@@ -4,9 +4,32 @@ Self-hosted deployment of **mem9** (`mnemo-server`, the open-source agent-memory
 server by `mem9-ai/mem9`, Apache-2.0) on AWS — a single-operator, multi-device,
 multi-agent shared memory layer with **full data ownership** (no third-party SaaS).
 
-> Status: **architecture / design phase**. No IaC implemented yet. The design is
-> in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md); the ground-truth facts about
-> mem9 (probed from source) are in [`docs/mem9-facts.md`](docs/mem9-facts.md).
+> Status: **architecture / design phase**. No IaC implemented yet.
+
+## Read first (ground-truth — do not re-derive)
+
+Before designing, changing infra, or answering mem9/AWS questions in this repo,
+read these two files. They hold facts that are expensive to re-derive (probed
+from mem9 source + verified against AWS docs) and the rationale for every locked
+decision. Treat them as authoritative; if code/AWS contradicts them, update the
+file rather than silently diverging.
+
+- **[`docs/mem9-facts.md`](docs/mem9-facts.md)** — the non-obvious constraints
+  that shaped this whole design, e.g.:
+  - Aurora **MySQL cannot run mem9** (mem9's MySQL/tidb path needs TiDB-only
+    `VECTOR`/`VEC_COSINE`/`EMBED_TEXT`) → we use the **postgres backend + pgvector**.
+  - **Bedrock Mantle has no `/embeddings`** (Chat Completions / Responses only) →
+    embedding can't go through Mantle; we self-host qwen3.
+  - Mantle bearer tokens (`@aws/bedrock-token-generator`) are **short-lived**, but
+    mem9 reads a **static** `MNEMO_LLM_API_KEY` → a **token-refresh sidecar** bridges.
+  - mem9 schema **`idx_app` gap**: control-plane `schema_pg.sql` ≠ the tenant
+    runtime schema the server validates → bootstrap must apply the runtime schema.
+  - AgentCore Gateway reaches a private VPC target via **managed VPC Lattice +
+    `privateEndpoint`** (no public exposure); ALB needs a **public** ACM cert for
+    Lattice TLS trust; SigV4 outbound is NOT compatible with ALB → use API key.
+- **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** — full selection + the
+  authoritative **Locked decisions** and **Open decisions** lists (this file's
+  table is a summary; ARCHITECTURE.md wins if they ever disagree).
 
 ## What this is / is NOT
 
@@ -28,8 +51,9 @@ multi-agent shared memory layer with **full data ownership** (no third-party Saa
 | Compute | **ECS Fargate**, **arm64**, single task (`desiredCount=1`) |
 | Database | **Aurora PostgreSQL Serverless v2** + `pgvector` (mem9 `postgres` backend) |
 | VPC | **Reuse the account default VPC** (private subnets w/ NAT), per a sibling project pattern |
-| MCP surface | **AgentCore Gateway** (REST target → mnemo-server REST API) |
-| Auth | **Cognito M2M**, reusing the a sibling project / a sibling project gateway pattern |
+| MCP surface | **AgentCore Gateway** (OpenAPI target → mnemo-server REST API) |
+| Gateway → server | **private**: `privateEndpoint` + managed VPC Lattice → **internal ALB** (public ACM cert `mem9.internal.example.com`, TLS terminated) → HTTP:8080. Outbound auth = API key (`X-API-Key`). No public exposure |
+| Auth (inbound) | **Cognito M2M**, reusing the a sibling project / a sibling project gateway pattern |
 | LLM (smart-ingest) | **Bedrock Mantle direct**, **GLM-5**, **ON at launch**. Auth via **`@aws/bedrock-token-generator`** (short-term bearer from task IAM role, same as a sibling project) + **Bedrock Project** cost attribution + a **token-refresh sidecar** (bearer expires; mem9 reads static `MNEMO_LLM_API_KEY`). GPT-5.4/5.5 excluded (Responses-only) |
 | Embedding | qwen3 OpenAI `/embeddings` as an **ECS sidecar** (localhost, always warm), **code lifted from a sibling project qwen3 ONNX**, **dims 1024**. NOT Mantle, NOT 3P API |
 | ECS task | **3 containers**: mnemo-server + qwen3-embed sidecar + token-refresh sidecar. TLS at the ALB, not in task |
@@ -74,12 +98,12 @@ multi-agent shared memory layer with **full data ownership** (no third-party Saa
   content or embeddings to a third party (OpenAI direct, mem9 SaaS) violates the
   project's reason to exist — flag it, don't silently adopt it.
 
-## Open decisions (not yet locked — see ARCHITECTURE.md §"Open decisions")
+## Open decisions
 
-1. Embedding supply concrete shape: reuse a sibling project's deployed qwen3 query Lambda
-   as a shared endpoint, vs. a dedicated OpenAI-compatible shim Lambda for mem9.
-2. Whether smart-ingest (LLM extraction) is enabled at launch, and which model
-   via which OpenAI-compatible proxy (Bedrock Claude via LiteLLM shim).
-3. Schema bootstrap mechanism (one-shot ECS task vs. init Lambda vs. manual).
-4. Gateway target style: REST/OpenAPI (a sibling project style, mnemo-server is a
-   REST server) vs. a thin Lambda adapter.
+**Authoritative list lives in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)
+§"Open decisions"** — keep it there, not here, to avoid drift. All are
+engineering detail now (no architecture-level choices remain): OpenAPI schema
+mapping, token-refresh sidecar mechanism, mem9 pin + arm64 image build, Aurora
+backup/PITR, CI/deploy (RUNNER_LABEL + arm64 build), secrets (DB creds in
+Secrets Manager). Everything architectural is in **Locked decisions** above and
+in ARCHITECTURE.md.
