@@ -1,0 +1,19 @@
+# Claude Code local files
+CLAUDE.local.md
+.claude/settings.local.json
+.claude/worktrees/
+
+# Env / local config
+.env
+.env.*
+*.local.*
+.local.json
+
+# Node / SST (for when IaC lands)
+node_modules/
+.sst/
+dist/
+*.tsbuildinfo
+
+# OS
+.DS_Store
