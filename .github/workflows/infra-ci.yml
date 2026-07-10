@@ -1,0 +1,582 @@
+# Infra CI/CD for the mem9-on-aws SST v4 pipeline (base scaffold).
+#
+# Flow:
+#   1. typecheck        — typecheck + unit tests (PR + push-to-main; always runs)
+#   2. deploy-preview   — PR opened/synchronized/reopened → deploy stage `pr-N`
+#   3. cleanup-preview  — PR closed/merged → remove stage `pr-N`
+#   4. deploy-prod      — push to main → deploy stage `prod`
+#
+# Required GitHub repo secret:
+#   AWS_ROLE_ARN — IAM role ARN from
+#                  `infra/cloudformation/github-actions-role.yaml` (bootstrapped
+#                  out-of-band via `scripts/deploy-github-role.sh`).
+#                  deploy-prod HARD-FAILS without it (a silent skip would let a
+#                  push to main "succeed" without deploying). Preview/cleanup
+#                  skip gracefully when it's unset.
+#
+# Optional GitHub repo variable:
+#   RUNNER_LABEL — JSON array selecting a self-hosted runner, e.g.
+#                  ["self-hosted", "linux", "arm64"]. Unset → ubuntu-latest.
+
+name: Infra CI
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, synchronize, reopened, closed]
+    paths:
+      - "infra/**"
+      - "sst.config.ts"
+      - ".github/workflows/infra-ci.yml"
+      - "scripts/**"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.json"
+      - "vitest.config.ts"
+      # The OIDC role is bootstrapped out-of-band via
+      # scripts/deploy-github-role.sh — it is NOT part of the per-PR SST
+      # deploy. Skip the workflow when a PR only touches that template.
+      - "!infra/cloudformation/**"
+  push:
+    branches: [main]
+    paths:
+      - "infra/**"
+      - "sst.config.ts"
+      - ".github/workflows/infra-ci.yml"
+      - "scripts/**"
+      - "package.json"
+      - "package-lock.json"
+      - "tsconfig.json"
+      - "vitest.config.ts"
+      - "!infra/cloudformation/**"
+
+# Per-PR concurrency for PR events (cancel superseded runs so repeated
+# `synchronize` events don't race the same `pr-N` stage's unlock/deploy);
+# singleton for push-to-main. Critical: the prod group is NOT
+# cancel-in-progress — prod must never be interrupted mid-deploy by a
+# subsequent merge. The `|| 'unknown'` guard protects format() during push
+# events where pull_request.number is null.
+concurrency:
+  group: >-
+    ${{
+      github.event_name == 'push'
+        && 'infra-deploy-prod'
+        || format('infra-ci-pr-{0}', github.event.pull_request.number || 'unknown')
+    }}
+  cancel-in-progress: ${{ github.event_name != 'push' }}
+
+env:
+  AWS_REGION: ap-northeast-1
+  ROLE_NAME: github-actions-mem9-on-aws
+
+jobs:
+  # ───────────────────────────────────────────────────────────────────────────
+  # typecheck — runs on every PR (except closed) + push-to-main. No AWS needed.
+  # ───────────────────────────────────────────────────────────────────────────
+  typecheck:
+    name: Typecheck & Unit Tests
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    if: github.event_name == 'push' || github.event.action != 'closed'
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v5
+        with:
+          package_json_file: infra/package.json
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: infra/pnpm-lock.yaml
+
+      - name: Install infra dependencies
+        run: pnpm -C infra install --frozen-lockfile
+
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Type check (infra)
+        run: pnpm -C infra typecheck
+
+      - name: Unit tests (infra)
+        run: pnpm -C infra test
+
+      - name: Type check (root)
+        run: npm run typecheck
+
+      - name: Unit tests (root)
+        run: npm test
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # deploy-preview — PR opened/synchronized/reopened → stage `pr-N`.
+  # Skipped gracefully if AWS_ROLE_ARN is unset.
+  # ───────────────────────────────────────────────────────────────────────────
+  deploy-preview:
+    name: Deploy PR Preview
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    needs: typecheck
+    if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.base.ref == 'main'
+    timeout-minutes: 15
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Gate on AWS_ROLE_ARN
+        id: gate
+        env:
+          HAS_AWS: ${{ secrets.AWS_ROLE_ARN }}
+        run: |
+          if [ -z "$HAS_AWS" ]; then
+            echo "::notice::AWS_ROLE_ARN not configured — skipping preview deploy"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v5
+        if: steps.gate.outputs.skip != 'true'
+
+      - uses: pnpm/action-setup@v5
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          package_json_file: infra/package.json
+
+      - uses: actions/setup-node@v5
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: infra/pnpm-lock.yaml
+
+      - name: Install infra dependencies
+        if: steps.gate.outputs.skip != 'true'
+        run: pnpm -C infra install --frozen-lockfile
+
+      - name: Configure AWS credentials (OIDC)
+        if: steps.gate.outputs.skip != 'true'
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Preflight — verify role is assumable
+        if: steps.gate.outputs.skip != 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! aws sts get-caller-identity >/dev/null 2>&1; then
+            echo "::error::OIDC role assumed but STS is unusable — check AWS_ROLE_ARN / trust policy"
+            exit 1
+          fi
+          if ! aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
+            echo "::error::Role $ROLE_NAME not found — run scripts/deploy-github-role.sh to bootstrap it"
+            exit 1
+          fi
+          echo "Preflight OK: $(aws sts get-caller-identity --query Arn --output text)"
+
+      - name: Remove conflicting Pulumi installation
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          # SST bundles its own Pulumi runtime; a globally-installed Pulumi can
+          # win the PATH lookup and produce a version mismatch. Persistent
+          # self-hosted runners can also cache stale provider binaries whose
+          # schemas lag the AWS SDK.
+          sudo rm -f /usr/local/bin/pulumi* 2>/dev/null || true
+          rm -rf ~/.pulumi/plugins/ 2>/dev/null || true
+          rm -rf ~/.config/sst/bin/ 2>/dev/null || true
+          rm -rf ~/.config/sst/plugins/ 2>/dev/null || true
+
+      - name: Deploy PR stage
+        id: deploy
+        if: steps.gate.outputs.skip != 'true'
+        shell: bash
+        run: |
+          # PR_NUMBER comes from GitHub's pull_request payload (integer);
+          # validate to short-circuit any injection risk.
+          if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid PR number: $PR_NUMBER"
+            exit 1
+          fi
+          STAGE="pr-${PR_NUMBER}"
+          echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
+          echo "Deploying to stage: $STAGE"
+
+          # Clear any stale SST state lock left by a cancelled previous run.
+          pnpm -C infra exec sst unlock --stage "$STAGE" 2>&1 || true
+
+          set +e
+          pnpm -C infra exec sst deploy --stage "$STAGE" --print-logs 2>&1 | tee sst-deploy.log
+          EXIT=${PIPESTATUS[0]}
+          set -e
+          if [ $EXIT -ne 0 ]; then
+            echo "::error::SST deployment failed (exit $EXIT)"
+            exit $EXIT
+          fi
+
+      - name: Auto-cleanup on deploy failure
+        # Best-effort — if the deploy half-applied resources, remove them so the
+        # next push doesn't accumulate orphan state.
+        if: failure() && steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        env:
+          STAGE: ${{ steps.deploy.outputs.stage }}
+        shell: bash
+        continue-on-error: true
+        run: |
+          if ! [[ "$STAGE" =~ ^pr- ]]; then
+            echo "::notice::Auto-cleanup only for pr-* stages; STAGE is protected"
+            exit 0
+          fi
+          echo "Deploy failed for $STAGE — attempting auto-cleanup"
+          pnpm -C infra exec sst remove --stage "$STAGE" 2>&1 || true
+
+      - name: Comment deploy status
+        if: always() && steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        uses: actions/github-script@v8
+        env:
+          STAGE: ${{ steps.deploy.outputs.stage }}
+          DEPLOY_STATUS: ${{ steps.deploy.outcome }}
+        with:
+          script: |
+            const pr = context.payload.pull_request.number;
+            const stage = process.env.STAGE;
+            const status = process.env.DEPLOY_STATUS;
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const icon = status === 'success' ? '✅' : '❌';
+            const body = [
+              `## ${icon} Preview Deployment`,
+              '',
+              `| Item | Value |`,
+              `|------|-------|`,
+              `| Stage | \`${stage}\` |`,
+              `| Status | ${status} |`,
+              `| Region | \`${process.env.AWS_REGION || 'ap-northeast-1'}\` |`,
+              `| Run | [View logs](${runUrl}) |`,
+              '',
+              `SSM parameters deployed by this stage: \`/mem9-on-aws/${stage}/...\``,
+              '',
+              `*The preview is removed automatically when the PR is closed.*`,
+            ].join('\n');
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr,
+            });
+            const existing = comments.find(c =>
+              c.user.type === 'Bot' && c.body.includes('Preview Deployment')
+            );
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: pr,
+                body,
+              });
+            }
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # cleanup-preview — PR closed/merged → remove stage `pr-N`.
+  # ───────────────────────────────────────────────────────────────────────────
+  cleanup-preview:
+    name: Cleanup PR Preview
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.base.ref == 'main'
+    timeout-minutes: 15
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+    steps:
+      - name: Gate on AWS_ROLE_ARN
+        id: gate
+        env:
+          HAS_AWS: ${{ secrets.AWS_ROLE_ARN }}
+        run: |
+          if [ -z "$HAS_AWS" ]; then
+            echo "::notice::AWS_ROLE_ARN not configured — skipping cleanup"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        if: steps.gate.outputs.skip != 'true'
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Check if stage was ever deployed
+        id: check-state
+        if: steps.gate.outputs.skip != 'true'
+        shell: bash
+        run: |
+          if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid PR number: $PR_NUMBER"
+            exit 1
+          fi
+          STAGE="pr-${PR_NUMBER}"
+
+          # SST writes bootstrap config to /sst/bootstrap (SSM) on first deploy
+          # per region. Reading from SSM is deterministic — unlike scanning
+          # buckets, which could match a sibling project's state bucket.
+          BOOTSTRAP_JSON=$(aws ssm get-parameter \
+            --name /sst/bootstrap \
+            --query Parameter.Value \
+            --output text 2>/dev/null || true)
+
+          if [[ -z "$BOOTSTRAP_JSON" ]]; then
+            echo "::notice::No /sst/bootstrap in ${AWS_REGION} — stage was never deployed"
+            echo "deployed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          STATE_BUCKET=$(echo "$BOOTSTRAP_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('state',''))")
+          if [[ -z "$STATE_BUCKET" ]]; then
+            echo "::error::Could not parse 'state' from /sst/bootstrap"
+            exit 1
+          fi
+
+          STATE_KEY="app/mem9-on-aws/${STAGE}.json"
+          echo "Looking up s3://${STATE_BUCKET}/${STATE_KEY}"
+          if aws s3api head-object --bucket "$STATE_BUCKET" --key "$STATE_KEY" >/dev/null 2>&1; then
+            echo "Pulumi state found for ${STAGE} — cleanup required"
+            echo "deployed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No state for ${STAGE} — stage was never deployed"
+            echo "deployed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v5
+        if: steps.check-state.outputs.deployed == 'true'
+
+      - uses: pnpm/action-setup@v5
+        if: steps.check-state.outputs.deployed == 'true'
+        with:
+          package_json_file: infra/package.json
+
+      - uses: actions/setup-node@v5
+        if: steps.check-state.outputs.deployed == 'true'
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: infra/pnpm-lock.yaml
+
+      - name: Install infra dependencies
+        if: steps.check-state.outputs.deployed == 'true'
+        run: pnpm -C infra install --frozen-lockfile
+
+      - name: Remove conflicting Pulumi installation
+        if: steps.check-state.outputs.deployed == 'true'
+        run: |
+          sudo rm -f /usr/local/bin/pulumi* 2>/dev/null || true
+          rm -rf ~/.config/sst/bin/ ~/.config/sst/plugins/ 2>/dev/null || true
+
+      - name: Remove PR stage
+        if: steps.check-state.outputs.deployed == 'true'
+        shell: bash
+        run: |
+          if ! [[ "$PR_NUMBER" =~ ^[0-9]+$ ]]; then
+            echo "::error::Invalid PR number: $PR_NUMBER"
+            exit 1
+          fi
+          STAGE="pr-${PR_NUMBER}"
+          # Refuse to remove a protected stage name.
+          case "$STAGE" in
+            prod|main|production) echo "::error::Refusing to remove protected stage $STAGE"; exit 1 ;;
+          esac
+          pnpm -C infra exec sst unlock --stage "$STAGE" 2>&1 || true
+          pnpm -C infra exec sst remove --stage "$STAGE" --print-logs
+
+      - name: Comment cleanup status
+        if: success() && steps.check-state.outputs.deployed == 'true'
+        uses: actions/github-script@v8
+        with:
+          script: |
+            const pr = context.payload.pull_request.number;
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: pr,
+              body: [`## 🧹 Preview Cleanup`, '', `Stage \`pr-${pr}\` has been removed.`].join('\n'),
+            });
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # deploy-prod — push to main → stage `prod`. HARD-FAILS without AWS_ROLE_ARN.
+  # ───────────────────────────────────────────────────────────────────────────
+  deploy-prod:
+    name: Deploy prod
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    needs: typecheck
+    if: github.event_name == 'push'
+    environment: prod
+    timeout-minutes: 20
+    permissions:
+      id-token: write
+      contents: read
+      issues: write
+    steps:
+      - name: Gate on AWS_ROLE_ARN (hard-fail)
+        env:
+          HAS_AWS: ${{ secrets.AWS_ROLE_ARN }}
+        run: |
+          if [ -z "$HAS_AWS" ]; then
+            echo "::error::AWS_ROLE_ARN not configured — cannot deploy prod. A silent skip would let this push 'succeed' without deploying. Bootstrap the role (scripts/deploy-github-role.sh) and set the secret."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v5
+        with:
+          package_json_file: infra/package.json
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: infra/pnpm-lock.yaml
+
+      - name: Install infra dependencies
+        run: pnpm -C infra install --frozen-lockfile
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Preflight — verify role is assumable
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! aws sts get-caller-identity >/dev/null 2>&1; then
+            echo "::error::OIDC role assumed but STS is unusable — check AWS_ROLE_ARN / trust policy"
+            exit 1
+          fi
+          if ! aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
+            echo "::error::Role $ROLE_NAME not found — run scripts/deploy-github-role.sh to bootstrap it"
+            exit 1
+          fi
+          echo "Preflight OK: $(aws sts get-caller-identity --query Arn --output text)"
+
+      - name: Remove conflicting Pulumi installation
+        run: |
+          sudo rm -f /usr/local/bin/pulumi* 2>/dev/null || true
+          rm -rf ~/.pulumi/plugins/ 2>/dev/null || true
+          rm -rf ~/.config/sst/bin/ ~/.config/sst/plugins/ 2>/dev/null || true
+
+      - name: Recover stale SST prod lock
+        # Recovers from "Concurrent update detected" left by a previous
+        # `sst deploy` that died without releasing its lock. Policy: only
+        # unlock if the lock object is OLDER than this job's timeout (20 min)
+        # + a 10-minute buffer = 30 min. Anything younger could be a genuinely
+        # concurrent deploy (a developer running `sst deploy --stage prod`).
+        shell: bash
+        env:
+          STALE_LOCK_AGE_MINUTES: "30"
+        run: |
+          set -euo pipefail
+          BOOTSTRAP_JSON=$(aws ssm get-parameter \
+            --name /sst/bootstrap \
+            --query Parameter.Value \
+            --output text 2>/dev/null || true)
+          if [[ -z "$BOOTSTRAP_JSON" ]]; then
+            echo "::notice::No /sst/bootstrap in ${AWS_REGION} — first prod deploy, no lock to recover"
+            exit 0
+          fi
+          STATE_BUCKET=$(echo "$BOOTSTRAP_JSON" | python3 -c "import json,sys; print(json.load(sys.stdin).get('state',''))")
+          if [[ -z "$STATE_BUCKET" ]]; then
+            echo "::error::Could not parse 'state' from /sst/bootstrap"
+            exit 1
+          fi
+          # SST's lock key layout has varied across versions; probe the common
+          # variants and unlock via the CLI (which knows the real key) if any
+          # is present + stale.
+          LAST_MODIFIED=""
+          for LOCK_KEY in "app/mem9-on-aws/.lock/prod.json" "lock/mem9-on-aws/prod.json"; do
+            LAST_MODIFIED=$(aws s3api head-object --bucket "$STATE_BUCKET" --key "$LOCK_KEY" \
+              --query LastModified --output text 2>/dev/null || true)
+            [[ -n "$LAST_MODIFIED" ]] && break
+          done
+          if [[ -z "$LAST_MODIFIED" ]]; then
+            echo "No lock object — proceeding with deploy"
+            exit 0
+          fi
+          # One-liner python3 -c (no heredoc): a `<<'PY'` heredoc inside a YAML
+          # `run: |` block keeps the closing PY indented, so bash never sees the
+          # column-0 terminator and the step dies with "unexpected EOF" the first
+          # time a lock exists. Semicolon form has no indentation-significant body.
+          AGE_MINUTES=$(python3 -c 'import sys; from datetime import datetime, timezone; last = datetime.fromisoformat(sys.argv[1].replace("Z", "+00:00")); print(f"{(datetime.now(timezone.utc) - last).total_seconds() / 60:.1f}")' "$LAST_MODIFIED")
+          echo "Lock LastModified: $LAST_MODIFIED (age ${AGE_MINUTES} min)"
+          if ! [[ "$AGE_MINUTES" =~ ^[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::Could not parse lock age: '${AGE_MINUTES}'"; exit 1
+          fi
+          if awk "BEGIN { exit !(${AGE_MINUTES} > ${STALE_LOCK_AGE_MINUTES}) }"; then
+            echo "::warning::Stale prod lock (age ${AGE_MINUTES} min > ${STALE_LOCK_AGE_MINUTES}). Auto-unlocking."
+            pnpm -C infra exec sst unlock --stage prod
+          else
+            echo "::error::prod lock is fresh (age ${AGE_MINUTES} min <= ${STALE_LOCK_AGE_MINUTES}). Refusing to unlock — a concurrent deploy may be running."
+            exit 1
+          fi
+
+      - name: Deploy prod stage
+        shell: bash
+        run: |
+          set +e
+          pnpm -C infra exec sst deploy --stage prod --print-logs 2>&1 | tee sst-deploy.log
+          EXIT=${PIPESTATUS[0]}
+          set -e
+          if [ $EXIT -ne 0 ]; then
+            echo "::error::SST prod deployment failed (exit $EXIT)"
+            exit $EXIT
+          fi
+
+      - name: Create issue on prod deploy failure
+        # failure() fires for any failed step (gate, preflight, lock recovery,
+        # deploy) — every one is a prod deploy that didn't land.
+        if: failure() && github.event_name == 'push'
+        uses: actions/github-script@v8
+        env:
+          COMMIT_MSG: ${{ github.event.head_commit.message }}
+        with:
+          script: |
+            const sha = context.sha;
+            const shortSha = sha.slice(0, 7);
+            const runUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`;
+            const commitUrl = `https://github.com/${context.repo.owner}/${context.repo.repo}/commit/${sha}`;
+            const subject = (process.env.COMMIT_MSG || '').split('\n')[0].trim() || '(no commit subject)';
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `Prod deploy failed: ${subject}`,
+              body: [
+                `## Prod deploy failed on push to \`main\``,
+                '',
+                `| Item | Value |`,
+                `|------|-------|`,
+                `| Commit | [\`${shortSha}\`](${commitUrl}) |`,
+                `| Subject | ${subject} |`,
+                `| Run | [View logs](${runUrl}) |`,
+                '',
+                '### Recovery',
+                '',
+                `1. Inspect the [failed run](${runUrl}).`,
+                `2. Fix on a follow-up PR and merge — every push to \`main\` re-triggers the deploy.`,
+                `3. Manual re-trigger without a new commit: re-run the failed job from the run page.`,
+              ].join('\n'),
+              labels: ['bug', 'infrastructure'],
+            });

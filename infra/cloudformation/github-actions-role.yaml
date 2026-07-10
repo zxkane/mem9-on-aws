@@ -1,0 +1,337 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  IAM role + least-privilege policies for GitHub Actions SST v4 deployments
+  (zxkane/mem9-on-aws) — BASE SCAFFOLD scope. Grants exactly what the scaffold
+  provisions today: SST Pulumi state (S3 + /sst/bootstrap SSM), the `meta`
+  stack's SSM parameters under /mem9-on-aws/*, read-only EC2/VPC lookup, STS,
+  and a constrained iam:PassRole. Deploy out-of-band via
+  `scripts/deploy-github-role.sh` — this stack is NOT managed by Pulumi/SST.
+
+  GRANTS ARE SCAFFOLD-SCOPED. Every future resource TYPE (Aurora, ECS Fargate,
+  internal ALB, AgentCore Gateway — the last needs iam:CreateServiceLinkedRole
+  for managed VPC Lattice) MUST add its grants to a ManagedPolicy below AND
+  re-run `scripts/deploy-github-role.sh` BEFORE the PR that provisions it, or
+  the first deploy 403s. See docs/ARCHITECTURE.md for the full resource list.
+
+# IAM is global; hosting the role stack in a specific region is purely a
+# CloudFormation decision (CFN scopes are per-region). Pinned to us-west-2 in
+# `scripts/deploy-github-role.sh` so a sister stack in another region can't
+# collide on the IAM role + ManagedPolicy names (EntityAlreadyExists rollback).
+
+Parameters:
+  GitHubOrg:
+    Type: String
+    Default: zxkane
+    Description: GitHub organisation/user that owns the repo.
+  GitHubRepo:
+    Type: String
+    Default: mem9-on-aws
+    Description: GitHub repository name. Used in the trust policy and as a
+      prefix for IAM role / managed policy names.
+  ProjectName:
+    Type: String
+    Default: mem9-on-aws
+    Description: SST app name. Must match `name` in `sst.config.ts` — SSM +
+      role ARN scoping uses this prefix.
+  OIDCProviderArn:
+    Type: String
+    Default: ""
+    Description: Existing GitHub Actions OIDC provider ARN. Leave empty to have
+      this template create one. This account already has
+      arn:aws:iam::<account-id>:oidc-provider/token.actions.githubusercontent.com
+      — pass it so no duplicate is created (only one provider per URL per
+      account is allowed).
+
+Conditions:
+  CreateOIDCProvider: !Equals [!Ref OIDCProviderArn, ""]
+
+Resources:
+  # ───────────────────────────────────────────────────────────────────────────
+  # OIDC provider — only created when OIDCProviderArn is empty. Reuse the
+  # account's existing provider by passing its ARN (the default deploy script
+  # does this), so this resource is normally NOT created.
+  # ───────────────────────────────────────────────────────────────────────────
+  GithubOidc:
+    Type: AWS::IAM::OIDCProvider
+    Condition: CreateOIDCProvider
+    Properties:
+      Url: https://token.actions.githubusercontent.com
+      ClientIdList: [sts.amazonaws.com]
+      # AWS no longer validates GitHub Actions OIDC thumbprints (since
+      # 2023-07), but CloudFormation still requires a valid-format entry.
+      ThumbprintList: [6938fd4d98bab03faadb97b34396831e3780aea1]
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Policy 1 — Explicit denies. First gate against privilege widening and
+  # irreversible account-level operations.
+  # ───────────────────────────────────────────────────────────────────────────
+  DenyPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${GitHubRepo}-deny-dangerous
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyIAMUserAndProvider
+            Effect: Deny
+            Action:
+              - iam:CreateUser
+              - iam:DeleteUser
+              - iam:CreateLoginProfile
+              - iam:CreateAccessKey
+              - iam:DeleteAccessKey
+              - iam:CreateGroup
+              - iam:DeleteGroup
+              - iam:AddUserToGroup
+              - iam:CreateAccountAlias
+              - iam:UpdateAccountPasswordPolicy
+              - iam:CreateOpenIDConnectProvider
+              - iam:DeleteOpenIDConnectProvider
+              - iam:CreateSAMLProvider
+              - iam:DeleteSAMLProvider
+              - iam:DeleteServiceLinkedRole
+            Resource: "*"
+          - Sid: DenyAccountLevel
+            Effect: Deny
+            Action:
+              - organizations:*
+              - account:*
+              - sso:*
+              - sso-admin:*
+              - cloudtrail:DeleteTrail
+              - cloudtrail:StopLogging
+              - guardduty:DeleteDetector
+              - config:DeleteConfigRule
+              - config:StopConfigurationRecorder
+            Resource: "*"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Policy 2 — SST Pulumi state + resource provisioning (the scaffold's real
+  # grants). SST v4 provisions via Pulumi (S3 state backend + CloudControl),
+  # NOT plain CloudFormation — so the role carries DIRECT resource grants for
+  # everything the scaffold creates (SSM parameters), not just cloudformation:*.
+  # ───────────────────────────────────────────────────────────────────────────
+  CorePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${GitHubRepo}-core
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: CFN
+            # SST v4 deploys via Pulumi, but the CloudControl API + internal
+            # change-sets consume these. Narrowing this is a known cause of
+            # mid-stack `sst deploy` failures. This does NOT provision app
+            # resources — the direct grants below do that.
+            Effect: Allow
+            Action:
+              - cloudformation:CreateStack
+              - cloudformation:UpdateStack
+              - cloudformation:DeleteStack
+              - cloudformation:DescribeStacks
+              - cloudformation:DescribeStackEvents
+              - cloudformation:DescribeStackResources
+              - cloudformation:GetTemplate
+              - cloudformation:GetTemplateSummary
+              - cloudformation:ListStackResources
+              - cloudformation:ValidateTemplate
+              - cloudformation:CreateChangeSet
+              - cloudformation:DescribeChangeSet
+              - cloudformation:ExecuteChangeSet
+              - cloudformation:DeleteChangeSet
+              - cloudformation:ListChangeSets
+              - cloudformation:TagResource
+              - cloudformation:UntagResource
+            Resource: "*"
+          - Sid: S3State
+            # Full S3 surface — Pulumi's AWS provider Read step probes
+            # Accelerate/Website/Logging/ObjectLock/Replication/etc. on every
+            # bucket refresh regardless of configuration; dropping any of these
+            # makes the second `sst deploy` fail on the refresh step. Covers
+            # SST's state bucket (`sst-state-{account}-{region}`) + any bucket a
+            # stack creates later.
+            Effect: Allow
+            Action:
+              - s3:ListAllMyBuckets
+              - s3:CreateBucket
+              - s3:DeleteBucket
+              - s3:GetBucketLocation
+              - s3:GetBucketPolicy
+              - s3:PutBucketPolicy
+              - s3:DeleteBucketPolicy
+              - s3:GetBucketAcl
+              - s3:PutBucketAcl
+              - s3:GetBucketVersioning
+              - s3:PutBucketVersioning
+              - s3:GetBucketPublicAccessBlock
+              - s3:PutBucketPublicAccessBlock
+              - s3:GetBucketOwnershipControls
+              - s3:PutBucketOwnershipControls
+              - s3:GetBucketTagging
+              - s3:PutBucketTagging
+              - s3:GetEncryptionConfiguration
+              - s3:PutEncryptionConfiguration
+              - s3:GetLifecycleConfiguration
+              - s3:PutLifecycleConfiguration
+              - s3:GetBucketNotification
+              - s3:PutBucketNotification
+              - s3:GetAccelerateConfiguration
+              - s3:GetBucketLogging
+              - s3:GetBucketRequestPayment
+              - s3:GetBucketObjectLockConfiguration
+              - s3:GetReplicationConfiguration
+              - s3:GetBucketWebsite
+              - s3:GetBucketPolicyStatus
+              - s3:GetObject
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:DeleteObjectVersion
+              - s3:ListBucket
+              - s3:ListBucketVersions
+              - s3:GetObjectTagging
+              - s3:PutObjectTagging
+              - s3:DeleteObjectTagging
+            Resource: "*"
+          - Sid: STS
+            # sts:GetCallerIdentity for the CI pre-deploy preflight (confirms
+            # the OIDC-assumed role has usable credentials before deploying).
+            Effect: Allow
+            Action:
+              - sts:GetCallerIdentity
+            Resource: "*"
+          - Sid: PreflightGetRole
+            # The CI preflight also runs `aws iam get-role --role-name
+            # github-actions-<repo>` to surface a clear "role not bootstrapped"
+            # error instead of a cryptic Pulumi timeout. Without iam:GetRole the
+            # preflight itself 403s and reports "role not found" even when the
+            # role exists — so grant it, scoped to THIS role's own ARN only.
+            Effect: Allow
+            Action:
+              - iam:GetRole
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/github-actions-${GitHubRepo}
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Policy 3 — Scaffold resource grants: SSM (state + the meta stack's params),
+  # EC2/VPC read-only lookup, and a constrained iam:PassRole.
+  # ───────────────────────────────────────────────────────────────────────────
+  ScaffoldPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${GitHubRepo}-scaffold
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: SSMRead
+            # SST reads /sst/bootstrap from any region (cleanup-preview probes
+            # it); the meta stack + CI read /mem9-on-aws/*. Read is broad — the
+            # role never reads other projects' trees in practice.
+            Effect: Allow
+            Action:
+              - ssm:GetParameter
+              - ssm:GetParameters
+              - ssm:GetParametersByPath
+              - ssm:DescribeParameters
+              - ssm:ListTagsForResource
+            Resource: "*"
+          - Sid: SSMWrite
+            # THE grant that lets the `meta` stack create its SSM parameters —
+            # without it the first `sst deploy` 403s. Scoped to this project's
+            # SSM tree + /sst/bootstrap (SST writes bootstrap config there on
+            # first deploy in a region).
+            Effect: Allow
+            Action:
+              - ssm:PutParameter
+              - ssm:DeleteParameter
+              - ssm:DeleteParameters
+              - ssm:AddTagsToResource
+              - ssm:RemoveTagsFromResource
+            Resource:
+              - !Sub arn:aws:ssm:*:${AWS::AccountId}:parameter/sst/*
+              - !Sub arn:aws:ssm:*:${AWS::AccountId}:parameter/mem9-on-aws/*
+          - Sid: EC2VpcReadOnly
+            # Read-only VPC lookup for infra/vpc.ts (resolveVpc). Pulumi's
+            # getVpcOutput reads VPC *attributes* (DNS support/hostnames) via
+            # ec2:DescribeVpcAttribute — not just DescribeVpcs — so that call is
+            # load-bearing (its absence 403'd the first CI preview deploy). The
+            # sibling *Attribute reads are added proactively for the same reason
+            # (Pulumi probes them on VPC/subnet refresh). Describe* has no
+            # per-resource ARN, so Resource must be "*".
+            Effect: Allow
+            Action:
+              - ec2:DescribeVpcs
+              - ec2:DescribeVpcAttribute
+              - ec2:DescribeSubnets
+              - ec2:DescribeRouteTables
+              - ec2:DescribeAvailabilityZones
+              - ec2:DescribeNetworkAcls
+              - ec2:DescribeSecurityGroups
+            Resource: "*"
+          - Sid: PassRoleConstrained
+            # No role is passed by the scaffold today, but future stacks (ECS
+            # task/execution roles, Lambda roles) will. Pre-scope PassRole to
+            # this project's role names + SST's name-truncation variants, gated
+            # by PassedToService — never Resource "*", never unconstrained.
+            Effect: Allow
+            Action: iam:PassRole
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/mem9-on-aws-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/mem9-on-aw-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/mem9-on-a-*
+            Condition:
+              StringEquals:
+                iam:PassedToService:
+                  - lambda.amazonaws.com
+                  - ecs-tasks.amazonaws.com
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # IAM Role — assumed by GitHub Actions via OIDC.
+  # ───────────────────────────────────────────────────────────────────────────
+  GitHubActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub github-actions-${GitHubRepo}
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated: !If [CreateOIDCProvider, !Ref GithubOidc, !Ref OIDCProviderArn]
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+              StringLike:
+                # Trust scope: only the subjects CI actually presents. NOT the
+                # broad `:*`. GitHub branch protection gates which workflows run.
+                #   - environment:prod — the deploy-prod job sets
+                #     `environment: prod`, which makes GitHub mint the OIDC token
+                #     with sub=`repo:<org>/<repo>:environment:prod` (NOT the
+                #     branch ref). This entry is load-bearing: without it the prod
+                #     job 403s at AssumeRoleWithWebIdentity before it can deploy.
+                #   - ref:refs/heads/main — any non-environment push job on main.
+                #   - pull_request — typecheck / preview / cleanup on PRs.
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubOrg}/${GitHubRepo}:environment:prod
+                  - !Sub repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main
+                  - !Sub repo:${GitHubOrg}/${GitHubRepo}:pull_request
+      ManagedPolicyArns:
+        - !Ref DenyPolicy
+        - !Ref CorePolicy
+        - !Ref ScaffoldPolicy
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: cloudformation
+
+Outputs:
+  RoleArn:
+    Description: >
+      Set this value as the GitHub repository secret AWS_ROLE_ARN. Run
+      `gh secret set AWS_ROLE_ARN --repo zxkane/mem9-on-aws --body "<role-arn>"`
+      after the stack deploys (deploy-github-role.sh prints it).
+    Value: !GetAtt GitHubActionsRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-RoleArn

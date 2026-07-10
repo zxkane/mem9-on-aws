@@ -160,6 +160,17 @@ Verified against AWS docs + the operator's podcast-curation prod usage:
 - podcast-curation's ECS stack consumes the **account default VPC** via
   `aws.ec2.getVpc({ default: true })`, filtered to NAT-routed private subnets —
   the pattern reused here.
+- **Tokyo default VPC is customized + NAT-routed (verified 2026-07-11).** The
+  account's `ap-northeast-1` default VPC (172.31.0.0/16) is NOT a stock default:
+  it has `private-1a/1c/1d` subnets across 3 AZs (172.31.96/112/128.0/20,
+  `MapPublicIpOnLaunch=false`), **each routing `0.0.0.0/0` through a NAT gateway**,
+  plus `public-1a/1c/1d` via the IGW. The scaffold's `infra/vpc.ts` selects the
+  three private subnets by the `private-1*` Name tag (excluding the secondary
+  `172.32.x` private subnets added out-of-band). So ECS Fargate + Aurora can live
+  in the default VPC with outbound internet (Bedrock Mantle) via NAT — no
+  dedicated VPC needed, confirming the ARCHITECTURE.md assumption. Concrete
+  resource ids are intentionally NOT recorded here (they'd leak account topology);
+  the design's own `docs/superpowers/specs/` note verified them at authoring time.
 
 ### AgentCore Gateway private egress to VPC (verified — resolves the #6 unknown)
 
