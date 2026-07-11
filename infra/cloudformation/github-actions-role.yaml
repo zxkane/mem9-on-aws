@@ -468,6 +468,170 @@ Resources:
             Resource: "*"
 
   # ───────────────────────────────────────────────────────────────────────────
+  # Policy 5 — Compute (infra/ecs.ts): ECS Fargate cluster + service + task
+  # definition, its task/execution IAM roles, CloudWatch Logs, ECR pull (for the
+  # container image), and CloudMap (SST auto-creates a service-discovery name for
+  # a no-load-balancer service). Its own ManagedPolicy to stay under IAM's
+  # 6144-byte per-policy cap and keep the compute footprint auditable.
+  #
+  # ADDED for the ECS PR — must be live (re-run scripts/deploy-github-role.sh)
+  # BEFORE that PR's first deploy, or the deploy 403s on the first ECS/role/log
+  # create (CLAUDE-AWS "new resource TYPE needs grants first").
+  # ───────────────────────────────────────────────────────────────────────────
+  ComputePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${GitHubRepo}-compute
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ECS
+            # Cluster + service + task-definition lifecycle. ECS has limited
+            # per-resource ARN granularity on many describe/register calls and
+            # Pulumi refreshes probe broadly, so Resource "*"; the DenyPolicy
+            # guards against account-level abuse.
+            Effect: Allow
+            Action:
+              - ecs:CreateCluster
+              - ecs:DeleteCluster
+              - ecs:DescribeClusters
+              - ecs:UpdateCluster
+              - ecs:PutClusterCapacityProviders
+              - ecs:CreateService
+              - ecs:UpdateService
+              - ecs:DeleteService
+              - ecs:DescribeServices
+              - ecs:RegisterTaskDefinition
+              - ecs:DeregisterTaskDefinition
+              - ecs:DescribeTaskDefinition
+              - ecs:ListTaskDefinitions
+              - ecs:DescribeTasks
+              - ecs:ListTasks
+              - ecs:TagResource
+              - ecs:UntagResource
+              - ecs:ListTagsForResource
+            Resource: "*"
+          - Sid: ECRPull
+            # Pull the container image (placeholder public image now; the
+            # mem9 arm64 image from our own ECR later). GetAuthorizationToken has
+            # no resource scope.
+            Effect: Allow
+            Action:
+              - ecr:GetAuthorizationToken
+              - ecr:BatchCheckLayerAvailability
+              - ecr:GetDownloadUrlForLayer
+              - ecr:BatchGetImage
+              - ecr:DescribeRepositories
+              - ecr:DescribeImages
+              - ecr:ListImages
+            Resource: "*"
+          - Sid: LogsDescribe
+            # logs:DescribeLogGroups is a LIST operation with no per-resource ARN
+            # (the Pulumi provider reads it as `log-group::log-stream:`), so it
+            # MUST be Resource "*" — scoping it to /sst/* 403s the ECS log-group
+            # read. Split out from the scoped write actions below.
+            Effect: Allow
+            Action:
+              - logs:DescribeLogGroups
+            Resource: "*"
+          - Sid: Logs
+            # CloudWatch Logs group for the ECS task. SST's default container log
+            # group is `/sst/cluster/<cluster>/<service>/<container>`, covered by
+            # the `/sst/*` ARNs below.
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:DeleteLogGroup
+              - logs:PutRetentionPolicy
+              - logs:DeleteRetentionPolicy
+              - logs:TagResource
+              - logs:UntagResource
+              - logs:ListTagsForResource
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource:
+              - !Sub arn:aws:logs:*:${AWS::AccountId}:log-group:/sst/*
+              - !Sub arn:aws:logs:*:${AWS::AccountId}:log-group:/sst/*:*
+          - Sid: EcsTaskRoles
+            # SST creates the task role + task-execution role for the service.
+            # Scoped to this project's auto-named roles + SST truncation variants.
+            Effect: Allow
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:GetRole
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:GetRolePolicy
+              - iam:ListRolePolicies
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:ListAttachedRolePolicies
+              - iam:TagRole
+              - iam:UntagRole
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/mem9-on-aws-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/mem9-on-aw-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/mem9-on-a-*
+          - Sid: AppAutoScaling
+            # SST's Service ALWAYS provisions an Application Auto Scaling target +
+            # CPU & memory target-tracking policies (even at the min:1/max:1
+            # default — createAutoScaling runs unconditionally). Target-tracking
+            # auto-creates CloudWatch alarms (next statement). Without these the
+            # first deploy 403s at RegisterScalableTarget. No per-resource ARN.
+            Effect: Allow
+            Action:
+              - application-autoscaling:RegisterScalableTarget
+              - application-autoscaling:DeregisterScalableTarget
+              - application-autoscaling:DescribeScalableTargets
+              - application-autoscaling:PutScalingPolicy
+              - application-autoscaling:DeleteScalingPolicy
+              - application-autoscaling:DescribeScalingPolicies
+              - application-autoscaling:DescribeScalingActivities
+              - application-autoscaling:ListTagsForResource
+              - application-autoscaling:TagResource
+              - application-autoscaling:UntagResource
+            Resource: "*"
+          - Sid: CloudWatchAlarmsForScaling
+            # Target-tracking scaling policies auto-provision CloudWatch alarms.
+            Effect: Allow
+            Action:
+              - cloudwatch:PutMetricAlarm
+              - cloudwatch:DeleteAlarms
+              - cloudwatch:DescribeAlarms
+            Resource: "*"
+          - Sid: AppAutoScalingSLR
+            # First app-autoscaling use in the account needs its service-linked
+            # role (distinct from the RDS one in DatabasePolicy).
+            Effect: Allow
+            Action:
+              - iam:CreateServiceLinkedRole
+            Resource: "*"
+            Condition:
+              StringEquals:
+                iam:AWSServiceName: application-autoscaling.amazonaws.com
+          - Sid: ServiceDiscovery
+            # RESERVED, currently unused: SST only creates a CloudMap service
+            # (servicediscovery) when the cluster's `vpc` is an `sst.aws.Vpc`
+            # component that carries a cloudmapNamespaceId. This skeleton passes a
+            # RAW VPC object (id + subnets + SG), so no CloudMap resource is
+            # created and the service has no stable DNS name until the deferred
+            # ALB (Gateway PR) lands. Kept minimal so a future Vpc-based cluster
+            # doesn't 403; harmless over-grant otherwise.
+            Effect: Allow
+            Action:
+              - servicediscovery:CreateService
+              - servicediscovery:DeleteService
+              - servicediscovery:GetService
+              - servicediscovery:ListServices
+              - servicediscovery:GetNamespace
+              - servicediscovery:ListNamespaces
+              - servicediscovery:GetOperation
+              - servicediscovery:TagResource
+              - servicediscovery:ListTagsForResource
+            Resource: "*"
+
+  # ───────────────────────────────────────────────────────────────────────────
   # IAM Role — assumed by GitHub Actions via OIDC.
   # ───────────────────────────────────────────────────────────────────────────
   GitHubActionsRole:
@@ -504,6 +668,7 @@ Resources:
         - !Ref CorePolicy
         - !Ref ScaffoldPolicy
         - !Ref DatabasePolicy
+        - !Ref ComputePolicy
       Tags:
         - Key: Project
           Value: !Ref ProjectName

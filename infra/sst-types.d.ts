@@ -115,6 +115,14 @@ declare namespace aws {
       readonly name: Output<string>;
       readonly arn: Output<string>;
     }
+    interface GetParameterOutputArgs {
+      name: Input<string>;
+    }
+    interface GetParameterResult {
+      readonly value: Output<string>;
+      readonly arn: Output<string>;
+    }
+    function getParameterOutput(args: GetParameterOutputArgs): GetParameterResult;
   }
 }
 
@@ -156,6 +164,44 @@ declare namespace sst {
       readonly password: Output<string>;
       readonly database: Output<string>;
       readonly secretArn: Output<string>;
+    }
+
+    // ── ECS (infra/ecs.ts) ────────────────────────────────────────────────
+    interface ClusterVpc {
+      id: Input<string>;
+      securityGroups: Input<string>[] | Input<string[]>;
+      containerSubnets?: Input<string[]>;
+      loadBalancerSubnets?: Input<string[]>;
+      publicSubnets?: Input<string[]>;
+    }
+    interface ClusterArgs {
+      vpc: ClusterVpc;
+      transform?: { cluster?: (args: Record<string, unknown>) => void };
+    }
+    class Cluster {
+      constructor(name: string, args: ClusterArgs);
+      readonly nodes: { cluster: { name: Output<string>; arn: Output<string> } };
+    }
+
+    interface ServiceLogging {
+      name?: Input<string>;
+      retention?: Input<string>;
+    }
+    interface ServiceArgs {
+      cluster: Cluster;
+      architecture?: Input<"x86_64" | "arm64">;
+      cpu?: Input<string>;
+      memory?: Input<string>;
+      image: Input<string>;
+      environment?: Input<Record<string, Input<string>>>;
+      ssm?: Input<Record<string, Input<string>>>;
+      logging?: ServiceLogging;
+      transform?: { service?: (args: Record<string, unknown>) => void };
+    }
+    class Service {
+      constructor(name: string, args: ServiceArgs);
+      readonly nodes: { service: { name: Output<string>; arn: Output<string> } };
+      readonly service: Output<string>;
     }
   }
 }
