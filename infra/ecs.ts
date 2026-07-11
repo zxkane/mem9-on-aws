@@ -101,6 +101,13 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
       containerSubnets: privateSubnetIds,
       loadBalancerSubnets: privateSubnetIds,
     },
+    // SST v4.17 introduced Cluster v2 (public-subnet default for both LB + services,
+    // no NAT required). Our design keeps services in PRIVATE subnets + NAT (the
+    // explicit containerSubnets above override v2's default). forceUpgrade: "v2"
+    // acknowledges the breaking-change gate so fresh-stage deploys don't block with
+    // "There is a new version of Cluster that has breaking changes." Existing prod
+    // (deployed on v1 before this flag) migrates forward on next deploy.
+    forceUpgrade: "v2",
     transform: {
       cluster: (args) => {
         args.tags = { ...(args.tags ?? {}), ...tags };

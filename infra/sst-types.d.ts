@@ -221,6 +221,7 @@ declare namespace sst {
     }
     interface ClusterArgs {
       vpc: ClusterVpc;
+      forceUpgrade?: Input<string>;
       transform?: { cluster?: (args: Record<string, unknown>) => void };
     }
     class Cluster {
