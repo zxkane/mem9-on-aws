@@ -1,20 +1,10 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  ECR repository for the mem9-on-aws mnemo-server container image — owned
-  OUT-OF-BAND (not by SST/Pulumi). See docs/ARCHITECTURE.md §4: every SST stage
-  (prod + every pr-N preview) references this ONE repo read-only, so a stray
-  `sst remove --stage pr-N` can never wipe the image history that prod runs on.
-
-  The arm64 mnemo-server image is built + pushed to this repo by CI
-  (.github/workflows/infra-ci.yml → build-and-push-image): push-to-main tags
-  `mem9-<sha7>` (release, per-commit) + `latest`; PR builds tag `pr-<sha7>`
-  (preview). The lifecycle policy retains the two prefixes on separate schedules
-  (see below). Deploy stages reference the URI
-  `<acct>.dkr.ecr.<region>.amazonaws.com/mem9-on-aws/mnemo-server:<tag>`.
-
-  Deploy out-of-band via `scripts/deploy-ecr-repositories.sh` (ONCE per account;
-  re-run only if this template changes). Region MUST be ap-northeast-1 (Tokyo) —
-  ECR is regional and Fargate pulls same-region to avoid cross-region data cost.
+  OUT-OF-BAND ECR repos for mem9-on-aws (not SST-managed) so `sst remove` can't
+  wipe image history: mnemo-server (server, §4), qwen3-embed (embed sidecar, §7),
+  bootstrap (schema-bootstrap task, §8). CI tags mem9-<sha>/latest (release) +
+  pr-<sha> (preview); each repo's lifecycle keeps them on separate schedules.
+  Deploy via scripts/deploy-ecr-repositories.sh in ap-northeast-1. See §4.
 
 Parameters:
   ProjectName:
@@ -104,6 +94,73 @@ Resources:
         - Key: ManagedBy
           Value: cloudformation
 
+  # ───────────────────────────────────────────────────────────────────────────
+  # qwen3-embed sidecar image (§7). Same tag scheme + lifecycle as mnemo-server.
+  # ───────────────────────────────────────────────────────────────────────────
+  Qwen3EmbedRepo:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Sub ${ProjectName}/qwen3-embed
+      ImageTagMutability: MUTABLE
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      # Identical policy to mnemo-server: pr-* expire 7d, keep 30 mem9-*, untagged 3d.
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              { "rulePriority": 1, "description": "Expire pr-<sha> preview images after 7 days.",
+                "selection": { "tagStatus": "tagged", "tagPrefixList": ["pr-"], "countType": "sinceImagePushed", "countUnit": "days", "countNumber": 7 },
+                "action": { "type": "expire" } },
+              { "rulePriority": 2, "description": "Keep the last 30 mem9-<sha> release images.",
+                "selection": { "tagStatus": "tagged", "tagPrefixList": ["mem9-"], "countType": "imageCountMoreThan", "countNumber": 30 },
+                "action": { "type": "expire" } },
+              { "rulePriority": 3, "description": "Expire untagged images after 3 days.",
+                "selection": { "tagStatus": "untagged", "countType": "sinceImagePushed", "countUnit": "days", "countNumber": 3 },
+                "action": { "type": "expire" } }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: cloudformation
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # bootstrap one-shot task image (§8). Same tag scheme + lifecycle.
+  # ───────────────────────────────────────────────────────────────────────────
+  BootstrapRepo:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Sub ${ProjectName}/bootstrap
+      ImageTagMutability: MUTABLE
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              { "rulePriority": 1, "description": "Expire pr-<sha> preview images after 7 days.",
+                "selection": { "tagStatus": "tagged", "tagPrefixList": ["pr-"], "countType": "sinceImagePushed", "countUnit": "days", "countNumber": 7 },
+                "action": { "type": "expire" } },
+              { "rulePriority": 2, "description": "Keep the last 30 mem9-<sha> release images.",
+                "selection": { "tagStatus": "tagged", "tagPrefixList": ["mem9-"], "countType": "imageCountMoreThan", "countNumber": 30 },
+                "action": { "type": "expire" } },
+              { "rulePriority": 3, "description": "Expire untagged images after 3 days.",
+                "selection": { "tagStatus": "untagged", "countType": "sinceImagePushed", "countUnit": "days", "countNumber": 3 },
+                "action": { "type": "expire" } }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: cloudformation
+
 Outputs:
   MnemoServerRepoUri:
     Description: >
@@ -118,3 +175,13 @@ Outputs:
     Value: !Ref MnemoServerRepo
     Export:
       Name: !Sub ${AWS::StackName}-MnemoServerRepoName
+  Qwen3EmbedRepoUri:
+    Description: The qwen3-embed sidecar ECR repository URI (without a tag).
+    Value: !GetAtt Qwen3EmbedRepo.RepositoryUri
+    Export:
+      Name: !Sub ${AWS::StackName}-Qwen3EmbedRepoUri
+  BootstrapRepoUri:
+    Description: The bootstrap one-shot task ECR repository URI (without a tag).
+    Value: !GetAtt BootstrapRepo.RepositoryUri
+    Export:
+      Name: !Sub ${AWS::StackName}-BootstrapRepoUri

@@ -1,0 +1,75 @@
+#!/bin/sh
+# bootstrap entrypoint — one-shot schema + tenant seed for mem9-on-aws (§8).
+#
+# Runs ONCE per deploy as a short-lived ECS task, then exits 0. Idempotent: safe
+# to re-run on every deploy (all DDL is IF NOT EXISTS; the tenant upsert is
+# ON CONFLICT DO NOTHING). It:
+#   1. assembles the DB DSN from the injected env + Secrets Manager JSON (same
+#      contract as the mnemo-server entrypoint),
+#   2. applies schema.sql (pgvector + control-plane tenants + memories vector(1024)
+#      + idx_app + FTS/HNSW indexes),
+#   3. seeds ONE active tenant row whose id IS the X-API-Key (mem9 does
+#      tenants.GetByID(apiKey)); the id is supplied via MEM9_TENANT_ID so it's
+#      stable across re-runs (generated once by SST, stored in Secrets Manager).
+#
+# Fails LOUD (set -e) — a half-applied schema must surface, not be swallowed.
+
+set -eu
+
+: "${MEM9_DB_HOST:?MEM9_DB_HOST required}"
+: "${MEM9_DB_PORT:?MEM9_DB_PORT required}"
+: "${MEM9_DB_NAME:?MEM9_DB_NAME required}"
+: "${MEM9_DB_SECRET:?MEM9_DB_SECRET (Secrets Manager JSON {username,password}) required}"
+: "${MEM9_TENANT_ID:?MEM9_TENANT_ID (the X-API-Key / tenants.id to seed) required}"
+
+DB_USER=$(printf '%s' "$MEM9_DB_SECRET" | jq -re '(.username // error("missing .username"))') || {
+  echo "bootstrap: MEM9_DB_SECRET has no .username" >&2; exit 1; }
+DB_PASS=$(printf '%s' "$MEM9_DB_SECRET" | jq -re '(.password // error("missing .password"))') || {
+  echo "bootstrap: MEM9_DB_SECRET has no .password" >&2; exit 1; }
+
+# psql reads the password from PGPASSWORD (never on the command line / in the
+# process args). TLS required (RDS Proxy mandates it), same as mnemo-server.
+export PGPASSWORD="$DB_PASS"
+export PGSSLMODE=require
+export PGCONNECT_TIMEOUT=15
+
+PSQL="psql --host=${MEM9_DB_HOST} --port=${MEM9_DB_PORT} --username=${DB_USER} \
+  --dbname=${MEM9_DB_NAME} -v ON_ERROR_STOP=1 --no-password"
+
+echo "bootstrap: applying schema to ${MEM9_DB_HOST}:${MEM9_DB_PORT}/${MEM9_DB_NAME} (user ${DB_USER})"
+$PSQL -f /bootstrap/schema.sql
+
+# Seed one active tenant. id == X-API-Key. The tenant's db_* point at THIS Aurora
+# (single operator, one active tenant on the same cluster). db_password is stored
+# as a placeholder marker, NOT the real secret: the runtime control-plane DSN
+# already carries the working credential, and for a single operator the memory
+# repo uses the same connection — we never want the raw password written into a
+# table row. (If a future multi-tenant setup needs per-tenant creds, revisit;
+# mem9 supports MNEMO_ENCRYPT_TYPE=kms for stored tenant passwords.)
+echo "bootstrap: seeding tenant ${MEM9_TENANT_ID} (idempotent)"
+$PSQL <<SQL
+INSERT INTO tenants (id, name, db_host, db_port, db_user, db_password, db_name, db_tls, provider, status, schema_version)
+VALUES (
+  '${MEM9_TENANT_ID}',
+  'mem9-on-aws',
+  '${MEM9_DB_HOST}',
+  ${MEM9_DB_PORT},
+  '${DB_USER}',
+  'managed-by-secrets-manager',
+  '${MEM9_DB_NAME}',
+  TRUE,
+  'self-hosted',
+  'active',
+  1
+)
+ON CONFLICT (id) DO UPDATE SET
+  db_host = EXCLUDED.db_host,
+  db_port = EXCLUDED.db_port,
+  db_user = EXCLUDED.db_user,
+  db_name = EXCLUDED.db_name,
+  db_tls  = EXCLUDED.db_tls,
+  status  = 'active',
+  updated_at = NOW();
+SQL
+
+echo "bootstrap: done — schema applied + tenant ${MEM9_TENANT_ID} active"

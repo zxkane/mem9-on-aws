@@ -10,13 +10,23 @@
  * mem9 source commit — see docs/mem9-facts.md). Its entrypoint assembles
  * MNEMO_DSN from the injected pieces at container start.
  *
- * NOT yet here (follow-up PRs, each needs its own prerequisite):
- *   - the qwen3-embed sidecar (§7 embedding) and token-refresh sidecar (§7 LLM)
- *   - the internal ALB + public ACM cert (deferred to the AgentCore Gateway PR,
- *     §6a — it exists only to give the Gateway a TLS-trusted Lattice target)
- *   - the one-shot schema-bootstrap task (§8: pgvector + tenant runtime schema).
- *     Until it runs, mnemo-server boots + reaches the DB but list/search fail on
- *     the missing tenant schema; this stack proves the server starts + connects.
+ * SIDECAR (this PR): the task now runs TWO containers (ARCHITECTURE.md §7):
+ *   1. mnemo-server (the memory server, HTTP :8080)
+ *   2. qwen3-embed  (OpenAI /v1/embeddings on localhost:8081; docker/qwen3-embed/)
+ * mem9 reaches the embedder at MNEMO_EMBED_BASE_URL=http://localhost:8081/v1 with
+ * MNEMO_EMBED_DIMS=1024 (matches the PG vector(1024) column the bootstrap creates).
+ * The qwen3 ONNX model is heavy (~3.85 GB resident), so the task memory jumps to
+ * fit it — the main §7/§9 cost swing.
+ *
+ * NOT yet here (follow-up PRs):
+ *   - the token-refresh sidecar + LLM smart-ingest (§7 LLM). Until then
+ *     MNEMO_INGEST_MODE=raw (store as-is); embedding/semantic search still works.
+ *   - the internal ALB + public ACM cert (AgentCore Gateway PR, §6a).
+ *
+ * SCHEMA BOOTSTRAP (this PR, separate one-shot task — infra/bootstrap.ts):
+ * mem9 does NOT create the PG memories table (it only validates idx_app at
+ * startup). The bootstrap task applies pgvector + the memories(vector 1024) schema
+ * + seeds one tenant BEFORE the server needs it (see docs/mem9-facts.md §8).
  *
  * MNEMO_DSN assembly: mem9 reads a single static `MNEMO_DSN` and cannot compose
  * it from parts, and the password is a runtime secret. So this stack injects the
@@ -28,28 +38,24 @@
 
 import { resolveVpc } from "./vpc";
 import type { DbOutputs } from "./db";
+import { ecrImage } from "./ecr";
 
-// The out-of-band ECR repo namespace (infra/cloudformation/ecr-repositories.yaml).
-// The full URI is composed at deploy time as
-// `<account>.dkr.ecr.<region>.amazonaws.com/<namespace>:<tag>` — account from the
-// caller identity (never hardcoded), region = the app region.
-const ECR_NAMESPACE = "mem9-on-aws/mnemo-server";
-const ECR_REGION = "ap-northeast-1"; // must match sst.config.ts providers.aws.region
-
-// Image tag to deploy. CI (push-to-main) sets MEM9_IMAGE_TAG to the exact
-// `mem9-<sha7>` it just built + pushed, so prod runs that precise commit's image;
-// CI PR previews set `pr-<sha7>`. Local `sst deploy` / any deploy without the env
-// defaults to `latest` — the image most recently pushed by main's CI (the
-// out-of-band repo is shared across all stages).
+// Image tags. CI (push-to-main) sets MEM9_IMAGE_TAG to the exact `mem9-<sha7>` it
+// just built + pushed, so prod runs that precise commit's images; CI PR previews
+// set `pr-<sha7>`. Local `sst deploy` / any deploy without the env defaults to
+// `latest`. All images built by the SAME CI run share one tag, so a single env
+// var pins the whole task consistently.
 // NOTE: on a freshly-bootstrapped account where CI has NOT yet merged to main,
-// `latest` does not exist yet, so a manual local `sst deploy` would leave the
-// task unable to pull. First bring-up is always via a merge to main (which builds
-// + pushes before deploying); do local deploys only after that, or pass an
-// explicit MEM9_IMAGE_TAG that exists in ECR.
+// `latest` does not exist yet; first bring-up is always via a merge to main.
 const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
+
+// The qwen3-embed sidecar listens here; mem9 calls it over localhost. Not exposed
+// outside the task.
+const EMBED_PORT = 8081;
 
 export interface EcsOutputs {
   ssmPrefix: string;
+  cluster: sst.aws.Cluster; // shared with bootstrap() so the one-shot task reuses it
   clusterName: Output<string>;
   serviceName: Output<string>;
   image: Output<string>;
@@ -80,12 +86,10 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
   const dbSecretArn = dbOut.secretArn;
   const taskSgId = dbOut.taskSecurityGroupId;
 
-  // The mnemo-server arm64 image URI, composed from the caller's account (never
-  // hardcoded), the app region, the out-of-band repo namespace, and the tag.
-  // The repo is owned by infra/cloudformation/ecr-repositories.yaml and pushed
-  // to by CI — this stack only REFERENCES it (SST does not build/push it).
-  const accountId = aws.getCallerIdentityOutput().accountId;
-  const image = $interpolate`${accountId}.dkr.ecr.${ECR_REGION}.amazonaws.com/${ECR_NAMESPACE}:${IMAGE_TAG}`;
+  // Image URIs (out-of-band ECR, referenced read-only). Both share IMAGE_TAG so a
+  // single CI run pins the whole task consistently.
+  const mnemoImage = ecrImage("mem9-on-aws/mnemo-server", IMAGE_TAG);
+  const embedImage = ecrImage("mem9-on-aws/qwen3-embed", IMAGE_TAG);
 
   // ECS cluster in the existing default VPC. `loadBalancerSubnets` is required by
   // the type even though we create no ALB here (deferred to the Gateway PR); set
@@ -104,34 +108,71 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
     },
   });
 
-  // Fargate service: arm64, smallest size (§4: ~256 CPU / 512 MB), single task
-  // (scaling unset → desiredCount 1), no load balancer (omit `loadBalancer`).
-  // `architecture: "arm64"` makes SST set the task's runtimePlatform
-  // cpuArchitecture=ARM64 — must match the image (built linux/arm64).
+  // Fargate service: arm64, single task (scaling unset → desiredCount 1), no
+  // load balancer. TWO containers (§7): mnemo-server + qwen3-embed sidecar.
+  //
+  // Task size is the TASK TOTAL (SST splits it across containers; per-container
+  // cpu/memory are optional sub-limits we leave unset so both share the pool). The
+  // qwen3 ONNX model needs ~3.85 GB resident, so 2 vCPU / 6 GB gives the model its
+  // ~4 GB floor plus headroom for mnemo-server + Node. This is the main cost swing
+  // vs the 0.25 vCPU/0.5 GB skeleton (ARCHITECTURE.md §9). Fargate requires valid
+  // cpu/memory pairs: 2 vCPU permits 4–16 GB → 6 GB is valid.
+  //
+  // IMPORTANT (SST validation): with `containers[]` you may NOT also set top-level
+  // image/environment/ssm/health/logging — they move INTO each container entry.
   const service = new sst.aws.Service("Mem9Server", {
     cluster,
-    architecture: "arm64",
-    cpu: "0.25 vCPU",
-    memory: "0.5 GB",
-    image,
-    // Plain env: mem9's non-secret config + the DB connection pieces. The image's
-    // entrypoint assembles MNEMO_DSN from these + the injected password JSON.
-    environment: {
-      MNEMO_DB_BACKEND: "postgres",
-      MNEMO_PORT: "8080",
-      MNEMO_INGEST_MODE: "raw", // no LLM sidecar yet; smart falls back to raw
-      MNEMO_UPLOAD_DIR: "/tmp", // single task → local /tmp is fine (mem9-facts)
-      MEM9_DB_HOST: dbProxyHost, // proxy endpoint
-      MEM9_DB_PORT: dbPort,
-      MEM9_DB_NAME: dbName,
-    },
-    // Secret injection (== ECS `secrets: valueFrom`): the DB secret's fields land
-    // as env vars from Secrets Manager at task start. Never a literal in the task
-    // def or git. SST/ECS reads the whole secret; the entrypoint picks username +
-    // password out of MEM9_DB_SECRET (a JSON {username,password}).
-    ssm: {
-      MEM9_DB_SECRET: dbSecretArn,
-    },
+    architecture: "arm64", // runtimePlatform cpuArchitecture=ARM64; images are linux/arm64
+    cpu: "2 vCPU",
+    memory: "6 GB",
+    containers: [
+      {
+        name: "mnemo-server",
+        image: mnemoImage,
+        // mem9 config + DB pieces + the embedder wiring. The image entrypoint
+        // assembles MNEMO_DSN from these + the injected password JSON.
+        environment: {
+          MNEMO_DB_BACKEND: "postgres",
+          MNEMO_PORT: "8080",
+          MNEMO_INGEST_MODE: "raw", // LLM sidecar deferred; smart falls back to raw
+          MNEMO_UPLOAD_DIR: "/tmp", // single task → local /tmp is fine (mem9-facts)
+          MEM9_DB_HOST: dbProxyHost, // proxy endpoint
+          MEM9_DB_PORT: dbPort,
+          MEM9_DB_NAME: dbName,
+          // Embedding MaaS = the qwen3 sidecar on localhost. Dims MUST equal the
+          // PG vector(1024) column the bootstrap creates + qwen3's native 1024.
+          MNEMO_EMBED_BASE_URL: `http://localhost:${EMBED_PORT}/v1`,
+          MNEMO_EMBED_MODEL: "qwen3-embedding-0.6b",
+          MNEMO_EMBED_DIMS: "1024",
+          // mem9's embedder treats "local"/"" as no-auth (localhost sidecar).
+          MNEMO_EMBED_API_KEY: "local",
+        },
+        // Secret injection (== ECS `secrets: valueFrom`): the DB secret lands as an
+        // env var from Secrets Manager at task start. Never a literal in git.
+        ssm: {
+          MEM9_DB_SECRET: dbSecretArn,
+        },
+      },
+      {
+        name: "qwen3-embed",
+        image: embedImage,
+        environment: {
+          QWEN3_EMBED_PORT: String(EMBED_PORT),
+        },
+        // Model load is slow on cold start (baked into the image, but the ONNX
+        // session-create reads ~2.4 GB); give it a long startPeriod before the
+        // health check counts failures. mem9 only calls it once it gets a request,
+        // and ECS starts both containers together — the health check keeps the
+        // task from being marked healthy until the embedder is actually ready.
+        health: {
+          command: ["CMD-SHELL", `wget -q -O- http://localhost:${EMBED_PORT}/health || exit 1`],
+          startPeriod: "180 seconds",
+          interval: "30 seconds",
+          timeout: "5 seconds",
+          retries: 3,
+        },
+      },
+    ],
     logging: {
       retention: "1 month",
     },
@@ -154,19 +195,21 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
     value: service.nodes.service.name,
     tags,
   });
-  // Record the deployed image URI (incl. tag) so it's auditable which mem9
-  // commit each stage is running without inspecting the task definition.
+  // Record the deployed mnemo-server image URI (incl. tag) so it's auditable which
+  // mem9 commit each stage runs without inspecting the task definition. The embed
+  // image shares the same tag.
   new aws.ssm.Parameter("EcsImage", {
     name: `${prefix}/ecs/image`,
     type: "String",
-    value: image,
+    value: mnemoImage,
     tags,
   });
 
   return {
     ssmPrefix: prefix,
+    cluster,
     clusterName: cluster.nodes.cluster.name,
     serviceName: service.nodes.service.name,
-    image,
+    image: mnemoImage,
   };
 }

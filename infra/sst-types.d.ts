@@ -112,6 +112,29 @@ declare namespace aws {
     }
   }
 
+  namespace secretsmanager {
+    interface SecretArgs {
+      name?: Input<string>;
+      namePrefix?: Input<string>;
+      description?: Input<string>;
+      recoveryWindowInDays?: Input<number>;
+      tags?: Record<string, Input<string>>;
+    }
+    class Secret {
+      constructor(name: string, args: SecretArgs);
+      readonly id: Output<string>;
+      readonly arn: Output<string>;
+    }
+    interface SecretVersionArgs {
+      secretId: Input<string>;
+      secretString: Input<string>;
+    }
+    class SecretVersion {
+      constructor(name: string, args: SecretVersionArgs);
+      readonly arn: Output<string>;
+    }
+  }
+
   namespace ssm {
     interface ParameterArgs {
       name: Input<string>;
@@ -132,6 +155,19 @@ declare namespace aws {
       readonly arn: Output<string>;
     }
     function getParameterOutput(args: GetParameterOutputArgs): GetParameterResult;
+  }
+}
+
+// ── The `random` provider (infra/bootstrap.ts uses RandomId for the tenant key) ──
+declare namespace random {
+  interface RandomIdArgs {
+    byteLength: Input<number>;
+    keepers?: Record<string, Input<string>>;
+  }
+  class RandomId {
+    constructor(name: string, args: RandomIdArgs);
+    readonly hex: Output<string>;
+    readonly id: Output<string>;
   }
 }
 
@@ -196,14 +232,39 @@ declare namespace sst {
       name?: Input<string>;
       retention?: Input<string>;
     }
+    interface ContainerHealth {
+      command: Input<string[]>;
+      startPeriod?: Input<string>;
+      interval?: Input<string>;
+      timeout?: Input<string>;
+      retries?: Input<number>;
+    }
+    // One entry of a multi-container task (FargateContainerArgs). When present on
+    // ServiceArgs.containers, top-level image/environment/ssm/health/logging must
+    // NOT be set (SST rejects both) — they live per-container here.
+    interface FargateContainer {
+      name: Input<string>;
+      image: Input<string>;
+      cpu?: Input<string>;
+      memory?: Input<string>;
+      command?: Input<string[]>;
+      entrypoint?: Input<string[]>;
+      environment?: Input<Record<string, Input<string>>>;
+      ssm?: Input<Record<string, Input<string>>>;
+      health?: Input<ContainerHealth>;
+      logging?: ServiceLogging;
+    }
     interface ServiceArgs {
       cluster: Cluster;
       architecture?: Input<"x86_64" | "arm64">;
       cpu?: Input<string>;
       memory?: Input<string>;
-      image: Input<string>;
+      // Single-container mode: image/environment/ssm at the top level.
+      image?: Input<string>;
       environment?: Input<Record<string, Input<string>>>;
       ssm?: Input<Record<string, Input<string>>>;
+      // Multi-container (sidecar) mode: mutually exclusive with the above.
+      containers?: Input<FargateContainer>[];
       logging?: ServiceLogging;
       transform?: { service?: (args: Record<string, unknown>) => void };
     }
@@ -211,6 +272,24 @@ declare namespace sst {
       constructor(name: string, args: ServiceArgs);
       readonly nodes: { service: { name: Output<string>; arn: Output<string> } };
       readonly service: Output<string>;
+    }
+
+    // ── one-shot Task (infra/bootstrap.ts) ────────────────────────────────
+    interface TaskArgs {
+      cluster: Cluster;
+      architecture?: Input<"x86_64" | "arm64">;
+      cpu?: Input<string>;
+      memory?: Input<string>;
+      image?: Input<string>;
+      environment?: Input<Record<string, Input<string>>>;
+      ssm?: Input<Record<string, Input<string>>>;
+      logging?: ServiceLogging;
+      transform?: { taskDefinition?: (args: Record<string, unknown>) => void };
+    }
+    class Task {
+      constructor(name: string, args: TaskArgs);
+      readonly nodes: { task: { arn: Output<string> } };
+      readonly taskDefinition: Output<string>;
     }
   }
 }

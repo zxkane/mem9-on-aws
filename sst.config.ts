@@ -67,13 +67,19 @@ export default $config({
     const { db } = await import("./infra/db");
     const dbOut = db();
 
-    // ECS Fargate cluster + mnemo-server service (§4). Skeleton: a placeholder
-    // image proving DB reachability + the env/secret wiring; the real
-    // mnemo-server image + embed/token sidecars + the internal ALB land in
-    // follow-up PRs. Takes db()'s Outputs DIRECTLY (a real Pulumi dependency) —
-    // NOT an SSM read-back, which would fail on a fresh stage's first deploy.
+    // ECS Fargate cluster + the mnemo-server service (§4/§7). Two containers:
+    // mnemo-server + the qwen3-embed sidecar (localhost /v1/embeddings, dims 1024).
+    // Takes db()'s Outputs DIRECTLY (a real Pulumi dependency) — NOT an SSM
+    // read-back, which would fail on a fresh stage's first deploy.
     const { ecs } = await import("./infra/ecs");
-    ecs(dbOut);
+    const ecsOut = ecs(dbOut);
+
+    // Schema-bootstrap one-shot Task (§8): defines a short-lived task that applies
+    // pgvector + the memories(vector 1024) schema + seeds one tenant. Reuses the
+    // ECS cluster + db Outputs. SST only DEFINES the task; CI runs it via
+    // `aws ecs run-task` after deploy (see .github/workflows/infra-ci.yml).
+    const { bootstrap } = await import("./infra/bootstrap");
+    bootstrap(ecsOut.cluster, dbOut);
 
     return {};
   },

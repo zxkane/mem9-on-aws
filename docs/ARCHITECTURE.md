@@ -320,8 +320,22 @@ mem9 PG needs, before first use:
 3. Insert an active `tenants` row (single-tenant for a single operator); the
    tenant `id` is the `X-API-Key` (probed).
 
-Mechanism — Open decision #3: one-shot ECS task on deploy vs. an init Lambda vs.
-a documented manual step. Leaning one-shot ECS task run against Aurora.
+Mechanism — **IMPLEMENTED (one-shot ECS task).** `infra/bootstrap.ts` defines an
+`sst.aws.Task` (arm64, image `docker/bootstrap/`, psql + jq) wired to the DB
+Outputs + a **stable tenant-id secret** (a `random.RandomId` stored in Secrets
+Manager, so re-runs reuse the same `X-API-Key` rather than minting a new one).
+The task runs `docker/bootstrap/schema.sql` (all IF NOT EXISTS) then upserts the
+one active tenant (ON CONFLICT). SST only *defines* the task; **CI runs it via
+`aws ecs run-task` after `sst deploy`** (`scripts/run-bootstrap-task.sh`, reading
+the run inputs SST exports to `/mem9-on-aws/${stage}/bootstrap/*` SSM) and waits
+for exit 0 — kept out of the Pulumi graph (no local-exec provider) and observable
+in CI logs. Idempotent, so it re-runs safely on every deploy.
+
+**Embedding-dims decision baked in here:** the `memories.embedding` column is
+`vector(1024)` (NOT mem9's hardcoded `vector(1536)`), matching the qwen3-embed
+sidecar + `MNEMO_EMBED_DIMS=1024`. The FTS index is a GIN on
+`to_tsvector('english', content)` (matches mem9's FTSSearch), plus an HNSW
+`vector_cosine_ops` index for the `embedding <=> $q` cosine search.
 
 ## 9. Cost sketch (Tokyo, order-of-magnitude, verify at build)
 
