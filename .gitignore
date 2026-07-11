@@ -9,11 +9,22 @@ CLAUDE.local.md
 *.local.*
 .local.json
 
-# Node / SST (for when IaC lands)
+# Node / SST
 node_modules/
 .sst/
 dist/
 *.tsbuildinfo
+# SST auto-generates these link-type files on `sst deploy`/`sst dev`.
+sst-env.d.ts
+infra/sst-env.d.ts
+
+# Git worktrees (feature isolation, per the dev workflow)
+.worktrees/
+
+# Autonomous-dev-team scaffolding (machine-local; see main-workspace .gitignore).
+# .agents/skills → symlink into the user-scope install; .agents/state → hook state.
+.agents/
+.pulumi/
 
 # OS
 .DS_Store
