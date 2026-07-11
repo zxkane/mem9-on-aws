@@ -18,7 +18,14 @@
 # ── builder ──────────────────────────────────────────────────────────────────
 # go.mod requires Go 1.24 (toolchain go1.24.6). Alpine builder keeps the image
 # small; the binary is static (CGO off) so the runtime needs no libc from here.
-FROM golang:1.24-alpine AS builder
+#
+# `--platform=$BUILDPLATFORM` runs the Go toolchain NATIVELY on the builder host
+# (fast on any runner) and cross-compiles to the target arch via GOARCH — instead
+# of running the whole compiler under QEMU emulation, which would be slow on x86
+# CI runners. mem9 is pure Go (CGO off), so cross-compiling is a plain GOARCH
+# switch, no emulation needed. BUILDPLATFORM/TARGETARCH are auto-injected by
+# buildx.
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
 
 # git to fetch the pinned source; ca-certificates so `go mod download` can reach
 # the module proxy over TLS.
@@ -27,8 +34,8 @@ RUN apk add --no-cache git ca-certificates
 # The exact upstream commit to vendor. A full 40-char SHA (not a branch/tag) so
 # the build is reproducible and can never drift under us.
 ARG MEM9_REF=d4638c8458abeb209a1b3a20472a1328c4acd149
-# Target arch for the static binary. arm64 for Graviton Fargate; overridable so
-# the same Dockerfile can build amd64 for a local x86 smoke test.
+# Target arch for the static binary, auto-injected by buildx from --platform
+# (linux/arm64 → arm64). Defaulted so a plain `docker build` still works.
 ARG TARGETARCH=arm64
 
 WORKDIR /src
@@ -38,7 +45,8 @@ RUN git init -q . \
     && git fetch -q --depth 1 origin "${MEM9_REF}" \
     && git checkout -q FETCH_HEAD
 
-# Build the server. go.mod + the whole module live under server/.
+# Build the server. go.mod + the whole module live under server/. GOARCH targets
+# the requested arch while the compiler itself runs on the native BUILDPLATFORM.
 WORKDIR /src/server
 RUN go mod download \
     && CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH}" \

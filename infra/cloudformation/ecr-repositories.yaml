@@ -42,26 +42,49 @@ Resources:
       # data-ownership is satisfied — the images live in the operator's account).
       EncryptionConfiguration:
         EncryptionType: AES256
-      # Keep only the most recent per-commit images so the repo doesn't grow
-      # unbounded across every main merge. `latest` is a tag on one of the kept
-      # images, so it stays pullable. 10 keeps a useful rollback window.
+      # PR-preview (`pr-<sha7>`) and release (`mem9-<sha7>`) images use DISTINCT
+      # tag prefixes (.github/workflows/infra-ci.yml → Resolve image tag) so they
+      # don't share one expiry window. This matters because a prod task pins its
+      # release tag BY NAME and Fargate re-resolves tag→digest on every task
+      # (re)start — if preview churn aged a still-referenced release tag out of a
+      # shared window, a prod restart would hit ImageNotFound and fail to recover.
+      # So:
+      #   - `pr-*`   → expire aggressively (7 days) — previews are torn down with
+      #     their stage; images just need to outlive an open PR's review cycle.
+      #   - `mem9-*` → keep the last 30 releases (a generous rollback window that
+      #     preview traffic can never encroach on).
+      #   - untagged → expire after 3 days (orphaned layers from overwritten
+      #     `latest`, which floats to the newest `mem9-*` on each main merge).
+      # Rule priority: pr-* first (lowest number = evaluated first).
       LifecyclePolicy:
         LifecyclePolicyText: |
           {
             "rules": [
               {
                 "rulePriority": 1,
-                "description": "Keep the last 10 mem9-<sha> images; expire older per-commit builds.",
+                "description": "Expire pr-<sha> preview images after 7 days (they die with their PR stage).",
                 "selection": {
                   "tagStatus": "tagged",
-                  "tagPrefixList": ["mem9-"],
-                  "countType": "imageCountMoreThan",
-                  "countNumber": 10
+                  "tagPrefixList": ["pr-"],
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
                 },
                 "action": { "type": "expire" }
               },
               {
                 "rulePriority": 2,
+                "description": "Keep the last 30 mem9-<sha> release images; expire older ones. Prod pins one of these by name — never let preview traffic age it out.",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["mem9-"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 30
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 3,
                 "description": "Expire untagged images after 3 days (orphaned layers from overwritten `latest`).",
                 "selection": {
                   "tagStatus": "untagged",

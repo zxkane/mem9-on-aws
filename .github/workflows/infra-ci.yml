@@ -477,9 +477,20 @@ jobs:
       - name: Resolve image tag
         id: tag
         if: steps.gate.outputs.skip != 'true'
-        # GITHUB_SHA is trusted (GitHub-controlled), so it's safe in run:. On a PR,
-        # GITHUB_SHA is the ephemeral merge commit — fine as a unique preview tag.
-        run: echo "image_tag=mem9-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+        # Distinct prefixes so PR-preview churn and release images don't share a
+        # lifecycle-expiry window (ecr-repositories.yaml): `pr-<sha7>` for PR
+        # builds (expired aggressively), `mem9-<sha7>` for release builds on main
+        # (retained long). A prod task pins the release tag by name, so it must
+        # never be aged out by preview traffic. GITHUB_SHA is trusted (GitHub-
+        # controlled), so it's safe in run:; on a PR it's the ephemeral merge SHA.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "push" ]; then
+            echo "image_tag=mem9-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          else
+            echo "image_tag=pr-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Configure AWS credentials (OIDC)
         if: steps.gate.outputs.skip != 'true'

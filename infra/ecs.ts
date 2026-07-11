@@ -37,9 +37,15 @@ const ECR_NAMESPACE = "mem9-on-aws/mnemo-server";
 const ECR_REGION = "ap-northeast-1"; // must match sst.config.ts providers.aws.region
 
 // Image tag to deploy. CI (push-to-main) sets MEM9_IMAGE_TAG to the exact
-// `mem9-<sha7>` it just built + pushed, so prod runs that precise commit's image.
-// Local `sst deploy` / PR previews default to `latest` — the image most recently
-// pushed by main's CI (the out-of-band repo is shared across all stages).
+// `mem9-<sha7>` it just built + pushed, so prod runs that precise commit's image;
+// CI PR previews set `pr-<sha7>`. Local `sst deploy` / any deploy without the env
+// defaults to `latest` — the image most recently pushed by main's CI (the
+// out-of-band repo is shared across all stages).
+// NOTE: on a freshly-bootstrapped account where CI has NOT yet merged to main,
+// `latest` does not exist yet, so a manual local `sst deploy` would leave the
+// task unable to pull. First bring-up is always via a merge to main (which builds
+// + pushes before deploying); do local deploys only after that, or pass an
+// explicit MEM9_IMAGE_TAG that exists in ECR.
 const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 
 export interface EcsOutputs {
