@@ -1,0 +1,120 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  ECR repository for the mem9-on-aws mnemo-server container image — owned
+  OUT-OF-BAND (not by SST/Pulumi). See docs/ARCHITECTURE.md §4: every SST stage
+  (prod + every pr-N preview) references this ONE repo read-only, so a stray
+  `sst remove --stage pr-N` can never wipe the image history that prod runs on.
+
+  The arm64 mnemo-server image is built + pushed to this repo by CI
+  (.github/workflows/infra-ci.yml → build-and-push-image): push-to-main tags
+  `mem9-<sha7>` (release, per-commit) + `latest`; PR builds tag `pr-<sha7>`
+  (preview). The lifecycle policy retains the two prefixes on separate schedules
+  (see below). Deploy stages reference the URI
+  `<acct>.dkr.ecr.<region>.amazonaws.com/mem9-on-aws/mnemo-server:<tag>`.
+
+  Deploy out-of-band via `scripts/deploy-ecr-repositories.sh` (ONCE per account;
+  re-run only if this template changes). Region MUST be ap-northeast-1 (Tokyo) —
+  ECR is regional and Fargate pulls same-region to avoid cross-region data cost.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: mem9-on-aws
+    Description: SST app name; used as the ECR repository namespace prefix so the
+      repo URI reads .../mem9-on-aws/mnemo-server.
+
+Resources:
+  # ───────────────────────────────────────────────────────────────────────────
+  # mnemo-server image repository. Namespaced under the project so a single
+  # account can host sibling projects' repos without collision.
+  # ───────────────────────────────────────────────────────────────────────────
+  MnemoServerRepo:
+    Type: AWS::ECR::Repository
+    # Retain on stack delete — the image history is the deploy artifact; never
+    # let tearing down this bootstrap stack drop the images prod depends on.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Sub ${ProjectName}/mnemo-server
+      # MUTABLE: CI pushes a rolling `latest` tag alongside the immutable
+      # per-commit `mem9-<sha7>` tag; `latest` must be overwritable. The
+      # per-commit tag is never re-pushed in practice (new commit = new sha).
+      ImageTagMutability: MUTABLE
+      # Encryption at rest with the ECR-managed AES256 key (no CMK to manage;
+      # data-ownership is satisfied — the images live in the operator's account).
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      # PR-preview (`pr-<sha7>`) and release (`mem9-<sha7>`) images use DISTINCT
+      # tag prefixes (.github/workflows/infra-ci.yml → Resolve image tag) so they
+      # don't share one expiry window. This matters because a prod task pins its
+      # release tag BY NAME and Fargate re-resolves tag→digest on every task
+      # (re)start — if preview churn aged a still-referenced release tag out of a
+      # shared window, a prod restart would hit ImageNotFound and fail to recover.
+      # So:
+      #   - `pr-*`   → expire aggressively (7 days) — previews are torn down with
+      #     their stage; images just need to outlive an open PR's review cycle.
+      #   - `mem9-*` → keep the last 30 releases (a generous rollback window that
+      #     preview traffic can never encroach on).
+      #   - untagged → expire after 3 days (orphaned layers from overwritten
+      #     `latest`, which floats to the newest `mem9-*` on each main merge).
+      # Rule priority: pr-* first (lowest number = evaluated first).
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Expire pr-<sha> preview images after 7 days (they die with their PR stage).",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["pr-"],
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 7
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Keep the last 30 mem9-<sha> release images; expire older ones. Prod pins one of these by name — never let preview traffic age it out.",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["mem9-"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 30
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 3,
+                "description": "Expire untagged images after 3 days (orphaned layers from overwritten `latest`).",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 3
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: cloudformation
+
+Outputs:
+  MnemoServerRepoUri:
+    Description: >
+      The mnemo-server ECR repository URI (without a tag). CI appends
+      `:mem9-<sha7>` / `:latest`; infra/ecs.ts composes the same URI from the
+      account + region + this namespace to reference the image read-only.
+    Value: !GetAtt MnemoServerRepo.RepositoryUri
+    Export:
+      Name: !Sub ${AWS::StackName}-MnemoServerRepoUri
+  MnemoServerRepoName:
+    Description: The ECR repository name (namespace/repo form).
+    Value: !Ref MnemoServerRepo
+    Export:
+      Name: !Sub ${AWS::StackName}-MnemoServerRepoName
