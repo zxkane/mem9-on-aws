@@ -26,6 +26,7 @@ on:
     types: [opened, synchronize, reopened, closed]
     paths:
       - "infra/**"
+      - "docker/**"
       - "sst.config.ts"
       - ".github/workflows/infra-ci.yml"
       - "scripts/**"
@@ -33,14 +34,16 @@ on:
       - "package-lock.json"
       - "tsconfig.json"
       - "vitest.config.ts"
-      # The OIDC role is bootstrapped out-of-band via
-      # scripts/deploy-github-role.sh — it is NOT part of the per-PR SST
-      # deploy. Skip the workflow when a PR only touches that template.
+      # The OIDC role + ECR repo are bootstrapped out-of-band via
+      # scripts/deploy-github-role.sh / deploy-ecr-repositories.sh — NOT part of
+      # the per-PR SST deploy. Skip the workflow when a PR only touches those
+      # CloudFormation templates.
       - "!infra/cloudformation/**"
   push:
     branches: [main]
     paths:
       - "infra/**"
+      - "docker/**"
       - "sst.config.ts"
       - ".github/workflows/infra-ci.yml"
       - "scripts/**"
@@ -68,6 +71,10 @@ concurrency:
 env:
   AWS_REGION: ap-northeast-1
   ROLE_NAME: github-actions-mem9-on-aws
+  # The out-of-band ECR repo (infra/cloudformation/ecr-repositories.yaml) that
+  # holds the mnemo-server arm64 image. build-and-push-image pushes here;
+  # deploy-prod references <acct>.dkr.ecr.<region>/<repo>:<tag>.
+  ECR_REPO: mem9-on-aws/mnemo-server
 
 jobs:
   # ───────────────────────────────────────────────────────────────────────────
@@ -116,7 +123,9 @@ jobs:
   deploy-preview:
     name: Deploy PR Preview
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
-    needs: typecheck
+    # Depends on the image build so the preview pulls THIS PR's freshly-built
+    # image (it wouldn't exist yet otherwise on the PR that introduces it).
+    needs: [typecheck, build-and-push-image]
     if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.base.ref == 'main'
     # Full-stack fresh preview: Aurora (~13m) + RDS Proxy + ECS. 15m timed out at ECS.
     timeout-minutes: 25
@@ -196,6 +205,10 @@ jobs:
         id: deploy
         if: steps.gate.outputs.skip != 'true'
         shell: bash
+        # Deploy the image this PR just built. If the build was skipped (no
+        # AWS_ROLE_ARN), fall back to `latest` — infra/ecs.ts's own default.
+        env:
+          MEM9_IMAGE_TAG: ${{ needs.build-and-push-image.outputs.image_tag || 'latest' }}
         run: |
           # PR_NUMBER comes from GitHub's pull_request payload (integer);
           # validate to short-circuit any injection risk.
@@ -417,12 +430,135 @@ jobs:
             });
 
   # ───────────────────────────────────────────────────────────────────────────
+  # build-and-push-image — build the mnemo-server arm64 image
+  # (docker/mnemo-server/, pinned mem9 commit) and push it to the out-of-band ECR
+  # repo, tagged `mem9-<sha7>` (immutable per-commit). On push-to-main it ALSO
+  # tags `latest`. Runs on BOTH PR (non-closed) and push so the PR preview
+  # exercises the real image (the image only exists once this job pushes it) and
+  # prod pins the exact commit. Exposes the per-commit tag as an output that both
+  # deploy-preview and deploy-prod consume. HARD-FAILS on push without
+  # AWS_ROLE_ARN; on PR it skips gracefully (matching deploy-preview's gate).
+  # ───────────────────────────────────────────────────────────────────────────
+  build-and-push-image:
+    name: Build & push mnemo-server image
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    needs: typecheck
+    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.base.ref == 'main')
+    # arm64 build: native on the self-hosted arm64 pool, QEMU-emulated on
+    # ubuntu-latest (slower). Give the go build + emulation headroom.
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+      contents: read
+    outputs:
+      # The per-commit tag, or empty when skipped (PR with no AWS_ROLE_ARN) so
+      # downstream jobs can fall back to `latest`.
+      image_tag: ${{ steps.tag.outputs.image_tag }}
+    steps:
+      - name: Gate on AWS_ROLE_ARN
+        id: gate
+        env:
+          HAS_AWS: ${{ secrets.AWS_ROLE_ARN }}
+        run: |
+          if [ -z "$HAS_AWS" ]; then
+            if [ "${{ github.event_name }}" = "push" ]; then
+              echo "::error::AWS_ROLE_ARN not configured — cannot build/push the image for prod. Bootstrap the role (scripts/deploy-github-role.sh) and set the secret."
+              exit 1
+            fi
+            echo "::notice::AWS_ROLE_ARN not configured — skipping image build (preview will fall back to :latest)"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v5
+        if: steps.gate.outputs.skip != 'true'
+
+      - name: Resolve image tag
+        id: tag
+        if: steps.gate.outputs.skip != 'true'
+        # Distinct prefixes so PR-preview churn and release images don't share a
+        # lifecycle-expiry window (ecr-repositories.yaml): `pr-<sha7>` for PR
+        # builds (expired aggressively), `mem9-<sha7>` for release builds on main
+        # (retained long). A prod task pins the release tag by name, so it must
+        # never be aged out by preview traffic. GITHUB_SHA is trusted (GitHub-
+        # controlled), so it's safe in run:; on a PR it's the ephemeral merge SHA.
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT_NAME" = "push" ]; then
+            echo "image_tag=mem9-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          else
+            echo "image_tag=pr-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Configure AWS credentials (OIDC)
+        if: steps.gate.outputs.skip != 'true'
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        if: steps.gate.outputs.skip != 'true'
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Resolve image tags
+        id: tags
+        if: steps.gate.outputs.skip != 'true'
+        # Build the newline-delimited `tags` list in shell (NOT an inline GHA
+        # ternary) so there's never a blank line — docker/build-push-action's
+        # handling of an empty tag entry is undocumented. Always push the
+        # per-commit tag; ADD `latest` only on push-to-main so PR previews can't
+        # clobber the tag local/PR deploys fall back to.
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAG: ${{ steps.tag.outputs.image_tag }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          {
+            echo "tags<<EOF"
+            echo "${REGISTRY}/${ECR_REPO}:${IMAGE_TAG}"
+            if [ "$EVENT_NAME" = "push" ]; then
+              echo "${REGISTRY}/${ECR_REPO}:latest"
+            fi
+            echo "EOF"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        # Enables linux/arm64 emulation on x86 runners (ubuntu-latest). A no-op
+        # cost on the native-arm64 self-hosted pool.
+        if: steps.gate.outputs.skip != 'true'
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        if: steps.gate.outputs.skip != 'true'
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build & push arm64 image
+        if: steps.gate.outputs.skip != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/mnemo-server/Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.tags }}
+          # GHA cache so repeated builds reuse the Go build layer.
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ───────────────────────────────────────────────────────────────────────────
   # deploy-prod — push to main → stage `prod`. HARD-FAILS without AWS_ROLE_ARN.
+  # Runs AFTER the image is built+pushed and pins prod to that exact `mem9-<sha7>`.
   # ───────────────────────────────────────────────────────────────────────────
   deploy-prod:
     name: Deploy prod
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
-    needs: typecheck
+    needs: [typecheck, build-and-push-image]
     if: github.event_name == 'push'
     environment: prod
     # Full-stack prod: Aurora + RDS Proxy + ECS provisioning exceeds 20m on first bring-up.
@@ -538,6 +674,10 @@ jobs:
 
       - name: Deploy prod stage
         shell: bash
+        # Pin prod to the exact image built by build-and-push-image (this commit's
+        # `mem9-<sha7>`); infra/ecs.ts reads MEM9_IMAGE_TAG (defaults to `latest`).
+        env:
+          MEM9_IMAGE_TAG: ${{ needs.build-and-push-image.outputs.image_tag }}
         run: |
           set +e
           pnpm -C infra exec sst deploy --stage prod --print-logs 2>&1 | tee sst-deploy.log

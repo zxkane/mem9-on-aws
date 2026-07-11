@@ -41,9 +41,37 @@ function fakeDbOut(): DbOutputs {
   } as unknown as DbOutputs;
 }
 
+// $interpolate mock: mirror Pulumi's tagged-template — unwrap out<T> values (and
+// plain values), join with the literal strings, and return an out<string> so the
+// result flows through .value/.apply like the real Output. ecs() uses it to
+// compose the ECR image URI from the account Output + literal strings.
+function installInterpolate() {
+  (globalThis as Record<string, unknown>).$interpolate = (
+    strings: TemplateStringsArray,
+    ...values: unknown[]
+  ) => {
+    let s = "";
+    strings.forEach((str, i) => {
+      s += str;
+      if (i < values.length) {
+        const v = values[i];
+        s +=
+          typeof v === "object" && v && "value" in v
+            ? String((v as { value: unknown }).value)
+            : String(v);
+      }
+    });
+    return out(s);
+  };
+}
+
 function installGlobals(stage: string) {
   (globalThis as Record<string, unknown>).$app = { name: "mem9-on-aws", stage };
+  installInterpolate();
   (globalThis as Record<string, unknown>).aws = {
+    // ecs() composes the ECR image URI from the caller's account id — never a
+    // hardcoded 12-digit account number in committed code.
+    getCallerIdentityOutput: () => ({ accountId: out("123456789012") }),
     ec2: {
       getVpcOutput: () => ({ id: out("vpc-test") }),
       getSubnetsOutput: () => ({ ids: out(["subnet-a", "subnet-b", "subnet-c"]) }),
@@ -86,7 +114,9 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  for (const g of ["$app", "aws", "sst"]) delete (globalThis as Record<string, unknown>)[g];
+  for (const g of ["$app", "aws", "sst", "$interpolate"])
+    delete (globalThis as Record<string, unknown>)[g];
+  delete process.env.MEM9_IMAGE_TAG;
   vi.resetModules();
 });
 
@@ -118,7 +148,7 @@ describe("ecs stack", () => {
     expect(vpc.containerSubnets).toBeDefined();
   });
 
-  it("runs an arm64 Fargate service with the placeholder image and NO load balancer", async () => {
+  it("runs an arm64 Fargate service with the ECR image URI and NO load balancer", async () => {
     installGlobals("prod");
     const ecs = await loadEcs();
     ecs(fakeDbOut());
@@ -127,9 +157,33 @@ describe("ecs stack", () => {
     expect(args.architecture).toBe("arm64");
     expect(args.cpu).toBe("0.25 vCPU");
     expect(args.memory).toBe("0.5 GB");
-    expect(String(args.image)).toContain("public.ecr.aws");
+    // The image is our out-of-band ECR repo URI (account.dkr.ecr.<region>...),
+    // composed from the caller's account id — NOT a public/placeholder image.
+    const image = String((args.image as { value: string }).value ?? args.image);
+    expect(image).toContain(".dkr.ecr.ap-northeast-1.amazonaws.com/mem9-on-aws/mnemo-server:");
+    expect(image).not.toContain("public.ecr.aws");
     // No ALB in this skeleton (deferred to the Gateway PR).
     expect(args.loadBalancer).toBeUndefined();
+  });
+
+  it("defaults the image tag to `latest` and honors MEM9_IMAGE_TAG", async () => {
+    // Default tag.
+    installGlobals("prod");
+    let ecs = await loadEcs();
+    ecs(fakeDbOut());
+    let image = String((services[0].args.image as { value: string }).value);
+    expect(image).toMatch(/:latest$/);
+
+    // Reset + override via env (how CI pins prod to the exact built commit).
+    for (const g of ["$app", "aws", "sst", "$interpolate"])
+      delete (globalThis as Record<string, unknown>)[g];
+    services = [];
+    process.env.MEM9_IMAGE_TAG = "mem9-abc1234";
+    installGlobals("prod");
+    ecs = await loadEcs();
+    ecs(fakeDbOut());
+    image = String((services[0].args.image as { value: string }).value);
+    expect(image).toMatch(/:mem9-abc1234$/);
   });
 
   it("injects DB config as env + the password secret via ssm (never a literal)", async () => {
@@ -151,13 +205,14 @@ describe("ecs stack", () => {
     }
   });
 
-  it("exports the cluster + service names under /mem9-on-aws/${stage}/ecs/", async () => {
+  it("exports the cluster + service names + image under /mem9-on-aws/${stage}/ecs/", async () => {
     installGlobals("prod");
     const ecs = await loadEcs();
     ecs(fakeDbOut());
     const names = params.map((p) => p.name).sort();
     expect(names).toEqual([
       "/mem9-on-aws/prod/ecs/cluster-name",
+      "/mem9-on-aws/prod/ecs/image",
       "/mem9-on-aws/prod/ecs/service-name",
     ]);
   });

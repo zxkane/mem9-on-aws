@@ -181,6 +181,40 @@ Verified against AWS docs + the operator's podcast-curation prod usage:
   switch to `GOARCH=arm64` + `docker build --platform=linux/arm64` for Graviton.
   No source change needed.
 
+### Packaging: no release/tag/public image → we PIN a source SHA (verified 2026-07-11)
+
+- **mem9-ai/mem9 publishes NO GitHub release, NO tag, and NO public image.**
+  `gh api repos/mem9-ai/mem9/{releases,tags}` both return empty. Their own CI
+  (`.github/workflows/deploy-dev.yml` / `deploy-prod.yml`) builds
+  `<branch>-<sha7>` and pushes to the **maintainers' PRIVATE ECR** (a different
+  AWS account) + deploys to their EKS — **unusable for us**. So self-hosting
+  REQUIRES pinning an upstream commit and building our own image.
+- Upstream's build model: the Makefile's `build-linux` compiles the binary on
+  the CI host (`CGO_ENABLED=0 GOOS=linux GOARCH=amd64`), then `docker build`
+  merely `COPY`s the prebuilt binary into `alpine:3.19` (the Dockerfile's golang
+  builder stage is commented out). Module path is
+  **`github.com/qiffang/mnemos/server`**; the server module lives under `server/`
+  (`server/{go.mod,go.sum,cmd/mnemo-server/main.go,internal,schema_pg.sql}`).
+- **Our build (this repo, `docker/mnemo-server/Dockerfile`):** a self-contained
+  **multi-stage** build — `golang:1.24-alpine` builder git-fetches the pinned
+  commit, `CGO_ENABLED=0 GOARCH=arm64 go build ./cmd/mnemo-server`, into
+  `alpine:3.19` — so CI needs only Docker (no host Go, no separate mem9
+  checkout). Built for **arm64** (Graviton Fargate) via `docker buildx
+  --platform=linux/arm64`.
+- **Vendored pin (LOCKED): `mem9-ai/mem9` @ `d4638c8458abeb209a1b3a20472a1328c4acd149`**
+  (main tip, committed 2026-07-10). It is the `MEM9_REF` build-arg default in the
+  Dockerfile. **Bumping the pin = change `MEM9_REF` + re-verify every fact in
+  this file against the new tree** (schema, config env vars, DB driver path).
+- **Entrypoint (`docker/mnemo-server/entrypoint.sh`)** bridges the static-DSN
+  constraint (see "DB connection mechanism"): mem9 reads one static `MNEMO_DSN`
+  and can't compose it from parts, and the DB password is a runtime secret
+  (Secrets Manager → ECS `secrets: valueFrom`), so the entrypoint assembles
+  `MNEMO_DSN=postgres://<user>:<url-encoded-pw>@<host>:<port>/<db>?sslmode=require`
+  at container start from the injected `MEM9_DB_HOST/PORT/NAME` env + the
+  `MEM9_DB_SECRET` JSON (`{username,password}`), URL-encoding the password (RDS
+  RandomPassword can contain `@ / : ? #`) via `jq @uri`. It respects a pre-set
+  `MNEMO_DSN` and fails loud on any missing/null field. **No mem9 source change.**
+
 ## Concurrency model
 
 - Server is the single process fronting the DB; concurrency is handled at the DB
