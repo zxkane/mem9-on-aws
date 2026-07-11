@@ -65,7 +65,15 @@ export default $config({
     // for the (later) ECS stack to assemble MNEMO_DSN. ~0.5 ACU idle floor makes
     // this the largest cost line — real on every deployed stage incl. pr-*.
     const { db } = await import("./infra/db");
-    db();
+    const dbOut = db();
+
+    // ECS Fargate cluster + mnemo-server service (§4). Skeleton: a placeholder
+    // image proving DB reachability + the env/secret wiring; the real
+    // mnemo-server image + embed/token sidecars + the internal ALB land in
+    // follow-up PRs. Takes db()'s Outputs DIRECTLY (a real Pulumi dependency) —
+    // NOT an SSM read-back, which would fail on a fresh stage's first deploy.
+    const { ecs } = await import("./infra/ecs");
+    ecs(dbOut);
 
     return {};
   },

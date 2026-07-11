@@ -118,7 +118,8 @@ jobs:
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     needs: typecheck
     if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.base.ref == 'main'
-    timeout-minutes: 15
+    # Full-stack fresh preview: Aurora (~13m) + RDS Proxy + ECS. 15m timed out at ECS.
+    timeout-minutes: 25
     permissions:
       id-token: write
       contents: read
@@ -292,7 +293,8 @@ jobs:
     name: Cleanup PR Preview
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.base.ref == 'main'
-    timeout-minutes: 15
+    # Aurora + ECS teardown can exceed 15m.
+    timeout-minutes: 20
     permissions:
       id-token: write
       contents: read
@@ -423,7 +425,8 @@ jobs:
     needs: typecheck
     if: github.event_name == 'push'
     environment: prod
-    timeout-minutes: 20
+    # Full-stack prod: Aurora + RDS Proxy + ECS provisioning exceeds 20m on first bring-up.
+    timeout-minutes: 30
     permissions:
       id-token: write
       contents: read
