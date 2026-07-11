@@ -128,10 +128,11 @@ jobs:
     # image (it wouldn't exist yet otherwise on the PR that introduces it).
     needs: [typecheck, build-and-push-image]
     if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.base.ref == 'main'
-    # Full-stack fresh preview: Aurora (~13m) + RDS Proxy + the 2-container ECS
-    # task (the ~1.2 GB qwen3 image pull + the 180s health-check startPeriod add
-    # several min) + the bootstrap run-task. 25m was tight; 35m gives headroom.
-    timeout-minutes: 35
+    # Full-stack fresh preview: Aurora (~13m) + RDS Proxy (~5m) + the 2-container
+    # ECS task (the ~1.2 GB qwen3 image pull + 180s health-check startPeriod) +
+    # the bootstrap DB-retry (up to 3m) + run-task. Measured first bring-up >35m;
+    # 45m gives headroom without wasting runner time on a stuck deploy.
+    timeout-minutes: 45
     permissions:
       id-token: write
       contents: read
@@ -605,9 +606,10 @@ jobs:
     if: github.event_name == 'push'
     environment: prod
     # Full-stack prod: Aurora + RDS Proxy + the 2-container ECS task (qwen3 image
-    # pull + 180s health startPeriod) + the bootstrap run-task. First bring-up
-    # exceeds 30m; 40m gives headroom.
-    timeout-minutes: 40
+    # pull + 180s health startPeriod) + the bootstrap run-task. Fresh bring-up
+    # exceeds 35m (measured); 50m gives headroom. Prod is singleton/non-cancelable,
+    # so a long timeout doesn't waste runners on duplicate runs.
+    timeout-minutes: 50
     permissions:
       id-token: write
       contents: read
