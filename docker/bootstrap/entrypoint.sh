@@ -36,6 +36,30 @@ export PGCONNECT_TIMEOUT=15
 PSQL="psql --host=${MEM9_DB_HOST} --port=${MEM9_DB_PORT} --username=${DB_USER} \
   --dbname=${MEM9_DB_NAME} -v ON_ERROR_STOP=1 --no-password"
 
+# Wait for the DB to accept connections before applying schema. The bootstrap
+# runs right after `sst deploy`, when the RDS Proxy target (the just-created
+# Aurora instance) may not be registered/available yet — a plain connect would
+# fail (psql exits 2) and abort under `set -e`. Retry `SELECT 1` for up to ~3 min.
+echo "bootstrap: waiting for ${MEM9_DB_HOST}:${MEM9_DB_PORT} to accept connections..."
+ready=0
+i=1
+while [ "$i" -le 30 ]; do
+  if $PSQL -tAc 'SELECT 1' >/dev/null 2>&1; then
+    ready=1
+    echo "bootstrap: DB reachable after $((i - 1)) retries"
+    break
+  fi
+  echo "bootstrap: not ready yet (attempt ${i}/30), sleeping 6s..."
+  sleep 6
+  i=$((i + 1))
+done
+if [ "$ready" -ne 1 ]; then
+  echo "bootstrap: DB did not accept connections within ~3 min — one last attempt (surfaces the real psql error):" >&2
+  # No redirection this time so the actual connection error is logged, then exit.
+  $PSQL -tAc 'SELECT 1'
+  exit 1
+fi
+
 echo "bootstrap: applying schema to ${MEM9_DB_HOST}:${MEM9_DB_PORT}/${MEM9_DB_NAME} (user ${DB_USER})"
 $PSQL -f /bootstrap/schema.sql
 

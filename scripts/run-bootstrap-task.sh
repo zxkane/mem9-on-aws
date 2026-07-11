@@ -73,7 +73,25 @@ STOP_REASON=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" --
 
 echo "run-bootstrap: task stopped (exitCode=${EXIT_CODE}, reason='${STOP_REASON}')"
 if [[ "$EXIT_CODE" != "0" ]]; then
-  echo "::error::bootstrap task did not exit 0 (exitCode=${EXIT_CODE}). Check the task's CloudWatch logs."
+  # Print the task's own logs INLINE so the failure is debuggable even after the
+  # stage (+ its log group) is torn down by auto-cleanup. SST logs the container
+  # to /sst/cluster/<cluster>/<...>Bootstrap.../<container>; grab the most-recent
+  # stream (= this just-failed task).
+  LG=$(aws logs describe-log-groups --region "$REGION" \
+    --query "logGroups[?contains(logGroupName,'${CLUSTER}') && contains(logGroupName,'Bootstrap')].logGroupName | [0]" \
+    --output text 2>/dev/null || true)
+  if [[ -n "$LG" && "$LG" != "None" ]]; then
+    STREAM=$(aws logs describe-log-streams --log-group-name "$LG" --region "$REGION" \
+      --order-by LastEventTime --descending --max-items 1 \
+      --query 'logStreams[0].logStreamName' --output text 2>/dev/null || true)
+    if [[ -n "$STREAM" && "$STREAM" != "None" ]]; then
+      echo "----- bootstrap task logs (${LG} / ${STREAM}) -----"
+      aws logs get-log-events --log-group-name "$LG" --log-stream-name "$STREAM" \
+        --region "$REGION" --limit 100 --query 'events[].message' --output text 2>/dev/null || true
+      echo "----- end bootstrap task logs -----"
+    fi
+  fi
+  echo "::error::bootstrap task did not exit 0 (exitCode=${EXIT_CODE}, reason='${STOP_REASON}')."
   exit 1
 fi
 echo "run-bootstrap: OK — schema + tenant bootstrap applied for stage ${STAGE}"
