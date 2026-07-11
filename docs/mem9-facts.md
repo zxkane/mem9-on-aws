@@ -63,9 +63,13 @@ Verified from `server/internal/config/config.go` + `server/internal/repository/p
   Proxy (mem9 is the IAM client either way). **Chosen (LOCKED): RDS Proxy +
   Secrets Manager** (ARCHITECTURE.md §3a). The Aurora password lives ONLY in a
   Secrets Manager secret (a **static `RandomPassword`** created by
-  `sst.aws.Aurora` — ⚠️ SST's `proxy:true` does NOT use `manageMasterUserPassword`
-  and attaches **no rotation Lambda**, so it is NOT auto-rotated; rotation is
-  ARCHITECTURE.md Open #6). RDS Proxy pulls the secret and pools/multiplexes; mem9
+  `sst.aws.Aurora`, **consumed ONLY by RDS Proxy** — password blast-radius is the
+  proxy↔Aurora hop). ⚠️ SST's `proxy:true` owns a minimal `{username,password}`
+  secret (no `host`/`engine`, no transform hook), and the AWS RDS rotation Lambda
+  requires `host`+`engine`; enabling rotation would force replacing the SST-owned
+  proxy → **rotation is intentionally NOT configured (DECIDED, ARCHITECTURE.md
+  §3a / #6)**, revisit when the ECS stack re-owns the secret/proxy. RDS Proxy
+  pulls the secret and pools/multiplexes; mem9
   connects to the **proxy endpoint** with a user+password delivered to the
   container via an ECS `secrets: valueFrom` (Secrets Manager → env at task start)
   — never a literal in the task def or git. Not literally passwordless at the
