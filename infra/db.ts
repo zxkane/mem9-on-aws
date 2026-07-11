@@ -9,13 +9,18 @@
  *     config as a literal.
  *   - A Secrets Manager secret (auto-created by sst.aws.Aurora, name
  *     `mem9-on-aws-<stage>-Mem9DbProxySecret-<random>`) holding a STATIC
- *     RandomPassword; RDS Proxy reads it to authenticate to Aurora. NOTE: SST's
- *     proxy:true does NOT use RDS manageMasterUserPassword and configures NO
- *     rotation — the password is not auto-rotated. Automatic rotation is an OPEN
- *     item (ARCHITECTURE.md Open #6): attach a Secrets Manager rotation schedule
- *     + the RDS rotation Lambda, then grant secretsmanager:RotateSecret. The
- *     value is still never committed / human-handled (created by Pulumi, read by
- *     the proxy + injected into ECS via `secrets: valueFrom`).
+ *     RandomPassword. This secret is **consumed ONLY by RDS Proxy** — the
+ *     password's blast radius is confined to the proxy↔Aurora hop; mem9 never
+ *     sees the raw password (it connects to the proxy, and the ECS task reads
+ *     the secret only via `secrets: valueFrom`). Never committed / human-handled.
+ *   - **Rotation: intentionally NOT configured (ARCHITECTURE.md §3a / Open #6,
+ *     DECIDED).** SST's `proxy:true` OWNS this secret ({username,password} only,
+ *     no host/engine, no transform hook) and the AWS RDS single-user rotation
+ *     Lambda requires host+engine in the secret — so rotation would need us to
+ *     drop SST's proxy and self-manage the proxy+secret, which would REPLACE the
+ *     live prod RDS Proxy. Not worth that for a proxy-confined password now;
+ *     accepted posture = static password, blast-radius-confined to the proxy.
+ *     Revisit if/when the secret+proxy are re-owned in the ECS-stack work.
  *   - Two security groups: a `db` SG (allows 5432 from the `task` SG only) and a
  *     `task` SG (attached to the future ECS mnemo-server task). The relationship
  *     is reserved now so the ECS stack just references the task SG.
