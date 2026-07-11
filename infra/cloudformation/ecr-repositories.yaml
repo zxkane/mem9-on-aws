@@ -1,0 +1,95 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  ECR repository for the mem9-on-aws mnemo-server container image — owned
+  OUT-OF-BAND (not by SST/Pulumi). See docs/ARCHITECTURE.md §4: every SST stage
+  (prod + every pr-N preview) references this ONE repo read-only, so a stray
+  `sst remove --stage pr-N` can never wipe the image history that prod runs on.
+
+  The arm64 mnemo-server image is built + pushed to this repo by CI on push-to-
+  main (.github/workflows/infra-ci.yml → build-and-push-image), tagged both
+  `mem9-<sha7>` (immutable-in-practice, per-commit) and `latest`. Deploy stages
+  reference the URI `<acct>.dkr.ecr.<region>.amazonaws.com/mem9-on-aws/mnemo-server:<tag>`.
+
+  Deploy out-of-band via `scripts/deploy-ecr-repositories.sh` (ONCE per account;
+  re-run only if this template changes). Region MUST be ap-northeast-1 (Tokyo) —
+  ECR is regional and Fargate pulls same-region to avoid cross-region data cost.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: mem9-on-aws
+    Description: SST app name; used as the ECR repository namespace prefix so the
+      repo URI reads .../mem9-on-aws/mnemo-server.
+
+Resources:
+  # ───────────────────────────────────────────────────────────────────────────
+  # mnemo-server image repository. Namespaced under the project so a single
+  # account can host sibling projects' repos without collision.
+  # ───────────────────────────────────────────────────────────────────────────
+  MnemoServerRepo:
+    Type: AWS::ECR::Repository
+    # Retain on stack delete — the image history is the deploy artifact; never
+    # let tearing down this bootstrap stack drop the images prod depends on.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Sub ${ProjectName}/mnemo-server
+      # MUTABLE: CI pushes a rolling `latest` tag alongside the immutable
+      # per-commit `mem9-<sha7>` tag; `latest` must be overwritable. The
+      # per-commit tag is never re-pushed in practice (new commit = new sha).
+      ImageTagMutability: MUTABLE
+      # Encryption at rest with the ECR-managed AES256 key (no CMK to manage;
+      # data-ownership is satisfied — the images live in the operator's account).
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      # Keep only the most recent per-commit images so the repo doesn't grow
+      # unbounded across every main merge. `latest` is a tag on one of the kept
+      # images, so it stays pullable. 10 keeps a useful rollback window.
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              {
+                "rulePriority": 1,
+                "description": "Keep the last 10 mem9-<sha> images; expire older per-commit builds.",
+                "selection": {
+                  "tagStatus": "tagged",
+                  "tagPrefixList": ["mem9-"],
+                  "countType": "imageCountMoreThan",
+                  "countNumber": 10
+                },
+                "action": { "type": "expire" }
+              },
+              {
+                "rulePriority": 2,
+                "description": "Expire untagged images after 3 days (orphaned layers from overwritten `latest`).",
+                "selection": {
+                  "tagStatus": "untagged",
+                  "countType": "sinceImagePushed",
+                  "countUnit": "days",
+                  "countNumber": 3
+                },
+                "action": { "type": "expire" }
+              }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: cloudformation
+
+Outputs:
+  MnemoServerRepoUri:
+    Description: >
+      The mnemo-server ECR repository URI (without a tag). CI appends
+      `:mem9-<sha7>` / `:latest`; infra/ecs.ts composes the same URI from the
+      account + region + this namespace to reference the image read-only.
+    Value: !GetAtt MnemoServerRepo.RepositoryUri
+    Export:
+      Name: !Sub ${AWS::StackName}-MnemoServerRepoUri
+  MnemoServerRepoName:
+    Description: The ECR repository name (namespace/repo form).
+    Value: !Ref MnemoServerRepo
+    Export:
+      Name: !Sub ${AWS::StackName}-MnemoServerRepoName

@@ -632,6 +632,56 @@ Resources:
             Resource: "*"
 
   # ───────────────────────────────────────────────────────────────────────────
+  # Policy 6 — Image build+push (.github/workflows/infra-ci.yml →
+  # build-and-push-image). CI on push-to-main builds the mnemo-server arm64 image
+  # (docker buildx) and pushes it to the OUT-OF-BAND ECR repo
+  # (infra/cloudformation/ecr-repositories.yaml → mem9-on-aws/mnemo-server).
+  #
+  # DISTINCT from ComputePolicy's ECRPull (the task PULLS at runtime): this is the
+  # CI PUSH surface. Its own ManagedPolicy so (a) ComputePolicy stays under IAM's
+  # 6144-byte per-policy cap, and (b) the "who can push images" footprint is
+  # auditable in one place. GetAuthorizationToken is already granted (ECRPull).
+  # Push actions are scoped to the ONE mnemo-server repo ARN (Tokyo — where the
+  # out-of-band repo lives; the role stack itself is in us-west-2 but ECR ARNs are
+  # regional).
+  #
+  # ADDED for the mnemo-server image PR — must be live (re-run
+  # scripts/deploy-github-role.sh) BEFORE that PR's first push-to-main build, or
+  # the build 403s on the first PutImage.
+  # ───────────────────────────────────────────────────────────────────────────
+  ImageBuildPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${GitHubRepo}-image-build
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ECRPushToken
+            # GetAuthorizationToken has no resource scope; needed for `docker
+            # login` before pushing. (Also granted in ComputePolicy's ECRPull for
+            # the deploy path; harmless to have on both, keeps this policy
+            # self-contained.)
+            Effect: Allow
+            Action:
+              - ecr:GetAuthorizationToken
+            Resource: "*"
+          - Sid: ECRPush
+            # Upload layers + put the manifest, scoped to the mnemo-server repo.
+            # BatchCheckLayerAvailability lets buildx skip re-uploading existing
+            # layers. DescribeRepositories confirms the out-of-band repo exists
+            # before pushing (clear error if the bootstrap wasn't run).
+            Effect: Allow
+            Action:
+              - ecr:BatchCheckLayerAvailability
+              - ecr:InitiateLayerUpload
+              - ecr:UploadLayerPart
+              - ecr:CompleteLayerUpload
+              - ecr:PutImage
+              - ecr:DescribeRepositories
+            Resource:
+              - !Sub arn:aws:ecr:ap-northeast-1:${AWS::AccountId}:repository/${ProjectName}/mnemo-server
+
+  # ───────────────────────────────────────────────────────────────────────────
   # IAM Role — assumed by GitHub Actions via OIDC.
   # ───────────────────────────────────────────────────────────────────────────
   GitHubActionsRole:
@@ -669,6 +719,7 @@ Resources:
         - !Ref ScaffoldPolicy
         - !Ref DatabasePolicy
         - !Ref ComputePolicy
+        - !Ref ImageBuildPolicy
       Tags:
         - Key: Project
           Value: !Ref ProjectName

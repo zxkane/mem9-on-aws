@@ -49,6 +49,15 @@ declare function $interpolate(
 
 // ── The `aws` provider surface the scaffold touches ─────────────────────────
 declare namespace aws {
+  // Caller identity — infra/ecs.ts uses accountId to compose the ECR image URI
+  // (never a hardcoded account id in committed code).
+  interface GetCallerIdentityResult {
+    readonly accountId: Output<string>;
+    readonly arn: Output<string>;
+    readonly userId: Output<string>;
+  }
+  function getCallerIdentityOutput(): GetCallerIdentityResult;
+
   namespace lambda {
     // Only referenced as the $transform target + its arg shape.
     interface FunctionArgs {
