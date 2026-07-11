@@ -41,6 +41,13 @@ export default $config({
             },
           },
         },
+        // The `random` provider exposes the `random` global (random.RandomId) used
+        // by infra/bootstrap.ts to mint the STABLE tenant id / X-API-Key. It must
+        // be declared here for the global to bind at run() (SST only injects a
+        // provider's namespace when it's in this block; declaring it triggers a
+        // `sst install`). Pulumi-internal (no cloud API) → no deploy-role IAM.
+        // SST already bundles @pulumi/random for sst.aws.Aurora's RandomPassword.
+        random: true,
       },
     };
   },

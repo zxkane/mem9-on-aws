@@ -111,6 +111,33 @@ Verified from `server/internal/config/config.go` + `server/internal/repository/p
   `idx_app` index the runtime validator requires. **Bootstrap must apply the
   tenant runtime schema (idx_app, FTS, vector column at the right dims), not just
   the control-plane file.** Verify exact DDL from `tenant/schema.go` at build time.
+- On the PG backend mem9 does NOT create the `memories` table at runtime — the
+  `TenantMemorySchemaPostgres` constant has NO call site (only webhooks/usage get
+  `EnsureSchema`); startup only *validates* `app_id`+`idx_app`. **So our bootstrap
+  creates the full memories schema** (with `vector(1024)`, GIN FTS, HNSW).
+
+### DB connection per request = PER-TENANT creds from the `tenants` row (decisive)
+Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
+`service/upload.go` + `domain/types.go` (`DSNForBackend`) + `tenant/pool.go`:
+- On **every** memory request, mem9's auth middleware loads the tenant row, calls
+  `enc.Decrypt(t.DBPassword)` (with `MNEMO_ENCRYPT_TYPE=plain` default → the stored
+  value is used **literally**), then `pool.Get(id, t.DSNForBackend(backend))` and
+  builds the `MemoryRepo` on THAT per-tenant `*sql.DB`. The memory add/search path
+  does NOT reuse the control-plane `MNEMO_DSN` pool.
+- `DSNForBackend` (postgres) =
+  `postgres://<db_user>:<db_password>@<db_host>:<db_port>/<db_name>?sslmode=<disable|require>`
+  (`require` iff `db_tls=true`). It does **NOT URL-encode** the password — a DSN-
+  reserved char in the password could malform mem9's own DSN (mem9 limitation;
+  the RDS `RandomPassword` can contain such chars — a risk to watch, not ours to
+  fix without a mem9 patch).
+- **Consequence for bootstrap:** the seeded `tenants` row MUST carry the REAL
+  `db_user`+`db_password` (the RDS Proxy creds from `MEM9_DB_SECRET`), NOT a
+  placeholder — else every add/search fails auth at query time even though the
+  server boots and passes `idx_app` validation. The bootstrap entrypoint seeds
+  them via psql `--set` variables (password never in argv/SQL text). `db_tls=TRUE`
+  → mem9 builds `sslmode=require`. This puts the DB password in a `tenants` table
+  column (mem9's plain-mode design; the operator's own DB). `MNEMO_ENCRYPT_TYPE=kms`
+  could encrypt it at rest later.
 
 ## Embedding (MaaS)
 
