@@ -10,16 +10,22 @@
 # there and runtime reads the same install-relative dir, so we must NOT reinstall
 # node_modules after baking.
 #
-# arm64 (Graviton), matching the mnemo-server image + the ECS task architecture.
+# BASE = node:24-slim (Debian bookworm, **glibc**), NOT alpine. onnxruntime-node
+# ships only glibc-linked prebuilt .so binaries; on alpine (musl) the model load
+# dies with `__vsnprintf_chk: symbol not found` (ERR_DLOPEN_FAILED) — a glibc-only
+# fortified symbol. llm-wiki runs this on Amazon Linux (glibc) for the same reason.
+# node:24-slim is multi-arch → the arm64 variant is pulled for --platform=linux/arm64.
 # Node 24 (@huggingface/transformers needs >=24; project standard).
 
-FROM node:24-alpine
+FROM node:24-slim
 
 WORKDIR /app
 
-# transformers.js is pure JS but onnxruntime-node ships a prebuilt .node binding;
-# on alpine (musl) it needs libstdc++/libc6-compat present at runtime.
-RUN apk add --no-cache libstdc++ libc6-compat
+# curl for the ECS health check (bookworm-slim ships neither curl nor wget); the
+# glibc runtime onnxruntime-node needs is already present in the Debian base.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends curl \
+    && rm -rf /var/lib/apt/lists/*
 
 # Install deps first (layer cache); --omit=dev keeps only @huggingface/transformers
 # + its transitive onnxruntime-node (~513 MB).

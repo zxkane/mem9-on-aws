@@ -165,7 +165,10 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
         // and ECS starts both containers together — the health check keeps the
         // task from being marked healthy until the embedder is actually ready.
         health: {
-          command: ["CMD-SHELL", `wget -q -O- http://localhost:${EMBED_PORT}/health || exit 1`],
+          // curl is installed in the qwen3-embed image (node:24-slim/Debian);
+          // -f fails on non-2xx, so a 503 "still loading" keeps the container
+          // unhealthy until the model finishes loading.
+          command: ["CMD-SHELL", `curl -fsS http://localhost:${EMBED_PORT}/health || exit 1`],
           startPeriod: "180 seconds",
           interval: "30 seconds",
           timeout: "5 seconds",
