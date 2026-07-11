@@ -62,8 +62,12 @@ if [[ -z "$TASK_ARN" || "$TASK_ARN" == "null" ]]; then
 fi
 echo "run-bootstrap: started ${TASK_ARN##*/}, waiting for it to stop..."
 
-# Wait for the task to reach STOPPED (bootstrap is quick; cap the wait).
-aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK_ARN" --region "$REGION"
+# Wait for the task to reach STOPPED. The default `aws ecs wait tasks-stopped`
+# is 100 attempts × 6s = 10 min. The bootstrap task can take longer on a cold
+# start: arm64 image pull (~2-3 min first time) + DB retry loop (up to 3 min) +
+# schema application (~30s) + ECS task start (~1 min). Use a custom longer wait
+# (200 attempts = 20 min) to avoid a false "Max attempts exceeded" failure.
+AWS_MAX_ATTEMPTS=200 aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK_ARN" --region "$REGION"
 
 # Assert the container exited 0. stoppedReason + container exitCode tell the story.
 EXIT_CODE=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" --region "$REGION" \
