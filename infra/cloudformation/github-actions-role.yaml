@@ -395,6 +395,12 @@ Resources:
               - iam:GetRolePolicy
               - iam:ListRolePolicies
               - iam:ListAttachedRolePolicies
+              # iam:DeleteRole triggers the AWS provider to first read the role's
+              # instance profiles (to detach any) — so ListInstanceProfilesForRole
+              # is REQUIRED for delete to succeed. Without it, `sst remove` 403s on
+              # the proxy role and leaks it on every pr-* teardown (observed on the
+              # pr-5 cleanup). AWS's own DeleteIAMRole runbook lists it as required.
+              - iam:ListInstanceProfilesForRole
               - iam:TagRole
               - iam:UntagRole
               - iam:DeleteRole
@@ -567,6 +573,9 @@ Resources:
               - iam:AttachRolePolicy
               - iam:DetachRolePolicy
               - iam:ListAttachedRolePolicies
+              # Required for iam:DeleteRole on teardown — the provider reads the
+              # role's instance profiles before deleting (see RdsProxyRole note).
+              - iam:ListInstanceProfilesForRole
               - iam:TagRole
               - iam:UntagRole
             Resource:
