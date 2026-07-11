@@ -5,10 +5,12 @@ Description: >
   (prod + every pr-N preview) references this ONE repo read-only, so a stray
   `sst remove --stage pr-N` can never wipe the image history that prod runs on.
 
-  The arm64 mnemo-server image is built + pushed to this repo by CI on push-to-
-  main (.github/workflows/infra-ci.yml → build-and-push-image), tagged both
-  `mem9-<sha7>` (immutable-in-practice, per-commit) and `latest`. Deploy stages
-  reference the URI `<acct>.dkr.ecr.<region>.amazonaws.com/mem9-on-aws/mnemo-server:<tag>`.
+  The arm64 mnemo-server image is built + pushed to this repo by CI
+  (.github/workflows/infra-ci.yml → build-and-push-image): push-to-main tags
+  `mem9-<sha7>` (release, per-commit) + `latest`; PR builds tag `pr-<sha7>`
+  (preview). The lifecycle policy retains the two prefixes on separate schedules
+  (see below). Deploy stages reference the URI
+  `<acct>.dkr.ecr.<region>.amazonaws.com/mem9-on-aws/mnemo-server:<tag>`.
 
   Deploy out-of-band via `scripts/deploy-ecr-repositories.sh` (ONCE per account;
   re-run only if this template changes). Region MUST be ap-northeast-1 (Tokyo) —
