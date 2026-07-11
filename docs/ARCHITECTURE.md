@@ -87,10 +87,20 @@ and decided (public-AWS only):**
   ```
   - The Aurora credential is generated (a static `RandomPassword`) + stored in a
     **Secrets Manager** secret by `sst.aws.Aurora` (the value never appears in
-    git, the SST code, or the ECS task def as a literal). ⚠️ SST's `proxy: true`
-    does **NOT** configure rotation (no `manageMasterUserPassword`, no rotation
-    Lambda) → **automatic rotation is an Open item (#6)**. Launch posture =
-    "secret not committed / not human-handled," not "auto-rotated."
+    git, the SST code, or the ECS task def as a literal). The secret is
+    **consumed ONLY by RDS Proxy** — the password's blast radius is confined to
+    the proxy↔Aurora hop; mem9 connects to the proxy and reads the secret only via
+    ECS `secrets: valueFrom`, never seeing/holding the raw value elsewhere.
+  - **Rotation: intentionally NOT configured (DECIDED — see #6).** Investigated
+    (2026-07-11): the AWS RDS single-user rotation Lambda requires
+    `host`+`engine`+`username`+`password` in the secret, but SST's `proxy: true`
+    OWNS a minimal `{username,password}`-only secret with **no transform hook** to
+    augment it and **no way to supply a bring-your-own secret ARN** to the proxy.
+    Enabling rotation would therefore require dropping SST's managed proxy and
+    self-provisioning `aws.rds.Proxy` + our own full-JSON secret — which would
+    **REPLACE the live prod RDS Proxy**. Not worth that for a password already
+    confined to the proxy. Accepted posture: static, proxy-confined password;
+    revisit only if the proxy+secret get re-owned during the ECS-stack work.
   - RDS Proxy targets Aurora and reads that secret to authenticate; it also pools
     + multiplexes connections (good for `desiredCount=1` reconnpressure).
   - mem9's `MNEMO_DSN` points at the **proxy endpoint** and carries a user +
@@ -370,8 +380,10 @@ model is the heavy tenant), which is the main swing in the Fargate cost row.
 - **DB auth (§3a)**: **RDS Proxy + Secrets Manager**, NOT native IAM (mem9's
   static `MNEMO_DSN` / pgx-stdlib / no credential refresh can't handle the ~15-min
   IAM token). Aurora password lives only in Secrets Manager (static
-  `RandomPassword` from `sst.aws.Aurora`; **rotation NOT configured by default —
-  Open #6**); RDS Proxy fronts Aurora; mem9's `MNEMO_DSN` → proxy endpoint with a
+  `RandomPassword` from `sst.aws.Aurora`; **rotation intentionally NOT configured
+  — the secret is consumed only by RDS Proxy, so the password is blast-radius-
+  confined; enabling rotation would force replacing the SST-owned proxy — see
+  §3a / #6, DECIDED**); RDS Proxy fronts Aurora; mem9's `MNEMO_DSN` → proxy endpoint with a
   user+password injected via ECS `secrets: valueFrom` (never committed /
   human-handled). Task role gets `secretsmanager:GetSecretValue` on the one secret
   ARN. True end-to-end IAM deferred (sidecar or source patch) — see Open decisions.
@@ -421,15 +433,26 @@ model is the heavy tenant), which is the main swing in the Fargate cost row.
    point-in-time recovery wanted? (Data-ownership project → likely yes.)
 5. **CI / deploy** — GHA with the `RUNNER_LABEL` self-hosted pattern; how the
    arm64 image builds & pushes to ECR (docker-build provider vs. CodeBuild arm).
-6. **Secrets + rotation** — storage RESOLVED into the DB-auth lock (§3a): Aurora
-   creds in a Secrets Manager secret (`sst.aws.Aurora` static `RandomPassword`),
-   consumed by RDS Proxy + injected into the Fargate task via ECS `secrets:
-   valueFrom`. **STILL OPEN: automatic rotation** — SST's `proxy: true` does NOT
-   attach a rotation Lambda, so add a Secrets Manager rotation schedule + the RDS
-   rotation Lambda (+ grant `secretsmanager:RotateSecret`) if rotation is wanted.
-   (Mantle bearer is minted at runtime by the token sidecar, not a stored secret.)
-   Also remaining: RDS Proxy `MaxConnectionsPercent` / pinning tuning for
-   `desiredCount=1`.
+6. **Secrets + rotation — DECIDED (2026-07-11): storage resolved (§3a), rotation
+   intentionally deferred.** Aurora creds live in an `sst.aws.Aurora` static
+   `RandomPassword` Secrets Manager secret, consumed ONLY by RDS Proxy + injected
+   into Fargate via ECS `secrets: valueFrom`. **Automatic rotation is NOT
+   configured, on purpose:** the AWS RDS single-user rotation Lambda needs
+   `host`+`engine` in the secret, but SST's `proxy: true` owns a minimal
+   `{username,password}`-only secret with no transform hook and no
+   bring-your-own-secret option — so rotation would force dropping SST's proxy and
+   self-managing `aws.rds.Proxy` + a full-JSON secret, **replacing the live prod
+   proxy**. The password is already blast-radius-confined to the proxy, so this
+   isn't worth a prod-proxy replacement now. **Reconsider only** when the ECS
+   stack re-owns the secret/proxy (design secret ownership ONCE there). If pursued:
+   single-user strategy is forced (RDS Proxy does NOT support alternating-users —
+   AWS docs), rotation Lambda = SAR `SecretsManagerRDSPostgreSQLRotationSingleUser`
+   in the DB private subnets reaching SM over NAT (no VPC endpoint needed), secret
+   JSON must add `engine=aurora-postgresql`+`host`=cluster (not proxy) endpoint,
+   and the deploy role needs `iam:CreateRole`+`AttachRolePolicy`+`serverlessrepo`+
+   `lambda`+`secretsmanager:RotateSecret`. (Mantle bearer is minted at runtime by
+   the token sidecar, not a stored secret.) Also remaining: RDS Proxy
+   `MaxConnectionsPercent` / pinning tuning for `desiredCount=1`.
 7. **Public-AWS LLM path (customer-facing)** — the solution must use only public
    AWS services. §7's **Bedrock Mantle** smart-ingest is internal/preview → for a
    customer build, migrate the OpenAI-compatible `/chat/completions` LLM to the
