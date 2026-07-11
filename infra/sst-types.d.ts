@@ -79,6 +79,28 @@ declare namespace aws {
       readonly ids: Output<string[]>;
     }
     function getSubnetsOutput(args: GetSubnetsOutputArgs): GetSubnetsResult;
+
+    // Security group + rule shapes used by infra/db.ts.
+    interface SecurityGroupRule {
+      protocol: Input<string>;
+      fromPort: Input<number>;
+      toPort: Input<number>;
+      cidrBlocks?: Input<string>[];
+      securityGroups?: Input<string>[];
+      description?: Input<string>;
+    }
+    interface SecurityGroupArgs {
+      vpcId: Input<string>;
+      description?: Input<string>;
+      ingress?: SecurityGroupRule[];
+      egress?: SecurityGroupRule[];
+      tags?: Record<string, Input<string>>;
+    }
+    class SecurityGroup {
+      constructor(name: string, args: SecurityGroupArgs);
+      readonly id: Output<string>;
+      readonly arn: Output<string>;
+    }
   }
 
   namespace ssm {
@@ -92,6 +114,48 @@ declare namespace aws {
       constructor(name: string, args: ParameterArgs);
       readonly name: Output<string>;
       readonly arn: Output<string>;
+    }
+  }
+}
+
+// ── The `sst.aws` component surface infra/db.ts uses ────────────────────────
+declare namespace sst {
+  namespace aws {
+    interface AuroraScaling {
+      min?: Input<string>;
+      max?: Input<string>;
+      pauseAfter?: Input<string>;
+    }
+    interface AuroraVpc {
+      subnets: Input<string[]>;
+      securityGroups: Input<string>[] | Input<string[]>;
+    }
+    interface AuroraClusterArgs {
+      skipFinalSnapshot?: Input<boolean>;
+      [k: string]: unknown;
+    }
+    interface AuroraArgs {
+      engine: Input<"postgres" | "mysql">;
+      version?: Input<string>;
+      database?: Input<string>;
+      username?: Input<string>;
+      password?: Input<string>;
+      proxy?: Input<boolean>;
+      scaling?: AuroraScaling;
+      vpc: AuroraVpc;
+      transform?: {
+        cluster?: (args: AuroraClusterArgs) => void;
+        proxy?: (args: Record<string, unknown>) => void;
+      };
+    }
+    class Aurora {
+      constructor(name: string, args: AuroraArgs);
+      readonly host: Output<string>;
+      readonly port: Output<number>;
+      readonly username: Output<string>;
+      readonly password: Output<string>;
+      readonly database: Output<string>;
+      readonly secretArn: Output<string>;
     }
   }
 }

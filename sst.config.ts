@@ -60,6 +60,13 @@ export default $config({
     const { meta } = await import("./infra/meta");
     meta();
 
+    // Aurora PostgreSQL Serverless v2 + RDS Proxy + Secrets Manager (§3, §3a).
+    // The durable state layer; exports the proxy endpoint + secret ARN via SSM
+    // for the (later) ECS stack to assemble MNEMO_DSN. ~0.5 ACU idle floor makes
+    // this the largest cost line — real on every deployed stage incl. pr-*.
+    const { db } = await import("./infra/db");
+    db();
+
     return {};
   },
 });
