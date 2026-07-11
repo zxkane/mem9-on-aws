@@ -44,6 +44,40 @@ on. Re-verify against the pinned upstream commit before implementing IaC.
 per-tenant DB" architecture (a `tenants` row carries db_host/user/pass/name per
 tenant); for a single operator you run one active tenant.
 
+### DB connection mechanism (probed — decisive for IAM-auth question)
+Verified from `server/internal/config/config.go` + `server/internal/repository/postgres/postgres.go`:
+- The **control-plane** connection is a **single static DSN env var `MNEMO_DSN`**
+  (required; `os.Getenv("MNEMO_DSN")`). mem9 does **NOT** assemble the DSN from
+  separate host/user/pass/dbname/sslmode env vars — there are no such vars.
+- `NewDB(dsn)` = `sql.Open("pgx", dsn)` via the **pgx v5 stdlib driver**
+  (`_ "github.com/jackc/pgx/v5/stdlib"`), pool sized `SetMaxOpenConns(25)` /
+  `SetMaxIdleConns(5)` / `SetConnMaxLifetime(5m)`, `db.Ping()` at startup.
+- **Credential is read ONCE at startup and never refreshed** — no `BeforeConnect`
+  hook, no credential callback, no password-returning function (the stdlib pgx
+  path doesn't expose pgxpool's `BeforeConnect`). Rotating the credential requires
+  a process restart.
+- **Consequence for IAM DB auth**: an RDS/Aurora **IAM auth token expires in
+  ~15 min**, but `MNEMO_DSN` is static → new pool connections after ~15 min would
+  fail with auth error. So **native (end-to-end) IAM database auth is NOT viable
+  for mem9 unmodified**, whether direct to Aurora OR client-side-IAM through RDS
+  Proxy (mem9 is the IAM client either way). **Chosen (LOCKED): RDS Proxy +
+  Secrets Manager** (ARCHITECTURE.md §3a). The Aurora password lives ONLY in a
+  Secrets Manager secret (a **static `RandomPassword`** created by
+  `sst.aws.Aurora` — ⚠️ SST's `proxy:true` does NOT use `manageMasterUserPassword`
+  and attaches **no rotation Lambda**, so it is NOT auto-rotated; rotation is
+  ARCHITECTURE.md Open #6). RDS Proxy pulls the secret and pools/multiplexes; mem9
+  connects to the **proxy endpoint** with a user+password delivered to the
+  container via an ECS `secrets: valueFrom` (Secrets Manager → env at task start)
+  — never a literal in the task def or git. Not literally passwordless at the
+  mem9 hop, but the password is never committed or human-handled. A future
+  token-refresh sidecar (like the Mantle one) or a mem9 source patch (pgx
+  `BeforeConnect` + AWS auth-token generator) could enable true end-to-end IAM
+  later — recorded as an Open decision, not adopted now.
+- The per-tenant `tenants` rows ALSO carry db_host/user/pass; `MNEMO_ENCRYPT_TYPE`
+  (`plain`|`kms`) + `MNEMO_ENCRYPT_KEY` encrypt those stored tenant DB passwords.
+  For a single operator with one tenant pointed at the same Aurora, the tenant
+  row's creds and the control-plane DSN target the same cluster.
+
 ### postgres backend (the one we use)
 - Uses **`github.com/pgvector/pgvector-go`**. Column `embedding vector(N)`.
 - **VectorSearch** = pgvector cosine: `... embedding <=> $q AS distance ORDER BY

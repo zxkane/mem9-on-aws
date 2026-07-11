@@ -65,6 +65,59 @@ The PG-vs-MySQL choice is forced by how mem9 implements vectors:
   OpenAI text-embedding-3-small = 1536). Pin dims once; changing later requires a
   reindex.
 
+### 3a. DB auth: **RDS Proxy + Secrets Manager rotation** (no committed password; NOT native IAM)
+
+The operator asked to avoid a password / use IAM-role auth. **Probed, verified,
+and decided (public-AWS only):**
+
+- **mem9 cannot do IAM database auth unmodified.** `server/internal/config/config.go`
+  reads a **single static `MNEMO_DSN`** env var (no separate host/user/pass vars);
+  `postgres.go` does `sql.Open("pgx", dsn)` (pgx v5 stdlib) and reads the
+  credential **once at startup** — no `BeforeConnect`/credential-refresh hook. An
+  Aurora **IAM auth token expires in ~15 min**, but the DSN is static, so pool
+  connections would start failing after the token expires. This is true whether
+  connecting **directly** to Aurora or via **RDS Proxy with client-side IAM**
+  (mem9 is the IAM token client either way). Verified against mem9 source +
+  public AWS Aurora docs (`rds-proxy-connecting.html`).
+- **Chosen: RDS Proxy in front of Aurora; the DB password lives ONLY in AWS
+  Secrets Manager with automatic rotation.** Flow:
+  ```
+  mnemo-server  --(static user+password from ECS `secrets: valueFrom`)-->  RDS Proxy
+                                          RDS Proxy  --(Secrets Manager creds, TLS)-->  Aurora PG
+  ```
+  - The Aurora credential is generated (a static `RandomPassword`) + stored in a
+    **Secrets Manager** secret by `sst.aws.Aurora` (the value never appears in
+    git, the SST code, or the ECS task def as a literal). ⚠️ SST's `proxy: true`
+    does **NOT** configure rotation (no `manageMasterUserPassword`, no rotation
+    Lambda) → **automatic rotation is an Open item (#6)**. Launch posture =
+    "secret not committed / not human-handled," not "auto-rotated."
+  - RDS Proxy targets Aurora and reads that secret to authenticate; it also pools
+    + multiplexes connections (good for `desiredCount=1` reconnpressure).
+  - mem9's `MNEMO_DSN` points at the **proxy endpoint** and carries a user +
+    password injected into the container via an ECS **`secrets: valueFrom`** (from
+    Secrets Manager / SSM SecureString) at task start — resolved to an env var by
+    ECS, **never a plaintext literal in the committed task def or repo.**
+  - Not *literally* passwordless at the mem9 hop, but: the password is never
+    committed, never human-handled, and rotates automatically — which satisfies
+    the real intent (no static secret in code, IAM-governed access to the secret).
+    The ECS task role gets `secretsmanager:GetSecretValue` on that one secret ARN.
+- **Deferred (Open decision, not adopted):** true end-to-end IAM (no password at
+  all) via either (a) a **token-refresh sidecar** minting a fresh RDS IAM token
+  <15 min and reloading mem9, or (b) a **mem9 source patch** (pgx `BeforeConnect`
+  + AWS auth-token generator). Both are more moving parts / a fork; revisit if the
+  operator wants zero password even in Secrets Manager.
+- **TLS**: RDS Proxy requires TLS for IAM client connections and uses ACM certs
+  itself; the mnemo-server → proxy hop uses password auth over TLS (proxy has a
+  managed cert; no cert to manage on our side). Set `sslmode=require` in `MNEMO_DSN`.
+
+> **Customer-facing / public-AWS-only note.** This deployment is intended for
+> customers and must use **only public AWS services**. Aurora + RDS Proxy +
+> Secrets Manager are all public — compliant. ⚠️ The LLM smart-ingest path
+> (§7) currently targets **Bedrock *Mantle***, which is an internal/preview
+> surface — for a customer-facing build that must be revisited to the **public**
+> `bedrock-runtime` Converse API (or an OpenAI-compatible public gateway). Tracked
+> in Open decisions; does not affect the DB-auth decision here.
+
 ## 4. Compute: **ECS Fargate, arm64, single task**
 
 - mnemo-server is a Go HTTP server (`:8080`), stateless for our usage → ECS
@@ -314,6 +367,18 @@ model is the heavy tenant), which is the main swing in the Fargate cost row.
 
 - **DB engine**: Aurora **PostgreSQL Serverless v2** + pgvector (not MySQL, not
   RDS t4g). Backend = mem9 `postgres`.
+- **DB auth (§3a)**: **RDS Proxy + Secrets Manager**, NOT native IAM (mem9's
+  static `MNEMO_DSN` / pgx-stdlib / no credential refresh can't handle the ~15-min
+  IAM token). Aurora password lives only in Secrets Manager (static
+  `RandomPassword` from `sst.aws.Aurora`; **rotation NOT configured by default —
+  Open #6**); RDS Proxy fronts Aurora; mem9's `MNEMO_DSN` → proxy endpoint with a
+  user+password injected via ECS `secrets: valueFrom` (never committed /
+  human-handled). Task role gets `secretsmanager:GetSecretValue` on the one secret
+  ARN. True end-to-end IAM deferred (sidecar or source patch) — see Open decisions.
+- **Public-AWS-only (customer-facing)**: this deployment targets customers, so it
+  must use **only public AWS services**. Aurora / RDS Proxy / Secrets Manager are
+  public ✅. The **Bedrock Mantle** LLM path (§7) is internal/preview → flagged for
+  revisit to public `bedrock-runtime` Converse before a customer build (Open #7).
 - **Region**: ap-northeast-1 (Tokyo). **Compute**: ECS Fargate, arm64,
   `desiredCount=1`. **VPC**: reuse default VPC private subnets.
 - **MCP + auth**: AgentCore Gateway + Cognito M2M (a sibling project pattern).
@@ -356,6 +421,21 @@ model is the heavy tenant), which is the main swing in the Fargate cost row.
    point-in-time recovery wanted? (Data-ownership project → likely yes.)
 5. **CI / deploy** — GHA with the `RUNNER_LABEL` self-hosted pattern; how the
    arm64 image builds & pushes to ECR (docker-build provider vs. CodeBuild arm).
-6. **Secrets** — DB credentials → Secrets Manager / SSM SecureString; wiring into
-   the Fargate task. (Mantle bearer is minted at runtime by the token sidecar, not
-   a stored secret.)
+6. **Secrets + rotation** — storage RESOLVED into the DB-auth lock (§3a): Aurora
+   creds in a Secrets Manager secret (`sst.aws.Aurora` static `RandomPassword`),
+   consumed by RDS Proxy + injected into the Fargate task via ECS `secrets:
+   valueFrom`. **STILL OPEN: automatic rotation** — SST's `proxy: true` does NOT
+   attach a rotation Lambda, so add a Secrets Manager rotation schedule + the RDS
+   rotation Lambda (+ grant `secretsmanager:RotateSecret`) if rotation is wanted.
+   (Mantle bearer is minted at runtime by the token sidecar, not a stored secret.)
+   Also remaining: RDS Proxy `MaxConnectionsPercent` / pinning tuning for
+   `desiredCount=1`.
+7. **Public-AWS LLM path (customer-facing)** — the solution must use only public
+   AWS services. §7's **Bedrock Mantle** smart-ingest is internal/preview → for a
+   customer build, migrate the OpenAI-compatible `/chat/completions` LLM to the
+   **public `bedrock-runtime` Converse API** (or a public OpenAI-compatible
+   gateway) + a `bedrock:InvokeModel`-based auth. Does not affect DB/Aurora.
+8. **True end-to-end IAM DB auth (deferred)** — reach zero-password by either a
+   token-refresh sidecar (mints an RDS IAM token <15 min, reloads mem9) or a mem9
+   source patch (pgx `BeforeConnect` + AWS auth-token generator). Not adopted;
+   §3a's Secrets-Manager-rotation path is the launch choice.

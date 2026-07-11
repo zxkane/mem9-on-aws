@@ -283,6 +283,189 @@ Resources:
                 iam:PassedToService:
                   - lambda.amazonaws.com
                   - ecs-tasks.amazonaws.com
+                  # rds.amazonaws.com — sst.aws.Aurora proxy:true passes the
+                  # ProxyRole to the RDS Proxy (rds:CreateDBProxy roleArn). Without
+                  # this, PassRole is denied and the first DB deploy 403s.
+                  - rds.amazonaws.com
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Policy 4 — Database stack (infra/db.ts): Aurora PostgreSQL Serverless v2 +
+  # RDS Proxy + Secrets Manager (rotated master creds) + the EC2 primitives a
+  # DB subnet group / security group need. Its own ManagedPolicy so the broad
+  # RDS create surface doesn't push CorePolicy/ScaffoldPolicy past IAM's
+  # 6144-byte per-policy cap, and the DB footprint is auditable in one place.
+  #
+  # ADDED for the Aurora PR — must be live (re-run scripts/deploy-github-role.sh)
+  # BEFORE that PR's first deploy, or the deploy 403s on the first RDS/Proxy/
+  # Secret create (CLAUDE-AWS "new resource TYPE needs grants first" rule).
+  # ───────────────────────────────────────────────────────────────────────────
+  DatabasePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${GitHubRepo}-database
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: RDS
+            # Aurora cluster + instance + DB subnet group + RDS Proxy lifecycle.
+            # RDS has no useful per-resource ARN granularity for many Describe/
+            # Create calls (and Pulumi refreshes probe broadly), so Resource "*".
+            # Guarded by the DenyPolicy against account-level RDS abuse.
+            Effect: Allow
+            Action:
+              - rds:CreateDBCluster
+              - rds:ModifyDBCluster
+              - rds:DeleteDBCluster
+              - rds:DescribeDBClusters
+              - rds:CreateDBInstance
+              - rds:ModifyDBInstance
+              - rds:DeleteDBInstance
+              - rds:DescribeDBInstances
+              - rds:CreateDBSubnetGroup
+              - rds:ModifyDBSubnetGroup
+              - rds:DeleteDBSubnetGroup
+              - rds:DescribeDBSubnetGroups
+              - rds:CreateDBClusterParameterGroup
+              - rds:ModifyDBClusterParameterGroup
+              - rds:DeleteDBClusterParameterGroup
+              - rds:DescribeDBClusterParameterGroups
+              - rds:DescribeDBClusterParameters
+              # DB-INSTANCE parameter group — SST's Aurora creates a `pg:` group
+              # (Mem9DbParameterGroup) for the instance, distinct from the
+              # cluster-level group above. Both families are needed.
+              - rds:CreateDBParameterGroup
+              - rds:ModifyDBParameterGroup
+              - rds:DeleteDBParameterGroup
+              - rds:DescribeDBParameterGroups
+              - rds:DescribeDBParameters
+              - rds:DescribeGlobalClusters
+              - rds:DescribeDBEngineVersions
+              - rds:ListTagsForResource
+              - rds:AddTagsToResource
+              - rds:RemoveTagsFromResource
+              # RDS Proxy lifecycle (proxy: true on sst.aws.Aurora).
+              - rds:CreateDBProxy
+              - rds:ModifyDBProxy
+              - rds:DeleteDBProxy
+              - rds:DescribeDBProxies
+              - rds:RegisterDBProxyTargets
+              - rds:DeregisterDBProxyTargets
+              - rds:DescribeDBProxyTargets
+              - rds:DescribeDBProxyTargetGroups
+              - rds:ModifyDBProxyTargetGroup
+            Resource: "*"
+          - Sid: RDSServiceLinkedRoles
+            # RDS + RDS Proxy provision service-linked roles on first use in an
+            # account. Scope CreateServiceLinkedRole to the two RDS service
+            # namespaces (the DenyPolicy blocks Delete of any SLR). This is the
+            # grant the panel flagged as needed once a real AWS-managed service
+            # (here RDS/Proxy) enters the stack.
+            Effect: Allow
+            Action:
+              - iam:CreateServiceLinkedRole
+            Resource: "*"
+            Condition:
+              StringEquals:
+                iam:AWSServiceName:
+                  - rds.amazonaws.com
+                  - rds.application-autoscaling.amazonaws.com
+          - Sid: RDSServiceLinkedRoleLookup
+            # SST's Aurora does a GetRole on the RDS service-linked role
+            # (AWSServiceRoleForRDS) to decide whether CreateServiceLinkedRole is
+            # needed. iam:GetRole in RdsProxyRole is scoped to mem9-on-aws-*, so
+            # grant this read explicitly on the SLR ARN (+ the autoscaling SLR).
+            Effect: Allow
+            Action:
+              - iam:GetRole
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/aws-service-role/rds.amazonaws.com/AWSServiceRoleForRDS
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/aws-service-role/rds.application-autoscaling.amazonaws.com/AWSServiceRoleForApplicationAutoScaling_RDSCluster
+          - Sid: RdsProxyRole
+            # sst.aws.Aurora with proxy:true creates a CUSTOMER IAM role
+            # (`<app>-<stage>-Mem9DbProxyRole-<random>`) with an inline
+            # secretsmanager:GetSecretValue policy, then passes it to the proxy
+            # (rds.amazonaws.com). Grant the role lifecycle scoped to this
+            # project's auto-named roles + SST truncation variants. (PassRole to
+            # rds.amazonaws.com is granted in ScaffoldPolicy's PassRoleConstrained.)
+            Effect: Allow
+            Action:
+              - iam:CreateRole
+              - iam:PutRolePolicy
+              - iam:GetRole
+              - iam:GetRolePolicy
+              - iam:ListRolePolicies
+              - iam:ListAttachedRolePolicies
+              - iam:TagRole
+              - iam:UntagRole
+              - iam:DeleteRole
+              - iam:DeleteRolePolicy
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/mem9-on-aws-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/mem9-on-aw-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/mem9-on-a-*
+          - Sid: SecretsManager
+            # sst.aws.Aurora creates its OWN secret `<app>-<stage>-Mem9DbProxySecret
+            # -<random>` holding a static RandomPassword — it does NOT use RDS
+            # manageMasterUserPassword, so there is NO `rds!`-prefixed managed
+            # secret and NO built-in rotation. The auto-name has no leading slash,
+            # so scope to the `mem9-on-aws-*` prefix. CreateSecret can't be
+            # resource-scoped (no ARN at create time) → its own statement below.
+            Effect: Allow
+            Action:
+              - secretsmanager:UpdateSecret
+              - secretsmanager:DeleteSecret
+              - secretsmanager:DescribeSecret
+              - secretsmanager:GetSecretValue
+              - secretsmanager:PutSecretValue
+              - secretsmanager:ListSecretVersionIds
+              - secretsmanager:GetResourcePolicy
+              - secretsmanager:PutResourcePolicy
+              - secretsmanager:DeleteResourcePolicy
+              - secretsmanager:TagResource
+              - secretsmanager:UntagResource
+            Resource:
+              - !Sub arn:${AWS::Partition}:secretsmanager:*:${AWS::AccountId}:secret:mem9-on-aws-*
+          - Sid: SecretsManagerCreate
+            # CreateSecret is authorized before the resource ARN exists, so it
+            # can't be resource-scoped. Split out with Resource "*"; every
+            # subsequent op on the secret is governed by the name-prefixed
+            # statement above, and the DenyPolicy blocks account-level abuse.
+            Effect: Allow
+            Action:
+              - secretsmanager:CreateSecret
+            Resource: "*"
+          - Sid: EC2ForDatabase
+            # Security-group lifecycle for the Aurora cluster + RDS Proxy SGs.
+            # DescribeVpcs/Subnets already granted in ScaffoldPolicy (read-only);
+            # here add the SG create/authorize surface. No per-resource ARN on
+            # create, so Resource "*"; the SG rules themselves scope 5432 to the
+            # task SG at the resource level in infra/db.ts.
+            Effect: Allow
+            Action:
+              - ec2:CreateSecurityGroup
+              - ec2:DeleteSecurityGroup
+              - ec2:AuthorizeSecurityGroupIngress
+              - ec2:AuthorizeSecurityGroupEgress
+              - ec2:RevokeSecurityGroupIngress
+              - ec2:RevokeSecurityGroupEgress
+              - ec2:CreateTags
+              - ec2:DeleteTags
+              - ec2:DescribeSecurityGroupRules
+            Resource: "*"
+          - Sid: KMSForRds
+            # Aurora storage + the Secrets Manager secret use the AWS-managed
+            # keys (aws/rds, aws/secretsmanager) by default. Pulumi refreshes
+            # read key metadata; grant the read/describe + grant-creation surface
+            # AWS-managed-key usage needs. Account-scoped, never Resource-widened
+            # to a customer-managed-key delete.
+            Effect: Allow
+            Action:
+              - kms:DescribeKey
+              - kms:CreateGrant
+              - kms:ListAliases
+              - kms:GenerateDataKey
+              - kms:Decrypt
+            Resource: "*"
 
   # ───────────────────────────────────────────────────────────────────────────
   # IAM Role — assumed by GitHub Actions via OIDC.
@@ -320,6 +503,7 @@ Resources:
         - !Ref DenyPolicy
         - !Ref CorePolicy
         - !Ref ScaffoldPolicy
+        - !Ref DatabasePolicy
       Tags:
         - Key: Project
           Value: !Ref ProjectName
