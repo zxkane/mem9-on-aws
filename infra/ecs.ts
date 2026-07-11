@@ -152,6 +152,10 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
         ssm: {
           MEM9_DB_SECRET: dbSecretArn,
         },
+        // Per-container logging: with `containers[]`, top-level `logging` is
+        // forbidden (SST rejects it alongside containers) — each container sets
+        // its own.
+        logging: { retention: "1 month" },
       },
       {
         name: "qwen3-embed",
@@ -159,6 +163,7 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
         environment: {
           QWEN3_EMBED_PORT: String(EMBED_PORT),
         },
+        logging: { retention: "1 month" },
         // Model load is slow on cold start (baked into the image, but the ONNX
         // session-create reads ~2.4 GB); give it a long startPeriod before the
         // health check counts failures. mem9 only calls it once it gets a request,
@@ -176,9 +181,6 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
         },
       },
     ],
-    logging: {
-      retention: "1 month",
-    },
     transform: {
       service: (args) => {
         args.tags = { ...(args.tags ?? {}), ...tags };
