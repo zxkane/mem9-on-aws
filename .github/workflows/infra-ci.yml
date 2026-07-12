@@ -71,10 +71,11 @@ concurrency:
 env:
   AWS_REGION: ap-northeast-1
   ROLE_NAME: github-actions-mem9-on-aws
-  # The out-of-band ECR repo (infra/cloudformation/ecr-repositories.yaml) that
-  # holds the mnemo-server arm64 image. build-and-push-image pushes here;
-  # deploy-prod references <acct>.dkr.ecr.<region>/<repo>:<tag>.
-  ECR_REPO: mem9-on-aws/mnemo-server
+  # The out-of-band ECR repo namespace (infra/cloudformation/ecr-repositories.yaml).
+  # build-and-push-image builds three images under it: <ns>/mnemo-server,
+  # <ns>/qwen3-embed, <ns>/bootstrap. Deploy stages reference
+  # <acct>.dkr.ecr.<region>/<ns>/<name>:<tag>.
+  ECR_NS: mem9-on-aws
 
 jobs:
   # ───────────────────────────────────────────────────────────────────────────
@@ -127,8 +128,12 @@ jobs:
     # image (it wouldn't exist yet otherwise on the PR that introduces it).
     needs: [typecheck, build-and-push-image]
     if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.base.ref == 'main'
-    # Full-stack fresh preview: Aurora (~13m) + RDS Proxy + ECS. 15m timed out at ECS.
-    timeout-minutes: 25
+    # Full-stack fresh preview: Aurora (~13m) + the 2-container ECS task (the
+    # ~1.2 GB qwen3 image pull + 180s health-check startPeriod) + the bootstrap
+    # DB-retry + run-task. No RDS Proxy (dropped — see infra/db.ts), so no proxy
+    # warmup wait. Measured first bring-up ~30-35m; 45m gives headroom without
+    # wasting runner time on a stuck deploy.
+    timeout-minutes: 45
     permissions:
       id-token: write
       contents: read
@@ -232,6 +237,17 @@ jobs:
             exit $EXIT
           fi
 
+      - name: Run schema-bootstrap task (preview)
+        # Same one-shot bootstrap as prod (§8), idempotent. Runs against this PR's
+        # pr-N stage so the preview actually has the memories schema + a tenant —
+        # otherwise mnemo-server would boot but list/search would fail. STAGE comes
+        # from the deploy step's output (validated pr-N).
+        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        shell: bash
+        env:
+          STAGE: ${{ steps.deploy.outputs.stage }}
+        run: bash scripts/run-bootstrap-task.sh
+
       - name: Auto-cleanup on deploy failure
         # Best-effort — if the deploy half-applied resources, remove them so the
         # next push doesn't accumulate orphan state.
@@ -306,8 +322,8 @@ jobs:
     name: Cleanup PR Preview
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.base.ref == 'main'
-    # Aurora + ECS teardown can exceed 15m.
-    timeout-minutes: 20
+    # Aurora + RDS Proxy + ECS teardown can exceed 20m (proxy delete alone ~5m).
+    timeout-minutes: 30
     permissions:
       id-token: write
       contents: read
@@ -504,27 +520,32 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         uses: aws-actions/amazon-ecr-login@v2
 
-      - name: Resolve image tags
+      - name: Resolve per-image tag lists
         id: tags
         if: steps.gate.outputs.skip != 'true'
-        # Build the newline-delimited `tags` list in shell (NOT an inline GHA
-        # ternary) so there's never a blank line — docker/build-push-action's
-        # handling of an empty tag entry is undocumented. Always push the
-        # per-commit tag; ADD `latest` only on push-to-main so PR previews can't
-        # clobber the tag local/PR deploys fall back to.
+        # For each of the 3 images, build a newline-delimited `tags` list in shell
+        # (NOT an inline GHA ternary → never a blank line, whose handling by
+        # docker/build-push-action is undocumented). Always push the per-commit
+        # tag; ADD `latest` only on push-to-main so PR previews can't clobber the
+        # tag local/PR deploys fall back to. Each image → its own step output.
         env:
           REGISTRY: ${{ steps.ecr-login.outputs.registry }}
           IMAGE_TAG: ${{ steps.tag.outputs.image_tag }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
-          {
-            echo "tags<<EOF"
-            echo "${REGISTRY}/${ECR_REPO}:${IMAGE_TAG}"
-            if [ "$EVENT_NAME" = "push" ]; then
-              echo "${REGISTRY}/${ECR_REPO}:latest"
-            fi
-            echo "EOF"
-          } >> "$GITHUB_OUTPUT"
+          emit() { # $1 = image name (repo leaf), $2 = output key
+            {
+              echo "$2<<EOF"
+              echo "${REGISTRY}/${ECR_NS}/$1:${IMAGE_TAG}"
+              if [ "$EVENT_NAME" = "push" ]; then
+                echo "${REGISTRY}/${ECR_NS}/$1:latest"
+              fi
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+          }
+          emit mnemo-server mnemo_tags
+          emit qwen3-embed  embed_tags
+          emit bootstrap    bootstrap_tags
 
       - name: Set up QEMU
         # Enables linux/arm64 emulation on x86 runners (ubuntu-latest). A no-op
@@ -538,7 +559,7 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         uses: docker/setup-buildx-action@v3
 
-      - name: Build & push arm64 image
+      - name: Build & push mnemo-server (arm64)
         if: steps.gate.outputs.skip != 'true'
         uses: docker/build-push-action@v6
         with:
@@ -546,10 +567,34 @@ jobs:
           file: docker/mnemo-server/Dockerfile
           platforms: linux/arm64
           push: true
-          tags: ${{ steps.tags.outputs.tags }}
-          # GHA cache so repeated builds reuse the Go build layer.
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+          tags: ${{ steps.tags.outputs.mnemo_tags }}
+          cache-from: type=gha,scope=mnemo-server
+          cache-to: type=gha,mode=max,scope=mnemo-server
+
+      - name: Build & push qwen3-embed (arm64)
+        if: steps.gate.outputs.skip != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/qwen3-embed/Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.embed_tags }}
+          # Distinct cache scope so the heavy model-bake layer caches separately.
+          cache-from: type=gha,scope=qwen3-embed
+          cache-to: type=gha,mode=max,scope=qwen3-embed
+
+      - name: Build & push bootstrap (arm64)
+        if: steps.gate.outputs.skip != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/bootstrap/Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.bootstrap_tags }}
+          cache-from: type=gha,scope=bootstrap
+          cache-to: type=gha,mode=max,scope=bootstrap
 
   # ───────────────────────────────────────────────────────────────────────────
   # deploy-prod — push to main → stage `prod`. HARD-FAILS without AWS_ROLE_ARN.
@@ -561,8 +606,11 @@ jobs:
     needs: [typecheck, build-and-push-image]
     if: github.event_name == 'push'
     environment: prod
-    # Full-stack prod: Aurora + RDS Proxy + ECS provisioning exceeds 20m on first bring-up.
-    timeout-minutes: 30
+    # Full-stack prod: Aurora + the 2-container ECS task (qwen3 image pull + 180s
+    # health startPeriod) + the bootstrap run-task. No RDS Proxy (dropped — see
+    # infra/db.ts). Fresh bring-up ~30-35m (measured); 50m gives headroom. Prod is
+    # singleton/non-cancelable, so a long timeout doesn't waste runners on dupes.
+    timeout-minutes: 50
     permissions:
       id-token: write
       contents: read
@@ -687,6 +735,17 @@ jobs:
             echo "::error::SST prod deployment failed (exit $EXIT)"
             exit $EXIT
           fi
+
+      - name: Run schema-bootstrap task (prod)
+        shell: bash
+        # SST DEFINES the one-shot bootstrap task; we run it here (§8), after the
+        # deploy created/updated the task def + Aurora. Idempotent (all DDL is
+        # IF NOT EXISTS; tenant upsert is ON CONFLICT), so re-running each deploy is
+        # safe. Reads the run inputs SST exported to SSM, runs the task with the
+        # DB task SG + private subnets (awsvpc, no public IP), and waits for exit 0.
+        env:
+          STAGE: prod
+        run: bash scripts/run-bootstrap-task.sh
 
       - name: Create issue on prod deploy failure
         # failure() fires for any failed step (gate, preflight, lock recovery,

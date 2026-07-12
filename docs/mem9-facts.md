@@ -111,6 +111,33 @@ Verified from `server/internal/config/config.go` + `server/internal/repository/p
   `idx_app` index the runtime validator requires. **Bootstrap must apply the
   tenant runtime schema (idx_app, FTS, vector column at the right dims), not just
   the control-plane file.** Verify exact DDL from `tenant/schema.go` at build time.
+- On the PG backend mem9 does NOT create the `memories` table at runtime — the
+  `TenantMemorySchemaPostgres` constant has NO call site (only webhooks/usage get
+  `EnsureSchema`); startup only *validates* `app_id`+`idx_app`. **So our bootstrap
+  creates the full memories schema** (with `vector(1024)`, GIN FTS, HNSW).
+
+### DB connection per request = PER-TENANT creds from the `tenants` row (decisive)
+Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
+`service/upload.go` + `domain/types.go` (`DSNForBackend`) + `tenant/pool.go`:
+- On **every** memory request, mem9's auth middleware loads the tenant row, calls
+  `enc.Decrypt(t.DBPassword)` (with `MNEMO_ENCRYPT_TYPE=plain` default → the stored
+  value is used **literally**), then `pool.Get(id, t.DSNForBackend(backend))` and
+  builds the `MemoryRepo` on THAT per-tenant `*sql.DB`. The memory add/search path
+  does NOT reuse the control-plane `MNEMO_DSN` pool.
+- `DSNForBackend` (postgres) =
+  `postgres://<db_user>:<db_password>@<db_host>:<db_port>/<db_name>?sslmode=<disable|require>`
+  (`require` iff `db_tls=true`). It does **NOT URL-encode** the password — a DSN-
+  reserved char in the password could malform mem9's own DSN (mem9 limitation;
+  the RDS `RandomPassword` can contain such chars — a risk to watch, not ours to
+  fix without a mem9 patch).
+- **Consequence for bootstrap:** the seeded `tenants` row MUST carry the REAL
+  `db_user`+`db_password` (the RDS Proxy creds from `MEM9_DB_SECRET`), NOT a
+  placeholder — else every add/search fails auth at query time even though the
+  server boots and passes `idx_app` validation. The bootstrap entrypoint seeds
+  them via psql `--set` variables (password never in argv/SQL text). `db_tls=TRUE`
+  → mem9 builds `sslmode=require`. This puts the DB password in a `tenants` table
+  column (mem9's plain-mode design; the operator's own DB). `MNEMO_ENCRYPT_TYPE=kms`
+  could encrypt it at rest later.
 
 ## Embedding (MaaS)
 
@@ -232,17 +259,31 @@ Verified against AWS docs + the operator's a sibling project prod usage:
 - a sibling project's ECS stack consumes the **account default VPC** via
   `aws.ec2.getVpc({ default: true })`, filtered to NAT-routed private subnets —
   the pattern reused here.
-- **Tokyo default VPC is customized + NAT-routed (verified 2026-07-11).** The
-  account's `ap-northeast-1` default VPC (172.31.0.0/16) is NOT a stock default:
-  it has `private-1a/1c/1d` subnets across 3 AZs (172.31.96/112/128.0/20,
-  `MapPublicIpOnLaunch=false`), **each routing `0.0.0.0/0` through a NAT gateway**,
-  plus `public-1a/1c/1d` via the IGW. The scaffold's `infra/vpc.ts` selects the
-  three private subnets by the `private-1*` Name tag (excluding the secondary
-  `172.32.x` private subnets added out-of-band). So ECS Fargate + Aurora can live
-  in the default VPC with outbound internet (Bedrock Mantle) via NAT — no
-  dedicated VPC needed, confirming the ARCHITECTURE.md assumption. Concrete
-  resource ids are intentionally NOT recorded here (they'd leak account topology);
-  the design's own `docs/superpowers/specs/` note verified them at authoring time.
+- **Tokyo default VPC is customized + NAT-routed (verified 2026-07-12).** The
+  account's `ap-northeast-1` default VPC (172.31.0.0/16) has three `private-1a/1c/1d`
+  subnets across 3 AZs (172.31.96/112/128.0/20, `MapPublicIpOnLaunch=false`), **each
+  routing `0.0.0.0/0` through a NAT gateway**, PLUS three `secondary-private-subnet-*`
+  subnets (172.32.x) that are ALSO `MapPublicIpOnLaunch=false` but have **NO NAT
+  egress**. So `infra/vpc.ts` selects the three NAT-routed private subnets by the
+  **`private-1*` Name tag** — a generic `map-public-ip-on-launch=false` filter would
+  wrongly include the no-NAT secondaries and strand ECS/Aurora with no internet.
+  Concrete resource ids are intentionally NOT recorded here (they'd leak topology).
+- **RDS Proxy `PENDING_PROXY_CAPACITY` starves at 0.5 ACU — the reason we DROPPED
+  the proxy (2026-07-12).** A freshly-created RDS Proxy (SST `Aurora({proxy:true})`)
+  sat in `TargetHealth.State=UNAVAILABLE / Reason=PENDING_PROXY_CAPACITY` for 40+ min
+  and NEVER became AVAILABLE, even though the Aurora cluster+instance were both
+  `available` and the proxy config (SG, subnets, target group, pool) was healthy.
+  **Reproduced in BOTH ap-northeast-1 and ap-southeast-1 → NOT regional.** Root cause
+  (confirmed vs internal AWS knowledge — answers.amazon.com/posts/295779 + AWS CDK
+  docs + internal RDS wikis): **an RDS Proxy provisions its backend capacity at a
+  rate proportional to the Aurora Serverless v2 current ACU** ("scale-up rate is
+  proportional to current capacity"; RDS Proxy team: "our capacity is based on
+  underlying registered database capacity"). At the **0.5-ACU floor** that rate is
+  the slowest possible, so provisioning effectively wedges. FIX: dropped the RDS
+  Proxy entirely — mem9 + the bootstrap task connect to the Aurora **cluster writer
+  endpoint** directly (a single-writer self-host needs no pooling). Alternative that
+  would also work: raise min ACU to ≥2 (per AWS, faster scale rate), but at ~4× idle
+  cost — dropping the proxy keeps the locked 0.5-ACU floor. See ARCHITECTURE.md §3a.
 
 ### AgentCore Gateway private egress to VPC (verified — resolves the #6 unknown)
 

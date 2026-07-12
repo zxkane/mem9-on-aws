@@ -1,0 +1,16 @@
+{
+  "name": "mem9-qwen3-embed",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "OpenAI-compatible /v1/embeddings service backed by Qwen3-Embedding-0.6B ONNX (mem9-on-aws embedding sidecar).",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "start": "node server.mjs"
+  },
+  "dependencies": {
+    "@huggingface/transformers": "^4.2.0"
+  }
+}
