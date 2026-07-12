@@ -132,6 +132,24 @@ describe("db stack", () => {
     expect((args.vpc as { securityGroups: unknown }).securityGroups).toBeDefined();
   });
 
+  it("attaches the db SG to the RDS proxy via transform.proxy (SST doesn't by default)", async () => {
+    // SST v4.17 puts vpc.securityGroups on the CLUSTER but leaves the PROXY in the
+    // VPC default SG — which blocks 5432 from the task SG, so mnemo-server/bootstrap
+    // can't reach the proxy endpoint. The transform.proxy hook must set
+    // vpcSecurityGroupIds to dbSg. Assert it does.
+    installGlobals("prod");
+    const db = await loadDb();
+    db();
+    const proxyTransform = (
+      auroras[0].args.transform as { proxy: (a: Record<string, unknown>) => void }
+    ).proxy;
+    expect(proxyTransform).toBeDefined();
+    const proxyArgs: Record<string, unknown> = {};
+    proxyTransform(proxyArgs);
+    expect(proxyArgs.vpcSecurityGroupIds).toBeDefined();
+    expect(Array.isArray(proxyArgs.vpcSecurityGroupIds)).toBe(true);
+  });
+
   it("skips the final snapshot on non-prod, keeps it on prod", async () => {
     // non-prod: transform sets skipFinalSnapshot = true
     installGlobals("pr-7");

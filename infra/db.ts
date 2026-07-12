@@ -143,6 +143,16 @@ export function db(): DbOutputs {
           args.skipFinalSnapshot = true;
         }
       },
+      // CRITICAL: attach dbSg to the RDS PROXY. SST v4.17 applies vpc.securityGroups
+      // to the Aurora CLUSTER but NOT the proxy — createProxy() sets vpcSubnetIds
+      // with NO vpcSecurityGroupIds, so the proxy lands in the VPC's DEFAULT SG,
+      // which does NOT allow 5432 from the task SG. Result: mnemo-server + the
+      // bootstrap task connect to the proxy endpoint and time out (verified: the
+      // prod proxy had sg-<default>, not mem9-on-aws-*-db). This transform puts the
+      // proxy in dbSg (which allows 5432 from the task SG), fixing DB reachability.
+      proxy: (args) => {
+        args.vpcSecurityGroupIds = [dbSg.id];
+      },
     },
   });
 

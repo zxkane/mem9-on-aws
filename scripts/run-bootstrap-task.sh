@@ -65,22 +65,38 @@ echo "run-bootstrap: started ${TASK_ARN##*/}, waiting for it to stop..."
 # Print the task's own CloudWatch logs INLINE (debuggable even after auto-cleanup
 # tears the stage down). Called on ANY failure path — wait timeout OR non-zero
 # exit. SST logs the container to /sst/cluster/<cluster>/...Bootstrap.../<container>.
+# Retries for CloudWatch ingestion lag (the task just stopped seconds ago) and
+# falls back to a broader query if the cluster-scoped one misses.
 print_task_logs() {
-  local lg stream
-  lg=$(aws logs describe-log-groups --region "$REGION" \
-    --query "logGroups[?contains(logGroupName,'${CLUSTER}') && contains(logGroupName,'Bootstrap')].logGroupName | [0]" \
-    --output text 2>/dev/null || true)
-  if [[ -n "$lg" && "$lg" != "None" ]]; then
-    stream=$(aws logs describe-log-streams --log-group-name "$lg" --region "$REGION" \
-      --order-by LastEventTime --descending --max-items 1 \
-      --query 'logStreams[0].logStreamName' --output text 2>/dev/null || true)
-    if [[ -n "$stream" && "$stream" != "None" ]]; then
-      echo "----- bootstrap task logs (${lg} / ${stream}) -----"
-      aws logs get-log-events --log-group-name "$lg" --log-stream-name "$stream" \
-        --region "$REGION" --limit 200 --query 'events[].message' --output text 2>/dev/null || true
-      echo "----- end bootstrap task logs -----"
+  local lg stream attempt
+  for attempt in 1 2 3 4 5; do
+    # Prefer the cluster-scoped Bootstrap log group; fall back to any Bootstrap
+    # group for this stage's SSM prefix if the cluster substring doesn't match.
+    lg=$(aws logs describe-log-groups --region "$REGION" \
+      --query "logGroups[?contains(logGroupName,'${CLUSTER}') && contains(logGroupName,'Bootstrap')].logGroupName | [0]" \
+      --output text 2>/dev/null || true)
+    if [[ -z "$lg" || "$lg" == "None" ]]; then
+      lg=$(aws logs describe-log-groups --region "$REGION" \
+        --query "logGroups[?contains(logGroupName,'${STAGE}') && contains(logGroupName,'Bootstrap')].logGroupName | [0]" \
+        --output text 2>/dev/null || true)
     fi
-  fi
+    if [[ -n "$lg" && "$lg" != "None" ]]; then
+      stream=$(aws logs describe-log-streams --log-group-name "$lg" --region "$REGION" \
+        --order-by LastEventTime --descending --max-items 1 \
+        --query 'logStreams[0].logStreamName' --output text 2>/dev/null || true)
+      if [[ -n "$stream" && "$stream" != "None" ]]; then
+        echo "----- bootstrap task logs (${lg} / ${stream}) -----"
+        aws logs get-log-events --log-group-name "$lg" --log-stream-name "$stream" \
+          --region "$REGION" --limit 200 --start-from-head \
+          --query 'events[].message' --output text 2>/dev/null || true
+        echo "----- end bootstrap task logs -----"
+        return 0
+      fi
+    fi
+    echo "run-bootstrap: task logs not available yet (attempt ${attempt}/5), waiting 8s for CloudWatch ingestion..."
+    sleep 8
+  done
+  echo "run-bootstrap: WARNING — could not retrieve bootstrap task logs (log group may be gone). cluster=${CLUSTER}"
 }
 
 # Manual wait loop (NOT `aws ecs wait`, whose 100×6s=10m cap can't be raised via
