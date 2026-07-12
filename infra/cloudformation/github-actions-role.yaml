@@ -266,6 +266,10 @@ Resources:
               - ec2:DescribeAvailabilityZones
               - ec2:DescribeNetworkAcls
               - ec2:DescribeSecurityGroups
+              # DescribeNetworkInterfaces: Pulumi's SG delete step lists the ENIs
+              # still using a security group before deleting it (ECS task ENIs).
+              # Its absence 403'd the pr-7 teardown's Mem9DbSg delete.
+              - ec2:DescribeNetworkInterfaces
             Resource: "*"
           - Sid: PassRoleConstrained
             # No role is passed by the scaffold today, but future stacks (ECS

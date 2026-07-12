@@ -62,14 +62,50 @@ if [[ -z "$TASK_ARN" || "$TASK_ARN" == "null" ]]; then
 fi
 echo "run-bootstrap: started ${TASK_ARN##*/}, waiting for it to stop..."
 
-# Wait for the task to reach STOPPED. The default `aws ecs wait tasks-stopped`
-# is 100 attempts × 6s = 10 min. The bootstrap task can take longer on a cold
-# start: arm64 image pull (~2-3 min first time) + DB retry loop (up to 3 min) +
-# schema application (~30s) + ECS task start (~1 min). Use a custom longer wait
-# (200 attempts = 20 min) to avoid a false "Max attempts exceeded" failure.
-AWS_MAX_ATTEMPTS=200 aws ecs wait tasks-stopped --cluster "$CLUSTER" --tasks "$TASK_ARN" --region "$REGION"
+# Print the task's own CloudWatch logs INLINE (debuggable even after auto-cleanup
+# tears the stage down). Called on ANY failure path — wait timeout OR non-zero
+# exit. SST logs the container to /sst/cluster/<cluster>/...Bootstrap.../<container>.
+print_task_logs() {
+  local lg stream
+  lg=$(aws logs describe-log-groups --region "$REGION" \
+    --query "logGroups[?contains(logGroupName,'${CLUSTER}') && contains(logGroupName,'Bootstrap')].logGroupName | [0]" \
+    --output text 2>/dev/null || true)
+  if [[ -n "$lg" && "$lg" != "None" ]]; then
+    stream=$(aws logs describe-log-streams --log-group-name "$lg" --region "$REGION" \
+      --order-by LastEventTime --descending --max-items 1 \
+      --query 'logStreams[0].logStreamName' --output text 2>/dev/null || true)
+    if [[ -n "$stream" && "$stream" != "None" ]]; then
+      echo "----- bootstrap task logs (${lg} / ${stream}) -----"
+      aws logs get-log-events --log-group-name "$lg" --log-stream-name "$stream" \
+        --region "$REGION" --limit 200 --query 'events[].message' --output text 2>/dev/null || true
+      echo "----- end bootstrap task logs -----"
+    fi
+  fi
+}
 
-# Assert the container exited 0. stoppedReason + container exitCode tell the story.
+# Manual wait loop (NOT `aws ecs wait`, whose 100×6s=10m cap can't be raised via
+# the AWS_MAX_ATTEMPTS env in all CLI builds). Poll lastStatus until STOPPED, up
+# to ~15 min. The entrypoint now fails FAST (~2 min) if the DB is unreachable, so
+# a STOPPED task should arrive well within this; a full timeout means the task is
+# genuinely stuck (image pull, etc.) — we then dump logs + describe-tasks.
+DEADLINE=$((SECONDS + 900))
+LAST_STATUS=""
+while [[ $SECONDS -lt $DEADLINE ]]; do
+  LAST_STATUS=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" --region "$REGION" \
+    --query 'tasks[0].lastStatus' --output text 2>/dev/null || echo "UNKNOWN")
+  [[ "$LAST_STATUS" == "STOPPED" ]] && break
+  sleep 10
+done
+
+if [[ "$LAST_STATUS" != "STOPPED" ]]; then
+  echo "::error::bootstrap task did not STOP within 15 min (lastStatus=${LAST_STATUS}). Dumping task detail + logs:"
+  aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" --region "$REGION" \
+    --query 'tasks[0].{lastStatus:lastStatus,containers:containers[].{name:name,lastStatus:lastStatus,reason:reason}}' --output json 2>&1 || true
+  print_task_logs
+  exit 1
+fi
+
+# STOPPED — assert the container exited 0.
 EXIT_CODE=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" --region "$REGION" \
   --query 'tasks[0].containers[0].exitCode' --output text)
 STOP_REASON=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" --region "$REGION" \
@@ -77,24 +113,7 @@ STOP_REASON=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" --
 
 echo "run-bootstrap: task stopped (exitCode=${EXIT_CODE}, reason='${STOP_REASON}')"
 if [[ "$EXIT_CODE" != "0" ]]; then
-  # Print the task's own logs INLINE so the failure is debuggable even after the
-  # stage (+ its log group) is torn down by auto-cleanup. SST logs the container
-  # to /sst/cluster/<cluster>/<...>Bootstrap.../<container>; grab the most-recent
-  # stream (= this just-failed task).
-  LG=$(aws logs describe-log-groups --region "$REGION" \
-    --query "logGroups[?contains(logGroupName,'${CLUSTER}') && contains(logGroupName,'Bootstrap')].logGroupName | [0]" \
-    --output text 2>/dev/null || true)
-  if [[ -n "$LG" && "$LG" != "None" ]]; then
-    STREAM=$(aws logs describe-log-streams --log-group-name "$LG" --region "$REGION" \
-      --order-by LastEventTime --descending --max-items 1 \
-      --query 'logStreams[0].logStreamName' --output text 2>/dev/null || true)
-    if [[ -n "$STREAM" && "$STREAM" != "None" ]]; then
-      echo "----- bootstrap task logs (${LG} / ${STREAM}) -----"
-      aws logs get-log-events --log-group-name "$LG" --log-stream-name "$STREAM" \
-        --region "$REGION" --limit 100 --query 'events[].message' --output text 2>/dev/null || true
-      echo "----- end bootstrap task logs -----"
-    fi
-  fi
+  print_task_logs
   echo "::error::bootstrap task did not exit 0 (exitCode=${EXIT_CODE}, reason='${STOP_REASON}')."
   exit 1
 fi

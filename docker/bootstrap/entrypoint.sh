@@ -31,32 +31,36 @@ DB_PASS=$(printf '%s' "$MEM9_DB_SECRET" | jq -re '(.password // error("missing .
 # process args). TLS required (RDS Proxy mandates it), same as mnemo-server.
 export PGPASSWORD="$DB_PASS"
 export PGSSLMODE=require
-export PGCONNECT_TIMEOUT=15
+export PGCONNECT_TIMEOUT=8
 
 PSQL="psql --host=${MEM9_DB_HOST} --port=${MEM9_DB_PORT} --username=${DB_USER} \
   --dbname=${MEM9_DB_NAME} -v ON_ERROR_STOP=1 --no-password"
 
-# Wait for the DB to accept connections before applying schema. The bootstrap
-# runs right after `sst deploy`, when the RDS Proxy target (the just-created
-# Aurora instance) may not be registered/available yet — a plain connect would
-# fail (psql exits 2) and abort under `set -e`. Retry `SELECT 1` for up to ~3 min.
-echo "bootstrap: waiting for ${MEM9_DB_HOST}:${MEM9_DB_PORT} to accept connections..."
+# Wait for the DB to accept connections before applying schema, but FAIL FAST if
+# it's genuinely unreachable — do NOT hang for many minutes (that blows the
+# caller's `aws ecs wait` and hides the cause). PGCONNECT_TIMEOUT=8 (set below) +
+# 8 attempts × 8s sleep ≈ 2 min worst case, then exit non-zero with the REAL psql
+# error printed (so run-bootstrap-task.sh's log-fetch shows why: SG/network block,
+# proxy-not-ready, auth, etc.). The bootstrap runs right after `sst deploy`, so a
+# few retries cover proxy-target-registration lag; a persistent failure is a real
+# config bug, not a race.
+echo "bootstrap: probing ${MEM9_DB_HOST}:${MEM9_DB_PORT} (fail-fast, up to ~2 min)..."
 ready=0
 i=1
-while [ "$i" -le 30 ]; do
-  if $PSQL -tAc 'SELECT 1' >/dev/null 2>&1; then
+while [ "$i" -le 8 ]; do
+  # Capture the error so the LAST failure's reason is shown if we give up.
+  if PROBE_ERR=$($PSQL -tAc 'SELECT 1' 2>&1); then
     ready=1
     echo "bootstrap: DB reachable after $((i - 1)) retries"
     break
   fi
-  echo "bootstrap: not ready yet (attempt ${i}/30), sleeping 6s..."
-  sleep 6
+  echo "bootstrap: attempt ${i}/8 failed: ${PROBE_ERR}"
+  sleep 8
   i=$((i + 1))
 done
 if [ "$ready" -ne 1 ]; then
-  echo "bootstrap: DB did not accept connections within ~3 min — one last attempt (surfaces the real psql error):" >&2
-  # No redirection this time so the actual connection error is logged, then exit.
-  $PSQL -tAc 'SELECT 1'
+  echo "bootstrap: DB unreachable after ~2 min. Last error above." >&2
+  echo "bootstrap: (common causes: RDS Proxy SG doesn't allow 5432 from the task SG; proxy target not yet available; bad creds)" >&2
   exit 1
 fi
 
