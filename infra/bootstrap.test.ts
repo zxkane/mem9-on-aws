@@ -41,7 +41,7 @@ function fakeDbOut(): DbOutputs {
     host: out("mem9-writer.example"),
     port: out(5432),
     database: out("mem9"),
-    secretArn: out("arn:aws:secretsmanager:x:y:secret:mem9-on-aws-prod-Mem9DbProxySecret-z"),
+    secretArn: out("arn:aws:secretsmanager:x:y:secret:mem9-on-aws-prod-Mem9DbSecret-z"),
     taskSecurityGroupId: out("sg-task"),
   } as unknown as DbOutputs;
 }
