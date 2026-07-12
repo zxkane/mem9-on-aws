@@ -128,12 +128,13 @@ jobs:
     # image (it wouldn't exist yet otherwise on the PR that introduces it).
     needs: [typecheck, build-and-push-image]
     if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.base.ref == 'main'
-    # Full-stack fresh preview: Aurora (~13m) + RDS Proxy (~5m) + the 2-container
-    # ECS task (the ~1.2 GB qwen3 image pull + 180s health-check startPeriod) +
-    # the RDS-Proxy readiness gate (≤8m) + the bootstrap DB-retry (≤5m) + run-task.
-    # Measured first bring-up >35m; 55m gives headroom for the proxy-warmup gate
-    # without wasting runner time on a stuck deploy.
-    timeout-minutes: 55
+    # Full-stack fresh preview: Aurora (~13m) + RDS Proxy + the 2-container ECS task
+    # (the ~1.2 GB qwen3 image pull + 180s health-check startPeriod) + the RDS-Proxy
+    # readiness gate (≤18m — the proxy's PENDING_PROXY_CAPACITY cold-start can run
+    # >10m past the cluster being available) + the bootstrap DB-retry (≤5m) +
+    # run-task. Measured first bring-up >35m; 75m gives headroom for the worst-case
+    # proxy warmup without wasting runner time on a genuinely stuck deploy.
+    timeout-minutes: 75
     permissions:
       id-token: write
       contents: read
@@ -607,11 +608,12 @@ jobs:
     if: github.event_name == 'push'
     environment: prod
     # Full-stack prod: Aurora + RDS Proxy + the 2-container ECS task (qwen3 image
-    # pull + 180s health startPeriod) + the RDS-Proxy readiness gate (≤8m) + the
-    # bootstrap run-task. Fresh bring-up exceeds 35m (measured); 60m gives headroom
-    # for the proxy-warmup gate. Prod is singleton/non-cancelable, so a long
-    # timeout doesn't waste runners on duplicate runs.
-    timeout-minutes: 60
+    # pull + 180s health startPeriod) + the RDS-Proxy readiness gate (≤18m — the
+    # proxy's PENDING_PROXY_CAPACITY cold-start can run >10m past cluster-available)
+    # + the bootstrap run-task. Fresh bring-up exceeds 35m (measured); 80m gives
+    # headroom for the worst-case proxy warmup. Prod is singleton/non-cancelable, so
+    # a long timeout doesn't waste runners on duplicate runs.
+    timeout-minutes: 80
     permissions:
       id-token: write
       contents: read

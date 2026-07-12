@@ -45,16 +45,24 @@ fi
 # connection pool. A freshly-created proxy accepts TCP on 5432 but DROPS the
 # client during the Postgres startup phase until its target becomes healthy
 # ("server closed the connection unexpectedly ... before or while processing the
-# request") — this can take 3–7 min after the proxy's create call returns. Both
-# the bootstrap task AND mnemo-server hit this on the first deploy. Gate here on
-# `describe-db-proxy-targets` TargetHealth.State == AVAILABLE (the deterministic
-# readiness signal — proxy Status `available` alone is NOT sufficient, the TARGET
-# must be healthy) BEFORE running the task, so the task connects to a warm proxy.
-# IAM: the deploy role already carries rds:DescribeDBProxyTargets.
+# request"). Gate here on `describe-db-proxy-targets` TargetHealth.State ==
+# AVAILABLE (the deterministic readiness signal — proxy Status `available` alone
+# is NOT sufficient; the TARGET must be healthy) BEFORE running the task, so the
+# task connects to a warm proxy. IAM: the deploy role already carries
+# rds:DescribeDBProxyTargets.
+#
+# TIMING (measured, ap-northeast-1, Serverless v2 @ 0.5 ACU min): the target sits
+# in TargetHealth.State=UNAVAILABLE / Reason=PENDING_PROXY_CAPACITY for a LONG
+# time after the proxy reports Status=available AND the Aurora cluster+instance
+# are both `available` — observed >10 min on a cold pr-N stage. That's the proxy
+# provisioning its own connection capacity, unrelated to DB readiness. So the gate
+# waits up to ~18 min (a comfortable ceiling above the worst observed), polling
+# every 15s. The DEPLOY itself already waited ~13 min for Aurora, during which the
+# proxy was NOT yet warming its pool, so this wait is largely additive.
 if [[ -n "$PROXY_HOST" && "$PROXY_HOST" != "None" ]]; then
   PROXY_NAME="${PROXY_HOST%%.*}"
-  echo "run-bootstrap: waiting for RDS Proxy '${PROXY_NAME}' target to become AVAILABLE (up to ~8 min)..."
-  PROXY_DEADLINE=$((SECONDS + 480))
+  echo "run-bootstrap: waiting for RDS Proxy '${PROXY_NAME}' target to become AVAILABLE (up to ~18 min; PENDING_PROXY_CAPACITY is normal cold-start)..."
+  PROXY_DEADLINE=$((SECONDS + 1080))
   PROXY_READY=0
   while [[ $SECONDS -lt $PROXY_DEADLINE ]]; do
     STATES=$(aws rds describe-db-proxy-targets --db-proxy-name "$PROXY_NAME" --region "$REGION" \
@@ -65,14 +73,14 @@ if [[ -n "$PROXY_HOST" && "$PROXY_HOST" != "None" ]]; then
       echo "run-bootstrap: RDS Proxy target is AVAILABLE (states: ${STATES:-<none>})"
       break
     fi
-    echo "run-bootstrap: proxy target not ready yet (states: ${STATES:-<none>}), waiting 10s..."
-    sleep 10
+    echo "run-bootstrap: proxy target not ready yet (states: ${STATES:-<none>}), waiting 15s..."
+    sleep 15
   done
   if [[ "$PROXY_READY" -ne 1 ]]; then
     # Don't hard-fail on the gate itself — the entrypoint's own retry may still
     # win if the proxy warms in the next moment. Warn and proceed; the task's
-    # fail-fast probe + this script's log dump will surface a genuine failure.
-    echo "::warning::RDS Proxy target not AVAILABLE within ~8 min; proceeding anyway (the bootstrap task retries)."
+    # own probe + this script's log dump will surface a genuine failure.
+    echo "::warning::RDS Proxy target not AVAILABLE within ~18 min; proceeding anyway (the bootstrap task retries)."
     aws rds describe-db-proxy-targets --db-proxy-name "$PROXY_NAME" --region "$REGION" \
       --query 'Targets[].{type:Type,port:Port,health:TargetHealth}' --output json 2>&1 || true
   fi
