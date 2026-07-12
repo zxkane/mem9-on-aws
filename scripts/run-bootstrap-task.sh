@@ -54,15 +54,18 @@ fi
 # TIMING (measured, ap-northeast-1, Serverless v2 @ 0.5 ACU min): the target sits
 # in TargetHealth.State=UNAVAILABLE / Reason=PENDING_PROXY_CAPACITY for a LONG
 # time after the proxy reports Status=available AND the Aurora cluster+instance
-# are both `available` — observed >10 min on a cold pr-N stage. That's the proxy
-# provisioning its own connection capacity, unrelated to DB readiness. So the gate
-# waits up to ~18 min (a comfortable ceiling above the worst observed), polling
-# every 15s. The DEPLOY itself already waited ~13 min for Aurora, during which the
-# proxy was NOT yet warming its pool, so this wait is largely additive.
+# are both `available` — the proxy description is literally "DBProxy Target is
+# waiting for proxy to scale to desired capacity". On a cold pr-N stage this was
+# observed to persist for >23 min (an 18-min gate was NOT enough). The proxy config
+# is healthy (verified: correct SG/subnets/target-group/pool); it's just AWS's
+# first-ever proxy capacity scale being very slow here. So the gate waits up to
+# ~35 min — well under the job timeout (75m preview / 80m prod) yet comfortably
+# past the worst observed warmup — polling every 15s. The proxy warms ONCE per
+# stage then stays warm, so this cost is paid only on the first deploy of a stage.
 if [[ -n "$PROXY_HOST" && "$PROXY_HOST" != "None" ]]; then
   PROXY_NAME="${PROXY_HOST%%.*}"
-  echo "run-bootstrap: waiting for RDS Proxy '${PROXY_NAME}' target to become AVAILABLE (up to ~18 min; PENDING_PROXY_CAPACITY is normal cold-start)..."
-  PROXY_DEADLINE=$((SECONDS + 1080))
+  echo "run-bootstrap: waiting for RDS Proxy '${PROXY_NAME}' target to become AVAILABLE (up to ~35 min; PENDING_PROXY_CAPACITY cold-start can exceed 23 min here)..."
+  PROXY_DEADLINE=$((SECONDS + 2100))
   PROXY_READY=0
   while [[ $SECONDS -lt $PROXY_DEADLINE ]]; do
     STATES=$(aws rds describe-db-proxy-targets --db-proxy-name "$PROXY_NAME" --region "$REGION" \
@@ -80,7 +83,7 @@ if [[ -n "$PROXY_HOST" && "$PROXY_HOST" != "None" ]]; then
     # Don't hard-fail on the gate itself — the entrypoint's own retry may still
     # win if the proxy warms in the next moment. Warn and proceed; the task's
     # own probe + this script's log dump will surface a genuine failure.
-    echo "::warning::RDS Proxy target not AVAILABLE within ~18 min; proceeding anyway (the bootstrap task retries)."
+    echo "::warning::RDS Proxy target not AVAILABLE within ~35 min; proceeding anyway (the bootstrap task retries)."
     aws rds describe-db-proxy-targets --db-proxy-name "$PROXY_NAME" --region "$REGION" \
       --query 'Targets[].{type:Type,port:Port,health:TargetHealth}' --output json 2>&1 || true
   fi
