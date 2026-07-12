@@ -19,8 +19,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const src = readFileSync(resolve(here, "../sst.config.ts"), "utf8");
 
 describe("sst.config.ts locked facts", () => {
-  it("pins region ap-southeast-1", () => {
-    expect(src).toMatch(/region:\s*["']ap-southeast-1["']/);
+  it("pins region ap-northeast-1", () => {
+    expect(src).toMatch(/region:\s*["']ap-northeast-1["']/);
   });
 
   it("retains + protects prod state", () => {

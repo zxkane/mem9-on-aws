@@ -70,7 +70,7 @@ export function bootstrap(cluster: sst.aws.Cluster, dbOut: DbOutputs): Bootstrap
     memory: "0.5 GB",
     image,
     environment: {
-      MEM9_DB_HOST: dbOut.proxyHost,
+      MEM9_DB_HOST: dbOut.host,
       MEM9_DB_PORT: dbOut.port.apply((p) => String(p)),
       MEM9_DB_NAME: dbOut.database,
     },

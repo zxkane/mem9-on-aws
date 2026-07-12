@@ -32,7 +32,7 @@ export default $config({
       home: "aws",
       providers: {
         aws: {
-          region: "ap-southeast-1",
+          region: "ap-northeast-1",
           defaultTags: {
             tags: {
               Project: "mem9-on-aws",

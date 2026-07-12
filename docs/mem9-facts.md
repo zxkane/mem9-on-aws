@@ -252,35 +252,38 @@ Verified against AWS docs + the operator's podcast-curation prod usage:
 
 ## Verified AWS facts (for the design)
 
-- Aurora **PostgreSQL Serverless v2** available in **ap-southeast-1 (Singapore)**,
+- Aurora **PostgreSQL Serverless v2** available in **ap-northeast-1 (Tokyo)**,
   PG 16 & 17. `pgvector` is a standard extension (`CREATE EXTENSION vector`).
-  (Project moved Tokyo→Singapore 2026-07-12 — see the RDS-Proxy warmup note below.)
 - Amazon S3 Files (2026-04 GA) exists as a writable POSIX/NFS mount but is NOT
   used here (no filesystem state to host; single-task `/tmp` covers import).
 - podcast-curation's ECS stack consumes the **account default VPC** via
   `aws.ec2.getVpc({ default: true })`, filtered to NAT-routed private subnets —
   the pattern reused here.
-- **Singapore default VPC is customized + NAT-routed (verified 2026-07-12).** The
-  account's `ap-southeast-1` default VPC (172.31.0.0/16) has three
-  `private-subnet-1a/1b/1c` subnets across 3 AZs (`MapPublicIpOnLaunch=false`),
-  **each routing `0.0.0.0/0` through a single NAT gateway**, plus three public
-  subnets via the IGW. The scaffold's `infra/vpc.ts` selects the three private
-  subnets by the **region-agnostic `map-public-ip-on-launch=false` filter** (NOT a
-  Name tag). So ECS Fargate + Aurora can live in the default VPC with outbound
-  internet via NAT — no dedicated VPC needed, confirming the ARCHITECTURE.md
-  assumption. Concrete resource ids are intentionally NOT recorded here (they'd
-  leak account topology).
-- **RDS Proxy `PENDING_PROXY_CAPACITY` was pathological in ap-northeast-1
-  (2026-07-12) — the reason for the Tokyo→Singapore move.** A freshly-created RDS
-  Proxy (SST `Aurora({proxy:true})`) sat in `TargetHealth.State=UNAVAILABLE /
-  Reason=PENDING_PROXY_CAPACITY` for 40+ min and NEVER became AVAILABLE, even
-  though the Aurora cluster+instance were both `available` and the proxy's own
-  config (SG, subnets, target group, pool) was verified healthy. Reproduced on two
-  independent proxies. SST's deploy returns once the CLUSTER is available but does
-  NOT wait for the proxy target to be healthy, so `run-bootstrap-task.sh` gates on
-  `describe-db-proxy-targets` TargetHealth.State==AVAILABLE (up to ~35 min) before
-  running the bootstrap task. Normal warmup is 1–3 min; Tokyo's indefinite wedge
-  was region-level. Watch for the same signature in Singapore.
+- **Tokyo default VPC is customized + NAT-routed (verified 2026-07-12).** The
+  account's `ap-northeast-1` default VPC (172.31.0.0/16) has three `private-1a/1c/1d`
+  subnets across 3 AZs (172.31.96/112/128.0/20, `MapPublicIpOnLaunch=false`), **each
+  routing `0.0.0.0/0` through a NAT gateway**, PLUS three `secondary-private-subnet-*`
+  subnets (172.32.x) that are ALSO `MapPublicIpOnLaunch=false` but have **NO NAT
+  egress**. So `infra/vpc.ts` selects the three NAT-routed private subnets by the
+  **`private-1*` Name tag** — a generic `map-public-ip-on-launch=false` filter would
+  wrongly include the no-NAT secondaries and strand ECS/Aurora with no internet.
+  Concrete resource ids are intentionally NOT recorded here (they'd leak topology).
+- **RDS Proxy `PENDING_PROXY_CAPACITY` starves at 0.5 ACU — the reason we DROPPED
+  the proxy (2026-07-12).** A freshly-created RDS Proxy (SST `Aurora({proxy:true})`)
+  sat in `TargetHealth.State=UNAVAILABLE / Reason=PENDING_PROXY_CAPACITY` for 40+ min
+  and NEVER became AVAILABLE, even though the Aurora cluster+instance were both
+  `available` and the proxy config (SG, subnets, target group, pool) was healthy.
+  **Reproduced in BOTH ap-northeast-1 and ap-southeast-1 → NOT regional.** Root cause
+  (confirmed vs internal AWS knowledge — answers.amazon.com/posts/295779 + AWS CDK
+  docs + internal RDS wikis): **an RDS Proxy provisions its backend capacity at a
+  rate proportional to the Aurora Serverless v2 current ACU** ("scale-up rate is
+  proportional to current capacity"; RDS Proxy team: "our capacity is based on
+  underlying registered database capacity"). At the **0.5-ACU floor** that rate is
+  the slowest possible, so provisioning effectively wedges. FIX: dropped the RDS
+  Proxy entirely — mem9 + the bootstrap task connect to the Aurora **cluster writer
+  endpoint** directly (a single-writer self-host needs no pooling). Alternative that
+  would also work: raise min ACU to ≥2 (per AWS, faster scale rate), but at ~4× idle
+  cost — dropping the proxy keeps the locked 0.5-ACU floor. See ARCHITECTURE.md §3a.
 
 ### AgentCore Gateway private egress to VPC (verified — resolves the #6 unknown)
 

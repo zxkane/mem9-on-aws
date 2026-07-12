@@ -4,7 +4,7 @@ Description: >
   wipe image history: mnemo-server (server, §4), qwen3-embed (embed sidecar, §7),
   bootstrap (schema-bootstrap task, §8). CI tags mem9-<sha>/latest (release) +
   pr-<sha> (preview); each repo's lifecycle keeps them on separate schedules.
-  Deploy via scripts/deploy-ecr-repositories.sh in ap-southeast-1. See §4.
+  Deploy via scripts/deploy-ecr-repositories.sh in ap-northeast-1. See §4.
 
 Parameters:
   ProjectName:

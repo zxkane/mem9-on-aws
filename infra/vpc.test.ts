@@ -80,19 +80,18 @@ describe("resolveVpc", () => {
     expect(getVpcCalls[0]).toEqual({ default: true });
   });
 
-  it("filters private subnets by vpc-id and map-public-ip-on-launch=false", async () => {
+  it("filters private subnets by vpc-id and the private-1* Name tag", async () => {
     const resolveVpc = await loadResolver();
     resolveVpc();
     expect(getSubnetsCalls).toHaveLength(1);
     const filters = getSubnetsCalls[0].filters ?? [];
     const names = filters.map((f) => f.name);
     expect(names).toContain("vpc-id");
-    // Region-agnostic "private" signal (NOT a region-specific Name tag) so the
-    // resolver works in the Singapore default VPC (and any account default VPC).
-    expect(names).toContain("map-public-ip-on-launch");
-    const pubFilter = filters.find((f) => f.name === "map-public-ip-on-launch");
-    expect(pubFilter?.values).toEqual(["false"]);
-    // Must NOT depend on the old Tokyo-specific private-1* Name tag.
-    expect(names).not.toContain("tag:Name");
+    // Tokyo's default VPC has NAT-routed private-1* subnets AND no-NAT
+    // secondary-private-subnet-* ones (both map-public-ip-on-launch=false), so we
+    // must select by the private-1* Name tag, not a generic public-ip filter.
+    expect(names).toContain("tag:Name");
+    const nameFilter = filters.find((f) => f.name === "tag:Name");
+    expect(nameFilter?.values).toEqual(["private-1*"]);
   });
 });

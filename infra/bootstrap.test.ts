@@ -38,7 +38,7 @@ const fakeCluster = {
 function fakeDbOut(): DbOutputs {
   return {
     ssmPrefix: "/mem9-on-aws/prod",
-    proxyHost: out("mem9-proxy.example"),
+    host: out("mem9-writer.example"),
     port: out(5432),
     database: out("mem9"),
     secretArn: out("arn:aws:secretsmanager:x:y:secret:mem9-on-aws-prod-Mem9DbProxySecret-z"),
@@ -150,7 +150,7 @@ describe("bootstrap stack", () => {
     expect(args.cluster).toBe(fakeCluster);
     expect(args.architecture).toBe("arm64");
     const image = String((args.image as { value: string }).value);
-    expect(image).toContain(".dkr.ecr.ap-southeast-1.amazonaws.com/mem9-on-aws/bootstrap:");
+    expect(image).toContain(".dkr.ecr.ap-northeast-1.amazonaws.com/mem9-on-aws/bootstrap:");
     expect(outs.taskDefinitionArn).toBeDefined();
     expect(outs.tenantSecretArn).toBeDefined();
   });

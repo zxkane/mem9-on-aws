@@ -6,11 +6,11 @@
 # it references it read-only (see docs/ARCHITECTURE.md §4). Owning it out-of-band
 # means `sst remove --stage pr-N` can never wipe the image history prod runs on.
 #
-# Bootstrap ONCE per AWS account (in the Singapore region — ECR is regional and
+# Bootstrap ONCE per AWS account (in the Tokyo region — ECR is regional and
 # Fargate pulls same-region), and RE-RUN only if
 # infra/cloudformation/ecr-repositories.yaml changes.
 #
-# Region: ap-southeast-1 (Singapore) — MUST match the SST app region (sst.config.ts)
+# Region: ap-northeast-1 (Tokyo) — MUST match the SST app region (sst.config.ts)
 # so Fargate pulls the image from the same region (no cross-region pull cost /
 # latency). This is UNLIKE deploy-github-role.sh, which pins us-west-2 for the
 # global IAM role stack; the ECR repo is a regional data resource.
@@ -26,13 +26,13 @@ set -euo pipefail
 
 STACK_NAME="${STACK_NAME:-ecr-repositories-mem9-on-aws}"
 TEMPLATE_FILE="infra/cloudformation/ecr-repositories.yaml"
-# Singapore — MUST equal sst.config.ts's providers.aws.region so Fargate pulls the
+# Tokyo — MUST equal sst.config.ts's providers.aws.region so Fargate pulls the
 # image same-region. Hard-coded, NOT read from the ambient AWS_REGION: a stray
 # AWS_REGION in the shell (e.g. left over from deploy-github-role.sh's us-west-2)
 # would silently create the repo in the wrong region, and Fargate would then pull
 # cross-region (cost + latency) or fail. Override deliberately with ECR_REGION
 # only if the whole app moves regions.
-REGION="${ECR_REGION:-ap-southeast-1}"
+REGION="${ECR_REGION:-ap-northeast-1}"
 
 MODE=""
 for arg in "$@"; do

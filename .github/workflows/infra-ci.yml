@@ -69,7 +69,7 @@ concurrency:
   cancel-in-progress: ${{ github.event_name != 'push' }}
 
 env:
-  AWS_REGION: ap-southeast-1
+  AWS_REGION: ap-northeast-1
   ROLE_NAME: github-actions-mem9-on-aws
   # The out-of-band ECR repo namespace (infra/cloudformation/ecr-repositories.yaml).
   # build-and-push-image builds three images under it: <ns>/mnemo-server,
@@ -128,13 +128,12 @@ jobs:
     # image (it wouldn't exist yet otherwise on the PR that introduces it).
     needs: [typecheck, build-and-push-image]
     if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.base.ref == 'main'
-    # Full-stack fresh preview: Aurora (~13m) + RDS Proxy + the 2-container ECS task
-    # (the ~1.2 GB qwen3 image pull + 180s health-check startPeriod) + the RDS-Proxy
-    # readiness gate (≤18m — the proxy's PENDING_PROXY_CAPACITY cold-start can run
-    # >10m past the cluster being available) + the bootstrap DB-retry (≤5m) +
-    # run-task. Measured first bring-up >35m; 75m gives headroom for the worst-case
-    # proxy warmup without wasting runner time on a genuinely stuck deploy.
-    timeout-minutes: 75
+    # Full-stack fresh preview: Aurora (~13m) + the 2-container ECS task (the
+    # ~1.2 GB qwen3 image pull + 180s health-check startPeriod) + the bootstrap
+    # DB-retry + run-task. No RDS Proxy (dropped — see infra/db.ts), so no proxy
+    # warmup wait. Measured first bring-up ~30-35m; 45m gives headroom without
+    # wasting runner time on a stuck deploy.
+    timeout-minutes: 45
     permissions:
       id-token: write
       contents: read
@@ -285,7 +284,7 @@ jobs:
               `|------|-------|`,
               `| Stage | \`${stage}\` |`,
               `| Status | ${status} |`,
-              `| Region | \`${process.env.AWS_REGION || 'ap-southeast-1'}\` |`,
+              `| Region | \`${process.env.AWS_REGION || 'ap-northeast-1'}\` |`,
               `| Run | [View logs](${runUrl}) |`,
               '',
               `SSM parameters deployed by this stage: \`/mem9-on-aws/${stage}/...\``,
@@ -607,13 +606,11 @@ jobs:
     needs: [typecheck, build-and-push-image]
     if: github.event_name == 'push'
     environment: prod
-    # Full-stack prod: Aurora + RDS Proxy + the 2-container ECS task (qwen3 image
-    # pull + 180s health startPeriod) + the RDS-Proxy readiness gate (≤18m — the
-    # proxy's PENDING_PROXY_CAPACITY cold-start can run >10m past cluster-available)
-    # + the bootstrap run-task. Fresh bring-up exceeds 35m (measured); 80m gives
-    # headroom for the worst-case proxy warmup. Prod is singleton/non-cancelable, so
-    # a long timeout doesn't waste runners on duplicate runs.
-    timeout-minutes: 80
+    # Full-stack prod: Aurora + the 2-container ECS task (qwen3 image pull + 180s
+    # health startPeriod) + the bootstrap run-task. No RDS Proxy (dropped — see
+    # infra/db.ts). Fresh bring-up ~30-35m (measured); 50m gives headroom. Prod is
+    # singleton/non-cancelable, so a long timeout doesn't waste runners on dupes.
+    timeout-minutes: 50
     permissions:
       id-token: write
       contents: read

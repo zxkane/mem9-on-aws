@@ -79,8 +79,9 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
   };
 
   // DB wiring comes straight from db()'s Outputs (a real dependency edge), not
-  // an SSM round-trip. proxyHost/port/database/secretArn/taskSecurityGroupId.
-  const dbProxyHost = dbOut.proxyHost;
+  // an SSM round-trip. host/port/database/secretArn/taskSecurityGroupId.
+  // host = the Aurora cluster writer endpoint (no RDS Proxy — see infra/db.ts).
+  const dbHost = dbOut.host;
   const dbPort = dbOut.port.apply((p) => String(p));
   const dbName = dbOut.database;
   const dbSecretArn = dbOut.secretArn;
@@ -143,7 +144,7 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
           MNEMO_PORT: "8080",
           MNEMO_INGEST_MODE: "raw", // LLM sidecar deferred; smart falls back to raw
           MNEMO_UPLOAD_DIR: "/tmp", // single task → local /tmp is fine (mem9-facts)
-          MEM9_DB_HOST: dbProxyHost, // proxy endpoint
+          MEM9_DB_HOST: dbHost, // Aurora cluster writer endpoint (no proxy)
           MEM9_DB_PORT: dbPort,
           MEM9_DB_NAME: dbName,
           // Embedding MaaS = the qwen3 sidecar on localhost. Dims MUST equal the

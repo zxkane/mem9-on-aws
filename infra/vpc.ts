@@ -8,18 +8,15 @@
  *     id doesn't exist in-region — no silent fallback).
  *   - unset (default)        → the account default VPC.
  *
- * The account default VPC in ap-southeast-1 (Singapore) was verified (2026-07-12)
- * to be a customized default with three `private-subnet-1a/1b/1c` subnets across
- * 3 AZs, each `map-public-ip-on-launch=false` and routing 0.0.0.0/0 through a
- * single NAT gateway. We select the private subnets by the GENERIC
- * `map-public-ip-on-launch=false` filter (NOT a region-specific Name tag), so this
- * resolver is portable across regions/accounts: it picks exactly the NAT-routed
- * private subnets and excludes the public (IGW) ones. See docs/mem9-facts.md.
- *
- * (Historical note: this project ran in ap-northeast-1 first, whose default VPC
- * used `private-1*` Name tags + had extra secondary-CIDR private subnets. Moving
- * to ap-southeast-1 — see docs/ARCHITECTURE.md — we switched to the generic
- * public-ip filter, which is cleaner and works in both.)
+ * The account default VPC in ap-northeast-1 (Tokyo) was verified (2026-07-12) to be
+ * a customized default with `private-1a/1c/1d` subnets across 3 AZs (172.31.96/
+ * 112/128.0/20), each routing 0.0.0.0/0 through a NAT gateway, PLUS three
+ * `secondary-private-subnet-*` subnets (172.32.x) that are ALSO
+ * `map-public-ip-on-launch=false` but have NO NAT egress (route to nowhere). So a
+ * generic public-ip filter would wrongly include the no-NAT secondaries and land
+ * ECS/Aurora in subnets with no internet (can't pull ECR / reach Bedrock). We
+ * therefore select the three NAT-routed private subnets by the `private-1*` Name
+ * tag, which the secondary subnets don't carry. See docs/mem9-facts.md.
  *
  * Deploy-role impact: read-only `ec2:DescribeVpcs`/`DescribeSubnets`.
  */
@@ -36,14 +33,15 @@ export function resolveVpc(): ResolvedVpc {
     ? aws.ec2.getVpcOutput({ id: explicitId }) // import existing
     : aws.ec2.getVpcOutput({ default: true }); // account default VPC
 
-  // NAT-routed private subnets = those that do NOT auto-assign a public IP.
-  // `map-public-ip-on-launch=false` is the region-agnostic signal for "private"
-  // in an account default VPC (the public/IGW subnets set it true). This selects
-  // exactly the three per-AZ private subnets in the Singapore default VPC.
+  // NAT-routed private subnets. The `private-1*` Name filter selects the three
+  // primary-CIDR (172.31.x) private subnets that route 0.0.0.0/0 through a NAT
+  // gateway, and EXCLUDES the `secondary-private-subnet-*` (172.32.x) subnets
+  // which are also private but have no NAT egress. A generic
+  // `map-public-ip-on-launch=false` filter would wrongly pull those in.
   const privateSubnets = aws.ec2.getSubnetsOutput({
     filters: [
       { name: "vpc-id", values: [vpc.id] },
-      { name: "map-public-ip-on-launch", values: ["false"] },
+      { name: "tag:Name", values: ["private-1*"] },
     ],
   });
 
