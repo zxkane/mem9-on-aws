@@ -266,6 +266,10 @@ Resources:
               - ec2:DescribeAvailabilityZones
               - ec2:DescribeNetworkAcls
               - ec2:DescribeSecurityGroups
+              # DescribeNetworkInterfaces: Pulumi's SG delete step lists the ENIs
+              # still using a security group before deleting it (ECS task ENIs).
+              # Its absence 403'd the pr-7 teardown's Mem9DbSg delete.
+              - ec2:DescribeNetworkInterfaces
             Resource: "*"
           - Sid: PassRoleConstrained
             # No role is passed by the scaffold today, but future stacks (ECS
@@ -513,6 +517,13 @@ Resources:
               - ecs:ListTaskDefinitions
               - ecs:DescribeTasks
               - ecs:ListTasks
+              # RunTask + StopTask: CI runs the one-shot schema-bootstrap task
+              # (infra/bootstrap.ts) via `aws ecs run-task` after deploy, then
+              # polls DescribeTasks for its exit code. RunTask has no useful
+              # per-resource ARN granularity here (task-def ARNs are versioned);
+              # Resource "*" with the DenyPolicy guarding account-level abuse.
+              - ecs:RunTask
+              - ecs:StopTask
               - ecs:TagResource
               - ecs:UntagResource
               - ecs:ListTagsForResource
@@ -675,10 +686,11 @@ Resources:
               - ecr:GetAuthorizationToken
             Resource: "*"
           - Sid: ECRPush
-            # Upload layers + put the manifest, scoped to the mnemo-server repo.
+            # Upload layers + put the manifest, scoped to the THREE out-of-band
+            # repos CI pushes to (mnemo-server, qwen3-embed, bootstrap).
             # BatchCheckLayerAvailability lets buildx skip re-uploading existing
-            # layers. DescribeRepositories confirms the out-of-band repo exists
-            # before pushing (clear error if the bootstrap wasn't run).
+            # layers. DescribeRepositories confirms a repo exists before pushing
+            # (clear error if the ECR bootstrap wasn't run).
             Effect: Allow
             Action:
               - ecr:BatchCheckLayerAvailability
@@ -689,6 +701,8 @@ Resources:
               - ecr:DescribeRepositories
             Resource:
               - !Sub arn:aws:ecr:ap-northeast-1:${AWS::AccountId}:repository/${ProjectName}/mnemo-server
+              - !Sub arn:aws:ecr:ap-northeast-1:${AWS::AccountId}:repository/${ProjectName}/qwen3-embed
+              - !Sub arn:aws:ecr:ap-northeast-1:${AWS::AccountId}:repository/${ProjectName}/bootstrap
 
   # ───────────────────────────────────────────────────────────────────────────
   # IAM Role — assumed by GitHub Actions via OIDC.

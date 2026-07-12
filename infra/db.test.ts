@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * Unit tests for the `db` stack factory. Mocks the SST globals ($app,
  * aws.ec2.*, aws.ssm.Parameter, sst.aws.Aurora) so the factory runs bare.
  * Asserts the security-group relationship (5432 from the task SG only), the
- * Aurora args (postgres, proxy, scaling, vpc wiring), the SSM export contract,
+ * Aurora args (postgres, NO proxy, scaling, vpc wiring), the SSM export contract,
  * and the prod-vs-non-prod final-snapshot transform.
  */
 
@@ -59,7 +59,7 @@ function installGlobals(stage: string) {
   (globalThis as Record<string, unknown>).sst = {
     aws: {
       Aurora: class {
-        host = out("mem9-proxy.example");
+        host = out("mem9-writer.example");
         port = out(5432);
         username = out("postgres");
         password = out("secret");
@@ -116,7 +116,7 @@ describe("db stack", () => {
     expect(ingress[0].cidrBlocks).toBeUndefined();
   });
 
-  it("provisions Aurora postgres with proxy + scaling + vpc wiring", async () => {
+  it("provisions Aurora postgres with NO proxy + scaling + vpc wiring", async () => {
     installGlobals("prod");
     const db = await loadDb();
     db();
@@ -124,12 +124,22 @@ describe("db stack", () => {
     expect(auroras).toHaveLength(1);
     const args = auroras[0].args;
     expect(args.engine).toBe("postgres");
-    expect(args.proxy).toBe(true);
+    // No RDS Proxy — dropped because PENDING_PROXY_CAPACITY starved at 0.5 ACU
+    // (see infra/db.ts). mem9 connects to the cluster writer endpoint directly.
+    expect(args.proxy).toBeUndefined();
     expect(args.database).toBe("mem9");
     expect((args.scaling as { min: string; max: string }).min).toBe("0.5 ACU");
     expect((args.scaling as { min: string; max: string }).max).toBe("4 ACU");
     expect(args.vpc).toBeDefined();
     expect((args.vpc as { securityGroups: unknown }).securityGroups).toBeDefined();
+  });
+
+  it("sets NO transform.proxy hook (there is no proxy to configure)", async () => {
+    installGlobals("prod");
+    const db = await loadDb();
+    db();
+    const transform = auroras[0].args.transform as { proxy?: unknown };
+    expect(transform.proxy).toBeUndefined();
   });
 
   it("skips the final snapshot on non-prod, keeps it on prod", async () => {
@@ -168,9 +178,9 @@ describe("db stack", () => {
 
     const names = params.map((p) => p.name).sort();
     expect(names).toEqual([
+      "/mem9-on-aws/prod/db/host",
       "/mem9-on-aws/prod/db/name",
       "/mem9-on-aws/prod/db/port",
-      "/mem9-on-aws/prod/db/proxy-host",
       "/mem9-on-aws/prod/db/secret-arn",
       "/mem9-on-aws/prod/db/task-sg-id",
     ]);

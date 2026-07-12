@@ -65,7 +65,7 @@ The PG-vs-MySQL choice is forced by how mem9 implements vectors:
   OpenAI text-embedding-3-small = 1536). Pin dims once; changing later requires a
   reindex.
 
-### 3a. DB auth: **RDS Proxy + Secrets Manager rotation** (no committed password; NOT native IAM)
+### 3a. DB auth: **direct-to-Aurora + Secrets Manager** (no RDS Proxy; no committed password; NOT native IAM)
 
 The operator asked to avoid a password / use IAM-role auth. **Probed, verified,
 and decided (public-AWS only):**
@@ -75,53 +75,54 @@ and decided (public-AWS only):**
   `postgres.go` does `sql.Open("pgx", dsn)` (pgx v5 stdlib) and reads the
   credential **once at startup** — no `BeforeConnect`/credential-refresh hook. An
   Aurora **IAM auth token expires in ~15 min**, but the DSN is static, so pool
-  connections would start failing after the token expires. This is true whether
-  connecting **directly** to Aurora or via **RDS Proxy with client-side IAM**
-  (mem9 is the IAM token client either way). Verified against mem9 source +
-  public AWS Aurora docs (`rds-proxy-connecting.html`).
-- **Chosen: RDS Proxy in front of Aurora; the DB password lives ONLY in AWS
-  Secrets Manager with automatic rotation.** Flow:
+  connections would start failing after the token expires. Verified against mem9
+  source + public AWS Aurora docs.
+- **Chosen: mem9 connects DIRECTLY to the Aurora cluster writer endpoint; the DB
+  password lives ONLY in AWS Secrets Manager.** Flow:
   ```
-  mnemo-server  --(static user+password from ECS `secrets: valueFrom`)-->  RDS Proxy
-                                          RDS Proxy  --(Secrets Manager creds, TLS)-->  Aurora PG
+  mnemo-server  --(static user+password from ECS `secrets: valueFrom`, TLS)-->  Aurora PG (writer endpoint)
   ```
   - The Aurora credential is generated (a static `RandomPassword`) + stored in a
     **Secrets Manager** secret by `sst.aws.Aurora` (the value never appears in
-    git, the SST code, or the ECS task def as a literal). The secret is
-    **consumed ONLY by RDS Proxy** — the password's blast radius is confined to
-    the proxy↔Aurora hop; mem9 connects to the proxy and reads the secret only via
-    ECS `secrets: valueFrom`, never seeing/holding the raw value elsewhere.
-  - **Rotation: intentionally NOT configured (DECIDED — see #6).** Investigated
-    (2026-07-11): the AWS RDS single-user rotation Lambda requires
-    `host`+`engine`+`username`+`password` in the secret, but SST's `proxy: true`
-    OWNS a minimal `{username,password}`-only secret with **no transform hook** to
-    augment it and **no way to supply a bring-your-own secret ARN** to the proxy.
-    Enabling rotation would therefore require dropping SST's managed proxy and
-    self-provisioning `aws.rds.Proxy` + our own full-JSON secret — which would
-    **REPLACE the live prod RDS Proxy**. Not worth that for a password already
-    confined to the proxy. Accepted posture: static, proxy-confined password;
-    revisit only if the proxy+secret get re-owned during the ECS-stack work.
-  - RDS Proxy targets Aurora and reads that secret to authenticate; it also pools
-    + multiplexes connections (good for `desiredCount=1` reconnpressure).
-  - mem9's `MNEMO_DSN` points at the **proxy endpoint** and carries a user +
-    password injected into the container via an ECS **`secrets: valueFrom`** (from
-    Secrets Manager / SSM SecureString) at task start — resolved to an env var by
-    ECS, **never a plaintext literal in the committed task def or repo.**
-  - Not *literally* passwordless at the mem9 hop, but: the password is never
-    committed, never human-handled, and rotates automatically — which satisfies
-    the real intent (no static secret in code, IAM-governed access to the secret).
-    The ECS task role gets `secretsmanager:GetSecretValue` on that one secret ARN.
+    git, the SST code, or the ECS task def as a literal). mem9 + the bootstrap
+    task read it via ECS `secrets: valueFrom` and connect to the cluster writer
+    endpoint. The ECS/bootstrap task role gets `secretsmanager:GetSecretValue` on
+    that one secret ARN.
+  - **NO RDS PROXY (DECIDED 2026-07-12).** We originally fronted Aurora with an
+    RDS Proxy (`sst.aws.Aurora({proxy:true})`) for connection pooling. It proved
+    **unusable at our 0.5-ACU floor**: an RDS Proxy provisions its backend capacity
+    at a rate PROPORTIONAL to the Aurora Serverless v2 current ACU (AWS: "scale-up
+    rate is proportional to current capacity"; the RDS Proxy team: "our capacity is
+    based on underlying registered database capacity"). At 0.5 ACU the provisioning
+    is the slowest possible, so the proxy target sat in
+    `TargetHealth.State=UNAVAILABLE / Reason=PENDING_PROXY_CAPACITY` for 40+ min and
+    effectively never became AVAILABLE — blocking every first connection. Reproduced
+    in **two regions (Tokyo + Singapore)** → systemic to the 0.5-ACU + proxy combo,
+    NOT regional (root cause confirmed against internal AWS knowledge). A
+    single-writer, single-task self-host does **not** need proxy pooling, so the
+    proxy was removed. (Raising min ACU to 2+ would also have fixed the proxy per
+    AWS docs, but at ~4× the idle cost; dropping the proxy keeps the locked 0.5-ACU
+    floor.) This removes the whole PENDING_PROXY_CAPACITY failure mode.
+  - **Rotation: intentionally NOT configured (DECIDED — see #6).** Static
+    Secrets-Manager password, blast-radius-confined; the master credential is only
+    read by mem9/bootstrap via `secrets: valueFrom`. Revisit only if zero-static-
+    secret becomes a hard requirement (would need the deferred token-refresh sidecar
+    or a mem9 source patch).
+  - mem9's `MNEMO_DSN` points at the **Aurora cluster writer endpoint** and carries
+    a user + password injected via ECS **`secrets: valueFrom`** at task start —
+    resolved to an env var by ECS, **never a plaintext literal in the committed
+    task def or repo.**
 - **Deferred (Open decision, not adopted):** true end-to-end IAM (no password at
   all) via either (a) a **token-refresh sidecar** minting a fresh RDS IAM token
   <15 min and reloading mem9, or (b) a **mem9 source patch** (pgx `BeforeConnect`
   + AWS auth-token generator). Both are more moving parts / a fork; revisit if the
   operator wants zero password even in Secrets Manager.
-- **TLS**: RDS Proxy requires TLS for IAM client connections and uses ACM certs
-  itself; the mnemo-server → proxy hop uses password auth over TLS (proxy has a
-  managed cert; no cert to manage on our side). Set `sslmode=require` in `MNEMO_DSN`.
+- **TLS**: the mnemo-server → Aurora hop uses password auth over TLS (Aurora
+  presents a managed RDS cert; no cert to manage on our side). Set
+  `sslmode=require` in `MNEMO_DSN`.
 
 > **Customer-facing / public-AWS-only note.** This deployment is intended for
-> customers and must use **only public AWS services**. Aurora + RDS Proxy +
+> customers and must use **only public AWS services**. Aurora +
 > Secrets Manager are all public — compliant. ⚠️ The LLM smart-ingest path
 > (§7) currently targets **Bedrock *Mantle***, which is an internal/preview
 > surface — for a customer-facing build that must be revisited to the **public**
@@ -320,8 +321,22 @@ mem9 PG needs, before first use:
 3. Insert an active `tenants` row (single-tenant for a single operator); the
    tenant `id` is the `X-API-Key` (probed).
 
-Mechanism — Open decision #3: one-shot ECS task on deploy vs. an init Lambda vs.
-a documented manual step. Leaning one-shot ECS task run against Aurora.
+Mechanism — **IMPLEMENTED (one-shot ECS task).** `infra/bootstrap.ts` defines an
+`sst.aws.Task` (arm64, image `docker/bootstrap/`, psql + jq) wired to the DB
+Outputs + a **stable tenant-id secret** (a `random.RandomId` stored in Secrets
+Manager, so re-runs reuse the same `X-API-Key` rather than minting a new one).
+The task runs `docker/bootstrap/schema.sql` (all IF NOT EXISTS) then upserts the
+one active tenant (ON CONFLICT). SST only *defines* the task; **CI runs it via
+`aws ecs run-task` after `sst deploy`** (`scripts/run-bootstrap-task.sh`, reading
+the run inputs SST exports to `/mem9-on-aws/${stage}/bootstrap/*` SSM) and waits
+for exit 0 — kept out of the Pulumi graph (no local-exec provider) and observable
+in CI logs. Idempotent, so it re-runs safely on every deploy.
+
+**Embedding-dims decision baked in here:** the `memories.embedding` column is
+`vector(1024)` (NOT mem9's hardcoded `vector(1536)`), matching the qwen3-embed
+sidecar + `MNEMO_EMBED_DIMS=1024`. The FTS index is a GIN on
+`to_tsvector('english', content)` (matches mem9's FTSSearch), plus an HNSW
+`vector_cosine_ops` index for the `embedding <=> $q` cosine search.
 
 ## 9. Cost sketch (Tokyo, order-of-magnitude, verify at build)
 
@@ -377,22 +392,30 @@ model is the heavy tenant), which is the main swing in the Fargate cost row.
 
 - **DB engine**: Aurora **PostgreSQL Serverless v2** + pgvector (not MySQL, not
   RDS t4g). Backend = mem9 `postgres`.
-- **DB auth (§3a)**: **RDS Proxy + Secrets Manager**, NOT native IAM (mem9's
+- **DB auth (§3a)**: **direct-to-Aurora + Secrets Manager**, NOT native IAM (mem9's
   static `MNEMO_DSN` / pgx-stdlib / no credential refresh can't handle the ~15-min
-  IAM token). Aurora password lives only in Secrets Manager (static
-  `RandomPassword` from `sst.aws.Aurora`; **rotation intentionally NOT configured
-  — the secret is consumed only by RDS Proxy, so the password is blast-radius-
-  confined; enabling rotation would force replacing the SST-owned proxy — see
-  §3a / #6, DECIDED**); RDS Proxy fronts Aurora; mem9's `MNEMO_DSN` → proxy endpoint with a
-  user+password injected via ECS `secrets: valueFrom` (never committed /
+  IAM token). **NO RDS Proxy** — it was dropped (DECIDED 2026-07-12) because at the
+  0.5-ACU floor the proxy's `PENDING_PROXY_CAPACITY` provisioning was starved and
+  the target never became AVAILABLE (reproduced Tokyo + Singapore → systemic to the
+  0.5-ACU + proxy combo, not regional; root cause confirmed vs internal AWS
+  knowledge — proxy capacity provisions ∝ current ACU). A single-writer self-host
+  needs no pooling, so mem9 + the bootstrap task connect to the Aurora **cluster
+  writer endpoint** directly. Aurora password lives only in Secrets Manager (static
+  `RandomPassword` from `sst.aws.Aurora`; **rotation intentionally NOT configured —
+  see §3a / #6, DECIDED**), injected via ECS `secrets: valueFrom` (never committed /
   human-handled). Task role gets `secretsmanager:GetSecretValue` on the one secret
   ARN. True end-to-end IAM deferred (sidecar or source patch) — see Open decisions.
 - **Public-AWS-only (customer-facing)**: this deployment targets customers, so it
-  must use **only public AWS services**. Aurora / RDS Proxy / Secrets Manager are
-  public ✅. The **Bedrock Mantle** LLM path (§7) is internal/preview → flagged for
-  revisit to public `bedrock-runtime` Converse before a customer build (Open #7).
-- **Region**: ap-northeast-1 (Tokyo). **Compute**: ECS Fargate, arm64,
-  `desiredCount=1`. **VPC**: reuse default VPC private subnets.
+  must use **only public AWS services**. Aurora / Secrets Manager are public ✅.
+  The **Bedrock Mantle** LLM path (§7) is internal/preview → flagged for revisit to
+  public `bedrock-runtime` Converse before a customer build (Open #7).
+- **Region**: **ap-northeast-1 (Tokyo)**. (Briefly moved to Singapore 2026-07-12
+  while diagnosing the RDS Proxy `PENDING_PROXY_CAPACITY` hang, but that turned out
+  to be the 0.5-ACU + proxy combo, not regional — so we dropped the proxy and moved
+  back to Tokyo.) **Compute**: ECS Fargate, arm64, `desiredCount=1`. **VPC**: reuse
+  the account default VPC's NAT-routed private subnets (selected by the `private-1*`
+  Name tag — the Tokyo default VPC also has no-NAT `secondary-private-subnet-*` ones
+  that a generic public-ip filter would wrongly include; see infra/vpc.ts).
 - **MCP + auth**: AgentCore Gateway + Cognito M2M (podcast-curation pattern).
 - **Gateway → mnemo-server**: **private** via AgentCore `privateEndpoint` +
   **managed VPC Lattice** → **internal ALB (public ACM cert, TLS terminated here)**
@@ -433,26 +456,21 @@ model is the heavy tenant), which is the main swing in the Fargate cost row.
    point-in-time recovery wanted? (Data-ownership project → likely yes.)
 5. **CI / deploy** — GHA with the `RUNNER_LABEL` self-hosted pattern; how the
    arm64 image builds & pushes to ECR (docker-build provider vs. CodeBuild arm).
-6. **Secrets + rotation — DECIDED (2026-07-11): storage resolved (§3a), rotation
-   intentionally deferred.** Aurora creds live in an `sst.aws.Aurora` static
-   `RandomPassword` Secrets Manager secret, consumed ONLY by RDS Proxy + injected
-   into Fargate via ECS `secrets: valueFrom`. **Automatic rotation is NOT
-   configured, on purpose:** the AWS RDS single-user rotation Lambda needs
-   `host`+`engine` in the secret, but SST's `proxy: true` owns a minimal
-   `{username,password}`-only secret with no transform hook and no
-   bring-your-own-secret option — so rotation would force dropping SST's proxy and
-   self-managing `aws.rds.Proxy` + a full-JSON secret, **replacing the live prod
-   proxy**. The password is already blast-radius-confined to the proxy, so this
-   isn't worth a prod-proxy replacement now. **Reconsider only** when the ECS
-   stack re-owns the secret/proxy (design secret ownership ONCE there). If pursued:
-   single-user strategy is forced (RDS Proxy does NOT support alternating-users —
-   AWS docs), rotation Lambda = SAR `SecretsManagerRDSPostgreSQLRotationSingleUser`
-   in the DB private subnets reaching SM over NAT (no VPC endpoint needed), secret
-   JSON must add `engine=aurora-postgresql`+`host`=cluster (not proxy) endpoint,
-   and the deploy role needs `iam:CreateRole`+`AttachRolePolicy`+`serverlessrepo`+
-   `lambda`+`secretsmanager:RotateSecret`. (Mantle bearer is minted at runtime by
-   the token sidecar, not a stored secret.) Also remaining: RDS Proxy
-   `MaxConnectionsPercent` / pinning tuning for `desiredCount=1`.
+6. **Secrets + rotation — DECIDED: storage resolved (§3a), rotation intentionally
+   deferred.** Aurora creds live in an `sst.aws.Aurora` static `RandomPassword`
+   Secrets Manager secret, injected into Fargate via ECS `secrets: valueFrom`, and
+   mem9 connects to the Aurora cluster writer endpoint DIRECTLY (no RDS Proxy — see
+   §3a). **Automatic rotation is NOT configured, on purpose** (static, blast-radius-
+   confined password is acceptable for a single-operator self-host). Note: dropping
+   the RDS Proxy actually REMOVED the old blocker to rotation (SST's `proxy:true`
+   owned a minimal `{username,password}`-only secret with no way to add
+   `host`+`engine` for the RDS rotation Lambda). If rotation is pursued later: the
+   secret would need `engine=aurora-postgresql`+`host`=cluster writer endpoint, the
+   SAR `SecretsManagerRDSPostgreSQLRotationSingleUser` Lambda in the DB private
+   subnets, and the deploy role would need
+   `iam:CreateRole`+`AttachRolePolicy`+`serverlessrepo`+`lambda`+
+   `secretsmanager:RotateSecret`. (Mantle bearer is minted at runtime by the token
+   sidecar, not a stored secret.)
 7. **Public-AWS LLM path (customer-facing)** — the solution must use only public
    AWS services. §7's **Bedrock Mantle** smart-ingest is internal/preview → for a
    customer build, migrate the OpenAI-compatible `/chat/completions` LLM to the

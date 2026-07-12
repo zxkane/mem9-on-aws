@@ -1,40 +1,41 @@
 /**
- * `db` stack — Aurora PostgreSQL Serverless v2 + RDS Proxy + Secrets Manager.
+ * `db` stack — Aurora PostgreSQL Serverless v2 + Secrets Manager (NO RDS Proxy).
  *
  * The durable state layer for mem9 (see docs/ARCHITECTURE.md §3, §3a). Provisions:
  *   - Aurora PostgreSQL Serverless v2 (engine "postgres") in the default VPC's
  *     NAT-routed private subnets (from infra/vpc.ts).
- *   - RDS Proxy in front of the cluster (`proxy: true`) so mem9 connects to a
- *     pooled/multiplexed endpoint, and the DB password never lives in mem9's
- *     config as a literal.
- *   - A Secrets Manager secret (auto-created by sst.aws.Aurora, name
- *     `mem9-on-aws-<stage>-Mem9DbProxySecret-<random>`) holding a STATIC
- *     RandomPassword. This secret is **consumed ONLY by RDS Proxy** — the
- *     password's blast radius is confined to the proxy↔Aurora hop; mem9 never
- *     sees the raw password (it connects to the proxy, and the ECS task reads
- *     the secret only via `secrets: valueFrom`). Never committed / human-handled.
- *   - **Rotation: intentionally NOT configured (ARCHITECTURE.md §3a / Open #6,
- *     DECIDED).** SST's `proxy:true` OWNS this secret ({username,password} only,
- *     no host/engine, no transform hook) and the AWS RDS single-user rotation
- *     Lambda requires host+engine in the secret — so rotation would need us to
- *     drop SST's proxy and self-manage the proxy+secret, which would REPLACE the
- *     live prod RDS Proxy. Not worth that for a proxy-confined password now;
- *     accepted posture = static password, blast-radius-confined to the proxy.
- *     Revisit if/when the secret+proxy are re-owned in the ECS-stack work.
+ *   - A Secrets Manager secret (auto-created by sst.aws.Aurora) holding the STATIC
+ *     master RandomPassword. mem9 + the bootstrap task read it via `secrets:
+ *     valueFrom` and connect DIRECTLY to the Aurora cluster writer endpoint.
+ *     Never committed / human-handled.
  *   - Two security groups: a `db` SG (allows 5432 from the `task` SG only) and a
- *     `task` SG (attached to the future ECS mnemo-server task). The relationship
- *     is reserved now so the ECS stack just references the task SG.
+ *     `task` SG (attached to the ECS mnemo-server task).
+ *
+ * NO RDS PROXY (§3a, DECIDED 2026-07-12). We originally fronted Aurora with an RDS
+ * Proxy (`proxy: true`) for connection pooling. But an RDS Proxy provisions its
+ * backend capacity at a rate PROPORTIONAL to the Aurora Serverless v2 current ACU
+ * (AWS: "scale-up rate is proportional to current capacity"; RDS Proxy team: "our
+ * capacity is based on underlying registered database capacity"). At our 0.5-ACU
+ * floor the provisioning is the slowest possible, so the proxy target sat in
+ * TargetHealth.State=UNAVAILABLE / Reason=PENDING_PROXY_CAPACITY for 40+ min and
+ * effectively never became AVAILABLE — blocking every first connection. Reproduced
+ * in two regions (Tokyo + Singapore) → systemic to the 0.5-ACU + proxy combo, not
+ * regional. A single-writer, single-task self-host does NOT need proxy pooling, so
+ * we drop the proxy entirely: mem9 connects to the cluster writer endpoint. This
+ * removes the whole PENDING_PROXY_CAPACITY failure mode. (Raising min ACU to 2+
+ * would also have fixed the proxy per AWS docs, but at ~4× the idle cost; dropping
+ * the proxy keeps the locked 0.5-ACU floor.)
  *
  * DB AUTH (LOCKED, §3a): NOT native IAM — mem9 reads a single static MNEMO_DSN
  * once at startup (pgx stdlib, no credential refresh), so a ~15-min IAM token
- * would expire under it. Instead the password lives in Secrets Manager (see the
- * rotation caveat above) and is injected into the ECS task via `secrets:
- * valueFrom` (never committed). This stack exports the proxy host/port/db + the
- * secret ARN; the ECS stack assembles MNEMO_DSN from them at task-launch.
+ * would expire under it. Instead the master password lives in Secrets Manager and
+ * is injected into the ECS task via `secrets: valueFrom` (never committed). This
+ * stack exports the writer host/port/db + the secret ARN; the ECS + bootstrap
+ * stacks assemble MNEMO_DSN from them at launch.
  *
  * pgvector is NOT enabled here — `CREATE EXTENSION vector` + the tenant runtime
  * schema is applied by the one-shot schema-bootstrap task on deploy (§8), which
- * connects through this proxy. This stack only provisions the cluster/proxy/creds.
+ * connects to this cluster. This stack only provisions the cluster + creds.
  *
  * Cost note: Aurora Serverless v2 has a ~0.5 ACU idle floor (~$40–50/mo) — this
  * is the project's largest line. Only deployed on real stages; PR previews get it
@@ -45,7 +46,7 @@ import { resolveVpc } from "./vpc";
 
 export interface DbOutputs {
   ssmPrefix: string;
-  proxyHost: Output<string>;
+  host: Output<string>;
   port: Output<number>;
   database: Output<string>;
   secretArn: Output<string>;
@@ -80,10 +81,10 @@ export function db(): DbOutputs {
     tags: { ...tags, Name: `mem9-on-aws-${$app.stage}-task` },
   });
 
-  // SG for Aurora + RDS Proxy: allow 5432 ONLY from the task SG.
+  // SG for the Aurora cluster: allow 5432 ONLY from the task SG.
   const dbSg = new aws.ec2.SecurityGroup("Mem9DbSg", {
     vpcId,
-    description: "mem9 Aurora + RDS Proxy SG; 5432 from the task SG only",
+    description: "mem9 Aurora SG; 5432 from the task SG only",
     ingress: [
       {
         protocol: "tcp",
@@ -104,22 +105,23 @@ export function db(): DbOutputs {
     tags: { ...tags, Name: `mem9-on-aws-${$app.stage}-db` },
   });
 
-  // Aurora PostgreSQL Serverless v2 + RDS Proxy. `proxy: true` makes SST create
-  // an RDS Proxy and route the component's `host` through it (verify at deploy).
-  // Password is auto-generated + stored in Secrets Manager (secretArn); RDS Proxy
-  // authenticates to Aurora with it.
+  // Aurora PostgreSQL Serverless v2, NO RDS Proxy (`proxy` omitted → false). With
+  // no proxy, SST's `aurora.host` resolves to the cluster WRITER endpoint, which
+  // mem9 + the bootstrap task connect to directly (verified: aurora.ts `host`
+  // getter returns `proxy?.endpoint ?? cluster.endpoint`). Password is
+  // auto-generated + stored in Secrets Manager (secretArn); mem9 authenticates
+  // with it via the injected DSN. See the header for WHY the proxy was dropped
+  // (PENDING_PROXY_CAPACITY starvation at 0.5 ACU).
   //
   // scaling.min = "0.5 ACU" (the LOCKED floor, ARCHITECTURE.md §3/§9) — NOT
-  // "0 ACU". Auto-pause (min 0) is intentionally NOT used: `proxy: true` keeps a
-  // connection open to the instance, so Aurora Serverless v2 never auto-pauses
-  // regardless of a 0-ACU floor (AWS docs) — a 0-ACU config would give no
-  // scale-to-zero benefit while diverging from the locked decision. Max 4 ACU is
-  // ample headroom for a single operator.
+  // "0 ACU". We keep 0.5 (not auto-pause min 0): a paused instance would add
+  // ~15-30s cold-resume latency to the first request after idle, and mem9 is a
+  // long-lived server holding a connection, so it rarely idles long enough to
+  // pause anyway. Max 4 ACU is ample headroom for a single operator.
   const aurora = new sst.aws.Aurora("Mem9Db", {
     engine: "postgres",
     version: "17.4",
     database: "mem9",
-    proxy: true,
     scaling: {
       min: "0.5 ACU",
       max: "4 ACU",
@@ -146,10 +148,11 @@ export function db(): DbOutputs {
     },
   });
 
-  // Export the connection pieces (NOT a literal DSN) for the ECS stack to
-  // assemble MNEMO_DSN from + inject the password via `secrets: valueFrom`.
-  new aws.ssm.Parameter("DbProxyHost", {
-    name: `${prefix}/db/proxy-host`,
+  // Export the connection pieces (NOT a literal DSN) for the ECS + bootstrap
+  // stacks to assemble MNEMO_DSN from + inject the password via `secrets:
+  // valueFrom`. host = the Aurora cluster writer endpoint (no proxy).
+  new aws.ssm.Parameter("DbHost", {
+    name: `${prefix}/db/host`,
     type: "String",
     value: aurora.host,
     tags,
@@ -184,7 +187,7 @@ export function db(): DbOutputs {
 
   return {
     ssmPrefix: prefix,
-    proxyHost: aurora.host,
+    host: aurora.host,
     port: aurora.port,
     database: aurora.database,
     secretArn: aurora.secretArn,
