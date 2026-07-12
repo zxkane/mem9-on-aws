@@ -1,0 +1,50 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  OUT-OF-BAND Bedrock Mantle Project for mem9-on-aws LLM cost attribution (§7).
+  The llm-proxy sidecar (docker/llm-proxy) passes this project's Id as the
+  `OpenAI-Project` header on every Mantle /chat/completions call, so GLM-5
+  smart-ingest spend is tagged to this project. Mantle does NOT support
+  IAM-principal / session-tag attribution (verified in podcast-curation prod), so
+  a Project is the ONLY way to attribute GLM-5 spend.
+
+  NOT SST-managed — managed out-of-band (like the ECR repos + the GitHub Actions
+  role) so `sst remove` on a PR stage can't drop the shared project. Deploy in
+  ap-northeast-1 (where the ECS task calls Mantle) via
+  scripts/deploy-bedrock-mantle-project.sh, then feed the ProjectId output to CI
+  as the MEM9_BEDROCK_PROJECT env the deploy reads (infra/ecs.ts BEDROCK_PROJECT).
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: mem9-on-aws
+    Description: SST app name; used to name the Bedrock Project.
+
+Resources:
+  MantleProject:
+    Type: AWS::BedrockMantle::Project
+    # Retain: the project id is referenced by the running task's OpenAI-Project
+    # header + accumulates cost history; never let a stack teardown drop it.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Name: !Sub ${ProjectName}-llm
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: cloudformation
+
+Outputs:
+  ProjectId:
+    Description: >
+      The Bedrock Mantle Project Id — set as the CI env MEM9_BEDROCK_PROJECT so
+      infra/ecs.ts injects it into the llm-proxy sidecar's LLM_PROXY_OPENAI_PROJECT
+      (the OpenAI-Project header). This is what tags GLM-5 spend.
+    Value: !GetAtt MantleProject.Id
+    Export:
+      Name: !Sub ${AWS::StackName}-ProjectId
+  ProjectArn:
+    Description: The Bedrock Mantle Project ARN.
+    Value: !GetAtt MantleProject.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-ProjectArn

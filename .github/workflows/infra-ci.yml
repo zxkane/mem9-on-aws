@@ -72,8 +72,8 @@ env:
   AWS_REGION: ap-northeast-1
   ROLE_NAME: github-actions-mem9-on-aws
   # The out-of-band ECR repo namespace (infra/cloudformation/ecr-repositories.yaml).
-  # build-and-push-image builds three images under it: <ns>/mnemo-server,
-  # <ns>/qwen3-embed, <ns>/bootstrap. Deploy stages reference
+  # build-and-push-image builds four images under it: <ns>/mnemo-server,
+  # <ns>/qwen3-embed, <ns>/bootstrap, <ns>/llm-proxy. Deploy stages reference
   # <acct>.dkr.ecr.<region>/<ns>/<name>:<tag>.
   ECR_NS: mem9-on-aws
 
@@ -128,11 +128,12 @@ jobs:
     # image (it wouldn't exist yet otherwise on the PR that introduces it).
     needs: [typecheck, build-and-push-image]
     if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.base.ref == 'main'
-    # Full-stack fresh preview: Aurora (~13m) + the 2-container ECS task (the
-    # ~1.2 GB qwen3 image pull + 180s health-check startPeriod) + the bootstrap
-    # DB-retry + run-task. No RDS Proxy (dropped — see infra/db.ts), so no proxy
-    # warmup wait. Measured first bring-up ~30-35m; 45m gives headroom without
-    # wasting runner time on a stuck deploy.
+    # Full-stack fresh preview: Aurora (~13m) + the 3-container ECS task (the
+    # ~1.2 GB qwen3 image pull + 180s health-check startPeriod, plus the tiny
+    # llm-proxy sidecar) + the bootstrap DB-retry + run-task. No RDS Proxy
+    # (dropped — see infra/db.ts), so no proxy warmup wait. Measured first
+    # bring-up ~30-35m; 45m gives headroom without wasting runner time on a stuck
+    # deploy.
     timeout-minutes: 45
     permissions:
       id-token: write
@@ -214,6 +215,11 @@ jobs:
         # AWS_ROLE_ARN), fall back to `latest` — infra/ecs.ts's own default.
         env:
           MEM9_IMAGE_TAG: ${{ needs.build-and-push-image.outputs.image_tag || 'latest' }}
+          # Bedrock Project id for the llm-proxy sidecar's OpenAI-Project cost
+          # header (infra/ecs.ts BEDROCK_PROJECT). Repo variable set out-of-band by
+          # scripts/deploy-bedrock-mantle-project.sh; empty → the proxy omits the
+          # header (still functional, just untagged).
+          MEM9_BEDROCK_PROJECT: ${{ vars.MEM9_BEDROCK_PROJECT }}
         run: |
           # PR_NUMBER comes from GitHub's pull_request payload (integer);
           # validate to short-circuit any injection risk.
@@ -546,6 +552,7 @@ jobs:
           emit mnemo-server mnemo_tags
           emit qwen3-embed  embed_tags
           emit bootstrap    bootstrap_tags
+          emit llm-proxy    llm_proxy_tags
 
       - name: Set up QEMU
         # Enables linux/arm64 emulation on x86 runners (ubuntu-latest). A no-op
@@ -596,6 +603,18 @@ jobs:
           cache-from: type=gha,scope=bootstrap
           cache-to: type=gha,mode=max,scope=bootstrap
 
+      - name: Build & push llm-proxy (arm64)
+        if: steps.gate.outputs.skip != 'true'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: docker/llm-proxy/Dockerfile
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.tags.outputs.llm_proxy_tags }}
+          cache-from: type=gha,scope=llm-proxy
+          cache-to: type=gha,mode=max,scope=llm-proxy
+
   # ───────────────────────────────────────────────────────────────────────────
   # deploy-prod — push to main → stage `prod`. HARD-FAILS without AWS_ROLE_ARN.
   # Runs AFTER the image is built+pushed and pins prod to that exact `mem9-<sha7>`.
@@ -606,7 +625,7 @@ jobs:
     needs: [typecheck, build-and-push-image]
     if: github.event_name == 'push'
     environment: prod
-    # Full-stack prod: Aurora + the 2-container ECS task (qwen3 image pull + 180s
+    # Full-stack prod: Aurora + the 3-container ECS task (qwen3 image pull + 180s
     # health startPeriod) + the bootstrap run-task. No RDS Proxy (dropped — see
     # infra/db.ts). Fresh bring-up ~30-35m (measured); 50m gives headroom. Prod is
     # singleton/non-cancelable, so a long timeout doesn't waste runners on dupes.
@@ -726,6 +745,10 @@ jobs:
         # `mem9-<sha7>`); infra/ecs.ts reads MEM9_IMAGE_TAG (defaults to `latest`).
         env:
           MEM9_IMAGE_TAG: ${{ needs.build-and-push-image.outputs.image_tag }}
+          # Bedrock Project id → the llm-proxy sidecar's OpenAI-Project cost header
+          # (infra/ecs.ts BEDROCK_PROJECT). Repo variable set out-of-band by
+          # scripts/deploy-bedrock-mantle-project.sh.
+          MEM9_BEDROCK_PROJECT: ${{ vars.MEM9_BEDROCK_PROJECT }}
         run: |
           set +e
           pnpm -C infra exec sst deploy --stage prod --print-logs 2>&1 | tee sst-deploy.log

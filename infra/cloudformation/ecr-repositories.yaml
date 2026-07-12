@@ -2,8 +2,9 @@ AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   OUT-OF-BAND ECR repos for mem9-on-aws (not SST-managed) so `sst remove` can't
   wipe image history: mnemo-server (server, §4), qwen3-embed (embed sidecar, §7),
-  bootstrap (schema-bootstrap task, §8). CI tags mem9-<sha>/latest (release) +
-  pr-<sha> (preview); each repo's lifecycle keeps them on separate schedules.
+  bootstrap (schema-bootstrap task, §8), llm-proxy (LLM smart-ingest sidecar, §7).
+  CI tags mem9-<sha>/latest (release) + pr-<sha> (preview); each repo's lifecycle
+  keeps them on separate schedules.
   Deploy via scripts/deploy-ecr-repositories.sh in ap-northeast-1. See §4.
 
 Parameters:
@@ -161,6 +162,39 @@ Resources:
         - Key: ManagedBy
           Value: cloudformation
 
+  # ───────────────────────────────────────────────────────────────────────────
+  # llm-proxy sidecar image (§7 LLM smart-ingest). Same tag scheme + lifecycle.
+  # ───────────────────────────────────────────────────────────────────────────
+  LlmProxyRepo:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Sub ${ProjectName}/llm-proxy
+      ImageTagMutability: MUTABLE
+      EncryptionConfiguration:
+        EncryptionType: AES256
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {
+            "rules": [
+              { "rulePriority": 1, "description": "Expire pr-<sha> preview images after 7 days.",
+                "selection": { "tagStatus": "tagged", "tagPrefixList": ["pr-"], "countType": "sinceImagePushed", "countUnit": "days", "countNumber": 7 },
+                "action": { "type": "expire" } },
+              { "rulePriority": 2, "description": "Keep the last 30 mem9-<sha> release images.",
+                "selection": { "tagStatus": "tagged", "tagPrefixList": ["mem9-"], "countType": "imageCountMoreThan", "countNumber": 30 },
+                "action": { "type": "expire" } },
+              { "rulePriority": 3, "description": "Expire untagged images after 3 days.",
+                "selection": { "tagStatus": "untagged", "countType": "sinceImagePushed", "countUnit": "days", "countNumber": 3 },
+                "action": { "type": "expire" } }
+            ]
+          }
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: cloudformation
+
 Outputs:
   MnemoServerRepoUri:
     Description: >
@@ -185,3 +219,8 @@ Outputs:
     Value: !GetAtt BootstrapRepo.RepositoryUri
     Export:
       Name: !Sub ${AWS::StackName}-BootstrapRepoUri
+  LlmProxyRepoUri:
+    Description: The llm-proxy sidecar ECR repository URI (without a tag).
+    Value: !GetAtt LlmProxyRepo.RepositoryUri
+    Export:
+      Name: !Sub ${AWS::StackName}-LlmProxyRepoUri
