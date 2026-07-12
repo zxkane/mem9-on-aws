@@ -36,31 +36,36 @@ export PGCONNECT_TIMEOUT=8
 PSQL="psql --host=${MEM9_DB_HOST} --port=${MEM9_DB_PORT} --username=${DB_USER} \
   --dbname=${MEM9_DB_NAME} -v ON_ERROR_STOP=1 --no-password"
 
-# Wait for the DB to accept connections before applying schema, but FAIL FAST if
-# it's genuinely unreachable — do NOT hang for many minutes (that blows the
-# caller's `aws ecs wait` and hides the cause). PGCONNECT_TIMEOUT=8 (set below) +
-# 8 attempts × 8s sleep ≈ 2 min worst case, then exit non-zero with the REAL psql
-# error printed (so run-bootstrap-task.sh's log-fetch shows why: SG/network block,
-# proxy-not-ready, auth, etc.). The bootstrap runs right after `sst deploy`, so a
-# few retries cover proxy-target-registration lag; a persistent failure is a real
-# config bug, not a race.
-echo "bootstrap: probing ${MEM9_DB_HOST}:${MEM9_DB_PORT} (fail-fast, up to ~2 min)..."
+# Wait for the DB to accept connections before applying schema. This runs right
+# after `sst deploy`, and run-bootstrap-task.sh already GATES the run on the RDS
+# Proxy target being AVAILABLE — but a freshly-warm proxy can still drop the very
+# first client connections during Postgres startup ("server closed the connection
+# unexpectedly ... before or while processing the request") for a short window
+# while its backend pool settles. So retry patiently: PGCONNECT_TIMEOUT=8 (set
+# above) + 30 attempts × 8s sleep ≈ 5 min worst case, then exit non-zero with the
+# REAL psql error printed (so run-bootstrap-task.sh's log-fetch shows why:
+# SG/network block, proxy-still-warming, auth, etc.). 5 min covers the observed
+# 3–7 min proxy cold-start range in combination with the pre-run gate; a failure
+# that survives BOTH the gate and 5 min of retries is a real config bug, not a
+# race. "server closed the connection unexpectedly" is transient here and treated
+# as retryable — psql exits non-zero and we loop.
+echo "bootstrap: probing ${MEM9_DB_HOST}:${MEM9_DB_PORT} (patient, up to ~5 min)..."
 ready=0
 i=1
-while [ "$i" -le 8 ]; do
+while [ "$i" -le 30 ]; do
   # Capture the error so the LAST failure's reason is shown if we give up.
   if PROBE_ERR=$($PSQL -tAc 'SELECT 1' 2>&1); then
     ready=1
     echo "bootstrap: DB reachable after $((i - 1)) retries"
     break
   fi
-  echo "bootstrap: attempt ${i}/8 failed: ${PROBE_ERR}"
+  echo "bootstrap: attempt ${i}/30 failed: ${PROBE_ERR}"
   sleep 8
   i=$((i + 1))
 done
 if [ "$ready" -ne 1 ]; then
-  echo "bootstrap: DB unreachable after ~2 min. Last error above." >&2
-  echo "bootstrap: (common causes: RDS Proxy SG doesn't allow 5432 from the task SG; proxy target not yet available; bad creds)" >&2
+  echo "bootstrap: DB unreachable after ~5 min. Last error above." >&2
+  echo "bootstrap: (common causes: RDS Proxy SG doesn't allow 5432 from the task SG; proxy target still warming; bad creds)" >&2
   exit 1
 fi
 

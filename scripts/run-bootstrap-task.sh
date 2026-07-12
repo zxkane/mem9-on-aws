@@ -29,10 +29,55 @@ TASK_DEF=$(aws ssm get-parameter --name "${PREFIX}/task-def-arn" --region "$REGI
 TASK_SG=$(aws ssm get-parameter --name "${PREFIX}/task-sg-id" --region "$REGION" --query Parameter.Value --output text)
 # subnet-ids is a StringList → comma-joined; run-task wants a JSON array.
 SUBNETS_CSV=$(aws ssm get-parameter --name "${PREFIX}/subnet-ids" --region "$REGION" --query Parameter.Value --output text)
+# The DB proxy host (db stack export) — its FIRST dot-label is the RDS Proxy name,
+# which the readiness gate below polls for a healthy backend target.
+DB_PREFIX="/mem9-on-aws/${STAGE}/db"
+PROXY_HOST=$(aws ssm get-parameter --name "${DB_PREFIX}/proxy-host" --region "$REGION" --query Parameter.Value --output text)
 
 if [[ -z "$CLUSTER" || -z "$TASK_DEF" || -z "$TASK_SG" || -z "$SUBNETS_CSV" ]]; then
   echo "::error::missing bootstrap SSM params under ${PREFIX} — has sst deploy run for this stage?"
   exit 1
+fi
+
+# ── RDS Proxy readiness gate ────────────────────────────────────────────────
+# SST's `sst.aws.Aurora({proxy:true})` returns once the Aurora CLUSTER is
+# `available`, but does NOT wait for the RDS Proxy to establish a healthy backend
+# connection pool. A freshly-created proxy accepts TCP on 5432 but DROPS the
+# client during the Postgres startup phase until its target becomes healthy
+# ("server closed the connection unexpectedly ... before or while processing the
+# request") — this can take 3–7 min after the proxy's create call returns. Both
+# the bootstrap task AND mnemo-server hit this on the first deploy. Gate here on
+# `describe-db-proxy-targets` TargetHealth.State == AVAILABLE (the deterministic
+# readiness signal — proxy Status `available` alone is NOT sufficient, the TARGET
+# must be healthy) BEFORE running the task, so the task connects to a warm proxy.
+# IAM: the deploy role already carries rds:DescribeDBProxyTargets.
+if [[ -n "$PROXY_HOST" && "$PROXY_HOST" != "None" ]]; then
+  PROXY_NAME="${PROXY_HOST%%.*}"
+  echo "run-bootstrap: waiting for RDS Proxy '${PROXY_NAME}' target to become AVAILABLE (up to ~8 min)..."
+  PROXY_DEADLINE=$((SECONDS + 480))
+  PROXY_READY=0
+  while [[ $SECONDS -lt $PROXY_DEADLINE ]]; do
+    STATES=$(aws rds describe-db-proxy-targets --db-proxy-name "$PROXY_NAME" --region "$REGION" \
+      --query 'Targets[].TargetHealth.State' --output text 2>/dev/null || true)
+    # Case-insensitive match: the API returns AVAILABLE.
+    if printf '%s' "$STATES" | grep -qiw AVAILABLE; then
+      PROXY_READY=1
+      echo "run-bootstrap: RDS Proxy target is AVAILABLE (states: ${STATES:-<none>})"
+      break
+    fi
+    echo "run-bootstrap: proxy target not ready yet (states: ${STATES:-<none>}), waiting 10s..."
+    sleep 10
+  done
+  if [[ "$PROXY_READY" -ne 1 ]]; then
+    # Don't hard-fail on the gate itself — the entrypoint's own retry may still
+    # win if the proxy warms in the next moment. Warn and proceed; the task's
+    # fail-fast probe + this script's log dump will surface a genuine failure.
+    echo "::warning::RDS Proxy target not AVAILABLE within ~8 min; proceeding anyway (the bootstrap task retries)."
+    aws rds describe-db-proxy-targets --db-proxy-name "$PROXY_NAME" --region "$REGION" \
+      --query 'Targets[].{type:Type,port:Port,health:TargetHealth}' --output json 2>&1 || true
+  fi
+else
+  echo "::warning::no ${DB_PREFIX}/proxy-host in SSM — skipping proxy readiness gate (task will retry on its own)."
 fi
 
 # Build the awsvpc network config: subnets as a JSON array (split the CSV on
@@ -101,9 +146,10 @@ print_task_logs() {
 
 # Manual wait loop (NOT `aws ecs wait`, whose 100×6s=10m cap can't be raised via
 # the AWS_MAX_ATTEMPTS env in all CLI builds). Poll lastStatus until STOPPED, up
-# to ~15 min. The entrypoint now fails FAST (~2 min) if the DB is unreachable, so
-# a STOPPED task should arrive well within this; a full timeout means the task is
-# genuinely stuck (image pull, etc.) — we then dump logs + describe-tasks.
+# to ~15 min. The proxy-readiness gate above already ensured a warm proxy, and the
+# entrypoint retries the DB for up to ~5 min then exits, so a STOPPED task should
+# arrive well within this; a full 15-min timeout means the task is genuinely stuck
+# (image pull, etc.) — we then dump logs + describe-tasks.
 DEADLINE=$((SECONDS + 900))
 LAST_STATUS=""
 while [[ $SECONDS -lt $DEADLINE ]]; do
