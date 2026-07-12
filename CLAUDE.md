@@ -47,7 +47,7 @@ file rather than silently diverging.
 | Dimension | Decision |
 |---|---|
 | IaC | **SST v4**, mirroring `zxkane/podcast-curation` + `zxkane/llm-wiki` structure |
-| Region | **ap-northeast-1 (Tokyo)** |
+| Region | **ap-southeast-1 (Singapore)** — moved from ap-northeast-1 (Tokyo), where RDS Proxy `PENDING_PROXY_CAPACITY` cold-start was pathological (a fresh proxy sat 40+ min, never AVAILABLE). See ARCHITECTURE.md. |
 | Compute | **ECS Fargate**, **arm64**, single task (`desiredCount=1`) |
 | Database | **Aurora PostgreSQL Serverless v2** + `pgvector` (mem9 `postgres` backend) |
 | VPC | **Reuse the account default VPC** (private subnets w/ NAT), per podcast-curation pattern |

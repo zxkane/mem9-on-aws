@@ -15,12 +15,12 @@
 # Env:
 #   STAGE       (required) — e.g. prod / pr-7. Selects the /mem9-on-aws/<stage>/
 #               bootstrap/* SSM params.
-#   AWS_REGION  (optional) — defaults to ap-northeast-1 (the app region).
+#   AWS_REGION  (optional) — defaults to ap-southeast-1 (the app region).
 
 set -euo pipefail
 
 STAGE="${STAGE:?STAGE is required (e.g. prod or pr-7)}"
-REGION="${AWS_REGION:-ap-northeast-1}"
+REGION="${AWS_REGION:-ap-southeast-1}"
 PREFIX="/mem9-on-aws/${STAGE}/bootstrap"
 
 echo "run-bootstrap: reading run inputs from SSM ${PREFIX}/* (region ${REGION})"
@@ -51,20 +51,19 @@ fi
 # task connects to a warm proxy. IAM: the deploy role already carries
 # rds:DescribeDBProxyTargets.
 #
-# TIMING (measured, ap-northeast-1, Serverless v2 @ 0.5 ACU min): the target sits
-# in TargetHealth.State=UNAVAILABLE / Reason=PENDING_PROXY_CAPACITY for a LONG
-# time after the proxy reports Status=available AND the Aurora cluster+instance
-# are both `available` — the proxy description is literally "DBProxy Target is
-# waiting for proxy to scale to desired capacity". On a cold pr-N stage this was
-# observed to persist for >23 min (an 18-min gate was NOT enough). The proxy config
-# is healthy (verified: correct SG/subnets/target-group/pool); it's just AWS's
-# first-ever proxy capacity scale being very slow here. So the gate waits up to
-# ~35 min — well under the job timeout (75m preview / 80m prod) yet comfortably
-# past the worst observed warmup — polling every 15s. The proxy warms ONCE per
-# stage then stays warm, so this cost is paid only on the first deploy of a stage.
+# TIMING: after the proxy reports Status=available, its target can still sit in
+# TargetHealth.State=UNAVAILABLE / Reason=PENDING_PROXY_CAPACITY ("DBProxy Target is
+# waiting for proxy to scale to desired capacity") while AWS provisions the proxy's
+# connection capacity — even though the Aurora cluster+instance are both `available`.
+# In ap-northeast-1 this was pathological (a fresh proxy sat PENDING for 40+ min and
+# never became AVAILABLE — the reason this project moved to ap-southeast-1). Normal
+# is 1–3 min. The gate waits up to ~35 min (a generous ceiling, well under the 75m/80m
+# job timeouts) polling every 15s, so a genuinely slow warmup still passes while a
+# truly wedged proxy surfaces via the downstream task's own probe + log dump. The
+# proxy warms ONCE per stage then stays warm — this cost is first-deploy only.
 if [[ -n "$PROXY_HOST" && "$PROXY_HOST" != "None" ]]; then
   PROXY_NAME="${PROXY_HOST%%.*}"
-  echo "run-bootstrap: waiting for RDS Proxy '${PROXY_NAME}' target to become AVAILABLE (up to ~35 min; PENDING_PROXY_CAPACITY cold-start can exceed 23 min here)..."
+  echo "run-bootstrap: waiting for RDS Proxy '${PROXY_NAME}' target to become AVAILABLE (up to ~35 min; PENDING_PROXY_CAPACITY during cold-start is normal, usually 1-3 min)..."
   PROXY_DEADLINE=$((SECONDS + 2100))
   PROXY_READY=0
   while [[ $SECONDS -lt $PROXY_DEADLINE ]]; do

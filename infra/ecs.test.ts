@@ -176,10 +176,10 @@ describe("ecs stack", () => {
     expect(Object.keys(byName).sort()).toEqual(["mnemo-server", "qwen3-embed"]);
     // Both images are our out-of-band ECR repos, from the caller account — not public.
     expect(imgStr(byName["mnemo-server"])).toContain(
-      ".dkr.ecr.ap-northeast-1.amazonaws.com/mem9-on-aws/mnemo-server:",
+      ".dkr.ecr.ap-southeast-1.amazonaws.com/mem9-on-aws/mnemo-server:",
     );
     expect(imgStr(byName["qwen3-embed"])).toContain(
-      ".dkr.ecr.ap-northeast-1.amazonaws.com/mem9-on-aws/qwen3-embed:",
+      ".dkr.ecr.ap-southeast-1.amazonaws.com/mem9-on-aws/qwen3-embed:",
     );
     expect(imgStr(byName["mnemo-server"])).not.toContain("public.ecr.aws");
     // No ALB (deferred to the Gateway PR).

@@ -13,8 +13,8 @@
  */
 
 // Must match sst.config.ts providers.aws.region and the ECR bootstrap region
-// (scripts/deploy-ecr-repositories.sh). Tokyo — Fargate pulls same-region.
-export const ECR_REGION = "ap-northeast-1";
+// (scripts/deploy-ecr-repositories.sh). Singapore — Fargate pulls same-region.
+export const ECR_REGION = "ap-southeast-1";
 
 // Cache the caller-identity Output so repeated ecrImage() calls don't each create
 // a new getCallerIdentityOutput invoke.

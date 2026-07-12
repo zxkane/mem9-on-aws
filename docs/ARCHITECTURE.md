@@ -240,7 +240,10 @@ and an OpenAI-compatible `/embeddings`. Both are resolved below.
 OpenAI-compatible* endpoint. mem9's LLM client POSTs to `/chat/completions`, so:
 
 - **smart-ingest = ON at launch, Mantle direct, NO LiteLLM/proxy.** Set
-  `MNEMO_LLM_BASE_URL=https://bedrock-mantle.ap-northeast-1.api.aws/v1`,
+  `MNEMO_LLM_BASE_URL=https://bedrock-mantle.ap-southeast-1.api.aws/v1`
+  (**region moved to Singapore — VERIFY Bedrock Mantle + GLM-5 are available in
+  ap-southeast-1 when the token-refresh sidecar lands (Task #32); if not, that
+  path may need a cross-region Mantle endpoint or a fallback**),
   `MNEMO_LLM_MODEL=<GLM-5 model id>`, `MNEMO_INGEST_MODE=smart`, and
   `MNEMO_LLM_API_KEY=<a Bedrock bearer token>` (see auth below).
   → **First deploy must bring up Mantle auth + Bedrock Project together** (not a
@@ -405,8 +408,16 @@ model is the heavy tenant), which is the main swing in the Fargate cost row.
   must use **only public AWS services**. Aurora / RDS Proxy / Secrets Manager are
   public ✅. The **Bedrock Mantle** LLM path (§7) is internal/preview → flagged for
   revisit to public `bedrock-runtime` Converse before a customer build (Open #7).
-- **Region**: ap-northeast-1 (Tokyo). **Compute**: ECS Fargate, arm64,
-  `desiredCount=1`. **VPC**: reuse default VPC private subnets.
+- **Region**: **ap-southeast-1 (Singapore)** — MOVED from ap-northeast-1 (Tokyo)
+  on 2026-07-12. In Tokyo, a freshly-created **RDS Proxy** sat in
+  `TargetHealth.State=UNAVAILABLE / Reason=PENDING_PROXY_CAPACITY` for 40+ min and
+  never became AVAILABLE (Aurora cluster+instance healthy the whole time; proxy
+  config verified correct), which blocked every bootstrap + mnemo-server first
+  connection. Two independent proxies reproduced it → region-level issue, not our
+  config. Singapore's default VPC is likewise NAT-routed private subnets (verified
+  2026-07-12). **Compute**: ECS Fargate, arm64, `desiredCount=1`. **VPC**: reuse
+  the account default VPC's private subnets (selected by the region-agnostic
+  `map-public-ip-on-launch=false` filter, not a Tokyo-specific Name tag).
 - **MCP + auth**: AgentCore Gateway + Cognito M2M (podcast-curation pattern).
 - **Gateway → mnemo-server**: **private** via AgentCore `privateEndpoint` +
   **managed VPC Lattice** → **internal ALB (public ACM cert, TLS terminated here)**
