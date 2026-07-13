@@ -58,21 +58,9 @@ export function gateway(
     openApiSchema = fs.readFileSync(path.resolve(process.cwd(), "infra", "gateway", "openapi.yaml"), "utf-8");
   }
 
-  // The AgentcoreGatewayTarget's openApiSchema takes the schema from S3 (the
-  // proven podcast-curation path — the `inlinePayload` variant the Pulumi
-  // provider rejects a plain string for). Upload the schema to a private bucket
-  // and reference it by URI; the gateway service role reads it (policy below).
-  const schemasBucket = new awsAny.s3.Bucket("Mem9McpSchemas", {
-    forceDestroy: true,
-    tags,
-  });
-  const schemaKey = "mcp-schema.yaml";
-  const schemaObject = new awsAny.s3.BucketObject("Mem9OpenApiSchema", {
-    bucket: schemasBucket.id,
-    key: schemaKey,
-    content: openApiSchema,
-    contentType: "application/yaml",
-  });
+  // (The OpenAPI schema is inlined into the target's desiredState below — no S3
+  // bucket/object. The S3-schema variant caused the target to FAIL to stabilize;
+  // inline is proven to reach READY.)
 
   // --- Gateway service role (assumed by AgentCore) ---
   // Name it explicitly so the CI role's mem9-on-aws-* iam grants (ComputePolicy)
@@ -139,18 +127,8 @@ export function gateway(
     }),
   });
 
-  // Let the gateway service role read the OpenAPI schema object from S3.
-  new awsAny.iam.RolePolicy("Mem9GatewayS3SchemaAccess", {
-    role: gatewayServiceRole.name,
-    policy: schemasBucket.arn.apply((bucketArn: string) =>
-      JSON.stringify({
-        Version: "2012-10-17",
-        Statement: [
-          { Effect: "Allow", Action: "s3:GetObject", Resource: `${bucketArn}/${schemaKey}` },
-        ],
-      }),
-    ),
-  });
+  // (No S3 schema-read policy needed — the OpenAPI schema is inlined into the
+  // target, not fetched from S3.)
 
   // --- AgentCore Gateway (typed aws.bedrock.AgentcoreGateway) ---
   // CUSTOM_JWT authorizer matching on allowedClients (Cognito client_credentials
@@ -210,9 +188,14 @@ export function gateway(
     Description: "mnemo-server REST tools (add_memory, search_memories) via internal ALB",
     TargetConfiguration: {
       Mcp: {
-        OpenApiSchema: {
-          S3: { Uri: $interpolate`s3://${schemasBucket.id}/${schemaKey}` },
-        },
+        // INLINE the OpenAPI schema (not S3). Verified via a direct API test: an
+        // inline-payload self-managed-Lattice target stabilizes CREATING→READY in
+        // ~3.5 min, whereas the S3-schema variant FAILEDs to stabilize (the async
+        // S3 fetch during stabilization is the failing factor). CloudControl takes
+        // inlinePayload as a plain string (unlike the typed pulumi-aws resource,
+        // which rejected it — that's why we're on CloudControl). Schema is ~4KB,
+        // well under the inline limit.
+        OpenApiSchema: { InlinePayload: openApiSchema },
       },
     },
     CredentialProviderConfigurations: [
@@ -239,7 +222,15 @@ export function gateway(
       typeName: "AWS::BedrockAgentCore::GatewayTarget",
       desiredState: targetDesiredState,
     },
-    { dependsOn: [bedrockGateway, apiKeyProvider, schemaObject] },
+    {
+      dependsOn: [bedrockGateway, apiKeyProvider],
+      // The target with a self-managed-Lattice privateEndpoint takes ~3-4 min to
+      // stabilize (verified via a direct API test: CREATING → READY at ~3.5 min).
+      // CloudControl's default create wait is too short → it reported the target
+      // as "NotStabilized / FAILED" mid-CREATING. A generous create timeout lets
+      // Pulumi poll through to READY.
+      customTimeouts: { create: "20m", update: "20m", delete: "20m" },
+    },
   );
 
   const gatewayId = bedrockGateway.gatewayId;

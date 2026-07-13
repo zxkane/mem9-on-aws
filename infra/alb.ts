@@ -171,6 +171,7 @@ export function alb(ecsOut: EcsOutputs, dbOut: DbOutputs, certOut: CertOutputs):
     {
       name: `mem9-${$app.stage}`.slice(0, 40),
       resourceGatewayIdentifier: resourceGateway.id,
+      type: "SINGLE", // required by the API (a single dnsResource, not a group)
       protocol: "TCP",
       portRanges: [`${ALB_HTTPS_PORT}`],
       resourceConfigurationDefinition: {

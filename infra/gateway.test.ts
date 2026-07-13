@@ -76,7 +76,6 @@ function installGlobals(stage: string) {
       getSubnetsOutput: () => ({ ids: out(["subnet-a", "subnet-b", "subnet-c"]) }),
     },
     iam: { Role: makeCtor("Role"), RolePolicy: makeCtor("RolePolicy") },
-    s3: { Bucket: makeCtor("Bucket"), BucketObject: makeCtor("BucketObject") },
     bedrock: {
       AgentcoreGateway: makeCtor("AgentcoreGateway"),
       AgentcoreApiKeyCredentialProvider: makeCtor("AgentcoreApiKeyCredentialProvider"),
@@ -157,7 +156,7 @@ describe("gateway stack", () => {
     expect(String((provider.apiKey as { value?: string }).value)).toBe("deadbeefTENANTID");
   });
 
-  it("target (CloudControl) has S3 OpenAPI schema, API-key cred config, and privateEndpoint routingDomain=ALB DNS", async () => {
+  it("target (CloudControl) has inline OpenAPI schema, API-key cred config, and self-managed-Lattice privateEndpoint", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
     gateway(fakeCognito(), fakeAlb(), fakeBootstrap());
@@ -167,11 +166,11 @@ describe("gateway stack", () => {
     const target = only("CloudControlResource");
     expect(target.typeName).toBe("AWS::BedrockAgentCore::GatewayTarget");
     const ds = JSON.parse(String((target.desiredState as { value?: string }).value));
-    // OpenAPI schema from S3 (inlinePayload is rejected; S3 is the proven path).
-    expect(ds.TargetConfiguration.Mcp.OpenApiSchema.S3.Uri).toMatch(/^s3:\/\/.*mcp-schema\.yaml$/);
-    const schemaObj = only("BucketObject");
-    expect(String(schemaObj.content)).toContain("add_memory");
-    expect(String(schemaObj.content)).toContain("search_memories");
+    // OpenAPI schema is INLINED (the S3-schema variant made the target fail to
+    // stabilize; inline is proven to reach READY).
+    const inline = ds.TargetConfiguration.Mcp.OpenApiSchema.InlinePayload as string;
+    expect(inline).toContain("add_memory");
+    expect(inline).toContain("search_memories");
     // Outbound = API key in the X-API-Key header (CredentialProviderConfigurations
     // is an ARRAY in the CFN shape, min/max 1).
     expect(ds.CredentialProviderConfigurations).toHaveLength(1);
@@ -193,18 +192,11 @@ describe("gateway stack", () => {
     const outs = gateway(fakeCognito(), fakeAlb(), fakeBootstrap());
     const role = only("Role");
     expect(String(role.assumeRolePolicy)).toContain("bedrock-agentcore.amazonaws.com");
-    // Two role policies now: workload-identity access + S3 schema read. The S3
-    // one's `policy` is an Output (bucket.arn.apply → out()); unwrap .value.
-    const rolePolicies = created.filter((r) => r.kind === "RolePolicy");
-    const policyDocs = rolePolicies
-      .map((r) => {
-        const p = r.args.policy as unknown;
-        return typeof p === "object" && p && "value" in p ? String((p as { value: unknown }).value) : String(p);
-      })
-      .join("\n");
-    expect(policyDocs).toContain("bedrock-agentcore:GetWorkloadAccessToken");
-    expect(policyDocs).toContain("bedrock-agentcore-identity!");
-    expect(policyDocs).toContain("s3:GetObject");
+    // Workload-identity access role policy (inline schema → no S3 read policy).
+    const rolePolicy = only("RolePolicy");
+    const policyDoc = String(rolePolicy.policy);
+    expect(policyDoc).toContain("bedrock-agentcore:GetWorkloadAccessToken");
+    expect(policyDoc).toContain("bedrock-agentcore-identity!");
     expect(params.map((p) => p.name)).toContain("/mem9-on-aws/prod/gateway/url");
     expect(outs.gatewayUrl).toBeDefined();
   });

@@ -154,6 +154,7 @@ describe("alb stack", () => {
     expect(rg.subnetIds).toBeDefined();
     expect(rg.securityGroupIds).toBeDefined();
     const rc = only("ResourceConfiguration");
+    expect(rc.type).toBe("SINGLE");
     expect(rc.protocol).toBe("TCP");
     expect(rc.portRanges).toEqual(["443"]);
     const dns = (rc.resourceConfigurationDefinition as any).dnsResource;
