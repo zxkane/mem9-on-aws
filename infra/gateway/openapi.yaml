@@ -1,0 +1,166 @@
+openapi: 3.0.3
+info:
+  title: mem9 MCP
+  version: "1"
+  description: >-
+    MCP tools for the mem9 shared-memory server: add a memory and search
+    memories. Reached by the AgentCore Gateway over managed VPC Lattice to the
+    internal ALB to mnemo-server. Auth to mnemo-server is an X-API-Key header
+    (the tenant id), injected by the Gateway's API-key credential provider;
+    clients authenticate to the GATEWAY with a Cognito M2M JWT.
+
+# AgentCore Gateway requires an HTTPS server URL. This is the ALB's public-cert
+# SNI domain (name-only; actual routing uses the target's routingDomain = the ALB
+# internal DNS). Fully INLINED schema (no $ref / oneOf / anyOf / allOf) — the
+# AgentCore Gateway OpenAPI validator rejects those (verified: oneOf -> "not
+# supported"); podcast-curation's working schema is likewise all-inline.
+servers:
+  - url: https://mem9.aws.kane.mx
+    description: mem9 internal ALB (TLS via public ACM cert; private via Lattice)
+
+# Every operation authenticates to mnemo-server with the X-API-Key header,
+# supplied by the Gateway's API-key credential provider (not the client).
+security:
+  - MnemoApiKey: []
+
+components:
+  securitySchemes:
+    MnemoApiKey:
+      type: apiKey
+      in: header
+      name: X-API-Key
+
+paths:
+  /v1alpha2/mem9s/memories:
+    post:
+      operationId: add_memory
+      summary: Add a memory (raw content or a conversation) for later recall.
+      description: >-
+        Store a memory. Provide EXACTLY ONE of `content` (a single string stored
+        as-is) OR `messages` (a conversation the server extracts memories from) —
+        never both. Writes are processed asynchronously; the call returns
+        {"status":"accepted"} and the memory becomes searchable a few seconds
+        later once the ingest + embedding pipeline completes.
+      parameters:
+        - in: header
+          name: X-Mnemo-Agent-Id
+          required: false
+          schema:
+            type: string
+          description: Optional agent id to attribute the write to (per-agent scoping).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              properties:
+                content:
+                  type: string
+                  description: Raw content to store as-is. Provide EXACTLY ONE of content OR messages, never both.
+                messages:
+                  type: array
+                  description: A conversation to extract memories from. Provide EXACTLY ONE of content OR messages.
+                  items:
+                    type: object
+                    required: [role, content]
+                    properties:
+                      role:
+                        type: string
+                        description: Conversation role (user, assistant, or system).
+                      content:
+                        type: string
+                agent_id:
+                  type: string
+                  description: Agent to attribute the memory to (falls back to the X-Mnemo-Agent-Id header).
+                tags:
+                  type: array
+                  items:
+                    type: string
+                metadata:
+                  type: object
+                  additionalProperties: true
+      responses:
+        "202":
+          description: Accepted — the memory is queued for async ingest + indexing.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+    get:
+      operationId: search_memories
+      summary: Search memories by semantic query.
+      description: >-
+        Search stored memories. `q` is the natural-language query (semantic +
+        keyword). Returns the most relevant memories with a relevance `score`.
+        Recently-added memories may not appear until their async ingest completes.
+      parameters:
+        - in: query
+          name: q
+          required: true
+          schema:
+            type: string
+          description: The search query.
+        - in: query
+          name: limit
+          required: false
+          schema:
+            type: integer
+            default: 20
+            maximum: 200
+        - in: query
+          name: offset
+          required: false
+          schema:
+            type: integer
+            default: 0
+        - in: query
+          name: agent_id
+          required: false
+          schema:
+            type: string
+          description: Restrict to memories written by this agent.
+      responses:
+        "200":
+          description: Search results (empty array if nothing matches yet).
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  memories:
+                    type: array
+                    items:
+                      type: object
+                      properties:
+                        id:
+                          type: string
+                        content:
+                          type: string
+                        memory_type:
+                          type: string
+                          description: pinned, insight, or session.
+                        score:
+                          type: number
+                          description: Relevance score (present only on search results).
+                        tags:
+                          type: array
+                          items:
+                            type: string
+                        agent_id:
+                          type: string
+                        created_at:
+                          type: string
+                          format: date-time
+                        updated_at:
+                          type: string
+                          format: date-time
+                  total:
+                    type: integer
+                  limit:
+                    type: integer
+                  offset:
+                    type: integer

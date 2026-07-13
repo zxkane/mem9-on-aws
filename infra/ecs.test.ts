@@ -22,10 +22,14 @@ interface ServiceRecord {
 interface ParamRecord {
   name: string;
 }
+interface TargetGroupRecord {
+  args: Record<string, unknown>;
+}
 
 let clusters: ClusterRecord[];
 let services: ServiceRecord[];
 let params: ParamRecord[];
+let targetGroups: TargetGroupRecord[];
 
 // Stand-in for the db() stack's return value — passed straight into ecs(). Cast
 // through the loose `out<T>` mock (its .apply returns unknown, not Output<U>) to
@@ -87,6 +91,16 @@ function installGlobals(stage: string) {
         }
       },
     },
+    lb: {
+      // ecs() creates the mnemo-server ALB target group here (§6a); alb.ts
+      // consumes its arn. Capture the args + expose an .arn like the real Output.
+      TargetGroup: class {
+        arn = out("arn:aws:elasticloadbalancing:tg/mem9");
+        constructor(_logicalName: string, args: Record<string, unknown>) {
+          targetGroups.push({ args });
+        }
+      },
+    },
   };
   (globalThis as Record<string, unknown>).sst = {
     aws: {
@@ -111,6 +125,7 @@ beforeEach(() => {
   clusters = [];
   services = [];
   params = [];
+  targetGroups = [];
 });
 
 afterEach(() => {
@@ -185,8 +200,34 @@ describe("ecs stack", () => {
       ".dkr.ecr.ap-northeast-1.amazonaws.com/mem9-on-aws/llm-proxy:",
     );
     expect(imgStr(byName["mnemo-server"])).not.toContain("public.ecr.aws");
-    // No ALB (deferred to the Gateway PR).
+    // Top-level `loadBalancer` (SST's abstraction) is NOT used — we register the
+    // ALB target group on the raw ECS service via transform.service (§6a).
     expect(args.loadBalancer).toBeUndefined();
+  });
+
+  it("creates an ip target group on :8080 and registers it on the service via transform (§6a)", async () => {
+    installGlobals("prod");
+    const ecs = await loadEcs();
+    ecs(fakeDbOut());
+    // The mnemo-server ALB target group: ip type (Fargate awsvpc), port 8080,
+    // unauthenticated /healthz check.
+    expect(targetGroups).toHaveLength(1);
+    const tg = targetGroups[0].args;
+    expect(tg.targetType).toBe("ip");
+    expect(tg.port).toBe(8080);
+    expect((tg.healthCheck as Record<string, unknown>).path).toBe("/healthz");
+    // The service transform registers the TG (rolling redeploy, not replacement)
+    // + a grace period covering the qwen3 180s model load.
+    const transform = (services[0].args.transform as Record<string, any>).service;
+    const svcArgs: Record<string, any> = {};
+    transform(svcArgs);
+    expect(svcArgs.loadBalancers).toHaveLength(1);
+    expect(svcArgs.loadBalancers[0].containerName).toBe("mnemo-server");
+    expect(svcArgs.loadBalancers[0].containerPort).toBe(8080);
+    expect(svcArgs.healthCheckGracePeriodSeconds).toBeGreaterThanOrEqual(180);
+    // targetGroupArn is exported for alb.ts to consume.
+    const outs = ecs(fakeDbOut());
+    expect(outs.targetGroupArn).toBeDefined();
   });
 
   it("grants the task role least-privilege Bedrock (CallWithBearerToken + InvokeModel on GLM-5), no wildcard model", async () => {
@@ -303,6 +344,7 @@ describe("ecs stack", () => {
       "/mem9-on-aws/prod/ecs/cluster-name",
       "/mem9-on-aws/prod/ecs/image",
       "/mem9-on-aws/prod/ecs/service-name",
+      "/mem9-on-aws/prod/ecs/target-group-arn",
     ]);
   });
 });

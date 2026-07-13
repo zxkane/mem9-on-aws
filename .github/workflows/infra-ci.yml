@@ -254,6 +254,22 @@ jobs:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: bash scripts/run-bootstrap-task.sh
 
+      - name: MCP write-search E2E (preview, soft)
+        # The first live write->search round-trip (section 6/6a): Cognito M2M JWT
+        # -> AgentCore Gateway -> managed VPC Lattice -> internal ALB ->
+        # mnemo-server -> Aurora -> qwen3 -> search. SOFT on preview
+        # (E2E_SOFT=1): mem9 ingest is async, and AgentCore identity / Lattice can
+        # take a few min to propagate on a fresh pr-N stage, so a search-timeout
+        # logs a ::warning:: instead of failing the PR. Prod runs the same check
+        # HARD. STAGE comes from the deploy step's validated pr-N output (env, not
+        # inlined into run:).
+        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        shell: bash
+        env:
+          STAGE: ${{ steps.deploy.outputs.stage }}
+          E2E_SOFT: "1"
+        run: bash scripts/run-mcp-e2e.sh
+
       - name: Auto-cleanup on deploy failure
         # Best-effort — if the deploy half-applied resources, remove them so the
         # next push doesn't accumulate orphan state.
@@ -769,6 +785,16 @@ jobs:
         env:
           STAGE: prod
         run: bash scripts/run-bootstrap-task.sh
+
+      - name: MCP write-search E2E (prod, hard)
+        # HARD gate on prod: the full section 6/6a chain must round-trip
+        # (Cognito M2M JWT -> AgentCore Gateway -> Lattice -> internal ALB ->
+        # mnemo-server -> Aurora -> qwen3 -> search). No E2E_SOFT, so a failure
+        # fails the prod deploy job (surfaced by the deploy-failure issue below).
+        shell: bash
+        env:
+          STAGE: prod
+        run: bash scripts/run-mcp-e2e.sh
 
       - name: Create issue on prod deploy failure
         # failure() fires for any failed step (gate, preflight, lock recovery,

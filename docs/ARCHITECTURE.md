@@ -157,6 +157,21 @@ VPC-internal endpoint if the embedding shim is in-VPC).
 
 ## 6. MCP surface + auth: **AgentCore Gateway + Cognito** (reuse the pattern)
 
+> **IMPLEMENTED** (PR "feat(mcp)", 2026-07-13). `infra/{certs,cognito,alb,gateway}.ts`
+> + `infra/gateway/openapi.yaml`. Two adaptations vs the design/podcast-curation,
+> both intentional:
+> - **Domain is `mem9.aws.kane.mx`**, NOT `mem9.internal.kane.mx` — the latter was
+>   never a real zone; `aws.kane.mx` is an existing delegated public Route53 zone, so
+>   ACM DNS validation is automatic. Still name-only (cert subject + Lattice SNI;
+>   decoupled from routing). Override via `MEM9_MCP_DOMAIN` / `MEM9_MCP_ZONE`.
+> - **Outbound auth = API key** (`AgentcoreApiKeyCredentialProvider`, X-API-Key =
+>   tenant id), NOT OAuth — podcast-curation fronts a public API with an OAuth
+>   credential provider; mem9 authenticates with X-API-Key. And the target carries
+>   **`privateEndpoint.managedVpcResource`** (managed VPC Lattice, `routingDomain` =
+>   the internal ALB DNS) — podcast-curation's public-API target has no privateEndpoint.
+> - **v1 has NO interceptor Lambda** (single-operator, single-tenant → per-tool
+>   scoping deferred). Tools exposed: `add_memory`, `search_memories`.
+
 Mirror podcast-curation `gateway.ts` + `cognito.ts` + `api.ts`:
 
 - **AgentCore Gateway** (MCP protocol) with an **OpenAPI target** whose schema
@@ -206,23 +221,26 @@ Design rules pinned from the docs:
   private CA won't do → the ALB carries a **public ACM cert** and terminates TLS.
   The ALB is `internal` (not internet-facing); the public cert is only for TLS
   trust, not for public reachability.
-- **Certificate + domain (LOCKED)**:
-  - Public ACM cert for a **kane.mx subdomain**, e.g. `mem9.internal.kane.mx`.
+- **Certificate + domain (IMPLEMENTED)**:
+  - Public ACM cert for **`mem9.aws.kane.mx`** (a subdomain of the EXISTING public
+    R53 zone `aws.kane.mx` — the design's original `mem9.aws.kane.mx` was
+    never a real zone).
   - The domain is **name-only**: it is the ACM cert subject and the Lattice
     request **TLS SNI** — it does **NOT** need public DNS resolution and does
     **NOT** point at the ALB. Actual routing uses Lattice `routingDomain` = the
     ALB's internal AWS DNS name (`internal-xxx.<region>.elb.amazonaws.com`). SNI
     (your domain) and routing (ALB AWS DNS) are decoupled — this is the documented
     flow.
-  - **Route53 assumed** for `kane.mx` → ACM does automatic DNS validation
-    (`sst.aws.Dns` / one CNAME). If the zone isn't in R53, add the ACM validation
-    CNAME manually at the registrar (one-time).
+  - **Route53 auto-validation**: `aws.kane.mx` is a delegated public R53 zone, so
+    `infra/certs.ts` looks it up (`route53.getZoneOutput`) + writes the ACM
+    validation CNAME + gates on `CertificateValidation` (cert must be ISSUED before
+    the ALB listener references it).
 - **ALB → mnemo-server = plain HTTP (LOCKED)**: the ALB terminates TLS with the
   public ACM cert, then forwards to mnemo-server over **HTTP :8080** inside the
   private subnets. mnemo-server needs **no cert of its own**. (The docs' HTTPS
   backend step assumes a backend that already has a private cert; ours is bare
   HTTP, which is fine intra-VPC.) The ALB HTTPS listener applies a host-header
-  transform (`mem9.internal.kane.mx` → mnemo-server's internal host) per the docs.
+  transform (`mem9.aws.kane.mx` → mnemo-server's internal host) per the docs.
 - **Outbound auth = API key**, NOT SigV4. Docs: IAM/SigV4 outbound auth is only
   compatible with API Gateway / Lambda URL / AgentCore — **NOT ALB/EC2**. So the
   Gateway target uses an **API-key credential provider** carrying mnemo-server's
@@ -358,7 +376,7 @@ sidecar + `MNEMO_EMBED_DIMS=1024`. The FTS index is a GIN on
 | qwen3 embedding: Lambda (b1) low volume ~$0–2, OR folded into the Fargate task (b2, sidecar) → task memory ↑ | see Fargate row |
 | Bedrock Mantle (GLM-5 smart-ingest) | per-token, tiny at single-operator volume |
 | **Internal ALB** (TLS termination for Lattice) | ~$16–20 (fixed; the price of the private Gateway→ECS path) |
-| ACM public cert (`mem9.internal.kane.mx`) | **$0** (public ACM certs are free) |
+| ACM public cert (`mem9.aws.kane.mx`) | **$0** (public ACM certs are free) |
 | AgentCore Gateway + Cognito + managed VPC Lattice | low / mostly free at this scale (managed Lattice has no separate charge surfaced) |
 | NAT (if not already present in default VPC) | ~$32 + data — check whether default VPC already has one |
 
@@ -390,7 +408,7 @@ model is the heavy tenant), which is the main swing in the Fargate cost row.
 | Networking | default VPC private subnets + SGs | podcast-curation `infra/ecs.ts` default-VPC lookup |
 | MCP gateway | AgentCore Gateway (OpenAPI target + `privateEndpoint` managed Lattice, API-key outbound) | podcast-curation `infra/gateway.ts` (adapt: private endpoint is new) |
 | Private egress | AgentCore managed VPC Lattice (auto) + **internal ALB** (HTTPS→HTTP:8080, host-header transform) | new (`infra/gateway-egress.ts`) — no direct template (podcast fronts Lambda, not ECS) |
-| TLS cert | **public ACM cert** `mem9.internal.kane.mx` (R53 DNS-validated; name-only, no public A record) | new (`infra/certs.ts`) |
+| TLS cert | **public ACM cert** `mem9.aws.kane.mx` (R53 DNS-validated; name-only, no public A record) | new (`infra/certs.ts`) |
 | Auth | Cognito M2M pool + resource server | podcast-curation `infra/cognito.ts` |
 | Tool authz | REQUEST interceptor Lambda | podcast-curation `infra/functions.ts` |
 | Embedding | qwen3 OpenAI `/embeddings` as an **ECS sidecar** (lifted from llm-wiki qwen3 ONNX), localhost, dims 1024 | llm-wiki qwen3 ONNX code |
@@ -431,7 +449,7 @@ model is the heavy tenant), which is the main swing in the Fargate cost row.
 - **Gateway → mnemo-server**: **private** via AgentCore `privateEndpoint` +
   **managed VPC Lattice** → **internal ALB (public ACM cert, TLS terminated here)**
   → mnemo-server over HTTP:8080. Outbound auth = **API key** (`X-API-Key` = tenant
-  id). ACM cert domain = a **kane.mx subdomain** (`mem9.internal.kane.mx`,
+  id). ACM cert domain = a **kane.mx subdomain** (`mem9.aws.kane.mx`,
   name-only / no public DNS needed, R53-validated). No public exposure. (See §6a.)
 - **LLM (smart-ingest)**: **Bedrock Mantle direct**, **GLM-5**, **ON at launch**
   (`MNEMO_INGEST_MODE=smart`). No proxy. GPT-5.4/5.5 (Responses-only) excluded.

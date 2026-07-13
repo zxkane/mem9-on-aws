@@ -182,6 +182,11 @@ Resources:
               - s3:GetReplicationConfiguration
               - s3:GetBucketWebsite
               - s3:GetBucketPolicyStatus
+              # CORS: Pulumi's S3 provider reads CORS on every bucket refresh (the
+              # Mem9McpSchemas bucket for the OpenAPI schema, §6). Put/Delete for
+              # completeness though we set no CORS rules.
+              - s3:GetBucketCORS
+              - s3:PutBucketCORS
               - s3:GetObject
               - s3:PutObject
               - s3:DeleteObject
@@ -675,6 +680,279 @@ Resources:
               - !Sub arn:aws:ecr:ap-northeast-1:${AWS::AccountId}:repository/${ProjectName}/llm-proxy
 
   # ───────────────────────────────────────────────────────────────────────────
+  # Policy 7 — MCP gateway networking (infra/certs.ts + infra/alb.ts): the public
+  # ACM cert + its Route53 DNS validation, and the internal ALB (+ target group,
+  # listener, rule, ALB SG). Split from the AgentCore/Cognito surface (Policy 8)
+  # to stay under IAM's 6144-byte per-policy cap. NET-NEW vs the sister
+  # podcast-curation role (which fronts a public API Gateway, no ALB/cert).
+  #
+  # ADDED for the MCP gateway PR — must be live (re-run scripts/deploy-github-role.sh)
+  # BEFORE that PR's first deploy, or the deploy 403s on the first ALB/cert create.
+  # ───────────────────────────────────────────────────────────────────────────
+  GatewayNetPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${GitHubRepo}-gateway-net
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ELB
+            # Internal ALB + target group + listener + listener rule lifecycle
+            # (infra/alb.ts) and the target-group registration on the ECS service
+            # (infra/ecs.ts). ELBv2 has no useful per-resource ARN granularity on
+            # create/describe and Pulumi refreshes probe broadly → Resource "*",
+            # guarded by the DenyPolicy against account-level abuse.
+            Effect: Allow
+            Action:
+              - elasticloadbalancing:CreateLoadBalancer
+              - elasticloadbalancing:DeleteLoadBalancer
+              - elasticloadbalancing:DescribeLoadBalancers
+              - elasticloadbalancing:DescribeLoadBalancerAttributes
+              - elasticloadbalancing:ModifyLoadBalancerAttributes
+              - elasticloadbalancing:CreateTargetGroup
+              - elasticloadbalancing:DeleteTargetGroup
+              - elasticloadbalancing:DescribeTargetGroups
+              - elasticloadbalancing:DescribeTargetGroupAttributes
+              - elasticloadbalancing:ModifyTargetGroupAttributes
+              - elasticloadbalancing:DescribeTargetHealth
+              - elasticloadbalancing:CreateListener
+              - elasticloadbalancing:DeleteListener
+              - elasticloadbalancing:DescribeListeners
+              - elasticloadbalancing:ModifyListener
+              # Per-listener attribute reads the Pulumi ELBv2 provider probes on
+              # every refresh (absent → the second deploy 403s on the listener).
+              - elasticloadbalancing:DescribeListenerAttributes
+              - elasticloadbalancing:ModifyListenerAttributes
+              - elasticloadbalancing:DescribeListenerCertificates
+              - elasticloadbalancing:AddListenerCertificates
+              - elasticloadbalancing:RemoveListenerCertificates
+              - elasticloadbalancing:CreateRule
+              - elasticloadbalancing:DeleteRule
+              - elasticloadbalancing:DescribeRules
+              - elasticloadbalancing:ModifyRule
+              - elasticloadbalancing:AddTags
+              - elasticloadbalancing:RemoveTags
+              - elasticloadbalancing:DescribeTags
+            Resource: "*"
+          - Sid: ELBServiceLinkedRole
+            # First ELBv2 use in an account provisions AWSServiceRoleForElasticLoadBalancing.
+            Effect: Allow
+            Action:
+              - iam:CreateServiceLinkedRole
+            Resource: "*"
+            Condition:
+              StringEquals:
+                iam:AWSServiceName: elasticloadbalancing.amazonaws.com
+          - Sid: ACM
+            # Public ACM cert for mem9.aws.kane.mx (DNS-validated). ACM's create/
+            # describe/list calls have no useful per-resource ARN (the cert ARN
+            # doesn't exist until after RequestCertificate) → Resource "*".
+            Effect: Allow
+            Action:
+              - acm:RequestCertificate
+              - acm:DeleteCertificate
+              - acm:DescribeCertificate
+              - acm:ListTagsForCertificate
+              - acm:AddTagsToCertificate
+              - acm:RemoveTagsFromCertificate
+              - acm:ListCertificates
+            Resource: "*"
+          - Sid: Route53
+            # ACM DNS validation writes a CNAME into the existing aws.kane.mx
+            # public hosted zone (infra/certs.ts via route53.getZoneOutput +
+            # route53.Record). GetChange has no resource scope. Record writes are
+            # scoped to hosted zones (the zone id isn't known at template time →
+            # hostedzone/* + the account guard from DenyPolicy); read helpers are
+            # account-wide.
+            Effect: Allow
+            Action:
+              - route53:ChangeResourceRecordSets
+              - route53:ListResourceRecordSets
+              - route53:GetHostedZone
+              - route53:DeleteHostedZone
+              - route53:AssociateVPCWithHostedZone
+              - route53:DisassociateVPCFromHostedZone
+              # Pulumi's route53 provider reads AND writes zone tags on every
+              # create/refresh — both required (the zone create succeeded but the
+              # immediate tag-write failed without ChangeTagsForResource).
+              - route53:ListTagsForResource
+              - route53:ChangeTagsForResource
+            Resource:
+              - !Sub arn:${AWS::Partition}:route53:::hostedzone/*
+          - Sid: Route53ReadOnly
+            # Zone lookup (getZoneOutput → ListHostedZonesByName), validation
+            # polling (GetChange), and CreateHostedZone (the private zone for
+            # MCP ALB domain, infra/alb.ts) — all have no per-resource ARN
+            # (the hosted zone doesn't exist at create time → Resource "*").
+            Effect: Allow
+            Action:
+              - route53:ListHostedZonesByName
+              - route53:ListHostedZones
+              - route53:GetChange
+              - route53:CreateHostedZone
+            Resource: "*"
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Policy 8 — MCP gateway auth + surface (infra/cognito.ts + infra/gateway.ts):
+  # the Cognito M2M user pool/domain/resource-server/clients, the AgentCore
+  # Gateway + OpenAPI target + API-key credential provider + workload identity,
+  # and the service-managed Secrets Manager secret AgentCore uses for outbound
+  # creds. Mirrors the sister podcast-curation `-mcp` policy (proven in prod);
+  # adapted to the API-key credential-provider actions. Its own policy for the
+  # 6144-byte cap + audit clarity.
+  #
+  # ADDED for the MCP gateway PR — must be live BEFORE that PR's first deploy, or
+  # the first Cognito/AgentCore create 403s (CLAUDE-AWS "new resource TYPE needs
+  # grants first"; the doc explicitly names "first Bedrock AgentCore gateway →
+  # missing workload-identity grants").
+  # ───────────────────────────────────────────────────────────────────────────
+  GatewayMcpPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${GitHubRepo}-gateway-mcp
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Cognito
+            # infra/cognito.ts. The Pulumi AWS provider Read step probes attribute
+            # settings, domain config, resource servers, and clients on every
+            # refresh — this is the minimal set that survives `sst deploy --refresh`
+            # (surface proven by podcast-curation prod).
+            Effect: Allow
+            Action:
+              - cognito-idp:CreateUserPool
+              - cognito-idp:DeleteUserPool
+              - cognito-idp:DescribeUserPool
+              - cognito-idp:UpdateUserPool
+              - cognito-idp:GetUserPoolMfaConfig
+              - cognito-idp:SetUserPoolMfaConfig
+              - cognito-idp:CreateUserPoolDomain
+              - cognito-idp:DescribeUserPoolDomain
+              - cognito-idp:DeleteUserPoolDomain
+              - cognito-idp:UpdateUserPoolDomain
+              - cognito-idp:CreateResourceServer
+              - cognito-idp:DescribeResourceServer
+              - cognito-idp:UpdateResourceServer
+              - cognito-idp:DeleteResourceServer
+              - cognito-idp:CreateUserPoolClient
+              - cognito-idp:DescribeUserPoolClient
+              - cognito-idp:UpdateUserPoolClient
+              - cognito-idp:DeleteUserPoolClient
+              - cognito-idp:ListUserPools
+              - cognito-idp:ListUserPoolClients
+              - cognito-idp:ListResourceServers
+              - cognito-idp:TagResource
+              - cognito-idp:UntagResource
+              - cognito-idp:ListTagsForResource
+            Resource: "*"
+          - Sid: BedrockAgentCoreGateway
+            # Gateway + Target + Rule lifecycle (infra/gateway.ts). CreateGateway /
+            # ListGateways have no resource-level permission per the Service
+            # Authorization Reference; the rest are scoped to gateway/*.
+            Effect: Allow
+            Action:
+              - bedrock-agentcore:CreateGateway
+              - bedrock-agentcore:ListGateways
+            Resource: "*"
+          - Sid: BedrockAgentCoreGatewayResource
+            Effect: Allow
+            Action:
+              - bedrock-agentcore:GetGateway
+              - bedrock-agentcore:UpdateGateway
+              - bedrock-agentcore:DeleteGateway
+              - bedrock-agentcore:CreateGatewayTarget
+              - bedrock-agentcore:GetGatewayTarget
+              - bedrock-agentcore:UpdateGatewayTarget
+              - bedrock-agentcore:DeleteGatewayTarget
+              - bedrock-agentcore:ListGatewayTargets
+              - bedrock-agentcore:TagResource
+              - bedrock-agentcore:UntagResource
+              - bedrock-agentcore:ListTagsForResource
+            Resource:
+              - !Sub arn:${AWS::Partition}:bedrock-agentcore:*:${AWS::AccountId}:gateway/*
+          - Sid: BedrockAgentCoreCredentialProviders
+            # API-key credential provider (infra/gateway.ts — mem9's X-API-Key
+            # outbound auth; podcast-curation uses OAuth2, we use API key). Scoped
+            # to the account token-vault (per the Service Authorization Reference:
+            # token-vault/<id>/apikeycredentialprovider/<name>).
+            Effect: Allow
+            Action:
+              - bedrock-agentcore:CreateApiKeyCredentialProvider
+              - bedrock-agentcore:GetApiKeyCredentialProvider
+              - bedrock-agentcore:UpdateApiKeyCredentialProvider
+              - bedrock-agentcore:DeleteApiKeyCredentialProvider
+              - bedrock-agentcore:ListApiKeyCredentialProviders
+            Resource:
+              - !Sub arn:${AWS::Partition}:bedrock-agentcore:*:${AWS::AccountId}:token-vault/*
+          - Sid: BedrockAgentCoreWorkloadIdentity
+            # Implicitly created by AgentCore the first time any Gateway /
+            # credential-provider runs in the account (single default
+            # workload-identity-directory + token-vault per account). CreateGateway
+            # + CreateApiKeyCredentialProvider both chain into CreateTokenVault on
+            # first account use — without these the FIRST deploy 403s.
+            Effect: Allow
+            Action:
+              - bedrock-agentcore:CreateWorkloadIdentity
+              - bedrock-agentcore:GetWorkloadIdentity
+              - bedrock-agentcore:UpdateWorkloadIdentity
+              - bedrock-agentcore:DeleteWorkloadIdentity
+              - bedrock-agentcore:ListWorkloadIdentities
+              - bedrock-agentcore:GetWorkloadIdentityDirectory
+              - bedrock-agentcore:CreateTokenVault
+              - bedrock-agentcore:GetTokenVault
+              - bedrock-agentcore:UpdateTokenVault
+              - bedrock-agentcore:DeleteTokenVault
+              - bedrock-agentcore:ListTokenVaults
+            Resource:
+              - !Sub arn:${AWS::Partition}:bedrock-agentcore:*:${AWS::AccountId}:workload-identity-directory/*
+              - !Sub arn:${AWS::Partition}:bedrock-agentcore:*:${AWS::AccountId}:token-vault/*
+          - Sid: SecretsManagerForAgentCore
+            # AWS::BedrockAgentCore::ApiKeyCredentialProvider stores the API key in
+            # a service-managed Secrets Manager secret (name pattern
+            # bedrock-agentcore-identity!*). Scope to that prefix so the role can't
+            # read/modify any other secret.
+            Effect: Allow
+            Action:
+              - secretsmanager:CreateSecret
+              - secretsmanager:UpdateSecret
+              - secretsmanager:DeleteSecret
+              - secretsmanager:DescribeSecret
+              - secretsmanager:GetSecretValue
+              - secretsmanager:PutSecretValue
+              - secretsmanager:TagResource
+              - secretsmanager:UntagResource
+            Resource:
+              - !Sub arn:${AWS::Partition}:secretsmanager:*:${AWS::AccountId}:secret:bedrock-agentcore-identity!*
+          - Sid: AgentCoreServiceLinkedRoles
+            # Managed VPC Lattice (privateEndpoint.managedVpcResource) auto-creates
+            # AWSServiceRoleForBedrockAgentCore, which itself creates the vpc-lattice
+            # SLR. Gate CreateServiceLinkedRole to both namespaces.
+            Effect: Allow
+            Action:
+              - iam:CreateServiceLinkedRole
+            Resource: "*"
+            Condition:
+              StringEquals:
+                iam:AWSServiceName:
+                  - bedrock-agentcore.amazonaws.com
+                  - vpc-lattice.amazonaws.com
+          - Sid: PassRoleAgentCore
+            # infra/gateway.ts creates the Gateway service role
+            # (mem9-on-aws-${stage}-gateway-service-role, covered by ComputePolicy's
+            # mem9-on-aws-* iam grants) and passes it to the Gateway. Gate PassRole
+            # to bedrock-agentcore, scoped to this project's role names + SST
+            # truncation variants (mirrors ScaffoldPolicy's PassRoleConstrained).
+            Effect: Allow
+            Action: iam:PassRole
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/mem9-on-aws-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/mem9-on-aw-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/mem9-on-a-*
+            Condition:
+              StringEquals:
+                iam:PassedToService: bedrock-agentcore.amazonaws.com
+
+  # ───────────────────────────────────────────────────────────────────────────
   # IAM Role — assumed by GitHub Actions via OIDC.
   # ───────────────────────────────────────────────────────────────────────────
   GitHubActionsRole:
@@ -713,6 +991,8 @@ Resources:
         - !Ref DatabasePolicy
         - !Ref ComputePolicy
         - !Ref ImageBuildPolicy
+        - !Ref GatewayNetPolicy
+        - !Ref GatewayMcpPolicy
       Tags:
         - Key: Project
           Value: !Ref ProjectName

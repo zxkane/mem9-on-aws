@@ -54,7 +54,7 @@ file rather than silently diverging.
 | Database | **Aurora PostgreSQL Serverless v2** + `pgvector` (mem9 `postgres` backend) |
 | VPC | **Reuse the account default VPC** (private subnets w/ NAT), per podcast-curation pattern |
 | MCP surface | **AgentCore Gateway** (OpenAPI target → mnemo-server REST API) |
-| Gateway → server | **private**: `privateEndpoint` + managed VPC Lattice → **internal ALB** (public ACM cert `mem9.internal.kane.mx`, TLS terminated) → HTTP:8080. Outbound auth = API key (`X-API-Key`). No public exposure |
+| Gateway → server | **private** (IMPLEMENTED): `privateEndpoint` (managed VPC Lattice, `routingDomain`=ALB DNS) → **internal ALB** (public ACM cert `mem9.aws.kane.mx` — an existing R53 public zone; name-only for Lattice TLS SNI) → HTTP:8080. Outbound auth = API key (`X-API-Key`=tenant id, `AgentcoreApiKeyCredentialProvider`). No public exposure |
 | Auth (inbound) | **Cognito M2M**, reusing the podcast-curation / llm-wiki gateway pattern |
 | LLM (smart-ingest) | **Bedrock Mantle direct**, **GLM-5**, **ON at launch**. Auth via **`@aws/bedrock-token-generator`** (short-term bearer from task IAM role, same as llm-wiki) + **Bedrock Project** cost attribution + a **local LLM proxy sidecar** (`docker/llm-proxy/` — mem9 reads `MNEMO_LLM_API_KEY` once & sends no custom headers, so a request-proxy holds the live bearer + injects `OpenAI-Project`; NOT a token file-writer). GPT-5.4/5.5 excluded (Responses-only) |
 | Embedding | qwen3 OpenAI `/embeddings` as an **ECS sidecar** (localhost, always warm), **code lifted from llm-wiki qwen3 ONNX**, **dims 1024**. NOT Mantle, NOT 3P API |

@@ -21,6 +21,10 @@ on. Re-verify against the pinned upstream commit before implementing IaC.
   That id is the API key.
 - Endpoints: `POST/GET/GET{id}/PUT{id}/DELETE{id} /v1alpha2/mem9s/memories`,
   batch-delete, `/imports`, `/session-messages`, `/status`, webhooks, space-chains.
+- **Unauthenticated health/liveness (registered BEFORE the auth middleware,
+  verified handler.go:205 @ pinned SHA):** `GET /healthz` → 200 `{"status":"ok"}`
+  and `GET /versionz` → 200 `{go_version,started_at}`. The internal ALB target
+  group (§6a, infra/ecs.ts) health-checks `/healthz` — no auth, no DB, cheap.
 - Search query param is `q` (`GET /v1alpha2/mem9s/memories?q=...`).
 - Writes return `{"status":"accepted"}` and are processed **asynchronously** —
   list/search may return empty for a few seconds/minutes after write until the

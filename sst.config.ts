@@ -3,10 +3,10 @@
 /**
  * SST v4 root config for `zxkane/mem9-on-aws`.
  *
- * Self-hosted deployment of mem9 (`mnemo-server`) on AWS. This file is the
- * BASE SCAFFOLD — it deploys only the `meta` SSM stack (see `infra/meta.ts`).
- * Aurora / ECS Fargate / AgentCore Gateway / Cognito / Bedrock land in
- * follow-up PRs (see docs/ARCHITECTURE.md).
+ * Self-hosted deployment of mem9 (`mnemo-server`) on AWS. `run()` wires the full
+ * stack (see docs/ARCHITECTURE.md): meta (SSM) → Aurora → ECS Fargate
+ * (mnemo-server + qwen3-embed + llm-proxy) → schema bootstrap → the MCP surface
+ * (ACM cert → Cognito M2M → internal ALB → AgentCore Gateway).
  *
  * Mirrors the shape of the sister SST v4 projects so a single operator can
  * context-switch without re-learning constructs:
@@ -86,8 +86,23 @@ export default $config({
     // pgvector + the memories(vector 1024) schema + seeds one tenant. Reuses the
     // ECS cluster + db Outputs. SST only DEFINES the task; CI runs it via
     // `aws ecs run-task` after deploy (see .github/workflows/infra-ci.yml).
+    // Capture its Outputs — the gateway stack reads the tenant id (X-API-Key).
     const { bootstrap } = await import("./infra/bootstrap");
-    bootstrap(ecsOut.cluster, dbOut);
+    const bootstrapOut = bootstrap(ecsOut.cluster, dbOut);
+
+    // MCP surface (§6/§6a): public ACM cert → Cognito M2M → internal ALB →
+    // AgentCore Gateway. Threaded as direct Pulumi Outputs (no SSM read-back).
+    // Cycle order: cert + cognito + alb first (independent), gateway last (it
+    // references all three + the tenant id). certs/cognito are independent of the
+    // ALB; alb() attaches the target group ecs() created to the internal ALB.
+    const { certs } = await import("./infra/certs");
+    const certOut = certs();
+    const { cognito } = await import("./infra/cognito");
+    const cognitoOut = cognito();
+    const { alb } = await import("./infra/alb");
+    const albOut = alb(ecsOut, dbOut, certOut);
+    const { gateway } = await import("./infra/gateway");
+    gateway(cognitoOut, albOut, bootstrapOut);
 
     return {};
   },
