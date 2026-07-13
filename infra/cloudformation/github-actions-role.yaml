@@ -859,6 +859,12 @@ Resources:
               - cloudcontrol:DeleteResource
               - cloudcontrol:ListResources
               - cloudcontrol:GetResourceRequestStatus
+              # Pulumi's cloudcontrol provider reads the resource-type schema from
+              # the CFN type registry on every create/refresh — needs DescribeType/
+              # ListTypeVersions (no per-resource ARN on the type registry).
+              - cloudformation:DescribeType
+              - cloudformation:ListTypes
+              - cloudformation:ListTypeVersions
             Resource: "*"
           - Sid: BedrockAgentCoreGateway
             # Gateway + Target + Rule lifecycle (infra/gateway.ts). CreateGateway /
