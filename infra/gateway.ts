@@ -119,6 +119,24 @@ export function gateway(
           Action: ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"],
           Resource: "arn:aws:secretsmanager:*:*:secret:bedrock-agentcore-identity!*",
         },
+        {
+          // The managed VPC Lattice resource gateway (created when the target's
+          // privateEndpoint.managedVpcResource is provisioned) places ENIs in our
+          // private subnets. AgentCore assumes THIS role to do it, so it needs the
+          // ENI lifecycle + VPC read. Without ec2:CreateNetworkInterface the target
+          // create FAILS with "caller does not have ec2:CreateNetworkInterface".
+          Effect: "Allow",
+          Action: [
+            "ec2:CreateNetworkInterface",
+            "ec2:DeleteNetworkInterface",
+            "ec2:DescribeNetworkInterfaces",
+            "ec2:CreateNetworkInterfacePermission",
+            "ec2:DescribeSubnets",
+            "ec2:DescribeVpcs",
+            "ec2:DescribeSecurityGroups",
+          ],
+          Resource: "*",
+        },
       ],
     }),
   });

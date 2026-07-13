@@ -848,20 +848,20 @@ Resources:
           - Sid: CloudControl
             # infra/gateway.ts provisions AWS::BedrockAgentCore::GatewayTarget via
             # aws.cloudcontrol.Resource (the typed pulumi-aws GatewayTarget lacks
-            # the privateEndpoint field). CloudControl is a thin delegate — the
-            # UNDERLYING bedrock-agentcore:* actions (below) are the real authz;
-            # cloudcontrol:* itself has no per-resource ARN.
+            # the privateEndpoint field). The CloudControl API operations are
+            # authorized under the **cloudformation:** action namespace
+            # (CreateResource/GetResource/UpdateResource/DeleteResource/
+            # GetResourceRequestStatus), NOT cloudcontrol:*. The UNDERLYING
+            # bedrock-agentcore:* actions (below) are the real per-resource authz.
+            # DescribeType reads the resource-type schema on every create/refresh.
             Effect: Allow
             Action:
-              - cloudcontrol:CreateResource
-              - cloudcontrol:GetResource
-              - cloudcontrol:UpdateResource
-              - cloudcontrol:DeleteResource
-              - cloudcontrol:ListResources
-              - cloudcontrol:GetResourceRequestStatus
-              # Pulumi's cloudcontrol provider reads the resource-type schema from
-              # the CFN type registry on every create/refresh — needs DescribeType/
-              # ListTypeVersions (no per-resource ARN on the type registry).
+              - cloudformation:CreateResource
+              - cloudformation:GetResource
+              - cloudformation:UpdateResource
+              - cloudformation:DeleteResource
+              - cloudformation:ListResources
+              - cloudformation:GetResourceRequestStatus
               - cloudformation:DescribeType
               - cloudformation:ListTypes
               - cloudformation:ListTypeVersions
