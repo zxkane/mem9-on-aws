@@ -845,6 +845,21 @@ Resources:
               - cognito-idp:UntagResource
               - cognito-idp:ListTagsForResource
             Resource: "*"
+          - Sid: CloudControl
+            # infra/gateway.ts provisions AWS::BedrockAgentCore::GatewayTarget via
+            # aws.cloudcontrol.Resource (the typed pulumi-aws GatewayTarget lacks
+            # the privateEndpoint field). CloudControl is a thin delegate — the
+            # UNDERLYING bedrock-agentcore:* actions (below) are the real authz;
+            # cloudcontrol:* itself has no per-resource ARN.
+            Effect: Allow
+            Action:
+              - cloudcontrol:CreateResource
+              - cloudcontrol:GetResource
+              - cloudcontrol:UpdateResource
+              - cloudcontrol:DeleteResource
+              - cloudcontrol:ListResources
+              - cloudcontrol:GetResourceRequestStatus
+            Resource: "*"
           - Sid: BedrockAgentCoreGateway
             # Gateway + Target + Rule lifecycle (infra/gateway.ts). CreateGateway /
             # ListGateways have no resource-level permission per the Service

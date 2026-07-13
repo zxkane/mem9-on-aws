@@ -20,6 +20,18 @@ interface Rec {
 let created: Rec[];
 let params: { name: string }[];
 
+// Unwrap the loose out<T> mock (and plain values) recursively for $jsonStringify.
+function unwrap(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(unwrap);
+  if (v && typeof v === "object") {
+    if ("value" in v) return unwrap((v as { value: unknown }).value);
+    const o: Record<string, unknown> = {};
+    for (const [k, val] of Object.entries(v)) o[k] = unwrap(val);
+    return o;
+  }
+  return v;
+}
+
 function installInterpolate() {
   (globalThis as Record<string, unknown>).$interpolate = (
     strings: TemplateStringsArray,
@@ -35,6 +47,9 @@ function installInterpolate() {
     });
     return out(s);
   };
+  // $jsonStringify: resolve embedded out<T> values then JSON.stringify → out<string>.
+  (globalThis as Record<string, unknown>).$jsonStringify = (obj: unknown) =>
+    out(JSON.stringify(unwrap(obj)));
 }
 
 function makeCtor(kind: string) {
@@ -65,8 +80,10 @@ function installGlobals(stage: string) {
     bedrock: {
       AgentcoreGateway: makeCtor("AgentcoreGateway"),
       AgentcoreApiKeyCredentialProvider: makeCtor("AgentcoreApiKeyCredentialProvider"),
-      AgentcoreGatewayTarget: makeCtor("AgentcoreGatewayTarget"),
     },
+    // The GatewayTarget is provisioned via CloudControl (the typed pulumi-aws
+    // GatewayTarget lacks privateEndpoint in 7.20.0).
+    cloudcontrol: { Resource: makeCtor("CloudControlResource") },
     ssm: {
       Parameter: class {
         constructor(_n: string, args: { name: unknown }) {
@@ -86,7 +103,7 @@ beforeEach(() => {
   params = [];
 });
 afterEach(() => {
-  for (const g of ["$app", "aws", "$interpolate"]) delete (globalThis as Record<string, unknown>)[g];
+  for (const g of ["$app", "aws", "$interpolate", "$jsonStringify"]) delete (globalThis as Record<string, unknown>)[g];
   vi.resetModules();
 });
 
@@ -139,28 +156,34 @@ describe("gateway stack", () => {
     expect(String((provider.apiKey as { value?: string }).value)).toBe("deadbeefTENANTID");
   });
 
-  it("target uses OpenAPI inline schema + privateEndpoint with routingDomain=ALB DNS + API-key header", async () => {
+  it("target (CloudControl) has S3 OpenAPI schema, API-key cred config, and privateEndpoint routingDomain=ALB DNS", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
     gateway(fakeCognito(), fakeAlb(), fakeBootstrap());
-    const target = only("AgentcoreGatewayTarget");
-    // OpenAPI schema is referenced from S3 (the inlinePayload variant is rejected
-    // by the Pulumi provider as a raw string). Assert the S3 URI + that the schema
-    // object uploaded to the bucket carries the two tools.
-    const s3ref = (target.targetConfiguration as any).mcp.openApiSchema.s3.uri;
-    expect(String((s3ref as { value?: string }).value)).toMatch(/^s3:\/\/.*mcp-schema\.yaml$/);
+    // Target is a CloudControl resource for AWS::BedrockAgentCore::GatewayTarget
+    // (the typed pulumi-aws GatewayTarget lacks privateEndpoint). Assert the CFN
+    // PascalCase desiredState JSON.
+    const target = only("CloudControlResource");
+    expect(target.typeName).toBe("AWS::BedrockAgentCore::GatewayTarget");
+    const ds = JSON.parse(String((target.desiredState as { value?: string }).value));
+    // OpenAPI schema from S3 (inlinePayload is rejected; S3 is the proven path).
+    expect(ds.TargetConfiguration.Mcp.OpenApiSchema.S3.Uri).toMatch(/^s3:\/\/.*mcp-schema\.yaml$/);
     const schemaObj = only("BucketObject");
     expect(String(schemaObj.content)).toContain("add_memory");
     expect(String(schemaObj.content)).toContain("search_memories");
-    // Outbound = API key in the X-API-Key header.
-    const cred = (target.credentialProviderConfiguration as any).apiKey;
-    expect(cred.credentialLocation).toBe("HEADER");
-    expect(cred.credentialParameterName).toBe("X-API-Key");
-    // Private egress via managed VPC Lattice; routingDomain = ALB internal DNS.
-    const mv = (target.privateEndpoint as any).managedVpcResource;
-    expect(mv.endpointIpAddressType).toBe("IPV4");
-    expect(mv.securityGroupIds).toHaveLength(1);
-    expect(String((mv.routingDomain as { value?: string }).value)).toContain("elb.amazonaws.com");
+    // Outbound = API key in the X-API-Key header (CredentialProviderConfigurations
+    // is an ARRAY in the CFN shape, min/max 1).
+    expect(ds.CredentialProviderConfigurations).toHaveLength(1);
+    const cp = ds.CredentialProviderConfigurations[0];
+    expect(cp.CredentialProviderType).toBe("API_KEY");
+    expect(cp.CredentialProvider.ApiKeyCredentialProvider.CredentialLocation).toBe("HEADER");
+    expect(cp.CredentialProvider.ApiKeyCredentialProvider.CredentialParameterName).toBe("X-API-Key");
+    // Private egress via managed VPC Lattice; RoutingDomain = ALB internal DNS
+    // (the fix — this is what the typed resource silently dropped).
+    const mv = ds.PrivateEndpoint.ManagedVpcResource;
+    expect(mv.EndpointIpAddressType).toBe("IPV4");
+    expect(mv.SecurityGroupIds).toHaveLength(1);
+    expect(mv.RoutingDomain).toContain("elb.amazonaws.com");
   });
 
   it("creates a bedrock-agentcore-trust service role with workload-identity access", async () => {

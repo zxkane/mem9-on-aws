@@ -47,6 +47,11 @@ declare function $interpolate(
   ...values: unknown[]
 ): Output<string>;
 
+// SST's $jsonStringify — like JSON.stringify but resolves embedded Output<T>
+// values, returning an Output<string>. Used in infra/gateway.ts to build the
+// CloudControl desiredState JSON for AWS::BedrockAgentCore::GatewayTarget.
+declare function $jsonStringify(obj: unknown): Output<string>;
+
 // ── The `aws` provider surface the scaffold touches ─────────────────────────
 declare namespace aws {
   // Caller identity — infra/ecs.ts uses accountId to compose the ECR image URI

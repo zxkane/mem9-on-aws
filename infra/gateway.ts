@@ -174,41 +174,57 @@ export function gateway(
   );
 
   // --- Gateway Target (OpenAPI, private via managed VPC Lattice → internal ALB) ---
-  new awsAny.bedrock.AgentcoreGatewayTarget(
-    "Mem9GatewayTarget",
-    {
-      gatewayIdentifier: bedrockGateway.gatewayId,
-      name: `${stage}-mem9-rest`,
-      description: "mnemo-server REST tools (add_memory, search_memories) via internal ALB",
-      targetConfiguration: {
-        mcp: {
-          openApiSchema: {
-            s3: { uri: $interpolate`s3://${schemasBucket.id}/${schemaKey}` },
+  //
+  // Provisioned via aws.cloudcontrol.Resource, NOT the typed
+  // aws.bedrock.AgentcoreGatewayTarget: the typed resource in pulumi-aws 7.20.0
+  // (the version SST bundles) has NO `privateEndpoint` field at all, so it
+  // SILENTLY DROPPED our privateEndpoint/routingDomain — the Gateway then tried to
+  // DNS-resolve the OpenAPI server URL (mem9.aws.kane.mx) directly and failed with
+  // "Error executing HTTP request for unknown: mem9.aws.kane.mx". The CFN type
+  // AWS::BedrockAgentCore::GatewayTarget DOES have PrivateEndpoint.ManagedVpcResource
+  // .RoutingDomain (verified in the CFN ref), and CloudControl provisions it.
+  //
+  // desiredState is CFN PascalCase JSON. routingDomain = the ALB internal DNS (the
+  // real route); the OpenAPI server URL / cert SNI (mem9.aws.kane.mx) is the SNI
+  // AgentCore sends on the wire — decoupled, per the AWS "routing domain" docs.
+  const targetDesiredState = $jsonStringify({
+    GatewayIdentifier: bedrockGateway.gatewayId,
+    Name: `${stage}-mem9-rest`,
+    Description: "mnemo-server REST tools (add_memory, search_memories) via internal ALB",
+    TargetConfiguration: {
+      Mcp: {
+        OpenApiSchema: {
+          S3: { Uri: $interpolate`s3://${schemasBucket.id}/${schemaKey}` },
+        },
+      },
+    },
+    CredentialProviderConfigurations: [
+      {
+        CredentialProviderType: "API_KEY",
+        CredentialProvider: {
+          ApiKeyCredentialProvider: {
+            ProviderArn: apiKeyProvider.credentialProviderArn,
+            CredentialLocation: "HEADER",
+            CredentialParameterName: "X-API-Key",
           },
         },
       },
-      // Outbound auth: X-API-Key credential provider. AgentCore injects the header
-      // named in the OpenAPI securityScheme (X-API-Key) with the provider's value.
-      credentialProviderConfiguration: {
-        apiKey: {
-          providerArn: apiKeyProvider.credentialProviderArn,
-          credentialLocation: "HEADER",
-          credentialParameterName: "X-API-Key",
-        },
+    ],
+    PrivateEndpoint: {
+      ManagedVpcResource: {
+        VpcIdentifier: vpcId,
+        SubnetIds: privateSubnetIds,
+        EndpointIpAddressType: "IPV4",
+        SecurityGroupIds: [albOut.albSecurityGroupId],
+        RoutingDomain: albOut.albDnsName,
       },
-      // Private egress: managed VPC Lattice to the internal ALB. routingDomain =
-      // the ALB's internal AWS DNS (the actual route), decoupled from the OpenAPI
-      // server URL / cert SNI (mem9.aws.kane.mx). SG = the ALB SG so the Lattice
-      // endpoint can reach the ALB on 443.
-      privateEndpoint: {
-        managedVpcResource: {
-          vpcIdentifier: vpcId,
-          subnetIds: privateSubnetIds,
-          endpointIpAddressType: "IPV4",
-          securityGroupIds: [albOut.albSecurityGroupId],
-          routingDomain: albOut.albDnsName,
-        },
-      },
+    },
+  });
+  new awsAny.cloudcontrol.Resource(
+    "Mem9GatewayTarget",
+    {
+      typeName: "AWS::BedrockAgentCore::GatewayTarget",
+      desiredState: targetDesiredState,
     },
     { dependsOn: [bedrockGateway, apiKeyProvider, schemaObject] },
   );
