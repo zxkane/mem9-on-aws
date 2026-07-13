@@ -10,17 +10,25 @@
  * mem9 source commit — see docs/mem9-facts.md). Its entrypoint assembles
  * MNEMO_DSN from the injected pieces at container start.
  *
- * SIDECAR (this PR): the task now runs TWO containers (ARCHITECTURE.md §7):
+ * SIDECARS (ARCHITECTURE.md §7): the task runs THREE containers:
  *   1. mnemo-server (the memory server, HTTP :8080)
  *   2. qwen3-embed  (OpenAI /v1/embeddings on localhost:8081; docker/qwen3-embed/)
+ *   3. llm-proxy    (OpenAI /v1/chat/completions → Bedrock Mantle, localhost:8082;
+ *                    docker/llm-proxy/) — enables LLM smart-ingest.
  * mem9 reaches the embedder at MNEMO_EMBED_BASE_URL=http://localhost:8081/v1 with
- * MNEMO_EMBED_DIMS=1024 (matches the PG vector(1024) column the bootstrap creates).
- * The qwen3 ONNX model is heavy (~3.85 GB resident), so the task memory jumps to
- * fit it — the main §7/§9 cost swing.
+ * MNEMO_EMBED_DIMS=1024 (matches the PG vector(1024) column the bootstrap creates),
+ * and the LLM at MNEMO_LLM_BASE_URL=http://localhost:8082/v1. The qwen3 ONNX model
+ * is heavy (~3.85 GB resident), so the task memory fits it — the main §7/§9 swing.
  *
- * NOT yet here (follow-up PRs):
- *   - the token-refresh sidecar + LLM smart-ingest (§7 LLM). Until then
- *     MNEMO_INGEST_MODE=raw (store as-is); embedding/semantic search still works.
+ * LLM SMART-INGEST (this PR): MNEMO_INGEST_MODE=smart. mem9 reads MNEMO_LLM_API_KEY
+ * ONCE at startup (immutable) and its LLM client sends only Authorization — so it
+ * can neither refresh a rotating Bedrock bearer nor add the OpenAI-Project cost
+ * header. The llm-proxy sidecar bridges both: mem9 auths with a static DUMMY key to
+ * localhost, and the proxy holds the live Mantle bearer (refreshed on a timer, a
+ * local presign) + injects OpenAI-Project per request. No mem9 fork, no restart on
+ * rotation. See docker/llm-proxy/server.mjs + docs/mem9-facts.md.
+ *
+ * NOT yet here (follow-up PR):
  *   - the internal ALB + public ACM cert (AgentCore Gateway PR, §6a).
  *
  * SCHEMA BOOTSTRAP (this PR, separate one-shot task — infra/bootstrap.ts):
@@ -52,6 +60,22 @@ const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 // The qwen3-embed sidecar listens here; mem9 calls it over localhost. Not exposed
 // outside the task.
 const EMBED_PORT = 8081;
+
+// The llm-proxy sidecar listens here; mem9 calls it over localhost for
+// smart-ingest LLM (proxied to Bedrock Mantle). Not exposed outside the task.
+const LLM_PROXY_PORT = 8082;
+
+// The GLM-5 model id mem9 sends as `model` on each /chat/completions (Mantle
+// Chat-Completions model, verified live — see docs/mem9-facts.md). Overridable
+// via env for a model swap without a code change.
+const LLM_MODEL = process.env.MEM9_LLM_MODEL || "zai.glm-5";
+
+// Bedrock Project id for Mantle cost attribution (the OpenAI-Project header the
+// proxy injects). Mantle does NOT support IAM-principal attribution, so this is
+// how GLM-5 spend is tagged. CI sets MEM9_BEDROCK_PROJECT from the out-of-band
+// Bedrock Project stack output; empty → the proxy omits the header (still works,
+// just untagged). See infra/cloudformation/bedrock-mantle-project.yaml.
+const BEDROCK_PROJECT = process.env.MEM9_BEDROCK_PROJECT || "";
 
 export interface EcsOutputs {
   ssmPrefix: string;
@@ -87,10 +111,11 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
   const dbSecretArn = dbOut.secretArn;
   const taskSgId = dbOut.taskSecurityGroupId;
 
-  // Image URIs (out-of-band ECR, referenced read-only). Both share IMAGE_TAG so a
-  // single CI run pins the whole task consistently.
+  // Image URIs (out-of-band ECR, referenced read-only). All three share IMAGE_TAG
+  // so a single CI run pins the whole task consistently.
   const mnemoImage = ecrImage("mem9-on-aws/mnemo-server", IMAGE_TAG);
   const embedImage = ecrImage("mem9-on-aws/qwen3-embed", IMAGE_TAG);
+  const llmProxyImage = ecrImage("mem9-on-aws/llm-proxy", IMAGE_TAG);
 
   // ECS cluster in the existing default VPC. `loadBalancerSubnets` is required by
   // the type even though we create no ALB here (deferred to the Gateway PR); set
@@ -133,6 +158,29 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
     architecture: "arm64", // runtimePlatform cpuArchitecture=ARM64; images are linux/arm64
     cpu: "2 vCPU",
     memory: "6 GB",
+    // Task-role IAM for the llm-proxy sidecar's Bedrock Mantle calls (§7). SST
+    // attaches `permissions` to the TASK role (not the execution role), which is
+    // the identity the container's default credential chain resolves — exactly
+    // what @aws/bedrock-token-generator signs the bearer with, and what Mantle
+    // authorizes the model call against.
+    //   - bedrock:CallWithBearerToken — the presigned action the minted bearer
+    //     carries (getToken signs Action=CallWithBearerToken); without it the
+    //     bearer is rejected. No resource ARN granularity → "*", guarded by scope
+    //     to this one action.
+    //   - bedrock:InvokeModel — the actual GLM-5 inference via Mantle. Scoped to
+    //     the zai.glm-5 foundation-model ARN (FM ARNs carry no account id) with a
+    //     wildcard region so a region change doesn't silently deny (per CLAUDE-AWS
+    //     Bedrock guidance); never widened to Resource "*".
+    permissions: [
+      {
+        actions: ["bedrock:CallWithBearerToken"],
+        resources: ["*"],
+      },
+      {
+        actions: ["bedrock:InvokeModel"],
+        resources: [`arn:aws:bedrock:*::foundation-model/${LLM_MODEL}`],
+      },
+    ],
     containers: [
       {
         name: "mnemo-server",
@@ -142,7 +190,7 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
         environment: {
           MNEMO_DB_BACKEND: "postgres",
           MNEMO_PORT: "8080",
-          MNEMO_INGEST_MODE: "raw", // LLM sidecar deferred; smart falls back to raw
+          MNEMO_INGEST_MODE: "smart", // LLM extraction via the llm-proxy sidecar
           MNEMO_UPLOAD_DIR: "/tmp", // single task → local /tmp is fine (mem9-facts)
           MEM9_DB_HOST: dbHost, // Aurora cluster writer endpoint (no proxy)
           MEM9_DB_PORT: dbPort,
@@ -154,6 +202,14 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
           MNEMO_EMBED_DIMS: "1024",
           // mem9's embedder treats "local"/"" as no-auth (localhost sidecar).
           MNEMO_EMBED_API_KEY: "local",
+          // LLM MaaS = the llm-proxy sidecar on localhost → Bedrock Mantle GLM-5.
+          // mem9 reads MNEMO_LLM_API_KEY once + can't add headers, so it auths with
+          // a static DUMMY key; the proxy swaps in the live Mantle bearer +
+          // OpenAI-Project. The key MUST be non-empty or mem9 nils the LLM client
+          // and silently downgrades smart→raw (verified in mem9 source).
+          MNEMO_LLM_BASE_URL: `http://localhost:${LLM_PROXY_PORT}/v1`,
+          MNEMO_LLM_MODEL: LLM_MODEL,
+          MNEMO_LLM_API_KEY: "local", // dummy; the proxy holds the real bearer
         },
         // Secret injection (== ECS `secrets: valueFrom`): the DB secret lands as an
         // env var from Secrets Manager at task start. Never a literal in git.
@@ -183,6 +239,31 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
           // unhealthy until the model finishes loading.
           command: ["CMD-SHELL", `curl -fsS http://localhost:${EMBED_PORT}/health || exit 1`],
           startPeriod: "180 seconds",
+          interval: "30 seconds",
+          timeout: "5 seconds",
+          retries: 3,
+        },
+      },
+      {
+        name: "llm-proxy",
+        image: llmProxyImage,
+        environment: {
+          LLM_PROXY_PORT: String(LLM_PROXY_PORT),
+          // The proxy derives the Mantle upstream from the region (AWS_REGION is
+          // set by Fargate); pin it explicitly so a region change can't silently
+          // point it at the wrong Mantle endpoint.
+          LLM_PROXY_REGION: "ap-northeast-1",
+          // OpenAI-Project header for Bedrock cost attribution. Empty → omitted.
+          LLM_PROXY_OPENAI_PROJECT: BEDROCK_PROJECT,
+        },
+        logging: { retention: "1 month" },
+        // /health flips to 200 only once the first Bedrock bearer is minted (a
+        // local presign, sub-second) — fast, no model load. curl -f keeps the
+        // container unhealthy until then so mnemo-server isn't marked healthy
+        // before smart-ingest can actually auth.
+        health: {
+          command: ["CMD-SHELL", `curl -fsS http://localhost:${LLM_PROXY_PORT}/health || exit 1`],
+          startPeriod: "30 seconds",
           interval: "30 seconds",
           timeout: "5 seconds",
           retries: 3,

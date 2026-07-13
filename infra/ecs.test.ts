@@ -159,7 +159,7 @@ describe("ecs stack", () => {
     return String((c.image as { value?: string })?.value ?? c.image);
   }
 
-  it("runs an arm64 2-container task (mnemo-server + qwen3-embed) sized for the model, NO load balancer", async () => {
+  it("runs an arm64 3-container task (mnemo-server + qwen3-embed + llm-proxy) sized for the model, NO load balancer", async () => {
     installGlobals("prod");
     const ecs = await loadEcs();
     ecs(fakeDbOut());
@@ -167,26 +167,48 @@ describe("ecs stack", () => {
     const args = services[0].args;
     expect(args.architecture).toBe("arm64");
     // Task total sized for the ~3.85 GB qwen3 model + headroom (§9). 2 vCPU/6 GB
-    // is a valid Fargate pair.
+    // is a valid Fargate pair; the tiny llm-proxy sidecar rides the same pool.
     expect(args.cpu).toBe("2 vCPU");
     expect(args.memory).toBe("6 GB");
     // Multi-container mode: containers[], and NO top-level image (SST rejects both).
     expect(args.image).toBeUndefined();
     const byName = containersByName();
-    expect(Object.keys(byName).sort()).toEqual(["mnemo-server", "qwen3-embed"]);
-    // Both images are our out-of-band ECR repos, from the caller account — not public.
+    expect(Object.keys(byName).sort()).toEqual(["llm-proxy", "mnemo-server", "qwen3-embed"]);
+    // All images are our out-of-band ECR repos, from the caller account — not public.
     expect(imgStr(byName["mnemo-server"])).toContain(
       ".dkr.ecr.ap-northeast-1.amazonaws.com/mem9-on-aws/mnemo-server:",
     );
     expect(imgStr(byName["qwen3-embed"])).toContain(
       ".dkr.ecr.ap-northeast-1.amazonaws.com/mem9-on-aws/qwen3-embed:",
     );
+    expect(imgStr(byName["llm-proxy"])).toContain(
+      ".dkr.ecr.ap-northeast-1.amazonaws.com/mem9-on-aws/llm-proxy:",
+    );
     expect(imgStr(byName["mnemo-server"])).not.toContain("public.ecr.aws");
     // No ALB (deferred to the Gateway PR).
     expect(args.loadBalancer).toBeUndefined();
   });
 
-  it("defaults the image tag to `latest` and honors MEM9_IMAGE_TAG (both containers)", async () => {
+  it("grants the task role least-privilege Bedrock (CallWithBearerToken + InvokeModel on GLM-5), no wildcard model", async () => {
+    installGlobals("prod");
+    const ecs = await loadEcs();
+    ecs(fakeDbOut());
+    const perms = services[0].args.permissions as { actions: string[]; resources: string[] }[];
+    expect(Array.isArray(perms)).toBe(true);
+    const actions = perms.flatMap((p) => p.actions);
+    expect(actions).toContain("bedrock:CallWithBearerToken"); // mint the bearer
+    expect(actions).toContain("bedrock:InvokeModel"); // the GLM-5 call via Mantle
+    // InvokeModel is scoped to the zai.glm-5 foundation-model ARN (wildcard region
+    // per CLAUDE-AWS Bedrock guidance) — never Resource "*" on the model.
+    const invoke = perms.find((p) => p.actions.includes("bedrock:InvokeModel"));
+    expect(invoke?.resources.some((r) => r.includes("foundation-model/zai.glm-5"))).toBe(true);
+    expect(invoke?.resources).not.toContain("*");
+    // No committed 12-digit account id in any permission ARN (FM ARNs have none).
+    for (const p of perms)
+      for (const r of p.resources) expect(r).not.toMatch(/\d{12}/);
+  });
+
+  it("defaults the image tag to `latest` and honors MEM9_IMAGE_TAG (all containers)", async () => {
     installGlobals("prod");
     let ecs = await loadEcs();
     ecs(fakeDbOut());
@@ -214,11 +236,16 @@ describe("ecs stack", () => {
     const env = mnemo.environment as Record<string, unknown>;
     expect(env.MNEMO_DB_BACKEND).toBe("postgres");
     expect(env.MNEMO_PORT).toBe("8080");
-    expect(env.MNEMO_INGEST_MODE).toBe("raw"); // LLM sidecar deferred
+    expect(env.MNEMO_INGEST_MODE).toBe("smart"); // LLM extraction via llm-proxy
     expect(env.MEM9_DB_HOST).toBeDefined();
     // Embed wiring: localhost sidecar, dims MUST be 1024 (matches PG vector(1024)).
     expect(String(env.MNEMO_EMBED_BASE_URL)).toBe("http://localhost:8081/v1");
     expect(env.MNEMO_EMBED_DIMS).toBe("1024");
+    // LLM wiring: mem9 talks to the llm-proxy sidecar on localhost with a NON-EMPTY
+    // dummy key (empty would nil mem9's LLM client → silent smart→raw downgrade).
+    expect(String(env.MNEMO_LLM_BASE_URL)).toBe("http://localhost:8082/v1");
+    expect(env.MNEMO_LLM_MODEL).toBe("zai.glm-5");
+    expect(String(env.MNEMO_LLM_API_KEY ?? "")).not.toBe(""); // dummy, but non-empty
     // Secret via ssm (== ECS secrets valueFrom), never environment.
     const ssm = mnemo.ssm as Record<string, unknown>;
     expect(ssm.MEM9_DB_SECRET).toBeDefined();
@@ -243,6 +270,28 @@ describe("ecs stack", () => {
     expect(String(health.startPeriod)).toMatch(/180/);
     // The embed container carries NO DB secret (only mnemo-server needs it).
     expect(embed.ssm).toBeUndefined();
+  });
+
+  it("llm-proxy container: localhost port + region env + health check, no DB secret", async () => {
+    installGlobals("prod");
+    const ecs = await loadEcs();
+    ecs(fakeDbOut());
+    const proxy = containersByName()["llm-proxy"];
+    const env = proxy.environment as Record<string, unknown>;
+    expect(env.LLM_PROXY_PORT).toBe("8082"); // matches MNEMO_LLM_BASE_URL localhost:8082
+    expect(env.LLM_PROXY_REGION).toBe("ap-northeast-1"); // pinned Mantle region
+    // OpenAI-Project header key is present (value comes from CI env; empty is fine
+    // — the proxy omits the header when unset).
+    expect("LLM_PROXY_OPENAI_PROJECT" in env).toBe(true);
+    const health = proxy.health as Record<string, unknown>;
+    expect(String((health.command as string[]).join(" "))).toContain("/health");
+    // The proxy carries NO DB secret (only mnemo-server needs it) and no real key
+    // in env — the bearer is minted at runtime from the task role.
+    expect(proxy.ssm).toBeUndefined();
+    for (const [k, v] of Object.entries(env)) {
+      expect(k.toLowerCase()).not.toContain("secret");
+      expect(String(v)).not.toMatch(/bedrock-api-key-/); // never a baked bearer
+    }
   });
 
   it("exports the cluster + service names + image under /mem9-on-aws/${stage}/ecs/", async () => {

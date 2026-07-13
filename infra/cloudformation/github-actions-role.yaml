@@ -655,8 +655,8 @@ Resources:
               - ecr:GetAuthorizationToken
             Resource: "*"
           - Sid: ECRPush
-            # Upload layers + put the manifest, scoped to the THREE out-of-band
-            # repos CI pushes to (mnemo-server, qwen3-embed, bootstrap).
+            # Upload layers + put the manifest, scoped to the FOUR out-of-band
+            # repos CI pushes to (mnemo-server, qwen3-embed, bootstrap, llm-proxy).
             # BatchCheckLayerAvailability lets buildx skip re-uploading existing
             # layers. DescribeRepositories confirms a repo exists before pushing
             # (clear error if the ECR bootstrap wasn't run).
@@ -672,6 +672,7 @@ Resources:
               - !Sub arn:aws:ecr:ap-northeast-1:${AWS::AccountId}:repository/${ProjectName}/mnemo-server
               - !Sub arn:aws:ecr:ap-northeast-1:${AWS::AccountId}:repository/${ProjectName}/qwen3-embed
               - !Sub arn:aws:ecr:ap-northeast-1:${AWS::AccountId}:repository/${ProjectName}/bootstrap
+              - !Sub arn:aws:ecr:ap-northeast-1:${AWS::AccountId}:repository/${ProjectName}/llm-proxy
 
   # ───────────────────────────────────────────────────────────────────────────
   # IAM Role — assumed by GitHub Actions via OIDC.

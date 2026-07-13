@@ -158,16 +158,50 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
 - OpenAI-compatible `/chat/completions`. Env: `MNEMO_LLM_BASE_URL`,
   `MNEMO_LLM_MODEL` (default `gpt-4o-mini`), `MNEMO_LLM_API_KEY`.
 - `MNEMO_INGEST_MODE` = `smart` (default, LLM extraction/reconciliation) or
-  `raw`. **If no LLM key/base-url, smart falls back to raw** (server logs
-  "no LLM configured, ingest will use raw mode"). Raw = store as-is (no extraction).
+  `raw`. **The nil-client downgrade is keyed on the API KEY, not the mode:**
+  `llm.New()` returns `nil` iff `MNEMO_LLM_API_KEY == ""` (base-url alone defaults
+  to `api.openai.com/v1`), and the ingest pipeline silently does raw whenever the
+  client is nil — regardless of `MNEMO_INGEST_MODE`. So `smart` needs a **non-empty**
+  `MNEMO_LLM_API_KEY` or it logs "no LLM configured, ingest will use raw mode" and
+  downgrades. (Verified in `server/internal/llm/client.go` + `service/ingest.go`.)
 - Startup also logs "no embedding configured, keyword-only search active" when no
   embedder is set → **without an embedding endpoint, PG backend does keyword-only
   (FTS), NO vector search.** So the embedding MaaS is required for semantic recall.
 
+### LLM key is read ONCE at startup, immutable — decisive for the sidecar (verified 2026-07-12)
+Probed at the pinned commit (`server/internal/config/config.go` + `llm/client.go`):
+- `MNEMO_LLM_API_KEY` / `_BASE_URL` / `_MODEL` are read **once** in `config.Load()`
+  (called once in `main`) and copied into an **immutable `Client` struct field**
+  (`apiKey`/`baseURL`/`model`). **NO reload path** — no SIGHUP handler (only
+  SIGINT/SIGTERM for shutdown), no file watch, no periodic re-read, no setter.
+  Rotating the key requires a **process restart**.
+- The LLM client is **hand-rolled `net/http`** (NOT go-openai/sashabaranov). Its
+  `doRequest` sets **only** `Content-Type` + `Authorization: Bearer <apiKey>` and
+  POSTs to `{baseURL}/chat/completions`. There is **no hook to add extra headers**
+  → mem9 **cannot** emit the `OpenAI-Project` header Bedrock Mantle needs for cost
+  attribution.
+- **Consequence (design pivot from the original §7):** a token-refresh sidecar that
+  rewrites a shared file/env for mem9 to re-read **cannot work** (mem9 never
+  re-reads), and mem9 can't tag Mantle spend. Both are solved WITHOUT a mem9 fork by
+  a **local LLM proxy sidecar** (`docker/llm-proxy/`): mem9 points
+  `MNEMO_LLM_BASE_URL=http://localhost:8082/v1` with a **static dummy**
+  `MNEMO_LLM_API_KEY`; the proxy holds the live Mantle bearer (minted by
+  `@aws/bedrock-token-generator` — a **local SigV4 presign, 12h TTL**, refreshed on
+  a timer) and injects a fresh `Authorization` + `OpenAI-Project` per request. See
+  ARCHITECTURE.md §7 + `docker/llm-proxy/server.mjs`.
+
 ## Bedrock Mantle facts (for the LLM/embedding decision)
 
-Verified against AWS docs + the operator's a sibling project prod usage:
+Verified against AWS docs + the operator's a sibling project prod usage, and — for
+this repo — **empirically live 2026-07-12** (ap-northeast-1):
 
+- **Live proof:** `getToken({credentials, region})` (from `@aws/bedrock-token-generator`)
+  → a `bedrock-api-key-…` bearer; `POST https://bedrock-mantle.ap-northeast-1.api.aws/v1/chat/completions`
+  with `{model:"zai.glm-5", messages:[…]}` + `Authorization: Bearer <bearer>` →
+  **HTTP 200**, OpenAI-shaped body (`choices[0].message.content`). The bearer's
+  default+max TTL is **12h** (`token.js`: `DEFAULT/MAX_TOKEN_EXPIRES_IN_SECONDS = 43200`),
+  and minting is a **pure local SigV4 presign** (no network call) → the token-refresh
+  cadence is ~hourly, not the 15-min figure that was the *RDS IAM* token, not this one.
 - **Mantle IS OpenAI-compatible.** Endpoint `https://bedrock-mantle.{region}.api.aws/v1`;
   surfaces = **Chat Completions** + **Responses** (OpenAI-compatible) + **Messages**
   (Anthropic). "Bring OpenAI SDK code by changing only base URL + API key."

@@ -255,6 +255,14 @@ declare namespace sst {
       health?: Input<ContainerHealth>;
       logging?: ServiceLogging;
     }
+    // A task-role IAM statement (FunctionPermissionArgs shape, shared by Service).
+    // SST attaches these to the TASK role — the identity the container's default
+    // credential chain resolves. Used here for the llm-proxy sidecar's Bedrock calls.
+    interface FargatePermission {
+      effect?: Input<"allow" | "deny">;
+      actions: Input<string>[];
+      resources: Input<Input<string>[]>;
+    }
     interface ServiceArgs {
       cluster: Cluster;
       architecture?: Input<"x86_64" | "arm64">;
@@ -267,6 +275,8 @@ declare namespace sst {
       // Multi-container (sidecar) mode: mutually exclusive with the above.
       containers?: Input<FargateContainer>[];
       logging?: ServiceLogging;
+      // IAM statements attached to the task role (SST's `permissions`).
+      permissions?: Input<FargatePermission>[];
       transform?: { service?: (args: Record<string, unknown>) => void };
     }
     class Service {

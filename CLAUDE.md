@@ -20,8 +20,10 @@ file rather than silently diverging.
     `VECTOR`/`VEC_COSINE`/`EMBED_TEXT`) → we use the **postgres backend + pgvector**.
   - **Bedrock Mantle has no `/embeddings`** (Chat Completions / Responses only) →
     embedding can't go through Mantle; we self-host qwen3.
-  - Mantle bearer tokens (`@aws/bedrock-token-generator`) are **short-lived**, but
-    mem9 reads a **static** `MNEMO_LLM_API_KEY` → a **token-refresh sidecar** bridges.
+  - mem9 reads `MNEMO_LLM_API_KEY` **once at startup (immutable)** and sends no
+    custom headers → the Mantle bearer (12h TTL, refreshable) + `OpenAI-Project`
+    cost header are bridged by a **local LLM proxy sidecar** (`docker/llm-proxy/`),
+    NOT a token file-writer.
   - mem9 schema **`idx_app` gap**: control-plane `schema_pg.sql` ≠ the tenant
     runtime schema the server validates → bootstrap must apply the runtime schema.
   - AgentCore Gateway reaches a private VPC target via **managed VPC Lattice +
@@ -54,9 +56,9 @@ file rather than silently diverging.
 | MCP surface | **AgentCore Gateway** (OpenAPI target → mnemo-server REST API) |
 | Gateway → server | **private**: `privateEndpoint` + managed VPC Lattice → **internal ALB** (public ACM cert `mem9.internal.example.com`, TLS terminated) → HTTP:8080. Outbound auth = API key (`X-API-Key`). No public exposure |
 | Auth (inbound) | **Cognito M2M**, reusing the a sibling project / a sibling project gateway pattern |
-| LLM (smart-ingest) | **Bedrock Mantle direct**, **GLM-5**, **ON at launch**. Auth via **`@aws/bedrock-token-generator`** (short-term bearer from task IAM role, same as a sibling project) + **Bedrock Project** cost attribution + a **token-refresh sidecar** (bearer expires; mem9 reads static `MNEMO_LLM_API_KEY`). GPT-5.4/5.5 excluded (Responses-only) |
+| LLM (smart-ingest) | **Bedrock Mantle direct**, **GLM-5**, **ON at launch**. Auth via **`@aws/bedrock-token-generator`** (short-term bearer from task IAM role, same as a sibling project) + **Bedrock Project** cost attribution + a **local LLM proxy sidecar** (`docker/llm-proxy/` — mem9 reads `MNEMO_LLM_API_KEY` once & sends no custom headers, so a request-proxy holds the live bearer + injects `OpenAI-Project`; NOT a token file-writer). GPT-5.4/5.5 excluded (Responses-only) |
 | Embedding | qwen3 OpenAI `/embeddings` as an **ECS sidecar** (localhost, always warm), **code lifted from a sibling project qwen3 ONNX**, **dims 1024**. NOT Mantle, NOT 3P API |
-| ECS task | **3 containers**: mnemo-server + qwen3-embed sidecar + token-refresh sidecar. TLS at the ALB, not in task |
+| ECS task | **3 containers**: mnemo-server + qwen3-embed sidecar + llm-proxy sidecar (Mantle GLM-5). TLS at the ALB, not in task |
 | Schema bootstrap | **one-shot ECS task** on deploy (pgvector + tenant runtime schema incl. `idx_app`/FTS/`vector(1024)` + seed 1 tenant) |
 | Tenancy | **single tenant** (one `X-API-Key`); writes carry **`X-Mnemo-Agent-Id`** to reserve per-agent scoping |
 | Replicas | **Single** (`desiredCount=1`) — single-writer, sidesteps mem9's local-disk import dir |

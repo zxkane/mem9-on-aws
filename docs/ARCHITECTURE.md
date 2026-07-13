@@ -252,18 +252,26 @@ OpenAI-compatible* endpoint. mem9's LLM client POSTs to `/chat/completions`, so:
   a sibling project uses `@aws/bedrock-token-generator@^1.1.0` to mint a **short-term
   Bedrock bearer token** from the task's IAM credentials (no long-lived API key to
   manage). Cost attribution = a **Bedrock Project** (`AWS::BedrockMantle::Project`,
-  out-of-band CFN like a sibling project's `bedrock-mantle-project.yaml` +
-  `deploy-mantle-project.sh`), passed as the `OpenAI-Project` header. Mantle does
-  NOT support IAM-principal attribution (a sibling project verified), so the Project
-  is how GLM-5 spend gets tagged.
-- **Token-lifetime bridge (LOCKED — this is the one non-obvious wiring):** the
-  bearer token from the generator is **short-lived and expires**, but mem9 reads a
-  **static** `MNEMO_LLM_API_KEY` env var. So a **token-refresh sidecar** in the ECS
-  task periodically mints a fresh bearer via `@aws/bedrock-token-generator` and
-  writes it where mnemo-server reads it (a shared file the container re-reads, or a
-  restart-free refresh mechanism), refreshing before expiry. **No mem9 source
-  change.** (Detail + the exact refresh mechanism = an IaC-stage item; the approach
-  is locked.)
+  out-of-band CFN — this repo's `infra/cloudformation/bedrock-mantle-project.yaml` +
+  `scripts/deploy-bedrock-mantle-project.sh`, modeled on a sibling project's), passed as the
+  `OpenAI-Project` header. Mantle does NOT support IAM-principal attribution
+  (a sibling project verified), so the Project is how GLM-5 spend gets tagged.
+- **Token-lifetime + header bridge (LOCKED; mechanism corrected 2026-07-12):** the
+  Mantle bearer expires (**12h TTL**, verified live), but mem9 reads
+  `MNEMO_LLM_API_KEY` **once at startup into an immutable field — NO reload** (no
+  SIGHUP/watch/re-read, verified in mem9 source), and its hand-rolled client sends
+  **only** `Authorization` (no hook to add the `OpenAI-Project` cost header). So the
+  originally-sketched "sidecar rewrites a file mem9 re-reads" **cannot work**. The
+  LOCKED mechanism is a **local LLM proxy sidecar** (`docker/llm-proxy/`): mem9
+  points `MNEMO_LLM_BASE_URL=http://localhost:8082/v1` with a **static dummy**
+  `MNEMO_LLM_API_KEY` (must be non-empty, else mem9 nils the LLM client → silent
+  raw); the proxy holds the live bearer (minted by `@aws/bedrock-token-generator` —
+  a **local SigV4 presign**, refreshed on a ~hourly timer well under the 12h TTL)
+  and injects a fresh `Authorization: Bearer` + the `OpenAI-Project` header per
+  forwarded request. Solves BOTH the read-once-key and no-custom-header limits —
+  **no mem9 source change, no restart on rotation.** Task-role IAM:
+  `bedrock:CallWithBearerToken` (mint) + `bedrock:InvokeModel` on the `zai.glm-5`
+  FM ARN. See `docs/mem9-facts.md` "LLM key is read ONCE" + `docker/llm-proxy/server.mjs`.
 
 ### Embedding → **NOT Mantle** (Mantle has no `/embeddings`)
 
@@ -300,9 +308,12 @@ qwen3 output, and the PG `vector(1024)` column. Changing later = full reindex.
 
 The single Fargate task (`desiredCount=1`, arm64) runs **three containers**:
 1. **mnemo-server** (upstream mem9, HTTP :8080) — the memory server.
-2. **qwen3-embed sidecar** — OpenAI `/v1/embeddings` on localhost (§7 embedding).
-3. **token-refresh sidecar** — mints/refreshes the Bedrock bearer for Mantle
-   (§7 LLM auth) so mnemo-server's `MNEMO_LLM_API_KEY` stays valid.
+2. **qwen3-embed sidecar** — OpenAI `/v1/embeddings` on localhost:8081 (§7 embedding).
+3. **llm-proxy sidecar** — OpenAI `/v1/chat/completions` proxy on localhost:8082 →
+   Bedrock Mantle GLM-5 (§7 LLM). Holds + refreshes the Mantle bearer and injects
+   `OpenAI-Project`, so mnemo-server auths with a static dummy key locally. (This
+   replaces the originally-named "token-refresh sidecar" — mem9's read-once key +
+   no-custom-header limits require a request proxy, not a token file-writer.)
 
 (TLS is NOT in the task — the internal ALB terminates it, §6a. So no nginx/TLS
 sidecar needed.) Task memory must fit mnemo-server + the qwen3 ONNX model; the
@@ -384,7 +395,7 @@ model is the heavy tenant), which is the main swing in the Fargate cost row.
 | Tool authz | REQUEST interceptor Lambda | a sibling project `infra/functions.ts` |
 | Embedding | qwen3 OpenAI `/embeddings` as an **ECS sidecar** (lifted from a sibling project qwen3 ONNX), localhost, dims 1024 | a sibling project qwen3 ONNX code |
 | LLM (smart-ingest) | **Bedrock Mantle direct**, **GLM-5**, ON at launch; auth via **`@aws/bedrock-token-generator`** + **token-refresh sidecar** + Bedrock Project | a sibling project (`@aws/bedrock-token-generator`, `bedrock-mantle-project.yaml`) + a sibling project `bedrock-mantle.ts` |
-| Bedrock Project | `AWS::BedrockMantle::Project` for GLM-5 cost attribution (out-of-band CFN) | a sibling project `cloudformation/bedrock-mantle-project.yaml` + `deploy-mantle-project.sh` |
+| Bedrock Project | `AWS::BedrockMantle::Project` for GLM-5 cost attribution (out-of-band CFN) | this repo: `infra/cloudformation/bedrock-mantle-project.yaml` + `scripts/deploy-bedrock-mantle-project.sh` (modeled on a sibling project) |
 | Config | SST v4 `sst.config.ts` (Tokyo, Node 24) | a sibling project `sst.config.ts` |
 | Cross-module wiring | SSM Parameter Store `/mem9-on-aws/${stage}/...` | both |
 
