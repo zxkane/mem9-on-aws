@@ -734,6 +734,55 @@ Resources:
               - elasticloadbalancing:RemoveTags
               - elasticloadbalancing:DescribeTags
             Resource: "*"
+          - Sid: VpcLattice
+            # infra/alb.ts creates a SELF-MANAGED VPC Lattice ResourceGateway +
+            # ResourceConfiguration (AgentCore's managed path can't create the ENIs
+            # in ap-northeast-1). Full lifecycle; Lattice create/describe calls have
+            # no useful per-resource ARN granularity + Pulumi refreshes probe broadly.
+            Effect: Allow
+            Action:
+              - vpc-lattice:CreateResourceGateway
+              - vpc-lattice:DeleteResourceGateway
+              - vpc-lattice:GetResourceGateway
+              - vpc-lattice:ListResourceGateways
+              - vpc-lattice:UpdateResourceGateway
+              - vpc-lattice:CreateResourceConfiguration
+              - vpc-lattice:DeleteResourceConfiguration
+              - vpc-lattice:GetResourceConfiguration
+              - vpc-lattice:ListResourceConfigurations
+              - vpc-lattice:UpdateResourceConfiguration
+              - vpc-lattice:TagResource
+              - vpc-lattice:UntagResource
+              - vpc-lattice:ListTagsForResource
+            Resource: "*"
+          - Sid: VpcLatticeServiceLinkedRole
+            # First VPC Lattice use provisions AWSServiceRoleForVpcLattice (the SLR
+            # that actually creates the resource-gateway ENIs).
+            Effect: Allow
+            Action:
+              - iam:CreateServiceLinkedRole
+            Resource: "*"
+            Condition:
+              StringEquals:
+                iam:AWSServiceName: vpc-lattice.amazonaws.com
+          - Sid: EC2NetworkInterfaceForLattice
+            # When infra/gateway.ts creates the GatewayTarget (via CloudControl),
+            # AgentCore synchronously provisions the managed VPC Lattice resource
+            # gateway, which creates ENIs in our private subnets — and it does so
+            # as THE CALLER (this deploy role, the CloudControl SigV4 principal),
+            # NOT the AgentCore SLR (whose managed policy has no ENI action). So the
+            # deploy role itself needs ec2:CreateNetworkInterface or the target
+            # create FAILS with "the caller does not have ec2:CreateNetworkInterface".
+            # (The DescribeVpcs/Subnets/SecurityGroups reads are already granted in
+            # ScaffoldPolicy's EC2VpcReadOnly.)
+            Effect: Allow
+            Action:
+              - ec2:CreateNetworkInterface
+              - ec2:DeleteNetworkInterface
+              - ec2:CreateNetworkInterfacePermission
+              - ec2:DeleteNetworkInterfacePermission
+              - ec2:CreateTags
+            Resource: "*"
           - Sid: ELBServiceLinkedRole
             # First ELBv2 use in an account provisions AWSServiceRoleForElasticLoadBalancing.
             Effect: Allow

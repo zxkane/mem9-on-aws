@@ -33,6 +33,14 @@ export interface AlbOutputs {
   ssmPrefix: string;
   albDnsName: Output<string>;
   albSecurityGroupId: Output<string>;
+  // Self-managed VPC Lattice resource-configuration ARN for the AgentCore Gateway
+  // target's privateEndpoint.selfManagedLatticeResource (§6a). We create the Lattice
+  // ResourceGateway + ResourceConfiguration ourselves (ENIs created under OUR deploy
+  // role, which has ec2:CreateNetworkInterface) — AgentCore's MANAGED-Lattice path
+  // fails to create the ENIs ("caller does not have ec2:CreateNetworkInterface")
+  // despite the AWSServiceRoleForVpcLattice SLR having the perm. Self-managed
+  // bypasses that AWS-side gap.
+  latticeResourceConfigArn: Output<string>;
 }
 
 export function alb(ecsOut: EcsOutputs, dbOut: DbOutputs, certOut: CertOutputs): AlbOutputs {
@@ -141,6 +149,45 @@ export function alb(ecsOut: EcsOutputs, dbOut: DbOutputs, certOut: CertOutputs):
     }],
   });
 
+  // --- Self-managed VPC Lattice (§6a) ---
+  // WE create the Lattice ResourceGateway + ResourceConfiguration so the ENIs are
+  // created by OUR IaC under the deploy role (which has ec2:CreateNetworkInterface).
+  // AgentCore's MANAGED-Lattice path fails to create the ENIs in ap-northeast-1
+  // despite the vpc-lattice SLR having the perm — self-managed sidesteps it. The
+  // Gateway target references this ResourceConfiguration's ARN.
+  const resourceGateway = new awsAny.vpclattice.ResourceGateway("Mem9LatticeRg", {
+    name: `mem9-${$app.stage}`.slice(0, 40),
+    vpcId,
+    subnetIds: privateSubnetIds,
+    securityGroupIds: [albSg.id],
+    ipAddressType: "IPV4",
+    tags,
+  });
+  // The resource config points at the ALB by its cert/SNI domain (resolved to the
+  // ALB via the private zone above). Lattice routes TCP:443 to it; the TLS SNI
+  // carries mem9.aws.kane.mx so the ALB presents the matching public cert.
+  const resourceConfig = new awsAny.vpclattice.ResourceConfiguration(
+    "Mem9LatticeRc",
+    {
+      name: `mem9-${$app.stage}`.slice(0, 40),
+      resourceGatewayIdentifier: resourceGateway.id,
+      protocol: "TCP",
+      portRanges: [`${ALB_HTTPS_PORT}`],
+      resourceConfigurationDefinition: {
+        dnsResource: { domainName: certOut.domainName, ipAddressType: "IPV4" },
+      },
+      tags,
+    },
+    { dependsOn: [resourceGateway] },
+  );
+
+  new awsAny.ssm.Parameter("SsmLatticeResourceConfigArn", {
+    name: `${prefix}/alb/lattice-resource-config-arn`,
+    type: "String",
+    value: resourceConfig.arn,
+    tags,
+  });
+
   new awsAny.ssm.Parameter("SsmAlbDnsName", {
     name: `${prefix}/alb/dns-name`,
     type: "String",
@@ -158,5 +205,6 @@ export function alb(ecsOut: EcsOutputs, dbOut: DbOutputs, certOut: CertOutputs):
     ssmPrefix: prefix,
     albDnsName: loadBalancer.dnsName,
     albSecurityGroupId: albSg.id,
+    latticeResourceConfigArn: resourceConfig.arn,
   };
 }

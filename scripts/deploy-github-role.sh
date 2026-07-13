@@ -53,6 +53,38 @@ echo "Stack:    $STACK_NAME"
 echo "Region:   $REGION"
 echo "Template: $TEMPLATE_FILE"
 
+# CloudFormation's inline --template-body cap is 51200 bytes. This role template
+# grew past that as resource-type policies accumulated (ELB/ACM/Route53/Cognito/
+# AgentCore/VPC-Lattice), which made `update-stack --template-body` SILENTLY
+# fail validation → the role froze at a stale version and every downstream deploy
+# 403'd on "missing" grants that were in git but never applied. So above ~50KB we
+# upload the template to S3 and use --template-url (1 MB cap). The bucket is a
+# reused SST state bucket (MEM9_TEMPLATE_BUCKET overrides); the object is a
+# throwaway under tmp/.
+TEMPLATE_SIZE=$(wc -c < "$TEMPLATE_FILE" | tr -d ' ')
+if [[ "$TEMPLATE_SIZE" -gt 50000 ]]; then
+  TEMPLATE_BUCKET="${MEM9_TEMPLATE_BUCKET:-}"
+  if [[ -z "$TEMPLATE_BUCKET" ]]; then
+    TEMPLATE_BUCKET=$(aws s3api list-buckets \
+      --query "Buckets[?starts_with(Name, 'sst-state-')].Name | [0]" --output text 2>/dev/null)
+  fi
+  if [[ -z "$TEMPLATE_BUCKET" || "$TEMPLATE_BUCKET" == "None" ]]; then
+    echo "Error: template is ${TEMPLATE_SIZE}B (> 50KB inline cap) but no S3 bucket found for --template-url. Set MEM9_TEMPLATE_BUCKET." >&2
+    exit 1
+  fi
+  # Bucket region for the virtual-hosted URL (CFN reads it cross-region over https).
+  BUCKET_REGION=$(aws s3api get-bucket-location --bucket "$TEMPLATE_BUCKET" \
+    --query 'LocationConstraint' --output text 2>/dev/null)
+  [[ "$BUCKET_REGION" == "None" || -z "$BUCKET_REGION" ]] && BUCKET_REGION="us-east-1"
+  TEMPLATE_KEY="tmp/${STACK_NAME}.yaml"
+  aws s3 cp "$TEMPLATE_FILE" "s3://${TEMPLATE_BUCKET}/${TEMPLATE_KEY}" --region "$BUCKET_REGION" >/dev/null
+  TEMPLATE_URL="https://${TEMPLATE_BUCKET}.s3.${BUCKET_REGION}.amazonaws.com/${TEMPLATE_KEY}"
+  TEMPLATE_ARG=(--template-url "$TEMPLATE_URL")
+  echo "Template: ${TEMPLATE_SIZE}B > 50KB → uploaded to s3://${TEMPLATE_BUCKET}/${TEMPLATE_KEY} (--template-url)"
+else
+  TEMPLATE_ARG=(--template-body "file://$TEMPLATE_FILE")
+fi
+
 # Reuse the account's existing GitHub Actions OIDC provider if present (sister
 # projects created one already). Fail the discovery loud — silently falling
 # through to "empty" would attempt a duplicate provider create on a transient
@@ -88,7 +120,7 @@ case "$MODE" in
     echo "Creating stack..."
     aws cloudformation create-stack \
       --stack-name "$STACK_NAME" \
-      --template-body "file://$TEMPLATE_FILE" \
+      "${TEMPLATE_ARG[@]}" \
       --parameters "${PARAMS[@]}" \
       --capabilities CAPABILITY_NAMED_IAM \
       --region "$REGION" \
@@ -105,7 +137,7 @@ case "$MODE" in
     set +e
     UPDATE_OUTPUT=$(aws cloudformation update-stack \
       --stack-name "$STACK_NAME" \
-      --template-body "file://$TEMPLATE_FILE" \
+      "${TEMPLATE_ARG[@]}" \
       --parameters "${PARAMS[@]}" \
       --capabilities CAPABILITY_NAMED_IAM \
       --region "$REGION" 2>&1)

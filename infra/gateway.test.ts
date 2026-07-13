@@ -122,6 +122,7 @@ function fakeAlb(): AlbOutputs {
   return {
     albDnsName: out("internal-mem9-abc.ap-northeast-1.elb.amazonaws.com"),
     albSecurityGroupId: out("sg-alb"),
+    latticeResourceConfigArn: out("arn:aws:vpc-lattice:ap-northeast-1:123456789012:resourceconfiguration/rcfg-abc"),
   } as unknown as AlbOutputs;
 }
 function fakeBootstrap(): BootstrapOutputs {
@@ -178,12 +179,12 @@ describe("gateway stack", () => {
     expect(cp.CredentialProviderType).toBe("API_KEY");
     expect(cp.CredentialProvider.ApiKeyCredentialProvider.CredentialLocation).toBe("HEADER");
     expect(cp.CredentialProvider.ApiKeyCredentialProvider.CredentialParameterName).toBe("X-API-Key");
-    // Private egress via managed VPC Lattice; RoutingDomain = ALB internal DNS
-    // (the fix — this is what the typed resource silently dropped).
-    const mv = ds.PrivateEndpoint.ManagedVpcResource;
-    expect(mv.EndpointIpAddressType).toBe("IPV4");
-    expect(mv.SecurityGroupIds).toHaveLength(1);
-    expect(mv.RoutingDomain).toContain("elb.amazonaws.com");
+    // Private egress via SELF-MANAGED VPC Lattice — references the ResourceConfiguration
+    // ARN infra/alb.ts creates (AgentCore's managed path can't create the ENIs in
+    // ap-northeast-1). This is the fix for the persistent ec2:CreateNetworkInterface error.
+    const sm = ds.PrivateEndpoint.SelfManagedLatticeResource;
+    expect(sm.ResourceConfigurationIdentifier).toContain("resourceconfiguration/rcfg-");
+    expect(ds.PrivateEndpoint.ManagedVpcResource).toBeUndefined();
   });
 
   it("creates a bedrock-agentcore-trust service role with workload-identity access", async () => {

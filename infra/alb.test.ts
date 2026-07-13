@@ -51,6 +51,10 @@ function installGlobals(stage: string) {
       Zone: makeCtor("Zone"),
       Record: makeCtor("Route53Record"),
     },
+    vpclattice: {
+      ResourceGateway: makeCtor("ResourceGateway"),
+      ResourceConfiguration: makeCtor("ResourceConfiguration"),
+    },
     ssm: {
       Parameter: class {
         constructor(_n: string, args: { name: unknown }) {
@@ -137,5 +141,26 @@ describe("alb stack", () => {
     expect(host).toBe("mem9.aws.kane.mx");
     expect((rule.actions as { type: string }[])[0].type).toBe("forward");
     expect(params.map((p) => p.name)).toContain("/mem9-on-aws/prod/alb/dns-name");
+  });
+
+  it("creates a self-managed VPC Lattice ResourceGateway + ResourceConfiguration and exports its ARN", async () => {
+    installGlobals("prod");
+    const alb = await loadAlb();
+    const outs = alb(fakeEcs(), fakeDb(), fakeCert());
+    // Self-managed Lattice: WE create the resource gateway (ENIs under our deploy
+    // role) + the resource config pointing at the ALB's cert/SNI domain over TCP:443.
+    const rg = only("ResourceGateway");
+    expect(rg.ipAddressType).toBe("IPV4");
+    expect(rg.subnetIds).toBeDefined();
+    expect(rg.securityGroupIds).toBeDefined();
+    const rc = only("ResourceConfiguration");
+    expect(rc.protocol).toBe("TCP");
+    expect(rc.portRanges).toEqual(["443"]);
+    const dns = (rc.resourceConfigurationDefinition as any).dnsResource;
+    expect(dns.domainName).toBe("mem9.aws.kane.mx");
+    expect(dns.ipAddressType).toBe("IPV4");
+    // The gateway target consumes this ARN.
+    expect(outs.latticeResourceConfigArn).toBeDefined();
+    expect(params.map((p) => p.name)).toContain("/mem9-on-aws/prod/alb/lattice-resource-config-arn");
   });
 });

@@ -25,7 +25,6 @@ import { fileURLToPath } from "url";
 import type { CognitoOutputs } from "./cognito";
 import type { AlbOutputs } from "./alb";
 import type { BootstrapOutputs } from "./bootstrap";
-import { resolveVpc } from "./vpc";
 
 // @ts-ignore - `aws` injected globally by SST; bedrock/iam/lambda types loose.
 const awsAny = aws as unknown as Record<string, any>;
@@ -47,7 +46,6 @@ export function gateway(
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const stage = $app.stage;
   const tags = { Project: "mem9-on-aws", Stage: stage, ManagedBy: "sst" };
-  const { vpcId, privateSubnetIds } = resolveVpc();
 
   // Load the OpenAPI schema (inline payload; static server URL, no substitution).
   // Resolve module-relative first, then workspace-root (SST build changes __dirname).
@@ -194,17 +192,18 @@ export function gateway(
   // --- Gateway Target (OpenAPI, private via managed VPC Lattice → internal ALB) ---
   //
   // Provisioned via aws.cloudcontrol.Resource, NOT the typed
-  // aws.bedrock.AgentcoreGatewayTarget: the typed resource in pulumi-aws 7.20.0
-  // (the version SST bundles) has NO `privateEndpoint` field at all, so it
-  // SILENTLY DROPPED our privateEndpoint/routingDomain — the Gateway then tried to
-  // DNS-resolve the OpenAPI server URL (mem9.aws.kane.mx) directly and failed with
-  // "Error executing HTTP request for unknown: mem9.aws.kane.mx". The CFN type
-  // AWS::BedrockAgentCore::GatewayTarget DOES have PrivateEndpoint.ManagedVpcResource
-  // .RoutingDomain (verified in the CFN ref), and CloudControl provisions it.
+  // aws.bedrock.AgentcoreGatewayTarget (pulumi-aws 7.20.0's typed resource has NO
+  // privateEndpoint field — it silently dropped it). CloudControl provisions the
+  // full CFN AWS::BedrockAgentCore::GatewayTarget incl. PrivateEndpoint.
   //
-  // desiredState is CFN PascalCase JSON. routingDomain = the ALB internal DNS (the
-  // real route); the OpenAPI server URL / cert SNI (mem9.aws.kane.mx) is the SNI
-  // AgentCore sends on the wire — decoupled, per the AWS "routing domain" docs.
+  // SELF-MANAGED VPC Lattice (§6a): infra/alb.ts creates the Lattice
+  // ResourceGateway + ResourceConfiguration ourselves (so the ENIs are created by
+  // OUR deploy role, which has ec2:CreateNetworkInterface). AgentCore's MANAGED
+  // path fails to create those ENIs in ap-northeast-1 ("caller does not have
+  // ec2:CreateNetworkInterface") despite the vpc-lattice SLR having the perm — a
+  // service-side gap. We reference our ResourceConfiguration by ARN instead.
+  // The resource config's dnsResource domain = mem9.aws.kane.mx (the cert/SNI),
+  // resolved to the ALB by the private R53 zone; Lattice sends that as the TLS SNI.
   const targetDesiredState = $jsonStringify({
     GatewayIdentifier: bedrockGateway.gatewayId,
     Name: `${stage}-mem9-rest`,
@@ -229,12 +228,8 @@ export function gateway(
       },
     ],
     PrivateEndpoint: {
-      ManagedVpcResource: {
-        VpcIdentifier: vpcId,
-        SubnetIds: privateSubnetIds,
-        EndpointIpAddressType: "IPV4",
-        SecurityGroupIds: [albOut.albSecurityGroupId],
-        RoutingDomain: albOut.albDnsName,
+      SelfManagedLatticeResource: {
+        ResourceConfigurationIdentifier: albOut.latticeResourceConfigArn,
       },
     },
   });
