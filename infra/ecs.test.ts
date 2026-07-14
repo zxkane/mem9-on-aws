@@ -163,6 +163,7 @@ afterEach(() => {
   for (const g of ["$app", "aws", "sst", "command", "$interpolate"])
     delete (globalThis as Record<string, unknown>)[g];
   delete process.env.MEM9_IMAGE_TAG;
+  delete process.env.MEM9_BEDROCK_PROJECT;
   vi.resetModules();
 });
 
@@ -274,23 +275,51 @@ describe("ecs stack", () => {
     expect(outs.taskSecurityGroupId).toBeDefined();
   });
 
-  it("grants the task role least-privilege Bedrock (CallWithBearerToken + InvokeModel on GLM-5), no wildcard model", async () => {
+  it("grants the task role Bedrock MANTLE inference perms (not the wrong bedrock:* namespace)", async () => {
     installGlobals("prod");
     const ecs = await loadEcs();
     ecs(fakeDbOut());
     const perms = services[0].args.permissions as { actions: string[]; resources: string[] }[];
     expect(Array.isArray(perms)).toBe(true);
     const actions = perms.flatMap((p) => p.actions);
-    expect(actions).toContain("bedrock:CallWithBearerToken"); // mint the bearer
-    expect(actions).toContain("bedrock:InvokeModel"); // the GLM-5 call via Mantle
-    // InvokeModel is scoped to the zai.glm-5 foundation-model ARN (wildcard region
-    // per CLAUDE-AWS Bedrock guidance) — never Resource "*" on the model.
-    const invoke = perms.find((p) => p.actions.includes("bedrock:InvokeModel"));
-    expect(invoke?.resources.some((r) => r.includes("foundation-model/zai.glm-5"))).toBe(true);
-    expect(invoke?.resources).not.toContain("*");
-    // No committed 12-digit account id in any permission ARN (FM ARNs have none).
-    for (const p of perms)
-      for (const r of p.resources) expect(r).not.toMatch(/\d{12}/);
+    // Smart-ingest calls the Bedrock MANTLE endpoint (/chat/completions), which
+    // authorizes against the `bedrock-mantle:` namespace — NOT `bedrock:`. The old
+    // grant used `bedrock:InvokeModel` + `bedrock:CallWithBearerToken`, so every
+    // inference 401'd (prod issue #11 / prod-smart-ingest-mantle-iam-gap memory).
+    expect(actions).toContain("bedrock-mantle:CreateInference"); // the GLM-5 inference
+    expect(actions).toContain("bedrock-mantle:CallWithBearerToken"); // the bearer at the Mantle endpoint
+    // The read actions the Mantle inference path also checks (AWS docs
+    // inference-how.html "bedrock-mantle endpoint" / AmazonBedrockMantleInferenceAccess).
+    expect(actions).toContain("bedrock-mantle:GetProject");
+    expect(actions).toContain("bedrock-mantle:ListProjects");
+    // The old, WRONG-namespace grants must be gone.
+    expect(actions).not.toContain("bedrock:InvokeModel");
+    expect(actions).not.toContain("bedrock:CallWithBearerToken");
+    // CreateInference is scoped to the project ARN (deploy-time interpolated account
+    // id, resolved by getCallerIdentityOutput — not a committed literal), so no
+    // hardcoded 12-digit account id appears in the committed source.
+    const createInf = perms.find((p) => p.actions.includes("bedrock-mantle:CreateInference"));
+    expect(
+      createInf?.resources.some((r) => String(r).includes("bedrock-mantle") || r === "*"),
+    ).toBe(true);
+  });
+
+  it("scopes CreateInference to the Bedrock Project ARN when MEM9_BEDROCK_PROJECT is set (no literal account id)", async () => {
+    installGlobals("prod");
+    process.env.MEM9_BEDROCK_PROJECT = "proj_testxyz";
+    const ecs = await loadEcs();
+    ecs(fakeDbOut());
+    const perms = services[0].args.permissions as { actions: string[]; resources: string[] }[];
+    const createInf = perms.find((p) => p.actions.includes("bedrock-mantle:CreateInference"));
+    // The resource is a $interpolate-composed Mantle project ARN. The harness's
+    // $interpolate mock returns an out<string> (with `.value`), so unwrap it — same
+    // way ecs() composes it from the account Output + literals at deploy time.
+    const res = (createInf?.resources ?? []).map((r) =>
+      typeof r === "object" && r && "value" in r ? String((r as { value: unknown }).value) : String(r),
+    );
+    expect(res).not.toContain("*");
+    // Scoped to THIS project's ARN, correct shape, and it's a bedrock-mantle ARN.
+    expect(res.some((r) => /^arn:aws:bedrock-mantle:[^:]+:[^:]*:project\/proj_testxyz$/.test(r))).toBe(true);
   });
 
   it("defaults the image tag to `latest` and honors MEM9_IMAGE_TAG (all containers)", async () => {
