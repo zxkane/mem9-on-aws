@@ -26,20 +26,6 @@ declare namespace $util {
 type Input<T> = $util.Input<T>;
 type Output<T> = $util.Output<T>;
 
-// ── Pulumi runtime global (SST injects `pulumi`) ────────────────────────────
-// infra/gateway.ts uses `pulumi.asset.{AssetArchive,FileAsset}` to zip the proxy
-// Lambda handler inline. Loose stub — the real types load at deploy time.
-declare namespace pulumi {
-  namespace asset {
-    class FileAsset {
-      constructor(path: string);
-    }
-    class AssetArchive {
-      constructor(assets: Record<string, unknown>);
-    }
-  }
-}
-
 // ── SST globals ─────────────────────────────────────────────────────────────
 interface $App {
   name: string;
@@ -335,6 +321,27 @@ declare namespace sst {
       constructor(name: string, args: TaskArgs);
       readonly nodes: { task: { arn: Output<string> } };
       readonly taskDefinition: Output<string>;
+    }
+
+    // ── Function (infra/gateway.ts — the MCP proxy Lambda) ────────────────
+    interface FunctionVpc {
+      subnets: Input<string[]> | Input<string>[];
+      securityGroups: Input<string[]> | Input<string>[];
+    }
+    interface FunctionArgs {
+      handler: Input<string>;
+      runtime?: Input<string>;
+      timeout?: Input<string>;
+      vpc?: FunctionVpc;
+      environment?: Input<Record<string, Input<string>>>;
+      permissions?: { actions: string[]; resources: Input<string>[] }[];
+      link?: unknown[];
+    }
+    class Function {
+      constructor(name: string, args: FunctionArgs);
+      readonly arn: Output<string>;
+      readonly name: Output<string>;
+      readonly nodes: { function: { name: Output<string>; arn: Output<string> } };
     }
   }
 }

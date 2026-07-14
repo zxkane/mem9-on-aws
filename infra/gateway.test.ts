@@ -74,7 +74,6 @@ function installGlobals(stage: string) {
       getSubnetsOutput: () => ({ ids: out(["subnet-a", "subnet-b", "subnet-c"]) }),
     },
     iam: { Role: makeCtor("Role"), RolePolicy: makeCtor("RolePolicy") },
-    lambda: { Function: makeCtor("LambdaFunction") },
     bedrock: {
       AgentcoreGateway: makeCtor("AgentcoreGateway"),
     },
@@ -90,16 +89,9 @@ function installGlobals(stage: string) {
       },
     },
   };
-  // pulumi.asset.* used to zip the proxy handler.
-  (globalThis as Record<string, unknown>).pulumi = {
-    asset: {
-      FileAsset: class {
-        constructor(public p: string) {}
-      },
-      AssetArchive: class {
-        constructor(public assets: Record<string, unknown>) {}
-      },
-    },
+  // The proxy Lambda is an `sst.aws.Function` (SST zips it + makes the exec role).
+  (globalThis as Record<string, unknown>).sst = {
+    aws: { Function: makeCtor("SstFunction") },
   };
   // The GatewayTarget is provisioned via a command.local.Command running the
   // direct bedrock-agentcore-control API. `command` is a separate SST global.
@@ -113,7 +105,7 @@ beforeEach(() => {
   params = [];
 });
 afterEach(() => {
-  for (const g of ["$app", "aws", "command", "pulumi", "$interpolate"]) delete (globalThis as Record<string, unknown>)[g];
+  for (const g of ["$app", "aws", "sst", "command", "$interpolate"]) delete (globalThis as Record<string, unknown>)[g];
   vi.resetModules();
 });
 
@@ -162,18 +154,18 @@ describe("gateway stack", () => {
     installGlobals("prod");
     const gateway = await loadGateway();
     gateway(fakeCognito(), fakeEcs(), fakeBootstrap());
-    const fn = only("LambdaFunction");
+    const fn = only("SstFunction");
     expect(fn.runtime).toBe("nodejs24.x");
-    expect(fn.handler).toBe("proxy-handler.handler");
+    expect(String(fn.handler)).toContain("proxy-handler.handler");
     // VPC-attached (private subnets + the task SG so it can reach mnemo-server).
-    const vpc = fn.vpcConfig as Record<string, unknown>;
-    expect(vpc.subnetIds).toBeDefined();
-    expect(vpc.securityGroupIds).toBeDefined();
-    // Env: the Cloud Map base URL (mnemo.mem9-<stage>.local:8080) + the tenant key.
-    const vars = (fn.environment as any).variables;
-    expect(String((vars.MEM9_SERVER_BASE_URL as { value?: string }).value)).toContain("mnemo.mem9-prod.local");
-    expect(String((vars.MEM9_SERVER_BASE_URL as { value?: string }).value)).toContain(":8080");
-    expect(String((vars.MEM9_API_KEY as { value?: string }).value)).toBe("deadbeefTENANTID");
+    const vpc = fn.vpc as Record<string, unknown>;
+    expect(vpc.subnets).toBeDefined();
+    expect(vpc.securityGroups).toBeDefined();
+    // Env (flat on sst.aws.Function): the Cloud Map base URL + the tenant key.
+    const env = fn.environment as Record<string, any>;
+    expect(String((env.MEM9_SERVER_BASE_URL as { value?: string }).value)).toContain("mnemo.mem9-prod.local");
+    expect(String((env.MEM9_SERVER_BASE_URL as { value?: string }).value)).toContain(":8080");
+    expect(String((env.MEM9_API_KEY as { value?: string }).value)).toBe("deadbeefTENANTID");
   });
 
   it("gateway service role grants ONLY lambda:InvokeFunction (no workload-identity/secret/ENI)", async () => {

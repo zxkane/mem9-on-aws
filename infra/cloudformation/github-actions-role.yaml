@@ -734,14 +734,18 @@ Resources:
               - lambda:CreateFunction
               - lambda:GetFunction
               - lambda:GetFunctionConfiguration
+              - lambda:GetFunctionCodeSigningConfig
               - lambda:ListVersionsByFunction
             Resource: "*"
           - Sid: LambdaManage
-            # Update/delete/tag scoped to the project's own functions.
+            # Update/delete/tag scoped to the project's own functions. SST's
+            # sst.aws.Function sets the runtime/env/vpc-config, tags, and (on prod)
+            # concurrency + publishes versions.
             Effect: Allow
             Action:
               - lambda:UpdateFunctionCode
               - lambda:UpdateFunctionConfiguration
+              - lambda:PublishVersion
               - lambda:DeleteFunction
               - lambda:TagResource
               - lambda:UntagResource
@@ -749,8 +753,27 @@ Resources:
               - lambda:AddPermission
               - lambda:RemovePermission
               - lambda:GetPolicy
+              - lambda:PutFunctionConcurrency
+              - lambda:DeleteFunctionConcurrency
             Resource:
               - !Sub arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:function:${ProjectName}-*
+          - Sid: LambdaFunctionLogs
+            # sst.aws.Function creates a CloudWatch log group at /aws/lambda/<fn>.
+            # The CorePolicy/ComputePolicy Logs Sid only covers /sst/* groups, so the
+            # Lambda's own log group needs its own grant.
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:DeleteLogGroup
+              - logs:PutRetentionPolicy
+              - logs:DeleteRetentionPolicy
+              - logs:TagResource
+              - logs:UntagResource
+              - logs:ListTagsForResource
+              - logs:DescribeLogGroups
+            Resource:
+              - !Sub arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-*
+              - !Sub arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-*:*
 
   # ───────────────────────────────────────────────────────────────────────────
   # Policy 8 — MCP gateway auth + surface (infra/cognito.ts + infra/gateway.ts):

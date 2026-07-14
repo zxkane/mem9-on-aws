@@ -32,7 +32,7 @@ import type { CognitoOutputs } from "./cognito";
 import type { EcsOutputs } from "./ecs";
 import type { BootstrapOutputs } from "./bootstrap";
 
-// @ts-ignore - `aws`/`pulumi` injected globally by SST; bedrock/iam/lambda types loose.
+// @ts-ignore - `aws` injected globally by SST; bedrock/iam/ssm types loose.
 const awsAny = aws as unknown as Record<string, any>;
 
 const gatewayFilename = fileURLToPath(import.meta.url);
@@ -116,85 +116,37 @@ export function gateway(
   // The GatewayTarget provision script (below) needs the region for its SDK client.
   const region = awsAny.getRegionOutput().name;
 
-  // Resolve the `infra/gateway/` directory that holds the proxy handler + the
-  // target-provision script. SST's esbuild bundle relocates the config, so
-  // `gatewayDirname` (from import.meta.url) may not point at the source tree —
-  // fall back to the workspace-root `infra/gateway`. Both the FileAsset (below)
-  // and the `node <script>` invocation need a correct path.
+  // Resolve the `infra/gateway/` directory that holds the target-provision
+  // script. SST's esbuild bundle relocates the config, so `gatewayDirname`
+  // (from import.meta.url) may not point at the source tree — fall back to the
+  // workspace-root `infra/gateway`. The `node <script>` invocation below needs a
+  // correct path (the proxy Lambda's handler uses an app-root-relative string).
   const moduleGatewayDir = path.resolve(gatewayDirname, "gateway");
   const gatewayAssetDir = fs.existsSync(path.join(moduleGatewayDir, "proxy-handler.mjs"))
     ? moduleGatewayDir
     : path.resolve(process.cwd(), "infra", "gateway");
 
-  // --- Proxy Lambda execution role ---
-  // Named with the mem9-on-aws-* prefix so the CI role's iam grants can manage it.
-  const lambdaRole = new awsAny.iam.Role("Mem9ProxyLambdaRole", {
-    name: `mem9-on-aws-${stage}-proxy-lambda-role`,
-    assumeRolePolicy: JSON.stringify({
-      Version: "2012-10-17",
-      Statement: [
-        {
-          Effect: "Allow",
-          Action: "sts:AssumeRole",
-          Principal: { Service: "lambda.amazonaws.com" },
-        },
-      ],
-    }),
-    tags,
-  });
-  // CloudWatch Logs + the VPC-ENI lifecycle (the AWSLambdaVPCAccessExecutionRole
-  // equivalent) — the LAMBDA SERVICE creates the function's ENIs under this role.
-  new awsAny.iam.RolePolicy("Mem9ProxyLambdaPolicy", {
-    role: lambdaRole.name,
-    policy: JSON.stringify({
-      Version: "2012-10-17",
-      Statement: [
-        {
-          Effect: "Allow",
-          Action: ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
-          Resource: "arn:aws:logs:*:*:*",
-        },
-        {
-          Effect: "Allow",
-          Action: [
-            "ec2:CreateNetworkInterface",
-            "ec2:DescribeNetworkInterfaces",
-            "ec2:DeleteNetworkInterface",
-            "ec2:AssignPrivateIpAddresses",
-            "ec2:UnassignPrivateIpAddresses",
-          ],
-          Resource: "*",
-        },
-      ],
-    }),
-  });
-
   // --- Proxy Lambda (VPC-attached, nodejs24.x) ---
-  // Attaches to the task SG (shares it with mnemo-server) so the self-ingress :8080
-  // rule in ecs.ts lets it reach the server. Env carries the Cloud Map URL + the
-  // X-API-Key (tenant id). runtime is also forced by the sst.config $transform.
-  const proxyFn = new awsAny.lambda.Function("Mem9ProxyFn", {
-    name: `mem9-on-aws-${stage}-mcp-proxy`,
+  // An `sst.aws.Function` (not a raw aws.lambda.Function): SST zips the handler,
+  // creates the exec role with the VPC-ENI + logs perms, and forces nodejs24.x via
+  // the sst.config $transform. Attaches to the task SG (shares it with mnemo-server)
+  // so the self-ingress :8080 rule in ecs.ts lets it reach the server. Env carries
+  // the Cloud Map URL + the X-API-Key (tenant id). The handler path is app-root-
+  // relative (SST resolves handlers from the sst.config.ts dir, not the esbuild
+  // bundle location — so no gatewayDirname/cwd dance needed here, unlike the
+  // provision-target.mjs `node` invocation below).
+  const proxyFn = new sst.aws.Function("Mem9ProxyFn", {
+    handler: "infra/gateway/proxy-handler.handler",
     runtime: "nodejs24.x",
-    handler: "proxy-handler.handler",
-    role: lambdaRole.arn,
-    code: new pulumi.asset.AssetArchive({
-      "proxy-handler.mjs": new pulumi.asset.FileAsset(
-        path.join(gatewayAssetDir, "proxy-handler.mjs"),
-      ),
-    }),
-    timeout: 30,
-    vpcConfig: {
-      subnetIds: privateSubnetIds,
-      securityGroupIds: [ecsOut.taskSecurityGroupId],
+    timeout: "30 seconds",
+    vpc: {
+      subnets: privateSubnetIds,
+      securityGroups: [ecsOut.taskSecurityGroupId],
     },
     environment: {
-      variables: {
-        MEM9_SERVER_BASE_URL: $interpolate`http://${ecsOut.serviceDnsName}:${MNEMO_PORT}`,
-        MEM9_API_KEY: bootstrapOut.tenantId,
-      },
+      MEM9_SERVER_BASE_URL: $interpolate`http://${ecsOut.serviceDnsName}:${MNEMO_PORT}`,
+      MEM9_API_KEY: bootstrapOut.tenantId,
     },
-    tags,
   });
 
   // --- Gateway service role (assumed by AgentCore to invoke the proxy Lambda) ---
