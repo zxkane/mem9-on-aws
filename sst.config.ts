@@ -49,6 +49,15 @@ export default $config({
         // `random: true` — "Specify the version explicitly"); 4.16.6 matches the
         // @pulumi/random SST bundles for sst.aws.Aurora's RandomPassword.
         random: { version: "4.16.6" },
+        // The `command` provider exposes the `command` global (command.local.Command)
+        // used by infra/gateway.ts to provision the AgentCore GatewayTarget via the
+        // DIRECT bedrock-agentcore-control API (infra/gateway/provision-target.mjs).
+        // CloudControl's AWS::BedrockAgentCore::GatewayTarget handler is broken for
+        // the private-endpoint path (proven: it FAILEDs while the identical direct
+        // API call reaches READY). The Command runs on the deploy host (no cloud
+        // resource of its own → no extra deploy-role IAM beyond the agentcore/lattice
+        // grants the script's API calls already need). Version pinned explicitly.
+        command: { version: "1.0.1" },
       },
     };
   },

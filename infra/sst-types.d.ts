@@ -47,11 +47,6 @@ declare function $interpolate(
   ...values: unknown[]
 ): Output<string>;
 
-// SST's $jsonStringify — like JSON.stringify but resolves embedded Output<T>
-// values, returning an Output<string>. Used in infra/gateway.ts to build the
-// CloudControl desiredState JSON for AWS::BedrockAgentCore::GatewayTarget.
-declare function $jsonStringify(obj: unknown): Output<string>;
-
 // ── The `aws` provider surface the scaffold touches ─────────────────────────
 declare namespace aws {
   // Caller identity — infra/ecs.ts uses accountId to compose the ECR image URI
@@ -173,6 +168,26 @@ declare namespace random {
     constructor(name: string, args: RandomIdArgs);
     readonly hex: Output<string>;
     readonly id: Output<string>;
+  }
+}
+
+// ── The `command` provider (infra/gateway.ts provisions the GatewayTarget via a
+// local command that drives the direct bedrock-agentcore-control API) ──────────
+declare namespace command {
+  namespace local {
+    interface CommandArgs {
+      create?: Input<string>;
+      delete?: Input<string>;
+      update?: Input<string>;
+      environment?: Input<Record<string, Input<string>>>;
+      triggers?: Input<unknown[]>;
+      [k: string]: unknown;
+    }
+    class Command {
+      constructor(name: string, args: CommandArgs, opts?: unknown);
+      readonly stdout: Output<string>;
+      readonly stderr: Output<string>;
+    }
   }
 }
 

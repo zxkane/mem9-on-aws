@@ -46,6 +46,8 @@ export function gateway(
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const stage = $app.stage;
   const tags = { Project: "mem9-on-aws", Stage: stage, ManagedBy: "sst" };
+  // The GatewayTarget provision script (below) needs the region for its SDK client.
+  const region = awsAny.getRegionOutput().name;
 
   // Load the OpenAPI schema (inline payload; static server URL, no substitution).
   // Resolve module-relative first, then workspace-root (SST build changes __dirname).
@@ -58,9 +60,8 @@ export function gateway(
     openApiSchema = fs.readFileSync(path.resolve(process.cwd(), "infra", "gateway", "openapi.yaml"), "utf-8");
   }
 
-  // (The OpenAPI schema is inlined into the target's desiredState below — no S3
-  // bucket/object. The S3-schema variant caused the target to FAIL to stabilize;
-  // inline is proven to reach READY.)
+  // (The OpenAPI schema is passed inline to the target's CreateGatewayTarget call
+  // below — no S3 bucket/object. Inline matches the proven-READY direct API call.)
 
   // --- Gateway service role (assumed by AgentCore) ---
   // Name it explicitly so the CI role's mem9-on-aws-* iam grants (ComputePolicy)
@@ -167,70 +168,63 @@ export function gateway(
     { dependsOn: [bedrockGateway] },
   );
 
-  // --- Gateway Target (OpenAPI, private via managed VPC Lattice → internal ALB) ---
+  // --- Gateway Target (OpenAPI, private via self-managed VPC Lattice → internal ALB) ---
   //
-  // Provisioned via aws.cloudcontrol.Resource, NOT the typed
-  // aws.bedrock.AgentcoreGatewayTarget (pulumi-aws 7.20.0's typed resource has NO
-  // privateEndpoint field — it silently dropped it). CloudControl provisions the
-  // full CFN AWS::BedrockAgentCore::GatewayTarget incl. PrivateEndpoint.
+  // Provisioned via a `command.local.Command` that drives the DIRECT
+  // bedrock-agentcore-control `CreateGatewayTarget` API (infra/gateway/
+  // provision-target.mjs), NOT `aws.cloudcontrol.Resource`.
+  //
+  // ROOT CAUSE (proven 2026-07-14): the typed pulumi-aws 7.20.0
+  // `aws.bedrock.AgentcoreGatewayTarget` has NO `privateEndpoint` field (silently
+  // dropped), so we tried CloudControl. But CloudControl's
+  // `AWS::BedrockAgentCore::GatewayTarget` handler FAILEDs EVERY time (~20 CI
+  // iterations) with "NotStabilized: FAILED, internal error" whenever
+  // PrivateEndpoint is present — while the IDENTICAL config via a direct
+  // `CreateGatewayTarget` SDK call reaches READY in ~3.5 min (verified with the
+  // exact resolving domain, self-managed Lattice RC, inline schema, API-key
+  // provider). So CloudControl's handler is broken for the private-endpoint path
+  // in ap-northeast-1; the underlying API is fine. This Command drives that
+  // proven-working API directly (create → poll to READY; delete on teardown).
   //
   // SELF-MANAGED VPC Lattice (§6a): infra/alb.ts creates the Lattice
   // ResourceGateway + ResourceConfiguration ourselves (so the ENIs are created by
   // OUR deploy role, which has ec2:CreateNetworkInterface). AgentCore's MANAGED
-  // path fails to create those ENIs in ap-northeast-1 ("caller does not have
-  // ec2:CreateNetworkInterface") despite the vpc-lattice SLR having the perm — a
-  // service-side gap. We reference our ResourceConfiguration by ARN instead.
-  // The resource config's dnsResource domain = mem9.aws.kane.mx (the cert/SNI),
-  // resolved to the ALB by the private R53 zone; Lattice sends that as the TLS SNI.
-  const targetDesiredState = $jsonStringify({
-    GatewayIdentifier: bedrockGateway.gatewayId,
-    Name: `${stage}-mem9-rest`,
-    Description: "mnemo-server REST tools (add_memory, search_memories) via internal ALB",
-    TargetConfiguration: {
-      Mcp: {
-        // INLINE the OpenAPI schema (not S3). Verified via a direct API test: an
-        // inline-payload self-managed-Lattice target stabilizes CREATING→READY in
-        // ~3.5 min, whereas the S3-schema variant FAILEDs to stabilize (the async
-        // S3 fetch during stabilization is the failing factor). CloudControl takes
-        // inlinePayload as a plain string (unlike the typed pulumi-aws resource,
-        // which rejected it — that's why we're on CloudControl). Schema is ~4KB,
-        // well under the inline limit.
-        OpenApiSchema: { InlinePayload: openApiSchema },
-      },
-    },
-    CredentialProviderConfigurations: [
-      {
-        CredentialProviderType: "API_KEY",
-        CredentialProvider: {
-          ApiKeyCredentialProvider: {
-            ProviderArn: apiKeyProvider.credentialProviderArn,
-            CredentialLocation: "HEADER",
-            CredentialParameterName: "X-API-Key",
-          },
-        },
-      },
-    ],
-    PrivateEndpoint: {
-      SelfManagedLatticeResource: {
-        ResourceConfigurationIdentifier: albOut.latticeResourceConfigArn,
-      },
-    },
-  });
-  new awsAny.cloudcontrol.Resource(
+  // path fails to create those ENIs in ap-northeast-1 despite the vpc-lattice SLR
+  // having the perm — a service-side gap. We reference our ResourceConfiguration
+  // by ARN. Its dnsResource domain = mem9.aws.kane.mx (the cert/SNI), resolved to
+  // the ALB by the private R53 zone; Lattice sends that as the TLS SNI.
+  const targetName = `${stage}-mem9-rest`;
+  const provisionScript = path.resolve(gatewayDirname, "gateway", "provision-target.mjs");
+  // `command.local.Command`'s `environment` block applies to BOTH create and
+  // delete, so MEM9_TGT_OP can't live there (it must differ per lifecycle).
+  // Instead set it as an inline `VAR=... node …` prefix on each command line —
+  // `create` runs with op=create (build + poll to READY), `delete` with op=delete
+  // (best-effort teardown by name). All other inputs (Outputs) go in `environment`.
+  new command.local.Command(
     "Mem9GatewayTarget",
     {
-      typeName: "AWS::BedrockAgentCore::GatewayTarget",
-      desiredState: targetDesiredState,
+      create: $interpolate`MEM9_TGT_OP=create node ${provisionScript}`,
+      delete: $interpolate`MEM9_TGT_OP=delete node ${provisionScript}`,
+      // Re-run `create` (delete-then-recreate) when any input changes.
+      triggers: [
+        bedrockGateway.gatewayId,
+        apiKeyProvider.credentialProviderArn,
+        albOut.latticeResourceConfigArn,
+        openApiSchema,
+      ],
+      environment: {
+        MEM9_TGT_REGION: region,
+        MEM9_TGT_GATEWAY_ID: bedrockGateway.gatewayId,
+        MEM9_TGT_NAME: targetName,
+        MEM9_TGT_DESCRIPTION:
+          "mnemo-server REST tools (add_memory, search_memories) via internal ALB",
+        MEM9_TGT_SCHEMA: openApiSchema,
+        MEM9_TGT_APIKEY_PROVIDER_ARN: apiKeyProvider.credentialProviderArn,
+        MEM9_TGT_APIKEY_HEADER: "X-API-Key",
+        MEM9_TGT_LATTICE_RC_ARN: albOut.latticeResourceConfigArn,
+      },
     },
-    {
-      dependsOn: [bedrockGateway, apiKeyProvider],
-      // The target with a self-managed-Lattice privateEndpoint takes ~3-4 min to
-      // stabilize (verified via a direct API test: CREATING → READY at ~3.5 min).
-      // CloudControl's default create wait is too short → it reported the target
-      // as "NotStabilized / FAILED" mid-CREATING. A generous create timeout lets
-      // Pulumi poll through to READY.
-      customTimeouts: { create: "20m", update: "20m", delete: "20m" },
-    },
+    { dependsOn: [bedrockGateway, apiKeyProvider] },
   );
 
   const gatewayId = bedrockGateway.gatewayId;

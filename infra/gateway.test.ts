@@ -6,7 +6,8 @@ import type { BootstrapOutputs } from "./bootstrap";
 /**
  * Unit tests for the `gateway` stack: the AgentCore Gateway (CUSTOM_JWT,
  * allowedClients), the API-key credential provider (X-API-Key outbound), and the
- * OpenAPI target with privateEndpoint.managedVpcResource (routingDomain = ALB DNS).
+ * OpenAPI target provisioned via a command.local.Command driving the direct
+ * bedrock-agentcore-control API (self-managed-Lattice privateEndpoint → ALB).
  */
 
 function out<T>(value: T): { value: T; apply: (fn: (v: T) => unknown) => unknown } {
@@ -20,7 +21,8 @@ interface Rec {
 let created: Rec[];
 let params: { name: string }[];
 
-// Unwrap the loose out<T> mock (and plain values) recursively for $jsonStringify.
+// Unwrap the loose out<T> mock (and plain values) recursively — the target
+// Command's `create`/`delete`/`environment` come through the out<T> mock.
 function unwrap(v: unknown): unknown {
   if (Array.isArray(v)) return v.map(unwrap);
   if (v && typeof v === "object") {
@@ -47,9 +49,6 @@ function installInterpolate() {
     });
     return out(s);
   };
-  // $jsonStringify: resolve embedded out<T> values then JSON.stringify → out<string>.
-  (globalThis as Record<string, unknown>).$jsonStringify = (obj: unknown) =>
-    out(JSON.stringify(unwrap(obj)));
 }
 
 function makeCtor(kind: string) {
@@ -80,9 +79,6 @@ function installGlobals(stage: string) {
       AgentcoreGateway: makeCtor("AgentcoreGateway"),
       AgentcoreApiKeyCredentialProvider: makeCtor("AgentcoreApiKeyCredentialProvider"),
     },
-    // The GatewayTarget is provisioned via CloudControl (the typed pulumi-aws
-    // GatewayTarget lacks privateEndpoint in 7.20.0).
-    cloudcontrol: { Resource: makeCtor("CloudControlResource") },
     ssm: {
       Parameter: class {
         constructor(_n: string, args: { name: unknown }) {
@@ -95,6 +91,12 @@ function installGlobals(stage: string) {
       },
     },
   };
+  // The GatewayTarget is provisioned via a `command.local.Command` running the
+  // direct bedrock-agentcore-control API (CloudControl's handler is broken for the
+  // private-endpoint path). `command` is a separate SST global (like `aws`).
+  (globalThis as Record<string, unknown>).command = {
+    local: { Command: makeCtor("LocalCommand") },
+  };
 }
 
 beforeEach(() => {
@@ -102,7 +104,7 @@ beforeEach(() => {
   params = [];
 });
 afterEach(() => {
-  for (const g of ["$app", "aws", "$interpolate", "$jsonStringify"]) delete (globalThis as Record<string, unknown>)[g];
+  for (const g of ["$app", "aws", "command", "$interpolate"]) delete (globalThis as Record<string, unknown>)[g];
   vi.resetModules();
 });
 
@@ -156,34 +158,38 @@ describe("gateway stack", () => {
     expect(String((provider.apiKey as { value?: string }).value)).toBe("deadbeefTENANTID");
   });
 
-  it("target (CloudControl) has inline OpenAPI schema, API-key cred config, and self-managed-Lattice privateEndpoint", async () => {
+  it("provisions the target via a command.local.Command driving the direct CreateGatewayTarget API", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
     gateway(fakeCognito(), fakeAlb(), fakeBootstrap());
-    // Target is a CloudControl resource for AWS::BedrockAgentCore::GatewayTarget
-    // (the typed pulumi-aws GatewayTarget lacks privateEndpoint). Assert the CFN
-    // PascalCase desiredState JSON.
-    const target = only("CloudControlResource");
-    expect(target.typeName).toBe("AWS::BedrockAgentCore::GatewayTarget");
-    const ds = JSON.parse(String((target.desiredState as { value?: string }).value));
-    // OpenAPI schema is INLINED (the S3-schema variant made the target fail to
-    // stabilize; inline is proven to reach READY).
-    const inline = ds.TargetConfiguration.Mcp.OpenApiSchema.InlinePayload as string;
-    expect(inline).toContain("add_memory");
-    expect(inline).toContain("search_memories");
-    // Outbound = API key in the X-API-Key header (CredentialProviderConfigurations
-    // is an ARRAY in the CFN shape, min/max 1).
-    expect(ds.CredentialProviderConfigurations).toHaveLength(1);
-    const cp = ds.CredentialProviderConfigurations[0];
-    expect(cp.CredentialProviderType).toBe("API_KEY");
-    expect(cp.CredentialProvider.ApiKeyCredentialProvider.CredentialLocation).toBe("HEADER");
-    expect(cp.CredentialProvider.ApiKeyCredentialProvider.CredentialParameterName).toBe("X-API-Key");
+    // The GatewayTarget is provisioned by a local Command (NOT CloudControl —
+    // its AWS::BedrockAgentCore::GatewayTarget handler is broken for the private-
+    // endpoint path). The Command runs infra/gateway/provision-target.mjs, which
+    // calls the direct bedrock-agentcore-control CreateGatewayTarget API (proven
+    // to reach READY where CloudControl FAILEDs).
+    const cmd = only("LocalCommand");
+    // create runs op=create, delete runs op=delete (same script; MEM9_TGT_OP flips
+    // per lifecycle via an inline env prefix since `environment` is shared).
+    // `$interpolate`/env values come through the loose out<T> mock → unwrap them.
+    expect(String(unwrap(cmd.create))).toContain("MEM9_TGT_OP=create");
+    expect(String(unwrap(cmd.create))).toContain("provision-target.mjs");
+    expect(String(unwrap(cmd.delete))).toContain("MEM9_TGT_OP=delete");
+    // The create-time inputs (Outputs) are passed via `environment`.
+    const env = unwrap(cmd.environment) as Record<string, unknown>;
+    // OpenAPI schema is INLINED (the S3-schema variant is unrelated; inline matches
+    // the proven-READY direct API call). Carries both tools.
+    expect(String(env.MEM9_TGT_SCHEMA)).toContain("add_memory");
+    expect(String(env.MEM9_TGT_SCHEMA)).toContain("search_memories");
+    // Outbound auth = API key in the X-API-Key header.
+    expect(env.MEM9_TGT_APIKEY_HEADER).toBe("X-API-Key");
+    expect(env.MEM9_TGT_APIKEY_PROVIDER_ARN).toBeDefined();
     // Private egress via SELF-MANAGED VPC Lattice — references the ResourceConfiguration
     // ARN infra/alb.ts creates (AgentCore's managed path can't create the ENIs in
     // ap-northeast-1). This is the fix for the persistent ec2:CreateNetworkInterface error.
-    const sm = ds.PrivateEndpoint.SelfManagedLatticeResource;
-    expect(sm.ResourceConfigurationIdentifier).toContain("resourceconfiguration/rcfg-");
-    expect(ds.PrivateEndpoint.ManagedVpcResource).toBeUndefined();
+    expect(String(env.MEM9_TGT_LATTICE_RC_ARN)).toContain("resourceconfiguration/rcfg-");
+    // Gateway + target name threaded through.
+    expect(env.MEM9_TGT_GATEWAY_ID).toBeDefined();
+    expect(env.MEM9_TGT_NAME).toBe("prod-mem9-rest");
   });
 
   it("creates a bedrock-agentcore-trust service role with workload-identity access", async () => {
