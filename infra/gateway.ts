@@ -1,36 +1,96 @@
 /**
- * `gateway` stack — AgentCore Gateway MCP surface (§6/§6a).
+ * `gateway` stack — AgentCore Gateway MCP surface (§6/§6a), Lambda-proxy path.
  *
- * The globally-reachable, Cognito-authed MCP endpoint. Mirrors the proven
- * zxkane/podcast-curation `infra/gateway.ts`, adapted for OUR two differences:
- *   1. Outbound auth = **API key** (X-API-Key = tenant id), not OAuth — mnemo-server
- *      authenticates with X-API-Key, and SigV4/OAuth-to-a-3P don't apply.
- *   2. The target is **private** (mnemo-server has no public URL): the OpenAPI
- *      target carries `privateEndpoint.managedVpcResource` (managed VPC Lattice) with
- *      `routingDomain` = the internal ALB's DNS name. podcast-curation targets a
- *      public API URL, so it has no privateEndpoint.
+ * The globally-reachable, Cognito-authed MCP endpoint. Inbound = CUSTOM_JWT
+ * (Cognito M2M). The target is a **Lambda-proxy GatewayTarget**: AgentCore invokes
+ * a VPC-attached proxy Lambda (docker-less zip, nodejs24.x) that reaches
+ * mnemo-server PRIVATELY over Cloud Map DNS (`mnemo.mem9-<stage>.local:8080`),
+ * injecting the X-API-Key (= tenant id). No ALB, no ACM cert, no VPC Lattice, no
+ * private R53 zone.
+ *
+ * WHY A LAMBDA TARGET (not ALB + self-managed-Lattice privateEndpoint): that path
+ * FAILED to stabilize 100% of the time in the full CI deploy — an AgentCore
+ * control-plane internal error on the self-managed-Lattice privateEndpoint target
+ * in ap-northeast-1 (verified: the identical config reached READY in isolation but
+ * never in a full-stack deploy). A Lambda target is AgentCore's out-of-the-box
+ * private path — "the gateway can immediately invoke Lambda functions configured
+ * with VPC access" — so it sidesteps Lattice entirely.
+ *
+ * The target is provisioned via a `command.local.Command` driving the direct
+ * bedrock-agentcore-control `CreateGatewayTarget` API (infra/gateway/
+ * provision-target.mjs) with `targetConfiguration.mcp.lambda`. The Command wrapper
+ * gives a create→poll-READY→delete lifecycle + a dependsOn edge on the Lambda.
  * v1 has NO interceptor Lambda (single-operator, single-tenant → per-tool scoping
- * deferred). The OpenAPI schema is inlined (static server URL; no per-stage
- * substitution needed, unlike podcast-curation).
- *
- * Provisioned via typed Pulumi `aws.bedrock.Agentcore*` resources (proven in
- * podcast-curation prod). Kept operational IAM that was hard-won there: the
- * `bedrock-agentcore.amazonaws.com`-trust service role + GetWorkloadAccessToken /
- * GetResourceApiKey grants + the `bedrock-agentcore-identity!*` secret read.
+ * deferred).
  */
 
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
+import { resolveVpc } from "./vpc";
 import type { CognitoOutputs } from "./cognito";
-import type { AlbOutputs } from "./alb";
+import type { EcsOutputs } from "./ecs";
 import type { BootstrapOutputs } from "./bootstrap";
 
-// @ts-ignore - `aws` injected globally by SST; bedrock/iam/lambda types loose.
+// @ts-ignore - `aws`/`pulumi` injected globally by SST; bedrock/iam/lambda types loose.
 const awsAny = aws as unknown as Record<string, any>;
 
 const gatewayFilename = fileURLToPath(import.meta.url);
 const gatewayDirname = path.dirname(gatewayFilename);
+
+const MNEMO_PORT = 8080;
+
+// The two MCP tools the proxy Lambda exposes. Names are bare (`add_memory` /
+// `search_memories`) — AgentCore prefixes them as `${targetName}___${tool}`, which
+// the Lambda strips and the E2E's endsWith matcher tolerates. inputSchema mirrors
+// the mem9 REST contract (infra/gateway/proxy-handler.mjs maps these to the calls).
+// SchemaType values are lowercase JSON-schema-like; `properties` is a LIST (each
+// carries its own `name`) with per-property `required` booleans (pulumi-aws shape).
+const TOOL_SCHEMA = [
+  {
+    name: "add_memory",
+    description:
+      "Add a memory (raw content) for later recall. Writes are async; returns {status:'accepted'}.",
+    inputSchema: {
+      type: "object",
+      properties: [
+        {
+          name: "content",
+          type: "string",
+          description: "Raw content to store as a memory.",
+          required: true,
+        },
+        {
+          name: "agentId",
+          type: "string",
+          description: "Optional agent id to attribute the write to (per-agent scoping).",
+          required: false,
+        },
+      ],
+    },
+  },
+  {
+    name: "search_memories",
+    description: "Search stored memories by semantic query; returns the most relevant memories.",
+    inputSchema: {
+      type: "object",
+      properties: [
+        {
+          name: "q",
+          type: "string",
+          description: "The natural-language search query.",
+          required: true,
+        },
+        {
+          name: "limit",
+          type: "integer",
+          description: "Max results to return (default 20).",
+          required: false,
+        },
+      ],
+    },
+  },
+];
 
 export interface GatewayOutputs {
   ssmPrefix: string;
@@ -40,35 +100,99 @@ export interface GatewayOutputs {
 
 export function gateway(
   cognitoOut: CognitoOutputs,
-  albOut: AlbOutputs,
+  ecsOut: EcsOutputs,
   bootstrapOut: BootstrapOutputs,
 ): GatewayOutputs {
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const stage = $app.stage;
   const tags = { Project: "mem9-on-aws", Stage: stage, ManagedBy: "sst" };
+  const { privateSubnetIds } = resolveVpc();
   // The GatewayTarget provision script (below) needs the region for its SDK client.
   const region = awsAny.getRegionOutput().name;
 
-  // Resolve the `infra/gateway/` directory that holds both openapi.yaml and the
+  // Resolve the `infra/gateway/` directory that holds the proxy handler + the
   // target-provision script. SST's esbuild bundle relocates the config, so
   // `gatewayDirname` (from import.meta.url) may not point at the source tree —
-  // fall back to the workspace-root `infra/gateway`. We MUST resolve this dir
-  // (not just the schema) because provisionScript below is passed to `node` on
-  // the deploy host: a wrong path → "Cannot find module" at target-create time.
+  // fall back to the workspace-root `infra/gateway`. Both the FileAsset (below)
+  // and the `node <script>` invocation need a correct path.
   const moduleGatewayDir = path.resolve(gatewayDirname, "gateway");
-  const gatewayAssetDir = fs.existsSync(path.join(moduleGatewayDir, "openapi.yaml"))
+  const gatewayAssetDir = fs.existsSync(path.join(moduleGatewayDir, "proxy-handler.mjs"))
     ? moduleGatewayDir
     : path.resolve(process.cwd(), "infra", "gateway");
 
-  // Load the OpenAPI schema (inline payload; static server URL, no substitution).
-  const openApiSchema = fs.readFileSync(path.join(gatewayAssetDir, "openapi.yaml"), "utf-8");
+  // --- Proxy Lambda execution role ---
+  // Named with the mem9-on-aws-* prefix so the CI role's iam grants can manage it.
+  const lambdaRole = new awsAny.iam.Role("Mem9ProxyLambdaRole", {
+    name: `mem9-on-aws-${stage}-proxy-lambda-role`,
+    assumeRolePolicy: JSON.stringify({
+      Version: "2012-10-17",
+      Statement: [
+        {
+          Effect: "Allow",
+          Action: "sts:AssumeRole",
+          Principal: { Service: "lambda.amazonaws.com" },
+        },
+      ],
+    }),
+    tags,
+  });
+  // CloudWatch Logs + the VPC-ENI lifecycle (the AWSLambdaVPCAccessExecutionRole
+  // equivalent) — the LAMBDA SERVICE creates the function's ENIs under this role.
+  new awsAny.iam.RolePolicy("Mem9ProxyLambdaPolicy", {
+    role: lambdaRole.name,
+    policy: JSON.stringify({
+      Version: "2012-10-17",
+      Statement: [
+        {
+          Effect: "Allow",
+          Action: ["logs:CreateLogGroup", "logs:CreateLogStream", "logs:PutLogEvents"],
+          Resource: "arn:aws:logs:*:*:*",
+        },
+        {
+          Effect: "Allow",
+          Action: [
+            "ec2:CreateNetworkInterface",
+            "ec2:DescribeNetworkInterfaces",
+            "ec2:DeleteNetworkInterface",
+            "ec2:AssignPrivateIpAddresses",
+            "ec2:UnassignPrivateIpAddresses",
+          ],
+          Resource: "*",
+        },
+      ],
+    }),
+  });
 
-  // (The OpenAPI schema is passed inline to the target's CreateGatewayTarget call
-  // below — no S3 bucket/object. Inline matches the proven-READY direct API call.)
+  // --- Proxy Lambda (VPC-attached, nodejs24.x) ---
+  // Attaches to the task SG (shares it with mnemo-server) so the self-ingress :8080
+  // rule in ecs.ts lets it reach the server. Env carries the Cloud Map URL + the
+  // X-API-Key (tenant id). runtime is also forced by the sst.config $transform.
+  const proxyFn = new awsAny.lambda.Function("Mem9ProxyFn", {
+    name: `mem9-on-aws-${stage}-mcp-proxy`,
+    runtime: "nodejs24.x",
+    handler: "proxy-handler.handler",
+    role: lambdaRole.arn,
+    code: new pulumi.asset.AssetArchive({
+      "proxy-handler.mjs": new pulumi.asset.FileAsset(
+        path.join(gatewayAssetDir, "proxy-handler.mjs"),
+      ),
+    }),
+    timeout: 30,
+    vpcConfig: {
+      subnetIds: privateSubnetIds,
+      securityGroupIds: [ecsOut.taskSecurityGroupId],
+    },
+    environment: {
+      variables: {
+        MEM9_SERVER_BASE_URL: $interpolate`http://${ecsOut.serviceDnsName}:${MNEMO_PORT}`,
+        MEM9_API_KEY: bootstrapOut.tenantId,
+      },
+    },
+    tags,
+  });
 
-  // --- Gateway service role (assumed by AgentCore) ---
-  // Name it explicitly so the CI role's mem9-on-aws-* iam grants (ComputePolicy)
-  // can PutRolePolicy on it (an auto-hashed name wouldn't match the prefix).
+  // --- Gateway service role (assumed by AgentCore to invoke the proxy Lambda) ---
+  // Name it explicitly so the CI role's mem9-on-aws-* iam grants can PutRolePolicy.
   const gatewayServiceRole = new awsAny.iam.Role("Mem9GatewayServiceRole", {
     name: `mem9-on-aws-${stage}-gateway-service-role`,
     assumeRolePolicy: JSON.stringify({
@@ -83,56 +207,19 @@ export function gateway(
     }),
     tags,
   });
-
-  // Workload-identity + outbound-credential access. AgentCore's outbound flow
-  // assumes this role and calls GetWorkloadAccessToken → then reads the API key
-  // from its service-managed secret (bedrock-agentcore-identity!*). Without these
-  // every tool call fails with "Failed to get workload identity token" / a
-  // secretsmanager AccessDenied (both hard-won in podcast-curation prod).
-  new awsAny.iam.RolePolicy("Mem9GatewayWorkloadIdentityAccess", {
+  // Least privilege: the gateway invokes the proxy Lambda AS THIS ROLE, so it needs
+  // only lambda:InvokeFunction on that one function. (No workload-identity / secret
+  // / ENI grants — those were for the removed API-key credential provider + the
+  // managed-Lattice ENI path.)
+  new awsAny.iam.RolePolicy("Mem9GatewayInvokeLambda", {
     role: gatewayServiceRole.name,
-    policy: JSON.stringify({
-      Version: "2012-10-17",
-      Statement: [
-        {
-          Effect: "Allow",
-          Action: [
-            "bedrock-agentcore:GetWorkloadAccessToken",
-            "bedrock-agentcore:GetWorkloadAccessTokenForJWT",
-            "bedrock-agentcore:GetWorkloadAccessTokenForUserId",
-            "bedrock-agentcore:GetResourceApiKey",
-          ],
-          Resource: "*",
-        },
-        {
-          Effect: "Allow",
-          Action: ["secretsmanager:GetSecretValue", "secretsmanager:DescribeSecret"],
-          Resource: "arn:aws:secretsmanager:*:*:secret:bedrock-agentcore-identity!*",
-        },
-        {
-          // The managed VPC Lattice resource gateway (created when the target's
-          // privateEndpoint.managedVpcResource is provisioned) places ENIs in our
-          // private subnets. AgentCore assumes THIS role to do it, so it needs the
-          // ENI lifecycle + VPC read. Without ec2:CreateNetworkInterface the target
-          // create FAILS with "caller does not have ec2:CreateNetworkInterface".
-          Effect: "Allow",
-          Action: [
-            "ec2:CreateNetworkInterface",
-            "ec2:DeleteNetworkInterface",
-            "ec2:DescribeNetworkInterfaces",
-            "ec2:CreateNetworkInterfacePermission",
-            "ec2:DescribeSubnets",
-            "ec2:DescribeVpcs",
-            "ec2:DescribeSecurityGroups",
-          ],
-          Resource: "*",
-        },
-      ],
-    }),
+    policy: proxyFn.arn.apply((arn: string) =>
+      JSON.stringify({
+        Version: "2012-10-17",
+        Statement: [{ Effect: "Allow", Action: "lambda:InvokeFunction", Resource: arn }],
+      }),
+    ),
   });
-
-  // (No S3 schema-read policy needed — the OpenAPI schema is inlined into the
-  // target, not fetched from S3.)
 
   // --- AgentCore Gateway (typed aws.bedrock.AgentcoreGateway) ---
   // CUSTOM_JWT authorizer matching on allowedClients (Cognito client_credentials
@@ -159,82 +246,38 @@ export function gateway(
     { dependsOn: [gatewayServiceRole] },
   );
 
-  // --- API-key credential provider (outbound auth to mnemo-server) ---
-  // Holds the X-API-Key = tenant id (from bootstrap()). AgentCore stores it in its
-  // service-managed secret (bedrock-agentcore-identity!*, read via the role above).
-  const apiKeyProvider = new awsAny.bedrock.AgentcoreApiKeyCredentialProvider(
-    "Mem9ApiKeyProvider",
-    {
-      name: `${stage}-mem9-mcp-apikey`,
-      apiKey: bootstrapOut.tenantId,
-    },
-    { dependsOn: [bedrockGateway] },
-  );
-
-  // --- Gateway Target (OpenAPI, private via self-managed VPC Lattice → internal ALB) ---
-  //
-  // Provisioned via a `command.local.Command` that drives the DIRECT
+  // --- Gateway Target (Lambda) ---
+  // Provisioned via a `command.local.Command` driving the direct
   // bedrock-agentcore-control `CreateGatewayTarget` API (infra/gateway/
-  // provision-target.mjs), NOT `aws.cloudcontrol.Resource`.
-  //
-  // ROOT CAUSE (proven 2026-07-14): the typed pulumi-aws 7.20.0
-  // `aws.bedrock.AgentcoreGatewayTarget` has NO `privateEndpoint` field (silently
-  // dropped), so we tried CloudControl. But CloudControl's
-  // `AWS::BedrockAgentCore::GatewayTarget` handler FAILEDs EVERY time (~20 CI
-  // iterations) with "NotStabilized: FAILED, internal error" whenever
-  // PrivateEndpoint is present — while the IDENTICAL config via a direct
-  // `CreateGatewayTarget` SDK call reaches READY in ~3.5 min (verified with the
-  // exact resolving domain, self-managed Lattice RC, inline schema, API-key
-  // provider). So CloudControl's handler is broken for the private-endpoint path
-  // in ap-northeast-1; the underlying API is fine. This Command drives that
-  // proven-working API directly (create → poll to READY; delete on teardown).
-  //
-  // SELF-MANAGED VPC Lattice (§6a): infra/alb.ts creates the Lattice
-  // ResourceGateway + ResourceConfiguration ourselves (so the ENIs are created by
-  // OUR deploy role, which has ec2:CreateNetworkInterface). AgentCore's MANAGED
-  // path fails to create those ENIs in ap-northeast-1 despite the vpc-lattice SLR
-  // having the perm — a service-side gap. We reference our ResourceConfiguration
-  // by ARN. Its dnsResource domain = mem9.aws.kane.mx (the cert/SNI), resolved to
-  // the ALB by the private R53 zone; Lattice sends that as the TLS SNI.
+  // provision-target.mjs) with `targetConfiguration.mcp.lambda`. A Lambda target
+  // has no privateEndpoint, so the Lattice-target flake doesn't apply — but the
+  // Command wrapper still gives a clean create→poll-READY→delete lifecycle + a
+  // dependsOn edge on the proxy Lambda + gateway.
   const targetName = `${stage}-mem9-rest`;
   const provisionScript = path.join(gatewayAssetDir, "provision-target.mjs");
+  const toolSchemaJson = JSON.stringify(TOOL_SCHEMA);
   // `command.local.Command`'s `environment` block applies to BOTH create and
-  // delete, so MEM9_TGT_OP can't live there (it must differ per lifecycle).
-  // Instead set it as an inline `VAR=... node …` prefix on each command line —
-  // `create` runs with op=create (build + poll to READY), `delete` with op=delete
-  // (best-effort teardown by name). All other inputs (Outputs) go in `environment`.
+  // delete, so MEM9_TGT_OP can't live there (it must differ per lifecycle) — set it
+  // as an inline `VAR=... node …` prefix on each command line.
   new command.local.Command(
     "Mem9GatewayTarget",
     {
       create: $interpolate`MEM9_TGT_OP=create node ${provisionScript}`,
       delete: $interpolate`MEM9_TGT_OP=delete node ${provisionScript}`,
-      // Re-run `create` (delete-then-recreate) when any of these change. The set
-      // covers every field of the target's config that actually varies here
-      // (gateway id, credential-provider ARN, Lattice RC ARN, and the schema).
-      // The API-key HEADER and description are constants, so they're deliberately
-      // omitted. CAVEAT: because a fire-once Command has no read/diff, if the
-      // target drifts out-of-band (manual edit/delete) with NO input change, a
-      // plain redeploy won't reconcile it — bump a trigger or `sst refresh` then
-      // redeploy. (A failed create always re-runs, so FAILED targets self-heal.)
-      triggers: [
-        bedrockGateway.gatewayId,
-        apiKeyProvider.credentialProviderArn,
-        albOut.latticeResourceConfigArn,
-        openApiSchema,
-      ],
+      // Re-run create (delete-then-recreate) when the gateway, the Lambda, or the
+      // tool schema changes. A fire-once Command has no read/diff, so out-of-band
+      // drift needs a trigger bump or `sst refresh`; a failed create always re-runs.
+      triggers: [bedrockGateway.gatewayId, proxyFn.arn, toolSchemaJson],
       environment: {
         MEM9_TGT_REGION: region,
         MEM9_TGT_GATEWAY_ID: bedrockGateway.gatewayId,
         MEM9_TGT_NAME: targetName,
-        MEM9_TGT_DESCRIPTION:
-          "mnemo-server REST tools (add_memory, search_memories) via internal ALB",
-        MEM9_TGT_SCHEMA: openApiSchema,
-        MEM9_TGT_APIKEY_PROVIDER_ARN: apiKeyProvider.credentialProviderArn,
-        MEM9_TGT_APIKEY_HEADER: "X-API-Key",
-        MEM9_TGT_LATTICE_RC_ARN: albOut.latticeResourceConfigArn,
+        MEM9_TGT_DESCRIPTION: "mnemo-server MCP tools (add_memory, search_memories) via a proxy Lambda",
+        MEM9_TGT_LAMBDA_ARN: proxyFn.arn,
+        MEM9_TGT_TOOL_SCHEMA: toolSchemaJson,
       },
     },
-    { dependsOn: [bedrockGateway, apiKeyProvider] },
+    { dependsOn: [bedrockGateway, proxyFn] },
   );
 
   const gatewayId = bedrockGateway.gatewayId;

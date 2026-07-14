@@ -1,13 +1,13 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CognitoOutputs } from "./cognito";
-import type { AlbOutputs } from "./alb";
+import type { EcsOutputs } from "./ecs";
 import type { BootstrapOutputs } from "./bootstrap";
 
 /**
- * Unit tests for the `gateway` stack: the AgentCore Gateway (CUSTOM_JWT,
- * allowedClients), the API-key credential provider (X-API-Key outbound), and the
- * OpenAPI target provisioned via a command.local.Command driving the direct
- * bedrock-agentcore-control API (self-managed-Lattice privateEndpoint → ALB).
+ * Unit tests for the `gateway` stack (Lambda-proxy target): the CUSTOM_JWT
+ * AgentCore Gateway, the VPC-attached proxy Lambda (nodejs24.x) + its exec role,
+ * the gateway service role (lambda:InvokeFunction only), and the Lambda
+ * GatewayTarget provisioned via a command.local.Command.
  */
 
 function out<T>(value: T): { value: T; apply: (fn: (v: T) => unknown) => unknown } {
@@ -54,11 +54,10 @@ function installInterpolate() {
 function makeCtor(kind: string) {
   return class {
     name = out(`${kind}-name`);
-    arn = out(`arn:${kind}`);
+    arn = { value: `arn:${kind}`, apply: (fn: (v: string) => unknown) => out(fn(`arn:${kind}`) as never) };
     id = out(`${kind}-id`);
     gatewayId = out("gw-123");
     gatewayUrl = out("https://gw-123.gateway.bedrock-agentcore.ap-northeast-1.amazonaws.com/mcp");
-    credentialProviderArn = out("arn:apikey-provider");
     constructor(_n: string, args: Record<string, unknown>) {
       created.push({ kind, args });
     }
@@ -75,9 +74,9 @@ function installGlobals(stage: string) {
       getSubnetsOutput: () => ({ ids: out(["subnet-a", "subnet-b", "subnet-c"]) }),
     },
     iam: { Role: makeCtor("Role"), RolePolicy: makeCtor("RolePolicy") },
+    lambda: { Function: makeCtor("LambdaFunction") },
     bedrock: {
       AgentcoreGateway: makeCtor("AgentcoreGateway"),
-      AgentcoreApiKeyCredentialProvider: makeCtor("AgentcoreApiKeyCredentialProvider"),
     },
     ssm: {
       Parameter: class {
@@ -91,9 +90,19 @@ function installGlobals(stage: string) {
       },
     },
   };
-  // The GatewayTarget is provisioned via a `command.local.Command` running the
-  // direct bedrock-agentcore-control API (CloudControl's handler is broken for the
-  // private-endpoint path). `command` is a separate SST global (like `aws`).
+  // pulumi.asset.* used to zip the proxy handler.
+  (globalThis as Record<string, unknown>).pulumi = {
+    asset: {
+      FileAsset: class {
+        constructor(public p: string) {}
+      },
+      AssetArchive: class {
+        constructor(public assets: Record<string, unknown>) {}
+      },
+    },
+  };
+  // The GatewayTarget is provisioned via a command.local.Command running the
+  // direct bedrock-agentcore-control API. `command` is a separate SST global.
   (globalThis as Record<string, unknown>).command = {
     local: { Command: makeCtor("LocalCommand") },
   };
@@ -104,7 +113,7 @@ beforeEach(() => {
   params = [];
 });
 afterEach(() => {
-  for (const g of ["$app", "aws", "command", "$interpolate"]) delete (globalThis as Record<string, unknown>)[g];
+  for (const g of ["$app", "aws", "command", "pulumi", "$interpolate"]) delete (globalThis as Record<string, unknown>)[g];
   vi.resetModules();
 });
 
@@ -119,12 +128,11 @@ function fakeCognito(): CognitoOutputs {
     allowedClientIds: [out("client-1")],
   } as unknown as CognitoOutputs;
 }
-function fakeAlb(): AlbOutputs {
+function fakeEcs(): EcsOutputs {
   return {
-    albDnsName: out("internal-mem9-abc.ap-northeast-1.elb.amazonaws.com"),
-    albSecurityGroupId: out("sg-alb"),
-    latticeResourceConfigArn: out("arn:aws:vpc-lattice:ap-northeast-1:123456789012:resourceconfiguration/rcfg-abc"),
-  } as unknown as AlbOutputs;
+    serviceDnsName: out("mnemo.mem9-prod.local"),
+    taskSecurityGroupId: out("sg-task"),
+  } as unknown as EcsOutputs;
 }
 function fakeBootstrap(): BootstrapOutputs {
   return { tenantId: out("deadbeefTENANTID") } as unknown as BootstrapOutputs;
@@ -139,7 +147,7 @@ describe("gateway stack", () => {
   it("creates a CUSTOM_JWT MCP gateway matching on allowedClients (not aud)", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
-    gateway(fakeCognito(), fakeAlb(), fakeBootstrap());
+    gateway(fakeCognito(), fakeEcs(), fakeBootstrap());
     const gw = only("AgentcoreGateway");
     expect(gw.protocolType).toBe("MCP");
     expect(gw.authorizerType).toBe("CUSTOM_JWT");
@@ -150,60 +158,64 @@ describe("gateway stack", () => {
     expect(gw.interceptorConfigurations).toBeUndefined();
   });
 
-  it("provisions an API-key credential provider carrying the tenant id (X-API-Key)", async () => {
+  it("provisions a VPC-attached nodejs24.x proxy Lambda carrying the Cloud Map URL + X-API-Key", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
-    gateway(fakeCognito(), fakeAlb(), fakeBootstrap());
-    const provider = only("AgentcoreApiKeyCredentialProvider");
-    expect(String((provider.apiKey as { value?: string }).value)).toBe("deadbeefTENANTID");
+    gateway(fakeCognito(), fakeEcs(), fakeBootstrap());
+    const fn = only("LambdaFunction");
+    expect(fn.runtime).toBe("nodejs24.x");
+    expect(fn.handler).toBe("proxy-handler.handler");
+    // VPC-attached (private subnets + the task SG so it can reach mnemo-server).
+    const vpc = fn.vpcConfig as Record<string, unknown>;
+    expect(vpc.subnetIds).toBeDefined();
+    expect(vpc.securityGroupIds).toBeDefined();
+    // Env: the Cloud Map base URL (mnemo.mem9-<stage>.local:8080) + the tenant key.
+    const vars = (fn.environment as any).variables;
+    expect(String((vars.MEM9_SERVER_BASE_URL as { value?: string }).value)).toContain("mnemo.mem9-prod.local");
+    expect(String((vars.MEM9_SERVER_BASE_URL as { value?: string }).value)).toContain(":8080");
+    expect(String((vars.MEM9_API_KEY as { value?: string }).value)).toBe("deadbeefTENANTID");
   });
 
-  it("provisions the target via a command.local.Command driving the direct CreateGatewayTarget API", async () => {
+  it("gateway service role grants ONLY lambda:InvokeFunction (no workload-identity/secret/ENI)", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
-    gateway(fakeCognito(), fakeAlb(), fakeBootstrap());
-    // The GatewayTarget is provisioned by a local Command (NOT CloudControl —
-    // its AWS::BedrockAgentCore::GatewayTarget handler is broken for the private-
-    // endpoint path). The Command runs infra/gateway/provision-target.mjs, which
-    // calls the direct bedrock-agentcore-control CreateGatewayTarget API (proven
-    // to reach READY where CloudControl FAILEDs).
+    gateway(fakeCognito(), fakeEcs(), fakeBootstrap());
+    // Two roles are created: the Lambda exec role + the gateway service role. Find
+    // the gateway-invoke RolePolicy (its doc is an apply()'d Output over the ARN).
+    const rolePolicies = created.filter((r) => r.kind === "RolePolicy");
+    const docs = rolePolicies.map((r) => JSON.stringify(unwrap(r.args.policy)));
+    const invokeDoc = docs.find((d) => d.includes("lambda:InvokeFunction"));
+    expect(invokeDoc).toBeDefined();
+    // None of the removed API-key/managed-Lattice grants remain anywhere.
+    for (const d of docs) {
+      expect(d).not.toContain("GetWorkloadAccessToken");
+      expect(d).not.toContain("bedrock-agentcore-identity!");
+      expect(d).not.toContain("CreateNetworkInterfacePermission");
+    }
+  });
+
+  it("provisions the target via a command.local.Command driving a mcp.lambda CreateGatewayTarget", async () => {
+    installGlobals("prod");
+    const gateway = await loadGateway();
+    gateway(fakeCognito(), fakeEcs(), fakeBootstrap());
     const cmd = only("LocalCommand");
-    // create runs op=create, delete runs op=delete (same script; MEM9_TGT_OP flips
-    // per lifecycle via an inline env prefix since `environment` is shared).
-    // `$interpolate`/env values come through the loose out<T> mock → unwrap them.
     expect(String(unwrap(cmd.create))).toContain("MEM9_TGT_OP=create");
     expect(String(unwrap(cmd.create))).toContain("provision-target.mjs");
     expect(String(unwrap(cmd.delete))).toContain("MEM9_TGT_OP=delete");
-    // The create-time inputs (Outputs) are passed via `environment`.
     const env = unwrap(cmd.environment) as Record<string, unknown>;
-    // OpenAPI schema is INLINED (the S3-schema variant is unrelated; inline matches
-    // the proven-READY direct API call). Carries both tools.
-    expect(String(env.MEM9_TGT_SCHEMA)).toContain("add_memory");
-    expect(String(env.MEM9_TGT_SCHEMA)).toContain("search_memories");
-    // Outbound auth = API key in the X-API-Key header.
-    expect(env.MEM9_TGT_APIKEY_HEADER).toBe("X-API-Key");
-    expect(env.MEM9_TGT_APIKEY_PROVIDER_ARN).toBeDefined();
-    // Private egress via SELF-MANAGED VPC Lattice — references the ResourceConfiguration
-    // ARN infra/alb.ts creates (AgentCore's managed path can't create the ENIs in
-    // ap-northeast-1). This is the fix for the persistent ec2:CreateNetworkInterface error.
-    expect(String(env.MEM9_TGT_LATTICE_RC_ARN)).toContain("resourceconfiguration/rcfg-");
-    // Gateway + target name threaded through.
+    // Lambda target inputs: the proxy Lambda ARN + the inline tool schema (both tools).
+    expect(env.MEM9_TGT_LAMBDA_ARN).toBeDefined();
+    expect(String(env.MEM9_TGT_TOOL_SCHEMA)).toContain("add_memory");
+    expect(String(env.MEM9_TGT_TOOL_SCHEMA)).toContain("search_memories");
+    // The removed privateEndpoint/API-key/OpenAPI-schema inputs are gone.
+    expect(env.MEM9_TGT_SCHEMA).toBeUndefined();
+    expect(env.MEM9_TGT_APIKEY_PROVIDER_ARN).toBeUndefined();
+    expect(env.MEM9_TGT_LATTICE_RC_ARN).toBeUndefined();
     expect(env.MEM9_TGT_GATEWAY_ID).toBeDefined();
     expect(env.MEM9_TGT_NAME).toBe("prod-mem9-rest");
-  });
-
-  it("creates a bedrock-agentcore-trust service role with workload-identity access", async () => {
-    installGlobals("prod");
-    const gateway = await loadGateway();
-    const outs = gateway(fakeCognito(), fakeAlb(), fakeBootstrap());
-    const role = only("Role");
-    expect(String(role.assumeRolePolicy)).toContain("bedrock-agentcore.amazonaws.com");
-    // Workload-identity access role policy (inline schema → no S3 read policy).
-    const rolePolicy = only("RolePolicy");
-    const policyDoc = String(rolePolicy.policy);
-    expect(policyDoc).toContain("bedrock-agentcore:GetWorkloadAccessToken");
-    expect(policyDoc).toContain("bedrock-agentcore-identity!");
+    // No API-key credential provider resource is created for a Lambda target.
+    expect(created.filter((r) => r.kind === "AgentcoreApiKeyCredentialProvider")).toHaveLength(0);
+    // Gateway url/id exported to SSM.
     expect(params.map((p) => p.name)).toContain("/mem9-on-aws/prod/gateway/url");
-    expect(outs.gatewayUrl).toBeDefined();
   });
 });

@@ -157,18 +157,20 @@ VPC-internal endpoint if the embedding shim is in-VPC).
 
 ## 6. MCP surface + auth: **AgentCore Gateway + Cognito** (reuse the pattern)
 
-> **IMPLEMENTED** (PR "feat(mcp)", 2026-07-13). `infra/{certs,cognito,alb,gateway}.ts`
-> + `infra/gateway/openapi.yaml`. Two adaptations vs the design/podcast-curation,
-> both intentional:
-> - **Domain is `mem9.aws.kane.mx`**, NOT `mem9.internal.kane.mx` — the latter was
->   never a real zone; `aws.kane.mx` is an existing delegated public Route53 zone, so
->   ACM DNS validation is automatic. Still name-only (cert subject + Lattice SNI;
->   decoupled from routing). Override via `MEM9_MCP_DOMAIN` / `MEM9_MCP_ZONE`.
-> - **Outbound auth = API key** (`AgentcoreApiKeyCredentialProvider`, X-API-Key =
->   tenant id), NOT OAuth — podcast-curation fronts a public API with an OAuth
->   credential provider; mem9 authenticates with X-API-Key. And the target carries
->   **`privateEndpoint.managedVpcResource`** (managed VPC Lattice, `routingDomain` =
->   the internal ALB DNS) — podcast-curation's public-API target has no privateEndpoint.
+> **IMPLEMENTED** (PR "feat(mcp)", 2026-07-14) — **Lambda-proxy target** (see §6a
+> for why the original ALB+Lattice path was abandoned). `infra/{cognito,gateway}.ts`
+> + `infra/gateway/{proxy-handler.mjs,provision-target.mjs}`. Adaptations vs
+> podcast-curation, all intentional:
+> - **Target = a VPC-attached proxy Lambda** (nodejs24.x), NOT a public API URL. The
+>   Lambda GatewayTarget carries `targetConfiguration.mcp.lambda.{lambdaArn,toolSchema}`
+>   — AgentCore's out-of-the-box private path. NO ALB, NO ACM cert, NO VPC Lattice,
+>   NO Route53 zone.
+> - **Outbound auth = API key injected BY THE LAMBDA** (X-API-Key = tenant id), NOT a
+>   credential provider — the proxy Lambda adds the header itself when it calls
+>   mnemo-server, so there's no `AgentcoreApiKeyCredentialProvider`.
+> - **Private reach = AWS Cloud Map**: mnemo-server registers under
+>   `mnemo.mem9-<stage>.local`; the Lambda (in the same private subnets + task SG)
+>   resolves it and calls HTTP :8080.
 > - **v1 has NO interceptor Lambda** (single-operator, single-tenant → per-tool
 >   scoping deferred). Tools exposed: `add_memory`, `search_memories`.
 
@@ -189,63 +191,48 @@ Mirror podcast-curation `gateway.ts` + `cognito.ts` + `api.ts`:
 - SSM parameter exports for Gateway URL / Cognito endpoints / client IDs
   (podcast-curation convention: `/mem9-on-aws/${stage}/...`).
 
-### 6a. Gateway → mnemo-server network path (RESOLVED — this was the one unknown)
+### 6a. Gateway → mnemo-server network path (Lambda-proxy — the ALB/Lattice path was abandoned)
 
-**mnemo-server stays fully private; the Gateway reaches it over VPC Lattice, no
-public exposure.** Verified against AWS docs — AgentCore Gateway OpenAPI/MCP
-targets support a **`privateEndpoint` (managed VPC Lattice)** config that routes to
-an in-VPC endpoint without the public internet. This is a **first-class,
-documented** capability — the earlier worry ("must be public HTTPS") applies only
-to certain integration points (e.g. AWS DevOps Agent, API Gateway *private
-endpoint type*), NOT to Gateway's own private target egress.
+**mnemo-server stays fully private; the Gateway reaches it via a VPC-attached proxy
+Lambda, no public exposure.** AgentCore Gateway supports a **Lambda target** as an
+out-of-the-box private path: *"the gateway can immediately invoke Lambda functions
+configured with VPC access to reach your internal resources"* (AWS docs). The Lambda
+runs in our private subnets and reaches mnemo-server over **AWS Cloud Map** DNS.
 
-Resolved path (all private, zero public):
+Path (all private, zero public):
 ```
 Claude Code (any device)
-  → AgentCore Gateway  [inbound: Cognito M2M JWT]
-    → privateEndpoint { managedVpcResource: default-VPC, private subnets, SG }  (VPC Lattice)
-      → internal ALB (HTTPS, PUBLIC ACM cert)     [outbound auth: API key = X-API-Key]
+  → AgentCore Gateway  [inbound: Cognito M2M JWT (CUSTOM_JWT)]
+    → GatewayTarget (mcp.lambda) → proxy Lambda (VPC, nodejs24.x)   [gateway role: lambda:InvokeFunction]
+      → http://mnemo.mem9-<stage>.local:8080  (AWS Cloud Map)       [outbound auth: X-API-Key = tenant id, added by the Lambda]
         → ECS Fargate mnemo-server (HTTP :8080, private subnet)
           → Aurora PG (private subnet)
 ```
 
-Design rules pinned from the docs:
-- **Managed Lattice** (`privateEndpoint.managedVpcResource`) — AgentCore creates &
-  manages the Lattice resource gateway/config on our behalf; **no VPC Lattice IAM,
-  SCP, or approval needed**, only standard EC2 perms + a service-linked role.
-  Simplest for a single operator. (Self-managed Lattice = cross-account/governance,
-  not needed.)
-- **Internal ALB in front of mnemo-server** — required because *"VPC egress
-  requires your target endpoint to have a publicly trusted TLS certificate"* (docs,
-  verbatim). Lattice's TLS handshake to the target must trust the cert, and a
-  private CA won't do → the ALB carries a **public ACM cert** and terminates TLS.
-  The ALB is `internal` (not internet-facing); the public cert is only for TLS
-  trust, not for public reachability.
-- **Certificate + domain (IMPLEMENTED)**:
-  - Public ACM cert for **`mem9.aws.kane.mx`** (a subdomain of the EXISTING public
-    R53 zone `aws.kane.mx` — the design's original `mem9.aws.kane.mx` was
-    never a real zone).
-  - The domain is **name-only**: it is the ACM cert subject and the Lattice
-    request **TLS SNI** — it does **NOT** need public DNS resolution and does
-    **NOT** point at the ALB. Actual routing uses Lattice `routingDomain` = the
-    ALB's internal AWS DNS name (`internal-xxx.<region>.elb.amazonaws.com`). SNI
-    (your domain) and routing (ALB AWS DNS) are decoupled — this is the documented
-    flow.
-  - **Route53 auto-validation**: `aws.kane.mx` is a delegated public R53 zone, so
-    `infra/certs.ts` looks it up (`route53.getZoneOutput`) + writes the ACM
-    validation CNAME + gates on `CertificateValidation` (cert must be ISSUED before
-    the ALB listener references it).
-- **ALB → mnemo-server = plain HTTP (LOCKED)**: the ALB terminates TLS with the
-  public ACM cert, then forwards to mnemo-server over **HTTP :8080** inside the
-  private subnets. mnemo-server needs **no cert of its own**. (The docs' HTTPS
-  backend step assumes a backend that already has a private cert; ours is bare
-  HTTP, which is fine intra-VPC.) The ALB HTTPS listener applies a host-header
-  transform (`mem9.aws.kane.mx` → mnemo-server's internal host) per the docs.
-- **Outbound auth = API key**, NOT SigV4. Docs: IAM/SigV4 outbound auth is only
-  compatible with API Gateway / Lambda URL / AgentCore — **NOT ALB/EC2**. So the
-  Gateway target uses an **API-key credential provider** carrying mnemo-server's
-  `X-API-Key` (= the tenant id). Fits mem9's native auth exactly. (OAuth is the
-  alternative if we ever front with something OAuth-capable.)
+Design rules:
+- **Lambda target** (`targetConfiguration.mcp.lambda.{lambdaArn, toolSchema}`) — no
+  `privateEndpoint`, no VPC Lattice, no ALB, no ACM cert, no Route53 public zone.
+  AgentCore invokes the Lambda AS THE GATEWAY SERVICE ROLE, so that role needs only
+  `lambda:InvokeFunction` on the one function (least privilege).
+- **The proxy Lambda** (`infra/gateway/proxy-handler.mjs`) receives the tool name in
+  `context.clientContext.Custom.bedrockAgentCoreToolName` (`${target}___${tool}`) and
+  the tool inputs as a flat event map; it maps `add_memory`/`search_memories` to
+  mnemo-server's REST (`POST`/`GET /v1alpha2/mem9s/memories`), injecting `X-API-Key`
+  (= tenant id). It's VPC-attached (private subnets + the task SG, so a self-ingress
+  :8080 rule lets it reach the server) and nodejs24.x. The tool inputSchemas live
+  inline in `infra/gateway.ts`.
+- **Cloud Map** (`infra/ecs.ts`): a `PrivateDnsNamespace` (`mem9-<stage>.local`) + a
+  `Service` (`mnemo`) registered on the ECS service; ECS keeps the A record pointed
+  at the running task's private IP. (A PrivateDnsNamespace creates a managed Route53
+  private hosted zone — the only remaining Route53 dependency.)
+- **WHY NOT the original ALB + self-managed-VPC-Lattice `privateEndpoint`**: that
+  target failed to stabilize **100% of the time** in the full CI deploy — an AgentCore
+  control-plane internal error (*"The server encountered an internal error … Retry the
+  request later."*) on the self-managed-Lattice privateEndpoint target in
+  ap-northeast-1. The IDENTICAL config reached READY in isolated direct-API tests but
+  never in a full-stack deploy (ruled out: CloudControl-vs-SDK, CUSTOM_JWT-vs-IAM,
+  RC-not-ACTIVE, domain-verification, retries + spacing). It's an AWS-side defect on
+  that combination; the Lambda target sidesteps it entirely.
 
 ## 7. LLM + embedding supply (all LOCKED)
 

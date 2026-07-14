@@ -1,30 +1,27 @@
 #!/usr/bin/env node
 /**
- * Provision the AgentCore GatewayTarget via the DIRECT bedrock-agentcore-control
- * API — NOT CloudControl.
+ * Provision the AgentCore GatewayTarget (a **Lambda target**) via the direct
+ * bedrock-agentcore-control `CreateGatewayTarget` API, wrapped by an SST
+ * `command.local.Command` (see infra/gateway.ts).
  *
- * WHY THIS SCRIPT EXISTS (proven root cause, 2026-07-14): the identical target
- * config (self-managed VPC Lattice privateEndpoint + inline OpenAPI schema +
- * API-key credential provider, servers.url = mem9.aws.kane.mx) reaches READY in
- * ~3.5 min via a direct `CreateGatewayTarget` SDK/boto3 call, but FAILEDs every
- * time (~20 CI iterations) when created through `aws.cloudcontrol.Resource`
- * (AWS::BedrockAgentCore::GatewayTarget): CloudControl's handler returns
- * "NotStabilized: FAILED, internal error". So CloudControl's GatewayTarget
- * handler is broken for the PrivateEndpoint path in ap-northeast-1, while the
- * underlying API is fine. This script drives that proven-working API directly,
- * wrapped by an SST `command.local.Command` (see infra/gateway.ts).
+ * WHY A LAMBDA TARGET: the earlier ALB + self-managed-VPC-Lattice privateEndpoint
+ * target failed to stabilize 100% of the time in the full CI deploy (an AgentCore
+ * control-plane internal error on that combination in ap-northeast-1). A Lambda
+ * target is AgentCore's out-of-the-box private path — no privateEndpoint, no
+ * Lattice — so it sidesteps that failure. The gateway invokes a VPC-attached proxy
+ * Lambda that reaches mnemo-server over Cloud Map DNS (see infra/gateway/
+ * proxy-handler.mjs). This Command drives the target's lifecycle (create → poll to
+ * READY; delete on teardown) so SST gets a real dependency edge on the Lambda.
  *
  * Contract (driven entirely by env vars, so the SST Command can pass Outputs):
- *   MEM9_TGT_OP                  create | delete
- *   MEM9_TGT_GATEWAY_ID          gateway id (CreateGatewayTarget target)
- *   MEM9_TGT_NAME                target name (unique within the gateway)
- *   MEM9_TGT_REGION              AWS region
+ *   MEM9_TGT_OP           create | delete
+ *   MEM9_TGT_GATEWAY_ID   gateway id (CreateGatewayTarget target)
+ *   MEM9_TGT_NAME         target name (unique within the gateway)
+ *   MEM9_TGT_REGION       AWS region
  *   -- create only --
- *   MEM9_TGT_DESCRIPTION         human description
- *   MEM9_TGT_SCHEMA              inline OpenAPI schema (string)
- *   MEM9_TGT_APIKEY_PROVIDER_ARN API-key credential-provider ARN
- *   MEM9_TGT_APIKEY_HEADER       header name (X-API-Key)
- *   MEM9_TGT_LATTICE_RC_ARN      self-managed Lattice ResourceConfiguration ARN
+ *   MEM9_TGT_DESCRIPTION  human description
+ *   MEM9_TGT_LAMBDA_ARN   the proxy Lambda's ARN (AgentCore invokes it)
+ *   MEM9_TGT_TOOL_SCHEMA  JSON array of ToolDefinition {name,description,inputSchema}
  *
  * create prints the created target id as the last stdout line (SST captures
  * stdout → the Command's `stdout` output). Idempotent: if a target with the
@@ -145,10 +142,8 @@ async function createOnce(input) {
 }
 
 async function create() {
-  const schema = env("MEM9_TGT_SCHEMA");
-  const apiKeyProviderArn = env("MEM9_TGT_APIKEY_PROVIDER_ARN");
-  const apiKeyHeader = env("MEM9_TGT_APIKEY_HEADER");
-  const latticeRcArn = env("MEM9_TGT_LATTICE_RC_ARN");
+  const lambdaArn = env("MEM9_TGT_LAMBDA_ARN");
+  const toolSchema = JSON.parse(env("MEM9_TGT_TOOL_SCHEMA"));
   const description = env("MEM9_TGT_DESCRIPTION", false) ?? "";
 
   // Idempotency: a same-named target may already exist (retry/re-run). Reuse if
@@ -166,61 +161,27 @@ async function create() {
     await deleteTarget(existing.targetId);
   }
 
+  // A LAMBDA target: AgentCore invokes the proxy Lambda (which reaches mnemo-server
+  // privately via Cloud Map). toolSchema is the inline ToolDefinition[]. No
+  // privateEndpoint (Lambda targets need none) and no credentialProviderConfigurations
+  // (the proxy Lambda injects the X-API-Key itself).
   const input = {
     gatewayIdentifier: GATEWAY_ID,
     name: NAME,
     description,
-    targetConfiguration: { mcp: { openApiSchema: { inlinePayload: schema } } },
-    credentialProviderConfigurations: [
-      {
-        credentialProviderType: "API_KEY",
-        credentialProvider: {
-          apiKeyCredentialProvider: {
-            providerArn: apiKeyProviderArn,
-            credentialLocation: "HEADER",
-            credentialParameterName: apiKeyHeader,
-          },
-        },
-      },
-    ],
-    privateEndpoint: {
-      selfManagedLatticeResource: { resourceConfigurationIdentifier: latticeRcArn },
+    targetConfiguration: {
+      mcp: { lambda: { lambdaArn, toolSchema: { inlinePayload: toolSchema } } },
     },
   };
 
-  // Retry on the AgentCore control-plane flake: CreateGatewayTarget with a
-  // self-managed-Lattice privateEndpoint sometimes lands the target in FAILED with
-  // "The server encountered an internal error while processing the request. Retry
-  // the request later."
-  //
-  // NATURE (measured across several live runs): a genuinely INTERMITTENT flake, NOT
-  // deterministic. Observed BOTH: (a) a CI deploy where every attempt in a tight
-  // ~35s burst FAILED (~7s each), and (b) fresh-gateway targets that reached READY
-  // on the FIRST attempt at +0s. So the error clusters in short windows — the cure
-  // is SPACED retries (independent samples across minutes), plus a small upfront
-  // settle for the freshness-correlated case.
-  //
-  // We bound BOTH by attempt count AND wall-clock, whichever hits first. The
-  // wall-clock cap is the real guard: an individual attempt can, in the worst case,
-  // burn ~6 min in waitReady + ~4 min in the post-FAILED delete-wait, so a pure
-  // count bound could blow the 45-min CI Deploy budget. DEADLINE_MS (25 min from the
-  // first attempt) keeps the whole loop safely under it, leaving room for the rest
-  // of the stack. In practice attempts fail/succeed in seconds, so many samples fit.
-  const SETTLE_MS = 30_000; // brief settle for the freshness-correlated failures
-  const BACKOFF_MS = 60_000; // space attempts so they sample different flake windows
-  const MAX_ATTEMPTS = 12;
-  const DEADLINE_MS = 25 * 60_000;
-  console.error(`waiting ${SETTLE_MS / 1000}s before the first create attempt...`);
-  await sleep(SETTLE_MS);
-  const startedAt = Date.now();
+  // A light retry for generic control-plane transients. Unlike the removed
+  // privateEndpoint path (which had a persistent internal-error flake needing a
+  // heavy spaced-retry loop), a Lambda target reaches READY quickly, so a few
+  // short-backoff attempts suffice. Bounded well under the 45-min CI budget.
+  const BACKOFF_MS = 15_000;
+  const MAX_ATTEMPTS = 3;
   let lastErr;
-  let attempts = 0;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
-    if (Date.now() - startedAt > DEADLINE_MS) {
-      console.error(`retry deadline (${DEADLINE_MS / 60_000} min) reached; giving up`);
-      break;
-    }
-    attempts = attempt;
     try {
       const targetId = await createOnce(input);
       // Last stdout line = the id (SST Command captures stdout).
@@ -233,7 +194,7 @@ async function create() {
     }
   }
   throw new Error(
-    `GatewayTarget ${NAME} failed to reach READY after ${attempts} attempt(s): ${lastErr?.message ?? lastErr}`,
+    `GatewayTarget ${NAME} failed to reach READY after ${MAX_ATTEMPTS} attempt(s): ${lastErr?.message ?? lastErr}`,
   );
 }
 

@@ -99,19 +99,15 @@ export default $config({
     const { bootstrap } = await import("./infra/bootstrap");
     const bootstrapOut = bootstrap(ecsOut.cluster, dbOut);
 
-    // MCP surface (§6/§6a): public ACM cert → Cognito M2M → internal ALB →
-    // AgentCore Gateway. Threaded as direct Pulumi Outputs (no SSM read-back).
-    // Cycle order: cert + cognito + alb first (independent), gateway last (it
-    // references all three + the tenant id). certs/cognito are independent of the
-    // ALB; alb() attaches the target group ecs() created to the internal ALB.
-    const { certs } = await import("./infra/certs");
-    const certOut = certs();
+    // MCP surface (§6/§6a): Cognito M2M → AgentCore Gateway → a VPC-attached proxy
+    // Lambda that reaches mnemo-server privately over Cloud Map DNS. Threaded as
+    // direct Pulumi Outputs (no SSM read-back). cognito is independent; gateway()
+    // takes ecsOut (the Cloud Map DNS name + task SG the Lambda uses) + the tenant
+    // id (bootstrapOut) for the outbound X-API-Key.
     const { cognito } = await import("./infra/cognito");
     const cognitoOut = cognito();
-    const { alb } = await import("./infra/alb");
-    const albOut = alb(ecsOut, dbOut, certOut);
     const { gateway } = await import("./infra/gateway");
-    gateway(cognitoOut, albOut, bootstrapOut);
+    gateway(cognitoOut, ecsOut, bootstrapOut);
 
     return {};
   },

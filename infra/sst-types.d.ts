@@ -26,6 +26,20 @@ declare namespace $util {
 type Input<T> = $util.Input<T>;
 type Output<T> = $util.Output<T>;
 
+// ── Pulumi runtime global (SST injects `pulumi`) ────────────────────────────
+// infra/gateway.ts uses `pulumi.asset.{AssetArchive,FileAsset}` to zip the proxy
+// Lambda handler inline. Loose stub — the real types load at deploy time.
+declare namespace pulumi {
+  namespace asset {
+    class FileAsset {
+      constructor(path: string);
+    }
+    class AssetArchive {
+      constructor(assets: Record<string, unknown>);
+    }
+  }
+}
+
 // ── SST globals ─────────────────────────────────────────────────────────────
 interface $App {
   name: string;
