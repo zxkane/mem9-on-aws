@@ -755,11 +755,10 @@ Resources:
   # ───────────────────────────────────────────────────────────────────────────
   # Policy 8 — MCP gateway auth + surface (infra/cognito.ts + infra/gateway.ts):
   # the Cognito M2M user pool/domain/resource-server/clients, the AgentCore
-  # Gateway + OpenAPI target + API-key credential provider + workload identity,
-  # and the service-managed Secrets Manager secret AgentCore uses for outbound
-  # creds. Mirrors the sister podcast-curation `-mcp` policy (proven in prod);
-  # adapted to the API-key credential-provider actions. Its own policy for the
-  # 6144-byte cap + audit clarity.
+  # Gateway + Lambda target + workload identity (the gateway's first-use
+  # token-vault). The Lambda-proxy path needs no API-key credential provider or
+  # service-managed secret — the proxy Lambda injects X-API-Key itself. Its own
+  # policy for the 6144-byte cap + audit clarity.
   #
   # ADDED for the MCP gateway PR — must be live BEFORE that PR's first deploy, or
   # the first Cognito/AgentCore create 403s (CLAUDE-AWS "new resource TYPE needs

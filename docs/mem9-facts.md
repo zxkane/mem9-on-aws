@@ -23,8 +23,9 @@ on. Re-verify against the pinned upstream commit before implementing IaC.
   batch-delete, `/imports`, `/session-messages`, `/status`, webhooks, space-chains.
 - **Unauthenticated health/liveness (registered BEFORE the auth middleware,
   verified handler.go:205 @ pinned SHA):** `GET /healthz` → 200 `{"status":"ok"}`
-  and `GET /versionz` → 200 `{go_version,started_at}`. The internal ALB target
-  group (§6a, infra/ecs.ts) health-checks `/healthz` — no auth, no DB, cheap.
+  and `GET /versionz` → 200 `{go_version,started_at}`. Reachable unauthenticated —
+  handy for a liveness probe (§6a uses a Lambda-proxy + Cloud Map, not an ALB
+  health check, so nothing polls it now, but it stays available).
 - Search query param is `q` (`GET /v1alpha2/mem9s/memories?q=...`).
 - Writes return `{"status":"accepted"}` and are processed **asynchronously** —
   list/search may return empty for a few seconds/minutes after write until the
@@ -323,26 +324,25 @@ this repo — **empirically live 2026-07-12** (ap-northeast-1):
   would also work: raise min ACU to ≥2 (per AWS, faster scale rate), but at ~4× idle
   cost — dropping the proxy keeps the locked 0.5-ACU floor. See ARCHITECTURE.md §3a.
 
-### AgentCore Gateway private egress to VPC (verified — resolves the #6 unknown)
+### AgentCore Gateway private egress to VPC — Lambda-proxy (the VPC-Lattice path was abandoned)
 
-- AgentCore Gateway **OpenAPI and MCP-server targets support a `privateEndpoint`**
-  block that routes to an in-VPC endpoint over **Amazon VPC Lattice**, **without
-  public internet exposure**. Shape:
-  `privateEndpoint.managedVpcResource = { vpcIdentifier, subnetIds[],
-  endpointIpAddressType, securityGroupIds[] }`.
-- **Two Lattice modes**: **managed** (AgentCore creates/manages the Lattice
-  resource gateway + resource config; needs only EC2 perms + a service-linked
-  role, no VPC Lattice IAM/SCP/approval) vs **self-managed** (cross-account /
-  governance). → use **managed**.
-- **TLS**: Lattice targets are HTTPS. For a plain-HTTP backend (mnemo-server:8080),
-  the documented workaround is an **internal ALB with a public ACM cert** in front.
-- **Outbound auth for OpenAPI targets**: OAuth / API key / IAM(SigV4). **SigV4 is
-  NOT compatible with ALB or EC2 backends** (only API Gateway / Lambda URL /
-  AgentCore natively verify SigV4). → for the ALB-fronted mnemo-server use an
-  **API-key credential provider** carrying `X-API-Key` (= mem9 tenant id).
-- Caveat: `privateEndpoint` applies to **one domain** in the OpenAPI schema; if the
-  schema references multiple server domains, need `privateEndpointOverrides` (AWS
-  Support request). mnemo-server = single domain → fine.
-- NOT the same limitation as "API Gateway *private endpoint type* not supported"
-  or "AWS DevOps Agent needs public HTTPS" — those are different integration points.
-  Gateway's own private target egress via Lattice is a first-class documented feature.
+**CURRENT (implemented, §6a):** a **Lambda target**. AgentCore invokes a VPC-attached
+proxy Lambda (`targetConfiguration.mcp.lambda.{lambdaArn, toolSchema}`) that reaches
+mnemo-server over **AWS Cloud Map** private DNS (`mnemo.mem9-<stage>.local:8080`),
+injecting `X-API-Key` (= tenant id). No ALB, no ACM cert, no VPC Lattice, no Route53
+public zone. The gateway service role needs only `lambda:InvokeFunction`. This is
+AgentCore's out-of-the-box private path — "the gateway can immediately invoke Lambda
+functions configured with VPC access" (AWS docs).
+
+**REJECTED alternative — OpenAPI/MCP target with `privateEndpoint` (VPC Lattice):**
+this was the original design and it is a real, documented feature, BUT the
+self-managed-VPC-Lattice `privateEndpoint` GatewayTarget **failed to stabilize 100%
+of the time in the full CI deploy** — an AgentCore control-plane internal error on
+that combination in ap-northeast-1 (the identical config reached READY in isolated
+direct-API tests but never in a full-stack deploy). We could not resolve it from IaC
+(ruled out CloudControl-vs-SDK, CUSTOM_JWT-vs-IAM, RC-not-ACTIVE, domain-verification,
+spaced retries), so we pivoted to the Lambda target. For the record, the rejected
+path's shape was: `privateEndpoint.managedVpcResource`/`selfManagedLatticeResource`
+→ an **internal ALB with a public ACM cert** (Lattice targets are HTTPS; a plain-HTTP
+backend needs the ALB+cert in front) → mnemo-server:8080, with an **API-key credential
+provider** for outbound auth (SigV4 is NOT compatible with ALB/EC2 backends).

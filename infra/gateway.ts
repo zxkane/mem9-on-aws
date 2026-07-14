@@ -61,7 +61,7 @@ const TOOL_SCHEMA = [
           required: true,
         },
         {
-          name: "agentId",
+          name: "agent_id",
           type: "string",
           description: "Optional agent id to attribute the write to (per-agent scoping).",
           required: false,
@@ -85,6 +85,12 @@ const TOOL_SCHEMA = [
           name: "limit",
           type: "integer",
           description: "Max results to return (default 20).",
+          required: false,
+        },
+        {
+          name: "agent_id",
+          type: "string",
+          description: "Optional: restrict results to memories written by this agent.",
           required: false,
         },
       ],
