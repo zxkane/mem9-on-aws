@@ -89,7 +89,20 @@ async function deleteTarget(targetId) {
   throw new Error(`target ${targetId} did not finish deleting in time`);
 }
 
-/** Poll a target to a terminal status (READY | FAILED); throw on FAILED/timeout. */
+// TargetStatus values that mean "still working" — keep polling. Anything else
+// that isn't READY is a terminal error (FAILED, *_UNSUCCESSFUL) or a stuck
+// pending-auth state; surfacing it with statusReasons is the whole point of this
+// script (the CloudControl handler obscured exactly these).
+const IN_PROGRESS_STATUSES = new Set([
+  "CREATING",
+  "CREATE_PENDING_AUTH",
+  "SYNCHRONIZING",
+  "SYNCHRONIZE_PENDING_AUTH",
+  "UPDATING",
+  "UPDATE_PENDING_AUTH",
+]);
+
+/** Poll a target to READY; throw with statusReasons on any terminal-error/stuck status or timeout. */
 async function waitReady(targetId) {
   // ~6 min budget (target reaches READY in ~3.5 min in practice).
   for (let i = 0; i < 60; i++) {
@@ -97,14 +110,16 @@ async function waitReady(targetId) {
       new GetGatewayTargetCommand({ gatewayIdentifier: GATEWAY_ID, targetId }),
     );
     if (res.status === "READY") return;
-    if (res.status === "FAILED") {
+    if (!IN_PROGRESS_STATUSES.has(res.status)) {
+      // FAILED / *_UNSUCCESSFUL / DELETING / any unexpected status — terminal.
       throw new Error(
-        `GatewayTarget ${targetId} FAILED: ${JSON.stringify(res.statusReasons ?? [])}`,
+        `GatewayTarget ${targetId} did not reach READY (status ${res.status}): ` +
+          JSON.stringify(res.statusReasons ?? []),
       );
     }
     await sleep(6_000);
   }
-  throw new Error(`GatewayTarget ${targetId} did not reach READY in time`);
+  throw new Error(`GatewayTarget ${targetId} did not reach READY within the timeout`);
 }
 
 async function create() {

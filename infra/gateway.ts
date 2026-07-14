@@ -49,16 +49,19 @@ export function gateway(
   // The GatewayTarget provision script (below) needs the region for its SDK client.
   const region = awsAny.getRegionOutput().name;
 
+  // Resolve the `infra/gateway/` directory that holds both openapi.yaml and the
+  // target-provision script. SST's esbuild bundle relocates the config, so
+  // `gatewayDirname` (from import.meta.url) may not point at the source tree —
+  // fall back to the workspace-root `infra/gateway`. We MUST resolve this dir
+  // (not just the schema) because provisionScript below is passed to `node` on
+  // the deploy host: a wrong path → "Cannot find module" at target-create time.
+  const moduleGatewayDir = path.resolve(gatewayDirname, "gateway");
+  const gatewayAssetDir = fs.existsSync(path.join(moduleGatewayDir, "openapi.yaml"))
+    ? moduleGatewayDir
+    : path.resolve(process.cwd(), "infra", "gateway");
+
   // Load the OpenAPI schema (inline payload; static server URL, no substitution).
-  // Resolve module-relative first, then workspace-root (SST build changes __dirname).
-  let openApiSchema: string;
-  const moduleRelative = path.resolve(gatewayDirname, "gateway", "openapi.yaml");
-  try {
-    openApiSchema = fs.readFileSync(moduleRelative, "utf-8");
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== "ENOENT") throw err;
-    openApiSchema = fs.readFileSync(path.resolve(process.cwd(), "infra", "gateway", "openapi.yaml"), "utf-8");
-  }
+  const openApiSchema = fs.readFileSync(path.join(gatewayAssetDir, "openapi.yaml"), "utf-8");
 
   // (The OpenAPI schema is passed inline to the target's CreateGatewayTarget call
   // below — no S3 bucket/object. Inline matches the proven-READY direct API call.)
@@ -194,7 +197,7 @@ export function gateway(
   // by ARN. Its dnsResource domain = mem9.aws.kane.mx (the cert/SNI), resolved to
   // the ALB by the private R53 zone; Lattice sends that as the TLS SNI.
   const targetName = `${stage}-mem9-rest`;
-  const provisionScript = path.resolve(gatewayDirname, "gateway", "provision-target.mjs");
+  const provisionScript = path.join(gatewayAssetDir, "provision-target.mjs");
   // `command.local.Command`'s `environment` block applies to BOTH create and
   // delete, so MEM9_TGT_OP can't live there (it must differ per lifecycle).
   // Instead set it as an inline `VAR=... node …` prefix on each command line —
@@ -205,7 +208,14 @@ export function gateway(
     {
       create: $interpolate`MEM9_TGT_OP=create node ${provisionScript}`,
       delete: $interpolate`MEM9_TGT_OP=delete node ${provisionScript}`,
-      // Re-run `create` (delete-then-recreate) when any input changes.
+      // Re-run `create` (delete-then-recreate) when any of these change. The set
+      // covers every field of the target's config that actually varies here
+      // (gateway id, credential-provider ARN, Lattice RC ARN, and the schema).
+      // The API-key HEADER and description are constants, so they're deliberately
+      // omitted. CAVEAT: because a fire-once Command has no read/diff, if the
+      // target drifts out-of-band (manual edit/delete) with NO input change, a
+      // plain redeploy won't reconcile it — bump a trigger or `sst refresh` then
+      // redeploy. (A failed create always re-runs, so FAILED targets self-heal.)
       triggers: [
         bedrockGateway.gatewayId,
         apiKeyProvider.credentialProviderArn,
