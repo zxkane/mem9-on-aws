@@ -65,7 +65,7 @@ export function db(): DbOutputs {
 
   // SG for the future ECS mnemo-server task. Created here so the DB SG can scope
   // 5432 ingress to exactly this SG (least-privilege) before ECS lands; the ECS
-  // stack attaches this SG to the task. Egress open (task reaches Aurora proxy +
+  // stack attaches this SG to the task. Egress open (task reaches Aurora +
   // Bedrock/embed over NAT).
   const taskSg = new aws.ec2.SecurityGroup("Mem9TaskSg", {
     vpcId,

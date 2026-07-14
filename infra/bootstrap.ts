@@ -29,12 +29,18 @@ const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 export interface BootstrapOutputs {
   taskDefinitionArn: Output<string>;
   tenantSecretArn: Output<string>;
+  // The tenant id == X-API-Key value (random.RandomId hex). infra/gateway.ts feeds
+  // this to the AgentCore API-key credential provider for outbound auth to
+  // mnemo-server. Already a Pulumi-internal random token (in state); the provider
+  // stores it in AgentCore's own service-managed secret — no new plaintext surface.
+  tenantId: Output<string>;
 }
 
 /**
  * @param cluster the ECS cluster from ecs() (bootstrap runs in the same cluster,
  *   subnets, and task SG so it reaches Aurora through the same 5432 path).
- * @param dbOut db()'s Outputs (proxy host/port/db + the DB secret ARN).
+ * @param dbOut db()'s Outputs (Aurora writer host/port/db + the DB secret ARN;
+ *   no RDS Proxy — see infra/db.ts).
  */
 export function bootstrap(cluster: sst.aws.Cluster, dbOut: DbOutputs): BootstrapOutputs {
   const prefix = `/mem9-on-aws/${$app.stage}`;
@@ -120,5 +126,6 @@ export function bootstrap(cluster: sst.aws.Cluster, dbOut: DbOutputs): Bootstrap
   return {
     taskDefinitionArn: task.taskDefinition,
     tenantSecretArn: tenantSecret.arn,
+    tenantId: tenantId.hex,
   };
 }

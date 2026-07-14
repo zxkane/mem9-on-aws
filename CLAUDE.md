@@ -26,9 +26,11 @@ file rather than silently diverging.
     NOT a token file-writer.
   - mem9 schema **`idx_app` gap**: control-plane `schema_pg.sql` ≠ the tenant
     runtime schema the server validates → bootstrap must apply the runtime schema.
-  - AgentCore Gateway reaches a private VPC target via **managed VPC Lattice +
-    `privateEndpoint`** (no public exposure); ALB needs a **public** ACM cert for
-    Lattice TLS trust; SigV4 outbound is NOT compatible with ALB → use API key.
+  - AgentCore Gateway reaches the private mnemo-server via a **Lambda-proxy target**
+    (out-of-the-box private path): a VPC-attached proxy Lambda reaches the server
+    over **Cloud Map** DNS with an `X-API-Key`. (The ALB+VPC-Lattice `privateEndpoint`
+    target it replaced failed to stabilize 100% in the CI deploy — an AgentCore
+    control-plane defect. See `mcp-gateway-progress` / `mcp-lambda-proxy-plan` memories.)
 - **[`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md)** — full selection + the
   authoritative **Locked decisions** and **Open decisions** lists (this file's
   table is a summary; ARCHITECTURE.md wins if they ever disagree).
@@ -54,7 +56,7 @@ file rather than silently diverging.
 | Database | **Aurora PostgreSQL Serverless v2** + `pgvector` (mem9 `postgres` backend) |
 | VPC | **Reuse the account default VPC** (private subnets w/ NAT), per a sibling project pattern |
 | MCP surface | **AgentCore Gateway** (OpenAPI target → mnemo-server REST API) |
-| Gateway → server | **private**: `privateEndpoint` + managed VPC Lattice → **internal ALB** (public ACM cert `mem9.internal.example.com`, TLS terminated) → HTTP:8080. Outbound auth = API key (`X-API-Key`). No public exposure |
+| Gateway → server | **private** (IMPLEMENTED): a **Lambda-proxy GatewayTarget** — AgentCore invokes a VPC-attached proxy Lambda (`lambda:InvokeFunction`), which reaches mnemo-server over **AWS Cloud Map** private DNS (`mnemo.mem9-<stage>.local:8080`) with `X-API-Key`=tenant id (injected by the Lambda). NO ALB, NO ACM cert, NO VPC Lattice, NO Route53 public zone. (The earlier ALB+self-managed-Lattice `privateEndpoint` target failed to stabilize 100% in the CI deploy — an AgentCore control-plane defect; the Lambda target is the out-of-the-box private path.) No public exposure |
 | Auth (inbound) | **Cognito M2M**, reusing the a sibling project / a sibling project gateway pattern |
 | LLM (smart-ingest) | **Bedrock Mantle direct**, **GLM-5**, **ON at launch**. Auth via **`@aws/bedrock-token-generator`** (short-term bearer from task IAM role, same as a sibling project) + **Bedrock Project** cost attribution + a **local LLM proxy sidecar** (`docker/llm-proxy/` — mem9 reads `MNEMO_LLM_API_KEY` once & sends no custom headers, so a request-proxy holds the live bearer + injects `OpenAI-Project`; NOT a token file-writer). GPT-5.4/5.5 excluded (Responses-only) |
 | Embedding | qwen3 OpenAI `/embeddings` as an **ECS sidecar** (localhost, always warm), **code lifted from a sibling project qwen3 ONNX**, **dims 1024**. NOT Mantle, NOT 3P API |

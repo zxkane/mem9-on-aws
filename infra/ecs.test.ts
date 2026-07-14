@@ -22,10 +22,15 @@ interface ServiceRecord {
 interface ParamRecord {
   name: string;
 }
+interface GenericRecord {
+  kind: string;
+  args: Record<string, unknown>;
+}
 
 let clusters: ClusterRecord[];
 let services: ServiceRecord[];
 let params: ParamRecord[];
+let created: GenericRecord[];
 
 // Stand-in for the db() stack's return value — passed straight into ecs(). Cast
 // through the loose `out<T>` mock (its .apply returns unknown, not Output<U>) to
@@ -75,6 +80,13 @@ function installGlobals(stage: string) {
     ec2: {
       getVpcOutput: () => ({ id: out("vpc-test") }),
       getSubnetsOutput: () => ({ ids: out(["subnet-a", "subnet-b", "subnet-c"]) }),
+      // Self-ingress :8080 rule so the proxy Lambda (shares the task SG) reaches
+      // mnemo-server (§6a).
+      SecurityGroupRule: class {
+        constructor(_logicalName: string, args: Record<string, unknown>) {
+          created.push({ kind: "SecurityGroupRule", args });
+        }
+      },
     },
     ssm: {
       Parameter: class {
@@ -84,6 +96,22 @@ function installGlobals(stage: string) {
               ? (args.name as { value: string }).value
               : (args.name as string);
           params.push({ name });
+        }
+      },
+    },
+    servicediscovery: {
+      // ecs() registers mnemo-server in Cloud Map (§6a) so the proxy Lambda can
+      // resolve it privately. Capture the namespace + service args.
+      PrivateDnsNamespace: class {
+        id = out("ns-id");
+        constructor(_logicalName: string, args: Record<string, unknown>) {
+          created.push({ kind: "PrivateDnsNamespace", args });
+        }
+      },
+      Service: class {
+        arn = out("arn:aws:servicediscovery:svc/mnemo");
+        constructor(_logicalName: string, args: Record<string, unknown>) {
+          created.push({ kind: "ServiceDiscoveryService", args });
         }
       },
     },
@@ -105,16 +133,34 @@ function installGlobals(stage: string) {
       },
     },
   };
+  // The Cloud Map discovery-settle uses command.local.Command (§6a cold-start fix).
+  (globalThis as Record<string, unknown>).command = {
+    local: {
+      Command: class {
+        arn = out("arn:command");
+        constructor(_logicalName: string, args: Record<string, unknown>) {
+          created.push({ kind: "Command", args });
+        }
+      },
+    },
+  };
 }
 
 beforeEach(() => {
   clusters = [];
   services = [];
   params = [];
+  created = [];
 });
 
+function createdOf(kind: string): Record<string, unknown> {
+  const rs = created.filter((r) => r.kind === kind);
+  expect(rs).toHaveLength(1);
+  return rs[0].args;
+}
+
 afterEach(() => {
-  for (const g of ["$app", "aws", "sst", "$interpolate"])
+  for (const g of ["$app", "aws", "sst", "command", "$interpolate"])
     delete (globalThis as Record<string, unknown>)[g];
   delete process.env.MEM9_IMAGE_TAG;
   vi.resetModules();
@@ -185,8 +231,47 @@ describe("ecs stack", () => {
       ".dkr.ecr.ap-northeast-1.amazonaws.com/mem9-on-aws/llm-proxy:",
     );
     expect(imgStr(byName["mnemo-server"])).not.toContain("public.ecr.aws");
-    // No ALB (deferred to the Gateway PR).
+    // No load balancer of any kind — the MCP proxy Lambda reaches mnemo-server via
+    // Cloud Map, so neither SST's `loadBalancer` abstraction nor a raw
+    // `loadBalancers` registration is used.
     expect(args.loadBalancer).toBeUndefined();
+  });
+
+  it("registers mnemo-server in Cloud Map + opens :8080 to the shared task SG (§6a)", async () => {
+    installGlobals("prod");
+    const ecs = await loadEcs();
+    const outs = ecs(fakeDbOut());
+    // Cloud Map: a PrivateDnsNamespace `mem9-<stage>.local` + a `mnemo` service.
+    const ns = createdOf("PrivateDnsNamespace");
+    expect(ns.name).toBe("mem9-prod.local");
+    const svc = createdOf("ServiceDiscoveryService");
+    expect(svc.name).toBe("mnemo");
+    const dns = (svc.dnsConfig as Record<string, any>).dnsRecords[0];
+    expect(dns.type).toBe("A");
+    // The service transform registers it in Cloud Map (rolling redeploy, not
+    // replacement) — serviceRegistries, NOT loadBalancers, and NO grace period.
+    const transform = (services[0].args.transform as Record<string, any>).service;
+    const svcArgs: Record<string, any> = {};
+    const svcOpts: Record<string, any> = {};
+    transform(svcArgs, svcOpts);
+    expect(svcArgs.serviceRegistries).toBeDefined();
+    expect(svcArgs.serviceRegistries.registryArn).toBeDefined();
+    expect(svcArgs.loadBalancers).toBeUndefined();
+    expect(svcArgs.healthCheckGracePeriodSeconds).toBeUndefined();
+    // The service depends on the discovery settle (fixes cold-deploy ServiceNotFound).
+    expect(svcOpts.dependsOn?.length).toBeGreaterThanOrEqual(1);
+    // A self-referential :8080 ingress rule on the task SG lets the Lambda (which
+    // shares that SG) reach mnemo-server.
+    const rule = createdOf("SecurityGroupRule");
+    expect(rule.type).toBe("ingress");
+    expect(rule.fromPort).toBe(8080);
+    expect(rule.securityGroupId).toBeDefined();
+    expect(rule.sourceSecurityGroupId).toBeDefined();
+    // Exports the stable Cloud Map DNS name + task SG for gateway.ts.
+    expect(String((outs.serviceDnsName as { value?: string }).value ?? outs.serviceDnsName)).toBe(
+      "mnemo.mem9-prod.local",
+    );
+    expect(outs.taskSecurityGroupId).toBeDefined();
   });
 
   it("grants the task role least-privilege Bedrock (CallWithBearerToken + InvokeModel on GLM-5), no wildcard model", async () => {
@@ -302,6 +387,7 @@ describe("ecs stack", () => {
     expect(names).toEqual([
       "/mem9-on-aws/prod/ecs/cluster-name",
       "/mem9-on-aws/prod/ecs/image",
+      "/mem9-on-aws/prod/ecs/service-dns-name",
       "/mem9-on-aws/prod/ecs/service-name",
     ]);
   });
