@@ -140,7 +140,7 @@ export function gateway(
     runtime: "nodejs24.x",
     timeout: "30 seconds",
     vpc: {
-      subnets: privateSubnetIds,
+      privateSubnets: privateSubnetIds,
       securityGroups: [ecsOut.taskSecurityGroupId],
     },
     environment: {

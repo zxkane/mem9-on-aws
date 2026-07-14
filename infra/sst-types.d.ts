@@ -325,7 +325,7 @@ declare namespace sst {
 
     // ── Function (infra/gateway.ts — the MCP proxy Lambda) ────────────────
     interface FunctionVpc {
-      subnets: Input<string[]> | Input<string>[];
+      privateSubnets: Input<string[]> | Input<string>[];
       securityGroups: Input<string[]> | Input<string>[];
     }
     interface FunctionArgs {

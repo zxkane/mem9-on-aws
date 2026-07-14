@@ -159,7 +159,7 @@ describe("gateway stack", () => {
     expect(String(fn.handler)).toContain("proxy-handler.handler");
     // VPC-attached (private subnets + the task SG so it can reach mnemo-server).
     const vpc = fn.vpc as Record<string, unknown>;
-    expect(vpc.subnets).toBeDefined();
+    expect(vpc.privateSubnets).toBeDefined();
     expect(vpc.securityGroups).toBeDefined();
     // Env (flat on sst.aws.Function): the Cloud Map base URL + the tenant key.
     const env = fn.environment as Record<string, any>;
