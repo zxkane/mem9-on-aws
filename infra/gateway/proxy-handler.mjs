@@ -26,6 +26,8 @@
  *   MEM9_API_KEY          the tenant id (X-API-Key). Not logged.
  */
 
+import { lookup as dnsLookup } from "node:dns/promises";
+
 const BASE_URL = requireEnv("MEM9_SERVER_BASE_URL").replace(/\/+$/, "");
 const API_KEY = requireEnv("MEM9_API_KEY");
 const TOOL_DELIM = "___";
@@ -50,7 +52,22 @@ function resolveToolName(context) {
   return i >= 0 ? raw.slice(i + TOOL_DELIM.length) : raw;
 }
 
-async function mem9Fetch(path, init) {
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Diagnostic: resolve the mnemo-server host so a failed fetch's logs distinguish
+ *  a DNS miss (ENOTFOUND/EAI_AGAIN — Cloud Map A record not resolvable) from a
+ *  connection failure (ECONNREFUSED — resolves but nothing listening on :8080). */
+async function probeHost() {
+  try {
+    const host = new URL(BASE_URL).hostname;
+    const addrs = await dnsLookup(host, { all: true });
+    return `dns ${host} → ${addrs.map((a) => a.address).join(",")}`;
+  } catch (e) {
+    return `dns lookup failed: ${e?.code ?? e?.message ?? e}`;
+  }
+}
+
+async function mem9FetchOnce(path, init) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
@@ -68,6 +85,33 @@ async function mem9Fetch(path, init) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function mem9Fetch(path, init) {
+  // Retry the mnemo-server call a few times. A VPC-attached Lambda's FIRST DNS
+  // lookup of the Cloud Map name (`mnemo.mem9-<stage>.local`) can transiently miss
+  // on a cold start — right after the ECS task registers its A record — and undici
+  // surfaces that as a bare `TypeError: fetch failed`. Short spaced retries clear
+  // the transient without masking a real config gap (which fails all attempts, and
+  // the URL logged below then points at the fix — DNS vs SG vs port).
+  const ATTEMPTS = 4;
+  let lastErr;
+  for (let i = 1; i <= ATTEMPTS; i++) {
+    try {
+      return await mem9FetchOnce(path, init);
+    } catch (e) {
+      lastErr = e;
+      const cause = e?.cause ? ` (cause: ${e.cause.code ?? e.cause.message ?? e.cause})` : "";
+      // On the last attempt, probe DNS so the logs pinpoint the failure class
+      // (DNS-miss vs conn-refused) rather than a bare "fetch failed".
+      const probe = i === ATTEMPTS ? ` [${await probeHost()}]` : "";
+      console.error(
+        `mem9Fetch ${init.method} ${BASE_URL}${path} attempt ${i}/${ATTEMPTS} failed: ${e?.message ?? e}${cause}${probe}`,
+      );
+      if (i < ATTEMPTS) await sleep(1500 * i);
+    }
+  }
+  throw lastErr;
 }
 
 function safeJson(text) {

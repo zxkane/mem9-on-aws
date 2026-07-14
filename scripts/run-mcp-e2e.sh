@@ -122,12 +122,24 @@ tools_call() {  # $1 = tool name, $2 = args JSON → sets MCP_RESP
   mcp_post "tools/call" "$(jq -nc --arg name "$1" --argjson args "$2" '{name:$name, arguments:$args}')"
 }
 
-# 3c. add_memory
+# 3c. add_memory — retry a few times. The gateway invokes a VPC-attached proxy
+# Lambda that reaches mnemo-server over Cloud Map DNS; on a fresh stage the first
+# calls can transiently fail (Lambda cold-start DNS / task just-registered) and the
+# gateway returns isError. Retry with backoff before treating it as a real failure.
 echo "run-mcp-e2e: calling ${ADD_TOOL} (marker ${MARKER})"
-tools_call "$ADD_TOOL" "$(jq -nc --arg c "$MEMORY_TEXT" '{content:$c}')"
-echo "run-mcp-e2e: add_memory response: $(printf '%s' "$MCP_RESP" | head -c 400)"
-if printf '%s' "$MCP_RESP" | grep -qiE '"isError":true|"code":-3[0-9]{4}'; then
-  echo "::error::add_memory returned an MCP error: $MCP_RESP"; exit 1
+ADD_OK=0
+for attempt in 1 2 3 4 5; do
+  tools_call "$ADD_TOOL" "$(jq -nc --arg c "$MEMORY_TEXT" '{content:$c}')"
+  echo "run-mcp-e2e: add_memory attempt ${attempt} response: $(printf '%s' "$MCP_RESP" | head -c 300)"
+  if printf '%s' "$MCP_RESP" | grep -qiE '"isError":true|"code":-3[0-9]{4}'; then
+    sleep 15
+    continue
+  fi
+  ADD_OK=1
+  break
+done
+if [[ "$ADD_OK" != "1" ]]; then
+  echo "::error::add_memory returned an MCP error after retries: $MCP_RESP"; exit 1
 fi
 
 # 4. Poll search_memories until the marker surfaces (async ingest → retry ~5 min).
