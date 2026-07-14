@@ -43,6 +43,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_tenant_name ON tenants(name);
 CREATE INDEX IF NOT EXISTS idx_tenant_status ON tenants(status);
 CREATE INDEX IF NOT EXISTS idx_tenant_provider ON tenants(provider);
 
+-- 2b) `tenant_activity` — the server's ActivityTracker.RecordMemoryStats upserts
+--     into this on EVERY memory write (hot path). Like upload_tasks it lives in the
+--     control-plane schema_pg.sql we don't run, so without it every write logs
+--     `record tenant memory stats failed ... relation "tenant_activity" does not
+--     exist (SQLSTATE 42P01)`. Non-fatal (a WARN — the write/ingest still succeeds)
+--     but noisy. FK → tenants(id), so it must follow the tenants table above. DDL
+--     verbatim from schema_pg.sql @ d4638c8458abeb209a1b3a20472a1328c4acd149.
+CREATE TABLE IF NOT EXISTS tenant_activity (
+    tenant_id                  VARCHAR(36) PRIMARY KEY,
+    last_activity_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    active_memory_total        BIGINT      NOT NULL DEFAULT 0,
+    active_memory_7d_total     BIGINT      NOT NULL DEFAULT 0,
+    memory_stats_observed_at   TIMESTAMPTZ NULL,
+    CONSTRAINT fk_tenant_activity FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+);
+CREATE INDEX IF NOT EXISTS idx_tenant_activity_last_activity ON tenant_activity(last_activity_at);
+
 -- 3) Tenant runtime `memories` schema — the table + indexes the server validates
 --    and uses. Derived from mem9's TenantMemorySchemaPostgres constant, with:
 --      * embedding vector(1024)  (qwen3 dims, NOT the default 1536)
@@ -90,4 +107,38 @@ BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
 $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS trg_memories_updated ON memories;
 CREATE TRIGGER trg_memories_updated BEFORE UPDATE ON memories
+    FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- 4) `upload_tasks` — the mnemo-server "upload worker" starts UNCONDITIONALLY at
+--    boot (cmd/mnemo-server/main.go: uploadWorker.Run) and immediately runs
+--    `reset processing tasks` against this table. Unlike the webhook tables
+--    (which the server creates itself via webhookStore.EnsureSchema), the upload
+--    worker has NO EnsureSchema — it assumes upload_tasks already exists (it lives
+--    in the CONTROL-PLANE server/schema_pg.sql we do not run). Without it the
+--    worker logs, every startup: `upload worker error ... reset upload task
+--    processing: ERROR: relation "upload_tasks" does not exist (SQLSTATE 42P01)`.
+--    DDL copied verbatim from the pinned mem9 source (schema_pg.sql @
+--    d4638c8458abeb209a1b3a20472a1328c4acd149). We do not use the file-upload path
+--    (writes go through the memory content API), but the worker must find the table.
+CREATE TABLE IF NOT EXISTS upload_tasks (
+    task_id       VARCHAR(36)   PRIMARY KEY,
+    tenant_id     VARCHAR(36)   NOT NULL,
+    file_name     VARCHAR(255)  NOT NULL,
+    file_path     TEXT          NOT NULL,
+    agent_id      VARCHAR(100)  NULL,
+    session_id    VARCHAR(100)  NULL,
+    file_type     VARCHAR(20)   NOT NULL,
+    total_chunks  INT           NOT NULL DEFAULT 0,
+    done_chunks   INT           NOT NULL DEFAULT 0,
+    status        VARCHAR(20)   NOT NULL DEFAULT 'pending',
+    error_msg     TEXT          NULL,
+    created_at    TIMESTAMPTZ   DEFAULT NOW(),
+    updated_at    TIMESTAMPTZ   DEFAULT NOW()
+);
+CREATE INDEX IF NOT EXISTS idx_upload_tenant ON upload_tasks(tenant_id);
+CREATE INDEX IF NOT EXISTS idx_upload_poll ON upload_tasks(status, created_at);
+-- upload_tasks' updated_at auto-touch trigger (also from schema_pg.sql). Reuses
+-- the update_updated_at() function defined above for `memories`.
+DROP TRIGGER IF EXISTS trg_upload_tasks_updated ON upload_tasks;
+CREATE TRIGGER trg_upload_tasks_updated BEFORE UPDATE ON upload_tasks
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();

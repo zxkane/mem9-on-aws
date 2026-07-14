@@ -208,3 +208,33 @@ describe("bootstrap stack", () => {
     expect(secrets[0].args.recoveryWindowInDays).toBe(0);
   });
 });
+
+// The bootstrap image applies docker/bootstrap/schema.sql (entrypoint.sh: psql -f).
+// mnemo-server's background workers assume some tables pre-exist (they live in
+// mem9's control-plane server/schema_pg.sql, which we do NOT run). Guard that our
+// hand-maintained runtime schema covers every table a worker touches at startup,
+// so the "relation ... does not exist" class of bug (prod issue #11: upload_tasks)
+// can't silently regress. We assert on the SQL source (a live PG round-trip is the
+// E2E's job), which is exactly where a dropped table would show up.
+describe("bootstrap schema.sql", () => {
+  it("creates the tables mnemo-server's boot-time workers require", async () => {
+    const { readFileSync } = await import("node:fs");
+    const { fileURLToPath } = await import("node:url");
+    const path = await import("node:path");
+    const here = path.dirname(fileURLToPath(import.meta.url));
+    const sql = readFileSync(
+      path.resolve(here, "..", "docker", "bootstrap", "schema.sql"),
+      "utf8",
+    );
+    // The upload worker (uploadWorker.Run) runs UNCONDITIONALLY at boot against
+    // upload_tasks and has no EnsureSchema — so the table must be bootstrapped.
+    expect(sql).toMatch(/CREATE TABLE IF NOT EXISTS upload_tasks\b/);
+    // ActivityTracker.RecordMemoryStats upserts tenant_activity on every write.
+    expect(sql).toMatch(/CREATE TABLE IF NOT EXISTS tenant_activity\b/);
+    // The auth + memory-content path the MCP write→search E2E exercises.
+    expect(sql).toMatch(/CREATE TABLE IF NOT EXISTS tenants\b/);
+    expect(sql).toMatch(/CREATE TABLE IF NOT EXISTS memories\b/);
+    // Embedding width MUST stay 1024 (qwen3), not mem9's default 1536.
+    expect(sql).toMatch(/embedding\s+vector\(1024\)/);
+  });
+});
