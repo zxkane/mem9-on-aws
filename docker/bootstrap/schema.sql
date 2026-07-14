@@ -43,6 +43,23 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_tenant_name ON tenants(name);
 CREATE INDEX IF NOT EXISTS idx_tenant_status ON tenants(status);
 CREATE INDEX IF NOT EXISTS idx_tenant_provider ON tenants(provider);
 
+-- 2b) `tenant_activity` — the server's ActivityTracker.RecordMemoryStats upserts
+--     into this on EVERY memory write (hot path). Like upload_tasks it lives in the
+--     control-plane schema_pg.sql we don't run, so without it every write logs
+--     `record tenant memory stats failed ... relation "tenant_activity" does not
+--     exist (SQLSTATE 42P01)`. Non-fatal (a WARN — the write/ingest still succeeds)
+--     but noisy. FK → tenants(id), so it must follow the tenants table above. DDL
+--     verbatim from schema_pg.sql @ d4638c8458abeb209a1b3a20472a1328c4acd149.
+CREATE TABLE IF NOT EXISTS tenant_activity (
+    tenant_id                  VARCHAR(36) PRIMARY KEY,
+    last_activity_at           TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+    active_memory_total        BIGINT      NOT NULL DEFAULT 0,
+    active_memory_7d_total     BIGINT      NOT NULL DEFAULT 0,
+    memory_stats_observed_at   TIMESTAMPTZ NULL,
+    CONSTRAINT fk_tenant_activity FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+);
+CREATE INDEX IF NOT EXISTS idx_tenant_activity_last_activity ON tenant_activity(last_activity_at);
+
 -- 3) Tenant runtime `memories` schema — the table + indexes the server validates
 --    and uses. Derived from mem9's TenantMemorySchemaPostgres constant, with:
 --      * embedding vector(1024)  (qwen3 dims, NOT the default 1536)

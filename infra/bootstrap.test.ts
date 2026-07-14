@@ -229,6 +229,8 @@ describe("bootstrap schema.sql", () => {
     // The upload worker (uploadWorker.Run) runs UNCONDITIONALLY at boot against
     // upload_tasks and has no EnsureSchema — so the table must be bootstrapped.
     expect(sql).toMatch(/CREATE TABLE IF NOT EXISTS upload_tasks\b/);
+    // ActivityTracker.RecordMemoryStats upserts tenant_activity on every write.
+    expect(sql).toMatch(/CREATE TABLE IF NOT EXISTS tenant_activity\b/);
     // The auth + memory-content path the MCP write→search E2E exercises.
     expect(sql).toMatch(/CREATE TABLE IF NOT EXISTS tenants\b/);
     expect(sql).toMatch(/CREATE TABLE IF NOT EXISTS memories\b/);
