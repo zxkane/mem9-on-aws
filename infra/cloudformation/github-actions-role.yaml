@@ -182,6 +182,11 @@ Resources:
               - s3:GetReplicationConfiguration
               - s3:GetBucketWebsite
               - s3:GetBucketPolicyStatus
+              # CORS: Pulumi's S3 provider reads CORS on every bucket refresh (the
+              # Mem9McpSchemas bucket for the OpenAPI schema, §6). Put/Delete for
+              # completeness though we set no CORS rules.
+              - s3:GetBucketCORS
+              - s3:PutBucketCORS
               - s3:GetObject
               - s3:PutObject
               - s3:DeleteObject
@@ -600,24 +605,46 @@ Resources:
               StringEquals:
                 iam:AWSServiceName: application-autoscaling.amazonaws.com
           - Sid: ServiceDiscovery
-            # RESERVED, currently unused: SST only creates a CloudMap service
-            # (servicediscovery) when the cluster's `vpc` is an `sst.aws.Vpc`
-            # component that carries a cloudmapNamespaceId. This skeleton passes a
-            # RAW VPC object (id + subnets + SG), so no CloudMap resource is
-            # created and the service has no stable DNS name until the deferred
-            # ALB (Gateway PR) lands. Kept minimal so a future Vpc-based cluster
-            # doesn't 403; harmless over-grant otherwise.
+            # Cloud Map (§6a): infra/ecs.ts registers mnemo-server in a private DNS
+            # namespace (mem9-<stage>.local) + a `mnemo` service so the MCP proxy
+            # Lambda can reach it privately. Needs the namespace create/delete in
+            # addition to the service actions.
             Effect: Allow
             Action:
+              - servicediscovery:CreatePrivateDnsNamespace
+              - servicediscovery:DeleteNamespace
               - servicediscovery:CreateService
               - servicediscovery:DeleteService
+              - servicediscovery:UpdateService
               - servicediscovery:GetService
               - servicediscovery:ListServices
               - servicediscovery:GetNamespace
               - servicediscovery:ListNamespaces
               - servicediscovery:GetOperation
               - servicediscovery:TagResource
+              - servicediscovery:UntagResource
               - servicediscovery:ListTagsForResource
+            Resource: "*"
+          - Sid: Route53ForCloudMap
+            # A servicediscovery PrivateDnsNamespace creates + manages a Route53
+            # PRIVATE hosted zone under the hood (and its record sets). Cloud Map
+            # owns the record writes at runtime, but the deploy role must be able to
+            # create/delete the zone + associate it with the VPC. (This is the ONLY
+            # remaining Route53 need — the ACM cert + ALB private zone are gone.)
+            Effect: Allow
+            Action:
+              - route53:CreateHostedZone
+              - route53:DeleteHostedZone
+              - route53:GetHostedZone
+              - route53:ListHostedZones
+              - route53:ListHostedZonesByName
+              - route53:ChangeResourceRecordSets
+              - route53:ListResourceRecordSets
+              - route53:GetChange
+              - route53:AssociateVPCWithHostedZone
+              - route53:DisassociateVPCFromHostedZone
+              - route53:ListTagsForResource
+              - route53:ChangeTagsForResource
             Resource: "*"
 
   # ───────────────────────────────────────────────────────────────────────────
@@ -675,6 +702,207 @@ Resources:
               - !Sub arn:aws:ecr:ap-northeast-1:${AWS::AccountId}:repository/${ProjectName}/llm-proxy
 
   # ───────────────────────────────────────────────────────────────────────────
+  # Policy 7 — MCP proxy Lambda (infra/gateway.ts): the VPC-attached proxy Lambda
+  # (nodejs24.x) the AgentCore Gateway invokes to reach mnemo-server privately over
+  # Cloud Map. Replaces the former ALB/ACM/Route53/VPC-Lattice networking policy —
+  # the Lambda-target path needs none of those. Its own ManagedPolicy to stay under
+  # IAM's 6144-byte per-policy cap.
+  #
+  # The Lambda's VPC ENIs are created by the LAMBDA SERVICE via the Lambda EXEC role
+  # (granted in infra/gateway.ts), NOT this deploy role — so no ec2:CreateNetworkInterface
+  # here (ec2:Describe* is already in ScaffoldPolicy.EC2VpcReadOnly). PassRole to
+  # lambda.amazonaws.com is already covered by ScaffoldPolicy.PassRoleConstrained, and
+  # the mem9-on-aws-* exec-role lifecycle by ComputePolicy.EcsTaskRoles. The Cloud Map
+  # + Route53-for-Cloud-Map grants live in ComputePolicy (near the ECS service).
+  #
+  # ADDED for the MCP Lambda-proxy pivot — must be live (re-run
+  # scripts/deploy-github-role.sh) BEFORE that PR's first deploy, or the deploy 403s
+  # on the first Lambda create.
+  # ───────────────────────────────────────────────────────────────────────────
+  LambdaProxyPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${GitHubRepo}-lambda-proxy
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: LambdaCreate
+            # CreateFunction has no pre-existing ARN (Resource "*"); scoped by the
+            # mem9-on-aws-* function-name prefix would reject create, so "*" here.
+            Effect: Allow
+            Action:
+              - lambda:CreateFunction
+              - lambda:GetFunction
+              - lambda:GetFunctionConfiguration
+              - lambda:GetFunctionCodeSigningConfig
+              - lambda:ListVersionsByFunction
+            Resource: "*"
+          - Sid: LambdaManage
+            # Update/delete/tag scoped to the project's own functions. SST's
+            # sst.aws.Function sets the runtime/env/vpc-config, tags, and (on prod)
+            # concurrency + publishes versions.
+            Effect: Allow
+            Action:
+              - lambda:UpdateFunctionCode
+              - lambda:UpdateFunctionConfiguration
+              - lambda:PublishVersion
+              - lambda:DeleteFunction
+              - lambda:TagResource
+              - lambda:UntagResource
+              - lambda:ListTags
+              - lambda:AddPermission
+              - lambda:RemovePermission
+              - lambda:GetPolicy
+              - lambda:PutFunctionConcurrency
+              - lambda:DeleteFunctionConcurrency
+            Resource:
+              - !Sub arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:function:${ProjectName}-*
+          - Sid: LambdaFunctionLogs
+            # sst.aws.Function creates a CloudWatch log group at /aws/lambda/<fn>.
+            # The CorePolicy/ComputePolicy Logs Sid only covers /sst/* groups, so the
+            # Lambda's own log group needs its own grant.
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:DeleteLogGroup
+              - logs:PutRetentionPolicy
+              - logs:DeleteRetentionPolicy
+              - logs:TagResource
+              - logs:UntagResource
+              - logs:ListTagsForResource
+              - logs:DescribeLogGroups
+            Resource:
+              - !Sub arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-*
+              - !Sub arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-*:*
+
+  # ───────────────────────────────────────────────────────────────────────────
+  # Policy 8 — MCP gateway auth + surface (infra/cognito.ts + infra/gateway.ts):
+  # the Cognito M2M user pool/domain/resource-server/clients, the AgentCore
+  # Gateway + Lambda target + workload identity (the gateway's first-use
+  # token-vault). The Lambda-proxy path needs no API-key credential provider or
+  # service-managed secret — the proxy Lambda injects X-API-Key itself. Its own
+  # policy for the 6144-byte cap + audit clarity.
+  #
+  # ADDED for the MCP gateway PR — must be live BEFORE that PR's first deploy, or
+  # the first Cognito/AgentCore create 403s (CLAUDE-AWS "new resource TYPE needs
+  # grants first"; the doc explicitly names "first Bedrock AgentCore gateway →
+  # missing workload-identity grants").
+  # ───────────────────────────────────────────────────────────────────────────
+  GatewayMcpPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${GitHubRepo}-gateway-mcp
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: Cognito
+            # infra/cognito.ts. The Pulumi AWS provider Read step probes attribute
+            # settings, domain config, resource servers, and clients on every
+            # refresh — this is the minimal set that survives `sst deploy --refresh`
+            # (surface proven by podcast-curation prod).
+            Effect: Allow
+            Action:
+              - cognito-idp:CreateUserPool
+              - cognito-idp:DeleteUserPool
+              - cognito-idp:DescribeUserPool
+              - cognito-idp:UpdateUserPool
+              - cognito-idp:GetUserPoolMfaConfig
+              - cognito-idp:SetUserPoolMfaConfig
+              - cognito-idp:CreateUserPoolDomain
+              - cognito-idp:DescribeUserPoolDomain
+              - cognito-idp:DeleteUserPoolDomain
+              - cognito-idp:UpdateUserPoolDomain
+              - cognito-idp:CreateResourceServer
+              - cognito-idp:DescribeResourceServer
+              - cognito-idp:UpdateResourceServer
+              - cognito-idp:DeleteResourceServer
+              - cognito-idp:CreateUserPoolClient
+              - cognito-idp:DescribeUserPoolClient
+              - cognito-idp:UpdateUserPoolClient
+              - cognito-idp:DeleteUserPoolClient
+              - cognito-idp:ListUserPools
+              - cognito-idp:ListUserPoolClients
+              - cognito-idp:ListResourceServers
+              - cognito-idp:TagResource
+              - cognito-idp:UntagResource
+              - cognito-idp:ListTagsForResource
+            Resource: "*"
+          - Sid: BedrockAgentCoreGateway
+            # Gateway + Target + Rule lifecycle (infra/gateway.ts). CreateGateway /
+            # ListGateways have no resource-level permission per the Service
+            # Authorization Reference; the rest are scoped to gateway/*.
+            Effect: Allow
+            Action:
+              - bedrock-agentcore:CreateGateway
+              - bedrock-agentcore:ListGateways
+            Resource: "*"
+          - Sid: BedrockAgentCoreGatewayResource
+            Effect: Allow
+            Action:
+              - bedrock-agentcore:GetGateway
+              - bedrock-agentcore:UpdateGateway
+              - bedrock-agentcore:DeleteGateway
+              - bedrock-agentcore:CreateGatewayTarget
+              - bedrock-agentcore:GetGatewayTarget
+              - bedrock-agentcore:UpdateGatewayTarget
+              - bedrock-agentcore:DeleteGatewayTarget
+              - bedrock-agentcore:ListGatewayTargets
+              - bedrock-agentcore:TagResource
+              - bedrock-agentcore:UntagResource
+              - bedrock-agentcore:ListTagsForResource
+            Resource:
+              - !Sub arn:${AWS::Partition}:bedrock-agentcore:*:${AWS::AccountId}:gateway/*
+          - Sid: BedrockAgentCoreWorkloadIdentity
+            # Implicitly created by AgentCore the first time any Gateway /
+            # credential-provider runs in the account (single default
+            # workload-identity-directory + token-vault per account). CreateGateway
+            # + CreateApiKeyCredentialProvider both chain into CreateTokenVault on
+            # first account use — without these the FIRST deploy 403s.
+            Effect: Allow
+            Action:
+              - bedrock-agentcore:CreateWorkloadIdentity
+              - bedrock-agentcore:GetWorkloadIdentity
+              - bedrock-agentcore:UpdateWorkloadIdentity
+              - bedrock-agentcore:DeleteWorkloadIdentity
+              - bedrock-agentcore:ListWorkloadIdentities
+              - bedrock-agentcore:GetWorkloadIdentityDirectory
+              - bedrock-agentcore:CreateTokenVault
+              - bedrock-agentcore:GetTokenVault
+              - bedrock-agentcore:UpdateTokenVault
+              - bedrock-agentcore:DeleteTokenVault
+              - bedrock-agentcore:ListTokenVaults
+            Resource:
+              - !Sub arn:${AWS::Partition}:bedrock-agentcore:*:${AWS::AccountId}:workload-identity-directory/*
+              - !Sub arn:${AWS::Partition}:bedrock-agentcore:*:${AWS::AccountId}:token-vault/*
+          - Sid: AgentCoreServiceLinkedRoles
+            # AgentCore auto-creates AWSServiceRoleForBedrockAgentCore the first time
+            # a Gateway runs in the account. Gate CreateServiceLinkedRole to that
+            # namespace only (the vpc-lattice SLR is gone with the Lattice path).
+            Effect: Allow
+            Action:
+              - iam:CreateServiceLinkedRole
+            Resource: "*"
+            Condition:
+              StringEquals:
+                iam:AWSServiceName:
+                  - bedrock-agentcore.amazonaws.com
+          - Sid: PassRoleAgentCore
+            # infra/gateway.ts creates the Gateway service role
+            # (mem9-on-aws-${stage}-gateway-service-role, covered by ComputePolicy's
+            # mem9-on-aws-* iam grants) and passes it to the Gateway. Gate PassRole
+            # to bedrock-agentcore, scoped to this project's role names + SST
+            # truncation variants (mirrors ScaffoldPolicy's PassRoleConstrained).
+            Effect: Allow
+            Action: iam:PassRole
+            Resource:
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/mem9-on-aws-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/mem9-on-aw-*
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/mem9-on-a-*
+            Condition:
+              StringEquals:
+                iam:PassedToService: bedrock-agentcore.amazonaws.com
+
+  # ───────────────────────────────────────────────────────────────────────────
   # IAM Role — assumed by GitHub Actions via OIDC.
   # ───────────────────────────────────────────────────────────────────────────
   GitHubActionsRole:
@@ -713,6 +941,8 @@ Resources:
         - !Ref DatabasePolicy
         - !Ref ComputePolicy
         - !Ref ImageBuildPolicy
+        - !Ref LambdaProxyPolicy
+        - !Ref GatewayMcpPolicy
       Tags:
         - Key: Project
           Value: !Ref ProjectName

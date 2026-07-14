@@ -3,10 +3,10 @@
 /**
  * SST v4 root config for `zxkane/mem9-on-aws`.
  *
- * Self-hosted deployment of mem9 (`mnemo-server`) on AWS. This file is the
- * BASE SCAFFOLD — it deploys only the `meta` SSM stack (see `infra/meta.ts`).
- * Aurora / ECS Fargate / AgentCore Gateway / Cognito / Bedrock land in
- * follow-up PRs (see docs/ARCHITECTURE.md).
+ * Self-hosted deployment of mem9 (`mnemo-server`) on AWS. `run()` wires the full
+ * stack (see docs/ARCHITECTURE.md): meta (SSM) → Aurora → ECS Fargate
+ * (mnemo-server + qwen3-embed + llm-proxy) → schema bootstrap → the MCP surface
+ * (ACM cert → Cognito M2M → internal ALB → AgentCore Gateway).
  *
  * Mirrors the shape of the sister SST v4 projects so a single operator can
  * context-switch without re-learning constructs:
@@ -49,6 +49,15 @@ export default $config({
         // `random: true` — "Specify the version explicitly"); 4.16.6 matches the
         // @pulumi/random SST bundles for sst.aws.Aurora's RandomPassword.
         random: { version: "4.16.6" },
+        // The `command` provider exposes the `command` global (command.local.Command)
+        // used by infra/gateway.ts to provision the AgentCore GatewayTarget via the
+        // DIRECT bedrock-agentcore-control API (infra/gateway/provision-target.mjs).
+        // CloudControl's AWS::BedrockAgentCore::GatewayTarget handler is broken for
+        // the private-endpoint path (proven: it FAILEDs while the identical direct
+        // API call reaches READY). The Command runs on the deploy host (no cloud
+        // resource of its own → no extra deploy-role IAM beyond the agentcore/lattice
+        // grants the script's API calls already need). Version pinned explicitly.
+        command: { version: "1.0.1" },
       },
     };
   },
@@ -86,8 +95,19 @@ export default $config({
     // pgvector + the memories(vector 1024) schema + seeds one tenant. Reuses the
     // ECS cluster + db Outputs. SST only DEFINES the task; CI runs it via
     // `aws ecs run-task` after deploy (see .github/workflows/infra-ci.yml).
+    // Capture its Outputs — the gateway stack reads the tenant id (X-API-Key).
     const { bootstrap } = await import("./infra/bootstrap");
-    bootstrap(ecsOut.cluster, dbOut);
+    const bootstrapOut = bootstrap(ecsOut.cluster, dbOut);
+
+    // MCP surface (§6/§6a): Cognito M2M → AgentCore Gateway → a VPC-attached proxy
+    // Lambda that reaches mnemo-server privately over Cloud Map DNS. Threaded as
+    // direct Pulumi Outputs (no SSM read-back). cognito is independent; gateway()
+    // takes ecsOut (the Cloud Map DNS name + task SG the Lambda uses) + the tenant
+    // id (bootstrapOut) for the outbound X-API-Key.
+    const { cognito } = await import("./infra/cognito");
+    const cognitoOut = cognito();
+    const { gateway } = await import("./infra/gateway");
+    gateway(cognitoOut, ecsOut, bootstrapOut);
 
     return {};
   },

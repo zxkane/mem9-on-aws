@@ -171,6 +171,26 @@ declare namespace random {
   }
 }
 
+// ── The `command` provider (infra/gateway.ts provisions the GatewayTarget via a
+// local command that drives the direct bedrock-agentcore-control API) ──────────
+declare namespace command {
+  namespace local {
+    interface CommandArgs {
+      create?: Input<string>;
+      delete?: Input<string>;
+      update?: Input<string>;
+      environment?: Input<Record<string, Input<string>>>;
+      triggers?: Input<unknown[]>;
+      [k: string]: unknown;
+    }
+    class Command {
+      constructor(name: string, args: CommandArgs, opts?: unknown);
+      readonly stdout: Output<string>;
+      readonly stderr: Output<string>;
+    }
+  }
+}
+
 // ── The `sst.aws` component surface infra/db.ts uses ────────────────────────
 declare namespace sst {
   namespace aws {
@@ -277,7 +297,9 @@ declare namespace sst {
       logging?: ServiceLogging;
       // IAM statements attached to the task role (SST's `permissions`).
       permissions?: Input<FargatePermission>[];
-      transform?: { service?: (args: Record<string, unknown>) => void };
+      transform?: {
+        service?: (args: Record<string, unknown>, opts: Record<string, unknown>) => void;
+      };
     }
     class Service {
       constructor(name: string, args: ServiceArgs);
@@ -301,6 +323,27 @@ declare namespace sst {
       constructor(name: string, args: TaskArgs);
       readonly nodes: { task: { arn: Output<string> } };
       readonly taskDefinition: Output<string>;
+    }
+
+    // ── Function (infra/gateway.ts — the MCP proxy Lambda) ────────────────
+    interface FunctionVpc {
+      privateSubnets: Input<string[]> | Input<string>[];
+      securityGroups: Input<string[]> | Input<string>[];
+    }
+    interface FunctionArgs {
+      handler: Input<string>;
+      runtime?: Input<string>;
+      timeout?: Input<string>;
+      vpc?: FunctionVpc;
+      environment?: Input<Record<string, Input<string>>>;
+      permissions?: { actions: string[]; resources: Input<string>[] }[];
+      link?: unknown[];
+    }
+    class Function {
+      constructor(name: string, args: FunctionArgs);
+      readonly arn: Output<string>;
+      readonly name: Output<string>;
+      readonly nodes: { function: { name: Output<string>; arn: Output<string> } };
     }
   }
 }

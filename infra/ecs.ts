@@ -28,8 +28,12 @@
  * local presign) + injects OpenAI-Project per request. No mem9 fork, no restart on
  * rotation. See docker/llm-proxy/server.mjs + docs/mem9-facts.md.
  *
- * NOT yet here (follow-up PR):
- *   - the internal ALB + public ACM cert (AgentCore Gateway PR, §6a).
+ * MCP REACHABILITY (§6a): the AgentCore Gateway reaches mnemo-server via a
+ * VPC-attached proxy Lambda (infra/gateway.ts), NOT a public/ALB endpoint. This
+ * stack registers the service in AWS Cloud Map (`mnemo.mem9-<stage>.local`) so the
+ * Lambda can resolve + reach the task privately over HTTP:8080. (Earlier revisions
+ * used an internal ALB + VPC Lattice privateEndpoint; that AgentCore target path
+ * failed to stabilize, so it was replaced by the out-of-the-box Lambda target.)
  *
  * SCHEMA BOOTSTRAP (this PR, separate one-shot task — infra/bootstrap.ts):
  * mem9 does NOT create the PG memories table (it only validates idx_app at
@@ -65,6 +69,10 @@ const EMBED_PORT = 8081;
 // smart-ingest LLM (proxied to Bedrock Mantle). Not exposed outside the task.
 const LLM_PROXY_PORT = 8082;
 
+// mnemo-server's HTTP port. The MCP proxy Lambda (§6a) reaches this port on the
+// task privately via the Cloud Map DNS name registered below.
+const MNEMO_PORT = 8080;
+
 // The GLM-5 model id mem9 sends as `model` on each /chat/completions (Mantle
 // Chat-Completions model, verified live — see docs/mem9-facts.md). Overridable
 // via env for a model swap without a code change.
@@ -83,6 +91,13 @@ export interface EcsOutputs {
   clusterName: Output<string>;
   serviceName: Output<string>;
   image: Output<string>;
+  // Stable private DNS name mnemo-server registers under via Cloud Map (§6a):
+  // `mnemo.mem9-<stage>.local`. The MCP proxy Lambda (infra/gateway.ts) resolves
+  // this to reach the task privately over HTTP:8080 — no ALB/Lattice/cert.
+  serviceDnsName: Output<string>;
+  // The task security group (from db()). The proxy Lambda attaches to this SG so a
+  // self-referential :8080 ingress rule (added below) lets it reach mnemo-server.
+  taskSecurityGroupId: Output<string>;
 }
 
 /**
@@ -118,8 +133,9 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
   const llmProxyImage = ecrImage("mem9-on-aws/llm-proxy", IMAGE_TAG);
 
   // ECS cluster in the existing default VPC. `loadBalancerSubnets` is required by
-  // the type even though we create no ALB here (deferred to the Gateway PR); set
-  // it to the private subnets — harmless, no LB is provisioned.
+  // the type even though we create no ALB (the MCP surface uses a Lambda-proxy +
+  // Cloud Map, not an ALB — §6a); set it to the private subnets — harmless, no LB
+  // is provisioned.
   const cluster = new sst.aws.Cluster("Mem9Cluster", {
     vpc: {
       id: vpcId,
@@ -141,8 +157,63 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
     },
   });
 
-  // Fargate service: arm64, single task (scaling unset → desiredCount 1), no
-  // load balancer. TWO containers (§7): mnemo-server + qwen3-embed sidecar.
+  const awsAny = aws as unknown as Record<string, any>;
+
+  // Cloud Map service discovery (§6a). mnemo-server has no public/gateway endpoint;
+  // the MCP proxy Lambda reaches it PRIVATELY via a stable Cloud Map DNS name.
+  // A PrivateDnsNamespace creates a VPC-associated Route53 private zone
+  // (`mem9-<stage>.local`); the Service (`mnemo`) gets an A record ECS keeps in sync
+  // with the running task's private IP → `mnemo.mem9-<stage>.local`. TTL is short (10s)
+  // because desiredCount=1 and the task IP changes on each rolling redeploy.
+  const namespace = new awsAny.servicediscovery.PrivateDnsNamespace("Mem9Namespace", {
+    name: `mem9-${$app.stage}.local`,
+    vpc: vpcId,
+    tags,
+  });
+  const discoveryService = new awsAny.servicediscovery.Service("Mem9Discovery", {
+    name: "mnemo", // → mnemo.mem9-<stage>.local
+    namespaceId: namespace.id,
+    dnsConfig: {
+      namespaceId: namespace.id,
+      dnsRecords: [{ type: "A", ttl: 10 }],
+      routingPolicy: "MULTIVALUE",
+    },
+    tags,
+  });
+  const serviceDnsName = $interpolate`mnemo.mem9-${$app.stage}.local`;
+
+  // Cold-start ordering fix: on a FRESH deploy, ECS CreateService validates its
+  // serviceRegistries against Route53 and fails with "ServiceNotFound" if the
+  // just-created Cloud Map service hasn't propagated to Route53 yet. A short
+  // settle Command (depends on the Cloud Map service) gives that propagation a
+  // few seconds; the ECS service transform below depends on THIS so it can't
+  // race ahead. (Once warm, the service already exists and this is a no-op wait.)
+  const discoverySettle = new command.local.Command(
+    "Mem9DiscoverySettle",
+    {
+      create: "sleep 25",
+      triggers: [discoveryService.arn],
+    },
+    { dependsOn: [discoveryService] },
+  );
+
+  // Let the proxy Lambda (which attaches to the task SG) reach mnemo-server on :8080.
+  // A self-referential ingress rule on the EXISTING task SG (from db.ts) — the Lambda
+  // shares that SG, so intra-SG traffic to 8080 is allowed. Standalone rule (not a
+  // mutation of db.ts's inline SG) so this stack owns it.
+  new awsAny.ec2.SecurityGroupRule("Mem9TaskFromProxyLambda", {
+    type: "ingress",
+    securityGroupId: taskSgId,
+    sourceSecurityGroupId: taskSgId,
+    protocol: "tcp",
+    fromPort: MNEMO_PORT,
+    toPort: MNEMO_PORT,
+    description: "mnemo-server HTTP from the MCP proxy Lambda (shares the task SG)",
+  });
+
+  // Fargate service: arm64, single task (scaling unset → desiredCount 1). THREE
+  // containers (§7): mnemo-server + qwen3-embed + llm-proxy. Registered in Cloud
+  // Map via transform.service.serviceRegistries (§6a) — no ALB.
   //
   // Task size is the TASK TOTAL (SST splits it across containers; per-container
   // cpu/memory are optional sub-limits we leave unset so both share the pool). The
@@ -271,8 +342,23 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
       },
     ],
     transform: {
-      service: (args) => {
+      service: (args: Record<string, any>, opts: Record<string, any>) => {
         args.tags = { ...(args.tags ?? {}), ...tags };
+        // Register the service in Cloud Map (§6a) so it gets the stable
+        // `mnemo.mem9-<stage>.local` A record ECS keeps pointed at the task's
+        // private IP. Set on the underlying aws.ecs.Service args (SST's Service
+        // component doesn't expose serviceRegistries for a raw-VPC cluster).
+        // Adding this to the ALREADY-RUNNING prod service triggers a rolling task
+        // redeploy (new task revision), NOT a Pulumi resource replacement —
+        // accepted (single rolling cycle, self-heals). No containerName/port is set
+        // for an awsvpc A-record registration (the task's ENI IP is registered).
+        // No healthCheckGracePeriodSeconds needed — Cloud Map registration has no
+        // health-check kill path (unlike an ALB target group).
+        args.serviceRegistries = { registryArn: discoveryService.arn };
+        // dependsOn the discovery settle so ECS CreateService doesn't validate the
+        // registry before Route53 has propagated the Cloud Map service (fixes the
+        // cold-deploy "ServiceNotFound").
+        opts.dependsOn = [...(opts.dependsOn ?? []), discoverySettle];
       },
     },
   });
@@ -298,6 +384,12 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
     value: mnemoImage,
     tags,
   });
+  new aws.ssm.Parameter("EcsServiceDnsName", {
+    name: `${prefix}/ecs/service-dns-name`,
+    type: "String",
+    value: serviceDnsName,
+    tags,
+  });
 
   return {
     ssmPrefix: prefix,
@@ -305,5 +397,7 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
     clusterName: cluster.nodes.cluster.name,
     serviceName: service.nodes.service.name,
     image: mnemoImage,
+    serviceDnsName,
+    taskSecurityGroupId: taskSgId,
   };
 }
