@@ -16,10 +16,11 @@
 // (scripts/deploy-ecr-repositories.sh). Tokyo — Fargate pulls same-region.
 export const ECR_REGION = "ap-northeast-1";
 
-// Cache the caller-identity Output so repeated ecrImage() calls don't each create
-// a new getCallerIdentityOutput invoke.
+// Cache the caller-identity Output so repeated ecrImage()/accountId() calls don't
+// each create a new getCallerIdentityOutput invoke. Exported so ecs.ts can build
+// the Bedrock Mantle project ARN with the same deploy-time-resolved account id.
 let accountIdOut: Output<string> | undefined;
-function accountId(): Output<string> {
+export function accountId(): Output<string> {
   if (!accountIdOut) accountIdOut = aws.getCallerIdentityOutput().accountId;
   return accountIdOut;
 }

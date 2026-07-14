@@ -50,7 +50,11 @@
 
 import { resolveVpc } from "./vpc";
 import type { DbOutputs } from "./db";
-import { ecrImage } from "./ecr";
+import { ecrImage, accountId, ECR_REGION } from "./ecr";
+
+// Bedrock Mantle is called in the app region (= the ECR/app region, Tokyo). Used
+// only to scope the bedrock-mantle:CreateInference project ARN.
+const region = ECR_REGION;
 
 // Image tags. CI (push-to-main) sets MEM9_IMAGE_TAG to the exact `mem9-<sha7>` it
 // just built + pushed, so prod runs that precise commit's images; CI PR previews
@@ -233,23 +237,44 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
     // attaches `permissions` to the TASK role (not the execution role), which is
     // the identity the container's default credential chain resolves — exactly
     // what @aws/bedrock-token-generator signs the bearer with, and what Mantle
-    // authorizes the model call against.
-    //   - bedrock:CallWithBearerToken — the presigned action the minted bearer
-    //     carries (getToken signs Action=CallWithBearerToken); without it the
-    //     bearer is rejected. No resource ARN granularity → "*", guarded by scope
-    //     to this one action.
-    //   - bedrock:InvokeModel — the actual GLM-5 inference via Mantle. Scoped to
-    //     the zai.glm-5 foundation-model ARN (FM ARNs carry no account id) with a
-    //     wildcard region so a region change doesn't silently deny (per CLAUDE-AWS
-    //     Bedrock guidance); never widened to Resource "*".
+    // authorizes the inference against.
+    //
+    // CRITICAL — the MANTLE endpoint uses the `bedrock-mantle:` namespace, NOT
+    // `bedrock:`. Smart-ingest posts to https://bedrock-mantle.<region>.api.aws/
+    // v1/chat/completions (see docker/llm-proxy/server.mjs), which authorizes
+    // against `bedrock-mantle:*` — a DIFFERENT service from `bedrock:*`. The
+    // original grant used `bedrock:InvokeModel` + `bedrock:CallWithBearerToken`,
+    // so the bearer minted fine (a local SigV4 presign, no IAM call) but every
+    // real inference 401'd `access_denied: bedrock-mantle:CreateInference ... no
+    // identity-based policy allows` → the memory was accepted but never indexed →
+    // search stayed empty. (Prod issue #11; verified against AWS docs
+    // inference-how.html "bedrock-mantle endpoint" + Service Authorization ref.)
+    //   - bedrock-mantle:CreateInference — the GLM-5 inference itself. Scoped to
+    //     the Bedrock Project ARN when MEM9_BEDROCK_PROJECT is set (account id via
+    //     getCallerIdentityOutput, resolved at DEPLOY time — never a committed
+    //     literal), falling back to "*" when the project is unset (local/typecheck).
+    //   - bedrock-mantle:CallWithBearerToken — the Mantle-endpoint variant of the
+    //     bearer-token action the minted bearer carries (distinct from the
+    //     `bedrock:` one). Account-wide by nature → "*".
+    //   - GetProject / ListProjects / ListTagsForResources — the read actions the
+    //     Mantle inference path also checks (mirrors AmazonBedrockMantleInferenceAccess).
     permissions: [
       {
-        actions: ["bedrock:CallWithBearerToken"],
-        resources: ["*"],
+        actions: ["bedrock-mantle:CreateInference"],
+        resources: [
+          BEDROCK_PROJECT
+            ? $interpolate`arn:aws:bedrock-mantle:${region}:${accountId()}:project/${BEDROCK_PROJECT}`
+            : "*",
+        ],
       },
       {
-        actions: ["bedrock:InvokeModel"],
-        resources: [`arn:aws:bedrock:*::foundation-model/${LLM_MODEL}`],
+        actions: [
+          "bedrock-mantle:CallWithBearerToken",
+          "bedrock-mantle:GetProject",
+          "bedrock-mantle:ListProjects",
+          "bedrock-mantle:ListTagsForResources",
+        ],
+        resources: ["*"],
       },
     ],
     containers: [
