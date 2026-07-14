@@ -162,9 +162,12 @@ async function create() {
   }
 
   // A LAMBDA target: AgentCore invokes the proxy Lambda (which reaches mnemo-server
-  // privately via Cloud Map). toolSchema is the inline ToolDefinition[]. No
-  // privateEndpoint (Lambda targets need none) and no credentialProviderConfigurations
-  // (the proxy Lambda injects the X-API-Key itself).
+  // privately via Cloud Map). toolSchema is the inline ToolDefinition[]; no
+  // privateEndpoint (Lambda targets need none). Outbound auth to the Lambda is the
+  // gateway's own IAM role (it holds lambda:InvokeFunction) → credentialProviderType
+  // GATEWAY_IAM_ROLE. This block is REQUIRED even for a Lambda target — omitting it
+  // is rejected with "Credential provider configurations is not defined". The
+  // mnemo-server X-API-Key is injected downstream BY the Lambda, not here.
   const input = {
     gatewayIdentifier: GATEWAY_ID,
     name: NAME,
@@ -172,6 +175,7 @@ async function create() {
     targetConfiguration: {
       mcp: { lambda: { lambdaArn, toolSchema: { inlinePayload: toolSchema } } },
     },
+    credentialProviderConfigurations: [{ credentialProviderType: "GATEWAY_IAM_ROLE" }],
   };
 
   // A light retry for generic control-plane transients. Unlike the removed

@@ -44,8 +44,13 @@ const MNEMO_PORT = 8080;
 // `search_memories`) — AgentCore prefixes them as `${targetName}___${tool}`, which
 // the Lambda strips and the E2E's endsWith matcher tolerates. inputSchema mirrors
 // the mem9 REST contract (infra/gateway/proxy-handler.mjs maps these to the calls).
-// SchemaType values are lowercase JSON-schema-like; `properties` is a LIST (each
-// carries its own `name`) with per-property `required` booleans (pulumi-aws shape).
+//
+// SHAPE: this schema is passed to the DIRECT bedrock-agentcore-control
+// `CreateGatewayTarget` API (via provision-target.mjs), so it uses the SDK's
+// `SchemaDefinition` shape — `properties` is a MAP keyed by property name and
+// `required` is an ARRAY of names (standard JSON-schema), NOT the pulumi typed-
+// resource's list-of-{name,required:boolean}. (Getting this wrong => the API
+// rejects with "Unexpected field type".)
 const TOOL_SCHEMA = [
   {
     name: "add_memory",
@@ -53,20 +58,14 @@ const TOOL_SCHEMA = [
       "Add a memory (raw content) for later recall. Writes are async; returns {status:'accepted'}.",
     inputSchema: {
       type: "object",
-      properties: [
-        {
-          name: "content",
-          type: "string",
-          description: "Raw content to store as a memory.",
-          required: true,
-        },
-        {
-          name: "agent_id",
+      properties: {
+        content: { type: "string", description: "Raw content to store as a memory." },
+        agent_id: {
           type: "string",
           description: "Optional agent id to attribute the write to (per-agent scoping).",
-          required: false,
         },
-      ],
+      },
+      required: ["content"],
     },
   },
   {
@@ -74,26 +73,15 @@ const TOOL_SCHEMA = [
     description: "Search stored memories by semantic query; returns the most relevant memories.",
     inputSchema: {
       type: "object",
-      properties: [
-        {
-          name: "q",
-          type: "string",
-          description: "The natural-language search query.",
-          required: true,
-        },
-        {
-          name: "limit",
-          type: "integer",
-          description: "Max results to return (default 20).",
-          required: false,
-        },
-        {
-          name: "agent_id",
+      properties: {
+        q: { type: "string", description: "The natural-language search query." },
+        limit: { type: "integer", description: "Max results to return (default 20)." },
+        agent_id: {
           type: "string",
           description: "Optional: restrict results to memories written by this agent.",
-          required: false,
         },
-      ],
+      },
+      required: ["q"],
     },
   },
 ];
