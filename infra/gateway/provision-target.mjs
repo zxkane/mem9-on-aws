@@ -74,8 +74,10 @@ async function deleteTarget(targetId) {
     new DeleteGatewayTargetCommand({ gatewayIdentifier: GATEWAY_ID, targetId }),
   );
   // Wait for it to actually disappear so a recreate with the same name won't
-  // collide with a still-DELETING target.
-  for (let i = 0; i < 40; i++) {
+  // collide with a still-DELETING target. A FAILED/READY target deletes in
+  // seconds in practice; cap at ~2 min so a slow delete can't dominate the
+  // retry loop's wall-clock budget.
+  for (let i = 0; i < 20; i++) {
     try {
       await client.send(
         new GetGatewayTargetCommand({ gatewayIdentifier: GATEWAY_ID, targetId }),
@@ -186,18 +188,39 @@ async function create() {
     },
   };
 
-  // Retry on the transient AgentCore control-plane flake: the SAME config that
-  // reaches READY on a fresh attempt sometimes lands in FAILED with "The server
-  // encountered an internal error while processing the request. Retry the request
-  // later." (VERIFIED against a live gateway/RC: a plain delete-then-recreate of
-  // an identically-configured target reached READY.) So a create failure is NOT
-  // taken as terminal — we recreate a few times with backoff before giving up.
-  // 3 attempts keeps the worst case (~3min FAILED + ~3.5min READY per attempt +
-  // backoff ≈ under 15 min) well within the CI Deploy job's 45-min budget, while
-  // the transient is intermittent enough that attempt 1-2 usually succeeds.
-  const MAX_ATTEMPTS = 3;
+  // Retry on the AgentCore control-plane flake: CreateGatewayTarget with a
+  // self-managed-Lattice privateEndpoint sometimes lands the target in FAILED with
+  // "The server encountered an internal error while processing the request. Retry
+  // the request later."
+  //
+  // NATURE (measured across several live runs): a genuinely INTERMITTENT flake, NOT
+  // deterministic. Observed BOTH: (a) a CI deploy where every attempt in a tight
+  // ~35s burst FAILED (~7s each), and (b) fresh-gateway targets that reached READY
+  // on the FIRST attempt at +0s. So the error clusters in short windows — the cure
+  // is SPACED retries (independent samples across minutes), plus a small upfront
+  // settle for the freshness-correlated case.
+  //
+  // We bound BOTH by attempt count AND wall-clock, whichever hits first. The
+  // wall-clock cap is the real guard: an individual attempt can, in the worst case,
+  // burn ~6 min in waitReady + ~4 min in the post-FAILED delete-wait, so a pure
+  // count bound could blow the 45-min CI Deploy budget. DEADLINE_MS (25 min from the
+  // first attempt) keeps the whole loop safely under it, leaving room for the rest
+  // of the stack. In practice attempts fail/succeed in seconds, so many samples fit.
+  const SETTLE_MS = 30_000; // brief settle for the freshness-correlated failures
+  const BACKOFF_MS = 60_000; // space attempts so they sample different flake windows
+  const MAX_ATTEMPTS = 12;
+  const DEADLINE_MS = 25 * 60_000;
+  console.error(`waiting ${SETTLE_MS / 1000}s before the first create attempt...`);
+  await sleep(SETTLE_MS);
+  const startedAt = Date.now();
   let lastErr;
+  let attempts = 0;
   for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    if (Date.now() - startedAt > DEADLINE_MS) {
+      console.error(`retry deadline (${DEADLINE_MS / 60_000} min) reached; giving up`);
+      break;
+    }
+    attempts = attempt;
     try {
       const targetId = await createOnce(input);
       // Last stdout line = the id (SST Command captures stdout).
@@ -206,11 +229,11 @@ async function create() {
     } catch (e) {
       lastErr = e;
       console.error(`attempt ${attempt}/${MAX_ATTEMPTS} did not reach READY`);
-      if (attempt < MAX_ATTEMPTS) await sleep(15_000);
+      if (attempt < MAX_ATTEMPTS) await sleep(BACKOFF_MS);
     }
   }
   throw new Error(
-    `GatewayTarget ${NAME} failed to reach READY after ${MAX_ATTEMPTS} attempts: ${lastErr?.message ?? lastErr}`,
+    `GatewayTarget ${NAME} failed to reach READY after ${attempts} attempt(s): ${lastErr?.message ?? lastErr}`,
   );
 }
 
