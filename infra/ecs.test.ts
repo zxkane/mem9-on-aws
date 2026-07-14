@@ -133,6 +133,17 @@ function installGlobals(stage: string) {
       },
     },
   };
+  // The Cloud Map discovery-settle uses command.local.Command (§6a cold-start fix).
+  (globalThis as Record<string, unknown>).command = {
+    local: {
+      Command: class {
+        arn = out("arn:command");
+        constructor(_logicalName: string, args: Record<string, unknown>) {
+          created.push({ kind: "Command", args });
+        }
+      },
+    },
+  };
 }
 
 beforeEach(() => {
@@ -149,7 +160,7 @@ function createdOf(kind: string): Record<string, unknown> {
 }
 
 afterEach(() => {
-  for (const g of ["$app", "aws", "sst", "$interpolate"])
+  for (const g of ["$app", "aws", "sst", "command", "$interpolate"])
     delete (globalThis as Record<string, unknown>)[g];
   delete process.env.MEM9_IMAGE_TAG;
   vi.resetModules();
@@ -241,11 +252,14 @@ describe("ecs stack", () => {
     // replacement) — serviceRegistries, NOT loadBalancers, and NO grace period.
     const transform = (services[0].args.transform as Record<string, any>).service;
     const svcArgs: Record<string, any> = {};
-    transform(svcArgs);
+    const svcOpts: Record<string, any> = {};
+    transform(svcArgs, svcOpts);
     expect(svcArgs.serviceRegistries).toBeDefined();
     expect(svcArgs.serviceRegistries.registryArn).toBeDefined();
     expect(svcArgs.loadBalancers).toBeUndefined();
     expect(svcArgs.healthCheckGracePeriodSeconds).toBeUndefined();
+    // The service depends on the discovery settle (fixes cold-deploy ServiceNotFound).
+    expect(svcOpts.dependsOn?.length).toBeGreaterThanOrEqual(1);
     // A self-referential :8080 ingress rule on the task SG lets the Lambda (which
     // shares that SG) reach mnemo-server.
     const rule = createdOf("SecurityGroupRule");

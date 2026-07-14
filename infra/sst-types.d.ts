@@ -297,7 +297,9 @@ declare namespace sst {
       logging?: ServiceLogging;
       // IAM statements attached to the task role (SST's `permissions`).
       permissions?: Input<FargatePermission>[];
-      transform?: { service?: (args: Record<string, unknown>) => void };
+      transform?: {
+        service?: (args: Record<string, unknown>, opts: Record<string, unknown>) => void;
+      };
     }
     class Service {
       constructor(name: string, args: ServiceArgs);

@@ -182,6 +182,21 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
   });
   const serviceDnsName = $interpolate`mnemo.mem9-${$app.stage}.local`;
 
+  // Cold-start ordering fix: on a FRESH deploy, ECS CreateService validates its
+  // serviceRegistries against Route53 and fails with "ServiceNotFound" if the
+  // just-created Cloud Map service hasn't propagated to Route53 yet. A short
+  // settle Command (depends on the Cloud Map service) gives that propagation a
+  // few seconds; the ECS service transform below depends on THIS so it can't
+  // race ahead. (Once warm, the service already exists and this is a no-op wait.)
+  const discoverySettle = new command.local.Command(
+    "Mem9DiscoverySettle",
+    {
+      create: "sleep 25",
+      triggers: [discoveryService.arn],
+    },
+    { dependsOn: [discoveryService] },
+  );
+
   // Let the proxy Lambda (which attaches to the task SG) reach mnemo-server on :8080.
   // A self-referential ingress rule on the EXISTING task SG (from db.ts) — the Lambda
   // shares that SG, so intra-SG traffic to 8080 is allowed. Standalone rule (not a
@@ -327,7 +342,7 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
       },
     ],
     transform: {
-      service: (args) => {
+      service: (args: Record<string, any>, opts: Record<string, any>) => {
         args.tags = { ...(args.tags ?? {}), ...tags };
         // Register the service in Cloud Map (§6a) so it gets the stable
         // `mnemo.mem9-<stage>.local` A record ECS keeps pointed at the task's
@@ -340,6 +355,10 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
         // No healthCheckGracePeriodSeconds needed — Cloud Map registration has no
         // health-check kill path (unlike an ALB target group).
         args.serviceRegistries = { registryArn: discoveryService.arn };
+        // dependsOn the discovery settle so ECS CreateService doesn't validate the
+        // registry before Route53 has propagated the Cloud Map service (fixes the
+        // cold-deploy "ServiceNotFound").
+        opts.dependsOn = [...(opts.dependsOn ?? []), discoverySettle];
       },
     },
   });
