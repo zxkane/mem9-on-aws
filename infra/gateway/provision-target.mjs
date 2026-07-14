@@ -122,6 +122,26 @@ async function waitReady(targetId) {
   throw new Error(`GatewayTarget ${targetId} did not reach READY within the timeout`);
 }
 
+// One create-and-wait attempt. Returns the READY targetId, or throws (leaving no
+// target — a FAILED one is deleted before throwing so the caller can cleanly retry).
+async function createOnce(input) {
+  const res = await client.send(new CreateGatewayTargetCommand(input));
+  const targetId = res.targetId;
+  console.error(`created target ${NAME} (${targetId}); waiting for READY...`);
+  try {
+    await waitReady(targetId);
+  } catch (e) {
+    // Clean up the non-READY target so a retry (same name) doesn't collide.
+    console.error(`create attempt failed (${e?.message ?? e}); deleting ${targetId}`);
+    await deleteTarget(targetId).catch((de) =>
+      console.error(`  (cleanup delete failed, continuing: ${de?.message ?? de})`),
+    );
+    throw e;
+  }
+  console.error(`target ${NAME} (${targetId}) is READY`);
+  return targetId;
+}
+
 async function create() {
   const schema = env("MEM9_TGT_SCHEMA");
   const apiKeyProviderArn = env("MEM9_TGT_APIKEY_PROVIDER_ARN");
@@ -144,35 +164,54 @@ async function create() {
     await deleteTarget(existing.targetId);
   }
 
-  const res = await client.send(
-    new CreateGatewayTargetCommand({
-      gatewayIdentifier: GATEWAY_ID,
-      name: NAME,
-      description,
-      targetConfiguration: { mcp: { openApiSchema: { inlinePayload: schema } } },
-      credentialProviderConfigurations: [
-        {
-          credentialProviderType: "API_KEY",
-          credentialProvider: {
-            apiKeyCredentialProvider: {
-              providerArn: apiKeyProviderArn,
-              credentialLocation: "HEADER",
-              credentialParameterName: apiKeyHeader,
-            },
+  const input = {
+    gatewayIdentifier: GATEWAY_ID,
+    name: NAME,
+    description,
+    targetConfiguration: { mcp: { openApiSchema: { inlinePayload: schema } } },
+    credentialProviderConfigurations: [
+      {
+        credentialProviderType: "API_KEY",
+        credentialProvider: {
+          apiKeyCredentialProvider: {
+            providerArn: apiKeyProviderArn,
+            credentialLocation: "HEADER",
+            credentialParameterName: apiKeyHeader,
           },
         },
-      ],
-      privateEndpoint: {
-        selfManagedLatticeResource: { resourceConfigurationIdentifier: latticeRcArn },
       },
-    }),
+    ],
+    privateEndpoint: {
+      selfManagedLatticeResource: { resourceConfigurationIdentifier: latticeRcArn },
+    },
+  };
+
+  // Retry on the transient AgentCore control-plane flake: the SAME config that
+  // reaches READY on a fresh attempt sometimes lands in FAILED with "The server
+  // encountered an internal error while processing the request. Retry the request
+  // later." (VERIFIED against a live gateway/RC: a plain delete-then-recreate of
+  // an identically-configured target reached READY.) So a create failure is NOT
+  // taken as terminal — we recreate a few times with backoff before giving up.
+  // 3 attempts keeps the worst case (~3min FAILED + ~3.5min READY per attempt +
+  // backoff ≈ under 15 min) well within the CI Deploy job's 45-min budget, while
+  // the transient is intermittent enough that attempt 1-2 usually succeeds.
+  const MAX_ATTEMPTS = 3;
+  let lastErr;
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt++) {
+    try {
+      const targetId = await createOnce(input);
+      // Last stdout line = the id (SST Command captures stdout).
+      console.log(targetId);
+      return;
+    } catch (e) {
+      lastErr = e;
+      console.error(`attempt ${attempt}/${MAX_ATTEMPTS} did not reach READY`);
+      if (attempt < MAX_ATTEMPTS) await sleep(15_000);
+    }
+  }
+  throw new Error(
+    `GatewayTarget ${NAME} failed to reach READY after ${MAX_ATTEMPTS} attempts: ${lastErr?.message ?? lastErr}`,
   );
-  const targetId = res.targetId;
-  console.error(`created target ${NAME} (${targetId}); waiting for READY...`);
-  await waitReady(targetId);
-  console.error(`target ${NAME} (${targetId}) is READY`);
-  // Last stdout line = the id (SST Command captures stdout).
-  console.log(targetId);
 }
 
 async function del() {
