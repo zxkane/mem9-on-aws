@@ -942,9 +942,12 @@ Resources:
               - apigateway:TagResource
               - apigateway:UntagResource
             Resource:
-              - !Sub "arn:aws:apigateway:${AWS::Region}::/apis"
-              - !Sub "arn:aws:apigateway:${AWS::Region}::/apis/*"
-              - !Sub "arn:aws:apigateway:${AWS::Region}::/tags/*"
+              # Region wildcard: the CFN stack lives in us-west-2 but the app
+              # deploys to ap-northeast-1. API Gateway ARNs carry no account-id
+              # (empty field between the double colons), only the region matters.
+              - "arn:aws:apigateway:*::/apis"
+              - "arn:aws:apigateway:*::/apis/*"
+              - "arn:aws:apigateway:*::/tags/*"
           # SST's sst.aws.ApiGatewayV2 creates an access-log LogGroup under
           # /aws/vendedlogs/apis/<app>-<stage>-<id>. The existing /sst/* and
           # /aws/lambda/* log grants don't cover this path.
