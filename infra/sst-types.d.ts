@@ -58,6 +58,57 @@ declare namespace aws {
   }
   function getCallerIdentityOutput(): GetCallerIdentityResult;
 
+  // Region lookup — infra/oauth-facade.ts composes the Cognito domain / issuer
+  // URLs from the deploy region.
+  interface GetRegionResult {
+    readonly name: Output<string>;
+  }
+  function getRegionOutput(): GetRegionResult;
+
+  // Cognito user pool + M2M/OAuth client (infra/cognito.ts + infra/oauth-facade.ts).
+  namespace cognito {
+    interface UserPoolArgs {
+      name?: Input<string>;
+      schema?: { name: string; attributeDataType: string; mutable?: boolean; required?: boolean }[];
+      userAttributeUpdateSettings?: { attributesRequireVerificationBeforeUpdate: string[] };
+      autoVerifiedAttributes?: string[];
+      tags?: Record<string, Input<string>>;
+      [k: string]: unknown;
+    }
+    class UserPool {
+      constructor(name: string, args: UserPoolArgs, opts?: unknown);
+      readonly id: Output<string>;
+    }
+    class UserPoolDomain {
+      constructor(name: string, args: Record<string, unknown>, opts?: unknown);
+      readonly domain: Output<string>;
+    }
+    class ResourceServer {
+      constructor(name: string, args: Record<string, unknown>);
+      readonly identifier: Output<string>;
+    }
+    interface UserPoolClientArgs {
+      name?: Input<string>;
+      userPoolId: Input<string>;
+      generateSecret?: Input<boolean>;
+      explicitAuthFlows?: Input<string>[];
+      allowedOauthFlows?: Input<string>[];
+      allowedOauthScopes?: Input<Input<string>[]>;
+      allowedOauthFlowsUserPoolClient?: Input<boolean>;
+      callbackUrls?: Input<Input<string>[]>;
+      logoutUrls?: Input<Input<string>[]>;
+      supportedIdentityProviders?: Input<string>[];
+      preventUserExistenceErrors?: Input<string>;
+      enableTokenRevocation?: Input<boolean>;
+      [k: string]: unknown;
+    }
+    class UserPoolClient {
+      constructor(name: string, args: UserPoolClientArgs, opts?: unknown);
+      readonly id: Output<string>;
+      readonly clientSecret: Output<string>;
+    }
+  }
+
   namespace lambda {
     // Only referenced as the $transform target + its arg shape.
     interface FunctionArgs {
@@ -334,6 +385,8 @@ declare namespace sst {
       handler: Input<string>;
       runtime?: Input<string>;
       timeout?: Input<string>;
+      architecture?: Input<"x86_64" | "arm64">;
+      memory?: Input<string>;
       vpc?: FunctionVpc;
       environment?: Input<Record<string, Input<string>>>;
       permissions?: { actions: string[]; resources: Input<string>[] }[];
@@ -345,5 +398,27 @@ declare namespace sst {
       readonly name: Output<string>;
       readonly nodes: { function: { name: Output<string>; arn: Output<string> } };
     }
+
+    // ── ApiGatewayV2 (infra/oauth-facade.ts — the OAuth login facade API) ─────
+    interface ApiGatewayV2Cors {
+      allowOrigins?: Input<string>[];
+      allowMethods?: Input<string>[];
+      allowHeaders?: Input<string>[];
+      maxAge?: Input<string>;
+    }
+    interface ApiGatewayV2Args {
+      cors?: ApiGatewayV2Cors;
+    }
+    class ApiGatewayV2 {
+      constructor(name: string, args?: ApiGatewayV2Args);
+      readonly url: Output<string>;
+      route(route: string, handler: Input<string>, args?: unknown): void;
+    }
+  }
+
+  // ── sst.Secret (infra/oauth-facade.ts — OAuth client secret / signing key) ──
+  class Secret {
+    constructor(name: string, defaultValue?: string);
+    readonly value: Output<string>;
   }
 }
