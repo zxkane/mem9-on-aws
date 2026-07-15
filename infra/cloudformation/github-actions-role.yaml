@@ -949,8 +949,8 @@ Resources:
               - "arn:aws:apigateway:*::/apis/*"
               - "arn:aws:apigateway:*::/tags/*"
           # SST's sst.aws.ApiGatewayV2 creates an access-log LogGroup under
-          # /aws/vendedlogs/apis/<app>-<stage>-<id>. The existing /sst/* and
-          # /aws/lambda/* log grants don't cover this path.
+          # /aws/vendedlogs/apis/<app>-<stage>-<id> AND creates a log delivery
+          # via the CloudWatch Logs Delivery API (CreateStage enables access logging).
           - Sid: ApiGatewayV2AccessLogs
             Effect: Allow
             Action:
@@ -962,9 +962,21 @@ Resources:
               - logs:UntagResource
               - logs:ListTagsForResource
               - logs:DescribeLogGroups
-            Resource:
-              - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/vendedlogs/apis/${ProjectName}-*"
-              - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/vendedlogs/apis/${ProjectName}-*:*"
+              # Delivery API actions needed by CreateStage's access-logging setup.
+              - logs:CreateLogDelivery
+              - logs:DeleteLogDelivery
+              - logs:GetLogDelivery
+              - logs:UpdateLogDelivery
+              - logs:PutDeliverySource
+              - logs:PutDeliveryDestination
+              - logs:CreateDelivery
+              - logs:GetDelivery
+              - logs:DeleteDelivery
+              - logs:ListDeliveries
+              - logs:PutResourcePolicy
+              - logs:DescribeResourcePolicies
+              - logs:DescribeLogGroups
+            Resource: "*"
 
   # ───────────────────────────────────────────────────────────────────────────
   # IAM Role — assumed by GitHub Actions via OIDC.
