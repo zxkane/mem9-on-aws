@@ -270,6 +270,13 @@ jobs:
           E2E_SOFT: "1"
         run: bash scripts/run-mcp-e2e.sh
 
+      - name: OAuth façade smoke (preview)
+        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        env:
+          STAGE: ${{ steps.deploy.outputs.stage }}
+          AWS_REGION: ap-northeast-1
+        run: bash scripts/run-oauth-facade-smoke.sh
+
       - name: Auto-cleanup on deploy failure
         # Best-effort — if the deploy half-applied resources, remove them so the
         # next push doesn't accumulate orphan state.
@@ -795,6 +802,13 @@ jobs:
         env:
           STAGE: prod
         run: bash scripts/run-mcp-e2e.sh
+
+      - name: OAuth façade smoke (prod)
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          STAGE: prod
+          AWS_REGION: ap-northeast-1
+        run: bash scripts/run-oauth-facade-smoke.sh
 
       - name: Create issue on prod deploy failure
         # failure() fires for any failed step (gate, preflight, lock recovery,
