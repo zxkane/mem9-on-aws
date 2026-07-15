@@ -945,6 +945,23 @@ Resources:
               - !Sub "arn:aws:apigateway:${AWS::Region}::/apis"
               - !Sub "arn:aws:apigateway:${AWS::Region}::/apis/*"
               - !Sub "arn:aws:apigateway:${AWS::Region}::/tags/*"
+          # SST's sst.aws.ApiGatewayV2 creates an access-log LogGroup under
+          # /aws/vendedlogs/apis/<app>-<stage>-<id>. The existing /sst/* and
+          # /aws/lambda/* log grants don't cover this path.
+          - Sid: ApiGatewayV2AccessLogs
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:DeleteLogGroup
+              - logs:PutRetentionPolicy
+              - logs:DeleteRetentionPolicy
+              - logs:TagResource
+              - logs:UntagResource
+              - logs:ListTagsForResource
+              - logs:DescribeLogGroups
+            Resource:
+              - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/vendedlogs/apis/${ProjectName}-*"
+              - !Sub "arn:aws:logs:*:${AWS::AccountId}:log-group:/aws/vendedlogs/apis/${ProjectName}-*:*"
 
   # ───────────────────────────────────────────────────────────────────────────
   # IAM Role — assumed by GitHub Actions via OIDC.
