@@ -53,12 +53,22 @@ export function cognito(): CognitoOutputs {
     "Mem9McpPool",
     {
       name: `${stage}-mem9-mcp`,
-      // Hosted-UI minimal config (llm-wiki's exact set): an `email` attribute for
-      // the login form, no forced re-verification on update, and nothing
-      // auto-verified (the OAuth2 façade owns the flow, not Cognito email/SMS).
+      // Hosted-UI config: an `email` attribute for the login form, no forced
+      // re-verification on attribute update.
       schema: [{ name: "email", attributeDataType: "String", mutable: true, required: false }],
       userAttributeUpdateSettings: { attributesRequireVerificationBeforeUpdate: [] },
-      autoVerifiedAttributes: [],
+      // Auto-verify email so the Hosted-UI ForgotPassword flow can send a
+      // recovery code (AccountRecovery defaults to verified_email). Without this,
+      // the operator can't reset their password via the browser — reset 503s
+      // because no verified recovery channel exists. Cognito's own /oauth login
+      // + this recovery path are separate from the OAuth2 FAÇADE, which brokers
+      // the authorization-code flow but not password management. Email sending
+      // uses the pool's COGNITO_DEFAULT sender (50/day — ample for one operator).
+      autoVerifiedAttributes: ["email"],
+      // Single-operator: NO self-service sign-up. Only an admin (admin-create-user)
+      // provisions users; enabling email auto-verify above must NOT open public
+      // registration. This flag locks the Hosted-UI sign-up path.
+      adminCreateUserConfig: { allowAdminCreateUserOnly: true },
       tags,
     },
     { deleteBeforeReplace: nonProd },
