@@ -21,6 +21,16 @@
 name: Infra CI
 
 on:
+  # Manual prod redeploy — e.g. to re-link a newly-set SST secret into the
+  # deployed Lambda env (SST secrets are build-time links, so setting one needs
+  # a redeploy to take effect). `seed_oauth_hmac` optionally (re)generates the
+  # OAuth façade's HMAC state-signing key before the deploy.
+  workflow_dispatch:
+    inputs:
+      seed_oauth_hmac:
+        description: "Generate + set OauthStateHmacKey before deploying (enables the OAuth browser-login flow)"
+        type: boolean
+        default: false
   pull_request:
     branches: [main]
     types: [opened, synchronize, reopened, closed]
@@ -55,18 +65,19 @@ on:
 
 # Per-PR concurrency for PR events (cancel superseded runs so repeated
 # `synchronize` events don't race the same `pr-N` stage's unlock/deploy);
-# singleton for push-to-main. Critical: the prod group is NOT
-# cancel-in-progress — prod must never be interrupted mid-deploy by a
-# subsequent merge. The `|| 'unknown'` guard protects format() during push
-# events where pull_request.number is null.
+# singleton for push-to-main AND manual workflow_dispatch (both deploy prod).
+# Critical: the prod group is NOT cancel-in-progress — prod must never be
+# interrupted mid-deploy by a subsequent merge or dispatch. The `|| 'unknown'`
+# guard protects format() during push/dispatch events where
+# pull_request.number is null.
 concurrency:
   group: >-
     ${{
-      github.event_name == 'push'
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         && 'infra-deploy-prod'
         || format('infra-ci-pr-{0}', github.event.pull_request.number || 'unknown')
     }}
-  cancel-in-progress: ${{ github.event_name != 'push' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   AWS_REGION: ap-northeast-1
@@ -488,7 +499,7 @@ jobs:
     name: Build & push mnemo-server image
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     needs: typecheck
-    if: github.event_name == 'push' || (github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.base.ref == 'main')
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.base.ref == 'main')
     # arm64 build: native on the self-hosted arm64 pool, QEMU-emulated on
     # ubuntu-latest (slower). Give the go build + emulation headroom.
     timeout-minutes: 30
@@ -646,7 +657,7 @@ jobs:
     name: Deploy prod
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     needs: [typecheck, build-and-push-image]
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     environment: prod
     # Full-stack prod: Aurora + the 3-container ECS task (qwen3 image pull + 180s
     # health startPeriod) + the bootstrap run-task. No RDS Proxy (dropped — see
@@ -761,6 +772,22 @@ jobs:
             echo "::error::prod lock is fresh (age ${AGE_MINUTES} min <= ${STALE_LOCK_AGE_MINUTES}). Refusing to unlock — a concurrent deploy may be running."
             exit 1
           fi
+
+      - name: Seed OAuth HMAC key (workflow_dispatch only)
+        # The OAuth façade's HMAC state-signing key. Empty → the façade returns
+        # 503 on /oauth/authorize, so the browser-login flow can't run. This
+        # generates a fresh 32-byte key and stores it as an SST secret; the
+        # following "Deploy prod stage" re-links it into the façade Lambda's env
+        # (SST secrets are build-time `.value` links). Idempotent — re-running
+        # rotates the key (existing signed states expire in 10 min anyway).
+        # Runs ONLY on a manual dispatch with seed_oauth_hmac=true.
+        if: github.event_name == 'workflow_dispatch' && inputs.seed_oauth_hmac
+        shell: bash
+        run: |
+          set -euo pipefail
+          KEY=$(openssl rand -base64 32)
+          pnpm -C infra exec sst secret set OauthStateHmacKey "$KEY" --stage prod
+          echo "::notice::OauthStateHmacKey seeded for prod (re-linked by the deploy below)"
 
       - name: Deploy prod stage
         shell: bash
