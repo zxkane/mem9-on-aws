@@ -6,7 +6,7 @@
  * Self-hosted deployment of mem9 (`mnemo-server`) on AWS. `run()` wires the full
  * stack (see docs/ARCHITECTURE.md): meta (SSM) → Aurora → ECS Fargate
  * (mnemo-server + qwen3-embed + llm-proxy) → schema bootstrap → the MCP surface
- * (ACM cert → Cognito M2M → internal ALB → AgentCore Gateway).
+ * (Cognito M2M + OAuth2 façade → AgentCore Gateway → Lambda-proxy target).
  *
  * Mirrors the shape of the sister SST v4 projects so a single operator can
  * context-switch without re-learning constructs:
@@ -16,9 +16,8 @@
  *
  * TWO STANDING RULES enforced here (see ~/.claude/CLAUDE-AWS.md):
  *   1. Every ZIP Lambda runs `nodejs24.x` (forced via `$transform` below).
- *   2. NO Lambda Function URL — ever. When the AgentCore interceptor Lambda
- *      lands, it is invoked by the Gateway (service-scoped resource policy),
- *      never via a Function URL.
+ *   2. NO Lambda Function URL — the OAuth façade is fronted by ApiGatewayV2, the
+ *      MCP proxy Lambda by the AgentCore Gateway (service-scoped invoke).
  */
 
 export default $config({
@@ -106,8 +105,14 @@ export default $config({
     // id (bootstrapOut) for the outbound X-API-Key.
     const { cognito } = await import("./infra/cognito");
     const cognitoOut = cognito();
+    // OAuth2 browser-login façade (§6): ApiGatewayV2 + reader client + façade
+    // Lambda. Built BEFORE gateway() because it produces the reader client id the
+    // gateway must trust. The façade reads gateway/url from SSM at RUNTIME, so it
+    // takes only cognitoOut (no gateway dep) — keeping the graph acyclic.
+    const { oauthFacade } = await import("./infra/oauth-facade");
+    const facadeOut = oauthFacade(cognitoOut);
     const { gateway } = await import("./infra/gateway");
-    gateway(cognitoOut, ecsOut, bootstrapOut);
+    gateway(cognitoOut, ecsOut, bootstrapOut, facadeOut.readerClientId);
 
     return {};
   },

@@ -139,4 +139,30 @@ describe("cognito stack", () => {
     // PR-stage domain gets the numeric suffix for deterministic re-deploys.
     expect(byKind("UserPoolDomain")[0].args.domain).toBe("pr-42-mem9-mcp-42");
   });
+
+  it("configures the pool for Hosted-UI (email schema + no forced re-verify)", async () => {
+    installGlobals("prod");
+    const cognito = await loadCognito();
+    cognito();
+    const poolArgs = byKind("UserPool")[0].args;
+    const schema = poolArgs.schema as { name: string; mutable: boolean; required: boolean }[];
+    expect(schema).toContainEqual(
+      expect.objectContaining({ name: "email", mutable: true, required: false }),
+    );
+    const updateSettings = poolArgs.userAttributeUpdateSettings as {
+      attributesRequireVerificationBeforeUpdate: unknown[];
+    };
+    expect(updateSettings.attributesRequireVerificationBeforeUpdate).toEqual([]);
+    expect(poolArgs.autoVerifiedAttributes).toEqual([]);
+  });
+
+  it("exports the Hosted-UI endpoint URLs the façade needs", async () => {
+    installGlobals("prod");
+    const cognito = await loadCognito();
+    const out = cognito();
+    expect(out.authorizeEndpoint).toBeDefined();
+    expect(out.userInfoEndpoint).toBeDefined();
+    expect(out.revocationEndpoint).toBeDefined();
+    expect(out.jwksUri).toBeDefined();
+  });
 });

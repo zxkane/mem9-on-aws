@@ -96,6 +96,7 @@ export function gateway(
   cognitoOut: CognitoOutputs,
   ecsOut: EcsOutputs,
   bootstrapOut: BootstrapOutputs,
+  readerClientId: Output<string>,
 ): GatewayOutputs {
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const stage = $app.stage;
@@ -183,7 +184,8 @@ export function gateway(
       authorizerConfiguration: {
         customJwtAuthorizer: {
           discoveryUrl: $interpolate`${cognitoOut.issuer}/.well-known/openid-configuration`,
-          allowedClients: cognitoOut.allowedClientIds,
+          // Trust BOTH the M2M client (CI/headless) AND the browser-login reader client.
+          allowedClients: [...cognitoOut.allowedClientIds, readerClientId],
         },
       },
       protocolConfiguration: { mcp: { supportedVersions: ["2025-03-26"] } },

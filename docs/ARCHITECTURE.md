@@ -191,6 +191,30 @@ Mirror podcast-curation `gateway.ts` + `cognito.ts` + `api.ts`:
 - SSM parameter exports for Gateway URL / Cognito endpoints / client IDs
   (podcast-curation convention: `/mem9-on-aws/${stage}/...`).
 
+### 6b. Inbound auth — **two coexisting modes** (the gateway trusts both clients)
+
+The MCP surface now accepts **two** inbound-auth flows against the same Cognito
+pool; the AgentCore Gateway's JWT authorizer trusts both app clients:
+
+1. **Cognito M2M (`client_credentials`)** — for CI / headless callers
+   (`scripts/run-mcp-e2e.sh`). Unchanged from §6.
+2. **OAuth2 authorization-code + PKCE (browser login)** — for humans (Claude Code
+   desktop). Served by the **OAuth façade** (`infra/oauth-facade.ts`, an
+   ApiGatewayV2 + Lambda surface — see the façade unit tests in
+   `infra/src/oauth-facade/`) that bridges the PKCE authorization-code flow to the
+   Cognito Hosted UI, so a human logs in via the browser instead of a client
+   secret.
+
+One-time setup per stage (never committed; run by the operator):
+- Seed the state-signing HMAC key:
+  `sst secret set OauthStateHmacKey "$(openssl rand -base64 32)" --stage <stage>`
+  (empty default → the façade returns 503 until seeded).
+- Create the operator user: `aws cognito-idp admin-create-user ...`.
+
+The operator then points Claude Code at the façade MCP endpoint published in SSM
+at `/mem9-on-aws/<stage>/facade/mcp-endpoint` and logs in via the browser. Full
+design + flow: [`docs/superpowers/specs/2026-07-15-oauth2-mcp-browser-login-design.md`](superpowers/specs/2026-07-15-oauth2-mcp-browser-login-design.md).
+
 ### 6a. Gateway → mnemo-server network path (Lambda-proxy — the ALB/Lattice path was abandoned)
 
 **mnemo-server stays fully private; the Gateway reaches it via a VPC-attached proxy
@@ -432,7 +456,13 @@ model is the heavy tenant), which is the main swing in the Fargate cost row.
   the account default VPC's NAT-routed private subnets (selected by the `private-1*`
   Name tag — the Tokyo default VPC also has no-NAT `secondary-private-subnet-*` ones
   that a generic public-ip filter would wrongly include; see infra/vpc.ts).
-- **MCP + auth**: AgentCore Gateway + Cognito M2M (podcast-curation pattern).
+- **MCP + auth**: AgentCore Gateway + Cognito (podcast-curation pattern). **Two
+  coexisting inbound modes** (§6b): **Cognito M2M** (`client_credentials`, for
+  CI / headless callers) **and** **OAuth2 authorization-code + PKCE** browser
+  login for humans (Claude Code desktop) via the **OAuth façade**
+  (`infra/oauth-facade.ts`, ApiGatewayV2 → Cognito Hosted UI). One-time per-stage
+  setup: seed `OauthStateHmacKey` + `admin-create-user`; the operator points
+  Claude Code at `/mem9-on-aws/<stage>/facade/mcp-endpoint`.
 - **Gateway → mnemo-server**: **private** via AgentCore `privateEndpoint` +
   **managed VPC Lattice** → **internal ALB (public ACM cert, TLS terminated here)**
   → mnemo-server over HTTP:8080. Outbound auth = **API key** (`X-API-Key` = tenant
