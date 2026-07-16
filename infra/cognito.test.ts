@@ -153,7 +153,26 @@ describe("cognito stack", () => {
       attributesRequireVerificationBeforeUpdate: unknown[];
     };
     expect(updateSettings.attributesRequireVerificationBeforeUpdate).toEqual([]);
-    expect(poolArgs.autoVerifiedAttributes).toEqual([]);
+  });
+
+  it("auto-verifies email so ForgotPassword recovery works", async () => {
+    installGlobals("prod");
+    const cognito = await loadCognito();
+    cognito();
+    const poolArgs = byKind("UserPool")[0].args;
+    // email must be auto-verifiable for the Hosted-UI ForgotPassword flow to send
+    // a recovery code (AccountRecovery is verified_email). Without this, reset 503s.
+    expect(poolArgs.autoVerifiedAttributes).toEqual(["email"]);
+  });
+
+  it("locks self-service sign-up (admin-create-user only)", async () => {
+    installGlobals("prod");
+    const cognito = await loadCognito();
+    cognito();
+    const poolArgs = byKind("UserPool")[0].args;
+    const adminCfg = poolArgs.adminCreateUserConfig as { allowAdminCreateUserOnly?: boolean };
+    // Single-operator: no public sign-up. Only an admin creates users.
+    expect(adminCfg.allowAdminCreateUserOnly).toBe(true);
   });
 
   it("exports the Hosted-UI endpoint URLs the façade needs", async () => {
