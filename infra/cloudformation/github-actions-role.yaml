@@ -903,6 +903,82 @@ Resources:
                 iam:PassedToService: bedrock-agentcore.amazonaws.com
 
   # ───────────────────────────────────────────────────────────────────────────
+  # Policy 9 — OAuth2 login façade (infra/facade.ts): the sst.aws.ApiGatewayV2
+  # HTTP API that fronts the OAuth2 authorization-code/PKCE flow. SST provisions
+  # the HTTP API + its routes/integrations/stage; the façade Lambda + its
+  # resource policy (lambda:AddPermission for the API→Lambda invoke) are already
+  # covered by LambdaProxyPolicy.LambdaManage (mem9-on-aws-* scope). The reader
+  # UserPoolClient is covered by GatewayMcpPolicy.Cognito (cognito-idp:*Client),
+  # and the sst.Secret's /sst/* SSM parameter by ScaffoldPolicy.SSM{Read,Write}
+  # — so this policy carries ONLY the genuinely-new apigateway control-plane
+  # surface. Its own ManagedPolicy to stay under IAM's 6144-byte per-policy cap
+  # and keep the OAuth2-façade footprint auditable in one place.
+  #
+  # API Gateway ARNs have an EMPTY account field (arn:aws:apigateway:<region>::/…)
+  # — the /apis (create), /apis/* (per-API ops), and /tags/* (tagging) resources
+  # cover the HTTP API lifecycle. apigateway:POST/GET/PATCH/PUT/DELETE are the
+  # verb-style actions the API Gateway v2 control plane authorizes against.
+  #
+  # ADDED for the OAuth2 MCP login PR — must be live (re-run
+  # scripts/deploy-github-role.sh) BEFORE that PR's first deploy, or the deploy
+  # 403s on the first apigateway create (CLAUDE-AWS "new resource TYPE needs
+  # grants first").
+  # ───────────────────────────────────────────────────────────────────────────
+  OAuth2FacadePolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${GitHubRepo}-oauth2-facade
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: ApiGatewayV2
+            Effect: Allow
+            Action:
+              - apigateway:POST
+              - apigateway:GET
+              - apigateway:PATCH
+              - apigateway:PUT
+              - apigateway:DELETE
+              - apigateway:TagResource
+              - apigateway:UntagResource
+            Resource:
+              # Region wildcard: the CFN stack lives in us-west-2 but the app
+              # deploys to ap-northeast-1. API Gateway ARNs carry no account-id
+              # (empty field between the double colons), only the region matters.
+              - "arn:aws:apigateway:*::/apis"
+              - "arn:aws:apigateway:*::/apis/*"
+              - "arn:aws:apigateway:*::/tags/*"
+          # SST's sst.aws.ApiGatewayV2 creates an access-log LogGroup under
+          # /aws/vendedlogs/apis/<app>-<stage>-<id> AND creates a log delivery
+          # via the CloudWatch Logs Delivery API (CreateStage enables access logging).
+          - Sid: ApiGatewayV2AccessLogs
+            Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:DeleteLogGroup
+              - logs:PutRetentionPolicy
+              - logs:DeleteRetentionPolicy
+              - logs:TagResource
+              - logs:UntagResource
+              - logs:ListTagsForResource
+              - logs:DescribeLogGroups
+              # Delivery API actions needed by CreateStage's access-logging setup.
+              - logs:CreateLogDelivery
+              - logs:DeleteLogDelivery
+              - logs:GetLogDelivery
+              - logs:UpdateLogDelivery
+              - logs:PutDeliverySource
+              - logs:PutDeliveryDestination
+              - logs:CreateDelivery
+              - logs:GetDelivery
+              - logs:DeleteDelivery
+              - logs:ListDeliveries
+              - logs:PutResourcePolicy
+              - logs:DescribeResourcePolicies
+              - logs:DescribeLogGroups
+            Resource: "*"
+
+  # ───────────────────────────────────────────────────────────────────────────
   # IAM Role — assumed by GitHub Actions via OIDC.
   # ───────────────────────────────────────────────────────────────────────────
   GitHubActionsRole:
@@ -943,6 +1019,7 @@ Resources:
         - !Ref ImageBuildPolicy
         - !Ref LambdaProxyPolicy
         - !Ref GatewayMcpPolicy
+        - !Ref OAuth2FacadePolicy
       Tags:
         - Key: Project
           Value: !Ref ProjectName

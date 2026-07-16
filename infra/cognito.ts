@@ -24,6 +24,10 @@ export interface CognitoOutputs {
   userPoolId: Output<string>;
   issuer: Output<string>;
   tokenEndpoint: Output<string>;
+  authorizeEndpoint: Output<string>;
+  userInfoEndpoint: Output<string>;
+  revocationEndpoint: Output<string>;
+  jwksUri: Output<string>;
   resourceServerId: string;
   clientId: Output<string>;
   clientSecret: Output<string>;
@@ -47,7 +51,16 @@ export function cognito(): CognitoOutputs {
   const nonProd = stage !== "prod";
   const pool = new awsAny.cognito.UserPool(
     "Mem9McpPool",
-    { name: `${stage}-mem9-mcp`, tags },
+    {
+      name: `${stage}-mem9-mcp`,
+      // Hosted-UI minimal config (a sibling project's exact set): an `email` attribute for
+      // the login form, no forced re-verification on update, and nothing
+      // auto-verified (the OAuth2 façade owns the flow, not Cognito email/SMS).
+      schema: [{ name: "email", attributeDataType: "String", mutable: true, required: false }],
+      userAttributeUpdateSettings: { attributesRequireVerificationBeforeUpdate: [] },
+      autoVerifiedAttributes: [],
+      tags,
+    },
     { deleteBeforeReplace: nonProd },
   );
 
@@ -91,6 +104,10 @@ export function cognito(): CognitoOutputs {
   // a plain literal would stringify them and break CFN/JWT-authorizer validation.
   const issuer = $interpolate`https://cognito-idp.${region}.amazonaws.com/${pool.id}`;
   const tokenEndpoint = $interpolate`https://${domain.domain}.auth.${region}.amazoncognito.com/oauth2/token`;
+  const authorizeEndpoint = $interpolate`https://${domain.domain}.auth.${region}.amazoncognito.com/oauth2/authorize`;
+  const userInfoEndpoint = $interpolate`https://${domain.domain}.auth.${region}.amazoncognito.com/oauth2/userInfo`;
+  const revocationEndpoint = $interpolate`https://${domain.domain}.auth.${region}.amazoncognito.com/oauth2/revoke`;
+  const jwksUri = $interpolate`https://cognito-idp.${region}.amazonaws.com/${pool.id}/.well-known/jwks.json`;
 
   new awsAny.ssm.Parameter("SsmCognitoIssuer", {
     name: `${prefix}/cognito/issuer`,
@@ -128,6 +145,10 @@ export function cognito(): CognitoOutputs {
     userPoolId: pool.id,
     issuer,
     tokenEndpoint,
+    authorizeEndpoint,
+    userInfoEndpoint,
+    revocationEndpoint,
+    jwksUri,
     resourceServerId: RESOURCE_SERVER_ID,
     clientId: client.id,
     clientSecret: client.clientSecret,
