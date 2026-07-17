@@ -267,7 +267,18 @@ export function gateway(
         MEM9_TGT_TOOL_SCHEMA: toolSchemaJson,
       },
     },
-    { dependsOn: [bedrockGateway, proxyFn] },
+    {
+      dependsOn: [bedrockGateway, proxyFn],
+      // A `triggers` change (e.g. the tool schema) REPLACES this Command. Pulumi's
+      // default replace order is create-new-THEN-delete-old — and because the create
+      // step reuses an existing READY target, the new create was a no-op and the
+      // trailing delete then WIPED the target, leaving the gateway with ZERO tools
+      // (prod outage on PR #16's deploy). `deleteBeforeReplace` flips the order: the
+      // old Command's delete removes the target FIRST, so the new create finds nothing
+      // and provisions a fresh target carrying the new schema. (provision-target.mjs
+      // also now reconciles the tool set on reuse — belt and suspenders.)
+      deleteBeforeReplace: true,
+    },
   );
 
   const gatewayId = bedrockGateway.gatewayId;
