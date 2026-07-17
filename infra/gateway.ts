@@ -84,6 +84,47 @@ const TOOL_SCHEMA = [
       required: ["q"],
     },
   },
+  {
+    // Transcript ingest. Hits the SAME mnemo-server endpoint as add_memory
+    // (POST /v1alpha2/mem9s/memories); mnemo-server branches on the presence of
+    // `messages` — a messages[] body triggers smart-ingest (LLM extraction +
+    // reconciliation) instead of storing one raw string. Used by the Claude Code
+    // ingest hooks (Stop/PreCompact/SessionEnd) to upload a bounded conversation
+    // window. See infra/gateway/proxy-handler.mjs `ingestMessages`.
+    name: "ingest_messages",
+    description:
+      "Ingest a conversation window (messages[]) for smart extraction into memories. Writes are async; returns {status:'accepted'}.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        messages: {
+          type: "array",
+          description: "Ordered conversation turns to extract memories from.",
+          items: {
+            type: "object",
+            properties: {
+              role: { type: "string", description: "'user' or 'assistant'." },
+              content: { type: "string", description: "The message text." },
+            },
+            required: ["role", "content"],
+          },
+        },
+        session_id: {
+          type: "string",
+          description: "Optional session id to group the ingested turns.",
+        },
+        agent_id: {
+          type: "string",
+          description: "Optional agent id to attribute the write to (per-agent scoping).",
+        },
+        mode: {
+          type: "string",
+          description: "Ingest mode: 'smart' (LLM extraction, default) or 'raw'.",
+        },
+      },
+      required: ["messages"],
+    },
+  },
 ];
 
 export interface GatewayOutputs {
@@ -220,7 +261,8 @@ export function gateway(
         MEM9_TGT_REGION: region,
         MEM9_TGT_GATEWAY_ID: bedrockGateway.gatewayId,
         MEM9_TGT_NAME: targetName,
-        MEM9_TGT_DESCRIPTION: "mnemo-server MCP tools (add_memory, search_memories) via a proxy Lambda",
+        MEM9_TGT_DESCRIPTION:
+          "mnemo-server MCP tools (add_memory, search_memories, ingest_messages) via a proxy Lambda",
         MEM9_TGT_LAMBDA_ARN: proxyFn.arn,
         MEM9_TGT_TOOL_SCHEMA: toolSchemaJson,
       },
