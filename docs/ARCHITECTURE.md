@@ -172,7 +172,10 @@ VPC-internal endpoint if the embedding shim is in-VPC).
 >   `mnemo.mem9-<stage>.local`; the Lambda (in the same private subnets + task SG)
 >   resolves it and calls HTTP :8080.
 > - **v1 has NO interceptor Lambda** (single-operator, single-tenant → per-tool
->   scoping deferred). Tools exposed: `add_memory`, `search_memories`.
+>   scoping deferred). Tools exposed: `add_memory`, `search_memories`,
+>   `ingest_messages` (transcript smart-ingest — same mnemo-server
+>   `POST /memories` endpoint as `add_memory`, but a `messages[]` body triggers
+>   LLM extraction; used by the Claude Code ingest hooks).
 
 Mirror a sibling project `gateway.ts` + `cognito.ts` + `api.ts`:
 
@@ -240,9 +243,10 @@ Design rules:
   `lambda:InvokeFunction` on the one function (least privilege).
 - **The proxy Lambda** (`infra/gateway/proxy-handler.mjs`) receives the tool name in
   `context.clientContext.Custom.bedrockAgentCoreToolName` (`${target}___${tool}`) and
-  the tool inputs as a flat event map; it maps `add_memory`/`search_memories` to
-  mnemo-server's REST (`POST`/`GET /v1alpha2/mem9s/memories`), injecting `X-API-Key`
-  (= tenant id). It's VPC-attached (private subnets + the task SG, so a self-ingress
+  the tool inputs as a flat event map; it maps `add_memory`/`search_memories`/
+  `ingest_messages` to mnemo-server's REST (`POST`/`GET /v1alpha2/mem9s/memories`;
+  `ingest_messages` POSTs a `messages[]` body for smart-ingest), injecting
+  `X-API-Key` (= tenant id). It's VPC-attached (private subnets + the task SG, so a self-ingress
   :8080 rule lets it reach the server) and nodejs24.x. The tool inputSchemas live
   inline in `infra/gateway.ts`.
 - **Cloud Map** (`infra/ecs.ts`): a `PrivateDnsNamespace` (`mem9-<stage>.local`) + a
