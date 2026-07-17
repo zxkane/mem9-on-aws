@@ -146,6 +146,26 @@ async function searchMemories(input) {
   return mem9Fetch(`${MEMORIES_PATH}?${params.toString()}`, { method: "GET" });
 }
 
+async function ingestMessages(input) {
+  // Same endpoint as add_memory; mnemo-server smart-ingests when the body carries
+  // messages[] (LLM extraction) rather than a single content string. Default
+  // mode=smart matches the upstream Claude Code plugin's transcript ingest.
+  const { messages, session_id, agent_id, mode } = input ?? {};
+  if (!Array.isArray(messages) || messages.length === 0) {
+    throw new Error("ingest_messages requires a non-empty 'messages' array");
+  }
+  const headers = { "Content-Type": "application/json" };
+  if (agent_id) headers["X-Mnemo-Agent-Id"] = String(agent_id);
+  const payload = { mode: mode ?? "smart", messages };
+  if (session_id) payload.session_id = session_id;
+  if (agent_id) payload.agent_id = agent_id;
+  return mem9Fetch(MEMORIES_PATH, {
+    method: "POST",
+    headers,
+    body: JSON.stringify(payload),
+  });
+}
+
 export const handler = async (event, context) => {
   const tool = resolveToolName(context);
   switch (tool) {
@@ -153,6 +173,8 @@ export const handler = async (event, context) => {
       return addMemory(event);
     case "search_memories":
       return searchMemories(event);
+    case "ingest_messages":
+      return ingestMessages(event);
     default:
       throw new Error(`unknown tool: ${tool}`);
   }

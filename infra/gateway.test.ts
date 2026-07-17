@@ -215,6 +215,7 @@ describe("gateway stack", () => {
     expect(env.MEM9_TGT_LAMBDA_ARN).toBeDefined();
     expect(String(env.MEM9_TGT_TOOL_SCHEMA)).toContain("add_memory");
     expect(String(env.MEM9_TGT_TOOL_SCHEMA)).toContain("search_memories");
+    expect(String(env.MEM9_TGT_TOOL_SCHEMA)).toContain("ingest_messages");
     // The removed privateEndpoint/API-key/OpenAPI-schema inputs are gone.
     expect(env.MEM9_TGT_SCHEMA).toBeUndefined();
     expect(env.MEM9_TGT_APIKEY_PROVIDER_ARN).toBeUndefined();
