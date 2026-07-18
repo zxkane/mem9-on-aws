@@ -17,6 +17,7 @@ function out<T>(value: T): { value: T; apply: (fn: (v: T) => unknown) => unknown
 interface Rec {
   kind: string;
   args: Record<string, unknown>;
+  opts?: Record<string, unknown>;
 }
 let created: Rec[];
 let params: { name: string }[];
@@ -58,8 +59,8 @@ function makeCtor(kind: string) {
     id = out(`${kind}-id`);
     gatewayId = out("gw-123");
     gatewayUrl = out("https://gw-123.gateway.bedrock-agentcore.ap-northeast-1.amazonaws.com/mcp");
-    constructor(_n: string, args: Record<string, unknown>) {
-      created.push({ kind, args });
+    constructor(_n: string, args: Record<string, unknown>, opts?: Record<string, unknown>) {
+      created.push({ kind, args, opts });
     }
   };
 }
@@ -226,5 +227,9 @@ describe("gateway stack", () => {
     expect(created.filter((r) => r.kind === "AgentcoreApiKeyCredentialProvider")).toHaveLength(0);
     // Gateway url/id exported to SSM.
     expect(params.map((p) => p.name)).toContain("/mem9-on-aws/prod/gateway/url");
+    // deleteBeforeReplace guards against the create-then-delete replace order that
+    // wiped the target on a tool-schema change (PR #16 prod outage).
+    const cmdRec = created.find((r) => r.kind === "LocalCommand");
+    expect(cmdRec?.opts?.deleteBeforeReplace).toBe(true);
   });
 });

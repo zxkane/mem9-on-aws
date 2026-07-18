@@ -141,23 +141,47 @@ async function createOnce(input) {
   return targetId;
 }
 
+/** Names of the tools an existing target exposes, for a schema-drift check on reuse. */
+async function existingToolNames(targetId) {
+  const res = await client.send(
+    new GetGatewayTargetCommand({ gatewayIdentifier: GATEWAY_ID, targetId }),
+  );
+  const inline = res?.targetConfiguration?.mcp?.lambda?.toolSchema?.inlinePayload ?? [];
+  return new Set(inline.map((t) => t.name));
+}
+
 async function create() {
   const lambdaArn = env("MEM9_TGT_LAMBDA_ARN");
   const toolSchema = JSON.parse(env("MEM9_TGT_TOOL_SCHEMA"));
   const description = env("MEM9_TGT_DESCRIPTION", false) ?? "";
 
-  // Idempotency: a same-named target may already exist (retry/re-run). Reuse if
-  // READY; otherwise delete the stale/failed one and recreate cleanly.
+  // Idempotency: a same-named target may already exist (retry/re-run). Reuse ONLY
+  // if READY *and* its tool set matches the desired schema — otherwise delete and
+  // recreate. Reusing a READY-but-stale target is exactly what silently kept the
+  // old 2-tool schema on a tool-schema change (and, combined with a create-then-
+  // delete replace, wiped the target entirely — see gateway.ts deleteBeforeReplace).
   const existing = await findTargetByName(NAME);
   if (existing) {
+    const wantNames = new Set(toolSchema.map((t) => t.name));
+    let sameTools = false;
     if (existing.status === "READY") {
-      console.error(`target ${NAME} already READY (${existing.targetId}); reusing`);
+      try {
+        const haveNames = await existingToolNames(existing.targetId);
+        sameTools =
+          haveNames.size === wantNames.size && [...wantNames].every((n) => haveNames.has(n));
+      } catch (e) {
+        console.error(`  (could not read existing tools, will recreate: ${e?.message ?? e})`);
+      }
+    }
+    if (existing.status === "READY" && sameTools) {
+      console.error(
+        `target ${NAME} already READY with matching tools (${existing.targetId}); reusing`,
+      );
       console.log(existing.targetId);
       return;
     }
-    console.error(
-      `target ${NAME} exists in status ${existing.status}; deleting to recreate`,
-    );
+    const why = existing.status === "READY" ? "tool schema changed" : `status ${existing.status}`;
+    console.error(`target ${NAME} exists (${why}); deleting to recreate`);
     await deleteTarget(existing.targetId);
   }
 
