@@ -6,6 +6,7 @@ CLAUDE.local.md
 # Env / local config
 .env
 .env.*
+!.env.example
 *.local.*
 .local.json
 

@@ -5,9 +5,8 @@
 // OpenAI-shaped reply. This is the mem9-on-aws embedding MaaS (ARCHITECTURE.md §7):
 // it runs as an ALWAYS-WARM ECS sidecar next to mnemo-server, reached over
 // localhost, so there's no cold-start / cross-service auth. The embedding code
-// (model, last_token pooling, L2 normalize, 1024 dims) is lifted from
-// a sibling project's ONNX embedder; this file is the thin HTTP wrapper a sibling project
-// never had (it called the embedder in-process).
+// (model, last_token pooling, L2 normalize, 1024 dims) is a standalone ONNX
+// embedder; this file is the thin HTTP wrapper around it.
 //
 // Non-obvious choices (see docs/mem9-facts.md "Embedding" + the qwen3 memory):
 //   - ONE text per pipeline call, never a native string[] batch: with last_token

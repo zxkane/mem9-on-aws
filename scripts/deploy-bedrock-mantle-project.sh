@@ -15,17 +15,22 @@
 # is in the same region the llm-proxy sidecar targets. Hard-coded (not the
 # ambient AWS_REGION) so a leftover AWS_REGION can't create it in the wrong one.
 #
-# Local deploy profile: your-aws-profile (set AWS_PROFILE).
+# Config: set AWS_PROFILE (and any overrides) in a gitignored .env at the repo
+# root — copy .env.example.
 #
 # Usage:
-#   AWS_PROFILE=your-aws-profile scripts/deploy-bedrock-mantle-project.sh   # auto create/update
+#   scripts/deploy-bedrock-mantle-project.sh            # auto create/update (reads .env)
 #   scripts/deploy-bedrock-mantle-project.sh --create   # force create-stack
 #   scripts/deploy-bedrock-mantle-project.sh --update   # force update-stack
 #
 # After success, feed the ProjectId output to CI so infra/ecs.ts injects it:
-#   gh variable set MEM9_BEDROCK_PROJECT --repo zxkane/mem9-on-aws --body "<project-id>"
+#   gh variable set MEM9_BEDROCK_PROJECT --repo <owner>/mem9-on-aws --body "<project-id>"
 
 set -euo pipefail
+
+# Load repo-root .env (gitignored) for AWS_PROFILE etc., if present.
+_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+[ -f "$_repo_root/.env" ] && set -a && . "$_repo_root/.env" && set +a
 
 STACK_NAME="${STACK_NAME:-bedrock-mantle-project-mem9-on-aws}"
 TEMPLATE_FILE="infra/cloudformation/bedrock-mantle-project.yaml"

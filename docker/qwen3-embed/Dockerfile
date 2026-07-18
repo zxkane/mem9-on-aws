@@ -2,7 +2,7 @@
 #
 # ARCHITECTURE.md §7: mem9's embedding MaaS, always-warm ECS sidecar next to
 # mnemo-server (localhost). Embedding logic (model, last_token pooling, 1024 dims)
-# lifted from a sibling project's ONNX embedder; server.mjs is the thin HTTP shell.
+# is a standalone ONNX embedder; server.mjs is the thin HTTP shell.
 #
 # The model is BAKED INTO THE IMAGE at build time (no cold-start download) so task
 # startup is deterministic. @huggingface/transformers v4 ignores HF_HOME and
@@ -13,7 +13,7 @@
 # BASE = node:24-slim (Debian bookworm, **glibc**), NOT alpine. onnxruntime-node
 # ships only glibc-linked prebuilt .so binaries; on alpine (musl) the model load
 # dies with `__vsnprintf_chk: symbol not found` (ERR_DLOPEN_FAILED) — a glibc-only
-# fortified symbol. a sibling project runs this on Amazon Linux (glibc) for the same reason.
+# fortified symbol — any glibc base (Debian/Amazon Linux) works for the same reason.
 # node:24-slim is multi-arch → the arm64 variant is pulled for --platform=linux/arm64.
 # Node 24 (@huggingface/transformers needs >=24; project standard).
 

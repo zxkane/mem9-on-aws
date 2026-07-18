@@ -15,14 +15,19 @@
 # latency). This is UNLIKE deploy-github-role.sh, which pins us-west-2 for the
 # global IAM role stack; the ECR repo is a regional data resource.
 #
-# Local deploy profile: your-aws-profile (set AWS_PROFILE), account <aws-account-id>.
+# Config: set AWS_PROFILE (and any overrides) in a gitignored .env at the repo
+# root — copy .env.example. Targets account <aws-account-id>.
 #
 # Usage:
-#   AWS_PROFILE=your-aws-profile scripts/deploy-ecr-repositories.sh   # auto create/update
+#   scripts/deploy-ecr-repositories.sh            # auto create/update (reads .env)
 #   scripts/deploy-ecr-repositories.sh --create   # force create-stack
 #   scripts/deploy-ecr-repositories.sh --update   # force update-stack
 
 set -euo pipefail
+
+# Load repo-root .env (gitignored) for AWS_PROFILE etc., if present.
+_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+[ -f "$_repo_root/.env" ] && set -a && . "$_repo_root/.env" && set +a
 
 STACK_NAME="${STACK_NAME:-ecr-repositories-mem9-on-aws}"
 TEMPLATE_FILE="infra/cloudformation/ecr-repositories.yaml"

@@ -23,7 +23,7 @@ function cfg(overrides: Partial<FacadeConfig> = {}): FacadeConfig {
     revocation: "https://dom.auth.ap-northeast-1.amazoncognito.com/oauth2/revoke",
     jwks: "https://cognito-idp.ap-northeast-1.amazonaws.com/pool/.well-known/jwks.json",
     // Reader-client-aligned: openid + email + read only (no write).
-    resourceScopes: ["a sibling project/query/read"],
+    resourceScopes: ["example-mcp/query/read"],
     userClientId: "reader-client-id",
     userClientSecret: "reader-client-secret",
     hmacKey: HMAC,
@@ -69,17 +69,17 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
     expect(b.code_challenge_methods_supported).toContain("S256");
     // Advertised scopes must match the reader client's allowed scopes exactly
     // — no `profile`, no `write`.
-    expect(b.scopes_supported).toEqual(["openid", "email", "a sibling project/query/read"]);
+    expect(b.scopes_supported).toEqual(["openid", "email", "example-mcp/query/read"]);
     expect(b.scopes_supported).not.toContain("profile");
-    expect(b.scopes_supported).not.toContain("a sibling project/query/write");
+    expect(b.scopes_supported).not.toContain("example-mcp/query/write");
   });
 
   it("TC-MCPGW-061b: OIDC discovery metadata advertises reader-aligned scopes (no profile/write)", async () => {
     const res = await route(ev("/.well-known/openid-configuration"), cfg());
     const b = JSON.parse(res.body);
-    expect(b.scopes_supported).toEqual(["openid", "email", "a sibling project/query/read"]);
+    expect(b.scopes_supported).toEqual(["openid", "email", "example-mcp/query/read"]);
     expect(b.scopes_supported).not.toContain("profile");
-    expect(b.scopes_supported).not.toContain("a sibling project/query/write");
+    expect(b.scopes_supported).not.toContain("example-mcp/query/write");
   });
 
   it("TC-MCPGW-062: /oauth/authorize 302s to Cognito with replaced redirect_uri + HMAC state", async () => {
@@ -258,7 +258,7 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
     expect(b.client_secret).toBe("reader-client-secret");
     expect(b.redirect_uris).toEqual(["http://127.0.0.1:9/cb"]);
     // DCR scope must match the reader client (no profile/write).
-    expect(b.scope).toBe("openid email a sibling project/query/read");
+    expect(b.scope).toBe("openid email example-mcp/query/read");
     expect(b.scope).not.toMatch(/profile/);
     expect(b.scope).not.toMatch(/write/);
   });

@@ -8,17 +8,23 @@
 # added to infra/cloudformation/github-actions-role.yaml (else the first
 # deploy that provisions it 403s).
 #
-# Local deploy profile: your-aws-profile (set AWS_PROFILE), account <aws-account-id>.
+# Config: set AWS_PROFILE (and any overrides) in a gitignored .env at the repo
+# root — copy .env.example and fill in your own profile. Targets account
+# <aws-account-id>.
 #
 # Usage:
-#   AWS_PROFILE=your-aws-profile scripts/deploy-github-role.sh   # auto create/update
+#   scripts/deploy-github-role.sh            # auto create/update (reads .env)
 #   scripts/deploy-github-role.sh --create   # force create-stack
 #   scripts/deploy-github-role.sh --update   # force update-stack
 #
 # After success, copy the RoleArn output to the GitHub repository secret:
-#   gh secret set AWS_ROLE_ARN --repo zxkane/mem9-on-aws --body "<role-arn>"
+#   gh secret set AWS_ROLE_ARN --repo <owner>/mem9-on-aws --body "<role-arn>"
 
 set -euo pipefail
+
+# Load repo-root .env (gitignored) for AWS_PROFILE etc., if present.
+_repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+[ -f "$_repo_root/.env" ] && set -a && . "$_repo_root/.env" && set +a
 
 STACK_NAME="${STACK_NAME:-github-actions-mem9-on-aws}"
 TEMPLATE_FILE="infra/cloudformation/github-actions-role.yaml"
