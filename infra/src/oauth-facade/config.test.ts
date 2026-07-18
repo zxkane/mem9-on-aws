@@ -8,7 +8,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import { loadConfig, resolveSsm, type SsmLike } from "./config.js";
 
-const PREFIX = "/llm-wiki/pr-7/mcp";
+const PREFIX = "/example-app/pr-7/mcp";
 
 function ssmReturning(params: Record<string, string>): SsmLike {
   return {
@@ -32,7 +32,7 @@ const baseEnv = {
   COGNITO_USERINFO_ENDPOINT: "https://userinfo",
   COGNITO_REVOCATION_ENDPOINT: "https://revoke",
   COGNITO_JWKS_URI: "https://jwks",
-  RESOURCE_SCOPES: "llm-wiki/query/read, llm-wiki/query/write",
+  RESOURCE_SCOPES: "example-mcp/query/read, example-mcp/query/write",
   OAUTH_STATE_HMAC_KEY: "the-key",
 };
 
@@ -69,8 +69,8 @@ describe("façade config loader (cycle-break SSM reads)", () => {
     expect(cfg.issuer).toBe("https://issuer");
     expect(cfg.hmacKey).toBe("the-key");
     expect(cfg.resourceScopes).toEqual([
-      "llm-wiki/query/read",
-      "llm-wiki/query/write",
+      "example-mcp/query/read",
+      "example-mcp/query/write",
     ]);
   });
 

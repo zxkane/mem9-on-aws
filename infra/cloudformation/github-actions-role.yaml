@@ -799,7 +799,7 @@ Resources:
             # infra/cognito.ts. The Pulumi AWS provider Read step probes attribute
             # settings, domain config, resource servers, and clients on every
             # refresh — this is the minimal set that survives `sst deploy --refresh`
-            # (surface proven by podcast-curation prod).
+            # (surface proven in production).
             Effect: Allow
             Action:
               - cognito-idp:CreateUserPool

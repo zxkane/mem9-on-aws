@@ -93,8 +93,8 @@ Verified from `server/internal/config/config.go` + `server/internal/repository/p
   embedding <=> $q`. Requires **pre-computed query embedding** (mnemo-server
   calls the embedding MaaS, then queries).
 - **FTSSearch** = PostgreSQL `to_tsvector('english', ...)` + `plainto_tsquery` +
-  `ts_rank`. (English analyzer — note for CJK content, same class of issue
-  llm-wiki hit; may need config.)
+  `ts_rank`. (English analyzer — note for CJK content, a known class of issue;
+  may need config.)
 - **`AutoVectorSearch` is NOT supported on PG** — explicit source fallback:
   "auto vector search not supported with PostgreSQL; use VectorSearch with
   pre-computed embeddings." (Auto-embed via `EMBED_TEXT` is TiDB-only.)
@@ -154,7 +154,7 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
 - **No native Bedrock.** Bedrock requires an OpenAI→Bedrock proxy exposing
   `/embeddings`. Ollama/LM Studio/TEI/any OpenAI-compatible server works via
   `MNEMO_EMBED_BASE_URL`.
-- Design decision: reuse llm-wiki's **qwen3** embedding (dims 1024) or a Bedrock
+- Design decision: reuse a self-hosted **qwen3** embedding (dims 1024) or a Bedrock
   Cohere/Titan proxy. **Pin model + dims before first ingest** — the vector
   column type and all stored vectors depend on it; changing dims = reindex.
 
@@ -197,7 +197,7 @@ Probed at the pinned commit (`server/internal/config/config.go` + `llm/client.go
 
 ## Bedrock Mantle facts (for the LLM/embedding decision)
 
-Verified against AWS docs + the operator's podcast-curation prod usage, and — for
+Verified against AWS docs + production usage, and — for
 this repo — **empirically live 2026-07-12** (ap-northeast-1):
 
 - **Live proof:** `getToken({credentials, region})` (from `@aws/bedrock-token-generator`)
@@ -211,8 +211,8 @@ this repo — **empirically live 2026-07-12** (ap-northeast-1):
   surfaces = **Chat Completions** + **Responses** (OpenAI-compatible) + **Messages**
   (Anthropic). "Bring OpenAI SDK code by changing only base URL + API key."
 - **mem9 speaks `/chat/completions` only** → the smart-ingest LLM must be a
-  **Chat-Completions** model on Mantle: **GLM-5** (podcast-curation runs GLM-5 on
-  Mantle in prod), Claude Sonnet/Fable 5, DeepSeek, Gemma, etc. **GPT-5.4 / 5.5
+  **Chat-Completions** model on Mantle: **GLM-5** (GLM-5 runs on Mantle in
+  production), Claude Sonnet/Fable 5, DeepSeek, Gemma, etc. **GPT-5.4 / 5.5
   are Responses-API only → NOT usable by mem9** without a source change.
 - **Mantle has NO `/embeddings`.** All Bedrock embedding models (Titan Text V2,
   Cohere embed-v4, Nova MM) are **`bedrock-runtime` ONLY**, and bedrock-runtime is
@@ -221,10 +221,10 @@ this repo — **empirically live 2026-07-12** (ap-northeast-1):
 - **Auth**: Bedrock API key (bearer) works with the OpenAI SDK; SigV4 also works.
   Cost attribution on Mantle = **Bedrock Projects** via the `OpenAI-Project`
   header — **IAM-principal / session-tag attribution does NOT work on Mantle**
-  (podcast-curation verified prod GLM-5 spend tagged ~$0 via the runtime path).
-  Reuse podcast-curation `infra/bedrock-mantle.ts` (CloudControl
-  `AWS::BedrockMantle::Project`, gated behind a provision env flag) +
-  `bedrock-mantle-auth.ts` + `src/shared/llm/providers/bedrock-mantle.ts`.
+  (verified in production: GLM-5 spend tagged ~$0 via the runtime path).
+  Follow the established pattern: a CloudControl `AWS::BedrockMantle::Project`
+  resource (gated behind a provision env flag) + a Mantle auth helper module +
+  a Bedrock-Mantle LLM provider module.
 - Pricing identical to bedrock-runtime per-token. VPC PrivateLink interface
   endpoint avoids NAT egress cost if calling from in-VPC.
 
@@ -295,7 +295,7 @@ this repo — **empirically live 2026-07-12** (ap-northeast-1):
   PG 16 & 17. `pgvector` is a standard extension (`CREATE EXTENSION vector`).
 - Amazon S3 Files (2026-04 GA) exists as a writable POSIX/NFS mount but is NOT
   used here (no filesystem state to host; single-task `/tmp` covers import).
-- podcast-curation's ECS stack consumes the **account default VPC** via
+- The ECS stack consumes the **account default VPC** via
   `aws.ec2.getVpc({ default: true })`, filtered to NAT-routed private subnets —
   the pattern reused here.
 - **Tokyo default VPC is customized + NAT-routed (verified 2026-07-12).** The

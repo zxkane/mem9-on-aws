@@ -4,8 +4,8 @@
  * The AgentCore Gateway's inbound authorizer is a CUSTOM_JWT authorizer that
  * validates Cognito `client_credentials` (M2M) JWTs. This stack provisions the
  * pool + domain (OAuth token endpoint) + resource server (scopes) + ONE M2M
- * client (single-operator; podcast-curation runs several tenant clients — we keep
- * one and can add more later without rotating the Gateway URL, since only
+ * client (single-operator; a multi-tenant setup would run several clients — we
+ * keep one and can add more later without rotating the Gateway URL, since only
  * `name`/`authorizerType` are RequiresReplace on the Gateway).
  *
  * The Gateway matches on `allowedClients` (Cognito client_credentials tokens carry

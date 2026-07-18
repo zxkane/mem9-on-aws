@@ -4,7 +4,7 @@ Description: >
   The llm-proxy sidecar (docker/llm-proxy) passes this project's Id as the
   `OpenAI-Project` header on every Mantle /chat/completions call, so GLM-5
   smart-ingest spend is tagged to this project. Mantle does NOT support
-  IAM-principal / session-tag attribution (verified in podcast-curation prod), so
+  IAM-principal / session-tag attribution (verified empirically in production), so
   a Project is the ONLY way to attribute GLM-5 spend.
 
   NOT SST-managed — managed out-of-band (like the ECR repos + the GitHub Actions
