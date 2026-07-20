@@ -82,6 +82,29 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
     expect(b.scopes_supported).not.toContain("example-mcp/query/write");
   });
 
+  it("TC-MCPGW-061c: resource-suffixed well-known paths (/.well-known/<doc>/mcp) return the FAÇADE metadata, not the raw Gateway", async () => {
+    // A spec-compliant MCP client (RFC 9728/8414) queries the resource-suffixed
+    // path first. Without normalization these fell through to the catch-all proxy
+    // and returned the raw AgentCore Gateway's Cognito metadata (no /register DCR),
+    // breaking discovery. All three must resolve to the façade's own metadata.
+    const pr = JSON.parse(
+      (await route(ev("/.well-known/oauth-protected-resource/mcp"), cfg())).body,
+    );
+    expect(pr.resource).toBe(`${BASE}/mcp`);
+    expect(pr.authorization_servers).toEqual([BASE]);
+
+    const as = JSON.parse(
+      (await route(ev("/.well-known/oauth-authorization-server/mcp"), cfg())).body,
+    );
+    expect(as.authorization_endpoint).toBe(`${BASE}/oauth/authorize`);
+    expect(as.registration_endpoint).toBe(`${BASE}/register`);
+
+    const oidc = JSON.parse(
+      (await route(ev("/.well-known/openid-configuration/mcp"), cfg())).body,
+    );
+    expect(oidc.registration_endpoint).toBe(`${BASE}/register`);
+  });
+
   it("TC-MCPGW-062: /oauth/authorize 302s to Cognito with replaced redirect_uri + HMAC state", async () => {
     const q = new URLSearchParams({
       client_id: "c",
