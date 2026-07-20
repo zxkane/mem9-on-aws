@@ -1,7 +1,6 @@
-# Claude Code local files
+# Claude Code local files (auto-managed by hooks installer)
+.claude/
 CLAUDE.local.md
-.claude/settings.local.json
-.claude/worktrees/
 
 # Env / local config
 .env
@@ -22,10 +21,36 @@ infra/sst-env.d.ts
 # Git worktrees (feature isolation, per the dev workflow)
 .worktrees/
 
-# Autonomous-dev-team scaffolding (machine-local; see main-workspace .gitignore).
+# Autonomous-dev-team scaffolding (machine-local; recreated by `npx skills add`).
 # .agents/skills → symlink into the user-scope install; .agents/state → hook state.
 .agents/
 .pulumi/
+
+# Symlink scaffolding pointing into .agents/ (machine-local, recreated on install)
+hooks
+scripts/autonomous.conf
+scripts/adt-gc.sh
+scripts/autonomous-dev.sh
+scripts/autonomous-review.sh
+scripts/check-provider-cutover.sh
+scripts/check-spec-drift.sh
+scripts/dispatch-local.sh
+scripts/dispatcher-multi-tick.sh
+scripts/dispatcher-tick.sh
+scripts/gen-state-machine.sh
+scripts/gh-app-token.sh
+scripts/gh-as-user.sh
+scripts/gh-token-refresh-daemon.sh
+scripts/gh-with-token-refresh.sh
+scripts/install-gc-timer.sh
+scripts/mark-issue-checkbox.sh
+scripts/metrics-report.sh
+scripts/post-verdict.sh
+scripts/reply-to-comments.sh
+scripts/resolve-threads.sh
+scripts/setup-labels.sh
+scripts/status.sh
+scripts/upload-screenshot.sh
 
 # OS
 .DS_Store
