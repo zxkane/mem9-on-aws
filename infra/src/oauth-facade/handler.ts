@@ -124,8 +124,21 @@ export async function route(
     event.requestContext?.http?.method ?? event.httpMethod ?? "GET";
   const base = selfBaseUrl(event);
 
+  // Per RFC 9728 §3.1 / RFC 8414 §3.1, a client that found the resource at
+  // `<base>/mcp` queries the metadata at the resource-suffixed well-known path
+  // (`/.well-known/<doc>/mcp`), then falls back to the bare path. Our API
+  // Gateway sends every path to this handler via `ANY /{proxy+}`, so a suffixed
+  // well-known path that we don't match here would fall through to the catch-all
+  // proxy and return the RAW AgentCore Gateway's Cognito metadata (no `/register`
+  // DCR) — which is exactly what broke a spec-compliant MCP client. Normalize by
+  // stripping a trailing `/mcp` from any well-known path so the bare and
+  // resource-suffixed variants both resolve to the façade's own metadata.
+  const wellKnown = path.startsWith("/.well-known/")
+    ? path.replace(/\/mcp$/, "")
+    : path;
+
   // RFC 9728 — Protected Resource Metadata.
-  if (path === "/.well-known/oauth-protected-resource") {
+  if (wellKnown === "/.well-known/oauth-protected-resource") {
     return json(200, {
       resource: `${base}/mcp`,
       authorization_servers: [base],
@@ -136,7 +149,7 @@ export async function route(
 
   // RFC 8414 — Authorization Server Metadata. authorize/token point at the
   // façade so clients hit the redirect proxy; the rest pass through to Cognito.
-  if (path === "/.well-known/oauth-authorization-server") {
+  if (wellKnown === "/.well-known/oauth-authorization-server") {
     return json(200, {
       issuer: cfg.issuer,
       authorization_endpoint: `${base}/oauth/authorize`,
@@ -163,7 +176,7 @@ export async function route(
   }
 
   // OIDC discovery (some clients only know this path).
-  if (path === "/.well-known/openid-configuration") {
+  if (wellKnown === "/.well-known/openid-configuration") {
     return json(200, {
       issuer: cfg.issuer,
       authorization_endpoint: `${base}/oauth/authorize`,
