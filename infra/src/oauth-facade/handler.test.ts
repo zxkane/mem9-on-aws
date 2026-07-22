@@ -1,5 +1,5 @@
 /**
- * Unit tests for the façade routing (TC-MCPGW-060..073).
+ * Unit tests for the façade routing (TC-MCPGW-060..078).
  * Exercised through the injected `route(event, cfg)` seam — no AWS/SSM.
  */
 
@@ -67,6 +67,14 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
     expect(b.authorization_endpoint).toBe(`${BASE}/oauth/authorize`);
     expect(b.token_endpoint).toBe(`${BASE}/oauth/token`);
     expect(b.code_challenge_methods_supported).toContain("S256");
+    // Public-client support ("none") plus the legacy secret methods during
+    // migration — clients that registered before the public-client change
+    // still authenticate with Basic/Post.
+    expect(b.token_endpoint_auth_methods_supported).toEqual([
+      "none",
+      "client_secret_basic",
+      "client_secret_post",
+    ]);
     // Advertised scopes must match the reader client's allowed scopes exactly
     // — no `profile`, no `write`.
     expect(b.scopes_supported).toEqual(["openid", "email", "example-mcp/query/read"]);
@@ -233,6 +241,7 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
       code: "c",
       redirect_uri: "http://127.0.0.1:5000/callback",
       code_verifier: "v",
+      client_id: "reader-client-id",
     }).toString();
     const res = await route(
       ev("/oauth/token", "POST", {
@@ -246,6 +255,128 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
     const fwd = new URLSearchParams(captured!.body);
     expect(fwd.get("redirect_uri")).toBe(`${BASE}/oauth/callback`);
     expect(fwd.get("code")).toBe("c");
+  });
+
+  // --- Public-client secret injection at /oauth/token (TC-MCPGW-074..078) ---
+  // Codex-style public clients authenticate with `none`: client_id only, no
+  // Authorization header, no client_secret. The façade injects the Cognito
+  // reader secret before forwarding — the secret must never be required from,
+  // nor returned to, the MCP client.
+
+  function mockTokenUpstream() {
+    const captured: { headers?: Record<string, string>; body?: string } = {};
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (_url: string | URL | Request, init?: RequestInit) => {
+        captured.headers = (init?.headers ?? {}) as Record<string, string>;
+        captured.body = String(init?.body ?? "");
+        return new Response(JSON.stringify({ access_token: "tok" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    );
+    return captured;
+  }
+
+  it("TC-MCPGW-074: secretless refresh with the known client_id → façade injects the Cognito secret", async () => {
+    const captured = mockTokenUpstream();
+    const form = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: "rt",
+      client_id: "reader-client-id",
+    }).toString();
+    const res = await route(
+      ev("/oauth/token", "POST", { body: form }),
+      cfg(),
+    );
+    expect(res.statusCode).toBe(200);
+    const fwd = new URLSearchParams(captured.body!);
+    expect(fwd.get("client_secret")).toBe("reader-client-secret");
+    expect(fwd.get("client_id")).toBe("reader-client-id");
+    expect(fwd.get("refresh_token")).toBe("rt");
+  });
+
+  it("TC-MCPGW-075: secretless request with an UNKNOWN client_id → 401, no injection", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const form = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: "rt",
+      client_id: "attacker-client-id",
+    }).toString();
+    const res = await route(
+      ev("/oauth/token", "POST", { body: form }),
+      cfg(),
+    );
+    expect(res.statusCode).toBe(401);
+    expect(JSON.parse(res.body).error).toBe("invalid_client");
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("TC-MCPGW-076: secretless request with NO client_id → 401, no injection", async () => {
+    const fetchSpy = vi.spyOn(globalThis, "fetch");
+    const form = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: "rt",
+    }).toString();
+    const res = await route(
+      ev("/oauth/token", "POST", { body: form }),
+      cfg(),
+    );
+    expect(res.statusCode).toBe(401);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("TC-MCPGW-077: Basic-auth refresh (legacy Claude Code) passes through untouched — no injection", async () => {
+    const captured = mockTokenUpstream();
+    const basic = "Basic " + Buffer.from("reader-client-id:reader-client-secret").toString("base64");
+    const form = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: "rt",
+    }).toString();
+    const res = await route(
+      ev("/oauth/token", "POST", { body: form, headers: { authorization: basic } }),
+      cfg(),
+    );
+    expect(res.statusCode).toBe(200);
+    expect(captured.headers!["authorization"]).toBe(basic);
+    const fwd = new URLSearchParams(captured.body!);
+    expect(fwd.get("client_secret")).toBeNull();
+  });
+
+  it("TC-MCPGW-078: client_secret_post refresh (legacy) passes through untouched — no overwrite", async () => {
+    const captured = mockTokenUpstream();
+    const form = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: "rt",
+      client_id: "reader-client-id",
+      client_secret: "caller-supplied-secret",
+    }).toString();
+    const res = await route(
+      ev("/oauth/token", "POST", { body: form }),
+      cfg(),
+    );
+    expect(res.statusCode).toBe(200);
+    const fwd = new URLSearchParams(captured.body!);
+    expect(fwd.get("client_secret")).toBe("caller-supplied-secret");
+  });
+
+  it("TC-MCPGW-078b: secretless authorization_code exchange also gets the injected secret (PKCE public client)", async () => {
+    const captured = mockTokenUpstream();
+    const form = new URLSearchParams({
+      grant_type: "authorization_code",
+      code: "c",
+      redirect_uri: "http://127.0.0.1:5000/callback",
+      code_verifier: "v",
+      client_id: "reader-client-id",
+    }).toString();
+    const res = await route(
+      ev("/oauth/token", "POST", { body: form }),
+      cfg(),
+    );
+    expect(res.statusCode).toBe(200);
+    const fwd = new URLSearchParams(captured.body!);
+    expect(fwd.get("client_secret")).toBe("reader-client-secret");
+    expect(fwd.get("redirect_uri")).toBe(`${BASE}/oauth/callback`);
   });
 
   it("TC-MCPGW-070: empty HMAC key → /oauth/authorize 503", async () => {
@@ -270,7 +401,7 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
     expect(JSON.parse(res.body).error).toBe("server_misconfigured");
   });
 
-  it("TC-MCPGW-072: /register returns the reader client creds (RFC 7591 DCR)", async () => {
+  it("TC-MCPGW-072: /register returns a PUBLIC client — no secret, auth method none (RFC 7591 DCR)", async () => {
     const res = await route(
       ev("/register", "POST", { body: JSON.stringify({ redirect_uris: ["http://127.0.0.1:9/cb"] }) }),
       cfg(),
@@ -278,12 +409,31 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
     expect(res.statusCode).toBe(201);
     const b = JSON.parse(res.body);
     expect(b.client_id).toBe("reader-client-id");
-    expect(b.client_secret).toBe("reader-client-secret");
+    // The Cognito client secret must NEVER leave the façade: a public MCP
+    // client (Codex) can't durably hold it, and handing it out means any
+    // registrant gets a confidential credential.
+    expect(b.client_secret).toBeUndefined();
+    expect(b.client_secret_expires_at).toBeUndefined();
+    expect(b.token_endpoint_auth_method).toBe("none");
     expect(b.redirect_uris).toEqual(["http://127.0.0.1:9/cb"]);
     // DCR scope must match the reader client (no profile/write).
     expect(b.scope).toBe("openid email example-mcp/query/read");
     expect(b.scope).not.toMatch(/profile/);
     expect(b.scope).not.toMatch(/write/);
+  });
+
+  it("TC-MCPGW-072b: /register rejects a request for a secret-based auth method", async () => {
+    const res = await route(
+      ev("/register", "POST", {
+        body: JSON.stringify({
+          redirect_uris: ["http://127.0.0.1:9/cb"],
+          token_endpoint_auth_method: "client_secret_basic",
+        }),
+      }),
+      cfg(),
+    );
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toBe("invalid_client_metadata");
   });
 
   it("TC-MCPGW-073: isAllowedClientRedirect only accepts loopback http URLs", () => {

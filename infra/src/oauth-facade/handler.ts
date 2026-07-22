@@ -163,6 +163,7 @@ export async function route(
       grant_types_supported: ["authorization_code", "refresh_token"],
       code_challenge_methods_supported: ["S256"],
       token_endpoint_auth_methods_supported: [
+        "none",
         "client_secret_basic",
         "client_secret_post",
       ],
@@ -309,6 +310,9 @@ export async function route(
 
   // POST /oauth/token — replace the client redirect_uri with the façade's so
   // Cognito's redirect_uri-replay check matches the single registered URL.
+  // Public-client support: when no Authorization header AND no client_secret in
+  // the form body, the façade injects the Cognito confidential-client secret
+  // server-side — so PKCE-only clients (Codex) work without holding a secret.
   if (path === "/oauth/token" && method === "POST") {
     const rawBody = event.isBase64Encoded
       ? Buffer.from(event.body ?? "", "base64").toString("utf8")
@@ -337,6 +341,35 @@ export async function route(
       event.headers?.authorization ?? event.headers?.Authorization;
     if (incomingAuth) fwdHeaders["authorization"] = incomingAuth;
 
+    // Classify how the CLIENT authenticated, read before any server-side
+    // mutation. The public-client injection below sets client_secret, so
+    // deriving this afterward would mislabel a secretless client as "post".
+    let clientAuth: "basic" | "post" | "none";
+    if (incomingAuth) clientAuth = "basic";
+    else if (inForm.has("client_secret")) clientAuth = "post";
+    else clientAuth = "none";
+
+    // Public-client secret injection: when the client sent no authentication at
+    // all (clientAuth === "none"), verify its client_id matches the known reader
+    // client and inject the Cognito confidential-client secret so Cognito's token
+    // endpoint accepts the request — PKCE-only clients (Codex) never hold it.
+    let injectedSecret = false;
+    if (clientAuth === "none") {
+      const formClientId = inForm.get("client_id");
+      if (formClientId !== cfg.userClientId) {
+        logEvent("oauth.token.public_client_rejected", {
+          client_id: formClientId ?? null,
+        });
+        return json(401, {
+          error: "invalid_client",
+          error_description:
+            "Unknown client_id for unauthenticated token request.",
+        });
+      }
+      inForm.set("client_secret", cfg.userClientSecret);
+      injectedSecret = true;
+    }
+
     let upstream: Response;
     try {
       upstream = await fetch(cfg.token, {
@@ -361,14 +394,10 @@ export async function route(
       respHeaders[k] = v;
     });
 
-    const clientAuth = incomingAuth
-      ? "basic"
-      : inForm.has("client_secret")
-        ? "post"
-        : "none";
     logEvent("oauth.token", {
       grant_type: inForm.get("grant_type") ?? null,
       client_auth: clientAuth,
+      secret_injected: injectedSecret,
       status: upstream.status,
     });
 
@@ -385,24 +414,38 @@ export async function route(
     };
   }
 
-  // RFC 7591 — Dynamic Client Registration (returns the pre-provisioned
-  // reader client to every caller).
+  // RFC 7591 — Dynamic Client Registration. The façade presents a PUBLIC
+  // client: no secret is returned, auth method is "none". The Cognito
+  // confidential-client secret is held server-side and injected at /oauth/token
+  // for secretless requests — clients (Codex) that can't durably hold secrets
+  // work with PKCE + refresh_token alone.
   if (path === "/register" && method === "POST") {
-    let req: { redirect_uris?: string[] } = {};
+    let req: { redirect_uris?: string[]; token_endpoint_auth_method?: string } =
+      {};
     try {
       req = JSON.parse(event.body ?? "{}");
     } catch {
       // minimal payloads are fine
     }
+    // Reject requests that explicitly ask for secret-based authentication:
+    // this endpoint only issues public-client registrations.
+    if (
+      req.token_endpoint_auth_method &&
+      req.token_endpoint_auth_method !== "none"
+    ) {
+      return json(400, {
+        error: "invalid_client_metadata",
+        error_description:
+          "Only token_endpoint_auth_method 'none' is supported (public client).",
+      });
+    }
     return json(201, {
       client_id: cfg.userClientId,
-      client_secret: cfg.userClientSecret,
       client_id_issued_at: Math.floor(Date.now() / 1000),
-      client_secret_expires_at: 0,
       redirect_uris: req.redirect_uris ?? ["http://localhost:8080/callback"],
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
-      token_endpoint_auth_method: "client_secret_post",
+      token_endpoint_auth_method: "none",
       scope: ["openid", "email", ...cfg.resourceScopes].join(" "),
     });
   }
