@@ -306,6 +306,13 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
           MNEMO_LLM_BASE_URL: `http://localhost:${LLM_PROXY_PORT}/v1`,
           MNEMO_LLM_MODEL: LLM_MODEL,
           MNEMO_LLM_API_KEY: "local", // dummy; the proxy holds the real bearer
+          // Recall tuning (issue #23, docker/mnemo-server/patches/): upstream's
+          // hard-coded min-confidence 65 rejected ~88% of prod searches
+          // (natural-language queries score low). 40 admits them; the
+          // zero-result fallback guarantees a best-effort answer whenever
+          // candidates exist (cutoff_reason=zero_result_fallback in the logs).
+          MNEMO_RECALL_MIN_CONFIDENCE: "40",
+          MNEMO_RECALL_ZERO_RESULT_FALLBACK: "1",
         },
         // Secret injection (== ECS `secrets: valueFrom`): the DB secret lands as an
         // env var from Secrets Manager at task start. Never a literal in git.

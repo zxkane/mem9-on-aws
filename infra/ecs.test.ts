@@ -360,6 +360,10 @@ describe("ecs stack", () => {
     expect(String(env.MNEMO_LLM_BASE_URL)).toBe("http://localhost:8082/v1");
     expect(env.MNEMO_LLM_MODEL).toBe("zai.glm-5");
     expect(String(env.MNEMO_LLM_API_KEY ?? "")).not.toBe(""); // dummy, but non-empty
+    // Recall tuning (TC-RECALL-020, issue #23): threshold lowered + zero-result
+    // fallback on — both consumed by the patched mnemo-server image.
+    expect(env.MNEMO_RECALL_MIN_CONFIDENCE).toBe("40");
+    expect(env.MNEMO_RECALL_ZERO_RESULT_FALLBACK).toBe("1");
     // Secret via ssm (== ECS secrets valueFrom), never environment.
     const ssm = mnemo.ssm as Record<string, unknown>;
     expect(ssm.MEM9_DB_SECRET).toBeDefined();

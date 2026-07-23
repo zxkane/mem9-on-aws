@@ -1,0 +1,355 @@
+diff --git a/server/internal/handler/recall.go b/server/internal/handler/recall.go
+index a241081..5ab7797 100644
+--- a/server/internal/handler/recall.go
++++ b/server/internal/handler/recall.go
+@@ -213,6 +213,10 @@ func (s *Server) defaultConfidenceRecallSearch(
+ 	selectionDuration := time.Since(selectionStart)
+ 
+ 	memories := append(pinned, mixed...)
++	// mem9-on-aws patch (issue #23): best-effort fallback when the confidence
++	// cutoff rejected every candidate — see recall_config.go.
++	allCandidates := append(append(append([]service.RecallCandidate{}, pinnedCandidates...), insightCandidates...), sessionCandidates...)
++	memories, cutoffReason = applyZeroResultFallback(profile.shape, budget, allCandidates, memories, cutoffReason)
+ 	slog.InfoContext(ctx, "confidence recall search",
+ 		"cluster_id", auth.ClusterID,
+ 		"query_len", len(filter.Query),
+@@ -254,7 +258,7 @@ func (s *Server) singlePoolConfidenceRecallSearch(
+ 	var (
+ 		candidates     []service.RecallCandidate
+ 		err            error
+-		minConfidence  = defaultMixedMinConfidence
++		minConfidence  = mixedMinConfidence
+ 		applyGapCutoff = true
+ 	)
+ 
+@@ -268,7 +272,7 @@ func (s *Server) singlePoolConfidenceRecallSearch(
+ 		candidates, err = svc.session.SearchCandidates(ctx, effectiveFilter, service.RecallSourceSession, recallCandidateOptions(profile.shape, false))
+ 	case string(domain.TypePinned):
+ 		candidates, err = svc.memory.SearchCandidates(ctx, effectiveFilter, service.RecallSourcePinned, recallCandidateOptions(profile.shape, false))
+-		minConfidence = defaultPinnedMinConfidence
++		minConfidence = pinnedMinConfidence
+ 		applyGapCutoff = false
+ 	case string(domain.TypeInsight):
+ 		candidates, err = svc.memory.SearchCandidates(ctx, effectiveFilter, service.RecallSourceInsight, recallCandidateOptions(profile.shape, true))
+@@ -293,6 +297,7 @@ func (s *Server) singlePoolConfidenceRecallSearch(
+ 		memories, cutoffReason = selectTopRecallCandidates(profile.shape, effectiveFilter.Limit, minConfidence, applyGapCutoff, candidates, nil)
+ 		stats.mode = "top"
+ 	}
++	memories, cutoffReason = applyZeroResultFallback(profile.shape, effectiveFilter.Limit, candidates, memories, cutoffReason)
+ 	selectionDuration := time.Since(selectionStart)
+ 
+ 	pinnedSelected := 0
+@@ -498,7 +503,7 @@ func selectPinnedRecallCandidates(
+ 	if isRecallIdentifierLiteral(profile.lower) {
+ 		keepMax = budget
+ 	}
+-	selected, _ := selectTopRecallCandidates(profile.shape, minInt(keepMax, budget), defaultPinnedMinConfidence, false, candidates, nil)
++	selected, _ := selectTopRecallCandidates(profile.shape, minInt(keepMax, budget), pinnedMinConfidence, false, candidates, nil)
+ 	seen := make(map[string]struct{}, len(selected))
+ 	for _, mem := range selected {
+ 		seen[recallMemoryKey(mem)] = struct{}{}
+@@ -518,7 +523,7 @@ func selectMixedRecallCandidates(
+ 	if shouldUseBalancedTopSelection(profile.shape) {
+ 		return selectBalancedRecallCandidates(profile, budget, candidates, seen)
+ 	}
+-	memories, cutoffReason := selectTopRecallCandidates(profile.shape, budget, defaultMixedMinConfidence, true, candidates, seen)
++	memories, cutoffReason := selectTopRecallCandidates(profile.shape, budget, mixedMinConfidence, true, candidates, seen)
+ 	return memories, cutoffReason, recallSelectionStats{mode: "top"}
+ }
+ 
+@@ -632,7 +637,7 @@ func selectBalancedRecallCandidates(
+ 	for round := 0; round < balancedSelectionRounds && len(selected) < budget; round++ {
+ 		progress := false
+ 		for i := range buckets {
+-			candidate, tokens, ok := nextEnumerationCandidate(&buckets[i].index, buckets[i].candidates, seen, defaultMixedMinConfidence, queryTokens, coverageSeen, nil, false, false, true)
++			candidate, tokens, ok := nextEnumerationCandidate(&buckets[i].index, buckets[i].candidates, seen, mixedMinConfidence, queryTokens, coverageSeen, nil, false, false, true)
+ 			if !ok {
+ 				continue
+ 			}
+@@ -661,7 +666,7 @@ func selectBalancedRecallCandidates(
+ 		}
+ 
+ 		confidence := recallConfidenceValue(candidate.Memory)
+-		if confidence < defaultMixedMinConfidence {
++		if confidence < mixedMinConfidence {
+ 			cutoffReason = "min_confidence"
+ 			break
+ 		}
+@@ -715,7 +720,7 @@ func selectEnumerationRecallCandidates(
+ 	for len(selected) < budget && progress {
+ 		progress = false
+ 		for i := range buckets {
+-			candidate, tokens, ok := nextEnumerationCandidate(&buckets[i].index, buckets[i].candidates, seen, enumerationMinConfidence, queryTokens, coverageSeen, profile.focusTokens, true, profile.repeatCountQuery, true)
++			candidate, tokens, ok := nextEnumerationCandidate(&buckets[i].index, buckets[i].candidates, seen, enumMinConfidence, queryTokens, coverageSeen, profile.focusTokens, true, profile.repeatCountQuery, true)
+ 			if !ok {
+ 				continue
+ 			}
+@@ -739,7 +744,7 @@ func selectEnumerationRecallCandidates(
+ 			continue
+ 		}
+ 		confidence := recallConfidenceValue(candidate.Memory)
+-		if confidence < enumerationMinConfidence {
++		if confidence < enumMinConfidence {
+ 			cutoffReason = "min_confidence"
+ 			break
+ 		}
+diff --git a/server/internal/handler/recall_config.go b/server/internal/handler/recall_config.go
+new file mode 100644
+index 0000000..2483894
+--- /dev/null
++++ b/server/internal/handler/recall_config.go
+@@ -0,0 +1,87 @@
++package handler
++
++// Recall selection tunables (mem9-on-aws patch, issue #23).
++//
++// Upstream hard-codes the selection min-confidence thresholds; in production
++// long natural-language queries score below defaultMixedMinConfidence and the
++// whole result set is cut off (cutoff_reason=min_confidence, 88% zero-hit).
++// This file makes the thresholds env-tunable and adds an opt-in zero-result
++// fallback. All defaults equal upstream behavior, so with no env set the
++// patch is a no-op.
++
++import (
++	"os"
++	"strconv"
++
++	"github.com/qiffang/mnemos/server/internal/domain"
++	"github.com/qiffang/mnemos/server/internal/service"
++)
++
++const (
++	cutoffReasonZeroResultFallback = "zero_result_fallback"
++)
++
++var (
++	mixedMinConfidence    = envConfidence("MNEMO_RECALL_MIN_CONFIDENCE", defaultMixedMinConfidence)
++	pinnedMinConfidence   = envConfidence("MNEMO_RECALL_PINNED_MIN_CONFIDENCE", defaultPinnedMinConfidence)
++	enumMinConfidence     = envConfidence("MNEMO_RECALL_ENUM_MIN_CONFIDENCE", enumerationMinConfidence)
++	zeroResultFallback    = envBool("MNEMO_RECALL_ZERO_RESULT_FALLBACK")
++	fallbackMinConfidence = envConfidence("MNEMO_RECALL_FALLBACK_MIN_CONFIDENCE", 25)
++)
++
++// envConfidence parses an int in [0,100] from env; anything else → def.
++func envConfidence(key string, def int) int {
++	raw := os.Getenv(key)
++	if raw == "" {
++		return def
++	}
++	v, err := strconv.Atoi(raw)
++	if err != nil || v < 0 || v > 100 {
++		return def
++	}
++	return v
++}
++
++func envBool(key string) bool {
++	switch os.Getenv(key) {
++	case "1", "true", "TRUE", "True", "yes", "on":
++		return true
++	}
++	return false
++}
++
++// applyZeroResultFallback returns the top-`budget` candidates by confidence
++// (≥ fallbackMinConfidence) when the primary selection produced nothing but
++// candidates exist. Returns the input unchanged when disabled, when the
++// primary selection already returned results, or when nothing clears the
++// floor. The returned cutoff reason replaces the primary one only when the
++// fallback actually fires, so the log line stays attributable.
++func applyZeroResultFallback(
++	shape recallQueryShape,
++	budget int,
++	candidates []service.RecallCandidate,
++	memories []domain.Memory,
++	cutoffReason string,
++) ([]domain.Memory, string) {
++	if !zeroResultFallback || len(memories) > 0 || budget <= 0 || len(candidates) == 0 {
++		return memories, cutoffReason
++	}
++
++	// dedupeRecallCandidates returns candidates ordered confidence-desc
++	// (recallCandidateLess), so walking it in order yields the top-N.
++	eligible := dedupeRecallCandidates(shape, candidates)
++	selected := make([]domain.Memory, 0, minInt(budget, len(eligible)))
++	for _, candidate := range eligible {
++		if recallConfidenceValue(candidate.Memory) < fallbackMinConfidence {
++			continue
++		}
++		selected = append(selected, candidate.Memory)
++		if len(selected) >= budget {
++			break
++		}
++	}
++	if len(selected) == 0 {
++		return memories, cutoffReason
++	}
++	return selected, cutoffReasonZeroResultFallback
++}
+diff --git a/server/internal/handler/recall_config_test.go b/server/internal/handler/recall_config_test.go
+new file mode 100644
+index 0000000..630ced2
+--- /dev/null
++++ b/server/internal/handler/recall_config_test.go
+@@ -0,0 +1,161 @@
++package handler
++
++// Tests for the mem9-on-aws recall patch (issue #23). IDs reference
++// docs/test-cases/recall-min-confidence.md in the mem9-on-aws repo.
++
++import (
++	"testing"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/domain"
++	"github.com/qiffang/mnemos/server/internal/service"
++)
++
++func confCandidate(id string, confidence int) service.RecallCandidate {
++	c := confidence
++	return service.RecallCandidate{
++		Memory: domain.Memory{
++			ID:         id,
++			Content:    "content-" + id,
++			Confidence: &c,
++			UpdatedAt:  time.Now(),
++		},
++		SourcePool: service.RecallSourceInsight,
++	}
++}
++
++// TC-RECALL-001: defaults equal upstream constants; fallback off.
++func TestRecallConfigDefaults(t *testing.T) {
++	if got := envConfidence("MNEMO_RECALL_TEST_UNSET_KEY", defaultMixedMinConfidence); got != defaultMixedMinConfidence {
++		t.Fatalf("unset env: got %d, want %d", got, defaultMixedMinConfidence)
++	}
++	if envBool("MNEMO_RECALL_TEST_UNSET_KEY") {
++		t.Fatal("unset env bool: want false")
++	}
++}
++
++// TC-RECALL-002: a valid env value overrides the default.
++func TestEnvConfidenceOverride(t *testing.T) {
++	t.Setenv("MNEMO_RECALL_TEST_KEY", "40")
++	if got := envConfidence("MNEMO_RECALL_TEST_KEY", 65); got != 40 {
++		t.Fatalf("got %d, want 40", got)
++	}
++	t.Setenv("MNEMO_RECALL_TEST_BOOL", "1")
++	if !envBool("MNEMO_RECALL_TEST_BOOL") {
++		t.Fatal("env bool '1': want true")
++	}
++}
++
++// TC-RECALL-003: invalid values fall back to the default; no panic.
++func TestEnvConfidenceInvalid(t *testing.T) {
++	for _, raw := range []string{"abc", "-5", "150", "6.5", " 40"} {
++		t.Setenv("MNEMO_RECALL_TEST_KEY", raw)
++		if got := envConfidence("MNEMO_RECALL_TEST_KEY", 65); got != 65 {
++			t.Fatalf("raw %q: got %d, want default 65", raw, got)
++		}
++	}
++}
++
++// TC-RECALL-004 (regression — fails on unpatched upstream): all candidates
++// below the mixed threshold + fallback on → non-empty best-effort result.
++func TestZeroResultFallbackReturnsBestEffort(t *testing.T) {
++	restore := zeroResultFallback
++	zeroResultFallback = true
++	defer func() { zeroResultFallback = restore }()
++
++	candidates := []service.RecallCandidate{
++		confCandidate("a", 45), confCandidate("b", 38), confCandidate("c", 30),
++	}
++	// Primary selection with upstream threshold 65 rejects everything.
++	memories, cutoff := selectTopRecallCandidates(recallQueryShapeGeneral, 8, 65, true, candidates, nil)
++	if len(memories) != 0 || cutoff != "min_confidence" {
++		t.Fatalf("precondition: primary selection should cut off, got %d/%s", len(memories), cutoff)
++	}
++
++	memories, cutoff = applyZeroResultFallback(recallQueryShapeGeneral, 8, candidates, memories, cutoff)
++	if len(memories) != 3 {
++		t.Fatalf("fallback returned %d memories, want 3", len(memories))
++	}
++	if cutoff != cutoffReasonZeroResultFallback {
++		t.Fatalf("cutoff = %q, want %q", cutoff, cutoffReasonZeroResultFallback)
++	}
++	if recallConfidenceValue(memories[0]) != 45 {
++		t.Fatalf("fallback not ordered by confidence desc: first = %d", recallConfidenceValue(memories[0]))
++	}
++}
++
++// TC-RECALL-005: no candidates at all → fallback stays empty, reason untouched.
++func TestZeroResultFallbackNoCandidates(t *testing.T) {
++	restore := zeroResultFallback
++	zeroResultFallback = true
++	defer func() { zeroResultFallback = restore }()
++
++	memories, cutoff := applyZeroResultFallback(recallQueryShapeGeneral, 8, nil, []domain.Memory{}, "no_candidates")
++	if len(memories) != 0 || cutoff != "no_candidates" {
++		t.Fatalf("got %d/%s, want 0/no_candidates", len(memories), cutoff)
++	}
++}
++
++// TC-RECALL-006: everything below the fallback floor → still empty.
++func TestZeroResultFallbackFloorHolds(t *testing.T) {
++	restoreOn, restoreFloor := zeroResultFallback, fallbackMinConfidence
++	zeroResultFallback, fallbackMinConfidence = true, 25
++	defer func() { zeroResultFallback, fallbackMinConfidence = restoreOn, restoreFloor }()
++
++	candidates := []service.RecallCandidate{confCandidate("a", 10), confCandidate("b", 24)}
++	memories, cutoff := applyZeroResultFallback(recallQueryShapeGeneral, 8, candidates, []domain.Memory{}, "min_confidence")
++	if len(memories) != 0 || cutoff != "min_confidence" {
++		t.Fatalf("got %d/%s, want 0/min_confidence", len(memories), cutoff)
++	}
++}
++
++// TC-RECALL-007: fallback disabled (default) → upstream behavior preserved.
++func TestZeroResultFallbackDisabled(t *testing.T) {
++	restore := zeroResultFallback
++	zeroResultFallback = false
++	defer func() { zeroResultFallback = restore }()
++
++	candidates := []service.RecallCandidate{confCandidate("a", 45)}
++	memories, cutoff := applyZeroResultFallback(recallQueryShapeGeneral, 8, candidates, []domain.Memory{}, "min_confidence")
++	if len(memories) != 0 || cutoff != "min_confidence" {
++		t.Fatalf("got %d/%s, want 0/min_confidence", len(memories), cutoff)
++	}
++}
++
++// TC-RECALL-008: primary selection already returned results → fallback no-op.
++func TestZeroResultFallbackNotTriggeredOnResults(t *testing.T) {
++	restore := zeroResultFallback
++	zeroResultFallback = true
++	defer func() { zeroResultFallback = restore }()
++
++	primary := []domain.Memory{{ID: "kept"}}
++	candidates := []service.RecallCandidate{confCandidate("a", 45)}
++	memories, cutoff := applyZeroResultFallback(recallQueryShapeGeneral, 8, candidates, primary, "budget_exhausted")
++	if len(memories) != 1 || memories[0].ID != "kept" || cutoff != "budget_exhausted" {
++		t.Fatalf("fallback altered a non-empty primary result: %d/%s", len(memories), cutoff)
++	}
++}
++
++// TC-RECALL-009: fallback respects the budget and orders by confidence desc.
++func TestZeroResultFallbackBudget(t *testing.T) {
++	restore := zeroResultFallback
++	zeroResultFallback = true
++	defer func() { zeroResultFallback = restore }()
++
++	candidates := make([]service.RecallCandidate, 0, 10)
++	for i := 0; i < 10; i++ {
++		candidates = append(candidates, confCandidate(string(rune('a'+i)), 30+i))
++	}
++	memories, cutoff := applyZeroResultFallback(recallQueryShapeGeneral, 3, candidates, []domain.Memory{}, "min_confidence")
++	if len(memories) != 3 {
++		t.Fatalf("got %d memories, want 3", len(memories))
++	}
++	if cutoff != cutoffReasonZeroResultFallback {
++		t.Fatalf("cutoff = %q", cutoff)
++	}
++	for i := 1; i < len(memories); i++ {
++		if recallConfidenceValue(memories[i-1]) < recallConfidenceValue(memories[i]) {
++			t.Fatalf("not ordered by confidence desc at %d", i)
++		}
++	}
++}
