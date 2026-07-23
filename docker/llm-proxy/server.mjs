@@ -129,8 +129,7 @@ export function createProxyServer(cfg, deps = {}) {
     return state.firstMint;
   }
 
-  async function forwardToMantle(bodyBuf) {
-    const token = await ensureToken();
+  async function postToMantle(bodyBuf, token) {
     const headers = {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
@@ -149,6 +148,21 @@ export function createProxyServer(cfg, deps = {}) {
     } finally {
       clearTimeout(timer);
     }
+  }
+
+  async function forwardToMantle(bodyBuf) {
+    const upstream = await postToMantle(bodyBuf, await ensureToken());
+    // 401/403 means the bearer is dead (typical cause: it was presigned from
+    // task-role session credentials that have since rotated — the 2026-07-22
+    // incident). The timer won't fix it for up to an hour; re-mint NOW (a
+    // local presign, no network) and retry ONCE. A second auth failure passes
+    // through — mem9 handles non-2xx itself.
+    if (upstream.status !== 401 && upstream.status !== 403) return upstream;
+    // Canonical, countable log line — the #26 metric filter matches this
+    // prefix verbatim; TC-PROXY401-006 pins it. Change both together.
+    console.warn(`llm-proxy re-minted bearer after upstream ${upstream.status}`);
+    const fresh = await refresh();
+    return postToMantle(bodyBuf, fresh);
   }
 
   const server = createServer(async (req, res) => {
@@ -226,20 +240,30 @@ export function createProxyServer(cfg, deps = {}) {
   return { server, start, state };
 }
 
+// ── Default minter factory ────────────────────────────────────────────────────
+// Presigns a Bedrock bearer from the task role. Resolves credentials via a NEW
+// provider chain on EVERY mint: a shared fromNodeProviderChain() memoizes, and
+// a bearer presigned from an expired session dies with that session no matter
+// the requested TTL — the mint "succeeds" but every call 401s (issue #24).
+// Minting is at most hourly + rare 401 retries, so per-mint resolution is
+// cheap. Deps are injectable for tests (TC-PROXY401-007).
+export function makeDefaultMintToken(cfg, deps) {
+  const { createProvider, getToken } = deps;
+  return async () => {
+    const credentials = await createProvider()();
+    return getToken({ credentials, region: cfg.region, expiresInSeconds: cfg.tokenTtlSeconds });
+  };
+}
+
 // ── Direct-run entrypoint (node server.mjs) ────────────────────────────────────
 // Only wires the real AWS deps + listens when executed as the main module, so
 // importing this file in a test does not require AWS credentials.
 const isMain = import.meta.url === `file://${process.argv[1]}`;
 if (isMain) {
   const cfg = readConfig();
-  // Real minter: presign a Bedrock bearer from the task role. Local (no network).
   const { getToken } = await import("@aws/bedrock-token-generator");
   const { fromNodeProviderChain } = await import("@aws-sdk/credential-providers");
-  const credentialProvider = fromNodeProviderChain();
-  const mintToken = async () => {
-    const credentials = await credentialProvider();
-    return getToken({ credentials, region: cfg.region, expiresInSeconds: cfg.tokenTtlSeconds });
-  };
+  const mintToken = makeDefaultMintToken(cfg, { createProvider: fromNodeProviderChain, getToken });
 
   const { server, start } = createProxyServer(cfg, { mintToken });
   server.listen(cfg.port, () => {

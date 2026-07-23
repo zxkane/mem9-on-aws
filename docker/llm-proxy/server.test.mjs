@@ -6,7 +6,7 @@
 // health gating, and error mapping without touching AWS or Bedrock Mantle.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createProxyServer, readConfig } from "./server.mjs";
+import { createProxyServer, makeDefaultMintToken, readConfig } from "./server.mjs";
 
 // Start `server` on an ephemeral port; return {url, close}.
 async function listen(server) {
@@ -121,6 +121,143 @@ describe("createProxyServer", () => {
     await start();
     await fetch(`${url}/v1/chat/completions`, { method: "POST", body: "{}" });
     expect(captured.headers["OpenAI-Project"]).toBeUndefined();
+  });
+
+  // 401-reactive re-mint (issue #24, TC-PROXY401-001…006): a bearer presigned
+  // from expired task-role session credentials 401s until the hourly refresh
+  // tick — the proxy must re-mint + retry once instead of serving the dead
+  // bearer for up to an hour (2026-07-22 incident: 32 ingests lost).
+  describe("401-reactive re-mint", () => {
+    const authFailure = (status) =>
+      new Response(JSON.stringify({ error: { code: "invalid_api_key", message: "The security token included in the request is invalid" } }), {
+        status,
+        headers: { "content-type": "application/json" },
+      });
+    const ok = () =>
+      new Response(JSON.stringify({ choices: [{ message: { content: "PONG" } }] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+
+    it("TC-PROXY401-001: re-mints once and retries with the fresh bearer on upstream 401", async () => {
+      const mintToken = vi
+        .fn()
+        .mockResolvedValueOnce("stale-bearer")
+        .mockResolvedValueOnce("fresh-bearer");
+      const seenAuth = [];
+      const fetchImpl = vi.fn(async (_u, opts) => {
+        seenAuth.push(opts.headers.Authorization);
+        return seenAuth.length === 1 ? authFailure(401) : ok();
+      });
+      const { url, start } = await boot(baseCfg, { mintToken, fetchImpl });
+      await start();
+
+      const res = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: "{}" });
+      expect(res.status).toBe(200);
+      expect((await res.json()).choices[0].message.content).toBe("PONG");
+      expect(mintToken).toHaveBeenCalledTimes(2); // initial + 401-triggered re-mint
+      expect(seenAuth).toEqual(["Bearer stale-bearer", "Bearer fresh-bearer"]);
+    });
+
+    it("TC-PROXY401-002: a 401 on the retry passes through — no retry loop", async () => {
+      const mintToken = vi.fn().mockResolvedValue("t");
+      const fetchImpl = vi.fn(async () => authFailure(401));
+      const { url, start } = await boot(baseCfg, { mintToken, fetchImpl });
+      await start();
+
+      const res = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: "{}" });
+      expect(res.status).toBe(401); // mem9 sees the real upstream status
+      expect((await res.json()).error.code).toBe("invalid_api_key");
+      expect(fetchImpl).toHaveBeenCalledTimes(2); // original + exactly one retry
+      expect(mintToken).toHaveBeenCalledTimes(2); // initial + one re-mint
+    });
+
+    it("TC-PROXY401-003: 403 takes the same re-mint+retry path", async () => {
+      const mintToken = vi.fn().mockResolvedValue("t");
+      const fetchImpl = vi
+        .fn()
+        .mockResolvedValueOnce(authFailure(403))
+        .mockResolvedValueOnce(ok());
+      const { url, start } = await boot(baseCfg, { mintToken, fetchImpl });
+      await start();
+
+      const res = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: "{}" });
+      expect(res.status).toBe(200);
+      expect(mintToken).toHaveBeenCalledTimes(2);
+    });
+
+    it("TC-PROXY401-004: non-auth statuses (400/429/500) do NOT re-mint", async () => {
+      for (const status of [400, 429, 500]) {
+        const mintToken = vi.fn().mockResolvedValue("t");
+        const fetchImpl = vi.fn(
+          async () => new Response("{}", { status, headers: { "content-type": "application/json" } }),
+        );
+        const { url, start } = await boot(baseCfg, { mintToken, fetchImpl });
+        await start();
+
+        const res = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: "{}" });
+        expect(res.status).toBe(status);
+        expect(fetchImpl).toHaveBeenCalledTimes(1); // no retry
+        expect(mintToken).toHaveBeenCalledTimes(1); // no re-mint
+      }
+    });
+
+    it("TC-PROXY401-005: a re-mint failure maps to the existing 502 shape", async () => {
+      const mintToken = vi
+        .fn()
+        .mockResolvedValueOnce("stale-bearer")
+        .mockRejectedValueOnce(new Error("provider chain empty"));
+      const fetchImpl = vi.fn(async () => authFailure(401));
+      const { url, start } = await boot(baseCfg, { mintToken, fetchImpl });
+      await start();
+
+      const res = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: "{}" });
+      expect(res.status).toBe(502);
+      expect((await res.json()).error.type).toBe("server_error");
+    });
+
+    it("TC-PROXY401-006: logs a distinct, countable line on the re-mint path", async () => {
+      const logSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const mintToken = vi.fn().mockResolvedValue("t");
+      const fetchImpl = vi
+        .fn()
+        .mockResolvedValueOnce(authFailure(401))
+        .mockResolvedValueOnce(ok());
+      const { url, start } = await boot(baseCfg, { mintToken, fetchImpl });
+      await start();
+
+      await fetch(`${url}/v1/chat/completions`, { method: "POST", body: "{}" });
+      // The full prefix is a stable contract — the #26 CloudWatch metric
+      // filter matches it verbatim. Do not loosen this assertion.
+      const line = logSpy.mock.calls.map((c) => c.join(" ")).find((m) => /re-mint/.test(m));
+      expect(line).toBe("llm-proxy re-minted bearer after upstream 401");
+    });
+  });
+
+  // TC-PROXY401-007: the default minter must resolve credentials FRESH per
+  // mint. A shared fromNodeProviderChain() memoizes; a bearer re-signed from
+  // the same dead session after a 401 would 401 again (the incident's root
+  // cause). The factory takes injectable deps so this is testable without AWS.
+  it("TC-PROXY401-007: default minter resolves fresh credentials on every mint", async () => {
+    const resolved = [];
+    const createProvider = vi.fn(() => {
+      const creds = { accessKeyId: `AK${createProvider.mock.calls.length}`, secretAccessKey: "s" };
+      return async () => {
+        resolved.push(creds.accessKeyId);
+        return creds;
+      };
+    });
+    const getToken = vi.fn(async ({ credentials }) => `bearer-for-${credentials.accessKeyId}`);
+    const mintToken = makeDefaultMintToken(
+      { region: "ap-northeast-1", tokenTtlSeconds: 43200 },
+      { createProvider, getToken },
+    );
+
+    expect(await mintToken()).toBe("bearer-for-AK1");
+    expect(await mintToken()).toBe("bearer-for-AK2");
+    // A NEW provider chain per mint — never a memoized instance.
+    expect(createProvider).toHaveBeenCalledTimes(2);
+    expect(resolved).toEqual(["AK1", "AK2"]);
   });
 
   it("passes the upstream status + body straight through on a Mantle 4xx", async () => {
