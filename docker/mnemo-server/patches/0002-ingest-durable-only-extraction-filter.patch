@@ -20,7 +20,7 @@ index b25f8ec..67fed15 100644
  	userPrompt := fmt.Sprintf("Extract facts and assign message tags.\n\n%s", input.formatted)
 diff --git a/server/internal/service/ingest_config.go b/server/internal/service/ingest_config.go
 new file mode 100644
-index 0000000..132d024
+index 0000000..2bfdb49
 --- /dev/null
 +++ b/server/internal/service/ingest_config.go
 @@ -0,0 +1,73 @@
@@ -31,7 +31,7 @@ index 0000000..132d024
 +// Upstream's extraction prompt is tuned for personal-assistant memory: rules
 +// 12-14 push toward extraction ("current status should usually become one
 +// fact", "prefer a faithful fact over an empty array"). Deployed as SHARED
-+// COODING-AGENT memory, that stores transient session observations ("user is
++// CODING-AGENT memory, that stores transient session observations ("user is
 +// using tool X", "already authenticated", review-progress notes) which never
 +// become useful recall hits and dilute vector search.
 +//
