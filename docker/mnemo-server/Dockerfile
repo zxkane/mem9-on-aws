@@ -45,10 +45,20 @@ RUN git init -q . \
     && git fetch -q --depth 1 origin "${MEM9_REF}" \
     && git checkout -q FETCH_HEAD
 
+# Local patches on top of the pin (docs/designs/recall-min-confidence.md).
+# `git apply` hard-fails the build if a future MEM9_REF bump drifts under a
+# patch — the loud failure forces a conscious re-verify instead of silently
+# shipping unpatched behavior.
+COPY docker/mnemo-server/patches/ /tmp/mem9-patches/
+RUN git apply --verbose /tmp/mem9-patches/*.patch
+
 # Build the server. go.mod + the whole module live under server/. GOARCH targets
 # the requested arch while the compiler itself runs on the native BUILDPLATFORM.
+# The handler-package tests gate the build: they cover the patched recall
+# selection (TC-RECALL-001…009), and run natively on BUILDPLATFORM (no QEMU).
 WORKDIR /src/server
 RUN go mod download \
+    && go test ./internal/handler/ \
     && CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH}" \
        go build -trimpath -ldflags="-s -w" -o /out/mnemo-server ./cmd/mnemo-server
 

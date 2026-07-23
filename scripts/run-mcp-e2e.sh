@@ -157,12 +157,45 @@ while [[ $SECONDS -lt $DEADLINE ]]; do
   sleep 15
 done
 
-if [[ "$FOUND" == "1" ]]; then
-  echo "run-mcp-e2e: OK — write→search round-trip verified (marker found) for stage ${STAGE}"
+if [[ "$FOUND" != "1" ]]; then
+  MSG="search_memories did not surface the marker within ~5 min (async ingest may be slow or the chain is broken). Last response: $(printf '%s' "${SEARCH_RESP:-}" | head -c 400)"
+  if [[ "$SOFT" == "1" ]]; then
+    echo "::warning::${MSG}"
+    exit 0
+  fi
+  echo "::error::${MSG}"
+  exit 1
+fi
+echo "run-mcp-e2e: OK — write→search round-trip verified (marker found) for stage ${STAGE}"
+
+# 5. Natural-language recall probe (TC-RECALL-031, issue #23). The keyword
+# search above proves the memory is indexed; now assert that a long (≥25 char)
+# natural-language query — the style the recall hooks instruct agents to use —
+# also surfaces it. Before the recall-threshold fix these scored below the
+# hard-coded min_confidence and returned 0 results (the cutoff rejected ALL
+# candidates regardless of rank, so an anchored sentence still regresses).
+# The run id anchors the query to THIS run's memory: probe memories from past
+# deploys accumulate in the tenant, and an unanchored query would compete with
+# them for the top-N. The memory is already searchable, so the short retry
+# loop only absorbs transient gateway errors.
+NL_QUERY="what secret marker did the e2e probe store for run ${GITHUB_RUN_ID:-local}"
+echo "run-mcp-e2e: natural-language recall probe (query: ${NL_QUERY})"
+NL_FOUND=0
+for attempt in 1 2 3; do
+  tools_call "$SEARCH_TOOL" "$(jq -nc --arg q "$NL_QUERY" '{q:$q, limit:10}')"
+  if printf '%s' "$MCP_RESP" | grep -qF "$MARKER"; then
+    NL_FOUND=1
+    break
+  fi
+  sleep 10
+done
+
+if [[ "$NL_FOUND" == "1" ]]; then
+  echo "run-mcp-e2e: OK — natural-language recall verified for stage ${STAGE}"
   exit 0
 fi
 
-MSG="search_memories did not surface the marker within ~5 min (async ingest may be slow or the chain is broken). Last response: $(printf '%s' "${SEARCH_RESP:-}" | head -c 400)"
+MSG="natural-language recall probe failed: an indexed memory was not returned for a NL query (recall min_confidence regression? see issue #23). Last response: $(printf '%s' "${MCP_RESP:-}" | head -c 400)"
 if [[ "$SOFT" == "1" ]]; then
   echo "::warning::${MSG}"
   exit 0
