@@ -378,7 +378,7 @@ describe("observability alert delivery", () => {
         },
       ],
     });
-    expect(topicStatement?.Action).toContain("sns:SetSubscriptionAttributes");
+    expect(topicStatement?.Action).not.toContain("sns:SetSubscriptionAttributes");
 
     expect(
       computePolicy.Statement.find(
@@ -389,6 +389,7 @@ describe("observability alert delivery", () => {
       Effect: "Allow",
       Action: [
         "sns:GetSubscriptionAttributes",
+        "sns:SetSubscriptionAttributes",
         "sns:Unsubscribe",
       ],
       Resource: [
