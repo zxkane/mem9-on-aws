@@ -1031,7 +1031,8 @@ Resources:
             Action:
               - sqs:CreateQueue
             Resource:
-              - !Sub arn:${AWS::Partition}:sqs:*:${AWS::AccountId}:*
+              - !Sub arn:${AWS::Partition}:sqs:*:${AWS::AccountId}:AlertTransportFailureQueue-*
+              - !Sub arn:${AWS::Partition}:sqs:*:${AWS::AccountId}:AlertExecutionFailureQueue-*
             Condition:
               StringEquals:
                 aws:RequestTag/Project: !Ref ProjectName
@@ -1046,12 +1047,12 @@ Resources:
               - sqs:SetQueueAttributes
               - sqs:TagQueue
               - sqs:UntagQueue
+            # Resource tags can lag immediately after CreateQueue. Scope by the
+            # two Pulumi-generated queue-name prefixes so the first read works
+            # without granting control-plane access to unrelated queues.
             Resource:
-              - !Sub arn:${AWS::Partition}:sqs:*:${AWS::AccountId}:*
-            Condition:
-              StringEquals:
-                aws:ResourceTag/Project: !Ref ProjectName
-                aws:ResourceTag/ManagedBy: sst
+              - !Sub arn:${AWS::Partition}:sqs:*:${AWS::AccountId}:AlertTransportFailureQueue-*
+              - !Sub arn:${AWS::Partition}:sqs:*:${AWS::AccountId}:AlertExecutionFailureQueue-*
           - Sid: LambdaAlertAsyncConfig
             Effect: Allow
             Action:

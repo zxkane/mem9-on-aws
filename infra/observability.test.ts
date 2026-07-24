@@ -315,7 +315,14 @@ describe("observability alert delivery", () => {
           Effect: "Allow",
           Action: ["sqs:CreateQueue"],
           Resource: [
-            { "Fn::Sub": "arn:${AWS::Partition}:sqs:*:${AWS::AccountId}:*" },
+            {
+              "Fn::Sub":
+                "arn:${AWS::Partition}:sqs:*:${AWS::AccountId}:AlertTransportFailureQueue-*",
+            },
+            {
+              "Fn::Sub":
+                "arn:${AWS::Partition}:sqs:*:${AWS::AccountId}:AlertExecutionFailureQueue-*",
+            },
           ],
           Condition: {
             StringEquals: {
@@ -337,14 +344,15 @@ describe("observability alert delivery", () => {
             "sqs:UntagQueue",
           ],
           Resource: [
-            { "Fn::Sub": "arn:${AWS::Partition}:sqs:*:${AWS::AccountId}:*" },
-          ],
-          Condition: {
-            StringEquals: {
-              "aws:ResourceTag/Project": { Ref: "ProjectName" },
-              "aws:ResourceTag/ManagedBy": "sst",
+            {
+              "Fn::Sub":
+                "arn:${AWS::Partition}:sqs:*:${AWS::AccountId}:AlertTransportFailureQueue-*",
             },
-          },
+            {
+              "Fn::Sub":
+                "arn:${AWS::Partition}:sqs:*:${AWS::AccountId}:AlertExecutionFailureQueue-*",
+            },
+          ],
         },
         {
           Sid: "LambdaAlertAsyncConfig",
