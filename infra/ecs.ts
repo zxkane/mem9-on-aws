@@ -114,10 +114,6 @@ export interface EcsOutputs {
  */
 export function ecs(dbOut: DbOutputs): EcsOutputs {
   const prefix = `/mem9-on-aws/${$app.stage}`;
-  // Stable log group name for the mnemo-server container — used by
-  // observability.ts metric filters. SST's auto-name includes a random hash;
-  // pinning it makes the filters deterministic and survives service recreates.
-  const mnemoLogGroupName = `/sst/cluster/mem9-on-aws-${$app.stage}/mnemo-server`;
   const { vpcId, privateSubnetIds } = resolveVpc();
 
   const tags = {
@@ -331,9 +327,12 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
         },
         // Per-container logging: with `containers[]`, top-level `logging` is
         // forbidden (SST rejects it alongside containers) — each container sets
-        // its own. The mnemo-server log group name is set explicitly so
-        // observability.ts can reference it deterministically for metric filters.
-        logging: { retention: "1 month", name: mnemoLogGroupName },
+        // its own. Do NOT pin `logging.name`: SST creates the LogGroup with
+        // `ignoreChanges: ["name"]`, so on a stack whose group already exists
+        // a rename is silently ignored — the pinned name never materializes
+        // (prod incident: metric filters 400'd ResourceNotFoundException
+        // forever). observability.ts reads the REAL name from the task def.
+        logging: { retention: "1 month" },
       },
       {
         name: "qwen3-embed",
@@ -438,8 +437,28 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
   // Slack delivery is conditional: only wired when the SlackWebhookUrl secret
   // is set (GitHub Actions secret → `sst secret set` during deploy, or manual).
   // When absent, alarms still fire (console-visible) but have no actions.
+  //
+  // The mnemo-server log group name comes from the TASK DEFINITION (the
+  // awslogs-group option of the mnemo-server container) — the only reliable
+  // source: SST auto-names the group with a random hash and ignores renames
+  // (`ignoreChanges: ["name"]`), so a hand-computed name silently diverges on
+  // stacks whose group already exists. Reading it also gives the metric
+  // filters a real Pulumi dependency on the log group's creator.
   const slackWebhookUrl = process.env.SLACK_WEBHOOK_URL || undefined;
-  observability({ stage: $app.stage, logGroupName: mnemoLogGroupName, service, slackWebhookUrl });
+  const mnemoLogGroupName = service.nodes.taskDefinition
+    .apply((td) => (td as { containerDefinitions: Output<string> }).containerDefinitions)
+    .apply((raw: string) => {
+      const defs = JSON.parse(raw) as {
+        name: string;
+        logConfiguration?: { options?: Record<string, string> };
+      }[];
+      const group = defs.find((c) => c.name === "mnemo-server")?.logConfiguration?.options?.[
+        "awslogs-group"
+      ];
+      if (!group) throw new Error("mnemo-server awslogs-group not found in task definition");
+      return group;
+    });
+  observability({ stage: $app.stage, logGroupName: mnemoLogGroupName, slackWebhookUrl });
 
   return {
     ssmPrefix: prefix,

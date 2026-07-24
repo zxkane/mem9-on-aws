@@ -23,21 +23,23 @@
 
 export interface ObservabilityInputs {
   stage: string;
-  logGroupName: string;
-  // The ECS service whose container logging creates the log group above. The
-  // metric filters MUST depend on it: they reference the log group by name
-  // (a plain string, no implicit Pulumi edge), and on a fresh deploy a filter
-  // racing ahead of the Service fails with ResourceNotFoundException.
-  service: unknown;
+  // The mnemo-server log group name, read from the SERVICE'S TASK DEFINITION
+  // (an Output<string>) — never a hand-computed string. SST names container
+  // log groups with a random physical-name hash AND creates them with
+  // `ignoreChanges: ["name"]`, so a pinned `logging.name` silently never
+  // materializes on a stack whose group already exists (prod incident:
+  // metric filters 400'd ResourceNotFoundException on a name that would
+  // never exist). Deriving from the task def both yields the REAL name and
+  // threads a Pulumi dependency edge through the log group's creator.
+  logGroupName: Output<string>;
   slackWebhookUrl?: string;
 }
 
 export function observability(inputs: ObservabilityInputs) {
-  const { stage, logGroupName, service, slackWebhookUrl } = inputs;
+  const { stage, logGroupName, slackWebhookUrl } = inputs;
   if (stage !== "prod") return;
 
   const namespace = "mem9-on-aws";
-  const afterService = { dependsOn: [service] };
 
   // ─── Metric filters ──────────────────────────────────────────────────────
 
@@ -53,7 +55,6 @@ export function observability(inputs: ObservabilityInputs) {
         defaultValue: "0",
       },
     },
-    afterService,
   );
 
   new aws.cloudwatch.LogMetricFilter(
@@ -68,7 +69,6 @@ export function observability(inputs: ObservabilityInputs) {
         defaultValue: "0",
       },
     },
-    afterService,
   );
 
   new aws.cloudwatch.LogMetricFilter(
@@ -83,7 +83,6 @@ export function observability(inputs: ObservabilityInputs) {
         defaultValue: "0",
       },
     },
-    afterService,
   );
 
   new aws.cloudwatch.LogMetricFilter(
@@ -98,7 +97,6 @@ export function observability(inputs: ObservabilityInputs) {
         defaultValue: "0",
       },
     },
-    afterService,
   );
 
   // ─── SNS topic + alert-router Lambda (conditional on webhook) ────────────
