@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "OpenAI /v1/chat/completions proxy → Bedrock Mantle: mints/refreshes the Bedrock bearer + injects OpenAI-Project (mem9-on-aws LLM smart-ingest sidecar).",
+  "description": "OpenAI /v1/chat/completions proxy to Bedrock Mantle: refreshes the bearer and conditionally injects OpenAI-Project.",
   "engines": {
     "node": ">=24"
   },

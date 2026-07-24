@@ -1,8 +1,10 @@
 # mem9 (`mnemo-server`) — Ground-truth facts
 
 Probed directly from the `mem9-ai/mem9` source (server is Go, under `server/`).
-These are the facts the AWS design in [`ARCHITECTURE.md`](ARCHITECTURE.md) relies
-on. Re-verify against the pinned upstream commit before implementing IaC.
+Unless a different date is stated, source-level observations are **empirical
+against the pinned upstream commit and were rechecked 2026-07-24**. These are the
+facts the current runtime in [`ARCHITECTURE.md`](ARCHITECTURE.md) relies on.
+Re-verify them whenever the pinned commit changes.
 
 ## Identity & license
 
@@ -23,9 +25,10 @@ on. Re-verify against the pinned upstream commit before implementing IaC.
   batch-delete, `/imports`, `/session-messages`, `/status`, webhooks, space-chains.
 - **Unauthenticated health/liveness (registered BEFORE the auth middleware,
   verified handler.go:205 @ pinned SHA):** `GET /healthz` → 200 `{"status":"ok"}`
-  and `GET /versionz` → 200 `{go_version,started_at}`. Reachable unauthenticated —
-  handy for a liveness probe (§6a uses a Lambda-proxy + Cloud Map, not an ALB
-  health check, so nothing polls it now, but it stays available).
+  and `GET /versionz` → 200 `{go_version,started_at}`. `/healthz` is **process
+  liveness only**: it does not query the database, embedding sidecar, LLM proxy,
+  or an end-to-end memory path, and must not be treated as dependency readiness.
+  It is reachable unauthenticated for the ECS container health check.
 - Search query param is `q` (`GET /v1alpha2/mem9s/memories?q=...`).
 - Writes return `{"status":"accepted"}` and are processed **asynchronously** —
   list/search may return empty for a few seconds/minutes after write until the
@@ -61,27 +64,24 @@ Verified from `server/internal/config/config.go` + `server/internal/repository/p
   hook, no credential callback, no password-returning function (the stdlib pgx
   path doesn't expose pgxpool's `BeforeConnect`). Rotating the credential requires
   a process restart.
-- **Consequence for IAM DB auth**: an RDS/Aurora **IAM auth token expires in
-  ~15 min**, but `MNEMO_DSN` is static → new pool connections after ~15 min would
-  fail with auth error. So **native (end-to-end) IAM database auth is NOT viable
-  for mem9 unmodified**, whether direct to Aurora OR client-side-IAM through RDS
-  Proxy (mem9 is the IAM client either way). **Chosen (LOCKED): RDS Proxy +
-  Secrets Manager** (ARCHITECTURE.md §3a). The Aurora password lives ONLY in a
-  Secrets Manager secret (a **static `RandomPassword`** created by
-  `sst.aws.Aurora`, **consumed ONLY by RDS Proxy** — password blast-radius is the
-  proxy↔Aurora hop). ⚠️ SST's `proxy:true` owns a minimal `{username,password}`
-  secret (no `host`/`engine`, no transform hook), and the AWS RDS rotation Lambda
-  requires `host`+`engine`; enabling rotation would force replacing the SST-owned
-  proxy → **rotation is intentionally NOT configured (DECIDED, ARCHITECTURE.md
-  §3a / #6)**, revisit when the ECS stack re-owns the secret/proxy. RDS Proxy
-  pulls the secret and pools/multiplexes; mem9
-  connects to the **proxy endpoint** with a user+password delivered to the
-  container via an ECS `secrets: valueFrom` (Secrets Manager → env at task start)
-  — never a literal in the task def or git. Not literally passwordless at the
-  mem9 hop, but the password is never committed or human-handled. A future
-  token-refresh sidecar (like the Mantle one) or a mem9 source patch (pgx
-  `BeforeConnect` + AWS auth-token generator) could enable true end-to-end IAM
-  later — recorded as an Open decision, not adopted now.
+- **Consequence for IAM DB auth**: an RDS/Aurora IAM authentication token is
+  [valid for 15 minutes](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/UsingWithRDS.IAMDBAuth.Connecting.html),
+  but `MNEMO_DSN` is static. New pool connections would fail after the token
+  expires, so native end-to-end IAM database auth is not viable for unmodified
+  mem9.
+- **Current implementation:** `mnemo-server` and the bootstrap task connect
+  directly to the Aurora cluster writer endpoint with a static
+  Secrets Manager password over TLS. **RDS Proxy is not deployed.** ECS injects
+  the secret through a task-definition `secrets: valueFrom` reference at task
+  startup; the literal does not appear in the task definition or repository.
+  Per the
+  [ECS execution-role documentation](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task_execution_IAM_role.html),
+  `secretsmanager:GetSecretValue` for that startup injection belongs to the task
+  execution role, not the application task role.
+- Automatic database credential rotation is not configured. Because both mem9
+  and ECS consume startup-time values, a changed credential also requires a new
+  task. End-to-end IAM auth remains a deferred alternative that would require a
+  mem9 credential-refresh change.
 - The per-tenant `tenants` rows ALSO carry db_host/user/pass; `MNEMO_ENCRYPT_TYPE`
   (`plain`|`kms`) + `MNEMO_ENCRYPT_KEY` encrypt those stored tenant DB passwords.
   For a single operator with one tenant pointed at the same Aurora, the tenant
@@ -136,7 +136,7 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
   the RDS `RandomPassword` can contain such chars — a risk to watch, not ours to
   fix without a mem9 patch).
 - **Consequence for bootstrap:** the seeded `tenants` row MUST carry the REAL
-  `db_user`+`db_password` (the RDS Proxy creds from `MEM9_DB_SECRET`), NOT a
+  `db_user`+`db_password` (the Aurora credentials from `MEM9_DB_SECRET`), NOT a
   placeholder — else every add/search fails auth at query time even though the
   server boots and passes `idx_app` validation. The bootstrap entrypoint seeds
   them via psql `--set` variables (password never in argv/SQL text). `db_tls=TRUE`
@@ -154,9 +154,9 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
 - **No native Bedrock.** Bedrock requires an OpenAI→Bedrock proxy exposing
   `/embeddings`. Ollama/LM Studio/TEI/any OpenAI-compatible server works via
   `MNEMO_EMBED_BASE_URL`.
-- Design decision: reuse a self-hosted **qwen3** embedding (dims 1024) or a Bedrock
-  Cohere/Titan proxy. **Pin model + dims before first ingest** — the vector
-  column type and all stored vectors depend on it; changing dims = reindex.
+- Current implementation: a self-hosted **qwen3** sidecar produces 1024
+  dimensions. **Pin model + dims before first ingest** — the vector column type
+  and all stored vectors depend on it; changing dims = reindex.
 
 ## LLM (smart-ingest / MaaS)
 
@@ -192,8 +192,16 @@ Probed at the pinned commit (`server/internal/config/config.go` + `llm/client.go
   `MNEMO_LLM_BASE_URL=http://localhost:8082/v1` with a **static dummy**
   `MNEMO_LLM_API_KEY`; the proxy holds the live Mantle bearer (minted by
   `@aws/bedrock-token-generator` — a **local SigV4 presign, 12h TTL**, refreshed on
-  a timer) and injects a fresh `Authorization` + `OpenAI-Project` per request. See
-  ARCHITECTURE.md §7 + `docker/llm-proxy/server.mjs`.
+  a timer) and injects a fresh `Authorization` per request. It adds
+  `OpenAI-Project` when `MEM9_BEDROCK_PROJECT` is configured. See
+  [`ARCHITECTURE.md`](ARCHITECTURE.md) and `docker/llm-proxy/server.mjs`.
+- **Provider-boundary limits (patched locally):** the proxy reads at most
+  **1,048,576 bytes**, validates chat-completions JSON before forwarding, defaults
+  missing `max_tokens` to **4096**, and rejects invalid or larger explicit values.
+  The patched formatter caps the conversation at **200,000 runes** through
+  `MNEMO_MAX_EXTRACTION_CONVERSATION_RUNES`; a real-formatter regression test uses
+  four-byte Unicode to prove the final serialized request remains below the byte
+  cap. ECS injects all three values explicitly.
 
 ## Bedrock Mantle facts (for the LLM/embedding decision)
 
@@ -218,15 +226,24 @@ this repo — **empirically live 2026-07-12** (ap-northeast-1):
   Cohere embed-v4, Nova MM) are **`bedrock-runtime` ONLY**, and bedrock-runtime is
   **not** OpenAI-compatible for embeddings (it's InvokeModel). → embedding must be
   our own OpenAI-shaped `/embeddings` service (decided: qwen3, dims 1024).
-- **Auth**: Bedrock API key (bearer) works with the OpenAI SDK; SigV4 also works.
-  Cost attribution on Mantle = **Bedrock Projects** via the `OpenAI-Project`
-  header — **IAM-principal / session-tag attribution does NOT work on Mantle**
-  (verified in production: GLM-5 spend tagged ~$0 via the runtime path).
-  Follow the established pattern: a CloudControl `AWS::BedrockMantle::Project`
-  resource (gated behind a provision env flag) + a Mantle auth helper module +
-  a Bedrock-Mantle LLM provider module.
-- Pricing identical to bedrock-runtime per-token. VPC PrivateLink interface
-  endpoint avoids NAT egress cost if calling from in-VPC.
+- **Auth**: AWS documents API-key or AWS-credential authentication for
+  [Mantle Chat Completions](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-chat-completions-mantle.html).
+  Its
+  [API key documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/api-keys.html)
+  documents the 12-hour maximum and token generator for short-term keys.
+- **Project attribution**: when `MEM9_BEDROCK_PROJECT` is configured, `llm-proxy`
+  sends its value in `OpenAI-Project`, the header AWS documents for
+  OpenAI-compatible project requests. Without that setting, the proxy omits the
+  header and inference remains untagged:
+  [Bedrock projects and workspaces](https://docs.aws.amazon.com/bedrock/latest/userguide/workspaces.html).
+- **IAM namespace**: current task-role permissions are
+  `bedrock-mantle:CreateInference`, `bedrock-mantle:CallWithBearerToken`,
+  `bedrock-mantle:GetProject`, `bedrock-mantle:ListProjects`, and
+  `bedrock-mantle:ListTagsForResource`. Mantle inference does not use the
+  `bedrock:*` action namespace. See the
+  [Mantle service authorization reference](https://docs.aws.amazon.com/service-authorization/latest/reference/list_bedrock-mantle.html)
+  and the
+  [Bedrock tagging documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/tagging.html).
 
 ## Other integrations
 
@@ -289,50 +306,43 @@ this repo — **empirically live 2026-07-12** (ap-northeast-1):
   Multi-replica writes would rely on Aurora's MVCC (fine for the DB) but hit the
   local-disk import limitation above.
 
-## Verified AWS facts (for the design)
+## AWS facts and empirical deployment observations
 
-- Aurora **PostgreSQL Serverless v2** available in **ap-northeast-1 (Tokyo)**,
-  PG 16 & 17. `pgvector` is a standard extension (`CREATE EXTENSION vector`).
-- Amazon S3 Files (2026-04 GA) exists as a writable POSIX/NFS mount but is NOT
-  used here (no filesystem state to host; single-task `/tmp` covers import).
-- The ECS stack consumes the **account default VPC** via
-  `aws.ec2.getVpc({ default: true })`, filtered to NAT-routed private subnets —
-  the pattern reused here.
-- **Tokyo default VPC is customized + NAT-routed (verified 2026-07-12).** The
-  account's `ap-northeast-1` default VPC (172.31.0.0/16) has three `private-1a/1c/1d`
-  subnets across 3 AZs (172.31.96/112/128.0/20, `MapPublicIpOnLaunch=false`), **each
-  routing `0.0.0.0/0` through a NAT gateway**, PLUS three `secondary-private-subnet-*`
-  subnets (172.32.x) that are ALSO `MapPublicIpOnLaunch=false` but have **NO NAT
-  egress**. So `infra/vpc.ts` selects the three NAT-routed private subnets by the
-  **`private-1*` Name tag** — a generic `map-public-ip-on-launch=false` filter would
-  wrongly include the no-NAT secondaries and strand ECS/Aurora with no internet.
-  Concrete resource ids are intentionally NOT recorded here (they'd leak topology).
-- **RDS Proxy `PENDING_PROXY_CAPACITY` starves at 0.5 ACU — the reason we DROPPED
-  the proxy (2026-07-12).** A freshly-created RDS Proxy (SST `Aurora({proxy:true})`)
-  sat in `TargetHealth.State=UNAVAILABLE / Reason=PENDING_PROXY_CAPACITY` for 40+ min
-  and NEVER became AVAILABLE, even though the Aurora cluster+instance were both
-  `available` and the proxy config (SG, subnets, target group, pool) was healthy.
-  **Reproduced in BOTH ap-northeast-1 and ap-southeast-1 → NOT regional.** Root cause
-  (confirmed vs internal AWS knowledge — answers.amazon.com/posts/295779 + AWS CDK
-  docs + internal RDS wikis): **an RDS Proxy provisions its backend capacity at a
-  rate proportional to the Aurora Serverless v2 current ACU** ("scale-up rate is
-  proportional to current capacity"; RDS Proxy team: "our capacity is based on
-  underlying registered database capacity"). At the **0.5-ACU floor** that rate is
-  the slowest possible, so provisioning effectively wedges. FIX: dropped the RDS
-  Proxy entirely — mem9 + the bootstrap task connect to the Aurora **cluster writer
-  endpoint** directly (a single-writer self-host needs no pooling). Alternative that
-  would also work: raise min ACU to ≥2 (per AWS, faster scale rate), but at ~4× idle
-  cost — dropping the proxy keeps the locked 0.5-ACU floor. See ARCHITECTURE.md §3a.
+- The current IaC provisions Aurora PostgreSQL 17.4 Serverless v2 and applies
+  `CREATE EXTENSION vector` in the bootstrap task.
+- AWS documents the Aurora cluster endpoint as the endpoint for the current
+  primary and recommends it for writes:
+  [Aurora cluster endpoints](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.Endpoints.Cluster.html).
+- The ECS stack consumes the account default VPC through
+  `aws.ec2.getVpc({ default: true })` and selects the NAT-routed private subnets.
+- **Empirical account observation, 2026-07-12:** the default VPC contains both
+  NAT-routed and no-NAT private subnets. `infra/vpc.ts` selects the intended
+  group by its `private-1*` Name tag. Concrete resource ids are intentionally not
+  recorded.
+- **Empirical deployment observation, 2026-07-12:** the former RDS Proxy target
+  remained `PENDING_PROXY_CAPACITY` for more than 40 minutes at the selected
+  0.5 ACU floor in two regions. The repository removed the proxy. mem9 and the
+  bootstrap task now connect directly to the Aurora cluster writer endpoint.
+  This observation is not presented as a general AWS root-cause or capacity
+  guarantee.
 
 ### AgentCore Gateway private egress to VPC — Lambda-proxy (the VPC-Lattice path was abandoned)
 
-**CURRENT (implemented, §6a):** a **Lambda target**. AgentCore invokes a VPC-attached
+**Current implementation:** a **Lambda target**. AgentCore invokes a VPC-attached
 proxy Lambda (`targetConfiguration.mcp.lambda.{lambdaArn, toolSchema}`) that reaches
 mnemo-server over **AWS Cloud Map** private DNS (`mnemo.mem9-<stage>.local:8080`),
 injecting `X-API-Key` (= tenant id). No ALB, no ACM cert, no VPC Lattice, no Route53
-public zone. The gateway service role needs only `lambda:InvokeFunction`. This is
-AgentCore's out-of-the-box private path — "the gateway can immediately invoke Lambda
-functions configured with VPC access" (AWS docs).
+public zone. The Cloud Map private DNS namespace creates a VPC-associated Route 53
+private hosted zone, as documented by
+[CreatePrivateDnsNamespace](https://docs.aws.amazon.com/cloud-map/latest/api/API_CreatePrivateDnsNamespace.html).
+The target shape follows the
+[AgentCore Lambda target documentation](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-add-target-api-target-config.html).
+The gateway service role grants only `lambda:InvokeFunction` on that target, as
+specified by the
+[AgentCore Gateway permissions documentation](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-prerequisites-permissions.html).
+The function uses
+[Lambda VPC connectivity](https://docs.aws.amazon.com/lambda/latest/dg/configuration-vpc.html)
+to reach Cloud Map and mnemo-server.
 
 **REJECTED alternative — OpenAPI/MCP target with `privateEndpoint` (VPC Lattice):**
 this was the original design and it is a real, documented feature, BUT the

@@ -1,11 +1,10 @@
 // Observability: CloudWatch metric filters + alarms + Slack alerting for the
-// mnemo-server container (issues #26, follow-up). Only created for the `prod`
+// mnemo-server container (issues #26 and #47). Only created for the `prod`
 // stage; PR-preview crash-loops must not page.
 //
-// Slack delivery is conditional on the `SlackWebhookUrl` SST secret being
-// configured (set via `npx sst secret set SlackWebhookUrl <url> --stage prod`
-// or via `SLACK_WEBHOOK_URL` GitHub secret). When absent, the alarms still fire
-// (visible in the CloudWatch console) but have no action — no Lambda, no topic.
+// Production requires an IaC-managed notification sink. The current sink is
+// Slack, configured by the `SLACK_WEBHOOK_URL` GitHub secret. Missing prod
+// configuration fails synthesis; preview/development stages omit this stack.
 //
 // Metrics extracted from the mnemo-server structured log lines:
 //   1. recall_zero_hit — `confidence recall search` with `returned = 0`
@@ -17,9 +16,10 @@
 //   - RecallZeroHitRate: metric math `zero/total > 0.7` over 1h
 //   - IngestAuthFailure: ≥3 ingest_llm_auth_failure in 15 min
 //
-// When SlackWebhookUrl is set:
-//   - SNS topic → alert-router Lambda → Slack webhook (Block Kit, #C0BKH5LPAJW
-//     in the opentuna workspace)
+// Delivery:
+//   - CloudWatch alarm -> SNS topic -> alert-router Lambda -> Slack webhook
+//   - SNS-to-Lambda transport failures -> transport failure queue
+//   - exhausted/expired Lambda executions -> execution failure queue
 
 export interface ObservabilityInputs {
   stage: string;
@@ -32,14 +32,18 @@ export interface ObservabilityInputs {
   // never exist). Deriving from the task def both yields the REAL name and
   // threads a Pulumi dependency edge through the log group's creator.
   logGroupName: Output<string>;
-  slackWebhookUrl?: string;
+  slackWebhookUrl?: Input<string>;
 }
 
 export function observability(inputs: ObservabilityInputs) {
   const { stage, logGroupName, slackWebhookUrl } = inputs;
   if (stage !== "prod") return;
+  if (!slackWebhookUrl) {
+    throw new Error("SLACK_WEBHOOK_URL is required for production alert delivery");
+  }
 
   const namespace = "mem9-on-aws";
+  const failureQueueRetentionSeconds = 14 * 24 * 60 * 60;
 
   // ─── Metric filters ──────────────────────────────────────────────────────
 
@@ -99,40 +103,91 @@ export function observability(inputs: ObservabilityInputs) {
     },
   );
 
-  // ─── SNS topic + alert-router Lambda (conditional on webhook) ────────────
+  // ─── Alarm topic + independently observable delivery failures ───────────
 
-  // alarmActions is either [topicArn] (Slack delivery enabled) or [] (console-only).
-  let alarmActions: any[] = [];
+  const topic = new aws.sns.Topic("Mem9AlertsTopic", {
+    name: `mem9-on-aws-${stage}-alerts`,
+  });
+  const alarmActions = [topic.arn];
 
-  if (slackWebhookUrl) {
-    const topic = new aws.sns.Topic("Mem9AlertsTopic", {
-      name: `mem9-on-aws-${stage}-alerts`,
-    });
+  const transportFailureQueue = new aws.sqs.Queue("AlertTransportFailureQueue", {
+    messageRetentionSeconds: failureQueueRetentionSeconds,
+    // SSE-SQS is compatible with SNS redrive without a customer-managed KMS key.
+    sqsManagedSseEnabled: true,
+  });
+  const executionFailureQueue = new aws.sqs.Queue("AlertExecutionFailureQueue", {
+    messageRetentionSeconds: failureQueueRetentionSeconds,
+    sqsManagedSseEnabled: true,
+  });
 
-    const alertRouter = new sst.aws.Function("Mem9AlertRouter", {
-      handler: "infra/src/alert-router/handler.handler",
-      runtime: "nodejs24.x",
-      architecture: "arm64",
-      timeout: "30 seconds",
-      memory: "256 MB",
-      environment: { SLACK_WEBHOOK_URL: slackWebhookUrl },
-    });
+  const accountId = aws.getCallerIdentityOutput().accountId;
+  const transportQueuePolicy = $jsonStringify({
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Effect: "Allow",
+        Principal: { Service: "sns.amazonaws.com" },
+        Action: "sqs:SendMessage",
+        Resource: transportFailureQueue.arn,
+        Condition: {
+          ArnEquals: { "aws:SourceArn": topic.arn },
+          StringEquals: { "aws:SourceAccount": accountId },
+        },
+      },
+    ],
+  });
 
-    new aws.sns.TopicSubscription("Mem9AlertRouterSubscription", {
+  const transportFailureQueuePolicy = new aws.sqs.QueuePolicy(
+    "AlertTransportFailureQueuePolicy",
+    {
+      queueUrl: transportFailureQueue.url,
+      policy: transportQueuePolicy,
+    },
+  );
+
+  const alertRouter = new sst.aws.Function("Mem9AlertRouter", {
+    handler: "infra/src/alert-router/handler.handler",
+    runtime: "nodejs24.x",
+    architecture: "arm64",
+    timeout: "30 seconds",
+    memory: "256 MB",
+    environment: { SLACK_WEBHOOK_URL: slackWebhookUrl },
+    permissions: [
+      {
+        actions: ["sqs:SendMessage"],
+        resources: [executionFailureQueue.arn],
+      },
+    ],
+  });
+
+  const snsInvokePermission = new aws.lambda.Permission("Mem9AlertRouterSnsInvoke", {
+    action: "lambda:InvokeFunction",
+    function: alertRouter.name,
+    principal: "sns.amazonaws.com",
+    sourceArn: topic.arn,
+  });
+
+  new aws.sns.TopicSubscription(
+    "Mem9AlertRouterSubscription",
+    {
       topic: topic.arn,
       protocol: "lambda",
       endpoint: alertRouter.arn,
-    });
+      redrivePolicy: $jsonStringify({
+        deadLetterTargetArn: transportFailureQueue.arn,
+      }),
+    },
+    { dependsOn: [transportFailureQueuePolicy, snsInvokePermission] },
+  );
 
-    new aws.lambda.Permission("Mem9AlertRouterSnsInvoke", {
-      action: "lambda:InvokeFunction",
-      function: alertRouter.name,
-      principal: "sns.amazonaws.com",
-      sourceArn: topic.arn,
-    });
-
-    alarmActions = [topic.arn];
-  }
+  new aws.lambda.FunctionEventInvokeConfig("Mem9AlertRouterAsyncFailures", {
+    functionName: alertRouter.name,
+    maximumRetryAttempts: 2,
+    maximumEventAgeInSeconds: 2 * 60 * 60,
+    destinationConfig: {
+      onFailure: { destination: executionFailureQueue.arn },
+    },
+  });
 
   // ─── Alarms ──────────────────────────────────────────────────────────────
 
@@ -187,6 +242,38 @@ export function observability(inputs: ObservabilityInputs) {
     evaluationPeriods: 1,
     threshold: 3,
     comparisonOperator: "GreaterThanOrEqualToThreshold",
+    treatMissingData: "notBreaching",
+    alarmActions,
+  });
+
+  new aws.cloudwatch.MetricAlarm("AlertTransportFailureQueueVisibleMessages", {
+    alarmDescription:
+      "SNS could not deliver an alarm event to the alert-router Lambda. " +
+      "Follow the transport failure queue runbook.",
+    namespace: "AWS/SQS",
+    metricName: "ApproximateNumberOfMessagesVisible",
+    dimensions: { QueueName: transportFailureQueue.name },
+    statistic: "Maximum",
+    period: 300,
+    evaluationPeriods: 1,
+    threshold: 0,
+    comparisonOperator: "GreaterThanThreshold",
+    treatMissingData: "notBreaching",
+    alarmActions,
+  });
+
+  new aws.cloudwatch.MetricAlarm("AlertExecutionFailureQueueVisibleMessages", {
+    alarmDescription:
+      "The alert-router Lambda exhausted retries or event age after accepting " +
+      "an alarm event. Follow the execution failure queue runbook.",
+    namespace: "AWS/SQS",
+    metricName: "ApproximateNumberOfMessagesVisible",
+    dimensions: { QueueName: executionFailureQueue.name },
+    statistic: "Maximum",
+    period: 300,
+    evaluationPeriods: 1,
+    threshold: 0,
+    comparisonOperator: "GreaterThanThreshold",
     treatMissingData: "notBreaching",
     alarmActions,
   });

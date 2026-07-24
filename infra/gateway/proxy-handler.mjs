@@ -5,9 +5,10 @@
  * failed to stabilize 100% of the time (an AgentCore control-plane internal error
  * on that combination in ap-northeast-1). A **Lambda target** is AgentCore's
  * out-of-the-box private path: the gateway invokes this VPC-attached function
- * directly (no ALB, no cert, no Lattice, no private zone), and the function
- * reaches mnemo-server privately over Cloud Map DNS. This keeps "no public
- * exposure" while sidestepping the broken Lattice-target path.
+ * directly with no ALB, certificate, or Lattice target. The function reaches
+ * mnemo-server over Cloud Map DNS; Cloud Map owns the VPC-associated Route 53
+ * private hosted zone. This keeps "no public exposure" while sidestepping the
+ * rejected Lattice-target path.
  *
  * INVOCATION CONTRACT (AWS docs — "AWS Lambda function targets"):
  *   - event   = a flat map of the called tool's inputSchema properties → values

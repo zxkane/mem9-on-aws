@@ -1,0 +1,31 @@
+{
+  "version": "1.0",
+  "timestamp": "2026-07-24T10:05:00.000Z",
+  "requestContext": {
+    "requestId": "execution-request-id",
+    "functionArn": "arn:aws:lambda:ap-northeast-1:123456789012:function:mem9-on-aws-prod-alert-router:$LATEST",
+    "condition": "RetriesExhausted",
+    "approximateInvokeCount": 3
+  },
+  "requestPayload": {
+    "Records": [
+      {
+        "EventSource": "aws:sns",
+        "Sns": {
+          "MessageId": "accepted-sns-message-id",
+          "Message": "{\"AlarmName\":\"SensitiveFixtureAlarm\",\"NewStateValue\":\"ALARM\"}"
+        }
+      }
+    ]
+  },
+  "responseContext": {
+    "statusCode": 200,
+    "executedVersion": "$LATEST",
+    "functionError": "Unhandled"
+  },
+  "responsePayload": {
+    "errorType": "Error",
+    "errorMessage": "Slack webhook request failed",
+    "trace": []
+  }
+}

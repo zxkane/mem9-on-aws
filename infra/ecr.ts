@@ -8,8 +8,8 @@
  * `<account>.dkr.ecr.<region>.amazonaws.com/<namespace>:<tag>` where the account
  * comes from the caller identity (never hardcoded) and region = the app region.
  *
- * Centralized here so ecs.ts (mnemo-server + qwen3-embed) and bootstrap.ts share
- * one composition + the same region constant.
+ * Centralized here so ecs.ts (mnemo-server, qwen3-embed, and llm-proxy) and
+ * bootstrap.ts share one composition and the same region constant.
  */
 
 // Must match sst.config.ts providers.aws.region and the ECR bootstrap region

@@ -20,22 +20,24 @@
  * and the LLM at MNEMO_LLM_BASE_URL=http://localhost:8082/v1. The qwen3 ONNX model
  * is heavy (~3.85 GB resident), so the task memory fits it — the main §7/§9 swing.
  *
- * LLM SMART-INGEST (this PR): MNEMO_INGEST_MODE=smart. mem9 reads MNEMO_LLM_API_KEY
+ * LLM SMART-INGEST: MNEMO_INGEST_MODE=smart. mem9 reads MNEMO_LLM_API_KEY
  * ONCE at startup (immutable) and its LLM client sends only Authorization — so it
  * can neither refresh a rotating Bedrock bearer nor add the OpenAI-Project cost
  * header. The llm-proxy sidecar bridges both: mem9 auths with a static DUMMY key to
  * localhost, and the proxy holds the live Mantle bearer (refreshed on a timer, a
- * local presign) + injects OpenAI-Project per request. No mem9 fork, no restart on
- * rotation. See docker/llm-proxy/server.mjs + docs/mem9-facts.md.
+ * local presign) + injects OpenAI-Project when a Bedrock Project is configured.
+ * No mem9 fork, no restart on rotation. See docker/llm-proxy/server.mjs +
+ * docs/mem9-facts.md.
  *
  * MCP REACHABILITY (§6a): the AgentCore Gateway reaches mnemo-server via a
  * VPC-attached proxy Lambda (infra/gateway.ts), NOT a public/ALB endpoint. This
  * stack registers the service in AWS Cloud Map (`mnemo.mem9-<stage>.local`) so the
  * Lambda can resolve + reach the task privately over HTTP:8080. (Earlier revisions
- * used an internal ALB + VPC Lattice privateEndpoint; that AgentCore target path
- * failed to stabilize, so it was replaced by the out-of-the-box Lambda target.)
+ * used an internal ALB + VPC Lattice privateEndpoint. Empirical 2026-07-14: that
+ * AgentCore target path failed to stabilize, so the repository replaced it with
+ * the Lambda target.)
  *
- * SCHEMA BOOTSTRAP (this PR, separate one-shot task — infra/bootstrap.ts):
+ * SCHEMA BOOTSTRAP (separate one-shot task — infra/bootstrap.ts):
  * mem9 does NOT create the PG memories table (it only validates idx_app at
  * startup). The bootstrap task applies pgvector + the memories(vector 1024) schema
  * + seeds one tenant BEFORE the server needs it (see docs/mem9-facts.md §8).
@@ -73,6 +75,12 @@ const EMBED_PORT = 8081;
 // The llm-proxy sidecar listens here; mem9 calls it over localhost for
 // smart-ingest LLM (proxied to Bedrock Mantle). Not exposed outside the task.
 const LLM_PROXY_PORT = 8082;
+
+// GLM-5 provider-boundary controls (issue #46). Keep these explicit in the ECS
+// task definition so production does not depend on image defaults.
+const LLM_PROXY_MAX_BODY_BYTES = 1_048_576;
+const LLM_PROXY_MAX_TOKENS = 4096;
+const MAX_EXTRACTION_CONVERSATION_RUNES = 200_000;
 
 // mnemo-server's HTTP port. The MCP proxy Lambda (§6a) reaches this port on the
 // task privately via the Cloud Map DNS name registered below.
@@ -113,6 +121,17 @@ export interface EcsOutputs {
  *   dependency so ECS waits for the DB resources.
  */
 export function ecs(dbOut: DbOutputs): EcsOutputs {
+  // GitHub exposes an unset repository secret as an empty string. Reject that
+  // before registering any resources; sst.Secret accepts empty string values.
+  const configuredSlackWebhook = process.env.SST_SECRET_SlackWebhookUrl;
+  if ($app.stage === "prod" && !configuredSlackWebhook) {
+    throw new Error("SLACK_WEBHOOK_URL is required for production alert delivery");
+  }
+  // Secret.value is a Pulumi secret Output, so the webhook remains encrypted
+  // and redacted in state, diagnostics, and the Lambda environment diff.
+  const slackWebhookUrl =
+    $app.stage === "prod" ? new sst.Secret("SlackWebhookUrl").value : undefined;
+
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const { vpcId, privateSubnetIds } = resolveVpc();
 
@@ -257,7 +276,7 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
     //   - bedrock-mantle:CallWithBearerToken — the Mantle-endpoint variant of the
     //     bearer-token action the minted bearer carries (distinct from the
     //     `bedrock:` one). Account-wide by nature → "*".
-    //   - GetProject / ListProjects / ListTagsForResources — the read actions the
+    //   - GetProject / ListProjects / ListTagsForResource — the read actions the
     //     Mantle inference path also checks (mirrors AmazonBedrockMantleInferenceAccess).
     permissions: [
       {
@@ -273,7 +292,7 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
           "bedrock-mantle:CallWithBearerToken",
           "bedrock-mantle:GetProject",
           "bedrock-mantle:ListProjects",
-          "bedrock-mantle:ListTagsForResources",
+          "bedrock-mantle:ListTagsForResource",
         ],
         resources: ["*"],
       },
@@ -302,8 +321,8 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
           // LLM MaaS = the llm-proxy sidecar on localhost → Bedrock Mantle GLM-5.
           // mem9 reads MNEMO_LLM_API_KEY once + can't add headers, so it auths with
           // a static DUMMY key; the proxy swaps in the live Mantle bearer +
-          // OpenAI-Project. The key MUST be non-empty or mem9 nils the LLM client
-          // and silently downgrades smart→raw (verified in mem9 source).
+          // optional OpenAI-Project. The key MUST be non-empty or mem9 nils the
+          // LLM client and silently downgrades smart→raw (verified in mem9 source).
           MNEMO_LLM_BASE_URL: `http://localhost:${LLM_PROXY_PORT}/v1`,
           MNEMO_LLM_MODEL: LLM_MODEL,
           MNEMO_LLM_API_KEY: "local", // dummy; the proxy holds the real bearer
@@ -319,11 +338,27 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
           // future sessions are stored (decisions, preferences, gotchas);
           // transient session-state observations are rejected.
           MNEMO_INGEST_DURABLE_ONLY: "1",
+          // Bound prompt construction before the provider-boundary byte check.
+          MNEMO_MAX_EXTRACTION_CONVERSATION_RUNES: String(MAX_EXTRACTION_CONVERSATION_RUNES),
         },
         // Secret injection (== ECS `secrets: valueFrom`): the DB secret lands as an
         // env var from Secrets Manager at task start. Never a literal in git.
         ssm: {
           MEM9_DB_SECRET: dbSecretArn,
+        },
+        // Process liveness only: /healthz confirms the HTTP server is responding,
+        // but intentionally does not probe Aurora, qwen3, the LLM proxy, or an
+        // end-to-end memory flow. BusyBox wget ships with the Alpine base image,
+        // so this adds no health-check-only package to the runtime.
+        health: {
+          command: [
+            "CMD-SHELL",
+            `wget -q -O /dev/null http://localhost:${MNEMO_PORT}/healthz || exit 1`,
+          ],
+          startPeriod: "60 seconds",
+          interval: "30 seconds",
+          timeout: "5 seconds",
+          retries: 3,
         },
         // Per-container logging: with `containers[]`, top-level `logging` is
         // forbidden (SST rejects it alongside containers) — each container sets
@@ -366,6 +401,8 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
           // set by Fargate); pin it explicitly so a region change can't silently
           // point it at the wrong Mantle endpoint.
           LLM_PROXY_REGION: "ap-northeast-1",
+          LLM_PROXY_MAX_BODY_BYTES: String(LLM_PROXY_MAX_BODY_BYTES),
+          LLM_PROXY_MAX_TOKENS: String(LLM_PROXY_MAX_TOKENS),
           // OpenAI-Project header for Bedrock cost attribution. Empty → omitted.
           LLM_PROXY_OPENAI_PROJECT: BEDROCK_PROJECT,
         },
@@ -435,9 +472,9 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
     value: IMAGE_TAG,
     tags,
   });
-  // Record the deployed mnemo-server image URI (incl. tag) so it's auditable which
-  // mem9 commit each stage runs without inspecting the task definition. The embed
-  // image shares the same tag.
+  // Record the deployed mnemo-server image URI (including tag) so it's auditable
+  // which mem9 commit each stage runs without inspecting the task definition.
+  // All workload images use the same per-commit tag.
   new aws.ssm.Parameter("EcsImage", {
     name: `${prefix}/ecs/image`,
     type: "String",
@@ -451,10 +488,9 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
     tags,
   });
 
-  // Observability (issue #26): metric filters + alarms for prod only.
-  // Slack delivery is conditional: only wired when the SlackWebhookUrl secret
-  // is set (GitHub Actions secret → `sst secret set` during deploy, or manual).
-  // When absent, alarms still fire (console-visible) but have no actions.
+  // Observability (issues #26 and #47): metric filters + alarms for prod only.
+  // Production requires the IaC-managed Slack sink; observability() fails
+  // synthesis when SLACK_WEBHOOK_URL is absent. Preview/dev stages omit it.
   //
   // The mnemo-server log group name comes from the TASK DEFINITION (the
   // awslogs-group option of the mnemo-server container) — the only reliable
@@ -462,7 +498,6 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
   // (`ignoreChanges: ["name"]`), so a hand-computed name silently diverges on
   // stacks whose group already exists. Reading it also gives the metric
   // filters a real Pulumi dependency on the log group's creator.
-  const slackWebhookUrl = process.env.SLACK_WEBHOOK_URL || undefined;
   const mnemoLogGroupName = service.nodes.taskDefinition
     .apply((td) => (td as { containerDefinitions: Output<string> }).containerDefinitions)
     .apply((raw: string) => {

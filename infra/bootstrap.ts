@@ -29,10 +29,9 @@ const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 export interface BootstrapOutputs {
   taskDefinitionArn: Output<string>;
   tenantSecretArn: Output<string>;
-  // The tenant id == X-API-Key value (random.RandomId hex). infra/gateway.ts feeds
-  // this to the AgentCore API-key credential provider for outbound auth to
-  // mnemo-server. Already a Pulumi-internal random token (in state); the provider
-  // stores it in AgentCore's own service-managed secret — no new plaintext surface.
+  // The tenant id == X-API-Key value (random.RandomId hex). infra/gateway.ts
+  // injects it into the proxy Lambda, which adds the header when calling
+  // mnemo-server. It remains a Pulumi-internal random token in state.
   tenantId: Output<string>;
 }
 

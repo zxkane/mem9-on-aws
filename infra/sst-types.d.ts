@@ -1,15 +1,14 @@
 /**
  * Minimal ambient declarations for the SST v4 + Pulumi globals used by
- * `infra/*.ts` in the mem9-on-aws BASE SCAFFOLD.
+ * the current `infra/*.ts` modules.
  *
  * SST bootstraps full types via `.sst/platform/config.d.ts` at deploy time,
  * but CI typecheck must run without first executing `sst install` (the
  * platform's source pulls in the whole Pulumi runtime + transitive deps and
- * is strict-mode-incompatible). This shim covers ONLY the surface the scaffold
- * uses: `$app`, `$transform`, `$config`, `$interpolate`, `aws.ec2.getVpcOutput`,
- * `aws.ec2.getSubnetsOutput`, and `aws.ssm.Parameter`.
+ * is strict-mode-incompatible). This shim covers only the global surface the
+ * repository uses.
  *
- * When a follow-up adds a new construct, EXTEND this file (don't expand the
+ * When the infrastructure adds a new construct, extend this file (don't expand the
  * triple-slash reference). At `sst deploy` time the platform's real types take
  * precedence — declaration-merging order means deploy-time inference does NOT
  * use these definitions, so a slightly loose shim here can't mask a real
@@ -46,6 +45,9 @@ declare function $interpolate(
   strings: TemplateStringsArray,
   ...values: unknown[]
 ): Output<string>;
+
+// Resolve nested Output/Promise values and serialize the result as JSON.
+declare function $jsonStringify(value: unknown): Output<string>;
 
 // ── The `aws` provider surface the scaffold touches ─────────────────────────
 declare namespace aws {
@@ -124,6 +126,18 @@ declare namespace aws {
     }
     class Permission {
       constructor(name: string, args: PermissionArgs);
+    }
+    interface FunctionEventInvokeConfigArgs {
+      functionName: Input<string>;
+      maximumRetryAttempts?: Input<number>;
+      maximumEventAgeInSeconds?: Input<number>;
+      destinationConfig?: {
+        onFailure?: { destination: Input<string> };
+        onSuccess?: { destination: Input<string> };
+      };
+    }
+    class FunctionEventInvokeConfig {
+      constructor(name: string, args: FunctionEventInvokeConfigArgs);
     }
   }
 
@@ -229,6 +243,7 @@ declare namespace aws {
       alarmDescription?: Input<string>;
       namespace?: Input<string>;
       metricName?: Input<string>;
+      dimensions?: Input<Record<string, Input<string>>>;
       statistic?: Input<string>;
       period?: Input<number>;
       evaluationPeriods: Input<number>;
@@ -258,9 +273,31 @@ declare namespace aws {
       topic: Input<string>;
       protocol: Input<string>;
       endpoint: Input<string>;
+      redrivePolicy?: Input<string>;
     }
     class TopicSubscription {
-      constructor(name: string, args: TopicSubscriptionArgs);
+      constructor(name: string, args: TopicSubscriptionArgs, opts?: { dependsOn?: unknown[] });
+    }
+  }
+
+  namespace sqs {
+    interface QueueArgs {
+      messageRetentionSeconds?: Input<number>;
+      sqsManagedSseEnabled?: Input<boolean>;
+      tags?: Record<string, Input<string>>;
+    }
+    class Queue {
+      constructor(name: string, args?: QueueArgs);
+      readonly arn: Output<string>;
+      readonly name: Output<string>;
+      readonly url: Output<string>;
+    }
+    interface QueuePolicyArgs {
+      queueUrl: Input<string>;
+      policy: Input<string>;
+    }
+    class QueuePolicy {
+      constructor(name: string, args: QueuePolicyArgs);
     }
   }
 

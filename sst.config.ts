@@ -51,11 +51,11 @@ export default $config({
         // The `command` provider exposes the `command` global (command.local.Command)
         // used by infra/gateway.ts to provision the AgentCore GatewayTarget via the
         // DIRECT bedrock-agentcore-control API (infra/gateway/provision-target.mjs).
-        // CloudControl's AWS::BedrockAgentCore::GatewayTarget handler is broken for
-        // the private-endpoint path (proven: it FAILEDs while the identical direct
-        // API call reaches READY). The Command runs on the deploy host (no cloud
-        // resource of its own → no extra deploy-role IAM beyond the agentcore/lattice
-        // grants the script's API calls already need). Version pinned explicitly.
+        // Empirical 2026-07-14: CloudControl reported FAILED for the rejected
+        // private-endpoint path while the identical direct API call reached READY.
+        // The Command runs on the deploy host (no cloud
+        // resource of its own, so it adds no deploy-role IAM beyond the
+        // bedrock-agentcore API grants used by the script). Version pinned explicitly.
         command: { version: "1.0.1" },
       },
     };
@@ -64,8 +64,8 @@ export default $config({
     // Force Node.js 24 for every ZIP Lambda function. `$transform` runs at
     // resource-construction time; SST v4's runtime default is "nodejs20.x",
     // so we OVERRIDE by assignment (not `??=`). Container-image functions
-    // (packageType: "Image") reject `runtime`, so skip them. No Lambda exists
-    // in the scaffold yet — this is the standing guard for when one lands.
+    // (packageType: "Image") reject `runtime`, so skip them. The Gateway proxy,
+    // OAuth facade, and observability handlers all receive this runtime.
     $transform(aws.lambda.Function, (args) => {
       if (args.packageType === "Image") return;
       args.runtime = "nodejs24.x";
@@ -76,15 +76,16 @@ export default $config({
     const { meta } = await import("./infra/meta");
     meta();
 
-    // Aurora PostgreSQL Serverless v2 + RDS Proxy + Secrets Manager (§3, §3a).
-    // The durable state layer; exports the proxy endpoint + secret ARN via SSM
-    // for the (later) ECS stack to assemble MNEMO_DSN. ~0.5 ACU idle floor makes
-    // this the largest cost line — real on every deployed stage incl. pr-*.
+    // Aurora PostgreSQL Serverless v2 + Secrets Manager (no RDS Proxy).
+    // The durable state layer exports the cluster writer endpoint + secret ARN;
+    // ECS and bootstrap connect to that endpoint directly. ~0.5 ACU idle floor
+    // makes this the largest cost line on every deployed stage, including pr-*.
     const { db } = await import("./infra/db");
     const dbOut = db();
 
-    // ECS Fargate cluster + the mnemo-server service (§4/§7). Two containers:
-    // mnemo-server + the qwen3-embed sidecar (localhost /v1/embeddings, dims 1024).
+    // ECS Fargate cluster + the mnemo-server service. Three containers:
+    // mnemo-server, qwen3-embed (localhost /v1/embeddings, dims 1024), and
+    // llm-proxy (localhost /v1/chat/completions -> Bedrock Mantle).
     // Takes db()'s Outputs DIRECTLY (a real Pulumi dependency) — NOT an SSM
     // read-back, which would fail on a fresh stage's first deploy.
     const { ecs } = await import("./infra/ecs");

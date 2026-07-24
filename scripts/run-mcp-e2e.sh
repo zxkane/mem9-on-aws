@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # run-mcp-e2e.sh — live end-to-end test of the MCP surface (§6/§6a).
 #
-# This is the FIRST exercisable write→search round-trip for the whole project.
+# This is the live write→search round-trip for the whole project.
 # It proves the full chain works against a deployed stage:
-#   Cognito M2M JWT → AgentCore Gateway (MCP) → managed VPC Lattice → internal ALB
-#   (public-cert TLS) → mnemo-server → Aurora → qwen3 embed → search.
+#   Cognito M2M JWT → AgentCore Gateway (MCP) → VPC-attached proxy Lambda
+#   → Cloud Map private DNS → mnemo-server → Aurora writer endpoint
+#   → qwen3-embed sidecar → search.
 #
 # Steps:
 #   1. Read the Cognito token endpoint + client id/secret + scope, and the Gateway

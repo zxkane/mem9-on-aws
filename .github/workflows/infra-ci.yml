@@ -1,4 +1,4 @@
-# Infra CI/CD for the mem9-on-aws SST v4 pipeline (base scaffold).
+# Infra CI/CD for the mem9-on-aws SST v4 runtime.
 #
 # Flow:
 #   1. typecheck        — typecheck + unit tests (PR + push-to-main; always runs)
@@ -44,7 +44,7 @@ on:
       - "package-lock.json"
       - "tsconfig.json"
       - "vitest.config.ts"
-      # The OIDC role + ECR repo are bootstrapped out-of-band via
+      # The OIDC role + ECR repositories are bootstrapped out-of-band via
       # scripts/deploy-github-role.sh / deploy-ecr-repositories.sh — NOT part of
       # the per-PR SST deploy. Skip the workflow when a PR only touches those
       # CloudFormation templates.
@@ -135,8 +135,8 @@ jobs:
   deploy-preview:
     name: Deploy PR Preview
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
-    # Depends on the image build so the preview pulls THIS PR's freshly-built
-    # image (it wouldn't exist yet otherwise on the PR that introduces it).
+    # Depends on the image build so the preview pulls this PR's freshly-built
+    # workload images.
     needs: [typecheck, build-and-push-image]
     if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.base.ref == 'main'
     # Full-stack fresh preview: Aurora (~13m) + the 3-container ECS task (the
@@ -204,7 +204,9 @@ jobs:
             echo "::error::Role $ROLE_NAME not found — run scripts/deploy-github-role.sh to bootstrap it"
             exit 1
           fi
-          echo "Preflight OK: $(aws sts get-caller-identity --query Arn --output text)"
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "::add-mask::$ACCOUNT_ID"
+          echo "Preflight OK: OIDC deploy role assumed"
 
       - name: Remove conflicting Pulumi installation
         if: steps.gate.outputs.skip != 'true'
@@ -222,7 +224,7 @@ jobs:
         id: deploy
         if: steps.gate.outputs.skip != 'true'
         shell: bash
-        # Deploy the image this PR just built. If the build was skipped (no
+        # Deploy the workload images this PR just built. If the build was skipped (no
         # AWS_ROLE_ARN), fall back to `latest` — infra/ecs.ts's own default.
         env:
           MEM9_IMAGE_TAG: ${{ needs.build-and-push-image.outputs.image_tag || 'latest' }}
@@ -273,12 +275,12 @@ jobs:
 
       - name: MCP write-search E2E (preview, soft)
         # The first live write->search round-trip (section 6/6a): Cognito M2M JWT
-        # -> AgentCore Gateway -> managed VPC Lattice -> internal ALB ->
-        # mnemo-server -> Aurora -> qwen3 -> search. SOFT on preview
-        # (E2E_SOFT=1): mem9 ingest is async, and AgentCore identity / Lattice can
-        # take a few min to propagate on a fresh pr-N stage, so a search-timeout
-        # logs a ::warning:: instead of failing the PR. Prod runs the same check
-        # HARD. STAGE comes from the deploy step's validated pr-N output (env, not
+        # -> AgentCore Gateway -> VPC-attached proxy Lambda -> Cloud Map private
+        # DNS -> mnemo-server -> Aurora -> qwen3 -> search. SOFT on preview
+        # (E2E_SOFT=1): mem9 ingest is async, and a fresh task registration or
+        # Lambda cold start can delay the first call, so a search-timeout logs a
+        # ::warning:: instead of failing the PR. Prod runs the same check HARD.
+        # STAGE comes from the deploy step's validated pr-N output (env, not
         # inlined into run:).
         if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
         shell: bash
@@ -370,7 +372,7 @@ jobs:
     name: Cleanup PR Preview
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.base.ref == 'main'
-    # Aurora + RDS Proxy + ECS teardown can exceed 20m (proxy delete alone ~5m).
+    # Aurora + ECS teardown can exceed 20m on a full preview stack.
     timeout-minutes: 30
     permissions:
       id-token: write
@@ -494,17 +496,16 @@ jobs:
             });
 
   # ───────────────────────────────────────────────────────────────────────────
-  # build-and-push-image — build the four arm64 application images and push them
-  # to the out-of-band ECR repos. Release builds (`push` and `workflow_dispatch`)
-  # get `mem9-<sha7>` + `latest`; pull requests get only `pr-<sha7>`. Runs on all
-  # three events so the PR preview
-  # exercises the real image (the image only exists once this job pushes it) and
-  # prod pins the exact commit. Exposes the per-commit tag as an output that both
-  # deploy-preview and deploy-prod consume. HARD-FAILS on release events without
+  # build-and-push-image — build the four arm64 workload images and push them to
+  # the out-of-band ECR repositories. Release builds (`push` and
+  # `workflow_dispatch`) get `mem9-<sha7>` + `latest`; pull requests get only
+  # `pr-<sha7>`. Runs on all three events so previews exercise the real images
+  # and prod pins the exact commit. Exposes the per-commit tag as an output that
+  # deploy-preview and deploy-prod consume. Hard-fails on release events without
   # AWS_ROLE_ARN; on PR it skips gracefully (matching deploy-preview's gate).
   # ───────────────────────────────────────────────────────────────────────────
   build-and-push-image:
-    name: Build & push application images
+    name: Build & push workload images
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     needs: typecheck
     if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.base.ref == 'main')
@@ -527,10 +528,10 @@ jobs:
         run: |
           if [ -z "$HAS_AWS" ]; then
             if [ "$EVENT_NAME" != "pull_request" ]; then
-              echo "::error::AWS_ROLE_ARN not configured — cannot build/push the image for prod. Bootstrap the role (scripts/deploy-github-role.sh) and set the secret."
+              echo "::error::AWS_ROLE_ARN not configured — cannot build/push workload images for prod. Bootstrap the role (scripts/deploy-github-role.sh) and set the secret."
               exit 1
             fi
-            echo "::notice::AWS_ROLE_ARN not configured — skipping image build (preview will fall back to :latest)"
+            echo "::notice::AWS_ROLE_ARN not configured — skipping image builds (preview will fall back to :latest)"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -615,6 +616,12 @@ jobs:
           tags: ${{ steps.tags.outputs.mnemo_tags }}
           cache-from: type=gha,scope=mnemo-server
           cache-to: type=gha,mode=max,scope=mnemo-server
+
+      - name: Smoke test mnemo-server liveness
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          MNEMO_IMAGE: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_NS }}/mnemo-server:${{ steps.tag.outputs.image_tag }}
+        run: bash scripts/run-mnemo-health-smoke.sh
 
       - name: Build & push qwen3-embed (arm64)
         if: steps.gate.outputs.skip != 'true'
@@ -715,7 +722,9 @@ jobs:
             echo "::error::Role $ROLE_NAME not found — run scripts/deploy-github-role.sh to bootstrap it"
             exit 1
           fi
-          echo "Preflight OK: $(aws sts get-caller-identity --query Arn --output text)"
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "::add-mask::$ACCOUNT_ID"
+          echo "Preflight OK: OIDC deploy role assumed"
 
       - name: Remove conflicting Pulumi installation
         run: |
@@ -795,8 +804,8 @@ jobs:
 
       - name: Deploy prod stage
         shell: bash
-        # Pin prod to the exact image built by build-and-push-image (this commit's
-        # `mem9-<sha7>`); infra/ecs.ts reads MEM9_IMAGE_TAG (defaults to `latest`).
+        # Pin prod to the shared tag built for all workload images in this commit
+        # (`mem9-<sha7>`); infra/ecs.ts reads MEM9_IMAGE_TAG.
         env:
           MEM9_IMAGE_TAG: ${{ needs.build-and-push-image.outputs.image_tag }}
           # Bedrock Project id → the llm-proxy sidecar's OpenAI-Project cost header
@@ -804,9 +813,9 @@ jobs:
           # scripts/deploy-bedrock-mantle-project.sh.
           MEM9_BEDROCK_PROJECT: ${{ vars.MEM9_BEDROCK_PROJECT }}
           # Slack incoming webhook for prod alarm delivery (infra/observability.ts).
-          # OPTIONAL: unset → alarms stay console-only (no SNS topic / Lambda).
-          # Set the SLACK_WEBHOOK_URL repo secret to enable.
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          # SST marks this value secret before it enters Pulumi state or Lambda config.
+          # Production synthesis fails when the managed sink is unset.
+          SST_SECRET_SlackWebhookUrl: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
           set +e
           pnpm -C infra exec sst deploy --stage prod --print-logs 2>&1 | tee sst-deploy.log
@@ -835,9 +844,10 @@ jobs:
 
       - name: MCP write-search E2E (prod, hard)
         # HARD gate on prod: the full section 6/6a chain must round-trip
-        # (Cognito M2M JWT -> AgentCore Gateway -> Lattice -> internal ALB ->
-        # mnemo-server -> Aurora -> qwen3 -> search). No E2E_SOFT, so a failure
-        # fails the prod deploy job (surfaced by the deploy-failure issue below).
+        # (Cognito M2M JWT -> AgentCore Gateway -> VPC-attached proxy Lambda ->
+        # Cloud Map private DNS -> mnemo-server -> Aurora -> qwen3 -> search).
+        # No E2E_SOFT, so a failure fails the prod deploy job (surfaced by the
+        # deploy-failure issue below).
         shell: bash
         env:
           STAGE: prod
