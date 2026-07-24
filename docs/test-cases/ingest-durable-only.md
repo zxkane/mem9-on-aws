@@ -9,6 +9,7 @@ Design: [`docs/designs/ingest-durable-only.md`](../designs/ingest-durable-only.m
 | TC-INGEST-001 | `MNEMO_INGEST_DURABLE_ONLY` not set | `durableOnlyPromptSection()` returns `""` — prompts byte-identical to upstream |
 | TC-INGEST-002 | Enabled | Section contains all load-bearing rules: "Durability filter", "future sessions", "REJECT session-state", "Rules 12-14 above do NOT apply", "empty facts array is the CORRECT output" |
 | TC-INGEST-003 | Env parsing | Only "1"/"true"/"yes"/"on" activate; "0"/"false"/""/etc. → off |
+| TC-INGEST-005 | Probe exception (D5): section contains EXCEPTION+probe+marker so deploy probes are never rejected | Present |
 | TC-INGEST-004 | Integration — durability section reaches the LLM extraction prompt | A mock LLM server captures the system prompt; `ExtractPhase1` with durability on includes "Durability filter" + "REJECT session-state observations" |
 
 ## Infra unit tests (`infra/ecs.test.ts`)
