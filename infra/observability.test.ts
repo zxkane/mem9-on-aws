@@ -279,7 +279,7 @@ describe("observability alert delivery", () => {
     });
   });
 
-  it("TC-ALERT-010: deploy role has only tagged SQS control-plane access", () => {
+  it("TC-ALERT-010: deploy role has least-privilege alert control-plane access", () => {
     const source = readFileSync(
       new URL("./cloudformation/github-actions-role.yaml", import.meta.url),
       "utf8",
@@ -360,6 +360,41 @@ describe("observability alert delivery", () => {
                 "arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:function:${ProjectName}-*",
             },
           ],
+        },
+      ],
+    });
+
+    const computePolicy = template.Resources.ComputePolicy.Properties.PolicyDocument as {
+      Statement: Array<Record<string, unknown>>;
+    };
+    const topicStatement = computePolicy.Statement.find(
+      (statement) => statement.Sid === "SnsAlerting",
+    );
+    expect(topicStatement).toMatchObject({
+      Effect: "Allow",
+      Resource: [
+        {
+          "Fn::Sub": "arn:${AWS::Partition}:sns:*:${AWS::AccountId}:mem9-on-aws-*",
+        },
+      ],
+    });
+    expect(topicStatement?.Action).toContain("sns:SetSubscriptionAttributes");
+
+    expect(
+      computePolicy.Statement.find(
+        (statement) => statement.Sid === "SnsSubscriptionRead",
+      ),
+    ).toEqual({
+      Sid: "SnsSubscriptionRead",
+      Effect: "Allow",
+      Action: [
+        "sns:GetSubscriptionAttributes",
+        "sns:Unsubscribe",
+      ],
+      Resource: [
+        {
+          "Fn::Sub":
+            "arn:${AWS::Partition}:sns:*:${AWS::AccountId}:mem9-on-aws-*:*",
         },
       ],
     });

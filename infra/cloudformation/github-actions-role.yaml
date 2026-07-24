@@ -606,6 +606,7 @@ Resources:
               - sns:Subscribe
               - sns:Unsubscribe
               - sns:GetSubscriptionAttributes
+              - sns:SetSubscriptionAttributes
               - sns:ListSubscriptionsByTopic
               - sns:TagResource
               - sns:UntagResource
