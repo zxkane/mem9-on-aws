@@ -20,8 +20,8 @@ Design: [`docs/designs/glm-request-bounds.md`](../designs/glm-request-bounds.md)
 | TC-GLM-BOUND-012 | Normal mem9 request carries supported and provider-extension fields | Model, messages, temperature, response format, and unknown extensions are unchanged; only missing `max_tokens` is added |
 | TC-GLM-BOUND-013 | Forwarded request metadata | `Content-Length` equals the rewritten body's byte length |
 | TC-GLM-BOUND-014 | Input fits N but the rewritten body exceeds N | The semantic size check uses the same `cfg.maxBodyBytes` and returns 413 |
-| TC-GLM-BOUND-015 | Validation logging | Snapshot contains metadata and `outcome_class:"permanent"` only; request/message markers are absent |
-| TC-GLM-BOUND-016 | Validation status classification | HTTP 400 and 413 classify as permanent for the durable-worker contract |
+| TC-GLM-BOUND-015 | Validation logging | Snapshot contains request ID, attempt 0, status/reason, duration, remaining budget, and outcome class only; request/message markers are absent |
+| TC-GLM-BOUND-016 | Validation status classification | HTTP 400 and 413 classify as `proxy_validation_permanent` for the durable-worker contract |
 
 ## Patched upstream Go tests (Docker builder)
 

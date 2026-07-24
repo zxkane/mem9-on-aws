@@ -102,6 +102,14 @@ points to `http://localhost:8082/v1`. The local `llm-proxy`:
 5. Injects `OpenAI-Project` when `MEM9_BEDROCK_PROJECT` is configured.
 6. Forwards the request to Mantle and returns the OpenAI-shaped response.
 
+Each proxy chat-completions request has one 110-second wall-clock deadline.
+Each Mantle call receives `min(108s, remaining - 2s)`, and no request makes more
+than two calls. The first 401 or 403 re-resolves ECS credentials and re-mints
+without backoff. Only fast network, 408, 429, 500, 502, 503, and 504 failures
+retry, using full jitter or a valid `Retry-After` when at least 20 seconds of
+call budget remains. Attempt timeout and downstream disconnect are terminal and
+cancel active work.
+
 AWS documents API-key or AWS-credential authentication for the
 [Mantle Chat Completions endpoint](https://docs.aws.amazon.com/bedrock/latest/userguide/inference-chat-completions-mantle.html).
 The official
@@ -242,6 +250,8 @@ do not require persistent task storage.
 - The service runs one arm64 Fargate task with the three containers listed above.
 - qwen3 embedding is local, 1024-dimensional, and not sent to a third party.
 - Smart ingest is enabled and reaches Mantle only through `llm-proxy`.
+- Each `llm-proxy` request has one 110-second deadline and makes at most two
+  Mantle calls.
 - Mantle application permissions use `bedrock-mantle:*` actions on the task role.
 - The AgentCore Gateway uses a Lambda target and Cloud Map private DNS.
 - The public OAuth facade uses API Gateway v2 plus Lambda, never a Lambda
@@ -253,7 +263,6 @@ do not require persistent task storage.
 The open reliability program covers future work in these areas:
 
 - Release image tag selection and read-only ECS actual-state reconciliation.
-- LLM proxy deadline and bounded retry controls.
 - Mandatory alert delivery with separate transport and execution failure queues.
 - A 14-day production Aurora point-in-time recovery retention policy and restore
   runbook.

@@ -43,11 +43,12 @@ fail without clamping.
 Validation responses use the OpenAI error envelope with `message`, `type`,
 `param`, and `code`. Malformed/invalid payloads and invalid `max_tokens` return
 400. Byte-limit failures return 413. The validation-status contract classifies
-400 and 413 as permanent so a durable worker must not retry them.
+400 and 413 as `proxy_validation_permanent` so a durable worker must not retry
+them.
 
-Validation logs are structured metadata only: event, status, error code,
-outcome class, method, path, declared content length, and observed byte count.
-Bodies, prompts, messages, and response content are never logged.
+Validation logs use the shared request schema only: generated request ID,
+attempt 0, status/reason, duration, remaining budget, and outcome class. Bodies,
+prompts, messages, credentials, and response content are never logged.
 
 ### Upstream formatter
 

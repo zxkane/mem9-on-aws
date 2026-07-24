@@ -57,7 +57,7 @@ citations.
 | MCP surface | **AgentCore Gateway** (MCP → mnemo-server REST API) |
 | Gateway → server | **Private** (a [Lambda-proxy GatewayTarget](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-add-target-api-target-config.html)): AgentCore invokes a VPC-attached proxy Lambda with [`lambda:InvokeFunction`](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-prerequisites-permissions.html). The Lambda uses [VPC connectivity](https://docs.aws.amazon.com/lambda/latest/dg/configuration-vpc.html) and [AWS Cloud Map private DNS](https://docs.aws.amazon.com/cloud-map/latest/api/API_CreatePrivateDnsNamespace.html) (`mnemo.mem9-<stage>.local:8080`) to reach mnemo-server with the `X-API-Key` (= tenant id). No ALB, ACM certificate, VPC Lattice, public Route 53 zone, or public server endpoint is deployed. |
 | Auth (inbound) | **Cognito M2M** (`client_credentials`) + an OAuth2 browser-login façade (`authorization_code` + PKCE) for interactive MCP clients |
-| LLM (smart-ingest) | `mnemo-server` calls the **local `llm-proxy` sidecar** at `http://localhost:8082/v1`. The proxy refreshes a short-term Mantle bearer, injects `OpenAI-Project` when `MEM9_BEDROCK_PROJECT` is configured, and calls Bedrock Mantle. The task role uses `bedrock-mantle:CreateInference` and `bedrock-mantle:CallWithBearerToken`; `mnemo-server` never calls Mantle directly. |
+| LLM (smart-ingest) | `mnemo-server` calls the **local `llm-proxy` sidecar** at `http://localhost:8082/v1`. The proxy refreshes a short-term Mantle bearer, injects `OpenAI-Project` when `MEM9_BEDROCK_PROJECT` is configured, and calls Bedrock Mantle. Each request has one 110-second deadline and at most two Mantle calls. The task role uses `bedrock-mantle:CreateInference` and `bedrock-mantle:CallWithBearerToken`; `mnemo-server` never calls Mantle directly. |
 | Embedding | qwen3 OpenAI-compatible `/embeddings` as an **ECS sidecar** (localhost, always warm), **dims 1024**. Not Mantle, not a third-party API. |
 | ECS task | **3 containers**: mnemo-server + qwen3-embed sidecar + llm-proxy sidecar |
 | Schema bootstrap | **one-shot ECS task** on deploy (pgvector + tenant runtime schema incl. `idx_app`/FTS/`vector(1024)` + seed 1 tenant) |
@@ -66,11 +66,11 @@ citations.
 
 ## Planned reliability work
 
-The remaining open reliability program covers deployment reconciliation, LLM
-deadline and retry controls, alert failure queues, Aurora retention, preview
-cleanup, ECR scanning, durable ingest jobs, atomic apply, telemetry, and
-post-deployment verification. **None of that planned work is part of the current
-implementation.** The exact boundary is recorded in
+The remaining open reliability program covers deployment reconciliation, alert
+failure queues, Aurora retention, preview cleanup, ECR scanning, durable ingest
+jobs, atomic apply, telemetry, and post-deployment verification. **None of that
+planned work is part of the current implementation.** The exact boundary is
+recorded in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#planned-changes).
 
 ## MCP tools exposed

@@ -27,7 +27,6 @@ const baseCfg = {
   maxTokens: 4096,
   tokenTtlSeconds: 43200,
   refreshIntervalMs: 60 * 60 * 1000,
-  upstreamTimeoutMs: 120_000,
 };
 
 const validRequest = {
@@ -79,7 +78,7 @@ afterEach(async () => {
 });
 
 async function boot(cfg, deps) {
-  const { server, start, state } = createProxyServer(cfg, deps);
+  const { server, start, state } = createProxyServer(cfg, { log: () => {}, ...deps });
   const inst = await listen(server);
   openInstances.push(inst);
   return { ...inst, start, state };
@@ -338,9 +337,16 @@ describe("createProxyServer", () => {
     });
 
     it("TC-GLM-BOUND-015/016: logs redacted permanent validation metadata for 400 and 413", async () => {
-      const logSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const logs = [];
+      const requestIds = ["validation-400", "validation-413"];
       const cfg = { ...baseCfg, maxBodyBytes: 128 };
-      const { url, start } = await boot(cfg, { mintToken: async () => "t", fetchImpl: vi.fn() });
+      const { url, start } = await boot(cfg, {
+        mintToken: async () => "t",
+        fetchImpl: vi.fn(),
+        log: (record) => logs.push(record),
+        now: () => 0,
+        requestId: () => requestIds.shift(),
+      });
       await start();
 
       const secretMarker = "MEMORY-CONTENT-MUST-NOT-APPEAR";
@@ -350,29 +356,29 @@ describe("createProxyServer", () => {
       });
       await postRaw(url, chatBodyAtBytes(cfg.maxBodyBytes + 1));
 
-      const logs = logSpy.mock.calls.map(([line]) => JSON.parse(line));
-      expect(logs).toHaveLength(2);
-      expect(logs[0]).toMatchInlineSnapshot(`
-        {
-          "body_bytes": 41,
-          "code": "invalid_json",
-          "content_length": "41",
-          "event": "llm_proxy_validation",
-          "method": "POST",
-          "outcome_class": "permanent",
-          "path": "/v1/chat/completions",
-          "status": 400,
-          "validation_phase": "parse",
-        }
+      expect(logs).toMatchInlineSnapshot(`
+        [
+          {
+            "attempt": 0,
+            "duration_ms": 0,
+            "outcome_class": "proxy_validation_permanent",
+            "reason": "invalid_json",
+            "remaining_budget_ms": 110000,
+            "request_id": "validation-400",
+            "status": 400,
+          },
+          {
+            "attempt": 0,
+            "duration_ms": 0,
+            "outcome_class": "proxy_validation_permanent",
+            "reason": "request_too_large",
+            "remaining_budget_ms": 110000,
+            "request_id": "validation-413",
+            "status": 413,
+          },
+        ]
       `);
-      expect(logs[1]).toMatchObject({
-        event: "llm_proxy_validation",
-        status: 413,
-        code: "request_too_large",
-        outcome_class: "permanent",
-        validation_phase: "read",
-      });
-      expect(logSpy.mock.calls.flat().join(" ")).not.toContain(secretMarker);
+      expect(JSON.stringify(logs)).not.toContain(secretMarker);
     });
   });
 
@@ -439,8 +445,8 @@ describe("createProxyServer", () => {
       expect(mintToken).toHaveBeenCalledTimes(2);
     });
 
-    it("TC-PROXY401-004: non-auth statuses (400/429/500) do NOT re-mint", async () => {
-      for (const status of [400, 429, 500]) {
+    it("TC-PROXY401-004: non-auth, non-retry statuses do not re-mint", async () => {
+      for (const status of [400, 404, 501]) {
         const mintToken = vi.fn().mockResolvedValue("t");
         const fetchImpl = vi.fn(
           async () => new Response("{}", { status, headers: { "content-type": "application/json" } }),
@@ -469,21 +475,29 @@ describe("createProxyServer", () => {
       expect((await res.json()).error.type).toBe("server_error");
     });
 
-    it("TC-PROXY401-006: logs a distinct, countable line on the re-mint path", async () => {
-      const logSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    it("TC-PROXY401-006: logs a distinct structured record on the re-mint path", async () => {
+      const logs = [];
       const mintToken = vi.fn().mockResolvedValue("t");
       const fetchImpl = vi
         .fn()
         .mockResolvedValueOnce(authFailure(401))
         .mockResolvedValueOnce(ok());
-      const { url, start } = await boot(baseCfg, { mintToken, fetchImpl });
+      const { url, start } = await boot(baseCfg, {
+        mintToken,
+        fetchImpl,
+        log: (record) => logs.push(record),
+        requestId: () => "auth-remint-request",
+      });
       await start();
 
       await fetch(`${url}/v1/chat/completions`, { method: "POST", body: validBody });
-      // The full prefix is a stable contract — the #26 CloudWatch metric
-      // filter matches it verbatim. Do not loosen this assertion.
-      const line = logSpy.mock.calls.map((c) => c.join(" ")).find((m) => /re-mint/.test(m));
-      expect(line).toBe("llm-proxy re-minted bearer after upstream 401");
+      expect(logs[0]).toMatchObject({
+        request_id: "auth-remint-request",
+        attempt: 1,
+        status: 401,
+        reason: "auth_remint",
+      });
+      expect(JSON.stringify(logs)).not.toMatch(/bearer|credential|message|body/i);
     });
   });
 

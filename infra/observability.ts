@@ -234,7 +234,7 @@ export function observability(inputs: ObservabilityInputs) {
     alarmDescription:
       "≥3 ingest LLM auth failures (401) in 15 min — llm-proxy bearer " +
       "may be dead (issue #24 regression guard). Check llm-proxy logs " +
-      "for 're-minted bearer' or credential-rotation events.",
+      "for reason=auth_remint or credential-rotation events.",
     namespace,
     metricName: "ingest_llm_auth_failure",
     statistic: "Sum",

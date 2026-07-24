@@ -570,6 +570,7 @@ describe("ecs stack", () => {
     // are explicit in the production task definition.
     expect(env.LLM_PROXY_MAX_BODY_BYTES).toBe("1048576");
     expect(env.LLM_PROXY_MAX_TOKENS).toBe("4096");
+    expect(env.LLM_PROXY_OVERALL_DEADLINE_MS).toBe("110000");
     // OpenAI-Project header key is present (value comes from CI env; empty is fine
     // — the proxy omits the header when unset).
     expect("LLM_PROXY_OPENAI_PROJECT" in env).toBe(true);
