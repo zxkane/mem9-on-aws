@@ -300,12 +300,14 @@ select or log memory content.
 
 Establish a write fence under the incident change window:
 
-1. Pause scheduled CI and every headless process that holds the M2M client
-   credentials.
-2. Through a reviewed IaC change, temporarily remove `readerClientId` from the
-   Gateway `allowedClients` list for `prod`, leaving only the M2M client used by
-   the operator's synthetic probe.
-3. Deploy the fence, verify a normal interactive client is rejected, and use
+1. Pause scheduled CI and every headless process that holds the normal M2M
+   client credentials.
+2. Through a reviewed IaC change, create a temporary recovery-only Cognito M2M
+   client with the existing read/write scopes. Store its generated ID and secret
+   in `/mem9-on-aws/prod/recovery/cognito/{client-id,client-secret}` and make it
+   the Gateway's **only** `allowedClients` entry for `prod`.
+3. Deploy the fence, verify both a normal M2M client and normal interactive
+   client are rejected, and use
    the proxy Lambda's CloudWatch `Invocations` metric to confirm zero backend
    calls during twice the maximum request timeout.
 
@@ -341,7 +343,7 @@ recovery change in `infra/db.ts` that:
   `DbOutputs` contract; and
 - leaves the stage-derived retention transform unchanged.
 
-Keep both values in `.env.recovery`, never in tracked files:
+Keep the database values in `.env.recovery`, never in tracked files:
 
 ```bash
 export MEM9_RECOVERY_DB_CLUSTER_IDENTIFIER="$RESTORED_CLUSTER"
@@ -369,22 +371,33 @@ source .env.recovery
 set +a
 sst diff --stage prod
 sst deploy --stage prod
+STAGE=prod AWS_REGION="$AWS_REGION" bash scripts/run-bootstrap-task.sh
 ```
 
 Replacing the ECS task is required because database credentials are injected at
-task start. Adopt the restored cluster into long-term IaC ownership only in a
-separate reviewed change after recovery is stable. Restore `readerClientId` to
-the Gateway allowlist and resume paused jobs only after the cutover or rollback
-probe passes.
+task start. The bootstrap task is also required: it idempotently updates the
+tenant row's per-request `db_host` and credentials to the selected endpoint.
+Do not probe until both the ECS service and bootstrap task are on the recovery
+configuration. Adopt the restored cluster into long-term IaC ownership only in
+a separate reviewed change after recovery is stable. Restore the normal M2M and
+reader client IDs to the Gateway allowlist, remove the temporary recovery client,
+and resume paused jobs only after the cutover or rollback probe passes.
 
 ### 6. Verify and roll back
 
 Keep normal clients behind the write fence and run the existing hard-fail
 synthetic write/search probe after cutover. It writes only a generated marker
-and does not inspect existing memory content.
+and does not inspect existing memory content. The script first waits for ECS
+service stability, verifies every running task uses the active task definition,
+and verifies that task definition targets the restored cluster.
 
 ```bash
-STAGE=prod AWS_REGION="$AWS_REGION" E2E_SOFT=0 bash scripts/run-mcp-e2e.sh
+STAGE=prod \
+AWS_REGION="$AWS_REGION" \
+E2E_SOFT=0 \
+E2E_COGNITO_CLIENT_PREFIX="/mem9-on-aws/prod/recovery/cognito" \
+E2E_EXPECTED_DB_CLUSTER_IDENTIFIER="$RESTORED_CLUSTER" \
+bash scripts/run-mcp-e2e.sh
 ```
 
 If deployment or verification fails, keep the write fence in place, unset the
@@ -399,7 +412,13 @@ rotate credentials as part of rollback.
 unset MEM9_RECOVERY_DB_CLUSTER_IDENTIFIER MEM9_RECOVERY_DB_SECRET_ARN
 sst diff --stage prod
 sst deploy --stage prod
-STAGE=prod AWS_REGION="$AWS_REGION" E2E_SOFT=0 bash scripts/run-mcp-e2e.sh
+STAGE=prod AWS_REGION="$AWS_REGION" bash scripts/run-bootstrap-task.sh
+STAGE=prod \
+AWS_REGION="$AWS_REGION" \
+E2E_SOFT=0 \
+E2E_COGNITO_CLIENT_PREFIX="/mem9-on-aws/prod/recovery/cognito" \
+E2E_EXPECTED_DB_CLUSTER_IDENTIFIER="$SOURCE_CLUSTER" \
+bash scripts/run-mcp-e2e.sh
 ```
 
 ### Command preflight

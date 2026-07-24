@@ -179,6 +179,7 @@ describe("db stack", () => {
     expect(dbSource).toContain(
       'args.backupRetentionPeriod = $app.stage === "prod" ? 14 : 1;',
     );
+    expect(dbSource.match(/\bbackupRetentionPeriod\b/g)).toHaveLength(1);
   });
 
   it("preserves production deletion protection and final snapshots", async () => {
