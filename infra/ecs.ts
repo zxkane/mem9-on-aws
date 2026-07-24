@@ -20,22 +20,24 @@
  * and the LLM at MNEMO_LLM_BASE_URL=http://localhost:8082/v1. The qwen3 ONNX model
  * is heavy (~3.85 GB resident), so the task memory fits it — the main §7/§9 swing.
  *
- * LLM SMART-INGEST (this PR): MNEMO_INGEST_MODE=smart. mem9 reads MNEMO_LLM_API_KEY
+ * LLM SMART-INGEST: MNEMO_INGEST_MODE=smart. mem9 reads MNEMO_LLM_API_KEY
  * ONCE at startup (immutable) and its LLM client sends only Authorization — so it
  * can neither refresh a rotating Bedrock bearer nor add the OpenAI-Project cost
  * header. The llm-proxy sidecar bridges both: mem9 auths with a static DUMMY key to
  * localhost, and the proxy holds the live Mantle bearer (refreshed on a timer, a
- * local presign) + injects OpenAI-Project per request. No mem9 fork, no restart on
- * rotation. See docker/llm-proxy/server.mjs + docs/mem9-facts.md.
+ * local presign) + injects OpenAI-Project when a Bedrock Project is configured.
+ * No mem9 fork, no restart on rotation. See docker/llm-proxy/server.mjs +
+ * docs/mem9-facts.md.
  *
  * MCP REACHABILITY (§6a): the AgentCore Gateway reaches mnemo-server via a
  * VPC-attached proxy Lambda (infra/gateway.ts), NOT a public/ALB endpoint. This
  * stack registers the service in AWS Cloud Map (`mnemo.mem9-<stage>.local`) so the
  * Lambda can resolve + reach the task privately over HTTP:8080. (Earlier revisions
- * used an internal ALB + VPC Lattice privateEndpoint; that AgentCore target path
- * failed to stabilize, so it was replaced by the out-of-the-box Lambda target.)
+ * used an internal ALB + VPC Lattice privateEndpoint. Empirical 2026-07-14: that
+ * AgentCore target path failed to stabilize, so the repository replaced it with
+ * the Lambda target.)
  *
- * SCHEMA BOOTSTRAP (this PR, separate one-shot task — infra/bootstrap.ts):
+ * SCHEMA BOOTSTRAP (separate one-shot task — infra/bootstrap.ts):
  * mem9 does NOT create the PG memories table (it only validates idx_app at
  * startup). The bootstrap task applies pgvector + the memories(vector 1024) schema
  * + seeds one tenant BEFORE the server needs it (see docs/mem9-facts.md §8).
@@ -263,7 +265,7 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
     //   - bedrock-mantle:CallWithBearerToken — the Mantle-endpoint variant of the
     //     bearer-token action the minted bearer carries (distinct from the
     //     `bedrock:` one). Account-wide by nature → "*".
-    //   - GetProject / ListProjects / ListTagsForResources — the read actions the
+    //   - GetProject / ListProjects / ListTagsForResource — the read actions the
     //     Mantle inference path also checks (mirrors AmazonBedrockMantleInferenceAccess).
     permissions: [
       {
@@ -279,7 +281,7 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
           "bedrock-mantle:CallWithBearerToken",
           "bedrock-mantle:GetProject",
           "bedrock-mantle:ListProjects",
-          "bedrock-mantle:ListTagsForResources",
+          "bedrock-mantle:ListTagsForResource",
         ],
         resources: ["*"],
       },
@@ -308,8 +310,8 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
           // LLM MaaS = the llm-proxy sidecar on localhost → Bedrock Mantle GLM-5.
           // mem9 reads MNEMO_LLM_API_KEY once + can't add headers, so it auths with
           // a static DUMMY key; the proxy swaps in the live Mantle bearer +
-          // OpenAI-Project. The key MUST be non-empty or mem9 nils the LLM client
-          // and silently downgrades smart→raw (verified in mem9 source).
+          // optional OpenAI-Project. The key MUST be non-empty or mem9 nils the
+          // LLM client and silently downgrades smart→raw (verified in mem9 source).
           MNEMO_LLM_BASE_URL: `http://localhost:${LLM_PROXY_PORT}/v1`,
           MNEMO_LLM_MODEL: LLM_MODEL,
           MNEMO_LLM_API_KEY: "local", // dummy; the proxy holds the real bearer
@@ -441,9 +443,9 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
     value: service.nodes.service.name,
     tags,
   });
-  // Record the deployed mnemo-server image URI (incl. tag) so it's auditable which
-  // mem9 commit each stage runs without inspecting the task definition. The embed
-  // image shares the same tag.
+  // Record the deployed mnemo-server image URI (including tag) so it's auditable
+  // which mem9 commit each stage runs without inspecting the task definition.
+  // All workload images use the same per-commit tag.
   new aws.ssm.Parameter("EcsImage", {
     name: `${prefix}/ecs/image`,
     type: "String",

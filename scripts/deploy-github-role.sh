@@ -60,8 +60,9 @@ echo "Region:   $REGION"
 echo "Template: $TEMPLATE_FILE"
 
 # CloudFormation's inline --template-body cap is 51200 bytes. This role template
-# grew past that as resource-type policies accumulated (ELB/ACM/Route53/Cognito/
-# AgentCore/VPC-Lattice), which made `update-stack --template-body` SILENTLY
+# grew past that as resource-type policies accumulated (including former
+# ELB/ACM/VPC-Lattice resources plus current Route53/Cognito/AgentCore resources),
+# which made `update-stack --template-body` SILENTLY
 # fail validation → the role froze at a stale version and every downstream deploy
 # 403'd on "missing" grants that were in git but never applied. So above ~50KB we
 # upload the template to S3 and use --template-url (1 MB cap). The bucket is a

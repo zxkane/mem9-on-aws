@@ -5,7 +5,7 @@
 // reads MNEMO_LLM_API_KEY ONCE at startup into an immutable field — there is NO
 // reload/SIGHUP/file-watch — and its hand-rolled net/http client sends ONLY
 // `Authorization` + `Content-Type` (no way to add the `OpenAI-Project` header
-// Bedrock Mantle needs for cost attribution). Both were verified against the
+// used for Bedrock Project attribution). Both were verified against the
 // pinned mem9 source.
 //
 // A Bedrock bearer minted by @aws/bedrock-token-generator expires (default/max
@@ -13,8 +13,8 @@
 // the OpenAI-Project header at all. This proxy resolves BOTH without a mem9 fork
 // and without restarting mnemo-server on rotation:
 //
-//   mnemo-server ──(localhost, static dummy key)──▶ THIS PROXY ──(fresh bearer +
-//   OpenAI-Project)──▶ https://bedrock-mantle.<region>.api.aws/v1/chat/completions
+//   mnemo-server ──(localhost, static dummy key)──▶ THIS PROXY ──(fresh bearer,
+//   optional OpenAI-Project)──▶ Bedrock Mantle /v1/chat/completions
 //
 // mem9 is configured with:
 //   MNEMO_LLM_BASE_URL=http://localhost:<PORT>/v1
@@ -25,7 +25,8 @@
 //
 // The proxy holds the LIVE Mantle bearer, refreshing it on a timer well before
 // expiry (minting is a LOCAL SigV4 presign — no network call — so refresh can't
-// fail on connectivity), and injects it + OpenAI-Project per forwarded request.
+// fail on connectivity), and injects it per forwarded request. It adds
+// OpenAI-Project only when LLM_PROXY_OPENAI_PROJECT is configured.
 //
 // Verified live 2026-07-12: getToken({credentials,region}) → bearer;
 // POST bedrock-mantle.ap-northeast-1.../v1/chat/completions {model:"zai.glm-5"}

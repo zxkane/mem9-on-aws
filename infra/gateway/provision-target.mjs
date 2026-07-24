@@ -230,7 +230,7 @@ async function del() {
   // Deletes are best-effort: on stage teardown the gateway is deleted too, so a
   // missing target — or a missing GATEWAY (list throws ResourceNotFound) — is
   // success, not an error. Pulumi deletes this Command before its dependsOn
-  // (gateway, api-key provider), so normally the gateway is still there; but a
+  // (gateway, proxy Lambda), so normally the gateway is still there; but a
   // partial/interrupted teardown could leave it gone, and we must not block.
   let existing;
   try {

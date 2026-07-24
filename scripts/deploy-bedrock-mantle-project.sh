@@ -3,10 +3,10 @@
 # Mantle Project for mem9-on-aws LLM (GLM-5 smart-ingest) cost attribution.
 #
 # Scope: **the Bedrock Mantle Project only**. The SST/Pulumi app does NOT manage
-# it — the llm-proxy sidecar (docker/llm-proxy) just passes its Id as the
-# `OpenAI-Project` header on every Mantle call. Owning it out-of-band (like the
-# ECR repos + the GitHub Actions role) means `sst remove --stage pr-N` can never
-# drop the shared project + its accumulated cost history (§7).
+# it. When its Id is supplied as MEM9_BEDROCK_PROJECT, the llm-proxy sidecar
+# passes it as `OpenAI-Project` on calls from that deployment. Owning it
+# out-of-band (like the ECR repos + the GitHub Actions role) means `sst remove
+# --stage pr-N` cannot drop the shared project or its accumulated cost history.
 #
 # Bootstrap ONCE per AWS account (in the Tokyo region — where the ECS task calls
 # Mantle), and RE-RUN only if bedrock-mantle-project.yaml changes.
@@ -127,4 +127,4 @@ echo "Next steps:"
 echo "  1. Set the CI variable so deploys inject it into the llm-proxy sidecar:"
 echo "       gh variable set MEM9_BEDROCK_PROJECT --repo zxkane/mem9-on-aws --body \"$PROJECT_ID\""
 echo "  2. infra/ecs.ts reads MEM9_BEDROCK_PROJECT → LLM_PROXY_OPENAI_PROJECT →"
-echo "     the OpenAI-Project header on every Mantle /chat/completions call."
+echo "     the OpenAI-Project header on calls from that configured deployment."

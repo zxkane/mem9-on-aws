@@ -40,9 +40,10 @@ fi
 # sst.aws.Aurora deploy already waits for the cluster to be `available`, so by the
 # time this runs the writer endpoint accepts connections. The bootstrap container's
 # own entrypoint still retries the DB briefly to cover the last few seconds of
-# instance readiness. (We previously fronted Aurora with an RDS Proxy and gated on
-# its target health, but the proxy's PENDING_PROXY_CAPACITY provisioning was starved
-# at 0.5 ACU and never became AVAILABLE — so the proxy was removed entirely.)
+# instance readiness. Empirical 2026-07-12: a former proxy target remained
+# PENDING_PROXY_CAPACITY for more than 40 minutes at the selected 0.5 ACU floor in
+# two regions, so the repository removed the proxy. This is not a general AWS
+# root-cause or capacity guarantee.
 
 # Build the awsvpc network config: subnets as a JSON array (split the CSV on
 # commas into separate quoted elements), no public IP. jq builds the array so the

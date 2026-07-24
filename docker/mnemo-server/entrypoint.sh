@@ -8,14 +8,14 @@
 # Manager → ECS `secrets: valueFrom`), so it CANNOT be string-concatenated into a
 # committed task def. This script does the composition at container start, from:
 #
-#   MEM9_DB_HOST    - RDS Proxy endpoint            (plain env, from infra/ecs.ts)
+#   MEM9_DB_HOST    - Aurora cluster writer endpoint (plain env, from infra/ecs.ts)
 #   MEM9_DB_PORT    - 5432                           (plain env)
 #   MEM9_DB_NAME    - "mem9"                          (plain env)
 #   MEM9_DB_SECRET  - JSON {"username":..,"password":..}  (ECS secret, whole value)
 #
 #   → MNEMO_DSN=postgres://<user>:<url-encoded-pw>@<host>:<port>/<db>?sslmode=require
 #
-# If MNEMO_DSN is ALREADY set (e.g. a local run, or a future non-proxy path), it
+# If MNEMO_DSN is ALREADY set (for example, a local run), it
 # is respected as-is and this assembly is skipped.
 #
 # Fail LOUD on any missing piece — a silent fallback to a malformed DSN would let
@@ -45,8 +45,8 @@ if [ -z "${MNEMO_DSN:-}" ]; then
   DB_USER=$(extract_field username)
   DB_PASS=$(extract_field password)
 
-  # sslmode=require: RDS Proxy mandates TLS; mem9 uses the pgx stdlib driver which
-  # honors the DSN query param (docs/ARCHITECTURE.md §3a).
+  # sslmode=require protects the direct Aurora connection; mem9 uses the pgx
+  # stdlib driver, which honors the DSN query parameter.
   export MNEMO_DSN="postgres://${DB_USER}:${DB_PASS}@${MEM9_DB_HOST}:${MEM9_DB_PORT}/${MEM9_DB_NAME}?sslmode=require"
 
   # Log the DSN with the password redacted (host/port/db/user are safe to show

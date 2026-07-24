@@ -5,7 +5,7 @@ import type { DbOutputs } from "./db";
  * Unit tests for the `ecs` stack factory. Mocks the SST globals ($app,
  * aws.ssm.*, sst.aws.Cluster/Service) so the factory runs bare. Asserts the
  * cluster VPC wiring (default VPC + task SG + private subnets), the Fargate
- * service props (arm64, size, placeholder image, NO load balancer, DB env +
+ * service props (arm64, size, private ECR images, NO load balancer, DB env +
  * secret injection), and the SSM exports.
  */
 
@@ -332,6 +332,7 @@ describe("ecs stack", () => {
     // inference-how.html "bedrock-mantle endpoint" / AmazonBedrockMantleInferenceAccess).
     expect(actions).toContain("bedrock-mantle:GetProject");
     expect(actions).toContain("bedrock-mantle:ListProjects");
+    expect(actions).toContain("bedrock-mantle:ListTagsForResource");
     // The old, WRONG-namespace grants must be gone.
     expect(actions).not.toContain("bedrock:InvokeModel");
     expect(actions).not.toContain("bedrock:CallWithBearerToken");

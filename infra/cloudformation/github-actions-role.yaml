@@ -1,17 +1,18 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   IAM role + least-privilege policies for GitHub Actions SST v4 deployments
-  (zxkane/mem9-on-aws) — BASE SCAFFOLD scope. Grants exactly what the scaffold
-  provisions today: SST Pulumi state (S3 + /sst/bootstrap SSM), the `meta`
-  stack's SSM parameters under /mem9-on-aws/*, read-only EC2/VPC lookup, STS,
-  and a constrained iam:PassRole. Deploy out-of-band via
+  (zxkane/mem9-on-aws). Grants the current SST Pulumi state, Aurora, ECS,
+  Lambda, Cloud Map, Cognito, API Gateway, AgentCore Gateway, observability,
+  read-only EC2/VPC lookup, STS, and constrained iam:PassRole surfaces. Deploy
+  out-of-band via
   `scripts/deploy-github-role.sh` — this stack is NOT managed by Pulumi/SST.
 
-  GRANTS ARE SCAFFOLD-SCOPED. Every future resource TYPE (Aurora, ECS Fargate,
-  internal ALB, AgentCore Gateway — the last needs iam:CreateServiceLinkedRole
-  for managed VPC Lattice) MUST add its grants to a ManagedPolicy below AND
-  re-run `scripts/deploy-github-role.sh` BEFORE the PR that provisions it, or
-  the first deploy 403s. See docs/ARCHITECTURE.md for the full resource list.
+  GRANTS ARE RESOURCE-TYPE-SCOPED. The policies below cover the current Aurora,
+  ECS Fargate, Lambda, Cloud Map, Cognito, API Gateway, and AgentCore Gateway
+  resources. Every new resource type MUST add its grants to a ManagedPolicy
+  below, and `scripts/deploy-github-role.sh` must be re-run before the PR that
+  provisions it, or the first deploy 403s. See docs/ARCHITECTURE.md for the
+  current resource list.
 
 # IAM is global; hosting the role stack in a specific region is purely a
 # CloudFormation decision (CFN scopes are per-region). Pinned to us-west-2 in
@@ -277,10 +278,10 @@ Resources:
               - ec2:DescribeNetworkInterfaces
             Resource: "*"
           - Sid: PassRoleConstrained
-            # No role is passed by the scaffold today, but future stacks (ECS
-            # task/execution roles, Lambda roles) will. Pre-scope PassRole to
-            # this project's role names + SST's name-truncation variants, gated
-            # by PassedToService — never Resource "*", never unconstrained.
+            # Current ECS and Lambda stacks pass task, execution, and function
+            # roles. Scope PassRole to this project's role names + SST's
+            # name-truncation variants, gated by PassedToService — never Resource
+            # "*", never unconstrained.
             # (rds.amazonaws.com was dropped with the RDS Proxy — plain Aurora
             # cluster/instance take no roleArn, so nothing passes a role to RDS.)
             Effect: Allow
@@ -303,9 +304,8 @@ Resources:
   # the broad RDS create surface doesn't push CorePolicy/ScaffoldPolicy past
   # IAM's 6144-byte per-policy cap, and the DB footprint is auditable in one place.
   #
-  # ADDED for the Aurora PR — must be live (re-run scripts/deploy-github-role.sh)
-  # BEFORE that PR's first deploy, or the deploy 403s on the first RDS/Secret
-  # create (CLAUDE-AWS "new resource TYPE needs grants first" rule).
+  # OUT-OF-BAND DEPLOY REQUIREMENT: apply this policy with
+  # scripts/deploy-github-role.sh before deploying Aurora policy changes.
   # ───────────────────────────────────────────────────────────────────────────
   DatabasePolicy:
     Type: AWS::IAM::ManagedPolicy
@@ -419,7 +419,7 @@ Resources:
               - secretsmanager:CreateSecret
             Resource: "*"
           - Sid: EC2ForDatabase
-            # Security-group lifecycle for the Aurora cluster + RDS Proxy SGs.
+            # Security-group lifecycle for the Aurora cluster + ECS workloads.
             # DescribeVpcs/Subnets already granted in ScaffoldPolicy (read-only);
             # here add the SG create/authorize surface. No per-resource ARN on
             # create, so Resource "*"; the SG rules themselves scope 5432 to the
@@ -458,9 +458,8 @@ Resources:
   # a no-load-balancer service). Its own ManagedPolicy to stay under IAM's
   # 6144-byte per-policy cap and keep the compute footprint auditable.
   #
-  # ADDED for the ECS PR — must be live (re-run scripts/deploy-github-role.sh)
-  # BEFORE that PR's first deploy, or the deploy 403s on the first ECS/role/log
-  # create (CLAUDE-AWS "new resource TYPE needs grants first").
+  # OUT-OF-BAND DEPLOY REQUIREMENT: apply this policy with
+  # scripts/deploy-github-role.sh before deploying ECS policy changes.
   # ───────────────────────────────────────────────────────────────────────────
   ComputePolicy:
     Type: AWS::IAM::ManagedPolicy
@@ -503,9 +502,8 @@ Resources:
               - ecs:ListTagsForResource
             Resource: "*"
           - Sid: ECRPull
-            # Pull the container image (placeholder public image now; the
-            # mem9 arm64 image from our own ECR later). GetAuthorizationToken has
-            # no resource scope.
+            # Pull the four workload images from the out-of-band private ECR
+            # repositories. GetAuthorizationToken has no resource scope.
             Effect: Allow
             Action:
               - ecr:GetAuthorizationToken
@@ -692,21 +690,19 @@ Resources:
 
   # ───────────────────────────────────────────────────────────────────────────
   # Policy 6 — Image build+push (.github/workflows/infra-ci.yml →
-  # build-and-push-image). CI on push-to-main builds the mnemo-server arm64 image
-  # (docker buildx) and pushes it to the OUT-OF-BAND ECR repo
-  # (infra/cloudformation/ecr-repositories.yaml → mem9-on-aws/mnemo-server).
+  # build-and-push-image). CI builds the four arm64 workload images with Docker
+  # Buildx and pushes them to the out-of-band ECR repositories defined in
+  # infra/cloudformation/ecr-repositories.yaml.
   #
   # DISTINCT from ComputePolicy's ECRPull (the task PULLS at runtime): this is the
   # CI PUSH surface. Its own ManagedPolicy so (a) ComputePolicy stays under IAM's
   # 6144-byte per-policy cap, and (b) the "who can push images" footprint is
   # auditable in one place. GetAuthorizationToken is already granted (ECRPull).
-  # Push actions are scoped to the ONE mnemo-server repo ARN (Tokyo — where the
-  # out-of-band repo lives; the role stack itself is in us-west-2 but ECR ARNs are
-  # regional).
+  # Push actions are scoped to the four workload repository ARNs in Tokyo. The
+  # role stack itself is in us-west-2, but ECR ARNs are regional.
   #
-  # ADDED for the mnemo-server image PR — must be live (re-run
-  # scripts/deploy-github-role.sh) BEFORE that PR's first push-to-main build, or
-  # the build 403s on the first PutImage.
+  # OUT-OF-BAND DEPLOY REQUIREMENT: apply this policy with
+  # scripts/deploy-github-role.sh before CI builds need new ECR grants.
   # ───────────────────────────────────────────────────────────────────────────
   ImageBuildPolicy:
     Type: AWS::IAM::ManagedPolicy
@@ -747,9 +743,9 @@ Resources:
   # ───────────────────────────────────────────────────────────────────────────
   # Policy 7 — MCP proxy Lambda (infra/gateway.ts): the VPC-attached proxy Lambda
   # (nodejs24.x) the AgentCore Gateway invokes to reach mnemo-server privately over
-  # Cloud Map. Replaces the former ALB/ACM/Route53/VPC-Lattice networking policy —
-  # the Lambda-target path needs none of those. Its own ManagedPolicy to stay under
-  # IAM's 6144-byte per-policy cap.
+  # Cloud Map. Replaces the former ALB/ACM/VPC-Lattice networking policy. Cloud
+  # Map's service-discovery and Route53 private-zone grants remain in ComputePolicy.
+  # Its own ManagedPolicy stays under IAM's 6144-byte per-policy cap.
   #
   # The Lambda's VPC ENIs are created by the LAMBDA SERVICE via the Lambda EXEC role
   # (granted in infra/gateway.ts), NOT this deploy role — so no ec2:CreateNetworkInterface
@@ -758,9 +754,8 @@ Resources:
   # the mem9-on-aws-* exec-role lifecycle by ComputePolicy.EcsTaskRoles. The Cloud Map
   # + Route53-for-Cloud-Map grants live in ComputePolicy (near the ECS service).
   #
-  # ADDED for the MCP Lambda-proxy pivot — must be live (re-run
-  # scripts/deploy-github-role.sh) BEFORE that PR's first deploy, or the deploy 403s
-  # on the first Lambda create.
+  # OUT-OF-BAND DEPLOY REQUIREMENT: apply this policy with
+  # scripts/deploy-github-role.sh before deploying Lambda proxy policy changes.
   # ───────────────────────────────────────────────────────────────────────────
   LambdaProxyPolicy:
     Type: AWS::IAM::ManagedPolicy
@@ -826,10 +821,9 @@ Resources:
   # service-managed secret — the proxy Lambda injects X-API-Key itself. Its own
   # policy for the 6144-byte cap + audit clarity.
   #
-  # ADDED for the MCP gateway PR — must be live BEFORE that PR's first deploy, or
-  # the first Cognito/AgentCore create 403s (CLAUDE-AWS "new resource TYPE needs
-  # grants first"; the doc explicitly names "first Bedrock AgentCore gateway →
-  # missing workload-identity grants").
+  # OUT-OF-BAND DEPLOY REQUIREMENT: apply this policy with
+  # scripts/deploy-github-role.sh before deploying Cognito or AgentCore policy
+  # changes.
   # ───────────────────────────────────────────────────────────────────────────
   GatewayMcpPolicy:
     Type: AWS::IAM::ManagedPolicy
@@ -962,10 +956,8 @@ Resources:
   # cover the HTTP API lifecycle. apigateway:POST/GET/PATCH/PUT/DELETE are the
   # verb-style actions the API Gateway v2 control plane authorizes against.
   #
-  # ADDED for the OAuth2 MCP login PR — must be live (re-run
-  # scripts/deploy-github-role.sh) BEFORE that PR's first deploy, or the deploy
-  # 403s on the first apigateway create (CLAUDE-AWS "new resource TYPE needs
-  # grants first").
+  # OUT-OF-BAND DEPLOY REQUIREMENT: apply this policy with
+  # scripts/deploy-github-role.sh before deploying API Gateway policy changes.
   # ───────────────────────────────────────────────────────────────────────────
   OAuth2FacadePolicy:
     Type: AWS::IAM::ManagedPolicy

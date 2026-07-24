@@ -50,8 +50,8 @@ them, update the file rather than silently diverging.
 ## Out-of-band bootstrap scripts
 
 `scripts/deploy-*.sh` create resources the SST app references read-only (the
-GitHub Actions IAM role, the ECR repository, the Bedrock Mantle Project) so that a
-`sst remove --stage pr-N` can never wipe shared/prod state. They are NOT part of
-the CI deploy — run them once per AWS account. Each reads its config from a
+GitHub Actions IAM role, four ECR repositories, and the Bedrock Mantle Project)
+so that a `sst remove --stage pr-N` can never wipe shared/prod state. They are NOT
+part of the CI deploy — run them once per AWS account. Each reads its config from a
 gitignored `.env` (copy `.env.example` and fill in your own AWS profile). See each
 script's header comment for what it provisions and when to re-run it.

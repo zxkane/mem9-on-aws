@@ -1,19 +1,19 @@
 #!/usr/bin/env bash
-# deploy-ecr-repositories.sh — Create or update the OUT-OF-BAND ECR repository
-# for the mem9-on-aws mnemo-server container image.
+# deploy-ecr-repositories.sh — Create or update the four OUT-OF-BAND ECR
+# repositories for the mem9-on-aws workload images.
 #
-# Scope: **ECR repository only**. The SST/Pulumi app does NOT manage this repo —
-# it references it read-only (see docs/ARCHITECTURE.md §4). Owning it out-of-band
-# means `sst remove --stage pr-N` can never wipe the image history prod runs on.
+# Scope: **ECR repositories only**. The SST/Pulumi app does not manage these
+# repositories; it references them read-only. Owning them out-of-band means
+# `sst remove --stage pr-N` cannot wipe the image history prod runs on.
 #
 # Bootstrap ONCE per AWS account (in the Tokyo region — ECR is regional and
 # Fargate pulls same-region), and RE-RUN only if
 # infra/cloudformation/ecr-repositories.yaml changes.
 #
 # Region: ap-northeast-1 (Tokyo) — MUST match the SST app region (sst.config.ts)
-# so Fargate pulls the image from the same region (no cross-region pull cost /
-# latency). This is UNLIKE deploy-github-role.sh, which pins us-west-2 for the
-# global IAM role stack; the ECR repo is a regional data resource.
+# so Fargate pulls the images from the same region (no cross-region pull cost /
+# latency). This is unlike deploy-github-role.sh, which pins us-west-2 for the
+# global IAM role stack; ECR repositories are regional data resources.
 #
 # Config: set AWS_PROFILE (and any overrides) in a gitignored .env at the repo
 # root — copy .env.example. Targets account <aws-account-id>.
@@ -114,16 +114,17 @@ case "$MODE" in
     ;;
 esac
 
-REPO_URI=$(aws cloudformation describe-stacks \
+REPO_URIS=$(aws cloudformation describe-stacks \
   --stack-name "$STACK_NAME" \
   --region "$REGION" \
-  --query "Stacks[0].Outputs[?OutputKey=='MnemoServerRepoUri'].OutputValue" \
+  --query "Stacks[0].Outputs[?ends_with(OutputKey, 'RepoUri')].[OutputKey,OutputValue]" \
   --output text)
 
 echo
-echo "MnemoServerRepoUri: $REPO_URI"
+echo "Repository URIs:"
+printf '%s\n' "$REPO_URIS"
 echo
 echo "Next steps:"
-echo "  1. CI (push to main) builds the arm64 image + pushes to this repo."
-echo "  2. infra/ecs.ts composes the same URI from account+region+namespace and"
-echo "     references \${uri}:\${tag} read-only (default tag: 'latest')."
+echo "  1. CI builds four arm64 images and pushes each to its matching repository."
+echo "  2. infra/ecr.ts composes the same URIs from account+region+namespace and"
+echo "     references \${uri}:\${tag} read-only."
