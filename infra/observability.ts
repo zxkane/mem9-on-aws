@@ -1,6 +1,11 @@
-// Observability: CloudWatch metric filters + alarms for the mnemo-server
-// container (issue #26). Only created for the `prod` stage; PR-preview
-// crash-loops must not page.
+// Observability: CloudWatch metric filters + alarms + Slack alerting for the
+// mnemo-server container (issues #26, follow-up). Only created for the `prod`
+// stage; PR-preview crash-loops must not page.
+//
+// Slack delivery is conditional on the `SlackWebhookUrl` SST secret being
+// configured (set via `npx sst secret set SlackWebhookUrl <url> --stage prod`
+// or via `SLACK_WEBHOOK_URL` GitHub secret). When absent, the alarms still fire
+// (visible in the CloudWatch console) but have no action — no Lambda, no topic.
 //
 // Metrics extracted from the mnemo-server structured log lines:
 //   1. recall_zero_hit — `confidence recall search` with `returned = 0`
@@ -9,20 +14,21 @@
 //   4. ingest_dropped — `async ingest failed`
 //
 // Alarms:
-//   - RecallZeroHitRate: metric math `zero/total > 0.7` over 1h, min 10 samples
+//   - RecallZeroHitRate: metric math `zero/total > 0.7` over 1h
 //   - IngestAuthFailure: ≥3 ingest_llm_auth_failure in 15 min
 //
-// The log group name is set explicitly in ecs.ts (`logging.name`) so it's a
-// stable, predictable string this module can reference without coupling to
-// SST's random physical-name suffix.
+// When SlackWebhookUrl is set:
+//   - SNS topic → alert-router Lambda → Slack webhook (Block Kit, #C0BKH5LPAJW
+//     in the opentuna workspace)
 
 export interface ObservabilityInputs {
   stage: string;
   logGroupName: string;
+  slackWebhookUrl?: string;
 }
 
 export function observability(inputs: ObservabilityInputs) {
-  const { stage, logGroupName } = inputs;
+  const { stage, logGroupName, slackWebhookUrl } = inputs;
   if (stage !== "prod") return;
 
   const namespace = "mem9-on-aws";
@@ -73,6 +79,41 @@ export function observability(inputs: ObservabilityInputs) {
     },
   });
 
+  // ─── SNS topic + alert-router Lambda (conditional on webhook) ────────────
+
+  // alarmActions is either [topicArn] (Slack delivery enabled) or [] (console-only).
+  let alarmActions: any[] = [];
+
+  if (slackWebhookUrl) {
+    const topic = new aws.sns.Topic("Mem9AlertsTopic", {
+      name: `mem9-on-aws-${stage}-alerts`,
+    });
+
+    const alertRouter = new sst.aws.Function("Mem9AlertRouter", {
+      handler: "infra/src/alert-router/handler.handler",
+      runtime: "nodejs24.x",
+      architecture: "arm64",
+      timeout: "30 seconds",
+      memory: "256 MB",
+      environment: { SLACK_WEBHOOK_URL: slackWebhookUrl },
+    });
+
+    new aws.sns.TopicSubscription("Mem9AlertRouterSubscription", {
+      topic: topic.arn,
+      protocol: "lambda",
+      endpoint: alertRouter.arn,
+    });
+
+    new aws.lambda.Permission("Mem9AlertRouterSnsInvoke", {
+      action: "lambda:InvokeFunction",
+      function: alertRouter.name,
+      principal: "sns.amazonaws.com",
+      sourceArn: topic.arn,
+    });
+
+    alarmActions = [topic.arn];
+  }
+
   // ─── Alarms ──────────────────────────────────────────────────────────────
 
   new aws.cloudwatch.MetricAlarm("RecallZeroHitRateAlarm", {
@@ -111,6 +152,7 @@ export function observability(inputs: ObservabilityInputs) {
     threshold: 0.7,
     evaluationPeriods: 1,
     treatMissingData: "notBreaching",
+    alarmActions,
   });
 
   new aws.cloudwatch.MetricAlarm("IngestAuthFailureAlarm", {
@@ -126,5 +168,6 @@ export function observability(inputs: ObservabilityInputs) {
     threshold: 3,
     comparisonOperator: "GreaterThanOrEqualToThreshold",
     treatMissingData: "notBreaching",
+    alarmActions,
   });
 }

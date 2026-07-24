@@ -435,7 +435,11 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
   });
 
   // Observability (issue #26): metric filters + alarms for prod only.
-  observability({ stage: $app.stage, logGroupName: mnemoLogGroupName });
+  // Slack delivery is conditional: only wired when the SlackWebhookUrl secret
+  // is set (GitHub Actions secret → `sst secret set` during deploy, or manual).
+  // When absent, alarms still fire (console-visible) but have no actions.
+  const slackWebhookUrl = process.env.SLACK_WEBHOOK_URL || undefined;
+  observability({ stage: $app.stage, logGroupName: mnemoLogGroupName, slackWebhookUrl });
 
   return {
     ssmPrefix: prefix,
