@@ -183,6 +183,19 @@ describe("buildReconciliationPlan", () => {
     });
   });
 
+  it("blocks every candidate while an active workflow cannot be correlated", () => {
+    const plan = buildReconciliationPlan(
+      observation({
+        workflowRuns: [{ prNumber: null, status: "in_progress", completedAt: null }],
+      }),
+    );
+
+    expect(plan.stages[0]).toMatchObject({
+      decision: "retain",
+      reasons: expect.arrayContaining(["deploy-active"]),
+    });
+  });
+
   it("TC-PREVIEW-RECON-012 protects malformed and non-preview stages", () => {
     const stages = [
       "prod",
@@ -414,6 +427,48 @@ describe("apply-time recheck", () => {
     ]);
     expect(() => sstRemoveCommand("prod")).toThrow(/unsafe stage/);
   });
+
+  it("persists state-missing inventory before an unrelated SST removal failure", async () => {
+    const mixed = observation({
+      pullRequests: [
+        { number: 12, state: "closed", closedAt: OLD },
+        { number: 13, state: "closed", closedAt: OLD },
+      ],
+      workflowRuns: [
+        { prNumber: 12, status: "completed", completedAt: OLD },
+        { prNumber: 13, status: "completed", completedAt: OLD },
+      ],
+      resources: [
+        {
+          stage: "pr-12",
+          resourceType: "rds:cluster",
+          project: "mem9-on-aws",
+          managedBy: "sst",
+        },
+        {
+          stage: "pr-13",
+          resourceType: "iam:role",
+          project: "mem9-on-aws",
+          managedBy: "sst",
+        },
+      ],
+    });
+    const initial = buildReconciliationPlan(mixed);
+    const runtime = adapters([mixed, mixed]);
+    vi.mocked(runtime.removeStage).mockRejectedValue(new Error("captured"));
+
+    await expect(
+      applyReconciliationPlan(initial, runtime, {
+        eventName: "workflow_dispatch",
+        mode: "apply",
+      }),
+    ).rejects.toThrow("captured");
+
+    expect(runtime.createOperatorIssue).toHaveBeenCalledOnce();
+    expect(vi.mocked(runtime.createOperatorIssue).mock.invocationCallOrder[0]).toBeLessThan(
+      vi.mocked(runtime.removeStage).mock.invocationCallOrder[0],
+    );
+  });
 });
 
 describe("workflow control flow", () => {
@@ -477,6 +532,8 @@ describe("workflow control flow", () => {
       .split("- Sid: SSMWrite")[0];
 
     expect(statement).toContain("tag:GetResources");
+    expect(statement).toContain("iam:ListRoles");
     expect(statement).not.toMatch(/tag:(TagResources|UntagResources)/);
+    expect(role).toContain("iam:ListRoleTags");
   });
 });

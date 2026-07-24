@@ -443,7 +443,8 @@ stage and resource type in one deduplicated operator issue.
 
 After deploying a revision that introduces this workflow, re-run
 `scripts/deploy-github-role.sh` once so the out-of-band CI role receives the
-read-only `tag:GetResources` grant used for inventory discovery.
+read-only `tag:GetResources`, `iam:ListRoles`, and scoped `iam:ListRoleTags`
+grants used for inventory discovery.
 
 ## License
 

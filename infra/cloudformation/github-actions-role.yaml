@@ -251,10 +251,14 @@ Resources:
           - Sid: TaggedInventoryRead
             # The recurring preview reconciler inventories this project's
             # currently tagged resources, then discards each ARN after deriving
-            # its resource type. GetResources has no resource-level scope.
+            # its resource type. GetResources and ListRoles have no
+            # resource-level scope. IAM roles are not returned by the Resource
+            # Groups Tagging API, so role names are prefix-filtered before the
+            # separately scoped ListRoleTags call below.
             Effect: Allow
             Action:
               - tag:GetResources
+              - iam:ListRoles
             Resource: "*"
           - Sid: SSMWrite
             # THE grant that lets the `meta` stack create its SSM parameters —
@@ -586,6 +590,7 @@ Resources:
               - iam:AttachRolePolicy
               - iam:DetachRolePolicy
               - iam:ListAttachedRolePolicies
+              - iam:ListRoleTags
               # Required for iam:DeleteRole on teardown — the provider reads the
               # role's instance profiles before deleting (see RdsProxyRole note).
               - iam:ListInstanceProfilesForRole

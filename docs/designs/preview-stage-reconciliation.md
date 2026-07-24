@@ -34,7 +34,8 @@ scripts/preview-reconciler.mts
   |    +-- GitHub pull requests
   |    +-- Infra CI workflow runs
   |    +-- SST S3 state objects
-  |    `-- Resource Groups Tagging API
+  |    +-- Resource Groups Tagging API
+  |    `-- IAM role tags
   +-- buildReconciliationPlan()       pure, deterministic, deeply frozen
   +-- renderPlanReport()              redacted stage/type/count output
   +-- applyReconciliationPlan()
@@ -56,7 +57,9 @@ reaches the planner, reports, plan artifacts, errors, or operator issues.
 1. Read all pull requests and matching `Infra CI` workflow runs.
 2. Read `/sst/bootstrap`, then list `app/mem9-on-aws/*.json` state objects from
    the configured SST state bucket.
-3. Read resources tagged `Project=mem9-on-aws` and `ManagedBy=sst`.
+3. Read resources tagged `Project=mem9-on-aws` and `ManagedBy=sst`. IAM roles
+   use `ListRoles` plus `ListRoleTags` because the Resource Groups Tagging API
+   does not return them.
 4. Group observations only by stage. The accepted mutation format is exactly
    `pr-[0-9]+`; protected and malformed names never become candidates.
 5. For each observed preview stage, calculate the grace anchor as the latest of:
@@ -66,7 +69,7 @@ reaches the planner, reports, plan artifacts, errors, or operator issues.
    workflow, a known grace anchor, and at least 24 elapsed hours.
 7. Persist a redacted advisory plan artifact and print a redacted report.
 8. In manual apply mode, refresh all observations and rebuild the plan before
-   every `sst remove`. Any reopened pull request, active/new workflow, changed
+   every candidate decision. Any reopened pull request, active/new workflow, changed
    state timestamp, missing state, or renewed grace period cancels removal.
 9. State-missing candidates are never sent to an AWS delete API. Manual apply
    creates or updates one marker-bearing operator issue containing only stage,
@@ -79,6 +82,9 @@ reaches the planner, reports, plan artifacts, errors, or operator issues.
   therefore does not generate a false orphan report.
 - Pull-request absence is allowed only when another timestamp supplies a grace
   anchor. An absent pull request with no trustworthy age remains protected.
+- Workflow runs first correlate through GitHub's PR association, then exact head
+  SHA/branch metadata. An active run that remains uncorrelated protects every
+  preview stage; it is never interpreted as inactivity.
 - Shared out-of-band IAM, ECR, and Mantle resources are excluded by the
   `ManagedBy=sst` and strict-stage ownership predicates. Their `ManagedBy=cli`
   tags never enter an SST stage inventory.
@@ -89,8 +95,9 @@ reaches the planner, reports, plan artifacts, errors, or operator issues.
   updates the existing open issue instead of creating duplicates.
 - Collection failures fail closed. The reconciler never interprets an AWS or
   GitHub read error as an empty result.
-- The deploy role gains only `tag:GetResources`, a read action with no
-  resource-level scope. Existing SSM and S3 read permissions cover SST state.
+- The deploy role gains only read inventory actions: `tag:GetResources`,
+  `iam:ListRoles`, and role-scoped `iam:ListRoleTags`. Existing SSM and S3 read
+  permissions cover SST state.
 
 ## Failure Modes
 
@@ -98,6 +105,8 @@ reaches the planner, reports, plan artifacts, errors, or operator issues.
 - Malformed plan artifact: reject before any mutation.
 - SST state disappears during recheck: cancel removal and report the stage as
   state-missing if tagged resources remain.
+- One removal fails: state-missing inventory has already been written, so the
+  failing SST command cannot suppress operator reporting for another stage.
 - `sst remove` failure: report only the stage and a generic failure; suppress
   command output.
 - GitHub operator-issue write failure: fail apply after all deletion decisions

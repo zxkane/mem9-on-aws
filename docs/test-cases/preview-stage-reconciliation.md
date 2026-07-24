@@ -49,4 +49,7 @@ Design: [`docs/designs/preview-stage-reconciliation.md`](../designs/preview-stag
 |---|---|---|
 | TC-PREVIEW-RECON-027 | Workflow and adapter source scan | No direct AWS delete API is present; only the SST removal adapter can mutate infrastructure |
 | TC-PREVIEW-RECON-028 | Rendered report and issue snapshot scan | No 12-digit account id, full ARN, endpoint URL, or resource content appears |
-| TC-PREVIEW-RECON-029 | Deploy-role policy | Adds only read-only `tag:GetResources` for tagged inventory discovery |
+| TC-PREVIEW-RECON-029 | Deploy-role policy | Adds only read-only tag and IAM inventory actions |
+| TC-PREVIEW-RECON-030 | Active workflow has no PR association and cannot be correlated by head metadata/API | Every preview stage is retained while the run remains active |
+| TC-PREVIEW-RECON-031 | State-missing stage has only an SST-managed IAM role | IAM-native tag discovery includes `iam:role` in the operator inventory |
+| TC-PREVIEW-RECON-032 | A state-missing candidate and a failing state-present SST removal share one apply | Operator issue is persisted before the removal failure propagates |

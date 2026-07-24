@@ -64,9 +64,9 @@ export type ActiveWorkflowStatus =
   | "unknown";
 
 export type WorkflowRunObservation =
-  | Readonly<{ prNumber: number; status: "completed"; completedAt: string }>
+  | Readonly<{ prNumber: number | null; status: "completed"; completedAt: string }>
   | Readonly<{
-      prNumber: number;
+      prNumber: number | null;
       status: ActiveWorkflowStatus;
       completedAt: null;
     }>;
@@ -291,12 +291,20 @@ export function buildReconciliationPlan(observation: Observation): Reconciliatio
       }
 
       const pullRequest = pullRequests.get(prNumber);
-      const workflowRuns = observation.workflowRuns.filter(
+      const matchingWorkflowRuns = observation.workflowRuns.filter(
         (run) => run.prNumber === prNumber,
       );
-      const activeDeployment = workflowRuns.some((run) => run.status !== "completed");
+      const uncorrelatedWorkflowRuns = observation.workflowRuns.filter(
+        (run) => run.prNumber === null,
+      );
+      const activeDeployment = [
+        ...matchingWorkflowRuns,
+        ...uncorrelatedWorkflowRuns,
+      ].some((run) => run.status !== "completed");
       const latestDeployCompletion = latestTimestamp(
-        workflowRuns.map((run) => run.completedAt),
+        [...matchingWorkflowRuns, ...uncorrelatedWorkflowRuns].map(
+          (run) => run.completedAt,
+        ),
       );
       const reasons: string[] = [];
 
@@ -495,6 +503,7 @@ export async function applyReconciliationPlan(
   const removed: string[] = [];
   const cancelled: Array<{ stage: string; reason: string }> = [];
   const stateMissing: StagePlan[] = [];
+  const removable: StagePlan[] = [];
 
   for (const advisory of plan.stages.filter(
     (stage) => stage.decision === "candidate",
@@ -517,8 +526,7 @@ export async function applyReconciliationPlan(
       continue;
     }
 
-    await adapters.removeStage(advisory.stage);
-    removed.push(advisory.stage);
+    removable.push(fresh);
   }
 
   let operatorIssue: ApplyResult["operatorIssue"] = "none";
@@ -534,6 +542,11 @@ export async function applyReconciliationPlan(
     if (draft) operatorIssue = await upsertOperatorIssue(draft, adapters);
   }
 
+  for (const stage of removable) {
+    await adapters.removeStage(stage.stage);
+    removed.push(stage.stage);
+  }
+
   return deepFreeze({ removed, cancelled, operatorIssue });
 }
 
@@ -545,7 +558,13 @@ export async function runReport(
   return deepFreeze({ plan, report });
 }
 
-type CommandResult = Readonly<{ stdout: string; stderr: string }>;
+export type CommandResult = Readonly<{ stdout: string; stderr: string }>;
+export type CommandRunner = (
+  file: string,
+  args: readonly string[],
+  label: string,
+  allowedFailure?: RegExp,
+) => Promise<CommandResult | null>;
 
 async function runCommand(
   file: string,
@@ -599,8 +618,17 @@ function validateRepository(repository: string): void {
   }
 }
 
-async function collectPullRequests(repository: string): Promise<PullRequestObservation[]> {
-  const result = await runCommand(
+type PullRequestCollection = Readonly<{
+  observations: readonly PullRequestObservation[];
+  byHeadSha: ReadonlyMap<string, number>;
+  byHeadBranch: ReadonlyMap<string, number>;
+}>;
+
+async function collectPullRequests(
+  repository: string,
+  commandRunner: CommandRunner,
+): Promise<PullRequestCollection> {
+  const result = await commandRunner(
     "gh",
     [
       "api",
@@ -617,13 +645,29 @@ async function collectPullRequests(repository: string): Promise<PullRequestObser
     "GitHub pull-request observation",
   );
   const pages = githubPages(parseJson(result!.stdout, "GitHub pull requests"));
-  return pages.flatMap((page) =>
+  const byHeadSha = new Map<string, number>();
+  const byHeadBranch = new Map<string, number>();
+  const ambiguousHeadBranches = new Set<string>();
+  const observations = pages.flatMap((page) =>
     (Array.isArray(page) ? page : []).map((item): PullRequestObservation => {
       const pullRequest = asRecord(item);
       const number = Number(pullRequest.number);
       if (!Number.isSafeInteger(number)) throw new Error("Invalid pull-request number");
       if (pullRequest.state !== "open" && pullRequest.state !== "closed") {
         throw new Error("Invalid pull-request state");
+      }
+      const head = asRecord(pullRequest.head);
+      const headSha = stringOrNull(head.sha);
+      const headBranch = stringOrNull(head.ref);
+      if (headSha) byHeadSha.set(headSha, number);
+      if (headBranch && !ambiguousHeadBranches.has(headBranch)) {
+        const existing = byHeadBranch.get(headBranch);
+        if (existing === undefined || existing === number) {
+          byHeadBranch.set(headBranch, number);
+        } else {
+          byHeadBranch.delete(headBranch);
+          ambiguousHeadBranches.add(headBranch);
+        }
       }
       const closedAt = stringOrNull(pullRequest.closed_at);
       if (pullRequest.state === "open") {
@@ -634,12 +678,15 @@ async function collectPullRequests(repository: string): Promise<PullRequestObser
       return { number, state: "closed", closedAt };
     }),
   );
+  return { observations, byHeadSha, byHeadBranch };
 }
 
 async function collectWorkflowRuns(
   repository: string,
+  pullRequests: PullRequestCollection,
+  commandRunner: CommandRunner,
 ): Promise<WorkflowRunObservation[]> {
-  const result = await runCommand(
+  const result = await commandRunner(
     "gh",
     [
       "api",
@@ -661,9 +708,12 @@ async function collectWorkflowRuns(
     return Array.isArray(workflowRuns) ? workflowRuns : [];
   });
 
-  return runs.flatMap((item): WorkflowRunObservation[] => {
+  const observations: WorkflowRunObservation[] = [];
+  for (const item of runs) {
     const run = asRecord(item);
-    const pullRequests = Array.isArray(run.pull_requests) ? run.pull_requests : [];
+    const associatedPullRequests = Array.isArray(run.pull_requests)
+      ? run.pull_requests
+      : [];
     const rawStatus = typeof run.status === "string" ? run.status : "unknown";
     const activeStatuses: readonly ActiveWorkflowStatus[] = [
       "queued",
@@ -673,24 +723,66 @@ async function collectWorkflowRuns(
       "requested",
       "unknown",
     ];
-    return pullRequests.map((pullRequest): WorkflowRunObservation => {
+    let numbers: Array<number | null> = associatedPullRequests.map((pullRequest) => {
       const number = Number(asRecord(pullRequest).number);
-      if (!Number.isSafeInteger(number)) throw new Error("Invalid workflow PR number");
+      if (!Number.isSafeInteger(number)) {
+        throw new Error("Invalid workflow PR number");
+      }
+      return number;
+    });
+    if (numbers.length === 0) {
+      const headSha = stringOrNull(run.head_sha);
+      const headBranch = stringOrNull(run.head_branch);
+      const correlated =
+        (headSha ? pullRequests.byHeadSha.get(headSha) : undefined) ??
+        (headBranch ? pullRequests.byHeadBranch.get(headBranch) : undefined);
+      if (correlated !== undefined) numbers = [correlated];
+    }
+    if (numbers.length === 0 && rawStatus !== "completed") {
+      const runId = Number(run.id);
+      if (Number.isSafeInteger(runId)) {
+        const associated = await commandRunner(
+          "gh",
+          [
+            "api",
+            "--method",
+            "GET",
+            `repos/${repository}/actions/runs/${runId}/pull_requests`,
+          ],
+          "GitHub active workflow association",
+        );
+        const payload = parseJson(
+          associated!.stdout,
+          "GitHub active workflow pull requests",
+        );
+        numbers = (Array.isArray(payload) ? payload : []).flatMap((pullRequest) => {
+          const number = Number(asRecord(pullRequest).number);
+          return Number.isSafeInteger(number) ? [number] : [];
+        });
+      }
+    }
+    if (numbers.length === 0) numbers = [null];
+
+    for (const number of numbers) {
       if (rawStatus === "completed") {
         const completedAt = stringOrNull(run.updated_at);
         if (completedAt === null) throw new Error("Completed workflow lacks updated_at");
-        return { prNumber: number, status: "completed", completedAt };
+        observations.push({ prNumber: number, status: "completed", completedAt });
+        continue;
       }
       const status = activeStatuses.includes(rawStatus as ActiveWorkflowStatus)
         ? (rawStatus as ActiveWorkflowStatus)
         : "unknown";
-      return { prNumber: number, status, completedAt: null };
-    });
-  });
+      observations.push({ prNumber: number, status, completedAt: null });
+    }
+  }
+  return observations;
 }
 
-async function collectStateObjects(): Promise<StateObjectObservation[]> {
-  const bootstrap = await runCommand(
+async function collectStateObjects(
+  commandRunner: CommandRunner,
+): Promise<StateObjectObservation[]> {
+  const bootstrap = await commandRunner(
     "aws",
     ["ssm", "get-parameter", "--name", "/sst/bootstrap", "--output", "json"],
     "SST bootstrap observation",
@@ -708,7 +800,7 @@ async function collectStateObjects(): Promise<StateObjectObservation[]> {
   );
   if (stateBucket === null) throw new Error("SST state bucket is missing");
 
-  const listing = await runCommand(
+  const listing = await commandRunner(
     "aws",
     [
       "s3api",
@@ -748,8 +840,10 @@ export function resourceTypeFromArn(arn: string): string {
   return safeResourceType(`${service}:${resourceType}`);
 }
 
-async function collectResources(): Promise<ResourceObservation[]> {
-  const result = await runCommand(
+async function collectResources(
+  commandRunner: CommandRunner,
+): Promise<ResourceObservation[]> {
+  const result = await commandRunner(
     "aws",
     [
       "resourcegroupstaggingapi",
@@ -780,10 +874,12 @@ async function collectResources(): Promise<ResourceObservation[]> {
     );
     const stage = tags.get("Stage");
     if (!arn || !stage) return [];
+    const resourceType = resourceTypeFromArn(arn);
+    if (resourceType === "iam:role") return [];
     return [
       {
         stage,
-        resourceType: resourceTypeFromArn(arn),
+        resourceType,
         project: tags.get("Project") ?? "",
         managedBy: tags.get("ManagedBy") ?? "",
       },
@@ -791,41 +887,101 @@ async function collectResources(): Promise<ResourceObservation[]> {
   });
 }
 
-function createObservationAdapter(repository: string): ObservationAdapter {
+async function collectIamRoles(
+  commandRunner: CommandRunner,
+): Promise<ResourceObservation[]> {
+  const result = await commandRunner(
+    "aws",
+    ["iam", "list-roles", "--output", "json"],
+    "IAM role inventory",
+  );
+  const roles = asRecord(parseJson(result!.stdout, "IAM roles")).Roles;
+  if (!Array.isArray(roles)) return [];
+
+  const observations: ResourceObservation[] = [];
+  for (const item of roles) {
+    const roleName = stringOrNull(asRecord(item).RoleName);
+    if (
+      !roleName ||
+      !["mem9-on-aws-", "mem9-on-aw-", "mem9-on-a-"].some((prefix) =>
+        roleName.startsWith(prefix),
+      )
+    ) {
+      continue;
+    }
+    const tagResult = await commandRunner(
+      "aws",
+      ["iam", "list-role-tags", "--role-name", roleName, "--output", "json"],
+      "IAM role tag inventory",
+    );
+    const rawTags = asRecord(parseJson(tagResult!.stdout, "IAM role tags")).Tags;
+    const tags = new Map(
+      (Array.isArray(rawTags) ? rawTags : []).flatMap((item): [string, string][] => {
+        const tag = asRecord(item);
+        const key = stringOrNull(tag.Key);
+        const value = stringOrNull(tag.Value);
+        return key && value ? [[key, value]] : [];
+      }),
+    );
+    const stage = tags.get("Stage");
+    if (
+      stage &&
+      tags.get("Project") === "mem9-on-aws" &&
+      tags.get("ManagedBy") === "sst"
+    ) {
+      observations.push({
+        stage,
+        resourceType: "iam:role",
+        project: "mem9-on-aws",
+        managedBy: "sst",
+      });
+    }
+  }
+  return observations;
+}
+
+function createObservationAdapter(
+  repository: string,
+  commandRunner: CommandRunner = runCommand,
+): ObservationAdapter {
   validateRepository(repository);
   return {
     async collectObservation() {
-      const [pullRequests, workflowRuns, stateObjects, resources] = await Promise.all([
-        collectPullRequests(repository),
-        collectWorkflowRuns(repository),
-        collectStateObjects(),
-        collectResources(),
+      const pullRequests = await collectPullRequests(repository, commandRunner);
+      const [workflowRuns, stateObjects, taggedResources, iamRoles] = await Promise.all([
+        collectWorkflowRuns(repository, pullRequests, commandRunner),
+        collectStateObjects(commandRunner),
+        collectResources(commandRunner),
+        collectIamRoles(commandRunner),
       ]);
       return {
         observedAt: new Date().toISOString(),
-        pullRequests,
+        pullRequests: pullRequests.observations,
         workflowRuns,
         stateObjects,
-        resources,
+        resources: [...taggedResources, ...iamRoles],
       };
     },
   };
 }
 
-function createApplyAdapters(repository: string): ApplyAdapters {
-  const observationAdapter = createObservationAdapter(repository);
+function createApplyAdapters(
+  repository: string,
+  commandRunner: CommandRunner = runCommand,
+): ApplyAdapters {
+  const observationAdapter = createObservationAdapter(repository, commandRunner);
   return {
     ...observationAdapter,
     async removeStage(stage) {
       const [file, ...args] = sstRemoveCommand(stage);
-      await runCommand(
+      await commandRunner(
         file,
         args,
         `SST removal for ${stage}`,
       );
     },
     async findOpenOperatorIssue(title, marker) {
-      const result = await runCommand(
+      const result = await commandRunner(
         "gh",
         [
           "api",
@@ -857,7 +1013,7 @@ function createApplyAdapters(repository: string): ApplyAdapters {
       return null;
     },
     async createOperatorIssue(title, body) {
-      const result = await runCommand(
+      const result = await commandRunner(
         "gh",
         [
           "api",
@@ -878,7 +1034,7 @@ function createApplyAdapters(repository: string): ApplyAdapters {
       return number;
     },
     async updateOperatorIssue(number, title, body) {
-      await runCommand(
+      await commandRunner(
         "gh",
         [
           "api",
@@ -986,10 +1142,15 @@ function parseCli(argv: readonly string[]): CliOptions {
   };
 }
 
-async function main(): Promise<void> {
-  const options = parseCli(process.argv.slice(2));
+export async function runCli(
+  argv: readonly string[],
+  commandRunner: CommandRunner = runCommand,
+): Promise<void> {
+  const options = parseCli(argv);
   if (options.command === "plan") {
-    const result = await runReport(createObservationAdapter(options.repository));
+    const result = await runReport(
+      createObservationAdapter(options.repository, commandRunner),
+    );
     console.log(result.report);
     await fs.writeFile(options.planPath, `${JSON.stringify(result.plan, null, 2)}\n`, {
       mode: 0o600,
@@ -1003,7 +1164,7 @@ async function main(): Promise<void> {
   );
   const result = await applyReconciliationPlan(
     plan,
-    createApplyAdapters(options.repository),
+    createApplyAdapters(options.repository, commandRunner),
     options.trigger,
   );
   for (const stage of result.removed) console.log(`Removed preview stage ${stage}`);
@@ -1017,7 +1178,7 @@ async function main(): Promise<void> {
 
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";
 if (invokedPath === fileURLToPath(import.meta.url)) {
-  main().catch(() => {
+  runCli(process.argv.slice(2)).catch(() => {
     console.error("preview-reconciler: failed closed");
     process.exitCode = 1;
   });
