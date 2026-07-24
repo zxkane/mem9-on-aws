@@ -498,6 +498,8 @@ describe("ecs stack", () => {
     expect(env.MNEMO_RECALL_ZERO_RESULT_FALLBACK).toBe("1");
     // Ingest durability (TC-INGEST-020, issue #25): only durable facts stored.
     expect(env.MNEMO_INGEST_DURABLE_ONLY).toBe("1");
+    // Durable queue routing/worker execution remains off until atomic apply.
+    expect(env.MNEMO_DURABLE_INGEST_ENABLED).toBe("0");
     // GLM-5 request bound (TC-GLM-BOUND-020, issue #46): patch configuration
     // is explicit in ECS, not left to an image default.
     expect(env.MNEMO_MAX_EXTRACTION_CONVERSATION_RUNES).toBe("200000");

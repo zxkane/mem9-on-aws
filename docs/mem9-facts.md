@@ -173,6 +173,23 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
   embedder is set → **without an embedding endpoint, PG backend does keyword-only
   (FTS), NO vector search.** So the embedding MaaS is required for semantic recall.
 
+### Disabled durable ingest foundation (downstream patch)
+
+- Upstream asynchronous `messages[]` ingest returns 202 before starting an
+  untracked goroutine. Downstream patch
+  `docker/mnemo-server/patches/0004-durable-ingest-queue.patch` adds a
+  tenant-database queue repository, canonical `ingest-v1` envelopes, leases,
+  retries, and an injected plan/apply worker contract.
+- `MNEMO_DURABLE_INGEST_ENABLED` defaults false in the patched application and
+  ECS explicitly sets it to `0` in every stage. Therefore the deployed request
+  path remains upstream-compatible. The production entrypoint rejects startup
+  if the flag is manually enabled before atomic processing is wired.
+- Production supplies no plan/apply processor. The queue worker cannot adapt or
+  call the existing non-atomic ingest/reconciliation path.
+- Bootstrap applies the repeatable `ingest_jobs` migration inside the same
+  operator-owned Aurora database. Canonical payloads and plans are not sent to
+  logs, metrics, or another service.
+
 ### LLM key is read ONCE at startup, immutable — decisive for the sidecar (verified 2026-07-12)
 Probed at the pinned commit (`server/internal/config/config.go` + `llm/client.go`):
 - `MNEMO_LLM_API_KEY` / `_BASE_URL` / `_MODEL` are read **once** in `config.Load()`

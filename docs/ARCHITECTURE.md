@@ -226,6 +226,14 @@ after deployment with `scripts/run-bootstrap-task.sh`. It:
 The task is idempotent and connects directly to the Aurora writer endpoint. It is
 not one of the three long-running application containers.
 
+The bootstrap also applies the additive `ingest_jobs` migration. The patched
+server contains tenant-local enqueue, lease, FIFO, retry, and worker primitives,
+but ECS explicitly sets `MNEMO_DURABLE_INGEST_ENABLED=0` in every stage. With
+that flag off, asynchronous message ingest keeps its existing upstream behavior.
+No production processor is wired to the queue worker, so this foundation cannot
+call the existing non-atomic reconciliation path. The server fails startup if
+the flag is manually enabled before atomic processor/worker wiring exists.
+
 Memory rows and embeddings are durable in Aurora. The Fargate task uses `/tmp`
 only for mem9's batch-import implementation; normal add, search, and CRUD paths
 do not require persistent task storage.
@@ -385,7 +393,7 @@ to the GitHub Actions deploy role.
 | MCP surface | AgentCore Gateway Lambda target | `infra/gateway.ts` |
 | Private service lookup | AWS Cloud Map | `infra/ecs.ts` |
 | Inbound auth | Cognito M2M plus OAuth2 PKCE facade | `infra/cognito.ts`, `infra/oauth-facade.ts` |
-| Schema setup | One-shot ECS bootstrap task | `infra/bootstrap.ts` |
+| Schema setup | One-shot ECS bootstrap task, including inert `ingest_jobs` foundation | `infra/bootstrap.ts`, `docker/bootstrap/migrations/` |
 
 ## Locked decisions
 
@@ -408,6 +416,8 @@ to the GitHub Actions deploy role.
 - Schema bootstrap is a separate one-shot ECS task.
 - ECR scan-on-push is a guarded out-of-band registry singleton, separate from
   the retained repository stack.
+- Durable ingest routing remains explicitly disabled in every stage until an
+  atomic plan-application processor is implemented.
 
 ## Planned changes
 
@@ -416,14 +426,13 @@ The open reliability program covers future work in these areas:
 - Release image tag selection and read-only ECS actual-state reconciliation.
 - Mandatory alert delivery with separate transport and execution failure queues.
 - Safe preview-stage reconciliation and a separately reviewed one-time cleanup.
-- A disabled-by-default durable ingest job foundation, atomic plan application,
-  tenant-scoped job status, and job-level telemetry.
+- Atomic ingest plan application, enabling the durable route, tenant-scoped job
+  status, and job-level telemetry.
 - A post-deployment production reliability verification exercise.
 
-**None of this planned work is part of the current implementation.** Each change
-must update this document only after its implementation, tests, and deployment
-definition land. The current async smart-ingest path must not be described as a
-durable queue or atomic job processor.
+The current async smart-ingest path must not be described as a durable queue or
+atomic job processor. The queue table and worker primitives are installed but
+inert; enabling them remains planned work.
 
 ## Open decisions
 

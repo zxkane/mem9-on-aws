@@ -142,3 +142,6 @@ CREATE INDEX IF NOT EXISTS idx_upload_poll ON upload_tasks(status, created_at);
 DROP TRIGGER IF EXISTS trg_upload_tasks_updated ON upload_tasks;
 CREATE TRIGGER trg_upload_tasks_updated BEFORE UPDATE ON upload_tasks
     FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+
+-- 5) Tenant-local durable ingest queue (disabled by default at runtime).
+\ir migrations/001_ingest_jobs.sql

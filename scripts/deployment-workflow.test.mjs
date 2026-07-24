@@ -48,6 +48,11 @@ function actionSetForSid(source, sid) {
 }
 
 describe("workflow integration", () => {
+  it("runs the PostgreSQL durable-ingest integration suite in CI", () => {
+    const workflow = readFileSync(workflowPath, "utf8");
+    expect(workflow).toContain("bash scripts/run-ingest-queue-integration.sh");
+  });
+
   it("uses the tested tag selector and reconciles preview and prod deployments", () => {
     const workflow = readFileSync(workflowPath, "utf8");
 

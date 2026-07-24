@@ -1,0 +1,2903 @@
+diff --git a/server/cmd/mnemo-server/durable_ingest_test.go b/server/cmd/mnemo-server/durable_ingest_test.go
+new file mode 100644
+index 0000000..ca547d4
+--- /dev/null
++++ b/server/cmd/mnemo-server/durable_ingest_test.go
+@@ -0,0 +1,17 @@
++package main
++
++import (
++	"errors"
++	"testing"
++
++	"github.com/qiffang/mnemos/server/internal/ingestqueue"
++)
++
++func TestDurableIngestStartupFailsClosedWithoutProcessor(t *testing.T) {
++	if err := validateDurableIngestStartup(false); err != nil {
++		t.Fatalf("disabled durable ingest: %v", err)
++	}
++	if err := validateDurableIngestStartup(true); !errors.Is(err, ingestqueue.ErrProcessorUnavailable) {
++		t.Fatalf("enabled durable ingest error = %v, want ErrProcessorUnavailable", err)
++	}
++}
+diff --git a/server/cmd/mnemo-server/main.go b/server/cmd/mnemo-server/main.go
+index c019f1d..9ee45f3 100644
+--- a/server/cmd/mnemo-server/main.go
++++ b/server/cmd/mnemo-server/main.go
+@@ -14,6 +14,7 @@ import (
+ 	"github.com/qiffang/mnemos/server/internal/embed"
+ 	"github.com/qiffang/mnemos/server/internal/encrypt"
+ 	"github.com/qiffang/mnemos/server/internal/handler"
++	"github.com/qiffang/mnemos/server/internal/ingestqueue"
+ 	"github.com/qiffang/mnemos/server/internal/llm"
+ 	"github.com/qiffang/mnemos/server/internal/metering"
+ 	"github.com/qiffang/mnemos/server/internal/middleware"
+@@ -37,6 +38,10 @@ func main() {
+ 		logger.Error("failed to load config", "err", err)
+ 		os.Exit(1)
+ 	}
++	if err := validateDurableIngestStartup(cfg.DurableIngestEnabled); err != nil {
++		logger.Error("durable ingest startup rejected", "err", err)
++		os.Exit(1)
++	}
+ 
+ 	db, err := repository.NewDB(cfg.DBBackend, cfg.DSN)
+ 	if err != nil {
+@@ -301,7 +306,8 @@ func main() {
+ 		WithRuntimeUsage(runtimeUsageManager).
+ 		WithWebhookService(webhookSvc).
+ 		WithActivityTracker(activityTracker).
+-		WithDisableSessionSave(cfg.DisableSessionSave)
++		WithDisableSessionSave(cfg.DisableSessionSave).
++		WithDurableIngest(cfg.DurableIngestEnabled)
+ 	router := srv.Router(tenantMW, rateMW, apiKeyMW, middleware.CORS(cfg.CORSAllowedOrigins))
+ 
+ 	httpSrv := &http.Server{
+@@ -365,6 +371,13 @@ func main() {
+ 	logger.Info("server stopped")
+ }
+ 
++func validateDurableIngestStartup(enabled bool) error {
++	if enabled {
++		return ingestqueue.ErrProcessorUnavailable
++	}
++	return nil
++}
++
+ func redactMeteringURLForLog(raw string) string {
+ 	if raw == "" {
+ 		return ""
+diff --git a/server/internal/config/config.go b/server/internal/config/config.go
+index 6410adc..028934b 100644
+--- a/server/internal/config/config.go
++++ b/server/internal/config/config.go
+@@ -32,11 +32,12 @@ type Config struct {
+ 	EmbedModel   string
+ 	EmbedDims    int
+ 
+-	LLMAPIKey      string
+-	LLMBaseURL     string
+-	LLMModel       string
+-	LLMTemperature float64
+-	IngestMode     string
++	LLMAPIKey            string
++	LLMBaseURL           string
++	LLMModel             string
++	LLMTemperature       float64
++	IngestMode           string
++	DurableIngestEnabled bool
+ 
+ 	// DisableSessionSave skips raw session row persistence for message ingest.
+ 	// Smart ingest still extracts and reconciles facts into insight memories.
+@@ -187,6 +188,7 @@ func Load() (*Config, error) {
+ 		LLMModel:                         envOr("MNEMO_LLM_MODEL", "gpt-4o-mini"),
+ 		LLMTemperature:                   envFloat("MNEMO_LLM_TEMPERATURE", 0.1),
+ 		IngestMode:                       envOr("MNEMO_INGEST_MODE", "smart"),
++		DurableIngestEnabled:             envBool("MNEMO_DURABLE_INGEST_ENABLED", false),
+ 		DisableSessionSave:               envBool("MNEMO_DISABLE_SESSION_SAVE", false),
+ 		TiDBZeroEnabled:                  envBool("MNEMO_TIDB_ZERO_ENABLED", true),
+ 		TiDBZeroAPIURL:                   envOr("MNEMO_TIDB_ZERO_API_URL", "https://zero.tidbapi.com/v1alpha1"),
+diff --git a/server/internal/config/durable_ingest_test.go b/server/internal/config/durable_ingest_test.go
+new file mode 100644
+index 0000000..62731e1
+--- /dev/null
++++ b/server/internal/config/durable_ingest_test.go
+@@ -0,0 +1,24 @@
++package config
++
++import "testing"
++
++func TestDurableIngestDefaultsDisabled(t *testing.T) {
++	t.Setenv("MNEMO_DSN", "test-dsn")
++	t.Setenv("MNEMO_DURABLE_INGEST_ENABLED", "")
++	cfg, err := Load()
++	if err != nil {
++		t.Fatalf("Load: %v", err)
++	}
++	if cfg.DurableIngestEnabled {
++		t.Fatal("durable ingest must default disabled")
++	}
++
++	t.Setenv("MNEMO_DURABLE_INGEST_ENABLED", "true")
++	cfg, err = Load()
++	if err != nil {
++		t.Fatalf("Load enabled: %v", err)
++	}
++	if !cfg.DurableIngestEnabled {
++		t.Fatal("explicit durable ingest flag was not enabled")
++	}
++}
+diff --git a/server/internal/handler/durable_ingest_test.go b/server/internal/handler/durable_ingest_test.go
+new file mode 100644
+index 0000000..5e847d1
+--- /dev/null
++++ b/server/internal/handler/durable_ingest_test.go
+@@ -0,0 +1,361 @@
++package handler
++
++import (
++	"context"
++	"database/sql"
++	"encoding/json"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"strings"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/domain"
++	"github.com/qiffang/mnemos/server/internal/ingestqueue"
++	"github.com/qiffang/mnemos/server/internal/middleware"
++)
++
++type handlerIngestRepo struct {
++	ingestqueue.Repository
++	enqueue func(context.Context, ingestqueue.EnqueueInput) (*ingestqueue.Job, error)
++}
++
++func (r *handlerIngestRepo) Enqueue(ctx context.Context, input ingestqueue.EnqueueInput) (*ingestqueue.Job, error) {
++	return r.enqueue(ctx, input)
++}
++
++func durableRequest(t *testing.T, tenant string, db *sql.DB, body map[string]any) *http.Request {
++	t.Helper()
++	req := makeRequest(t, http.MethodPost, "/memories", body)
++	auth := &domain.AuthInfo{
++		TenantID:  tenant,
++		TenantDB:  db,
++		AgentName: "authenticated-agent",
++	}
++	return req.WithContext(middleware.WithAuthContext(req.Context(), auth))
++}
++
++func TestDurableIngestWaitsForEnqueueCommitBefore202(t *testing.T) {
++	srv := newTestServer(&testMemoryRepo{}, &testSessionRepo{}).WithDurableIngest(true)
++	started := make(chan struct{})
++	release := make(chan struct{})
++	repo := &handlerIngestRepo{
++		enqueue: func(_ context.Context, input ingestqueue.EnqueueInput) (*ingestqueue.Job, error) {
++			close(started)
++			<-release
++			if input.TenantID != "tenant-a" || input.AgentID != "authenticated-agent" ||
++				input.AppID != "business-app" || input.SessionID != "session-a" {
++				t.Fatalf("enqueue scope = %+v", input)
++			}
++			return &ingestqueue.Job{
++				ID:       "job-committed",
++				TenantID: input.TenantID,
++				State:    ingestqueue.StateQueued,
++			}, nil
++		},
++	}
++	srv.ingestRepoFactory = func(backend string, db *sql.DB) ingestqueue.Repository {
++		if db != nil {
++			t.Fatal("test request should pass its resolved nil TenantDB")
++		}
++		return repo
++	}
++	req := durableRequest(t, "tenant-a", nil, map[string]any{
++		"messages":   []map[string]any{{"role": "user", "content": "SECRET-MEMORY"}},
++		"appId":      "business-app",
++		"session_id": "session-a",
++	})
++	rr := httptest.NewRecorder()
++	done := make(chan struct{})
++	go func() {
++		srv.createMemory(rr, req)
++		close(done)
++	}()
++	<-started
++	select {
++	case <-done:
++		t.Fatal("handler returned 202 before enqueue/commit completed")
++	case <-time.After(40 * time.Millisecond):
++	}
++	close(release)
++	<-done
++	if rr.Code != http.StatusAccepted {
++		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
++	}
++	var response map[string]string
++	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
++		t.Fatal(err)
++	}
++	if response["job_id"] != "job-committed" || response["state"] != "queued" {
++		t.Fatalf("response = %#v", response)
++	}
++	if _, exists := response["status"]; exists {
++		t.Fatalf("durable response leaked legacy status: %#v", response)
++	}
++}
++
++func TestDurableIngestEnqueueFailureIsNon2xx(t *testing.T) {
++	srv := newTestServer(&testMemoryRepo{}, &testSessionRepo{}).WithDurableIngest(true)
++	srv.ingestRepoFactory = func(string, *sql.DB) ingestqueue.Repository {
++		return &handlerIngestRepo{
++			enqueue: func(context.Context, ingestqueue.EnqueueInput) (*ingestqueue.Job, error) {
++				return nil, errors.New("database commit failed")
++			},
++		}
++	}
++	req := durableRequest(t, "tenant-a", nil, map[string]any{
++		"messages": []map[string]string{{"role": "user", "content": "hello"}},
++	})
++	rr := httptest.NewRecorder()
++	srv.createMemory(rr, req)
++	if rr.Code < 400 {
++		t.Fatalf("enqueue failure returned %d: %s", rr.Code, rr.Body.String())
++	}
++	if body := rr.Body.String(); body == "" || body == "database commit failed" {
++		t.Fatalf("unexpected error body %q", body)
++	}
++}
++
++func TestDurableIngestDuplicateReturnsCurrentJobState(t *testing.T) {
++	srv := newTestServer(&testMemoryRepo{}, &testSessionRepo{}).WithDurableIngest(true)
++	var mu sync.Mutex
++	var inputs []ingestqueue.EnqueueInput
++	srv.ingestRepoFactory = func(string, *sql.DB) ingestqueue.Repository {
++		return &handlerIngestRepo{
++			enqueue: func(_ context.Context, input ingestqueue.EnqueueInput) (*ingestqueue.Job, error) {
++				mu.Lock()
++				inputs = append(inputs, input)
++				mu.Unlock()
++				return &ingestqueue.Job{ID: "same-job", TenantID: input.TenantID, State: ingestqueue.StateRetryWait}, nil
++			},
++		}
++	}
++	body := map[string]any{
++		"messages": []map[string]any{
++			{"role": "user", "content": "hello"},
++			{"role": "assistant", "content": "world", "seq": 7},
++		},
++		"metadata": map[string]any{"z": 1, "a": map[string]any{"b": 2, "a": 1}},
++	}
++	var hashes []string
++	for range 2 {
++		req := durableRequest(t, "tenant-a", nil, body)
++		rr := httptest.NewRecorder()
++		srv.createMemory(rr, req)
++		if rr.Code != http.StatusAccepted {
++			t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
++		}
++		var response map[string]string
++		if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
++			t.Fatal(err)
++		}
++		if response["job_id"] != "same-job" || response["state"] != "retry_wait" {
++			t.Fatalf("response = %#v", response)
++		}
++	}
++	mu.Lock()
++	defer mu.Unlock()
++	for _, input := range inputs {
++		hashes = append(hashes, input.IdempotencyKey)
++		if input.Mode != "smart" || input.DisableSessionSave {
++			t.Fatalf("defaults not applied: %+v", input)
++		}
++		if string(input.CanonicalPayload) == "" {
++			t.Fatal("canonical payload missing")
++		}
++	}
++	if len(hashes) != 2 || hashes[0] != hashes[1] {
++		t.Fatalf("duplicate hashes = %#v", hashes)
++	}
++}
++
++func TestDurableIngestExcludesTransportAndCredentialFieldsFromHash(t *testing.T) {
++	srv := newTestServer(&testMemoryRepo{}, &testSessionRepo{}).WithDurableIngest(true)
++	var hashes []string
++	var payloads []string
++	srv.ingestRepoFactory = func(string, *sql.DB) ingestqueue.Repository {
++		return &handlerIngestRepo{
++			enqueue: func(_ context.Context, input ingestqueue.EnqueueInput) (*ingestqueue.Job, error) {
++				hashes = append(hashes, input.IdempotencyKey)
++				payloads = append(payloads, string(input.CanonicalPayload))
++				return &ingestqueue.Job{ID: "job", TenantID: input.TenantID, State: ingestqueue.StateQueued}, nil
++			},
++		}
++	}
++	for _, fields := range []map[string]any{
++		{"api_key": "transport-value-a", "request_id": "request-a"},
++		{"api_key": "transport-value-b", "request_id": "request-b"},
++	} {
++		fields["messages"] = []map[string]string{{"role": "user", "content": "hello"}}
++		rr := httptest.NewRecorder()
++		srv.createMemory(rr, durableRequest(t, "tenant-a", nil, fields))
++		if rr.Code != http.StatusAccepted {
++			t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
++		}
++	}
++	if len(hashes) != 2 || hashes[0] != hashes[1] {
++		t.Fatalf("transport-only fields changed hashes: %#v", hashes)
++	}
++	for _, payload := range payloads {
++		if strings.Contains(payload, "transport-value") || strings.Contains(payload, "request-") {
++			t.Fatalf("canonical payload retained a transport field: %s", payload)
++		}
++	}
++}
++
++func TestDurableIngestStripsInjectedContextBeforeHashing(t *testing.T) {
++	srv := newTestServer(&testMemoryRepo{}, &testSessionRepo{}).WithDurableIngest(true)
++	var hashes []string
++	var payloads []string
++	srv.ingestRepoFactory = func(string, *sql.DB) ingestqueue.Repository {
++		return &handlerIngestRepo{
++			enqueue: func(_ context.Context, input ingestqueue.EnqueueInput) (*ingestqueue.Job, error) {
++				hashes = append(hashes, input.IdempotencyKey)
++				payloads = append(payloads, string(input.CanonicalPayload))
++				return &ingestqueue.Job{ID: "job", TenantID: input.TenantID, State: ingestqueue.StateQueued}, nil
++			},
++		}
++	}
++	for _, injected := range []string{"private-memory-a", "private-memory-b"} {
++		body := map[string]any{
++			"messages": []map[string]string{{
++				"role":    "user",
++				"content": "keep <relevant-memories>" + injected + "</relevant-memories> text",
++			}},
++		}
++		rr := httptest.NewRecorder()
++		srv.createMemory(rr, durableRequest(t, "tenant-a", nil, body))
++		if rr.Code != http.StatusAccepted {
++			t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
++		}
++	}
++	if len(hashes) != 2 || hashes[0] != hashes[1] {
++		t.Fatalf("injected context changed hashes: %#v", hashes)
++	}
++	for _, payload := range payloads {
++		if strings.Contains(payload, "private-memory") || !strings.Contains(payload, `"content":"keep  text"`) {
++			t.Fatalf("canonical payload was not sanitized: %s", payload)
++		}
++	}
++}
++
++func TestDurableIngestUsesOnlyAuthenticatedTenantDatabase(t *testing.T) {
++	dbA := openHandlerErrorDB(t)
++	defer dbA.Close()
++	dbB := openHandlerErrorDB(t)
++	defer dbB.Close()
++	srv := newTestServer(&testMemoryRepo{}, &testSessionRepo{}).WithDurableIngest(true)
++	var got []*sql.DB
++	srv.ingestRepoFactory = func(_ string, db *sql.DB) ingestqueue.Repository {
++		got = append(got, db)
++		return &handlerIngestRepo{
++			enqueue: func(_ context.Context, input ingestqueue.EnqueueInput) (*ingestqueue.Job, error) {
++				return &ingestqueue.Job{ID: input.TenantID + "-job", TenantID: input.TenantID, State: ingestqueue.StateQueued}, nil
++			},
++		}
++	}
++	for _, tc := range []struct {
++		tenant string
++		db     *sql.DB
++	}{
++		{"tenant-a", dbA},
++		{"tenant-b", dbB},
++	} {
++		req := durableRequest(t, tc.tenant, tc.db, map[string]any{
++			"messages": []map[string]string{{"role": "user", "content": "hello"}},
++		})
++		rr := httptest.NewRecorder()
++		srv.createMemory(rr, req)
++		if rr.Code != http.StatusAccepted {
++			t.Fatalf("%s status = %d: %s", tc.tenant, rr.Code, rr.Body.String())
++		}
++	}
++	if len(got) != 2 || got[0] != dbA || got[1] != dbB {
++		t.Fatalf("repository DBs = %#v, want authenticated handles", got)
++	}
++}
++
++func TestDurableIngestDefaultsDisabled(t *testing.T) {
++	srv := newTestServer(&testMemoryRepo{}, &testSessionRepo{})
++	if srv.durableIngestEnabled {
++		t.Fatal("durable ingest routing must default disabled")
++	}
++}
++
++func TestDurableIngestRejectsNonFiniteMetadata(t *testing.T) {
++	srv := newTestServer(&testMemoryRepo{}, &testSessionRepo{}).WithDurableIngest(true)
++	req := durableRequest(t, "tenant-a", nil, map[string]any{
++		"messages": []map[string]string{{"role": "user", "content": "hello"}},
++		"metadata": json.RawMessage(`{"n":1e10000}`),
++	})
++	rr := httptest.NewRecorder()
++	srv.createMemory(rr, req)
++	if rr.Code != http.StatusBadRequest {
++		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
++	}
++}
++
++func TestDurableIngestPostgresCommitAndDedupIntegration(t *testing.T) {
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
++	}
++	db, err := sql.Open("pgx", dsn)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer db.Close()
++	if _, err := db.Exec(`TRUNCATE ingest_jobs`); err != nil {
++		t.Fatal(err)
++	}
++
++	srv := newTestServer(&testMemoryRepo{}, &testSessionRepo{}).WithDurableIngest(true)
++	srv.dbBackend = "postgres"
++	body := map[string]any{
++		"messages":   []map[string]string{{"role": "user", "content": "hello"}},
++		"appId":      "business-app",
++		"session_id": "session-a",
++	}
++	var firstID string
++	for range 2 {
++		req := durableRequest(t, "tenant-a", db, body)
++		rr := httptest.NewRecorder()
++		srv.createMemory(rr, req)
++		if rr.Code != http.StatusAccepted {
++			t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
++		}
++		var response map[string]string
++		if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
++			t.Fatal(err)
++		}
++		if firstID == "" {
++			firstID = response["job_id"]
++		} else if response["job_id"] != firstID {
++			t.Fatalf("duplicate ids = %q and %q", firstID, response["job_id"])
++		}
++		var committed int
++		if err := db.QueryRow(`SELECT count(*) FROM ingest_jobs WHERE job_id = $1`, response["job_id"]).Scan(&committed); err != nil {
++			t.Fatal(err)
++		}
++		if committed != 1 {
++			t.Fatalf("202 returned before commit: rows = %d", committed)
++		}
++	}
++
++	body["messages"] = []map[string]string{{"role": "user", "content": "different"}}
++	rr := httptest.NewRecorder()
++	srv.createMemory(rr, durableRequest(t, "tenant-a", db, body))
++	if rr.Code != http.StatusAccepted {
++		t.Fatalf("different request status = %d: %s", rr.Code, rr.Body.String())
++	}
++	var count int
++	if err := db.QueryRow(`SELECT count(*) FROM ingest_jobs`).Scan(&count); err != nil {
++		t.Fatal(err)
++	}
++	if count != 2 {
++		t.Fatalf("semantically different requests produced %d rows, want 2", count)
++	}
++}
+diff --git a/server/internal/handler/handler.go b/server/internal/handler/handler.go
+index c5fe14e..4edbd6c 100644
+--- a/server/internal/handler/handler.go
++++ b/server/internal/handler/handler.go
+@@ -2,6 +2,7 @@ package handler
+ 
+ import (
+ 	"context"
++	"database/sql"
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
+@@ -17,6 +18,7 @@ import (
+ 
+ 	"github.com/qiffang/mnemos/server/internal/domain"
+ 	"github.com/qiffang/mnemos/server/internal/embed"
++	"github.com/qiffang/mnemos/server/internal/ingestqueue"
+ 	"github.com/qiffang/mnemos/server/internal/llm"
+ 	"github.com/qiffang/mnemos/server/internal/metering"
+ 	"github.com/qiffang/mnemos/server/internal/metrics"
+@@ -49,6 +51,8 @@ type Server struct {
+ 	svcCache             sync.Map
+ 	chainRecallStopScore float64
+ 	disableSessionSave   bool
++	durableIngestEnabled bool
++	ingestRepoFactory    func(string, *sql.DB) ingestqueue.Repository
+ }
+ 
+ // NewServer creates a new HTTP handler server.
+@@ -77,6 +81,7 @@ func NewServer(
+ 		logger:               logger,
+ 		startedAt:            time.Now().UTC(),
+ 		chainRecallStopScore: 0.8,
++		ingestRepoFactory:    repository.NewIngestJobRepo,
+ 	}
+ }
+ 
+@@ -113,6 +118,11 @@ func (s *Server) WithDisableSessionSave(disabled bool) *Server {
+ 	return s
+ }
+ 
++func (s *Server) WithDurableIngest(enabled bool) *Server {
++	s.durableIngestEnabled = enabled
++	return s
++}
++
+ // resolvedSvc holds the correct service instances for a request.
+ // Services are always backed by the tenant's dedicated DB.
+ type resolvedSvc struct {
+diff --git a/server/internal/handler/memory.go b/server/internal/handler/memory.go
+index 39e40f1..733a473 100644
+--- a/server/internal/handler/memory.go
++++ b/server/internal/handler/memory.go
+@@ -14,7 +14,9 @@ import (
+ 	"time"
+ 
+ 	"github.com/go-chi/chi/v5"
++	"github.com/google/uuid"
+ 	"github.com/qiffang/mnemos/server/internal/domain"
++	"github.com/qiffang/mnemos/server/internal/ingestqueue"
+ 	"github.com/qiffang/mnemos/server/internal/metrics"
+ 	"github.com/qiffang/mnemos/server/internal/runtimeusage"
+ 	"github.com/qiffang/mnemos/server/internal/service"
+@@ -104,6 +106,25 @@ func (s *Server) createMemory(w http.ResponseWriter, r *http.Request) {
+ 			Metadata:           append(json.RawMessage(nil), req.Metadata...),
+ 		}
+ 
++		if s.durableIngestEnabled && !req.Sync {
++			ingestReq.Messages = service.StripInjectedContext(ingestReq.Messages)
++			job, err := s.enqueueDurableIngest(r.Context(), auth, ingestReq)
++			if err != nil {
++				if errors.Is(err, domain.ErrValidation) {
++					s.handleError(r.Context(), w, err)
++					return
++				}
++				s.logger.Error("durable ingest enqueue failed", "operation", "enqueue")
++				respondError(w, http.StatusServiceUnavailable, "durable ingest enqueue failed")
++				return
++			}
++			respond(w, http.StatusAccepted, map[string]string{
++				"job_id": job.ID,
++				"state":  string(job.State),
++			})
++			return
++		}
++
+ 		if req.Sync {
+ 			syncCtx, cancel := context.WithTimeout(r.Context(), syncIngestTimeout)
+ 			defer cancel()
+@@ -515,6 +536,56 @@ func (s *Server) createMemory(w http.ResponseWriter, r *http.Request) {
+ 	}
+ }
+ 
++func (s *Server) enqueueDurableIngest(ctx context.Context, auth *domain.AuthInfo, req service.IngestRequest) (*ingestqueue.Job, error) {
++	mode := req.Mode
++	if mode == "" {
++		mode = s.ingestMode
++	}
++	if mode != service.ModeSmart && mode != service.ModeRaw {
++		return nil, &domain.ValidationError{Field: "mode", Message: fmt.Sprintf("unsupported mode %q", mode)}
++	}
++	messages := make([]ingestqueue.Message, len(req.Messages))
++	for i, message := range req.Messages {
++		messages[i] = ingestqueue.Message{
++			Role:    message.Role,
++			Content: message.Content,
++			Seq:     message.Seq,
++		}
++	}
++	envelope, err := ingestqueue.Canonicalize(ingestqueue.CanonicalInput{
++		TenantID:           auth.TenantID,
++		AgentID:            req.AgentID,
++		AppID:              req.AppID,
++		SessionID:          req.SessionID,
++		Mode:               string(mode),
++		DisableSessionSave: req.DisableSessionSave,
++		Messages:           messages,
++		Metadata:           req.Metadata,
++	})
++	if err != nil {
++		return nil, &domain.ValidationError{Field: "metadata", Message: "metadata must contain finite JSON values"}
++	}
++	repo := s.ingestRepoFactory(s.dbBackend, auth.TenantDB)
++	if repo == nil {
++		return nil, errors.New("durable ingest requires PostgreSQL")
++	}
++	job, err := repo.Enqueue(ctx, ingestqueue.EnqueueInput{
++		ID:                 uuid.NewString(),
++		TenantID:           auth.TenantID,
++		IdempotencyKey:     envelope.IdempotencyKey,
++		CanonicalPayload:   envelope.Payload,
++		AgentID:            req.AgentID,
++		AppID:              req.AppID,
++		SessionID:          req.SessionID,
++		Mode:               string(mode),
++		DisableSessionSave: req.DisableSessionSave,
++	})
++	if err != nil {
++		return nil, err
++	}
++	return job, nil
++}
++
+ // ingestMessages runs the full ingest pipeline: optional BulkCreate → ExtractPhase1 → optional PatchTags + ReconcilePhase2.
+ // TODO: wrap all database writes (BulkCreate, PatchTags, ReconcilePhase2) in a single transaction to guarantee atomicity.
+ func (s *Server) ingestMessages(ctx context.Context, auth *domain.AuthInfo, svc resolvedSvc, req service.IngestRequest, chainAuth *domain.AuthInfo) (*service.IngestResult, error) {
+diff --git a/server/internal/ingestqueue/canonical.go b/server/internal/ingestqueue/canonical.go
+new file mode 100644
+index 0000000..d7bf17f
+--- /dev/null
++++ b/server/internal/ingestqueue/canonical.go
+@@ -0,0 +1,191 @@
++package ingestqueue
++
++import (
++	"bytes"
++	"crypto/sha256"
++	"encoding/hex"
++	"encoding/json"
++	"fmt"
++	"io"
++	"math"
++	"sort"
++	"strconv"
++	"strings"
++)
++
++func Canonicalize(input CanonicalInput) (CanonicalEnvelope, error) {
++	if strings.TrimSpace(input.TenantID) == "" {
++		return CanonicalEnvelope{}, fmt.Errorf("tenant_id is required")
++	}
++	if input.Mode == "" {
++		input.Mode = "smart"
++	}
++
++	metadata, err := decodeMetadata(input.Metadata)
++	if err != nil {
++		return CanonicalEnvelope{}, fmt.Errorf("metadata: %w", err)
++	}
++	messages := make([]any, len(input.Messages))
++	for i, message := range input.Messages {
++		seq := i
++		if message.Seq != nil {
++			seq = *message.Seq
++		}
++		messages[i] = map[string]any{
++			"role":    message.Role,
++			"content": message.Content,
++			"seq":     json.Number(strconv.Itoa(seq)),
++		}
++	}
++
++	envelope := map[string]any{
++		"version":            "ingest-v1",
++		"tenant_id":          input.TenantID,
++		"agent_id":           input.AgentID,
++		"app_id":             input.AppID,
++		"session_id":         input.SessionID,
++		"mode":               input.Mode,
++		"disableSessionSave": input.DisableSessionSave,
++		"messages":           messages,
++		"metadata":           metadata,
++	}
++	var payload bytes.Buffer
++	if err := writeCanonicalJSON(&payload, envelope); err != nil {
++		return CanonicalEnvelope{}, err
++	}
++	sum := sha256.Sum256(payload.Bytes())
++	return CanonicalEnvelope{
++		Payload:        payload.Bytes(),
++		IdempotencyKey: hex.EncodeToString(sum[:]),
++	}, nil
++}
++
++func decodeMetadata(raw json.RawMessage) (any, error) {
++	if len(bytes.TrimSpace(raw)) == 0 {
++		return map[string]any{}, nil
++	}
++	decoder := json.NewDecoder(bytes.NewReader(raw))
++	decoder.UseNumber()
++	var value any
++	if err := decoder.Decode(&value); err != nil {
++		return nil, err
++	}
++	var trailing any
++	if err := decoder.Decode(&trailing); !errorsIsEOF(err) {
++		if err == nil {
++			return nil, fmt.Errorf("multiple JSON values")
++		}
++		return nil, err
++	}
++	return value, nil
++}
++
++func errorsIsEOF(err error) bool {
++	return err == io.EOF
++}
++
++func writeCanonicalJSON(dst *bytes.Buffer, value any) error {
++	switch typed := value.(type) {
++	case nil:
++		dst.WriteString("null")
++	case bool:
++		if typed {
++			dst.WriteString("true")
++		} else {
++			dst.WriteString("false")
++		}
++	case string:
++		encoded, _ := json.Marshal(typed)
++		dst.Write(encoded)
++	case json.Number:
++		normalized, err := normalizeJSONNumber(typed.String())
++		if err != nil {
++			return err
++		}
++		dst.WriteString(normalized)
++	case []any:
++		dst.WriteByte('[')
++		for i, item := range typed {
++			if i > 0 {
++				dst.WriteByte(',')
++			}
++			if err := writeCanonicalJSON(dst, item); err != nil {
++				return err
++			}
++		}
++		dst.WriteByte(']')
++	case map[string]any:
++		keys := make([]string, 0, len(typed))
++		for key := range typed {
++			keys = append(keys, key)
++		}
++		sort.Strings(keys)
++		dst.WriteByte('{')
++		for i, key := range keys {
++			if i > 0 {
++				dst.WriteByte(',')
++			}
++			encoded, _ := json.Marshal(key)
++			dst.Write(encoded)
++			dst.WriteByte(':')
++			if err := writeCanonicalJSON(dst, typed[key]); err != nil {
++				return err
++			}
++		}
++		dst.WriteByte('}')
++	default:
++		return fmt.Errorf("unsupported canonical JSON type %T", value)
++	}
++	return nil
++}
++
++func normalizeJSONNumber(raw string) (string, error) {
++	value, err := strconv.ParseFloat(raw, 64)
++	if err != nil || math.IsInf(value, 0) || math.IsNaN(value) {
++		return "", fmt.Errorf("number %q is not finite JSON", raw)
++	}
++
++	negative := strings.HasPrefix(raw, "-")
++	unsigned := strings.TrimPrefix(raw, "-")
++	mantissa := unsigned
++	exponent := 0
++	if index := strings.IndexAny(unsigned, "eE"); index >= 0 {
++		mantissa = unsigned[:index]
++		exponent, err = strconv.Atoi(unsigned[index+1:])
++		if err != nil {
++			return "", fmt.Errorf("number %q has an invalid exponent", raw)
++		}
++	}
++	fractionDigits := 0
++	if point := strings.IndexByte(mantissa, '.'); point >= 0 {
++		fractionDigits = len(mantissa) - point - 1
++		mantissa = mantissa[:point] + mantissa[point+1:]
++	}
++	digits := strings.TrimLeft(mantissa, "0")
++	if digits == "" {
++		return "0", nil
++	}
++	if value == 0 {
++		return "", fmt.Errorf("number %q is outside the finite JSON range", raw)
++	}
++	exponent -= fractionDigits
++	for strings.HasSuffix(digits, "0") {
++		digits = strings.TrimSuffix(digits, "0")
++		exponent++
++	}
++
++	decimalPoint := len(digits) + exponent
++	var normalized string
++	switch {
++	case decimalPoint <= 0:
++		normalized = "0." + strings.Repeat("0", -decimalPoint) + digits
++	case decimalPoint >= len(digits):
++		normalized = digits + strings.Repeat("0", decimalPoint-len(digits))
++	default:
++		normalized = digits[:decimalPoint] + "." + digits[decimalPoint:]
++	}
++	if negative {
++		return "-" + normalized, nil
++	}
++	return normalized, nil
++}
+diff --git a/server/internal/ingestqueue/canonical_test.go b/server/internal/ingestqueue/canonical_test.go
+new file mode 100644
+index 0000000..23062bb
+--- /dev/null
++++ b/server/internal/ingestqueue/canonical_test.go
+@@ -0,0 +1,171 @@
++package ingestqueue
++
++import (
++	"bytes"
++	"encoding/json"
++	"strings"
++	"testing"
++)
++
++func intPtr(v int) *int { return &v }
++
++func canonicalInput() CanonicalInput {
++	return CanonicalInput{
++		TenantID:           "tenant-a",
++		AgentID:            "agent-a",
++		AppID:              "app-a",
++		SessionID:          "session-a",
++		Mode:               "smart",
++		DisableSessionSave: true,
++		Messages: []Message{
++			{Role: "user", Content: "first"},
++			{Role: "assistant", Content: "second", Seq: intPtr(9)},
++		},
++		Metadata: json.RawMessage(`{"z":1.0,"nested":{"b":2e0,"a":1},"items":[{"b":2,"a":1},3]}`),
++	}
++}
++
++func mustCanonical(t *testing.T, input CanonicalInput) CanonicalEnvelope {
++	t.Helper()
++	got, err := Canonicalize(input)
++	if err != nil {
++		t.Fatalf("Canonicalize: %v", err)
++	}
++	return got
++}
++
++func TestCanonicalizeStableOrderingNumbersAndDefaults(t *testing.T) {
++	first := canonicalInput()
++	second := first
++	second.Metadata = json.RawMessage(`{"items":[{"a":1.00,"b":2.0},3.0],"nested":{"a":1e0,"b":2},"z":1}`)
++
++	a := mustCanonical(t, first)
++	b := mustCanonical(t, second)
++	if !bytes.Equal(a.Payload, b.Payload) || a.IdempotencyKey != b.IdempotencyKey {
++		t.Fatalf("semantic metadata did not canonicalize identically:\n%s\n%s", a.Payload, b.Payload)
++	}
++	want := `"messages":[{"content":"first","role":"user","seq":0},{"content":"second","role":"assistant","seq":9}]`
++	if !strings.Contains(string(a.Payload), want) {
++		t.Fatalf("payload missing ordered/defaulted messages: %s", a.Payload)
++	}
++	for _, field := range []string{
++		`"version":"ingest-v1"`,
++		`"tenant_id":"tenant-a"`,
++		`"app_id":"app-a"`,
++		`"disableSessionSave":true`,
++		`"metadata":{"items":[{"a":1,"b":2},3],"nested":{"a":1,"b":2},"z":1}`,
++	} {
++		if !strings.Contains(string(a.Payload), field) {
++			t.Fatalf("payload missing %s: %s", field, a.Payload)
++		}
++	}
++}
++
++func TestCanonicalizeSemanticFieldsAffectHash(t *testing.T) {
++	base := canonicalInput()
++	baseHash := mustCanonical(t, base).IdempotencyKey
++	cases := map[string]func(*CanonicalInput){
++		"tenant": func(v *CanonicalInput) { v.TenantID = "tenant-b" },
++		"agent":  func(v *CanonicalInput) { v.AgentID = "agent-b" },
++		"app":    func(v *CanonicalInput) { v.AppID = "app-b" },
++		"session": func(v *CanonicalInput) {
++			v.SessionID = "session-b"
++		},
++		"mode": func(v *CanonicalInput) { v.Mode = "raw" },
++		"disableSessionSave": func(v *CanonicalInput) {
++			v.DisableSessionSave = false
++		},
++		"message order": func(v *CanonicalInput) {
++			v.Messages[0], v.Messages[1] = v.Messages[1], v.Messages[0]
++		},
++		"message content": func(v *CanonicalInput) { v.Messages[0].Content = "changed" },
++	}
++	for name, mutate := range cases {
++		t.Run(name, func(t *testing.T) {
++			input := canonicalInput()
++			mutate(&input)
++			if got := mustCanonical(t, input).IdempotencyKey; got == baseHash {
++				t.Fatalf("hash unchanged for %s", name)
++			}
++		})
++	}
++}
++
++func TestCanonicalizeExcludesTransportAndCredentialsByConstruction(t *testing.T) {
++	input := canonicalInput()
++	got := mustCanonical(t, input)
++	for _, forbidden := range []string{
++		"api_key", "authorization", "credential", "request_id", "transport", "sync",
++	} {
++		if strings.Contains(strings.ToLower(string(got.Payload)), forbidden) {
++			t.Fatalf("canonical payload contains transport/auth field %q: %s", forbidden, got.Payload)
++		}
++	}
++}
++
++func TestCanonicalizeRejectsInvalidNumbersAndMissingScope(t *testing.T) {
++	for _, raw := range []string{
++		`{"n":NaN}`,
++		`{"n":Infinity}`,
++		`{"n":1e10000}`,
++		`{"n":1e-1000000000}`,
++		`{"n":01}`,
++	} {
++		input := canonicalInput()
++		input.Metadata = json.RawMessage(raw)
++		if _, err := Canonicalize(input); err == nil {
++			t.Fatalf("Canonicalize metadata %q succeeded, want error", raw)
++		}
++	}
++
++	input := canonicalInput()
++	input.TenantID = ""
++	if _, err := Canonicalize(input); err == nil {
++		t.Fatal("Canonicalize accepted empty authenticated tenant")
++	}
++}
++
++func TestCanonicalizeMetadataArrayOrderIsSignificant(t *testing.T) {
++	a := canonicalInput()
++	a.Metadata = json.RawMessage(`{"items":[1,2,3]}`)
++	b := a
++	b.Metadata = json.RawMessage(`{"items":[3,2,1]}`)
++	if mustCanonical(t, a).IdempotencyKey == mustCanonical(t, b).IdempotencyKey {
++		t.Fatal("array reordering must change the hash")
++	}
++}
++
++func TestCanonicalizeExplicitDefaults(t *testing.T) {
++	got := mustCanonical(t, CanonicalInput{
++		TenantID: "tenant-a",
++		Messages: []Message{{Role: "user", Content: "hello"}},
++	})
++	for _, field := range []string{
++		`"agent_id":""`,
++		`"app_id":""`,
++		`"session_id":""`,
++		`"mode":"smart"`,
++		`"disableSessionSave":false`,
++		`"metadata":{}`,
++		`"seq":0`,
++	} {
++		if !strings.Contains(string(got.Payload), field) {
++			t.Fatalf("defaulted payload missing %s: %s", field, got.Payload)
++		}
++	}
++}
++
++func TestCanonicalizePreservesDistinctLargeIntegers(t *testing.T) {
++	first := canonicalInput()
++	first.Metadata = json.RawMessage(`{"n":9007199254740992}`)
++	second := canonicalInput()
++	second.Metadata = json.RawMessage(`{"n":9007199254740993}`)
++	a := mustCanonical(t, first)
++	b := mustCanonical(t, second)
++	if a.IdempotencyKey == b.IdempotencyKey {
++		t.Fatal("distinct integers above the IEEE-754 exact range collided")
++	}
++	if !strings.Contains(string(b.Payload), `"n":9007199254740993`) {
++		t.Fatalf("large integer lost precision: %s", b.Payload)
++	}
++}
+diff --git a/server/internal/ingestqueue/types.go b/server/internal/ingestqueue/types.go
+new file mode 100644
+index 0000000..b7c7d8c
+--- /dev/null
++++ b/server/internal/ingestqueue/types.go
+@@ -0,0 +1,114 @@
++package ingestqueue
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"time"
++)
++
++type State string
++
++const (
++	StateQueued     State = "queued"
++	StateProcessing State = "processing"
++	StatePlanning   State = "planning"
++	StateApplying   State = "applying"
++	StateRetryWait  State = "retry_wait"
++	StateSucceeded  State = "succeeded"
++	StateDead       State = "dead"
++
++	MaxAttempts = 5
++)
++
++var (
++	ErrLeaseLost            = errors.New("ingest job lease lost")
++	ErrProcessorUnavailable = errors.New("durable ingest processor unavailable")
++)
++
++type Message struct {
++	Role    string
++	Content string
++	Seq     *int
++}
++
++type CanonicalInput struct {
++	TenantID           string
++	AgentID            string
++	AppID              string
++	SessionID          string
++	Mode               string
++	DisableSessionSave bool
++	Messages           []Message
++	Metadata           json.RawMessage
++}
++
++type CanonicalEnvelope struct {
++	Payload        []byte
++	IdempotencyKey string
++}
++
++type EnqueueInput struct {
++	ID                 string
++	TenantID           string
++	IdempotencyKey     string
++	CanonicalPayload   json.RawMessage
++	AgentID            string
++	AppID              string
++	SessionID          string
++	Mode               string
++	DisableSessionSave bool
++}
++
++type Job struct {
++	ID                 string
++	TenantID           string
++	IdempotencyKey     string
++	CanonicalPayload   json.RawMessage
++	AgentID            string
++	AppID              string
++	SessionID          string
++	Mode               string
++	DisableSessionSave bool
++	State              State
++	AttemptCount       int
++	AvailableAt        time.Time
++	LeaseOwner         string
++	LeaseExpiresAt     *time.Time
++	HeartbeatAt        *time.Time
++	PlanPayload        json.RawMessage
++	PlanWarningCount   int
++	ApplyWarningCount  int
++	WarningCount       int
++	ErrorClass         string
++	CreatedAt          time.Time
++	UpdatedAt          time.Time
++	CompletedAt        *time.Time
++}
++
++type Failure struct {
++	State       State
++	ErrorClass  string
++	AvailableAt time.Time
++}
++
++type Plan struct {
++	Payload  json.RawMessage
++	Warnings int
++}
++
++type Processor interface {
++	Plan(context.Context, *Job) (Plan, error)
++	Apply(context.Context, *Job, json.RawMessage) (int, error)
++}
++
++type Repository interface {
++	Enqueue(context.Context, EnqueueInput) (*Job, error)
++	Get(context.Context, string, string) (*Job, error)
++	Claim(context.Context, string, string, time.Time, time.Duration, int) (*Job, error)
++	StartPlanning(context.Context, string, string, string) error
++	SavePlan(context.Context, string, string, string, json.RawMessage, int) error
++	Succeed(context.Context, string, string, string, int) error
++	Fail(context.Context, string, string, string, Failure) error
++	Heartbeat(context.Context, string, string, string, time.Time) error
++}
+diff --git a/server/internal/ingestqueue/worker.go b/server/internal/ingestqueue/worker.go
+new file mode 100644
+index 0000000..648ec73
+--- /dev/null
++++ b/server/internal/ingestqueue/worker.go
+@@ -0,0 +1,320 @@
++package ingestqueue
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"log/slog"
++	"math"
++	"math/rand/v2"
++	"sync"
++	"sync/atomic"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/llm"
++)
++
++const failureWriteTimeout = 5 * time.Second
++const maxWorkerConcurrency = 2
++
++var processSemaphore = make(chan struct{}, maxWorkerConcurrency)
++
++type WorkerConfig struct {
++	Enabled      bool
++	Concurrency  int
++	Lease        time.Duration
++	Heartbeat    time.Duration
++	JobTimeout   time.Duration
++	PollInterval time.Duration
++	Random       func() float64
++}
++
++func DefaultWorkerConfig() WorkerConfig {
++	return WorkerConfig{
++		Enabled:      false,
++		Concurrency:  2,
++		Lease:        90 * time.Second,
++		Heartbeat:    30 * time.Second,
++		JobTimeout:   10 * time.Minute,
++		PollInterval: time.Second,
++		Random:       rand.Float64,
++	}
++}
++
++type Worker struct {
++	repo      Repository
++	processor Processor
++	tenantID  string
++	owner     string
++	config    WorkerConfig
++	logger    *slog.Logger
++}
++
++func NewWorker(repo Repository, processor Processor, tenantID, owner string, config WorkerConfig, logger *slog.Logger) *Worker {
++	defaults := DefaultWorkerConfig()
++	if config.Concurrency <= 0 {
++		config.Concurrency = defaults.Concurrency
++	}
++	if config.Concurrency > maxWorkerConcurrency {
++		config.Concurrency = maxWorkerConcurrency
++	}
++	if config.Lease <= 0 {
++		config.Lease = defaults.Lease
++	}
++	if config.Heartbeat <= 0 {
++		config.Heartbeat = defaults.Heartbeat
++	}
++	if config.JobTimeout <= 0 {
++		config.JobTimeout = defaults.JobTimeout
++	}
++	if config.PollInterval <= 0 {
++		config.PollInterval = defaults.PollInterval
++	}
++	if config.Random == nil {
++		config.Random = defaults.Random
++	}
++	if logger == nil {
++		logger = slog.Default()
++	}
++	return &Worker{
++		repo:      repo,
++		processor: processor,
++		tenantID:  tenantID,
++		owner:     owner,
++		config:    config,
++		logger:    logger,
++	}
++}
++
++func (w *Worker) Run(ctx context.Context) error {
++	if !w.config.Enabled {
++		return nil
++	}
++	if w.processor == nil {
++		return ErrProcessorUnavailable
++	}
++
++	workerCtx, cancel := context.WithCancel(ctx)
++	defer cancel()
++	workerSemaphore := make(chan struct{}, w.config.Concurrency)
++	var active sync.WaitGroup
++	defer active.Wait()
++
++	for {
++		select {
++		case <-workerCtx.Done():
++			return nil
++		case workerSemaphore <- struct{}{}:
++		}
++		select {
++		case <-workerCtx.Done():
++			<-workerSemaphore
++			return nil
++		case processSemaphore <- struct{}{}:
++		}
++
++		job, err := w.repo.Claim(workerCtx, w.tenantID, w.owner, time.Now(), w.config.Lease, MaxAttempts)
++		if err != nil {
++			<-processSemaphore
++			<-workerSemaphore
++			w.logger.Error("durable ingest claim failed", "operation", "claim")
++			if !waitForWorker(workerCtx, w.config.PollInterval) {
++				return nil
++			}
++			continue
++		}
++		if job == nil {
++			<-processSemaphore
++			<-workerSemaphore
++			if !waitForWorker(workerCtx, w.config.PollInterval) {
++				return nil
++			}
++			continue
++		}
++
++		active.Add(1)
++		go func() {
++			defer active.Done()
++			defer func() {
++				<-processSemaphore
++				<-workerSemaphore
++			}()
++			w.process(workerCtx, job)
++		}()
++	}
++}
++
++func waitForWorker(ctx context.Context, duration time.Duration) bool {
++	timer := time.NewTimer(duration)
++	defer timer.Stop()
++	select {
++	case <-ctx.Done():
++		return false
++	case <-timer.C:
++		return true
++	}
++}
++
++func (w *Worker) process(ctx context.Context, job *Job) {
++	jobCtx, cancel := context.WithTimeout(ctx, w.config.JobTimeout)
++	var leaseLost atomic.Bool
++	heartbeatDone := make(chan struct{})
++	go w.heartbeat(jobCtx, cancel, job, &leaseLost, heartbeatDone)
++	defer func() {
++		cancel()
++		<-heartbeatDone
++	}()
++
++	if err := w.repo.StartPlanning(jobCtx, job.TenantID, job.ID, job.LeaseOwner); err != nil {
++		return
++	}
++	plan, err := w.processor.Plan(jobCtx, job)
++	if err != nil {
++		w.fail(ctx, job, err, leaseLost.Load())
++		return
++	}
++	if err := w.repo.SavePlan(jobCtx, job.TenantID, job.ID, job.LeaseOwner, plan.Payload, plan.Warnings); err != nil {
++		return
++	}
++	applyWarnings, err := w.processor.Apply(jobCtx, job, json.RawMessage(plan.Payload))
++	if err != nil {
++		w.fail(ctx, job, err, leaseLost.Load())
++		return
++	}
++	if err := w.repo.Succeed(jobCtx, job.TenantID, job.ID, job.LeaseOwner, applyWarnings); err != nil {
++		return
++	}
++	w.logger.Info("durable ingest job completed",
++		"job_id", job.ID,
++		"state", StateSucceeded,
++		"attempt", job.AttemptCount,
++	)
++}
++
++func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc, job *Job, leaseLost *atomic.Bool, done chan<- struct{}) {
++	defer close(done)
++	ticker := time.NewTicker(w.config.Heartbeat)
++	defer ticker.Stop()
++	for {
++		select {
++		case <-ctx.Done():
++			return
++		case now := <-ticker.C:
++			if err := w.repo.Heartbeat(ctx, job.TenantID, job.ID, job.LeaseOwner, now.Add(w.config.Lease)); err != nil {
++				leaseLost.Store(true)
++				cancel()
++				return
++			}
++		}
++	}
++}
++
++func (w *Worker) fail(parent context.Context, job *Job, err error, leaseLost bool) {
++	if parent.Err() != nil || leaseLost {
++		return
++	}
++	classification := ClassifyError(err)
++	failure := Failure{
++		State:      StateDead,
++		ErrorClass: classification.Class,
++	}
++	if classification.Transient && job.AttemptCount < MaxAttempts {
++		failure.State = StateRetryWait
++		failure.AvailableAt = time.Now().Add(FullJitterBackoff(job.AttemptCount, w.config.Random()))
++	}
++	writeCtx, cancel := context.WithTimeout(parent, failureWriteTimeout)
++	defer cancel()
++	if err := w.repo.Fail(writeCtx, job.TenantID, job.ID, job.LeaseOwner, failure); err != nil {
++		return
++	}
++	w.logger.Info("durable ingest job failed",
++		"job_id", job.ID,
++		"state", failure.State,
++		"attempt", job.AttemptCount,
++		"error_class", failure.ErrorClass,
++	)
++}
++
++func FullJitterBackoff(attempt int, random float64) time.Duration {
++	if attempt < 1 {
++		attempt = 1
++	}
++	if random < 0 {
++		random = 0
++	}
++	if random > 1 {
++		random = 1
++	}
++	exponent := min(attempt-1, 6)
++	capDuration := 5 * time.Second * time.Duration(1<<exponent)
++	if capDuration > 5*time.Minute {
++		capDuration = 5 * time.Minute
++	}
++	return time.Duration(math.Round(float64(capDuration) * random))
++}
++
++type OutcomeError struct {
++	class string
++}
++
++func NewOutcomeError(class string) error {
++	return &OutcomeError{class: class}
++}
++
++func (e *OutcomeError) Error() string {
++	return "durable ingest processor outcome"
++}
++
++type ErrorClassification struct {
++	Class     string
++	Transient bool
++}
++
++func ClassifyError(err error) ErrorClassification {
++	if errors.Is(err, context.DeadlineExceeded) {
++		return ErrorClassification{Class: "deadline", Transient: true}
++	}
++	var httpError *llm.HTTPStatusError
++	if errors.As(err, &httpError) {
++		return classifyProxyHTTPError(httpError)
++	}
++	var outcome *OutcomeError
++	if errors.As(err, &outcome) {
++		switch outcome.class {
++		case "proxy_validation_permanent", "mantle_4xx_permanent":
++			return ErrorClassification{Class: outcome.class}
++		case "mantle_transient", "deadline":
++			return ErrorClassification{Class: outcome.class, Transient: true}
++		}
++	}
++	return ErrorClassification{Class: "permanent_unknown"}
++}
++
++func classifyProxyHTTPError(err *llm.HTTPStatusError) ErrorClassification {
++	code := proxyErrorCode(err.Body)
++	switch code {
++	case "request_too_large", "invalid_json", "invalid_chat_completions_request", "invalid_max_tokens":
++		return ErrorClassification{Class: "proxy_validation_permanent"}
++	case "upstream_timeout":
++		return ErrorClassification{Class: "deadline", Transient: true}
++	}
++	if err.Code == 408 || err.Code == 429 || err.Code >= 500 {
++		return ErrorClassification{Class: "mantle_transient", Transient: true}
++	}
++	if err.Code >= 400 && err.Code < 500 {
++		return ErrorClassification{Class: "mantle_4xx_permanent"}
++	}
++	return ErrorClassification{Class: "permanent_unknown"}
++}
++
++func proxyErrorCode(body string) string {
++	var envelope struct {
++		Error struct {
++			Code string `json:"code"`
++		} `json:"error"`
++	}
++	if json.Unmarshal([]byte(body), &envelope) != nil {
++		return ""
++	}
++	return envelope.Error.Code
++}
+diff --git a/server/internal/ingestqueue/worker_integration_test.go b/server/internal/ingestqueue/worker_integration_test.go
+new file mode 100644
+index 0000000..ea29148
+--- /dev/null
++++ b/server/internal/ingestqueue/worker_integration_test.go
+@@ -0,0 +1,241 @@
++package ingestqueue_test
++
++import (
++	"context"
++	"database/sql"
++	"encoding/json"
++	"fmt"
++	"io"
++	"log/slog"
++	"os"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	_ "github.com/jackc/pgx/v5/stdlib"
++	"github.com/qiffang/mnemos/server/internal/ingestqueue"
++	"github.com/qiffang/mnemos/server/internal/repository/postgres"
++)
++
++func workerTestRepo(t *testing.T) (*postgres.IngestJobRepo, *sql.DB) {
++	t.Helper()
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
++	}
++	db, err := sql.Open("pgx", dsn)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.Exec(`TRUNCATE ingest_jobs`); err != nil {
++		db.Close()
++		t.Fatal(err)
++	}
++	t.Cleanup(func() { db.Close() })
++	return postgres.NewIngestJobRepo(db), db
++}
++
++func workerEnqueue(t *testing.T, repo *postgres.IngestJobRepo, index int, session string) *ingestqueue.Job {
++	t.Helper()
++	key := fmt.Sprintf("%064d", index)
++	job, err := repo.Enqueue(context.Background(), ingestqueue.EnqueueInput{
++		ID:               fmt.Sprintf("10000000-0000-4000-8000-%012d", index),
++		TenantID:         "tenant-worker",
++		IdempotencyKey:   key,
++		CanonicalPayload: []byte(`{"version":"ingest-v1"}`),
++		AgentID:          "agent",
++		AppID:            "app",
++		SessionID:        session,
++		Mode:             "smart",
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	return job
++}
++
++type integrationProcessor struct {
++	plan  func(context.Context, *ingestqueue.Job) (ingestqueue.Plan, error)
++	apply func(context.Context, *ingestqueue.Job, json.RawMessage) (int, error)
++}
++
++func (p integrationProcessor) Plan(ctx context.Context, job *ingestqueue.Job) (ingestqueue.Plan, error) {
++	return p.plan(ctx, job)
++}
++func (p integrationProcessor) Apply(ctx context.Context, job *ingestqueue.Job, plan json.RawMessage) (int, error) {
++	return p.apply(ctx, job, plan)
++}
++
++func TestPostgresWorkerCrossSessionCapAndShutdownRecovery(t *testing.T) {
++	repo, db := workerTestRepo(t)
++	workerEnqueue(t, repo, 1, "session-a")
++	time.Sleep(time.Millisecond)
++	workerEnqueue(t, repo, 2, "session-a")
++	workerEnqueue(t, repo, 3, "session-b")
++	workerEnqueue(t, repo, 4, "session-c")
++
++	var active atomic.Int32
++	var maxActive atomic.Int32
++	var mu sync.Mutex
++	started := map[string]int{}
++	release := make(chan struct{})
++	processor := integrationProcessor{
++		plan: func(ctx context.Context, job *ingestqueue.Job) (ingestqueue.Plan, error) {
++			n := active.Add(1)
++			defer active.Add(-1)
++			for {
++				old := maxActive.Load()
++				if n <= old || maxActive.CompareAndSwap(old, n) {
++					break
++				}
++			}
++			mu.Lock()
++			started[job.SessionID]++
++			mu.Unlock()
++			select {
++			case <-release:
++				return ingestqueue.Plan{Payload: json.RawMessage(`{"ops":[]}`)}, nil
++			case <-ctx.Done():
++				return ingestqueue.Plan{}, ctx.Err()
++			}
++		},
++		apply: func(context.Context, *ingestqueue.Job, json.RawMessage) (int, error) { return 0, nil },
++	}
++	cfg := ingestqueue.DefaultWorkerConfig()
++	cfg.Enabled = true
++	cfg.PollInterval = 5 * time.Millisecond
++	cfg.Lease = 150 * time.Millisecond
++	cfg.Heartbeat = 30 * time.Millisecond
++	ctx, cancel := context.WithCancel(context.Background())
++	workers := []*ingestqueue.Worker{
++		ingestqueue.NewWorker(repo, processor, "tenant-worker", "worker-a", cfg, slog.New(slog.NewTextHandler(io.Discard, nil))),
++		ingestqueue.NewWorker(repo, processor, "tenant-worker", "worker-b", cfg, slog.New(slog.NewTextHandler(io.Discard, nil))),
++	}
++	done := make(chan error, len(workers))
++	for _, worker := range workers {
++		go func(worker *ingestqueue.Worker) { done <- worker.Run(ctx) }(worker)
++	}
++
++	deadline := time.Now().Add(time.Second)
++	for time.Now().Before(deadline) {
++		mu.Lock()
++		count := len(started)
++		sessionACount := started["session-a"]
++		mu.Unlock()
++		if count == 2 {
++			if sessionACount != 1 {
++				t.Fatalf("same-session follower started concurrently: %#v", started)
++			}
++			break
++		}
++		time.Sleep(5 * time.Millisecond)
++	}
++	if got := maxActive.Load(); got != 2 {
++		t.Fatalf("max active = %d, want 2", got)
++	}
++
++	cancel()
++	for range workers {
++		<-done
++	}
++	close(release)
++	var processing int
++	if err := db.QueryRow(`SELECT count(*) FROM ingest_jobs WHERE state IN ('processing','planning','applying')`).Scan(&processing); err != nil {
++		t.Fatal(err)
++	}
++	if processing != 2 {
++		t.Fatalf("shutdown acknowledged active jobs: processing=%d", processing)
++	}
++
++	if _, err := db.Exec(`UPDATE ingest_jobs SET lease_expires_at = NOW() - interval '1 second' WHERE state IN ('processing','planning','applying')`); err != nil {
++		t.Fatal(err)
++	}
++	recovered := make(chan string, 2)
++	recoveryProcessor := integrationProcessor{
++		plan: func(_ context.Context, job *ingestqueue.Job) (ingestqueue.Plan, error) {
++			recovered <- job.ID
++			return ingestqueue.Plan{Payload: json.RawMessage(`{"ops":[]}`)}, nil
++		},
++		apply: func(context.Context, *ingestqueue.Job, json.RawMessage) (int, error) { return 0, nil },
++	}
++	recoveryCtx, recoveryCancel := context.WithCancel(context.Background())
++	recovery := ingestqueue.NewWorker(repo, recoveryProcessor, "tenant-worker", "worker-b", cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
++	recoveryDone := make(chan error, 1)
++	go func() { recoveryDone <- recovery.Run(recoveryCtx) }()
++	select {
++	case <-recovered:
++	case <-time.After(time.Second):
++		t.Fatal("expired shutdown job was not recovered")
++	}
++	recoveryCancel()
++	<-recoveryDone
++}
++
++func TestPostgresWorkerFiveAttemptExhaustionUnblocksFollower(t *testing.T) {
++	testPostgresWorkerDeadHeadUnblocksFollower(
++		t,
++		10,
++		ingestqueue.NewOutcomeError("mantle_transient"),
++		ingestqueue.MaxAttempts,
++	)
++}
++
++func TestPostgresWorkerPermanentFailureUnblocksFollower(t *testing.T) {
++	testPostgresWorkerDeadHeadUnblocksFollower(
++		t,
++		20,
++		ingestqueue.NewOutcomeError("proxy_validation_permanent"),
++		1,
++	)
++}
++
++func testPostgresWorkerDeadHeadUnblocksFollower(t *testing.T, index int, processorError error, expectedAttempts int) {
++	t.Helper()
++	repo, db := workerTestRepo(t)
++	head := workerEnqueue(t, repo, index, "session-a")
++	time.Sleep(time.Millisecond)
++	follower := workerEnqueue(t, repo, index+1, "session-a")
++
++	processor := integrationProcessor{
++		plan: func(_ context.Context, job *ingestqueue.Job) (ingestqueue.Plan, error) {
++			if job.ID == head.ID {
++				return ingestqueue.Plan{}, processorError
++			}
++			return ingestqueue.Plan{Payload: json.RawMessage(`{"ops":[]}`)}, nil
++		},
++		apply: func(context.Context, *ingestqueue.Job, json.RawMessage) (int, error) { return 0, nil },
++	}
++	cfg := ingestqueue.DefaultWorkerConfig()
++	cfg.Enabled = true
++	cfg.PollInterval = time.Millisecond
++	cfg.Random = func() float64 { return 0 }
++	ctx, cancel := context.WithCancel(context.Background())
++	done := make(chan error, 1)
++	worker := ingestqueue.NewWorker(repo, processor, "tenant-worker", "worker-exhaustion", cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
++	go func() { done <- worker.Run(ctx) }()
++
++	deadline := time.Now().Add(2 * time.Second)
++	for time.Now().Before(deadline) {
++		var headState, followerState string
++		var attempts int
++		err := db.QueryRow(`SELECT state, attempt_count FROM ingest_jobs WHERE job_id = $1`, head.ID).Scan(&headState, &attempts)
++		if err != nil {
++			t.Fatal(err)
++		}
++		err = db.QueryRow(`SELECT state FROM ingest_jobs WHERE job_id = $1`, follower.ID).Scan(&followerState)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if headState == string(ingestqueue.StateDead) && attempts == expectedAttempts &&
++			followerState == string(ingestqueue.StateSucceeded) {
++			cancel()
++			<-done
++			return
++		}
++		time.Sleep(5 * time.Millisecond)
++	}
++	cancel()
++	<-done
++	t.Fatalf("dead head did not unblock follower after %d attempt(s)", expectedAttempts)
++}
+diff --git a/server/internal/ingestqueue/worker_test.go b/server/internal/ingestqueue/worker_test.go
+new file mode 100644
+index 0000000..4f431f7
+--- /dev/null
++++ b/server/internal/ingestqueue/worker_test.go
+@@ -0,0 +1,392 @@
++package ingestqueue
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"errors"
++	"io"
++	"log/slog"
++	"strconv"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/llm"
++)
++
++type fakeRepo struct {
++	Repository
++	claimCalls atomic.Int32
++	claim      func(context.Context, string, string, time.Time, time.Duration, int) (*Job, error)
++	transition func(context.Context, string, string, string) error
++	savePlan   func(context.Context, string, string, string, json.RawMessage, int) error
++	succeed    func(context.Context, string, string, string, int) error
++	fail       func(context.Context, string, string, string, Failure) error
++	heartbeat  func(context.Context, string, string, string, time.Time) error
++}
++
++func (r *fakeRepo) Claim(ctx context.Context, tenant, owner string, now time.Time, lease time.Duration, max int) (*Job, error) {
++	r.claimCalls.Add(1)
++	if r.claim == nil {
++		return nil, nil
++	}
++	return r.claim(ctx, tenant, owner, now, lease, max)
++}
++func (r *fakeRepo) StartPlanning(ctx context.Context, tenant, id, owner string) error {
++	return r.transition(ctx, tenant, id, owner)
++}
++func (r *fakeRepo) SavePlan(ctx context.Context, tenant, id, owner string, plan json.RawMessage, warnings int) error {
++	return r.savePlan(ctx, tenant, id, owner, plan, warnings)
++}
++func (r *fakeRepo) Succeed(ctx context.Context, tenant, id, owner string, warnings int) error {
++	return r.succeed(ctx, tenant, id, owner, warnings)
++}
++func (r *fakeRepo) Fail(ctx context.Context, tenant, id, owner string, failure Failure) error {
++	return r.fail(ctx, tenant, id, owner, failure)
++}
++func (r *fakeRepo) Heartbeat(ctx context.Context, tenant, id, owner string, expires time.Time) error {
++	if r.heartbeat == nil {
++		return nil
++	}
++	return r.heartbeat(ctx, tenant, id, owner, expires)
++}
++
++type fakeProcessor struct {
++	plan  func(context.Context, *Job) (Plan, error)
++	apply func(context.Context, *Job, json.RawMessage) (int, error)
++}
++
++func (p fakeProcessor) Plan(ctx context.Context, job *Job) (Plan, error) {
++	return p.plan(ctx, job)
++}
++func (p fakeProcessor) Apply(ctx context.Context, job *Job, plan json.RawMessage) (int, error) {
++	return p.apply(ctx, job, plan)
++}
++
++func TestDefaultWorkerConfigAndRetryBoundaries(t *testing.T) {
++	cfg := DefaultWorkerConfig()
++	if cfg.Enabled {
++		t.Fatal("worker must default disabled")
++	}
++	if cfg.Concurrency != 2 || cfg.Lease != 90*time.Second ||
++		cfg.Heartbeat != 30*time.Second || cfg.JobTimeout != 10*time.Minute {
++		t.Fatalf("unexpected defaults: %+v", cfg)
++	}
++	cases := []struct {
++		attempt int
++		random  float64
++		want    time.Duration
++	}{
++		{1, 0, 0},
++		{1, 1, 5 * time.Second},
++		{2, 1, 10 * time.Second},
++		{7, 1, 5 * time.Minute},
++		{99, 1, 5 * time.Minute},
++	}
++	for _, tc := range cases {
++		if got := FullJitterBackoff(tc.attempt, tc.random); got != tc.want {
++			t.Fatalf("attempt %d random %v: got %v want %v", tc.attempt, tc.random, got, tc.want)
++		}
++	}
++
++	cfg.Concurrency = 9
++	worker := NewWorker(&fakeRepo{}, fakeProcessor{}, "tenant", "owner", cfg, nil)
++	if worker.config.Concurrency != 2 {
++		t.Fatalf("worker concurrency = %d, want hard cap 2", worker.config.Concurrency)
++	}
++}
++
++func TestClassifyProxyOutcomesAndAttemptLimit(t *testing.T) {
++	for _, class := range []string{"proxy_validation_permanent", "mantle_4xx_permanent"} {
++		if got := ClassifyError(NewOutcomeError(class)); got.Transient {
++			t.Fatalf("%s classified transient", class)
++		}
++	}
++	for _, class := range []string{"mantle_transient", "deadline"} {
++		if got := ClassifyError(NewOutcomeError(class)); !got.Transient {
++			t.Fatalf("%s classified permanent", class)
++		}
++	}
++	if MaxAttempts != 5 {
++		t.Fatalf("MaxAttempts = %d, want 5", MaxAttempts)
++	}
++	if got := ClassifyError(errors.New("SECRET unknown failure")); got.Transient {
++		t.Fatal("unknown errors must fail closed as permanent")
++	}
++
++	proxyCases := []struct {
++		name      string
++		err       error
++		class     string
++		transient bool
++	}{
++		{
++			name:  "proxy validation",
++			err:   &llm.HTTPStatusError{Code: 400, Body: `{"error":{"code":"invalid_max_tokens"}}`},
++			class: "proxy_validation_permanent",
++		},
++		{
++			name:  "permanent provider response",
++			err:   &llm.HTTPStatusError{Code: 422, Body: `{"error":{"code":"provider_error"}}`},
++			class: "mantle_4xx_permanent",
++		},
++		{
++			name:      "retryable provider response",
++			err:       &llm.HTTPStatusError{Code: 503, Body: `{}`},
++			class:     "mantle_transient",
++			transient: true,
++		},
++		{
++			name:      "proxy deadline",
++			err:       &llm.HTTPStatusError{Code: 504, Body: `{"error":{"code":"upstream_timeout"}}`},
++			class:     "deadline",
++			transient: true,
++		},
++	}
++	for _, tc := range proxyCases {
++		t.Run(tc.name, func(t *testing.T) {
++			got := ClassifyError(tc.err)
++			if got.Class != tc.class || got.Transient != tc.transient {
++				t.Fatalf("classification = %+v, want %s transient=%v", got, tc.class, tc.transient)
++			}
++		})
++	}
++}
++
++func TestDisabledWorkerAndNilProcessorNeverClaim(t *testing.T) {
++	repo := &fakeRepo{}
++	cfg := DefaultWorkerConfig()
++	worker := NewWorker(repo, nil, "tenant-secret", "owner", cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
++	if err := worker.Run(context.Background()); err != nil {
++		t.Fatalf("disabled Run: %v", err)
++	}
++	if repo.claimCalls.Load() != 0 {
++		t.Fatalf("disabled worker made %d claims", repo.claimCalls.Load())
++	}
++
++	cfg.Enabled = true
++	worker = NewWorker(repo, nil, "tenant-secret", "owner", cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
++	if !errors.Is(worker.Run(context.Background()), ErrProcessorUnavailable) {
++		t.Fatal("enabled worker without atomic processor must fail before claiming")
++	}
++	if repo.claimCalls.Load() != 0 {
++		t.Fatalf("processor-less worker made %d claims", repo.claimCalls.Load())
++	}
++}
++
++func TestWorkerPersistsPlanAndSuccessWithOwner(t *testing.T) {
++	var mu sync.Mutex
++	var calls []string
++	claimed := false
++	repo := &fakeRepo{}
++	repo.claim = func(_ context.Context, tenant, owner string, _ time.Time, _ time.Duration, _ int) (*Job, error) {
++		mu.Lock()
++		defer mu.Unlock()
++		if claimed {
++			return nil, nil
++		}
++		claimed = true
++		if tenant != "tenant-a" || owner != "worker-a" {
++			t.Fatalf("claim scope = %q/%q", tenant, owner)
++		}
++		return &Job{ID: "job-a", TenantID: tenant, LeaseOwner: owner, AttemptCount: 1}, nil
++	}
++	repo.transition = func(_ context.Context, tenant, id, owner string) error {
++		mu.Lock()
++		defer mu.Unlock()
++		calls = append(calls, "planning:"+tenant+":"+id+":"+owner)
++		return nil
++	}
++	repo.savePlan = func(_ context.Context, tenant, id, owner string, plan json.RawMessage, warnings int) error {
++		mu.Lock()
++		defer mu.Unlock()
++		calls = append(calls, "plan:"+string(plan))
++		if tenant != "tenant-a" || id != "job-a" || owner != "worker-a" || warnings != 2 {
++			t.Fatal("SavePlan lost scope/owner/warnings")
++		}
++		return nil
++	}
++	done := make(chan struct{})
++	repo.succeed = func(_ context.Context, tenant, id, owner string, warnings int) error {
++		mu.Lock()
++		calls = append(calls, "succeeded")
++		mu.Unlock()
++		if tenant != "tenant-a" || id != "job-a" || owner != "worker-a" || warnings != 3 {
++			t.Fatal("Succeed lost scope/owner/warnings")
++		}
++		close(done)
++		return nil
++	}
++	processor := fakeProcessor{
++		plan: func(context.Context, *Job) (Plan, error) {
++			return Plan{Payload: json.RawMessage(`{"b":2,"a":1}`), Warnings: 2}, nil
++		},
++		apply: func(context.Context, *Job, json.RawMessage) (int, error) { return 3, nil },
++	}
++	cfg := DefaultWorkerConfig()
++	cfg.Enabled = true
++	cfg.PollInterval = time.Millisecond
++	ctx, cancel := context.WithCancel(context.Background())
++	worker := NewWorker(repo, processor, "tenant-a", "worker-a", cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
++	runDone := make(chan error, 1)
++	go func() { runDone <- worker.Run(ctx) }()
++	select {
++	case <-done:
++	case <-time.After(time.Second):
++		t.Fatal("worker did not complete")
++	}
++	cancel()
++	<-runDone
++	mu.Lock()
++	defer mu.Unlock()
++	if len(calls) != 3 || calls[0] != "planning:tenant-a:job-a:worker-a" || calls[2] != "succeeded" {
++		t.Fatalf("state calls = %#v", calls)
++	}
++}
++
++func TestWorkerTransientRetriesAndFifthAttemptDies(t *testing.T) {
++	for attempt := 1; attempt <= MaxAttempts; attempt++ {
++		t.Run(strconv.Itoa(attempt), func(t *testing.T) {
++			repo := &fakeRepo{}
++			repo.transition = func(context.Context, string, string, string) error { return nil }
++			failed := make(chan Failure, 1)
++			repo.fail = func(_ context.Context, _, _, _ string, failure Failure) error {
++				failed <- failure
++				return nil
++			}
++			claimed := false
++			repo.claim = func(context.Context, string, string, time.Time, time.Duration, int) (*Job, error) {
++				if claimed {
++					return nil, nil
++				}
++				claimed = true
++				return &Job{ID: "job", TenantID: "tenant", LeaseOwner: "owner", AttemptCount: attempt}, nil
++			}
++			processor := fakeProcessor{
++				plan: func(context.Context, *Job) (Plan, error) {
++					return Plan{}, NewOutcomeError("mantle_transient")
++				},
++				apply: func(context.Context, *Job, json.RawMessage) (int, error) { return 0, nil },
++			}
++			cfg := DefaultWorkerConfig()
++			cfg.Enabled = true
++			cfg.PollInterval = time.Millisecond
++			cfg.Random = func() float64 { return 1 }
++			ctx, cancel := context.WithCancel(context.Background())
++			worker := NewWorker(repo, processor, "tenant", "owner", cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
++			go worker.Run(ctx)
++			got := <-failed
++			cancel()
++			if attempt < MaxAttempts {
++				if got.State != StateRetryWait || got.AvailableAt.IsZero() {
++					t.Fatalf("attempt %d failure = %+v, want retry_wait", attempt, got)
++				}
++			} else if got.State != StateDead {
++				t.Fatalf("attempt 5 failure = %+v, want dead", got)
++			}
++		})
++	}
++}
++
++func TestWorkerShutdownCancelsWithoutAcknowledging(t *testing.T) {
++	repo := &fakeRepo{}
++	repo.transition = func(context.Context, string, string, string) error { return nil }
++	var failureCalls atomic.Int32
++	repo.fail = func(context.Context, string, string, string, Failure) error {
++		failureCalls.Add(1)
++		return nil
++	}
++	var claimed atomic.Bool
++	repo.claim = func(context.Context, string, string, time.Time, time.Duration, int) (*Job, error) {
++		if claimed.Swap(true) {
++			return nil, nil
++		}
++		return &Job{ID: "job", TenantID: "tenant", LeaseOwner: "owner", AttemptCount: 1}, nil
++	}
++	started := make(chan struct{})
++	canceled := make(chan struct{})
++	processor := fakeProcessor{
++		plan: func(ctx context.Context, _ *Job) (Plan, error) {
++			close(started)
++			<-ctx.Done()
++			close(canceled)
++			return Plan{}, ctx.Err()
++		},
++		apply: func(context.Context, *Job, json.RawMessage) (int, error) { return 0, nil },
++	}
++	cfg := DefaultWorkerConfig()
++	cfg.Enabled = true
++	cfg.PollInterval = time.Millisecond
++	ctx, cancel := context.WithCancel(context.Background())
++	worker := NewWorker(repo, processor, "tenant", "owner", cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
++	done := make(chan error, 1)
++	go func() { done <- worker.Run(ctx) }()
++	<-started
++	cancel()
++	<-canceled
++	<-done
++	if failureCalls.Load() != 0 {
++		t.Fatal("shutdown must not acknowledge or fail unfinished work")
++	}
++}
++
++func TestWorkerLogsExcludePayloadAndScope(t *testing.T) {
++	const (
++		tenantMarker  = "TENANT-MARKER"
++		payloadMarker = "MEMORY-CONTENT-MARKER"
++	)
++	repo := &fakeRepo{}
++	repo.transition = func(context.Context, string, string, string) error { return nil }
++	failed := make(chan struct{})
++	repo.fail = func(context.Context, string, string, string, Failure) error {
++		close(failed)
++		return nil
++	}
++	var claimed atomic.Bool
++	repo.claim = func(context.Context, string, string, time.Time, time.Duration, int) (*Job, error) {
++		if claimed.Swap(true) {
++			return nil, nil
++		}
++		return &Job{
++			ID:               "00000000-0000-4000-8000-000000000001",
++			TenantID:         tenantMarker,
++			AgentID:          "AGENT-MARKER",
++			AppID:            "APP-MARKER",
++			SessionID:        "SESSION-MARKER",
++			CanonicalPayload: []byte(payloadMarker),
++			LeaseOwner:       "owner",
++			AttemptCount:     1,
++		}, nil
++	}
++	processor := fakeProcessor{
++		plan: func(context.Context, *Job) (Plan, error) {
++			return Plan{}, errors.New(payloadMarker + " " + tenantMarker)
++		},
++		apply: func(context.Context, *Job, json.RawMessage) (int, error) { return 0, nil },
++	}
++	var logs bytes.Buffer
++	cfg := DefaultWorkerConfig()
++	cfg.Enabled = true
++	cfg.PollInterval = time.Millisecond
++	ctx, cancel := context.WithCancel(context.Background())
++	worker := NewWorker(repo, processor, tenantMarker, "owner", cfg, slog.New(slog.NewJSONHandler(&logs, nil)))
++	done := make(chan error, 1)
++	go func() { done <- worker.Run(ctx) }()
++	<-failed
++	cancel()
++	<-done
++	for _, forbidden := range []string{
++		tenantMarker,
++		payloadMarker,
++		"AGENT-MARKER",
++		"APP-MARKER",
++		"SESSION-MARKER",
++	} {
++		if strings.Contains(logs.String(), forbidden) {
++			t.Fatalf("worker logs contain %q: %s", forbidden, logs.String())
++		}
++	}
++}
+diff --git a/server/internal/repository/factory.go b/server/internal/repository/factory.go
+index c0c9bd2..929b8ea 100644
+--- a/server/internal/repository/factory.go
++++ b/server/internal/repository/factory.go
+@@ -6,6 +6,7 @@ import (
+ 	"fmt"
+ 
+ 	"github.com/qiffang/mnemos/server/internal/domain"
++	"github.com/qiffang/mnemos/server/internal/ingestqueue"
+ 	"github.com/qiffang/mnemos/server/internal/repository/db9"
+ 	"github.com/qiffang/mnemos/server/internal/repository/postgres"
+ 	"github.com/qiffang/mnemos/server/internal/repository/tidb"
+@@ -25,6 +26,14 @@ func NewDB(backend, dsn string) (*sql.DB, error) {
+ 	}
+ }
+ 
++// NewIngestJobRepo creates the durable ingest repository for PostgreSQL tenant databases.
++func NewIngestJobRepo(backend string, db *sql.DB) ingestqueue.Repository {
++	if backend != "postgres" {
++		return nil
++	}
++	return postgres.NewIngestJobRepo(db)
++}
++
+ // NewTenantRepo creates a TenantRepo for the specified backend.
+ func NewTenantRepo(backend string, db *sql.DB) TenantRepo {
+ 	switch backend {
+diff --git a/server/internal/repository/postgres/ingest_job.go b/server/internal/repository/postgres/ingest_job.go
+new file mode 100644
+index 0000000..864c27c
+--- /dev/null
++++ b/server/internal/repository/postgres/ingest_job.go
+@@ -0,0 +1,422 @@
++package postgres
++
++import (
++	"context"
++	"database/sql"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"strings"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/ingestqueue"
++)
++
++const ingestJobColumns = `
++	job_id, tenant_id, idempotency_key, canonical_payload,
++	agent_id, app_id, session_id, mode, disable_session_save,
++	state, attempt_count, available_at, lease_owner, lease_expires_at,
++	heartbeat_at, plan_payload, plan_warning_count, apply_warning_count,
++	warning_count, error_class, created_at, updated_at, completed_at`
++
++type IngestJobRepo struct {
++	db *sql.DB
++}
++
++func NewIngestJobRepo(db *sql.DB) *IngestJobRepo {
++	return &IngestJobRepo{db: db}
++}
++
++func (r *IngestJobRepo) Enqueue(ctx context.Context, input ingestqueue.EnqueueInput) (*ingestqueue.Job, error) {
++	tx, err := r.db.BeginTx(ctx, nil)
++	if err != nil {
++		return nil, fmt.Errorf("begin ingest enqueue: %w", err)
++	}
++	defer tx.Rollback()
++
++	row := tx.QueryRowContext(ctx, `
++		INSERT INTO ingest_jobs (
++			job_id, tenant_id, idempotency_key, canonical_payload,
++			agent_id, app_id, session_id, mode, disable_session_save
++		)
++		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
++		ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
++		RETURNING `+ingestJobColumns,
++		input.ID,
++		input.TenantID,
++		input.IdempotencyKey,
++		[]byte(input.CanonicalPayload),
++		input.AgentID,
++		input.AppID,
++		input.SessionID,
++		input.Mode,
++		input.DisableSessionSave,
++	)
++	job, err := scanIngestJob(row)
++	if errors.Is(err, sql.ErrNoRows) {
++		job, err = scanIngestJob(tx.QueryRowContext(ctx, `
++			SELECT `+ingestJobColumns+`
++			FROM ingest_jobs
++			WHERE tenant_id = $1 AND idempotency_key = $2`,
++			input.TenantID,
++			input.IdempotencyKey,
++		))
++	}
++	if err != nil {
++		return nil, fmt.Errorf("enqueue ingest job: %w", err)
++	}
++	if err := tx.Commit(); err != nil {
++		return nil, fmt.Errorf("commit ingest enqueue: %w", err)
++	}
++	return job, nil
++}
++
++func (r *IngestJobRepo) Get(ctx context.Context, tenantID, jobID string) (*ingestqueue.Job, error) {
++	job, err := scanIngestJob(r.db.QueryRowContext(ctx, `
++		SELECT `+ingestJobColumns+`
++		FROM ingest_jobs
++		WHERE tenant_id = $1 AND job_id = $2`,
++		tenantID,
++		jobID,
++	))
++	if err != nil {
++		return nil, fmt.Errorf("get ingest job: %w", err)
++	}
++	return job, nil
++}
++
++func (r *IngestJobRepo) Claim(
++	ctx context.Context,
++	tenantID string,
++	owner string,
++	now time.Time,
++	lease time.Duration,
++	maxAttempts int,
++) (*ingestqueue.Job, error) {
++	tx, err := r.db.BeginTx(ctx, nil)
++	if err != nil {
++		return nil, fmt.Errorf("begin ingest claim: %w", err)
++	}
++	defer tx.Rollback()
++
++	if _, err := tx.ExecContext(ctx, `
++		WITH exhausted AS (
++			SELECT j.job_id, j.state, j.lease_owner
++			FROM ingest_jobs AS j
++			WHERE j.tenant_id = $1
++			  AND j.attempt_count >= $2
++			  AND (
++				(j.state IN ('queued', 'retry_wait') AND j.available_at <= $3)
++				OR
++				(j.state IN ('processing', 'planning', 'applying')
++				 AND (j.lease_expires_at IS NULL OR j.lease_expires_at <= $3))
++			  )
++			  AND NOT EXISTS (
++				SELECT 1
++				FROM ingest_jobs AS earlier
++				WHERE earlier.tenant_id = j.tenant_id
++				  AND earlier.agent_id = j.agent_id
++				  AND earlier.app_id = j.app_id
++				  AND earlier.session_id = j.session_id
++				  AND earlier.state NOT IN ('succeeded', 'dead')
++				  AND (
++					earlier.created_at < j.created_at
++					OR (earlier.created_at = j.created_at AND earlier.job_id < j.job_id)
++				  )
++			  )
++			ORDER BY j.available_at, j.created_at, j.job_id
++			FOR UPDATE OF j SKIP LOCKED
++			LIMIT 1
++		)
++		UPDATE ingest_jobs AS job
++		SET state = 'dead',
++			error_class = 'attempts_exhausted',
++			lease_owner = NULL,
++			lease_expires_at = NULL,
++			heartbeat_at = $3,
++			completed_at = $3,
++			updated_at = $3
++		FROM exhausted
++		WHERE job.job_id = exhausted.job_id
++		  AND job.tenant_id = $1
++		  AND job.state = exhausted.state
++		  AND job.lease_owner IS NOT DISTINCT FROM exhausted.lease_owner
++		  AND (
++			(job.state IN ('queued', 'retry_wait') AND job.available_at <= $3)
++			OR
++			(job.state IN ('processing', 'planning', 'applying')
++			 AND (job.lease_expires_at IS NULL OR job.lease_expires_at <= $3))
++		  )`,
++		tenantID,
++		maxAttempts,
++		now,
++	); err != nil {
++		return nil, fmt.Errorf("expire exhausted ingest job: %w", err)
++	}
++
++	job, err := scanIngestJob(tx.QueryRowContext(ctx, `
++		WITH candidate AS (
++			SELECT j.job_id
++			FROM ingest_jobs AS j
++			WHERE j.tenant_id = $1
++			  AND j.attempt_count < $5
++			  AND (
++				(j.state IN ('queued', 'retry_wait') AND j.available_at <= $3)
++				OR
++				(j.state IN ('processing', 'planning', 'applying')
++				 AND (j.lease_expires_at IS NULL OR j.lease_expires_at <= $3))
++			  )
++			  AND NOT EXISTS (
++				SELECT 1
++				FROM ingest_jobs AS earlier
++				WHERE earlier.tenant_id = j.tenant_id
++				  AND earlier.agent_id = j.agent_id
++				  AND earlier.app_id = j.app_id
++				  AND earlier.session_id = j.session_id
++				  AND earlier.state NOT IN ('succeeded', 'dead')
++				  AND (
++					earlier.created_at < j.created_at
++					OR (earlier.created_at = j.created_at AND earlier.job_id < j.job_id)
++				  )
++			  )
++			ORDER BY j.available_at, j.created_at, j.job_id
++			FOR UPDATE OF j SKIP LOCKED
++			LIMIT 1
++		)
++		UPDATE ingest_jobs AS job
++		SET state = 'processing',
++			attempt_count = job.attempt_count + 1,
++			lease_owner = $2,
++			lease_expires_at = $4,
++			heartbeat_at = $3,
++			plan_payload = NULL,
++			plan_warning_count = 0,
++			apply_warning_count = 0,
++			warning_count = 0,
++			error_class = NULL,
++			completed_at = NULL,
++			updated_at = $3
++		FROM candidate
++		WHERE job.job_id = candidate.job_id AND job.tenant_id = $1
++		RETURNING `+prefixedIngestJobColumns("job"),
++		tenantID,
++		owner,
++		now,
++		now.Add(lease),
++		maxAttempts,
++	))
++	if errors.Is(err, sql.ErrNoRows) {
++		if err := tx.Commit(); err != nil {
++			return nil, fmt.Errorf("commit empty ingest claim: %w", err)
++		}
++		return nil, nil
++	}
++	if err != nil {
++		return nil, fmt.Errorf("claim ingest job: %w", err)
++	}
++	if err := tx.Commit(); err != nil {
++		return nil, fmt.Errorf("commit ingest claim: %w", err)
++	}
++	return job, nil
++}
++
++func (r *IngestJobRepo) StartPlanning(ctx context.Context, tenantID, jobID, owner string) error {
++	return r.ownedTransition(ctx, `
++		UPDATE ingest_jobs
++		SET state = 'planning', updated_at = NOW()
++		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
++		  AND state = 'processing' AND lease_expires_at > NOW()`,
++		tenantID,
++		jobID,
++		owner,
++	)
++}
++
++func (r *IngestJobRepo) SavePlan(
++	ctx context.Context,
++	tenantID string,
++	jobID string,
++	owner string,
++	plan json.RawMessage,
++	warnings int,
++) error {
++	return r.ownedTransition(ctx, `
++		UPDATE ingest_jobs
++		SET state = 'applying',
++			plan_payload = $4,
++			plan_warning_count = $5,
++			warning_count = $5,
++			updated_at = NOW()
++		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
++		  AND state = 'planning' AND lease_expires_at > NOW()`,
++		tenantID,
++		jobID,
++		owner,
++		[]byte(plan),
++		warnings,
++	)
++}
++
++func (r *IngestJobRepo) Succeed(ctx context.Context, tenantID, jobID, owner string, warnings int) error {
++	return r.ownedTransition(ctx, `
++		UPDATE ingest_jobs
++		SET state = 'succeeded',
++			apply_warning_count = $4,
++			warning_count = plan_warning_count + $4,
++			error_class = NULL,
++			lease_owner = NULL,
++			lease_expires_at = NULL,
++			heartbeat_at = NOW(),
++			completed_at = NOW(),
++			updated_at = NOW()
++		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
++		  AND state = 'applying' AND lease_expires_at > NOW()`,
++		tenantID,
++		jobID,
++		owner,
++		warnings,
++	)
++}
++
++func (r *IngestJobRepo) Fail(
++	ctx context.Context,
++	tenantID string,
++	jobID string,
++	owner string,
++	failure ingestqueue.Failure,
++) error {
++	if failure.State != ingestqueue.StateRetryWait && failure.State != ingestqueue.StateDead {
++		return fmt.Errorf("invalid ingest failure state %q", failure.State)
++	}
++	availableAt := failure.AvailableAt
++	if availableAt.IsZero() {
++		availableAt = time.Now()
++	}
++	return r.ownedTransition(ctx, `
++		UPDATE ingest_jobs
++		SET state = $4::varchar,
++			available_at = $5,
++			error_class = $6,
++			lease_owner = NULL,
++			lease_expires_at = NULL,
++			heartbeat_at = NOW(),
++			completed_at = CASE WHEN $4::varchar = 'dead' THEN NOW() ELSE NULL END,
++			updated_at = NOW()
++		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
++		  AND state IN ('processing', 'planning', 'applying')
++		  AND lease_expires_at > NOW()`,
++		tenantID,
++		jobID,
++		owner,
++		string(failure.State),
++		availableAt,
++		failure.ErrorClass,
++	)
++}
++
++func (r *IngestJobRepo) Heartbeat(
++	ctx context.Context,
++	tenantID string,
++	jobID string,
++	owner string,
++	expiresAt time.Time,
++) error {
++	return r.ownedTransition(ctx, `
++		UPDATE ingest_jobs
++		SET lease_expires_at = $4, heartbeat_at = NOW(), updated_at = NOW()
++		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
++		  AND state IN ('processing', 'planning', 'applying')
++		  AND lease_expires_at > NOW()`,
++		tenantID,
++		jobID,
++		owner,
++		expiresAt,
++	)
++}
++
++func (r *IngestJobRepo) ownedTransition(ctx context.Context, query string, args ...any) error {
++	result, err := r.db.ExecContext(ctx, query, args...)
++	if err != nil {
++		return fmt.Errorf("update ingest job: %w", err)
++	}
++	updated, err := result.RowsAffected()
++	if err != nil {
++		return fmt.Errorf("read ingest update result: %w", err)
++	}
++	if updated != 1 {
++		return ingestqueue.ErrLeaseLost
++	}
++	return nil
++}
++
++type rowScanner interface {
++	Scan(...any) error
++}
++
++func scanIngestJob(row rowScanner) (*ingestqueue.Job, error) {
++	var (
++		job            ingestqueue.Job
++		state          string
++		leaseOwner     sql.NullString
++		leaseExpiresAt sql.NullTime
++		heartbeatAt    sql.NullTime
++		planPayload    []byte
++		errorClass     sql.NullString
++		completedAt    sql.NullTime
++	)
++	if err := row.Scan(
++		&job.ID,
++		&job.TenantID,
++		&job.IdempotencyKey,
++		&job.CanonicalPayload,
++		&job.AgentID,
++		&job.AppID,
++		&job.SessionID,
++		&job.Mode,
++		&job.DisableSessionSave,
++		&state,
++		&job.AttemptCount,
++		&job.AvailableAt,
++		&leaseOwner,
++		&leaseExpiresAt,
++		&heartbeatAt,
++		&planPayload,
++		&job.PlanWarningCount,
++		&job.ApplyWarningCount,
++		&job.WarningCount,
++		&errorClass,
++		&job.CreatedAt,
++		&job.UpdatedAt,
++		&completedAt,
++	); err != nil {
++		return nil, err
++	}
++	job.State = ingestqueue.State(state)
++	job.LeaseOwner = leaseOwner.String
++	job.ErrorClass = errorClass.String
++	job.PlanPayload = json.RawMessage(planPayload)
++	if leaseExpiresAt.Valid {
++		job.LeaseExpiresAt = &leaseExpiresAt.Time
++	}
++	if heartbeatAt.Valid {
++		job.HeartbeatAt = &heartbeatAt.Time
++	}
++	if completedAt.Valid {
++		job.CompletedAt = &completedAt.Time
++	}
++	return &job, nil
++}
++
++func prefixedIngestJobColumns(prefix string) string {
++	columns := []string{
++		"job_id", "tenant_id", "idempotency_key", "canonical_payload",
++		"agent_id", "app_id", "session_id", "mode", "disable_session_save",
++		"state", "attempt_count", "available_at", "lease_owner", "lease_expires_at",
++		"heartbeat_at", "plan_payload", "plan_warning_count", "apply_warning_count",
++		"warning_count", "error_class", "created_at", "updated_at", "completed_at",
++	}
++	for i := range columns {
++		columns[i] = prefix + "." + columns[i]
++	}
++	return strings.Join(columns, ", ")
++}
+diff --git a/server/internal/repository/postgres/ingest_job_integration_test.go b/server/internal/repository/postgres/ingest_job_integration_test.go
+new file mode 100644
+index 0000000..d0a6753
+--- /dev/null
++++ b/server/internal/repository/postgres/ingest_job_integration_test.go
+@@ -0,0 +1,334 @@
++package postgres
++
++import (
++	"context"
++	"database/sql"
++	"errors"
++	"fmt"
++	"os"
++	"sync"
++	"testing"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/ingestqueue"
++)
++
++func ingestTestDB(t *testing.T) *sql.DB {
++	t.Helper()
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
++	}
++	db, err := sql.Open("pgx", dsn)
++	if err != nil {
++		t.Fatalf("open postgres: %v", err)
++	}
++	if err := db.PingContext(context.Background()); err != nil {
++		db.Close()
++		t.Fatalf("ping postgres: %v", err)
++	}
++	if _, err := db.Exec(`TRUNCATE ingest_jobs`); err != nil {
++		db.Close()
++		t.Fatalf("truncate ingest_jobs: %v", err)
++	}
++	t.Cleanup(func() { db.Close() })
++	return db
++}
++
++func enqueueInput(tenant, session, key string) ingestqueue.EnqueueInput {
++	return ingestqueue.EnqueueInput{
++		ID:                 "00000000-0000-4000-8000-000000000001",
++		TenantID:           tenant,
++		IdempotencyKey:     key,
++		CanonicalPayload:   []byte(`{"version":"ingest-v1"}`),
++		AgentID:            "agent-a",
++		AppID:              "app-a",
++		SessionID:          session,
++		Mode:               "smart",
++		DisableSessionSave: false,
++	}
++}
++
++func enqueueJob(t *testing.T, repo *IngestJobRepo, input ingestqueue.EnqueueInput) *ingestqueue.Job {
++	t.Helper()
++	job, err := repo.Enqueue(context.Background(), input)
++	if err != nil {
++		t.Fatalf("Enqueue: %v", err)
++	}
++	return job
++}
++
++func TestIngestJobEnqueueUniqueRaceAndTenantIsolation(t *testing.T) {
++	db := ingestTestDB(t)
++	repo := NewIngestJobRepo(db)
++	const callers = 12
++	ids := make(chan string, callers)
++	errs := make(chan error, callers)
++	var wg sync.WaitGroup
++	for range callers {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			job, err := repo.Enqueue(context.Background(), enqueueInput("tenant-a", "session-a", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"))
++			if err != nil {
++				errs <- err
++				return
++			}
++			ids <- job.ID
++		}()
++	}
++	wg.Wait()
++	close(ids)
++	close(errs)
++	for err := range errs {
++		t.Errorf("concurrent Enqueue: %v", err)
++	}
++	var first string
++	for id := range ids {
++		if first == "" {
++			first = id
++		}
++		if id != first {
++			t.Fatalf("duplicate enqueue returned ids %q and %q", first, id)
++		}
++	}
++	var count int
++	if err := db.QueryRow(`SELECT count(*) FROM ingest_jobs WHERE tenant_id = 'tenant-a'`).Scan(&count); err != nil {
++		t.Fatal(err)
++	}
++	if count != 1 {
++		t.Fatalf("tenant-a rows = %d, want 1", count)
++	}
++
++	other := enqueueInput("tenant-b", "session-a", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
++	other.ID = "00000000-0000-4000-8000-000000000002"
++	otherJob := enqueueJob(t, repo, other)
++	if otherJob.ID == first {
++		t.Fatal("tenant-scoped idempotency reused a cross-tenant job")
++	}
++	claimed, err := repo.Claim(context.Background(), "tenant-b", "worker-b", time.Now(), time.Second, ingestqueue.MaxAttempts)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if claimed == nil || claimed.TenantID != "tenant-b" {
++		t.Fatalf("tenant-b claim = %+v", claimed)
++	}
++	if err := repo.StartPlanning(context.Background(), "tenant-a", claimed.ID, "worker-b"); !errors.Is(err, ingestqueue.ErrLeaseLost) {
++		t.Fatalf("cross-tenant update error = %v, want ErrLeaseLost", err)
++	}
++}
++
++func TestIngestJobConcurrentClaimFIFOAndTerminalUnblock(t *testing.T) {
++	db := ingestTestDB(t)
++	repo := NewIngestJobRepo(db)
++	first := enqueueInput("tenant-a", "session-a", "1111111111111111111111111111111111111111111111111111111111111111")
++	first.ID = "00000000-0000-4000-8000-000000000001"
++	second := enqueueInput("tenant-a", "session-a", "2222222222222222222222222222222222222222222222222222222222222222")
++	second.ID = "00000000-0000-4000-8000-000000000002"
++	cross := enqueueInput("tenant-a", "session-b", "3333333333333333333333333333333333333333333333333333333333333333")
++	cross.ID = "00000000-0000-4000-8000-000000000003"
++	enqueueJob(t, repo, first)
++	time.Sleep(time.Millisecond)
++	enqueueJob(t, repo, second)
++	enqueueJob(t, repo, cross)
++
++	var wg sync.WaitGroup
++	claims := make(chan *ingestqueue.Job, 8)
++	for i := range 8 {
++		wg.Add(1)
++		go func() {
++			defer wg.Done()
++			job, err := repo.Claim(context.Background(), "tenant-a", fmt.Sprintf("worker-%d", i), time.Now(), time.Minute, ingestqueue.MaxAttempts)
++			if err != nil {
++				t.Errorf("Claim: %v", err)
++				return
++			}
++			if job != nil {
++				claims <- job
++			}
++		}()
++	}
++	wg.Wait()
++	close(claims)
++	got := map[string]*ingestqueue.Job{}
++	for job := range claims {
++		if _, duplicate := got[job.ID]; duplicate {
++			t.Fatalf("job %s double claimed", job.ID)
++		}
++		got[job.ID] = job
++	}
++	if len(got) != 2 || got[first.ID] == nil || got[cross.ID] == nil || got[second.ID] != nil {
++		t.Fatalf("claims = %#v, want session heads only", got)
++	}
++
++	head := got[first.ID]
++	if err := repo.StartPlanning(context.Background(), "tenant-a", head.ID, head.LeaseOwner); err != nil {
++		t.Fatal(err)
++	}
++	if err := repo.SavePlan(context.Background(), "tenant-a", head.ID, head.LeaseOwner, []byte(`{"ops":[]}`), 2); err != nil {
++		t.Fatal(err)
++	}
++	if err := repo.Succeed(context.Background(), "tenant-a", head.ID, head.LeaseOwner, 3); err != nil {
++		t.Fatal(err)
++	}
++	next, err := repo.Claim(context.Background(), "tenant-a", "worker-next", time.Now(), time.Minute, ingestqueue.MaxAttempts)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if next == nil || next.ID != second.ID {
++		t.Fatalf("next claim after succeeded = %+v", next)
++	}
++
++	crossHead := got[cross.ID]
++	if err := repo.Fail(context.Background(), "tenant-a", crossHead.ID, crossHead.LeaseOwner, ingestqueue.Failure{
++		State:      ingestqueue.StateDead,
++		ErrorClass: "poison",
++	}); err != nil {
++		t.Fatal(err)
++	}
++	var state string
++	if err := db.QueryRow(`SELECT state FROM ingest_jobs WHERE job_id = $1`, crossHead.ID).Scan(&state); err != nil {
++		t.Fatal(err)
++	}
++	if state != string(ingestqueue.StateDead) {
++		t.Fatalf("poison state = %q", state)
++	}
++}
++
++func TestIngestJobRetryWaitBlocksScopeAndLeaseRecovery(t *testing.T) {
++	db := ingestTestDB(t)
++	repo := NewIngestJobRepo(db)
++	first := enqueueInput("tenant-a", "session-a", "4444444444444444444444444444444444444444444444444444444444444444")
++	first.ID = "00000000-0000-4000-8000-000000000004"
++	second := enqueueInput("tenant-a", "session-a", "5555555555555555555555555555555555555555555555555555555555555555")
++	second.ID = "00000000-0000-4000-8000-000000000005"
++	enqueueJob(t, repo, first)
++	time.Sleep(time.Millisecond)
++	enqueueJob(t, repo, second)
++
++	now := time.Now()
++	head, err := repo.Claim(context.Background(), "tenant-a", "worker-a", now, 50*time.Millisecond, ingestqueue.MaxAttempts)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := repo.Fail(context.Background(), "tenant-a", head.ID, head.LeaseOwner, ingestqueue.Failure{
++		State:       ingestqueue.StateRetryWait,
++		ErrorClass:  "mantle_transient",
++		AvailableAt: now.Add(time.Hour),
++	}); err != nil {
++		t.Fatal(err)
++	}
++	if got, err := repo.Claim(context.Background(), "tenant-a", "worker-b", now.Add(time.Second), time.Minute, ingestqueue.MaxAttempts); err != nil || got != nil {
++		t.Fatalf("retry_wait head did not block scope: job=%+v err=%v", got, err)
++	}
++
++	if _, err := db.Exec(`UPDATE ingest_jobs SET available_at = NOW() - interval '1 second' WHERE job_id = $1`, head.ID); err != nil {
++		t.Fatal(err)
++	}
++	retry, err := repo.Claim(context.Background(), "tenant-a", "worker-b", time.Now(), 40*time.Millisecond, ingestqueue.MaxAttempts)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if retry == nil || retry.ID != head.ID || retry.AttemptCount != 2 {
++		t.Fatalf("retry claim = %+v", retry)
++	}
++	if err := repo.Heartbeat(context.Background(), "tenant-a", retry.ID, "wrong-owner", time.Now().Add(time.Minute)); !errors.Is(err, ingestqueue.ErrLeaseLost) {
++		t.Fatalf("wrong-owner heartbeat = %v", err)
++	}
++	extended := time.Now().Add(time.Minute)
++	if err := repo.Heartbeat(context.Background(), "tenant-a", retry.ID, retry.LeaseOwner, extended); err != nil {
++		t.Fatal(err)
++	}
++	if got, err := repo.Claim(context.Background(), "tenant-a", "worker-c", time.Now().Add(100*time.Millisecond), time.Minute, ingestqueue.MaxAttempts); err != nil || got != nil {
++		t.Fatalf("heartbeat lease was stolen: job=%+v err=%v", got, err)
++	}
++	if _, err := db.Exec(`UPDATE ingest_jobs SET lease_expires_at = NOW() - interval '1 second' WHERE job_id = $1`, retry.ID); err != nil {
++		t.Fatal(err)
++	}
++	recovered, err := repo.Claim(context.Background(), "tenant-a", "worker-c", time.Now(), time.Minute, ingestqueue.MaxAttempts)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if recovered == nil || recovered.ID != retry.ID || recovered.AttemptCount != 3 || recovered.LeaseOwner != "worker-c" {
++		t.Fatalf("expired lease recovery = %+v", recovered)
++	}
++}
++
++func TestIngestJobPersistsPayloadScopeCountersAndPlan(t *testing.T) {
++	db := ingestTestDB(t)
++	repo := NewIngestJobRepo(db)
++	input := enqueueInput("tenant-a", "session-a", "6666666666666666666666666666666666666666666666666666666666666666")
++	input.ID = "00000000-0000-4000-8000-000000000006"
++	input.CanonicalPayload = []byte(`{"metadata":{"secret":"MEMORY-CONTENT-MARKER"}}`)
++	job := enqueueJob(t, repo, input)
++	if job.State != ingestqueue.StateQueued || job.AttemptCount != 0 || string(job.CanonicalPayload) != string(input.CanonicalPayload) {
++		t.Fatalf("enqueued job = %+v", job)
++	}
++	claimed, err := repo.Claim(context.Background(), input.TenantID, "owner", time.Now(), time.Minute, ingestqueue.MaxAttempts)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if err := repo.StartPlanning(context.Background(), input.TenantID, claimed.ID, claimed.LeaseOwner); err != nil {
++		t.Fatal(err)
++	}
++	if err := repo.SavePlan(context.Background(), input.TenantID, claimed.ID, claimed.LeaseOwner, []byte(`{"plan":"PRIVATE-PLAN"}`), 2); err != nil {
++		t.Fatal(err)
++	}
++	if err := repo.Succeed(context.Background(), input.TenantID, claimed.ID, claimed.LeaseOwner, 3); err != nil {
++		t.Fatal(err)
++	}
++	got, err := repo.Get(context.Background(), input.TenantID, claimed.ID)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if got.State != ingestqueue.StateSucceeded || got.WarningCount != 5 ||
++		got.PlanWarningCount != 2 || got.ApplyWarningCount != 3 ||
++		string(got.PlanPayload) != `{"plan":"PRIVATE-PLAN"}` || got.CompletedAt == nil {
++		t.Fatalf("persisted job = %+v", got)
++	}
++}
++
++func TestIngestJobExpiredFifthAttemptDiesAndUnblocks(t *testing.T) {
++	db := ingestTestDB(t)
++	repo := NewIngestJobRepo(db)
++	headInput := enqueueInput("tenant-a", "session-a", "7777777777777777777777777777777777777777777777777777777777777777")
++	headInput.ID = "00000000-0000-4000-8000-000000000007"
++	followerInput := enqueueInput("tenant-a", "session-a", "8888888888888888888888888888888888888888888888888888888888888888")
++	followerInput.ID = "00000000-0000-4000-8000-000000000008"
++	head := enqueueJob(t, repo, headInput)
++	time.Sleep(time.Millisecond)
++	follower := enqueueJob(t, repo, followerInput)
++	if _, err := db.Exec(`
++		UPDATE ingest_jobs
++		SET state = 'processing',
++			attempt_count = $2,
++			lease_owner = 'stale-owner',
++			lease_expires_at = NOW() - interval '1 second'
++		WHERE job_id = $1`,
++		head.ID,
++		ingestqueue.MaxAttempts,
++	); err != nil {
++		t.Fatal(err)
++	}
++
++	claimed, err := repo.Claim(context.Background(), "tenant-a", "new-owner", time.Now(), time.Minute, ingestqueue.MaxAttempts)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if claimed == nil || claimed.ID != follower.ID {
++		t.Fatalf("claim after exhausted lease = %+v, want follower %s", claimed, follower.ID)
++	}
++	var state, errorClass string
++	var completedAt sql.NullTime
++	if err := db.QueryRow(`
++		SELECT state, error_class, completed_at
++		FROM ingest_jobs
++		WHERE job_id = $1`,
++		head.ID,
++	).Scan(&state, &errorClass, &completedAt); err != nil {
++		t.Fatal(err)
++	}
++	if state != string(ingestqueue.StateDead) || errorClass != "attempts_exhausted" || !completedAt.Valid {
++		t.Fatalf("exhausted head = state %q class %q completed %v", state, errorClass, completedAt.Valid)
++	}
++}

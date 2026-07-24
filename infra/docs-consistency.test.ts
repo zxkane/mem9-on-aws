@@ -148,8 +148,9 @@ describe("runtime documentation", () => {
     expect(text.architecture).toContain("## Planned changes");
     expect(text.architecture).toContain("## Rejected alternatives");
     expect(text.architecture).toContain(
-      "None of this planned work is part of the current implementation.",
+      "The queue table and worker primitives are installed but",
     );
+    expect(text.architecture).toContain("inert; enabling them remains planned work.");
     expect(authoritativeDocs).not.toContain("Status: **design only, not implemented.**");
   });
 
