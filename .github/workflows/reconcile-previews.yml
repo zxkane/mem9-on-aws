@@ -1,0 +1,114 @@
+name: Reconcile preview stages
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "Report only, or revalidate and remove eligible SST-managed stages"
+        type: choice
+        options:
+          - dry-run
+          - apply
+        default: dry-run
+
+concurrency:
+  group: preview-stage-reconciliation
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ap-northeast-1
+
+jobs:
+  report:
+    name: Report stale preview stages
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+      pull-requests: read
+      issues: read
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+
+      - name: Configure AWS credentials (read-only reconciliation)
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
+
+      - name: Build redacted advisory plan
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          node scripts/preview-reconciler.mts plan
+          --repository "$GITHUB_REPOSITORY"
+          --event "$GITHUB_EVENT_NAME"
+          --plan "$RUNNER_TEMP/preview-reconciliation-plan.json"
+
+      - name: Preserve advisory plan for explicit apply
+        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'apply'
+        uses: actions/upload-artifact@v4
+        with:
+          name: preview-reconciliation-plan
+          path: ${{ runner.temp }}/preview-reconciliation-plan.json
+          retention-days: 1
+
+  apply:
+    name: Revalidate and reconcile preview stages
+    needs: report
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'apply'
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    timeout-minutes: 45
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+      pull-requests: read
+      issues: write
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: pnpm/action-setup@v5
+        with:
+          package_json_file: infra/package.json
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: infra/pnpm-lock.yaml
+
+      - name: Install SST dependencies
+        run: pnpm -C infra install --frozen-lockfile
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
+
+      - name: Download advisory plan
+        uses: actions/download-artifact@v5
+        with:
+          name: preview-reconciliation-plan
+          path: ${{ runner.temp }}
+
+      - name: Apply after fresh safety checks
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: >-
+          node scripts/preview-reconciler.mts apply
+          --repository "$GITHUB_REPOSITORY"
+          --event "$GITHUB_EVENT_NAME"
+          --mode apply
+          --plan "$RUNNER_TEMP/preview-reconciliation-plan.json"

@@ -433,6 +433,19 @@ AWS references:
 [point-in-time restore](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-pitr.html),
 and [`restore-db-cluster-to-point-in-time`](https://docs.aws.amazon.com/cli/latest/reference/rds/restore-db-cluster-to-point-in-time.html).
 
+## Preview reconciliation
+
+The `Reconcile preview stages` workflow runs daily in report-only mode. Manual
+dispatch also defaults to `dry-run`; selecting `apply` explicitly rechecks every
+candidate before invoking `sst remove` for a strict `pr-N` stage with SST state.
+Tagged resources without SST state are never deleted. They are summarized by
+stage and resource type in one deduplicated operator issue.
+
+After deploying a revision that introduces this workflow, re-run
+`scripts/deploy-github-role.sh` once so the out-of-band CI role receives the
+read-only `tag:GetResources`, `iam:ListRoles`, and scoped `iam:ListRoleTags`
+grants used for inventory discovery.
+
 ## License
 
 The mem9 server (`mnemo-server`) is Apache-2.0 (upstream `mem9-ai/mem9`). See that
