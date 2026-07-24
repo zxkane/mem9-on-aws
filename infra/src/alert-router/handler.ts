@@ -46,9 +46,7 @@ export async function handler(event: SnsEvent): Promise<void> {
         body,
       });
       if (!res.ok) {
-        console.error(
-          `alert-router: Slack webhook returned ${res.status}: ${(await res.text()).slice(0, 200)}`,
-        );
+        console.error(`alert-router: Slack webhook returned ${res.status}`);
       } else {
         console.log("alert-router: delivered alarm notification to Slack");
       }
