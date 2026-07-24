@@ -55,3 +55,5 @@ Design: [`docs/designs/preview-stage-reconciliation.md`](../designs/preview-stag
 | TC-PREVIEW-RECON-032 | A state-missing candidate and a failing state-present SST removal share one apply | Operator issue is persisted before the removal failure propagates |
 | TC-PREVIEW-RECON-033 | Candidate becomes active/reopened after preflight but before removal | Immediate second recheck cancels `sst remove` |
 | TC-PREVIEW-RECON-034 | Recent completed run remains uncorrelated after head matching | It does not change another stage's matching grace anchor |
+| TC-PREVIEW-RECON-035 | SST state disappears after its timestamp supplied the advisory plan's only grace anchor | Tagged resources are reported from the still-eligible advisory evidence; no removal occurs |
+| TC-PREVIEW-RECON-036 | Multiple stages lose SST state during the final apply recheck | One cumulative operator-issue update contains every late state-missing stage |

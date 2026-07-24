@@ -490,6 +490,43 @@ function assertApplyTrigger(trigger: Trigger): void {
   }
 }
 
+function stateMissingForOperatorReview(
+  advisory: StagePlan,
+  fresh: StagePlan,
+  observedAt: string,
+): StagePlan | null {
+  if (fresh.statePresent || fresh.resources.length === 0) return null;
+  if (fresh.decision === "candidate" && fresh.action === "operator-review") {
+    return fresh;
+  }
+
+  const stateWasOnlyGraceEvidence =
+    advisory.decision === "candidate" &&
+    advisory.graceAnchor !== null &&
+    advisory.eligibleAt !== null &&
+    fresh.decision === "retain" &&
+    fresh.reasons.includes("pr-absent") &&
+    fresh.reasons.includes("deploy-inactive") &&
+    fresh.reasons.includes("grace-anchor-missing") &&
+    timestampMs(observedAt, "apply observation") >=
+      timestampMs(advisory.eligibleAt, "advisory eligibility");
+  if (!stateWasOnlyGraceEvidence) return null;
+
+  return deepFreeze({
+    ...fresh,
+    decision: "candidate",
+    action: "operator-review",
+    reasons: [
+      ...fresh.reasons.filter((reason) => reason !== "grace-anchor-missing"),
+      "advisory-grace-evidence",
+      "grace-elapsed",
+      "state-missing",
+    ],
+    graceAnchor: advisory.graceAnchor,
+    eligibleAt: advisory.eligibleAt,
+  });
+}
+
 export async function applyReconciliationPlan(
   plan: ReconciliationPlan,
   adapters: ApplyAdapters,
@@ -498,7 +535,7 @@ export async function applyReconciliationPlan(
   assertApplyTrigger(trigger);
   const removed: string[] = [];
   const cancelled: Array<{ stage: string; reason: string }> = [];
-  const stateMissing: StagePlan[] = [];
+  const stateMissing = new Map<string, StagePlan>();
   const removable: StagePlan[] = [];
 
   for (const advisory of plan.stages.filter(
@@ -511,13 +548,27 @@ export async function applyReconciliationPlan(
 
     const freshPlan = buildReconciliationPlan(await adapters.collectObservation());
     const fresh = freshPlan.stages.find((stage) => stage.stage === advisory.stage);
-    if (!fresh || fresh.decision !== "candidate") {
+    if (!fresh) {
       cancelled.push({ stage: advisory.stage, reason: "no-longer-candidate" });
       continue;
     }
 
+    const missing = stateMissingForOperatorReview(
+      advisory,
+      fresh,
+      freshPlan.observedAt,
+    );
+    if (missing) {
+      stateMissing.set(missing.stage, missing);
+      cancelled.push({ stage: advisory.stage, reason: "state-missing" });
+      continue;
+    }
+
+    if (fresh.decision !== "candidate") {
+      cancelled.push({ stage: advisory.stage, reason: "no-longer-candidate" });
+      continue;
+    }
     if (fresh.action !== "remove-with-sst" || !fresh.statePresent) {
-      stateMissing.push(fresh);
       cancelled.push({ stage: advisory.stage, reason: "state-missing" });
       continue;
     }
@@ -526,43 +577,69 @@ export async function applyReconciliationPlan(
   }
 
   let operatorIssue: ApplyResult["operatorIssue"] = "none";
-  if (stateMissing.length > 0) {
+  let inventoryDirty = stateMissing.size > 0;
+  const persistStateMissingInventory = async (): Promise<void> => {
     const draft = prepareOperatorIssue(
       deepFreeze({
         schemaVersion: PLAN_SCHEMA_VERSION,
         observedAt: plan.observedAt,
         gracePeriodHours: plan.gracePeriodHours,
-        stages: stateMissing,
+        stages: [...stateMissing.values()].sort((left, right) =>
+          left.stage.localeCompare(right.stage),
+        ),
       }),
     );
     if (draft) operatorIssue = await upsertOperatorIssue(draft, adapters);
+    inventoryDirty = false;
+  };
+  if (inventoryDirty) {
+    await persistStateMissingInventory();
   }
 
+  let removalFailure: Readonly<{ error: unknown }> | null = null;
   for (const stage of removable) {
     const immediatePlan = buildReconciliationPlan(await adapters.collectObservation());
     const immediate = immediatePlan.stages.find(
       (candidate) => candidate.stage === stage.stage,
     );
-    if (!immediate || immediate.decision !== "candidate") {
+    if (!immediate) {
+      cancelled.push({ stage: stage.stage, reason: "no-longer-candidate" });
+      continue;
+    }
+
+    const missing = stateMissingForOperatorReview(
+      stage,
+      immediate,
+      immediatePlan.observedAt,
+    );
+    if (missing) {
+      stateMissing.set(missing.stage, missing);
+      inventoryDirty = true;
+      cancelled.push({ stage: stage.stage, reason: "state-missing" });
+      continue;
+    }
+
+    if (immediate.decision !== "candidate") {
       cancelled.push({ stage: stage.stage, reason: "no-longer-candidate" });
       continue;
     }
     if (immediate.action !== "remove-with-sst" || !immediate.statePresent) {
-      const draft = prepareOperatorIssue(
-        deepFreeze({
-          schemaVersion: PLAN_SCHEMA_VERSION,
-          observedAt: immediatePlan.observedAt,
-          gracePeriodHours: immediatePlan.gracePeriodHours,
-          stages: [immediate],
-        }),
-      );
-      if (draft) operatorIssue = await upsertOperatorIssue(draft, adapters);
       cancelled.push({ stage: stage.stage, reason: "state-missing" });
       continue;
     }
-    await adapters.removeStage(stage.stage);
+    try {
+      await adapters.removeStage(stage.stage);
+    } catch (error) {
+      removalFailure = { error };
+      break;
+    }
     removed.push(stage.stage);
   }
+
+  if (inventoryDirty) {
+    await persistStateMissingInventory();
+  }
+  if (removalFailure) throw removalFailure.error;
 
   return deepFreeze({ removed, cancelled, operatorIssue });
 }

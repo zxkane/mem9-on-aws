@@ -424,6 +424,35 @@ describe("apply-time recheck", () => {
     expect(result.operatorIssue).toBe("created");
   });
 
+  it("reports state loss when the advisory SST timestamp was the only grace anchor", async () => {
+    const stateOnly = observation({
+      pullRequests: [],
+      workflowRuns: [],
+    });
+    const initial = buildReconciliationPlan(stateOnly);
+    const runtime = adapters([
+      observation({
+        pullRequests: [],
+        workflowRuns: [],
+        stateObjects: [],
+      }),
+    ]);
+
+    const result = await applyReconciliationPlan(initial, runtime, {
+      eventName: "workflow_dispatch",
+      mode: "apply",
+    });
+
+    expect(runtime.removeStage).not.toHaveBeenCalled();
+    expect(result.cancelled).toEqual([
+      { stage: "pr-12", reason: "state-missing" },
+    ]);
+    expect(runtime.createOperatorIssue).toHaveBeenCalledWith(
+      OPERATOR_ISSUE_TITLE,
+      expect.stringContaining("| pr-12 | rds:cluster | 1 |"),
+    );
+  });
+
   it("TC-PREVIEW-RECON-020 invokes only the exact SST removal adapter", async () => {
     const initial = buildReconciliationPlan(observation());
     const runtime = adapters([observation()]);
@@ -468,6 +497,63 @@ describe("apply-time recheck", () => {
     expect(runtime.removeStage).not.toHaveBeenCalled();
     expect(result.cancelled).toEqual([
       { stage: "pr-12", reason: "no-longer-candidate" },
+    ]);
+  });
+
+  it("batches all late state-missing stages into one operator issue update", async () => {
+    const mixed = observation({
+      pullRequests: [
+        { number: 12, state: "closed", closedAt: OLD },
+        { number: 13, state: "closed", closedAt: OLD },
+      ],
+      workflowRuns: [
+        { prNumber: 12, status: "completed", completedAt: OLD },
+        { prNumber: 13, status: "completed", completedAt: OLD },
+      ],
+      stateObjects: [
+        { stage: "pr-12", lastModified: OLD },
+        { stage: "pr-13", lastModified: OLD },
+      ],
+      resources: [
+        {
+          stage: "pr-12",
+          resourceType: "rds:cluster",
+          project: "mem9-on-aws",
+          managedBy: "sst",
+        },
+        {
+          stage: "pr-13",
+          resourceType: "iam:role",
+          project: "mem9-on-aws",
+          managedBy: "sst",
+        },
+      ],
+    });
+    const missing = observation({
+      pullRequests: mixed.pullRequests,
+      workflowRuns: mixed.workflowRuns,
+      stateObjects: [],
+      resources: mixed.resources,
+    });
+    const runtime = adapters([mixed, mixed, missing, missing]);
+
+    const result = await applyReconciliationPlan(
+      buildReconciliationPlan(mixed),
+      runtime,
+      {
+        eventName: "workflow_dispatch",
+        mode: "apply",
+      },
+    );
+
+    expect(runtime.removeStage).not.toHaveBeenCalled();
+    expect(runtime.createOperatorIssue).toHaveBeenCalledOnce();
+    const body = vi.mocked(runtime.createOperatorIssue).mock.calls[0][1];
+    expect(body).toContain("| pr-12 | rds:cluster | 1 |");
+    expect(body).toContain("| pr-13 | iam:role | 1 |");
+    expect(result.cancelled).toEqual([
+      { stage: "pr-12", reason: "state-missing" },
+      { stage: "pr-13", reason: "state-missing" },
     ]);
   });
 

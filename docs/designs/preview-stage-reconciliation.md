@@ -108,7 +108,11 @@ reaches the planner, reports, plan artifacts, errors, or operator issues.
 - Missing AWS role or unreadable bootstrap state: fail the report; do not apply.
 - Malformed plan artifact: reject before any mutation.
 - SST state disappears during recheck: cancel removal and report the stage as
-  state-missing if tagged resources remain.
+  state-missing if tagged resources remain. If that state timestamp was the only
+  grace anchor, retain the already-eligible advisory timestamp for reporting only;
+  it never restores removal eligibility.
+- Multiple stages that lose state during final rechecks are accumulated into one
+  redacted issue update so later inventory cannot overwrite an earlier stage.
 - One removal fails: state-missing inventory has already been written, so the
   failing SST command cannot suppress operator reporting for another stage.
 - `sst remove` failure: report only the stage and a generic failure; suppress
