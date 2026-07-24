@@ -1,0 +1,206 @@
+diff --git a/server/internal/service/ingest.go b/server/internal/service/ingest.go
+index b25f8ec..67fed15 100644
+--- a/server/internal/service/ingest.go
++++ b/server/internal/service/ingest.go
+@@ -774,6 +774,7 @@ atomic facts from a conversation.
+ Return ONLY valid JSON. No markdown fences, no explanation.
+ 
+ {"facts": [{"text": "fact one", "tags": ["tag1", "tag2"], "fact_type": "fact"}, {"text": "User asked about X", "fact_type": "query_intent"}, ...]}`
++	systemPrompt += durableOnlyPromptSection() // mem9-on-aws patch (issue #25)
+ 	systemPrompt += routingPromptSection(routingTargets)
+ 
+ 	userPrompt := fmt.Sprintf("Extract facts.\n\n%s", input.formatted)
+@@ -949,6 +950,7 @@ Output: {"facts": [{"text": "Working remotely this week", "tags": ["work", "time
+ Return ONLY valid JSON. No markdown fences, no explanation.
+ 
+ {"facts": [{"text": "fact one", "tags": ["tag1", "tag2"], "fact_type": "fact"}, {"text": "User asked about X", "fact_type": "query_intent"}], "message_tags": [["tag1", "tag2"], ["tag3"], [], ...]}`
++	systemPrompt += durableOnlyPromptSection() // mem9-on-aws patch (issue #25)
+ 	systemPrompt += routingPromptSection(routingTargets)
+ 
+ 	userPrompt := fmt.Sprintf("Extract facts and assign message tags.\n\n%s", input.formatted)
+diff --git a/server/internal/service/ingest_config.go b/server/internal/service/ingest_config.go
+new file mode 100644
+index 0000000..2bfdb49
+--- /dev/null
++++ b/server/internal/service/ingest_config.go
+@@ -0,0 +1,73 @@
++package service
++
++// Ingest durability filter (mem9-on-aws patch, issue #25).
++//
++// Upstream's extraction prompt is tuned for personal-assistant memory: rules
++// 12-14 push toward extraction ("current status should usually become one
++// fact", "prefer a faithful fact over an empty array"). Deployed as SHARED
++// CODING-AGENT memory, that stores transient session observations ("user is
++// using tool X", "already authenticated", review-progress notes) which never
++// become useful recall hits and dilute vector search.
++//
++// MNEMO_INGEST_DURABLE_ONLY=1 appends a durability override section to both
++// extraction prompt variants (facts-only and facts+tags). Default off — the
++// prompts stay byte-identical to upstream.
++
++import "os"
++
++var ingestDurableOnly = envIngestBool("MNEMO_INGEST_DURABLE_ONLY")
++
++func envIngestBool(key string) bool {
++	switch os.Getenv(key) {
++	case "1", "true", "TRUE", "True", "yes", "on":
++		return true
++	}
++	return false
++}
++
++const durableOnlySection = `
++
++## Durability filter (deployment override — ACTIVE)
++
++This deployment stores SHARED, LONG-LIVED memory for coding agents across
++sessions, machines, and tools — not a personal-assistant activity log. Apply
++these rules AFTER all rules above; where they conflict, these WIN:
++
++D1. Store a fact ONLY if it will still be true and useful in FUTURE sessions:
++    a decision and its rationale, a stable user preference or convention, an
++    environment/configuration fact, a costly gotcha or lesson learned, or a
++    stable relationship between people, systems, or projects.
++D2. REJECT session-state observations: what the user is doing right now
++    ("is using tool X", "is comparing A and B", "is debugging Y"), what has
++    already happened within this session ("already authenticated", "reviewed
++    commit abc123", "tests now pass", "found 2 findings"), and one-off task
++    progress or status updates.
++D3. REJECT identifiers that only matter within the current session: session
++    ids, request ids, CI run numbers, and commit SHAs used as progress
++    checkpoints. (A SHA pinned as a lasting decision — "we pin upstream at
++    <sha>" — is durable and kept.)
++D4. Rules 12-14 above do NOT apply. When in doubt about durability, return
++    fewer facts. An empty facts array is the CORRECT output for a routine
++    work session with no durable takeaways.
++
++Examples to keep:
++  - "Uses AWS profile <name> for the production account"
++  - "Decided to patch the vendored upstream at build time instead of forking, to keep the pin reproducible"
++  - "The deploy role must be updated out-of-band before a PR adding a new resource type can deploy"
++  - "偏好用中文讨论架构问题"
++
++Examples to reject:
++  - "User is using mem9 MCP server with Codex"
++  - "Already authenticated to mem9 earlier"
++  - "Session ID is 15210913-87ce-44a0"
++  - "Reviewed committed HEAD b90598a and found 2 remaining test-coverage findings"
++  - "之前已经对 mem9 进行过 auth 认证"`
++
++// durableOnlyPromptSection returns the override section when the durability
++// filter is enabled, else "" (prompt byte-identical to upstream).
++func durableOnlyPromptSection() string {
++	if !ingestDurableOnly {
++		return ""
++	}
++	return durableOnlySection
++}
+diff --git a/server/internal/service/ingest_config_test.go b/server/internal/service/ingest_config_test.go
+new file mode 100644
+index 0000000..7c2159f
+--- /dev/null
++++ b/server/internal/service/ingest_config_test.go
+@@ -0,0 +1,101 @@
++package service
++
++// Tests for the mem9-on-aws ingest durability patch (issue #25). IDs reference
++// docs/test-cases/ingest-durable-only.md in the mem9-on-aws repo.
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/qiffang/mnemos/server/internal/llm"
++)
++
++// TC-INGEST-001: default off — the prompt section is empty, so both
++// extraction prompts stay byte-identical to upstream.
++func TestDurableOnlyDisabledByDefault(t *testing.T) {
++	restore := ingestDurableOnly
++	ingestDurableOnly = false
++	defer func() { ingestDurableOnly = restore }()
++
++	if got := durableOnlyPromptSection(); got != "" {
++		t.Fatalf("disabled filter must contribute nothing, got %d bytes", len(got))
++	}
++}
++
++// TC-INGEST-002: enabled — the section carries the load-bearing rules.
++func TestDurableOnlySectionContent(t *testing.T) {
++	restore := ingestDurableOnly
++	ingestDurableOnly = true
++	defer func() { ingestDurableOnly = restore }()
++
++	got := durableOnlyPromptSection()
++	for _, want := range []string{
++		"Durability filter",
++		"future sessions",
++		"REJECT session-state observations",
++		"Rules 12-14 above do NOT apply",
++		"empty facts array is the CORRECT output",
++	} {
++		if !strings.Contains(strings.ToLower(got), strings.ToLower(want)) {
++			t.Fatalf("durability section missing %q", want)
++		}
++	}
++}
++
++// TC-INGEST-003: env parsing accepts the documented truthy forms only.
++func TestEnvIngestBool(t *testing.T) {
++	for raw, want := range map[string]bool{
++		"1": true, "true": true, "yes": true, "on": true,
++		"0": false, "false": false, "": false, "enabled": false,
++	} {
++		t.Setenv("MNEMO_INGEST_TEST_KEY", raw)
++		if got := envIngestBool("MNEMO_INGEST_TEST_KEY"); got != want {
++			t.Fatalf("envIngestBool(%q) = %v, want %v", raw, got, want)
++		}
++	}
++}
++
++// TC-INGEST-004 (integration): when enabled, the durability section actually
++// reaches the LLM's system prompt during extraction. This wires through the
++// real ExtractPhase1 / extractFactsAndTagsWithRouting paths.
++func TestDurableOnlyReachesExtractionPrompt(t *testing.T) {
++	restore := ingestDurableOnly
++	ingestDurableOnly = true
++	defer func() { ingestDurableOnly = restore }()
++
++	var captured string
++	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		var req struct {
++			Messages []struct {
++				Role    string `json:"role"`
++				Content string `json:"content"`
++			} `json:"messages"`
++		}
++		_ = json.NewDecoder(r.Body).Decode(&req)
++		if len(req.Messages) > 0 {
++			captured = req.Messages[0].Content
++		}
++		w.Header().Set("Content-Type", "application/json")
++		_ = json.NewEncoder(w).Encode(map[string]any{
++			"choices": []map[string]any{
++				{"message": map[string]string{"content": `{"facts": []}`}},
++			},
++		})
++	}))
++	defer mock.Close()
++
++	llmClient := llm.New(llm.Config{APIKey: "t", BaseURL: mock.URL, Model: "m"})
++	svc := NewIngestService(&memoryRepoMock{}, llmClient, nil, "auto-model", ModeSmart)
++
++	_, _ = svc.ExtractPhase1(context.Background(), []IngestMessage{{Role: "user", Content: "already authenticated"}})
++	if !strings.Contains(captured, "Durability filter") {
++		t.Fatal("extraction prompt did not contain the durability section")
++	}
++	if !strings.Contains(captured, "REJECT session-state observations") {
++		t.Fatal("extraction prompt missing key rule D2")
++	}
++}

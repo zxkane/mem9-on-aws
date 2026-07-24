@@ -364,6 +364,8 @@ describe("ecs stack", () => {
     // fallback on — both consumed by the patched mnemo-server image.
     expect(env.MNEMO_RECALL_MIN_CONFIDENCE).toBe("40");
     expect(env.MNEMO_RECALL_ZERO_RESULT_FALLBACK).toBe("1");
+    // Ingest durability (TC-INGEST-020, issue #25): only durable facts stored.
+    expect(env.MNEMO_INGEST_DURABLE_ONLY).toBe("1");
     // Secret via ssm (== ECS secrets valueFrom), never environment.
     const ssm = mnemo.ssm as Record<string, unknown>;
     expect(ssm.MEM9_DB_SECRET).toBeDefined();

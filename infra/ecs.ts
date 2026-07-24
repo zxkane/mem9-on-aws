@@ -313,6 +313,11 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
           // candidates exist (cutoff_reason=zero_result_fallback in the logs).
           MNEMO_RECALL_MIN_CONFIDENCE: "40",
           MNEMO_RECALL_ZERO_RESULT_FALLBACK: "1",
+          // Ingest durability filter (issue #25): appends a durability
+          // override section to the extraction prompt so only facts useful in
+          // future sessions are stored (decisions, preferences, gotchas);
+          // transient session-state observations are rejected.
+          MNEMO_INGEST_DURABLE_ONLY: "1",
         },
         // Secret injection (== ECS `secrets: valueFrom`): the DB secret lands as an
         // env var from Secrets Manager at task start. Never a literal in git.
