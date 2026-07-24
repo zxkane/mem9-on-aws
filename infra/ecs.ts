@@ -325,6 +325,20 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
         ssm: {
           MEM9_DB_SECRET: dbSecretArn,
         },
+        // Process liveness only: /healthz confirms the HTTP server is responding,
+        // but intentionally does not probe Aurora, qwen3, the LLM proxy, or an
+        // end-to-end memory flow. BusyBox wget ships with the Alpine base image,
+        // so this adds no health-check-only package to the runtime.
+        health: {
+          command: [
+            "CMD-SHELL",
+            `wget -q -O /dev/null http://localhost:${MNEMO_PORT}/healthz || exit 1`,
+          ],
+          startPeriod: "60 seconds",
+          interval: "30 seconds",
+          timeout: "5 seconds",
+          retries: 3,
+        },
         // Per-container logging: with `containers[]`, top-level `logging` is
         // forbidden (SST rejects it alongside containers) — each container sets
         // its own. Do NOT pin `logging.name`: SST creates the LogGroup with

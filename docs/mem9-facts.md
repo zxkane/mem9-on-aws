@@ -23,9 +23,10 @@ on. Re-verify against the pinned upstream commit before implementing IaC.
   batch-delete, `/imports`, `/session-messages`, `/status`, webhooks, space-chains.
 - **Unauthenticated health/liveness (registered BEFORE the auth middleware,
   verified handler.go:205 @ pinned SHA):** `GET /healthz` → 200 `{"status":"ok"}`
-  and `GET /versionz` → 200 `{go_version,started_at}`. Reachable unauthenticated —
-  handy for a liveness probe (§6a uses a Lambda-proxy + Cloud Map, not an ALB
-  health check, so nothing polls it now, but it stays available).
+  and `GET /versionz` → 200 `{go_version,started_at}`. `/healthz` is **process
+  liveness only**: it does not query the database, embedding sidecar, LLM proxy,
+  or an end-to-end memory path, and must not be treated as dependency readiness.
+  It is reachable unauthenticated for the ECS container health check.
 - Search query param is `q` (`GET /v1alpha2/mem9s/memories?q=...`).
 - Writes return `{"status":"accepted"}` and are processed **asynchronously** —
   list/search may return empty for a few seconds/minutes after write until the
