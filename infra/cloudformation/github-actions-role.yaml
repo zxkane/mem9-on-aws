@@ -593,6 +593,35 @@ Resources:
               - application-autoscaling:TagResource
               - application-autoscaling:UntagResource
             Resource: "*"
+          - Sid: SnsAlerting
+            # infra/observability.ts (Slack alerting): SNS topic + Lambda
+            # subscription for prod alarm delivery. Scoped to this project's
+            # topic naming scheme.
+            Effect: Allow
+            Action:
+              - sns:CreateTopic
+              - sns:DeleteTopic
+              - sns:GetTopicAttributes
+              - sns:SetTopicAttributes
+              - sns:Subscribe
+              - sns:Unsubscribe
+              - sns:GetSubscriptionAttributes
+              - sns:ListSubscriptionsByTopic
+              - sns:TagResource
+              - sns:UntagResource
+              - sns:ListTagsForResource
+            Resource:
+              - !Sub arn:${AWS::Partition}:sns:*:${AWS::AccountId}:mem9-on-aws-*
+          - Sid: SnsSubscriptionRead
+            # GetSubscriptionAttributes on refresh addresses the subscription ARN
+            # (arn:...:mem9-on-aws-prod-alerts:<uuid>), covered above; Unsubscribe
+            # during teardown can be called with just the subscription ARN too.
+            Effect: Allow
+            Action:
+              - sns:GetSubscriptionAttributes
+              - sns:Unsubscribe
+            Resource:
+              - !Sub arn:${AWS::Partition}:sns:*:${AWS::AccountId}:mem9-on-aws-*:*
           - Sid: CloudWatchAlarmsForScaling
             # Target-tracking scaling policies auto-provision CloudWatch alarms.
             Effect: Allow
