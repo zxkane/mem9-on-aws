@@ -47,6 +47,9 @@ declare function $interpolate(
   ...values: unknown[]
 ): Output<string>;
 
+// Resolve nested Output/Promise values and serialize the result as JSON.
+declare function $jsonStringify(value: unknown): Output<string>;
+
 // ── The `aws` provider surface the scaffold touches ─────────────────────────
 declare namespace aws {
   // Caller identity — infra/ecs.ts uses accountId to compose the ECR image URI
@@ -124,6 +127,18 @@ declare namespace aws {
     }
     class Permission {
       constructor(name: string, args: PermissionArgs);
+    }
+    interface FunctionEventInvokeConfigArgs {
+      functionName: Input<string>;
+      maximumRetryAttempts?: Input<number>;
+      maximumEventAgeInSeconds?: Input<number>;
+      destinationConfig?: {
+        onFailure?: { destination: Input<string> };
+        onSuccess?: { destination: Input<string> };
+      };
+    }
+    class FunctionEventInvokeConfig {
+      constructor(name: string, args: FunctionEventInvokeConfigArgs);
     }
   }
 
@@ -229,6 +244,7 @@ declare namespace aws {
       alarmDescription?: Input<string>;
       namespace?: Input<string>;
       metricName?: Input<string>;
+      dimensions?: Input<Record<string, Input<string>>>;
       statistic?: Input<string>;
       period?: Input<number>;
       evaluationPeriods: Input<number>;
@@ -258,9 +274,31 @@ declare namespace aws {
       topic: Input<string>;
       protocol: Input<string>;
       endpoint: Input<string>;
+      redrivePolicy?: Input<string>;
     }
     class TopicSubscription {
-      constructor(name: string, args: TopicSubscriptionArgs);
+      constructor(name: string, args: TopicSubscriptionArgs, opts?: { dependsOn?: unknown[] });
+    }
+  }
+
+  namespace sqs {
+    interface QueueArgs {
+      messageRetentionSeconds?: Input<number>;
+      sqsManagedSseEnabled?: Input<boolean>;
+      tags?: Record<string, Input<string>>;
+    }
+    class Queue {
+      constructor(name: string, args?: QueueArgs);
+      readonly arn: Output<string>;
+      readonly name: Output<string>;
+      readonly url: Output<string>;
+    }
+    interface QueuePolicyArgs {
+      queueUrl: Input<string>;
+      policy: Input<string>;
+    }
+    class QueuePolicy {
+      constructor(name: string, args: QueuePolicyArgs);
     }
   }
 

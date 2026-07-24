@@ -457,10 +457,9 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
     tags,
   });
 
-  // Observability (issue #26): metric filters + alarms for prod only.
-  // Slack delivery is conditional: only wired when the SlackWebhookUrl secret
-  // is set (GitHub Actions secret → `sst secret set` during deploy, or manual).
-  // When absent, alarms still fire (console-visible) but have no actions.
+  // Observability (issues #26 and #47): metric filters + alarms for prod only.
+  // Production requires the IaC-managed Slack sink; observability() fails
+  // synthesis when SLACK_WEBHOOK_URL is absent. Preview/dev stages omit it.
   //
   // The mnemo-server log group name comes from the TASK DEFINITION (the
   // awslogs-group option of the mnemo-server container) — the only reliable

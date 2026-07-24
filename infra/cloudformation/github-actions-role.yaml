@@ -1022,6 +1022,54 @@ Resources:
             Resource: "*"
 
   # ───────────────────────────────────────────────────────────────────────────
+  # Policy 10 — alert delivery failure isolation (infra/observability.ts):
+  # two encrypted SQS queues, the SNS transport queue policy, and the alert
+  # Lambda asynchronous invocation configuration. The deploy role receives only
+  # control-plane access; it cannot send, receive, or delete queue messages.
+  # ───────────────────────────────────────────────────────────────────────────
+  AlertDeliveryPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${GitHubRepo}-alert-delivery
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: SqsAlertQueueCreate
+            Effect: Allow
+            Action:
+              - sqs:CreateQueue
+            Resource:
+              - !Sub arn:${AWS::Partition}:sqs:*:${AWS::AccountId}:*
+            Condition:
+              StringEquals:
+                aws:RequestTag/Project: !Ref ProjectName
+                aws:RequestTag/ManagedBy: sst
+          - Sid: SqsAlertQueueManage
+            Effect: Allow
+            Action:
+              - sqs:DeleteQueue
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+              - sqs:ListQueueTags
+              - sqs:SetQueueAttributes
+              - sqs:TagQueue
+              - sqs:UntagQueue
+            Resource:
+              - !Sub arn:${AWS::Partition}:sqs:*:${AWS::AccountId}:*
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Project: !Ref ProjectName
+                aws:ResourceTag/ManagedBy: sst
+          - Sid: LambdaAlertAsyncConfig
+            Effect: Allow
+            Action:
+              - lambda:DeleteFunctionEventInvokeConfig
+              - lambda:GetFunctionEventInvokeConfig
+              - lambda:PutFunctionEventInvokeConfig
+            Resource:
+              - !Sub arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:function:${ProjectName}-*
+
+  # ───────────────────────────────────────────────────────────────────────────
   # IAM Role — assumed by GitHub Actions via OIDC.
   # ───────────────────────────────────────────────────────────────────────────
   GitHubActionsRole:
@@ -1063,6 +1111,7 @@ Resources:
         - !Ref LambdaProxyPolicy
         - !Ref GatewayMcpPolicy
         - !Ref OAuth2FacadePolicy
+        - !Ref AlertDeliveryPolicy
       Tags:
         - Key: Project
           Value: !Ref ProjectName
