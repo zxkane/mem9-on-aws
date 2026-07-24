@@ -22,8 +22,9 @@ infra/sst-env.d.ts
 .worktrees/
 
 # Autonomous-dev-team scaffolding (machine-local; recreated by `npx skills add`).
-# .agents/skills → symlink into the user-scope install; .agents/state → hook state.
+# .agents/skills contains project-scoped skill bodies; .agents/state is hook state.
 .agents/
+.codex/
 .pulumi/
 
 # Symlink scaffolding pointing into .agents/ (machine-local, recreated on install)
@@ -33,6 +34,7 @@ scripts/adt-gc.sh
 scripts/autonomous-dev.sh
 scripts/autonomous-review.sh
 scripts/check-provider-cutover.sh
+scripts/check-shell-idioms.sh
 scripts/check-spec-drift.sh
 scripts/dispatch-local.sh
 scripts/dispatcher-multi-tick.sh
@@ -51,6 +53,8 @@ scripts/resolve-threads.sh
 scripts/setup-labels.sh
 scripts/status.sh
 scripts/upload-screenshot.sh
+scripts/write-verdict-artifact.sh
+scripts/write-verdict-body.sh
 
 # OS
 .DS_Store
