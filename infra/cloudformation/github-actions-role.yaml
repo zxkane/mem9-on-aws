@@ -234,11 +234,19 @@ Resources:
             Effect: Allow
             Action:
               - ssm:GetParameter
-              - ssm:GetParameters
               - ssm:GetParametersByPath
               - ssm:DescribeParameters
               - ssm:ListTagsForResource
             Resource: "*"
+          - Sid: SsmDeploymentReconciliationRead
+            # scripts/reconcile-ecs-deployment.mjs reads the exact task-definition
+            # ARN + image tag exported by the current SST deployment, along with
+            # the service lookup names. It never writes desired state.
+            Effect: Allow
+            Action:
+              - ssm:GetParameters
+            Resource:
+              - !Sub arn:aws:ssm:*:${AWS::AccountId}:parameter/mem9-on-aws/*
           - Sid: SSMWrite
             # THE grant that lets the `meta` stack create its SSM parameters —
             # without it the first `sst deploy` 403s. Scoped to this project's
@@ -469,6 +477,16 @@ Resources:
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
+          - Sid: EcsDeploymentReconciliationRead
+            # Exact ECS read surface exercised after the services-stable waiter.
+            # No UpdateService, revision listing, or remediation action belongs
+            # in reconciliation.
+            Effect: Allow
+            Action:
+              - ecs:DescribeServices
+              - ecs:DescribeTasks
+              - ecs:ListTasks
+            Resource: "*"
           - Sid: ECS
             # Cluster + service + task-definition lifecycle. ECS has limited
             # per-resource ARN granularity on many describe/register calls and
@@ -484,13 +502,10 @@ Resources:
               - ecs:CreateService
               - ecs:UpdateService
               - ecs:DeleteService
-              - ecs:DescribeServices
               - ecs:RegisterTaskDefinition
               - ecs:DeregisterTaskDefinition
               - ecs:DescribeTaskDefinition
               - ecs:ListTaskDefinitions
-              - ecs:DescribeTasks
-              - ecs:ListTasks
               # RunTask + StopTask: CI runs the one-shot schema-bootstrap task
               # (infra/bootstrap.ts) via `aws ecs run-task` after deploy, then
               # polls DescribeTasks for its exit code. RunTask has no useful

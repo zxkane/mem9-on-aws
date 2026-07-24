@@ -1,0 +1,81 @@
+{
+  "responses": {
+    "ssm get-parameters": {
+      "stdout": {
+        "Parameters": [
+          {
+            "Name": "/mem9-on-aws/prod/ecs/cluster-name",
+            "Value": "mem9-cluster"
+          },
+          {
+            "Name": "/mem9-on-aws/prod/ecs/service-name",
+            "Value": "mem9-service"
+          },
+          {
+            "Name": "/mem9-on-aws/prod/ecs/task-definition",
+            "Value": "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-on-aws-prod-Mem9Server:42"
+          },
+          {
+            "Name": "/mem9-on-aws/prod/ecs/image-tag",
+            "Value": "mem9-abcdef0"
+          }
+        ],
+        "InvalidParameters": []
+      }
+    },
+    "ecs wait": {
+      "status": 0
+    },
+    "ecs describe-services": {
+      "stdout": {
+        "services": [
+          {
+            "serviceArn": "arn:aws:ecs:ap-northeast-1:123456789012:service/mem9-cluster/mem9-service",
+            "deployments": [
+              {
+                "status": "PRIMARY",
+                "rolloutState": "COMPLETED",
+                "taskDefinition": "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-on-aws-prod-Mem9Server:42"
+              }
+            ]
+          }
+        ],
+        "failures": []
+      }
+    },
+    "ecs list-tasks": {
+      "stdout": {
+        "taskArns": [
+          "arn:aws:ecs:ap-northeast-1:123456789012:task/mem9-cluster/task-1"
+        ]
+      }
+    },
+    "ecs describe-tasks": {
+      "stdout": {
+        "tasks": [
+          {
+            "taskArn": "arn:aws:ecs:ap-northeast-1:123456789012:task/mem9-cluster/task-1",
+            "taskDefinitionArn": "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-on-aws-prod-Mem9Server:42",
+            "desiredStatus": "RUNNING",
+            "lastStatus": "RUNNING",
+            "containers": [
+              {
+                "name": "mnemo-server",
+                "image": "123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/mem9-on-aws/mnemo-server:mem9-abcdef0"
+              },
+              {
+                "name": "qwen3-embed",
+                "image": "123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/mem9-on-aws/qwen3-embed:mem9-abcdef0"
+              },
+              {
+                "name": "llm-proxy",
+                "image": "123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/mem9-on-aws/llm-proxy:mem9-abcdef0"
+              }
+            ]
+          }
+        ],
+        "failures": []
+      }
+    }
+  }
+}

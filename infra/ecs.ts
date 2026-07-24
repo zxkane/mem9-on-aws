@@ -404,6 +404,10 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
       },
     },
   });
+  const taskDefinitionArn = service.nodes.taskDefinition.apply(
+    (taskDefinition) =>
+      (taskDefinition as { arn: Output<string> }).arn,
+  ) as Output<string>;
 
   new aws.ssm.Parameter("EcsClusterName", {
     name: `${prefix}/ecs/cluster-name`,
@@ -415,6 +419,20 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
     name: `${prefix}/ecs/service-name`,
     type: "String",
     value: service.nodes.service.name,
+    tags,
+  });
+  // Reconciliation desired state: these values come from THIS SST deployment,
+  // never from task-definition revision discovery or an inferred image tag.
+  new aws.ssm.Parameter("EcsTaskDefinition", {
+    name: `${prefix}/ecs/task-definition`,
+    type: "String",
+    value: taskDefinitionArn,
+    tags,
+  });
+  new aws.ssm.Parameter("EcsImageTag", {
+    name: `${prefix}/ecs/image-tag`,
+    type: "String",
+    value: IMAGE_TAG,
     tags,
   });
   // Record the deployed mnemo-server image URI (incl. tag) so it's auditable which
