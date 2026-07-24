@@ -204,6 +204,8 @@ jobs:
             echo "::error::Role $ROLE_NAME not found — run scripts/deploy-github-role.sh to bootstrap it"
             exit 1
           fi
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "::add-mask::$ACCOUNT_ID"
           echo "Preflight OK: OIDC deploy role assumed"
 
       - name: Remove conflicting Pulumi installation
@@ -717,6 +719,8 @@ jobs:
             echo "::error::Role $ROLE_NAME not found — run scripts/deploy-github-role.sh to bootstrap it"
             exit 1
           fi
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "::add-mask::$ACCOUNT_ID"
           echo "Preflight OK: OIDC deploy role assumed"
 
       - name: Remove conflicting Pulumi installation
