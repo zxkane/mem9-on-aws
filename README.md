@@ -103,6 +103,53 @@ The AgentCore Gateway exposes three tools over MCP (Cognito-authenticated):
   `scripts/deploy-*.sh` bootstrap scripts.
 - Agent contributors: see [`AGENTS.md`](AGENTS.md) for repo conventions and hard rules.
 
+## Production alert runbook
+
+Production deployment requires the `SLACK_WEBHOOK_URL` GitHub secret. SST
+synthesis fails when it is absent so production alarms cannot be deployed
+without an IaC-managed sink. Preview and development stages do not create the
+alerting stack.
+
+All production alarms target one SNS topic. Delivery failures are separated by
+the AWS boundary at which they occurred:
+
+| Alarm | Queue meaning | Queue body |
+|---|---|---|
+| `AlertTransportFailureQueueVisibleMessages` | SNS exhausted attempts to invoke the alert Lambda | Original SNS notification envelope with `Type`, `MessageId`, `TopicArn`, and `Message` |
+| `AlertExecutionFailureQueueVisibleMessages` | Lambda accepted the SNS event, but the handler exhausted two retries or reached the two-hour event age | Lambda destination record with `requestContext`, `requestPayload`, `responseContext`, and `responsePayload` |
+
+Both queues use SSE-SQS encryption and retain messages for 14 days. The
+queue-depth alarms use the same alert path, so the CloudWatch alarm state and
+SQS queue depth remain the ground truth when Slack delivery is impaired.
+
+For a **transport failure**:
+
+1. Verify the SNS subscription still targets the alert Lambda and its redrive
+   policy names the transport queue.
+2. Verify the Lambda resource permission allows `sns.amazonaws.com` from only
+   the project alarm topic, and check for deleted, disabled, or throttled Lambda
+   resources.
+3. After restoring SNS-to-Lambda delivery, republish only the envelope's
+   `Message` value to the alarm topic through controlled tooling.
+
+For an **execution failure**:
+
+1. Inspect the destination record's `requestContext.condition` and
+   `approximateInvokeCount`. `RetriesExhausted` with count `3` means the initial
+   attempt plus two retries failed.
+2. Verify the webhook secret is configured and Slack is reachable. Lambda logs
+   intentionally contain only generic operation messages and HTTP status codes.
+3. After fixing the handler dependency, asynchronously invoke the alert Lambda
+   with only `requestPayload`. Do not invoke it with the destination envelope.
+
+Use the shape-specific parsers in
+[`infra/src/alert-router/failure-records.ts`](infra/src/alert-router/failure-records.ts)
+for automation. Each parser rejects the other queue's record shape and returns
+only routing/failure metadata. Never print, log, or paste `Message`,
+`requestPayload`, `responsePayload`, webhook values, or formatted alarm fields.
+Delete a queued record only after the replay succeeds and the notification is
+confirmed.
+
 ## License
 
 The mem9 server (`mnemo-server`) is Apache-2.0 (upstream `mem9-ai/mem9`). See that

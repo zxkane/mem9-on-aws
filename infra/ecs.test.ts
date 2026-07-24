@@ -81,9 +81,24 @@ function installInterpolate() {
   };
 }
 
+function materialize(value: unknown): unknown {
+  if (typeof value === "object" && value && "value" in value) {
+    return materialize((value as { value: unknown }).value);
+  }
+  if (Array.isArray(value)) return value.map(materialize);
+  if (typeof value === "object" && value) {
+    return Object.fromEntries(
+      Object.entries(value).map(([key, nested]) => [key, materialize(nested)]),
+    );
+  }
+  return value;
+}
+
 function installGlobals(stage: string) {
   (globalThis as Record<string, unknown>).$app = { name: "mem9-on-aws", stage };
   installInterpolate();
+  (globalThis as Record<string, unknown>).$jsonStringify = (value: unknown) =>
+    out(JSON.stringify(materialize(value)));
   (globalThis as Record<string, unknown>).aws = {
     // ecs() composes the ECR image URI from the caller's account id — never a
     // hardcoded 12-digit account number in committed code.
@@ -109,6 +124,49 @@ function installGlobals(stage: string) {
         arn = out("arn:aws:cloudwatch:alarm");
         constructor(_name: string, args: Record<string, unknown>) {
           created.push({ kind: "MetricAlarm", args });
+        }
+      },
+    },
+    lambda: {
+      FunctionEventInvokeConfig: class {
+        constructor(_name: string, args: Record<string, unknown>) {
+          created.push({ kind: "FunctionEventInvokeConfig", args });
+        }
+      },
+      Permission: class {
+        constructor(_name: string, args: Record<string, unknown>) {
+          created.push({ kind: "LambdaPermission", args });
+        }
+      },
+    },
+    sns: {
+      Topic: class {
+        arn = out("arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts");
+        constructor(_name: string, args: Record<string, unknown>) {
+          created.push({ kind: "Topic", args });
+        }
+      },
+      TopicSubscription: class {
+        constructor(_name: string, args: Record<string, unknown>) {
+          created.push({ kind: "TopicSubscription", args });
+        }
+      },
+    },
+    sqs: {
+      Queue: class {
+        arn: ReturnType<typeof out<string>>;
+        name: ReturnType<typeof out<string>>;
+        url: ReturnType<typeof out<string>>;
+        constructor(logicalName: string, args: Record<string, unknown>) {
+          this.arn = out(`arn:aws:sqs:test:123456789012:${logicalName}`);
+          this.name = out(logicalName);
+          this.url = out(`https://example.com/queues/${logicalName}`);
+          created.push({ kind: "Queue", args });
+        }
+      },
+      QueuePolicy: class {
+        constructor(_name: string, args: Record<string, unknown>) {
+          created.push({ kind: "QueuePolicy", args });
         }
       },
     },
@@ -141,6 +199,15 @@ function installGlobals(stage: string) {
     },
   };
   (globalThis as Record<string, unknown>).sst = {
+    Secret: class {
+      value: ReturnType<typeof out<string>> & { isSecret: true };
+      constructor(logicalName: string) {
+        const value = process.env[`SST_SECRET_${logicalName}`];
+        if (typeof value !== "string") throw new Error(`Missing SST secret ${logicalName}`);
+        this.value = { ...out(value), isSecret: true };
+        created.push({ kind: "Secret", args: { logicalName } });
+      }
+    },
     aws: {
       Cluster: class {
         nodes = { cluster: { name: out("mem9-cluster"), arn: out("arn:cluster") } };
@@ -171,6 +238,13 @@ function installGlobals(stage: string) {
           services.push({ args });
         }
       },
+      Function: class {
+        arn = out("arn:aws:lambda:test:123456789012:function:alert-router");
+        name = out("alert-router");
+        constructor(_logicalName: string, args: Record<string, unknown>) {
+          created.push({ kind: "Function", args });
+        }
+      },
     },
   };
   // The Cloud Map discovery-settle uses command.local.Command (§6a cold-start fix).
@@ -191,6 +265,7 @@ beforeEach(() => {
   services = [];
   params = [];
   created = [];
+  process.env.SST_SECRET_SlackWebhookUrl = "https://example.com/hooks/test";
 });
 
 function createdOf(kind: string): Record<string, unknown> {
@@ -200,10 +275,11 @@ function createdOf(kind: string): Record<string, unknown> {
 }
 
 afterEach(() => {
-  for (const g of ["$app", "aws", "sst", "command", "$interpolate"])
+  for (const g of ["$app", "aws", "sst", "command", "$interpolate", "$jsonStringify"])
     delete (globalThis as Record<string, unknown>)[g];
   delete process.env.MEM9_IMAGE_TAG;
   delete process.env.MEM9_BEDROCK_PROJECT;
+  delete process.env.SST_SECRET_SlackWebhookUrl;
   vi.resetModules();
 });
 
@@ -213,6 +289,17 @@ async function loadEcs() {
 }
 
 describe("ecs stack", () => {
+  it("fails production synthesis before resources when the Slack secret is empty", async () => {
+    process.env.SST_SECRET_SlackWebhookUrl = "";
+    installGlobals("prod");
+    const ecs = await loadEcs();
+
+    expect(() => ecs(fakeDbOut())).toThrow(
+      "SLACK_WEBHOOK_URL is required for production alert delivery",
+    );
+    expect(created).toHaveLength(0);
+  });
+
   it("takes the db stack's Outputs directly (no SSM read-back)", async () => {
     installGlobals("prod");
     const ecs = await loadEcs();
@@ -506,15 +593,15 @@ describe("ecs stack", () => {
     ]);
   });
 
-  // Observability (TC-OBS-001…003, issue #26): metric filters + alarms on prod only.
-  it("creates metric filters + alarms on prod (recall zero-hit + ingest auth failure)", async () => {
+  // Observability (TC-OBS-001...003, issue #26): metrics and alarms on prod only.
+  it("creates metric filters + alarms on prod", async () => {
     installGlobals("prod");
     const ecs = await loadEcs();
     ecs(fakeDbOut());
     const filters = created.filter((c) => c.kind === "LogMetricFilter");
     const alarms = created.filter((c) => c.kind === "MetricAlarm");
     expect(filters.length).toBe(4); // recall_zero_hit, recall_total, ingest_llm_auth_failure, ingest_dropped
-    expect(alarms.length).toBe(2); // RecallZeroHitRate, IngestAuthFailure
+    expect(alarms.length).toBe(4); // Service health plus two alert failure queues.
     // Prod alarms use treatMissingData=notBreaching.
     for (const alarm of alarms) {
       expect((alarm.args as Record<string, unknown>).treatMissingData).toBe("notBreaching");
@@ -526,7 +613,19 @@ describe("ecs stack", () => {
     expect(patterns.some((p) => p.includes("async ingest failed"))).toBe(true);
   });
 
+  it("passes the Slack webhook to Lambda only as an SST secret output", async () => {
+    installGlobals("prod");
+    const ecs = await loadEcs();
+    ecs(fakeDbOut());
+
+    expect(created.filter((resource) => resource.kind === "Secret")).toHaveLength(1);
+    const fn = createdOf("Function");
+    const environment = fn.environment as Record<string, unknown>;
+    expect(environment.SLACK_WEBHOOK_URL).toMatchObject({ isSecret: true });
+  });
+
   it("does NOT create metric filters or alarms on pr-* stages", async () => {
+    delete process.env.SST_SECRET_SlackWebhookUrl;
     installGlobals("pr-99");
     const ecs = await loadEcs();
     ecs(fakeDbOut());
@@ -534,5 +633,6 @@ describe("ecs stack", () => {
     const alarms = created.filter((c) => c.kind === "MetricAlarm");
     expect(filters.length).toBe(0);
     expect(alarms.length).toBe(0);
+    expect(created.filter((c) => c.kind === "Secret")).toHaveLength(0);
   });
 });

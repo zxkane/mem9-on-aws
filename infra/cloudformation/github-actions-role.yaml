@@ -611,15 +611,15 @@ Resources:
             Resource:
               - !Sub arn:${AWS::Partition}:sns:*:${AWS::AccountId}:mem9-on-aws-*
           - Sid: SnsSubscriptionRead
-            # GetSubscriptionAttributes on refresh addresses the subscription ARN
-            # (arn:...:mem9-on-aws-prod-alerts:<uuid>), covered above; Unsubscribe
-            # during teardown can be called with just the subscription ARN too.
+            # SNS does not support resource-level IAM authorization for these
+            # subscription APIs, so Resource must be "*". Keep the action set
+            # limited to the operations Pulumi needs for refresh/update/teardown.
             Effect: Allow
             Action:
               - sns:GetSubscriptionAttributes
+              - sns:SetSubscriptionAttributes
               - sns:Unsubscribe
-            Resource:
-              - !Sub arn:${AWS::Partition}:sns:*:${AWS::AccountId}:mem9-on-aws-*:*
+            Resource: "*"
           - Sid: CloudWatchAlarmsForScaling
             # Target-tracking scaling policies auto-provision CloudWatch alarms;
             # infra/observability.ts creates its own metric alarms too. The
@@ -1014,6 +1014,54 @@ Resources:
             Resource: "*"
 
   # ───────────────────────────────────────────────────────────────────────────
+  # Policy 10 — alert delivery failure isolation (infra/observability.ts):
+  # two encrypted SQS queues, the SNS transport queue policy, and the alert
+  # Lambda asynchronous invocation configuration. The deploy role receives only
+  # control-plane access; it cannot send, receive, or delete queue messages.
+  # ───────────────────────────────────────────────────────────────────────────
+  AlertDeliveryPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      ManagedPolicyName: !Sub ${GitHubRepo}-alert-delivery
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: SqsAlertQueueCreate
+            Effect: Allow
+            Action:
+              - sqs:CreateQueue
+            Resource:
+              - !Sub arn:${AWS::Partition}:sqs:*:${AWS::AccountId}:*
+            Condition:
+              StringEquals:
+                aws:RequestTag/Project: !Ref ProjectName
+                aws:RequestTag/ManagedBy: sst
+          - Sid: SqsAlertQueueManage
+            Effect: Allow
+            Action:
+              - sqs:DeleteQueue
+              - sqs:GetQueueAttributes
+              - sqs:GetQueueUrl
+              - sqs:ListQueueTags
+              - sqs:SetQueueAttributes
+              - sqs:TagQueue
+              - sqs:UntagQueue
+            Resource:
+              - !Sub arn:${AWS::Partition}:sqs:*:${AWS::AccountId}:*
+            Condition:
+              StringEquals:
+                aws:ResourceTag/Project: !Ref ProjectName
+                aws:ResourceTag/ManagedBy: sst
+          - Sid: LambdaAlertAsyncConfig
+            Effect: Allow
+            Action:
+              - lambda:DeleteFunctionEventInvokeConfig
+              - lambda:GetFunctionEventInvokeConfig
+              - lambda:PutFunctionEventInvokeConfig
+            Resource:
+              - !Sub arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:function:${ProjectName}-*
+
+  # ───────────────────────────────────────────────────────────────────────────
   # IAM Role — assumed by GitHub Actions via OIDC.
   # ───────────────────────────────────────────────────────────────────────────
   GitHubActionsRole:
@@ -1055,6 +1103,7 @@ Resources:
         - !Ref LambdaProxyPolicy
         - !Ref GatewayMcpPolicy
         - !Ref OAuth2FacadePolicy
+        - !Ref AlertDeliveryPolicy
       Tags:
         - Key: Project
           Value: !Ref ProjectName
