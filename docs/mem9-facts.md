@@ -194,6 +194,13 @@ Probed at the pinned commit (`server/internal/config/config.go` + `llm/client.go
   `@aws/bedrock-token-generator` — a **local SigV4 presign, 12h TTL**, refreshed on
   a timer) and injects a fresh `Authorization` + `OpenAI-Project` per request. See
   ARCHITECTURE.md §7 + `docker/llm-proxy/server.mjs`.
+- **Provider-boundary limits (patched locally):** the proxy reads at most
+  **1,048,576 bytes**, validates chat-completions JSON before forwarding, defaults
+  missing `max_tokens` to **4096**, and rejects invalid or larger explicit values.
+  The patched formatter caps the conversation at **200,000 runes** through
+  `MNEMO_MAX_EXTRACTION_CONVERSATION_RUNES`; a real-formatter regression test uses
+  four-byte Unicode to prove the final serialized request remains below the byte
+  cap. ECS injects all three values explicitly.
 
 ## Bedrock Mantle facts (for the LLM/embedding decision)
 

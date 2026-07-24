@@ -38,6 +38,18 @@
 
 import { createServer } from "node:http";
 
+const DEFAULT_MAX_BODY_BYTES = 1_048_576;
+const DEFAULT_MAX_TOKENS = 4096;
+
+function positiveInteger(raw, fallback, name) {
+  if (raw === undefined || raw === "") return fallback;
+  const value = Number(raw);
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return value;
+}
+
 // ── Config from env (read once) ──────────────────────────────────────────────
 export function readConfig(env = process.env) {
   const region = env.LLM_PROXY_REGION || env.AWS_REGION || "ap-northeast-1";
@@ -50,6 +62,18 @@ export function readConfig(env = process.env) {
     // Mantle does NOT support IAM-principal attribution, so this is how GLM-5
     // spend is tagged. Empty → header omitted (still functional, just untagged).
     openaiProject: env.LLM_PROXY_OPENAI_PROJECT || "",
+    // Provider-boundary controls. The byte value is passed to both the stream
+    // reader and the post-rewrite size check; do not introduce a second limit.
+    maxBodyBytes: positiveInteger(
+      env.LLM_PROXY_MAX_BODY_BYTES,
+      DEFAULT_MAX_BODY_BYTES,
+      "LLM_PROXY_MAX_BODY_BYTES",
+    ),
+    maxTokens: positiveInteger(
+      env.LLM_PROXY_MAX_TOKENS,
+      DEFAULT_MAX_TOKENS,
+      "LLM_PROXY_MAX_TOKENS",
+    ),
     // The bearer's lifetime. getToken's default+max is 12h (43200s); we mint at
     // max and refresh at a fraction so a fresh token is always well within expiry.
     tokenTtlSeconds: Number(env.LLM_PROXY_TOKEN_TTL_SECONDS || 43200),
@@ -72,19 +96,124 @@ function sendJson(res, status, obj) {
   res.end(body);
 }
 
-function sendError(res, status, message, type = "invalid_request_error") {
-  sendJson(res, status, { error: { message, type } });
+function sendError(
+  res,
+  status,
+  message,
+  type = "invalid_request_error",
+  code = null,
+  param = null,
+) {
+  sendJson(res, status, { error: { message, type, param, code } });
 }
 
-async function readBody(req, limitBytes = 8 * 1024 * 1024) {
+class RequestValidationError extends Error {
+  constructor(status, code, message, bodyBytes, phase) {
+    super(message);
+    this.name = "RequestValidationError";
+    this.status = status;
+    this.code = code;
+    this.bodyBytes = bodyBytes;
+    this.phase = phase;
+    this.outcomeClass = "permanent";
+  }
+}
+
+function logValidationFailure(req, url, err) {
+  const declaredLength = req.headers["content-length"];
+  console.warn(
+    JSON.stringify({
+      event: "llm_proxy_validation",
+      status: err.status,
+      code: err.code,
+      outcome_class: err.outcomeClass,
+      validation_phase: err.phase,
+      method: req.method,
+      path: url.pathname,
+      content_length: Array.isArray(declaredLength)
+        ? declaredLength.join(",")
+        : (declaredLength ?? null),
+      body_bytes: err.bodyBytes,
+    }),
+  );
+}
+
+async function readBody(req, limitBytes) {
   const chunks = [];
   let size = 0;
   for await (const chunk of req) {
     size += chunk.length;
-    if (size > limitBytes) throw new Error("request body too large");
+    if (size > limitBytes) {
+      throw new RequestValidationError(
+        413,
+        "request_too_large",
+        `request body exceeds ${limitBytes} bytes`,
+        size,
+        "read",
+      );
+    }
     chunks.push(chunk);
   }
   return Buffer.concat(chunks);
+}
+
+function rewriteChatCompletion(bodyBuf, cfg) {
+  let payload;
+  try {
+    const text = new TextDecoder("utf-8", { fatal: true }).decode(bodyBuf);
+    payload = JSON.parse(text);
+  } catch {
+    throw new RequestValidationError(
+      400,
+      "invalid_json",
+      "request body is not valid JSON",
+      bodyBuf.length,
+      "parse",
+    );
+  }
+
+  if (
+    payload === null ||
+    typeof payload !== "object" ||
+    Array.isArray(payload) ||
+    typeof payload.model !== "string" ||
+    payload.model.trim() === "" ||
+    !Array.isArray(payload.messages)
+  ) {
+    throw new RequestValidationError(
+      400,
+      "invalid_chat_completions_request",
+      "request body must be a chat-completions object with model and messages",
+      bodyBuf.length,
+      "semantic",
+    );
+  }
+
+  let maxTokens = cfg.maxTokens;
+  if (Object.hasOwn(payload, "max_tokens")) {
+    maxTokens = payload.max_tokens;
+    if (!Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > cfg.maxTokens) {
+      throw new RequestValidationError(
+        400,
+        "invalid_max_tokens",
+        `max_tokens must be an integer from 1 through ${cfg.maxTokens}`,
+        bodyBuf.length,
+        "semantic",
+      );
+    }
+  }
+
+  const rewritten = Buffer.from(JSON.stringify({ ...payload, max_tokens: maxTokens }));
+  if (rewritten.length > cfg.maxBodyBytes) {
+    throw new RequestValidationError(
+      413,
+      "request_too_large",
+      `rewritten request body exceeds ${cfg.maxBodyBytes} bytes`,
+      rewritten.length,
+      "rewrite",
+    );
+  }
+  return rewritten;
 }
 
 /**
@@ -133,6 +262,7 @@ export function createProxyServer(cfg, deps = {}) {
     const headers = {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
+      "Content-Length": String(bodyBuf.length),
     };
     if (cfg.openaiProject) headers["OpenAI-Project"] = cfg.openaiProject;
 
@@ -166,8 +296,9 @@ export function createProxyServer(cfg, deps = {}) {
   }
 
   const server = createServer(async (req, res) => {
+    let url;
     try {
-      const url = new URL(req.url, `http://localhost:${cfg.port}`);
+      url = new URL(req.url, `http://localhost:${cfg.port}`);
 
       // Readiness: 200 once the first bearer is minted. The ECS health check gates
       // the task on this so mnemo-server isn't marked healthy before the proxy can
@@ -186,7 +317,8 @@ export function createProxyServer(cfg, deps = {}) {
       // mem9 posts to `${MNEMO_LLM_BASE_URL}/chat/completions`; base is
       // http://localhost:PORT/v1 → accept /v1/chat/completions and /chat/completions.
       if (req.method === "POST" && /\/(v1\/)?chat\/completions$/.test(url.pathname)) {
-        const bodyBuf = await readBody(req);
+        const inboundBody = await readBody(req, cfg.maxBodyBytes);
+        const bodyBuf = rewriteChatCompletion(inboundBody, cfg);
         const upstream = await forwardToMantle(bodyBuf);
         // Pass the upstream status + JSON body straight through. mem9 handles
         // non-2xx itself (it strips provider-specific flags on 400 and retries).
@@ -198,8 +330,18 @@ export function createProxyServer(cfg, deps = {}) {
         return res.end(text);
       }
 
-      return sendError(res, 404, `no route for ${req.method} ${url.pathname}`, "not_found");
+      return sendError(
+        res,
+        404,
+        `no route for ${req.method} ${url.pathname}`,
+        "not_found",
+        "not_found",
+      );
     } catch (err) {
+      if (err instanceof RequestValidationError) {
+        logValidationFailure(req, url, err);
+        return sendError(res, err.status, err.message, "invalid_request_error", err.code);
+      }
       // AbortError = upstream timeout; everything else = proxy/mint failure. Never
       // leak internals; log server-side, return an OpenAI-shaped error.
       const isTimeout = err?.name === "AbortError";
@@ -209,6 +351,7 @@ export function createProxyServer(cfg, deps = {}) {
         isTimeout ? 504 : 502,
         isTimeout ? "upstream Mantle request timed out" : "llm-proxy failed to reach Mantle",
         "server_error",
+        isTimeout ? "upstream_timeout" : "upstream_error",
       );
     }
   });

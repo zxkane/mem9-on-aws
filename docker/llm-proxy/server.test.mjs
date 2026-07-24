@@ -23,10 +23,51 @@ const baseCfg = {
   region: "ap-northeast-1",
   upstreamBase: "https://mantle.test/v1",
   openaiProject: "proj-abc",
+  maxBodyBytes: 1_048_576,
+  maxTokens: 4096,
   tokenTtlSeconds: 43200,
   refreshIntervalMs: 60 * 60 * 1000,
   upstreamTimeoutMs: 120_000,
 };
+
+const validRequest = {
+  model: "zai.glm-5",
+  messages: [{ role: "user", content: "hi" }],
+};
+const validBody = JSON.stringify(validRequest);
+
+function chatBodyAtBytes(size, { multibyte = false, includeMaxTokens = true } = {}) {
+  const prefix = '{"model":"zai.glm-5","messages":[{"role":"user","content":"';
+  const suffix = `"}]${includeMaxTokens ? ',"max_tokens":1' : ""}}`;
+  const fixedBytes = Buffer.byteLength(prefix) + Buffer.byteLength(suffix);
+  if (fixedBytes > size) throw new Error(`requested body size ${size} is too small`);
+  const contentBytes = size - fixedBytes;
+  const emoji = multibyte ? "😀".repeat(Math.floor(contentBytes / 4)) : "";
+  const ascii = "a".repeat(contentBytes - Buffer.byteLength(emoji));
+  const body = Buffer.from(prefix + emoji + ascii + suffix);
+  if (body.length !== size) throw new Error(`built ${body.length} bytes, expected ${size}`);
+  return body;
+}
+
+async function postRaw(target, body) {
+  const res = await fetch(new URL("/v1/chat/completions", target), {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body,
+  });
+  return { status: res.status, body: await res.text() };
+}
+
+function expectOpenAiError(payload, code) {
+  expect(payload).toEqual({
+    error: {
+      message: expect.any(String),
+      type: "invalid_request_error",
+      param: null,
+      code,
+    },
+  });
+}
 
 const openInstances = [];
 afterEach(async () => {
@@ -55,12 +96,21 @@ describe("readConfig", () => {
     const c = readConfig({});
     expect(c.tokenTtlSeconds).toBe(43200); // getToken max/default
     expect(c.refreshIntervalMs).toBe(3_600_000);
+    expect(c.maxBodyBytes).toBe(1_048_576);
+    expect(c.maxTokens).toBe(4096);
   });
 
   it("honors an explicit upstream override + project", () => {
-    const c = readConfig({ LLM_PROXY_UPSTREAM_BASE: "https://x/v1", LLM_PROXY_OPENAI_PROJECT: "p1" });
+    const c = readConfig({
+      LLM_PROXY_UPSTREAM_BASE: "https://x/v1",
+      LLM_PROXY_OPENAI_PROJECT: "p1",
+      LLM_PROXY_MAX_BODY_BYTES: "2048",
+      LLM_PROXY_MAX_TOKENS: "512",
+    });
     expect(c.upstreamBase).toBe("https://x/v1");
     expect(c.openaiProject).toBe("p1");
+    expect(c.maxBodyBytes).toBe(2048);
+    expect(c.maxTokens).toBe(512);
   });
 });
 
@@ -106,7 +156,7 @@ describe("createProxyServer", () => {
     );
     const { url, start } = await boot(baseCfg, { mintToken: async () => "t", fetchImpl });
     await start();
-    const res = await fetch(`${url}/chat/completions`, { method: "POST", body: "{}" });
+    const res = await fetch(`${url}/chat/completions`, { method: "POST", body: validBody });
     expect(res.status).toBe(200);
     expect(fetchImpl).toHaveBeenCalledOnce();
   });
@@ -119,8 +169,211 @@ describe("createProxyServer", () => {
     });
     const { url, start } = await boot({ ...baseCfg, openaiProject: "" }, { mintToken: async () => "t", fetchImpl });
     await start();
-    await fetch(`${url}/v1/chat/completions`, { method: "POST", body: "{}" });
+    await fetch(`${url}/v1/chat/completions`, { method: "POST", body: validBody });
     expect(captured.headers["OpenAI-Project"]).toBeUndefined();
+  });
+
+  describe("request bounds and rewrite", () => {
+    it("TC-GLM-BOUND-002/003: accepts exactly N bytes and rejects N+1 without forwarding", async () => {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response("{}", { status: 200, headers: { "content-type": "application/json" } }),
+      );
+      const { url, start } = await boot(baseCfg, { mintToken: async () => "t", fetchImpl });
+      await start();
+
+      const atLimit = await postRaw(url, chatBodyAtBytes(baseCfg.maxBodyBytes));
+      expect(atLimit.status).toBe(200);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(Buffer.from(fetchImpl.mock.calls[0][1].body)).toHaveLength(baseCfg.maxBodyBytes);
+
+      const overLimit = await postRaw(url, chatBodyAtBytes(baseCfg.maxBodyBytes + 1));
+      expect(overLimit.status).toBe(413);
+      expectOpenAiError(JSON.parse(overLimit.body), "request_too_large");
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    });
+
+    it("TC-GLM-BOUND-004: counts four-byte UTF-8 at the N/N+1 boundary", async () => {
+      const fetchImpl = vi.fn(
+        async () =>
+          new Response("{}", { status: 200, headers: { "content-type": "application/json" } }),
+      );
+      const { url, start } = await boot(baseCfg, { mintToken: async () => "t", fetchImpl });
+      await start();
+
+      expect((await postRaw(url, chatBodyAtBytes(baseCfg.maxBodyBytes, { multibyte: true }))).status).toBe(200);
+      const over = await postRaw(
+        url,
+        chatBodyAtBytes(baseCfg.maxBodyBytes + 1, { multibyte: true }),
+      );
+      expect(over.status).toBe(413);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+    });
+
+    it("TC-GLM-BOUND-005: rejects malformed JSON with an OpenAI error", async () => {
+      const fetchImpl = vi.fn();
+      const { url, start } = await boot(baseCfg, { mintToken: async () => "t", fetchImpl });
+      await start();
+
+      const res = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: '{"model":' });
+      expect(res.status).toBe(400);
+      expectOpenAiError(await res.json(), "invalid_json");
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["array", []],
+      ["null", null],
+      ["missing model", { messages: [] }],
+      ["non-string model", { model: 1, messages: [] }],
+      ["missing messages", { model: "zai.glm-5" }],
+      ["non-array messages", { model: "zai.glm-5", messages: {} }],
+    ])("TC-GLM-BOUND-006: rejects %s as a non-chat payload", async (_name, payload) => {
+      const fetchImpl = vi.fn();
+      const { url, start } = await boot(baseCfg, { mintToken: async () => "t", fetchImpl });
+      await start();
+
+      const res = await fetch(`${url}/v1/chat/completions`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      expect(res.status).toBe(400);
+      expectOpenAiError(await res.json(), "invalid_chat_completions_request");
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
+
+    it.each([
+      ["missing", undefined, 4096],
+      ["minimum", 1, 1],
+      ["smaller", 1024, 1024],
+      ["maximum", 4096, 4096],
+    ])("TC-GLM-BOUND-007/008/009: preserves/defaults %s max_tokens", async (_name, value, expected) => {
+      let forwarded;
+      const fetchImpl = vi.fn(async (_target, opts) => {
+        forwarded = JSON.parse(Buffer.from(opts.body).toString("utf8"));
+        return new Response("{}", {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      });
+      const { url, start } = await boot(baseCfg, { mintToken: async () => "t", fetchImpl });
+      await start();
+
+      const payload = structuredClone(validRequest);
+      if (value !== undefined) payload.max_tokens = value;
+      const res = await fetch(`${url}/v1/chat/completions`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      expect(res.status).toBe(200);
+      expect(forwarded.max_tokens).toBe(expected);
+    });
+
+    it.each([
+      ["string", "4096"],
+      ["null", null],
+      ["boolean", true],
+      ["fraction", 1.5],
+      ["zero", 0],
+      ["negative", -1],
+      ["over maximum", 4097],
+    ])("TC-GLM-BOUND-010/011: rejects %s max_tokens without clamping", async (_name, value) => {
+      const fetchImpl = vi.fn();
+      const { url, start } = await boot(baseCfg, { mintToken: async () => "t", fetchImpl });
+      await start();
+
+      const res = await fetch(`${url}/v1/chat/completions`, {
+        method: "POST",
+        body: JSON.stringify({ ...validRequest, max_tokens: value }),
+      });
+      expect(res.status).toBe(400);
+      expectOpenAiError(await res.json(), "invalid_max_tokens");
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
+
+    it("TC-GLM-BOUND-012/013: preserves fields and sets rewritten Content-Length", async () => {
+      let captured;
+      const fetchImpl = vi.fn(async (_target, opts) => {
+        captured = opts;
+        return new Response("{}", {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      });
+      const { url, start } = await boot(baseCfg, { mintToken: async () => "t", fetchImpl });
+      await start();
+      const payload = {
+        model: "zai.glm-5",
+        messages: [
+          { role: "system", content: "fixed prompt" },
+          { role: "user", content: "normal mem9 request" },
+        ],
+        temperature: 0.1,
+        response_format: { type: "json_object" },
+        enable_thinking: false,
+        provider_extension: { nested: ["kept", 3] },
+      };
+
+      const res = await fetch(`${url}/v1/chat/completions`, {
+        method: "POST",
+        body: JSON.stringify(payload),
+      });
+      expect(res.status).toBe(200);
+      const rewritten = Buffer.from(captured.body);
+      expect(JSON.parse(rewritten.toString("utf8"))).toEqual({ ...payload, max_tokens: 4096 });
+      expect(captured.headers["Content-Length"]).toBe(String(rewritten.length));
+    });
+
+    it("TC-GLM-BOUND-014: rejects when adding max_tokens pushes the rewritten body over N", async () => {
+      const cfg = { ...baseCfg, maxBodyBytes: 512 };
+      const fetchImpl = vi.fn();
+      const { url, start } = await boot(cfg, { mintToken: async () => "t", fetchImpl });
+      await start();
+
+      const inbound = chatBodyAtBytes(cfg.maxBodyBytes, { includeMaxTokens: false });
+      const res = await postRaw(url, inbound);
+      expect(res.status).toBe(413);
+      expectOpenAiError(JSON.parse(res.body), "request_too_large");
+      expect(fetchImpl).not.toHaveBeenCalled();
+    });
+
+    it("TC-GLM-BOUND-015/016: logs redacted permanent validation metadata for 400 and 413", async () => {
+      const logSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const cfg = { ...baseCfg, maxBodyBytes: 128 };
+      const { url, start } = await boot(cfg, { mintToken: async () => "t", fetchImpl: vi.fn() });
+      await start();
+
+      const secretMarker = "MEMORY-CONTENT-MUST-NOT-APPEAR";
+      await fetch(`${url}/v1/chat/completions`, {
+        method: "POST",
+        body: `{"model":"${secretMarker}"`,
+      });
+      await postRaw(url, chatBodyAtBytes(cfg.maxBodyBytes + 1));
+
+      const logs = logSpy.mock.calls.map(([line]) => JSON.parse(line));
+      expect(logs).toHaveLength(2);
+      expect(logs[0]).toMatchInlineSnapshot(`
+        {
+          "body_bytes": 41,
+          "code": "invalid_json",
+          "content_length": "41",
+          "event": "llm_proxy_validation",
+          "method": "POST",
+          "outcome_class": "permanent",
+          "path": "/v1/chat/completions",
+          "status": 400,
+          "validation_phase": "parse",
+        }
+      `);
+      expect(logs[1]).toMatchObject({
+        event: "llm_proxy_validation",
+        status: 413,
+        code: "request_too_large",
+        outcome_class: "permanent",
+        validation_phase: "read",
+      });
+      expect(logSpy.mock.calls.flat().join(" ")).not.toContain(secretMarker);
+    });
   });
 
   // 401-reactive re-mint (issue #24, TC-PROXY401-001…006): a bearer presigned
@@ -152,7 +405,7 @@ describe("createProxyServer", () => {
       const { url, start } = await boot(baseCfg, { mintToken, fetchImpl });
       await start();
 
-      const res = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: "{}" });
+      const res = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: validBody });
       expect(res.status).toBe(200);
       expect((await res.json()).choices[0].message.content).toBe("PONG");
       expect(mintToken).toHaveBeenCalledTimes(2); // initial + 401-triggered re-mint
@@ -165,7 +418,7 @@ describe("createProxyServer", () => {
       const { url, start } = await boot(baseCfg, { mintToken, fetchImpl });
       await start();
 
-      const res = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: "{}" });
+      const res = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: validBody });
       expect(res.status).toBe(401); // mem9 sees the real upstream status
       expect((await res.json()).error.code).toBe("invalid_api_key");
       expect(fetchImpl).toHaveBeenCalledTimes(2); // original + exactly one retry
@@ -181,7 +434,7 @@ describe("createProxyServer", () => {
       const { url, start } = await boot(baseCfg, { mintToken, fetchImpl });
       await start();
 
-      const res = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: "{}" });
+      const res = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: validBody });
       expect(res.status).toBe(200);
       expect(mintToken).toHaveBeenCalledTimes(2);
     });
@@ -195,7 +448,7 @@ describe("createProxyServer", () => {
         const { url, start } = await boot(baseCfg, { mintToken, fetchImpl });
         await start();
 
-        const res = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: "{}" });
+        const res = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: validBody });
         expect(res.status).toBe(status);
         expect(fetchImpl).toHaveBeenCalledTimes(1); // no retry
         expect(mintToken).toHaveBeenCalledTimes(1); // no re-mint
@@ -211,7 +464,7 @@ describe("createProxyServer", () => {
       const { url, start } = await boot(baseCfg, { mintToken, fetchImpl });
       await start();
 
-      const res = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: "{}" });
+      const res = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: validBody });
       expect(res.status).toBe(502);
       expect((await res.json()).error.type).toBe("server_error");
     });
@@ -226,7 +479,7 @@ describe("createProxyServer", () => {
       const { url, start } = await boot(baseCfg, { mintToken, fetchImpl });
       await start();
 
-      await fetch(`${url}/v1/chat/completions`, { method: "POST", body: "{}" });
+      await fetch(`${url}/v1/chat/completions`, { method: "POST", body: validBody });
       // The full prefix is a stable contract — the #26 CloudWatch metric
       // filter matches it verbatim. Do not loosen this assertion.
       const line = logSpy.mock.calls.map((c) => c.join(" ")).find((m) => /re-mint/.test(m));
@@ -270,7 +523,7 @@ describe("createProxyServer", () => {
     );
     const { url, start } = await boot(baseCfg, { mintToken: async () => "t", fetchImpl });
     await start();
-    const res = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: "{}" });
+    const res = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: validBody });
     expect(res.status).toBe(400); // mem9 relies on seeing the real upstream status
     expect((await res.json()).error.message).toBe("bad model");
   });
@@ -281,7 +534,7 @@ describe("createProxyServer", () => {
     });
     const { url, start } = await boot(baseCfg, { mintToken: async () => "t", fetchImpl });
     await start();
-    const res = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: "{}" });
+    const res = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: validBody });
     expect(res.status).toBe(502);
     expect((await res.json()).error.type).toBe("server_error");
   });
@@ -294,7 +547,7 @@ describe("createProxyServer", () => {
     });
     const { url, start } = await boot(baseCfg, { mintToken: async () => "t", fetchImpl });
     await start();
-    const res = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: "{}" });
+    const res = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: validBody });
     expect(res.status).toBe(504);
   });
 
@@ -354,11 +607,11 @@ describe("createProxyServer", () => {
     const { url } = await boot(baseCfg, { mintToken, fetchImpl });
 
     // First request: the mint rejects → proxy returns 502.
-    const first = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: "{}" });
+    const first = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: validBody });
     expect(first.status).toBe(502);
 
     // Second request: mint now succeeds → the proxy self-heals and forwards.
-    const second = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: "{}" });
+    const second = await fetch(`${url}/v1/chat/completions`, { method: "POST", body: validBody });
     expect(second.status).toBe(200);
     expect(mintToken).toHaveBeenCalledTimes(2); // retried, not cached-rejected
   });
