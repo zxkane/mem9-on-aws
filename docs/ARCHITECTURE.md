@@ -145,6 +145,11 @@ selected model and endpoint; it is not a general AWS availability claim.
 `mnemo-server` and the one-shot bootstrap task connect **directly to the Aurora
 cluster writer endpoint**. **RDS Proxy is not deployed.**
 
+Automated backup retention is fixed in IaC at **14 days for production** and
+**1 day for every non-production stage**. Recovery restores a separate cluster;
+the operator procedure is in the
+[Aurora PITR runbook](../README.md#aurora-backup-and-point-in-time-recovery).
+
 AWS documents that the Aurora cluster endpoint follows the current primary and
 should be used for write operations:
 [Aurora cluster endpoints](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.Endpoints.Cluster.html).
@@ -230,7 +235,7 @@ do not require persistent task storage.
 | Layer | Current resource or component | Source |
 |---|---|---|
 | Compute | ECS Fargate, arm64, one task, three containers | `infra/ecs.ts` |
-| Database | Aurora PostgreSQL Serverless v2, direct writer endpoint | `infra/db.ts` |
+| Database | Aurora PostgreSQL Serverless v2, direct writer endpoint; PITR retention prod=14 days, non-prod=1 day | `infra/db.ts` |
 | Database credential | Secrets Manager task-definition secret | `infra/db.ts`, `docker/mnemo-server/entrypoint.sh` |
 | Embedding | Local qwen3 sidecar, 1024 dimensions | `docker/qwen3-embed/` |
 | Smart-ingest LLM | Local proxy to Bedrock Mantle | `docker/llm-proxy/` |
@@ -243,6 +248,8 @@ do not require persistent task storage.
 ## Locked decisions
 
 - Aurora PostgreSQL plus pgvector is the database engine.
+- Aurora automated backup retention is 14 days in production and 1 day in every
+  non-production stage; PITR restores to a separate cluster.
 - `mnemo-server` and bootstrap connect directly to the Aurora writer endpoint.
 - Database authentication uses a Secrets Manager password over TLS, not native
   IAM database authentication.
@@ -264,8 +271,6 @@ The open reliability program covers future work in these areas:
 
 - Release image tag selection and read-only ECS actual-state reconciliation.
 - Mandatory alert delivery with separate transport and execution failure queues.
-- A 14-day production Aurora point-in-time recovery retention policy and restore
-  runbook.
 - Safe preview-stage reconciliation and a separately reviewed one-time cleanup.
 - Registry-level ECR scan-on-push coverage.
 - A disabled-by-default durable ingest job foundation, atomic plan application,

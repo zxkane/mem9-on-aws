@@ -1,11 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { readFileSync } from "node:fs";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 
 /**
  * Unit tests for the `db` stack factory. Mocks the SST globals ($app,
  * aws.ec2.*, aws.ssm.Parameter, sst.aws.Aurora) so the factory runs bare.
  * Asserts the security-group relationship (5432 from the task SG only), the
  * Aurora args (postgres, NO proxy, scaling, vpc wiring), the SSM export contract,
- * and the prod-vs-non-prod final-snapshot transform.
+ * and the stage-derived backup/deletion/final-snapshot transform.
  */
 
 function out<T>(value: T): { value: T; apply: (fn: (v: T) => unknown) => unknown } {
@@ -28,6 +31,7 @@ interface AuroraRecord {
 let sgs: SgRecord[];
 let params: ParamRecord[];
 let auroras: AuroraRecord[];
+const dbSource = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "db.ts"), "utf8");
 
 function installGlobals(stage: string) {
   (globalThis as Record<string, unknown>).$app = { name: "mem9-on-aws", stage };
@@ -142,34 +146,72 @@ describe("db stack", () => {
     expect(transform.proxy).toBeUndefined();
   });
 
-  it("skips the final snapshot on non-prod, keeps it on prod", async () => {
-    // non-prod: transform sets skipFinalSnapshot = true
-    installGlobals("pr-7");
-    let db = await loadDb();
+  it("sets production backup retention to 14 days", async () => {
+    installGlobals("prod");
+    const db = await loadDb();
     db();
     const clusterTransform = (
       auroras[0].args.transform as { cluster: (a: Record<string, unknown>) => void }
     ).cluster;
-    const nonProdArgs: Record<string, unknown> = {};
-    clusterTransform(nonProdArgs);
-    expect(nonProdArgs.skipFinalSnapshot).toBe(true);
+    const clusterArgs: Record<string, unknown> = {};
+    clusterTransform(clusterArgs);
 
-    // prod: transform leaves skipFinalSnapshot unset (cluster is protected)
-    sgs = [];
-    params = [];
-    auroras = [];
+    expect(clusterArgs.backupRetentionPeriod).toBe(14);
+  });
+
+  it.each(["pr-7", "dev", "qa"])(
+    "sets backup retention to 1 day for non-production stage %s",
+    async (stage) => {
+      installGlobals(stage);
+      const db = await loadDb();
+      db();
+      const clusterTransform = (
+        auroras[0].args.transform as { cluster: (a: Record<string, unknown>) => void }
+      ).cluster;
+      const clusterArgs: Record<string, unknown> = {};
+      clusterTransform(clusterArgs);
+
+      expect(clusterArgs.backupRetentionPeriod).toBe(1);
+    },
+  );
+
+  it("derives backup retention directly from stage with no retention override path", () => {
+    expect(dbSource).toContain(
+      'args.backupRetentionPeriod = $app.stage === "prod" ? 14 : 1;',
+    );
+  });
+
+  it("preserves production deletion protection and final snapshots", async () => {
     installGlobals("prod");
-    db = await loadDb();
+    const db = await loadDb();
     db();
-    const prodTransform = (
+    const clusterTransform = (
       auroras[0].args.transform as { cluster: (a: Record<string, unknown>) => void }
     ).cluster;
-    const prodArgs: Record<string, unknown> = {};
-    prodTransform(prodArgs);
-    // prod keeps the default final snapshot AND sets RDS deletion protection.
-    expect(prodArgs.skipFinalSnapshot).toBeUndefined();
-    expect(prodArgs.deletionProtection).toBe(true);
+    // SST supplies skipFinalSnapshot=true before invoking this transform.
+    const clusterArgs: Record<string, unknown> = { skipFinalSnapshot: true };
+    clusterTransform(clusterArgs);
+
+    expect(clusterArgs.deletionProtection).toBe(true);
+    expect(clusterArgs.skipFinalSnapshot).toBe(true);
   });
+
+  it.each(["pr-7", "dev"])(
+    "preserves removable, no-final-snapshot behavior for %s",
+    async (stage) => {
+      installGlobals(stage);
+      const db = await loadDb();
+      db();
+      const clusterTransform = (
+        auroras[0].args.transform as { cluster: (a: Record<string, unknown>) => void }
+      ).cluster;
+      const clusterArgs: Record<string, unknown> = { skipFinalSnapshot: true };
+      clusterTransform(clusterArgs);
+
+      expect(clusterArgs.deletionProtection).toBeUndefined();
+      expect(clusterArgs.skipFinalSnapshot).toBe(true);
+    },
+  );
 
   it("exports the connection pieces under /mem9-on-aws/${stage}/db/ (no DSN, no password)", async () => {
     installGlobals("prod");

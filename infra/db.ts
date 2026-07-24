@@ -124,11 +124,16 @@ export function db(): DbOutputs {
       // prod: RDS-native deletionProtection = true (defense-in-depth beyond the
       // app-level removal:retain + protect in sst.config.ts — those guard the
       // Pulumi resource, but the deploy role holds rds:DeleteDBCluster, so a
-      // direct/console delete could still drop prod without this). prod keeps the
-      // default final snapshot (skipFinalSnapshot stays false).
-      // non-prod (dev / pr-*): skip the final snapshot + no deletion protection
-      // so `sst remove --stage pr-N` tears down fast and clean.
+      // direct/console delete could still drop prod without this). SST's existing
+      // Aurora default skips a final snapshot; prod instead relies on app-level
+      // retain/protect, RDS deletion protection, automated backups, and explicit
+      // operator snapshots. Production retains PITR backups for 14 days.
+      // non-prod (dev / pr-*): explicitly skip the final snapshot + no deletion
+      // protection so `sst remove --stage pr-N` tears down fast and clean; PITR
+      // retention is fixed at the one-day Aurora minimum. Retention is derived
+      // only from the stage, with no runtime environment override.
       cluster: (args) => {
+        args.backupRetentionPeriod = $app.stage === "prod" ? 14 : 1;
         if ($app.stage === "prod") {
           args.deletionProtection = true;
         } else {
