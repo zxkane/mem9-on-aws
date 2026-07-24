@@ -32,7 +32,7 @@ export interface ObservabilityInputs {
   // never exist). Deriving from the task def both yields the REAL name and
   // threads a Pulumi dependency edge through the log group's creator.
   logGroupName: Output<string>;
-  slackWebhookUrl?: string;
+  slackWebhookUrl?: Input<string>;
 }
 
 export function observability(inputs: ObservabilityInputs) {

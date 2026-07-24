@@ -119,6 +119,17 @@ export interface EcsOutputs {
  *   dependency so ECS waits for the DB resources.
  */
 export function ecs(dbOut: DbOutputs): EcsOutputs {
+  // GitHub exposes an unset repository secret as an empty string. Reject that
+  // before registering any resources; sst.Secret accepts empty string values.
+  const configuredSlackWebhook = process.env.SST_SECRET_SlackWebhookUrl;
+  if ($app.stage === "prod" && !configuredSlackWebhook) {
+    throw new Error("SLACK_WEBHOOK_URL is required for production alert delivery");
+  }
+  // Secret.value is a Pulumi secret Output, so the webhook remains encrypted
+  // and redacted in state, diagnostics, and the Lambda environment diff.
+  const slackWebhookUrl =
+    $app.stage === "prod" ? new sst.Secret("SlackWebhookUrl").value : undefined;
+
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const { vpcId, privateSubnetIds } = resolveVpc();
 
@@ -467,7 +478,6 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
   // (`ignoreChanges: ["name"]`), so a hand-computed name silently diverges on
   // stacks whose group already exists. Reading it also gives the metric
   // filters a real Pulumi dependency on the log group's creator.
-  const slackWebhookUrl = process.env.SLACK_WEBHOOK_URL || undefined;
   const mnemoLogGroupName = service.nodes.taskDefinition
     .apply((td) => (td as { containerDefinitions: Output<string> }).containerDefinitions)
     .apply((raw: string) => {

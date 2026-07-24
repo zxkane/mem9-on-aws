@@ -806,8 +806,9 @@ jobs:
           # scripts/deploy-bedrock-mantle-project.sh.
           MEM9_BEDROCK_PROJECT: ${{ vars.MEM9_BEDROCK_PROJECT }}
           # Slack incoming webhook for prod alarm delivery (infra/observability.ts).
-          # REQUIRED: production synthesis fails when this managed sink is unset.
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          # SST marks this value secret before it enters Pulumi state or Lambda config.
+          # Production synthesis fails when the managed sink is unset.
+          SST_SECRET_SlackWebhookUrl: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
           set +e
           pnpm -C infra exec sst deploy --stage prod --print-logs 2>&1 | tee sst-deploy.log

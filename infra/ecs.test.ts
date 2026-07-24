@@ -199,6 +199,15 @@ function installGlobals(stage: string) {
     },
   };
   (globalThis as Record<string, unknown>).sst = {
+    Secret: class {
+      value: ReturnType<typeof out<string>> & { isSecret: true };
+      constructor(logicalName: string) {
+        const value = process.env[`SST_SECRET_${logicalName}`];
+        if (typeof value !== "string") throw new Error(`Missing SST secret ${logicalName}`);
+        this.value = { ...out(value), isSecret: true };
+        created.push({ kind: "Secret", args: { logicalName } });
+      }
+    },
     aws: {
       Cluster: class {
         nodes = { cluster: { name: out("mem9-cluster"), arn: out("arn:cluster") } };
@@ -256,7 +265,7 @@ beforeEach(() => {
   services = [];
   params = [];
   created = [];
-  process.env.SLACK_WEBHOOK_URL = "https://example.com/hooks/test";
+  process.env.SST_SECRET_SlackWebhookUrl = "https://example.com/hooks/test";
 });
 
 function createdOf(kind: string): Record<string, unknown> {
@@ -270,7 +279,7 @@ afterEach(() => {
     delete (globalThis as Record<string, unknown>)[g];
   delete process.env.MEM9_IMAGE_TAG;
   delete process.env.MEM9_BEDROCK_PROJECT;
-  delete process.env.SLACK_WEBHOOK_URL;
+  delete process.env.SST_SECRET_SlackWebhookUrl;
   vi.resetModules();
 });
 
@@ -280,6 +289,17 @@ async function loadEcs() {
 }
 
 describe("ecs stack", () => {
+  it("fails production synthesis before resources when the Slack secret is empty", async () => {
+    process.env.SST_SECRET_SlackWebhookUrl = "";
+    installGlobals("prod");
+    const ecs = await loadEcs();
+
+    expect(() => ecs(fakeDbOut())).toThrow(
+      "SLACK_WEBHOOK_URL is required for production alert delivery",
+    );
+    expect(created).toHaveLength(0);
+  });
+
   it("takes the db stack's Outputs directly (no SSM read-back)", async () => {
     installGlobals("prod");
     const ecs = await loadEcs();
@@ -592,7 +612,19 @@ describe("ecs stack", () => {
     expect(patterns.some((p) => p.includes("async ingest failed"))).toBe(true);
   });
 
+  it("passes the Slack webhook to Lambda only as an SST secret output", async () => {
+    installGlobals("prod");
+    const ecs = await loadEcs();
+    ecs(fakeDbOut());
+
+    expect(created.filter((resource) => resource.kind === "Secret")).toHaveLength(1);
+    const fn = createdOf("Function");
+    const environment = fn.environment as Record<string, unknown>;
+    expect(environment.SLACK_WEBHOOK_URL).toMatchObject({ isSecret: true });
+  });
+
   it("does NOT create metric filters or alarms on pr-* stages", async () => {
+    delete process.env.SST_SECRET_SlackWebhookUrl;
     installGlobals("pr-99");
     const ecs = await loadEcs();
     ecs(fakeDbOut());
@@ -600,5 +632,6 @@ describe("ecs stack", () => {
     const alarms = created.filter((c) => c.kind === "MetricAlarm");
     expect(filters.length).toBe(0);
     expect(alarms.length).toBe(0);
+    expect(created.filter((c) => c.kind === "Secret")).toHaveLength(0);
   });
 });

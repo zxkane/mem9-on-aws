@@ -1,5 +1,6 @@
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { parse } from "yaml";
 import { observability } from "./observability";
 
 interface ResourceRecord {
@@ -131,20 +132,6 @@ function queue(logicalName: string): ResourceRecord {
   );
   expect(match).toBeDefined();
   return match!;
-}
-
-function policyStatement(template: string, sid: string): string {
-  const start = template.indexOf(`          - Sid: ${sid}`);
-  expect(start).toBeGreaterThan(-1);
-  const remainder = template.slice(start + 1);
-  const nextStatement = remainder.search(/\n          - Sid: |\n\n  #/);
-  return template.slice(start, nextStatement === -1 ? undefined : start + 1 + nextStatement);
-}
-
-function iamActions(statement: string): string[] {
-  return [...statement.matchAll(/^\s+- ((?:sqs|lambda):[A-Za-z*]+)$/gm)]
-    .map((match) => match[1])
-    .sort();
 }
 
 beforeEach(() => {
@@ -293,58 +280,101 @@ describe("observability alert delivery", () => {
   });
 
   it("TC-ALERT-010: deploy role has only tagged SQS control-plane access", () => {
-    const template = readFileSync(
+    const source = readFileSync(
       new URL("./cloudformation/github-actions-role.yaml", import.meta.url),
       "utf8",
     );
-    const create = policyStatement(template, "SqsAlertQueueCreate");
-    const manage = policyStatement(template, "SqsAlertQueueManage");
-    const asyncConfig = policyStatement(template, "LambdaAlertAsyncConfig");
+    const template = parse(source, {
+      customTags: [
+        { tag: "!Ref", resolve: (value: string) => ({ Ref: value }) },
+        { tag: "!Sub", resolve: (value: string) => ({ "Fn::Sub": value }) },
+        {
+          tag: "!Equals",
+          collection: "seq",
+          resolve: (value) => ({ "Fn::Equals": value.toJSON() }),
+        },
+        {
+          tag: "!If",
+          collection: "seq",
+          resolve: (value) => ({ "Fn::If": value.toJSON() }),
+        },
+        {
+          tag: "!GetAtt",
+          resolve: (value: string) => ({ "Fn::GetAtt": value.split(".") }),
+        },
+      ],
+    }) as {
+      Resources: Record<string, { Properties: Record<string, unknown> }>;
+    };
 
-    expect(iamActions(create)).toEqual(["sqs:CreateQueue"]);
-    expect(create).toContain("arn:${AWS::Partition}:sqs:*:${AWS::AccountId}:*");
-    expect(create).toContain("aws:RequestTag/Project: !Ref ProjectName");
-    expect(create).toContain("aws:RequestTag/ManagedBy: sst");
+    expect(template.Resources.AlertDeliveryPolicy.Properties.PolicyDocument).toEqual({
+      Version: "2012-10-17",
+      Statement: [
+        {
+          Sid: "SqsAlertQueueCreate",
+          Effect: "Allow",
+          Action: ["sqs:CreateQueue"],
+          Resource: [
+            { "Fn::Sub": "arn:${AWS::Partition}:sqs:*:${AWS::AccountId}:*" },
+          ],
+          Condition: {
+            StringEquals: {
+              "aws:RequestTag/Project": { Ref: "ProjectName" },
+              "aws:RequestTag/ManagedBy": "sst",
+            },
+          },
+        },
+        {
+          Sid: "SqsAlertQueueManage",
+          Effect: "Allow",
+          Action: [
+            "sqs:DeleteQueue",
+            "sqs:GetQueueAttributes",
+            "sqs:GetQueueUrl",
+            "sqs:ListQueueTags",
+            "sqs:SetQueueAttributes",
+            "sqs:TagQueue",
+            "sqs:UntagQueue",
+          ],
+          Resource: [
+            { "Fn::Sub": "arn:${AWS::Partition}:sqs:*:${AWS::AccountId}:*" },
+          ],
+          Condition: {
+            StringEquals: {
+              "aws:ResourceTag/Project": { Ref: "ProjectName" },
+              "aws:ResourceTag/ManagedBy": "sst",
+            },
+          },
+        },
+        {
+          Sid: "LambdaAlertAsyncConfig",
+          Effect: "Allow",
+          Action: [
+            "lambda:DeleteFunctionEventInvokeConfig",
+            "lambda:GetFunctionEventInvokeConfig",
+            "lambda:PutFunctionEventInvokeConfig",
+          ],
+          Resource: [
+            {
+              "Fn::Sub":
+                "arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:function:${ProjectName}-*",
+            },
+          ],
+        },
+      ],
+    });
 
-    expect(iamActions(manage)).toEqual([
-      "sqs:DeleteQueue",
-      "sqs:GetQueueAttributes",
-      "sqs:GetQueueUrl",
-      "sqs:ListQueueTags",
-      "sqs:SetQueueAttributes",
-      "sqs:TagQueue",
-      "sqs:UntagQueue",
+    expect(template.Resources.GitHubActionsRole.Properties.ManagedPolicyArns).toEqual([
+      { Ref: "DenyPolicy" },
+      { Ref: "CorePolicy" },
+      { Ref: "ScaffoldPolicy" },
+      { Ref: "DatabasePolicy" },
+      { Ref: "ComputePolicy" },
+      { Ref: "ImageBuildPolicy" },
+      { Ref: "LambdaProxyPolicy" },
+      { Ref: "GatewayMcpPolicy" },
+      { Ref: "OAuth2FacadePolicy" },
+      { Ref: "AlertDeliveryPolicy" },
     ]);
-    expect(manage).toContain("arn:${AWS::Partition}:sqs:*:${AWS::AccountId}:*");
-    expect(manage).toContain("aws:ResourceTag/Project: !Ref ProjectName");
-    expect(manage).toContain("aws:ResourceTag/ManagedBy: sst");
-
-    expect(iamActions(asyncConfig)).toEqual([
-      "lambda:DeleteFunctionEventInvokeConfig",
-      "lambda:GetFunctionEventInvokeConfig",
-      "lambda:PutFunctionEventInvokeConfig",
-    ]);
-    expect(asyncConfig).toContain(
-      "arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:function:${ProjectName}-*",
-    );
-
-    const managedPolicyStart = template.indexOf("      ManagedPolicyArns:");
-    const attachments = template.slice(
-      managedPolicyStart,
-      template.indexOf("      Tags:", managedPolicyStart),
-    );
-    expect([...attachments.matchAll(/^\s+- !Ref ([A-Za-z0-9]+)$/gm)].map((match) => match[1]))
-      .toEqual([
-        "DenyPolicy",
-        "CorePolicy",
-        "ScaffoldPolicy",
-        "DatabasePolicy",
-        "ComputePolicy",
-        "ImageBuildPolicy",
-        "LambdaProxyPolicy",
-        "GatewayMcpPolicy",
-        "OAuth2FacadePolicy",
-        "AlertDeliveryPolicy",
-      ]);
   });
 });
