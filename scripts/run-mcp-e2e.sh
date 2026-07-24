@@ -8,17 +8,24 @@
 #   → qwen3-embed sidecar → search.
 #
 # Steps:
-#   1. Read the Cognito token endpoint + client id/secret + scope, and the Gateway
-#      MCP URL, from the /mem9-on-aws/<stage>/... SSM params this stage exported.
-#   2. Mint a Cognito `client_credentials` JWT at the token endpoint.
-#   3. Call the `add_memory` MCP tool via the Gateway (JSON-RPC `tools/call`).
-#   4. Poll the `search_memories` tool until the written memory surfaces — mem9
+#   1. Wait for the ECS service to stabilize and verify every running task uses
+#      the service's active task definition.
+#   2. Read the Cognito token endpoint + client id/secret + scope, and the Gateway
+#      MCP URL, from the stage's SSM parameters.
+#   3. Mint a Cognito `client_credentials` JWT at the token endpoint.
+#   4. Call the `add_memory` MCP tool via the Gateway (JSON-RPC `tools/call`).
+#   5. Poll the `search_memories` tool until the written memory surfaces — mem9
 #      ingest is ASYNC (a write returns "accepted"; it's searchable seconds later),
 #      so this retries up to ~5 min before failing.
 #
 # Env:
 #   STAGE       (required) — e.g. prod / pr-7.
 #   AWS_REGION  (optional) — defaults to ap-northeast-1.
+#   E2E_COGNITO_CLIENT_PREFIX (optional) — SSM prefix containing client-id and
+#               client-secret. Defaults to /mem9-on-aws/<stage>/cognito. Recovery
+#               uses a dedicated client under a separate prefix.
+#   E2E_EXPECTED_DB_CLUSTER_IDENTIFIER (optional) — fail unless the active task
+#               definition's MEM9_DB_HOST is the writer endpoint of this cluster.
 #   E2E_SOFT    (optional) — if "1", a search-timeout logs a ::warning:: and exits 0
 #               (used on PR previews where async timing can flake); default hard-fails.
 
@@ -27,14 +34,79 @@ set -euo pipefail
 STAGE="${STAGE:?STAGE is required (e.g. prod or pr-7)}"
 REGION="${AWS_REGION:-ap-northeast-1}"
 PREFIX="/mem9-on-aws/${STAGE}"
+COGNITO_CLIENT_PREFIX="${E2E_COGNITO_CLIENT_PREFIX:-${PREFIX}/cognito}"
 SOFT="${E2E_SOFT:-0}"
 
 ssm() { aws ssm get-parameter --name "$1" --region "$REGION" --with-decryption --query Parameter.Value --output text; }
 
+echo "run-mcp-e2e: waiting for the ECS service to converge"
+ECS_CLUSTER=$(ssm "${PREFIX}/ecs/cluster-name")
+ECS_SERVICE=$(ssm "${PREFIX}/ecs/service-name")
+aws ecs wait services-stable \
+  --cluster "$ECS_CLUSTER" \
+  --services "$ECS_SERVICE" \
+  --region "$REGION"
+
+SERVICE_JSON=$(aws ecs describe-services \
+  --cluster "$ECS_CLUSTER" \
+  --services "$ECS_SERVICE" \
+  --region "$REGION" \
+  --output json)
+ACTIVE_TASK_DEFINITION=$(printf '%s' "$SERVICE_JSON" | jq -r '.services[0].taskDefinition // ""')
+TASK_ARNS_JSON=$(aws ecs list-tasks \
+  --cluster "$ECS_CLUSTER" \
+  --service-name "$ECS_SERVICE" \
+  --desired-status RUNNING \
+  --region "$REGION" \
+  --query taskArns \
+  --output json)
+
+if [[ -z "$ACTIVE_TASK_DEFINITION" || "$ACTIVE_TASK_DEFINITION" == "null" ]] ||
+  ! printf '%s' "$TASK_ARNS_JSON" | jq -e 'length > 0' >/dev/null; then
+  echo "::error::ECS service has no active task definition or running task"
+  exit 1
+fi
+
+TASKS_JSON=$(aws ecs describe-tasks \
+  --cluster "$ECS_CLUSTER" \
+  --tasks $(printf '%s' "$TASK_ARNS_JSON" | jq -r '.[]') \
+  --region "$REGION" \
+  --output json)
+TASK_DEF_MISMATCHES=$(printf '%s' "$TASKS_JSON" | jq --arg active "$ACTIVE_TASK_DEFINITION" \
+  '[.tasks[] | select(.taskDefinitionArn != $active)] | length')
+if [[ "$TASK_DEF_MISMATCHES" != "0" ]]; then
+  echo "::error::${TASK_DEF_MISMATCHES} running ECS task(s) do not use the active task definition"
+  exit 1
+fi
+
+if [[ -n "${E2E_EXPECTED_DB_CLUSTER_IDENTIFIER:-}" ]]; then
+  EXPECTED_DB_HOST=$(aws rds describe-db-clusters \
+    --db-cluster-identifier "$E2E_EXPECTED_DB_CLUSTER_IDENTIFIER" \
+    --region "$REGION" \
+    --query 'DBClusters[0].Endpoint' \
+    --output text)
+  TASK_DEFINITION_JSON=$(aws ecs describe-task-definition \
+    --task-definition "$ACTIVE_TASK_DEFINITION" \
+    --region "$REGION" \
+    --output json)
+  ACTIVE_DB_HOST=$(printf '%s' "$TASK_DEFINITION_JSON" | jq -r \
+    '.taskDefinition.containerDefinitions[]
+     | select(.name == "mnemo-server")
+     | .environment[]
+     | select(.name == "MEM9_DB_HOST")
+     | .value')
+  if [[ -z "$EXPECTED_DB_HOST" || "$EXPECTED_DB_HOST" == "None" ||
+    "$ACTIVE_DB_HOST" != "$EXPECTED_DB_HOST" ]]; then
+    echo "::error::active ECS task definition does not target the expected recovery cluster"
+    exit 1
+  fi
+fi
+echo "run-mcp-e2e: ECS service stable; all running tasks use the active task definition"
+
 echo "run-mcp-e2e: reading MCP config from SSM ${PREFIX}/{cognito,gateway}/* (region ${REGION})"
 TOKEN_ENDPOINT=$(ssm "${PREFIX}/cognito/token-endpoint")
-CLIENT_ID=$(ssm "${PREFIX}/cognito/client-id")
-CLIENT_SECRET=$(ssm "${PREFIX}/cognito/client-secret")
+CLIENT_ID=$(ssm "${COGNITO_CLIENT_PREFIX}/client-id")
+CLIENT_SECRET=$(ssm "${COGNITO_CLIENT_PREFIX}/client-secret")
 SCOPE=$(ssm "${PREFIX}/cognito/scope")
 GATEWAY_URL=$(ssm "${PREFIX}/gateway/url")
 

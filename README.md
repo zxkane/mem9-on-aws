@@ -67,7 +67,7 @@ citations.
 ## Planned reliability work
 
 The remaining open reliability program covers deployment reconciliation, alert
-failure queues, Aurora retention, preview cleanup, ECR scanning, durable ingest
+failure queues, preview cleanup, ECR scanning, durable ingest
 jobs, atomic apply, telemetry, and post-deployment verification. **None of that
 planned work is part of the current implementation.** The exact boundary is
 recorded in
@@ -149,6 +149,289 @@ only routing/failure metadata. Never print, log, or paste `Message`,
 `requestPayload`, `responsePayload`, webhook values, or formatted alarm fields.
 Delete a queued record only after the replay succeeds and the notification is
 confirmed.
+
+## Aurora backup and point-in-time recovery
+
+Aurora automated backup retention is fixed in IaC: **14 days for `prod`** and
+**1 day for every non-production stage**. There is no environment override.
+Changing `BackupRetentionPeriod` updates the existing cluster rather than
+replacing it, although AWS classifies the update as **some interruptions**.
+Schedule the production change in an approved maintenance window.
+
+This runbook restores to a **new cluster**. It never rewinds or overwrites the
+source cluster. Do not run a production restore from CI or as a pre-merge test.
+Use a gitignored `.env.recovery` for real operator values; the placeholders
+below must never be committed.
+
+### 1. Select and record the restore point
+
+```bash
+export AWS_PROFILE="<aws-profile>"
+export AWS_REGION="<aws-region>"
+export SOURCE_CLUSTER="<source-db-cluster-identifier>"
+export RESTORED_CLUSTER="<new-db-cluster-identifier>"
+export RESTORED_INSTANCE="<new-db-instance-identifier>"
+export RESTORE_TIME="<yyyy-mm-ddThh:mm:ssZ>"
+export DB_SUBNET_GROUP="<db-subnet-group-name>"
+export DB_SECURITY_GROUP="<db-security-group-id>"
+export DB_CLUSTER_PARAMETER_GROUP="<db-cluster-parameter-group-name>"
+export SOURCE_WRITER="<source-writer-db-instance-identifier>"
+export DB_INSTANCE_PARAMETER_GROUP="<db-instance-parameter-group-name>"
+export PRE_CUTOVER_SNAPSHOT="<pre-cutover-snapshot-identifier>"
+
+aws rds describe-db-clusters \
+  --db-cluster-identifier "$SOURCE_CLUSTER" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  --query 'DBClusters[0].{Earliest:EarliestRestorableTime,Latest:LatestRestorableTime,Retention:BackupRetentionPeriod,Engine:Engine,EngineVersion:EngineVersion,SubnetGroup:DBSubnetGroup,ParameterGroup:DBClusterParameterGroup,SecurityGroups:VpcSecurityGroups[*].VpcSecurityGroupId,Encrypted:StorageEncrypted,KmsKeyId:KmsKeyId,Scaling:ServerlessV2ScalingConfiguration}'
+
+aws rds describe-db-instances \
+  --db-instance-identifier "$SOURCE_WRITER" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  --query 'DBInstances[0].{ParameterGroups:DBParameterGroups[*].DBParameterGroupName,AutoMinorVersionUpgrade:AutoMinorVersionUpgrade}'
+```
+
+Choose a UTC `RESTORE_TIME` inside the returned earliest/latest interval and
+immediately before the damaging event. Record the evidence and timestamp in the
+approved operational record. Do not use `--use-latest-restorable-time` unless
+latest-state recovery is explicitly the incident objective.
+
+### 2. Restore a separate cluster and writer
+
+The restore explicitly reuses the production network controls, keeps 14-day
+retention and deletion protection, and uses the existing Serverless v2 bounds.
+Omitting `--kms-key-id` makes an encrypted restore inherit the source KMS key.
+
+```bash
+aws rds restore-db-cluster-to-point-in-time \
+  --source-db-cluster-identifier "$SOURCE_CLUSTER" \
+  --db-cluster-identifier "$RESTORED_CLUSTER" \
+  --restore-to-time "$RESTORE_TIME" \
+  --db-subnet-group-name "$DB_SUBNET_GROUP" \
+  --vpc-security-group-ids "$DB_SECURITY_GROUP" \
+  --db-cluster-parameter-group-name "$DB_CLUSTER_PARAMETER_GROUP" \
+  --serverless-v2-scaling-configuration MinCapacity=0.5,MaxCapacity=4 \
+  --backup-retention-period 14 \
+  --deletion-protection \
+  --copy-tags-to-snapshot \
+  --tags Key=Project,Value=mem9-on-aws Key=Stage,Value=prod Key=ManagedBy,Value=recovery \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+aws rds wait db-cluster-available \
+  --db-cluster-identifier "$RESTORED_CLUSTER" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+aws rds create-db-instance \
+  --db-instance-identifier "$RESTORED_INSTANCE" \
+  --db-cluster-identifier "$RESTORED_CLUSTER" \
+  --engine aurora-postgresql \
+  --db-instance-class db.serverless \
+  --db-parameter-group-name "$DB_INSTANCE_PARAMETER_GROUP" \
+  --no-auto-minor-version-upgrade \
+  --no-publicly-accessible \
+  --promotion-tier 0 \
+  --tags Key=Project,Value=mem9-on-aws Key=Stage,Value=prod Key=ManagedBy,Value=recovery \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+aws rds wait db-instance-available \
+  --db-instance-identifier "$RESTORED_INSTANCE" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+```
+
+Verify the restored cluster before connecting. `Encrypted` must be `true`,
+`Retention` must be `14`, the KMS key must match the approved source key, and
+the endpoint must differ from the source endpoint.
+
+```bash
+aws rds describe-db-clusters \
+  --db-cluster-identifier "$RESTORED_CLUSTER" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION" \
+  --query 'DBClusters[0].{Status:Status,Endpoint:Endpoint,Retention:BackupRetentionPeriod,DeletionProtection:DeletionProtection,Encrypted:StorageEncrypted,KmsKeyId:KmsKeyId,Scaling:ServerlessV2ScalingConfiguration}'
+```
+
+### 3. Validate schema without reading memory content
+
+From an approved PostgreSQL client inside the VPC, supply the restored endpoint,
+database user, and password through a temporary `PGPASSFILE`. Never put a
+password in the command line, shell history, committed files, or logs.
+
+```bash
+export PGHOST="<restored-cluster-endpoint>"
+export PGPORT="5432"
+export PGDATABASE="mem9"
+export PGUSER="<database-user>"
+umask 077
+export PGPASSFILE="$(mktemp)"
+chmod 600 "$PGPASSFILE"
+trap 'rm -f "$PGPASSFILE"' EXIT
+
+# Populate PGPASSFILE from the approved secret without printing the password.
+# Escape any "\" or ":" characters according to the PostgreSQL .pgpass format.
+
+psql -X -v ON_ERROR_STOP=1 <<'SQL'
+SELECT extname FROM pg_extension WHERE extname = 'vector';
+SELECT to_regclass('public.tenants') AS tenants_table,
+       to_regclass('public.memories') AS memories_table;
+SELECT format_type(a.atttypid, a.atttypmod) AS embedding_type
+FROM pg_attribute AS a
+WHERE a.attrelid = 'public.memories'::regclass
+  AND a.attname = 'embedding'
+  AND NOT a.attisdropped;
+SELECT indexname
+FROM pg_indexes
+WHERE schemaname = 'public'
+  AND tablename = 'memories'
+  AND indexname IN ('idx_app', 'idx_memories_embedding', 'idx_memories_fts')
+ORDER BY indexname;
+SQL
+```
+
+Require `vector`, both tables, `embedding_type = vector(1024)`, and all
+bootstrap-required indexes. Compare aggregate row counts only if needed; do not
+select or log memory content.
+
+### 4. Take the pre-cutover backup
+
+Establish a write fence under the incident change window:
+
+1. Pause scheduled CI and every headless process that holds the normal M2M
+   client credentials.
+2. Through a reviewed IaC change, create a temporary recovery-only Cognito M2M
+   client with the existing read/write scopes. Store its generated ID and secret
+   in `/mem9-on-aws/prod/recovery/cognito/{client-id,client-secret}` and make it
+   the Gateway's **only** `allowedClients` entry for `prod`.
+3. Deploy the fence, verify both a normal M2M client and normal interactive
+   client are rejected, and use
+   the proxy Lambda's CloudWatch `Invocations` metric to confirm zero backend
+   calls during twice the maximum request timeout.
+
+Then snapshot the still-active source cluster. Keep the fence in place through
+cutover, synthetic verification, and any rollback; only the operator's synthetic
+probe may write after cutover. Do not proceed until the snapshot is available.
+
+```bash
+aws rds create-db-cluster-snapshot \
+  --db-cluster-identifier "$SOURCE_CLUSTER" \
+  --db-cluster-snapshot-identifier "$PRE_CUTOVER_SNAPSHOT" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+
+aws rds wait db-cluster-snapshot-available \
+  --db-cluster-snapshot-identifier "$PRE_CUTOVER_SNAPSHOT" \
+  --profile "$AWS_PROFILE" \
+  --region "$AWS_REGION"
+```
+
+### 5. Cut over through IaC
+
+Do not edit SSM parameters or ECS task definitions manually, and do not import
+the restored cluster during incident cutover. Prepare a reviewed, lookup-only
+recovery change in `infra/db.ts` that:
+
+- leaves the original `sst.aws.Aurora` declaration state-managed and retained;
+- for `prod` only, resolves `MEM9_RECOVERY_DB_CLUSTER_IDENTIFIER` with
+  `aws.rds.getClusterOutput`;
+- uses `MEM9_RECOVERY_DB_SECRET_ARN` only after that secret has authenticated
+  successfully to the restored cluster;
+- feeds the selected writer endpoint and secret ARN through the existing
+  `DbOutputs` contract; and
+- leaves the stage-derived retention transform unchanged.
+
+Keep the database values in `.env.recovery`, never in tracked files:
+
+```bash
+export MEM9_RECOVERY_DB_CLUSTER_IDENTIFIER="$RESTORED_CLUSTER"
+export MEM9_RECOVERY_DB_SECRET_ARN="<approved-secret-arn>"
+```
+
+Source that file into the deploy shell before preview and deployment. This
+lookup-only approach leaves source-cluster ownership unchanged, making rollback
+a connection-selection change rather than another state import.
+
+Run `sst diff --stage prod` and require:
+
+- the restored endpoint and approved secret are the only database connection
+  inputs propagated to ECS and bootstrap;
+- neither cluster is deleted or replaced;
+- encryption, security groups, Serverless v2 bounds, production retention,
+  deletion protection, and SST `removal: "retain"` / `protect: true` remain;
+- no plaintext credential or full DSN appears in the plan.
+
+After approval, deploy the recovery change:
+
+```bash
+set -a
+source .env.recovery
+set +a
+sst diff --stage prod
+sst deploy --stage prod
+STAGE=prod AWS_REGION="$AWS_REGION" bash scripts/run-bootstrap-task.sh
+```
+
+Replacing the ECS task is required because database credentials are injected at
+task start. The bootstrap task is also required: it idempotently updates the
+tenant row's per-request `db_host` and credentials to the selected endpoint.
+Do not probe until both the ECS service and bootstrap task are on the recovery
+configuration. Adopt the restored cluster into long-term IaC ownership only in
+a separate reviewed change after recovery is stable. Restore the normal M2M and
+reader client IDs to the Gateway allowlist, remove the temporary recovery client,
+and resume paused jobs only after the cutover or rollback probe passes.
+
+### 6. Verify and roll back
+
+Keep normal clients behind the write fence and run the existing hard-fail
+synthetic write/search probe after cutover. It writes only a generated marker
+and does not inspect existing memory content. The script first waits for ECS
+service stability, verifies every running task uses the active task definition,
+and verifies that task definition targets the restored cluster.
+
+```bash
+STAGE=prod \
+AWS_REGION="$AWS_REGION" \
+E2E_SOFT=0 \
+E2E_COGNITO_CLIENT_PREFIX="/mem9-on-aws/prod/recovery/cognito" \
+E2E_EXPECTED_DB_CLUSTER_IDENTIFIER="$RESTORED_CLUSTER" \
+bash scripts/run-mcp-e2e.sh
+```
+
+If deployment or verification fails, keep the write fence in place, unset the
+two recovery variables, and deploy the same IaC change so `DbOutputs` selects
+the untouched source endpoint and original secret again. Rerun the same probe;
+remove the write fence only after either the cutover probe or rollback probe
+passes. Keep the restored cluster for investigation and the pre-cutover snapshot
+until the incident owner closes the recovery. Do not delete either cluster or
+rotate credentials as part of rollback.
+
+```bash
+unset MEM9_RECOVERY_DB_CLUSTER_IDENTIFIER MEM9_RECOVERY_DB_SECRET_ARN
+sst diff --stage prod
+sst deploy --stage prod
+STAGE=prod AWS_REGION="$AWS_REGION" bash scripts/run-bootstrap-task.sh
+STAGE=prod \
+AWS_REGION="$AWS_REGION" \
+E2E_SOFT=0 \
+E2E_COGNITO_CLIENT_PREFIX="/mem9-on-aws/prod/recovery/cognito" \
+E2E_EXPECTED_DB_CLUSTER_IDENTIFIER="$SOURCE_CLUSTER" \
+bash scripts/run-mcp-e2e.sh
+```
+
+### Command preflight
+
+`--generate-cli-skeleton output` validates AWS CLI arguments locally and does
+not call AWS. Use it with non-production dummy identifiers before an incident;
+also run `bash -n scripts/run-mcp-e2e.sh`. These checks validate command shape
+only and never replace a reviewed recovery drill.
+
+AWS references:
+[Aurora backup and restore](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.Managing.Backups.html),
+[point-in-time restore](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/aurora-pitr.html),
+and [`restore-db-cluster-to-point-in-time`](https://docs.aws.amazon.com/cli/latest/reference/rds/restore-db-cluster-to-point-in-time.html).
 
 ## License
 

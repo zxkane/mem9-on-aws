@@ -1,0 +1,75 @@
+name: Documentation Security
+
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - "README.md"
+      - "docs/**"
+      - ".github/workflows/docs-security.yml"
+  push:
+    branches: [main]
+    paths:
+      - "README.md"
+      - "docs/**"
+      - ".github/workflows/docs-security.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    name: Runbook & Public-Content Scan
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Validate README shell blocks
+        shell: bash
+        run: |
+          set -euo pipefail
+          awk '
+            BEGIN { in_block = 0 }
+            /^```bash$/ { in_block = 1; next }
+            /^```$/ {
+              if (in_block) {
+                in_block = 0
+                print ""
+              }
+              next
+            }
+            in_block { print }
+          ' README.md | bash -n
+
+      - name: Validate PITR runbook invariants
+        shell: bash
+        run: |
+          set -euo pipefail
+          required=(
+            "restore-db-cluster-to-point-in-time"
+            "--restore-to-time"
+            "aws rds create-db-instance"
+            "vector(1024)"
+            "create-db-cluster-snapshot"
+            "MEM9_RECOVERY_DB_CLUSTER_IDENTIFIER"
+            "E2E_EXPECTED_DB_CLUSTER_IDENTIFIER"
+            "scripts/run-bootstrap-task.sh"
+            "unset MEM9_RECOVERY_DB_CLUSTER_IDENTIFIER"
+          )
+          for text in "${required[@]}"; do
+            if ! grep -Fq -- "$text" README.md; then
+              echo "::error::PITR runbook is missing required content: $text"
+              exit 1
+            fi
+          done
+
+      - name: Scan public documentation for live identifiers and secrets
+        shell: bash
+        run: |
+          set -euo pipefail
+          pattern='issuecomment-[0-9]+|<owner>/<repo>#[0-9]+|[0-9]{12}|arn:aws:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}|[A-Za-z0-9-]+\.cluster-[A-Za-z0-9-]+\.[a-z0-9-]+\.rds\.amazonaws\.com|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY'
+          if grep -RniE "$pattern" README.md docs; then
+            echo "::error::Public documentation contains a prohibited identifier or secret pattern"
+            exit 1
+          fi

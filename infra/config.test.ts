@@ -23,8 +23,10 @@ describe("sst.config.ts locked facts", () => {
     expect(src).toMatch(/region:\s*["']ap-northeast-1["']/);
   });
 
-  it("retains + protects prod state", () => {
-    expect(src).toMatch(/removal:\s*input\?\.stage === ["']prod["'] \? ["']retain["']/);
+  it("retains + protects prod state and removes non-prod state", () => {
+    expect(src).toMatch(
+      /removal:\s*input\?\.stage === ["']prod["'] \? ["']retain["'] : ["']remove["']/,
+    );
     expect(src).toMatch(/protect:\s*input\?\.stage === ["']prod["']/);
   });
 
