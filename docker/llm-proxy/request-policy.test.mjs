@@ -280,6 +280,16 @@ describe("GLM request policy", () => {
     expect(run.sleep).toHaveBeenCalledWith(7_000, expect.any(AbortSignal));
   });
 
+  it("TC-GLM-RETRY-014: applies RFC 850 rollover using the full 50-year boundary", async () => {
+    vi.setSystemTime(Date.UTC(2026, 6, 24));
+    const run = await runScript([
+      { status: 503, headers: { "retry-after": "Friday, 31-Dec-76 00:00:00 GMT" } },
+      { status: 200 },
+    ]);
+    expect(run.result.status).toBe(200);
+    expect(run.sleep).toHaveBeenCalledWith(0, expect.any(AbortSignal));
+  });
+
   it.each([
     "later-ish",
     "1.5",

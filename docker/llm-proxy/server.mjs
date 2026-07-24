@@ -262,12 +262,19 @@ function parseHttpDate(value, currentTime) {
   if (twoDigitYear) {
     const currentYear = new Date(currentTime).getUTCFullYear();
     year += Math.floor(currentYear / 100) * 100;
-    if (year > currentYear + 50) year -= 100;
   }
 
   const parsed = new Date(0);
   parsed.setUTCFullYear(year, month, day);
   parsed.setUTCHours(hour, minute, second, 0);
+  if (twoDigitYear) {
+    const futureLimit = new Date(currentTime);
+    futureLimit.setUTCFullYear(futureLimit.getUTCFullYear() + 50);
+    if (parsed.getTime() > futureLimit.getTime()) {
+      year -= 100;
+      parsed.setUTCFullYear(year, month, day);
+    }
+  }
   const expectedWeekday = (longWeekday ? LONG_WEEKDAYS : SHORT_WEEKDAYS)[
     parsed.getUTCDay()
   ];
