@@ -34,7 +34,7 @@ if [ -z "${MNEMO_IMAGE:-}" ]; then
   BUILT_LOCAL_IMAGE=true
 else
   echo "mnemo-health-smoke: pulling $IMAGE"
-  docker pull "$IMAGE"
+  docker pull --platform linux/arm64 "$IMAGE"
 fi
 
 echo "mnemo-health-smoke: verifying Alpine BusyBox wget"
