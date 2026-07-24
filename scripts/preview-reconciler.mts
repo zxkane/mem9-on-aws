@@ -1,0 +1,1024 @@
+import { execFile } from "node:child_process";
+import fs from "node:fs/promises";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const PREVIEW_STAGE = /^pr-([0-9]+)$/;
+const SAFE_RESOURCE_TYPE = /^[a-z0-9][a-z0-9-]*(?::[a-z0-9][a-z0-9._-]*)?$/;
+const GRACE_PERIOD_MS = 24 * 60 * 60 * 1_000;
+const PLAN_SCHEMA_VERSION = 1;
+const RESOURCE_TYPE_BY_SERVICE: Readonly<Record<string, Readonly<Record<string, string>>>> =
+  deepFreeze({
+    apigateway: { apis: "api" },
+    cloudwatch: { alarm: "alarm" },
+    cognito: { userpool: "user-pool" },
+    "cognito-idp": { userpool: "user-pool" },
+    ecr: { repository: "repository" },
+    ecs: {
+      cluster: "cluster",
+      service: "service",
+      task: "task",
+      "task-definition": "task-definition",
+    },
+    elasticloadbalancing: {
+      listener: "listener",
+      loadbalancer: "load-balancer",
+      targetgroup: "target-group",
+    },
+    iam: { role: "role" },
+    lambda: { function: "function" },
+    logs: { "log-group": "log-group" },
+    rds: {
+      cluster: "cluster",
+      db: "instance",
+      pg: "parameter-group",
+      "cluster-pg": "cluster-parameter-group",
+      subgrp: "subnet-group",
+    },
+    route53: { hostedzone: "hosted-zone" },
+    secretsmanager: { secret: "secret" },
+    servicediscovery: { namespace: "namespace", service: "service" },
+    ssm: { parameter: "parameter" },
+  });
+const RESOURCE_TYPE_DEFAULT_BY_SERVICE: Readonly<Record<string, string>> = deepFreeze({
+  s3: "bucket",
+  sns: "topic",
+});
+
+export const OPERATOR_ISSUE_MARKER = "<!-- preview-stage-reconciler -->";
+export const OPERATOR_ISSUE_TITLE = "Preview reconciliation: state-missing resources";
+
+export type PullRequestObservation =
+  | Readonly<{ number: number; state: "open"; closedAt: null }>
+  | Readonly<{ number: number; state: "closed"; closedAt: string }>;
+
+export type ActiveWorkflowStatus =
+  | "queued"
+  | "in_progress"
+  | "waiting"
+  | "pending"
+  | "requested"
+  | "unknown";
+
+export type WorkflowRunObservation =
+  | Readonly<{ prNumber: number; status: "completed"; completedAt: string }>
+  | Readonly<{
+      prNumber: number;
+      status: ActiveWorkflowStatus;
+      completedAt: null;
+    }>;
+
+export type StateObjectObservation = Readonly<{
+  stage: string;
+  lastModified: string;
+}>;
+
+export type ResourceObservation = Readonly<{
+  stage: string;
+  resourceType: string;
+  project: string;
+  managedBy: string;
+}>;
+
+export type Observation = Readonly<{
+  observedAt: string;
+  pullRequests: readonly PullRequestObservation[];
+  workflowRuns: readonly WorkflowRunObservation[];
+  stateObjects: readonly StateObjectObservation[];
+  resources: readonly ResourceObservation[];
+}>;
+
+export type ObservationAdapter = Readonly<{
+  collectObservation: () => Promise<Observation>;
+}>;
+
+export type ResourceCount = Readonly<{
+  resourceType: string;
+  count: number;
+}>;
+
+export type StageDecision = "protected" | "retain" | "candidate";
+export type StageAction = "none" | "remove-with-sst" | "operator-review";
+
+export type StagePlan = Readonly<{
+  stage: string;
+  prNumber: number | null;
+  decision: StageDecision;
+  action: StageAction;
+  reasons: readonly string[];
+  statePresent: boolean;
+  graceAnchor: string | null;
+  eligibleAt: string | null;
+  resources: readonly ResourceCount[];
+}>;
+
+export type ReconciliationPlan = Readonly<{
+  schemaVersion: number;
+  observedAt: string;
+  gracePeriodHours: number;
+  stages: readonly StagePlan[];
+}>;
+
+export type Trigger = Readonly<{
+  eventName: "workflow_dispatch";
+  mode: "apply";
+}>;
+
+export type OperatorIssueDraft = Readonly<{
+  title: string;
+  body: string;
+}>;
+
+export type ApplyAdapters = ObservationAdapter &
+  Readonly<{
+    removeStage: (stage: string) => Promise<void>;
+    findOpenOperatorIssue: (title: string, marker: string) => Promise<number | null>;
+    createOperatorIssue: (title: string, body: string) => Promise<number>;
+    updateOperatorIssue: (number: number, title: string, body: string) => Promise<void>;
+  }>;
+
+export type ApplyResult = Readonly<{
+  removed: readonly string[];
+  cancelled: readonly Readonly<{ stage: string; reason: string }>[];
+  operatorIssue: "none" | "created" | "updated";
+}>;
+
+export function sstRemoveCommand(stage: string): readonly string[] {
+  if (previewNumber(stage) === null) throw new Error("Refusing unsafe stage removal");
+  return deepFreeze([
+    "pnpm",
+    "-C",
+    "infra",
+    "exec",
+    "sst",
+    "remove",
+    "--stage",
+    stage,
+  ]);
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value !== null && typeof value === "object" && !Object.isFrozen(value)) {
+    for (const child of Object.values(value as Record<string, unknown>)) {
+      deepFreeze(child);
+    }
+    Object.freeze(value);
+  }
+  return value;
+}
+
+function timestampMs(value: string, label: string): number {
+  const parsed = Date.parse(value);
+  if (!Number.isFinite(parsed)) {
+    throw new Error(`Invalid ${label} timestamp`);
+  }
+  return parsed;
+}
+
+function validateObservation(observation: Observation): void {
+  timestampMs(observation.observedAt, "plan observation");
+  for (const pullRequest of observation.pullRequests) {
+    if (pullRequest.state === "closed") {
+      timestampMs(pullRequest.closedAt, "pull-request close");
+    } else if (pullRequest.closedAt !== null) {
+      throw new Error("Open pull request has a close timestamp");
+    }
+  }
+  for (const workflowRun of observation.workflowRuns) {
+    if (workflowRun.status === "completed") {
+      timestampMs(workflowRun.completedAt, "workflow completion");
+    } else if (workflowRun.completedAt !== null) {
+      throw new Error("Active workflow has a completion timestamp");
+    }
+  }
+}
+
+function latestTimestamp(values: readonly (string | null)[]): string | null {
+  const present = values.filter((value): value is string => value !== null);
+  if (present.length === 0) return null;
+  return present.reduce((latest, value) =>
+    timestampMs(value, "observation") > timestampMs(latest, "observation")
+      ? value
+      : latest,
+  );
+}
+
+function previewNumber(stage: string): number | null {
+  const match = PREVIEW_STAGE.exec(stage);
+  if (!match) return null;
+  const number = Number(match[1]);
+  return Number.isSafeInteger(number) ? number : null;
+}
+
+function safeResourceType(value: string): string {
+  const normalized = value.toLowerCase();
+  return SAFE_RESOURCE_TYPE.test(normalized) ? normalized : "unknown";
+}
+
+function displayStage(stage: string): string {
+  if (PREVIEW_STAGE.test(stage) || ["prod", "main", "production"].includes(stage)) {
+    return stage;
+  }
+  return "<invalid-stage>";
+}
+
+function groupResourceCounts(
+  stage: string,
+  resources: readonly ResourceObservation[],
+): ResourceCount[] {
+  const counts = new Map<string, number>();
+  for (const resource of resources) {
+    if (resource.stage !== stage) continue;
+    const resourceType = safeResourceType(resource.resourceType);
+    counts.set(resourceType, (counts.get(resourceType) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([resourceType, count]) => ({ resourceType, count }));
+}
+
+function isOwnedResource(resource: ResourceObservation): boolean {
+  return resource.project === "mem9-on-aws" && resource.managedBy === "sst";
+}
+
+export function buildReconciliationPlan(observation: Observation): ReconciliationPlan {
+  validateObservation(observation);
+  const observedAtMs = timestampMs(observation.observedAt, "plan observation");
+  const pullRequests = new Map(
+    observation.pullRequests.map((pullRequest) => [pullRequest.number, pullRequest]),
+  );
+  const stateObjects = new Map<string, StateObjectObservation>();
+  for (const stateObject of observation.stateObjects) {
+    const current = stateObjects.get(stateObject.stage);
+    if (
+      !current ||
+      timestampMs(stateObject.lastModified, "state") >
+        timestampMs(current.lastModified, "state")
+    ) {
+      stateObjects.set(stateObject.stage, stateObject);
+    }
+  }
+
+  const ownedResources = observation.resources.filter(isOwnedResource);
+  const stageNames = new Set<string>([
+    ...stateObjects.keys(),
+    ...ownedResources.map(({ stage }) => stage),
+  ]);
+
+  const stages = [...stageNames]
+    .sort((left, right) => left.localeCompare(right))
+    .map((stage): StagePlan => {
+      const prNumber = previewNumber(stage);
+      const stateObject = stateObjects.get(stage);
+      const statePresent = stateObject !== undefined;
+      const resources = groupResourceCounts(stage, ownedResources);
+
+      if (prNumber === null) {
+        return {
+          stage: displayStage(stage),
+          prNumber: null,
+          decision: "protected",
+          action: "none",
+          reasons: ["stage-protected"],
+          statePresent,
+          graceAnchor: null,
+          eligibleAt: null,
+          resources,
+        };
+      }
+
+      const pullRequest = pullRequests.get(prNumber);
+      const workflowRuns = observation.workflowRuns.filter(
+        (run) => run.prNumber === prNumber,
+      );
+      const activeDeployment = workflowRuns.some((run) => run.status !== "completed");
+      const latestDeployCompletion = latestTimestamp(
+        workflowRuns.map((run) => run.completedAt),
+      );
+      const reasons: string[] = [];
+
+      if (pullRequest?.state === "open") {
+        return {
+          stage,
+          prNumber,
+          decision: "retain",
+          action: "none",
+          reasons: ["pr-open"],
+          statePresent,
+          graceAnchor: latestTimestamp([
+            latestDeployCompletion,
+            stateObject?.lastModified ?? null,
+          ]),
+          eligibleAt: null,
+          resources,
+        };
+      }
+
+      reasons.push(pullRequest ? "pr-closed" : "pr-absent");
+      if (activeDeployment) {
+        reasons.push("deploy-active");
+        return {
+          stage,
+          prNumber,
+          decision: "retain",
+          action: "none",
+          reasons,
+          statePresent,
+          graceAnchor: latestTimestamp([
+            pullRequest?.closedAt ?? null,
+            latestDeployCompletion,
+            stateObject?.lastModified ?? null,
+          ]),
+          eligibleAt: null,
+          resources,
+        };
+      }
+
+      reasons.push("deploy-inactive");
+      const graceAnchor = latestTimestamp([
+        pullRequest?.closedAt ?? null,
+        latestDeployCompletion,
+        stateObject?.lastModified ?? null,
+      ]);
+      if (graceAnchor === null) {
+        reasons.push("grace-anchor-missing");
+        return {
+          stage,
+          prNumber,
+          decision: "retain",
+          action: "none",
+          reasons,
+          statePresent,
+          graceAnchor: null,
+          eligibleAt: null,
+          resources,
+        };
+      }
+
+      const eligibleAtMs = timestampMs(graceAnchor, "grace anchor") + GRACE_PERIOD_MS;
+      const eligibleAt = new Date(eligibleAtMs).toISOString();
+      if (observedAtMs < eligibleAtMs) {
+        reasons.push("grace-period");
+        return {
+          stage,
+          prNumber,
+          decision: "retain",
+          action: "none",
+          reasons,
+          statePresent,
+          graceAnchor,
+          eligibleAt,
+          resources,
+        };
+      }
+
+      reasons.push("grace-elapsed", statePresent ? "state-present" : "state-missing");
+      return {
+        stage,
+        prNumber,
+        decision: "candidate",
+        action: statePresent ? "remove-with-sst" : "operator-review",
+        reasons,
+        statePresent,
+        graceAnchor,
+        eligibleAt,
+        resources,
+      };
+    });
+
+  return deepFreeze({
+    schemaVersion: PLAN_SCHEMA_VERSION,
+    observedAt: observation.observedAt,
+    gracePeriodHours: GRACE_PERIOD_MS / (60 * 60 * 1_000),
+    stages,
+  });
+}
+
+function assertSafeOutput(output: string): void {
+  if (/\barn:/i.test(output) || /https?:\/\//i.test(output) || /\b[0-9]{12}\b/.test(output)) {
+    throw new Error("Refusing to emit an unredacted reconciliation report");
+  }
+}
+
+export function renderPlanReport(plan: ReconciliationPlan): string {
+  const stageRows = plan.stages.map((stage) => {
+    const state = stage.statePresent ? "present" : "missing";
+    const anchor = stage.graceAnchor ?? "none";
+    return `| ${displayStage(stage.stage)} | ${stage.decision} | ${stage.action} | ${state} | ${anchor} |`;
+  });
+  const resourceRows = plan.stages.flatMap((stage) =>
+    stage.resources.map(
+      (resource) =>
+        `| ${displayStage(stage.stage)} | ${safeResourceType(resource.resourceType)} | ${resource.count} |`,
+    ),
+  );
+
+  const report = [
+    `Preview reconciliation observed at ${plan.observedAt}`,
+    "",
+    "| Stage | Decision | Action | SST state | Grace anchor |",
+    "|---|---|---|---|---|",
+    ...(stageRows.length > 0 ? stageRows : ["| none | retain | none | missing | none |"]),
+    "",
+    "Resource inventory",
+    "",
+    "| Stage | Resource type | Count |",
+    "|---|---|---:|",
+    ...(resourceRows.length > 0 ? resourceRows : ["| none | none | 0 |"]),
+  ].join("\n");
+
+  assertSafeOutput(report);
+  return report;
+}
+
+export function prepareOperatorIssue(
+  plan: ReconciliationPlan,
+): OperatorIssueDraft | null {
+  const resourceRows = plan.stages
+    .filter(
+      (stage) =>
+        stage.decision === "candidate" && stage.action === "operator-review",
+    )
+    .flatMap((stage) =>
+      stage.resources.map(
+        (resource) =>
+          `| ${stage.stage} | ${safeResourceType(resource.resourceType)} | ${resource.count} |`,
+      ),
+    );
+  if (resourceRows.length === 0) return null;
+
+  const body = [
+    OPERATOR_ISSUE_MARKER,
+    "## State-missing preview inventory",
+    "",
+    "These SST-owned preview resources have no matching SST state. Automatic deletion is disabled.",
+    "",
+    "| Stage | Resource type | Count |",
+    "|---|---|---:|",
+    ...resourceRows,
+  ].join("\n");
+  assertSafeOutput(body);
+  return deepFreeze({ title: OPERATOR_ISSUE_TITLE, body });
+}
+
+export async function upsertOperatorIssue(
+  draft: OperatorIssueDraft,
+  adapters: ApplyAdapters,
+): Promise<"created" | "updated"> {
+  const existing = await adapters.findOpenOperatorIssue(
+    draft.title,
+    OPERATOR_ISSUE_MARKER,
+  );
+  if (existing === null) {
+    await adapters.createOperatorIssue(draft.title, draft.body);
+    return "created";
+  }
+  await adapters.updateOperatorIssue(existing, draft.title, draft.body);
+  return "updated";
+}
+
+function assertApplyTrigger(trigger: Trigger): void {
+  if (trigger.eventName !== "workflow_dispatch" || trigger.mode !== "apply") {
+    throw new Error("Apply requires an explicit manual apply trigger");
+  }
+}
+
+export async function applyReconciliationPlan(
+  plan: ReconciliationPlan,
+  adapters: ApplyAdapters,
+  trigger: Trigger,
+): Promise<ApplyResult> {
+  assertApplyTrigger(trigger);
+  const removed: string[] = [];
+  const cancelled: Array<{ stage: string; reason: string }> = [];
+  const stateMissing: StagePlan[] = [];
+
+  for (const advisory of plan.stages.filter(
+    (stage) => stage.decision === "candidate",
+  )) {
+    if (previewNumber(advisory.stage) === null) {
+      cancelled.push({ stage: displayStage(advisory.stage), reason: "stage-protected" });
+      continue;
+    }
+
+    const freshPlan = buildReconciliationPlan(await adapters.collectObservation());
+    const fresh = freshPlan.stages.find((stage) => stage.stage === advisory.stage);
+    if (!fresh || fresh.decision !== "candidate") {
+      cancelled.push({ stage: advisory.stage, reason: "no-longer-candidate" });
+      continue;
+    }
+
+    if (fresh.action !== "remove-with-sst" || !fresh.statePresent) {
+      stateMissing.push(fresh);
+      cancelled.push({ stage: advisory.stage, reason: "state-missing" });
+      continue;
+    }
+
+    await adapters.removeStage(advisory.stage);
+    removed.push(advisory.stage);
+  }
+
+  let operatorIssue: ApplyResult["operatorIssue"] = "none";
+  if (stateMissing.length > 0) {
+    const draft = prepareOperatorIssue(
+      deepFreeze({
+        schemaVersion: PLAN_SCHEMA_VERSION,
+        observedAt: plan.observedAt,
+        gracePeriodHours: plan.gracePeriodHours,
+        stages: stateMissing,
+      }),
+    );
+    if (draft) operatorIssue = await upsertOperatorIssue(draft, adapters);
+  }
+
+  return deepFreeze({ removed, cancelled, operatorIssue });
+}
+
+export async function runReport(
+  adapters: ObservationAdapter,
+): Promise<Readonly<{ plan: ReconciliationPlan; report: string }>> {
+  const plan = buildReconciliationPlan(await adapters.collectObservation());
+  const report = renderPlanReport(plan);
+  return deepFreeze({ plan, report });
+}
+
+type CommandResult = Readonly<{ stdout: string; stderr: string }>;
+
+async function runCommand(
+  file: string,
+  args: readonly string[],
+  label: string,
+  allowedFailure?: RegExp,
+): Promise<CommandResult | null> {
+  try {
+    const result = await execFileAsync(file, [...args], {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      maxBuffer: 20 * 1024 * 1024,
+      env: process.env,
+    });
+    return { stdout: result.stdout, stderr: result.stderr };
+  } catch (error) {
+    const stderr =
+      typeof error === "object" && error !== null && "stderr" in error
+        ? String(error.stderr)
+        : "";
+    if (allowedFailure?.test(stderr)) return null;
+    throw new Error(`${label} failed`);
+  }
+}
+
+function parseJson(value: string, label: string): unknown {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    throw new Error(`Invalid JSON from ${label}`);
+  }
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  return typeof value === "object" && value !== null
+    ? (value as Record<string, unknown>)
+    : {};
+}
+
+function stringOrNull(value: unknown): string | null {
+  return typeof value === "string" && value.length > 0 ? value : null;
+}
+
+function githubPages(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
+}
+
+function validateRepository(repository: string): void {
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repository)) {
+    throw new Error("Invalid GitHub repository");
+  }
+}
+
+async function collectPullRequests(repository: string): Promise<PullRequestObservation[]> {
+  const result = await runCommand(
+    "gh",
+    [
+      "api",
+      "--method",
+      "GET",
+      "--paginate",
+      "--slurp",
+      `repos/${repository}/pulls`,
+      "-f",
+      "state=all",
+      "-f",
+      "per_page=100",
+    ],
+    "GitHub pull-request observation",
+  );
+  const pages = githubPages(parseJson(result!.stdout, "GitHub pull requests"));
+  return pages.flatMap((page) =>
+    (Array.isArray(page) ? page : []).map((item): PullRequestObservation => {
+      const pullRequest = asRecord(item);
+      const number = Number(pullRequest.number);
+      if (!Number.isSafeInteger(number)) throw new Error("Invalid pull-request number");
+      if (pullRequest.state !== "open" && pullRequest.state !== "closed") {
+        throw new Error("Invalid pull-request state");
+      }
+      const closedAt = stringOrNull(pullRequest.closed_at);
+      if (pullRequest.state === "open") {
+        if (closedAt !== null) throw new Error("Open pull request has closed_at");
+        return { number, state: "open", closedAt: null };
+      }
+      if (closedAt === null) throw new Error("Closed pull request lacks closed_at");
+      return { number, state: "closed", closedAt };
+    }),
+  );
+}
+
+async function collectWorkflowRuns(
+  repository: string,
+): Promise<WorkflowRunObservation[]> {
+  const result = await runCommand(
+    "gh",
+    [
+      "api",
+      "--method",
+      "GET",
+      "--paginate",
+      "--slurp",
+      `repos/${repository}/actions/workflows/infra-ci.yml/runs`,
+      "-f",
+      "event=pull_request",
+      "-f",
+      "per_page=100",
+    ],
+    "GitHub workflow observation",
+  );
+  const pages = githubPages(parseJson(result!.stdout, "GitHub workflow runs"));
+  const runs = pages.flatMap((page) => {
+    const workflowRuns = asRecord(page).workflow_runs;
+    return Array.isArray(workflowRuns) ? workflowRuns : [];
+  });
+
+  return runs.flatMap((item): WorkflowRunObservation[] => {
+    const run = asRecord(item);
+    const pullRequests = Array.isArray(run.pull_requests) ? run.pull_requests : [];
+    const rawStatus = typeof run.status === "string" ? run.status : "unknown";
+    const activeStatuses: readonly ActiveWorkflowStatus[] = [
+      "queued",
+      "in_progress",
+      "waiting",
+      "pending",
+      "requested",
+      "unknown",
+    ];
+    return pullRequests.map((pullRequest): WorkflowRunObservation => {
+      const number = Number(asRecord(pullRequest).number);
+      if (!Number.isSafeInteger(number)) throw new Error("Invalid workflow PR number");
+      if (rawStatus === "completed") {
+        const completedAt = stringOrNull(run.updated_at);
+        if (completedAt === null) throw new Error("Completed workflow lacks updated_at");
+        return { prNumber: number, status: "completed", completedAt };
+      }
+      const status = activeStatuses.includes(rawStatus as ActiveWorkflowStatus)
+        ? (rawStatus as ActiveWorkflowStatus)
+        : "unknown";
+      return { prNumber: number, status, completedAt: null };
+    });
+  });
+}
+
+async function collectStateObjects(): Promise<StateObjectObservation[]> {
+  const bootstrap = await runCommand(
+    "aws",
+    ["ssm", "get-parameter", "--name", "/sst/bootstrap", "--output", "json"],
+    "SST bootstrap observation",
+    /ParameterNotFound/,
+  );
+  if (bootstrap === null) return [];
+
+  const parameter = asRecord(
+    asRecord(parseJson(bootstrap.stdout, "SST bootstrap")).Parameter,
+  );
+  const bootstrapValue = stringOrNull(parameter.Value);
+  if (bootstrapValue === null) throw new Error("SST bootstrap state is missing");
+  const stateBucket = stringOrNull(
+    asRecord(parseJson(bootstrapValue, "SST bootstrap value")).state,
+  );
+  if (stateBucket === null) throw new Error("SST state bucket is missing");
+
+  const listing = await runCommand(
+    "aws",
+    [
+      "s3api",
+      "list-objects-v2",
+      "--bucket",
+      stateBucket,
+      "--prefix",
+      "app/mem9-on-aws/",
+      "--output",
+      "json",
+    ],
+    "SST state observation",
+  );
+  const contents = asRecord(parseJson(listing!.stdout, "SST state objects")).Contents;
+  if (!Array.isArray(contents)) return [];
+
+  return contents.flatMap((item): StateObjectObservation[] => {
+    const object = asRecord(item);
+    const key = stringOrNull(object.Key);
+    const lastModified = stringOrNull(object.LastModified);
+    const match = key?.match(/^app\/mem9-on-aws\/(.+)\.json$/);
+    if (!match || lastModified === null) return [];
+    return [{ stage: match[1], lastModified }];
+  });
+}
+
+export function resourceTypeFromArn(arn: string): string {
+  const parts = arn.split(":");
+  const service = parts[2]?.toLowerCase();
+  const resource = parts.slice(5).join(":");
+  if (!service) return "unknown";
+  const token = resource.split(/[/:]/).find((part) => part.length > 0)?.toLowerCase();
+  const resourceType =
+    (token ? RESOURCE_TYPE_BY_SERVICE[service]?.[token] : undefined) ??
+    RESOURCE_TYPE_DEFAULT_BY_SERVICE[service] ??
+    "resource";
+  return safeResourceType(`${service}:${resourceType}`);
+}
+
+async function collectResources(): Promise<ResourceObservation[]> {
+  const result = await runCommand(
+    "aws",
+    [
+      "resourcegroupstaggingapi",
+      "get-resources",
+      "--tag-filters",
+      "Key=Project,Values=mem9-on-aws",
+      "Key=ManagedBy,Values=sst",
+      "--output",
+      "json",
+    ],
+    "AWS tagged-resource observation",
+  );
+  const mappings = asRecord(
+    parseJson(result!.stdout, "AWS tagged resources"),
+  ).ResourceTagMappingList;
+  if (!Array.isArray(mappings)) return [];
+
+  return mappings.flatMap((item): ResourceObservation[] => {
+    const mapping = asRecord(item);
+    const arn = stringOrNull(mapping.ResourceARN);
+    const tags = new Map(
+      (Array.isArray(mapping.Tags) ? mapping.Tags : []).flatMap((item): [string, string][] => {
+        const tag = asRecord(item);
+        const key = stringOrNull(tag.Key);
+        const value = stringOrNull(tag.Value);
+        return key && value ? [[key, value]] : [];
+      }),
+    );
+    const stage = tags.get("Stage");
+    if (!arn || !stage) return [];
+    return [
+      {
+        stage,
+        resourceType: resourceTypeFromArn(arn),
+        project: tags.get("Project") ?? "",
+        managedBy: tags.get("ManagedBy") ?? "",
+      },
+    ];
+  });
+}
+
+function createObservationAdapter(repository: string): ObservationAdapter {
+  validateRepository(repository);
+  return {
+    async collectObservation() {
+      const [pullRequests, workflowRuns, stateObjects, resources] = await Promise.all([
+        collectPullRequests(repository),
+        collectWorkflowRuns(repository),
+        collectStateObjects(),
+        collectResources(),
+      ]);
+      return {
+        observedAt: new Date().toISOString(),
+        pullRequests,
+        workflowRuns,
+        stateObjects,
+        resources,
+      };
+    },
+  };
+}
+
+function createApplyAdapters(repository: string): ApplyAdapters {
+  const observationAdapter = createObservationAdapter(repository);
+  return {
+    ...observationAdapter,
+    async removeStage(stage) {
+      const [file, ...args] = sstRemoveCommand(stage);
+      await runCommand(
+        file,
+        args,
+        `SST removal for ${stage}`,
+      );
+    },
+    async findOpenOperatorIssue(title, marker) {
+      const result = await runCommand(
+        "gh",
+        [
+          "api",
+          "--method",
+          "GET",
+          "--paginate",
+          "--slurp",
+          `repos/${repository}/issues`,
+          "-f",
+          "state=open",
+          "-f",
+          "per_page=100",
+        ],
+        "GitHub operator-issue lookup",
+      );
+      const pages = githubPages(parseJson(result!.stdout, "GitHub issues"));
+      for (const item of pages.flatMap((page) => (Array.isArray(page) ? page : []))) {
+        const issue = asRecord(item);
+        if (
+          issue.pull_request === undefined &&
+          issue.title === title &&
+          typeof issue.body === "string" &&
+          issue.body.includes(marker)
+        ) {
+          const number = Number(issue.number);
+          if (Number.isSafeInteger(number)) return number;
+        }
+      }
+      return null;
+    },
+    async createOperatorIssue(title, body) {
+      const result = await runCommand(
+        "gh",
+        [
+          "api",
+          `repos/${repository}/issues`,
+          "-X",
+          "POST",
+          "-f",
+          `title=${title}`,
+          "-f",
+          `body=${body}`,
+        ],
+        "GitHub operator-issue creation",
+      );
+      const number = Number(
+        asRecord(parseJson(result!.stdout, "created GitHub issue")).number,
+      );
+      if (!Number.isSafeInteger(number)) throw new Error("Invalid created issue number");
+      return number;
+    },
+    async updateOperatorIssue(number, title, body) {
+      await runCommand(
+        "gh",
+        [
+          "api",
+          `repos/${repository}/issues/${number}`,
+          "-X",
+          "PATCH",
+          "-f",
+          `title=${title}`,
+          "-f",
+          `body=${body}`,
+        ],
+        "GitHub operator-issue update",
+      );
+    },
+  };
+}
+
+function validateStoredPlan(value: unknown): ReconciliationPlan {
+  const plan = asRecord(value);
+  if (
+    plan.schemaVersion !== PLAN_SCHEMA_VERSION ||
+    typeof plan.observedAt !== "string" ||
+    plan.gracePeriodHours !== 24 ||
+    !Array.isArray(plan.stages)
+  ) {
+    throw new Error("Invalid reconciliation plan");
+  }
+  timestampMs(plan.observedAt, "stored plan");
+  for (const item of plan.stages) {
+    const stage = asRecord(item);
+    if (
+      typeof stage.stage !== "string" ||
+      !["protected", "retain", "candidate"].includes(String(stage.decision)) ||
+      !["none", "remove-with-sst", "operator-review"].includes(String(stage.action)) ||
+      !Array.isArray(stage.reasons) ||
+      !Array.isArray(stage.resources)
+    ) {
+      throw new Error("Invalid reconciliation stage");
+    }
+    if (stage.decision === "candidate" && previewNumber(stage.stage) === null) {
+      throw new Error("Unsafe candidate stage");
+    }
+  }
+  return deepFreeze(value as ReconciliationPlan);
+}
+
+type CliOptions =
+  | Readonly<{
+      command: "plan";
+      repository: string;
+      eventName: "schedule" | "workflow_dispatch";
+      planPath: string;
+    }>
+  | Readonly<{
+      command: "apply";
+      repository: string;
+      trigger: Trigger;
+      planPath: string;
+    }>;
+
+function parseCli(argv: readonly string[]): CliOptions {
+  const [command, ...rest] = argv;
+  if (command !== "plan" && command !== "apply") {
+    throw new Error("Expected plan or apply command");
+  }
+  const flags = new Map<string, string>();
+  for (let index = 0; index < rest.length; index += 2) {
+    const key = rest[index];
+    const value = rest[index + 1];
+    if (!key?.startsWith("--") || value === undefined) {
+      throw new Error("Invalid command arguments");
+    }
+    flags.set(key.slice(2), value);
+  }
+  const eventName = flags.get("event");
+  const mode = flags.get("mode");
+  const repository = flags.get("repository") ?? "";
+  const planPath = flags.get("plan") ?? "";
+  if (planPath.length === 0) {
+    throw new Error("Invalid reconciliation trigger");
+  }
+  validateRepository(repository);
+  if (command === "plan") {
+    if (
+      (eventName !== "schedule" && eventName !== "workflow_dispatch") ||
+      mode !== undefined
+    ) {
+      throw new Error("Invalid report trigger");
+    }
+    return {
+      command,
+      repository,
+      eventName,
+      planPath: path.resolve(planPath),
+    };
+  }
+  if (eventName !== "workflow_dispatch" || mode !== "apply") {
+    throw new Error("Apply requires an explicit manual apply trigger");
+  }
+  return {
+    command,
+    repository,
+    trigger: { eventName, mode },
+    planPath: path.resolve(planPath),
+  };
+}
+
+async function main(): Promise<void> {
+  const options = parseCli(process.argv.slice(2));
+  if (options.command === "plan") {
+    const result = await runReport(createObservationAdapter(options.repository));
+    console.log(result.report);
+    await fs.writeFile(options.planPath, `${JSON.stringify(result.plan, null, 2)}\n`, {
+      mode: 0o600,
+    });
+    return;
+  }
+
+  assertApplyTrigger(options.trigger);
+  const plan = validateStoredPlan(
+    parseJson(await fs.readFile(options.planPath, "utf8"), "stored plan"),
+  );
+  const result = await applyReconciliationPlan(
+    plan,
+    createApplyAdapters(options.repository),
+    options.trigger,
+  );
+  for (const stage of result.removed) console.log(`Removed preview stage ${stage}`);
+  for (const cancellation of result.cancelled) {
+    console.log(`Retained preview stage ${cancellation.stage}: ${cancellation.reason}`);
+  }
+  if (result.operatorIssue !== "none") {
+    console.log(`Operator issue ${result.operatorIssue} for state-missing inventory`);
+  }
+}
+
+const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";
+if (invokedPath === fileURLToPath(import.meta.url)) {
+  main().catch(() => {
+    console.error("preview-reconciler: failed closed");
+    process.exitCode = 1;
+  });
+}

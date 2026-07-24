@@ -248,6 +248,14 @@ Resources:
               - ssm:GetParameters
             Resource:
               - !Sub arn:aws:ssm:*:${AWS::AccountId}:parameter/mem9-on-aws/*
+          - Sid: TaggedInventoryRead
+            # The recurring preview reconciler inventories this project's
+            # currently tagged resources, then discards each ARN after deriving
+            # its resource type. GetResources has no resource-level scope.
+            Effect: Allow
+            Action:
+              - tag:GetResources
+            Resource: "*"
           - Sid: SSMWrite
             # THE grant that lets the `meta` stack create its SSM parameters —
             # without it the first `sst deploy` 403s. Scoped to this project's
