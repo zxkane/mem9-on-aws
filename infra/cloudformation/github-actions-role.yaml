@@ -767,6 +767,26 @@ Resources:
               - !Sub arn:aws:ecr:ap-northeast-1:${AWS::AccountId}:repository/${ProjectName}/qwen3-embed
               - !Sub arn:aws:ecr:ap-northeast-1:${AWS::AccountId}:repository/${ProjectName}/bootstrap
               - !Sub arn:aws:ecr:ap-northeast-1:${AWS::AccountId}:repository/${ProjectName}/llm-proxy
+          - Sid: EcrRegistryScanning
+            # Registry scanning configuration is an account/region singleton
+            # with no resource ARN. CloudFormation uses Put while the guarded
+            # wrapper reads the complete configuration with Get.
+            Effect: Allow
+            Action:
+              - ecr:GetRegistryScanningConfiguration
+              - ecr:PutRegistryScanningConfiguration
+            Resource: "*"
+          - Sid: EcrImageScanFindings
+            # Read-only operator/CI access to BASIC findings is restricted to
+            # the same four project repositories as the image push grant.
+            Effect: Allow
+            Action:
+              - ecr:DescribeImageScanFindings
+            Resource:
+              - !Sub arn:${AWS::Partition}:ecr:ap-northeast-1:${AWS::AccountId}:repository/${ProjectName}/mnemo-server
+              - !Sub arn:${AWS::Partition}:ecr:ap-northeast-1:${AWS::AccountId}:repository/${ProjectName}/qwen3-embed
+              - !Sub arn:${AWS::Partition}:ecr:ap-northeast-1:${AWS::AccountId}:repository/${ProjectName}/bootstrap
+              - !Sub arn:${AWS::Partition}:ecr:ap-northeast-1:${AWS::AccountId}:repository/${ProjectName}/llm-proxy
 
   # ───────────────────────────────────────────────────────────────────────────
   # Policy 7 — MCP proxy Lambda (infra/gateway.ts): the VPC-attached proxy Lambda

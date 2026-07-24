@@ -12,6 +12,7 @@
     "@aws-sdk/client-ssm": "^3.1092.0",
     "@types/node": "^24.0.0",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8"
+    "vitest": "^2.1.8",
+    "yaml": "^2.8.1"
   }
 }

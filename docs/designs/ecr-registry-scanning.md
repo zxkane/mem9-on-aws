@@ -1,0 +1,62 @@
+# Design Canvas - ECR registry scan-on-push
+
+Feature: Out-of-band ECR registry scanning ownership
+Date: 2026-07-24
+Status: Approved (autonomous mode)
+
+## Component Architecture
+
+```text
+deploy-ecr-registry-scanning.sh
+  |
+  +-- ECR GetRegistryScanningConfiguration (complete account/region state)
+  +-- CloudFormation DescribeStacks/DescribeStackResources (ownership only)
+  +-- ecr-registry-scanning-preflight.mjs (pure decision)
+        |
+        +-- adopt          -> validate + create dedicated stack
+        +-- verify-owned   -> exit without mutation
+        +-- update-owned   -> validate + update from complete template
+        +-- verify-only    -> exit without adopting external rules
+        +-- fail-closed    -> exit before every mutation command
+
+Dedicated CloudFormation stack
+  `-- AWS::ECR::RegistryScanningConfiguration
+        ScanType: BASIC
+        Rules:
+          - ScanFrequency: SCAN_ON_PUSH
+            RepositoryFilters:
+              - Filter: mem9-on-aws/*
+                FilterType: WILDCARD
+```
+
+The existing retained `AWS::ECR::Repository` resources remain in their current
+out-of-band stack. The registry singleton is deliberately separate.
+
+## Data Flow
+
+1. Read the complete registry scanning configuration before any CloudFormation
+   mutation.
+2. Read whether the dedicated stack exists and owns the singleton resource.
+3. Evaluate the current configuration, stack ownership, the four project
+   repositories, and the complete declared configuration as pure data.
+4. Permit a mutation only when the registry is default/unconfigured or the
+   dedicated stack already owns the singleton.
+5. Never merge external filters into the project template. Externally managed
+   BASIC scan-on-push rules are accepted only when they cover all four project
+   repositories; every other external state fails closed.
+
+## Design Notes
+
+- `${ProjectName}/*` is narrower than `${ProjectName}*`: it covers only
+  repositories below the project's namespace separator.
+- A filter without `*` uses ECR substring semantics, so matching is implemented
+  according to the documented wildcard rules instead of as a prefix shortcut.
+- Stack-owned drift can be replaced because the dedicated template is the
+  complete declaration for the singleton. External drift is never replaced.
+- `DeletionPolicy: Retain` preserves the registry configuration if ownership is
+  relinquished. An external owner can then install a complete account-level
+  ruleset without this stack deleting it.
+- The wrapper uses CloudFormation for mutations and never calls ECR's
+  repository-level scanning API or directly puts a registry configuration.
+- Fixture tests record every mocked AWS command so all conflict paths can prove
+  that no mutation command was reached.

@@ -230,10 +230,73 @@ Memory rows and embeddings are durable in Aurora. The Fargate task uses `/tmp`
 only for mem9's batch-import implementation; normal add, search, and CRUD paths
 do not require persistent task storage.
 
+### ECR registry scanning
+
+The four retained repositories remain in
+`infra/cloudformation/ecr-repositories.yaml`. Registry scanning is a separate
+account/region singleton, so the dedicated
+`infra/cloudformation/ecr-registry-scanning.yaml` stack owns the complete
+registry configuration. No `AWS::ECR::Repository` has repository-level scanning
+configuration.
+
+The complete declaration uses BASIC scanning with one `SCAN_ON_PUSH` filter,
+`mem9-on-aws/*`. The namespace separator keeps the rule narrow: it covers the
+four project repositories without matching a sibling such as
+`mem9-on-aws-other/*`.
+
+Run `scripts/deploy-ecr-registry-scanning.sh` once per account/region. Its first
+AWS call reads the complete registry scanning configuration. It then reads
+CloudFormation ownership and applies this policy:
+
+| Current state | Wrapper result |
+|---|---|
+| Default BASIC configuration with no rules; dedicated stack absent | Adopt by creating the dedicated stack |
+| Dedicated stack owns an equivalent complete declaration | Verify and exit without mutation |
+| Dedicated stack owns different current rules | Update from the stack's complete declared ruleset |
+| External BASIC `SCAN_ON_PUSH` rules cover all four project repositories | Verify and exit without adopting or mutating them |
+| Any external scan type conflict, sibling-only rules, or partial project coverage | Fail closed before mutation |
+
+The wrapper never merges or infers external rules. It repeats the complete
+registry and ownership preflight immediately before mutation, and a stack-name
+collision without ownership also fails closed.
+
+CloudFormation does not reconcile resource drift when the submitted template is
+unchanged. On that specific stack-owned path, the wrapper reapplies the exact
+complete declaration through the registry-level API, reads it back, and requires
+an owned-equivalent result. It never uses the deprecated repository-level
+scanning API.
+
+CloudFormation update rollback restores the stack's previous complete
+declaration. The singleton has `DeletionPolicy: Retain`, so deleting the stack
+relinquishes ownership without deleting the active configuration. After
+deletion, the account-level owner may apply a reviewed complete ruleset,
+including the default state if that is the intended rollback. The project
+wrapper intentionally does not perform that account-wide handoff.
+
+For conflicts, export the current state with
+`aws ecr get-registry-scanning-configuration --region ap-northeast-1`, have the
+account-level owner update the complete ruleset, and rerun the wrapper. Do not
+copy sibling filters into this project's template.
+
+After an image push and scan completion, an operator can inspect findings
+without starting or changing a scan:
+
+```bash
+aws ecr describe-image-scan-findings \
+  --region ap-northeast-1 \
+  --repository-name mem9-on-aws/mnemo-server \
+  --image-id imageTag=<image-tag> \
+  --query '{status:imageScanStatus.status,counts:imageScanFindings.findingSeverityCounts,findings:imageScanFindings.findings}'
+```
+
+The deploy role adds only registry configuration get/put and this findings-read
+action. Findings access is scoped to the four project repository ARNs.
+
 ### Component map
 
 | Layer | Current resource or component | Source |
 |---|---|---|
+| Container registry | Four retained ECR repositories plus guarded registry-level BASIC scan-on-push | `infra/cloudformation/ecr-repositories.yaml`, `infra/cloudformation/ecr-registry-scanning.yaml` |
 | Compute | ECS Fargate, arm64, one task, three containers | `infra/ecs.ts` |
 | Database | Aurora PostgreSQL Serverless v2, direct writer endpoint; PITR retention prod=14 days, non-prod=1 day | `infra/db.ts` |
 | Database credential | Secrets Manager task-definition secret | `infra/db.ts`, `docker/mnemo-server/entrypoint.sh` |
@@ -264,6 +327,8 @@ do not require persistent task storage.
 - The public OAuth facade uses API Gateway v2 plus Lambda, never a Lambda
   Function URL.
 - Schema bootstrap is a separate one-shot ECS task.
+- ECR scan-on-push is a guarded out-of-band registry singleton, separate from
+  the retained repository stack.
 
 ## Planned changes
 
@@ -272,7 +337,6 @@ The open reliability program covers future work in these areas:
 - Release image tag selection and read-only ECS actual-state reconciliation.
 - Mandatory alert delivery with separate transport and execution failure queues.
 - Safe preview-stage reconciliation and a separately reviewed one-time cleanup.
-- Registry-level ECR scan-on-push coverage.
 - A disabled-by-default durable ingest job foundation, atomic plan application,
   tenant-scoped job status, and job-level telemetry.
 - A post-deployment production reliability verification exercise.
