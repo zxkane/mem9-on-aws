@@ -207,6 +207,7 @@ declare namespace aws {
       logGroupName: Input<string>;
       pattern: Input<string>;
       metricTransformation: LogMetricFilterMetricTransformation;
+      [k: string]: unknown;
     }
     class LogMetricFilter {
       constructor(name: string, args: LogMetricFilterArgs, opts?: { dependsOn?: unknown[] });
@@ -431,7 +432,12 @@ declare namespace sst {
     }
     class Service {
       constructor(name: string, args: ServiceArgs);
-      readonly nodes: { service: { name: Output<string>; arn: Output<string> } };
+      readonly nodes: {
+        service: { name: Output<string>; arn: Output<string> };
+        // Output<ecs.TaskDefinition>; observability wiring reads the
+        // containerDefinitions JSON to find the real awslogs-group.
+        taskDefinition: Output<unknown>;
+      };
       readonly service: Output<string>;
     }
 

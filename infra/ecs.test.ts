@@ -10,7 +10,18 @@ import type { DbOutputs } from "./db";
  */
 
 function out<T>(value: T): { value: T; apply: (fn: (v: T) => unknown) => unknown } {
-  return { value, apply: (fn) => out(fn(value) as never) };
+  return {
+    value,
+    // Mirror Pulumi's Output.apply: when fn returns another Output, FLATTEN it
+    // (Output<Output<U>> → Output<U>) instead of double-wrapping — the ecs()
+    // taskDefinition→containerDefinitions chain relies on this.
+    apply: (fn) => {
+      const result = fn(value);
+      return result && typeof result === "object" && "apply" in result
+        ? result
+        : out(result as never);
+    },
+  };
 }
 
 interface ClusterRecord {
@@ -138,7 +149,23 @@ function installGlobals(stage: string) {
         }
       },
       Service: class {
-        nodes = { service: { name: out("mem9-service"), arn: out("arn:service") } };
+        nodes = {
+          service: { name: out("mem9-service"), arn: out("arn:service") },
+          // observability wiring parses containerDefinitions JSON from the task
+          // def to find the mnemo-server awslogs-group.
+          taskDefinition: out({
+            containerDefinitions: out(
+              JSON.stringify([
+                {
+                  name: "mnemo-server",
+                  logConfiguration: {
+                    options: { "awslogs-group": "/sst/cluster/test/svc-hash/mnemo-server" },
+                  },
+                },
+              ]),
+            ),
+          }),
+        };
         service = out("mem9.svc.local");
         constructor(_logicalName: string, args: Record<string, unknown>) {
           services.push({ args });
