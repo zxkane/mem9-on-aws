@@ -49,6 +49,7 @@ GitHub event + commit SHA
        -> SSM GetParameters
        -> ECS services-stable waiter
        -> ECS DescribeServices (one PRIMARY deployment)
+          -> bounded follow-up polling while rolloutState is IN_PROGRESS
        -> ECS ListTasks (RUNNING for this service)
        -> ECS DescribeTasks (task-definition ARN + three container images)
        -> match: continue deployment job
@@ -61,6 +62,7 @@ A deployment matches only when all of these are true:
 
 - ECS stabilization succeeds.
 - The service has exactly one resolved deployment and one PRIMARY deployment.
+- The PRIMARY rollout reaches `COMPLETED` within the bounded follow-up window.
 - The PRIMARY deployment task definition exactly equals the exported ARN.
 - At least one running task exists.
 - Every listed task is running and uses the exported task definition.
@@ -68,7 +70,8 @@ A deployment matches only when all of these are true:
 - Every application container image uses the exported release tag.
 
 Mixed task definitions, mixed tags, missing tasks or containers, AWS lookup
-failures, and waiter timeout are mismatches.
+failures, waiter timeout, and an incomplete PRIMARY rollout after the bounded
+follow-up window are mismatches.
 
 ## Diagnostics And IAM
 

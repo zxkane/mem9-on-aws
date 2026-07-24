@@ -73,6 +73,7 @@ function mockAws(overrides = {}) {
     calls.push(key);
     const response = responses[key];
     if (response instanceof Error) throw response;
+    if (typeof response === "function") return response();
     return response;
   });
   return { runAws, calls };
@@ -92,6 +93,70 @@ describe("reconcileDeployment", () => {
       "ecs list-tasks",
       "ecs describe-tasks",
     ]);
+  });
+
+  it("waits for PRIMARY rollout completion after the stable waiter returns", () => {
+    let serviceReads = 0;
+    const sleep = vi.fn();
+    const completed = baseResponses()["ecs describe-services"];
+    const { runAws, calls } = mockAws({
+      "ecs describe-services": () => {
+        serviceReads += 1;
+        if (serviceReads > 1) return completed;
+        return {
+          services: [
+            {
+              deployments: [
+                {
+                  status: "PRIMARY",
+                  rolloutState: "IN_PROGRESS",
+                  taskDefinition: DESIRED_TASK_DEF,
+                },
+              ],
+            },
+          ],
+          failures: [],
+        };
+      },
+    });
+
+    const result = reconcileDeployment({ stage: "prod", runAws, sleep });
+
+    expect(result.ok).toBe(true);
+    expect(sleep).toHaveBeenCalledOnce();
+    expect(calls.filter((call) => call === "ecs describe-services")).toHaveLength(2);
+  });
+
+  it("bounds PRIMARY rollout polling and reports an incomplete rollout", () => {
+    const sleep = vi.fn();
+    const { runAws, calls } = mockAws({
+      "ecs describe-services": {
+        services: [
+          {
+            deployments: [
+              {
+                status: "PRIMARY",
+                rolloutState: "IN_PROGRESS",
+                taskDefinition: DESIRED_TASK_DEF,
+              },
+            ],
+          },
+        ],
+        failures: [],
+      },
+    });
+
+    const result = reconcileDeployment({
+      stage: "prod",
+      runAws,
+      sleep,
+      rolloutPollAttempts: 3,
+      rolloutPollIntervalMs: 1,
+    });
+
+    expect(result.reasons).toContain("primary_not_completed");
+    expect(sleep).toHaveBeenCalledTimes(2);
+    expect(calls.filter((call) => call === "ecs describe-services")).toHaveLength(3);
   });
 
   it("detects exported-new/ECS-old drift without exposing ARNs or account IDs", () => {

@@ -7,6 +7,12 @@ import { resolve } from "node:path";
 const APP_CONTAINERS = ["mnemo-server", "qwen3-embed", "llm-proxy"];
 const SAFE_VALUE = /^[A-Za-z0-9._:-]+$/;
 const ACCOUNT_ID = /\d{12}/;
+const ROLLOUT_POLL_ATTEMPTS = 12;
+const ROLLOUT_POLL_INTERVAL_MS = 10_000;
+
+function sleepSync(milliseconds) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);
+}
 
 function addReason(result, reason) {
   if (!result.reasons.includes(reason)) result.reasons.push(reason);
@@ -101,7 +107,51 @@ function describeAllTasks(cluster, taskArns, runAws) {
   return { tasks, failures };
 }
 
-export function reconcileDeployment({ stage, runAws }) {
+function describeService(cluster, service, runAws) {
+  return runAws([
+    "ecs",
+    "describe-services",
+    "--cluster",
+    cluster,
+    "--services",
+    service,
+    "--output",
+    "json",
+  ]);
+}
+
+function waitForPrimaryRollout({
+  cluster,
+  service,
+  runAws,
+  sleep,
+  rolloutPollAttempts,
+  rolloutPollIntervalMs,
+}) {
+  let response;
+  for (let attempt = 0; attempt < rolloutPollAttempts; attempt += 1) {
+    response = describeService(cluster, service, runAws);
+    const services = response?.services ?? [];
+    const deployments = services[0]?.deployments ?? [];
+    const primaries = deployments.filter((deployment) => deployment.status === "PRIMARY");
+    const rolloutState =
+      services.length === 1 && deployments.length === 1 && primaries.length === 1
+        ? primaries[0].rolloutState
+        : undefined;
+
+    if (rolloutState !== "IN_PROGRESS") return response;
+    if (attempt + 1 < rolloutPollAttempts) sleep(rolloutPollIntervalMs);
+  }
+  return response;
+}
+
+export function reconcileDeployment({
+  stage,
+  runAws,
+  sleep = sleepSync,
+  rolloutPollAttempts = ROLLOUT_POLL_ATTEMPTS,
+  rolloutPollIntervalMs = ROLLOUT_POLL_INTERVAL_MS,
+}) {
   if (!/^[A-Za-z0-9-]+$/.test(stage ?? "")) {
     throw new Error("stage must contain only letters, digits, and hyphens");
   }
@@ -135,16 +185,14 @@ export function reconcileDeployment({ stage, runAws }) {
   let serviceResponse;
   let taskArns;
   try {
-    serviceResponse = runAws([
-      "ecs",
-      "describe-services",
-      "--cluster",
-      desired.cluster,
-      "--services",
-      desired.service,
-      "--output",
-      "json",
-    ]);
+    serviceResponse = waitForPrimaryRollout({
+      cluster: desired.cluster,
+      service: desired.service,
+      runAws,
+      sleep,
+      rolloutPollAttempts,
+      rolloutPollIntervalMs,
+    });
     taskArns =
       runAws([
         "ecs",

@@ -21,3 +21,5 @@ Design:
 | TC-DEPLOY-014 | Match and drift fixtures execute through the fake AWS CLI | Match exits 0; drift exits nonzero; calls are recorded in deterministic order |
 | TC-DEPLOY-015 | Recorded reconciliation commands and source are inspected | No `UpdateService`, task-definition listing, or other ECS mutation is called |
 | TC-DEPLOY-016 | Reconciliation fails in the production job | The existing `failure()` deployment-reporting step runs; no separate remediation path is introduced |
+| TC-DEPLOY-017 | `services-stable` returns while the single PRIMARY rollout is `IN_PROGRESS`, then a follow-up read reports `COMPLETED` | Reconciliation waits within the bounded follow-up window and succeeds |
+| TC-DEPLOY-018 | The single PRIMARY rollout remains `IN_PROGRESS` through the bounded follow-up window | Reconciliation exits nonzero with `primary_not_completed`; it does not mutate ECS or wait indefinitely |
