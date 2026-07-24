@@ -799,6 +799,10 @@ jobs:
           # (infra/ecs.ts BEDROCK_PROJECT). Repo variable set out-of-band by
           # scripts/deploy-bedrock-mantle-project.sh.
           MEM9_BEDROCK_PROJECT: ${{ vars.MEM9_BEDROCK_PROJECT }}
+          # Slack incoming webhook for prod alarm delivery (infra/observability.ts).
+          # OPTIONAL: unset → alarms stay console-only (no SNS topic / Lambda).
+          # Set the SLACK_WEBHOOK_URL repo secret to enable.
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
         run: |
           set +e
           pnpm -C infra exec sst deploy --stage prod --print-logs 2>&1 | tee sst-deploy.log
