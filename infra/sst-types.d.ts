@@ -116,6 +116,15 @@ declare namespace aws {
       packageType?: Input<string>;
     }
     class Function {}
+    interface PermissionArgs {
+      action: Input<string>;
+      function: Input<string>;
+      principal: Input<string>;
+      sourceArn?: Input<string>;
+    }
+    class Permission {
+      constructor(name: string, args: PermissionArgs);
+    }
   }
 
   namespace ec2 {
@@ -226,11 +235,31 @@ declare namespace aws {
       comparisonOperator: Input<string>;
       treatMissingData?: Input<string>;
       metricQueries?: MetricAlarmMetricQuery[];
-      alarmActions?: Input<string>[];
+      alarmActions?: Input<Input<string>[]>;
     }
     class MetricAlarm {
       constructor(name: string, args: MetricAlarmArgs);
       readonly arn: Output<string>;
+    }
+  }
+
+  // SNS (infra/observability.ts — Slack alerting).
+  namespace sns {
+    interface TopicArgs {
+      name?: Input<string>;
+      tags?: Record<string, Input<string>>;
+    }
+    class Topic {
+      constructor(name: string, args?: TopicArgs);
+      readonly arn: Output<string>;
+    }
+    interface TopicSubscriptionArgs {
+      topic: Input<string>;
+      protocol: Input<string>;
+      endpoint: Input<string>;
+    }
+    class TopicSubscription {
+      constructor(name: string, args: TopicSubscriptionArgs);
     }
   }
 
