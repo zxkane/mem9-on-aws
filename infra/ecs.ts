@@ -439,7 +439,7 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
   // is set (GitHub Actions secret → `sst secret set` during deploy, or manual).
   // When absent, alarms still fire (console-visible) but have no actions.
   const slackWebhookUrl = process.env.SLACK_WEBHOOK_URL || undefined;
-  observability({ stage: $app.stage, logGroupName: mnemoLogGroupName, slackWebhookUrl });
+  observability({ stage: $app.stage, logGroupName: mnemoLogGroupName, service, slackWebhookUrl });
 
   return {
     ssmPrefix: prefix,

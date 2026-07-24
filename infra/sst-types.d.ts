@@ -209,7 +209,7 @@ declare namespace aws {
       metricTransformation: LogMetricFilterMetricTransformation;
     }
     class LogMetricFilter {
-      constructor(name: string, args: LogMetricFilterArgs);
+      constructor(name: string, args: LogMetricFilterArgs, opts?: { dependsOn?: unknown[] });
     }
     interface MetricAlarmMetricQuery {
       id: Input<string>;

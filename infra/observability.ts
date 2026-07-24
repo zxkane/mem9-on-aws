@@ -24,60 +24,82 @@
 export interface ObservabilityInputs {
   stage: string;
   logGroupName: string;
+  // The ECS service whose container logging creates the log group above. The
+  // metric filters MUST depend on it: they reference the log group by name
+  // (a plain string, no implicit Pulumi edge), and on a fresh deploy a filter
+  // racing ahead of the Service fails with ResourceNotFoundException.
+  service: unknown;
   slackWebhookUrl?: string;
 }
 
 export function observability(inputs: ObservabilityInputs) {
-  const { stage, logGroupName, slackWebhookUrl } = inputs;
+  const { stage, logGroupName, service, slackWebhookUrl } = inputs;
   if (stage !== "prod") return;
 
   const namespace = "mem9-on-aws";
+  const afterService = { dependsOn: [service] };
 
   // ─── Metric filters ──────────────────────────────────────────────────────
 
-  new aws.cloudwatch.LogMetricFilter("RecallZeroHitFilter", {
-    logGroupName,
-    pattern: '{ $.msg = "confidence recall search" && $.returned = 0 }',
-    metricTransformation: {
-      name: "recall_zero_hit",
-      namespace,
-      value: "1",
-      defaultValue: "0",
+  new aws.cloudwatch.LogMetricFilter(
+    "RecallZeroHitFilter",
+    {
+      logGroupName,
+      pattern: '{ $.msg = "confidence recall search" && $.returned = 0 }',
+      metricTransformation: {
+        name: "recall_zero_hit",
+        namespace,
+        value: "1",
+        defaultValue: "0",
+      },
     },
-  });
+    afterService,
+  );
 
-  new aws.cloudwatch.LogMetricFilter("RecallTotalFilter", {
-    logGroupName,
-    pattern: '{ $.msg = "confidence recall search" }',
-    metricTransformation: {
-      name: "recall_total",
-      namespace,
-      value: "1",
-      defaultValue: "0",
+  new aws.cloudwatch.LogMetricFilter(
+    "RecallTotalFilter",
+    {
+      logGroupName,
+      pattern: '{ $.msg = "confidence recall search" }',
+      metricTransformation: {
+        name: "recall_total",
+        namespace,
+        value: "1",
+        defaultValue: "0",
+      },
     },
-  });
+    afterService,
+  );
 
-  new aws.cloudwatch.LogMetricFilter("IngestAuthFailureFilter", {
-    logGroupName,
-    pattern: '{ $.msg = "extraction LLM call failed" && $.err = "*401*" }',
-    metricTransformation: {
-      name: "ingest_llm_auth_failure",
-      namespace,
-      value: "1",
-      defaultValue: "0",
+  new aws.cloudwatch.LogMetricFilter(
+    "IngestAuthFailureFilter",
+    {
+      logGroupName,
+      pattern: '{ $.msg = "extraction LLM call failed" && $.err = "*401*" }',
+      metricTransformation: {
+        name: "ingest_llm_auth_failure",
+        namespace,
+        value: "1",
+        defaultValue: "0",
+      },
     },
-  });
+    afterService,
+  );
 
-  new aws.cloudwatch.LogMetricFilter("IngestDroppedFilter", {
-    logGroupName,
-    pattern: '{ $.msg = "async ingest failed" }',
-    metricTransformation: {
-      name: "ingest_dropped",
-      namespace,
-      value: "1",
-      defaultValue: "0",
+  new aws.cloudwatch.LogMetricFilter(
+    "IngestDroppedFilter",
+    {
+      logGroupName,
+      pattern: '{ $.msg = "async ingest failed" }',
+      metricTransformation: {
+        name: "ingest_dropped",
+        namespace,
+        value: "1",
+        defaultValue: "0",
+      },
     },
-  });
+    afterService,
+  );
 
   // ─── SNS topic + alert-router Lambda (conditional on webhook) ────────────
 
