@@ -196,6 +196,26 @@ describe("buildReconciliationPlan", () => {
     });
   });
 
+  it("ignores an uncorrelated completed run when calculating matching grace", () => {
+    const plan = buildReconciliationPlan(
+      observation({
+        workflowRuns: [
+          { prNumber: 12, status: "completed", completedAt: OLD },
+          {
+            prNumber: null,
+            status: "completed",
+            completedAt: "2026-07-24T11:59:00.000Z",
+          },
+        ],
+      }),
+    );
+
+    expect(plan.stages[0]).toMatchObject({
+      decision: "candidate",
+      graceAnchor: OLD,
+    });
+  });
+
   it("TC-PREVIEW-RECON-012 protects malformed and non-preview stages", () => {
     const stages = [
       "prod",
@@ -426,6 +446,29 @@ describe("apply-time recheck", () => {
       "pr-12",
     ]);
     expect(() => sstRemoveCommand("prod")).toThrow(/unsafe stage/);
+  });
+
+  it("revalidates again immediately before SST removal", async () => {
+    const initial = buildReconciliationPlan(observation());
+    const runtime = adapters([
+      observation(),
+      observation({
+        workflowRuns: [
+          { prNumber: 12, status: "in_progress", completedAt: null },
+        ],
+      }),
+    ]);
+
+    const result = await applyReconciliationPlan(initial, runtime, {
+      eventName: "workflow_dispatch",
+      mode: "apply",
+    });
+
+    expect(runtime.collectObservation).toHaveBeenCalledTimes(2);
+    expect(runtime.removeStage).not.toHaveBeenCalled();
+    expect(result.cancelled).toEqual([
+      { stage: "pr-12", reason: "no-longer-candidate" },
+    ]);
   });
 
   it("persists state-missing inventory before an unrelated SST removal failure", async () => {

@@ -68,9 +68,11 @@ reaches the planner, reports, plan artifacts, errors, or operator issues.
 6. A candidate requires a closed or absent pull request, no active matching
    workflow, a known grace anchor, and at least 24 elapsed hours.
 7. Persist a redacted advisory plan artifact and print a redacted report.
-8. In manual apply mode, refresh all observations and rebuild the plan before
-   every candidate decision. Any reopened pull request, active/new workflow, changed
-   state timestamp, missing state, or renewed grace period cancels removal.
+8. In manual apply mode, refresh all observations to classify every advisory
+   candidate, write any state-missing operator inventory, then refresh the same
+   stage again immediately before `sst remove`. Any reopened pull request,
+   active/new workflow, changed state timestamp, missing state, or renewed grace
+   period cancels removal.
 9. State-missing candidates are never sent to an AWS delete API. Manual apply
    creates or updates one marker-bearing operator issue containing only stage,
    resource type, and count.
@@ -83,8 +85,10 @@ reaches the planner, reports, plan artifacts, errors, or operator issues.
 - Pull-request absence is allowed only when another timestamp supplies a grace
   anchor. An absent pull request with no trustworthy age remains protected.
 - Workflow runs first correlate through GitHub's PR association, then exact head
-  SHA/branch metadata. An active run that remains uncorrelated protects every
-  preview stage; it is never interpreted as inactivity.
+  SHA/branch metadata, then the commit-to-pull-request API for active runs. An
+  active run that remains uncorrelated protects every preview stage; it is never
+  interpreted as inactivity. Uncorrelated completed runs do not alter another
+  stage's matching grace timestamp.
 - Shared out-of-band IAM, ECR, and Mantle resources are excluded by the
   `ManagedBy=sst` and strict-stage ownership predicates. Their `ManagedBy=cli`
   tags never enter an SST stage inventory.

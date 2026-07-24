@@ -53,3 +53,5 @@ Design: [`docs/designs/preview-stage-reconciliation.md`](../designs/preview-stag
 | TC-PREVIEW-RECON-030 | Active workflow has no PR association and cannot be correlated by head metadata/API | Every preview stage is retained while the run remains active |
 | TC-PREVIEW-RECON-031 | State-missing stage has only an SST-managed IAM role | IAM-native tag discovery includes `iam:role` in the operator inventory |
 | TC-PREVIEW-RECON-032 | A state-missing candidate and a failing state-present SST removal share one apply | Operator issue is persisted before the removal failure propagates |
+| TC-PREVIEW-RECON-033 | Candidate becomes active/reopened after preflight but before removal | Immediate second recheck cancels `sst remove` |
+| TC-PREVIEW-RECON-034 | Recent completed run remains uncorrelated after head matching | It does not change another stage's matching grace anchor |

@@ -54,7 +54,9 @@ function mockCommands(
               id: 700,
               status: uncorrelatedActive ? "in_progress" : "completed",
               updated_at: uncorrelatedActive ? null : OLD,
-              head_sha: uncorrelatedActive ? "unknown-sha" : "preview-sha-7",
+              head_sha: uncorrelatedActive
+                ? "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
+                : "preview-sha-7",
               head_branch: uncorrelatedActive
                 ? "unknown-branch"
                 : "preview-branch-7",
@@ -66,7 +68,8 @@ function mockCommands(
     }
     if (
       file === "gh" &&
-      endpoint === `repos/${REPOSITORY}/actions/runs/700/pull_requests`
+      endpoint ===
+        `repos/${REPOSITORY}/commits/deadbeefdeadbeefdeadbeefdeadbeefdeadbeef/pulls`
     ) {
       return json([]);
     }
@@ -232,7 +235,7 @@ describe("preview reconciler CLI with mocked GitHub/AWS commands", () => {
             file === "gh" &&
             args.includes(`repos/${REPOSITORY}/actions/workflows/infra-ci.yml/runs`),
         ),
-      ).toHaveLength(2);
+      ).toHaveLength(3);
     });
   });
 
@@ -265,7 +268,9 @@ describe("preview reconciler CLI with mocked GitHub/AWS commands", () => {
         commands.calls.some(
           ({ file, args }) =>
             file === "gh" &&
-            args.includes(`repos/${REPOSITORY}/actions/runs/700/pull_requests`),
+            args.includes(
+              `repos/${REPOSITORY}/commits/deadbeefdeadbeefdeadbeefdeadbeefdeadbeef/pulls`,
+            ),
         ),
       ).toBe(true);
     });

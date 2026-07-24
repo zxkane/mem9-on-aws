@@ -294,17 +294,13 @@ export function buildReconciliationPlan(observation: Observation): Reconciliatio
       const matchingWorkflowRuns = observation.workflowRuns.filter(
         (run) => run.prNumber === prNumber,
       );
-      const uncorrelatedWorkflowRuns = observation.workflowRuns.filter(
-        (run) => run.prNumber === null,
-      );
-      const activeDeployment = [
-        ...matchingWorkflowRuns,
-        ...uncorrelatedWorkflowRuns,
-      ].some((run) => run.status !== "completed");
+      const activeDeployment =
+        matchingWorkflowRuns.some((run) => run.status !== "completed") ||
+        observation.workflowRuns.some(
+          (run) => run.prNumber === null && run.status !== "completed",
+        );
       const latestDeployCompletion = latestTimestamp(
-        [...matchingWorkflowRuns, ...uncorrelatedWorkflowRuns].map(
-          (run) => run.completedAt,
-        ),
+        matchingWorkflowRuns.map((run) => run.completedAt),
       );
       const reasons: string[] = [];
 
@@ -543,6 +539,27 @@ export async function applyReconciliationPlan(
   }
 
   for (const stage of removable) {
+    const immediatePlan = buildReconciliationPlan(await adapters.collectObservation());
+    const immediate = immediatePlan.stages.find(
+      (candidate) => candidate.stage === stage.stage,
+    );
+    if (!immediate || immediate.decision !== "candidate") {
+      cancelled.push({ stage: stage.stage, reason: "no-longer-candidate" });
+      continue;
+    }
+    if (immediate.action !== "remove-with-sst" || !immediate.statePresent) {
+      const draft = prepareOperatorIssue(
+        deepFreeze({
+          schemaVersion: PLAN_SCHEMA_VERSION,
+          observedAt: immediatePlan.observedAt,
+          gracePeriodHours: immediatePlan.gracePeriodHours,
+          stages: [immediate],
+        }),
+      );
+      if (draft) operatorIssue = await upsertOperatorIssue(draft, adapters);
+      cancelled.push({ stage: stage.stage, reason: "state-missing" });
+      continue;
+    }
     await adapters.removeStage(stage.stage);
     removed.push(stage.stage);
   }
@@ -739,15 +756,15 @@ async function collectWorkflowRuns(
       if (correlated !== undefined) numbers = [correlated];
     }
     if (numbers.length === 0 && rawStatus !== "completed") {
-      const runId = Number(run.id);
-      if (Number.isSafeInteger(runId)) {
+      const headSha = stringOrNull(run.head_sha);
+      if (headSha && /^[0-9a-f]{7,64}$/i.test(headSha)) {
         const associated = await commandRunner(
           "gh",
           [
             "api",
             "--method",
             "GET",
-            `repos/${repository}/actions/runs/${runId}/pull_requests`,
+            `repos/${repository}/commits/${headSha}/pulls`,
           ],
           "GitHub active workflow association",
         );
