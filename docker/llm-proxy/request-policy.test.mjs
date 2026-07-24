@@ -267,9 +267,13 @@ describe("GLM request policy", () => {
     expect(Date.now()).toBe(5_000);
   });
 
-  it("TC-GLM-RETRY-014: honors Retry-After HTTP-date", async () => {
+  it.each([
+    ["IMF-fixdate", new Date(7_000).toUTCString()],
+    ["RFC 850", "Thursday, 01-Jan-70 00:00:07 GMT"],
+    ["asctime", "Thu Jan  1 00:00:07 1970"],
+  ])("TC-GLM-RETRY-014: honors Retry-After %s", async (_format, retryAfter) => {
     const run = await runScript([
-      { status: 503, headers: { "retry-after": new Date(7_000).toUTCString() } },
+      { status: 503, headers: { "retry-after": retryAfter } },
       { status: 200 },
     ]);
     expect(run.result.status).toBe(200);

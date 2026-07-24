@@ -141,6 +141,7 @@ describe("llm-proxy HTTP deadline integration", () => {
     const writeBlocked = new Promise((resolve) => {
       releaseWrite = resolve;
     });
+    const logs = [];
     const proxy = await bootProxy(
       {
         ...shortCfg,
@@ -149,6 +150,8 @@ describe("llm-proxy HTTP deadline integration", () => {
         maxCallMs: 60,
       },
       {
+        requestId: () => "response-write-timeout",
+        log: (record) => logs.push(record),
         writeResponse: async () => writeBlocked,
       },
     );
@@ -156,7 +159,52 @@ describe("llm-proxy HTTP deadline integration", () => {
     const started = performance.now();
     await expect(post(proxy.url)).rejects.toThrow();
     expect(performance.now() - started).toBeLessThan(130);
+    await vi.waitFor(() =>
+      expect(logs.at(-1)).toMatchObject({
+        request_id: "response-write-timeout",
+        attempt: 1,
+        reason: "overall_deadline",
+        outcome_class: "deadline",
+      }),
+    );
     releaseWrite();
+  });
+
+  it("TC-GLM-RETRY-029: logs downstream cancellation while reading the body", async () => {
+    const logs = [];
+    const proxy = await bootProxy(
+      {
+        ...shortCfg,
+        upstreamBase: "http://127.0.0.1:1/v1",
+        overallDeadlineMs: 500,
+        maxCallMs: 480,
+      },
+      {
+        requestId: () => "body-read-cancel",
+        log: (record) => logs.push(record),
+      },
+    );
+
+    const client = httpRequest(`${proxy.url}/v1/chat/completions`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "content-length": Buffer.byteLength(body) + 100,
+      },
+    });
+    client.on("error", () => {});
+    client.write(body.slice(0, 20));
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    client.destroy();
+
+    await vi.waitFor(() =>
+      expect(logs.at(-1)).toMatchObject({
+        request_id: "body-read-cancel",
+        attempt: 0,
+        reason: "downstream_disconnect",
+        outcome_class: "deadline",
+      }),
+    );
   });
 
   it("TC-GLM-RETRY-026: downstream disconnect cancels the active Mantle call", async () => {

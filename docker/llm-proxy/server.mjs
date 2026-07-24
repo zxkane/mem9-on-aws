@@ -53,6 +53,10 @@ const REQUEST_POLICY_DEFAULTS = Object.freeze({
 const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 const IMF_FIXDATE =
   /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/;
+const RFC850_DATE =
+  /^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), \d{2}-(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2} \d{2}:\d{2}:\d{2} GMT$/;
+const ASCTIME_DATE =
+  /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)( {2}\d| \d{2}) \d{2}:\d{2}:\d{2} \d{4}$/;
 
 function positiveInteger(raw, fallback, name) {
   if (raw === undefined || raw === "") return fallback;
@@ -170,6 +174,7 @@ class ProxyRequestError extends Error {
     this.code = code;
     this.reason = reason;
     this.outcomeClass = outcomeClass;
+    this.logged = false;
   }
 }
 
@@ -218,9 +223,11 @@ function parseRetryAfter(value, now) {
     const seconds = Number(trimmed);
     return Number.isFinite(seconds) ? seconds * 1_000 : Number.POSITIVE_INFINITY;
   }
-  if (!IMF_FIXDATE.test(trimmed)) return null;
+  const isImfFixdate = IMF_FIXDATE.test(trimmed);
+  if (!isImfFixdate && !RFC850_DATE.test(trimmed) && !ASCTIME_DATE.test(trimmed)) return null;
   const date = Date.parse(trimmed);
-  if (Number.isNaN(date) || new Date(date).toUTCString() !== trimmed) return null;
+  if (Number.isNaN(date)) return null;
+  if (isImfFixdate && new Date(date).toUTCString() !== trimmed) return null;
   return Math.max(0, date - now());
 }
 
@@ -359,10 +366,12 @@ export async function forwardWithPolicy({ body, token, cfg, request, deps = {} }
       reason: error.reason,
       outcome_class: error.outcomeClass,
     });
+    error.logged = true;
     throw error;
   }
 
   async function callMantle(attempt, bearer) {
+    request.attempt = attempt;
     const budgetMs = callBudget(cfg, request, now);
     const startedAt = now();
     if (budgetMs <= 0 || request.signal.aborted) {
@@ -641,6 +650,7 @@ export function createProxyServer(cfg, deps = {}) {
           deadlineAt: startedAt + requestCfg.overallDeadlineMs,
           signal: controller.signal,
           startedAt,
+          attempt: 0,
         };
         const deadlineTimer = setTimeout(
           () => {
@@ -678,6 +688,7 @@ export function createProxyServer(cfg, deps = {}) {
             reason: error.reason,
             outcome_class: error.outcomeClass,
           });
+          error.logged = true;
           throw error;
         }
         const upstream = await forwardWithPolicy({
@@ -697,14 +708,17 @@ export function createProxyServer(cfg, deps = {}) {
         // Pass the upstream status + JSON body straight through. mem9 handles
         // non-2xx itself (it strips provider-specific flags on 400 and retries).
         const text = await upstream.text();
-        return await writeResponse(
-          res,
-          upstream.status,
-          {
-            "content-type": upstream.headers.get("content-type") || "application/json",
-            "content-length": Buffer.byteLength(text),
-          },
-          text,
+        return await waitForPromise(
+          writeResponse(
+            res,
+            upstream.status,
+            {
+              "content-type": upstream.headers.get("content-type") || "application/json",
+              "content-length": Buffer.byteLength(text),
+            },
+            text,
+          ),
+          request.signal,
         );
       }
 
@@ -738,6 +752,13 @@ export function createProxyServer(cfg, deps = {}) {
               request?.signal.aborted ? requestAbortReason(request.signal) : "network_error",
               request?.signal.aborted ? "deadline" : "mantle_transient",
             );
+      if (request && !failure.logged) {
+        requestLog(request, now, log, request.attempt, request.startedAt, {
+          reason: failure.reason,
+          outcome_class: failure.outcomeClass,
+        });
+        failure.logged = true;
+      }
       return await sendError(
         res,
         failure.httpStatus,

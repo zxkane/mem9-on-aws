@@ -24,7 +24,7 @@ request.
 | TC-GLM-RETRY-011 | 503 then 401 | Transient retry consumes call two and returns 401 without remint; two calls/one mint |
 | TC-GLM-RETRY-012 | Consecutive 401 responses | Second 401 is returned; two calls/two mints and no third call |
 | TC-GLM-RETRY-013 | `Retry-After` seconds | Valid delay is honored and retry begins with at least 20 seconds of call budget |
-| TC-GLM-RETRY-014 | `Retry-After` HTTP-date | Valid future date is honored using the injected clock |
+| TC-GLM-RETRY-014 | `Retry-After` HTTP-date | Valid IMF-fixdate, RFC 850, and asctime future dates are honored using the injected clock |
 | TC-GLM-RETRY-015 | Invalid `Retry-After` | Header is ignored and deterministic full jitter is used |
 | TC-GLM-RETRY-016 | Too-long `Retry-After` | First upstream status/body is returned without waiting or retrying |
 | TC-GLM-RETRY-017 | Retry budget equality | A wait leaving exactly 20 seconds of call budget is eligible |
@@ -48,6 +48,7 @@ same calculations.
 | TC-GLM-RETRY-026 | HTTP client disconnects during Mantle call | Active upstream request is canceled and no retry arrives |
 | TC-GLM-RETRY-027 | Provider-400 fallback is a second proxy request | A slow 400 request followed by a slow successful request gets two independent request IDs/deadlines; the second does not inherit elapsed budget from the first |
 | TC-GLM-RETRY-028 | Response write reaches the overall deadline | The downstream socket is closed by the still-active overall timer; response flushing cannot extend the request past its deadline |
+| TC-GLM-RETRY-029 | Client disconnects during request-body read | Attempt 0 logs `downstream_disconnect` with terminal `deadline`; no Mantle call starts |
 
 ## Existing integration coverage
 
