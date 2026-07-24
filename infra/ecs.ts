@@ -74,6 +74,12 @@ const EMBED_PORT = 8081;
 // smart-ingest LLM (proxied to Bedrock Mantle). Not exposed outside the task.
 const LLM_PROXY_PORT = 8082;
 
+// GLM-5 provider-boundary controls (issue #46). Keep these explicit in the ECS
+// task definition so production does not depend on image defaults.
+const LLM_PROXY_MAX_BODY_BYTES = 1_048_576;
+const LLM_PROXY_MAX_TOKENS = 4096;
+const MAX_EXTRACTION_CONVERSATION_RUNES = 200_000;
+
 // mnemo-server's HTTP port. The MCP proxy Lambda (§6a) reaches this port on the
 // task privately via the Cloud Map DNS name registered below.
 const MNEMO_PORT = 8080;
@@ -319,6 +325,8 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
           // future sessions are stored (decisions, preferences, gotchas);
           // transient session-state observations are rejected.
           MNEMO_INGEST_DURABLE_ONLY: "1",
+          // Bound prompt construction before the provider-boundary byte check.
+          MNEMO_MAX_EXTRACTION_CONVERSATION_RUNES: String(MAX_EXTRACTION_CONVERSATION_RUNES),
         },
         // Secret injection (== ECS `secrets: valueFrom`): the DB secret lands as an
         // env var from Secrets Manager at task start. Never a literal in git.
@@ -380,6 +388,8 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
           // set by Fargate); pin it explicitly so a region change can't silently
           // point it at the wrong Mantle endpoint.
           LLM_PROXY_REGION: "ap-northeast-1",
+          LLM_PROXY_MAX_BODY_BYTES: String(LLM_PROXY_MAX_BODY_BYTES),
+          LLM_PROXY_MAX_TOKENS: String(LLM_PROXY_MAX_TOKENS),
           // OpenAI-Project header for Bedrock cost attribution. Empty → omitted.
           LLM_PROXY_OPENAI_PROJECT: BEDROCK_PROJECT,
         },

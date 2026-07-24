@@ -406,6 +406,9 @@ describe("ecs stack", () => {
     expect(env.MNEMO_RECALL_ZERO_RESULT_FALLBACK).toBe("1");
     // Ingest durability (TC-INGEST-020, issue #25): only durable facts stored.
     expect(env.MNEMO_INGEST_DURABLE_ONLY).toBe("1");
+    // GLM-5 request bound (TC-GLM-BOUND-020, issue #46): patch configuration
+    // is explicit in ECS, not left to an image default.
+    expect(env.MNEMO_MAX_EXTRACTION_CONVERSATION_RUNES).toBe("200000");
     // Secret via ssm (== ECS secrets valueFrom), never environment.
     const ssm = mnemo.ssm as Record<string, unknown>;
     expect(ssm.MEM9_DB_SECRET).toBeDefined();
@@ -471,6 +474,10 @@ describe("ecs stack", () => {
     const env = proxy.environment as Record<string, unknown>;
     expect(env.LLM_PROXY_PORT).toBe("8082"); // matches MNEMO_LLM_BASE_URL localhost:8082
     expect(env.LLM_PROXY_REGION).toBe("ap-northeast-1"); // pinned Mantle region
+    // GLM-5 request bounds (TC-GLM-BOUND-021, issue #46): both proxy controls
+    // are explicit in the production task definition.
+    expect(env.LLM_PROXY_MAX_BODY_BYTES).toBe("1048576");
+    expect(env.LLM_PROXY_MAX_TOKENS).toBe("4096");
     // OpenAI-Project header key is present (value comes from CI env; empty is fine
     // — the proxy omits the header when unset).
     expect("LLM_PROXY_OPENAI_PROJECT" in env).toBe(true);

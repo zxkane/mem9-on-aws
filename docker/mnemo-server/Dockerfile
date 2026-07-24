@@ -58,7 +58,7 @@ RUN git apply --verbose /tmp/mem9-patches/*.patch
 # selection (TC-RECALL-001…009), and run natively on BUILDPLATFORM (no QEMU).
 WORKDIR /src/server
 RUN go mod download \
-    && go test ./internal/handler/ ./internal/service/ \
+    && go test ./internal/handler/ ./internal/service/ ./internal/llm/ \
     && CGO_ENABLED=0 GOOS=linux GOARCH="${TARGETARCH}" \
        go build -trimpath -ldflags="-s -w" -o /out/mnemo-server ./cmd/mnemo-server
 

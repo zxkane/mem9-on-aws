@@ -1,0 +1,241 @@
+diff --git a/server/internal/service/ingest.go b/server/internal/service/ingest.go
+index d4fd17f..0cef98d 100644
+--- a/server/internal/service/ingest.go
++++ b/server/internal/service/ingest.go
+@@ -30,23 +30,22 @@ const (
+ )
+ 
+ const (
+-	maxExtractionConversationRunes = 1000000
+-	factTypeQueryIntent            = "query_intent"
+-	factTypeRawFallback            = "raw_fallback"
+-	rawFallbackTag                 = "raw-fallback"
++	factTypeQueryIntent = "query_intent"
++	factTypeRawFallback = "raw_fallback"
++	rawFallbackTag      = "raw-fallback"
+ )
+ 
+ var formattedConversationMessageRE = regexp.MustCompile(`(?:^|\n\n)([A-Za-z][A-Za-z0-9_-]*): `)
+ 
+ // IngestRequest is the input for the ingest pipeline.
+ type IngestRequest struct {
+-	Messages           []IngestMessage  `json:"messages"`
+-	SessionID          string           `json:"session_id"`
+-	AgentID            string           `json:"agent_id"`
+-	AppID              string           `json:"appId,omitempty"`
+-	Mode               IngestMode       `json:"mode"`
+-	DisableSessionSave bool             `json:"disableSessionSave,omitempty"`
+-	Metadata           json.RawMessage  `json:"metadata,omitempty"`
++	Messages           []IngestMessage `json:"messages"`
++	SessionID          string          `json:"session_id"`
++	AgentID            string          `json:"agent_id"`
++	AppID              string          `json:"appId,omitempty"`
++	Mode               IngestMode      `json:"mode"`
++	DisableSessionSave bool            `json:"disableSessionSave,omitempty"`
++	Metadata           json.RawMessage `json:"metadata,omitempty"`
+ }
+ 
+ // IngestMessage represents a single conversation message.
+@@ -138,7 +137,7 @@ func (s *IngestService) Ingest(ctx context.Context, agentName string, req Ingest
+ 	}
+ 
+ 	// Cap conversation size to avoid blowing LLM token limits.
+-	formatted = truncateRunes(formatted, maxExtractionConversationRunes)
++	formatted = truncateConversationRunes(formatted, maxExtractionConversationRunes)
+ 
+ 	changes, warnings, err := s.extractAndReconcile(ctx, agentName, req.AgentID, req.AppID, req.SessionID, formatted)
+ 	if err != nil {
+@@ -230,7 +229,7 @@ func prepareExtractionInput(messages []IngestMessage, maxConversationRunes int)
+ 	if len(input.messages) == 0 {
+ 		return input
+ 	}
+-	input.formatted = truncateRunes(formatConversation(input.messages), maxConversationRunes)
++	input.formatted = truncateConversationRunes(formatConversation(input.messages), maxConversationRunes)
+ 	return input
+ }
+ 
+@@ -1733,6 +1732,22 @@ func truncateRunes(s string, maxRunes int) string {
+ 	return string(runes[:maxRunes]) + "..."
+ }
+ 
++// truncateConversationRunes keeps the ellipsis inside maxRunes so the formatted
++// conversation's configured cap is a true upper bound.
++func truncateConversationRunes(s string, maxRunes int) string {
++	runes := []rune(s)
++	if len(runes) <= maxRunes {
++		return s
++	}
++	if maxRunes <= 0 {
++		return ""
++	}
++	if maxRunes <= 3 {
++		return string(runes[:maxRunes])
++	}
++	return string(runes[:maxRunes-3]) + "..."
++}
++
+ func metricStatus(err error) string {
+ 	if err != nil {
+ 		return "error"
+diff --git a/server/internal/service/ingest_config.go b/server/internal/service/ingest_config.go
+index db19036..39b6eda 100644
+--- a/server/internal/service/ingest_config.go
++++ b/server/internal/service/ingest_config.go
+@@ -17,9 +17,17 @@ package service
+ // keeping, incl. the deploy pipeline's e2e probe) and the reconcile path.
+ // Default off — the prompts stay byte-identical to upstream.
+ 
+-import "os"
++import (
++	"os"
++	"strconv"
++)
+ 
+-var ingestDurableOnly = envIngestBool("MNEMO_INGEST_DURABLE_ONLY")
++const defaultMaxExtractionConversationRunes = 200000
++
++var (
++	ingestDurableOnly              = envIngestBool("MNEMO_INGEST_DURABLE_ONLY")
++	maxExtractionConversationRunes = envIngestPositiveInt("MNEMO_MAX_EXTRACTION_CONVERSATION_RUNES", defaultMaxExtractionConversationRunes)
++)
+ 
+ func envIngestBool(key string) bool {
+ 	switch os.Getenv(key) {
+@@ -29,6 +37,18 @@ func envIngestBool(key string) bool {
+ 	return false
+ }
+ 
++func envIngestPositiveInt(key string, fallback int) int {
++	raw := os.Getenv(key)
++	if raw == "" {
++		return fallback
++	}
++	value, err := strconv.Atoi(raw)
++	if err != nil || value < 1 {
++		return fallback
++	}
++	return value
++}
++
+ const durableOnlySection = `
+ 
+ ## Durability filter (deployment override — ACTIVE)
+diff --git a/server/internal/service/ingest_config_test.go b/server/internal/service/ingest_config_test.go
+index 89effd4..506521d 100644
+--- a/server/internal/service/ingest_config_test.go
++++ b/server/internal/service/ingest_config_test.go
+@@ -6,10 +6,12 @@ package service
+ import (
+ 	"context"
+ 	"encoding/json"
++	"io"
+ 	"net/http"
+ 	"net/http/httptest"
+ 	"strings"
+ 	"testing"
++	"unicode/utf8"
+ 
+ 	"github.com/qiffang/mnemos/server/internal/llm"
+ )
+@@ -59,6 +61,101 @@ func TestEnvIngestBool(t *testing.T) {
+ 	}
+ }
+ 
++// TC-GLM-BOUND-017: the extraction limit defaults to 200,000 runes and accepts
++// only positive integer overrides.
++func TestMaxExtractionConversationRunesConfig(t *testing.T) {
++	if defaultMaxExtractionConversationRunes != 200000 {
++		t.Fatalf("default cap = %d, want 200000", defaultMaxExtractionConversationRunes)
++	}
++	t.Setenv("MNEMO_MAX_EXTRACTION_CONVERSATION_RUNES_TEST", "1234")
++	if got := envIngestPositiveInt("MNEMO_MAX_EXTRACTION_CONVERSATION_RUNES_TEST", 200000); got != 1234 {
++		t.Fatalf("valid override = %d, want 1234", got)
++	}
++	for _, raw := range []string{"", "0", "-1", "1.5", "not-a-number"} {
++		t.Setenv("MNEMO_MAX_EXTRACTION_CONVERSATION_RUNES_TEST", raw)
++		if got := envIngestPositiveInt("MNEMO_MAX_EXTRACTION_CONVERSATION_RUNES_TEST", 200000); got != 200000 {
++			t.Fatalf("raw %q: got %d, want fallback 200000", raw, got)
++		}
++	}
++}
++
++// TC-GLM-BOUND-019: the formatted conversation cap includes the ellipsis and
++// remains valid UTF-8 when the input is four-byte Unicode.
++func TestFormattedConversationRuneCap(t *testing.T) {
++	input := []IngestMessage{{
++		Role:    "user",
++		Content: strings.Repeat("\U0001F600", defaultMaxExtractionConversationRunes+100),
++	}}
++	formatted := prepareExtractionInput(input, defaultMaxExtractionConversationRunes).formatted
++	if !utf8.ValidString(formatted) {
++		t.Fatal("formatted conversation is not valid UTF-8")
++	}
++	if got := utf8.RuneCountInString(formatted); got != defaultMaxExtractionConversationRunes {
++		t.Fatalf("formatted runes = %d, want %d", got, defaultMaxExtractionConversationRunes)
++	}
++	if !strings.HasSuffix(formatted, "...") {
++		t.Fatal("truncated conversation is missing ellipsis")
++	}
++}
++
++// TC-GLM-BOUND-018: exercise the real formatter, current fixed extraction
++// prompts, and real llm.Client request serializer with a 200,000-rune,
++// four-byte conversation. Model the proxy's sole rewrite (max_tokens=4096) and
++// assert the final wire body remains below its 1 MiB hard limit.
++func TestWorstCaseExtractionRequestFitsProxyLimit(t *testing.T) {
++	restoreCap := maxExtractionConversationRunes
++	restoreDurable := ingestDurableOnly
++	maxExtractionConversationRunes = defaultMaxExtractionConversationRunes
++	ingestDurableOnly = true
++	defer func() {
++		maxExtractionConversationRunes = restoreCap
++		ingestDurableOnly = restoreDurable
++	}()
++
++	var captured []byte
++	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		var err error
++		captured, err = io.ReadAll(r.Body)
++		if err != nil {
++			t.Errorf("read request: %v", err)
++		}
++		w.Header().Set("Content-Type", "application/json")
++		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"{\"facts\":[],\"message_tags\":[[]]}"}}]}`))
++	}))
++	defer mock.Close()
++
++	llmClient := llm.New(llm.Config{
++		APIKey:  "local",
++		BaseURL: mock.URL,
++		Model:   "zai.glm-5",
++	})
++	svc := NewIngestService(&memoryRepoMock{}, llmClient, nil, "auto-model", ModeSmart)
++	_, err := svc.ExtractPhase1(context.Background(), []IngestMessage{{
++		Role:    "user",
++		Content: strings.Repeat("\U0001F600", defaultMaxExtractionConversationRunes),
++	}})
++	if err != nil {
++		t.Fatalf("ExtractPhase1: %v", err)
++	}
++	if len(captured) == 0 {
++		t.Fatal("LLM request was not captured")
++	}
++
++	var rewritten map[string]any
++	if err := json.Unmarshal(captured, &rewritten); err != nil {
++		t.Fatalf("decode captured request: %v", err)
++	}
++	rewritten["max_tokens"] = 4096
++	finalBody, err := json.Marshal(rewritten)
++	if err != nil {
++		t.Fatalf("serialize rewritten request: %v", err)
++	}
++	const proxyLimitBytes = 1048576
++	if len(finalBody) >= proxyLimitBytes {
++		t.Fatalf("serialized request = %d bytes, must be below %d", len(finalBody), proxyLimitBytes)
++	}
++}
++
+ // TC-INGEST-004 (integration): when enabled, the durability section actually
+ // reaches the LLM's system prompt during extraction. This wires through the
+ // real ExtractPhase1 / extractFactsAndTagsWithRouting paths.
