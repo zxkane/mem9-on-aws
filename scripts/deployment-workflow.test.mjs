@@ -65,6 +65,16 @@ describe("workflow integration", () => {
     const reporterBlock = workflow.slice(failureReporter, failureReporter + 500);
     expect(reporterBlock).toContain("if: failure()");
   });
+
+  it("reports preview reconciliation failures using the overall job status", () => {
+    const workflow = readFileSync(workflowPath, "utf8");
+    const statusComment = workflow.indexOf("name: Comment deploy status");
+    const commentBlock = workflow.slice(statusComment, statusComment + 500);
+
+    expect(statusComment).toBeGreaterThanOrEqual(0);
+    expect(commentBlock).toContain("DEPLOY_STATUS: ${{ job.status }}");
+    expect(commentBlock).not.toContain("steps.deploy.outcome");
+  });
 });
 
 describe("reconciliation IAM", () => {

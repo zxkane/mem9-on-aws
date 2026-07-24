@@ -315,7 +315,9 @@ jobs:
         uses: actions/github-script@v8
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
-          DEPLOY_STATUS: ${{ steps.deploy.outcome }}
+          # Overall job status includes reconciliation and any later verification,
+          # not just the earlier SST command.
+          DEPLOY_STATUS: ${{ job.status }}
         with:
           script: |
             const pr = context.payload.pull_request.number;
