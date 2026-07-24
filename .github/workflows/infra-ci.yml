@@ -204,7 +204,7 @@ jobs:
             echo "::error::Role $ROLE_NAME not found — run scripts/deploy-github-role.sh to bootstrap it"
             exit 1
           fi
-          echo "Preflight OK: $(aws sts get-caller-identity --query Arn --output text)"
+          echo "Preflight OK: OIDC deploy role assumed"
 
       - name: Remove conflicting Pulumi installation
         if: steps.gate.outputs.skip != 'true'
@@ -717,7 +717,7 @@ jobs:
             echo "::error::Role $ROLE_NAME not found — run scripts/deploy-github-role.sh to bootstrap it"
             exit 1
           fi
-          echo "Preflight OK: $(aws sts get-caller-identity --query Arn --output text)"
+          echo "Preflight OK: OIDC deploy role assumed"
 
       - name: Remove conflicting Pulumi installation
         run: |
