@@ -528,7 +528,9 @@ Resources:
           - Sid: Logs
             # CloudWatch Logs group for the ECS task. SST's default container log
             # group is `/sst/cluster/<cluster>/<service>/<container>`, covered by
-            # the `/sst/*` ARNs below.
+            # the `/sst/*` ARNs below. StartQuery/GetQueryResults are used by the
+            # E2E log-scan hardening (issue #26) to detect 401s in the service
+            # logs during the deploy.
             Effect: Allow
             Action:
               - logs:CreateLogGroup
@@ -540,6 +542,11 @@ Resources:
               - logs:ListTagsForResource
               - logs:CreateLogStream
               - logs:PutLogEvents
+              - logs:StartQuery
+              - logs:GetQueryResults
+              - logs:PutMetricFilter
+              - logs:DeleteMetricFilter
+              - logs:DescribeMetricFilters
             Resource:
               - !Sub arn:aws:logs:*:${AWS::AccountId}:log-group:/sst/*
               - !Sub arn:aws:logs:*:${AWS::AccountId}:log-group:/sst/*:*

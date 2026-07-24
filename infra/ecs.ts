@@ -51,6 +51,7 @@
 import { resolveVpc } from "./vpc";
 import type { DbOutputs } from "./db";
 import { ecrImage, accountId, ECR_REGION } from "./ecr";
+import { observability } from "./observability";
 
 // Bedrock Mantle is called in the app region (= the ECR/app region, Tokyo). Used
 // only to scope the bedrock-mantle:CreateInference project ARN.
@@ -113,6 +114,10 @@ export interface EcsOutputs {
  */
 export function ecs(dbOut: DbOutputs): EcsOutputs {
   const prefix = `/mem9-on-aws/${$app.stage}`;
+  // Stable log group name for the mnemo-server container — used by
+  // observability.ts metric filters. SST's auto-name includes a random hash;
+  // pinning it makes the filters deterministic and survives service recreates.
+  const mnemoLogGroupName = `/sst/cluster/mem9-on-aws-${$app.stage}/mnemo-server`;
   const { vpcId, privateSubnetIds } = resolveVpc();
 
   const tags = {
@@ -326,8 +331,9 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
         },
         // Per-container logging: with `containers[]`, top-level `logging` is
         // forbidden (SST rejects it alongside containers) — each container sets
-        // its own.
-        logging: { retention: "1 month" },
+        // its own. The mnemo-server log group name is set explicitly so
+        // observability.ts can reference it deterministically for metric filters.
+        logging: { retention: "1 month", name: mnemoLogGroupName },
       },
       {
         name: "qwen3-embed",
@@ -427,6 +433,9 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
     value: serviceDnsName,
     tags,
   });
+
+  // Observability (issue #26): metric filters + alarms for prod only.
+  observability({ stage: $app.stage, logGroupName: mnemoLogGroupName });
 
   return {
     ssmPrefix: prefix,

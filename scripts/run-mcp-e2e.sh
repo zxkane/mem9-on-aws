@@ -190,15 +190,42 @@ for attempt in 1 2 3; do
   sleep 10
 done
 
-if [[ "$NL_FOUND" == "1" ]]; then
-  echo "run-mcp-e2e: OK — natural-language recall verified for stage ${STAGE}"
-  exit 0
+if [[ "$NL_FOUND" != "1" ]]; then
+  MSG="natural-language recall probe failed: an indexed memory was not returned for a NL query (recall min_confidence regression? see issue #23). Last response: $(printf '%s' "${MCP_RESP:-}" | head -c 400)"
+  if [[ "$SOFT" == "1" ]]; then
+    echo "::warning::${MSG}"
+    exit 0
+  fi
+  echo "::error::${MSG}"
+  exit 1
 fi
+echo "run-mcp-e2e: OK — natural-language recall verified for stage ${STAGE}"
 
-MSG="natural-language recall probe failed: an indexed memory was not returned for a NL query (recall min_confidence regression? see issue #23). Last response: $(printf '%s' "${MCP_RESP:-}" | head -c 400)"
-if [[ "$SOFT" == "1" ]]; then
-  echo "::warning::${MSG}"
-  exit 0
+# 6. Log-scan hardening (TC-OBS-010, issue #26). Scan the mnemo-server log
+# group for LLM auth failures (401s) that occurred during this E2E run window.
+# A 401 means the llm-proxy bearer is dead — smart-ingest data is being lost
+# silently (the 2026-07-22 incident). HARD fail on any 401 regardless of
+# E2E_SOFT — an auth failure is never a timing flake.
+LOG_GROUP="/sst/cluster/mem9-on-aws-${STAGE}/mnemo-server"
+echo "run-mcp-e2e: log-scan for auth failures in ${LOG_GROUP} (last 10 min)"
+SCAN_START=$(( $(date +%s) - 600 ))000
+SCAN_END=$(date +%s)000
+QUERY_ID=$(aws logs start-query --region "$REGION" \
+  --log-group-name "$LOG_GROUP" \
+  --start-time "$SCAN_START" --end-time "$SCAN_END" \
+  --query-string 'filter msg = "extraction LLM call failed" and err like /401/' \
+  --output text 2>/dev/null || true)
+
+if [[ -n "$QUERY_ID" ]]; then
+  sleep 5
+  AUTH_FAILURES=$(aws logs get-query-results --region "$REGION" \
+    --query-id "$QUERY_ID" \
+    --query 'results | length(@)' --output text 2>/dev/null || echo "0")
+  if [[ "$AUTH_FAILURES" != "0" && "$AUTH_FAILURES" != "None" ]]; then
+    echo "::error::log-scan found ${AUTH_FAILURES} LLM auth failure(s) (401) in ${LOG_GROUP} during the E2E window — llm-proxy bearer may be dead (issue #24 regression). Investigate immediately."
+    exit 1
+  fi
+  echo "run-mcp-e2e: log-scan clean — no auth failures in the last 10 min"
+else
+  echo "run-mcp-e2e: log-scan skipped (could not start Logs Insights query — log group may not exist yet on fresh stages)"
 fi
-echo "::error::${MSG}"
-exit 1

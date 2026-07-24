@@ -186,6 +186,54 @@ declare namespace aws {
     }
   }
 
+  // CloudWatch metric filters + alarms (infra/observability.ts, issue #26).
+  namespace cloudwatch {
+    interface LogMetricFilterMetricTransformation {
+      name: Input<string>;
+      namespace: Input<string>;
+      value: Input<string>;
+      defaultValue?: Input<string>;
+    }
+    interface LogMetricFilterArgs {
+      logGroupName: Input<string>;
+      pattern: Input<string>;
+      metricTransformation: LogMetricFilterMetricTransformation;
+    }
+    class LogMetricFilter {
+      constructor(name: string, args: LogMetricFilterArgs);
+    }
+    interface MetricAlarmMetricQuery {
+      id: Input<string>;
+      metric?: {
+        metricName: Input<string>;
+        namespace: Input<string>;
+        stat: Input<string>;
+        period: Input<number>;
+        dimensions?: Input<Record<string, Input<string>>>;
+      };
+      expression?: Input<string>;
+      label?: Input<string>;
+      returnData?: Input<boolean>;
+    }
+    interface MetricAlarmArgs {
+      alarmDescription?: Input<string>;
+      namespace?: Input<string>;
+      metricName?: Input<string>;
+      statistic?: Input<string>;
+      period?: Input<number>;
+      evaluationPeriods: Input<number>;
+      threshold?: Input<number>;
+      comparisonOperator: Input<string>;
+      treatMissingData?: Input<string>;
+      metricQueries?: MetricAlarmMetricQuery[];
+      alarmActions?: Input<string>[];
+    }
+    class MetricAlarm {
+      constructor(name: string, args: MetricAlarmArgs);
+      readonly arn: Output<string>;
+    }
+  }
+
   namespace ssm {
     interface ParameterArgs {
       name: Input<string>;
