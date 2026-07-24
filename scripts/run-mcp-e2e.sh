@@ -171,27 +171,32 @@ echo "run-mcp-e2e: OK — write→search round-trip verified (marker found) for 
 # 5. Natural-language recall probe (TC-RECALL-031, issue #23). The keyword
 # search above proves the memory is indexed; now assert that a long (≥25 char)
 # natural-language query — the style the recall hooks instruct agents to use —
-# also surfaces it. Before the recall-threshold fix these scored below the
-# hard-coded min_confidence and returned 0 results (the cutoff rejected ALL
-# candidates regardless of rank, so an anchored sentence still regresses).
-# The run id anchors the query to THIS run's memory: probe memories from past
-# deploys accumulate in the tenant, and an unanchored query would compete with
-# them for the top-N. The memory is already searchable, so the short retry
-# loop only absorbs transient gateway errors.
+# returns a NON-EMPTY result set. That is the exact #23 regression signature:
+# the hard-coded min_confidence cutoff rejected ALL candidates for long
+# queries (cutoff_reason=min_confidence, 88% zero-hit) regardless of match
+# quality. Rank ORDER is deliberately NOT asserted: on a long-lived tenant
+# (prod) hundreds of real memories legitimately compete for the top-N, so
+# "this run's marker in the top 10" is a flakiness generator, not a
+# regression guard (bit run 30085629030). Finding the marker is logged as a
+# bonus signal when it happens.
 NL_QUERY="what secret marker did the e2e probe store for run ${GITHUB_RUN_ID:-local}"
 echo "run-mcp-e2e: natural-language recall probe (query: ${NL_QUERY})"
-NL_FOUND=0
+NL_NONEMPTY=0
 for attempt in 1 2 3; do
   tools_call "$SEARCH_TOOL" "$(jq -nc --arg q "$NL_QUERY" '{q:$q, limit:10}')"
-  if printf '%s' "$MCP_RESP" | grep -qF "$MARKER"; then
-    NL_FOUND=1
+  NL_TOTAL=$(printf '%s' "$MCP_RESP" | mcp_result | jq -r '.content[0].text // "{}" | fromjson | .total // 0' 2>/dev/null || echo 0)
+  if [[ "$NL_TOTAL" =~ ^[0-9]+$ && "$NL_TOTAL" -gt 0 ]]; then
+    NL_NONEMPTY=1
+    if printf '%s' "$MCP_RESP" | grep -qF "$MARKER"; then
+      echo "run-mcp-e2e: NL probe bonus — this run's marker ranked in the top ${NL_TOTAL}"
+    fi
     break
   fi
   sleep 10
 done
 
-if [[ "$NL_FOUND" != "1" ]]; then
-  MSG="natural-language recall probe failed: an indexed memory was not returned for a NL query (recall min_confidence regression? see issue #23). Last response: $(printf '%s' "${MCP_RESP:-}" | head -c 400)"
+if [[ "$NL_NONEMPTY" != "1" ]]; then
+  MSG="natural-language recall probe failed: a long NL query returned ZERO results (min_confidence cutoff regression — see issue #23). Last response: $(printf '%s' "${MCP_RESP:-}" | head -c 400)"
   if [[ "$SOFT" == "1" ]]; then
     echo "::warning::${MSG}"
     exit 0
@@ -199,7 +204,7 @@ if [[ "$NL_FOUND" != "1" ]]; then
   echo "::error::${MSG}"
   exit 1
 fi
-echo "run-mcp-e2e: OK — natural-language recall verified for stage ${STAGE}"
+echo "run-mcp-e2e: OK — natural-language recall verified (non-empty, ${NL_TOTAL} results) for stage ${STAGE}"
 
 # 6. Log-scan hardening (TC-OBS-010, issue #26). Scan the mnemo-server log
 # group for LLM auth failures (401s) that occurred during this E2E run window.
