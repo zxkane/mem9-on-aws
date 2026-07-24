@@ -32,6 +32,7 @@ interface ServiceRecord {
 }
 interface ParamRecord {
   name: string;
+  value: unknown;
 }
 interface GenericRecord {
   kind: string;
@@ -177,7 +178,7 @@ function installGlobals(stage: string) {
             typeof args.name === "object" && args.name && "value" in args.name
               ? (args.name as { value: string }).value
               : (args.name as string);
-          params.push({ name });
+          params.push({ name, value: (args as { value?: unknown }).value });
         }
       },
     },
@@ -221,6 +222,9 @@ function installGlobals(stage: string) {
           // observability wiring parses containerDefinitions JSON from the task
           // def to find the mnemo-server awslogs-group.
           taskDefinition: out({
+            arn: out(
+              "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-on-aws-prod-Mem9Server:42",
+            ),
             containerDefinitions: out(
               JSON.stringify([
                 {
@@ -580,17 +584,28 @@ describe("ecs stack", () => {
     }
   });
 
-  it("exports the cluster + service names + image under /mem9-on-aws/${stage}/ecs/", async () => {
+  it("exports service lookup plus the authoritative task definition and image tag", async () => {
     installGlobals("prod");
+    process.env.MEM9_IMAGE_TAG = "mem9-abcdef0";
     const ecs = await loadEcs();
     ecs(fakeDbOut());
     const names = params.map((p) => p.name).sort();
     expect(names).toEqual([
       "/mem9-on-aws/prod/ecs/cluster-name",
       "/mem9-on-aws/prod/ecs/image",
+      "/mem9-on-aws/prod/ecs/image-tag",
       "/mem9-on-aws/prod/ecs/service-dns-name",
       "/mem9-on-aws/prod/ecs/service-name",
+      "/mem9-on-aws/prod/ecs/task-definition",
     ]);
+    const taskDefinition = params.find((p) => p.name.endsWith("/task-definition"));
+    const imageTag = params.find((p) => p.name.endsWith("/image-tag"));
+    expect(
+      String(
+        (taskDefinition?.value as { value?: string })?.value ?? taskDefinition?.value,
+      ),
+    ).toBe("arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-on-aws-prod-Mem9Server:42");
+    expect(imageTag?.value).toBe("mem9-abcdef0");
   });
 
   // Observability (TC-OBS-001...003, issue #26): metrics and alarms on prod only.
