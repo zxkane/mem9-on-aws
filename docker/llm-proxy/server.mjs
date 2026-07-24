@@ -52,11 +52,35 @@ const REQUEST_POLICY_DEFAULTS = Object.freeze({
 });
 const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
 const IMF_FIXDATE =
-  /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/;
+  /^(?<weekday>Mon|Tue|Wed|Thu|Fri|Sat|Sun), (?<day>\d{2}) (?<month>Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) (?<year>\d{4}) (?<hour>\d{2}):(?<minute>\d{2}):(?<second>\d{2}) GMT$/;
 const RFC850_DATE =
-  /^(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), \d{2}-(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-\d{2} \d{2}:\d{2}:\d{2} GMT$/;
+  /^(?<weekday>Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday), (?<day>\d{2})-(?<month>Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)-(?<year>\d{2}) (?<hour>\d{2}):(?<minute>\d{2}):(?<second>\d{2}) GMT$/;
 const ASCTIME_DATE =
-  /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun) (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)( {2}\d| \d{2}) \d{2}:\d{2}:\d{2} \d{4}$/;
+  /^(?<weekday>Mon|Tue|Wed|Thu|Fri|Sat|Sun) (?<month>Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)(?<day> {2}\d| \d{2}) (?<hour>\d{2}):(?<minute>\d{2}):(?<second>\d{2}) (?<year>\d{4})$/;
+const MONTHS = [
+  "Jan",
+  "Feb",
+  "Mar",
+  "Apr",
+  "May",
+  "Jun",
+  "Jul",
+  "Aug",
+  "Sep",
+  "Oct",
+  "Nov",
+  "Dec",
+];
+const SHORT_WEEKDAYS = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+const LONG_WEEKDAYS = [
+  "Sunday",
+  "Monday",
+  "Tuesday",
+  "Wednesday",
+  "Thursday",
+  "Friday",
+  "Saturday",
+];
 
 function positiveInteger(raw, fallback, name) {
   if (raw === undefined || raw === "") return fallback;
@@ -216,6 +240,51 @@ function defaultRequestLog(record) {
   console.log(JSON.stringify(record));
 }
 
+function parseHttpDate(value, currentTime) {
+  let match = value.match(IMF_FIXDATE);
+  let longWeekday = false;
+  let twoDigitYear = false;
+  if (!match) {
+    match = value.match(RFC850_DATE);
+    longWeekday = !!match;
+    twoDigitYear = !!match;
+  }
+  if (!match) match = value.match(ASCTIME_DATE);
+  if (!match) return null;
+
+  const fields = match.groups;
+  const month = MONTHS.indexOf(fields.month);
+  const day = Number(fields.day);
+  const hour = Number(fields.hour);
+  const minute = Number(fields.minute);
+  const second = Number(fields.second);
+  let year = Number(fields.year);
+  if (twoDigitYear) {
+    const currentYear = new Date(currentTime).getUTCFullYear();
+    year += Math.floor(currentYear / 100) * 100;
+    if (year > currentYear + 50) year -= 100;
+  }
+
+  const parsed = new Date(0);
+  parsed.setUTCFullYear(year, month, day);
+  parsed.setUTCHours(hour, minute, second, 0);
+  const expectedWeekday = (longWeekday ? LONG_WEEKDAYS : SHORT_WEEKDAYS)[
+    parsed.getUTCDay()
+  ];
+  if (
+    fields.weekday !== expectedWeekday ||
+    parsed.getUTCFullYear() !== year ||
+    parsed.getUTCMonth() !== month ||
+    parsed.getUTCDate() !== day ||
+    parsed.getUTCHours() !== hour ||
+    parsed.getUTCMinutes() !== minute ||
+    parsed.getUTCSeconds() !== second
+  ) {
+    return null;
+  }
+  return parsed.getTime();
+}
+
 function parseRetryAfter(value, now) {
   if (value === null) return null;
   const trimmed = value.trim();
@@ -223,12 +292,10 @@ function parseRetryAfter(value, now) {
     const seconds = Number(trimmed);
     return Number.isFinite(seconds) ? seconds * 1_000 : Number.POSITIVE_INFINITY;
   }
-  const isImfFixdate = IMF_FIXDATE.test(trimmed);
-  if (!isImfFixdate && !RFC850_DATE.test(trimmed) && !ASCTIME_DATE.test(trimmed)) return null;
-  const date = Date.parse(trimmed);
-  if (Number.isNaN(date)) return null;
-  if (isImfFixdate && new Date(date).toUTCString() !== trimmed) return null;
-  return Math.max(0, date - now());
+  const currentTime = now();
+  const date = parseHttpDate(trimmed, currentTime);
+  if (date === null) return null;
+  return Math.max(0, date - currentTime);
 }
 
 function fullJitterDelay(cfg, attempt, random) {

@@ -280,17 +280,25 @@ describe("GLM request policy", () => {
     expect(run.sleep).toHaveBeenCalledWith(7_000, expect.any(AbortSignal));
   });
 
-  it.each(["later-ish", "1.5", "2026-07-24"])(
+  it.each([
+    "later-ish",
+    "1.5",
+    "2026-07-24",
+    "Thursday, 31-Feb-70 00:00:07 GMT",
+    "Friday, 01-Jan-70 00:00:07 GMT",
+    "Fri Jan  1 00:00:07 1970",
+    "Thu Feb 30 00:00:07 1970",
+  ])(
     "TC-GLM-RETRY-015: invalid Retry-After %s falls back to full jitter",
     async (retryAfter) => {
-    const run = await runScript(
-      [
+      const run = await runScript(
+        [
           { status: 503, headers: { "retry-after": retryAfter } },
-        { status: 200 },
-      ],
-      { random: 0.75 },
-    );
-    expect(run.sleep).toHaveBeenCalledWith(375, expect.any(AbortSignal));
+          { status: 200 },
+        ],
+        { random: 0.75 },
+      );
+      expect(run.sleep).toHaveBeenCalledWith(375, expect.any(AbortSignal));
     },
   );
 
