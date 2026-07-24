@@ -1,15 +1,14 @@
 /**
  * Minimal ambient declarations for the SST v4 + Pulumi globals used by
- * `infra/*.ts` in the mem9-on-aws BASE SCAFFOLD.
+ * the current `infra/*.ts` modules.
  *
  * SST bootstraps full types via `.sst/platform/config.d.ts` at deploy time,
  * but CI typecheck must run without first executing `sst install` (the
  * platform's source pulls in the whole Pulumi runtime + transitive deps and
- * is strict-mode-incompatible). This shim covers ONLY the surface the scaffold
- * uses: `$app`, `$transform`, `$config`, `$interpolate`, `aws.ec2.getVpcOutput`,
- * `aws.ec2.getSubnetsOutput`, and `aws.ssm.Parameter`.
+ * is strict-mode-incompatible). This shim covers only the global surface the
+ * repository uses.
  *
- * When a follow-up adds a new construct, EXTEND this file (don't expand the
+ * When the infrastructure adds a new construct, extend this file (don't expand the
  * triple-slash reference). At `sst deploy` time the platform's real types take
  * precedence — declaration-merging order means deploy-time inference does NOT
  * use these definitions, so a slightly loose shim here can't mask a real

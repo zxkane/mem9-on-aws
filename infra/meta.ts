@@ -1,15 +1,14 @@
 /**
- * `meta` stack — the base scaffold's one deployable stack.
+ * `meta` stack — shared deployment metadata and network exports.
  *
  * Writes a handful of SSM parameters under `/mem9-on-aws/${stage}/...`. It is
  * cheap (SSM Standard parameters are free), deploys in seconds, and serves two
  * purposes:
- *   1. Proves the pipeline end-to-end (OIDC deploy-role grants, SST state,
- *      main→prod deploy) before any costly infra lands.
- *   2. Establishes the SSM export NAMESPACE every later stack reuses:
+ *   1. Records the deployed stage and selected VPC for operators.
+ *   2. Establishes the SSM export namespace used by the other stacks:
  *      `/mem9-on-aws/${stage}/<component>/<key>`.
  *
- * Later stacks extend this namespace: `.../db/endpoint`, `.../gateway/url`,
+ * Other stacks extend this namespace: `.../db/endpoint`, `.../gateway/url`,
  * `.../cognito/client-id`, etc.
  */
 
@@ -31,7 +30,7 @@ export function meta(): MetaOutputs {
     ManagedBy: "sst",
   };
 
-  // Scaffold marker — proves deploy + cross-module SSM wiring works.
+  // Stage marker for deploy diagnostics and cross-module SSM wiring.
   new aws.ssm.Parameter("MetaStageMarker", {
     name: `${prefix}/meta/stage`,
     type: "String",

@@ -11,20 +11,11 @@
  *   - Two security groups: a `db` SG (allows 5432 from the `task` SG only) and a
  *     `task` SG (attached to the ECS mnemo-server task).
  *
- * NO RDS PROXY (§3a, DECIDED 2026-07-12). We originally fronted Aurora with an RDS
- * Proxy (`proxy: true`) for connection pooling. But an RDS Proxy provisions its
- * backend capacity at a rate PROPORTIONAL to the Aurora Serverless v2 current ACU
- * (AWS: "scale-up rate is proportional to current capacity"; RDS Proxy team: "our
- * capacity is based on underlying registered database capacity"). At our 0.5-ACU
- * floor the provisioning is the slowest possible, so the proxy target sat in
- * TargetHealth.State=UNAVAILABLE / Reason=PENDING_PROXY_CAPACITY for 40+ min and
- * effectively never became AVAILABLE — blocking every first connection. Reproduced
- * in two regions (Tokyo + Singapore) → systemic to the 0.5-ACU + proxy combo, not
- * regional. A single-writer, single-task self-host does NOT need proxy pooling, so
- * we drop the proxy entirely: mem9 connects to the cluster writer endpoint. This
- * removes the whole PENDING_PROXY_CAPACITY failure mode. (Raising min ACU to 2+
- * would also have fixed the proxy per AWS docs, but at ~4× the idle cost; dropping
- * the proxy keeps the locked 0.5-ACU floor.)
+ * NO RDS PROXY (repository deployment observation, empirical 2026-07-12). The
+ * former proxy target remained PENDING_PROXY_CAPACITY for more than 40 minutes at
+ * the selected 0.5 ACU floor in two regions, so the repository removed the proxy.
+ * mem9 now connects directly to the Aurora cluster writer endpoint. This
+ * observation is not a general AWS root-cause or capacity guarantee.
  *
  * DB AUTH (LOCKED, §3a): NOT native IAM — mem9 reads a single static MNEMO_DSN
  * once at startup (pgx stdlib, no credential refresh), so a ~15-min IAM token
@@ -63,10 +54,9 @@ export function db(): DbOutputs {
     ManagedBy: "sst",
   };
 
-  // SG for the future ECS mnemo-server task. Created here so the DB SG can scope
-  // 5432 ingress to exactly this SG (least-privilege) before ECS lands; the ECS
-  // stack attaches this SG to the task. Egress open (task reaches Aurora +
-  // Bedrock/embed over NAT).
+  // SG shared by the ECS service, bootstrap task, and Gateway proxy Lambda. The
+  // DB SG scopes 5432 ingress to exactly this SG; the ECS and Lambda stacks attach
+  // it to their workloads. Egress is open for Aurora and AWS service endpoints.
   const taskSg = new aws.ec2.SecurityGroup("Mem9TaskSg", {
     vpcId,
     description: "mem9 ECS task SG (mnemo-server); source for Aurora 5432 ingress",
@@ -110,8 +100,8 @@ export function db(): DbOutputs {
   // mem9 + the bootstrap task connect to directly (verified: aurora.ts `host`
   // getter returns `proxy?.endpoint ?? cluster.endpoint`). Password is
   // auto-generated + stored in Secrets Manager (secretArn); mem9 authenticates
-  // with it via the injected DSN. See the header for WHY the proxy was dropped
-  // (PENDING_PROXY_CAPACITY starvation at 0.5 ACU).
+  // with it via the injected DSN. See the header for the dated
+  // PENDING_PROXY_CAPACITY deployment observation.
   //
   // scaling.min = "0.5 ACU" (the LOCKED floor, ARCHITECTURE.md §3/§9) — NOT
   // "0 ACU". We keep 0.5 (not auto-pause min 0): a paused instance would add
@@ -169,9 +159,11 @@ export function db(): DbOutputs {
     value: aurora.database,
     tags,
   });
-  // The secret ARN — the ECS task role will get secretsmanager:GetSecretValue on
-  // it, and the task def references it via `secrets: valueFrom`. The password
-  // VALUE is never written to SSM or git.
+  // The secret ARN. The task definition references it through `secrets:
+  // valueFrom`, so the ECS task EXECUTION role gets
+  // secretsmanager:GetSecretValue. The application task role is only for API
+  // calls made by running containers. The password value is never written to
+  // SSM or git.
   new aws.ssm.Parameter("DbSecretArn", {
     name: `${prefix}/db/secret-arn`,
     type: "String",

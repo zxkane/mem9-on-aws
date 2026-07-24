@@ -67,10 +67,11 @@ RUN go mod download \
 # tracks what the maintainers ship; the static binary + certs are all we need.
 FROM alpine:3.19
 
-# ca-certificates: TLS to RDS Proxy / Bedrock / embed. jq: the entrypoint parses
-# the Secrets Manager JSON ({username,password}) and URL-encodes the password
-# (RDS RandomPassword can contain DSN-reserved chars: @ / : ? #) via jq's @uri —
-# far more robust than hand-rolled sed/awk. Both are small (~1-2 MB total).
+# ca-certificates: TLS to the Aurora writer endpoint. qwen3-embed and llm-proxy
+# are localhost HTTP sidecars; mnemo-server does not call Bedrock directly.
+# jq parses the Secrets Manager JSON ({username,password}) and URL-encodes the
+# password (RDS RandomPassword can contain DSN-reserved chars: @ / : ? #) via
+# jq's @uri. Both packages are small (~1-2 MB total).
 RUN apk add --no-cache ca-certificates jq
 
 COPY --from=builder /out/mnemo-server /usr/local/bin/mnemo-server

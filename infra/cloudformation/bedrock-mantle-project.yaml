@@ -1,11 +1,10 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
   OUT-OF-BAND Bedrock Mantle Project for mem9-on-aws LLM cost attribution (§7).
-  The llm-proxy sidecar (docker/llm-proxy) passes this project's Id as the
-  `OpenAI-Project` header on every Mantle /chat/completions call, so GLM-5
-  smart-ingest spend is tagged to this project. Mantle does NOT support
-  IAM-principal / session-tag attribution (verified empirically in production), so
-  a Project is the ONLY way to attribute GLM-5 spend.
+  When CI supplies this project's Id as MEM9_BEDROCK_PROJECT, the llm-proxy
+  sidecar passes it as `OpenAI-Project` on Mantle /chat/completions calls.
+  Empirical deployment observation, 2026-07-12: IAM-principal attribution did
+  not attribute the GLM-5 spend, so this repository uses a Bedrock Project.
 
   NOT SST-managed — managed out-of-band (like the ECR repos + the GitHub Actions
   role) so `sst remove` on a PR stage can't drop the shared project. Deploy in

@@ -5,8 +5,8 @@
  * (Cognito M2M). The target is a **Lambda-proxy GatewayTarget**: AgentCore invokes
  * a VPC-attached proxy Lambda (docker-less zip, nodejs24.x) that reaches
  * mnemo-server PRIVATELY over Cloud Map DNS (`mnemo.mem9-<stage>.local:8080`),
- * injecting the X-API-Key (= tenant id). No ALB, no ACM cert, no VPC Lattice, no
- * private R53 zone.
+ * injecting the X-API-Key (= tenant id). No ALB, ACM cert, or VPC Lattice is
+ * deployed; Cloud Map owns the VPC-associated Route 53 private hosted zone.
  *
  * WHY A LAMBDA TARGET (not ALB + self-managed-Lattice privateEndpoint): that path
  * FAILED to stabilize 100% of the time in the full CI deploy — an AgentCore

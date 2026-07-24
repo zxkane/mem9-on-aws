@@ -28,7 +28,7 @@ DB_PASS=$(printf '%s' "$MEM9_DB_SECRET" | jq -re '(.password // error("missing .
   echo "bootstrap: MEM9_DB_SECRET has no .password" >&2; exit 1; }
 
 # psql reads the password from PGPASSWORD (never on the command line / in the
-# process args). TLS required (RDS Proxy mandates it), same as mnemo-server.
+# process args). The direct Aurora connection requires TLS, as does mnemo-server.
 export PGPASSWORD="$DB_PASS"
 export PGSSLMODE=require
 export PGCONNECT_TIMEOUT=8
@@ -36,19 +36,13 @@ export PGCONNECT_TIMEOUT=8
 PSQL="psql --host=${MEM9_DB_HOST} --port=${MEM9_DB_PORT} --username=${DB_USER} \
   --dbname=${MEM9_DB_NAME} -v ON_ERROR_STOP=1 --no-password"
 
-# Wait for the DB to accept connections before applying schema. This runs right
-# after `sst deploy`, and run-bootstrap-task.sh already GATES the run on the RDS
-# Proxy target being AVAILABLE — but a freshly-warm proxy can still drop the very
-# first client connections during Postgres startup ("server closed the connection
-# unexpectedly ... before or while processing the request") for a short window
-# while its backend pool settles. So retry patiently: PGCONNECT_TIMEOUT=8 (set
-# above) + 30 attempts × 8s sleep ≈ 5 min worst case, then exit non-zero with the
-# REAL psql error printed (so run-bootstrap-task.sh's log-fetch shows why:
-# SG/network block, proxy-still-warming, auth, etc.). 5 min covers the observed
-# 3–7 min proxy cold-start range in combination with the pre-run gate; a failure
-# that survives BOTH the gate and 5 min of retries is a real config bug, not a
-# race. "server closed the connection unexpectedly" is transient here and treated
-# as retryable — psql exits non-zero and we loop.
+# Wait for the Aurora writer endpoint to accept connections before applying the
+# schema. This runs immediately after `sst deploy`; the cluster is available, but
+# the first client connection can still race the final seconds of readiness.
+# Retry patiently: PGCONNECT_TIMEOUT=8 plus 30 attempts with an 8-second delay is
+# about five minutes worst case. Then exit non-zero with the real psql error so
+# run-bootstrap-task.sh can surface whether networking, authentication, or
+# database readiness failed.
 echo "bootstrap: probing ${MEM9_DB_HOST}:${MEM9_DB_PORT} (patient, up to ~5 min)..."
 ready=0
 i=1
@@ -65,7 +59,7 @@ while [ "$i" -le 30 ]; do
 done
 if [ "$ready" -ne 1 ]; then
   echo "bootstrap: DB unreachable after ~5 min. Last error above." >&2
-  echo "bootstrap: (common causes: RDS Proxy SG doesn't allow 5432 from the task SG; proxy target still warming; bad creds)" >&2
+  echo "bootstrap: (common causes: Aurora SG blocks 5432 from the task SG; writer not ready; bad creds)" >&2
   exit 1
 fi
 
@@ -82,14 +76,14 @@ $PSQL -f /bootstrap/schema.sql
 # postgres://<db_user>:<db_password>@<db_host>:<db_port>/<db_name>?sslmode=require
 # (verified in mem9 middleware/auth.go + domain/types.go). A placeholder password
 # would make every add/search fail auth at query time. So we write the actual
-# proxy username+password (from MEM9_DB_SECRET) into the row. db_tls=TRUE →
-# sslmode=require (RDS Proxy mandates TLS).
+# Aurora username+password (from MEM9_DB_SECRET) into the row. db_tls=TRUE makes
+# mem9 use sslmode=require for the direct writer-endpoint connection.
 #
 # Passed to psql as VARIABLES (:'var' → correctly-quoted literal), never
 # interpolated into the SQL text or argv, so the password isn't in shell
 # history/process args. It IS stored in the tenants table — that is mem9's
 # plain-mode design; the DB is the operator's own and the same password already
-# authenticates the proxy hop. (MNEMO_ENCRYPT_TYPE=kms could encrypt it at rest
+# authenticates the Aurora connection. (MNEMO_ENCRYPT_TYPE=kms could encrypt it at rest
 # later — recorded as a follow-up, not needed for launch.)
 echo "bootstrap: seeding tenant ${MEM9_TENANT_ID} (idempotent)"
 $PSQL \
