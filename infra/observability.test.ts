@@ -392,12 +392,7 @@ describe("observability alert delivery", () => {
         "sns:SetSubscriptionAttributes",
         "sns:Unsubscribe",
       ],
-      Resource: [
-        {
-          "Fn::Sub":
-            "arn:${AWS::Partition}:sns:*:${AWS::AccountId}:mem9-on-aws-*:*",
-        },
-      ],
+      Resource: "*",
     });
 
     expect(template.Resources.GitHubActionsRole.Properties.ManagedPolicyArns).toEqual([

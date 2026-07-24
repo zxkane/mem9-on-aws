@@ -613,15 +613,15 @@ Resources:
             Resource:
               - !Sub arn:${AWS::Partition}:sns:*:${AWS::AccountId}:mem9-on-aws-*
           - Sid: SnsSubscriptionRead
-            # These operations address the subscription ARN
-            # (arn:...:mem9-on-aws-prod-alerts:<uuid>), not the topic ARN above.
+            # SNS does not support resource-level IAM authorization for these
+            # subscription APIs, so Resource must be "*". Keep the action set
+            # limited to the operations Pulumi needs for refresh/update/teardown.
             Effect: Allow
             Action:
               - sns:GetSubscriptionAttributes
               - sns:SetSubscriptionAttributes
               - sns:Unsubscribe
-            Resource:
-              - !Sub arn:${AWS::Partition}:sns:*:${AWS::AccountId}:mem9-on-aws-*:*
+            Resource: "*"
           - Sid: CloudWatchAlarmsForScaling
             # Target-tracking scaling policies auto-provision CloudWatch alarms;
             # infra/observability.ts creates its own metric alarms too. The
