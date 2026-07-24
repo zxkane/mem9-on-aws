@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "skills": {
+    "autonomous-common": {
+      "source": "zxkane/autonomous-dev-team",
+      "ref": "main",
+      "sourceType": "github",
+      "skillPath": "skills/autonomous-common/SKILL.md",
+      "computedHash": "c4b38d67e95f82070681efe4d55766da0fd1a79067d79379baf074ff70086177"
+    },
+    "autonomous-dev": {
+      "source": "zxkane/autonomous-dev-team",
+      "ref": "main",
+      "sourceType": "github",
+      "skillPath": "skills/autonomous-dev/SKILL.md",
+      "computedHash": "28ce578720bb850a68954051265cd384224a6dbd93ec71e77812ad1906aa4933"
+    },
+    "autonomous-dispatcher": {
+      "source": "zxkane/autonomous-dev-team",
+      "ref": "main",
+      "sourceType": "github",
+      "skillPath": "skills/autonomous-dispatcher/SKILL.md",
+      "computedHash": "6d552c4a19c2f58472920b03df79930f83aa9aec5ef30ab25319bdd84f8b5d53"
+    },
+    "autonomous-review": {
+      "source": "zxkane/autonomous-dev-team",
+      "ref": "main",
+      "sourceType": "github",
+      "skillPath": "skills/autonomous-review/SKILL.md",
+      "computedHash": "bbc18fbaa935e757c9ac1d786670c504ad3a28a10521739a293d6e30c5c10316"
+    },
+    "create-issue": {
+      "source": "zxkane/autonomous-dev-team",
+      "ref": "main",
+      "sourceType": "github",
+      "skillPath": "skills/create-issue/SKILL.md",
+      "computedHash": "5dd0729285e33266d02f9fb6432508b5e6306063c9241fe0710009e605a9a629"
+    }
+  }
+}
