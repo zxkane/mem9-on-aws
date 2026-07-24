@@ -6,6 +6,7 @@ import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 import { parse } from "yaml";
 import {
+  declaredConfiguration,
   decideRegistryScanningAction,
   projectRepositories,
   repositoryMatchesFilter,
@@ -44,7 +45,7 @@ function parseCloudFormation(source) {
   return parse(source, { customTags: cloudFormationTags });
 }
 
-async function runWrapper(fixture, stackState) {
+async function runWrapper(fixture, stackState, options = {}) {
   const dir = await mkdtemp(join(tmpdir(), "ecr-scan-wrapper-"));
   tempDirs.push(dir);
   const mockAws = join(dir, "aws");
@@ -59,8 +60,16 @@ async function runWrapper(fixture, stackState) {
       ...process.env,
       PATH: `${dir}${delimiter}${process.env.PATH}`,
       MOCK_AWS_LOG: log,
+      MOCK_AWS_STATE: join(dir, "aws.state"),
       MOCK_CURRENT_CONFIG: join(fixtureDir, fixture),
+      MOCK_DECLARED_CONFIG: join(fixtureDir, "declared.json"),
+      MOCK_SECOND_CURRENT_CONFIG: options.secondFixture
+        ? join(fixtureDir, options.secondFixture)
+        : "",
       MOCK_STACK_STATE: stackState,
+      MOCK_UPDATE_RESULT: options.updateResult ?? "success",
+      MOCK_MUTATION_CONVERGES: String(options.mutationConverges ?? true),
+      MOCK_POST_MUTATION_STACK_STATE: options.postMutationStackState ?? "",
     },
   });
 
@@ -225,6 +234,16 @@ describe("CloudFormation declarations", () => {
         ],
       },
     });
+    expect(declaredConfiguration("mem9-on-aws")).toEqual({
+      scanType: resources[0].Properties.ScanType,
+      rules: resources[0].Properties.Rules.map((rule) => ({
+        scanFrequency: rule.ScanFrequency,
+        repositoryFilters: rule.RepositoryFilters.map((filter) => ({
+          filter: filter.Filter.replace("${ProjectName}", "mem9-on-aws"),
+          filterType: filter.FilterType,
+        })),
+      })),
+    });
   });
 
   it("TC-ECR-SCAN-011: leaves all four retained repositories in their existing stack", async () => {
@@ -259,6 +278,11 @@ describe("CloudFormation declarations", () => {
         "ecr:PutRegistryScanningConfiguration",
       ],
       Resource: "*",
+      Condition: {
+        StringEquals: {
+          "aws:RequestedRegion": "ap-northeast-1",
+        },
+      },
     });
     expect(findingsStatement?.Action).toEqual(["ecr:DescribeImageScanFindings"]);
     expect([...registryStatement.Action, ...findingsStatement.Action]).toEqual([
@@ -333,6 +357,31 @@ describe("deployment wrapper fixture adapter", () => {
     expect(result.calls).toContain("cloudformation wait stack-update-complete");
   });
 
+  it("TC-ECR-SCAN-020: repairs owned drift when CloudFormation has no template update", async () => {
+    const result = await runWrapper("owned-drift.json", "owned", {
+      updateResult: "no-updates",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.calls).toContain("cloudformation update-stack");
+    expect(result.calls).toContain("ecr put-registry-scanning-configuration");
+  });
+
+  it("TC-ECR-SCAN-024: fails when an owned update does not converge", async () => {
+    const result = await runWrapper("owned-drift.json", "owned", {
+      mutationConverges: false,
+    });
+    expect(result.status).toBe(4);
+    expect(result.stderr).toContain("did not converge");
+  });
+
+  it("TC-ECR-SCAN-025: fails when ownership is lost after adoption", async () => {
+    const result = await runWrapper("default.json", "missing", {
+      postMutationStackState: "missing",
+    });
+    expect(result.status).toBe(4);
+    expect(result.stderr).toContain("did not converge");
+  });
+
   it("TC-ECR-SCAN-015: verifies equivalent stack-owned state without mutation", async () => {
     const result = await runWrapper("declared.json", "owned");
     expect(result.status, result.stderr).toBe(0);
@@ -354,6 +403,17 @@ describe("deployment wrapper fixture adapter", () => {
     },
   );
 
+  it("TC-ECR-SCAN-021: a conflicting second read fails before mutation", async () => {
+    const result = await runWrapper("default.json", "missing", {
+      secondFixture: "external-sibling.json",
+    });
+    expect(result.status).not.toBe(0);
+    expect(
+      result.calls.match(/ecr get-registry-scanning-configuration/g),
+    ).toHaveLength(2);
+    expect(mutationCalls(result.calls)).toEqual([]);
+  });
+
   it("TC-ECR-SCAN-017: never uses repository-level scanning configuration", async () => {
     const [wrapperSource, repositoryTemplate, registryTemplate] = await Promise.all([
       readFile(wrapper, "utf8"),
@@ -369,5 +429,16 @@ describe("deployment wrapper fixture adapter", () => {
       expect(source).not.toContain(repositoryApi);
       expect(source).not.toContain(repositoryProperty);
     }
+  });
+});
+
+describe("CI validation", () => {
+  it("TC-ECR-SCAN-023: runs genuine cfn-lint schema validation", async () => {
+    const workflow = await readFile(
+      join(repoRoot, ".github", "workflows", "infra-ci.yml"),
+      "utf8",
+    );
+    expect(workflow).toContain("cfn-lint");
+    expect(workflow).toContain("infra/cloudformation/ecr-registry-scanning.yaml");
   });
 });

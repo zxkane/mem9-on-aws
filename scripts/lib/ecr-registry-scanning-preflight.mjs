@@ -196,6 +196,10 @@ async function main() {
     process.stdout.write(`${decision.action}\t${decision.reason}\t${uncovered}\n`);
     return;
   }
+  if (format === "configuration") {
+    process.stdout.write(`${JSON.stringify(declaredConfiguration(projectName))}\n`);
+    return;
+  }
   if (format !== "json") {
     throw new Error(`unsupported --format: ${format}`);
   }

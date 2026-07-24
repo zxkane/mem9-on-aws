@@ -776,6 +776,9 @@ Resources:
               - ecr:GetRegistryScanningConfiguration
               - ecr:PutRegistryScanningConfiguration
             Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: ap-northeast-1
           - Sid: EcrImageScanFindings
             # Read-only operator/CI access to BASIC findings is restricted to
             # the same four project repositories as the image push grant.

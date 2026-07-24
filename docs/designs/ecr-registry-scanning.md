@@ -15,7 +15,7 @@ deploy-ecr-registry-scanning.sh
         |
         +-- adopt          -> validate + create dedicated stack
         +-- verify-owned   -> exit without mutation
-        +-- update-owned   -> validate + update from complete template
+        +-- update-owned   -> validate + update from complete declaration
         +-- verify-only    -> exit without adopting external rules
         +-- fail-closed    -> exit before every mutation command
 
@@ -39,9 +39,10 @@ out-of-band stack. The registry singleton is deliberately separate.
 2. Read whether the dedicated stack exists and owns the singleton resource.
 3. Evaluate the current configuration, stack ownership, the four project
    repositories, and the complete declared configuration as pure data.
-4. Permit a mutation only when the registry is default/unconfigured or the
+4. Repeat the complete registry and ownership read immediately before mutation.
+5. Permit a mutation only when the registry is default/unconfigured or the
    dedicated stack already owns the singleton.
-5. Never merge external filters into the project template. Externally managed
+6. Never merge external filters into the project template. Externally managed
    BASIC scan-on-push rules are accepted only when they cover all four project
    repositories; every other external state fails closed.
 
@@ -56,7 +57,9 @@ out-of-band stack. The registry singleton is deliberately separate.
 - `DeletionPolicy: Retain` preserves the registry configuration if ownership is
   relinquished. An external owner can then install a complete account-level
   ruleset without this stack deleting it.
-- The wrapper uses CloudFormation for mutations and never calls ECR's
-  repository-level scanning API or directly puts a registry configuration.
+- The wrapper normally updates through CloudFormation. If an unchanged template
+  cannot repair stack-owned drift, it reapplies the exact complete declaration
+  through the registry-level API and verifies convergence. It never calls ECR's
+  repository-level scanning API.
 - Fixture tests record every mocked AWS command so all conflict paths can prove
   that no mutation command was reached.

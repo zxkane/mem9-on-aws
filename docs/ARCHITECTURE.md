@@ -257,8 +257,9 @@ CloudFormation ownership and applies this policy:
 | Any external scan type conflict, sibling-only rules, or partial project coverage | Fail closed before mutation |
 
 The wrapper never merges or infers external rules. It repeats the complete
-registry and ownership preflight immediately before mutation, and a stack-name
-collision without ownership also fails closed.
+registry and ownership preflight immediately before mutation. A stack-name
+collision without ownership also fails closed. This prevents a project-local
+deployment from replacing sibling repositories' account-level rules.
 
 CloudFormation does not reconcile resource drift when the submitted template is
 unchanged. On that specific stack-owned path, the wrapper reapplies the exact
