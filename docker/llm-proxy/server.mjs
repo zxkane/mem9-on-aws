@@ -37,10 +37,22 @@
 // routing / header-injection / error paths without touching AWS or Mantle. When
 // run directly (node server.mjs) the module wires the real deps + starts listening.
 
+import { randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 
 const DEFAULT_MAX_BODY_BYTES = 1_048_576;
 const DEFAULT_MAX_TOKENS = 4096;
+const REQUEST_POLICY_DEFAULTS = Object.freeze({
+  overallDeadlineMs: 110_000,
+  maxCallMs: 108_000,
+  responseReserveMs: 2_000,
+  retryMinCallBudgetMs: 20_000,
+  backoffBaseMs: 500,
+  backoffCapMs: 2_000,
+});
+const RETRYABLE_STATUSES = new Set([408, 429, 500, 502, 503, 504]);
+const IMF_FIXDATE =
+  /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun), \d{2} (Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec) \d{4} \d{2}:\d{2}:\d{2} GMT$/;
 
 function positiveInteger(raw, fallback, name) {
   if (raw === undefined || raw === "") return fallback;
@@ -81,20 +93,52 @@ export function readConfig(env = process.env) {
     // Refresh interval. Default = 1h (well under 12h TTL); a long safety margin
     // costs nothing since minting is a local presign, not an API call.
     refreshIntervalMs: Number(env.LLM_PROXY_REFRESH_INTERVAL_MS || 60 * 60 * 1000),
-    // Per-request upstream timeout. mem9's own client uses 120s; match it so the
-    // proxy never times out before mem9 would.
-    upstreamTimeoutMs: Number(env.LLM_PROXY_UPSTREAM_TIMEOUT_MS || 120_000),
+    // The overall request remains below mem9's 120s timeout. Only the overall
+    // deadline is configurable, and it is capped at 110s; the internal policy
+    // values stay fixed so an environment change cannot weaken the reserves.
+    overallDeadlineMs: Math.min(
+      positiveInteger(
+        env.LLM_PROXY_OVERALL_DEADLINE_MS,
+        REQUEST_POLICY_DEFAULTS.overallDeadlineMs,
+        "LLM_PROXY_OVERALL_DEADLINE_MS",
+      ),
+      REQUEST_POLICY_DEFAULTS.overallDeadlineMs,
+    ),
+    maxCallMs: REQUEST_POLICY_DEFAULTS.maxCallMs,
+    responseReserveMs: REQUEST_POLICY_DEFAULTS.responseReserveMs,
+    retryMinCallBudgetMs: REQUEST_POLICY_DEFAULTS.retryMinCallBudgetMs,
+    backoffBaseMs: REQUEST_POLICY_DEFAULTS.backoffBaseMs,
+    backoffCapMs: REQUEST_POLICY_DEFAULTS.backoffCapMs,
   };
 }
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
+function writeHttpResponse(res, status, headers, body) {
+  if (res.destroyed || res.writableFinished) return Promise.resolve();
+  return new Promise((resolve) => {
+    const done = () => {
+      res.removeListener("finish", done);
+      res.removeListener("close", done);
+      resolve();
+    };
+    res.once("finish", done);
+    res.once("close", done);
+    res.writeHead(status, headers);
+    res.end(body);
+  });
+}
+
 function sendJson(res, status, obj) {
   const body = JSON.stringify(obj);
-  res.writeHead(status, {
-    "content-type": "application/json",
-    "content-length": Buffer.byteLength(body),
-  });
-  res.end(body);
+  return writeHttpResponse(
+    res,
+    status,
+    {
+      "content-type": "application/json",
+      "content-length": Buffer.byteLength(body),
+    },
+    body,
+  );
 }
 
 function sendError(
@@ -105,57 +149,143 @@ function sendError(
   code = null,
   param = null,
 ) {
-  sendJson(res, status, { error: { message, type, param, code } });
+  return sendJson(res, status, { error: { message, type, param, code } });
 }
 
 class RequestValidationError extends Error {
-  constructor(status, code, message, bodyBytes, phase) {
+  constructor(status, code, message) {
     super(message);
     this.name = "RequestValidationError";
     this.status = status;
     this.code = code;
-    this.bodyBytes = bodyBytes;
-    this.phase = phase;
-    this.outcomeClass = "permanent";
+    this.outcomeClass = "proxy_validation_permanent";
   }
 }
 
-function logValidationFailure(req, url, err) {
-  const declaredLength = req.headers["content-length"];
-  console.warn(
-    JSON.stringify({
-      event: "llm_proxy_validation",
-      status: err.status,
-      code: err.code,
-      outcome_class: err.outcomeClass,
-      validation_phase: err.phase,
-      method: req.method,
-      path: url.pathname,
-      content_length: Array.isArray(declaredLength)
-        ? declaredLength.join(",")
-        : (declaredLength ?? null),
-      body_bytes: err.bodyBytes,
-    }),
+class ProxyRequestError extends Error {
+  constructor(httpStatus, code, message, reason, outcomeClass) {
+    super(message);
+    this.name = "ProxyRequestError";
+    this.httpStatus = httpStatus;
+    this.code = code;
+    this.reason = reason;
+    this.outcomeClass = outcomeClass;
+  }
+}
+
+function requestAbortReason(signal) {
+  return signal.reason?.reason || "overall_deadline";
+}
+
+function remainingBudget(request, now) {
+  return Math.max(0, Math.floor(request.deadlineAt - now()));
+}
+
+function callBudget(cfg, request, now, at = now()) {
+  return Math.max(
+    0,
+    Math.min(cfg.maxCallMs, Math.floor(request.deadlineAt - at - cfg.responseReserveMs)),
   );
 }
 
-async function readBody(req, limitBytes) {
+function outcomeForStatus(status) {
+  if (status >= 400 && status < 500) {
+    return RETRYABLE_STATUSES.has(status) ? "mantle_transient" : "mantle_4xx_permanent";
+  }
+  if (status >= 500) return "mantle_transient";
+  return undefined;
+}
+
+function requestLog(request, now, log, attempt, startedAt, fields) {
+  const record = {
+    request_id: request.id,
+    attempt,
+    ...fields,
+    duration_ms: Math.max(0, Math.round(now() - startedAt)),
+    remaining_budget_ms: remainingBudget(request, now),
+  };
+  log(record);
+}
+
+function defaultRequestLog(record) {
+  console.log(JSON.stringify(record));
+}
+
+function parseRetryAfter(value, now) {
+  if (value === null) return null;
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) {
+    const seconds = Number(trimmed);
+    return Number.isFinite(seconds) ? seconds * 1_000 : Number.POSITIVE_INFINITY;
+  }
+  if (!IMF_FIXDATE.test(trimmed)) return null;
+  const date = Date.parse(trimmed);
+  if (Number.isNaN(date) || new Date(date).toUTCString() !== trimmed) return null;
+  return Math.max(0, date - now());
+}
+
+function fullJitterDelay(cfg, attempt, random) {
+  const cap = Math.min(cfg.backoffBaseMs * 2 ** (attempt - 1), cfg.backoffCapMs);
+  return Math.min(cap, Math.floor(random() * (cap + 1)));
+}
+
+function abortableSleep(delayMs, signal) {
+  if (signal.aborted) return Promise.reject(new Error("request aborted"));
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(done, delayMs);
+    function done() {
+      signal.removeEventListener("abort", aborted);
+      resolve();
+    }
+    function aborted() {
+      clearTimeout(timer);
+      reject(new Error("request aborted"));
+    }
+    signal.addEventListener("abort", aborted, { once: true });
+  });
+}
+
+function waitForPromise(promise, signal) {
+  if (signal.aborted) return Promise.reject(new Error("request aborted"));
+  return new Promise((resolve, reject) => {
+    function aborted() {
+      reject(new Error("request aborted"));
+    }
+    signal.addEventListener("abort", aborted, { once: true });
+    Promise.resolve(promise).then(
+      (value) => {
+        signal.removeEventListener("abort", aborted);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", aborted);
+        reject(error);
+      },
+    );
+  });
+}
+
+async function readBody(req, limitBytes, signal) {
   const chunks = [];
   let size = 0;
-  for await (const chunk of req) {
-    size += chunk.length;
-    if (size > limitBytes) {
-      throw new RequestValidationError(
-        413,
-        "request_too_large",
-        `request body exceeds ${limitBytes} bytes`,
-        size,
-        "read",
-      );
+  const abort = () => req.destroy(new Error("request aborted"));
+  signal.addEventListener("abort", abort, { once: true });
+  try {
+    for await (const chunk of req) {
+      size += chunk.length;
+      if (size > limitBytes) {
+        throw new RequestValidationError(
+          413,
+          "request_too_large",
+          `request body exceeds ${limitBytes} bytes`,
+        );
+      }
+      chunks.push(chunk);
     }
-    chunks.push(chunk);
+    return Buffer.concat(chunks);
+  } finally {
+    signal.removeEventListener("abort", abort);
   }
-  return Buffer.concat(chunks);
 }
 
 function rewriteChatCompletion(bodyBuf, cfg) {
@@ -168,8 +298,6 @@ function rewriteChatCompletion(bodyBuf, cfg) {
       400,
       "invalid_json",
       "request body is not valid JSON",
-      bodyBuf.length,
-      "parse",
     );
   }
 
@@ -185,8 +313,6 @@ function rewriteChatCompletion(bodyBuf, cfg) {
       400,
       "invalid_chat_completions_request",
       "request body must be a chat-completions object with model and messages",
-      bodyBuf.length,
-      "semantic",
     );
   }
 
@@ -198,8 +324,6 @@ function rewriteChatCompletion(bodyBuf, cfg) {
         400,
         "invalid_max_tokens",
         `max_tokens must be an integer from 1 through ${cfg.maxTokens}`,
-        bodyBuf.length,
-        "semantic",
       );
     }
   }
@@ -210,11 +334,230 @@ function rewriteChatCompletion(bodyBuf, cfg) {
       413,
       "request_too_large",
       `rewritten request body exceeds ${cfg.maxBodyBytes} bytes`,
-      rewritten.length,
-      "rewrite",
     );
   }
   return rewritten;
+}
+
+/**
+ * Execute at most two Mantle calls inside one request budget.
+ *
+ * This function owns retry/auth-remint decisions and is exported so unit tests
+ * can inject clock, fetch, credential refresh, jitter, sleep, and log behavior.
+ */
+export async function forwardWithPolicy({ body, token, cfg, request, deps = {} }) {
+  const fetchImpl = deps.fetchImpl || globalThis.fetch;
+  const refreshToken = deps.refreshToken;
+  const now = deps.now || Date.now;
+  const random = deps.random || Math.random;
+  const sleep = deps.sleep || abortableSleep;
+  const log = deps.log || defaultRequestLog;
+
+  function terminalError(attempt, startedAt, error, status) {
+    requestLog(request, now, log, attempt, startedAt, {
+      ...(status === undefined ? {} : { status }),
+      reason: error.reason,
+      outcome_class: error.outcomeClass,
+    });
+    throw error;
+  }
+
+  async function callMantle(attempt, bearer) {
+    const budgetMs = callBudget(cfg, request, now);
+    const startedAt = now();
+    if (budgetMs <= 0 || request.signal.aborted) {
+      const error = new ProxyRequestError(
+        504,
+        "upstream_timeout",
+        "overall request deadline reached",
+        request.signal.aborted ? requestAbortReason(request.signal) : "overall_deadline",
+        "deadline",
+      );
+      return terminalError(attempt, startedAt, error);
+    }
+
+    const headers = {
+      Authorization: `Bearer ${bearer}`,
+      "Content-Type": "application/json",
+      "Content-Length": String(body.length),
+    };
+    if (cfg.openaiProject) headers["OpenAI-Project"] = cfg.openaiProject;
+
+    const callController = new AbortController();
+    const timeoutReason = { reason: "attempt_timeout" };
+    const abortFromRequest = () => callController.abort(request.signal.reason);
+    request.signal.addEventListener("abort", abortFromRequest, { once: true });
+    const timer = setTimeout(() => callController.abort(timeoutReason), budgetMs);
+    try {
+      const upstream = await fetchImpl(`${cfg.upstreamBase}/chat/completions`, {
+        method: "POST",
+        headers,
+        body,
+        signal: callController.signal,
+      });
+      const responseBody = await upstream.arrayBuffer();
+      return {
+        response: new Response(responseBody, {
+          status: upstream.status,
+          statusText: upstream.statusText,
+          headers: upstream.headers,
+        }),
+        startedAt,
+      };
+    } catch (cause) {
+      if (request.signal.aborted) {
+        return {
+          error: new ProxyRequestError(
+            504,
+            "upstream_timeout",
+            "request canceled",
+            requestAbortReason(request.signal),
+            "deadline",
+          ),
+          startedAt,
+        };
+      }
+      if (callController.signal.reason === timeoutReason || cause?.name === "AbortError") {
+        return {
+          error: new ProxyRequestError(
+            504,
+            "upstream_timeout",
+            "upstream Mantle request timed out",
+            "attempt_timeout",
+            "deadline",
+          ),
+          startedAt,
+        };
+      }
+      return {
+        error: new ProxyRequestError(
+          502,
+          "upstream_error",
+          "llm-proxy failed to reach Mantle",
+          "network_error",
+          "mantle_transient",
+        ),
+        startedAt,
+      };
+    } finally {
+      clearTimeout(timer);
+      request.signal.removeEventListener("abort", abortFromRequest);
+    }
+  }
+
+  async function waitBeforeRetry(delayMs, attempt, startedAt, fields) {
+    requestLog(request, now, log, attempt, startedAt, fields);
+    try {
+      await sleep(delayMs, request.signal);
+    } catch {
+      const error = new ProxyRequestError(
+        504,
+        "upstream_timeout",
+        "request canceled",
+        requestAbortReason(request.signal),
+        "deadline",
+      );
+      return terminalError(attempt, startedAt, error, fields.status);
+    }
+    return callBudget(cfg, request, now) >= cfg.retryMinCallBudgetMs;
+  }
+
+  async function retryIfUseful(delayMs, attempt, startedAt, fields) {
+    const projected = callBudget(cfg, request, now, now() + delayMs);
+    if (projected < cfg.retryMinCallBudgetMs) return false;
+    return waitBeforeRetry(delayMs, attempt, startedAt, fields);
+  }
+
+  let bearer = token;
+  for (let attempt = 1; attempt <= 2; attempt += 1) {
+    const result = await callMantle(attempt, bearer);
+
+    if (result.error) {
+      if (attempt === 1 && result.error.reason === "network_error") {
+        const delayMs = fullJitterDelay(cfg, attempt, random);
+        const retry = await retryIfUseful(delayMs, attempt, result.startedAt, {
+          reason: "transient_retry",
+        });
+        if (retry) continue;
+      }
+      return terminalError(attempt, result.startedAt, result.error);
+    }
+
+    const { response, startedAt } = result;
+    if (attempt === 2) {
+      requestLog(request, now, log, attempt, startedAt, {
+        status: response.status,
+        ...(outcomeForStatus(response.status)
+          ? { outcome_class: outcomeForStatus(response.status) }
+          : {}),
+      });
+      return response;
+    }
+
+    if (response.status === 401 || response.status === 403) {
+      if (callBudget(cfg, request, now) <= 0 || request.signal.aborted) {
+        requestLog(request, now, log, attempt, startedAt, {
+          status: response.status,
+          outcome_class: "mantle_4xx_permanent",
+        });
+        return response;
+      }
+      try {
+        bearer = await waitForPromise(refreshToken(), request.signal);
+      } catch {
+        if (request.signal.aborted) {
+          const error = new ProxyRequestError(
+            504,
+            "upstream_timeout",
+            "request canceled",
+            requestAbortReason(request.signal),
+            "deadline",
+          );
+          return terminalError(attempt, startedAt, error, response.status);
+        }
+        const error = new ProxyRequestError(
+          502,
+          "upstream_error",
+          "llm-proxy failed to refresh Mantle credentials",
+          "credential_error",
+          "mantle_transient",
+        );
+        return terminalError(attempt, startedAt, error, response.status);
+      }
+      if (callBudget(cfg, request, now) <= 0) {
+        requestLog(request, now, log, attempt, startedAt, {
+          status: response.status,
+          outcome_class: "mantle_4xx_permanent",
+        });
+        return response;
+      }
+      requestLog(request, now, log, attempt, startedAt, {
+        status: response.status,
+        reason: "auth_remint",
+      });
+      continue;
+    }
+
+    if (RETRYABLE_STATUSES.has(response.status)) {
+      const retryAfter = parseRetryAfter(response.headers.get("retry-after"), now);
+      const delayMs = retryAfter === null ? fullJitterDelay(cfg, attempt, random) : retryAfter;
+      const retry = await retryIfUseful(delayMs, attempt, startedAt, {
+        status: response.status,
+        reason: "transient_retry",
+      });
+      if (retry) continue;
+    }
+
+    requestLog(request, now, log, attempt, startedAt, {
+      status: response.status,
+      ...(outcomeForStatus(response.status)
+        ? { outcome_class: outcomeForStatus(response.status) }
+        : {}),
+    });
+    return response;
+  }
+
+  throw new Error("unreachable request policy state");
 }
 
 /**
@@ -230,6 +573,14 @@ function rewriteChatCompletion(bodyBuf, cfg) {
 export function createProxyServer(cfg, deps = {}) {
   const mintToken = deps.mintToken;
   const fetchImpl = deps.fetchImpl || globalThis.fetch;
+  const now = deps.now || Date.now;
+  const requestId = deps.requestId || randomUUID;
+  const log = deps.log || defaultRequestLog;
+  const writeResponse = deps.writeResponse || writeHttpResponse;
+  const requestCfg = {
+    ...REQUEST_POLICY_DEFAULTS,
+    ...cfg,
+  };
   if (typeof mintToken !== "function") {
     throw new Error("createProxyServer requires deps.mintToken");
   }
@@ -239,7 +590,7 @@ export function createProxyServer(cfg, deps = {}) {
   async function refresh() {
     const token = await mintToken();
     state.token = token;
-    state.lastMintAt = Date.now();
+    state.lastMintAt = now();
     return token;
   }
 
@@ -259,45 +610,10 @@ export function createProxyServer(cfg, deps = {}) {
     return state.firstMint;
   }
 
-  async function postToMantle(bodyBuf, token) {
-    const headers = {
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
-      "Content-Length": String(bodyBuf.length),
-    };
-    if (cfg.openaiProject) headers["OpenAI-Project"] = cfg.openaiProject;
-
-    const ac = new AbortController();
-    const timer = setTimeout(() => ac.abort(), cfg.upstreamTimeoutMs);
-    try {
-      return await fetchImpl(`${cfg.upstreamBase}/chat/completions`, {
-        method: "POST",
-        headers,
-        body: bodyBuf,
-        signal: ac.signal,
-      });
-    } finally {
-      clearTimeout(timer);
-    }
-  }
-
-  async function forwardToMantle(bodyBuf) {
-    const upstream = await postToMantle(bodyBuf, await ensureToken());
-    // 401/403 means the bearer is dead (typical cause: it was presigned from
-    // task-role session credentials that have since rotated — the 2026-07-22
-    // incident). The timer won't fix it for up to an hour; re-mint NOW (a
-    // local presign, no network) and retry ONCE. A second auth failure passes
-    // through — mem9 handles non-2xx itself.
-    if (upstream.status !== 401 && upstream.status !== 403) return upstream;
-    // Canonical, countable log line — the #26 metric filter matches this
-    // prefix verbatim; TC-PROXY401-006 pins it. Change both together.
-    console.warn(`llm-proxy re-minted bearer after upstream ${upstream.status}`);
-    const fresh = await refresh();
-    return postToMantle(bodyBuf, fresh);
-  }
-
   const server = createServer(async (req, res) => {
     let url;
+    let request;
+    let cleanupRequest = () => {};
     try {
       url = new URL(req.url, `http://localhost:${cfg.port}`);
 
@@ -310,7 +626,7 @@ export function createProxyServer(cfg, deps = {}) {
         return sendJson(res, ready ? 200 : 503, {
           status: ready ? "ok" : "starting",
           lastMintAgeSeconds: state.lastMintAt
-            ? Math.round((Date.now() - state.lastMintAt) / 1000)
+            ? Math.round((now() - state.lastMintAt) / 1000)
             : null,
         });
       }
@@ -318,17 +634,78 @@ export function createProxyServer(cfg, deps = {}) {
       // mem9 posts to `${MNEMO_LLM_BASE_URL}/chat/completions`; base is
       // http://localhost:PORT/v1 → accept /v1/chat/completions and /chat/completions.
       if (req.method === "POST" && /\/(v1\/)?chat\/completions$/.test(url.pathname)) {
-        const inboundBody = await readBody(req, cfg.maxBodyBytes);
+        const startedAt = now();
+        const controller = new AbortController();
+        request = {
+          id: requestId(),
+          deadlineAt: startedAt + requestCfg.overallDeadlineMs,
+          signal: controller.signal,
+          startedAt,
+        };
+        const deadlineTimer = setTimeout(
+          () => {
+            controller.abort({ reason: "overall_deadline" });
+            if (!res.writableFinished) res.destroy();
+          },
+          requestCfg.overallDeadlineMs,
+        );
+        const clientDisconnected = () => {
+          if (!res.writableFinished) controller.abort({ reason: "downstream_disconnect" });
+        };
+        req.once("aborted", clientDisconnected);
+        res.once("close", clientDisconnected);
+        cleanupRequest = () => {
+          clearTimeout(deadlineTimer);
+          req.removeListener("aborted", clientDisconnected);
+          res.removeListener("close", clientDisconnected);
+        };
+
+        const inboundBody = await readBody(req, cfg.maxBodyBytes, request.signal);
         const bodyBuf = rewriteChatCompletion(inboundBody, cfg);
-        const upstream = await forwardToMantle(bodyBuf);
+        let token;
+        try {
+          token = await waitForPromise(ensureToken(), request.signal);
+        } catch {
+          const aborted = request.signal.aborted;
+          const error = new ProxyRequestError(
+            aborted ? 504 : 502,
+            aborted ? "upstream_timeout" : "upstream_error",
+            aborted ? "request canceled" : "llm-proxy failed to resolve Mantle credentials",
+            aborted ? requestAbortReason(request.signal) : "credential_error",
+            aborted ? "deadline" : "mantle_transient",
+          );
+          requestLog(request, now, log, 0, startedAt, {
+            reason: error.reason,
+            outcome_class: error.outcomeClass,
+          });
+          throw error;
+        }
+        const upstream = await forwardWithPolicy({
+          body: bodyBuf,
+          token,
+          cfg: requestCfg,
+          request,
+          deps: {
+            fetchImpl,
+            refreshToken: refresh,
+            now,
+            random: deps.random,
+            sleep: deps.sleep,
+            log,
+          },
+        });
         // Pass the upstream status + JSON body straight through. mem9 handles
         // non-2xx itself (it strips provider-specific flags on 400 and retries).
         const text = await upstream.text();
-        res.writeHead(upstream.status, {
-          "content-type": upstream.headers.get("content-type") || "application/json",
-          "content-length": Buffer.byteLength(text),
-        });
-        return res.end(text);
+        return await writeResponse(
+          res,
+          upstream.status,
+          {
+            "content-type": upstream.headers.get("content-type") || "application/json",
+            "content-length": Buffer.byteLength(text),
+          },
+          text,
+        );
       }
 
       return sendError(
@@ -340,20 +717,36 @@ export function createProxyServer(cfg, deps = {}) {
       );
     } catch (err) {
       if (err instanceof RequestValidationError) {
-        logValidationFailure(req, url, err);
-        return sendError(res, err.status, err.message, "invalid_request_error", err.code);
+        if (request) {
+          requestLog(request, now, log, 0, request.startedAt, {
+            status: err.status,
+            reason: err.code,
+            outcome_class: err.outcomeClass,
+          });
+        }
+        return await sendError(res, err.status, err.message, "invalid_request_error", err.code);
       }
-      // AbortError = upstream timeout; everything else = proxy/mint failure. Never
-      // leak internals; log server-side, return an OpenAI-shaped error.
-      const isTimeout = err?.name === "AbortError";
-      console.error("llm-proxy request error:", err?.message || err);
-      return sendError(
+      const failure =
+        err instanceof ProxyRequestError
+          ? err
+          : new ProxyRequestError(
+              request?.signal.aborted ? 504 : 502,
+              request?.signal.aborted ? "upstream_timeout" : "upstream_error",
+              request?.signal.aborted
+                ? "request canceled"
+                : "llm-proxy failed to reach Mantle",
+              request?.signal.aborted ? requestAbortReason(request.signal) : "network_error",
+              request?.signal.aborted ? "deadline" : "mantle_transient",
+            );
+      return await sendError(
         res,
-        isTimeout ? 504 : 502,
-        isTimeout ? "upstream Mantle request timed out" : "llm-proxy failed to reach Mantle",
+        failure.httpStatus,
+        failure.message,
         "server_error",
-        isTimeout ? "upstream_timeout" : "upstream_error",
+        failure.code,
       );
+    } finally {
+      cleanupRequest();
     }
   });
 

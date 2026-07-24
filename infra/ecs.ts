@@ -80,6 +80,7 @@ const LLM_PROXY_PORT = 8082;
 // task definition so production does not depend on image defaults.
 const LLM_PROXY_MAX_BODY_BYTES = 1_048_576;
 const LLM_PROXY_MAX_TOKENS = 4096;
+const LLM_PROXY_OVERALL_DEADLINE_MS = 110_000;
 const MAX_EXTRACTION_CONVERSATION_RUNES = 200_000;
 
 // mnemo-server's HTTP port. The MCP proxy Lambda (§6a) reaches this port on the
@@ -403,6 +404,7 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
           LLM_PROXY_REGION: "ap-northeast-1",
           LLM_PROXY_MAX_BODY_BYTES: String(LLM_PROXY_MAX_BODY_BYTES),
           LLM_PROXY_MAX_TOKENS: String(LLM_PROXY_MAX_TOKENS),
+          LLM_PROXY_OVERALL_DEADLINE_MS: String(LLM_PROXY_OVERALL_DEADLINE_MS),
           // OpenAI-Project header for Bedrock cost attribution. Empty → omitted.
           LLM_PROXY_OPENAI_PROJECT: BEDROCK_PROJECT,
         },

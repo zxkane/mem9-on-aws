@@ -26,10 +26,9 @@ Two changes, both inside the proxy (no mnemo-server / upstream change):
    upstream responds 401 or 403, re-mint the bearer once (minting is a local
    SigV4 presign — cheap, no network), retry the request with the fresh
    bearer, and pass through whatever the retry returns. No retry loop: a
-   second auth failure passes through (mem9 already handles non-2xx). Log a
-   distinct line — exactly `llm-proxy re-minted bearer after upstream <status>`
-   — so occurrences are countable; the #26 metric filter matches this prefix
-   verbatim and TC-PROXY401-006 pins it as a contract.
+   second auth failure passes through (mem9 already handles non-2xx). Log the
+   remint as redacted structured request metadata with `status:401|403` and
+   `reason:"auth_remint"`; TC-PROXY401-006 pins that contract.
 2. **Fresh credentials per mint.** The default minter resolves credentials
    via a NEW `fromNodeProviderChain()` per mint call instead of a shared
    memoized provider. Mint happens at most hourly (plus rare 401 retries), so
