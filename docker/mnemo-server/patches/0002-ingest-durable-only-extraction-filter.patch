@@ -1,16 +1,8 @@
 diff --git a/server/internal/service/ingest.go b/server/internal/service/ingest.go
-index b25f8ec..67fed15 100644
+index b25f8ec..d4fd17f 100644
 --- a/server/internal/service/ingest.go
 +++ b/server/internal/service/ingest.go
-@@ -774,6 +774,7 @@ atomic facts from a conversation.
- Return ONLY valid JSON. No markdown fences, no explanation.
- 
- {"facts": [{"text": "fact one", "tags": ["tag1", "tag2"], "fact_type": "fact"}, {"text": "User asked about X", "fact_type": "query_intent"}, ...]}`
-+	systemPrompt += durableOnlyPromptSection() // mem9-on-aws patch (issue #25)
- 	systemPrompt += routingPromptSection(routingTargets)
- 
- 	userPrompt := fmt.Sprintf("Extract facts.\n\n%s", input.formatted)
-@@ -949,6 +950,7 @@ Output: {"facts": [{"text": "Working remotely this week", "tags": ["work", "time
+@@ -949,6 +949,7 @@ Output: {"facts": [{"text": "Working remotely this week", "tags": ["work", "time
  Return ONLY valid JSON. No markdown fences, no explanation.
  
  {"facts": [{"text": "fact one", "tags": ["tag1", "tag2"], "fact_type": "fact"}, {"text": "User asked about X", "fact_type": "query_intent"}], "message_tags": [["tag1", "tag2"], ["tag3"], [], ...]}`
@@ -20,10 +12,10 @@ index b25f8ec..67fed15 100644
  	userPrompt := fmt.Sprintf("Extract facts and assign message tags.\n\n%s", input.formatted)
 diff --git a/server/internal/service/ingest_config.go b/server/internal/service/ingest_config.go
 new file mode 100644
-index 0000000..1aa8c7f
+index 0000000..db19036
 --- /dev/null
 +++ b/server/internal/service/ingest_config.go
-@@ -0,0 +1,79 @@
+@@ -0,0 +1,77 @@
 +package service
 +
 +// Ingest durability filter (mem9-on-aws patch, issue #25).
@@ -35,9 +27,13 @@ index 0000000..1aa8c7f
 +// using tool X", "already authenticated", review-progress notes) which never
 +// become useful recall hits and dilute vector search.
 +//
-+// MNEMO_INGEST_DURABLE_ONLY=1 appends a durability override section to both
-+// extraction prompt variants (facts-only and facts+tags). Default off — the
-+// prompts stay byte-identical to upstream.
++// MNEMO_INGEST_DURABLE_ONLY=1 appends a durability override section to the
++// TRANSCRIPT-INGEST extraction prompt (extractFactsAndTagsWithRouting — the
++// ingest_messages path fed by Stop/PreCompact hooks). It does NOT apply to
++// extractFactsWithRouting: that variant serves add_memory (an agent's
++// DELIBERATE store of a single fact — the caller already decided it's worth
++// keeping, incl. the deploy pipeline's e2e probe) and the reconcile path.
++// Default off — the prompts stay byte-identical to upstream.
 +
 +import "os"
 +
@@ -75,12 +71,6 @@ index 0000000..1aa8c7f
 +D4. Rules 12-14 above do NOT apply. When in doubt about durability, return
 +    fewer facts. An empty facts array is the CORRECT output for a routine
 +    work session with no durable takeaways.
-+D5. EXCEPTION: deployment-verification probes are ALWAYS kept verbatim. A
-+    statement that a health/e2e/smoke probe stored a marker (contains "probe"
-+    together with "marker", e.g. "e2e probe: the secret marker is X") is the
-+    deployment pipeline verifying this very extraction path end-to-end —
-+    reject it and the deploy fails. Store it as a single fact, preserving the
-+    marker value exactly.
 +
 +Examples to keep:
 +  - "Uses AWS profile <name> for the production account"
@@ -105,10 +95,10 @@ index 0000000..1aa8c7f
 +}
 diff --git a/server/internal/service/ingest_config_test.go b/server/internal/service/ingest_config_test.go
 new file mode 100644
-index 0000000..e43a2c2
+index 0000000..89effd4
 --- /dev/null
 +++ b/server/internal/service/ingest_config_test.go
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,140 @@
 +package service
 +
 +// Tests for the mem9-on-aws ingest durability patch (issue #25). IDs reference
@@ -211,18 +201,41 @@ index 0000000..e43a2c2
 +	}
 +}
 +
-+// TC-INGEST-005: the e2e-probe exception (D5) is present in the section — the
-+// deployment pipeline's write→search probe must never be rejected as
-+// transient, or every prod deploy hard-fails.
-+func TestDurableOnlyKeepsProbeException(t *testing.T) {
++// TC-INGEST-005: the durability filter must NOT apply to the add_memory
++// path (ExtractContentWithRouting → extractFactsWithRouting). A deliberate
++// single-fact store — including the deploy pipeline's e2e probe — is already
++// curated by the caller; filtering it broke the prod E2E hard gate.
++func TestDurableOnlyDoesNotApplyToAddMemoryPath(t *testing.T) {
 +	restore := ingestDurableOnly
 +	ingestDurableOnly = true
 +	defer func() { ingestDurableOnly = restore }()
 +
-+	got := durableOnlyPromptSection()
-+	for _, want := range []string{"EXCEPTION", "probe", "marker", "kept verbatim"} {
-+		if !strings.Contains(got, want) {
-+			t.Fatalf("durability section missing probe-exception content %q", want)
++	var captured string
++	mock := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		var req struct {
++			Messages []struct {
++				Role    string `json:"role"`
++				Content string `json:"content"`
++			} `json:"messages"`
 +		}
++		_ = json.NewDecoder(r.Body).Decode(&req)
++		if len(req.Messages) > 0 {
++			captured = req.Messages[0].Content
++		}
++		w.Header().Set("Content-Type", "application/json")
++		_ = json.NewEncoder(w).Encode(map[string]any{
++			"choices": []map[string]any{
++				{"message": map[string]string{"content": `{"facts": [{"text": "probe marker X"}]}`}},
++			},
++		})
++	}))
++	defer mock.Close()
++
++	llmClient := llm.New(llm.Config{APIKey: "t", BaseURL: mock.URL, Model: "m"})
++	svc := NewIngestService(&memoryRepoMock{}, llmClient, nil, "auto-model", ModeSmart)
++
++	_, _ = svc.ExtractContentWithRouting(context.Background(), "e2e probe: the secret marker is X", nil)
++	if strings.Contains(captured, "Durability filter") {
++		t.Fatal("durability section must not reach the add_memory extraction prompt")
 +	}
 +}
