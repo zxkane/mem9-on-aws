@@ -612,6 +612,12 @@ jobs:
           cache-from: type=gha,scope=mnemo-server
           cache-to: type=gha,mode=max,scope=mnemo-server
 
+      - name: Smoke test mnemo-server liveness
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          MNEMO_IMAGE: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_NS }}/mnemo-server:${{ steps.tag.outputs.image_tag }}
+        run: bash scripts/run-mnemo-health-smoke.sh
+
       - name: Build & push qwen3-embed (arm64)
         if: steps.gate.outputs.skip != 'true'
         uses: docker/build-push-action@v6

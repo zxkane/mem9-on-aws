@@ -416,6 +416,37 @@ describe("ecs stack", () => {
     }
   });
 
+  it("mnemo-server container: exact process-liveness command and ECS timing", async () => {
+    installGlobals("prod");
+    const ecs = await loadEcs();
+    ecs(fakeDbOut());
+    const health = containersByName()["mnemo-server"].health as Record<string, unknown>;
+    expect(health).toEqual({
+      command: [
+        "CMD-SHELL",
+        "wget -q -O /dev/null http://localhost:8080/healthz || exit 1",
+      ],
+      startPeriod: "60 seconds",
+      interval: "30 seconds",
+      timeout: "5 seconds",
+      retries: 3,
+    });
+  });
+
+  it("keeps all three application containers essential and health-checked", async () => {
+    installGlobals("prod");
+    const ecs = await loadEcs();
+    ecs(fakeDbOut());
+    const containers = containersByName();
+    for (const name of ["mnemo-server", "qwen3-embed", "llm-proxy"]) {
+      const container = containers[name];
+      expect(container).toBeDefined();
+      // ECS assumes a container is essential when `essential` is omitted.
+      expect((container.essential as boolean | undefined) ?? true).toBe(true);
+      expect(container.health).toBeDefined();
+    }
+  });
+
   it("qwen3-embed container: localhost port env + a health check gated on model load", async () => {
     installGlobals("prod");
     const ecs = await loadEcs();
