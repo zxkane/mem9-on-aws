@@ -88,6 +88,19 @@ function installGlobals(stage: string) {
         }
       },
     },
+    cloudwatch: {
+      LogMetricFilter: class {
+        constructor(_name: string, args: Record<string, unknown>) {
+          created.push({ kind: "LogMetricFilter", args });
+        }
+      },
+      MetricAlarm: class {
+        arn = out("arn:aws:cloudwatch:alarm");
+        constructor(_name: string, args: Record<string, unknown>) {
+          created.push({ kind: "MetricAlarm", args });
+        }
+      },
+    },
     ssm: {
       Parameter: class {
         constructor(_logicalName: string, args: { name: unknown }) {
@@ -425,5 +438,35 @@ describe("ecs stack", () => {
       "/mem9-on-aws/prod/ecs/service-dns-name",
       "/mem9-on-aws/prod/ecs/service-name",
     ]);
+  });
+
+  // Observability (TC-OBS-001…003, issue #26): metric filters + alarms on prod only.
+  it("creates metric filters + alarms on prod (recall zero-hit + ingest auth failure)", async () => {
+    installGlobals("prod");
+    const ecs = await loadEcs();
+    ecs(fakeDbOut());
+    const filters = created.filter((c) => c.kind === "LogMetricFilter");
+    const alarms = created.filter((c) => c.kind === "MetricAlarm");
+    expect(filters.length).toBe(4); // recall_zero_hit, recall_total, ingest_llm_auth_failure, ingest_dropped
+    expect(alarms.length).toBe(2); // RecallZeroHitRate, IngestAuthFailure
+    // Prod alarms use treatMissingData=notBreaching.
+    for (const alarm of alarms) {
+      expect((alarm.args as Record<string, unknown>).treatMissingData).toBe("notBreaching");
+    }
+    // Metric filter patterns reference the correct log line msg values.
+    const patterns = filters.map((f) => (f.args as { pattern: string }).pattern);
+    expect(patterns.some((p) => p.includes("confidence recall search") && p.includes("returned = 0"))).toBe(true);
+    expect(patterns.some((p) => p.includes("extraction LLM call failed") && p.includes("401"))).toBe(true);
+    expect(patterns.some((p) => p.includes("async ingest failed"))).toBe(true);
+  });
+
+  it("does NOT create metric filters or alarms on pr-* stages", async () => {
+    installGlobals("pr-99");
+    const ecs = await loadEcs();
+    ecs(fakeDbOut());
+    const filters = created.filter((c) => c.kind === "LogMetricFilter");
+    const alarms = created.filter((c) => c.kind === "MetricAlarm");
+    expect(filters.length).toBe(0);
+    expect(alarms.length).toBe(0);
   });
 });
