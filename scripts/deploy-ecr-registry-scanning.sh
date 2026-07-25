@@ -23,12 +23,18 @@
 #                           account owner pauses other registry config writers
 #   ECR_SCAN_BACKUP_FILE    optional protected path for direct-repair rollback;
 #                           defaults to a timestamped repo-root *.local.json
+#   ECR_SCAN_SKIP_DOTENV    test harness only; true prevents fixture runs from
+#                           reading operator values from the repo-root .env
 
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
-[ -f "$repo_root/.env" ] && set -a && . "$repo_root/.env" && set +a
+if [[ "${ECR_SCAN_SKIP_DOTENV:-false}" != "true" && -f "$repo_root/.env" ]]; then
+  set -a
+  . "$repo_root/.env"
+  set +a
+fi
 
 project_name="mem9-on-aws"
 # This exact derivation is protected by the GitHub Actions role's DenyPolicy.

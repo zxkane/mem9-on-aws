@@ -9,6 +9,18 @@ mutation_happened() {
      -f "${MOCK_AWS_STATE}.updated" ]]
 }
 
+effective_stack_state() {
+  local state="$MOCK_STACK_STATE"
+  local read_count=0
+  if [[ -f "$MOCK_AWS_STATE" ]]; then
+    read -r read_count <"$MOCK_AWS_STATE"
+  fi
+  if [[ "$read_count" -gt 1 && -n "${MOCK_SECOND_STACK_STATE:-}" ]]; then
+    state="$MOCK_SECOND_STACK_STATE"
+  fi
+  printf '%s\n' "$state"
+}
+
 case "${1:-} ${2:-}" in
   "ecr get-registry-scanning-configuration")
     if mutation_happened && [[ "${MOCK_MUTATION_CONVERGES:-true}" == "true" ]]; then
@@ -53,22 +65,33 @@ case "${1:-} ${2:-}" in
     printf '%s\n' '{"registryId":"123456789012"}'
     ;;
   "cloudformation describe-stacks")
+    stack_state="$(effective_stack_state)"
     if mutation_happened && [[ "${MOCK_POST_MUTATION_STACK_STATE:-}" == "missing" ]]; then
       echo "ValidationError: Stack with id ecr-registry-scanning-mem9-on-aws does not exist" >&2
       exit 255
     fi
-    if [[ "$MOCK_STACK_STATE" == "missing" && ! -f "${MOCK_AWS_STATE}.created" ]]; then
+    if [[ "$stack_state" == "error" ]]; then
+      echo "AccessDeniedException: User is not authorized to perform cloudformation:DescribeStacks" >&2
+      exit 255
+    fi
+    if [[ "$stack_state" == "missing" && ! -f "${MOCK_AWS_STATE}.created" ]]; then
       echo "ValidationError: Stack with id ecr-registry-scanning-mem9-on-aws does not exist" >&2
       exit 255
     fi
     printf 'UPDATE_COMPLETE\n'
     ;;
   "cloudformation describe-stack-resources")
+    stack_state="$(effective_stack_state)"
     if mutation_happened && [[ "${MOCK_POST_MUTATION_STACK_STATE:-}" == "unowned" ]]; then
       printf 'false\n'
       exit 0
     fi
-    if [[ "$MOCK_STACK_STATE" == "owned" || -f "${MOCK_AWS_STATE}.created" ]]; then
+    if [[ "$stack_state" == "resource-error" ]]; then
+      echo "AccessDeniedException: User is not authorized to perform cloudformation:DescribeStackResources" >&2
+      exit 255
+    elif [[ "$stack_state" == "invalid" ]]; then
+      printf 'None\n'
+    elif [[ "$stack_state" == "owned" || -f "${MOCK_AWS_STATE}.created" ]]; then
       printf 'true\n'
     else
       printf 'false\n'

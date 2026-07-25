@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import {
   chmod,
   copyFile,
+  mkdir,
   mkdtemp,
   readFile,
   rm,
@@ -104,15 +105,55 @@ async function runWrapper(fixture, stackState, options = {}) {
   tempDirs.push(dir);
   const mockAws = join(dir, "aws");
   const log = join(dir, "aws.log");
-  const rollbackFile = join(dir, "rollback.local.json");
+  const rollbackFile = join(
+    dir,
+    options.rollbackFileName ?? "rollback.local.json",
+  );
   const putInputFile = join(dir, "put-input.json");
+  let wrapperUnderTest = wrapper;
+  let operatorBackupFile = null;
   await copyFile(join(fixtureDir, "mock-aws.sh"), mockAws);
   await chmod(mockAws, 0o755);
   if (options.existingRollback) {
     await writeFile(rollbackFile, "existing rollback\n", { mode: 0o600 });
   }
+  if (options.repoEnv) {
+    const isolatedRepo = join(dir, "repo");
+    const isolatedScripts = join(isolatedRepo, "scripts");
+    await Promise.all([
+      mkdir(join(isolatedScripts, "lib"), { recursive: true }),
+      mkdir(join(isolatedRepo, "infra", "cloudformation"), { recursive: true }),
+    ]);
+    wrapperUnderTest = join(isolatedScripts, "deploy-ecr-registry-scanning.sh");
+    operatorBackupFile = join(dir, "operator-backup.local.json");
+    await Promise.all([
+      copyFile(wrapper, wrapperUnderTest),
+      copyFile(
+        preflight,
+        join(isolatedScripts, "lib", "ecr-registry-scanning-preflight.mjs"),
+      ),
+      copyFile(
+        join(repoRoot, "infra", "cloudformation", "ecr-registry-scanning.yaml"),
+        join(
+          isolatedRepo,
+          "infra",
+          "cloudformation",
+          "ecr-registry-scanning.yaml",
+        ),
+      ),
+      writeFile(
+        join(isolatedRepo, ".env"),
+        [
+          "AWS_PROFILE=operator-real-profile",
+          "ECR_REGION=us-east-1",
+          `ECR_SCAN_BACKUP_FILE=${operatorBackupFile}`,
+          "",
+        ].join("\n"),
+      ),
+    ]);
+  }
 
-  const result = spawnSync("bash", [wrapper], {
+  const result = spawnSync("bash", [wrapperUnderTest], {
     cwd: repoRoot,
     encoding: "utf8",
     env: {
@@ -127,10 +168,12 @@ async function runWrapper(fixture, stackState, options = {}) {
         ? join(fixtureDir, options.secondFixture)
         : "",
       MOCK_STACK_STATE: stackState,
+      MOCK_SECOND_STACK_STATE: options.secondStackState ?? "",
       MOCK_UPDATE_RESULT: options.updateResult ?? "success",
       MOCK_PUT_RESULT: options.putResult ?? "success",
       MOCK_MUTATION_CONVERGES: String(options.mutationConverges ?? true),
       MOCK_POST_MUTATION_STACK_STATE: options.postMutationStackState ?? "",
+      ECR_SCAN_SKIP_DOTENV: String(options.skipDotenv ?? true),
       ECR_SCAN_EXCLUSIVE_WRITER_ACK: options.exclusiveWriterAck ?? "true",
       ECR_SCAN_BACKUP_FILE: rollbackFile,
       ECR_SCAN_STACK_NAME: options.stackName ?? "",
@@ -143,6 +186,7 @@ async function runWrapper(fixture, stackState, options = {}) {
   let rollback = "";
   let rollbackMode = null;
   let putInput = null;
+  let operatorBackup = null;
   try {
     calls = await readFile(log, "utf8");
   } catch (error) {
@@ -159,6 +203,13 @@ async function runWrapper(fixture, stackState, options = {}) {
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
+  if (operatorBackupFile) {
+    try {
+      operatorBackup = await readFile(operatorBackupFile, "utf8");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+  }
 
   return {
     ...result,
@@ -166,6 +217,8 @@ async function runWrapper(fixture, stackState, options = {}) {
     rollbackFile,
     rollbackMode,
     calls,
+    operatorBackup,
+    operatorBackupFile,
     putInput,
   };
 }
@@ -716,6 +769,20 @@ describe("deployment wrapper fixture adapter", () => {
     });
     expect(noProfileFailure.stderr).not.toContain("--profile");
 
+    const quotedGuidance = await runWrapper("owned-drift.json", "owned", {
+      awsProfile: "test operator;false",
+      mutationConverges: false,
+      rollbackFileName: "rollback path;false.local.json",
+      updateResult: "no-updates",
+    });
+    expect(quotedGuidance.status).toBe(4);
+    expect(quotedGuidance.stderr).toContain(
+      "aws --profile test\\ operator\\;false ecr",
+    );
+    expect(quotedGuidance.stderr).toContain(
+      `file://${quotedGuidance.rollbackFile.replaceAll(" ", "\\ ").replaceAll(";", "\\;")}`,
+    );
+
     const backupCollision = await runWrapper("owned-drift.json", "owned", {
       updateResult: "no-updates",
       existingRollback: true,
@@ -772,6 +839,59 @@ describe("deployment wrapper fixture adapter", () => {
     expect(
       result.calls.match(/ecr get-registry-scanning-configuration/g),
     ).toHaveLength(2);
+    expect(mutationCalls(result.calls)).toEqual([]);
+  });
+
+  it("TC-ECR-SCAN-033: fixture tests ignore an operator repo-root .env", async () => {
+    const driftedConfiguration = (await fixture("owned-drift.json"))
+      .scanningConfiguration;
+    const isolated = await runWrapper("owned-drift.json", "owned", {
+      mutationConverges: false,
+      repoEnv: true,
+      updateResult: "no-updates",
+    });
+    expect(isolated.status).toBe(4);
+    expectRollback(isolated, driftedConfiguration, { guidance: true });
+    expect(isolated.operatorBackup).toBeNull();
+    expect(isolated.stderr).not.toContain("operator-real-profile");
+    expect(isolated.stderr).not.toContain("us-east-1");
+
+    const loaded = await runWrapper("owned-drift.json", "owned", {
+      mutationConverges: false,
+      repoEnv: true,
+      skipDotenv: false,
+      updateResult: "no-updates",
+    });
+    expect(loaded.status).toBe(4);
+    expect(JSON.parse(loaded.operatorBackup)).toEqual(driftedConfiguration);
+    expect(loaded.rollback).toBe("");
+    expect(loaded.stderr).toContain("--profile operator-real-profile");
+    expect(loaded.stderr).toContain("--region us-east-1");
+    expect(loaded.stderr).toContain(`file://${loaded.operatorBackupFile}`);
+  });
+
+  it.each([
+    ["error", "Could not determine CloudFormation ownership"],
+    ["resource-error", "AccessDeniedException"],
+    ["invalid", "Could not determine whether the stack owns"],
+  ])(
+    "TC-ECR-SCAN-034: %s ownership response fails before mutation",
+    async (stackState, expectedError) => {
+      const result = await runWrapper("default.json", stackState);
+      expect(result.status).not.toBe(0);
+      expect(result.stderr).toContain(expectedError);
+      expect(mutationCalls(result.calls)).toEqual([]);
+    },
+  );
+
+  it("TC-ECR-SCAN-035: an ownership change cannot switch mutation paths", async () => {
+    const result = await runWrapper("default.json", "missing", {
+      secondStackState: "owned",
+    });
+    expect(result.status).toBe(3);
+    expect(result.stderr).toContain(
+      "Ownership changed during preflight; refusing to switch mutation paths.",
+    );
     expect(mutationCalls(result.calls)).toEqual([]);
   });
 

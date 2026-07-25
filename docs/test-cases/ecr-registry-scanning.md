@@ -30,7 +30,7 @@ Design: [`docs/designs/ecr-registry-scanning.md`](../designs/ecr-registry-scanni
 | TC-ECR-SCAN-017 | Inspect wrapper and both ECR templates | No repository-level scan-on-push API or repository property is used |
 | TC-ECR-SCAN-018 | Parse every managed or inline policy attached to the deploy role, role bootstrap defaults, the canonical wrapper stack name, rollout guidance, and the documented operator policy | IAM `*`, `?`, and `NotAction` grants cannot hide registry-singleton or findings access; bootstrap and wrapper resolve the same non-overridable ownership stack protected from direct CI-role mutation; operators are told to deploy the policy-only role update; the operator policy grants only `GetRegistryScanningConfiguration`, `PutRegistryScanningConfiguration`, and repository-scoped `DescribeImageScanFindings` |
 | TC-ECR-SCAN-019 | Scan changed documentation and examples | No account ID, live ARN, API key, private repository reference, or comment permalink is present |
-| TC-ECR-SCAN-020 | Stack-owned drift but CloudFormation reports no template update | Exclusively capture the prior complete configuration in a protected local rollback file; write the exact complete declaration, never the drifted current state; a collision blocks mutation, and write/read-back failure prints a same-profile restore command |
+| TC-ECR-SCAN-020 | Stack-owned drift but CloudFormation reports no template update | Exclusively capture the prior complete configuration in a protected local rollback file; write the exact complete declaration, never the drifted current state; a collision blocks mutation, and write/read-back failure prints a shell-escaped same-profile restore command |
 | TC-ECR-SCAN-021 | Registry state changes between initial preflight and mutation | Read and decide again immediately before mutation; external sibling rules fail closed |
 | TC-ECR-SCAN-022 | Inspect the operator identity boundary | Registry get/put belongs to the operator's `AWS_PROFILE` identity in `ap-northeast-1`, never the GitHub Actions role |
 | TC-ECR-SCAN-023 | CI CloudFormation validation | After all core typechecks and unit tests run, `actions/setup-python` provides pip and `cfn-lint` performs schema validation on the dedicated template |
@@ -42,6 +42,9 @@ Design: [`docs/designs/ecr-registry-scanning.md`](../designs/ecr-registry-scanni
 | TC-ECR-SCAN-030 | Wrapper receives a malformed registry response | Wrapper exits before mutation |
 | TC-ECR-SCAN-031 | Preflight CLI receives unknown or malformed options | Strict argument parsing exits nonzero |
 | TC-ECR-SCAN-032 | Ambient `PROJECT_NAME` or stack-name variables are present | Wrapper still targets the canonical protected stack and project parameter; ownership cannot be redirected |
+| TC-ECR-SCAN-033 | Fixture tests run while an operator `.env` contains real profile, region, and rollback-path values | The harness can suppress dotenv loading and never writes the operator rollback path; a companion run proves default dotenv loading still uses those values |
+| TC-ECR-SCAN-034 | Either CloudFormation ownership lookup returns an access error, or the resource lookup returns a non-boolean result | Wrapper fails closed before validation or mutation |
+| TC-ECR-SCAN-035 | Ownership changes from absent to owned between the initial and pre-mutation reads | Wrapper refuses to switch from adoption to update and exits before mutation |
 
 ## Operator verification
 
