@@ -40,17 +40,11 @@ project_name="mem9-on-aws"
 # This exact derivation is protected by the GitHub Actions role's DenyPolicy.
 # Keeping it non-configurable prevents an alternate ownership stack from
 # falling back under the pull-request-capable role's broad CFN permissions.
+# The preflight CLI owns project-name validation before any mutation decision.
 stack_name="ecr-registry-scanning-${project_name}"
 region="${ECR_REGION:-ap-northeast-1}"
 template_file="$repo_root/infra/cloudformation/ecr-registry-scanning.yaml"
 preflight="$repo_root/scripts/lib/ecr-registry-scanning-preflight.mjs"
-
-if [[ ${#project_name} -lt 2 ||
-      ${#project_name} -gt 243 ||
-      ! "$project_name" =~ ^[a-z0-9]+([._/-][a-z0-9]+)*$ ]]; then
-  echo "Internal project name must be a 2-243 character lowercase ECR repository prefix without wildcards." >&2
-  exit 2
-fi
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   sed -n '2,/^$/p' "$0" | sed 's/^# \?//'

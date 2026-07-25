@@ -154,7 +154,7 @@ export function repositoryMatchesFilter(repositoryName, filter) {
   return new RegExp(`^${expression}$`).test(repositoryName);
 }
 
-function uncoveredProjectRepositories(configuration, projectName) {
+export function uncoveredProjectRepositories(configuration, projectName) {
   const scanOnPushFilters = (configuration.rules ?? [])
     .filter((rule) => rule.scanFrequency === "SCAN_ON_PUSH")
     .flatMap((rule) => rule.repositoryFilters ?? [])

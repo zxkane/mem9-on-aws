@@ -113,6 +113,10 @@ case "${1:-} ${2:-}" in
       echo "ValidationError: No updates are to be performed." >&2
       exit 255
     fi
+    if [[ "${MOCK_UPDATE_RESULT:-success}" == "failure" ]]; then
+      echo "AccessDeniedException: User is not authorized to perform cloudformation:UpdateStack" >&2
+      exit 254
+    fi
     touch "${MOCK_AWS_STATE}.updated"
     printf '%s\n' '{"StackId":"mock-stack-id"}'
     ;;

@@ -20,6 +20,7 @@ import {
   decideRegistryScanningAction,
   projectRepositories,
   repositoryMatchesFilter,
+  uncoveredProjectRepositories,
 } from "./lib/ecr-registry-scanning-preflight.mjs";
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
@@ -370,6 +371,25 @@ describe("registry scanning preflight decision", () => {
   it("TC-ECR-SCAN-038: wildcard filters escape regex metacharacters", () => {
     expect(repositoryMatchesFilter("a.c-thing", "a.c*")).toBe(true);
     expect(repositoryMatchesFilter("abc-thing", "a.c*")).toBe(false);
+  });
+
+  it("TC-ECR-SCAN-043: non-wildcard filters never contribute external coverage", async () => {
+    const current = await fixture("external-compliant.json");
+    current.scanningConfiguration.rules[0].repositoryFilters[0].filterType =
+      "PREFIX_MATCH";
+
+    const decision = decideRegistryScanningAction({
+      current,
+      ownership: missingStack,
+      projectName: "mem9-on-aws",
+    });
+    expect(decision.action).toBe("fail-closed");
+    expect(
+      uncoveredProjectRepositories(
+        current.scanningConfiguration,
+        "mem9-on-aws",
+      ),
+    ).toEqual(projectRepositories("mem9-on-aws"));
   });
 
   it("TC-ECR-SCAN-009: fails closed when the stack name exists without ownership", async () => {
@@ -854,6 +874,19 @@ describe("deployment wrapper fixture adapter", () => {
     );
   });
 
+  it("TC-ECR-SCAN-041: a genuine update-stack failure never enters drift repair", async () => {
+    const result = await runWrapper("owned-drift.json", "owned", {
+      updateResult: "failure",
+    });
+    expect(result.status).toBe(254);
+    expect(result.stderr).toContain("AccessDeniedException");
+    expect(mutationCalls(result.calls)).toEqual([
+      expect.stringMatching(/^cloudformation update-stack /),
+    ]);
+    expect(result.rollback).toBe("");
+    expect(result.putInput).toBeNull();
+  });
+
   it("TC-ECR-SCAN-024: fails when an owned update does not converge", async () => {
     const result = await runWrapper("owned-drift.json", "owned", {
       mutationConverges: false,
@@ -886,7 +919,8 @@ describe("deployment wrapper fixture adapter", () => {
     "TC-ECR-SCAN-016: %s/%s fails before mutation",
     async (fixture, stackState) => {
       const result = await runWrapper(fixture, stackState);
-      expect(result.status).not.toBe(0);
+      expect(result.status).toBe(3);
+      expect(result.stderr).toContain("No registry configuration was mutated.");
       expect(mutationCalls(result.calls)).toEqual([]);
     },
   );
@@ -983,6 +1017,39 @@ describe("deployment wrapper fixture adapter", () => {
     expect(result.putInput).toBeNull();
   });
 
+  it("TC-ECR-SCAN-042: a non-mutating second read exits before the selected mutation", async () => {
+    const result = await runWrapper("owned-drift.json", "owned", {
+      secondFixture: "declared.json",
+      secondStackState: "owned",
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain("Mutation preflight decision: verify-owned");
+    expect(mutationCalls(result.calls)).toEqual([]);
+  });
+
+  it.each([
+    ["verify-owned", "declared.json", "owned"],
+    ["verify-only", "external-compliant.json", "missing"],
+  ])(
+    "TC-ECR-SCAN-042: a %s third read exits before direct drift repair",
+    async (expectedAction, thirdFixture, thirdStackState) => {
+      const result = await runWrapper("owned-drift.json", "owned", {
+        thirdFixture,
+        thirdStackState,
+        updateResult: "no-updates",
+      });
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain(
+        `Drift repair preflight decision: ${expectedAction}`,
+      );
+      expect(mutationCalls(result.calls)).toEqual([
+        expect.stringMatching(/^cloudformation update-stack /),
+      ]);
+      expect(result.rollback).toBe("");
+      expect(result.putInput).toBeNull();
+    },
+  );
+
   it("TC-ECR-SCAN-029: mutations require an exclusive-writer acknowledgement", async () => {
     const result = await runWrapper("default.json", "missing", {
       exclusiveWriterAck: "",
@@ -1076,6 +1143,22 @@ describe("deployment wrapper fixture adapter", () => {
     );
   });
 
+  it("TC-ECR-SCAN-044: the preflight CLI rejects unsafe project names", () => {
+    const result = spawnSync(
+      process.execPath,
+      [
+        preflight,
+        "--project-name",
+        "mem9-on-aws*",
+        "--format",
+        "configuration",
+      ],
+      { encoding: "utf8" },
+    );
+    expect(result.status).toBe(2);
+    expect(result.stderr).toMatch(/project name/i);
+  });
+
   it("TC-ECR-SCAN-017: never uses repository-level scanning configuration", async () => {
     const [wrapperSource, repositoryTemplate, registryTemplate] = await Promise.all([
       readFile(wrapper, "utf8"),
@@ -1100,6 +1183,7 @@ describe("CI validation", () => {
       join(repoRoot, ".github", "workflows", "infra-ci.yml"),
       "utf8",
     );
+    const workflowConfiguration = parse(workflow);
     const coreChecks = [
       "Type check (infra)",
       "Unit tests (infra)",
@@ -1110,9 +1194,16 @@ describe("CI validation", () => {
     const templateValidation = workflow.indexOf(
       "name: Validate ECR registry scanning template",
     );
+    const validationStep = workflowConfiguration.jobs.typecheck.steps.find(
+      (step) => step.name === "Validate ECR registry scanning template",
+    );
 
-    expect(workflow).toContain("cfn-lint");
-    expect(workflow).toContain("infra/cloudformation/ecr-registry-scanning.yaml");
+    expect(validationStep).toBeDefined();
+    expect(validationStep.run).toContain(
+      "cfn-lint infra/cloudformation/ecr-registry-scanning.yaml",
+    );
+    expect(validationStep.run).not.toMatch(/cfn-lint[^\n]*\|\|\s*true/u);
+    expect(validationStep).not.toHaveProperty("continue-on-error");
     expect(workflow).toContain("python-version: \"3.x\"");
     for (const name of coreChecks) {
       const coreCheck = workflow.indexOf(`name: ${name}`);
@@ -1120,5 +1211,14 @@ describe("CI validation", () => {
       expect(setupPython).toBeGreaterThan(coreCheck);
     }
     expect(templateValidation).toBeGreaterThan(setupPython);
+    for (const trigger of ["pull_request", "push"]) {
+      const paths = workflowConfiguration.on[trigger].paths;
+      const exclusion = paths.indexOf("!infra/cloudformation/**");
+      const registryTemplate = paths.indexOf(
+        "infra/cloudformation/ecr-registry-scanning.yaml",
+      );
+      expect(exclusion).toBeGreaterThanOrEqual(0);
+      expect(registryTemplate).toBeGreaterThan(exclusion);
+    }
   });
 });
