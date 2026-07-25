@@ -691,7 +691,25 @@ describe("CI validation", () => {
       join(repoRoot, ".github", "workflows", "infra-ci.yml"),
       "utf8",
     );
+    const coreChecks = [
+      "Type check (infra)",
+      "Unit tests (infra)",
+      "Type check (root)",
+      "Unit tests (root)",
+    ];
+    const setupPython = workflow.indexOf("uses: actions/setup-python@v6");
+    const templateValidation = workflow.indexOf(
+      "name: Validate ECR registry scanning template",
+    );
+
     expect(workflow).toContain("cfn-lint");
     expect(workflow).toContain("infra/cloudformation/ecr-registry-scanning.yaml");
+    expect(workflow).toContain("python-version: \"3.x\"");
+    for (const name of coreChecks) {
+      const coreCheck = workflow.indexOf(`name: ${name}`);
+      expect(coreCheck).toBeGreaterThanOrEqual(0);
+      expect(setupPython).toBeGreaterThan(coreCheck);
+    }
+    expect(templateValidation).toBeGreaterThan(setupPython);
   });
 });

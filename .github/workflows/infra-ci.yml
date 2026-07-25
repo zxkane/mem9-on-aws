@@ -118,14 +118,6 @@ jobs:
       - name: Install root dependencies
         run: npm ci
 
-      - name: Validate ECR registry scanning template
-        run: |
-          python3 -m pip install --disable-pip-version-check \
-            --target "$RUNNER_TEMP/cfn-lint" 'cfn-lint>=1.39,<2'
-          PYTHONPATH="$RUNNER_TEMP/cfn-lint" python3 -c \
-            'import sys; from cfnlint.runner import main; sys.argv[0] = "cfn-lint"; main()' \
-            infra/cloudformation/ecr-registry-scanning.yaml
-
       - name: Type check (infra)
         run: pnpm -C infra typecheck
 
@@ -137,6 +129,15 @@ jobs:
 
       - name: Unit tests (root)
         run: npm test
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Validate ECR registry scanning template
+        run: |
+          python -m pip install --disable-pip-version-check 'cfn-lint>=1.39,<2'
+          cfn-lint infra/cloudformation/ecr-registry-scanning.yaml
 
   # ───────────────────────────────────────────────────────────────────────────
   # deploy-preview — PR opened/synchronized/reopened → stage `pr-N`.
