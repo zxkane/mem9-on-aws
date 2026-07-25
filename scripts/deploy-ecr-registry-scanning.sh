@@ -18,8 +18,6 @@
 #
 # Overrides:
 #   ECR_REGION              default ap-northeast-1
-#   ECR_SCAN_STACK_NAME     default ecr-registry-scanning-mem9-on-aws
-#   PROJECT_NAME            default mem9-on-aws
 #   ECR_SCAN_EXCLUSIVE_WRITER_ACK
 #                           must be true before a mutation; set only after the
 #                           account owner pauses other registry config writers
@@ -32,8 +30,11 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 # shellcheck source=/dev/null
 [ -f "$repo_root/.env" ] && set -a && . "$repo_root/.env" && set +a
 
-stack_name="${ECR_SCAN_STACK_NAME:-ecr-registry-scanning-mem9-on-aws}"
-project_name="${PROJECT_NAME:-mem9-on-aws}"
+project_name="mem9-on-aws"
+# This exact derivation is protected by the GitHub Actions role's DenyPolicy.
+# Keeping it non-configurable prevents an alternate ownership stack from
+# falling back under the pull-request-capable role's broad CFN permissions.
+stack_name="ecr-registry-scanning-${project_name}"
 region="${ECR_REGION:-ap-northeast-1}"
 template_file="$repo_root/infra/cloudformation/ecr-registry-scanning.yaml"
 preflight="$repo_root/scripts/lib/ecr-registry-scanning-preflight.mjs"

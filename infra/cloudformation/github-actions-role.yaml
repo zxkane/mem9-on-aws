@@ -105,6 +105,30 @@ Resources:
               - config:DeleteConfigRule
               - config:StopConfigurationRecorder
             Resource: "*"
+          - Sid: DenyEcrRegistryScanningOwnershipStackMutation
+            # Pull-request jobs can assume this role, so they must not use the
+            # broad CloudFormation grants below to alter or delete the
+            # out-of-band stack that records registry-singleton ownership.
+            Effect: Deny
+            Action:
+              - cloudformation:CancelUpdateStack
+              - cloudformation:ContinueUpdateRollback
+              - cloudformation:CreateChangeSet
+              - cloudformation:CreateStack
+              - cloudformation:CreateStackRefactor
+              - cloudformation:DeleteChangeSet
+              - cloudformation:DeleteStack
+              - cloudformation:ExecuteChangeSet
+              - cloudformation:ExecuteStackRefactor
+              - cloudformation:RecordHandlerProgress
+              - cloudformation:RollbackStack
+              - cloudformation:SetStackPolicy
+              - cloudformation:SignalResource
+              - cloudformation:TagResource
+              - cloudformation:UntagResource
+              - cloudformation:UpdateStack
+              - cloudformation:UpdateTerminationProtection
+            Resource: !Sub arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/ecr-registry-scanning-${ProjectName}/*
 
   # ───────────────────────────────────────────────────────────────────────────
   # Policy 2 — SST Pulumi state + resource provisioning (the scaffold's real

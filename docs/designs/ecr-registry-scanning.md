@@ -63,7 +63,12 @@ out-of-band stack. The registry singleton is deliberately separate.
 - The operator's `AWS_PROFILE` identity owns the registry get/put and findings
   permissions. The pull-request-capable GitHub Actions role intentionally has no
   registry-singleton mutation or findings access because CI never runs this
-  wrapper.
+  wrapper. Its explicit deny also covers every direct stack-level write API for
+  the dedicated ownership stack. The wrapper derives that canonical stack name
+  without an environment override, preventing an alternate ownership stack from
+  escaping the direct deny. This guard does not propagate to application roles
+  the deploy role can create and pass; an enforced permissions-boundary rollout
+  is still required before claiming account-wide tamper resistance.
 - `DeletionPolicy: Retain` preserves the registry configuration if ownership is
   relinquished. An external owner can then install a complete account-level
   ruleset without this stack deleting it.

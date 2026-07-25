@@ -55,6 +55,50 @@ function parseCloudFormation(source) {
   return parse(source, { customTags: cloudFormationTags });
 }
 
+function actionPatternMatches(pattern, action) {
+  const expression = pattern
+    .split(/([*?])/u)
+    .map((part) => {
+      if (part === "*") return ".*";
+      if (part === "?") return ".";
+      return RegExp.escape(part);
+    })
+    .join("");
+  return new RegExp(`^${expression}$`, "i").test(action);
+}
+
+function statementAllowsAction(statement, action) {
+  if (statement.Effect !== "Allow") return false;
+  if (statement.Action !== undefined) {
+    const actions = Array.isArray(statement.Action)
+      ? statement.Action
+      : [statement.Action];
+    return actions.some((pattern) => actionPatternMatches(pattern, action));
+  }
+  if (statement.NotAction !== undefined) {
+    const excludedActions = Array.isArray(statement.NotAction)
+      ? statement.NotAction
+      : [statement.NotAction];
+    return !excludedActions.some((pattern) => actionPatternMatches(pattern, action));
+  }
+  return false;
+}
+
+function rolePolicyStatements(template, roleId) {
+  const role = template.Resources[roleId];
+  const attachedStatements = role.Properties.ManagedPolicyArns.flatMap(
+    (policyId) => {
+      const policy = template.Resources[policyId];
+      if (!policy) throw new Error(`Unknown attached policy: ${policyId}`);
+      return policy.Properties.PolicyDocument.Statement;
+    },
+  );
+  const inlineStatements = (role.Properties.Policies ?? []).flatMap(
+    (policy) => policy.PolicyDocument.Statement,
+  );
+  return [...attachedStatements, ...inlineStatements];
+}
+
 async function runWrapper(fixture, stackState, options = {}) {
   const dir = await mkdtemp(join(tmpdir(), "ecr-scan-wrapper-"));
   tempDirs.push(dir);
@@ -87,6 +131,7 @@ async function runWrapper(fixture, stackState, options = {}) {
       MOCK_POST_MUTATION_STACK_STATE: options.postMutationStackState ?? "",
       ECR_SCAN_EXCLUSIVE_WRITER_ACK: options.exclusiveWriterAck ?? "true",
       ECR_SCAN_BACKUP_FILE: rollbackFile,
+      ECR_SCAN_STACK_NAME: options.stackName ?? "",
       AWS_PROFILE: options.awsProfile ?? "test-operator",
       PROJECT_NAME: options.projectName ?? "mem9-on-aws",
     },
@@ -371,13 +416,16 @@ describe("CloudFormation declarations", () => {
   });
 
   it("TC-ECR-SCAN-018: keeps singleton permissions on the operator identity", async () => {
-    const [source, architecture] = await Promise.all([
+    const [source, wrapperSource, architecture] = await Promise.all([
       readFile(
         join(repoRoot, "infra", "cloudformation", "github-actions-role.yaml"),
         "utf8",
       ),
+      readFile(wrapper, "utf8"),
       readFile(join(repoRoot, "docs", "ARCHITECTURE.md"), "utf8"),
     ]);
+    const template = parseCloudFormation(source);
+    const roleStatements = rolePolicyStatements(template, "GitHubActionsRole");
     const operatorPolicy = [...architecture.matchAll(/```json\n([\s\S]*?)\n```/g)]
       .map((match) => JSON.parse(match[1]))
       .find((document) =>
@@ -391,10 +439,101 @@ describe("CloudFormation declarations", () => {
       "ecr:PutRegistryScanningConfiguration",
       "ecr:DescribeImageScanFindings",
     ];
+    expect(
+      statementAllowsAction(
+        { Effect: "Allow", Action: "ecr:*RegistryScanningConfiguration" },
+        targetActions[0],
+      ),
+    ).toBe(true);
+    expect(
+      actionPatternMatches(
+        "ecr:GetRegistryScanningConfiguratio?",
+        "ecr:GetRegistryScanningConfiguration",
+      ),
+    ).toBe(true);
+    expect(
+      actionPatternMatches(
+        "ecr:GetRegistryScanningConfiguratio",
+        "ecr:GetRegistryScanningConfiguration",
+      ),
+    ).toBe(false);
+    const inlineNotActionGrant = {
+      Effect: "Allow",
+      NotAction: "ecr:Delete*",
+      Resource: "*",
+    };
+    const templateWithInlinePolicy = structuredClone(template);
+    templateWithInlinePolicy.Resources.GitHubActionsRole.Properties.Policies = [
+      {
+        PolicyName: "SyntheticRegressionPolicy",
+        PolicyDocument: {
+          Version: "2012-10-17",
+          Statement: [inlineNotActionGrant],
+        },
+      },
+    ];
+    expect(
+      rolePolicyStatements(
+        templateWithInlinePolicy,
+        "GitHubActionsRole",
+      ),
+    ).toContainEqual(inlineNotActionGrant);
+    expect(statementAllowsAction(inlineNotActionGrant, targetActions[0])).toBe(
+      true,
+    );
+    expect(
+      statementAllowsAction(
+        { Effect: "Allow", NotAction: "ecr:Get*" },
+        targetActions[0],
+      ),
+    ).toBe(false);
 
     for (const action of targetActions) {
-      expect(source).not.toContain(action);
+      expect(
+        roleStatements.some((statement) => statementAllowsAction(statement, action)),
+        action,
+      ).toBe(false);
     }
+
+    const protectedStackArn =
+      "arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/ecr-registry-scanning-${ProjectName}/*";
+    const ownershipMutationActions = [
+      "cloudformation:CancelUpdateStack",
+      "cloudformation:ContinueUpdateRollback",
+      "cloudformation:CreateChangeSet",
+      "cloudformation:CreateStack",
+      "cloudformation:CreateStackRefactor",
+      "cloudformation:DeleteChangeSet",
+      "cloudformation:DeleteStack",
+      "cloudformation:ExecuteChangeSet",
+      "cloudformation:ExecuteStackRefactor",
+      "cloudformation:RecordHandlerProgress",
+      "cloudformation:RollbackStack",
+      "cloudformation:SetStackPolicy",
+      "cloudformation:SignalResource",
+      "cloudformation:TagResource",
+      "cloudformation:UntagResource",
+      "cloudformation:UpdateStack",
+      "cloudformation:UpdateTerminationProtection",
+    ];
+    const ownershipStackDeny = roleStatements.find(
+      (statement) =>
+        statement.Sid === "DenyEcrRegistryScanningOwnershipStackMutation",
+    );
+    expect({
+      ...ownershipStackDeny,
+      Action: [...ownershipStackDeny.Action].sort(),
+    }).toEqual({
+      Sid: "DenyEcrRegistryScanningOwnershipStackMutation",
+      Effect: "Deny",
+      Action: ownershipMutationActions.sort(),
+      Resource: protectedStackArn,
+    });
+    expect(wrapperSource).not.toContain("ECR_SCAN_STACK_NAME");
+    expect(wrapperSource).toContain('project_name="mem9-on-aws"');
+    expect(wrapperSource).toContain(
+      'stack_name="ecr-registry-scanning-${project_name}"',
+    );
 
     const registryStatement = operatorPolicy.Statement.find(
       (statement) => statement.Sid === "EcrRegistryScanning",
@@ -621,16 +760,34 @@ describe("deployment wrapper fixture adapter", () => {
     expect(mutationCalls(result.calls)).toEqual([]);
   });
 
-  it("TC-ECR-SCAN-030: malformed configuration and unsafe project names never mutate", async () => {
+  it("TC-ECR-SCAN-030: malformed configuration never mutates", async () => {
     const malformed = await runWrapper("malformed.json", "missing");
     expect(malformed.status).not.toBe(0);
     expect(mutationCalls(malformed.calls)).toEqual([]);
+  });
 
-    const unsafeProject = await runWrapper("default.json", "missing", {
-      projectName: "mem9-on-aws*",
+  it("TC-ECR-SCAN-032: ambient variables cannot redirect the ownership stack", async () => {
+    const result = await runWrapper("default.json", "missing", {
+      projectName: "alternate-project",
+      stackName: "alternate-ownership-stack",
     });
-    expect(unsafeProject.status).not.toBe(0);
-    expect(mutationCalls(unsafeProject.calls)).toEqual([]);
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.calls).not.toContain("alternate-project");
+    expect(result.calls).not.toContain("alternate-ownership-stack");
+    for (const call of result.calls
+      .split("\n")
+      .filter((line) =>
+        /^cloudformation (describe-stacks|describe-stack-resources|create-stack|update-stack|wait) /.test(
+          line,
+        ),
+      )) {
+      expect(call).toContain(
+        "--stack-name ecr-registry-scanning-mem9-on-aws",
+      );
+    }
+    expect(result.calls).toContain(
+      "ParameterKey=ProjectName,ParameterValue=mem9-on-aws",
+    );
   });
 
   it("TC-ECR-SCAN-031: rejects unknown preflight CLI options", async () => {

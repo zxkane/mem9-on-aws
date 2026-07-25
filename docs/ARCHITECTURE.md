@@ -312,8 +312,19 @@ findings query additionally needs `ecr:DescribeImageScanFindings` on the four
 project repository ARNs. These account-level mutation permissions are
 intentionally absent from the GitHub Actions deploy role: its OIDC trust includes
 pull-request jobs, while the guarded wrapper is operator-run and is never invoked
-by CI. This keeps the ownership and exclusive-writer checks on the only identity
-allowed to mutate the singleton.
+by CI. An explicit deny prevents that role from directly using its broad
+application-stack CloudFormation permissions to create, update, refactor, tag,
+or delete the dedicated ownership stack in any region. The operator wrapper
+derives its canonical `ecr-registry-scanning-mem9-on-aws` stack name without an
+override, so it cannot move the ownership record outside that deny.
+
+This direct-role guard is not an account-wide security boundary. The deploy role
+can create and pass application execution roles, and IAM explicit denies are not
+inherited by a different role session. Until those delegated roles are
+constrained by an enforced permissions boundary (or an equivalent account-level
+control), operators must not treat the ownership stack as tamper-proof against a
+malicious deployment. Keep the operator-only wrapper and manual review boundary
+in place.
 
 #### Operator IAM
 

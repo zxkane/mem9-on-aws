@@ -28,7 +28,7 @@ Design: [`docs/designs/ecr-registry-scanning.md`](../designs/ecr-registry-scanni
 | TC-ECR-SCAN-015 | Run wrapper with stack-owned equivalent fixture | Exits successfully with no mutation command |
 | TC-ECR-SCAN-016 | Run wrapper with sibling, conflicting scan type, partial coverage, or stack-name conflict | Every path exits nonzero before create, update, delete, or direct registry mutation |
 | TC-ECR-SCAN-017 | Inspect wrapper and both ECR templates | No repository-level scan-on-push API or repository property is used |
-| TC-ECR-SCAN-018 | Parse deploy-role IAM and the documented operator policy | The pull-request-capable CI role has no registry-singleton or findings actions; the operator policy grants only `GetRegistryScanningConfiguration`, `PutRegistryScanningConfiguration`, and repository-scoped `DescribeImageScanFindings` |
+| TC-ECR-SCAN-018 | Parse every managed or inline policy attached to the deploy role, the canonical wrapper stack name, and the documented operator policy | IAM `*`, `?`, and `NotAction` grants cannot hide registry-singleton or findings access; the pull-request-capable CI role explicitly denies its direct stack-level mutation of the non-overridable dedicated ownership stack; the operator policy grants only `GetRegistryScanningConfiguration`, `PutRegistryScanningConfiguration`, and repository-scoped `DescribeImageScanFindings` |
 | TC-ECR-SCAN-019 | Scan changed documentation and examples | No account ID, live ARN, API key, private repository reference, or comment permalink is present |
 | TC-ECR-SCAN-020 | Stack-owned drift but CloudFormation reports no template update | Exclusively capture the prior complete configuration in a protected local rollback file before the write; a collision blocks mutation, and write/read-back failure prints a same-profile restore command |
 | TC-ECR-SCAN-021 | Registry state changes between initial preflight and mutation | Read and decide again immediately before mutation; external sibling rules fail closed |
@@ -37,10 +37,11 @@ Design: [`docs/designs/ecr-registry-scanning.md`](../designs/ecr-registry-scanni
 | TC-ECR-SCAN-024 | Registry still differs after a successful owned update | Read-back verification exits nonzero instead of reporting convergence |
 | TC-ECR-SCAN-025 | Dedicated stack loses ownership after adoption | Read-back verification exits nonzero instead of accepting external state |
 | TC-ECR-SCAN-027 | AWS registry response or owned stack status is incomplete | Decision is `fail-closed`; no mutation |
-| TC-ECR-SCAN-028 | Project-name override contains a wildcard or invalid repository-prefix syntax | Decision is `fail-closed`, and CloudFormation rejects the parameter |
+| TC-ECR-SCAN-028 | Project-name input contains a wildcard or invalid repository-prefix syntax | Decision is `fail-closed`, and CloudFormation rejects the parameter |
 | TC-ECR-SCAN-029 | Account owner has not acknowledged an exclusive registry-writer window | Wrapper exits before validation or mutation |
-| TC-ECR-SCAN-030 | Wrapper receives a malformed response or unsafe project-name override | Wrapper exits before mutation |
+| TC-ECR-SCAN-030 | Wrapper receives a malformed registry response | Wrapper exits before mutation |
 | TC-ECR-SCAN-031 | Preflight CLI receives unknown or malformed options | Strict argument parsing exits nonzero |
+| TC-ECR-SCAN-032 | Ambient `PROJECT_NAME` or stack-name variables are present | Wrapper still targets the canonical protected stack and project parameter; ownership cannot be redirected |
 
 ## Operator verification
 
