@@ -261,6 +261,13 @@ registry and ownership preflight immediately before mutation. A stack-name
 collision without ownership also fails closed. This prevents a project-local
 deployment from replacing sibling repositories' account-level rules.
 
+ECR exposes no conditional or versioned registry-configuration write. Before an
+adopt or owned update, the account owner must pause every other writer for that
+account/region and set `ECR_SCAN_EXCLUSIVE_WRITER_ACK=true`. The acknowledgement
+is intentionally unnecessary for verify-only paths. The repeated read narrows
+the service-level time-of-check/time-of-write window; the exclusive writer
+window closes it operationally.
+
 CloudFormation does not reconcile resource drift when the submitted template is
 unchanged. On that specific stack-owned path, the wrapper reapplies the exact
 complete declaration through the registry-level API, reads it back, and requires

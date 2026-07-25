@@ -1,5 +1,6 @@
 import { readFile } from "node:fs/promises";
 import { pathToFileURL } from "node:url";
+import { parseArgs } from "node:util";
 
 const PROJECT_REPOSITORY_SUFFIXES = [
   "mnemo-server",
@@ -14,12 +15,38 @@ const STABLE_STACK_STATUSES = new Set([
   "UPDATE_COMPLETE",
   "UPDATE_ROLLBACK_COMPLETE",
 ]);
+const PROJECT_NAME_PATTERN = /^[a-z0-9]+(?:[._/-][a-z0-9]+)*$/;
+const SCAN_TYPES = new Set(["BASIC", "ENHANCED"]);
+const SCAN_FREQUENCIES = new Set([
+  "SCAN_ON_PUSH",
+  "CONTINUOUS_SCAN",
+  "MANUAL",
+]);
+
+export function validProjectName(projectName) {
+  return (
+    typeof projectName === "string" &&
+    projectName.length >= 2 &&
+    projectName.length <= 243 &&
+    PROJECT_NAME_PATTERN.test(projectName)
+  );
+}
+
+function assertProjectName(projectName) {
+  if (!validProjectName(projectName)) {
+    throw new Error(
+      "project name must be 2-243 lowercase repository-prefix characters without wildcards",
+    );
+  }
+}
 
 export function projectRepositories(projectName) {
+  assertProjectName(projectName);
   return PROJECT_REPOSITORY_SUFFIXES.map((suffix) => `${projectName}/${suffix}`);
 }
 
 export function declaredConfiguration(projectName) {
+  assertProjectName(projectName);
   return {
     scanType: "BASIC",
     rules: [
@@ -70,6 +97,50 @@ function defaultConfiguration(value) {
   return rules.length === 0 && (!configuration.scanType || configuration.scanType === "BASIC");
 }
 
+function invalidConfigurationReason(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return "Registry scanning response is missing.";
+  }
+  if (!/^[0-9]{12}$/.test(value.registryId ?? "")) {
+    return "Registry scanning response has no valid registry ID.";
+  }
+
+  const configuration = value.scanningConfiguration;
+  if (!configuration || typeof configuration !== "object") {
+    return "Registry scanning response has no configuration.";
+  }
+  if (!SCAN_TYPES.has(configuration.scanType)) {
+    return "Registry scanning response has an invalid scan type.";
+  }
+  if (!Array.isArray(configuration.rules)) {
+    return "Registry scanning response has no complete rules array.";
+  }
+
+  for (const rule of configuration.rules) {
+    if (
+      !rule ||
+      typeof rule !== "object" ||
+      !SCAN_FREQUENCIES.has(rule.scanFrequency) ||
+      !Array.isArray(rule.repositoryFilters)
+    ) {
+      return "Registry scanning response contains an incomplete rule.";
+    }
+    for (const filter of rule.repositoryFilters) {
+      if (
+        !filter ||
+        typeof filter !== "object" ||
+        filter.filterType !== "WILDCARD" ||
+        typeof filter.filter !== "string" ||
+        filter.filter.length === 0
+      ) {
+        return "Registry scanning response contains an incomplete repository filter.";
+      }
+    }
+  }
+
+  return null;
+}
+
 function escapeRegex(value) {
   return value.replace(/[\\^$.*+?()[\]{}|]/g, "\\$&");
 }
@@ -97,6 +168,31 @@ function uncoveredProjectRepositories(configuration, projectName) {
 }
 
 export function decideRegistryScanningAction({ current, ownership, projectName }) {
+  if (!validProjectName(projectName)) {
+    return {
+      action: "fail-closed",
+      reason: "The project name is not a safe ECR repository prefix.",
+    };
+  }
+  if (
+    !ownership ||
+    typeof ownership.stackExists !== "boolean" ||
+    typeof ownership.ownsResource !== "boolean"
+  ) {
+    return {
+      action: "fail-closed",
+      reason: "CloudFormation ownership data is incomplete.",
+    };
+  }
+
+  const invalidReason = invalidConfigurationReason(current);
+  if (invalidReason) {
+    return {
+      action: "fail-closed",
+      reason: invalidReason,
+    };
+  }
+
   const configuration = scanningConfiguration(current);
   const declared = declaredConfiguration(projectName);
 
@@ -116,12 +212,12 @@ export function decideRegistryScanningAction({ current, ownership, projectName }
 
   if (ownership.ownsResource) {
     if (
-      ownership.stackStatus &&
+      !ownership.stackStatus ||
       !STABLE_STACK_STATUSES.has(ownership.stackStatus)
     ) {
       return {
         action: "fail-closed",
-        reason: `The owning stack is not stable (${ownership.stackStatus}).`,
+        reason: `The owning stack is not stable (${ownership.stackStatus ?? "unknown"}).`,
       };
     }
 
@@ -167,24 +263,58 @@ export function decideRegistryScanningAction({ current, ownership, projectName }
   };
 }
 
-function argumentValue(args, name, fallback = undefined) {
-  const index = args.indexOf(name);
-  return index === -1 ? fallback : args[index + 1];
-}
-
 async function main() {
   const args = process.argv.slice(2);
-  const inputFile = argumentValue(args, "--input");
-  const projectName = argumentValue(args, "--project-name");
-  if (!inputFile || !projectName) {
-    throw new Error("--input and --project-name are required");
+  const parsed = parseArgs({
+    args,
+    options: {
+      input: { type: "string" },
+      "project-name": { type: "string" },
+      "stack-exists": { type: "string" },
+      "owns-resource": { type: "string" },
+      "stack-status": { type: "string" },
+      format: { type: "string", default: "json" },
+    },
+    strict: true,
+    allowPositionals: false,
+    tokens: true,
+  });
+
+  const optionCounts = new Map();
+  for (const token of parsed.tokens) {
+    if (token.kind === "option") {
+      optionCounts.set(token.name, (optionCounts.get(token.name) ?? 0) + 1);
+    }
+  }
+  for (const [name, count] of optionCounts) {
+    if (count > 1) throw new Error(`--${name} must be provided at most once`);
   }
 
+  const projectName = parsed.values["project-name"];
+  const format = parsed.values.format;
+  if (!projectName) throw new Error("--project-name is required");
+  if (!["json", "tsv", "configuration"].includes(format)) {
+    throw new Error(`unsupported --format: ${format}`);
+  }
+  if (format === "configuration") {
+    process.stdout.write(`${JSON.stringify(declaredConfiguration(projectName))}\n`);
+    return;
+  }
+
+  for (const name of ["input", "stack-exists", "owns-resource"]) {
+    if (!parsed.values[name]) throw new Error(`--${name} is required`);
+  }
+  for (const name of ["stack-exists", "owns-resource"]) {
+    if (!["true", "false"].includes(parsed.values[name])) {
+      throw new Error(`--${name} must be true or false`);
+    }
+  }
+
+  const inputFile = parsed.values.input;
   const current = JSON.parse(await readFile(inputFile, "utf8"));
-  const stackExists = argumentValue(args, "--stack-exists") === "true";
-  const ownsResource = argumentValue(args, "--owns-resource") === "true";
-  const stackStatus = argumentValue(args, "--stack-status", "") || null;
-  const format = argumentValue(args, "--format", "json");
+  const stackExists = parsed.values["stack-exists"] === "true";
+  const ownsResource = parsed.values["owns-resource"] === "true";
+  const stackStatus = parsed.values["stack-status"] || null;
   const decision = decideRegistryScanningAction({
     current,
     ownership: { stackExists, ownsResource, stackStatus },
@@ -195,13 +325,6 @@ async function main() {
     const uncovered = decision.uncoveredRepositories?.join(", ") ?? "";
     process.stdout.write(`${decision.action}\t${decision.reason}\t${uncovered}\n`);
     return;
-  }
-  if (format === "configuration") {
-    process.stdout.write(`${JSON.stringify(declaredConfiguration(projectName))}\n`);
-    return;
-  }
-  if (format !== "json") {
-    throw new Error(`unsupported --format: ${format}`);
   }
   process.stdout.write(`${JSON.stringify(decision)}\n`);
 }

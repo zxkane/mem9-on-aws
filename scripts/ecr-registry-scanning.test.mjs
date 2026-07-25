@@ -16,6 +16,7 @@ const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = dirname(scriptsDir);
 const fixtureDir = join(scriptsDir, "test-fixtures", "ecr-registry-scanning");
 const wrapper = join(scriptsDir, "deploy-ecr-registry-scanning.sh");
+const preflight = join(scriptsDir, "lib", "ecr-registry-scanning-preflight.mjs");
 const tempDirs = [];
 const cloudFormationTags = [
   ...["!Ref", "!Sub", "!GetAtt"].map((tag) => ({ tag, resolve: (value) => value })),
@@ -70,12 +71,21 @@ async function runWrapper(fixture, stackState, options = {}) {
       MOCK_UPDATE_RESULT: options.updateResult ?? "success",
       MOCK_MUTATION_CONVERGES: String(options.mutationConverges ?? true),
       MOCK_POST_MUTATION_STACK_STATE: options.postMutationStackState ?? "",
+      ECR_SCAN_EXCLUSIVE_WRITER_ACK: options.exclusiveWriterAck ?? "true",
+      PROJECT_NAME: options.projectName ?? "mem9-on-aws",
     },
   });
 
+  let calls = "";
+  try {
+    calls = await readFile(log, "utf8");
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+
   return {
     ...result,
-    calls: await readFile(log, "utf8"),
+    calls,
   };
 }
 
@@ -93,13 +103,6 @@ afterEach(async () => {
 
 describe("registry scanning preflight decision", () => {
   it("TC-ECR-SCAN-001: allows adoption only from the default BASIC configuration", async () => {
-    expect(
-      decideRegistryScanningAction({
-        current: {},
-        ownership: missingStack,
-        projectName: "mem9-on-aws",
-      }).action,
-    ).toBe("adopt");
     expect(
       decideRegistryScanningAction({
         current: await fixture("default.json"),
@@ -204,6 +207,53 @@ describe("registry scanning preflight decision", () => {
       }).action,
     ).toBe("fail-closed");
   });
+
+  it("TC-ECR-SCAN-027: fails closed on incomplete AWS responses and ownership", () => {
+    expect(
+      decideRegistryScanningAction({
+        current: {},
+        ownership: missingStack,
+        projectName: "mem9-on-aws",
+      }).action,
+    ).toBe("fail-closed");
+    expect(
+      decideRegistryScanningAction({
+        current: {
+          registryId: "123456789012",
+          scanningConfiguration: { scanType: "BASIC" },
+        },
+        ownership: missingStack,
+        projectName: "mem9-on-aws",
+      }).action,
+    ).toBe("fail-closed");
+    expect(
+      decideRegistryScanningAction({
+        current: {
+          registryId: "123456789012",
+          scanningConfiguration: { scanType: "BASIC", rules: [] },
+        },
+        ownership: { ...ownedStack, stackStatus: null },
+        projectName: "mem9-on-aws",
+      }).action,
+    ).toBe("fail-closed");
+  });
+
+  it("TC-ECR-SCAN-028: rejects project names that could broaden the filter", async () => {
+    expect(
+      decideRegistryScanningAction({
+        current: await fixture("default.json"),
+        ownership: missingStack,
+        projectName: "mem9-on-aws*",
+      }).action,
+    ).toBe("fail-closed");
+    expect(() => declaredConfiguration("mem9-on-aws*")).toThrow(/project name/i);
+
+    const maximumPrefix = "a".repeat(243);
+    expect(projectRepositories(maximumPrefix)[0]).toHaveLength(256);
+    expect(declaredConfiguration(maximumPrefix).rules[0].repositoryFilters[0].filter)
+      .toHaveLength(245);
+    expect(() => declaredConfiguration("a".repeat(244))).toThrow(/project name/i);
+  });
 });
 
 describe("CloudFormation declarations", () => {
@@ -213,6 +263,11 @@ describe("CloudFormation declarations", () => {
       "utf8",
     );
     const template = parseCloudFormation(source);
+    expect(template.Parameters.ProjectName).toMatchObject({
+      MinLength: 2,
+      MaxLength: 243,
+      AllowedPattern: "^[a-z0-9]+([._/-][a-z0-9]+)*$",
+    });
     const resources = Object.values(template.Resources);
     expect(resources).toHaveLength(1);
     expect(resources[0]).toMatchObject({
@@ -251,8 +306,16 @@ describe("CloudFormation declarations", () => {
       join(repoRoot, "infra", "cloudformation", "ecr-repositories.yaml"),
       "utf8",
     );
+    const template = parseCloudFormation(source);
+    const repositoryNames = Object.values(template.Resources)
+      .filter((resource) => resource.Type === "AWS::ECR::Repository")
+      .map((resource) =>
+        resource.Properties.RepositoryName.replace("${ProjectName}", "mem9-on-aws"),
+      )
+      .sort();
     const repositoryCount = (source.match(/Type: AWS::ECR::Repository$/gm) ?? []).length;
     expect(repositoryCount).toBe(4);
+    expect(repositoryNames).toEqual(projectRepositories("mem9-on-aws").sort());
     expect(source).not.toContain("AWS::ECR::RegistryScanningConfiguration");
   });
 
@@ -291,11 +354,17 @@ describe("CloudFormation declarations", () => {
       "ecr:DescribeImageScanFindings",
     ]);
     expect(findingsStatement?.Resource).toHaveLength(4);
-    expect(
-      findingsStatement?.Resource.every((resource) =>
-        resource.includes("repository/${ProjectName}/"),
-      ),
-    ).toBe(true);
+    expect([...findingsStatement.Resource].sort()).toEqual(
+      projectRepositories("mem9-on-aws")
+        .map((repository) =>
+          repository.replace("mem9-on-aws", "${ProjectName}"),
+        )
+        .map(
+          (repository) =>
+            `arn:\${AWS::Partition}:ecr:ap-northeast-1:\${AWS::AccountId}:repository/${repository}`,
+        )
+        .sort(),
+    );
   });
 
   it("TC-ECR-SCAN-019: keeps new public artifacts free of live identifiers", async () => {
@@ -412,6 +481,61 @@ describe("deployment wrapper fixture adapter", () => {
       result.calls.match(/ecr get-registry-scanning-configuration/g),
     ).toHaveLength(2);
     expect(mutationCalls(result.calls)).toEqual([]);
+  });
+
+  it("TC-ECR-SCAN-029: mutations require an exclusive-writer acknowledgement", async () => {
+    const result = await runWrapper("default.json", "missing", {
+      exclusiveWriterAck: "",
+    });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("exclusive");
+    expect(mutationCalls(result.calls)).toEqual([]);
+  });
+
+  it("TC-ECR-SCAN-030: malformed configuration and unsafe project names never mutate", async () => {
+    const malformed = await runWrapper("malformed.json", "missing");
+    expect(malformed.status).not.toBe(0);
+    expect(mutationCalls(malformed.calls)).toEqual([]);
+
+    const unsafeProject = await runWrapper("default.json", "missing", {
+      projectName: "mem9-on-aws*",
+    });
+    expect(unsafeProject.status).not.toBe(0);
+    expect(mutationCalls(unsafeProject.calls)).toEqual([]);
+  });
+
+  it("TC-ECR-SCAN-031: rejects unknown preflight CLI options", async () => {
+    const result = spawnSync(
+      process.execPath,
+      [
+        preflight,
+        "--input",
+        join(fixtureDir, "default.json"),
+        "--project-name",
+        "mem9-on-aws",
+        "--unknown-option",
+        "value",
+      ],
+      { encoding: "utf8" },
+    );
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain("unknown-option");
+
+    const declaration = spawnSync(
+      process.execPath,
+      [
+        preflight,
+        "--project-name",
+        "mem9-on-aws",
+        "--format",
+        "configuration",
+      ],
+      { encoding: "utf8" },
+    );
+    expect(declaration.status, declaration.stderr).toBe(0);
+    expect(JSON.parse(declaration.stdout)).toEqual(
+      declaredConfiguration("mem9-on-aws"),
+    );
   });
 
   it("TC-ECR-SCAN-017: never uses repository-level scanning configuration", async () => {

@@ -9,6 +9,11 @@ Parameters:
   ProjectName:
     Type: String
     Default: mem9-on-aws
+    MinLength: 2
+    MaxLength: 243
+    AllowedPattern: "^[a-z0-9]+([._/-][a-z0-9]+)*$"
+    ConstraintDescription: >
+      Use a lowercase ECR repository prefix without wildcards.
     Description: >
       Repository namespace. The scan-on-push filter matches only repositories
       below this namespace separator.

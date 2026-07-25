@@ -36,6 +36,11 @@ Design: [`docs/designs/ecr-registry-scanning.md`](../designs/ecr-registry-scanni
 | TC-ECR-SCAN-023 | CI CloudFormation validation | `cfn-lint` performs schema validation on the dedicated template before unit tests |
 | TC-ECR-SCAN-024 | Registry still differs after a successful owned update | Read-back verification exits nonzero instead of reporting convergence |
 | TC-ECR-SCAN-025 | Dedicated stack loses ownership after adoption | Read-back verification exits nonzero instead of accepting external state |
+| TC-ECR-SCAN-027 | AWS registry response or owned stack status is incomplete | Decision is `fail-closed`; no mutation |
+| TC-ECR-SCAN-028 | Project-name override contains a wildcard or invalid repository-prefix syntax | Decision is `fail-closed`, and CloudFormation rejects the parameter |
+| TC-ECR-SCAN-029 | Account owner has not acknowledged an exclusive registry-writer window | Wrapper exits before validation or mutation |
+| TC-ECR-SCAN-030 | Wrapper receives a malformed response or unsafe project-name override | Wrapper exits before mutation |
+| TC-ECR-SCAN-031 | Preflight CLI receives unknown or malformed options | Strict argument parsing exits nonzero |
 
 ## Operator verification
 

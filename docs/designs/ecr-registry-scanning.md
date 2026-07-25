@@ -40,9 +40,11 @@ out-of-band stack. The registry singleton is deliberately separate.
 3. Evaluate the current configuration, stack ownership, the four project
    repositories, and the complete declared configuration as pure data.
 4. Repeat the complete registry and ownership read immediately before mutation.
-5. Permit a mutation only when the registry is default/unconfigured or the
+5. Require the account owner to acknowledge an exclusive account/region writer
+   window because ECR has no conditional registry-configuration write.
+6. Permit a mutation only when the registry is default/unconfigured or the
    dedicated stack already owns the singleton.
-6. Never merge external filters into the project template. Externally managed
+7. Never merge external filters into the project template. Externally managed
    BASIC scan-on-push rules are accepted only when they cover all four project
    repositories; every other external state fails closed.
 
@@ -54,6 +56,10 @@ out-of-band stack. The registry singleton is deliberately separate.
   according to the documented wildcard rules instead of as a prefix shortcut.
 - Stack-owned drift can be replaced because the dedicated template is the
   complete declaration for the singleton. External drift is never replaced.
+- The project prefix is constrained to a wildcard-free ECR repository-prefix
+  pattern in both the wrapper and CloudFormation parameter.
+- Missing registry fields or stack status are errors, never evidence of a
+  default or stable configuration.
 - `DeletionPolicy: Retain` preserves the registry configuration if ownership is
   relinquished. An external owner can then install a complete account-level
   ruleset without this stack deleting it.

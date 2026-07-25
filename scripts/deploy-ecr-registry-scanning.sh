@@ -20,6 +20,9 @@
 #   ECR_REGION              default ap-northeast-1
 #   ECR_SCAN_STACK_NAME     default ecr-registry-scanning-mem9-on-aws
 #   PROJECT_NAME            default mem9-on-aws
+#   ECR_SCAN_EXCLUSIVE_WRITER_ACK
+#                           must be true before a mutation; set only after the
+#                           account owner pauses other registry config writers
 
 set -euo pipefail
 
@@ -32,6 +35,13 @@ project_name="${PROJECT_NAME:-mem9-on-aws}"
 region="${ECR_REGION:-ap-northeast-1}"
 template_file="$repo_root/infra/cloudformation/ecr-registry-scanning.yaml"
 preflight="$repo_root/scripts/lib/ecr-registry-scanning-preflight.mjs"
+
+if [[ ${#project_name} -lt 2 ||
+      ${#project_name} -gt 243 ||
+      ! "$project_name" =~ ^[a-z0-9]+([._/-][a-z0-9]+)*$ ]]; then
+  echo "PROJECT_NAME must be a 2-243 character lowercase ECR repository prefix without wildcards." >&2
+  exit 2
+fi
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
@@ -162,6 +172,12 @@ case "$action" in
     ;;
 esac
 
+if [[ "${ECR_SCAN_EXCLUSIVE_WRITER_ACK:-}" != "true" ]]; then
+  echo "Mutation requires an exclusive account/region registry-writer window." >&2
+  echo "Pause other registry configuration writers, then set ECR_SCAN_EXCLUSIVE_WRITER_ACK=true." >&2
+  exit 2
+fi
+
 aws cloudformation validate-template \
   --template-body "file://$template_file" \
   --region "$region" \
@@ -213,11 +229,7 @@ if [[ $update_exit -ne 0 ]]; then
     fi
 
     node "$preflight" \
-      --input "$current_file" \
       --project-name "$project_name" \
-      --stack-exists "$stack_exists" \
-      --owns-resource "$owns_resource" \
-      --stack-status "$stack_status" \
       --format configuration \
       >"$declared_file"
     aws ecr put-registry-scanning-configuration \
