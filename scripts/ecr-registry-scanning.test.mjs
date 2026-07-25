@@ -105,6 +105,7 @@ async function runWrapper(fixture, stackState, options = {}) {
   const mockAws = join(dir, "aws");
   const log = join(dir, "aws.log");
   const rollbackFile = join(dir, "rollback.local.json");
+  const putInputFile = join(dir, "put-input.json");
   await copyFile(join(fixtureDir, "mock-aws.sh"), mockAws);
   await chmod(mockAws, 0o755);
   if (options.existingRollback) {
@@ -119,6 +120,7 @@ async function runWrapper(fixture, stackState, options = {}) {
       PATH: `${dir}${delimiter}${process.env.PATH}`,
       MOCK_AWS_LOG: log,
       MOCK_AWS_STATE: join(dir, "aws.state"),
+      MOCK_PUT_INPUT: putInputFile,
       MOCK_CURRENT_CONFIG: join(fixtureDir, fixture),
       MOCK_DECLARED_CONFIG: join(fixtureDir, "declared.json"),
       MOCK_SECOND_CURRENT_CONFIG: options.secondFixture
@@ -140,6 +142,7 @@ async function runWrapper(fixture, stackState, options = {}) {
   let calls = "";
   let rollback = "";
   let rollbackMode = null;
+  let putInput = null;
   try {
     calls = await readFile(log, "utf8");
   } catch (error) {
@@ -151,6 +154,11 @@ async function runWrapper(fixture, stackState, options = {}) {
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
+  try {
+    putInput = JSON.parse(await readFile(putInputFile, "utf8"));
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
 
   return {
     ...result,
@@ -158,6 +166,7 @@ async function runWrapper(fixture, stackState, options = {}) {
     rollbackFile,
     rollbackMode,
     calls,
+    putInput,
   };
 }
 
@@ -433,6 +442,12 @@ describe("CloudFormation declarations", () => {
     const template = parseCloudFormation(source);
     expect(template.Parameters.ProjectName.Default).toBe("mem9-on-aws");
     expect(roleBootstrapSource).not.toContain("ParameterKey=ProjectName");
+    expect(architecture).toContain(
+      "update once with `scripts/deploy-github-role.sh`",
+    );
+    expect(architecture).toContain(
+      "DenyEcrRegistryScanningOwnershipStackMutation",
+    );
     const roleStatements = rolePolicyStatements(template, "GitHubActionsRole");
     const operatorPolicy = [...architecture.matchAll(/```json\n([\s\S]*?)\n```/g)]
       .map((match) => JSON.parse(match[1]))
@@ -670,6 +685,7 @@ describe("deployment wrapper fixture adapter", () => {
     expect(result.status, result.stderr).toBe(0);
     expect(result.calls).toContain("cloudformation update-stack");
     expect(result.calls).toContain("ecr put-registry-scanning-configuration");
+    expect(result.putInput).toEqual(declaredConfiguration("mem9-on-aws"));
     const driftedConfiguration = (await fixture("owned-drift.json"))
       .scanningConfiguration;
     expectRollback(result, driftedConfiguration);

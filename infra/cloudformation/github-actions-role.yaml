@@ -9,10 +9,11 @@ Description: >
 
   GRANTS ARE RESOURCE-TYPE-SCOPED. The policies below cover the current Aurora,
   ECS Fargate, Lambda, Cloud Map, Cognito, API Gateway, and AgentCore Gateway
-  resources. Every new resource type MUST add its grants to a ManagedPolicy
-  below, and `scripts/deploy-github-role.sh` must be re-run before the PR that
-  provisions it, or the first deploy 403s. See docs/ARCHITECTURE.md for the
-  current resource list.
+  resources. Every policy or resource-type change below requires re-running
+  `scripts/deploy-github-role.sh`; policy-only changes such as explicit denies
+  are not active until this out-of-band stack is updated. New resource types
+  MUST add their grants before the PR that provisions them, or the first deploy
+  403s. See docs/ARCHITECTURE.md for the current resource list.
 
 # IAM is global; hosting the role stack in a specific region is purely a
 # CloudFormation decision (CFN scopes are per-region). Pinned to us-west-2 in

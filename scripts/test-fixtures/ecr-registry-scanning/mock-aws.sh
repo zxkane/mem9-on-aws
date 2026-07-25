@@ -12,7 +12,13 @@ mutation_happened() {
 case "${1:-} ${2:-}" in
   "ecr get-registry-scanning-configuration")
     if mutation_happened && [[ "${MOCK_MUTATION_CONVERGES:-true}" == "true" ]]; then
-      cat "$MOCK_DECLARED_CONFIG"
+      if [[ -f "${MOCK_AWS_STATE}.put" ]]; then
+        printf '%s' '{"registryId":"123456789012","scanningConfiguration":'
+        cat "$MOCK_PUT_INPUT"
+        printf '%s\n' '}'
+      else
+        cat "$MOCK_DECLARED_CONFIG"
+      fi
       exit 0
     fi
     count=0
@@ -30,6 +36,19 @@ case "${1:-} ${2:-}" in
       echo "ServerException: mock registry write failed" >&2
       exit 255
     fi
+    args=("$@")
+    input_reference=""
+    for ((index = 0; index < ${#args[@]}; index++)); do
+      if [[ "${args[$index]}" == "--cli-input-json" ]]; then
+        input_reference="${args[$((index + 1))]:-}"
+        break
+      fi
+    done
+    if [[ "$input_reference" != file://* ]]; then
+      echo "Mock expected --cli-input-json file://..." >&2
+      exit 64
+    fi
+    cp -- "${input_reference#file://}" "$MOCK_PUT_INPUT"
     touch "${MOCK_AWS_STATE}.put"
     printf '%s\n' '{"registryId":"123456789012"}'
     ;;

@@ -244,6 +244,11 @@ The complete declaration uses BASIC scanning with one `SCAN_ON_PUSH` filter,
 four project repositories without matching a sibling such as
 `mem9-on-aws-other/*`.
 
+Before first adoption from this revision, apply the reviewed deploy-role policy
+update once with `scripts/deploy-github-role.sh`. This out-of-band step
+activates `DenyEcrRegistryScanningOwnershipStackMutation`; merging or deploying
+the SST application does not update that role.
+
 Run `scripts/deploy-ecr-registry-scanning.sh` once per account/region. Its first
 AWS call reads the complete registry scanning configuration. It then reads
 CloudFormation ownership and applies this policy:
