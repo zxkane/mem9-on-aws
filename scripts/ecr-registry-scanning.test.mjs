@@ -1,4 +1,13 @@
-import { chmod, copyFile, mkdtemp, readFile, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import {
+  chmod,
+  copyFile,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -51,8 +60,12 @@ async function runWrapper(fixture, stackState, options = {}) {
   tempDirs.push(dir);
   const mockAws = join(dir, "aws");
   const log = join(dir, "aws.log");
+  const rollbackFile = join(dir, "rollback.local.json");
   await copyFile(join(fixtureDir, "mock-aws.sh"), mockAws);
   await chmod(mockAws, 0o755);
+  if (options.existingRollback) {
+    await writeFile(rollbackFile, "existing rollback\n", { mode: 0o600 });
+  }
 
   const result = spawnSync("bash", [wrapper], {
     cwd: repoRoot,
@@ -69,22 +82,36 @@ async function runWrapper(fixture, stackState, options = {}) {
         : "",
       MOCK_STACK_STATE: stackState,
       MOCK_UPDATE_RESULT: options.updateResult ?? "success",
+      MOCK_PUT_RESULT: options.putResult ?? "success",
       MOCK_MUTATION_CONVERGES: String(options.mutationConverges ?? true),
       MOCK_POST_MUTATION_STACK_STATE: options.postMutationStackState ?? "",
       ECR_SCAN_EXCLUSIVE_WRITER_ACK: options.exclusiveWriterAck ?? "true",
+      ECR_SCAN_BACKUP_FILE: rollbackFile,
+      AWS_PROFILE: options.awsProfile ?? "test-operator",
       PROJECT_NAME: options.projectName ?? "mem9-on-aws",
     },
   });
 
   let calls = "";
+  let rollback = "";
+  let rollbackMode = null;
   try {
     calls = await readFile(log, "utf8");
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+  }
+  try {
+    rollback = await readFile(rollbackFile, "utf8");
+    rollbackMode = (await stat(rollbackFile)).mode & 0o777;
   } catch (error) {
     if (error.code !== "ENOENT") throw error;
   }
 
   return {
     ...result,
+    rollback,
+    rollbackFile,
+    rollbackMode,
     calls,
   };
 }
@@ -95,6 +122,30 @@ function mutationCalls(calls) {
     .filter((line) =>
       /cloudformation (create-stack|update-stack|delete-stack)|ecr put-/.test(line),
     );
+}
+
+function repositoryTokenDigest(token) {
+  const normalized = token.toLowerCase().replace(/\.+$/, "").replace(/\.git$/, "");
+  return createHash("sha256").update(normalized).digest("hex");
+}
+
+function expectRollback(
+  result,
+  expectedConfiguration,
+  { guidance = false, profile = "test-operator" } = {},
+) {
+  expect(JSON.parse(result.rollback)).toEqual(expectedConfiguration);
+  expect(result.rollbackMode).toBe(0o600);
+
+  if (guidance) {
+    const profileArgument = profile ? ` --profile ${profile}` : "";
+    expect(result.stderr).toContain(
+      "Restore the captured baseline while the exclusive-writer window remains active:",
+    );
+    expect(result.stderr).toContain(
+      `aws${profileArgument} ecr put-registry-scanning-configuration --region ap-northeast-1 --cli-input-json file://${result.rollbackFile}`,
+    );
+  }
 }
 
 afterEach(async () => {
@@ -319,27 +370,45 @@ describe("CloudFormation declarations", () => {
     expect(source).not.toContain("AWS::ECR::RegistryScanningConfiguration");
   });
 
-  it("TC-ECR-SCAN-018: grants exactly the required ECR registry and findings actions", async () => {
-    const source = await readFile(
-      join(repoRoot, "infra", "cloudformation", "github-actions-role.yaml"),
-      "utf8",
-    );
-    const template = parseCloudFormation(source);
-    const statements =
-      template.Resources.ImageBuildPolicy.Properties.PolicyDocument.Statement;
-    const registryStatement = statements.find(
+  it("TC-ECR-SCAN-018: keeps singleton permissions on the operator identity", async () => {
+    const [source, architecture] = await Promise.all([
+      readFile(
+        join(repoRoot, "infra", "cloudformation", "github-actions-role.yaml"),
+        "utf8",
+      ),
+      readFile(join(repoRoot, "docs", "ARCHITECTURE.md"), "utf8"),
+    ]);
+    const operatorPolicy = [...architecture.matchAll(/```json\n([\s\S]*?)\n```/g)]
+      .map((match) => JSON.parse(match[1]))
+      .find((document) =>
+        document.Statement?.some(
+          (statement) => statement.Sid === "EcrRegistryScanning",
+        ),
+      );
+    expect(operatorPolicy).toBeDefined();
+    const targetActions = [
+      "ecr:GetRegistryScanningConfiguration",
+      "ecr:PutRegistryScanningConfiguration",
+      "ecr:DescribeImageScanFindings",
+    ];
+
+    for (const action of targetActions) {
+      expect(source).not.toContain(action);
+    }
+
+    const registryStatement = operatorPolicy.Statement.find(
       (statement) => statement.Sid === "EcrRegistryScanning",
     );
-    const findingsStatement = statements.find(
+    const findingsStatement = operatorPolicy.Statement.find(
       (statement) => statement.Sid === "EcrImageScanFindings",
     );
-
-    expect(registryStatement).toMatchObject({
+    expect({
+      ...registryStatement,
+      Action: [...registryStatement.Action].sort(),
+    }).toEqual({
+      Sid: "EcrRegistryScanning",
       Effect: "Allow",
-      Action: [
-        "ecr:GetRegistryScanningConfiguration",
-        "ecr:PutRegistryScanningConfiguration",
-      ],
+      Action: targetActions.slice(0, 2).sort(),
       Resource: "*",
       Condition: {
         StringEquals: {
@@ -347,24 +416,30 @@ describe("CloudFormation declarations", () => {
         },
       },
     });
-    expect(findingsStatement?.Action).toEqual(["ecr:DescribeImageScanFindings"]);
-    expect([...registryStatement.Action, ...findingsStatement.Action]).toEqual([
-      "ecr:GetRegistryScanningConfiguration",
-      "ecr:PutRegistryScanningConfiguration",
-      "ecr:DescribeImageScanFindings",
-    ]);
-    expect(findingsStatement?.Resource).toHaveLength(4);
-    expect([...findingsStatement.Resource].sort()).toEqual(
-      projectRepositories("mem9-on-aws")
-        .map((repository) =>
-          repository.replace("mem9-on-aws", "${ProjectName}"),
-        )
+    expect({
+      ...findingsStatement,
+      Resource: [...findingsStatement.Resource].sort(),
+    }).toEqual({
+      Sid: "EcrImageScanFindings",
+      Effect: "Allow",
+      Action: targetActions[2],
+      Resource: projectRepositories("mem9-on-aws")
         .map(
           (repository) =>
-            `arn:\${AWS::Partition}:ecr:ap-northeast-1:\${AWS::AccountId}:repository/${repository}`,
+            `arn:aws:ecr:ap-northeast-1:<aws-account-id>:repository/${repository}`,
         )
         .sort(),
-    );
+    });
+    expect(
+      operatorPolicy.Statement.flatMap((statement) =>
+        Array.isArray(statement.Action) ? statement.Action : [statement.Action],
+      ),
+    ).toEqual(expect.arrayContaining(targetActions));
+    expect(
+      operatorPolicy.Statement.flatMap((statement) =>
+        Array.isArray(statement.Action) ? statement.Action : [statement.Action],
+      ),
+    ).toHaveLength(targetActions.length);
   });
 
   it("TC-ECR-SCAN-019: keeps new public artifacts free of live identifiers", async () => {
@@ -385,13 +460,28 @@ describe("CloudFormation declarations", () => {
     const prohibited = [
       /\b(?!123456789012\b)[0-9]{12}\b/i,
       /arn:aws:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}/i,
-      /quant-scorer|vidsyllabus|issuecomment-[0-9]+/i,
+      /issuecomment-[0-9]+/i,
       /[a-z0-9_.-]+\/[a-z0-9_.-]+#[0-9]+/i,
     ];
+    const prohibitedSlugDigests = new Set([
+      "af2d37eee16a88a81c6dd8d96a9025555355cda174e6f4b48f7fbdf8fca985fd",
+      "a36eed16dd93c459d32152e438418f179d3a2f6cc1860bcdaea12bfc0b0996f9",
+    ]);
+    const referenceDigest = repositoryTokenDigest("example");
+    for (const suffix of [".", ".git", ".git."]) {
+      expect(repositoryTokenDigest(`example${suffix}`)).toBe(referenceDigest);
+    }
 
     for (const artifact of artifacts) {
       for (const pattern of prohibited) {
         expect(artifact.source, `${artifact.path} matched ${pattern}`).not.toMatch(pattern);
+      }
+      for (const token of artifact.source.match(/[a-z0-9][a-z0-9._-]*/gi) ?? []) {
+        const digest = repositoryTokenDigest(token);
+        expect(
+          prohibitedSlugDigests,
+          `${artifact.path} contains a prohibited private repository reference`,
+        ).not.toContain(digest);
       }
     }
   });
@@ -433,6 +523,45 @@ describe("deployment wrapper fixture adapter", () => {
     expect(result.status, result.stderr).toBe(0);
     expect(result.calls).toContain("cloudformation update-stack");
     expect(result.calls).toContain("ecr put-registry-scanning-configuration");
+    const driftedConfiguration = (await fixture("owned-drift.json"))
+      .scanningConfiguration;
+    expectRollback(result, driftedConfiguration);
+
+    const failed = await runWrapper("owned-drift.json", "owned", {
+      updateResult: "no-updates",
+      mutationConverges: false,
+    });
+    expect(failed.status).toBe(4);
+    expectRollback(failed, driftedConfiguration, { guidance: true });
+
+    const writeFailed = await runWrapper("owned-drift.json", "owned", {
+      updateResult: "no-updates",
+      putResult: "failure",
+    });
+    expect(writeFailed.status).not.toBe(0);
+    expectRollback(writeFailed, driftedConfiguration, { guidance: true });
+
+    const noProfileFailure = await runWrapper("owned-drift.json", "owned", {
+      updateResult: "no-updates",
+      mutationConverges: false,
+      awsProfile: "",
+    });
+    expect(noProfileFailure.status).toBe(4);
+    expectRollback(noProfileFailure, driftedConfiguration, {
+      guidance: true,
+      profile: "",
+    });
+    expect(noProfileFailure.stderr).not.toContain("--profile");
+
+    const backupCollision = await runWrapper("owned-drift.json", "owned", {
+      updateResult: "no-updates",
+      existingRollback: true,
+    });
+    expect(backupCollision.status).not.toBe(0);
+    expect(backupCollision.rollback).toBe("existing rollback\n");
+    expect(backupCollision.calls).not.toContain(
+      "ecr put-registry-scanning-configuration",
+    );
   });
 
   it("TC-ECR-SCAN-024: fails when an owned update does not converge", async () => {

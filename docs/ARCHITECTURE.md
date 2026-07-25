@@ -272,14 +272,22 @@ CloudFormation does not reconcile resource drift when the submitted template is
 unchanged. On that specific stack-owned path, the wrapper reapplies the exact
 complete declaration through the registry-level API, reads it back, and requires
 an owned-equivalent result. It never uses the deprecated repository-level
-scanning API.
+scanning API. Immediately before that direct write, it saves the prior complete
+configuration to a mode-`0600`, gitignored
+`ecr-registry-scanning-rollback-<timestamp>.local.json`. If the direct write or
+read-back fails, keep the exclusive-writer window active and restore that file
+with the command printed by the wrapper before investigating further. The
+command includes the `AWS_PROFILE` selected from `.env`, when configured, so
+the restore targets the same account.
 
 CloudFormation update rollback restores the stack's previous complete
 declaration. The singleton has `DeletionPolicy: Retain`, so deleting the stack
 relinquishes ownership without deleting the active configuration. After
 deletion, the account-level owner may apply a reviewed complete ruleset,
 including the default state if that is the intended rollback. The project
-wrapper intentionally does not perform that account-wide handoff.
+wrapper intentionally does not perform that account-wide handoff. Stack deletion
+also does not replace the direct-write rollback procedure above: retained state
+remains active after CloudFormation relinquishes ownership.
 
 For conflicts, export the current state with
 `aws ecr get-registry-scanning-configuration --region ap-northeast-1`, have the
@@ -297,8 +305,55 @@ aws ecr describe-image-scan-findings \
   --query '{status:imageScanStatus.status,counts:imageScanFindings.findingSeverityCounts,findings:imageScanFindings.findings}'
 ```
 
-The deploy role adds only registry configuration get/put and this findings-read
-action. Findings access is scoped to the four project repository ARNs.
+The operator identity selected by `AWS_PROFILE` must have
+`ecr:GetRegistryScanningConfiguration` and
+`ecr:PutRegistryScanningConfiguration` in `ap-northeast-1`; the read-only
+findings query additionally needs `ecr:DescribeImageScanFindings` on the four
+project repository ARNs. These account-level mutation permissions are
+intentionally absent from the GitHub Actions deploy role: its OIDC trust includes
+pull-request jobs, while the guarded wrapper is operator-run and is never invoked
+by CI. This keeps the ownership and exclusive-writer checks on the only identity
+allowed to mutate the singleton.
+
+#### Operator IAM
+
+In addition to its existing CloudFormation stack-management permissions, the
+operator identity needs only these ECR permissions for this workflow. Replace
+the account placeholder before attaching the policy; do not grant these actions
+to the GitHub Actions deploy role.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EcrRegistryScanning",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetRegistryScanningConfiguration",
+        "ecr:PutRegistryScanningConfiguration"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-northeast-1"
+        }
+      }
+    },
+    {
+      "Sid": "EcrImageScanFindings",
+      "Effect": "Allow",
+      "Action": "ecr:DescribeImageScanFindings",
+      "Resource": [
+        "arn:aws:ecr:ap-northeast-1:<aws-account-id>:repository/mem9-on-aws/mnemo-server",
+        "arn:aws:ecr:ap-northeast-1:<aws-account-id>:repository/mem9-on-aws/qwen3-embed",
+        "arn:aws:ecr:ap-northeast-1:<aws-account-id>:repository/mem9-on-aws/bootstrap",
+        "arn:aws:ecr:ap-northeast-1:<aws-account-id>:repository/mem9-on-aws/llm-proxy"
+      ]
+    }
+  ]
+}
+```
 
 ### Component map
 

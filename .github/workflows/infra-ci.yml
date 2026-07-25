@@ -120,9 +120,11 @@ jobs:
 
       - name: Validate ECR registry scanning template
         run: |
-          python3 -m venv "$RUNNER_TEMP/cfn-lint"
-          "$RUNNER_TEMP/cfn-lint/bin/pip" install --disable-pip-version-check 'cfn-lint>=1.39,<2'
-          "$RUNNER_TEMP/cfn-lint/bin/cfn-lint" infra/cloudformation/ecr-registry-scanning.yaml
+          python3 -m pip install --disable-pip-version-check \
+            --target "$RUNNER_TEMP/cfn-lint" 'cfn-lint>=1.39,<2'
+          PYTHONPATH="$RUNNER_TEMP/cfn-lint" python3 -c \
+            'import sys; from cfnlint.runner import main; sys.argv[0] = "cfn-lint"; main()' \
+            infra/cloudformation/ecr-registry-scanning.yaml
 
       - name: Type check (infra)
         run: pnpm -C infra typecheck

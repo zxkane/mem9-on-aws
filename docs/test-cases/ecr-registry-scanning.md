@@ -28,11 +28,11 @@ Design: [`docs/designs/ecr-registry-scanning.md`](../designs/ecr-registry-scanni
 | TC-ECR-SCAN-015 | Run wrapper with stack-owned equivalent fixture | Exits successfully with no mutation command |
 | TC-ECR-SCAN-016 | Run wrapper with sibling, conflicting scan type, partial coverage, or stack-name conflict | Every path exits nonzero before create, update, delete, or direct registry mutation |
 | TC-ECR-SCAN-017 | Inspect wrapper and both ECR templates | No repository-level scan-on-push API or repository property is used |
-| TC-ECR-SCAN-018 | Parse deploy-role IAM | Registry operations are exactly `GetRegistryScanningConfiguration`, `PutRegistryScanningConfiguration`, and `DescribeImageScanFindings` |
+| TC-ECR-SCAN-018 | Parse deploy-role IAM and the documented operator policy | The pull-request-capable CI role has no registry-singleton or findings actions; the operator policy grants only `GetRegistryScanningConfiguration`, `PutRegistryScanningConfiguration`, and repository-scoped `DescribeImageScanFindings` |
 | TC-ECR-SCAN-019 | Scan changed documentation and examples | No account ID, live ARN, API key, private repository reference, or comment permalink is present |
-| TC-ECR-SCAN-020 | Stack-owned drift but CloudFormation reports no template update | Reapply the complete declared registry configuration directly; never treat unresolved drift as success |
+| TC-ECR-SCAN-020 | Stack-owned drift but CloudFormation reports no template update | Exclusively capture the prior complete configuration in a protected local rollback file before the write; a collision blocks mutation, and write/read-back failure prints a same-profile restore command |
 | TC-ECR-SCAN-021 | Registry state changes between initial preflight and mutation | Read and decide again immediately before mutation; external sibling rules fail closed |
-| TC-ECR-SCAN-022 | Parse deploy-role singleton IAM condition | Registry get/put is limited to `ap-northeast-1` with `aws:RequestedRegion` |
+| TC-ECR-SCAN-022 | Inspect the operator identity boundary | Registry get/put belongs to the operator's `AWS_PROFILE` identity in `ap-northeast-1`, never the GitHub Actions role |
 | TC-ECR-SCAN-023 | CI CloudFormation validation | `cfn-lint` performs schema validation on the dedicated template before unit tests |
 | TC-ECR-SCAN-024 | Registry still differs after a successful owned update | Read-back verification exits nonzero instead of reporting convergence |
 | TC-ECR-SCAN-025 | Dedicated stack loses ownership after adoption | Read-back verification exits nonzero instead of accepting external state |

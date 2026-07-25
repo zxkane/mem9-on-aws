@@ -60,12 +60,19 @@ out-of-band stack. The registry singleton is deliberately separate.
   pattern in both the wrapper and CloudFormation parameter.
 - Missing registry fields or stack status are errors, never evidence of a
   default or stable configuration.
+- The operator's `AWS_PROFILE` identity owns the registry get/put and findings
+  permissions. The pull-request-capable GitHub Actions role intentionally has no
+  registry-singleton mutation or findings access because CI never runs this
+  wrapper.
 - `DeletionPolicy: Retain` preserves the registry configuration if ownership is
   relinquished. An external owner can then install a complete account-level
   ruleset without this stack deleting it.
 - The wrapper normally updates through CloudFormation. If an unchanged template
   cannot repair stack-owned drift, it reapplies the exact complete declaration
-  through the registry-level API and verifies convergence. It never calls ECR's
-  repository-level scanning API.
+  through the registry-level API and verifies convergence. Before that direct
+  write it saves the prior complete configuration to a mode-`0600`, gitignored
+  local rollback file and prints the exact restore command on any subsequent
+  write or verification failure, including the selected AWS profile when one is
+  configured. It never calls ECR's repository-level scanning API.
 - Fixture tests record every mocked AWS command so all conflict paths can prove
   that no mutation command was reached.

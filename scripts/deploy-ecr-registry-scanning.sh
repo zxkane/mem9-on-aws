@@ -23,6 +23,8 @@
 #   ECR_SCAN_EXCLUSIVE_WRITER_ACK
 #                           must be true before a mutation; set only after the
 #                           account owner pauses other registry config writers
+#   ECR_SCAN_BACKUP_FILE    optional protected path for direct-repair rollback;
+#                           defaults to a timestamped repo-root *.local.json
 
 set -euo pipefail
 
@@ -57,7 +59,6 @@ if [[ ! -f "$template_file" || ! -f "$preflight" ]]; then
 fi
 
 tmp_dir="$(mktemp -d)"
-trap 'rm -rf "$tmp_dir"' EXIT
 current_file="$tmp_dir/current.json"
 stack_error="$tmp_dir/stack-error.log"
 declared_file="$tmp_dir/declared.json"
@@ -68,6 +69,30 @@ stack_status=""
 action=""
 reason=""
 uncovered=""
+rollback_file=""
+rollback_required=false
+
+print_rollback_guidance() {
+  local file="$1"
+  echo "Restore the captured baseline while the exclusive-writer window remains active:" >&2
+  printf '  aws' >&2
+  if [[ -n "${AWS_PROFILE:-}" ]]; then
+    printf ' --profile %q' "$AWS_PROFILE" >&2
+  fi
+  printf ' ecr put-registry-scanning-configuration --region %q --cli-input-json %q\n' \
+    "$region" "file://$file" >&2
+}
+
+cleanup() {
+  local exit_code=$?
+  rm -rf "$tmp_dir"
+  if [[ $exit_code -ne 0 && "$rollback_required" == "true" && -n "$rollback_file" ]]; then
+    print_rollback_guidance "$rollback_file"
+  fi
+  trap - EXIT
+  exit "$exit_code"
+}
+trap cleanup EXIT
 
 read_registry_configuration() {
   aws ecr get-registry-scanning-configuration \
@@ -232,12 +257,28 @@ if [[ $update_exit -ne 0 ]]; then
       --project-name "$project_name" \
       --format configuration \
       >"$declared_file"
+
+    rollback_file="${ECR_SCAN_BACKUP_FILE:-$repo_root/ecr-registry-scanning-rollback-$(date -u +%Y%m%dT%H%M%SZ).local.json}"
+    node - "$current_file" "$rollback_file" <<'NODE'
+const [inputFile, outputFile] = process.argv.slice(2);
+const { readFileSync, writeFileSync } = require("node:fs");
+const current = JSON.parse(readFileSync(inputFile, "utf8"));
+writeFileSync(outputFile, `${JSON.stringify(current.scanningConfiguration)}\n`, {
+  encoding: "utf8",
+  mode: 0o600,
+  flag: "wx",
+});
+NODE
+    rollback_required=true
+    echo "Captured pre-repair registry configuration: $rollback_file"
+
     aws ecr put-registry-scanning-configuration \
       --region "$region" \
       --cli-input-json "file://$declared_file" \
       >/dev/null
 
     verify_owned_convergence "Drift repair verification"
+    rollback_required=false
     echo "Owned registry drift repaired from the complete declaration."
     exit 0
   fi

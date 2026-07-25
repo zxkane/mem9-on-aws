@@ -26,6 +26,10 @@ case "${1:-} ${2:-}" in
     fi
     ;;
   "ecr put-registry-scanning-configuration")
+    if [[ "${MOCK_PUT_RESULT:-success}" == "failure" ]]; then
+      echo "ServerException: mock registry write failed" >&2
+      exit 255
+    fi
     touch "${MOCK_AWS_STATE}.put"
     printf '%s\n' '{"registryId":"123456789012"}'
     ;;
