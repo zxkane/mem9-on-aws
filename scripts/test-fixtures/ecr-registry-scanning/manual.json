@@ -1,0 +1,17 @@
+{
+  "registryId": "123456789012",
+  "scanningConfiguration": {
+    "scanType": "BASIC",
+    "rules": [
+      {
+        "scanFrequency": "MANUAL",
+        "repositoryFilters": [
+          {
+            "filter": "mem9-on-aws/*",
+            "filterType": "WILDCARD"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -181,6 +181,7 @@ async function runWrapper(fixture, stackState, options = {}) {
       ECR_SCAN_EXCLUSIVE_WRITER_ACK: options.exclusiveWriterAck ?? "true",
       ECR_SCAN_BACKUP_FILE: rollbackFile,
       ECR_SCAN_STACK_NAME: options.stackName ?? "",
+      ECR_REGION: options.ecrRegion ?? "ap-northeast-1",
       AWS_PROFILE: options.awsProfile ?? "test-operator",
       PROJECT_NAME: options.projectName ?? "mem9-on-aws",
     },
@@ -356,6 +357,21 @@ describe("registry scanning preflight decision", () => {
     expect(repositoryMatchesFilter("other/mem9-on-aws/image", "mem9-on-aws")).toBe(true);
   });
 
+  it("TC-ECR-SCAN-037: external MANUAL coverage is not scan-on-push compliance", async () => {
+    const decision = decideRegistryScanningAction({
+      current: await fixture("manual.json"),
+      ownership: missingStack,
+      projectName: "mem9-on-aws",
+    });
+    expect(decision.action).toBe("fail-closed");
+    expect(decision.uncoveredRepositories).toEqual(projectRepositories("mem9-on-aws"));
+  });
+
+  it("TC-ECR-SCAN-038: wildcard filters escape regex metacharacters", () => {
+    expect(repositoryMatchesFilter("a.c-thing", "a.c*")).toBe(true);
+    expect(repositoryMatchesFilter("abc-thing", "a.c*")).toBe(false);
+  });
+
   it("TC-ECR-SCAN-009: fails closed when the stack name exists without ownership", async () => {
     expect(
       decideRegistryScanningAction({
@@ -395,6 +411,45 @@ describe("registry scanning preflight decision", () => {
           scanningConfiguration: { scanType: "BASIC", rules: [] },
         },
         ownership: { ...ownedStack, stackStatus: null },
+        projectName: "mem9-on-aws",
+      }).action,
+    ).toBe("fail-closed");
+  });
+
+  it("TC-ECR-SCAN-039: pins registry identity and ownership stability guards", async () => {
+    const ownedDrift = await fixture("owned-drift.json");
+    for (const stackStatus of ["UPDATE_IN_PROGRESS", "UPDATE_ROLLBACK_FAILED"]) {
+      expect(
+        decideRegistryScanningAction({
+          current: ownedDrift,
+          ownership: { ...ownedStack, stackStatus },
+          projectName: "mem9-on-aws",
+        }).action,
+      ).toBe("fail-closed");
+    }
+
+    const defaultConfiguration = await fixture("default.json");
+    for (const registryId of [undefined, "not-an-account-id"]) {
+      expect(
+        decideRegistryScanningAction({
+          current: {
+            ...defaultConfiguration,
+            registryId,
+          },
+          ownership: missingStack,
+          projectName: "mem9-on-aws",
+        }).action,
+      ).toBe("fail-closed");
+    }
+
+    expect(
+      decideRegistryScanningAction({
+        current: defaultConfiguration,
+        ownership: {
+          stackExists: false,
+          ownsResource: true,
+          stackStatus: "UPDATE_COMPLETE",
+        },
         projectName: "mem9-on-aws",
       }).action,
     ).toBe("fail-closed");
@@ -850,11 +905,19 @@ describe("deployment wrapper fixture adapter", () => {
   it("TC-ECR-SCAN-033: fixture tests ignore an operator repo-root .env", async () => {
     const driftedConfiguration = (await fixture("owned-drift.json"))
       .scanningConfiguration;
-    const isolated = await runWrapper("owned-drift.json", "owned", {
-      mutationConverges: false,
-      repoEnv: true,
-      updateResult: "no-updates",
-    });
+    const originalRegion = process.env.ECR_REGION;
+    process.env.ECR_REGION = "us-east-1";
+    let isolated;
+    try {
+      isolated = await runWrapper("owned-drift.json", "owned", {
+        mutationConverges: false,
+        repoEnv: true,
+        updateResult: "no-updates",
+      });
+    } finally {
+      if (originalRegion === undefined) delete process.env.ECR_REGION;
+      else process.env.ECR_REGION = originalRegion;
+    }
     expect(isolated.status).toBe(4);
     expectRollback(isolated, driftedConfiguration, { guidance: true });
     expect(isolated.operatorBackup).toBeNull();
@@ -990,6 +1053,26 @@ describe("deployment wrapper fixture adapter", () => {
     expect(declaration.status, declaration.stderr).toBe(0);
     expect(JSON.parse(declaration.stdout)).toEqual(
       declaredConfiguration("mem9-on-aws"),
+    );
+  });
+
+  it("TC-ECR-SCAN-040: rejects duplicate preflight CLI options", () => {
+    const result = spawnSync(
+      process.execPath,
+      [
+        preflight,
+        "--project-name",
+        "mem9-on-aws",
+        "--project-name",
+        "alternate-project",
+        "--format",
+        "configuration",
+      ],
+      { encoding: "utf8" },
+    );
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain(
+      "--project-name must be provided at most once",
     );
   });
 

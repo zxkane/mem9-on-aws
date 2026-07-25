@@ -42,10 +42,14 @@ Design: [`docs/designs/ecr-registry-scanning.md`](../designs/ecr-registry-scanni
 | TC-ECR-SCAN-030 | Wrapper receives a malformed registry response | Wrapper exits before mutation |
 | TC-ECR-SCAN-031 | Preflight CLI receives unknown or malformed options | Strict argument parsing exits nonzero |
 | TC-ECR-SCAN-032 | Ambient `PROJECT_NAME` or stack-name variables are present | Wrapper still targets the canonical protected stack and project parameter; ownership cannot be redirected |
-| TC-ECR-SCAN-033 | Fixture tests run while an operator `.env` contains real profile, region, and rollback-path values | The harness can suppress dotenv loading and never writes the operator rollback path; a companion run proves default dotenv loading still uses those values |
+| TC-ECR-SCAN-033 | Fixture tests run while an operator `.env` or exported `ECR_REGION` contains real profile, region, and rollback-path values | The harness suppresses ambient operator values and never writes the operator rollback path; a companion run proves default dotenv loading still uses `.env` values |
 | TC-ECR-SCAN-034 | Either CloudFormation ownership lookup returns an access error, or the resource lookup returns a non-boolean result | Wrapper fails closed before validation or mutation |
 | TC-ECR-SCAN-035 | Ownership changes from absent to owned between the initial and pre-mutation reads | Wrapper refuses to switch from adoption to update and exits before mutation |
 | TC-ECR-SCAN-036 | An owned no-op update reaches drift repair, but the stack disappears and the registry returns to its default configuration before the third read | Wrapper refuses to switch from update to adoption, permits only the no-op CloudFormation update attempt, then exits before rollback capture or direct registry mutation |
+| TC-ECR-SCAN-037 | External BASIC rules match every project repository but use `MANUAL` frequency | Decision is `fail-closed`, with every project repository uncovered because no scan-on-push rule applies |
+| TC-ECR-SCAN-038 | A wildcard filter contains a regex metacharacter such as `.` | The metacharacter is matched literally; `a.c*` matches `a.c-thing` but not `abc-thing` |
+| TC-ECR-SCAN-039 | Registry identity is missing/malformed, ownership is internally inconsistent, or the owning stack is updating/rollback-failed | Every case decides `fail-closed`; no invalid identity or unstable ownership can reach adoption/update |
+| TC-ECR-SCAN-040 | A preflight CLI option is provided more than once | Strict argument parsing exits nonzero instead of accepting the last value |
 
 ## Operator verification
 
