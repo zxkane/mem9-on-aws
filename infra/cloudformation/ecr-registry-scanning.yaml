@@ -1,0 +1,32 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  OUT-OF-BAND account/region ECR registry scanning configuration for
+  mem9-on-aws. This singleton is separate from the retained repository stack
+  because its rules replace the registry's complete scanning configuration.
+  Deploy only through scripts/deploy-ecr-registry-scanning.sh.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: mem9-on-aws
+    MinLength: 2
+    MaxLength: 243
+    AllowedPattern: "^[a-z0-9]+([._/-][a-z0-9]+)*$"
+    ConstraintDescription: >
+      Use a lowercase ECR repository prefix without wildcards.
+    Description: >
+      Repository namespace. The scan-on-push filter matches only repositories
+      below this namespace separator.
+
+Resources:
+  RegistryScanningConfiguration:
+    Type: AWS::ECR::RegistryScanningConfiguration
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ScanType: BASIC
+      Rules:
+        - ScanFrequency: SCAN_ON_PUSH
+          RepositoryFilters:
+            - Filter: !Sub ${ProjectName}/*
+              FilterType: WILDCARD

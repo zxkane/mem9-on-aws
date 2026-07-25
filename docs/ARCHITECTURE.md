@@ -230,10 +230,152 @@ Memory rows and embeddings are durable in Aurora. The Fargate task uses `/tmp`
 only for mem9's batch-import implementation; normal add, search, and CRUD paths
 do not require persistent task storage.
 
+### ECR registry scanning
+
+The four retained repositories remain in
+`infra/cloudformation/ecr-repositories.yaml`. Registry scanning is a separate
+account/region singleton, so the dedicated
+`infra/cloudformation/ecr-registry-scanning.yaml` stack owns the complete
+registry configuration. No `AWS::ECR::Repository` has repository-level scanning
+configuration.
+
+The complete declaration uses BASIC scanning with one `SCAN_ON_PUSH` filter,
+`mem9-on-aws/*`. The namespace separator keeps the rule narrow: it covers the
+four project repositories without matching a sibling such as
+`mem9-on-aws-other/*`.
+
+Before first adoption from this revision, apply the reviewed deploy-role policy
+update once with `scripts/deploy-github-role.sh`. This out-of-band step
+activates `DenyEcrRegistryScanningOwnershipStackMutation`; merging or deploying
+the SST application does not update that role.
+
+Run `scripts/deploy-ecr-registry-scanning.sh` once per account/region. Its first
+AWS call reads the complete registry scanning configuration. It then reads
+CloudFormation ownership and applies this policy:
+
+| Current state | Wrapper result |
+|---|---|
+| Default BASIC configuration with no rules; dedicated stack absent | Adopt by creating the dedicated stack |
+| Dedicated stack owns an equivalent complete declaration | Verify and exit without mutation |
+| Dedicated stack owns different current rules | Update from the stack's complete declared ruleset |
+| External BASIC `SCAN_ON_PUSH` rules cover all four project repositories | Verify and exit without adopting or mutating them |
+| Any external scan type conflict, sibling-only rules, or partial project coverage | Fail closed before mutation |
+
+The wrapper never merges or infers external rules. It repeats the complete
+registry and ownership preflight immediately before mutation. A stack-name
+collision without ownership also fails closed. This prevents a project-local
+deployment from replacing sibling repositories' account-level rules.
+
+ECR exposes no conditional or versioned registry-configuration write. Before an
+adopt or owned update, the account owner must pause every other writer for that
+account/region and set `ECR_SCAN_EXCLUSIVE_WRITER_ACK=true`. The acknowledgement
+is intentionally unnecessary for verify-only paths. The repeated read narrows
+the service-level time-of-check/time-of-write window; the exclusive writer
+window closes it operationally.
+
+CloudFormation does not reconcile resource drift when the submitted template is
+unchanged. On that specific stack-owned path, the wrapper reapplies the exact
+complete declaration through the registry-level API, reads it back, and requires
+an owned-equivalent result. It never uses the deprecated repository-level
+scanning API. Immediately before that direct write, it saves the prior complete
+configuration to a mode-`0600`, gitignored
+`ecr-registry-scanning-rollback-<timestamp>.local.json`. If the direct write or
+read-back fails, keep the exclusive-writer window active and restore that file
+with the command printed by the wrapper before investigating further. The
+command includes the `AWS_PROFILE` selected from `.env`, when configured, so
+the restore targets the same account.
+
+CloudFormation update rollback restores the stack's previous complete
+declaration. The singleton has `DeletionPolicy: Retain`, so deleting the stack
+relinquishes ownership without deleting the active configuration. After
+deletion, the account-level owner may apply a reviewed complete ruleset,
+including the default state if that is the intended rollback. The project
+wrapper intentionally does not perform that account-wide handoff. Stack deletion
+also does not replace the direct-write rollback procedure above: retained state
+remains active after CloudFormation relinquishes ownership.
+
+For conflicts, export the current state with
+`aws ecr get-registry-scanning-configuration --region ap-northeast-1`, have the
+account-level owner update the complete ruleset, and rerun the wrapper. Do not
+copy sibling filters into this project's template.
+
+After an image push and scan completion, an operator can inspect findings
+without starting or changing a scan:
+
+```bash
+aws ecr describe-image-scan-findings \
+  --region ap-northeast-1 \
+  --repository-name mem9-on-aws/mnemo-server \
+  --image-id imageTag=<image-tag> \
+  --query '{status:imageScanStatus.status,counts:imageScanFindings.findingSeverityCounts,findings:imageScanFindings.findings}'
+```
+
+The operator identity selected by `AWS_PROFILE` must have
+`ecr:GetRegistryScanningConfiguration` and
+`ecr:PutRegistryScanningConfiguration` in `ap-northeast-1`; the read-only
+findings query additionally needs `ecr:DescribeImageScanFindings` on the four
+project repository ARNs. These account-level mutation permissions are
+intentionally absent from the GitHub Actions deploy role: its OIDC trust includes
+pull-request jobs, while the guarded wrapper is operator-run and is never invoked
+by CI. An explicit deny prevents that role from directly using its broad
+application-stack CloudFormation permissions to create, update, refactor, tag,
+or delete the dedicated ownership stack in any region. The operator wrapper
+derives its canonical `ecr-registry-scanning-mem9-on-aws` stack name without an
+override, so it cannot move the ownership record outside that deny.
+
+This direct-role guard is not an account-wide security boundary. The deploy role
+can create and pass application execution roles, and IAM explicit denies are not
+inherited by a different role session. Until those delegated roles are
+constrained by an enforced permissions boundary (or an equivalent account-level
+control), operators must not treat the ownership stack as tamper-proof against a
+malicious deployment. Keep the operator-only wrapper and manual review boundary
+in place.
+
+#### Operator IAM
+
+In addition to its existing CloudFormation stack-management permissions, the
+operator identity needs only these ECR permissions for this workflow. Replace
+the account placeholder before attaching the policy; do not grant these actions
+to the GitHub Actions deploy role.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "EcrRegistryScanning",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:GetRegistryScanningConfiguration",
+        "ecr:PutRegistryScanningConfiguration"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-northeast-1"
+        }
+      }
+    },
+    {
+      "Sid": "EcrImageScanFindings",
+      "Effect": "Allow",
+      "Action": "ecr:DescribeImageScanFindings",
+      "Resource": [
+        "arn:aws:ecr:ap-northeast-1:<aws-account-id>:repository/mem9-on-aws/mnemo-server",
+        "arn:aws:ecr:ap-northeast-1:<aws-account-id>:repository/mem9-on-aws/qwen3-embed",
+        "arn:aws:ecr:ap-northeast-1:<aws-account-id>:repository/mem9-on-aws/bootstrap",
+        "arn:aws:ecr:ap-northeast-1:<aws-account-id>:repository/mem9-on-aws/llm-proxy"
+      ]
+    }
+  ]
+}
+```
+
 ### Component map
 
 | Layer | Current resource or component | Source |
 |---|---|---|
+| Container registry | Four retained ECR repositories plus guarded registry-level BASIC scan-on-push | `infra/cloudformation/ecr-repositories.yaml`, `infra/cloudformation/ecr-registry-scanning.yaml` |
 | Compute | ECS Fargate, arm64, one task, three containers | `infra/ecs.ts` |
 | Database | Aurora PostgreSQL Serverless v2, direct writer endpoint; PITR retention prod=14 days, non-prod=1 day | `infra/db.ts` |
 | Database credential | Secrets Manager task-definition secret | `infra/db.ts`, `docker/mnemo-server/entrypoint.sh` |
@@ -264,6 +406,8 @@ do not require persistent task storage.
 - The public OAuth facade uses API Gateway v2 plus Lambda, never a Lambda
   Function URL.
 - Schema bootstrap is a separate one-shot ECS task.
+- ECR scan-on-push is a guarded out-of-band registry singleton, separate from
+  the retained repository stack.
 
 ## Planned changes
 
@@ -272,7 +416,6 @@ The open reliability program covers future work in these areas:
 - Release image tag selection and read-only ECS actual-state reconciliation.
 - Mandatory alert delivery with separate transport and execution failure queues.
 - Safe preview-stage reconciliation and a separately reviewed one-time cleanup.
-- Registry-level ECR scan-on-push coverage.
 - A disabled-by-default durable ingest job foundation, atomic plan application,
   tenant-scoped job status, and job-level telemetry.
 - A post-deployment production reliability verification exercise.

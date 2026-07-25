@@ -4,9 +4,9 @@
 #
 # Scope: **IAM role only**. The Pulumi/SST app does NOT manage this role —
 # running CI requires the role to exist beforehand (chicken-and-egg).
-# Bootstrap once per AWS account, and RE-RUN whenever a new resource TYPE is
-# added to infra/cloudformation/github-actions-role.yaml (else the first
-# deploy that provisions it 403s).
+# Bootstrap once per AWS account, and RE-RUN after every policy or resource-type
+# change in infra/cloudformation/github-actions-role.yaml. Policy-only changes
+# such as explicit denies are not active until this out-of-band stack is updated.
 #
 # Config: set AWS_PROFILE (and any overrides) in a gitignored .env at the repo
 # root — copy .env.example and fill in your own profile. Targets account

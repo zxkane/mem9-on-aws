@@ -1,0 +1,7 @@
+{
+  "registryId": "123456789012",
+  "scanningConfiguration": {
+    "scanType": "BASIC",
+    "rules": []
+  }
+}

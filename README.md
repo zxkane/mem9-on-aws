@@ -51,6 +51,7 @@ citations.
 |---|---|
 | IaC | **SST v4** |
 | Region | **ap-northeast-1 (Tokyo)** |
+| Container registry | Four retained ECR repositories plus guarded registry-level BASIC scan-on-push for `mem9-on-aws/*`, both managed out of band |
 | Compute | **ECS Fargate**, **arm64**, single task (`desiredCount=1`) |
 | Database | **Aurora PostgreSQL Serverless v2** + `pgvector` (mem9 `postgres` backend). `mnemo-server` and bootstrap connect directly to the cluster writer endpoint with a Secrets Manager credential. **RDS Proxy is not deployed.** |
 | VPC | **Reuse the account default VPC** (private subnets with NAT egress) |
@@ -67,8 +68,8 @@ citations.
 ## Planned reliability work
 
 The remaining open reliability program covers deployment reconciliation, alert
-failure queues, preview cleanup, ECR scanning, durable ingest
-jobs, atomic apply, telemetry, and post-deployment verification. **None of that
+failure queues, preview cleanup, durable ingest jobs, atomic apply, telemetry,
+and post-deployment verification. **None of that
 planned work is part of the current implementation.** The exact boundary is
 recorded in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#planned-changes).
@@ -90,9 +91,9 @@ The AgentCore Gateway exposes three tools over MCP (Cognito-authenticated):
   `qwen3-embed` (embedding sidecar), `llm-proxy` (Mantle bearer/project bridge),
   `bootstrap` (schema + tenant seed).
 - `scripts/` — out-of-band bootstrap scripts (GitHub Actions IAM role, four ECR
-  repositories, and Bedrock Mantle Project) that the SST app references
-  read-only. See each script's header and `.env.example` for the environment it
-  expects.
+  repositories, guarded registry scan-on-push, and Bedrock Mantle Project) that
+  the SST app references read-only. See each script's header and `.env.example`
+  for the environment it expects.
 - `docs/` — `ARCHITECTURE.md` (decisions) and `mem9-facts.md` (upstream constraints).
 
 ## Development

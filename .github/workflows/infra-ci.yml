@@ -49,6 +49,7 @@ on:
       # the per-PR SST deploy. Skip the workflow when a PR only touches those
       # CloudFormation templates.
       - "!infra/cloudformation/**"
+      - "infra/cloudformation/ecr-registry-scanning.yaml"
   push:
     branches: [main]
     paths:
@@ -62,6 +63,7 @@ on:
       - "tsconfig.json"
       - "vitest.config.ts"
       - "!infra/cloudformation/**"
+      - "infra/cloudformation/ecr-registry-scanning.yaml"
 
 # Per-PR concurrency for PR events (cancel superseded runs so repeated
 # `synchronize` events don't race the same `pr-N` stage's unlock/deploy);
@@ -127,6 +129,15 @@ jobs:
 
       - name: Unit tests (root)
         run: npm test
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.x"
+
+      - name: Validate ECR registry scanning template
+        run: |
+          python -m pip install --disable-pip-version-check 'cfn-lint>=1.39,<2'
+          cfn-lint infra/cloudformation/ecr-registry-scanning.yaml
 
   # ───────────────────────────────────────────────────────────────────────────
   # deploy-preview — PR opened/synchronized/reopened → stage `pr-N`.
