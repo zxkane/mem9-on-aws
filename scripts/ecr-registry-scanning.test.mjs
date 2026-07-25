@@ -477,7 +477,7 @@ describe("CloudFormation declarations", () => {
     expect(source).not.toContain("AWS::ECR::RegistryScanningConfiguration");
   });
 
-  it("TC-ECR-SCAN-018: keeps singleton permissions on the operator identity", async () => {
+  it("TC-ECR-SCAN-018/022: keeps singleton permissions on the operator identity", async () => {
     const [
       source,
       roleBootstrapSource,
@@ -659,6 +659,7 @@ describe("CloudFormation declarations", () => {
 
   it("TC-ECR-SCAN-019: keeps new public artifacts free of live identifiers", async () => {
     const artifactPaths = [
+      ".env.example",
       "README.md",
       "docs/ARCHITECTURE.md",
       "docs/designs/ecr-registry-scanning.md",

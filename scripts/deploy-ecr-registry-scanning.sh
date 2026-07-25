@@ -48,7 +48,7 @@ preflight="$repo_root/scripts/lib/ecr-registry-scanning-preflight.mjs"
 if [[ ${#project_name} -lt 2 ||
       ${#project_name} -gt 243 ||
       ! "$project_name" =~ ^[a-z0-9]+([._/-][a-z0-9]+)*$ ]]; then
-  echo "PROJECT_NAME must be a 2-243 character lowercase ECR repository prefix without wildcards." >&2
+  echo "Internal project name must be a 2-243 character lowercase ECR repository prefix without wildcards." >&2
   exit 2
 fi
 
