@@ -167,8 +167,12 @@ async function runWrapper(fixture, stackState, options = {}) {
       MOCK_SECOND_CURRENT_CONFIG: options.secondFixture
         ? join(fixtureDir, options.secondFixture)
         : "",
+      MOCK_THIRD_CURRENT_CONFIG: options.thirdFixture
+        ? join(fixtureDir, options.thirdFixture)
+        : "",
       MOCK_STACK_STATE: stackState,
       MOCK_SECOND_STACK_STATE: options.secondStackState ?? "",
+      MOCK_THIRD_STACK_STATE: options.thirdStackState ?? "",
       MOCK_UPDATE_RESULT: options.updateResult ?? "success",
       MOCK_PUT_RESULT: options.putResult ?? "success",
       MOCK_MUTATION_CONVERGES: String(options.mutationConverges ?? true),
@@ -894,6 +898,26 @@ describe("deployment wrapper fixture adapter", () => {
       "Ownership changed during preflight; refusing to switch mutation paths.",
     );
     expect(mutationCalls(result.calls)).toEqual([]);
+  });
+
+  it("TC-ECR-SCAN-036: ownership loss before drift repair refuses a direct write", async () => {
+    const result = await runWrapper("owned-drift.json", "owned", {
+      thirdFixture: "default.json",
+      thirdStackState: "missing",
+      updateResult: "no-updates",
+    });
+    expect(result.status).toBe(3);
+    expect(result.stderr).toContain(
+      "Ownership changed before drift repair; refusing direct registry mutation.",
+    );
+    expect(
+      result.calls.match(/ecr get-registry-scanning-configuration/g),
+    ).toHaveLength(3);
+    expect(mutationCalls(result.calls)).toEqual([
+      expect.stringMatching(/^cloudformation update-stack /),
+    ]);
+    expect(result.rollback).toBe("");
+    expect(result.putInput).toBeNull();
   });
 
   it("TC-ECR-SCAN-029: mutations require an exclusive-writer acknowledgement", async () => {

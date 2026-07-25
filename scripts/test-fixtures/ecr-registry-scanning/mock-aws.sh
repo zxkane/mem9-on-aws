@@ -15,7 +15,9 @@ effective_stack_state() {
   if [[ -f "$MOCK_AWS_STATE" ]]; then
     read -r read_count <"$MOCK_AWS_STATE"
   fi
-  if [[ "$read_count" -gt 1 && -n "${MOCK_SECOND_STACK_STATE:-}" ]]; then
+  if [[ "$read_count" -gt 2 && -n "${MOCK_THIRD_STACK_STATE:-}" ]]; then
+    state="$MOCK_THIRD_STACK_STATE"
+  elif [[ "$read_count" -gt 1 && -n "${MOCK_SECOND_STACK_STATE:-}" ]]; then
     state="$MOCK_SECOND_STACK_STATE"
   fi
   printf '%s\n' "$state"
@@ -37,7 +39,9 @@ case "${1:-} ${2:-}" in
     [[ -f "$MOCK_AWS_STATE" ]] && read -r count <"$MOCK_AWS_STATE"
     count=$((count + 1))
     printf '%s\n' "$count" >"$MOCK_AWS_STATE"
-    if [[ "$count" -gt 1 && -n "${MOCK_SECOND_CURRENT_CONFIG:-}" ]]; then
+    if [[ "$count" -gt 2 && -n "${MOCK_THIRD_CURRENT_CONFIG:-}" ]]; then
+      cat "$MOCK_THIRD_CURRENT_CONFIG"
+    elif [[ "$count" -gt 1 && -n "${MOCK_SECOND_CURRENT_CONFIG:-}" ]]; then
       cat "$MOCK_SECOND_CURRENT_CONFIG"
     else
       cat "$MOCK_CURRENT_CONFIG"

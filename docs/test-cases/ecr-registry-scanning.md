@@ -45,6 +45,7 @@ Design: [`docs/designs/ecr-registry-scanning.md`](../designs/ecr-registry-scanni
 | TC-ECR-SCAN-033 | Fixture tests run while an operator `.env` contains real profile, region, and rollback-path values | The harness can suppress dotenv loading and never writes the operator rollback path; a companion run proves default dotenv loading still uses those values |
 | TC-ECR-SCAN-034 | Either CloudFormation ownership lookup returns an access error, or the resource lookup returns a non-boolean result | Wrapper fails closed before validation or mutation |
 | TC-ECR-SCAN-035 | Ownership changes from absent to owned between the initial and pre-mutation reads | Wrapper refuses to switch from adoption to update and exits before mutation |
+| TC-ECR-SCAN-036 | An owned no-op update reaches drift repair, but the stack disappears and the registry returns to its default configuration before the third read | Wrapper refuses to switch from update to adoption, permits only the no-op CloudFormation update attempt, then exits before rollback capture or direct registry mutation |
 
 ## Operator verification
 
