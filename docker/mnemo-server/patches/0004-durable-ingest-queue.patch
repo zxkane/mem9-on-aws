@@ -1017,10 +1017,10 @@ index 0000000..23062bb
 +}
 diff --git a/server/internal/ingestqueue/types.go b/server/internal/ingestqueue/types.go
 new file mode 100644
-index 0000000..b7c7d8c
+index 0000000..e23b26e
 --- /dev/null
 +++ b/server/internal/ingestqueue/types.go
-@@ -0,0 +1,114 @@
+@@ -0,0 +1,130 @@
 +package ingestqueue
 +
 +import (
@@ -1109,10 +1109,26 @@ index 0000000..b7c7d8c
 +	CompletedAt        *time.Time
 +}
 +
++type LeaseRef struct {
++	TenantID   string
++	JobID      string
++	Owner      string
++	Generation int
++}
++
++func (j *Job) LeaseRef() LeaseRef {
++	return LeaseRef{
++		TenantID:   j.TenantID,
++		JobID:      j.ID,
++		Owner:      j.LeaseOwner,
++		Generation: j.AttemptCount,
++	}
++}
++
 +type Failure struct {
-+	State       State
-+	ErrorClass  string
-+	AvailableAt time.Time
++	State      State
++	ErrorClass string
++	RetryDelay time.Duration
 +}
 +
 +type Plan struct {
@@ -1128,19 +1144,19 @@ index 0000000..b7c7d8c
 +type Repository interface {
 +	Enqueue(context.Context, EnqueueInput) (*Job, error)
 +	Get(context.Context, string, string) (*Job, error)
-+	Claim(context.Context, string, string, time.Time, time.Duration, int) (*Job, error)
-+	StartPlanning(context.Context, string, string, string) error
-+	SavePlan(context.Context, string, string, string, json.RawMessage, int) error
-+	Succeed(context.Context, string, string, string, int) error
-+	Fail(context.Context, string, string, string, Failure) error
-+	Heartbeat(context.Context, string, string, string, time.Time) error
++	Claim(context.Context, string, string, time.Duration, int) (*Job, error)
++	StartPlanning(context.Context, LeaseRef) error
++	SavePlan(context.Context, LeaseRef, json.RawMessage, int) error
++	Succeed(context.Context, LeaseRef, int) error
++	Fail(context.Context, LeaseRef, Failure) error
++	Heartbeat(context.Context, LeaseRef, time.Duration) error
 +}
 diff --git a/server/internal/ingestqueue/worker.go b/server/internal/ingestqueue/worker.go
 new file mode 100644
-index 0000000..648ec73
+index 0000000..5c5b8f8
 --- /dev/null
 +++ b/server/internal/ingestqueue/worker.go
-@@ -0,0 +1,320 @@
+@@ -0,0 +1,344 @@
 +package ingestqueue
 +
 +import (
@@ -1256,7 +1272,7 @@ index 0000000..648ec73
 +		case processSemaphore <- struct{}{}:
 +		}
 +
-+		job, err := w.repo.Claim(workerCtx, w.tenantID, w.owner, time.Now(), w.config.Lease, MaxAttempts)
++		job, err := w.repo.Claim(workerCtx, w.tenantID, w.owner, w.config.Lease, MaxAttempts)
 +		if err != nil {
 +			<-processSemaphore
 +			<-workerSemaphore
@@ -1300,31 +1316,41 @@ index 0000000..648ec73
 +
 +func (w *Worker) process(ctx context.Context, job *Job) {
 +	jobCtx, cancel := context.WithTimeout(ctx, w.config.JobTimeout)
++	lease := job.LeaseRef()
 +	var leaseLost atomic.Bool
 +	heartbeatDone := make(chan struct{})
-+	go w.heartbeat(jobCtx, cancel, job, &leaseLost, heartbeatDone)
++	go w.heartbeat(jobCtx, cancel, lease, &leaseLost, heartbeatDone)
 +	defer func() {
 +		cancel()
 +		<-heartbeatDone
 +	}()
 +
-+	if err := w.repo.StartPlanning(jobCtx, job.TenantID, job.ID, job.LeaseOwner); err != nil {
++	if err := w.repo.StartPlanning(jobCtx, lease); err != nil {
 +		return
 +	}
 +	plan, err := w.processor.Plan(jobCtx, job)
 +	if err != nil {
-+		w.fail(ctx, job, err, leaseLost.Load())
++		w.fail(ctx, lease, err, leaseLost.Load())
 +		return
 +	}
-+	if err := w.repo.SavePlan(jobCtx, job.TenantID, job.ID, job.LeaseOwner, plan.Payload, plan.Warnings); err != nil {
++	if err := w.repo.SavePlan(
++		jobCtx,
++		lease,
++		plan.Payload,
++		plan.Warnings,
++	); err != nil {
 +		return
 +	}
 +	applyWarnings, err := w.processor.Apply(jobCtx, job, json.RawMessage(plan.Payload))
 +	if err != nil {
-+		w.fail(ctx, job, err, leaseLost.Load())
++		w.fail(ctx, lease, err, leaseLost.Load())
 +		return
 +	}
-+	if err := w.repo.Succeed(jobCtx, job.TenantID, job.ID, job.LeaseOwner, applyWarnings); err != nil {
++	if err := w.repo.Succeed(
++		jobCtx,
++		lease,
++		applyWarnings,
++	); err != nil {
 +		return
 +	}
 +	w.logger.Info("durable ingest job completed",
@@ -1334,7 +1360,13 @@ index 0000000..648ec73
 +	)
 +}
 +
-+func (w *Worker) heartbeat(ctx context.Context, cancel context.CancelFunc, job *Job, leaseLost *atomic.Bool, done chan<- struct{}) {
++func (w *Worker) heartbeat(
++	ctx context.Context,
++	cancel context.CancelFunc,
++	lease LeaseRef,
++	leaseLost *atomic.Bool,
++	done chan<- struct{},
++) {
 +	defer close(done)
 +	ticker := time.NewTicker(w.config.Heartbeat)
 +	defer ticker.Stop()
@@ -1342,8 +1374,12 @@ index 0000000..648ec73
 +		select {
 +		case <-ctx.Done():
 +			return
-+		case now := <-ticker.C:
-+			if err := w.repo.Heartbeat(ctx, job.TenantID, job.ID, job.LeaseOwner, now.Add(w.config.Lease)); err != nil {
++		case <-ticker.C:
++			if err := w.repo.Heartbeat(
++				ctx,
++				lease,
++				w.config.Lease,
++			); err != nil {
 +				leaseLost.Store(true)
 +				cancel()
 +				return
@@ -1352,7 +1388,7 @@ index 0000000..648ec73
 +	}
 +}
 +
-+func (w *Worker) fail(parent context.Context, job *Job, err error, leaseLost bool) {
++func (w *Worker) fail(parent context.Context, lease LeaseRef, err error, leaseLost bool) {
 +	if parent.Err() != nil || leaseLost {
 +		return
 +	}
@@ -1361,19 +1397,23 @@ index 0000000..648ec73
 +		State:      StateDead,
 +		ErrorClass: classification.Class,
 +	}
-+	if classification.Transient && job.AttemptCount < MaxAttempts {
++	if classification.Transient && lease.Generation < MaxAttempts {
 +		failure.State = StateRetryWait
-+		failure.AvailableAt = time.Now().Add(FullJitterBackoff(job.AttemptCount, w.config.Random()))
++		failure.RetryDelay = FullJitterBackoff(lease.Generation, w.config.Random())
 +	}
 +	writeCtx, cancel := context.WithTimeout(parent, failureWriteTimeout)
 +	defer cancel()
-+	if err := w.repo.Fail(writeCtx, job.TenantID, job.ID, job.LeaseOwner, failure); err != nil {
++	if err := w.repo.Fail(
++		writeCtx,
++		lease,
++		failure,
++	); err != nil {
 +		return
 +	}
 +	w.logger.Info("durable ingest job failed",
-+		"job_id", job.ID,
++		"job_id", lease.JobID,
 +		"state", failure.State,
-+		"attempt", job.AttemptCount,
++		"attempt", lease.Generation,
 +		"error_class", failure.ErrorClass,
 +	)
 +}
@@ -1710,10 +1750,10 @@ index 0000000..ea29148
 +}
 diff --git a/server/internal/ingestqueue/worker_test.go b/server/internal/ingestqueue/worker_test.go
 new file mode 100644
-index 0000000..4f431f7
+index 0000000..0ee3906
 --- /dev/null
 +++ b/server/internal/ingestqueue/worker_test.go
-@@ -0,0 +1,392 @@
+@@ -0,0 +1,411 @@
 +package ingestqueue
 +
 +import (
@@ -1736,38 +1776,47 @@ index 0000000..4f431f7
 +type fakeRepo struct {
 +	Repository
 +	claimCalls atomic.Int32
-+	claim      func(context.Context, string, string, time.Time, time.Duration, int) (*Job, error)
-+	transition func(context.Context, string, string, string) error
-+	savePlan   func(context.Context, string, string, string, json.RawMessage, int) error
-+	succeed    func(context.Context, string, string, string, int) error
-+	fail       func(context.Context, string, string, string, Failure) error
-+	heartbeat  func(context.Context, string, string, string, time.Time) error
++	claim      func(context.Context, string, string, time.Duration, int) (*Job, error)
++	transition func(context.Context, LeaseRef) error
++	savePlan   func(context.Context, LeaseRef, json.RawMessage, int) error
++	succeed    func(context.Context, LeaseRef, int) error
++	fail       func(context.Context, LeaseRef, Failure) error
++	heartbeat  func(context.Context, LeaseRef, time.Duration) error
 +}
 +
-+func (r *fakeRepo) Claim(ctx context.Context, tenant, owner string, now time.Time, lease time.Duration, max int) (*Job, error) {
++func (r *fakeRepo) Claim(ctx context.Context, tenant, owner string, lease time.Duration, max int) (*Job, error) {
 +	r.claimCalls.Add(1)
 +	if r.claim == nil {
 +		return nil, nil
 +	}
-+	return r.claim(ctx, tenant, owner, now, lease, max)
++	return r.claim(ctx, tenant, owner, lease, max)
 +}
-+func (r *fakeRepo) StartPlanning(ctx context.Context, tenant, id, owner string) error {
-+	return r.transition(ctx, tenant, id, owner)
++func (r *fakeRepo) StartPlanning(ctx context.Context, lease LeaseRef) error {
++	return r.transition(ctx, lease)
 +}
-+func (r *fakeRepo) SavePlan(ctx context.Context, tenant, id, owner string, plan json.RawMessage, warnings int) error {
-+	return r.savePlan(ctx, tenant, id, owner, plan, warnings)
++func (r *fakeRepo) SavePlan(
++	ctx context.Context,
++	lease LeaseRef,
++	plan json.RawMessage,
++	warnings int,
++) error {
++	return r.savePlan(ctx, lease, plan, warnings)
 +}
-+func (r *fakeRepo) Succeed(ctx context.Context, tenant, id, owner string, warnings int) error {
-+	return r.succeed(ctx, tenant, id, owner, warnings)
++func (r *fakeRepo) Succeed(ctx context.Context, lease LeaseRef, warnings int) error {
++	return r.succeed(ctx, lease, warnings)
 +}
-+func (r *fakeRepo) Fail(ctx context.Context, tenant, id, owner string, failure Failure) error {
-+	return r.fail(ctx, tenant, id, owner, failure)
++func (r *fakeRepo) Fail(ctx context.Context, lease LeaseRef, failure Failure) error {
++	return r.fail(ctx, lease, failure)
 +}
-+func (r *fakeRepo) Heartbeat(ctx context.Context, tenant, id, owner string, expires time.Time) error {
++func (r *fakeRepo) Heartbeat(
++	ctx context.Context,
++	leaseRef LeaseRef,
++	lease time.Duration,
++) error {
 +	if r.heartbeat == nil {
 +		return nil
 +	}
-+	return r.heartbeat(ctx, tenant, id, owner, expires)
++	return r.heartbeat(ctx, leaseRef, lease)
 +}
 +
 +type fakeProcessor struct {
@@ -1898,7 +1947,7 @@ index 0000000..4f431f7
 +	var calls []string
 +	claimed := false
 +	repo := &fakeRepo{}
-+	repo.claim = func(_ context.Context, tenant, owner string, _ time.Time, _ time.Duration, _ int) (*Job, error) {
++	repo.claim = func(_ context.Context, tenant, owner string, _ time.Duration, _ int) (*Job, error) {
 +		mu.Lock()
 +		defer mu.Unlock()
 +		if claimed {
@@ -1910,28 +1959,35 @@ index 0000000..4f431f7
 +		}
 +		return &Job{ID: "job-a", TenantID: tenant, LeaseOwner: owner, AttemptCount: 1}, nil
 +	}
-+	repo.transition = func(_ context.Context, tenant, id, owner string) error {
++	repo.transition = func(_ context.Context, lease LeaseRef) error {
 +		mu.Lock()
 +		defer mu.Unlock()
-+		calls = append(calls, "planning:"+tenant+":"+id+":"+owner)
++		calls = append(calls, "planning:"+lease.TenantID+":"+lease.JobID+":"+lease.Owner+":"+strconv.Itoa(lease.Generation))
 +		return nil
 +	}
-+	repo.savePlan = func(_ context.Context, tenant, id, owner string, plan json.RawMessage, warnings int) error {
++	repo.savePlan = func(
++		_ context.Context,
++		lease LeaseRef,
++		plan json.RawMessage,
++		warnings int,
++	) error {
 +		mu.Lock()
 +		defer mu.Unlock()
 +		calls = append(calls, "plan:"+string(plan))
-+		if tenant != "tenant-a" || id != "job-a" || owner != "worker-a" || warnings != 2 {
-+			t.Fatal("SavePlan lost scope/owner/warnings")
++		if lease.TenantID != "tenant-a" || lease.JobID != "job-a" || lease.Owner != "worker-a" ||
++			lease.Generation != 1 || warnings != 2 {
++			t.Fatal("SavePlan lost scope/owner/generation/warnings")
 +		}
 +		return nil
 +	}
 +	done := make(chan struct{})
-+	repo.succeed = func(_ context.Context, tenant, id, owner string, warnings int) error {
++	repo.succeed = func(_ context.Context, lease LeaseRef, warnings int) error {
 +		mu.Lock()
 +		calls = append(calls, "succeeded")
 +		mu.Unlock()
-+		if tenant != "tenant-a" || id != "job-a" || owner != "worker-a" || warnings != 3 {
-+			t.Fatal("Succeed lost scope/owner/warnings")
++		if lease.TenantID != "tenant-a" || lease.JobID != "job-a" || lease.Owner != "worker-a" ||
++			lease.Generation != 1 || warnings != 3 {
++			t.Fatal("Succeed lost scope/owner/generation/warnings")
 +		}
 +		close(done)
 +		return nil
@@ -1958,7 +2014,7 @@ index 0000000..4f431f7
 +	<-runDone
 +	mu.Lock()
 +	defer mu.Unlock()
-+	if len(calls) != 3 || calls[0] != "planning:tenant-a:job-a:worker-a" || calls[2] != "succeeded" {
++	if len(calls) != 3 || calls[0] != "planning:tenant-a:job-a:worker-a:1" || calls[2] != "succeeded" {
 +		t.Fatalf("state calls = %#v", calls)
 +	}
 +}
@@ -1967,14 +2023,17 @@ index 0000000..4f431f7
 +	for attempt := 1; attempt <= MaxAttempts; attempt++ {
 +		t.Run(strconv.Itoa(attempt), func(t *testing.T) {
 +			repo := &fakeRepo{}
-+			repo.transition = func(context.Context, string, string, string) error { return nil }
++			repo.transition = func(context.Context, LeaseRef) error { return nil }
 +			failed := make(chan Failure, 1)
-+			repo.fail = func(_ context.Context, _, _, _ string, failure Failure) error {
++			repo.fail = func(_ context.Context, lease LeaseRef, failure Failure) error {
++				if lease.Generation != attempt {
++					t.Fatalf("failure generation = %d, want %d", lease.Generation, attempt)
++				}
 +				failed <- failure
 +				return nil
 +			}
 +			claimed := false
-+			repo.claim = func(context.Context, string, string, time.Time, time.Duration, int) (*Job, error) {
++			repo.claim = func(context.Context, string, string, time.Duration, int) (*Job, error) {
 +				if claimed {
 +					return nil, nil
 +				}
@@ -1997,7 +2056,7 @@ index 0000000..4f431f7
 +			got := <-failed
 +			cancel()
 +			if attempt < MaxAttempts {
-+				if got.State != StateRetryWait || got.AvailableAt.IsZero() {
++				if got.State != StateRetryWait || got.RetryDelay <= 0 {
 +					t.Fatalf("attempt %d failure = %+v, want retry_wait", attempt, got)
 +				}
 +			} else if got.State != StateDead {
@@ -2009,14 +2068,14 @@ index 0000000..4f431f7
 +
 +func TestWorkerShutdownCancelsWithoutAcknowledging(t *testing.T) {
 +	repo := &fakeRepo{}
-+	repo.transition = func(context.Context, string, string, string) error { return nil }
++	repo.transition = func(context.Context, LeaseRef) error { return nil }
 +	var failureCalls atomic.Int32
-+	repo.fail = func(context.Context, string, string, string, Failure) error {
++	repo.fail = func(context.Context, LeaseRef, Failure) error {
 +		failureCalls.Add(1)
 +		return nil
 +	}
 +	var claimed atomic.Bool
-+	repo.claim = func(context.Context, string, string, time.Time, time.Duration, int) (*Job, error) {
++	repo.claim = func(context.Context, string, string, time.Duration, int) (*Job, error) {
 +		if claimed.Swap(true) {
 +			return nil, nil
 +		}
@@ -2055,14 +2114,14 @@ index 0000000..4f431f7
 +		payloadMarker = "MEMORY-CONTENT-MARKER"
 +	)
 +	repo := &fakeRepo{}
-+	repo.transition = func(context.Context, string, string, string) error { return nil }
++	repo.transition = func(context.Context, LeaseRef) error { return nil }
 +	failed := make(chan struct{})
-+	repo.fail = func(context.Context, string, string, string, Failure) error {
++	repo.fail = func(context.Context, LeaseRef, Failure) error {
 +		close(failed)
 +		return nil
 +	}
 +	var claimed atomic.Bool
-+	repo.claim = func(context.Context, string, string, time.Time, time.Duration, int) (*Job, error) {
++	repo.claim = func(context.Context, string, string, time.Duration, int) (*Job, error) {
 +		if claimed.Swap(true) {
 +			return nil, nil
 +		}
@@ -2135,10 +2194,10 @@ index c0c9bd2..929b8ea 100644
  	switch backend {
 diff --git a/server/internal/repository/postgres/ingest_job.go b/server/internal/repository/postgres/ingest_job.go
 new file mode 100644
-index 0000000..864c27c
+index 0000000..1ad0d90
 --- /dev/null
 +++ b/server/internal/repository/postgres/ingest_job.go
-@@ -0,0 +1,422 @@
+@@ -0,0 +1,528 @@
 +package postgres
 +
 +import (
@@ -2164,23 +2223,42 @@ index 0000000..864c27c
 +	db *sql.DB
 +}
 +
++type ingestJobScope struct {
++	tenantID  string
++	agentID   string
++	appID     string
++	sessionID string
++}
++
 +func NewIngestJobRepo(db *sql.DB) *IngestJobRepo {
 +	return &IngestJobRepo{db: db}
 +}
 +
 +func (r *IngestJobRepo) Enqueue(ctx context.Context, input ingestqueue.EnqueueInput) (*ingestqueue.Job, error) {
-+	tx, err := r.db.BeginTx(ctx, nil)
++	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 +	if err != nil {
 +		return nil, fmt.Errorf("begin ingest enqueue: %w", err)
 +	}
 +	defer tx.Rollback()
 +
++	scope := ingestJobScope{
++		tenantID:  input.TenantID,
++		agentID:   input.AgentID,
++		appID:     input.AppID,
++		sessionID: input.SessionID,
++	}
++	if err := lockIngestJobScope(ctx, tx, scope); err != nil {
++		return nil, fmt.Errorf("lock ingest enqueue scope: %w", err)
++	}
++
 +	row := tx.QueryRowContext(ctx, `
 +		INSERT INTO ingest_jobs (
 +			job_id, tenant_id, idempotency_key, canonical_payload,
-+			agent_id, app_id, session_id, mode, disable_session_save
++			agent_id, app_id, session_id, mode, disable_session_save,
++			available_at, created_at, updated_at
 +		)
-+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
++		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
++			statement_timestamp(), statement_timestamp(), statement_timestamp())
 +		ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
 +		RETURNING `+ingestJobColumns,
 +		input.ID,
@@ -2230,122 +2308,24 @@ index 0000000..864c27c
 +	ctx context.Context,
 +	tenantID string,
 +	owner string,
-+	now time.Time,
 +	lease time.Duration,
 +	maxAttempts int,
 +) (*ingestqueue.Job, error) {
-+	tx, err := r.db.BeginTx(ctx, nil)
++	if lease <= 0 {
++		return nil, errors.New("ingest lease must be positive")
++	}
++	if maxAttempts <= 0 {
++		return nil, errors.New("ingest max attempts must be positive")
++	}
++	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 +	if err != nil {
 +		return nil, fmt.Errorf("begin ingest claim: %w", err)
 +	}
 +	defer tx.Rollback()
 +
-+	if _, err := tx.ExecContext(ctx, `
-+		WITH exhausted AS (
-+			SELECT j.job_id, j.state, j.lease_owner
-+			FROM ingest_jobs AS j
-+			WHERE j.tenant_id = $1
-+			  AND j.attempt_count >= $2
-+			  AND (
-+				(j.state IN ('queued', 'retry_wait') AND j.available_at <= $3)
-+				OR
-+				(j.state IN ('processing', 'planning', 'applying')
-+				 AND (j.lease_expires_at IS NULL OR j.lease_expires_at <= $3))
-+			  )
-+			  AND NOT EXISTS (
-+				SELECT 1
-+				FROM ingest_jobs AS earlier
-+				WHERE earlier.tenant_id = j.tenant_id
-+				  AND earlier.agent_id = j.agent_id
-+				  AND earlier.app_id = j.app_id
-+				  AND earlier.session_id = j.session_id
-+				  AND earlier.state NOT IN ('succeeded', 'dead')
-+				  AND (
-+					earlier.created_at < j.created_at
-+					OR (earlier.created_at = j.created_at AND earlier.job_id < j.job_id)
-+				  )
-+			  )
-+			ORDER BY j.available_at, j.created_at, j.job_id
-+			FOR UPDATE OF j SKIP LOCKED
-+			LIMIT 1
-+		)
-+		UPDATE ingest_jobs AS job
-+		SET state = 'dead',
-+			error_class = 'attempts_exhausted',
-+			lease_owner = NULL,
-+			lease_expires_at = NULL,
-+			heartbeat_at = $3,
-+			completed_at = $3,
-+			updated_at = $3
-+		FROM exhausted
-+		WHERE job.job_id = exhausted.job_id
-+		  AND job.tenant_id = $1
-+		  AND job.state = exhausted.state
-+		  AND job.lease_owner IS NOT DISTINCT FROM exhausted.lease_owner
-+		  AND (
-+			(job.state IN ('queued', 'retry_wait') AND job.available_at <= $3)
-+			OR
-+			(job.state IN ('processing', 'planning', 'applying')
-+			 AND (job.lease_expires_at IS NULL OR job.lease_expires_at <= $3))
-+		  )`,
-+		tenantID,
-+		maxAttempts,
-+		now,
-+	); err != nil {
-+		return nil, fmt.Errorf("expire exhausted ingest job: %w", err)
-+	}
-+
-+	job, err := scanIngestJob(tx.QueryRowContext(ctx, `
-+		WITH candidate AS (
-+			SELECT j.job_id
-+			FROM ingest_jobs AS j
-+			WHERE j.tenant_id = $1
-+			  AND j.attempt_count < $5
-+			  AND (
-+				(j.state IN ('queued', 'retry_wait') AND j.available_at <= $3)
-+				OR
-+				(j.state IN ('processing', 'planning', 'applying')
-+				 AND (j.lease_expires_at IS NULL OR j.lease_expires_at <= $3))
-+			  )
-+			  AND NOT EXISTS (
-+				SELECT 1
-+				FROM ingest_jobs AS earlier
-+				WHERE earlier.tenant_id = j.tenant_id
-+				  AND earlier.agent_id = j.agent_id
-+				  AND earlier.app_id = j.app_id
-+				  AND earlier.session_id = j.session_id
-+				  AND earlier.state NOT IN ('succeeded', 'dead')
-+				  AND (
-+					earlier.created_at < j.created_at
-+					OR (earlier.created_at = j.created_at AND earlier.job_id < j.job_id)
-+				  )
-+			  )
-+			ORDER BY j.available_at, j.created_at, j.job_id
-+			FOR UPDATE OF j SKIP LOCKED
-+			LIMIT 1
-+		)
-+		UPDATE ingest_jobs AS job
-+		SET state = 'processing',
-+			attempt_count = job.attempt_count + 1,
-+			lease_owner = $2,
-+			lease_expires_at = $4,
-+			heartbeat_at = $3,
-+			plan_payload = NULL,
-+			plan_warning_count = 0,
-+			apply_warning_count = 0,
-+			warning_count = 0,
-+			error_class = NULL,
-+			completed_at = NULL,
-+			updated_at = $3
-+		FROM candidate
-+		WHERE job.job_id = candidate.job_id AND job.tenant_id = $1
-+		RETURNING `+prefixedIngestJobColumns("job"),
-+		tenantID,
-+		owner,
-+		now,
-+		now.Add(lease),
-+		maxAttempts,
-+	))
++	// The first statement reserves visible work with SKIP LOCKED. After the
++	// scope lock, the loop reads a fresh snapshot that includes delayed enqueues.
++	scope, err := selectClaimableIngestJobScope(ctx, tx, tenantID)
 +	if errors.Is(err, sql.ErrNoRows) {
 +		if err := tx.Commit(); err != nil {
 +			return nil, fmt.Errorf("commit empty ingest claim: %w", err)
@@ -2353,130 +2333,312 @@ index 0000000..864c27c
 +		return nil, nil
 +	}
 +	if err != nil {
-+		return nil, fmt.Errorf("claim ingest job: %w", err)
++		return nil, fmt.Errorf("select ingest claim scope: %w", err)
 +	}
-+	if err := tx.Commit(); err != nil {
-+		return nil, fmt.Errorf("commit ingest claim: %w", err)
++	if err := lockIngestJobScope(ctx, tx, scope); err != nil {
++		return nil, fmt.Errorf("lock ingest claim scope: %w", err)
 +	}
-+	return job, nil
++
++	for {
++		var (
++			jobID        string
++			attemptCount int
++			eligible     bool
++		)
++		err := tx.QueryRowContext(ctx, `
++			SELECT job_id,
++				attempt_count,
++				CASE
++					WHEN state IN ('queued', 'retry_wait')
++						THEN available_at <= statement_timestamp()
++					WHEN state IN ('processing', 'planning', 'applying')
++						THEN lease_expires_at IS NULL
++							OR lease_expires_at <= statement_timestamp()
++					ELSE FALSE
++				END
++			FROM ingest_jobs
++			WHERE tenant_id = $1
++			  AND agent_id = $2
++			  AND app_id = $3
++			  AND session_id = $4
++			  AND state NOT IN ('succeeded', 'dead')
++			ORDER BY created_at, job_id
++			FOR UPDATE
++			LIMIT 1`,
++			scope.tenantID,
++			scope.agentID,
++			scope.appID,
++			scope.sessionID,
++		).Scan(&jobID, &attemptCount, &eligible)
++		if errors.Is(err, sql.ErrNoRows) {
++			if err := tx.Commit(); err != nil {
++				return nil, fmt.Errorf("commit empty ingest claim: %w", err)
++			}
++			return nil, nil
++		}
++		if err != nil {
++			return nil, fmt.Errorf("select ingest scope head: %w", err)
++		}
++		if !eligible {
++			if err := tx.Commit(); err != nil {
++				return nil, fmt.Errorf("commit blocked ingest claim: %w", err)
++			}
++			return nil, nil
++		}
++
++		if attemptCount >= maxAttempts {
++			if _, err := tx.ExecContext(ctx, `
++				UPDATE ingest_jobs
++				SET state = 'dead',
++					error_class = 'attempts_exhausted',
++					lease_owner = NULL,
++					lease_expires_at = NULL,
++					heartbeat_at = statement_timestamp(),
++					completed_at = statement_timestamp(),
++					updated_at = statement_timestamp()
++				WHERE tenant_id = $1 AND job_id = $2`,
++				tenantID,
++				jobID,
++			); err != nil {
++				return nil, fmt.Errorf("expire exhausted ingest job: %w", err)
++			}
++			continue
++		}
++
++		job, err := scanIngestJob(tx.QueryRowContext(ctx, `
++			UPDATE ingest_jobs AS job
++			SET state = 'processing',
++				attempt_count = job.attempt_count + 1,
++				lease_owner = $3,
++				lease_expires_at = statement_timestamp()
++					+ ($4 * interval '1 microsecond'),
++				heartbeat_at = statement_timestamp(),
++				plan_payload = NULL,
++				plan_warning_count = 0,
++				apply_warning_count = 0,
++				warning_count = 0,
++				error_class = NULL,
++				completed_at = NULL,
++				updated_at = statement_timestamp()
++			WHERE job.tenant_id = $1 AND job.job_id = $2
++			RETURNING `+prefixedIngestJobColumns("job"),
++			tenantID,
++			jobID,
++			owner,
++			lease.Microseconds(),
++		))
++		if err != nil {
++			return nil, fmt.Errorf("claim ingest job: %w", err)
++		}
++		if err := tx.Commit(); err != nil {
++			return nil, fmt.Errorf("commit ingest claim: %w", err)
++		}
++		return job, nil
++	}
 +}
 +
-+func (r *IngestJobRepo) StartPlanning(ctx context.Context, tenantID, jobID, owner string) error {
-+	return r.ownedTransition(ctx, `
-+		UPDATE ingest_jobs
-+		SET state = 'planning', updated_at = NOW()
-+		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
-+		  AND state = 'processing' AND lease_expires_at > NOW()`,
++func selectClaimableIngestJobScope(ctx context.Context, tx *sql.Tx, tenantID string) (ingestJobScope, error) {
++	var scope ingestJobScope
++	err := tx.QueryRowContext(ctx, `
++		SELECT j.tenant_id, j.agent_id, j.app_id, j.session_id
++		FROM ingest_jobs AS j
++		WHERE j.tenant_id = $1
++		  AND (
++			(j.state IN ('queued', 'retry_wait')
++			 AND j.available_at <= statement_timestamp())
++			OR
++			(j.state IN ('processing', 'planning', 'applying')
++			 AND (j.lease_expires_at IS NULL
++				OR j.lease_expires_at <= statement_timestamp()))
++		  )
++		  AND NOT EXISTS (
++			SELECT 1
++			FROM ingest_jobs AS earlier
++			WHERE earlier.tenant_id = j.tenant_id
++			  AND earlier.agent_id = j.agent_id
++			  AND earlier.app_id = j.app_id
++			  AND earlier.session_id = j.session_id
++			  AND earlier.state NOT IN ('succeeded', 'dead')
++			  AND (
++				earlier.created_at < j.created_at
++				OR (earlier.created_at = j.created_at AND earlier.job_id < j.job_id)
++			  )
++		  )
++		ORDER BY j.available_at, j.created_at, j.job_id
++		FOR UPDATE OF j SKIP LOCKED
++		LIMIT 1`,
 +		tenantID,
-+		jobID,
-+		owner,
++	).Scan(&scope.tenantID, &scope.agentID, &scope.appID, &scope.sessionID)
++	return scope, err
++}
++
++func lockIngestJobScope(ctx context.Context, tx *sql.Tx, scope ingestJobScope) error {
++	_, err := tx.ExecContext(ctx, `
++		SELECT pg_advisory_xact_lock(
++			hashtextextended($1::text,
++				hashtextextended($2::text,
++					hashtextextended($3::text,
++						hashtextextended($4::text, 0)))))`,
++		scope.tenantID,
++		scope.agentID,
++		scope.appID,
++		scope.sessionID,
 +	)
++	return err
++}
++
++func (r *IngestJobRepo) StartPlanning(ctx context.Context, lease ingestqueue.LeaseRef) error {
++	return r.ownedTransition(ctx, lease, `
++		UPDATE ingest_jobs
++		SET state = 'planning', updated_at = statement_timestamp()
++		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
++		  AND attempt_count = $4
++		  AND state = 'processing'
++		  AND lease_expires_at > statement_timestamp()`)
 +}
 +
 +func (r *IngestJobRepo) SavePlan(
 +	ctx context.Context,
-+	tenantID string,
-+	jobID string,
-+	owner string,
++	lease ingestqueue.LeaseRef,
 +	plan json.RawMessage,
 +	warnings int,
 +) error {
-+	return r.ownedTransition(ctx, `
++	return r.ownedTransition(ctx, lease, `
 +		UPDATE ingest_jobs
 +		SET state = 'applying',
-+			plan_payload = $4,
-+			plan_warning_count = $5,
-+			warning_count = $5,
-+			updated_at = NOW()
++			plan_payload = $5,
++			plan_warning_count = $6,
++			warning_count = $6,
++			updated_at = statement_timestamp()
 +		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
-+		  AND state = 'planning' AND lease_expires_at > NOW()`,
-+		tenantID,
-+		jobID,
-+		owner,
++		  AND attempt_count = $4
++		  AND state = 'planning'
++		  AND lease_expires_at > statement_timestamp()`,
 +		[]byte(plan),
 +		warnings,
 +	)
 +}
 +
-+func (r *IngestJobRepo) Succeed(ctx context.Context, tenantID, jobID, owner string, warnings int) error {
-+	return r.ownedTransition(ctx, `
++func (r *IngestJobRepo) Succeed(
++	ctx context.Context,
++	lease ingestqueue.LeaseRef,
++	warnings int,
++) error {
++	return r.ownedTransition(ctx, lease, `
 +		UPDATE ingest_jobs
 +		SET state = 'succeeded',
-+			apply_warning_count = $4,
-+			warning_count = plan_warning_count + $4,
++			apply_warning_count = $5,
++			warning_count = plan_warning_count + $5,
 +			error_class = NULL,
 +			lease_owner = NULL,
 +			lease_expires_at = NULL,
-+			heartbeat_at = NOW(),
-+			completed_at = NOW(),
-+			updated_at = NOW()
++			heartbeat_at = statement_timestamp(),
++			completed_at = statement_timestamp(),
++			updated_at = statement_timestamp()
 +		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
-+		  AND state = 'applying' AND lease_expires_at > NOW()`,
-+		tenantID,
-+		jobID,
-+		owner,
++		  AND attempt_count = $4
++		  AND state = 'applying'
++		  AND lease_expires_at > statement_timestamp()`,
 +		warnings,
 +	)
 +}
 +
 +func (r *IngestJobRepo) Fail(
 +	ctx context.Context,
-+	tenantID string,
-+	jobID string,
-+	owner string,
++	lease ingestqueue.LeaseRef,
 +	failure ingestqueue.Failure,
 +) error {
 +	if failure.State != ingestqueue.StateRetryWait && failure.State != ingestqueue.StateDead {
 +		return fmt.Errorf("invalid ingest failure state %q", failure.State)
 +	}
-+	availableAt := failure.AvailableAt
-+	if availableAt.IsZero() {
-+		availableAt = time.Now()
++	if failure.RetryDelay < 0 {
++		return errors.New("ingest retry delay must not be negative")
 +	}
-+	return r.ownedTransition(ctx, `
++	return r.ownedTransition(ctx, lease, `
 +		UPDATE ingest_jobs
-+		SET state = $4::varchar,
-+			available_at = $5,
-+			error_class = $6,
++		SET state = $5::varchar,
++			available_at = statement_timestamp()
++				+ ($6 * interval '1 microsecond'),
++			error_class = $7,
 +			lease_owner = NULL,
 +			lease_expires_at = NULL,
-+			heartbeat_at = NOW(),
-+			completed_at = CASE WHEN $4::varchar = 'dead' THEN NOW() ELSE NULL END,
-+			updated_at = NOW()
++			heartbeat_at = statement_timestamp(),
++			completed_at = CASE WHEN $5::varchar = 'dead'
++				THEN statement_timestamp() ELSE NULL END,
++			updated_at = statement_timestamp()
 +		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
++		  AND attempt_count = $4
 +		  AND state IN ('processing', 'planning', 'applying')
-+		  AND lease_expires_at > NOW()`,
-+		tenantID,
-+		jobID,
-+		owner,
++		  AND lease_expires_at > statement_timestamp()`,
 +		string(failure.State),
-+		availableAt,
++		failure.RetryDelay.Microseconds(),
 +		failure.ErrorClass,
 +	)
 +}
 +
 +func (r *IngestJobRepo) Heartbeat(
 +	ctx context.Context,
-+	tenantID string,
-+	jobID string,
-+	owner string,
-+	expiresAt time.Time,
++	leaseRef ingestqueue.LeaseRef,
++	lease time.Duration,
 +) error {
-+	return r.ownedTransition(ctx, `
++	if lease <= 0 {
++		return errors.New("ingest lease must be positive")
++	}
++	return r.ownedTransition(ctx, leaseRef, `
 +		UPDATE ingest_jobs
-+		SET lease_expires_at = $4, heartbeat_at = NOW(), updated_at = NOW()
++		SET lease_expires_at = statement_timestamp()
++				+ ($5 * interval '1 microsecond'),
++			heartbeat_at = statement_timestamp(),
++			updated_at = statement_timestamp()
 +		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
++		  AND attempt_count = $4
 +		  AND state IN ('processing', 'planning', 'applying')
-+		  AND lease_expires_at > NOW()`,
-+		tenantID,
-+		jobID,
-+		owner,
-+		expiresAt,
++		  AND lease_expires_at > statement_timestamp()`,
++		lease.Microseconds(),
 +	)
 +}
 +
-+func (r *IngestJobRepo) ownedTransition(ctx context.Context, query string, args ...any) error {
-+	result, err := r.db.ExecContext(ctx, query, args...)
++func (r *IngestJobRepo) ownedTransition(
++	ctx context.Context,
++	lease ingestqueue.LeaseRef,
++	query string,
++	args ...any,
++) error {
++	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
++	if err != nil {
++		return fmt.Errorf("begin ingest update: %w", err)
++	}
++	defer tx.Rollback()
++
++	var locked int
++	err = tx.QueryRowContext(ctx, `
++		SELECT 1
++		FROM ingest_jobs
++		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
++		  AND attempt_count = $4
++		  AND state IN ('processing', 'planning', 'applying')
++		  AND lease_expires_at > clock_timestamp()
++		FOR UPDATE`,
++		lease.TenantID,
++		lease.JobID,
++		lease.Owner,
++		lease.Generation,
++	).Scan(&locked)
++	if errors.Is(err, sql.ErrNoRows) {
++		return ingestqueue.ErrLeaseLost
++	}
++	if err != nil {
++		return fmt.Errorf("lock ingest job update: %w", err)
++	}
++
++	queryArgs := []any{
++		lease.TenantID,
++		lease.JobID,
++		lease.Owner,
++		lease.Generation,
++	}
++	queryArgs = append(queryArgs, args...)
++	result, err := tx.ExecContext(ctx, query, queryArgs...)
 +	if err != nil {
 +		return fmt.Errorf("update ingest job: %w", err)
 +	}
@@ -2486,6 +2648,9 @@ index 0000000..864c27c
 +	}
 +	if updated != 1 {
 +		return ingestqueue.ErrLeaseLost
++	}
++	if err := tx.Commit(); err != nil {
++		return fmt.Errorf("commit ingest update: %w", err)
 +	}
 +	return nil
 +}
@@ -2563,10 +2728,10 @@ index 0000000..864c27c
 +}
 diff --git a/server/internal/repository/postgres/ingest_job_integration_test.go b/server/internal/repository/postgres/ingest_job_integration_test.go
 new file mode 100644
-index 0000000..d0a6753
+index 0000000..c61a61a
 --- /dev/null
 +++ b/server/internal/repository/postgres/ingest_job_integration_test.go
-@@ -0,0 +1,334 @@
+@@ -0,0 +1,655 @@
 +package postgres
 +
 +import (
@@ -2588,6 +2753,11 @@ index 0000000..d0a6753
 +	if dsn == "" {
 +		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
 +	}
++	return ingestTestDBWithDSN(t, dsn)
++}
++
++func ingestTestDBWithDSN(t *testing.T, dsn string) *sql.DB {
++	t.Helper()
 +	db, err := sql.Open("pgx", dsn)
 +	if err != nil {
 +		t.Fatalf("open postgres: %v", err)
@@ -2675,14 +2845,16 @@ index 0000000..d0a6753
 +	if otherJob.ID == first {
 +		t.Fatal("tenant-scoped idempotency reused a cross-tenant job")
 +	}
-+	claimed, err := repo.Claim(context.Background(), "tenant-b", "worker-b", time.Now(), time.Second, ingestqueue.MaxAttempts)
++	claimed, err := repo.Claim(context.Background(), "tenant-b", "worker-b", time.Second, ingestqueue.MaxAttempts)
 +	if err != nil {
 +		t.Fatal(err)
 +	}
 +	if claimed == nil || claimed.TenantID != "tenant-b" {
 +		t.Fatalf("tenant-b claim = %+v", claimed)
 +	}
-+	if err := repo.StartPlanning(context.Background(), "tenant-a", claimed.ID, "worker-b"); !errors.Is(err, ingestqueue.ErrLeaseLost) {
++	wrongTenantLease := claimed.LeaseRef()
++	wrongTenantLease.TenantID = "tenant-a"
++	if err := repo.StartPlanning(context.Background(), wrongTenantLease); !errors.Is(err, ingestqueue.ErrLeaseLost) {
 +		t.Fatalf("cross-tenant update error = %v, want ErrLeaseLost", err)
 +	}
 +}
@@ -2707,7 +2879,7 @@ index 0000000..d0a6753
 +		wg.Add(1)
 +		go func() {
 +			defer wg.Done()
-+			job, err := repo.Claim(context.Background(), "tenant-a", fmt.Sprintf("worker-%d", i), time.Now(), time.Minute, ingestqueue.MaxAttempts)
++			job, err := repo.Claim(context.Background(), "tenant-a", fmt.Sprintf("worker-%d", i), time.Minute, ingestqueue.MaxAttempts)
 +			if err != nil {
 +				t.Errorf("Claim: %v", err)
 +				return
@@ -2731,16 +2903,16 @@ index 0000000..d0a6753
 +	}
 +
 +	head := got[first.ID]
-+	if err := repo.StartPlanning(context.Background(), "tenant-a", head.ID, head.LeaseOwner); err != nil {
++	if err := repo.StartPlanning(context.Background(), head.LeaseRef()); err != nil {
 +		t.Fatal(err)
 +	}
-+	if err := repo.SavePlan(context.Background(), "tenant-a", head.ID, head.LeaseOwner, []byte(`{"ops":[]}`), 2); err != nil {
++	if err := repo.SavePlan(context.Background(), head.LeaseRef(), []byte(`{"ops":[]}`), 2); err != nil {
 +		t.Fatal(err)
 +	}
-+	if err := repo.Succeed(context.Background(), "tenant-a", head.ID, head.LeaseOwner, 3); err != nil {
++	if err := repo.Succeed(context.Background(), head.LeaseRef(), 3); err != nil {
 +		t.Fatal(err)
 +	}
-+	next, err := repo.Claim(context.Background(), "tenant-a", "worker-next", time.Now(), time.Minute, ingestqueue.MaxAttempts)
++	next, err := repo.Claim(context.Background(), "tenant-a", "worker-next", time.Minute, ingestqueue.MaxAttempts)
 +	if err != nil {
 +		t.Fatal(err)
 +	}
@@ -2749,7 +2921,7 @@ index 0000000..d0a6753
 +	}
 +
 +	crossHead := got[cross.ID]
-+	if err := repo.Fail(context.Background(), "tenant-a", crossHead.ID, crossHead.LeaseOwner, ingestqueue.Failure{
++	if err := repo.Fail(context.Background(), crossHead.LeaseRef(), ingestqueue.Failure{
 +		State:      ingestqueue.StateDead,
 +		ErrorClass: "poison",
 +	}); err != nil {
@@ -2775,46 +2947,46 @@ index 0000000..d0a6753
 +	time.Sleep(time.Millisecond)
 +	enqueueJob(t, repo, second)
 +
-+	now := time.Now()
-+	head, err := repo.Claim(context.Background(), "tenant-a", "worker-a", now, 50*time.Millisecond, ingestqueue.MaxAttempts)
++	head, err := repo.Claim(context.Background(), "tenant-a", "worker-a", 50*time.Millisecond, ingestqueue.MaxAttempts)
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	if err := repo.Fail(context.Background(), "tenant-a", head.ID, head.LeaseOwner, ingestqueue.Failure{
-+		State:       ingestqueue.StateRetryWait,
-+		ErrorClass:  "mantle_transient",
-+		AvailableAt: now.Add(time.Hour),
++	if err := repo.Fail(context.Background(), head.LeaseRef(), ingestqueue.Failure{
++		State:      ingestqueue.StateRetryWait,
++		ErrorClass: "mantle_transient",
++		RetryDelay: time.Hour,
 +	}); err != nil {
 +		t.Fatal(err)
 +	}
-+	if got, err := repo.Claim(context.Background(), "tenant-a", "worker-b", now.Add(time.Second), time.Minute, ingestqueue.MaxAttempts); err != nil || got != nil {
++	if got, err := repo.Claim(context.Background(), "tenant-a", "worker-b", time.Minute, ingestqueue.MaxAttempts); err != nil || got != nil {
 +		t.Fatalf("retry_wait head did not block scope: job=%+v err=%v", got, err)
 +	}
 +
 +	if _, err := db.Exec(`UPDATE ingest_jobs SET available_at = NOW() - interval '1 second' WHERE job_id = $1`, head.ID); err != nil {
 +		t.Fatal(err)
 +	}
-+	retry, err := repo.Claim(context.Background(), "tenant-a", "worker-b", time.Now(), 40*time.Millisecond, ingestqueue.MaxAttempts)
++	retry, err := repo.Claim(context.Background(), "tenant-a", "worker-b", 40*time.Millisecond, ingestqueue.MaxAttempts)
 +	if err != nil {
 +		t.Fatal(err)
 +	}
 +	if retry == nil || retry.ID != head.ID || retry.AttemptCount != 2 {
 +		t.Fatalf("retry claim = %+v", retry)
 +	}
-+	if err := repo.Heartbeat(context.Background(), "tenant-a", retry.ID, "wrong-owner", time.Now().Add(time.Minute)); !errors.Is(err, ingestqueue.ErrLeaseLost) {
++	wrongOwnerLease := retry.LeaseRef()
++	wrongOwnerLease.Owner = "wrong-owner"
++	if err := repo.Heartbeat(context.Background(), wrongOwnerLease, time.Minute); !errors.Is(err, ingestqueue.ErrLeaseLost) {
 +		t.Fatalf("wrong-owner heartbeat = %v", err)
 +	}
-+	extended := time.Now().Add(time.Minute)
-+	if err := repo.Heartbeat(context.Background(), "tenant-a", retry.ID, retry.LeaseOwner, extended); err != nil {
++	if err := repo.Heartbeat(context.Background(), retry.LeaseRef(), time.Minute); err != nil {
 +		t.Fatal(err)
 +	}
-+	if got, err := repo.Claim(context.Background(), "tenant-a", "worker-c", time.Now().Add(100*time.Millisecond), time.Minute, ingestqueue.MaxAttempts); err != nil || got != nil {
++	if got, err := repo.Claim(context.Background(), "tenant-a", "worker-c", time.Minute, ingestqueue.MaxAttempts); err != nil || got != nil {
 +		t.Fatalf("heartbeat lease was stolen: job=%+v err=%v", got, err)
 +	}
 +	if _, err := db.Exec(`UPDATE ingest_jobs SET lease_expires_at = NOW() - interval '1 second' WHERE job_id = $1`, retry.ID); err != nil {
 +		t.Fatal(err)
 +	}
-+	recovered, err := repo.Claim(context.Background(), "tenant-a", "worker-c", time.Now(), time.Minute, ingestqueue.MaxAttempts)
++	recovered, err := repo.Claim(context.Background(), "tenant-a", "worker-c", time.Minute, ingestqueue.MaxAttempts)
 +	if err != nil {
 +		t.Fatal(err)
 +	}
@@ -2833,17 +3005,17 @@ index 0000000..d0a6753
 +	if job.State != ingestqueue.StateQueued || job.AttemptCount != 0 || string(job.CanonicalPayload) != string(input.CanonicalPayload) {
 +		t.Fatalf("enqueued job = %+v", job)
 +	}
-+	claimed, err := repo.Claim(context.Background(), input.TenantID, "owner", time.Now(), time.Minute, ingestqueue.MaxAttempts)
++	claimed, err := repo.Claim(context.Background(), input.TenantID, "owner", time.Minute, ingestqueue.MaxAttempts)
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	if err := repo.StartPlanning(context.Background(), input.TenantID, claimed.ID, claimed.LeaseOwner); err != nil {
++	if err := repo.StartPlanning(context.Background(), claimed.LeaseRef()); err != nil {
 +		t.Fatal(err)
 +	}
-+	if err := repo.SavePlan(context.Background(), input.TenantID, claimed.ID, claimed.LeaseOwner, []byte(`{"plan":"PRIVATE-PLAN"}`), 2); err != nil {
++	if err := repo.SavePlan(context.Background(), claimed.LeaseRef(), []byte(`{"plan":"PRIVATE-PLAN"}`), 2); err != nil {
 +		t.Fatal(err)
 +	}
-+	if err := repo.Succeed(context.Background(), input.TenantID, claimed.ID, claimed.LeaseOwner, 3); err != nil {
++	if err := repo.Succeed(context.Background(), claimed.LeaseRef(), 3); err != nil {
 +		t.Fatal(err)
 +	}
 +	got, err := repo.Get(context.Background(), input.TenantID, claimed.ID)
@@ -2880,7 +3052,7 @@ index 0000000..d0a6753
 +		t.Fatal(err)
 +	}
 +
-+	claimed, err := repo.Claim(context.Background(), "tenant-a", "new-owner", time.Now(), time.Minute, ingestqueue.MaxAttempts)
++	claimed, err := repo.Claim(context.Background(), "tenant-a", "new-owner", time.Minute, ingestqueue.MaxAttempts)
 +	if err != nil {
 +		t.Fatal(err)
 +	}
@@ -2899,5 +3071,319 @@ index 0000000..d0a6753
 +	}
 +	if state != string(ingestqueue.StateDead) || errorClass != "attempts_exhausted" || !completedAt.Valid {
 +		t.Fatalf("exhausted head = state %q class %q completed %v", state, errorClass, completedAt.Valid)
++	}
++}
++
++func TestIngestJobDelayedEnqueueCommitPreservesFIFO(t *testing.T) {
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
++	}
++	db := ingestTestDBWithDSN(t, dsn+"&default_transaction_isolation=repeatable%20read")
++	repo := NewIngestJobRepo(db)
++	defaultTx, err := db.BeginTx(context.Background(), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var isolation string
++	if err := defaultTx.QueryRow(`SHOW transaction_isolation`).Scan(&isolation); err != nil {
++		t.Fatal(err)
++	}
++	if err := defaultTx.Rollback(); err != nil {
++		t.Fatal(err)
++	}
++	if isolation != "repeatable read" {
++		t.Fatalf("test connection isolation = %q, want repeatable read", isolation)
++	}
++
++	earlier := enqueueInput("tenant-a", "session-a", "9999999999999999999999999999999999999999999999999999999999999999")
++	earlier.ID = "00000000-0000-4000-8000-000000000009"
++	later := enqueueInput("tenant-a", "session-a", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaab")
++	later.ID = "00000000-0000-4000-8000-000000000010"
++
++	earlierTx, err := db.BeginTx(context.Background(), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer earlierTx.Rollback()
++	if _, err := earlierTx.Exec(`
++		SELECT pg_advisory_xact_lock(
++			hashtextextended($1::text,
++				hashtextextended($2::text,
++					hashtextextended($3::text,
++						hashtextextended($4::text, 0)))))
++	`, earlier.TenantID, earlier.AgentID, earlier.AppID, earlier.SessionID); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := earlierTx.Exec(`
++		INSERT INTO ingest_jobs (
++			job_id, tenant_id, idempotency_key, canonical_payload,
++			agent_id, app_id, session_id, mode, disable_session_save,
++			available_at, created_at, updated_at
++		)
++		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
++			statement_timestamp(), statement_timestamp(), statement_timestamp())
++	`, earlier.ID, earlier.TenantID, earlier.IdempotencyKey, []byte(earlier.CanonicalPayload),
++		earlier.AgentID, earlier.AppID, earlier.SessionID, earlier.Mode, earlier.DisableSessionSave); err != nil {
++		t.Fatal(err)
++	}
++
++	time.Sleep(10 * time.Millisecond)
++	if _, err := db.Exec(`
++		INSERT INTO ingest_jobs (
++			job_id, tenant_id, idempotency_key, canonical_payload,
++			agent_id, app_id, session_id, mode, disable_session_save,
++			available_at, created_at, updated_at
++		)
++		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
++			statement_timestamp(), statement_timestamp(), statement_timestamp())
++	`, later.ID, later.TenantID, later.IdempotencyKey, []byte(later.CanonicalPayload),
++		later.AgentID, later.AppID, later.SessionID, later.Mode, later.DisableSessionSave); err != nil {
++		t.Fatal(err)
++	}
++
++	type claimResult struct {
++		job *ingestqueue.Job
++		err error
++	}
++	result := make(chan claimResult, 1)
++	go func() {
++		job, err := repo.Claim(context.Background(), "tenant-a", "worker-a", time.Minute, ingestqueue.MaxAttempts)
++		result <- claimResult{job: job, err: err}
++	}()
++
++	var claimed claimResult
++	select {
++	case claimed = <-result:
++	case <-time.After(100 * time.Millisecond):
++		if err := earlierTx.Commit(); err != nil {
++			t.Fatal(err)
++		}
++		claimed = <-result
++	}
++	if err := earlierTx.Commit(); err != nil && !errors.Is(err, sql.ErrTxDone) {
++		t.Fatal(err)
++	}
++	if claimed.err != nil {
++		t.Fatal(claimed.err)
++	}
++	if claimed.job == nil || claimed.job.ID != earlier.ID {
++		t.Fatalf("claim during delayed enqueue = %+v, want earlier job %s", claimed.job, earlier.ID)
++	}
++
++	var earlierState, laterState string
++	if err := db.QueryRow(`SELECT state FROM ingest_jobs WHERE job_id = $1`, earlier.ID).Scan(&earlierState); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.QueryRow(`SELECT state FROM ingest_jobs WHERE job_id = $1`, later.ID).Scan(&laterState); err != nil {
++		t.Fatal(err)
++	}
++	if earlierState != string(ingestqueue.StateProcessing) || laterState != string(ingestqueue.StateQueued) {
++		t.Fatalf("states after delayed enqueue = earlier:%s later:%s", earlierState, laterState)
++	}
++}
++
++func TestIngestJobSameOwnerRecoveryFencesStaleAttempt(t *testing.T) {
++	db := ingestTestDB(t)
++	repo := NewIngestJobRepo(db)
++	job := enqueueJob(t, repo, enqueueInput("tenant-a", "session-a", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"))
++	first, err := repo.Claim(context.Background(), job.TenantID, "shared-owner", time.Minute, ingestqueue.MaxAttempts)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.Exec(`UPDATE ingest_jobs SET lease_expires_at = statement_timestamp() - interval '1 second' WHERE job_id = $1`, job.ID); err != nil {
++		t.Fatal(err)
++	}
++	recovered, err := repo.Claim(context.Background(), job.TenantID, "shared-owner", time.Minute, ingestqueue.MaxAttempts)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if recovered == nil || recovered.AttemptCount != first.AttemptCount+1 {
++		t.Fatalf("recovered job = %+v", recovered)
++	}
++	if err := repo.Heartbeat(context.Background(), first.LeaseRef(), time.Minute); !errors.Is(err, ingestqueue.ErrLeaseLost) {
++		t.Fatalf("stale attempt heartbeat = %v, want ErrLeaseLost", err)
++	}
++	if err := repo.StartPlanning(context.Background(), first.LeaseRef()); !errors.Is(err, ingestqueue.ErrLeaseLost) {
++		t.Fatalf("stale attempt transition = %v, want ErrLeaseLost", err)
++	}
++	if err := repo.StartPlanning(context.Background(), recovered.LeaseRef()); err != nil {
++		t.Fatalf("recovered attempt transition: %v", err)
++	}
++	if err := repo.SavePlan(
++		context.Background(),
++		first.LeaseRef(),
++		[]byte(`{"ops":[]}`),
++		0,
++	); !errors.Is(err, ingestqueue.ErrLeaseLost) {
++		t.Fatalf("stale attempt plan write = %v, want ErrLeaseLost", err)
++	}
++	if err := repo.SavePlan(
++		context.Background(),
++		recovered.LeaseRef(),
++		[]byte(`{"ops":[]}`),
++		0,
++	); err != nil {
++		t.Fatalf("recovered attempt plan write: %v", err)
++	}
++	if err := repo.Fail(
++		context.Background(),
++		first.LeaseRef(),
++		ingestqueue.Failure{State: ingestqueue.StateDead, ErrorClass: "stale"},
++	); !errors.Is(err, ingestqueue.ErrLeaseLost) {
++		t.Fatalf("stale attempt failure write = %v, want ErrLeaseLost", err)
++	}
++	if err := repo.Succeed(
++		context.Background(),
++		first.LeaseRef(),
++		0,
++	); !errors.Is(err, ingestqueue.ErrLeaseLost) {
++		t.Fatalf("stale attempt terminal write = %v, want ErrLeaseLost", err)
++	}
++	if err := repo.Succeed(
++		context.Background(),
++		recovered.LeaseRef(),
++		0,
++	); err != nil {
++		t.Fatalf("recovered attempt terminal write: %v", err)
++	}
++}
++
++func TestIngestJobLeaseDecisionsIgnoreProcessClockSkew(t *testing.T) {
++	db := ingestTestDB(t)
++	repo := NewIngestJobRepo(db)
++	job := enqueueJob(t, repo, enqueueInput("tenant-a", "session-a", "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"))
++	const lease = 500 * time.Millisecond
++	claimed, err := repo.Claim(context.Background(), job.TenantID, "worker-a", lease, ingestqueue.MaxAttempts)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if claimed == nil {
++		t.Fatal("initial claim returned nil")
++	}
++	assertDatabaseDeadline(t, db, job.ID, "lease_expires_at", lease)
++
++	if err := repo.Heartbeat(
++		context.Background(),
++		claimed.LeaseRef(),
++		lease,
++	); err != nil {
++		t.Fatal(err)
++	}
++	assertDatabaseDeadline(t, db, job.ID, "lease_expires_at", lease)
++
++	if err := repo.Fail(
++		context.Background(),
++		claimed.LeaseRef(),
++		ingestqueue.Failure{
++			State:      ingestqueue.StateRetryWait,
++			ErrorClass: "mantle_transient",
++			RetryDelay: lease,
++		},
++	); err != nil {
++		t.Fatal(err)
++	}
++	assertDatabaseDeadline(t, db, job.ID, "available_at", lease)
++
++	if recovered, err := repo.Claim(context.Background(), job.TenantID, "worker-b", lease, ingestqueue.MaxAttempts); err != nil || recovered != nil {
++		t.Fatalf("database-future retry became immediately eligible: job=%+v err=%v", recovered, err)
++	}
++}
++
++func TestIngestJobBlockedWritesUsePostLockDatabaseTime(t *testing.T) {
++	const (
++		activeLease = 3 * time.Second
++		deadline    = 400 * time.Millisecond
++		lockWait    = 600 * time.Millisecond
++	)
++	for _, test := range []struct {
++		name  string
++		write func(context.Context, *IngestJobRepo, *ingestqueue.Job) error
++		field string
++	}{
++		{
++			name: "heartbeat",
++			write: func(ctx context.Context, repo *IngestJobRepo, job *ingestqueue.Job) error {
++				return repo.Heartbeat(ctx, job.LeaseRef(), deadline)
++			},
++			field: "lease_expires_at",
++		},
++		{
++			name: "retry",
++			write: func(ctx context.Context, repo *IngestJobRepo, job *ingestqueue.Job) error {
++				return repo.Fail(
++					ctx,
++					job.LeaseRef(),
++					ingestqueue.Failure{
++						State:      ingestqueue.StateRetryWait,
++						ErrorClass: "mantle_transient",
++						RetryDelay: deadline,
++					},
++				)
++			},
++			field: "available_at",
++		},
++	} {
++		t.Run(test.name, func(t *testing.T) {
++			db := ingestTestDB(t)
++			repo := NewIngestJobRepo(db)
++			input := enqueueInput("tenant-a", "session-a", "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd")
++			job := enqueueJob(t, repo, input)
++			job, err := repo.Claim(
++				context.Background(),
++				job.TenantID,
++				"worker-a",
++				activeLease,
++				ingestqueue.MaxAttempts,
++			)
++			if err != nil {
++				t.Fatal(err)
++			}
++
++			blocker, err := db.BeginTx(context.Background(), nil)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer blocker.Rollback()
++			if _, err := blocker.Exec(
++				`SELECT 1 FROM ingest_jobs WHERE job_id = $1 FOR UPDATE`,
++				job.ID,
++			); err != nil {
++				t.Fatal(err)
++			}
++
++			started := make(chan struct{})
++			result := make(chan error, 1)
++			go func() {
++				close(started)
++				result <- test.write(context.Background(), repo, job)
++			}()
++			<-started
++			time.Sleep(lockWait)
++			if err := blocker.Commit(); err != nil {
++				t.Fatal(err)
++			}
++			if err := <-result; err != nil {
++				t.Fatal(err)
++			}
++			assertDatabaseDeadline(t, db, job.ID, test.field, deadline)
++		})
++	}
++}
++
++func assertDatabaseDeadline(t *testing.T, db *sql.DB, jobID, column string, want time.Duration) {
++	t.Helper()
++	var remainingSeconds float64
++	query := fmt.Sprintf(
++		`SELECT EXTRACT(EPOCH FROM (%s - statement_timestamp()))
++		 FROM ingest_jobs WHERE job_id = $1`,
++		column,
++	)
++	if err := db.QueryRow(query, jobID).Scan(&remainingSeconds); err != nil {
++		t.Fatal(err)
++	}
++	remaining := time.Duration(remainingSeconds * float64(time.Second))
++	if remaining <= want/2 || remaining > want {
++		t.Fatalf("%s remaining = %v, want (%v, %v]", column, remaining, want/2, want)
 +	}
 +}

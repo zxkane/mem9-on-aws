@@ -65,6 +65,10 @@ Design: [`docs/designs/durable-ingest-queue.md`](../designs/durable-ingest-queue
 | TC-INGEST-QUEUE-042 | Heartbeat keeps a long-running job alive | Other claimers cannot recover it before heartbeat stops and lease expires |
 | TC-INGEST-QUEUE-043 | Worker and repository errors include secret payload markers and tenant identifiers | Captured logs/metrics omit payload, plan, memory content, credentials, tenant, agent, app, and session identifiers |
 | TC-INGEST-QUEUE-044 | Worker is disabled or has no atomic processor | It makes no claims; production rejects enabled startup and never invokes the existing non-atomic reconcile path |
+| TC-INGEST-QUEUE-045 | An earlier same-scope enqueue holds its transaction open while a later row is visible to a concurrent claim and the connection default is `REPEATABLE READ` | Claim explicitly uses `READ COMMITTED`, waits for scope ownership, refreshes its snapshot, and claims only the earlier row; the later row remains queued |
+| TC-INGEST-QUEUE-046 | A lease expires and the same worker owner recovers the job with a new attempt generation | Every stale-attempt heartbeat/state/plan/terminal write fails as lease-lost; only the recovered generation can write |
+| TC-INGEST-QUEUE-047 | Worker and database clocks differ far in either direction | Claim eligibility, lease/heartbeat expiry, and retry availability remain anchored to PostgreSQL; repository calls pass durations only |
+| TC-INGEST-QUEUE-048 | A heartbeat or retry write waits on the job row longer than its requested duration | The write locks and revalidates first, then derives its deadline from a fresh database statement; the persisted deadline is not already expired |
 
 ## CI Evidence
 

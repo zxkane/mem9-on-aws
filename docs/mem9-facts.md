@@ -189,6 +189,10 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
 - Bootstrap applies the repeatable `ingest_jobs` migration inside the same
   operator-owned Aurora database. Canonical payloads and plans are not sent to
   logs, metrics, or another service.
+- Enqueue and claim serialize each tenant/agent/app/session scope with a
+  transaction advisory lock. The claim attempt count fences every owned write,
+  and lease/retry decisions use PostgreSQL's statement clock rather than the
+  worker process clock.
 
 ### LLM key is read ONCE at startup, immutable — decisive for the sidecar (verified 2026-07-12)
 Probed at the pinned commit (`server/internal/config/config.go` + `llm/client.go`):

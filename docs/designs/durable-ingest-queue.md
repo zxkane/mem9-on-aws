@@ -55,6 +55,7 @@ authenticated async messages request
   -> resolve agent/app/session/mode/defaults
   -> canonicalize ingest-v1 envelope and hash
   -> BEGIN
+       acquire transaction-scoped advisory lock for the tenant/session scope
        INSERT ingest_jobs
        ON CONFLICT (tenant_id, idempotency_key) return existing row
      COMMIT
@@ -74,15 +75,31 @@ commit returns non-2xx.
 
 ## FIFO And Claiming
 
-The scope is `(tenant_id, agent_id, app_id, session_id)`. A candidate is
-claimable only when no earlier nonterminal row exists in the same scope.
-Therefore a delayed retry or active lease at the head blocks later overlapping
-windows. `succeeded` and `dead` are terminal and unblock the next row.
+The scope is `(tenant_id, agent_id, app_id, session_id)`. Enqueue and claim use
+the same transaction-scoped PostgreSQL advisory lock derived from that scope.
+Enqueue acquires it before assigning database timestamps and inserting. Claim
+first locks a visible candidate with `FOR UPDATE SKIP LOCKED`, acquires the
+candidate scope's advisory lock, then re-reads the scope head in a new
+statement. Enqueue, claim, and owned writes explicitly request
+`READ COMMITTED`, independent of the database or role default. The second
+snapshot therefore includes any earlier enqueue that committed while claim
+waited for the scope lock, so an invisible in-progress enqueue cannot overlap a
+later job.
+
+A candidate is claimable only when no earlier nonterminal row exists in the same
+scope. Therefore a delayed retry or active lease at the head blocks later
+overlapping windows. `succeeded` and `dead` are terminal and unblock the next
+row. Advisory-lock hash collisions may serialize unrelated scopes but cannot
+relax ordering.
 
 Candidates are ordered by availability, creation time, and job ID. Concurrent
 claimers lock one candidate through `FOR UPDATE SKIP LOCKED`; an atomic update
 sets `processing`, increments the full-job attempt count, and records the lease
-owner/expiry. Different scopes remain independently claimable.
+owner/expiry. The incremented `attempt_count` is also the lease generation.
+Every owned write matches tenant, job, lease owner, eligible state, unexpired
+lease, and that generation. A stale attempt is fenced even when a worker process
+reuses its owner string after recovery. Different scopes remain independently
+claimable.
 
 An expired scope head already at five attempts is locked and moved to `dead`
 before selecting another candidate. It therefore cannot remain nonterminal and
@@ -94,8 +111,14 @@ block its scope forever after a worker crash.
 - Lease: 90 seconds.
 - Heartbeat: every 30 seconds, extending the lease.
 - Full-job context: 10 minutes.
+- Claim eligibility, lease expiry, heartbeat extension, and retry availability
+  are calculated from PostgreSQL's statement clock. Worker APIs pass durations,
+  never absolute process timestamps.
+- Owned writes first lock and validate the row, then calculate deadlines in a
+  second database statement. Time spent waiting for the row lock cannot consume
+  the new lease or retry duration.
 - Every heartbeat, transition, plan write, retry, and terminal write matches
-  tenant, job ID, eligible current state, and lease owner.
+  tenant, job ID, eligible current state, lease owner, and lease generation.
 - Shutdown stops claims, cancels active contexts, and leaves unfinished leased
   rows nonterminal. A later worker recovers them after lease expiry.
 - Processor outcome classes `proxy_validation_permanent` and

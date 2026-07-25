@@ -230,6 +230,8 @@ The bootstrap also applies the additive `ingest_jobs` migration. The patched
 server contains tenant-local enqueue, lease, FIFO, retry, and worker primitives,
 but ECS explicitly sets `MNEMO_DURABLE_INGEST_ENABLED=0` in every stage. With
 that flag off, asynchronous message ingest keeps its existing upstream behavior.
+Scope-level advisory locks serialize enqueue and claim, each claim attempt is a
+write-fencing generation, and PostgreSQL supplies lease and retry timestamps.
 No production processor is wired to the queue worker, so this foundation cannot
 call the existing non-atomic reconciliation path. The server fails startup if
 the flag is manually enabled before atomic processor/worker wiring exists.
