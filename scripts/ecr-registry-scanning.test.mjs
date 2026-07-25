@@ -416,15 +416,23 @@ describe("CloudFormation declarations", () => {
   });
 
   it("TC-ECR-SCAN-018: keeps singleton permissions on the operator identity", async () => {
-    const [source, wrapperSource, architecture] = await Promise.all([
+    const [
+      source,
+      roleBootstrapSource,
+      wrapperSource,
+      architecture,
+    ] = await Promise.all([
       readFile(
         join(repoRoot, "infra", "cloudformation", "github-actions-role.yaml"),
         "utf8",
       ),
+      readFile(join(repoRoot, "scripts", "deploy-github-role.sh"), "utf8"),
       readFile(wrapper, "utf8"),
       readFile(join(repoRoot, "docs", "ARCHITECTURE.md"), "utf8"),
     ]);
     const template = parseCloudFormation(source);
+    expect(template.Parameters.ProjectName.Default).toBe("mem9-on-aws");
+    expect(roleBootstrapSource).not.toContain("ParameterKey=ProjectName");
     const roleStatements = rolePolicyStatements(template, "GitHubActionsRole");
     const operatorPolicy = [...architecture.matchAll(/```json\n([\s\S]*?)\n```/g)]
       .map((match) => JSON.parse(match[1]))
