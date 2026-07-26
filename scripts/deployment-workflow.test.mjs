@@ -4,11 +4,13 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
+import { parse, parseDocument } from "yaml";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
 const workflowPath = resolve(root, ".github/workflows/infra-ci.yml");
 const rolePath = resolve(root, "infra/cloudformation/github-actions-role.yaml");
+const deployRolePath = resolve(here, "deploy-github-role.sh");
 const reconcilePath = resolve(here, "reconcile-ecs-deployment.mjs");
 const fakeAwsPath = resolve(here, "fixtures/fake-aws.mjs");
 const tempDirs = [];
@@ -38,16 +40,40 @@ function runFixture(name) {
   return { result, callRecords };
 }
 
-function actionSetForSid(source, sid) {
+function blockForSid(source, sid) {
   const start = source.indexOf(`- Sid: ${sid}`);
   expect(start, `missing IAM Sid ${sid}`).toBeGreaterThanOrEqual(0);
   const tail = source.slice(start);
   const next = tail.slice(1).search(/\n\s+- Sid: /);
-  const block = next >= 0 ? tail.slice(0, next + 1) : tail;
-  return [...block.matchAll(/^\s+- ((?:ecs|ssm):[A-Za-z]+)$/gm)].map((m) => m[1]);
+  return next >= 0 ? tail.slice(0, next + 1) : tail;
+}
+
+function actionSetForSid(source, sid) {
+  return [
+    ...blockForSid(source, sid).matchAll(
+      /^\s+- ((?:ec2|ecs|logs|ssm):[A-Za-z]+)$/gm,
+    ),
+  ].map(
+    (m) => m[1],
+  );
 }
 
 describe("workflow integration", () => {
+  it("runs IAM regression tests when the GitHub Actions role template changes", () => {
+    const workflow = parse(readFileSync(workflowPath, "utf8"));
+
+    for (const trigger of ["pull_request", "push"]) {
+      const paths = workflow.on[trigger].paths;
+      const exclusion = paths.indexOf("!infra/cloudformation/**");
+      const roleTemplate = paths.indexOf(
+        "infra/cloudformation/github-actions-role.yaml",
+      );
+
+      expect(exclusion).toBeGreaterThanOrEqual(0);
+      expect(roleTemplate).toBeGreaterThan(exclusion);
+    }
+  });
+
   it("runs the PostgreSQL durable-ingest integration suite in CI", () => {
     const workflow = readFileSync(workflowPath, "utf8");
     expect(workflow).toContain("bash scripts/run-ingest-queue-integration.sh");
@@ -98,6 +124,71 @@ describe("reconciliation IAM", () => {
         "ssm:GetParameters",
       ].sort(),
     );
+  });
+});
+
+describe("OAuth2 facade IAM", () => {
+  it("grants the documented CloudWatch Logs delivery lifecycle actions", () => {
+    const role = readFileSync(rolePath, "utf8");
+    const actions = actionSetForSid(role, "ApiGatewayV2AccessLogs");
+
+    expect(actions).toEqual(
+      expect.arrayContaining([
+        "logs:CreateLogDelivery",
+        "logs:PutResourcePolicy",
+        "logs:UpdateLogDelivery",
+        "logs:DeleteLogDelivery",
+        "logs:CreateLogGroup",
+        "logs:DescribeResourcePolicies",
+        "logs:GetLogDelivery",
+        "logs:ListLogDeliveries",
+      ]),
+    );
+  });
+});
+
+describe("Lambda VPC IAM", () => {
+  it("discovers the same application VPC and private subnets used by SST", () => {
+    const script = readFileSync(deployRolePath, "utf8");
+
+    expect(script).toContain(
+      'APPLICATION_REGION="${PROJECT_REGION:-ap-northeast-1}"',
+    );
+    expect(script).toContain('APPLICATION_VPC_ID="${MEM9_VPC_ID:-}"');
+    expect(script).toContain('"Name=tag:Name,Values=private-1*"');
+    for (const parameter of [
+      "OIDCProviderArn",
+      "ApplicationRegion",
+      "ApplicationVpcArn",
+      "ApplicationPrivateSubnetArns",
+    ]) {
+      expect(script).toContain(`"ParameterKey":"${parameter}"`);
+    }
+  });
+
+  it("scopes ENI cleanup to the application account, region, VPC, and subnets", () => {
+    const document = parseDocument(readFileSync(rolePath, "utf8"));
+    expect(document.errors).toEqual([]);
+    const template = document.toJS();
+    const statement =
+      template.Resources.LambdaProxyPolicy.Properties.PolicyDocument.Statement.find(
+        ({ Sid }) => Sid === "LambdaVpcEniCleanup",
+      );
+
+    expect(statement).toEqual({
+      Sid: "LambdaVpcEniCleanup",
+      Effect: "Allow",
+      Action: ["ec2:DeleteNetworkInterface"],
+      Resource: [
+        "arn:${AWS::Partition}:ec2:${ApplicationRegion}:${AWS::AccountId}:network-interface/*",
+      ],
+      Condition: {
+        ArnEquals: {
+          "ec2:Vpc": "ApplicationVpcArn",
+          "ec2:Subnet": "ApplicationPrivateSubnetArns",
+        },
+      },
+    });
   });
 });
 

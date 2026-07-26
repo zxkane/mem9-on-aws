@@ -43,6 +43,16 @@ Parameters:
       arn:aws:iam::<account-id>:oidc-provider/token.actions.githubusercontent.com
       — pass it so no duplicate is created (only one provider per URL per
       account is allowed).
+  ApplicationRegion:
+    Type: String
+    Default: ap-northeast-1
+    Description: AWS Region where the SST application and its Lambda VPC ENIs run.
+  ApplicationVpcArn:
+    Type: String
+    Description: ARN of the existing VPC used by the SST application.
+  ApplicationPrivateSubnetArns:
+    Type: CommaDelimitedList
+    Description: ARNs of the private subnets used by the proxy Lambda.
 
 Conditions:
   CreateOIDCProvider: !Equals [!Ref OIDCProviderArn, ""]
@@ -799,11 +809,13 @@ Resources:
   # Map's service-discovery and Route53 private-zone grants remain in ComputePolicy.
   # Its own ManagedPolicy stays under IAM's 6144-byte per-policy cap.
   #
-  # The Lambda's VPC ENIs are created by the LAMBDA SERVICE via the Lambda EXEC role
-  # (granted in infra/gateway.ts), NOT this deploy role — so no ec2:CreateNetworkInterface
-  # here (ec2:Describe* is already in ScaffoldPolicy.EC2VpcReadOnly). PassRole to
-  # lambda.amazonaws.com is already covered by ScaffoldPolicy.PassRoleConstrained, and
-  # the mem9-on-aws-* exec-role lifecycle by ComputePolicy.EcsTaskRoles. The Cloud Map
+  # The Lambda service creates VPC ENIs via the Lambda execution role (granted in
+  # infra/gateway.ts), so this deploy role does not need CreateNetworkInterface.
+  # During teardown Pulumi deletes detached Lambda ENIs before deleting the shared
+  # task security group, which requires the narrowly-scoped delete grant below.
+  # ec2:Describe* is already in ScaffoldPolicy.EC2VpcReadOnly. PassRole to
+  # lambda.amazonaws.com is covered by ScaffoldPolicy.PassRoleConstrained, and the
+  # mem9-on-aws-* exec-role lifecycle by ComputePolicy.EcsTaskRoles. The Cloud Map
   # + Route53-for-Cloud-Map grants live in ComputePolicy (near the ECS service).
   #
   # OUT-OF-BAND DEPLOY REQUIREMENT: apply this policy with
@@ -847,6 +859,16 @@ Resources:
               - lambda:DeleteFunctionConcurrency
             Resource:
               - !Sub arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:function:${ProjectName}-*
+          - Sid: LambdaVpcEniCleanup
+            Effect: Allow
+            Action:
+              - ec2:DeleteNetworkInterface
+            Resource:
+              - !Sub arn:${AWS::Partition}:ec2:${ApplicationRegion}:${AWS::AccountId}:network-interface/*
+            Condition:
+              ArnEquals:
+                ec2:Vpc: !Ref ApplicationVpcArn
+                ec2:Subnet: !Ref ApplicationPrivateSubnetArns
           - Sid: LambdaFunctionLogs
             # sst.aws.Function creates a CloudWatch log group at /aws/lambda/<fn>.
             # The CorePolicy/ComputePolicy Logs Sid only covers /sst/* groups, so the
@@ -1049,10 +1071,12 @@ Resources:
               - logs:UntagResource
               - logs:ListTagsForResource
               - logs:DescribeLogGroups
-              # Delivery API actions needed by CreateStage's access-logging setup.
+              # Delivery API actions needed by the CreateStage/DeleteStage
+              # access-logging lifecycle.
               - logs:CreateLogDelivery
               - logs:DeleteLogDelivery
               - logs:GetLogDelivery
+              - logs:ListLogDeliveries
               - logs:UpdateLogDelivery
               - logs:PutDeliverySource
               - logs:PutDeliveryDestination

@@ -33,6 +33,10 @@ TEMPLATE_FILE="infra/cloudformation/github-actions-role.yaml"
 # in different regions (EntityAlreadyExists rollback). Keep all GitHub Actions
 # role stacks in one region so they share one OIDC provider collision-free.
 REGION="${AWS_REGION:-us-west-2}"
+# The application remains regional even though the IAM stack is pinned elsewhere.
+# Match infra/vpc.ts: use MEM9_VPC_ID when configured, otherwise the default VPC,
+# and authorize only the NAT-routed private-1* subnets selected by the app.
+APPLICATION_REGION="${PROJECT_REGION:-ap-northeast-1}"
 
 MODE=""
 for arg in "$@"; do
@@ -108,7 +112,71 @@ if [[ "$OIDC_PROVIDER_ARN" == "None" ]]; then
 else
   echo "OIDC ARN: $OIDC_PROVIDER_ARN"
 fi
-PARAMS=("ParameterKey=OIDCProviderArn,ParameterValue=$OIDC_PROVIDER_ARN")
+
+APPLICATION_VPC_ID="${MEM9_VPC_ID:-}"
+if [[ -z "$APPLICATION_VPC_ID" ]]; then
+  if ! APPLICATION_VPC_ID=$(aws ec2 describe-vpcs \
+      --region "$APPLICATION_REGION" \
+      --filters Name=is-default,Values=true \
+      --query "Vpcs[0].VpcId" \
+      --output text); then
+    echo "Error: failed to resolve the default VPC in $APPLICATION_REGION." >&2
+    exit 1
+  fi
+else
+  if ! aws ec2 describe-vpcs \
+      --region "$APPLICATION_REGION" \
+      --vpc-ids "$APPLICATION_VPC_ID" \
+      --query "Vpcs[0].VpcId" \
+      --output text >/dev/null; then
+    echo "Error: MEM9_VPC_ID does not resolve in $APPLICATION_REGION." >&2
+    exit 1
+  fi
+fi
+if [[ -z "$APPLICATION_VPC_ID" || "$APPLICATION_VPC_ID" == "None" ]]; then
+  echo "Error: no application VPC resolved in $APPLICATION_REGION." >&2
+  exit 1
+fi
+
+if ! PRIVATE_SUBNET_TEXT=$(aws ec2 describe-subnets \
+    --region "$APPLICATION_REGION" \
+    --filters \
+      "Name=vpc-id,Values=$APPLICATION_VPC_ID" \
+      "Name=tag:Name,Values=private-1*" \
+    --query "sort_by(Subnets, &SubnetId)[].SubnetId" \
+    --output text); then
+  echo "Error: failed to resolve application private subnets in $APPLICATION_REGION." >&2
+  exit 1
+fi
+read -r -a PRIVATE_SUBNET_IDS <<< "$PRIVATE_SUBNET_TEXT"
+if [[ ${#PRIVATE_SUBNET_IDS[@]} -eq 0 || "$PRIVATE_SUBNET_TEXT" == "None" ]]; then
+  echo "Error: no private-1* subnets found in the application VPC." >&2
+  exit 1
+fi
+for subnet_id in "${PRIVATE_SUBNET_IDS[@]}"; do
+  if [[ ! "$subnet_id" =~ ^subnet-[0-9a-f]+$ ]]; then
+    echo "Error: invalid private subnet id returned by EC2." >&2
+    exit 1
+  fi
+done
+
+ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+CALLER_ARN=$(aws sts get-caller-identity --query Arn --output text)
+PARTITION=$(cut -d: -f2 <<< "$CALLER_ARN")
+APPLICATION_VPC_ARN="arn:${PARTITION}:ec2:${APPLICATION_REGION}:${ACCOUNT_ID}:vpc/${APPLICATION_VPC_ID}"
+APPLICATION_SUBNET_ARNS=""
+for subnet_id in "${PRIVATE_SUBNET_IDS[@]}"; do
+  [[ -n "$APPLICATION_SUBNET_ARNS" ]] && APPLICATION_SUBNET_ARNS+=","
+  APPLICATION_SUBNET_ARNS+="arn:${PARTITION}:ec2:${APPLICATION_REGION}:${ACCOUNT_ID}:subnet/${subnet_id}"
+done
+
+PARAMS_JSON=$(printf \
+  '[{"ParameterKey":"OIDCProviderArn","ParameterValue":"%s"},{"ParameterKey":"ApplicationRegion","ParameterValue":"%s"},{"ParameterKey":"ApplicationVpcArn","ParameterValue":"%s"},{"ParameterKey":"ApplicationPrivateSubnetArns","ParameterValue":"%s"}]' \
+  "$OIDC_PROVIDER_ARN" \
+  "$APPLICATION_REGION" \
+  "$APPLICATION_VPC_ARN" \
+  "$APPLICATION_SUBNET_ARNS")
+echo "ENI scope: $APPLICATION_REGION, one VPC, ${#PRIVATE_SUBNET_IDS[@]} private subnet(s)"
 
 # Auto-detect create vs update when the caller did not pass --create / --update.
 if [[ -z "$MODE" ]]; then
@@ -128,7 +196,7 @@ case "$MODE" in
     aws cloudformation create-stack \
       --stack-name "$STACK_NAME" \
       "${TEMPLATE_ARG[@]}" \
-      --parameters "${PARAMS[@]}" \
+      --parameters "$PARAMS_JSON" \
       --capabilities CAPABILITY_NAMED_IAM \
       --region "$REGION" \
       --tags Key=Project,Value=mem9-on-aws Key=ManagedBy,Value=cli
@@ -145,7 +213,7 @@ case "$MODE" in
     UPDATE_OUTPUT=$(aws cloudformation update-stack \
       --stack-name "$STACK_NAME" \
       "${TEMPLATE_ARG[@]}" \
-      --parameters "${PARAMS[@]}" \
+      --parameters "$PARAMS_JSON" \
       --capabilities CAPABILITY_NAMED_IAM \
       --region "$REGION" 2>&1)
     UPDATE_EXIT=$?
