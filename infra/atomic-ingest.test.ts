@@ -51,10 +51,34 @@ describe("atomic durable ingest wiring", () => {
     expect(workflow).not.toContain("Enable durable ingest after bootstrap");
     expect(dockerfile).toContain("postgresql-client");
     expect(dockerfile).toContain("001_ingest_jobs.sql");
-    expect(entrypoint).toContain('PGDATABASE="$MNEMO_DSN" psql');
-    expect(entrypoint.indexOf('PGDATABASE="$MNEMO_DSN" psql')).toBeLessThan(
+    expect(entrypoint).not.toContain('PGDATABASE="$MNEMO_DSN" psql');
+    expect(entrypoint).toContain('psql --dbname="$MNEMO_DSN"');
+    expect(entrypoint).toContain('PGDATABASE="$MEM9_DB_NAME"');
+    expect(entrypoint).toContain('PGPASSWORD="$DB_PASS"');
+    expect(entrypoint).toContain("PGCONNECT_TIMEOUT");
+    expect(entrypoint).toContain('while [ "$i" -le "$MIGRATION_MAX_ATTEMPTS" ]');
+    expect(entrypoint).toContain("MIGRATION_RETRY_DELAY_SECONDS");
+    expect(entrypoint).toContain("MIGRATION_SUCCEEDED=false");
+    expect(entrypoint).toContain('if [ "$MIGRATION_SUCCEEDED" != true ]');
+    expect(entrypoint).toContain('if [ "$MIGRATION_RETRY_BUDGET_SECONDS" -ge 300 ]');
+    expect(entrypoint.indexOf('psql --dbname="$MNEMO_DSN"')).toBeLessThan(
       entrypoint.indexOf("exec /usr/local/bin/mnemo-server"),
     );
+    const attempts = Number(
+      entrypoint.match(/MNEMO_MIGRATION_MAX_ATTEMPTS:-([0-9]+)/)?.[1],
+    );
+    const connectTimeout = Number(
+      entrypoint.match(/PGCONNECT_TIMEOUT:-([0-9]+)/)?.[1],
+    );
+    const retryDelay = Number(
+      entrypoint.match(/MNEMO_MIGRATION_RETRY_DELAY_SECONDS:-([0-9]+)/)?.[1],
+    );
+    const startupGrace = Number(
+      ecs.match(/startPeriod: "([0-9]+) seconds"/)?.[1],
+    );
+    const worstCaseRetryBudget =
+      attempts * connectTimeout + (attempts - 1) * retryDelay;
+    expect(worstCaseRetryBudget).toBeLessThan(startupGrace);
     expect(ecs).toContain("MEM9_TENANT_ID");
     expect(config).toContain("tenantIdentity");
     expect(patch).toContain("NewWorker");

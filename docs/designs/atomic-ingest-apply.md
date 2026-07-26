@@ -189,12 +189,17 @@ same Secrets Manager value can be injected into both bootstrap and
 - the atomic processor and worker wiring.
 
 The `mnemo-server` image includes the repeatable atomic migration. Its
-entrypoint applies that migration before starting the server or worker, keeping
-the credential-bearing DSN out of process arguments. CI performs one rollout
-with `MNEMO_DURABLE_INGEST_ENABLED=1`, reconciles the healthy replacement, and
-then runs the one-shot bootstrap for the complete base schema and tenant seed.
-The worker uses the existing database handle because this deployment's control
-and single tenant data plane intentionally share the Aurora database.
+entrypoint applies that migration before starting the server or worker. The ECS
+path passes discrete libpq connection variables so the credential-bearing DSN
+stays out of process arguments, and retries transient connection failures with
+a bounded timeout. CI performs one rollout with
+`MNEMO_DURABLE_INGEST_ENABLED=1`; its live-image smoke exercises the same
+secret-derived connection contract over TLS, verifies a delayed database is
+retried, and requires the atomic relations before health can pass. CI then
+reconciles the healthy replacement and runs the one-shot bootstrap for the
+complete base schema and tenant seed. The worker uses the existing database
+handle because this deployment's control and single tenant data plane
+intentionally share the Aurora database.
 
 ## Privacy
 
