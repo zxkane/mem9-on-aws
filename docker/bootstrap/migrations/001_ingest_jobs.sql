@@ -51,9 +51,28 @@ ALTER TABLE ingest_jobs ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL
 ALTER TABLE ingest_jobs ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 ALTER TABLE ingest_jobs ADD COLUMN IF NOT EXISTS completed_at TIMESTAMPTZ NULL;
 
+-- The first foundation revision used an indistinguishable 64-hex synthetic key
+-- for upgraded rows. Remove its length-only constraint before moving those keys
+-- into a reserved namespace. Keep the current constraint untouched on repeats.
+DO $$
+BEGIN
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'ingest_jobs'::regclass
+          AND conname = 'ck_ingest_jobs_idempotency_key'
+          AND position(
+              'legacy:' IN pg_get_constraintdef(oid)
+          ) = 0
+    ) THEN
+        ALTER TABLE ingest_jobs DROP CONSTRAINT ck_ingest_jobs_idempotency_key;
+    END IF;
+END
+$$;
+
 UPDATE ingest_jobs
-SET idempotency_key = md5(job_id) || md5('ingest-v1:' || job_id)
-WHERE idempotency_key IS NULL;
+SET idempotency_key = 'legacy:' || job_id
+WHERE idempotency_key IS NULL
+   OR idempotency_key = md5(job_id) || md5('ingest-v1:' || job_id);
 ALTER TABLE ingest_jobs ALTER COLUMN idempotency_key SET NOT NULL;
 
 DO $$
@@ -81,7 +100,30 @@ BEGIN
           AND conname = 'ck_ingest_jobs_idempotency_key'
     ) THEN
         ALTER TABLE ingest_jobs ADD CONSTRAINT ck_ingest_jobs_idempotency_key
-            CHECK (length(idempotency_key) = 64);
+            CHECK (
+                idempotency_key ~ '^[0-9a-f]{64}$'
+                OR idempotency_key = 'legacy:' || job_id
+            );
+    END IF;
+    IF NOT EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'ingest_jobs'::regclass
+          AND conname = 'ck_ingest_jobs_payload_size'
+    ) THEN
+        ALTER TABLE ingest_jobs ADD CONSTRAINT ck_ingest_jobs_payload_size
+            CHECK (octet_length(canonical_payload) <= 1048576) NOT VALID;
+    END IF;
+    IF EXISTS (
+        SELECT 1 FROM pg_constraint
+        WHERE conrelid = 'ingest_jobs'::regclass
+          AND conname = 'ck_ingest_jobs_payload_size'
+          AND NOT convalidated
+    ) AND NOT EXISTS (
+        SELECT 1 FROM ingest_jobs
+        WHERE octet_length(canonical_payload) > 1048576
+    ) THEN
+        ALTER TABLE ingest_jobs
+            VALIDATE CONSTRAINT ck_ingest_jobs_payload_size;
     END IF;
     IF NOT EXISTS (
         SELECT 1 FROM pg_constraint
@@ -108,6 +150,10 @@ CREATE INDEX IF NOT EXISTS idx_ingest_jobs_fifo
 CREATE INDEX IF NOT EXISTS idx_ingest_jobs_claim
     ON ingest_jobs (tenant_id, available_at, created_at, job_id)
     WHERE state IN ('queued', 'retry_wait', 'processing', 'planning', 'applying');
+
+CREATE INDEX IF NOT EXISTS idx_ingest_jobs_claim_cursor
+    ON ingest_jobs (tenant_id, created_at, job_id)
+    WHERE state NOT IN ('succeeded', 'dead');
 
 CREATE INDEX IF NOT EXISTS idx_ingest_jobs_lease
     ON ingest_jobs (tenant_id, lease_expires_at)

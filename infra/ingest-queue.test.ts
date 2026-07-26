@@ -57,11 +57,22 @@ describe("durable ingest migration", () => {
       "uq_ingest_jobs_tenant_idempotency",
       "idx_ingest_jobs_fifo",
       "idx_ingest_jobs_claim",
+      "idx_ingest_jobs_claim_cursor",
       "idx_ingest_jobs_lease",
       "idx_ingest_jobs_status",
     ]) {
       expect(migration).toContain(index);
     }
+    expect(migration).toContain("legacy:' || job_id");
+    expect(migration).toContain("octet_length(canonical_payload) <= 1048576");
+    expect(migration).toContain("ck_ingest_jobs_payload_size\n            CHECK");
+    expect(migration).toContain("NOT VALID");
+    expect(migration).toContain("AND NOT convalidated");
+    expect(migration).toContain("VALIDATE CONSTRAINT ck_ingest_jobs_payload_size");
+    expect(migration).toContain(
+      "idempotency_key = md5(job_id) || md5('ingest-v1:' || job_id)",
+    );
+    expect(migration).not.toContain("SET idempotency_key = md5");
     expect(migration).toMatch(/ADD COLUMN IF NOT EXISTS/);
     expect(migration.toLowerCase()).not.toMatch(
       /\b(api_key|authorization|credential|password|secret|access_token)\b/,

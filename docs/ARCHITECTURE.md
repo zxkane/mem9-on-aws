@@ -232,9 +232,15 @@ but ECS explicitly sets `MNEMO_DURABLE_INGEST_ENABLED=0` in every stage. With
 that flag off, asynchronous message ingest keeps its existing upstream behavior.
 Scope-level advisory locks serialize enqueue and claim, each claim attempt is a
 write-fencing generation, and PostgreSQL supplies lease and retry timestamps.
+Claim traverses finite high-water sweeps in bounded candidate pages,
+nonblockingly tries advisory locks before taking any row lock, locks only the
+exact FIFO head, limits new canonical envelopes to 1 MiB, and terminalizes only
+one exhausted head per transaction.
 No production processor is wired to the queue worker, so this foundation cannot
 call the existing non-atomic reconciliation path. The server fails startup if
-the flag is manually enabled before atomic processor/worker wiring exists.
+the flag is manually enabled before atomic processor/worker wiring exists. A
+future enablement must also preserve upstream runtime-usage metering and
+memory-added webhook side effects, which the inert enqueue route does not run.
 
 Memory rows and embeddings are durable in Aurora. The Fargate task uses `/tmp`
 only for mem9's batch-import implementation; normal add, search, and CRUD paths
@@ -428,8 +434,8 @@ The open reliability program covers future work in these areas:
 - Release image tag selection and read-only ECS actual-state reconciliation.
 - Mandatory alert delivery with separate transport and execution failure queues.
 - Safe preview-stage reconciliation and a separately reviewed one-time cleanup.
-- Atomic ingest plan application, enabling the durable route, tenant-scoped job
-  status, and job-level telemetry.
+- Atomic ingest plan application, metering/webhook finalization, enabling the
+  durable route, tenant-scoped job status, and job-level telemetry.
 - A post-deployment production reliability verification exercise.
 
 The current async smart-ingest path must not be described as a durable queue or

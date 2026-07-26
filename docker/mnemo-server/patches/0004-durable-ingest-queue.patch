@@ -130,10 +130,10 @@ index 0000000..62731e1
 +}
 diff --git a/server/internal/handler/durable_ingest_test.go b/server/internal/handler/durable_ingest_test.go
 new file mode 100644
-index 0000000..5e847d1
+index 0000000..2a56645
 --- /dev/null
 +++ b/server/internal/handler/durable_ingest_test.go
-@@ -0,0 +1,361 @@
+@@ -0,0 +1,389 @@
 +package handler
 +
 +import (
@@ -146,6 +146,7 @@ index 0000000..5e847d1
 +	"os"
 +	"strings"
 +	"sync"
++	"sync/atomic"
 +	"testing"
 +	"time"
 +
@@ -434,6 +435,33 @@ index 0000000..5e847d1
 +	}
 +}
 +
++func TestDurableIngestRejectsOversizedCanonicalPayload(t *testing.T) {
++	srv := newTestServer(&testMemoryRepo{}, &testSessionRepo{}).WithDurableIngest(true)
++	var enqueueCalls atomic.Int32
++	srv.ingestRepoFactory = func(string, *sql.DB) ingestqueue.Repository {
++		return &handlerIngestRepo{
++			enqueue: func(context.Context, ingestqueue.EnqueueInput) (*ingestqueue.Job, error) {
++				enqueueCalls.Add(1)
++				return nil, errors.New("must not enqueue")
++			},
++		}
++	}
++	req := durableRequest(t, "tenant-a", nil, map[string]any{
++		"messages": []map[string]string{{
++			"role":    "user",
++			"content": strings.Repeat("a", ingestqueue.MaxCanonicalPayloadBytes),
++		}},
++	})
++	rr := httptest.NewRecorder()
++	srv.createMemory(rr, req)
++	if rr.Code != http.StatusBadRequest {
++		t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
++	}
++	if enqueueCalls.Load() != 0 {
++		t.Fatalf("oversized request made %d enqueue calls", enqueueCalls.Load())
++	}
++}
++
 +func TestDurableIngestPostgresCommitAndDedupIntegration(t *testing.T) {
 +	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
 +	if dsn == "" {
@@ -545,7 +573,7 @@ index c5fe14e..4edbd6c 100644
  // Services are always backed by the tenant's dedicated DB.
  type resolvedSvc struct {
 diff --git a/server/internal/handler/memory.go b/server/internal/handler/memory.go
-index 39e40f1..733a473 100644
+index 39e40f1..bff6a81 100644
 --- a/server/internal/handler/memory.go
 +++ b/server/internal/handler/memory.go
 @@ -14,7 +14,9 @@ import (
@@ -584,7 +612,7 @@ index 39e40f1..733a473 100644
  		if req.Sync {
  			syncCtx, cancel := context.WithTimeout(r.Context(), syncIngestTimeout)
  			defer cancel()
-@@ -515,6 +536,56 @@ func (s *Server) createMemory(w http.ResponseWriter, r *http.Request) {
+@@ -515,6 +536,62 @@ func (s *Server) createMemory(w http.ResponseWriter, r *http.Request) {
  	}
  }
  
@@ -615,6 +643,12 @@ index 39e40f1..733a473 100644
 +		Metadata:           req.Metadata,
 +	})
 +	if err != nil {
++		if errors.Is(err, ingestqueue.ErrCanonicalPayloadTooLarge) {
++			return nil, &domain.ValidationError{
++				Field:   "body",
++				Message: fmt.Sprintf("canonical ingest payload exceeds %d bytes", ingestqueue.MaxCanonicalPayloadBytes),
++			}
++		}
 +		return nil, &domain.ValidationError{Field: "metadata", Message: "metadata must contain finite JSON values"}
 +	}
 +	repo := s.ingestRepoFactory(s.dbBackend, auth.TenantDB)
@@ -643,10 +677,10 @@ index 39e40f1..733a473 100644
  func (s *Server) ingestMessages(ctx context.Context, auth *domain.AuthInfo, svc resolvedSvc, req service.IngestRequest, chainAuth *domain.AuthInfo) (*service.IngestResult, error) {
 diff --git a/server/internal/ingestqueue/canonical.go b/server/internal/ingestqueue/canonical.go
 new file mode 100644
-index 0000000..d7bf17f
+index 0000000..b528e4e
 --- /dev/null
 +++ b/server/internal/ingestqueue/canonical.go
-@@ -0,0 +1,191 @@
+@@ -0,0 +1,198 @@
 +package ingestqueue
 +
 +import (
@@ -701,6 +735,13 @@ index 0000000..d7bf17f
 +	var payload bytes.Buffer
 +	if err := writeCanonicalJSON(&payload, envelope); err != nil {
 +		return CanonicalEnvelope{}, err
++	}
++	if payload.Len() > MaxCanonicalPayloadBytes {
++		return CanonicalEnvelope{}, fmt.Errorf(
++			"%w: maximum is %d bytes",
++			ErrCanonicalPayloadTooLarge,
++			MaxCanonicalPayloadBytes,
++		)
 +	}
 +	sum := sha256.Sum256(payload.Bytes())
 +	return CanonicalEnvelope{
@@ -840,15 +881,16 @@ index 0000000..d7bf17f
 +}
 diff --git a/server/internal/ingestqueue/canonical_test.go b/server/internal/ingestqueue/canonical_test.go
 new file mode 100644
-index 0000000..23062bb
+index 0000000..3d041c4
 --- /dev/null
 +++ b/server/internal/ingestqueue/canonical_test.go
-@@ -0,0 +1,171 @@
+@@ -0,0 +1,190 @@
 +package ingestqueue
 +
 +import (
 +	"bytes"
 +	"encoding/json"
++	"errors"
 +	"strings"
 +	"testing"
 +)
@@ -1015,12 +1057,30 @@ index 0000000..23062bb
 +		t.Fatalf("large integer lost precision: %s", b.Payload)
 +	}
 +}
++
++func TestCanonicalizePayloadSizeBoundary(t *testing.T) {
++	input := canonicalInput()
++	input.Messages = []Message{{Role: "user"}}
++	input.Metadata = nil
++	empty := mustCanonical(t, input)
++
++	input.Messages[0].Content = strings.Repeat("a", MaxCanonicalPayloadBytes-len(empty.Payload))
++	atLimit := mustCanonical(t, input)
++	if len(atLimit.Payload) != MaxCanonicalPayloadBytes {
++		t.Fatalf("payload size = %d, want %d", len(atLimit.Payload), MaxCanonicalPayloadBytes)
++	}
++
++	input.Messages[0].Content += "a"
++	if _, err := Canonicalize(input); !errors.Is(err, ErrCanonicalPayloadTooLarge) {
++		t.Fatalf("oversized payload error = %v, want ErrCanonicalPayloadTooLarge", err)
++	}
++}
 diff --git a/server/internal/ingestqueue/types.go b/server/internal/ingestqueue/types.go
 new file mode 100644
-index 0000000..e23b26e
+index 0000000..775a61a
 --- /dev/null
 +++ b/server/internal/ingestqueue/types.go
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,133 @@
 +package ingestqueue
 +
 +import (
@@ -1041,12 +1101,15 @@ index 0000000..e23b26e
 +	StateSucceeded  State = "succeeded"
 +	StateDead       State = "dead"
 +
-+	MaxAttempts = 5
++	MaxAttempts              = 5
++	MaxCanonicalPayloadBytes = 1 << 20
 +)
 +
 +var (
-+	ErrLeaseLost            = errors.New("ingest job lease lost")
-+	ErrProcessorUnavailable = errors.New("durable ingest processor unavailable")
++	ErrLeaseLost                = errors.New("ingest job lease lost")
++	ErrProcessorUnavailable     = errors.New("durable ingest processor unavailable")
++	ErrCanonicalPayloadTooLarge = errors.New("canonical ingest payload too large")
++	ErrClaimContention          = errors.New("ingest job claim contention")
 +)
 +
 +type Message struct {
@@ -1153,10 +1216,10 @@ index 0000000..e23b26e
 +}
 diff --git a/server/internal/ingestqueue/worker.go b/server/internal/ingestqueue/worker.go
 new file mode 100644
-index 0000000..5c5b8f8
+index 0000000..392cfbc
 --- /dev/null
 +++ b/server/internal/ingestqueue/worker.go
-@@ -0,0 +1,344 @@
+@@ -0,0 +1,364 @@
 +package ingestqueue
 +
 +import (
@@ -1175,6 +1238,7 @@ index 0000000..5c5b8f8
 +
 +const failureWriteTimeout = 5 * time.Second
 +const maxWorkerConcurrency = 2
++const maxImmediateClaimRetries = 3
 +
 +var processSemaphore = make(chan struct{}, maxWorkerConcurrency)
 +
@@ -1258,6 +1322,7 @@ index 0000000..5c5b8f8
 +	workerSemaphore := make(chan struct{}, w.config.Concurrency)
 +	var active sync.WaitGroup
 +	defer active.Wait()
++	immediateClaimRetries := 0
 +
 +	for {
 +		select {
@@ -1276,12 +1341,23 @@ index 0000000..5c5b8f8
 +		if err != nil {
 +			<-processSemaphore
 +			<-workerSemaphore
-+			w.logger.Error("durable ingest claim failed", "operation", "claim")
++			errorClass, retryImmediately := classifyClaimError(err)
++			w.logger.Error(
++				"durable ingest claim failed",
++				"operation", "claim",
++				"error_class", errorClass,
++			)
++			if retryImmediately && immediateClaimRetries < maxImmediateClaimRetries {
++				immediateClaimRetries++
++				continue
++			}
++			immediateClaimRetries = 0
 +			if !waitForWorker(workerCtx, w.config.PollInterval) {
 +				return nil
 +			}
 +			continue
 +		}
++		immediateClaimRetries = 0
 +		if job == nil {
 +			<-processSemaphore
 +			<-workerSemaphore
@@ -1301,6 +1377,13 @@ index 0000000..5c5b8f8
 +			w.process(workerCtx, job)
 +		}()
 +	}
++}
++
++func classifyClaimError(err error) (string, bool) {
++	if errors.Is(err, ErrClaimContention) {
++		return "database_contention", true
++	}
++	return "database_error", false
 +}
 +
 +func waitForWorker(ctx context.Context, duration time.Duration) bool {
@@ -1750,10 +1833,10 @@ index 0000000..ea29148
 +}
 diff --git a/server/internal/ingestqueue/worker_test.go b/server/internal/ingestqueue/worker_test.go
 new file mode 100644
-index 0000000..0ee3906
+index 0000000..39f0ce2
 --- /dev/null
 +++ b/server/internal/ingestqueue/worker_test.go
-@@ -0,0 +1,411 @@
+@@ -0,0 +1,495 @@
 +package ingestqueue
 +
 +import (
@@ -1761,6 +1844,7 @@ index 0000000..0ee3906
 +	"context"
 +	"encoding/json"
 +	"errors"
++	"fmt"
 +	"io"
 +	"log/slog"
 +	"strconv"
@@ -1940,6 +2024,89 @@ index 0000000..0ee3906
 +	if repo.claimCalls.Load() != 0 {
 +		t.Fatalf("processor-less worker made %d claims", repo.claimCalls.Load())
 +	}
++}
++
++func TestWorkerClaimErrorRetryPolicy(t *testing.T) {
++	t.Run("contention retries three times then polls", func(t *testing.T) {
++		calls := make(chan struct{}, maxImmediateClaimRetries+2)
++		repo := &fakeRepo{
++			claim: func(context.Context, string, string, time.Duration, int) (*Job, error) {
++				calls <- struct{}{}
++				return nil, fmt.Errorf("%w: database details must stay private", ErrClaimContention)
++			},
++		}
++		var logs bytes.Buffer
++		cfg := DefaultWorkerConfig()
++		cfg.Enabled = true
++		cfg.PollInterval = time.Hour
++		ctx, cancel := context.WithCancel(context.Background())
++		worker := NewWorker(
++			repo,
++			fakeProcessor{},
++			"tenant",
++			"owner",
++			cfg,
++			slog.New(slog.NewJSONHandler(&logs, nil)),
++		)
++		done := make(chan error, 1)
++		go func() { done <- worker.Run(ctx) }()
++		for call := 1; call <= maxImmediateClaimRetries+1; call++ {
++			select {
++			case <-calls:
++			case <-time.After(2 * time.Second):
++				t.Fatalf("contention claim %d did not run immediately", call)
++			}
++		}
++		select {
++		case <-calls:
++			t.Fatal("contention exceeded the immediate retry bound")
++		case <-time.After(50 * time.Millisecond):
++		}
++		cancel()
++		<-done
++		if !strings.Contains(logs.String(), `"error_class":"database_contention"`) {
++			t.Fatalf("contention log missing safe class: %s", logs.String())
++		}
++		if strings.Contains(logs.String(), "database details") {
++			t.Fatalf("contention log leaked database error: %s", logs.String())
++		}
++	})
++
++	t.Run("other errors use poll interval", func(t *testing.T) {
++		calls := make(chan struct{}, 2)
++		repo := &fakeRepo{
++			claim: func(context.Context, string, string, time.Duration, int) (*Job, error) {
++				calls <- struct{}{}
++				return nil, errors.New("private database failure")
++			},
++		}
++		cfg := DefaultWorkerConfig()
++		cfg.Enabled = true
++		cfg.PollInterval = time.Hour
++		ctx, cancel := context.WithCancel(context.Background())
++		worker := NewWorker(
++			repo,
++			fakeProcessor{},
++			"tenant",
++			"owner",
++			cfg,
++			slog.New(slog.NewTextHandler(io.Discard, nil)),
++		)
++		done := make(chan error, 1)
++		go func() { done <- worker.Run(ctx) }()
++		select {
++		case <-calls:
++		case <-time.After(2 * time.Second):
++			t.Fatal("non-contention claim did not run")
++		}
++		select {
++		case <-calls:
++			t.Fatal("non-contention claim retried before the poll interval")
++		case <-time.After(50 * time.Millisecond):
++		}
++		cancel()
++		<-done
++	})
 +}
 +
 +func TestWorkerPersistsPlanAndSuccessWithOwner(t *testing.T) {
@@ -2194,10 +2361,10 @@ index c0c9bd2..929b8ea 100644
  	switch backend {
 diff --git a/server/internal/repository/postgres/ingest_job.go b/server/internal/repository/postgres/ingest_job.go
 new file mode 100644
-index 0000000..1ad0d90
+index 0000000..39986ad
 --- /dev/null
 +++ b/server/internal/repository/postgres/ingest_job.go
-@@ -0,0 +1,528 @@
+@@ -0,0 +1,700 @@
 +package postgres
 +
 +import (
@@ -2207,6 +2374,7 @@ index 0000000..1ad0d90
 +	"errors"
 +	"fmt"
 +	"strings"
++	"sync"
 +	"time"
 +
 +	"github.com/qiffang/mnemos/server/internal/ingestqueue"
@@ -2219,8 +2387,20 @@ index 0000000..1ad0d90
 +	heartbeat_at, plan_payload, plan_warning_count, apply_warning_count,
 +	warning_count, error_class, created_at, updated_at, completed_at`
 +
++const ownedTransitionGuardQuery = `
++	SELECT 1
++	FROM ingest_jobs
++	WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
++	  AND attempt_count = $4
++	  AND state IN ('processing', 'planning', 'applying')
++	  AND lease_expires_at > statement_timestamp()
++	FOR UPDATE`
++
++const maxClaimCandidateScopes = 32
++
 +type IngestJobRepo struct {
-+	db *sql.DB
++	db           *sql.DB
++	claimCursors sync.Map
 +}
 +
 +type ingestJobScope struct {
@@ -2230,11 +2410,32 @@ index 0000000..1ad0d90
 +	sessionID string
 +}
 +
++type ingestJobCandidate struct {
++	scope     ingestJobScope
++	createdAt time.Time
++	jobID     string
++}
++
++type ingestJobClaimCursor struct {
++	afterSet      bool
++	afterCreated  time.Time
++	afterJobID    string
++	highCreatedAt time.Time
++	highJobID     string
++}
++
 +func NewIngestJobRepo(db *sql.DB) *IngestJobRepo {
 +	return &IngestJobRepo{db: db}
 +}
 +
 +func (r *IngestJobRepo) Enqueue(ctx context.Context, input ingestqueue.EnqueueInput) (*ingestqueue.Job, error) {
++	if len(input.CanonicalPayload) > ingestqueue.MaxCanonicalPayloadBytes {
++		return nil, fmt.Errorf(
++			"%w: maximum is %d bytes",
++			ingestqueue.ErrCanonicalPayloadTooLarge,
++			ingestqueue.MaxCanonicalPayloadBytes,
++		)
++	}
 +	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
 +	if err != nil {
 +		return nil, fmt.Errorf("begin ingest enqueue: %w", err)
@@ -2310,7 +2511,10 @@ index 0000000..1ad0d90
 +	owner string,
 +	lease time.Duration,
 +	maxAttempts int,
-+) (*ingestqueue.Job, error) {
++) (_ *ingestqueue.Job, returnErr error) {
++	defer func() {
++		returnErr = classifyIngestClaimError(returnErr)
++	}()
 +	if lease <= 0 {
 +		return nil, errors.New("ingest lease must be positive")
 +	}
@@ -2323,58 +2527,70 @@ index 0000000..1ad0d90
 +	}
 +	defer tx.Rollback()
 +
-+	// The first statement reserves visible work with SKIP LOCKED. After the
-+	// scope lock, the loop reads a fresh snapshot that includes delayed enqueues.
-+	scope, err := selectClaimableIngestJobScope(ctx, tx, tenantID)
-+	if errors.Is(err, sql.ErrNoRows) {
++	// A fixed high-water mark makes each bounded page sweep finite even while
++	// producers keep adding newer scopes. Candidate discovery never locks rows.
++	cursor, ok, err := r.claimCursor(ctx, tx, tenantID)
++	if err != nil {
++		return nil, fmt.Errorf("select ingest claim cursor: %w", err)
++	}
++	if !ok {
 +		if err := tx.Commit(); err != nil {
 +			return nil, fmt.Errorf("commit empty ingest claim: %w", err)
 +		}
 +		return nil, nil
 +	}
++	candidates, err := selectClaimableIngestJobScopes(ctx, tx, tenantID, cursor)
 +	if err != nil {
-+		return nil, fmt.Errorf("select ingest claim scope: %w", err)
++		return nil, fmt.Errorf("select ingest claim scopes: %w", err)
 +	}
-+	if err := lockIngestJobScope(ctx, tx, scope); err != nil {
-+		return nil, fmt.Errorf("lock ingest claim scope: %w", err)
-+	}
++	r.updateClaimCursor(tenantID, cursor, candidates)
++	for _, candidate := range candidates {
++		scope := candidate.scope
++		locked, err := tryLockIngestJobScope(ctx, tx, scope)
++		if err != nil {
++			return nil, fmt.Errorf("try ingest claim scope lock: %w", err)
++		}
++		if !locked {
++			continue
++		}
 +
-+	for {
 +		var (
 +			jobID        string
 +			attemptCount int
 +			eligible     bool
 +		)
-+		err := tx.QueryRowContext(ctx, `
-+			SELECT job_id,
-+				attempt_count,
++		err = tx.QueryRowContext(ctx, `
++			WITH head AS MATERIALIZED (
++				SELECT job_id
++				FROM ingest_jobs
++				WHERE tenant_id = $1
++				  AND agent_id = $2
++				  AND app_id = $3
++				  AND session_id = $4
++				  AND state NOT IN ('succeeded', 'dead')
++				ORDER BY created_at, job_id
++				LIMIT 1
++			)
++			SELECT job.job_id,
++				job.attempt_count,
 +				CASE
-+					WHEN state IN ('queued', 'retry_wait')
-+						THEN available_at <= statement_timestamp()
-+					WHEN state IN ('processing', 'planning', 'applying')
-+						THEN lease_expires_at IS NULL
-+							OR lease_expires_at <= statement_timestamp()
++					WHEN job.state IN ('queued', 'retry_wait')
++						THEN job.available_at <= statement_timestamp()
++					WHEN job.state IN ('processing', 'planning', 'applying')
++						THEN job.lease_expires_at IS NULL
++							OR job.lease_expires_at <= statement_timestamp()
 +					ELSE FALSE
 +				END
-+			FROM ingest_jobs
-+			WHERE tenant_id = $1
-+			  AND agent_id = $2
-+			  AND app_id = $3
-+			  AND session_id = $4
-+			  AND state NOT IN ('succeeded', 'dead')
-+			ORDER BY created_at, job_id
-+			FOR UPDATE
-+			LIMIT 1`,
++			FROM ingest_jobs AS job
++			JOIN head ON head.job_id = job.job_id
++			FOR UPDATE OF job SKIP LOCKED`,
 +			scope.tenantID,
 +			scope.agentID,
 +			scope.appID,
 +			scope.sessionID,
 +		).Scan(&jobID, &attemptCount, &eligible)
 +		if errors.Is(err, sql.ErrNoRows) {
-+			if err := tx.Commit(); err != nil {
-+				return nil, fmt.Errorf("commit empty ingest claim: %w", err)
-+			}
-+			return nil, nil
++			continue
 +		}
 +		if err != nil {
 +			return nil, fmt.Errorf("select ingest scope head: %w", err)
@@ -2402,7 +2618,10 @@ index 0000000..1ad0d90
 +			); err != nil {
 +				return nil, fmt.Errorf("expire exhausted ingest job: %w", err)
 +			}
-+			continue
++			if err := tx.Commit(); err != nil {
++				return nil, fmt.Errorf("commit exhausted ingest claim: %w", err)
++			}
++			return nil, nil
 +		}
 +
 +		job, err := scanIngestJob(tx.QueryRowContext(ctx, `
@@ -2435,14 +2654,33 @@ index 0000000..1ad0d90
 +		}
 +		return job, nil
 +	}
++
++	if err := tx.Commit(); err != nil {
++		return nil, fmt.Errorf("commit empty ingest claim: %w", err)
++	}
++	return nil, nil
 +}
 +
-+func selectClaimableIngestJobScope(ctx context.Context, tx *sql.Tx, tenantID string) (ingestJobScope, error) {
-+	var scope ingestJobScope
-+	err := tx.QueryRowContext(ctx, `
-+		SELECT j.tenant_id, j.agent_id, j.app_id, j.session_id
++func selectClaimableIngestJobScopes(
++	ctx context.Context,
++	tx *sql.Tx,
++	tenantID string,
++	cursor ingestJobClaimCursor,
++) ([]ingestJobCandidate, error) {
++	var afterCreatedAt any
++	if cursor.afterSet {
++		afterCreatedAt = cursor.afterCreated
++	}
++	rows, err := tx.QueryContext(ctx, `
++		SELECT j.tenant_id, j.agent_id, j.app_id, j.session_id,
++			j.created_at, j.job_id
 +		FROM ingest_jobs AS j
 +		WHERE j.tenant_id = $1
++		  AND (
++			$2::timestamptz IS NULL
++			OR (j.created_at, j.job_id) > ($2::timestamptz, $3)
++		  )
++		  AND (j.created_at, j.job_id) <= ($4, $5)
 +		  AND (
 +			(j.state IN ('queued', 'retry_wait')
 +			 AND j.available_at <= statement_timestamp())
@@ -2463,13 +2701,89 @@ index 0000000..1ad0d90
 +				earlier.created_at < j.created_at
 +				OR (earlier.created_at = j.created_at AND earlier.job_id < j.job_id)
 +			  )
-+		  )
-+		ORDER BY j.available_at, j.created_at, j.job_id
-+		FOR UPDATE OF j SKIP LOCKED
++			  )
++		ORDER BY j.created_at, j.job_id
++		LIMIT $6`,
++		tenantID,
++		afterCreatedAt,
++		cursor.afterJobID,
++		cursor.highCreatedAt,
++		cursor.highJobID,
++		maxClaimCandidateScopes,
++	)
++	if err != nil {
++		return nil, err
++	}
++	defer rows.Close()
++	candidates := make([]ingestJobCandidate, 0, maxClaimCandidateScopes)
++	for rows.Next() {
++		var candidate ingestJobCandidate
++		if err := rows.Scan(
++			&candidate.scope.tenantID,
++			&candidate.scope.agentID,
++			&candidate.scope.appID,
++			&candidate.scope.sessionID,
++			&candidate.createdAt,
++			&candidate.jobID,
++		); err != nil {
++			return nil, err
++		}
++		candidates = append(candidates, candidate)
++	}
++	if err := rows.Err(); err != nil {
++		return nil, err
++	}
++	return candidates, nil
++}
++
++func (r *IngestJobRepo) claimCursor(
++	ctx context.Context,
++	tx *sql.Tx,
++	tenantID string,
++) (ingestJobClaimCursor, bool, error) {
++	if value, ok := r.claimCursors.Load(tenantID); ok {
++		return value.(ingestJobClaimCursor), true, nil
++	}
++
++	var cursor ingestJobClaimCursor
++	err := tx.QueryRowContext(ctx, `
++		SELECT created_at, job_id
++		FROM ingest_jobs
++		WHERE tenant_id = $1
++		  AND state NOT IN ('succeeded', 'dead')
++		ORDER BY created_at DESC, job_id DESC
 +		LIMIT 1`,
 +		tenantID,
-+	).Scan(&scope.tenantID, &scope.agentID, &scope.appID, &scope.sessionID)
-+	return scope, err
++	).Scan(&cursor.highCreatedAt, &cursor.highJobID)
++	if errors.Is(err, sql.ErrNoRows) {
++		return ingestJobClaimCursor{}, false, nil
++	}
++	if err != nil {
++		return ingestJobClaimCursor{}, false, err
++	}
++
++	value, loaded := r.claimCursors.LoadOrStore(tenantID, cursor)
++	if !loaded {
++		return cursor, true, nil
++	}
++	return value.(ingestJobClaimCursor), true, nil
++}
++
++func (r *IngestJobRepo) updateClaimCursor(
++	tenantID string,
++	cursor ingestJobClaimCursor,
++	candidates []ingestJobCandidate,
++) {
++	if len(candidates) == maxClaimCandidateScopes {
++		last := candidates[len(candidates)-1]
++		next := cursor
++		next.afterSet = true
++		next.afterCreated = last.createdAt
++		next.afterJobID = last.jobID
++		r.claimCursors.CompareAndSwap(tenantID, cursor, next)
++		return
++	}
++	r.claimCursors.CompareAndDelete(tenantID, cursor)
 +}
 +
 +func lockIngestJobScope(ctx context.Context, tx *sql.Tx, scope ingestJobScope) error {
@@ -2484,6 +2798,38 @@ index 0000000..1ad0d90
 +		scope.appID,
 +		scope.sessionID,
 +	)
++	return err
++}
++
++func tryLockIngestJobScope(ctx context.Context, tx *sql.Tx, scope ingestJobScope) (bool, error) {
++	var locked bool
++	err := tx.QueryRowContext(ctx, `
++		SELECT pg_try_advisory_xact_lock(
++			hashtextextended($1::text,
++				hashtextextended($2::text,
++					hashtextextended($3::text,
++						hashtextextended($4::text, 0)))))`,
++		scope.tenantID,
++		scope.agentID,
++		scope.appID,
++		scope.sessionID,
++	).Scan(&locked)
++	return locked, err
++}
++
++func classifyIngestClaimError(err error) error {
++	if err == nil {
++		return nil
++	}
++	var stateError interface {
++		SQLState() string
++	}
++	if errors.As(err, &stateError) {
++		switch stateError.SQLState() {
++		case "40P01", "40001":
++			return fmt.Errorf("%w: %w", ingestqueue.ErrClaimContention, err)
++		}
++	}
 +	return err
 +}
 +
@@ -2611,14 +2957,7 @@ index 0000000..1ad0d90
 +	defer tx.Rollback()
 +
 +	var locked int
-+	err = tx.QueryRowContext(ctx, `
-+		SELECT 1
-+		FROM ingest_jobs
-+		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
-+		  AND attempt_count = $4
-+		  AND state IN ('processing', 'planning', 'applying')
-+		  AND lease_expires_at > clock_timestamp()
-+		FOR UPDATE`,
++	err = tx.QueryRowContext(ctx, ownedTransitionGuardQuery,
 +		lease.TenantID,
 +		lease.JobID,
 +		lease.Owner,
@@ -2728,10 +3067,10 @@ index 0000000..1ad0d90
 +}
 diff --git a/server/internal/repository/postgres/ingest_job_integration_test.go b/server/internal/repository/postgres/ingest_job_integration_test.go
 new file mode 100644
-index 0000000..c61a61a
+index 0000000..27e7e79
 --- /dev/null
 +++ b/server/internal/repository/postgres/ingest_job_integration_test.go
-@@ -0,0 +1,655 @@
+@@ -0,0 +1,1202 @@
 +package postgres
 +
 +import (
@@ -2740,6 +3079,7 @@ index 0000000..c61a61a
 +	"errors"
 +	"fmt"
 +	"os"
++	"strings"
 +	"sync"
 +	"testing"
 +	"time"
@@ -2795,6 +3135,98 @@ index 0000000..c61a61a
 +		t.Fatalf("Enqueue: %v", err)
 +	}
 +	return job
++}
++
++type ingestJobExecer interface {
++	ExecContext(context.Context, string, ...any) (sql.Result, error)
++}
++
++func insertIngestJobAt(
++	t *testing.T,
++	execer ingestJobExecer,
++	input ingestqueue.EnqueueInput,
++	createdAt time.Time,
++) {
++	t.Helper()
++	if _, err := execer.ExecContext(context.Background(), `
++		INSERT INTO ingest_jobs (
++			job_id, tenant_id, idempotency_key, canonical_payload,
++			agent_id, app_id, session_id, mode, disable_session_save,
++			available_at, created_at, updated_at
++		)
++		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
++			statement_timestamp(), $10, statement_timestamp())
++	`, input.ID, input.TenantID, input.IdempotencyKey, []byte(input.CanonicalPayload),
++		input.AgentID, input.AppID, input.SessionID, input.Mode, input.DisableSessionSave,
++		createdAt,
++	); err != nil {
++		t.Fatal(err)
++	}
++}
++
++type claimResult struct {
++	job *ingestqueue.Job
++	err error
++}
++
++func runConcurrentIngestClaims(
++	t *testing.T,
++	repo *IngestJobRepo,
++	tenantID, ownerPrefix string,
++	count int,
++) []claimResult {
++	t.Helper()
++	results := make(chan claimResult, count)
++	start := make(chan struct{})
++	for i := range count {
++		go func() {
++			<-start
++			ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
++			defer cancel()
++			job, err := repo.Claim(
++				ctx,
++				tenantID,
++				fmt.Sprintf("%s-%d", ownerPrefix, i),
++				time.Minute,
++				ingestqueue.MaxAttempts,
++			)
++			results <- claimResult{job: job, err: err}
++		}()
++	}
++	close(start)
++	claims := make([]claimResult, 0, count)
++	timeout := time.NewTimer(time.Second)
++	defer timeout.Stop()
++	for range count {
++		select {
++		case result := <-results:
++			claims = append(claims, result)
++		case <-timeout.C:
++			t.Fatal("concurrent claims did not finish")
++		}
++	}
++	return claims
++}
++
++type testSQLStateError struct {
++	state string
++}
++
++func (e testSQLStateError) Error() string    { return "database failure" }
++func (e testSQLStateError) SQLState() string { return e.state }
++
++func TestClassifyIngestClaimError(t *testing.T) {
++	for _, state := range []string{"40P01", "40001"} {
++		err := classifyIngestClaimError(fmt.Errorf("wrapped: %w", testSQLStateError{state: state}))
++		if !errors.Is(err, ingestqueue.ErrClaimContention) {
++			t.Fatalf("SQLSTATE %s error = %v, want ErrClaimContention", state, err)
++		}
++	}
++	plain := errors.New("plain failure")
++	if got := classifyIngestClaimError(plain); !errors.Is(got, plain) ||
++		errors.Is(got, ingestqueue.ErrClaimContention) {
++		t.Fatalf("plain claim error classification = %v", got)
++	}
 +}
 +
 +func TestIngestJobEnqueueUniqueRaceAndTenantIsolation(t *testing.T) {
@@ -2856,6 +3288,23 @@ index 0000000..c61a61a
 +	wrongTenantLease.TenantID = "tenant-a"
 +	if err := repo.StartPlanning(context.Background(), wrongTenantLease); !errors.Is(err, ingestqueue.ErrLeaseLost) {
 +		t.Fatalf("cross-tenant update error = %v, want ErrLeaseLost", err)
++	}
++}
++
++func TestIngestJobRejectsOversizedCanonicalPayload(t *testing.T) {
++	db := ingestTestDB(t)
++	repo := NewIngestJobRepo(db)
++	input := enqueueInput("tenant-a", "session-a", "abababababababababababababababababababababababababababababababab")
++	input.CanonicalPayload = make([]byte, ingestqueue.MaxCanonicalPayloadBytes+1)
++	if _, err := repo.Enqueue(context.Background(), input); !errors.Is(err, ingestqueue.ErrCanonicalPayloadTooLarge) {
++		t.Fatalf("oversized Enqueue error = %v, want ErrCanonicalPayloadTooLarge", err)
++	}
++	var count int
++	if err := db.QueryRow(`SELECT count(*) FROM ingest_jobs`).Scan(&count); err != nil {
++		t.Fatal(err)
++	}
++	if count != 0 {
++		t.Fatalf("oversized enqueue persisted %d rows", count)
 +	}
 +}
 +
@@ -3056,8 +3505,8 @@ index 0000000..c61a61a
 +	if err != nil {
 +		t.Fatal(err)
 +	}
-+	if claimed == nil || claimed.ID != follower.ID {
-+		t.Fatalf("claim after exhausted lease = %+v, want follower %s", claimed, follower.ID)
++	if claimed != nil {
++		t.Fatalf("bounded exhausted-head claim = %+v, want nil", claimed)
 +	}
 +	var state, errorClass string
 +	var completedAt sql.NullTime
@@ -3071,6 +3520,61 @@ index 0000000..c61a61a
 +	}
 +	if state != string(ingestqueue.StateDead) || errorClass != "attempts_exhausted" || !completedAt.Valid {
 +		t.Fatalf("exhausted head = state %q class %q completed %v", state, errorClass, completedAt.Valid)
++	}
++	claimed, err = repo.Claim(context.Background(), "tenant-a", "new-owner", time.Minute, ingestqueue.MaxAttempts)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if claimed == nil || claimed.ID != follower.ID {
++		t.Fatalf("claim after bounded reap = %+v, want follower %s", claimed, follower.ID)
++	}
++}
++
++func TestIngestJobClaimReapsAtMostOneExhaustedHead(t *testing.T) {
++	db := ingestTestDB(t)
++	repo := NewIngestJobRepo(db)
++	for i := 0; i < 3; i++ {
++		input := enqueueInput(
++			"tenant-a",
++			"session-a",
++			fmt.Sprintf("%064x", 100+i),
++		)
++		input.ID = fmt.Sprintf("00000000-0000-4000-8000-%012d", 100+i)
++		enqueueJob(t, repo, input)
++		time.Sleep(time.Millisecond)
++	}
++	if _, err := db.Exec(`
++		UPDATE ingest_jobs
++		SET state = 'processing',
++			attempt_count = $1,
++			lease_owner = 'stale-owner',
++			lease_expires_at = statement_timestamp() - interval '1 second'`,
++		ingestqueue.MaxAttempts,
++	); err != nil {
++		t.Fatal(err)
++	}
++
++	for wantDead := 1; wantDead <= 3; wantDead++ {
++		job, err := repo.Claim(
++			context.Background(),
++			"tenant-a",
++			"new-owner",
++			time.Minute,
++			ingestqueue.MaxAttempts,
++		)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if job != nil {
++			t.Fatalf("reap %d returned job %+v, want nil", wantDead, job)
++		}
++		var dead int
++		if err := db.QueryRow(`SELECT count(*) FROM ingest_jobs WHERE state = 'dead'`).Scan(&dead); err != nil {
++			t.Fatal(err)
++		}
++		if dead != wantDead {
++			t.Fatalf("dead rows after claim %d = %d, want %d", wantDead, dead, wantDead)
++		}
 +	}
 +}
 +
@@ -3106,69 +3610,42 @@ index 0000000..c61a61a
 +		t.Fatal(err)
 +	}
 +	defer earlierTx.Rollback()
-+	if _, err := earlierTx.Exec(`
-+		SELECT pg_advisory_xact_lock(
-+			hashtextextended($1::text,
-+				hashtextextended($2::text,
-+					hashtextextended($3::text,
-+						hashtextextended($4::text, 0)))))
-+	`, earlier.TenantID, earlier.AgentID, earlier.AppID, earlier.SessionID); err != nil {
++	if err := lockIngestJobScope(context.Background(), earlierTx, ingestJobScope{
++		tenantID:  earlier.TenantID,
++		agentID:   earlier.AgentID,
++		appID:     earlier.AppID,
++		sessionID: earlier.SessionID,
++	}); err != nil {
 +		t.Fatal(err)
 +	}
-+	if _, err := earlierTx.Exec(`
-+		INSERT INTO ingest_jobs (
-+			job_id, tenant_id, idempotency_key, canonical_payload,
-+			agent_id, app_id, session_id, mode, disable_session_save,
-+			available_at, created_at, updated_at
-+		)
-+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
-+			statement_timestamp(), statement_timestamp(), statement_timestamp())
-+	`, earlier.ID, earlier.TenantID, earlier.IdempotencyKey, []byte(earlier.CanonicalPayload),
-+		earlier.AgentID, earlier.AppID, earlier.SessionID, earlier.Mode, earlier.DisableSessionSave); err != nil {
-+		t.Fatal(err)
-+	}
++	createdAt := time.Now().UTC()
++	insertIngestJobAt(t, earlierTx, earlier, createdAt)
++	insertIngestJobAt(t, db, later, createdAt.Add(time.Second))
 +
-+	time.Sleep(10 * time.Millisecond)
-+	if _, err := db.Exec(`
-+		INSERT INTO ingest_jobs (
-+			job_id, tenant_id, idempotency_key, canonical_payload,
-+			agent_id, app_id, session_id, mode, disable_session_save,
-+			available_at, created_at, updated_at
-+		)
-+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
-+			statement_timestamp(), statement_timestamp(), statement_timestamp())
-+	`, later.ID, later.TenantID, later.IdempotencyKey, []byte(later.CanonicalPayload),
-+		later.AgentID, later.AppID, later.SessionID, later.Mode, later.DisableSessionSave); err != nil {
-+		t.Fatal(err)
-+	}
-+
-+	type claimResult struct {
-+		job *ingestqueue.Job
-+		err error
-+	}
 +	result := make(chan claimResult, 1)
 +	go func() {
 +		job, err := repo.Claim(context.Background(), "tenant-a", "worker-a", time.Minute, ingestqueue.MaxAttempts)
 +		result <- claimResult{job: job, err: err}
 +	}()
 +
-+	var claimed claimResult
++	var skipped claimResult
 +	select {
-+	case claimed = <-result:
-+	case <-time.After(100 * time.Millisecond):
-+		if err := earlierTx.Commit(); err != nil {
-+			t.Fatal(err)
-+		}
-+		claimed = <-result
++	case skipped = <-result:
++	case <-time.After(500 * time.Millisecond):
++		t.Fatal("claim blocked on a contended scope")
 +	}
-+	if err := earlierTx.Commit(); err != nil && !errors.Is(err, sql.ErrTxDone) {
++	if skipped.err != nil || skipped.job != nil {
++		t.Fatalf("claim while enqueue held scope = job:%+v err:%v", skipped.job, skipped.err)
++	}
++	if err := earlierTx.Commit(); err != nil {
 +		t.Fatal(err)
 +	}
-+	if claimed.err != nil {
-+		t.Fatal(claimed.err)
++	claimed, err := repo.Claim(context.Background(), "tenant-a", "worker-a", time.Minute, ingestqueue.MaxAttempts)
++	if err != nil {
++		t.Fatal(err)
 +	}
-+	if claimed.job == nil || claimed.job.ID != earlier.ID {
-+		t.Fatalf("claim during delayed enqueue = %+v, want earlier job %s", claimed.job, earlier.ID)
++	if claimed == nil || claimed.ID != earlier.ID {
++		t.Fatalf("claim after delayed enqueue = %+v, want earlier job %s", claimed, earlier.ID)
 +	}
 +
 +	var earlierState, laterState string
@@ -3180,6 +3657,362 @@ index 0000000..c61a61a
 +	}
 +	if earlierState != string(ingestqueue.StateProcessing) || laterState != string(ingestqueue.StateQueued) {
 +		t.Fatalf("states after delayed enqueue = earlier:%s later:%s", earlierState, laterState)
++	}
++}
++
++func TestIngestJobDelayedEnqueueWithMultipleClaimersDoesNotDeadlock(t *testing.T) {
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
++	}
++	db := ingestTestDBWithDSN(t, dsn)
++	db.SetMaxOpenConns(32)
++	repo := NewIngestJobRepo(db)
++
++	earlier := enqueueInput("tenant-a", "session-a", "1212121212121212121212121212121212121212121212121212121212121212")
++	earlier.ID = "00000000-0000-4000-8000-000000000012"
++	later := enqueueInput("tenant-a", "session-a", "1313131313131313131313131313131313131313131313131313131313131313")
++	later.ID = "00000000-0000-4000-8000-000000000013"
++
++	earlierTx, err := db.BeginTx(context.Background(), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer earlierTx.Rollback()
++	if err := lockIngestJobScope(context.Background(), earlierTx, ingestJobScope{
++		tenantID:  earlier.TenantID,
++		agentID:   earlier.AgentID,
++		appID:     earlier.AppID,
++		sessionID: earlier.SessionID,
++	}); err != nil {
++		t.Fatal(err)
++	}
++	createdAt := time.Now().UTC()
++	insertIngestJobAt(t, earlierTx, earlier, createdAt)
++	insertIngestJobAt(t, db, later, createdAt.Add(time.Second))
++
++	const claimers = 12
++	for _, result := range runConcurrentIngestClaims(t, repo, "tenant-a", "blocked-worker", claimers) {
++		if result.err != nil || result.job != nil {
++			t.Fatalf("claim while delayed enqueue held scope = job:%+v err:%v", result.job, result.err)
++		}
++	}
++	if err := earlierTx.Commit(); err != nil {
++		t.Fatal(err)
++	}
++
++	var claimed []string
++	for _, result := range runConcurrentIngestClaims(t, repo, "tenant-a", "released-worker", claimers) {
++		if result.err != nil {
++			t.Errorf("concurrent delayed Claim: %v", result.err)
++			continue
++		}
++		if result.job != nil {
++			claimed = append(claimed, result.job.ID)
++		}
++	}
++	if len(claimed) != 1 || claimed[0] != earlier.ID {
++		t.Fatalf("delayed multi-claimer jobs = %#v, want only %s", claimed, earlier.ID)
++	}
++}
++
++func TestIngestJobScopeSerializationDoesNotBlockOtherScopes(t *testing.T) {
++	db := ingestTestDB(t)
++	repo := NewIngestJobRepo(db)
++	blocked := enqueueInput("tenant-a", "session-a", "1414141414141414141414141414141414141414141414141414141414141414")
++	blocked.ID = "00000000-0000-4000-8000-000000000014"
++	independent := enqueueInput("tenant-a", "session-b", "1515151515151515151515151515151515151515151515151515151515151515")
++	independent.ID = "00000000-0000-4000-8000-000000000015"
++
++	holder, err := db.BeginTx(context.Background(), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer holder.Rollback()
++	if err := lockIngestJobScope(context.Background(), holder, ingestJobScope{
++		tenantID:  blocked.TenantID,
++		agentID:   blocked.AgentID,
++		appID:     blocked.AppID,
++		sessionID: blocked.SessionID,
++	}); err != nil {
++		t.Fatal(err)
++	}
++
++	blockedResult := make(chan error, 1)
++	go func() {
++		_, err := repo.Enqueue(context.Background(), blocked)
++		blockedResult <- err
++	}()
++	select {
++	case err := <-blockedResult:
++		t.Fatalf("same-scope enqueue did not serialize: %v", err)
++	case <-time.After(75 * time.Millisecond):
++	}
++
++	independentResult := make(chan error, 1)
++	go func() {
++		_, err := repo.Enqueue(context.Background(), independent)
++		independentResult <- err
++	}()
++	select {
++	case err := <-independentResult:
++		if err != nil {
++			t.Fatal(err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("unrelated scope enqueue blocked on another scope")
++	}
++
++	if err := holder.Commit(); err != nil {
++		t.Fatal(err)
++	}
++	select {
++	case err := <-blockedResult:
++		if err != nil {
++			t.Fatal(err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("same-scope enqueue did not finish after lock release")
++	}
++}
++
++func TestIngestJobContendedScopeDoesNotBlockOtherScope(t *testing.T) {
++	db := ingestTestDB(t)
++	repo := NewIngestJobRepo(db)
++	contended := enqueueInput("tenant-a", "session-a", "1616161616161616161616161616161616161616161616161616161616161616")
++	contended.ID = "00000000-0000-4000-8000-000000000016"
++	independent := enqueueInput("tenant-a", "session-b", "1717171717171717171717171717171717171717171717171717171717171717")
++	independent.ID = "00000000-0000-4000-8000-000000000017"
++
++	holder, err := db.BeginTx(context.Background(), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer holder.Rollback()
++	if err := lockIngestJobScope(context.Background(), holder, ingestJobScope{
++		tenantID:  contended.TenantID,
++		agentID:   contended.AgentID,
++		appID:     contended.AppID,
++		sessionID: contended.SessionID,
++	}); err != nil {
++		t.Fatal(err)
++	}
++	createdAt := time.Now().UTC()
++	insertIngestJobAt(t, db, contended, createdAt)
++	insertIngestJobAt(t, db, independent, createdAt.Add(time.Second))
++
++	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
++	defer cancel()
++	claimed, err := repo.Claim(ctx, "tenant-a", "worker", time.Minute, ingestqueue.MaxAttempts)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if claimed == nil || claimed.ID != independent.ID {
++		t.Fatalf("claim with contended first scope = %+v, want %s", claimed, independent.ID)
++	}
++}
++
++func TestIngestJobClaimRotatesPastContendedCandidatePage(t *testing.T) {
++	db := ingestTestDB(t)
++	repo := NewIngestJobRepo(db)
++	holder, err := db.BeginTx(context.Background(), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer holder.Rollback()
++
++	createdAt := time.Now().UTC().Add(-time.Minute)
++	var target ingestqueue.EnqueueInput
++	for i := 0; i <= maxClaimCandidateScopes; i++ {
++		input := enqueueInput(
++			"tenant-a",
++			fmt.Sprintf("session-%02d", i),
++			fmt.Sprintf("%064x", 200+i),
++		)
++		input.ID = fmt.Sprintf("00000000-0000-4000-8000-%012d", 200+i)
++		insertIngestJobAt(t, db, input, createdAt.Add(time.Duration(i)*time.Millisecond))
++		if i < maxClaimCandidateScopes {
++			if err := lockIngestJobScope(context.Background(), holder, ingestJobScope{
++				tenantID:  input.TenantID,
++				agentID:   input.AgentID,
++				appID:     input.AppID,
++				sessionID: input.SessionID,
++			}); err != nil {
++				t.Fatal(err)
++			}
++			continue
++		}
++		target = input
++	}
++	if _, err := db.Exec(`UPDATE ingest_jobs SET available_at = created_at`); err != nil {
++		t.Fatal(err)
++	}
++
++	if claimed, err := repo.Claim(
++		context.Background(),
++		"tenant-a",
++		"worker-first-page",
++		time.Minute,
++		ingestqueue.MaxAttempts,
++	); err != nil || claimed != nil {
++		t.Fatalf("contended first-page claim = job:%+v err:%v", claimed, err)
++	}
++	claimed, err := repo.Claim(
++		context.Background(),
++		"tenant-a",
++		"worker-next-page",
++		time.Minute,
++		ingestqueue.MaxAttempts,
++	)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if claimed == nil || claimed.ID != target.ID {
++		t.Fatalf("rotated candidate-page claim = %+v, want %s", claimed, target.ID)
++	}
++}
++
++func TestIngestJobClaimHighWaterSweepSurvivesQueueGrowth(t *testing.T) {
++	db := ingestTestDB(t)
++	repo := NewIngestJobRepo(db)
++	holder, err := db.BeginTx(context.Background(), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer holder.Rollback()
++
++	createdAt := time.Now().UTC().Add(-time.Minute)
++	var target ingestqueue.EnqueueInput
++	for i := 0; i < maxClaimCandidateScopes; i++ {
++		input := enqueueInput(
++			"tenant-a",
++			fmt.Sprintf("old-session-%02d", i),
++			fmt.Sprintf("%064x", 300+i),
++		)
++		input.ID = fmt.Sprintf("00000000-0000-4000-8000-%012d", 300+i)
++		insertIngestJobAt(t, db, input, createdAt.Add(time.Duration(i)*time.Millisecond))
++		if i == 0 {
++			target = input
++		}
++		if err := lockIngestJobScope(context.Background(), holder, ingestJobScope{
++			tenantID:  input.TenantID,
++			agentID:   input.AgentID,
++			appID:     input.AppID,
++			sessionID: input.SessionID,
++		}); err != nil {
++			t.Fatal(err)
++		}
++	}
++
++	if claimed, err := repo.Claim(
++		context.Background(),
++		"tenant-a",
++		"worker-contended-sweep",
++		time.Minute,
++		ingestqueue.MaxAttempts,
++	); err != nil || claimed != nil {
++		t.Fatalf("contended high-water claim = job:%+v err:%v", claimed, err)
++	}
++	if err := holder.Commit(); err != nil {
++		t.Fatal(err)
++	}
++
++	insertNewer := func(sequence int) {
++		input := enqueueInput(
++			"tenant-a",
++			fmt.Sprintf("new-session-%d", sequence),
++			fmt.Sprintf("%064x", sequence),
++		)
++		input.ID = fmt.Sprintf("00000000-0000-4000-8000-%012d", sequence)
++		insertIngestJobAt(
++			t,
++			db,
++			input,
++			createdAt.Add(time.Duration(sequence)*time.Millisecond),
++		)
++	}
++	insertNewer(1000)
++	claimed, err := repo.Claim(
++		context.Background(),
++		"tenant-a",
++		"worker-end-of-sweep",
++		time.Minute,
++		ingestqueue.MaxAttempts,
++	)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if claimed != nil {
++		t.Fatalf("end-of-sweep claim = %+v, want nil before cursor reset", claimed)
++	}
++
++	insertNewer(1001)
++	claimed, err = repo.Claim(
++		context.Background(),
++		"tenant-a",
++		"worker-wrapped-sweep",
++		time.Minute,
++		ingestqueue.MaxAttempts,
++	)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if claimed == nil || claimed.ID != target.ID {
++		t.Fatalf("growing-queue claim = %+v, want released older job %s", claimed, target.ID)
++	}
++}
++
++func TestIngestJobLockedHeadDoesNotBlockOtherScope(t *testing.T) {
++	db := ingestTestDB(t)
++	repo := NewIngestJobRepo(db)
++	headInput := enqueueInput("tenant-a", "session-a", "1818181818181818181818181818181818181818181818181818181818181818")
++	headInput.ID = "00000000-0000-4000-8000-000000000018"
++	followerInput := enqueueInput("tenant-a", "session-a", "1919191919191919191919191919191919191919191919191919191919191919")
++	followerInput.ID = "00000000-0000-4000-8000-000000000019"
++	independentInput := enqueueInput("tenant-a", "session-b", "2020202020202020202020202020202020202020202020202020202020202020")
++	independentInput.ID = "00000000-0000-4000-8000-000000000020"
++	head := enqueueJob(t, repo, headInput)
++	time.Sleep(time.Millisecond)
++	follower := enqueueJob(t, repo, followerInput)
++	independent := enqueueJob(t, repo, independentInput)
++	if _, err := db.Exec(`
++		UPDATE ingest_jobs
++		SET state = 'processing',
++			attempt_count = 1,
++			lease_owner = 'expired-owner',
++			lease_expires_at = statement_timestamp() - interval '1 second'
++		WHERE job_id = $1`,
++		head.ID,
++	); err != nil {
++		t.Fatal(err)
++	}
++
++	blocker, err := db.BeginTx(context.Background(), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer blocker.Rollback()
++	if _, err := blocker.Exec(
++		`SELECT 1 FROM ingest_jobs WHERE job_id = $1 FOR UPDATE`,
++		head.ID,
++	); err != nil {
++		t.Fatal(err)
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
++	defer cancel()
++	claimed, err := repo.Claim(ctx, "tenant-a", "worker", time.Minute, ingestqueue.MaxAttempts)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if claimed == nil || claimed.ID != independent.ID {
++		t.Fatalf("claim with row-locked first scope = %+v, want %s", claimed, independent.ID)
++	}
++	var followerState string
++	if err := db.QueryRow(`SELECT state FROM ingest_jobs WHERE job_id = $1`, follower.ID).Scan(&followerState); err != nil {
++		t.Fatal(err)
++	}
++	if followerState != string(ingestqueue.StateQueued) {
++		t.Fatalf("locked-head follower state = %s, want queued", followerState)
 +	}
 +}
 +
@@ -3368,6 +4201,59 @@ index 0000000..c61a61a
 +			}
 +			assertDatabaseDeadline(t, db, job.ID, test.field, deadline)
 +		})
++	}
++}
++
++func TestIngestJobOwnedWriteFailsClosedWhenLeaseExpiresWhileWaiting(t *testing.T) {
++	db := ingestTestDB(t)
++	repo := NewIngestJobRepo(db)
++	job := enqueueJob(t, repo, enqueueInput(
++		"tenant-a",
++		"session-a",
++		"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
++	))
++	job, err := repo.Claim(
++		context.Background(),
++		job.TenantID,
++		"worker-a",
++		150*time.Millisecond,
++		ingestqueue.MaxAttempts,
++	)
++	if err != nil {
++		t.Fatal(err)
++	}
++
++	blocker, err := db.BeginTx(context.Background(), nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer blocker.Rollback()
++	if _, err := blocker.Exec(
++		`SELECT 1 FROM ingest_jobs WHERE job_id = $1 FOR UPDATE`,
++		job.ID,
++	); err != nil {
++		t.Fatal(err)
++	}
++
++	result := make(chan error, 1)
++	go func() {
++		result <- repo.Heartbeat(context.Background(), job.LeaseRef(), time.Minute)
++	}()
++	time.Sleep(250 * time.Millisecond)
++	if err := blocker.Commit(); err != nil {
++		t.Fatal(err)
++	}
++	if err := <-result; !errors.Is(err, ingestqueue.ErrLeaseLost) {
++		t.Fatalf("expired blocked heartbeat = %v, want ErrLeaseLost", err)
++	}
++}
++
++func TestOwnedTransitionGuardUsesStatementClock(t *testing.T) {
++	if strings.Contains(ownedTransitionGuardQuery, "clock_timestamp()") {
++		t.Fatal("owned transition guard must not use the wall clock")
++	}
++	if !strings.Contains(ownedTransitionGuardQuery, "statement_timestamp()") {
++		t.Fatal("owned transition guard must use the PostgreSQL statement clock")
 +	}
 +}
 +

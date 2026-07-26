@@ -1,7 +1,7 @@
 # Design Canvas: durable ingest queue foundation
 
 Feature: Tenant-scoped Aurora ingest jobs
-Date: 2026-07-24
+Date: 2026-07-25
 Status: Approved (autonomous mode)
 
 ## Problem
@@ -56,6 +56,7 @@ authenticated async messages request
   -> canonicalize ingest-v1 envelope and hash
   -> BEGIN
        acquire transaction-scoped advisory lock for the tenant/session scope
+       reject canonical payloads larger than 1 MiB
        INSERT ingest_jobs
        ON CONFLICT (tenant_id, idempotency_key) return existing row
      COMMIT
@@ -77,32 +78,55 @@ commit returns non-2xx.
 
 The scope is `(tenant_id, agent_id, app_id, session_id)`. Enqueue and claim use
 the same transaction-scoped PostgreSQL advisory lock derived from that scope.
-Enqueue acquires it before assigning database timestamps and inserting. Claim
-first locks a visible candidate with `FOR UPDATE SKIP LOCKED`, acquires the
-candidate scope's advisory lock, then re-reads the scope head in a new
-statement. Enqueue, claim, and owned writes explicitly request
-`READ COMMITTED`, independent of the database or role default. The second
-snapshot therefore includes any earlier enqueue that committed while claim
-waited for the scope lock, so an invisible in-progress enqueue cannot overlap a
-later job.
+Enqueue acquires it before assigning database timestamps and inserting. Each
+claim reads at most 32 candidate scopes without locking rows and advances a
+process-local per-tenant cursor through a fixed high-water boundary. Repeated
+bounded claims therefore wrap even while newer scopes keep arriving, and reach
+eligible work behind a persistently contended page. Within the page, claim
+attempts advisory locks with
+`pg_try_advisory_xact_lock`. A contended scope is skipped rather than consuming a
+worker slot. After a lock succeeds, claim re-reads the exact scope head and
+applies `FOR UPDATE SKIP LOCKED` only to that row. A locked head cannot expose
+its same-scope follower; claim continues to another scope in the page instead.
+No claim path takes a row lock before an advisory lock. Enqueue, claim, and
+owned writes explicitly request
+`READ COMMITTED`, independent of the database or role default. A claim cannot
+pass an invisible enqueue because that enqueue still owns the shared scope lock;
+a later claim sees its committed row in a fresh snapshot.
+
+The enqueue-side lock is intentional. Assigning `created_at` after acquiring it
+makes accepted same-scope jobs follow the database serialization order and
+prevents claim from passing an uncommitted enqueue. This adds request-path
+contention for bursts in one session; replacing it requires an equivalent
+database-enforced scope sequencer and is an enablement prerequisite, not a
+reason to weaken FIFO. Claim holds the lock only for one head transition and
+never reaps an unbounded series in one transaction. Claim-side advisory
+acquisition is nonblocking, so a slow same-scope enqueue does not stall claims
+for other sessions.
 
 A candidate is claimable only when no earlier nonterminal row exists in the same
 scope. Therefore a delayed retry or active lease at the head blocks later
 overlapping windows. `succeeded` and `dead` are terminal and unblock the next
-row. Advisory-lock hash collisions may serialize unrelated scopes but cannot
-relax ordering.
+row. Advisory-lock hash collisions may serialize same-scope enqueues or cause a
+claimer to temporarily skip an unrelated scope, but cannot relax ordering or
+expose data. Because PostgreSQL advisory locks are scoped to one database,
+separately resolved tenant databases cannot collide. If multiple tenant IDs
+share one database, a 64-bit hash collision can affect an unrelated tenant's
+progress; this is a liveness-only cross-tenant effect and must be revisited
+before a shared-database multi-tenant rollout.
 
-Candidates are ordered by availability, creation time, and job ID. Concurrent
-claimers lock one candidate through `FOR UPDATE SKIP LOCKED`; an atomic update
-sets `processing`, increments the full-job attempt count, and records the lease
-owner/expiry. The incremented `attempt_count` is also the lease generation.
-Every owned write matches tenant, job, lease owner, eligible state, unexpired
-lease, and that generation. A stale attempt is fenced even when a worker process
-reuses its owner string after recovery. Different scopes remain independently
-claimable.
+Candidates are ordered by creation time and job ID. Concurrent
+claimers try candidate scope locks in that order. After locking one scope, the
+claimer locks only its exact FIFO head; an atomic update sets `processing`,
+increments the full-job attempt count, and records the lease owner/expiry. The
+incremented `attempt_count` is also the lease generation. Every owned write
+matches tenant, job, lease owner, eligible state, unexpired lease, and that
+generation. A stale attempt is fenced even when a worker process reuses its
+owner string after recovery. Different scopes remain independently claimable.
 
-An expired scope head already at five attempts is locked and moved to `dead`
-before selecting another candidate. It therefore cannot remain nonterminal and
+An expired scope head already at five attempts is locked and moved to `dead`.
+That claim transaction then ends, bounding lock duration; the next claim can
+select the newly unblocked head. It therefore cannot remain nonterminal and
 block its scope forever after a worker crash.
 
 ## Worker Contract
@@ -114,6 +138,8 @@ block its scope forever after a worker crash.
 - Claim eligibility, lease expiry, heartbeat extension, and retry availability
   are calculated from PostgreSQL's statement clock. Worker APIs pass durations,
   never absolute process timestamps.
+- Lease validation and the guarded write both use `statement_timestamp()`.
+  A lease expiring between the two statements fails closed as lease-lost.
 - Owned writes first lock and validate the row, then calculate deadlines in a
   second database statement. Time spent waiting for the row lock cannot consume
   the new lease or retry duration.
@@ -128,6 +154,11 @@ block its scope forever after a worker crash.
   enter `retry_wait`; attempt 5 becomes `dead`.
 - Retry delay is full jitter from zero through
   `min(5s * 2^(attempt-1), 5m)`.
+- PostgreSQL deadlock (`40P01`) and serialization (`40001`) claim failures are
+  mapped by the PostgreSQL repository to a provider-neutral contention
+  sentinel, logged without query or scope data, and retried immediately up to
+  three times. Other claim failures, or persistent contention after that bound,
+  retain the normal poll delay.
 
 The persisted plan is opaque canonical JSON for a later atomic-apply change.
 This issue supplies no production processor and does not call
@@ -136,7 +167,8 @@ the worker.
 
 ## Schema
 
-`ingest_jobs` stores:
+Canonical envelopes are limited to 1,048,576 bytes before repository writes;
+the database also enforces that bound. `ingest_jobs` stores:
 
 - job ID, tenant-scoped idempotency key, exact canonical payload;
 - tenant/agent/app/session scope and effective mode/settings;
@@ -145,7 +177,24 @@ the worker.
 - created, updated, and completed timestamps.
 
 Migrations use `IF NOT EXISTS` plus guarded constraints and indexes so they are
-repeatable on empty and previously bootstrapped tenant schemas.
+repeatable on empty and previously bootstrapped tenant schemas. A row from a
+pre-foundation schema receives `legacy:<job_id>` as its migration-only
+idempotency value. That reserved form is distinguishable from and cannot collide
+with a 64-character canonical SHA-256 key. The migration also recognizes the
+preceding foundation revision's deterministic synthetic 64-hex value, rewrites
+it to the reserved form, and replaces that revision's length-only constraint.
+The 1 MiB database check is added `NOT VALID`, so a payload accepted by the
+preceding schema is preserved while every new or changed row is constrained.
+Clean schemas validate the check immediately.
+
+## Deferred Enablement Responsibilities
+
+The durable route returns after enqueue and therefore does not run upstream
+runtime-usage leasing/metering or memory-added webhooks. This is inert in the
+current deployment because durable routing is disabled and runtime-usage
+metering is not configured. Atomic apply must define transactional mutation,
+metering finalization, and webhook emission semantics before the flag can be
+enabled; the foundation must not silently omit those side effects.
 
 ## Privacy
 

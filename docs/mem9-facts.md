@@ -188,11 +188,23 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
   call the existing non-atomic ingest/reconciliation path.
 - Bootstrap applies the repeatable `ingest_jobs` migration inside the same
   operator-owned Aurora database. Canonical payloads and plans are not sent to
-  logs, metrics, or another service.
+  logs, metrics, or another service. Canonical envelopes are rejected above
+  1,048,576 bytes before enqueue, with a matching database constraint.
 - Enqueue and claim serialize each tenant/agent/app/session scope with a
-  transaction advisory lock. The claim attempt count fences every owned write,
-  and lease/retry decisions use PostgreSQL's statement clock rather than the
-  worker process clock.
+  transaction advisory lock. Claim traverses a fixed high-water boundary in
+  bounded candidate pages, nonblockingly tries scope locks before any row lock,
+  locks only the exact FIFO head, and terminalizes at most one exhausted head
+  per transaction. A row-locked head cannot expose its follower or block an
+  eligible scope later in the page. The claim attempt count fences every owned
+  write, and lease/retry decisions use PostgreSQL's statement clock rather than
+  the worker process clock.
+- Advisory-key collisions can only serialize unrelated scopes in the same
+  tenant database; they cannot weaken FIFO or expose rows. If multiple tenant
+  IDs ever share one database, this becomes a liveness-only cross-tenant risk
+  that must be revisited before enablement.
+- The durable route returns before upstream runtime-usage metering and
+  memory-added webhook side effects. Atomic apply must define and restore those
+  semantics before the route can be enabled.
 
 ### LLM key is read ONCE at startup, immutable — decisive for the sidecar (verified 2026-07-12)
 Probed at the pinned commit (`server/internal/config/config.go` + `llm/client.go`):

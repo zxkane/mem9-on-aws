@@ -42,18 +42,64 @@ apply_migration() {
 apply_migration mem9_queue
 apply_migration mem9_queue
 
-# Upgraded schema: preserve a legacy row while adding every foundation column.
+# Upgraded schema: migrate the preceding foundation's synthetic key and
+# length-only constraint while preserving its row.
 docker exec "$CONTAINER" psql -q -v ON_ERROR_STOP=1 -U postgres -d postgres \
   -c "CREATE DATABASE mem9_queue_upgraded"
 docker exec "$CONTAINER" psql -q -v ON_ERROR_STOP=1 -U postgres -d mem9_queue_upgraded \
-  -c "CREATE TABLE ingest_jobs (job_id VARCHAR(36) PRIMARY KEY)"
+  -c "CREATE TABLE ingest_jobs (
+        job_id VARCHAR(36) PRIMARY KEY,
+        tenant_id VARCHAR(36) NOT NULL DEFAULT '',
+        idempotency_key VARCHAR(64) NOT NULL,
+        canonical_payload BYTEA NOT NULL DEFAULT '\x7b7d'::bytea,
+        CONSTRAINT ck_ingest_jobs_idempotency_key CHECK (length(idempotency_key) = 64)
+      )"
 docker exec "$CONTAINER" psql -q -v ON_ERROR_STOP=1 -U postgres -d mem9_queue_upgraded \
-  -c "INSERT INTO ingest_jobs (job_id) VALUES ('00000000-0000-4000-8000-000000000099')"
+  -c "INSERT INTO ingest_jobs (job_id, idempotency_key, canonical_payload)
+      VALUES (
+        '00000000-0000-4000-8000-000000000099',
+        md5('00000000-0000-4000-8000-000000000099')
+          || md5('ingest-v1:00000000-0000-4000-8000-000000000099'),
+        decode(repeat('aa', 1048577), 'hex')
+      )"
 apply_migration mem9_queue_upgraded
 apply_migration mem9_queue_upgraded
 docker exec "$CONTAINER" psql -qAt -v ON_ERROR_STOP=1 -U postgres -d mem9_queue_upgraded \
-  -c "SELECT count(*) FROM ingest_jobs WHERE idempotency_key IS NOT NULL" |
-  grep -qx "1"
+  -c "SELECT idempotency_key FROM ingest_jobs WHERE job_id = '00000000-0000-4000-8000-000000000099'" |
+  grep -qx "legacy:00000000-0000-4000-8000-000000000099"
+docker exec "$CONTAINER" psql -qAt -v ON_ERROR_STOP=1 -U postgres -d mem9_queue_upgraded \
+  -c "SELECT pg_get_constraintdef(oid)
+      FROM pg_constraint
+      WHERE conrelid = 'ingest_jobs'::regclass
+        AND conname = 'ck_ingest_jobs_idempotency_key'" |
+  grep -q "legacy:"
+docker exec "$CONTAINER" psql -qAt -v ON_ERROR_STOP=1 -U postgres -d mem9_queue_upgraded \
+  -c "SELECT octet_length(canonical_payload)
+      FROM ingest_jobs
+      WHERE job_id = '00000000-0000-4000-8000-000000000099'" |
+  grep -qx "1048577"
+docker exec "$CONTAINER" psql -qAt -v ON_ERROR_STOP=1 -U postgres -d mem9_queue_upgraded \
+  -c "SELECT convalidated
+      FROM pg_constraint
+      WHERE conrelid = 'ingest_jobs'::regclass
+        AND conname = 'ck_ingest_jobs_payload_size'" |
+  grep -qx "f"
+if docker exec "$CONTAINER" psql -q -v ON_ERROR_STOP=1 -U postgres -d mem9_queue_upgraded \
+  -c "INSERT INTO ingest_jobs (job_id, tenant_id, idempotency_key, canonical_payload)
+      VALUES (
+        '00000000-0000-4000-8000-000000000101',
+        '',
+        repeat('b', 64),
+        decode(repeat('bb', 1048577), 'hex')
+      )" >/dev/null 2>&1; then
+  echo "oversized canonical payload unexpectedly bypassed the not-valid constraint" >&2
+  exit 1
+fi
+docker exec "$CONTAINER" psql -q -v ON_ERROR_STOP=1 -U postgres -d mem9_queue_upgraded \
+  -c "INSERT INTO ingest_jobs (job_id, tenant_id, idempotency_key) VALUES ('00000000-0000-4000-8000-000000000100', '', repeat('a', 64))"
+docker exec "$CONTAINER" psql -qAt -v ON_ERROR_STOP=1 -U postgres -d mem9_queue_upgraded \
+  -c "SELECT count(*) FROM ingest_jobs WHERE tenant_id = ''" |
+  grep -qx "2"
 
 git -C "$TMP_DIR" init -q upstream
 git -C "$TMP_DIR/upstream" remote add origin https://github.com/mem9-ai/mem9.git
