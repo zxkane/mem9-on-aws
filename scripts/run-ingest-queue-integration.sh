@@ -111,8 +111,9 @@ PORT=$(docker port "$CONTAINER" 5432/tcp | head -n 1 | awk -F: '{print $NF}')
 export MNEMO_TEST_POSTGRES_DSN="postgres://postgres:test@127.0.0.1:${PORT}/mem9_queue?sslmode=disable"
 
 cd "$TMP_DIR/upstream/server"
-go test ./internal/repository/postgres -run '^TestIngestJob' -count=1
-go test ./internal/ingestqueue -count=1
-go test ./internal/handler -run '^TestDurableIngest' -count=1
-go test ./internal/config -run '^TestDurableIngest' -count=1
-go test ./cmd/mnemo-server -run '^TestDurableIngest' -count=1
+go test -count=1 \
+  ./internal/repository/postgres \
+  ./internal/ingestqueue \
+  ./internal/handler \
+  ./internal/config \
+  ./cmd/mnemo-server

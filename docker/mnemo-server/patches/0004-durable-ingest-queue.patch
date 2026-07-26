@@ -130,10 +130,10 @@ index 0000000..62731e1
 +}
 diff --git a/server/internal/handler/durable_ingest_test.go b/server/internal/handler/durable_ingest_test.go
 new file mode 100644
-index 0000000..2a56645
+index 0000000..4783202
 --- /dev/null
 +++ b/server/internal/handler/durable_ingest_test.go
-@@ -0,0 +1,389 @@
+@@ -0,0 +1,383 @@
 +package handler
 +
 +import (
@@ -153,6 +153,7 @@ index 0000000..2a56645
 +	"github.com/qiffang/mnemos/server/internal/domain"
 +	"github.com/qiffang/mnemos/server/internal/ingestqueue"
 +	"github.com/qiffang/mnemos/server/internal/middleware"
++	"github.com/qiffang/mnemos/server/internal/testutil"
 +)
 +
 +type handlerIngestRepo struct {
@@ -467,14 +468,7 @@ index 0000000..2a56645
 +	if dsn == "" {
 +		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
 +	}
-+	db, err := sql.Open("pgx", dsn)
-+	if err != nil {
-+		t.Fatal(err)
-+	}
-+	defer db.Close()
-+	if _, err := db.Exec(`TRUNCATE ingest_jobs`); err != nil {
-+		t.Fatal(err)
-+	}
++	db := testutil.OpenIsolatedPostgres(t, dsn)
 +
 +	srv := newTestServer(&testMemoryRepo{}, &testSessionRepo{}).WithDurableIngest(true)
 +	srv.dbBackend = "postgres"
@@ -1586,10 +1580,10 @@ index 0000000..392cfbc
 +}
 diff --git a/server/internal/ingestqueue/worker_integration_test.go b/server/internal/ingestqueue/worker_integration_test.go
 new file mode 100644
-index 0000000..ea29148
+index 0000000..24f51b9
 --- /dev/null
 +++ b/server/internal/ingestqueue/worker_integration_test.go
-@@ -0,0 +1,241 @@
+@@ -0,0 +1,233 @@
 +package ingestqueue_test
 +
 +import (
@@ -1605,9 +1599,9 @@ index 0000000..ea29148
 +	"testing"
 +	"time"
 +
-+	_ "github.com/jackc/pgx/v5/stdlib"
 +	"github.com/qiffang/mnemos/server/internal/ingestqueue"
 +	"github.com/qiffang/mnemos/server/internal/repository/postgres"
++	"github.com/qiffang/mnemos/server/internal/testutil"
 +)
 +
 +func workerTestRepo(t *testing.T) (*postgres.IngestJobRepo, *sql.DB) {
@@ -1616,15 +1610,7 @@ index 0000000..ea29148
 +	if dsn == "" {
 +		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
 +	}
-+	db, err := sql.Open("pgx", dsn)
-+	if err != nil {
-+		t.Fatal(err)
-+	}
-+	if _, err := db.Exec(`TRUNCATE ingest_jobs`); err != nil {
-+		db.Close()
-+		t.Fatal(err)
-+	}
-+	t.Cleanup(func() { db.Close() })
++	db := testutil.OpenIsolatedPostgres(t, dsn)
 +	return postgres.NewIngestJobRepo(db), db
 +}
 +
@@ -3067,10 +3053,10 @@ index 0000000..39986ad
 +}
 diff --git a/server/internal/repository/postgres/ingest_job_integration_test.go b/server/internal/repository/postgres/ingest_job_integration_test.go
 new file mode 100644
-index 0000000..27e7e79
+index 0000000..3094d84
 --- /dev/null
 +++ b/server/internal/repository/postgres/ingest_job_integration_test.go
-@@ -0,0 +1,1202 @@
+@@ -0,0 +1,1190 @@
 +package postgres
 +
 +import (
@@ -3085,6 +3071,7 @@ index 0000000..27e7e79
 +	"time"
 +
 +	"github.com/qiffang/mnemos/server/internal/ingestqueue"
++	"github.com/qiffang/mnemos/server/internal/testutil"
 +)
 +
 +func ingestTestDB(t *testing.T) *sql.DB {
@@ -3098,20 +3085,7 @@ index 0000000..27e7e79
 +
 +func ingestTestDBWithDSN(t *testing.T, dsn string) *sql.DB {
 +	t.Helper()
-+	db, err := sql.Open("pgx", dsn)
-+	if err != nil {
-+		t.Fatalf("open postgres: %v", err)
-+	}
-+	if err := db.PingContext(context.Background()); err != nil {
-+		db.Close()
-+		t.Fatalf("ping postgres: %v", err)
-+	}
-+	if _, err := db.Exec(`TRUNCATE ingest_jobs`); err != nil {
-+		db.Close()
-+		t.Fatalf("truncate ingest_jobs: %v", err)
-+	}
-+	t.Cleanup(func() { db.Close() })
-+	return db
++	return testutil.OpenIsolatedPostgres(t, dsn)
 +}
 +
 +func enqueueInput(tenant, session, key string) ingestqueue.EnqueueInput {
@@ -4272,4 +4246,81 @@ index 0000000..27e7e79
 +	if remaining <= want/2 || remaining > want {
 +		t.Fatalf("%s remaining = %v, want (%v, %v]", column, remaining, want/2, want)
 +	}
++}
+diff --git a/server/internal/testutil/postgres.go b/server/internal/testutil/postgres.go
+new file mode 100644
+index 0000000..c44f4bd
+--- /dev/null
++++ b/server/internal/testutil/postgres.go
+@@ -0,0 +1,71 @@
++package testutil
++
++import (
++	"context"
++	"database/sql"
++	"fmt"
++	"os"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/jackc/pgx/v5"
++	"github.com/jackc/pgx/v5/stdlib"
++)
++
++var postgresDatabaseSequence atomic.Uint64
++
++// OpenIsolatedPostgres clones the migrated DSN database so concurrent test
++// packages cannot share rows or advisory locks.
++func OpenIsolatedPostgres(t testing.TB, dsn string) *sql.DB {
++	t.Helper()
++
++	config, err := pgx.ParseConfig(dsn)
++	if err != nil {
++		t.Fatalf("parse postgres DSN: %v", err)
++	}
++	sourceDatabase := config.Database
++	if sourceDatabase == "" {
++		t.Fatal("postgres DSN must select a database")
++	}
++
++	adminConfig := config.Copy()
++	adminConfig.Database = "postgres"
++	if sourceDatabase == adminConfig.Database {
++		adminConfig.Database = "template1"
++	}
++	adminDB := stdlib.OpenDB(*adminConfig)
++	if err := adminDB.PingContext(context.Background()); err != nil {
++		adminDB.Close()
++		t.Fatalf("connect to postgres maintenance database: %v", err)
++	}
++
++	database := fmt.Sprintf(
++		"ingest_test_%d_%d",
++		os.Getpid(),
++		postgresDatabaseSequence.Add(1),
++	)
++	quotedDatabase := pgx.Identifier{database}.Sanitize()
++	quotedSource := pgx.Identifier{sourceDatabase}.Sanitize()
++	if _, err := adminDB.Exec(`CREATE DATABASE ` + quotedDatabase + ` TEMPLATE ` + quotedSource); err != nil {
++		adminDB.Close()
++		t.Fatalf("create isolated postgres database: %v", err)
++	}
++
++	testConfig := config.Copy()
++	testConfig.Database = database
++	db := stdlib.OpenDB(*testConfig)
++	t.Cleanup(func() {
++		db.Close()
++		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++		defer cancel()
++		if _, err := adminDB.ExecContext(ctx, `DROP DATABASE `+quotedDatabase+` WITH (FORCE)`); err != nil {
++			t.Errorf("drop isolated postgres database: %v", err)
++		}
++		adminDB.Close()
++	})
++	if err := db.PingContext(context.Background()); err != nil {
++		t.Fatalf("connect to isolated postgres database: %v", err)
++	}
++	return db
 +}

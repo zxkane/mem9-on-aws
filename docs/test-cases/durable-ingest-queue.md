@@ -83,11 +83,13 @@ Design: [`docs/designs/durable-ingest-queue.md`](../designs/durable-ingest-queue
 | TC-INGEST-QUEUE-060 | Advisory locks hold the first 32 candidate scopes while scope 33 is eligible | Candidate pages rotate across bounded claim calls, so the later scope is claimed without waiting for the contended page |
 | TC-INGEST-QUEUE-061 | New scopes arrive faster than bounded claim pages advance after an older page becomes uncontended | A fixed high-water sweep reaches its end and wraps, so sustained queue growth cannot starve the released older scope |
 | TC-INGEST-QUEUE-062 | Upgrade a preceding schema containing a canonical payload larger than 1 MiB | Migration preserves the legacy row with a not-valid check, rejects every new oversized row, and validates the constraint on clean schemas |
+| TC-INGEST-QUEUE-063 | Repository, worker, and handler PostgreSQL packages run in one default-parallel `go test` invocation against the same configured DSN | Every integration test uses an isolated database, no helper truncates shared state, and all packages pass without `-p 1` serialization |
 
 ## CI Evidence
 
 - Go unit tests run while building the patched mnemo-server image.
 - `scripts/run-ingest-queue-integration.sh` starts PostgreSQL, applies both
-  migration scenarios, and runs concurrent repository/worker/handler tests.
+  migration scenarios, and runs repository/worker/handler integration packages
+  together with Go's default package parallelism.
 - Root and infrastructure Vitest suites pin migration contents and the
   disabled-by-default ECS configuration.
