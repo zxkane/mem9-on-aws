@@ -4,6 +4,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
+import { parse } from "yaml";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
@@ -50,6 +51,21 @@ function actionSetForSid(source, sid) {
 }
 
 describe("workflow integration", () => {
+  it("runs IAM regression tests when the GitHub Actions role template changes", () => {
+    const workflow = parse(readFileSync(workflowPath, "utf8"));
+
+    for (const trigger of ["pull_request", "push"]) {
+      const paths = workflow.on[trigger].paths;
+      const exclusion = paths.indexOf("!infra/cloudformation/**");
+      const roleTemplate = paths.indexOf(
+        "infra/cloudformation/github-actions-role.yaml",
+      );
+
+      expect(exclusion).toBeGreaterThanOrEqual(0);
+      expect(roleTemplate).toBeGreaterThan(exclusion);
+    }
+  });
+
   it("runs the PostgreSQL durable-ingest integration suite in CI", () => {
     const workflow = readFileSync(workflowPath, "utf8");
     expect(workflow).toContain("bash scripts/run-ingest-queue-integration.sh");

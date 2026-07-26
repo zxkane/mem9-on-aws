@@ -46,9 +46,10 @@ on:
       - "vitest.config.ts"
       # The OIDC role + ECR repositories are bootstrapped out-of-band via
       # scripts/deploy-github-role.sh / deploy-ecr-repositories.sh — NOT part of
-      # the per-PR SST deploy. Skip the workflow when a PR only touches those
-      # CloudFormation templates.
+      # the per-PR SST deploy. Re-include templates whose regression tests run
+      # in this workflow.
       - "!infra/cloudformation/**"
+      - "infra/cloudformation/github-actions-role.yaml"
       - "infra/cloudformation/ecr-registry-scanning.yaml"
   push:
     branches: [main]
@@ -63,6 +64,7 @@ on:
       - "tsconfig.json"
       - "vitest.config.ts"
       - "!infra/cloudformation/**"
+      - "infra/cloudformation/github-actions-role.yaml"
       - "infra/cloudformation/ecr-registry-scanning.yaml"
 
 # Per-PR concurrency for PR events (cancel superseded runs so repeated
