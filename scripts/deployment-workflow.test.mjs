@@ -39,13 +39,20 @@ function runFixture(name) {
   return { result, callRecords };
 }
 
-function actionSetForSid(source, sid) {
+function blockForSid(source, sid) {
   const start = source.indexOf(`- Sid: ${sid}`);
   expect(start, `missing IAM Sid ${sid}`).toBeGreaterThanOrEqual(0);
   const tail = source.slice(start);
   const next = tail.slice(1).search(/\n\s+- Sid: /);
-  const block = next >= 0 ? tail.slice(0, next + 1) : tail;
-  return [...block.matchAll(/^\s+- ((?:ecs|logs|ssm):[A-Za-z]+)$/gm)].map(
+  return next >= 0 ? tail.slice(0, next + 1) : tail;
+}
+
+function actionSetForSid(source, sid) {
+  return [
+    ...blockForSid(source, sid).matchAll(
+      /^\s+- ((?:ec2|ecs|logs|ssm):[A-Za-z]+)$/gm,
+    ),
+  ].map(
     (m) => m[1],
   );
 }
@@ -135,6 +142,20 @@ describe("OAuth2 facade IAM", () => {
         "logs:GetLogDelivery",
         "logs:ListLogDeliveries",
       ]),
+    );
+  });
+});
+
+describe("Lambda VPC IAM", () => {
+  it("scopes ENI cleanup to this account and application region", () => {
+    const role = readFileSync(rolePath, "utf8");
+    const block = blockForSid(role, "LambdaVpcEniCleanup");
+
+    expect(actionSetForSid(role, "LambdaVpcEniCleanup")).toEqual([
+      "ec2:DeleteNetworkInterface",
+    ]);
+    expect(block).toContain(
+      "!Sub arn:${AWS::Partition}:ec2:ap-northeast-1:${AWS::AccountId}:network-interface/*",
     );
   });
 });
