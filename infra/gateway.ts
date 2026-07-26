@@ -30,7 +30,7 @@ import { fileURLToPath } from "url";
 import { resolveVpc } from "./vpc";
 import type { CognitoOutputs } from "./cognito";
 import type { EcsOutputs } from "./ecs";
-import type { BootstrapOutputs } from "./bootstrap";
+import type { TenantIdentityOutputs } from "./tenant-identity";
 
 // @ts-ignore - `aws` injected globally by SST; bedrock/iam/ssm types loose.
 const awsAny = aws as unknown as Record<string, any>;
@@ -40,7 +40,7 @@ const gatewayDirname = path.dirname(gatewayFilename);
 
 const MNEMO_PORT = 8080;
 
-// The two MCP tools the proxy Lambda exposes. Names are bare (`add_memory` /
+// The MCP tools the proxy Lambda exposes. Names are bare (`add_memory` /
 // `search_memories`) — AgentCore prefixes them as `${targetName}___${tool}`, which
 // the Lambda strips and the E2E's endsWith matcher tolerates. inputSchema mirrors
 // the mem9 REST contract (infra/gateway/proxy-handler.mjs maps these to the calls).
@@ -125,6 +125,20 @@ const TOOL_SCHEMA = [
       required: ["messages"],
     },
   },
+  {
+    name: "get_ingest_job_status",
+    description: "Get the state and timestamps of an accepted transcript-ingest job.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        job_id: {
+          type: "string",
+          description: "The job id returned by ingest_messages.",
+        },
+      },
+      required: ["job_id"],
+    },
+  },
 ];
 
 export interface GatewayOutputs {
@@ -136,7 +150,7 @@ export interface GatewayOutputs {
 export function gateway(
   cognitoOut: CognitoOutputs,
   ecsOut: EcsOutputs,
-  bootstrapOut: BootstrapOutputs,
+  identity: TenantIdentityOutputs,
   readerClientId: Output<string>,
 ): GatewayOutputs {
   const prefix = `/mem9-on-aws/${$app.stage}`;
@@ -175,7 +189,7 @@ export function gateway(
     },
     environment: {
       MEM9_SERVER_BASE_URL: $interpolate`http://${ecsOut.serviceDnsName}:${MNEMO_PORT}`,
-      MEM9_API_KEY: bootstrapOut.tenantId,
+      MEM9_API_KEY: identity.tenantId,
     },
   });
 
@@ -262,7 +276,7 @@ export function gateway(
         MEM9_TGT_GATEWAY_ID: bedrockGateway.gatewayId,
         MEM9_TGT_NAME: targetName,
         MEM9_TGT_DESCRIPTION:
-          "mnemo-server MCP tools (add_memory, search_memories, ingest_messages) via a proxy Lambda",
+          "mnemo-server MCP tools (memory, transcript ingest, and ingest status) via a proxy Lambda",
         MEM9_TGT_LAMBDA_ARN: proxyFn.arn,
         MEM9_TGT_TOOL_SCHEMA: toolSchemaJson,
       },

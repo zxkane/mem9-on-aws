@@ -38,9 +38,88 @@ apply_migration() {
     psql -q -v ON_ERROR_STOP=1 -U postgres -d "$database" < "$MIGRATION"
 }
 
+expect_ingest_job_insert_rejected() {
+  local description=$1
+  local statement=$2
+  if docker exec "$CONTAINER" \
+    psql -q -v ON_ERROR_STOP=1 -U postgres -d mem9_queue \
+    -c "$statement" >/dev/null 2>&1; then
+    echo "$description unexpectedly bypassed an ingest_jobs constraint" >&2
+    exit 1
+  fi
+}
+
 # Empty schema: initial application and repeat application must both succeed.
 apply_migration mem9_queue
 apply_migration mem9_queue
+
+expect_ingest_job_insert_rejected \
+  "active plan revision without a hash" \
+  "INSERT INTO ingest_jobs (
+      job_id, tenant_id, idempotency_key, active_plan_revision
+    ) VALUES (
+      '00000000-0000-4000-8000-000000000201',
+      'tenant-a',
+      repeat('c', 64),
+      1
+    )"
+expect_ingest_job_insert_rejected \
+  "active plan hash without a revision" \
+  "INSERT INTO ingest_jobs (
+      job_id, tenant_id, idempotency_key, active_plan_hash
+    ) VALUES (
+      '00000000-0000-4000-8000-000000000202',
+      'tenant-a',
+      repeat('d', 64),
+      repeat('e', 64)
+    )"
+expect_ingest_job_insert_rejected \
+  "runtime operation without a finalization state" \
+  "INSERT INTO ingest_jobs (
+      job_id, tenant_id, idempotency_key, runtime_operation_id
+    ) VALUES (
+      '00000000-0000-4000-8000-000000000203',
+      'tenant-a',
+      repeat('f', 64),
+      '00000000-0000-7000-8000-000000000203'
+    )"
+
+# Add the runtime memory table as it would exist before this migration, including
+# a nullable legacy version. Reapplying must backfill and constrain the token.
+docker exec "$CONTAINER" psql -q -v ON_ERROR_STOP=1 -U postgres -d mem9_queue \
+  -c "CREATE TABLE memories (
+        id VARCHAR(36) PRIMARY KEY,
+        content TEXT NOT NULL,
+        source VARCHAR(100),
+        tags JSONB,
+        metadata JSONB,
+        embedding TEXT NULL,
+        memory_type VARCHAR(20) NOT NULL DEFAULT 'pinned',
+        agent_id VARCHAR(100) NULL,
+        session_id VARCHAR(100) NULL,
+        app_id VARCHAR(100) NOT NULL DEFAULT '',
+        state VARCHAR(20) NOT NULL DEFAULT 'active',
+        version INT NULL,
+        updated_by VARCHAR(100),
+        superseded_by VARCHAR(36) NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+      INSERT INTO memories (id, content, version)
+      VALUES ('00000000-0000-4000-8000-000000000054', 'legacy', NULL);"
+apply_migration mem9_queue
+docker exec "$CONTAINER" psql -qAt -v ON_ERROR_STOP=1 -U postgres -d mem9_queue \
+  -c "SELECT version FROM memories WHERE id = '00000000-0000-4000-8000-000000000054'" |
+  grep -qx "1"
+docker exec "$CONTAINER" psql -qAt -v ON_ERROR_STOP=1 -U postgres -d mem9_queue \
+  -c "SELECT is_nullable || ':' || column_default
+      FROM information_schema.columns
+      WHERE table_schema = 'public'
+        AND table_name = 'memories'
+        AND column_name = 'version'" |
+  grep -qx "NO:1"
+docker exec "$CONTAINER" psql -q -v ON_ERROR_STOP=1 -U postgres -d mem9_queue \
+  -c "DELETE FROM memories"
 
 # Upgraded schema: migrate the preceding foundation's synthetic key and
 # length-only constraint while preserving its row.

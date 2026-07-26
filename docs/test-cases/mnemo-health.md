@@ -9,8 +9,8 @@ database, embedding, LLM, or end-to-end readiness.
 | ID | Scenario | Expected |
 |---|---|---|
 | TC-MNEMO-HEALTH-001 | mnemo-server health command | Command is exactly `["CMD-SHELL", "wget -q -O /dev/null http://localhost:8080/healthz \|\| exit 1"]` |
-| TC-MNEMO-HEALTH-002 | ECS health timing | `startPeriod="60 seconds"`, `interval="30 seconds"`, `timeout="5 seconds"`, and `retries=3` |
-| TC-MNEMO-HEALTH-003 | Startup grace | Failures during the first 60 seconds do not count toward the retry limit; a success during that period establishes container health |
+| TC-MNEMO-HEALTH-002 | ECS health timing | `startPeriod="300 seconds"`, `interval="30 seconds"`, `timeout="5 seconds"`, and `retries=3` |
+| TC-MNEMO-HEALTH-003 | Startup grace | Failures during the first 300 seconds do not count toward the retry limit; a success during that period establishes container health |
 | TC-MNEMO-HEALTH-004 | Essential-container task health | mnemo-server, qwen3-embed, and llm-proxy are all essential and each defines an ECS health check |
 
 ## Container smoke test (`scripts/run-mnemo-health-smoke.sh`)

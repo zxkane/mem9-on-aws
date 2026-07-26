@@ -111,3 +111,70 @@ describe("proxy-handler routing (regression)", () => {
     await expect(handler({}, ctx("delete_everything"))).rejects.toThrow(/unknown tool/);
   });
 });
+
+describe("proxy-handler get_ingest_job_status", () => {
+  it("GETs status with the configured tenant key and accepts only job_id", async () => {
+    const status = {
+      job_id: "job-54",
+      state: "succeeded",
+      attempts: 1,
+      warning_class: "facts_truncated",
+      created_at: "2026-07-26T12:00:00Z",
+      updated_at: "2026-07-26T12:01:00Z",
+      completed_at: "2026-07-26T12:01:00Z",
+      canonical_payload: "payload-leak",
+      plan_payload: "plan-leak",
+      lease_owner: "owner-leak",
+    };
+    const spy = mockFetchOk(status);
+    const result = await handler(
+      { job_id: "job-54", tenant_id: "attacker", api_key: "attacker" },
+      ctx("get_ingest_job_status"),
+    );
+    expect(result).toEqual({
+      job_id: "job-54",
+      state: "succeeded",
+      attempts: 1,
+      warning_class: "facts_truncated",
+      created_at: "2026-07-26T12:00:00Z",
+      updated_at: "2026-07-26T12:01:00Z",
+      completed_at: "2026-07-26T12:01:00Z",
+    });
+    expect(JSON.stringify(result)).not.toMatch(/payload-leak|plan-leak|owner-leak/);
+    const [url, init] = spy.mock.calls[0];
+    expect(url).toBe(
+      "http://mnemo.mem9-test.local:8080/v1alpha2/mem9s/ingest-jobs/job-54",
+    );
+    expect(init.method).toBe("GET");
+    expect(init.headers["X-API-Key"]).toBe("test-tenant-id");
+    expect(url).not.toContain("attacker");
+    expect(JSON.stringify(init)).not.toContain("attacker");
+  });
+
+  it("preserves not-found without retries, response-body leakage, or logging", async () => {
+    const fetchSpy = vi.fn(async () => ({
+      ok: false,
+      status: 404,
+      text: async () => '{"error":"not found","private":"payload-leak"}',
+    }));
+    const logSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    vi.stubGlobal("fetch", fetchSpy);
+
+    let message = "";
+    try {
+      await handler({ job_id: "job-other" }, ctx("get_ingest_job_status"));
+    } catch (error) {
+      message = String(error);
+    }
+    expect(message).toContain("returned 404");
+    expect(message).not.toContain("payload-leak");
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(logSpy).not.toHaveBeenCalled();
+  });
+
+  it("requires a non-empty job_id", async () => {
+    const spy = mockFetchOk();
+    await expect(handler({}, ctx("get_ingest_job_status"))).rejects.toThrow(/requires 'job_id'/);
+    expect(spy).not.toHaveBeenCalled();
+  });
+});

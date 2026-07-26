@@ -324,7 +324,7 @@ declare namespace aws {
   }
 }
 
-// ── The `random` provider (infra/bootstrap.ts uses RandomId for the tenant key) ──
+// ── The `random` provider (infra/tenant-identity.ts uses RandomId for the tenant key) ──
 declare namespace random {
   interface RandomIdArgs {
     byteLength: Input<number>;

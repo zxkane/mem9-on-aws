@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbOutputs } from "./db";
+import type { TenantIdentityOutputs } from "./tenant-identity";
 
 /**
  * Unit tests for the `ecs` stack factory. Mocks the SST globals ($app,
@@ -56,6 +57,15 @@ function fakeDbOut(): DbOutputs {
     secretArn: out("arn:aws:secretsmanager:x:y:secret:mem9-on-aws-prod-Mem9DbSecret-z"),
     taskSecurityGroupId: out("sg-task"),
   } as unknown as DbOutputs;
+}
+
+function fakeTenantIdentity(): TenantIdentityOutputs {
+  return {
+    tenantSecretArn: out(
+      "arn:aws:secretsmanager:x:y:secret:mem9-on-aws-prod-tenant-api-key-z",
+    ),
+    tenantId: out("0123456789abcdef0123456789abcdef"),
+  } as unknown as TenantIdentityOutputs;
 }
 
 // $interpolate mock: mirror Pulumi's tagged-template — unwrap out<T> values (and
@@ -270,6 +280,7 @@ beforeEach(() => {
   params = [];
   created = [];
   process.env.SST_SECRET_SlackWebhookUrl = "https://example.com/hooks/test";
+  process.env.MEM9_DURABLE_INGEST_ENABLED = "1";
 });
 
 function createdOf(kind: string): Record<string, unknown> {
@@ -283,13 +294,15 @@ afterEach(() => {
     delete (globalThis as Record<string, unknown>)[g];
   delete process.env.MEM9_IMAGE_TAG;
   delete process.env.MEM9_BEDROCK_PROJECT;
+  delete process.env.MEM9_DURABLE_INGEST_ENABLED;
   delete process.env.SST_SECRET_SlackWebhookUrl;
   vi.resetModules();
 });
 
 async function loadEcs() {
   vi.resetModules();
-  return (await import("./ecs")).ecs;
+  const { ecs } = await import("./ecs");
+  return (dbOut: DbOutputs) => ecs(dbOut, fakeTenantIdentity());
 }
 
 describe("ecs stack", () => {
@@ -498,19 +511,28 @@ describe("ecs stack", () => {
     expect(env.MNEMO_RECALL_ZERO_RESULT_FALLBACK).toBe("1");
     // Ingest durability (TC-INGEST-020, issue #25): only durable facts stored.
     expect(env.MNEMO_INGEST_DURABLE_ONLY).toBe("1");
-    // Durable queue routing/worker execution remains off until atomic apply.
-    expect(env.MNEMO_DURABLE_INGEST_ENABLED).toBe("0");
+    expect(env.MNEMO_DURABLE_INGEST_ENABLED).toBe("1");
     // GLM-5 request bound (TC-GLM-BOUND-020, issue #46): patch configuration
     // is explicit in ECS, not left to an image default.
     expect(env.MNEMO_MAX_EXTRACTION_CONVERSATION_RUNES).toBe("200000");
     // Secret via ssm (== ECS secrets valueFrom), never environment.
     const ssm = mnemo.ssm as Record<string, unknown>;
     expect(ssm.MEM9_DB_SECRET).toBeDefined();
+    expect(ssm.MEM9_TENANT_ID).toBeDefined();
     // No plaintext password anywhere in env.
     for (const [k, v] of Object.entries(env)) {
       expect(k.toLowerCase()).not.toContain("password");
       expect(String(v)).not.toMatch(/password/i);
     }
+  });
+
+  it("keeps durable ingest disabled unless the deploy explicitly enables it", async () => {
+    delete process.env.MEM9_DURABLE_INGEST_ENABLED;
+    installGlobals("prod");
+    const ecs = await loadEcs();
+    ecs(fakeDbOut());
+    const env = containersByName()["mnemo-server"].environment as Record<string, unknown>;
+    expect(env.MNEMO_DURABLE_INGEST_ENABLED).toBe("0");
   });
 
   it("mnemo-server container: exact process-liveness command and ECS timing", async () => {
@@ -523,7 +545,7 @@ describe("ecs stack", () => {
         "CMD-SHELL",
         "wget -q -O /dev/null http://localhost:8080/healthz || exit 1",
       ],
-      startPeriod: "60 seconds",
+      startPeriod: "300 seconds",
       interval: "30 seconds",
       timeout: "5 seconds",
       retries: 3,

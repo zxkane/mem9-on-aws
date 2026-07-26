@@ -15,24 +15,19 @@
  * to exit 0. This stack exports the task ARN + network config to SSM so CI (and a
  * manual operator) can run it deterministically.
  *
- * The tenant id (== X-API-Key) is supplied via MEM9_TENANT_ID from a STABLE
- * Secrets Manager secret created here, so re-runs reuse the same key rather than
- * minting a new one each deploy.
+ * The tenant id (== X-API-Key) is supplied via MEM9_TENANT_ID from the shared
+ * stable identity in infra/tenant-identity.ts, so re-runs reuse the same key.
  */
 
 import type { DbOutputs } from "./db";
 import { ecrImage } from "./ecr";
 import { resolveVpc } from "./vpc";
+import type { TenantIdentityOutputs } from "./tenant-identity";
 
 const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 
 export interface BootstrapOutputs {
   taskDefinitionArn: Output<string>;
-  tenantSecretArn: Output<string>;
-  // The tenant id == X-API-Key value (random.RandomId hex). infra/gateway.ts
-  // injects it into the proxy Lambda, which adds the header when calling
-  // mnemo-server. It remains a Pulumi-internal random token in state.
-  tenantId: Output<string>;
 }
 
 /**
@@ -40,30 +35,18 @@ export interface BootstrapOutputs {
  *   subnets, and task SG so it reaches Aurora through the same 5432 path).
  * @param dbOut db()'s Outputs (Aurora writer host/port/db + the DB secret ARN;
  *   no RDS Proxy — see infra/db.ts).
+ * @param identity stable tenant identity shared with mnemo-server and Gateway.
  */
-export function bootstrap(cluster: sst.aws.Cluster, dbOut: DbOutputs): BootstrapOutputs {
+export function bootstrap(
+  cluster: sst.aws.Cluster,
+  dbOut: DbOutputs,
+  identity: TenantIdentityOutputs,
+): BootstrapOutputs {
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const tags = { Project: "mem9-on-aws", Stage: $app.stage, ManagedBy: "sst" };
   const { privateSubnetIds } = resolveVpc();
 
   const image = ecrImage("mem9-on-aws/bootstrap", IMAGE_TAG);
-
-  // Stable tenant id / X-API-Key. A RandomPassword-style value stored in Secrets
-  // Manager so it's generated ONCE and reused across re-runs (not minted per
-  // deploy). The value is a random token; the tenant row's id == this value, and
-  // clients send it as X-API-Key. Never committed / logged in plaintext.
-  const tenantSecret = new aws.secretsmanager.Secret("Mem9TenantApiKey", {
-    namePrefix: `mem9-on-aws-${$app.stage}-tenant-api-key-`,
-    description: "mem9 tenant id == X-API-Key (single tenant). Stable across deploys.",
-    recoveryWindowInDays: $app.stage === "prod" ? 7 : 0,
-    tags,
-  });
-  // A URL-safe random token as the tenant id (fits VARCHAR(36): a 32-hex string).
-  const tenantId = new random.RandomId("Mem9TenantId", { byteLength: 16 });
-  new aws.secretsmanager.SecretVersion("Mem9TenantApiKeyValue", {
-    secretId: tenantSecret.id,
-    secretString: tenantId.hex,
-  });
 
   // The one-shot task. arm64, sized small (psql + jq are light — the DDL is
   // trivial). Injects the DB pieces + the DB secret (JSON {username,password}) +
@@ -83,7 +66,7 @@ export function bootstrap(cluster: sst.aws.Cluster, dbOut: DbOutputs): Bootstrap
     // id, both resolved from Secrets Manager at task start, never literals.
     ssm: {
       MEM9_DB_SECRET: dbOut.secretArn,
-      MEM9_TENANT_ID: tenantSecret.arn,
+      MEM9_TENANT_ID: identity.tenantSecretArn,
     },
     logging: { retention: "1 month" },
     transform: {
@@ -124,7 +107,5 @@ export function bootstrap(cluster: sst.aws.Cluster, dbOut: DbOutputs): Bootstrap
 
   return {
     taskDefinitionArn: task.taskDefinition,
-    tenantSecretArn: tenantSecret.arn,
-    tenantId: tenantId.hex,
   };
 }

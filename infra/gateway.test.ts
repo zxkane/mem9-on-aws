@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CognitoOutputs } from "./cognito";
 import type { EcsOutputs } from "./ecs";
-import type { BootstrapOutputs } from "./bootstrap";
+import type { TenantIdentityOutputs } from "./tenant-identity";
 
 /**
  * Unit tests for the `gateway` stack (Lambda-proxy target): the CUSTOM_JWT
@@ -127,8 +127,11 @@ function fakeEcs(): EcsOutputs {
     taskSecurityGroupId: out("sg-task"),
   } as unknown as EcsOutputs;
 }
-function fakeBootstrap(): BootstrapOutputs {
-  return { tenantId: out("deadbeefTENANTID") } as unknown as BootstrapOutputs;
+function fakeIdentity(): TenantIdentityOutputs {
+  return {
+    tenantId: out("deadbeefTENANTID"),
+    tenantSecretArn: out("arn:secret"),
+  } as unknown as TenantIdentityOutputs;
 }
 function only(kind: string) {
   const rs = created.filter((r) => r.kind === kind);
@@ -140,7 +143,7 @@ describe("gateway stack", () => {
   it("creates a CUSTOM_JWT MCP gateway matching on allowedClients (not aud)", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
-    gateway(fakeCognito(), fakeEcs(), fakeBootstrap(), out("reader-client-id-test") as unknown as Output<string>);
+    gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>);
     const gw = only("AgentcoreGateway");
     expect(gw.protocolType).toBe("MCP");
     expect(gw.authorizerType).toBe("CUSTOM_JWT");
@@ -155,7 +158,7 @@ describe("gateway stack", () => {
   it("trusts BOTH the M2M and the reader client in allowedClients", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
-    gateway(fakeCognito(), fakeEcs(), fakeBootstrap(), out("reader-client-id-test") as unknown as Output<string>);
+    gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>);
     const gw = only("AgentcoreGateway");
     const jwt = (gw.authorizerConfiguration as any).customJwtAuthorizer;
     // The list is [...cognitoOut.allowedClientIds, readerClientId]; each entry is an
@@ -170,7 +173,7 @@ describe("gateway stack", () => {
   it("provisions a VPC-attached nodejs24.x proxy Lambda carrying the Cloud Map URL + X-API-Key", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
-    gateway(fakeCognito(), fakeEcs(), fakeBootstrap(), out("reader-client-id-test") as unknown as Output<string>);
+    gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>);
     const fn = only("SstFunction");
     expect(fn.runtime).toBe("nodejs24.x");
     expect(String(fn.handler)).toContain("proxy-handler.handler");
@@ -188,7 +191,7 @@ describe("gateway stack", () => {
   it("gateway service role grants ONLY lambda:InvokeFunction (no workload-identity/secret/ENI)", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
-    gateway(fakeCognito(), fakeEcs(), fakeBootstrap(), out("reader-client-id-test") as unknown as Output<string>);
+    gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>);
     // Two roles are created: the Lambda exec role + the gateway service role. Find
     // the gateway-invoke RolePolicy (its doc is an apply()'d Output over the ARN).
     const rolePolicies = created.filter((r) => r.kind === "RolePolicy");
@@ -206,7 +209,7 @@ describe("gateway stack", () => {
   it("provisions the target via a command.local.Command driving a mcp.lambda CreateGatewayTarget", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
-    gateway(fakeCognito(), fakeEcs(), fakeBootstrap(), out("reader-client-id-test") as unknown as Output<string>);
+    gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>);
     const cmd = only("LocalCommand");
     expect(String(unwrap(cmd.create))).toContain("MEM9_TGT_OP=create");
     expect(String(unwrap(cmd.create))).toContain("provision-target.mjs");
@@ -217,6 +220,7 @@ describe("gateway stack", () => {
     expect(String(env.MEM9_TGT_TOOL_SCHEMA)).toContain("add_memory");
     expect(String(env.MEM9_TGT_TOOL_SCHEMA)).toContain("search_memories");
     expect(String(env.MEM9_TGT_TOOL_SCHEMA)).toContain("ingest_messages");
+    expect(String(env.MEM9_TGT_TOOL_SCHEMA)).toContain("get_ingest_job_status");
     // The removed privateEndpoint/API-key/OpenAPI-schema inputs are gone.
     expect(env.MEM9_TGT_SCHEMA).toBeUndefined();
     expect(env.MEM9_TGT_APIKEY_PROVIDER_ARN).toBeUndefined();

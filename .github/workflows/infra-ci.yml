@@ -254,6 +254,9 @@ jobs:
           # scripts/deploy-bedrock-mantle-project.sh; empty → the proxy omits the
           # header (still functional, just untagged).
           MEM9_BEDROCK_PROJECT: ${{ vars.MEM9_BEDROCK_PROJECT }}
+          # The image applies the repeatable atomic-ingest migration before the
+          # server starts, so one enabled rollout is safe.
+          MEM9_DURABLE_INGEST_ENABLED: "1"
         run: |
           # PR_NUMBER comes from GitHub's pull_request payload (integer);
           # validate to short-circuit any injection risk.
@@ -833,6 +836,9 @@ jobs:
           # (infra/ecs.ts BEDROCK_PROJECT). Repo variable set out-of-band by
           # scripts/deploy-bedrock-mantle-project.sh.
           MEM9_BEDROCK_PROJECT: ${{ vars.MEM9_BEDROCK_PROJECT }}
+          # The image applies the repeatable atomic-ingest migration before the
+          # server starts, so one enabled rollout is safe.
+          MEM9_DURABLE_INGEST_ENABLED: "1"
           # Slack incoming webhook for prod alarm delivery (infra/observability.ts).
           # SST marks this value secret before it enters Pulumi state or Lambda config.
           # Production synthesis fails when the managed sink is unset.

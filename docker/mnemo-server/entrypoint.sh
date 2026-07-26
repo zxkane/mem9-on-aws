@@ -1,6 +1,6 @@
 #!/bin/sh
-# entrypoint.sh — assemble MNEMO_DSN from the ECS-injected DB pieces, then exec
-# mnemo-server. Runs as PID 1 in the mnemo-server container.
+# entrypoint.sh — assemble MNEMO_DSN, apply the repeatable atomic migration, then
+# exec mnemo-server. Runs as PID 1 in the mnemo-server container.
 #
 # WHY (docs/mem9-facts.md "DB connection mechanism"): mem9 reads a SINGLE static
 # `MNEMO_DSN` env var and does NOT compose it from host/user/pass/dbname parts —
@@ -53,6 +53,12 @@ if [ -z "${MNEMO_DSN:-}" ]; then
   # and help diagnose connectivity; the secret value never appears in logs).
   echo "entrypoint: assembled MNEMO_DSN=postgres://${DB_USER}:***@${MEM9_DB_HOST}:${MEM9_DB_PORT}/${MEM9_DB_NAME}?sslmode=require"
 fi
+
+# Apply the repeatable atomic-ingest migration before the process can become
+# healthy or route durable jobs. PGDATABASE keeps the credential-bearing DSN
+# out of the process arguments visible through `ps`.
+PGDATABASE="$MNEMO_DSN" psql -q -v ON_ERROR_STOP=1 \
+  -f /usr/local/share/mem9/001_ingest_jobs.sql
 
 # Hand off to the server as PID 1 (proper signal handling / graceful shutdown).
 exec /usr/local/bin/mnemo-server "$@"

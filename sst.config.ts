@@ -41,7 +41,7 @@ export default $config({
           },
         },
         // The `random` provider exposes the `random` global (random.RandomId) used
-        // by infra/bootstrap.ts to mint the STABLE tenant id / X-API-Key. It must
+        // by infra/tenant-identity.ts to mint the STABLE tenant id / X-API-Key. It must
         // be declared here for the global to bind at run() (SST only injects a
         // provider's namespace when it's in this block). Pulumi-internal (no cloud
         // API) → no deploy-role IAM. Version pinned explicitly (SST v4.17 rejects
@@ -83,27 +83,31 @@ export default $config({
     const { db } = await import("./infra/db");
     const dbOut = db();
 
+    // Stable tenant id / X-API-Key shared by the service, bootstrap task, and
+    // private Gateway proxy. ECS containers receive it from Secrets Manager.
+    const { tenantIdentity } = await import("./infra/tenant-identity");
+    const identityOut = tenantIdentity();
+
     // ECS Fargate cluster + the mnemo-server service. Three containers:
     // mnemo-server, qwen3-embed (localhost /v1/embeddings, dims 1024), and
     // llm-proxy (localhost /v1/chat/completions -> Bedrock Mantle).
     // Takes db()'s Outputs DIRECTLY (a real Pulumi dependency) — NOT an SSM
     // read-back, which would fail on a fresh stage's first deploy.
     const { ecs } = await import("./infra/ecs");
-    const ecsOut = ecs(dbOut);
+    const ecsOut = ecs(dbOut, identityOut);
 
     // Schema-bootstrap one-shot Task (§8): defines a short-lived task that applies
     // pgvector + the memories(vector 1024) schema + seeds one tenant. Reuses the
     // ECS cluster + db Outputs. SST only DEFINES the task; CI runs it via
     // `aws ecs run-task` after deploy (see .github/workflows/infra-ci.yml).
-    // Capture its Outputs — the gateway stack reads the tenant id (X-API-Key).
     const { bootstrap } = await import("./infra/bootstrap");
-    const bootstrapOut = bootstrap(ecsOut.cluster, dbOut);
+    bootstrap(ecsOut.cluster, dbOut, identityOut);
 
     // MCP surface (§6/§6a): Cognito M2M → AgentCore Gateway → a VPC-attached proxy
     // Lambda that reaches mnemo-server privately over Cloud Map DNS. Threaded as
     // direct Pulumi Outputs (no SSM read-back). cognito is independent; gateway()
     // takes ecsOut (the Cloud Map DNS name + task SG the Lambda uses) + the tenant
-    // id (bootstrapOut) for the outbound X-API-Key.
+    // id (identityOut) for the outbound X-API-Key.
     const { cognito } = await import("./infra/cognito");
     const cognitoOut = cognito();
     // OAuth2 browser-login façade (§6): ApiGatewayV2 + reader client + façade
@@ -113,7 +117,7 @@ export default $config({
     const { oauthFacade } = await import("./infra/oauth-facade");
     const facadeOut = oauthFacade(cognitoOut);
     const { gateway } = await import("./infra/gateway");
-    gateway(cognitoOut, ecsOut, bootstrapOut, facadeOut.readerClientId);
+    gateway(cognitoOut, ecsOut, identityOut, facadeOut.readerClientId);
 
     return {};
   },

@@ -63,18 +63,21 @@ RUN go mod download \
        go build -trimpath -ldflags="-s -w" -o /out/mnemo-server ./cmd/mnemo-server
 
 # ── runtime ──────────────────────────────────────────────────────────────────
-# Matches upstream's runtime base (alpine:3.19 + ca-certificates) so behavior
-# tracks what the maintainers ship; the static binary + certs are all we need.
+# Matches upstream's Alpine runtime base; the static binary is supplemented only
+# with TLS/secret parsing and the PostgreSQL migration client.
 FROM alpine:3.19
 
 # ca-certificates: TLS to the Aurora writer endpoint. qwen3-embed and llm-proxy
 # are localhost HTTP sidecars; mnemo-server does not call Bedrock directly.
 # jq parses the Secrets Manager JSON ({username,password}) and URL-encodes the
 # password (RDS RandomPassword can contain DSN-reserved chars: @ / : ? #) via
-# jq's @uri. Both packages are small (~1-2 MB total).
-RUN apk add --no-cache ca-certificates jq
+# jq's @uri. postgresql-client applies the additive durable-ingest migration
+# before the server starts, so an enabled replacement cannot accept work before
+# its atomic queue schema exists.
+RUN apk add --no-cache ca-certificates jq postgresql-client
 
 COPY --from=builder /out/mnemo-server /usr/local/bin/mnemo-server
+COPY docker/bootstrap/migrations/001_ingest_jobs.sql /usr/local/share/mem9/001_ingest_jobs.sql
 # entrypoint assembles MNEMO_DSN from the ECS-injected DB env + secret, then
 # execs the server (mem9 reads a single static MNEMO_DSN and can't compose it
 # from parts — see docs/mem9-facts.md "DB connection mechanism").
