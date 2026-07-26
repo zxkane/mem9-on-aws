@@ -4,12 +4,13 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
-import { parse } from "yaml";
+import { parse, parseDocument } from "yaml";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
 const workflowPath = resolve(root, ".github/workflows/infra-ci.yml");
 const rolePath = resolve(root, "infra/cloudformation/github-actions-role.yaml");
+const deployRolePath = resolve(here, "deploy-github-role.sh");
 const reconcilePath = resolve(here, "reconcile-ecs-deployment.mjs");
 const fakeAwsPath = resolve(here, "fixtures/fake-aws.mjs");
 const tempDirs = [];
@@ -147,16 +148,47 @@ describe("OAuth2 facade IAM", () => {
 });
 
 describe("Lambda VPC IAM", () => {
-  it("scopes ENI cleanup to this account and application region", () => {
-    const role = readFileSync(rolePath, "utf8");
-    const block = blockForSid(role, "LambdaVpcEniCleanup");
+  it("discovers the same application VPC and private subnets used by SST", () => {
+    const script = readFileSync(deployRolePath, "utf8");
 
-    expect(actionSetForSid(role, "LambdaVpcEniCleanup")).toEqual([
-      "ec2:DeleteNetworkInterface",
-    ]);
-    expect(block).toContain(
-      "!Sub arn:${AWS::Partition}:ec2:ap-northeast-1:${AWS::AccountId}:network-interface/*",
+    expect(script).toContain(
+      'APPLICATION_REGION="${PROJECT_REGION:-ap-northeast-1}"',
     );
+    expect(script).toContain('APPLICATION_VPC_ID="${MEM9_VPC_ID:-}"');
+    expect(script).toContain('"Name=tag:Name,Values=private-1*"');
+    for (const parameter of [
+      "OIDCProviderArn",
+      "ApplicationRegion",
+      "ApplicationVpcArn",
+      "ApplicationPrivateSubnetArns",
+    ]) {
+      expect(script).toContain(`"ParameterKey":"${parameter}"`);
+    }
+  });
+
+  it("scopes ENI cleanup to the application account, region, VPC, and subnets", () => {
+    const document = parseDocument(readFileSync(rolePath, "utf8"));
+    expect(document.errors).toEqual([]);
+    const template = document.toJS();
+    const statement =
+      template.Resources.LambdaProxyPolicy.Properties.PolicyDocument.Statement.find(
+        ({ Sid }) => Sid === "LambdaVpcEniCleanup",
+      );
+
+    expect(statement).toEqual({
+      Sid: "LambdaVpcEniCleanup",
+      Effect: "Allow",
+      Action: ["ec2:DeleteNetworkInterface"],
+      Resource: [
+        "arn:${AWS::Partition}:ec2:${ApplicationRegion}:${AWS::AccountId}:network-interface/*",
+      ],
+      Condition: {
+        ArnEquals: {
+          "ec2:Vpc": "ApplicationVpcArn",
+          "ec2:Subnet": "ApplicationPrivateSubnetArns",
+        },
+      },
+    });
   });
 });
 
