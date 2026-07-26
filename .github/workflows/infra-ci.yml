@@ -98,7 +98,7 @@ jobs:
     name: Typecheck & Unit Tests
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     if: github.event_name == 'push' || github.event.action != 'closed'
-    timeout-minutes: 10
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v5
 
@@ -111,6 +111,11 @@ jobs:
           node-version: 24
           cache: pnpm
           cache-dependency-path: infra/pnpm-lock.yaml
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: "1.24.x"
+          cache: false
 
       - name: Install infra dependencies
         run: pnpm -C infra install --frozen-lockfile
@@ -138,6 +143,9 @@ jobs:
         run: |
           python -m pip install --disable-pip-version-check 'cfn-lint>=1.39,<2'
           cfn-lint infra/cloudformation/ecr-registry-scanning.yaml
+
+      - name: PostgreSQL durable ingest integration tests
+        run: bash scripts/run-ingest-queue-integration.sh
 
   # ───────────────────────────────────────────────────────────────────────────
   # deploy-preview — PR opened/synchronized/reopened → stage `pr-N`.

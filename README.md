@@ -62,15 +62,16 @@ citations.
 | Embedding | qwen3 OpenAI-compatible `/embeddings` as an **ECS sidecar** (localhost, always warm), **dims 1024**. Not Mantle, not a third-party API. |
 | ECS task | **3 containers**: mnemo-server + qwen3-embed sidecar + llm-proxy sidecar |
 | Schema bootstrap | **one-shot ECS task** on deploy (pgvector + tenant runtime schema incl. `idx_app`/FTS/`vector(1024)` + seed 1 tenant) |
+| Durable ingest | Aurora `ingest_jobs` schema and recoverable worker primitives are installed, but `MNEMO_DURABLE_INGEST_ENABLED=0` in every stage; startup rejects manual enablement until a production atomic processor is wired |
 | Tenancy | **single tenant** (one `X-API-Key`); writes carry **`X-Mnemo-Agent-Id`** to reserve per-agent scoping |
 | Replicas | **Single** (`desiredCount=1`) — single-writer, sidesteps mem9's local-disk import dir |
 
 ## Planned reliability work
 
 The remaining open reliability program covers deployment reconciliation, alert
-failure queues, preview cleanup, durable ingest jobs, atomic apply, telemetry,
-and post-deployment verification. **None of that
-planned work is part of the current implementation.** The exact boundary is
+failure queues, preview cleanup, atomic durable ingest apply and enablement,
+telemetry, and post-deployment verification. The exact boundary between the
+inert queue foundation and future atomic processing is
 recorded in
 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md#planned-changes).
 

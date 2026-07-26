@@ -14,6 +14,7 @@ FROM postgres:17-alpine
 RUN apk add --no-cache jq
 
 COPY docker/bootstrap/schema.sql /bootstrap/schema.sql
+COPY docker/bootstrap/migrations/ /bootstrap/migrations/
 COPY docker/bootstrap/entrypoint.sh /bootstrap/entrypoint.sh
 RUN chmod +x /bootstrap/entrypoint.sh
 

@@ -339,6 +339,9 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
           // future sessions are stored (decisions, preferences, gotchas);
           // transient session-state observations are rejected.
           MNEMO_INGEST_DURABLE_ONLY: "1",
+          // Queue routing and execution remain disabled until atomic plan
+          // application is implemented and reviewed independently.
+          MNEMO_DURABLE_INGEST_ENABLED: "0",
           // Bound prompt construction before the provider-boundary byte check.
           MNEMO_MAX_EXTRACTION_CONVERSATION_RUNES: String(MAX_EXTRACTION_CONVERSATION_RUNES),
         },
