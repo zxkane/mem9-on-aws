@@ -44,7 +44,9 @@ function actionSetForSid(source, sid) {
   const tail = source.slice(start);
   const next = tail.slice(1).search(/\n\s+- Sid: /);
   const block = next >= 0 ? tail.slice(0, next + 1) : tail;
-  return [...block.matchAll(/^\s+- ((?:ecs|ssm):[A-Za-z]+)$/gm)].map((m) => m[1]);
+  return [...block.matchAll(/^\s+- ((?:ecs|logs|ssm):[A-Za-z]+)$/gm)].map(
+    (m) => m[1],
+  );
 }
 
 describe("workflow integration", () => {
@@ -97,6 +99,26 @@ describe("reconciliation IAM", () => {
         "ecs:ListTasks",
         "ssm:GetParameters",
       ].sort(),
+    );
+  });
+});
+
+describe("OAuth2 facade IAM", () => {
+  it("grants the documented CloudWatch Logs delivery lifecycle actions", () => {
+    const role = readFileSync(rolePath, "utf8");
+    const actions = actionSetForSid(role, "ApiGatewayV2AccessLogs");
+
+    expect(actions).toEqual(
+      expect.arrayContaining([
+        "logs:CreateLogDelivery",
+        "logs:PutResourcePolicy",
+        "logs:UpdateLogDelivery",
+        "logs:DeleteLogDelivery",
+        "logs:CreateLogGroup",
+        "logs:DescribeResourcePolicies",
+        "logs:GetLogDelivery",
+        "logs:ListLogDeliveries",
+      ]),
     );
   });
 });

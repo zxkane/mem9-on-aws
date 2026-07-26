@@ -1049,10 +1049,12 @@ Resources:
               - logs:UntagResource
               - logs:ListTagsForResource
               - logs:DescribeLogGroups
-              # Delivery API actions needed by CreateStage's access-logging setup.
+              # Delivery API actions needed by the CreateStage/DeleteStage
+              # access-logging lifecycle.
               - logs:CreateLogDelivery
               - logs:DeleteLogDelivery
               - logs:GetLogDelivery
+              - logs:ListLogDeliveries
               - logs:UpdateLogDelivery
               - logs:PutDeliverySource
               - logs:PutDeliveryDestination
