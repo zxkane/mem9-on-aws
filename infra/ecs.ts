@@ -70,6 +70,7 @@ const region = ECR_REGION;
 const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 const DURABLE_INGEST_ENABLED =
   process.env.MEM9_DURABLE_INGEST_ENABLED === "1" ? "1" : "0";
+const DURABLE_INGEST_METRIC_STAGE = $app.stage === "prod" ? "prod" : "";
 
 // The qwen3-embed sidecar listens here; mem9 calls it over localhost. Not exposed
 // outside the task.
@@ -350,7 +351,9 @@ export function ecs(dbOut: DbOutputs, identity: TenantIdentityOutputs): EcsOutpu
           // PostgreSQL apply. The image applies its repeatable migration before
           // the server starts, so CI can use one enabled rollout.
           MNEMO_DURABLE_INGEST_ENABLED: DURABLE_INGEST_ENABLED,
-          MNEMO_DURABLE_INGEST_METRIC_STAGE: $app.stage,
+          // Preview stages exercise durable processing without creating a new
+          // permanent CloudWatch custom-metric dimension for every PR.
+          MNEMO_DURABLE_INGEST_METRIC_STAGE: DURABLE_INGEST_METRIC_STAGE,
           // Bound prompt construction before the provider-boundary byte check.
           MNEMO_MAX_EXTRACTION_CONVERSATION_RUNES: String(MAX_EXTRACTION_CONVERSATION_RUNES),
         },

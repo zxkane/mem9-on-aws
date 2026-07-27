@@ -663,12 +663,10 @@ describe("ecs stack", () => {
     expect(filters.length).toBe(3); // recall_zero_hit, recall_total, ingest_llm_auth_failure
     expect(alarms.length).toBe(8); // Existing four plus four ingest/Mantle alarms.
     expect(created.filter((c) => c.kind === "Dashboard")).toHaveLength(1);
-    // The queue-age heartbeat alarms on missing samples; sparse event metrics do not.
+    // Missing samples do not prove a threshold breach, including queue age.
     for (const alarm of alarms) {
       const args = alarm.args as Record<string, unknown>;
-      expect(args.treatMissingData).toBe(
-        args.metricName === "OldestQueuedAgeMs" ? "breaching" : "notBreaching",
-      );
+      expect(args.treatMissingData).toBe("notBreaching");
     }
     // Metric filter patterns reference the correct log line msg values.
     const patterns = filters.map((f) => (f.args as { pattern: string }).pattern);
@@ -693,6 +691,10 @@ describe("ecs stack", () => {
     installGlobals("pr-99");
     const ecs = await loadEcs();
     ecs(fakeDbOut());
+    const mnemo = containersByName()["mnemo-server"];
+    const env = mnemo.environment as Record<string, unknown>;
+    expect(env.MNEMO_DURABLE_INGEST_ENABLED).toBe("1");
+    expect(env.MNEMO_DURABLE_INGEST_METRIC_STAGE).toBe("");
     const filters = created.filter((c) => c.kind === "LogMetricFilter");
     const alarms = created.filter((c) => c.kind === "MetricAlarm");
     expect(filters.length).toBe(0);

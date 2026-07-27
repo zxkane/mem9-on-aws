@@ -1,23 +1,75 @@
+diff --git a/server/cmd/mnemo-server/durable_ingest_test.go b/server/cmd/mnemo-server/durable_ingest_test.go
+index d5c244787223716cab8503772c1edbb5b9608f63..9b2d41d45746f7f0cf6697c2600efdfc05c65669 100644
+--- a/server/cmd/mnemo-server/durable_ingest_test.go
++++ b/server/cmd/mnemo-server/durable_ingest_test.go
+@@ -1,6 +1,7 @@
+ package main
+ 
+ import (
++	"bytes"
+ 	"testing"
+ )
+ 
+@@ -18,3 +19,16 @@ func TestDurableIngestStartupValidation(t *testing.T) {
+ 		t.Fatalf("valid durable ingest startup: %v", err)
+ 	}
+ }
++
++func TestDurableIngestTelemetryRequiresEnabledNamedStage(t *testing.T) {
++	var output bytes.Buffer
++	if telemetry := newDurableIngestTelemetry(false, "prod", &output); telemetry != nil {
++		t.Fatal("disabled durable ingest created telemetry")
++	}
++	if telemetry := newDurableIngestTelemetry(true, "", &output); telemetry != nil {
++		t.Fatal("empty preview metric stage created telemetry")
++	}
++	if telemetry := newDurableIngestTelemetry(true, "prod", &output); telemetry == nil {
++		t.Fatal("enabled production stage did not create telemetry")
++	}
++}
 diff --git a/server/cmd/mnemo-server/main.go b/server/cmd/mnemo-server/main.go
-index 1983012..81f13cf 100644
+index 19830120da5e4ae9851dfb5be0b22df24e25c80f..5ff934bc04eb2512229b759c1fbd40dc97c7ce16 100644
 --- a/server/cmd/mnemo-server/main.go
 +++ b/server/cmd/mnemo-server/main.go
-@@ -303,6 +303,14 @@ func main() {
+@@ -3,6 +3,7 @@ package main
+ import (
+ 	"context"
+ 	"fmt"
++	"io"
+ 	"log/slog"
+ 	"net/http"
+ 	"net/url"
+@@ -27,6 +28,17 @@ import (
+ 	"github.com/qiffang/mnemos/server/internal/webhook"
+ )
+ 
++func newDurableIngestTelemetry(
++	enabled bool,
++	stage string,
++	output io.Writer,
++) ingestqueue.Telemetry {
++	if !enabled || stage == "" {
++		return nil
++	}
++	return ingestqueue.NewEMFTelemetry(stage, output, nil)
++}
++
+ func main() {
+ 	logger := slog.New(reqid.NewHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
+ 		Level:     slog.LevelInfo,
+@@ -303,6 +315,11 @@ func main() {
  	rateMW := rl.Middleware()
  
  	activityTracker := service.NewActivityTracker(tenantRepo, logger)
-+	var durableTelemetry ingestqueue.Telemetry
-+	if cfg.DurableIngestEnabled {
-+		durableTelemetry = ingestqueue.NewEMFTelemetry(
-+			cfg.DurableIngestMetricStage,
-+			os.Stdout,
-+			nil,
-+		)
-+	}
++	durableTelemetry := newDurableIngestTelemetry(
++		cfg.DurableIngestEnabled,
++		cfg.DurableIngestMetricStage,
++		os.Stdout,
++	)
  
  	// Handler.
  	srv := handler.NewServer(tenantSvc, uploadTaskRepo, cfg.UploadDir, embedder, llmClient, cfg.EmbedAutoModel, cfg.FTSEnabled, service.IngestMode(cfg.IngestMode), cfg.DBBackend, logger).
-@@ -312,7 +320,8 @@ func main() {
+@@ -312,7 +329,8 @@ func main() {
  		WithWebhookService(webhookSvc).
  		WithActivityTracker(activityTracker).
  		WithDisableSessionSave(cfg.DisableSessionSave).
@@ -27,7 +79,7 @@ index 1983012..81f13cf 100644
  	router := srv.Router(tenantMW, rateMW, apiKeyMW, middleware.CORS(cfg.CORSAllowedOrigins))
  
  	var durableWorkerCancel context.CancelFunc
-@@ -341,6 +350,7 @@ func main() {
+@@ -341,6 +359,7 @@ func main() {
  		)
  		workerConfig := ingestqueue.DefaultWorkerConfig()
  		workerConfig.Enabled = true
@@ -36,7 +88,7 @@ index 1983012..81f13cf 100644
  		durableWorkerCtx, durableWorkerCancel = context.WithCancel(context.Background())
  		defer durableWorkerCancel()
 diff --git a/server/internal/config/config.go b/server/internal/config/config.go
-index 7f90b14..fd298b6 100644
+index 7f90b14bc5782eeedd51ab0146b95a15a2a0ec73..633477846ad6f807251778107d96228bd76fcfdf 100644
 --- a/server/internal/config/config.go
 +++ b/server/internal/config/config.go
 @@ -32,13 +32,14 @@ type Config struct {
@@ -65,12 +117,12 @@ index 7f90b14..fd298b6 100644
  		IngestMode:                       envOr("MNEMO_INGEST_MODE", "smart"),
  		DurableIngestEnabled:             envBool("MNEMO_DURABLE_INGEST_ENABLED", false),
  		DurableIngestTenantID:            strings.TrimSpace(os.Getenv("MEM9_TENANT_ID")),
-+		DurableIngestMetricStage:         strings.TrimSpace(envOr("MNEMO_DURABLE_INGEST_METRIC_STAGE", env)),
++		DurableIngestMetricStage:         strings.TrimSpace(os.Getenv("MNEMO_DURABLE_INGEST_METRIC_STAGE")),
  		DisableSessionSave:               envBool("MNEMO_DISABLE_SESSION_SAVE", false),
  		TiDBZeroEnabled:                  envBool("MNEMO_TIDB_ZERO_ENABLED", true),
  		TiDBZeroAPIURL:                   envOr("MNEMO_TIDB_ZERO_API_URL", "https://zero.tidbapi.com/v1alpha1"),
 diff --git a/server/internal/config/durable_ingest_test.go b/server/internal/config/durable_ingest_test.go
-index 1fa2b72..f3a05da 100644
+index 1fa2b7265c2c23f38db031778a0b03d7bf09e976..df85321fb496c2eefe266e6cf9b7292bd695c40e 100644
 --- a/server/internal/config/durable_ingest_test.go
 +++ b/server/internal/config/durable_ingest_test.go
 @@ -5,6 +5,7 @@ import "testing"
@@ -85,7 +137,7 @@ index 1fa2b72..f3a05da 100644
  	if cfg.DurableIngestEnabled {
  		t.Fatal("durable ingest must default disabled")
  	}
-+	if cfg.DurableIngestMetricStage != "development" {
++	if cfg.DurableIngestMetricStage != "" {
 +		t.Fatalf("default durable metric stage = %q", cfg.DurableIngestMetricStage)
 +	}
  
@@ -106,7 +158,7 @@ index 1fa2b72..f3a05da 100644
 +	}
  }
 diff --git a/server/internal/handler/durable_ingest_test.go b/server/internal/handler/durable_ingest_test.go
-index 43fd2b7..bc2de92 100644
+index 43fd2b713ef671080e87ee773e89e9700ddeccf4..bc2de92ad91f2ea23a949231ae23697a1a0874e7 100644
 --- a/server/internal/handler/durable_ingest_test.go
 +++ b/server/internal/handler/durable_ingest_test.go
 @@ -1,6 +1,7 @@
@@ -166,7 +218,7 @@ index 43fd2b7..bc2de92 100644
  	srv := newTestServer(&testMemoryRepo{}, &testSessionRepo{}).WithDurableIngest(true)
  	srv.ingestRepoFactory = func(string, *sql.DB) ingestqueue.Repository {
 diff --git a/server/internal/handler/handler.go b/server/internal/handler/handler.go
-index dd2d5b5..8706895 100644
+index dd2d5b5607c282d9aa54c5dee2d6a3f568bc2d15..8706895e06ec09c84498562881f6e6da9f3299d7 100644
 --- a/server/internal/handler/handler.go
 +++ b/server/internal/handler/handler.go
 @@ -52,6 +52,7 @@ type Server struct {
@@ -190,7 +242,7 @@ index dd2d5b5..8706895 100644
  // Services are always backed by the tenant's dedicated DB.
  type resolvedSvc struct {
 diff --git a/server/internal/handler/memory.go b/server/internal/handler/memory.go
-index e88df72..9560c52 100644
+index e88df72091ac8a7079fe8e56ae03a39bf3dcd0cb..9560c52ffbc57b70699c336ad19d734d14635c02 100644
 --- a/server/internal/handler/memory.go
 +++ b/server/internal/handler/memory.go
 @@ -587,6 +587,9 @@ func (s *Server) enqueueDurableIngest(
@@ -204,7 +256,7 @@ index e88df72..9560c52 100644
  }
  
 diff --git a/server/internal/ingestqueue/plan_test.go b/server/internal/ingestqueue/plan_test.go
-index b4002bc..e7b3c7f 100644
+index b4002bc85f6aee2ca4f6b3a68ec55928778f88c5..e7b3c7ff5ff2ec91f24f0c5e77d0829d39e6bc8c 100644
 --- a/server/internal/ingestqueue/plan_test.go
 +++ b/server/internal/ingestqueue/plan_test.go
 @@ -3,6 +3,7 @@ package ingestqueue
@@ -255,10 +307,10 @@ index b4002bc..e7b3c7f 100644
  		JobID:             "00000000-0000-4000-8000-000000000054",
 diff --git a/server/internal/ingestqueue/telemetry.go b/server/internal/ingestqueue/telemetry.go
 new file mode 100644
-index 0000000..33f9699
+index 0000000000000000000000000000000000000000..32ec348477295ae023e17dc549a89481aedaadbb
 --- /dev/null
 +++ b/server/internal/ingestqueue/telemetry.go
-@@ -0,0 +1,257 @@
+@@ -0,0 +1,266 @@
 +package ingestqueue
 +
 +import (
@@ -311,6 +363,21 @@ index 0000000..33f9699
 +type emfMetadata struct {
 +	Timestamp         int64          `json:"Timestamp"`
 +	CloudWatchMetrics []emfDirective `json:"CloudWatchMetrics"`
++}
++
++var boundedErrorClasses = map[string]struct{}{
++	errorClassProxyValidationPermanent:   {},
++	errorClassMantle4xxPermanent:         {},
++	errorClassMantleTransient:            {},
++	errorClassDeadline:                   {},
++	errorClassOptimisticConflict:         {},
++	errorClassDatabaseContention:         {},
++	errorClassRuntimeUsageTransient:      {},
++	errorClassRuntimeReservationTooShort: {},
++	errorClassRuntimeQuotaDenied:         {},
++	errorClassCommitAmbiguous:            {},
++	errorClassPermanentUnknown:           {},
++	errorClassAttemptsExhausted:          {},
 +}
 +
 +func NewEMFTelemetry(stage string, output io.Writer, now func() time.Time) Telemetry {
@@ -367,10 +434,17 @@ index 0000000..33f9699
 +	case "retrying":
 +		record["error_class"] = boundedErrorClass(metrics.ErrorClass)
 +		record["JobsRetrying"] = 1
-+		directives = append(directives, metricDirective(
-+			[]string{"stage", "result_class", "error_class"},
-+			countMetric("JobsRetrying"),
-+		))
++		directives = append(
++			directives,
++			metricDirective(
++				[]string{"stage", "result_class", "error_class"},
++				countMetric("JobsRetrying"),
++			),
++			metricDirective(
++				[]string{"stage"},
++				countMetric("JobsRetrying"),
++			),
++		)
 +	case string(StateSucceeded):
 +		record["JobsSucceeded"] = 1
 +		record["JobsTerminated"] = 1
@@ -399,7 +473,7 @@ index 0000000..33f9699
 +		record["JobsDead"] = 1
 +		record["JobsTerminated"] = 1
 +		record["DeadlineTransientTerminalFailures"] = boolCount(
-+			errorClass == "deadline" || errorClass == "mantle_transient",
++			errorClass == errorClassDeadline || errorClass == errorClassMantleTransient,
 +		)
 +		directives = append(
 +			directives,
@@ -477,23 +551,10 @@ index 0000000..33f9699
 +}
 +
 +func boundedErrorClass(class string) string {
-+	switch class {
-+	case "proxy_validation_permanent",
-+		"mantle_4xx_permanent",
-+		"mantle_transient",
-+		"deadline",
-+		"optimistic_conflict",
-+		"database_contention",
-+		"runtime_usage_transient",
-+		"runtime_reservation_too_short",
-+		"runtime_quota_denied",
-+		"commit_ambiguous",
-+		"permanent_unknown",
-+		"attempts_exhausted":
++	if _, ok := boundedErrorClasses[class]; ok {
 +		return class
-+	default:
-+		return "other"
 +	}
++	return "other"
 +}
 +
 +func durationMilliseconds(duration time.Duration) int64 {
@@ -518,10 +579,10 @@ index 0000000..33f9699
 +}
 diff --git a/server/internal/ingestqueue/telemetry_test.go b/server/internal/ingestqueue/telemetry_test.go
 new file mode 100644
-index 0000000..aefb5b3
+index 0000000000000000000000000000000000000000..f316ca45d3ea7359474c3a1bd8244765629ea232
 --- /dev/null
 +++ b/server/internal/ingestqueue/telemetry_test.go
-@@ -0,0 +1,206 @@
+@@ -0,0 +1,295 @@
 +package ingestqueue
 +
 +import (
@@ -544,6 +605,78 @@ index 0000000..aefb5b3
 +		records = append(records, record)
 +	}
 +	return records
++}
++
++func assertBoundedMetricDimensions(t *testing.T, records []map[string]any) {
++	t.Helper()
++	for _, record := range records {
++		aws, ok := record["_aws"].(map[string]any)
++		if !ok {
++			t.Fatalf("missing EMF metadata: %#v", record)
++		}
++		directives, ok := aws["CloudWatchMetrics"].([]any)
++		if !ok || len(directives) == 0 {
++			t.Fatalf("missing metric directives: %#v", record)
++		}
++		for _, rawDirective := range directives {
++			directive := rawDirective.(map[string]any)
++			if directive["Namespace"] != DurableMetricNamespace {
++				t.Fatalf("namespace = %#v", directive["Namespace"])
++			}
++			for _, rawDimensions := range directive["Dimensions"].([]any) {
++				for _, rawName := range rawDimensions.([]any) {
++					name := rawName.(string)
++					switch name {
++					case "stage", "result_class", "error_class":
++					default:
++						t.Fatalf("unbounded dimension %q in %#v", name, directive)
++					}
++				}
++			}
++		}
++	}
++}
++
++func hasMetricDirective(
++	record map[string]any,
++	dimensions []string,
++	metricName string,
++) bool {
++	aws, ok := record["_aws"].(map[string]any)
++	if !ok {
++		return false
++	}
++	directives, ok := aws["CloudWatchMetrics"].([]any)
++	if !ok {
++		return false
++	}
++	for _, rawDirective := range directives {
++		directive := rawDirective.(map[string]any)
++		rawDimensions := directive["Dimensions"].([]any)
++		if len(rawDimensions) != 1 {
++			continue
++		}
++		gotDimensions := rawDimensions[0].([]any)
++		if len(gotDimensions) != len(dimensions) {
++			continue
++		}
++		matches := true
++		for index, want := range dimensions {
++			if gotDimensions[index] != want {
++				matches = false
++				break
++			}
++		}
++		if !matches {
++			continue
++		}
++		for _, rawMetric := range directive["Metrics"].([]any) {
++			if rawMetric.(map[string]any)["Name"] == metricName {
++				return true
++			}
++		}
++	}
++	return false
 +}
 +
 +func TestEMFTelemetryLifecycleFixtures(t *testing.T) {
@@ -616,50 +749,28 @@ index 0000000..aefb5b3
 +	if records[4]["OldestQueuedAgeMs"] != float64(660000) {
 +		t.Fatalf("queue age record = %#v", records[4])
 +	}
++	if !hasMetricDirective(
++		records[1],
++		[]string{"stage", "result_class", "error_class"},
++		"JobsRetrying",
++	) || !hasMetricDirective(records[1], []string{"stage"}, "JobsRetrying") {
++		t.Fatalf("retry rollups missing: %#v", records[1])
++	}
++	if !hasMetricDirective(records[3], []string{"stage"}, "JobsDead") {
++		t.Fatalf("dead-job alarm rollup missing: %#v", records[3])
++	}
 +
 +	for _, record := range records {
 +		aws, ok := record["_aws"].(map[string]any)
 +		if !ok || aws["Timestamp"] != float64(now.UnixMilli()) {
 +			t.Fatalf("invalid EMF metadata: %#v", record)
 +		}
-+		directives, ok := aws["CloudWatchMetrics"].([]any)
-+		if !ok || len(directives) == 0 {
-+			t.Fatalf("missing metric directives: %#v", record)
-+		}
-+		for _, rawDirective := range directives {
-+			directive := rawDirective.(map[string]any)
-+			if directive["Namespace"] != DurableMetricNamespace {
-+				t.Fatalf("namespace = %#v", directive["Namespace"])
-+			}
-+			for _, rawDimensions := range directive["Dimensions"].([]any) {
-+				for _, rawName := range rawDimensions.([]any) {
-+					name := rawName.(string)
-+					switch name {
-+					case "stage", "result_class", "error_class":
-+					default:
-+						t.Fatalf("unbounded dimension %q in %#v", name, directive)
-+					}
-+				}
-+			}
-+		}
 +	}
++	assertBoundedMetricDimensions(t, records)
 +}
 +
 +func TestEMFTelemetryBoundsClassesAndDurations(t *testing.T) {
-+	for _, class := range []string{
-+		"proxy_validation_permanent",
-+		"mantle_4xx_permanent",
-+		"mantle_transient",
-+		"deadline",
-+		"optimistic_conflict",
-+		"database_contention",
-+		"runtime_usage_transient",
-+		"runtime_reservation_too_short",
-+		"runtime_quota_denied",
-+		"commit_ambiguous",
-+		"permanent_unknown",
-+		"attempts_exhausted",
-+	} {
++	for class := range boundedErrorClasses {
 +		if got := boundedErrorClass(class); got != class {
 +			t.Fatalf("bounded class %q = %q", class, got)
 +		}
@@ -711,13 +822,52 @@ index 0000000..aefb5b3
 +	if _, exists := records[1]["QueueWaitMs"]; exists {
 +		t.Fatalf("later attempt emitted queue wait: %#v", records[1])
 +	}
++	if records[1]["ZeroFactSuccess"] != float64(0) {
++		t.Fatalf("nonzero-fact success counter = %#v", records[1])
++	}
++}
++
++func TestEMFTelemetryTerminalFailureClassification(t *testing.T) {
++	for _, tc := range []struct {
++		errorClass string
++		want       float64
++	}{
++		{errorClass: "deadline", want: 1},
++		{errorClass: "mantle_transient", want: 1},
++		{errorClass: "proxy_validation_permanent", want: 0},
++	} {
++		t.Run(tc.errorClass, func(t *testing.T) {
++			var output bytes.Buffer
++			NewEMFTelemetry("prod", &output, nil).Result(ResultMetrics{
++				ResultClass: string(StateDead),
++				ErrorClass:  tc.errorClass,
++			})
++			record := telemetryRecords(t, output.String())[0]
++			if record["DeadlineTransientTerminalFailures"] != tc.want {
++				t.Fatalf("terminal failure record = %#v", record)
++			}
++		})
++	}
 +}
 +
 +func TestEMFTelemetrySchemaContainsNoHighCardinalityFields(t *testing.T) {
 +	var output bytes.Buffer
-+	NewEMFTelemetry("prod", &output, nil).Result(ResultMetrics{
++	telemetry := NewEMFTelemetry("prod", &output, nil)
++	telemetry.Accepted()
++	telemetry.Result(ResultMetrics{
++		ResultClass: string(StateRetryWait),
++		ErrorClass:  "mantle_transient",
++	})
++	telemetry.Result(ResultMetrics{
 +		ResultClass: string(StateSucceeded),
 +	})
++	telemetry.Result(ResultMetrics{
++		ResultClass: string(StateDead),
++		ErrorClass:  "deadline",
++	})
++	telemetry.QueueAge(time.Minute)
++	assertBoundedMetricDimensions(t, telemetryRecords(t, output.String()))
++
 +	serialized := strings.ToLower(output.String())
 +	for _, forbidden := range []string{
 +		"tenant", "agent", "app_id", "session", "job_id", "request",
@@ -729,10 +879,32 @@ index 0000000..aefb5b3
 +	}
 +}
 diff --git a/server/internal/ingestqueue/types.go b/server/internal/ingestqueue/types.go
-index cbe4831..546ae6d 100644
+index cbe48313bfa66edcbc00aa35c8a211434f3f92b9..93434f7bbba6f3aa8c7a5a3402fef4bb7e52aba4 100644
 --- a/server/internal/ingestqueue/types.go
 +++ b/server/internal/ingestqueue/types.go
-@@ -86,6 +86,9 @@ type EnqueueInput struct {
+@@ -27,6 +27,21 @@ const (
+ 	WarningTruncated           = "truncated"
+ )
+ 
++const (
++	errorClassProxyValidationPermanent   = "proxy_validation_permanent"
++	errorClassMantle4xxPermanent         = "mantle_4xx_permanent"
++	errorClassMantleTransient            = "mantle_transient"
++	errorClassDeadline                   = "deadline"
++	errorClassOptimisticConflict         = "optimistic_conflict"
++	errorClassDatabaseContention         = "database_contention"
++	errorClassRuntimeUsageTransient      = "runtime_usage_transient"
++	errorClassRuntimeReservationTooShort = "runtime_reservation_too_short"
++	errorClassRuntimeQuotaDenied         = "runtime_quota_denied"
++	errorClassCommitAmbiguous            = "commit_ambiguous"
++	errorClassPermanentUnknown           = "permanent_unknown"
++	errorClassAttemptsExhausted          = "attempts_exhausted"
++)
++
+ type RuntimeFinalizationState string
+ 
+ const (
+@@ -86,6 +101,9 @@ type EnqueueInput struct {
  
  type Job struct {
  	ID                          string
@@ -742,7 +914,7 @@ index cbe4831..546ae6d 100644
  	TenantID                    string
  	IdempotencyKey              string
  	CanonicalPayload            json.RawMessage
-@@ -162,6 +165,7 @@ type Processor interface {
+@@ -162,6 +180,7 @@ type Processor interface {
  type Repository interface {
  	Enqueue(context.Context, EnqueueInput) (*Job, error)
  	Get(context.Context, string, string) (*Job, error)
@@ -750,7 +922,7 @@ index cbe4831..546ae6d 100644
  	Claim(context.Context, string, string, time.Duration, int) (*Job, error)
  	StartPlanning(context.Context, LeaseRef) error
  	NextPlanRevision(context.Context, LeaseRef) (int, error)
-@@ -234,6 +238,7 @@ type AtomicPlan struct {
+@@ -234,6 +253,7 @@ type AtomicPlan struct {
  	TruncatedFactCount int               `json:"truncated_fact_count"`
  	WarningCount       int               `json:"warning_count"`
  	WarningClass       string            `json:"warning_class,omitempty"`
@@ -759,18 +931,19 @@ index cbe4831..546ae6d 100644
  }
  
 diff --git a/server/internal/ingestqueue/worker.go b/server/internal/ingestqueue/worker.go
-index 0fa0942..4908b95 100644
+index 0fa094268190ec552b8bca8e7b67719369d949d6..a2cc8905ed18370eb55ab9755ddfa7a34ad20d16 100644
 --- a/server/internal/ingestqueue/worker.go
 +++ b/server/internal/ingestqueue/worker.go
-@@ -19,6 +19,7 @@ const terminalFinalizationWriteTimeout = 5 * time.Second
+@@ -19,6 +19,8 @@ const terminalFinalizationWriteTimeout = 5 * time.Second
  const runtimeReservationFinalizationBuffer = 30 * time.Second
  const maxWorkerConcurrency = 2
  const maxImmediateClaimRetries = 3
 +const queueAgeSampleInterval = time.Minute
++const queueAgeSampleTimeout = 5 * time.Second
  
  var processSemaphore = make(chan struct{}, maxWorkerConcurrency)
  
-@@ -30,6 +31,8 @@ type WorkerConfig struct {
+@@ -30,6 +32,8 @@ type WorkerConfig struct {
  	JobTimeout   time.Duration
  	PollInterval time.Duration
  	Random       func() float64
@@ -779,7 +952,7 @@ index 0fa0942..4908b95 100644
  }
  
  func DefaultWorkerConfig() WorkerConfig {
-@@ -41,6 +44,7 @@ func DefaultWorkerConfig() WorkerConfig {
+@@ -41,6 +45,7 @@ func DefaultWorkerConfig() WorkerConfig {
  		JobTimeout:   10 * time.Minute,
  		PollInterval: time.Second,
  		Random:       rand.Float64,
@@ -787,7 +960,7 @@ index 0fa0942..4908b95 100644
  	}
  }
  
-@@ -76,6 +80,9 @@ func NewWorker(repo Repository, processor Processor, tenantID, owner string, con
+@@ -76,6 +81,9 @@ func NewWorker(repo Repository, processor Processor, tenantID, owner string, con
  	if config.Random == nil {
  		config.Random = defaults.Random
  	}
@@ -797,18 +970,30 @@ index 0fa0942..4908b95 100644
  	if logger == nil {
  		logger = slog.Default()
  	}
-@@ -103,6 +110,10 @@ func (w *Worker) Run(ctx context.Context) error {
+@@ -98,11 +106,20 @@ func (w *Worker) Run(ctx context.Context) error {
+ 	}
+ 
+ 	workerCtx, cancel := context.WithCancel(ctx)
+-	defer cancel()
+ 	workerSemaphore := make(chan struct{}, w.config.Concurrency)
  	var active sync.WaitGroup
- 	defer active.Wait()
+-	defer active.Wait()
++	defer func() {
++		cancel()
++		active.Wait()
++	}()
  	immediateClaimRetries := 0
 +	if w.config.Telemetry != nil {
-+		w.sampleOldestQueuedAge(workerCtx)
-+		go w.runQueueAgeSampler(workerCtx)
++		active.Add(1)
++		go func() {
++			defer active.Done()
++			w.runQueueAgeSampler(workerCtx)
++		}()
 +	}
  
  	for {
  		select {
-@@ -117,6 +128,7 @@ func (w *Worker) Run(ctx context.Context) error {
+@@ -117,6 +134,7 @@ func (w *Worker) Run(ctx context.Context) error {
  		case processSemaphore <- struct{}{}:
  		}
  
@@ -816,7 +1001,7 @@ index 0fa0942..4908b95 100644
  		job, err := w.repo.Claim(workerCtx, w.tenantID, w.owner, w.config.Lease, MaxAttempts)
  		if err != nil {
  			<-processSemaphore
-@@ -146,7 +158,9 @@ func (w *Worker) Run(ctx context.Context) error {
+@@ -146,7 +164,9 @@ func (w *Worker) Run(ctx context.Context) error {
  			}
  			continue
  		}
@@ -826,11 +1011,21 @@ index 0fa0942..4908b95 100644
  			w.processTerminal(workerCtx, job, nil)
  			<-processSemaphore
  			<-workerSemaphore
-@@ -183,7 +197,60 @@ func waitForWorker(ctx context.Context, duration time.Duration) bool {
+@@ -167,7 +187,7 @@ func (w *Worker) Run(ctx context.Context) error {
+ 
+ func classifyClaimError(err error) (string, bool) {
+ 	if errors.Is(err, ErrClaimContention) {
+-		return "database_contention", true
++		return errorClassDatabaseContention, true
+ 	}
+ 	return "database_error", false
+ }
+@@ -183,7 +203,66 @@ func waitForWorker(ctx context.Context, duration time.Duration) bool {
  	}
  }
  
 +func (w *Worker) runQueueAgeSampler(ctx context.Context) {
++	w.sampleOldestQueuedAge(ctx)
 +	ticker := time.NewTicker(queueAgeSampleInterval)
 +	defer ticker.Stop()
 +	for {
@@ -847,8 +1042,13 @@ index 0fa0942..4908b95 100644
 +	if w.config.Telemetry == nil {
 +		return
 +	}
-+	age, present, err := w.repo.OldestQueuedAge(ctx, w.tenantID)
++	sampleCtx, cancel := context.WithTimeout(ctx, queueAgeSampleTimeout)
++	defer cancel()
++	age, present, err := w.repo.OldestQueuedAge(sampleCtx, w.tenantID)
 +	if err != nil {
++		if ctx.Err() != nil {
++			return
++		}
 +		w.logger.Error(
 +			"durable ingest queue age sample failed",
 +			"operation", "queue_age",
@@ -887,7 +1087,7 @@ index 0fa0942..4908b95 100644
  	jobCtx, cancel := context.WithTimeout(ctx, w.config.JobTimeout)
  	lease := job.LeaseRef()
  	var leaseLost atomic.Bool
-@@ -199,9 +266,14 @@ func (w *Worker) process(ctx context.Context, job *Job) {
+@@ -199,9 +278,14 @@ func (w *Worker) process(ctx context.Context, job *Job) {
  		job,
  		w.config.JobTimeout+runtimeReservationFinalizationBuffer,
  	); err != nil {
@@ -903,7 +1103,7 @@ index 0fa0942..4908b95 100644
  	if err := w.repo.StartPlanning(jobCtx, lease); err != nil {
  		return
  	}
-@@ -212,7 +284,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
+@@ -212,7 +296,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
  			persisted, err := w.repo.LoadPlan(jobCtx, lease)
  			if err != nil {
  				if !errors.Is(err, ErrPlanInvalid) || persisted == nil {
@@ -912,7 +1112,7 @@ index 0fa0942..4908b95 100644
  					return
  				}
  				if staleErr := w.repo.MarkPlanStale(jobCtx, lease, *persisted); staleErr != nil {
-@@ -220,7 +292,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
+@@ -220,7 +304,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
  				}
  			} else if persisted != nil {
  				if persisted.JobID != job.ID || persisted.TenantID != job.TenantID {
@@ -921,12 +1121,12 @@ index 0fa0942..4908b95 100644
  					return
  				}
  				if err := w.repo.ResumePlan(jobCtx, lease, *persisted); err != nil {
-@@ -232,24 +304,24 @@ func (w *Worker) process(ctx context.Context, job *Job) {
+@@ -232,24 +316,24 @@ func (w *Worker) process(ctx context.Context, job *Job) {
  
  		if plan == nil {
  			if createdRevisions >= MaxPlanRevisionsPerAttempt {
 -				w.fail(ctx, job, lease, NewOutcomeError("optimistic_conflict"), leaseLost.Load())
-+				failPlanning(NewOutcomeError("optimistic_conflict"))
++				failPlanning(NewOutcomeError(errorClassOptimisticConflict))
  				return
  			}
  			revision, err := w.repo.NextPlanRevision(jobCtx, lease)
@@ -950,7 +1150,7 @@ index 0fa0942..4908b95 100644
  				return
  			}
  			if err := w.repo.SavePlan(jobCtx, lease, built); err != nil {
-@@ -259,27 +331,32 @@ func (w *Worker) process(ctx context.Context, job *Job) {
+@@ -259,27 +343,32 @@ func (w *Worker) process(ctx context.Context, job *Job) {
  			plan = &built
  		}
  
@@ -985,7 +1185,7 @@ index 0fa0942..4908b95 100644
  			"state", StateSucceeded,
  			"attempt", job.AttemptCount,
  			"plan_revision", plan.Revision,
-@@ -307,7 +384,6 @@ func (w *Worker) processTerminal(
+@@ -307,7 +396,6 @@ func (w *Worker) processTerminal(
  		); err != nil {
  			w.logger.Error(
  				"durable ingest terminal reservation refresh failed",
@@ -993,7 +1193,7 @@ index 0fa0942..4908b95 100644
  				"state", job.State,
  				"error_class", "runtime_reservation",
  			)
-@@ -320,7 +396,6 @@ func (w *Worker) processTerminal(
+@@ -320,7 +408,6 @@ func (w *Worker) processTerminal(
  	if err := w.processor.FinalizeTerminal(ctx, job, plan); err != nil {
  		w.logger.Error(
  			"durable ingest terminal finalization failed",
@@ -1001,7 +1201,7 @@ index 0fa0942..4908b95 100644
  			"state", job.State,
  			"error_class", "runtime_finalization",
  		)
-@@ -334,7 +409,6 @@ func (w *Worker) processTerminal(
+@@ -334,7 +421,6 @@ func (w *Worker) processTerminal(
  	if err := w.repo.CompleteTerminalFinalization(writeCtx, job.LeaseRef()); err != nil {
  		w.logger.Error(
  			"durable ingest terminal finalization completion failed",
@@ -1009,7 +1209,16 @@ index 0fa0942..4908b95 100644
  			"state", job.State,
  			"error_class", "database_error",
  		)
-@@ -452,6 +526,7 @@ func (w *Worker) fail(
+@@ -369,7 +455,7 @@ func (w *Worker) ensureRuntimeReservation(
+ 			!replacement.ExpiresAt.After(minimumExpiry)) {
+ 		replacementJob := jobWithRuntimeReservation(job, replacement)
+ 		renewer.ReleaseRuntimeReservation(ctx, replacementJob)
+-		return NewOutcomeError("runtime_reservation_too_short")
++		return NewOutcomeError(errorClassRuntimeReservationTooShort)
+ 	}
+ 	if err := w.repo.ReplaceRuntimeReservation(
+ 		ctx,
+@@ -452,6 +538,7 @@ func (w *Worker) fail(
  	lease LeaseRef,
  	err error,
  	leaseLost bool,
@@ -1017,7 +1226,7 @@ index 0fa0942..4908b95 100644
  ) {
  	if parent.Err() != nil || leaseLost {
  		return
-@@ -474,6 +549,7 @@ func (w *Worker) fail(
+@@ -474,6 +561,7 @@ func (w *Worker) fail(
  	); err != nil {
  		return
  	}
@@ -1025,7 +1234,7 @@ index 0fa0942..4908b95 100644
  	if failure.State == StateDead {
  		job.State = StateDead
  		job.ErrorClass = failure.ErrorClass
-@@ -483,13 +559,68 @@ func (w *Worker) fail(
+@@ -483,13 +571,68 @@ func (w *Worker) fail(
  		}
  	}
  	w.logger.Info("durable ingest job failed",
@@ -1095,8 +1304,78 @@ index 0fa0942..4908b95 100644
  func FullJitterBackoff(attempt int, random float64) time.Duration {
  	if attempt < 1 {
  		attempt = 1
+@@ -527,10 +670,10 @@ type ErrorClassification struct {
+ 
+ func ClassifyError(err error) ErrorClassification {
+ 	if errors.Is(err, context.DeadlineExceeded) {
+-		return ErrorClassification{Class: "deadline", Transient: true}
++		return ErrorClassification{Class: errorClassDeadline, Transient: true}
+ 	}
+ 	if errors.Is(err, ErrCommitAmbiguous) {
+-		return ErrorClassification{Class: "commit_ambiguous", Transient: true}
++		return ErrorClassification{Class: errorClassCommitAmbiguous, Transient: true}
+ 	}
+ 	var httpError *llm.HTTPStatusError
+ 	if errors.As(err, &httpError) {
+@@ -539,13 +682,13 @@ func ClassifyError(err error) ErrorClassification {
+ 	var outcome *OutcomeError
+ 	if errors.As(err, &outcome) {
+ 		switch outcome.class {
+-		case "proxy_validation_permanent", "mantle_4xx_permanent":
++		case errorClassProxyValidationPermanent, errorClassMantle4xxPermanent:
+ 			return ErrorClassification{Class: outcome.class}
+-		case "mantle_transient", "deadline", "optimistic_conflict",
+-			"database_contention", "runtime_usage_transient",
+-			"runtime_reservation_too_short":
++		case errorClassMantleTransient, errorClassDeadline, errorClassOptimisticConflict,
++			errorClassDatabaseContention, errorClassRuntimeUsageTransient,
++			errorClassRuntimeReservationTooShort:
+ 			return ErrorClassification{Class: outcome.class, Transient: true}
+-		case "runtime_quota_denied":
++		case errorClassRuntimeQuotaDenied:
+ 			return ErrorClassification{Class: outcome.class}
+ 		}
+ 	}
+@@ -555,29 +698,29 @@ func ClassifyError(err error) ErrorClassification {
+ 	if errors.As(err, &stateError) {
+ 		switch stateError.SQLState() {
+ 		case "40P01", "40001":
+-			return ErrorClassification{Class: "database_contention", Transient: true}
++			return ErrorClassification{Class: errorClassDatabaseContention, Transient: true}
+ 		case "57014":
+-			return ErrorClassification{Class: "deadline", Transient: true}
++			return ErrorClassification{Class: errorClassDeadline, Transient: true}
+ 		}
+ 	}
+-	return ErrorClassification{Class: "permanent_unknown"}
++	return ErrorClassification{Class: errorClassPermanentUnknown}
+ }
+ 
+ func classifyProxyHTTPError(err *llm.HTTPStatusError) ErrorClassification {
+ 	code := proxyErrorCode(err.Body)
+ 	switch code {
+ 	case "request_too_large", "invalid_json", "invalid_chat_completions_request", "invalid_max_tokens":
+-		return ErrorClassification{Class: "proxy_validation_permanent"}
++		return ErrorClassification{Class: errorClassProxyValidationPermanent}
+ 	case "upstream_timeout":
+-		return ErrorClassification{Class: "deadline", Transient: true}
++		return ErrorClassification{Class: errorClassDeadline, Transient: true}
+ 	}
+ 	if err.Code == 408 || err.Code == 429 || err.Code >= 500 {
+-		return ErrorClassification{Class: "mantle_transient", Transient: true}
++		return ErrorClassification{Class: errorClassMantleTransient, Transient: true}
+ 	}
+ 	if err.Code >= 400 && err.Code < 500 {
+-		return ErrorClassification{Class: "mantle_4xx_permanent"}
++		return ErrorClassification{Class: errorClassMantle4xxPermanent}
+ 	}
+-	return ErrorClassification{Class: "permanent_unknown"}
++	return ErrorClassification{Class: errorClassPermanentUnknown}
+ }
+ 
+ func proxyErrorCode(body string) string {
 diff --git a/server/internal/ingestqueue/worker_integration_test.go b/server/internal/ingestqueue/worker_integration_test.go
-index e00e6ac..a3ca4ff 100644
+index e00e6ac84d8fd67bda5e4a481809e10cf7b08fbf..a3ca4ff0d5eaed4cc160786ae828deb96bc9b86b 100644
 --- a/server/internal/ingestqueue/worker_integration_test.go
 +++ b/server/internal/ingestqueue/worker_integration_test.go
 @@ -1,6 +1,7 @@
@@ -1136,7 +1415,7 @@ index e00e6ac..a3ca4ff 100644
  
  func TestPostgresWorkerPermanentFailureUnblocksFollower(t *testing.T) {
 diff --git a/server/internal/ingestqueue/worker_test.go b/server/internal/ingestqueue/worker_test.go
-index 0106f32..3efbe45 100644
+index 0106f3242589d71b7e1a57d62476fa19a3695306..4178db3dc7afef6d0a3dde38b7f5f2e375dfc089 100644
 --- a/server/internal/ingestqueue/worker_test.go
 +++ b/server/internal/ingestqueue/worker_test.go
 @@ -32,6 +32,17 @@ type fakeRepo struct {
@@ -1157,7 +1436,7 @@ index 0106f32..3efbe45 100644
  }
  
  func (r *fakeRepo) Claim(ctx context.Context, tenant, owner string, lease time.Duration, max int) (*Job, error) {
-@@ -285,6 +296,85 @@ func TestDisabledWorkerAndNilProcessorNeverClaim(t *testing.T) {
+@@ -285,6 +296,131 @@ func TestDisabledWorkerAndNilProcessorNeverClaim(t *testing.T) {
  	}
  }
  
@@ -1240,10 +1519,56 @@ index 0106f32..3efbe45 100644
 +	}
 +}
 +
++func TestWorkerDoesNotReemitPreviouslyTerminalClaim(t *testing.T) {
++	var telemetry bytes.Buffer
++	ctx, cancel := context.WithCancel(context.Background())
++	claimed := false
++	repo := &fakeRepo{
++		claim: func(context.Context, string, string, time.Duration, int) (*Job, error) {
++			if claimed {
++				return nil, nil
++			}
++			claimed = true
++			return &Job{
++				State:                    StateDead,
++				ErrorClass:               "attempts_exhausted",
++				AttemptCount:             MaxAttempts,
++				TerminalTransition:       false,
++				RuntimeFinalizationState: RuntimeFinalizationFinalizing,
++			}, nil
++		},
++	}
++	processor := fakeProcessor{
++		finalizeTerminal: func(context.Context, *Job, *AtomicPlan) error {
++			cancel()
++			return nil
++		},
++	}
++	cfg := DefaultWorkerConfig()
++	cfg.Enabled = true
++	cfg.Telemetry = NewEMFTelemetry("prod", &telemetry, nil)
++	worker := NewWorker(
++		repo,
++		processor,
++		"tenant",
++		"owner",
++		cfg,
++		slog.New(slog.NewTextHandler(io.Discard, nil)),
++	)
++
++	if err := worker.Run(ctx); err != nil {
++		t.Fatalf("Run: %v", err)
++	}
++	if strings.Contains(telemetry.String(), `"JobsDead":1`) ||
++		strings.Contains(telemetry.String(), `"JobsTerminated":1`) {
++		t.Fatalf("previous terminal claim was re-emitted: %s", telemetry.String())
++	}
++}
++
  func TestWorkerClaimErrorRetryPolicy(t *testing.T) {
  	t.Run("contention retries three times then polls", func(t *testing.T) {
  		calls := make(chan struct{}, maxImmediateClaimRetries+2)
-@@ -1074,3 +1164,352 @@ func TestWorkerLogsExcludePayloadAndScope(t *testing.T) {
+@@ -1074,3 +1210,445 @@ func TestWorkerLogsExcludePayloadAndScope(t *testing.T) {
  		}
  	}
  }
@@ -1325,22 +1650,52 @@ index 0106f32..3efbe45 100644
 +func TestWorkerEmitsRetryAndDeadPlanningResults(t *testing.T) {
 +	base := time.Date(2026, 7, 27, 3, 30, 0, 0, time.UTC)
 +	for _, tc := range []struct {
-+		name         string
-+		attempt      int
-+		processorErr error
-+		metric       string
-+		resultClass  string
-+		errorClass   string
-+		retryCount   float64
++		name              string
++		attempt           int
++		processorErr      error
++		metric            string
++		resultClass       string
++		errorClass        string
++		retryCount        float64
++		updatedAt         time.Time
++		expectedQueueWait float64
++		includeQueueWait  bool
 +	}{
 +		{
-+			name:         "retry",
-+			attempt:      1,
-+			processorErr: NewOutcomeError("mantle_transient"),
-+			metric:       "JobsRetrying",
-+			resultClass:  "retrying",
-+			errorClass:   "mantle_transient",
-+			retryCount:   1,
++			name:              "retry",
++			attempt:           1,
++			processorErr:      NewOutcomeError("mantle_transient"),
++			metric:            "JobsRetrying",
++			resultClass:       "retrying",
++			errorClass:        "mantle_transient",
++			retryCount:        1,
++			updatedAt:         base.Add(25 * time.Millisecond),
++			expectedQueueWait: 25,
++			includeQueueWait:  true,
++		},
++		{
++			name:              "queue wait at acceptance boundary",
++			attempt:           1,
++			processorErr:      NewOutcomeError("mantle_transient"),
++			metric:            "JobsRetrying",
++			resultClass:       "retrying",
++			errorClass:        "mantle_transient",
++			retryCount:        1,
++			updatedAt:         base,
++			expectedQueueWait: 0,
++			includeQueueWait:  true,
++		},
++		{
++			name:              "queue wait before acceptance boundary",
++			attempt:           1,
++			processorErr:      NewOutcomeError("mantle_transient"),
++			metric:            "JobsRetrying",
++			resultClass:       "retrying",
++			errorClass:        "mantle_transient",
++			retryCount:        1,
++			updatedAt:         base.Add(-25 * time.Millisecond),
++			expectedQueueWait: 0,
++			includeQueueWait:  true,
 +		},
 +		{
 +			name:         "dead",
@@ -1370,7 +1725,7 @@ index 0106f32..3efbe45 100644
 +				LeaseOwner:   "worker-a",
 +				AttemptCount: tc.attempt,
 +				CreatedAt:    base,
-+				UpdatedAt:    base.Add(25 * time.Millisecond),
++				UpdatedAt:    tc.updatedAt,
 +			}
 +			repo := &fakeRepo{}
 +			processor := fakeProcessor{
@@ -1405,7 +1760,8 @@ index 0106f32..3efbe45 100644
 +				record["RetryCount"] != tc.retryCount {
 +				t.Fatalf("result record = %#v", record)
 +			}
-+			if tc.attempt == 1 && record["QueueWaitMs"] != float64(25) {
++			if tc.includeQueueWait &&
++				record["QueueWaitMs"] != tc.expectedQueueWait {
 +				t.Fatalf("database-clock queue wait = %#v", record)
 +			}
 +			if tc.attempt > 1 {
@@ -1596,8 +1952,70 @@ index 0106f32..3efbe45 100644
 +		t.Fatalf("queue age record = %s", output.String())
 +	}
 +}
++
++func TestWorkerQueueAgeSamplerCannotBlockClaims(t *testing.T) {
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	var logs bytes.Buffer
++	samplerStarted := make(chan time.Duration, 1)
++	claimCalled := make(chan struct{})
++	repo := &fakeRepo{
++		oldestAge: func(sampleCtx context.Context, _ string) (time.Duration, bool, error) {
++			deadline, ok := sampleCtx.Deadline()
++			if !ok {
++				samplerStarted <- 0
++			} else {
++				samplerStarted <- time.Until(deadline)
++			}
++			<-sampleCtx.Done()
++			return 0, false, sampleCtx.Err()
++		},
++		claim: func(context.Context, string, string, time.Duration, int) (*Job, error) {
++			timeout := <-samplerStarted
++			if timeout <= 0 || timeout > queueAgeSampleTimeout {
++				t.Errorf("queue age sample timeout = %v", timeout)
++			}
++			close(claimCalled)
++			cancel()
++			return nil, nil
++		},
++	}
++	cfg := DefaultWorkerConfig()
++	cfg.Enabled = true
++	cfg.Telemetry = NewEMFTelemetry("prod", io.Discard, nil)
++	worker := NewWorker(
++		repo,
++		fakeProcessor{},
++		"tenant-a",
++		"worker-a",
++		cfg,
++		slog.New(slog.NewTextHandler(&logs, nil)),
++	)
++
++	done := make(chan error, 1)
++	go func() {
++		done <- worker.Run(ctx)
++	}()
++	select {
++	case <-claimCalled:
++	case <-time.After(time.Second):
++		cancel()
++		t.Fatal("queue age sample blocked the claim loop")
++	}
++	select {
++	case err := <-done:
++		if err != nil {
++			t.Fatalf("Run: %v", err)
++		}
++	case <-time.After(time.Second):
++		t.Fatal("worker did not wait for the canceled queue age sampler")
++	}
++	if strings.Contains(logs.String(), "queue age sample failed") {
++		t.Fatalf("normal sampler cancellation logged as a failure: %s", logs.String())
++	}
++}
 diff --git a/server/internal/repository/postgres/ingest_job.go b/server/internal/repository/postgres/ingest_job.go
-index 76d3e7b..16f3a21 100644
+index 76d3e7b58bb41967cf5374a76d71d5f07247818c..16f3a2115a8fd7cb5daa6d248e352eb8518fe294 100644
 --- a/server/internal/repository/postgres/ingest_job.go
 +++ b/server/internal/repository/postgres/ingest_job.go
 @@ -125,6 +125,7 @@ func (r *IngestJobRepo) Enqueue(ctx context.Context, input ingestqueue.EnqueueIn
@@ -1664,7 +2082,7 @@ index 76d3e7b..16f3a21 100644
  				return nil, fmt.Errorf("commit exhausted ingest claim: %w", err)
  			}
 diff --git a/server/internal/repository/postgres/ingest_job_integration_test.go b/server/internal/repository/postgres/ingest_job_integration_test.go
-index adb3ad4..4dcad05 100644
+index adb3ad4689bce34229be4535568305583ca0c084..4dcad05ae348637abbd42aa475570fca704cedd9 100644
 --- a/server/internal/repository/postgres/ingest_job_integration_test.go
 +++ b/server/internal/repository/postgres/ingest_job_integration_test.go
 @@ -242,6 +242,40 @@ func TestIngestJobEnqueueUniqueRaceAndTenantIsolation(t *testing.T) {
@@ -1729,7 +2147,7 @@ index adb3ad4..4dcad05 100644
  		}
  		var dead int
 diff --git a/server/internal/service/durable_ingest.go b/server/internal/service/durable_ingest.go
-index d38bb8a..6316855 100644
+index d38bb8a7619de53a325255f13368cebc81db9cde..631685506935174613eab67f3cc689aed92b51a5 100644
 --- a/server/internal/service/durable_ingest.go
 +++ b/server/internal/service/durable_ingest.go
 @@ -238,6 +238,7 @@ func (p *DurableProcessor) Plan(
@@ -1757,10 +2175,18 @@ index d38bb8a..6316855 100644
  		"runtime_usage_outcome", "handed_off",
  	)
 diff --git a/server/internal/service/durable_ingest_test.go b/server/internal/service/durable_ingest_test.go
-index 160941b..19a30c9 100644
+index 160941bb1fd61bda59a7234716e4be51e99f9bdb..330ac91a1a0e22687d7dccc7acd7632ceb05d3fb 100644
 --- a/server/internal/service/durable_ingest_test.go
 +++ b/server/internal/service/durable_ingest_test.go
-@@ -139,6 +139,41 @@ func TestDurableProcessorRetainsFirstFiftyFactsWithWarning(t *testing.T) {
+@@ -9,6 +9,7 @@ import (
+ 	"testing"
+ 	"time"
+ 
++	"github.com/qiffang/mnemos/server/internal/domain"
+ 	"github.com/qiffang/mnemos/server/internal/embed"
+ 	"github.com/qiffang/mnemos/server/internal/ingestqueue"
+ 	"github.com/qiffang/mnemos/server/internal/llm"
+@@ -139,6 +140,89 @@ func TestDurableProcessorRetainsFirstFiftyFactsWithWarning(t *testing.T) {
  	}
  }
  
@@ -1799,11 +2225,59 @@ index 160941b..19a30c9 100644
 +	}
 +}
 +
++func TestDurableProcessorDoesNotMarkNonzeroFactNoopAsZeroFact(t *testing.T) {
++	call := 0
++	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		call++
++		w.Header().Set("Content-Type", "application/json")
++		content := `{"facts":[{"text":"Uses Go","tags":["tech"]}],"message_tags":[[]]}`
++		if call == 2 {
++			content = `{"memory":[{"id":"0","text":"Uses Go","event":"NOOP"}]}`
++		}
++		_ = json.NewEncoder(w).Encode(map[string]any{
++			"choices": []map[string]any{
++				{"message": map[string]any{"content": content}},
++			},
++		})
++	}))
++	defer llmServer.Close()
++
++	llmClient := llm.New(llm.Config{
++		APIKey:  "test-key",
++		BaseURL: llmServer.URL,
++		Model:   "test-model",
++	})
++	memories := &memoryRepoMock{
++		vectorResults: []domain.Memory{{
++			ID:        "existing-memory",
++			Content:   "Uses Go",
++			Version:   1,
++			UpdatedAt: time.Date(2026, 7, 26, 11, 0, 0, 0, time.UTC),
++		}},
++	}
++	processor := NewDurableProcessor(
++		NewIngestService(memories, llmClient, nil, "auto-model", ModeSmart),
++		nil,
++		nil,
++		"",
++		nil,
++		nil,
++	)
++
++	plan, err := processor.Plan(context.Background(), durableTestJob(t, ModeSmart), 1)
++	if err != nil {
++		t.Fatalf("Plan: %v", err)
++	}
++	if call != 2 || plan.ZeroFact || len(plan.Actions) != 0 {
++		t.Fatalf("nonzero-fact no-op plan = %+v calls=%d", plan, call)
++	}
++}
++
  func TestDurableProcessorMaterializesEmbeddingInPlan(t *testing.T) {
  	embedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
  		w.Header().Set("Content-Type", "application/json")
 diff --git a/server/internal/service/ingest.go b/server/internal/service/ingest.go
-index 0cef98d..76ea4de 100644
+index 0cef98db4121fcfeffb627848a5a928098708efd..76ea4de9f07aee29d710a7c3df554030d32009bd 100644
 --- a/server/internal/service/ingest.go
 +++ b/server/internal/service/ingest.go
 @@ -661,7 +661,7 @@ func normalizeParsedFacts(raw string, parsed []ExtractedFact) []ExtractedFact {
@@ -1816,7 +2290,7 @@ index 0cef98d..76ea4de 100644
  		}
  	}
 diff --git a/server/internal/service/ingest_test.go b/server/internal/service/ingest_test.go
-index b8f8e1f..f5e59ff 100644
+index b8f8e1f156db7df71d4cbdee6738a805095a24eb..f5e59ff17157417b3c7ea931407c3af75a37339b 100644
 --- a/server/internal/service/ingest_test.go
 +++ b/server/internal/service/ingest_test.go
 @@ -1,11 +1,13 @@

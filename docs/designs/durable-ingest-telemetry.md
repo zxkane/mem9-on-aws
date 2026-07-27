@@ -36,7 +36,7 @@ The worker outcome allow-list preserves the proxy classes
 |---|---|---|
 | `JobsAccepted` | Count | A newly committed job, not an idempotent duplicate; `stage,result_class` |
 | `JobsSucceeded` | Count | Atomic apply committed; `stage,result_class` |
-| `JobsRetrying` | Count | A retry transition committed; `stage,result_class,error_class` |
+| `JobsRetrying` | Count | A retry transition committed; detailed `stage,result_class,error_class` plus a stage-only dashboard rollup |
 | `JobsDead` | Count | A dead transition committed; detailed `stage,result_class,error_class` plus a separate stage-only rollup consumed by the dead-job alarm |
 | `JobsTerminated` | Count | Every succeeded or dead job; `stage` |
 | `DeadlineTransientTerminalFailures` | Count | `1` only for dead `deadline` or `mantle_transient`, otherwise `0`; `stage` |
@@ -58,17 +58,28 @@ webhooks and metering are outside durable processing duration.
 latency metric.
 
 The dashboard graphs retry volume from the additive `JobsRetrying` transition
-counter. `RetryCount` is an ordinal attached to each result and must not be
-summed across jobs.
+counter's stage-only rollup. This remains a stable zero-or-value time series
+after a quiet period instead of depending on a CloudWatch metric search that
+forgets inactive detailed series after two weeks. `RetryCount` is an ordinal
+attached to each result and must not be summed across jobs.
 
-The queue sampler uses PostgreSQL `statement_timestamp()` and emits immediately
-at worker start and once per minute. This avoids worker/database clock skew and
-provides multiple samples in each five-minute alarm period.
+The queue sampler runs asynchronously, uses PostgreSQL `statement_timestamp()`,
+and emits immediately at worker start and once per minute. Each query has a
+five-second timeout so observability cannot block job claims. This avoids
+worker/database clock skew and provides multiple samples in each five-minute
+alarm period.
+
+Application EMF is enabled only for production. Preview stages exercise the
+same durable queue and worker path with an empty metric-stage setting so each
+short-lived `pr-N` stage does not create permanently retained custom-metric
+dimension values.
 
 ## Provider Metrics
 
-AWS documentation verified on 2026-07-27 defines these Project-dimension
-metrics in `AWS/BedrockMantle`:
+The AWS
+[Bedrock Mantle CloudWatch metrics documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/monitoring-mantle-metrics.html),
+verified on 2026-07-27, defines these Project-dimension metrics in
+`AWS/BedrockMantle`:
 
 - `Inferences`;
 - `TotalInputTokens`;
@@ -93,7 +104,9 @@ missing-data behavior:
 
 - `JobsDead >= 1` in one 15-minute period, missing data not breaching.
 - `OldestQueuedAgeMs > 600000` for two of two consecutive five-minute periods,
-  missing data breaching because the once-per-minute sample is a heartbeat.
+  missing data not breaching. A missing sample does not prove excessive queue
+  age and can occur during deploys, a disabled-worker rollback, or a transient
+  database read failure.
 - `DeadlineTransientTerminalFailures / JobsTerminated >= 0.10` in 15 minutes,
   gated with `IF(JobsTerminated >= 20, ratio, 0)`, missing data not breaching.
 - `AWS/BedrockMantle InferenceClientErrors >= 1` in 15 minutes for the configured
@@ -109,7 +122,7 @@ best-effort, not an accounting ledger. A process crash or log-write failure in
 that post-commit window can omit a transition metric, so Aurora `ingest_jobs`
 and the tenant-scoped job-status API remain the authoritative job state.
 Serialization failures do not alter job state, and missing telemetry cannot
-break ingest. The continuously sampled queue-age heartbeat alarms on missing
-data so loss of the worker or EMF path is visible. Set
-`MNEMO_DURABLE_INGEST_ENABLED=0` to stop the worker; dashboard and alarms may
-remain deployed without affecting the data path.
+break ingest. Queue-age alarms only on sampled values over the threshold; it is
+not a worker-liveness signal. Set `MNEMO_DURABLE_INGEST_ENABLED=0` to stop the
+worker; dashboard and alarms may remain deployed without creating a false
+queue-age page.
