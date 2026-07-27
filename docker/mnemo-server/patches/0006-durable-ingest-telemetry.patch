@@ -1,0 +1,1861 @@
+diff --git a/server/cmd/mnemo-server/main.go b/server/cmd/mnemo-server/main.go
+index 1983012..81f13cf 100644
+--- a/server/cmd/mnemo-server/main.go
++++ b/server/cmd/mnemo-server/main.go
+@@ -303,6 +303,14 @@ func main() {
+ 	rateMW := rl.Middleware()
+ 
+ 	activityTracker := service.NewActivityTracker(tenantRepo, logger)
++	var durableTelemetry ingestqueue.Telemetry
++	if cfg.DurableIngestEnabled {
++		durableTelemetry = ingestqueue.NewEMFTelemetry(
++			cfg.DurableIngestMetricStage,
++			os.Stdout,
++			nil,
++		)
++	}
+ 
+ 	// Handler.
+ 	srv := handler.NewServer(tenantSvc, uploadTaskRepo, cfg.UploadDir, embedder, llmClient, cfg.EmbedAutoModel, cfg.FTSEnabled, service.IngestMode(cfg.IngestMode), cfg.DBBackend, logger).
+@@ -312,7 +320,8 @@ func main() {
+ 		WithWebhookService(webhookSvc).
+ 		WithActivityTracker(activityTracker).
+ 		WithDisableSessionSave(cfg.DisableSessionSave).
+-		WithDurableIngest(cfg.DurableIngestEnabled)
++		WithDurableIngest(cfg.DurableIngestEnabled).
++		WithDurableIngestTelemetry(durableTelemetry)
+ 	router := srv.Router(tenantMW, rateMW, apiKeyMW, middleware.CORS(cfg.CORSAllowedOrigins))
+ 
+ 	var durableWorkerCancel context.CancelFunc
+@@ -341,6 +350,7 @@ func main() {
+ 		)
+ 		workerConfig := ingestqueue.DefaultWorkerConfig()
+ 		workerConfig.Enabled = true
++		workerConfig.Telemetry = durableTelemetry
+ 		var durableWorkerCtx context.Context
+ 		durableWorkerCtx, durableWorkerCancel = context.WithCancel(context.Background())
+ 		defer durableWorkerCancel()
+diff --git a/server/internal/config/config.go b/server/internal/config/config.go
+index 7f90b14..fd298b6 100644
+--- a/server/internal/config/config.go
++++ b/server/internal/config/config.go
+@@ -32,13 +32,14 @@ type Config struct {
+ 	EmbedModel   string
+ 	EmbedDims    int
+ 
+-	LLMAPIKey             string
+-	LLMBaseURL            string
+-	LLMModel              string
+-	LLMTemperature        float64
+-	IngestMode            string
+-	DurableIngestEnabled  bool
+-	DurableIngestTenantID string
++	LLMAPIKey                string
++	LLMBaseURL               string
++	LLMModel                 string
++	LLMTemperature           float64
++	IngestMode               string
++	DurableIngestEnabled     bool
++	DurableIngestTenantID    string
++	DurableIngestMetricStage string
+ 
+ 	// DisableSessionSave skips raw session row persistence for message ingest.
+ 	// Smart ingest still extracts and reconciles facts into insight memories.
+@@ -191,6 +192,7 @@ func Load() (*Config, error) {
+ 		IngestMode:                       envOr("MNEMO_INGEST_MODE", "smart"),
+ 		DurableIngestEnabled:             envBool("MNEMO_DURABLE_INGEST_ENABLED", false),
+ 		DurableIngestTenantID:            strings.TrimSpace(os.Getenv("MEM9_TENANT_ID")),
++		DurableIngestMetricStage:         strings.TrimSpace(envOr("MNEMO_DURABLE_INGEST_METRIC_STAGE", env)),
+ 		DisableSessionSave:               envBool("MNEMO_DISABLE_SESSION_SAVE", false),
+ 		TiDBZeroEnabled:                  envBool("MNEMO_TIDB_ZERO_ENABLED", true),
+ 		TiDBZeroAPIURL:                   envOr("MNEMO_TIDB_ZERO_API_URL", "https://zero.tidbapi.com/v1alpha1"),
+diff --git a/server/internal/config/durable_ingest_test.go b/server/internal/config/durable_ingest_test.go
+index 1fa2b72..f3a05da 100644
+--- a/server/internal/config/durable_ingest_test.go
++++ b/server/internal/config/durable_ingest_test.go
+@@ -5,6 +5,7 @@ import "testing"
+ func TestDurableIngestDefaultsDisabled(t *testing.T) {
+ 	t.Setenv("MNEMO_DSN", "test-dsn")
+ 	t.Setenv("MNEMO_DURABLE_INGEST_ENABLED", "")
++	t.Setenv("MNEMO_DURABLE_INGEST_METRIC_STAGE", "")
+ 	t.Setenv("MEM9_TENANT_ID", "")
+ 	cfg, err := Load()
+ 	if err != nil {
+@@ -13,6 +14,9 @@ func TestDurableIngestDefaultsDisabled(t *testing.T) {
+ 	if cfg.DurableIngestEnabled {
+ 		t.Fatal("durable ingest must default disabled")
+ 	}
++	if cfg.DurableIngestMetricStage != "development" {
++		t.Fatalf("default durable metric stage = %q", cfg.DurableIngestMetricStage)
++	}
+ 
+ 	t.Setenv("MNEMO_DURABLE_INGEST_ENABLED", "true")
+ 	cfg, err = Load()
+@@ -31,4 +35,13 @@ func TestDurableIngestDefaultsDisabled(t *testing.T) {
+ 	if cfg.DurableIngestTenantID != "tenant-a" {
+ 		t.Fatalf("durable tenant id = %q", cfg.DurableIngestTenantID)
+ 	}
++
++	t.Setenv("MNEMO_DURABLE_INGEST_METRIC_STAGE", " pr-55 ")
++	cfg, err = Load()
++	if err != nil {
++		t.Fatalf("Load metric stage: %v", err)
++	}
++	if cfg.DurableIngestMetricStage != "pr-55" {
++		t.Fatalf("durable metric stage = %q", cfg.DurableIngestMetricStage)
++	}
+ }
+diff --git a/server/internal/handler/durable_ingest_test.go b/server/internal/handler/durable_ingest_test.go
+index 43fd2b7..bc2de92 100644
+--- a/server/internal/handler/durable_ingest_test.go
++++ b/server/internal/handler/durable_ingest_test.go
+@@ -1,6 +1,7 @@
+ package handler
+ 
+ import (
++	"bytes"
+ 	"context"
+ 	"database/sql"
+ 	"encoding/json"
+@@ -110,6 +111,47 @@ func TestDurableIngestWaitsForEnqueueCommitBefore202(t *testing.T) {
+ 	}
+ }
+ 
++func TestDurableIngestEmitsAcceptedOnlyForNewJob(t *testing.T) {
++	var output bytes.Buffer
++	telemetry := ingestqueue.NewEMFTelemetry("prod", &output, nil)
++	srv := newTestServer(&testMemoryRepo{}, &testSessionRepo{}).
++		WithDurableIngest(true).
++		WithDurableIngestTelemetry(telemetry)
++	call := 0
++	srv.ingestRepoFactory = func(string, *sql.DB) ingestqueue.Repository {
++		return &handlerIngestRepo{
++			enqueue: func(_ context.Context, input ingestqueue.EnqueueInput) (*ingestqueue.Job, error) {
++				call++
++				id := input.ID
++				if call == 2 {
++					id = "existing-job"
++				}
++				return &ingestqueue.Job{
++					ID:            id,
++					NewlyEnqueued: call == 1,
++					TenantID:      input.TenantID,
++					State:         ingestqueue.StateQueued,
++				}, nil
++			},
++		}
++	}
++	for range 2 {
++		rr := httptest.NewRecorder()
++		srv.createMemory(rr, durableRequest(t, "tenant-a", nil, map[string]any{
++			"messages": []map[string]string{{"role": "user", "content": "PRIVATE-MESSAGE"}},
++		}))
++		if rr.Code != http.StatusAccepted {
++			t.Fatalf("status = %d: %s", rr.Code, rr.Body.String())
++		}
++	}
++	records := strings.Split(strings.TrimSpace(output.String()), "\n")
++	if len(records) != 1 ||
++		!strings.Contains(records[0], `"JobsAccepted":1`) ||
++		strings.Contains(output.String(), "PRIVATE-MESSAGE") {
++		t.Fatalf("accepted telemetry = %s", output.String())
++	}
++}
++
+ func TestDurableIngestEnqueueFailureIsNon2xx(t *testing.T) {
+ 	srv := newTestServer(&testMemoryRepo{}, &testSessionRepo{}).WithDurableIngest(true)
+ 	srv.ingestRepoFactory = func(string, *sql.DB) ingestqueue.Repository {
+diff --git a/server/internal/handler/handler.go b/server/internal/handler/handler.go
+index dd2d5b5..8706895 100644
+--- a/server/internal/handler/handler.go
++++ b/server/internal/handler/handler.go
+@@ -52,6 +52,7 @@ type Server struct {
+ 	chainRecallStopScore float64
+ 	disableSessionSave   bool
+ 	durableIngestEnabled bool
++	durableTelemetry     ingestqueue.Telemetry
+ 	ingestRepoFactory    func(string, *sql.DB) ingestqueue.Repository
+ }
+ 
+@@ -123,6 +124,11 @@ func (s *Server) WithDurableIngest(enabled bool) *Server {
+ 	return s
+ }
+ 
++func (s *Server) WithDurableIngestTelemetry(telemetry ingestqueue.Telemetry) *Server {
++	s.durableTelemetry = telemetry
++	return s
++}
++
+ // resolvedSvc holds the correct service instances for a request.
+ // Services are always backed by the tenant's dedicated DB.
+ type resolvedSvc struct {
+diff --git a/server/internal/handler/memory.go b/server/internal/handler/memory.go
+index e88df72..9560c52 100644
+--- a/server/internal/handler/memory.go
++++ b/server/internal/handler/memory.go
+@@ -587,6 +587,9 @@ func (s *Server) enqueueDurableIngest(
+ 	if err != nil {
+ 		return nil, err
+ 	}
++	if s.durableTelemetry != nil && job.NewlyEnqueued {
++		s.durableTelemetry.Accepted()
++	}
+ 	return job, nil
+ }
+ 
+diff --git a/server/internal/ingestqueue/plan_test.go b/server/internal/ingestqueue/plan_test.go
+index b4002bc..e7b3c7f 100644
+--- a/server/internal/ingestqueue/plan_test.go
++++ b/server/internal/ingestqueue/plan_test.go
+@@ -3,6 +3,7 @@ package ingestqueue
+ import (
+ 	"encoding/json"
+ 	"fmt"
++	"strings"
+ 	"testing"
+ )
+ 
+@@ -163,6 +164,37 @@ func TestFinalizePlanUsesNumericSourceAndSessionOrder(t *testing.T) {
+ 	}
+ }
+ 
++func TestFinalizePlanOmitsFalseZeroFactForExistingPlanHashes(t *testing.T) {
++	plan, err := FinalizePlan(AtomicPlan{
++		JobID:             "job-compatibility",
++		TenantID:          "tenant-a",
++		Revision:          1,
++		AttemptGeneration: 1,
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	payload, err := PlanPayload(plan)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if strings.Contains(string(payload), "zero_fact") {
++		t.Fatalf("false zero-fact marker changed canonical plan payload: %s", payload)
++	}
++	plan.ZeroFact = true
++	plan, err = FinalizePlan(plan)
++	if err != nil {
++		t.Fatal(err)
++	}
++	payload, err = PlanPayload(plan)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !strings.Contains(string(payload), `"zero_fact":true`) {
++		t.Fatalf("true zero-fact marker was not persisted: %s", payload)
++	}
++}
++
+ func TestFinalizePlanUsesEveryMaterializedFieldAsActionTieBreaker(t *testing.T) {
+ 	base := AtomicPlan{
+ 		JobID:             "00000000-0000-4000-8000-000000000054",
+diff --git a/server/internal/ingestqueue/telemetry.go b/server/internal/ingestqueue/telemetry.go
+new file mode 100644
+index 0000000..33f9699
+--- /dev/null
++++ b/server/internal/ingestqueue/telemetry.go
+@@ -0,0 +1,257 @@
++package ingestqueue
++
++import (
++	"encoding/json"
++	"io"
++	"sync"
++	"time"
++)
++
++const DurableMetricNamespace = "mem9-on-aws/DurableIngest"
++
++type Telemetry interface {
++	Accepted()
++	Result(ResultMetrics)
++	QueueAge(time.Duration)
++}
++
++type ResultMetrics struct {
++	ResultClass        string
++	ErrorClass         string
++	QueueWait          time.Duration
++	IncludeQueueWait   bool
++	PlanDuration       time.Duration
++	ApplyDuration      time.Duration
++	TotalDuration      time.Duration
++	RetryCount         int
++	WarningCount       int
++	TruncatedFactCount int
++	ZeroFactSuccess    bool
++}
++
++type emfTelemetry struct {
++	stage  string
++	output io.Writer
++	now    func() time.Time
++	mu     sync.Mutex
++}
++
++type emfMetric struct {
++	Name string `json:"Name"`
++	Unit string `json:"Unit"`
++}
++
++type emfDirective struct {
++	Namespace  string      `json:"Namespace"`
++	Dimensions [][]string  `json:"Dimensions"`
++	Metrics    []emfMetric `json:"Metrics"`
++}
++
++type emfMetadata struct {
++	Timestamp         int64          `json:"Timestamp"`
++	CloudWatchMetrics []emfDirective `json:"CloudWatchMetrics"`
++}
++
++func NewEMFTelemetry(stage string, output io.Writer, now func() time.Time) Telemetry {
++	if now == nil {
++		now = time.Now
++	}
++	return &emfTelemetry{
++		stage:  stage,
++		output: output,
++		now:    now,
++	}
++}
++
++func (t *emfTelemetry) Accepted() {
++	t.write(
++		map[string]any{
++			"stage":        t.stage,
++			"result_class": "accepted",
++			"JobsAccepted": 1,
++		},
++		[]emfDirective{metricDirective(
++			[]string{"stage", "result_class"},
++			countMetric("JobsAccepted"),
++		)},
++	)
++}
++
++func (t *emfTelemetry) Result(metrics ResultMetrics) {
++	resultClass := boundedResultClass(metrics.ResultClass)
++	record := map[string]any{
++		"stage":                     t.stage,
++		"result_class":              resultClass,
++		"PlanDurationMs":            durationMilliseconds(metrics.PlanDuration),
++		"ApplyDurationMs":           durationMilliseconds(metrics.ApplyDuration),
++		"TotalProcessingDurationMs": durationMilliseconds(metrics.TotalDuration),
++		"RetryCount":                nonNegative(metrics.RetryCount),
++	}
++	directives := []emfDirective{metricDirective(
++		[]string{"stage", "result_class"},
++		millisecondMetric("PlanDurationMs"),
++		millisecondMetric("ApplyDurationMs"),
++		millisecondMetric("TotalProcessingDurationMs"),
++		countMetric("RetryCount"),
++	)}
++	if metrics.IncludeQueueWait || metrics.QueueWait != 0 {
++		record["QueueWaitMs"] = durationMilliseconds(metrics.QueueWait)
++		directives[0].Metrics = append(
++			directives[0].Metrics,
++			millisecondMetric("QueueWaitMs"),
++		)
++	}
++
++	switch resultClass {
++	case "retrying":
++		record["error_class"] = boundedErrorClass(metrics.ErrorClass)
++		record["JobsRetrying"] = 1
++		directives = append(directives, metricDirective(
++			[]string{"stage", "result_class", "error_class"},
++			countMetric("JobsRetrying"),
++		))
++	case string(StateSucceeded):
++		record["JobsSucceeded"] = 1
++		record["JobsTerminated"] = 1
++		record["DeadlineTransientTerminalFailures"] = 0
++		record["Warnings"] = nonNegative(metrics.WarningCount)
++		record["TruncatedFacts"] = nonNegative(metrics.TruncatedFactCount)
++		record["ZeroFactSuccess"] = boolCount(metrics.ZeroFactSuccess)
++		directives = append(
++			directives,
++			metricDirective(
++				[]string{"stage", "result_class"},
++				countMetric("JobsSucceeded"),
++			),
++			metricDirective(
++				[]string{"stage"},
++				countMetric("JobsTerminated"),
++				countMetric("DeadlineTransientTerminalFailures"),
++				countMetric("Warnings"),
++				countMetric("TruncatedFacts"),
++				countMetric("ZeroFactSuccess"),
++			),
++		)
++	case string(StateDead):
++		errorClass := boundedErrorClass(metrics.ErrorClass)
++		record["error_class"] = errorClass
++		record["JobsDead"] = 1
++		record["JobsTerminated"] = 1
++		record["DeadlineTransientTerminalFailures"] = boolCount(
++			errorClass == "deadline" || errorClass == "mantle_transient",
++		)
++		directives = append(
++			directives,
++			metricDirective(
++				[]string{"stage", "result_class", "error_class"},
++				countMetric("JobsDead"),
++			),
++			metricDirective(
++				[]string{"stage"},
++				countMetric("JobsDead"),
++			),
++			metricDirective(
++				[]string{"stage"},
++				countMetric("JobsTerminated"),
++				countMetric("DeadlineTransientTerminalFailures"),
++			),
++		)
++	default:
++		return
++	}
++	t.write(record, directives)
++}
++
++func (t *emfTelemetry) QueueAge(age time.Duration) {
++	t.write(
++		map[string]any{
++			"stage":             t.stage,
++			"OldestQueuedAgeMs": durationMilliseconds(age),
++		},
++		[]emfDirective{metricDirective(
++			[]string{"stage"},
++			millisecondMetric("OldestQueuedAgeMs"),
++		)},
++	)
++}
++
++func (t *emfTelemetry) write(record map[string]any, directives []emfDirective) {
++	if t == nil || t.output == nil {
++		return
++	}
++	record["_aws"] = emfMetadata{
++		Timestamp:         t.now().UnixMilli(),
++		CloudWatchMetrics: directives,
++	}
++	t.mu.Lock()
++	defer t.mu.Unlock()
++	_ = json.NewEncoder(t.output).Encode(record)
++}
++
++func metricDirective(dimensions []string, metrics ...emfMetric) emfDirective {
++	return emfDirective{
++		Namespace:  DurableMetricNamespace,
++		Dimensions: [][]string{dimensions},
++		Metrics:    metrics,
++	}
++}
++
++func countMetric(name string) emfMetric {
++	return emfMetric{Name: name, Unit: "Count"}
++}
++
++func millisecondMetric(name string) emfMetric {
++	return emfMetric{Name: name, Unit: "Milliseconds"}
++}
++
++func boundedResultClass(class string) string {
++	switch class {
++	case string(StateRetryWait), "retrying":
++		return "retrying"
++	case string(StateSucceeded), string(StateDead):
++		return class
++	default:
++		return "other"
++	}
++}
++
++func boundedErrorClass(class string) string {
++	switch class {
++	case "proxy_validation_permanent",
++		"mantle_4xx_permanent",
++		"mantle_transient",
++		"deadline",
++		"optimistic_conflict",
++		"database_contention",
++		"runtime_usage_transient",
++		"runtime_reservation_too_short",
++		"runtime_quota_denied",
++		"commit_ambiguous",
++		"permanent_unknown",
++		"attempts_exhausted":
++		return class
++	default:
++		return "other"
++	}
++}
++
++func durationMilliseconds(duration time.Duration) int64 {
++	if duration < 0 {
++		return 0
++	}
++	return duration.Milliseconds()
++}
++
++func nonNegative(value int) int {
++	if value < 0 {
++		return 0
++	}
++	return value
++}
++
++func boolCount(value bool) int {
++	if value {
++		return 1
++	}
++	return 0
++}
+diff --git a/server/internal/ingestqueue/telemetry_test.go b/server/internal/ingestqueue/telemetry_test.go
+new file mode 100644
+index 0000000..aefb5b3
+--- /dev/null
++++ b/server/internal/ingestqueue/telemetry_test.go
+@@ -0,0 +1,206 @@
++package ingestqueue
++
++import (
++	"bytes"
++	"encoding/json"
++	"strings"
++	"testing"
++	"time"
++)
++
++func telemetryRecords(t *testing.T, output string) []map[string]any {
++	t.Helper()
++	lines := strings.Split(strings.TrimSpace(output), "\n")
++	records := make([]map[string]any, 0, len(lines))
++	for _, line := range lines {
++		var record map[string]any
++		if err := json.Unmarshal([]byte(line), &record); err != nil {
++			t.Fatalf("decode EMF record %q: %v", line, err)
++		}
++		records = append(records, record)
++	}
++	return records
++}
++
++func TestEMFTelemetryLifecycleFixtures(t *testing.T) {
++	var output bytes.Buffer
++	now := time.Date(2026, 7, 27, 2, 30, 0, 0, time.UTC)
++	telemetry := NewEMFTelemetry("prod", &output, func() time.Time { return now })
++
++	telemetry.Accepted()
++	telemetry.Result(ResultMetrics{
++		ResultClass:   string(StateRetryWait),
++		ErrorClass:    "mantle_transient",
++		QueueWait:     125 * time.Millisecond,
++		PlanDuration:  2 * time.Second,
++		ApplyDuration: 30 * time.Millisecond,
++		TotalDuration: 3 * time.Second,
++		RetryCount:    1,
++	})
++	telemetry.Result(ResultMetrics{
++		ResultClass:        string(StateSucceeded),
++		PlanDuration:       4 * time.Second,
++		ApplyDuration:      90 * time.Millisecond,
++		TotalDuration:      5 * time.Second,
++		RetryCount:         1,
++		WarningCount:       2,
++		TruncatedFactCount: 17,
++		ZeroFactSuccess:    true,
++	})
++	telemetry.Result(ResultMetrics{
++		ResultClass:   string(StateDead),
++		ErrorClass:    "deadline",
++		PlanDuration:  9 * time.Second,
++		ApplyDuration: 50 * time.Millisecond,
++		TotalDuration: 10 * time.Second,
++		RetryCount:    4,
++	})
++	telemetry.QueueAge(11 * time.Minute)
++
++	records := telemetryRecords(t, output.String())
++	if len(records) != 5 {
++		t.Fatalf("EMF records = %d, want 5: %s", len(records), output.String())
++	}
++	if records[0]["JobsAccepted"] != float64(1) ||
++		records[0]["stage"] != "prod" ||
++		records[0]["result_class"] != "accepted" {
++		t.Fatalf("accepted record = %#v", records[0])
++	}
++	if records[1]["JobsRetrying"] != float64(1) ||
++		records[1]["QueueWaitMs"] != float64(125) ||
++		records[1]["PlanDurationMs"] != float64(2000) ||
++		records[1]["ApplyDurationMs"] != float64(30) ||
++		records[1]["TotalProcessingDurationMs"] != float64(3000) ||
++		records[1]["RetryCount"] != float64(1) ||
++		records[1]["error_class"] != "mantle_transient" {
++		t.Fatalf("retry record = %#v", records[1])
++	}
++	if records[2]["JobsSucceeded"] != float64(1) ||
++		records[2]["JobsTerminated"] != float64(1) ||
++		records[2]["DeadlineTransientTerminalFailures"] != float64(0) ||
++		records[2]["Warnings"] != float64(2) ||
++		records[2]["TruncatedFacts"] != float64(17) ||
++		records[2]["ZeroFactSuccess"] != float64(1) {
++		t.Fatalf("success record = %#v", records[2])
++	}
++	if records[3]["JobsDead"] != float64(1) ||
++		records[3]["JobsTerminated"] != float64(1) ||
++		records[3]["DeadlineTransientTerminalFailures"] != float64(1) ||
++		records[3]["error_class"] != "deadline" {
++		t.Fatalf("dead record = %#v", records[3])
++	}
++	if records[4]["OldestQueuedAgeMs"] != float64(660000) {
++		t.Fatalf("queue age record = %#v", records[4])
++	}
++
++	for _, record := range records {
++		aws, ok := record["_aws"].(map[string]any)
++		if !ok || aws["Timestamp"] != float64(now.UnixMilli()) {
++			t.Fatalf("invalid EMF metadata: %#v", record)
++		}
++		directives, ok := aws["CloudWatchMetrics"].([]any)
++		if !ok || len(directives) == 0 {
++			t.Fatalf("missing metric directives: %#v", record)
++		}
++		for _, rawDirective := range directives {
++			directive := rawDirective.(map[string]any)
++			if directive["Namespace"] != DurableMetricNamespace {
++				t.Fatalf("namespace = %#v", directive["Namespace"])
++			}
++			for _, rawDimensions := range directive["Dimensions"].([]any) {
++				for _, rawName := range rawDimensions.([]any) {
++					name := rawName.(string)
++					switch name {
++					case "stage", "result_class", "error_class":
++					default:
++						t.Fatalf("unbounded dimension %q in %#v", name, directive)
++					}
++				}
++			}
++		}
++	}
++}
++
++func TestEMFTelemetryBoundsClassesAndDurations(t *testing.T) {
++	for _, class := range []string{
++		"proxy_validation_permanent",
++		"mantle_4xx_permanent",
++		"mantle_transient",
++		"deadline",
++		"optimistic_conflict",
++		"database_contention",
++		"runtime_usage_transient",
++		"runtime_reservation_too_short",
++		"runtime_quota_denied",
++		"commit_ambiguous",
++		"permanent_unknown",
++		"attempts_exhausted",
++	} {
++		if got := boundedErrorClass(class); got != class {
++			t.Fatalf("bounded class %q = %q", class, got)
++		}
++	}
++	if got := boundedErrorClass("PRIVATE-UNBOUNDED-MARKER"); got != "other" {
++		t.Fatalf("unknown class = %q, want other", got)
++	}
++
++	var output bytes.Buffer
++	telemetry := NewEMFTelemetry("prod", &output, nil)
++	telemetry.Result(ResultMetrics{
++		ResultClass:   string(StateDead),
++		ErrorClass:    "PRIVATE-UNBOUNDED-MARKER",
++		QueueWait:     -time.Second,
++		PlanDuration:  -time.Second,
++		ApplyDuration: -time.Second,
++		TotalDuration: -time.Second,
++	})
++	record := telemetryRecords(t, output.String())[0]
++	for _, metric := range []string{
++		"QueueWaitMs",
++		"PlanDurationMs",
++		"ApplyDurationMs",
++		"TotalProcessingDurationMs",
++	} {
++		if record[metric] != float64(0) {
++			t.Fatalf("%s = %#v, want zero", metric, record[metric])
++		}
++	}
++	if record["error_class"] != "other" ||
++		strings.Contains(output.String(), "PRIVATE-UNBOUNDED-MARKER") {
++		t.Fatalf("unbounded class leaked: %s", output.String())
++	}
++}
++
++func TestEMFTelemetryQueueWaitPresence(t *testing.T) {
++	var output bytes.Buffer
++	telemetry := NewEMFTelemetry("prod", &output, nil)
++	telemetry.Result(ResultMetrics{
++		ResultClass:      string(StateSucceeded),
++		IncludeQueueWait: true,
++	})
++	telemetry.Result(ResultMetrics{ResultClass: string(StateSucceeded)})
++
++	records := telemetryRecords(t, output.String())
++	if records[0]["QueueWaitMs"] != float64(0) {
++		t.Fatalf("first-attempt queue wait = %#v", records[0])
++	}
++	if _, exists := records[1]["QueueWaitMs"]; exists {
++		t.Fatalf("later attempt emitted queue wait: %#v", records[1])
++	}
++}
++
++func TestEMFTelemetrySchemaContainsNoHighCardinalityFields(t *testing.T) {
++	var output bytes.Buffer
++	NewEMFTelemetry("prod", &output, nil).Result(ResultMetrics{
++		ResultClass: string(StateSucceeded),
++	})
++	serialized := strings.ToLower(output.String())
++	for _, forbidden := range []string{
++		"tenant", "agent", "app_id", "session", "job_id", "request",
++		"payload", "hash", "message", "fact_content", "embedding",
++	} {
++		if strings.Contains(serialized, forbidden) {
++			t.Fatalf("EMF contains forbidden field %q: %s", forbidden, serialized)
++		}
++	}
++}
+diff --git a/server/internal/ingestqueue/types.go b/server/internal/ingestqueue/types.go
+index cbe4831..546ae6d 100644
+--- a/server/internal/ingestqueue/types.go
++++ b/server/internal/ingestqueue/types.go
+@@ -86,6 +86,9 @@ type EnqueueInput struct {
+ 
+ type Job struct {
+ 	ID                          string
++	NewlyEnqueued               bool
++	TerminalTransition          bool
++	ClaimedAt                   time.Time
+ 	TenantID                    string
+ 	IdempotencyKey              string
+ 	CanonicalPayload            json.RawMessage
+@@ -162,6 +165,7 @@ type Processor interface {
+ type Repository interface {
+ 	Enqueue(context.Context, EnqueueInput) (*Job, error)
+ 	Get(context.Context, string, string) (*Job, error)
++	OldestQueuedAge(context.Context, string) (time.Duration, bool, error)
+ 	Claim(context.Context, string, string, time.Duration, int) (*Job, error)
+ 	StartPlanning(context.Context, LeaseRef) error
+ 	NextPlanRevision(context.Context, LeaseRef) (int, error)
+@@ -234,6 +238,7 @@ type AtomicPlan struct {
+ 	TruncatedFactCount int               `json:"truncated_fact_count"`
+ 	WarningCount       int               `json:"warning_count"`
+ 	WarningClass       string            `json:"warning_class,omitempty"`
++	ZeroFact           bool              `json:"zero_fact,omitempty"`
+ 	Hash               string            `json:"plan_hash,omitempty"`
+ }
+ 
+diff --git a/server/internal/ingestqueue/worker.go b/server/internal/ingestqueue/worker.go
+index 0fa0942..4908b95 100644
+--- a/server/internal/ingestqueue/worker.go
++++ b/server/internal/ingestqueue/worker.go
+@@ -19,6 +19,7 @@ const terminalFinalizationWriteTimeout = 5 * time.Second
+ const runtimeReservationFinalizationBuffer = 30 * time.Second
+ const maxWorkerConcurrency = 2
+ const maxImmediateClaimRetries = 3
++const queueAgeSampleInterval = time.Minute
+ 
+ var processSemaphore = make(chan struct{}, maxWorkerConcurrency)
+ 
+@@ -30,6 +31,8 @@ type WorkerConfig struct {
+ 	JobTimeout   time.Duration
+ 	PollInterval time.Duration
+ 	Random       func() float64
++	Now          func() time.Time
++	Telemetry    Telemetry
+ }
+ 
+ func DefaultWorkerConfig() WorkerConfig {
+@@ -41,6 +44,7 @@ func DefaultWorkerConfig() WorkerConfig {
+ 		JobTimeout:   10 * time.Minute,
+ 		PollInterval: time.Second,
+ 		Random:       rand.Float64,
++		Now:          time.Now,
+ 	}
+ }
+ 
+@@ -76,6 +80,9 @@ func NewWorker(repo Repository, processor Processor, tenantID, owner string, con
+ 	if config.Random == nil {
+ 		config.Random = defaults.Random
+ 	}
++	if config.Now == nil {
++		config.Now = defaults.Now
++	}
+ 	if logger == nil {
+ 		logger = slog.Default()
+ 	}
+@@ -103,6 +110,10 @@ func (w *Worker) Run(ctx context.Context) error {
+ 	var active sync.WaitGroup
+ 	defer active.Wait()
+ 	immediateClaimRetries := 0
++	if w.config.Telemetry != nil {
++		w.sampleOldestQueuedAge(workerCtx)
++		go w.runQueueAgeSampler(workerCtx)
++	}
+ 
+ 	for {
+ 		select {
+@@ -117,6 +128,7 @@ func (w *Worker) Run(ctx context.Context) error {
+ 		case processSemaphore <- struct{}{}:
+ 		}
+ 
++		claimStarted := w.now()
+ 		job, err := w.repo.Claim(workerCtx, w.tenantID, w.owner, w.config.Lease, MaxAttempts)
+ 		if err != nil {
+ 			<-processSemaphore
+@@ -146,7 +158,9 @@ func (w *Worker) Run(ctx context.Context) error {
+ 			}
+ 			continue
+ 		}
++		job.ClaimedAt = claimStarted
+ 		if job.State == StateSucceeded || job.State == StateDead {
++			w.emitClaimedTerminal(job)
+ 			w.processTerminal(workerCtx, job, nil)
+ 			<-processSemaphore
+ 			<-workerSemaphore
+@@ -183,7 +197,60 @@ func waitForWorker(ctx context.Context, duration time.Duration) bool {
+ 	}
+ }
+ 
++func (w *Worker) runQueueAgeSampler(ctx context.Context) {
++	ticker := time.NewTicker(queueAgeSampleInterval)
++	defer ticker.Stop()
++	for {
++		select {
++		case <-ctx.Done():
++			return
++		case <-ticker.C:
++			w.sampleOldestQueuedAge(ctx)
++		}
++	}
++}
++
++func (w *Worker) sampleOldestQueuedAge(ctx context.Context) {
++	if w.config.Telemetry == nil {
++		return
++	}
++	age, present, err := w.repo.OldestQueuedAge(ctx, w.tenantID)
++	if err != nil {
++		w.logger.Error(
++			"durable ingest queue age sample failed",
++			"operation", "queue_age",
++			"error_class", "database_error",
++		)
++		return
++	}
++	if !present {
++		age = 0
++	}
++	w.config.Telemetry.QueueAge(age)
++}
++
++type attemptTelemetry struct {
++	startedAt        time.Time
++	queueWait        time.Duration
++	includeQueueWait bool
++	planDuration     time.Duration
++	applyDuration    time.Duration
++}
++
+ func (w *Worker) process(ctx context.Context, job *Job) {
++	startedAt := job.ClaimedAt
++	if startedAt.IsZero() {
++		startedAt = w.now()
++	}
++	attempt := attemptTelemetry{startedAt: startedAt}
++	if job.AttemptCount == 1 {
++		attempt.includeQueueWait = true
++		claimedAt := job.UpdatedAt
++		if claimedAt.IsZero() {
++			claimedAt = attempt.startedAt
++		}
++		attempt.queueWait = elapsed(claimedAt, job.CreatedAt)
++	}
+ 	jobCtx, cancel := context.WithTimeout(ctx, w.config.JobTimeout)
+ 	lease := job.LeaseRef()
+ 	var leaseLost atomic.Bool
+@@ -199,9 +266,14 @@ func (w *Worker) process(ctx context.Context, job *Job) {
+ 		job,
+ 		w.config.JobTimeout+runtimeReservationFinalizationBuffer,
+ 	); err != nil {
+-		w.fail(ctx, job, lease, err, leaseLost.Load())
++		w.fail(ctx, job, lease, err, leaseLost.Load(), attempt)
+ 		return
+ 	}
++	planStarted := w.now()
++	failPlanning := func(err error) {
++		attempt.planDuration += elapsed(w.now(), planStarted)
++		w.fail(ctx, job, lease, err, leaseLost.Load(), attempt)
++	}
+ 	if err := w.repo.StartPlanning(jobCtx, lease); err != nil {
+ 		return
+ 	}
+@@ -212,7 +284,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
+ 			persisted, err := w.repo.LoadPlan(jobCtx, lease)
+ 			if err != nil {
+ 				if !errors.Is(err, ErrPlanInvalid) || persisted == nil {
+-					w.fail(ctx, job, lease, err, leaseLost.Load())
++					failPlanning(err)
+ 					return
+ 				}
+ 				if staleErr := w.repo.MarkPlanStale(jobCtx, lease, *persisted); staleErr != nil {
+@@ -220,7 +292,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
+ 				}
+ 			} else if persisted != nil {
+ 				if persisted.JobID != job.ID || persisted.TenantID != job.TenantID {
+-					w.fail(ctx, job, lease, ErrPlanInvalid, leaseLost.Load())
++					failPlanning(ErrPlanInvalid)
+ 					return
+ 				}
+ 				if err := w.repo.ResumePlan(jobCtx, lease, *persisted); err != nil {
+@@ -232,24 +304,24 @@ func (w *Worker) process(ctx context.Context, job *Job) {
+ 
+ 		if plan == nil {
+ 			if createdRevisions >= MaxPlanRevisionsPerAttempt {
+-				w.fail(ctx, job, lease, NewOutcomeError("optimistic_conflict"), leaseLost.Load())
++				failPlanning(NewOutcomeError("optimistic_conflict"))
+ 				return
+ 			}
+ 			revision, err := w.repo.NextPlanRevision(jobCtx, lease)
+ 			if err != nil {
+-				w.fail(ctx, job, lease, err, leaseLost.Load())
++				failPlanning(err)
+ 				return
+ 			}
+ 			built, err := w.processor.Plan(jobCtx, job, revision)
+ 			if err != nil {
+-				w.fail(ctx, job, lease, err, leaseLost.Load())
++				failPlanning(err)
+ 				return
+ 			}
+ 			if err := ValidatePlan(built); err != nil ||
+ 				built.JobID != job.ID ||
+ 				built.TenantID != job.TenantID ||
+ 				built.Revision != revision {
+-				w.fail(ctx, job, lease, ErrPlanInvalid, leaseLost.Load())
++				failPlanning(ErrPlanInvalid)
+ 				return
+ 			}
+ 			if err := w.repo.SavePlan(jobCtx, lease, built); err != nil {
+@@ -259,27 +331,32 @@ func (w *Worker) process(ctx context.Context, job *Job) {
+ 			plan = &built
+ 		}
+ 
++		attempt.planDuration += elapsed(w.now(), planStarted)
++		applyStarted := w.now()
+ 		result, err := w.repo.ApplyPlan(jobCtx, lease, *plan)
++		applyFinished := w.now()
++		attempt.applyDuration += elapsed(applyFinished, applyStarted)
+ 		if errors.Is(err, ErrPlanConflict) {
+ 			if staleErr := w.repo.MarkPlanStale(jobCtx, lease, *plan); staleErr != nil {
+ 				return
+ 			}
+ 			plan = nil
++			planStarted = applyFinished
+ 			continue
+ 		}
+ 		if err != nil {
+-			w.fail(ctx, job, lease, err, leaseLost.Load())
++			w.fail(ctx, job, lease, err, leaseLost.Load(), attempt)
+ 			return
+ 		}
+ 
+ 		job.State = StateSucceeded
++		w.emitResult(job, StateSucceeded, "", attempt, plan)
+ 		if job.RuntimeOperationID != "" {
+ 			job.RuntimeFinalizationState = RuntimeFinalizationFinalizing
+ 			w.processTerminal(jobCtx, job, plan)
+ 		}
+ 		w.processor.PostCommit(jobCtx, job, *plan, result)
+ 		w.logger.Info("durable ingest job completed",
+-			"job_id", job.ID,
+ 			"state", StateSucceeded,
+ 			"attempt", job.AttemptCount,
+ 			"plan_revision", plan.Revision,
+@@ -307,7 +384,6 @@ func (w *Worker) processTerminal(
+ 		); err != nil {
+ 			w.logger.Error(
+ 				"durable ingest terminal reservation refresh failed",
+-				"job_id", job.ID,
+ 				"state", job.State,
+ 				"error_class", "runtime_reservation",
+ 			)
+@@ -320,7 +396,6 @@ func (w *Worker) processTerminal(
+ 	if err := w.processor.FinalizeTerminal(ctx, job, plan); err != nil {
+ 		w.logger.Error(
+ 			"durable ingest terminal finalization failed",
+-			"job_id", job.ID,
+ 			"state", job.State,
+ 			"error_class", "runtime_finalization",
+ 		)
+@@ -334,7 +409,6 @@ func (w *Worker) processTerminal(
+ 	if err := w.repo.CompleteTerminalFinalization(writeCtx, job.LeaseRef()); err != nil {
+ 		w.logger.Error(
+ 			"durable ingest terminal finalization completion failed",
+-			"job_id", job.ID,
+ 			"state", job.State,
+ 			"error_class", "database_error",
+ 		)
+@@ -452,6 +526,7 @@ func (w *Worker) fail(
+ 	lease LeaseRef,
+ 	err error,
+ 	leaseLost bool,
++	attempt attemptTelemetry,
+ ) {
+ 	if parent.Err() != nil || leaseLost {
+ 		return
+@@ -474,6 +549,7 @@ func (w *Worker) fail(
+ 	); err != nil {
+ 		return
+ 	}
++	w.emitResult(job, failure.State, failure.ErrorClass, attempt, nil)
+ 	if failure.State == StateDead {
+ 		job.State = StateDead
+ 		job.ErrorClass = failure.ErrorClass
+@@ -483,13 +559,68 @@ func (w *Worker) fail(
+ 		}
+ 	}
+ 	w.logger.Info("durable ingest job failed",
+-		"job_id", lease.JobID,
+ 		"state", failure.State,
+ 		"attempt", lease.Generation,
+ 		"error_class", failure.ErrorClass,
+ 	)
+ }
+ 
++func (w *Worker) emitResult(
++	job *Job,
++	state State,
++	errorClass string,
++	attempt attemptTelemetry,
++	plan *AtomicPlan,
++) {
++	if w.config.Telemetry == nil {
++		return
++	}
++	retryCount := max(job.AttemptCount-1, 0)
++	if state == StateRetryWait {
++		retryCount = job.AttemptCount
++	}
++	metrics := ResultMetrics{
++		ResultClass:      string(state),
++		ErrorClass:       errorClass,
++		QueueWait:        attempt.queueWait,
++		IncludeQueueWait: attempt.includeQueueWait,
++		PlanDuration:     attempt.planDuration,
++		ApplyDuration:    attempt.applyDuration,
++		TotalDuration:    elapsed(w.now(), attempt.startedAt),
++		RetryCount:       retryCount,
++	}
++	if state == StateSucceeded && plan != nil {
++		metrics.WarningCount = plan.WarningCount
++		metrics.TruncatedFactCount = plan.TruncatedFactCount
++		metrics.ZeroFactSuccess = plan.ZeroFact
++	}
++	w.config.Telemetry.Result(metrics)
++}
++
++func (w *Worker) emitClaimedTerminal(job *Job) {
++	if w.config.Telemetry == nil || !job.TerminalTransition {
++		return
++	}
++	w.config.Telemetry.Result(ResultMetrics{
++		ResultClass:   string(job.State),
++		ErrorClass:    job.ErrorClass,
++		TotalDuration: elapsed(w.now(), job.ClaimedAt),
++		RetryCount:    max(job.AttemptCount-1, 0),
++	})
++}
++
++func (w *Worker) now() time.Time {
++	return w.config.Now()
++}
++
++func elapsed(end, start time.Time) time.Duration {
++	duration := end.Sub(start)
++	if duration < 0 {
++		return 0
++	}
++	return duration
++}
++
+ func FullJitterBackoff(attempt int, random float64) time.Duration {
+ 	if attempt < 1 {
+ 		attempt = 1
+diff --git a/server/internal/ingestqueue/worker_integration_test.go b/server/internal/ingestqueue/worker_integration_test.go
+index e00e6ac..a3ca4ff 100644
+--- a/server/internal/ingestqueue/worker_integration_test.go
++++ b/server/internal/ingestqueue/worker_integration_test.go
+@@ -1,6 +1,7 @@
+ package ingestqueue_test
+ 
+ import (
++	"bytes"
+ 	"context"
+ 	"database/sql"
+ 	"errors"
+@@ -8,6 +9,7 @@ import (
+ 	"io"
+ 	"log/slog"
+ 	"os"
++	"strings"
+ 	"sync"
+ 	"sync/atomic"
+ 	"testing"
+@@ -257,6 +259,8 @@ func TestPostgresWorkerFinalizesReapedExhaustedJob(t *testing.T) {
+ 	cfg := ingestqueue.DefaultWorkerConfig()
+ 	cfg.Enabled = true
+ 	cfg.PollInterval = time.Millisecond
++	var telemetry bytes.Buffer
++	cfg.Telemetry = ingestqueue.NewEMFTelemetry("test", &telemetry, nil)
+ 	ctx, cancel := context.WithCancel(context.Background())
+ 	done := make(chan error, 1)
+ 	go func() {
+@@ -280,6 +284,10 @@ func TestPostgresWorkerFinalizesReapedExhaustedJob(t *testing.T) {
+ 	}
+ 	cancel()
+ 	<-done
++	if strings.Count(telemetry.String(), `"JobsDead":1`) != 1 ||
++		!strings.Contains(telemetry.String(), `"error_class":"attempts_exhausted"`) {
++		t.Fatalf("reaped terminal telemetry = %s", telemetry.String())
++	}
+ }
+ 
+ func TestPostgresWorkerPermanentFailureUnblocksFollower(t *testing.T) {
+diff --git a/server/internal/ingestqueue/worker_test.go b/server/internal/ingestqueue/worker_test.go
+index 0106f32..3efbe45 100644
+--- a/server/internal/ingestqueue/worker_test.go
++++ b/server/internal/ingestqueue/worker_test.go
+@@ -32,6 +32,17 @@ type fakeRepo struct {
+ 	heartbeat  func(context.Context, LeaseRef, time.Duration) error
+ 	complete   func(context.Context, LeaseRef) error
+ 	replace    func(context.Context, LeaseRef, RuntimeReservation) error
++	oldestAge  func(context.Context, string) (time.Duration, bool, error)
++}
++
++func (r *fakeRepo) OldestQueuedAge(
++	ctx context.Context,
++	tenantID string,
++) (time.Duration, bool, error) {
++	if r.oldestAge == nil {
++		return 0, false, nil
++	}
++	return r.oldestAge(ctx, tenantID)
+ }
+ 
+ func (r *fakeRepo) Claim(ctx context.Context, tenant, owner string, lease time.Duration, max int) (*Job, error) {
+@@ -285,6 +296,85 @@ func TestDisabledWorkerAndNilProcessorNeverClaim(t *testing.T) {
+ 	}
+ }
+ 
++func TestWorkerTerminalDurationStartsBeforeClaimAndPreservesClock(t *testing.T) {
++	startedAt := time.Now()
++	finishedAt := startedAt.Add(250 * time.Millisecond)
++	clockSamples := []time.Time{startedAt, finishedAt}
++	claimClockRead := false
++	claimReturned := false
++	var telemetry bytes.Buffer
++	ctx, cancel := context.WithCancel(context.Background())
++	repo := &fakeRepo{
++		claim: func(context.Context, string, string, time.Duration, int) (*Job, error) {
++			if !claimClockRead {
++				t.Fatal("claim began before the worker sampled its clock")
++			}
++			if claimReturned {
++				return nil, nil
++			}
++			claimReturned = true
++			return &Job{
++				State:                    StateDead,
++				ErrorClass:               "attempts_exhausted",
++				AttemptCount:             MaxAttempts,
++				TerminalTransition:       true,
++				RuntimeFinalizationState: RuntimeFinalizationFinalizing,
++			}, nil
++		},
++	}
++	processor := fakeProcessor{
++		finalizeTerminal: func(context.Context, *Job, *AtomicPlan) error {
++			cancel()
++			return nil
++		},
++	}
++	cfg := DefaultWorkerConfig()
++	cfg.Enabled = true
++	cfg.Telemetry = NewEMFTelemetry("prod", &telemetry, nil)
++	cfg.Now = func() time.Time {
++		if len(clockSamples) == 0 {
++			return finishedAt
++		}
++		value := clockSamples[0]
++		clockSamples = clockSamples[1:]
++		claimClockRead = true
++		return value
++	}
++
++	worker := NewWorker(
++		repo,
++		processor,
++		"tenant",
++		"owner",
++		cfg,
++		slog.New(slog.NewTextHandler(io.Discard, nil)),
++	)
++	if got := worker.now(); got != startedAt {
++		t.Fatalf("worker clock = %v, want exact injected time %v", got, startedAt)
++	}
++	clockSamples = []time.Time{startedAt, finishedAt}
++	claimClockRead = false
++	if err := worker.Run(ctx); err != nil {
++		t.Fatalf("Run: %v", err)
++	}
++	if len(clockSamples) != 0 {
++		t.Fatalf("unused clock samples = %d", len(clockSamples))
++	}
++	var record map[string]any
++	for _, candidate := range telemetryRecords(t, telemetry.String()) {
++		if candidate["JobsDead"] == float64(1) {
++			record = candidate
++			break
++		}
++	}
++	if record == nil {
++		t.Fatalf("terminal telemetry missing: %s", telemetry.String())
++	}
++	if record["TotalProcessingDurationMs"] != float64(250) {
++		t.Fatalf("terminal duration record = %#v", record)
++	}
++}
++
+ func TestWorkerClaimErrorRetryPolicy(t *testing.T) {
+ 	t.Run("contention retries three times then polls", func(t *testing.T) {
+ 		calls := make(chan struct{}, maxImmediateClaimRetries+2)
+@@ -1074,3 +1164,352 @@ func TestWorkerLogsExcludePayloadAndScope(t *testing.T) {
+ 		}
+ 	}
+ }
++
++func TestWorkerEmitsDeterministicLifecycleDurations(t *testing.T) {
++	base := time.Date(2026, 7, 27, 3, 0, 0, 0, time.UTC)
++	times := []time.Time{
++		base.Add(30 * time.Millisecond),
++		base.Add(40 * time.Millisecond),
++		base.Add(100 * time.Millisecond),
++		base.Add(110 * time.Millisecond),
++		base.Add(160 * time.Millisecond),
++		base.Add(200 * time.Millisecond),
++	}
++	nextTime := func() time.Time {
++		if len(times) == 0 {
++			t.Fatal("worker requested an unexpected clock sample")
++		}
++		value := times[0]
++		times = times[1:]
++		return value
++	}
++	job := &Job{
++		ID:           "PRIVATE-JOB-MARKER",
++		TenantID:     "PRIVATE-TENANT-MARKER",
++		LeaseOwner:   "worker-a",
++		AttemptCount: 1,
++		CreatedAt:    base,
++	}
++	repo := &fakeRepo{
++		applyPlan: func(context.Context, LeaseRef, AtomicPlan) (ApplyResult, error) {
++			return ApplyResult{WarningCount: 2}, nil
++		},
++	}
++	processor := fakeProcessor{
++		plan: func(_ context.Context, got *Job, revision int) (AtomicPlan, error) {
++			return FinalizePlan(AtomicPlan{
++				JobID:              got.ID,
++				TenantID:           got.TenantID,
++				Revision:           revision,
++				AttemptGeneration:  got.AttemptCount,
++				WarningCount:       2,
++				TruncatedFactCount: 7,
++				ZeroFact:           true,
++			})
++		},
++	}
++	var output bytes.Buffer
++	telemetry := NewEMFTelemetry("prod", &output, func() time.Time { return base })
++	cfg := DefaultWorkerConfig()
++	cfg.Now = nextTime
++	cfg.Telemetry = telemetry
++
++	NewWorker(
++		repo,
++		processor,
++		job.TenantID,
++		job.LeaseOwner,
++		cfg,
++		slog.New(slog.NewTextHandler(io.Discard, nil)),
++	).process(context.Background(), job)
++
++	if len(times) != 0 {
++		t.Fatalf("unused clock samples = %d", len(times))
++	}
++	record := telemetryRecords(t, output.String())[0]
++	if record["QueueWaitMs"] != float64(30) ||
++		record["PlanDurationMs"] != float64(60) ||
++		record["ApplyDurationMs"] != float64(50) ||
++		record["TotalProcessingDurationMs"] != float64(170) {
++		t.Fatalf("duration record = %#v", record)
++	}
++	if strings.Contains(output.String(), "PRIVATE-JOB-MARKER") ||
++		strings.Contains(output.String(), "PRIVATE-TENANT-MARKER") {
++		t.Fatalf("EMF leaked identifiers: %s", output.String())
++	}
++}
++
++func TestWorkerEmitsRetryAndDeadPlanningResults(t *testing.T) {
++	base := time.Date(2026, 7, 27, 3, 30, 0, 0, time.UTC)
++	for _, tc := range []struct {
++		name         string
++		attempt      int
++		processorErr error
++		metric       string
++		resultClass  string
++		errorClass   string
++		retryCount   float64
++	}{
++		{
++			name:         "retry",
++			attempt:      1,
++			processorErr: NewOutcomeError("mantle_transient"),
++			metric:       "JobsRetrying",
++			resultClass:  "retrying",
++			errorClass:   "mantle_transient",
++			retryCount:   1,
++		},
++		{
++			name:         "dead",
++			attempt:      2,
++			processorErr: NewOutcomeError("proxy_validation_permanent"),
++			metric:       "JobsDead",
++			resultClass:  "dead",
++			errorClass:   "proxy_validation_permanent",
++			retryCount:   1,
++		},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			times := []time.Time{
++				base.Add(100 * time.Millisecond),
++				base.Add(110 * time.Millisecond),
++				base.Add(150 * time.Millisecond),
++				base.Add(180 * time.Millisecond),
++			}
++			nextTime := func() time.Time {
++				value := times[0]
++				times = times[1:]
++				return value
++			}
++			job := &Job{
++				ID:           "PRIVATE-JOB-MARKER",
++				TenantID:     "PRIVATE-TENANT-MARKER",
++				LeaseOwner:   "worker-a",
++				AttemptCount: tc.attempt,
++				CreatedAt:    base,
++				UpdatedAt:    base.Add(25 * time.Millisecond),
++			}
++			repo := &fakeRepo{}
++			processor := fakeProcessor{
++				plan: func(context.Context, *Job, int) (AtomicPlan, error) {
++					return AtomicPlan{}, tc.processorErr
++				},
++			}
++			var output bytes.Buffer
++			cfg := DefaultWorkerConfig()
++			cfg.Now = nextTime
++			cfg.Telemetry = NewEMFTelemetry("prod", &output, func() time.Time { return base })
++
++			NewWorker(
++				repo,
++				processor,
++				job.TenantID,
++				job.LeaseOwner,
++				cfg,
++				slog.New(slog.NewTextHandler(io.Discard, nil)),
++			).process(context.Background(), job)
++
++			if len(times) != 0 {
++				t.Fatalf("unused clock samples = %d", len(times))
++			}
++			record := telemetryRecords(t, output.String())[0]
++			if record[tc.metric] != float64(1) ||
++				record["result_class"] != tc.resultClass ||
++				record["error_class"] != tc.errorClass ||
++				record["PlanDurationMs"] != float64(40) ||
++				record["ApplyDurationMs"] != float64(0) ||
++				record["TotalProcessingDurationMs"] != float64(80) ||
++				record["RetryCount"] != tc.retryCount {
++				t.Fatalf("result record = %#v", record)
++			}
++			if tc.attempt == 1 && record["QueueWaitMs"] != float64(25) {
++				t.Fatalf("database-clock queue wait = %#v", record)
++			}
++			if tc.attempt > 1 {
++				if _, exists := record["QueueWaitMs"]; exists {
++					t.Fatalf("later attempt emitted queue wait: %#v", record)
++				}
++			}
++		})
++	}
++}
++
++func TestWorkerAccumulatesApplyAndReplanningDurations(t *testing.T) {
++	base := time.Date(2026, 7, 27, 4, 0, 0, 0, time.UTC)
++	times := []time.Time{
++		base.Add(100 * time.Millisecond),
++		base.Add(110 * time.Millisecond),
++		base.Add(150 * time.Millisecond),
++		base.Add(160 * time.Millisecond),
++		base.Add(190 * time.Millisecond),
++		base.Add(250 * time.Millisecond),
++		base.Add(260 * time.Millisecond),
++		base.Add(300 * time.Millisecond),
++		base.Add(330 * time.Millisecond),
++	}
++	nextTime := func() time.Time {
++		value := times[0]
++		times = times[1:]
++		return value
++	}
++	job := &Job{
++		ID:           "PRIVATE-JOB-MARKER",
++		TenantID:     "PRIVATE-TENANT-MARKER",
++		LeaseOwner:   "worker-a",
++		AttemptCount: 1,
++		CreatedAt:    base,
++		UpdatedAt:    base.Add(25 * time.Millisecond),
++	}
++	revision := 0
++	applyCalls := 0
++	repo := &fakeRepo{
++		nextPlan: func(context.Context, LeaseRef) (int, error) {
++			revision++
++			return revision, nil
++		},
++		applyPlan: func(context.Context, LeaseRef, AtomicPlan) (ApplyResult, error) {
++			applyCalls++
++			if applyCalls == 1 {
++				return ApplyResult{}, ErrPlanConflict
++			}
++			return ApplyResult{}, nil
++		},
++	}
++	processor := fakeProcessor{
++		plan: func(_ context.Context, got *Job, revision int) (AtomicPlan, error) {
++			return FinalizePlan(AtomicPlan{
++				JobID:             got.ID,
++				TenantID:          got.TenantID,
++				Revision:          revision,
++				AttemptGeneration: got.AttemptCount,
++			})
++		},
++	}
++	var output bytes.Buffer
++	cfg := DefaultWorkerConfig()
++	cfg.Now = nextTime
++	cfg.Telemetry = NewEMFTelemetry("prod", &output, func() time.Time { return base })
++
++	NewWorker(
++		repo,
++		processor,
++		job.TenantID,
++		job.LeaseOwner,
++		cfg,
++		slog.New(slog.NewTextHandler(io.Discard, nil)),
++	).process(context.Background(), job)
++
++	if len(times) != 0 || applyCalls != 2 {
++		t.Fatalf("unused clock samples = %d apply calls = %d", len(times), applyCalls)
++	}
++	record := telemetryRecords(t, output.String())[0]
++	if record["JobsSucceeded"] != float64(1) ||
++		record["QueueWaitMs"] != float64(25) ||
++		record["PlanDurationMs"] != float64(100) ||
++		record["ApplyDurationMs"] != float64(70) ||
++		record["TotalProcessingDurationMs"] != float64(230) {
++		t.Fatalf("replanning duration record = %#v", record)
++	}
++}
++
++func TestWorkerEmitsApplyFailureDuration(t *testing.T) {
++	base := time.Date(2026, 7, 27, 4, 30, 0, 0, time.UTC)
++	times := []time.Time{
++		base.Add(100 * time.Millisecond),
++		base.Add(110 * time.Millisecond),
++		base.Add(150 * time.Millisecond),
++		base.Add(160 * time.Millisecond),
++		base.Add(190 * time.Millisecond),
++		base.Add(220 * time.Millisecond),
++	}
++	nextTime := func() time.Time {
++		value := times[0]
++		times = times[1:]
++		return value
++	}
++	job := &Job{
++		ID:           "PRIVATE-JOB-MARKER",
++		TenantID:     "PRIVATE-TENANT-MARKER",
++		LeaseOwner:   "worker-a",
++		AttemptCount: 1,
++		CreatedAt:    base,
++		UpdatedAt:    base.Add(25 * time.Millisecond),
++	}
++	repo := &fakeRepo{
++		applyPlan: func(context.Context, LeaseRef, AtomicPlan) (ApplyResult, error) {
++			return ApplyResult{}, NewOutcomeError("mantle_transient")
++		},
++	}
++	processor := fakeProcessor{
++		plan: func(_ context.Context, got *Job, revision int) (AtomicPlan, error) {
++			return FinalizePlan(AtomicPlan{
++				JobID:             got.ID,
++				TenantID:          got.TenantID,
++				Revision:          revision,
++				AttemptGeneration: got.AttemptCount,
++			})
++		},
++	}
++	var output bytes.Buffer
++	cfg := DefaultWorkerConfig()
++	cfg.Now = nextTime
++	cfg.Telemetry = NewEMFTelemetry("prod", &output, func() time.Time { return base })
++
++	NewWorker(
++		repo,
++		processor,
++		job.TenantID,
++		job.LeaseOwner,
++		cfg,
++		slog.New(slog.NewTextHandler(io.Discard, nil)),
++	).process(context.Background(), job)
++
++	if len(times) != 0 {
++		t.Fatalf("unused clock samples = %d", len(times))
++	}
++	record := telemetryRecords(t, output.String())[0]
++	if record["JobsRetrying"] != float64(1) ||
++		record["QueueWaitMs"] != float64(25) ||
++		record["PlanDurationMs"] != float64(40) ||
++		record["ApplyDurationMs"] != float64(30) ||
++		record["TotalProcessingDurationMs"] != float64(120) {
++		t.Fatalf("apply failure duration record = %#v", record)
++	}
++}
++
++func TestWorkerSamplesDatabaseClockQueueAge(t *testing.T) {
++	var output bytes.Buffer
++	samples := 0
++	repo := &fakeRepo{
++		oldestAge: func(_ context.Context, tenantID string) (time.Duration, bool, error) {
++			if tenantID != "PRIVATE-TENANT-MARKER" {
++				t.Fatalf("queue age tenant = %q", tenantID)
++			}
++			samples++
++			if samples == 2 {
++				return 0, false, nil
++			}
++			return 11 * time.Minute, true, nil
++		},
++	}
++	cfg := DefaultWorkerConfig()
++	cfg.Telemetry = NewEMFTelemetry("prod", &output, nil)
++	worker := NewWorker(
++		repo,
++		fakeProcessor{},
++		"PRIVATE-TENANT-MARKER",
++		"worker-a",
++		cfg,
++		slog.New(slog.NewTextHandler(io.Discard, nil)),
++	)
++
++	worker.sampleOldestQueuedAge(context.Background())
++	worker.sampleOldestQueuedAge(context.Background())
++
++	records := telemetryRecords(t, output.String())
++	if records[0]["OldestQueuedAgeMs"] != float64(660000) ||
++		records[1]["OldestQueuedAgeMs"] != float64(0) ||
++		strings.Contains(output.String(), "PRIVATE-TENANT-MARKER") {
++		t.Fatalf("queue age record = %s", output.String())
++	}
++}
+diff --git a/server/internal/repository/postgres/ingest_job.go b/server/internal/repository/postgres/ingest_job.go
+index 76d3e7b..16f3a21 100644
+--- a/server/internal/repository/postgres/ingest_job.go
++++ b/server/internal/repository/postgres/ingest_job.go
+@@ -125,6 +125,7 @@ func (r *IngestJobRepo) Enqueue(ctx context.Context, input ingestqueue.EnqueueIn
+ 		runtimeFinalizationState(input.RuntimeOperationID),
+ 	)
+ 	job, err := scanIngestJob(row)
++	newlyEnqueued := err == nil
+ 	if errors.Is(err, sql.ErrNoRows) {
+ 		job, err = scanIngestJob(tx.QueryRowContext(ctx, `
+ 			SELECT `+ingestJobColumns+`
+@@ -137,6 +138,7 @@ func (r *IngestJobRepo) Enqueue(ctx context.Context, input ingestqueue.EnqueueIn
+ 	if err != nil {
+ 		return nil, fmt.Errorf("enqueue ingest job: %w", err)
+ 	}
++	job.NewlyEnqueued = newlyEnqueued
+ 	commitErr := tx.Commit()
+ 	if commitErr == nil && r.enqueueHook != nil {
+ 		commitErr = r.enqueueHook("after_commit")
+@@ -161,6 +163,7 @@ func (r *IngestJobRepo) resolveAmbiguousEnqueue(
+ 		input.IdempotencyKey,
+ 	))
+ 	if err == nil {
++		job.NewlyEnqueued = job.ID == input.ID
+ 		return job, nil
+ 	}
+ 	if errors.Is(err, sql.ErrNoRows) {
+@@ -192,6 +195,30 @@ func (r *IngestJobRepo) Get(ctx context.Context, tenantID, jobID string) (*inges
+ 	return job, nil
+ }
+ 
++func (r *IngestJobRepo) OldestQueuedAge(
++	ctx context.Context,
++	tenantID string,
++) (time.Duration, bool, error) {
++	var seconds sql.NullFloat64
++	err := r.db.QueryRowContext(ctx, `
++		SELECT EXTRACT(EPOCH FROM (statement_timestamp() - MIN(created_at)))
++		FROM ingest_jobs
++		WHERE tenant_id = $1 AND state IN ('queued', 'retry_wait')`,
++		tenantID,
++	).Scan(&seconds)
++	if err != nil {
++		return 0, false, fmt.Errorf("select oldest queued ingest age: %w", err)
++	}
++	if !seconds.Valid {
++		return 0, false, nil
++	}
++	age := time.Duration(seconds.Float64 * float64(time.Second))
++	if age < 0 {
++		age = 0
++	}
++	return age, true, nil
++}
++
+ func (r *IngestJobRepo) Claim(
+ 	ctx context.Context,
+ 	tenantID string,
+@@ -329,6 +356,7 @@ func (r *IngestJobRepo) Claim(
+ 			if err != nil {
+ 				return nil, fmt.Errorf("expire exhausted ingest job: %w", err)
+ 			}
++			job.TerminalTransition = true
+ 			if err := tx.Commit(); err != nil {
+ 				return nil, fmt.Errorf("commit exhausted ingest claim: %w", err)
+ 			}
+diff --git a/server/internal/repository/postgres/ingest_job_integration_test.go b/server/internal/repository/postgres/ingest_job_integration_test.go
+index adb3ad4..4dcad05 100644
+--- a/server/internal/repository/postgres/ingest_job_integration_test.go
++++ b/server/internal/repository/postgres/ingest_job_integration_test.go
+@@ -242,6 +242,40 @@ func TestIngestJobEnqueueUniqueRaceAndTenantIsolation(t *testing.T) {
+ 	}
+ }
+ 
++func TestIngestJobOldestQueuedAgeUsesDatabaseClock(t *testing.T) {
++	db := ingestTestDB(t)
++	repo := NewIngestJobRepo(db)
++	oldest := enqueueJob(t, repo, enqueueInput(
++		"tenant-a",
++		"session-a",
++		"edededededededededededededededededededededededededededededededed",
++	))
++	second := enqueueInput(
++		"tenant-a",
++		"session-b",
++		"efefefefefefefefefefefefefefefefefefefefefefefefefefefefefefefef",
++	)
++	second.ID = "00000000-0000-4000-8000-000000000002"
++	enqueueJob(t, repo, second)
++	if _, err := db.Exec(`
++		UPDATE ingest_jobs
++		SET created_at = statement_timestamp() - interval '11 minutes'
++		WHERE tenant_id = $1 AND job_id = $2`,
++		oldest.TenantID,
++		oldest.ID,
++	); err != nil {
++		t.Fatal(err)
++	}
++
++	age, ok, err := repo.OldestQueuedAge(context.Background(), "tenant-a")
++	if err != nil {
++		t.Fatal(err)
++	}
++	if !ok || age < 11*time.Minute || age > 11*time.Minute+5*time.Second {
++		t.Fatalf("oldest queued age = %v present=%v", age, ok)
++	}
++}
++
+ func TestIngestJobEnqueuePersistsOriginalRuntimeReservation(t *testing.T) {
+ 	db := ingestTestDB(t)
+ 	repo := NewIngestJobRepo(db)
+@@ -766,7 +800,8 @@ func TestIngestJobExpiredFifthAttemptDiesAndUnblocks(t *testing.T) {
+ 	}
+ 	if claimed == nil || claimed.ID != head.ID ||
+ 		claimed.State != ingestqueue.StateDead ||
+-		claimed.ErrorClass != "attempts_exhausted" {
++		claimed.ErrorClass != "attempts_exhausted" ||
++		!claimed.TerminalTransition {
+ 		t.Fatalf("bounded exhausted-head claim = %+v, want terminal head", claimed)
+ 	}
+ 	var state, errorClass string
+@@ -827,7 +862,8 @@ func TestIngestJobClaimReapsAtMostOneExhaustedHead(t *testing.T) {
+ 			t.Fatal(err)
+ 		}
+ 		if job == nil || job.State != ingestqueue.StateDead ||
+-			job.ErrorClass != "attempts_exhausted" {
++			job.ErrorClass != "attempts_exhausted" ||
++			!job.TerminalTransition {
+ 			t.Fatalf("reap %d returned job %+v, want terminal event", wantDead, job)
+ 		}
+ 		var dead int
+diff --git a/server/internal/service/durable_ingest.go b/server/internal/service/durable_ingest.go
+index d38bb8a..6316855 100644
+--- a/server/internal/service/durable_ingest.go
++++ b/server/internal/service/durable_ingest.go
+@@ -238,6 +238,7 @@ func (p *DurableProcessor) Plan(
+ 		return ingestqueue.AtomicPlan{}, fmt.Errorf("durable extraction: %w", err)
+ 	}
+ 	facts := phase1.Facts
++	plan.ZeroFact = len(facts) == 0
+ 	if len(facts) > ingestqueue.MaxFacts {
+ 		plan.TruncatedFactCount = len(facts) - ingestqueue.MaxFacts
+ 		facts = facts[:ingestqueue.MaxFacts]
+@@ -371,7 +372,6 @@ func (p *DurableProcessor) PostCommit(
+ 		}
+ 	}
+ 	p.logger.Info("durable ingest post-commit effects",
+-		"job_id", job.ID,
+ 		"metering_outcome", meteringOutcome,
+ 		"webhook_outcome", webhookOutcome,
+ 		"mutation_count", result.MutationCount,
+@@ -434,7 +434,6 @@ func (p *DurableProcessor) FinalizeTerminal(
+ 	}
+ 	p.logger.Info(
+ 		"durable ingest terminal effects",
+-		"job_id", job.ID,
+ 		"state", job.State,
+ 		"runtime_usage_outcome", "handed_off",
+ 	)
+diff --git a/server/internal/service/durable_ingest_test.go b/server/internal/service/durable_ingest_test.go
+index 160941b..19a30c9 100644
+--- a/server/internal/service/durable_ingest_test.go
++++ b/server/internal/service/durable_ingest_test.go
+@@ -139,6 +139,41 @@ func TestDurableProcessorRetainsFirstFiftyFactsWithWarning(t *testing.T) {
+ 	}
+ }
+ 
++func TestDurableProcessorMarksZeroFactPlans(t *testing.T) {
++	llmServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		w.Header().Set("Content-Type", "application/json")
++		_ = json.NewEncoder(w).Encode(map[string]any{
++			"choices": []map[string]any{
++				{"message": map[string]any{
++					"content": `{"facts":[],"message_tags":[[]]}`,
++				}},
++			},
++		})
++	}))
++	defer llmServer.Close()
++	llmClient := llm.New(llm.Config{
++		APIKey:  "test-key",
++		BaseURL: llmServer.URL,
++		Model:   "test-model",
++	})
++	processor := NewDurableProcessor(
++		NewIngestService(&memoryRepoMock{}, llmClient, nil, "auto-model", ModeSmart),
++		nil,
++		nil,
++		"",
++		nil,
++		nil,
++	)
++
++	plan, err := processor.Plan(context.Background(), durableTestJob(t, ModeSmart), 1)
++	if err != nil {
++		t.Fatalf("Plan: %v", err)
++	}
++	if !plan.ZeroFact || len(plan.Actions) != 0 {
++		t.Fatalf("zero-fact plan = %+v", plan)
++	}
++}
++
+ func TestDurableProcessorMaterializesEmbeddingInPlan(t *testing.T) {
+ 	embedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+ 		w.Header().Set("Content-Type", "application/json")
+diff --git a/server/internal/service/ingest.go b/server/internal/service/ingest.go
+index 0cef98d..76ea4de 100644
+--- a/server/internal/service/ingest.go
++++ b/server/internal/service/ingest.go
+@@ -661,7 +661,7 @@ func normalizeParsedFacts(raw string, parsed []ExtractedFact) []ExtractedFact {
+ 	var flat flattenedFact
+ 	if err := json.Unmarshal([]byte(cleaned), &flat); err == nil {
+ 		if t := strings.TrimSpace(flat.Text); t != "" {
+-			slog.Warn("normalizeParsedFacts: recovered fact from flattened-fact corruption", "text", t)
++			slog.Warn("normalizeParsedFacts: recovered fact from flattened-fact corruption")
+ 			out = append(out, ExtractedFact{Text: t, Tags: flat.Tags, FactType: flat.FactType, RouteTargets: flat.RouteTargets})
+ 		}
+ 	}
+diff --git a/server/internal/service/ingest_test.go b/server/internal/service/ingest_test.go
+index b8f8e1f..f5e59ff 100644
+--- a/server/internal/service/ingest_test.go
++++ b/server/internal/service/ingest_test.go
+@@ -1,11 +1,13 @@
+ package service
+ 
+ import (
++	"bytes"
+ 	"context"
+ 	"encoding/json"
+ 	"errors"
+ 	"fmt"
+ 	"io"
++	"log/slog"
+ 	"net/http"
+ 	"net/http/httptest"
+ 	"reflect"
+@@ -3073,6 +3075,25 @@ func TestExtractFactsFlattenedFactWithText(t *testing.T) {
+ 	}
+ }
+ 
++func TestNormalizeParsedFactsDoesNotLogRecoveredFact(t *testing.T) {
++	const marker = "PRIVATE-RECOVERED-FACT-MARKER"
++	var output bytes.Buffer
++	previous := slog.Default()
++	slog.SetDefault(slog.New(slog.NewJSONHandler(&output, nil)))
++	t.Cleanup(func() { slog.SetDefault(previous) })
++
++	facts := normalizeParsedFacts(
++		`{"facts":":[{","text":"`+marker+`","tags":["private"]}`,
++		nil,
++	)
++	if len(facts) != 1 || facts[0].Text != marker {
++		t.Fatalf("recovered facts = %#v", facts)
++	}
++	if strings.Contains(output.String(), marker) {
++		t.Fatalf("recovered fact leaked to logs: %s", output.String())
++	}
++}
++
+ func TestExtractPhase1FlattenedFactWithText(t *testing.T) {
+ 	t.Parallel()
+ 

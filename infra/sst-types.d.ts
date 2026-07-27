@@ -247,6 +247,7 @@ declare namespace aws {
       statistic?: Input<string>;
       period?: Input<number>;
       evaluationPeriods: Input<number>;
+      datapointsToAlarm?: Input<number>;
       threshold?: Input<number>;
       comparisonOperator: Input<string>;
       treatMissingData?: Input<string>;
@@ -256,6 +257,13 @@ declare namespace aws {
     class MetricAlarm {
       constructor(name: string, args: MetricAlarmArgs);
       readonly arn: Output<string>;
+    }
+    interface DashboardArgs {
+      dashboardName?: Input<string>;
+      dashboardBody: Input<string>;
+    }
+    class Dashboard {
+      constructor(name: string, args: DashboardArgs);
     }
   }
 

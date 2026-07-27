@@ -112,6 +112,19 @@ synthesis fails when it is absent so production alarms cannot be deployed
 without an IaC-managed sink. Preview and development stages do not create the
 alerting stack.
 
+Production synthesis also requires the out-of-band Bedrock Mantle Project ID.
+The `mem9-on-aws-prod-ingest` dashboard separates documented Project-scoped
+Mantle inference/token/client-error metrics from durable application outcomes,
+queue age, phase durations, retries, and warnings. It does not present
+application planning time as provider latency. Lifecycle EMF is a post-commit,
+best-effort operational signal; Aurora job rows and the tenant-scoped status API
+remain authoritative.
+
+Before the first deployment from this revision, run
+`scripts/deploy-github-role.sh` to grant the out-of-band GitHub Actions role the
+CloudWatch dashboard APIs. Merging the PR or running SST does not update that
+role.
+
 All production alarms target one SNS topic. Delivery failures are separated by
 the AWS boundary at which they occurred:
 

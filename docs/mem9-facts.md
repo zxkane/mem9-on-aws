@@ -187,6 +187,13 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
   one enabled rollout and runs the complete bootstrap afterward. ECS injects
   the stable tenant identity. The old untracked transcript goroutine is no
   longer used when durable routing is enabled.
+- Patch `docker/mnemo-server/patches/0006-durable-ingest-telemetry.patch` emits
+  content-free CloudWatch EMF for committed accepted, retry, success, and dead
+  transitions plus queue age and phase durations. It uses only stage and
+  bounded result/error dimensions; plan duration measures application work and
+  is not a Mantle/provider latency. Lifecycle EMF is post-commit best effort,
+  not an accounting ledger; Aurora and the tenant-scoped status API remain
+  authoritative if a crash or log-write failure omits a metric.
 - Startup and bootstrap apply the repeatable `ingest_jobs` migration inside the
   same operator-owned Aurora database. Canonical payloads and plans are not sent
   to logs, metrics, or another service. Canonical envelopes are rejected above

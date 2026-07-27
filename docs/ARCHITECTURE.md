@@ -262,6 +262,13 @@ reclaimable finalization state until the existing runtime-usage outbox has
 accepted the idempotent commit or release handoff. Other post-commit metering
 and webhooks are best effort and cannot change a committed job outcome.
 
+Durable-ingest lifecycle EMF is also emitted after its database transition and
+is best-effort. It is an operational signal rather than an accounting ledger:
+a process crash or log-write failure can omit a committed transition metric.
+Aurora `ingest_jobs` and the tenant-scoped status API are the authoritative job
+state. The once-per-minute queue-age heartbeat treats missing data as breaching
+so loss of the worker or EMF path remains alarmable.
+
 Memory rows and embeddings are durable in Aurora. The Fargate task uses `/tmp`
 only for mem9's batch-import implementation; normal add, search, and CRUD paths
 do not require persistent task storage.
@@ -418,6 +425,7 @@ to the GitHub Actions deploy role.
 | Embedding | Local qwen3 sidecar, 1024 dimensions | `docker/qwen3-embed/` |
 | Smart-ingest LLM | Local proxy to Bedrock Mantle | `docker/llm-proxy/` |
 | Mantle attribution | `OpenAI-Project` added by `llm-proxy` when a project is configured | `docker/llm-proxy/server.mjs` |
+| Ingest observability | Content-free EMF metrics, CloudWatch dashboard, and production alarms | `docker/mnemo-server/patches/0006-durable-ingest-telemetry.patch`, `infra/observability.ts` |
 | MCP surface | AgentCore Gateway Lambda target | `infra/gateway.ts` |
 | Private service lookup | AWS Cloud Map | `infra/ecs.ts` |
 | Inbound auth | Cognito M2M plus OAuth2 PKCE facade | `infra/cognito.ts`, `infra/oauth-facade.ts` |
@@ -445,6 +453,12 @@ to the GitHub Actions deploy role.
 - ECR scan-on-push is a guarded out-of-band registry singleton, separate from
   the retained repository stack.
 - Durable transcript ingest uses immutable plans and atomic PostgreSQL apply.
+- Durable ingest emits job lifecycle, queue-age, phase-duration, retry, warning,
+  truncation, and zero-fact metrics in `mem9-on-aws/DurableIngest`. Metric
+  dimensions are limited to stage and bounded result/error classes.
+- The production ingest dashboard keeps application metrics separate from
+  documented `AWS/BedrockMantle` Project metrics. Planning duration is
+  application elapsed time; no Mantle latency metric is synthesized.
 
 ## Planned changes
 
@@ -453,7 +467,6 @@ The open reliability program covers future work in these areas:
 - Release image tag selection and read-only ECS actual-state reconciliation.
 - Mandatory alert delivery with separate transport and execution failure queues.
 - Safe preview-stage reconciliation and a separately reviewed one-time cleanup.
-- Job-level durable-ingest telemetry.
 - A post-deployment production reliability verification exercise.
 
 The current async `messages[]` path is a durable queue and atomic job processor.

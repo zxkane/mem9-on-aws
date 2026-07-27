@@ -194,5 +194,6 @@ go test -count=1 \
   ./internal/repository/postgres \
   ./internal/ingestqueue \
   ./internal/handler \
+  ./internal/service \
   ./internal/config \
   ./cmd/mnemo-server

@@ -1,5 +1,7 @@
-// Observability: CloudWatch metric filters + alarms + Slack alerting for the
-// mnemo-server container (issues #26 and #47). Only created for the `prod`
+import { ECR_REGION } from "./ecr";
+
+// Observability: CloudWatch metrics, dashboard, alarms, and Slack alerting for
+// the mnemo-server container (issues #26, #47, and #55). Only created for `prod`
 // stage; PR-preview crash-loops must not page.
 //
 // Production requires an IaC-managed notification sink. The current sink is
@@ -10,8 +12,6 @@
 //   1. recall_zero_hit — `confidence recall search` with `returned = 0`
 //   2. recall_total   — `confidence recall search` (all)
 //   3. ingest_llm_auth_failure — `extraction LLM call failed` containing `401`
-//   4. ingest_dropped — `async ingest failed`
-//
 // Alarms:
 //   - RecallZeroHitRate: metric math `zero/total > 0.7` over 1h
 //   - IngestAuthFailure: ≥3 ingest_llm_auth_failure in 15 min
@@ -33,16 +33,24 @@ export interface ObservabilityInputs {
   // threads a Pulumi dependency edge through the log group's creator.
   logGroupName: Output<string>;
   slackWebhookUrl?: Input<string>;
+  mantleProject?: string;
 }
 
+export const DURABLE_FAILURE_RATIO_EXPRESSION =
+  "IF(terminal >= 20, failures / terminal, 0)";
+
 export function observability(inputs: ObservabilityInputs) {
-  const { stage, logGroupName, slackWebhookUrl } = inputs;
+  const { stage, logGroupName, slackWebhookUrl, mantleProject } = inputs;
   if (stage !== "prod") return;
   if (!slackWebhookUrl) {
     throw new Error("SLACK_WEBHOOK_URL is required for production alert delivery");
   }
+  if (!mantleProject) {
+    throw new Error("MEM9_BEDROCK_PROJECT is required for production observability");
+  }
 
   const namespace = "mem9-on-aws";
+  const durableNamespace = "mem9-on-aws/DurableIngest";
   const failureQueueRetentionSeconds = 14 * 24 * 60 * 60;
 
   // ─── Metric filters ──────────────────────────────────────────────────────
@@ -82,20 +90,6 @@ export function observability(inputs: ObservabilityInputs) {
       pattern: '{ $.msg = "extraction LLM call failed" && $.err = "*401*" }',
       metricTransformation: {
         name: "ingest_llm_auth_failure",
-        namespace,
-        value: "1",
-        defaultValue: "0",
-      },
-    },
-  );
-
-  new aws.cloudwatch.LogMetricFilter(
-    "IngestDroppedFilter",
-    {
-      logGroupName,
-      pattern: '{ $.msg = "async ingest failed" }',
-      metricTransformation: {
-        name: "ingest_dropped",
         namespace,
         value: "1",
         defaultValue: "0",
@@ -189,6 +183,168 @@ export function observability(inputs: ObservabilityInputs) {
     },
   });
 
+  // ─── Dashboard ───────────────────────────────────────────────────────────
+
+  const providerMetric = (name: string, stat = "Sum") => [
+    "AWS/BedrockMantle",
+    name,
+    "Project",
+    mantleProject,
+    { stat },
+  ];
+  const durableMetric = (
+    name: string,
+    resultClass?: "accepted" | "succeeded" | "retrying" | "dead",
+    stat = "Sum",
+  ) => [
+    durableNamespace,
+    name,
+    "stage",
+    stage,
+    ...(resultClass ? ["result_class", resultClass] : []),
+    { stat },
+  ];
+  const jobsRetryingSearch =
+    `SEARCH('{${durableNamespace},stage,result_class,error_class} ` +
+    `MetricName="JobsRetrying" stage="${stage}"', 'Sum', 300)`;
+
+  new aws.cloudwatch.Dashboard("DurableIngestDashboard", {
+    dashboardName: `mem9-on-aws-${stage}-ingest`,
+    dashboardBody: $jsonStringify({
+      widgets: [
+        {
+          type: "text",
+          x: 0,
+          y: 0,
+          width: 24,
+          height: 1,
+          properties: { markdown: "# Bedrock Mantle provider" },
+        },
+        {
+          type: "metric",
+          x: 0,
+          y: 1,
+          width: 12,
+          height: 6,
+          properties: {
+            title: "Inference outcomes",
+            region: ECR_REGION,
+            period: 300,
+            metrics: [
+              providerMetric("Inferences"),
+              providerMetric("InferenceClientErrors"),
+            ],
+          },
+        },
+        {
+          type: "metric",
+          x: 12,
+          y: 1,
+          width: 12,
+          height: 6,
+          properties: {
+            title: "Token volume",
+            region: ECR_REGION,
+            period: 300,
+            metrics: [
+              providerMetric("TotalInputTokens"),
+              providerMetric("TotalOutputTokens"),
+            ],
+          },
+        },
+        {
+          type: "text",
+          x: 0,
+          y: 7,
+          width: 24,
+          height: 1,
+          properties: { markdown: "# Durable ingest application" },
+        },
+        {
+          type: "metric",
+          x: 0,
+          y: 8,
+          width: 12,
+          height: 6,
+          properties: {
+            title: "Job outcomes",
+            region: ECR_REGION,
+            period: 300,
+            metrics: [
+              durableMetric("JobsAccepted", "accepted"),
+              durableMetric("JobsSucceeded", "succeeded"),
+              durableMetric("JobsDead"),
+              [
+                {
+                  expression: jobsRetryingSearch,
+                  label: "Jobs retrying",
+                },
+              ],
+            ],
+          },
+        },
+        {
+          type: "metric",
+          x: 12,
+          y: 8,
+          width: 12,
+          height: 6,
+          properties: {
+            title: "Queue health",
+            region: ECR_REGION,
+            period: 300,
+            metrics: [
+              durableMetric("OldestQueuedAgeMs", undefined, "Maximum"),
+              durableMetric("QueueWaitMs", "succeeded", "Average"),
+              durableMetric("QueueWaitMs", "retrying", "Average"),
+              durableMetric("QueueWaitMs", "dead", "Average"),
+            ],
+          },
+        },
+        {
+          type: "metric",
+          x: 0,
+          y: 14,
+          width: 12,
+          height: 6,
+          properties: {
+            title: "Application phase duration",
+            region: ECR_REGION,
+            period: 300,
+            metrics: [
+              durableMetric("PlanDurationMs", "succeeded", "Average"),
+              durableMetric("ApplyDurationMs", "succeeded", "Average"),
+              durableMetric("TotalProcessingDurationMs", "succeeded", "Average"),
+            ],
+          },
+        },
+        {
+          type: "metric",
+          x: 12,
+          y: 14,
+          width: 12,
+          height: 6,
+          properties: {
+            title: "Retries and warnings",
+            region: ECR_REGION,
+            period: 300,
+            metrics: [
+              [
+                {
+                  expression: `SUM(${jobsRetryingSearch})`,
+                  label: "Retry transitions",
+                },
+              ],
+              durableMetric("Warnings"),
+              durableMetric("TruncatedFacts"),
+              durableMetric("ZeroFactSuccess"),
+            ],
+          },
+        },
+      ],
+    }),
+  });
+
   // ─── Alarms ──────────────────────────────────────────────────────────────
 
   new aws.cloudwatch.MetricAlarm("RecallZeroHitRateAlarm", {
@@ -241,6 +397,92 @@ export function observability(inputs: ObservabilityInputs) {
     period: 900,
     evaluationPeriods: 1,
     threshold: 3,
+    comparisonOperator: "GreaterThanOrEqualToThreshold",
+    treatMissingData: "notBreaching",
+    alarmActions,
+  });
+
+  new aws.cloudwatch.MetricAlarm("DurableIngestDeadJobAlarm", {
+    alarmDescription: "At least one durable ingest job reached dead state in 15 minutes.",
+    namespace: durableNamespace,
+    metricName: "JobsDead",
+    dimensions: { stage },
+    statistic: "Sum",
+    period: 900,
+    evaluationPeriods: 1,
+    threshold: 1,
+    comparisonOperator: "GreaterThanOrEqualToThreshold",
+    treatMissingData: "notBreaching",
+    alarmActions,
+  });
+
+  new aws.cloudwatch.MetricAlarm("DurableIngestOldestQueuedAgeAlarm", {
+    alarmDescription:
+      "The oldest durable ingest job remained queued for more than 10 minutes.",
+    namespace: durableNamespace,
+    metricName: "OldestQueuedAgeMs",
+    dimensions: { stage },
+    statistic: "Maximum",
+    period: 300,
+    evaluationPeriods: 2,
+    datapointsToAlarm: 2,
+    threshold: 600_000,
+    comparisonOperator: "GreaterThanThreshold",
+    // This sampler is a once-per-minute heartbeat. Missing data means the
+    // worker or EMF path is unhealthy, unlike sparse transition metrics.
+    treatMissingData: "breaching",
+    alarmActions,
+  });
+
+  new aws.cloudwatch.MetricAlarm("DurableIngestFailureRatioAlarm", {
+    alarmDescription:
+      "Deadline or Mantle transient failures are at least 10% of 20+ terminal jobs.",
+    metricQueries: [
+      {
+        id: "failures",
+        metric: {
+          metricName: "DeadlineTransientTerminalFailures",
+          namespace: durableNamespace,
+          stat: "Sum",
+          period: 900,
+          dimensions: { stage },
+        },
+        returnData: false,
+      },
+      {
+        id: "terminal",
+        metric: {
+          metricName: "JobsTerminated",
+          namespace: durableNamespace,
+          stat: "Sum",
+          period: 900,
+          dimensions: { stage },
+        },
+        returnData: false,
+      },
+      {
+        id: "rate",
+        expression: DURABLE_FAILURE_RATIO_EXPRESSION,
+        label: "Deadline/Transient Terminal Failure Ratio",
+        returnData: true,
+      },
+    ],
+    evaluationPeriods: 1,
+    threshold: 0.1,
+    comparisonOperator: "GreaterThanOrEqualToThreshold",
+    treatMissingData: "notBreaching",
+    alarmActions,
+  });
+
+  new aws.cloudwatch.MetricAlarm("MantleClientErrorAlarm", {
+    alarmDescription: "Bedrock Mantle reported a Project-scoped client error.",
+    namespace: "AWS/BedrockMantle",
+    metricName: "InferenceClientErrors",
+    dimensions: { Project: mantleProject },
+    statistic: "Sum",
+    period: 900,
+    evaluationPeriods: 1,
+    threshold: 1,
     comparisonOperator: "GreaterThanOrEqualToThreshold",
     treatMissingData: "notBreaching",
     alarmActions,

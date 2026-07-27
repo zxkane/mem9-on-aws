@@ -98,8 +98,9 @@ const LLM_MODEL = process.env.MEM9_LLM_MODEL || "zai.glm-5";
 // Bedrock Project id for Mantle cost attribution (the OpenAI-Project header the
 // proxy injects). Mantle does NOT support IAM-principal attribution, so this is
 // how GLM-5 spend is tagged. CI sets MEM9_BEDROCK_PROJECT from the out-of-band
-// Bedrock Project stack output; empty → the proxy omits the header (still works,
-// just untagged). See infra/cloudformation/bedrock-mantle-project.yaml.
+// Bedrock Project stack output. Non-production stages may omit it and run
+// untagged; production rejects an empty value below. See
+// infra/cloudformation/bedrock-mantle-project.yaml.
 const BEDROCK_PROJECT = process.env.MEM9_BEDROCK_PROJECT || "";
 
 export interface EcsOutputs {
@@ -125,6 +126,9 @@ export interface EcsOutputs {
  *   dependency so ECS waits for the DB resources.
  */
 export function ecs(dbOut: DbOutputs, identity: TenantIdentityOutputs): EcsOutputs {
+  if ($app.stage === "prod" && !BEDROCK_PROJECT) {
+    throw new Error("MEM9_BEDROCK_PROJECT is required for production observability");
+  }
   // GitHub exposes an unset repository secret as an empty string. Reject that
   // before registering any resources; sst.Secret accepts empty string values.
   const configuredSlackWebhook = process.env.SST_SECRET_SlackWebhookUrl;
@@ -346,6 +350,7 @@ export function ecs(dbOut: DbOutputs, identity: TenantIdentityOutputs): EcsOutpu
           // PostgreSQL apply. The image applies its repeatable migration before
           // the server starts, so CI can use one enabled rollout.
           MNEMO_DURABLE_INGEST_ENABLED: DURABLE_INGEST_ENABLED,
+          MNEMO_DURABLE_INGEST_METRIC_STAGE: $app.stage,
           // Bound prompt construction before the provider-boundary byte check.
           MNEMO_MAX_EXTRACTION_CONVERSATION_RUNES: String(MAX_EXTRACTION_CONVERSATION_RUNES),
         },
@@ -524,7 +529,12 @@ export function ecs(dbOut: DbOutputs, identity: TenantIdentityOutputs): EcsOutpu
       if (!group) throw new Error("mnemo-server awslogs-group not found in task definition");
       return group;
     });
-  observability({ stage: $app.stage, logGroupName: mnemoLogGroupName, slackWebhookUrl });
+  observability({
+    stage: $app.stage,
+    logGroupName: mnemoLogGroupName,
+    slackWebhookUrl,
+    mantleProject: BEDROCK_PROJECT,
+  });
 
   return {
     ssmPrefix: prefix,
