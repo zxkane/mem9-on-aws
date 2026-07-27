@@ -97,15 +97,17 @@ export function extractSamplerEventFromDockerLogs(input) {
     const event = bytes.subarray(start);
     if (event.includes(Buffer.from(`"${METRIC}"`))) events.push(event);
   }
-  if (events.length !== 1) {
-    fail(`expected exactly one ${METRIC} event, found ${events.length}`);
+  if (events.length === 0) {
+    fail(`expected at least one ${METRIC} event`);
   }
 
-  const event = events[0];
-  if (event.at(-1) !== 0x0a || event.at(-2) === 0x0d) {
-    fail("non-TTY Docker output must end with LF and no preceding CR");
+  for (const event of events) {
+    if (event.at(-1) !== 0x0a || event.at(-2) === 0x0d) {
+      fail("non-TTY Docker output must end with LF and no preceding CR");
+    }
+    validateSamplerEvent(event);
   }
-  return event;
+  return events[0];
 }
 
 function main() {

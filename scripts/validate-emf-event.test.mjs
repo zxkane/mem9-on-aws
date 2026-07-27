@@ -117,14 +117,25 @@ describe("extractSamplerEventFromDockerLogs", () => {
     ).toThrow(/non-TTY/);
   });
 
-  it("rejects missing or duplicate sampler events", () => {
-    expect(() => extractSamplerEventFromDockerLogs(Buffer.from("startup\n"))).toThrow(
-      /exactly one/,
+  it("accepts multiple complete sampler events from a slow smoke run", () => {
+    const event = extractSamplerEventFromDockerLogs(
+      Buffer.from(`${sampler()}\nworker log\n${sampler()}\n`),
     );
+
+    expect(validateSamplerEvent(event).SamplerHeartbeat).toBe(1);
+  });
+
+  it("validates every captured sampler event", () => {
     expect(() =>
       extractSamplerEventFromDockerLogs(
-        Buffer.from(`${sampler()}\n${sampler()}\n`),
+        Buffer.from(`${sampler()}\n{"SamplerHeartbeat":1}\n`),
       ),
-    ).toThrow(/exactly one/);
+    ).toThrow(/frame must start/);
+  });
+
+  it("rejects a stream without sampler events", () => {
+    expect(() => extractSamplerEventFromDockerLogs(Buffer.from("startup\n"))).toThrow(
+      /at least one/,
+    );
   });
 });

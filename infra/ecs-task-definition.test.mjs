@@ -47,6 +47,29 @@ bootstrap.forRegion = async () => ({
 });
 
 describe("real SST task-definition synthesis", () => {
+  it("fails when SST does not expose container definitions as an output", () => {
+    expect(() =>
+      disableMnemoServerPseudoTerminal({ containerDefinitions: "[]" }),
+    ).toThrow("task definition containerDefinitions output not found");
+  });
+
+  it("fails when the synthesized task omits mnemo-server", () => {
+    const containerDefinitions = {
+      apply(callback) {
+        return callback(
+          JSON.stringify([
+            { name: "qwen3-embed" },
+            { name: "llm-proxy" },
+          ]),
+        );
+      },
+    };
+
+    expect(() =>
+      disableMnemoServerPseudoTerminal({ containerDefinitions }),
+    ).toThrow("mnemo-server container not found in task definition");
+  });
+
   it("TC-EMF-004: disables only mnemo-server TTY and preserves awslogs", async () => {
     registered.length = 0;
     const parent = new ComponentResource("test:index:Parent", "parent");
