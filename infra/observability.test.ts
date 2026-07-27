@@ -211,11 +211,7 @@ describe("observability alert delivery", () => {
       expect(materialize(alarm.args.alarmActions)).toEqual([
         "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
       ]);
-      expect(alarm.args.treatMissingData).toBe(
-        alarm.logicalName === "DurableIngestOldestQueuedAgeAlarm"
-          ? "breaching"
-          : "notBreaching",
-      );
+      expect(alarm.args.treatMissingData).toBe("notBreaching");
     }
 
     const queueAlarms = alarms.filter(
@@ -510,14 +506,27 @@ describe("observability alert delivery", () => {
       (widget: { properties?: { title?: string } }) =>
         widget.properties?.title === "Retries and warnings",
     );
-    expect(retryWidget.properties.metrics[0]).toEqual([
-      {
-        expression:
-          "SUM(SEARCH('{mem9-on-aws/DurableIngest,stage,result_class,error_class} " +
-          "MetricName=\"JobsRetrying\" stage=\"prod\"', 'Sum', 300))",
-        label: "Retry transitions",
-      },
+    expect(retryWidget.properties.metrics.slice(0, 2)).toEqual([
+      [
+        {
+          expression: "FILL(retry_transitions, 0)",
+          id: "retry_transitions_filled",
+          label: "Retry transitions",
+        },
+      ],
+      [
+        "mem9-on-aws/DurableIngest",
+        "JobsRetrying",
+        "stage",
+        "prod",
+        {
+          id: "retry_transitions",
+          stat: "Sum",
+          visible: false,
+        },
+      ],
     ]);
+    expect(JSON.stringify(retryWidget)).not.toContain("SEARCH(");
 
     const providerMetrics = body.widgets
       .filter((widget: { type: string }) => widget.type === "metric")
@@ -555,7 +564,7 @@ describe("observability alert delivery", () => {
       datapointsToAlarm: 2,
       threshold: 600_000,
       comparisonOperator: "GreaterThanThreshold",
-      treatMissingData: "breaching",
+      treatMissingData: "notBreaching",
     });
 
     const ratio = named("MetricAlarm", "DurableIngestFailureRatioAlarm").args;
@@ -617,6 +626,51 @@ describe("observability alert delivery", () => {
     expect(durableFailureRatio(1, 20)).toBe(0.05);
     expect(durableFailureRatio(2, 20)).toBe(0.1);
     expect(durableFailureRatio(3, 30)).toBe(0.1);
+  });
+
+  it("TC-INGEST-METRIC-015/016/017: pins emitter metrics to dashboard and alarms", () => {
+    const patch = readFileSync(
+      new URL(
+        "../docker/mnemo-server/patches/0006-durable-ingest-telemetry.patch",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    const telemetryStart = patch.indexOf(
+      "+++ b/server/internal/ingestqueue/telemetry.go",
+    );
+    const telemetryEnd = patch.indexOf(
+      "diff --git a/server/internal/ingestqueue/telemetry_test.go",
+    );
+    expect(telemetryStart).toBeGreaterThanOrEqual(0);
+    expect(telemetryEnd).toBeGreaterThan(telemetryStart);
+    const emitter = patch.slice(telemetryStart, telemetryEnd);
+
+    expect(emitter).toContain(
+      'const DurableMetricNamespace = "mem9-on-aws/DurableIngest"',
+    );
+    for (const metric of [
+      "JobsAccepted",
+      "JobsSucceeded",
+      "JobsRetrying",
+      "JobsDead",
+      "JobsTerminated",
+      "DeadlineTransientTerminalFailures",
+      "Warnings",
+      "TruncatedFacts",
+      "ZeroFactSuccess",
+    ]) {
+      expect(emitter).toContain(`countMetric("${metric}")`);
+    }
+    for (const metric of [
+      "OldestQueuedAgeMs",
+      "QueueWaitMs",
+      "PlanDurationMs",
+      "ApplyDurationMs",
+      "TotalProcessingDurationMs",
+    ]) {
+      expect(emitter).toContain(`millisecondMetric("${metric}")`);
+    }
   });
 
   it("TC-INGEST-METRIC-020: removes the obsolete ingest_dropped metric", () => {

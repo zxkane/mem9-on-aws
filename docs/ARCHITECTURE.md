@@ -262,12 +262,15 @@ reclaimable finalization state until the existing runtime-usage outbox has
 accepted the idempotent commit or release handoff. Other post-commit metering
 and webhooks are best effort and cannot change a committed job outcome.
 
-Durable-ingest lifecycle EMF is also emitted after its database transition and
-is best-effort. It is an operational signal rather than an accounting ledger:
-a process crash or log-write failure can omit a committed transition metric.
-Aurora `ingest_jobs` and the tenant-scoped status API are the authoritative job
-state. The once-per-minute queue-age heartbeat treats missing data as breaching
-so loss of the worker or EMF path remains alarmable.
+Production durable-ingest lifecycle EMF is emitted after its database
+transition and is best-effort. Preview workers use the same durable processing
+path without EMF so short-lived `pr-N` stages do not create unbounded custom
+metric dimensions. These metrics are operational signals rather than an
+accounting ledger: a process crash or log-write failure can omit a committed
+transition metric. Aurora `ingest_jobs` and the tenant-scoped status API are the
+authoritative job state. Queue age alarms only on sampled values over the
+threshold; missing data is not treated as a queue-age breach or as a
+worker-liveness signal.
 
 Memory rows and embeddings are durable in Aurora. The Fargate task uses `/tmp`
 only for mem9's batch-import implementation; normal add, search, and CRUD paths
