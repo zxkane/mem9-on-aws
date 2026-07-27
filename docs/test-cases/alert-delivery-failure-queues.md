@@ -7,10 +7,11 @@ Related issue: #47
 **Given** the observability stack is synthesized for `prod` with a configured
 Slack webhook
 **When** CloudWatch alarms are created
-**Then** one project SNS alarm topic exists and every alarm action targets it.
+**Then** one project SNS alarm topic exists and every ALARM and OK action
+targets it.
 
 Also assert that production synthesis throws when the managed Slack sink is not
-configured, while a preview stage can omit the sink.
+configured, while a preview stage creates no notification resources.
 
 ## TC-ALERT-002: SNS transport failures use their own queue
 
@@ -96,3 +97,22 @@ transport parser rejects it.
 **When** success, HTTP failure, network failure, and missing-configuration paths
 run
 **Then** captured console output contains neither marker nor any webhook value.
+
+## TC-ALERT-014: recovery transitions notify the project topic
+
+**Given** any production alarm that notifies the project topic when entering
+`ALARM`
+**When** the alarm returns to `OK`
+**Then** its `okActions` contain the same single topic ARN as its
+`alarmActions`, including the transport and execution failure queue alarms.
+
+The alert-router formatter must continue rendering `ALARM` payloads as active
+alerts and `OK` payloads as `RESOLVED` recovery messages.
+
+## TC-ALERT-015: recovery wiring does not change alarm semantics
+
+**Given** the existing eight production alarms
+**When** recovery actions are added
+**Then** each alarm retains its description, metric or metric-query periods,
+dimensions, threshold, comparison operator, evaluation periods, datapoints, and
+missing-data behavior.
