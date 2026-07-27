@@ -418,6 +418,7 @@ to the GitHub Actions deploy role.
 | Embedding | Local qwen3 sidecar, 1024 dimensions | `docker/qwen3-embed/` |
 | Smart-ingest LLM | Local proxy to Bedrock Mantle | `docker/llm-proxy/` |
 | Mantle attribution | `OpenAI-Project` added by `llm-proxy` when a project is configured | `docker/llm-proxy/server.mjs` |
+| Ingest observability | Content-free EMF metrics, CloudWatch dashboard, and production alarms | `docker/mnemo-server/patches/0006-durable-ingest-telemetry.patch`, `infra/observability.ts` |
 | MCP surface | AgentCore Gateway Lambda target | `infra/gateway.ts` |
 | Private service lookup | AWS Cloud Map | `infra/ecs.ts` |
 | Inbound auth | Cognito M2M plus OAuth2 PKCE facade | `infra/cognito.ts`, `infra/oauth-facade.ts` |
@@ -445,6 +446,12 @@ to the GitHub Actions deploy role.
 - ECR scan-on-push is a guarded out-of-band registry singleton, separate from
   the retained repository stack.
 - Durable transcript ingest uses immutable plans and atomic PostgreSQL apply.
+- Durable ingest emits job lifecycle, queue-age, phase-duration, retry, warning,
+  truncation, and zero-fact metrics in `mem9-on-aws/DurableIngest`. Metric
+  dimensions are limited to stage and bounded result/error classes.
+- The production ingest dashboard keeps application metrics separate from
+  documented `AWS/BedrockMantle` Project metrics. Planning duration is
+  application elapsed time; no Mantle latency metric is synthesized.
 
 ## Planned changes
 
@@ -453,7 +460,6 @@ The open reliability program covers future work in these areas:
 - Release image tag selection and read-only ECS actual-state reconciliation.
 - Mandatory alert delivery with separate transport and execution failure queues.
 - Safe preview-stage reconciliation and a separately reviewed one-time cleanup.
-- Job-level durable-ingest telemetry.
 - A post-deployment production reliability verification exercise.
 
 The current async `messages[]` path is a durable queue and atomic job processor.

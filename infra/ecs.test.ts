@@ -137,6 +137,11 @@ function installGlobals(stage: string) {
           created.push({ kind: "MetricAlarm", args });
         }
       },
+      Dashboard: class {
+        constructor(_name: string, args: Record<string, unknown>) {
+          created.push({ kind: "Dashboard", args });
+        }
+      },
     },
     lambda: {
       FunctionEventInvokeConfig: class {
@@ -280,6 +285,7 @@ beforeEach(() => {
   params = [];
   created = [];
   process.env.SST_SECRET_SlackWebhookUrl = "https://example.com/hooks/test";
+  process.env.MEM9_BEDROCK_PROJECT = "proj_testxyz";
   process.env.MEM9_DURABLE_INGEST_ENABLED = "1";
 });
 
@@ -313,6 +319,17 @@ describe("ecs stack", () => {
 
     expect(() => ecs(fakeDbOut())).toThrow(
       "SLACK_WEBHOOK_URL is required for production alert delivery",
+    );
+    expect(created).toHaveLength(0);
+  });
+
+  it("fails production synthesis before resources when the Mantle Project is empty", async () => {
+    process.env.MEM9_BEDROCK_PROJECT = "";
+    installGlobals("prod");
+    const ecs = await loadEcs();
+
+    expect(() => ecs(fakeDbOut())).toThrow(
+      "MEM9_BEDROCK_PROJECT is required for production observability",
     );
     expect(created).toHaveLength(0);
   });
@@ -445,7 +462,9 @@ describe("ecs stack", () => {
     // hardcoded 12-digit account id appears in the committed source.
     const createInf = perms.find((p) => p.actions.includes("bedrock-mantle:CreateInference"));
     expect(
-      createInf?.resources.some((r) => String(r).includes("bedrock-mantle") || r === "*"),
+      createInf?.resources.some(
+        (r) => String(materialize(r)).includes("bedrock-mantle") || r === "*",
+      ),
     ).toBe(true);
   });
 
@@ -512,6 +531,7 @@ describe("ecs stack", () => {
     // Ingest durability (TC-INGEST-020, issue #25): only durable facts stored.
     expect(env.MNEMO_INGEST_DURABLE_ONLY).toBe("1");
     expect(env.MNEMO_DURABLE_INGEST_ENABLED).toBe("1");
+    expect(env.MNEMO_DURABLE_INGEST_METRIC_STAGE).toBe("prod");
     // GLM-5 request bound (TC-GLM-BOUND-020, issue #46): patch configuration
     // is explicit in ECS, not left to an image default.
     expect(env.MNEMO_MAX_EXTRACTION_CONVERSATION_RUNES).toBe("200000");
@@ -633,15 +653,16 @@ describe("ecs stack", () => {
     expect(imageTag?.value).toBe("mem9-abcdef0");
   });
 
-  // Observability (TC-OBS-001...003, issue #26): metrics and alarms on prod only.
-  it("creates metric filters + alarms on prod", async () => {
+  // Observability (TC-OBS-001...003 and TC-INGEST-METRIC-015...020): prod only.
+  it("creates metric filters, dashboard, and alarms on prod", async () => {
     installGlobals("prod");
     const ecs = await loadEcs();
     ecs(fakeDbOut());
     const filters = created.filter((c) => c.kind === "LogMetricFilter");
     const alarms = created.filter((c) => c.kind === "MetricAlarm");
-    expect(filters.length).toBe(4); // recall_zero_hit, recall_total, ingest_llm_auth_failure, ingest_dropped
-    expect(alarms.length).toBe(4); // Service health plus two alert failure queues.
+    expect(filters.length).toBe(3); // recall_zero_hit, recall_total, ingest_llm_auth_failure
+    expect(alarms.length).toBe(8); // Existing four plus four ingest/Mantle alarms.
+    expect(created.filter((c) => c.kind === "Dashboard")).toHaveLength(1);
     // Prod alarms use treatMissingData=notBreaching.
     for (const alarm of alarms) {
       expect((alarm.args as Record<string, unknown>).treatMissingData).toBe("notBreaching");
@@ -650,7 +671,7 @@ describe("ecs stack", () => {
     const patterns = filters.map((f) => (f.args as { pattern: string }).pattern);
     expect(patterns.some((p) => p.includes("confidence recall search") && p.includes("returned = 0"))).toBe(true);
     expect(patterns.some((p) => p.includes("extraction LLM call failed") && p.includes("401"))).toBe(true);
-    expect(patterns.some((p) => p.includes("async ingest failed"))).toBe(true);
+    expect(patterns.some((p) => p.includes("async ingest failed"))).toBe(false);
   });
 
   it("passes the Slack webhook to Lambda only as an SST secret output", async () => {
@@ -664,7 +685,7 @@ describe("ecs stack", () => {
     expect(environment.SLACK_WEBHOOK_URL).toMatchObject({ isSecret: true });
   });
 
-  it("does NOT create metric filters or alarms on pr-* stages", async () => {
+  it("does NOT create metric filters, dashboards, or alarms on pr-* stages", async () => {
     delete process.env.SST_SECRET_SlackWebhookUrl;
     installGlobals("pr-99");
     const ecs = await loadEcs();
@@ -673,6 +694,7 @@ describe("ecs stack", () => {
     const alarms = created.filter((c) => c.kind === "MetricAlarm");
     expect(filters.length).toBe(0);
     expect(alarms.length).toBe(0);
+    expect(created.filter((c) => c.kind === "Dashboard")).toHaveLength(0);
     expect(created.filter((c) => c.kind === "Secret")).toHaveLength(0);
   });
 });

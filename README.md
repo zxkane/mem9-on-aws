@@ -112,6 +112,12 @@ synthesis fails when it is absent so production alarms cannot be deployed
 without an IaC-managed sink. Preview and development stages do not create the
 alerting stack.
 
+Production synthesis also requires the out-of-band Bedrock Mantle Project ID.
+The `mem9-on-aws-prod-ingest` dashboard separates documented Project-scoped
+Mantle inference/token/client-error metrics from durable application outcomes,
+queue age, phase durations, retries, and warnings. It does not present
+application planning time as provider latency.
+
 All production alarms target one SNS topic. Delivery failures are separated by
 the AWS boundary at which they occurred:
 

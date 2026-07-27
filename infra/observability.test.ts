@@ -1,7 +1,10 @@
 import { readFileSync } from "node:fs";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
-import { observability } from "./observability";
+import {
+  DURABLE_FAILURE_RATIO_EXPRESSION,
+  observability,
+} from "./observability";
 
 interface ResourceRecord {
   args: Record<string, unknown>;
@@ -57,6 +60,11 @@ function installGlobals() {
       MetricAlarm: class {
         constructor(logicalName: string, args: Record<string, unknown>) {
           record("MetricAlarm", logicalName, args);
+        }
+      },
+      Dashboard: class {
+        constructor(logicalName: string, args: Record<string, unknown>) {
+          record("Dashboard", logicalName, args);
         }
       },
     },
@@ -134,6 +142,25 @@ function queue(logicalName: string): ResourceRecord {
   return match!;
 }
 
+function named(kind: string, logicalName: string): ResourceRecord {
+  const match = resources.find(
+    (resource) => resource.kind === kind && resource.logicalName === logicalName,
+  );
+  expect(match).toBeDefined();
+  return match!;
+}
+
+const prodInputs = {
+  stage: "prod",
+  logGroupName: out("/logs/mem9") as never,
+  slackWebhookUrl: "https://example.com/hooks/test",
+  mantleProject: "proj_testxyz",
+};
+
+function durableFailureRatio(failures: number, terminal: number): number {
+  return terminal >= 20 ? failures / terminal : 0;
+}
+
 beforeEach(() => {
   resources = [];
   installGlobals();
@@ -149,8 +176,22 @@ afterEach(() => {
 describe("observability alert delivery", () => {
   it("TC-ALERT-001: requires a managed sink only in production", () => {
     expect(() =>
-      observability({ stage: "prod", logGroupName: out("/logs/mem9") as never }),
+      observability({
+        stage: "prod",
+        logGroupName: out("/logs/mem9") as never,
+        mantleProject: "proj_testxyz",
+      }),
     ).toThrow("SLACK_WEBHOOK_URL is required for production alert delivery");
+    expect(resources).toHaveLength(0);
+
+    expect(() =>
+      observability({
+        stage: "prod",
+        logGroupName: out("/logs/mem9") as never,
+        slackWebhookUrl: "https://example.com/hooks/test",
+        mantleProject: "",
+      }),
+    ).toThrow("MEM9_BEDROCK_PROJECT is required for production observability");
     expect(resources).toHaveLength(0);
 
     expect(() =>
@@ -160,20 +201,17 @@ describe("observability alert delivery", () => {
   });
 
   it("TC-ALERT-001/009: attaches every production alarm to one topic", () => {
-    observability({
-      stage: "prod",
-      logGroupName: out("/logs/mem9") as never,
-      slackWebhookUrl: "https://example.com/hooks/test",
-    });
+    observability(prodInputs);
 
     const topic = one("Topic");
     expect(topic.args).toEqual({ name: "mem9-on-aws-prod-alerts" });
     const alarms = resources.filter((resource) => resource.kind === "MetricAlarm");
-    expect(alarms).toHaveLength(4);
+    expect(alarms).toHaveLength(8);
     for (const alarm of alarms) {
       expect(materialize(alarm.args.alarmActions)).toEqual([
         "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
       ]);
+      expect(alarm.args.treatMissingData).toBe("notBreaching");
     }
 
     const queueAlarms = alarms.filter(
@@ -195,11 +233,7 @@ describe("observability alert delivery", () => {
   });
 
   it("TC-ALERT-002/003/004/010: separates redrive and execution destinations", () => {
-    observability({
-      stage: "prod",
-      logGroupName: out("/logs/mem9") as never,
-      slackWebhookUrl: "https://example.com/hooks/test",
-    });
+    observability(prodInputs);
 
     const transport = queue("AlertTransportFailureQueue");
     const execution = queue("AlertExecutionFailureQueue");
@@ -237,11 +271,7 @@ describe("observability alert delivery", () => {
   });
 
   it("TC-ALERT-002/003/010: scopes SNS and Lambda queue writes", () => {
-    observability({
-      stage: "prod",
-      logGroupName: out("/logs/mem9") as never,
-      slackWebhookUrl: "https://example.com/hooks/test",
-    });
+    observability(prodInputs);
 
     const queuePolicy = one("QueuePolicy");
     const policy = JSON.parse(materialize(queuePolicy.args.policy) as string);
@@ -390,6 +420,22 @@ describe("observability alert delivery", () => {
 
     expect(
       computePolicy.Statement.find(
+        (statement) => statement.Sid === "CloudWatchDashboards",
+      ),
+    ).toEqual({
+      Sid: "CloudWatchDashboards",
+      Effect: "Allow",
+      Action: [
+        "cloudwatch:DeleteDashboards",
+        "cloudwatch:GetDashboard",
+        "cloudwatch:ListDashboards",
+        "cloudwatch:PutDashboard",
+      ],
+      Resource: "*",
+    });
+
+    expect(
+      computePolicy.Statement.find(
         (statement) => statement.Sid === "SnsSubscriptionRead",
       ),
     ).toEqual({
@@ -415,5 +461,137 @@ describe("observability alert delivery", () => {
       { Ref: "OAuth2FacadePolicy" },
       { Ref: "AlertDeliveryPolicy" },
     ]);
+  });
+
+  it("TC-INGEST-METRIC-015/019: separates Mantle and durable dashboard metrics", () => {
+    observability(prodInputs);
+
+    const dashboard = one("Dashboard");
+    expect(dashboard.args.dashboardName).toBe("mem9-on-aws-prod-ingest");
+    const body = JSON.parse(materialize(dashboard.args.dashboardBody) as string);
+    const serialized = JSON.stringify(body);
+    expect(serialized).toContain("Bedrock Mantle provider");
+    expect(serialized).toContain("Durable ingest application");
+    expect(serialized).toContain("AWS/BedrockMantle");
+    expect(serialized).toContain("mem9-on-aws/DurableIngest");
+    expect(serialized).toContain("proj_testxyz");
+    for (const metric of [
+      "Inferences",
+      "TotalInputTokens",
+      "TotalOutputTokens",
+      "InferenceClientErrors",
+    ]) {
+      expect(serialized).toContain(metric);
+    }
+    expect(serialized).not.toContain("InvocationLatency");
+    expect(serialized).not.toContain("TimeToFirstToken");
+
+    const providerMetrics = body.widgets
+      .filter((widget: { type: string }) => widget.type === "metric")
+      .flatMap((widget: { properties: { metrics?: unknown[] } }) =>
+        widget.properties.metrics ?? [],
+      )
+      .filter((metric: unknown[]) => metric[0] === "AWS/BedrockMantle");
+    expect(providerMetrics.length).toBeGreaterThan(0);
+    for (const metric of providerMetrics) {
+      expect(metric.slice(2, 4)).toEqual(["Project", "proj_testxyz"]);
+    }
+  });
+
+  it("TC-INGEST-METRIC-016/018/019: pins durable and Mantle alarms", () => {
+    observability(prodInputs);
+
+    expect(named("MetricAlarm", "DurableIngestDeadJobAlarm").args).toMatchObject({
+      namespace: "mem9-on-aws/DurableIngest",
+      metricName: "JobsDead",
+      dimensions: { stage: "prod" },
+      statistic: "Sum",
+      period: 900,
+      evaluationPeriods: 1,
+      threshold: 1,
+      comparisonOperator: "GreaterThanOrEqualToThreshold",
+      treatMissingData: "notBreaching",
+    });
+    expect(named("MetricAlarm", "DurableIngestOldestQueuedAgeAlarm").args).toMatchObject({
+      namespace: "mem9-on-aws/DurableIngest",
+      metricName: "OldestQueuedAgeMs",
+      dimensions: { stage: "prod" },
+      statistic: "Maximum",
+      period: 300,
+      evaluationPeriods: 2,
+      datapointsToAlarm: 2,
+      threshold: 600_000,
+      comparisonOperator: "GreaterThanThreshold",
+      treatMissingData: "notBreaching",
+    });
+
+    const ratio = named("MetricAlarm", "DurableIngestFailureRatioAlarm").args;
+    expect(ratio).toMatchObject({
+      evaluationPeriods: 1,
+      threshold: 0.1,
+      comparisonOperator: "GreaterThanOrEqualToThreshold",
+      treatMissingData: "notBreaching",
+    });
+    expect(ratio.metricQueries).toEqual([
+      {
+        id: "failures",
+        metric: {
+          metricName: "DeadlineTransientTerminalFailures",
+          namespace: "mem9-on-aws/DurableIngest",
+          stat: "Sum",
+          period: 900,
+          dimensions: { stage: "prod" },
+        },
+        returnData: false,
+      },
+      {
+        id: "terminal",
+        metric: {
+          metricName: "JobsTerminated",
+          namespace: "mem9-on-aws/DurableIngest",
+          stat: "Sum",
+          period: 900,
+          dimensions: { stage: "prod" },
+        },
+        returnData: false,
+      },
+      {
+        id: "rate",
+        expression: DURABLE_FAILURE_RATIO_EXPRESSION,
+        label: "Deadline/Transient Terminal Failure Ratio",
+        returnData: true,
+      },
+    ]);
+
+    expect(named("MetricAlarm", "MantleClientErrorAlarm").args).toMatchObject({
+      namespace: "AWS/BedrockMantle",
+      metricName: "InferenceClientErrors",
+      dimensions: { Project: "proj_testxyz" },
+      statistic: "Sum",
+      period: 900,
+      evaluationPeriods: 1,
+      threshold: 1,
+      comparisonOperator: "GreaterThanOrEqualToThreshold",
+      treatMissingData: "notBreaching",
+    });
+  });
+
+  it("TC-INGEST-METRIC-017: gates failure ratio on twenty terminal jobs", () => {
+    expect(DURABLE_FAILURE_RATIO_EXPRESSION).toBe(
+      "IF(terminal >= 20, failures / terminal, 0)",
+    );
+    expect(durableFailureRatio(2, 19)).toBe(0);
+    expect(durableFailureRatio(1, 20)).toBe(0.05);
+    expect(durableFailureRatio(2, 20)).toBe(0.1);
+    expect(durableFailureRatio(3, 30)).toBe(0.1);
+  });
+
+  it("TC-INGEST-METRIC-020: removes the obsolete ingest_dropped metric", () => {
+    observability(prodInputs);
+    const filters = resources.filter((resource) => resource.kind === "LogMetricFilter");
+    expect(filters).toHaveLength(3);
+    expect(JSON.stringify(filters.map((filter) => filter.args))).not.toContain(
+      "ingest_dropped",
+    );
   });
 });

@@ -698,6 +698,15 @@ Resources:
               - cloudwatch:TagResource
               - cloudwatch:UntagResource
             Resource: "*"
+          - Sid: CloudWatchDashboards
+            # CloudWatch dashboard APIs do not support resource-level IAM.
+            Effect: Allow
+            Action:
+              - cloudwatch:DeleteDashboards
+              - cloudwatch:GetDashboard
+              - cloudwatch:ListDashboards
+              - cloudwatch:PutDashboard
+            Resource: "*"
           - Sid: AppAutoScalingSLR
             # First app-autoscaling use in the account needs its service-linked
             # role (distinct from the RDS one in DatabasePolicy).
