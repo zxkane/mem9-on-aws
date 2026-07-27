@@ -33,6 +33,15 @@ so the implementation does not hand-build JSON and concurrent records cannot
 interleave. Regression tests check the raw prefix before decoding the same lines
 for schema, value, unit, dimension, bounded-cardinality, and privacy assertions.
 
+The synthesized `mnemo-server` container explicitly sets
+`pseudoTerminal=false`. The service is non-interactive, and omitting the TTY
+keeps the emitter's LF record boundary from being translated to CRLF before the
+`awslogs` driver splits events. The two sidecar terminal settings are unchanged.
+A named arm64 image smoke captures one real sampler record through Docker with
+the same non-TTY setting and validates its exact local bytes. This smoke covers
+the container stdout contract only; post-deploy CloudWatch extraction remains a
+separate production verification.
+
 Tenant, agent, app, session, job, request, plan, payload, fact, message, and
 embedding identifiers or content are absent. Existing durable-worker log lines
 also drop job IDs.

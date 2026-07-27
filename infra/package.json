@@ -9,6 +9,7 @@
     "deploy": "cd .. && sst deploy",
     "remove": "cd .. && sst remove",
     "dev": "cd .. && sst dev",
+    "pretest": "cd .. && infra/node_modules/.bin/sst install --stage test",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

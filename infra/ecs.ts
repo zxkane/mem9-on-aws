@@ -55,6 +55,7 @@ import type { DbOutputs } from "./db";
 import { ecrImage, accountId, ECR_REGION } from "./ecr";
 import { observability } from "./observability";
 import type { TenantIdentityOutputs } from "./tenant-identity";
+import { disableMnemoServerPseudoTerminal } from "./ecs-task-definition";
 
 // Bedrock Mantle is called in the app region (= the ECR/app region, Tokyo). Used
 // only to scope the bedrock-mantle:CreateInference project ARN.
@@ -442,6 +443,7 @@ export function ecs(dbOut: DbOutputs, identity: TenantIdentityOutputs): EcsOutpu
       },
     ],
     transform: {
+      taskDefinition: disableMnemoServerPseudoTerminal,
       service: (args: Record<string, any>, opts: Record<string, any>) => {
         args.tags = { ...(args.tags ?? {}), ...tags };
         // Register the service in Cloud Map (§6a) so it gets the stable
