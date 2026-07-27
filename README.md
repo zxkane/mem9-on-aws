@@ -121,13 +121,32 @@ best-effort operational signal; Aurora job rows and the tenant-scoped status API
 remain authoritative. EMF is production-only so preview stage identifiers do
 not accumulate as permanent custom-metric dimensions.
 
+Queue health and telemetry health are independent. Missing
+`OldestQueuedAgeMs` remains non-breaching because it is not evidence of a
+backlog. The sampler emits stage-only `SamplerHeartbeat=1` immediately and once
+per minute. The raw liveness alarm fills each current missing period with zero
+and requires five of five one-minute periods below one. This prevents older
+healthy points in CloudWatch's wider sliding evaluation range from extending
+the five-minute bound, while one delayed latest sample after four healthy
+samples remains non-alarming. That raw alarm has no actions. Its composite
+notification waits exactly five more minutes on every ALARM transition, which
+bounds both initial enablement and rolling-deploy suppression without a manual
+actions-disabled mode. A real ECS-origin heartbeat clears the raw alarm during
+that wait; otherwise the notification is released. A direct `PutLogEvents`
+probe or zero `AWS/Logs` parser errors can aid diagnosis but does not establish
+sampler liveness.
+
 Before the first deployment from this revision, run
 `scripts/deploy-github-role.sh` to grant the out-of-band GitHub Actions role the
-CloudWatch dashboard APIs. Merging the PR or running SST does not update that
-role.
+CloudWatch composite-alarm and dashboard APIs. Merging the PR or running SST
+does not update that role.
 
-All production alarms target one SNS topic. Delivery failures are separated by
-the AWS boundary at which they occurred:
+All action-bearing production alarms target one SNS topic. The raw telemetry
+liveness alarm and its action-delay guard are intentionally actionless. The
+liveness composite has only an ALARM action: CloudWatch restarts its suppression
+wait after a state change, so an OK action could otherwise send a recovery
+without a preceding notification. Delivery failures are separated by the AWS
+boundary at which they occurred:
 
 | Alarm | Queue meaning | Queue body |
 |---|---|---|

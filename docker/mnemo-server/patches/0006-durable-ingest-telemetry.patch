@@ -310,7 +310,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..32ec348477295ae023e17dc549a89481aedaadbb
 --- /dev/null
 +++ b/server/internal/ingestqueue/telemetry.go
-@@ -0,0 +1,292 @@
+@@ -0,0 +1,307 @@
 +package ingestqueue
 +
 +import (
@@ -325,6 +325,7 @@ index 0000000000000000000000000000000000000000..32ec348477295ae023e17dc549a89481
 +type Telemetry interface {
 +	Accepted()
 +	Result(ResultMetrics)
++	SamplerHeartbeat()
 +	QueueAge(time.Duration)
 +}
 +
@@ -384,6 +385,7 @@ index 0000000000000000000000000000000000000000..32ec348477295ae023e17dc549a89481
 +	Warnings                          *int        `json:"Warnings,omitempty"`
 +	TruncatedFacts                    *int        `json:"TruncatedFacts,omitempty"`
 +	ZeroFactSuccess                   *int        `json:"ZeroFactSuccess,omitempty"`
++	SamplerHeartbeat                  *int        `json:"SamplerHeartbeat,omitempty"`
 +	OldestQueuedAgeMs                 *int64      `json:"OldestQueuedAgeMs,omitempty"`
 +}
 +
@@ -519,6 +521,19 @@ index 0000000000000000000000000000000000000000..32ec348477295ae023e17dc549a89481
 +	t.write(record, directives)
 +}
 +
++func (t *emfTelemetry) SamplerHeartbeat() {
++	t.write(
++		emfEnvelope{
++			Stage:            t.stage,
++			SamplerHeartbeat: metricValue(1),
++		},
++		[]emfDirective{metricDirective(
++			[]string{"stage"},
++			countMetric("SamplerHeartbeat"),
++		)},
++	)
++}
++
 +func (t *emfTelemetry) QueueAge(age time.Duration) {
 +	t.write(
 +		emfEnvelope{
@@ -608,7 +623,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..f316ca45d3ea7359474c3a1bd8244765629ea232
 --- /dev/null
 +++ b/server/internal/ingestqueue/telemetry_test.go
-@@ -0,0 +1,354 @@
+@@ -0,0 +1,365 @@
 +package ingestqueue
 +
 +import (
@@ -753,11 +768,12 @@ index 0000000000000000000000000000000000000000..f316ca45d3ea7359474c3a1bd8244765
 +		TotalDuration: 10 * time.Second,
 +		RetryCount:    4,
 +	})
++	telemetry.SamplerHeartbeat()
 +	telemetry.QueueAge(11 * time.Minute)
 +
 +	records := telemetryRecords(t, output.String())
-+	if len(records) != 5 {
-+		t.Fatalf("EMF records = %d, want 5: %s", len(records), output.String())
++	if len(records) != 6 {
++		t.Fatalf("EMF records = %d, want 6: %s", len(records), output.String())
 +	}
 +	if records[0]["JobsAccepted"] != float64(1) ||
 +		records[0]["stage"] != "prod" ||
@@ -787,8 +803,13 @@ index 0000000000000000000000000000000000000000..f316ca45d3ea7359474c3a1bd8244765
 +		records[3]["error_class"] != "deadline" {
 +		t.Fatalf("dead record = %#v", records[3])
 +	}
-+	if records[4]["OldestQueuedAgeMs"] != float64(660000) {
-+		t.Fatalf("queue age record = %#v", records[4])
++	if records[4]["SamplerHeartbeat"] != float64(1) ||
++		records[4]["stage"] != "prod" ||
++		!hasMetricDirective(records[4], []string{"stage"}, "SamplerHeartbeat") {
++		t.Fatalf("sampler heartbeat record = %#v", records[4])
++	}
++	if records[5]["OldestQueuedAgeMs"] != float64(660000) {
++		t.Fatalf("queue age record = %#v", records[5])
 +	}
 +	if !hasMetricDirective(
 +		records[1],
@@ -906,6 +927,7 @@ index 0000000000000000000000000000000000000000..f316ca45d3ea7359474c3a1bd8244765
 +		ResultClass: string(StateDead),
 +		ErrorClass:  "deadline",
 +	})
++	telemetry.SamplerHeartbeat()
 +	telemetry.QueueAge(time.Minute)
 +	assertBoundedMetricDimensions(t, telemetryRecords(t, output.String()))
 +
@@ -925,15 +947,17 @@ index 0000000000000000000000000000000000000000..f316ca45d3ea7359474c3a1bd8244765
 +	var output bytes.Buffer
 +	telemetry := NewEMFTelemetry("prod", &output, nil)
 +	var writers sync.WaitGroup
-+	for index := range writesPerKind * 3 {
++	for index := range writesPerKind * 4 {
 +		writers.Add(1)
 +		go func() {
 +			defer writers.Done()
-+			switch index % 3 {
++			switch index % 4 {
 +			case 0:
 +				telemetry.Accepted()
 +			case 1:
 +				telemetry.Result(ResultMetrics{ResultClass: string(StateSucceeded)})
++			case 2:
++				telemetry.SamplerHeartbeat()
 +			default:
 +				telemetry.QueueAge(time.Duration(index) * time.Millisecond)
 +			}
@@ -942,8 +966,8 @@ index 0000000000000000000000000000000000000000..f316ca45d3ea7359474c3a1bd8244765
 +	writers.Wait()
 +
 +	records := telemetryRecords(t, output.String())
-+	if len(records) != writesPerKind*3 {
-+		t.Fatalf("EMF records = %d, want %d", len(records), writesPerKind*3)
++	if len(records) != writesPerKind*4 {
++		t.Fatalf("EMF records = %d, want %d", len(records), writesPerKind*4)
 +	}
 +	counts := map[string]int{}
 +	for _, record := range records {
@@ -952,11 +976,13 @@ index 0000000000000000000000000000000000000000..f316ca45d3ea7359474c3a1bd8244765
 +			counts["accepted"]++
 +		case record["JobsSucceeded"] == float64(1):
 +			counts["result"]++
++		case record["SamplerHeartbeat"] == float64(1):
++			counts["heartbeat"]++
 +		case record["OldestQueuedAgeMs"] != nil:
 +			counts["queue_age"]++
 +		}
 +	}
-+	for _, kind := range []string{"accepted", "result", "queue_age"} {
++	for _, kind := range []string{"accepted", "result", "heartbeat", "queue_age"} {
 +		if counts[kind] != writesPerKind {
 +			t.Fatalf("%s records = %d, want %d", kind, counts[kind], writesPerKind)
 +		}
@@ -1105,7 +1131,7 @@ index 0fa094268190ec552b8bca8e7b67719369d949d6..a2cc8905ed18370eb55ab9755ddfa7a3
  	}
  	return "database_error", false
  }
-@@ -183,7 +203,66 @@ func waitForWorker(ctx context.Context, duration time.Duration) bool {
+@@ -183,7 +203,67 @@ func waitForWorker(ctx context.Context, duration time.Duration) bool {
  	}
  }
  
@@ -1127,6 +1153,7 @@ index 0fa094268190ec552b8bca8e7b67719369d949d6..a2cc8905ed18370eb55ab9755ddfa7a3
 +	if w.config.Telemetry == nil {
 +		return
 +	}
++	w.config.Telemetry.SamplerHeartbeat()
 +	sampleCtx, cancel := context.WithTimeout(ctx, queueAgeSampleTimeout)
 +	defer cancel()
 +	age, present, err := w.repo.OldestQueuedAge(sampleCtx, w.tenantID)
@@ -1653,7 +1680,7 @@ index 0106f3242589d71b7e1a57d62476fa19a3695306..4178db3dc7afef6d0a3dde38b7f5f2e3
  func TestWorkerClaimErrorRetryPolicy(t *testing.T) {
  	t.Run("contention retries three times then polls", func(t *testing.T) {
  		calls := make(chan struct{}, maxImmediateClaimRetries+2)
-@@ -1074,3 +1210,445 @@ func TestWorkerLogsExcludePayloadAndScope(t *testing.T) {
+@@ -1074,3 +1210,458 @@ func TestWorkerLogsExcludePayloadAndScope(t *testing.T) {
  		}
  	}
  }
@@ -2003,6 +2030,9 @@ index 0106f3242589d71b7e1a57d62476fa19a3695306..4178db3dc7afef6d0a3dde38b7f5f2e3
 +
 +func TestWorkerSamplesDatabaseClockQueueAge(t *testing.T) {
 +	var output bytes.Buffer
++	if queueAgeSampleInterval != time.Minute {
++		t.Fatalf("queue age sample interval = %v", queueAgeSampleInterval)
++	}
 +	samples := 0
 +	repo := &fakeRepo{
 +		oldestAge: func(_ context.Context, tenantID string) (time.Duration, bool, error) {
@@ -2031,8 +2061,11 @@ index 0106f3242589d71b7e1a57d62476fa19a3695306..4178db3dc7afef6d0a3dde38b7f5f2e3
 +	worker.sampleOldestQueuedAge(context.Background())
 +
 +	records := telemetryRecords(t, output.String())
-+	if records[0]["OldestQueuedAgeMs"] != float64(660000) ||
-+		records[1]["OldestQueuedAgeMs"] != float64(0) ||
++	if len(records) != 4 ||
++		records[0]["SamplerHeartbeat"] != float64(1) ||
++		records[1]["OldestQueuedAgeMs"] != float64(660000) ||
++		records[2]["SamplerHeartbeat"] != float64(1) ||
++		records[3]["OldestQueuedAgeMs"] != float64(0) ||
 +		strings.Contains(output.String(), "PRIVATE-TENANT-MARKER") {
 +		t.Fatalf("queue age record = %s", output.String())
 +	}
@@ -2067,7 +2100,8 @@ index 0106f3242589d71b7e1a57d62476fa19a3695306..4178db3dc7afef6d0a3dde38b7f5f2e3
 +	}
 +	cfg := DefaultWorkerConfig()
 +	cfg.Enabled = true
-+	cfg.Telemetry = NewEMFTelemetry("prod", io.Discard, nil)
++	var telemetry bytes.Buffer
++	cfg.Telemetry = NewEMFTelemetry("prod", &telemetry, nil)
 +	worker := NewWorker(
 +		repo,
 +		fakeProcessor{},
@@ -2097,6 +2131,12 @@ index 0106f3242589d71b7e1a57d62476fa19a3695306..4178db3dc7afef6d0a3dde38b7f5f2e3
 +	}
 +	if strings.Contains(logs.String(), "queue age sample failed") {
 +		t.Fatalf("normal sampler cancellation logged as a failure: %s", logs.String())
++	}
++	records := telemetryRecords(t, telemetry.String())
++	if len(records) != 1 ||
++		records[0]["SamplerHeartbeat"] != float64(1) ||
++		!hasMetricDirective(records[0], []string{"stage"}, "SamplerHeartbeat") {
++		t.Fatalf("failed sample heartbeat = %s", telemetry.String())
 +	}
 +}
 diff --git a/server/internal/repository/postgres/ingest_job.go b/server/internal/repository/postgres/ingest_job.go

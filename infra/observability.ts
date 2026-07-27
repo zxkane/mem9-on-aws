@@ -302,10 +302,11 @@ export function observability(inputs: ObservabilityInputs) {
           width: 12,
           height: 6,
           properties: {
-            title: "Queue health",
+            title: "Queue and telemetry health",
             region: ECR_REGION,
             period: 300,
             metrics: [
+              durableMetric("SamplerHeartbeat"),
               durableMetric("OldestQueuedAgeMs", undefined, "Maximum"),
               durableMetric("QueueWaitMs", "succeeded", "Average"),
               durableMetric("QueueWaitMs", "retrying", "Average"),
@@ -444,6 +445,72 @@ export function observability(inputs: ObservabilityInputs) {
     treatMissingData: "notBreaching",
     alarmActions,
     okActions,
+  });
+
+  const telemetryLivenessAlarm = new aws.cloudwatch.MetricAlarm(
+    "DurableIngestTelemetryLivenessAlarm",
+    {
+      alarmDescription:
+        "The once-per-minute durable ingest sampler stopped emitting ECS-origin telemetry.",
+      metricQueries: [
+        {
+          id: "heartbeat",
+          metric: {
+            namespace: durableNamespace,
+            metricName: "SamplerHeartbeat",
+            dimensions: { stage },
+            stat: "Maximum",
+            period: 60,
+          },
+          returnData: false,
+        },
+        {
+          id: "heartbeat_present",
+          expression: "FILL(heartbeat, 0)",
+          label: "Sampler heartbeat present",
+          returnData: true,
+        },
+      ],
+      evaluationPeriods: 5,
+      datapointsToAlarm: 5,
+      threshold: 1,
+      comparisonOperator: "LessThanThreshold",
+      // FILL makes every current missing period an explicit breach, so older
+      // healthy points from CloudWatch's wider sliding range cannot defer it.
+      treatMissingData: "breaching",
+    },
+  );
+
+  const telemetryActionDelayGuard = new aws.cloudwatch.MetricAlarm(
+    "DurableIngestTelemetryActionDelayGuard",
+    {
+      alarmDescription:
+        "Always-OK guard that gives liveness alarm actions one bounded deployment grace period.",
+      namespace: durableNamespace,
+      metricName: "SamplerHeartbeat",
+      dimensions: { stage },
+      statistic: "Minimum",
+      period: 60,
+      evaluationPeriods: 1,
+      threshold: 0,
+      comparisonOperator: "LessThanThreshold",
+      treatMissingData: "notBreaching",
+    },
+  );
+
+  new aws.cloudwatch.CompositeAlarm("DurableIngestTelemetryLivenessNotification", {
+    alarmName: `mem9-on-aws-${stage}-durable-ingest-telemetry-liveness`,
+    alarmDescription:
+      "Durable ingest telemetry was absent through the bounded deployment grace period.",
+    alarmRule: telemetryLivenessAlarm.arn.apply((arn) => `ALARM("${arn}")`),
+    actionsSuppressor: {
+      alarm: telemetryActionDelayGuard.arn,
+      waitPeriod: 300,
+      extensionPeriod: 0,
+    },
+    alarmActions,
+    // CloudWatch starts a new wait after a state change during suppression.
+    // An OK action here could therefore send a recovery without a prior page.
   });
 
   new aws.cloudwatch.MetricAlarm("DurableIngestFailureRatioAlarm", {

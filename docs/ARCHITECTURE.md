@@ -268,9 +268,29 @@ path without EMF so short-lived `pr-N` stages do not create unbounded custom
 metric dimensions. These metrics are operational signals rather than an
 accounting ledger: a process crash or log-write failure can omit a committed
 transition metric. Aurora `ingest_jobs` and the tenant-scoped status API are the
-authoritative job state. Queue age alarms only on sampled values over the
-threshold; missing data is not treated as a queue-age breach or as a
-worker-liveness signal.
+authoritative job state.
+
+The same production emitter writes a content-free, stage-only
+`SamplerHeartbeat=1` before every queue-age query: immediately at worker start
+and once per minute thereafter, including when the query fails. Queue age and
+telemetry health are separate contracts. The queue-age alarm uses only sampled
+values over the threshold and keeps missing data non-breaching. The raw
+heartbeat alarm fills each current missing period with zero and requires five
+of five one-minute values below one. Older healthy points from CloudWatch's
+wider sliding evaluation range therefore cannot extend the five-minute bound;
+one delayed latest sample after four healthy samples remains non-alarming.
+
+The raw heartbeat alarm has no actions. Its action-bearing composite uses a
+fixed five-minute CloudWatch action-suppression wait backed by an always-OK
+guard alarm. This absorbs absent historical datapoints at initial enablement
+and brief rolling-deploy gaps. If no real ECS-origin heartbeat arrives, the
+wait expires and the composite notifies; sustained loss is therefore actionable
+after at most five evaluation minutes plus five action-wait minutes. Direct log
+probes and `AWS/Logs` parser-error metrics are diagnostic only and do not enable
+or suppress this contract. The composite has no OK action because CloudWatch
+starts a new suppression wait after a state change; recovery during the wait
+must clear silently rather than produce a notification without a preceding
+ALARM action.
 
 Memory rows and embeddings are durable in Aurora. The Fargate task uses `/tmp`
 only for mem9's batch-import implementation; normal add, search, and CRUD paths
@@ -456,9 +476,10 @@ to the GitHub Actions deploy role.
 - ECR scan-on-push is a guarded out-of-band registry singleton, separate from
   the retained repository stack.
 - Durable transcript ingest uses immutable plans and atomic PostgreSQL apply.
-- Durable ingest emits job lifecycle, queue-age, phase-duration, retry, warning,
-  truncation, and zero-fact metrics in `mem9-on-aws/DurableIngest`. Metric
-  dimensions are limited to stage and bounded result/error classes.
+- Durable ingest emits job lifecycle, queue-age, sampler-heartbeat,
+  phase-duration, retry, warning, truncation, and zero-fact metrics in
+  `mem9-on-aws/DurableIngest`. Metric dimensions are limited to stage and
+  bounded result/error classes.
 - The production ingest dashboard keeps application metrics separate from
   documented `AWS/BedrockMantle` Project metrics. Planning duration is
   application elapsed time; no Mantle latency metric is synthesized.
