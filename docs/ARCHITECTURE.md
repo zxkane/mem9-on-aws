@@ -319,13 +319,13 @@ Run `scripts/deploy-ecr-registry-scanning.sh` once per account/region. Its first
 AWS call reads the complete registry scanning configuration. It then reads
 CloudFormation ownership and applies this policy:
 
-| Current state | Wrapper result |
-|---|---|
-| Default BASIC configuration with no rules; dedicated stack absent | Adopt by creating the dedicated stack |
-| Dedicated stack owns an equivalent complete declaration | Verify and exit without mutation |
-| Dedicated stack owns different current rules | Update from the stack's complete declared ruleset |
-| External BASIC `SCAN_ON_PUSH` rules cover all four project repositories | Verify and exit without adopting or mutating them |
-| Any external scan type conflict, sibling-only rules, or partial project coverage | Fail closed before mutation |
+| Current state                                                                    | Wrapper result                                    |
+| -------------------------------------------------------------------------------- | ------------------------------------------------- |
+| Default BASIC configuration with no rules; dedicated stack absent                | Adopt by creating the dedicated stack             |
+| Dedicated stack owns an equivalent complete declaration                          | Verify and exit without mutation                  |
+| Dedicated stack owns different current rules                                     | Update from the stack's complete declared ruleset |
+| External BASIC `SCAN_ON_PUSH` rules cover all four project repositories          | Verify and exit without adopting or mutating them |
+| Any external scan type conflict, sibling-only rules, or partial project coverage | Fail closed before mutation                       |
 
 The wrapper never merges or infers external rules. It repeats the complete
 registry and ownership preflight immediately before mutation. A stack-name
@@ -389,13 +389,76 @@ or delete the dedicated ownership stack in any region. The operator wrapper
 derives its canonical `ecr-registry-scanning-mem9-on-aws` stack name without an
 override, so it cannot move the ownership record outside that deny.
 
-This direct-role guard is not an account-wide security boundary. The deploy role
-can create and pass application execution roles, and IAM explicit denies are not
-inherited by a different role session. Until those delegated roles are
-constrained by an enforced permissions boundary (or an equivalent account-level
-control), operators must not treat the ownership stack as tamper-proof against a
-malicious deployment. Keep the operator-only wrapper and manual review boundary
-in place.
+The application now defines a retained, operator-owned
+`mem9-on-aws-workload-boundary` and applies it to every non-production Pulumi IAM
+role through a global transform. Production registration requires an explicit
+`false` before migration and is changed to `true` only by the guarded migration;
+a missing or malformed value fails synthesis. The deploy-role policy
+requires that exact boundary for role creation, boundary attachment, and
+subsequent policy writes; it denies boundary removal and mutation of the
+boundary policy or operator-owned stacks.
+The boundary uses one broad identity allow plus an explicit
+`Deny`/`NotAction` ceiling for the current Lambda, ECS, AgentCore, alert-router,
+OAuth, and Mantle runtime actions. This is deliberate: same-account resource
+policies can grant directly to assumed-role sessions without an explicit
+boundary allow, but
+[explicit boundary denies still apply](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies.html).
+Resource and condition denies constrain project resources, SSM KMS context,
+short-term Mantle bearer use, and Lambda VPC ENI access. The ENI exception
+requires both a generated proxy-role name and `iam:PassedToService` restricted
+to Lambda; `lambda:SourceFunctionArn` explicitly denies the same actions to
+function code. The name match is therefore not the sole authorization check.
+
+The live role migration is intentionally separate from application deployment.
+`scripts/rollout-workload-permissions-boundary.sh` requires a maintenance
+acknowledgement plus `DEPLOYMENT_MAINTENANCE_PAUSED=true`. Both Infra CI and
+preview reconciliation stop before assuming the deploy role, and the rollout
+requires a clean checkout at the current default-branch commit, verifies the
+exact reviewed workflow blobs, and waits for queued or active runs from either
+workflow to finish, including disabled workflows. It then installs and verifies
+a temporary deploy-role quarantine before discovery, expands the deployed
+`iam:PassRole` scope with full pagination, and verifies all current production
+service deployment, RUNNING/PENDING, and bootstrap task definitions still carry
+the two required current-account/current-region project secret references before
+the first boundary attachment. It also lists the production project Lambdas,
+reads the production AgentCore Gateway, and requires every ECS task/execution,
+Lambda execution, and Gateway service role to belong to the migration inventory.
+That live binding set is re-read at every frozen-state verification. It attaches
+and reads back every role boundary, repairs and re-verifies the exact active
+boundary default policy version, activates and reads back the production
+transform variable, and re-verifies the role bindings, boundaries, and permanent
+enforcement. Immediately before quarantine deletion it also requires the
+default branch to remain at the reviewed commit, both reviewed workflow blobs
+to remain exact, the pause variable to remain `true`, both workflows to remain
+manually disabled, and every nonterminal run count to remain zero. It rechecks
+quarantine after that GitHub interlock and only then deletes it. It then enables
+and reads back both deployment workflows before unpausing; a partial resume
+restores the pause and disables workflows enabled by that attempt, while a
+failed restoration is reported as unsafe. IAM/ECS/Lambda pagination has page
+and item ceilings;
+AWS, GitHub, and deploy subprocesses have explicit timeouts; the overall rollout
+deadline is 45 minutes. Existing-stack
+updates change a semantics-neutral policy revision so CloudFormation reconciles
+direct managed-policy drift; nonterminal or rollback stack states fail closed.
+A failure retains quarantine and is recovered by re-running the same command.
+Normal preview and production deployment preflights use the read-only
+`--verify-only` path, so a permissive policy drift at the same stable ARN blocks
+deployment rather than satisfying an ARN-only check.
+Before migration, GitHub preview AWS jobs intentionally skip while
+`WORKLOAD_BOUNDARY_PROD_ENABLED=false`; policy preparation is required for a
+manual non-production deployment and for the first post-migration GitHub
+preview, not for a pre-migration implementation preview.
+Workflow gates and repository variables are trusted-writer maintenance
+interlocks, not authorization against a repository writer who can edit them.
+GitHub and IAM provide no cross-system atomic transaction, so the final
+revalidation narrows rather than eliminates the interval between observing
+GitHub state and deleting the IAM quarantine. The trusted-writer maintenance
+window requires no concurrent workflow or repository-settings changes in that
+interval. An untrusted-PR model requires removing the OIDC `pull_request`
+subject out of band until permanent enforcement is verified.
+Any rollback must preserve the transform, production activation, future
+`CreateRole` boundary enforcement, and the boundary-removal deny. Production
+execution and redacted evidence belong to the release-verification procedure.
 
 #### Operator IAM
 
@@ -439,20 +502,21 @@ to the GitHub Actions deploy role.
 
 ### Component map
 
-| Layer | Current resource or component | Source |
-|---|---|---|
-| Container registry | Four retained ECR repositories plus guarded registry-level BASIC scan-on-push | `infra/cloudformation/ecr-repositories.yaml`, `infra/cloudformation/ecr-registry-scanning.yaml` |
-| Compute | ECS Fargate, arm64, one task, three containers | `infra/ecs.ts` |
-| Database | Aurora PostgreSQL Serverless v2, direct writer endpoint; PITR retention prod=14 days, non-prod=1 day | `infra/db.ts` |
-| Database credential | Secrets Manager task-definition secret | `infra/db.ts`, `docker/mnemo-server/entrypoint.sh` |
-| Embedding | Local qwen3 sidecar, 1024 dimensions | `docker/qwen3-embed/` |
-| Smart-ingest LLM | Local proxy to Bedrock Mantle | `docker/llm-proxy/` |
-| Mantle attribution | `OpenAI-Project` added by `llm-proxy` when a project is configured | `docker/llm-proxy/server.mjs` |
-| Ingest observability | Content-free EMF metrics, CloudWatch dashboard, and production alarms | `docker/mnemo-server/patches/0006-durable-ingest-telemetry.patch`, `infra/observability.ts` |
-| MCP surface | AgentCore Gateway Lambda target | `infra/gateway.ts` |
-| Private service lookup | AWS Cloud Map | `infra/ecs.ts` |
-| Inbound auth | Cognito M2M plus OAuth2 PKCE facade | `infra/cognito.ts`, `infra/oauth-facade.ts` |
-| Schema setup | Startup atomic-ingest migration plus one-shot ECS bootstrap for the complete schema and tenant seed | `docker/mnemo-server/entrypoint.sh`, `infra/bootstrap.ts`, `docker/bootstrap/migrations/` |
+| Layer                  | Current resource or component                                                                        | Source                                                                                                        |
+| ---------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
+| Container registry     | Four retained ECR repositories plus guarded registry-level BASIC scan-on-push                        | `infra/cloudformation/ecr-repositories.yaml`, `infra/cloudformation/ecr-registry-scanning.yaml`               |
+| Compute                | ECS Fargate, arm64, one task, three containers                                                       | `infra/ecs.ts`                                                                                                |
+| Database               | Aurora PostgreSQL Serverless v2, direct writer endpoint; PITR retention prod=14 days, non-prod=1 day | `infra/db.ts`                                                                                                 |
+| Database credential    | Secrets Manager task-definition secret                                                               | `infra/db.ts`, `docker/mnemo-server/entrypoint.sh`                                                            |
+| Workload IAM ceiling   | Retained operator-owned permissions boundary; guarded live migration                                 | `infra/cloudformation/workload-permissions-boundary.yaml`, `scripts/rollout-workload-permissions-boundary.sh` |
+| Embedding              | Local qwen3 sidecar, 1024 dimensions                                                                 | `docker/qwen3-embed/`                                                                                         |
+| Smart-ingest LLM       | Local proxy to Bedrock Mantle                                                                        | `docker/llm-proxy/`                                                                                           |
+| Mantle attribution     | `OpenAI-Project` added by `llm-proxy` when a project is configured                                   | `docker/llm-proxy/server.mjs`                                                                                 |
+| Ingest observability   | Content-free EMF metrics, CloudWatch dashboard, and production alarms                                | `docker/mnemo-server/patches/0006-durable-ingest-telemetry.patch`, `infra/observability.ts`                   |
+| MCP surface            | AgentCore Gateway Lambda target                                                                      | `infra/gateway.ts`                                                                                            |
+| Private service lookup | AWS Cloud Map                                                                                        | `infra/ecs.ts`                                                                                                |
+| Inbound auth           | Cognito M2M plus OAuth2 PKCE facade                                                                  | `infra/cognito.ts`, `infra/oauth-facade.ts`                                                                   |
+| Schema setup           | Startup atomic-ingest migration plus one-shot ECS bootstrap for the complete schema and tenant seed  | `docker/mnemo-server/entrypoint.sh`, `infra/bootstrap.ts`, `docker/bootstrap/migrations/`                     |
 
 ## Locked decisions
 
@@ -475,6 +539,8 @@ to the GitHub Actions deploy role.
 - Schema bootstrap is a separate one-shot ECS task.
 - ECR scan-on-push is a guarded out-of-band registry singleton, separate from
   the retained repository stack.
+- Every application IAM role is synthesized with the fixed operator-owned
+  workload permissions boundary; live adoption uses the guarded migration.
 - Durable transcript ingest uses immutable plans and atomic PostgreSQL apply.
 - Durable ingest emits job lifecycle, queue-age, sampler-heartbeat,
   phase-duration, retry, warning, truncation, and zero-fact metrics in

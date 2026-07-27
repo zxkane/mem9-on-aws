@@ -1,0 +1,41 @@
+{
+  "repository": "zxkane/mem9-on-aws",
+  "rolloutTimeoutMs": 2700000,
+  "shutdownGraceMs": 30000,
+  "identifiers": {
+    "boundaryPolicyName": "mem9-on-aws-workload-boundary",
+    "boundaryStackName": "workload-permissions-boundary-mem9-on-aws",
+    "deployRoleName": "github-actions-mem9-on-aws",
+    "quarantinePolicyName": "mem9-on-aws-workload-boundary-quarantine"
+  },
+  "deploymentWorkflows": [
+    {
+      "id": "infra-ci.yml",
+      "path": ".github/workflows/infra-ci.yml",
+      "reviewedBlob": "ab2a30b0c9b16e3ec8d347c5fddc9428b02aedce"
+    },
+    {
+      "id": "reconcile-previews.yml",
+      "path": ".github/workflows/reconcile-previews.yml",
+      "reviewedBlob": "082330244d9773cb55949f54deb2659c5d999506"
+    }
+  ],
+  "nonterminalWorkflowStatuses": [
+    "queued",
+    "in_progress",
+    "requested",
+    "waiting",
+    "pending"
+  ],
+  "quarantineProbeActions": [
+    "cloudformation:UpdateStack",
+    "ecr:PutImage",
+    "ecs:UpdateService",
+    "iam:PassRole",
+    "iam:PutRolePermissionsBoundary",
+    "iam:PutRolePolicy",
+    "lambda:UpdateFunctionCode",
+    "s3:PutBucketPolicy",
+    "ssm:PutParameter"
+  ]
+}

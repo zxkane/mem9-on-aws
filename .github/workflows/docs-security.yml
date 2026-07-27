@@ -3,16 +3,8 @@ name: Documentation Security
 on:
   pull_request:
     branches: [main]
-    paths:
-      - "README.md"
-      - "docs/**"
-      - ".github/workflows/docs-security.yml"
   push:
     branches: [main]
-    paths:
-      - "README.md"
-      - "docs/**"
-      - ".github/workflows/docs-security.yml"
 
 permissions:
   contents: read
@@ -24,6 +16,12 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
 
       - name: Validate README shell blocks
         shell: bash
@@ -64,12 +62,23 @@ jobs:
             fi
           done
 
-      - name: Scan public documentation for live identifiers and secrets
+      - name: Scan every changed path and historical blob
         shell: bash
+        env:
+          DIFF_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+          DIFF_HEAD: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           set -euo pipefail
-          pattern='issuecomment-[0-9]+|<owner>/<repo>#[0-9]+|[0-9]{12}|arn:aws:[a-z0-9-]+:[a-z0-9-]*:[0-9]{12}|[A-Za-z0-9-]+\.cluster-[A-Za-z0-9-]+\.[a-z0-9-]+\.rds\.amazonaws\.com|AKIA[0-9A-Z]{16}|ASIA[0-9A-Z]{16}|BEGIN (RSA |EC |OPENSSH )?PRIVATE KEY'
-          if grep -RniE "$pattern" README.md docs; then
-            echo "::error::Public documentation contains a prohibited identifier or secret pattern"
+          if [[ ! "$DIFF_HEAD" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Could not resolve the public-artifact scan head"
             exit 1
           fi
+          if [[ "$DIFF_BASE" == "0000000000000000000000000000000000000000" ]]; then
+            DIFF_BASE="$(git rev-parse "$DIFF_HEAD^")"
+          fi
+          if [[ ! "$DIFF_BASE" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Could not resolve the public-artifact scan base"
+            exit 1
+          fi
+          node scripts/scan-public-artifacts.mjs \
+            --git-range "$DIFF_BASE" "$DIFF_HEAD"

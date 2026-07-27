@@ -109,7 +109,6 @@ Resources:
               - organizations:*
               - account:*
               - sso:*
-              - sso-admin:*
               - cloudtrail:DeleteTrail
               - cloudtrail:StopLogging
               - guardduty:DeleteDetector
@@ -140,6 +139,96 @@ Resources:
               - cloudformation:UpdateStack
               - cloudformation:UpdateTerminationProtection
             Resource: !Sub arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/ecr-registry-scanning-${ProjectName}/*
+          - Sid: DenyOperatorOwnedIamMutation
+            # The workload boundary is created and maintained by the operator.
+            # Pull-request deployments may reference it but can never replace,
+            # version, retag, or delete it.
+            Effect: Deny
+            Action:
+              - iam:CreatePolicy
+              - iam:CreatePolicyVersion
+              - iam:DeletePolicy
+              - iam:DeletePolicyVersion
+              - iam:SetDefaultPolicyVersion
+              - iam:TagPolicy
+              - iam:UntagPolicy
+            Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
+          - Sid: DenyOperatorOwnedStackMutation
+            # Protect every out-of-band ownership/control stack whose policy is
+            # relied on to constrain a pull-request-capable deploy session.
+            Effect: Deny
+            Action:
+              - cloudformation:CancelUpdateStack
+              - cloudformation:ContinueUpdateRollback
+              - cloudformation:CreateChangeSet
+              - cloudformation:CreateStack
+              - cloudformation:CreateStackRefactor
+              - cloudformation:DeleteChangeSet
+              - cloudformation:DeleteStack
+              - cloudformation:ExecuteChangeSet
+              - cloudformation:ExecuteStackRefactor
+              - cloudformation:RecordHandlerProgress
+              - cloudformation:RollbackStack
+              - cloudformation:SetStackPolicy
+              - cloudformation:SignalResource
+              - cloudformation:TagResource
+              - cloudformation:UntagResource
+              - cloudformation:UpdateStack
+              - cloudformation:UpdateTerminationProtection
+            Resource:
+              - !Sub arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/workload-permissions-boundary-${ProjectName}/*
+              - !Sub arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/github-actions-${GitHubRepo}/*
+          - Sid: DenyUnboundedProjectRoleCreation
+            # Negated ARN conditions also match a missing request/resource key,
+            # so CreateRole without a boundary and boundary replacement with any
+            # other policy are both denied.
+            Effect: Deny
+            Action:
+              - iam:CreateRole
+              - iam:PutRolePermissionsBoundary
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aw-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a-*
+            Condition:
+              ArnNotEquals:
+                iam:PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
+          - Sid: DenyUnboundedProjectRolePolicyWrites
+            # iam:PermissionsBoundary describes the target role for policy
+            # writes. This explicit deny protects against a future allow being
+            # added elsewhere without the corresponding boundary condition.
+            Effect: Deny
+            Action:
+              - iam:AttachRolePolicy
+              - iam:PutRolePolicy
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aw-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a-*
+            Condition:
+              ArnNotEquals:
+                iam:PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
+          - Sid: DenyVpcLambdaRolePassToOtherServices
+            # The shared boundary exposes ENI actions only to roles whose
+            # generated name identifies the VPC proxy Lambda. Prevent a
+            # PR-controlled role with that name from being passed to ECS or
+            # AgentCore, where lambda:SourceFunctionArn is unavailable.
+            Effect: Deny
+            Action:
+              - iam:PassRole
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ProxyFnRole-*
+            Condition:
+              StringNotEquals:
+                iam:PassedToService: lambda.amazonaws.com
+          - Sid: DenyWorkloadBoundaryRemoval
+            Effect: Deny
+            Action:
+              - iam:DeleteRolePermissionsBoundary
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aw-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a-*
 
   # ───────────────────────────────────────────────────────────────────────────
   # Policy 2 — SST Pulumi state + resource provisioning (the scaffold's real
@@ -430,7 +519,9 @@ Resources:
             # needed. Grant this read explicitly on the SLR ARN (+ the
             # autoscaling SLR); the customer role lifecycle (CreateRole/etc.) for
             # this project's mem9-on-aws-* roles lives in ComputePolicy's
-            # EcsTaskRoles now — the RDS-Proxy customer role is gone.
+            # EcsTaskRoleCreateWithBoundary, EcsTaskRolePolicyWritesWithBoundary,
+            # and EcsTaskRoleLifecycle statements now — the RDS-Proxy customer
+            # role is gone.
             Effect: Allow
             Action:
               - iam:GetRole
@@ -440,7 +531,8 @@ Resources:
           # (Sid: RdsProxyRole removed 2026-07-12 — the RDS Proxy was dropped, so
           # SST no longer creates the Mem9DbProxyRole customer role. The generic
           # mem9-on-aws-* IAM role lifecycle needed by the rest of the stack is
-          # granted in ComputePolicy's EcsTaskRoles.)
+          # granted in ComputePolicy's boundary-enforced ECS task-role
+          # statements.)
           - Sid: SecretsManager
             # sst.aws.Aurora creates its OWN secret `<app>-<stage>-Mem9DbSecret
             # -<random>` (the cluster master creds) holding a static RandomPassword
@@ -610,19 +702,53 @@ Resources:
             Resource:
               - !Sub arn:aws:logs:*:${AWS::AccountId}:log-group:/sst/*
               - !Sub arn:aws:logs:*:${AWS::AccountId}:log-group:/sst/*:*
-          - Sid: EcsTaskRoles
-            # SST creates the task role + task-execution role for the service.
-            # Scoped to this project's auto-named roles + SST truncation variants.
+          - Sid: EcsTaskRoleCreateWithBoundary
+            # Every new or newly-bounded application role must carry the fixed
+            # operator-owned boundary in the same request.
             Effect: Allow
             Action:
               - iam:CreateRole
+              - iam:PutRolePermissionsBoundary
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aw-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a-*
+            Condition:
+              ArnEquals:
+                iam:PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
+          - Sid: WorkloadBoundaryRead
+            # Deployment preflight verifies the active default version, not only
+            # the stable policy ARN, so operator drift fails every AWS deploy.
+            Effect: Allow
+            Action:
+              - iam:GetPolicy
+              - iam:GetPolicyVersion
+            Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
+          - Sid: EcsTaskRolePolicyWritesWithBoundary
+            # Policy writes are allowed only after IAM confirms that the target
+            # role already carries the exact expected boundary.
+            Effect: Allow
+            Action:
+              - iam:PutRolePolicy
+              - iam:AttachRolePolicy
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aw-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a-*
+            Condition:
+              ArnEquals:
+                iam:PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
+          - Sid: EcsTaskRoleLifecycle
+            # Read, detach, policy-delete, and role-delete remain available for
+            # preview teardown. IAM removes a role's boundary association when
+            # the role is deleted; CI never calls DeleteRolePermissionsBoundary.
+            Effect: Allow
+            Action:
               - iam:DeleteRole
               - iam:GetRole
-              - iam:PutRolePolicy
               - iam:DeleteRolePolicy
               - iam:GetRolePolicy
               - iam:ListRolePolicies
-              - iam:AttachRolePolicy
               - iam:DetachRolePolicy
               - iam:ListAttachedRolePolicies
               - iam:ListRoleTags
@@ -830,8 +956,9 @@ Resources:
   # task security group, which requires the narrowly-scoped delete grant below.
   # ec2:Describe* is already in ScaffoldPolicy.EC2VpcReadOnly. PassRole to
   # lambda.amazonaws.com is covered by ScaffoldPolicy.PassRoleConstrained, and the
-  # mem9-on-aws-* exec-role lifecycle by ComputePolicy.EcsTaskRoles. The Cloud Map
-  # + Route53-for-Cloud-Map grants live in ComputePolicy (near the ECS service).
+  # mem9-on-aws-* exec-role lifecycle by ComputePolicy's boundary-enforced ECS
+  # task-role statements. The Cloud Map + Route53-for-Cloud-Map grants live in
+  # ComputePolicy (near the ECS service).
   #
   # OUT-OF-BAND DEPLOY REQUIREMENT: apply this policy with
   # scripts/deploy-github-role.sh before deploying Lambda proxy policy changes.
@@ -852,6 +979,7 @@ Resources:
               - lambda:GetFunction
               - lambda:GetFunctionConfiguration
               - lambda:GetFunctionCodeSigningConfig
+              - lambda:ListFunctions
               - lambda:ListVersionsByFunction
             Resource: "*"
           - Sid: LambdaManage
@@ -979,11 +1107,9 @@ Resources:
             Resource:
               - !Sub arn:${AWS::Partition}:bedrock-agentcore:*:${AWS::AccountId}:gateway/*
           - Sid: BedrockAgentCoreWorkloadIdentity
-            # Implicitly created by AgentCore the first time any Gateway /
-            # credential-provider runs in the account (single default
-            # workload-identity-directory + token-vault per account). CreateGateway
-            # + CreateApiKeyCredentialProvider both chain into CreateTokenVault on
-            # first account use — without these the FIRST deploy 403s.
+            # AgentCore workload identity lifecycle plus the one public token-vault
+            # read action. Vault creation/lifecycle is service-managed and has no
+            # customer IAM action in the service authorization reference.
             Effect: Allow
             Action:
               - bedrock-agentcore:CreateWorkloadIdentity
@@ -991,12 +1117,7 @@ Resources:
               - bedrock-agentcore:UpdateWorkloadIdentity
               - bedrock-agentcore:DeleteWorkloadIdentity
               - bedrock-agentcore:ListWorkloadIdentities
-              - bedrock-agentcore:GetWorkloadIdentityDirectory
-              - bedrock-agentcore:CreateTokenVault
               - bedrock-agentcore:GetTokenVault
-              - bedrock-agentcore:UpdateTokenVault
-              - bedrock-agentcore:DeleteTokenVault
-              - bedrock-agentcore:ListTokenVaults
             Resource:
               - !Sub arn:${AWS::Partition}:bedrock-agentcore:*:${AWS::AccountId}:workload-identity-directory/*
               - !Sub arn:${AWS::Partition}:bedrock-agentcore:*:${AWS::AccountId}:token-vault/*
@@ -1063,8 +1184,6 @@ Resources:
               - apigateway:PATCH
               - apigateway:PUT
               - apigateway:DELETE
-              - apigateway:TagResource
-              - apigateway:UntagResource
             Resource:
               # Region wildcard: the CFN stack lives in us-west-2 but the app
               # deploys to ap-northeast-1. API Gateway ARNs carry no account-id
@@ -1098,7 +1217,7 @@ Resources:
               - logs:CreateDelivery
               - logs:GetDelivery
               - logs:DeleteDelivery
-              - logs:ListDeliveries
+              - logs:DescribeDeliveries
               - logs:PutResourcePolicy
               - logs:DescribeResourcePolicies
               - logs:DescribeLogGroups
@@ -1166,7 +1285,8 @@ Resources:
         Statement:
           - Effect: Allow
             Principal:
-              Federated: !If [CreateOIDCProvider, !Ref GithubOidc, !Ref OIDCProviderArn]
+              Federated:
+                !If [CreateOIDCProvider, !Ref GithubOidc, !Ref OIDCProviderArn]
             Action: sts:AssumeRoleWithWebIdentity
             Condition:
               StringEquals:

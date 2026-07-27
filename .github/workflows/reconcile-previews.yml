@@ -1,5 +1,13 @@
 name: Reconcile preview stages
 
+# Optional GitHub repository variable:
+#   DEPLOYMENT_MAINTENANCE_PAUSED - set to true during guarded IAM maintenance.
+#   Both report and apply stop before assuming the shared deploy role.
+#   WORKLOAD_BOUNDARY_PROD_ENABLED - both jobs stay disabled until the guarded
+#   workload-role migration sets this variable to true.
+#
+# Workload-boundary maintenance gate revision: 1
+
 on:
   schedule:
     - cron: "17 3 * * *"
@@ -23,6 +31,7 @@ env:
 jobs:
   report:
     name: Report stale preview stages
+    if: vars.WORKLOAD_BOUNDARY_PROD_ENABLED == 'true'
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     timeout-minutes: 10
     permissions:
@@ -32,6 +41,15 @@ jobs:
       pull-requests: read
       issues: read
     steps:
+      - name: Deployment maintenance gate
+        env:
+          PAUSED: ${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}
+        run: |
+          if [ "$PAUSED" = "true" ]; then
+            echo "::error::AWS deployments are paused for guarded IAM maintenance"
+            exit 1
+          fi
+
       - uses: actions/checkout@v5
 
       - uses: actions/setup-node@v5
@@ -65,7 +83,7 @@ jobs:
   apply:
     name: Revalidate and reconcile preview stages
     needs: report
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'apply'
+    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'apply' && vars.WORKLOAD_BOUNDARY_PROD_ENABLED == 'true'
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     timeout-minutes: 45
     permissions:
@@ -75,6 +93,15 @@ jobs:
       pull-requests: read
       issues: write
     steps:
+      - name: Deployment maintenance gate
+        env:
+          PAUSED: ${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}
+        run: |
+          if [ "$PAUSED" = "true" ]; then
+            echo "::error::AWS deployments are paused for guarded IAM maintenance"
+            exit 1
+          fi
+
       - uses: actions/checkout@v5
 
       - uses: pnpm/action-setup@v5

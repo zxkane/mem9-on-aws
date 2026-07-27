@@ -47,24 +47,24 @@ rather than silently diverging.
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for rationale and official AWS
 citations.
 
-| Dimension | Decision |
-|---|---|
-| IaC | **SST v4** |
-| Region | **ap-northeast-1 (Tokyo)** |
-| Container registry | Four retained ECR repositories plus guarded registry-level BASIC scan-on-push for `mem9-on-aws/*`, both managed out of band |
-| Compute | **ECS Fargate**, **arm64**, single task (`desiredCount=1`) |
-| Database | **Aurora PostgreSQL Serverless v2** + `pgvector` (mem9 `postgres` backend). `mnemo-server` and bootstrap connect directly to the cluster writer endpoint with a Secrets Manager credential. **RDS Proxy is not deployed.** |
-| VPC | **Reuse the account default VPC** (private subnets with NAT egress) |
-| MCP surface | **AgentCore Gateway** (MCP → mnemo-server REST API) |
-| Gateway → server | **Private** (a [Lambda-proxy GatewayTarget](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-add-target-api-target-config.html)): AgentCore invokes a VPC-attached proxy Lambda with [`lambda:InvokeFunction`](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-prerequisites-permissions.html). The Lambda uses [VPC connectivity](https://docs.aws.amazon.com/lambda/latest/dg/configuration-vpc.html) and [AWS Cloud Map private DNS](https://docs.aws.amazon.com/cloud-map/latest/api/API_CreatePrivateDnsNamespace.html) (`mnemo.mem9-<stage>.local:8080`) to reach mnemo-server with the `X-API-Key` (= tenant id). No ALB, ACM certificate, VPC Lattice, public Route 53 zone, or public server endpoint is deployed. |
-| Auth (inbound) | **Cognito M2M** (`client_credentials`) + an OAuth2 browser-login façade (`authorization_code` + PKCE) for interactive MCP clients |
-| LLM (smart-ingest) | `mnemo-server` calls the **local `llm-proxy` sidecar** at `http://localhost:8082/v1`. The proxy refreshes a short-term Mantle bearer, injects `OpenAI-Project` when `MEM9_BEDROCK_PROJECT` is configured, and calls Bedrock Mantle. Each request has one 110-second deadline and at most two Mantle calls. The task role uses `bedrock-mantle:CreateInference` and `bedrock-mantle:CallWithBearerToken`; `mnemo-server` never calls Mantle directly. |
-| Embedding | qwen3 OpenAI-compatible `/embeddings` as an **ECS sidecar** (localhost, always warm), **dims 1024**. Not Mantle, not a third-party API. |
-| ECS task | **3 containers**: mnemo-server + qwen3-embed sidecar + llm-proxy sidecar |
-| Schema bootstrap | **startup atomic-ingest migration** before `mnemo-server`, plus a **one-shot ECS task** on deploy (pgvector + tenant runtime schema incl. `idx_app`/FTS/`vector(1024)` + seed 1 tenant) |
-| Durable ingest | Transcript `messages[]` requests enqueue durable Aurora jobs. Immutable, materialized plans apply raw sessions, tags, memory actions, and job success in one PostgreSQL transaction; authenticated REST and Gateway status lookups are tenant-scoped. |
-| Tenancy | **single tenant** (one `X-API-Key`); writes carry **`X-Mnemo-Agent-Id`** to reserve per-agent scoping |
-| Replicas | **Single** (`desiredCount=1`) — single-writer, sidesteps mem9's local-disk import dir |
+| Dimension          | Decision                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| IaC                | **SST v4**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Region             | **ap-northeast-1 (Tokyo)**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Container registry | Four retained ECR repositories plus guarded registry-level BASIC scan-on-push for `mem9-on-aws/*`, both managed out of band                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
+| Compute            | **ECS Fargate**, **arm64**, single task (`desiredCount=1`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Database           | **Aurora PostgreSQL Serverless v2** + `pgvector` (mem9 `postgres` backend). `mnemo-server` and bootstrap connect directly to the cluster writer endpoint with a Secrets Manager credential. **RDS Proxy is not deployed.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| VPC                | **Reuse the account default VPC** (private subnets with NAT egress)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| MCP surface        | **AgentCore Gateway** (MCP → mnemo-server REST API)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Gateway → server   | **Private** (a [Lambda-proxy GatewayTarget](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-add-target-api-target-config.html)): AgentCore invokes a VPC-attached proxy Lambda with [`lambda:InvokeFunction`](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-prerequisites-permissions.html). The Lambda uses [VPC connectivity](https://docs.aws.amazon.com/lambda/latest/dg/configuration-vpc.html) and [AWS Cloud Map private DNS](https://docs.aws.amazon.com/cloud-map/latest/api/API_CreatePrivateDnsNamespace.html) (`mnemo.mem9-<stage>.local:8080`) to reach mnemo-server with the `X-API-Key` (= tenant id). No ALB, ACM certificate, VPC Lattice, public Route 53 zone, or public server endpoint is deployed. |
+| Auth (inbound)     | **Cognito M2M** (`client_credentials`) + an OAuth2 browser-login façade (`authorization_code` + PKCE) for interactive MCP clients                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| LLM (smart-ingest) | `mnemo-server` calls the **local `llm-proxy` sidecar** at `http://localhost:8082/v1`. The proxy refreshes a short-term Mantle bearer, injects `OpenAI-Project` when `MEM9_BEDROCK_PROJECT` is configured, and calls Bedrock Mantle. Each request has one 110-second deadline and at most two Mantle calls. The task role uses `bedrock-mantle:CreateInference` and `bedrock-mantle:CallWithBearerToken`; `mnemo-server` never calls Mantle directly.                                                                                                                                                                                                                                                                                                                   |
+| Embedding          | qwen3 OpenAI-compatible `/embeddings` as an **ECS sidecar** (localhost, always warm), **dims 1024**. Not Mantle, not a third-party API.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| ECS task           | **3 containers**: mnemo-server + qwen3-embed sidecar + llm-proxy sidecar                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
+| Schema bootstrap   | **startup atomic-ingest migration** before `mnemo-server`, plus a **one-shot ECS task** on deploy (pgvector + tenant runtime schema incl. `idx_app`/FTS/`vector(1024)` + seed 1 tenant)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Durable ingest     | Transcript `messages[]` requests enqueue durable Aurora jobs. Immutable, materialized plans apply raw sessions, tags, memory actions, and job success in one PostgreSQL transaction; authenticated REST and Gateway status lookups are tenant-scoped.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Tenancy            | **single tenant** (one `X-API-Key`); writes carry **`X-Mnemo-Agent-Id`** to reserve per-agent scoping                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Replicas           | **Single** (`desiredCount=1`) — single-writer, sidesteps mem9's local-disk import dir                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
 ## Planned reliability work
 
@@ -91,10 +91,10 @@ The AgentCore Gateway exposes four tools over MCP (Cognito-authenticated):
 - `docker/` — the four container images: `mnemo-server` (pinned upstream build),
   `qwen3-embed` (embedding sidecar), `llm-proxy` (Mantle bearer/project bridge),
   `bootstrap` (schema + tenant seed).
-- `scripts/` — out-of-band bootstrap scripts (GitHub Actions IAM role, four ECR
-  repositories, guarded registry scan-on-push, and Bedrock Mantle Project) that
-  the SST app references read-only. See each script's header and `.env.example`
-  for the environment it expects.
+- `scripts/` — out-of-band bootstrap scripts (GitHub Actions IAM role, workload
+  permissions boundary, four ECR repositories, guarded registry scan-on-push,
+  and Bedrock Mantle Project) that the SST app references read-only. See each
+  script's header and `.env.example` for the environment it expects.
 - `docs/` — `ARCHITECTURE.md` (decisions) and `mem9-facts.md` (upstream constraints).
 
 ## Development
@@ -108,6 +108,144 @@ The AgentCore Gateway exposes four tools over MCP (Cognito-authenticated):
   application VPC discovery must target a region other than its documented
   default.
 - Agent contributors: see [`AGENTS.md`](AGENTS.md) for repo conventions and hard rules.
+
+## Workload permissions-boundary rollout
+
+The application applies the fixed, operator-owned workload permissions boundary
+to every non-production Pulumi `aws.iam.Role`. Set the repository variable
+`WORKLOAD_BOUNDARY_PROD_ENABLED=false` before merging the implementation; the
+guarded migration later sets and verifies it as `true`. A missing or malformed
+value fails production synthesis instead of silently omitting the transform.
+The boundary stack and its migration remain out-of-band so a pull-request-capable
+deploy role cannot modify its own ceiling. Merging the implementation does not
+migrate the live account.
+
+Before migration, pull-request AWS jobs intentionally skip while
+`WORKLOAD_BOUNDARY_PROD_ENABLED=false`; only the non-AWS validation job runs.
+There is therefore no pre-migration GitHub preview of this implementation.
+
+Prepare the unattached policy before either a manual non-production deployment
+or the first GitHub preview after migration:
+
+```bash
+scripts/deploy-workload-permissions-boundary.sh
+gh variable set WORKLOAD_BOUNDARY_PROD_ENABLED --body false
+```
+
+This preparation creates or verifies only the retained managed policy. It does
+not attach a boundary, update the deploy role, activate pre-migration GitHub AWS
+jobs, or remove the maintenance gate. A drifted existing stack can be updated
+only by the guarded rollout, which changes a semantics-neutral policy revision
+so CloudFormation rewrites the managed policy even when the submitted template
+is otherwise unchanged. Both boundary operator commands require Node.js 24.
+
+Merge the gate-bearing implementation before migration. Then run the migration
+only in an approved maintenance window after setting
+`DEPLOYMENT_MAINTENANCE_PAUSED=true`. The rollout requires a clean checkout at
+the current default-branch commit, verifies the exact reviewed workflow blobs,
+checks every nonterminal workflow status twice (including disabled workflows),
+requires the exact-head push run's non-AWS `Typecheck & Unit Tests` job to have
+succeeded, and refuses to start until Infra CI and preview reconciliation are
+idle. It passes that reviewed commit explicitly into the migration state
+machine for one final comparison before quarantine removal. The gated AWS jobs
+are expected to fail or skip before migration:
+
+```bash
+WORKLOAD_BOUNDARY_MAINTENANCE_ACK=true \
+  scripts/rollout-workload-permissions-boundary.sh
+```
+
+The command requires Node.js 24 before its first AWS mutation. It first installs
+and simulates a temporary deny on the GitHub Actions deploy role, then deploys
+or verifies the retained boundary stack, derives the complete migration set from
+the deployed `iam:PassRole` policies, and checks all production service
+deployments, RUNNING/PENDING tasks, and the bootstrap task definition before the
+first role mutation. Every task definition must carry `MEM9_DB_SECRET` and
+`MEM9_TENANT_ID` references to current-account, Tokyo-region
+`mem9-on-aws-*` secrets. It also reads every production project Lambda and the
+AgentCore Gateway, then proves that all ECS task/execution, Lambda execution,
+and Gateway service roles are in the migration inventory. That binding set is
+re-read before quarantine removal. The command then attaches and reads back every
+boundary and deploys the permanent policy conditions. Before removing quarantine
+it repairs and verifies the exact active boundary policy, sets and reads back
+`WORKLOAD_BOUNDARY_PROD_ENABLED=true`, and repeats the frozen-state checks, so
+the next exact-head production deployment retains every boundary. It then
+requires the default branch to remain at the reviewed commit, both reviewed
+workflow blobs to remain exact, the pause to remain `true`, both workflows to
+remain `disabled_manually`, and all `queued`, `in_progress`, `requested`,
+`waiting`, and `pending` run counts to remain zero. Only after another
+quarantine verification may it delete quarantine. It then enables and reads
+back both workflows before unpausing deployments. A partial resume restores and
+reads back the pause, disables workflows enabled by that attempt, and reports
+any failed rollback without claiming success. That rollback uses a fresh signal
+and the reserved shutdown window even when the operational signal or deadline
+already fired.
+
+Normal AWS deployment preflights call the boundary script with `--verify-only`.
+They compare the current default policy version with the repository contract and
+fail on policy drift at the stable ARN without creating or updating anything.
+AWS and GitHub CLI calls, deploy subprocesses, pagination, and the complete
+rollout all have bounded execution limits; exceeding one leaves quarantine in
+place.
+
+Use an operator identity, never the GitHub Actions deploy role. In addition to
+the existing out-of-band CloudFormation permissions, it needs IAM role/policy
+read access, inline-policy put/get/delete on the deploy role,
+`iam:SimulatePrincipalPolicy`, role inventory reads, and
+`iam:PutRolePermissionsBoundary` on the discovered project roles.
+The permanent-enforcement phase invokes `scripts/deploy-github-role.sh`, so the
+operator also needs that script's existing OIDC-provider, STS, VPC/subnet, and
+template-upload reads/writes. Because the role template exceeds the inline
+CloudFormation size limit, configure `MEM9_TEMPLATE_BUCKET` or ensure the
+operator can discover and write the account's SST state bucket.
+
+If the command is interrupted or fails after the quarantine attempt, keep
+deployments paused and run the exact `Resume:` command it prints. Before the
+first IAM mutation the wrapper writes the effective non-secret AWS profile and
+region settings, VPC/template-bucket selectors, and expected account and
+partition to the gitignored, mode-`0600`
+`.env.workload-boundary-resume` file. The printed command explicitly reloads
+that file even if the caller previously set `WORKLOAD_BOUNDARY_SKIP_DOTENV`.
+A retry refuses a different AWS identity instead of targeting another account.
+If retained recovery state already exists, an initial command is rejected before
+any GitHub or AWS call; only the printed `Resume:` command may reload that state.
+The wrapper takes a checkout-local nonblocking lock so another rollout cannot
+overwrite or remove that recovery state. During the IAM phase it forwards
+`SIGINT` and `SIGTERM` to the bounded Node process, waits for its recovery path,
+and exits with 130 or 143. The file is removed after a successful rollout. The
+migration is idempotent and treats quarantine as installed until proven
+otherwise. Never manually remove
+`mem9-on-aws-workload-boundary-quarantine` during recovery.
+
+An ownership stack in `UPDATE_ROLLBACK_COMPLETE` is repaired only by the guarded
+rollout; read-only verification rejects it even if the current policy happens to
+match. For `UPDATE_ROLLBACK_FAILED`, first use CloudFormation's reviewed
+`continue-update-rollback` recovery to return the stack to
+`UPDATE_ROLLBACK_COMPLETE`, then rerun the printed guarded command.
+
+A rollback is forward-fix only. It may correct or narrow the explicit runtime
+action ceiling, but it must retain the transform, the production activation
+variable, the fixed boundary, the `CreateRole`/policy-write boundary conditions,
+and the explicit boundary-removal deny. Never deploy an older revision that
+omits `permissionsBoundary`, and never unset
+`WORKLOAD_BOUNDARY_PROD_ENABLED`: either action asks Pulumi to remove the
+boundary, which permanent enforcement denies and can leave a partial deployment.
+If such a deployment was attempted, keep maintenance paused, restore the
+boundary-aware exact head, verify every role boundary, and redeploy that head.
+Removing future-role enforcement would reopen the privilege-escalation path even
+if existing roles remain bounded.
+Live migration and production smoke evidence are recorded by the production
+release-verification procedure, not by CI for this change.
+
+The maintenance variables and workflow checks are operational interlocks for
+this private, trusted-writer repository. They cannot stop a repository writer
+from editing the workflow itself, and GitHub state plus IAM state cannot be
+validated and changed in one atomic transaction. The final GitHub revalidation
+narrows that cross-system window; the trusted-writer rule and prohibition on
+concurrent repository-settings changes close it operationally. Before accepting
+untrusted pull requests, remove the `pull_request` subject from the deploy role
+trust out of band and restore it only after the guarded migration has verified
+permanent enforcement.
 
 ## Production alert runbook
 
@@ -152,9 +290,9 @@ wait after a state change, so an OK action could otherwise send a recovery
 without a preceding notification. Delivery failures are separated by the AWS
 boundary at which they occurred:
 
-| Alarm | Queue meaning | Queue body |
-|---|---|---|
-| `AlertTransportFailureQueueVisibleMessages` | SNS exhausted attempts to invoke the alert Lambda | Original SNS notification envelope with `Type`, `MessageId`, `TopicArn`, and `Message` |
+| Alarm                                       | Queue meaning                                                                                          | Queue body                                                                                                  |
+| ------------------------------------------- | ------------------------------------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| `AlertTransportFailureQueueVisibleMessages` | SNS exhausted attempts to invoke the alert Lambda                                                      | Original SNS notification envelope with `Type`, `MessageId`, `TopicArn`, and `Message`                      |
 | `AlertExecutionFailureQueueVisibleMessages` | Lambda accepted the SNS event, but the handler exhausted two retries or reached the two-hour event age | Lambda destination record with `requestContext`, `requestPayload`, `responseContext`, and `responsePayload` |
 
 Both queues use SSE-SQS encryption and retain messages for 14 days. The

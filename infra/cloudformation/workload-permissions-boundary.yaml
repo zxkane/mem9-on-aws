@@ -1,0 +1,153 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Retained, operator-owned permissions boundary for mem9-on-aws application
+  workload roles. Deploy out of band before the guarded role migration.
+
+Parameters:
+  ApplicationRegion:
+    Type: String
+    Default: ap-northeast-1
+    AllowedPattern: "^[a-z]{2}(-gov)?-[a-z]+-[0-9]$"
+    Description: Region containing the mem9-on-aws workload resources.
+  BedrockProjectArn:
+    Type: String
+    AllowedPattern: "^arn:[a-z0-9-]+:bedrock-mantle:[a-z0-9-]+:[0-9]{12}:project/[A-Za-z0-9_-]+$"
+    Description: Exact operator-owned Bedrock Mantle project used by smart ingest.
+  PolicyRevision:
+    Type: String
+    Default: r1
+    AllowedPattern: "^r[0-9]{1,20}$"
+    Description: >
+      Semantics-neutral policy document revision. The guarded updater changes
+      this value to force CloudFormation to reconcile direct managed-policy drift.
+
+Resources:
+  WorkloadPermissionsBoundary:
+    Type: AWS::IAM::ManagedPolicy
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      ManagedPolicyName: mem9-on-aws-workload-boundary
+      Description: Maximum runtime permissions for mem9-on-aws workload roles
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          # Resource policies can grant directly to assumed-role sessions without
+          # an explicit boundary allow. The explicit Deny/NotAction below is the
+          # action ceiling; this Allow only admits identity-policy permissions
+          # that survive every explicit deny.
+          - Sid: AllowRuntimeIdentityPermissions
+            Effect: Allow
+            Action: "*"
+            Resource: "*"
+          - Sid: !Sub DenyOutsideRuntimeActionCeiling${PolicyRevision}
+            Effect: Deny
+            NotAction:
+              - bedrock-mantle:CreateInference
+              - bedrock-mantle:GetProject
+              - bedrock-mantle:ListProjects
+              - bedrock-mantle:ListTagsForResource
+              - ecr:BatchCheckLayerAvailability
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+              - lambda:InvokeFunction
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - secretsmanager:GetSecretValue
+              - sqs:SendMessage
+              - ssm:GetParameters
+              - ec2:AssignPrivateIpAddresses
+              - ec2:CreateNetworkInterface
+              - ec2:DeleteNetworkInterface
+              - ec2:DescribeNetworkInterfaces
+              - ec2:DescribeSubnets
+              - ec2:UnassignPrivateIpAddresses
+              - ecr:GetAuthorizationToken
+              - ssmmessages:CreateControlChannel
+              - ssmmessages:CreateDataChannel
+              - ssmmessages:OpenControlChannel
+              - ssmmessages:OpenDataChannel
+              - kms:Decrypt
+              - bedrock-mantle:CallWithBearerToken
+            Resource: "*"
+          - Sid: DenyProjectRuntimeOutsideResources
+            Effect: Deny
+            Action:
+              - bedrock-mantle:CreateInference
+              - bedrock-mantle:GetProject
+              - bedrock-mantle:ListProjects
+              - bedrock-mantle:ListTagsForResource
+              - ecr:BatchCheckLayerAvailability
+              - ecr:BatchGetImage
+              - ecr:GetDownloadUrlForLayer
+              - lambda:InvokeFunction
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+              - secretsmanager:GetSecretValue
+              - sqs:SendMessage
+              - ssm:GetParameters
+            NotResource:
+              - !Ref BedrockProjectArn
+              - !Sub arn:${AWS::Partition}:ecr:${ApplicationRegion}:${AWS::AccountId}:repository/mem9-on-aws/*
+              - !Sub arn:${AWS::Partition}:lambda:${ApplicationRegion}:${AWS::AccountId}:function:mem9-on-aws-*
+              - !Sub arn:${AWS::Partition}:logs:${ApplicationRegion}:${AWS::AccountId}:log-group:/sst/*
+              - !Sub arn:${AWS::Partition}:logs:${ApplicationRegion}:${AWS::AccountId}:log-group:/aws/lambda/mem9-on-aws-*
+              - !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-*
+              - !Sub arn:${AWS::Partition}:sqs:${ApplicationRegion}:${AWS::AccountId}:AlertTransportFailureQueue-*
+              - !Sub arn:${AWS::Partition}:sqs:${ApplicationRegion}:${AWS::AccountId}:AlertExecutionFailureQueue-*
+              - !Sub arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/mem9-on-aws/*
+          - Sid: DenyKmsDecryptOutsideProjectParameters
+            Effect: Deny
+            Action:
+              - kms:Decrypt
+            Resource: "*"
+            Condition:
+              ArnNotLikeIfExists:
+                "kms:EncryptionContext:PARAMETER_ARN": !Sub arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/mem9-on-aws/*
+          - Sid: DenyKmsDecryptOutsideSsm
+            Effect: Deny
+            Action:
+              - kms:Decrypt
+            Resource: "*"
+            Condition:
+              StringNotEqualsIfExists:
+                kms:ViaService: !Sub ssm.${ApplicationRegion}.${AWS::URLSuffix}
+          - Sid: DenyNonShortTermMantleBearer
+            Effect: Deny
+            Action:
+              - bedrock-mantle:CallWithBearerToken
+            Resource: "*"
+            Condition:
+              StringNotEqualsIfExists:
+                bedrock-mantle:BearerTokenType: SHORT_TERM
+          # Only the VPC proxy Lambda role may expose ENI permissions to the
+          # Lambda service. A second deny blocks those APIs from function code.
+          - Sid: DenyEniFromNonVpcLambdaRoles
+            Effect: Deny
+            Action:
+              - ec2:*NetworkInterface*
+              - ec2:AssignPrivateIpAddresses
+              - ec2:DescribeSubnets
+              - ec2:UnassignPrivateIpAddresses
+            Resource: "*"
+            Condition:
+              ArnNotLike:
+                "aws:PrincipalArn": !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ProxyFnRole-*
+          - Sid: DenyEniFromFunctionCode
+            Effect: Deny
+            Action:
+              - ec2:*NetworkInterface*
+              - ec2:AssignPrivateIpAddresses
+              - ec2:DescribeSubnets
+              - ec2:UnassignPrivateIpAddresses
+            Resource: "*"
+            Condition:
+              "Null":
+                "lambda:SourceFunctionArn": "false"
+
+Outputs:
+  PolicyArn:
+    Description: ARN of the retained workload permissions boundary
+    Value: !Ref WorkloadPermissionsBoundary

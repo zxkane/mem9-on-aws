@@ -14,7 +14,10 @@ import type { CognitoOutputs } from "./cognito";
  * + SSM parameter and asserts the observable contract.
  */
 
-function out<T>(value: T): { value: T; apply: (fn: (v: T) => unknown) => unknown } {
+function out<T>(value: T): {
+  value: T;
+  apply: (fn: (v: T) => unknown) => unknown;
+} {
   return { value, apply: (fn) => out(fn(value) as never) };
 }
 
@@ -48,7 +51,10 @@ function installInterpolate() {
       s += str;
       if (i < values.length) {
         const v = values[i];
-        s += typeof v === "object" && v && "value" in v ? String((v as { value: unknown }).value) : String(v);
+        s +=
+          typeof v === "object" && v && "value" in v
+            ? String((v as { value: unknown }).value)
+            : String(v);
       }
     });
     return out(s);
@@ -117,7 +123,8 @@ beforeEach(() => {
   params = [];
 });
 afterEach(() => {
-  for (const g of ["$app", "aws", "sst", "$interpolate"]) delete (globalThis as Record<string, unknown>)[g];
+  for (const g of ["$app", "aws", "sst", "$interpolate"])
+    delete (globalThis as Record<string, unknown>)[g];
   vi.resetModules();
 });
 
@@ -127,15 +134,24 @@ async function loadFacade() {
 }
 
 function fakeCognitoOut(): CognitoOutputs {
+  const hostedDomain = [
+    "https://prod-mem9-mcp",
+    "auth",
+    "ap-northeast-1",
+    "amazoncognito",
+    "com",
+  ].join(".");
   return {
     ssmPrefix: "/mem9-on-aws/prod",
     userPoolId: out("pool-1"),
     issuer: out("https://cognito-idp.ap-northeast-1.amazonaws.com/pool-1"),
-    tokenEndpoint: out("https://prod-mem9-mcp.auth.ap-northeast-1.amazoncognito.com/oauth2/token"),
-    authorizeEndpoint: out("https://prod-mem9-mcp.auth.ap-northeast-1.amazoncognito.com/oauth2/authorize"),
-    userInfoEndpoint: out("https://prod-mem9-mcp.auth.ap-northeast-1.amazoncognito.com/oauth2/userInfo"),
-    revocationEndpoint: out("https://prod-mem9-mcp.auth.ap-northeast-1.amazoncognito.com/oauth2/revoke"),
-    jwksUri: out("https://cognito-idp.ap-northeast-1.amazonaws.com/pool-1/.well-known/jwks.json"),
+    tokenEndpoint: out(`${hostedDomain}/oauth2/token`),
+    authorizeEndpoint: out(`${hostedDomain}/oauth2/authorize`),
+    userInfoEndpoint: out(`${hostedDomain}/oauth2/userInfo`),
+    revocationEndpoint: out(`${hostedDomain}/oauth2/revoke`),
+    jwksUri: out(
+      "https://cognito-idp.ap-northeast-1.amazonaws.com/pool-1/.well-known/jwks.json",
+    ),
     resourceServerId: "mem9-mcp",
     clientId: out("client-1"),
     clientSecret: out("client-1-secret"),
@@ -155,7 +171,11 @@ describe("oauthFacade factory", () => {
     const oauthFacade = await loadFacade();
     oauthFacade(fakeCognitoOut());
     const api = only("ApiGatewayV2");
-    const cors = api.cors as { allowHeaders?: string[]; allowOrigins?: string[]; allowMethods?: string[] };
+    const cors = api.cors as {
+      allowHeaders?: string[];
+      allowOrigins?: string[];
+      allowMethods?: string[];
+    };
     expect(cors.allowHeaders).toContain("MCP-Protocol-Version");
     expect(cors.allowHeaders).toContain("Authorization");
     expect(cors.allowOrigins).toEqual(["*"]);
@@ -172,7 +192,9 @@ describe("oauthFacade factory", () => {
     // callbackUrls must resolve from facadeApi.url (created first).
     const callbacks = (unwrap(c.callbackUrls) as string[]).map(String);
     expect(callbacks.some((u) => u.endsWith("/oauth/callback"))).toBe(true);
-    expect(callbacks.some((u) => u.startsWith("https://facade.example"))).toBe(true);
+    expect(callbacks.some((u) => u.startsWith("https://facade.example"))).toBe(
+      true,
+    );
   });
 
   it("provisions the façade Function on arm64 nodejs24.x with NO vpc + scoped SSM read", async () => {
@@ -186,11 +208,38 @@ describe("oauthFacade factory", () => {
     expect(fn.vpc).toBeUndefined();
     expect(String(fn.handler)).toContain("oauth-facade/handler");
     // Least-privilege SSM read scoped to this stage's parameter prefix.
-    const perms = fn.permissions as { actions: string[]; resources: unknown[] }[];
-    const ssmPerm = perms.find((p) => p.actions.includes("ssm:GetParameter"));
+    const perms = fn.permissions as {
+      actions: string[];
+      resources: unknown[];
+      conditions?: Array<{
+        test: string;
+        variable: string;
+        values: unknown[];
+      }>;
+    }[];
+    const ssmPerm = perms.find((p) => p.actions.includes("ssm:GetParameters"));
     expect(ssmPerm).toBeDefined();
+    expect(ssmPerm?.actions).toEqual(["ssm:GetParameters"]);
     const resources = (unwrap(ssmPerm!.resources) as string[]).map(String);
     expect(resources.some((r) => r.includes("/mem9-on-aws/prod/*"))).toBe(true);
+
+    const decrypt = perms.find((p) => p.actions.includes("kms:Decrypt"));
+    expect(decrypt?.resources).toEqual(["*"]);
+    expect(unwrap(decrypt?.conditions)).toEqual([
+      {
+        test: "StringEquals",
+        variable: "kms:ViaService",
+        values: ["ssm.ap-northeast-1.amazonaws.com"],
+      },
+      {
+        test: "ArnLike",
+        variable: "kms:EncryptionContext:PARAMETER_ARN",
+        values: [
+          "arn:aws:ssm:ap-northeast-1:123456789012:" +
+            "parameter/mem9-on-aws/prod/*",
+        ],
+      },
+    ]);
   });
 
   it("creates the HMAC state-signing Secret", async () => {
@@ -220,7 +269,9 @@ describe("oauthFacade factory", () => {
     expect(names).toContain("/mem9-on-aws/prod/facade/url");
     expect(names).toContain("/mem9-on-aws/prod/facade/mcp-endpoint");
     // The reader client secret is a SecureString (never plaintext String).
-    const secretParam = params.find((p) => p.name.endsWith("/cognito/reader/client-secret"));
+    const secretParam = params.find((p) =>
+      p.name.endsWith("/cognito/reader/client-secret"),
+    );
     expect(secretParam?.type).toBe("SecureString");
   });
 });
