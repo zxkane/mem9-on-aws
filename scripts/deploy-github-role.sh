@@ -32,7 +32,7 @@ TEMPLATE_FILE="infra/cloudformation/github-actions-role.yaml"
 # stacks in this account collide on IAM role + ManagedPolicy names if created
 # in different regions (EntityAlreadyExists rollback). Keep all GitHub Actions
 # role stacks in one region so they share one OIDC provider collision-free.
-REGION="${AWS_REGION:-us-west-2}"
+readonly STACK_REGION="us-west-2"
 # The application remains regional even though the IAM stack is pinned elsewhere.
 # Match infra/vpc.ts: use MEM9_VPC_ID when configured, otherwise the default VPC,
 # and authorize only the NAT-routed private-1* subnets selected by the app.
@@ -60,7 +60,7 @@ if [[ ! -f "$TEMPLATE_FILE" ]]; then
 fi
 
 echo "Stack:    $STACK_NAME"
-echo "Region:   $REGION"
+echo "Region:   $STACK_REGION"
 echo "Template: $TEMPLATE_FILE"
 
 # CloudFormation's inline --template-body cap is 51200 bytes. This role template
@@ -182,7 +182,7 @@ echo "ENI scope: $APPLICATION_REGION, one VPC, ${#PRIVATE_SUBNET_IDS[@]} private
 if [[ -z "$MODE" ]]; then
   if aws cloudformation describe-stacks \
       --stack-name "$STACK_NAME" \
-      --region "$REGION" \
+      --region "$STACK_REGION" \
       >/dev/null 2>&1; then
     MODE="update"
   else
@@ -198,11 +198,11 @@ case "$MODE" in
       "${TEMPLATE_ARG[@]}" \
       --parameters "$PARAMS_JSON" \
       --capabilities CAPABILITY_NAMED_IAM \
-      --region "$REGION" \
+      --region "$STACK_REGION" \
       --tags Key=Project,Value=mem9-on-aws Key=ManagedBy,Value=cli
     aws cloudformation wait stack-create-complete \
       --stack-name "$STACK_NAME" \
-      --region "$REGION"
+      --region "$STACK_REGION"
     ;;
   update)
     echo "Updating stack..."
@@ -215,7 +215,7 @@ case "$MODE" in
       "${TEMPLATE_ARG[@]}" \
       --parameters "$PARAMS_JSON" \
       --capabilities CAPABILITY_NAMED_IAM \
-      --region "$REGION" 2>&1)
+      --region "$STACK_REGION" 2>&1)
     UPDATE_EXIT=$?
     set -e
     if [[ $UPDATE_EXIT -ne 0 ]]; then
@@ -228,14 +228,14 @@ case "$MODE" in
     else
       aws cloudformation wait stack-update-complete \
         --stack-name "$STACK_NAME" \
-        --region "$REGION"
+        --region "$STACK_REGION"
     fi
     ;;
 esac
 
 ROLE_ARN=$(aws cloudformation describe-stacks \
   --stack-name "$STACK_NAME" \
-  --region "$REGION" \
+  --region "$STACK_REGION" \
   --query "Stacks[0].Outputs[?OutputKey=='RoleArn'].OutputValue" \
   --output text)
 

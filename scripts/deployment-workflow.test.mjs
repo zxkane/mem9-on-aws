@@ -1,6 +1,13 @@
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  copyFileSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { delimiter, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
@@ -11,6 +18,10 @@ const root = resolve(here, "..");
 const workflowPath = resolve(root, ".github/workflows/infra-ci.yml");
 const rolePath = resolve(root, "infra/cloudformation/github-actions-role.yaml");
 const deployRolePath = resolve(here, "deploy-github-role.sh");
+const deployRoleFixturePath = resolve(
+  here,
+  "test-fixtures/deploy-github-role/mock-aws.mjs",
+);
 const reconcilePath = resolve(here, "reconcile-ecs-deployment.mjs");
 const fakeAwsPath = resolve(here, "fixtures/fake-aws.mjs");
 const tempDirs = [];
@@ -38,6 +49,52 @@ function runFixture(name) {
     .filter(Boolean)
     .map((line) => JSON.parse(line));
   return { result, callRecords };
+}
+
+function runDeployRoleFixture(args = []) {
+  const dir = mkdtempSync(join(tmpdir(), "mem9-deploy-role-"));
+  tempDirs.push(dir);
+  const isolatedRoot = join(dir, "repo");
+  const isolatedScripts = join(isolatedRoot, "scripts");
+  const mockAws = join(dir, "aws");
+  const wrapperUnderTest = join(isolatedScripts, "deploy-github-role.sh");
+  const calls = join(dir, "calls.jsonl");
+  mkdirSync(isolatedScripts, { recursive: true });
+  mkdirSync(join(isolatedRoot, "infra", "cloudformation"), {
+    recursive: true,
+  });
+  copyFileSync(deployRoleFixturePath, mockAws);
+  copyFileSync(deployRolePath, wrapperUnderTest);
+  copyFileSync(
+    rolePath,
+    join(isolatedRoot, "infra", "cloudformation", "github-actions-role.yaml"),
+  );
+  chmodSync(mockAws, 0o755);
+
+  const result = spawnSync("bash", [wrapperUnderTest, ...args], {
+    cwd: isolatedRoot,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: `${dir}${delimiter}${process.env.PATH}`,
+      AWS_CALL_LOG: calls,
+      AWS_PROFILE: "fixture-operator",
+      AWS_REGION: "us-east-2",
+      PROJECT_REGION: "eu-west-1",
+      MEM9_TEMPLATE_BUCKET: "fixture-template-bucket",
+    },
+  });
+  const callRecords = readFileSync(calls, "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  return { result, callRecords };
+}
+
+function optionValue(args, option) {
+  const index = args.indexOf(option);
+  return index >= 0 ? args[index + 1] : undefined;
 }
 
 function blockForSid(source, sid) {
@@ -206,6 +263,67 @@ describe("Lambda VPC IAM", () => {
         },
       },
     });
+  });
+});
+
+describe("deploy-role stack region", () => {
+  it("auto-detects the owner stack without coupling its application region", () => {
+    const { result, callRecords } = runDeployRoleFixture();
+    const cloudFormationCalls = callRecords.filter(
+      ({ args }) => args[0] === "cloudformation",
+    );
+    const ec2Calls = callRecords.filter(({ args }) => args[0] === "ec2");
+    const updateCall = cloudFormationCalls.find(
+      ({ args }) => args[1] === "update-stack",
+    );
+    const parameters = JSON.parse(
+      optionValue(updateCall.args, "--parameters"),
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(
+      cloudFormationCalls.map(({ args }) => args.slice(0, 2).join(" ")),
+    ).toEqual([
+      "cloudformation describe-stacks",
+      "cloudformation update-stack",
+      "cloudformation wait",
+      "cloudformation describe-stacks",
+    ]);
+    expect(
+      cloudFormationCalls.every(
+        ({ args }) => optionValue(args, "--region") === "us-west-2",
+      ),
+    ).toBe(true);
+    expect(ec2Calls).not.toHaveLength(0);
+    expect(
+      ec2Calls.every(
+        ({ args }) => optionValue(args, "--region") === "eu-west-1",
+      ),
+    ).toBe(true);
+    expect(parameters).toContainEqual({
+      ParameterKey: "ApplicationRegion",
+      ParameterValue: "eu-west-1",
+    });
+  });
+
+  it.each([
+    ["create", "--create", "cloudformation create-stack"],
+    ["update", "--update", "cloudformation update-stack"],
+  ])("pins forced %s operations to the owner region", (_, mode, operation) => {
+    const { result, callRecords } = runDeployRoleFixture([mode]);
+    const cloudFormationCalls = callRecords.filter(
+      ({ args }) => args[0] === "cloudformation",
+    );
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(
+      cloudFormationCalls.map(({ args }) => args.slice(0, 2).join(" ")),
+    ).toContain(operation);
+    expect(
+      cloudFormationCalls.every(
+        ({ args }) => optionValue(args, "--region") === "us-west-2",
+      ),
+    ).toBe(true);
   });
 });
 
