@@ -23,6 +23,8 @@ const deployRoleFixturePath = resolve(
   "test-fixtures/deploy-github-role/mock-aws.mjs",
 );
 const reconcilePath = resolve(here, "reconcile-ecs-deployment.mjs");
+const emfSmokePath = resolve(here, "run-mnemo-emf-smoke.sh");
+const healthSmokePath = resolve(here, "run-mnemo-health-smoke.sh");
 const fakeAwsPath = resolve(here, "fixtures/fake-aws.mjs");
 const tempDirs = [];
 
@@ -134,6 +136,34 @@ describe("workflow integration", () => {
   it("runs the PostgreSQL durable-ingest integration suite in CI", () => {
     const workflow = readFileSync(workflowPath, "utf8");
     expect(workflow).toContain("bash scripts/run-ingest-queue-integration.sh");
+  });
+
+  it("TC-EMF-011: smokes non-TTY EMF bytes from the built arm64 image", () => {
+    const workflow = parse(readFileSync(workflowPath, "utf8"));
+    const steps = workflow.jobs["build-and-push-image"].steps;
+    const buildIndex = steps.findIndex(
+      ({ name }) => name === "Build & push mnemo-server (arm64)",
+    );
+    const smokeIndex = steps.findIndex(
+      ({ name }) => name === "Smoke test mnemo-server EMF framing (non-TTY)",
+    );
+
+    expect(buildIndex).toBeGreaterThanOrEqual(0);
+    expect(smokeIndex).toBeGreaterThanOrEqual(0);
+    expect(smokeIndex).toBeGreaterThan(buildIndex);
+    expect(steps[smokeIndex]).toMatchObject({
+      env: {
+        MNEMO_IMAGE:
+          "${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_NS }}/mnemo-server:${{ steps.tag.outputs.image_tag }}",
+      },
+      run: "bash scripts/run-mnemo-emf-smoke.sh",
+    });
+    expect(readFileSync(emfSmokePath, "utf8")).toContain(
+      "MNEMO_VALIDATE_EMF=true",
+    );
+    const healthSmoke = readFileSync(healthSmokePath, "utf8");
+    expect(healthSmoke).toContain("--tty=false");
+    expect(healthSmoke).toContain("validate-emf-event.mjs --docker-stream");
   });
 
   it("uses one enabled rollout after baking the repeatable migration into startup", () => {

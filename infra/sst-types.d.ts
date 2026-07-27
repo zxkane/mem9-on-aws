@@ -489,6 +489,7 @@ declare namespace sst {
       // IAM statements attached to the task role (SST's `permissions`).
       permissions?: Input<FargatePermission>[];
       transform?: {
+        taskDefinition?: (args: Record<string, unknown>, opts: Record<string, unknown>) => void;
         service?: (args: Record<string, unknown>, opts: Record<string, unknown>) => void;
       };
     }

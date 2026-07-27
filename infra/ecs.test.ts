@@ -552,6 +552,29 @@ describe("ecs stack", () => {
     }
   });
 
+  it("wires the mnemo-server terminal override into SST task synthesis", async () => {
+    installGlobals("prod");
+    const ecs = await loadEcs();
+    ecs(fakeDbOut());
+
+    const transform = services[0].args.transform as Record<string, unknown>;
+    const taskArgs: Record<string, unknown> = {
+      containerDefinitions: out(
+        JSON.stringify([{ name: "mnemo-server", pseudoTerminal: true }]),
+      ),
+    };
+    (
+      transform.taskDefinition as (
+        args: Record<string, unknown>,
+        opts: Record<string, unknown>,
+      ) => void
+    )(taskArgs, {});
+    const definitions = JSON.parse(
+      String(materialize(taskArgs.containerDefinitions)),
+    ) as Record<string, unknown>[];
+    expect(definitions[0].pseudoTerminal).toBe(false);
+  });
+
   it("keeps durable ingest disabled unless the deploy explicitly enables it", async () => {
     delete process.env.MEM9_DURABLE_INGEST_ENABLED;
     installGlobals("prod");

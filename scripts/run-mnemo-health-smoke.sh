@@ -14,6 +14,7 @@ readonly POSTGRES_IMAGE="postgres:17-alpine"
 readonly DB_USER="mnemo"
 readonly DB_PASSWORD='mnemo:@/?#retry'
 readonly DB_SECRET='{"username":"mnemo","password":"mnemo:@/?#retry"}'
+readonly VALIDATE_EMF="${MNEMO_VALIDATE_EMF:-false}"
 TLS_DIR="$(mktemp -d)"
 readonly TLS_DIR
 
@@ -84,9 +85,19 @@ fi
 
 docker network create "$NETWORK" >/dev/null
 
+emf_args=()
+if [ "$VALIDATE_EMF" = true ]; then
+  emf_args=(
+    --env MNEMO_DURABLE_INGEST_ENABLED=true
+    --env MEM9_TENANT_ID=emf-smoke-tenant
+    --env MNEMO_DURABLE_INGEST_METRIC_STAGE=prod
+  )
+fi
+
 docker run --detach \
   --name "$SERVER_CONTAINER" \
   --network "$NETWORK" \
+  --tty=false \
   --env "MEM9_DB_HOST=${DB_CONTAINER}" \
   --env MEM9_DB_PORT=5432 \
   --env MEM9_DB_NAME=mnemo \
@@ -95,6 +106,7 @@ docker run --detach \
   --env MNEMO_INGEST_MODE=raw \
   --env MNEMO_MIGRATION_RETRY_DELAY_SECONDS=1 \
   --env MNEMO_TIDB_ZERO_ENABLED=false \
+  "${emf_args[@]}" \
   "$IMAGE" >/dev/null
 
 if docker exec "$SERVER_CONTAINER" /bin/sh -c "$HEALTH_COMMAND"; then
@@ -215,6 +227,10 @@ server_logs=$(docker logs "$SERVER_CONTAINER" 2>&1)
 if printf '%s\n' "$server_logs" | grep -Fq "$DB_PASSWORD"; then
   echo "mnemo-health-smoke: database password appeared in server logs" >&2
   exit 1
+fi
+if [ "$VALIDATE_EMF" = true ]; then
+  docker logs "$SERVER_CONTAINER" >"$TLS_DIR/server-stdout.log" 2>/dev/null
+  node scripts/validate-emf-event.mjs --docker-stream <"$TLS_DIR/server-stdout.log"
 fi
 echo "mnemo-health-smoke: ECS startup migration retried over enforced TLS and created atomic-ingest relations"
 echo "mnemo-health-smoke: exact ECS command succeeds against running server"
