@@ -121,6 +121,8 @@ Design:
 | TC-INGEST-METRIC-018 | Alarm input data is absent | Every alarm explicitly uses `notBreaching`; absent queue-age data is not interpreted as proof that the age threshold was exceeded |
 | TC-INGEST-METRIC-019 | Production alarms are synthesized | Every alarm action targets the existing topic; application alarms use `stage=prod` and Mantle client errors use the configured `Project` |
 | TC-INGEST-METRIC-020 | Legacy observability resources are synthesized | The unalarmed `ingest_dropped` metric filter is absent |
+| TC-INGEST-METRIC-021 | Emit accepted, retry, success, dead, and queue-age EMF records | Every raw line starts with `{"_aws":`; decoding those same lines preserves the existing metadata, metric values, dimensions, units, bounded classes, and content exclusions |
+| TC-INGEST-METRIC-022 | Concurrent writers emit accepted, result, and queue-age records to one stream | Every write produces one complete `_aws`-first JSON line; records never interleave, disappear, or acquire unbounded dimensions |
 
 ## Atomic Plan And Apply
 

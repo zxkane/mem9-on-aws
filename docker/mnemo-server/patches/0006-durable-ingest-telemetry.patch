@@ -310,7 +310,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..32ec348477295ae023e17dc549a89481aedaadbb
 --- /dev/null
 +++ b/server/internal/ingestqueue/telemetry.go
-@@ -0,0 +1,266 @@
+@@ -0,0 +1,292 @@
 +package ingestqueue
 +
 +import (
@@ -365,6 +365,28 @@ index 0000000000000000000000000000000000000000..32ec348477295ae023e17dc549a89481
 +	CloudWatchMetrics []emfDirective `json:"CloudWatchMetrics"`
 +}
 +
++type emfEnvelope struct {
++	Metadata                          emfMetadata `json:"_aws"`
++	Stage                             string      `json:"stage"`
++	ResultClass                       string      `json:"result_class,omitempty"`
++	ErrorClass                        string      `json:"error_class,omitempty"`
++	JobsAccepted                      *int        `json:"JobsAccepted,omitempty"`
++	JobsSucceeded                     *int        `json:"JobsSucceeded,omitempty"`
++	JobsRetrying                      *int        `json:"JobsRetrying,omitempty"`
++	JobsDead                          *int        `json:"JobsDead,omitempty"`
++	JobsTerminated                    *int        `json:"JobsTerminated,omitempty"`
++	DeadlineTransientTerminalFailures *int        `json:"DeadlineTransientTerminalFailures,omitempty"`
++	QueueWaitMs                       *int64      `json:"QueueWaitMs,omitempty"`
++	PlanDurationMs                    *int64      `json:"PlanDurationMs,omitempty"`
++	ApplyDurationMs                   *int64      `json:"ApplyDurationMs,omitempty"`
++	TotalProcessingDurationMs         *int64      `json:"TotalProcessingDurationMs,omitempty"`
++	RetryCount                        *int        `json:"RetryCount,omitempty"`
++	Warnings                          *int        `json:"Warnings,omitempty"`
++	TruncatedFacts                    *int        `json:"TruncatedFacts,omitempty"`
++	ZeroFactSuccess                   *int        `json:"ZeroFactSuccess,omitempty"`
++	OldestQueuedAgeMs                 *int64      `json:"OldestQueuedAgeMs,omitempty"`
++}
++
 +var boundedErrorClasses = map[string]struct{}{
 +	errorClassProxyValidationPermanent:   {},
 +	errorClassMantle4xxPermanent:         {},
@@ -393,10 +415,10 @@ index 0000000000000000000000000000000000000000..32ec348477295ae023e17dc549a89481
 +
 +func (t *emfTelemetry) Accepted() {
 +	t.write(
-+		map[string]any{
-+			"stage":        t.stage,
-+			"result_class": "accepted",
-+			"JobsAccepted": 1,
++		emfEnvelope{
++			Stage:        t.stage,
++			ResultClass:  "accepted",
++			JobsAccepted: metricValue(1),
 +		},
 +		[]emfDirective{metricDirective(
 +			[]string{"stage", "result_class"},
@@ -407,13 +429,13 @@ index 0000000000000000000000000000000000000000..32ec348477295ae023e17dc549a89481
 +
 +func (t *emfTelemetry) Result(metrics ResultMetrics) {
 +	resultClass := boundedResultClass(metrics.ResultClass)
-+	record := map[string]any{
-+		"stage":                     t.stage,
-+		"result_class":              resultClass,
-+		"PlanDurationMs":            durationMilliseconds(metrics.PlanDuration),
-+		"ApplyDurationMs":           durationMilliseconds(metrics.ApplyDuration),
-+		"TotalProcessingDurationMs": durationMilliseconds(metrics.TotalDuration),
-+		"RetryCount":                nonNegative(metrics.RetryCount),
++	record := emfEnvelope{
++		Stage:                     t.stage,
++		ResultClass:               resultClass,
++		PlanDurationMs:            metricValue(durationMilliseconds(metrics.PlanDuration)),
++		ApplyDurationMs:           metricValue(durationMilliseconds(metrics.ApplyDuration)),
++		TotalProcessingDurationMs: metricValue(durationMilliseconds(metrics.TotalDuration)),
++		RetryCount:                metricValue(nonNegative(metrics.RetryCount)),
 +	}
 +	directives := []emfDirective{metricDirective(
 +		[]string{"stage", "result_class"},
@@ -423,7 +445,7 @@ index 0000000000000000000000000000000000000000..32ec348477295ae023e17dc549a89481
 +		countMetric("RetryCount"),
 +	)}
 +	if metrics.IncludeQueueWait || metrics.QueueWait != 0 {
-+		record["QueueWaitMs"] = durationMilliseconds(metrics.QueueWait)
++		record.QueueWaitMs = metricValue(durationMilliseconds(metrics.QueueWait))
 +		directives[0].Metrics = append(
 +			directives[0].Metrics,
 +			millisecondMetric("QueueWaitMs"),
@@ -432,8 +454,8 @@ index 0000000000000000000000000000000000000000..32ec348477295ae023e17dc549a89481
 +
 +	switch resultClass {
 +	case "retrying":
-+		record["error_class"] = boundedErrorClass(metrics.ErrorClass)
-+		record["JobsRetrying"] = 1
++		record.ErrorClass = boundedErrorClass(metrics.ErrorClass)
++		record.JobsRetrying = metricValue(1)
 +		directives = append(
 +			directives,
 +			metricDirective(
@@ -446,12 +468,12 @@ index 0000000000000000000000000000000000000000..32ec348477295ae023e17dc549a89481
 +			),
 +		)
 +	case string(StateSucceeded):
-+		record["JobsSucceeded"] = 1
-+		record["JobsTerminated"] = 1
-+		record["DeadlineTransientTerminalFailures"] = 0
-+		record["Warnings"] = nonNegative(metrics.WarningCount)
-+		record["TruncatedFacts"] = nonNegative(metrics.TruncatedFactCount)
-+		record["ZeroFactSuccess"] = boolCount(metrics.ZeroFactSuccess)
++		record.JobsSucceeded = metricValue(1)
++		record.JobsTerminated = metricValue(1)
++		record.DeadlineTransientTerminalFailures = metricValue(0)
++		record.Warnings = metricValue(nonNegative(metrics.WarningCount))
++		record.TruncatedFacts = metricValue(nonNegative(metrics.TruncatedFactCount))
++		record.ZeroFactSuccess = metricValue(boolCount(metrics.ZeroFactSuccess))
 +		directives = append(
 +			directives,
 +			metricDirective(
@@ -469,12 +491,12 @@ index 0000000000000000000000000000000000000000..32ec348477295ae023e17dc549a89481
 +		)
 +	case string(StateDead):
 +		errorClass := boundedErrorClass(metrics.ErrorClass)
-+		record["error_class"] = errorClass
-+		record["JobsDead"] = 1
-+		record["JobsTerminated"] = 1
-+		record["DeadlineTransientTerminalFailures"] = boolCount(
++		record.ErrorClass = errorClass
++		record.JobsDead = metricValue(1)
++		record.JobsTerminated = metricValue(1)
++		record.DeadlineTransientTerminalFailures = metricValue(boolCount(
 +			errorClass == errorClassDeadline || errorClass == errorClassMantleTransient,
-+		)
++		))
 +		directives = append(
 +			directives,
 +			metricDirective(
@@ -499,9 +521,9 @@ index 0000000000000000000000000000000000000000..32ec348477295ae023e17dc549a89481
 +
 +func (t *emfTelemetry) QueueAge(age time.Duration) {
 +	t.write(
-+		map[string]any{
-+			"stage":             t.stage,
-+			"OldestQueuedAgeMs": durationMilliseconds(age),
++		emfEnvelope{
++			Stage:             t.stage,
++			OldestQueuedAgeMs: metricValue(durationMilliseconds(age)),
 +		},
 +		[]emfDirective{metricDirective(
 +			[]string{"stage"},
@@ -510,11 +532,11 @@ index 0000000000000000000000000000000000000000..32ec348477295ae023e17dc549a89481
 +	)
 +}
 +
-+func (t *emfTelemetry) write(record map[string]any, directives []emfDirective) {
++func (t *emfTelemetry) write(record emfEnvelope, directives []emfDirective) {
 +	if t == nil || t.output == nil {
 +		return
 +	}
-+	record["_aws"] = emfMetadata{
++	record.Metadata = emfMetadata{
 +		Timestamp:         t.now().UnixMilli(),
 +		CloudWatchMetrics: directives,
 +	}
@@ -577,18 +599,23 @@ index 0000000000000000000000000000000000000000..32ec348477295ae023e17dc549a89481
 +	}
 +	return 0
 +}
++
++func metricValue[T any](value T) *T {
++	return &value
++}
 diff --git a/server/internal/ingestqueue/telemetry_test.go b/server/internal/ingestqueue/telemetry_test.go
 new file mode 100644
 index 0000000000000000000000000000000000000000..f316ca45d3ea7359474c3a1bd8244765629ea232
 --- /dev/null
 +++ b/server/internal/ingestqueue/telemetry_test.go
-@@ -0,0 +1,295 @@
+@@ -0,0 +1,354 @@
 +package ingestqueue
 +
 +import (
 +	"bytes"
 +	"encoding/json"
 +	"strings"
++	"sync"
 +	"testing"
 +	"time"
 +)
@@ -598,6 +625,9 @@ index 0000000000000000000000000000000000000000..f316ca45d3ea7359474c3a1bd8244765
 +	lines := strings.Split(strings.TrimSpace(output), "\n")
 +	records := make([]map[string]any, 0, len(lines))
 +	for _, line := range lines {
++		if !strings.HasPrefix(line, `{"_aws":`) {
++			t.Fatalf("EMF metadata is not the first root member: %s", line)
++		}
 +		var record map[string]any
 +		if err := json.Unmarshal([]byte(line), &record); err != nil {
 +			t.Fatalf("decode EMF record %q: %v", line, err)
@@ -631,6 +661,17 @@ index 0000000000000000000000000000000000000000..f316ca45d3ea7359474c3a1bd8244765
 +					default:
 +						t.Fatalf("unbounded dimension %q in %#v", name, directive)
 +					}
++				}
++			}
++			for _, rawMetric := range directive["Metrics"].([]any) {
++				metric := rawMetric.(map[string]any)
++				name := metric["Name"].(string)
++				wantUnit := "Count"
++				if strings.HasSuffix(name, "Ms") {
++					wantUnit = "Milliseconds"
++				}
++				if metric["Unit"] != wantUnit {
++					t.Fatalf("%s unit = %#v, want %q", name, metric["Unit"], wantUnit)
 +				}
 +			}
 +		}
@@ -877,6 +918,50 @@ index 0000000000000000000000000000000000000000..f316ca45d3ea7359474c3a1bd8244765
 +			t.Fatalf("EMF contains forbidden field %q: %s", forbidden, serialized)
 +		}
 +	}
++}
++
++func TestEMFTelemetryConcurrentWritersDoNotInterleave(t *testing.T) {
++	const writesPerKind = 20
++	var output bytes.Buffer
++	telemetry := NewEMFTelemetry("prod", &output, nil)
++	var writers sync.WaitGroup
++	for index := range writesPerKind * 3 {
++		writers.Add(1)
++		go func() {
++			defer writers.Done()
++			switch index % 3 {
++			case 0:
++				telemetry.Accepted()
++			case 1:
++				telemetry.Result(ResultMetrics{ResultClass: string(StateSucceeded)})
++			default:
++				telemetry.QueueAge(time.Duration(index) * time.Millisecond)
++			}
++		}()
++	}
++	writers.Wait()
++
++	records := telemetryRecords(t, output.String())
++	if len(records) != writesPerKind*3 {
++		t.Fatalf("EMF records = %d, want %d", len(records), writesPerKind*3)
++	}
++	counts := map[string]int{}
++	for _, record := range records {
++		switch {
++		case record["JobsAccepted"] == float64(1):
++			counts["accepted"]++
++		case record["JobsSucceeded"] == float64(1):
++			counts["result"]++
++		case record["OldestQueuedAgeMs"] != nil:
++			counts["queue_age"]++
++		}
++	}
++	for _, kind := range []string{"accepted", "result", "queue_age"} {
++		if counts[kind] != writesPerKind {
++			t.Fatalf("%s records = %d, want %d", kind, counts[kind], writesPerKind)
++		}
++	}
++	assertBoundedMetricDimensions(t, records)
 +}
 diff --git a/server/internal/ingestqueue/types.go b/server/internal/ingestqueue/types.go
 index cbe48313bfa66edcbc00aa35c8a211434f3f92b9..93434f7bbba6f3aa8c7a5a3402fef4bb7e52aba4 100644

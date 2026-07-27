@@ -21,6 +21,15 @@ dimensions:
 - bounded `result_class`: `accepted`, `succeeded`, `retrying`, or `dead`;
 - bounded `error_class`, normalized to the worker outcome allow-list or `other`.
 
+CloudWatch Logs auto-detection in the production path extracts these records
+only when `_aws` is the first root member. The emitter therefore serializes an
+explicit Go envelope whose first declared JSON field is `_aws`; typed optional
+fields retain required zero-valued metrics without returning to a top-level
+map. `encoding/json` produces the complete line, and a mutex covers each encode,
+so the implementation does not hand-build JSON and concurrent records cannot
+interleave. Regression tests check the raw prefix before decoding the same lines
+for schema, value, unit, dimension, bounded-cardinality, and privacy assertions.
+
 Tenant, agent, app, session, job, request, plan, payload, fact, message, and
 embedding identifiers or content are absent. Existing durable-worker log lines
 also drop job IDs.
