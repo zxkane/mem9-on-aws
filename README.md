@@ -103,6 +103,10 @@ The AgentCore Gateway exposes four tools over MCP (Cognito-authenticated):
   Lambda `nodejs24.x`). The Go build for mnemo-server targets **arm64**.
 - Copy `.env.example` to `.env` and fill in your AWS profile before running the
   `scripts/deploy-*.sh` bootstrap scripts.
+- `scripts/deploy-github-role.sh` always owns its account-global IAM stack in
+  `us-west-2` and ignores ambient `AWS_REGION`. Set `PROJECT_REGION` only when
+  application VPC discovery must target a region other than its documented
+  default.
 - Agent contributors: see [`AGENTS.md`](AGENTS.md) for repo conventions and hard rules.
 
 ## Production alert runbook
