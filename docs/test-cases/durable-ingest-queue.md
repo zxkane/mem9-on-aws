@@ -112,13 +112,13 @@ Design:
 | TC-INGEST-METRIC-009 | Atomic apply commits successfully | `JobsSucceeded` and `JobsTerminated` are emitted once with result `succeeded` |
 | TC-INGEST-METRIC-010 | Smart extraction returns zero facts and apply succeeds | `ZeroFactSuccess=1`; a nonzero-fact no-op reconciliation does not increment it |
 | TC-INGEST-METRIC-011 | Extraction truncates facts or planning records warnings | Exact `TruncatedFacts` and `Warnings` values are emitted on success |
-| TC-INGEST-METRIC-012 | Queue contains queued/retrying rows or is empty | Database-clock `OldestQueuedAgeMs` reports the oldest age or zero without tenant dimensions |
+| TC-INGEST-METRIC-012 | Queue contains queued/retrying rows, is empty, or its age query stalls | Database-clock `OldestQueuedAgeMs` reports the oldest age or zero without tenant dimensions; a bounded asynchronous sample cannot block claims |
 | TC-INGEST-METRIC-013 | Proxy and worker errors cover every agreed class plus an unknown value | GLM/worker classes are preserved and unknown input normalizes to `other` |
 | TC-INGEST-METRIC-014 | EMF fixtures carry marker values in tenant, agent, app, session, job, request, payload hash, message, fact, and embedding fields | Metric/log output contains none of the markers and dimensions remain low-cardinality |
-| TC-INGEST-METRIC-015 | Production dashboard is synthesized | Provider and durable-application headings are separate; Mantle widgets use `AWS/BedrockMantle` plus `Project`; no Mantle latency metric appears; retry volume uses additive `JobsRetrying`, never a sum of retry ordinals |
+| TC-INGEST-METRIC-015 | Production dashboard is synthesized | Provider and durable-application headings are separate; Mantle widgets use `AWS/BedrockMantle` plus `Project`; no Mantle latency metric appears; retry volume uses the additive stage-only `JobsRetrying` rollup, never a search gap or sum of retry ordinals |
 | TC-INGEST-METRIC-016 | Dead-job and queue-age alarms are synthesized | Dead consumes the stage-only `JobsDead` rollup and alarms at least once in 15 minutes; queue age is greater than 10 minutes for two consecutive five-minute periods |
 | TC-INGEST-METRIC-017 | Failure-ratio fixtures contain 19, 20, or more terminal jobs | The expression returns zero below 20 and alarms at or above 10 percent only from 20 onward |
-| TC-INGEST-METRIC-018 | Alarm input data is absent | Queue-age heartbeat treats missing data as `breaching`; sparse transition and provider alarms explicitly use `notBreaching` |
+| TC-INGEST-METRIC-018 | Alarm input data is absent | Every alarm explicitly uses `notBreaching`; absent queue-age data is not interpreted as proof that the age threshold was exceeded |
 | TC-INGEST-METRIC-019 | Production alarms are synthesized | Every alarm action targets the existing topic; application alarms use `stage=prod` and Mantle client errors use the configured `Project` |
 | TC-INGEST-METRIC-020 | Legacy observability resources are synthesized | The unalarmed `ingest_dropped` metric filter is absent |
 

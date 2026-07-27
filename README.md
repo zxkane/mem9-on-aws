@@ -118,7 +118,8 @@ Mantle inference/token/client-error metrics from durable application outcomes,
 queue age, phase durations, retries, and warnings. It does not present
 application planning time as provider latency. Lifecycle EMF is a post-commit,
 best-effort operational signal; Aurora job rows and the tenant-scoped status API
-remain authoritative.
+remain authoritative. EMF is production-only so preview stage identifiers do
+not accumulate as permanent custom-metric dimensions.
 
 Before the first deployment from this revision, run
 `scripts/deploy-github-role.sh` to grant the out-of-band GitHub Actions role the

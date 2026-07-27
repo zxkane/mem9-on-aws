@@ -289,6 +289,12 @@ this repo — **empirically live 2026-07-12** (ap-northeast-1):
   OpenAI-compatible project requests. Without that setting, the proxy omits the
   header and inference remains untagged:
   [Bedrock projects and workspaces](https://docs.aws.amazon.com/bedrock/latest/userguide/workspaces.html).
+- **CloudWatch metrics**: AWS documents `Inferences`,
+  `InferenceClientErrors`, `TotalInputTokens`, and `TotalOutputTokens` in the
+  `AWS/BedrockMantle` namespace at Project granularity. It also explicitly
+  states that Mantle does not yet publish `InvocationLatency` or
+  `TimeToFirstToken` equivalents:
+  [Bedrock Mantle CloudWatch metrics](https://docs.aws.amazon.com/bedrock/latest/userguide/monitoring-mantle-metrics.html).
 - **IAM namespace**: current task-role permissions are
   `bedrock-mantle:CreateInference`, `bedrock-mantle:CallWithBearerToken`,
   `bedrock-mantle:GetProject`, `bedrock-mantle:ListProjects`, and

@@ -204,10 +204,26 @@ export function observability(inputs: ObservabilityInputs) {
     ...(resultClass ? ["result_class", resultClass] : []),
     { stat },
   ];
-  const jobsRetryingSearch =
-    `SEARCH('{${durableNamespace},stage,result_class,error_class} ` +
-    `MetricName="JobsRetrying" stage="${stage}"', 'Sum', 300)`;
-
+  const retryTransitions = () => [
+    [
+      {
+        expression: "FILL(retry_transitions, 0)",
+        id: "retry_transitions_filled",
+        label: "Retry transitions",
+      },
+    ],
+    [
+      durableNamespace,
+      "JobsRetrying",
+      "stage",
+      stage,
+      {
+        id: "retry_transitions",
+        stat: "Sum",
+        visible: false,
+      },
+    ],
+  ];
   new aws.cloudwatch.Dashboard("DurableIngestDashboard", {
     dashboardName: `mem9-on-aws-${stage}-ingest`,
     dashboardBody: $jsonStringify({
@@ -274,12 +290,7 @@ export function observability(inputs: ObservabilityInputs) {
               durableMetric("JobsAccepted", "accepted"),
               durableMetric("JobsSucceeded", "succeeded"),
               durableMetric("JobsDead"),
-              [
-                {
-                  expression: jobsRetryingSearch,
-                  label: "Jobs retrying",
-                },
-              ],
+              ...retryTransitions(),
             ],
           },
         },
@@ -329,12 +340,7 @@ export function observability(inputs: ObservabilityInputs) {
             region: ECR_REGION,
             period: 300,
             metrics: [
-              [
-                {
-                  expression: `SUM(${jobsRetryingSearch})`,
-                  label: "Retry transitions",
-                },
-              ],
+              ...retryTransitions(),
               durableMetric("Warnings"),
               durableMetric("TruncatedFacts"),
               durableMetric("ZeroFactSuccess"),
@@ -428,9 +434,10 @@ export function observability(inputs: ObservabilityInputs) {
     datapointsToAlarm: 2,
     threshold: 600_000,
     comparisonOperator: "GreaterThanThreshold",
-    // This sampler is a once-per-minute heartbeat. Missing data means the
-    // worker or EMF path is unhealthy, unlike sparse transition metrics.
-    treatMissingData: "breaching",
+    // Queue age is meaningful only when sampled. Missing telemetry does not
+    // prove that a queued job exceeded the threshold and must not page during
+    // a deploy, rollback, or transient database read failure.
+    treatMissingData: "notBreaching",
     alarmActions,
   });
 
