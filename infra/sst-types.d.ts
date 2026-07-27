@@ -253,6 +253,7 @@ declare namespace aws {
       treatMissingData?: Input<string>;
       metricQueries?: MetricAlarmMetricQuery[];
       alarmActions?: Input<Input<string>[]>;
+      okActions?: Input<Input<string>[]>;
     }
     class MetricAlarm {
       constructor(name: string, args: MetricAlarmArgs);

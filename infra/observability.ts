@@ -103,6 +103,7 @@ export function observability(inputs: ObservabilityInputs) {
     name: `mem9-on-aws-${stage}-alerts`,
   });
   const alarmActions = [topic.arn];
+  const okActions = alarmActions;
 
   const transportFailureQueue = new aws.sqs.Queue("AlertTransportFailureQueue", {
     messageRetentionSeconds: failureQueueRetentionSeconds,
@@ -390,6 +391,7 @@ export function observability(inputs: ObservabilityInputs) {
     evaluationPeriods: 1,
     treatMissingData: "notBreaching",
     alarmActions,
+    okActions,
   });
 
   new aws.cloudwatch.MetricAlarm("IngestAuthFailureAlarm", {
@@ -406,6 +408,7 @@ export function observability(inputs: ObservabilityInputs) {
     comparisonOperator: "GreaterThanOrEqualToThreshold",
     treatMissingData: "notBreaching",
     alarmActions,
+    okActions,
   });
 
   new aws.cloudwatch.MetricAlarm("DurableIngestDeadJobAlarm", {
@@ -420,6 +423,7 @@ export function observability(inputs: ObservabilityInputs) {
     comparisonOperator: "GreaterThanOrEqualToThreshold",
     treatMissingData: "notBreaching",
     alarmActions,
+    okActions,
   });
 
   new aws.cloudwatch.MetricAlarm("DurableIngestOldestQueuedAgeAlarm", {
@@ -439,6 +443,7 @@ export function observability(inputs: ObservabilityInputs) {
     // a deploy, rollback, or transient database read failure.
     treatMissingData: "notBreaching",
     alarmActions,
+    okActions,
   });
 
   new aws.cloudwatch.MetricAlarm("DurableIngestFailureRatioAlarm", {
@@ -479,6 +484,7 @@ export function observability(inputs: ObservabilityInputs) {
     comparisonOperator: "GreaterThanOrEqualToThreshold",
     treatMissingData: "notBreaching",
     alarmActions,
+    okActions,
   });
 
   new aws.cloudwatch.MetricAlarm("MantleClientErrorAlarm", {
@@ -493,6 +499,7 @@ export function observability(inputs: ObservabilityInputs) {
     comparisonOperator: "GreaterThanOrEqualToThreshold",
     treatMissingData: "notBreaching",
     alarmActions,
+    okActions,
   });
 
   new aws.cloudwatch.MetricAlarm("AlertTransportFailureQueueVisibleMessages", {
@@ -509,6 +516,7 @@ export function observability(inputs: ObservabilityInputs) {
     comparisonOperator: "GreaterThanThreshold",
     treatMissingData: "notBreaching",
     alarmActions,
+    okActions,
   });
 
   new aws.cloudwatch.MetricAlarm("AlertExecutionFailureQueueVisibleMessages", {
@@ -525,5 +533,6 @@ export function observability(inputs: ObservabilityInputs) {
     comparisonOperator: "GreaterThanThreshold",
     treatMissingData: "notBreaching",
     alarmActions,
+    okActions,
   });
 }

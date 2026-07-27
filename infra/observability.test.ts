@@ -200,7 +200,7 @@ describe("observability alert delivery", () => {
     expect(resources).toHaveLength(0);
   });
 
-  it("TC-ALERT-001/009: attaches every production alarm to one topic", () => {
+  it("TC-ALERT-001/009/014: attaches every production alarm state to one topic", () => {
     observability(prodInputs);
 
     const topic = one("Topic");
@@ -211,6 +211,9 @@ describe("observability alert delivery", () => {
       expect(materialize(alarm.args.alarmActions)).toEqual([
         "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
       ]);
+      expect(materialize(alarm.args.okActions)).toEqual(
+        materialize(alarm.args.alarmActions),
+      );
       expect(alarm.args.treatMissingData).toBe("notBreaching");
     }
 
@@ -540,10 +543,56 @@ describe("observability alert delivery", () => {
     }
   });
 
-  it("TC-INGEST-METRIC-016/018/019: pins durable and Mantle alarms", () => {
+  it("TC-ALERT-015/TC-INGEST-METRIC-016/018/019: pins alarm semantics", () => {
     observability(prodInputs);
 
+    const recall = named("MetricAlarm", "RecallZeroHitRateAlarm").args;
+    expect(recall).toMatchObject({
+      alarmDescription:
+        "Recall zero-hit rate > 70% over 1h (issue #23 regression guard). " +
+        "Check cutoff_reason in the confidence recall search log lines.",
+      evaluationPeriods: 1,
+      threshold: 0.7,
+      comparisonOperator: "GreaterThanThreshold",
+      treatMissingData: "notBreaching",
+    });
+    expect(
+      (
+        recall.metricQueries as Array<{
+          metric?: Record<string, unknown>;
+        }>
+      ).flatMap((query) =>
+        query.metric
+          ? [{
+              period: query.metric.period,
+              dimensions: query.metric.dimensions,
+            }]
+          : [],
+      ),
+    ).toEqual([
+      { period: 3600, dimensions: undefined },
+      { period: 3600, dimensions: undefined },
+    ]);
+    expect(recall.dimensions).toBeUndefined();
+
+    expect(named("MetricAlarm", "IngestAuthFailureAlarm").args).toMatchObject({
+      alarmDescription:
+        "≥3 ingest LLM auth failures (401) in 15 min — llm-proxy bearer " +
+        "may be dead (issue #24 regression guard). Check llm-proxy logs " +
+        "for reason=auth_remint or credential-rotation events.",
+      namespace: "mem9-on-aws",
+      metricName: "ingest_llm_auth_failure",
+      statistic: "Sum",
+      period: 900,
+      evaluationPeriods: 1,
+      threshold: 3,
+      comparisonOperator: "GreaterThanOrEqualToThreshold",
+      treatMissingData: "notBreaching",
+    });
+
     expect(named("MetricAlarm", "DurableIngestDeadJobAlarm").args).toMatchObject({
+      alarmDescription:
+        "At least one durable ingest job reached dead state in 15 minutes.",
       namespace: "mem9-on-aws/DurableIngest",
       metricName: "JobsDead",
       dimensions: { stage: "prod" },
@@ -555,6 +604,8 @@ describe("observability alert delivery", () => {
       treatMissingData: "notBreaching",
     });
     expect(named("MetricAlarm", "DurableIngestOldestQueuedAgeAlarm").args).toMatchObject({
+      alarmDescription:
+        "The oldest durable ingest job remained queued for more than 10 minutes.",
       namespace: "mem9-on-aws/DurableIngest",
       metricName: "OldestQueuedAgeMs",
       dimensions: { stage: "prod" },
@@ -569,6 +620,8 @@ describe("observability alert delivery", () => {
 
     const ratio = named("MetricAlarm", "DurableIngestFailureRatioAlarm").args;
     expect(ratio).toMatchObject({
+      alarmDescription:
+        "Deadline or Mantle transient failures are at least 10% of 20+ terminal jobs.",
       evaluationPeriods: 1,
       threshold: 0.1,
       comparisonOperator: "GreaterThanOrEqualToThreshold",
@@ -606,6 +659,7 @@ describe("observability alert delivery", () => {
     ]);
 
     expect(named("MetricAlarm", "MantleClientErrorAlarm").args).toMatchObject({
+      alarmDescription: "Bedrock Mantle reported a Project-scoped client error.",
       namespace: "AWS/BedrockMantle",
       metricName: "InferenceClientErrors",
       dimensions: { Project: "proj_testxyz" },
@@ -614,6 +668,47 @@ describe("observability alert delivery", () => {
       evaluationPeriods: 1,
       threshold: 1,
       comparisonOperator: "GreaterThanOrEqualToThreshold",
+      treatMissingData: "notBreaching",
+    });
+
+    expect(
+      materialize(
+        named("MetricAlarm", "AlertTransportFailureQueueVisibleMessages").args,
+      ),
+    ).toMatchObject({
+      alarmDescription:
+        "SNS could not deliver an alarm event to the alert-router Lambda. " +
+        "Follow the transport failure queue runbook.",
+      namespace: "AWS/SQS",
+      metricName: "ApproximateNumberOfMessagesVisible",
+      dimensions: {
+        QueueName: "mem9-on-aws-prod-AlertTransportFailureQueue",
+      },
+      statistic: "Maximum",
+      period: 300,
+      evaluationPeriods: 1,
+      threshold: 0,
+      comparisonOperator: "GreaterThanThreshold",
+      treatMissingData: "notBreaching",
+    });
+    expect(
+      materialize(
+        named("MetricAlarm", "AlertExecutionFailureQueueVisibleMessages").args,
+      ),
+    ).toMatchObject({
+      alarmDescription:
+        "The alert-router Lambda exhausted retries or event age after accepting " +
+        "an alarm event. Follow the execution failure queue runbook.",
+      namespace: "AWS/SQS",
+      metricName: "ApproximateNumberOfMessagesVisible",
+      dimensions: {
+        QueueName: "mem9-on-aws-prod-AlertExecutionFailureQueue",
+      },
+      statistic: "Maximum",
+      period: 300,
+      evaluationPeriods: 1,
+      threshold: 0,
+      comparisonOperator: "GreaterThanThreshold",
       treatMissingData: "notBreaching",
     });
   });

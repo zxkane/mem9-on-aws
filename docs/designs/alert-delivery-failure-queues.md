@@ -17,7 +17,7 @@ Combining them in one queue would hide whether SNS reached Lambda at all.
 ## Data Flow
 
 ```text
-CloudWatch alarm
+CloudWatch alarm ALARM or OK transition
   -> production SNS alarm topic
        -> SNS invokes alert-router Lambda
             transport failure -> alert transport failure queue
@@ -32,10 +32,12 @@ execution queue visible messages > 0 -> execution queue alarm -> alarm topic
 ```
 
 Every production alarm, including both queue-depth alarms, uses the same project
-SNS topic as its alarm action. Production synthesis fails before resource
-creation when the IaC-managed Slack sink has no webhook configuration. Non-prod
-stages continue to omit the complete observability stack and do not require the
-webhook.
+SNS topic for ALARM and OK actions. The alert router formats an OK transition as
+a recovery message; its transport and execution failure destinations remain the
+separate queues above, so recovery wiring does not create a recursive
+destination. Production synthesis fails before resource creation when the
+IaC-managed Slack sink has no webhook configuration. Non-prod stages continue
+to omit the complete observability stack and do not require the webhook.
 
 ## Resource Design
 
@@ -95,7 +97,8 @@ content.
 - Handler unit tests cover 2xx, each non-2xx class, network rejection, missing
   configuration, and redacted logs.
 - IaC assertion tests cover the two queues, encryption, retention, policies,
-  redrive, Lambda destination/retries/event age, queue alarms, and topic actions.
+  redrive, Lambda destination/retries/event age, queue alarms, and matching
+  ALARM/OK topic actions without changing alarm semantics.
 - Fixture tests cover representative SNS transport and Lambda execution records
   and prove each parser rejects the other shape.
 - Production and non-prod synthesis behavior is tested separately.
