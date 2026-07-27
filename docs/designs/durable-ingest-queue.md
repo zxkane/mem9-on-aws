@@ -2,7 +2,8 @@
 
 Feature: Tenant-scoped Aurora ingest jobs
 Date: 2026-07-25
-Status: Approved (autonomous mode)
+Status: Implemented foundation; enabled by
+[`atomic-ingest-apply.md`](atomic-ingest-apply.md)
 
 ## Problem
 
@@ -187,14 +188,14 @@ The 1 MiB database check is added `NOT VALID`, so a payload accepted by the
 preceding schema is preserved while every new or changed row is constrained.
 Clean schemas validate the check immediately.
 
-## Deferred Enablement Responsibilities
+## Follow-on Enablement
 
-The durable route returns after enqueue and therefore does not run upstream
-runtime-usage leasing/metering or memory-added webhooks. This is inert in the
-current deployment because durable routing is disabled and runtime-usage
-metering is not configured. Atomic apply must define transactional mutation,
-metering finalization, and webhook emission semantics before the flag can be
-enabled; the foundation must not silently omit those side effects.
+The follow-on atomic apply design is implemented in
+[`atomic-ingest-apply.md`](atomic-ingest-apply.md). Durable routing is enabled;
+transactional mutations and job success share one commit, while metering and
+webhook emission run after commit as best effort. Runtime-usage reservation
+correlation persists on the job so retries retain it and terminal success or
+failure finalizes it from the worker.
 
 ## Privacy
 
@@ -205,7 +206,6 @@ payload-derived metric labels are introduced.
 
 ## Rollback
 
-Keep `MNEMO_DURABLE_INGEST_ENABLED=0` or revert the handler/config patch. The
-production entrypoint also rejects `1` until atomic worker wiring exists.
-Existing rows are inert and do not alter the current ingest path. The additive
-table and indexes may remain without affecting runtime behavior.
+Set `MNEMO_DURABLE_INGEST_ENABLED=0` to make existing rows inert and restore the
+legacy request path. The additive table and indexes may remain without affecting
+that path.

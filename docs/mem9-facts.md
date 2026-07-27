@@ -173,38 +173,51 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
   embedder is set → **without an embedding endpoint, PG backend does keyword-only
   (FTS), NO vector search.** So the embedding MaaS is required for semantic recall.
 
-### Disabled durable ingest foundation (downstream patch)
+### Enabled atomic durable ingest (downstream patches)
 
 - Upstream asynchronous `messages[]` ingest returns 202 before starting an
   untracked goroutine. Downstream patch
   `docker/mnemo-server/patches/0004-durable-ingest-queue.patch` adds a
   tenant-database queue repository, canonical `ingest-v1` envelopes, leases,
   retries, and an injected plan/apply worker contract.
-- `MNEMO_DURABLE_INGEST_ENABLED` defaults false in the patched application and
-  ECS explicitly sets it to `0` in every stage. Therefore the deployed request
-  path remains upstream-compatible. The production entrypoint rejects startup
-  if the flag is manually enabled before atomic processing is wired.
-- Production supplies no plan/apply processor. The queue worker cannot adapt or
-  call the existing non-atomic ingest/reconciliation path.
-- Bootstrap applies the repeatable `ingest_jobs` migration inside the same
-  operator-owned Aurora database. Canonical payloads and plans are not sent to
-  logs, metrics, or another service. Canonical envelopes are rejected above
+- Patch `docker/mnemo-server/patches/0005-atomic-ingest-apply.patch` supplies the
+  PostgreSQL processor and worker, immutable plan revisions, explicit memory
+  versions, one-transaction apply, and tenant-scoped job status. The server
+  entrypoint applies the repeatable migration before process startup, so CI uses
+  one enabled rollout and runs the complete bootstrap afterward. ECS injects
+  the stable tenant identity. The old untracked transcript goroutine is no
+  longer used when durable routing is enabled.
+- Startup and bootstrap apply the repeatable `ingest_jobs` migration inside the
+  same operator-owned Aurora database. Canonical payloads and plans are not sent
+  to logs, metrics, or another service. Canonical envelopes are rejected above
   1,048,576 bytes before enqueue, with a matching database constraint.
 - Enqueue and claim serialize each tenant/agent/app/session scope with a
   transaction advisory lock. Claim traverses a fixed high-water boundary in
   bounded candidate pages, nonblockingly tries scope locks before any row lock,
   locks only the exact FIFO head, and terminalizes at most one exhausted head
   per transaction. A row-locked head cannot expose its follower or block an
-  eligible scope later in the page. The claim attempt count fences every owned
-  write, and lease/retry decisions use PostgreSQL's statement clock rather than
-  the worker process clock.
+  eligible scope later in the page. The claim attempt count fences every
+  processing write; each terminal reclaim rotates a claim-specific owner token
+  to fence stale callbacks even when ECS workers share one configured identity.
+  Lease/retry decisions use PostgreSQL's statement clock rather than the worker
+  process clock.
 - Advisory-key collisions can only serialize unrelated scopes in the same
   tenant database; they cannot weaken FIFO or expose rows. If multiple tenant
   IDs ever share one database, this becomes a liveness-only cross-tenant risk
   that must be revisited before enablement.
-- The durable route returns before upstream runtime-usage metering and
-  memory-added webhook side effects. Atomic apply must define and restore those
-  semantics before the route can be enabled.
+- Extraction, reconciliation, existing-memory reads, and embedding calls happen
+  before the 15-second apply transaction. Raw-session upserts, tag patches,
+  memory actions, plan completion, and job success commit or roll back together.
+  Runtime-usage reservation correlation is stored on the job, retained across
+  retries, and refreshed before processing when provider expiry cannot cover
+  the full attempt. Terminal success/failure retains a recoverable finalization
+  lease until the idempotent runtime-usage outbox handoff completes. Other
+  metering and webhook work runs after commit as best effort and cannot move a
+  succeeded job back to failed.
+- At most the first 50 extracted facts and 50 deterministic actions are retained.
+  ADD IDs derive from the job, plan revision, and action index; UPDATE/DELETE use
+  monotonic memory-version predicates. Recovery reuses a valid persisted plan or
+  creates a bounded replacement revision after an optimistic conflict.
 
 ### LLM key is read ONCE at startup, immutable — decisive for the sidecar (verified 2026-07-12)
 Probed at the pinned commit (`server/internal/config/config.go` + `llm/client.go`):

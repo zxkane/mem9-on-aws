@@ -46,8 +46,8 @@ Design: [`docs/designs/durable-ingest-queue.md`](../designs/durable-ingest-queue
 | TC-INGEST-QUEUE-028 | Duplicate durable request | HTTP 202 returns the existing job ID and current state |
 | TC-INGEST-QUEUE-029 | Two authenticated tenant DB handles | Each request constructs its repository from only its resolved `TenantDB` |
 | TC-INGEST-QUEUE-030 | Application config has no durable-ingest environment variable | Durable routing and worker execution are false |
-| TC-INGEST-QUEUE-031 | IaC task definition for prod or preview | `MNEMO_DURABLE_INGEST_ENABLED` is explicitly `0` in every stage |
-| TC-INGEST-QUEUE-032 | Inspect production worker wiring | No processor adapter calls existing ingest/reconcile/memory mutation methods, and enabling without one fails startup |
+| TC-INGEST-QUEUE-031 | IaC task definition for prod or preview | CI explicitly supplies `MNEMO_DURABLE_INGEST_ENABLED=1`; local synthesis still fails closed to `0` unless explicitly enabled |
+| TC-INGEST-QUEUE-032 | Inspect production worker wiring | The immutable-plan atomic processor is injected; enabling without PostgreSQL or tenant identity fails startup |
 
 ## Worker, Retry, And Privacy
 
@@ -64,7 +64,7 @@ Design: [`docs/designs/durable-ingest-queue.md`](../designs/durable-ingest-queue
 | TC-INGEST-QUEUE-041 | New worker starts after shutdown lease expiry | Unfinished row is recovered and processed |
 | TC-INGEST-QUEUE-042 | Heartbeat keeps a long-running job alive | Other claimers cannot recover it before heartbeat stops and lease expires |
 | TC-INGEST-QUEUE-043 | Worker and repository errors include secret payload markers and tenant identifiers | Captured logs/metrics omit payload, plan, memory content, credentials, tenant, agent, app, and session identifiers |
-| TC-INGEST-QUEUE-044 | Worker is disabled or has no atomic processor | It makes no claims; production rejects enabled startup and never invokes the existing non-atomic reconcile path |
+| TC-INGEST-QUEUE-044 | Worker is disabled or has no atomic processor | It makes no claims; production injects the reviewed atomic processor and never invokes the existing non-atomic reconcile path |
 | TC-INGEST-QUEUE-045 | An earlier same-scope enqueue holds its transaction open while a later row is visible to a concurrent claim and the connection default is `REPEATABLE READ` | Claim explicitly uses `READ COMMITTED`, skips the contended scope without taking a row lock, and after commit claims only the earlier row; the later row remains queued |
 | TC-INGEST-QUEUE-046 | A lease expires and the same worker owner recovers the job with a new attempt generation | Every stale-attempt heartbeat/state/plan/terminal write fails as lease-lost; only the recovered generation can write |
 | TC-INGEST-QUEUE-047 | Worker and database clocks differ far in either direction | Claim eligibility, lease/heartbeat expiry, and retry availability remain anchored to PostgreSQL; repository calls pass durations only |
@@ -91,5 +91,66 @@ Design: [`docs/designs/durable-ingest-queue.md`](../designs/durable-ingest-queue
 - `scripts/run-ingest-queue-integration.sh` starts PostgreSQL, applies both
   migration scenarios, and runs repository/worker/handler integration packages
   together with Go's default package parallelism.
-- Root and infrastructure Vitest suites pin migration contents and the
-  disabled-by-default ECS configuration.
+- Root and infrastructure Vitest suites pin migration contents, atomic worker
+  wiring, Gateway status behavior, and enabled ECS configuration.
+
+## Atomic Plan And Apply
+
+Design: [`docs/designs/atomic-ingest-apply.md`](../designs/atomic-ingest-apply.md)
+
+| ID | Scenario | Expected |
+|---|---|---|
+| TC-INGEST-ATOMIC-001 | Build a plan twice from identical extracted/reconcile results | Canonical action order and plan hash are identical |
+| TC-INGEST-ATOMIC-002 | Build replacement plans after optimistic conflicts | Revisions increase monotonically and old plan payload/hash rows remain immutable |
+| TC-INGEST-ATOMIC-003 | Generate ADD IDs for repeated and replacement revisions | IDs are stable for one `(job, revision, action index)` tuple and distinct across tuples |
+| TC-INGEST-ATOMIC-004 | Reconcile emits actions in different model orders | Canonical sorting produces one action order and hash |
+| TC-INGEST-ATOMIC-005 | UPDATE or DELETE has a stale expected version | The predicate changes zero rows, every earlier mutation rolls back, and the plan becomes stale only after rollback |
+| TC-INGEST-ATOMIC-006 | UPDATE succeeds with the expected version | Content/tags/metadata/embedding change in place and the monotonic version increments exactly once |
+| TC-INGEST-ATOMIC-007 | DELETE succeeds with the expected version | State becomes deleted and the monotonic version increments exactly once |
+| TC-INGEST-ATOMIC-008 | Extraction returns 67 facts | The first 50 in model order are retained, `truncated_fact_count=17`, at most 50 actions apply, and the job succeeds with a truncation warning |
+| TC-INGEST-ATOMIC-009 | Reconcile returns more than 50 valid actions | The canonical first 50 actions apply and excess action count is recorded as a warning |
+| TC-INGEST-ATOMIC-010 | Worker recovers an applying job with a valid persisted plan | No extraction, LLM, existing-memory read, or embedding call repeats; the same plan is applied |
+| TC-INGEST-ATOMIC-011 | Persisted plan hash or envelope is invalid | The plan is not applied and a new immutable revision is built under the active lease |
+| TC-INGEST-ATOMIC-012 | Four consecutive version conflicts occur in one full-job attempt | At most three new revisions are persisted; the attempt leaves via bounded transient retry |
+| TC-INGEST-ATOMIC-013 | Plan save uses a wrong tenant, owner, generation, state, or expired lease | No plan row or active-plan pointer is persisted |
+| TC-INGEST-ATOMIC-014 | Final apply loses tenant, owner, generation, eligible state, active plan, or lease predicate | The entire transaction rolls back |
+| TC-INGEST-ATOMIC-015 | Crash after enqueue commit | The durable job remains claimable and no raw-session, tag, or memory mutation exists |
+| TC-INGEST-ATOMIC-016 | Crash immediately after plan persistence | The valid plan remains reusable and no plan mutation exists |
+| TC-INGEST-ATOMIC-017 | Crash immediately before apply | The valid plan remains reusable and no plan mutation exists |
+| TC-INGEST-ATOMIC-018 | Crash/error after each raw-session, tag, or memory mutation | Every pre-commit mutation rolls back, including mutations earlier in the plan |
+| TC-INGEST-ATOMIC-019 | Crash immediately before transaction commit | Every plan mutation and job completion rolls back |
+| TC-INGEST-ATOMIC-020 | Commit succeeds but the client observes an ambiguous error/crash | Tenant-scoped reread sees `succeeded`; restart does not reapply or duplicate actions |
+| TC-INGEST-ATOMIC-021 | Commit fails and reread sees a nonterminal job | No plan mutation committed and recovery safely retries |
+| TC-INGEST-ATOMIC-022 | PostgreSQL injects `40P01`, transaction cancellation, or the 15-second deadline | The transaction rolls back and the worker classifies a retryable database outcome |
+| TC-INGEST-ATOMIC-023 | Instrument extraction, reads, reconciliation, embeddings, webhook, and metering | Every observed network call occurs while the apply-transaction-open signal is false |
+| TC-INGEST-ATOMIC-024 | Post-commit webhook or metering fails | A content-free outcome is logged and the committed job remains succeeded |
+| TC-INGEST-ATOMIC-025 | Owning tenant requests an existing job status | HTTP 200 contains only job ID, state, attempts, warning/error class, and timestamps |
+| TC-INGEST-ATOMIC-026 | A different authenticated tenant or an unknown ID requests status | HTTP 404 is returned with no existence or payload disclosure |
+| TC-INGEST-ATOMIC-027 | Serialize a status row containing payload, plan, lease, runtime reservation, tenant, and credential markers | None of those fields or marker values appears in JSON |
+| TC-INGEST-ATOMIC-028 | Gateway status tool is called with an owning job ID | Proxy sends a tenant-authenticated GET and returns the approved status fields |
+| TC-INGEST-ATOMIC-029 | Gateway status tool input attempts to supply tenant/key/payload fields | Schema and proxy ignore/disallow them; only configured tenant auth is used |
+| TC-INGEST-ATOMIC-030 | Gateway owning tenant requests an unknown or mismatched-tenant job | Not-found response is preserved without payload leakage |
+| TC-INGEST-ATOMIC-031 | Production deployment is synthesized | The image applies the repeatable atomic migration before server startup and one rollout enables durable ingest with tenant identity and atomic worker wiring |
+| TC-INGEST-ATOMIC-032 | Asynchronous `messages[]` request is accepted with durable mode enabled | Enqueue commits and returns a job; no untracked ingest goroutine is launched |
+| TC-INGEST-ATOMIC-033 | Worker process restarts before and after every apply boundary | Recovery reuses/replans safely and creates no duplicate fact/action |
+| TC-INGEST-ATOMIC-034 | Apply raw sessions, message tags, mixed ADD/UPDATE/DELETE, and success | One commit contains all mutations and `succeeded`; observers never see a partial subset |
+| TC-INGEST-ATOMIC-035 | Apply the atomic migration twice to empty and preceding schemas | Sessions, version backfill, plan history, constraints, and indexes converge idempotently |
+| TC-INGEST-ATOMIC-036 | Runtime quota reservation succeeds before enqueue | Reservation correlation is persisted on the new job and is not finalized by the request handler |
+| TC-INGEST-ATOMIC-037 | Durable job retries and then succeeds or becomes dead | Retry retains the reservation; success commits it after apply; committed terminal failure releases it |
+| TC-INGEST-ATOMIC-038 | Duplicate enqueue creates a second runtime reservation | Existing job keeps its original reservation and the duplicate reservation is released |
+| TC-INGEST-ATOMIC-039 | ECS deploys an enabled replacement | The live-image smoke uses the ECS `MEM9_DB_*` secret contract over TLS and verifies `ingest_jobs`, `ingest_job_plans`, and `sessions` exist before the server is healthy; CI performs exactly one enabled service rollout and then the complete bootstrap |
+| TC-INGEST-ATOMIC-040 | Enqueue commits but the client observes a connection error | A fresh tenant/idempotency reread returns the committed job and the handler does not release its reservation |
+| TC-INGEST-ATOMIC-041 | Enqueue commit outcome is unknown and the immediate reread returns no row or an error | The request fails closed without releasing the possibly committed reservation; retry or TTL expiry resolves it |
+| TC-INGEST-ATOMIC-042 | Process exits after `succeeded` commits but before runtime finalization starts | The terminal job retains a `finalizing` intent and an expired lease is reclaimed without reapplying the plan |
+| TC-INGEST-ATOMIC-043 | Process exits after a `dead` transition but before reservation release starts | The terminal job retains a `finalizing` intent and another worker performs the idempotent release handoff |
+| TC-INGEST-ATOMIC-044 | Runtime finalization handoff succeeds and completion write commits | State becomes `completed`, terminal lease fields clear, and the job outcome remains unchanged |
+| TC-INGEST-ATOMIC-045 | Runtime finalization callback or completion write fails | The finalization remains reclaimable under its expiring lease and no terminal business mutation is retried |
+| TC-INGEST-ATOMIC-046 | Quota provider returns a reservation expiry | The manager propagates it and enqueue persists it with the operation correlation |
+| TC-INGEST-ATOMIC-047 | A queued or retrying job's reservation cannot cover the full job deadline | The worker reserves and lease-fences a replacement before planning, then releases the superseded reservation |
+| TC-INGEST-ATOMIC-048 | A recovered terminal job's reservation has expired | The worker refreshes correlation before the idempotent terminal handoff; no plan mutation is rerun |
+| TC-INGEST-ATOMIC-049 | Process exits after runtime outbox handoff but before finalization completion | Replay uses the same operation ID, memory IDs, and stable job occurrence timestamp, so the outbox payload hash remains identical |
+| TC-INGEST-ATOMIC-050 | Terminal release cannot reach either the runtime outbox or quota provider | The callback reports failure and the job remains `finalizing` for lease-based recovery |
+| TC-INGEST-ATOMIC-051 | Replacement reservation persistence returns an ambiguous database error | The worker does not release the replacement; a committed replacement remains valid and an uncommitted one expires by provider TTL |
+| TC-INGEST-ATOMIC-052 | A terminal lease is reclaimed by the same configured worker owner while its reservation is replaced | The reclaim rotates a claim-specific lease token; the stale callback is fenced and cannot complete the replacement |
+| TC-INGEST-ATOMIC-053 | A job row has only one active-plan pointer or a runtime operation without a finalization state | Two-valued database checks reject every partial invariant even when nullable expressions would otherwise evaluate to `UNKNOWN` |
+| TC-INGEST-ATOMIC-054 | The enabled replacement starts before PostgreSQL accepts connections | The bounded retry budget fits inside the ECS startup grace; CI pre-pulls PostgreSQL, starts it only after a failed migration attempt, rejects plaintext DB connections, and then requires TLS migration completion and server health |

@@ -54,6 +54,7 @@ import { resolveVpc } from "./vpc";
 import type { DbOutputs } from "./db";
 import { ecrImage, accountId, ECR_REGION } from "./ecr";
 import { observability } from "./observability";
+import type { TenantIdentityOutputs } from "./tenant-identity";
 
 // Bedrock Mantle is called in the app region (= the ECR/app region, Tokyo). Used
 // only to scope the bedrock-mantle:CreateInference project ARN.
@@ -67,6 +68,8 @@ const region = ECR_REGION;
 // NOTE: on a freshly-bootstrapped account where CI has NOT yet merged to main,
 // `latest` does not exist yet; first bring-up is always via a merge to main.
 const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
+const DURABLE_INGEST_ENABLED =
+  process.env.MEM9_DURABLE_INGEST_ENABLED === "1" ? "1" : "0";
 
 // The qwen3-embed sidecar listens here; mem9 calls it over localhost. Not exposed
 // outside the task.
@@ -121,7 +124,7 @@ export interface EcsOutputs {
  *   ("couldn't find resource"). Passing the Outputs threads a real Pulumi
  *   dependency so ECS waits for the DB resources.
  */
-export function ecs(dbOut: DbOutputs): EcsOutputs {
+export function ecs(dbOut: DbOutputs, identity: TenantIdentityOutputs): EcsOutputs {
   // GitHub exposes an unset repository secret as an empty string. Reject that
   // before registering any resources; sst.Secret accepts empty string values.
   const configuredSlackWebhook = process.env.SST_SECRET_SlackWebhookUrl;
@@ -339,9 +342,10 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
           // future sessions are stored (decisions, preferences, gotchas);
           // transient session-state observations are rejected.
           MNEMO_INGEST_DURABLE_ONLY: "1",
-          // Queue routing and execution remain disabled until atomic plan
-          // application is implemented and reviewed independently.
-          MNEMO_DURABLE_INGEST_ENABLED: "0",
+          // Durable transcript ingest uses immutable plans and one-transaction
+          // PostgreSQL apply. The image applies its repeatable migration before
+          // the server starts, so CI can use one enabled rollout.
+          MNEMO_DURABLE_INGEST_ENABLED: DURABLE_INGEST_ENABLED,
           // Bound prompt construction before the provider-boundary byte check.
           MNEMO_MAX_EXTRACTION_CONVERSATION_RUNES: String(MAX_EXTRACTION_CONVERSATION_RUNES),
         },
@@ -349,6 +353,7 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
         // env var from Secrets Manager at task start. Never a literal in git.
         ssm: {
           MEM9_DB_SECRET: dbSecretArn,
+          MEM9_TENANT_ID: identity.tenantSecretArn,
         },
         // Process liveness only: /healthz confirms the HTTP server is responding,
         // but intentionally does not probe Aurora, qwen3, the LLM proxy, or an
@@ -359,7 +364,10 @@ export function ecs(dbOut: DbOutputs): EcsOutputs {
             "CMD-SHELL",
             `wget -q -O /dev/null http://localhost:${MNEMO_PORT}/healthz || exit 1`,
           ],
-          startPeriod: "60 seconds",
+          // The entrypoint may backfill memory versions on the first atomic
+          // deployment. A success ends the grace period immediately, while a
+          // larger existing table gets enough time to migrate.
+          startPeriod: "300 seconds",
           interval: "30 seconds",
           timeout: "5 seconds",
           retries: 3,

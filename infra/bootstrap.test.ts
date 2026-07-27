@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbOutputs } from "./db";
+import type { TenantIdentityOutputs } from "./tenant-identity";
 
 /**
  * Unit tests for the `bootstrap` stack factory (the one-shot schema-bootstrap
@@ -20,15 +21,8 @@ interface ParamRecord {
   name: string;
   type: string;
 }
-interface SecretRecord {
-  args: Record<string, unknown>;
-}
-
 let tasks: TaskRecord[];
 let params: ParamRecord[];
-let secrets: SecretRecord[];
-let secretVersions: Record<string, unknown>[];
-let randomIds: string[];
 
 // Stand-in cluster (ecs() returns the real one; here just a marker object).
 const fakeCluster = {
@@ -44,6 +38,15 @@ function fakeDbOut(): DbOutputs {
     secretArn: out("arn:aws:secretsmanager:x:y:secret:mem9-on-aws-prod-Mem9DbSecret-z"),
     taskSecurityGroupId: out("sg-task"),
   } as unknown as DbOutputs;
+}
+
+function fakeTenantIdentity(): TenantIdentityOutputs {
+  return {
+    tenantSecretArn: out(
+      "arn:aws:secretsmanager:x:y:secret:mem9-on-aws-prod-tenant-api-key-abc",
+    ),
+    tenantId: out("0123456789abcdef0123456789abcdef"),
+  } as unknown as TenantIdentityOutputs;
 }
 
 function installGlobals(stage: string) {
@@ -71,21 +74,6 @@ function installGlobals(stage: string) {
       getVpcOutput: () => ({ id: out("vpc-test") }),
       getSubnetsOutput: () => ({ ids: out(["subnet-a", "subnet-b", "subnet-c"]) }),
     },
-    secretsmanager: {
-      Secret: class {
-        arn = out("arn:aws:secretsmanager:x:y:secret:mem9-on-aws-prod-tenant-api-key-abc");
-        id = out("secret-id");
-        constructor(_n: string, args: Record<string, unknown>) {
-          secrets.push({ args });
-        }
-      },
-      SecretVersion: class {
-        arn = out("arn:secretversion");
-        constructor(_n: string, args: Record<string, unknown>) {
-          secretVersions.push(args);
-        }
-      },
-    },
     ssm: {
       Parameter: class {
         constructor(_n: string, args: { name: unknown; type: unknown }) {
@@ -96,15 +84,6 @@ function installGlobals(stage: string) {
           params.push({ name, type: String(args.type) });
         }
       },
-    },
-  };
-  (globalThis as Record<string, unknown>).random = {
-    RandomId: class {
-      hex = out("0123456789abcdef0123456789abcdef");
-      id = out("rid");
-      constructor(_n: string, _args: Record<string, unknown>) {
-        randomIds.push(_n);
-      }
     },
   };
   (globalThis as Record<string, unknown>).sst = {
@@ -123,13 +102,10 @@ function installGlobals(stage: string) {
 beforeEach(() => {
   tasks = [];
   params = [];
-  secrets = [];
-  secretVersions = [];
-  randomIds = [];
 });
 
 afterEach(() => {
-  for (const g of ["$app", "aws", "sst", "$interpolate", "random"])
+  for (const g of ["$app", "aws", "sst", "$interpolate"])
     delete (globalThis as Record<string, unknown>)[g];
   delete process.env.MEM9_IMAGE_TAG;
   vi.resetModules();
@@ -137,7 +113,9 @@ afterEach(() => {
 
 async function loadBootstrap() {
   vi.resetModules();
-  return (await import("./bootstrap")).bootstrap;
+  const { bootstrap } = await import("./bootstrap");
+  return (cluster: sst.aws.Cluster, dbOut: DbOutputs) =>
+    bootstrap(cluster, dbOut, fakeTenantIdentity());
 }
 
 describe("bootstrap stack", () => {
@@ -152,7 +130,6 @@ describe("bootstrap stack", () => {
     const image = String((args.image as { value: string }).value);
     expect(image).toContain(".dkr.ecr.ap-northeast-1.amazonaws.com/mem9-on-aws/bootstrap:");
     expect(outs.taskDefinitionArn).toBeDefined();
-    expect(outs.tenantSecretArn).toBeDefined();
   });
 
   it("injects DB pieces as env + DB secret + tenant-id secret via ssm (never literals)", async () => {
@@ -174,17 +151,6 @@ describe("bootstrap stack", () => {
     }
   });
 
-  it("creates a STABLE tenant-id secret from a RandomId (generated once, reused)", async () => {
-    installGlobals("prod");
-    const bootstrap = await loadBootstrap();
-    bootstrap(fakeCluster, fakeDbOut());
-    expect(secrets).toHaveLength(1);
-    expect(randomIds).toHaveLength(1);
-    expect(secretVersions).toHaveLength(1);
-    // prod keeps a recovery window; non-prod tears down clean.
-    expect(secrets[0].args.recoveryWindowInDays).toBe(7);
-  });
-
   it("exports the CI run-task inputs under /mem9-on-aws/${stage}/bootstrap/", async () => {
     installGlobals("prod");
     const bootstrap = await loadBootstrap();
@@ -201,12 +167,6 @@ describe("bootstrap stack", () => {
     expect(subnetParam?.type).toBe("StringList");
   });
 
-  it("non-prod uses recoveryWindowInDays 0 (clean teardown)", async () => {
-    installGlobals("pr-9");
-    const bootstrap = await loadBootstrap();
-    bootstrap(fakeCluster, fakeDbOut());
-    expect(secrets[0].args.recoveryWindowInDays).toBe(0);
-  });
 });
 
 // The bootstrap image applies docker/bootstrap/schema.sql (entrypoint.sh: psql -f).

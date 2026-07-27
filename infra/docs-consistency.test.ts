@@ -148,9 +148,11 @@ describe("runtime documentation", () => {
     expect(text.architecture).toContain("## Planned changes");
     expect(text.architecture).toContain("## Rejected alternatives");
     expect(text.architecture).toContain(
-      "The queue table and worker primitives are installed but",
+      "The current async `messages[]` path is a durable queue and atomic job processor.",
     );
-    expect(text.architecture).toContain("inert; enabling them remains planned work.");
+    expect(text.architecture).toContain(
+      "Regular explicit-content memory operations remain on their existing path.",
+    );
     expect(authoritativeDocs).not.toContain("Status: **design only, not implemented.**");
   });
 

@@ -200,8 +200,9 @@ Cognito-authenticated MCP request
 
 `infra/gateway.ts` grants the gateway service role
 `lambda:InvokeFunction` on the one proxy Lambda. The Lambda maps
-`add_memory`, `search_memories`, and `ingest_messages` to the mem9 REST API and
-injects the tenant `X-API-Key`.
+`add_memory`, `search_memories`, `ingest_messages`, and
+`get_ingest_job_status` to the mem9 REST API and injects the tenant
+`X-API-Key`.
 
 `infra/ecs.ts` creates an AWS Cloud Map private DNS namespace and service. The
 proxy Lambda and ECS task share the task security group, whose self-referencing
@@ -226,21 +227,40 @@ after deployment with `scripts/run-bootstrap-task.sh`. It:
 The task is idempotent and connects directly to the Aurora writer endpoint. It is
 not one of the three long-running application containers.
 
-The bootstrap also applies the additive `ingest_jobs` migration. The patched
-server contains tenant-local enqueue, lease, FIFO, retry, and worker primitives,
-but ECS explicitly sets `MNEMO_DURABLE_INGEST_ENABLED=0` in every stage. With
-that flag off, asynchronous message ingest keeps its existing upstream behavior.
-Scope-level advisory locks serialize enqueue and claim, each claim attempt is a
-write-fencing generation, and PostgreSQL supplies lease and retry timestamps.
+The `mnemo-server` image contains the additive `ingest_jobs` migration and its
+entrypoint applies it before starting the server or worker. CI therefore uses
+one rollout with durable routing enabled, reconciles that healthy deployment,
+and then runs the bootstrap task for the complete schema and tenant seed. The
+bootstrap repeats the same migration after creating the memory schema, which
+also guarantees the memory-version backfill on a fresh environment.
+Asynchronous `messages[]` ingest commits a canonical job before returning
+instead of launching the upstream untracked goroutine. Scope-level advisory
+locks serialize enqueue and claim, each claim attempt is a write-fencing
+generation, and PostgreSQL supplies lease and retry timestamps.
 Claim traverses finite high-water sweeps in bounded candidate pages,
 nonblockingly tries advisory locks before taking any row lock, locks only the
 exact FIFO head, limits new canonical envelopes to 1 MiB, and terminalizes only
-one exhausted head per transaction.
-No production processor is wired to the queue worker, so this foundation cannot
-call the existing non-atomic reconciliation path. The server fails startup if
-the flag is manually enabled before atomic processor/worker wiring exists. A
-future enablement must also preserve upstream runtime-usage metering and
-memory-added webhook side effects, which the inert enqueue route does not run.
+one exhausted head per transaction. Terminal reclaims rotate a claim-specific
+owner token so a stale callback is fenced even when workers share a configured
+identity.
+The worker performs extraction, existing-memory reads, reconciliation, and
+embedding before persisting an immutable deterministic plan. It retains at most
+50 facts and actions, uses monotonic memory versions for optimistic
+UPDATE/DELETE predicates, and replans at most three times per attempt. A
+15-second tenant-database transaction applies every raw session, message-tag
+patch, memory mutation, plan completion, and `job=succeeded`. A conflict,
+deadlock, cancellation, timeout, or mutation error rolls back the whole apply.
+Valid plans survive lease recovery, and ambiguous commits are resolved by
+rereading the tenant-scoped job.
+
+Authenticated REST and AgentCore `get_ingest_job_status` lookups expose only the
+job ID, state, attempts, warning/error class, and timestamps. Unknown and
+cross-tenant jobs are both not found. Runtime-usage reservations are correlated
+on the durable job with provider expiry. Expiring reservations are replaced
+under the active lease before plan/apply work. Terminal commits preserve a
+reclaimable finalization state until the existing runtime-usage outbox has
+accepted the idempotent commit or release handoff. Other post-commit metering
+and webhooks are best effort and cannot change a committed job outcome.
 
 Memory rows and embeddings are durable in Aurora. The Fargate task uses `/tmp`
 only for mem9's batch-import implementation; normal add, search, and CRUD paths
@@ -401,7 +421,7 @@ to the GitHub Actions deploy role.
 | MCP surface | AgentCore Gateway Lambda target | `infra/gateway.ts` |
 | Private service lookup | AWS Cloud Map | `infra/ecs.ts` |
 | Inbound auth | Cognito M2M plus OAuth2 PKCE facade | `infra/cognito.ts`, `infra/oauth-facade.ts` |
-| Schema setup | One-shot ECS bootstrap task, including inert `ingest_jobs` foundation | `infra/bootstrap.ts`, `docker/bootstrap/migrations/` |
+| Schema setup | Startup atomic-ingest migration plus one-shot ECS bootstrap for the complete schema and tenant seed | `docker/mnemo-server/entrypoint.sh`, `infra/bootstrap.ts`, `docker/bootstrap/migrations/` |
 
 ## Locked decisions
 
@@ -424,8 +444,7 @@ to the GitHub Actions deploy role.
 - Schema bootstrap is a separate one-shot ECS task.
 - ECR scan-on-push is a guarded out-of-band registry singleton, separate from
   the retained repository stack.
-- Durable ingest routing remains explicitly disabled in every stage until an
-  atomic plan-application processor is implemented.
+- Durable transcript ingest uses immutable plans and atomic PostgreSQL apply.
 
 ## Planned changes
 
@@ -434,13 +453,11 @@ The open reliability program covers future work in these areas:
 - Release image tag selection and read-only ECS actual-state reconciliation.
 - Mandatory alert delivery with separate transport and execution failure queues.
 - Safe preview-stage reconciliation and a separately reviewed one-time cleanup.
-- Atomic ingest plan application, metering/webhook finalization, enabling the
-  durable route, tenant-scoped job status, and job-level telemetry.
+- Job-level durable-ingest telemetry.
 - A post-deployment production reliability verification exercise.
 
-The current async smart-ingest path must not be described as a durable queue or
-atomic job processor. The queue table and worker primitives are installed but
-inert; enabling them remains planned work.
+The current async `messages[]` path is a durable queue and atomic job processor.
+Regular explicit-content memory operations remain on their existing path.
 
 ## Open decisions
 

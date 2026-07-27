@@ -79,6 +79,23 @@ describe("workflow integration", () => {
     expect(workflow).toContain("bash scripts/run-ingest-queue-integration.sh");
   });
 
+  it("uses one enabled rollout after baking the repeatable migration into startup", () => {
+    const workflow = readFileSync(workflowPath, "utf8");
+    for (const stage of ["preview", "prod"]) {
+      const bootstrap = workflow.indexOf(`name: Run schema-bootstrap task (${stage})`);
+      const reconcile = workflow.indexOf(
+        `name: Reconcile ${stage === "preview" ? "preview ECS deployment" : "prod ECS deployment"}`,
+      );
+      expect(bootstrap).toBeGreaterThanOrEqual(0);
+      expect(reconcile).toBeGreaterThanOrEqual(0);
+      expect(bootstrap).toBeGreaterThan(reconcile);
+    }
+    expect(workflow.match(/MEM9_DURABLE_INGEST_ENABLED: "1"/g)).toHaveLength(2);
+    expect(workflow).not.toContain('MEM9_DURABLE_INGEST_ENABLED: "0"');
+    expect(workflow).not.toContain("Enable durable ingest after bootstrap");
+    expect(workflow.match(/pnpm -C infra exec sst deploy/g)).toHaveLength(2);
+  });
+
   it("uses the tested tag selector and reconciles preview and prod deployments", () => {
     const workflow = readFileSync(workflowPath, "utf8");
 
