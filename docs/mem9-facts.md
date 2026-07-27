@@ -189,11 +189,19 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
   longer used when durable routing is enabled.
 - Patch `docker/mnemo-server/patches/0006-durable-ingest-telemetry.patch` emits
   content-free CloudWatch EMF for committed accepted, retry, success, and dead
-  transitions plus queue age and phase durations. It uses only stage and
-  bounded result/error dimensions; plan duration measures application work and
-  is not a Mantle/provider latency. Lifecycle EMF is post-commit best effort,
-  not an accounting ledger; Aurora and the tenant-scoped status API remain
-  authoritative if a crash or log-write failure omits a metric.
+  transitions plus queue age, sampler heartbeat, and phase durations. The
+  heartbeat is written before each immediate/once-per-minute queue-age query,
+  including failed queries, and uses only the stage dimension. Other metrics
+  use only stage and bounded result/error dimensions; plan duration measures
+  application work and is not a Mantle/provider latency. Lifecycle EMF is
+  post-commit best effort, not an accounting ledger; Aurora and the
+  tenant-scoped status API remain authoritative if a crash or log-write failure
+  omits a metric. Queue-age absence remains non-breaching, while five
+  current missing one-minute heartbeats, filled as zero by metric math, breach
+  the actionless raw liveness alarm without reuse of older healthy samples. A
+  composite releases its ALARM notification after a fixed five-minute
+  initial/rollout wait if real ECS-origin heartbeat extraction does not recover;
+  it omits an OK action so recovery during suppression cannot notify alone.
 - Startup and bootstrap apply the repeatable `ingest_jobs` migration inside the
   same operator-owned Aurora database. Canonical payloads and plans are not sent
   to logs, metrics, or another service. Canonical envelopes are rejected above

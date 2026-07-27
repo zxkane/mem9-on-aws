@@ -259,6 +259,22 @@ declare namespace aws {
       constructor(name: string, args: MetricAlarmArgs);
       readonly arn: Output<string>;
     }
+    interface CompositeAlarmActionsSuppressor {
+      alarm: Input<string>;
+      waitPeriod: Input<number>;
+      extensionPeriod: Input<number>;
+    }
+    interface CompositeAlarmArgs {
+      alarmName: Input<string>;
+      alarmDescription?: Input<string>;
+      alarmRule: Input<string>;
+      actionsSuppressor?: Input<CompositeAlarmActionsSuppressor>;
+      alarmActions?: Input<Input<string>[]>;
+      okActions?: Input<Input<string>[]>;
+    }
+    class CompositeAlarm {
+      constructor(name: string, args: CompositeAlarmArgs);
+    }
     interface DashboardArgs {
       dashboardName?: Input<string>;
       dashboardBody: Input<string>;

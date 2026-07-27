@@ -132,9 +132,15 @@ function installGlobals(stage: string) {
         }
       },
       MetricAlarm: class {
-        arn = out("arn:aws:cloudwatch:alarm");
-        constructor(_name: string, args: Record<string, unknown>) {
+        arn: ReturnType<typeof out<string>>;
+        constructor(logicalName: string, args: Record<string, unknown>) {
+          this.arn = out(`arn:aws:cloudwatch:alarm:${logicalName}`);
           created.push({ kind: "MetricAlarm", args });
+        }
+      },
+      CompositeAlarm: class {
+        constructor(_name: string, args: Record<string, unknown>) {
+          created.push({ kind: "CompositeAlarm", args });
         }
       },
       Dashboard: class {
@@ -653,21 +659,25 @@ describe("ecs stack", () => {
     expect(imageTag?.value).toBe("mem9-abcdef0");
   });
 
-  // Observability (TC-OBS-001...003 and TC-INGEST-METRIC-015...020): prod only.
+  // Observability (TC-OBS-001...003 and TC-INGEST-METRIC-015...027): prod only.
   it("creates metric filters, dashboard, and alarms on prod", async () => {
     installGlobals("prod");
     const ecs = await loadEcs();
     ecs(fakeDbOut());
     const filters = created.filter((c) => c.kind === "LogMetricFilter");
     const alarms = created.filter((c) => c.kind === "MetricAlarm");
+    const compositeAlarms = created.filter((c) => c.kind === "CompositeAlarm");
     expect(filters.length).toBe(3); // recall_zero_hit, recall_total, ingest_llm_auth_failure
-    expect(alarms.length).toBe(8); // Existing four plus four ingest/Mantle alarms.
+    expect(alarms.length).toBe(10);
+    expect(compositeAlarms).toHaveLength(1);
     expect(created.filter((c) => c.kind === "Dashboard")).toHaveLength(1);
-    // Missing samples do not prove a threshold breach, including queue age.
-    for (const alarm of alarms) {
-      const args = alarm.args as Record<string, unknown>;
-      expect(args.treatMissingData).toBe("notBreaching");
-    }
+    // Queue health remains evidence-based; only sampler liveness treats loss
+    // of its continuously expected signal as breaching.
+    const missingPolicies = alarms.map((alarm) => alarm.args.treatMissingData);
+    expect(missingPolicies.filter((policy) => policy === "breaching")).toHaveLength(1);
+    expect(
+      missingPolicies.filter((policy) => policy === "notBreaching"),
+    ).toHaveLength(9);
     // Metric filter patterns reference the correct log line msg values.
     const patterns = filters.map((f) => (f.args as { pattern: string }).pattern);
     expect(patterns.some((p) => p.includes("confidence recall search") && p.includes("returned = 0"))).toBe(true);

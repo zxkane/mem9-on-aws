@@ -685,12 +685,13 @@ Resources:
             Resource: "*"
           - Sid: CloudWatchAlarmsForScaling
             # Target-tracking scaling policies auto-provision CloudWatch alarms;
-            # infra/observability.ts creates its own metric alarms too. The
-            # Pulumi provider reads tags on every alarm refresh, so the tag
+            # infra/observability.ts creates metric and composite alarms too.
+            # The Pulumi provider reads tags on every alarm refresh, so the tag
             # actions ride along (ListTagsForResource 403s the whole deploy
             # otherwise — the alarm CREATES fine, then the read-back fails).
             Effect: Allow
             Action:
+              - cloudwatch:PutCompositeAlarm
               - cloudwatch:PutMetricAlarm
               - cloudwatch:DeleteAlarms
               - cloudwatch:DescribeAlarms

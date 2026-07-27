@@ -58,8 +58,18 @@ function installGlobals() {
         }
       },
       MetricAlarm: class {
+        arn: TestOutput<string>;
         constructor(logicalName: string, args: Record<string, unknown>) {
+          this.arn = out(
+            `arn:aws:cloudwatch:ap-northeast-1:123456789012:alarm:` +
+            `mem9-on-aws-prod-${logicalName}`,
+          );
           record("MetricAlarm", logicalName, args);
+        }
+      },
+      CompositeAlarm: class {
+        constructor(logicalName: string, args: Record<string, unknown>) {
+          record("CompositeAlarm", logicalName, args);
         }
       },
       Dashboard: class {
@@ -200,14 +210,18 @@ describe("observability alert delivery", () => {
     expect(resources).toHaveLength(0);
   });
 
-  it("TC-ALERT-001/009/014: attaches every production alarm state to one topic", () => {
+  it("TC-ALERT-001/009/014: attaches configured production actions to one topic", () => {
     observability(prodInputs);
 
     const topic = one("Topic");
     expect(topic.args).toEqual({ name: "mem9-on-aws-prod-alerts" });
     const alarms = resources.filter((resource) => resource.kind === "MetricAlarm");
-    expect(alarms).toHaveLength(8);
-    for (const alarm of alarms) {
+    expect(alarms).toHaveLength(10);
+    const actionBearingMetricAlarms = alarms.filter(
+      (alarm) => alarm.args.alarmActions !== undefined,
+    );
+    expect(actionBearingMetricAlarms).toHaveLength(8);
+    for (const alarm of actionBearingMetricAlarms) {
       expect(materialize(alarm.args.alarmActions)).toEqual([
         "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
       ]);
@@ -216,6 +230,11 @@ describe("observability alert delivery", () => {
       );
       expect(alarm.args.treatMissingData).toBe("notBreaching");
     }
+    const composite = one("CompositeAlarm");
+    expect(materialize(composite.args.alarmActions)).toEqual([
+      "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
+    ]);
+    expect(composite.args.okActions).toBeUndefined();
 
     const queueAlarms = alarms.filter(
       (alarm) => alarm.args.metricName === "ApproximateNumberOfMessagesVisible",
@@ -423,6 +442,19 @@ describe("observability alert delivery", () => {
 
     expect(
       computePolicy.Statement.find(
+        (statement) => statement.Sid === "CloudWatchAlarmsForScaling",
+      ),
+    ).toMatchObject({
+      Effect: "Allow",
+      Action: expect.arrayContaining([
+        "cloudwatch:PutCompositeAlarm",
+        "cloudwatch:PutMetricAlarm",
+      ]),
+      Resource: "*",
+    });
+
+    expect(
+      computePolicy.Statement.find(
         (statement) => statement.Sid === "CloudWatchDashboards",
       ),
     ).toEqual({
@@ -504,6 +536,7 @@ describe("observability alert delivery", () => {
     expect(serialized).not.toContain("InvocationLatency");
     expect(serialized).not.toContain("TimeToFirstToken");
     expect(serialized).not.toContain("RetryCount");
+    expect(serialized).toContain("SamplerHeartbeat");
 
     const retryWidget = body.widgets.find(
       (widget: { properties?: { title?: string } }) =>
@@ -543,7 +576,7 @@ describe("observability alert delivery", () => {
     }
   });
 
-  it("TC-ALERT-015/TC-INGEST-METRIC-016/018/019: pins alarm semantics", () => {
+  it("TC-ALERT-015/TC-INGEST-METRIC-016/018/019/024..027: pins alarm semantics", () => {
     observability(prodInputs);
 
     const recall = named("MetricAlarm", "RecallZeroHitRateAlarm").args;
@@ -616,6 +649,71 @@ describe("observability alert delivery", () => {
       threshold: 600_000,
       comparisonOperator: "GreaterThanThreshold",
       treatMissingData: "notBreaching",
+    });
+    expect(named("MetricAlarm", "DurableIngestTelemetryLivenessAlarm").args).toEqual({
+      alarmDescription:
+        "The once-per-minute durable ingest sampler stopped emitting ECS-origin telemetry.",
+      metricQueries: [
+        {
+          id: "heartbeat",
+          metric: {
+            namespace: "mem9-on-aws/DurableIngest",
+            metricName: "SamplerHeartbeat",
+            dimensions: { stage: "prod" },
+            stat: "Maximum",
+            period: 60,
+          },
+          returnData: false,
+        },
+        {
+          id: "heartbeat_present",
+          expression: "FILL(heartbeat, 0)",
+          label: "Sampler heartbeat present",
+          returnData: true,
+        },
+      ],
+      evaluationPeriods: 5,
+      datapointsToAlarm: 5,
+      threshold: 1,
+      comparisonOperator: "LessThanThreshold",
+      treatMissingData: "breaching",
+    });
+    expect(
+      named("MetricAlarm", "DurableIngestTelemetryActionDelayGuard").args,
+    ).toEqual({
+      alarmDescription:
+        "Always-OK guard that gives liveness alarm actions one bounded deployment grace period.",
+      namespace: "mem9-on-aws/DurableIngest",
+      metricName: "SamplerHeartbeat",
+      dimensions: { stage: "prod" },
+      statistic: "Minimum",
+      period: 60,
+      evaluationPeriods: 1,
+      threshold: 0,
+      comparisonOperator: "LessThanThreshold",
+      treatMissingData: "notBreaching",
+    });
+    expect(
+      materialize(
+        named("CompositeAlarm", "DurableIngestTelemetryLivenessNotification").args,
+      ),
+    ).toEqual({
+      alarmName: "mem9-on-aws-prod-durable-ingest-telemetry-liveness",
+      alarmDescription:
+        "Durable ingest telemetry was absent through the bounded deployment grace period.",
+      alarmRule:
+        'ALARM("arn:aws:cloudwatch:ap-northeast-1:123456789012:alarm:' +
+        'mem9-on-aws-prod-DurableIngestTelemetryLivenessAlarm")',
+      actionsSuppressor: {
+        alarm:
+          "arn:aws:cloudwatch:ap-northeast-1:123456789012:alarm:" +
+          "mem9-on-aws-prod-DurableIngestTelemetryActionDelayGuard",
+        waitPeriod: 300,
+        extensionPeriod: 0,
+      },
+      alarmActions: [
+        "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
+      ],
     });
 
     const ratio = named("MetricAlarm", "DurableIngestFailureRatioAlarm").args;
@@ -713,6 +811,63 @@ describe("observability alert delivery", () => {
     });
   });
 
+  it("TC-INGEST-METRIC-016/018/024..026: evaluates bounded alarm fixtures", () => {
+    observability(prodInputs);
+
+    const queueCases = [
+      { name: "real backlog", samples: [600_001, 600_001], expected: true },
+      { name: "missing queue age", samples: [undefined, undefined], expected: false },
+    ];
+    for (const { name, samples, expected } of queueCases) {
+      const breaches = samples.filter(
+        (sample) => sample !== undefined && sample > 600_000,
+      );
+      expect(breaches.length >= 2, name).toBe(expected);
+    }
+
+    const heartbeatCases: Array<{
+      name: string;
+      samples: Array<number | undefined>;
+      expected: boolean;
+    }> = [
+      { name: "healthy", samples: [1, 1, 1, 1, 1], expected: false },
+      {
+        name: "latest sample delayed",
+        samples: [1, 1, 1, 1, undefined],
+        expected: false,
+      },
+      {
+        name: "four-sample rollout gap",
+        samples: [1, undefined, undefined, undefined, undefined],
+        expected: false,
+      },
+      {
+        name: "initial enablement",
+        samples: [undefined, undefined, undefined, undefined, undefined],
+        expected: true,
+      },
+      {
+        name: "older healthy samples cannot extend the window",
+        samples: [1, 1, 1, undefined, undefined, undefined, undefined, undefined],
+        expected: true,
+      },
+    ];
+    for (const { name, samples, expected } of heartbeatCases) {
+      const current = samples.slice(-5).map((sample) => sample ?? 0);
+      expect(current.every((sample) => sample < 1), name).toBe(expected);
+    }
+
+    const notification = named(
+      "CompositeAlarm",
+      "DurableIngestTelemetryLivenessNotification",
+    ).args;
+    expect(notification.actionsSuppressor).toMatchObject({
+      waitPeriod: 300,
+      extensionPeriod: 0,
+    });
+    expect(notification.okActions).toBeUndefined();
+  });
+
   it("TC-INGEST-METRIC-017: gates failure ratio on twenty terminal jobs", () => {
     expect(DURABLE_FAILURE_RATIO_EXPRESSION).toBe(
       "IF(terminal >= 20, failures / terminal, 0)",
@@ -723,7 +878,7 @@ describe("observability alert delivery", () => {
     expect(durableFailureRatio(3, 30)).toBe(0.1);
   });
 
-  it("TC-INGEST-METRIC-015/016/017: pins emitter metrics to dashboard and alarms", () => {
+  it("TC-INGEST-METRIC-015/016/017/023: pins emitter metrics to dashboard and alarms", () => {
     const patch = readFileSync(
       new URL(
         "../docker/mnemo-server/patches/0006-durable-ingest-telemetry.patch",
@@ -749,6 +904,7 @@ describe("observability alert delivery", () => {
       "JobsDead",
       "JobsTerminated",
       "DeadlineTransientTerminalFailures",
+      "SamplerHeartbeat",
     ]) {
       expect(emitter).toContain(`countMetric("${metric}")`);
     }
