@@ -98,8 +98,9 @@ const LLM_MODEL = process.env.MEM9_LLM_MODEL || "zai.glm-5";
 // Bedrock Project id for Mantle cost attribution (the OpenAI-Project header the
 // proxy injects). Mantle does NOT support IAM-principal attribution, so this is
 // how GLM-5 spend is tagged. CI sets MEM9_BEDROCK_PROJECT from the out-of-band
-// Bedrock Project stack output; empty → the proxy omits the header (still works,
-// just untagged). See infra/cloudformation/bedrock-mantle-project.yaml.
+// Bedrock Project stack output. Non-production stages may omit it and run
+// untagged; production rejects an empty value below. See
+// infra/cloudformation/bedrock-mantle-project.yaml.
 const BEDROCK_PROJECT = process.env.MEM9_BEDROCK_PROJECT || "";
 
 export interface EcsOutputs {

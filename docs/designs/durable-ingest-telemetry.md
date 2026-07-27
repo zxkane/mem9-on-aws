@@ -37,7 +37,7 @@ The worker outcome allow-list preserves the proxy classes
 | `JobsAccepted` | Count | A newly committed job, not an idempotent duplicate; `stage,result_class` |
 | `JobsSucceeded` | Count | Atomic apply committed; `stage,result_class` |
 | `JobsRetrying` | Count | A retry transition committed; `stage,result_class,error_class` |
-| `JobsDead` | Count | A dead transition committed; `stage,result_class,error_class` |
+| `JobsDead` | Count | A dead transition committed; detailed `stage,result_class,error_class` plus a separate stage-only rollup consumed by the dead-job alarm |
 | `JobsTerminated` | Count | Every succeeded or dead job; `stage` |
 | `DeadlineTransientTerminalFailures` | Count | `1` only for dead `deadline` or `mantle_transient`, otherwise `0`; `stage` |
 | `QueueWaitMs` | Milliseconds | Acceptance to first claim only; `stage,result_class` |
@@ -56,6 +56,10 @@ webhooks and metering are outside durable processing duration.
 
 `PlanDurationMs` is application elapsed time. It is not a Mantle or provider
 latency metric.
+
+The dashboard graphs retry volume from the additive `JobsRetrying` transition
+counter. `RetryCount` is an ordinal attached to each result and must not be
+summed across jobs.
 
 The queue sampler uses PostgreSQL `statement_timestamp()` and emits immediately
 at worker start and once per minute. This avoids worker/database clock skew and
@@ -78,6 +82,9 @@ publish `InvocationLatency` or `TimeToFirstToken` equivalents for Mantle.
 Application metrics appear in a separate "Durable ingest application" section.
 Production synthesis requires the out-of-band Mantle Project ID so provider
 widgets and the client-error alarm cannot silently target an empty dimension.
+The out-of-band GitHub Actions role must be updated with
+`scripts/deploy-github-role.sh` before the first deployment that creates the
+dashboard; application deployment does not update that role.
 
 ## Alarms
 
@@ -86,7 +93,7 @@ missing-data behavior:
 
 - `JobsDead >= 1` in one 15-minute period, missing data not breaching.
 - `OldestQueuedAgeMs > 600000` for two of two consecutive five-minute periods,
-  missing data not breaching.
+  missing data breaching because the once-per-minute sample is a heartbeat.
 - `DeadlineTransientTerminalFailures / JobsTerminated >= 0.10` in 15 minutes,
   gated with `IF(JobsTerminated >= 20, ratio, 0)`, missing data not breaching.
 - `AWS/BedrockMantle InferenceClientErrors >= 1` in 15 minutes for the configured
@@ -97,7 +104,12 @@ explicit retry and dead outcomes.
 
 ## Failure Modes And Rollback
 
-EMF serialization failures are content-free application errors and do not alter
-job state. Missing telemetry therefore cannot break ingest. Set
+Lifecycle EMF is emitted after the corresponding database commit and is
+best-effort, not an accounting ledger. A process crash or log-write failure in
+that post-commit window can omit a transition metric, so Aurora `ingest_jobs`
+and the tenant-scoped job-status API remain the authoritative job state.
+Serialization failures do not alter job state, and missing telemetry cannot
+break ingest. The continuously sampled queue-age heartbeat alarms on missing
+data so loss of the worker or EMF path is visible. Set
 `MNEMO_DURABLE_INGEST_ENABLED=0` to stop the worker; dashboard and alarms may
 remain deployed without affecting the data path.

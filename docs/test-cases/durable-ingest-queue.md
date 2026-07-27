@@ -108,17 +108,17 @@ Design:
 | TC-INGEST-METRIC-005 | Atomic apply succeeds, conflicts, or fails | `ApplyDurationMs` includes every apply attempt and excludes post-commit effects |
 | TC-INGEST-METRIC-006 | A claimed attempt commits retry, success, or dead | `TotalProcessingDurationMs` spans claim to the committed durable result and clamps negative clock movement to zero |
 | TC-INGEST-METRIC-007 | Attempts one through four fail transiently | `JobsRetrying`, retry ordinal, duration, and the agreed bounded error class are emitted |
-| TC-INGEST-METRIC-008 | A permanent failure, fifth-attempt transient failure, or exhausted lease becomes dead | `JobsDead`, `JobsTerminated`, retry count, and the bounded error class are emitted once |
+| TC-INGEST-METRIC-008 | A permanent failure, fifth-attempt transient failure, or exhausted lease becomes dead | Detailed `JobsDead` with bounded result/error dimensions, its stage-only alarm rollup, `JobsTerminated`, and retry count are emitted once |
 | TC-INGEST-METRIC-009 | Atomic apply commits successfully | `JobsSucceeded` and `JobsTerminated` are emitted once with result `succeeded` |
 | TC-INGEST-METRIC-010 | Smart extraction returns zero facts and apply succeeds | `ZeroFactSuccess=1`; a nonzero-fact no-op reconciliation does not increment it |
 | TC-INGEST-METRIC-011 | Extraction truncates facts or planning records warnings | Exact `TruncatedFacts` and `Warnings` values are emitted on success |
 | TC-INGEST-METRIC-012 | Queue contains queued/retrying rows or is empty | Database-clock `OldestQueuedAgeMs` reports the oldest age or zero without tenant dimensions |
 | TC-INGEST-METRIC-013 | Proxy and worker errors cover every agreed class plus an unknown value | GLM/worker classes are preserved and unknown input normalizes to `other` |
 | TC-INGEST-METRIC-014 | EMF fixtures carry marker values in tenant, agent, app, session, job, request, payload hash, message, fact, and embedding fields | Metric/log output contains none of the markers and dimensions remain low-cardinality |
-| TC-INGEST-METRIC-015 | Production dashboard is synthesized | Provider and durable-application headings are separate; Mantle widgets use `AWS/BedrockMantle` plus `Project`, and no Mantle latency metric appears |
-| TC-INGEST-METRIC-016 | Dead-job and queue-age alarms are synthesized | Dead is at least one in 15 minutes; queue age is greater than 10 minutes for two consecutive five-minute periods |
+| TC-INGEST-METRIC-015 | Production dashboard is synthesized | Provider and durable-application headings are separate; Mantle widgets use `AWS/BedrockMantle` plus `Project`; no Mantle latency metric appears; retry volume uses additive `JobsRetrying`, never a sum of retry ordinals |
+| TC-INGEST-METRIC-016 | Dead-job and queue-age alarms are synthesized | Dead consumes the stage-only `JobsDead` rollup and alarms at least once in 15 minutes; queue age is greater than 10 minutes for two consecutive five-minute periods |
 | TC-INGEST-METRIC-017 | Failure-ratio fixtures contain 19, 20, or more terminal jobs | The expression returns zero below 20 and alarms at or above 10 percent only from 20 onward |
-| TC-INGEST-METRIC-018 | Alarm input data is absent | Every new alarm has explicit `notBreaching` missing-data behavior |
+| TC-INGEST-METRIC-018 | Alarm input data is absent | Queue-age heartbeat treats missing data as `breaching`; sparse transition and provider alarms explicitly use `notBreaching` |
 | TC-INGEST-METRIC-019 | Production alarms are synthesized | Every alarm action targets the existing topic; application alarms use `stage=prod` and Mantle client errors use the configured `Project` |
 | TC-INGEST-METRIC-020 | Legacy observability resources are synthesized | The unalarmed `ingest_dropped` metric filter is absent |
 

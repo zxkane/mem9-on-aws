@@ -211,7 +211,11 @@ describe("observability alert delivery", () => {
       expect(materialize(alarm.args.alarmActions)).toEqual([
         "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
       ]);
-      expect(alarm.args.treatMissingData).toBe("notBreaching");
+      expect(alarm.args.treatMissingData).toBe(
+        alarm.logicalName === "DurableIngestOldestQueuedAgeAlarm"
+          ? "breaching"
+          : "notBreaching",
+      );
     }
 
     const queueAlarms = alarms.filter(
@@ -428,9 +432,24 @@ describe("observability alert delivery", () => {
       Action: [
         "cloudwatch:DeleteDashboards",
         "cloudwatch:GetDashboard",
-        "cloudwatch:ListDashboards",
         "cloudwatch:PutDashboard",
       ],
+      Resource: [
+        {
+          "Fn::Sub":
+            "arn:${AWS::Partition}:cloudwatch::${AWS::AccountId}:dashboard/mem9-on-aws-*-ingest",
+        },
+      ],
+    });
+
+    expect(
+      computePolicy.Statement.find(
+        (statement) => statement.Sid === "CloudWatchDashboardList",
+      ),
+    ).toEqual({
+      Sid: "CloudWatchDashboardList",
+      Effect: "Allow",
+      Action: "cloudwatch:ListDashboards",
       Resource: "*",
     });
 
@@ -485,6 +504,20 @@ describe("observability alert delivery", () => {
     }
     expect(serialized).not.toContain("InvocationLatency");
     expect(serialized).not.toContain("TimeToFirstToken");
+    expect(serialized).not.toContain("RetryCount");
+
+    const retryWidget = body.widgets.find(
+      (widget: { properties?: { title?: string } }) =>
+        widget.properties?.title === "Retries and warnings",
+    );
+    expect(retryWidget.properties.metrics[0]).toEqual([
+      {
+        expression:
+          "SUM(SEARCH('{mem9-on-aws/DurableIngest,stage,result_class,error_class} " +
+          "MetricName=\"JobsRetrying\" stage=\"prod\"', 'Sum', 300))",
+        label: "Retry transitions",
+      },
+    ]);
 
     const providerMetrics = body.widgets
       .filter((widget: { type: string }) => widget.type === "metric")
@@ -522,7 +555,7 @@ describe("observability alert delivery", () => {
       datapointsToAlarm: 2,
       threshold: 600_000,
       comparisonOperator: "GreaterThanThreshold",
-      treatMissingData: "notBreaching",
+      treatMissingData: "breaching",
     });
 
     const ratio = named("MetricAlarm", "DurableIngestFailureRatioAlarm").args;

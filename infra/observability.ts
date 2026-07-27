@@ -204,6 +204,9 @@ export function observability(inputs: ObservabilityInputs) {
     ...(resultClass ? ["result_class", resultClass] : []),
     { stat },
   ];
+  const jobsRetryingSearch =
+    `SEARCH('{${durableNamespace},stage,result_class,error_class} ` +
+    `MetricName="JobsRetrying" stage="${stage}"', 'Sum', 300)`;
 
   new aws.cloudwatch.Dashboard("DurableIngestDashboard", {
     dashboardName: `mem9-on-aws-${stage}-ingest`,
@@ -273,9 +276,7 @@ export function observability(inputs: ObservabilityInputs) {
               durableMetric("JobsDead"),
               [
                 {
-                  expression:
-                    `SEARCH('{${durableNamespace},stage,result_class,error_class} ` +
-                    `MetricName=\"JobsRetrying\" stage=\"${stage}\"', 'Sum', 300)`,
+                  expression: jobsRetryingSearch,
                   label: "Jobs retrying",
                 },
               ],
@@ -328,7 +329,12 @@ export function observability(inputs: ObservabilityInputs) {
             region: ECR_REGION,
             period: 300,
             metrics: [
-              durableMetric("RetryCount", "retrying"),
+              [
+                {
+                  expression: `SUM(${jobsRetryingSearch})`,
+                  label: "Retry transitions",
+                },
+              ],
               durableMetric("Warnings"),
               durableMetric("TruncatedFacts"),
               durableMetric("ZeroFactSuccess"),
@@ -422,7 +428,9 @@ export function observability(inputs: ObservabilityInputs) {
     datapointsToAlarm: 2,
     threshold: 600_000,
     comparisonOperator: "GreaterThanThreshold",
-    treatMissingData: "notBreaching",
+    // This sampler is a once-per-minute heartbeat. Missing data means the
+    // worker or EMF path is unhealthy, unlike sparse transition metrics.
+    treatMissingData: "breaching",
     alarmActions,
   });
 

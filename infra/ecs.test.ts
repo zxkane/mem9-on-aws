@@ -663,9 +663,12 @@ describe("ecs stack", () => {
     expect(filters.length).toBe(3); // recall_zero_hit, recall_total, ingest_llm_auth_failure
     expect(alarms.length).toBe(8); // Existing four plus four ingest/Mantle alarms.
     expect(created.filter((c) => c.kind === "Dashboard")).toHaveLength(1);
-    // Prod alarms use treatMissingData=notBreaching.
+    // The queue-age heartbeat alarms on missing samples; sparse event metrics do not.
     for (const alarm of alarms) {
-      expect((alarm.args as Record<string, unknown>).treatMissingData).toBe("notBreaching");
+      const args = alarm.args as Record<string, unknown>;
+      expect(args.treatMissingData).toBe(
+        args.metricName === "OldestQueuedAgeMs" ? "breaching" : "notBreaching",
+      );
     }
     // Metric filter patterns reference the correct log line msg values.
     const patterns = filters.map((f) => (f.args as { pattern: string }).pattern);
