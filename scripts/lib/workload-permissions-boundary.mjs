@@ -33,6 +33,11 @@ export const ROLLOUT_TIMEOUT_MS = rolloutContract.rolloutTimeoutMs;
 export const ROLLOUT_SHUTDOWN_GRACE_MS = rolloutContract.shutdownGraceMs;
 
 const ROLE_PREFIXES = ["mem9-on-aws-", "mem9-on-aw-", "mem9-on-a-"];
+const LAMBDA_EXECUTION_ROLE_TOKENS = [
+  "Mem9AlertRouterRole-",
+  "Mem9OauthFacadeFnRole-",
+  "Mem9ProxyFnRole-",
+];
 const ALLOWED_PASS_SERVICES = new Set([
   "bedrock-agentcore.amazonaws.com",
   "ecs-tasks.amazonaws.com",
@@ -969,15 +974,18 @@ export function validateProductionRuntimeBindings({
     }
   }
 
-  if (!Array.isArray(lambdaFunctions) || lambdaFunctions.length < 3) {
+  const requiredFunctions = new Map([
+    ["Mem9AlertRouter", "Mem9AlertRouterRole-"],
+    ["Mem9OauthFacadeFn", "Mem9OauthFacadeFnRole-"],
+    ["Mem9ProxyFn", "Mem9ProxyFnRole-"],
+  ]);
+  if (
+    !Array.isArray(lambdaFunctions) ||
+    lambdaFunctions.length !== requiredFunctions.size
+  ) {
     throw new Error("production Lambda inventory is incomplete");
   }
-  const requiredFunctions = [
-    "Mem9AlertRouter",
-    "Mem9OauthFacadeFn",
-    "Mem9ProxyFn",
-  ];
-  for (const token of requiredFunctions) {
+  for (const token of requiredFunctions.keys()) {
     if (
       lambdaFunctions.filter(({ FunctionName }) =>
         FunctionName?.includes(token),
@@ -1000,7 +1008,16 @@ export function validateProductionRuntimeBindings({
     }
     seenFunctions.add(fn.FunctionName);
     const roleName = productionRoleName(fn.Role, { partition, accountId });
-    const isProxyFunction = fn.FunctionName.includes("Mem9ProxyFn");
+    const matchingFunctionTypes = [...requiredFunctions].filter(([token]) =>
+      fn.FunctionName.includes(token),
+    );
+    if (
+      matchingFunctionTypes.length !== 1 ||
+      !roleName.includes(matchingFunctionTypes[0][1])
+    ) {
+      throw new Error("production Lambda role binding is malformed");
+    }
+    const isProxyFunction = matchingFunctionTypes[0][0] === "Mem9ProxyFn";
     if (isVpcProxyRoleName(roleName) !== isProxyFunction) {
       throw new Error("production Lambda proxy role binding is malformed");
     }
@@ -1029,7 +1046,11 @@ export function validateProductionRuntimeBindings({
   return [...roleNames].sort();
 }
 
-export function matchingRoleNames(roles, rolePatterns) {
+function analyzeMatchingRoles(
+  roles,
+  rolePatterns,
+  { repairableLegacyTrustIdentity } = {},
+) {
   for (const pattern of rolePatterns) {
     const marker = ":role/";
     const offset = pattern.indexOf(marker);
@@ -1042,8 +1063,12 @@ export function matchingRoleNames(roles, rolePatterns) {
       throw new Error("unsupported role ARN pattern");
     }
   }
+  if (repairableLegacyTrustIdentity !== undefined) {
+    assertIdentity(repairableLegacyTrustIdentity);
+  }
 
   const matches = new Set();
+  const repairableLegacyLambdaRoles = new Set();
   for (const role of roles) {
     if (
       !role ||
@@ -1054,17 +1079,39 @@ export function matchingRoleNames(roles, rolePatterns) {
     ) {
       throw new Error("IAM role inventory is malformed");
     }
-    if (
-      isVpcProxyRoleName(role.name) &&
-      !isLambdaOnlyTrustPolicy(role.assumeRolePolicyDocument)
-    ) {
-      throw new Error("VPC proxy role trust policy is not Lambda-only");
+    const matchesPattern = rolePatterns.some((pattern) =>
+      globMatches(pattern, role.arn),
+    );
+    if (isProjectLambdaExecutionRoleName(role.name)) {
+      if (verifyLambdaExecutionRoleTrustPolicy(role.assumeRolePolicyDocument)) {
+        // Already safe. A resumed rollout must not rewrite it.
+      } else if (
+        matchesPattern &&
+        repairableLegacyTrustIdentity !== undefined &&
+        isExactLegacyLambdaTrustPolicy(
+          role.assumeRolePolicyDocument,
+          repairableLegacyTrustIdentity,
+        )
+      ) {
+        repairableLegacyLambdaRoles.add(role.name);
+      } else {
+        throw new Error(
+          "project Lambda execution role trust policy is not Lambda-only",
+        );
+      }
     }
-    if (rolePatterns.some((pattern) => globMatches(pattern, role.arn))) {
+    if (matchesPattern) {
       matches.add(role.name);
     }
   }
-  return [...matches].sort();
+  return {
+    repairableLegacyLambdaRoles: [...repairableLegacyLambdaRoles].sort(),
+    roleNames: [...matches].sort(),
+  };
+}
+
+export function matchingRoleNames(roles, rolePatterns) {
+  return analyzeMatchingRoles(roles, rolePatterns).roleNames;
 }
 
 async function discoverMatchingRoles(adapter, rolePatterns) {
@@ -1073,6 +1120,54 @@ async function discoverMatchingRoles(adapter, rolePatterns) {
     "roles",
   );
   return matchingRoleNames(roles, rolePatterns);
+}
+
+async function discoverAndRepairMatchingRoles(adapter, rolePatterns, identity) {
+  const roles = await collectPages(
+    (marker) => adapter.listRoles({ marker }),
+    "roles",
+  );
+  const analysis = analyzeMatchingRoles(roles, rolePatterns, {
+    repairableLegacyTrustIdentity: identity,
+  });
+  if (
+    analysis.repairableLegacyLambdaRoles.length > 0 &&
+    typeof adapter.updateAssumeRolePolicy !== "function"
+  ) {
+    throw new Error("Lambda trust repair adapter is not configured");
+  }
+
+  for (const roleName of analysis.repairableLegacyLambdaRoles) {
+    const before = await adapter.getRole({ roleName });
+    if (
+      verifyLambdaExecutionRoleTrustPolicy(before?.assumeRolePolicyDocument)
+    ) {
+      continue;
+    }
+    if (
+      !isExactLegacyLambdaTrustPolicy(
+        before?.assumeRolePolicyDocument,
+        identity,
+      )
+    ) {
+      throw new Error(
+        "project Lambda execution role trust changed before repair",
+      );
+    }
+    await adapter.updateAssumeRolePolicy({
+      policyDocument: lambdaExecutionRoleTrustPolicy(),
+      roleName,
+    });
+    const after = await adapter.getRole({ roleName });
+    if (
+      !verifyLambdaExecutionRoleTrustPolicy(after?.assumeRolePolicyDocument)
+    ) {
+      throw new Error(
+        "project Lambda execution role trust repair read-back mismatch",
+      );
+    }
+  }
+  return analysis.roleNames;
 }
 
 function sameList(left, right) {
@@ -1096,17 +1191,35 @@ function requireLiveRoleCoverage(liveRoleNames, inventoryRoleNames) {
   }
 }
 
-function isVpcProxyRoleName(roleName) {
+function isProjectLambdaExecutionRoleName(roleName) {
   return (
     typeof roleName === "string" &&
-    ROLE_PREFIXES.some((prefix) =>
-      roleName.startsWith(prefix),
-    ) &&
+    ROLE_PREFIXES.some((prefix) => roleName.startsWith(prefix)) &&
+    LAMBDA_EXECUTION_ROLE_TOKENS.some((token) => roleName.includes(token))
+  );
+}
+
+function isVpcProxyRoleName(roleName) {
+  return (
+    isProjectLambdaExecutionRoleName(roleName) &&
     roleName.includes("Mem9ProxyFnRole-")
   );
 }
 
-function isLambdaOnlyTrustPolicy(document) {
+export function lambdaExecutionRoleTrustPolicy() {
+  return {
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Effect: "Allow",
+        Action: "sts:AssumeRole",
+        Principal: { Service: "lambda.amazonaws.com" },
+      },
+    ],
+  };
+}
+
+function exactAssumeRolePrincipal(document) {
   let decoded;
   try {
     decoded = decodePolicyDocument(document);
@@ -1120,15 +1233,42 @@ function isLambdaOnlyTrustPolicy(document) {
     return false;
   }
   const statements = list(decoded.Statement);
-  if (statements.length !== 1) return false;
+  if (statements.length !== 1) return undefined;
   const statement = statements[0];
-  return (
-    statement?.Effect === "Allow" &&
-    sameStringSet(Object.keys(statement), ["Action", "Effect", "Principal"]) &&
-    sameStringSet(statement.Action, ["sts:AssumeRole"]) &&
-    statement.Principal &&
-    sameStringSet(Object.keys(statement.Principal), ["Service"]) &&
-    sameStringSet(statement.Principal.Service, ["lambda.amazonaws.com"])
+  if (
+    statement?.Effect !== "Allow" ||
+    !sameStringSet(Object.keys(statement), ["Action", "Effect", "Principal"]) ||
+    !sameStringSet(statement.Action, ["sts:AssumeRole"]) ||
+    !statement.Principal
+  ) {
+    return undefined;
+  }
+  return statement.Principal;
+}
+
+export function verifyLambdaExecutionRoleTrustPolicy(document) {
+  const principal = exactAssumeRolePrincipal(document);
+  return Boolean(
+    principal &&
+      sameStringSet(Object.keys(principal), ["Service"]) &&
+      sameStringSet(principal.Service, ["lambda.amazonaws.com"]),
+  );
+}
+
+function isExactLegacyLambdaTrustPolicy(document, { partition, accountId }) {
+  try {
+    assertIdentity({ partition, accountId });
+  } catch {
+    return false;
+  }
+  const principal = exactAssumeRolePrincipal(document);
+  return Boolean(
+    principal &&
+      sameStringSet(Object.keys(principal), ["AWS", "Service"]) &&
+      sameStringSet(principal.Service, ["lambda.amazonaws.com"]) &&
+      sameStringSet(principal.AWS, [
+        `arn:${partition}:iam::${accountId}:root`,
+      ]),
   );
 }
 
@@ -1221,9 +1361,10 @@ export async function runBoundaryRollout(
 
     const discovery = { roleName: deployRoleName, partition, accountId };
     const scopeBefore = await discoverPassRoleScope(boundedAdapter, discovery);
-    const rolesBefore = await discoverMatchingRoles(
+    const rolesBefore = await discoverAndRepairMatchingRoles(
       boundedAdapter,
       scopeBefore,
+      { partition, accountId },
     );
     if (rolesBefore.length === 0) {
       throw new Error("no workload roles matched the deployed PassRole scope");
@@ -1312,8 +1453,8 @@ export async function runBoundaryRollout(
     if (!(await boundedAdapter.verifyQuarantine())) {
       throw new Error("deploy-role quarantine failed final verification");
     }
-    await verifyFrozenState();
     await boundedAdapter.verifyFinalGithubInterlock({ reviewedCommit });
+    await verifyFrozenState();
     if (!(await boundedAdapter.verifyQuarantine())) {
       throw new Error("deploy-role quarantine failed final verification");
     }

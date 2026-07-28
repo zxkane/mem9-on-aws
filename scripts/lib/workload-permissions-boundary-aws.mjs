@@ -12,6 +12,7 @@ import {
   loadRolePolicyDocuments,
   quarantinePolicyDocument,
   validateProductionRuntimeBindings,
+  verifyLambdaExecutionRoleTrustPolicy,
   verifyPermanentEnforcementDocuments,
   verifyQuarantinePolicy,
 } from "./workload-permissions-boundary.mjs";
@@ -824,9 +825,24 @@ export function createAwsCliAdapter({
         roleName,
       ]);
       return {
+        assumeRolePolicyDocument: response.Role?.AssumeRolePolicyDocument,
         permissionsBoundaryArn:
           response.Role?.PermissionsBoundary?.PermissionsBoundaryArn,
       };
+    },
+
+    async updateAssumeRolePolicy({ roleName, policyDocument }) {
+      if (!verifyLambdaExecutionRoleTrustPolicy(policyDocument)) {
+        throw new Error("refusing malformed Lambda trust repair");
+      }
+      await invokeAwsCommand([
+        "iam",
+        "update-assume-role-policy",
+        "--role-name",
+        roleName,
+        "--policy-document",
+        JSON.stringify(policyDocument),
+      ]);
     },
 
     async deployBoundary() {

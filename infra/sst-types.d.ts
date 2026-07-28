@@ -565,6 +565,14 @@ declare namespace sst {
       privateSubnets: Input<string[]> | Input<string>[];
       securityGroups: Input<string[]> | Input<string>[];
     }
+    interface FunctionRoleTransform {
+      assumeRolePolicy?: Input<string>;
+    }
+    type FunctionRoleTransformCallback = (
+      args: FunctionRoleTransform,
+      opts: Record<string, unknown>,
+      name: string,
+    ) => void;
     interface FunctionArgs {
       handler: Input<string>;
       runtime?: Input<string>;
@@ -583,6 +591,9 @@ declare namespace sst {
         }[];
       }[];
       link?: unknown[];
+      transform?: {
+        role?: FunctionRoleTransform | FunctionRoleTransformCallback;
+      };
     }
     class Function {
       constructor(name: string, args: FunctionArgs);

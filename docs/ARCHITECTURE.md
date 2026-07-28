@@ -397,6 +397,11 @@ a missing or malformed value fails synthesis. The deploy-role policy
 requires that exact boundary for role creation, boundary attachment, and
 subsequent policy writes; it denies boundary removal and mutation of the
 boundary policy or operator-owned stacks.
+A global `sst.aws.Function` component transform, registered before any stack
+module is imported, gives every application Function an exact execution-role
+trust containing only `lambda.amazonaws.com`. The pinned SST version otherwise
+emits the same-account root principal because it evaluates a Pulumi
+development-mode output as a plain boolean.
 The boundary uses one broad identity allow plus an explicit
 `Deny`/`NotAction` ceiling for the current Lambda, ECS, AgentCore, alert-router,
 OAuth, and Mantle runtime actions. This is deliberate: same-account resource
@@ -426,8 +431,14 @@ temporary quarantine therefore cannot satisfy the permanent check.
 This avoids principal-simulator Organizations decisions that do not represent
 live authorization in a management account, where SCPs do not apply. The
 rollout then expands the deployed `iam:PassRole` scope with full pagination and
-verifies all current production service deployment, RUNNING/PENDING, and
-bootstrap task definitions still carry the two required
+validates the alert-router, OAuth-facade, and VPC-proxy Lambda role trusts.
+During initial discovery only, it repairs the single exact legacy shape
+containing Lambda plus current-account root: the complete inventory must first
+contain no other unexpected trust, and each repair is guarded by an immediate
+pre-write read plus an exact post-write read-back. Retries skip already repaired
+roles. All later frozen-state checks are validation-only.
+The rollout then verifies all current production service deployment,
+RUNNING/PENDING, and bootstrap task definitions still carry the two required
 current-account/current-region project secret references before the first
 boundary attachment. It also lists the production project Lambdas,
 reads the production AgentCore Gateway, and requires every ECS task/execution,
@@ -435,12 +446,12 @@ Lambda execution, and Gateway service role to belong to the migration inventory.
 That live binding set is re-read at every frozen-state verification. It attaches
 and reads back every role boundary, repairs and re-verifies the exact active
 boundary default policy version, activates and reads back the production
-transform variable, and re-verifies the role bindings, boundaries, and permanent
-enforcement. Immediately before quarantine deletion it also requires the
+transform variable. Immediately before quarantine deletion it requires the
 default branch to remain at the reviewed commit, both reviewed workflow blobs
 to remain exact, the pause variable to remain `true`, both workflows to remain
-manually disabled, and every nonterminal run count to remain zero. It rechecks
-quarantine after that GitHub interlock and only then deletes it. It then enables
+manually disabled, and every nonterminal run count to remain zero. It then
+re-verifies trust, role bindings, boundaries, and permanent enforcement,
+rechecks quarantine, and only then deletes it. It then enables
 and reads back both deployment workflows before unpausing; a partial resume
 restores the pause and disables workflows enabled by that attempt, while a
 failed restoration is reported as unsafe. IAM/ECS/Lambda pagination has page

@@ -330,6 +330,31 @@ describe("workload role coverage from the real SST graph", () => {
           ({ inputs }) => inputs.permissionsBoundary === expectedBoundary,
         ),
       ).toBe(true);
+
+      const lambdaRoleNames = [
+        "Mem9AlertRouterRole",
+        "Mem9OauthFacadeFnRole",
+        "Mem9ProxyFnRole",
+      ];
+      const lambdaRoles = createdRoles.filter(({ name }) =>
+        lambdaRoleNames.includes(name),
+      );
+      expect(lambdaRoles).toHaveLength(lambdaRoleNames.length);
+      for (const { inputs, name } of lambdaRoles) {
+        expect(
+          JSON.parse(String(inputs.assumeRolePolicy)),
+          `${name} trust policy`,
+        ).toEqual({
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Action: "sts:AssumeRole",
+              Principal: { Service: "lambda.amazonaws.com" },
+            },
+          ],
+        });
+      }
     } finally {
       if (previousSstServer === undefined) {
         delete process.env.SST_SERVER;

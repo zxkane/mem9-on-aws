@@ -61,6 +61,14 @@ export default $config({
     };
   },
   async run() {
+    // SST 4.17's Function component tests the Pulumi dev-mode Output as a
+    // JavaScript boolean, so its generated execution-role trust always includes
+    // the same-account root. Force every application Function back to the exact
+    // Lambda service trust before constructing any component.
+    const { registerLambdaExecutionRoleTrust } =
+      await import("./infra/lambda-execution-role");
+    registerLambdaExecutionRoleTrust();
+
     // Non-production roles always carry the operator-owned workload boundary.
     // Prod is activated only by the release-verification migration after every
     // existing passable role has been bounded; this keeps the implementation
