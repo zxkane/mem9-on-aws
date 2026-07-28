@@ -33,10 +33,22 @@ export const ROLLOUT_TIMEOUT_MS = rolloutContract.rolloutTimeoutMs;
 export const ROLLOUT_SHUTDOWN_GRACE_MS = rolloutContract.shutdownGraceMs;
 
 const ROLE_PREFIXES = ["mem9-on-aws-", "mem9-on-aw-", "mem9-on-a-"];
-const LAMBDA_EXECUTION_ROLE_TOKENS = [
-  "Mem9AlertRouterRole-",
-  "Mem9OauthFacadeFnRole-",
-  "Mem9ProxyFnRole-",
+const LAMBDA_EXECUTION_ROLE_TYPES = [
+  {
+    functionToken: "Mem9AlertRouter",
+    roleToken: "Mem9AlertRouterRole-",
+    isVpcProxy: false,
+  },
+  {
+    functionToken: "Mem9OauthFacadeFn",
+    roleToken: "Mem9OauthFacadeFnRole-",
+    isVpcProxy: false,
+  },
+  {
+    functionToken: "Mem9ProxyFn",
+    roleToken: "Mem9ProxyFnRole-",
+    isVpcProxy: true,
+  },
 ];
 const ALLOWED_PASS_SERVICES = new Set([
   "bedrock-agentcore.amazonaws.com",
@@ -974,21 +986,16 @@ export function validateProductionRuntimeBindings({
     }
   }
 
-  const requiredFunctions = new Map([
-    ["Mem9AlertRouter", "Mem9AlertRouterRole-"],
-    ["Mem9OauthFacadeFn", "Mem9OauthFacadeFnRole-"],
-    ["Mem9ProxyFn", "Mem9ProxyFnRole-"],
-  ]);
   if (
     !Array.isArray(lambdaFunctions) ||
-    lambdaFunctions.length !== requiredFunctions.size
+    lambdaFunctions.length !== LAMBDA_EXECUTION_ROLE_TYPES.length
   ) {
     throw new Error("production Lambda inventory is incomplete");
   }
-  for (const token of requiredFunctions.keys()) {
+  for (const { functionToken } of LAMBDA_EXECUTION_ROLE_TYPES) {
     if (
       lambdaFunctions.filter(({ FunctionName }) =>
-        FunctionName?.includes(token),
+        FunctionName?.includes(functionToken),
       ).length !== 1
     ) {
       throw new Error("production Lambda inventory is incomplete");
@@ -1008,17 +1015,16 @@ export function validateProductionRuntimeBindings({
     }
     seenFunctions.add(fn.FunctionName);
     const roleName = productionRoleName(fn.Role, { partition, accountId });
-    const matchingFunctionTypes = [...requiredFunctions].filter(([token]) =>
-      fn.FunctionName.includes(token),
+    const matchingFunctionTypes = LAMBDA_EXECUTION_ROLE_TYPES.filter(
+      ({ functionToken }) => fn.FunctionName.includes(functionToken),
     );
     if (
       matchingFunctionTypes.length !== 1 ||
-      !roleName.includes(matchingFunctionTypes[0][1])
+      !roleName.includes(matchingFunctionTypes[0].roleToken)
     ) {
       throw new Error("production Lambda role binding is malformed");
     }
-    const isProxyFunction = matchingFunctionTypes[0][0] === "Mem9ProxyFn";
-    if (isVpcProxyRoleName(roleName) !== isProxyFunction) {
+    if (isVpcProxyRoleName(roleName) !== matchingFunctionTypes[0].isVpcProxy) {
       throw new Error("production Lambda proxy role binding is malformed");
     }
     roleNames.add(roleName);
@@ -1195,14 +1201,19 @@ function isProjectLambdaExecutionRoleName(roleName) {
   return (
     typeof roleName === "string" &&
     ROLE_PREFIXES.some((prefix) => roleName.startsWith(prefix)) &&
-    LAMBDA_EXECUTION_ROLE_TOKENS.some((token) => roleName.includes(token))
+    LAMBDA_EXECUTION_ROLE_TYPES.some(({ roleToken }) =>
+      roleName.includes(roleToken),
+    )
   );
 }
 
 function isVpcProxyRoleName(roleName) {
   return (
     isProjectLambdaExecutionRoleName(roleName) &&
-    roleName.includes("Mem9ProxyFnRole-")
+    LAMBDA_EXECUTION_ROLE_TYPES.some(
+      ({ roleToken, isVpcProxy }) =>
+        isVpcProxy && roleName.includes(roleToken),
+    )
   );
 }
 
