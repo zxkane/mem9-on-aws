@@ -5,6 +5,7 @@
   "identifiers": {
     "boundaryPolicyName": "mem9-on-aws-workload-boundary",
     "boundaryStackName": "workload-permissions-boundary-mem9-on-aws",
+    "denyDangerousPolicyName": "mem9-on-aws-deny-dangerous",
     "deployRoleName": "github-actions-mem9-on-aws",
     "quarantinePolicyName": "mem9-on-aws-workload-boundary-quarantine"
   },

@@ -125,7 +125,9 @@ document and repair direct drift without changing effective permissions.
 
 ```text
 verify exact reviewed workflow blobs, clean exact-head checkout, and idle runs
-  -> PUT and verify deploy-role quarantine
+  -> PUT and read back the exact deploy-role quarantine
+  -> custom-simulate its cross-service probes against the default * resource
+  -> re-read the exact quarantine
   -> install/verify boundary stack
   -> read PassRole scope A
   -> enumerate matching roles
@@ -149,6 +151,9 @@ verify exact reviewed workflow blobs, clean exact-head checkout, and idle runs
   -> read PassRole scope C
   -> verify C == A, live role bindings are unchanged, and all boundaries match
   -> verify permanent policy statements
+  -> require the exact permanent deny managed policy to be attached
+  -> custom-simulate the permanent deny policy alone
+  -> re-read its attachment/default version and the complete policy aggregate
   -> redeploy/read back the exact active boundary default policy version
   -> set/read back WORKLOAD_BOUNDARY_PROD_ENABLED=true
   -> repeat scope, live binding, boundary, and enforcement checks
@@ -199,6 +204,22 @@ proxy because an interrupted response is itself the state that must be
 recovered. Reinstallation and verification use a fresh, non-aborted signal, a
 five-second cap per AWS command, and an independent budget that cannot pass the
 original hard deadline.
+
+Quarantine and permanent-enforcement probes use `SimulateCustomPolicy` on
+documents read back from the target role. The quarantine document is an exact
+`Deny`, `Action: "*"`, `Resource: "*"` policy, so its cross-service probe omits
+resource ARNs and evaluates each action against the simulator's default `*`.
+Passing one IAM role ARN for CloudFormation, ECR, ECS, Lambda, S3, and SSM
+actions yields resource-type mismatches instead of testing the deny.
+
+The permanent probe first requires the fixed
+`mem9-on-aws-deny-dangerous` managed-policy ARN in the role's paginated attached
+policy inventory, then simulates only that policy. The temporary quarantine
+therefore cannot mask missing permanent denies. Principal simulation is not a
+reliable substitute here: AWS documents that SCPs do not affect principals in
+an Organizations management account and that simulator results can differ from
+live authorization. In this account, the management-account SCP view
+short-circuited principal simulation before role policies were matched.
 
 Workflow-enable or unpause failure uses the same recovery rule as ambiguous
 quarantine deletion: pause restoration and workflow disable/read-back run with

@@ -416,11 +416,20 @@ preview reconciliation stop before assuming the deploy role, and the rollout
 requires a clean checkout at the current default-branch commit, verifies the
 exact reviewed workflow blobs, and waits for queued or active runs from either
 workflow to finish, including disabled workflows. It then installs and verifies
-a temporary deploy-role quarantine before discovery, expands the deployed
-`iam:PassRole` scope with full pagination, and verifies all current production
-service deployment, RUNNING/PENDING, and bootstrap task definitions still carry
-the two required current-account/current-region project secret references before
-the first boundary attachment. It also lists the production project Lambdas,
+a temporary deploy-role quarantine before discovery. Verification reads back
+the exact inline deny and custom-simulates every cross-service probe against its
+default `*` resource, then re-reads the exact deny before mutation. Permanent
+verification separately requires the fixed deny managed policy in the role's
+attached-policy inventory, custom-simulates that policy alone, and rechecks its
+attachment, default version, and the complete live policy aggregate. The
+temporary quarantine therefore cannot satisfy the permanent check.
+This avoids principal-simulator Organizations decisions that do not represent
+live authorization in a management account, where SCPs do not apply. The
+rollout then expands the deployed `iam:PassRole` scope with full pagination and
+verifies all current production service deployment, RUNNING/PENDING, and
+bootstrap task definitions still carry the two required
+current-account/current-region project secret references before the first
+boundary attachment. It also lists the production project Lambdas,
 reads the production AgentCore Gateway, and requires every ECS task/execution,
 Lambda execution, and Gateway service role to belong to the migration inventory.
 That live binding set is re-read at every frozen-state verification. It attaches

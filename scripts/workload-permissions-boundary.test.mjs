@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
 import {
+  DENY_DANGEROUS_POLICY_NAME,
   DEPLOY_ROLE_NAME,
   QUARANTINE_POLICY_NAME,
   ROLLOUT_RESUME_COMMAND,
@@ -110,7 +111,9 @@ const boundaryContract = {
   partition,
 };
 const patterns = expectedRolePatterns({ partition, accountId });
-const denyPolicyId = "mem9-on-aws-deny-dangerous";
+const denyPolicyId = DENY_DANGEROUS_POLICY_NAME;
+const denyPolicyArn =
+  `arn:${partition}:iam::${accountId}:policy/${denyPolicyId}`;
 const independentRuntimeActions = [
   // AWSLambdaBasicExecutionRole v1.
   "logs:CreateLogGroup",
@@ -448,12 +451,27 @@ function resolveTemplateValue(value) {
 }
 
 function deployedManagedPolicyDocuments() {
+  return deployedManagedPolicyFixtures().map(({ document }) => document);
+}
+
+function deployedManagedPolicyFixtures() {
   const template = parseCloudFormation(deployRoleTemplatePath);
-  return Object.values(template.Resources)
-    .filter((resource) => resource.Type === "AWS::IAM::ManagedPolicy")
-    .map((resource) =>
-      resolveTemplateValue(resource.Properties.PolicyDocument),
-    );
+  return Object.entries(template.Resources)
+    .filter(([, resource]) => resource.Type === "AWS::IAM::ManagedPolicy")
+    .map(([logicalId, resource]) => ({
+      arn:
+        logicalId === "DenyPolicy"
+          ? denyPolicyArn
+          : `arn:${partition}:iam::${accountId}:policy/test-${logicalId}`,
+      document: resolveTemplateValue(resource.Properties.PolicyDocument),
+      logicalId,
+    }));
+}
+
+function deployedDenyPolicyDocument() {
+  return deployedManagedPolicyFixtures().find(
+    ({ logicalId }) => logicalId === "DenyPolicy",
+  ).document;
 }
 
 function passRolePolicy(resources = patterns) {
@@ -483,10 +501,22 @@ function argument(args, name) {
   return index === -1 ? undefined : args[index + 1];
 }
 
+function optionValues(args, name) {
+  const start = args.indexOf(name);
+  if (start === -1) return [];
+  const values = [];
+  for (const value of args.slice(start + 1)) {
+    if (value.startsWith("--")) break;
+    values.push(value);
+  }
+  return values;
+}
+
 async function runBoundaryDeployMock({
   guarded = false,
   matching = false,
   postMutationDrift = false,
+  quarantineLostAfterSimulation = false,
   quarantine = true,
   quarantineSimulation,
   simulationCommandFails = false,
@@ -502,6 +532,7 @@ async function runBoundaryDeployMock({
   const expectedPath = join(directory, "expected.json");
   const quarantinePath = join(directory, "quarantine.json");
   const simulationPath = join(directory, "simulation.json");
+  const simulationCompletePath = join(directory, "simulation-complete");
   await writeFile(
     expectedPath,
     JSON.stringify(expectedBoundaryPolicyDocument(boundaryContract)),
@@ -587,10 +618,16 @@ case "$command" in
     fi
     ;;
   "iam get-role-policy")
-    if [[ "$MOCK_QUARANTINE" == "true" ]]; then cat "$MOCK_QUARANTINE_DOC"; else exit 1; fi
+    if [[ "$MOCK_QUARANTINE" != "true" ||
+          ( "$MOCK_QUARANTINE_LOST_AFTER_SIMULATION" == "true" &&
+            -f "$MOCK_SIMULATION_COMPLETE" ) ]]; then
+      exit 1
+    fi
+    cat "$MOCK_QUARANTINE_DOC"
     ;;
-  "iam simulate-principal-policy")
+  "iam simulate-custom-policy")
     if [[ "$MOCK_SIMULATION_COMMAND_FAILS" == "true" ]]; then exit 1; fi
+    : > "$MOCK_SIMULATION_COMPLETE"
     cat "$MOCK_SIMULATION"
     ;;
   *)
@@ -626,7 +663,11 @@ esac
           MOCK_POST_MUTATION_DRIFT: String(postMutationDrift),
           MOCK_QUARANTINE: String(quarantine),
           MOCK_QUARANTINE_DOC: quarantinePath,
+          MOCK_QUARANTINE_LOST_AFTER_SIMULATION: String(
+            quarantineLostAfterSimulation,
+          ),
           MOCK_SIMULATION: simulationPath,
+          MOCK_SIMULATION_COMPLETE: simulationCompletePath,
           MOCK_SIMULATION_COMMAND_FAILS: String(simulationCommandFails),
           MOCK_STACK_EXISTS: String(stackExists),
           MOCK_STACK_STATUS: stackStatus,
@@ -1159,8 +1200,14 @@ function makeAdapter(options = {}) {
       calls.push("deploy-enforcement");
       if (options.failEnforcement) throw new Error("enforcement failed");
     },
-    async verifyPermanentEnforcement() {
+    async verifyPermanentEnforcement(request) {
       calls.push("verify-enforcement");
+      if (
+        options.rejectStalePolicyDocuments &&
+        Object.hasOwn(request, "policyDocuments")
+      ) {
+        throw new Error("stale policy documents were passed to verification");
+      }
       if (options.failVerification) throw new Error("verification failed");
       if (options.falseVerification) return false;
       return true;
@@ -2005,6 +2052,17 @@ describe("guarded rollout", () => {
     expect(adapter.calls).not.toContain("resume-deployments");
   });
 
+  it("lets permanent verification load its own live policy state", async () => {
+    const adapter = makeAdapter({ rejectStalePolicyDocuments: true });
+    await expect(runBoundaryRollout(adapter, options)).resolves.toEqual({
+      verifiedRoleCount: 3,
+      status: "complete",
+    });
+    expect(
+      adapter.calls.filter((call) => call === "verify-enforcement"),
+    ).toHaveLength(2);
+  });
+
   it("does not attach any boundary when production secret preflight fails", async () => {
     const adapter = makeAdapter({ failProductionSecretPreflight: true });
     await expect(runBoundaryRollout(adapter, options)).rejects.toThrow(
@@ -2449,14 +2507,10 @@ describe("stateful AWS CLI adapter", () => {
     sourcePolicyId = denyPolicyId,
     sourcePolicyType = "IAM Policy",
   ) {
-    const actionIndex = args.indexOf("--action-names");
-    const resourceIndex = args.indexOf("--resource-arns");
-    const contextIndex = args.indexOf("--context-entries");
-    const actions = args.slice(actionIndex + 1, resourceIndex);
-    const resources = args.slice(
-      resourceIndex + 1,
-      contextIndex === -1 ? args.length : contextIndex,
-    );
+    const actions = optionValues(args, "--action-names");
+    const configuredResources = optionValues(args, "--resource-arns");
+    const resources =
+      configuredResources.length === 0 ? ["*"] : configuredResources;
     return actions.flatMap((action) =>
       resources.map((resource) => ({
         EvalActionName: action,
@@ -2472,35 +2526,132 @@ describe("stateful AWS CLI adapter", () => {
     );
   }
 
+  it("custom-simulates the exact read-back quarantine on the default resource", async () => {
+    const calls = [];
+    const policy = quarantinePolicyDocument();
+    const adapter = createAwsCliAdapter({
+      consistencyAttempts: 1,
+      identity: { accountId, partition },
+      invokeAws: (args) => {
+        calls.push(args);
+        const command = args.slice(0, 2).join(" ");
+        if (command === "iam get-role-policy") {
+          return { PolicyDocument: policy };
+        }
+        if (command === "iam simulate-custom-policy") {
+          expect(argument(args, "--policy-input-list")).toBe(
+            JSON.stringify(policy),
+          );
+          expect(args).not.toContain("--policy-source-arn");
+          expect(args).not.toContain("--resource-arns");
+          return { EvaluationResults: simulationMatrix(args) };
+        }
+        throw new Error(`unexpected mocked command: ${args.join(" ")}`);
+      },
+      sleep: async () => {},
+    });
+
+    await expect(adapter.verifyQuarantine()).resolves.toBe(true);
+    expect(calls.map((args) => args.slice(0, 2).join(" "))).toEqual([
+      "iam get-role-policy",
+      "iam simulate-custom-policy",
+      "iam get-role-policy",
+    ]);
+  });
+
+  it("retries when quarantine changes between simulation and post-read", async () => {
+    const exactPolicy = quarantinePolicyDocument();
+    const malformedPolicy = {
+      ...exactPolicy,
+      Statement: [],
+    };
+    let policyReads = 0;
+    const adapter = createAwsCliAdapter({
+      consistencyAttempts: 2,
+      identity: { accountId, partition },
+      invokeAws: (args) => {
+        const command = args.slice(0, 2).join(" ");
+        if (command === "iam get-role-policy") {
+          policyReads += 1;
+          return {
+            PolicyDocument: policyReads === 2 ? malformedPolicy : exactPolicy,
+          };
+        }
+        if (command === "iam simulate-custom-policy") {
+          return { EvaluationResults: simulationMatrix(args) };
+        }
+        throw new Error(`unexpected mocked command: ${args.join(" ")}`);
+      },
+      sleep: async () => {},
+    });
+
+    await expect(adapter.verifyQuarantine()).resolves.toBe(true);
+    expect(policyReads).toBe(4);
+  });
+
+  it("accepts an RFC3986-encoded exact quarantine document", async () => {
+    const encoded = encodeURIComponent(
+      JSON.stringify(quarantinePolicyDocument()),
+    );
+    const adapter = createAwsCliAdapter({
+      consistencyAttempts: 1,
+      identity: { accountId, partition },
+      invokeAws: (args) => {
+        const command = args.slice(0, 2).join(" ");
+        if (command === "iam get-role-policy") {
+          return { PolicyDocument: encoded };
+        }
+        if (command === "iam simulate-custom-policy") {
+          expect(argument(args, "--policy-input-list")).toBe(
+            JSON.stringify(quarantinePolicyDocument()),
+          );
+          return { EvaluationResults: simulationMatrix(args) };
+        }
+        throw new Error(`unexpected mocked command: ${args.join(" ")}`);
+      },
+      sleep: async () => {},
+    });
+
+    await expect(adapter.verifyQuarantine()).resolves.toBe(true);
+  });
+
   function permanentVerificationAdapter(
     mutateSimulation = (results) => results,
+    consistencyAttempts = 1,
+    observeSimulation = () => {},
   ) {
-    const combinedPolicy = {
-      Version: "2012-10-17",
-      Statement: deployedManagedPolicyDocuments().flatMap(
-        (document) => document.Statement,
-      ),
-    };
+    const policies = deployedManagedPolicyFixtures();
+    const documentsByArn = new Map(
+      policies.map(({ arn, document }) => [arn, document]),
+    );
     return createAwsCliAdapter({
-      consistencyAttempts: 1,
+      consistencyAttempts,
       identity: { accountId, partition },
       invokeAws: (args) => {
         switch (args.slice(0, 2).join(" ")) {
           case "iam list-attached-role-policies":
             return {
-              AttachedPolicies: [{ PolicyArn: "arn:managed:combined" }],
+              AttachedPolicies: policies.map(({ arn }) => ({
+                PolicyArn: arn,
+              })),
               IsTruncated: false,
             };
           case "iam get-policy":
             return { Policy: { DefaultVersionId: "v1" } };
           case "iam get-policy-version":
-            return { PolicyVersion: { Document: combinedPolicy } };
+            return {
+              PolicyVersion: {
+                Document: documentsByArn.get(argument(args, "--policy-arn")),
+              },
+            };
           case "iam list-role-policies":
             return { PolicyNames: [], IsTruncated: false };
-          case "iam simulate-principal-policy":
+          case "iam simulate-custom-policy": {
+            observeSimulation(args);
             return {
               EvaluationResults: mutateSimulation(simulationMatrix(args)),
             };
+          }
           default:
             throw new Error(`unexpected mocked command: ${args.join(" ")}`);
         }
@@ -2508,6 +2659,46 @@ describe("stateful AWS CLI adapter", () => {
       sleep: async () => {},
     });
   }
+
+  it("custom-simulates only the real deployed deny policy", async () => {
+    let simulatedPolicy;
+    const adapter = permanentVerificationAdapter(
+      (results) => results,
+      1,
+      (args) => {
+        simulatedPolicy = argument(args, "--policy-input-list");
+      },
+    );
+
+    await expect(
+      adapter.verifyPermanentEnforcement({ boundaryArn }),
+    ).resolves.toBe(true);
+    expect(JSON.parse(simulatedPolicy)).toEqual(deployedDenyPolicyDocument());
+  });
+
+  it("accepts an RFC3986-encoded permanent deny policy document", async () => {
+    const adapter = permanentVerificationAdapter(
+      (results) => results,
+      1,
+      (args) => {
+        expect(argument(args, "--policy-input-list")).toBe(
+          JSON.stringify(deployedDenyPolicyDocument()),
+        );
+      },
+    );
+    const originalVersion = adapter.getManagedPolicyVersion;
+    adapter.getManagedPolicyVersion = async (request) => {
+      const version = await originalVersion(request);
+      if (request.policyArn !== denyPolicyArn) return version;
+      return {
+        document: encodeURIComponent(JSON.stringify(version.document)),
+      };
+    };
+
+    await expect(
+      adapter.verifyPermanentEnforcement({ boundaryArn }),
+    ).resolves.toBe(true);
+  });
 
   it.each([
     [
@@ -2527,7 +2718,7 @@ describe("stateful AWS CLI adapter", () => {
         if (args.slice(0, 2).join(" ") === "iam get-role-policy") {
           return { PolicyDocument: quarantinePolicyDocument() };
         }
-        if (args.slice(0, 2).join(" ") === "iam simulate-principal-policy") {
+        if (args.slice(0, 2).join(" ") === "iam simulate-custom-policy") {
           return { EvaluationResults: mutate(simulationMatrix(args)) };
         }
         throw new Error(`unexpected mocked command: ${args.join(" ")}`);
@@ -2545,7 +2736,7 @@ describe("stateful AWS CLI adapter", () => {
         if (args.slice(0, 2).join(" ") === "iam get-role-policy") {
           return { PolicyDocument: quarantinePolicyDocument() };
         }
-        if (args.slice(0, 2).join(" ") === "iam simulate-principal-policy") {
+        if (args.slice(0, 2).join(" ") === "iam simulate-custom-policy") {
           const results = simulationMatrix(args);
           results[1] = {
             ...results[0],
@@ -2900,7 +3091,7 @@ describe("stateful AWS CLI adapter", () => {
         if (command === "iam get-role-policy") {
           return { PolicyDocument: quarantine };
         }
-        if (command === "iam simulate-principal-policy") {
+        if (command === "iam simulate-custom-policy") {
           return { EvaluationResults: simulationMatrix(args) };
         }
         throw new Error(`unexpected AWS command: ${command}`);
@@ -2962,7 +3153,7 @@ describe("stateful AWS CLI adapter", () => {
           if (policyReads === 1) throw new Error("transient");
           return { PolicyDocument: quarantinePolicyDocument() };
         }
-        if (command === "iam simulate-principal-policy") {
+        if (command === "iam simulate-custom-policy") {
           return { EvaluationResults: simulationMatrix(args) };
         }
         throw new Error(`unexpected command: ${command}`);
@@ -2970,7 +3161,7 @@ describe("stateful AWS CLI adapter", () => {
       sleep: async (milliseconds) => sleeps.push(milliseconds),
     });
     await expect(adapter.verifyQuarantine()).resolves.toBe(true);
-    expect(policyReads).toBe(2);
+    expect(policyReads).toBe(3);
     expect(sleeps).toEqual([2_000]);
   });
 
@@ -3000,41 +3191,154 @@ describe("stateful AWS CLI adapter", () => {
     ["missing result", (results) => results.slice(1)],
     ["malformed result set", () => "malformed"],
     [
-      "wrong source policy",
+      "missing matched statement",
       (results) =>
         results.map((result) => ({
           ...result,
-          MatchedStatements: [
-            {
-              SourcePolicyId: "wrong-policy",
-              SourcePolicyType: "IAM Policy",
-            },
-          ],
-        })),
-    ],
-    [
-      "missing source policy type",
-      (results) =>
-        results.map((result) => ({
-          ...result,
-          MatchedStatements: [{ SourcePolicyId: denyPolicyId }],
-        })),
-    ],
-    [
-      "wrong source policy type",
-      (results) =>
-        results.map((result) => ({
-          ...result,
-          MatchedStatements: [
-            {
-              SourcePolicyId: denyPolicyId,
-              SourcePolicyType: "Permissions Boundary Policy",
-            },
-          ],
+          MatchedStatements: [],
         })),
     ],
   ])("rejects permanent simulation with %s", async (_name, mutate) => {
     const adapter = permanentVerificationAdapter(mutate);
+    await expect(
+      adapter.verifyPermanentEnforcement({ boundaryArn }),
+    ).resolves.toBe(false);
+  });
+
+  it("rejects permanent verification without the exact attached deny policy", async () => {
+    const adapter = permanentVerificationAdapter();
+    const originalList = adapter.listAttachedPolicies;
+    adapter.listAttachedPolicies = async (request) => {
+      const page = await originalList(request);
+      return {
+        ...page,
+        policies: page.policies.map(() => ({
+          arn: "arn:aws:iam::123456789012:policy/wrong-policy",
+        })),
+      };
+    };
+    await expect(
+      adapter.verifyPermanentEnforcement({ boundaryArn }),
+    ).resolves.toBe(false);
+  });
+
+  it("retries until the exact permanent deny attachment is visible", async () => {
+    let attachmentReads = 0;
+    const adapter = permanentVerificationAdapter(
+      (results) => results,
+      2,
+    );
+    const originalList = adapter.listAttachedPolicies;
+    adapter.listAttachedPolicies = async (request) => {
+      attachmentReads += 1;
+      if (attachmentReads === 2) {
+        return {
+          marker: undefined,
+          policies: [
+            { arn: "arn:aws:iam::123456789012:policy/wrong-policy" },
+          ],
+        };
+      }
+      return originalList(request);
+    };
+
+    await expect(
+      adapter.verifyPermanentEnforcement({ boundaryArn }),
+    ).resolves.toBe(true);
+    expect(attachmentReads).toBeGreaterThanOrEqual(3);
+  });
+
+  it("retries a stale complete-policy read inside permanent verification", async () => {
+    let versionReads = 0;
+    const adapter = permanentVerificationAdapter(
+      (results) => results,
+      2,
+    );
+    const originalVersion = adapter.getManagedPolicyVersion;
+    adapter.getManagedPolicyVersion = async (request) => {
+      versionReads += 1;
+      if (versionReads === 1) {
+        return {
+          document: { Version: "2012-10-17", Statement: [] },
+        };
+      }
+      return originalVersion(request);
+    };
+
+    await expect(
+      adapter.verifyPermanentEnforcement({ boundaryArn }),
+    ).resolves.toBe(true);
+    expect(versionReads).toBeGreaterThan(
+      deployedManagedPolicyFixtures().length,
+    );
+  });
+
+  it("rejects a deny-policy mutation after permanent simulation", async () => {
+    let simulated = false;
+    const adapter = permanentVerificationAdapter(
+      (results) => {
+        simulated = true;
+        return results;
+      },
+      1,
+    );
+    const originalList = adapter.listAttachedPolicies;
+    adapter.listAttachedPolicies = async (request) => {
+      if (simulated) {
+        return {
+          marker: undefined,
+          policies: [{ arn: "arn:aws:iam::123456789012:policy/wrong-policy" }],
+        };
+      }
+      return originalList(request);
+    };
+
+    await expect(
+      adapter.verifyPermanentEnforcement({ boundaryArn }),
+    ).resolves.toBe(false);
+  });
+
+  it("rejects a default-version mutation after permanent simulation", async () => {
+    let simulated = false;
+    const adapter = permanentVerificationAdapter(
+      (results) => {
+        simulated = true;
+        return results;
+      },
+      1,
+    );
+    const originalMetadata = adapter.getManagedPolicy;
+    adapter.getManagedPolicy = async (request) => {
+      if (simulated && request.policyArn === denyPolicyArn) {
+        return { defaultVersionId: "v2" };
+      }
+      return originalMetadata(request);
+    };
+
+    await expect(
+      adapter.verifyPermanentEnforcement({ boundaryArn }),
+    ).resolves.toBe(false);
+  });
+
+  it("rejects aggregate policy drift after permanent simulation", async () => {
+    let simulated = false;
+    const adapter = permanentVerificationAdapter(
+      (results) => {
+        simulated = true;
+        return results;
+      },
+      1,
+    );
+    const originalVersion = adapter.getManagedPolicyVersion;
+    adapter.getManagedPolicyVersion = async (request) => {
+      if (simulated && request.policyArn !== denyPolicyArn) {
+        return {
+          document: { Version: "2012-10-17", Statement: [] },
+        };
+      }
+      return originalVersion(request);
+    };
+
     await expect(
       adapter.verifyPermanentEnforcement({ boundaryArn }),
     ).resolves.toBe(false);
@@ -3060,12 +3364,7 @@ describe("stateful AWS CLI adapter", () => {
       (results) =>
         results.map((result) => ({
           ...result,
-          MatchedStatements: [
-            {
-              SourcePolicyId: "wrong-policy",
-              SourcePolicyType: "IAM Policy",
-            },
-          ],
+          MatchedStatements: [],
         })),
     ).verifyPermanentEnforcement;
     await expect(
@@ -3092,12 +3391,10 @@ describe("stateful AWS CLI adapter", () => {
       quarantine: undefined,
       workflowsEnabled: false,
     };
-    const permanentDocument = {
-      Version: "2012-10-17",
-      Statement: deployedManagedPolicyDocuments().flatMap(
-        (document) => document.Statement,
-      ),
-    };
+    const permanentPolicies = deployedManagedPolicyFixtures();
+    const permanentDocumentsByArn = new Map(
+      permanentPolicies.map(({ arn, document }) => [arn, document]),
+    );
 
     const invokeAws = (args) => {
       calls.push(args);
@@ -3125,15 +3422,11 @@ describe("stateful AWS CLI adapter", () => {
             return { PolicyDocument: state.quarantine };
           }
           throw new Error("inline policy not found");
-        case "iam simulate-principal-policy": {
-          const actionIndex = args.indexOf("--action-names");
-          const resourceIndex = args.indexOf("--resource-arns");
-          const contextIndex = args.indexOf("--context-entries");
-          const actions = args.slice(actionIndex + 1, resourceIndex);
-          const resources = args.slice(
-            resourceIndex + 1,
-            contextIndex === -1 ? args.length : contextIndex,
-          );
+        case "iam simulate-custom-policy": {
+          const actions = optionValues(args, "--action-names");
+          const configuredResources = optionValues(args, "--resource-arns");
+          const resources =
+            configuredResources.length === 0 ? ["*"] : configuredResources;
           return {
             EvaluationResults: actions.flatMap((action) =>
               resources.map((resource) => {
@@ -3171,11 +3464,15 @@ describe("stateful AWS CLI adapter", () => {
         case "iam list-attached-role-policies":
           return marker === "attached-2"
             ? {
-                AttachedPolicies: [{ PolicyArn: "arn:managed:enforcement" }],
+                AttachedPolicies: permanentPolicies.slice(2).map(({ arn }) => ({
+                  PolicyArn: arn,
+                })),
                 IsTruncated: false,
               }
             : {
-                AttachedPolicies: [{ PolicyArn: "arn:managed:pass-role" }],
+                AttachedPolicies: permanentPolicies
+                  .slice(0, 2)
+                  .map(({ arn }) => ({ PolicyArn: arn })),
                 IsTruncated: true,
                 Marker: "attached-2",
               };
@@ -3189,11 +3486,9 @@ describe("stateful AWS CLI adapter", () => {
           return {
             PolicyVersion: {
               Document:
-                policyArn === "arn:managed:pass-role"
-                  ? state.enforced
-                    ? permanentDocument
-                    : passRolePolicy()
-                  : { Version: "2012-10-17", Statement: [] },
+                policyArn === denyPolicyArn && !state.enforced
+                  ? { Version: "2012-10-17", Statement: [] }
+                  : permanentDocumentsByArn.get(policyArn),
             },
           };
         case "iam list-role-policies":
@@ -3403,7 +3698,7 @@ describe("stateful AWS CLI adapter", () => {
     ).toBeGreaterThan(
       calls.findIndex(
         (args) =>
-          args.slice(0, 2).join(" ") === "iam simulate-principal-policy",
+          args.slice(0, 2).join(" ") === "iam simulate-custom-policy",
       ),
     );
     expect(
@@ -3424,7 +3719,7 @@ describe("stateful AWS CLI adapter", () => {
     expect(
       calls.some(
         (args) =>
-          args.slice(0, 2).join(" ") === "iam simulate-principal-policy" &&
+          args.slice(0, 2).join(" ") === "iam simulate-custom-policy" &&
           args.includes("lambda:UpdateFunctionCode"),
       ),
     ).toBe(true);
@@ -3437,7 +3732,7 @@ describe("stateful AWS CLI adapter", () => {
       expect(
         calls.some(
           (args) =>
-            args.slice(0, 2).join(" ") === "iam simulate-principal-policy" &&
+            args.slice(0, 2).join(" ") === "iam simulate-custom-policy" &&
             args.includes(action),
         ),
       ).toBe(true);
@@ -3451,14 +3746,14 @@ describe("stateful AWS CLI adapter", () => {
     expect(
       calls.some(
         (args) =>
-          args.slice(0, 2).join(" ") === "iam simulate-principal-policy" &&
+          args.slice(0, 2).join(" ") === "iam simulate-custom-policy" &&
           args.includes("iam:CreatePolicyVersion"),
       ),
     ).toBe(true);
     expect(
       calls.some(
         (args) =>
-          args.slice(0, 2).join(" ") === "iam simulate-principal-policy" &&
+          args.slice(0, 2).join(" ") === "iam simulate-custom-policy" &&
           args.includes("cloudformation:UpdateStack") &&
           args.some((value) =>
             value.includes("stack/ecr-registry-scanning-mem9-on-aws/"),
@@ -3468,7 +3763,7 @@ describe("stateful AWS CLI adapter", () => {
     expect(
       calls.some(
         (args) =>
-          args.slice(0, 2).join(" ") === "iam simulate-principal-policy" &&
+          args.slice(0, 2).join(" ") === "iam simulate-custom-policy" &&
           args.includes(
             "ContextKeyName=iam:PassedToService," +
               "ContextKeyValues=ecs-tasks.amazonaws.com," +
@@ -3512,17 +3807,14 @@ describe("stateful AWS CLI adapter", () => {
           return {};
         case "iam get-role-policy":
           return { PolicyDocument: state.quarantine };
-        case "iam simulate-principal-policy":
+        case "iam simulate-custom-policy":
           return {
-            EvaluationResults: args
-              .slice(
-                args.indexOf("--action-names") + 1,
-                args.indexOf("--resource-arns"),
-              )
-              .map((action) => ({
+            EvaluationResults: optionValues(args, "--action-names").map(
+              (action) => ({
                 EvalActionName: action,
                 EvalDecision: "explicitDeny",
-              })),
+              }),
+            ),
           };
         default:
           throw new Error("unexpected AWS command");
@@ -3559,7 +3851,7 @@ describe("stateful AWS CLI adapter", () => {
     expect(
       calls.some(
         (args) =>
-          args.slice(0, 2).join(" ") === "iam simulate-principal-policy",
+          args.slice(0, 2).join(" ") === "iam simulate-custom-policy",
       ),
     ).toBe(true);
   });
@@ -3583,17 +3875,14 @@ describe("stateful AWS CLI adapter", () => {
           return {};
         case "iam get-role-policy":
           return { PolicyDocument: state.quarantine };
-        case "iam simulate-principal-policy":
+        case "iam simulate-custom-policy":
           return {
-            EvaluationResults: args
-              .slice(
-                args.indexOf("--action-names") + 1,
-                args.indexOf("--resource-arns"),
-              )
-              .map((action) => ({
+            EvaluationResults: optionValues(args, "--action-names").map(
+              (action) => ({
                 EvalActionName: action,
                 EvalDecision: "explicitDeny",
-              })),
+              }),
+            ),
           };
         default:
           throw new Error("unexpected AWS command");
@@ -3618,7 +3907,7 @@ describe("stateful AWS CLI adapter", () => {
         "iam delete-role-policy",
         "iam put-role-policy",
         "iam get-role-policy",
-        "iam simulate-principal-policy",
+        "iam simulate-custom-policy",
       ]),
     );
     expect(
@@ -3649,7 +3938,7 @@ describe("stateful AWS CLI adapter", () => {
           return {};
         case "iam get-role-policy":
           return { PolicyDocument: quarantine };
-        case "iam simulate-principal-policy":
+        case "iam simulate-custom-policy":
           return {
             EvaluationResults: QUARANTINE_PROBE_ACTIONS.map((action) => ({
               EvalActionName: action,
@@ -3681,7 +3970,8 @@ describe("stateful AWS CLI adapter", () => {
       "iam delete-role-policy",
       "iam put-role-policy",
       "iam get-role-policy",
-      "iam simulate-principal-policy",
+      "iam simulate-custom-policy",
+      "iam get-role-policy",
     ]);
     for (const call of calls.slice(1)) {
       expect(call.signal).not.toBe(controller.signal);
@@ -3714,7 +4004,7 @@ describe("stateful AWS CLI adapter", () => {
           return {};
         case "iam get-role-policy":
           return { PolicyDocument: quarantine };
-        case "iam simulate-principal-policy":
+        case "iam simulate-custom-policy":
           return {
             EvaluationResults: QUARANTINE_PROBE_ACTIONS.map((action) => ({
               EvalActionName: action,
@@ -3746,10 +4036,10 @@ describe("stateful AWS CLI adapter", () => {
       [
         "iam put-role-policy",
         "iam get-role-policy",
-        "iam simulate-principal-policy",
+        "iam simulate-custom-policy",
       ].includes(command),
     );
-    expect(recoveryCalls).toHaveLength(3);
+    expect(recoveryCalls).toHaveLength(4);
     for (const call of recoveryCalls) {
       expect(call.timestamp).toBeGreaterThan(deadlineAt);
       expect(call.options.signal).not.toBe(mainSignal);
@@ -4177,13 +4467,13 @@ case "$command_name" in
     cat "$MOCK_STATE_PATH"
     printf '}\\n'
     ;;
-  "iam simulate-principal-policy")
+  "iam simulate-custom-policy")
     actions=()
     reading_actions=false
     for argument in "$@"; do
       if [[ "$argument" == "--action-names" ]]; then
         reading_actions=true
-      elif [[ "$argument" == "--resource-arns" ]]; then
+      elif [[ "$reading_actions" == true && "$argument" == --* ]]; then
         break
       elif [[ "$reading_actions" == true ]]; then
         actions+=("$argument")
@@ -4304,7 +4594,8 @@ try {
           "iam delete-role-policy",
           "iam put-role-policy",
           "iam get-role-policy",
-          "iam simulate-principal-policy",
+          "iam simulate-custom-policy",
+          "iam get-role-policy",
         ]);
       } finally {
         if (child?.exitCode === null && child.signalCode === null) {
@@ -5386,17 +5677,34 @@ describe("operator entry point", () => {
     );
     expect(update).toBeGreaterThan(
       calls.findIndex((call) =>
-        call.startsWith("iam simulate-principal-policy"),
+        call.startsWith("iam simulate-custom-policy"),
       ),
     );
     expect(calls[update]).toContain(
       "ParameterKey=PolicyRevision,ParameterValue=r",
     );
     const simulation = calls.find((call) =>
-      call.startsWith("iam simulate-principal-policy"),
+      call.startsWith("iam simulate-custom-policy"),
     );
     expect(simulation).toContain("iam:PassRole");
     expect(simulation).toContain("iam:PutRolePermissionsBoundary");
+    expect(
+      calls.filter((call) => call.startsWith("iam get-role-policy")),
+    ).toHaveLength(2);
+  });
+
+  it("refuses a guarded update when quarantine disappears after simulation", async () => {
+    const { calls, result } = await runBoundaryDeployMock({
+      guarded: true,
+      quarantineLostAfterSimulation: true,
+    });
+    expect(result.status).toBe(1);
+    expect(
+      calls.filter((call) => call.startsWith("iam get-role-policy")),
+    ).toHaveLength(2);
+    expect(
+      calls.some((call) => call.startsWith("cloudformation update-stack")),
+    ).toBe(false);
   });
 
   it.each([
@@ -5748,6 +6056,7 @@ describe("boundary and deploy-role templates", () => {
     expect({
       boundaryPolicyName: WORKLOAD_BOUNDARY_POLICY_NAME,
       boundaryStackName: WORKLOAD_BOUNDARY_STACK_NAME,
+      denyDangerousPolicyName: DENY_DANGEROUS_POLICY_NAME,
       deployRoleName: DEPLOY_ROLE_NAME,
       quarantinePolicyName: QUARANTINE_POLICY_NAME,
     }).toEqual(contract.identifiers);
@@ -5773,6 +6082,11 @@ describe("boundary and deploy-role templates", () => {
     expect(deployRoleSource).toContain(
       `stack/${contract.identifiers.deployRoleName}/`,
     );
+    expect(
+      resolveTemplateValue(
+        deployRoleTemplate.Resources.DenyPolicy.Properties.ManagedPolicyName,
+      ),
+    ).toBe(contract.identifiers.denyDangerousPolicyName);
 
     const typescriptSource = readFileSync(
       resolve(root, "infra/workload-permissions-boundary.ts"),
@@ -5786,6 +6100,7 @@ describe("boundary and deploy-role templates", () => {
     for (const field of [
       "boundaryPolicyName",
       "boundaryStackName",
+      "denyDangerousPolicyName",
       "deployRoleName",
       "quarantinePolicyName",
     ]) {

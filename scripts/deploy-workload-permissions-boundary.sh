@@ -57,6 +57,7 @@ if ! contract_identifiers="$(jq -ce '
     | select(
         (.boundaryPolicyName | type) == "string" and
         (.boundaryStackName | type) == "string" and
+        (.denyDangerousPolicyName | type) == "string" and
         (.deployRoleName | type) == "string" and
         (.quarantinePolicyName | type) == "string" and
         all(.[]; test("^[A-Za-z0-9+=,.@_-]+$"))
@@ -159,20 +160,20 @@ verify_guarded_update() {
     echo "Attached boundary updates require the guarded rollout." >&2
     return 1
   fi
-  if ! aws iam get-role-policy \
-    --role-name "$deploy_role_name" \
-    --policy-name "$quarantine_policy_name" \
-    --query PolicyDocument \
-    --output json 2>/dev/null |
-    node "$repo_root/scripts/verify-workload-permissions-boundary.mjs" \
-      --quarantine; then
+  local quarantine_policy
+  if ! quarantine_policy="$(aws iam get-role-policy \
+      --role-name "$deploy_role_name" \
+      --policy-name "$quarantine_policy_name" \
+      --query PolicyDocument \
+      --output json 2>/dev/null)" ||
+      [[ -z "$quarantine_policy" ]] ||
+      ! node "$repo_root/scripts/verify-workload-permissions-boundary.mjs" \
+        --quarantine <<<"$quarantine_policy"; then
     return 1
   fi
 
-  local deploy_role_arn probe_role_arn simulation quarantine_actions_json
+  local simulation quarantine_actions_json
   local -a quarantine_actions
-  deploy_role_arn="arn:${partition}:iam::${account_id}:role/${deploy_role_name}"
-  probe_role_arn="arn:${partition}:iam::${account_id}:role/mem9-on-aws-quarantine-probe"
   quarantine_actions_json="$(jq -c '
     .quarantineProbeActions
     | select(
@@ -190,10 +191,9 @@ verify_guarded_update() {
   mapfile -t quarantine_actions < <(
     jq -r '.[]' <<<"$quarantine_actions_json"
   )
-  if ! simulation="$(aws iam simulate-principal-policy \
-      --policy-source-arn "$deploy_role_arn" \
+  if ! simulation="$(aws iam simulate-custom-policy \
+      --policy-input-list "$quarantine_policy" \
       --action-names "${quarantine_actions[@]}" \
-      --resource-arns "$probe_role_arn" \
       --output json 2>/dev/null)" ||
       [[ -z "$simulation" ]]; then
     echo "Deploy-role quarantine is not effective for every probe." >&2
@@ -218,6 +218,18 @@ verify_guarded_update() {
     ) catch false
   ' <<<"$simulation" >/dev/null; then
     echo "Deploy-role quarantine is not effective for every probe." >&2
+    return 1
+  fi
+  local quarantine_policy_after
+  if ! quarantine_policy_after="$(aws iam get-role-policy \
+      --role-name "$deploy_role_name" \
+      --policy-name "$quarantine_policy_name" \
+      --query PolicyDocument \
+      --output json 2>/dev/null)" ||
+      [[ -z "$quarantine_policy_after" ]] ||
+      ! node "$repo_root/scripts/verify-workload-permissions-boundary.mjs" \
+        --quarantine <<<"$quarantine_policy_after"; then
+    echo "Deploy-role quarantine changed after simulation." >&2
     return 1
   fi
 }
