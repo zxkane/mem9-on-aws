@@ -22,9 +22,15 @@
 
 set -euo pipefail
 
-# Load repo-root .env (gitignored) for AWS_PROFILE etc., if present.
+# Load repo-root .env (gitignored) for AWS_PROFILE etc., if present. Guarded
+# callers set WORKLOAD_BOUNDARY_SKIP_DOTENV after loading their selected file so
+# this subprocess cannot silently switch profiles.
 _repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-[ -f "$_repo_root/.env" ] && set -a && . "$_repo_root/.env" && set +a
+if [[ "${WORKLOAD_BOUNDARY_SKIP_DOTENV:-false}" != "true" && -f "$_repo_root/.env" ]]; then
+  set -a
+  . "$_repo_root/.env"
+  set +a
+fi
 
 STACK_NAME="${STACK_NAME:-github-actions-mem9-on-aws}"
 TEMPLATE_FILE="infra/cloudformation/github-actions-role.yaml"

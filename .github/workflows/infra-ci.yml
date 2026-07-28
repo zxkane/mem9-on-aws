@@ -14,9 +14,18 @@
 #                  push to main "succeed" without deploying). Preview/cleanup
 #                  skip gracefully when it's unset.
 #
-# Optional GitHub repo variable:
+# Optional GitHub repo variables:
 #   RUNNER_LABEL — JSON array selecting a self-hosted runner, e.g.
 #                  ["self-hosted", "linux", "arm64"]. Unset → ubuntu-latest.
+#   DEPLOYMENT_MAINTENANCE_PAUSED — set to true during the guarded workload-role
+#                  migration. Existing AWS jobs fail before assuming the deploy
+#                  role; the operator also waits for every prior run to finish.
+#   WORKLOAD_BOUNDARY_PROD_ENABLED — explicitly false before migration and set
+#                  to true only after every live role is bounded. Every AWS job
+#                  stays disabled until true; prod also fails synthesis unless
+#                  the value is explicitly true or false.
+#
+# Workload-boundary maintenance gate revision: 1
 
 name: Infra CI
 
@@ -51,6 +60,7 @@ on:
       - "!infra/cloudformation/**"
       - "infra/cloudformation/github-actions-role.yaml"
       - "infra/cloudformation/ecr-registry-scanning.yaml"
+      - "infra/cloudformation/workload-permissions-boundary.yaml"
   push:
     branches: [main]
     paths:
@@ -66,6 +76,7 @@ on:
       - "!infra/cloudformation/**"
       - "infra/cloudformation/github-actions-role.yaml"
       - "infra/cloudformation/ecr-registry-scanning.yaml"
+      - "infra/cloudformation/workload-permissions-boundary.yaml"
 
 # Per-PR concurrency for PR events (cancel superseded runs so repeated
 # `synchronize` events don't race the same `pr-N` stage's unlock/deploy);
@@ -125,6 +136,11 @@ jobs:
       - name: Install root dependencies
         run: npm ci
 
+      - name: Install Pulumi runtime for lifecycle tests
+        uses: pulumi/actions@v7
+        with:
+          pulumi-version: 3.215.0
+
       - name: Type check (infra)
         run: pnpm -C infra typecheck
 
@@ -144,7 +160,18 @@ jobs:
       - name: Validate ECR registry scanning template
         run: |
           python -m pip install --disable-pip-version-check 'cfn-lint>=1.39,<2'
-          cfn-lint infra/cloudformation/ecr-registry-scanning.yaml
+          cfn-lint infra/cloudformation/ecr-registry-scanning.yaml --regions ap-northeast-1
+          cfn-lint infra/cloudformation/github-actions-role.yaml --regions us-west-2
+          cfn-lint infra/cloudformation/workload-permissions-boundary.yaml --regions us-west-2
+
+      - name: Validate workload boundary operator scripts
+        run: |
+          if ! command -v shellcheck >/dev/null 2>&1; then
+            sudo apt-get update
+            sudo apt-get install --yes --no-install-recommends shellcheck
+          fi
+          shellcheck scripts/deploy-workload-permissions-boundary.sh
+          shellcheck scripts/rollout-workload-permissions-boundary.sh
 
       - name: PostgreSQL durable ingest integration tests
         run: bash scripts/run-ingest-queue-integration.sh
@@ -174,12 +201,25 @@ jobs:
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
+      - name: Deployment maintenance gate
+        env:
+          PAUSED: ${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}
+        run: |
+          if [ "$PAUSED" = "true" ]; then
+            echo "::error::AWS deployments are paused for guarded IAM maintenance"
+            exit 1
+          fi
+
       - name: Gate on AWS_ROLE_ARN
         id: gate
         env:
+          BOUNDARY_ENFORCED: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
           HAS_AWS: ${{ secrets.AWS_ROLE_ARN }}
         run: |
-          if [ -z "$HAS_AWS" ]; then
+          if [ "$BOUNDARY_ENFORCED" != "true" ]; then
+            echo "::notice::Guarded workload-boundary migration is incomplete — skipping preview deploy"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "$HAS_AWS" ]; then
             echo "::notice::AWS_ROLE_ARN not configured — skipping preview deploy"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
@@ -225,8 +265,11 @@ jobs:
             echo "::error::Role $ROLE_NAME not found — run scripts/deploy-github-role.sh to bootstrap it"
             exit 1
           fi
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          echo "::add-mask::$ACCOUNT_ID"
+          if ! WORKLOAD_BOUNDARY_SKIP_DOTENV=true \
+            scripts/deploy-workload-permissions-boundary.sh --verify-only; then
+            echo "::error::Operator-owned workload boundary is missing or drifted"
+            exit 1
+          fi
           echo "Preflight OK: OIDC deploy role assumed"
 
       - name: Remove conflicting Pulumi installation
@@ -405,12 +448,25 @@ jobs:
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
+      - name: Deployment maintenance gate
+        env:
+          PAUSED: ${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}
+        run: |
+          if [ "$PAUSED" = "true" ]; then
+            echo "::error::AWS deployments are paused for guarded IAM maintenance"
+            exit 1
+          fi
+
       - name: Gate on AWS_ROLE_ARN
         id: gate
         env:
+          BOUNDARY_ENFORCED: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
           HAS_AWS: ${{ secrets.AWS_ROLE_ARN }}
         run: |
-          if [ -z "$HAS_AWS" ]; then
+          if [ "$BOUNDARY_ENFORCED" != "true" ]; then
+            echo "::notice::Guarded workload-boundary migration is incomplete — skipping preview cleanup"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "$HAS_AWS" ]; then
             echo "::notice::AWS_ROLE_ARN not configured — skipping cleanup"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
@@ -544,13 +600,30 @@ jobs:
       # downstream jobs can fall back to `latest`.
       image_tag: ${{ steps.tag.outputs.image_tag }}
     steps:
+      - name: Deployment maintenance gate
+        env:
+          PAUSED: ${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}
+        run: |
+          if [ "$PAUSED" = "true" ]; then
+            echo "::error::AWS deployments are paused for guarded IAM maintenance"
+            exit 1
+          fi
+
       - name: Gate on AWS_ROLE_ARN
         id: gate
         env:
+          BOUNDARY_ENFORCED: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
           HAS_AWS: ${{ secrets.AWS_ROLE_ARN }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
-          if [ -z "$HAS_AWS" ]; then
+          if [ "$BOUNDARY_ENFORCED" != "true" ]; then
+            if [ "$EVENT_NAME" != "pull_request" ]; then
+              echo "::error::Guarded workload-boundary migration is incomplete — refusing AWS image publication"
+              exit 1
+            fi
+            echo "::notice::Guarded workload-boundary migration is incomplete — skipping preview image builds"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "$HAS_AWS" ]; then
             if [ "$EVENT_NAME" != "pull_request" ]; then
               echo "::error::AWS_ROLE_ARN not configured — cannot build/push workload images for prod. Bootstrap the role (scripts/deploy-github-role.sh) and set the secret."
               exit 1
@@ -704,6 +777,20 @@ jobs:
       contents: read
       issues: write
     steps:
+      - name: Deployment maintenance gate
+        env:
+          BOUNDARY_ENFORCED: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
+          PAUSED: ${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}
+        run: |
+          if [ "$PAUSED" = "true" ]; then
+            echo "::error::AWS deployments are paused for guarded IAM maintenance"
+            exit 1
+          fi
+          if [ "$BOUNDARY_ENFORCED" != "true" ]; then
+            echo "::error::Guarded workload-boundary migration is incomplete — refusing prod deployment"
+            exit 1
+          fi
+
       - name: Gate on AWS_ROLE_ARN (hard-fail)
         env:
           HAS_AWS: ${{ secrets.AWS_ROLE_ARN }}
@@ -746,8 +833,11 @@ jobs:
             echo "::error::Role $ROLE_NAME not found — run scripts/deploy-github-role.sh to bootstrap it"
             exit 1
           fi
-          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-          echo "::add-mask::$ACCOUNT_ID"
+          if ! WORKLOAD_BOUNDARY_SKIP_DOTENV=true \
+            scripts/deploy-workload-permissions-boundary.sh --verify-only; then
+            echo "::error::Operator-owned workload boundary is missing or drifted"
+            exit 1
+          fi
           echo "Preflight OK: OIDC deploy role assumed"
 
       - name: Remove conflicting Pulumi installation
@@ -836,6 +926,10 @@ jobs:
           # (infra/ecs.ts BEDROCK_PROJECT). Repo variable set out-of-band by
           # scripts/deploy-bedrock-mantle-project.sh.
           MEM9_BEDROCK_PROJECT: ${{ vars.MEM9_BEDROCK_PROJECT }}
+          # Explicitly false before migration. The guarded migration changes it
+          # to true only after every passable role has the exact boundary and
+          # permanent enforcement is active. Missing/invalid values fail closed.
+          WORKLOAD_BOUNDARY_PROD_ENABLED: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
           # The image applies the repeatable atomic-ingest migration before the
           # server starts, so one enabled rollout is safe.
           MEM9_DURABLE_INGEST_ENABLED: "1"

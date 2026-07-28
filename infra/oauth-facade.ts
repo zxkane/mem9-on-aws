@@ -62,7 +62,12 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
   // Accept negotiation, and the MCP protocol-version header the transport adds.
   const facadeApi = new sst.aws.ApiGatewayV2("Mem9OauthFacadeApi", {
     cors: {
-      allowHeaders: ["Authorization", "Content-Type", "Accept", "MCP-Protocol-Version"],
+      allowHeaders: [
+        "Authorization",
+        "Content-Type",
+        "Accept",
+        "MCP-Protocol-Version",
+      ],
       allowOrigins: ["*"],
       allowMethods: ["*"],
       maxAge: "1 day",
@@ -120,8 +125,28 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
     },
     permissions: [
       {
-        actions: ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"],
-        resources: [$interpolate`arn:aws:ssm:${region}:${accountId}:parameter${prefix}/*`],
+        actions: ["ssm:GetParameters"],
+        resources: [
+          $interpolate`arn:aws:ssm:${region}:${accountId}:parameter${prefix}/*`,
+        ],
+      },
+      {
+        actions: ["kms:Decrypt"],
+        resources: ["*"],
+        conditions: [
+          {
+            test: "StringEquals",
+            variable: "kms:ViaService",
+            values: [$interpolate`ssm.${region}.amazonaws.com`],
+          },
+          {
+            test: "ArnLike",
+            variable: "kms:EncryptionContext:PARAMETER_ARN",
+            values: [
+              $interpolate`arn:aws:ssm:${region}:${accountId}:parameter${prefix}/*`,
+            ],
+          },
+        ],
       },
     ],
   });
@@ -133,9 +158,18 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
 
   // --- SSM exports ---
   param("SsmReaderClientId", "cognito/reader/client-id", readerClient.id);
-  param("SsmReaderClientSecret", "cognito/reader/client-secret", readerClient.clientSecret, true);
+  param(
+    "SsmReaderClientSecret",
+    "cognito/reader/client-secret",
+    readerClient.clientSecret,
+    true,
+  );
   param("SsmFacadeUrl", "facade/url", facadeApi.url);
-  param("SsmFacadeMcpEndpoint", "facade/mcp-endpoint", $interpolate`${facadeApi.url}/mcp`);
+  param(
+    "SsmFacadeMcpEndpoint",
+    "facade/mcp-endpoint",
+    $interpolate`${facadeApi.url}/mcp`,
+  );
 
   return {
     ssmPrefix: prefix,

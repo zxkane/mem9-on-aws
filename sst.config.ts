@@ -61,6 +61,21 @@ export default $config({
     };
   },
   async run() {
+    // Non-production roles always carry the operator-owned workload boundary.
+    // Prod is activated only by the release-verification migration after every
+    // existing passable role has been bounded; this keeps the implementation
+    // push from racing the guarded live-account migration.
+    const { registerWorkloadRoleBoundary, shouldRegisterWorkloadRoleBoundary } =
+      await import("./infra/workload-permissions-boundary");
+    if (
+      shouldRegisterWorkloadRoleBoundary({
+        stage: $app.stage,
+        prodEnabled: process.env.WORKLOAD_BOUNDARY_PROD_ENABLED,
+      })
+    ) {
+      registerWorkloadRoleBoundary();
+    }
+
     // Force Node.js 24 for every ZIP Lambda function. `$transform` runs at
     // resource-construction time; SST v4's runtime default is "nodejs20.x",
     // so we OVERRIDE by assignment (not `??=`). Container-image functions

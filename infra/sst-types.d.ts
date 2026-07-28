@@ -60,6 +60,11 @@ declare namespace aws {
   }
   function getCallerIdentityOutput(): GetCallerIdentityResult;
 
+  interface GetPartitionResult {
+    readonly partition: Output<string>;
+  }
+  function getPartitionOutput(): GetPartitionResult;
+
   // Region lookup — infra/oauth-facade.ts composes the Cognito domain / issuer
   // URLs from the deploy region.
   interface GetRegionResult {
@@ -67,12 +72,27 @@ declare namespace aws {
   }
   function getRegionOutput(): GetRegionResult;
 
+  namespace iam {
+    class Role {
+      constructor(name: string, args: Record<string, unknown>, opts?: unknown);
+      readonly arn: Output<string>;
+      readonly name: Output<string>;
+    }
+  }
+
   // Cognito user pool + M2M/OAuth client (infra/cognito.ts + infra/oauth-facade.ts).
   namespace cognito {
     interface UserPoolArgs {
       name?: Input<string>;
-      schema?: { name: string; attributeDataType: string; mutable?: boolean; required?: boolean }[];
-      userAttributeUpdateSettings?: { attributesRequireVerificationBeforeUpdate: string[] };
+      schema?: {
+        name: string;
+        attributeDataType: string;
+        mutable?: boolean;
+        required?: boolean;
+      }[];
+      userAttributeUpdateSettings?: {
+        attributesRequireVerificationBeforeUpdate: string[];
+      };
       autoVerifiedAttributes?: string[];
       tags?: Record<string, Input<string>>;
       [k: string]: unknown;
@@ -224,7 +244,11 @@ declare namespace aws {
       [k: string]: unknown;
     }
     class LogMetricFilter {
-      constructor(name: string, args: LogMetricFilterArgs, opts?: { dependsOn?: unknown[] });
+      constructor(
+        name: string,
+        args: LogMetricFilterArgs,
+        opts?: { dependsOn?: unknown[] },
+      );
     }
     interface MetricAlarmMetricQuery {
       id: Input<string>;
@@ -301,7 +325,11 @@ declare namespace aws {
       redrivePolicy?: Input<string>;
     }
     class TopicSubscription {
-      constructor(name: string, args: TopicSubscriptionArgs, opts?: { dependsOn?: unknown[] });
+      constructor(
+        name: string,
+        args: TopicSubscriptionArgs,
+        opts?: { dependsOn?: unknown[] },
+      );
     }
   }
 
@@ -345,7 +373,9 @@ declare namespace aws {
       readonly value: Output<string>;
       readonly arn: Output<string>;
     }
-    function getParameterOutput(args: GetParameterOutputArgs): GetParameterResult;
+    function getParameterOutput(
+      args: GetParameterOutputArgs,
+    ): GetParameterResult;
   }
 }
 
@@ -437,7 +467,9 @@ declare namespace sst {
     }
     class Cluster {
       constructor(name: string, args: ClusterArgs);
-      readonly nodes: { cluster: { name: Output<string>; arn: Output<string> } };
+      readonly nodes: {
+        cluster: { name: Output<string>; arn: Output<string> };
+      };
     }
 
     interface ServiceLogging {
@@ -489,8 +521,14 @@ declare namespace sst {
       // IAM statements attached to the task role (SST's `permissions`).
       permissions?: Input<FargatePermission>[];
       transform?: {
-        taskDefinition?: (args: Record<string, unknown>, opts: Record<string, unknown>) => void;
-        service?: (args: Record<string, unknown>, opts: Record<string, unknown>) => void;
+        taskDefinition?: (
+          args: Record<string, unknown>,
+          opts: Record<string, unknown>,
+        ) => void;
+        service?: (
+          args: Record<string, unknown>,
+          opts: Record<string, unknown>,
+        ) => void;
       };
     }
     class Service {
@@ -535,14 +573,24 @@ declare namespace sst {
       memory?: Input<string>;
       vpc?: FunctionVpc;
       environment?: Input<Record<string, Input<string>>>;
-      permissions?: { actions: string[]; resources: Input<string>[] }[];
+      permissions?: {
+        actions: string[];
+        resources: Input<string>[];
+        conditions?: {
+          test: string;
+          variable: string;
+          values: Input<string>[];
+        }[];
+      }[];
       link?: unknown[];
     }
     class Function {
       constructor(name: string, args: FunctionArgs);
       readonly arn: Output<string>;
       readonly name: Output<string>;
-      readonly nodes: { function: { name: Output<string>; arn: Output<string> } };
+      readonly nodes: {
+        function: { name: Output<string>; arn: Output<string> };
+      };
     }
 
     // ── ApiGatewayV2 (infra/oauth-facade.ts — the OAuth login facade API) ─────
