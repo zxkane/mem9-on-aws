@@ -156,12 +156,15 @@ WORKLOAD_BOUNDARY_MAINTENANCE_ACK=true \
 ```
 
 The command requires Node.js 24 before its first AWS mutation. It first installs
-and simulates a temporary deny on the GitHub Actions deploy role, then deploys
-or verifies the retained boundary stack, derives the complete migration set from
-the deployed `iam:PassRole` policies, and checks all production service
-deployments, RUNNING/PENDING tasks, and the bootstrap task definition before the
-first role mutation. Every task definition must carry `MEM9_DB_SECRET` and
-`MEM9_TENANT_ID` references to current-account, Tokyo-region
+an exact temporary deny on the GitHub Actions deploy role, reads it back, and
+custom-simulates every quarantine action against the policy's default `*`
+resource. It reads the exact quarantine again after simulation before any
+boundary mutation. It then deploys or verifies the retained boundary stack,
+derives the complete migration set from the deployed `iam:PassRole` policies,
+and checks all production service deployments, RUNNING/PENDING tasks, and the
+bootstrap task definition before the first role mutation. Every task definition
+must carry `MEM9_DB_SECRET` and `MEM9_TENANT_ID` references to current-account,
+Tokyo-region
 `mem9-on-aws-*` secrets. It also reads every production project Lambda and the
 AgentCore Gateway, then proves that all ECS task/execution, Lambda execution,
 and Gateway service roles are in the migration inventory. That binding set is
@@ -191,7 +194,7 @@ place.
 Use an operator identity, never the GitHub Actions deploy role. In addition to
 the existing out-of-band CloudFormation permissions, it needs IAM role/policy
 read access, inline-policy put/get/delete on the deploy role,
-`iam:SimulatePrincipalPolicy`, role inventory reads, and
+`iam:SimulateCustomPolicy`, role inventory reads, and
 `iam:PutRolePermissionsBoundary` on the discovered project roles.
 The permanent-enforcement phase invokes `scripts/deploy-github-role.sh`, so the
 operator also needs that script's existing OIDC-provider, STS, VPC/subnet, and

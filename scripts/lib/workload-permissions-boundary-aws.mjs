@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  DENY_DANGEROUS_POLICY_NAME,
   DEPLOY_ROLE_NAME,
   QUARANTINE_POLICY_NAME,
   ROLLOUT_SHUTDOWN_GRACE_MS,
@@ -190,6 +191,15 @@ function defaultSleep(milliseconds) {
   });
 }
 
+function serializePolicyInput(document) {
+  if (typeof document === "string") {
+    return document.trimStart().startsWith("{")
+      ? document
+      : decodeURIComponent(document);
+  }
+  return JSON.stringify(document);
+}
+
 export async function resolveAwsIdentity(invokeAws = invokeAwsCli) {
   const response = await invokeAws(["sts", "get-caller-identity"]);
   const accountId = response.Account;
@@ -232,8 +242,9 @@ export function createAwsCliAdapter({
   }
   const { accountId, partition } = identity;
   const [primaryRolePattern] = expectedRolePatterns(identity);
-  const deployRoleArn = `arn:${partition}:iam::${accountId}:role/${DEPLOY_ROLE_NAME}`;
-  const denyPolicyId = "mem9-on-aws-deny-dangerous";
+  const denyPolicyArn =
+    `arn:${partition}:iam::${accountId}:policy/` +
+    DENY_DANGEROUS_POLICY_NAME;
   const probeRoleArn = `${primaryRolePattern.slice(0, -1)}quarantine-probe`;
   const boundaryPolicyArn = `arn:${partition}:iam::${accountId}:policy/${WORKLOAD_BOUNDARY_POLICY_NAME}`;
   const boundaryStackArn =
@@ -298,20 +309,18 @@ export function createAwsCliAdapter({
             "--policy-name",
             QUARANTINE_POLICY_NAME,
           ]);
+          if (!verifyQuarantinePolicy(response.PolicyDocument)) {
+            return false;
+          }
           simulation = await invokeCommand([
             "iam",
-            "simulate-principal-policy",
-            "--policy-source-arn",
-            deployRoleArn,
+            "simulate-custom-policy",
+            "--policy-input-list",
+            serializePolicyInput(response.PolicyDocument),
             "--action-names",
             ...QUARANTINE_PROBE_ACTIONS,
-            "--resource-arns",
-            probeRoleArn,
           ]);
         } catch {
-          return false;
-        }
-        if (!verifyQuarantinePolicy(response.PolicyDocument)) {
           return false;
         }
         if (!Array.isArray(simulation.EvaluationResults)) {
@@ -339,7 +348,20 @@ export function createAwsCliAdapter({
           if (!expected.has(action) || decisions.has(action)) return false;
           decisions.set(action, result.EvalDecision);
         }
-        return decisions.size === expected.size;
+        if (decisions.size !== expected.size) return false;
+        try {
+          const postSimulation = await invokeCommand([
+            "iam",
+            "get-role-policy",
+            "--role-name",
+            DEPLOY_ROLE_NAME,
+            "--policy-name",
+            QUARANTINE_POLICY_NAME,
+          ]);
+          return verifyQuarantinePolicy(postSimulation.PolicyDocument);
+        } catch {
+          return false;
+        }
       },
       { attempts: consistencyAttempts, sleep: retrySleep },
     );
@@ -827,15 +849,7 @@ export function createAwsCliAdapter({
       await resumeDeployments();
     },
 
-    async verifyPermanentEnforcement({ boundaryArn, policyDocuments }) {
-      const documents =
-        policyDocuments ??
-        (await loadRolePolicyDocuments(adapter, DEPLOY_ROLE_NAME));
-      verifyPermanentEnforcementDocuments(documents, {
-        accountId,
-        boundaryArn,
-        partition,
-      });
+    async verifyPermanentEnforcement({ boundaryArn }) {
       const probes = [
         {
           action: "iam:CreatePolicyVersion",
@@ -868,14 +882,70 @@ export function createAwsCliAdapter({
       ];
       const actionNames = [...new Set(probes.map(({ action }) => action))];
       const resourceArns = [...new Set(probes.map(({ resource }) => resource))];
+      const verifyLivePolicyDocuments = async () => {
+        const documents = await loadRolePolicyDocuments(
+          adapter,
+          DEPLOY_ROLE_NAME,
+        );
+        verifyPermanentEnforcementDocuments(documents, {
+          accountId,
+          boundaryArn,
+          partition,
+        });
+      };
+      const readDenyPolicyState = async ({ includeDocument = false } = {}) => {
+        const attachedPolicies = await collectBoundedPages({
+          decodePage: (page) => ({
+            items: page?.policies,
+            nextToken: page?.marker,
+          }),
+          fetchPage: (marker) =>
+            adapter.listAttachedPolicies({
+              marker,
+              roleName: DEPLOY_ROLE_NAME,
+            }),
+          label: "deploy-role attached policy listing",
+        });
+        const denyPolicies = attachedPolicies.filter(
+          (policy) => policy?.arn === denyPolicyArn,
+        );
+        if (denyPolicies.length !== 1) return undefined;
+        const metadata = await adapter.getManagedPolicy({
+          policyArn: denyPolicyArn,
+        });
+        if (
+          !metadata ||
+          typeof metadata.defaultVersionId !== "string" ||
+          !/^v[1-9][0-9]*$/u.test(metadata.defaultVersionId)
+        ) {
+          return undefined;
+        }
+        if (!includeDocument) {
+          return { defaultVersionId: metadata.defaultVersionId };
+        }
+        const version = await adapter.getManagedPolicyVersion({
+          policyArn: denyPolicyArn,
+          versionId: metadata.defaultVersionId,
+        });
+        if (!version?.document) return undefined;
+        return {
+          defaultVersionId: metadata.defaultVersionId,
+          document: version.document,
+        };
+      };
       return retry(
         async () => {
           try {
+            await verifyLivePolicyDocuments();
+            const denyPolicyBefore = await readDenyPolicyState({
+              includeDocument: true,
+            });
+            if (!denyPolicyBefore) return false;
             const response = await invokeAwsCommand([
               "iam",
-              "simulate-principal-policy",
-              "--policy-source-arn",
-              deployRoleArn,
+              "simulate-custom-policy",
+              "--policy-input-list",
+              serializePolicyInput(denyPolicyBefore.document),
               "--action-names",
               ...actionNames,
               "--resource-arns",
@@ -885,7 +955,7 @@ export function createAwsCliAdapter({
                 "ContextKeyValues=ecs-tasks.amazonaws.com," +
                 "ContextKeyType=string",
             ]);
-            return probes.every(({ action, resource }) => {
+            const probesVerified = probes.every(({ action, resource }) => {
               const result = response.EvaluationResults?.find(
                 (evaluation) =>
                   evaluation.EvalActionName?.toLowerCase() ===
@@ -894,13 +964,25 @@ export function createAwsCliAdapter({
               );
               return (
                 result?.EvalDecision === "explicitDeny" &&
-                result.MatchedStatements?.some(
-                  (statement) =>
-                    statement.SourcePolicyId === denyPolicyId &&
-                    statement.SourcePolicyType === "IAM Policy",
-                )
+                Array.isArray(result.MatchedStatements) &&
+                result.MatchedStatements.length > 0
               );
             });
+            if (!probesVerified) return false;
+
+            const denyPolicyAfter = await readDenyPolicyState();
+            if (
+              denyPolicyAfter?.defaultVersionId !==
+              denyPolicyBefore.defaultVersionId
+            ) {
+              return false;
+            }
+            await verifyLivePolicyDocuments();
+            const finalDenyPolicy = await readDenyPolicyState();
+            return (
+              finalDenyPolicy?.defaultVersionId ===
+              denyPolicyBefore.defaultVersionId
+            );
           } catch {
             return false;
           }

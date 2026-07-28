@@ -12,6 +12,8 @@ export const WORKLOAD_BOUNDARY_POLICY_NAME =
   rolloutContract.identifiers.boundaryPolicyName;
 export const WORKLOAD_BOUNDARY_STACK_NAME =
   rolloutContract.identifiers.boundaryStackName;
+export const DENY_DANGEROUS_POLICY_NAME =
+  rolloutContract.identifiers.denyDangerousPolicyName;
 export const DEPLOY_ROLE_NAME = rolloutContract.identifiers.deployRoleName;
 export const ROLLOUT_RESUME_COMMAND =
   "WORKLOAD_BOUNDARY_MAINTENANCE_ACK=true " +
@@ -1293,7 +1295,6 @@ export async function runBoundaryRollout(
       if (
         !(await boundedAdapter.verifyPermanentEnforcement({
           boundaryArn,
-          policyDocuments,
         }))
       ) {
         throw new Error(
