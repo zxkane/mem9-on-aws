@@ -107,8 +107,12 @@ describe("workload role boundary transform", () => {
       let configuredRoleTransform:
         | ((args: Record<string, unknown>) => void)
         | undefined;
+      let configuredFunctionTransform:
+        | ((args: Record<string, unknown>) => void)
+        | undefined;
       const roleResource = class {};
       const lambdaResource = class {};
+      const functionComponent = class {};
 
       (globalThis as Record<string, unknown>).$config = (value: unknown) =>
         value;
@@ -123,6 +127,9 @@ describe("workload role boundary transform", () => {
         getPartitionOutput: () => ({ partition: out("aws") }),
         iam: { Role: roleResource },
         lambda: { Function: lambdaResource },
+      };
+      (globalThis as Record<string, unknown>).sst = {
+        aws: { Function: functionComponent },
       };
       (globalThis as Record<string, unknown>).$interpolate = (
         strings: TemplateStringsArray,
@@ -142,6 +149,9 @@ describe("workload role boundary transform", () => {
         transform: (args: Record<string, unknown>) => void,
       ) => {
         if (resource === roleResource) configuredRoleTransform = transform;
+        if (resource === functionComponent) {
+          configuredFunctionTransform = transform;
+        }
       };
       process.env.WORKLOAD_BOUNDARY_PROD_ENABLED = prodEnabled;
 
@@ -151,6 +161,26 @@ describe("workload role boundary transform", () => {
           default: { run(): Promise<unknown> };
         };
         await expect(configModule.default.run()).rejects.toThrow(expectedError);
+        expect(configuredFunctionTransform).toBeTypeOf("function");
+        const functionArgs: Record<string, any> = {
+          handler: "handler.main",
+          transform: {
+            role: { assumeRolePolicy: "wrong" },
+          },
+        };
+        configuredFunctionTransform?.(functionArgs);
+        const roleArgs = { assumeRolePolicy: "still-wrong" };
+        functionArgs.transform.role(roleArgs, {}, "TestFunctionRole");
+        expect(JSON.parse(roleArgs.assumeRolePolicy)).toEqual({
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Action: "sts:AssumeRole",
+              Principal: { Service: "lambda.amazonaws.com" },
+            },
+          ],
+        });
         if (shouldRegister) {
           expect(configuredRoleTransform).toBeTypeOf("function");
           const args = {
@@ -173,6 +203,7 @@ describe("workload role boundary transform", () => {
           "$app",
           "$config",
           "aws",
+          "sst",
           "$interpolate",
           "$transform",
         ]) {

@@ -82,16 +82,31 @@ bearers. ENI actions are exposed only to the generated VPC proxy Lambda role and
 are denied whenever `lambda:SourceFunctionArn` is present, so function code
 cannot use the Lambda service's VPC permissions. Permanent deploy-role
 enforcement also prevents a matching VPC proxy role from being passed to ECS or
-AgentCore. Before attachment and at every frozen-state check, rollout verifies
-that every proxy-pattern role in the complete project IAM inventory has exactly
-one Lambda-only trust statement. Production ECS task definitions and the
-AgentCore Gateway independently reject proxy-pattern roles. The generated
-role-name match is not treated as an authorization factor by itself: exact
-Lambda-only trust, the `iam:PassedToService=lambda.amazonaws.com` restriction,
-and the function-code deny are all required. Under the documented
-trusted-writer model, creating another matching VPC Lambda can let only the
-Lambda service perform its VPC attachment lifecycle; it does not expose those
-EC2 actions to function code or another workload service.
+AgentCore. Before any stack module is imported, one global
+`sst.aws.Function` component transform overrides every generated execution role
+with one exact trust statement for `lambda.amazonaws.com`. This also covers
+future application Functions. It compensates for the pinned SST version
+constructing an account-root principal alongside Lambda when its
+development-mode `Output` is tested as a plain boolean.
+
+During initial migration discovery only, rollout may repair the exact legacy
+shape emitted by that bug: one otherwise exact assume-role statement whose
+principal contains only Lambda plus the current-account root. It first
+classifies the complete role inventory, so an unknown principal or extra field
+stops all trust writes. For each eligible role it re-reads trust immediately
+before `UpdateAssumeRolePolicy`, writes the exact Lambda-only policy, and reads
+it back. A retry accepts roles already repaired and continues with the
+remainder. Every later frozen-state check is validation-only and rejects any
+non-Lambda-only trust.
+
+Production ECS task definitions and the AgentCore Gateway independently reject
+proxy-pattern roles. The generated role-name match is not treated as an
+authorization factor by itself: exact Lambda-only trust, the
+`iam:PassedToService=lambda.amazonaws.com` restriction, and the function-code
+deny are all required. Under the documented trusted-writer model, creating
+another matching VPC Lambda can let only the Lambda service perform its VPC
+attachment lifecycle; it does not expose those EC2 actions to function code or
+another workload service.
 
 This common policy is a project-wide action/resource ceiling, not a stage
 isolation boundary. Pull-request and production jobs currently assume the same
@@ -131,7 +146,10 @@ verify exact reviewed workflow blobs, clean exact-head checkout, and idle runs
   -> install/verify boundary stack
   -> read PassRole scope A
   -> enumerate matching roles
-  -> require every proxy-pattern role in the full inventory to trust only Lambda
+  -> classify all alert-router, OAuth-facade, and VPC-proxy Lambda role trusts
+  -> fail before trust mutation unless every non-current policy is the exact
+     Lambda plus current-account-root legacy shape
+  -> for each exact legacy role: re-read, update to Lambda-only, and read back
   -> read the complete boundary ownership stack in us-west-2
   -> require its ApplicationRegion and BedrockProjectArn parameters
   -> read prod cluster/service/bootstrap parameters in ap-northeast-1
@@ -146,7 +164,7 @@ verify exact reviewed workflow blobs, clean exact-head checkout, and idle runs
   -> require every bound role to belong to the complete migration inventory
   -> attach and read back every boundary
   -> read PassRole scope B
-  -> require A == B
+  -> require A == B and every known Lambda role still has Lambda-only trust
   -> deploy permanent enforcement
   -> read PassRole scope C
   -> verify C == A, live role bindings are unchanged, and all boundaries match
@@ -156,13 +174,13 @@ verify exact reviewed workflow blobs, clean exact-head checkout, and idle runs
   -> re-read its attachment/default version and the complete policy aggregate
   -> redeploy/read back the exact active boundary default policy version
   -> set/read back WORKLOAD_BOUNDARY_PROD_ENABLED=true
-  -> repeat scope, live binding, boundary, and enforcement checks
   -> require the default branch still equals the reviewed commit
   -> require both reviewed workflow blobs are unchanged
   -> require DEPLOYMENT_MAINTENANCE_PAUSED=true
   -> require both deployment workflows remain disabled_manually
   -> require zero queued, in_progress, requested, waiting, and pending runs
-  -> recheck quarantine after the complete GitHub interlock
+  -> repeat validation-only trust, scope, live binding, boundary, and enforcement checks
+  -> recheck quarantine after the complete GitHub and frozen-state interlock
   -> DELETE deploy-role quarantine
   -> enable/read back Infra CI and preview reconciliation
   -> set/read back DEPLOYMENT_MAINTENANCE_PAUSED=false

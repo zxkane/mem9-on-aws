@@ -161,8 +161,14 @@ custom-simulates every quarantine action against the policy's default `*`
 resource. It reads the exact quarantine again after simulation before any
 boundary mutation. It then deploys or verifies the retained boundary stack,
 derives the complete migration set from the deployed `iam:PassRole` policies,
-and checks all production service deployments, RUNNING/PENDING tasks, and the
-bootstrap task definition before the first role mutation. Every task definition
+classifies all three known Lambda execution-role types, and repairs only the
+exact legacy trust containing Lambda plus the current-account root. It validates
+the complete inventory before any trust write, then re-reads immediately before
+each update and reads back the exact Lambda-only result. Any unknown principal,
+extra field, or later trust drift fails closed; frozen-state checks never repair.
+The command then checks all production service deployments, RUNNING/PENDING
+tasks, and the bootstrap task definition before the first boundary mutation.
+Every task definition
 must carry `MEM9_DB_SECRET` and `MEM9_TENANT_ID` references to current-account,
 Tokyo-region
 `mem9-on-aws-*` secrets. It also reads every production project Lambda and the
@@ -171,13 +177,14 @@ and Gateway service roles are in the migration inventory. That binding set is
 re-read before quarantine removal. The command then attaches and reads back every
 boundary and deploys the permanent policy conditions. Before removing quarantine
 it repairs and verifies the exact active boundary policy, sets and reads back
-`WORKLOAD_BOUNDARY_PROD_ENABLED=true`, and repeats the frozen-state checks, so
-the next exact-head production deployment retains every boundary. It then
-requires the default branch to remain at the reviewed commit, both reviewed
+`WORKLOAD_BOUNDARY_PROD_ENABLED=true`, then requires the default branch to
+remain at the reviewed commit, both reviewed
 workflow blobs to remain exact, the pause to remain `true`, both workflows to
 remain `disabled_manually`, and all `queued`, `in_progress`, `requested`,
-`waiting`, and `pending` run counts to remain zero. Only after another
-quarantine verification may it delete quarantine. It then enables and reads
+`waiting`, and `pending` run counts to remain zero. It repeats the frozen-state
+checks after that GitHub interlock, so trust, bindings, boundaries, and
+permanent enforcement are the last substantive reads before another quarantine
+verification and deletion. It then enables and reads
 back both workflows before unpausing deployments. A partial resume restores and
 reads back the pause, disables workflows enabled by that attempt, and reports
 any failed rollback without claiming success. That rollback uses a fresh signal
@@ -195,7 +202,8 @@ Use an operator identity, never the GitHub Actions deploy role. In addition to
 the existing out-of-band CloudFormation permissions, it needs IAM role/policy
 read access, inline-policy put/get/delete on the deploy role,
 `iam:SimulateCustomPolicy`, role inventory reads, and
-`iam:PutRolePermissionsBoundary` on the discovered project roles.
+`iam:UpdateAssumeRolePolicy` plus `iam:PutRolePermissionsBoundary` on the
+discovered project roles.
 The permanent-enforcement phase invokes `scripts/deploy-github-role.sh`, so the
 operator also needs that script's existing OIDC-provider, STS, VPC/subnet, and
 template-upload reads/writes. Because the role template exceeds the inline

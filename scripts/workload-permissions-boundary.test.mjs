@@ -18,6 +18,7 @@ import {
   expectedBoundaryPolicyDocument,
   expectedRolePatterns,
   extractPassRoleScope,
+  lambdaExecutionRoleTrustPolicy,
   matchingRoleNames,
   quarantinePolicyDocument,
   redactedRolloutFailure,
@@ -25,6 +26,7 @@ import {
   validateProductionRuntimeBindings,
   validateProductionTaskDefinitionSecrets,
   verifyBoundaryPolicyDocument,
+  verifyLambdaExecutionRoleTrustPolicy,
   verifyPermanentEnforcementDocuments,
   verifyQuarantinePolicy,
 } from "./lib/workload-permissions-boundary.mjs";
@@ -112,8 +114,7 @@ const boundaryContract = {
 };
 const patterns = expectedRolePatterns({ partition, accountId });
 const denyPolicyId = DENY_DANGEROUS_POLICY_NAME;
-const denyPolicyArn =
-  `arn:${partition}:iam::${accountId}:policy/${denyPolicyId}`;
+const denyPolicyArn = `arn:${partition}:iam::${accountId}:policy/${denyPolicyId}`;
 const independentRuntimeActions = [
   // AWSLambdaBasicExecutionRole v1.
   "logs:CreateLogGroup",
@@ -353,7 +354,7 @@ function productionPreflightAws(args, override = {}) {
   }
 }
 
-const lambdaOnlyTrustPolicy = {
+const expectedLambdaOnlyTrustPolicy = {
   Version: "2012-10-17",
   Statement: [
     {
@@ -363,11 +364,33 @@ const lambdaOnlyTrustPolicy = {
     },
   ],
 };
+const lambdaOnlyTrustPolicy = lambdaExecutionRoleTrustPolicy();
+const legacyLambdaTrustPolicy = {
+  Version: "2012-10-17",
+  Statement: [
+    {
+      Effect: "Allow",
+      Action: "sts:AssumeRole",
+      Principal: {
+        AWS: `arn:${partition}:iam::${accountId}:root`,
+        Service: "lambda.amazonaws.com",
+      },
+    },
+  ],
+};
+
+function isFixtureLambdaRoleName(name) {
+  return [
+    "Mem9AlertRouterRole-",
+    "Mem9OauthFacadeFnRole-",
+    "Mem9ProxyFnRole-",
+  ].some((token) => name.includes(token));
+}
 
 function role(
   name,
   path = "",
-  assumeRolePolicyDocument = name.includes("Mem9ProxyFnRole")
+  assumeRolePolicyDocument = isFixtureLambdaRoleName(name)
     ? lambdaOnlyTrustPolicy
     : undefined,
 ) {
@@ -1066,6 +1089,17 @@ function makeAdapter(options = {}) {
   const roleBoundaries = new Map(
     Object.entries(options.initialBoundaries ?? {}),
   );
+  const roleTrustPolicies = new Map(
+    Object.entries(options.initialRoleTrustPolicies ?? {}),
+  );
+  const inventoryRole = (value) => {
+    const fixture = typeof value === "string" ? role(value) : value;
+    if (!roleTrustPolicies.has(fixture.name)) return fixture;
+    return {
+      ...fixture,
+      assumeRolePolicyDocument: roleTrustPolicies.get(fixture.name),
+    };
+  };
   let scopeRead = 0;
   let roleInventoryRead = 0;
   let quarantineChecks = 0;
@@ -1155,15 +1189,15 @@ function makeAdapter(options = {}) {
           ];
         if (marker) {
           roleInventoryRead += 1;
-          return { roles: inventory.slice(2).map((name) => role(name)) };
+          return { roles: inventory.slice(2).map(inventoryRole) };
         }
         return {
-          roles: inventory.slice(0, 2).map((name) => role(name)),
+          roles: inventory.slice(0, 2).map(inventoryRole),
           marker: "roles-2",
         };
       }
       if (options.roles !== undefined) {
-        return { roles: options.roles };
+        return { roles: options.roles.map(inventoryRole) };
       }
       return marker
         ? {
@@ -1194,7 +1228,24 @@ function makeAdapter(options = {}) {
         options.mismatchedRole === roleName
           ? "arn:aws:iam::123456789012:policy/wrong"
           : roleBoundaries.get(roleName);
-      return { permissionsBoundaryArn: value };
+      return {
+        assumeRolePolicyDocument: roleTrustPolicies.has(roleName)
+          ? roleTrustPolicies.get(roleName)
+          : role(roleName).assumeRolePolicyDocument,
+        permissionsBoundaryArn: value,
+      };
+    },
+    async updateAssumeRolePolicy({ roleName, policyDocument }) {
+      calls.push(`update-trust:${roleName}`);
+      if (!verifyLambdaExecutionRoleTrustPolicy(policyDocument)) {
+        throw new Error("invalid Lambda trust repair");
+      }
+      if (options.failTrustRole === roleName) {
+        throw new Error("Lambda trust repair failed");
+      }
+      if (!options.dropTrustWrites) {
+        roleTrustPolicies.set(roleName, policyDocument);
+      }
     },
     async deployPermanentEnforcement() {
       calls.push("deploy-enforcement");
@@ -1231,6 +1282,12 @@ function makeAdapter(options = {}) {
       if (receivedReviewedCommit !== reviewedCommit) {
         throw new Error("reviewed commit mismatch");
       }
+      if (options.driftTrustDuringFinalGithub) {
+        roleTrustPolicies.set(
+          productionRoleNames.proxy,
+          legacyLambdaTrustPolicy,
+        );
+      }
     },
     async deleteQuarantine({ roleName, policyName }) {
       calls.push(`unquarantine:${roleName}:${policyName}`);
@@ -1247,6 +1304,59 @@ function makeAdapter(options = {}) {
 }
 
 describe("deployed PassRole scope", () => {
+  it("builds and verifies the exact Lambda-only execution-role trust", () => {
+    expect(lambdaOnlyTrustPolicy).toEqual(expectedLambdaOnlyTrustPolicy);
+    expect(
+      verifyLambdaExecutionRoleTrustPolicy(expectedLambdaOnlyTrustPolicy),
+    ).toBe(true);
+    expect(
+      verifyLambdaExecutionRoleTrustPolicy(
+        encodeURIComponent(JSON.stringify(expectedLambdaOnlyTrustPolicy)),
+      ),
+    ).toBe(true);
+  });
+
+  it.each([
+    ["legacy account principal", legacyLambdaTrustPolicy],
+    [
+      "extra condition",
+      {
+        ...expectedLambdaOnlyTrustPolicy,
+        Statement: [
+          {
+            ...expectedLambdaOnlyTrustPolicy.Statement[0],
+            Condition: { StringEquals: { "aws:SourceAccount": accountId } },
+          },
+        ],
+      },
+    ],
+    [
+      "extra statement",
+      {
+        ...expectedLambdaOnlyTrustPolicy,
+        Statement: [
+          ...expectedLambdaOnlyTrustPolicy.Statement,
+          expectedLambdaOnlyTrustPolicy.Statement[0],
+        ],
+      },
+    ],
+    [
+      "wrong action",
+      {
+        ...expectedLambdaOnlyTrustPolicy,
+        Statement: [
+          {
+            ...expectedLambdaOnlyTrustPolicy.Statement[0],
+            Action: "sts:AssumeRoleWithWebIdentity",
+          },
+        ],
+      },
+    ],
+    ["malformed", { Version: "2012-10-17" }],
+  ])("rejects %s as Lambda-only trust", (_name, policy) => {
+    expect(verifyLambdaExecutionRoleTrustPolicy(policy)).toBe(false);
+  });
+
   it("normalizes the exact supported resource set", () => {
     expect(
       extractPassRoleScope([passRolePolicy([...patterns].reverse())], {
@@ -1395,6 +1505,55 @@ describe("deployed PassRole scope", () => {
     await expect(adapter[method]({})).rejects.toThrow(/pagination|response/u);
   });
 
+  it("reads role trust and updates it only with the exact Lambda policy", async () => {
+    const calls = [];
+    const adapter = createAwsCliAdapter({
+      identity: { accountId, partition },
+      invokeAws: (args) => {
+        calls.push(args);
+        if (args.slice(0, 2).join(" ") === "iam get-role") {
+          return {
+            Role: {
+              AssumeRolePolicyDocument: legacyLambdaTrustPolicy,
+              PermissionsBoundary: {
+                PermissionsBoundaryArn: boundaryArn,
+              },
+            },
+          };
+        }
+        if (args.slice(0, 2).join(" ") === "iam update-assume-role-policy") {
+          return {};
+        }
+        throw new Error("unexpected IAM adapter command");
+      },
+    });
+    await expect(
+      adapter.getRole({ roleName: productionRoleNames.proxy }),
+    ).resolves.toEqual({
+      assumeRolePolicyDocument: legacyLambdaTrustPolicy,
+      permissionsBoundaryArn: boundaryArn,
+    });
+    await adapter.updateAssumeRolePolicy({
+      policyDocument: lambdaOnlyTrustPolicy,
+      roleName: productionRoleNames.proxy,
+    });
+    expect(calls[1]).toEqual([
+      "iam",
+      "update-assume-role-policy",
+      "--role-name",
+      productionRoleNames.proxy,
+      "--policy-document",
+      JSON.stringify(lambdaOnlyTrustPolicy),
+    ]);
+    await expect(
+      adapter.updateAssumeRolePolicy({
+        policyDocument: legacyLambdaTrustPolicy,
+        roleName: productionRoleNames.proxy,
+      }),
+    ).rejects.toThrow(/refusing malformed Lambda trust repair/u);
+    expect(calls).toHaveLength(2);
+  });
+
   it("matches only deployed role prefixes", () => {
     expect(
       matchingRoleNames(
@@ -1432,6 +1591,19 @@ describe("deployed PassRole scope", () => {
     expect(() =>
       matchingRoleNames(
         [role(productionRoleNames.proxy, "", unsafeTrust)],
+        patterns,
+      ),
+    ).toThrow(/trust policy is not Lambda-only/u);
+  });
+
+  it.each([
+    productionRoleNames.alertRouter,
+    productionRoleNames.oauthFacade,
+    productionRoleNames.proxy,
+  ])("rejects legacy trust outside initial repair for %s", (roleName) => {
+    expect(() =>
+      matchingRoleNames(
+        [role(roleName, "", legacyLambdaTrustPolicy)],
         patterns,
       ),
     ).toThrow(/trust policy is not Lambda-only/u);
@@ -1482,6 +1654,31 @@ describe("production task-definition secret preflight", () => {
   it("returns every role bound to production ECS, Lambda, and AgentCore", () => {
     expect(validateProductionRuntimeBindings(validRuntimeInput())).toEqual(
       expectedProductionRoleNames,
+    );
+  });
+
+  it("rejects an additional production Lambda outside the reviewed graph", () => {
+    const input = validRuntimeInput();
+    const extraName = "mem9-on-aws-prod-UnreviewedFn-fixture";
+    input.lambdaFunctions.push({
+      FunctionArn:
+        `arn:aws:lambda:ap-northeast-1:${accountId}:function:` + extraName,
+      FunctionName: extraName,
+      Role: productionRoleArns.oauthFacade,
+    });
+    expect(() => validateProductionRuntimeBindings(input)).toThrow(
+      /Lambda inventory is incomplete/u,
+    );
+  });
+
+  it.each([
+    ["alert-router", 0, productionRoleArns.oauthFacade],
+    ["OAuth facade", 1, productionRoleArns.alertRouter],
+  ])("rejects a %s Function bound to another Lambda role type", (_name, index, roleArn) => {
+    const input = validRuntimeInput();
+    input.lambdaFunctions[index].Role = roleArn;
+    expect(() => validateProductionRuntimeBindings(input)).toThrow(
+      /Lambda role binding is malformed/u,
     );
   });
 
@@ -1718,6 +1915,21 @@ describe("guarded rollout", () => {
     reviewedCommit,
     resumeCommand: "scripts/rollout-workload-permissions-boundary.sh",
   };
+  const migrationLambdaRoleNames = [
+    productionRoleNames.alertRouter,
+    productionRoleNames.oauthFacade,
+    productionRoleNames.proxy,
+  ];
+  const migrationRoles = [
+    role("mem9-on-aws-prod-task-role"),
+    ...migrationLambdaRoleNames.map((roleName) => role(roleName)),
+  ];
+  const legacyMigrationTrust = Object.fromEntries(
+    migrationLambdaRoleNames.map((roleName) => [
+      roleName,
+      legacyLambdaTrustPolicy,
+    ]),
+  );
 
   it("runs quarantine first and removes it only after complete verification", async () => {
     const adapter = makeAdapter();
@@ -1773,10 +1985,10 @@ describe("guarded rollout", () => {
       adapter.calls.indexOf("verify-quarantine:3"),
     );
     expect(adapter.calls.lastIndexOf("verify-enforcement")).toBeGreaterThan(
-      adapter.calls.indexOf("activate-prod-boundary"),
+      adapter.calls.indexOf(`verify-final-github:${reviewedCommit}`),
     );
     expect(adapter.calls.lastIndexOf("verify-enforcement")).toBeLessThan(
-      adapter.calls.indexOf(`verify-final-github:${reviewedCommit}`),
+      adapter.calls.indexOf("verify-quarantine:4"),
     );
     expect(
       adapter.calls.indexOf(`verify-final-github:${reviewedCommit}`),
@@ -1786,6 +1998,264 @@ describe("guarded rollout", () => {
         `unquarantine:${options.deployRoleName}:${QUARANTINE_POLICY_NAME}`,
       ),
     );
+  });
+
+  it("repairs every exact legacy Lambda trust before boundary attachment", async () => {
+    const adapter = makeAdapter({
+      initialRoleTrustPolicies: legacyMigrationTrust,
+      roles: migrationRoles,
+    });
+
+    await expect(runBoundaryRollout(adapter, options)).resolves.toEqual({
+      status: "complete",
+      verifiedRoleCount: migrationRoles.length,
+    });
+    expect(
+      adapter.calls.filter((call) => call.startsWith("update-trust:")),
+    ).toEqual(
+      migrationLambdaRoleNames
+        .map((roleName) => `update-trust:${roleName}`)
+        .sort(),
+    );
+    const firstBoundaryWrite = adapter.calls.findIndex((call) =>
+      call.startsWith("put-boundary:"),
+    );
+    expect(firstBoundaryWrite).toBeGreaterThan(-1);
+    for (const roleName of migrationLambdaRoleNames) {
+      const update = adapter.calls.indexOf(`update-trust:${roleName}`);
+      expect(update).toBeGreaterThan(
+        adapter.calls.indexOf(`get-role:${roleName}`),
+      );
+      expect(update).toBeLessThan(firstBoundaryWrite);
+      expect(adapter.calls.slice(update + 1, firstBoundaryWrite)).toContain(
+        `get-role:${roleName}`,
+      );
+    }
+  });
+
+  it("does not rewrite Lambda roles that already have exact trust", async () => {
+    const adapter = makeAdapter({ roles: migrationRoles });
+
+    await runBoundaryRollout(adapter, options);
+    expect(adapter.calls.some((call) => call.startsWith("update-trust:"))).toBe(
+      false,
+    );
+  });
+
+  it.each([
+    [
+      "foreign root",
+      {
+        Version: "2012-10-17",
+        Statement: [
+          {
+            Effect: "Allow",
+            Action: "sts:AssumeRole",
+            Principal: {
+              AWS: `arn:${partition}:iam::${"9".repeat(12)}:root`,
+              Service: "lambda.amazonaws.com",
+            },
+          },
+        ],
+      },
+    ],
+    [
+      "unknown service",
+      {
+        Version: "2012-10-17",
+        Statement: [
+          {
+            Effect: "Allow",
+            Action: "sts:AssumeRole",
+            Principal: {
+              Service: ["lambda.amazonaws.com", "ecs-tasks.amazonaws.com"],
+            },
+          },
+        ],
+      },
+    ],
+    [
+      "extra condition",
+      {
+        Version: "2012-10-17",
+        Statement: [
+          {
+            Effect: "Allow",
+            Action: "sts:AssumeRole",
+            Principal: {
+              AWS: `arn:${partition}:iam::${accountId}:root`,
+              Service: "lambda.amazonaws.com",
+            },
+            Condition: { StringEquals: { "aws:SourceAccount": accountId } },
+          },
+        ],
+      },
+    ],
+  ])(
+    "rejects %s trust before repairing any role",
+    async (_name, unsafeTrust) => {
+      const adapter = makeAdapter({
+        initialRoleTrustPolicies: {
+          ...legacyMigrationTrust,
+          [productionRoleNames.oauthFacade]: unsafeTrust,
+        },
+        roles: migrationRoles,
+      });
+
+      await expect(runBoundaryRollout(adapter, options)).rejects.toThrow(
+        /trust policy is not Lambda-only/u,
+      );
+      expect(
+        adapter.calls.some((call) => call.startsWith("update-trust:")),
+      ).toBe(false);
+      expect(
+        adapter.calls.some((call) => call.startsWith("put-boundary:")),
+      ).toBe(false);
+      expect(adapter.state.quarantineInstalled).toBe(true);
+      expect(
+        adapter.calls.some((call) => call.startsWith("unquarantine:")),
+      ).toBe(false);
+    },
+  );
+
+  it("re-reads exact legacy trust immediately before mutation", async () => {
+    const adapter = makeAdapter({
+      initialRoleTrustPolicies: {
+        [productionRoleNames.proxy]: legacyLambdaTrustPolicy,
+      },
+      roles: [
+        role("mem9-on-aws-prod-task-role"),
+        role(productionRoleNames.proxy),
+      ],
+    });
+    const getRole = adapter.getRole.bind(adapter);
+    adapter.getRole = async ({ roleName }) => {
+      const result = await getRole({ roleName });
+      if (roleName !== productionRoleNames.proxy) return result;
+      return {
+        ...result,
+        assumeRolePolicyDocument: {
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Action: "sts:AssumeRole",
+              Principal: { Service: "ecs-tasks.amazonaws.com" },
+            },
+          ],
+        },
+      };
+    };
+
+    await expect(runBoundaryRollout(adapter, options)).rejects.toThrow(
+      /trust changed before repair/u,
+    );
+    expect(adapter.calls).not.toContain(
+      `update-trust:${productionRoleNames.proxy}`,
+    );
+    expect(adapter.state.quarantineInstalled).toBe(true);
+    expect(
+      adapter.calls.some((call) => call.startsWith("unquarantine:")),
+    ).toBe(false);
+  });
+
+  it("fails closed when repaired trust cannot be read back", async () => {
+    const adapter = makeAdapter({
+      dropTrustWrites: true,
+      initialRoleTrustPolicies: {
+        [productionRoleNames.proxy]: legacyLambdaTrustPolicy,
+      },
+      roles: [
+        role("mem9-on-aws-prod-task-role"),
+        role(productionRoleNames.proxy),
+      ],
+    });
+
+    await expect(runBoundaryRollout(adapter, options)).rejects.toThrow(
+      /trust repair read-back mismatch/u,
+    );
+    expect(adapter.calls).toContain(
+      `update-trust:${productionRoleNames.proxy}`,
+    );
+    expect(adapter.calls.some((call) => call.startsWith("put-boundary:"))).toBe(
+      false,
+    );
+    expect(adapter.state.quarantineInstalled).toBe(true);
+    expect(
+      adapter.calls.some((call) => call.startsWith("unquarantine:")),
+    ).toBe(false);
+  });
+
+  it("resumes after a partial Lambda trust repair", async () => {
+    const mutableOptions = {
+      failTrustRole: productionRoleNames.oauthFacade,
+      initialRoleTrustPolicies: legacyMigrationTrust,
+      roles: migrationRoles,
+    };
+    const adapter = makeAdapter(mutableOptions);
+
+    await expect(runBoundaryRollout(adapter, options)).rejects.toThrow(
+      /Lambda trust repair failed/u,
+    );
+    expect(adapter.state.quarantineInstalled).toBe(true);
+    delete mutableOptions.failTrustRole;
+    await expect(runBoundaryRollout(adapter, options)).resolves.toEqual({
+      status: "complete",
+      verifiedRoleCount: migrationRoles.length,
+    });
+    expect(
+      adapter.calls.filter(
+        (call) => call === `update-trust:${productionRoleNames.alertRouter}`,
+      ),
+    ).toHaveLength(1);
+    expect(
+      adapter.calls.filter(
+        (call) => call === `update-trust:${productionRoleNames.oauthFacade}`,
+      ),
+    ).toHaveLength(2);
+    expect(
+      adapter.calls.filter(
+        (call) => call === `update-trust:${productionRoleNames.proxy}`,
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("never repairs trust during frozen-state verification", async () => {
+    const adapter = makeAdapter({
+      roles: [
+        role("mem9-on-aws-prod-task-role"),
+        role(productionRoleNames.proxy),
+      ],
+    });
+    const listRoles = adapter.listRoles.bind(adapter);
+    let inventoryReads = 0;
+    adapter.listRoles = async (request) => {
+      inventoryReads += 1;
+      const page = await listRoles(request);
+      if (inventoryReads === 1) return page;
+      return {
+        ...page,
+        roles: page.roles.map((fixture) =>
+          fixture.name === productionRoleNames.proxy
+            ? {
+                ...fixture,
+                assumeRolePolicyDocument: legacyLambdaTrustPolicy,
+              }
+            : fixture,
+        ),
+      };
+    };
+
+    await expect(runBoundaryRollout(adapter, options)).rejects.toThrow(
+      /trust policy is not Lambda-only/u,
+    );
+    expect(adapter.calls.some((call) => call.startsWith("update-trust:"))).toBe(
+      false,
+    );
+    expect(adapter.state.quarantineInstalled).toBe(true);
+    expect(
+      adapter.calls.some((call) => call.startsWith("unquarantine:")),
+    ).toBe(false);
   });
 
   it("fails the quarantine-order invariant against a real module mutation", async () => {
@@ -1985,6 +2455,21 @@ describe("guarded rollout", () => {
     {
       name: "final GitHub interlock failure",
       adapter: () => makeAdapter({ failFinalGithubInterlock: true }),
+    },
+    {
+      name: "Lambda trust drift during final GitHub interlock",
+      adapter: () =>
+        makeAdapter({
+          driftTrustDuringFinalGithub: true,
+          liveRoleNames: [
+            "mem9-on-aws-prod-task-role",
+            productionRoleNames.proxy,
+          ],
+          roles: [
+            role("mem9-on-aws-prod-task-role"),
+            role(productionRoleNames.proxy),
+          ],
+        }),
     },
     {
       name: "quarantine loss after final GitHub interlock",
