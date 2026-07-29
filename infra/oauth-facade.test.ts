@@ -209,7 +209,16 @@ describe("oauthFacade factory", () => {
     expect(addAuthorizerSpy).toHaveBeenCalledWith({
       name: "Mem9OauthFacadeAllowAll",
       lambda: {
-        function: "infra/src/oauth-facade/authorizer.handler",
+        function: {
+          architecture: "arm64",
+          handler: "infra/src/oauth-facade/authorizer.handler",
+          name: "mem9-on-aws-prod-Mem9OauthFacadeAllowAll",
+          transform: {
+            role: {
+              name: "mem9-on-aws-prod-Mem9OauthFacadeAllowAllRole",
+            },
+          },
+        },
         identitySources: [],
         response: "simple",
         ttl: "0 seconds",

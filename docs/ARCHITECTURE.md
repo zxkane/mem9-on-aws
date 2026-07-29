@@ -421,9 +421,10 @@ boundary does not require `kms:ViaService` for the Lambda cold-start path
 because that path does not expose it consistently during permissions-boundary
 evaluation. Non-Lambda-context decrypts must come through SSM or Secrets
 Manager in the application region. Separate denies restrict Lambda contexts to
-the three Lambda execution-role types and secret contexts to the two ECS
-execution-role types. AWS defines `aws:PrincipalArn` for an IAM role as the IAM
-role ARN, not its assumed-role session ARN:
+the three required Lambda execution-role types plus the optional facade
+authorizer role, and secret contexts to the two ECS execution-role types. AWS
+defines `aws:PrincipalArn` for an IAM role as the IAM role ARN, not its
+assumed-role session ARN:
 [global condition keys](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_condition-keys.html).
 `StringNotEqualsIfExists` remains fail closed when a service key is absent.
 `lambda:SourceFunctionArn` also blocks function code from using the secret
@@ -432,7 +433,7 @@ exception requires both a generated proxy-role name and
 `iam:PassedToService` restricted to Lambda; `lambda:SourceFunctionArn`
 explicitly denies the same actions to function code. The name match is
 therefore not the sole authorization check. The deploy role likewise denies
-passing any of the three allowlisted Lambda role-name patterns to a non-Lambda
+passing any of the four allowlisted Lambda role-name patterns to a non-Lambda
 service, and denies passing either allowlisted ECS execution-role pattern to a
 non-ECS service. These `PassRole` denies do not constrain a role trust policy
 supplied to `CreateRole`; the accepted trusted-writer model therefore remains
@@ -489,12 +490,12 @@ A failure retains quarantine and is recovered by re-running the same command.
 Normal preview and production deployment preflights use the read-only
 `--verify-only` path, so a permissive policy drift at the same stable ARN blocks
 deployment rather than satisfying an ARN-only check. That path also
-custom-simulates the live boundary's 16 KMS cases: project Lambda, SSM,
-server-secret, and bootstrap-secret paths must be allowed; direct SSM/secret,
-foreign-secret, cross-region, task-role secret, Lambda-role secret, direct
-function-code, mismatched service/context pairs, forged/out-of-project Lambda,
-and missing-context paths must be explicit denies. It then confirms that the
-simulated policy version remains the default.
+custom-simulates the live boundary's 17 KMS cases: required and optional project
+Lambda, SSM, server-secret, and bootstrap-secret paths must be allowed; direct
+SSM/secret, foreign-secret, cross-region, task-role secret, Lambda-role secret,
+direct function-code, mismatched service/context pairs, forged/out-of-project
+Lambda, and missing-context paths must be explicit denies. It then confirms
+that the simulated policy version remains the default.
 The cold-start Lambda probe intentionally omits
 `kms:ViaService`, matching the cold-start authorization path that a warm
 end-to-end smoke can temporarily hide. This simulation verifies policy semantics;

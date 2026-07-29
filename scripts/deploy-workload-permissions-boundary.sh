@@ -205,6 +205,7 @@ verify_boundary_policy() {
   }
 
   local bootstrap_execution_principal_context cross_region_secret_via_context
+  local facade_authorizer_principal_context
   local lambda_context lambda_principal_context nonlambda_principal_context
   local outside_lambda_context outside_secret_context
   local secret_context secret_version_context secret_via_context
@@ -218,6 +219,7 @@ verify_boundary_policy() {
   fi
   lambda_context="ContextKeyName=kms:EncryptionContext:aws:lambda:FunctionArn,ContextKeyValues=arn:${partition}:lambda:${application_region}:${account_id}:function:mem9-on-aws-regression-probe,ContextKeyType=string"
   lambda_principal_context="ContextKeyName=aws:PrincipalArn,ContextKeyValues=arn:${partition}:iam::${account_id}:role/mem9-on-aws-prod-Mem9OauthFacadeFnRole-regression-probe,ContextKeyType=string"
+  facade_authorizer_principal_context="ContextKeyName=aws:PrincipalArn,ContextKeyValues=arn:${partition}:iam::${account_id}:role/mem9-on-aws-prod-Mem9OauthFacadeAllowAllRole,ContextKeyType=string"
   nonlambda_principal_context="ContextKeyName=aws:PrincipalArn,ContextKeyValues=arn:${partition}:iam::${account_id}:role/mem9-on-aws-prod-Mem9ServerTaskRole-regression-probe,ContextKeyType=string"
   outside_lambda_context="ContextKeyName=kms:EncryptionContext:aws:lambda:FunctionArn,ContextKeyValues=arn:${partition}:lambda:${application_region}:${account_id}:function:outside-project-regression-probe,ContextKeyType=string"
   source_function_context="ContextKeyName=lambda:SourceFunctionArn,ContextKeyValues=arn:${partition}:lambda:${application_region}:${account_id}:function:mem9-on-aws-regression-probe,ContextKeyType=string"
@@ -235,6 +237,8 @@ verify_boundary_policy() {
 
   if ! verify_decrypt_probe allowed \
         "$lambda_context" "$lambda_principal_context" ||
+      ! verify_decrypt_probe allowed \
+        "$lambda_context" "$facade_authorizer_principal_context" ||
       ! verify_decrypt_probe allowed \
         "$ssm_context" "$ssm_via_context" "$source_function_context" ||
       ! verify_decrypt_probe allowed \

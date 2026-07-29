@@ -567,6 +567,7 @@ declare namespace sst {
     }
     interface FunctionRoleTransform {
       assumeRolePolicy?: Input<string>;
+      name?: Input<string>;
     }
     type FunctionRoleTransformCallback = (
       args: FunctionRoleTransform,
@@ -575,6 +576,7 @@ declare namespace sst {
     ) => void;
     interface FunctionArgs {
       handler: Input<string>;
+      name?: Input<string>;
       runtime?: Input<string>;
       timeout?: Input<string>;
       architecture?: Input<"x86_64" | "arm64">;
@@ -617,7 +619,7 @@ declare namespace sst {
     interface ApiGatewayV2AuthorizerArgs {
       name: string;
       lambda: {
-        function: Input<string>;
+        function: Input<string | FunctionArgs>;
         identitySources?: Input<Input<string>[]>;
         response?: Input<"simple" | "iam">;
         ttl?: Input<string>;

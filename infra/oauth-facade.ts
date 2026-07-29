@@ -159,7 +159,16 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
     ? facadeApi.addAuthorizer({
         name: "Mem9OauthFacadeAllowAll",
         lambda: {
-          function: "infra/src/oauth-facade/authorizer.handler",
+          function: {
+            handler: "infra/src/oauth-facade/authorizer.handler",
+            architecture: "arm64",
+            name: `mem9-on-aws-${stage}-Mem9OauthFacadeAllowAll`,
+            transform: {
+              role: {
+                name: `mem9-on-aws-${stage}-Mem9OauthFacadeAllowAllRole`,
+              },
+            },
+          },
           identitySources: [],
           response: "simple",
           ttl: "0 seconds",

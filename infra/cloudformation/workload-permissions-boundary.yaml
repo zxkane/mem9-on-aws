@@ -160,8 +160,8 @@ Resources:
                 "aws:PrincipalArn":
                   - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ServerExecutionRole-*
                   - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9BootstrapExecutionRole-*
-          # Only the three reviewed Lambda execution-role types may present the
-          # Lambda cold-start context. Other workload roles cannot forge it.
+          # Only the reviewed Lambda execution-role types may present the Lambda
+          # cold-start context. Other workload roles cannot forge it.
           - Sid: DenyLambdaContextDecryptFromNonLambdaRoles
             Effect: Deny
             Action:
@@ -173,6 +173,7 @@ Resources:
               ArnNotLike:
                 "aws:PrincipalArn":
                   - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9AlertRouterRole-*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9OauthFacadeAllowAllRole
                   - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9OauthFacadeFnRole-*
                   - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ProxyFnRole-*
           # Encryption context is caller supplied. Block function code from
