@@ -208,15 +208,17 @@ Resources:
             Condition:
               ArnNotEquals:
                 iam:PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
-          - Sid: DenyVpcLambdaRolePassToOtherServices
-            # The shared boundary exposes ENI actions only to roles whose
-            # generated name identifies the VPC proxy Lambda. Prevent a
-            # PR-controlled role with that name from being passed to ECS or
-            # AgentCore, where lambda:SourceFunctionArn is unavailable.
+          - Sid: DenyLambdaRolePassToOtherServices
+            # Boundary exceptions identify the three reviewed Lambda role
+            # types by generated name. Prevent a PR-controlled lookalike from
+            # being passed to ECS or AgentCore, where Lambda context keys are
+            # unavailable.
             Effect: Deny
             Action:
               - iam:PassRole
             Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9AlertRouterRole-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9OauthFacadeFnRole-*
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ProxyFnRole-*
             Condition:
               StringNotEquals:
@@ -724,6 +726,14 @@ Resources:
               - iam:GetPolicy
               - iam:GetPolicyVersion
             Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
+          - Sid: WorkloadBoundarySimulation
+            # SimulateCustomPolicy has no resource-level authorization. Preflight
+            # uses it only with the repository-verified boundary document and a
+            # fixed kms:Decrypt probe matrix; it does not inspect another identity.
+            Effect: Allow
+            Action:
+              - iam:SimulateCustomPolicy
+            Resource: "*"
           - Sid: EcsTaskRolePolicyWritesWithBoundary
             # Policy writes are allowed only after IAM confirms that the target
             # role already carries the exact expected boundary.

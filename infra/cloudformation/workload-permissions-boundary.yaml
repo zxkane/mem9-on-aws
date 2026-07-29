@@ -98,7 +98,10 @@ Resources:
               - !Sub arn:${AWS::Partition}:sqs:${ApplicationRegion}:${AWS::AccountId}:AlertTransportFailureQueue-*
               - !Sub arn:${AWS::Partition}:sqs:${ApplicationRegion}:${AWS::AccountId}:AlertExecutionFailureQueue-*
               - !Sub arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/mem9-on-aws/*
-          - Sid: DenyKmsDecryptOutsideProjectParameters
+          # Lambda decrypts its server-side encrypted environment at cold start
+          # under the function ARN encryption context. The boundary scopes both
+          # approved project contexts. Missing and foreign contexts remain denied.
+          - Sid: DenyKmsDecryptOutsideProjectParameterOrFunctionContexts
             Effect: Deny
             Action:
               - kms:Decrypt
@@ -106,12 +109,43 @@ Resources:
             Condition:
               ArnNotLikeIfExists:
                 "kms:EncryptionContext:PARAMETER_ARN": !Sub arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/mem9-on-aws/*
-          - Sid: DenyKmsDecryptOutsideSsm
+                "kms:EncryptionContext:aws:lambda:FunctionArn": !Sub arn:${AWS::Partition}:lambda:${ApplicationRegion}:${AWS::AccountId}:function:mem9-on-aws-*
+          - Sid: DenyKmsDecryptOutsideSsmOrProjectLambdaPath
             Effect: Deny
             Action:
               - kms:Decrypt
             Resource: "*"
             Condition:
+              StringNotEqualsIfExists:
+                kms:ViaService: !Sub ssm.${ApplicationRegion}.${AWS::URLSuffix}
+              ArnNotLikeIfExists:
+                "kms:EncryptionContext:aws:lambda:FunctionArn": !Sub arn:${AWS::Partition}:lambda:${ApplicationRegion}:${AWS::AccountId}:function:mem9-on-aws-*
+          # Only the three reviewed Lambda execution-role types may present the
+          # Lambda cold-start context. Other workload roles cannot forge it.
+          - Sid: DenyLambdaContextDecryptFromNonLambdaRoles
+            Effect: Deny
+            Action:
+              - kms:Decrypt
+            Resource: "*"
+            Condition:
+              "Null":
+                "kms:EncryptionContext:aws:lambda:FunctionArn": "false"
+              ArnNotLike:
+                "aws:PrincipalArn":
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9AlertRouterRole-*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9OauthFacadeFnRole-*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ProxyFnRole-*
+          # Encryption context is caller supplied. Block function code from
+          # presenting a project Lambda context directly while preserving the
+          # facade's SSM-mediated decrypt and Lambda's cold-start service path.
+          - Sid: DenyDirectKmsDecryptFromFunctionCode
+            Effect: Deny
+            Action:
+              - kms:Decrypt
+            Resource: "*"
+            Condition:
+              "Null":
+                "lambda:SourceFunctionArn": "false"
               StringNotEqualsIfExists:
                 kms:ViaService: !Sub ssm.${ApplicationRegion}.${AWS::URLSuffix}
           - Sid: DenyNonShortTermMantleBearer
