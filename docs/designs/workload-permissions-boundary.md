@@ -94,8 +94,12 @@ the generated VPC proxy Lambda role and
 are denied whenever `lambda:SourceFunctionArn` is present, so function code
 cannot use the Lambda service's VPC permissions. Permanent deploy-role
 enforcement prevents every allowlisted Lambda role type from being passed to ECS
-or AgentCore, so a PR cannot create a non-Lambda lookalike. Before any stack
-module is imported, one global
+or AgentCore. This is a `PassRole` control, not proof of role provenance:
+`CreateRole` does not expose the submitted trust policy as an IAM condition key,
+so a repository writer could create a matching role that is directly assumable.
+The accepted trusted-writer model excludes that caller. An untrusted-PR model
+must first remove the GitHub OIDC `pull_request` subject out of band. Before any
+stack module is imported, one global
 `sst.aws.Function` component transform overrides every generated execution role
 with one exact trust statement for `lambda.amazonaws.com`. This also covers
 future application Functions. It compensates for the pinned SST version
@@ -333,12 +337,14 @@ The GitHub Actions role:
 - permits `PutRolePolicy` and `AttachRolePolicy` only when the target role
   already carries the exact boundary;
 - explicitly denies `DeleteRolePermissionsBoundary`;
-- prevents VPC proxy Lambda roles from being passed to non-Lambda services;
+- prevents all three allowlisted Lambda execution-role types from being passed
+  to non-Lambda services;
 - keeps read, detach, inline-policy delete, and role delete for preview cleanup;
 - explicitly denies mutation of the boundary policy and the operator-owned
   boundary, deploy-role, and ECR scanning ownership stacks.
-- can read only the fixed boundary managed policy so every normal AWS deployment
-  verifies the exact active default policy document through `--verify-only`.
+- can read only the fixed boundary managed policy and custom-simulate its
+  repository-verified document so every normal AWS deployment verifies the
+  exact active default policy and KMS behavior through `--verify-only`.
 
 Role deletion does not remove the boundary first. IAM deletes the role and its
 boundary association together.
