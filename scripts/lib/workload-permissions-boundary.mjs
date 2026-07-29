@@ -50,6 +50,10 @@ const LAMBDA_EXECUTION_ROLE_TYPES = [
     isVpcProxy: true,
   },
 ];
+const ECS_EXECUTION_ROLE_TOKENS = [
+  "Mem9ServerExecutionRole-",
+  "Mem9BootstrapExecutionRole-",
+];
 const ALLOWED_PASS_SERVICES = new Set([
   "bedrock-agentcore.amazonaws.com",
   "ecs-tasks.amazonaws.com",
@@ -209,9 +213,26 @@ function boundaryContract({
     accountId,
     partition,
     policyRevision,
-    kmsViaService: `ssm.${applicationRegion}.${
-      partition === "aws-cn" ? "amazonaws.com.cn" : "amazonaws.com"
-    }`,
+    kmsViaServices: ["ssm", "secretsmanager"].map(
+      (service) =>
+        `${service}.${applicationRegion}.${
+          partition === "aws-cn" ? "amazonaws.com.cn" : "amazonaws.com"
+        }`,
+    ),
+    secretArns: [
+      "Mem9DbProxySecret-*",
+      "Mem9DbSecret-*",
+      "tenant-api-key-*",
+    ].map(
+      (secretToken) =>
+        `arn:${partition}:secretsmanager:${applicationRegion}:${accountId}:` +
+        `secret:mem9-on-aws-*-${secretToken}`,
+    ),
+    ecsExecutionRoleArns: ECS_EXECUTION_ROLE_TOKENS.map(
+      (roleToken) =>
+        `arn:${partition}:iam::${accountId}:role/` +
+        `mem9-on-a*-*${roleToken}*`,
+    ),
     lambdaFunctionArn:
       `arn:${partition}:lambda:${applicationRegion}:${accountId}:` +
       "function:mem9-on-aws-*",
@@ -244,12 +265,14 @@ function boundaryContract({
 export function expectedBoundaryPolicyDocument(contract) {
   const {
     accountId,
-    kmsViaService,
+    ecsExecutionRoleArns,
+    kmsViaServices,
     lambdaExecutionRoleArns,
     lambdaFunctionArn,
     partition,
     policyRevision,
     projectResources,
+    secretArns,
     ssmParameterArn,
   } = boundaryContract(contract);
   return {
@@ -274,30 +297,73 @@ export function expectedBoundaryPolicyDocument(contract) {
         NotResource: projectResources,
       },
       {
-        Sid: "DenyKmsDecryptOutsideProjectParameterOrFunctionContexts",
+        Sid: "DenyKmsDecryptOutsideProjectParameterFunctionOrSecretContexts",
         Effect: "Deny",
         Action: [...CONDITIONED_RUNTIME_ACTIONS],
         Resource: "*",
         Condition: {
-          ArnNotLikeIfExists: {
+          StringNotLikeIfExists: {
             "kms:EncryptionContext:PARAMETER_ARN": ssmParameterArn,
+            "kms:EncryptionContext:aws:lambda:FunctionArn":
+              lambdaFunctionArn,
+            "kms:EncryptionContext:SecretARN": secretArns,
+          },
+        },
+      },
+      {
+        Sid: "DenyKmsDecryptOutsideSsmSecretsManagerOrProjectLambdaPath",
+        Effect: "Deny",
+        Action: [...CONDITIONED_RUNTIME_ACTIONS],
+        Resource: "*",
+        Condition: {
+          StringNotEqualsIfExists: {
+            "kms:ViaService": kmsViaServices,
+          },
+          StringNotLikeIfExists: {
             "kms:EncryptionContext:aws:lambda:FunctionArn":
               lambdaFunctionArn,
           },
         },
       },
       {
-        Sid: "DenyKmsDecryptOutsideSsmOrProjectLambdaPath",
+        Sid: "DenyParameterContextDecryptOutsideSsm",
         Effect: "Deny",
         Action: [...CONDITIONED_RUNTIME_ACTIONS],
         Resource: "*",
         Condition: {
-          StringNotEqualsIfExists: {
-            "kms:ViaService": kmsViaService,
+          Null: {
+            "kms:EncryptionContext:PARAMETER_ARN": "false",
           },
-          ArnNotLikeIfExists: {
-            "kms:EncryptionContext:aws:lambda:FunctionArn":
-              lambdaFunctionArn,
+          StringNotEqualsIfExists: {
+            "kms:ViaService": kmsViaServices[0],
+          },
+        },
+      },
+      {
+        Sid: "DenySecretContextDecryptOutsideSecretsManager",
+        Effect: "Deny",
+        Action: [...CONDITIONED_RUNTIME_ACTIONS],
+        Resource: "*",
+        Condition: {
+          Null: {
+            "kms:EncryptionContext:SecretARN": "false",
+          },
+          StringNotEqualsIfExists: {
+            "kms:ViaService": kmsViaServices[1],
+          },
+        },
+      },
+      {
+        Sid: "DenySecretContextDecryptFromNonEcsExecutionRoles",
+        Effect: "Deny",
+        Action: [...CONDITIONED_RUNTIME_ACTIONS],
+        Resource: "*",
+        Condition: {
+          Null: {
+            "kms:EncryptionContext:SecretARN": "false",
+          },
+          ArnNotLike: {
+            "aws:PrincipalArn": ecsExecutionRoleArns,
           },
         },
       },
@@ -325,7 +391,7 @@ export function expectedBoundaryPolicyDocument(contract) {
             "lambda:SourceFunctionArn": "false",
           },
           StringNotEqualsIfExists: {
-            "kms:ViaService": kmsViaService,
+            "kms:ViaService": kmsViaServices[0],
           },
         },
       },
@@ -788,6 +854,19 @@ export function verifyPermanentEnforcementDocuments(
     conditionOperator: "StringNotEquals",
     conditionKey: "iam:PassedToService",
     conditionValue: "lambda.amazonaws.com",
+  });
+  requireStatement(documents, {
+    sid: "DenyEcsExecutionRolePassToOtherServices",
+    effect: "Deny",
+    actions: ["iam:PassRole"],
+    resources: ECS_EXECUTION_ROLE_TOKENS.map(
+      (roleToken) =>
+        `arn:${partition}:iam::${accountId}:role/` +
+        `mem9-on-a*-*${roleToken}*`,
+    ),
+    conditionOperator: "StringNotEquals",
+    conditionKey: "iam:PassedToService",
+    conditionValue: "ecs-tasks.amazonaws.com",
   });
   requireStatement(documents, {
     sid: "DenyOperatorOwnedIamMutation",

@@ -223,6 +223,20 @@ Resources:
             Condition:
               StringNotEquals:
                 iam:PassedToService: lambda.amazonaws.com
+          - Sid: DenyEcsExecutionRolePassToOtherServices
+            # The Secrets Manager KMS exception identifies these execution-role
+            # types by generated name. Keep a PR-controlled lookalike on the ECS
+            # task execution path where the reviewed secret-injection contract
+            # applies.
+            Effect: Deny
+            Action:
+              - iam:PassRole
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ServerExecutionRole-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9BootstrapExecutionRole-*
+            Condition:
+              StringNotEquals:
+                iam:PassedToService: ecs-tasks.amazonaws.com
           - Sid: DenyWorkloadBoundaryRemoval
             Effect: Deny
             Action:

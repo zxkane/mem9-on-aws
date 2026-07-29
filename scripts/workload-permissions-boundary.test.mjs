@@ -599,6 +599,41 @@ async function runBoundaryDeployMock({
     "ContextKeyName=kms:ViaService," +
     "ContextKeyValues=ssm.ap-northeast-1.amazonaws.com," +
     "ContextKeyType=string";
+  const secretContext =
+    "ContextKeyName=kms:EncryptionContext:SecretARN," +
+    "ContextKeyValues=arn:aws:secretsmanager:ap-northeast-1:123456789012:" +
+    "secret:mem9-on-aws-prod-Mem9DbSecret-regression," +
+    "ContextKeyType=string";
+  const tenantSecretContext =
+    "ContextKeyName=kms:EncryptionContext:SecretARN," +
+    "ContextKeyValues=arn:aws:secretsmanager:ap-northeast-1:123456789012:" +
+    "secret:mem9-on-aws-prod-tenant-api-key-regression," +
+    "ContextKeyType=string";
+  const outsideSecretContext =
+    "ContextKeyName=kms:EncryptionContext:SecretARN," +
+    "ContextKeyValues=arn:aws:secretsmanager:ap-northeast-1:123456789012:" +
+    "secret:outside-project-regression,ContextKeyType=string";
+  const secretVersionContext =
+    "ContextKeyName=kms:EncryptionContext:SecretVersionId," +
+    "ContextKeyValues=regression-version,ContextKeyType=string";
+  const secretViaContext =
+    "ContextKeyName=kms:ViaService," +
+    "ContextKeyValues=secretsmanager.ap-northeast-1.amazonaws.com," +
+    "ContextKeyType=string";
+  const crossRegionSecretViaContext =
+    "ContextKeyName=kms:ViaService," +
+    "ContextKeyValues=secretsmanager.us-west-2.amazonaws.com," +
+    "ContextKeyType=string";
+  const serverExecutionPrincipalContext =
+    "ContextKeyName=aws:PrincipalArn," +
+    "ContextKeyValues=arn:aws:iam::123456789012:role/" +
+    "mem9-on-aws-prod-Mem9ServerExecutionRole-regression-probe," +
+    "ContextKeyType=string";
+  const bootstrapExecutionPrincipalContext =
+    "ContextKeyName=aws:PrincipalArn," +
+    "ContextKeyValues=arn:aws:iam::123456789012:role/" +
+    "mem9-on-aws-prod-Mem9BootstrapExecutionRole-regression-probe," +
+    "ContextKeyType=string";
   await writeFile(
     boundarySimulationsPath,
     JSON.stringify({
@@ -636,9 +671,97 @@ async function runBoundaryDeployMock({
           ],
         },
         {
+          name: "server-secret",
+          decision: "allowed",
+          contextEntries: [
+            secretContext,
+            secretVersionContext,
+            secretViaContext,
+            serverExecutionPrincipalContext,
+          ],
+        },
+        {
+          name: "bootstrap-secret",
+          decision: "allowed",
+          contextEntries: [
+            tenantSecretContext,
+            secretVersionContext,
+            secretViaContext,
+            bootstrapExecutionPrincipalContext,
+          ],
+        },
+        {
           name: "direct-ssm",
           decision: "explicitDeny",
           contextEntries: [ssmContext],
+        },
+        {
+          name: "direct-secret",
+          decision: "explicitDeny",
+          contextEntries: [
+            secretContext,
+            secretVersionContext,
+            serverExecutionPrincipalContext,
+          ],
+        },
+        {
+          name: "outside-secret",
+          decision: "explicitDeny",
+          contextEntries: [
+            outsideSecretContext,
+            secretVersionContext,
+            secretViaContext,
+            serverExecutionPrincipalContext,
+          ],
+        },
+        {
+          name: "task-role-secret",
+          decision: "explicitDeny",
+          contextEntries: [
+            secretContext,
+            secretVersionContext,
+            secretViaContext,
+            nonLambdaPrincipalContext,
+          ],
+        },
+        {
+          name: "lambda-role-secret",
+          decision: "explicitDeny",
+          contextEntries: [
+            secretContext,
+            secretVersionContext,
+            secretViaContext,
+            lambdaPrincipalContext,
+          ],
+        },
+        {
+          name: "cross-region-secret",
+          decision: "explicitDeny",
+          contextEntries: [
+            secretContext,
+            secretVersionContext,
+            crossRegionSecretViaContext,
+            serverExecutionPrincipalContext,
+          ],
+        },
+        {
+          name: "secret-via-ssm",
+          decision: "explicitDeny",
+          contextEntries: [
+            secretContext,
+            secretVersionContext,
+            ssmViaContext,
+            serverExecutionPrincipalContext,
+          ],
+        },
+        {
+          name: "parameter-via-secretsmanager",
+          decision: "explicitDeny",
+          contextEntries: [
+            ssmContext,
+            secretViaContext,
+            serverExecutionPrincipalContext,
+          ],
         },
         {
           name: "direct-function",
@@ -3156,6 +3279,18 @@ describe("quarantine and permanent policy verification", () => {
         for (const document of documents) {
           document.Statement = document.Statement.filter(
             ({ Sid }) => Sid !== "DenyLambdaRolePassToOtherServices",
+          );
+        }
+        return documents;
+      },
+    ],
+    [
+      "missing ECS execution role PassRole deny",
+      () => {
+        const documents = structuredClone(deployedManagedPolicyDocuments());
+        for (const document of documents) {
+          document.Statement = document.Statement.filter(
+            ({ Sid }) => Sid !== "DenyEcsExecutionRolePassToOtherServices",
           );
         }
         return documents;
@@ -6506,7 +6641,7 @@ describe("operator entry point", () => {
     ).toBe(false);
   });
 
-  it("gates the active boundary with Lambda cold-start KMS semantics", async () => {
+  it("gates the active boundary with runtime KMS semantics", async () => {
     const { calls, result } = await runBoundaryDeployMock({
       matching: true,
       verifyOnly: true,
@@ -6517,7 +6652,7 @@ describe("operator entry point", () => {
         call.startsWith("iam simulate-custom-policy") &&
         call.includes("--permissions-boundary-policy-input-list"),
     );
-    expect(simulations).toHaveLength(7);
+    expect(simulations).toHaveLength(16);
     const projectLambda = simulations.find((call) =>
       call.includes("function:mem9-on-aws-regression-probe") &&
       !call.includes("ContextKeyName=lambda:SourceFunctionArn"),
@@ -6531,12 +6666,82 @@ describe("operator entry point", () => {
       call.includes("ContextKeyName=kms:ViaService"),
     );
     expect(projectSsm).toContain("ContextKeyName=lambda:SourceFunctionArn");
+    const serverSecret = simulations.find(
+      (call) =>
+        call.includes("ContextKeyName=kms:EncryptionContext:SecretARN") &&
+        call.includes("Mem9DbSecret-regression") &&
+        call.includes("Mem9ServerExecutionRole-regression-probe") &&
+        call.includes(
+          "ContextKeyValues=secretsmanager.ap-northeast-1.amazonaws.com",
+        ),
+    );
+    expect(serverSecret).toContain(
+      "ContextKeyName=kms:EncryptionContext:SecretVersionId",
+    );
+    const bootstrapSecret = simulations.find(
+      (call) =>
+        call.includes("tenant-api-key-regression") &&
+        call.includes("Mem9BootstrapExecutionRole-regression-probe"),
+    );
+    expect(bootstrapSecret).toContain(
+      "ContextKeyValues=secretsmanager.ap-northeast-1.amazonaws.com",
+    );
     const directSsm = simulations.find(
       (call) =>
         call.includes("ContextKeyName=kms:EncryptionContext:PARAMETER_ARN") &&
         !call.includes("ContextKeyName=kms:ViaService"),
     );
     expect(directSsm).toBeDefined();
+    expect(
+      simulations.find(
+        (call) =>
+          call.includes("Mem9DbSecret-regression") &&
+          call.includes("Mem9ServerExecutionRole-regression-probe") &&
+          !call.includes("ContextKeyName=kms:ViaService"),
+      ),
+    ).toBeDefined();
+    expect(
+      simulations.find((call) =>
+        call.includes("secret:outside-project-regression"),
+      ),
+    ).toBeDefined();
+    expect(
+      simulations.find(
+        (call) =>
+          call.includes("Mem9DbSecret-regression") &&
+          call.includes("Mem9ServerTaskRole-regression-probe"),
+      ),
+    ).toBeDefined();
+    expect(
+      simulations.find(
+        (call) =>
+          call.includes("Mem9DbSecret-regression") &&
+          call.includes("Mem9OauthFacadeFnRole-regression-probe"),
+      ),
+    ).toBeDefined();
+    expect(
+      simulations.find((call) =>
+        call.includes(
+          "ContextKeyValues=secretsmanager.us-west-2.amazonaws.com",
+        ),
+      ),
+    ).toBeDefined();
+    expect(
+      simulations.find(
+        (call) =>
+          call.includes("Mem9DbSecret-regression") &&
+          call.includes("ContextKeyValues=ssm.ap-northeast-1.amazonaws.com"),
+      ),
+    ).toBeDefined();
+    expect(
+      simulations.find(
+        (call) =>
+          call.includes("ContextKeyName=kms:EncryptionContext:PARAMETER_ARN") &&
+          call.includes(
+            "ContextKeyValues=secretsmanager.ap-northeast-1.amazonaws.com",
+          ),
+      ),
+    ).toBeDefined();
     const directFunction = simulations.find(
       (call) =>
         call.includes(
@@ -6545,8 +6750,12 @@ describe("operator entry point", () => {
     );
     expect(directFunction).toBeDefined();
     expect(directFunction).not.toContain("ContextKeyName=kms:ViaService");
-    const nonlambdaForgedLambda = simulations.find((call) =>
-      call.includes("Mem9ServerTaskRole-regression-probe"),
+    const nonlambdaForgedLambda = simulations.find(
+      (call) =>
+        call.includes("Mem9ServerTaskRole-regression-probe") &&
+        call.includes(
+          "ContextKeyName=kms:EncryptionContext:aws:lambda:FunctionArn",
+        ),
     );
     expect(nonlambdaForgedLambda).toContain(
       "ContextKeyName=kms:EncryptionContext:aws:lambda:FunctionArn",
@@ -6564,7 +6773,16 @@ describe("operator entry point", () => {
   it.each([
     "project-lambda",
     "project-ssm",
+    "server-secret",
+    "bootstrap-secret",
     "direct-ssm",
+    "direct-secret",
+    "outside-secret",
+    "task-role-secret",
+    "lambda-role-secret",
+    "cross-region-secret",
+    "secret-via-ssm",
+    "parameter-via-secretsmanager",
     "direct-function",
     "nonlambda-forged-lambda",
     "outside-lambda",
@@ -6773,40 +6991,103 @@ describe("boundary and deploy-role templates", () => {
     );
     expect(
       bySid(
-        "DenyKmsDecryptOutsideProjectParameterOrFunctionContexts",
+        "DenyKmsDecryptOutsideProjectParameterFunctionOrSecretContexts",
       ),
     ).toEqual({
-      Sid: "DenyKmsDecryptOutsideProjectParameterOrFunctionContexts",
+      Sid: "DenyKmsDecryptOutsideProjectParameterFunctionOrSecretContexts",
       Effect: "Deny",
       Action: ["kms:Decrypt"],
       Resource: "*",
       Condition: {
-        ArnNotLikeIfExists: {
+        StringNotLikeIfExists: {
           "kms:EncryptionContext:PARAMETER_ARN":
             "arn:aws:ssm:ap-northeast-1:123456789012:" +
             "parameter/mem9-on-aws/*",
           "kms:EncryptionContext:aws:lambda:FunctionArn":
             "arn:aws:lambda:ap-northeast-1:123456789012:" +
             "function:mem9-on-aws-*",
+          "kms:EncryptionContext:SecretARN": [
+            "arn:aws:secretsmanager:ap-northeast-1:123456789012:" +
+              "secret:mem9-on-aws-*-Mem9DbProxySecret-*",
+            "arn:aws:secretsmanager:ap-northeast-1:123456789012:" +
+              "secret:mem9-on-aws-*-Mem9DbSecret-*",
+            "arn:aws:secretsmanager:ap-northeast-1:123456789012:" +
+              "secret:mem9-on-aws-*-tenant-api-key-*",
+          ],
         },
       },
     });
     expect(bySid("DenyKmsDecryptOutsideSsm")).toBeUndefined();
     expect(
-      bySid("DenyKmsDecryptOutsideSsmOrProjectLambdaPath"),
+      bySid("DenyKmsDecryptOutsideSsmSecretsManagerOrProjectLambdaPath"),
     ).toEqual({
-      Sid: "DenyKmsDecryptOutsideSsmOrProjectLambdaPath",
+      Sid: "DenyKmsDecryptOutsideSsmSecretsManagerOrProjectLambdaPath",
       Effect: "Deny",
       Action: ["kms:Decrypt"],
       Resource: "*",
       Condition: {
         StringNotEqualsIfExists: {
-          "kms:ViaService": "ssm.ap-northeast-1.amazonaws.com",
+          "kms:ViaService": [
+            "ssm.ap-northeast-1.amazonaws.com",
+            "secretsmanager.ap-northeast-1.amazonaws.com",
+          ],
         },
-        ArnNotLikeIfExists: {
+        StringNotLikeIfExists: {
           "kms:EncryptionContext:aws:lambda:FunctionArn":
             "arn:aws:lambda:ap-northeast-1:123456789012:" +
             "function:mem9-on-aws-*",
+        },
+      },
+    });
+    expect(
+      bySid("DenySecretContextDecryptFromNonEcsExecutionRoles"),
+    ).toEqual({
+      Sid: "DenySecretContextDecryptFromNonEcsExecutionRoles",
+      Effect: "Deny",
+      Action: ["kms:Decrypt"],
+      Resource: "*",
+      Condition: {
+        Null: {
+          "kms:EncryptionContext:SecretARN": "false",
+        },
+        ArnNotLike: {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::123456789012:role/" +
+              "mem9-on-a*-*Mem9ServerExecutionRole-*",
+            "arn:aws:iam::123456789012:role/" +
+              "mem9-on-a*-*Mem9BootstrapExecutionRole-*",
+          ],
+        },
+      },
+    });
+    expect(bySid("DenyParameterContextDecryptOutsideSsm")).toEqual({
+      Sid: "DenyParameterContextDecryptOutsideSsm",
+      Effect: "Deny",
+      Action: ["kms:Decrypt"],
+      Resource: "*",
+      Condition: {
+        Null: {
+          "kms:EncryptionContext:PARAMETER_ARN": "false",
+        },
+        StringNotEqualsIfExists: {
+          "kms:ViaService": "ssm.ap-northeast-1.amazonaws.com",
+        },
+      },
+    });
+    expect(
+      bySid("DenySecretContextDecryptOutsideSecretsManager"),
+    ).toEqual({
+      Sid: "DenySecretContextDecryptOutsideSecretsManager",
+      Effect: "Deny",
+      Action: ["kms:Decrypt"],
+      Resource: "*",
+      Condition: {
+        Null: {
+          "kms:EncryptionContext:SecretARN": "false",
+        },
+        StringNotEqualsIfExists: {
+          "kms:ViaService":
+            "secretsmanager.ap-northeast-1.amazonaws.com",
         },
       },
     });
@@ -6967,6 +7248,7 @@ describe("boundary and deploy-role templates", () => {
       "DenyUnboundedProjectRoleCreation",
       "DenyUnboundedProjectRolePolicyWrites",
       "DenyLambdaRolePassToOtherServices",
+      "DenyEcsExecutionRolePassToOtherServices",
       "DenyWorkloadBoundaryRemoval",
       "DenyOperatorOwnedIamMutation",
       "DenyOperatorOwnedStackMutation",
@@ -7053,6 +7335,25 @@ describe("boundary and deploy-role templates", () => {
       Condition: {
         StringNotEquals: {
           "iam:PassedToService": "lambda.amazonaws.com",
+        },
+      },
+    });
+    expect(
+      resolveTemplateValue(
+        bySid(denyStatements, "DenyEcsExecutionRolePassToOtherServices"),
+      ),
+    ).toMatchObject({
+      Effect: "Deny",
+      Action: ["iam:PassRole"],
+      Resource: [
+        "arn:aws:iam::123456789012:role/" +
+          "mem9-on-a*-*Mem9ServerExecutionRole-*",
+        "arn:aws:iam::123456789012:role/" +
+          "mem9-on-a*-*Mem9BootstrapExecutionRole-*",
+      ],
+      Condition: {
+        StringNotEquals: {
+          "iam:PassedToService": "ecs-tasks.amazonaws.com",
         },
       },
     });
