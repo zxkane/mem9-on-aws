@@ -536,6 +536,9 @@ function optionValues(args, name) {
 }
 
 async function runBoundaryDeployMock({
+  boundarySimulationBadProbe = "",
+  boundarySimulationMalformedProbe = "",
+  defaultVersionDriftsAfterSimulation = false,
   guarded = false,
   matching = false,
   postMutationDrift = false,
@@ -630,7 +633,12 @@ case "$command" in
     printf '%s\\n' '{}'
     ;;
   "iam get-policy")
-    printf '%s\\n' 'v1'
+    if [[ "$MOCK_DEFAULT_VERSION_DRIFTS_AFTER_SIMULATION" == "true" &&
+          -f "$MOCK_SIMULATION_COMPLETE" ]]; then
+      printf '%s\\n' 'v2'
+    else
+      printf '%s\\n' 'v1'
+    fi
     ;;
   "iam get-policy-version")
     if [[ "$MOCK_POST_MUTATION_DRIFT" != "true" &&
@@ -651,7 +659,47 @@ case "$command" in
   "iam simulate-custom-policy")
     if [[ "$MOCK_SIMULATION_COMMAND_FAILS" == "true" ]]; then exit 1; fi
     : > "$MOCK_SIMULATION_COMPLETE"
-    cat "$MOCK_SIMULATION"
+    if [[ "$*" == *"--permissions-boundary-policy-input-list"* ]]; then
+      probe="missing-context"
+      decision="explicitDeny"
+      if [[ "$*" == *"ContextKeyName=kms:EncryptionContext:PARAMETER_ARN"* ]]; then
+        probe="direct-ssm"
+        if [[ "$*" == *"ContextKeyName=kms:ViaService"* ]]; then
+          probe="project-ssm"
+          decision="allowed"
+        fi
+      elif [[ "$*" == *"ContextKeyName=lambda:SourceFunctionArn"* ]]; then
+        probe="direct-function"
+      elif [[ "$*" == *"function:mem9-on-aws-regression-probe"* ]]; then
+        if [[ "$*" == *"Mem9ServerTaskRole-regression-probe"* ]]; then
+          probe="nonlambda-forged-lambda"
+        else
+          probe="project-lambda"
+          decision="allowed"
+        fi
+      elif [[ "$*" == *"function:outside-project-regression-probe"* ]]; then
+        probe="outside-lambda"
+      fi
+      if [[ "$MOCK_BOUNDARY_SIMULATION_MALFORMED_PROBE" == "$probe" ]]; then
+        printf '%s\\n' '{"EvaluationResults":[{}]}'
+        exit 0
+      fi
+      if [[ "$MOCK_BOUNDARY_SIMULATION_BAD_PROBE" == "$probe" ]]; then
+        if [[ "$decision" == "allowed" ]]; then
+          decision="explicitDeny"
+        else
+          decision="allowed"
+        fi
+      fi
+      if [[ "$decision" == "explicitDeny" ]]; then
+        matched='[{"SourcePolicyId":"Permissions Boundary Policy"}]'
+      else
+        matched='[]'
+      fi
+      printf '{"EvaluationResults":[{"EvalActionName":"kms:Decrypt","EvalResourceName":"*","EvalDecision":"%s","MatchedStatements":%s}]}\\n' "$decision" "$matched"
+    else
+      cat "$MOCK_SIMULATION"
+    fi
     ;;
   *)
     printf 'unexpected mock command: %s\\n' "$*" >&2
@@ -679,8 +727,14 @@ esac
         env: {
           ...process.env,
           AWS_PROFILE: "mock",
+          MOCK_BOUNDARY_SIMULATION_BAD_PROBE: boundarySimulationBadProbe,
+          MOCK_BOUNDARY_SIMULATION_MALFORMED_PROBE:
+            boundarySimulationMalformedProbe,
           MOCK_CALLS: callsPath,
           MOCK_CREATED: createdPath,
+          MOCK_DEFAULT_VERSION_DRIFTS_AFTER_SIMULATION: String(
+            defaultVersionDriftsAfterSimulation,
+          ),
           MOCK_EXPECTED: expectedPath,
           MOCK_MATCHING: String(matching),
           MOCK_POST_MUTATION_DRIFT: String(postMutationDrift),
@@ -2964,12 +3018,12 @@ describe("quarantine and permanent policy verification", () => {
       },
     ],
     [
-      "missing VPC Lambda PassRole deny",
+      "missing Lambda role PassRole deny",
       () => {
         const documents = structuredClone(deployedManagedPolicyDocuments());
         for (const document of documents) {
           document.Statement = document.Statement.filter(
-            ({ Sid }) => Sid !== "DenyVpcLambdaRolePassToOtherServices",
+            ({ Sid }) => Sid !== "DenyLambdaRolePassToOtherServices",
           );
         }
         return documents;
@@ -3924,6 +3978,8 @@ describe("stateful AWS CLI adapter", () => {
                     ":stack/ecr-registry-scanning-mem9-on-aws/",
                   ) ||
                   resource.endsWith("/mem9-on-aws-quarantine-probe") ||
+                  resource.includes("Mem9AlertRouterRole") ||
+                  resource.includes("Mem9OauthFacadeFnRole") ||
                   resource.includes("Mem9ProxyFnRole");
                 return {
                   EvalActionName: action,
@@ -6318,6 +6374,123 @@ describe("operator entry point", () => {
     ).toBe(false);
   });
 
+  it("gates the active boundary with Lambda cold-start KMS semantics", async () => {
+    const { calls, result } = await runBoundaryDeployMock({
+      matching: true,
+      verifyOnly: true,
+    });
+    expect(result.status, result.stderr).toBe(0);
+    const simulations = calls.filter(
+      (call) =>
+        call.startsWith("iam simulate-custom-policy") &&
+        call.includes("--permissions-boundary-policy-input-list"),
+    );
+    expect(simulations).toHaveLength(7);
+    const projectLambda = simulations.find((call) =>
+      call.includes("function:mem9-on-aws-regression-probe") &&
+      !call.includes("ContextKeyName=lambda:SourceFunctionArn"),
+    );
+    expect(projectLambda).toContain(
+      "ContextKeyName=kms:EncryptionContext:aws:lambda:FunctionArn",
+    );
+    expect(projectLambda).not.toContain("ContextKeyName=kms:ViaService");
+    const projectSsm = simulations.find((call) =>
+      call.includes("ContextKeyName=kms:EncryptionContext:PARAMETER_ARN") &&
+      call.includes("ContextKeyName=kms:ViaService"),
+    );
+    expect(projectSsm).toContain("ContextKeyName=lambda:SourceFunctionArn");
+    const directSsm = simulations.find(
+      (call) =>
+        call.includes("ContextKeyName=kms:EncryptionContext:PARAMETER_ARN") &&
+        !call.includes("ContextKeyName=kms:ViaService"),
+    );
+    expect(directSsm).toBeDefined();
+    const directFunction = simulations.find(
+      (call) =>
+        call.includes(
+          "ContextKeyName=kms:EncryptionContext:aws:lambda:FunctionArn",
+        ) && call.includes("ContextKeyName=lambda:SourceFunctionArn"),
+    );
+    expect(directFunction).toBeDefined();
+    expect(directFunction).not.toContain("ContextKeyName=kms:ViaService");
+    const nonlambdaForgedLambda = simulations.find((call) =>
+      call.includes("Mem9ServerTaskRole-regression-probe"),
+    );
+    expect(nonlambdaForgedLambda).toContain(
+      "ContextKeyName=kms:EncryptionContext:aws:lambda:FunctionArn",
+    );
+    expect(
+      simulations.find((call) =>
+        call.includes("function:outside-project-regression-probe"),
+      ),
+    ).toBeDefined();
+    expect(
+      simulations.find((call) => !call.includes("--context-entries")),
+    ).toBeDefined();
+  });
+
+  it.each([
+    "project-lambda",
+    "project-ssm",
+    "direct-ssm",
+    "direct-function",
+    "nonlambda-forged-lambda",
+    "outside-lambda",
+    "missing-context",
+  ])("rejects a boundary with incorrect %s KMS semantics", async (probe) => {
+    const { calls, result } = await runBoundaryDeployMock({
+      boundarySimulationBadProbe: probe,
+      matching: true,
+      verifyOnly: true,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "Workload permissions-boundary policy drift detected",
+    );
+    expect(
+      calls.some((call) => call.startsWith("cloudformation update-stack")),
+    ).toBe(false);
+  });
+
+  it.each([
+    ["an AWS command failure", { simulationCommandFails: true }],
+    [
+      "a malformed response",
+      { boundarySimulationMalformedProbe: "project-lambda" },
+    ],
+  ])("fails closed when boundary simulation has %s", async (_name, options) => {
+    const { calls, result } = await runBoundaryDeployMock({
+      ...options,
+      matching: true,
+      verifyOnly: true,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "Workload permissions-boundary policy drift detected",
+    );
+    expect(
+      calls.some((call) => call.startsWith("cloudformation update-stack")),
+    ).toBe(false);
+  });
+
+  it("rejects a default-version change during semantic verification", async () => {
+    const { calls, result } = await runBoundaryDeployMock({
+      defaultVersionDriftsAfterSimulation: true,
+      matching: true,
+      verifyOnly: true,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "Workload permissions-boundary policy drift detected",
+    );
+    expect(
+      calls.filter((call) => call.startsWith("iam get-policy ")),
+    ).toHaveLength(2);
+    expect(
+      calls.some((call) => call.startsWith("cloudformation update-stack")),
+    ).toBe(false);
+  });
+
   it.each([
     ["policy drift", { matching: false }],
     ["missing stack", { matching: false, stackExists: false }],
@@ -6466,8 +6639,12 @@ describe("boundary and deploy-role templates", () => {
         "ssm:GetParametersByPath",
       ]),
     );
-    expect(bySid("DenyKmsDecryptOutsideProjectParameters")).toEqual({
-      Sid: "DenyKmsDecryptOutsideProjectParameters",
+    expect(
+      bySid(
+        "DenyKmsDecryptOutsideProjectParameterOrFunctionContexts",
+      ),
+    ).toEqual({
+      Sid: "DenyKmsDecryptOutsideProjectParameterOrFunctionContexts",
       Effect: "Deny",
       Action: ["kms:Decrypt"],
       Resource: "*",
@@ -6476,14 +6653,66 @@ describe("boundary and deploy-role templates", () => {
           "kms:EncryptionContext:PARAMETER_ARN":
             "arn:aws:ssm:ap-northeast-1:123456789012:" +
             "parameter/mem9-on-aws/*",
+          "kms:EncryptionContext:aws:lambda:FunctionArn":
+            "arn:aws:lambda:ap-northeast-1:123456789012:" +
+            "function:mem9-on-aws-*",
         },
       },
     });
+    expect(bySid("DenyKmsDecryptOutsideSsm")).toBeUndefined();
     expect(
-      bySid("DenyKmsDecryptOutsideSsm").Condition.StringNotEqualsIfExists[
-        "kms:ViaService"
-      ],
-    ).toBe("ssm.ap-northeast-1.amazonaws.com");
+      bySid("DenyKmsDecryptOutsideSsmOrProjectLambdaPath"),
+    ).toEqual({
+      Sid: "DenyKmsDecryptOutsideSsmOrProjectLambdaPath",
+      Effect: "Deny",
+      Action: ["kms:Decrypt"],
+      Resource: "*",
+      Condition: {
+        StringNotEqualsIfExists: {
+          "kms:ViaService": "ssm.ap-northeast-1.amazonaws.com",
+        },
+        ArnNotLikeIfExists: {
+          "kms:EncryptionContext:aws:lambda:FunctionArn":
+            "arn:aws:lambda:ap-northeast-1:123456789012:" +
+            "function:mem9-on-aws-*",
+        },
+      },
+    });
+    expect(bySid("DenyDirectKmsDecryptFromFunctionCode")).toEqual({
+      Sid: "DenyDirectKmsDecryptFromFunctionCode",
+      Effect: "Deny",
+      Action: ["kms:Decrypt"],
+      Resource: "*",
+      Condition: {
+        Null: {
+          "lambda:SourceFunctionArn": "false",
+        },
+        StringNotEqualsIfExists: {
+          "kms:ViaService": "ssm.ap-northeast-1.amazonaws.com",
+        },
+      },
+    });
+    expect(bySid("DenyLambdaContextDecryptFromNonLambdaRoles")).toEqual({
+      Sid: "DenyLambdaContextDecryptFromNonLambdaRoles",
+      Effect: "Deny",
+      Action: ["kms:Decrypt"],
+      Resource: "*",
+      Condition: {
+        Null: {
+          "kms:EncryptionContext:aws:lambda:FunctionArn": "false",
+        },
+        ArnNotLike: {
+          "aws:PrincipalArn": [
+            "arn:aws:iam::123456789012:role/" +
+              "mem9-on-a*-*Mem9AlertRouterRole-*",
+            "arn:aws:iam::123456789012:role/" +
+              "mem9-on-a*-*Mem9OauthFacadeFnRole-*",
+            "arn:aws:iam::123456789012:role/" +
+              "mem9-on-a*-*Mem9ProxyFnRole-*",
+          ],
+        },
+      },
+    });
     expect(
       bySid("DenyNonShortTermMantleBearer").Condition.StringNotEqualsIfExists[
         "bedrock-mantle:BearerTokenType"
@@ -6605,7 +6834,7 @@ describe("boundary and deploy-role templates", () => {
     for (const sid of [
       "DenyUnboundedProjectRoleCreation",
       "DenyUnboundedProjectRolePolicyWrites",
-      "DenyVpcLambdaRolePassToOtherServices",
+      "DenyLambdaRolePassToOtherServices",
       "DenyWorkloadBoundaryRemoval",
       "DenyOperatorOwnedIamMutation",
       "DenyOperatorOwnedStackMutation",
@@ -6618,6 +6847,7 @@ describe("boundary and deploy-role templates", () => {
       "EcsTaskRolePolicyWritesWithBoundary",
       "EcsTaskRoleLifecycle",
       "WorkloadBoundaryRead",
+      "WorkloadBoundarySimulation",
     ]) {
       expect(bySid(roleStatements, sid), `missing ${sid}`).toBeDefined();
     }
@@ -6642,6 +6872,14 @@ describe("boundary and deploy-role templates", () => {
       Effect: "Allow",
       Action: ["iam:GetPolicy", "iam:GetPolicyVersion"],
       Resource: boundaryArn,
+    });
+    expect(
+      resolveTemplateValue(bySid(roleStatements, "WorkloadBoundarySimulation")),
+    ).toEqual({
+      Sid: "WorkloadBoundarySimulation",
+      Effect: "Allow",
+      Action: ["iam:SimulateCustomPolicy"],
+      Resource: "*",
     });
     const lambdaStatements =
       template.Resources.LambdaProxyPolicy.Properties.PolicyDocument.Statement;
@@ -6670,12 +6908,14 @@ describe("boundary and deploy-role templates", () => {
     });
     expect(
       resolveTemplateValue(
-        bySid(denyStatements, "DenyVpcLambdaRolePassToOtherServices"),
+        bySid(denyStatements, "DenyLambdaRolePassToOtherServices"),
       ),
     ).toMatchObject({
       Effect: "Deny",
       Action: ["iam:PassRole"],
       Resource: [
+        "arn:aws:iam::123456789012:role/mem9-on-a*-*Mem9AlertRouterRole-*",
+        "arn:aws:iam::123456789012:role/mem9-on-a*-*Mem9OauthFacadeFnRole-*",
         "arn:aws:iam::123456789012:role/mem9-on-a*-*Mem9ProxyFnRole-*",
       ],
       Condition: {

@@ -212,6 +212,18 @@ function boundaryContract({
     kmsViaService: `ssm.${applicationRegion}.${
       partition === "aws-cn" ? "amazonaws.com.cn" : "amazonaws.com"
     }`,
+    lambdaFunctionArn:
+      `arn:${partition}:lambda:${applicationRegion}:${accountId}:` +
+      "function:mem9-on-aws-*",
+    lambdaExecutionRoleArns: [
+      "Mem9AlertRouterRole-",
+      "Mem9OauthFacadeFnRole-",
+      "Mem9ProxyFnRole-",
+    ].map(
+      (roleToken) =>
+        `arn:${partition}:iam::${accountId}:role/` +
+        `mem9-on-a*-*${roleToken}*`,
+    ),
     ssmParameterArn:
       `arn:${partition}:ssm:${applicationRegion}:${accountId}:` +
       "parameter/mem9-on-aws/*",
@@ -233,6 +245,8 @@ export function expectedBoundaryPolicyDocument(contract) {
   const {
     accountId,
     kmsViaService,
+    lambdaExecutionRoleArns,
+    lambdaFunctionArn,
     partition,
     policyRevision,
     projectResources,
@@ -260,22 +274,56 @@ export function expectedBoundaryPolicyDocument(contract) {
         NotResource: projectResources,
       },
       {
-        Sid: "DenyKmsDecryptOutsideProjectParameters",
+        Sid: "DenyKmsDecryptOutsideProjectParameterOrFunctionContexts",
         Effect: "Deny",
         Action: [...CONDITIONED_RUNTIME_ACTIONS],
         Resource: "*",
         Condition: {
           ArnNotLikeIfExists: {
             "kms:EncryptionContext:PARAMETER_ARN": ssmParameterArn,
+            "kms:EncryptionContext:aws:lambda:FunctionArn":
+              lambdaFunctionArn,
           },
         },
       },
       {
-        Sid: "DenyKmsDecryptOutsideSsm",
+        Sid: "DenyKmsDecryptOutsideSsmOrProjectLambdaPath",
         Effect: "Deny",
         Action: [...CONDITIONED_RUNTIME_ACTIONS],
         Resource: "*",
         Condition: {
+          StringNotEqualsIfExists: {
+            "kms:ViaService": kmsViaService,
+          },
+          ArnNotLikeIfExists: {
+            "kms:EncryptionContext:aws:lambda:FunctionArn":
+              lambdaFunctionArn,
+          },
+        },
+      },
+      {
+        Sid: "DenyLambdaContextDecryptFromNonLambdaRoles",
+        Effect: "Deny",
+        Action: [...CONDITIONED_RUNTIME_ACTIONS],
+        Resource: "*",
+        Condition: {
+          Null: {
+            "kms:EncryptionContext:aws:lambda:FunctionArn": "false",
+          },
+          ArnNotLike: {
+            "aws:PrincipalArn": lambdaExecutionRoleArns,
+          },
+        },
+      },
+      {
+        Sid: "DenyDirectKmsDecryptFromFunctionCode",
+        Effect: "Deny",
+        Action: [...CONDITIONED_RUNTIME_ACTIONS],
+        Resource: "*",
+        Condition: {
+          Null: {
+            "lambda:SourceFunctionArn": "false",
+          },
           StringNotEqualsIfExists: {
             "kms:ViaService": kmsViaService,
           },
@@ -729,13 +777,14 @@ export function verifyPermanentEnforcementDocuments(
     resources: rolePatterns,
   });
   requireStatement(documents, {
-    sid: "DenyVpcLambdaRolePassToOtherServices",
+    sid: "DenyLambdaRolePassToOtherServices",
     effect: "Deny",
     actions: ["iam:PassRole"],
-    resources: [
-      `arn:${partition}:iam::${accountId}:role/` +
-        "mem9-on-a*-*Mem9ProxyFnRole-*",
-    ],
+    resources: LAMBDA_EXECUTION_ROLE_TYPES.map(
+      ({ roleToken }) =>
+        `arn:${partition}:iam::${accountId}:role/` +
+        `mem9-on-a*-*${roleToken}*`,
+    ),
     conditionOperator: "StringNotEquals",
     conditionKey: "iam:PassedToService",
     conditionValue: "lambda.amazonaws.com",

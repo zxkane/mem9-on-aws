@@ -62,7 +62,9 @@ current runtime roles:
 - ECS Exec control/data channels for the server and bootstrap task roles.
 - Lambda log delivery and VPC network-interface lifecycle.
 - The OAuth facade's SSM reads and KMS decrypt, constrained to Parameter Store
-  in the application region and the project parameter hierarchy.
+  in the application region and the project parameter hierarchy. Lambda cold
+  starts may also decrypt only with a
+  `kms:EncryptionContext:aws:lambda:FunctionArn` matching a project function.
 - Alert-router failure delivery to project/stage-prefixed SQS queues.
 - AgentCore Gateway invocation of the proxy Lambda.
 - Bedrock Mantle inference and project reads from the ECS task role.
@@ -77,17 +79,47 @@ that names an assumed-role session does not require an explicit boundary allow;
 An implicit action allow-list would therefore leave a bypass.
 
 Additional explicit denies constrain otherwise permitted actions to project
-resources, Parameter Store KMS context and service, and short-term Mantle
-bearers. ENI actions are exposed only to the generated VPC proxy Lambda role and
+resources, the project Parameter Store KMS context, Lambda's project function
+encryption context, and short-term Mantle bearers. The boundary does not repeat
+`kms:ViaService`: Lambda's default environment-key grant does not expose that
+condition as a blanket requirement during permissions-boundary evaluation.
+Instead, one deny requires either SSM mediation or a project Lambda context, and
+another uses `lambda:SourceFunctionArn` to reject project-context KMS calls made
+directly by function code. A third deny permits the Lambda context only for the
+three reviewed project Lambda execution-role types, so ECS and AgentCore roles
+cannot forge the exception. The facade identity policy independently pins the
+SSM service and project parameter context. A decrypt without either approved
+project context remains denied by the boundary. ENI actions are exposed only to
+the generated VPC proxy Lambda role and
 are denied whenever `lambda:SourceFunctionArn` is present, so function code
 cannot use the Lambda service's VPC permissions. Permanent deploy-role
-enforcement also prevents a matching VPC proxy role from being passed to ECS or
-AgentCore. Before any stack module is imported, one global
+enforcement prevents every allowlisted Lambda role type from being passed to ECS
+or AgentCore, so a PR cannot create a non-Lambda lookalike. Before any stack
+module is imported, one global
 `sst.aws.Function` component transform overrides every generated execution role
 with one exact trust statement for `lambda.amazonaws.com`. This also covers
 future application Functions. It compensates for the pinned SST version
 constructing an account-root principal alongside Lambda when its
 development-mode `Output` is tested as a plain boolean.
+
+The boundary verifier enforces both policy shape and evaluated behavior. Every
+guarded rollout and normal deployment preflight custom-simulates seven
+`kms:Decrypt` cases against the live default boundary version:
+
+- Project Lambda function context without `kms:ViaService`: allowed.
+- Project SSM parameter context from function code via SSM: allowed.
+- Direct call with a project SSM parameter context: explicit deny.
+- Direct function-code call with a forged project Lambda context: explicit deny.
+- Non-Lambda workload role with a forged project Lambda context: explicit deny.
+- Out-of-project Lambda function context: explicit deny.
+- No approved encryption context: explicit deny.
+
+This matrix catches the policy-semantics regression before deployment and
+rechecks that the simulated version remains the active default. It does not
+prove which context keys the Lambda service supplies. A forced cold-start smoke
+remains the integration check for that AWS behavior; a warm Lambda smoke is not
+sufficient because an existing execution environment may not decrypt its
+environment again for hours.
 
 During initial migration discovery only, rollout may repair the exact legacy
 shape emitted by that bug: one otherwise exact assume-role statement whose

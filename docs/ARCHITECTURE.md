@@ -408,11 +408,25 @@ OAuth, and Mantle runtime actions. This is deliberate: same-account resource
 policies can grant directly to assumed-role sessions without an explicit
 boundary allow, but
 [explicit boundary denies still apply](https://docs.aws.amazon.com/IAM/latest/UserGuide/access_policies.html).
-Resource and condition denies constrain project resources, SSM KMS context,
-short-term Mantle bearer use, and Lambda VPC ENI access. The ENI exception
-requires both a generated proxy-role name and `iam:PassedToService` restricted
-to Lambda; `lambda:SourceFunctionArn` explicitly denies the same actions to
-function code. The name match is therefore not the sole authorization check.
+Resource and condition denies constrain project resources, KMS use, short-term
+Mantle bearer use, and Lambda VPC ENI access. KMS decrypt is limited to either
+the project SSM parameter context or Lambda cold-start environment decryption
+with a project function ARN encryption context; a decrypt without either
+context remains denied. The boundary deliberately does not duplicate a
+`kms:ViaService` condition because Lambda's default environment-key grant does
+not expose it consistently during permissions-boundary evaluation. A separate
+deny requires either SSM mediation or a project Lambda context. A second deny
+uses `lambda:SourceFunctionArn` to block a direct KMS call from function code
+that forges that Lambda context. A third deny allows the Lambda context only
+from the three reviewed project Lambda execution-role types, preventing a
+non-Lambda workload role from forging the exception. The OAuth facade identity
+policy also pins both the SSM service and project parameter context. The ENI
+exception requires both a generated proxy-role name and
+`iam:PassedToService` restricted to Lambda; `lambda:SourceFunctionArn`
+explicitly denies the same actions to function code. The name match is
+therefore not the sole authorization check. The deploy role likewise denies
+passing any of the three allowlisted Lambda role-name patterns to a non-Lambda
+service, preventing a PR from creating an ECS-assumable lookalike.
 
 The live role migration is intentionally separate from application deployment.
 `scripts/rollout-workload-permissions-boundary.sh` requires a maintenance
@@ -463,7 +477,16 @@ direct managed-policy drift; nonterminal or rollback stack states fail closed.
 A failure retains quarantine and is recovered by re-running the same command.
 Normal preview and production deployment preflights use the read-only
 `--verify-only` path, so a permissive policy drift at the same stable ARN blocks
-deployment rather than satisfying an ARN-only check.
+deployment rather than satisfying an ARN-only check. That path also
+custom-simulates the live boundary's KMS behavior: project Lambda and SSM
+contexts must be allowed, while direct SSM-context use, direct function-code KMS
+use, a non-Lambda role forging the Lambda context, an out-of-project Lambda
+context, and a missing context must be explicit denies. It then confirms that
+the simulated policy version remains the default.
+The cold-start Lambda probe intentionally omits
+`kms:ViaService`, matching the cold-start authorization path that a warm
+end-to-end smoke can temporarily hide. This simulation verifies policy semantics;
+a forced cold-start smoke separately verifies the AWS integration path.
 Before migration, GitHub preview AWS jobs intentionally skip while
 `WORKLOAD_BOUNDARY_PROD_ENABLED=false`; policy preparation is required for a
 manual non-production deployment and for the first post-migration GitHub
