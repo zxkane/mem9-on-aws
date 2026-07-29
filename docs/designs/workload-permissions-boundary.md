@@ -59,6 +59,9 @@ The common boundary is an explicit-deny maximum-permission ceiling for the
 current runtime roles:
 
 - ECS image pull, log delivery, and Secrets Manager startup injection.
+- ECS startup decrypt for only the DB and tenant secret families, mediated by
+  Secrets Manager in the application region and limited to the server/bootstrap
+  execution-role types.
 - ECS Exec control/data channels for the server and bootstrap task roles.
 - Lambda log delivery and VPC network-interface lifecycle.
 - The OAuth facade's SSM reads and KMS decrypt, constrained to Parameter Store
@@ -79,22 +82,24 @@ that names an assumed-role session does not require an explicit boundary allow;
 An implicit action allow-list would therefore leave a bypass.
 
 Additional explicit denies constrain otherwise permitted actions to project
-resources, the project Parameter Store KMS context, Lambda's project function
-encryption context, and short-term Mantle bearers. The boundary does not repeat
-`kms:ViaService`: Lambda's default environment-key grant does not expose that
-condition as a blanket requirement during permissions-boundary evaluation.
-Instead, one deny requires either SSM mediation or a project Lambda context, and
-another uses `lambda:SourceFunctionArn` to reject project-context KMS calls made
-directly by function code. A third deny permits the Lambda context only for the
-three reviewed project Lambda execution-role types, so ECS and AgentCore roles
-cannot forge the exception. The facade identity policy independently pins the
-SSM service and project parameter context. A decrypt without either approved
-project context remains denied by the boundary. ENI actions are exposed only to
+resources, the project Parameter Store, Lambda function, or Secrets Manager
+`SecretARN` KMS contexts, and short-term Mantle bearers. The boundary does not
+require `kms:ViaService` for Lambda's default environment-key grant. Every other
+decrypt must be mediated by application-region SSM or Secrets Manager. A
+`SecretARN` path is further restricted to the two ECS execution-role types and
+the known DB/tenant secret families; a Lambda source remains denied on this path.
+AWS returns the IAM role ARN, not an STS session ARN, for
+[`aws:PrincipalArn`](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_condition-keys.html).
+The negated `...IfExists` operators intentionally remain fail closed when their
+keys are absent. The facade identity policy independently pins the SSM service
+and project parameter context. A decrypt without an approved project context
+remains denied by the boundary. ENI actions are exposed only to
 the generated VPC proxy Lambda role and
 are denied whenever `lambda:SourceFunctionArn` is present, so function code
 cannot use the Lambda service's VPC permissions. Permanent deploy-role
 enforcement prevents every allowlisted Lambda role type from being passed to ECS
-or AgentCore. This is a `PassRole` control, not proof of role provenance:
+or AgentCore and every allowlisted ECS execution-role type from being passed to
+Lambda or AgentCore. This is a `PassRole` control, not proof of role provenance:
 `CreateRole` does not expose the submitted trust policy as an IAM condition key,
 so a repository writer could create a matching role that is directly assumable.
 The accepted trusted-writer model excludes that caller. An untrusted-PR model
@@ -107,23 +112,32 @@ constructing an account-root principal alongside Lambda when its
 development-mode `Output` is tested as a plain boolean.
 
 The boundary verifier enforces both policy shape and evaluated behavior. Every
-guarded rollout and normal deployment preflight custom-simulates seven
+guarded rollout and normal deployment preflight custom-simulates 16
 `kms:Decrypt` cases against the live default boundary version:
 
 - Project Lambda function context without `kms:ViaService`: allowed.
 - Project SSM parameter context from function code via SSM: allowed.
+- Project DB secret from the server execution role via Secrets Manager: allowed.
+- Project tenant secret from the bootstrap execution role via Secrets Manager:
+  allowed.
 - Direct call with a project SSM parameter context: explicit deny.
+- Direct call with a project secret context: explicit deny.
+- Out-of-project secret via Secrets Manager: explicit deny.
+- Project secret via Secrets Manager from an ECS task role: explicit deny.
+- Project secret via Secrets Manager from a Lambda role: explicit deny.
+- Project secret through a cross-region Secrets Manager path: explicit deny.
+- Project secret through SSM: explicit deny.
+- Project parameter through Secrets Manager: explicit deny.
 - Direct function-code call with a forged project Lambda context: explicit deny.
 - Non-Lambda workload role with a forged project Lambda context: explicit deny.
 - Out-of-project Lambda function context: explicit deny.
 - No approved encryption context: explicit deny.
 
-This matrix catches the policy-semantics regression before deployment and
-rechecks that the simulated version remains the active default. It does not
-prove which context keys the Lambda service supplies. A forced cold-start smoke
-remains the integration check for that AWS behavior; a warm Lambda smoke is not
-sufficient because an existing execution environment may not decrypt its
-environment again for hours.
+This matrix catches policy-semantics regressions before deployment and rechecks
+that the simulated version remains the active default. It does not prove which
+context keys AWS services supply. A forced Lambda cold start, ECS replacement,
+and bootstrap task remain the integration checks; an existing warm workload can
+hide a decrypt regression.
 
 During initial migration discovery only, rollout may repair the exact legacy
 shape emitted by that bug: one otherwise exact assume-role statement whose

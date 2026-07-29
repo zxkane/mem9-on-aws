@@ -98,28 +98,68 @@ Resources:
               - !Sub arn:${AWS::Partition}:sqs:${ApplicationRegion}:${AWS::AccountId}:AlertTransportFailureQueue-*
               - !Sub arn:${AWS::Partition}:sqs:${ApplicationRegion}:${AWS::AccountId}:AlertExecutionFailureQueue-*
               - !Sub arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/mem9-on-aws/*
-          # Lambda decrypts its server-side encrypted environment at cold start
-          # under the function ARN encryption context. The boundary scopes both
-          # approved project contexts. Missing and foreign contexts remain denied.
-          - Sid: DenyKmsDecryptOutsideProjectParameterOrFunctionContexts
+          # Lambda cold starts, SSM SecureStrings, and the two ECS task-definition
+          # secret families use different KMS encryption contexts. Missing and
+          # foreign contexts remain denied.
+          - Sid: DenyKmsDecryptOutsideProjectParameterFunctionOrSecretContexts
             Effect: Deny
             Action:
               - kms:Decrypt
             Resource: "*"
             Condition:
-              ArnNotLikeIfExists:
+              StringNotLikeIfExists:
                 "kms:EncryptionContext:PARAMETER_ARN": !Sub arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/mem9-on-aws/*
                 "kms:EncryptionContext:aws:lambda:FunctionArn": !Sub arn:${AWS::Partition}:lambda:${ApplicationRegion}:${AWS::AccountId}:function:mem9-on-aws-*
-          - Sid: DenyKmsDecryptOutsideSsmOrProjectLambdaPath
+                "kms:EncryptionContext:SecretARN":
+                  - !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-*-Mem9DbProxySecret-*
+                  - !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-*-Mem9DbSecret-*
+                  - !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-*-tenant-api-key-*
+          - Sid: DenyKmsDecryptOutsideSsmSecretsManagerOrProjectLambdaPath
             Effect: Deny
             Action:
               - kms:Decrypt
             Resource: "*"
             Condition:
               StringNotEqualsIfExists:
-                kms:ViaService: !Sub ssm.${ApplicationRegion}.${AWS::URLSuffix}
-              ArnNotLikeIfExists:
+                kms:ViaService:
+                  - !Sub ssm.${ApplicationRegion}.${AWS::URLSuffix}
+                  - !Sub secretsmanager.${ApplicationRegion}.${AWS::URLSuffix}
+              StringNotLikeIfExists:
                 "kms:EncryptionContext:aws:lambda:FunctionArn": !Sub arn:${AWS::Partition}:lambda:${ApplicationRegion}:${AWS::AccountId}:function:mem9-on-aws-*
+          - Sid: DenyParameterContextDecryptOutsideSsm
+            Effect: Deny
+            Action:
+              - kms:Decrypt
+            Resource: "*"
+            Condition:
+              "Null":
+                "kms:EncryptionContext:PARAMETER_ARN": "false"
+              StringNotEqualsIfExists:
+                kms:ViaService: !Sub ssm.${ApplicationRegion}.${AWS::URLSuffix}
+          - Sid: DenySecretContextDecryptOutsideSecretsManager
+            Effect: Deny
+            Action:
+              - kms:Decrypt
+            Resource: "*"
+            Condition:
+              "Null":
+                "kms:EncryptionContext:SecretARN": "false"
+              StringNotEqualsIfExists:
+                kms:ViaService: !Sub secretsmanager.${ApplicationRegion}.${AWS::URLSuffix}
+          # Secrets Manager's encryption context is fixed, but the boundary also
+          # constrains which project role types may use that service-mediated path.
+          - Sid: DenySecretContextDecryptFromNonEcsExecutionRoles
+            Effect: Deny
+            Action:
+              - kms:Decrypt
+            Resource: "*"
+            Condition:
+              "Null":
+                "kms:EncryptionContext:SecretARN": "false"
+              ArnNotLike:
+                "aws:PrincipalArn":
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ServerExecutionRole-*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9BootstrapExecutionRole-*
           # Only the three reviewed Lambda execution-role types may present the
           # Lambda cold-start context. Other workload roles cannot forge it.
           - Sid: DenyLambdaContextDecryptFromNonLambdaRoles

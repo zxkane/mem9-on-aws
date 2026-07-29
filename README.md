@@ -193,16 +193,18 @@ already fired.
 
 Normal AWS deployment preflights call the boundary script with `--verify-only`.
 They compare the current default policy version with the repository contract and
-then custom-simulate the KMS boundary semantics. The required matrix allows the
-project Lambda function context without `kms:ViaService`, allows the project SSM
-parameter context through SSM, and explicitly denies direct SSM-context use, a
-direct function-code KMS call, a non-Lambda role forging the Lambda context, an
-out-of-project Lambda context, and a request with no approved context. It also
-confirms that the simulated version remains the active default. Any structural
-or semantic drift at the stable ARN fails without creating or updating anything.
-This deterministic policy check does not rely on an already-warm Lambda
-execution environment; a forced cold-start smoke separately verifies the AWS
-integration path. The deploy role therefore has the
+then custom-simulate 16 KMS boundary cases. The allowed paths are a project
+Lambda context, an SSM-mediated project parameter, and Secrets Manager-mediated
+project DB/tenant secrets from the server or bootstrap ECS execution-role type.
+Direct service-context use, foreign/cross-region service paths, task/Lambda
+roles presenting a secret context, mismatched SSM/Secrets Manager context
+pairs, forged Lambda contexts, and missing contexts must be explicit denies.
+The verifier also confirms that the simulated version remains the active
+default. Any structural or semantic drift at the stable ARN fails without
+creating or updating anything. This deterministic policy check does not prove
+the live AWS service context: a forced Lambda cold start, ECS service
+replacement, and bootstrap task separately verify the integration paths. The
+deploy role therefore has the
 resource-agnostic `iam:SimulateCustomPolicy` read/evaluation action; apply that
 out-of-band role update with `scripts/deploy-github-role.sh` before this
 preflight revision runs.

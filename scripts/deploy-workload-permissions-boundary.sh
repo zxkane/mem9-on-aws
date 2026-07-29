@@ -204,9 +204,18 @@ verify_boundary_policy() {
     ' <<<"$simulation" >/dev/null
   }
 
+  local bootstrap_execution_principal_context cross_region_secret_via_context
   local lambda_context lambda_principal_context nonlambda_principal_context
-  local outside_lambda_context source_function_context
-  local ssm_context ssm_via_context
+  local outside_lambda_context outside_secret_context
+  local secret_context secret_version_context secret_via_context
+  local server_execution_principal_context source_function_context
+  local ssm_context ssm_via_context task_principal_context tenant_secret_context
+  local other_region
+  if [[ "$application_region" == "us-west-2" ]]; then
+    other_region="us-east-1"
+  else
+    other_region="us-west-2"
+  fi
   lambda_context="ContextKeyName=kms:EncryptionContext:aws:lambda:FunctionArn,ContextKeyValues=arn:${partition}:lambda:${application_region}:${account_id}:function:mem9-on-aws-regression-probe,ContextKeyType=string"
   lambda_principal_context="ContextKeyName=aws:PrincipalArn,ContextKeyValues=arn:${partition}:iam::${account_id}:role/mem9-on-aws-prod-Mem9OauthFacadeFnRole-regression-probe,ContextKeyType=string"
   nonlambda_principal_context="ContextKeyName=aws:PrincipalArn,ContextKeyValues=arn:${partition}:iam::${account_id}:role/mem9-on-aws-prod-Mem9ServerTaskRole-regression-probe,ContextKeyType=string"
@@ -214,12 +223,49 @@ verify_boundary_policy() {
   source_function_context="ContextKeyName=lambda:SourceFunctionArn,ContextKeyValues=arn:${partition}:lambda:${application_region}:${account_id}:function:mem9-on-aws-regression-probe,ContextKeyType=string"
   ssm_context="ContextKeyName=kms:EncryptionContext:PARAMETER_ARN,ContextKeyValues=arn:${partition}:ssm:${application_region}:${account_id}:parameter/mem9-on-aws/regression-probe,ContextKeyType=string"
   ssm_via_context="ContextKeyName=kms:ViaService,ContextKeyValues=ssm.${application_region}.${url_suffix},ContextKeyType=string"
+  secret_context="ContextKeyName=kms:EncryptionContext:SecretARN,ContextKeyValues=arn:${partition}:secretsmanager:${application_region}:${account_id}:secret:mem9-on-aws-prod-Mem9DbSecret-regression,ContextKeyType=string"
+  tenant_secret_context="ContextKeyName=kms:EncryptionContext:SecretARN,ContextKeyValues=arn:${partition}:secretsmanager:${application_region}:${account_id}:secret:mem9-on-aws-prod-tenant-api-key-regression,ContextKeyType=string"
+  outside_secret_context="ContextKeyName=kms:EncryptionContext:SecretARN,ContextKeyValues=arn:${partition}:secretsmanager:${application_region}:${account_id}:secret:outside-project-regression,ContextKeyType=string"
+  secret_version_context="ContextKeyName=kms:EncryptionContext:SecretVersionId,ContextKeyValues=regression-version,ContextKeyType=string"
+  secret_via_context="ContextKeyName=kms:ViaService,ContextKeyValues=secretsmanager.${application_region}.${url_suffix},ContextKeyType=string"
+  cross_region_secret_via_context="ContextKeyName=kms:ViaService,ContextKeyValues=secretsmanager.${other_region}.${url_suffix},ContextKeyType=string"
+  server_execution_principal_context="ContextKeyName=aws:PrincipalArn,ContextKeyValues=arn:${partition}:iam::${account_id}:role/mem9-on-aws-prod-Mem9ServerExecutionRole-regression-probe,ContextKeyType=string"
+  bootstrap_execution_principal_context="ContextKeyName=aws:PrincipalArn,ContextKeyValues=arn:${partition}:iam::${account_id}:role/mem9-on-aws-prod-Mem9BootstrapExecutionRole-regression-probe,ContextKeyType=string"
+  task_principal_context="ContextKeyName=aws:PrincipalArn,ContextKeyValues=arn:${partition}:iam::${account_id}:role/mem9-on-aws-prod-Mem9ServerTaskRole-regression-probe,ContextKeyType=string"
 
   if ! verify_decrypt_probe allowed \
         "$lambda_context" "$lambda_principal_context" ||
       ! verify_decrypt_probe allowed \
         "$ssm_context" "$ssm_via_context" "$source_function_context" ||
+      ! verify_decrypt_probe allowed \
+        "$secret_context" "$secret_version_context" "$secret_via_context" \
+        "$server_execution_principal_context" ||
+      ! verify_decrypt_probe allowed \
+        "$tenant_secret_context" "$secret_version_context" \
+        "$secret_via_context" "$bootstrap_execution_principal_context" ||
       ! verify_decrypt_probe explicitDeny "$ssm_context" ||
+      ! verify_decrypt_probe explicitDeny \
+        "$secret_context" "$secret_version_context" \
+        "$server_execution_principal_context" ||
+      ! verify_decrypt_probe explicitDeny \
+        "$outside_secret_context" "$secret_version_context" \
+        "$secret_via_context" "$server_execution_principal_context" ||
+      ! verify_decrypt_probe explicitDeny \
+        "$secret_context" "$secret_version_context" "$secret_via_context" \
+        "$task_principal_context" ||
+      ! verify_decrypt_probe explicitDeny \
+        "$secret_context" "$secret_version_context" "$secret_via_context" \
+        "$lambda_principal_context" ||
+      ! verify_decrypt_probe explicitDeny \
+        "$secret_context" "$secret_version_context" \
+        "$cross_region_secret_via_context" \
+        "$server_execution_principal_context" ||
+      ! verify_decrypt_probe explicitDeny \
+        "$secret_context" "$secret_version_context" "$ssm_via_context" \
+        "$server_execution_principal_context" ||
+      ! verify_decrypt_probe explicitDeny \
+        "$ssm_context" "$secret_via_context" \
+        "$server_execution_principal_context" ||
       ! verify_decrypt_probe explicitDeny \
         "$lambda_context" "$lambda_principal_context" \
         "$source_function_context" ||
