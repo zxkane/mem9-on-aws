@@ -614,9 +614,21 @@ declare namespace sst {
     interface ApiGatewayV2Args {
       cors?: ApiGatewayV2Cors;
     }
+    interface ApiGatewayV2AuthorizerArgs {
+      name: string;
+      lambda: {
+        function: Input<string>;
+        identitySources?: Input<Input<string>[]>;
+        response?: Input<"simple" | "iam">;
+        ttl?: Input<string>;
+      };
+    }
     class ApiGatewayV2 {
       constructor(name: string, args?: ApiGatewayV2Args);
       readonly url: Output<string>;
+      addAuthorizer(args: ApiGatewayV2AuthorizerArgs): {
+        readonly id: Output<string>;
+      };
       route(route: string, handler: Input<string>, args?: unknown): void;
     }
   }
