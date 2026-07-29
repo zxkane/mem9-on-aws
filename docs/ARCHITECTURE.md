@@ -474,7 +474,8 @@ restores the pause and disables workflows enabled by that attempt, while a
 failed restoration is reported as unsafe. IAM/ECS/Lambda pagination has page
 and item ceilings;
 AWS, GitHub, and deploy subprocesses have explicit timeouts; the overall rollout
-deadline is 45 minutes. Existing-stack
+deadline is 60 minutes so retained preview-role inventories can complete every
+required read-back pass. Existing-stack
 updates change a semantics-neutral policy revision so CloudFormation reconciles
 direct managed-policy drift; nonterminal or rollback stack states fail closed.
 A failure retains quarantine and is recovered by re-running the same command.

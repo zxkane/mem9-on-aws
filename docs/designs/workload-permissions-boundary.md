@@ -298,8 +298,10 @@ CloudFormation `continue-update-rollback` operation before the guarded retry.
 
 Every AWS CLI call has a 60-second process timeout, GitHub CLI calls have a
 30-second timeout, deploy subprocesses have a 20-minute timeout, and the whole
-shell-preflight-through-resume operation shares one absolute 45-minute
-hard deadline. The operational deadline is 30 seconds earlier so Node can abort
+shell-preflight-through-resume operation shares one absolute 60-minute hard
+deadline. This covers repeated exact read-backs for large retained preview-role
+inventories without weakening any fail-closed gate. The operational deadline is
+30 seconds earlier so Node can abort
 AWS, GitHub, and deploy subprocess groups, send `SIGTERM`, escalate to
 `SIGKILL`, observe leader and process-group closure, and complete its failure
 path before the outer shell issues a final hard kill. Failure to observe cleanup

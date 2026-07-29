@@ -1,6 +1,6 @@
 {
   "repository": "zxkane/mem9-on-aws",
-  "rolloutTimeoutMs": 2700000,
+  "rolloutTimeoutMs": 3600000,
   "shutdownGraceMs": 30000,
   "identifiers": {
     "boundaryPolicyName": "mem9-on-aws-workload-boundary",
