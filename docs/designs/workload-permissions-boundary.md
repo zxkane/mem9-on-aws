@@ -112,10 +112,11 @@ constructing an account-root principal alongside Lambda when its
 development-mode `Output` is tested as a plain boolean.
 
 The boundary verifier enforces both policy shape and evaluated behavior. Every
-guarded rollout and normal deployment preflight custom-simulates 16
+guarded rollout and normal deployment preflight custom-simulates 17
 `kms:Decrypt` cases against the live default boundary version:
 
 - Project Lambda function context without `kms:ViaService`: allowed.
+- Optional facade-authorizer Lambda context without `kms:ViaService`: allowed.
 - Project SSM parameter context from function code via SSM: allowed.
 - Project DB secret from the server execution role via Secrets Manager: allowed.
 - Project tenant secret from the bootstrap execution role via Secrets Manager:
@@ -353,8 +354,8 @@ The GitHub Actions role:
 - permits `PutRolePolicy` and `AttachRolePolicy` only when the target role
   already carries the exact boundary;
 - explicitly denies `DeleteRolePermissionsBoundary`;
-- prevents all three allowlisted Lambda execution-role types from being passed
-  to non-Lambda services;
+- prevents all four allowlisted Lambda execution-role types, including the
+  optional facade authorizer, from being passed to non-Lambda services;
 - keeps read, detach, inline-policy delete, and role delete for preview cleanup;
 - explicitly denies mutation of the boundary policy and the operator-owned
   boundary, deploy-role, and ECR scanning ownership stacks.
@@ -367,11 +368,11 @@ boundary association together.
 
 ## Pulumi Role And Lifecycle Evidence
 
-One infrastructure test derives the workload-role inventory from the project
-source and the installed SST component implementation. It proves that the three
-Lambda roles, ECS service task/execution roles, bootstrap task/execution roles,
-and explicit AgentCore Gateway role are exactly eight AWS IAM role resources and
-that every one receives the exact boundary through the real Pulumi transform.
+One infrastructure test derives both switch-state workload-role inventories
+from the project source and installed SST component implementation. It proves
+that the default graph contains exactly eight AWS IAM roles, the enabled graph
+adds only the facade-authorizer role, and every role in both graphs receives the
+exact boundary through the real Pulumi transform.
 
 A separate test uses Pulumi Automation API with a local file backend and two
 updates across dynamic fixtures derived from all eight actual role descriptors.

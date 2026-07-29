@@ -209,8 +209,8 @@ Resources:
               ArnNotEquals:
                 iam:PermissionsBoundary: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:policy/${ProjectName}-workload-boundary
           - Sid: DenyLambdaRolePassToOtherServices
-            # Boundary exceptions identify the three reviewed Lambda role
-            # types by generated name. Prevent a PR-controlled lookalike from
+            # Boundary exceptions identify the reviewed Lambda role types by
+            # generated or stable name. Prevent a PR-controlled lookalike from
             # being passed to ECS or AgentCore, where Lambda context keys are
             # unavailable.
             Effect: Deny
@@ -218,6 +218,7 @@ Resources:
               - iam:PassRole
             Resource:
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9AlertRouterRole-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9OauthFacadeAllowAllRole
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9OauthFacadeFnRole-*
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ProxyFnRole-*
             Condition:

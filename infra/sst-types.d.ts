@@ -567,6 +567,7 @@ declare namespace sst {
     }
     interface FunctionRoleTransform {
       assumeRolePolicy?: Input<string>;
+      name?: Input<string>;
     }
     type FunctionRoleTransformCallback = (
       args: FunctionRoleTransform,
@@ -575,6 +576,7 @@ declare namespace sst {
     ) => void;
     interface FunctionArgs {
       handler: Input<string>;
+      name?: Input<string>;
       runtime?: Input<string>;
       timeout?: Input<string>;
       architecture?: Input<"x86_64" | "arm64">;
@@ -614,9 +616,21 @@ declare namespace sst {
     interface ApiGatewayV2Args {
       cors?: ApiGatewayV2Cors;
     }
+    interface ApiGatewayV2AuthorizerArgs {
+      name: string;
+      lambda: {
+        function: Input<string | FunctionArgs>;
+        identitySources?: Input<Input<string>[]>;
+        response?: Input<"simple" | "iam">;
+        ttl?: Input<string>;
+      };
+    }
     class ApiGatewayV2 {
       constructor(name: string, args?: ApiGatewayV2Args);
       readonly url: Output<string>;
+      addAuthorizer(args: ApiGatewayV2AuthorizerArgs): {
+        readonly id: Output<string>;
+      };
       route(route: string, handler: Input<string>, args?: unknown): void;
     }
   }

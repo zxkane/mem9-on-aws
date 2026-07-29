@@ -2,7 +2,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { afterAll, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { WORKLOAD_BOUNDARY_POLICY_NAME } from "./workload-permissions-boundary";
 import { EXPECTED_WORKLOAD_ROLE_NAMES } from "./workload-permissions-boundary.test-fixtures";
 
@@ -27,6 +27,11 @@ const accountId = "123456789012";
 const region = "ap-northeast-1";
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const recordedResources: RecordedResource[] = [];
+const authorizerRoleLogicalName =
+  "Mem9OauthFacadeApiAuthorizerMem9OauthFacadeAllowAllHandlerRole";
+const authorizerFunctionLogicalName =
+  "Mem9OauthFacadeApiAuthorizerMem9OauthFacadeAllowAllHandlerFunction";
+const workloadRolePrefixes = ["mem9-on-aws-", "mem9-on-aw-", "mem9-on-a-"];
 
 function moduleUrl(path: string): string {
   return pathToFileURL(resolve(repositoryRoot, path)).href;
@@ -214,165 +219,254 @@ const globalNames = [
   "sst",
 ];
 
-afterAll(() => {
+afterEach(() => {
   for (const name of globalNames) {
     delete (globalThis as Record<string, unknown>)[name];
   }
+  recordedResources.length = 0;
+  vi.resetModules();
 });
 
 describe("workload role coverage from the real SST graph", () => {
-  it("puts the exact boundary on every emitted AWS role", async () => {
-    const rpcServer = await startSstRpcServer();
-    const previousSstServer = process.env.SST_SERVER;
-    const previousBoundaryFlag = process.env.WORKLOAD_BOUNDARY_PROD_ENABLED;
-    const previousMantleProject = process.env.MEM9_BEDROCK_PROJECT;
-    const previousSlackWebhook = process.env.SST_SECRET_SlackWebhookUrl;
-    process.env.SST_SERVER = rpcServer.url;
-    process.env.WORKLOAD_BOUNDARY_PROD_ENABLED = "true";
-    process.env.MEM9_BEDROCK_PROJECT = "mock-project";
-    process.env.SST_SECRET_SlackWebhookUrl =
-      "https://hooks.example.com/services/mock";
-    Object.assign(globalThis, {
-      $app: {
-        name: "mem9-on-aws",
-        protect: true,
-        providers: {},
-        removal: "retain",
-        stage: "prod",
-      },
-      $cli: {
-        command: "deploy",
-        paths: {
-          home: repositoryRoot,
-          platform: resolve(repositoryRoot, ".sst/platform"),
-          root: repositoryRoot,
-          work: resolve(repositoryRoot, ".sst"),
-        },
-        rpc: "",
-        state: { version: {} },
-      },
-      $dev: false,
-    });
-    const [pulumi, aws, command, random, sst, { $transform }] =
-      await Promise.all([
-        import(
-          /* @vite-ignore */ moduleUrl(
-            ".sst/platform/node_modules/@pulumi/pulumi/index.js",
-          )
-        ),
-        import(
-          /* @vite-ignore */ moduleUrl(
-            ".sst/platform/node_modules/@pulumi/aws/index.js",
-          )
-        ),
-        import(
-          /* @vite-ignore */ moduleUrl(
-            ".sst/platform/node_modules/@pulumi/command/index.js",
-          )
-        ),
-        import(
-          /* @vite-ignore */ moduleUrl(
-            ".sst/platform/node_modules/@pulumi/random/index.js",
-          )
-        ),
-        import(
-          /* @vite-ignore */ moduleUrl(".sst/platform/src/components/index.ts")
-        ),
-        import(
-          /* @vite-ignore */ moduleUrl(
-            ".sst/platform/src/components/component.ts",
-          )
-        ),
-      ]);
-    pulumi.runtime.setMocks(
-      {
-        call: mockCall,
-        newResource: mockNewResource,
-      },
-      "mem9-on-aws",
-      "prod",
-      false,
-    );
-    Object.assign(globalThis, {
-      $config: (value: unknown) => value,
-      $interpolate: pulumi.interpolate,
-      $jsonStringify: pulumi.jsonStringify,
-      $transform,
-      aws,
-      command,
-      random,
-      sst,
-    });
-
-    try {
-      await pulumi.runtime.runInPulumiStack(async () => {
-        const configModule = await import(
-          /* @vite-ignore */ moduleUrl("sst.config.ts")
-        );
-        const config = configModule.default as {
-          run(): Promise<Record<string, unknown>>;
-        };
-        const outputs = await config.run();
-        await waitForRecordedRoles(8);
-        return outputs;
-      });
-      await pulumi.runtime.waitForRPCs();
-
-      const createdRoles = recordedResources.filter(
-        ({ type }) => type === "aws:iam/role:Role",
-      );
-      expect(createdRoles.map(({ name }) => name).sort()).toEqual([
-        ...EXPECTED_WORKLOAD_ROLE_NAMES,
-      ]);
-      const expectedBoundary = `arn:aws:iam::${accountId}:policy/${WORKLOAD_BOUNDARY_POLICY_NAME}`;
-      expect(
-        createdRoles.every(
-          ({ inputs }) => inputs.permissionsBoundary === expectedBoundary,
-        ),
-      ).toBe(true);
-
-      const lambdaRoleNames = [
-        "Mem9AlertRouterRole",
-        "Mem9OauthFacadeFnRole",
-        "Mem9ProxyFnRole",
-      ];
-      const lambdaRoles = createdRoles.filter(({ name }) =>
-        lambdaRoleNames.includes(name),
-      );
-      expect(lambdaRoles).toHaveLength(lambdaRoleNames.length);
-      for (const { inputs, name } of lambdaRoles) {
-        expect(
-          JSON.parse(String(inputs.assumeRolePolicy)),
-          `${name} trust policy`,
-        ).toEqual({
-          Version: "2012-10-17",
-          Statement: [
-            {
-              Effect: "Allow",
-              Action: "sts:AssumeRole",
-              Principal: { Service: "lambda.amazonaws.com" },
-            },
-          ],
-        });
-      }
-    } finally {
-      if (previousSstServer === undefined) {
-        delete process.env.SST_SERVER;
+  it.each([
+    { authorizerEnabled: false, label: "disabled" },
+    { authorizerEnabled: true, label: "enabled" },
+  ])(
+    "TC-FACADEAUTH-004: keeps the $label facade graph inside the workload boundary",
+    async ({ authorizerEnabled }) => {
+      vi.resetModules();
+      const rpcServer = await startSstRpcServer();
+      const previousSstServer = process.env.SST_SERVER;
+      const previousBoundaryFlag = process.env.WORKLOAD_BOUNDARY_PROD_ENABLED;
+      const previousFacadeAuthorizerEnabled =
+        process.env.MEM9_FACADE_AUTHORIZER_ENABLED;
+      const previousMantleProject = process.env.MEM9_BEDROCK_PROJECT;
+      const previousSlackWebhook = process.env.SST_SECRET_SlackWebhookUrl;
+      process.env.SST_SERVER = rpcServer.url;
+      process.env.WORKLOAD_BOUNDARY_PROD_ENABLED = "true";
+      if (authorizerEnabled) {
+        process.env.MEM9_FACADE_AUTHORIZER_ENABLED = "1";
       } else {
-        process.env.SST_SERVER = previousSstServer;
+        delete process.env.MEM9_FACADE_AUTHORIZER_ENABLED;
       }
-      for (const [name, value] of [
-        ["WORKLOAD_BOUNDARY_PROD_ENABLED", previousBoundaryFlag],
-        ["MEM9_BEDROCK_PROJECT", previousMantleProject],
-        ["SST_SECRET_SlackWebhookUrl", previousSlackWebhook],
-      ] as const) {
-        if (value === undefined) {
-          delete process.env[name];
-        } else {
-          process.env[name] = value;
+      process.env.MEM9_BEDROCK_PROJECT = "mock-project";
+      process.env.SST_SECRET_SlackWebhookUrl =
+        "https://hooks.example.com/services/mock";
+      Object.assign(globalThis, {
+        $app: {
+          name: "mem9-on-aws",
+          protect: true,
+          providers: {},
+          removal: "retain",
+          stage: "prod",
+        },
+        $cli: {
+          command: "deploy",
+          paths: {
+            home: repositoryRoot,
+            platform: resolve(repositoryRoot, ".sst/platform"),
+            root: repositoryRoot,
+            work: resolve(repositoryRoot, ".sst"),
+          },
+          rpc: "",
+          state: { version: {} },
+        },
+        $dev: false,
+      });
+      const [pulumi, aws, command, random, sst, { $transform }] =
+        await Promise.all([
+          import(
+            /* @vite-ignore */ moduleUrl(
+              ".sst/platform/node_modules/@pulumi/pulumi/index.js",
+            )
+          ),
+          import(
+            /* @vite-ignore */ moduleUrl(
+              ".sst/platform/node_modules/@pulumi/aws/index.js",
+            )
+          ),
+          import(
+            /* @vite-ignore */ moduleUrl(
+              ".sst/platform/node_modules/@pulumi/command/index.js",
+            )
+          ),
+          import(
+            /* @vite-ignore */ moduleUrl(
+              ".sst/platform/node_modules/@pulumi/random/index.js",
+            )
+          ),
+          import(
+            /* @vite-ignore */ moduleUrl(
+              ".sst/platform/src/components/index.ts",
+            )
+          ),
+          import(
+            /* @vite-ignore */ moduleUrl(
+              ".sst/platform/src/components/component.ts",
+            )
+          ),
+        ]);
+      pulumi.runtime.setMocks(
+        {
+          call: mockCall,
+          newResource: mockNewResource,
+        },
+        "mem9-on-aws",
+        "prod",
+        false,
+      );
+      Object.assign(globalThis, {
+        $config: (value: unknown) => value,
+        $interpolate: pulumi.interpolate,
+        $jsonStringify: pulumi.jsonStringify,
+        $transform,
+        aws,
+        command,
+        random,
+        sst,
+      });
+
+      try {
+        const expectedRoleNames = authorizerEnabled
+          ? [...EXPECTED_WORKLOAD_ROLE_NAMES, authorizerRoleLogicalName].sort()
+          : [...EXPECTED_WORKLOAD_ROLE_NAMES];
+        await pulumi.runtime.runInPulumiStack(async () => {
+          const configModule = await import(
+            /* @vite-ignore */ moduleUrl("sst.config.ts")
+          );
+          const config = configModule.default as {
+            run(): Promise<Record<string, unknown>>;
+          };
+          const outputs = await config.run();
+          await waitForRecordedRoles(expectedRoleNames.length);
+          return outputs;
+        });
+        await pulumi.runtime.waitForRPCs();
+
+        const createdRoles = recordedResources.filter(
+          ({ type }) => type === "aws:iam/role:Role",
+        );
+        expect(createdRoles.map(({ name }) => name).sort()).toEqual(
+          expectedRoleNames,
+        );
+        const expectedBoundary = `arn:aws:iam::${accountId}:policy/${WORKLOAD_BOUNDARY_POLICY_NAME}`;
+        expect(
+          createdRoles.every(
+            ({ inputs }) => inputs.permissionsBoundary === expectedBoundary,
+          ),
+        ).toBe(true);
+        for (const { inputs, name } of createdRoles) {
+          expect(
+            workloadRolePrefixes.some((prefix) =>
+              String(inputs.name).startsWith(prefix),
+            ),
+            `${name} physical role name`,
+          ).toBe(true);
         }
+
+        const authorizerRole = createdRoles.find(
+          ({ name }) => name === authorizerRoleLogicalName,
+        );
+        const authorizerFunction = recordedResources.find(
+          ({ name, type }) =>
+            type === "aws:lambda/function:Function" &&
+            name === authorizerFunctionLogicalName,
+        );
+        const authorizers = recordedResources.filter(
+          ({ type }) => type === "aws:apigatewayv2/authorizer:Authorizer",
+        );
+        if (authorizerEnabled) {
+          expect(authorizerRole?.inputs).toMatchObject({
+            name: "mem9-on-aws-prod-Mem9OauthFacadeAllowAllRole",
+            permissionsBoundary: expectedBoundary,
+          });
+          expect(authorizerFunction?.inputs).toMatchObject({
+            architectures: ["arm64"],
+            name: "mem9-on-aws-prod-Mem9OauthFacadeAllowAll",
+            runtime: "nodejs24.x",
+          });
+          expect(authorizers).toHaveLength(1);
+          expect(authorizers[0]?.inputs).toMatchObject({
+            authorizerPayloadFormatVersion: "2.0",
+            authorizerResultTtlInSeconds: 0,
+            authorizerType: "REQUEST",
+            enableSimpleResponses: true,
+            identitySources: [],
+          });
+        } else {
+          expect(authorizerRole).toBeUndefined();
+          expect(authorizerFunction).toBeUndefined();
+          expect(authorizers).toHaveLength(0);
+        }
+
+        const routes = recordedResources.filter(
+          ({ type }) => type === "aws:apigatewayv2/route:Route",
+        );
+        expect(routes).toHaveLength(2);
+        expect(routes.map(({ inputs }) => inputs.routeKey).sort()).toEqual([
+          "ANY /",
+          "ANY /{proxy+}",
+        ]);
+        for (const { inputs } of routes) {
+          expect(inputs.authorizationType).toBe(
+            authorizerEnabled ? "CUSTOM" : "NONE",
+          );
+          if (authorizerEnabled) {
+            expect(inputs.authorizerId).toBe(`${authorizers[0]?.name}-id`);
+          } else {
+            expect(inputs.authorizerId).toBeUndefined();
+          }
+        }
+
+        const lambdaRoleNames = [
+          "Mem9AlertRouterRole",
+          ...(authorizerEnabled ? [authorizerRoleLogicalName] : []),
+          "Mem9OauthFacadeFnRole",
+          "Mem9ProxyFnRole",
+        ];
+        const lambdaRoles = createdRoles.filter(({ name }) =>
+          lambdaRoleNames.includes(name),
+        );
+        expect(lambdaRoles).toHaveLength(lambdaRoleNames.length);
+        for (const { inputs, name } of lambdaRoles) {
+          expect(
+            JSON.parse(String(inputs.assumeRolePolicy)),
+            `${name} trust policy`,
+          ).toEqual({
+            Version: "2012-10-17",
+            Statement: [
+              {
+                Effect: "Allow",
+                Action: "sts:AssumeRole",
+                Principal: { Service: "lambda.amazonaws.com" },
+              },
+            ],
+          });
+        }
+      } finally {
+        if (previousSstServer === undefined) {
+          delete process.env.SST_SERVER;
+        } else {
+          process.env.SST_SERVER = previousSstServer;
+        }
+        for (const [name, value] of [
+          ["WORKLOAD_BOUNDARY_PROD_ENABLED", previousBoundaryFlag],
+          [
+            "MEM9_FACADE_AUTHORIZER_ENABLED",
+            previousFacadeAuthorizerEnabled,
+          ],
+          ["MEM9_BEDROCK_PROJECT", previousMantleProject],
+          ["SST_SECRET_SlackWebhookUrl", previousSlackWebhook],
+        ] as const) {
+          if (value === undefined) {
+            delete process.env[name];
+          } else {
+            process.env[name] = value;
+          }
+        }
+        await rpcServer.close();
       }
-      await rpcServer.close();
-    }
-  }, 120_000);
+    },
+    120_000,
+  );
 });

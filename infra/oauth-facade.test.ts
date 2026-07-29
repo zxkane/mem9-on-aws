@@ -27,6 +27,10 @@ interface Rec {
 }
 let created: Rec[];
 let params: { name: string; type: string }[];
+let routeSpy: ReturnType<typeof vi.fn>;
+let addAuthorizerSpy: ReturnType<typeof vi.fn>;
+let authorizerId: ReturnType<typeof out>;
+let previousFacadeAuthorizerEnabled: string | undefined;
 
 // Recursively unwrap the loose out<T> mock (and plain values) — env / arg values
 // come through as out<T> or $interpolate results.
@@ -92,10 +96,11 @@ function installGlobals(stage: string) {
   (globalThis as Record<string, unknown>).sst = {
     aws: {
       // ApiGatewayV2 — created FIRST (cycle break). Exposes `.url` (needed by the
-      // reader client's callbackUrls) + a `.route` spy.
+      // reader client's callbackUrls) + authorizer/route spies.
       ApiGatewayV2: class {
         url = out("https://facade.example");
-        route = vi.fn();
+        route = routeSpy;
+        addAuthorizer = addAuthorizerSpy;
         constructor(_n: string, args?: Record<string, unknown>) {
           created.push({ kind: "ApiGatewayV2", args: args ?? {} });
         }
@@ -121,10 +126,22 @@ function installGlobals(stage: string) {
 beforeEach(() => {
   created = [];
   params = [];
+  routeSpy = vi.fn();
+  authorizerId = out("facade-allow-all-authorizer-id");
+  addAuthorizerSpy = vi.fn(() => ({ id: authorizerId }));
+  previousFacadeAuthorizerEnabled =
+    process.env.MEM9_FACADE_AUTHORIZER_ENABLED;
+  delete process.env.MEM9_FACADE_AUTHORIZER_ENABLED;
 });
 afterEach(() => {
   for (const g of ["$app", "aws", "sst", "$interpolate"])
     delete (globalThis as Record<string, unknown>)[g];
+  if (previousFacadeAuthorizerEnabled === undefined) {
+    delete process.env.MEM9_FACADE_AUTHORIZER_ENABLED;
+  } else {
+    process.env.MEM9_FACADE_AUTHORIZER_ENABLED =
+      previousFacadeAuthorizerEnabled;
+  }
   vi.resetModules();
 });
 
@@ -166,6 +183,58 @@ function only(kind: string) {
 }
 
 describe("oauthFacade factory", () => {
+  it("TC-FACADEAUTH-001: leaves both routes unchanged when the switch is off", async () => {
+    installGlobals("prod");
+    const oauthFacade = await loadFacade();
+    oauthFacade(fakeCognitoOut());
+
+    expect(addAuthorizerSpy).not.toHaveBeenCalled();
+    expect(routeSpy.mock.calls.map(([route]) => route)).toEqual([
+      "ANY /{proxy+}",
+      "ANY /",
+    ]);
+    for (const routeCall of routeSpy.mock.calls) {
+      expect(routeCall).toHaveLength(2);
+      expect(routeCall[2]).toBeUndefined();
+    }
+  });
+
+  it("TC-FACADEAUTH-002: binds the allow-all authorizer to both routes when enabled", async () => {
+    process.env.MEM9_FACADE_AUTHORIZER_ENABLED = "1";
+    installGlobals("prod");
+    const oauthFacade = await loadFacade();
+    oauthFacade(fakeCognitoOut());
+
+    expect(addAuthorizerSpy).toHaveBeenCalledOnce();
+    expect(addAuthorizerSpy).toHaveBeenCalledWith({
+      name: "Mem9OauthFacadeAllowAll",
+      lambda: {
+        function: {
+          architecture: "arm64",
+          handler: "infra/src/oauth-facade/authorizer.handler",
+          name: "mem9-on-aws-prod-Mem9OauthFacadeAllowAll",
+          transform: {
+            role: {
+              name: "mem9-on-aws-prod-Mem9OauthFacadeAllowAllRole",
+            },
+          },
+        },
+        identitySources: [],
+        response: "simple",
+        ttl: "0 seconds",
+      },
+    });
+    expect(routeSpy.mock.calls.map(([route]) => route)).toEqual([
+      "ANY /{proxy+}",
+      "ANY /",
+    ]);
+    for (const routeCall of routeSpy.mock.calls) {
+      expect(routeCall[2]).toEqual({
+        auth: { lambda: authorizerId },
+      });
+    }
+  });
+
   it("creates an ApiGatewayV2 with MCP-scoped CORS", async () => {
     installGlobals("prod");
     const oauthFacade = await loadFacade();

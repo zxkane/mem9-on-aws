@@ -27,6 +27,8 @@ import type { CognitoOutputs } from "./cognito";
 
 // @ts-ignore - `aws`/`sst` injected globally by SST; cognito/ssm types loose.
 const awsAny = aws as unknown as Record<string, any>;
+const FACADE_AUTHORIZER_ENABLED =
+  process.env.MEM9_FACADE_AUTHORIZER_ENABLED === "1";
 
 export interface OauthFacadeOutputs {
   ssmPrefix: string;
@@ -153,8 +155,37 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
 
   // --- Routes ---
   // A catch-all proxy (the handler routes internally by path/method) + the root.
-  facadeApi.route("ANY /{proxy+}", facadeFn.arn);
-  facadeApi.route("ANY /", facadeFn.arn);
+  const authorizer = FACADE_AUTHORIZER_ENABLED
+    ? facadeApi.addAuthorizer({
+        name: "Mem9OauthFacadeAllowAll",
+        lambda: {
+          function: {
+            handler: "infra/src/oauth-facade/authorizer.handler",
+            architecture: "arm64",
+            name: `mem9-on-aws-${stage}-Mem9OauthFacadeAllowAll`,
+            transform: {
+              role: {
+                name: `mem9-on-aws-${stage}-Mem9OauthFacadeAllowAllRole`,
+              },
+            },
+          },
+          identitySources: [],
+          response: "simple",
+          ttl: "0 seconds",
+        },
+      })
+    : undefined;
+  const addRoute = (route: string) => {
+    if (authorizer) {
+      facadeApi.route(route, facadeFn.arn, {
+        auth: { lambda: authorizer.id },
+      });
+    } else {
+      facadeApi.route(route, facadeFn.arn);
+    }
+  };
+  addRoute("ANY /{proxy+}");
+  addRoute("ANY /");
 
   // --- SSM exports ---
   param("SsmReaderClientId", "cognito/reader/client-id", readerClient.id);

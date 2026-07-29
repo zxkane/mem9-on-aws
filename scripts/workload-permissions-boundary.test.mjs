@@ -180,6 +180,12 @@ const productionRoleArns = Object.fromEntries(
     `arn:aws:iam::${accountId}:role/${name}`,
   ]),
 );
+const facadeAuthorizerRoleName =
+  "mem9-on-aws-prod-Mem9OauthFacadeAllowAllRole";
+const facadeAuthorizerRoleArn =
+  `arn:aws:iam::${accountId}:role/${facadeAuthorizerRoleName}`;
+const facadeAuthorizerFunctionName =
+  "mem9-on-aws-prod-Mem9OauthFacadeAllowAll";
 const expectedProductionRoleNames = Object.values(productionRoleNames).sort();
 
 function taskDefinition(arn, family) {
@@ -382,6 +388,7 @@ const legacyLambdaTrustPolicy = {
 function isFixtureLambdaRoleName(name) {
   return [
     "Mem9AlertRouterRole-",
+    "Mem9OauthFacadeAllowAllRole",
     "Mem9OauthFacadeFnRole-",
     "Mem9ProxyFnRole-",
   ].some((token) => name.includes(token));
@@ -578,6 +585,11 @@ async function runBoundaryDeployMock({
     "ContextKeyValues=arn:aws:iam::123456789012:role/" +
     "mem9-on-aws-prod-Mem9OauthFacadeFnRole-regression-probe," +
     "ContextKeyType=string";
+  const facadeAuthorizerPrincipalContext =
+    "ContextKeyName=aws:PrincipalArn," +
+    "ContextKeyValues=arn:aws:iam::123456789012:role/" +
+    "mem9-on-aws-prod-Mem9OauthFacadeAllowAllRole," +
+    "ContextKeyType=string";
   const nonLambdaPrincipalContext =
     "ContextKeyName=aws:PrincipalArn," +
     "ContextKeyValues=arn:aws:iam::123456789012:role/" +
@@ -660,6 +672,11 @@ async function runBoundaryDeployMock({
           name: "project-lambda",
           decision: "allowed",
           contextEntries: [lambdaContext, lambdaPrincipalContext],
+        },
+        {
+          name: "facade-authorizer-lambda",
+          decision: "allowed",
+          contextEntries: [lambdaContext, facadeAuthorizerPrincipalContext],
         },
         {
           name: "project-ssm",
@@ -1907,6 +1924,7 @@ describe("deployed PassRole scope", () => {
 
   it.each([
     productionRoleNames.alertRouter,
+    facadeAuthorizerRoleName,
     productionRoleNames.oauthFacade,
     productionRoleNames.proxy,
   ])("rejects legacy trust outside initial repair for %s", (roleName) => {
@@ -1965,6 +1983,66 @@ describe("production task-definition secret preflight", () => {
       expectedProductionRoleNames,
     );
   });
+
+  it("TC-FACADEAUTH-005: accepts the optional facade authorizer Lambda binding", () => {
+    const input = validRuntimeInput();
+    input.lambdaFunctions.push({
+      FunctionArn:
+        `arn:aws:lambda:ap-northeast-1:${accountId}:function:` +
+        facadeAuthorizerFunctionName,
+      FunctionName: facadeAuthorizerFunctionName,
+      Role: facadeAuthorizerRoleArn,
+    });
+    expect(validateProductionRuntimeBindings(input)).toEqual(
+      [...expectedProductionRoleNames, facadeAuthorizerRoleName].sort(),
+    );
+  });
+
+  it.each([
+    [
+      "prefixed token",
+      "mem9-on-aws-prod-XMem9OauthFacadeAllowAll",
+    ],
+    ["suffixed token", `${facadeAuthorizerFunctionName}Suffix`],
+  ])(
+    "rejects a non-exact optional facade authorizer Function name: %s",
+    (_name, FunctionName) => {
+      const input = validRuntimeInput();
+      input.lambdaFunctions.push({
+        FunctionArn:
+          `arn:aws:lambda:ap-northeast-1:${accountId}:function:` +
+          FunctionName,
+        FunctionName,
+        Role: facadeAuthorizerRoleArn,
+      });
+      expect(() => validateProductionRuntimeBindings(input)).toThrow(
+        /Lambda inventory is incomplete/u,
+      );
+    },
+  );
+
+  it.each([
+    [
+      "prefixed token",
+      "mem9-on-aws-prod-XMem9OauthFacadeAllowAllRole",
+    ],
+    ["suffixed token", `${facadeAuthorizerRoleName}Suffix`],
+  ])(
+    "rejects a non-exact optional facade authorizer role name: %s",
+    (_name, roleName) => {
+      const input = validRuntimeInput();
+      input.lambdaFunctions.push({
+        FunctionArn:
+          `arn:aws:lambda:ap-northeast-1:${accountId}:function:` +
+          facadeAuthorizerFunctionName,
+        FunctionName: facadeAuthorizerFunctionName,
+        Role: `arn:aws:iam::${accountId}:role/${roleName}`,
+      });
+      expect(() => validateProductionRuntimeBindings(input)).toThrow(
+        /Lambda role binding is malformed/u,
+      );
+    },
+  );
 
   it("rejects an additional production Lambda outside the reviewed graph", () => {
     const input = validRuntimeInput();
@@ -4246,6 +4324,7 @@ describe("stateful AWS CLI adapter", () => {
                   ) ||
                   resource.endsWith("/mem9-on-aws-quarantine-probe") ||
                   resource.includes("Mem9AlertRouterRole") ||
+                  resource.includes("Mem9OauthFacadeAllowAllRole") ||
                   resource.includes("Mem9OauthFacadeFnRole") ||
                   resource.includes("Mem9ProxyFnRole");
                 return {
@@ -6652,15 +6731,28 @@ describe("operator entry point", () => {
         call.startsWith("iam simulate-custom-policy") &&
         call.includes("--permissions-boundary-policy-input-list"),
     );
-    expect(simulations).toHaveLength(16);
-    const projectLambda = simulations.find((call) =>
-      call.includes("function:mem9-on-aws-regression-probe") &&
-      !call.includes("ContextKeyName=lambda:SourceFunctionArn"),
+    expect(simulations).toHaveLength(17);
+    const projectLambda = simulations.find(
+      (call) =>
+        call.includes("function:mem9-on-aws-regression-probe") &&
+        call.includes("Mem9OauthFacadeFnRole-regression-probe") &&
+        !call.includes("ContextKeyName=lambda:SourceFunctionArn"),
     );
     expect(projectLambda).toContain(
       "ContextKeyName=kms:EncryptionContext:aws:lambda:FunctionArn",
     );
     expect(projectLambda).not.toContain("ContextKeyName=kms:ViaService");
+    const facadeAuthorizerLambda = simulations.find(
+      (call) =>
+        call.includes("function:mem9-on-aws-regression-probe") &&
+        call.includes("Mem9OauthFacadeAllowAllRole"),
+    );
+    expect(facadeAuthorizerLambda).toContain(
+      "ContextKeyName=kms:EncryptionContext:aws:lambda:FunctionArn",
+    );
+    expect(facadeAuthorizerLambda).not.toContain(
+      "ContextKeyName=kms:ViaService",
+    );
     const projectSsm = simulations.find((call) =>
       call.includes("ContextKeyName=kms:EncryptionContext:PARAMETER_ARN") &&
       call.includes("ContextKeyName=kms:ViaService"),
@@ -6772,6 +6864,7 @@ describe("operator entry point", () => {
 
   it.each([
     "project-lambda",
+    "facade-authorizer-lambda",
     "project-ssm",
     "server-secret",
     "bootstrap-secret",
@@ -7119,6 +7212,8 @@ describe("boundary and deploy-role templates", () => {
             "arn:aws:iam::123456789012:role/" +
               "mem9-on-a*-*Mem9AlertRouterRole-*",
             "arn:aws:iam::123456789012:role/" +
+              "mem9-on-a*-*Mem9OauthFacadeAllowAllRole",
+            "arn:aws:iam::123456789012:role/" +
               "mem9-on-a*-*Mem9OauthFacadeFnRole-*",
             "arn:aws:iam::123456789012:role/" +
               "mem9-on-a*-*Mem9ProxyFnRole-*",
@@ -7329,6 +7424,7 @@ describe("boundary and deploy-role templates", () => {
       Action: ["iam:PassRole"],
       Resource: [
         "arn:aws:iam::123456789012:role/mem9-on-a*-*Mem9AlertRouterRole-*",
+        "arn:aws:iam::123456789012:role/mem9-on-a*-*Mem9OauthFacadeAllowAllRole",
         "arn:aws:iam::123456789012:role/mem9-on-a*-*Mem9OauthFacadeFnRole-*",
         "arn:aws:iam::123456789012:role/mem9-on-a*-*Mem9ProxyFnRole-*",
       ],
