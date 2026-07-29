@@ -7278,6 +7278,7 @@ describe("boundary and deploy-role templates", () => {
       NONTERMINAL_WORKFLOW_STATUSES,
     );
     expect(contract.rolloutTimeoutMs).toBe(ROLLOUT_TIMEOUT_MS);
+    expect(contract.rolloutTimeoutMs).toBe(3_600_000);
     expect(contract.shutdownGraceMs).toBe(ROLLOUT_SHUTDOWN_GRACE_MS);
     expect(contract.shutdownGraceMs).toBeGreaterThan(0);
     expect(contract.shutdownGraceMs).toBeLessThan(contract.rolloutTimeoutMs);
