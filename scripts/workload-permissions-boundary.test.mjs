@@ -556,12 +556,119 @@ async function runBoundaryDeployMock({
   const createdPath = join(directory, "created");
   const updatedPath = join(directory, "updated");
   const expectedPath = join(directory, "expected.json");
+  const boundarySimulationsPath = join(
+    directory,
+    "boundary-simulations.json",
+  );
   const quarantinePath = join(directory, "quarantine.json");
   const simulationPath = join(directory, "simulation.json");
   const simulationCompletePath = join(directory, "simulation-complete");
+  const expectedBoundaryPolicy =
+    expectedBoundaryPolicyDocument(boundaryContract);
   await writeFile(
     expectedPath,
-    JSON.stringify(expectedBoundaryPolicyDocument(boundaryContract)),
+    JSON.stringify(expectedBoundaryPolicy),
+  );
+  const lambdaContext =
+    "ContextKeyName=kms:EncryptionContext:aws:lambda:FunctionArn," +
+    "ContextKeyValues=arn:aws:lambda:ap-northeast-1:123456789012:" +
+    "function:mem9-on-aws-regression-probe,ContextKeyType=string";
+  const lambdaPrincipalContext =
+    "ContextKeyName=aws:PrincipalArn," +
+    "ContextKeyValues=arn:aws:iam::123456789012:role/" +
+    "mem9-on-aws-prod-Mem9OauthFacadeFnRole-regression-probe," +
+    "ContextKeyType=string";
+  const nonLambdaPrincipalContext =
+    "ContextKeyName=aws:PrincipalArn," +
+    "ContextKeyValues=arn:aws:iam::123456789012:role/" +
+    "mem9-on-aws-prod-Mem9ServerTaskRole-regression-probe," +
+    "ContextKeyType=string";
+  const outsideLambdaContext =
+    "ContextKeyName=kms:EncryptionContext:aws:lambda:FunctionArn," +
+    "ContextKeyValues=arn:aws:lambda:ap-northeast-1:123456789012:" +
+    "function:outside-project-regression-probe,ContextKeyType=string";
+  const sourceFunctionContext =
+    "ContextKeyName=lambda:SourceFunctionArn," +
+    "ContextKeyValues=arn:aws:lambda:ap-northeast-1:123456789012:" +
+    "function:mem9-on-aws-regression-probe,ContextKeyType=string";
+  const ssmContext =
+    "ContextKeyName=kms:EncryptionContext:PARAMETER_ARN," +
+    "ContextKeyValues=arn:aws:ssm:ap-northeast-1:123456789012:" +
+    "parameter/mem9-on-aws/regression-probe,ContextKeyType=string";
+  const ssmViaContext =
+    "ContextKeyName=kms:ViaService," +
+    "ContextKeyValues=ssm.ap-northeast-1.amazonaws.com," +
+    "ContextKeyType=string";
+  await writeFile(
+    boundarySimulationsPath,
+    JSON.stringify({
+      policyInputList: [
+        JSON.stringify({
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Action: "kms:Decrypt",
+              Resource: "*",
+            },
+          ],
+        }),
+      ],
+      permissionsBoundaryPolicyInputList: [
+        JSON.stringify(expectedBoundaryPolicy),
+      ],
+      actionNames: ["kms:Decrypt"],
+      resourceArns: ["*"],
+      output: ["json"],
+      probes: [
+        {
+          name: "project-lambda",
+          decision: "allowed",
+          contextEntries: [lambdaContext, lambdaPrincipalContext],
+        },
+        {
+          name: "project-ssm",
+          decision: "allowed",
+          contextEntries: [
+            ssmContext,
+            ssmViaContext,
+            sourceFunctionContext,
+          ],
+        },
+        {
+          name: "direct-ssm",
+          decision: "explicitDeny",
+          contextEntries: [ssmContext],
+        },
+        {
+          name: "direct-function",
+          decision: "explicitDeny",
+          contextEntries: [
+            lambdaContext,
+            lambdaPrincipalContext,
+            sourceFunctionContext,
+          ],
+        },
+        {
+          name: "nonlambda-forged-lambda",
+          decision: "explicitDeny",
+          contextEntries: [lambdaContext, nonLambdaPrincipalContext],
+        },
+        {
+          name: "outside-lambda",
+          decision: "explicitDeny",
+          contextEntries: [
+            outsideLambdaContext,
+            lambdaPrincipalContext,
+          ],
+        },
+        {
+          name: "missing-context",
+          decision: "explicitDeny",
+          contextEntries: [],
+        },
+      ],
+    }),
   );
   await writeFile(quarantinePath, JSON.stringify(quarantinePolicyDocument()));
   await writeFile(
@@ -587,6 +694,22 @@ arg() {
     if [[ "$1" == "$needle" ]]; then printf '%s' "\${2:-}"; return; fi
     shift
   done
+}
+option_json() {
+  local needle="$1"
+  shift
+  local found=false
+  local -a values=()
+  while [[ $# -gt 0 ]]; do
+    if [[ "$found" == "true" ]]; then
+      if [[ "$1" == --* ]]; then break; fi
+      values+=("$1")
+    elif [[ "$1" == "$needle" ]]; then
+      found=true
+    fi
+    shift
+  done
+  jq -cn --args '$ARGS.positional' "\${values[@]}"
 }
 command="\${1:-} \${2:-}"
 case "$command" in
@@ -660,26 +783,34 @@ case "$command" in
     if [[ "$MOCK_SIMULATION_COMMAND_FAILS" == "true" ]]; then exit 1; fi
     : > "$MOCK_SIMULATION_COMPLETE"
     if [[ "$*" == *"--permissions-boundary-policy-input-list"* ]]; then
-      probe="missing-context"
-      decision="explicitDeny"
-      if [[ "$*" == *"ContextKeyName=kms:EncryptionContext:PARAMETER_ARN"* ]]; then
-        probe="direct-ssm"
-        if [[ "$*" == *"ContextKeyName=kms:ViaService"* ]]; then
-          probe="project-ssm"
-          decision="allowed"
-        fi
-      elif [[ "$*" == *"ContextKeyName=lambda:SourceFunctionArn"* ]]; then
-        probe="direct-function"
-      elif [[ "$*" == *"function:mem9-on-aws-regression-probe"* ]]; then
-        if [[ "$*" == *"Mem9ServerTaskRole-regression-probe"* ]]; then
-          probe="nonlambda-forged-lambda"
-        else
-          probe="project-lambda"
-          decision="allowed"
-        fi
-      elif [[ "$*" == *"function:outside-project-regression-probe"* ]]; then
-        probe="outside-lambda"
-      fi
+      policy_inputs="$(option_json --policy-input-list "$@")"
+      boundary_inputs="$(
+        option_json --permissions-boundary-policy-input-list "$@"
+      )"
+      action_names="$(option_json --action-names "$@")"
+      resource_arns="$(option_json --resource-arns "$@")"
+      output_values="$(option_json --output "$@")"
+      context_entries="$(option_json --context-entries "$@")"
+      probe_data="$(jq -er \
+        --argjson policy_inputs "$policy_inputs" \
+        --argjson boundary_inputs "$boundary_inputs" \
+        --argjson action_names "$action_names" \
+        --argjson resource_arns "$resource_arns" \
+        --argjson output_values "$output_values" \
+        --argjson context_entries "$context_entries" '
+          select(
+            .policyInputList == $policy_inputs and
+            .permissionsBoundaryPolicyInputList == $boundary_inputs and
+            .actionNames == $action_names and
+            .resourceArns == $resource_arns and
+            .output == $output_values
+          )
+          | .probes[]
+          | select(.contextEntries == $context_entries)
+          | [.name, .decision]
+          | @tsv
+        ' "$MOCK_BOUNDARY_SIMULATIONS")" || exit 1
+      IFS=$'\\t' read -r probe decision <<<"$probe_data"
       if [[ "$MOCK_BOUNDARY_SIMULATION_MALFORMED_PROBE" == "$probe" ]]; then
         printf '%s\\n' '{"EvaluationResults":[{}]}'
         exit 0
@@ -730,6 +861,7 @@ esac
           MOCK_BOUNDARY_SIMULATION_BAD_PROBE: boundarySimulationBadProbe,
           MOCK_BOUNDARY_SIMULATION_MALFORMED_PROBE:
             boundarySimulationMalformedProbe,
+          MOCK_BOUNDARY_SIMULATIONS: boundarySimulationsPath,
           MOCK_CALLS: callsPath,
           MOCK_CREATED: createdPath,
           MOCK_DEFAULT_VERSION_DRIFTS_AFTER_SIMULATION: String(

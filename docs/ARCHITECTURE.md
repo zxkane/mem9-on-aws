@@ -426,7 +426,10 @@ exception requires both a generated proxy-role name and
 explicitly denies the same actions to function code. The name match is
 therefore not the sole authorization check. The deploy role likewise denies
 passing any of the three allowlisted Lambda role-name patterns to a non-Lambda
-service, preventing a PR from creating an ECS-assumable lookalike.
+service, preventing a PR from creating an ECS-assumable lookalike. This
+`PassRole` deny does not constrain a role trust policy supplied to `CreateRole`;
+the accepted trusted-writer model therefore remains load-bearing for direct
+assumption, as described below.
 
 The live role migration is intentionally separate from application deployment.
 `scripts/rollout-workload-permissions-boundary.sh` requires a maintenance
