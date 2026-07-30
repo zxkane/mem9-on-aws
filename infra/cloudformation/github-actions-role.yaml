@@ -1191,6 +1191,14 @@ Resources:
   # cover the HTTP API lifecycle. apigateway:POST/GET/PATCH/PUT/DELETE are the
   # verb-style actions the API Gateway v2 control plane authorizes against.
   #
+  # TagResource/UntagResource are SEPARATE from the verb-style actions: Api and
+  # Stage are taggable v2 resources, and CreateStage carries `tags`, so the stage
+  # create authorizes apigateway:TagResource on
+  # arn:aws:apigateway:<region>::/apis/<id>/stages. Without it a stage
+  # create/replace 403s with "no identity-based policy allows the
+  # apigateway:TagResource action" — hit when the compliance authorizer changed
+  # the API's resource graph and Pulumi replaced the $default stage.
+  #
   # OUT-OF-BAND DEPLOY REQUIREMENT: apply this policy with
   # scripts/deploy-github-role.sh before deploying API Gateway policy changes.
   # ───────────────────────────────────────────────────────────────────────────
@@ -1209,6 +1217,8 @@ Resources:
               - apigateway:PATCH
               - apigateway:PUT
               - apigateway:DELETE
+              - apigateway:TagResource
+              - apigateway:UntagResource
             Resource:
               # Region wildcard: the CFN stack lives in us-west-2 but the app
               # deploys to ap-northeast-1. API Gateway ARNs carry no account-id
