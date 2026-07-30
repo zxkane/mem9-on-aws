@@ -3461,6 +3461,7 @@ describe("stateful AWS CLI adapter", () => {
                   simulationMatrix(args),
                   args,
                 ),
+                IsTruncated: false,
               },
               args,
             );
