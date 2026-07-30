@@ -300,6 +300,15 @@ jobs:
           # The image applies the repeatable atomic-ingest migration before the
           # server starts, so one enabled rollout is safe.
           MEM9_DURABLE_INGEST_ENABLED: "1"
+          # Attaches the allow-all compliance authorizer to the OAuth façade
+          # routes (infra/oauth-facade.ts), flipping them from AuthorizationType
+          # NONE to CUSTOM so the Palisade APIGv2NotNoneAuthorizer finding clears.
+          # It gates nothing: empty identity sources mean the gateway invokes it on
+          # every request (so anonymous OAuth discovery keeps working) and it always
+          # returns isAuthorized. Real auth stays in the façade Lambda's /mcp bearer
+          # check. Read at synth time, so it must be set here — a deploy without it
+          # silently strips the authorizer and reopens the finding.
+          MEM9_FACADE_AUTHORIZER_ENABLED: "1"
         run: |
           # PR_NUMBER comes from GitHub's pull_request payload (integer);
           # validate to short-circuit any injection risk.
@@ -933,6 +942,11 @@ jobs:
           # The image applies the repeatable atomic-ingest migration before the
           # server starts, so one enabled rollout is safe.
           MEM9_DURABLE_INGEST_ENABLED: "1"
+          # Compliance authorizer on the OAuth façade routes — see the preview
+          # deploy step above for the full rationale. Must be set here too: the
+          # flag is read at synth time, so a prod deploy without it strips the
+          # authorizer and reopens the Palisade finding.
+          MEM9_FACADE_AUTHORIZER_ENABLED: "1"
           # Slack incoming webhook for prod alarm delivery (infra/observability.ts).
           # SST marks this value secret before it enters Pulumi state or Lambda config.
           # Production synthesis fails when the managed sink is unset.
