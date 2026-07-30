@@ -4,6 +4,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -15,6 +16,7 @@ import { parse, parseDocument } from "yaml";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const root = resolve(here, "..");
+const workflowsDirectory = resolve(root, ".github/workflows");
 const workflowPath = resolve(root, ".github/workflows/infra-ci.yml");
 const rolePath = resolve(root, "infra/cloudformation/github-actions-role.yaml");
 const deployRolePath = resolve(here, "deploy-github-role.sh");
@@ -118,6 +120,45 @@ function actionSetForSid(source, sid) {
 }
 
 describe("workflow integration", () => {
+  it("masks the AWS account ID in every credential configuration", () => {
+    const workflowFiles = readdirSync(workflowsDirectory).filter((name) =>
+      /\.ya?ml$/u.test(name),
+    );
+    const credentialJobs = [];
+
+    for (const workflowFile of workflowFiles) {
+      const workflow = parse(
+        readFileSync(resolve(workflowsDirectory, workflowFile), "utf8"),
+      );
+      for (const [jobName, job] of Object.entries(workflow.jobs ?? {})) {
+        for (const step of job.steps ?? []) {
+          if (
+            typeof step.uses !== "string" ||
+            !step.uses.startsWith("aws-actions/configure-aws-credentials@")
+          ) {
+            continue;
+          }
+          credentialJobs.push(`${workflowFile}:${jobName}`);
+          expect(
+            step.with?.["mask-aws-account-id"],
+            `${workflowFile}:${jobName}:${step.name ?? step.uses}`,
+          ).toBe(true);
+        }
+      }
+    }
+
+    expect(credentialJobs.sort()).toEqual(
+      [
+        "infra-ci.yml:build-and-push-image",
+        "infra-ci.yml:cleanup-preview",
+        "infra-ci.yml:deploy-preview",
+        "infra-ci.yml:deploy-prod",
+        "reconcile-previews.yml:apply",
+        "reconcile-previews.yml:report",
+      ].sort(),
+    );
+  });
+
   it("runs IAM regression tests when the GitHub Actions role template changes", () => {
     const workflow = parse(readFileSync(workflowPath, "utf8"));
 
