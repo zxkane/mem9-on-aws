@@ -3503,6 +3503,7 @@ describe("stateful AWS CLI adapter", () => {
     mutateSimulation = (results) => results,
     consistencyAttempts = 1,
     observeSimulation = () => {},
+    mutateSimulationResponse = (response) => response,
   ) {
     const policies = deployedManagedPolicyFixtures();
     const documentsByArn = new Map(
@@ -3532,9 +3533,16 @@ describe("stateful AWS CLI adapter", () => {
             return { PolicyNames: [], IsTruncated: false };
           case "iam simulate-custom-policy": {
             observeSimulation(args);
-            return {
-              EvaluationResults: mutateSimulation(simulationMatrix(args)),
-            };
+            return mutateSimulationResponse(
+              {
+                EvaluationResults: mutateSimulation(
+                  simulationMatrix(args),
+                  args,
+                ),
+                IsTruncated: false,
+              },
+              args,
+            );
           }
           default:
             throw new Error(`unexpected mocked command: ${args.join(" ")}`);
@@ -3545,19 +3553,80 @@ describe("stateful AWS CLI adapter", () => {
   }
 
   it("custom-simulates only the real deployed deny policy", async () => {
-    let simulatedPolicy;
+    const simulationCalls = [];
     const adapter = permanentVerificationAdapter(
       (results) => results,
       1,
       (args) => {
-        simulatedPolicy = argument(args, "--policy-input-list");
+        simulationCalls.push(args);
       },
     );
 
     await expect(
       adapter.verifyPermanentEnforcement({ boundaryArn }),
     ).resolves.toBe(true);
-    expect(JSON.parse(simulatedPolicy)).toEqual(deployedDenyPolicyDocument());
+    expect(simulationCalls).toHaveLength(7);
+    for (const args of simulationCalls) {
+      expect(JSON.parse(argument(args, "--policy-input-list"))).toEqual(
+        deployedDenyPolicyDocument(),
+      );
+      expect(optionValues(args, "--action-names")).toHaveLength(1);
+      expect(optionValues(args, "--resource-arns")).toHaveLength(1);
+    }
+    expect(
+      simulationCalls.map((args) => [
+        optionValues(args, "--action-names")[0],
+        optionValues(args, "--resource-arns")[0],
+      ]),
+    ).toEqual([
+      ["iam:CreatePolicyVersion", boundaryArn],
+      [
+        "cloudformation:UpdateStack",
+        `arn:aws:cloudformation:us-west-2:${accountId}:stack/${WORKLOAD_BOUNDARY_STACK_NAME}/propagation-probe`,
+      ],
+      [
+        "cloudformation:UpdateStack",
+        `arn:aws:cloudformation:us-west-2:${accountId}:stack/ecr-registry-scanning-mem9-on-aws/propagation-probe`,
+      ],
+      [
+        "iam:CreateRole",
+        `arn:aws:iam::${accountId}:role/mem9-on-aws-quarantine-probe`,
+      ],
+      [
+        "iam:PutRolePolicy",
+        `arn:aws:iam::${accountId}:role/mem9-on-aws-quarantine-probe`,
+      ],
+      [
+        "iam:DeleteRolePermissionsBoundary",
+        `arn:aws:iam::${accountId}:role/mem9-on-aws-quarantine-probe`,
+      ],
+      [
+        "iam:PassRole",
+        `arn:aws:iam::${accountId}:role/mem9-on-aws-prod-Mem9ProxyFnRole-propagation-probe`,
+      ],
+    ]);
+  });
+
+  it("avoids generalized resource results from batched simulations", async () => {
+    let simulationCalls = 0;
+    const adapter = permanentVerificationAdapter((results, args) => {
+      simulationCalls += 1;
+      if (
+        optionValues(args, "--action-names").length > 1 ||
+        optionValues(args, "--resource-arns").length > 1
+      ) {
+        return results.map((result) => ({
+          ...result,
+          EvalResourceName: "*",
+        }));
+      }
+      return results;
+    });
+
+    await expect(
+      adapter.verifyPermanentEnforcement({ boundaryArn }),
+    ).resolves.toBe(true);
+    expect(simulationCalls).toBe(7);
   });
 
   it("accepts an RFC3986-encoded permanent deny policy document", async () => {
@@ -4074,6 +4143,23 @@ describe("stateful AWS CLI adapter", () => {
     ],
     ["missing result", (results) => results.slice(1)],
     ["malformed result set", () => "malformed"],
+    ["duplicate result", (results) => [...results, structuredClone(results[0])]],
+    [
+      "mismatched action",
+      (results) =>
+        results.map((result) => ({
+          ...result,
+          EvalActionName: "iam:DeleteUser",
+        })),
+    ],
+    [
+      "generalized resource",
+      (results) =>
+        results.map((result) => ({
+          ...result,
+          EvalResourceName: "*",
+        })),
+    ],
     [
       "missing matched statement",
       (results) =>
@@ -4087,6 +4173,108 @@ describe("stateful AWS CLI adapter", () => {
     await expect(
       adapter.verifyPermanentEnforcement({ boundaryArn }),
     ).resolves.toBe(false);
+  });
+
+  it("rejects a truncated permanent simulation result", async () => {
+    const adapter = permanentVerificationAdapter(
+      (results) => results,
+      1,
+      () => {},
+      (response) => ({ ...response, IsTruncated: true }),
+    );
+    await expect(
+      adapter.verifyPermanentEnforcement({ boundaryArn }),
+    ).resolves.toBe(false);
+  });
+
+  it.each([
+    ["malformed truncation flag", { IsTruncated: "false" }],
+    ["unexpected pagination marker", { IsTruncated: false, Marker: "next" }],
+  ])("rejects permanent simulation with %s", async (_name, metadata) => {
+    const adapter = permanentVerificationAdapter(
+      (results) => results,
+      1,
+      () => {},
+      (response) => ({ ...response, ...metadata }),
+    );
+    await expect(
+      adapter.verifyPermanentEnforcement({ boundaryArn }),
+    ).resolves.toBe(false);
+  });
+
+  it("rejects a failed final permanent-enforcement probe", async () => {
+    const simulatedActions = [];
+    const adapter = permanentVerificationAdapter(
+      (results, args) => {
+        const [action] = optionValues(args, "--action-names");
+        simulatedActions.push(action);
+        if (action !== "iam:PassRole") return results;
+        return results.map((result) => ({
+          ...result,
+          EvalDecision: "implicitDeny",
+        }));
+      },
+      1,
+    );
+
+    await expect(
+      adapter.verifyPermanentEnforcement({ boundaryArn }),
+    ).resolves.toBe(false);
+    expect(simulatedActions).toEqual([
+      "iam:CreatePolicyVersion",
+      "cloudformation:UpdateStack",
+      "cloudformation:UpdateStack",
+      "iam:CreateRole",
+      "iam:PutRolePolicy",
+      "iam:DeleteRolePermissionsBoundary",
+      "iam:PassRole",
+    ]);
+  });
+
+  it("restarts every probe with fresh policy state after a transient final-probe failure", async () => {
+    const simulatedActions = [];
+    let passRoleAttempts = 0;
+    let denyPolicyDocumentReads = 0;
+    const adapter = permanentVerificationAdapter(
+      (results, args) => {
+        const [action] = optionValues(args, "--action-names");
+        simulatedActions.push(action);
+        if (action !== "iam:PassRole" || passRoleAttempts++ > 0) return results;
+        return results.map((result) => ({
+          ...result,
+          EvalDecision: "implicitDeny",
+        }));
+      },
+      2,
+    );
+    const originalGetManagedPolicyVersion = adapter.getManagedPolicyVersion;
+    adapter.getManagedPolicyVersion = async (request) => {
+      if (request.policyArn === denyPolicyArn) {
+        denyPolicyDocumentReads += 1;
+      }
+      return originalGetManagedPolicyVersion(request);
+    };
+
+    await expect(
+      adapter.verifyPermanentEnforcement({ boundaryArn }),
+    ).resolves.toBe(true);
+    expect(simulatedActions).toEqual([
+      "iam:CreatePolicyVersion",
+      "cloudformation:UpdateStack",
+      "cloudformation:UpdateStack",
+      "iam:CreateRole",
+      "iam:PutRolePolicy",
+      "iam:DeleteRolePermissionsBoundary",
+      "iam:PassRole",
+      "iam:CreatePolicyVersion",
+      "cloudformation:UpdateStack",
+      "cloudformation:UpdateStack",
+      "iam:CreateRole",
+      "iam:PutRolePolicy",
+      "iam:DeleteRolePermissionsBoundary",
+      "iam:PassRole",
+    ]);
+    expect(denyPolicyDocumentReads).toBe(5);
   });
 
   it("rejects permanent verification without the exact attached deny policy", async () => {

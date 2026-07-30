@@ -896,8 +896,6 @@ export function createAwsCliAdapter({
           resource: vpcProxyRoleArn,
         },
       ];
-      const actionNames = [...new Set(probes.map(({ action }) => action))];
-      const resourceArns = [...new Set(probes.map(({ resource }) => resource))];
       const verifyLivePolicyDocuments = async () => {
         const documents = await loadRolePolicyDocuments(
           adapter,
@@ -957,34 +955,42 @@ export function createAwsCliAdapter({
               includeDocument: true,
             });
             if (!denyPolicyBefore) return false;
-            const response = await invokeAwsCommand([
-              "iam",
-              "simulate-custom-policy",
-              "--policy-input-list",
-              serializePolicyInput(denyPolicyBefore.document),
-              "--action-names",
-              ...actionNames,
-              "--resource-arns",
-              ...resourceArns,
-              "--context-entries",
-              "ContextKeyName=iam:PassedToService," +
-                "ContextKeyValues=ecs-tasks.amazonaws.com," +
-                "ContextKeyType=string",
-            ]);
-            const probesVerified = probes.every(({ action, resource }) => {
-              const result = response.EvaluationResults?.find(
-                (evaluation) =>
-                  evaluation.EvalActionName?.toLowerCase() ===
-                    action.toLowerCase() &&
-                  evaluation.EvalResourceName === resource,
-              );
-              return (
-                result?.EvalDecision === "explicitDeny" &&
-                Array.isArray(result.MatchedStatements) &&
-                result.MatchedStatements.length > 0
-              );
-            });
-            if (!probesVerified) return false;
+            for (const { action, resource } of probes) {
+              const response = await invokeAwsCommand([
+                "iam",
+                "simulate-custom-policy",
+                "--policy-input-list",
+                serializePolicyInput(denyPolicyBefore.document),
+                "--action-names",
+                action,
+                "--resource-arns",
+                resource,
+                "--context-entries",
+                "ContextKeyName=iam:PassedToService," +
+                  "ContextKeyValues=ecs-tasks.amazonaws.com," +
+                  "ContextKeyType=string",
+              ]);
+              if (
+                (Object.hasOwn(response, "IsTruncated") &&
+                  typeof response.IsTruncated !== "boolean") ||
+                response.IsTruncated === true ||
+                Object.hasOwn(response, "Marker") ||
+                !Array.isArray(response.EvaluationResults) ||
+                response.EvaluationResults.length !== 1
+              ) {
+                return false;
+              }
+              const [result] = response.EvaluationResults;
+              if (
+                result.EvalActionName !== action ||
+                result.EvalResourceName !== resource ||
+                result.EvalDecision !== "explicitDeny" ||
+                !Array.isArray(result.MatchedStatements) ||
+                result.MatchedStatements.length === 0
+              ) {
+                return false;
+              }
+            }
 
             const denyPolicyAfter = await readDenyPolicyState();
             if (
