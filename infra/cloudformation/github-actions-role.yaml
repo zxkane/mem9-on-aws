@@ -1204,6 +1204,19 @@ Resources:
   # ───────────────────────────────────────────────────────────────────────────
   OAuth2FacadePolicy:
     Type: AWS::IAM::ManagedPolicy
+    Metadata:
+      cfn-lint:
+        config:
+          # W3037 flags apigateway:TagResource/UntagResource as invalid actions:
+          # cfn-lint's apigateway action list carries only the verb-style actions
+          # (get/post/put/patch/delete). The live authorization engine disagrees —
+          # a CreateStage denial names the action verbatim ("not authorized to
+          # perform: apigateway:TagResource on
+          # arn:aws:apigateway:<region>::/apis/<id>/stages"), so the grant is
+          # required and the linter's static list is stale. Scoped to this
+          # resource so the rule stays active everywhere else.
+          ignore_checks:
+            - W3037
     Properties:
       ManagedPolicyName: !Sub ${GitHubRepo}-oauth2-facade
       PolicyDocument:
