@@ -105,6 +105,14 @@ const LLM_MODEL = process.env.MEM9_LLM_MODEL || "zai.glm-5";
 // infra/cloudformation/bedrock-mantle-project.yaml.
 const BEDROCK_PROJECT = process.env.MEM9_BEDROCK_PROJECT || "";
 
+// Security group of the self-hosted CI runner pool (issue #102). When set, an
+// :8080 ingress rule from this SG onto the task SG lets the memory-cleanup
+// dry-run E2E reach mnemo-server directly (the runner is in the same VPC but
+// not in the task SG). Unset (e.g. GitHub-hosted runners, local synth) → no
+// rule is created and the E2E step simply fails discovery/connect — same
+// opt-in spirit as RUNNER_LABEL.
+const CI_RUNNER_SG = process.env.MEM9_CI_RUNNER_SG || "";
+
 export interface EcsOutputs {
   ssmPrefix: string;
   cluster: sst.aws.Cluster; // shared with bootstrap() so the one-shot task reuses it
@@ -244,6 +252,21 @@ export function ecs(dbOut: DbOutputs, identity: TenantIdentityOutputs): EcsOutpu
     toPort: MNEMO_PORT,
     description: "mnemo-server HTTP from the MCP proxy Lambda (shares the task SG)",
   });
+
+  // Optional: let the self-hosted CI runner pool reach mnemo-server for the
+  // memory-cleanup dry-run E2E (issue #102). SG-to-SG, port-scoped, and only
+  // when MEM9_CI_RUNNER_SG is configured — never a CIDR rule.
+  if (CI_RUNNER_SG) {
+    new awsAny.ec2.SecurityGroupRule("Mem9TaskFromCiRunner", {
+      type: "ingress",
+      securityGroupId: taskSgId,
+      sourceSecurityGroupId: CI_RUNNER_SG,
+      protocol: "tcp",
+      fromPort: MNEMO_PORT,
+      toPort: MNEMO_PORT,
+      description: "mnemo-server HTTP from the self-hosted CI runner pool (memory-cleanup E2E)",
+    });
+  }
 
   // Fargate service: arm64, single task (scaling unset → desiredCount 1). THREE
   // containers (§7): mnemo-server + qwen3-embed + llm-proxy. Registered in Cloud

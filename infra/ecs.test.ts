@@ -307,6 +307,7 @@ afterEach(() => {
   delete process.env.MEM9_IMAGE_TAG;
   delete process.env.MEM9_BEDROCK_PROJECT;
   delete process.env.MEM9_DURABLE_INGEST_ENABLED;
+  delete process.env.MEM9_CI_RUNNER_SG;
   delete process.env.SST_SECRET_SlackWebhookUrl;
   vi.resetModules();
 });
@@ -429,7 +430,8 @@ describe("ecs stack", () => {
     // The service depends on the discovery settle (fixes cold-deploy ServiceNotFound).
     expect(svcOpts.dependsOn?.length).toBeGreaterThanOrEqual(1);
     // A self-referential :8080 ingress rule on the task SG lets the Lambda (which
-    // shares that SG) reach mnemo-server.
+    // shares that SG) reach mnemo-server. Without MEM9_CI_RUNNER_SG this is the
+    // ONLY SG rule (no CI-runner ingress leaks in by default).
     const rule = createdOf("SecurityGroupRule");
     expect(rule.type).toBe("ingress");
     expect(rule.fromPort).toBe(8080);
@@ -440,6 +442,17 @@ describe("ecs stack", () => {
       "mnemo.mem9-prod.local",
     );
     expect(outs.taskSecurityGroupId).toBeDefined();
+  });
+
+  it("adds a port-scoped CI-runner ingress rule only when MEM9_CI_RUNNER_SG is set", async () => {
+    installGlobals("pr-7");
+    process.env.MEM9_CI_RUNNER_SG = "sg-runnerpool";
+    const ecs = await loadEcs();
+    ecs(fakeDbOut());
+    const rules = created.filter((r) => r.kind === "SecurityGroupRule").map((r) => r.args);
+    expect(rules).toHaveLength(2);
+    const runnerRule = rules.find((r) => r.sourceSecurityGroupId === "sg-runnerpool");
+    expect(runnerRule).toMatchObject({ type: "ingress", fromPort: 8080, toPort: 8080, protocol: "tcp" });
   });
 
   it("grants the task role Bedrock MANTLE inference perms (not the wrong bedrock:* namespace)", async () => {
