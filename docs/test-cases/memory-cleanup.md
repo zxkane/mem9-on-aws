@@ -1,7 +1,9 @@
 # Test Cases: retroactive memory cleanup script (issue #102)
 
 Unit tests live in `scripts/memory-cleanup.test.mjs` (mocked REST API + LLM via
-injected deps). The E2E dry-run runs in CI against the PR preview stage.
+injected deps). There is no CI E2E: the mem9 REST API is VPC-internal and the
+CI runner pool is outside that VPC, so live verification is an operator dry-run
+from a VPC-internal host (TC-MEMCLEAN-060 below).
 
 ## Scan & pagination
 
@@ -84,8 +86,9 @@ injected deps). The E2E dry-run runs in CI against the PR preview stage.
   no healthy instance → clear error after bounded retries; multiple healthy
   instances → first one, logged; `--base-url` bypasses discovery.
 
-## E2E (CI, preview stage)
+## Live verification (operator, VPC-internal host)
 
-- **TC-MEMCLEAN-060** — dry-run against the live preview mem9 completes with
-  exit 0, emits a decision list, and reports writeCalls 0 (asserted from the
-  job log).
+- **TC-MEMCLEAN-060** — dry-run against a live stage completes with exit 0,
+  emits a decision list with at least one non-SKIP verdict (on a non-empty
+  store), and reports writeCalls 0. Executed manually per the README runbook —
+  not a CI gate (the runner pool cannot reach the VPC-internal REST API).

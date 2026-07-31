@@ -692,8 +692,11 @@ grants used for inventory discovery.
 
 `scripts/memory-cleanup.mjs` retroactively audits the memory store against the
 same D1–D4 durability rules smart-ingest enforces (issue #102; design:
-`docs/designs/memory-cleanup.md`). CI runs it in dry-run against every PR
-preview; production execution is a deliberate manual flow:
+`docs/designs/memory-cleanup.md`). The mem9 REST API is VPC-internal and the
+CI runner pool lives outside that VPC, so there is no CI E2E for this tool —
+behavior is pinned by the unit suite (`scripts/memory-cleanup.test.mjs`), and
+live verification is the operator dry-run below, executed from a VPC-internal
+host. Production execution is a deliberate manual flow:
 
 1. **Dry-run** (read-only; classifies every active memory with GLM-5):
 
@@ -739,10 +742,6 @@ script discovers the task IP via Cloud Map `DiscoverInstances`; pass
 the tenant secret, `servicediscovery:DiscoverInstances`, and
 `bedrock-mantle:CreateInference`/`CallWithBearerToken`.
 
-After deploying a revision that introduces the cleanup E2E step, re-run
-`scripts/deploy-github-role.sh` once so the CI role gains
-`servicediscovery:DiscoverInstances` and the `bedrock-mantle` inference
-actions.
 
 ## License
 

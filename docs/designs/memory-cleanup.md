@@ -33,17 +33,19 @@ and never sends an empty list.
 
 The REST API listens on the task's Cloud Map private DNS
 (`mnemo.mem9-<stage>.local:8080`) inside the default VPC, guarded by an
-intra-SG ingress rule. Two supported invocation contexts:
+intra-SG ingress rule. The single supported invocation context is an
+**operator on a VPC-internal host** (dry-run and `--apply`): the script
+resolves the service IP via the Cloud Map API (`DiscoverInstances`, healthy
+instances only) because a host outside the private hosted zone cannot resolve
+`*.local` DNS. No healthy instance → clear error after 3 retries; multiple
+healthy instances (rolling deploy) → first instance, logged. `--base-url`
+overrides discovery when tunneling.
 
-1. **CI E2E (dry-run only)** — the self-hosted runner is in the same VPC. The
-   script resolves the service IP via the Cloud Map API
-   (`DiscoverInstances`, healthy instances only) because the runner is not
-   associated with the private hosted zone; plain DNS for `*.local` does not
-   resolve there. No healthy instance → clear error after 3 retries. Multiple
-   healthy instances (rolling deploy) → first instance, logged.
-2. **Operator (dry-run and `--apply`)** — same discovery path from any box in
-   the VPC with the task SG reachable, or an explicit `--base-url` override
-   when a tunnel/port-forward is used.
+**No CI E2E** (decided after two live attempts): the self-hosted runner pool
+runs in a different VPC (different region), so it can never reach the
+VPC-internal REST API; an SG-to-SG ingress rule was tried and reverted.
+Behavior is pinned by the unit suite; live verification is the runbook's
+operator dry-run (TC-MEMCLEAN-060).
 
 The tenant API key (== tenant id) is read from Secrets Manager
 (`--tenant-secret-arn`, same source ECS injects), or from `MEM9_TENANT_ID` for

@@ -32,10 +32,6 @@
 #                  to true only after every live role is bounded. Every AWS job
 #                  stays disabled until true; prod also fails synthesis unless
 #                  the value is explicitly true or false.
-#   MEM9_CI_RUNNER_SG — security-group id of the self-hosted runner pool. When
-#                  set, the deploy adds a task-SG :8080 ingress rule from it so
-#                  the memory-cleanup dry-run E2E can reach mnemo-server
-#                  (issue #102). Unset → no rule, E2E fails on discovery.
 #
 # Workload-boundary maintenance gate revision: 1
 
@@ -310,9 +306,6 @@ jobs:
           # scripts/deploy-bedrock-mantle-project.sh; empty → the proxy omits the
           # header (still functional, just untagged).
           MEM9_BEDROCK_PROJECT: ${{ vars.MEM9_BEDROCK_PROJECT }}
-          # Self-hosted runner pool SG — enables the task-SG :8080 ingress rule
-          # the memory-cleanup dry-run E2E needs (issue #102). Unset → no rule.
-          MEM9_CI_RUNNER_SG: ${{ vars.MEM9_CI_RUNNER_SG }}
           # The image applies the repeatable atomic-ingest migration before the
           # server starts, so one enabled rollout is safe.
           MEM9_DURABLE_INGEST_ENABLED: "1"
@@ -388,24 +381,6 @@ jobs:
           AWS_REGION: ap-northeast-1
         run: bash scripts/run-oauth-facade-smoke.sh
 
-      - name: Install root dependencies (memory-cleanup E2E)
-        # scripts/memory-cleanup.mjs dynamically imports AWS SDK packages from
-        # the ROOT package.json — the only step in this job that needs root
-        # node_modules (its bash/awscli siblings don't).
-        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
-        run: npm ci
-
-      - name: Memory cleanup dry-run E2E (preview)
-        # TC-MEMCLEAN-060 (issue #102): the operator cleanup tool scans the
-        # preview stage's live store via Cloud Map discovery, classifies with
-        # GLM-5, writes a decision list, and asserts writeCalls=0. Dry-run
-        # only — the wrapper never passes --apply.
-        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
-        shell: bash
-        env:
-          STAGE: ${{ steps.deploy.outputs.stage }}
-          AWS_REGION: ap-northeast-1
-        run: bash scripts/run-memory-cleanup-e2e.sh
 
       - name: Auto-cleanup on deploy failure
         # Best-effort — if the deploy half-applied resources, remove them so the
@@ -995,9 +970,6 @@ jobs:
           # (infra/ecs.ts BEDROCK_PROJECT). Repo variable set out-of-band by
           # scripts/deploy-bedrock-mantle-project.sh.
           MEM9_BEDROCK_PROJECT: ${{ vars.MEM9_BEDROCK_PROJECT }}
-          # Self-hosted runner pool SG — enables the task-SG :8080 ingress rule
-          # the memory-cleanup dry-run E2E needs (issue #102). Unset → no rule.
-          MEM9_CI_RUNNER_SG: ${{ vars.MEM9_CI_RUNNER_SG }}
           # Explicitly false before migration. The guarded migration changes it
           # to true only after every passable role has the exact boundary and
           # permanent enforcement is active. Missing/invalid values fail closed.
