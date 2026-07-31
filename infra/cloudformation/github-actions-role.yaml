@@ -899,8 +899,8 @@ Resources:
             # A servicediscovery PrivateDnsNamespace creates + manages a Route53
             # PRIVATE hosted zone under the hood (and its record sets). Cloud Map
             # owns the record writes at runtime, but the deploy role must be able to
-            # create/delete the zone + associate it with the VPC. (This is the ONLY
-            # remaining Route53 need — the ACM cert + ALB private zone are gone.)
+            # create/delete the zone + associate it with the VPC. This is the only
+            # Route53 need; the OAuth façade uses Cloudflare for public DNS.
             Effect: Allow
             Action:
               - route53:CreateHostedZone
@@ -1182,14 +1182,16 @@ Resources:
   # covered by LambdaProxyPolicy.LambdaManage (mem9-on-aws-* scope). The reader
   # UserPoolClient is covered by GatewayMcpPolicy.Cognito (cognito-idp:*Client),
   # and the sst.Secret's /sst/* SSM parameter by ScaffoldPolicy.SSM{Read,Write}
-  # — so this policy carries ONLY the genuinely-new apigateway control-plane
-  # surface. Its own ManagedPolicy to stay under IAM's 6144-byte per-policy cap
-  # and keep the OAuth2-façade footprint auditable in one place.
+  # — so this policy carries the API Gateway, ACM, and service-linked-role
+  # control-plane surface. Its own ManagedPolicy keeps the OAuth2-façade
+  # footprint auditable in one place and below IAM's 6144-byte per-policy cap.
   #
   # API Gateway ARNs have an EMPTY account field (arn:aws:apigateway:<region>::/…)
-  # — the /apis (create), /apis/* (per-API ops), and /tags/* (tagging) resources
-  # cover the HTTP API lifecycle. apigateway:POST/GET/PATCH/PUT/DELETE are the
-  # verb-style actions the API Gateway v2 control plane authorizes against.
+  # — the /apis (create), /apis/* (per-API ops), /domainnames (create),
+  # /domainnames/* (domain + mapping lifecycle), and /tags/* (tagging)
+  # resources cover the HTTP API lifecycle. apigateway:POST/GET/PATCH/PUT/DELETE
+  # are the verb-style actions the API Gateway v2 control plane authorizes
+  # against.
   #
   # TagResource/UntagResource are SEPARATE from the verb-style actions: Api and
   # Stage are taggable v2 resources, and CreateStage carries `tags`, so the stage
@@ -1238,7 +1240,46 @@ Resources:
               # (empty field between the double colons), only the region matters.
               - "arn:aws:apigateway:*::/apis"
               - "arn:aws:apigateway:*::/apis/*"
+              - "arn:aws:apigateway:*::/domainnames"
+              - "arn:aws:apigateway:*::/domainnames/*"
               - "arn:aws:apigateway:*::/tags/*"
+          - Sid: AcmFacadeCertificateCreate
+            # SST requests an Amazon-issued DNS-validated certificate in the
+            # application region. The certificate ARN does not exist yet, so
+            # RequestCertificate requires Resource "*"; request tags and the
+            # validation method keep creation project-scoped.
+            Effect: Allow
+            Action:
+              - acm:RequestCertificate
+              - acm:AddTagsToCertificate
+            Resource: "*"
+            Condition:
+              StringEquals:
+                aws:RequestedRegion: !Ref ApplicationRegion
+                acm:ValidationMethod: DNS
+                aws:RequestTag/Project: !Ref ProjectName
+                aws:RequestTag/ManagedBy: sst
+          - Sid: AcmFacadeCertificateManage
+            Effect: Allow
+            Action:
+              - acm:AddTagsToCertificate
+              - acm:DeleteCertificate
+              - acm:DescribeCertificate
+              - acm:ListTagsForCertificate
+              - acm:RemoveTagsFromCertificate
+            Resource:
+              - !Sub arn:${AWS::Partition}:acm:${ApplicationRegion}:${AWS::AccountId}:certificate/*
+          - Sid: ApiGatewayServiceLinkedRole
+            # A Regional custom domain can cause API Gateway to create
+            # AWSServiceRoleForAPIGateway on first use. API Gateway owns the
+            # role; the explicit deny above still prevents its deletion.
+            Effect: Allow
+            Action:
+              - iam:CreateServiceLinkedRole
+            Resource: "*"
+            Condition:
+              StringEquals:
+                iam:AWSServiceName: ops.apigateway.amazonaws.com
           # SST's sst.aws.ApiGatewayV2 creates an access-log LogGroup under
           # /aws/vendedlogs/apis/<app>-<stage>-<id> AND creates a log delivery
           # via the CloudWatch Logs Delivery API (CreateStage enables access logging).

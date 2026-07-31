@@ -613,7 +613,12 @@ declare namespace sst {
       allowHeaders?: Input<string>[];
       maxAge?: Input<string>;
     }
+    interface ApiGatewayV2Domain {
+      name: Input<string>;
+      dns?: unknown;
+    }
     interface ApiGatewayV2Args {
+      domain?: Input<string | ApiGatewayV2Domain>;
       cors?: ApiGatewayV2Cors;
     }
     interface ApiGatewayV2AuthorizerArgs {
@@ -633,6 +638,14 @@ declare namespace sst {
       };
       route(route: string, handler: Input<string>, args?: unknown): void;
     }
+  }
+
+  namespace cloudflare {
+    interface DnsArgs {
+      zone?: Input<string>;
+      proxy?: Input<boolean>;
+    }
+    function dns(args?: DnsArgs): unknown;
   }
 
   // ── sst.Secret (infra/oauth-facade.ts — OAuth client secret / signing key) ──

@@ -264,4 +264,22 @@ describe("runtime documentation", () => {
       "**Empirical deployment observation, 2026-07-12:**",
     );
   });
+
+  it("TC-DOCS-009: documents the optional production facade domain boundary", () => {
+    for (const source of [text.readme, text.architecture]) {
+      expect(source).toContain("MEM9_FACADE_CUSTOM_DOMAIN");
+      expect(source).toContain("CLOUDFLARE_API_TOKEN");
+      expect(source).toContain("CLOUDFLARE_ZONE_ID");
+      expect(source).toMatch(/existing Cloudflare zone/i);
+      expect(source).toMatch(/DNS-only/i);
+      expect(source).toMatch(/Preview stages\s+never/i);
+      expect(source).toMatch(/ACM automatically renews/i);
+      expect(source).toContain(
+        "https://docs.aws.amazon.com/acm/latest/userguide/dns-renewal-validation.html",
+      );
+    }
+    expect(text.facts).toContain(
+      "optional ACM certificate and DNS-only Cloudflare records for the public OAuth",
+    );
+  });
 });

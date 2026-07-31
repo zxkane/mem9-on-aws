@@ -47,6 +47,15 @@ describe("sst.config.ts locked facts", () => {
     expect(src).toMatch(/packageType === ["']Image["']/);
   });
 
+  it("initializes Cloudflare only for a configured production custom domain", () => {
+    expect(src).toMatch(
+      /const cloudflareEnabled =\s*input\?\.stage === ["']prod["']\s*&&\s*Boolean\(process\.env\.MEM9_FACADE_CUSTOM_DOMAIN\?\.trim\(\)\)\s*&&\s*Boolean\(process\.env\.CLOUDFLARE_API_TOKEN\?\.trim\(\)\)/u,
+    );
+    expect(src).toMatch(
+      /\.\.\.\(cloudflareEnabled\s*\?\s*\{\s*cloudflare:\s*\{\s*version:\s*["']6\.15\.0["']\s*\}\s*\}\s*:\s*\{\}\)/u,
+    );
+  });
+
   it("wires the meta stack via lazy import", () => {
     expect(src).toMatch(/await import\(["']\.\/infra\/meta["']\)/);
     expect(src).toContain("meta()");

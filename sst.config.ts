@@ -22,6 +22,11 @@
 
 export default $config({
   app(input) {
+    const cloudflareEnabled =
+      input?.stage === "prod" &&
+      Boolean(process.env.MEM9_FACADE_CUSTOM_DOMAIN?.trim()) &&
+      Boolean(process.env.CLOUDFLARE_API_TOKEN?.trim());
+
     return {
       name: "mem9-on-aws",
       // prod state is retained + protected so a stray `sst remove` can't
@@ -40,6 +45,11 @@ export default $config({
             },
           },
         },
+        // Avoid initializing the Cloudflare client for preview stages, which
+        // intentionally never receive the production DNS token.
+        ...(cloudflareEnabled
+          ? { cloudflare: { version: "6.15.0" } }
+          : {}),
         // The `random` provider exposes the `random` global (random.RandomId) used
         // by infra/tenant-identity.ts to mint the STABLE tenant id / X-API-Key. It must
         // be declared here for the global to bind at run() (SST only injects a

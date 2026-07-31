@@ -29,6 +29,32 @@ import type { CognitoOutputs } from "./cognito";
 const awsAny = aws as unknown as Record<string, any>;
 const FACADE_AUTHORIZER_ENABLED =
   process.env.MEM9_FACADE_AUTHORIZER_ENABLED === "1";
+const FACADE_CUSTOM_DOMAIN_ENV = "MEM9_FACADE_CUSTOM_DOMAIN";
+const CLOUDFLARE_API_TOKEN_ENV = "CLOUDFLARE_API_TOKEN";
+const CLOUDFLARE_ZONE_ID_ENV = "CLOUDFLARE_ZONE_ID";
+
+export function facadeCustomDomain(
+  stage: string,
+  raw = process.env[FACADE_CUSTOM_DOMAIN_ENV],
+): string | undefined {
+  // One hostname can map to only one stage. CI intentionally reserves the
+  // optional shared hostname for production and leaves previews on execute-api.
+  if (stage !== "prod" || !raw?.trim()) return undefined;
+
+  const domain = raw.trim().toLowerCase().replace(/\.$/u, "");
+  const labels = domain.split(".");
+  const validLabel = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
+  if (
+    domain.length > 253 ||
+    labels.length < 2 ||
+    labels.some((label) => !validLabel.test(label))
+  ) {
+    throw new Error(
+      `${FACADE_CUSTOM_DOMAIN_ENV} must be a hostname such as memory.example.com (without a scheme, port, or path).`,
+    );
+  }
+  return domain;
+}
 
 export interface OauthFacadeOutputs {
   ssmPrefix: string;
@@ -42,6 +68,28 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
   const tags = { Project: "mem9-on-aws", Stage: stage, ManagedBy: "sst" };
   const region = awsAny.getRegionOutput().name;
   const accountId = awsAny.getCallerIdentityOutput().accountId;
+  const customDomain = facadeCustomDomain(stage);
+  const cloudflareToken = process.env[CLOUDFLARE_API_TOKEN_ENV]?.trim();
+  const cloudflareZoneId = process.env[CLOUDFLARE_ZONE_ID_ENV]?.trim();
+  if (customDomain && (!cloudflareToken || !cloudflareZoneId)) {
+    const missing = [
+      !cloudflareToken && CLOUDFLARE_API_TOKEN_ENV,
+      !cloudflareZoneId && CLOUDFLARE_ZONE_ID_ENV,
+    ].filter(Boolean);
+    throw new Error(
+      `${FACADE_CUSTOM_DOMAIN_ENV} requires ${missing.join(" and ")} for Cloudflare DNS.`,
+    );
+  }
+  const customDomainConfig = customDomain
+    ? {
+        name: customDomain,
+        dns: sst.cloudflare.dns({
+          zone: cloudflareZoneId!,
+          // Keep both ACM validation and API Gateway CNAMEs DNS-only.
+          proxy: false,
+        }),
+      }
+    : undefined;
 
   // Small helper: emit an SSM export under this stage's prefix. `secure` flips the
   // type to SecureString (the reader client secret; the MCP client needs it to
@@ -63,6 +111,7 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
   // CORS scoped to the headers an MCP client sends: the bearer, JSON bodies, the
   // Accept negotiation, and the MCP protocol-version header the transport adds.
   const facadeApi = new sst.aws.ApiGatewayV2("Mem9OauthFacadeApi", {
+    ...(customDomainConfig ? { domain: customDomainConfig } : {}),
     cors: {
       allowHeaders: [
         "Authorization",

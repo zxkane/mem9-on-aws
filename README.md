@@ -56,7 +56,7 @@ citations.
 | Database           | **Aurora PostgreSQL Serverless v2** + `pgvector` (mem9 `postgres` backend). `mnemo-server` and bootstrap connect directly to the cluster writer endpoint with a Secrets Manager credential. **RDS Proxy is not deployed.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | VPC                | **Reuse the account default VPC** (private subnets with NAT egress)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | MCP surface        | **AgentCore Gateway** (MCP → mnemo-server REST API)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| Gateway → server   | **Private** (a [Lambda-proxy GatewayTarget](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-add-target-api-target-config.html)): AgentCore invokes a VPC-attached proxy Lambda with [`lambda:InvokeFunction`](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-prerequisites-permissions.html). The Lambda uses [VPC connectivity](https://docs.aws.amazon.com/lambda/latest/dg/configuration-vpc.html) and [AWS Cloud Map private DNS](https://docs.aws.amazon.com/cloud-map/latest/api/API_CreatePrivateDnsNamespace.html) (`mnemo.mem9-<stage>.local:8080`) to reach mnemo-server with the `X-API-Key` (= tenant id). No ALB, ACM certificate, VPC Lattice, public Route 53 zone, or public server endpoint is deployed. |
+| Gateway → server   | **Private** (a [Lambda-proxy GatewayTarget](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-add-target-api-target-config.html)): AgentCore invokes a VPC-attached proxy Lambda with [`lambda:InvokeFunction`](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-prerequisites-permissions.html). The Lambda uses [VPC connectivity](https://docs.aws.amazon.com/lambda/latest/dg/configuration-vpc.html) and [AWS Cloud Map private DNS](https://docs.aws.amazon.com/cloud-map/latest/api/API_CreatePrivateDnsNamespace.html) (`mnemo.mem9-<stage>.local:8080`) to reach mnemo-server with the `X-API-Key` (= tenant id). No ALB, VPC Lattice, or public server endpoint is deployed; the optional OAuth façade custom domain is a separate API Gateway concern. |
 | Auth (inbound)     | **Cognito M2M** (`client_credentials`) + an OAuth2 browser-login façade (`authorization_code` + PKCE) for interactive MCP clients                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | LLM (smart-ingest) | `mnemo-server` calls the **local `llm-proxy` sidecar** at `http://localhost:8082/v1`. The proxy refreshes a short-term Mantle bearer, injects `OpenAI-Project` when `MEM9_BEDROCK_PROJECT` is configured, and calls Bedrock Mantle. Each request has one 110-second deadline and at most two Mantle calls. The task role uses `bedrock-mantle:CreateInference` and `bedrock-mantle:CallWithBearerToken`; `mnemo-server` never calls Mantle directly.                                                                                                                                                                                                                                                                                                                   |
 | Embedding          | qwen3 OpenAI-compatible `/embeddings` as an **ECS sidecar** (localhost, always warm), **dims 1024**. Not Mantle, not a third-party API.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
@@ -111,6 +111,41 @@ The AgentCore Gateway exposes four tools over MCP (Cognito-authenticated):
   application VPC discovery must target a region other than its documented
   default.
 - Agent contributors: see [`AGENTS.md`](AGENTS.md) for repo conventions and hard rules.
+
+### Optional production custom domain
+
+The OAuth façade can use a production-only custom hostname. Leave
+`MEM9_FACADE_CUSTOM_DOMAIN` unset to keep the generated API Gateway
+`execute-api` URL. When configured, SST creates a Regional API Gateway domain
+and mapping, requests and DNS-validates an ACM certificate in
+`ap-northeast-1`, and creates DNS-only validation and API-target CNAME records
+in an existing Cloudflare zone. Preview stages never receive these settings.
+
+Before enabling it, update the out-of-band deploy role. Create a
+[Cloudflare API token](https://developers.cloudflare.com/dns/manage-dns-records/how-to/api-tokens/)
+scoped to the target zone with `Zone:Read` and `DNS:Edit`, then configure the
+hostname, token, and zone ID as GitHub repository secrets:
+
+```bash
+scripts/deploy-github-role.sh
+gh secret set MEM9_FACADE_CUSTOM_DOMAIN --body "memory.example.com"
+gh secret set CLOUDFLARE_API_TOKEN
+gh secret set CLOUDFLARE_ZONE_ID
+```
+
+Use a hostname only, without `https://`, a port, or a path. The secret prevents
+the repository and workflow definition from carrying the operator's domain,
+but the hostname is inherently public in DNS and appears in the deployed AWS
+resources. One hostname maps to the production stage; use no production
+hostname for PR previews. Keep Cloudflare proxying disabled for these managed
+records.
+
+No certificate-renewal issue is required. ACM automatically renews a
+DNS-validated certificate while it remains attached to API Gateway and every
+ACM validation CNAME remains publicly resolvable. Do not manually remove that
+CNAME while the custom domain is in use; ACM reports renewal failures through
+AWS Health and EventBridge. See
+[ACM DNS renewal](https://docs.aws.amazon.com/acm/latest/userguide/dns-renewal-validation.html).
 
 ## Workload permissions-boundary rollout
 
