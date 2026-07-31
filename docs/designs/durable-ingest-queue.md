@@ -197,6 +197,51 @@ webhook emission run after commit as best effort. Runtime-usage reservation
 correlation persists on the job so retries retain it and terminal success or
 failure finalizes it from the worker.
 
+## PostgreSQL Raw-Session Deletion
+
+Atomic apply materializes raw transcript turns in the tenant database's
+PostgreSQL `sessions` table. Authenticated memory deletion already falls back to
+the session repository after a memory miss, and batch deletion already combines
+the two repositories' affected-row counts. The PostgreSQL factory path therefore
+needs deletion support without broadening the backend into session search,
+direct-write, or edit-overlay support.
+
+`NewSessionRepo("postgres", tenantDB, ...)` wraps the existing unsupported
+session stub with a PostgreSQL delete repository. Only `SoftDelete` and
+`BulkSoftDelete` are overridden; every other method retains the stub's current
+result. TiDB construction and unsupported backends remain unchanged.
+
+Single deletion runs in a transaction and locks the exact row with
+`SELECT ... FOR UPDATE`. A missing row returns `ErrNotFound`. A row already in
+`deleted` state commits without issuing an update, preserving `updated_at`.
+Every other state is changed to `deleted` with a new `updated_at` from
+`statement_timestamp()`, so time spent waiting for the row lock cannot move the
+last-modified timestamp backwards. The method reports one affected row.
+
+Batch deletion returns zero without querying for empty input. Otherwise, one
+statement updates only requested rows whose state is not `deleted`. PostgreSQL
+updates each matching row once even when an ID is repeated, so the affected-row
+count is exact and unknown or already-deleted IDs contribute zero. Duplicate-ID
+normalization remains at the service boundary.
+
+Tenant databases that have not received the additive durable-ingest migration
+may not contain `sessions`. The PostgreSQL adapter preserves the preceding stub
+contract on that compatibility path: single deletion treats the absent table as
+not found, while batch deletion contributes zero session rows without failing a
+memory deletion that already succeeded.
+
+Tenant isolation continues to come from authenticated database selection:
+
+```text
+authenticated request
+  -> AuthInfo.TenantDB
+  -> NewSessionRepo("postgres", TenantDB, ...)
+  -> UPDATE sessions in that database only
+```
+
+The `sessions` table intentionally has no `tenant_id`; no schema change or
+cross-database lookup is introduced.
+
 ## Privacy
 
 Payloads and plans remain inside Aurora. Queue logs contain only generated job

@@ -1,0 +1,893 @@
+diff --git a/server/internal/handler/session_delete_postgres_integration_test.go b/server/internal/handler/session_delete_postgres_integration_test.go
+new file mode 100644
+index 0000000..d413bfb
+--- /dev/null
++++ b/server/internal/handler/session_delete_postgres_integration_test.go
+@@ -0,0 +1,301 @@
++package handler
++
++import (
++	"database/sql"
++	"encoding/json"
++	"log/slog"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/domain"
++	"github.com/qiffang/mnemos/server/internal/middleware"
++	"github.com/qiffang/mnemos/server/internal/service"
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++func handlerSessionDeleteTestDB(t *testing.T) *sql.DB {
++	t.Helper()
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
++	}
++	db := testutil.OpenIsolatedPostgres(t, dsn)
++	testutil.RecreateMemoryDeleteTable(t, db)
++	return db
++}
++
++func postgresSessionDeleteServer() *Server {
++	return NewServer(
++		nil,
++		nil,
++		"",
++		nil,
++		nil,
++		"",
++		false,
++		service.ModeSmart,
++		"postgres",
++		slog.Default(),
++	)
++}
++
++func postgresSessionDeleteRequest(
++	t *testing.T,
++	method string,
++	path string,
++	body any,
++	tenantID string,
++	db *sql.DB,
++) *http.Request {
++	t.Helper()
++	req := makeRequest(t, method, path, body)
++	auth := &domain.AuthInfo{
++		TenantID:  tenantID,
++		TenantDB:  db,
++		ClusterID: "cluster-" + tenantID,
++		AgentName: "authenticated-agent",
++	}
++	return req.WithContext(middleware.WithAuthContext(req.Context(), auth))
++}
++
++func TestPostgresAuthenticatedSessionDeleteFallbackAndTenantIsolation(t *testing.T) {
++	tenantADB := handlerSessionDeleteTestDB(t)
++	tenantBDB := handlerSessionDeleteTestDB(t)
++	originalUpdatedAt := time.Date(2026, 4, 5, 6, 7, 8, 0, time.UTC)
++	sharedID := "20000000-0000-4000-8000-00000000a001"
++	unrelatedID := "20000000-0000-4000-8000-00000000a002"
++	testutil.InsertSessionRow(t, tenantADB, sharedID, domain.StateActive, originalUpdatedAt)
++	testutil.InsertSessionRow(t, tenantADB, unrelatedID, domain.StateActive, originalUpdatedAt)
++	testutil.InsertSessionRow(t, tenantBDB, sharedID, domain.StateActive, originalUpdatedAt)
++
++	srv := postgresSessionDeleteServer()
++	req := postgresSessionDeleteRequest(
++		t,
++		http.MethodDelete,
++		"/v1alpha2/mem9s/memories/"+sharedID,
++		nil,
++		"tenant-a",
++		tenantADB,
++	)
++	req = withURLParam(req, "id", sharedID)
++	rr := httptest.NewRecorder()
++	srv.deleteMemory(rr, req)
++	if rr.Code != http.StatusNoContent {
++		t.Fatalf("delete status = %d, want 204: %s", rr.Code, rr.Body.String())
++	}
++
++	state, firstUpdatedAt := testutil.SessionRowState(t, tenantADB, sharedID)
++	if state != domain.StateDeleted || !firstUpdatedAt.After(originalUpdatedAt) {
++		t.Fatalf("tenant A row = (%q, %s), want deleted with newer timestamp", state, firstUpdatedAt)
++	}
++	state, updatedAt := testutil.SessionRowState(t, tenantBDB, sharedID)
++	if state != domain.StateActive || !updatedAt.Equal(originalUpdatedAt) {
++		t.Fatalf("tenant B row = (%q, %s), want unchanged active row", state, updatedAt)
++	}
++
++	repeat := postgresSessionDeleteRequest(
++		t,
++		http.MethodDelete,
++		"/v1alpha2/mem9s/memories/"+sharedID,
++		nil,
++		"tenant-a",
++		tenantADB,
++	)
++	repeat = withURLParam(repeat, "id", sharedID)
++	repeatRR := httptest.NewRecorder()
++	srv.deleteMemory(repeatRR, repeat)
++	if repeatRR.Code != http.StatusNoContent {
++		t.Fatalf("repeat status = %d, want 204: %s", repeatRR.Code, repeatRR.Body.String())
++	}
++	_, repeatedUpdatedAt := testutil.SessionRowState(t, tenantADB, sharedID)
++	if !repeatedUpdatedAt.Equal(firstUpdatedAt) {
++		t.Fatalf("repeat updated_at = %s, want unchanged %s", repeatedUpdatedAt, firstUpdatedAt)
++	}
++
++	unknownID := "20000000-0000-4000-8000-00000000a099"
++	unknown := postgresSessionDeleteRequest(
++		t,
++		http.MethodDelete,
++		"/v1alpha2/mem9s/memories/"+unknownID,
++		nil,
++		"tenant-a",
++		tenantADB,
++	)
++	unknown = withURLParam(unknown, "id", unknownID)
++	unknownRR := httptest.NewRecorder()
++	srv.deleteMemory(unknownRR, unknown)
++	if unknownRR.Code != http.StatusNotFound {
++		t.Fatalf("unknown status = %d, want 404: %s", unknownRR.Code, unknownRR.Body.String())
++	}
++	state, updatedAt = testutil.SessionRowState(t, tenantADB, unrelatedID)
++	if state != domain.StateActive || !updatedAt.Equal(originalUpdatedAt) {
++		t.Fatalf("unrelated row = (%q, %s), want unchanged active row", state, updatedAt)
++	}
++}
++
++func TestPostgresAuthenticatedMixedBatchDelete(t *testing.T) {
++	db := handlerSessionDeleteTestDB(t)
++	originalUpdatedAt := time.Date(2026, 5, 6, 7, 8, 9, 0, time.UTC)
++	memoryID := "20000000-0000-4000-8000-00000000a010"
++	activeSessionID := "20000000-0000-4000-8000-00000000a011"
++	deletedSessionID := "20000000-0000-4000-8000-00000000a012"
++	unrequestedSessionID := "20000000-0000-4000-8000-00000000a013"
++	unknownID := "20000000-0000-4000-8000-00000000a098"
++	if _, err := db.Exec(`
++		INSERT INTO memories (id, content, state, created_at, updated_at)
++		VALUES ($1, 'memory row', 'active', $2, $2)
++	`, memoryID, originalUpdatedAt); err != nil {
++		t.Fatalf("insert memory: %v", err)
++	}
++	testutil.InsertSessionRow(t, db, activeSessionID, domain.StateActive, originalUpdatedAt)
++	testutil.InsertSessionRow(t, db, deletedSessionID, domain.StateDeleted, originalUpdatedAt)
++	testutil.InsertSessionRow(t, db, unrequestedSessionID, domain.StateActive, originalUpdatedAt)
++
++	srv := postgresSessionDeleteServer()
++	req := postgresSessionDeleteRequest(
++		t,
++		http.MethodPost,
++		"/v1alpha2/mem9s/memories/batch-delete",
++		map[string]any{"ids": []string{
++			memoryID,
++			activeSessionID,
++			deletedSessionID,
++			unknownID,
++			activeSessionID,
++		}},
++		"tenant-a",
++		db,
++	)
++	rr := httptest.NewRecorder()
++	srv.batchDeleteMemories(rr, req)
++	if rr.Code != http.StatusOK {
++		t.Fatalf("batch status = %d, want 200: %s", rr.Code, rr.Body.String())
++	}
++	var response struct {
++		Deleted int64 `json:"deleted"`
++	}
++	if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
++		t.Fatal(err)
++	}
++	if response.Deleted != 2 {
++		t.Fatalf("deleted = %d, want 2", response.Deleted)
++	}
++
++	var memoryState domain.MemoryState
++	if err := db.QueryRow(
++		`SELECT state FROM memories WHERE id = $1`,
++		memoryID,
++	).Scan(&memoryState); err != nil {
++		t.Fatal(err)
++	}
++	if memoryState != domain.StateDeleted {
++		t.Fatalf("memory state = %q, want deleted", memoryState)
++	}
++	state, activeUpdatedAt := testutil.SessionRowState(t, db, activeSessionID)
++	if state != domain.StateDeleted || !activeUpdatedAt.After(originalUpdatedAt) {
++		t.Fatalf("active session = (%q, %s), want deleted with newer timestamp", state, activeUpdatedAt)
++	}
++	for _, id := range []string{deletedSessionID, unrequestedSessionID} {
++		wantState := domain.StateDeleted
++		if id == unrequestedSessionID {
++			wantState = domain.StateActive
++		}
++		state, updatedAt := testutil.SessionRowState(t, db, id)
++		if state != wantState || !updatedAt.Equal(originalUpdatedAt) {
++			t.Fatalf("%s = (%q, %s), want (%q, %s)", id, state, updatedAt, wantState, originalUpdatedAt)
++		}
++	}
++
++	repeat := postgresSessionDeleteRequest(
++		t,
++		http.MethodPost,
++		"/v1alpha2/mem9s/memories/batch-delete",
++		map[string]any{"ids": []string{memoryID, activeSessionID, unknownID}},
++		"tenant-a",
++		db,
++	)
++	repeatRR := httptest.NewRecorder()
++	srv.batchDeleteMemories(repeatRR, repeat)
++	if repeatRR.Code != http.StatusOK {
++		t.Fatalf("repeat batch status = %d, want 200: %s", repeatRR.Code, repeatRR.Body.String())
++	}
++	if err := json.NewDecoder(repeatRR.Body).Decode(&response); err != nil {
++		t.Fatal(err)
++	}
++	if response.Deleted != 0 {
++		t.Fatalf("repeat deleted = %d, want 0", response.Deleted)
++	}
++	_, repeatedUpdatedAt := testutil.SessionRowState(t, db, activeSessionID)
++	if !repeatedUpdatedAt.Equal(activeUpdatedAt) {
++		t.Fatalf("repeat batch changed active session timestamp from %s to %s", activeUpdatedAt, repeatedUpdatedAt)
++	}
++}
++
++func TestPostgresAuthenticatedDeleteWithoutSessionsTable(t *testing.T) {
++	db := handlerSessionDeleteTestDB(t)
++	if _, err := db.Exec(`DROP TABLE sessions`); err != nil {
++		t.Fatalf("drop sessions table: %v", err)
++	}
++
++	srv := postgresSessionDeleteServer()
++	unknownID := "20000000-0000-4000-8000-00000000a097"
++	single := postgresSessionDeleteRequest(
++		t,
++		http.MethodDelete,
++		"/v1alpha2/mem9s/memories/"+unknownID,
++		nil,
++		"tenant-a",
++		db,
++	)
++	single = withURLParam(single, "id", unknownID)
++	singleRR := httptest.NewRecorder()
++	srv.deleteMemory(singleRR, single)
++	if singleRR.Code != http.StatusNotFound {
++		t.Fatalf("single status = %d, want 404: %s", singleRR.Code, singleRR.Body.String())
++	}
++
++	originalUpdatedAt := time.Date(2026, 6, 7, 8, 9, 10, 0, time.UTC)
++	memoryID := "20000000-0000-4000-8000-00000000a020"
++	if _, err := db.Exec(`
++		INSERT INTO memories (id, content, state, created_at, updated_at)
++		VALUES ($1, 'memory row', 'active', $2, $2)
++	`, memoryID, originalUpdatedAt); err != nil {
++		t.Fatalf("insert memory: %v", err)
++	}
++	batch := postgresSessionDeleteRequest(
++		t,
++		http.MethodPost,
++		"/v1alpha2/mem9s/memories/batch-delete",
++		map[string]any{"ids": []string{memoryID, unknownID}},
++		"tenant-a",
++		db,
++	)
++	batchRR := httptest.NewRecorder()
++	srv.batchDeleteMemories(batchRR, batch)
++	if batchRR.Code != http.StatusOK {
++		t.Fatalf("batch status = %d, want 200: %s", batchRR.Code, batchRR.Body.String())
++	}
++	var response struct {
++		Deleted int64 `json:"deleted"`
++	}
++	if err := json.NewDecoder(batchRR.Body).Decode(&response); err != nil {
++		t.Fatal(err)
++	}
++	if response.Deleted != 1 {
++		t.Fatalf("deleted = %d, want 1", response.Deleted)
++	}
++
++	var state domain.MemoryState
++	if err := db.QueryRow(
++		`SELECT state FROM memories WHERE id = $1`,
++		memoryID,
++	).Scan(&state); err != nil {
++		t.Fatal(err)
++	}
++	if state != domain.StateDeleted {
++		t.Fatalf("memory state = %q, want deleted", state)
++	}
++}
+diff --git a/server/internal/repository/factory.go b/server/internal/repository/factory.go
+index 929b8ea..5a9c452 100644
+--- a/server/internal/repository/factory.go
++++ b/server/internal/repository/factory.go
+@@ -99,17 +99,34 @@ func NewMemoryRepo(backend string, db *sql.DB, autoModel string, ftsEnabled bool
+ }
+ 
+ // NewSessionRepo creates a SessionRepo for the specified backend.
+-// Only TiDB has a sessions table; all other backends return a stub that
+-// silently no-ops writes/searches and returns ErrNotSupported for reads.
++// PostgreSQL supports deletion of durable-ingest session rows; its other
++// capabilities remain stubbed.
+ func NewSessionRepo(backend string, db *sql.DB, autoModel string, ftsEnabled bool, clusterID string) SessionRepo {
+ 	switch backend {
+ 	case "tidb", "":
+ 		return tidb.NewSessionRepo(db, autoModel, ftsEnabled, clusterID)
++	case "postgres":
++		return postgresSessionRepo{
++			deletes: postgres.NewSessionDeleteRepo(db),
++		}
+ 	default:
+ 		return stubSessionRepo{}
+ 	}
+ }
+ 
++type postgresSessionRepo struct {
++	stubSessionRepo
++	deletes *postgres.SessionDeleteRepo
++}
++
++func (r postgresSessionRepo) SoftDelete(ctx context.Context, id, agentName string) (int64, error) {
++	return r.deletes.SoftDelete(ctx, id, agentName)
++}
++
++func (r postgresSessionRepo) BulkSoftDelete(ctx context.Context, ids []string, agentName string) (int64, error) {
++	return r.deletes.BulkSoftDelete(ctx, ids, agentName)
++}
++
+ // stubSessionRepo satisfies SessionRepo for non-TiDB backends.
+ // Write and search methods are silently skipped (consistent with the
+ // IsTableNotFoundError no-op pattern). ListBySessionIDs returns ErrNotSupported
+diff --git a/server/internal/repository/postgres/session_delete.go b/server/internal/repository/postgres/session_delete.go
+new file mode 100644
+index 0000000..4d4ee17
+--- /dev/null
++++ b/server/internal/repository/postgres/session_delete.go
+@@ -0,0 +1,112 @@
++package postgres
++
++import (
++	"context"
++	"database/sql"
++	"errors"
++	"fmt"
++	"strings"
++
++	"github.com/jackc/pgx/v5/pgconn"
++
++	"github.com/qiffang/mnemos/server/internal/domain"
++)
++
++// SessionDeleteRepo supplies the PostgreSQL raw-session deletion methods.
++// Other SessionRepo capabilities remain unsupported by the factory adapter.
++type SessionDeleteRepo struct {
++	db *sql.DB
++}
++
++func NewSessionDeleteRepo(db *sql.DB) *SessionDeleteRepo {
++	return &SessionDeleteRepo{db: db}
++}
++
++func (r *SessionDeleteRepo) SoftDelete(ctx context.Context, id, _ string) (int64, error) {
++	tx, err := r.db.BeginTx(ctx, nil)
++	if err != nil {
++		return 0, fmt.Errorf("session soft delete begin tx: %w", err)
++	}
++	defer tx.Rollback()
++
++	var state string
++	err = tx.QueryRowContext(
++		ctx,
++		`SELECT state FROM sessions WHERE id = $1 FOR UPDATE`,
++		id,
++	).Scan(&state)
++	if err == sql.ErrNoRows {
++		return 0, domain.ErrNotFound
++	}
++	if err != nil {
++		if isUndefinedTableError(err) {
++			return 0, domain.ErrNotFound
++		}
++		return 0, fmt.Errorf("session soft delete lock row: %w", err)
++	}
++
++	if state == string(domain.StateDeleted) {
++		if err := tx.Commit(); err != nil {
++			return 0, fmt.Errorf("session soft delete commit: %w", err)
++		}
++		return 0, nil
++	}
++
++	result, err := tx.ExecContext(
++		ctx,
++		`UPDATE sessions
++		 SET state = 'deleted', updated_at = statement_timestamp()
++		 WHERE id = $1`,
++		id,
++	)
++	if err != nil {
++		return 0, fmt.Errorf("session soft delete update: %w", err)
++	}
++	deleted, err := result.RowsAffected()
++	if err != nil {
++		return 0, fmt.Errorf("session soft delete rows affected: %w", err)
++	}
++	if err := tx.Commit(); err != nil {
++		return 0, fmt.Errorf("session soft delete commit: %w", err)
++	}
++	return deleted, nil
++}
++
++func (r *SessionDeleteRepo) BulkSoftDelete(
++	ctx context.Context,
++	ids []string,
++	_ string,
++) (int64, error) {
++	if len(ids) == 0 {
++		return 0, nil
++	}
++
++	placeholders := make([]string, len(ids))
++	args := make([]any, len(ids))
++	for i, id := range ids {
++		placeholders[i] = fmt.Sprintf("$%d", i+1)
++		args[i] = id
++	}
++	result, err := r.db.ExecContext(
++		ctx,
++		`UPDATE sessions SET state = 'deleted', updated_at = statement_timestamp()
++		 WHERE id IN (`+strings.Join(placeholders, ",")+`) AND state != 'deleted'`,
++		args...,
++	)
++	if err != nil {
++		if isUndefinedTableError(err) {
++			return 0, nil
++		}
++		return 0, fmt.Errorf("session bulk soft delete: %w", err)
++	}
++	deleted, err := result.RowsAffected()
++	if err != nil {
++		return 0, fmt.Errorf("session bulk soft delete rows affected: %w", err)
++	}
++	return deleted, nil
++}
++
++func isUndefinedTableError(err error) bool {
++	var pgErr *pgconn.PgError
++	return errors.As(err, &pgErr) && pgErr.Code == "42P01"
++}
+diff --git a/server/internal/repository/session_delete_integration_test.go b/server/internal/repository/session_delete_integration_test.go
+new file mode 100644
+index 0000000..d6184e3
+--- /dev/null
++++ b/server/internal/repository/session_delete_integration_test.go
+@@ -0,0 +1,338 @@
++package repository
++
++import (
++	"context"
++	"database/sql"
++	"errors"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/domain"
++	"github.com/qiffang/mnemos/server/internal/repository/tidb"
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++func sessionDeleteTestDB(t *testing.T) *sql.DB {
++	t.Helper()
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
++	}
++	return testutil.OpenIsolatedPostgres(t, dsn)
++}
++
++func waitForSessionDeleteLock(t *testing.T, db *sql.DB) {
++	t.Helper()
++	deadline := time.Now().Add(2 * time.Second)
++	for {
++		var waiting bool
++		if err := db.QueryRow(`
++			SELECT EXISTS (
++				SELECT 1
++				FROM pg_stat_activity
++				WHERE datname = current_database()
++				  AND state = 'active'
++				  AND wait_event_type = 'Lock'
++				  AND query LIKE '%SELECT state FROM sessions WHERE id = $1 FOR UPDATE%'
++				  AND pid != pg_backend_pid()
++			)
++		`).Scan(&waiting); err != nil {
++			t.Fatalf("inspect session delete lock wait: %v", err)
++		}
++		if waiting {
++			return
++		}
++		if time.Now().After(deadline) {
++			t.Fatal("SoftDelete did not wait for the session row lock")
++		}
++		time.Sleep(10 * time.Millisecond)
++	}
++}
++
++func TestPostgresSessionRepoSoftDeleteIsIdempotent(t *testing.T) {
++	db := sessionDeleteTestDB(t)
++	ctx := context.Background()
++	originalUpdatedAt := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
++	id := "10000000-0000-4000-8000-00000000a001"
++	testutil.InsertSessionRow(t, db, id, domain.StateActive, originalUpdatedAt)
++
++	repo := NewSessionRepo("postgres", db, "", false, "cluster-a")
++	deleted, err := repo.SoftDelete(ctx, id, "agent-a")
++	if err != nil {
++		t.Fatalf("SoftDelete: %v", err)
++	}
++	if deleted != 1 {
++		t.Fatalf("deleted = %d, want 1", deleted)
++	}
++	state, firstUpdatedAt := testutil.SessionRowState(t, db, id)
++	if state != domain.StateDeleted {
++		t.Fatalf("state = %q, want deleted", state)
++	}
++	if !firstUpdatedAt.After(originalUpdatedAt) {
++		t.Fatalf("updated_at = %s, want after %s", firstUpdatedAt, originalUpdatedAt)
++	}
++
++	deleted, err = repo.SoftDelete(ctx, id, "agent-b")
++	if err != nil {
++		t.Fatalf("repeated SoftDelete: %v", err)
++	}
++	if deleted != 0 {
++		t.Fatalf("repeated deleted = %d, want 0", deleted)
++	}
++	_, repeatedUpdatedAt := testutil.SessionRowState(t, db, id)
++	if !repeatedUpdatedAt.Equal(firstUpdatedAt) {
++		t.Fatalf("repeated updated_at = %s, want unchanged %s", repeatedUpdatedAt, firstUpdatedAt)
++	}
++
++	deleted, err = repo.SoftDelete(
++		ctx,
++		"10000000-0000-4000-8000-00000000a099",
++		"agent-a",
++	)
++	if !errors.Is(err, domain.ErrNotFound) {
++		t.Fatalf("unknown SoftDelete error = %v, want ErrNotFound", err)
++	}
++	if deleted != 0 {
++		t.Fatalf("unknown deleted = %d, want 0", deleted)
++	}
++}
++
++func TestPostgresSessionRepoSoftDeleteLocksExactRow(t *testing.T) {
++	db := sessionDeleteTestDB(t)
++	ctx := context.Background()
++	targetID := "10000000-0000-4000-8000-00000000a002"
++	otherID := "10000000-0000-4000-8000-00000000a003"
++	originalUpdatedAt := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
++	testutil.InsertSessionRow(t, db, targetID, domain.StateActive, originalUpdatedAt)
++	testutil.InsertSessionRow(t, db, otherID, domain.StateActive, originalUpdatedAt)
++
++	blocker, err := db.BeginTx(ctx, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer blocker.Rollback()
++	var state string
++	if err := blocker.QueryRow(
++		`SELECT state FROM sessions WHERE id = $1 FOR UPDATE`,
++		targetID,
++	).Scan(&state); err != nil {
++		t.Fatal(err)
++	}
++
++	repo := NewSessionRepo("postgres", db, "", false, "cluster-a")
++	type result struct {
++		deleted int64
++		err     error
++	}
++	resultCh := make(chan result, 1)
++	go func() {
++		deleted, err := repo.SoftDelete(ctx, targetID, "agent-a")
++		resultCh <- result{deleted: deleted, err: err}
++	}()
++	waitForSessionDeleteLock(t, db)
++
++	otherDeleted, err := repo.SoftDelete(ctx, otherID, "agent-a")
++	if err != nil || otherDeleted != 1 {
++		t.Fatalf("unrelated SoftDelete = (%d, %v), want (1, nil)", otherDeleted, err)
++	}
++	var blockerUpdatedAt time.Time
++	if err := blocker.QueryRow(
++		`UPDATE sessions
++		 SET tags = '["lock-holder"]', updated_at = statement_timestamp()
++		 WHERE id = $1
++		 RETURNING updated_at`,
++		targetID,
++	).Scan(&blockerUpdatedAt); err != nil {
++		t.Fatal(err)
++	}
++	if err := blocker.Commit(); err != nil {
++		t.Fatal(err)
++	}
++
++	select {
++	case got := <-resultCh:
++		if got.err != nil || got.deleted != 1 {
++			t.Fatalf("locked SoftDelete = (%d, %v), want (1, nil)", got.deleted, got.err)
++		}
++	case <-time.After(2 * time.Second):
++		t.Fatal("SoftDelete did not resume after the row lock was released")
++	}
++	targetState, targetUpdatedAt := testutil.SessionRowState(t, db, targetID)
++	if targetState != domain.StateDeleted || targetUpdatedAt.Before(blockerUpdatedAt) {
++		t.Fatalf(
++			"target = (%q, %s), want deleted at or after lock-holder update %s",
++			targetState,
++			targetUpdatedAt,
++			blockerUpdatedAt,
++		)
++	}
++}
++
++func TestPostgresSessionRepoSoftDeleteObservesConcurrentDelete(t *testing.T) {
++	db := sessionDeleteTestDB(t)
++	ctx := context.Background()
++	id := "10000000-0000-4000-8000-00000000a004"
++	originalUpdatedAt := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
++	blockerUpdatedAt := originalUpdatedAt.Add(time.Hour)
++	testutil.InsertSessionRow(t, db, id, domain.StateActive, originalUpdatedAt)
++
++	blocker, err := db.BeginTx(ctx, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer blocker.Rollback()
++	var state string
++	if err := blocker.QueryRow(
++		`SELECT state FROM sessions WHERE id = $1 FOR UPDATE`,
++		id,
++	).Scan(&state); err != nil {
++		t.Fatal(err)
++	}
++
++	repo := NewSessionRepo("postgres", db, "", false, "cluster-a")
++	type result struct {
++		deleted int64
++		err     error
++	}
++	resultCh := make(chan result, 1)
++	go func() {
++		deleted, err := repo.SoftDelete(ctx, id, "agent-a")
++		resultCh <- result{deleted: deleted, err: err}
++	}()
++	waitForSessionDeleteLock(t, db)
++
++	if _, err := blocker.Exec(
++		`UPDATE sessions SET state = 'deleted', updated_at = $1 WHERE id = $2`,
++		blockerUpdatedAt,
++		id,
++	); err != nil {
++		t.Fatal(err)
++	}
++	if err := blocker.Commit(); err != nil {
++		t.Fatal(err)
++	}
++
++	select {
++	case got := <-resultCh:
++		if got.err != nil || got.deleted != 0 {
++			t.Fatalf("locked SoftDelete = (%d, %v), want (0, nil)", got.deleted, got.err)
++		}
++	case <-time.After(2 * time.Second):
++		t.Fatal("SoftDelete did not resume after the row lock was released")
++	}
++	targetState, targetUpdatedAt := testutil.SessionRowState(t, db, id)
++	if targetState != domain.StateDeleted || !targetUpdatedAt.Equal(blockerUpdatedAt) {
++		t.Fatalf(
++			"target = (%q, %s), want (deleted, %s)",
++			targetState,
++			targetUpdatedAt,
++			blockerUpdatedAt,
++		)
++	}
++}
++
++func TestPostgresSessionRepoBulkSoftDeleteCountsDistinctActiveRows(t *testing.T) {
++	db := sessionDeleteTestDB(t)
++	ctx := context.Background()
++	originalUpdatedAt := time.Date(2026, 3, 4, 5, 6, 7, 0, time.UTC)
++	activeA := "10000000-0000-4000-8000-00000000a010"
++	activeB := "10000000-0000-4000-8000-00000000a011"
++	alreadyDeleted := "10000000-0000-4000-8000-00000000a012"
++	unrequested := "10000000-0000-4000-8000-00000000a013"
++	testutil.InsertSessionRow(t, db, activeA, domain.StateActive, originalUpdatedAt)
++	testutil.InsertSessionRow(t, db, activeB, domain.StateActive, originalUpdatedAt)
++	testutil.InsertSessionRow(t, db, alreadyDeleted, domain.StateDeleted, originalUpdatedAt)
++	testutil.InsertSessionRow(t, db, unrequested, domain.StateActive, originalUpdatedAt)
++
++	repo := NewSessionRepo("postgres", db, "", false, "cluster-a")
++	ids := []string{
++		activeA,
++		activeA,
++		activeB,
++		alreadyDeleted,
++		"10000000-0000-4000-8000-00000000a098",
++	}
++	deleted, err := repo.BulkSoftDelete(ctx, ids, "agent-a")
++	if err != nil {
++		t.Fatalf("BulkSoftDelete: %v", err)
++	}
++	if deleted != 2 {
++		t.Fatalf("deleted = %d, want 2", deleted)
++	}
++
++	_, activeAUpdatedAt := testutil.SessionRowState(t, db, activeA)
++	_, activeBUpdatedAt := testutil.SessionRowState(t, db, activeB)
++	for _, id := range []string{activeA, activeB} {
++		state, updatedAt := testutil.SessionRowState(t, db, id)
++		if state != domain.StateDeleted || !updatedAt.After(originalUpdatedAt) {
++			t.Fatalf("%s = (%q, %s), want deleted with newer timestamp", id, state, updatedAt)
++		}
++	}
++	for _, id := range []string{alreadyDeleted, unrequested} {
++		wantState := domain.StateDeleted
++		if id == unrequested {
++			wantState = domain.StateActive
++		}
++		state, updatedAt := testutil.SessionRowState(t, db, id)
++		if state != wantState || !updatedAt.Equal(originalUpdatedAt) {
++			t.Fatalf("%s = (%q, %s), want (%q, %s)", id, state, updatedAt, wantState, originalUpdatedAt)
++		}
++	}
++
++	deleted, err = repo.BulkSoftDelete(ctx, ids, "agent-b")
++	if err != nil || deleted != 0 {
++		t.Fatalf("repeated BulkSoftDelete = (%d, %v), want (0, nil)", deleted, err)
++	}
++	_, repeatedAUpdatedAt := testutil.SessionRowState(t, db, activeA)
++	_, repeatedBUpdatedAt := testutil.SessionRowState(t, db, activeB)
++	if !repeatedAUpdatedAt.Equal(activeAUpdatedAt) ||
++		!repeatedBUpdatedAt.Equal(activeBUpdatedAt) {
++		t.Fatal("repeated batch delete changed an already-deleted row timestamp")
++	}
++
++	deleted, err = repo.BulkSoftDelete(ctx, nil, "agent-a")
++	if err != nil || deleted != 0 {
++		t.Fatalf("empty BulkSoftDelete = (%d, %v), want (0, nil)", deleted, err)
++	}
++}
++
++func TestPostgresSessionRepoWithoutSessionsTable(t *testing.T) {
++	db := sessionDeleteTestDB(t)
++	if _, err := db.Exec(`DROP TABLE sessions`); err != nil {
++		t.Fatalf("drop sessions table: %v", err)
++	}
++	repo := NewSessionRepo("postgres", db, "", false, "cluster-a")
++
++	deleted, err := repo.SoftDelete(context.Background(), "missing", "agent-a")
++	if !errors.Is(err, domain.ErrNotFound) || deleted != 0 {
++		t.Errorf("SoftDelete = (%d, %v), want (0, ErrNotFound)", deleted, err)
++	}
++	deleted, err = repo.BulkSoftDelete(
++		context.Background(),
++		[]string{"missing"},
++		"agent-a",
++	)
++	if err != nil || deleted != 0 {
++		t.Errorf("BulkSoftDelete = (%d, %v), want (0, nil)", deleted, err)
++	}
++}
++
++func TestSessionRepoFactoryPreservesOtherBackends(t *testing.T) {
++	if _, ok := NewSessionRepo("tidb", nil, "", false, "").(*tidb.SessionRepo); !ok {
++		t.Fatal("tidb backend no longer selects the TiDB session repository")
++	}
++	if _, ok := NewSessionRepo("", nil, "", false, "").(*tidb.SessionRepo); !ok {
++		t.Fatal("default backend no longer selects the TiDB session repository")
++	}
++
++	for _, backend := range []string{"db9", "unsupported"} {
++		repo := NewSessionRepo(backend, nil, "", false, "")
++		if _, err := repo.SoftDelete(context.Background(), "id", "agent"); !errors.Is(err, domain.ErrNotSupported) {
++			t.Fatalf("%s SoftDelete error = %v, want ErrNotSupported", backend, err)
++		}
++		if _, err := repo.BulkSoftDelete(context.Background(), []string{"id"}, "agent"); !errors.Is(err, domain.ErrNotSupported) {
++			t.Fatalf("%s BulkSoftDelete error = %v, want ErrNotSupported", backend, err)
++		}
++	}
++}
+diff --git a/server/internal/testutil/session.go b/server/internal/testutil/session.go
+new file mode 100644
+index 0000000..1b798e8
+--- /dev/null
++++ b/server/internal/testutil/session.go
+@@ -0,0 +1,77 @@
++package testutil
++
++import (
++	"crypto/sha256"
++	"database/sql"
++	"encoding/hex"
++	"testing"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/domain"
++)
++
++func RecreateMemoryDeleteTable(t testing.TB, db *sql.DB) {
++	t.Helper()
++	if _, err := db.Exec(`DROP TABLE IF EXISTS memories`); err != nil {
++		t.Fatalf("drop memories table: %v", err)
++	}
++	if _, err := db.Exec(`
++		CREATE TABLE memories (
++			id VARCHAR(36) PRIMARY KEY,
++			content TEXT NOT NULL,
++			source VARCHAR(100),
++			tags JSONB,
++			metadata JSONB,
++			embedding TEXT,
++			memory_type VARCHAR(20) NOT NULL DEFAULT 'pinned',
++			agent_id VARCHAR(100),
++			session_id VARCHAR(100),
++			app_id VARCHAR(100) NOT NULL DEFAULT '',
++			state VARCHAR(20) NOT NULL DEFAULT 'active',
++			version INT DEFAULT 1,
++			updated_by VARCHAR(100),
++			superseded_by VARCHAR(36),
++			created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
++			updated_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
++		)
++	`); err != nil {
++		t.Fatalf("create memories table: %v", err)
++	}
++}
++
++func InsertSessionRow(
++	t testing.TB,
++	db *sql.DB,
++	id string,
++	state domain.MemoryState,
++	updatedAt time.Time,
++) {
++	t.Helper()
++	contentHash := sha256.Sum256([]byte(id))
++	if _, err := db.Exec(`
++		INSERT INTO sessions (
++			id, session_id, app_id, role, content, content_hash, state,
++			created_at, updated_at
++		)
++		VALUES ($1, 'session-delete', 'app-delete', 'user', $2, $3, $4, $5, $5)
++	`, id, "content-"+id, hex.EncodeToString(contentHash[:]), state, updatedAt); err != nil {
++		t.Fatalf("insert session %s: %v", id, err)
++	}
++}
++
++func SessionRowState(
++	t testing.TB,
++	db *sql.DB,
++	id string,
++) (domain.MemoryState, time.Time) {
++	t.Helper()
++	var state domain.MemoryState
++	var updatedAt time.Time
++	if err := db.QueryRow(
++		`SELECT state, updated_at FROM sessions WHERE id = $1`,
++		id,
++	).Scan(&state, &updatedAt); err != nil {
++		t.Fatalf("read session %s: %v", id, err)
++	}
++	return state, updatedAt
++}
