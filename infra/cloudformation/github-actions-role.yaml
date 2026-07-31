@@ -578,9 +578,28 @@ Resources:
             # can't be resource-scoped. Split out with Resource "*"; every
             # subsequent op on the secret is governed by the name-prefixed
             # statement above, and the DenyPolicy blocks account-level abuse.
+            # ListSecrets likewise has no resource-level scoping; the memory-
+            # cleanup dry-run E2E (issue #102) uses it to resolve the stage's
+            # tenant-secret ARN by name filter (value reads stay governed by
+            # the prefixed GetSecretValue statement above).
             Effect: Allow
             Action:
               - secretsmanager:CreateSecret
+              - secretsmanager:ListSecrets
+            Resource: "*"
+          - Sid: BedrockMantleCleanupE2E
+            # The memory-cleanup dry-run E2E (issue #102) classifies memories
+            # with GLM-5 directly from the CI runner (bearer minted locally by
+            # @aws/bedrock-token-generator over this role). Mirrors the action
+            # set the ECS task role holds for the llm-proxy sidecar (the Mantle
+            # inference path also checks the project read actions).
+            Effect: Allow
+            Action:
+              - bedrock-mantle:CreateInference
+              - bedrock-mantle:CallWithBearerToken
+              - bedrock-mantle:GetProject
+              - bedrock-mantle:ListProjects
+              - bedrock-mantle:ListTagsForResource
             Resource: "*"
           - Sid: EC2ForDatabase
             # Security-group lifecycle for the Aurora cluster + ECS workloads.
@@ -894,6 +913,11 @@ Resources:
               - servicediscovery:TagResource
               - servicediscovery:UntagResource
               - servicediscovery:ListTagsForResource
+              # DiscoverInstances: the memory-cleanup dry-run E2E (issue #102)
+              # resolves mnemo-server's private IP through the Cloud Map data
+              # plane — the CI runner is in the VPC but not associated with the
+              # private hosted zone, so `.local` DNS does not resolve there.
+              - servicediscovery:DiscoverInstances
             Resource: "*"
           - Sid: Route53ForCloudMap
             # A servicediscovery PrivateDnsNamespace creates + manages a Route53

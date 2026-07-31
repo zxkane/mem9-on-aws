@@ -688,6 +688,55 @@ After deploying a revision that introduces this workflow, re-run
 read-only `tag:GetResources`, `iam:ListRoles`, and scoped `iam:ListRoleTags`
 grants used for inventory discovery.
 
+## Memory cleanup (operator runbook)
+
+`scripts/memory-cleanup.mjs` retroactively audits the memory store against the
+same D1–D4 durability rules smart-ingest enforces (issue #102; design:
+`docs/designs/memory-cleanup.md`). CI runs it in dry-run against every PR
+preview; production execution is a deliberate manual flow:
+
+1. **Dry-run** (read-only; classifies every active memory with GLM-5):
+
+   ```bash
+   node scripts/memory-cleanup.mjs --stage prod \
+     --tenant-secret-arn "$(aws secretsmanager list-secrets \
+       --filters Key=name,Values=mem9-on-aws-prod-tenant-api-key- \
+       --query 'sort_by(SecretList, &CreatedDate)[-1].ARN' --output text)"
+   ```
+
+   The decision list is written to `~/.mem9-cleanup/prod/decisions-*.json`
+   (mode 0600, outside any checkout — it contains memory content and must
+   never be committed or attached to issues/PRs).
+
+2. **Review** the decision list. To approve a subset, put one decision id per
+   line in a text file.
+
+3. **Apply during a low-ingest window** (the LWW re-read guard narrows but
+   does not close the TOCTOU race with live ingest — residual risk is
+   accepted because deletes are soft, `state='deleted'`):
+
+   ```bash
+   node scripts/memory-cleanup.mjs --stage prod --apply \
+     --decisions ~/.mem9-cleanup/prod/decisions-<ts>.json \
+     [--ids approved.txt] [--cap 50] ...
+   ```
+
+   Destructive actions (deleted ids + merge rewrites) are capped per run
+   (default 50); the run aborts before any call that would exceed the cap. A
+   stage-scoped lockfile prevents concurrent applies from the same host; do
+   not run applies from two hosts at once (single-operator contract).
+
+Requires VPC-internal network access to `mnemo.mem9-<stage>.local:8080` (the
+script discovers the task IP via Cloud Map `DiscoverInstances`; pass
+`--base-url` explicitly when tunneling) plus IAM for `secretsmanager:ListSecrets`
++ `GetSecretValue` on the tenant secret, `servicediscovery:DiscoverInstances`,
+and `bedrock-mantle:CreateInference`/`CallWithBearerToken`.
+
+After deploying a revision that introduces the cleanup E2E step, re-run
+`scripts/deploy-github-role.sh` once so the CI role gains
+`servicediscovery:DiscoverInstances`, `secretsmanager:ListSecrets`, and the
+`bedrock-mantle` inference actions.
+
 ## License
 
 The mem9 server (`mnemo-server`) is Apache-2.0 (upstream `mem9-ai/mem9`). See that

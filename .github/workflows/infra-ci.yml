@@ -381,6 +381,18 @@ jobs:
           AWS_REGION: ap-northeast-1
         run: bash scripts/run-oauth-facade-smoke.sh
 
+      - name: Memory cleanup dry-run E2E (preview)
+        # TC-MEMCLEAN-060 (issue #102): the operator cleanup tool scans the
+        # preview stage's live store via Cloud Map discovery, classifies with
+        # GLM-5, writes a decision list, and asserts writeCalls=0. Dry-run
+        # only — the wrapper never passes --apply.
+        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        shell: bash
+        env:
+          STAGE: ${{ steps.deploy.outputs.stage }}
+          AWS_REGION: ap-northeast-1
+        run: bash scripts/run-memory-cleanup-e2e.sh
+
       - name: Auto-cleanup on deploy failure
         # Best-effort — if the deploy half-applied resources, remove them so the
         # next push doesn't accumulate orphan state.
