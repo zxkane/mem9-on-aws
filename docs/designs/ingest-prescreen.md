@@ -52,9 +52,9 @@ frozen before labels are read.
   job creation time. This yields every label-valid job in the window, 1,052
   jobs, and exceeds the minimum of 500.
 - **Source:** canonical `messages` payloads in Aurora `ingest_jobs` joined to
-  the latest applied plan in `ingest_job_plans`. The schema defines
-  `ingest_jobs.job_id` as a global primary key; the query relies on that
-  invariant when retaining only the job key in its temporary feature table.
+  the latest applied plan in `ingest_job_plans`. The temporary feature rows
+  retain both tenant and job keys because plans use the composite
+  `(tenant_id, job_id, plan_revision)` primary key. Neither key is emitted.
 - **Ground truth:** the applied plan JSON's `zero_fact=true` is zero-fact.
   `zero_fact` uses `omitempty`, so its absence after the label boundary means
   extraction produced at least one fact. Older plans are excluded because an
@@ -85,8 +85,10 @@ session as the resampling cluster, while retaining the zero-observed-error and
 
 The committed query is
 [`scripts/analyze-ingest-prescreen.sql`](../../scripts/analyze-ingest-prescreen.sql).
-An authorized operator runs it from a private network path with a read-only
-PostgreSQL connection:
+An authorized operator runs it from a private network path with a database role
+that has `SELECT` on the two source tables and `TEMP` on the database, but no
+source-table write grants. The invocation also works when the role has
+`default_transaction_read_only=on`:
 
 ```bash
 export PGHOST="<database-host>"
@@ -107,24 +109,34 @@ psql -X --quiet --tuples-only --no-align \
   > /tmp/ingest-prescreen-report.local.jsonl
 
 jq -e -s '
-  map(.section) as $sections
-  | ($sections | index("protocol")) != null
-    and ($sections | index("baseline")) != null
-    and ($sections | index("selected")) != null
+  (map(.section) | last == "complete")
+  and (map(select(.section == "protocol")) | length == 1)
+  and (map(select(.section == "baseline")) | length == 1)
+  and (map(select(.section == "selected")) | length == 1)
+  and (map(select(.section == "complete")) | length == 1)
+  and (map(select(.section == "complete"))[0].data.consistent == true)
+  and (
+    (map(select(.section == "false_skip_item")) | length)
+    == (map(select(.section == "selected"))[0].data.false_skips // 0)
+  )
 ' /tmp/ingest-prescreen-report.local.jsonl
 ```
 
 The production run used a one-off private Fargate task based on the existing
 bootstrap image and task-injected database configuration. The task definition
-was deregistered after the query. The script creates only empty session-local
-temporary objects before starting `TRANSACTION READ ONLY`; all source reads,
+was deregistered after the query. To support roles whose session default is
+read-only, the script uses one explicit `TRANSACTION READ WRITE` only to create
+empty session-local objects. Committing it automatically restores the role
+default before the explicit `TRANSACTION READ ONLY`. All source reads,
 temporary rows, and reports occur inside that read-only transaction. Message
 and persisted-action text is decoded only in database-local feature queries.
 Output is bounded JSONL containing aggregate counts, buckets, rates, and
 synthetic false-skip labels. No content, fact text, tenant/session/job
 identifier, hash, credential, or environment identifier leaves PostgreSQL.
 The result reports zero empty-message jobs, proving the left join did not
-silently exclude any eligible row. No new production telemetry was needed.
+silently exclude any eligible row. A final `complete` record proves the
+itemized false-skip count matches the selected rule's aggregate count, so
+truncated output fails validation. No new production telemetry was needed.
 
 ## Baseline
 
@@ -245,12 +257,14 @@ durable-only extractor is making a semantic decision that message shape and a
 small keyword list do not reproduce.
 
 No content was manually reviewed or exported. For the selected false skips,
-the query privately classifies persisted memory-action text into a fixed
-durable-fact taxonomy and emits only the category; all three fell into
-`other_durable_fact`. This preserves instance privacy. The zero-fact cause
-categories remain measurable proxies rather than a subjective content
-taxonomy, and their overlap with fact-producing jobs is itself the limiting
-result.
+the query privately classifies persisted memory actions into a fixed
+durable-fact taxonomy and emits only the category. It distinguishes no memory
+mutation and actions without content text before applying lexical categories.
+The corrected production rerun found content text for all three false skips;
+all three fell into `other_durable_fact`. This preserves instance privacy. The
+zero-fact cause categories remain measurable proxies rather than a subjective
+content taxonomy, and their overlap with fact-producing jobs is itself the
+limiting result.
 
 ## Candidate Signals
 
@@ -285,9 +299,9 @@ content.
 
 | Item | Category | Shape | Durable-language cues |
 |---|---|---|---|
-| H-0001 | Other durable fact | 1 message, 0-80 runes | None |
-| H-0002 | Other durable fact | 1 message, 0-80 runes | None |
-| H-0003 | Other durable fact | 1 message, 0-80 runes | None |
+| H-0001 | `other_durable_fact` | 1 message, 0-80 runes | None |
+| H-0002 | `other_durable_fact` | 1 message, 0-80 runes | None |
+| H-0003 | `other_durable_fact` | 1 message, 0-80 runes | None |
 
 The point estimate, 3/683 or 0.4392%, is below 0.5%, but the explicit
 criterion also requires zero observed false skips. Its one-sided 95% Wilson

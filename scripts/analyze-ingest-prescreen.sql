@@ -31,13 +31,15 @@
   \set window_days '30'
 \endif
 
--- PostgreSQL permits a read-only transaction to modify temporary tables, but
--- CREATE TABLE AS itself is classified as DDL. Define empty session-local
--- objects first; every source-table read and every populated row then occurs
--- inside the read-only transaction below.
-BEGIN;
+-- PostgreSQL permits a read-only transaction to modify existing temporary
+-- tables, but creating them is classified as DDL. A read-only role may also
+-- default every transaction to read-only. Use one explicit read-write
+-- transaction only to define empty session-local objects; committing it
+-- restores the role default before every source-table read and populated row.
+BEGIN TRANSACTION READ WRITE;
 CREATE TEMP TABLE ingest_prescreen_features (
   job_id varchar(36) NOT NULL,
+  tenant_id varchar(36) NOT NULL,
   split text NOT NULL,
   zero_fact boolean NOT NULL,
   message_count int NOT NULL,
@@ -56,6 +58,17 @@ CREATE TEMP TABLE ingest_prescreen_features (
   cause_category text,
   message_count_bucket text NOT NULL,
   rune_bucket text NOT NULL
+);
+
+CREATE TEMP TABLE ingest_prescreen_false_skip_items (
+  item text PRIMARY KEY,
+  category text NOT NULL,
+  message_count_bucket text NOT NULL,
+  rune_bucket text NOT NULL,
+  has_decision_language boolean NOT NULL,
+  has_preference_language boolean NOT NULL,
+  has_constraint_language boolean NOT NULL,
+  has_environment_language boolean NOT NULL
 );
 
 CREATE TEMP VIEW ingest_prescreen_candidates AS
@@ -149,10 +162,10 @@ parameters AS (
 ),
 decoded_jobs AS MATERIALIZED (
   SELECT
-    -- Schema invariant: ingest_jobs.job_id is the global primary key. The
-    -- feature tables can therefore retain job_id without tenant_id, and the
-    -- later applied-plan lookup remains unambiguous.
+    -- job_id globally identifies feature joins, while tenant_id is retained
+    -- for the composite ingest_job_plans key used by the taxonomy lookup.
     job.job_id,
+    job.tenant_id,
     mod(
       (
         'x' || substr(
@@ -191,10 +204,10 @@ decoded_jobs AS MATERIALIZED (
   CROSS JOIN parameters
   WHERE job.state = 'succeeded'
     AND job.mode = 'smart'
-    AND job.created_at < parameters.analysis_cutoff
-    AND job.created_at >=
+    AND plan.applied_at >= greatest(
+      parameters.label_start,
       parameters.analysis_cutoff - make_interval(days => parameters.window_days)
-    AND plan.applied_at >= parameters.label_start
+    )
     AND plan.applied_at < parameters.analysis_cutoff
 ),
 message_features AS (
@@ -235,6 +248,7 @@ message_features AS (
 features AS (
   SELECT
     job.job_id,
+    job.tenant_id,
     CASE
       WHEN job.split_bucket = 0 THEN 'tuning'
       ELSE 'held_out'
@@ -305,6 +319,105 @@ SELECT
     ELSE '5001+'
   END AS rune_bucket
 FROM features;
+
+INSERT INTO ingest_prescreen_false_skip_items (
+  item,
+  category,
+  message_count_bucket,
+  rune_bucket,
+  has_decision_language,
+  has_preference_language,
+  has_constraint_language,
+  has_environment_language
+)
+WITH
+selected AS MATERIALIZED (
+  SELECT
+    hit.job_id,
+    hit.tenant_id,
+    hit.message_count_bucket,
+    hit.rune_bucket,
+    hit.has_decision_language,
+    hit.has_preference_language,
+    hit.has_constraint_language,
+    hit.has_environment_language
+  FROM ingest_prescreen_candidates AS hit
+  JOIN ingest_prescreen_choice ON ingest_prescreen_choice.candidate = hit.candidate
+  WHERE hit.split = 'held_out'
+    AND hit.should_skip
+    AND NOT hit.zero_fact
+),
+categorized AS (
+  SELECT
+    'H-' || lpad(
+      row_number() OVER (ORDER BY md5(hit.job_id))::text,
+      4,
+      '0'
+    ) AS item,
+    CASE
+      WHEN action_summary.action_count = 0
+        THEN 'fact_extracted_no_memory_mutation'
+      WHEN action_summary.action_count > 0
+        AND action_summary.action_text = ''
+        THEN 'action_without_content_text'
+      WHEN action_summary.action_text ~
+        '\m(prefer|preference|always|never|like|dislike)\M'
+        THEN 'preference'
+      WHEN action_summary.action_text ~
+        '\m(decid(e|ed|ing)|decision|choose|chose|rationale|because|root cause)\M'
+        THEN 'decision_or_rationale'
+      WHEN action_summary.action_text ~
+        '\m(must|should|require[ds]?|constraint|policy|do not|don''t|avoid)\M'
+        THEN 'constraint_or_policy'
+      WHEN action_summary.action_text ~
+        '\m(config|configuration|configured|environment|runtime|version|deploy|'
+        'architecture|uses?)\M'
+        THEN 'environment_or_configuration'
+      WHEN action_summary.action_text ~
+        '\m(error|failure|failed|bug|workaround|gotcha|remember|fix(ed)?)\M'
+        THEN 'failure_or_workaround'
+      ELSE 'other_durable_fact'
+    END AS category,
+    hit.message_count_bucket,
+    hit.rune_bucket,
+    hit.has_decision_language,
+    hit.has_preference_language,
+    hit.has_constraint_language,
+    hit.has_environment_language
+  FROM selected AS hit
+  JOIN LATERAL (
+    SELECT convert_from(retained.plan_payload, 'UTF8')::jsonb AS plan_json
+    FROM ingest_job_plans AS retained
+    WHERE retained.tenant_id = hit.tenant_id
+      AND retained.job_id = hit.job_id
+      AND retained.state = 'applied'
+    ORDER BY retained.plan_revision DESC
+    LIMIT 1
+  ) AS plan ON TRUE
+  CROSS JOIN LATERAL (
+    SELECT
+      count(*)::int AS action_count,
+      coalesce(string_agg(lower(action.value->>'content'), E'\n'), '')
+        AS action_text
+    FROM jsonb_array_elements(
+      CASE
+        WHEN jsonb_typeof(plan.plan_json->'actions') = 'array'
+          THEN plan.plan_json->'actions'
+        ELSE '[]'::jsonb
+      END
+    ) AS action(value)
+  ) AS action_summary
+)
+SELECT
+  item,
+  category,
+  message_count_bucket,
+  rune_bucket,
+  has_decision_language,
+  has_preference_language,
+  has_constraint_language,
+  has_environment_language
+FROM categorized;
 
 SELECT jsonb_build_object(
   'section', 'protocol',
@@ -492,84 +605,33 @@ SELECT jsonb_build_object(
 FROM (SELECT 1) AS one
 LEFT JOIN result ON TRUE;
 
-WITH
-selected AS MATERIALIZED (
-  SELECT
-    hit.job_id,
-    hit.message_count_bucket,
-    hit.rune_bucket,
-    hit.has_decision_language,
-    hit.has_preference_language,
-    hit.has_constraint_language,
-    hit.has_environment_language
-  FROM ingest_prescreen_candidates AS hit
-  JOIN ingest_prescreen_choice ON ingest_prescreen_choice.candidate = hit.candidate
-  WHERE hit.split = 'held_out'
-    AND hit.should_skip
-    AND NOT hit.zero_fact
-),
-categorized AS (
-  SELECT
-    'H-' || lpad(
-      row_number() OVER (ORDER BY md5(hit.job_id))::text,
-      4,
-      '0'
-    ) AS item,
-    CASE
-      WHEN action_summary.action_count = 0
-        THEN 'fact_extracted_no_memory_mutation'
-      WHEN action_summary.action_text ~
-        '\m(prefer|preference|always|never|like|dislike)\M'
-        THEN 'preference'
-      WHEN action_summary.action_text ~
-        '\m(decid(e|ed|ing)|decision|choose|chose|rationale|because|root cause)\M'
-        THEN 'decision_or_rationale'
-      WHEN action_summary.action_text ~
-        '\m(must|should|require[ds]?|constraint|policy|do not|don''t|avoid)\M'
-        THEN 'constraint_or_policy'
-      WHEN action_summary.action_text ~
-        '\m(config|configuration|configured|environment|runtime|version|deploy|'
-        'architecture|uses?)\M'
-        THEN 'environment_or_configuration'
-      WHEN action_summary.action_text ~
-        '\m(error|failure|failed|bug|workaround|gotcha|remember|fix(ed)?)\M'
-        THEN 'failure_or_workaround'
-      ELSE 'other_durable_fact'
-    END AS category,
-    hit.message_count_bucket,
-    hit.rune_bucket,
-    hit.has_decision_language,
-    hit.has_preference_language,
-    hit.has_constraint_language,
-    hit.has_environment_language
-  FROM selected AS hit
-  JOIN LATERAL (
-    SELECT convert_from(retained.plan_payload, 'UTF8')::jsonb AS plan_json
-    FROM ingest_job_plans AS retained
-    WHERE retained.job_id = hit.job_id
-      AND retained.state = 'applied'
-    ORDER BY retained.plan_revision DESC
-    LIMIT 1
-  ) AS plan ON TRUE
-  CROSS JOIN LATERAL (
-    SELECT
-      count(*)::int AS action_count,
-      coalesce(string_agg(lower(action.value->>'content'), E'\n'), '')
-        AS action_text
-    FROM jsonb_array_elements(
-      CASE
-        WHEN jsonb_typeof(plan.plan_json->'actions') = 'array'
-          THEN plan.plan_json->'actions'
-        ELSE '[]'::jsonb
-      END
-    ) AS action(value)
-  ) AS action_summary
-)
 SELECT jsonb_build_object(
   'section', 'false_skip_item',
-  'data', to_jsonb(categorized)
+  'data', to_jsonb(ingest_prescreen_false_skip_items)
 )
-FROM categorized
+FROM ingest_prescreen_false_skip_items
 ORDER BY item;
+
+WITH
+actual AS (
+  SELECT count(*)::int AS false_skip_items
+  FROM ingest_prescreen_false_skip_items
+),
+expected AS (
+  SELECT coalesce(sum(metrics.false_skips), 0)::int AS false_skips
+  FROM ingest_prescreen_candidate_metrics AS metrics
+  JOIN ingest_prescreen_choice USING (candidate)
+  WHERE metrics.split = 'held_out'
+)
+SELECT jsonb_build_object(
+  'section', 'complete',
+  'data', jsonb_build_object(
+    'false_skip_items', actual.false_skip_items,
+    'expected_false_skips', expected.false_skips,
+    'consistent', actual.false_skip_items = expected.false_skips
+  )
+)
+FROM actual
+CROSS JOIN expected;
 
 ROLLBACK;
