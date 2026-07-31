@@ -6,7 +6,7 @@
       "ref": "main",
       "sourceType": "github",
       "skillPath": "skills/autonomous-common/SKILL.md",
-      "computedHash": "c4b38d67e95f82070681efe4d55766da0fd1a79067d79379baf074ff70086177"
+      "computedHash": "e939a24b3d3060812eac92e4f1c747c8d57bd6111ce931640feb7d689e03ea0a"
     },
     "autonomous-dev": {
       "source": "zxkane/autonomous-dev-team",
@@ -20,7 +20,7 @@
       "ref": "main",
       "sourceType": "github",
       "skillPath": "skills/autonomous-dispatcher/SKILL.md",
-      "computedHash": "6d552c4a19c2f58472920b03df79930f83aa9aec5ef30ab25319bdd84f8b5d53"
+      "computedHash": "f9346f48ae0b11f61505088f0a94bd2a454392b2a59b0c36bd5f1cefed153e96"
     },
     "autonomous-review": {
       "source": "zxkane/autonomous-dev-team",
