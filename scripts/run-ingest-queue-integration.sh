@@ -58,7 +58,7 @@ expect_ingest_job_insert_rejected \
   "INSERT INTO ingest_jobs (
       job_id, tenant_id, idempotency_key, active_plan_revision
     ) VALUES (
-      '00000000-0000-4000-8000-000000000201',
+      '00000000-0000-4000-8000-00000000a201',
       'tenant-a',
       repeat('c', 64),
       1
@@ -68,7 +68,7 @@ expect_ingest_job_insert_rejected \
   "INSERT INTO ingest_jobs (
       job_id, tenant_id, idempotency_key, active_plan_hash
     ) VALUES (
-      '00000000-0000-4000-8000-000000000202',
+      '00000000-0000-4000-8000-00000000a202',
       'tenant-a',
       repeat('d', 64),
       repeat('e', 64)
@@ -78,10 +78,10 @@ expect_ingest_job_insert_rejected \
   "INSERT INTO ingest_jobs (
       job_id, tenant_id, idempotency_key, runtime_operation_id
     ) VALUES (
-      '00000000-0000-4000-8000-000000000203',
+      '00000000-0000-4000-8000-00000000a203',
       'tenant-a',
       repeat('f', 64),
-      '00000000-0000-7000-8000-000000000203'
+      '00000000-0000-7000-8000-00000000a203'
     )"
 
 # Add the runtime memory table as it would exist before this migration, including
@@ -106,10 +106,10 @@ docker exec "$CONTAINER" psql -q -v ON_ERROR_STOP=1 -U postgres -d mem9_queue \
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
       INSERT INTO memories (id, content, version)
-      VALUES ('00000000-0000-4000-8000-000000000054', 'legacy', NULL);"
+      VALUES ('00000000-0000-4000-8000-00000000a054', 'legacy', NULL);"
 apply_migration mem9_queue
 docker exec "$CONTAINER" psql -qAt -v ON_ERROR_STOP=1 -U postgres -d mem9_queue \
-  -c "SELECT version FROM memories WHERE id = '00000000-0000-4000-8000-000000000054'" |
+  -c "SELECT version FROM memories WHERE id = '00000000-0000-4000-8000-00000000a054'" |
   grep -qx "1"
 docker exec "$CONTAINER" psql -qAt -v ON_ERROR_STOP=1 -U postgres -d mem9_queue \
   -c "SELECT is_nullable || ':' || column_default
@@ -136,16 +136,16 @@ docker exec "$CONTAINER" psql -q -v ON_ERROR_STOP=1 -U postgres -d mem9_queue_up
 docker exec "$CONTAINER" psql -q -v ON_ERROR_STOP=1 -U postgres -d mem9_queue_upgraded \
   -c "INSERT INTO ingest_jobs (job_id, idempotency_key, canonical_payload)
       VALUES (
-        '00000000-0000-4000-8000-000000000099',
-        md5('00000000-0000-4000-8000-000000000099')
-          || md5('ingest-v1:00000000-0000-4000-8000-000000000099'),
+        '00000000-0000-4000-8000-00000000a099',
+        md5('00000000-0000-4000-8000-00000000a099')
+          || md5('ingest-v1:00000000-0000-4000-8000-00000000a099'),
         decode(repeat('aa', 1048577), 'hex')
       )"
 apply_migration mem9_queue_upgraded
 apply_migration mem9_queue_upgraded
 docker exec "$CONTAINER" psql -qAt -v ON_ERROR_STOP=1 -U postgres -d mem9_queue_upgraded \
-  -c "SELECT idempotency_key FROM ingest_jobs WHERE job_id = '00000000-0000-4000-8000-000000000099'" |
-  grep -qx "legacy:00000000-0000-4000-8000-000000000099"
+  -c "SELECT idempotency_key FROM ingest_jobs WHERE job_id = '00000000-0000-4000-8000-00000000a099'" |
+  grep -qx "legacy:00000000-0000-4000-8000-00000000a099"
 docker exec "$CONTAINER" psql -qAt -v ON_ERROR_STOP=1 -U postgres -d mem9_queue_upgraded \
   -c "SELECT pg_get_constraintdef(oid)
       FROM pg_constraint
@@ -155,7 +155,7 @@ docker exec "$CONTAINER" psql -qAt -v ON_ERROR_STOP=1 -U postgres -d mem9_queue_
 docker exec "$CONTAINER" psql -qAt -v ON_ERROR_STOP=1 -U postgres -d mem9_queue_upgraded \
   -c "SELECT octet_length(canonical_payload)
       FROM ingest_jobs
-      WHERE job_id = '00000000-0000-4000-8000-000000000099'" |
+      WHERE job_id = '00000000-0000-4000-8000-00000000a099'" |
   grep -qx "1048577"
 docker exec "$CONTAINER" psql -qAt -v ON_ERROR_STOP=1 -U postgres -d mem9_queue_upgraded \
   -c "SELECT convalidated
@@ -166,7 +166,7 @@ docker exec "$CONTAINER" psql -qAt -v ON_ERROR_STOP=1 -U postgres -d mem9_queue_
 if docker exec "$CONTAINER" psql -q -v ON_ERROR_STOP=1 -U postgres -d mem9_queue_upgraded \
   -c "INSERT INTO ingest_jobs (job_id, tenant_id, idempotency_key, canonical_payload)
       VALUES (
-        '00000000-0000-4000-8000-000000000101',
+        '00000000-0000-4000-8000-00000000a101',
         '',
         repeat('b', 64),
         decode(repeat('bb', 1048577), 'hex')
@@ -175,7 +175,7 @@ if docker exec "$CONTAINER" psql -q -v ON_ERROR_STOP=1 -U postgres -d mem9_queue
   exit 1
 fi
 docker exec "$CONTAINER" psql -q -v ON_ERROR_STOP=1 -U postgres -d mem9_queue_upgraded \
-  -c "INSERT INTO ingest_jobs (job_id, tenant_id, idempotency_key) VALUES ('00000000-0000-4000-8000-000000000100', '', repeat('a', 64))"
+  -c "INSERT INTO ingest_jobs (job_id, tenant_id, idempotency_key) VALUES ('00000000-0000-4000-8000-00000000a100', '', repeat('a', 64))"
 docker exec "$CONTAINER" psql -qAt -v ON_ERROR_STOP=1 -U postgres -d mem9_queue_upgraded \
   -c "SELECT count(*) FROM ingest_jobs WHERE tenant_id = ''" |
   grep -qx "2"
@@ -191,6 +191,7 @@ export MNEMO_TEST_POSTGRES_DSN="postgres://postgres:test@127.0.0.1:${PORT}/mem9_
 
 cd "$TMP_DIR/upstream/server"
 go test -count=1 \
+  ./internal/repository \
   ./internal/repository/postgres \
   ./internal/ingestqueue \
   ./internal/handler \

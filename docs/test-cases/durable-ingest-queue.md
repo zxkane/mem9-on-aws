@@ -94,6 +94,26 @@ Design: [`docs/designs/durable-ingest-queue.md`](../designs/durable-ingest-queue
 - Root and infrastructure Vitest suites pin migration contents, atomic worker
   wiring, Gateway status behavior, and enabled ECS configuration.
 
+## PostgreSQL Raw-Session Deletion
+
+| ID | Scenario | Expected |
+|---|---|---|
+| TC-SESSION-DELETE-001 | Factory constructs a PostgreSQL session repository and deletes an active row | The exact row is locked, changes to `state='deleted'`, receives a newer `updated_at`, and reports one affected row |
+| TC-SESSION-DELETE-002 | Single delete is repeated for an already-deleted row | The second call succeeds with zero affected rows and leaves `updated_at` unchanged |
+| TC-SESSION-DELETE-003 | Single delete targets an unknown row | The repository returns `ErrNotFound`; authenticated HTTP deletion preserves the existing 404 contract |
+| TC-SESSION-DELETE-004 | A concurrent transaction holds the requested row lock and changes it to deleted before releasing it | Single delete waits for the exact lock, observes the committed deleted state, returns zero, and performs no second update |
+| TC-SESSION-DELETE-005 | Batch input contains active, already-deleted, unknown, duplicate, and unrequested session IDs | Only distinct requested non-deleted rows change; the exact affected count excludes deleted, unknown, duplicate, and unrequested rows |
+| TC-SESSION-DELETE-006 | Batch input is empty | The repository returns zero without an error or database mutation |
+| TC-SESSION-DELETE-007 | Authenticated single delete misses `memories` and finds a PostgreSQL session row through `NewSessionRepo` | The handler returns 204 and soft-deletes the session row; a repeat remains 204 without changing its timestamp |
+| TC-SESSION-DELETE-008 | Authenticated batch delete includes a memory row, active and deleted session rows, an unknown ID, and a repeated ID | The handler returns the exact combined distinct memory/session count and leaves unrequested rows unchanged |
+| TC-SESSION-DELETE-009 | Two authenticated tenant databases contain the same session row ID | Deleting through one tenant context changes only its selected database; the other row remains active |
+| TC-SESSION-DELETE-010 | Factory constructs TiDB and unsupported backend session repositories | TiDB still selects its existing implementation; unsupported backends retain `ErrNotSupported` deletion behavior |
+| TC-SESSION-DELETE-011 | Apply all downstream patches to the pinned mem9 commit and run repository plus handler packages | Patch application is clean, the packages compile, and PostgreSQL integration tests run in the existing isolated databases |
+| TC-SESSION-DELETE-012 | A concurrent transaction locks an active session row, writes a fresh `updated_at`, and then releases it to a waiting single delete | The delete waits, changes the row to deleted, and persists an `updated_at` no earlier than the lock holder's write |
+| TC-SESSION-DELETE-013 | An authenticated tenant database contains `memories` but has no `sessions` table | Single fallback preserves the 404 contract; batch deletion still returns 200 with the exact memory-row count and no partial-failure response |
+| TC-SESSION-DELETE-014 | Handler integration starts from an isolated database without an incidental pre-created `memories` table | Test setup creates its explicit memory-schema precondition and both authenticated delete paths run independently of integration-script ordering |
+| TC-SESSION-DELETE-015 | A concurrent transaction locks an active session row, writes a fresh `updated_at`, and then releases it to a waiting batch delete | The batch delete waits, changes the row to deleted, and persists an `updated_at` no earlier than the lock holder's write |
+
 ## Durable Ingest Telemetry
 
 Design:
