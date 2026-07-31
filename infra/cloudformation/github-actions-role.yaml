@@ -895,15 +895,12 @@ Resources:
               - servicediscovery:UntagResource
               - servicediscovery:ListTagsForResource
             Resource: "*"
-          - Sid: Route53ForCloudMapAndFacadeDomain
+          - Sid: Route53ForCloudMap
             # A servicediscovery PrivateDnsNamespace creates + manages a Route53
             # PRIVATE hosted zone under the hood (and its record sets). Cloud Map
             # owns the record writes at runtime, but the deploy role must be able to
-            # create/delete the zone + associate it with the VPC. The optional
-            # OAuth façade custom domain reuses the read/change actions to find an
-            # existing same-account PUBLIC hosted zone and manage certificate
-            # validation plus API Gateway alias records; it never creates that
-            # public zone.
+            # create/delete the zone + associate it with the VPC. This is the only
+            # Route53 need; the OAuth façade uses Cloudflare for public DNS.
             Effect: Allow
             Action:
               - route53:CreateHostedZone
@@ -1186,9 +1183,8 @@ Resources:
   # UserPoolClient is covered by GatewayMcpPolicy.Cognito (cognito-idp:*Client),
   # and the sst.Secret's /sst/* SSM parameter by ScaffoldPolicy.SSM{Read,Write}
   # — so this policy carries the API Gateway, ACM, and service-linked-role
-  # control-plane surface. Route 53 record access is shared with ComputePolicy's
-  # Cloud Map lifecycle. Its own ManagedPolicy keeps the OAuth2-façade footprint
-  # auditable in one place and below IAM's 6144-byte per-policy cap.
+  # control-plane surface. Its own ManagedPolicy keeps the OAuth2-façade
+  # footprint auditable in one place and below IAM's 6144-byte per-policy cap.
   #
   # API Gateway ARNs have an EMPTY account field (arn:aws:apigateway:<region>::/…)
   # — the /apis (create), /apis/* (per-API ops), /domainnames (create),

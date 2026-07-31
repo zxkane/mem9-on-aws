@@ -400,10 +400,10 @@ proxy Lambda (`targetConfiguration.mcp.lambda.{lambdaArn, toolSchema}`) that rea
 mnemo-server over **AWS Cloud Map** private DNS (`mnemo.mem9-<stage>.local:8080`),
 injecting `X-API-Key` (= tenant id). This private backend path has no ALB, ACM
 certificate, VPC Lattice, public Route 53 zone, or public server endpoint. The
-optional ACM certificate and existing-zone records for the public OAuth facade
-custom domain are separate from this path. The Cloud Map private DNS namespace
-creates a VPC-associated Route 53 private hosted zone, as documented by
-[CreatePrivateDnsNamespace](https://docs.aws.amazon.com/cloud-map/latest/api/API_CreatePrivateDnsNamespace.html).
+optional ACM certificate and DNS-only Cloudflare records for the public OAuth
+facade custom domain are separate from this path. The Cloud Map private DNS
+namespace creates a VPC-associated Route 53 private hosted zone, as documented
+by [CreatePrivateDnsNamespace](https://docs.aws.amazon.com/cloud-map/latest/api/API_CreatePrivateDnsNamespace.html).
 The target shape follows the
 [AgentCore Lambda target documentation](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-add-target-api-target-config.html).
 The gateway service role grants only `lambda:InvokeFunction` on that target, as

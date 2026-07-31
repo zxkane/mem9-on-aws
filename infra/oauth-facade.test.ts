@@ -32,6 +32,8 @@ let addAuthorizerSpy: ReturnType<typeof vi.fn>;
 let authorizerId: ReturnType<typeof out>;
 let previousFacadeAuthorizerEnabled: string | undefined;
 let previousFacadeCustomDomain: string | undefined;
+let previousCloudflareApiToken: string | undefined;
+let previousCloudflareZoneId: string | undefined;
 
 // Recursively unwrap the loose out<T> mock (and plain values) — env / arg values
 // come through as out<T> or $interpolate results.
@@ -114,6 +116,13 @@ function installGlobals(stage: string) {
         }
       },
     },
+    cloudflare: {
+      dns: (args: Record<string, unknown>) => {
+        const dns = { provider: "cloudflare", args };
+        created.push({ kind: "CloudflareDns", args });
+        return dns;
+      },
+    },
     // sst.Secret — the HMAC signing key (empty default → façade 503 until seeded).
     Secret: class {
       value = out("hmac-secret-value");
@@ -133,8 +142,12 @@ beforeEach(() => {
   previousFacadeAuthorizerEnabled =
     process.env.MEM9_FACADE_AUTHORIZER_ENABLED;
   previousFacadeCustomDomain = process.env.MEM9_FACADE_CUSTOM_DOMAIN;
+  previousCloudflareApiToken = process.env.CLOUDFLARE_API_TOKEN;
+  previousCloudflareZoneId = process.env.CLOUDFLARE_ZONE_ID;
   delete process.env.MEM9_FACADE_AUTHORIZER_ENABLED;
   delete process.env.MEM9_FACADE_CUSTOM_DOMAIN;
+  delete process.env.CLOUDFLARE_API_TOKEN;
+  delete process.env.CLOUDFLARE_ZONE_ID;
 });
 afterEach(() => {
   for (const g of ["$app", "aws", "sst", "$interpolate"])
@@ -149,6 +162,16 @@ afterEach(() => {
     delete process.env.MEM9_FACADE_CUSTOM_DOMAIN;
   } else {
     process.env.MEM9_FACADE_CUSTOM_DOMAIN = previousFacadeCustomDomain;
+  }
+  if (previousCloudflareApiToken === undefined) {
+    delete process.env.CLOUDFLARE_API_TOKEN;
+  } else {
+    process.env.CLOUDFLARE_API_TOKEN = previousCloudflareApiToken;
+  }
+  if (previousCloudflareZoneId === undefined) {
+    delete process.env.CLOUDFLARE_ZONE_ID;
+  } else {
+    process.env.CLOUDFLARE_ZONE_ID = previousCloudflareZoneId;
   }
   vi.resetModules();
 });
@@ -262,11 +285,54 @@ describe("oauthFacade factory", () => {
 
   it("configures the production custom domain from a trimmed hostname", async () => {
     process.env.MEM9_FACADE_CUSTOM_DOMAIN = " Memory.Example.com. ";
+    process.env.CLOUDFLARE_API_TOKEN = "test-token";
+    process.env.CLOUDFLARE_ZONE_ID = "test-zone-id";
     installGlobals("prod");
     const oauthFacade = await loadFacade();
     oauthFacade(fakeCognitoOut());
 
-    expect(only("ApiGatewayV2").domain).toBe("memory.example.com");
+    expect(only("CloudflareDns")).toEqual({
+      zone: "test-zone-id",
+      proxy: false,
+    });
+    expect(only("ApiGatewayV2").domain).toEqual({
+      name: "memory.example.com",
+      dns: {
+        provider: "cloudflare",
+        args: {
+          zone: "test-zone-id",
+          proxy: false,
+        },
+      },
+    });
+    expect(JSON.stringify(only("ApiGatewayV2"))).not.toContain("test-token");
+  });
+
+  it.each([
+    ["CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ZONE_ID", "test-zone-id"],
+    ["CLOUDFLARE_ZONE_ID", "CLOUDFLARE_API_TOKEN", "test-token"],
+  ])(
+    "requires %s when the production custom domain is configured",
+    async (_missing, present, value) => {
+      process.env.MEM9_FACADE_CUSTOM_DOMAIN = "memory.example.com";
+      process.env[present] = value;
+      installGlobals("prod");
+      const oauthFacade = await loadFacade();
+
+      expect(() => oauthFacade(fakeCognitoOut())).toThrow(
+        new RegExp(`requires ${_missing} for Cloudflare DNS`, "u"),
+      );
+    },
+  );
+
+  it("reports both missing Cloudflare settings together", async () => {
+    process.env.MEM9_FACADE_CUSTOM_DOMAIN = "memory.example.com";
+    installGlobals("prod");
+    const oauthFacade = await loadFacade();
+
+    expect(() => oauthFacade(fakeCognitoOut())).toThrow(
+      /requires CLOUDFLARE_API_TOKEN and CLOUDFLARE_ZONE_ID for Cloudflare DNS/u,
+    );
   });
 
   it("does not attach the production hostname to a preview stage", async () => {
@@ -276,6 +342,9 @@ describe("oauthFacade factory", () => {
     oauthFacade(fakeCognitoOut());
 
     expect(only("ApiGatewayV2").domain).toBeUndefined();
+    expect(created.filter(({ kind }) => kind === "CloudflareDns")).toHaveLength(
+      0,
+    );
   });
 
   it("rejects a URL instead of accepting it as the custom hostname", async () => {

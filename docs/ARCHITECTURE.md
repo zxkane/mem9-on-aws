@@ -218,14 +218,24 @@ The gateway trusts both implemented Cognito clients:
 
 The OAuth facade optionally uses a production custom hostname from
 `MEM9_FACADE_CUSTOM_DOMAIN`. GitHub Actions supplies it only from the repository
-secret of the same name; when it is absent, the facade keeps its generated
-`execute-api` URL. When present, SST creates the Regional API Gateway domain and
-root API mapping, requests a same-region ACM certificate, validates it through
-DNS, and creates aliases in an existing public Route 53 hosted zone in the same
-AWS account. Preview stages never claim the production hostname. AWS documents
-the [HTTP API custom-domain flow](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-custom-domain-names.html)
+secret of the same name. The deploy also receives `CLOUDFLARE_API_TOKEN` from a
+repository secret and `CLOUDFLARE_ZONE_ID` from a repository variable. When the
+hostname is absent, the facade keeps its generated `execute-api` URL. When
+present, SST creates the Regional API Gateway domain and root API mapping,
+requests a same-region ACM certificate, and uses the Cloudflare provider to
+create DNS-only validation and API-target CNAME records in the existing zone.
+The token is limited to `Zone:Read` and `DNS:Edit` on that zone. Preview stages
+never receive the three settings or claim the production hostname.
+
+AWS documents the
+[HTTP API custom-domain flow](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-custom-domain-names.html)
 and requires a same-region certificate for a
 [Regional custom domain](https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-regional-api-custom-domain-create.html).
+ACM automatically renews the DNS-validated certificate while it remains in use
+by API Gateway and every validation CNAME remains publicly resolvable; no
+operator renewal issue is required. The Cloudflare records therefore remain
+DNS-only and under SST ownership. See
+[ACM DNS renewal](https://docs.aws.amazon.com/acm/latest/userguide/dns-renewal-validation.html).
 These public facade resources do not expose `mnemo-server`.
 
 ### Schema bootstrap and data
@@ -607,7 +617,7 @@ to the GitHub Actions deploy role.
 - The public OAuth facade uses API Gateway v2 plus Lambda, never a Lambda
   Function URL.
 - The OAuth facade custom domain is optional, production-only, and uses an
-  existing same-account public Route 53 hosted zone; previews use `execute-api`.
+  existing Cloudflare zone with DNS-only records; previews use `execute-api`.
 - Schema bootstrap is a separate one-shot ECS task.
 - ECR scan-on-push is a guarded out-of-band registry singleton, separate from
   the retained repository stack.

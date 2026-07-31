@@ -118,22 +118,35 @@ The OAuth façade can use a production-only custom hostname. Leave
 `MEM9_FACADE_CUSTOM_DOMAIN` unset to keep the generated API Gateway
 `execute-api` URL. When configured, SST creates a Regional API Gateway domain
 and mapping, requests and DNS-validates an ACM certificate in
-`ap-northeast-1`, and writes alias records into an existing public Route 53
-hosted zone in the same AWS account. Preview stages never receive this setting.
+`ap-northeast-1`, and creates DNS-only validation and API-target CNAME records
+in an existing Cloudflare zone. Preview stages never receive these settings.
 
-Before enabling it, update the out-of-band deploy role, then store the hostname
-as a GitHub secret:
+Before enabling it, update the out-of-band deploy role. Create a
+[Cloudflare API token](https://developers.cloudflare.com/dns/manage-dns-records/how-to/api-tokens/)
+scoped to the target zone with `Zone:Read` and `DNS:Edit`, then configure the
+hostname and token as GitHub secrets and the non-sensitive zone ID as a
+repository variable:
 
 ```bash
 scripts/deploy-github-role.sh
 gh secret set MEM9_FACADE_CUSTOM_DOMAIN --body "memory.example.com"
+gh secret set CLOUDFLARE_API_TOKEN
+gh variable set CLOUDFLARE_ZONE_ID --body "<cloudflare-zone-id>"
 ```
 
 Use a hostname only, without `https://`, a port, or a path. The secret prevents
 the repository and workflow definition from carrying the operator's domain,
 but the hostname is inherently public in DNS and appears in the deployed AWS
 resources. One hostname maps to the production stage; use no production
-hostname for PR previews.
+hostname for PR previews. Keep Cloudflare proxying disabled for these managed
+records.
+
+No certificate-renewal issue is required. ACM automatically renews a
+DNS-validated certificate while it remains attached to API Gateway and every
+ACM validation CNAME remains publicly resolvable. Do not manually remove that
+CNAME while the custom domain is in use; ACM reports renewal failures through
+AWS Health and EventBridge. See
+[ACM DNS renewal](https://docs.aws.amazon.com/acm/latest/userguide/dns-renewal-validation.html).
 
 ## Workload permissions-boundary rollout
 

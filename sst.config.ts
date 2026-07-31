@@ -40,6 +40,10 @@ export default $config({
             },
           },
         },
+        // The optional production OAuth façade domain is hosted on Cloudflare.
+        // Authentication comes from CLOUDFLARE_API_TOKEN at deploy time; the
+        // provider is still declared globally so SST injects sst.cloudflare.
+        cloudflare: { version: "6.15.0" },
         // The `random` provider exposes the `random` global (random.RandomId) used
         // by infra/tenant-identity.ts to mint the STABLE tenant id / X-API-Key. It must
         // be declared here for the global to bind at run() (SST only injects a
