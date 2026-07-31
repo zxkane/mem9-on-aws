@@ -578,14 +578,9 @@ Resources:
             # can't be resource-scoped. Split out with Resource "*"; every
             # subsequent op on the secret is governed by the name-prefixed
             # statement above, and the DenyPolicy blocks account-level abuse.
-            # ListSecrets likewise has no resource-level scoping; the memory-
-            # cleanup dry-run E2E (issue #102) uses it to resolve the stage's
-            # tenant-secret ARN by name filter (value reads stay governed by
-            # the prefixed GetSecretValue statement above).
             Effect: Allow
             Action:
               - secretsmanager:CreateSecret
-              - secretsmanager:ListSecrets
             Resource: "*"
           - Sid: BedrockMantleCleanupE2E
             # The memory-cleanup dry-run E2E (issue #102) classifies memories

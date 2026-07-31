@@ -151,15 +151,17 @@ scan (paged GET, state=active)
 
 ## Observability & audit
 
-- Decision log + apply journal default to `~/.mem9-cleanup/<stage>/`
-  (`--out` override) — **outside any repository checkout** (repo will be
+- Decision log defaults to `~/.mem9-cleanup/<stage>/` (0700 dir, 0600 file;
+  `--out` override) — **outside any repository checkout** (repo will be
   open-sourced; memory content must never be committable by accident). Path
-  printed on exit.
-- Apply appends a journal line per destructive call (intent + result) to the
-  same directory, so an interrupted run is reconstructable.
+  printed on exit. The file records the stage it was generated for, and apply
+  refuses to replay a file against a different stage.
+- An interrupted apply is reconstructable without a journal: the decision
+  file is the full intent, and the hash-anchored re-run re-derives what has
+  and hasn't been applied from server state. A per-call apply journal (and
+  EMF metrics) arrive with the scheduled task in #103.
 - stdout summary: counts per verdict (KEEP/DELETE/MERGE/SKIP), writeCalls,
   cap used, skipped-LWW, batch-delete affected-vs-requested warnings.
-- No EMF in this issue (#103 adds task-mode metrics).
 
 ## Alternatives considered
 

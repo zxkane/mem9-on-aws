@@ -381,6 +381,13 @@ jobs:
           AWS_REGION: ap-northeast-1
         run: bash scripts/run-oauth-facade-smoke.sh
 
+      - name: Install root dependencies (memory-cleanup E2E)
+        # scripts/memory-cleanup.mjs dynamically imports AWS SDK packages from
+        # the ROOT package.json — the only step in this job that needs root
+        # node_modules (its bash/awscli siblings don't).
+        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        run: npm ci
+
       - name: Memory cleanup dry-run E2E (preview)
         # TC-MEMCLEAN-060 (issue #102): the operator cleanup tool scans the
         # preview stage's live store via Cloud Map discovery, classifies with

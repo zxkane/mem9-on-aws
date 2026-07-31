@@ -27,11 +27,14 @@ import { fileURLToPath } from "node:url";
 const MEMORIES_PATH = "/v1alpha2/mem9s/memories";
 const LIST_PAGE_LIMIT = 200; // server max for GET /memories
 const BATCH_DELETE_MAX = 1000; // server ValidateBulkDeleteIDs cap
+const MID_RUN_FLUSH_THRESHOLD = 20; // bound the re-read→delete TOCTOU window
 const CLASSIFY_BATCH = 20;
 const CLASSIFY_ATTEMPTS = 2;
 const LOCK_ACQUIRE_ATTEMPTS = 2;
 const DISCOVERY_RETRIES = 3;
 const DEFAULT_CAP = 50;
+const REQUEST_TIMEOUT_MS = 30_000; // REST calls; the LLM call sets its own
+const LLM_TIMEOUT_MS = 120_000;
 const HOUR_MS = 3600 * 1000;
 const DEFAULT_LOCK_TTL_MS = 2 * HOUR_MS;
 const SNIPPET_LEN = 120;
@@ -76,14 +79,41 @@ export function contentHash(content) {
   return `sha256:${createHash("sha256").update(content ?? "").digest("hex")}`;
 }
 
-/** Parse + validate one LLM classification response. Throws on any malformed shape. */
+/**
+ * Parse + validate one LLM classification response. Throws MalformedResponse
+ * on any malformed shape — field types included, so a hallucinated
+ * `absorbs: "id"` (non-array) is caught here and handled by the retry/SKIP
+ * machinery instead of crashing planDecisions mid-run. Error messages are
+ * fixed strings (never echo response text — it can contain memory content).
+ */
+class MalformedResponse extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "MalformedResponse";
+  }
+}
+
 export function parseVerdicts(raw) {
-  const parsed = JSON.parse(raw);
-  if (!parsed || !Array.isArray(parsed.verdicts)) throw new Error("verdicts array missing");
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new MalformedResponse("response is not valid JSON");
+  }
+  if (!parsed || !Array.isArray(parsed.verdicts)) throw new MalformedResponse("verdicts array missing");
   return parsed.verdicts.map((v) => {
-    if (!v || typeof v.id !== "string") throw new Error("verdict entry missing id");
+    if (!v || typeof v.id !== "string") throw new MalformedResponse("verdict entry missing id");
     if (!["KEEP", "DELETE", "MERGE"].includes(v.verdict)) {
-      throw new Error(`invalid verdict ${JSON.stringify(v.verdict)} for ${v.id}`);
+      throw new MalformedResponse("verdict entry has an invalid verdict value");
+    }
+    if (v.merge_into !== undefined && typeof v.merge_into !== "string") {
+      throw new MalformedResponse("merge_into must be a string");
+    }
+    if (v.absorbs !== undefined && (!Array.isArray(v.absorbs) || v.absorbs.some((a) => typeof a !== "string"))) {
+      throw new MalformedResponse("absorbs must be an array of strings");
+    }
+    if (v.merged_content !== undefined && typeof v.merged_content !== "string") {
+      throw new MalformedResponse("merged_content must be a string");
     }
     return v;
   });
@@ -104,12 +134,24 @@ function snapshot(mem) {
  * groups, collecting into `skip` every id whose merge graph is invalid: target
  * outside the batch, target itself DELETEd or absorbed elsewhere, or a cycle.
  */
-function resolveMergeGroups(byId, verdictById) {
+function resolveMergeGroups(byId, verdictById, conflicted) {
   const mergeGroups = new Map();
-  const skip = new Set();
+  const skip = new Set(conflicted);
+
+  // An id may be absorbed only when its OWN verdict is a MERGE into the same
+  // survivor. A KEEP/DELETE/absent/conflicted verdict must never be overridden
+  // by another verdict's `absorbs` list — that would delete a memory the
+  // classifier judged durable (or never judged at all) on the strength of one
+  // hallucinated entry.
+  const consentsToAbsorption = (absorbedId, survivor) => {
+    if (conflicted.has(absorbedId)) return false;
+    const own = verdictById.get(absorbedId);
+    return own?.verdict === "MERGE" && (own.merge_into || absorbedId) === survivor;
+  };
 
   for (const [id, v] of verdictById) {
     if (v.verdict !== "MERGE") continue;
+    if (conflicted.has(id)) continue;
     const target = v.merge_into || id;
     const targetVerdict = verdictById.get(target);
     const targetAbsorbedElsewhere =
@@ -120,7 +162,9 @@ function resolveMergeGroups(byId, verdictById) {
     }
     if (target === id) {
       // Self-nominated survivor: it carries the merged content for the group.
-      const absorbs = (v.absorbs || []).filter((a) => byId.has(a) && a !== id);
+      const absorbs = (v.absorbs || []).filter(
+        (a) => byId.has(a) && a !== id && consentsToAbsorption(a, id),
+      );
       mergeGroups.set(id, { absorbs, mergedContent: v.merged_content });
     } else {
       // Absorbed member: join the survivor's group, which may not be seen yet.
@@ -150,14 +194,30 @@ function resolveMergeGroups(byId, verdictById) {
 export function planDecisions(memories, verdicts) {
   const byId = new Map(memories.map((m) => [m.id, m]));
   const verdictById = new Map();
+  const conflicted = new Set();
   for (const v of verdicts) {
-    if (byId.has(v.id)) verdictById.set(v.id, v);
+    if (!byId.has(v.id)) continue;
+    const prior = verdictById.get(v.id);
+    // Contradictory duplicate verdicts for one id: trust neither (SKIP).
+    if (prior && prior.verdict !== v.verdict) conflicted.add(v.id);
+    verdictById.set(v.id, v);
   }
-  const { mergeGroups, skip } = resolveMergeGroups(byId, verdictById);
+  const { mergeGroups, skip } = resolveMergeGroups(byId, verdictById, conflicted);
 
-  const absorbedIds = new Set();
+  // Only groups that will actually EMIT a MERGE decision may fold their
+  // absorbed ids: the survivor self-nominated (own verdict MERGE), carries
+  // merged content, has consenting absorbed ids, and is not skipped. An id
+  // referenced by any non-emitting group falls through to its own verdict (or
+  // an explicit SKIP row) — every scanned id appears in the decision log.
+  const emitting = new Map();
   for (const [survivor, group] of mergeGroups) {
     if (skip.has(survivor)) continue;
+    if (verdictById.get(survivor)?.verdict !== "MERGE") continue;
+    if (!group.mergedContent || group.absorbs.length === 0) continue;
+    emitting.set(survivor, group);
+  }
+  const absorbedIds = new Set();
+  for (const group of emitting.values()) {
     for (const a of group.absorbs) absorbedIds.add(a);
   }
 
@@ -167,15 +227,15 @@ export function planDecisions(memories, verdicts) {
       decisions.push({ id, verdict: "SKIP", reason: `invalid merge graph (${v.reason || "n/a"})` });
       continue;
     }
-    if (absorbedIds.has(id)) continue; // folded into the survivor's decision
+    if (absorbedIds.has(id)) continue; // folded into an emitting survivor's decision
 
     if (v.verdict !== "MERGE") {
       decisions.push({ id, verdict: v.verdict, reason: v.reason, ...snapshot(byId.get(id)) });
       continue;
     }
-    const group = mergeGroups.get(id);
-    if (!group || !group.mergedContent || group.absorbs.length === 0) {
-      decisions.push({ id, verdict: "SKIP", reason: "merge without content or absorbed ids" });
+    const group = emitting.get(id);
+    if (!group) {
+      decisions.push({ id, verdict: "SKIP", reason: "merge without content or consenting absorbed ids" });
       continue;
     }
     decisions.push({
@@ -187,6 +247,13 @@ export function planDecisions(memories, verdicts) {
       mergedContentHash: contentHash(group.mergedContent),
       absorbs: group.absorbs.map((a) => ({ id: a, ...anchor(byId.get(a)) })),
     });
+  }
+  // Audit completeness: a memory the LLM returned no verdict for still gets a
+  // row, so the decision log covers every scanned memory (TC-MEMCLEAN-021).
+  for (const [id] of byId) {
+    if (!verdictById.has(id) && !absorbedIds.has(id)) {
+      decisions.push({ id, verdict: "SKIP", reason: "no verdict returned" });
+    }
   }
   return decisions;
 }
@@ -200,16 +267,21 @@ function destructiveCost(decision) {
 /** Build the REST client. Counts every non-GET request so dry-run can assert 0. */
 function restClient(baseUrl, tenantId, fetchImpl, counters) {
   const base = baseUrl.replace(/\/$/, "");
-  async function call(method, path, body) {
+  async function call(method, path, body, { nullOn404 = false, headers = {} } = {}) {
     if (method !== "GET") counters.writeCalls += 1;
     const res = await fetchImpl(`${base}${path}`, {
       method,
       headers: {
         "X-API-Key": tenantId,
         ...(body ? { "content-type": "application/json" } : {}),
+        ...headers,
       },
       ...(body ? { body: JSON.stringify(body) } : {}),
+      // A hung server must not stall the run indefinitely while the lockfile
+      // is held; a timeout aborts the run (destructive path fails loud).
+      signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
+    if (nullOn404 && res.status === 404) return null;
     if (!res.ok) {
       throw new Error(`${method} ${path} -> HTTP ${res.status}`);
     }
@@ -219,8 +291,14 @@ function restClient(baseUrl, tenantId, fetchImpl, counters) {
   return {
     listPage: (offset) =>
       call("GET", `${MEMORIES_PATH}?limit=${LIST_PAGE_LIMIT}&offset=${offset}`),
-    get: (id) => call("GET", memoryPath(id)),
-    put: (id, content, version) => call("PUT", memoryPath(id), { content, if_match: version }),
+    // null on 404: upstream GetByID selects `WHERE state = 'active'` (probed at
+    // the pinned commit), so a soft-deleted memory 404s rather than returning
+    // its row. Callers treat null as "already in the intended end state".
+    get: (id) => call("GET", memoryPath(id), undefined, { nullOn404: true }),
+    // If-Match is an HTTP HEADER upstream (handler reads r.Header.Get("If-Match"),
+    // probed at the pinned commit) — audit-trail only, a mismatch is LWW-warned.
+    put: (id, content, version) =>
+      call("PUT", memoryPath(id), { content }, { headers: { "If-Match": String(version) } }),
     batchDelete: (ids) => call("POST", `${MEMORIES_PATH}/batch-delete`, { ids }),
   };
 }
@@ -230,7 +308,12 @@ async function scanActiveMemories(client) {
   let offset = 0;
   for (;;) {
     const page = await client.listPage(offset);
-    const items = page.memories || [];
+    // Fail loud on a shape change: a missing field must read as "client is
+    // broken", never as "store is clean" (a silent empty audit).
+    if (!Array.isArray(page.memories)) {
+      throw new Error("unexpected list response shape: memories is not an array");
+    }
+    const items = page.memories;
     all.push(...items);
     if (items.length < LIST_PAGE_LIMIT) return all;
     offset += items.length;
@@ -250,6 +333,9 @@ async function classifyBatch(batch, batchIndex, completeChat, log) {
     try {
       return parseVerdicts(await completeChat(CLASSIFY_SYSTEM_PROMPT, input));
     } catch (err) {
+      // MalformedResponse messages are fixed strings; transport errors (HTTP
+      // status, timeout, auth) carry safe, load-bearing messages. Raw JSON
+      // SyntaxErrors never reach here — parseVerdicts wraps them.
       log(`classification batch ${batchIndex} attempt ${attempt} failed: ${err.message}`);
     }
   }
@@ -258,11 +344,15 @@ async function classifyBatch(batch, batchIndex, completeChat, log) {
 
 async function classifyAll(memories, completeChat, log) {
   const decisions = [];
+  let batches = 0;
+  let failedBatches = 0;
   for (let i = 0; i < memories.length; i += CLASSIFY_BATCH) {
     const batch = memories.slice(i, i + CLASSIFY_BATCH);
+    batches += 1;
     const verdicts = await classifyBatch(batch, i / CLASSIFY_BATCH, completeChat, log);
     if (!verdicts) {
       // Never destructive on classification failure: whole batch becomes SKIP.
+      failedBatches += 1;
       for (const m of batch) {
         decisions.push({ id: m.id, verdict: "SKIP", reason: "classification failed after retry" });
       }
@@ -276,7 +366,7 @@ async function classifyAll(memories, completeChat, log) {
     });
     decisions.push(...planDecisions(batch, inBatch));
   }
-  return decisions;
+  return { decisions, batches, failedBatches };
 }
 
 /**
@@ -333,6 +423,13 @@ function defaultPidAlive(pid) {
  */
 async function applyMerge(decision, client, deleteQueue, counters, log) {
   const survivor = await client.get(decision.id);
+  if (!survivor) {
+    // Survivor no longer active (deleted/archived out-of-band): the merge's
+    // premise is gone — skip entirely, absorbed ids untouched.
+    log(`MERGE ${decision.id}: survivor no longer active — skipping whole merge`);
+    counters.skippedLww += 1;
+    return 0;
+  }
   const currentHash = contentHash(survivor.content);
   const needsPut = currentHash === decision.contentHash && currentHash !== decision.mergedContentHash;
   const isRecovery = currentHash === decision.mergedContentHash;
@@ -348,16 +445,13 @@ async function applyMerge(decision, client, deleteQueue, counters, log) {
     await client.put(decision.id, decision.mergedContent, decision.version);
     used += 1;
   }
-  // Delete leg: re-read each absorbed id; drop changed or already-deleted ones.
-  // An absorbed id deleted out-of-band is already in the intended end state.
+  // Delete leg: re-read each absorbed id; drop changed or already-gone ones
+  // (null = 404 = no longer active, already the intended end state). A network
+  // error here intentionally propagates and aborts the run — "gone" and
+  // "unreachable" must not be conflated on a destructive path.
   for (const absorbed of decision.absorbs) {
-    let current;
-    try {
-      current = await client.get(absorbed.id);
-    } catch {
-      continue; // gone entirely — nothing to delete
-    }
-    if (current.state === "deleted") continue;
+    const current = await client.get(absorbed.id);
+    if (!current || current.state === "deleted") continue;
     if (contentHash(current.content) !== absorbed.contentHash) {
       log(`MERGE ${decision.id}: absorbed ${absorbed.id} changed externally — dropped from delete set`);
       counters.skippedLww += 1;
@@ -373,9 +467,11 @@ async function flushDeletes(deleteQueue, client, log) {
   while (deleteQueue.length > 0) {
     const chunk = deleteQueue.splice(0, BATCH_DELETE_MAX);
     const res = await client.batchDelete(chunk);
-    const affected = res.deleted ?? res.affected ?? 0;
-    if (affected < chunk.length) {
-      log(`batch-delete affected ${affected} of requested ${chunk.length} — some ids were already deleted`);
+    // Probed at the pinned commit: the handler responds {"deleted": <count>}.
+    if (typeof res.deleted !== "number") {
+      log(`batch-delete response missing "deleted" count — response shape changed upstream?`);
+    } else if (res.deleted < chunk.length) {
+      log(`batch-delete affected ${res.deleted} of requested ${chunk.length} — some ids were already deleted`);
     }
   }
 }
@@ -412,10 +508,26 @@ function verdictSummary(decisions) {
 async function loadDecisions(opts, deps, { client, fs, clock, log }) {
   if (opts.decisionsFile) {
     const loaded = JSON.parse(fs.readFileSync(opts.decisionsFile, "utf8"));
-    return { decisions: loaded.decisions, decisionPath: opts.decisionsFile };
+    // A decision file is stage-bound: ids/hashes from one store must never be
+    // replayed against another (a preview file applied to prod would delete
+    // prod memories whenever ids happen to collide).
+    if (loaded.stage !== opts.stage) {
+      throw new Error(
+        `decision file is for stage ${JSON.stringify(loaded.stage)}, not ${JSON.stringify(opts.stage)}`,
+      );
+    }
+    if (!Array.isArray(loaded.decisions)) {
+      throw new Error("decision file has no decisions array");
+    }
+    validateDecisions(loaded.decisions);
+    return { decisions: loaded.decisions, decisionPath: opts.decisionsFile, classifierBroken: false };
   }
   const memories = await scanActiveMemories(client);
-  const decisions = await classifyAll(memories, deps.completeChat, log);
+  const { decisions, batches, failedBatches } = await classifyAll(memories, deps.completeChat, log);
+  // Zero successful batches on a non-empty store = the GLM-5 path is broken
+  // (IAM, model id, endpoint), not "nothing to clean". Surfaced as a distinct
+  // exit code so CI cannot report a green E2E for a classifier that never ran.
+  const classifierBroken = batches > 0 && failedBatches === batches;
 
   const generatedAt = new Date(clock()).toISOString();
   const outDir = deps.outDir || join(homedir(), ".mem9-cleanup", opts.stage);
@@ -427,7 +539,32 @@ async function loadDecisions(opts, deps, { client, fs, clock, log }) {
     { mode: 0o600 },
   );
   log(`decision list written to ${decisionPath}`);
-  return { decisions, decisionPath };
+  return { decisions, decisionPath, classifierBroken };
+}
+
+/**
+ * Validate a replayed decision list's shape so a hand-edited or truncated file
+ * fails loud at load time — not as a misattributed "LWW guard" skip (missing
+ * contentHash) or a TypeError mid-apply.
+ */
+function validateDecisions(decisions) {
+  decisions.forEach((d, i) => {
+    const fail = (why) => {
+      throw new Error(`decision file entry ${i} invalid: ${why}`);
+    };
+    if (!d || typeof d.id !== "string") fail("missing id");
+    if (!["KEEP", "DELETE", "MERGE", "SKIP"].includes(d.verdict)) fail("invalid verdict");
+    if (d.verdict === "DELETE" && typeof d.contentHash !== "string") fail("DELETE without contentHash");
+    if (d.verdict === "MERGE") {
+      if (typeof d.contentHash !== "string") fail("MERGE without contentHash");
+      if (typeof d.mergedContent !== "string" || typeof d.mergedContentHash !== "string") {
+        fail("MERGE without merged content/hash");
+      }
+      if (!Array.isArray(d.absorbs) || d.absorbs.some((a) => !a || typeof a.id !== "string" || typeof a.contentHash !== "string")) {
+        fail("MERGE with invalid absorbs");
+      }
+    }
+  });
 }
 
 function readApprovedIds(fs, idsFile) {
@@ -447,36 +584,49 @@ async function applyDecisions({ decisions, client, cap, approved, counters, log 
   let skippedByFilter = 0;
   let exitCode = 0;
 
-  for (const decision of decisions) {
-    const cost = destructiveCost(decision);
-    if (cost === 0) continue;
-    if (approved && !approved.has(decision.id)) {
-      skippedByFilter += 1;
-      continue;
+  try {
+    for (const decision of decisions) {
+      const cost = destructiveCost(decision);
+      if (cost === 0) continue;
+      if (approved && !approved.has(decision.id)) {
+        skippedByFilter += 1;
+        continue;
+      }
+      // Reservation-style cap: the decision's full worst-case cost must fit
+      // BEFORE its first destructive call. Overflow aborts the entire run.
+      if (capUsed + cost > cap) {
+        log(`cap exceeded: used ${capUsed} + next decision cost ${cost} > cap ${cap} — aborting run`);
+        exitCode = 4;
+        break;
+      }
+      if (decision.verdict === "MERGE") {
+        capUsed += await applyMerge(decision, client, deleteQueue, counters, log);
+      } else {
+        const current = await client.get(decision.id);
+        if (!current || current.state === "deleted") {
+          log(`DELETE ${decision.id}: already gone — nothing to do`);
+          continue;
+        }
+        if (contentHash(current.content) !== decision.contentHash) {
+          log(`DELETE ${decision.id}: changed externally — skipped (LWW guard)`);
+          counters.skippedLww += 1;
+          continue;
+        }
+        deleteQueue.push(decision.id);
+        capUsed += 1;
+      }
+      // Bound the re-read→delete window (and crash-loss) to a small queue
+      // while keeping some batch-delete efficiency; with the default cap of
+      // 50 this flushes at most a few times per run.
+      if (deleteQueue.length >= MID_RUN_FLUSH_THRESHOLD) {
+        await flushDeletes(deleteQueue, client, log);
+      }
     }
-    // Reservation-style cap: the decision's full worst-case cost must fit
-    // BEFORE its first destructive call. Overflow aborts the entire run.
-    if (capUsed + cost > cap) {
-      log(`cap exceeded: used ${capUsed} + next decision cost ${cost} > cap ${cap} — aborting run`);
-      exitCode = 4;
-      break;
-    }
-    if (decision.verdict === "MERGE") {
-      capUsed += await applyMerge(decision, client, deleteQueue, counters, log);
-      continue;
-    }
-    const current = await client.get(decision.id);
-    if (current.state === "deleted") continue;
-    if (contentHash(current.content) !== decision.contentHash) {
-      log(`DELETE ${decision.id}: changed externally — skipped (LWW guard)`);
-      counters.skippedLww += 1;
-      continue;
-    }
-    deleteQueue.push(decision.id);
-    capUsed += 1;
+  } finally {
+    // A mid-loop error still flushes ids already validated and charged
+    // against the cap — they must not be silently dropped.
+    await flushDeletes(deleteQueue, client, log);
   }
-
-  await flushDeletes(deleteQueue, client, log);
   return { capUsed, skippedByFilter, exitCode };
 }
 
@@ -496,6 +646,11 @@ export async function runCleanup(opts, deps) {
   const clock = deps.clock || Date.now;
   const counters = { writeCalls: 0, skippedLww: 0 };
   const cap = opts.cap ?? DEFAULT_CAP;
+  // Defense in depth behind parseArgs: `NaN > cap` is always false, so a
+  // non-finite cap would silently disable the blast-radius limiter.
+  if (!Number.isFinite(cap) || cap <= 0) {
+    throw new Error(`cap must be a positive finite number, got ${cap}`);
+  }
   // Shared tail of every return: the counters object is read at return time.
   const result = (fields) => ({
     decisions: [],
@@ -515,9 +670,18 @@ export async function runCleanup(opts, deps) {
   }
   const client = restClient(baseUrl, opts.tenantId, deps.fetchImpl, counters);
 
-  const { decisions, decisionPath } = await loadDecisions(opts, deps, { client, fs, clock, log });
+  const { decisions, decisionPath, classifierBroken } = await loadDecisions(opts, deps, {
+    client,
+    fs,
+    clock,
+    log,
+  });
   const summary = verdictSummary(decisions);
 
+  if (classifierBroken) {
+    log(`classification failed for every batch — GLM-5 path is broken; ${JSON.stringify(summary)}`);
+    return result({ exitCode: 5, decisions, decisionPath });
+  }
   if (!opts.apply) {
     log(`dry-run: ${JSON.stringify(summary)}; writeCalls=${counters.writeCalls}`);
     return result({ exitCode: 0, decisions, decisionPath });
@@ -532,16 +696,19 @@ export async function runCleanup(opts, deps) {
     return result({ exitCode: 3, decisions, decisionPath });
   }
 
+  const approved = readApprovedIds(fs, opts.idsFile);
+  if (approved) {
+    const known = new Set(decisions.map((d) => d.id));
+    const unmatched = [...approved].filter((id) => !known.has(id));
+    if (unmatched.length > 0) {
+      // A typo'd approval must not silently no-op.
+      log(`${unmatched.length} approved id(s) matched no decision: ${unmatched.join(", ")}`);
+    }
+  }
+
   let applied;
   try {
-    applied = await applyDecisions({
-      decisions,
-      client,
-      cap,
-      approved: readApprovedIds(fs, opts.idsFile),
-      counters,
-      log,
-    });
+    applied = await applyDecisions({ decisions, client, cap, approved, counters, log });
   } finally {
     fs.rmSync(lockFile, { force: true });
   }
@@ -572,7 +739,7 @@ const ARG_SPECS = {
   "--apply": { key: "apply", flag: true },
 };
 
-function parseArgs(argv) {
+export function parseArgs(argv) {
   const opts = { apply: false, cap: DEFAULT_CAP };
   for (let i = 0; i < argv.length; i += 1) {
     const name = argv[i];
@@ -602,12 +769,16 @@ function parseArgs(argv) {
 async function productionDeps(opts) {
   const region = process.env.AWS_REGION || "ap-northeast-1";
 
-  let tenantId = process.env.MEM9_TENANT_ID;
-  if (!tenantId && opts.tenantSecretArn) {
+  // The explicit flag WINS over the env var: a stale MEM9_TENANT_ID from a
+  // preview shell must not silently redirect an --apply aimed at another stage.
+  let tenantId;
+  if (opts.tenantSecretArn) {
     const { SecretsManagerClient, GetSecretValueCommand } = await import("@aws-sdk/client-secrets-manager");
     const sm = new SecretsManagerClient({ region });
     const res = await sm.send(new GetSecretValueCommand({ SecretId: opts.tenantSecretArn }));
     tenantId = res.SecretString;
+  } else {
+    tenantId = process.env.MEM9_TENANT_ID;
   }
   if (!tenantId) throw new Error("tenant id required: set MEM9_TENANT_ID or --tenant-secret-arn");
 
@@ -615,24 +786,34 @@ async function productionDeps(opts) {
   const { fromNodeProviderChain } = await import("@aws-sdk/credential-providers");
   let bearer = null;
   async function completeChat(systemPrompt, memories) {
-    if (!bearer) {
-      bearer = await getToken({ credentials: fromNodeProviderChain(), region });
+    // Minting is a free local SigV4 presign (12h TTL); re-mint once on 401/403
+    // so a long scan outliving the bearer self-heals (llm-proxy pattern).
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      if (!bearer) {
+        bearer = await getToken({ credentials: fromNodeProviderChain(), region });
+      }
+      const res = await fetch(`https://bedrock-mantle.${region}.api.aws/v1/chat/completions`, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${bearer}` },
+        body: JSON.stringify({
+          model: process.env.MEM9_LLM_MODEL || "zai.glm-5",
+          max_tokens: 4096,
+          messages: [
+            { role: "system", content: systemPrompt },
+            { role: "user", content: JSON.stringify({ memories }) },
+          ],
+        }),
+        signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
+      });
+      if ((res.status === 401 || res.status === 403) && attempt === 1) {
+        bearer = null;
+        continue;
+      }
+      if (!res.ok) throw new Error(`Mantle chat-completions -> HTTP ${res.status}`);
+      const body = await res.json();
+      return body.choices?.[0]?.message?.content ?? "";
     }
-    const res = await fetch(`https://bedrock-mantle.${region}.api.aws/v1/chat/completions`, {
-      method: "POST",
-      headers: { "content-type": "application/json", authorization: `Bearer ${bearer}` },
-      body: JSON.stringify({
-        model: process.env.MEM9_LLM_MODEL || "zai.glm-5",
-        max_tokens: 4096,
-        messages: [
-          { role: "system", content: systemPrompt },
-          { role: "user", content: JSON.stringify({ memories }) },
-        ],
-      }),
-    });
-    if (!res.ok) throw new Error(`Mantle chat-completions -> HTTP ${res.status}`);
-    const body = await res.json();
-    return body.choices?.[0]?.message?.content ?? "";
+    throw new Error("Mantle chat-completions: authentication failed after re-mint");
   }
 
   async function discoverInstances(stage) {
@@ -674,7 +855,9 @@ if (isMain) {
     const result = await runCleanup({ ...opts, tenantId }, deps);
     process.exit(result.exitCode);
   } catch (err) {
-    console.error(`memory-cleanup: ${err.message}`);
+    // Full stack on a destructive tool: an operator reconstructing a
+    // half-applied run needs more than one context-free message line.
+    console.error(`memory-cleanup: ${err.stack || err.message}`);
     process.exit(1);
   }
 }

@@ -9,6 +9,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   contentHash,
+  parseArgs,
   parseVerdicts,
   planDecisions,
   runCleanup,
@@ -65,8 +66,10 @@ function fakeServer(initial) {
     }
     const single = u.pathname.match(/\/memories\/([^/]+)$/);
     if (single && method === "GET") {
+      // Probed upstream: GetByID selects WHERE state='active', so deleted
+      // (and archived) memories 404 on single GET.
       const m = store.get(single[1]);
-      return m ? json(200, m) : json(404, { error: "not found" });
+      return m && m.state === "active" ? json(200, m) : json(404, { error: "not found" });
     }
     if (single && method === "PUT") {
       const m = store.get(single[1]);
@@ -182,10 +185,30 @@ describe("classification", () => {
   it("TC-MEMCLEAN-011 malformed JSON retries once then batch-SKIPs, never destructive", async () => {
     const server = fakeServer([memory("m-1", "x"), memory("m-2", "y")]);
     const llm = fakeLlm(["not json", "still not json"]);
-    const result = await runCleanup(baseOpts({ apply: true }), baseDeps(server, llm, tempDir()));
+    const deps = baseDeps(server, llm, tempDir());
+    const result = await runCleanup(baseOpts({ apply: true }), deps);
     expect(llm).toHaveBeenCalledTimes(2);
     expect(result.decisions.every((d) => d.verdict === "SKIP")).toBe(true);
     expect(result.capUsed).toBe(0);
+    expect(server.calls.filter((c) => c.method !== "GET")).toHaveLength(0);
+    // Classification failing for EVERY batch is a broken-classifier signal,
+    // not a clean store: distinct exit code so CI can't green-light it.
+    expect(result.exitCode).toBe(5);
+    // Raw LLM text (which can echo memory content) never reaches the logs.
+    for (const call of deps.log.mock.calls) {
+      expect(String(call[0])).not.toContain("not json");
+    }
+  });
+
+  it("hallucinated field types are malformed responses, not crashes (batch SKIPs)", async () => {
+    const server = fakeServer([memory("m-1", "x")]);
+    // absorbs as a string instead of an array — twice, so the batch gives up.
+    const bad = JSON.stringify({
+      verdicts: [{ id: "m-1", verdict: "MERGE", merge_into: "m-1", absorbs: "m-1", merged_content: "y", reason: "r" }],
+    });
+    const llm = fakeLlm([bad, bad]);
+    const result = await runCleanup(baseOpts({ apply: true }), baseDeps(server, llm, tempDir()));
+    expect(result.decisions[0]).toMatchObject({ id: "m-1", verdict: "SKIP" });
     expect(server.calls.filter((c) => c.method !== "GET")).toHaveLength(0);
   });
 
@@ -263,6 +286,7 @@ describe("apply, cap, --ids", () => {
       [
         { id: "del-1", verdict: "DELETE", reason: "noise" },
         { id: "surv-1", verdict: "MERGE", reason: "frags", merge_into: "surv-1", absorbs: ["abs-1"], merged_content: "frag a+b" },
+        { id: "abs-1", verdict: "MERGE", reason: "frags", merge_into: "surv-1" },
       ],
     ]);
     const result = await runCleanup(baseOpts({ apply: true }), baseDeps(server, llm, tempDir()));
@@ -290,7 +314,11 @@ describe("apply, cap, --ids", () => {
     const llm = fakeLlm([
       [
         { id: "s1", verdict: "MERGE", reason: "r", merge_into: "s1", absorbs: ["a1", "a2"], merged_content: "abc" },
+        { id: "a1", verdict: "MERGE", reason: "r", merge_into: "s1" },
+        { id: "a2", verdict: "MERGE", reason: "r", merge_into: "s1" },
         { id: "s2", verdict: "MERGE", reason: "r", merge_into: "s2", absorbs: ["a3", "a4"], merged_content: "def" },
+        { id: "a3", verdict: "MERGE", reason: "r", merge_into: "s2" },
+        { id: "a4", verdict: "MERGE", reason: "r", merge_into: "s2" },
       ],
     ]);
     const result = await runCleanup(baseOpts({ apply: true, cap: 5 }), baseDeps(server, llm, tempDir()));
@@ -306,7 +334,11 @@ describe("apply, cap, --ids", () => {
       baseDeps(server2, fakeLlm([
         [
           { id: "s1", verdict: "MERGE", reason: "r", merge_into: "s1", absorbs: ["a1", "a2"], merged_content: "abc" },
+          { id: "a1", verdict: "MERGE", reason: "r", merge_into: "s1" },
+          { id: "a2", verdict: "MERGE", reason: "r", merge_into: "s1" },
           { id: "s2", verdict: "MERGE", reason: "r", merge_into: "s2", absorbs: ["a3", "a4"], merged_content: "def" },
+          { id: "a3", verdict: "MERGE", reason: "r", merge_into: "s2" },
+          { id: "a4", verdict: "MERGE", reason: "r", merge_into: "s2" },
         ],
       ]), tempDir()),
     );
@@ -384,7 +416,7 @@ describe("apply, cap, --ids", () => {
     expect(r3.skippedLww).toBe(1);
   });
 
-  it("TC-MEMCLEAN-034 batch-delete chunks at 1000 and never sends an empty list", async () => {
+  it("TC-MEMCLEAN-034 batch-delete flushes in bounded chunks and never sends an empty list", async () => {
     const mems = Array.from({ length: 1200 }, (_, i) => memory(`m-${i}`, `noise ${i}`));
     const server = fakeServer(mems);
     const llm = fakeLlm([]);
@@ -396,10 +428,13 @@ describe("apply, cap, --ids", () => {
       baseDeps(server, llm, tempDir()),
     );
     const deletes = server.calls.filter((c) => c.method === "POST");
-    expect(deletes.length).toBe(2);
     const sizes = deletes.map((c) => JSON.parse(c.body).ids.length);
+    // Mid-run flush threshold (20) bounds the TOCTOU window; the server-side
+    // 1000-id cap is never exceeded, no request is empty, and every id lands.
     expect(Math.max(...sizes)).toBeLessThanOrEqual(1000);
     expect(sizes.every((n) => n > 0)).toBe(true);
+    expect(sizes.reduce((a, b) => a + b, 0)).toBe(1200);
+    expect([...server.store.values()].every((m) => m.state === "deleted")).toBe(true);
     expect(result.capUsed).toBe(1200);
 
     // Empty delete set: KEEP-only run issues no POST.
@@ -445,6 +480,7 @@ describe("concurrency guards", () => {
       [
         { id: "d1", verdict: "DELETE", reason: "noise" },
         { id: "s1", verdict: "MERGE", reason: "frags", merge_into: "s1", absorbs: ["a1"], merged_content: "frag a+b" },
+        { id: "a1", verdict: "MERGE", reason: "frags", merge_into: "s1" },
       ],
     ]);
     // Mutate d1 and a1 after classification (between scan and apply re-read):
@@ -557,6 +593,31 @@ describe("verdict parsing units", () => {
     expect(() => parseVerdicts('{"verdicts":[{"id":"a","verdict":"EXPLODE"}]}')).toThrow(/verdict/i);
   });
 
+  it("planDecisions never lets `absorbs` override an id's own verdict (TC-MEMCLEAN-014)", () => {
+    const mems = [memory("s", "survivor"), memory("k", "kept"), memory("n", "no verdict")];
+    // "k" is judged KEEP, "n" has no verdict at all — a MERGE listing either
+    // in `absorbs` must not delete them.
+    const out = planDecisions(mems, [
+      { id: "s", verdict: "MERGE", reason: "r", merge_into: "s", absorbs: ["k", "n"], merged_content: "x" },
+      { id: "k", verdict: "KEEP", reason: "durable" },
+    ]);
+    const byId = Object.fromEntries(out.map((d) => [d.id, d]));
+    expect(byId["k"].verdict).toBe("KEEP");
+    // With no consenting absorbed ids the merge itself degrades to SKIP.
+    expect(byId["s"].verdict).toBe("SKIP");
+    expect(out.some((d) => d.verdict === "MERGE")).toBe(false);
+  });
+
+  it("planDecisions SKIPs an id with contradictory duplicate verdicts (TC-MEMCLEAN-015)", () => {
+    const mems = [memory("a", "1")];
+    const out = planDecisions(mems, [
+      { id: "a", verdict: "KEEP", reason: "durable" },
+      { id: "a", verdict: "DELETE", reason: "noise" },
+    ]);
+    expect(out).toHaveLength(1);
+    expect(out[0].verdict).toBe("SKIP");
+  });
+
   it("planDecisions validates the merge graph (no DELETE targets, no cycles)", () => {
     const mems = [memory("a", "1"), memory("b", "2"), memory("c", "3")];
     // Target of a merge is itself deleted → invalid, downgraded to SKIP.
@@ -571,6 +632,39 @@ describe("verdict parsing units", () => {
       { id: "b", verdict: "MERGE", reason: "r", merge_into: "a", merged_content: "y" },
     ]);
     expect(cyc.every((d) => d.verdict === "SKIP")).toBe(true);
+  });
+
+  it("parseArgs validates flags, values, and the positive-cap guard", () => {
+    expect(parseArgs(["--stage", "prod"])).toMatchObject({ stage: "prod", apply: false, cap: 50 });
+    expect(
+      parseArgs(["--stage", "prod", "--apply", "--cap", "10", "--ids", "a.txt", "--lock-ttl", "4"]),
+    ).toMatchObject({ apply: true, cap: 10, idsFile: "a.txt", lockTtlHours: 4 });
+    expect(() => parseArgs([])).toThrow(/--stage/);
+    expect(() => parseArgs(["--stage", "prod", "--cap", "abc"])).toThrow(/positive/);
+    expect(() => parseArgs(["--stage", "prod", "--cap", "0"])).toThrow(/positive/);
+    expect(() => parseArgs(["--stage", "prod", "--cap", "-5"])).toThrow(/positive/);
+    expect(() => parseArgs(["--stage", "prod", "--cap"])).toThrow(/requires a value/);
+    expect(() => parseArgs(["--bogus"])).toThrow(/unknown argument/);
+  });
+
+  it("runCleanup rejects a non-finite cap even if parseArgs is bypassed", async () => {
+    const server = fakeServer([]);
+    await expect(
+      runCleanup(baseOpts({ cap: Number.NaN }), baseDeps(server, fakeLlm([]), tempDir())),
+    ).rejects.toThrow(/positive finite/);
+  });
+
+  it("refuses to replay a decision file generated for a different stage", async () => {
+    const dir = tempDir();
+    const decisionsFile = join(dir, "decisions.json");
+    writeFileSync(decisionsFile, JSON.stringify({ stage: "pr-7", decisions: [] }));
+    const server = fakeServer([]);
+    await expect(
+      runCleanup(
+        baseOpts({ apply: true, decisionsFile }), // stage: "test"
+        baseDeps(server, fakeLlm([]), dir),
+      ),
+    ).rejects.toThrow(/stage/);
   });
 
   it("contentHash is a stable sha256 label", () => {

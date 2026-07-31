@@ -699,9 +699,9 @@ preview; production execution is a deliberate manual flow:
 
    ```bash
    node scripts/memory-cleanup.mjs --stage prod \
-     --tenant-secret-arn "$(aws secretsmanager list-secrets \
-       --filters Key=name,Values=mem9-on-aws-prod-tenant-api-key- \
-       --query 'sort_by(SecretList, &CreatedDate)[-1].ARN' --output text)"
+     --tenant-secret-arn "$(aws ssm get-parameter \
+       --name /mem9-on-aws/prod/tenant/secret-arn \
+       --query Parameter.Value --output text)"
    ```
 
    The decision list is written to `~/.mem9-cleanup/prod/decisions-*.json`
@@ -722,20 +722,27 @@ preview; production execution is a deliberate manual flow:
    ```
 
    Destructive actions (deleted ids + merge rewrites) are capped per run
-   (default 50); the run aborts before any call that would exceed the cap. A
-   stage-scoped lockfile prevents concurrent applies from the same host; do
-   not run applies from two hosts at once (single-operator contract).
+   (default 50, `--cap` override); the run aborts before any call that would
+   exceed the cap. A stage-scoped lockfile (`--lock-file`/`--lock-ttl`
+   overrides) prevents concurrent applies by the same user on the same host;
+   do not run applies from two hosts or accounts at once (single-operator
+   contract).
+
+   Exit codes: `0` success, `1` unexpected error, `2` discovery failed,
+   `3` another run holds the lock, `4` cap exceeded (aborted), `5` GLM-5
+   classification failed for every batch.
 
 Requires VPC-internal network access to `mnemo.mem9-<stage>.local:8080` (the
 script discovers the task IP via Cloud Map `DiscoverInstances`; pass
-`--base-url` explicitly when tunneling) plus IAM for `secretsmanager:ListSecrets`
-+ `GetSecretValue` on the tenant secret, `servicediscovery:DiscoverInstances`,
-and `bedrock-mantle:CreateInference`/`CallWithBearerToken`.
+`--base-url` explicitly when tunneling) plus IAM for `ssm:GetParameter` on
+`/mem9-on-aws/<stage>/tenant/secret-arn`, `secretsmanager:GetSecretValue` on
+the tenant secret, `servicediscovery:DiscoverInstances`, and
+`bedrock-mantle:CreateInference`/`CallWithBearerToken`.
 
 After deploying a revision that introduces the cleanup E2E step, re-run
 `scripts/deploy-github-role.sh` once so the CI role gains
-`servicediscovery:DiscoverInstances`, `secretsmanager:ListSecrets`, and the
-`bedrock-mantle` inference actions.
+`servicediscovery:DiscoverInstances` and the `bedrock-mantle` inference
+actions.
 
 ## License
 

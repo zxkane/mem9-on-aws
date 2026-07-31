@@ -23,6 +23,15 @@ injected deps). The E2E dry-run runs in CI against the PR preview stage.
   discarded with a warning (hallucination guard).
 - **TC-MEMCLEAN-013** — the classification prompt contains the D1–D4 rules
   from patch 0002 (docs-consistency: embedded copy matches the patch text).
+- **TC-MEMCLEAN-014** — an id listed in another verdict's `absorbs` is only
+  absorbed when its OWN verdict is a MERGE into the same survivor; a KEEP or
+  absent verdict is never overridden (the merge degrades to SKIP instead).
+- **TC-MEMCLEAN-015** — contradictory duplicate verdicts for one id resolve
+  to SKIP, never to the last (or any destructive) verdict.
+- **TC-MEMCLEAN-016** — CLI argument validation: unknown flags, missing
+  values, missing `--stage`, and non-positive/non-numeric `--cap`/`--lock-ttl`
+  are rejected; `runCleanup` independently rejects a non-finite cap; a
+  decision file generated for another stage is refused on replay.
 
 ## Dry-run (default)
 

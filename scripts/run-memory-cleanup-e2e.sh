@@ -17,16 +17,17 @@ set -euo pipefail
 STAGE="${STAGE:?STAGE is required (e.g. prod or pr-7)}"
 REGION="${AWS_REGION:-ap-northeast-1}"
 
-# The tenant secret has a stable name prefix (infra/tenant-identity.ts); resolve
-# the newest matching secret's ARN. The VALUE never touches this shell — the
-# cleanup script reads it via the SDK.
-TENANT_SECRET_ARN=$(aws secretsmanager list-secrets \
+# SST publishes the tenant secret's ARN to SSM (infra/tenant-identity.ts) so
+# this stays inside the already-scoped /mem9-on-aws/<stage>/* reads — no
+# account-wide ListSecrets. The VALUE never touches this shell — the cleanup
+# script reads it via the SDK.
+TENANT_SECRET_ARN=$(aws ssm get-parameter \
+  --name "/mem9-on-aws/${STAGE}/tenant/secret-arn" \
   --region "$REGION" \
-  --filters "Key=name,Values=mem9-on-aws-${STAGE}-tenant-api-key-" \
-  --query 'sort_by(SecretList, &CreatedDate)[-1].ARN' \
-  --output text)
+  --query Parameter.Value \
+  --output text) || TENANT_SECRET_ARN=""
 if [[ -z "$TENANT_SECRET_ARN" || "$TENANT_SECRET_ARN" == "None" ]]; then
-  echo "::error::no tenant secret found for stage ${STAGE}"
+  echo "::error::no tenant secret ARN parameter for stage ${STAGE}"
   exit 1
 fi
 
@@ -61,4 +62,12 @@ if ! grep -qE 'writeCalls=0([^0-9]|$)' <<<"$OUTPUT"; then
   exit 1
 fi
 COUNT=$(jq '.decisions | length' "${DECISIONS[0]}")
-echo "memory-cleanup e2e: OK — ${COUNT} decisions, zero write calls"
+# An all-SKIP list on a non-empty store means classification never succeeded
+# (exit code 5 covers the all-batches-failed case; this guards partial rot on
+# a store the earlier smoke steps have already seeded).
+NON_SKIP=$(jq '[.decisions[] | select(.verdict != "SKIP")] | length' "${DECISIONS[0]}")
+if [[ "$COUNT" -gt 0 && "$NON_SKIP" -eq 0 ]]; then
+  echo "::error::all ${COUNT} decisions are SKIP — GLM-5 classification produced no verdicts"
+  exit 1
+fi
+echo "memory-cleanup e2e: OK — ${COUNT} decisions (${NON_SKIP} classified), zero write calls"
