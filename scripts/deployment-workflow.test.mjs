@@ -6,6 +6,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
@@ -96,6 +97,49 @@ function runDeployRoleFixture(args = []) {
   return { result, callRecords };
 }
 
+function runCloudflareResolver({
+  customDomain = "memory.example.com",
+  curlExit = 0,
+  zoneResponse = "",
+} = {}) {
+  const workflow = parse(readFileSync(workflowPath, "utf8"));
+  const resolver = workflow.jobs["deploy-prod"].steps.find(
+    ({ name }) => name === "Resolve Cloudflare account ID",
+  );
+  const dir = mkdtempSync(join(tmpdir(), "mem9-cloudflare-account-"));
+  tempDirs.push(dir);
+  const bin = join(dir, "bin");
+  const githubEnv = join(dir, "github-env");
+  mkdirSync(bin);
+  writeFileSync(
+    join(bin, "curl"),
+    [
+      "#!/usr/bin/env bash",
+      'if [[ "${MOCK_CURL_EXIT:-0}" != "0" ]]; then exit "$MOCK_CURL_EXIT"; fi',
+      "printf '%s' \"$MOCK_ZONE_RESPONSE\"",
+      "",
+    ].join("\n"),
+    { mode: 0o755 },
+  );
+  writeFileSync(githubEnv, "");
+
+  const result = spawnSync("bash", ["-c", resolver.run], {
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      PATH: `${bin}${delimiter}${process.env.PATH}`,
+      GITHUB_ENV: githubEnv,
+      MEM9_FACADE_CUSTOM_DOMAIN: customDomain,
+      CLOUDFLARE_API_TOKEN: customDomain ? "fixture-token" : "",
+      CLOUDFLARE_ZONE_ID: customDomain ? "a".repeat(32) : "",
+      MOCK_CURL_EXIT: String(curlExit),
+      MOCK_ZONE_RESPONSE: zoneResponse,
+    },
+  });
+
+  return { result, githubEnv: readFileSync(githubEnv, "utf8") };
+}
+
 function optionValue(args, option) {
   const index = args.indexOf(option);
   return index >= 0 ? args[index + 1] : undefined;
@@ -179,15 +223,44 @@ describe("workflow integration", () => {
     expect(workflow).toContain("bash scripts/run-ingest-queue-integration.sh");
   });
 
-  it("passes the optional façade Cloudflare settings only to the prod deploy", () => {
+  it("TC-CF-ACCOUNT-001/002/003: resolves the Cloudflare account only for prod", () => {
     const workflow = parse(readFileSync(workflowPath, "utf8"));
-    const preview = workflow.jobs["deploy-preview"].steps.find(
+    const previewSteps = workflow.jobs["deploy-preview"].steps;
+    const prodSteps = workflow.jobs["deploy-prod"].steps;
+    const preview = previewSteps.find(
       ({ name }) => name === "Deploy PR stage",
     );
-    const prod = workflow.jobs["deploy-prod"].steps.find(
+    const resolverIndex = prodSteps.findIndex(
+      ({ name }) => name === "Resolve Cloudflare account ID",
+    );
+    const deployIndex = prodSteps.findIndex(
       ({ name }) => name === "Deploy prod stage",
     );
+    const resolver = prodSteps[resolverIndex];
+    const prod = prodSteps[deployIndex];
 
+    expect(resolverIndex).toBeGreaterThanOrEqual(0);
+    expect(resolverIndex).toBeLessThan(deployIndex);
+    expect(resolver.env.MEM9_FACADE_CUSTOM_DOMAIN).toBe(
+      "${{ secrets.MEM9_FACADE_CUSTOM_DOMAIN }}",
+    );
+    expect(resolver.env.CLOUDFLARE_API_TOKEN).toBe(
+      "${{ secrets.CLOUDFLARE_API_TOKEN }}",
+    );
+    expect(resolver.env.CLOUDFLARE_ZONE_ID).toBe(
+      "${{ secrets.CLOUDFLARE_ZONE_ID }}",
+    );
+    expect(resolver.run).toContain(
+      "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}",
+    );
+    expect(resolver.run).toContain("curl --fail");
+    expect(resolver.run).toContain('data.get("success") is True');
+    expect(resolver.run).toContain('re.fullmatch(r"[0-9a-f]{32}", value)');
+    expect(resolver.run).toContain("::add-mask::$ACCOUNT_ID");
+    expect(resolver.run).toContain(
+      "CLOUDFLARE_DEFAULT_ACCOUNT_ID=%s\\n",
+    );
+    expect(resolver.run).toContain('>> "$GITHUB_ENV"');
     expect(prod.env.MEM9_FACADE_CUSTOM_DOMAIN).toBe(
       "${{ secrets.MEM9_FACADE_CUSTOM_DOMAIN }}",
     );
@@ -201,8 +274,45 @@ describe("workflow integration", () => {
       "MEM9_FACADE_CUSTOM_DOMAIN",
       "CLOUDFLARE_API_TOKEN",
       "CLOUDFLARE_ZONE_ID",
+      "CLOUDFLARE_DEFAULT_ACCOUNT_ID",
     ]) {
       expect(preview.env[name]).toBeUndefined();
+    }
+    expect(
+      previewSteps.some(({ name }) => name === "Resolve Cloudflare account ID"),
+    ).toBe(false);
+  });
+
+  it("TC-CF-ACCOUNT-003/004: exports only a valid account and skips an unset domain", () => {
+    const accountId = "b".repeat(32);
+    const success = runCloudflareResolver({
+      zoneResponse: JSON.stringify({
+        success: true,
+        result: { account: { id: accountId } },
+      }),
+    });
+    expect(success.result.status).toBe(0);
+    expect(success.result.stdout).toContain(`::add-mask::${accountId}`);
+    expect(success.githubEnv).toBe(
+      `CLOUDFLARE_DEFAULT_ACCOUNT_ID=${accountId}\n`,
+    );
+
+    const noDomain = runCloudflareResolver({ customDomain: "" });
+    expect(noDomain.result.status).toBe(0);
+    expect(noDomain.result.stdout).toContain(
+      "skipping Cloudflare account resolution",
+    );
+    expect(noDomain.githubEnv).toBe("");
+
+    for (const failure of [
+      runCloudflareResolver({ curlExit: 22 }),
+      runCloudflareResolver({ zoneResponse: "not-json" }),
+      runCloudflareResolver({
+        zoneResponse: JSON.stringify({ success: true, result: {} }),
+      }),
+    ]) {
+      expect(failure.result.status).not.toBe(0);
+      expect(failure.githubEnv).toBe("");
     }
   });
 
