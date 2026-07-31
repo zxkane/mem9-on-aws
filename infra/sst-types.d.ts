@@ -614,6 +614,7 @@ declare namespace sst {
       maxAge?: Input<string>;
     }
     interface ApiGatewayV2Args {
+      domain?: Input<string>;
       cors?: ApiGatewayV2Cors;
     }
     interface ApiGatewayV2AuthorizerArgs {

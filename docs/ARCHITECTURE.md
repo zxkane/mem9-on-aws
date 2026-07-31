@@ -206,14 +206,27 @@ Cognito-authenticated MCP request
 
 `infra/ecs.ts` creates an AWS Cloud Map private DNS namespace and service. The
 proxy Lambda and ECS task share the task security group, whose self-referencing
-port 8080 rule permits the private hop. There is no ALB, ACM certificate, VPC
-Lattice target, public Route 53 zone, or public mnemo-server endpoint.
+port 8080 rule permits the private hop. The private backend path has no ALB,
+certificate, VPC Lattice target, public Route 53 zone, or public mnemo-server
+endpoint.
 
 The gateway trusts both implemented Cognito clients:
 
 - M2M `client_credentials` for CI and headless clients.
 - Authorization code with PKCE through the API Gateway v2 OAuth facade for
   interactive clients.
+
+The OAuth facade optionally uses a production custom hostname from
+`MEM9_FACADE_CUSTOM_DOMAIN`. GitHub Actions supplies it only from the repository
+secret of the same name; when it is absent, the facade keeps its generated
+`execute-api` URL. When present, SST creates the Regional API Gateway domain and
+root API mapping, requests a same-region ACM certificate, validates it through
+DNS, and creates aliases in an existing public Route 53 hosted zone in the same
+AWS account. Preview stages never claim the production hostname. AWS documents
+the [HTTP API custom-domain flow](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-custom-domain-names.html)
+and requires a same-region certificate for a
+[Regional custom domain](https://docs.aws.amazon.com/apigateway/latest/developerguide/apigateway-regional-api-custom-domain-create.html).
+These public facade resources do not expose `mnemo-server`.
 
 ### Schema bootstrap and data
 
@@ -572,7 +585,7 @@ to the GitHub Actions deploy role.
 | Ingest observability   | Content-free EMF metrics, CloudWatch dashboard, and production alarms                                | `docker/mnemo-server/patches/0006-durable-ingest-telemetry.patch`, `infra/observability.ts`                   |
 | MCP surface            | AgentCore Gateway Lambda target                                                                      | `infra/gateway.ts`                                                                                            |
 | Private service lookup | AWS Cloud Map                                                                                        | `infra/ecs.ts`                                                                                                |
-| Inbound auth           | Cognito M2M plus OAuth2 PKCE facade                                                                  | `infra/cognito.ts`, `infra/oauth-facade.ts`                                                                   |
+| Inbound auth           | Cognito M2M plus OAuth2 PKCE facade; optional production API Gateway custom domain                  | `infra/cognito.ts`, `infra/oauth-facade.ts`                                                                   |
 | Schema setup           | Startup atomic-ingest migration plus one-shot ECS bootstrap for the complete schema and tenant seed  | `docker/mnemo-server/entrypoint.sh`, `infra/bootstrap.ts`, `docker/bootstrap/migrations/`                     |
 
 ## Locked decisions
@@ -593,6 +606,8 @@ to the GitHub Actions deploy role.
 - The AgentCore Gateway uses a Lambda target and Cloud Map private DNS.
 - The public OAuth facade uses API Gateway v2 plus Lambda, never a Lambda
   Function URL.
+- The OAuth facade custom domain is optional, production-only, and uses an
+  existing same-account public Route 53 hosted zone; previews use `execute-api`.
 - Schema bootstrap is a separate one-shot ECS task.
 - ECR scan-on-push is a guarded out-of-band registry singleton, separate from
   the retained repository stack.

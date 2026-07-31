@@ -14,6 +14,13 @@
 #                  push to main "succeed" without deploying). Preview/cleanup
 #                  skip gracefully when it's unset.
 #
+# Optional GitHub repo secret:
+#   MEM9_FACADE_CUSTOM_DOMAIN — production OAuth façade hostname, for example
+#                  memory.example.com. The public Route 53 hosted zone must
+#                  already exist in the same AWS account. Unset keeps the
+#                  execute-api URL. It is injected only into the prod deploy so
+#                  preview stages cannot claim the production hostname.
+#
 # Optional GitHub repo variables:
 #   RUNNER_LABEL — JSON array selecting a self-hosted runner, e.g.
 #                  ["self-hosted", "linux", "arm64"]. Unset → ubuntu-latest.
@@ -951,6 +958,10 @@ jobs:
           # flag is read at synth time, so a prod deploy without it strips the
           # authorizer and reopens the Palisade finding.
           MEM9_FACADE_AUTHORIZER_ENABLED: "1"
+          # Optional production hostname. SST creates and DNS-validates the
+          # regional ACM certificate, API mapping, and Route 53 aliases. Keep
+          # this in GitHub Secrets; previews intentionally never receive it.
+          MEM9_FACADE_CUSTOM_DOMAIN: ${{ secrets.MEM9_FACADE_CUSTOM_DOMAIN }}
           # Slack incoming webhook for prod alarm delivery (infra/observability.ts).
           # SST marks this value secret before it enters Pulumi state or Lambda config.
           # Production synthesis fails when the managed sink is unset.

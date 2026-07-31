@@ -264,4 +264,15 @@ describe("runtime documentation", () => {
       "**Empirical deployment observation, 2026-07-12:**",
     );
   });
+
+  it("TC-DOCS-009: documents the optional production facade domain boundary", () => {
+    for (const source of [text.readme, text.architecture]) {
+      expect(source).toContain("MEM9_FACADE_CUSTOM_DOMAIN");
+      expect(source).toMatch(/existing public Route 53\s+hosted zone/i);
+      expect(source).toMatch(/Preview stages never/i);
+    }
+    expect(text.facts).toContain(
+      "optional ACM certificate and existing-zone records for the public OAuth facade",
+    );
+  });
 });

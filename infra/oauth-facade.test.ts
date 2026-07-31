@@ -31,6 +31,7 @@ let routeSpy: ReturnType<typeof vi.fn>;
 let addAuthorizerSpy: ReturnType<typeof vi.fn>;
 let authorizerId: ReturnType<typeof out>;
 let previousFacadeAuthorizerEnabled: string | undefined;
+let previousFacadeCustomDomain: string | undefined;
 
 // Recursively unwrap the loose out<T> mock (and plain values) — env / arg values
 // come through as out<T> or $interpolate results.
@@ -131,7 +132,9 @@ beforeEach(() => {
   addAuthorizerSpy = vi.fn(() => ({ id: authorizerId }));
   previousFacadeAuthorizerEnabled =
     process.env.MEM9_FACADE_AUTHORIZER_ENABLED;
+  previousFacadeCustomDomain = process.env.MEM9_FACADE_CUSTOM_DOMAIN;
   delete process.env.MEM9_FACADE_AUTHORIZER_ENABLED;
+  delete process.env.MEM9_FACADE_CUSTOM_DOMAIN;
 });
 afterEach(() => {
   for (const g of ["$app", "aws", "sst", "$interpolate"])
@@ -141,6 +144,11 @@ afterEach(() => {
   } else {
     process.env.MEM9_FACADE_AUTHORIZER_ENABLED =
       previousFacadeAuthorizerEnabled;
+  }
+  if (previousFacadeCustomDomain === undefined) {
+    delete process.env.MEM9_FACADE_CUSTOM_DOMAIN;
+  } else {
+    process.env.MEM9_FACADE_CUSTOM_DOMAIN = previousFacadeCustomDomain;
   }
   vi.resetModules();
 });
@@ -249,6 +257,35 @@ describe("oauthFacade factory", () => {
     expect(cors.allowHeaders).toContain("Authorization");
     expect(cors.allowOrigins).toEqual(["*"]);
     expect(cors.allowMethods).toEqual(["*"]);
+    expect(api.domain).toBeUndefined();
+  });
+
+  it("configures the production custom domain from a trimmed hostname", async () => {
+    process.env.MEM9_FACADE_CUSTOM_DOMAIN = " Memory.Example.com. ";
+    installGlobals("prod");
+    const oauthFacade = await loadFacade();
+    oauthFacade(fakeCognitoOut());
+
+    expect(only("ApiGatewayV2").domain).toBe("memory.example.com");
+  });
+
+  it("does not attach the production hostname to a preview stage", async () => {
+    process.env.MEM9_FACADE_CUSTOM_DOMAIN = "memory.example.com";
+    installGlobals("pr-42");
+    const oauthFacade = await loadFacade();
+    oauthFacade(fakeCognitoOut());
+
+    expect(only("ApiGatewayV2").domain).toBeUndefined();
+  });
+
+  it("rejects a URL instead of accepting it as the custom hostname", async () => {
+    process.env.MEM9_FACADE_CUSTOM_DOMAIN = "https://memory.example.com/path";
+    installGlobals("prod");
+    const oauthFacade = await loadFacade();
+
+    expect(() => oauthFacade(fakeCognitoOut())).toThrow(
+      /MEM9_FACADE_CUSTOM_DOMAIN must be a hostname/u,
+    );
   });
 
   it("creates the reader UserPoolClient wired to the facade callback URL (cycle break)", async () => {

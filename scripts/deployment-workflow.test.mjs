@@ -112,7 +112,7 @@ function blockForSid(source, sid) {
 function actionSetForSid(source, sid) {
   return [
     ...blockForSid(source, sid).matchAll(
-      /^\s+- ((?:ec2|ecs|logs|ssm):[A-Za-z]+)$/gm,
+      /^\s+- ([a-z0-9-]+:[A-Za-z*]+)$/gm,
     ),
   ].map(
     (m) => m[1],
@@ -177,6 +177,21 @@ describe("workflow integration", () => {
   it("runs the PostgreSQL durable-ingest integration suite in CI", () => {
     const workflow = readFileSync(workflowPath, "utf8");
     expect(workflow).toContain("bash scripts/run-ingest-queue-integration.sh");
+  });
+
+  it("passes the optional façade domain secret only to the prod deploy", () => {
+    const workflow = parse(readFileSync(workflowPath, "utf8"));
+    const preview = workflow.jobs["deploy-preview"].steps.find(
+      ({ name }) => name === "Deploy PR stage",
+    );
+    const prod = workflow.jobs["deploy-prod"].steps.find(
+      ({ name }) => name === "Deploy prod stage",
+    );
+
+    expect(prod.env.MEM9_FACADE_CUSTOM_DOMAIN).toBe(
+      "${{ secrets.MEM9_FACADE_CUSTOM_DOMAIN }}",
+    );
+    expect(preview.env.MEM9_FACADE_CUSTOM_DOMAIN).toBeUndefined();
   });
 
   it("TC-EMF-011: smokes non-TTY EMF bytes from the built arm64 image", () => {
@@ -289,6 +304,45 @@ describe("OAuth2 facade IAM", () => {
         "logs:ListLogDeliveries",
       ]),
     );
+  });
+
+  it("grants the optional custom-domain lifecycle without creating a public zone", () => {
+    const role = readFileSync(rolePath, "utf8");
+
+    expect(actionSetForSid(role, "ApiGatewayV2")).toEqual(
+      expect.arrayContaining([
+        "apigateway:POST",
+        "apigateway:GET",
+        "apigateway:PATCH",
+        "apigateway:PUT",
+        "apigateway:DELETE",
+      ]),
+    );
+    expect(blockForSid(role, "ApiGatewayV2")).toContain(
+      "arn:aws:apigateway:*::/domainnames/*",
+    );
+    expect(actionSetForSid(role, "AcmFacadeCertificateCreate")).toEqual([
+      "acm:RequestCertificate",
+      "acm:AddTagsToCertificate",
+    ]);
+    expect(actionSetForSid(role, "AcmFacadeCertificateManage")).toEqual(
+      expect.arrayContaining([
+        "acm:DeleteCertificate",
+        "acm:DescribeCertificate",
+        "acm:ListTagsForCertificate",
+      ]),
+    );
+    expect(actionSetForSid(role, "ApiGatewayServiceLinkedRole")).toEqual([
+      "iam:CreateServiceLinkedRole",
+    ]);
+    expect(blockForSid(role, "ApiGatewayServiceLinkedRole")).toContain(
+      "iam:AWSServiceName: ops.apigateway.amazonaws.com",
+    );
+
+    const route53 = blockForSid(role, "Route53ForCloudMapAndFacadeDomain");
+    expect(route53).toContain("route53:ChangeResourceRecordSets");
+    expect(route53).toContain("route53:ListHostedZonesByName");
+    expect(route53).toContain("it never creates that");
   });
 });
 
