@@ -124,14 +124,13 @@ in an existing Cloudflare zone. Preview stages never receive these settings.
 Before enabling it, update the out-of-band deploy role. Create a
 [Cloudflare API token](https://developers.cloudflare.com/dns/manage-dns-records/how-to/api-tokens/)
 scoped to the target zone with `Zone:Read` and `DNS:Edit`, then configure the
-hostname and token as GitHub secrets and the non-sensitive zone ID as a
-repository variable:
+hostname, token, and zone ID as GitHub repository secrets:
 
 ```bash
 scripts/deploy-github-role.sh
 gh secret set MEM9_FACADE_CUSTOM_DOMAIN --body "memory.example.com"
 gh secret set CLOUDFLARE_API_TOKEN
-gh variable set CLOUDFLARE_ZONE_ID --body "<cloudflare-zone-id>"
+gh secret set CLOUDFLARE_ZONE_ID
 ```
 
 Use a hostname only, without `https://`, a port, or a path. The secret prevents

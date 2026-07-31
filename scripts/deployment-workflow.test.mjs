@@ -195,7 +195,7 @@ describe("workflow integration", () => {
       "${{ secrets.CLOUDFLARE_API_TOKEN }}",
     );
     expect(prod.env.CLOUDFLARE_ZONE_ID).toBe(
-      "${{ vars.CLOUDFLARE_ZONE_ID }}",
+      "${{ secrets.CLOUDFLARE_ZONE_ID }}",
     );
     for (const name of [
       "MEM9_FACADE_CUSTOM_DOMAIN",

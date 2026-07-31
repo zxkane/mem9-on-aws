@@ -219,8 +219,8 @@ The gateway trusts both implemented Cognito clients:
 The OAuth facade optionally uses a production custom hostname from
 `MEM9_FACADE_CUSTOM_DOMAIN`. GitHub Actions supplies it only from the repository
 secret of the same name. The deploy also receives `CLOUDFLARE_API_TOKEN` from a
-repository secret and `CLOUDFLARE_ZONE_ID` from a repository variable. When the
-hostname is absent, the facade keeps its generated `execute-api` URL. When
+repository secret and `CLOUDFLARE_ZONE_ID` from another repository secret. When
+the hostname is absent, the facade keeps its generated `execute-api` URL. When
 present, SST creates the Regional API Gateway domain and root API mapping,
 requests a same-region ACM certificate, and uses the Cloudflare provider to
 create DNS-only validation and API-target CNAME records in the existing zone.
