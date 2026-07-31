@@ -112,6 +112,7 @@ Design: [`docs/designs/durable-ingest-queue.md`](../designs/durable-ingest-queue
 | TC-SESSION-DELETE-012 | A concurrent transaction locks an active session row, writes a fresh `updated_at`, and then releases it to a waiting single delete | The delete waits, changes the row to deleted, and persists an `updated_at` no earlier than the lock holder's write |
 | TC-SESSION-DELETE-013 | An authenticated tenant database contains `memories` but has no `sessions` table | Single fallback preserves the 404 contract; batch deletion still returns 200 with the exact memory-row count and no partial-failure response |
 | TC-SESSION-DELETE-014 | Handler integration starts from an isolated database without an incidental pre-created `memories` table | Test setup creates its explicit memory-schema precondition and both authenticated delete paths run independently of integration-script ordering |
+| TC-SESSION-DELETE-015 | A concurrent transaction locks an active session row, writes a fresh `updated_at`, and then releases it to a waiting batch delete | The batch delete waits, changes the row to deleted, and persists an `updated_at` no earlier than the lock holder's write |
 
 ## Durable Ingest Telemetry
 

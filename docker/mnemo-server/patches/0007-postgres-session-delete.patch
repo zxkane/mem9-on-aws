@@ -348,7 +348,7 @@ index 929b8ea..5a9c452 100644
  // IsTableNotFoundError no-op pattern). ListBySessionIDs returns ErrNotSupported
 diff --git a/server/internal/repository/postgres/session_delete.go b/server/internal/repository/postgres/session_delete.go
 new file mode 100644
-index 0000000..4d4ee17
+index 0000000..0017d75
 --- /dev/null
 +++ b/server/internal/repository/postgres/session_delete.go
 @@ -0,0 +1,112 @@
@@ -443,7 +443,7 @@ index 0000000..4d4ee17
 +	}
 +	result, err := r.db.ExecContext(
 +		ctx,
-+		`UPDATE sessions SET state = 'deleted', updated_at = statement_timestamp()
++		`UPDATE sessions SET state = 'deleted', updated_at = clock_timestamp()
 +		 WHERE id IN (`+strings.Join(placeholders, ",")+`) AND state != 'deleted'`,
 +		args...,
 +	)
@@ -466,10 +466,10 @@ index 0000000..4d4ee17
 +}
 diff --git a/server/internal/repository/session_delete_integration_test.go b/server/internal/repository/session_delete_integration_test.go
 new file mode 100644
-index 0000000..d6184e3
+index 0000000..87946b2
 --- /dev/null
 +++ b/server/internal/repository/session_delete_integration_test.go
-@@ -0,0 +1,338 @@
+@@ -0,0 +1,402 @@
 +package repository
 +
 +import (
@@ -506,7 +506,6 @@ index 0000000..d6184e3
 +				WHERE datname = current_database()
 +				  AND state = 'active'
 +				  AND wait_event_type = 'Lock'
-+				  AND query LIKE '%SELECT state FROM sessions WHERE id = $1 FOR UPDATE%'
 +				  AND pid != pg_backend_pid()
 +			)
 +		`).Scan(&waiting); err != nil {
@@ -516,7 +515,7 @@ index 0000000..d6184e3
 +			return
 +		}
 +		if time.Now().After(deadline) {
-+			t.Fatal("SoftDelete did not wait for the session row lock")
++			t.Fatal("session deletion did not wait for the row lock")
 +		}
 +		time.Sleep(10 * time.Millisecond)
 +	}
@@ -697,6 +696,71 @@ index 0000000..d6184e3
 +	if targetState != domain.StateDeleted || !targetUpdatedAt.Equal(blockerUpdatedAt) {
 +		t.Fatalf(
 +			"target = (%q, %s), want (deleted, %s)",
++			targetState,
++			targetUpdatedAt,
++			blockerUpdatedAt,
++		)
++	}
++}
++
++func TestPostgresSessionRepoBulkSoftDeletePreservesTimestampOrderAfterLockWait(t *testing.T) {
++	db := sessionDeleteTestDB(t)
++	ctx := context.Background()
++	id := "10000000-0000-4000-8000-00000000a005"
++	originalUpdatedAt := time.Date(2026, 2, 3, 4, 5, 6, 0, time.UTC)
++	testutil.InsertSessionRow(t, db, id, domain.StateActive, originalUpdatedAt)
++
++	blocker, err := db.BeginTx(ctx, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer blocker.Rollback()
++	var state string
++	if err := blocker.QueryRow(
++		`SELECT state FROM sessions WHERE id = $1 FOR UPDATE`,
++		id,
++	).Scan(&state); err != nil {
++		t.Fatal(err)
++	}
++
++	repo := NewSessionRepo("postgres", db, "", false, "cluster-a")
++	type result struct {
++		deleted int64
++		err     error
++	}
++	resultCh := make(chan result, 1)
++	go func() {
++		deleted, err := repo.BulkSoftDelete(ctx, []string{id}, "agent-a")
++		resultCh <- result{deleted: deleted, err: err}
++	}()
++	waitForSessionDeleteLock(t, db)
++
++	var blockerUpdatedAt time.Time
++	if err := blocker.QueryRow(
++		`UPDATE sessions
++		 SET tags = '["lock-holder"]', updated_at = statement_timestamp()
++		 WHERE id = $1
++		 RETURNING updated_at`,
++		id,
++	).Scan(&blockerUpdatedAt); err != nil {
++		t.Fatal(err)
++	}
++	if err := blocker.Commit(); err != nil {
++		t.Fatal(err)
++	}
++
++	select {
++	case got := <-resultCh:
++		if got.err != nil || got.deleted != 1 {
++			t.Fatalf("locked BulkSoftDelete = (%d, %v), want (1, nil)", got.deleted, got.err)
++		}
++	case <-time.After(2 * time.Second):
++		t.Fatal("BulkSoftDelete did not resume after the row lock was released")
++	}
++	targetState, targetUpdatedAt := testutil.SessionRowState(t, db, id)
++	if targetState != domain.StateDeleted || targetUpdatedAt.Before(blockerUpdatedAt) {
++		t.Fatalf(
++			"target = (%q, %s), want deleted at or after lock-holder update %s",
 +			targetState,
 +			targetUpdatedAt,
 +			blockerUpdatedAt,

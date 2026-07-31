@@ -222,7 +222,10 @@ Batch deletion returns zero without querying for empty input. Otherwise, one
 statement updates only requested rows whose state is not `deleted`. PostgreSQL
 updates each matching row once even when an ID is repeated, so the affected-row
 count is exact and unknown or already-deleted IDs contribute zero. Duplicate-ID
-normalization remains at the service boundary.
+normalization remains at the service boundary. The statement uses
+`clock_timestamp()` because its row-lock wait occurs inside that same statement;
+the persisted timestamp is therefore read after the lock is acquired and cannot
+precede a concurrent lock holder's last write.
 
 Tenant databases that have not received the additive durable-ingest migration
 may not contain `sessions`. The PostgreSQL adapter preserves the preceding stub
