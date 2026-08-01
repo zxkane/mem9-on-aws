@@ -446,6 +446,21 @@ export function ecs(dbOut: DbOutputs, identity: TenantIdentityOutputs): EcsOutpu
       taskDefinition: disableMnemoServerPseudoTerminal,
       service: (args: Record<string, any>, opts: Record<string, any>) => {
         args.tags = { ...(args.tags ?? {}), ...tags };
+        // Fargate compute is billed to tasks, not just to this tagged Service.
+        // Propagate Project/Stage to every new task so Cost Explorer can
+        // attribute vCPU and memory charges. Managed tags add the ECS
+        // cluster/service identity used by ECS usage reports.
+        args.propagateTags = "SERVICE";
+        args.enableEcsManagedTags = true;
+        // Propagation only applies when a task is created. Force the Service
+        // update to replace tasks that predate this setting. The versioned
+        // trigger guarantees a Pulumi update even when a manual deploy reuses
+        // an unchanged image tag.
+        args.forceNewDeployment = true;
+        args.triggers = {
+          ...(args.triggers ?? {}),
+          taskTagPropagation: "v1",
+        };
         // Register the service in Cloud Map (§6a) so it gets the stable
         // `mnemo.mem9-<stage>.local` A record ECS keeps pointed at the task's
         // private IP. Set on the underlying aws.ecs.Service args (SST's Service
