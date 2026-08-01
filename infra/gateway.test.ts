@@ -58,7 +58,7 @@ function makeCtor(kind: string) {
     arn = { value: `arn:${kind}`, apply: (fn: (v: string) => unknown) => out(fn(`arn:${kind}`) as never) };
     id = out(`${kind}-id`);
     gatewayId = out("gw-123");
-    gatewayUrl = out("https://gw-123.gateway.bedrock-agentcore.ap-northeast-1.amazonaws.com/mcp");
+    gatewayUrl = out("https://gateway.example.com/mcp");
     constructor(_n: string, args: Record<string, unknown>, opts?: Record<string, unknown>) {
       created.push({ kind, args, opts });
     }
@@ -118,7 +118,7 @@ async function loadGateway() {
 function fakeCognito(): CognitoOutputs {
   return {
     issuer: out("https://cognito-idp.ap-northeast-1.amazonaws.com/pool-1"),
-    allowedClientIds: [out("client-1")],
+    allowedClientIds: [out("client-1"), out("client-2")],
   } as unknown as CognitoOutputs;
 }
 function fakeEcs(): EcsOutputs {
@@ -149,13 +149,13 @@ describe("gateway stack", () => {
     expect(gw.authorizerType).toBe("CUSTOM_JWT");
     const jwt = (gw.authorizerConfiguration as any).customJwtAuthorizer;
     expect(String((jwt.discoveryUrl as { value?: string }).value)).toContain("/.well-known/openid-configuration");
-    // The M2M client plus the browser-login reader client.
-    expect(jwt.allowedClients).toHaveLength(2);
+    // The two M2M clients plus the browser-login reader client.
+    expect(jwt.allowedClients).toHaveLength(3);
     // No interceptor in v1.
     expect(gw.interceptorConfigurations).toBeUndefined();
   });
 
-  it("trusts BOTH the M2M and the reader client in allowedClients", async () => {
+  it("trusts both M2M clients and the reader client in allowedClients", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
     gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>);
@@ -164,8 +164,9 @@ describe("gateway stack", () => {
     // The list is [...cognitoOut.allowedClientIds, readerClientId]; each entry is an
     // out<string> wrapper, so unwrap to compare the underlying client ids.
     const clients = (unwrap(jwt.allowedClients) as string[]);
-    // The M2M client from fakeCognito().allowedClientIds.
+    // Both M2M clients from fakeCognito().allowedClientIds.
     expect(clients).toContain("client-1");
+    expect(clients).toContain("client-2");
     // The browser-login reader client passed as the 4th arg.
     expect(clients).toContain("reader-client-id-test");
   });

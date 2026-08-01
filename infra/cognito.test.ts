@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 /**
  * Unit tests for the `cognito` stack factory. Mocks the SST globals so the
  * factory runs bare; asserts the M2M user pool + domain + resource server +
- * client wiring and the SSM exports (client secret as SecureString, never plain).
+ * client wiring and the SSM exports (client secrets as SecureString, never plain).
  */
 
 function out<T>(value: T): { value: T; apply: (fn: (v: T) => unknown) => unknown } {
@@ -15,7 +15,7 @@ interface Rec {
   args: Record<string, unknown>;
 }
 let created: Rec[];
-let params: { name: string; type: string }[];
+let params: { name: string; type: string; value: unknown }[];
 
 function installInterpolate() {
   (globalThis as Record<string, unknown>).$interpolate = (
@@ -36,11 +36,13 @@ function installInterpolate() {
 
 function makeCtor(kind: string) {
   return class {
-    id = out(`${kind}-id`);
+    id = out(`${kind}-${created.filter((record) => record.kind === kind).length + 1}-id`);
     arn = out(`arn:${kind}`);
     identifier = out("mem9-mcp");
     domain = out("prod-mem9-mcp");
-    clientSecret = out("SECRET-VALUE");
+    clientSecret = out(
+      `SECRET-VALUE-${created.filter((record) => record.kind === kind).length + 1}`,
+    );
     constructor(_n: string, args: Record<string, unknown>) {
       created.push({ kind, args });
     }
@@ -60,12 +62,16 @@ function installGlobals(stage: string) {
     },
     ssm: {
       Parameter: class {
-        constructor(_n: string, args: { name: unknown; type: string }) {
+        constructor(_n: string, args: { name: unknown; type: string; value: unknown }) {
           const name =
             typeof args.name === "object" && args.name && "value" in args.name
               ? (args.name as { value: string }).value
               : (args.name as string);
-          params.push({ name, type: args.type });
+          const value =
+            typeof args.value === "object" && args.value && "value" in args.value
+              ? (args.value as { value: unknown }).value
+              : args.value;
+          params.push({ name, type: args.type, value });
         }
       },
     },
@@ -90,7 +96,7 @@ function byKind(kind: string) {
 }
 
 describe("cognito stack", () => {
-  it("creates a pool, domain, resource server (read+write), and one M2M client", async () => {
+  it("creates a pool, domain, resource server (read+write), and two M2M clients", async () => {
     installGlobals("prod");
     const cognito = await loadCognito();
     const outs = cognito();
@@ -101,24 +107,50 @@ describe("cognito stack", () => {
     const scopeNames = (rs.scopes as { scopeName: string }[]).map((s) => s.scopeName).sort();
     expect(scopeNames).toEqual(["read", "write"]);
     const clients = byKind("UserPoolClient");
-    expect(clients).toHaveLength(1);
-    const c = clients[0].args;
-    expect(c.generateSecret).toBe(true);
-    expect(c.allowedOauthFlows).toEqual(["client_credentials"]);
-    // The gateway consumes the client id in allowedClientIds.
-    expect(outs.allowedClientIds).toHaveLength(1);
-    expect(outs.clientId).toBeDefined();
+    expect(clients).toHaveLength(2);
+    expect(clients.map(({ args }) => args.name)).toEqual([
+      "prod-mem9-mcp-client",
+      "prod-mem9-mcp-client2",
+    ]);
+    for (const { args } of clients) {
+      expect(args.generateSecret).toBe(true);
+      expect(args.allowedOauthFlows).toEqual(["client_credentials"]);
+      expect((args.allowedOauthScopes as { value: string[] }).value).toEqual([
+        "mem9-mcp/read",
+        "mem9-mcp/write",
+      ]);
+    }
+    // The gateway consumes both client ids in allowedClientIds.
+    expect(outs.allowedClientIds).toHaveLength(2);
+    expect(outs.allowedClientIds.map((id) => (id as unknown as { value: string }).value)).toEqual(
+      ["UserPoolClient-1-id", "UserPoolClient-2-id"],
+    );
   });
 
-  it("exports client secret as a SecureString (never plaintext String)", async () => {
+  it("exports both client secrets as SecureString values", async () => {
     installGlobals("prod");
     const cognito = await loadCognito();
     cognito();
-    const secretParam = params.find((p) => p.name.endsWith("/cognito/client-secret"));
-    expect(secretParam?.type).toBe("SecureString");
-    // issuer / token-endpoint / client-id / scope are plain Strings.
+    expect(params.find((p) => p.name.endsWith("/cognito/client-secret"))).toMatchObject({
+      type: "SecureString",
+      value: "SECRET-VALUE-1",
+    });
+    expect(
+      params.find((p) => p.name.endsWith("/cognito/client2/client-secret")),
+    ).toMatchObject({
+      type: "SecureString",
+      value: "SECRET-VALUE-2",
+    });
+    // Issuer, token endpoint, client ids, and scope are plain Strings.
     expect(params.find((p) => p.name.endsWith("/cognito/issuer"))?.type).toBe("String");
-    expect(params.find((p) => p.name.endsWith("/cognito/client-id"))?.type).toBe("String");
+    expect(params.find((p) => p.name.endsWith("/cognito/client-id"))).toMatchObject({
+      type: "String",
+      value: "UserPoolClient-1-id",
+    });
+    expect(params.find((p) => p.name.endsWith("/cognito/client2/client-id"))).toMatchObject({
+      type: "String",
+      value: "UserPoolClient-2-id",
+    });
   });
 
   it("uses deleteBeforeReplace on non-prod, not on prod (pool replacement wipes clients)", async () => {
