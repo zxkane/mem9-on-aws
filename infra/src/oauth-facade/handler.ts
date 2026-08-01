@@ -1,11 +1,11 @@
 /**
  * OAuth2 façade for the mem9 MCP surface (§6).
  *
- * Adapted from a proven OAuth2-façade router. One adaptation:
+ * Adapted from a proven OAuth2-façade router:
  *
  *   - Config is injected (`route(event, cfg)`) and resolved at runtime from
  *     env + SSM (`./config.ts`) — see that file for the SSM-at-runtime config.
- *     The routing logic below is unchanged and fully unit-testable without AWS.
+ *     The router remains fully unit-testable without AWS.
  *
  * The façade is fronted by an `ApiGatewayV2` HTTP API (NOT a Lambda Function
  * URL — that would expose an open `Principal: "*"` resource policy). The event
@@ -22,20 +22,26 @@
  *   stage-configured exact HTTPS callbacks; Cognito requires static
  *   `callbackUrls`. The façade is the single registered Cognito target and
  *   302-redirects to the validated client URL. State + the original
- *   redirect_uri ride through Cognito as an HMAC-signed opaque blob so the
- *   proxy stays stateless.
+ *   redirect_uri are held in a short-lived HMAC-signed HttpOnly cookie while a
+ *   compact signed nonce rides through Cognito. This keeps third-party client
+ *   state out of Cognito's bounded `state` parameter without adding server-side
+ *   session storage.
  *
  * Routes: `/.well-known/*` metadata, `/oauth/authorize|callback|token|logout`,
  * `/register`, and a catch-all proxy to the AgentCore Gateway (`/mcp`).
  */
 
+import { randomBytes } from "node:crypto";
+
 import { loadConfig, type FacadeConfig } from "./config.js";
 import {
-  canEncodeCognitoState,
   COGNITO_STATE_MAX_LENGTH,
+  SIGNED_PAYLOAD_TTL_SECONDS,
   signAuthorizationCode,
+  signOAuthTransaction,
   signState,
   verifyAuthorizationCode,
+  verifyOAuthTransaction,
   verifyState,
 } from "./state.js";
 
@@ -44,6 +50,7 @@ interface ApiGwEvent {
   path?: string;
   rawQueryString?: string;
   headers?: Record<string, string>;
+  cookies?: string[];
   body?: string;
   isBase64Encoded?: boolean;
   requestContext?: {
@@ -57,7 +64,19 @@ interface ApiGwResponse {
   statusCode: number;
   headers: Record<string, string>;
   body: string;
+  cookies?: string[];
 }
+
+const OAUTH_STATE_COOKIE_NAME = "__Secure-mem9-oauth";
+const OAUTH_STATE_COOKIE_PATH = "/oauth/callback";
+const OAUTH_STATE_COOKIE_MAX_BYTES = 4096;
+const OAUTH_STATE_HANDLE_MARKER = "cookie-v1";
+const OAUTH_STATE_NONCE_BYTES = 16;
+const OAUTH_STATE_NONCE_LENGTH = Math.ceil((OAUTH_STATE_NONCE_BYTES * 4) / 3);
+const OAUTH_STATE_NONCE_PATTERN = new RegExp(
+  `^[A-Za-z0-9_-]{${OAUTH_STATE_NONCE_LENGTH}}$`,
+  "u",
+);
 
 function json(
   status: number,
@@ -71,12 +90,75 @@ function json(
   };
 }
 
-function redirect(location: string): ApiGwResponse {
+function redirect(location: string, cookies?: string[]): ApiGwResponse {
   return {
     statusCode: 302,
     headers: { location, "cache-control": "no-store" },
     body: "",
+    ...(cookies?.length ? { cookies } : {}),
   };
+}
+
+function stateCookie(name: string, value: string, maxAge: number): string {
+  return [
+    `${name}=${value}`,
+    `Max-Age=${maxAge}`,
+    `Path=${OAUTH_STATE_COOKIE_PATH}`,
+    "Secure",
+    "HttpOnly",
+    "SameSite=Lax",
+  ].join("; ");
+}
+
+function createTransactionCookie(
+  clientState: string,
+  clientRedirect: string,
+  hmacKey: string,
+  now: number,
+  nonce: string,
+): string | null {
+  const transaction = signOAuthTransaction(
+    {
+      nonce,
+      clientState,
+      redirectUri: clientRedirect,
+    },
+    hmacKey,
+    now,
+  );
+  const cookie = stateCookie(
+    OAUTH_STATE_COOKIE_NAME,
+    transaction,
+    SIGNED_PAYLOAD_TTL_SECONDS,
+  );
+  return Buffer.byteLength(cookie, "utf8") <= OAUTH_STATE_COOKIE_MAX_BYTES
+    ? cookie
+    : null;
+}
+
+function canFitTransactionCookie(clientRedirect: string): boolean {
+  return (
+    createTransactionCookie(
+      "",
+      clientRedirect,
+      "",
+      1_000_000_000_000,
+      "n".repeat(OAUTH_STATE_NONCE_LENGTH),
+    ) !== null
+  );
+}
+
+function readCookie(event: ApiGwEvent, name: string): string | null {
+  const values: string[] = [];
+  for (const header of event.cookies ?? []) {
+    for (const pair of header.split(";")) {
+      const separator = pair.indexOf("=");
+      if (separator < 0) continue;
+      if (pair.slice(0, separator).trim() !== name) continue;
+      values.push(pair.slice(separator + 1).trim());
+    }
+  }
+  return values.length === 1 ? values[0]! : null;
 }
 
 function selfBaseUrl(event: ApiGwEvent): string {
@@ -210,8 +292,8 @@ export async function route(
     });
   }
 
-  // GET /oauth/authorize — wrap state + client redirect_uri into an
-  // HMAC-signed token, then 302 to Cognito Hosted UI.
+  // GET /oauth/authorize — store state + client redirect_uri in a signed
+  // callback cookie, then send a compact signed nonce to Cognito Hosted UI.
   if (path === "/oauth/authorize" && method === "GET") {
     const misconfigured = ensureHmacConfigured(cfg);
     if (misconfigured) return misconfigured;
@@ -257,15 +339,32 @@ export async function route(
       });
     }
 
-    const facadeState = signState(
-      { cs: clientState, r: clientRedirect },
+    const now = Date.now();
+    const nonce = randomBytes(OAUTH_STATE_NONCE_BYTES).toString("base64url");
+    const transactionCookie = createTransactionCookie(
+      clientState,
+      clientRedirect,
       cfg.hmacKey,
-      Date.now(),
+      now,
+      nonce,
     );
-    if (facadeState.length > COGNITO_STATE_MAX_LENGTH) {
+    if (!transactionCookie) {
       return json(400, {
         error: "invalid_request",
-        error_description: "redirect_uri and state exceed the supported length",
+        error_description:
+          "redirect_uri and state exceed the supported cookie length",
+      });
+    }
+
+    const facadeState = signState(
+      { cs: nonce, r: OAUTH_STATE_HANDLE_MARKER },
+      cfg.hmacKey,
+      now,
+    );
+    if (facadeState.length > COGNITO_STATE_MAX_LENGTH) {
+      return json(500, {
+        error: "server_error",
+        error_description: "generated OAuth state exceeds the upstream limit",
       });
     }
 
@@ -281,7 +380,9 @@ export async function route(
       client_id: inParams.get("client_id") ?? null,
       has_pkce: inParams.get("code_challenge") !== null,
     });
-    return redirect(`${cfg.authorize}?${out.toString()}`);
+    return redirect(`${cfg.authorize}?${out.toString()}`, [
+      transactionCookie,
+    ]);
   }
 
   // GET /oauth/callback — verify HMAC, decode original client state +
@@ -302,23 +403,55 @@ export async function route(
       });
     }
 
-    const decoded = verifyState(facadeState, cfg.hmacKey, Date.now());
-    if (!decoded) {
+    const now = Date.now();
+    const handle = verifyState(facadeState, cfg.hmacKey, now);
+    if (
+      !handle ||
+      handle.r !== OAUTH_STATE_HANDLE_MARKER ||
+      !OAUTH_STATE_NONCE_PATTERN.test(handle.cs)
+    ) {
       logEvent("oauth.callback.bad_state", {});
       return json(400, {
         error: "invalid_state",
         error_description: "state HMAC failed or token expired",
       });
     }
+    const clearStateCookie = stateCookie(OAUTH_STATE_COOKIE_NAME, "", 0);
+    const transaction = readCookie(event, OAUTH_STATE_COOKIE_NAME);
+    const signedTransaction = transaction
+      ? verifyOAuthTransaction(transaction, cfg.hmacKey, now)
+      : null;
+    if (!signedTransaction) {
+      logEvent("oauth.callback.bad_state_cookie", {});
+      const response = json(400, {
+        error: "invalid_state",
+        error_description: "OAuth state cookie is missing, invalid, or expired",
+      });
+      response.cookies = [clearStateCookie];
+      return response;
+    }
+    if (signedTransaction.nonce !== handle.cs) {
+      // A newer authorization may have replaced the single transaction slot.
+      // Do not let a stale callback clear that newer, otherwise valid cookie.
+      logEvent("oauth.callback.stale_state_cookie", {});
+      return json(400, {
+        error: "invalid_state",
+        error_description: "OAuth state cookie does not match this request",
+      });
+    }
+    const clientState = signedTransaction.clientState;
+    const clientRedirect = signedTransaction.redirectUri;
     // Defense-in-depth: re-enforce the current allowlist at the redirect step.
     if (
-      !isAllowedClientRedirect(decoded.r, cfg.allowedClientRedirectUris)
+      !isAllowedClientRedirect(clientRedirect, cfg.allowedClientRedirectUris)
     ) {
       logEvent("oauth.callback.disallowed_redirect", {});
-      return json(400, {
+      const response = json(400, {
         error: "invalid_state",
         error_description: "decoded redirect_uri is not allowed",
       });
+      response.cookies = [clearStateCookie];
+      return response;
     }
 
     const out = new URLSearchParams();
@@ -326,9 +459,9 @@ export async function route(
       out.set(
         "code",
         signAuthorizationCode(
-          { code, redirectUri: decoded.r },
+          { code, redirectUri: clientRedirect },
           cfg.hmacKey,
-          Date.now(),
+          now,
         ),
       );
     }
@@ -337,15 +470,15 @@ export async function route(
       const errDesc = params.get("error_description");
       if (errDesc) out.set("error_description", errDesc);
     }
-    out.set("state", decoded.cs);
+    out.set("state", clientState);
 
     logEvent("oauth.callback", { ok: !error, error: error ?? null });
-    const clientRedirect = new URL(decoded.r);
+    const redirectUrl = new URL(clientRedirect);
     for (const key of ["code", "error", "error_description", "state"]) {
-      clientRedirect.searchParams.delete(key);
+      redirectUrl.searchParams.delete(key);
     }
-    for (const [key, value] of out) clientRedirect.searchParams.set(key, value);
-    return redirect(clientRedirect.toString());
+    for (const [key, value] of out) redirectUrl.searchParams.set(key, value);
+    return redirect(redirectUrl.toString(), [clearStateCookie]);
   }
 
   // POST /oauth/token — replace the client redirect_uri with the façade's so
@@ -535,7 +668,7 @@ export async function route(
         (uri) =>
           typeof uri !== "string" ||
           !isAllowedClientRedirect(uri, cfg.allowedClientRedirectUris) ||
-          !canEncodeCognitoState({ cs: "", r: uri }),
+          !canFitTransactionCookie(uri),
       )
     ) {
       return json(400, {

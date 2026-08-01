@@ -3,21 +3,23 @@
  *
  * State format (URL-safe, ASCII): `<base64url(payload)>.<base64url(sig)>`
  *
- * Payload is JSON `{ cs: <client_state>, r: <client_redirect_uri>,
- * ts: <ms epoch> }`. We HMAC-SHA-256 the payload's base64url form (not the
+ * Client state and authorization-code wrappers retain their compact historical
+ * field names. OAuth browser transactions use explicit nonce, client-state,
+ * and redirect fields. Every token HMACs the payload's base64url form (not the
  * raw bytes) so verification compares the recomputed b64-form signature
  * byte-for-byte with `crypto.timingSafeEqual`.
  *
- * Stateless by design — no DDB / no TTL store / no extra IAM. A typical token
- * is ~150-200 bytes, well under Cognito's 1024-char `state` limit.
+ * Stateless by design — no DDB / no TTL store / no extra IAM. Only the compact
+ * nonce token is sent through Cognito; the client transaction token is held in
+ * a short-lived HttpOnly cookie.
  *
- * Forked verbatim from the proven mem9 MCP surface façade
- * (`src/lambdas/oauth2-facade/state.ts`).
+ * Originally adapted from the mem9 MCP surface façade.
  */
 
 import { createHmac, timingSafeEqual } from "node:crypto";
 
-const STATE_TTL_MS = 10 * 60 * 1000;
+export const SIGNED_PAYLOAD_TTL_SECONDS = 10 * 60;
+const STATE_TTL_MS = SIGNED_PAYLOAD_TTL_SECONDS * 1000;
 export const COGNITO_STATE_MAX_LENGTH = 1024;
 
 export interface StatePayload {
@@ -29,6 +31,13 @@ export interface StatePayload {
 export interface AuthorizationCodePayload {
   c: string;
   r: string;
+  ts: number;
+}
+
+export interface OAuthTransactionPayload {
+  nonce: string;
+  clientState: string;
+  redirectUri: string;
   ts: number;
 }
 
@@ -67,19 +76,20 @@ export function signState(
   return signPayload({ cs: input.cs, r: input.r, ts: now }, key);
 }
 
-export function canEncodeCognitoState(
-  input: { cs: string; r: string },
-  now: number = Date.now(),
-): boolean {
-  return signState(input, "", now).length <= COGNITO_STATE_MAX_LENGTH;
-}
-
 export function signAuthorizationCode(
   input: { code: string; redirectUri: string },
   key: string,
   now: number,
 ): string {
   return signPayload({ c: input.code, r: input.redirectUri, ts: now }, key);
+}
+
+export function signOAuthTransaction(
+  input: Omit<OAuthTransactionPayload, "ts">,
+  key: string,
+  now: number,
+): string {
+  return signPayload({ ...input, ts: now }, key);
 }
 
 function verifyPayload(
@@ -156,4 +166,27 @@ export function verifyAuthorizationCode(
     return null;
   }
   return { c: payload.c, r: payload.r, ts: payload.ts as number };
+}
+
+export function verifyOAuthTransaction(
+  token: string,
+  key: string,
+  now: number,
+  ttlMs: number = STATE_TTL_MS,
+): OAuthTransactionPayload | null {
+  const payload = verifyPayload(token, key, now, ttlMs);
+  if (
+    !payload ||
+    typeof payload.nonce !== "string" ||
+    typeof payload.clientState !== "string" ||
+    typeof payload.redirectUri !== "string"
+  ) {
+    return null;
+  }
+  return {
+    nonce: payload.nonce,
+    clientState: payload.clientState,
+    redirectUri: payload.redirectUri,
+    ts: payload.ts as number,
+  };
 }

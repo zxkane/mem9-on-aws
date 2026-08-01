@@ -8,7 +8,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { isAllowedClientRedirect, route } from "./handler.js";
 import {
   signAuthorizationCode,
+  signOAuthTransaction,
   verifyAuthorizationCode,
+  verifyOAuthTransaction,
   verifyState,
 } from "./state.js";
 import type { FacadeConfig } from "./config.js";
@@ -40,15 +42,27 @@ function cfg(overrides: Partial<FacadeConfig> = {}): FacadeConfig {
 function ev(
   path: string,
   method = "GET",
-  opts: { query?: string; body?: string; headers?: Record<string, string> } = {},
+  opts: {
+    query?: string;
+    body?: string;
+    headers?: Record<string, string>;
+    cookies?: string[];
+  } = {},
 ) {
   return {
     rawPath: path,
     rawQueryString: opts.query ?? "",
     headers: { host: HOST, ...(opts.headers ?? {}) },
+    cookies: opts.cookies,
     body: opts.body,
     requestContext: { http: { method }, domainName: HOST },
   };
+}
+
+function requestCookies(
+  response: { cookies?: string[] },
+): string[] {
+  return (response.cookies ?? []).map((cookie) => cookie.split(";", 1)[0]!);
 }
 
 afterEach(() => {
@@ -119,7 +133,7 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
     expect(oidc.registration_endpoint).toBe(`${BASE}/register`);
   });
 
-  it("TC-MCPGW-062: /oauth/authorize 302s to Cognito with replaced redirect_uri + HMAC state", async () => {
+  it("TC-MCPGW-062: /oauth/authorize sends Cognito a short signed handle and stores client state in a signed cookie", async () => {
     const q = new URLSearchParams({
       client_id: "c",
       redirect_uri: "http://127.0.0.1:5000/callback",
@@ -138,8 +152,25 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
       HMAC,
       Date.now(),
     );
-    expect(decoded!.r).toBe("http://127.0.0.1:5000/callback");
-    expect(decoded!.cs).toBe("orig-state");
+    expect(decoded).not.toBeNull();
+    expect(decoded!.r).not.toBe("http://127.0.0.1:5000/callback");
+    expect(decoded!.cs).not.toBe("orig-state");
+
+    const setCookie = (res as typeof res & { cookies: string[] }).cookies[0]!;
+    expect(setCookie).toContain("Path=/oauth/callback");
+    expect(setCookie).toContain("Secure");
+    expect(setCookie).toContain("HttpOnly");
+    expect(setCookie).toContain("SameSite=Lax");
+    const transaction = verifyOAuthTransaction(
+      setCookie.split(";", 1)[0]!.split("=", 2)[1]!,
+      HMAC,
+      Date.now(),
+    );
+    expect(transaction).toMatchObject({
+      nonce: decoded!.cs,
+      redirectUri: "http://127.0.0.1:5000/callback",
+      clientState: "orig-state",
+    });
   });
 
   it("TC-MCPGW-063: /oauth/authorize without redirect_uri → 400", async () => {
@@ -193,16 +224,52 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
     expect(JSON.parse(res.body).error_description).toMatch(/S256/);
   });
 
-  it("rejects authorize requests whose signed state would exceed Cognito's limit", async () => {
+  it("TC-OAUTH-CALLBACK-012: preserves a hosted client's long opaque state without exceeding Cognito's limit", async () => {
+    const clientState = "g".repeat(2200);
     const q = new URLSearchParams({
-      redirect_uri: "http://localhost:5000/cb",
-      state: "x".repeat(1000),
+      redirect_uri: REMOTE_CALLBACK,
+      state: clientState,
       code_challenge: "x",
       code_challenge_method: "S256",
     }).toString();
-    const res = await route(ev("/oauth/authorize", "GET", { query: q }), cfg());
-    expect(res.statusCode).toBe(400);
-    expect(JSON.parse(res.body).error_description).toMatch(/length/u);
+    const config = cfg({ allowedClientRedirectUris: [REMOTE_CALLBACK] });
+    const authRes = await route(
+      ev("/oauth/authorize", "GET", { query: q }),
+      config,
+    );
+    expect(authRes.statusCode).toBe(302);
+    const cognitoState = new URL(
+      authRes.headers.location,
+    ).searchParams.get("state");
+    expect(cognitoState).toBeTruthy();
+    expect(cognitoState!.length).toBeLessThanOrEqual(1024);
+
+    const cookies = (authRes as typeof authRes & { cookies: string[] }).cookies;
+    expect(cookies).toHaveLength(1);
+    expect(Buffer.byteLength(cookies[0]!, "utf8")).toBeLessThanOrEqual(4096);
+    expect(cookies[0]).toContain("HttpOnly");
+    expect(cookies[0]).toContain("SameSite=Lax");
+
+    const callbackQ = new URLSearchParams({
+      code: "auth-code-xyz",
+      state: cognitoState!,
+    }).toString();
+    const callbackRes = await route(
+      ev("/oauth/callback", "GET", {
+        query: callbackQ,
+        cookies: requestCookies({ cookies }),
+      }),
+      config,
+    );
+    expect(callbackRes.statusCode).toBe(302);
+    const clientLocation = new URL(callbackRes.headers.location);
+    expect(clientLocation.origin + clientLocation.pathname).toBe(
+      REMOTE_CALLBACK,
+    );
+    expect(clientLocation.searchParams.get("state")).toBe(clientState);
+    expect(
+      (callbackRes as typeof callbackRes & { cookies: string[] }).cookies[0],
+    ).toContain("Max-Age=0");
   });
 
   it("TC-MCPGW-067: /oauth/callback 302s back to the client loopback with code + orig state", async () => {
@@ -225,7 +292,13 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
       code: "auth-code-xyz",
       state: facadeState,
     }).toString();
-    const res = await route(ev("/oauth/callback", "GET", { query: cbQ }), cfg());
+    const res = await route(
+      ev("/oauth/callback", "GET", {
+        query: cbQ,
+        cookies: requestCookies(authRes),
+      }),
+      cfg(),
+    );
     expect(res.statusCode).toBe(302);
     const loc = new URL(res.headers.location);
     expect(loc.origin + loc.pathname).toBe("http://127.0.0.1:5000/callback");
@@ -246,6 +319,156 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
     const res = await route(ev("/oauth/callback", "GET", { query: q }), cfg());
     expect(res.statusCode).toBe(400);
     expect(JSON.parse(res.body).error).toBe("invalid_state");
+  });
+
+  it("TC-OAUTH-CALLBACK-013: rejects a valid Cognito state handle when its transaction cookie is missing", async () => {
+    const authQ = new URLSearchParams({
+      redirect_uri: "http://127.0.0.1:5000/callback",
+      state: "orig-state",
+      code_challenge: "x",
+      code_challenge_method: "S256",
+    }).toString();
+    const authRes = await route(
+      ev("/oauth/authorize", "GET", { query: authQ }),
+      cfg(),
+    );
+    const state = new URL(authRes.headers.location).searchParams.get("state")!;
+
+    const res = await route(
+      ev("/oauth/callback", "GET", {
+        query: new URLSearchParams({ code: "c", state }).toString(),
+      }),
+      cfg(),
+    );
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toBe("invalid_state");
+    expect((res as typeof res & { cookies: string[] }).cookies[0]).toContain(
+      "Max-Age=0",
+    );
+  });
+
+  it("TC-OAUTH-CALLBACK-013: rejects tampered or duplicate transaction cookies", async () => {
+    const authQ = new URLSearchParams({
+      redirect_uri: "http://127.0.0.1:5000/callback",
+      state: "orig-state",
+      code_challenge: "x",
+      code_challenge_method: "S256",
+    }).toString();
+    const authRes = await route(
+      ev("/oauth/authorize", "GET", { query: authQ }),
+      cfg(),
+    );
+    const state = new URL(authRes.headers.location).searchParams.get("state")!;
+    const cookie = requestCookies(authRes)[0]!;
+    const query = new URLSearchParams({ code: "c", state }).toString();
+
+    const tampered = await route(
+      ev("/oauth/callback", "GET", {
+        query,
+        cookies: [`${cookie}x`],
+      }),
+      cfg(),
+    );
+    expect(tampered.statusCode).toBe(400);
+    expect(JSON.parse(tampered.body).error).toBe("invalid_state");
+
+    const duplicate = await route(
+      ev("/oauth/callback", "GET", {
+        query,
+        cookies: [cookie, cookie],
+      }),
+      cfg(),
+    );
+    expect(duplicate.statusCode).toBe(400);
+    expect(JSON.parse(duplicate.body).error).toBe("invalid_state");
+  });
+
+  it("TC-OAUTH-CALLBACK-013: rejects an expired transaction cookie", async () => {
+    const authQ = new URLSearchParams({
+      redirect_uri: "http://127.0.0.1:5000/callback",
+      state: "orig-state",
+      code_challenge: "x",
+      code_challenge_method: "S256",
+    }).toString();
+    const authRes = await route(
+      ev("/oauth/authorize", "GET", { query: authQ }),
+      cfg(),
+    );
+    const state = new URL(authRes.headers.location).searchParams.get("state")!;
+    const handle = verifyState(state, HMAC, Date.now())!;
+    const cookie = requestCookies(authRes)[0]!;
+    const cookieName = cookie.slice(0, cookie.indexOf("="));
+    const expiredTransaction = signOAuthTransaction(
+      {
+        nonce: handle.cs,
+        clientState: "orig-state",
+        redirectUri: "http://127.0.0.1:5000/callback",
+      },
+      HMAC,
+      Date.now() - 11 * 60 * 1000,
+    );
+
+    const res = await route(
+      ev("/oauth/callback", "GET", {
+        query: new URLSearchParams({ code: "c", state }).toString(),
+        cookies: [`${cookieName}=${expiredTransaction}`],
+      }),
+      cfg(),
+    );
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toBe("invalid_state");
+  });
+
+  it("binds one fixed transaction-cookie slot and preserves a newer transaction from a stale callback", async () => {
+    const authorize = async (clientState: string) => {
+      const query = new URLSearchParams({
+        redirect_uri: "http://127.0.0.1:5000/callback",
+        state: clientState,
+        code_challenge: "x",
+        code_challenge_method: "S256",
+      }).toString();
+      return route(ev("/oauth/authorize", "GET", { query }), cfg());
+    };
+    const first = await authorize("first-state");
+    const second = await authorize("second-state");
+    const firstCookie = requestCookies(first)[0]!;
+    const secondCookie = requestCookies(second)[0]!;
+    const firstCookieName = firstCookie.slice(0, firstCookie.indexOf("="));
+    const secondCookieName = secondCookie.slice(0, secondCookie.indexOf("="));
+    expect(secondCookieName).toBe(firstCookieName);
+    const firstState = new URL(first.headers.location).searchParams.get("state")!;
+    const secondState = new URL(second.headers.location).searchParams.get(
+      "state",
+    )!;
+
+    const stale = await route(
+      ev("/oauth/callback", "GET", {
+        query: new URLSearchParams({
+          code: "c",
+          state: firstState,
+        }).toString(),
+        cookies: [secondCookie],
+      }),
+      cfg(),
+    );
+    expect(stale.statusCode).toBe(400);
+    expect(JSON.parse(stale.body).error).toBe("invalid_state");
+    expect(stale.cookies).toBeUndefined();
+
+    const current = await route(
+      ev("/oauth/callback", "GET", {
+        query: new URLSearchParams({
+          code: "c",
+          state: secondState,
+        }).toString(),
+        cookies: [secondCookie],
+      }),
+      cfg(),
+    );
+    expect(current.statusCode).toBe(302);
+    expect(new URL(current.headers.location).searchParams.get("state")).toBe(
+      "second-state",
+    );
   });
 
   it("TC-MCPGW-069: /oauth/token replaces redirect_uri before forwarding to Cognito", async () => {
@@ -507,7 +730,10 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
       state: cognitoRedirect.searchParams.get("state")!,
     }).toString();
     const callbackRes = await route(
-      ev("/oauth/callback", "GET", { query: callbackQ }),
+      ev("/oauth/callback", "GET", {
+        query: callbackQ,
+        cookies: requestCookies(authRes),
+      }),
       config,
     );
     expect(callbackRes.statusCode).toBe(302);
@@ -561,6 +787,7 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
     const res = await route(
       ev("/oauth/callback", "GET", {
         query: new URLSearchParams({ code: "c", state }).toString(),
+        cookies: requestCookies(authRes),
       }),
       cfg(),
     );
@@ -686,12 +913,26 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
     expect(JSON.parse(res.body).error).toBe("invalid_redirect_uri");
   });
 
-  it("rejects registration of a callback that cannot fit in signed state", async () => {
+  it("accepts registration of a callback that fits the transaction cookie", async () => {
+    const redirectUri = `http://localhost:8080/${"x".repeat(800)}`;
+    const res = await route(
+      ev("/register", "POST", {
+        body: JSON.stringify({
+          redirect_uris: [redirectUri],
+        }),
+      }),
+      cfg(),
+    );
+    expect(res.statusCode).toBe(201);
+    expect(JSON.parse(res.body).redirect_uris).toEqual([redirectUri]);
+  });
+
+  it("rejects registration of a callback that cannot fit in the transaction cookie", async () => {
     const res = await route(
       ev("/register", "POST", {
         body: JSON.stringify({
           redirect_uris: [
-            `http://localhost:8080/${"x".repeat(800)}`,
+            `http://localhost:8080/${"x".repeat(4000)}`,
           ],
         }),
       }),

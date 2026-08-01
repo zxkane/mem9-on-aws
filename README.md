@@ -261,10 +261,22 @@ dynamic registration, authorization, callback, and token exchange.
 
 Do not add hosted-client URLs to the Cognito reader app client's callback list.
 Cognito always redirects to the façade's own `/oauth/callback`; the façade
-carries the original client URL in HMAC-signed state and redirects there only
-after exact allowlist validation. It also wraps the Cognito authorization code
-in a short-lived signature so token exchange must present the same client
-redirect URL. The interactive OAuth client remains read-only.
+sends Cognito only a compact HMAC-signed nonce. The original client URL and
+opaque client state stay in a nonce-bound, HMAC-signed cookie with
+`Secure`, `HttpOnly`, `SameSite=Lax`, a 10-minute lifetime, and
+`Path=/oauth/callback`; the callback clears it after use. This supports hosted
+clients whose state is too large for Cognito's state parameter without adding
+server-side session storage. The complete cookie is limited to 4 KiB. One fixed
+cookie slot prevents pending authorization attempts from accumulating beyond
+API Gateway's
+[10,240-byte request-line and header quota](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-quotas.html);
+starting a new authorization in the same browser replaces an older unfinished
+transaction.
+
+After exact allowlist validation, the façade redirects to the client URL. It
+also wraps the Cognito authorization code in a short-lived signature so token
+exchange must present the same client redirect URL. The interactive OAuth
+client remains read-only.
 
 ### Optional production custom domain
 

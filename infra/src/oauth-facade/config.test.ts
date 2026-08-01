@@ -134,10 +134,6 @@ describe("façade config loader (cycle-break SSM reads)", () => {
     ["fragment", '["https://oauth.example.com/callback#fragment"]'],
     ["oversized whitespace", " ".repeat(1025)],
     [
-      "callback that cannot fit in signed state",
-      JSON.stringify([`https://oauth.example.com/${"x".repeat(800)}`]),
-    ],
-    [
       "serialized configuration over 1 KiB",
       JSON.stringify([`https://oauth.example.com/${"x".repeat(1100)}`]),
     ],
@@ -154,5 +150,12 @@ describe("façade config loader (cycle-break SSM reads)", () => {
     expect(() => parseAllowedCallbackUrls(raw)).toThrow(
       /OauthAllowedCallbackUrls/u,
     );
+  });
+
+  it("accepts a callback within the serialized configuration limit", () => {
+    const callback = `https://oauth.example.com/${"x".repeat(800)}`;
+    expect(parseAllowedCallbackUrls(JSON.stringify([callback]))).toEqual([
+      callback,
+    ]);
   });
 });
