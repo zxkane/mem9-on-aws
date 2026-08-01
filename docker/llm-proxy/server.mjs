@@ -49,9 +49,9 @@ const DEFAULT_MAX_TOKENS = 4096;
 // chat-completions path; only `openai/v1/responses` serves them.
 const DEFAULT_RESPONSES_MODEL_PREFIXES = ["openai.gpt-5.6-"];
 const DEFAULT_RESPONSES_REGION = "us-west-2";
-const DEFAULT_REASONING_EFFORT = "high";
+export const DEFAULT_REASONING_EFFORT = "high";
 const DEFAULT_RESPONSES_MAX_OUTPUT_TOKENS = 16384;
-const REASONING_EFFORTS = Object.freeze(["low", "medium", "high"]);
+export const REASONING_EFFORTS = Object.freeze(["low", "medium", "high"]);
 const REQUEST_POLICY_DEFAULTS = Object.freeze({
   overallDeadlineMs: 110_000,
   maxCallMs: 108_000,
@@ -395,7 +395,7 @@ function sendError(
   return sendJson(res, status, { error: { message, type, param, code } });
 }
 
-class RequestValidationError extends Error {
+export class RequestValidationError extends Error {
   constructor(status, code, message) {
     super(message);
     this.name = "RequestValidationError";

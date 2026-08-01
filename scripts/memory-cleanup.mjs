@@ -1,17 +1,24 @@
 #!/usr/bin/env node
 // memory-cleanup.mjs — retroactive memory cleanup for the mem9 store (issue #102).
 //
-// Classifies every active memory with GLM-5 (Bedrock Mantle chat-completions)
-// against the same D1–D4 durability rules smart-ingest uses (patch 0002), then
-// applies KEEP / DELETE / MERGE decisions through the public REST API. Dry-run
-// is the default; `--apply` executes; `--ids` restricts apply to a reviewed
-// subset. Design: docs/designs/memory-cleanup.md. Tests: memory-cleanup.test.mjs.
+// Classifies every active memory with a Bedrock Mantle model against the same
+// D1–D4 durability rules smart-ingest uses (patch 0002), then applies KEEP /
+// DELETE / MERGE decisions through the public REST API. Dry-run is the default;
+// `--apply` executes; `--ids` restricts apply to a reviewed subset.
+// Design: docs/designs/memory-cleanup.md. Tests: memory-cleanup.test.mjs.
+//
+// Two model routes (see docs/designs/cleanup-reasoning-model.md): `zai.glm-5`
+// on chat-completions in the app region, and the `openai.gpt-5.6-*` reasoning
+// models on the Responses API in a different region. Route selection and the
+// request/reply translation are the llm-proxy sidecar's, imported directly so
+// both callers share one reviewed contract.
 //
 // Usage:
 //   node scripts/memory-cleanup.mjs --stage prod [--base-url http://host:8080]
 //        [--tenant-secret-arn arn | MEM9_TENANT_ID env]
 //        [--apply] [--decisions file.json] [--ids approved.txt]
 //        [--cap 50] [--out dir] [--lock-file path] [--lock-ttl hours]
+//        [--model openai.gpt-5.6-terra] [--effort high] [--llm-region us-west-2]
 //
 // The decision log contains memory snippets — instance-private data. It is
 // written OUTSIDE the repository (default ~/.mem9-cleanup/<stage>/) and must
@@ -24,6 +31,19 @@ import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
+// The llm-proxy sidecar owns model routing and chat ⇄ Responses translation.
+// These are pure functions (no server, no AWS client), so importing them here
+// shares one reviewed contract instead of forking it into a second caller.
+import {
+  readConfig as readProxyConfig,
+  resolveRoute,
+  translateChatToResponses,
+  translateResponsesToChat,
+  DEFAULT_REASONING_EFFORT,
+  REASONING_EFFORTS,
+  RequestValidationError,
+} from "../docker/llm-proxy/server.mjs";
+
 const MEMORIES_PATH = "/v1alpha2/mem9s/memories";
 const LIST_PAGE_LIMIT = 200; // server max for GET /memories
 const BATCH_DELETE_MAX = 1000; // server ValidateBulkDeleteIDs cap
@@ -35,6 +55,16 @@ const DISCOVERY_RETRIES = 3;
 const DEFAULT_CAP = 50;
 const REQUEST_TIMEOUT_MS = 30_000; // REST calls; the LLM call sets its own
 const LLM_TIMEOUT_MS = 120_000;
+// Reasoning models consume output tokens on hidden reasoning BEFORE emitting
+// visible text, so the chat route's 4096 cap truncates the verdict JSON
+// mid-object — the measured root cause of GLM-5 leaving 33% of the corpus
+// unclassified. 24k is the budget that classified the full corpus clean.
+const RESPONSES_MAX_OUTPUT_TOKENS = 24_000;
+const RESPONSES_TIMEOUT_MS = 300_000; // observed max ~30s; high effort runs longer
+const DEFAULT_CHAT_MODEL = "zai.glm-5";
+// The SKIP reason for a batch the classifier never judged. Counted in the run
+// summary, so it must stay in sync with the decision rows.
+const UNCLASSIFIED_REASON = "classification failed after retry";
 const HOUR_MS = 3600 * 1000;
 const DEFAULT_LOCK_TTL_MS = 2 * HOUR_MS;
 const SNIPPET_LEN = 120;
@@ -333,6 +363,12 @@ async function classifyBatch(batch, batchIndex, completeChat, log) {
     try {
       return parseVerdicts(await completeChat(CLASSIFY_SYSTEM_PROMPT, input));
     } catch (err) {
+      // A request the translator rejects is a DETERMINISTIC config defect (bad
+      // message content, bad effort) thrown before any network call: it will
+      // fail identically on all remaining batches. Retrying it wastes a scan
+      // and then degrades the whole run to SKIP, which reads as a clean audit.
+      // Abort instead so the operator fixes the invocation.
+      if (err instanceof RequestValidationError) throw err;
       // MalformedResponse messages are fixed strings; transport errors (HTTP
       // status, timeout, auth) carry safe, load-bearing messages. Raw JSON
       // SyntaxErrors never reach here — parseVerdicts wraps them.
@@ -354,7 +390,7 @@ async function classifyAll(memories, completeChat, log) {
       // Never destructive on classification failure: whole batch becomes SKIP.
       failedBatches += 1;
       for (const m of batch) {
-        decisions.push({ id: m.id, verdict: "SKIP", reason: "classification failed after retry" });
+        decisions.push({ id: m.id, verdict: "SKIP", reason: UNCLASSIFIED_REASON });
       }
       continue;
     }
@@ -502,6 +538,36 @@ function verdictSummary(decisions) {
 }
 
 /**
+ * How much of the corpus the classifier never judged.
+ *
+ * Without this, a partial transport outage is invisible: its SKIPs land in the
+ * same bucket as legitimate planner SKIPs (invalid merge graph, contradictory
+ * verdicts), and `classifierBroken` only fires when EVERY batch failed — so a
+ * run that classified one batch of 117 still exits 0 and reads as a clean
+ * audit. The measured GLM-5 run failed 27% of batches and reported exit 0.
+ */
+function classificationFailureNote({ batches, failedBatches, decisions, scanned }) {
+  const unclassified = decisions.filter(
+    (d) => d.verdict === "SKIP" && d.reason === UNCLASSIFIED_REASON,
+  ).length;
+  if (unclassified === 0) return "";
+  // `decisions.length` is NOT the memory count — planDecisions folds absorbed
+  // ids into the surviving MERGE row, so a merge group of k contributes one
+  // row. Replaying a decision file has no scan, so recover the total from the
+  // rows themselves.
+  const total = scanned ?? decisions.reduce((n, d) => n + 1 + (d.absorbs?.length ?? 0), 0);
+  // Batch counters exist only on a fresh scan; the count itself always does,
+  // and --apply always replays a file, which is the run that deletes.
+  const detail = batches
+    ? `${failedBatches}/${batches} batches failed, ${Math.round((failedBatches / batches) * 100)}%`
+    : "from the replayed decision list";
+  return (
+    `; UNCLASSIFIED=${unclassified} of ${total} memories (${detail}) — ` +
+    `NOT audited by this classification; re-run before treating the result as complete`
+  );
+}
+
+/**
  * Obtain the decision list: replay a prior dry-run file, or scan + classify and
  * persist a new one outside the repo (0700/0600 — it holds memory snippets).
  */
@@ -520,13 +586,20 @@ async function loadDecisions(opts, deps, { client, fs, clock, log }) {
       throw new Error("decision file has no decisions array");
     }
     validateDecisions(loaded.decisions);
-    return { decisions: loaded.decisions, decisionPath: opts.decisionsFile, classifierBroken: false };
+    return {
+      decisions: loaded.decisions,
+      decisionPath: opts.decisionsFile,
+      classifierBroken: false,
+      batches: 0,
+      failedBatches: 0,
+    };
   }
   const memories = await scanActiveMemories(client);
   const { decisions, batches, failedBatches } = await classifyAll(memories, deps.completeChat, log);
-  // Zero successful batches on a non-empty store = the GLM-5 path is broken
-  // (IAM, model id, endpoint), not "nothing to clean". Surfaced as a distinct
-  // exit code so CI cannot report a green E2E for a classifier that never ran.
+  // Zero successful batches on a non-empty store = the classifier path is
+  // broken (IAM, model id, endpoint), not "nothing to clean". Surfaced as a
+  // distinct exit code so CI cannot report a green E2E for a run that never
+  // classified anything.
   const classifierBroken = batches > 0 && failedBatches === batches;
 
   const generatedAt = new Date(clock()).toISOString();
@@ -539,7 +612,14 @@ async function loadDecisions(opts, deps, { client, fs, clock, log }) {
     { mode: 0o600 },
   );
   log(`decision list written to ${decisionPath}`);
-  return { decisions, decisionPath, classifierBroken };
+  return {
+    decisions,
+    decisionPath,
+    classifierBroken,
+    batches,
+    failedBatches,
+    scanned: memories.length,
+  };
 }
 
 /**
@@ -670,20 +750,24 @@ export async function runCleanup(opts, deps) {
   }
   const client = restClient(baseUrl, opts.tenantId, deps.fetchImpl, counters);
 
-  const { decisions, decisionPath, classifierBroken } = await loadDecisions(opts, deps, {
+  const { decisions, decisionPath, classifierBroken, batches, failedBatches, scanned } = await loadDecisions(opts, deps, {
     client,
     fs,
     clock,
     log,
   });
   const summary = verdictSummary(decisions);
+  const failureNote = classificationFailureNote({ batches, failedBatches, decisions, scanned });
 
   if (classifierBroken) {
-    log(`classification failed for every batch — GLM-5 path is broken; ${JSON.stringify(summary)}`);
+    log(
+      `classification failed for EVERY batch — the classifier path is broken ` +
+        `(check the model id, region, and Bedrock IAM); ${JSON.stringify(summary)}`,
+    );
     return result({ exitCode: 5, decisions, decisionPath });
   }
   if (!opts.apply) {
-    log(`dry-run: ${JSON.stringify(summary)}; writeCalls=${counters.writeCalls}`);
+    log(`dry-run: ${JSON.stringify(summary)}; writeCalls=${counters.writeCalls}${failureNote}`);
     return result({ exitCode: 0, decisions, decisionPath });
   }
 
@@ -716,9 +800,120 @@ export async function runCleanup(opts, deps) {
   log(
     `apply done: ${JSON.stringify(summary)}; capUsed=${applied.capUsed}/${cap}; ` +
       `writeCalls=${counters.writeCalls}; skippedLww=${counters.skippedLww}; ` +
-      `skippedByFilter=${applied.skippedByFilter}`,
+      `skippedByFilter=${applied.skippedByFilter}${failureNote}`,
   );
   return result({ ...applied, decisions, decisionPath });
+}
+
+// ---------------------------------------------------------------------------
+// LLM transport
+
+/**
+ * Build the `completeChat` dep for the configured model.
+ *
+ * Route selection and both translation directions are the llm-proxy sidecar's
+ * (`resolveRoute`, `translateChatToResponses`, `translateResponsesToChat`) —
+ * imported rather than reimplemented so the reviewed fail-loud contract holds
+ * identically for smart-ingest and for cleanup. That contract matters most
+ * here: a Responses `status: "failed"` arrives as HTTP 200 with empty output,
+ * and returning "" for it would parse as "no verdicts" and mark a whole batch
+ * SKIP on what looks like an authoritative answer.
+ */
+export function buildCompleteChat(opts, deps) {
+  const model = opts.model || process.env.MEM9_LLM_MODEL || DEFAULT_CHAT_MODEL;
+  const appRegion = opts.region || "ap-northeast-1";
+  // A CLOSED object, never a spread of process.env: `readProxyConfig` is
+  // written for a container where the whole LLM_PROXY_* namespace is set by
+  // infra/ecs.ts. Spreading the operator's shell in would make every sidecar
+  // variable a live input here — and an ambient
+  // LLM_PROXY_RESPONSES_MODEL_PREFIXES would silently route a gpt-5.6 model to
+  // the chat route at its 4096 cap, reintroducing the truncation this exists to
+  // fix. Only the keys cleanup actually maps are passed.
+  const cfg = readProxyConfig({
+    LLM_PROXY_REGION: appRegion,
+    LLM_PROXY_RESPONSES_REGION: opts.llmRegion || process.env.MEM9_LLM_RESPONSES_REGION,
+    LLM_PROXY_OPENAI_PROJECT: process.env.MEM9_BEDROCK_PROJECT,
+    LLM_PROXY_RESPONSES_OPENAI_PROJECT: process.env.MEM9_BEDROCK_PROJECT_OPENAI,
+    LLM_PROXY_RESPONSES_MAX_OUTPUT_TOKENS: String(RESPONSES_MAX_OUTPUT_TOKENS),
+    // Routed through the config reader (not applied after it) so its
+    // low|medium|high validation is the single check on this value.
+    LLM_PROXY_REASONING_EFFORT: opts.effort || DEFAULT_REASONING_EFFORT,
+  });
+  const route = resolveRoute(model, cfg);
+  const isResponses = route.kind === "responses";
+  const timeoutMs = isResponses ? RESPONSES_TIMEOUT_MS : LLM_TIMEOUT_MS;
+
+  let bearer = null;
+  return async function completeChat(systemPrompt, memories) {
+    const chatPayload = {
+      model,
+      max_tokens: isResponses ? RESPONSES_MAX_OUTPUT_TOKENS : 4096,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: JSON.stringify({ memories }) },
+      ],
+    };
+    const payload = isResponses ? translateChatToResponses(chatPayload, cfg) : chatPayload;
+
+    // Minting is a free local SigV4 presign (12h TTL); re-mint once on 401/403
+    // so a long scan outliving the bearer self-heals (llm-proxy pattern).
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      if (!bearer) bearer = await deps.mintToken(route.region);
+      const res = await deps.fetchImpl(route.url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          authorization: `Bearer ${bearer}`,
+          ...(route.openaiProject ? { "OpenAI-Project": route.openaiProject } : {}),
+        },
+        body: JSON.stringify(payload),
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+      if (res.status === 401 || res.status === 403) {
+        bearer = null;
+        // A second rejection after a fresh presign is a credentials/permission
+        // problem, not a stale token. Say so instead of reporting a bare 401 an
+        // operator would read as a transient upstream blip and retry forever.
+        if (attempt === 2) {
+          throw new Error(
+            `Mantle ${route.kind}: HTTP ${res.status} after bearer re-mint ` +
+              // `bedrock-mantle:`, NOT `bedrock:` — a DIFFERENT service. Granting
+              // the `bedrock:` variant mints a valid bearer and still 403s every
+              // inference (the issue #11 dead end); see infra/ecs.ts. Inference
+              // is what denies here: minting is a local presign that never calls AWS.
+              `(check credentials and bedrock-mantle:CreateInference on the ` +
+              `${route.region} project)`,
+          );
+        }
+        continue;
+      }
+      if (!res.ok) throw new Error(`Mantle ${route.kind} -> HTTP ${res.status}`);
+      let body;
+      try {
+        body = await res.json();
+      } catch {
+        // A truncated or HTML body would otherwise surface as a bare
+        // SyntaxError with no hint of which route produced it.
+        throw new Error(`Mantle ${route.kind}: 2xx body is not valid JSON`);
+      }
+      // `translateResponsesToChat` throws on a broken contract; the chat route
+      // has no equivalent guard upstream, so keep its original ?? "" behavior.
+      const completion = isResponses ? translateResponsesToChat(body, model) : body;
+      // A truncated reply must NEVER be classified. Truncation at the 24k
+      // budget can land on syntactically valid JSON — a partial verdict list,
+      // or a MERGE whose merged_content is cut mid-sentence. Parsing that
+      // would delete memories the model never finished judging and overwrite a
+      // survivor with a half-written fact. `finish_reason: "length"` is the
+      // upstream telling us the output is incomplete, so treat it as a failed
+      // batch: classifyBatch retries, then SKIPs (non-destructive).
+      const choice = completion.choices?.[0];
+      if (choice?.finish_reason === "length") {
+        throw new Error(`Mantle ${route.kind}: reply truncated (finish_reason=length)`);
+      }
+      return choice?.message?.content ?? "";
+    }
+    throw new Error(`Mantle ${route.kind}: retry loop exhausted`);
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -726,6 +921,7 @@ export async function runCleanup(opts, deps) {
 
 // --flag -> the opts key it sets. `flag: true` takes no value; `number: true`
 // values must parse to a positive number (a NaN cap would disable the cap).
+// `choices` restricts the accepted values.
 const ARG_SPECS = {
   "--stage": { key: "stage" },
   "--base-url": { key: "baseUrl" },
@@ -737,6 +933,9 @@ const ARG_SPECS = {
   "--cap": { key: "cap", number: true },
   "--lock-ttl": { key: "lockTtlHours", number: true },
   "--apply": { key: "apply", flag: true },
+  "--model": { key: "model" },
+  "--effort": { key: "effort", choices: REASONING_EFFORTS },
+  "--llm-region": { key: "llmRegion" },
 };
 
 export function parseArgs(argv) {
@@ -752,6 +951,9 @@ export function parseArgs(argv) {
     i += 1;
     const raw = argv[i];
     if (raw === undefined) throw new Error(`${name} requires a value`);
+    if (spec.choices && !spec.choices.includes(raw)) {
+      throw new Error(`${name} must be one of ${spec.choices.join("|")}`);
+    }
     if (!spec.number) {
       opts[spec.key] = raw;
       continue;
@@ -784,37 +986,14 @@ async function productionDeps(opts) {
 
   const { getToken } = await import("@aws/bedrock-token-generator");
   const { fromNodeProviderChain } = await import("@aws-sdk/credential-providers");
-  let bearer = null;
-  async function completeChat(systemPrompt, memories) {
-    // Minting is a free local SigV4 presign (12h TTL); re-mint once on 401/403
-    // so a long scan outliving the bearer self-heals (llm-proxy pattern).
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      if (!bearer) {
-        bearer = await getToken({ credentials: fromNodeProviderChain(), region });
-      }
-      const res = await fetch(`https://bedrock-mantle.${region}.api.aws/v1/chat/completions`, {
-        method: "POST",
-        headers: { "content-type": "application/json", authorization: `Bearer ${bearer}` },
-        body: JSON.stringify({
-          model: process.env.MEM9_LLM_MODEL || "zai.glm-5",
-          max_tokens: 4096,
-          messages: [
-            { role: "system", content: systemPrompt },
-            { role: "user", content: JSON.stringify({ memories }) },
-          ],
-        }),
-        signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
-      });
-      if ((res.status === 401 || res.status === 403) && attempt === 1) {
-        bearer = null;
-        continue;
-      }
-      if (!res.ok) throw new Error(`Mantle chat-completions -> HTTP ${res.status}`);
-      const body = await res.json();
-      return body.choices?.[0]?.message?.content ?? "";
-    }
-    throw new Error("Mantle chat-completions: authentication failed after re-mint");
-  }
+  const completeChat = buildCompleteChat(
+    { ...opts, region },
+    {
+      fetchImpl: fetch,
+      mintToken: (tokenRegion) =>
+        getToken({ credentials: fromNodeProviderChain(), region: tokenRegion }),
+    },
+  );
 
   async function discoverInstances(stage) {
     const { ServiceDiscoveryClient, DiscoverInstancesCommand } = await import("@aws-sdk/client-servicediscovery");
