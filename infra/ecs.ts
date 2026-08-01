@@ -105,6 +105,21 @@ const LLM_MODEL = process.env.MEM9_LLM_MODEL || "zai.glm-5";
 // infra/cloudformation/bedrock-mantle-project.yaml.
 const BEDROCK_PROJECT = process.env.MEM9_BEDROCK_PROJECT || "";
 
+// Optional second Bedrock Project for the llm-proxy's Responses route (OpenAI
+// reasoning models). Mantle projects are REGIONAL, so BEDROCK_PROJECT above is
+// meaningless in RESPONSES_REGION — this is that region's own project id,
+// created out-of-band via
+// `PROJECT_REGION=us-west-2 scripts/deploy-bedrock-mantle-project.sh`.
+// Unset → no extra IAM grant and no project env, so responses-route calls run
+// untagged where the boundary permits them and 403 where it does not.
+const BEDROCK_PROJECT_OPENAI = process.env.MEM9_BEDROCK_PROJECT_OPENAI || "";
+// OPERATOR INVARIANT: this must agree with the boundary rollout's
+// WORKLOAD_BOUNDARY_OPENAI_PROJECT_REGION (both default us-west-2). A
+// mismatch grants CreateInference in one region while the boundary's
+// NotResource lists the project of another → every responses call 403s with
+// no single place revealing why. See .env.example.
+const RESPONSES_REGION = process.env.MEM9_LLM_RESPONSES_REGION || "us-west-2";
+
 export interface EcsOutputs {
   ssmPrefix: string;
   cluster: sst.aws.Cluster; // shared with bootstrap() so the one-shot task reuses it
@@ -295,6 +310,13 @@ export function ecs(dbOut: DbOutputs, identity: TenantIdentityOutputs): EcsOutpu
           BEDROCK_PROJECT
             ? $interpolate`arn:aws:bedrock-mantle:${region}:${accountId()}:project/${BEDROCK_PROJECT}`
             : "*",
+          // A cross-region call authorizes against the REQUESTING region's
+          // project resource, so the Responses route needs its own ARN here.
+          ...(BEDROCK_PROJECT_OPENAI
+            ? [
+                $interpolate`arn:aws:bedrock-mantle:${RESPONSES_REGION}:${accountId()}:project/${BEDROCK_PROJECT_OPENAI}`,
+              ]
+            : []),
         ],
       },
       {
@@ -427,6 +449,10 @@ export function ecs(dbOut: DbOutputs, identity: TenantIdentityOutputs): EcsOutpu
           LLM_PROXY_OVERALL_DEADLINE_MS: String(LLM_PROXY_OVERALL_DEADLINE_MS),
           // OpenAI-Project header for Bedrock cost attribution. Empty → omitted.
           LLM_PROXY_OPENAI_PROJECT: BEDROCK_PROJECT,
+          // Responses route: its region plus that region's own project id.
+          // Empty project → header omitted on that route only.
+          LLM_PROXY_RESPONSES_REGION: RESPONSES_REGION,
+          LLM_PROXY_RESPONSES_OPENAI_PROJECT: BEDROCK_PROJECT_OPENAI,
         },
         logging: { retention: "1 month" },
         // /health flips to 200 only once the first Bedrock bearer is minted (a

@@ -88,15 +88,59 @@ if [[ "$partition" == "aws-cn" ]]; then
 else
   url_suffix="amazonaws.com"
 fi
-bedrock_project_arn="$(aws cloudformation describe-stacks \
-  --stack-name "$bedrock_stack_name" \
-  --region "$application_region" \
-  --query "Stacks[0].Outputs[?OutputKey=='ProjectArn'].OutputValue | [0]" \
-  --output text 2>/dev/null || true)"
-expected_project_prefix="arn:${partition}:bedrock-mantle:${application_region}:${account_id}:project/"
-if [[ "$bedrock_project_arn" != "$expected_project_prefix"* ]]; then
+# Read the out-of-band Mantle project ARN for one region. Prints the ARN on
+# stdout when the stack exists and its output is this account's project in
+# that region; prints nothing when the stack does not exist. Any OTHER
+# describe failure (AccessDenied, throttling, endpoint issues) or a mismatched
+# ProjectArn output is FATAL: on a guarded update, misreading such a failure
+# as "feature off" would silently rebuild the boundary without an enabled
+# project ARN — stripping a live grant and then self-verifying clean.
+read_bedrock_project_arn() {
+  local project_region="$1" describe_out describe_rc arn
+  set +e
+  describe_out="$(aws cloudformation describe-stacks \
+    --stack-name "$bedrock_stack_name" \
+    --region "$project_region" \
+    --query "Stacks[0].Outputs[?OutputKey=='ProjectArn'].OutputValue | [0]" \
+    --output text 2>&1)"
+  describe_rc=$?
+  set -e
+  if [[ $describe_rc -ne 0 ]]; then
+    if grep -qi "does not exist" <<<"$describe_out"; then
+      return 0 # stack absent → feature off (the only silent case)
+    fi
+    echo "Reading Mantle project stack in ${project_region} failed: ${describe_out}" >&2
+    return 1
+  fi
+  arn="$describe_out"
+  if [[ "$arn" != "arn:${partition}:bedrock-mantle:${project_region}:${account_id}:project/"* ]]; then
+    echo "Mantle project stack in ${project_region} has a mismatched ProjectArn output." >&2
+    return 1
+  fi
+  printf '%s' "$arn"
+}
+
+bedrock_project_arn="$(read_bedrock_project_arn "$application_region")" || exit 1
+if [[ -z "$bedrock_project_arn" ]]; then
   echo "Bedrock Mantle project identity is missing or mismatched." >&2
   exit 1
+fi
+
+# Optional second Mantle project for the llm-proxy Responses route (OpenAI
+# reasoning models), from the same project stack deployed in the responses
+# region. Absent stack → feature off, empty parameter, boundary unchanged.
+# Same-region as the application would duplicate the primary ARN in the
+# boundary NotResource list (an exact-document verify failure) — treat as off.
+openai_project_region="${WORKLOAD_BOUNDARY_OPENAI_PROJECT_REGION:-us-west-2}"
+if [[ "$openai_project_region" == "$application_region" ]]; then
+  openai_bedrock_project_arn=""
+else
+  openai_bedrock_project_arn="$(read_bedrock_project_arn "$openai_project_region")" || exit 1
+fi
+if [[ -n "$openai_bedrock_project_arn" ]]; then
+  echo "Responses-route Mantle project enabled (${openai_project_region})."
+else
+  echo "Responses-route Mantle project not deployed in ${openai_project_region}; boundary unchanged."
 fi
 
 if ! aws cloudformation validate-template \
@@ -155,6 +199,7 @@ verify_boundary_policy() {
   if ! WORKLOAD_BOUNDARY_ACCOUNT_ID="$account_id" \
     WORKLOAD_BOUNDARY_APPLICATION_REGION="$application_region" \
     WORKLOAD_BOUNDARY_BEDROCK_PROJECT_ARN="$bedrock_project_arn" \
+    WORKLOAD_BOUNDARY_OPENAI_BEDROCK_PROJECT_ARN="$openai_bedrock_project_arn" \
     WORKLOAD_BOUNDARY_PARTITION="$partition" \
     WORKLOAD_BOUNDARY_POLICY_REVISION="$policy_revision" \
       node "$repo_root/scripts/verify-workload-permissions-boundary.mjs" \
@@ -424,6 +469,7 @@ if [[ $describe_exit -eq 0 ]]; then
     --parameters \
       "ParameterKey=ApplicationRegion,ParameterValue=$application_region" \
       "ParameterKey=BedrockProjectArn,ParameterValue=$bedrock_project_arn" \
+      "ParameterKey=OpenAiBedrockProjectArn,ParameterValue=$openai_bedrock_project_arn" \
       "ParameterKey=PolicyRevision,ParameterValue=$policy_revision" \
     --capabilities CAPABILITY_NAMED_IAM \
     --region "$region" >/dev/null 2>&1
@@ -451,6 +497,7 @@ elif grep -qi "does not exist" <<<"$describe_output"; then
     --parameters \
       "ParameterKey=ApplicationRegion,ParameterValue=$application_region" \
       "ParameterKey=BedrockProjectArn,ParameterValue=$bedrock_project_arn" \
+      "ParameterKey=OpenAiBedrockProjectArn,ParameterValue=$openai_bedrock_project_arn" \
       "ParameterKey=PolicyRevision,ParameterValue=r1" \
     --capabilities CAPABILITY_NAMED_IAM \
     --region "$region" \

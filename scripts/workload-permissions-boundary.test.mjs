@@ -413,7 +413,7 @@ const cloudFormationTags = [
     tag,
     resolve: (value) => value,
   })),
-  ...["!If", "!Equals"].map((tag) => ({
+  ...["!If", "!Equals", "!Not"].map((tag) => ({
     tag,
     collection: "seq",
     resolve: (value) => value,
@@ -458,8 +458,20 @@ async function withMutatedRolloutModule(mutate, callback) {
   }
 }
 
+// Sentinel for a collapsed Fn::If whose condition is false with template
+// defaults (AWS::NoValue removes the entry from the surrounding list).
+const NO_VALUE = Symbol("AWS::NoValue");
+
 function resolveTemplateValue(value) {
-  if (Array.isArray(value)) return value.map(resolveTemplateValue);
+  if (Array.isArray(value)) {
+    // A parsed `!If [HasOpenAiBedrockProject, ...]` node: the parameter
+    // defaults to "" so the condition is false → the else branch is
+    // AWS::NoValue → the entry vanishes from the parent list.
+    if (value.length === 3 && value[0] === "HasOpenAiBedrockProject") {
+      return NO_VALUE;
+    }
+    return value.map(resolveTemplateValue).filter((item) => item !== NO_VALUE);
+  }
   if (value && typeof value === "object") {
     return Object.fromEntries(
       Object.entries(value).map(([key, child]) => [
@@ -863,6 +875,13 @@ case "$command" in
     stack="$(arg --stack-name "$@")"
     query="$(arg --query "$@")"
     if [[ "$stack" == "bedrock-mantle-project-mem9-on-aws" ]]; then
+      # Regional: the primary project exists in the application region; the
+      # optional Responses-route project stack is absent (feature off).
+      project_region="$(arg --region "$@")"
+      if [[ "$project_region" != "ap-northeast-1" ]]; then
+        printf '%s\\n' 'ValidationError: Stack with id bedrock-mantle-project-mem9-on-aws does not exist' >&2
+        exit 255
+      fi
       printf '%s\\n' 'arn:aws:bedrock-mantle:ap-northeast-1:123456789012:project/proj_test'
     elif [[ "$MOCK_STACK_EXISTS" != "true" && ! -f "$MOCK_CREATED" ]]; then
       printf '%s\\n' 'ValidationError: Stack does not exist' >&2
@@ -3180,6 +3199,49 @@ describe("quarantine and permanent policy verification", () => {
         boundaryContract,
       ),
     ).toBe(true);
+  });
+
+  it("TC-MMROUTE-061: accepts the optional cross-region OpenAI project ARN in NotResource", () => {
+    const contract = {
+      ...boundaryContract,
+      openAiBedrockProjectArn:
+        "arn:aws:bedrock-mantle:us-west-2:123456789012:project/proj_openai",
+    };
+    const document = expectedBoundaryPolicyDocument(contract);
+    const projectStatement = document.Statement.find(
+      ({ Sid }) => Sid === "DenyProjectRuntimeOutsideResources",
+    );
+    expect(projectStatement.NotResource).toContain(
+      "arn:aws:bedrock-mantle:us-west-2:123456789012:project/proj_openai",
+    );
+    expect(verifyBoundaryPolicyDocument(document, contract)).toBe(true);
+    // A document WITH the extra ARN must not verify against a contract WITHOUT
+    // it (and vice versa) — the boundary shape is exact either way.
+    expect(verifyBoundaryPolicyDocument(document, boundaryContract)).toBe(false);
+    expect(
+      verifyBoundaryPolicyDocument(
+        expectedBoundaryPolicyDocument(boundaryContract),
+        contract,
+      ),
+    ).toBe(false);
+  });
+
+  it("TC-MMROUTE-061: rejects a malformed or foreign-account OpenAI project ARN", () => {
+    // Built programmatically: the public-artifact scan only allowlists the
+    // canonical test account id, so no other 12-digit literal may appear.
+    const foreignAccount = "9".repeat(12);
+    for (const bad of [
+      `arn:aws:bedrock-mantle:us-west-2:${foreignAccount}:project/p`, // foreign account
+      `arn:aws:bedrock:us-west-2:${accountId}:project/p`, // wrong service
+      "not-an-arn",
+    ]) {
+      expect(() =>
+        expectedBoundaryPolicyDocument({
+          ...boundaryContract,
+          openAiBedrockProjectArn: bad,
+        }),
+      ).toThrow(/OpenAI Bedrock Mantle project ARN/);
+    }
   });
 
   it("accepts semantically equivalent reordered action and resource lists", () => {

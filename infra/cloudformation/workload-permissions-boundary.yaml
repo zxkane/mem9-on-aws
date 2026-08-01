@@ -13,6 +13,14 @@ Parameters:
     Type: String
     AllowedPattern: "^arn:[a-z0-9-]+:bedrock-mantle:[a-z0-9-]+:[0-9]{12}:project/[A-Za-z0-9_-]+$"
     Description: Exact operator-owned Bedrock Mantle project used by smart ingest.
+  OpenAiBedrockProjectArn:
+    Type: String
+    Default: ""
+    AllowedPattern: "^(arn:[a-z0-9-]+:bedrock-mantle:[a-z0-9-]+:[0-9]{12}:project/[A-Za-z0-9_-]+)?$"
+    Description: >
+      Optional second Bedrock Mantle project ARN for the llm-proxy Responses
+      route (OpenAI reasoning models; regional project in the responses
+      region, e.g. us-west-2). Empty keeps the boundary unchanged.
   PolicyRevision:
     Type: String
     Default: r1
@@ -20,6 +28,9 @@ Parameters:
     Description: >
       Semantics-neutral policy document revision. The guarded updater changes
       this value to force CloudFormation to reconcile direct managed-policy drift.
+
+Conditions:
+  HasOpenAiBedrockProject: !Not [!Equals [!Ref OpenAiBedrockProjectArn, ""]]
 
 Resources:
   WorkloadPermissionsBoundary:
@@ -90,6 +101,9 @@ Resources:
               - ssm:GetParameters
             NotResource:
               - !Ref BedrockProjectArn
+              # AWS::NoValue removes this entry entirely when unconfigured, so
+              # the default boundary keeps its historic shape.
+              - !If [HasOpenAiBedrockProject, !Ref OpenAiBedrockProjectArn, !Ref "AWS::NoValue"]
               - !Sub arn:${AWS::Partition}:ecr:${ApplicationRegion}:${AWS::AccountId}:repository/mem9-on-aws/*
               - !Sub arn:${AWS::Partition}:lambda:${ApplicationRegion}:${AWS::AccountId}:function:mem9-on-aws-*
               - !Sub arn:${AWS::Partition}:logs:${ApplicationRegion}:${AWS::AccountId}:log-group:/sst/*
