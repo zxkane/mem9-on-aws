@@ -39,6 +39,17 @@ export interface ObservabilityInputs {
 export const DURABLE_FAILURE_RATIO_EXPRESSION =
   "IF(terminal >= 20, failures / terminal, 0)";
 
+// The traffic guard is load-bearing: a quiet day with a handful of legitimately
+// zero-fact jobs reads 100% and would otherwise page.
+export const ZERO_FACT_RATE_EXPRESSION = "IF(succeeded > 50, zero_rate, 0)";
+// Exactly 1.0: breach only when NOT ONE of the day's 50+ succeeded jobs
+// extracted a fact. A fractional threshold reads as a comfortable margin over
+// the 96% worst healthy day but is not one — at 200 jobs, 0.995 would page on a
+// day that extracted a single real fact. "Any extraction at all" is the honest
+// line for a blackout detector, and it cannot false-positive on traffic that is
+// still producing memories.
+export const ZERO_FACT_ALARM_THRESHOLD = 1;
+
 export function observability(inputs: ObservabilityInputs) {
   const { stage, logGroupName, slackWebhookUrl, mantleProject } = inputs;
   if (stage !== "prod") return;
@@ -422,6 +433,78 @@ export function observability(inputs: ObservabilityInputs) {
     evaluationPeriods: 1,
     threshold: 1,
     comparisonOperator: "GreaterThanOrEqualToThreshold",
+    treatMissingData: "notBreaching",
+    alarmActions,
+    okActions,
+  });
+
+  // Smart-extraction quality backstop. `ZeroFactSuccess` is emitted once per
+  // SUCCEEDED job (0 or 1), so its Average over a window IS the zero-fact rate
+  // — no second metric is needed for the ratio.
+  //
+  // Deliberately a blackout detector, not a sensitive quality monitor. Measured
+  // healthy prod baseline: 96/82/91/90/77% by day, and SIX CONSECUTIVE 100%
+  // hours (Jul 30) — most agent sessions genuinely carry no durable takeaway,
+  // the documented correct outcome of rule D4. Those six hours total 134 jobs
+  // with zero facts, which is why the window is DAILY and the threshold is
+  // exactly 1.0: a sub-day window or a fractional threshold would page on that
+  // healthy stretch. Over the calendar day those hours belong to, Jul 30
+  // extracted 35 facts from 377 jobs and stays quiet.
+  //
+  // NOTE the evaluation window SLIDES: CloudWatch advances it by a minute and
+  // does not align it to the wall clock, and @pulumi/aws at the pinned version
+  // exposes no `evaluationWindow` to request wall-clock alignment. So this is
+  // not literally a per-calendar-day check — some 24h window could enclose the
+  // 134-job stretch plus quieter hours. That is an accepted residual: the
+  // threshold of exactly 1.0 means any single fact-producing job anywhere in
+  // the window clears it, and the stretch above is bracketed on both sides by
+  // fact-producing hours in the real series.
+  //
+  // What it catches: "the extractor returns nothing, ever" — a bad model swap,
+  // a broken prompt, a translation regression yielding empty content. What it
+  // does NOT catch: subtle quality drift, which is not observable in this
+  // metric at all (that is #104/#106's shadow scoring).
+  new aws.cloudwatch.MetricAlarm("DurableIngestZeroFactRateAlarm", {
+    alarmDescription:
+      "Not one of 50+ succeeded ingest jobs extracted a fact in 24h. Suspect a " +
+      "broken extractor (model swap, prompt, or llm-proxy translation), not " +
+      "normal traffic: healthy days run 77-96% zero-fact but always extract " +
+      "something. Check MNEMO_LLM_MODEL and the llm-proxy request log.",
+    metricQueries: [
+      {
+        id: "zero_rate",
+        metric: {
+          namespace: durableNamespace,
+          metricName: "ZeroFactSuccess",
+          dimensions: { stage },
+          stat: "Average",
+          period: 86400,
+        },
+        returnData: false,
+      },
+      {
+        id: "succeeded",
+        metric: {
+          namespace: durableNamespace,
+          metricName: "JobsSucceeded",
+          dimensions: { stage, result_class: "succeeded" },
+          stat: "Sum",
+          period: 86400,
+        },
+        returnData: false,
+      },
+      {
+        id: "rate",
+        expression: ZERO_FACT_RATE_EXPRESSION,
+        label: "Zero-fact extraction rate (>50 jobs/day)",
+        returnData: true,
+      },
+    ],
+    threshold: ZERO_FACT_ALARM_THRESHOLD,
+    evaluationPeriods: 1,
+    comparisonOperator: "GreaterThanOrEqualToThreshold",
+    // No ingest traffic is not a quality regression; the liveness alarm owns
+    // "telemetry stopped".
     treatMissingData: "notBreaching",
     alarmActions,
     okActions,

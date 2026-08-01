@@ -865,14 +865,25 @@ behavior is pinned by the unit suite (`scripts/memory-cleanup.test.mjs`), and
 live verification is the operator dry-run below, executed from a VPC-internal
 host. Production execution is a deliberate manual flow:
 
-1. **Dry-run** (read-only; classifies every active memory with GLM-5):
+1. **Dry-run** (read-only; classifies every active memory):
 
    ```bash
    node scripts/memory-cleanup.mjs --stage prod \
+     --model openai.gpt-5.6-terra --effort high \
      --tenant-secret-arn "$(aws ssm get-parameter \
        --name /mem9-on-aws/prod/tenant/secret-arn \
        --query Parameter.Value --output text)"
    ```
+
+   **Use a reasoning model for cleanup.** `--model` selects the classifier;
+   omitted, it falls back to `MEM9_LLM_MODEL` and then `zai.glm-5`. An
+   `openai.gpt-5.6-*` value routes to the Responses API in `--llm-region`
+   (default `us-west-2`) with a 24k output budget; anything else uses
+   chat-completions in the application region. Measured on the same
+   2271-memory corpus: GLM-5 left **33% of memories unclassified** (batch JSON
+   truncated at its 4096-token cap) while `gpt-5.6-terra` had zero
+   classification failures and found ~6× more merge groups. GLM-5 remains
+   usable and is the cheaper zero-cross-region-dependency fallback.
 
    The decision list is written to `~/.mem9-cleanup/prod/decisions-*.json`
    (mode 0600, outside any checkout — it contains memory content and must
@@ -899,15 +910,26 @@ host. Production execution is a deliberate manual flow:
    contract).
 
    Exit codes: `0` success, `1` unexpected error, `2` discovery failed,
-   `3` another run holds the lock, `4` cap exceeded (aborted), `5` GLM-5
+   `3` another run holds the lock, `4` cap exceeded (aborted), `5`
    classification failed for every batch.
+
+   **Read the `UNCLASSIFIED=` count in the summary before trusting a run.**
+   Exit 5 fires only when *every* batch fails, so a partial classifier outage
+   exits 0; the summary reports how many memories went unaudited and what share
+   of batches failed. "We never looked at these 740 memories" is not the same
+   result as "these 740 are fine" — re-run before treating the audit as
+   complete.
 
 Requires VPC-internal network access to `mnemo.mem9-<stage>.local:8080` (the
 script discovers the task IP via Cloud Map `DiscoverInstances`; pass
 `--base-url` explicitly when tunneling) plus IAM for `ssm:GetParameter` on
 `/mem9-on-aws/<stage>/tenant/secret-arn`, `secretsmanager:GetSecretValue` on
 the tenant secret, `servicediscovery:DiscoverInstances`, and
-`bedrock-mantle:CreateInference`/`CallWithBearerToken`.
+`bedrock-mantle:CreateInference`/`CallWithBearerToken`. A reasoning-model run
+needs those Bedrock grants in the **responses region** as well (default
+`us-west-2`), since the bearer is minted per region; cost attribution uses
+`MEM9_BEDROCK_PROJECT_OPENAI` there and `MEM9_BEDROCK_PROJECT` in the
+application region (Mantle projects are regional and never cross-applied).
 
 
 ## License

@@ -3,6 +3,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
 import {
   DURABLE_FAILURE_RATIO_EXPRESSION,
+  ZERO_FACT_ALARM_THRESHOLD,
+  ZERO_FACT_RATE_EXPRESSION,
   observability,
 } from "./observability";
 
@@ -171,6 +173,15 @@ function durableFailureRatio(failures: number, terminal: number): number {
   return terminal >= 20 ? failures / terminal : 0;
 }
 
+/** Mirrors ZERO_FACT_RATE_EXPRESSION — the zero-fact alarm's math. */
+function zeroFactRate(zeroFactJobs: number, succeeded: number): number {
+  return succeeded > 50 ? zeroFactJobs / succeeded : 0;
+}
+
+function zeroFactBreaches(zeroFactJobs: number, succeeded: number): boolean {
+  return zeroFactRate(zeroFactJobs, succeeded) >= ZERO_FACT_ALARM_THRESHOLD;
+}
+
 beforeEach(() => {
   resources = [];
   installGlobals();
@@ -216,11 +227,11 @@ describe("observability alert delivery", () => {
     const topic = one("Topic");
     expect(topic.args).toEqual({ name: "mem9-on-aws-prod-alerts" });
     const alarms = resources.filter((resource) => resource.kind === "MetricAlarm");
-    expect(alarms).toHaveLength(10);
+    expect(alarms).toHaveLength(11);
     const actionBearingMetricAlarms = alarms.filter(
       (alarm) => alarm.args.alarmActions !== undefined,
     );
-    expect(actionBearingMetricAlarms).toHaveLength(8);
+    expect(actionBearingMetricAlarms).toHaveLength(9);
     for (const alarm of actionBearingMetricAlarms) {
       expect(materialize(alarm.args.alarmActions)).toEqual([
         "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
@@ -650,6 +661,47 @@ describe("observability alert delivery", () => {
       comparisonOperator: "GreaterThanThreshold",
       treatMissingData: "notBreaching",
     });
+    expect(named("MetricAlarm", "DurableIngestZeroFactRateAlarm").args).toMatchObject({
+      threshold: ZERO_FACT_ALARM_THRESHOLD,
+      evaluationPeriods: 1,
+      comparisonOperator: "GreaterThanOrEqualToThreshold",
+      treatMissingData: "notBreaching",
+    });
+    expect(
+      named("MetricAlarm", "DurableIngestZeroFactRateAlarm").args.metricQueries,
+    ).toEqual([
+      {
+        id: "zero_rate",
+        metric: {
+          namespace: "mem9-on-aws/DurableIngest",
+          metricName: "ZeroFactSuccess",
+          dimensions: { stage: "prod" },
+          // ZeroFactSuccess is 0/1 per succeeded job, so Average IS the rate.
+          stat: "Average",
+          // Daily, not hourly: healthy prod runs six consecutive 100% HOURS.
+          period: 86400,
+        },
+        returnData: false,
+      },
+      {
+        id: "succeeded",
+        metric: {
+          namespace: "mem9-on-aws/DurableIngest",
+          metricName: "JobsSucceeded",
+          dimensions: { stage: "prod", result_class: "succeeded" },
+          stat: "Sum",
+          period: 86400,
+        },
+        returnData: false,
+      },
+      {
+        id: "rate",
+        expression: ZERO_FACT_RATE_EXPRESSION,
+        label: "Zero-fact extraction rate (>50 jobs/day)",
+        returnData: true,
+      },
+    ]);
+
     expect(named("MetricAlarm", "DurableIngestTelemetryLivenessAlarm").args).toEqual({
       alarmDescription:
         "The once-per-minute durable ingest sampler stopped emitting ECS-origin telemetry.",
@@ -878,6 +930,55 @@ describe("observability alert delivery", () => {
     expect(durableFailureRatio(3, 30)).toBe(0.1);
   });
 
+  it("TC-INGEST-METRIC-031/032: zero-fact alarm clears the measured healthy baseline", () => {
+    // Pin the shipped expression as a LITERAL. The mirror below reimplements
+    // this math, so comparing the constant to itself would let a mutation of
+    // either the guard value or the branch order pass unnoticed.
+    expect(ZERO_FACT_RATE_EXPRESSION).toBe("IF(succeeded > 50, zero_rate, 0)");
+    // Exactly 1.0, not a fraction: at 200 jobs, 0.995 pages on a day that
+    // extracted a single real fact.
+    expect(ZERO_FACT_ALARM_THRESHOLD).toBe(1);
+
+    // Real prod daily buckets (Jul 28 - Aug 1, 2026), zero-fact / succeeded.
+    // Every one is a HEALTHY day: a high zero-fact rate is the correct outcome
+    // of rule D4 for sessions with no durable takeaway.
+    for (const [zero, succeeded] of [
+      [97, 101], // 96%
+      [144, 176], // 82%
+      [342, 377], // 91%
+      [280, 312], // 90%
+      [231, 300], // 77%
+    ]) {
+      expect(zeroFactBreaches(zero, succeeded)).toBe(false);
+    }
+
+    // Six consecutive 100% HOURS from the same healthy baseline (Jul 30
+    // 17:00-23:00). Aggregated they are 134 succeeded jobs with ZERO facts —
+    // past the traffic guard and a breach at any threshold. This is the
+    // concrete reason the window is a full day: evaluated hourly (or over any
+    // sub-day window covering this stretch) the alarm would page on traffic
+    // that was healthy.
+    const healthyHours = [41, 3, 27, 8, 37, 18];
+    const stretch = healthyHours.reduce((sum, jobs) => sum + jobs, 0);
+    expect(stretch).toBe(134);
+    expect(zeroFactBreaches(stretch, stretch)).toBe(true);
+    // Over the real day those hours belong to, the same traffic stays quiet:
+    // Jul 30 extracted 35 facts across 377 jobs.
+    expect(zeroFactBreaches(342, 377)).toBe(false);
+
+    // A quiet day that is entirely zero-fact still cannot page: too few jobs
+    // to distinguish a blackout from normal low-signal traffic.
+    expect(zeroFactBreaches(50, 50)).toBe(false);
+    expect(zeroFactBreaches(51, 51)).toBe(true); // one job past the guard
+
+    // The boundary that matters: ONE successful extraction keeps it quiet, at
+    // the smallest healthy daily volume observed (101 jobs). The alarm asserts
+    // a TOTAL blackout, never degraded quality (that is #104/#106's scope).
+    expect(zeroFactBreaches(101, 101)).toBe(true);
+    expect(zeroFactBreaches(100, 101)).toBe(false);
+    expect(zeroFactBreaches(299, 300)).toBe(false);
+  });
+
   it("TC-INGEST-METRIC-015/016/017/023: pins emitter metrics to dashboard and alarms", () => {
     const patch = readFileSync(
       new URL(
@@ -905,6 +1006,13 @@ describe("observability alert delivery", () => {
       "JobsTerminated",
       "DeadlineTransientTerminalFailures",
       "SamplerHeartbeat",
+      // Both feed DurableIngestZeroFactRateAlarm. If the emitter stops
+      // publishing either, the metric vanishes from CloudWatch and the alarm
+      // sits INSUFFICIENT_DATA → notBreaching → reads healthy forever. Pinning
+      // the PRODUCER matters most on the one alarm whose failure mode is
+      // silence.
+      "ZeroFactSuccess",
+      "JobsSucceeded",
     ]) {
       expect(emitter).toContain(`countMetric("${metric}")`);
     }

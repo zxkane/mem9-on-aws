@@ -8,6 +8,7 @@ import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  buildCompleteChat,
   contentHash,
   parseArgs,
   parseVerdicts,
@@ -669,5 +670,366 @@ describe("verdict parsing units", () => {
 
   it("contentHash is a stable sha256 label", () => {
     expect(contentHash("abc")).toBe(`sha256:${createHash("sha256").update("abc").digest("hex")}`);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// LLM route (TC-MEMCLEAN-070..078) — docs/test-cases/cleanup-reasoning-model.md
+
+describe("LLM route", () => {
+  const APP_REGION = "ap-northeast-1";
+  const CLASSIFY_ATTEMPTS = 2; // mirrors memory-cleanup.mjs
+
+  /** Record every request; reply with the queued responses in order. */
+  function recorder(replies) {
+    const calls = [];
+    const queue = [...replies];
+    const fetchImpl = (url, init) => {
+      calls.push({ url, body: JSON.parse(init.body), headers: init.headers });
+      const next = queue.shift();
+      if (!next) throw new Error("unexpected extra request");
+      return Promise.resolve({
+        ok: next.status === undefined || next.status < 400,
+        status: next.status ?? 200,
+        json: async () => next.body,
+      });
+    };
+    return { calls, fetchImpl };
+  }
+
+  const chatReply = (content) => ({ body: { choices: [{ message: { content } }] } });
+  const responsesReply = (overrides) => ({
+    body: {
+      id: "resp_1",
+      status: "completed",
+      output: [{ content: [{ type: "output_text", text: "[]" }] }],
+      usage: { input_tokens: 10, output_tokens: 20 },
+      ...overrides,
+    },
+  });
+
+  const build = (opts, deps) =>
+    buildCompleteChat({ region: APP_REGION, ...opts }, { mintToken: async (r) => `tok-${r}`, ...deps });
+
+  it("TC-MEMCLEAN-070: GLM-5 keeps the chat-completions contract unchanged", async () => {
+    const { calls, fetchImpl } = recorder([chatReply("[]")]);
+    const completeChat = build({ model: "zai.glm-5" }, { fetchImpl });
+
+    expect(await completeChat("sys", [{ id: "m1" }])).toBe("[]");
+    expect(calls).toHaveLength(1);
+    expect(calls[0].url).toBe(`https://bedrock-mantle.${APP_REGION}.api.aws/v1/chat/completions`);
+    // The chat route must keep the 4096 cap and the messages shape: GLM-5 has
+    // no Responses surface, and a reasoning field would 400.
+    expect(calls[0].body).toMatchObject({
+      model: "zai.glm-5",
+      max_tokens: 4096,
+      messages: [
+        { role: "system", content: "sys" },
+        { role: "user", content: JSON.stringify({ memories: [{ id: "m1" }] }) },
+      ],
+    });
+    expect(calls[0].body.input).toBeUndefined();
+    expect(calls[0].body.reasoning).toBeUndefined();
+    expect(calls[0].headers.authorization).toBe(`Bearer tok-${APP_REGION}`);
+  });
+
+  it("TC-MEMCLEAN-071: a gpt-5.6 model routes to Responses in the responses region", async () => {
+    const { calls, fetchImpl } = recorder([responsesReply()]);
+    const completeChat = build(
+      { model: "openai.gpt-5.6-terra", effort: "high", llmRegion: "us-west-2" },
+      { fetchImpl },
+    );
+
+    await completeChat("sysprompt", [{ id: "m1" }]);
+    expect(calls[0].url).toBe("https://bedrock-mantle.us-west-2.api.aws/openai/v1/responses");
+    expect(calls[0].body).toMatchObject({
+      model: "openai.gpt-5.6-terra",
+      instructions: "sysprompt",
+      reasoning: { effort: "high" },
+      // 4096 truncates reasoning output mid-JSON — the measured GLM-5 failure.
+      max_output_tokens: 24000,
+    });
+    expect(calls[0].body.input).toEqual([
+      { role: "user", content: JSON.stringify({ memories: [{ id: "m1" }] }) },
+    ]);
+    expect(calls[0].body.messages).toBeUndefined();
+    // The bearer is minted for the RESPONSES region, not the app region.
+    expect(calls[0].headers.authorization).toBe("Bearer tok-us-west-2");
+  });
+
+  it("TC-MEMCLEAN-072: responses output_text parts reach parseVerdicts verbatim", async () => {
+    const verdicts = '{"verdicts":[{"id":"m1","verdict":"KEEP","reason":"durable"}]}';
+    const { fetchImpl } = recorder([
+      responsesReply({
+        // Split across parts: the route must concatenate, not take the first.
+        output: [
+          { content: [{ type: "output_text", text: verdicts.slice(0, 10) }] },
+          { content: [{ type: "output_text", text: verdicts.slice(10) }] },
+        ],
+      }),
+    ]);
+    const completeChat = build({ model: "openai.gpt-5.6-terra" }, { fetchImpl });
+
+    const raw = await completeChat("sys", [{ id: "m1" }]);
+    expect(raw).toBe(verdicts);
+    expect(parseVerdicts(raw)).toEqual([{ id: "m1", verdict: "KEEP", reason: "durable" }]);
+  });
+
+  it("TC-MEMCLEAN-073: a failed responses status throws instead of returning empty", async () => {
+    // status:"failed" arrives as HTTP 200 with empty output. Returning "" would
+    // parse as "no verdicts" and SKIP a whole batch on a non-answer that looks
+    // authoritative — the exact silent skip this route must not introduce.
+    const { fetchImpl } = recorder([
+      responsesReply({ status: "failed", output: [], error: { message: "upstream boom" } }),
+    ]);
+    const completeChat = build({ model: "openai.gpt-5.6-terra" }, { fetchImpl });
+
+    await expect(completeChat("sys", [{ id: "m1" }])).rejects.toThrow(/failed/);
+  });
+
+  it("TC-MEMCLEAN-073b: a completed reply with no output_text throws", async () => {
+    const { fetchImpl } = recorder([responsesReply({ output: [{ content: [] }] })]);
+    const completeChat = build({ model: "openai.gpt-5.6-terra" }, { fetchImpl });
+
+    await expect(completeChat("sys", [{ id: "m1" }])).rejects.toThrow(/no output_text/);
+  });
+
+  it("TC-MEMCLEAN-074: a truncated reply is rejected even when its JSON parses", async () => {
+    // The dangerous case is truncation that lands on VALID JSON. Parsing it
+    // would delete memories the model never finished judging, so an
+    // `incomplete` status must fail the batch (→ retry → SKIP), not classify.
+    const truncatedButValid = JSON.stringify({
+      verdicts: [{ id: "m1", verdict: "DELETE", reason: "noise" }],
+    });
+    for (const text of [truncatedButValid, '{"verdicts":[{"id":"m1"']) {
+      const { fetchImpl } = recorder([
+        responsesReply({
+          status: "incomplete",
+          incomplete_details: { reason: "max_output_tokens" },
+          output: [{ content: [{ type: "output_text", text }] }],
+        }),
+      ]);
+      const completeChat = build({ model: "openai.gpt-5.6-terra" }, { fetchImpl });
+      await expect(completeChat("sys", [{ id: "m1" }])).rejects.toThrow(/truncated/);
+    }
+  });
+
+  it("TC-MEMCLEAN-074b: a truncated reply cannot delete or merge end-to-end", async () => {
+    // Drives the REAL buildCompleteChat through runCleanup: a truncated MERGE
+    // whose merged_content is cut mid-sentence must not rewrite the survivor
+    // or delete the absorbed memory.
+    const dir = tempDir();
+    const server = fakeServer([memory("s", "fragment a"), memory("a", "fragment b")]);
+    const { fetchImpl } = recorder([
+      responsesReply({
+        status: "incomplete",
+        output: [{
+          content: [{
+            type: "output_text",
+            text: JSON.stringify({
+              verdicts: [
+                { id: "s", verdict: "MERGE", reason: "frags", merge_into: "s",
+                  absorbs: ["a"], merged_content: "fragment a and the deploy pipeline was" },
+                { id: "a", verdict: "MERGE", reason: "frags", merge_into: "s" },
+              ],
+            }),
+          }],
+        }],
+      }),
+      // classifyBatch retries once; fail the same way.
+      responsesReply({
+        status: "incomplete",
+        output: [{ content: [{ type: "output_text", text: "{}" }] }],
+      }),
+    ]);
+    const completeChat = build({ model: "openai.gpt-5.6-terra" }, { fetchImpl });
+
+    const result = await runCleanup(
+      baseOpts({ apply: true }),
+      { ...baseDeps(server, completeChat, dir), completeChat },
+    );
+    expect(result.decisions.map((d) => d.verdict)).toEqual(["SKIP", "SKIP"]);
+    expect(result.writeCalls).toBe(0);
+    expect(server.store.get("s").content).toBe("fragment a");
+    expect(server.store.get("a").state).toBe("active");
+  });
+
+  it("TC-MEMCLEAN-074c: a near-miss model id must not silently use the 4096 cap", async () => {
+    // Prefix matching is exact: a typo or the next model generation would
+    // otherwise route to chat-completions at the truncating cap and produce a
+    // run that looks successful while a third of the corpus goes unclassified.
+    for (const model of ["openai.gpt-5.6terra", "openai.gpt-6-terra", "OPENAI.GPT-5.6-TERRA"]) {
+      const { calls, fetchImpl } = recorder([chatReply('{"verdicts":[]}')]);
+      await build({ model }, { fetchImpl })("sys", []);
+      // Documents the CURRENT behavior so a future prefix change is a visible
+      // test change, not a silent capability regression.
+      expect(calls[0].body.max_tokens).toBe(4096);
+    }
+  });
+
+  it("TC-MEMCLEAN-075: a 401 re-mints once per route, then gives up", async () => {
+    const minted = [];
+    const { calls, fetchImpl } = recorder([{ status: 401, body: {} }, responsesReply()]);
+    const completeChat = build(
+      { model: "openai.gpt-5.6-terra", llmRegion: "us-west-2" },
+      { fetchImpl, mintToken: async (r) => `tok-${r}-${minted.push(r)}` },
+    );
+
+    await completeChat("sys", [{ id: "m1" }]);
+    expect(minted).toEqual(["us-west-2", "us-west-2"]);
+    expect(calls[1].headers.authorization).toBe("Bearer tok-us-west-2-2");
+
+    const second = recorder([{ status: 401, body: {} }, { status: 401, body: {} }]);
+    const giveUp = build({ model: "openai.gpt-5.6-terra" }, { fetchImpl: second.fetchImpl });
+    await expect(giveUp("sys", [{ id: "m1" }])).rejects.toThrow(/after bearer re-mint/);
+  });
+
+  it("TC-MEMCLEAN-075b: a non-auth HTTP error names the route and does not retry", async () => {
+    const { calls, fetchImpl } = recorder([{ status: 500, body: {} }]);
+    const completeChat = build({ model: "openai.gpt-5.6-terra" }, { fetchImpl });
+
+    await expect(completeChat("sys", [{ id: "m1" }])).rejects.toThrow(/responses -> HTTP 500/);
+    expect(calls).toHaveLength(1);
+  });
+
+  it("TC-MEMCLEAN-076: --model/--effort/--llm-region parse; --effort is bounded", () => {
+    expect(
+      parseArgs([
+        "--stage", "prod",
+        "--model", "openai.gpt-5.6-luna",
+        "--effort", "medium",
+        "--llm-region", "us-east-1",
+      ]),
+    ).toMatchObject({ model: "openai.gpt-5.6-luna", effort: "medium", llmRegion: "us-east-1" });
+
+    // An unbounded effort would reach Mantle and 400 mid-scan.
+    expect(() => parseArgs(["--stage", "prod", "--effort", "ultra"])).toThrow(/low\|medium\|high/);
+    expect(parseArgs(["--stage", "prod"]).model).toBeUndefined();
+  });
+
+  it("TC-MEMCLEAN-077: each route carries its own timeout budget", async () => {
+    const budgets = [];
+    const spy = vi.spyOn(AbortSignal, "timeout");
+    try {
+      for (const model of ["zai.glm-5", "openai.gpt-5.6-terra"]) {
+        const reply = model === "zai.glm-5" ? chatReply("[]") : responsesReply();
+        const { fetchImpl } = recorder([reply]);
+        spy.mockClear();
+        await build({ model }, { fetchImpl })("sys", [{ id: "m1" }]);
+        budgets.push(spy.mock.calls.at(-1)[0]);
+      }
+    } finally {
+      spy.mockRestore();
+    }
+    // High-effort reasoning legitimately outlives the 120s chat budget.
+    expect(budgets).toEqual([120_000, 300_000]);
+  });
+
+  it("TC-MEMCLEAN-080: a partial classification outage is reported, not hidden in SKIP", async () => {
+    // 3 batches of 20. The first fails BOTH attempts (classifyBatch retries
+    // once), so exactly one batch goes unclassified while two succeed.
+    // classifierBroken requires ALL batches to fail, so this exits 0 — the
+    // summary MUST say how much of the corpus went unaudited, or a partial
+    // outage is indistinguishable from a clean audit.
+    const memories = Array.from({ length: 60 }, (_, i) => memory(`m-${i}`, `fact ${i}`));
+    const server = fakeServer(memories);
+    let call = 0;
+    const llm = vi.fn(async (_p, batch) => {
+      call += 1;
+      if (call <= CLASSIFY_ATTEMPTS) throw new Error("Mantle responses -> HTTP 500");
+      // A merge group in a SUCCEEDING batch: planDecisions folds the absorbed
+      // ids into the survivor's row, so decisions.length < scanned memories.
+      // The denominator must still be the memory count an operator can verify
+      // against the store, not the row count.
+      if (call === CLASSIFY_ATTEMPTS + 1) {
+        const [s1, a1, a2, ...rest] = batch;
+        return JSON.stringify({
+          verdicts: [
+            { id: s1.id, verdict: "MERGE", reason: "frags", merge_into: s1.id,
+              absorbs: [a1.id, a2.id], merged_content: "merged fact" },
+            { id: a1.id, verdict: "MERGE", reason: "frags", merge_into: s1.id },
+            { id: a2.id, verdict: "MERGE", reason: "frags", merge_into: s1.id },
+            ...keepAll(rest),
+          ],
+        });
+      }
+      return JSON.stringify({ verdicts: keepAll(batch) });
+    });
+    const deps = baseDeps(server, llm, tempDir());
+    const result = await runCleanup(baseOpts(), deps);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.decisions.length).toBeLessThan(60); // merge folding shrank the rows
+    const summaryLine = deps.log.mock.calls.map((c) => c[0]).find((m) => m.startsWith("dry-run:"));
+    expect(summaryLine).toMatch(/UNCLASSIFIED=20 of 60 memories \(1\/3 batches failed, 33%\)/);
+    expect(summaryLine).toMatch(/NOT audited by this classification/);
+    // The old summary reported only SKIP:20, which is also what a legitimate
+    // planner SKIP looks like — the whole point of the new note.
+    expect(summaryLine).toContain('"SKIP":20');
+
+    // The apply run replays the file and is the run that DELETES, so it must
+    // carry the same warning; batch counters are absent there.
+    const applyServer = fakeServer(memories);
+    const applyDeps = baseDeps(applyServer, llm, tempDir());
+    await runCleanup(
+      baseOpts({ apply: true, decisionsFile: result.decisionPath, cap: 500 }),
+      applyDeps,
+    );
+    const applyLine = applyDeps.log.mock.calls.map((c) => c[0]).find((m) => m.startsWith("apply done:"));
+    expect(applyLine).toMatch(/UNCLASSIFIED=20 of 60 memories \(from the replayed decision list\)/);
+  });
+
+  it("TC-MEMCLEAN-081: a deterministic request-translation defect aborts the run", async () => {
+    // Non-string message content is rejected by the translator BEFORE any
+    // network call, so it fails identically on every batch. Retrying it and
+    // degrading to SKIP would turn an invocation bug into a clean-looking
+    // audit of an unexamined corpus.
+    const server = fakeServer([memory("m-1", "x")]);
+    const { fetchImpl } = recorder([]);
+    const completeChat = build({ model: "openai.gpt-5.6-terra" }, { fetchImpl });
+    const boom = () => completeChat(null, [{ id: "m-1" }]); // null system prompt
+
+    await expect(boom()).rejects.toThrow(/string content/);
+    await expect(
+      runCleanup(baseOpts(), { ...baseDeps(server, boom, tempDir()), completeChat: boom }),
+    ).rejects.toThrow(/string content/);
+  });
+
+  it("TC-MEMCLEAN-079: ambient LLM_PROXY_* sidecar env cannot alter the route", async () => {
+    // The config is assembled from a CLOSED object, not a spread of process.env.
+    // A debug host with the sidecar's container env exported would otherwise
+    // silently route terra to chat-completions at its 4096 cap (reintroducing
+    // the truncation this route exists to fix) or crash on a limit cleanup
+    // never reads.
+    vi.stubEnv("LLM_PROXY_RESPONSES_MODEL_PREFIXES", "nothing-matches");
+    vi.stubEnv("LLM_PROXY_UPSTREAM_BASE", "http://localhost:8082/v1");
+    vi.stubEnv("LLM_PROXY_MAX_BODY_BYTES", "0");
+    vi.stubEnv("LLM_PROXY_REASONING_EFFORT", "not-an-effort");
+    try {
+      const { calls, fetchImpl } = recorder([responsesReply()]);
+      await build({ model: "openai.gpt-5.6-terra" }, { fetchImpl })("sys", []);
+      expect(calls[0].url).toBe("https://bedrock-mantle.us-west-2.api.aws/openai/v1/responses");
+      expect(calls[0].body.max_output_tokens).toBe(24000);
+      expect(calls[0].body.reasoning).toEqual({ effort: "high" });
+    } finally {
+      vi.unstubAllEnvs();
+    }
+  });
+
+  it("TC-MEMCLEAN-078: regional project ids are never cross-applied", async () => {
+    vi.stubEnv("MEM9_BEDROCK_PROJECT", "proj_tokyo");
+    vi.stubEnv("MEM9_BEDROCK_PROJECT_OPENAI", "proj_uswest");
+    try {
+      const chat = recorder([chatReply("[]")]);
+      await build({ model: "zai.glm-5" }, { fetchImpl: chat.fetchImpl })("sys", []);
+      expect(chat.calls[0].headers["OpenAI-Project"]).toBe("proj_tokyo");
+
+      const resp = recorder([responsesReply()]);
+      await build({ model: "openai.gpt-5.6-terra" }, { fetchImpl: resp.fetchImpl })("sys", []);
+      // Mantle projects are regional: the Tokyo id means nothing in us-west-2.
+      expect(resp.calls[0].headers["OpenAI-Project"]).toBe("proj_uswest");
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
 });
