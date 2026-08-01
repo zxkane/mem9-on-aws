@@ -233,6 +233,19 @@ The gateway trusts three implemented Cognito clients:
 - Authorization code with PKCE through the API Gateway v2 OAuth facade for
   interactive clients.
 
+The OAuth facade accepts RFC 8252 loopback redirects by default. Hosted clients
+can be added per stage through the SST `OauthAllowedCallbackUrls` secret, whose
+value is a JSON array of exact HTTPS URLs. SST writes the selected value to the
+stage's existing OAuth SSM prefix, and the facade reads it at cold start with
+the reader client configuration. A SHA-256 configuration version in the Lambda
+environment forces a function update when the SSM value changes, without
+putting callback URLs in the environment. The facade applies the same allowlist
+to dynamic registration, authorization, callback, and token exchange. Cognito
+still sees only the facade's own `/oauth/callback`; external callback URLs are
+never added to the Cognito reader client. A short-lived HMAC wrapper binds the
+Cognito authorization code to the original external redirect URL for token
+exchange.
+
 The OAuth facade optionally uses a production custom hostname from
 `MEM9_FACADE_CUSTOM_DOMAIN`. GitHub Actions supplies it only from the repository
 secret of the same name. The deploy also receives `CLOUDFLARE_API_TOKEN` from a

@@ -18,18 +18,26 @@
  * - Claude Code's OAuth client needs RFC 8414 / RFC 9728 metadata + RFC 7591
  *   DCR, none of which Cognito serves at the discovery path the Gateway
  *   advertises.
- * - Claude Code's local callback listener picks a random ephemeral port;
- *   Cognito requires exact-match `callbackUrls`. The façade is the single
- *   registered redirect target and 302-redirects to the client's loopback
- *   port. State + the original client redirect_uri ride through Cognito as an
- *   HMAC-signed opaque blob so the proxy stays stateless.
+ * - Native clients can pick a random loopback port, while hosted clients use
+ *   stage-configured exact HTTPS callbacks; Cognito requires static
+ *   `callbackUrls`. The façade is the single registered Cognito target and
+ *   302-redirects to the validated client URL. State + the original
+ *   redirect_uri ride through Cognito as an HMAC-signed opaque blob so the
+ *   proxy stays stateless.
  *
  * Routes: `/.well-known/*` metadata, `/oauth/authorize|callback|token|logout`,
  * `/register`, and a catch-all proxy to the AgentCore Gateway (`/mcp`).
  */
 
 import { loadConfig, type FacadeConfig } from "./config.js";
-import { signState, verifyState } from "./state.js";
+import {
+  canEncodeCognitoState,
+  COGNITO_STATE_MAX_LENGTH,
+  signAuthorizationCode,
+  signState,
+  verifyAuthorizationCode,
+  verifyState,
+} from "./state.js";
 
 interface ApiGwEvent {
   rawPath?: string;
@@ -94,24 +102,29 @@ function ensureHmacConfigured(cfg: FacadeConfig): ApiGwResponse | null {
 }
 
 /**
- * Native-app loopback redirect_uri validation (RFC 8252 §7.3). Without this
- * the façade would be an open redirector leaking auth codes to attacker URLs.
- * Claude Code's MCP transport uses a loopback address with an arbitrary port.
+ * Native-app loopback redirect_uri validation (RFC 8252 §7.3) plus exact-match
+ * HTTPS callbacks configured for hosted clients. Without this the façade would
+ * be an open redirector leaking auth codes to attacker URLs.
  */
-export function isAllowedClientRedirect(uri: string): boolean {
+export function isAllowedClientRedirect(
+  uri: string,
+  allowedHttpsUris: readonly string[] = [],
+): boolean {
   let url: URL;
   try {
     url = new URL(uri);
   } catch {
     return false;
   }
-  if (url.protocol !== "http:") return false;
-  return (
-    url.hostname === "localhost" ||
-    url.hostname === "127.0.0.1" ||
-    url.hostname === "[::1]" ||
-    url.hostname === "::1"
-  );
+  if (url.protocol === "http:") {
+    return (
+      url.hostname === "localhost" ||
+      url.hostname === "127.0.0.1" ||
+      url.hostname === "[::1]" ||
+      url.hostname === "::1"
+    );
+  }
+  return url.protocol === "https:" && allowedHttpsUris.includes(uri);
 }
 
 /** Pure router — all façade logic; config injected so tests need no AWS. */
@@ -212,11 +225,16 @@ export async function route(
         error_description: "missing redirect_uri",
       });
     }
-    if (!isAllowedClientRedirect(clientRedirect)) {
+    if (
+      !isAllowedClientRedirect(
+        clientRedirect,
+        cfg.allowedClientRedirectUris,
+      )
+    ) {
       return json(400, {
         error: "invalid_request",
         error_description:
-          "redirect_uri must be a loopback (http://localhost or http://127.0.0.1) URL",
+          "redirect_uri must be an allowed callback URL",
       });
     }
     // Require PKCE so the auth code is useless without the code_verifier.
@@ -244,6 +262,12 @@ export async function route(
       cfg.hmacKey,
       Date.now(),
     );
+    if (facadeState.length > COGNITO_STATE_MAX_LENGTH) {
+      return json(400, {
+        error: "invalid_request",
+        error_description: "redirect_uri and state exceed the supported length",
+      });
+    }
 
     const out = new URLSearchParams();
     for (const [k, v] of inParams.entries()) {
@@ -286,17 +310,28 @@ export async function route(
         error_description: "state HMAC failed or token expired",
       });
     }
-    // Defense-in-depth: re-enforce loopback at the redirect step.
-    if (!isAllowedClientRedirect(decoded.r)) {
-      logEvent("oauth.callback.non_loopback_redirect", {});
+    // Defense-in-depth: re-enforce the current allowlist at the redirect step.
+    if (
+      !isAllowedClientRedirect(decoded.r, cfg.allowedClientRedirectUris)
+    ) {
+      logEvent("oauth.callback.disallowed_redirect", {});
       return json(400, {
         error: "invalid_state",
-        error_description: "decoded redirect_uri is not a loopback URL",
+        error_description: "decoded redirect_uri is not allowed",
       });
     }
 
     const out = new URLSearchParams();
-    if (code) out.set("code", code);
+    if (code) {
+      out.set(
+        "code",
+        signAuthorizationCode(
+          { code, redirectUri: decoded.r },
+          cfg.hmacKey,
+          Date.now(),
+        ),
+      );
+    }
     if (error) {
       out.set("error", error);
       const errDesc = params.get("error_description");
@@ -305,7 +340,12 @@ export async function route(
     out.set("state", decoded.cs);
 
     logEvent("oauth.callback", { ok: !error, error: error ?? null });
-    return redirect(`${decoded.r}?${out.toString()}`);
+    const clientRedirect = new URL(decoded.r);
+    for (const key of ["code", "error", "error_description", "state"]) {
+      clientRedirect.searchParams.delete(key);
+    }
+    for (const [key, value] of out) clientRedirect.searchParams.set(key, value);
+    return redirect(clientRedirect.toString());
   }
 
   // POST /oauth/token — replace the client redirect_uri with the façade's so
@@ -319,18 +359,64 @@ export async function route(
       : (event.body ?? "");
     const inForm = new URLSearchParams(rawBody);
 
+    const grantType = inForm.get("grant_type");
     const clientRedirect = inForm.get("redirect_uri");
-    if (clientRedirect && !isAllowedClientRedirect(clientRedirect)) {
+    if (grantType === "authorization_code") {
+      const misconfigured = ensureHmacConfigured(cfg);
+      if (misconfigured) return misconfigured;
+      if (!clientRedirect) {
+        return json(400, {
+          error: "invalid_request",
+          error_description:
+            "redirect_uri is required for authorization_code exchange",
+        });
+      }
+      if (
+        !isAllowedClientRedirect(
+          clientRedirect,
+          cfg.allowedClientRedirectUris,
+        )
+      ) {
+        return json(400, {
+          error: "invalid_request",
+          error_description: "redirect_uri must be an allowed callback URL",
+        });
+      }
+
+      const clientCode = inForm.get("code");
+      if (!clientCode) {
+        return json(400, {
+          error: "invalid_request",
+          error_description: "code is required for authorization_code exchange",
+        });
+      }
+      const codePayload = verifyAuthorizationCode(
+        clientCode,
+        cfg.hmacKey,
+        Date.now(),
+      );
+      if (!codePayload || codePayload.r !== clientRedirect) {
+        return json(400, {
+          error: "invalid_grant",
+          error_description:
+            "authorization code is invalid or redirect_uri does not match",
+        });
+      }
+      inForm.set("code", codePayload.c);
+    } else if (
+      clientRedirect &&
+      !isAllowedClientRedirect(
+        clientRedirect,
+        cfg.allowedClientRedirectUris,
+      )
+    ) {
       return json(400, {
         error: "invalid_request",
-        error_description: "redirect_uri must be a loopback URL",
+        error_description: "redirect_uri must be an allowed callback URL",
       });
     }
 
-    if (
-      inForm.has("redirect_uri") ||
-      inForm.get("grant_type") === "authorization_code"
-    ) {
+    if (inForm.has("redirect_uri") || grantType === "authorization_code") {
       inForm.set("redirect_uri", `${base}/oauth/callback`);
     }
 
@@ -439,10 +525,29 @@ export async function route(
           "Only token_endpoint_auth_method 'none' is supported (public client).",
       });
     }
+    const redirectUris = req.redirect_uris ?? [
+      "http://localhost:8080/callback",
+    ];
+    if (
+      !Array.isArray(redirectUris) ||
+      redirectUris.length === 0 ||
+      redirectUris.some(
+        (uri) =>
+          typeof uri !== "string" ||
+          !isAllowedClientRedirect(uri, cfg.allowedClientRedirectUris) ||
+          !canEncodeCognitoState({ cs: "", r: uri }),
+      )
+    ) {
+      return json(400, {
+        error: "invalid_redirect_uri",
+        error_description:
+          "redirect_uris must contain only allowed callback URLs",
+      });
+    }
     return json(201, {
       client_id: cfg.userClientId,
       client_id_issued_at: Math.floor(Date.now() / 1000),
-      redirect_uris: req.redirect_uris ?? ["http://localhost:8080/callback"],
+      redirect_uris: redirectUris,
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
       token_endpoint_auth_method: "none",

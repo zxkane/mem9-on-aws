@@ -5,7 +5,12 @@
 
 import { describe, expect, it } from "vitest";
 
-import { signState, verifyState } from "./state.js";
+import {
+  signAuthorizationCode,
+  signState,
+  verifyAuthorizationCode,
+  verifyState,
+} from "./state.js";
 
 const KEY = "test-hmac-key-do-not-use-in-prod";
 const REDIRECT = "http://127.0.0.1:54321/callback";
@@ -57,5 +62,19 @@ describe("façade state (TC-MCPGW-040..046)", () => {
   it("TC-MCPGW-046: token stays under Cognito's 1024-char state limit", () => {
     const token = signState({ cs: "x".repeat(64), r: REDIRECT }, KEY, Date.now());
     expect(token.length).toBeLessThan(1024);
+  });
+
+  it("round-trips an authorization code bound to its client redirect URI", () => {
+    const now = Date.now();
+    const token = signAuthorizationCode(
+      { code: "cognito-code", redirectUri: REDIRECT },
+      KEY,
+      now,
+    );
+    expect(verifyAuthorizationCode(token, KEY, now)).toMatchObject({
+      c: "cognito-code",
+      r: REDIRECT,
+    });
+    expect(verifyAuthorizationCode(`${token}x`, KEY, now)).toBeNull();
   });
 });

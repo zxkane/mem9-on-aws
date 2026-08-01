@@ -26,7 +26,7 @@ interface Rec {
   args: Record<string, unknown>;
 }
 let created: Rec[];
-let params: { name: string; type: string }[];
+let params: { name: string; type: string; value: unknown }[];
 let routeSpy: ReturnType<typeof vi.fn>;
 let addAuthorizerSpy: ReturnType<typeof vi.fn>;
 let authorizerId: ReturnType<typeof out>;
@@ -86,12 +86,17 @@ function installGlobals(stage: string) {
     },
     ssm: {
       Parameter: class {
-        constructor(_n: string, args: { name: unknown; type: string }) {
+        value: unknown;
+        constructor(
+          _n: string,
+          args: { name: unknown; type: string; value: unknown },
+        ) {
+          this.value = args.value;
           const name =
             typeof args.name === "object" && args.name && "value" in args.name
               ? (args.name as { value: string }).value
               : (args.name as string);
-          params.push({ name, type: args.type });
+          params.push({ name, type: args.type, value: unwrap(args.value) });
         }
       },
     },
@@ -123,11 +128,12 @@ function installGlobals(stage: string) {
         return dns;
       },
     },
-    // sst.Secret — the HMAC signing key (empty default → façade 503 until seeded).
+    // sst.Secret — stage-scoped values linked into the façade environment.
     Secret: class {
-      value = out("hmac-secret-value");
-      constructor(name: string, _default?: string) {
-        created.push({ kind: "Secret", args: { name } });
+      value: ReturnType<typeof out>;
+      constructor(name: string, fallback?: string) {
+        this.value = out(`${name}-value`);
+        created.push({ kind: "Secret", args: { name, fallback } });
       }
     },
   };
@@ -417,12 +423,32 @@ describe("oauthFacade factory", () => {
     ]);
   });
 
-  it("creates the HMAC state-signing Secret", async () => {
+  it("TC-OAUTH-CALLBACK-001: creates and wires the OAuth configuration Secrets", async () => {
     installGlobals("prod");
     const oauthFacade = await loadFacade();
     oauthFacade(fakeCognitoOut());
-    const secret = only("Secret");
-    expect(secret.name).toBe("OauthStateHmacKey");
+    const secrets = created
+      .filter(({ kind }) => kind === "Secret")
+      .map(({ args }) => args);
+    expect(secrets).toEqual([
+      { name: "OauthStateHmacKey", fallback: "" },
+      { name: "OauthAllowedCallbackUrls", fallback: "[]" },
+    ]);
+    const fn = only("SstFunction");
+    const environment = unwrap(fn.environment) as Record<string, string>;
+    expect(environment).toMatchObject({
+      OAUTH_STATE_HMAC_KEY: "OauthStateHmacKey-value",
+    });
+    expect(environment.OAUTH_ALLOWED_CALLBACK_URLS_VERSION).toMatch(
+      /^[0-9a-f]{64}$/u,
+    );
+    expect(environment).not.toHaveProperty("OAUTH_ALLOWED_CALLBACK_URLS");
+    expect(
+      params.find((p) => p.name.endsWith("/oauth/allowed-callback-urls")),
+    ).toMatchObject({
+      type: "String",
+      value: "OauthAllowedCallbackUrls-value",
+    });
   });
 
   it("returns the reader client id + facade url", async () => {
@@ -439,6 +465,7 @@ describe("oauthFacade factory", () => {
     const oauthFacade = await loadFacade();
     oauthFacade(fakeCognitoOut());
     const names = params.map((p) => p.name);
+    expect(names).toContain("/mem9-on-aws/prod/oauth/allowed-callback-urls");
     expect(names).toContain("/mem9-on-aws/prod/cognito/reader/client-id");
     expect(names).toContain("/mem9-on-aws/prod/cognito/reader/client-secret");
     expect(names).toContain("/mem9-on-aws/prod/facade/url");

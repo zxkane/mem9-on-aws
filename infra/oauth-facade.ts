@@ -23,6 +23,8 @@
  * public internet, so a VPC/NAT hop would only add cold-start ENI latency.
  */
 
+import { createHash } from "node:crypto";
+
 import type { CognitoOutputs } from "./cognito";
 
 // @ts-ignore - `aws`/`sst` injected globally by SST; cognito/ssm types loose.
@@ -151,6 +153,22 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
 
   // --- HMAC state-signing key (empty default → façade 503 until seeded) ---
   const hmacKey = new sst.Secret("OauthStateHmacKey", "");
+  // Stage-scoped JSON array of exact HTTPS callbacks for hosted MCP clients.
+  // Loopback callbacks remain built in; an empty array preserves that default.
+  const allowedCallbackUrls = new sst.Secret(
+    "OauthAllowedCallbackUrls",
+    "[]",
+  );
+  const allowedCallbackUrlsParameter = param(
+    "SsmAllowedCallbackUrls",
+    "oauth/allowed-callback-urls",
+    allowedCallbackUrls.value,
+  );
+  // Deriving the version from the Parameter output orders its update before
+  // Lambda replacement, so a new cold start cannot cache the previous value.
+  const allowedCallbackUrlsVersion = allowedCallbackUrlsParameter.value.apply(
+    (value: string) => createHash("sha256").update(value).digest("hex"),
+  );
 
   // --- Façade Function (public, NOT VPC-attached) ---
   // arm64 nodejs24.x. Env carries the SSM prefix (the handler reads the reader
@@ -173,6 +191,7 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
       COGNITO_JWKS_URI: cognitoOut.jwksUri,
       RESOURCE_SCOPES: "mem9-mcp/read",
       OAUTH_STATE_HMAC_KEY: hmacKey.value,
+      OAUTH_ALLOWED_CALLBACK_URLS_VERSION: allowedCallbackUrlsVersion,
     },
     permissions: [
       {
