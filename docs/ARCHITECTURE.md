@@ -96,11 +96,28 @@ points to `http://localhost:8082/v1`. The local `llm-proxy`:
 
 1. Resolves the ECS task-role credentials.
 2. Mints and refreshes a short-term Mantle bearer with
-   `@aws/bedrock-token-generator`.
-3. Re-mints once immediately after an upstream 401 or 403.
+   `@aws/bedrock-token-generator` (one per region in use — bearers are
+   region-scoped presigns).
+3. Re-mints once immediately after an upstream 401 or 403 (the route's region).
 4. Replaces the local dummy authorization value with the live bearer.
-5. Injects `OpenAI-Project` when `MEM9_BEDROCK_PROJECT` is configured.
+5. Injects `OpenAI-Project` with the route's own project id — the chat route
+   when `MEM9_BEDROCK_PROJECT` is configured, the Responses route when
+   `MEM9_BEDROCK_PROJECT_OPENAI` is (Mantle projects are regional, never
+   shared across routes).
 6. Forwards the request to Mantle and returns the OpenAI-shaped response.
+
+The proxy routes by the requested `model`. Ids matching
+`LLM_PROXY_RESPONSES_MODEL_PREFIXES` (default `openai.gpt-5.6-` — terra/luna)
+go to the **Responses API** at `openai/v1/responses` in
+`LLM_PROXY_RESPONSES_REGION` (default us-west-2; these models are not served
+in Tokyo and reject every chat-completions path). The proxy translates
+chat-completions ⇄ Responses both ways (system → `instructions`,
+`max_tokens` → `max_output_tokens` capped at
+`LLM_PROXY_RESPONSES_MAX_OUTPUT_TOKENS` = 16384, `reasoning.effort` from
+`LLM_PROXY_REASONING_EFFORT` = high), so mem9 sees a normal chat-completions
+reply either way. Every other model id (the `zai.glm-5` default) passes
+through to the regional chat-completions endpoint unchanged. Switching models
+is one env change: `MEM9_LLM_MODEL`.
 
 Each proxy chat-completions request has one 110-second wall-clock deadline.
 Each Mantle call receives `min(108s, remaining - 2s)`, and no request makes more

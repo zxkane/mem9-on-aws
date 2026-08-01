@@ -141,6 +141,10 @@ const NETWORK_INTERFACE_DENY_ACTIONS = [
 ];
 const MAX_IAM_PAGES = 100;
 const MAX_IAM_ITEMS = 10_000;
+// An AWS region, as a bare regex source (embeddable in a larger ARN pattern)
+// and as an anchored matcher for validating a region on its own.
+const ANY_REGION_SOURCE = "[a-z]{2}(?:-gov)?-[a-z]+-[0-9]";
+const REGION_PATTERN = new RegExp(`^${ANY_REGION_SOURCE}$`, "u");
 
 function list(value) {
   if (value === undefined) return [];
@@ -222,25 +226,50 @@ export function quarantinePolicyDocument() {
   };
 }
 
+// A same-account Mantle project ARN. `regionSource` is a regex fragment: the
+// exact application region for the primary project, ANY_REGION_SOURCE for the
+// optional Responses-route project, which is regional and by definition lives
+// outside the application region.
+function mantleProjectArnPattern({ partition, accountId, regionSource }) {
+  return new RegExp(
+    `^arn:${RegExp.escape(partition)}:bedrock-mantle:` +
+      `${regionSource}:${RegExp.escape(accountId)}:` +
+      "project/[A-Za-z0-9_-]+$",
+    "u",
+  );
+}
+
 function boundaryContract({
   partition,
   accountId,
   applicationRegion,
   bedrockProjectArn,
+  openAiBedrockProjectArn = "",
   policyRevision = "r1",
 }) {
   assertIdentity({ partition, accountId });
-  if (!/^[a-z]{2}(?:-gov)?-[a-z]+-[0-9]$/u.test(applicationRegion ?? "")) {
+  if (!REGION_PATTERN.test(applicationRegion ?? "")) {
     throw new Error("invalid application region");
   }
-  const projectArnPattern = new RegExp(
-    `^arn:${RegExp.escape(partition)}:bedrock-mantle:` +
-      `${RegExp.escape(applicationRegion)}:${RegExp.escape(accountId)}:` +
-      "project/[A-Za-z0-9_-]+$",
-    "u",
-  );
+  const projectArnPattern = mantleProjectArnPattern({
+    partition,
+    accountId,
+    regionSource: RegExp.escape(applicationRegion),
+  });
   if (!projectArnPattern.test(bedrockProjectArn ?? "")) {
     throw new Error("invalid Bedrock Mantle project ARN");
+  }
+  // Optional second project for the llm-proxy Responses route. Empty = feature
+  // not enabled; the boundary document then matches the historic shape.
+  if (
+    openAiBedrockProjectArn &&
+    !mantleProjectArnPattern({
+      partition,
+      accountId,
+      regionSource: ANY_REGION_SOURCE,
+    }).test(openAiBedrockProjectArn)
+  ) {
+    throw new Error("invalid OpenAI Bedrock Mantle project ARN");
   }
   if (!/^r[0-9]{1,20}$/u.test(policyRevision)) {
     throw new Error("invalid boundary policy revision");
@@ -282,6 +311,7 @@ function boundaryContract({
       "parameter/mem9-on-aws/*",
     projectResources: [
       bedrockProjectArn,
+      ...(openAiBedrockProjectArn ? [openAiBedrockProjectArn] : []),
       `arn:${partition}:ecr:${applicationRegion}:${accountId}:repository/mem9-on-aws/*`,
       `arn:${partition}:lambda:${applicationRegion}:${accountId}:function:mem9-on-aws-*`,
       `arn:${partition}:logs:${applicationRegion}:${accountId}:log-group:/sst/*`,
@@ -957,7 +987,7 @@ export function validateProductionTaskDefinitionSecrets({
   taskDefinitions,
 }) {
   assertIdentity({ partition, accountId });
-  if (!/^[a-z]{2}(?:-gov)?-[a-z]+-[0-9]$/u.test(applicationRegion ?? "")) {
+  if (!REGION_PATTERN.test(applicationRegion ?? "")) {
     throw new Error("production task definition region is invalid");
   }
   const taskArnPattern = taskDefinitionArnPattern({

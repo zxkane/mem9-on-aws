@@ -42,6 +42,16 @@ import { createServer } from "node:http";
 
 const DEFAULT_MAX_BODY_BYTES = 1_048_576;
 const DEFAULT_MAX_TOKENS = 4096;
+// Responses route (OpenAI reasoning models — terra/luna). Reasoning burns
+// output tokens before any visible text, so the cap must sit far above the
+// chat route's 4096 or long JSON replies truncate (the GLM failure mode this
+// route exists to fix). Probed live 2026-08-01: these models 400 on every
+// chat-completions path; only `openai/v1/responses` serves them.
+const DEFAULT_RESPONSES_MODEL_PREFIXES = ["openai.gpt-5.6-"];
+const DEFAULT_RESPONSES_REGION = "us-west-2";
+const DEFAULT_REASONING_EFFORT = "high";
+const DEFAULT_RESPONSES_MAX_OUTPUT_TOKENS = 16384;
+const REASONING_EFFORTS = Object.freeze(["low", "medium", "high"]);
 const REQUEST_POLICY_DEFAULTS = Object.freeze({
   overallDeadlineMs: 110_000,
   maxCallMs: 108_000,
@@ -137,7 +147,212 @@ export function readConfig(env = process.env) {
     retryMinCallBudgetMs: REQUEST_POLICY_DEFAULTS.retryMinCallBudgetMs,
     backoffBaseMs: REQUEST_POLICY_DEFAULTS.backoffBaseMs,
     backoffCapMs: REQUEST_POLICY_DEFAULTS.backoffCapMs,
+    ...readResponsesRouteConfig(env),
   };
+}
+
+function readResponsesRouteConfig(env) {
+  const responsesRegion = env.LLM_PROXY_RESPONSES_REGION || DEFAULT_RESPONSES_REGION;
+  const reasoningEffort = env.LLM_PROXY_REASONING_EFFORT || DEFAULT_REASONING_EFFORT;
+  if (!REASONING_EFFORTS.includes(reasoningEffort)) {
+    throw new Error(`LLM_PROXY_REASONING_EFFORT must be one of ${REASONING_EFFORTS.join("|")}`);
+  }
+  return {
+    responsesModelPrefixes: (
+      env.LLM_PROXY_RESPONSES_MODEL_PREFIXES ?? DEFAULT_RESPONSES_MODEL_PREFIXES.join(",")
+    )
+      .split(",")
+      .map((prefix) => prefix.trim())
+      .filter(Boolean),
+    responsesRegion,
+    // The reasoning models live at the `openai/v1` path, NOT `/v1` (probed).
+    responsesBase:
+      env.LLM_PROXY_RESPONSES_BASE ||
+      `https://bedrock-mantle.${responsesRegion}.api.aws/openai/v1`,
+    reasoningEffort,
+    responsesMaxOutputTokens: positiveInteger(
+      env.LLM_PROXY_RESPONSES_MAX_OUTPUT_TOKENS,
+      DEFAULT_RESPONSES_MAX_OUTPUT_TOKENS,
+      "LLM_PROXY_RESPONSES_MAX_OUTPUT_TOKENS",
+    ),
+    // Mantle projects are REGIONAL: the Tokyo project id means nothing in the
+    // responses region, so each route carries its own (never cross-applied).
+    responsesOpenaiProject: env.LLM_PROXY_RESPONSES_OPENAI_PROJECT || "",
+  };
+}
+
+// ── Model routing ─────────────────────────────────────────────────────────────
+function chatRoute(cfg) {
+  return {
+    kind: "chat",
+    url: `${cfg.upstreamBase}/chat/completions`,
+    region: cfg.region,
+    openaiProject: cfg.openaiProject,
+  };
+}
+
+/**
+ * Pick the upstream route for a model id. `responses` = OpenAI reasoning
+ * models (chat ⇄ Responses translation, cross-region); `chat` = passthrough
+ * to the regional chat-completions endpoint (the original behavior).
+ */
+export function resolveRoute(model, cfg) {
+  // readConfig always populates the prefixes; a cfg without them (a chat-only
+  // caller assembling one by hand) must still resolve to the chat route.
+  if (!(cfg.responsesModelPrefixes ?? []).some((prefix) => model.startsWith(prefix))) {
+    return chatRoute(cfg);
+  }
+  return {
+    kind: "responses",
+    url: `${cfg.responsesBase}/responses`,
+    region: cfg.responsesRegion,
+    openaiProject: cfg.responsesOpenaiProject,
+  };
+}
+
+// A requested max_tokens is validated against the route's cap, never clamped:
+// silently narrowing it would truncate replies the caller believed it had room
+// for. Absent → the cap itself.
+function resolveMaxTokens(payload, cap) {
+  if (!Object.hasOwn(payload, "max_tokens")) return cap;
+  const requested = payload.max_tokens;
+  if (!Number.isInteger(requested) || requested < 1 || requested > cap) {
+    throw new RequestValidationError(
+      400,
+      "invalid_max_tokens",
+      `max_tokens must be an integer from 1 through ${cap}`,
+    );
+  }
+  return requested;
+}
+
+/**
+ * chat-completions request → Responses request. System messages become
+ * `instructions`, the rest become `input`; only known-safe fields are
+ * forwarded (the Responses API 400s on unknown fields).
+ */
+export function translateChatToResponses(payload, cfg) {
+  const instructions = [];
+  const input = [];
+  for (const message of payload.messages) {
+    // Only string content translates: chat's array-of-parts form uses part
+    // types the Responses API names differently (`text` vs `input_text`), so
+    // passing it through would fail upstream with an opaque 400. mem9 only
+    // sends strings; reject the rest loudly at the boundary.
+    if (typeof message?.content !== "string") {
+      throw new RequestValidationError(
+        400,
+        "invalid_message_content",
+        "responses-route messages must have string content",
+      );
+    }
+    if (message.role === "system") instructions.push(message.content);
+    else input.push({ role: message.role, content: message.content });
+  }
+
+  const maxOutputTokens = resolveMaxTokens(payload, cfg.responsesMaxOutputTokens);
+  const effort = Object.hasOwn(payload, "reasoning_effort")
+    ? payload.reasoning_effort
+    : cfg.reasoningEffort;
+  if (!REASONING_EFFORTS.includes(effort)) {
+    throw new RequestValidationError(
+      400,
+      "invalid_reasoning_effort",
+      `reasoning_effort must be one of ${REASONING_EFFORTS.join("|")}`,
+    );
+  }
+
+  return {
+    model: payload.model,
+    ...(instructions.length > 0 ? { instructions: instructions.join("\n") } : {}),
+    input,
+    reasoning: { effort },
+    max_output_tokens: maxOutputTokens,
+  };
+}
+
+// Error messages below are FIXED STRINGS (never echo upstream body text — a
+// Responses body can contain memory content, which must not reach logs).
+class ResponsesContractError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ResponsesContractError";
+  }
+}
+
+/**
+ * Responses reply → chat-completions shape (mem9 reads
+ * `choices[0].message.content`). `incomplete` (output-token exhaustion) maps
+ * to finish_reason "length" with whatever text exists — mem9's JSON-parse
+ * retry treats truncation the same way it does on the chat route.
+ *
+ * Everything else fails LOUD: `failed`/`cancelled`/unknown statuses arrive as
+ * HTTP 200 with empty output, and translating them to a well-formed empty
+ * "stop" completion would be an authoritative "nothing to extract" — the
+ * silent-skip failure this route exists to eliminate. Same for a `completed`
+ * reply with no output_text (e.g. a refusal): a contract breach, not a valid
+ * empty completion.
+ */
+export function translateResponsesToChat(body, model) {
+  if (!body || typeof body !== "object" || !Array.isArray(body.output)) {
+    throw new ResponsesContractError("responses body has no output array");
+  }
+  if (body.status !== "completed" && body.status !== "incomplete") {
+    // body.error.message is Mantle's own diagnostic (not memory content) but
+    // is bounded anyway to keep log records small.
+    const detail = typeof body.error?.message === "string" ? body.error.message.slice(0, 200) : "";
+    throw new ResponsesContractError(
+      `responses status ${JSON.stringify(body.status ?? null)}${detail ? `: ${detail}` : ""}`,
+    );
+  }
+  const content = body.output
+    .flatMap((item) => item.content ?? [])
+    .filter((part) => part.type === "output_text")
+    .map((part) => part.text)
+    .join("");
+  if (body.status === "completed" && content === "") {
+    throw new ResponsesContractError("responses reply completed with no output_text");
+  }
+  const { input_tokens: promptTokens = 0, output_tokens: completionTokens = 0 } =
+    body.usage ?? {};
+  return {
+    id: body.id,
+    object: "chat.completion",
+    model,
+    choices: [
+      {
+        index: 0,
+        message: { role: "assistant", content },
+        finish_reason: body.status === "incomplete" ? "length" : "stop",
+      },
+    ],
+    usage: {
+      prompt_tokens: promptTokens,
+      completion_tokens: completionTokens,
+      total_tokens: promptTokens + completionTokens,
+    },
+  };
+}
+
+// Translate a 2xx Responses body text → chat-completions body text. An
+// untranslatable 2xx is a broken upstream contract that will fail identically
+// on every retry (the upstream call already succeeded and billed), so it is
+// classified PERMANENT — labeling it transient would point on-call at Mantle
+// and invite indefinite retries of a proxy-side translation bug.
+function translateResponsesBody(text, model) {
+  try {
+    return JSON.stringify(translateResponsesToChat(JSON.parse(text), model));
+  } catch (err) {
+    const detail =
+      err instanceof ResponsesContractError ? `: ${err.message}` : ` (${err.name || "Error"})`;
+    throw new ProxyRequestError(
+      502,
+      "upstream_error",
+      `llm-proxy could not translate the Responses reply${detail}`,
+      "translation_error",
+      "proxy_translation_permanent",
+    );
+  }
 }
 
 // ── HTTP helpers ──────────────────────────────────────────────────────────────
@@ -229,6 +444,9 @@ function requestLog(request, now, log, attempt, startedAt, fields) {
   const record = {
     request_id: request.id,
     attempt,
+    // Two upstreams in two regions: failures must be route-attributable or a
+    // us-west-2 outage reads like Tokyo chat traffic in the logs.
+    ...(request.route ? { route: request.route.kind, region: request.route.region } : {}),
     ...fields,
     duration_ms: Math.max(0, Math.round(now() - startedAt)),
     remaining_budget_ms: remainingBudget(request, now),
@@ -397,19 +615,13 @@ function rewriteChatCompletion(bodyBuf, cfg) {
     );
   }
 
-  let maxTokens = cfg.maxTokens;
-  if (Object.hasOwn(payload, "max_tokens")) {
-    maxTokens = payload.max_tokens;
-    if (!Number.isInteger(maxTokens) || maxTokens < 1 || maxTokens > cfg.maxTokens) {
-      throw new RequestValidationError(
-        400,
-        "invalid_max_tokens",
-        `max_tokens must be an integer from 1 through ${cfg.maxTokens}`,
-      );
-    }
-  }
+  const route = resolveRoute(payload.model, cfg);
+  const upstreamPayload =
+    route.kind === "responses"
+      ? translateChatToResponses(payload, cfg)
+      : { ...payload, max_tokens: resolveMaxTokens(payload, cfg.maxTokens) };
 
-  const rewritten = Buffer.from(JSON.stringify({ ...payload, max_tokens: maxTokens }));
+  const rewritten = Buffer.from(JSON.stringify(upstreamPayload));
   if (rewritten.length > cfg.maxBodyBytes) {
     throw new RequestValidationError(
       413,
@@ -417,7 +629,7 @@ function rewriteChatCompletion(bodyBuf, cfg) {
       `rewritten request body exceeds ${cfg.maxBodyBytes} bytes`,
     );
   }
-  return rewritten;
+  return { body: rewritten, route, model: payload.model };
 }
 
 /**
@@ -426,13 +638,16 @@ function rewriteChatCompletion(bodyBuf, cfg) {
  * This function owns retry/auth-remint decisions and is exported so unit tests
  * can inject clock, fetch, credential refresh, jitter, sleep, and log behavior.
  */
-export async function forwardWithPolicy({ body, token, cfg, request, deps = {} }) {
+export async function forwardWithPolicy({ body, token, cfg, request, route, deps = {} }) {
   const fetchImpl = deps.fetchImpl || globalThis.fetch;
   const refreshToken = deps.refreshToken;
   const now = deps.now || Date.now;
   const random = deps.random || Math.random;
   const sleep = deps.sleep || abortableSleep;
   const log = deps.log || defaultRequestLog;
+  // One policy, parameterized by route. Omitted route → the chat target, so
+  // pre-routing callers keep working unchanged.
+  const target = route ?? chatRoute(cfg);
 
   function terminalError(attempt, startedAt, error, status) {
     requestLog(request, now, log, attempt, startedAt, {
@@ -464,7 +679,7 @@ export async function forwardWithPolicy({ body, token, cfg, request, deps = {} }
       "Content-Type": "application/json",
       "Content-Length": String(body.length),
     };
-    if (cfg.openaiProject) headers["OpenAI-Project"] = cfg.openaiProject;
+    if (target.openaiProject) headers["OpenAI-Project"] = target.openaiProject;
 
     const callController = new AbortController();
     const timeoutReason = { reason: "attempt_timeout" };
@@ -472,7 +687,7 @@ export async function forwardWithPolicy({ body, token, cfg, request, deps = {} }
     request.signal.addEventListener("abort", abortFromRequest, { once: true });
     const timer = setTimeout(() => callController.abort(timeoutReason), budgetMs);
     try {
-      const upstream = await fetchImpl(`${cfg.upstreamBase}/chat/completions`, {
+      const upstream = await fetchImpl(target.url, {
         method: "POST",
         headers,
         body,
@@ -668,29 +883,42 @@ export function createProxyServer(cfg, deps = {}) {
     throw new Error("createProxyServer requires deps.mintToken");
   }
 
-  const state = { token: null, firstMint: null, lastMintAt: 0, refreshTimer: null };
+  // Bearers are region-scoped presigns, so each region in use gets its own
+  // entry: the default region at start(), a route region on first use.
+  const state = { regions: new Map(), refreshTimer: null };
 
-  async function refresh() {
-    const token = await mintToken();
-    state.token = token;
-    state.lastMintAt = now();
-    return token;
+  function regionEntry(region) {
+    let entry = state.regions.get(region);
+    if (!entry) {
+      entry = { token: null, firstMint: null, lastMintAt: 0 };
+      state.regions.set(region, entry);
+    }
+    return entry;
   }
 
-  // Ensure a token exists (blocking on the first mint); return the current one.
-  // If the first mint REJECTS, clear the cached promise so a later request can
-  // retry — otherwise `state.firstMint` would pin the rejected promise forever
-  // and the proxy could never self-heal a transient cold-start credential hiccup
-  // (belt-and-suspenders: the entrypoint also exits non-zero so ECS restarts).
-  async function ensureToken() {
-    if (state.token) return state.token;
-    if (!state.firstMint) {
-      state.firstMint = refresh().catch((err) => {
-        state.firstMint = null;
+  async function refresh(region = cfg.region) {
+    const entry = regionEntry(region);
+    entry.token = await mintToken(region);
+    entry.lastMintAt = now();
+    return entry.token;
+  }
+
+  // Ensure a token exists for a region (blocking on the first mint); return the
+  // current one. If the first mint REJECTS, clear the cached promise so a later
+  // request can retry — otherwise `firstMint` would pin the rejected promise
+  // forever and the proxy could never self-heal a transient cold-start
+  // credential hiccup (belt-and-suspenders: the entrypoint also exits non-zero
+  // so ECS restarts).
+  async function ensureToken(region = cfg.region) {
+    const entry = regionEntry(region);
+    if (entry.token) return entry.token;
+    if (!entry.firstMint) {
+      entry.firstMint = refresh(region).catch((err) => {
+        entry.firstMint = null;
         throw err;
       });
     }
-    return state.firstMint;
+    return entry.firstMint;
   }
 
   const server = createServer(async (req, res) => {
@@ -704,13 +932,13 @@ export function createProxyServer(cfg, deps = {}) {
       // the task on this so mnemo-server isn't marked healthy before the proxy can
       // auth. NON-BLOCKING: report the CURRENT token state — never await the
       // in-flight mint (that would hang the health probe until Mantle auth is up).
+      // Keyed on the DEFAULT region only: a route region mints lazily on first
+      // use, so waiting for it would keep the task unhealthy forever.
       if (req.method === "GET" && (url.pathname === "/health" || url.pathname === "/healthz")) {
-        const ready = !!state.token;
-        return sendJson(res, ready ? 200 : 503, {
-          status: ready ? "ok" : "starting",
-          lastMintAgeSeconds: state.lastMintAt
-            ? Math.round((now() - state.lastMintAt) / 1000)
-            : null,
+        const { token, lastMintAt } = regionEntry(cfg.region);
+        return sendJson(res, token ? 200 : 503, {
+          status: token ? "ok" : "starting",
+          lastMintAgeSeconds: lastMintAt ? Math.round((now() - lastMintAt) / 1000) : null,
         });
       }
 
@@ -745,11 +973,12 @@ export function createProxyServer(cfg, deps = {}) {
         };
 
         const inboundBody = await readBody(req, cfg.maxBodyBytes, request.signal);
-        const bodyBuf = rewriteChatCompletion(inboundBody, cfg);
+        const { body: bodyBuf, route, model } = rewriteChatCompletion(inboundBody, cfg);
+        request.route = route; // requestLog attributes records to route+region
         let token;
         try {
-          token = await waitForPromise(ensureToken(), request.signal);
-        } catch {
+          token = await waitForPromise(ensureToken(route.region), request.signal);
+        } catch (mintErr) {
           const aborted = request.signal.aborted;
           const error = new ProxyRequestError(
             aborted ? 504 : 502,
@@ -761,6 +990,10 @@ export function createProxyServer(cfg, deps = {}) {
           requestLog(request, now, log, 0, startedAt, {
             reason: error.reason,
             outcome_class: error.outcomeClass,
+            // The lazy route-region mint has no other logging path (unlike the
+            // default region's cold-start mint) — without this an IAM deny on
+            // the responses region is indistinguishable from a network blip.
+            ...(aborted ? {} : { mint_error: String(mintErr?.message ?? mintErr).slice(0, 200) }),
           });
           error.logged = true;
           throw error;
@@ -770,9 +1003,11 @@ export function createProxyServer(cfg, deps = {}) {
           token,
           cfg: requestCfg,
           request,
+          route,
           deps: {
             fetchImpl,
-            refreshToken: refresh,
+            // 401 re-mint must target the ROUTE's region, not the default.
+            refreshToken: () => refresh(route.region),
             now,
             random: deps.random,
             sleep: deps.sleep,
@@ -781,7 +1016,12 @@ export function createProxyServer(cfg, deps = {}) {
         });
         // Pass the upstream status + JSON body straight through. mem9 handles
         // non-2xx itself (it strips provider-specific flags on 400 and retries).
-        const text = await upstream.text();
+        // The one exception: a 2xx Responses-API body is translated back to the
+        // chat-completions shape mem9 can read.
+        let text = await upstream.text();
+        if (route.kind === "responses" && upstream.ok) {
+          text = translateResponsesBody(text, model);
+        }
         return await waitForPromise(
           writeResponse(
             res,
@@ -851,16 +1091,23 @@ export function createProxyServer(cfg, deps = {}) {
     const p = ensureToken();
     p.then(() => {
       state.refreshTimer = setInterval(() => {
-        refresh()
-          .then(() => console.log("llm-proxy refreshed Bedrock bearer"))
-          .catch((err) =>
-            // A refresh failure keeps the previous (still-valid, 12h) token; log
-            // and let the next tick retry. Do NOT crash — the current token works.
-            console.error(
-              "llm-proxy bearer refresh failed (keeping current):",
-              err?.message || err,
-            ),
-          );
+        // Every region minted so far, so a lazily-added route region keeps its
+        // bearer fresh too. A region never used is never minted.
+        for (const [region, entry] of state.regions) {
+          refresh(region)
+            .then(() => console.log(`llm-proxy refreshed Bedrock bearer (${region})`))
+            .catch((err) =>
+              // A refresh failure keeps the previous (still-valid, 12h) token
+              // when one exists; a region whose first mint failed has NO token
+              // and is hard down between ticks — say so instead of reassuring.
+              console.error(
+                entry.token
+                  ? `llm-proxy bearer refresh failed for ${region} (keeping current):`
+                  : `llm-proxy bearer refresh failed for ${region} (region has NO token):`,
+                err?.message || err,
+              ),
+            );
+        }
       }, cfg.refreshIntervalMs);
       state.refreshTimer.unref?.(); // don't keep the process alive on the timer alone
     }).catch(() => {
@@ -881,9 +1128,9 @@ export function createProxyServer(cfg, deps = {}) {
 // cheap. Deps are injectable for tests (TC-PROXY401-007).
 export function makeDefaultMintToken(cfg, deps) {
   const { createProvider, getToken } = deps;
-  return async () => {
+  return async (region = cfg.region) => {
     const credentials = await createProvider()();
-    return getToken({ credentials, region: cfg.region, expiresInSeconds: cfg.tokenTtlSeconds });
+    return getToken({ credentials, region, expiresInSeconds: cfg.tokenTtlSeconds });
   };
 }
 

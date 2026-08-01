@@ -306,6 +306,7 @@ afterEach(() => {
     delete (globalThis as Record<string, unknown>)[g];
   delete process.env.MEM9_IMAGE_TAG;
   delete process.env.MEM9_BEDROCK_PROJECT;
+  delete process.env.MEM9_BEDROCK_PROJECT_OPENAI;
   delete process.env.MEM9_DURABLE_INGEST_ENABLED;
   delete process.env.SST_SECRET_SlackWebhookUrl;
   vi.resetModules();
@@ -481,6 +482,47 @@ describe("ecs stack", () => {
         (r) => String(materialize(r)).includes("bedrock-mantle") || r === "*",
       ),
     ).toBe(true);
+  });
+
+  it("TC-MMROUTE-060: MEM9_BEDROCK_PROJECT_OPENAI adds the responses-region grant + env", async () => {
+    installGlobals("prod");
+    process.env.MEM9_BEDROCK_PROJECT_OPENAI = "proj_openai_west";
+    const ecs = await loadEcs();
+    ecs(fakeDbOut());
+
+    const perms = services[0].args.permissions as { actions: string[]; resources: unknown[] }[];
+    const createInf = perms.find((p) => p.actions.includes("bedrock-mantle:CreateInference"));
+    const resources = (createInf?.resources ?? []).map((r) => String(materialize(r)));
+    // Cross-region: the Responses route authorizes against the requesting
+    // region's project resource, so a second ARN in us-west-2 must exist.
+    expect(resources.some((r) => r.includes("us-west-2") && r.includes("proj_openai_west"))).toBe(
+      true,
+    );
+    // The Tokyo grant is untouched.
+    expect(resources.some((r) => r.includes("ap-northeast-1"))).toBe(true);
+
+    const containers = materialize(services[0].args.containers) as {
+      name: string;
+      environment: Record<string, string>;
+    }[];
+    const proxy = containers.find((c) => c.name === "llm-proxy");
+    expect(proxy?.environment.LLM_PROXY_RESPONSES_OPENAI_PROJECT).toBe("proj_openai_west");
+    expect(proxy?.environment.LLM_PROXY_RESPONSES_REGION).toBe("us-west-2");
+  });
+
+  it("TC-MMROUTE-060: without the OpenAI project no extra grant or project env appears", async () => {
+    installGlobals("prod");
+    const ecs = await loadEcs();
+    ecs(fakeDbOut());
+    const perms = services[0].args.permissions as { actions: string[]; resources: unknown[] }[];
+    const createInf = perms.find((p) => p.actions.includes("bedrock-mantle:CreateInference"));
+    expect(createInf?.resources).toHaveLength(1);
+    const containers = materialize(services[0].args.containers) as {
+      name: string;
+      environment: Record<string, string>;
+    }[];
+    const proxy = containers.find((c) => c.name === "llm-proxy");
+    expect(proxy?.environment.LLM_PROXY_RESPONSES_OPENAI_PROJECT).toBe("");
   });
 
   it("scopes CreateInference to the Bedrock Project ARN when MEM9_BEDROCK_PROJECT is set (no literal account id)", async () => {
