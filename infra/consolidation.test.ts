@@ -163,6 +163,18 @@ function installGlobals(stage: string) {
       },
     },
     scheduler: {
+      ScheduleGroup: class {
+        arn: Output<string>;
+        name: Output<string>;
+        constructor(logicalName: string, args: Record<string, unknown>) {
+          const name = `${String(materialize(args.namePrefix))}fixture`;
+          this.arn = out(
+            `arn:aws:scheduler:ap-northeast-1:123456789012:schedule-group/${name}`,
+          );
+          this.name = out(name);
+          record("ScheduleGroup", logicalName, args);
+        }
+      },
       Schedule: class {
         constructor(logicalName: string, args: Record<string, unknown>) {
           record("Schedule", logicalName, args);
@@ -310,6 +322,9 @@ describe("consolidation task and schedule", () => {
         "arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:mem9-on-aws-prod-tenant-api-key-x",
     });
     expect(resources.filter((resource) => resource.kind === "Schedule")).toEqual([]);
+    expect(
+      resources.filter((resource) => resource.kind === "ScheduleGroup"),
+    ).toEqual([]);
     expect(resources.filter((resource) => resource.kind === "Role")).toEqual([]);
     const transformed = { tags: { Existing: "tag" } };
     args.transform.taskDefinition(transformed);
@@ -332,12 +347,29 @@ describe("consolidation task and schedule", () => {
     ]);
   });
 
-  it("TC-CONSOL-021/022/027: creates a disabled preview and enabled weekly prod schedule", async () => {
+  it("TC-CONSOL-021/022/027/037: creates a disabled preview and enabled weekly prod schedule", async () => {
     process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED = "1";
     installGlobals("pr-103");
     const consolidationModule = await loadAndRun("pr-103");
+    const scheduleGroup = materialize(one("ScheduleGroup").args) as Record<
+      string,
+      any
+    >;
+    expect(scheduleGroup).toMatchObject({
+      namePrefix:
+        "mem9-on-aws-pr-103-weekly-consolidation-group-",
+      tags: {
+        ManagedBy: "sst",
+        Project: "mem9-on-aws",
+        Stage: "pr-103",
+      },
+    });
     let schedule = materialize(one("Schedule").args) as Record<string, any>;
     expect(schedule.state).toBe("DISABLED");
+    expect(schedule.groupName).toBe(
+      "mem9-on-aws-pr-103-weekly-consolidation-group-fixture",
+    );
+    expect(schedule.tags).toBeUndefined();
     expect(schedule.scheduleExpression).toBe("cron(0 3 ? * SUN *)");
     expect(schedule.flexibleTimeWindow).toEqual({ mode: "OFF" });
     expect(JSON.parse(schedule.target.input)).toEqual({
@@ -413,7 +445,7 @@ describe("consolidation task and schedule", () => {
         StringEquals: {
           "aws:SourceAccount": "123456789012",
           "aws:SourceArn":
-            "arn:aws:scheduler:ap-northeast-1:123456789012:schedule-group/default",
+            "arn:aws:scheduler:ap-northeast-1:123456789012:schedule-group/mem9-on-aws-prod-weekly-consolidation-group-fixture",
         },
       },
     });
@@ -443,7 +475,7 @@ describe("consolidation task and schedule", () => {
     ]);
   });
 
-  it("TC-CONSOL-029/030: alarms on exact-task non-zero STOPPED events through SNS", async () => {
+  it("TC-CONSOL-029/030/036: alarms on exact-task non-zero STOPPED events through SNS", async () => {
     installGlobals("prod");
     await loadAndRun();
 
@@ -473,11 +505,29 @@ describe("consolidation task and schedule", () => {
           "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
         ],
       });
+
+    const logPolicy = JSON.parse(
+      String(materialize(one("LogResourcePolicy").args.policyDocument)),
+    );
+    expect(logPolicy.Statement).toEqual([
+      {
+        Effect: "Allow",
+        Principal: {
+          Service: [
+            "events.amazonaws.com",
+            "delivery.logs.amazonaws.com",
+          ],
+        },
+        Action: ["logs:CreateLogStream", "logs:PutLogEvents"],
+        Resource:
+          "arn:aws:logs:ap-northeast-1:123456789012:log-group:/aws/events/consolidation:*",
+      },
+    ]);
   });
 });
 
 describe("consolidation IAM templates", () => {
-  it("TC-CONSOL-031: scopes deploy Scheduler and PassRole grants", () => {
+  it("TC-CONSOL-031/037: scopes deploy Scheduler and PassRole grants", () => {
     const template = cloudFormationTemplate(
       "./cloudformation/github-actions-role.yaml",
     );
@@ -492,15 +542,32 @@ describe("consolidation IAM templates", () => {
         "scheduler:CreateSchedule",
         "scheduler:DeleteSchedule",
         "scheduler:GetSchedule",
-        "scheduler:ListTagsForResource",
-        "scheduler:TagResource",
-        "scheduler:UntagResource",
         "scheduler:UpdateSchedule",
       ],
       Resource: [
         {
           "Fn::Sub":
-            "arn:${AWS::Partition}:scheduler:${ApplicationRegion}:${AWS::AccountId}:schedule/*/mem9-on-aws-*",
+            "arn:${AWS::Partition}:scheduler:${ApplicationRegion}:${AWS::AccountId}:schedule/mem9-on-aws-*/mem9-on-aws-*",
+        },
+      ],
+    });
+    expect(
+      compute.find(({ Sid }) => Sid === "SchedulerConsolidationGroup"),
+    ).toEqual({
+      Sid: "SchedulerConsolidationGroup",
+      Effect: "Allow",
+      Action: [
+        "scheduler:CreateScheduleGroup",
+        "scheduler:DeleteScheduleGroup",
+        "scheduler:GetScheduleGroup",
+        "scheduler:ListTagsForResource",
+        "scheduler:TagResource",
+        "scheduler:UntagResource",
+      ],
+      Resource: [
+        {
+          "Fn::Sub":
+            "arn:${AWS::Partition}:scheduler:${ApplicationRegion}:${AWS::AccountId}:schedule-group/mem9-on-aws-*",
         },
       ],
     });

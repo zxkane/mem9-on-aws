@@ -17,7 +17,7 @@ active memories while preserving a review boundary for low-confidence actions.
 ## Runtime Architecture
 
 ```text
-EventBridge Scheduler (weekly, explicit enablement only)
+EventBridge Scheduler group + schedule (weekly, explicit enablement only)
   -> scheduler execution role
   -> ECS RunTask in the existing private cluster
   -> consolidation container (llm-proxy image, dedicated entrypoint)
@@ -40,7 +40,8 @@ existing `server.mjs` entrypoint.
 ## Enablement
 
 - `MEM9_CONSOLIDATION_SCHEDULE_ENABLED=1` is the only synthesis gate.
-- Without the flag, the schedule and scheduler execution role do not exist.
+- Without the flag, the schedule group, schedule, and scheduler execution role
+  do not exist.
   The task definition still exists so an operator and preview CI can run a
   report-only pass.
 - With the flag in a preview, the schedule resource exists but its state is
@@ -155,9 +156,12 @@ In production, an ECS task-state EventBridge rule captures STOPPED events for th
 consolidation task definition when any container exit code is non-zero. It
 writes a redacted event projection to a dedicated CloudWatch log group. A metric
 filter emits a stage-scoped failure metric, and a CloudWatch alarm targets the
-existing SNS/Slack topic. Preview CI checks the task exit directly and does not
-consume an account-level Logs resource policy. AWS documents the ECS task
-state-change event and its container exit-code fields:
+existing SNS/Slack topic. The log resource policy follows AWS's documented
+EventBridge target contract by granting `logs:CreateLogStream` and
+`logs:PutLogEvents` to both `events.amazonaws.com` and
+`delivery.logs.amazonaws.com` on only that log group. Preview CI checks the task
+exit directly and does not consume an account-level Logs resource policy. AWS
+documents the ECS task state-change event and its container exit-code fields:
 
 https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs_task_events.html
 
@@ -170,9 +174,10 @@ https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs_task_events.html
 - Scheduler role: `ecs:RunTask` on the exact task definition and `iam:PassRole`
   on only the consolidation task/execution roles, conditioned on
   `iam:PassedToService=ecs-tasks.amazonaws.com`. Its trust policy accepts only
-  the deploying account's default Scheduler group.
-- Deploy role: scoped Scheduler lifecycle/read actions and `iam:PassRole` for
-  the scheduler role conditioned on `scheduler.amazonaws.com`.
+  the deploying account's dedicated consolidation schedule group.
+- Deploy role: separately scoped schedule and tagged schedule-group lifecycle
+  actions, plus `iam:PassRole` for the scheduler role conditioned on
+  `scheduler.amazonaws.com`.
 - Every new role receives the retained workload permissions boundary. The
   boundary adds only the actions/resources needed by these exact paths.
 

@@ -407,6 +407,11 @@ declare namespace aws {
   }
 
   namespace scheduler {
+    class ScheduleGroup {
+      constructor(name: string, args: Record<string, unknown>, opts?: unknown);
+      readonly arn: Output<string>;
+      readonly name: Output<string>;
+    }
     class Schedule {
       constructor(name: string, args: Record<string, unknown>, opts?: unknown);
       readonly arn: Output<string>;

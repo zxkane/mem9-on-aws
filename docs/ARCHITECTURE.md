@@ -370,8 +370,8 @@ facts within each component. Memory content and embeddings remain in the
 operator's AWS account. Components above 50 memories or 200,000 content
 characters are review-deferred before inference.
 
-The task definition always defaults to report-only. The EventBridge Scheduler
-schedule and its execution role exist only when
+The task definition always defaults to report-only. The tagged EventBridge
+Scheduler group, schedule, and execution role exist only when
 `MEM9_CONSOLIDATION_SCHEDULE_ENABLED=1`; previews remain `DISABLED`, while
 production runs Sunday at 03:00 UTC. Production enablement is an operator
 decision after the one-shot cleanup and a report-only pass show actionable
@@ -406,10 +406,12 @@ Each run emits content-free EMF in namespace `mem9-on-aws` with only the
 
 In production, an exact-task ECS STOPPED event with a non-zero container exit code produces
 `ConsolidationTaskFailures` in the same namespace and stage dimension. Its
-alarm targets the existing SNS-to-Slack delivery path. The Scheduler role can
-run only the exact task definition and pass only its task/execution roles to
+alarm targets the existing SNS-to-Slack delivery path. Its log resource policy
+grants only the documented EventBridge delivery principals access to the
+dedicated failure log group. The Scheduler role can run only the exact task
+definition and pass only its task/execution roles to
 `ecs-tasks.amazonaws.com`; its trust policy is bound to the deploying account's
-default Scheduler group.
+dedicated consolidation schedule group.
 
 ### ECR registry scanning
 

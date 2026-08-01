@@ -967,8 +967,8 @@ DELETE. It may automatically merge fragments, archive a strictly older
 contradiction loser, or mark an eligible fact stale, with a hard cap of 20
 mutations per run.
 
-The weekly schedule and Scheduler execution role are absent by default. Before
-the first deployment that introduces Scheduler resources, re-run
+The weekly schedule group, schedule, and Scheduler execution role are absent by
+default. Before the first deployment that introduces Scheduler resources, re-run
 `scripts/deploy-github-role.sh` with IAM-admin credentials. Enable production by
 setting the repository variable `MEM9_CONSOLIDATION_SCHEDULE_ENABLED` to `1`
 only after the initial cleanup and a report-only run show actionable drift.

@@ -150,12 +150,14 @@ export function consolidation(
           Statement: [
             {
               Effect: "Allow",
-              Principal: { Service: "events.amazonaws.com" },
+              Principal: {
+                Service: [
+                  "events.amazonaws.com",
+                  "delivery.logs.amazonaws.com",
+                ],
+              },
               Action: ["logs:CreateLogStream", "logs:PutLogEvents"],
               Resource: $interpolate`${failureLogGroup.arn}:*`,
-              Condition: {
-                ArnEquals: { "aws:SourceArn": failureRule.arn },
-              },
             },
           ],
         }),
@@ -241,7 +243,14 @@ export function consolidation(
 
   if (SCHEDULE_ENABLED) {
     const accountId = aws.getCallerIdentityOutput().accountId;
-    const region = aws.getRegionOutput().name;
+    const scheduleGroup = new aws.scheduler.ScheduleGroup(
+      "WeeklyMemoryConsolidationGroup",
+      {
+        namePrefix:
+          `mem9-on-aws-${$app.stage}-weekly-consolidation-group-`,
+        tags,
+      },
+    );
     const schedulerRole = new aws.iam.Role(
       "Mem9ConsolidationSchedulerRole",
       {
@@ -257,8 +266,7 @@ export function consolidation(
               Condition: {
                 StringEquals: {
                   "aws:SourceAccount": accountId,
-                  "aws:SourceArn":
-                    $interpolate`arn:aws:scheduler:${region}:${accountId}:schedule-group/default`,
+                  "aws:SourceArn": scheduleGroup.arn,
                 },
               },
             },
@@ -298,6 +306,7 @@ export function consolidation(
       namePrefix: `mem9-on-aws-${$app.stage}-weekly-consolidation-`,
       description:
         "Weekly cross-memory contradiction, merge, and staleness pass.",
+      groupName: scheduleGroup.name,
       scheduleExpression: "cron(0 3 ? * SUN *)",
       scheduleExpressionTimezone: "UTC",
       state: $app.stage === "prod" ? "ENABLED" : "DISABLED",
@@ -333,7 +342,6 @@ export function consolidation(
           },
         },
       },
-      tags,
     });
   }
 
