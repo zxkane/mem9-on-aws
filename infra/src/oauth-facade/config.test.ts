@@ -6,7 +6,12 @@
 
 import { describe, expect, it, vi } from "vitest";
 
-import { loadConfig, resolveSsm, type SsmLike } from "./config.js";
+import {
+  loadConfig,
+  parseAllowedCallbackUrls,
+  resolveSsm,
+  type SsmLike,
+} from "./config.js";
 
 const PREFIX = "/example-app/pr-7/mcp";
 
@@ -22,6 +27,8 @@ const fullSsm = {
   [`${PREFIX}/gateway/url`]: "https://gw",
   [`${PREFIX}/cognito/reader/client-id`]: "cid",
   [`${PREFIX}/cognito/reader/client-secret`]: "csecret",
+  [`${PREFIX}/oauth/allowed-callback-urls`]:
+    '["https://oauth.example.com/callback/app"]',
 };
 
 const baseEnv = {
@@ -44,6 +51,8 @@ describe("façade config loader (cycle-break SSM reads)", () => {
       upstream: "https://gw",
       userClientId: "cid",
       userClientSecret: "csecret",
+      allowedCallbackUrls:
+        '["https://oauth.example.com/callback/app"]',
     });
     const cmd = (ssm.send as ReturnType<typeof vi.fn>).mock.calls[0][0];
     expect(cmd.input.WithDecryption).toBe(true);
@@ -51,6 +60,7 @@ describe("façade config loader (cycle-break SSM reads)", () => {
       `${PREFIX}/gateway/url`,
       `${PREFIX}/cognito/reader/client-id`,
       `${PREFIX}/cognito/reader/client-secret`,
+      `${PREFIX}/oauth/allowed-callback-urls`,
     ]);
   });
 
@@ -72,6 +82,9 @@ describe("façade config loader (cycle-break SSM reads)", () => {
       "example-mcp/query/read",
       "example-mcp/query/write",
     ]);
+    expect(cfg.allowedClientRedirectUris).toEqual([
+      "https://oauth.example.com/callback/app",
+    ]);
   });
 
   it("loadConfig throws when a required env var is missing", async () => {
@@ -91,5 +104,55 @@ describe("façade config loader (cycle-break SSM reads)", () => {
     const env = { ...baseEnv, RESOURCE_SCOPES: "" };
     const cfg = await loadConfig({ ssm: ssmReturning(fullSsm), env });
     expect(cfg.resourceScopes).toEqual([]);
+  });
+
+  it("TC-OAUTH-CALLBACK-002: parses and de-duplicates valid HTTPS callback URLs", () => {
+    expect(
+      parseAllowedCallbackUrls(
+        '["https://oauth.example.com/callback/app","https://oauth.example.com/callback/app"]',
+      ),
+    ).toEqual(["https://oauth.example.com/callback/app"]);
+    expect(
+      parseAllowedCallbackUrls(
+        JSON.stringify(
+          Array.from(
+            { length: 21 },
+            () => "https://x.co/c",
+          ),
+        ),
+      ),
+    ).toEqual(["https://x.co/c"]);
+    expect(parseAllowedCallbackUrls("")).toEqual([]);
+  });
+
+  it.each([
+    ["malformed JSON", "["],
+    ["non-array JSON", '{"url":"https://oauth.example.com/callback"}'],
+    ["non-string entry", '["https://oauth.example.com/callback",7]'],
+    ["remote HTTP", '["http://oauth.example.com/callback"]'],
+    ["credentials", '["https://user:pass@oauth.example.com/callback"]'],
+    ["fragment", '["https://oauth.example.com/callback#fragment"]'],
+    ["oversized whitespace", " ".repeat(1025)],
+    [
+      "callback that cannot fit in signed state",
+      JSON.stringify([`https://oauth.example.com/${"x".repeat(800)}`]),
+    ],
+    [
+      "serialized configuration over 1 KiB",
+      JSON.stringify([`https://oauth.example.com/${"x".repeat(1100)}`]),
+    ],
+    [
+      "too many callbacks",
+      JSON.stringify(
+        Array.from(
+          { length: 21 },
+          (_, i) => `https://x.co/${i}`,
+        ),
+      ),
+    ],
+  ])("TC-OAUTH-CALLBACK-003: rejects %s", (_case, raw) => {
+    expect(() => parseAllowedCallbackUrls(raw)).toThrow(
+      /OauthAllowedCallbackUrls/u,
+    );
   });
 });

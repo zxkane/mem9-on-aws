@@ -239,6 +239,33 @@ The AgentCore Gateway exposes four tools over MCP (Cognito-authenticated):
   default.
 - Agent contributors: see [`AGENTS.md`](AGENTS.md) for repo conventions and hard rules.
 
+### Optional hosted OAuth callback URLs
+
+Native MCP clients continue to use RFC 8252 loopback callbacks without any
+configuration. For a hosted OAuth client, set the stage-scoped SST secret to a
+JSON array of complete callback URLs, then redeploy so SST propagates the value
+to the stage's OAuth configuration in SSM and refreshes the façade Lambda:
+
+```bash
+pnpm -C infra exec sst secret set OauthAllowedCallbackUrls \
+  '["https://oauth.example.com/callback/app"]' \
+  --stage prod
+gh workflow run "Infra CI"
+```
+
+The array supports at most 20 unique HTTPS URLs and its serialized JSON must
+not exceed 1 KiB. Each URL must be an exact match and cannot contain credentials
+or a fragment; host and path wildcards are intentionally unsupported. Use `[]`
+to remove all hosted callbacks. The façade validates the same list during
+dynamic registration, authorization, callback, and token exchange.
+
+Do not add hosted-client URLs to the Cognito reader app client's callback list.
+Cognito always redirects to the façade's own `/oauth/callback`; the façade
+carries the original client URL in HMAC-signed state and redirects there only
+after exact allowlist validation. It also wraps the Cognito authorization code
+in a short-lived signature so token exchange must present the same client
+redirect URL. The interactive OAuth client remains read-only.
+
 ### Optional production custom domain
 
 The OAuth façade can use a production-only custom hostname. Leave

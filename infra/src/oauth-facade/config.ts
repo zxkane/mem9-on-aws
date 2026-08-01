@@ -17,14 +17,16 @@
  *   - `{mcpPrefix}/gateway/url`                    (UPSTREAM gateway)
  *   - `{mcpPrefix}/cognito/reader/client-id`
  *   - `{mcpPrefix}/cognito/reader/client-secret`   (SecureString)
+ *   - `{mcpPrefix}/oauth/allowed-callback-urls`
  *
  * The remaining, non-cyclic values (Cognito endpoint URLs that depend only on
- * the user pool + domain, the HMAC key from the SST Secret, and the resource
+ * the user pool + domain, the HMAC key from an SST Secret, and the resource
  * scopes) are plain env vars. The SSM client is injected (`SsmLike`) so the
  * loader is unit-testable without AWS.
  */
 
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
+import { canEncodeCognitoState } from "./state.js";
 
 export interface FacadeConfig {
   /** AgentCore Gateway URL the façade proxies to (`/mcp` + fallthrough). */
@@ -42,6 +44,8 @@ export interface FacadeConfig {
   /** Reader app client credentials returned by `/register` (DCR). */
   userClientId: string;
   userClientSecret: string;
+  /** Exact HTTPS redirect URIs allowed in addition to RFC 8252 loopback URLs. */
+  allowedClientRedirectUris: string[];
   /** HMAC key for state signing; empty disables the proxy (503). */
   hmacKey: string;
 }
@@ -54,6 +58,10 @@ export interface SsmLike {
 }
 
 type Env = Record<string, string | undefined>;
+const ALLOWED_CALLBACK_URLS_SETTING = "OauthAllowedCallbackUrls";
+const MAX_ALLOWED_CALLBACK_URLS = 20;
+const MAX_CALLBACK_URL_LENGTH = 2048;
+const MAX_CALLBACK_CONFIG_BYTES = 1024;
 
 function reqEnv(env: Env, name: string): string {
   const v = env[name];
@@ -61,15 +69,85 @@ function reqEnv(env: Env, name: string): string {
   return v;
 }
 
-/** Resolve the three cyclic values from SSM (decrypting the client secret). */
+export function parseAllowedCallbackUrls(raw = ""): string[] {
+  if (Buffer.byteLength(raw, "utf8") > MAX_CALLBACK_CONFIG_BYTES) {
+    throw new Error(
+      `${ALLOWED_CALLBACK_URLS_SETTING} must not exceed ${MAX_CALLBACK_CONFIG_BYTES} UTF-8 bytes`,
+    );
+  }
+  if (!raw.trim()) return [];
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new Error(`${ALLOWED_CALLBACK_URLS_SETTING} must be a JSON array`);
+  }
+  if (!Array.isArray(parsed)) {
+    throw new Error(`${ALLOWED_CALLBACK_URLS_SETTING} must be a JSON array`);
+  }
+  const urls = new Set<string>();
+  for (const entry of parsed) {
+    if (
+      typeof entry !== "string" ||
+      !entry ||
+      entry !== entry.trim() ||
+      entry.length > MAX_CALLBACK_URL_LENGTH
+    ) {
+      throw new Error(
+        `${ALLOWED_CALLBACK_URLS_SETTING} entries must be non-empty URL strings`,
+      );
+    }
+
+    let url: URL;
+    try {
+      url = new URL(entry);
+    } catch {
+      throw new Error(
+        `${ALLOWED_CALLBACK_URLS_SETTING} entries must be valid HTTPS URLs`,
+      );
+    }
+    if (
+      url.protocol !== "https:" ||
+      !url.hostname ||
+      url.username ||
+      url.password ||
+      url.hash
+    ) {
+      throw new Error(
+        `${ALLOWED_CALLBACK_URLS_SETTING} entries must be HTTPS URLs without credentials or fragments`,
+      );
+    }
+    if (!canEncodeCognitoState({ cs: "", r: entry })) {
+      throw new Error(
+        `${ALLOWED_CALLBACK_URLS_SETTING} entries must fit in Cognito's signed state limit`,
+      );
+    }
+    urls.add(entry);
+    if (urls.size > MAX_ALLOWED_CALLBACK_URLS) {
+      throw new Error(
+        `${ALLOWED_CALLBACK_URLS_SETTING} supports at most ${MAX_ALLOWED_CALLBACK_URLS} unique URLs`,
+      );
+    }
+  }
+  return [...urls];
+}
+
+/** Resolve runtime values from SSM (decrypting the client secret). */
 export async function resolveSsm(
   prefix: string,
   ssm: SsmLike,
-): Promise<{ upstream: string; userClientId: string; userClientSecret: string }> {
+): Promise<{
+  upstream: string;
+  userClientId: string;
+  userClientSecret: string;
+  allowedCallbackUrls: string;
+}> {
   const names = [
     `${prefix}/gateway/url`,
     `${prefix}/cognito/reader/client-id`,
     `${prefix}/cognito/reader/client-secret`,
+    `${prefix}/oauth/allowed-callback-urls`,
   ];
   const res = await ssm.send(
     new GetParametersCommand({ Names: names, WithDecryption: true }),
@@ -86,6 +164,7 @@ export async function resolveSsm(
     upstream: get(names[0]!),
     userClientId: get(names[1]!),
     userClientSecret: get(names[2]!),
+    allowedCallbackUrls: get(names[3]!),
   };
 }
 
@@ -114,6 +193,9 @@ export async function loadConfig(
       .filter(Boolean),
     userClientId: resolved.userClientId,
     userClientSecret: resolved.userClientSecret,
+    allowedClientRedirectUris: parseAllowedCallbackUrls(
+      resolved.allowedCallbackUrls,
+    ),
     // Empty (not missing) is the intended "proxy disabled" sentinel.
     hmacKey: env.OAUTH_STATE_HMAC_KEY ?? "",
   };

@@ -6,26 +6,32 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { isAllowedClientRedirect, route } from "./handler.js";
-import { verifyState } from "./state.js";
+import {
+  signAuthorizationCode,
+  verifyAuthorizationCode,
+  verifyState,
+} from "./state.js";
 import type { FacadeConfig } from "./config.js";
 
 const HOST = "abc123.lambda-url.ap-northeast-1.on.aws";
 const BASE = `https://${HOST}`;
 const HMAC = "unit-test-hmac-key";
+const REMOTE_CALLBACK = "https://oauth.example.com/callback/app";
 
 function cfg(overrides: Partial<FacadeConfig> = {}): FacadeConfig {
   return {
     upstream: "https://gateway.example/mcp-prefix",
     issuer: "https://cognito-idp.ap-northeast-1.amazonaws.com/pool",
-    authorize: "https://dom.auth.ap-northeast-1.amazoncognito.com/oauth2/authorize",
-    token: "https://dom.auth.ap-northeast-1.amazoncognito.com/oauth2/token",
-    userinfo: "https://dom.auth.ap-northeast-1.amazoncognito.com/oauth2/userInfo",
-    revocation: "https://dom.auth.ap-northeast-1.amazoncognito.com/oauth2/revoke",
+    authorize: "https://auth.example.com/oauth2/authorize",
+    token: "https://auth.example.com/oauth2/token",
+    userinfo: "https://auth.example.com/oauth2/userInfo",
+    revocation: "https://auth.example.com/oauth2/revoke",
     jwks: "https://cognito-idp.ap-northeast-1.amazonaws.com/pool/.well-known/jwks.json",
     // Reader-client-aligned: openid + email + read only (no write).
     resourceScopes: ["example-mcp/query/read"],
     userClientId: "reader-client-id",
     userClientSecret: "reader-client-secret",
+    allowedClientRedirectUris: [],
     hmacKey: HMAC,
     ...overrides,
   };
@@ -187,6 +193,18 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
     expect(JSON.parse(res.body).error_description).toMatch(/S256/);
   });
 
+  it("rejects authorize requests whose signed state would exceed Cognito's limit", async () => {
+    const q = new URLSearchParams({
+      redirect_uri: "http://localhost:5000/cb",
+      state: "x".repeat(1000),
+      code_challenge: "x",
+      code_challenge_method: "S256",
+    }).toString();
+    const res = await route(ev("/oauth/authorize", "GET", { query: q }), cfg());
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error_description).toMatch(/length/u);
+  });
+
   it("TC-MCPGW-067: /oauth/callback 302s back to the client loopback with code + orig state", async () => {
     // Sign a state the way /oauth/authorize would.
     const authQ = new URLSearchParams({
@@ -211,7 +229,12 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
     expect(res.statusCode).toBe(302);
     const loc = new URL(res.headers.location);
     expect(loc.origin + loc.pathname).toBe("http://127.0.0.1:5000/callback");
-    expect(loc.searchParams.get("code")).toBe("auth-code-xyz");
+    expect(
+      verifyAuthorizationCode(loc.searchParams.get("code")!, HMAC, Date.now()),
+    ).toMatchObject({
+      c: "auth-code-xyz",
+      r: "http://127.0.0.1:5000/callback",
+    });
     expect(loc.searchParams.get("state")).toBe("orig-state");
   });
 
@@ -238,7 +261,14 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
     );
     const form = new URLSearchParams({
       grant_type: "authorization_code",
-      code: "c",
+      code: signAuthorizationCode(
+        {
+          code: "c",
+          redirectUri: "http://127.0.0.1:5000/callback",
+        },
+        HMAC,
+        Date.now(),
+      ),
       redirect_uri: "http://127.0.0.1:5000/callback",
       code_verifier: "v",
       client_id: "reader-client-id",
@@ -364,7 +394,14 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
     const captured = mockTokenUpstream();
     const form = new URLSearchParams({
       grant_type: "authorization_code",
-      code: "c",
+      code: signAuthorizationCode(
+        {
+          code: "c",
+          redirectUri: "http://127.0.0.1:5000/callback",
+        },
+        HMAC,
+        Date.now(),
+      ),
       redirect_uri: "http://127.0.0.1:5000/callback",
       code_verifier: "v",
       client_id: "reader-client-id",
@@ -439,8 +476,228 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
   it("TC-MCPGW-073: isAllowedClientRedirect only accepts loopback http URLs", () => {
     expect(isAllowedClientRedirect("http://localhost:1/cb")).toBe(true);
     expect(isAllowedClientRedirect("http://127.0.0.1:65535/cb")).toBe(true);
+    expect(isAllowedClientRedirect("http://[::1]:54321/cb")).toBe(true);
     expect(isAllowedClientRedirect("https://localhost/cb")).toBe(false);
     expect(isAllowedClientRedirect("http://evil.example/cb")).toBe(false);
     expect(isAllowedClientRedirect("not a url")).toBe(false);
+  });
+
+  it("TC-OAUTH-CALLBACK-004/005: accepts an exact configured HTTPS callback through authorize and callback", async () => {
+    const configuredCallback =
+      `${REMOTE_CALLBACK}?tenant=example&code=stale&error=stale`;
+    const config = cfg({ allowedClientRedirectUris: [configuredCallback] });
+    const authQ = new URLSearchParams({
+      redirect_uri: configuredCallback,
+      state: "remote-state",
+      code_challenge: "challenge",
+      code_challenge_method: "S256",
+    }).toString();
+    const authRes = await route(
+      ev("/oauth/authorize", "GET", { query: authQ }),
+      config,
+    );
+    expect(authRes.statusCode).toBe(302);
+    const cognitoRedirect = new URL(authRes.headers.location);
+    expect(cognitoRedirect.searchParams.get("redirect_uri")).toBe(
+      `${BASE}/oauth/callback`,
+    );
+
+    const callbackQ = new URLSearchParams({
+      code: "remote-code",
+      state: cognitoRedirect.searchParams.get("state")!,
+    }).toString();
+    const callbackRes = await route(
+      ev("/oauth/callback", "GET", { query: callbackQ }),
+      config,
+    );
+    expect(callbackRes.statusCode).toBe(302);
+    const clientRedirect = new URL(callbackRes.headers.location);
+    expect(clientRedirect.origin + clientRedirect.pathname).toBe(
+      REMOTE_CALLBACK,
+    );
+    expect(clientRedirect.searchParams.get("tenant")).toBe("example");
+    expect(
+      verifyAuthorizationCode(
+        clientRedirect.searchParams.get("code")!,
+        HMAC,
+        Date.now(),
+      ),
+    ).toMatchObject({ c: "remote-code", r: configuredCallback });
+    expect(clientRedirect.searchParams.get("error")).toBeNull();
+    expect(clientRedirect.searchParams.get("state")).toBe("remote-state");
+  });
+
+  it.each([
+    "https://oauth.example.com/callback/other",
+    "https://sub.oauth.example.com/callback/app",
+  ])(
+    "TC-OAUTH-CALLBACK-006: rejects an unconfigured sibling redirect %s",
+    async (redirectUri) => {
+      const q = new URLSearchParams({
+        redirect_uri: redirectUri,
+        code_challenge: "challenge",
+        code_challenge_method: "S256",
+      }).toString();
+      const res = await route(
+        ev("/oauth/authorize", "GET", { query: q }),
+        cfg({ allowedClientRedirectUris: [REMOTE_CALLBACK] }),
+      );
+      expect(res.statusCode).toBe(400);
+    },
+  );
+
+  it("TC-OAUTH-CALLBACK-006: rechecks the allowlist before redirecting from callback", async () => {
+    const authQ = new URLSearchParams({
+      redirect_uri: REMOTE_CALLBACK,
+      code_challenge: "challenge",
+      code_challenge_method: "S256",
+    }).toString();
+    const authRes = await route(
+      ev("/oauth/authorize", "GET", { query: authQ }),
+      cfg({ allowedClientRedirectUris: [REMOTE_CALLBACK] }),
+    );
+    const state = new URL(authRes.headers.location).searchParams.get("state")!;
+
+    const res = await route(
+      ev("/oauth/callback", "GET", {
+        query: new URLSearchParams({ code: "c", state }).toString(),
+      }),
+      cfg(),
+    );
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toBe("invalid_state");
+  });
+
+  it("TC-OAUTH-CALLBACK-007: accepts the configured callback during code exchange", async () => {
+    const captured = mockTokenUpstream();
+    const form = new URLSearchParams({
+      grant_type: "authorization_code",
+      code: signAuthorizationCode(
+        { code: "c", redirectUri: REMOTE_CALLBACK },
+        HMAC,
+        Date.now(),
+      ),
+      redirect_uri: REMOTE_CALLBACK,
+      code_verifier: "v",
+      client_id: "reader-client-id",
+    }).toString();
+    const res = await route(
+      ev("/oauth/token", "POST", { body: form }),
+      cfg({ allowedClientRedirectUris: [REMOTE_CALLBACK] }),
+    );
+    expect(res.statusCode).toBe(200);
+    const forwarded = new URLSearchParams(captured.body!);
+    expect(forwarded.get("redirect_uri")).toBe(`${BASE}/oauth/callback`);
+    expect(forwarded.get("code")).toBe("c");
+  });
+
+  it.each([
+    ["omitted", undefined],
+    ["empty", ""],
+  ])(
+    "rejects an authorization-code exchange with an %s redirect_uri",
+    async (_case, redirectUri) => {
+      const form = new URLSearchParams({
+        grant_type: "authorization_code",
+        code: signAuthorizationCode(
+          { code: "c", redirectUri: REMOTE_CALLBACK },
+          HMAC,
+          Date.now(),
+        ),
+        code_verifier: "v",
+        client_id: "reader-client-id",
+      });
+      if (redirectUri !== undefined) form.set("redirect_uri", redirectUri);
+      const res = await route(
+        ev("/oauth/token", "POST", { body: form.toString() }),
+        cfg({ allowedClientRedirectUris: [REMOTE_CALLBACK] }),
+      );
+      expect(res.statusCode).toBe(400);
+      expect(JSON.parse(res.body).error).toBe("invalid_request");
+    },
+  );
+
+  it("rejects a code exchange using a different allowlisted redirect_uri", async () => {
+    const otherCallback = "https://oauth.example.com/callback/other";
+    const res = await route(
+      ev("/oauth/token", "POST", {
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code: signAuthorizationCode(
+            { code: "c", redirectUri: REMOTE_CALLBACK },
+            HMAC,
+            Date.now(),
+          ),
+          redirect_uri: otherCallback,
+          code_verifier: "v",
+          client_id: "reader-client-id",
+        }).toString(),
+      }),
+      cfg({
+        allowedClientRedirectUris: [REMOTE_CALLBACK, otherCallback],
+      }),
+    );
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toBe("invalid_grant");
+  });
+
+  it("TC-OAUTH-CALLBACK-006: rejects an unconfigured callback during code exchange", async () => {
+    const res = await route(
+      ev("/oauth/token", "POST", {
+        body: new URLSearchParams({
+          grant_type: "authorization_code",
+          code: "c",
+          redirect_uri: "https://oauth.example.com/callback/other",
+          code_verifier: "v",
+          client_id: "reader-client-id",
+        }).toString(),
+      }),
+      cfg({ allowedClientRedirectUris: [REMOTE_CALLBACK] }),
+    );
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toBe("invalid_request");
+  });
+
+  it("TC-OAUTH-CALLBACK-008: registers configured HTTPS and loopback callbacks", async () => {
+    const redirects = [REMOTE_CALLBACK, "http://127.0.0.1:54321/callback"];
+    const res = await route(
+      ev("/register", "POST", {
+        body: JSON.stringify({ redirect_uris: redirects }),
+      }),
+      cfg({ allowedClientRedirectUris: [REMOTE_CALLBACK] }),
+    );
+    expect(res.statusCode).toBe(201);
+    expect(JSON.parse(res.body).redirect_uris).toEqual(redirects);
+  });
+
+  it("TC-OAUTH-CALLBACK-009: rejects the entire registration when one redirect is unsupported", async () => {
+    const res = await route(
+      ev("/register", "POST", {
+        body: JSON.stringify({
+          redirect_uris: [
+            REMOTE_CALLBACK,
+            "https://oauth.example.com/callback/other",
+          ],
+        }),
+      }),
+      cfg({ allowedClientRedirectUris: [REMOTE_CALLBACK] }),
+    );
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toBe("invalid_redirect_uri");
+  });
+
+  it("rejects registration of a callback that cannot fit in signed state", async () => {
+    const res = await route(
+      ev("/register", "POST", {
+        body: JSON.stringify({
+          redirect_uris: [
+            `http://localhost:8080/${"x".repeat(800)}`,
+          ],
+        }),
+      }),
+      cfg(),
+    );
+    expect(res.statusCode).toBe(400);
+    expect(JSON.parse(res.body).error).toBe("invalid_redirect_uri");
   });
 });

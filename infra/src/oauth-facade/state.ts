@@ -18,9 +18,16 @@
 import { createHmac, timingSafeEqual } from "node:crypto";
 
 const STATE_TTL_MS = 10 * 60 * 1000;
+export const COGNITO_STATE_MAX_LENGTH = 1024;
 
 export interface StatePayload {
   cs: string;
+  r: string;
+  ts: number;
+}
+
+export interface AuthorizationCodePayload {
+  c: string;
   r: string;
   ts: number;
 }
@@ -43,23 +50,44 @@ function hmac(key: string, payload: string): Buffer {
   return createHmac("sha256", key).update(payload).digest();
 }
 
-export function signState(
-  input: { cs: string; r: string },
+function signPayload(
+  payload: Record<string, string | number>,
   key: string,
-  now: number,
 ): string {
-  const payload: StatePayload = { cs: input.cs, r: input.r, ts: now };
   const payloadB64 = b64urlEncode(JSON.stringify(payload));
   const sigB64 = b64urlEncode(hmac(key, payloadB64));
   return `${payloadB64}.${sigB64}`;
 }
 
-export function verifyState(
+export function signState(
+  input: { cs: string; r: string },
+  key: string,
+  now: number,
+): string {
+  return signPayload({ cs: input.cs, r: input.r, ts: now }, key);
+}
+
+export function canEncodeCognitoState(
+  input: { cs: string; r: string },
+  now: number = Date.now(),
+): boolean {
+  return signState(input, "", now).length <= COGNITO_STATE_MAX_LENGTH;
+}
+
+export function signAuthorizationCode(
+  input: { code: string; redirectUri: string },
+  key: string,
+  now: number,
+): string {
+  return signPayload({ c: input.code, r: input.redirectUri, ts: now }, key);
+}
+
+function verifyPayload(
   token: string,
   key: string,
   now: number,
   ttlMs: number = STATE_TTL_MS,
-): StatePayload | null {
+): Record<string, unknown> | null {
   const parts = token.split(".");
   if (parts.length !== 2) return null;
   const [payloadB64, sigB64] = parts;
@@ -75,22 +103,57 @@ export function verifyState(
   if (providedSig.length !== expectedSig.length) return null;
   if (!timingSafeEqual(providedSig, expectedSig)) return null;
 
-  let payload: StatePayload;
+  let payload: unknown;
   try {
     payload = JSON.parse(b64urlDecode(payloadB64).toString("utf8"));
   } catch {
     return null;
   }
   if (
-    typeof payload.cs !== "string" ||
-    typeof payload.r !== "string" ||
-    typeof payload.ts !== "number"
+    !payload ||
+    typeof payload !== "object" ||
+    typeof (payload as Record<string, unknown>).ts !== "number"
   ) {
     return null;
   }
 
-  if (now - payload.ts > ttlMs) return null;
-  if (payload.ts > now + 60_000) return null; // future-dated by >60s, reject
+  const parsed = payload as Record<string, unknown> & { ts: number };
+  if (now - parsed.ts > ttlMs) return null;
+  if (parsed.ts > now + 60_000) return null; // future-dated by >60s, reject
 
-  return payload;
+  return parsed;
+}
+
+export function verifyState(
+  token: string,
+  key: string,
+  now: number,
+  ttlMs: number = STATE_TTL_MS,
+): StatePayload | null {
+  const payload = verifyPayload(token, key, now, ttlMs);
+  if (
+    !payload ||
+    typeof payload.cs !== "string" ||
+    typeof payload.r !== "string"
+  ) {
+    return null;
+  }
+  return { cs: payload.cs, r: payload.r, ts: payload.ts as number };
+}
+
+export function verifyAuthorizationCode(
+  token: string,
+  key: string,
+  now: number,
+  ttlMs: number = STATE_TTL_MS,
+): AuthorizationCodePayload | null {
+  const payload = verifyPayload(token, key, now, ttlMs);
+  if (
+    !payload ||
+    typeof payload.c !== "string" ||
+    typeof payload.r !== "string"
+  ) {
+    return null;
+  }
+  return { c: payload.c, r: payload.r, ts: payload.ts as number };
 }
