@@ -15,6 +15,7 @@ function out<T>(value: T): { value: T; apply: (fn: (v: T) => unknown) => unknown
 let secrets: Record<string, unknown>[];
 let versions: Record<string, unknown>[];
 let randomIds: Record<string, unknown>[];
+let ssmParams: Record<string, unknown>[];
 
 function installGlobals(stage: string) {
   (globalThis as Record<string, unknown>).$app = { name: "mem9-on-aws", stage };
@@ -34,6 +35,13 @@ function installGlobals(stage: string) {
         }
       },
     },
+    ssm: {
+      Parameter: class {
+        constructor(_name: string, args: Record<string, unknown>) {
+          ssmParams.push(args);
+        }
+      },
+    },
   };
   (globalThis as Record<string, unknown>).random = {
     RandomId: class {
@@ -49,6 +57,7 @@ beforeEach(() => {
   secrets = [];
   versions = [];
   randomIds = [];
+  ssmParams = [];
 });
 
 afterEach(() => {
@@ -69,6 +78,11 @@ describe("tenant identity", () => {
     expect(secrets[0].recoveryWindowInDays).toBe(7);
     expect(outputs.tenantSecretArn).toBeDefined();
     expect(outputs.tenantId).toBeDefined();
+    // The secret's ARN (metadata only, never the value) is published to SSM
+    // so operator tooling resolves it without secretsmanager:ListSecrets.
+    expect(ssmParams).toHaveLength(1);
+    expect(ssmParams[0].name).toBe("/mem9-on-aws/prod/tenant/secret-arn");
+    expect(ssmParams[0].type).toBe("String");
   });
 
   it("allows clean non-production teardown", async () => {

@@ -381,6 +381,7 @@ jobs:
           AWS_REGION: ap-northeast-1
         run: bash scripts/run-oauth-facade-smoke.sh
 
+
       - name: Auto-cleanup on deploy failure
         # Best-effort — if the deploy half-applied resources, remove them so the
         # next push doesn't accumulate orphan state.

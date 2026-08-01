@@ -688,6 +688,61 @@ After deploying a revision that introduces this workflow, re-run
 read-only `tag:GetResources`, `iam:ListRoles`, and scoped `iam:ListRoleTags`
 grants used for inventory discovery.
 
+## Memory cleanup (operator runbook)
+
+`scripts/memory-cleanup.mjs` retroactively audits the memory store against the
+same D1–D4 durability rules smart-ingest enforces (issue #102; design:
+`docs/designs/memory-cleanup.md`). The mem9 REST API is VPC-internal and the
+CI runner pool lives outside that VPC, so there is no CI E2E for this tool —
+behavior is pinned by the unit suite (`scripts/memory-cleanup.test.mjs`), and
+live verification is the operator dry-run below, executed from a VPC-internal
+host. Production execution is a deliberate manual flow:
+
+1. **Dry-run** (read-only; classifies every active memory with GLM-5):
+
+   ```bash
+   node scripts/memory-cleanup.mjs --stage prod \
+     --tenant-secret-arn "$(aws ssm get-parameter \
+       --name /mem9-on-aws/prod/tenant/secret-arn \
+       --query Parameter.Value --output text)"
+   ```
+
+   The decision list is written to `~/.mem9-cleanup/prod/decisions-*.json`
+   (mode 0600, outside any checkout — it contains memory content and must
+   never be committed or attached to issues/PRs).
+
+2. **Review** the decision list. To approve a subset, put one decision id per
+   line in a text file.
+
+3. **Apply during a low-ingest window** (the LWW re-read guard narrows but
+   does not close the TOCTOU race with live ingest — residual risk is
+   accepted because deletes are soft, `state='deleted'`):
+
+   ```bash
+   node scripts/memory-cleanup.mjs --stage prod --apply \
+     --decisions ~/.mem9-cleanup/prod/decisions-<ts>.json \
+     [--ids approved.txt] [--cap 50] ...
+   ```
+
+   Destructive actions (deleted ids + merge rewrites) are capped per run
+   (default 50, `--cap` override); the run aborts before any call that would
+   exceed the cap. A stage-scoped lockfile (`--lock-file`/`--lock-ttl`
+   overrides) prevents concurrent applies by the same user on the same host;
+   do not run applies from two hosts or accounts at once (single-operator
+   contract).
+
+   Exit codes: `0` success, `1` unexpected error, `2` discovery failed,
+   `3` another run holds the lock, `4` cap exceeded (aborted), `5` GLM-5
+   classification failed for every batch.
+
+Requires VPC-internal network access to `mnemo.mem9-<stage>.local:8080` (the
+script discovers the task IP via Cloud Map `DiscoverInstances`; pass
+`--base-url` explicitly when tunneling) plus IAM for `ssm:GetParameter` on
+`/mem9-on-aws/<stage>/tenant/secret-arn`, `secretsmanager:GetSecretValue` on
+the tenant secret, `servicediscovery:DiscoverInstances`, and
+`bedrock-mantle:CreateInference`/`CallWithBearerToken`.
+
+
 ## License
 
 The mem9 server (`mnemo-server`) is Apache-2.0 (upstream `mem9-ai/mem9`). See that
