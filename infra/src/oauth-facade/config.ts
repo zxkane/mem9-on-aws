@@ -20,13 +20,13 @@
  *   - `{mcpPrefix}/oauth/allowed-callback-urls`
  *
  * The remaining, non-cyclic values (Cognito endpoint URLs that depend only on
- * the user pool + domain, the HMAC key from an SST Secret, and the resource
- * scopes) are plain env vars. The SSM client is injected (`SsmLike`) so the
- * loader is unit-testable without AWS.
+ * the user pool + domain, the stage-specific HMAC key, and the resource scopes)
+ * are plain env vars. Production sources the key from an operator-set SST
+ * secret; ephemeral stages use a Pulumi-generated secret output. The SSM client
+ * is injected (`SsmLike`) so the loader is unit-testable without AWS.
  */
 
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
-import { canEncodeCognitoState } from "./state.js";
 
 export interface FacadeConfig {
   /** AgentCore Gateway URL the façade proxies to (`/mcp` + fallthrough). */
@@ -116,11 +116,6 @@ export function parseAllowedCallbackUrls(raw = ""): string[] {
     ) {
       throw new Error(
         `${ALLOWED_CALLBACK_URLS_SETTING} entries must be HTTPS URLs without credentials or fragments`,
-      );
-    }
-    if (!canEncodeCognitoState({ cs: "", r: entry })) {
-      throw new Error(
-        `${ALLOWED_CALLBACK_URLS_SETTING} entries must fit in Cognito's signed state limit`,
       );
     }
     urls.add(entry);

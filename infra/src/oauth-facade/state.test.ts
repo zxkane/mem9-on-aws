@@ -7,8 +7,10 @@ import { describe, expect, it } from "vitest";
 
 import {
   signAuthorizationCode,
+  signOAuthTransaction,
   signState,
   verifyAuthorizationCode,
+  verifyOAuthTransaction,
   verifyState,
 } from "./state.js";
 
@@ -76,5 +78,17 @@ describe("façade state (TC-MCPGW-040..046)", () => {
       r: REDIRECT,
     });
     expect(verifyAuthorizationCode(`${token}x`, KEY, now)).toBeNull();
+  });
+
+  it("round-trips an OAuth transaction with explicit nonce binding", () => {
+    const now = Date.now();
+    const transaction = {
+      nonce: "nonce",
+      clientState: "client-state",
+      redirectUri: REDIRECT,
+    };
+    const token = signOAuthTransaction(transaction, KEY, now);
+    expect(verifyOAuthTransaction(token, KEY, now)).toMatchObject(transaction);
+    expect(verifyOAuthTransaction(`${token}x`, KEY, now)).toBeNull();
   });
 });

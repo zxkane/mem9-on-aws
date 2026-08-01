@@ -242,9 +242,20 @@ environment forces a function update when the SSM value changes, without
 putting callback URLs in the environment. The facade applies the same allowlist
 to dynamic registration, authorization, callback, and token exchange. Cognito
 still sees only the facade's own `/oauth/callback`; external callback URLs are
-never added to the Cognito reader client. A short-lived HMAC wrapper binds the
-Cognito authorization code to the original external redirect URL for token
-exchange.
+never added to the Cognito reader client. The authorization request sends
+Cognito a compact HMAC-signed nonce. The original client state and redirect URL
+remain in a nonce-bound HMAC-signed cookie scoped to `/oauth/callback`, with
+`Secure`, `HttpOnly`, `SameSite=Lax`, a ten-minute lifetime, and a 4 KiB total
+size limit. A fixed cookie name bounds the browser to one pending transaction;
+a new authorization replaces an older unfinished flow, and a stale callback
+cannot clear the newer valid cookie. This avoids accumulating cookies against
+API Gateway's
+[10,240-byte request-line and header quota](https://docs.aws.amazon.com/apigateway/latest/developerguide/http-api-quotas.html).
+The callback requires both valid signatures, rechecks the current allowlist,
+and clears the matching cookie. This remains free of server-side session storage
+while supporting hosted clients whose opaque state exceeds Cognito's state
+limit. A separate short-lived HMAC wrapper binds the Cognito authorization code
+to the original external redirect URL for token exchange.
 
 The OAuth facade optionally uses a production custom hostname from
 `MEM9_FACADE_CUSTOM_DOMAIN`. GitHub Actions supplies it only from the repository

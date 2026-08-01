@@ -50,13 +50,13 @@ export default $config({
         ...(cloudflareEnabled
           ? { cloudflare: { version: "6.15.0" } }
           : {}),
-        // The `random` provider exposes the `random` global (random.RandomId) used
-        // by infra/tenant-identity.ts to mint the STABLE tenant id / X-API-Key. It must
-        // be declared here for the global to bind at run() (SST only injects a
-        // provider's namespace when it's in this block). Pulumi-internal (no cloud
-        // API) → no deploy-role IAM. Version pinned explicitly (SST v4.17 rejects
-        // `random: true` — "Specify the version explicitly"); 4.16.6 matches the
-        // @pulumi/random SST bundles for sst.aws.Aurora's RandomPassword.
+        // The `random` provider exposes the stable tenant RandomId and the
+        // non-production OAuth RandomPassword. It must be declared here for the
+        // global to bind at run() (SST only injects a provider's namespace when
+        // it is in this block). Pulumi-internal (no cloud API) → no deploy-role
+        // IAM. Version pinned explicitly (SST v4.17 rejects `random: true` —
+        // "Specify the version explicitly"); 4.16.6 matches the @pulumi/random
+        // version SST bundles for sst.aws.Aurora's RandomPassword.
         random: { version: "4.16.6" },
         // The `command` provider exposes the `command` global (command.local.Command)
         // used by infra/gateway.ts to provision the AgentCore GatewayTarget via the

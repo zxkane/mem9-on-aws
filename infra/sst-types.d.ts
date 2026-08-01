@@ -379,7 +379,7 @@ declare namespace aws {
   }
 }
 
-// ── The `random` provider (infra/tenant-identity.ts uses RandomId for the tenant key) ──
+// ── The `random` provider (tenant identity + non-production OAuth HMAC key) ──
 declare namespace random {
   interface RandomIdArgs {
     byteLength: Input<number>;
@@ -389,6 +389,15 @@ declare namespace random {
     constructor(name: string, args: RandomIdArgs);
     readonly hex: Output<string>;
     readonly id: Output<string>;
+  }
+
+  interface RandomPasswordArgs {
+    length: Input<number>;
+    special?: Input<boolean>;
+  }
+  class RandomPassword {
+    constructor(name: string, args: RandomPasswordArgs);
+    readonly result: Output<string>;
   }
 }
 
