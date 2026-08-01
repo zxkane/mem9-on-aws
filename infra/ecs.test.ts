@@ -405,7 +405,7 @@ describe("ecs stack", () => {
     expect(args.loadBalancer).toBeUndefined();
   });
 
-  it("registers mnemo-server in Cloud Map + opens :8080 to the shared task SG (§6a)", async () => {
+  it("propagates cost tags, registers Cloud Map, and opens :8080 to the shared task SG", async () => {
     installGlobals("prod");
     const ecs = await loadEcs();
     const outs = ecs(fakeDbOut());
@@ -422,6 +422,15 @@ describe("ecs stack", () => {
     const svcArgs: Record<string, any> = {};
     const svcOpts: Record<string, any> = {};
     transform(svcArgs, svcOpts);
+    // TC-ECS-COST-001/002: Fargate charges belong to tasks, so the service's
+    // Project/Stage tags must reach each newly created task. ECS-managed tags
+    // add the cluster/service identity used by ECS usage reports.
+    expect(svcArgs.propagateTags).toBe("SERVICE");
+    expect(svcArgs.enableEcsManagedTags).toBe(true);
+    // TC-ECS-COST-004: propagation applies only at task creation.
+    expect(svcArgs.forceNewDeployment).toBe(true);
+    expect(svcArgs.triggers).toMatchObject({ taskTagPropagation: "v1" });
+    // TC-ECS-COST-003: cost attribution must not disturb private discovery.
     expect(svcArgs.serviceRegistries).toBeDefined();
     expect(svcArgs.serviceRegistries.registryArn).toBeDefined();
     expect(svcArgs.loadBalancers).toBeUndefined();

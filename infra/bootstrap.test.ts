@@ -129,6 +129,14 @@ describe("bootstrap stack", () => {
     expect(args.architecture).toBe("arm64");
     const image = String((args.image as { value: string }).value);
     expect(image).toContain(".dkr.ecr.ap-northeast-1.amazonaws.com/mem9-on-aws/bootstrap:");
+    const transform = (args.transform as Record<string, any>).taskDefinition;
+    const taskDefinitionArgs: Record<string, any> = {};
+    transform(taskDefinitionArgs);
+    expect(taskDefinitionArgs.tags).toMatchObject({
+      Project: "mem9-on-aws",
+      Stage: "prod",
+      ManagedBy: "sst",
+    });
     expect(outs.taskDefinitionArn).toBeDefined();
   });
 

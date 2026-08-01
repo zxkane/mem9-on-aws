@@ -66,6 +66,133 @@ citations.
 | Tenancy            | **single tenant** (one `X-API-Key`); writes carry **`X-Mnemo-Agent-Id`** to reserve per-agent scoping                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | Replicas           | **Single** (`desiredCount=1`) — single-writer, sidesteps mem9's local-disk import dir                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
+## Cost attribution and monthly estimate
+
+The billing model has three attribution scopes. Keep them separate rather than
+forcing every charge through one `Stage=prod` filter:
+
+| Scope | Cost Explorer attribution | Included resources |
+| ----- | ------------------------- | ------------------ |
+| Production | `Project=mem9-on-aws` **and** `Stage=prod` | SST-managed Aurora, ECS, Lambda, API Gateway, AgentCore Gateway, CloudWatch, Secrets Manager, and related resources |
+| Mantle inference | Service `Amazon Bedrock` **and** `Project=mem9-on-aws` | Chat Completions requests associated with the retained Bedrock Project |
+| Shared | `Project=mem9-on-aws`, excluding service `Amazon Bedrock`; group by `Stage` and retain only the no-`Stage` bucket | Retained ECR repositories, the Bedrock Project resource, and other intentionally stage-neutral resources |
+
+SST applies `Project`, `Stage`, and `ManagedBy` as default tags. The retained
+Bedrock Project is different: it intentionally has no `Stage`, and `llm-proxy`
+associates each Mantle Chat Completions request with it through
+`OpenAI-Project`. AWS documents that a Project's tags flow to Cost Explorer and
+CUR 2.0. Do not add `Stage=prod` to the Mantle query or its inference cost will
+be omitted. See [Bedrock Projects cost
+attribution](https://docs.aws.amazon.com/bedrock/latest/userguide/cost-mgmt-projects.html).
+
+AgentCore Gateway is not the model charge. It bills Gateway operations such as
+tool listing, invocation, and health checks at approximately **$0.005 per 1,000
+API invocations**. Semantic search is approximately **$0.025 per 1,000
+queries**, tool indexing is **$0.02 per 100 indexed tools per month**, and data
+egress to a customer VPC adds **$0.006 per GB**. The target Lambda invocation
+and Mantle inference are separate charges. See [AgentCore
+pricing](https://aws.amazon.com/bedrock/agentcore/pricing/).
+
+### ECS/Fargate attribution requirement
+
+Fargate vCPU and memory charges belong to the running ECS **task**, not merely
+to the tagged ECS Service. The Service must propagate its user tags when tasks
+are created:
+
+```text
+propagateTags = SERVICE
+```
+
+This repository sets both `propagateTags=SERVICE` and
+`enableEcsManagedTags=true`. The latter adds AWS-managed cluster and
+service-name tags, but it does not replace propagation of `Project` and
+`Stage`. Tag changes apply only to newly created tasks, so the Service sets
+`forceNewDeployment=true` with a versioned deployment trigger; the update that
+enables propagation replaces tasks that predate the setting even when the image
+tag is unchanged. The one-shot bootstrap run separately propagates
+`TASK_DEFINITION` tags and enables ECS-managed tags. The `Project` and `Stage`
+keys must also be activated as cost-allocation tags before the resulting
+charges appear in Cost Explorer.
+
+Without task tag propagation, a `Project + Stage` report excludes Fargate even
+when the ECS Service itself has both tags. Those charges appear in the
+untagged ECS bucket, where they cannot be reliably separated from other
+untagged workloads. Task tag propagation is not retroactive: it cannot add tags
+to historical task usage. Cost-allocation tag activation is different; AWS can
+backfill the current activation status to a prior billing month, but that does
+not reconstruct tags that were absent from a resource or task. See
+[tagging ECS resources](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs-using-tags.html)
+and [cost-allocation tag
+backfill](https://docs.aws.amazon.com/cli/latest/reference/ce/start-cost-allocation-tag-backfill.html).
+
+### Reporting procedure and considerations
+
+1. Use `UnblendedCost` for a single account, and exclude `Credit` and `Refund`
+   record types. Use amortized cost instead if commitments must be allocated.
+2. Produce the production, Mantle, and shared scopes above as separate reports,
+   then sum them. Keep the scopes mutually exclusive by excluding `Amazon
+   Bedrock` and retaining only the no-`Stage` bucket in the shared scope. Group
+   each scope by AWS service and usage type.
+3. Reconcile every service total against its tagged total. Investigate the
+   no-tag bucket, especially for Fargate tasks, model calls without a Project,
+   restored resources, and tasks that ran before tag propagation.
+4. Treat the current day as incomplete. Cost data, newly activated tags, and
+   new tag values can take roughly 24 hours to appear. Request a cost-allocation
+   tag backfill when prior-month activation status is needed. AWS limits the
+   start date to the previous 12 months and accepts one request every 24 hours
+   after the prior request completes.
+5. Use CUR 2.0 when invoice-level line items or task-level allocation are
+   required. ECS Split Cost Allocation Data adds task CPU and memory usage
+   detail; it is not a substitute for propagating cost-allocation tags.
+6. Report preview stages separately. Each live preview can duplicate the two
+   largest fixed lines, Aurora and Fargate, until reconciliation removes it.
+7. Allocate shared NAT Gateway hourly cost only if this application owns the
+   gateway. For a pre-existing shared NAT, attribute incremental processing and
+   transfer where CUR supports it, and leave the shared hourly charge in a
+   documented shared-cost pool.
+8. Set budgets on the combined project view and separate alerts for Fargate,
+   RDS, and Bedrock so a missing tag cannot hide a service-level increase.
+
+### Approximate monthly cost
+
+These are architecture estimates, not a quote or a snapshot of any AWS
+account. They assume one continuously running production task, near-idle
+database capacity, low API traffic, and 730.5 hours per average month. Prices
+vary by Region and can change.
+
+| Cost driver | Assumption | Approximate monthly cost |
+| ----------- | ---------- | ------------------------ |
+| ECS Fargate | One arm64 task, 2 vCPU and 6 GB, running continuously | **$78** |
+| Aurora PostgreSQL Serverless v2 | 0.5 ACU floor with light storage, I/O, and backup usage | **$50-60** |
+| Supporting services | CloudWatch dashboard/alarms/logs, Secrets Manager, ECR storage, Lambda, API Gateway, Cognito, and low-volume AgentCore Gateway | **$5-20** |
+| Core total before model usage and shared networking | Production baseline | **$135-160** |
+| Bedrock Mantle | Input and output tokens for the selected model | **Variable** |
+
+The Fargate estimate uses representative regional arm64 rates:
+`2 x 730.5 x $0.04045` for vCPU plus
+`6 x 730.5 x $0.00442` for memory, or approximately **$78/month**.
+
+The Fargate task and Aurora floor dominate the fixed cost. The qwen3 embedding
+model drives the 2 vCPU/6 GB task size; reduce it only after CPU and memory
+measurements prove a smaller valid Fargate size is safe. A Compute Savings Plan
+can help a stable 24/7 task, while Fargate Spot is a poor default for the only
+replica unless interruptions are acceptable.
+
+The conservative smaller candidate is **1 vCPU/6 GB**, approximately
+**$49/month** at the same rates. It preserves memory headroom but halves burst
+CPU, so validate embedding latency, ingest deadlines, and startup health before
+adopting it. Reducing memory from 6 GB to 5 GB saves only about **$3/month**;
+4 GB leaves too little headroom for the embedding model, application, and proxy
+sidecars to be a safe production target.
+
+Aurora auto-pause is unlikely to help while the long-lived service polls the
+durable ingest queue and retains database connections. A single-AZ burstable
+RDS PostgreSQL instance can reduce the database estimate to roughly
+**$20-40/month** plus storage, but gives up Aurora Serverless scaling and
+requires a planned database migration. Mantle remains usage-based; bound prompt
+size and output tokens, and review token usage by Bedrock Project rather than
+estimating it from Gateway calls.
+
 ## Planned reliability work
 
 The remaining open reliability program covers deployment reconciliation, alert

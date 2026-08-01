@@ -26,6 +26,7 @@ const deployRoleFixturePath = resolve(
   "test-fixtures/deploy-github-role/mock-aws.mjs",
 );
 const reconcilePath = resolve(here, "reconcile-ecs-deployment.mjs");
+const bootstrapTaskPath = resolve(here, "run-bootstrap-task.sh");
 const emfSmokePath = resolve(here, "run-mnemo-emf-smoke.sh");
 const healthSmokePath = resolve(here, "run-mnemo-health-smoke.sh");
 const fakeAwsPath = resolve(here, "fixtures/fake-aws.mjs");
@@ -366,6 +367,18 @@ describe("workflow integration", () => {
 
     expect(workflow).toContain("node scripts/image-tags.mjs");
     expect(workflow.match(/node scripts\/reconcile-ecs-deployment\.mjs/g)).toHaveLength(2);
+  });
+
+  it("TC-ECS-COST-005: propagates bootstrap task tags at task creation", () => {
+    const script = readFileSync(bootstrapTaskPath, "utf8");
+    const start = script.indexOf("RUN_OUT=$(aws ecs run-task");
+    const end = script.indexOf("TASK_ARN=", start);
+    const runTask = script.slice(start, end);
+
+    expect(start).toBeGreaterThanOrEqual(0);
+    expect(end).toBeGreaterThan(start);
+    expect(runTask).toContain("--propagate-tags TASK_DEFINITION");
+    expect(runTask).toContain("--enable-ecs-managed-tags");
   });
 
   it("routes a reconciliation failure through the existing prod failure reporter", () => {

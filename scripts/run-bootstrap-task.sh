@@ -60,6 +60,8 @@ RUN_OUT=$(aws ecs run-task \
   --task-definition "$TASK_DEF" \
   --launch-type FARGATE \
   --count 1 \
+  --propagate-tags TASK_DEFINITION \
+  --enable-ecs-managed-tags \
   --network-configuration "$NET_CONFIG" \
   --region "$REGION" \
   --output json)
