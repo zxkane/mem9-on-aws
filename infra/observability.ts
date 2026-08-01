@@ -36,6 +36,10 @@ export interface ObservabilityInputs {
   mantleProject?: string;
 }
 
+export interface ObservabilityOutputs {
+  alertsTopicArn?: Output<string>;
+}
+
 export const DURABLE_FAILURE_RATIO_EXPRESSION =
   "IF(terminal >= 20, failures / terminal, 0)";
 
@@ -50,9 +54,11 @@ export const ZERO_FACT_RATE_EXPRESSION = "IF(succeeded > 50, zero_rate, 0)";
 // still producing memories.
 export const ZERO_FACT_ALARM_THRESHOLD = 1;
 
-export function observability(inputs: ObservabilityInputs) {
+export function observability(
+  inputs: ObservabilityInputs,
+): ObservabilityOutputs {
   const { stage, logGroupName, slackWebhookUrl, mantleProject } = inputs;
-  if (stage !== "prod") return;
+  if (stage !== "prod") return {};
   if (!slackWebhookUrl) {
     throw new Error("SLACK_WEBHOOK_URL is required for production alert delivery");
   }
@@ -685,4 +691,6 @@ export function observability(inputs: ObservabilityInputs) {
     alarmActions,
     okActions,
   });
+
+  return { alertsTopicArn: topic.arn };
 }

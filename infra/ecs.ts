@@ -133,6 +133,8 @@ export interface EcsOutputs {
   // The task security group (from db()). The proxy Lambda attaches to this SG so a
   // self-referential :8080 ingress rule (added below) lets it reach mnemo-server.
   taskSecurityGroupId: Output<string>;
+  // Production-only SNS topic backed by the existing Slack alert router.
+  alertsTopicArn?: Output<string>;
 }
 
 /**
@@ -575,7 +577,7 @@ export function ecs(dbOut: DbOutputs, identity: TenantIdentityOutputs): EcsOutpu
       if (!group) throw new Error("mnemo-server awslogs-group not found in task definition");
       return group;
     });
-  observability({
+  const observabilityOut = observability({
     stage: $app.stage,
     logGroupName: mnemoLogGroupName,
     slackWebhookUrl,
@@ -590,5 +592,6 @@ export function ecs(dbOut: DbOutputs, identity: TenantIdentityOutputs): EcsOutpu
     image: mnemoImage,
     serviceDnsName,
     taskSecurityGroupId: taskSgId,
+    alertsTopicArn: observabilityOut.alertsTopicArn,
   };
 }

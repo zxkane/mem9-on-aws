@@ -539,6 +539,40 @@ describe("concurrency guards", () => {
     expect(deps2.log).toHaveBeenCalledWith(expect.stringContaining("stale"));
     expect(server.store.get("d1").state).toBe("deleted");
   });
+
+  it("TC-CONSOL-014 shares the database apply mutex with consolidation", async () => {
+    const dir = tempDir();
+    const server = fakeServer([memory("d1", "x")]);
+    const llm = fakeLlm([
+      [{ id: "d1", verdict: "DELETE", reason: "noise" }],
+    ]);
+    const acquireMutex = vi.fn(async () => null);
+    const blocked = await runCleanup(
+      baseOpts({ apply: true }),
+      { ...baseDeps(server, llm, dir), acquireMutex },
+    );
+    expect(acquireMutex).toHaveBeenCalledWith("test");
+    expect(blocked.exitCode).toBe(3);
+    expect(server.store.get("d1").state).toBe("active");
+
+    const release = vi.fn(async () => {});
+    const localLock = join(dir, "local.lock");
+    writeFileSync(
+      localLock,
+      JSON.stringify({ pid: 99999, host: "other-host", at: Date.now() }),
+    );
+    const localBlocked = await runCleanup(
+      baseOpts({ apply: true }),
+      {
+        ...baseDeps(server, llm, dir),
+        acquireMutex: vi.fn(async () => ({ release })),
+        lockFile: localLock,
+      },
+    );
+    expect(localBlocked.exitCode).toBe(3);
+    expect(release).toHaveBeenCalledOnce();
+    expect(server.store.get("d1").state).toBe("active");
+  });
 });
 
 describe("secrets", () => {

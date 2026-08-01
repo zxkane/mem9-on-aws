@@ -3,7 +3,7 @@
 This document describes the runtime implemented in this repository. It separates
 that current state from planned reliability work and rejected alternatives.
 
-Status: **implemented current state, reviewed 2026-07-24**. The deployed-resource
+Status: **implemented current state, reviewed 2026-08-01**. The deployed-resource
 definitions in `sst.config.ts`, `infra/`, and `docker/` are authoritative. The
 upstream mem9 observations in [`mem9-facts.md`](mem9-facts.md) are empirical
 against the pinned source commit and carry their verification date.
@@ -360,6 +360,57 @@ Memory rows and embeddings are durable in Aurora. The Fargate task uses `/tmp`
 only for mem9's batch-import implementation; normal add, search, and CRUD paths
 do not require persistent task storage.
 
+### Weekly memory consolidation
+
+`infra/consolidation.ts` defines a separate arm64 Fargate task in the existing
+cluster. The task reads active memories and embeddings from Aurora, builds
+deterministic cosine-similarity components, and asks GLM-5 on Bedrock Mantle to
+classify contradictions, merge candidates, and stale environment/configuration
+facts within each component. Memory content and embeddings remain in the
+operator's AWS account. Components above 50 memories or 200,000 content
+characters are review-deferred before inference.
+
+The task definition always defaults to report-only. The EventBridge Scheduler
+schedule and its execution role exist only when
+`MEM9_CONSOLIDATION_SCHEDULE_ENABLED=1`; previews remain `DISABLED`, while
+production runs Sunday at 03:00 UTC. Production enablement is an operator
+decision after the one-shot cleanup and a report-only pass show actionable
+drift. `scripts/run-consolidation-task.sh` is the preview and operator harness:
+it overrides the container command with `--report-only --check-llm`, performs a
+content-free live Mantle smoke, waits for exit zero, and queries only the exact
+task stream's content-free review-list marker.
+
+Automatic execution is capped at 20 mutations. It can merge fragments through
+the cleanup MERGE contract, archive only the strictly older side of a
+timeline-decidable contradiction, and add a bounded stale marker. Every DELETE
+and every contradiction without a strict timeline winner remains review-only.
+Review records with ids, bounded snippets, and rationale persist only in the
+task's CloudWatch Logs. The SNS-to-Slack path receives counts only.
+
+Cleanup and consolidation apply modes share the PostgreSQL advisory key
+`mem9-cleanup:<stage>` for cross-host exclusion. Both retain optimistic
+version/content guards; an archive predicates both timeline sides atomically.
+The cleanup tool also keeps its local lockfile as
+defense in depth; its production apply path therefore needs direct access to
+the Aurora writer endpoint and DB secret.
+
+Each run emits content-free EMF in namespace `mem9-on-aws` with only the
+`stage` dimension:
+
+- `ConsolidationScanned`
+- `ConsolidationMerged`
+- `ConsolidationArchived`
+- `ConsolidationFlaggedStale`
+- `ConsolidationReviewItems`
+- `ConsolidationSkippedLww`
+
+In production, an exact-task ECS STOPPED event with a non-zero container exit code produces
+`ConsolidationTaskFailures` in the same namespace and stage dimension. Its
+alarm targets the existing SNS-to-Slack delivery path. The Scheduler role can
+run only the exact task definition and pass only its task/execution roles to
+`ecs-tasks.amazonaws.com`; its trust policy is bound to the deploying account's
+default Scheduler group.
+
 ### ECR registry scanning
 
 The four retained repositories remain in
@@ -634,6 +685,7 @@ to the GitHub Actions deploy role.
 | Smart-ingest LLM       | Local proxy to Bedrock Mantle                                                                        | `docker/llm-proxy/`                                                                                           |
 | Mantle attribution     | `OpenAI-Project` added by `llm-proxy` when a project is configured                                   | `docker/llm-proxy/server.mjs`                                                                                 |
 | Ingest observability   | Content-free EMF metrics, CloudWatch dashboard, and production alarms                                | `docker/mnemo-server/patches/0006-durable-ingest-telemetry.patch`, `infra/observability.ts`                   |
+| Memory consolidation   | Opt-in weekly Scheduler task, private review logs, safe mutation cap, and failure alarm              | `infra/consolidation.ts`, `scripts/memory-consolidation.mjs`                                                  |
 | MCP surface            | AgentCore Gateway Lambda target                                                                      | `infra/gateway.ts`                                                                                            |
 | Private service lookup | AWS Cloud Map                                                                                        | `infra/ecs.ts`                                                                                                |
 | Inbound auth           | Cognito M2M plus OAuth2 PKCE facade; optional production API Gateway custom domain                  | `infra/cognito.ts`, `infra/oauth-facade.ts`                                                                   |
@@ -660,6 +712,8 @@ to the GitHub Actions deploy role.
 - The OAuth facade custom domain is optional, production-only, and uses an
   existing Cloudflare zone with DNS-only records; previews use `execute-api`.
 - Schema bootstrap is a separate one-shot ECS task.
+- Weekly cross-memory consolidation is absent by default and enabled only by
+  `MEM9_CONSOLIDATION_SCHEDULE_ENABLED=1`; deletion remains manual.
 - ECR scan-on-push is a guarded out-of-band registry singleton, separate from
   the retained repository stack.
 - Every application IAM role is synthesized with the fixed operator-owned
@@ -679,7 +733,7 @@ The open reliability program covers future work in these areas:
 
 - Release image tag selection and read-only ECS actual-state reconciliation.
 - Mandatory alert delivery with separate transport and execution failure queues.
-- Safe preview-stage reconciliation and a separately reviewed one-time cleanup.
+- Safe preview-stage reconciliation.
 - A post-deployment production reliability verification exercise.
 
 The current async `messages[]` path is a durable queue and atomic job processor.

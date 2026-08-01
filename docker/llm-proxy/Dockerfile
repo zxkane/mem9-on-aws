@@ -18,17 +18,22 @@ WORKDIR /app
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends curl \
+    && curl --fail --silent --show-error \
+      https://truststore.pki.rds.amazonaws.com/ap-northeast-1/ap-northeast-1-bundle.pem \
+      --output /app/ap-northeast-1-bundle.pem \
     && rm -rf /var/lib/apt/lists/*
 
-# Deps first (layer cache). --omit=dev: only @aws/bedrock-token-generator +
-# @aws-sdk/credential-providers (+ their @smithy/@aws-sdk transitive deps).
-COPY docker/llm-proxy/package.json ./
-RUN npm install --omit=dev --no-audit --no-fund
+# Deps first (layer cache). The sidecar uses the token dependencies; the
+# consolidation entrypoint additionally uses PostgreSQL and SNS.
+COPY docker/llm-proxy/package*.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
 
 COPY docker/llm-proxy/server.mjs ./
+COPY scripts/memory-cleanup.mjs scripts/memory-consolidation.mjs ./
 
 # Listens on LLM_PROXY_PORT (default 8082); mem9 reaches it at
 # http://localhost:8082/v1. Not published outside the task — localhost only.
 EXPOSE 8082
 ENV NODE_ENV=production
+ENV NODE_EXTRA_CA_CERTS=/app/ap-northeast-1-bundle.pem
 ENTRYPOINT ["node", "server.mjs"]

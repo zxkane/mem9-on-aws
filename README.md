@@ -63,6 +63,7 @@ citations.
 | ECS task           | **3 containers**: mnemo-server + qwen3-embed sidecar + llm-proxy sidecar                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | Schema bootstrap   | **startup atomic-ingest migration** before `mnemo-server`, plus a **one-shot ECS task** on deploy (pgvector + tenant runtime schema incl. `idx_app`/FTS/`vector(1024)` + seed 1 tenant)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
 | Durable ingest     | Transcript `messages[]` requests enqueue durable Aurora jobs. Immutable, materialized plans apply raw sessions, tags, memory actions, and job success in one PostgreSQL transaction; authenticated REST and Gateway status lookups are tenant-scoped.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Consolidation      | An opt-in Sunday 03:00 UTC Scheduler task clusters existing memories, uses GLM-5 to detect contradictions/fragments/staleness, auto-applies at most 20 safe mutations, and sends every deletion or ambiguous contradiction to private review. The schedule is absent unless `MEM9_CONSOLIDATION_SCHEDULE_ENABLED=1`; the task remains available for report-only runs. |
 | Tenancy            | **single tenant** (one `X-API-Key`); writes carry **`X-Mnemo-Agent-Id`** to reserve per-agent scoping                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | Replicas           | **Single** (`desiredCount=1`) — single-writer, sidesteps mem9's local-disk import dir                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 
@@ -214,7 +215,7 @@ The AgentCore Gateway exposes four tools over MCP (Cognito-authenticated):
 ## Layout
 
 - `infra/` — the SST/Pulumi app (VPC lookup, Aurora, ECS, Cognito, gateway,
-  OAuth façade, bootstrap) + unit tests.
+  OAuth façade, bootstrap, consolidation) + unit tests.
 - `docker/` — the four container images: `mnemo-server` (pinned upstream build),
   `qwen3-embed` (embedding sidecar), `llm-proxy` (Mantle bearer/project bridge),
   `bootstrap` (schema + tenant seed).
@@ -904,10 +905,10 @@ host. Production execution is a deliberate manual flow:
 
    Destructive actions (deleted ids + merge rewrites) are capped per run
    (default 50, `--cap` override); the run aborts before any call that would
-   exceed the cap. A stage-scoped lockfile (`--lock-file`/`--lock-ttl`
-   overrides) prevents concurrent applies by the same user on the same host;
-   do not run applies from two hosts or accounts at once (single-operator
-   contract).
+   exceed the cap. Apply mode holds the same stage-scoped PostgreSQL advisory
+   mutex as scheduled consolidation, preventing cross-host mutation overlap.
+   A lockfile (`--lock-file`/`--lock-ttl` overrides) remains a local
+   defense-in-depth guard.
 
    Exit codes: `0` success, `1` unexpected error, `2` discovery failed,
    `3` another run holds the lock, `4` cap exceeded (aborted), `5`
@@ -930,6 +931,50 @@ needs those Bedrock grants in the **responses region** as well (default
 `us-west-2`), since the bearer is minted per region; cost attribution uses
 `MEM9_BEDROCK_PROJECT_OPENAI` there and `MEM9_BEDROCK_PROJECT` in the
 application region (Mantle projects are regional and never cross-applied).
+
+The consolidation task additionally needs the Aurora writer endpoint plus IAM for
+`/mem9-on-aws/<stage>/db/*` parameters and the DB secret. The host must trust the
+current Amazon RDS CA; set `NODE_EXTRA_CA_CERTS` to the regional RDS bundle
+before starting Node when that CA is not already in the host trust store.
+
+## Weekly memory consolidation
+
+`infra/consolidation.ts` defines an arm64 Fargate task that compares existing
+active memories with each other. The task always defaults to report-only.
+`scripts/run-consolidation-task.sh` starts that deployed task explicitly with
+`--report-only --check-llm`, performs a content-free live Mantle smoke, waits
+for exit zero, and reads only its content-free `CONSOLIDATION_REVIEW_LIST`
+summary from the exact CloudWatch log stream:
+
+```bash
+STAGE=prod AWS_REGION=ap-northeast-1 \
+  bash scripts/run-consolidation-task.sh
+```
+
+Individual `CONSOLIDATION_REVIEW` records contain memory ids, snippets, and
+rationale. Review them only in the private task log group. Do not paste them
+into repository artifacts, issues, or PRs. Approved deletion ids go one per
+line in a local file and are applied through the cleanup tool:
+
+```bash
+node scripts/memory-cleanup.mjs --stage prod --apply \
+  --ids approved.local.txt
+```
+
+The cleanup tool reclassifies and LWW-checks those ids, uses soft deletion, and
+shares the consolidation advisory mutex. Consolidation itself never executes a
+DELETE. It may automatically merge fragments, archive a strictly older
+contradiction loser, or mark an eligible fact stale, with a hard cap of 20
+mutations per run.
+
+The weekly schedule and Scheduler execution role are absent by default. Before
+the first deployment that introduces Scheduler resources, re-run
+`scripts/deploy-github-role.sh` with IAM-admin credentials. Enable production by
+setting the repository variable `MEM9_CONSOLIDATION_SCHEDULE_ENABLED` to `1`
+only after the initial cleanup and a report-only run show actionable drift.
+Production then runs Sunday at 03:00 UTC; previews synthesize a disabled
+schedule for infrastructure coverage.
+
 
 
 ## License

@@ -29,6 +29,7 @@ const reconcilePath = resolve(here, "reconcile-ecs-deployment.mjs");
 const bootstrapTaskPath = resolve(here, "run-bootstrap-task.sh");
 const emfSmokePath = resolve(here, "run-mnemo-emf-smoke.sh");
 const healthSmokePath = resolve(here, "run-mnemo-health-smoke.sh");
+const consolidationRunnerPath = resolve(here, "run-consolidation-task.sh");
 const fakeAwsPath = resolve(here, "fixtures/fake-aws.mjs");
 const tempDirs = [];
 
@@ -360,6 +361,42 @@ describe("workflow integration", () => {
     expect(workflow).not.toContain('MEM9_DURABLE_INGEST_ENABLED: "0"');
     expect(workflow).not.toContain("Enable durable ingest after bootstrap");
     expect(workflow.match(/pnpm -C infra exec sst deploy/g)).toHaveLength(2);
+  });
+
+  it("TC-CONSOL-040/041: runs a report-only preview task behind the schedule gate", () => {
+    const source = readFileSync(workflowPath, "utf8");
+    const workflow = parse(source);
+    const previewSteps = workflow.jobs["deploy-preview"].steps;
+    const prodSteps = workflow.jobs["deploy-prod"].steps;
+    const previewDeploy = previewSteps.find(
+      ({ name }) => name === "Deploy PR stage",
+    );
+    const prodDeploy = prodSteps.find(
+      ({ name }) => name === "Deploy prod stage",
+    );
+    const bootstrapIndex = previewSteps.findIndex(
+      ({ name }) => name === "Run schema-bootstrap task (preview)",
+    );
+    const consolidationIndex = previewSteps.findIndex(
+      ({ name }) => name === "Run report-only consolidation task (preview)",
+    );
+
+    expect(previewDeploy.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED).toBe("1");
+    expect(prodDeploy.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED).toBe(
+      "${{ vars.MEM9_CONSOLIDATION_SCHEDULE_ENABLED }}",
+    );
+    expect(consolidationIndex).toBeGreaterThan(bootstrapIndex);
+    expect(previewSteps[consolidationIndex].run).toBe(
+      "bash scripts/run-consolidation-task.sh",
+    );
+    expect(source).toContain("shellcheck scripts/run-consolidation-task.sh");
+
+    const runner = readFileSync(consolidationRunnerPath, "utf8");
+    expect(runner).toContain('"--report-only"');
+    expect(runner).toContain('"--check-llm"');
+    expect(runner).toContain("logs filter-log-events");
+    expect(runner).toContain('"CONSOLIDATION_REVIEW_LIST"');
+    expect(runner).not.toContain("logs get-log-events");
   });
 
   it("uses the tested tag selector and reconciles preview and prod deployments", () => {

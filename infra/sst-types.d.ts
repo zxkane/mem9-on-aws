@@ -78,6 +78,9 @@ declare namespace aws {
       readonly arn: Output<string>;
       readonly name: Output<string>;
     }
+    class RolePolicy {
+      constructor(name: string, args: Record<string, unknown>, opts?: unknown);
+    }
   }
 
   // Cognito user pool + M2M/OAuth client (infra/cognito.ts + infra/oauth-facade.ts).
@@ -231,11 +234,36 @@ declare namespace aws {
 
   // CloudWatch metric filters + alarms (infra/observability.ts, issue #26).
   namespace cloudwatch {
+    class EventRule {
+      constructor(name: string, args?: Record<string, unknown>, opts?: unknown);
+      readonly arn: Output<string>;
+      readonly name: Output<string>;
+    }
+    class EventTarget {
+      constructor(
+        name: string,
+        args: Record<string, unknown>,
+        opts?: { dependsOn?: unknown[] },
+      );
+    }
+    class LogGroup {
+      constructor(name: string, args?: Record<string, unknown>, opts?: unknown);
+      readonly arn: Output<string>;
+      readonly name: Output<string>;
+    }
+    class LogResourcePolicy {
+      constructor(
+        name: string,
+        args: Record<string, unknown>,
+        opts?: unknown,
+      );
+    }
     interface LogMetricFilterMetricTransformation {
       name: Input<string>;
       namespace: Input<string>;
       value: Input<string>;
       defaultValue?: Input<string>;
+      dimensions?: Input<Record<string, Input<string>>>;
     }
     interface LogMetricFilterArgs {
       logGroupName: Input<string>;
@@ -376,6 +404,14 @@ declare namespace aws {
     function getParameterOutput(
       args: GetParameterOutputArgs,
     ): GetParameterResult;
+  }
+
+  namespace scheduler {
+    class Schedule {
+      constructor(name: string, args: Record<string, unknown>, opts?: unknown);
+      readonly arn: Output<string>;
+      readonly name: Output<string>;
+    }
   }
 }
 
@@ -558,14 +594,30 @@ declare namespace sst {
       cpu?: Input<string>;
       memory?: Input<string>;
       image?: Input<string>;
+      command?: Input<Input<string>[]>;
+      entrypoint?: Input<string[]>;
       environment?: Input<Record<string, Input<string>>>;
       ssm?: Input<Record<string, Input<string>>>;
+      permissions?: Input<FargatePermission>[];
       logging?: ServiceLogging;
       transform?: { taskDefinition?: (args: Record<string, unknown>) => void };
     }
     class Task {
       constructor(name: string, args: TaskArgs);
-      readonly nodes: { task: { arn: Output<string> } };
+      readonly assignPublicIp: Output<boolean>;
+      readonly securityGroups: Output<string[]>;
+      readonly subnets: Output<string[]>;
+      readonly nodes: {
+        executionRole: {
+          arn: Output<string>;
+          name: Output<string>;
+        };
+        taskRole: {
+          arn: Output<string>;
+          name: Output<string>;
+        };
+        taskDefinition: Output<unknown>;
+      };
       readonly taskDefinition: Output<string>;
     }
 

@@ -1,0 +1,341 @@
+import type { DbOutputs } from "./db";
+import type { EcsOutputs } from "./ecs";
+import { accountId, ECR_REGION, ecrImage } from "./ecr";
+import type { TenantIdentityOutputs } from "./tenant-identity";
+
+const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
+const BEDROCK_PROJECT = process.env.MEM9_BEDROCK_PROJECT;
+const SCHEDULE_ENABLED =
+  process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED === "1";
+const TASK_CONTAINER_NAME = "Mem9Consolidation";
+const FAILURE_NAMESPACE = "mem9-on-aws";
+const FAILURE_METRIC = "ConsolidationTaskFailures";
+
+export interface ConsolidationOutputs {
+  taskDefinitionArn: Output<string>;
+}
+
+export function consolidation(
+  ecsOut: EcsOutputs,
+  dbOut: DbOutputs,
+  identity: TenantIdentityOutputs,
+): ConsolidationOutputs {
+  const prefix = `/mem9-on-aws/${$app.stage}`;
+  const tags = {
+    Project: "mem9-on-aws",
+    Stage: $app.stage,
+    ManagedBy: "sst",
+  };
+  const image = ecrImage("mem9-on-aws/llm-proxy", IMAGE_TAG);
+  const taskPermissions: sst.aws.FargatePermission[] = [
+    {
+      actions: ["bedrock-mantle:CreateInference"],
+      resources: [
+        BEDROCK_PROJECT
+          ? $interpolate`arn:aws:bedrock-mantle:${ECR_REGION}:${accountId()}:project/${BEDROCK_PROJECT}`
+          : "*",
+      ],
+    },
+    {
+      actions: [
+        "bedrock-mantle:CallWithBearerToken",
+        "bedrock-mantle:GetProject",
+        "bedrock-mantle:ListProjects",
+        "bedrock-mantle:ListTagsForResource",
+      ],
+      resources: ["*"],
+    },
+    ...(ecsOut.alertsTopicArn
+      ? [
+          {
+            actions: ["sns:Publish"],
+            resources: [ecsOut.alertsTopicArn],
+          },
+        ]
+      : []),
+  ];
+
+  // The task definition is report-only. The weekly target explicitly overrides
+  // this flag, so ad-hoc and preview runs cannot mutate by omission.
+  const task = new sst.aws.Task("Mem9Consolidation", {
+    cluster: ecsOut.cluster,
+    architecture: "arm64",
+    cpu: "0.5 vCPU",
+    memory: "1 GB",
+    image,
+    entrypoint: ["node"],
+    command: ["/app/memory-consolidation.mjs"],
+    environment: {
+      MEM9_STAGE: $app.stage,
+      MEM9_BASE_URL: $interpolate`http://${ecsOut.serviceDnsName}:8080`,
+      MEM9_DB_HOST: dbOut.host,
+      MEM9_DB_PORT: dbOut.port.apply(String),
+      MEM9_DB_NAME: dbOut.database,
+      MEM9_LLM_MODEL: process.env.MEM9_LLM_MODEL || "zai.glm-5",
+      MEM9_BEDROCK_PROJECT: process.env.MEM9_BEDROCK_PROJECT || "",
+      MEM9_CONSOLIDATION_REPORT_ONLY: "1",
+      ...(ecsOut.alertsTopicArn
+        ? { MEM9_ALERTS_TOPIC_ARN: ecsOut.alertsTopicArn }
+        : {}),
+    },
+    ssm: {
+      MEM9_DB_SECRET: dbOut.secretArn,
+      MEM9_TENANT_ID: identity.tenantSecretArn,
+    },
+    permissions: taskPermissions,
+    logging: { retention: "1 month" },
+    transform: {
+      taskDefinition: (args) => {
+        args.tags = { ...(args.tags ?? {}), ...tags };
+      },
+    },
+  });
+
+  const taskLogGroupName = task.nodes.taskDefinition
+    .apply(
+      (definition) =>
+        (definition as { containerDefinitions: Output<string> })
+          .containerDefinitions,
+    )
+    .apply((raw) => {
+      const definitions = JSON.parse(raw) as {
+        name: string;
+        logConfiguration?: { options?: Record<string, string> };
+      }[];
+      const name = definitions.find(
+        (container) => container.name === TASK_CONTAINER_NAME,
+      )?.logConfiguration?.options?.["awslogs-group"];
+      if (!name) {
+        throw new Error("consolidation awslogs-group not found in task definition");
+      }
+      return name;
+    });
+
+  if (ecsOut.alertsTopicArn) {
+    const failureLogGroup = new aws.cloudwatch.LogGroup(
+      "ConsolidationTaskFailureEvents",
+      {
+        name: `/sst/consolidation/${$app.stage}/task-failures`,
+        retentionInDays: 30,
+        tags,
+      },
+    );
+    const failureRule = new aws.cloudwatch.EventRule(
+      "ConsolidationTaskFailureRule",
+      {
+        namePrefix: `mem9-on-aws-${$app.stage}-consolidation-failure-`,
+        description:
+          "Captures non-zero exits from the exact consolidation task revision.",
+        eventPattern: $jsonStringify({
+          source: ["aws.ecs"],
+          "detail-type": ["ECS Task State Change"],
+          detail: {
+            lastStatus: ["STOPPED"],
+            taskDefinitionArn: [task.taskDefinition],
+            containers: {
+              exitCode: [{ "anything-but": 0 }],
+            },
+          },
+        }),
+        tags,
+      },
+    );
+
+    const failureLogPolicy = new aws.cloudwatch.LogResourcePolicy(
+      "ConsolidationTaskFailureLogPolicy",
+      {
+        policyName: `mem9-on-aws-${$app.stage}-consolidation-events`,
+        policyDocument: $jsonStringify({
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Principal: { Service: "events.amazonaws.com" },
+              Action: ["logs:CreateLogStream", "logs:PutLogEvents"],
+              Resource: $interpolate`${failureLogGroup.arn}:*`,
+              Condition: {
+                ArnEquals: { "aws:SourceArn": failureRule.arn },
+              },
+            },
+          ],
+        }),
+      },
+    );
+
+    new aws.cloudwatch.EventTarget(
+      "ConsolidationTaskFailureLogTarget",
+      {
+        arn: failureLogGroup.arn,
+        rule: failureRule.name,
+        inputTransformer: {
+          inputPaths: {
+            exitCode: "$.detail.containers[0].exitCode",
+          },
+          inputTemplate: JSON.stringify({
+            event: "consolidation_task_failed",
+            stage: $app.stage,
+            exitCode: "<exitCode>",
+          }),
+        },
+      },
+      { dependsOn: [failureLogPolicy] },
+    );
+
+    new aws.cloudwatch.LogMetricFilter("ConsolidationTaskFailureFilter", {
+      logGroupName: failureLogGroup.name,
+      pattern:
+        `{ $.event = "consolidation_task_failed" && ` +
+        `$.stage = "${$app.stage}" }`,
+      metricTransformation: {
+        name: FAILURE_METRIC,
+        namespace: FAILURE_NAMESPACE,
+        value: "1",
+        dimensions: { stage: "$.stage" },
+      },
+    });
+
+    new aws.cloudwatch.MetricAlarm("ConsolidationTaskFailureAlarm", {
+      alarmDescription:
+        "The weekly memory consolidation ECS task exited non-zero.",
+      namespace: FAILURE_NAMESPACE,
+      metricName: FAILURE_METRIC,
+      dimensions: { stage: $app.stage },
+      statistic: "Sum",
+      period: 300,
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      threshold: 1,
+      comparisonOperator: "GreaterThanOrEqualToThreshold",
+      treatMissingData: "notBreaching",
+      alarmActions: [ecsOut.alertsTopicArn],
+    });
+  }
+
+  const parameters: Array<[string, string, Input<string>]> = [
+    ["ConsolidationTaskDefArn", "task-def-arn", task.taskDefinition],
+    [
+      "ConsolidationClusterName",
+      "cluster-name",
+      ecsOut.cluster.nodes.cluster.name,
+    ],
+    [
+      "ConsolidationTaskSgId",
+      "task-sg-id",
+      task.securityGroups.apply((ids) => ids.join(",")),
+    ],
+    [
+      "ConsolidationSubnetIds",
+      "subnet-ids",
+      task.subnets.apply((ids) => ids.join(",")),
+    ],
+    ["ConsolidationLogGroupName", "log-group-name", taskLogGroupName],
+  ];
+  for (const [logicalName, suffix, value] of parameters) {
+    new aws.ssm.Parameter(logicalName, {
+      name: `${prefix}/consolidation/${suffix}`,
+      type: suffix === "subnet-ids" ? "StringList" : "String",
+      value,
+      tags,
+    });
+  }
+
+  if (SCHEDULE_ENABLED) {
+    const accountId = aws.getCallerIdentityOutput().accountId;
+    const region = aws.getRegionOutput().name;
+    const schedulerRole = new aws.iam.Role(
+      "Mem9ConsolidationSchedulerRole",
+      {
+        namePrefix:
+          `mem9-on-aws-${$app.stage}-Mem9ConsolidationSchedulerRole-`,
+        assumeRolePolicy: $jsonStringify({
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Principal: { Service: "scheduler.amazonaws.com" },
+              Action: "sts:AssumeRole",
+              Condition: {
+                StringEquals: {
+                  "aws:SourceAccount": accountId,
+                  "aws:SourceArn":
+                    $interpolate`arn:aws:scheduler:${region}:${accountId}:schedule-group/default`,
+                },
+              },
+            },
+          ],
+        }),
+        tags,
+      },
+    );
+    new aws.iam.RolePolicy("Mem9ConsolidationSchedulerPolicy", {
+      role: schedulerRole.name,
+      policy: $jsonStringify({
+        Version: "2012-10-17",
+        Statement: [
+          {
+            Effect: "Allow",
+            Action: "ecs:RunTask",
+            Resource: task.taskDefinition,
+          },
+          {
+            Effect: "Allow",
+            Action: "iam:PassRole",
+            Resource: [
+              task.nodes.taskRole.arn,
+              task.nodes.executionRole.arn,
+            ],
+            Condition: {
+              StringEquals: {
+                "iam:PassedToService": "ecs-tasks.amazonaws.com",
+              },
+            },
+          },
+        ],
+      }),
+    });
+
+    new aws.scheduler.Schedule("WeeklyMemoryConsolidation", {
+      namePrefix: `mem9-on-aws-${$app.stage}-weekly-consolidation-`,
+      description:
+        "Weekly cross-memory contradiction, merge, and staleness pass.",
+      scheduleExpression: "cron(0 3 ? * SUN *)",
+      scheduleExpressionTimezone: "UTC",
+      state: $app.stage === "prod" ? "ENABLED" : "DISABLED",
+      flexibleTimeWindow: { mode: "OFF" },
+      target: {
+        arn: ecsOut.cluster.nodes.cluster.arn,
+        roleArn: schedulerRole.arn,
+        input: $jsonStringify({
+          containerOverrides: [
+            {
+              name: TASK_CONTAINER_NAME,
+              environment: [
+                {
+                  name: "MEM9_CONSOLIDATION_REPORT_ONLY",
+                  value: "0",
+                },
+              ],
+            },
+          ],
+        }),
+        retryPolicy: {
+          maximumEventAgeInSeconds: 3600,
+          maximumRetryAttempts: 1,
+        },
+        ecsParameters: {
+          launchType: "FARGATE",
+          taskCount: 1,
+          taskDefinitionArn: task.taskDefinition,
+          networkConfiguration: {
+            assignPublicIp: task.assignPublicIp,
+            securityGroups: task.securityGroups,
+            subnets: task.subnets,
+          },
+        },
+      },
+      tags,
+    });
+  }
+
+  return { taskDefinitionArn: task.taskDefinition };
+}
