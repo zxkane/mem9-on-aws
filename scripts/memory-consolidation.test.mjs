@@ -121,6 +121,24 @@ describe("embedding clustering", () => {
       }).map((cluster) => cluster.map((item) => item.id)),
     ).toEqual([["a", "b"], ["c", "d"], ["old"]]);
   });
+
+  it("TC-CONSOL-019: excludes session memories from consolidation", async () => {
+    const session = memory("session", "old raw session", [1, 0], {
+      memory_type: "session",
+      updated_at: "2025-01-01T00:00:00Z",
+    });
+
+    expect(clusterMemories([session], { now: NOW })).toEqual([]);
+
+    const fake = fakeDeps([session], []);
+    const result = await runConsolidation(
+      { stage: "prod", reportOnly: true, cap: 20 },
+      fake.deps,
+    );
+    expect(fake.completeChat).not.toHaveBeenCalled();
+    expect(result.metrics.scanned).toBe(0);
+    expect(result.review).toEqual([]);
+  });
 });
 
 describe("LLM action validation and tiers", () => {
@@ -394,6 +412,207 @@ describe("execution safety", () => {
     );
     expect(fake.writes.filter((write) => write.type === "put")).toEqual([]);
     expect(result.metrics.skippedLww).toBe(1);
+    expect(result.mutations).toBe(0);
+  });
+
+  it("TC-CONSOL-018: reviews stale marking when all 20 tag slots are occupied", async () => {
+    const item = memory("stale", "old config", [1, 0], {
+      tags: Array.from({ length: 20 }, (_, index) => `tag-${index}`),
+      updated_at: "2025-01-01T00:00:00Z",
+    });
+    const fake = fakeDeps([item], [
+      '{"actions":[{"type":"STALE","ids":["stale"],"rationale":"old"}]}',
+    ]);
+
+    const result = await runConsolidation(
+      { stage: "prod", reportOnly: false, cap: 20 },
+      fake.deps,
+    );
+
+    expect(fake.writes.filter((write) => write.type === "put")).toEqual([]);
+    expect(result.metrics.flaggedStale).toBe(0);
+    expect(result.review).toContainEqual(
+      expect.objectContaining({
+        kind: "TAG_LIMIT_REACHED",
+        ids: ["stale"],
+      }),
+    );
+  });
+
+  it("TC-CONSOL-017: emits review and EMF after a mid-apply mutation error", async () => {
+    const memories = [
+      memory("a", "first fragment", [1, 0]),
+      memory("b", "second fragment", [1, 0]),
+      memory("c", "third fragment", [0, 1]),
+      memory("d", "fourth fragment", [0, 1]),
+    ];
+    const fake = fakeDeps(memories, [
+      JSON.stringify({
+        actions: [{
+          type: "MERGE",
+          ids: ["a", "b"],
+          survivor_id: "a",
+          merged_content: "first merged memory",
+          rationale: "same first topic",
+        }],
+      }),
+      JSON.stringify({
+        actions: [{
+          type: "MERGE",
+          ids: ["c", "d"],
+          survivor_id: "c",
+          merged_content: "second merged memory",
+          rationale: "same second topic",
+        }],
+      }),
+    ]);
+    const putMemory = fake.deps.putMemory.getMockImplementation();
+    fake.deps.putMemory
+      .mockImplementationOnce(putMemory)
+      .mockRejectedValueOnce(new Error("injected PUT failure"));
+
+    const result = await runConsolidation(
+      {
+        stage: "prod",
+        reportOnly: false,
+        cap: 20,
+        similarityThreshold: 0.95,
+      },
+      fake.deps,
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.metrics.merged).toBe(1);
+    expect(result.review).toContainEqual(
+      expect.objectContaining({ kind: "APPLY_FAILED", ids: ["c", "d"] }),
+    );
+    expect(fake.mutexRelease).toHaveBeenCalledOnce();
+    expect(
+      fake.logs.some((line) => line.startsWith("CONSOLIDATION_REVIEW_LIST ")),
+    ).toBe(true);
+    const emf = fake.logs
+      .map((line) => {
+        try {
+          return JSON.parse(line);
+        } catch {
+          return null;
+        }
+      })
+      .find((record) => record?._aws);
+    expect(emf).toMatchObject({
+      ConsolidationMerged: 1,
+      ConsolidationReviewItems: 1,
+    });
+  });
+
+  it("TC-CONSOL-017: records a survivor PUT when MERGE deletion fails", async () => {
+    const memories = [
+      memory("survivor", "first fragment", [1, 0]),
+      memory("absorbed", "second fragment", [1, 0]),
+    ];
+    const fake = fakeDeps(memories, [
+      JSON.stringify({
+        actions: [{
+          type: "MERGE",
+          ids: ["survivor", "absorbed"],
+          survivor_id: "survivor",
+          merged_content: "merged memory",
+          rationale: "same topic",
+        }],
+      }),
+    ]);
+    fake.deps.deleteMemories.mockRejectedValueOnce(
+      new Error("injected batch-delete failure"),
+    );
+
+    const result = await runConsolidation(
+      { stage: "prod", reportOnly: false, cap: 20 },
+      fake.deps,
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.mutations).toBe(1);
+    expect(result.metrics.merged).toBe(0);
+    expect(result.review).toContainEqual(
+      expect.objectContaining({
+        kind: "APPLY_FAILED",
+        ids: ["survivor", "absorbed"],
+        rationale: expect.stringContaining("after 1 confirmed mutation"),
+      }),
+    );
+  });
+
+  it("TC-CONSOL-017: rejects an invalid batch-delete count", async () => {
+    const memories = [
+      memory("survivor", "first fragment", [1, 0]),
+      memory("absorbed", "second fragment", [1, 0]),
+    ];
+    const fake = fakeDeps(memories, [
+      JSON.stringify({
+        actions: [{
+          type: "MERGE",
+          ids: ["survivor", "absorbed"],
+          survivor_id: "survivor",
+          merged_content: "merged memory",
+          rationale: "same topic",
+        }],
+      }),
+    ]);
+    fake.deps.deleteMemories.mockResolvedValueOnce(undefined);
+
+    const result = await runConsolidation(
+      { stage: "prod", reportOnly: false, cap: 20 },
+      fake.deps,
+    );
+
+    expect(result).toMatchObject({
+      exitCode: 1,
+      mutations: 1,
+      metrics: { merged: 0 },
+    });
+    expect(result.review).toContainEqual(
+      expect.objectContaining({
+        kind: "APPLY_FAILED",
+        rationale: expect.stringContaining("after 1 confirmed mutation"),
+      }),
+    );
+  });
+
+  it("TC-CONSOL-017: records a survivor PUT when an absorbed re-read fails", async () => {
+    const memories = [
+      memory("survivor", "first fragment", [1, 0]),
+      memory("absorbed", "second fragment", [1, 0]),
+    ];
+    const fake = fakeDeps(memories, [
+      JSON.stringify({
+        actions: [{
+          type: "MERGE",
+          ids: ["survivor", "absorbed"],
+          survivor_id: "survivor",
+          merged_content: "merged memory",
+          rationale: "same topic",
+        }],
+      }),
+    ]);
+    const getMemory = fake.deps.getMemory.getMockImplementation();
+    fake.deps.getMemory
+      .mockImplementationOnce(getMemory)
+      .mockRejectedValueOnce(new Error("injected absorbed read failure"));
+
+    const result = await runConsolidation(
+      { stage: "prod", reportOnly: false, cap: 20 },
+      fake.deps,
+    );
+
+    expect(result.exitCode).toBe(1);
+    expect(result.mutations).toBe(1);
+    expect(result.metrics.merged).toBe(0);
+    expect(result.review).toContainEqual(
+      expect.objectContaining({
+        kind: "APPLY_FAILED",
+        rationale: expect.stringContaining("after 1 confirmed mutation"),
+      }),
+    );
   });
 
   it("TC-CONSOL-009: does not absorb a memory whose version changed after scan", async () => {

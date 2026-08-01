@@ -21,7 +21,13 @@ const out = <T>(value: T): Output<T> => ({
 });
 
 function materialize(value: unknown): unknown {
-  if (value && typeof value === "object" && "value" in value) {
+  if (
+    value &&
+    typeof value === "object" &&
+    "value" in value &&
+    "apply" in value &&
+    typeof (value as { apply?: unknown }).apply === "function"
+  ) {
     return materialize((value as Output<unknown>).value);
   }
   if (Array.isArray(value)) return value.map(materialize);
@@ -249,12 +255,13 @@ function installGlobals(stage: string) {
 
 async function loadAndRun(stage = "prod") {
   vi.resetModules();
-  const { consolidation } = await import("./consolidation");
-  return consolidation(fakeEcs(
+  const consolidationModule = await import("./consolidation");
+  consolidationModule.consolidation(fakeEcs(
     stage === "prod"
       ? "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts"
       : undefined,
   ), fakeDb(), fakeIdentity());
+  return consolidationModule;
 }
 
 beforeEach(() => {
@@ -289,6 +296,13 @@ describe("consolidation task and schedule", () => {
     expect(args.command).toEqual(["/app/memory-consolidation.mjs"]);
     expect(args.environment.MEM9_CONSOLIDATION_REPORT_ONLY).toBe("1");
     expect(JSON.stringify(args.environment)).not.toContain("sensitive-tenant-id");
+    const proxyDockerfile = readFileSync(
+      new URL("../docker/llm-proxy/Dockerfile", import.meta.url),
+      "utf8",
+    );
+    expect(proxyDockerfile).toMatch(
+      /apt-get install[^\\]*\bca-certificates\b/u,
+    );
     expect(materialize(task.args.ssm)).toEqual({
       MEM9_DB_SECRET:
         "arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:mem9-on-aws-prod-Mem9DbSecret-x",
@@ -321,11 +335,24 @@ describe("consolidation task and schedule", () => {
   it("TC-CONSOL-021/022/027: creates a disabled preview and enabled weekly prod schedule", async () => {
     process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED = "1";
     installGlobals("pr-103");
-    await loadAndRun("pr-103");
+    const consolidationModule = await loadAndRun("pr-103");
     let schedule = materialize(one("Schedule").args) as Record<string, any>;
     expect(schedule.state).toBe("DISABLED");
     expect(schedule.scheduleExpression).toBe("cron(0 3 ? * SUN *)");
     expect(schedule.flexibleTimeWindow).toEqual({ mode: "OFF" });
+    expect(JSON.parse(schedule.target.input)).toEqual({
+      containerOverrides: [
+        {
+          name: consolidationModule.CONSOLIDATION_CONTAINER_NAME,
+          environment: [
+            {
+              name: "MEM9_CONSOLIDATION_REPORT_ONLY",
+              value: "0",
+            },
+          ],
+        },
+      ],
+    });
     expect(schedule.target.ecsParameters).toMatchObject({
       launchType: "FARGATE",
       taskDefinitionArn:

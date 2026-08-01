@@ -7,7 +7,7 @@ const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 const BEDROCK_PROJECT = process.env.MEM9_BEDROCK_PROJECT;
 const SCHEDULE_ENABLED =
   process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED === "1";
-const TASK_CONTAINER_NAME = "Mem9Consolidation";
+export const CONSOLIDATION_CONTAINER_NAME = "Mem9Consolidation";
 const FAILURE_NAMESPACE = "mem9-on-aws";
 const FAILURE_METRIC = "ConsolidationTaskFailures";
 
@@ -103,7 +103,7 @@ export function consolidation(
         logConfiguration?: { options?: Record<string, string> };
       }[];
       const name = definitions.find(
-        (container) => container.name === TASK_CONTAINER_NAME,
+        (container) => container.name === CONSOLIDATION_CONTAINER_NAME,
       )?.logConfiguration?.options?.["awslogs-group"];
       if (!name) {
         throw new Error("consolidation awslogs-group not found in task definition");
@@ -308,7 +308,7 @@ export function consolidation(
         input: $jsonStringify({
           containerOverrides: [
             {
-              name: TASK_CONTAINER_NAME,
+              name: CONSOLIDATION_CONTAINER_NAME,
               environment: [
                 {
                   name: "MEM9_CONSOLIDATION_REPORT_ONLY",

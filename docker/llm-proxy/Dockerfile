@@ -17,7 +17,7 @@ FROM node:24-slim
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && curl --fail --silent --show-error \
       https://truststore.pki.rds.amazonaws.com/ap-northeast-1/ap-northeast-1-bundle.pem \
       --output /app/ap-northeast-1-bundle.pem \

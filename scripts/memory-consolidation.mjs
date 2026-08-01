@@ -17,6 +17,7 @@ const DEFAULT_STALE_AFTER_MS = {
   insight: 90 * DAY_MS,
   pinned: 180 * DAY_MS,
 };
+const MAX_TAGS = 20;
 const SNIPPET_LENGTH = 160;
 const MAX_RATIONALE_LENGTH = 500;
 const MAX_CLUSTER_MEMORIES = 50;
@@ -101,12 +102,23 @@ function isStaleCandidate(memory, now, staleAfterMs) {
     now - timestamp(memory.updated_at) >= threshold;
 }
 
+function isConsolidationCandidate(memory) {
+  return memory.memory_type !== "session";
+}
+
+function withStaleTag(value) {
+  const current = Array.isArray(value) ? value : [];
+  const tags = [...new Set([...current, "stale"])];
+  return tags.length <= MAX_TAGS ? tags : null;
+}
+
 /**
  * Build deterministic cosine-similarity connected components. Components with
  * multiple memories are always evaluated. Singletons are evaluated only after
  * their memory-type staleness threshold.
  */
 export function clusterMemories(memories, options = {}) {
+  const candidates = memories.filter(isConsolidationCandidate);
   const similarityThreshold =
     options.similarityThreshold ?? DEFAULT_SIMILARITY_THRESHOLD;
   const now = options.now ?? Date.now();
@@ -114,7 +126,7 @@ export function clusterMemories(memories, options = {}) {
     ...DEFAULT_STALE_AFTER_MS,
     ...(options.staleAfterMs ?? {}),
   };
-  const parent = memories.map((_, index) => index);
+  const parent = candidates.map((_, index) => index);
 
   const find = (index) => {
     let current = index;
@@ -130,10 +142,10 @@ export function clusterMemories(memories, options = {}) {
     if (rootLeft !== rootRight) parent[rootRight] = rootLeft;
   };
 
-  for (let left = 0; left < memories.length; left += 1) {
-    for (let right = left + 1; right < memories.length; right += 1) {
+  for (let left = 0; left < candidates.length; left += 1) {
+    for (let right = left + 1; right < candidates.length; right += 1) {
       if (
-        cosine(memories[left].embedding, memories[right].embedding) >=
+        cosine(candidates[left].embedding, candidates[right].embedding) >=
         similarityThreshold
       ) {
         union(left, right);
@@ -142,7 +154,7 @@ export function clusterMemories(memories, options = {}) {
   }
 
   const grouped = new Map();
-  memories.forEach((memory, index) => {
+  candidates.forEach((memory, index) => {
     const root = find(index);
     const group = grouped.get(root) ?? [];
     group.push(memory);
@@ -160,6 +172,14 @@ class InvalidActions extends Error {
   constructor(message) {
     super(message);
     this.name = "InvalidActions";
+  }
+}
+
+class ApplyMutationError extends Error {
+  constructor(cause, confirmedMutations) {
+    super("consolidation mutation failed", { cause });
+    this.name = "ApplyMutationError";
+    this.confirmedMutations = confirmedMutations;
   }
 }
 
@@ -328,6 +348,12 @@ export function routeActions(memories, actions, options = {}) {
         continue;
       }
       const memory = byId.get(ids[0]);
+      if (!withStaleTag(memory.tags)) {
+        review.push(
+          reviewItem("TAG_LIMIT_REACHED", ids, byId, action.rationale),
+        );
+        continue;
+      }
       if (!isStaleCandidate(memory, now, staleAfterMs)) {
         review.push(
           reviewItem("INELIGIBLE_STALE", ids, byId, action.rationale),
@@ -444,17 +470,41 @@ function cleanupClient(deps) {
 async function executeMerge(action, deps, metrics) {
   const deleteQueue = [];
   const counters = { skippedLww: 0 };
-  const used = await applyMergeDecision(
-    action,
-    cleanupClient(deps),
-    deleteQueue,
-    counters,
-    deps.log,
-  );
-  if (deleteQueue.length > 0) await deps.deleteMemories(deleteQueue);
-  metrics.skippedLww += counters.skippedLww;
-  if (used > 0) metrics.merged += 1;
-  return used;
+  const client = cleanupClient(deps);
+  let confirmedMutations = 0;
+  try {
+    const used = await applyMergeDecision(
+      action,
+      {
+        ...client,
+        put: async (...args) => {
+          const result = await client.put(...args);
+          confirmedMutations += 1;
+          return result;
+        },
+      },
+      deleteQueue,
+      counters,
+      deps.log,
+    );
+    if (deleteQueue.length > 0) {
+      const deleted = await deps.deleteMemories(deleteQueue);
+      if (
+        !Number.isInteger(deleted) ||
+        deleted < 0 ||
+        deleted > deleteQueue.length
+      ) {
+        throw new Error("batch-delete returned an invalid deleted count");
+      }
+      confirmedMutations += deleted;
+    }
+    if (used > 0) metrics.merged += 1;
+    return confirmedMutations;
+  } catch (error) {
+    throw new ApplyMutationError(error, confirmedMutations);
+  } finally {
+    metrics.skippedLww += counters.skippedLww;
+  }
 }
 
 async function executeStale(action, deps, metrics, clock) {
@@ -465,9 +515,12 @@ async function executeStale(action, deps, metrics, clock) {
     contentHash(current.content) !== action.contentHash
   ) {
     metrics.skippedLww += 1;
-    return 0;
+    return { used: 0, tagLimitReached: false };
   }
-  const tags = [...new Set([...(current.tags ?? []), "stale"])].slice(0, 20);
+  const tags = withStaleTag(current.tags);
+  if (!tags) {
+    return { used: 0, tagLimitReached: true };
+  }
   const metadata =
     current.metadata && typeof current.metadata === "object"
       ? structuredClone(current.metadata)
@@ -479,7 +532,7 @@ async function executeStale(action, deps, metrics, clock) {
   };
   await deps.putMemory(action.id, { tags, metadata }, current.version);
   metrics.flaggedStale += 1;
-  return 1;
+  return { used: 1, tagLimitReached: false };
 }
 
 async function executeArchive(action, deps, metrics) {
@@ -520,6 +573,134 @@ function summaryPayload(stage, metrics) {
   };
 }
 
+async function executeAutoAction(action, deps, metrics, clock) {
+  if (action.type === "MERGE") {
+    return { used: await executeMerge(action, deps, metrics) };
+  }
+  if (action.type === "STALE") {
+    return executeStale(action, deps, metrics, clock);
+  }
+  if (action.type === "ARCHIVE") {
+    return { used: await executeArchive(action, deps, metrics) };
+  }
+  return { used: 0 };
+}
+
+async function applyAutoActions(actions, context) {
+  const { byId, cap, clock, deps, metrics, stage } = context;
+  const review = [];
+  let mutations = 0;
+  let failed = false;
+  let mutex;
+  try {
+    mutex = await deps.acquireMutex(stage);
+  } catch (error) {
+    failed = true;
+    deps.log(`consolidation apply setup failed: ${error?.name || "Error"}`);
+    review.push(
+      reviewItem(
+        "APPLY_FAILED",
+        [],
+        byId,
+        "failed to acquire the shared apply mutex; operator review required",
+      ),
+    );
+  }
+  if (!mutex) {
+    if (!failed) {
+      review.push(
+        reviewItem(
+          "LOCK_HELD",
+          [],
+          byId,
+          "another cleanup or consolidation apply holds the shared mutex",
+        ),
+      );
+    }
+    return { failed, mutations, review };
+  }
+
+  try {
+    for (let index = 0; index < actions.length; index += 1) {
+      const action = actions[index];
+      if (mutations + action.cost > cap) {
+        review.push(
+          reviewItem("CAP_DEFERRED", action.ids, byId, action.rationale),
+        );
+        continue;
+      }
+      try {
+        const outcome = await executeAutoAction(action, deps, metrics, clock);
+        mutations += outcome.used;
+        if (outcome.tagLimitReached) {
+          review.push(
+            reviewItem(
+              "TAG_LIMIT_REACHED",
+              action.ids,
+              byId,
+              action.rationale,
+            ),
+          );
+        }
+      } catch (error) {
+        failed = true;
+        const confirmedMutations = Number.isInteger(
+          error?.confirmedMutations,
+        )
+          ? error.confirmedMutations
+          : 0;
+        mutations += confirmedMutations;
+        deps.log(
+          `consolidation ${action.type} apply failed: ${
+            error?.name || "Error"
+          }`,
+        );
+        review.push(
+          reviewItem(
+            "APPLY_FAILED",
+            action.ids,
+            byId,
+            `${action.type} mutation failed${
+              confirmedMutations > 0
+                ? ` after ${confirmedMutations} confirmed mutation${
+                    confirmedMutations === 1 ? "" : "s"
+                  }`
+                : ""
+            }; operator review required`,
+          ),
+        );
+        for (const deferred of actions.slice(index + 1)) {
+          review.push(
+            reviewItem(
+              "APPLY_ABORTED",
+              deferred.ids,
+              byId,
+              "deferred after an earlier mutation failed",
+            ),
+          );
+        }
+        break;
+      }
+    }
+  } finally {
+    try {
+      await mutex.release();
+    } catch (error) {
+      failed = true;
+      deps.log(`consolidation mutex release failed: ${error?.name || "Error"}`);
+      review.push(
+        reviewItem(
+          "APPLY_FAILED",
+          [],
+          byId,
+          "failed to release the shared apply mutex",
+        ),
+      );
+    }
+  }
+  return { failed, mutations, review };
+}
+
 /**
  * Run one consolidation pass over injected adapters.
  */
@@ -541,7 +722,9 @@ export async function runConsolidation(options, deps) {
     }
   }
 
-  const memories = await deps.listActiveMemories();
+  const memories = (await deps.listActiveMemories()).filter(
+    isConsolidationCandidate,
+  );
   const scanTime = clock();
   const clusters = clusterMemories(memories, {
     similarityThreshold:
@@ -565,46 +748,23 @@ export async function runConsolidation(options, deps) {
     skippedLww: 0,
   };
   let mutations = 0;
+  let applyFailed = false;
+  const byId = new Map(memories.map((memory) => [memory.id, memory]));
 
   if (reportOnly) {
-    const byId = new Map(memories.map((memory) => [memory.id, memory]));
     review.push(...routed.auto.map((action) => reportOnlyReview(action, byId)));
   } else if (routed.auto.length > 0) {
-    const mutex = await deps.acquireMutex(stage);
-    if (!mutex) {
-      const byId = new Map(memories.map((memory) => [memory.id, memory]));
-      review.push(
-        reviewItem(
-          "LOCK_HELD",
-          [],
-          byId,
-          "another cleanup or consolidation apply holds the shared mutex",
-        ),
-      );
-    } else {
-      try {
-        for (const action of routed.auto) {
-          if (mutations + action.cost > cap) {
-            const byId = new Map(memories.map((memory) => [memory.id, memory]));
-            review.push(
-              reviewItem("CAP_DEFERRED", action.ids, byId, action.rationale),
-            );
-            continue;
-          }
-          let used = 0;
-          if (action.type === "MERGE") {
-            used = await executeMerge(action, deps, metrics);
-          } else if (action.type === "STALE") {
-            used = await executeStale(action, deps, metrics, clock);
-          } else if (action.type === "ARCHIVE") {
-            used = await executeArchive(action, deps, metrics);
-          }
-          mutations += used;
-        }
-      } finally {
-        await mutex.release();
-      }
-    }
+    const applied = await applyAutoActions(routed.auto, {
+      byId,
+      cap,
+      clock,
+      deps,
+      metrics,
+      stage,
+    });
+    applyFailed = applied.failed;
+    mutations = applied.mutations;
+    review.push(...applied.review);
   }
 
   for (const item of review) {
@@ -626,7 +786,10 @@ export async function runConsolidation(options, deps) {
 
   return {
     exitCode:
-      routed.attempted > 0 && routed.failed === routed.attempted ? 1 : 0,
+      applyFailed ||
+      (routed.attempted > 0 && routed.failed === routed.attempted)
+        ? 1
+        : 0,
     metrics,
     mutations,
     review,
