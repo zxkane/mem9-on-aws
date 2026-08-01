@@ -20,9 +20,10 @@
  *   - `{mcpPrefix}/oauth/allowed-callback-urls`
  *
  * The remaining, non-cyclic values (Cognito endpoint URLs that depend only on
- * the user pool + domain, the HMAC key from an SST Secret, and the resource
- * scopes) are plain env vars. The SSM client is injected (`SsmLike`) so the
- * loader is unit-testable without AWS.
+ * the user pool + domain, the stage-specific HMAC key, and the resource scopes)
+ * are plain env vars. Production sources the key from an operator-set SST
+ * secret; ephemeral stages use a Pulumi-generated secret output. The SSM client
+ * is injected (`SsmLike`) so the loader is unit-testable without AWS.
  */
 
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";

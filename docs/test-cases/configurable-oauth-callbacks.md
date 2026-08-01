@@ -8,7 +8,7 @@ supported.
 
 | ID | Scenario | Expected result |
 | --- | --- | --- |
-| TC-OAUTH-CALLBACK-001 | Synthesize the OAuth facade | SST creates `OauthAllowedCallbackUrls` with an empty-list default and writes its value under the stage's OAuth SSM prefix |
+| TC-OAUTH-CALLBACK-001 | Synthesize the OAuth facade | SST creates `OauthAllowedCallbackUrls` with an empty-list default and writes its value under the stage's OAuth SSM prefix; production keeps the operator-set HMAC secret while ephemeral stages receive a stable Pulumi-generated secret output |
 | TC-OAUTH-CALLBACK-002 | Load a valid JSON array containing complete HTTPS callback URLs | The runtime config exposes the validated URLs |
 | TC-OAUTH-CALLBACK-003 | Load malformed JSON, a non-array value, an HTTP remote URL, a URL with credentials or fragment, more than 20 unique URLs, or more than 1 KiB of JSON | Configuration fails closed before serving OAuth requests |
 | TC-OAUTH-CALLBACK-004 | Authorize with a configured HTTPS callback and S256 PKCE | The facade sends Cognito its own callback URL plus a compact signed nonce and stores the external callback and client state in a signed callback-only cookie |

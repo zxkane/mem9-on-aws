@@ -15,9 +15,9 @@
  * — it's a public authorization-code client (Hosted-UI), scoped to read-only
  * (`mem9-mcp/read`), returned via `readerClientId` for gateway.ts to trust.
  *
- * The HMAC state-signing key is an `sst.Secret` seeded EMPTY — the handler returns
- * 503 until the operator seeds it (config.ts treats an empty key as unconfigured),
- * so a fresh deploy never runs the flow with a guessable state signature.
+ * Production uses an operator-seeded `sst.Secret` and fails closed while it is
+ * empty. Ephemeral stages use a stable Pulumi RandomPassword secret output so
+ * preview OAuth smoke tests exercise the signed flow without shared credentials.
  *
  * The façade Function is NOT VPC-attached: it only reaches Cognito + SSM over the
  * public internet, so a VPC/NAT hop would only add cold-start ENI latency.
@@ -151,8 +151,16 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
     { dependsOn: [facadeApi] },
   );
 
-  // --- HMAC state-signing key (empty default → façade 503 until seeded) ---
-  const hmacKey = new sst.Secret("OauthStateHmacKey", "");
+  // Production fails closed until its operator-owned key is seeded. Ephemeral
+  // stages get a secret Pulumi output that remains stable across stack updates
+  // and disappears with the stage.
+  const hmacKeyValue =
+    stage === "prod"
+      ? new sst.Secret("OauthStateHmacKey", "").value
+      : new random.RandomPassword("OauthStateHmacKey", {
+          length: 64,
+          special: false,
+        }).result;
   // Stage-scoped JSON array of exact HTTPS callbacks for hosted MCP clients.
   // Loopback callbacks remain built in; an empty array preserves that default.
   const allowedCallbackUrls = new sst.Secret(
@@ -190,7 +198,7 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
       COGNITO_REVOCATION_ENDPOINT: cognitoOut.revocationEndpoint,
       COGNITO_JWKS_URI: cognitoOut.jwksUri,
       RESOURCE_SCOPES: "mem9-mcp/read",
-      OAUTH_STATE_HMAC_KEY: hmacKey.value,
+      OAUTH_STATE_HMAC_KEY: hmacKeyValue,
       OAUTH_ALLOWED_CALLBACK_URLS_VERSION: allowedCallbackUrlsVersion,
     },
     permissions: [

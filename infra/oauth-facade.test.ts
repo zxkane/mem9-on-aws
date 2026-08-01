@@ -21,6 +21,10 @@ function out<T>(value: T): {
   return { value, apply: (fn) => out(fn(value) as never) };
 }
 
+function secretOut<T>(value: T) {
+  return { ...out(value), isSecret: true as const };
+}
+
 interface Rec {
   kind: string;
   args: Record<string, unknown>;
@@ -30,6 +34,10 @@ let params: { name: string; type: string; value: unknown }[];
 let routeSpy: ReturnType<typeof vi.fn>;
 let addAuthorizerSpy: ReturnType<typeof vi.fn>;
 let authorizerId: ReturnType<typeof out>;
+let randomPasswords: {
+  name: string;
+  args: Record<string, unknown>;
+}[];
 let previousFacadeAuthorizerEnabled: string | undefined;
 let previousFacadeCustomDomain: string | undefined;
 let previousCloudflareApiToken: string | undefined;
@@ -137,11 +145,20 @@ function installGlobals(stage: string) {
       }
     },
   };
+  (globalThis as Record<string, unknown>).random = {
+    RandomPassword: class {
+      result = secretOut("preview-hmac-key");
+      constructor(name: string, args: Record<string, unknown>) {
+        randomPasswords.push({ name, args });
+      }
+    },
+  };
 }
 
 beforeEach(() => {
   created = [];
   params = [];
+  randomPasswords = [];
   routeSpy = vi.fn();
   authorizerId = out("facade-allow-all-authorizer-id");
   addAuthorizerSpy = vi.fn(() => ({ id: authorizerId }));
@@ -156,7 +173,7 @@ beforeEach(() => {
   delete process.env.CLOUDFLARE_ZONE_ID;
 });
 afterEach(() => {
-  for (const g of ["$app", "aws", "sst", "$interpolate"])
+  for (const g of ["$app", "aws", "sst", "random", "$interpolate"])
     delete (globalThis as Record<string, unknown>)[g];
   if (previousFacadeAuthorizerEnabled === undefined) {
     delete process.env.MEM9_FACADE_AUTHORIZER_ENABLED;
@@ -443,11 +460,38 @@ describe("oauthFacade factory", () => {
       /^[0-9a-f]{64}$/u,
     );
     expect(environment).not.toHaveProperty("OAUTH_ALLOWED_CALLBACK_URLS");
+    expect(randomPasswords).toEqual([]);
     expect(
       params.find((p) => p.name.endsWith("/oauth/allowed-callback-urls")),
     ).toMatchObject({
       type: "String",
       value: "OauthAllowedCallbackUrls-value",
+    });
+  });
+
+  it("generates a stable non-production HMAC key instead of using an empty fallback", async () => {
+    installGlobals("pr-42");
+    const oauthFacade = await loadFacade();
+    oauthFacade(fakeCognitoOut());
+
+    expect(randomPasswords).toEqual([
+      {
+        name: "OauthStateHmacKey",
+        args: { length: 64, special: false },
+      },
+    ]);
+    expect(
+      created
+        .filter(({ kind }) => kind === "Secret")
+        .map(({ args }) => args),
+    ).toEqual([{ name: "OauthAllowedCallbackUrls", fallback: "[]" }]);
+    const environment = only("SstFunction").environment as Record<
+      string,
+      unknown
+    >;
+    expect(environment.OAUTH_STATE_HMAC_KEY).toMatchObject({
+      value: "preview-hmac-key",
+      isSecret: true,
     });
   });
 
