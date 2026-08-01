@@ -306,6 +306,11 @@ jobs:
           # scripts/deploy-bedrock-mantle-project.sh; empty → the proxy omits the
           # header (still functional, just untagged).
           MEM9_BEDROCK_PROJECT: ${{ vars.MEM9_BEDROCK_PROJECT }}
+          # llm-proxy Responses route (OpenAI gpt-5.6 terra/luna): the regional
+          # (us-west-2) Mantle project id + the model selector. Unset vars pass
+          # through empty → feature off / GLM-5 default.
+          MEM9_BEDROCK_PROJECT_OPENAI: ${{ vars.MEM9_BEDROCK_PROJECT_OPENAI }}
+          MEM9_LLM_MODEL: ${{ vars.MEM9_LLM_MODEL }}
           # The image applies the repeatable atomic-ingest migration before the
           # server starts, so one enabled rollout is safe.
           MEM9_DURABLE_INGEST_ENABLED: "1"
@@ -970,6 +975,11 @@ jobs:
           # (infra/ecs.ts BEDROCK_PROJECT). Repo variable set out-of-band by
           # scripts/deploy-bedrock-mantle-project.sh.
           MEM9_BEDROCK_PROJECT: ${{ vars.MEM9_BEDROCK_PROJECT }}
+          # llm-proxy Responses route (OpenAI gpt-5.6 terra/luna): the regional
+          # (us-west-2) Mantle project id + the model selector. Unset vars pass
+          # through empty → feature off / GLM-5 default.
+          MEM9_BEDROCK_PROJECT_OPENAI: ${{ vars.MEM9_BEDROCK_PROJECT_OPENAI }}
+          MEM9_LLM_MODEL: ${{ vars.MEM9_LLM_MODEL }}
           # Explicitly false before migration. The guarded migration changes it
           # to true only after every passable role has the exact boundary and
           # permanent enforcement is active. Missing/invalid values fail closed.
