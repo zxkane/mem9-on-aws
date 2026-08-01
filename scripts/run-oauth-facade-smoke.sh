@@ -51,7 +51,14 @@ AUTH_STATUS=$(
     --data-urlencode "state=${LONG_STATE}" \
     "${FACADE}/oauth/authorize"
 )
-[[ "$AUTH_STATUS" == "302" ]] || { echo "::error::authorize did not return 302"; exit 1; }
+if [[ "$AUTH_STATUS" != "302" ]]; then
+  AUTH_ERROR=$(
+    jq -r '.error_description // .message // .error // "non-JSON response"' \
+      "$AUTH_BODY" 2>/dev/null || printf '%s' 'non-JSON response'
+  )
+  echo "::error::authorize returned HTTP ${AUTH_STATUS}: ${AUTH_ERROR}"
+  exit 1
+fi
 SET_COOKIE_COUNT=$(awk 'tolower($1) == "set-cookie:" { count++ } END { print count + 0 }' "$AUTH_HEADERS")
 [[ "$SET_COOKIE_COUNT" == "1" ]] || { echo "::error::authorize must return exactly one transaction cookie"; exit 1; }
 TRANSACTION_COOKIE=$(
