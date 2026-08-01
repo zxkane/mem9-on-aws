@@ -59,7 +59,8 @@ Return JSON only:
 Rules:
 - MERGE only same-topic fragments and preserve all durable information.
 - CONTRADICTION names exactly two memories. Set winner_id only when their
-  timestamps make the replacement timeline clear.
+  creation and update timestamps agree on a clear replacement timeline and
+  neither memory has a prior consolidation stale marker.
 - STALE only environment/configuration facts whose age makes review useful.
 - DELETE is a recommendation only. It is never executed automatically.
 - Never invent ids or facts.`;
@@ -110,6 +111,13 @@ function withStaleTag(value) {
   const current = Array.isArray(value) ? value : [];
   const tags = [...new Set([...current, "stale"])];
   return tags.length <= MAX_TAGS ? tags : null;
+}
+
+function hasConsolidationStaleMarker(memory) {
+  return (
+    (Array.isArray(memory.tags) && memory.tags.includes("stale")) ||
+    memory.metadata?.consolidation?.stale === true
+  );
 }
 
 /**
@@ -287,12 +295,19 @@ export function routeActions(memories, actions, options = {}) {
       const loserId = ids.find((id) => id !== action.winner_id);
       const winner = byId.get(action.winner_id);
       const loser = byId.get(loserId);
-      const winnerTimestamp = timestamp(winner.updated_at);
-      const loserTimestamp = timestamp(loser.updated_at);
+      const winnerCreatedAt = timestamp(winner.created_at);
+      const loserCreatedAt = timestamp(loser.created_at);
+      const winnerUpdatedAt = timestamp(winner.updated_at);
+      const loserUpdatedAt = timestamp(loser.updated_at);
       if (
-        winnerTimestamp === 0 ||
-        loserTimestamp === 0 ||
-        winnerTimestamp <= loserTimestamp
+        winnerCreatedAt === 0 ||
+        loserCreatedAt === 0 ||
+        winnerUpdatedAt === 0 ||
+        loserUpdatedAt === 0 ||
+        winnerCreatedAt <= loserCreatedAt ||
+        winnerUpdatedAt <= loserUpdatedAt ||
+        hasConsolidationStaleMarker(winner) ||
+        hasConsolidationStaleMarker(loser)
       ) {
         review.push(
           reviewItem("CONTRADICTION", ids, byId, action.rationale),

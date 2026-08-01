@@ -111,7 +111,9 @@ reached, remaining otherwise-safe actions become review items for a later run.
 The following are always review records and never enter the mutation dispatcher:
 
 - every `DELETE`, regardless of model confidence or other fields;
-- a contradiction without a unique, strictly newer timeline winner;
+- a contradiction without a unique winner whose `created_at` and `updated_at`
+  are both strictly newer, or whose pair carries a prior consolidation stale
+  marker;
 - malformed or conflicting decisions that name real memories;
 - safe actions deferred by the cap.
 

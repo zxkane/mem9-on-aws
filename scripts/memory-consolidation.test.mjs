@@ -193,9 +193,11 @@ describe("LLM action validation and tiers", () => {
   it("TC-CONSOL-006: routes only a strictly newer contradiction winner to archive", () => {
     const memories = [
       memory("old", "use v1", [1, 0], {
+        created_at: "2025-12-01T00:00:00Z",
         updated_at: "2026-01-01T00:00:00Z",
       }),
       memory("new", "use v2", [1, 0], {
+        created_at: "2026-06-01T00:00:00Z",
         updated_at: "2026-07-01T00:00:00Z",
       }),
     ];
@@ -216,6 +218,72 @@ describe("LLM action validation and tiers", () => {
         cost: 1,
       }),
     ]);
+  });
+
+  it("TC-CONSOL-043: reviews a winner whose update and creation timelines disagree", () => {
+    const memories = [
+      memory("older-edited", "use the legacy deploy path", [1, 0], {
+        created_at: "2024-01-01T00:00:00Z",
+        updated_at: "2026-07-31T00:00:00Z",
+      }),
+      memory("newer-fact", "use the current deploy path", [1, 0], {
+        created_at: "2026-06-01T00:00:00Z",
+        updated_at: "2026-06-01T00:00:00Z",
+      }),
+    ];
+
+    const routed = routeActions(memories, [{
+      type: "CONTRADICTION",
+      ids: ["older-edited", "newer-fact"],
+      winner_id: "older-edited",
+      rationale: "the edited row appears newer",
+    }]);
+
+    expect(routed.auto).toEqual([]);
+    expect(routed.review).toContainEqual(
+      expect.objectContaining({
+        kind: "CONTRADICTION",
+        ids: ["older-edited", "newer-fact"],
+      }),
+    );
+  });
+
+  it("TC-CONSOL-044: reviews either contradiction side carrying a prior stale marker", () => {
+    for (const markedId of ["old", "new"]) {
+      const memories = [
+        memory("old", "use the legacy deploy path", [1, 0], {
+          created_at: "2025-12-01T00:00:00Z",
+          updated_at: "2026-01-01T00:00:00Z",
+        }),
+        memory("new", "use the current deploy path", [1, 0], {
+          created_at: "2026-06-01T00:00:00Z",
+          updated_at: "2026-07-01T00:00:00Z",
+        }),
+      ];
+      const marked = memories.find(({ id }) => id === markedId);
+      marked.tags = ["stale"];
+      marked.metadata = {
+        consolidation: {
+          stale: true,
+          flagged_at: "2026-07-31T00:00:00Z",
+        },
+      };
+
+      const routed = routeActions(memories, [{
+        type: "CONTRADICTION",
+        ids: ["old", "new"],
+        winner_id: "new",
+        rationale: "the new fact otherwise has a clear timeline",
+      }]);
+
+      expect(routed.auto).toEqual([]);
+      expect(routed.review).toContainEqual(
+        expect.objectContaining({
+          kind: "CONTRADICTION",
+          ids: ["old", "new"],
+        }),
+      );
+    }
   });
 
   it("rejects malformed fields and reviews conflicting or invalid safe actions", () => {
@@ -325,9 +393,11 @@ describe("execution safety", () => {
         updated_at: "2025-01-01T00:00:00Z",
       }),
       memory("old", "use v1", [-1, 0], {
+        created_at: "2025-12-01T00:00:00Z",
         updated_at: "2026-01-01T00:00:00Z",
       }),
       memory("new", "use v2", [-1, 0], {
+        created_at: "2026-06-01T00:00:00Z",
         updated_at: "2026-07-01T00:00:00Z",
       }),
     ];
@@ -691,9 +761,11 @@ describe("execution safety", () => {
   it("TC-CONSOL-006: archives an unchanged timeline loser", async () => {
     const memories = [
       memory("old", "use v1", [1, 0], {
+        created_at: "2025-12-01T00:00:00Z",
         updated_at: "2026-01-01T00:00:00Z",
       }),
       memory("new", "use v2", [1, 0], {
+        created_at: "2026-06-01T00:00:00Z",
         updated_at: "2026-07-01T00:00:00Z",
       }),
     ];
@@ -724,9 +796,11 @@ describe("execution safety", () => {
   it("TC-CONSOL-009: skips archival when the timeline winner changed after scan", async () => {
     const memories = [
       memory("old", "use v1", [1, 0], {
+        created_at: "2025-12-01T00:00:00Z",
         updated_at: "2026-01-01T00:00:00Z",
       }),
       memory("new", "use v2", [1, 0], {
+        created_at: "2026-06-01T00:00:00Z",
         updated_at: "2026-07-01T00:00:00Z",
       }),
     ];

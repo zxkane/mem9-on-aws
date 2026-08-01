@@ -382,8 +382,11 @@ task stream's content-free review-list marker.
 
 Automatic execution is capped at 20 mutations. It can merge fragments through
 the cleanup MERGE contract, archive only the strictly older side of a
-timeline-decidable contradiction, and add a bounded stale marker. Every DELETE
-and every contradiction without a strict timeline winner remains review-only.
+timeline-decidable contradiction, and add a bounded stale marker. An archive
+requires the selected winner to be strictly newer by both `created_at` and
+`updated_at`; either side carrying a prior consolidation stale marker makes the
+pair review-only. Every DELETE and every contradiction without that corroborated
+timeline remains review-only.
 Review records with ids, bounded snippets, and rationale persist only in the
 task's CloudWatch Logs. The SNS-to-Slack path receives counts only.
 
