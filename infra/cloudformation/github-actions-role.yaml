@@ -235,9 +235,19 @@ Resources:
             Resource:
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ServerExecutionRole-*
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9BootstrapExecutionRole-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ConsolidationExecutionRole-*
             Condition:
               StringNotEquals:
                 iam:PassedToService: ecs-tasks.amazonaws.com
+          - Sid: DenyConsolidationSchedulerRolePassToOtherServices
+            Effect: Deny
+            Action:
+              - iam:PassRole
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ConsolidationSchedulerRole-*
+            Condition:
+              StringNotEquals:
+                iam:PassedToService: scheduler.amazonaws.com
           - Sid: DenyWorkloadBoundaryRemoval
             Effect: Deny
             Action:
@@ -456,6 +466,56 @@ Resources:
                 iam:PassedToService:
                   - lambda.amazonaws.com
                   - ecs-tasks.amazonaws.com
+          - Sid: EventBridgeConsolidationFailures
+            Effect: Allow
+            Action:
+              - events:DeleteRule
+              - events:DescribeRule
+              - events:ListTagsForResource
+              - events:ListTargetsByRule
+              - events:PutRule
+              - events:PutTargets
+              - events:RemoveTargets
+              - events:TagResource
+              - events:UntagResource
+            Resource:
+              - !Sub arn:${AWS::Partition}:events:${ApplicationRegion}:${AWS::AccountId}:rule/mem9-on-aws-*
+          - Sid: SchedulerConsolidation
+            Effect: Allow
+            Action:
+              - scheduler:CreateSchedule
+              - scheduler:DeleteSchedule
+              - scheduler:GetSchedule
+              - scheduler:UpdateSchedule
+            Resource:
+              - !Sub arn:${AWS::Partition}:scheduler:${ApplicationRegion}:${AWS::AccountId}:schedule/mem9-on-aws-*/mem9-on-aws-*
+          - Sid: SchedulerConsolidationGroup
+            Effect: Allow
+            Action:
+              - scheduler:CreateScheduleGroup
+              - scheduler:DeleteScheduleGroup
+              - scheduler:GetScheduleGroup
+              - scheduler:ListTagsForResource
+              - scheduler:TagResource
+              - scheduler:UntagResource
+            Resource:
+              - !Sub arn:${AWS::Partition}:scheduler:${ApplicationRegion}:${AWS::AccountId}:schedule-group/mem9-on-aws-*
+          - Sid: PassConsolidationSchedulerRole
+            Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ConsolidationSchedulerRole-*
+            Condition:
+              StringEquals:
+                iam:PassedToService: scheduler.amazonaws.com
+          - Sid: LogsResourcePolicy
+            Effect: Allow
+            Action:
+              - logs:DeleteResourcePolicy
+              - logs:DescribeResourcePolicies
+              - logs:PutResourcePolicy
+            Resource: "*"
 
   # ───────────────────────────────────────────────────────────────────────────
   # Policy 4 — Database stack (infra/db.ts): Aurora PostgreSQL Serverless v2 +
@@ -699,7 +759,8 @@ Resources:
             # group is `/sst/cluster/<cluster>/<service>/<container>`, covered by
             # the `/sst/*` ARNs below. StartQuery/GetQueryResults are used by the
             # E2E log-scan hardening (issue #26) to detect 401s in the service
-            # logs during the deploy.
+            # logs during the deploy. FilterLogEvents reads only the exact
+            # consolidation task stream's content-free REVIEW_LIST marker.
             Effect: Allow
             Action:
               - logs:CreateLogGroup
@@ -713,6 +774,7 @@ Resources:
               - logs:PutLogEvents
               - logs:StartQuery
               - logs:GetQueryResults
+              - logs:FilterLogEvents
               - logs:PutMetricFilter
               - logs:DeleteMetricFilter
               - logs:DescribeMetricFilters
