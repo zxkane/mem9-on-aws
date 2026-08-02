@@ -90,11 +90,13 @@ function matchesProjectLambdaRoleName(roleName, type) {
 const ECS_EXECUTION_ROLE_TOKENS = [
   "Mem9ServerExecutionRole-",
   "Mem9BootstrapExecutionRole-",
+  "Mem9ConsolidationExecutionRole-",
 ];
 const ALLOWED_PASS_SERVICES = new Set([
   "bedrock-agentcore.amazonaws.com",
   "ecs-tasks.amazonaws.com",
   "lambda.amazonaws.com",
+  "scheduler.amazonaws.com",
 ]);
 const PROJECT_RESOURCE_RUNTIME_ACTIONS = [
   "bedrock-mantle:CreateInference",
@@ -109,11 +111,13 @@ const PROJECT_RESOURCE_RUNTIME_ACTIONS = [
   "logs:CreateLogStream",
   "logs:PutLogEvents",
   "secretsmanager:GetSecretValue",
+  "sns:Publish",
   "sqs:SendMessage",
   "ssm:GetParameters",
 ];
 const MANTLE_BEARER_ACTION = "bedrock-mantle:CallWithBearerToken";
 const GLOBAL_RUNTIME_ACTIONS = [
+  "ecs:RunTask",
   "ec2:AssignPrivateIpAddresses",
   "ec2:CreateNetworkInterface",
   "ec2:DeleteNetworkInterface",
@@ -121,6 +125,7 @@ const GLOBAL_RUNTIME_ACTIONS = [
   "ec2:DescribeSubnets",
   "ec2:UnassignPrivateIpAddresses",
   "ecr:GetAuthorizationToken",
+  "iam:PassRole",
   "ssmmessages:CreateControlChannel",
   "ssmmessages:CreateDataChannel",
   "ssmmessages:OpenControlChannel",
@@ -165,6 +170,13 @@ export function expectedRolePatterns(identity) {
   return ROLE_PREFIXES.map(
     (prefix) =>
       `arn:${identity.partition}:iam::${identity.accountId}:role/${prefix}*`,
+  );
+}
+
+function consolidationSchedulerRoleArnPattern({ partition, accountId }) {
+  return (
+    `arn:${partition}:iam::${accountId}:role/` +
+    "mem9-on-a*-*Mem9ConsolidationSchedulerRole-*"
   );
 }
 
@@ -319,6 +331,7 @@ function boundaryContract({
       `arn:${partition}:secretsmanager:${applicationRegion}:${accountId}:secret:mem9-on-aws-*`,
       `arn:${partition}:sqs:${applicationRegion}:${accountId}:AlertTransportFailureQueue-*`,
       `arn:${partition}:sqs:${applicationRegion}:${accountId}:AlertExecutionFailureQueue-*`,
+      `arn:${partition}:sns:${applicationRegion}:${accountId}:mem9-on-aws-*-alerts`,
       `arn:${partition}:ssm:${applicationRegion}:${accountId}:parameter/mem9-on-aws/*`,
     ],
   };
@@ -617,11 +630,14 @@ function validatePassServices(statement) {
       "iam:PassRole has an unsupported iam:PassedToService scope",
     );
   }
+  return services;
 }
 
 export function extractPassRoleScope(policyDocuments, identity) {
   const expected = expectedRolePatterns(identity);
   const expectedSet = new Set(expected);
+  const schedulerRolePattern =
+    consolidationSchedulerRoleArnPattern(identity);
   const resources = new Set();
 
   for (const rawDocument of policyDocuments) {
@@ -645,10 +661,22 @@ export function extractPassRoleScope(policyDocuments, identity) {
         throw new Error("PassRole NotResource is unsupported");
       }
 
-      validatePassServices(statement);
+      const services = validatePassServices(statement);
       const statementResources = list(statement.Resource);
       if (statementResources.length === 0) {
         throw new Error("PassRole statement has no resource scope");
+      }
+      if (services.includes("scheduler.amazonaws.com")) {
+        if (
+          services.length !== 1 ||
+          statementResources.length !== 1 ||
+          statementResources[0] !== schedulerRolePattern
+        ) {
+          throw new Error(
+            "Scheduler PassRole scope does not match the consolidation role",
+          );
+        }
+        continue;
       }
       for (const resource of statementResources) {
         if (
@@ -925,6 +953,17 @@ export function verifyPermanentEnforcementDocuments(
     conditionOperator: "StringNotEquals",
     conditionKey: "iam:PassedToService",
     conditionValue: "ecs-tasks.amazonaws.com",
+  });
+  requireStatement(documents, {
+    sid: "DenyConsolidationSchedulerRolePassToOtherServices",
+    effect: "Deny",
+    actions: ["iam:PassRole"],
+    resources: [
+      consolidationSchedulerRoleArnPattern({ partition, accountId }),
+    ],
+    conditionOperator: "StringNotEquals",
+    conditionKey: "iam:PassedToService",
+    conditionValue: "scheduler.amazonaws.com",
   });
   requireStatement(documents, {
     sid: "DenyOperatorOwnedIamMutation",

@@ -113,6 +113,9 @@ const boundaryContract = {
   partition,
 };
 const patterns = expectedRolePatterns({ partition, accountId });
+const consolidationSchedulerRolePattern =
+  `arn:${partition}:iam::${accountId}:role/` +
+  "mem9-on-a*-*Mem9ConsolidationSchedulerRole-*";
 const denyPolicyId = DENY_DANGEROUS_POLICY_NAME;
 const denyPolicyArn = `arn:${partition}:iam::${accountId}:policy/${denyPolicyId}`;
 const independentRuntimeActions = [
@@ -138,9 +141,12 @@ const independentRuntimeActions = [
   "bedrock-mantle:GetProject",
   "bedrock-mantle:ListProjects",
   "bedrock-mantle:ListTagsForResource",
+  "ecs:RunTask",
+  "iam:PassRole",
   "kms:Decrypt",
   "lambda:InvokeFunction",
   "secretsmanager:GetSecretValue",
+  "sns:Publish",
   "sqs:SendMessage",
   "ssm:GetParameters",
   // SST Service/Task ECS Exec channels.
@@ -531,6 +537,27 @@ function passRolePolicy(resources = patterns) {
               "ecs-tasks.amazonaws.com",
               "bedrock-agentcore.amazonaws.com",
             ],
+          },
+        },
+      },
+    ],
+  };
+}
+
+function consolidationSchedulerPassRolePolicy({
+  resources = [consolidationSchedulerRolePattern],
+  services = ["scheduler.amazonaws.com"],
+} = {}) {
+  return {
+    Version: "2012-10-17",
+    Statement: [
+      {
+        Effect: "Allow",
+        Action: "iam:PassRole",
+        Resource: resources,
+        Condition: {
+          StringEquals: {
+            "iam:PassedToService": services,
           },
         },
       },
@@ -1709,6 +1736,46 @@ describe("deployed PassRole scope", () => {
         accountId,
       }),
     ).toEqual(patterns);
+  });
+
+  it("accepts the exact consolidation Scheduler role separately", () => {
+    expect(
+      extractPassRoleScope(
+        [
+          passRolePolicy([...patterns].reverse()),
+          consolidationSchedulerPassRolePolicy(),
+        ],
+        { partition, accountId },
+      ),
+    ).toEqual(patterns);
+  });
+
+  it.each([
+    [
+      "generic project roles",
+      consolidationSchedulerPassRolePolicy({ resources: patterns }),
+    ],
+    [
+      "additional service",
+      consolidationSchedulerPassRolePolicy({
+        services: ["scheduler.amazonaws.com", "ecs-tasks.amazonaws.com"],
+      }),
+    ],
+    [
+      "foreign scheduler role",
+      consolidationSchedulerPassRolePolicy({
+        resources: [
+          `arn:${partition}:iam::${accountId}:role/other-scheduler-role-*`,
+        ],
+      }),
+    ],
+  ])("rejects Scheduler PassRole for %s", (_name, policy) => {
+    expect(() =>
+      extractPassRoleScope([passRolePolicy(), policy], {
+        partition,
+        accountId,
+      }),
+    ).toThrow(/PassRole/u);
   });
 
   it.each([
@@ -3431,6 +3498,19 @@ describe("quarantine and permanent policy verification", () => {
         for (const document of documents) {
           document.Statement = document.Statement.filter(
             ({ Sid }) => Sid !== "DenyEcsExecutionRolePassToOtherServices",
+          );
+        }
+        return documents;
+      },
+    ],
+    [
+      "missing consolidation Scheduler role PassRole deny",
+      () => {
+        const documents = structuredClone(deployedManagedPolicyDocuments());
+        for (const document of documents) {
+          document.Statement = document.Statement.filter(
+            ({ Sid }) =>
+              Sid !== "DenyConsolidationSchedulerRolePassToOtherServices",
           );
         }
         return documents;
@@ -7315,12 +7395,14 @@ describe("boundary and deploy-role templates", () => {
           "AlertTransportFailureQueue-*",
         "arn:aws:sqs:ap-northeast-1:123456789012:" +
           "AlertExecutionFailureQueue-*",
+        "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-*-alerts",
         expect.stringContaining("parameter/mem9-on-aws/*"),
       ]),
     );
     expect(bySid("DenyProjectRuntimeOutsideResources").Action).toEqual(
       expect.arrayContaining([
         "secretsmanager:GetSecretValue",
+        "sns:Publish",
         "sqs:SendMessage",
         "ssm:GetParameters",
       ]),
@@ -7399,6 +7481,8 @@ describe("boundary and deploy-role templates", () => {
               "mem9-on-a*-*Mem9ServerExecutionRole-*",
             "arn:aws:iam::123456789012:role/" +
               "mem9-on-a*-*Mem9BootstrapExecutionRole-*",
+            "arn:aws:iam::123456789012:role/" +
+              "mem9-on-a*-*Mem9ConsolidationExecutionRole-*",
           ],
         },
       },
@@ -7506,7 +7590,9 @@ describe("boundary and deploy-role templates", () => {
   it("keeps the boundary within the IAM managed-policy size quota", () => {
     const template = parseCloudFormation(boundaryTemplatePath);
     const size = JSON.stringify(
-      template.Resources.WorkloadPermissionsBoundary.Properties.PolicyDocument,
+      resolveTemplateValue(
+        template.Resources.WorkloadPermissionsBoundary.Properties.PolicyDocument,
+      ),
     ).length;
     expect(size).toBeLessThanOrEqual(6_144);
   });
@@ -7594,6 +7680,7 @@ describe("boundary and deploy-role templates", () => {
       "DenyUnboundedProjectRolePolicyWrites",
       "DenyLambdaRolePassToOtherServices",
       "DenyEcsExecutionRolePassToOtherServices",
+      "DenyConsolidationSchedulerRolePassToOtherServices",
       "DenyWorkloadBoundaryRemoval",
       "DenyOperatorOwnedIamMutation",
       "DenyOperatorOwnedStackMutation",
@@ -7696,10 +7783,29 @@ describe("boundary and deploy-role templates", () => {
           "mem9-on-a*-*Mem9ServerExecutionRole-*",
         "arn:aws:iam::123456789012:role/" +
           "mem9-on-a*-*Mem9BootstrapExecutionRole-*",
+        "arn:aws:iam::123456789012:role/" +
+          "mem9-on-a*-*Mem9ConsolidationExecutionRole-*",
       ],
       Condition: {
         StringNotEquals: {
           "iam:PassedToService": "ecs-tasks.amazonaws.com",
+        },
+      },
+    });
+    expect(
+      resolveTemplateValue(
+        bySid(
+          denyStatements,
+          "DenyConsolidationSchedulerRolePassToOtherServices",
+        ),
+      ),
+    ).toMatchObject({
+      Effect: "Deny",
+      Action: ["iam:PassRole"],
+      Resource: [consolidationSchedulerRolePattern],
+      Condition: {
+        StringNotEquals: {
+          "iam:PassedToService": "scheduler.amazonaws.com",
         },
       },
     });
