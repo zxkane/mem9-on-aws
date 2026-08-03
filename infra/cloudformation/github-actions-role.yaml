@@ -488,7 +488,15 @@ Resources:
               - scheduler:GetSchedule
               - scheduler:UpdateSchedule
             Resource:
-              - !Sub arn:${AWS::Partition}:scheduler:${ApplicationRegion}:${AWS::AccountId}:schedule/mem9-on-aws-*/mem9-on-aws-*
+              # The schedule-NAME segment is `*`, not `mem9-on-aws-*`. Pulumi
+              # names the schedule from a namePrefix, but DeleteScheduleGroup
+              # authorizes against `schedule/<group>/*` — a wildcard over the
+              # name — so a `mem9-on-aws-*` name segment does not match and the
+              # group can be created but never deleted. Observed on the pr-113
+              # preview: the stage deployed, then auto-cleanup failed with
+              # AccessDenied on scheduler:DeleteSchedule and left an orphan
+              # group. The GROUP segment stays scoped to `mem9-on-aws-*`.
+              - !Sub arn:${AWS::Partition}:scheduler:${ApplicationRegion}:${AWS::AccountId}:schedule/mem9-on-aws-*/*
           - Sid: SchedulerConsolidationGroup
             Effect: Allow
             Action:

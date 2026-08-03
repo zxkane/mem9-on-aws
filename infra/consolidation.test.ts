@@ -547,7 +547,10 @@ describe("consolidation IAM templates", () => {
       Resource: [
         {
           "Fn::Sub":
-            "arn:${AWS::Partition}:scheduler:${ApplicationRegion}:${AWS::AccountId}:schedule/mem9-on-aws-*/mem9-on-aws-*",
+            // Name segment is `*`: DeleteScheduleGroup authorizes against
+            // `schedule/<group>/*`, so a `mem9-on-aws-*` name segment leaves a
+            // group that can be created but never deleted (observed on pr-113).
+            "arn:${AWS::Partition}:scheduler:${ApplicationRegion}:${AWS::AccountId}:schedule/mem9-on-aws-*/*",
         },
       ],
     });
