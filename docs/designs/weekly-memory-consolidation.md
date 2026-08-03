@@ -142,6 +142,38 @@ Every mutation re-reads or atomically predicates current state:
 This preserves the cleanup tool's last-writer-wins guard while closing its
 previous cross-host mutex gap.
 
+### Known limit: the MERGE survivor PUT is advisory, not atomic
+
+Independent review (Codex, 2026-08-03) flagged this and it is real. The two legs
+of a MERGE have different strength:
+
+- **Absorbed deletes ARE guarded.** Each id is re-read and dropped from the
+  delete set unless its version AND content hash still match the plan
+  (`applyMergeDecision`), so a concurrently-edited absorbed memory is never
+  deleted.
+- **The survivor PUT is NOT fenced.** It sends `If-Match: <version>`, but
+  upstream treats that header as advisory — a mismatch only logs a server-side
+  warning (`docs/mem9-facts.md`). So an ingest write landing between the
+  survivor's GET and its PUT is overwritten by the merged content rather than
+  rejected.
+
+The window is the round trip between those two calls, and the advisory mutex
+(`mem9-cleanup:<stage>`) excludes other cleanup/consolidation runs but NOT live
+ingest. Consequence: at most one memory per merge group can lose a concurrent
+ingest edit; the content is recoverable only from the ingest source, not from the
+store.
+
+This is inherited from the cleanup tool (#102 accepted the same residual risk and
+mandates a low-ingest window), not introduced here — but consolidation runs
+UNATTENDED on a schedule, which removes the operator's ability to choose the
+window. Mitigations in force: the weekly schedule targets the lowest-ingest hour
+(Sunday 03:00 UTC), the auto tier is capped at 20 mutations per run, and
+`skippedLww` is emitted as a metric so a rising count is visible. Closing it
+properly requires either a conditional-update REST surface upstream or moving the
+survivor rewrite to the same direct-SQL, version-predicated path `archiveMemory`
+and `markMemoryStale` already use — tracked as follow-up work, not a blocker for
+the report-only rollout this PR enables.
+
 ## Metrics And Failure Detection
 
 One content-free EMF line is emitted per run in namespace `mem9-on-aws` with

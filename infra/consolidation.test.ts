@@ -475,6 +475,22 @@ describe("consolidation task and schedule", () => {
         },
       },
     });
+    // A target that never STARTS a task is invisible to the exit-code alarm:
+    // after maximumRetryAttempts the invocation is dropped, so there is no ECS
+    // task and no STOPPED event, and the weekly run silently does not happen.
+    expect(
+      materialize(
+        one("MetricAlarm", "ConsolidationScheduleTargetErrorAlarm").args,
+      ),
+    ).toMatchObject({
+      namespace: "AWS/Scheduler",
+      metricName: "TargetErrorCount",
+      statistic: "Sum",
+      threshold: 1,
+      comparisonOperator: "GreaterThanOrEqualToThreshold",
+      treatMissingData: "notBreaching",
+    });
+
     const policy = JSON.parse(
       String(materialize(one("RolePolicy").args.policy)),
     );
@@ -710,7 +726,7 @@ describe("consolidation docs and metrics", () => {
   });
 });
 
-describe("schedule-group name bound (TC-CONSOL-043)", () => {
+describe("schedule-group name bound (TC-CONSOL-046)", () => {
   it("keeps every realistic stage under the EventBridge Scheduler 38-char limit", async () => {
     const { consolidationScheduleGroupPrefix, SCHEDULE_GROUP_NAME_PREFIX_MAX } =
       await import("./consolidation");
@@ -736,7 +752,7 @@ describe("schedule-group name bound (TC-CONSOL-043)", () => {
   });
 });
 
-describe("scheduler role name (TC-CONSOL-044)", () => {
+describe("scheduler role name (TC-CONSOL-047)", () => {
   it("satisfies all three intersecting naming constraints", async () => {
     const {
       consolidationSchedulerRoleName,

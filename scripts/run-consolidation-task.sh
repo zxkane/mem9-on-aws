@@ -154,8 +154,20 @@ for attempt in 1 2 3 4 5 6; do
     --region "$REGION" \
     --query 'events[].message' \
     --output text 2>/dev/null || true)
-  if [[ "$MARKER" == *"CONSOLIDATION_REVIEW_LIST"* ]]; then
-    printf '%s\n' "$MARKER"
+  # Never print a matched line raw. `filter-log-events` matches the token as a
+  # SUBSTRING, so an ordinary CONSOLIDATION_REVIEW record whose snippet or
+  # rationale happens to contain "CONSOLIDATION_REVIEW_LIST" also matches — and
+  # those records carry private memory content that must not reach CI output
+  # (this repo is planned to be open-sourced). Select the line that STARTS with
+  # the marker, then re-emit only the known content-free fields.
+  SUMMARY=$(printf '%s\n' "$MARKER" | jq -Rr '
+    select(startswith("CONSOLIDATION_REVIEW_LIST "))
+    | ltrimstr("CONSOLIDATION_REVIEW_LIST ")
+    | fromjson?
+    | {stage, reportOnly, reviewItems}
+    | tostring' | head -1)
+  if [[ -n "$SUMMARY" ]]; then
+    printf 'CONSOLIDATION_REVIEW_LIST %s\n' "$SUMMARY"
     echo "run-consolidation: report-only E2E passed for ${STAGE}"
     exit 0
   fi

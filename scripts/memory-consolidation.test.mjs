@@ -868,6 +868,17 @@ describe("execution safety", () => {
     expect(reportResult.review).toContainEqual(
       expect.objectContaining({ kind: "REPORT_ONLY_STALE", ids: ["stale"] }),
     );
+    // The review row alone is not proof: STALE is an AUTO-tier action, so this
+    // case only tests report-only suppression if it also asserts that NOTHING
+    // was written. Without these, the test passes even if suppression breaks.
+    expect(report.writes).toEqual([]);
+    expect(report.deps.markMemoryStale).not.toHaveBeenCalled();
+    expect(report.deps.putMemory).not.toHaveBeenCalled();
+    expect(report.deps.archiveMemory).not.toHaveBeenCalled();
+    expect(report.deps.deleteMemories).not.toHaveBeenCalled();
+    expect(report.deps.publishSummary).not.toHaveBeenCalled();
+    expect(reportResult.mutations).toBe(0);
+    expect(report.store.get("stale").tags).not.toContain("stale");
 
     const locked = fakeDeps([item], [
       '{"actions":[{"type":"STALE","ids":["stale"],"rationale":"aged"}]}',

@@ -419,6 +419,34 @@ export function consolidation(
         },
       },
     });
+
+    // Gated on the alerts topic, which only prod has: preview stages create no
+    // alarms by contract (an ephemeral stage must never page).
+    //
+    // The ECS-exit alarm above cannot cover a target that never STARTS a task.
+    // With maximumRetryAttempts: 1, an invocation that fails RunTask twice (IAM
+    // drift, capacity, a bad task definition) is dropped: no task, no STOPPED
+    // event, no alarm — the weekly run silently does not happen. Scheduler
+    // publishes TargetErrorCount for exactly this, so alarm on it directly.
+    if (ecsOut.alertsTopicArn) {
+    new aws.cloudwatch.MetricAlarm("ConsolidationScheduleTargetErrorAlarm", {
+      alarmDescription:
+        "EventBridge Scheduler could not invoke the weekly consolidation " +
+        "target, so no ECS task ran and the task-exit alarm cannot fire.",
+      namespace: "AWS/Scheduler",
+      metricName: "TargetErrorCount",
+      dimensions: { ScheduleGroup: scheduleGroup.name },
+      statistic: "Sum",
+      period: 3600,
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      threshold: 1,
+      comparisonOperator: "GreaterThanOrEqualToThreshold",
+      // A week with no invocation emits no datapoint; that is not an error.
+      treatMissingData: "notBreaching",
+      alarmActions: [ecsOut.alertsTopicArn],
+    });
+    }
   }
 
   return { taskDefinitionArn: task.taskDefinition };
