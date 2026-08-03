@@ -7,7 +7,16 @@ import { resolve } from "node:path";
 const APP_CONTAINERS = ["mnemo-server", "qwen3-embed", "llm-proxy"];
 const SAFE_VALUE = /^[A-Za-z0-9._:-]+$/;
 const ACCOUNT_ID = /\d{12}/;
-const ROLLOUT_POLL_ATTEMPTS = 12;
+// A FRESH preview stack is the slow case: the service pulls three container
+// images and waits for the mnemo-server health check before the rollout reports
+// COMPLETED. The previous 12 attempts gave ~110s of sleep, and a measured
+// successful run (#121) needed 132s wall-clock — it only fit because the twelve
+// DescribeServices round trips padded the budget, leaving effectively no margin.
+// A marginally slower stack then fails with `primary_not_completed` even though
+// the deploy itself is healthy. 30 attempts (~290s of sleep) covers observed
+// cold starts with real headroom; a genuinely stuck rollout still fails, just
+// later.
+const ROLLOUT_POLL_ATTEMPTS = 30;
 const ROLLOUT_POLL_INTERVAL_MS = 10_000;
 
 function sleepSync(milliseconds) {
