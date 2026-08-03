@@ -1,5 +1,6 @@
 import type { DbOutputs } from "./db";
 import type { EcsOutputs } from "./ecs";
+import { resolveVpc } from "./vpc";
 import { accountId, ECR_REGION, ecrImage } from "./ecr";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 
@@ -269,7 +270,14 @@ export function consolidation(
     [
       "ConsolidationSubnetIds",
       "subnet-ids",
-      task.subnets.apply((ids) => ids.join(",")),
+      // resolveVpc(), NOT task.subnets. `Cluster.vpc.containerSubnets` is typed
+      // `Input<Input<string>[]>` — the ELEMENTS may themselves be Outputs, so
+      // `ids.join(",")` stringifies unresolved Outputs instead of subnet ids and
+      // RunTask rejects the result with "Subnet ID must match subnet-[0-9a-f]+"
+      // (observed on the pr-113 preview). infra/bootstrap.ts publishes the same
+      // parameter from resolveVpc(), whose `Output<string[]>` resolves cleanly;
+      // both point at the same NAT-routed private subnets.
+      resolveVpc().privateSubnetIds.apply((ids) => ids.join(",")),
     ],
     ["ConsolidationLogGroupName", "log-group-name", taskLogGroupName],
   ];
@@ -402,6 +410,10 @@ export function consolidation(
           networkConfiguration: {
             assignPublicIp: task.assignPublicIp,
             securityGroups: task.securityGroups,
+            // Passed as an Output, so Pulumi resolves nested Outputs before the
+            // API call — unlike the `.join(",")` used for the SSM parameter
+            // above, which stringified them. Kept as `task.subnets` so the
+            // schedule targets exactly the subnets the task is configured for.
             subnets: task.subnets,
           },
         },

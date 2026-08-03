@@ -146,6 +146,13 @@ function installGlobals(stage: string) {
   (globalThis as Record<string, unknown>).aws = {
     getCallerIdentityOutput: () => ({ accountId: out("123456789012") }),
     getRegionOutput: () => ({ name: out("ap-northeast-1") }),
+    // resolveVpc() is used for the subnet-ids SSM parameter: Cluster
+    // containerSubnets elements can be Outputs, so joining them stringifies
+    // unresolved Outputs and RunTask rejects them. Mirrors bootstrap.test.ts.
+    ec2: {
+      getVpcOutput: () => ({ id: out("vpc-test") }),
+      getSubnetsOutput: () => ({ ids: out(["subnet-a", "subnet-b", "subnet-c"]) }),
+    },
     iam: {
       Role: class {
         arn: Output<string>;
@@ -345,6 +352,25 @@ describe("consolidation task and schedule", () => {
       "/mem9-on-aws/prod/consolidation/task-def-arn",
       "/mem9-on-aws/prod/consolidation/task-sg-id",
     ]);
+
+    // The VALUE matters as much as the name. `subnet-ids` feeds RunTask's
+    // awsvpcConfiguration verbatim, and Cluster `containerSubnets` is typed
+    // `Input<Input<string>[]>` — joining it stringifies unresolved Outputs, which
+    // RunTask rejects with "Subnet ID must match subnet-[0-9a-f]+". Only the name
+    // list was asserted before, so the preview deploy was the first thing to
+    // notice. Assert the shape.
+    const subnetParam = resources.find(
+      (resource) =>
+        resource.kind === "Parameter" &&
+        materialize(resource.args.name) ===
+          "/mem9-on-aws/prod/consolidation/subnet-ids",
+    );
+    const subnetValue = String(materialize(subnetParam!.args.value));
+    expect(subnetValue).toBe("subnet-a,subnet-b,subnet-c");
+    for (const id of subnetValue.split(",")) {
+      expect(id).toMatch(/^subnet-[0-9a-z]+$/);
+    }
+    expect(materialize(subnetParam!.args.type)).toBe("StringList");
   });
 
   it("TC-CONSOL-021/022/027/037: creates a disabled preview and enabled weekly prod schedule", async () => {
