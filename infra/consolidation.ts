@@ -28,16 +28,46 @@ export interface ConsolidationOutputs {
  * name_prefix limit. Exported so a unit test can assert the bound for realistic
  * stage names instead of discovering it in a failed deploy.
  */
+// Pulumi appends a 26-character unique suffix to every `namePrefix` (observed:
+// "20260803182536887300000001"). A prefix that fits its own documented limit can
+// therefore still produce an over-long NAME — prod's EventBridge rule prefix was
+// 39 chars against a 64-char rule limit and PutRule rejected the resulting
+// 65-char name. Budget the SUFFIX, not just the prefix.
+export const PULUMI_NAME_SUFFIX_LEN = 26;
+
+/**
+ * Assert a `namePrefix` leaves room for Pulumi's suffix under the resource's own
+ * name limit, for the longest stage this project realistically deploys.
+ */
+export function boundedNamePrefix(
+  prefix: string,
+  nameMax: number,
+  what: string,
+): string {
+  const worst = prefix.length + PULUMI_NAME_SUFFIX_LEN;
+  if (worst > nameMax) {
+    throw new Error(
+      `${what} prefix ${prefix} yields a ${worst}-character name, over the ` +
+        `${nameMax}-character limit`,
+    );
+  }
+  return prefix;
+}
+
 export const SCHEDULE_GROUP_NAME_PREFIX_MAX = 38;
 
 export function consolidationScheduleGroupPrefix(stage: string): string {
   const prefix = `mem9-on-aws-${stage}-consolidation-`;
+  // Two limits apply. Check the TIGHTER one (Scheduler's 38-char prefix cap)
+  // first so the error names the binding constraint; the suffix-aware 64-char
+  // NAME check follows.
   if (prefix.length > SCHEDULE_GROUP_NAME_PREFIX_MAX) {
     throw new Error(
       `schedule-group name prefix ${prefix} exceeds ` +
         `${SCHEDULE_GROUP_NAME_PREFIX_MAX} characters`,
     );
   }
+  boundedNamePrefix(prefix, 64, "consolidation schedule");
   return prefix;
 }
 
@@ -185,7 +215,15 @@ export function consolidation(
     const failureRule = new aws.cloudwatch.EventRule(
       "ConsolidationTaskFailureRule",
       {
-        namePrefix: `mem9-on-aws-${$app.stage}-consolidation-failure-`,
+        // 64-char rule limit MINUS Pulumi's 26-char suffix. The former
+        // `...-consolidation-failure-` prefix was 39 chars for `prod` alone,
+        // producing a 65-char name that PutRule rejected on the first prod
+        // deploy after merge.
+        namePrefix: boundedNamePrefix(
+          `mem9-on-aws-${$app.stage}-consol-failure-`,
+          64,
+          "consolidation failure rule",
+        ),
         description:
           "Captures non-zero exits from the exact consolidation task revision.",
         eventPattern: $jsonStringify({
