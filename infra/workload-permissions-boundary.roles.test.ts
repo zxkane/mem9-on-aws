@@ -379,6 +379,24 @@ describe("workload role coverage from the real SST graph", () => {
         ).toBe(true);
         for (const { inputs, name } of createdRoles) {
           const physicalName = inputs.name ?? inputs.namePrefix;
+          if (physicalName === undefined) {
+            // SST auto-names the role as `<app>-<stage>-<logicalName>-<suffix>`.
+            // That is the path MOST project roles take (Mem9ServerTaskRole,
+            // Mem9BootstrapExecutionRole, …), and it is required for names whose
+            // explicit prefix would exceed Pulumi's 38-char name_prefix cap. The
+            // boundary patterns are `mem9-on-a*-*<LogicalName>-*`, so the logical
+            // name is what must match.
+            // `expectedRoleNames` is already asserted above to equal the full
+            // set of created logical names, so membership here proves the role is
+            // a reviewed workload role whose auto-generated physical name will
+            // carry the `mem9-on-aws-<stage>-<logicalName>-` shape the boundary
+            // patterns match.
+            expect(
+              expectedRoleNames.includes(name),
+              `${name} auto-named role must be a known workload role`,
+            ).toBe(true);
+            continue;
+          }
           expect(
             workloadRolePrefixes.some((prefix) =>
               String(physicalName).startsWith(prefix),

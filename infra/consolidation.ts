@@ -275,11 +275,16 @@ export function consolidation(
         tags,
       },
     );
+    // NO explicit namePrefix. Pulumi caps a role name_prefix at 38 chars, and
+    // `mem9-on-aws-<stage>-Mem9ConsolidationSchedulerRole-` is 48 for `prod`
+    // alone. SST's auto-naming already produces
+    // `mem9-on-aws-<stage>-Mem9ConsolidationSchedulerRole-<suffix>` (IAM's own
+    // limit is 64, and existing project roles run to 54 chars this way), which is
+    // what the boundary and deploy-role patterns
+    // `mem9-on-a*-*Mem9ConsolidationSchedulerRole-*` already match.
     const schedulerRole = new aws.iam.Role(
       "Mem9ConsolidationSchedulerRole",
       {
-        namePrefix:
-          `mem9-on-aws-${$app.stage}-Mem9ConsolidationSchedulerRole-`,
         assumeRolePolicy: $jsonStringify({
           Version: "2012-10-17",
           Statement: [
@@ -327,7 +332,10 @@ export function consolidation(
     });
 
     new aws.scheduler.Schedule("WeeklyMemoryConsolidation", {
-      namePrefix: `mem9-on-aws-${$app.stage}-weekly-consolidation-`,
+      // Same 38-char Scheduler name_prefix cap as the schedule group (the group
+      // rejected 44). `...-weekly-consolidation-` is already 40 for pr-113, so
+      // reuse the bounded prefix rather than find out in another deploy.
+      namePrefix: consolidationScheduleGroupPrefix($app.stage),
       description:
         "Weekly cross-memory contradiction, merge, and staleness pass.",
       groupName: scheduleGroup.name,
