@@ -33,6 +33,29 @@ export function consolidationScheduleGroupPrefix(stage: string): string {
   return prefix;
 }
 
+/**
+ * Scheduler role name. Must start with `mem9-on-aws-` (deploy-role
+ * `iam:CreateRole` scope) AND contain `Mem9ConsolidationSchedulerRole-` (the
+ * deployed boundary patterns), which together exceed Pulumi's 38-char
+ * `name_prefix` cap — hence a fixed `name` under IAM's 64-char limit.
+ */
+export const IAM_ROLE_NAME_MAX = 64;
+
+export const CONSOLIDATION_SCHEDULER_ROLE_ARN_PATTERN =
+  "mem9-on-a*-*Mem9ConsolidationSchedulerRole-*";
+
+export function consolidationSchedulerRoleName(stage: string): string {
+  // The deployed pattern ends `...SchedulerRole-*`, so the name needs a trailing
+  // hyphen segment; without it the boundary/deploy-role grants do NOT match.
+  const name = `mem9-on-aws-${stage}-Mem9ConsolidationSchedulerRole-role`;
+  if (name.length > IAM_ROLE_NAME_MAX) {
+    throw new Error(
+      `scheduler role name ${name} exceeds ${IAM_ROLE_NAME_MAX} characters`,
+    );
+  }
+  return name;
+}
+
 export function consolidation(
   ecsOut: EcsOutputs,
   dbOut: DbOutputs,
@@ -275,16 +298,25 @@ export function consolidation(
         tags,
       },
     );
-    // NO explicit namePrefix. Pulumi caps a role name_prefix at 38 chars, and
-    // `mem9-on-aws-<stage>-Mem9ConsolidationSchedulerRole-` is 48 for `prod`
-    // alone. SST's auto-naming already produces
-    // `mem9-on-aws-<stage>-Mem9ConsolidationSchedulerRole-<suffix>` (IAM's own
-    // limit is 64, and existing project roles run to 54 chars this way), which is
-    // what the boundary and deploy-role patterns
-    // `mem9-on-a*-*Mem9ConsolidationSchedulerRole-*` already match.
+    // `name`, NOT `namePrefix`. Three constraints intersect and only this
+    // satisfies all of them:
+    //   1. Pulumi caps a role `name_prefix` at 38 chars, and any prefix
+    //      containing `Mem9ConsolidationSchedulerRole-` is >= 46.
+    //   2. The role name MUST still contain `Mem9ConsolidationSchedulerRole-`:
+    //      the boundary and deploy-role patterns
+    //      `mem9-on-a*-*Mem9ConsolidationSchedulerRole-*` are already deployed
+    //      (#122) and rolled out, so renaming would need another guarded rollout.
+    //   3. It MUST start with `mem9-on-aws-`: the deploy role's `iam:CreateRole`
+    //      is scoped to `role/mem9-on-aws-*`. Dropping the prefix and letting SST
+    //      auto-name produced `Mem9ConsolidationSchedulerRole-4482bfd`, which
+    //      AccessDenied'd on CreateRole.
+    // A fixed `name` sidesteps the 38-char prefix validator entirely (IAM's own
+    // limit is 64; this resolves to 47-51 chars) and is safe because the role is
+    // stage-scoped and created at most once per stage.
     const schedulerRole = new aws.iam.Role(
       "Mem9ConsolidationSchedulerRole",
       {
+        name: consolidationSchedulerRoleName($app.stage),
         assumeRolePolicy: $jsonStringify({
           Version: "2012-10-17",
           Statement: [

@@ -706,3 +706,37 @@ describe("schedule-group name bound (TC-CONSOL-043)", () => {
     );
   });
 });
+
+describe("scheduler role name (TC-CONSOL-044)", () => {
+  it("satisfies all three intersecting naming constraints", async () => {
+    const {
+      consolidationSchedulerRoleName,
+      CONSOLIDATION_SCHEDULER_ROLE_ARN_PATTERN,
+      IAM_ROLE_NAME_MAX,
+    } = await import("./consolidation");
+
+    const globToRegExp = (glob: string) =>
+      new RegExp(`^${glob.split("*").map((p) => p.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")).join(".*")}$`);
+    const pattern = globToRegExp(CONSOLIDATION_SCHEDULER_ROLE_ARN_PATTERN);
+
+    for (const stage of ["prod", "pr-1", "pr-113", "pr-99999"]) {
+      const name = consolidationSchedulerRoleName(stage);
+      // 1. IAM's own 64-char role-name limit (NOT Pulumi's 38-char name_prefix
+      //    cap — this uses `name`, which is why it can be this long).
+      expect(name.length).toBeLessThanOrEqual(IAM_ROLE_NAME_MAX);
+      // 2. Must match the ALREADY-DEPLOYED boundary + deploy-role patterns from
+      //    #122. Renaming would require another guarded rollout.
+      expect(name).toMatch(pattern);
+      // 3. Must start with `mem9-on-aws-`: the deploy role's iam:CreateRole is
+      //    scoped to `role/mem9-on-aws-*`. Auto-naming produced
+      //    `Mem9ConsolidationSchedulerRole-<suffix>` and AccessDenied'd.
+      expect(name.startsWith("mem9-on-aws-")).toBe(true);
+    }
+    expect(consolidationSchedulerRoleName("prod")).toBe(
+      "mem9-on-aws-prod-Mem9ConsolidationSchedulerRole-role",
+    );
+    expect(() => consolidationSchedulerRoleName("a".repeat(60))).toThrow(
+      /exceeds 64 characters/,
+    );
+  });
+});
