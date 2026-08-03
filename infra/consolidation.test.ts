@@ -836,3 +836,32 @@ describe("scheduler role name (TC-CONSOL-047)", () => {
     );
   });
 });
+
+describe("name budgets account for Pulumi's suffix (TC-CONSOL-048)", () => {
+  it("keeps every namePrefix under its resource limit once the suffix is appended", async () => {
+    const mod = await import("./consolidation");
+    const { boundedNamePrefix, PULUMI_NAME_SUFFIX_LEN } = mod;
+
+    // The lesson from a PROD deploy failure: checking the prefix against the
+    // resource's name limit is not enough. Pulumi appends a 26-character unique
+    // suffix, so a 39-char EventBridge rule prefix produced a 65-char name and
+    // PutRule rejected it with a ValidationException — after the PR had merged
+    // and every preview check was green.
+    expect(PULUMI_NAME_SUFFIX_LEN).toBe(26);
+
+    // The old failure-rule prefix must now be rejected at synth.
+    expect(() =>
+      boundedNamePrefix("mem9-on-aws-prod-consolidation-failure-", 64, "rule"),
+    ).toThrow(/65-character name/);
+
+    // Every prefix this stack builds must fit for the longest realistic stage.
+    for (const stage of ["prod", "pr-1", "pr-113", "pr-99999"]) {
+      const rule = `mem9-on-aws-${stage}-consol-failure-`;
+      expect(rule.length + PULUMI_NAME_SUFFIX_LEN).toBeLessThanOrEqual(64);
+      expect(() => boundedNamePrefix(rule, 64, "rule")).not.toThrow();
+
+      const group = mod.consolidationScheduleGroupPrefix(stage);
+      expect(group.length + PULUMI_NAME_SUFFIX_LEN).toBeLessThanOrEqual(64);
+    }
+  });
+});
