@@ -279,3 +279,24 @@ describe("reconcileDeployment", () => {
     expect(diagnostic).toContain("image_tag=<unavailable>");
   });
 });
+
+describe("rollout poll budget", () => {
+  it("stays above the task's own cold-start health floor", async () => {
+    const {
+      ROLLOUT_POLL_ATTEMPTS,
+      ROLLOUT_POLL_INTERVAL_MS,
+      ROLLOUT_HEALTH_FLOOR_MS,
+    } = await import("./reconcile-ecs-deployment.mjs");
+
+    const budgetMs = (ROLLOUT_POLL_ATTEMPTS - 1) * ROLLOUT_POLL_INTERVAL_MS;
+    // A budget at or below the floor makes the check a coin flip on a healthy
+    // deploy: 12 attempts (~110s) and 30 attempts (~290s) both landed inside the
+    // 270-390s band a real cold start needs, and pr-113 failed at 389s with
+    // `primary_not_completed,task_not_running` on a deploy that was fine.
+    expect(budgetMs).toBeGreaterThan(ROLLOUT_HEALTH_FLOOR_MS);
+    // Want real margin over the observed worst case, not a hair above the floor.
+    expect(budgetMs).toBeGreaterThanOrEqual(500_000);
+    // But it must stay well inside the workflow job's 60-minute timeout.
+    expect(budgetMs).toBeLessThan(20 * 60 * 1000);
+  });
+});
