@@ -265,7 +265,13 @@ export function consolidation(
     [
       "ConsolidationTaskSgId",
       "task-sg-id",
-      task.securityGroups.apply((ids) => ids.join(",")),
+      // Same defect class as subnet-ids below: `task.securityGroups` elements can
+      // be Outputs, so `.join(",")` wrote the literal
+      // "Calling [toString] on an [Output<T>] is not supported." into SSM
+      // (observed in the live pr-113 stack). `dbOut.taskSecurityGroupId` is a
+      // resolved Output<string> and is the SAME security group the task runs in
+      // — infra/ecs.ts derives the task SG from exactly this value.
+      dbOut.taskSecurityGroupId,
     ],
     [
       "ConsolidationSubnetIds",

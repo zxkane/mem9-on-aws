@@ -240,8 +240,14 @@ function installGlobals(stage: string) {
         taskDefinition = out(
           "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-consolidation:1",
         );
-        subnets = out(["subnet-a", "subnet-b"]);
-        securityGroups = out(["sg-task"]);
+        // FAITHFUL to SST: `Task.subnets`/`securityGroups` return the cluster's
+        // `Input<Input<string>[]>`, so the ELEMENTS are themselves Outputs. A
+        // stub with plain strings makes `ids.join(",")` look correct while
+        // production writes "Calling [toString] on an [Output<T>]..." into SSM —
+        // which is exactly how the task-sg-id defect reached a live stack after
+        // the identical subnet-ids defect had already been fixed.
+        subnets = out([out("subnet-a"), out("subnet-b")]);
+        securityGroups = out([out("sg-task")]);
         assignPublicIp = out(false);
         nodes = {
           taskRole: {
@@ -371,6 +377,26 @@ describe("consolidation task and schedule", () => {
       expect(id).toMatch(/^subnet-[0-9a-z]+$/);
     }
     expect(materialize(subnetParam!.args.type)).toBe("StringList");
+
+    // Guard EVERY parameter, not just subnet-ids. The same defect hit task-sg-id
+    // independently: joining an `Input<Input<string>[]>` wrote the literal
+    // "Calling [toString] on an [Output<T>] is not supported." into SSM, and
+    // asserting only the subnet value let the second instance through to a live
+    // stack. Any unresolved Output stringifies with that exact marker.
+    for (const parameter of resources.filter(({ kind }) => kind === "Parameter")) {
+      const name = String(materialize(parameter.args.name));
+      const value = String(materialize(parameter.args.value));
+      expect(value, `${name} value`).not.toMatch(/Calling \[toString\]/);
+      expect(value, `${name} value`).not.toMatch(/Output<T>/);
+      expect(value.trim(), `${name} must not be empty`).not.toBe("");
+    }
+    const sgParam = resources.find(
+      (resource) =>
+        resource.kind === "Parameter" &&
+        materialize(resource.args.name) ===
+          "/mem9-on-aws/prod/consolidation/task-sg-id",
+    );
+    expect(String(materialize(sgParam!.args.value))).toMatch(/^sg-[0-9a-z]+$/);
   });
 
   it("TC-CONSOL-021/022/027/037: creates a disabled preview and enabled weekly prod schedule", async () => {
