@@ -294,6 +294,9 @@ beforeEach(() => {
   delete process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED;
   delete process.env.MEM9_IMAGE_TAG;
   process.env.MEM9_BEDROCK_PROJECT = "proj_test";
+  // A reasoning model routes to another region, so the task needs THAT region's
+  // project id and a grant for it.
+  process.env.MEM9_BEDROCK_PROJECT_OPENAI = "proj_openai";
 });
 
 afterEach(() => {
@@ -303,6 +306,7 @@ afterEach(() => {
   delete process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED;
   delete process.env.MEM9_IMAGE_TAG;
   delete process.env.MEM9_BEDROCK_PROJECT;
+  delete process.env.MEM9_BEDROCK_PROJECT_OPENAI;
   vi.resetModules();
 });
 
@@ -320,6 +324,24 @@ describe("consolidation task and schedule", () => {
     expect(args.entrypoint).toEqual(["node"]);
     expect(args.command).toEqual(["/app/scripts/memory-consolidation.mjs"]);
     expect(args.environment.MEM9_CONSOLIDATION_REPORT_ONLY).toBe("1");
+
+    // The task classifies with MEM9_LLM_MODEL, and an `openai.gpt-5.6-*` value
+    // routes through buildCompleteChat to the Responses API in ANOTHER region.
+    // Without these two the task minted a bearer for the wrong region and sent
+    // the application-region project id, so every classification call failed —
+    // the first real preview run exited 1 for exactly this reason.
+    expect(args.environment.MEM9_BEDROCK_PROJECT_OPENAI).toBe("proj_openai");
+    expect(args.environment.MEM9_LLM_RESPONSES_REGION).toBe("us-west-2");
+
+    // ...and the grant must cover that region's project, which is a DIFFERENT
+    // resource from the application-region one.
+    const inference = (args.permissions as Array<Record<string, any>>).find(
+      (permission) => permission.actions?.includes("bedrock-mantle:CreateInference"),
+    );
+    expect(materialize(inference!.resources)).toEqual([
+      "arn:aws:bedrock-mantle:ap-northeast-1:123456789012:project/proj_test",
+      "arn:aws:bedrock-mantle:us-west-2:123456789012:project/proj_openai",
+    ]);
     expect(JSON.stringify(args.environment)).not.toContain("sensitive-tenant-id");
     const proxyDockerfile = readFileSync(
       new URL("../docker/llm-proxy/Dockerfile", import.meta.url),
@@ -469,6 +491,9 @@ describe("consolidation task and schedule", () => {
       actions: ["bedrock-mantle:CreateInference"],
       resources: [
         "arn:aws:bedrock-mantle:ap-northeast-1:123456789012:project/proj_test",
+        // Mantle projects are REGIONAL: a reasoning model is served from the
+        // responses region, whose project is a separate resource.
+        "arn:aws:bedrock-mantle:us-west-2:123456789012:project/proj_openai",
       ],
     });
     expect(task.permissions).toContainEqual({

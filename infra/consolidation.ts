@@ -6,6 +6,13 @@ import type { TenantIdentityOutputs } from "./tenant-identity";
 
 const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 const BEDROCK_PROJECT = process.env.MEM9_BEDROCK_PROJECT;
+// The consolidation task classifies with the SAME model the deployed ingest path
+// uses (MEM9_LLM_MODEL). An `openai.gpt-5.6-*` value routes through
+// buildCompleteChat to the Responses API in ANOTHER region, so the task needs
+// that region's own project id (Mantle projects are regional and never
+// cross-applied) and a grant for it. Mirrors infra/ecs.ts.
+const BEDROCK_PROJECT_OPENAI = process.env.MEM9_BEDROCK_PROJECT_OPENAI || "";
+const RESPONSES_REGION = process.env.MEM9_LLM_RESPONSES_REGION || "us-west-2";
 const SCHEDULE_ENABLED =
   process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED === "1";
 export const CONSOLIDATION_CONTAINER_NAME = "Mem9Consolidation";
@@ -76,6 +83,14 @@ export function consolidation(
         BEDROCK_PROJECT
           ? $interpolate`arn:aws:bedrock-mantle:${ECR_REGION}:${accountId()}:project/${BEDROCK_PROJECT}`
           : "*",
+        // A reasoning model is served from RESPONSES_REGION, whose project is a
+        // DIFFERENT resource. Without this the task 403s on inference even though
+        // the application-region grant looks correct.
+        ...(BEDROCK_PROJECT_OPENAI
+          ? [
+              $interpolate`arn:aws:bedrock-mantle:${RESPONSES_REGION}:${accountId()}:project/${BEDROCK_PROJECT_OPENAI}`,
+            ]
+          : []),
       ],
     },
     {
@@ -115,6 +130,11 @@ export function consolidation(
       MEM9_DB_NAME: dbOut.database,
       MEM9_LLM_MODEL: process.env.MEM9_LLM_MODEL || "zai.glm-5",
       MEM9_BEDROCK_PROJECT: process.env.MEM9_BEDROCK_PROJECT || "",
+      // Read by buildCompleteChat when MEM9_LLM_MODEL selects the Responses
+      // route. Absent, it minted a bearer for the wrong region and sent the
+      // application-region project id, so every classification call failed.
+      MEM9_BEDROCK_PROJECT_OPENAI: BEDROCK_PROJECT_OPENAI,
+      MEM9_LLM_RESPONSES_REGION: RESPONSES_REGION,
       MEM9_CONSOLIDATION_REPORT_ONLY: "1",
       ...(ecsOut.alertsTopicArn
         ? { MEM9_ALERTS_TOPIC_ARN: ecsOut.alertsTopicArn }
