@@ -4,7 +4,10 @@ import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WORKLOAD_BOUNDARY_POLICY_NAME } from "./workload-permissions-boundary";
-import { EXPECTED_WORKLOAD_ROLE_NAMES } from "./workload-permissions-boundary.test-fixtures";
+import {
+  CONSOLIDATION_SCHEDULER_ROLE_NAME,
+  EXPECTED_WORKLOAD_ROLE_NAMES,
+} from "./workload-permissions-boundary.test-fixtures";
 
 interface MockCallArgs {
   inputs: Record<string, unknown>;
@@ -229,11 +232,19 @@ afterEach(() => {
 
 describe("workload role coverage from the real SST graph", () => {
   it.each([
-    { authorizerEnabled: false, label: "disabled" },
-    { authorizerEnabled: true, label: "enabled" },
+    {
+      authorizerEnabled: false,
+      label: "authorizer disabled, scheduler disabled",
+      scheduleEnabled: false,
+    },
+    {
+      authorizerEnabled: true,
+      label: "authorizer enabled, scheduler enabled",
+      scheduleEnabled: true,
+    },
   ])(
-    "TC-FACADEAUTH-004: keeps the $label facade graph inside the workload boundary",
-    async ({ authorizerEnabled }) => {
+    "TC-FACADEAUTH-004/TC-CONSOL-026: keeps the $label graph inside the workload boundary",
+    async ({ authorizerEnabled, scheduleEnabled }) => {
       vi.resetModules();
       const rpcServer = await startSstRpcServer();
       const previousSstServer = process.env.SST_SERVER;
@@ -242,6 +253,8 @@ describe("workload role coverage from the real SST graph", () => {
         process.env.MEM9_FACADE_AUTHORIZER_ENABLED;
       const previousMantleProject = process.env.MEM9_BEDROCK_PROJECT;
       const previousSlackWebhook = process.env.SST_SECRET_SlackWebhookUrl;
+      const previousScheduleEnabled =
+        process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED;
       process.env.SST_SERVER = rpcServer.url;
       process.env.WORKLOAD_BOUNDARY_PROD_ENABLED = "true";
       if (authorizerEnabled) {
@@ -252,6 +265,11 @@ describe("workload role coverage from the real SST graph", () => {
       process.env.MEM9_BEDROCK_PROJECT = "mock-project";
       process.env.SST_SECRET_SlackWebhookUrl =
         "https://hooks.example.com/services/mock";
+      if (scheduleEnabled) {
+        process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED = "1";
+      } else {
+        delete process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED;
+      }
       Object.assign(globalThis, {
         $app: {
           name: "mem9-on-aws",
@@ -330,6 +348,10 @@ describe("workload role coverage from the real SST graph", () => {
         const expectedRoleNames = authorizerEnabled
           ? [...EXPECTED_WORKLOAD_ROLE_NAMES, authorizerRoleLogicalName].sort()
           : [...EXPECTED_WORKLOAD_ROLE_NAMES];
+        if (scheduleEnabled) {
+          expectedRoleNames.push(CONSOLIDATION_SCHEDULER_ROLE_NAME);
+          expectedRoleNames.sort();
+        }
         await pulumi.runtime.runInPulumiStack(async () => {
           const configModule = await import(
             /* @vite-ignore */ moduleUrl("sst.config.ts")
@@ -356,9 +378,28 @@ describe("workload role coverage from the real SST graph", () => {
           ),
         ).toBe(true);
         for (const { inputs, name } of createdRoles) {
+          const physicalName = inputs.name ?? inputs.namePrefix;
+          if (physicalName === undefined) {
+            // SST auto-names the role as `<app>-<stage>-<logicalName>-<suffix>`.
+            // That is the path MOST project roles take (Mem9ServerTaskRole,
+            // Mem9BootstrapExecutionRole, …), and it is required for names whose
+            // explicit prefix would exceed Pulumi's 38-char name_prefix cap. The
+            // boundary patterns are `mem9-on-a*-*<LogicalName>-*`, so the logical
+            // name is what must match.
+            // `expectedRoleNames` is already asserted above to equal the full
+            // set of created logical names, so membership here proves the role is
+            // a reviewed workload role whose auto-generated physical name will
+            // carry the `mem9-on-aws-<stage>-<logicalName>-` shape the boundary
+            // patterns match.
+            expect(
+              expectedRoleNames.includes(name),
+              `${name} auto-named role must be a known workload role`,
+            ).toBe(true);
+            continue;
+          }
           expect(
             workloadRolePrefixes.some((prefix) =>
-              String(inputs.name).startsWith(prefix),
+              String(physicalName).startsWith(prefix),
             ),
             `${name} physical role name`,
           ).toBe(true);
@@ -457,6 +498,10 @@ describe("workload role coverage from the real SST graph", () => {
           ],
           ["MEM9_BEDROCK_PROJECT", previousMantleProject],
           ["SST_SECRET_SlackWebhookUrl", previousSlackWebhook],
+          [
+            "MEM9_CONSOLIDATION_SCHEDULE_ENABLED",
+            previousScheduleEnabled,
+          ],
         ] as const) {
           if (value === undefined) {
             delete process.env[name];

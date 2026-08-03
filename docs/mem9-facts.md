@@ -101,6 +101,32 @@ Verified from `server/internal/config/config.go` + `server/internal/repository/p
 - Default schema (`server/schema_pg.sql`) ships `embedding vector(1536)` and
   `CREATE EXTENSION IF NOT EXISTS vector;`.
 
+#### A content-free `PUT` NULLS the embedding on postgres (probed in prod 2026-08-03)
+**Decisive for any tool that updates tags/metadata without changing content.**
+
+`PUT /v1alpha2/mem9s/memories/{id}` is not a partial update at the storage layer:
+
+- `service/memory.go` re-embeds **only** when the request changes `content`.
+- `repository/postgres/memory.go` `UpdateOptimistic` writes `embedding = $4`
+  **unconditionally**, from the in-memory row.
+- `scanMemory`/`scanMemoryRows` on the **postgres** path scan the embedding column
+  into a discarded local and **never assign `m.Embedding`** (the TiDB path does).
+  So the read-modify-write round-trips `nil` → `embedding = NULL`.
+
+Verified against prod: a probe memory that ranked **first** for its own topic
+became permanently unfindable by semantic search after a tags-only `PUT`, while
+`GET` still returned it `state=active` with the new tag and `version` bumped.
+`VectorSearch` filters `embedding IS NOT NULL`, so the row survives in
+list/get and silently leaves recall — unrecoverable without recomputing the
+vector.
+
+**Consequence:** a tags/metadata-only mutation must go **direct to Aurora**
+(`UPDATE ... SET tags=…, metadata=… WHERE id=… AND version=… AND content=…`),
+not through the REST `PUT`. `scripts/memory-consolidation.mjs`'s
+`markMemoryStale` adapter does exactly this; `executeStale` documents why. If a
+future path must use REST, it has to send the unchanged `content` too so
+`contentChanged` triggers a re-embed, and pay the embedding cost.
+
 ### tidb backend (NOT viable on Aurora)
 - Uses TiDB `VECTOR(N)` type, `VEC_COSINE_DISTANCE`, and optionally
   `EMBED_TEXT("tidbcloud_free/...", content)` GENERATED column for **server-side

@@ -129,21 +129,25 @@ describe("workload role boundary Pulumi lifecycle", () => {
           onOutput: () => {},
           signal: AbortSignal.timeout(PULUMI_OPERATION_TIMEOUT_MS),
         });
-        expect(createResult.summary.resourceChanges?.create).toBe(9);
+        expect(createResult.summary.resourceChanges?.create).toBe(
+          EXPECTED_WORKLOAD_ROLE_NAMES.length + 1,
+        );
 
         await stack.setConfig("revision", { value: "2" });
         const updateResult = await stack.up({
           onOutput: () => {},
           signal: AbortSignal.timeout(PULUMI_OPERATION_TIMEOUT_MS),
         });
-        expect(updateResult.summary.resourceChanges?.update).toBe(8);
+        expect(updateResult.summary.resourceChanges?.update).toBe(
+          EXPECTED_WORKLOAD_ROLE_NAMES.length,
+        );
 
         const state = await stack.exportStack();
         const resources = state.deployment.resources as ExportedResource[];
         const roles = resources.filter(
           ({ type }) => type === "pulumi-nodejs:dynamic:Resource",
         );
-        expect(roles).toHaveLength(8);
+        expect(roles).toHaveLength(EXPECTED_WORKLOAD_ROLE_NAMES.length);
         expect(
           roles.every(
             ({ inputs, outputs }) =>
@@ -156,7 +160,9 @@ describe("workload role boundary Pulumi lifecycle", () => {
           onOutput: () => {},
           signal: AbortSignal.timeout(PULUMI_OPERATION_TIMEOUT_MS),
         });
-        expect(destroyResult.summary.resourceChanges?.delete).toBe(9);
+        expect(destroyResult.summary.resourceChanges?.delete).toBe(
+          EXPECTED_WORKLOAD_ROLE_NAMES.length + 1,
+        );
       } finally {
         await stack.workspace.removeStack(stack.name);
       }

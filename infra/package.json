@@ -11,7 +11,8 @@
     "dev": "cd .. && sst dev",
     "pretest": "cd .. && infra/node_modules/.bin/sst install --stage test",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:consolidation:coverage": "vitest run consolidation.test.ts --coverage.enabled=true --coverage.include=consolidation.ts --coverage.reporter=text --coverage.thresholds.lines=80 --coverage.thresholds.functions=80 --coverage.thresholds.statements=80 --coverage.thresholds.branches=80"
   },
   "dependencies": {
     "@aws-sdk/client-bedrock-agentcore-control": "^3.900.0",
@@ -20,9 +21,11 @@
   "devDependencies": {
     "@pulumi/pulumi": "3.215.0",
     "@types/node": "^24.0.0",
+    "@vitest/coverage-v8": "4.1.10",
     "sst": "^4.17.0",
     "typescript": "^5.7.2",
-    "vitest": "^2.1.8",
+    "vite": "8.2.0",
+    "vitest": "^4.1.10",
     "yaml": "^2.9.0"
   }
 }

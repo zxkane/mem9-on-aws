@@ -69,6 +69,10 @@ const HOUR_MS = 3600 * 1000;
 const DEFAULT_LOCK_TTL_MS = 2 * HOUR_MS;
 const SNIPPET_LEN = 120;
 
+export function sharedCleanupMutexKey(stage) {
+  return `mem9-cleanup:${stage}`;
+}
+
 // D1–D4 durability rules, copied verbatim from
 // docker/mnemo-server/patches/0002-ingest-durable-only-extraction-filter.patch
 // so cleanup and smart-ingest share one durability definition. A unit test
@@ -457,7 +461,7 @@ function defaultPidAlive(pid) {
  * model): branch on the survivor's CURRENT content hash to distinguish
  * fresh run / crash-recovery / external write. Returns destructive calls used.
  */
-async function applyMerge(decision, client, deleteQueue, counters, log) {
+export async function applyMergeDecision(decision, client, deleteQueue, counters, log) {
   const survivor = await client.get(decision.id);
   if (!survivor) {
     // Survivor no longer active (deleted/archived out-of-band): the merge's
@@ -467,8 +471,16 @@ async function applyMerge(decision, client, deleteQueue, counters, log) {
     return 0;
   }
   const currentHash = contentHash(survivor.content);
-  const needsPut = currentHash === decision.contentHash && currentHash !== decision.mergedContentHash;
-  const isRecovery = currentHash === decision.mergedContentHash;
+  const needsPut =
+    survivor.version === decision.version &&
+    currentHash === decision.contentHash &&
+    currentHash !== decision.mergedContentHash;
+  const isRecovery =
+    currentHash === decision.mergedContentHash &&
+    (
+      decision.contentHash !== decision.mergedContentHash ||
+      survivor.version === decision.version
+    );
 
   if (!needsPut && !isRecovery) {
     log(`MERGE ${decision.id}: survivor changed externally — skipping whole merge`);
@@ -488,7 +500,10 @@ async function applyMerge(decision, client, deleteQueue, counters, log) {
   for (const absorbed of decision.absorbs) {
     const current = await client.get(absorbed.id);
     if (!current || current.state === "deleted") continue;
-    if (contentHash(current.content) !== absorbed.contentHash) {
+    if (
+      current.version !== absorbed.version ||
+      contentHash(current.content) !== absorbed.contentHash
+    ) {
       log(`MERGE ${decision.id}: absorbed ${absorbed.id} changed externally — dropped from delete set`);
       counters.skippedLww += 1;
       continue;
@@ -680,7 +695,7 @@ async function applyDecisions({ decisions, client, cap, approved, counters, log 
         break;
       }
       if (decision.verdict === "MERGE") {
-        capUsed += await applyMerge(decision, client, deleteQueue, counters, log);
+        capUsed += await applyMergeDecision(decision, client, deleteQueue, counters, log);
       } else {
         const current = await client.get(decision.id);
         if (!current || current.state === "deleted") {
@@ -775,26 +790,34 @@ export async function runCleanup(opts, deps) {
     deps.lockFile ||
     join(process.env.XDG_RUNTIME_DIR || join(homedir(), ".cache"), "mem9-cleanup", `${opts.stage}.lock`);
   const ttlMs = deps.lockTtlMs ?? (opts.lockTtlHours ? opts.lockTtlHours * HOUR_MS : DEFAULT_LOCK_TTL_MS);
+  const sharedMutex = deps.acquireMutex
+    ? await deps.acquireMutex(opts.stage)
+    : undefined;
+  if (deps.acquireMutex && !sharedMutex) {
+    log("another cleanup or consolidation apply holds the shared database mutex");
+    return result({ exitCode: 3, decisions, decisionPath });
+  }
   if (!acquireLock(fs, lockFile, clock, log, ttlMs, deps.pidAlive || defaultPidAlive)) {
+    await sharedMutex?.release();
     log(`another cleanup run holds ${lockFile} — aborting`);
     return result({ exitCode: 3, decisions, decisionPath });
   }
 
-  const approved = readApprovedIds(fs, opts.idsFile);
-  if (approved) {
-    const known = new Set(decisions.map((d) => d.id));
-    const unmatched = [...approved].filter((id) => !known.has(id));
-    if (unmatched.length > 0) {
-      // A typo'd approval must not silently no-op.
-      log(`${unmatched.length} approved id(s) matched no decision: ${unmatched.join(", ")}`);
-    }
-  }
-
   let applied;
   try {
+    const approved = readApprovedIds(fs, opts.idsFile);
+    if (approved) {
+      const known = new Set(decisions.map((d) => d.id));
+      const unmatched = [...approved].filter((id) => !known.has(id));
+      if (unmatched.length > 0) {
+        // A typo'd approval must not silently no-op.
+        log(`${unmatched.length} approved id(s) matched no decision: ${unmatched.join(", ")}`);
+      }
+    }
     applied = await applyDecisions({ decisions, client, cap, approved, counters, log });
   } finally {
     fs.rmSync(lockFile, { force: true });
+    await sharedMutex?.release();
   }
 
   log(
@@ -968,6 +991,99 @@ export function parseArgs(argv) {
   return opts;
 }
 
+async function productionDatabaseMutex(stage, region) {
+  const { SSMClient, GetParametersCommand } =
+    await import("@aws-sdk/client-ssm");
+  const { SecretsManagerClient, GetSecretValueCommand } =
+    await import("@aws-sdk/client-secrets-manager");
+  const prefix = `/mem9-on-aws/${stage}/db`;
+  const parameterNames = {
+    host: `${prefix}/host`,
+    port: `${prefix}/port`,
+    database: `${prefix}/name`,
+    secretArn: `${prefix}/secret-arn`,
+  };
+
+  const ssm = new SSMClient({ region });
+  const parameterResponse = await ssm.send(
+    new GetParametersCommand({ Names: Object.values(parameterNames) }),
+  );
+  ssm.destroy();
+  if (parameterResponse.InvalidParameters?.length) {
+    throw new Error("database connection parameters are incomplete");
+  }
+  const parameters = new Map(
+    (parameterResponse.Parameters ?? []).map((parameter) => [
+      parameter.Name,
+      parameter.Value,
+    ]),
+  );
+  const config = Object.fromEntries(
+    Object.entries(parameterNames).map(([key, name]) => [
+      key,
+      parameters.get(name),
+    ]),
+  );
+  const port = Number(config.port);
+  if (
+    !config.host ||
+    !Number.isInteger(port) ||
+    !config.database ||
+    !config.secretArn
+  ) {
+    throw new Error("database connection parameters are incomplete");
+  }
+
+  const secrets = new SecretsManagerClient({ region });
+  const secretResponse = await secrets.send(
+    new GetSecretValueCommand({ SecretId: config.secretArn }),
+  );
+  secrets.destroy();
+  let credentials;
+  try {
+    credentials = JSON.parse(secretResponse.SecretString ?? "");
+  } catch {
+    throw new Error("database secret is not valid JSON");
+  }
+  if (
+    typeof credentials.username !== "string" ||
+    typeof credentials.password !== "string"
+  ) {
+    throw new Error("database secret is missing credentials");
+  }
+
+  const { Client } = await import("pg");
+  const db = new Client({
+    host: config.host,
+    port,
+    database: config.database,
+    user: credentials.username,
+    password: credentials.password,
+    ssl: { rejectUnauthorized: true },
+    application_name: `mem9-cleanup-${stage}`,
+  });
+  await db.connect();
+
+  return {
+    acquireMutex: async (lockStage) => {
+      const result = await db.query(
+        "SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS acquired",
+        [sharedCleanupMutexKey(lockStage)],
+      );
+      if (!result.rows[0]?.acquired) return null;
+      return {
+        release: async () => {
+          await db.query(
+            "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
+            [sharedCleanupMutexKey(lockStage)],
+          );
+        },
+      };
+    },
+    close: () => db.end(),
+  };
+}
+
 async function productionDeps(opts) {
   const region = process.env.AWS_REGION || "ap-northeast-1";
 
@@ -983,6 +1099,9 @@ async function productionDeps(opts) {
     tenantId = process.env.MEM9_TENANT_ID;
   }
   if (!tenantId) throw new Error("tenant id required: set MEM9_TENANT_ID or --tenant-secret-arn");
+  const databaseMutex = opts.apply
+    ? await productionDatabaseMutex(opts.stage, region)
+    : undefined;
 
   const { getToken } = await import("@aws/bedrock-token-generator");
   const { fromNodeProviderChain } = await import("@aws-sdk/credential-providers");
@@ -1020,6 +1139,10 @@ async function productionDeps(opts) {
       log: (msg) => console.error(`[memory-cleanup ${new Date().toISOString()}] ${msg}`),
       outDir: opts.outDir,
       lockFile: opts.lockFile,
+      acquireMutex: databaseMutex?.acquireMutex,
+    },
+    close: async () => {
+      await databaseMutex?.close();
     },
   };
 }
@@ -1028,15 +1151,21 @@ const isMain =
   process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
 
 if (isMain) {
+  let production;
   try {
     const opts = parseArgs(process.argv.slice(2));
-    const { tenantId, deps } = await productionDeps(opts);
-    const result = await runCleanup({ ...opts, tenantId }, deps);
+    production = await productionDeps(opts);
+    const result = await runCleanup(
+      { ...opts, tenantId: production.tenantId },
+      production.deps,
+    );
     process.exit(result.exitCode);
   } catch (err) {
     // Full stack on a destructive tool: an operator reconstructing a
     // half-applied run needs more than one context-free message line.
     console.error(`memory-cleanup: ${err.stack || err.message}`);
     process.exit(1);
+  } finally {
+    await production?.close();
   }
 }

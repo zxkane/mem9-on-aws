@@ -136,6 +136,12 @@ export default $config({
     const { bootstrap } = await import("./infra/bootstrap");
     bootstrap(ecsOut.cluster, dbOut, identityOut);
 
+    // Weekly cross-memory consolidation. The task always exists for a
+    // report-only preview run; its Scheduler and execution role are synthesized
+    // only behind MEM9_CONSOLIDATION_SCHEDULE_ENABLED.
+    const { consolidation } = await import("./infra/consolidation");
+    consolidation(ecsOut, dbOut, identityOut);
+
     // MCP surface (§6/§6a): Cognito M2M → AgentCore Gateway → a VPC-attached proxy
     // Lambda that reaches mnemo-server privately over Cloud Map DNS. Threaded as
     // direct Pulumi Outputs (no SSM read-back). cognito is independent; gateway()

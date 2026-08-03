@@ -7,8 +7,26 @@ import { resolve } from "node:path";
 const APP_CONTAINERS = ["mnemo-server", "qwen3-embed", "llm-proxy"];
 const SAFE_VALUE = /^[A-Za-z0-9._:-]+$/;
 const ACCOUNT_ID = /\d{12}/;
-const ROLLOUT_POLL_ATTEMPTS = 12;
-const ROLLOUT_POLL_INTERVAL_MS = 10_000;
+// A FRESH preview stack is the slow case, and the floor is set by the task's own
+// health contract rather than by network luck: `qwen3-embed` declares a
+// startPeriod of 180s because its ONNX session-create reads ~2.4 GB
+// (infra/ecs.ts), then needs a 30s-interval health check to pass before the task
+// counts as healthy — so the EARLIEST a cold start can report COMPLETED is ~210s,
+// and 270-390s is the realistic band once ECS settles the deployment.
+//
+// This budget was 12 attempts (~110s), which only ever passed because the
+// DescribeServices round trips padded it: a measured SUCCESSFUL run (#121) took
+// 132s. Raising it to 30 (~290s) was still inside the band, so it stayed a coin
+// flip — pr-113 then failed at 389s with `primary_not_completed,task_not_running`
+// on a deploy that was itself healthy. 60 attempts (~590s) clears the band with
+// real margin while staying far under the job's 60-minute budget, and a genuinely
+// stuck rollout still fails, just later.
+export const ROLLOUT_POLL_ATTEMPTS = 60;
+export const ROLLOUT_POLL_INTERVAL_MS = 10_000;
+// The qwen3-embed startPeriod (infra/ecs.ts) plus one health interval is the
+// EARLIEST a cold start can report COMPLETED. Exported so a test can assert the
+// budget stays above it instead of rediscovering the floor in CI.
+export const ROLLOUT_HEALTH_FLOOR_MS = (180 + 30) * 1000;
 
 function sleepSync(milliseconds) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, milliseconds);

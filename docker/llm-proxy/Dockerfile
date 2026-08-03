@@ -17,18 +17,35 @@ FROM node:24-slim
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends curl \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
+    && curl --fail --silent --show-error \
+      https://truststore.pki.rds.amazonaws.com/ap-northeast-1/ap-northeast-1-bundle.pem \
+      --output /app/ap-northeast-1-bundle.pem \
     && rm -rf /var/lib/apt/lists/*
 
-# Deps first (layer cache). --omit=dev: only @aws/bedrock-token-generator +
-# @aws-sdk/credential-providers (+ their @smithy/@aws-sdk transitive deps).
-COPY docker/llm-proxy/package.json ./
-RUN npm install --omit=dev --no-audit --no-fund
+# Deps first (layer cache). The sidecar uses the token dependencies; the
+# consolidation entrypoint additionally uses PostgreSQL and SNS.
+COPY docker/llm-proxy/package*.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
 
+# PRESERVE the repo directory layout: memory-cleanup.mjs imports the sidecar as
+# `../docker/llm-proxy/server.mjs`, so flattening both into /app makes that
+# resolve to /docker/llm-proxy/server.mjs and the consolidation entrypoint dies
+# on its first import. The sidecar itself is still started as `server.mjs` from
+# the /app workdir (see ENTRYPOINT), so it is copied to BOTH locations.
 COPY docker/llm-proxy/server.mjs ./
+COPY docker/llm-proxy/server.mjs /app/docker/llm-proxy/server.mjs
+COPY scripts/memory-cleanup.mjs /app/scripts/memory-cleanup.mjs
+COPY scripts/memory-consolidation.mjs /app/scripts/memory-consolidation.mjs
+
+# Fail the BUILD, not the weekly run, if that import graph ever breaks again.
+RUN node --input-type=module \
+      -e "await import('/app/scripts/memory-consolidation.mjs')" \
+    && echo "consolidation entrypoint imports OK"
 
 # Listens on LLM_PROXY_PORT (default 8082); mem9 reaches it at
 # http://localhost:8082/v1. Not published outside the task — localhost only.
 EXPOSE 8082
 ENV NODE_ENV=production
+ENV NODE_EXTRA_CA_CERTS=/app/ap-northeast-1-bundle.pem
 ENTRYPOINT ["node", "server.mjs"]

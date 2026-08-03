@@ -32,6 +32,9 @@
 #                  to true only after every live role is bounded. Every AWS job
 #                  stays disabled until true; prod also fails synthesis unless
 #                  the value is explicitly true or false.
+#   MEM9_CONSOLIDATION_SCHEDULE_ENABLED — set to 1 only after the one-shot
+#                  cleanup and an actionable report-only consolidation run.
+#                  Unset keeps the production weekly schedule absent.
 #
 # Workload-boundary maintenance gate revision: 1
 
@@ -155,11 +158,17 @@ jobs:
       - name: Unit tests (infra)
         run: pnpm -C infra test
 
+      - name: Consolidation coverage (infra)
+        run: pnpm -C infra test:consolidation:coverage
+
       - name: Type check (root)
         run: npm run typecheck
 
       - name: Unit tests (root)
         run: npm test
+
+      - name: Consolidation coverage (root)
+        run: npm run test:consolidation:coverage
 
       - uses: actions/setup-python@v6
         with:
@@ -180,6 +189,7 @@ jobs:
           fi
           shellcheck scripts/deploy-workload-permissions-boundary.sh
           shellcheck scripts/rollout-workload-permissions-boundary.sh
+          shellcheck scripts/run-consolidation-task.sh
 
       - name: PostgreSQL durable ingest integration tests
         run: bash scripts/run-ingest-queue-integration.sh
@@ -199,9 +209,9 @@ jobs:
     # ~1.2 GB qwen3 image pull + 180s health-check startPeriod, plus the tiny
     # llm-proxy sidecar) + the bootstrap DB-retry + run-task. No RDS Proxy
     # (dropped — see infra/db.ts), so no proxy warmup wait. Measured first
-    # bring-up ~30-35m; 45m gives headroom without wasting runner time on a stuck
+    # bring-up ~30-35m; 60m leaves room for the report-only consolidation E2E
     # deploy.
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
       id-token: write
       contents: read
@@ -314,6 +324,9 @@ jobs:
           # The image applies the repeatable atomic-ingest migration before the
           # server starts, so one enabled rollout is safe.
           MEM9_DURABLE_INGEST_ENABLED: "1"
+          # Synthesize the Scheduler resource for infra coverage, but
+          # infra/consolidation.ts keeps every preview schedule DISABLED.
+          MEM9_CONSOLIDATION_SCHEDULE_ENABLED: "1"
           # Attaches the allow-all compliance authorizer to the OAuth façade
           # routes (infra/oauth-facade.ts), flipping them from AuthorizationType
           # NONE to CUSTOM so the Palisade APIGv2NotNoneAuthorizer finding clears.
@@ -362,6 +375,15 @@ jobs:
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: bash scripts/run-bootstrap-task.sh
+
+      - name: Run report-only consolidation task (preview)
+        # Runs the exact deployed image/task/network path, requires exit 0, and
+        # prints only the content-free REVIEW_LIST summary from its exact stream.
+        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        shell: bash
+        env:
+          STAGE: ${{ steps.deploy.outputs.stage }}
+        run: bash scripts/run-consolidation-task.sh
 
       - name: MCP write-search E2E (preview, soft)
         # The first live write->search round-trip (section 6/6a): Cognito M2M JWT
@@ -987,6 +1009,9 @@ jobs:
           # The image applies the repeatable atomic-ingest migration before the
           # server starts, so one enabled rollout is safe.
           MEM9_DURABLE_INGEST_ENABLED: "1"
+          # Explicit opt-in. Missing/empty keeps the schedule and Scheduler role
+          # absent; the task definition remains available for report-only runs.
+          MEM9_CONSOLIDATION_SCHEDULE_ENABLED: ${{ vars.MEM9_CONSOLIDATION_SCHEDULE_ENABLED }}
           # Compliance authorizer on the OAuth façade routes — see the preview
           # deploy step above for the full rationale. Must be set here too: the
           # flag is read at synth time, so a prod deploy without it strips the
