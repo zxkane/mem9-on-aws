@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 /**
  * Unit tests for the `cognito` stack factory. Mocks the SST globals so the
  * factory runs bare; asserts the M2M user pool + domain + resource server +
- * client wiring and the SSM exports (client secrets as SecureString, never plain).
+ * client wiring and the SSM exports (client secret as SecureString, never plain).
  */
 
 function out<T>(value: T): { value: T; apply: (fn: (v: T) => unknown) => unknown } {
@@ -96,7 +96,7 @@ function byKind(kind: string) {
 }
 
 describe("cognito stack", () => {
-  it("creates a pool, domain, resource server (read+write), and two M2M clients", async () => {
+  it("TC-M2M-CLEANUP-001: creates one read/write M2M client", async () => {
     installGlobals("prod");
     const cognito = await loadCognito();
     const outs = cognito();
@@ -107,10 +107,9 @@ describe("cognito stack", () => {
     const scopeNames = (rs.scopes as { scopeName: string }[]).map((s) => s.scopeName).sort();
     expect(scopeNames).toEqual(["read", "write"]);
     const clients = byKind("UserPoolClient");
-    expect(clients).toHaveLength(2);
+    expect(clients).toHaveLength(1);
     expect(clients.map(({ args }) => args.name)).toEqual([
       "prod-mem9-mcp-client",
-      "prod-mem9-mcp-client2",
     ]);
     for (const { args } of clients) {
       expect(args.generateSecret).toBe(true);
@@ -120,14 +119,14 @@ describe("cognito stack", () => {
         "mem9-mcp/write",
       ]);
     }
-    // The gateway consumes both client ids in allowedClientIds.
-    expect(outs.allowedClientIds).toHaveLength(2);
+    // The gateway consumes the remaining M2M client id in allowedClientIds.
+    expect(outs.allowedClientIds).toHaveLength(1);
     expect(outs.allowedClientIds.map((id) => (id as unknown as { value: string }).value)).toEqual(
-      ["UserPoolClient-1-id", "UserPoolClient-2-id"],
+      ["UserPoolClient-1-id"],
     );
   });
 
-  it("exports both client secrets as SecureString values", async () => {
+  it("TC-M2M-CLEANUP-002: exports only the original client credentials", async () => {
     installGlobals("prod");
     const cognito = await loadCognito();
     cognito();
@@ -135,22 +134,13 @@ describe("cognito stack", () => {
       type: "SecureString",
       value: "SECRET-VALUE-1",
     });
-    expect(
-      params.find((p) => p.name.endsWith("/cognito/client2/client-secret")),
-    ).toMatchObject({
-      type: "SecureString",
-      value: "SECRET-VALUE-2",
-    });
-    // Issuer, token endpoint, client ids, and scope are plain Strings.
+    // Issuer, token endpoint, client id, and scope are plain Strings.
     expect(params.find((p) => p.name.endsWith("/cognito/issuer"))?.type).toBe("String");
     expect(params.find((p) => p.name.endsWith("/cognito/client-id"))).toMatchObject({
       type: "String",
       value: "UserPoolClient-1-id",
     });
-    expect(params.find((p) => p.name.endsWith("/cognito/client2/client-id"))).toMatchObject({
-      type: "String",
-      value: "UserPoolClient-2-id",
-    });
+    expect(params.some((p) => p.name.includes("/cognito/client2/"))).toBe(false);
   });
 
   it("uses deleteBeforeReplace on non-prod, not on prod (pool replacement wipes clients)", async () => {

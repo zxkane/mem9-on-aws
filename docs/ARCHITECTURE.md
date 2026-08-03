@@ -227,9 +227,9 @@ port 8080 rule permits the private hop. The private backend path has no ALB,
 certificate, VPC Lattice target, public Route 53 zone, or public mnemo-server
 endpoint.
 
-The gateway trusts three implemented Cognito clients:
+The gateway trusts both implemented Cognito clients:
 
-- Two independent M2M clients using `client_credentials`.
+- M2M `client_credentials` for CI and headless clients.
 - Authorization code with PKCE through the API Gateway v2 OAuth facade for
   interactive clients.
 

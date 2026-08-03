@@ -118,7 +118,7 @@ async function loadGateway() {
 function fakeCognito(): CognitoOutputs {
   return {
     issuer: out("https://cognito-idp.ap-northeast-1.amazonaws.com/pool-1"),
-    allowedClientIds: [out("client-1"), out("client-2")],
+    allowedClientIds: [out("client-1")],
   } as unknown as CognitoOutputs;
 }
 function fakeEcs(): EcsOutputs {
@@ -149,13 +149,13 @@ describe("gateway stack", () => {
     expect(gw.authorizerType).toBe("CUSTOM_JWT");
     const jwt = (gw.authorizerConfiguration as any).customJwtAuthorizer;
     expect(String((jwt.discoveryUrl as { value?: string }).value)).toContain("/.well-known/openid-configuration");
-    // The two M2M clients plus the browser-login reader client.
-    expect(jwt.allowedClients).toHaveLength(3);
+    // The M2M client plus the browser-login reader client.
+    expect(jwt.allowedClients).toHaveLength(2);
     // No interceptor in v1.
     expect(gw.interceptorConfigurations).toBeUndefined();
   });
 
-  it("trusts both M2M clients and the reader client in allowedClients", async () => {
+  it("TC-M2M-CLEANUP-003: trusts the M2M and reader clients", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
     gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>);
@@ -164,9 +164,8 @@ describe("gateway stack", () => {
     // The list is [...cognitoOut.allowedClientIds, readerClientId]; each entry is an
     // out<string> wrapper, so unwrap to compare the underlying client ids.
     const clients = (unwrap(jwt.allowedClients) as string[]);
-    // Both M2M clients from fakeCognito().allowedClientIds.
+    // The M2M client from fakeCognito().allowedClientIds.
     expect(clients).toContain("client-1");
-    expect(clients).toContain("client-2");
     // The browser-login reader client passed as the 4th arg.
     expect(clients).toContain("reader-client-id-test");
   });
