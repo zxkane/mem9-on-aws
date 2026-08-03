@@ -15,6 +15,24 @@ export interface ConsolidationOutputs {
   taskDefinitionArn: Output<string>;
 }
 
+/**
+ * Schedule-group name prefix, bounded by EventBridge Scheduler's 38-character
+ * name_prefix limit. Exported so a unit test can assert the bound for realistic
+ * stage names instead of discovering it in a failed deploy.
+ */
+export const SCHEDULE_GROUP_NAME_PREFIX_MAX = 38;
+
+export function consolidationScheduleGroupPrefix(stage: string): string {
+  const prefix = `mem9-on-aws-${stage}-consolidation-`;
+  if (prefix.length > SCHEDULE_GROUP_NAME_PREFIX_MAX) {
+    throw new Error(
+      `schedule-group name prefix ${prefix} exceeds ` +
+        `${SCHEDULE_GROUP_NAME_PREFIX_MAX} characters`,
+    );
+  }
+  return prefix;
+}
+
 export function consolidation(
   ecsOut: EcsOutputs,
   dbOut: DbOutputs,
@@ -64,7 +82,7 @@ export function consolidation(
     memory: "1 GB",
     image,
     entrypoint: ["node"],
-    command: ["/app/memory-consolidation.mjs"],
+    command: ["/app/scripts/memory-consolidation.mjs"],
     environment: {
       MEM9_STAGE: $app.stage,
       MEM9_BASE_URL: $interpolate`http://${ecsOut.serviceDnsName}:8080`,
@@ -243,11 +261,17 @@ export function consolidation(
 
   if (SCHEDULE_ENABLED) {
     const accountId = aws.getCallerIdentityOutput().accountId;
+    // EventBridge Scheduler caps a schedule-group name_prefix at 38 chars — the
+    // TIGHTEST limit among this stack's names (IAM roles and ECS names allow 64),
+    // and Pulumi appends a random suffix on top of the prefix. The longer
+    // `...-weekly-consolidation-group-` form is 44 chars for `prod` alone, so it
+    // failed to deploy on EVERY stage, not just long preview ones. Keep the
+    // `mem9-on-aws-` prefix: the deploy role is scoped to
+    // `schedule-group/mem9-on-aws-*` (github-actions-role.yaml).
     const scheduleGroup = new aws.scheduler.ScheduleGroup(
       "WeeklyMemoryConsolidationGroup",
       {
-        namePrefix:
-          `mem9-on-aws-${$app.stage}-weekly-consolidation-group-`,
+        namePrefix: consolidationScheduleGroupPrefix($app.stage),
         tags,
       },
     );

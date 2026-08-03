@@ -28,8 +28,20 @@ RUN apt-get update \
 COPY docker/llm-proxy/package*.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 
+# PRESERVE the repo directory layout: memory-cleanup.mjs imports the sidecar as
+# `../docker/llm-proxy/server.mjs`, so flattening both into /app makes that
+# resolve to /docker/llm-proxy/server.mjs and the consolidation entrypoint dies
+# on its first import. The sidecar itself is still started as `server.mjs` from
+# the /app workdir (see ENTRYPOINT), so it is copied to BOTH locations.
 COPY docker/llm-proxy/server.mjs ./
-COPY scripts/memory-cleanup.mjs scripts/memory-consolidation.mjs ./
+COPY docker/llm-proxy/server.mjs /app/docker/llm-proxy/server.mjs
+COPY scripts/memory-cleanup.mjs /app/scripts/memory-cleanup.mjs
+COPY scripts/memory-consolidation.mjs /app/scripts/memory-consolidation.mjs
+
+# Fail the BUILD, not the weekly run, if that import graph ever breaks again.
+RUN node --input-type=module \
+      -e "await import('/app/scripts/memory-consolidation.mjs')" \
+    && echo "consolidation entrypoint imports OK"
 
 # Listens on LLM_PROXY_PORT (default 8082); mem9 reaches it at
 # http://localhost:8082/v1. Not published outside the task — localhost only.

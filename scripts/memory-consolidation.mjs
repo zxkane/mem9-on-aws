@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   applyMergeDecision,
+  buildCompleteChat,
   contentHash,
   sharedCleanupMutexKey,
 } from "./memory-cleanup.mjs";
@@ -545,7 +546,31 @@ async function executeStale(action, deps, metrics, clock) {
     flagged_at: new Date(clock()).toISOString(),
     rationale: action.rationale,
   };
-  await deps.putMemory(action.id, { tags, metadata }, current.version);
+  // NOT deps.putMemory. Upstream `PUT /memories/{id}` re-embeds ONLY when the
+  // request changes content (service/memory.go), but the postgres UPDATE writes
+  // `embedding = $4` UNCONDITIONALLY from the in-memory row — and the postgres
+  // scanner never populates `m.Embedding` (unlike the TiDB one). So a
+  // content-free PUT round-trips a nil embedding and stores NULL.
+  //
+  // Verified against prod at pinned commit d4638c8: a probe memory that ranked
+  // first for its own topic became permanently unfindable by semantic search
+  // after a tags-only PUT, while GET still returned it as active with the tag
+  // applied. VectorSearch filters `embedding IS NOT NULL`, and clusterMemories
+  // does too, so consolidation could never even revisit what it erased.
+  //
+  // Stale marking therefore goes straight to Aurora with the same version+content
+  // guard archiveMemory uses. That leaves the embedding column untouched.
+  const marked = await deps.markMemoryStale({
+    id: action.id,
+    tags,
+    metadata,
+    version: current.version,
+    content: current.content,
+  });
+  if (!marked) {
+    metrics.skippedLww += 1;
+    return { used: 0, tagLimitReached: false };
+  }
   metrics.flaggedStale += 1;
   return { used: 1, tagLimitReached: false };
 }
@@ -905,48 +930,20 @@ export async function createProductionDeps(options, runtime = {}) {
   const fromNodeProviderChain =
     runtime.fromNodeProviderChain ??
     (await import("@aws-sdk/credential-providers")).fromNodeProviderChain;
-  let bearer;
-  const completeChat = async (systemPrompt, memories) => {
-    for (let attempt = 1; attempt <= 2; attempt += 1) {
-      bearer ??= await getToken({
-        credentials: fromNodeProviderChain(),
-        region,
-      });
-      const headers = {
-        authorization: `Bearer ${bearer}`,
-        "content-type": "application/json",
-      };
-      if (process.env.MEM9_BEDROCK_PROJECT) {
-        headers["OpenAI-Project"] = process.env.MEM9_BEDROCK_PROJECT;
-      }
-      const response = await fetchImpl(
-        `https://bedrock-mantle.${region}.api.aws/v1/chat/completions`,
-        {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            model: process.env.MEM9_LLM_MODEL || "zai.glm-5",
-            max_tokens: 4096,
-            messages: [
-              { role: "system", content: systemPrompt },
-              { role: "user", content: JSON.stringify({ memories }) },
-            ],
-          }),
-          signal: AbortSignal.timeout(LLM_TIMEOUT_MS),
-        },
-      );
-      if ((response.status === 401 || response.status === 403) && attempt === 1) {
-        bearer = undefined;
-        continue;
-      }
-      if (!response.ok) {
-        throw new Error(`Mantle chat-completions -> HTTP ${response.status}`);
-      }
-      const body = await response.json();
-      return body.choices?.[0]?.message?.content ?? "";
-    }
-    throw new Error("Mantle authentication failed after bearer refresh");
-  };
+  // Reuse the cleanup tool's transport instead of a second copy. It carries the
+  // reviewed guards this path was missing: a `finish_reason: "length"` reply
+  // fails the batch instead of being parsed, and the reasoning-model route gets
+  // a 24k output budget. Truncation matters more here than in cleanup — a MERGE's
+  // `merged_content` IS the whole merged fact, so a reply cut mid-sentence would
+  // PUT a fragment over a durable memory inside the auto-execute tier.
+  const completeChat = buildCompleteChat(
+    { region, model: process.env.MEM9_LLM_MODEL, effort: process.env.MEM9_LLM_EFFORT },
+    {
+      fetchImpl,
+      mintToken: (tokenRegion) =>
+        getToken({ credentials: fromNodeProviderChain(), region: tokenRegion }),
+    },
+  );
 
   let sns;
   const publishSummary = async (summary) => {
@@ -1038,6 +1035,24 @@ export async function createProductionDeps(options, runtime = {}) {
                        AND winner.content = $6
                   )`,
           [id, supersededBy, version, content, winnerVersion, winnerContent],
+        );
+        return result.rowCount === 1;
+      },
+      markMemoryStale: async ({ id, tags, metadata, version, content }) => {
+        // Deliberately does NOT touch `embedding` — see executeStale for why the
+        // REST PUT cannot be used here. `updated_at` is still rewritten by
+        // trg_memories_updated, which is why routeActions refuses to auto-archive
+        // a contradiction whose winner carries a stale marker.
+        const result = await db.query(
+          `UPDATE memories
+              SET tags = $2,
+                  metadata = $3,
+                  version = version + 1
+            WHERE id = $1
+              AND state = 'active'
+              AND version = $4
+              AND content = $5`,
+          [id, JSON.stringify(tags), JSON.stringify(metadata), version, content],
         );
         return result.rowCount === 1;
       },

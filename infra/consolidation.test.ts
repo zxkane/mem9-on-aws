@@ -305,7 +305,7 @@ describe("consolidation task and schedule", () => {
       ".dkr.ecr.ap-northeast-1.amazonaws.com/mem9-on-aws/llm-proxy:latest",
     );
     expect(args.entrypoint).toEqual(["node"]);
-    expect(args.command).toEqual(["/app/memory-consolidation.mjs"]);
+    expect(args.command).toEqual(["/app/scripts/memory-consolidation.mjs"]);
     expect(args.environment.MEM9_CONSOLIDATION_REPORT_ONLY).toBe("1");
     expect(JSON.stringify(args.environment)).not.toContain("sensitive-tenant-id");
     const proxyDockerfile = readFileSync(
@@ -357,7 +357,7 @@ describe("consolidation task and schedule", () => {
     >;
     expect(scheduleGroup).toMatchObject({
       namePrefix:
-        "mem9-on-aws-pr-103-weekly-consolidation-group-",
+        "mem9-on-aws-pr-103-consolidation-",
       tags: {
         ManagedBy: "sst",
         Project: "mem9-on-aws",
@@ -367,7 +367,7 @@ describe("consolidation task and schedule", () => {
     let schedule = materialize(one("Schedule").args) as Record<string, any>;
     expect(schedule.state).toBe("DISABLED");
     expect(schedule.groupName).toBe(
-      "mem9-on-aws-pr-103-weekly-consolidation-group-fixture",
+      "mem9-on-aws-pr-103-consolidation-fixture",
     );
     expect(schedule.tags).toBeUndefined();
     expect(schedule.scheduleExpression).toBe("cron(0 3 ? * SUN *)");
@@ -445,7 +445,7 @@ describe("consolidation task and schedule", () => {
         StringEquals: {
           "aws:SourceAccount": "123456789012",
           "aws:SourceArn":
-            "arn:aws:scheduler:ap-northeast-1:123456789012:schedule-group/mem9-on-aws-prod-weekly-consolidation-group-fixture",
+            "arn:aws:scheduler:ap-northeast-1:123456789012:schedule-group/mem9-on-aws-prod-consolidation-fixture",
         },
       },
     });
@@ -678,5 +678,31 @@ describe("consolidation docs and metrics", () => {
       expect(command).toContain("--coverage.thresholds.functions=80");
       expect(command).toContain("--coverage.thresholds.statements=80");
     }
+  });
+});
+
+describe("schedule-group name bound (TC-CONSOL-043)", () => {
+  it("keeps every realistic stage under the EventBridge Scheduler 38-char limit", async () => {
+    const { consolidationScheduleGroupPrefix, SCHEDULE_GROUP_NAME_PREFIX_MAX } =
+      await import("./consolidation");
+
+    expect(SCHEDULE_GROUP_NAME_PREFIX_MAX).toBe(38);
+    // The previous `...-weekly-consolidation-group-` form was 44 chars for `prod`
+    // ALONE, so the schedule group failed to create on every stage — the feature
+    // could never deploy anywhere. Pulumi also appends a random suffix on top of
+    // the prefix, so the margin here is not slack.
+    for (const stage of ["prod", "pr-1", "pr-113", "pr-99999"]) {
+      const prefix = consolidationScheduleGroupPrefix(stage);
+      expect(prefix.length).toBeLessThanOrEqual(SCHEDULE_GROUP_NAME_PREFIX_MAX);
+      // The deploy role is scoped to `schedule-group/mem9-on-aws-*`.
+      expect(prefix.startsWith("mem9-on-aws-")).toBe(true);
+    }
+    expect(consolidationScheduleGroupPrefix("prod")).toBe(
+      "mem9-on-aws-prod-consolidation-",
+    );
+    // A stage long enough to overflow must fail loudly at synth, not at deploy.
+    expect(() => consolidationScheduleGroupPrefix("a".repeat(40))).toThrow(
+      /exceeds 38 characters/,
+    );
   });
 });

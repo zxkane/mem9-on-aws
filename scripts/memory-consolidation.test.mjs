@@ -63,6 +63,22 @@ function fakeDeps(memories, responses) {
         for (const id of ids) store.get(id).state = "deleted";
         return ids.length;
       }),
+      markMemoryStale: vi.fn(async ({ id, tags, metadata, version, content }) => {
+        const item = store.get(id);
+        if (
+          item?.state !== "active" ||
+          item.version !== version ||
+          item.content !== content
+        ) {
+          return false;
+        }
+        writes.push({ type: "stale", id, tags: [...tags] });
+        item.tags = [...tags];
+        item.metadata = structuredClone(metadata);
+        item.version += 1;
+        // The whole point of this dep: the embedding column is NOT written.
+        return true;
+      }),
       archiveMemory: vi.fn(async ({
         id,
         supersededBy,
@@ -444,16 +460,26 @@ describe("execution safety", () => {
       expect.objectContaining({ type: "put", id: "survivor" }),
       { type: "delete", ids: ["absorbed"] },
     ]);
+    // Stale marking must go through markMemoryStale (direct SQL), NOT putMemory:
+    // a content-free REST PUT nulls the pgvector embedding on the postgres
+    // backend, permanently removing the memory from semantic recall. Verified
+    // against prod. Asserting the write TYPE is the regression guard.
     expect(fake.writes).toContainEqual(
       expect.objectContaining({
-        type: "put",
+        type: "stale",
         id: "stale",
-        patch: expect.objectContaining({
-          tags: ["config", "stale"],
-          metadata: expect.objectContaining({ source: "agent" }),
-        }),
+        tags: ["config", "stale"],
       }),
     );
+    expect(
+      fake.writes.some((write) => write.type === "put" && write.id === "stale"),
+    ).toBe(false);
+    expect(fake.deps.putMemory).not.toHaveBeenCalledWith(
+      "stale",
+      expect.anything(),
+      expect.anything(),
+    );
+    expect(fake.store.get("stale").metadata.source).toBe("agent");
     expect(fake.writes.some((write) => write.type === "archive")).toBe(false);
     expect(result.metrics.merged).toBe(1);
     expect(result.metrics.flaggedStale).toBe(1);
