@@ -201,6 +201,13 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
 
 ### Enabled atomic durable ingest (downstream patches)
 
+- The ordered downstream stack is
+  `0001-recall-min-confidence-tunables-and-zero-result-fallback`,
+  `0002-ingest-durable-only-extraction-filter`, `0003-glm-request-bounds`,
+  `0004-durable-ingest-queue`, `0005-atomic-ingest-apply`,
+  `0006-durable-ingest-telemetry`, `0007-postgres-session-delete`, then
+  `0008-ingest-prescreen-shadow`. The Docker build applies the complete stack
+  to the pinned upstream commit in lexical order.
 - Upstream asynchronous `messages[]` ingest returns 202 before starting an
   untracked goroutine. Downstream patch
   `docker/mnemo-server/patches/0004-durable-ingest-queue.patch` adds a
@@ -228,6 +235,21 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
   composite releases its ALARM notification after a fixed five-minute
   initial/rollout wait if real ECS-origin heartbeat extraction does not recover;
   it omits an OK action so recovery during suppression cannot notify alone.
+- Patch `docker/mnemo-server/patches/0008-ingest-prescreen-shadow.patch` scores
+  each smart-ingest candidate immediately before planning with the pure,
+  versioned `msg-count-le-1-v1` policy. Exactly one message is `would-skip`;
+  two or more messages are pass-through. The decision is persisted in the
+  immutable plan only when a configured LLM runs the smart extraction path;
+  raw mode and the existing nil-LLM raw fallback are not eligible samples. The
+  decision never controls planning, extraction, reconciliation, embedding, or
+  apply. Recovery reuses the persisted decision.
+- After a successful real extraction/apply outcome, patch `0008` emits
+  `PrescreenEvaluated`, `PrescreenWouldSkip`, and `PrescreenFalseSkip` through
+  the existing best-effort EMF stream. A false skip means `would-skip` and the
+  real plan produced facts. These counters use only `stage` and the bounded
+  `policy_version`; they contain no content, identifier, hash, measured length,
+  or lexical match. The dashboard divides would-skip and false-skip by evaluated
+  beside `ZeroFactSuccess`. No alarm or `ZeroFactSuccess` definition changes.
 - Startup and bootstrap apply the repeatable `ingest_jobs` migration inside the
   same operator-owned Aurora database. Canonical payloads and plans are not sent
   to logs, metrics, or another service. Canonical envelopes are rejected above

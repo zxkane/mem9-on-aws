@@ -54,6 +54,12 @@ export const ZERO_FACT_RATE_EXPRESSION = "IF(succeeded > 50, zero_rate, 0)";
 // still producing memories.
 export const ZERO_FACT_ALARM_THRESHOLD = 1;
 
+export const PRESCREEN_POLICY_VERSION = "msg-count-le-1-v1";
+export const PRESCREEN_WOULD_SKIP_RATE_EXPRESSION =
+  "IF(prescreen_evaluated > 0, prescreen_would_skip / prescreen_evaluated, 0)";
+export const PRESCREEN_FALSE_SKIP_RATE_EXPRESSION =
+  "IF(prescreen_evaluated > 0, prescreen_false_skip / prescreen_evaluated, 0)";
+
 export function observability(
   inputs: ObservabilityInputs,
 ): ObservabilityOutputs {
@@ -242,6 +248,19 @@ export function observability(
       },
     ],
   ];
+  const prescreenMetric = (name: string, id: string) => [
+    durableNamespace,
+    name,
+    "stage",
+    stage,
+    "policy_version",
+    PRESCREEN_POLICY_VERSION,
+    {
+      id,
+      stat: "Sum",
+      visible: false,
+    },
+  ];
   new aws.cloudwatch.Dashboard("DurableIngestDashboard", {
     dashboardName: `mem9-on-aws-${stage}-ingest`,
     dashboardBody: $jsonStringify({
@@ -363,6 +382,40 @@ export function observability(
               durableMetric("Warnings"),
               durableMetric("TruncatedFacts"),
               durableMetric("ZeroFactSuccess"),
+            ],
+          },
+        },
+        {
+          type: "metric",
+          x: 0,
+          y: 20,
+          width: 24,
+          height: 6,
+          properties: {
+            title: "Extraction and pre-screen outcomes",
+            region: ECR_REGION,
+            period: 300,
+            metrics: [
+              durableMetric("ZeroFactSuccess"),
+              [
+                {
+                  expression: PRESCREEN_WOULD_SKIP_RATE_EXPRESSION,
+                  id: "prescreen_would_skip_rate",
+                  label: "Would-skip rate",
+                  yAxis: "right",
+                },
+              ],
+              [
+                {
+                  expression: PRESCREEN_FALSE_SKIP_RATE_EXPRESSION,
+                  id: "prescreen_false_skip_rate",
+                  label: "False-skip rate",
+                  yAxis: "right",
+                },
+              ],
+              prescreenMetric("PrescreenEvaluated", "prescreen_evaluated"),
+              prescreenMetric("PrescreenWouldSkip", "prescreen_would_skip"),
+              prescreenMetric("PrescreenFalseSkip", "prescreen_false_skip"),
             ],
           },
         },

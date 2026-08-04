@@ -1,0 +1,991 @@
+diff --git a/server/internal/ingestqueue/plan.go b/server/internal/ingestqueue/plan.go
+index f3621ec..8142086 100644
+--- a/server/internal/ingestqueue/plan.go
++++ b/server/internal/ingestqueue/plan.go
+@@ -29,2 +29,15 @@ func FinalizePlan(input AtomicPlan) (AtomicPlan, error) {
+ 	}
++	if plan.PrescreenPolicyVersion == "" {
++		if plan.PrescreenWouldSkip {
++			return AtomicPlan{}, fmt.Errorf(
++				"%w: pre-screen decision requires a policy version",
++				ErrPlanInvalid,
++			)
++		}
++	} else if !knownPrescreenPolicyVersion(plan.PrescreenPolicyVersion) {
++		return AtomicPlan{}, fmt.Errorf(
++			"%w: unknown pre-screen policy version",
++			ErrPlanInvalid,
++		)
++	}
+ 
+diff --git a/server/internal/ingestqueue/plan_test.go b/server/internal/ingestqueue/plan_test.go
+index e7b3c7f..9ceac23 100644
+--- a/server/internal/ingestqueue/plan_test.go
++++ b/server/internal/ingestqueue/plan_test.go
+@@ -197,2 +197,43 @@ func TestFinalizePlanOmitsFalseZeroFactForExistingPlanHashes(t *testing.T) {
+ 
++func TestFinalizePlanValidatesAndHashesPrescreenDecision(t *testing.T) {
++	base := AtomicPlan{
++		JobID:                  "job-prescreen",
++		TenantID:               "tenant-prescreen",
++		Revision:               1,
++		AttemptGeneration:      1,
++		PrescreenPolicyVersion: PrescreenPolicyMessageCountV1,
++		PrescreenWouldSkip:     true,
++	}
++	plan, err := FinalizePlan(base)
++	if err != nil {
++		t.Fatalf("FinalizePlan: %v", err)
++	}
++	if err := ValidatePlan(plan); err != nil {
++		t.Fatalf("ValidatePlan: %v", err)
++	}
++	payload, err := PlanPayload(plan)
++	if err != nil {
++		t.Fatalf("PlanPayload: %v", err)
++	}
++	if !strings.Contains(string(payload), `"prescreen_policy_version":"msg-count-le-1-v1"`) ||
++		!strings.Contains(string(payload), `"prescreen_would_skip":true`) {
++		t.Fatalf("pre-screen decision missing from plan: %s", payload)
++	}
++
++	tampered := plan
++	tampered.PrescreenWouldSkip = false
++	if err := ValidatePlan(tampered); err == nil {
++		t.Fatal("ValidatePlan accepted a tampered pre-screen decision")
++	}
++
++	base.PrescreenPolicyVersion = "unbounded-private-version"
++	if _, err := FinalizePlan(base); err == nil {
++		t.Fatal("FinalizePlan accepted an unknown pre-screen policy")
++	}
++	base.PrescreenPolicyVersion = ""
++	if _, err := FinalizePlan(base); err == nil {
++		t.Fatal("FinalizePlan accepted would-skip without a policy version")
++	}
++}
++
+ func TestFinalizePlanUsesEveryMaterializedFieldAsActionTieBreaker(t *testing.T) {
+diff --git a/server/internal/ingestqueue/prescreen.go b/server/internal/ingestqueue/prescreen.go
+new file mode 100644
+index 0000000..b369852
+--- /dev/null
++++ b/server/internal/ingestqueue/prescreen.go
+@@ -0,0 +1,35 @@
++package ingestqueue
++
++import "encoding/json"
++
++const PrescreenPolicyMessageCountV1 = "msg-count-le-1-v1"
++
++type PrescreenDecision struct {
++	PolicyVersion string
++	WouldSkip     bool
++}
++
++func ScorePrescreenMessageCountV1(messageCount int) PrescreenDecision {
++	return PrescreenDecision{
++		PolicyVersion: PrescreenPolicyMessageCountV1,
++		WouldSkip:     messageCount <= 1,
++	}
++}
++
++func scoreJobPrescreen(job *Job) (PrescreenDecision, bool) {
++	if job == nil || job.Mode != "smart" {
++		return PrescreenDecision{}, false
++	}
++	var envelope struct {
++		Messages []json.RawMessage `json:"messages"`
++	}
++	if err := json.Unmarshal(job.CanonicalPayload, &envelope); err != nil ||
++		len(envelope.Messages) == 0 {
++		return PrescreenDecision{}, false
++	}
++	return ScorePrescreenMessageCountV1(len(envelope.Messages)), true
++}
++
++func knownPrescreenPolicyVersion(version string) bool {
++	return version == PrescreenPolicyMessageCountV1
++}
+diff --git a/server/internal/ingestqueue/prescreen_test.go b/server/internal/ingestqueue/prescreen_test.go
+new file mode 100644
+index 0000000..a160966
+--- /dev/null
++++ b/server/internal/ingestqueue/prescreen_test.go
+@@ -0,0 +1,78 @@
++package ingestqueue
++
++import "testing"
++
++func TestScorePrescreenMessageCountV1Threshold(t *testing.T) {
++	for _, tc := range []struct {
++		name         string
++		messageCount int
++		wouldSkip    bool
++	}{
++		{name: "empty boundary", messageCount: 0, wouldSkip: true},
++		{name: "one message", messageCount: 1, wouldSkip: true},
++		{name: "two messages", messageCount: 2, wouldSkip: false},
++		{name: "many messages", messageCount: 100, wouldSkip: false},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			got := ScorePrescreenMessageCountV1(tc.messageCount)
++			if got.PolicyVersion != PrescreenPolicyMessageCountV1 ||
++				got.WouldSkip != tc.wouldSkip {
++				t.Fatalf(
++					"score(%d) = %+v, want policy=%q wouldSkip=%v",
++					tc.messageCount,
++					got,
++					PrescreenPolicyMessageCountV1,
++					tc.wouldSkip,
++				)
++			}
++		})
++	}
++}
++
++func TestScoreJobPrescreenOnlyEvaluatesValidSmartPayloads(t *testing.T) {
++	for _, tc := range []struct {
++		name      string
++		mode      string
++		payload   string
++		evaluated bool
++		wouldSkip bool
++	}{
++		{
++			name:      "one-message smart job",
++			mode:      "smart",
++			payload:   `{"messages":[{"role":"user","content":"private"}]}`,
++			evaluated: true,
++			wouldSkip: true,
++		},
++		{
++			name:      "two-message smart job",
++			mode:      "smart",
++			payload:   `{"messages":[{},{}]}`,
++			evaluated: true,
++			wouldSkip: false,
++		},
++		{
++			name:    "raw job",
++			mode:    "raw",
++			payload: `{"messages":[{}]}`,
++		},
++		{
++			name:    "malformed smart job",
++			mode:    "smart",
++			payload: `{"messages":`,
++		},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			job := &Job{Mode: tc.mode, CanonicalPayload: []byte(tc.payload)}
++			got, evaluated := scoreJobPrescreen(job)
++			if evaluated != tc.evaluated {
++				t.Fatalf("evaluated = %v, want %v", evaluated, tc.evaluated)
++			}
++			if evaluated &&
++				(got.PolicyVersion != PrescreenPolicyMessageCountV1 ||
++					got.WouldSkip != tc.wouldSkip) {
++				t.Fatalf("score = %+v, want wouldSkip=%v", got, tc.wouldSkip)
++			}
++		})
++	}
++}
+diff --git a/server/internal/ingestqueue/telemetry.go b/server/internal/ingestqueue/telemetry.go
+index a5a9c89..5773b94 100644
+--- a/server/internal/ingestqueue/telemetry.go
++++ b/server/internal/ingestqueue/telemetry.go
+@@ -14,2 +14,3 @@ type Telemetry interface {
+ 	Result(ResultMetrics)
++	Prescreen(PrescreenMetrics)
+ 	SamplerHeartbeat()
+@@ -32,2 +33,8 @@ type ResultMetrics struct {
+ 
++type PrescreenMetrics struct {
++	PolicyVersion string
++	WouldSkip     bool
++	ZeroFact      bool
++}
++
+ type emfTelemetry struct {
+@@ -74,2 +81,6 @@ type emfEnvelope struct {
+ 	ZeroFactSuccess                   *int        `json:"ZeroFactSuccess,omitempty"`
++	PolicyVersion                     string      `json:"policy_version,omitempty"`
++	PrescreenEvaluated                *int        `json:"PrescreenEvaluated,omitempty"`
++	PrescreenWouldSkip                *int        `json:"PrescreenWouldSkip,omitempty"`
++	PrescreenFalseSkip                *int        `json:"PrescreenFalseSkip,omitempty"`
+ 	SamplerHeartbeat                  *int        `json:"SamplerHeartbeat,omitempty"`
+@@ -210,2 +221,22 @@ func (t *emfTelemetry) Result(metrics ResultMetrics) {
+ 
++func (t *emfTelemetry) Prescreen(metrics PrescreenMetrics) {
++	t.write(
++		emfEnvelope{
++			Stage:              t.stage,
++			PolicyVersion:      boundedPrescreenPolicyVersion(metrics.PolicyVersion),
++			PrescreenEvaluated: metricValue(1),
++			PrescreenWouldSkip: metricValue(boolCount(metrics.WouldSkip)),
++			PrescreenFalseSkip: metricValue(boolCount(
++				metrics.WouldSkip && !metrics.ZeroFact,
++			)),
++		},
++		[]emfDirective{metricDirective(
++			[]string{"stage", "policy_version"},
++			countMetric("PrescreenEvaluated"),
++			countMetric("PrescreenWouldSkip"),
++			countMetric("PrescreenFalseSkip"),
++		)},
++	)
++}
++
+ func (t *emfTelemetry) SamplerHeartbeat() {
+@@ -283,2 +314,9 @@ func boundedErrorClass(class string) string {
+ 
++func boundedPrescreenPolicyVersion(version string) string {
++	if knownPrescreenPolicyVersion(version) {
++		return version
++	}
++	return "other"
++}
++
+ func durationMilliseconds(duration time.Duration) int64 {
+diff --git a/server/internal/ingestqueue/telemetry_test.go b/server/internal/ingestqueue/telemetry_test.go
+index 8bf0f1f..e15fc06 100644
+--- a/server/internal/ingestqueue/telemetry_test.go
++++ b/server/internal/ingestqueue/telemetry_test.go
+@@ -48,3 +48,3 @@ func assertBoundedMetricDimensions(t *testing.T, records []map[string]any) {
+ 					switch name {
+-					case "stage", "result_class", "error_class":
++					case "stage", "result_class", "error_class", "policy_version":
+ 					default:
+@@ -288,2 +288,64 @@ func TestEMFTelemetryTerminalFailureClassification(t *testing.T) {
+ 
++func TestEMFTelemetryPrescreenCountersAndFalseSkipClassification(t *testing.T) {
++	var output bytes.Buffer
++	telemetry := NewEMFTelemetry("prod", &output, nil)
++	telemetry.Prescreen(PrescreenMetrics{
++		PolicyVersion: PrescreenPolicyMessageCountV1,
++		WouldSkip:     false,
++		ZeroFact:      false,
++	})
++	telemetry.Prescreen(PrescreenMetrics{
++		PolicyVersion: PrescreenPolicyMessageCountV1,
++		WouldSkip:     true,
++		ZeroFact:      true,
++	})
++	telemetry.Prescreen(PrescreenMetrics{
++		PolicyVersion: PrescreenPolicyMessageCountV1,
++		WouldSkip:     true,
++		ZeroFact:      false,
++	})
++
++	records := telemetryRecords(t, output.String())
++	if len(records) != 3 {
++		t.Fatalf("pre-screen records = %d, want 3: %s", len(records), output.String())
++	}
++	want := [][2]float64{{0, 0}, {1, 0}, {1, 1}}
++	for index, record := range records {
++		if record["PrescreenEvaluated"] != float64(1) ||
++			record["PrescreenWouldSkip"] != want[index][0] ||
++			record["PrescreenFalseSkip"] != want[index][1] ||
++			record["stage"] != "prod" ||
++			record["policy_version"] != PrescreenPolicyMessageCountV1 {
++			t.Fatalf("pre-screen record %d = %#v", index, record)
++		}
++		for _, metric := range []string{
++			"PrescreenEvaluated",
++			"PrescreenWouldSkip",
++			"PrescreenFalseSkip",
++		} {
++			if !hasMetricDirective(
++				record,
++				[]string{"stage", "policy_version"},
++				metric,
++			) {
++				t.Fatalf("%s directive missing from %#v", metric, record)
++			}
++		}
++	}
++	assertBoundedMetricDimensions(t, records)
++}
++
++func TestEMFTelemetryBoundsPrescreenPolicyVersion(t *testing.T) {
++	var output bytes.Buffer
++	NewEMFTelemetry("prod", &output, nil).Prescreen(PrescreenMetrics{
++		PolicyVersion: "PRIVATE-UNBOUNDED-POLICY",
++		WouldSkip:     true,
++	})
++	record := telemetryRecords(t, output.String())[0]
++	if record["policy_version"] != "other" ||
++		strings.Contains(output.String(), "PRIVATE-UNBOUNDED-POLICY") {
++		t.Fatalf("unbounded policy version leaked: %#v", record)
++	}
++}
++
+ func TestEMFTelemetrySchemaContainsNoHighCardinalityFields(t *testing.T) {
+@@ -303,2 +365,6 @@ func TestEMFTelemetrySchemaContainsNoHighCardinalityFields(t *testing.T) {
+ 	})
++	telemetry.Prescreen(PrescreenMetrics{
++		PolicyVersion: "PRIVATE-IDENTIFIER-HASH-LENGTH-LEXICAL",
++		WouldSkip:     true,
++	})
+ 	telemetry.SamplerHeartbeat()
+@@ -311,2 +377,3 @@ func TestEMFTelemetrySchemaContainsNoHighCardinalityFields(t *testing.T) {
+ 		"payload", "hash", "message", "fact_content", "embedding",
++		"identifier", "length", "lexical", "private",
+ 	} {
+diff --git a/server/internal/ingestqueue/types.go b/server/internal/ingestqueue/types.go
+index 93434f7..a999ca1 100644
+--- a/server/internal/ingestqueue/types.go
++++ b/server/internal/ingestqueue/types.go
+@@ -137,2 +137,4 @@ type Job struct {
+ 	CompletedAt                 *time.Time
++	PrescreenPolicyVersion      string
++	PrescreenWouldSkip          bool
+ }
+@@ -244,15 +246,17 @@ type MemoryAction struct {
+ type AtomicPlan struct {
+-	Version            string            `json:"version"`
+-	JobID              string            `json:"job_id"`
+-	TenantID           string            `json:"tenant_id"`
+-	Revision           int               `json:"plan_revision"`
+-	AttemptGeneration  int               `json:"attempt_generation"`
+-	Sessions           []SessionUpsert   `json:"sessions"`
+-	MessageTagPatches  []MessageTagPatch `json:"message_tag_patches"`
+-	Actions            []MemoryAction    `json:"actions"`
+-	TruncatedFactCount int               `json:"truncated_fact_count"`
+-	WarningCount       int               `json:"warning_count"`
+-	WarningClass       string            `json:"warning_class,omitempty"`
+-	ZeroFact           bool              `json:"zero_fact,omitempty"`
+-	Hash               string            `json:"plan_hash,omitempty"`
++	Version                string            `json:"version"`
++	JobID                  string            `json:"job_id"`
++	TenantID               string            `json:"tenant_id"`
++	Revision               int               `json:"plan_revision"`
++	AttemptGeneration      int               `json:"attempt_generation"`
++	Sessions               []SessionUpsert   `json:"sessions"`
++	MessageTagPatches      []MessageTagPatch `json:"message_tag_patches"`
++	Actions                []MemoryAction    `json:"actions"`
++	TruncatedFactCount     int               `json:"truncated_fact_count"`
++	WarningCount           int               `json:"warning_count"`
++	WarningClass           string            `json:"warning_class,omitempty"`
++	ZeroFact               bool              `json:"zero_fact,omitempty"`
++	PrescreenPolicyVersion string            `json:"prescreen_policy_version,omitempty"`
++	PrescreenWouldSkip     bool              `json:"prescreen_would_skip,omitempty"`
++	Hash                   string            `json:"plan_hash,omitempty"`
+ }
+diff --git a/server/internal/ingestqueue/worker.go b/server/internal/ingestqueue/worker.go
+index 357898b..74f9889 100644
+--- a/server/internal/ingestqueue/worker.go
++++ b/server/internal/ingestqueue/worker.go
+@@ -327,2 +327,8 @@ func (w *Worker) process(ctx context.Context, job *Job) {
+ 			}
++			job.PrescreenPolicyVersion = ""
++			job.PrescreenWouldSkip = false
++			if decision, evaluated := scoreJobPrescreen(job); evaluated {
++				job.PrescreenPolicyVersion = decision.PolicyVersion
++				job.PrescreenWouldSkip = decision.WouldSkip
++			}
+ 			built, err := w.processor.Plan(jobCtx, job, revision)
+@@ -610,2 +616,11 @@ func (w *Worker) emitResult(
+ 	w.config.Telemetry.Result(metrics)
++	if state == StateSucceeded &&
++		plan != nil &&
++		plan.PrescreenPolicyVersion != "" {
++		w.config.Telemetry.Prescreen(PrescreenMetrics{
++			PolicyVersion: plan.PrescreenPolicyVersion,
++			WouldSkip:     plan.PrescreenWouldSkip,
++			ZeroFact:      plan.ZeroFact,
++		})
++	}
+ }
+diff --git a/server/internal/ingestqueue/worker_test.go b/server/internal/ingestqueue/worker_test.go
+index 7b52ae3..b8e1f4c 100644
+--- a/server/internal/ingestqueue/worker_test.go
++++ b/server/internal/ingestqueue/worker_test.go
+@@ -872,2 +872,156 @@ func TestWorkerKeepsPlanAndPostCommitOutsideApplyTransaction(t *testing.T) {
+ 
++func TestWorkerPrescreenDecisionsRemainPassThrough(t *testing.T) {
++	for _, tc := range []struct {
++		name             string
++		messageCount     int
++		zeroFact         bool
++		wantSkip         bool
++		telemetryEnabled bool
++	}{
++		{
++			name:             "one-message fact-producing",
++			messageCount:     1,
++			wantSkip:         true,
++			telemetryEnabled: true,
++		},
++		{
++			name:             "multi-message zero-fact",
++			messageCount:     2,
++			zeroFact:         true,
++			telemetryEnabled: true,
++		},
++		{
++			name:         "one-message telemetry disabled",
++			messageCount: 1,
++			wantSkip:     true,
++		},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			messages := make([]Message, tc.messageCount)
++			for index := range messages {
++				messages[index] = Message{Role: "user", Content: "PRIVATE-CONTENT"}
++			}
++			canonical, err := Canonicalize(CanonicalInput{
++				TenantID: "PRIVATE-TENANT",
++				Mode:     "smart",
++				Messages: messages,
++			})
++			if err != nil {
++				t.Fatal(err)
++			}
++			job := &Job{
++				ID:               "job-prescreen",
++				TenantID:         "PRIVATE-TENANT",
++				CanonicalPayload: canonical.Payload,
++				Mode:             "smart",
++				LeaseOwner:       "worker-a",
++				AttemptCount:     1,
++			}
++
++			var planCalls atomic.Int32
++			var applied AtomicPlan
++			var postCommitResult ApplyResult
++			repo := &fakeRepo{
++				applyPlan: func(
++					_ context.Context,
++					_ LeaseRef,
++					plan AtomicPlan,
++				) (ApplyResult, error) {
++					applied = plan
++					return ApplyResult{MutationCount: len(plan.Actions)}, nil
++				},
++			}
++			processor := fakeProcessor{
++				plan: func(_ context.Context, got *Job, revision int) (AtomicPlan, error) {
++					planCalls.Add(1)
++					if got.PrescreenPolicyVersion != PrescreenPolicyMessageCountV1 ||
++						got.PrescreenWouldSkip != tc.wantSkip {
++						t.Fatalf("processor decision = %+v", got)
++					}
++					plan := AtomicPlan{
++						JobID:                  got.ID,
++						TenantID:               got.TenantID,
++						Revision:               revision,
++						AttemptGeneration:      got.AttemptCount,
++						ZeroFact:               tc.zeroFact,
++						PrescreenPolicyVersion: got.PrescreenPolicyVersion,
++						PrescreenWouldSkip:     got.PrescreenWouldSkip,
++					}
++					if !tc.zeroFact {
++						plan.Actions = []MemoryAction{{
++							Kind:    ActionAdd,
++							Content: "preserved fact",
++						}}
++					}
++					return FinalizePlan(plan)
++				},
++				postCommit: func(
++					_ context.Context,
++					_ *Job,
++					_ AtomicPlan,
++					result ApplyResult,
++				) {
++					postCommitResult = result
++				},
++			}
++			var output bytes.Buffer
++			cfg := DefaultWorkerConfig()
++			if tc.telemetryEnabled {
++				cfg.Telemetry = NewEMFTelemetry("prod", &output, nil)
++			}
++
++			NewWorker(
++				repo,
++				processor,
++				job.TenantID,
++				job.LeaseOwner,
++				cfg,
++				slog.New(slog.NewTextHandler(io.Discard, nil)),
++			).process(context.Background(), job)
++
++			if planCalls.Load() != 1 {
++				t.Fatalf("plan calls = %d, want 1", planCalls.Load())
++			}
++			wantActions := 1
++			if tc.zeroFact {
++				wantActions = 0
++			}
++			if len(applied.Actions) != wantActions ||
++				applied.ZeroFact != tc.zeroFact ||
++				applied.PrescreenWouldSkip != tc.wantSkip ||
++				applied.PrescreenPolicyVersion != PrescreenPolicyMessageCountV1 {
++				t.Fatalf("applied plan = %+v", applied)
++			}
++			if postCommitResult.MutationCount != wantActions {
++				t.Fatalf("post-commit result = %+v", postCommitResult)
++			}
++
++			if !tc.telemetryEnabled {
++				if output.Len() != 0 {
++					t.Fatalf("disabled telemetry wrote %s", output.String())
++				}
++				return
++			}
++			var prescreenRecord map[string]any
++			for _, record := range telemetryRecords(t, output.String()) {
++				if record["PrescreenEvaluated"] == float64(1) {
++					prescreenRecord = record
++					break
++				}
++			}
++			if prescreenRecord == nil ||
++				prescreenRecord["PrescreenWouldSkip"] != float64(boolCount(tc.wantSkip)) ||
++				prescreenRecord["PrescreenFalseSkip"] !=
++					float64(boolCount(tc.wantSkip && !tc.zeroFact)) {
++				t.Fatalf("pre-screen telemetry = %#v; output=%s", prescreenRecord, output.String())
++			}
++			for _, forbidden := range []string{"PRIVATE-CONTENT", "PRIVATE-TENANT"} {
++				if strings.Contains(output.String(), forbidden) {
++					t.Fatalf("telemetry leaked %q: %s", forbidden, output.String())
++				}
++			}
++		})
++	}
++}
++
+ func TestWorkerReusesPersistedPlanAfterRecovery(t *testing.T) {
+@@ -880,7 +1034,9 @@ func TestWorkerReusesPersistedPlanAfterRecovery(t *testing.T) {
+ 	persisted, err := FinalizePlan(AtomicPlan{
+-		JobID:             job.ID,
+-		TenantID:          job.TenantID,
+-		Revision:          1,
+-		AttemptGeneration: 1,
+-		Actions:           []MemoryAction{{Kind: ActionAdd, Content: "persisted"}},
++		JobID:                  job.ID,
++		TenantID:               job.TenantID,
++		Revision:               1,
++		AttemptGeneration:      1,
++		Actions:                []MemoryAction{{Kind: ActionAdd, Content: "persisted"}},
++		PrescreenPolicyVersion: PrescreenPolicyMessageCountV1,
++		PrescreenWouldSkip:     true,
+ 	})
+@@ -917,2 +1073,5 @@ func TestWorkerReusesPersistedPlanAfterRecovery(t *testing.T) {
+ 	}
++	var output bytes.Buffer
++	cfg := DefaultWorkerConfig()
++	cfg.Telemetry = NewEMFTelemetry("prod", &output, nil)
+ 	NewWorker(
+@@ -922,3 +1081,3 @@ func TestWorkerReusesPersistedPlanAfterRecovery(t *testing.T) {
+ 		job.LeaseOwner,
+-		DefaultWorkerConfig(),
++		cfg,
+ 		slog.New(slog.NewTextHandler(io.Discard, nil)),
+@@ -933,2 +1092,5 @@ func TestWorkerReusesPersistedPlanAfterRecovery(t *testing.T) {
+ 	}
++	if !strings.Contains(output.String(), `"PrescreenFalseSkip":1`) {
++		t.Fatalf("persisted pre-screen decision was not emitted: %s", output.String())
++	}
+ }
+diff --git a/server/internal/service/durable_ingest.go b/server/internal/service/durable_ingest.go
+index 6316855..2b452c4 100644
+--- a/server/internal/service/durable_ingest.go
++++ b/server/internal/service/durable_ingest.go
+@@ -234,2 +234,4 @@ func (p *DurableProcessor) Plan(
+ 	}
++	plan.PrescreenPolicyVersion = job.PrescreenPolicyVersion
++	plan.PrescreenWouldSkip = job.PrescreenWouldSkip
+ 
+diff --git a/server/internal/service/durable_ingest_prescreen_integration_test.go b/server/internal/service/durable_ingest_prescreen_integration_test.go
+new file mode 100644
+index 0000000..972cbbf
+--- /dev/null
++++ b/server/internal/service/durable_ingest_prescreen_integration_test.go
+@@ -0,0 +1,242 @@
++package service
++
++import (
++	"bytes"
++	"context"
++	"encoding/json"
++	"io"
++	"log/slog"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/ingestqueue"
++	"github.com/qiffang/mnemos/server/internal/llm"
++	"github.com/qiffang/mnemos/server/internal/repository/postgres"
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++type prescreenIntegrationProcessor struct {
++	*DurableProcessor
++	committed chan struct{}
++}
++
++func (p *prescreenIntegrationProcessor) PostCommit(
++	ctx context.Context,
++	job *ingestqueue.Job,
++	plan ingestqueue.AtomicPlan,
++	result ingestqueue.ApplyResult,
++) {
++	p.DurableProcessor.PostCommit(ctx, job, plan, result)
++	close(p.committed)
++}
++
++func TestPostgresDurableWorkerPrescreenShadowOutcomes(t *testing.T) {
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
++	}
++
++	for _, tc := range []struct {
++		name          string
++		jobID         string
++		fact          string
++		wantZeroFact  bool
++		wantMemories  int
++		wantFalseSkip float64
++	}{
++		{
++			name:          "one-message zero-fact",
++			jobID:         "10600000-0000-4000-8000-abcdef000030",
++			wantZeroFact:  true,
++			wantMemories:  0,
++			wantFalseSkip: 0,
++		},
++		{
++			name:          "one-message fact-producing",
++			jobID:         "10600000-0000-4000-8000-abcdef000031",
++			fact:          "Uses Go",
++			wantMemories:  1,
++			wantFalseSkip: 1,
++		},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			db := testutil.OpenIsolatedPostgres(t, dsn)
++			jobRepo := postgres.NewIngestJobRepo(db)
++			memoryRepo := postgres.NewMemoryRepo(db, false, "")
++
++			var llmCalls atomic.Int32
++			llmServer := httptest.NewServer(http.HandlerFunc(
++				func(w http.ResponseWriter, _ *http.Request) {
++					llmCalls.Add(1)
++					facts := []map[string]any{}
++					if tc.fact != "" {
++						facts = append(facts, map[string]any{
++							"text": tc.fact,
++							"tags": []string{"tech"},
++						})
++					}
++					w.Header().Set("Content-Type", "application/json")
++					_ = json.NewEncoder(w).Encode(map[string]any{
++						"choices": []map[string]any{
++							{"message": map[string]any{
++								"content": mustJSON(t, map[string]any{
++									"facts":        facts,
++									"message_tags": [][]string{{}},
++								}),
++							}},
++						},
++					})
++				},
++			))
++			defer llmServer.Close()
++
++			canonical, err := ingestqueue.Canonicalize(ingestqueue.CanonicalInput{
++				TenantID:  "tenant-prescreen",
++				AgentID:   "agent-prescreen",
++				AppID:     "app-prescreen",
++				SessionID: "session-prescreen",
++				Mode:      "smart",
++				Messages: []ingestqueue.Message{{
++					Role:    "user",
++					Content: "PRIVATE-INTEGRATION-CONTENT",
++				}},
++			})
++			if err != nil {
++				t.Fatal(err)
++			}
++			if _, err := jobRepo.Enqueue(context.Background(), ingestqueue.EnqueueInput{
++				ID:               tc.jobID,
++				TenantID:         "tenant-prescreen",
++				IdempotencyKey:   canonical.IdempotencyKey,
++				CanonicalPayload: canonical.Payload,
++				AgentID:          "agent-prescreen",
++				AppID:            "app-prescreen",
++				SessionID:        "session-prescreen",
++				Mode:             "smart",
++			}); err != nil {
++				t.Fatalf("Enqueue: %v", err)
++			}
++
++			client := llm.New(llm.Config{
++				APIKey:  "test-key",
++				BaseURL: llmServer.URL,
++				Model:   "test-model",
++			})
++			committed := make(chan struct{})
++			processor := &prescreenIntegrationProcessor{
++				DurableProcessor: NewDurableProcessor(
++					NewIngestService(memoryRepo, client, nil, "", ModeSmart),
++					nil,
++					nil,
++					"",
++					nil,
++					nil,
++				),
++				committed: committed,
++			}
++			var output bytes.Buffer
++			cfg := ingestqueue.DefaultWorkerConfig()
++			cfg.Enabled = true
++			cfg.PollInterval = time.Millisecond
++			cfg.Telemetry = ingestqueue.NewEMFTelemetry("test", &output, nil)
++			ctx, cancel := context.WithCancel(context.Background())
++			done := make(chan error, 1)
++			go func() {
++				done <- ingestqueue.NewWorker(
++					jobRepo,
++					processor,
++					"tenant-prescreen",
++					"worker-prescreen",
++					cfg,
++					slog.New(slog.NewTextHandler(io.Discard, nil)),
++				).Run(ctx)
++			}()
++			select {
++			case <-committed:
++			case <-time.After(3 * time.Second):
++				cancel()
++				<-done
++				t.Fatal("durable worker did not reach post-commit")
++			}
++			cancel()
++			if err := <-done; err != nil {
++				t.Fatalf("worker Run: %v", err)
++			}
++
++			job, err := jobRepo.Get(
++				context.Background(),
++				"tenant-prescreen",
++				tc.jobID,
++			)
++			if err != nil {
++				t.Fatalf("Get: %v", err)
++			}
++			var sessions, memories int
++			if err := db.QueryRow(`SELECT count(*) FROM sessions`).Scan(&sessions); err != nil {
++				t.Fatal(err)
++			}
++			if err := db.QueryRow(`SELECT count(*) FROM memories`).Scan(&memories); err != nil {
++				t.Fatal(err)
++			}
++			if job.State != ingestqueue.StateSucceeded ||
++				sessions != 1 ||
++				memories != tc.wantMemories ||
++				llmCalls.Load() != 1 {
++				t.Fatalf(
++					"outcome state=%s sessions=%d memories=%d llm=%d",
++					job.State,
++					sessions,
++					memories,
++					llmCalls.Load(),
++				)
++			}
++
++			var prescreen map[string]any
++			for _, line := range strings.Split(strings.TrimSpace(output.String()), "\n") {
++				var record map[string]any
++				if err := json.Unmarshal([]byte(line), &record); err != nil {
++					t.Fatalf("decode EMF: %v", err)
++				}
++				if record["PrescreenEvaluated"] == float64(1) {
++					prescreen = record
++				}
++			}
++			if prescreen == nil ||
++				prescreen["PrescreenWouldSkip"] != float64(1) ||
++				prescreen["PrescreenFalseSkip"] != tc.wantFalseSkip ||
++				prescreen["policy_version"] !=
++					ingestqueue.PrescreenPolicyMessageCountV1 {
++				t.Fatalf("pre-screen record = %#v; output=%s", prescreen, output.String())
++			}
++			if strings.Contains(output.String(), "PRIVATE-INTEGRATION-CONTENT") {
++				t.Fatalf("EMF leaked content: %s", output.String())
++			}
++
++			var planPayload []byte
++			if err := db.QueryRow(`
++				SELECT plan_payload
++				FROM ingest_job_plans
++				WHERE tenant_id = $1 AND job_id = $2 AND state = 'applied'`,
++				"tenant-prescreen",
++				tc.jobID,
++			).Scan(&planPayload); err != nil {
++				t.Fatal(err)
++			}
++			var plan ingestqueue.AtomicPlan
++			if err := json.Unmarshal(planPayload, &plan); err != nil {
++				t.Fatal(err)
++			}
++			if plan.ZeroFact != tc.wantZeroFact ||
++				plan.PrescreenPolicyVersion !=
++					ingestqueue.PrescreenPolicyMessageCountV1 ||
++				!plan.PrescreenWouldSkip {
++				t.Fatalf("applied plan = %+v", plan)
++			}
++		})
++	}
++}
+diff --git a/server/internal/service/durable_ingest_test.go b/server/internal/service/durable_ingest_test.go
+index 330ac91..75d4521 100644
+--- a/server/internal/service/durable_ingest_test.go
++++ b/server/internal/service/durable_ingest_test.go
+@@ -225,2 +225,136 @@ func TestDurableProcessorDoesNotMarkNonzeroFactNoopAsZeroFact(t *testing.T) {
+ 
++func TestDurableProcessorPrescreenStillInvokesExtraction(t *testing.T) {
++	for _, tc := range []struct {
++		name         string
++		messageCount int
++		fact         string
++		zeroFact     bool
++		wantSkip     bool
++	}{
++		{
++			name:         "one-message fact-producing",
++			messageCount: 1,
++			fact:         "Uses Go",
++			wantSkip:     true,
++		},
++		{
++			name:         "multi-message zero-fact",
++			messageCount: 2,
++			zeroFact:     true,
++			wantSkip:     false,
++		},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			callCount := 0
++			llmServer := httptest.NewServer(http.HandlerFunc(
++				func(w http.ResponseWriter, _ *http.Request) {
++					callCount++
++					facts := []map[string]any{}
++					if tc.fact != "" {
++						facts = append(facts, map[string]any{
++							"text": tc.fact,
++							"tags": []string{"tech"},
++						})
++					}
++					messageTags := make([][]string, tc.messageCount)
++					w.Header().Set("Content-Type", "application/json")
++					_ = json.NewEncoder(w).Encode(map[string]any{
++						"choices": []map[string]any{
++							{"message": map[string]any{
++								"content": mustJSON(t, map[string]any{
++									"facts":        facts,
++									"message_tags": messageTags,
++								}),
++							}},
++						},
++					})
++				},
++			))
++			defer llmServer.Close()
++
++			job := durableTestJob(t, ModeSmart)
++			var envelope durableCanonicalEnvelope
++			if err := json.Unmarshal(job.CanonicalPayload, &envelope); err != nil {
++				t.Fatal(err)
++			}
++			for len(envelope.Messages) < tc.messageCount {
++				envelope.Messages = append(envelope.Messages, durableMessage{
++					Role:    "assistant",
++					Content: "acknowledged",
++					Seq:     len(envelope.Messages),
++				})
++			}
++			var err error
++			job.CanonicalPayload, err = json.Marshal(envelope)
++			if err != nil {
++				t.Fatal(err)
++			}
++			job.PrescreenPolicyVersion = ingestqueue.PrescreenPolicyMessageCountV1
++			job.PrescreenWouldSkip = tc.wantSkip
++
++			processor := NewDurableProcessor(
++				NewIngestService(
++					&memoryRepoMock{},
++					llm.New(llm.Config{
++						APIKey:  "test-key",
++						BaseURL: llmServer.URL,
++						Model:   "test-model",
++					}),
++					nil,
++					"auto-model",
++					ModeSmart,
++				),
++				nil,
++				nil,
++				"",
++				nil,
++				nil,
++			)
++			plan, err := processor.Plan(context.Background(), job, 1)
++			if err != nil {
++				t.Fatalf("Plan: %v", err)
++			}
++			if callCount != 1 {
++				t.Fatalf("extraction calls = %d, want 1", callCount)
++			}
++			wantActions := 1
++			if tc.zeroFact {
++				wantActions = 0
++			}
++			if plan.ZeroFact != tc.zeroFact ||
++				len(plan.Actions) != wantActions ||
++				plan.PrescreenPolicyVersion != ingestqueue.PrescreenPolicyMessageCountV1 ||
++				plan.PrescreenWouldSkip != tc.wantSkip {
++				t.Fatalf("planned result = %+v", plan)
++			}
++		})
++	}
++}
++
++func TestDurableProcessorOmitsPrescreenForSmartRawFallback(t *testing.T) {
++	job := durableTestJob(t, ModeSmart)
++	job.PrescreenPolicyVersion = ingestqueue.PrescreenPolicyMessageCountV1
++	job.PrescreenWouldSkip = true
++	processor := NewDurableProcessor(
++		NewIngestService(&memoryRepoMock{}, nil, nil, "auto-model", ModeSmart),
++		nil,
++		nil,
++		"",
++		nil,
++		nil,
++	)
++
++	plan, err := processor.Plan(context.Background(), job, 1)
++	if err != nil {
++		t.Fatalf("Plan: %v", err)
++	}
++	if len(plan.Actions) != 1 ||
++		plan.Actions[0].Content != "User: remember these facts" {
++		t.Fatalf("raw fallback plan = %+v", plan)
++	}
++	if plan.PrescreenPolicyVersion != "" || plan.PrescreenWouldSkip {
++		t.Fatalf("raw fallback persisted pre-screen decision: %+v", plan)
++	}
++}
++
+ func TestDurableProcessorMaterializesEmbeddingInPlan(t *testing.T) {
