@@ -899,6 +899,28 @@ describe("verdict parsing units", () => {
     expect(good.find((d) => d.id === "s").verdict).toBe("MERGE");
   });
 
+  it("planDecisions still logs a decision for every scanned id when a merge is unfenceable (TC-MEMCLEAN-051)", () => {
+    // Audit completeness (TC-MEMCLEAN-021) is not suspended by the fence guard.
+    // A rejected merge must be non-emitting BEFORE its absorbed ids are folded
+    // away, exactly like the skip/verdict/missing-content rejections above it —
+    // otherwise the absorbed id is neither merged nor reported and the decision
+    // log silently loses a row the operator scanned.
+    for (const unfenceable of ["s", "a"]) {
+      const mems = [memory("s", "survivor"), memory("a", "absorbed")].map((m) =>
+        m.id === unfenceable ? { ...m, version: null } : m,
+      );
+      const out = planDecisions(mems, [
+        { id: "s", verdict: "MERGE", reason: "r", merge_into: "s", absorbs: ["a"], merged_content: "x" },
+        { id: "a", verdict: "MERGE", reason: "r", merge_into: "s" },
+      ]);
+      expect(
+        out.map((d) => d.id).sort(),
+        `unfenceable ${unfenceable}: every scanned id needs a decision row`,
+      ).toEqual(["a", "s"]);
+      expect(out.some((d) => d.verdict === "MERGE")).toBe(false);
+    }
+  });
+
   it("planDecisions SKIPs a non-MERGE verdict whose version cannot be fenced (TC-MEMCLEAN-051)", () => {
     // DELETE's delete leg and every other mutation anchor on the same version.
     // A null-versioned DELETE would reach `flushDeletes` unfenced.

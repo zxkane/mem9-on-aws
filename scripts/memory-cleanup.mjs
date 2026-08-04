@@ -262,10 +262,21 @@ export function planDecisions(memories, verdicts) {
   // referenced by any non-emitting group falls through to its own verdict (or
   // an explicit SKIP row) — every scanned id appears in the decision log.
   const emitting = new Map();
+  const unfenceable = new Set();
   for (const [survivor, group] of mergeGroups) {
     if (skip.has(survivor)) continue;
     if (verdictById.get(survivor)?.verdict !== "MERGE") continue;
     if (!group.mergedContent || group.absorbs.length === 0) continue;
+    // Both legs of a MERGE are version-anchored, so either side being
+    // unfenceable disqualifies the whole action — absorbing fragments after an
+    // unfenced rewrite would delete content the survivor never received. This
+    // belongs here rather than at emit time: a group that folds its absorbed
+    // ids and is only then rejected leaves those ids with no decision row at
+    // all, which is the completeness invariant above (TC-MEMCLEAN-051).
+    if (![survivor, ...group.absorbs].every((m) => isFenceable(byId.get(m)))) {
+      unfenceable.add(survivor);
+      continue;
+    }
     emitting.set(survivor, group);
   }
   const absorbedIds = new Set();
@@ -290,16 +301,13 @@ export function planDecisions(memories, verdicts) {
       decisions.push({ id, verdict: v.verdict, reason: v.reason, ...snapshot(byId.get(id)) });
       continue;
     }
+    if (unfenceable.has(id)) {
+      decisions.push({ id, verdict: "SKIP", reason: "version cannot be fenced" });
+      continue;
+    }
     const group = emitting.get(id);
     if (!group) {
       decisions.push({ id, verdict: "SKIP", reason: "merge without content or consenting absorbed ids" });
-      continue;
-    }
-    // Both legs of a MERGE are version-anchored, so either side being
-    // unfenceable disqualifies the whole action — absorbing fragments after an
-    // unfenced rewrite would delete content the survivor never received.
-    if (![id, ...group.absorbs].every((m) => isFenceable(byId.get(m)))) {
-      decisions.push({ id, verdict: "SKIP", reason: "version cannot be fenced" });
       continue;
     }
     decisions.push({

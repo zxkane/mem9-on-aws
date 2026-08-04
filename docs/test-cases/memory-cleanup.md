@@ -152,6 +152,12 @@ version before it reaches the wire.
   disqualifies the whole MERGE, since both legs are version-anchored), and on a
   bare DELETE; a well-formed version still merges. `KEEP` is exempt because it
   mutates nothing — `destructiveCost` is 0 and it is never dispatched.
+  A third case pins the interaction with TC-MEMCLEAN-021: a disqualified merge
+  must be rejected *before* its absorbed ids are folded into the survivor's
+  decision, so the guard lives in the `emitting` filter next to the other
+  non-emitting conditions. Rejecting it later still skipped the merge safely,
+  but the absorbed id then received no decision row at all — the audit log
+  silently lost a scanned id while reporting success.
 
 ## Secrets
 
