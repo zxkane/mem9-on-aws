@@ -160,17 +160,20 @@ function anchor(mem) {
 
 /**
  * A mutation is only safe if its version can actually fence the write.
- * Upstream's column is `version INT DEFAULT 1` — nullable — and this repo's
- * `NOT NULL`/`CHECK (version > 0)` hardening is conditional on the table
- * already existing, so nothing in the schema guarantees a positive version.
- * Reachability differs from the consolidation task's: this tool reads over
- * REST, where upstream scans `version` into a plain Go `int`, so a true NULL
- * already fails loud server-side and the live cases are a non-positive or
- * non-integer version. `put()` would send `String(null)` as `If-Match: "null"`, which
- * patch 0009 rejects with a 400 that aborts the run mid-apply — possibly after
- * earlier decisions already deleted rows. `validateDecisions` catches this on
- * the replay path; this catches it on the fresh-scan path, where the tool
- * generates the anchors itself (TC-MEMCLEAN-051).
+ *
+ * Belt-and-braces, and deliberately so. On a fully bootstrapped instance the
+ * column IS constrained: upstream's own `version INT DEFAULT 1` is nullable,
+ * but `docker/bootstrap/migrations/001_ingest_jobs.sql` adds `NOT NULL` and
+ * `CHECK (version > 0)`, and `schema.sql` `\ir`-includes it after creating
+ * `memories`, so the guard fires on every bootstrap. What this defends against
+ * is therefore a partially-migrated or hand-edited store, not normal operation.
+ *
+ * It is still worth having, because the failure it prevents is disproportionate
+ * to its cost: `put()` does `String(version)`, so a null would go on the wire as
+ * `If-Match: "null"`, which patch 0009 rejects with a 400 that aborts the run
+ * mid-apply — possibly after earlier decisions already deleted rows.
+ * `validateDecisions` covers the replay path; this covers the fresh-scan path,
+ * where the tool generates the anchors itself (TC-MEMCLEAN-051).
  */
 function isFenceable(mem) {
   return Number.isInteger(mem?.version) && mem.version >= 1;
@@ -373,7 +376,7 @@ function restClient(baseUrl, tenantId, fetchImpl, counters) {
     // its row. Callers treat null as "already in the intended end state".
     get: (id) => call("GET", memoryPath(id), undefined, { nullOn404: true }),
     // If-Match is an HTTP HEADER upstream (handler reads r.Header.Get("If-Match"),
-    // probed at the pinned commit). Patch 0008 makes it AUTHORITATIVE: the
+    // probed at the pinned commit). Patch 0009 makes it AUTHORITATIVE: the
     // version predicate rides in the same UPDATE that writes the content, so
     // there is no window for a concurrent ingest write to be overwritten.
     // Returns null when the fence rejects the write (see nullOn412).

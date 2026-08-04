@@ -353,7 +353,7 @@ postgres/tidb/db9 repositories already implemented.
 - **Known divergence from upstream's own e2e suite:** upstream
   `e2e/api-smoke-test-round2.sh` test 6 asserts that a stale `If-Match` returns
   **200** ("LWW semantics"), and `e2e/AGENTS.md` documents that contract. Against
-  a 0008-patched server it returns 412. The script is not applied, copied into
+  a 0009-patched server it returns 412. The script is not applied, copied into
   the image, or in the Dockerfile's gating test set, so nothing here runs it —
   left unpatched deliberately, since a hunk against a file we never execute would
   only add drift risk at the next `MEM9_REF` bump. Expect that test to fail if

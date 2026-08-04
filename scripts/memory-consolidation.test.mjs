@@ -407,9 +407,11 @@ describe("LLM action validation and tiers", () => {
     // reintroduced. It also fails *closed-looking*: the client's own guard
     // compares `current.version !== action.version`, and null !== null is false,
     // so that guard passes too and the merge proceeds fully unfenced.
-    // Upstream's schema declares `version INT DEFAULT 1` with no NOT NULL, and
-    // this repo's own bootstrap hardening (NOT NULL + CHECK version > 0) is
-    // guarded on the table already existing, so it is skipped on a fresh stage.
+    // Upstream's schema declares `version INT DEFAULT 1` with no NOT NULL. This
+    // repo's bootstrap does harden it (NOT NULL + CHECK version > 0) after
+    // creating `memories`, so on a healthy stage the input below takes a partial
+    // migration or out-of-band SQL — asserted anyway because this task reads the
+    // column with direct SQL, where a bad value arrives silently.
     for (const unfenceable of [null, undefined, 0, "1"]) {
       const routed = routeActions(
         [

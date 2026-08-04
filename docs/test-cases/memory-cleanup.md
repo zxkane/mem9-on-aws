@@ -139,10 +139,11 @@ version before it reaches the wire.
 - **TC-MEMCLEAN-051** — the same unfenceable version on the **fresh-scan** path,
   which `validateDecisions` does not cover because it only guards a loaded
   decision file. `planDecisions` builds its own anchors from the store, so a
-  `null`/`0`/non-integer `version` (upstream's column is `INT DEFAULT 1` —
-  nullable) is unguarded here too. Defense in depth: this tool reads over REST,
-  where upstream scans `version` into a plain Go `int`, so a true NULL fails loud
-  server-side and the reachable silent cases are non-positive/non-integer. Such a
+  `null`/`0`/non-integer `version` is unguarded here too. Belt-and-braces:
+  upstream's column is nullable (`INT DEFAULT 1`), but this repo's bootstrap
+  hardens it to `NOT NULL` + `CHECK (version > 0)` after creating `memories`, so
+  such a row implies a partially-migrated or hand-edited store. Asserted anyway
+  because the blast radius dwarfs the check. Such a
   memory degrades to `SKIP`
   ("version cannot be fenced") instead of emitting a live decision: `put()` does
   `String(version)`, so it would otherwise send `If-Match: "null"` and take a

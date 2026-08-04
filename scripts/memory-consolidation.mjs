@@ -350,15 +350,15 @@ export function routeActions(memories, actions, options = {}) {
       // no fence and no 412. It would also slip the client's own guard, since
       // `current.version !== action.version` is false when both are null.
       //
-      // Defense in depth, not the only barrier. Upstream's column is
-      // `version INT DEFAULT 1` — nullable — so the schema guarantees nothing,
-      // and this task reads the column with direct SQL (`listActiveMemories`),
-      // where node-pg surfaces a NULL as `null` rather than erroring. But every
-      // upstream insert hardcodes `Version: 1`, so producing such a row takes
-      // out-of-band SQL; a true NULL would also fail loud on any REST read,
-      // since upstream scans `version` into a plain Go `int`. The reachable
-      // cases are a non-positive or non-integer version (e.g. a hand-run
-      // `UPDATE ... SET version = 0`), which degrade silently — hence the guard.
+      // Defense in depth, and on a healthy store redundant: upstream's column
+      // is nullable (`version INT DEFAULT 1`), but this repo's bootstrap adds
+      // `NOT NULL` + `CHECK (version > 0)` after creating `memories`, and every
+      // upstream insert hardcodes `Version: 1`. Producing an unfenceable row
+      // takes a partial migration or out-of-band SQL. The guard earns its keep
+      // anyway because this task reads `version` with direct SQL
+      // (`listActiveMemories`), where node-pg surfaces a NULL as `null` rather
+      // than erroring — so unlike a REST read, nothing upstream fails loud
+      // first and the bad value would degrade silently into the branch above.
       if (![survivor, ...absorbed].every((m) => Number.isInteger(m.version) && m.version >= 1)) {
         review.push(reviewItem("UNFENCEABLE_MERGE", ids, byId, action.rationale));
         continue;

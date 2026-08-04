@@ -93,12 +93,15 @@ apply), so apply never re-invokes the LLM.
 Every `version` in a decision is a positive integer — enforced, not assumed, on
 both paths that produce one: a replay is refused at load
 (`validateDecisions`) and a fresh scan degrades the affected memory to `SKIP`
-(`planDecisions`, TC-MEMCLEAN-051). It is enforced rather than assumed because
-upstream's column is `version INT DEFAULT 1` — nullable — and this repo's
-`NOT NULL` + `CHECK (version > 0)` hardening only runs if the table already
-exists. Defense in depth: a true NULL cannot reach this tool, which reads over
-REST where upstream scans `version` into a plain Go `int` and so fails loud; the
-reachable silent cases are a non-positive or non-integer version.
+(`planDecisions`, TC-MEMCLEAN-051). This is belt-and-braces: upstream's own
+column is nullable (`version INT DEFAULT 1`), but this repo's bootstrap adds
+`NOT NULL` + `CHECK (version > 0)` — `schema.sql` `\ir`-includes the migration
+after creating `memories`, so the hardening fires on every bootstrap. A store
+that can violate the invariant is therefore partially migrated or hand-edited,
+not merely unlucky. It is enforced anyway because the consequence is
+disproportionate to the check: an unfenceable version reaches the wire as
+`If-Match: "null"` and earns a 400 that aborts the run mid-apply, after earlier
+decisions may already have deleted rows.
 
 On a MERGE the version is load-bearing: the
 survivor's is both the re-read comparison and the `If-Match` value the fence is
@@ -191,7 +194,7 @@ scan (paged GET, state=active)
   pin-bump cost for a tool that works fine externally.
 - **`If-Match` for optimistic concurrency** — originally advisory upstream (a
   mismatch was warned and the write applied anyway), so the client-side re-read
-  + hash anchoring was the only guard. Patch 0008 (issue #128) makes the header
+  + hash anchoring was the only guard. Patch 0009 (issue #128) makes the header
   authoritative for the MERGE survivor rewrite: the version predicate now rides
   in the same statement that writes the content, and a 412 makes the caller skip
   the whole merge. The client-side re-read is kept — it narrows the window
