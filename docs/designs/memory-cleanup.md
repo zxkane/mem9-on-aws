@@ -18,7 +18,7 @@ public REST API — no mem9 patch.
 | Operation | Surface | Probed behavior |
 |---|---|---|
 | Enumerate | `GET /v1alpha2/mem9s/memories?limit=&offset=` | `limit` ≤ 200; server returns items + paging fields |
-| Rewrite | `PUT /v1alpha2/mem9s/memories/{id}` | Re-embeds when content changes. **Fenced** since patch 0008 (issue #128): `If-Match` is passed to `UpdateOptimistic` as the expected version, so the predicate rides in the same `UPDATE` that writes the content — a mismatch returns **412** and writes nothing. Upstream logged the mismatch and applied the write anyway (LWW) |
+| Rewrite | `PUT /v1alpha2/mem9s/memories/{id}` | Re-embeds when content changes. **Fenced** since patch 0009 (issue #128): `If-Match` is passed to `UpdateOptimistic` as the expected version, so the predicate rides in the same `UPDATE` that writes the content — a mismatch returns **412** and writes nothing. Upstream logged the mismatch and applied the write anyway (LWW) |
 | Delete | `POST /v1alpha2/mem9s/memories/batch-delete` | `ValidateBulkDeleteIDs`: max 1000 ids per call, server-side dedup, empty list rejected (400). **Single UPDATE statement** (`repository/postgres/memory.go BulkSoftDelete`): `SET state='deleted' WHERE id IN (...) AND state != 'deleted'` — atomic per call (one statement, one implicit transaction), returns affected-row count. No per-item version predicate; already-deleted rows are skipped, not errors |
 
 **batch-delete partial-failure semantics (issue requirement):** the PG
@@ -102,7 +102,7 @@ reachable silent cases are a non-positive or non-integer version.
 
 On a MERGE the version is load-bearing: the
 survivor's is both the re-read comparison and the `If-Match` value the fence is
-built on (patch 0008), and each absorbed one must still match at re-read. A
+built on (patch 0009), and each absorbed one must still match at re-read. A
 replay whose MERGE lacks either is refused at load, before any API call. A
 malformed one is worse than an error, because it fails *quietly*: the `===`
 comparison can never match, so every affected merge degrades into a

@@ -83,7 +83,7 @@ function fakeServer(initial) {
       const m = store.get(single[1]);
       if (!m) return json(404, { error: "not found" });
       const body = JSON.parse(opts.body);
-      // `If-Match` FENCES the write (patch 0008, issue #128): a mismatch is 412
+      // `If-Match` FENCES the write (patch 0009, issue #128): a mismatch is 412
       // and the write is NOT applied. Accepting a stale version here would make
       // every fence test vacuous.
       const ifMatch = Number(opts.headers?.["If-Match"]);
@@ -865,7 +865,7 @@ describe("verdict parsing units", () => {
     // DEFAULT 1` — nullable — so an unfenceable version is a data condition
     // here too. `anchor()` copies it verbatim and `put()` does
     // `String(version)`, so a null would go on the wire as `If-Match: "null"`,
-    // which patch 0008 rejects as a 400 that aborts the run mid-apply, after
+    // which patch 0009 rejects as a 400 that aborts the run mid-apply, after
     // earlier decisions may already have deleted rows. SKIP instead: one bad
     // row must not abort an otherwise-valid audit.
     for (const version of [null, undefined, 0, "1"]) {
@@ -965,7 +965,7 @@ describe("verdict parsing units", () => {
       return { promise, server };
     };
 
-    // The survivor's version is the `If-Match` value. Post-patch-0008 an absent
+    // The survivor's version is the `If-Match` value. Post-patch-0009 an absent
     // one would be sent as the literal "undefined" and earn an opaque 400
     // mid-apply, after earlier decisions have already deleted rows. Fail at load.
     for (const bad of [{ version: undefined }, { version: "1" }, { version: 0 }]) {

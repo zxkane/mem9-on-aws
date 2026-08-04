@@ -11,7 +11,7 @@ VPC-internal REST API, and the preview consolidation E2E is report-only, so it
 issues no writes at all. The fence itself is therefore asserted at both layers
 it exists in, and both run in CI:
 
-- **Server-side**, by the Go tests that patch 0008 ships
+- **Server-side**, by the Go tests that patch 0009 ships
   (`internal/service/memory_ifmatch_test.go`,
   `internal/handler/memory_ifmatch_test.go`). These run inside the
   `docker/mnemo-server` build, whose gating `go test ./internal/service/
@@ -110,7 +110,7 @@ version before it reaches the wire.
   and only the server-side `If-Match` fence can catch it. The concurrent
   content survives, `skippedLww` increments, the absorbed ids stay active, and
   zero batch-delete calls are issued. The fake server rejects the stale-version
-  rewrite with **412** (patch 0008); a fake that accepted it would make this
+  rewrite with **412** (patch 0009); a fake that accepted it would make this
   case vacuous.
 - **TC-MEMCLEAN-043** — a 412 on the survivor rewrite is a *skip*, not a run
   failure: the fenced merge consumes no cap and logs the survivor id, while an

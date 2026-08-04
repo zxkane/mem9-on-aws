@@ -318,11 +318,11 @@ can compare a shadow decision with the real extraction result, and can emit
 bounded lifecycle telemetry in the existing application namespace.
 
 The issue anticipated patch `0007`, but that number is now occupied by
-PostgreSQL session deletion. A new implementation would be patch `0008`.
-The current downstream stack is seven patch files and 15,192 patch lines, so an
-eighth patch increases patch-file count by 14.3%. Every upstream pin bump must:
+PostgreSQL session deletion. This shipped as patch `0008`
+(`0008-ingest-prescreen-shadow`); the `If-Match` fence for issue #128 then took
+`0009`. Every upstream pin bump must:
 
-1. Apply all eight patches in order.
+1. Apply all nine patches in order.
 2. Run the Docker builder's four Go package groups: server command, handler,
    service, and LLM.
 3. Run the PostgreSQL integration suite's seven package groups: repository,

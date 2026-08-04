@@ -151,7 +151,7 @@ Both legs of a MERGE are now version-predicated, by different mechanisms:
   (`applyMergeDecision`), so a concurrently-edited absorbed memory is never
   deleted. Unchanged by #128.
 - **The survivor rewrite** is fenced server-side. It sends
-  `If-Match: <version>`, and patch 0008 makes that header **authoritative**:
+  `If-Match: <version>`, and patch 0009 makes that header **authoritative**:
   the service passes it to `UpdateOptimistic` as the expected version, so the
   predicate rides in the SAME `UPDATE ... WHERE id = $ AND version = $N` that
   writes the content. A mismatch returns **412** and writes nothing.
@@ -208,7 +208,7 @@ whose MERGE lacks a version anchor (TC-MEMCLEAN-048). On the fresh-scan path
 `planDecisions` builds the anchors itself, so it degrades an unfenceable memory
 to `SKIP` (TC-MEMCLEAN-051) — a `SKIP`, not a throw, so one bad row cannot abort
 an otherwise-valid audit. Without it the run would send `If-Match: "null"` and
-take patch 0008's 400 mid-apply, possibly after earlier decisions had already
+take patch 0009's 400 mid-apply, possibly after earlier decisions had already
 deleted rows.
 
 The survivor's embedding stays correct because the rewrite remains a

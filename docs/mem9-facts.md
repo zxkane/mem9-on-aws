@@ -210,9 +210,10 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
   `0001-recall-min-confidence-tunables-and-zero-result-fallback`,
   `0002-ingest-durable-only-extraction-filter`, `0003-glm-request-bounds`,
   `0004-durable-ingest-queue`, `0005-atomic-ingest-apply`,
-  `0006-durable-ingest-telemetry`, `0007-postgres-session-delete`, then
-  `0008-ingest-prescreen-shadow`. The Docker build applies the complete stack
-  to the pinned upstream commit in lexical order.
+  `0006-durable-ingest-telemetry`, `0007-postgres-session-delete`,
+  `0008-ingest-prescreen-shadow`, then `0009-if-match-precondition-fence`. The
+  Docker build applies the complete stack to the pinned upstream commit in
+  lexical order.
 - Upstream asynchronous `messages[]` ingest returns 202 before starting an
   untracked goroutine. Downstream patch
   `docker/mnemo-server/patches/0004-durable-ingest-queue.patch` adds a
@@ -287,7 +288,7 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
   monotonic memory-version predicates. Recovery reuses a valid persisted plan or
   creates a bounded replacement revision after an optimistic conflict.
 
-### `If-Match` is a FENCE, not a warning (downstream patch 0008, issue #128)
+### `If-Match` is a FENCE, not a warning (downstream patch 0009, issue #128)
 
 **Upstream at the pinned commit:** `PUT /v1alpha2/mem9s/memories/{id}` read
 `If-Match` as an HTTP **header** (`r.Header.Get("If-Match")`, not a body field),
@@ -297,7 +298,7 @@ discarded the `strconv.Atoi` error, and on a version mismatch only logged
 hardcoding `0`, which **disabled** the `AND version = $N` predicate the
 postgres/tidb/db9 repositories already implemented.
 
-**Downstream patch `docker/mnemo-server/patches/0008-if-match-precondition-fence.patch`:**
+**Downstream patch `docker/mnemo-server/patches/0009-if-match-precondition-fence.patch`:**
 
 - `ifMatch` is threaded into `UpdateOptimistic` as the expected version, so the
   predicate rides in the **same** `UPDATE ... WHERE id = $ AND version = $N`

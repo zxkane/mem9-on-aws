@@ -54,7 +54,7 @@ function fakeDeps(memories, responses) {
       }),
       putMemory: vi.fn(async (id, patch, version) => {
         const item = store.get(id);
-        // `If-Match` FENCES the write (patch 0008, issue #128): a version
+        // `If-Match` FENCES the write (patch 0009, issue #128): a version
         // mismatch means the server rejected it with 412 and applied nothing.
         // Silently accepting a stale version would make the fence tests vacuous.
         if (version && item && item.version !== version) return null;

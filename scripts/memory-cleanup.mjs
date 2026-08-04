@@ -167,7 +167,7 @@ function anchor(mem) {
  * REST, where upstream scans `version` into a plain Go `int`, so a true NULL
  * already fails loud server-side and the live cases are a non-positive or
  * non-integer version. `put()` would send `String(null)` as `If-Match: "null"`, which
- * patch 0008 rejects with a 400 that aborts the run mid-apply — possibly after
+ * patch 0009 rejects with a 400 that aborts the run mid-apply — possibly after
  * earlier decisions already deleted rows. `validateDecisions` catches this on
  * the replay path; this catches it on the fresh-scan path, where the tool
  * generates the anchors itself (TC-MEMCLEAN-051).
@@ -347,7 +347,7 @@ function restClient(baseUrl, tenantId, fetchImpl, counters) {
     });
     if (nullOn404 && res.status === 404) return null;
     // 412 = the `If-Match` precondition lost the race, so the write was NOT
-    // applied (patch 0008). That is an expected outcome on a fenced write, not
+    // applied (patch 0009). That is an expected outcome on a fenced write, not
     // a transport failure: return null so the caller can skip this decision
     // instead of aborting the whole run.
     if (nullOn412 && res.status === 412) return null;
@@ -535,7 +535,7 @@ export async function applyMergeDecision(decision, client, deleteQueue, counters
   if (needsPut) {
     // The re-read above narrows the race but cannot close it: an ingest write
     // can still land between that GET and this PUT. The `If-Match` fence
-    // (patch 0008) is what actually closes it — a null return means the
+    // (patch 0009) is what actually closes it — a null return means the
     // version moved and the merged content was NOT written. Abandon the whole
     // merge: absorbing the fragments now would delete content the survivor
     // never received.
