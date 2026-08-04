@@ -50,7 +50,7 @@ citations.
 | Dimension          | Decision                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | IaC                | **SST v4**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| Region             | **ap-northeast-1 (Tokyo)**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
+| Region topology    | **Region-heterogeneous**: the current application plane and retained ECR repositories are in `ap-northeast-1`; account-global IAM ownership stacks are hosted in `us-west-2`; the optional Mantle Responses route uses its own configured region (default `us-west-2`) and regional Project.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | Container registry | Four retained ECR repositories plus guarded registry-level BASIC scan-on-push for `mem9-on-aws/*`, both managed out of band                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | Compute            | **ECS Fargate**, **arm64**, single task (`desiredCount=1`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | Database           | **Aurora PostgreSQL Serverless v2** + `pgvector` (mem9 `postgres` backend). `mnemo-server` and bootstrap connect directly to the cluster writer endpoint with a Secrets Manager credential. **RDS Proxy is not deployed.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
@@ -66,6 +66,27 @@ citations.
 | Consolidation      | An opt-in Sunday 03:00 UTC Scheduler task clusters existing memories, uses GLM-5 to detect contradictions/fragments/staleness, auto-applies at most 20 safe mutations, and sends every deletion or ambiguous contradiction to private review. The schedule is absent unless `MEM9_CONSOLIDATION_SCHEDULE_ENABLED=1`; the task remains available for report-only runs. |
 | Tenancy            | **single tenant** (one `X-API-Key`); writes carry **`X-Mnemo-Agent-Id`** to reserve per-agent scoping                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | Replicas           | **Single** (`desiredCount=1`) — single-writer, sidesteps mem9's local-disk import dir                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+
+### Region topology
+
+This is not a single-region deployment where one `AWS_REGION` applies to every
+resource. Treat each plane independently:
+
+- **Application plane:** SST resources, VPC, ECR images, and the primary Mantle
+  route must agree on one application region. The current IaC pins this plane to
+  `ap-northeast-1`; moving it is a coordinated IaC, workflow, bootstrap-stack,
+  and permissions-boundary change, not an ambient environment override.
+- **IAM ownership plane:** the GitHub Actions role and workload-boundary
+  CloudFormation stacks are intentionally hosted in `us-west-2`. IAM is
+  account-global, while the fixed stack region prevents duplicate ownership.
+- **Optional Responses plane:** the Responses model route, its task-role grant,
+  workload-boundary Project ARN, Mantle bearer, and `OpenAI-Project` value use
+  their own region. The default is `us-west-2`, independently of the application
+  region.
+
+Operator commands must use the region of the component they address. Do not
+replace these service-specific regions with one global value. A hosted OAuth
+callback may run in any region; only its exact public HTTPS URL is allowlisted.
 
 ## Cost attribution and monthly estimate
 
@@ -235,9 +256,9 @@ The AgentCore Gateway exposes four tools over MCP (Cognito-authenticated):
   allow-all OAuth facade compliance authorizer; it is disabled by default.
   Roll out the reviewed workload-boundary update before enabling it.
 - `scripts/deploy-github-role.sh` always owns its account-global IAM stack in
-  `us-west-2` and ignores ambient `AWS_REGION`. Set `PROJECT_REGION` only when
-  application VPC discovery must target a region other than its documented
-  default.
+  `us-west-2` and ignores ambient `AWS_REGION`. `PROJECT_REGION` selects the
+  application region used for VPC discovery and regional bootstrap resources;
+  it does not move the SST application by itself.
 - Agent contributors: see [`AGENTS.md`](AGENTS.md) for repo conventions and hard rules.
 
 ### Optional hosted OAuth callback URLs
@@ -247,18 +268,25 @@ configuration. For a hosted OAuth client, set the stage-scoped SST secret to a
 JSON array of complete callback URLs, then redeploy so SST propagates the value
 to the stage's OAuth configuration in SSM and refreshes the façade Lambda:
 
+`OauthAllowedCallbackUrls` is not a GitHub Actions environment or repository
+secret. `sst secret set` replaces the complete JSON array, so inspect only the
+current callback setting, preserve every existing URL, and append the new URL.
+Do not print unrelated SST secrets while doing so.
+
 ```bash
 pnpm -C infra exec sst secret set OauthAllowedCallbackUrls \
-  '["https://oauth.example.com/callback/app"]' \
+  '["https://existing.example.com/callback","https://new.example.com/callback"]' \
   --stage prod
-gh workflow run "Infra CI"
+gh workflow run "Infra CI" --ref main
 ```
 
 The array supports at most 20 unique HTTPS URLs and its serialized JSON must
 not exceed 1 KiB. Each URL must be an exact match and cannot contain credentials
 or a fragment; host and path wildcards are intentionally unsupported. Use `[]`
 to remove all hosted callbacks. The façade validates the same list during
-dynamic registration, authorization, callback, and token exchange.
+dynamic registration, authorization, callback, and token exchange. The hosted
+client may run in any region; callback authorization is based on the exact URL,
+not regional co-location with the façade.
 
 Do not add hosted-client URLs to the Cognito reader app client's callback list.
 Cognito always redirects to the façade's own `/oauth/callback`; the façade
@@ -284,9 +312,9 @@ client remains read-only.
 The OAuth façade can use a production-only custom hostname. Leave
 `MEM9_FACADE_CUSTOM_DOMAIN` unset to keep the generated API Gateway
 `execute-api` URL. When configured, SST creates a Regional API Gateway domain
-and mapping, requests and DNS-validates an ACM certificate in
-`ap-northeast-1`, and creates DNS-only validation and API-target CNAME records
-in an existing Cloudflare zone. Preview stages never receive these settings.
+and mapping, requests and DNS-validates an ACM certificate in the application
+region, and creates DNS-only validation and API-target CNAME records in an
+existing Cloudflare zone. Preview stages never receive these settings.
 
 Before enabling it, update the out-of-band deploy role. Create a
 [Cloudflare API token](https://developers.cloudflare.com/dns/manage-dns-records/how-to/api-tokens/)
@@ -376,7 +404,7 @@ The command then checks all production service deployments, RUNNING/PENDING
 tasks, and the bootstrap task definition before the first boundary mutation.
 Every task definition
 must carry `MEM9_DB_SECRET` and `MEM9_TENANT_ID` references to current-account,
-Tokyo-region
+application-region
 `mem9-on-aws-*` secrets. It also reads every production project Lambda and the
 AgentCore Gateway, then proves that all ECS task/execution, Lambda execution,
 and Gateway service roles are in the migration inventory. That binding set is
@@ -947,7 +975,7 @@ for exit zero, and reads only its content-free `CONSOLIDATION_REVIEW_LIST`
 summary from the exact CloudWatch log stream:
 
 ```bash
-STAGE=prod AWS_REGION=ap-northeast-1 \
+STAGE=prod AWS_REGION="<application-region>" \
   bash scripts/run-consolidation-task.sh
 ```
 

@@ -47,6 +47,52 @@ them, update the file rather than silently diverging.
   Keep `fromJSON` — `${{ vars.RUNNER_LABEL || 'ubuntu-latest' }}` passes the literal
   JSON string as a single label and never matches.
 
+## Region topology
+
+- This deployment is region-heterogeneous. Never treat `ap-northeast-1`,
+  `us-west-2`, or one ambient `AWS_REGION` as a universal region for every
+  component.
+- The application plane (SST resources, ECR images, primary Mantle route, and
+  VPC) must use one internally consistent application region. The current IaC
+  pins that plane to `ap-northeast-1`; moving it requires a coordinated code,
+  workflow, bootstrap-stack, and permissions-boundary change.
+- The account-global IAM ownership stacks are intentionally hosted in
+  `us-west-2`. The optional Mantle Responses route has its own independently
+  configured region and regional Project. Do not "normalize" either to the
+  application region.
+- For operator commands, identify the component first and pass its specific
+  region variable. Preserve service-specific region settings when editing
+  examples or automation.
+
+## OAuth operator memory
+
+- The Cognito resource server defines `mem9-mcp/read` and `mem9-mcp/write`.
+  M2M clients may request both. The browser/hosted-client OAuth facade is
+  intentionally read-only and advertises only `openid`, `email`, and
+  `mem9-mcp/read`; do not assume a facade token can call write tools.
+- Hosted callback URLs come from the stage-scoped SST secret
+  `OauthAllowedCallbackUrls`. This is not a GitHub Actions environment/repository
+  secret, and external URLs must not be added to the Cognito reader client's
+  callback list. Cognito redirects only to the facade's own `/oauth/callback`.
+- A hosted callback may itself run in any region; its exact public HTTPS URL is
+  allowlisted independently of the AWS region hosting the OAuth facade.
+- The secret is one complete JSON array, so `sst secret set` replaces the entire
+  allowlist. Read the current stage value and preserve existing entries when
+  adding one. Values are exact HTTPS URLs (no wildcard, credentials, or
+  fragment), with at most 20 unique entries and 1 KiB of serialized JSON.
+- After changing the secret, redeploy the same stage so SST updates SSM and
+  refreshes the facade Lambda. For production:
+
+  ```bash
+  pnpm -C infra exec sst secret set OauthAllowedCallbackUrls \
+    '["https://existing.example.com/callback","https://new.example.com/callback"]' \
+    --stage prod
+  gh workflow run "Infra CI" --ref main
+  ```
+
+  Monitor the production workflow through its OAuth facade smoke test. Do not
+  print unrelated SST secrets while inspecting the current callback allowlist.
+
 ## Out-of-band bootstrap scripts
 
 `scripts/deploy-*.sh` create resources the SST app references read-only (the
