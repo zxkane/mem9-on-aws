@@ -165,8 +165,11 @@ function anchor(mem) {
  * column IS constrained: upstream's own `version INT DEFAULT 1` is nullable,
  * but `docker/bootstrap/migrations/001_ingest_jobs.sql` adds `NOT NULL` and
  * `CHECK (version > 0)`, and `schema.sql` `\ir`-includes it after creating
- * `memories`, so the guard fires on every bootstrap. What this defends against
- * is therefore a partially-migrated or hand-edited store, not normal operation.
+ * `memories`. Verified against a real bootstrap: the column comes out
+ * `NOT NULL DEFAULT 1` with `ck_memories_version`, and the check rejects a
+ * hand-run `UPDATE ... SET version = 0` as well as a bad INSERT. So a store that
+ * can violate this needs a partial migration or a dropped constraint — the
+ * unfenceable value is not reachable by ordinary means.
  *
  * It is still worth having, because the failure it prevents is disproportionate
  * to its cost: `put()` does `String(version)`, so a null would go on the wire as

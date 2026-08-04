@@ -409,9 +409,10 @@ describe("LLM action validation and tiers", () => {
     // so that guard passes too and the merge proceeds fully unfenced.
     // Upstream's schema declares `version INT DEFAULT 1` with no NOT NULL. This
     // repo's bootstrap does harden it (NOT NULL + CHECK version > 0) after
-    // creating `memories`, so on a healthy stage the input below takes a partial
-    // migration or out-of-band SQL — asserted anyway because this task reads the
-    // column with direct SQL, where a bad value arrives silently.
+    // creating `memories` — and the check rejects even a hand-run
+    // `SET version = 0` — so on a healthy stage the input below takes a partial
+    // migration or a dropped constraint. Asserted anyway because this task reads
+    // the column with direct SQL, where a bad value arrives silently.
     for (const unfenceable of [null, undefined, 0, "1"]) {
       const routed = routeActions(
         [

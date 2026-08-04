@@ -141,9 +141,10 @@ version before it reaches the wire.
   decision file. `planDecisions` builds its own anchors from the store, so a
   `null`/`0`/non-integer `version` is unguarded here too. Belt-and-braces:
   upstream's column is nullable (`INT DEFAULT 1`), but this repo's bootstrap
-  hardens it to `NOT NULL` + `CHECK (version > 0)` after creating `memories`, so
-  such a row implies a partially-migrated or hand-edited store. Asserted anyway
-  because the blast radius dwarfs the check. Such a
+  hardens it to `NOT NULL` + `CHECK (version > 0)` after creating `memories` —
+  verified against a real bootstrap, the check rejects even a hand-run
+  `UPDATE ... SET version = 0` — so such a row implies a partial migration or a
+  dropped constraint. Asserted anyway because the blast radius dwarfs the check. Such a
   memory degrades to `SKIP`
   ("version cannot be fenced") instead of emitting a live decision: `put()` does
   `String(version)`, so it would otherwise send `If-Match: "null"` and take a

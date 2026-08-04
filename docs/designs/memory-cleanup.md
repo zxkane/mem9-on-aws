@@ -96,9 +96,12 @@ both paths that produce one: a replay is refused at load
 (`planDecisions`, TC-MEMCLEAN-051). This is belt-and-braces: upstream's own
 column is nullable (`version INT DEFAULT 1`), but this repo's bootstrap adds
 `NOT NULL` + `CHECK (version > 0)` — `schema.sql` `\ir`-includes the migration
-after creating `memories`, so the hardening fires on every bootstrap. A store
-that can violate the invariant is therefore partially migrated or hand-edited,
-not merely unlucky. It is enforced anyway because the consequence is
+after creating `memories`, so the hardening fires on every bootstrap. Verified
+against a real bootstrap: the column comes out `NOT NULL DEFAULT 1` with
+`ck_memories_version`, and the check rejects a hand-run `UPDATE ... SET
+version = 0` as well as a bad INSERT. A store that can violate the invariant
+therefore needs a partial migration or a dropped constraint, not merely bad
+luck. It is enforced anyway because the consequence is
 disproportionate to the check: an unfenceable version reaches the wire as
 `If-Match: "null"` and earns a 400 that aborts the run mid-apply, after earlier
 decisions may already have deleted rows.

@@ -353,8 +353,10 @@ export function routeActions(memories, actions, options = {}) {
       // Defense in depth, and on a healthy store redundant: upstream's column
       // is nullable (`version INT DEFAULT 1`), but this repo's bootstrap adds
       // `NOT NULL` + `CHECK (version > 0)` after creating `memories`, and every
-      // upstream insert hardcodes `Version: 1`. Producing an unfenceable row
-      // takes a partial migration or out-of-band SQL. The guard earns its keep
+      // upstream insert hardcodes `Version: 1`. Verified against a real
+      // bootstrap, the check also rejects a hand-run `SET version = 0`, so an
+      // unfenceable row needs a partial migration or a dropped constraint rather
+      // than ordinary out-of-band SQL. The guard earns its keep
       // anyway because this task reads `version` with direct SQL
       // (`listActiveMemories`), where node-pg surfaces a NULL as `null` rather
       // than erroring — so unlike a REST read, nothing upstream fails loud

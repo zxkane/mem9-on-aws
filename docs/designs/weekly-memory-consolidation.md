@@ -189,8 +189,11 @@ precise about what is actually reachable. Upstream's column is nullable
 (`version INT DEFAULT 1`), but this repo's bootstrap adds `NOT NULL` +
 `CHECK (version > 0)`, and `schema.sql` `\ir`-includes that migration *after*
 creating `memories`, so the hardening fires on every bootstrap. Every upstream
-insert also hardcodes `Version: 1`. An unfenceable row therefore implies a
-partially-migrated or hand-edited store rather than ordinary operation. What
+insert also hardcodes `Version: 1`. Verified against a real bootstrap: the column
+comes out `NOT NULL DEFAULT 1` with `ck_memories_version`, and the check rejects a
+hand-run `UPDATE ... SET version = 0` as well as a bad INSERT — so an unfenceable
+row implies a partial migration or a dropped constraint, not ordinary
+out-of-band SQL. What
 makes the guard worth keeping is where this task reads from: unlike a REST read —
 where upstream scans `version` into a plain Go `int` and a true NULL fails loud
 (`converting NULL to int is unsupported`) — this task uses direct SQL, and
