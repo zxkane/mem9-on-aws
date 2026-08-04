@@ -715,7 +715,7 @@ Establish a write fence under the incident change window:
    client with the existing read/write scopes. Store its generated ID and secret
    in `/mem9-on-aws/prod/recovery/cognito/{client-id,client-secret}` and make it
    the Gateway's **only** `allowedClients` entry for `prod`.
-3. Deploy the fence, verify all normal M2M clients and the normal interactive
+3. Deploy the fence, verify the normal M2M client and normal interactive
    client are rejected, and use
    the proxy Lambda's CloudWatch `Invocations` metric to confirm zero backend
    calls during twice the maximum request timeout.
@@ -788,8 +788,8 @@ task start. The bootstrap task is also required: it idempotently updates the
 tenant row's per-request `db_host` and credentials to the selected endpoint.
 Do not probe until both the ECS service and bootstrap task are on the recovery
 configuration. Adopt the restored cluster into long-term IaC ownership only in
-a separate reviewed change after recovery is stable. Restore all normal M2M
-client IDs and the reader client ID to the Gateway allowlist, remove the
+a separate reviewed change after recovery is stable. Restore the normal M2M
+client ID and reader client ID to the Gateway allowlist, remove the
 temporary recovery client, and resume paused jobs only after the cutover or
 rollback probe passes.
 

@@ -3,16 +3,16 @@
  *
  * The AgentCore Gateway's inbound authorizer is a CUSTOM_JWT authorizer that
  * validates Cognito `client_credentials` (M2M) JWTs. This stack provisions the
- * pool + domain (OAuth token endpoint) + resource server (scopes) + two M2M
- * clients. Additional clients do not rotate the Gateway URL because only
+ * pool + domain (OAuth token endpoint) + resource server (scopes) + one M2M
+ * client. Additional clients would not rotate the Gateway URL because only
  * `name`/`authorizerType` are RequiresReplace on the Gateway.
  *
  * The Gateway matches on `allowedClients` (Cognito client_credentials tokens carry
- * `client_id`, not `aud`), so infra/gateway.ts lists both client ids there.
+ * `client_id`, not `aud`), so infra/gateway.ts lists this client id there.
  *
- * Exports the issuer + token endpoint (for clients to mint tokens) and both client
- * ids + secrets via SSM. Client secrets are SecureString values surfaced only to
- * the operator.
+ * Exports the issuer + token endpoint (for clients to mint tokens) and the client
+ * id + secret via SSM. The client secret is a SecureString surfaced only to the
+ * operator.
  */
 
 // @ts-ignore - `aws` injected globally by SST; cognito types declared loosely.
@@ -92,8 +92,8 @@ export function cognito(): CognitoOutputs {
     ],
   });
 
-  const m2mClientArgs = (name: string) => ({
-    name,
+  const client = new awsAny.cognito.UserPoolClient("Mem9McpClient", {
+    name: `${stage}-mem9-mcp-client`,
     userPoolId: pool.id,
     generateSecret: true,
     explicitAuthFlows: [],
@@ -106,15 +106,6 @@ export function cognito(): CognitoOutputs {
     preventUserExistenceErrors: "ENABLED",
     enableTokenRevocation: true,
   });
-
-  const client = new awsAny.cognito.UserPoolClient(
-    "Mem9McpClient",
-    m2mClientArgs(`${stage}-mem9-mcp-client`),
-  );
-  const client2 = new awsAny.cognito.UserPoolClient(
-    "Mem9McpClient2",
-    m2mClientArgs(`${stage}-mem9-mcp-client2`),
-  );
 
   // $interpolate (NOT a template literal) resolves the embedded Output<string>s;
   // a plain literal would stringify them and break CFN/JWT-authorizer validation.
@@ -149,18 +140,6 @@ export function cognito(): CognitoOutputs {
     value: client.clientSecret,
     tags,
   });
-  new awsAny.ssm.Parameter("SsmCognitoClient2Id", {
-    name: `${prefix}/cognito/client2/client-id`,
-    type: "String",
-    value: client2.id,
-    tags,
-  });
-  new awsAny.ssm.Parameter("SsmCognitoClient2Secret", {
-    name: `${prefix}/cognito/client2/client-secret`,
-    type: "SecureString",
-    value: client2.clientSecret,
-    tags,
-  });
   new awsAny.ssm.Parameter("SsmCognitoScope", {
     name: `${prefix}/cognito/scope`,
     type: "String",
@@ -180,6 +159,6 @@ export function cognito(): CognitoOutputs {
     resourceServerId: RESOURCE_SERVER_ID,
     clientId: client.id,
     clientSecret: client.clientSecret,
-    allowedClientIds: [client.id, client2.id],
+    allowedClientIds: [client.id],
   };
 }
