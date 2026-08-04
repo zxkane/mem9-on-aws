@@ -3,7 +3,7 @@
 This document describes the runtime implemented in this repository. It separates
 that current state from planned reliability work and rejected alternatives.
 
-Status: **implemented current state, reviewed 2026-08-01**. The deployed-resource
+Status: **implemented current state, reviewed 2026-08-04**. The deployed-resource
 definitions in `sst.config.ts`, `infra/`, and `docker/` are authoritative. The
 upstream mem9 observations in [`mem9-facts.md`](mem9-facts.md) are empirical
 against the pinned source commit and carry their verification date.
@@ -297,6 +297,12 @@ one rollout with durable routing enabled, reconciles that healthy deployment,
 and then runs the bootstrap task for the complete schema and tenant seed. The
 bootstrap repeats the same migration after creating the memory schema, which
 also guarantees the memory-version backfill on a fresh environment.
+The image applies the downstream patches in this fixed order:
+`0001-recall-min-confidence-tunables-and-zero-result-fallback`,
+`0002-ingest-durable-only-extraction-filter`, `0003-glm-request-bounds`,
+`0004-durable-ingest-queue`, `0005-atomic-ingest-apply`,
+`0006-durable-ingest-telemetry`, `0007-postgres-session-delete`, and
+`0008-ingest-prescreen-shadow`.
 Asynchronous `messages[]` ingest commits a canonical job before returning
 instead of launching the upstream untracked goroutine. Scope-level advisory
 locks serialize enqueue and claim, each claim attempt is a write-fencing
@@ -317,6 +323,17 @@ deadlock, cancellation, timeout, or mutation error rolls back the whole apply.
 Valid plans survive lease recovery, and ambiguous commits are resolved by
 rereading the tenant-scoped job.
 
+Immediately before planning, smart-job candidates are scored by the pure,
+versioned `msg-count-le-1-v1` shadow policy: one message is `would-skip`, while
+two or more messages are pass-through. The worker always invokes the same
+durable path regardless of that decision. The decision is hashed into the
+immutable plan only when a configured LLM runs smart extraction; raw mode and
+the nil-LLM raw fallback do not produce a shadow sample because they have no
+real extraction outcome. Recovery reports the original eligible evaluation
+without rescoring or changing the extraction result. This policy is
+observation-only; it is not an active skip or a rollback-controlled active
+feature.
+
 Authenticated REST and AgentCore `get_ingest_job_status` lookups expose only the
 job ID, state, attempts, warning/error class, and timestamps. Unknown and
 cross-tenant jobs are both not found. Runtime-usage reservations are correlated
@@ -333,6 +350,15 @@ metric dimensions. These metrics are operational signals rather than an
 accounting ledger: a process crash or log-write failure can omit a committed
 transition metric. Aurora `ingest_jobs` and the tenant-scoped status API are the
 authoritative job state.
+
+After each successful eligible outcome, the same best-effort stream emits
+`PrescreenEvaluated`, `PrescreenWouldSkip`, and `PrescreenFalseSkip`; false skip
+means the shadow rule matched and real extraction produced facts. Their only
+dimensions are the fixed stage and bounded policy version. The records contain
+no content, identifiers, hashes, measured lengths, or lexical matches. The
+dashboard shows would-skip/evaluated and false-skip/evaluated next to
+`ZeroFactSuccess`. Existing alarms and the meaning and dimensions of
+`ZeroFactSuccess` are unchanged.
 
 The same production emitter writes a content-free, stage-only
 `SamplerHeartbeat=1` before every queue-age query: immediately at worker start
@@ -689,7 +715,7 @@ to the GitHub Actions deploy role.
 | Embedding              | Local qwen3 sidecar, 1024 dimensions                                                                 | `docker/qwen3-embed/`                                                                                         |
 | Smart-ingest LLM       | Local proxy to Bedrock Mantle                                                                        | `docker/llm-proxy/`                                                                                           |
 | Mantle attribution     | `OpenAI-Project` added by `llm-proxy` when a project is configured                                   | `docker/llm-proxy/server.mjs`                                                                                 |
-| Ingest observability   | Content-free EMF metrics, CloudWatch dashboard, and production alarms                                | `docker/mnemo-server/patches/0006-durable-ingest-telemetry.patch`, `infra/observability.ts`                   |
+| Ingest observability   | Content-free EMF metrics, shadow pre-screen rates, CloudWatch dashboard, and production alarms       | `docker/mnemo-server/patches/0006-durable-ingest-telemetry.patch`, `docker/mnemo-server/patches/0008-ingest-prescreen-shadow.patch`, `infra/observability.ts` |
 | Memory consolidation   | Opt-in weekly Scheduler task, private review logs, safe mutation cap, and failure alarm              | `infra/consolidation.ts`, `scripts/memory-consolidation.mjs`                                                  |
 | MCP surface            | AgentCore Gateway Lambda target                                                                      | `infra/gateway.ts`                                                                                            |
 | Private service lookup | AWS Cloud Map                                                                                        | `infra/ecs.ts`                                                                                                |
@@ -728,6 +754,9 @@ to the GitHub Actions deploy role.
   phase-duration, retry, warning, truncation, and zero-fact metrics in
   `mem9-on-aws/DurableIngest`. Metric dimensions are limited to stage and
   bounded result/error classes.
+- Durable ingest evaluates `msg-count-le-1-v1` only in shadow mode. Every
+  eligible job still runs extraction; post-outcome pre-screen metrics use only
+  stage and bounded policy-version dimensions.
 - The production ingest dashboard keeps application metrics separate from
   documented `AWS/BedrockMantle` Project metrics. Planning duration is
   application elapsed time; no Mantle latency metric is synthesized.

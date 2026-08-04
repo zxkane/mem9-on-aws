@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
 import {
   DURABLE_FAILURE_RATIO_EXPRESSION,
+  PRESCREEN_FALSE_SKIP_RATE_EXPRESSION,
+  PRESCREEN_POLICY_VERSION,
+  PRESCREEN_WOULD_SKIP_RATE_EXPRESSION,
   ZERO_FACT_ALARM_THRESHOLD,
   ZERO_FACT_RATE_EXPRESSION,
   observability,
@@ -180,6 +183,10 @@ function zeroFactRate(zeroFactJobs: number, succeeded: number): number {
 
 function zeroFactBreaches(zeroFactJobs: number, succeeded: number): boolean {
   return zeroFactRate(zeroFactJobs, succeeded) >= ZERO_FACT_ALARM_THRESHOLD;
+}
+
+function prescreenRate(counter: number, evaluated: number): number {
+  return evaluated > 0 ? counter / evaluated : 0;
 }
 
 beforeEach(() => {
@@ -585,6 +592,101 @@ describe("observability alert delivery", () => {
     for (const metric of providerMetrics) {
       expect(metric.slice(2, 4)).toEqual(["Project", "proj_testxyz"]);
     }
+  });
+
+  it("TC-PRESCREEN-020/021/022: renders bounded shadow rates without changing alarms", () => {
+    expect(PRESCREEN_POLICY_VERSION).toBe("msg-count-le-1-v1");
+    expect(PRESCREEN_WOULD_SKIP_RATE_EXPRESSION).toBe(
+      "IF(prescreen_evaluated > 0, prescreen_would_skip / prescreen_evaluated, 0)",
+    );
+    expect(PRESCREEN_FALSE_SKIP_RATE_EXPRESSION).toBe(
+      "IF(prescreen_evaluated > 0, prescreen_false_skip / prescreen_evaluated, 0)",
+    );
+    expect(prescreenRate(0, 0)).toBe(0);
+    expect(prescreenRate(10, 100)).toBe(0.1);
+    expect(prescreenRate(3, 683)).toBeCloseTo(0.004392, 6);
+
+    observability(prodInputs);
+    const body = JSON.parse(
+      materialize(one("Dashboard").args.dashboardBody) as string,
+    );
+    const widget = body.widgets.find(
+      (candidate: { properties?: { title?: string } }) =>
+        candidate.properties?.title === "Extraction and pre-screen outcomes",
+    );
+    expect(widget).toBeDefined();
+    expect(widget.properties.metrics).toEqual([
+      [
+        "mem9-on-aws/DurableIngest",
+        "ZeroFactSuccess",
+        "stage",
+        "prod",
+        { stat: "Sum" },
+      ],
+      [
+        {
+          expression: PRESCREEN_WOULD_SKIP_RATE_EXPRESSION,
+          id: "prescreen_would_skip_rate",
+          label: "Would-skip rate",
+          yAxis: "right",
+        },
+      ],
+      [
+        {
+          expression: PRESCREEN_FALSE_SKIP_RATE_EXPRESSION,
+          id: "prescreen_false_skip_rate",
+          label: "False-skip rate",
+          yAxis: "right",
+        },
+      ],
+      [
+        "mem9-on-aws/DurableIngest",
+        "PrescreenEvaluated",
+        "stage",
+        "prod",
+        "policy_version",
+        PRESCREEN_POLICY_VERSION,
+        {
+          id: "prescreen_evaluated",
+          stat: "Sum",
+          visible: false,
+        },
+      ],
+      [
+        "mem9-on-aws/DurableIngest",
+        "PrescreenWouldSkip",
+        "stage",
+        "prod",
+        "policy_version",
+        PRESCREEN_POLICY_VERSION,
+        {
+          id: "prescreen_would_skip",
+          stat: "Sum",
+          visible: false,
+        },
+      ],
+      [
+        "mem9-on-aws/DurableIngest",
+        "PrescreenFalseSkip",
+        "stage",
+        "prod",
+        "policy_version",
+        PRESCREEN_POLICY_VERSION,
+        {
+          id: "prescreen_false_skip",
+          stat: "Sum",
+          visible: false,
+        },
+      ],
+    ]);
+    expect(JSON.stringify(widget)).not.toContain("SEARCH(");
+    expect(
+      resources.filter(
+        (resource) =>
+          resource.kind === "MetricAlarm" ||
+          resource.kind === "CompositeAlarm",
+      ),
+    ).toHaveLength(12);
   });
 
   it("TC-ALERT-015/TC-INGEST-METRIC-016/018/019/024..027: pins alarm semantics", () => {
@@ -1017,6 +1119,36 @@ describe("observability alert delivery", () => {
       expect(emitter).toContain(`countMetric("${metric}")`);
     }
     expect(emitter).toContain('millisecondMetric("OldestQueuedAgeMs")');
+
+    const prescreenPatch = readFileSync(
+      new URL(
+        "../docker/mnemo-server/patches/0008-ingest-prescreen-shadow.patch",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    const prescreenEmitterStart = prescreenPatch.indexOf(
+      "+++ b/server/internal/ingestqueue/telemetry.go",
+    );
+    const prescreenEmitterEnd = prescreenPatch.indexOf(
+      "diff --git a/server/internal/ingestqueue/telemetry_test.go",
+    );
+    expect(prescreenEmitterStart).toBeGreaterThanOrEqual(0);
+    expect(prescreenEmitterEnd).toBeGreaterThan(prescreenEmitterStart);
+    const prescreenEmitter = prescreenPatch.slice(
+      prescreenEmitterStart,
+      prescreenEmitterEnd,
+    );
+    for (const metric of [
+      "PrescreenEvaluated",
+      "PrescreenWouldSkip",
+      "PrescreenFalseSkip",
+    ]) {
+      expect(prescreenEmitter).toContain(`countMetric("${metric}")`);
+    }
+    expect(prescreenEmitter).toContain(
+      '[]string{"stage", "policy_version"}',
+    );
   });
 
   it("TC-INGEST-METRIC-020: removes the obsolete ingest_dropped metric", () => {
