@@ -400,6 +400,70 @@ describe("LLM action validation and tiers", () => {
       rationale: "no rationale supplied",
     });
   });
+
+  it("TC-CONSOL-050: a memory with no usable version is never auto-merged, because it cannot be fenced", () => {
+    // `If-Match` is omitted when the version is falsy (restAdapter), so upstream
+    // falls back to LWW and the fence is silently OFF — issue #128's overwrite,
+    // reintroduced. It also fails *closed-looking*: the client's own guard
+    // compares `current.version !== action.version`, and null !== null is false,
+    // so that guard passes too and the merge proceeds fully unfenced.
+    // Upstream's schema declares `version INT DEFAULT 1` with no NOT NULL, and
+    // this repo's own bootstrap hardening (NOT NULL + CHECK version > 0) is
+    // guarded on the table already existing, so it is skipped on a fresh stage.
+    for (const unfenceable of [null, undefined, 0, "1"]) {
+      const routed = routeActions(
+        [
+          memory("surv", "one", [1, 0], { version: unfenceable }),
+          memory("frag", "two", [1, 0]),
+        ],
+        [{
+          type: "MERGE",
+          ids: ["surv", "frag"],
+          survivor_id: "surv",
+          merged_content: "one two",
+          rationale: "same topic",
+        }],
+      );
+      expect(routed.auto).toEqual([]);
+      expect(routed.review).toContainEqual(
+        expect.objectContaining({ kind: "UNFENCEABLE_MERGE" }),
+      );
+    }
+
+    // An absorbed fragment's version is compared against its re-read before the
+    // delete, so an unfenceable one there is equally disqualifying.
+    const absorbed = routeActions(
+      [
+        memory("surv", "one", [1, 0]),
+        memory("frag", "two", [1, 0], { version: null }),
+      ],
+      [{
+        type: "MERGE",
+        ids: ["surv", "frag"],
+        survivor_id: "surv",
+        merged_content: "one two",
+        rationale: "same topic",
+      }],
+    );
+    expect(absorbed.auto).toEqual([]);
+    expect(absorbed.review).toContainEqual(
+      expect.objectContaining({ kind: "UNFENCEABLE_MERGE" }),
+    );
+
+    // A normal version still auto-merges — the guard must not disqualify everything.
+    expect(
+      routeActions(
+        [memory("surv", "one", [1, 0]), memory("frag", "two", [1, 0])],
+        [{
+          type: "MERGE",
+          ids: ["surv", "frag"],
+          survivor_id: "surv",
+          merged_content: "one two",
+          rationale: "same topic",
+        }],
+      ).auto,
+    ).toHaveLength(1);
+  });
 });
 
 describe("execution safety", () => {

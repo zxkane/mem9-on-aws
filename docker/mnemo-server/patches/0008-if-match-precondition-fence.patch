@@ -60,10 +60,10 @@ index 9560c52..a86a60a 100644
  	if auth.IsChain() {
 diff --git a/server/internal/handler/memory_ifmatch_test.go b/server/internal/handler/memory_ifmatch_test.go
 new file mode 100644
-index 0000000..386b2e5
+index 0000000..ec0f078
 --- /dev/null
 +++ b/server/internal/handler/memory_ifmatch_test.go
-@@ -0,0 +1,104 @@
+@@ -0,0 +1,118 @@
 +package handler
 +
 +import (
@@ -147,25 +147,39 @@ index 0000000..386b2e5
 +func TestUpdateMemoryUnparsableIfMatchIsRejected(t *testing.T) {
 +	// `strconv.Atoi` silently yielded 0 on a garbled header, which disabled the
 +	// fence exactly when a client thought it was fenced. Fail loud instead.
-+	memRepo := &testMemoryRepo{
-+		createCalls: []*domain.Memory{
-+			{ID: "mem-1", Content: "ingest wrote this", Version: 7},
-+		},
-+	}
-+	srv := newTestServer(memRepo, &testSessionRepo{})
++	//
++	// The non-positive cases matter as much as the garbled one: `ifMatch = 0` is
++	// precisely the value that DISABLES the version predicate downstream, so
++	// accepting "0" or "-1" would leave a client believing it was fenced while
++	// the write ran unfenced. Pinning both stops a later simplification to a
++	// bare `if err != nil` from quietly reopening that hole.
++	//
++	// An absent or empty header is NOT in this table: it means "no precondition
++	// supplied", which stays last-writer-wins by design
++	// (TestUpdateMemoryWithoutIfMatchIsUnfenced).
++	for _, header := range []string{`W/"7"`, "0", "-1", "7.0", " 7"} {
++		t.Run("if-match="+header, func(t *testing.T) {
++			memRepo := &testMemoryRepo{
++				createCalls: []*domain.Memory{
++					{ID: "mem-1", Content: "ingest wrote this", Version: 7},
++				},
++			}
++			srv := newTestServer(memRepo, &testSessionRepo{})
 +
-+	body := map[string]any{"content": "merged content"}
-+	req := withURLParam(makeTenantRequest(t, http.MethodPut, "/memories/mem-1", body), "id", "mem-1")
-+	req.Header.Set("If-Match", `W/"7"`)
-+	rr := httptest.NewRecorder()
++			body := map[string]any{"content": "merged content"}
++			req := withURLParam(makeTenantRequest(t, http.MethodPut, "/memories/mem-1", body), "id", "mem-1")
++			req.Header.Set("If-Match", header)
++			rr := httptest.NewRecorder()
 +
-+	srv.updateMemory(rr, req)
++			srv.updateMemory(rr, req)
 +
-+	if rr.Code != http.StatusBadRequest {
-+		t.Fatalf("status = %d, want 400 on an unparsable If-Match: %s", rr.Code, rr.Body.String())
-+	}
-+	if len(memRepo.updateCalls) != 0 {
-+		t.Fatalf("UpdateOptimistic calls = %d, want 0", len(memRepo.updateCalls))
++			if rr.Code != http.StatusBadRequest {
++				t.Fatalf("status = %d, want 400 on If-Match %q: %s", rr.Code, header, rr.Body.String())
++			}
++			if len(memRepo.updateCalls) != 0 {
++				t.Fatalf("UpdateOptimistic calls = %d, want 0", len(memRepo.updateCalls))
++			}
++		})
 +	}
 +}
 diff --git a/server/internal/service/memory.go b/server/internal/service/memory.go

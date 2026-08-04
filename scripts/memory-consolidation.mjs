@@ -344,6 +344,17 @@ export function routeActions(memories, actions, options = {}) {
       const absorbed = ids
         .filter((id) => id !== survivor.id)
         .map((id) => ({ id, ...snapshot(byId.get(id)) }));
+      // A MERGE is only auto-executable if every side can actually be fenced.
+      // `restAdapter` omits `If-Match` when the version is falsy, which drops
+      // upstream back to last-writer-wins — issue #128's silent overwrite, with
+      // no fence and no 412. It would also slip the client's own guard, since
+      // `current.version !== action.version` is false when both are null.
+      // Upstream's schema is `version INT DEFAULT 1` (nullable), so this is a
+      // data condition, not a hypothetical. Review, never auto-apply.
+      if (![survivor, ...absorbed].every((m) => Number.isInteger(m.version) && m.version >= 1)) {
+        review.push(reviewItem("UNFENCEABLE_MERGE", ids, byId, action.rationale));
+        continue;
+      }
       auto.push({
         type: "MERGE",
         id: survivor.id,

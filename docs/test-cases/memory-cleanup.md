@@ -5,7 +5,7 @@ injected deps). There is no CI E2E: the mem9 REST API is VPC-internal and the
 CI runner pool is outside that VPC, so live verification is an operator dry-run
 from a VPC-internal host (TC-MEMCLEAN-060 below).
 
-**On the `If-Match` fence (TC-MEMCLEAN-042…047):** the interleaving cannot be
+**On the `If-Match` fence (TC-MEMCLEAN-042/043/044/047/048):** the interleaving cannot be
 made deterministic against a live server from CI — the runner cannot reach the
 VPC-internal REST API, and the preview consolidation E2E is report-only, so it
 issues no writes at all. The fence itself is therefore asserted at both layers
@@ -20,7 +20,7 @@ it exists in, and both run in CI:
   the `UPDATE` predicate, losing the predicate race reports 412 rather than
   404, a rejected write costs no embedding call, an accepted one still
   re-embeds, and a request with no `If-Match` stays last-writer-wins.
-- **Client-side**, at both layers the callers have. TC-MEMCLEAN-042…047 fake the
+- **Client-side**, at both layers the callers have. TC-MEMCLEAN-042/043/044/047 fake the
   HTTP layer, so they cover `restClient`'s 412→null translation *and*
   `applyMergeDecision`'s reaction. The consolidation fake is one layer higher (it
   replaces the `putMemory` dep), so TC-CONSOL-038/039 cover the reaction only —
@@ -110,21 +110,26 @@ it exists in, and both run in CI:
   failure: the fenced merge consumes no cap and logs the survivor id, while an
   unrelated DELETE in the same run still applies and the run exits 0.
 - **TC-MEMCLEAN-044** — a successful merge sends `If-Match: <observed version>`
-  and carries `content` in the body. The content-bearing PUT is what makes
-  upstream re-embed, so the survivor's embedding matches its merged content
-  (issue #128 requirement (d) — the rewrite never strands a stale embedding).
+  and carries `content` in the body. A content-bearing PUT is the *precondition*
+  for upstream re-embedding (issue #128 requirement (d) — the rewrite never
+  strands a stale embedding); this test can only assert the request shape, since
+  the fake store has no embedding column. The re-embed itself is pinned
+  server-side by the patch's
+  `TestUpdateAcceptedByIfMatchStillReEmbedsTheNewContent`, which asserts the
+  stored embedding actually changed.
 - **TC-MEMCLEAN-047** — only 412 is treated as a fence: a 5xx on the survivor
   rewrite still propagates and aborts the run before the delete leg, so
   narrowing 412 to "skip" cannot widen into swallowing transport faults.
 - **TC-MEMCLEAN-048** — a replayed MERGE decision whose survivor `version` is
   absent, non-integer, or `< 1` is refused at load with zero API calls, and so
-  is one whose `absorbs` entry lacks a version. Patch 0008 made the survivor's
-  version load-bearing: it is the `If-Match` value, so an absent one would be
-  sent as the literal `"undefined"` and earn an opaque 400 *mid-apply*, after
-  earlier decisions have already deleted rows. Before the guard, that same input
-  instead reported `skippedLww: 1` — a misattributed LWW skip that reads in the
-  summary as "a concurrent write protected me", which is what
-  `validateDecisions` exists to prevent.
+  is one whose `absorbs` entry lacks a version. The malformed version never
+  reaches the wire: `needsPut` compares it with `===` against a real integer, so
+  it silently degrades the merge into the "survivor changed externally" branch.
+  Measured before the guard, that input reported `skippedLww: 1` — a
+  misattributed LWW skip, indistinguishable in the summary from "a concurrent
+  write protected me", so a replay of a hand-edited file reads as a success
+  while applying nothing. That is exactly the failure `validateDecisions` exists
+  to convert into a loud load-time error.
 
 ## Secrets
 

@@ -90,12 +90,13 @@ state to make apply **resumable and self-verifying**:
 `mergedContent` is produced at classification time (deterministic input to
 apply), so apply never re-invokes the LLM.
 
-Every `version` is a positive integer and, on a MERGE, load-bearing rather than
-informational: the survivor's is the `If-Match` value the fence is built on
-(patch 0008), and each absorbed one must still match at re-read. A replay whose
-MERGE lacks either is refused at load, before any API call — otherwise a
-hand-edited file buys an opaque 400 mid-apply, or a delete-set drop that reports
-as an LWW skip that never happened.
+Every `version` is a positive integer and, on a MERGE, load-bearing: the
+survivor's is both the re-read comparison and the `If-Match` value the fence is
+built on (patch 0008), and each absorbed one must still match at re-read. A
+replay whose MERGE lacks either is refused at load, before any API call. A
+malformed one is worse than an error, because it fails *quietly*: the `===`
+comparison can never match, so every affected merge degrades into a
+`skippedLww` that reads as a concurrent-write protection which never happened.
 
 ## Execution model
 

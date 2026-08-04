@@ -156,11 +156,19 @@ Both legs of a MERGE are now version-predicated, by different mechanisms:
   predicate rides in the SAME `UPDATE ... WHERE id = $ AND version = $N` that
   writes the content. A mismatch returns **412** and writes nothing.
 
-Because the check and the write are one statement, there is no window between
-them — this closes the race rather than narrowing it. Previously the header was
-advisory: a mismatch only logged a server-side warning, and an ingest write
-landing between the survivor's GET and its PUT was silently overwritten by the
-merged content.
+Because the predicate and the write are one statement, no interleaving can make
+the rewrite clobber a newer row: either the merged content lands, or the caller
+gets a 412 and nothing was written. That closes the race rather than narrowing
+it. Previously the header was advisory — a mismatch only logged a server-side
+warning, and an ingest write landing between the survivor's GET and its PUT was
+silently overwritten by the merged content.
+
+To be precise about where the safety comes from, since it is not the pre-read:
+upstream's `Update` does a pre-read, compares the version, embeds, then issues
+the predicated `UPDATE`. A write can still land between the compare and the
+`UPDATE`, and it is the predicate — not the compare — that catches it (see
+`TestUpdateLosingTheVersionPredicateRaceReportsConflict`). The compare only
+saves a wasted embedding call on the common case.
 
 On a 412 both callers (`scripts/memory-cleanup.mjs` from the CLI and
 `scripts/memory-consolidation.mjs` from the scheduled task, which share
@@ -169,6 +177,20 @@ absorbed ids are left active, and the run continues. Abandoning both legs is the
 point — absorbing the fragments after a rejected rewrite would delete content
 the survivor never received. A 412 is not a failure; any other non-2xx still
 propagates and aborts the run.
+
+A fence only works if a version is available to send. `restAdapter` omits
+`If-Match` when the version is falsy, and upstream's column is
+`version INT DEFAULT 1` — **nullable**; this repo's bootstrap hardening
+(`NOT NULL` + `CHECK (version > 0)`) is conditional on the table already
+existing, so it is skipped when the migration runs before mnemo-server creates
+it. A null version would therefore send no precondition and silently fall back
+to last-writer-wins, and it would slip the client-side guard too, because
+`current.version !== action.version` is false when both sides are null. So
+`routeActions` disqualifies any MERGE whose survivor or absorbed side lacks a
+positive integer version, routing it to `UNFENCEABLE_MERGE` review instead of
+auto-applying it (TC-CONSOL-050). The SQL-based archive and stale-marking legs
+need no equivalent guard: they carry the version in a `WHERE` clause, so a null
+matches no row and already fails closed into `skippedLww`.
 
 The survivor's embedding stays correct because the rewrite remains a
 content-bearing REST PUT, which is what makes upstream re-embed. A direct-SQL

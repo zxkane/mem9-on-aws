@@ -106,7 +106,12 @@ Verified from `server/internal/config/config.go` + `server/internal/repository/p
 
 `PUT /v1alpha2/mem9s/memories/{id}` is not a partial update at the storage layer:
 
-- `service/memory.go` re-embeds **only** when the request changes `content`.
+- `service/memory.go` re-embeds **only** when the request changes `content`, and
+  the full guard is `contentChanged && s.autoModel == "" && s.embedder != nil`.
+  We rely on `autoModel` being empty: `MNEMO_EMBED_AUTO_MODEL` is never set in
+  `infra/ecs.ts`, so the condition holds in production. Setting it would silently
+  stop re-embedding on content change, which is what makes the content-bearing
+  MERGE rewrite safe — treat it as load-bearing config, not a tuning knob.
 - `repository/postgres/memory.go` `UpdateOptimistic` writes `embedding = $4`
   **unconditionally**, from the in-memory row.
 - `scanMemory`/`scanMemoryRows` on the **postgres** path scan the embedding column
@@ -296,8 +301,15 @@ postgres/tidb/db9 repositories already implemented.
 
 - `ifMatch` is threaded into `UpdateOptimistic` as the expected version, so the
   predicate rides in the **same** `UPDATE ... WHERE id = $ AND version = $N`
-  statement that writes the content. The check and the write are one atomic
-  statement — there is no window between them.
+  statement that writes the content. Being one statement, it cannot silently
+  overwrite: either the content lands or the caller gets 412.
+  Precisely: `Update` is pre-read → cheap version compare → embed → predicated
+  `UPDATE`. There are two checks, and the window between them is real — that is
+  why the `ErrNotFound`→412 remap below has to exist. The pre-read compare is
+  only an optimisation that saves an embedding call; the *predicate* is what
+  makes the write safe. So the race is closed with respect to silent overwrite,
+  which is the guarantee issue #128 needed, and it is closed rather than
+  narrowed because no interleaving can make the `UPDATE` clobber a newer row.
 - A mismatch detected on the pre-read returns the new sentinel
   `domain.ErrPreconditionFailed` → HTTP **412**, before the embedder runs, so a
   rejected write costs no embedding call. It is deliberately distinct from
@@ -310,9 +322,21 @@ postgres/tidb/db9 repositories already implemented.
   Discarding the parse error would disable the fence at exactly the moment a
   client believed it was fenced.
 - **Blast radius:** requests that send no `If-Match` keep last-writer-wins
-  semantics (`ifMatch = 0` → no predicate). The other `MemoryService.Update`
-  callers in `handler/memory.go` pass `0`, so ingest and MCP paths are
-  unaffected. Pinned by `TestUpdateWithoutIfMatchRemainsLastWriterWins`.
+  semantics (`ifMatch = 0` → no predicate), pinned by
+  `TestUpdateWithoutIfMatchRemainsLastWriterWins`. There are four
+  `MemoryService.Update` callers post-patch, and they split two ways:
+  - The two ingest-internal ones (`handler/memory.go:727` metadata merge in
+    `ingestMessages`, `:775` tag merge in `createSmartContentWithRouting`) pass a
+    literal `0`, so smart-ingest is unaffected. The MCP surface is this repo's
+    own proxy Lambda (`infra/gateway/`), not an upstream Go package — it issues
+    only POST/GET and never sends `If-Match`, so it is unaffected too.
+  - Both PUT handler branches pass the parsed `ifMatch` and are therefore fenced
+    identically: the normal one (`:1430`) and the **Space Chain** branch
+    (`:1379`, `auth.IsChain()`, routed through `target.svc.memory`). A chain
+    client sending `If-Match` now gets 412 on a mismatch and 400 on a malformed
+    header. That is intended — the whole point is that the header means what it
+    says for every caller — but note the chain routing itself is not covered by
+    the patch's tests, which exercise the service layer and the non-chain handler.
 - The rewrite stays a content-bearing REST PUT, so upstream still re-embeds and
   the survivor's embedding matches its new content. This is why the fix went
   upstream instead of into a direct-SQL rewrite — see the content-free-`PUT`

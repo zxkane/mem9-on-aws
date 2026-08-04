@@ -38,7 +38,8 @@ function memory(id, content, version = 1) {
  * Records every request; mutates the store like the probed upstream:
  *  - GET  /memories?limit&offset — pages active memories
  *  - GET  /memories/{id}         — single read (re-read guard)
- *  - PUT  /memories/{id}         — LWW update, bumps version
+ *  - PUT  /memories/{id}         — update, bumps version; a mismatched
+ *                                  `If-Match` is 412 and writes nothing
  *  - POST /memories/batch-delete — soft delete, skips already-deleted
  */
 function fakeServer(initial) {
@@ -600,7 +601,11 @@ describe("concurrency guards", () => {
       deps,
     );
 
-    // The fenced merge did not consume cap and did not abort the run...
+    // The fenced merge did not consume cap and did not abort the run. Charging
+    // it would shrink the blast-radius budget for the rest of the run, and a
+    // mostly-fenced run could trip the exit-4 cap abort having applied nothing:
+    // only the unrelated DELETE below may be charged.
+    expect(result.capUsed).toBe(1);
     expect(result.skippedLww).toBeGreaterThanOrEqual(1);
     expect(server.store.get("abs-1").state).toBe("active");
     // ...while an unrelated DELETE in the same run still applied.
@@ -671,6 +676,28 @@ describe("concurrency guards", () => {
     // Aborted before the delete leg: the absorbed fragment is untouched.
     expect(server.store.get("abs-1").state).toBe("active");
     expect(server.calls.filter((c) => c.method === "POST")).toHaveLength(0);
+
+    // And 412 is opt-in per call site, not global: only a fenced write carries a
+    // precondition, so a 412 on the unversioned batch-delete has no race to have
+    // lost and must still abort. If it were swallowed to null, `flushDeletes`
+    // would then read `.deleted` off null and throw an unrelated TypeError.
+    const dir2 = tempDir();
+    writeFileSync(join(dir2, "decisions.json"), JSON.stringify({
+      stage: "test",
+      decisions: [{ id: "junk-1", verdict: "DELETE", reason: "noise", version: 1, contentHash: contentHash("noise") }],
+    }));
+    const s2 = fakeServer([memory("junk-1", "noise")]);
+    const d2 = baseDeps(s2, fakeLlm([]), dir2);
+    const realFetch2 = s2.fetchImpl;
+    d2.fetchImpl = vi.fn(async (url, opts = {}) => {
+      if (String(url).endsWith("/batch-delete")) {
+        return new Response(JSON.stringify({ error: "precondition failed" }), { status: 412 });
+      }
+      return realFetch2(url, opts);
+    });
+    await expect(
+      runCleanup(baseOpts({ apply: true, decisionsFile: join(dir2, "decisions.json") }), d2),
+    ).rejects.toThrow(/HTTP 412/);
   });
 
   it("TC-MEMCLEAN-041 mutex blocks a second apply; stale lock broken only if holder is dead", async () => {
