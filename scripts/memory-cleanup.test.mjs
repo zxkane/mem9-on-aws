@@ -859,6 +859,56 @@ describe("verdict parsing units", () => {
     expect(cyc.every((d) => d.verdict === "SKIP")).toBe(true);
   });
 
+  it("planDecisions SKIPs a memory whose version cannot be fenced (TC-MEMCLEAN-051)", () => {
+    // `validateDecisions` only guards the REPLAY path. A fresh scan builds its
+    // own anchors from the store, and upstream's column is `version INT
+    // DEFAULT 1` — nullable — so an unfenceable version is a data condition
+    // here too. `anchor()` copies it verbatim and `put()` does
+    // `String(version)`, so a null would go on the wire as `If-Match: "null"`,
+    // which patch 0008 rejects as a 400 that aborts the run mid-apply, after
+    // earlier decisions may already have deleted rows. SKIP instead: one bad
+    // row must not abort an otherwise-valid audit.
+    for (const version of [null, undefined, 0, "1"]) {
+      const survivor = { ...memory("s", "survivor"), version };
+      const out = planDecisions([survivor, memory("a", "absorbed")], [
+        { id: "s", verdict: "MERGE", reason: "r", merge_into: "s", absorbs: ["a"], merged_content: "x" },
+        { id: "a", verdict: "MERGE", reason: "r", merge_into: "s" },
+      ]);
+      const byId = Object.fromEntries(out.map((d) => [d.id, d]));
+      expect(byId["s"].verdict, `survivor version ${JSON.stringify(version)}`).toBe("SKIP");
+      expect(byId["s"].reason).toMatch(/cannot be fenced/i);
+      expect(out.some((d) => d.verdict === "MERGE")).toBe(false);
+    }
+
+    // An unfenceable ABSORBED side must disqualify the merge too: its delete
+    // leg is guarded by a version re-read the same way.
+    const absorbedNull = { ...memory("a", "absorbed"), version: null };
+    const out = planDecisions([memory("s", "survivor"), absorbedNull], [
+      { id: "s", verdict: "MERGE", reason: "r", merge_into: "s", absorbs: ["a"], merged_content: "x" },
+      { id: "a", verdict: "MERGE", reason: "r", merge_into: "s" },
+    ]);
+    expect(out.find((d) => d.id === "s").verdict).toBe("SKIP");
+    expect(out.some((d) => d.verdict === "MERGE")).toBe(false);
+
+    // Positive control: a well-formed version still merges, so the guard is not
+    // simply refusing everything.
+    const good = planDecisions([memory("s", "survivor"), memory("a", "absorbed")], [
+      { id: "s", verdict: "MERGE", reason: "r", merge_into: "s", absorbs: ["a"], merged_content: "x" },
+      { id: "a", verdict: "MERGE", reason: "r", merge_into: "s" },
+    ]);
+    expect(good.find((d) => d.id === "s").verdict).toBe("MERGE");
+  });
+
+  it("planDecisions SKIPs a non-MERGE verdict whose version cannot be fenced (TC-MEMCLEAN-051)", () => {
+    // DELETE's delete leg and every other mutation anchor on the same version.
+    // A null-versioned DELETE would reach `flushDeletes` unfenced.
+    const out = planDecisions([{ ...memory("d", "noise"), version: null }], [
+      { id: "d", verdict: "DELETE", reason: "noise" },
+    ]);
+    expect(out[0].verdict).toBe("SKIP");
+    expect(out[0].reason).toMatch(/cannot be fenced/i);
+  });
+
   it("parseArgs validates flags, values, and the positive-cap guard", () => {
     expect(parseArgs(["--stage", "prod"])).toMatchObject({ stage: "prod", apply: false, cap: 50 });
     expect(

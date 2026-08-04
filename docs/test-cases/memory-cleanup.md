@@ -5,7 +5,7 @@ injected deps). There is no CI E2E: the mem9 REST API is VPC-internal and the
 CI runner pool is outside that VPC, so live verification is an operator dry-run
 from a VPC-internal host (TC-MEMCLEAN-060 below).
 
-**On the `If-Match` fence (TC-MEMCLEAN-042/043/044/047/048):** the interleaving cannot be
+**On the `If-Match` fence (TC-MEMCLEAN-042/043/044/047):** the interleaving cannot be
 made deterministic against a live server from CI — the runner cannot reach the
 VPC-internal REST API, and the preview consolidation E2E is report-only, so it
 issues no writes at all. The fence itself is therefore asserted at both layers
@@ -28,6 +28,12 @@ it exists in, and both run in CI:
   `createProductionDeps`. That split matters: the adapter is the half that runs
   unattended weekly, and without a test on it a regression there would turn the
   intended "skip and carry on" into an aborted apply.
+
+A fence also needs a usable version to send, so its *inputs* are pinned
+separately from its behavior — TC-MEMCLEAN-048 on the replay path and
+TC-MEMCLEAN-051 on the fresh-scan path, plus TC-CONSOL-050 for the scheduled
+task. Those issue no HTTP calls, which is the point: they stop an unfenceable
+version before it reaches the wire.
 
 ## Scan & pagination
 
@@ -130,6 +136,22 @@ it exists in, and both run in CI:
   write protected me", so a replay of a hand-edited file reads as a success
   while applying nothing. That is exactly the failure `validateDecisions` exists
   to convert into a loud load-time error.
+- **TC-MEMCLEAN-051** — the same unfenceable version on the **fresh-scan** path,
+  which `validateDecisions` does not cover because it only guards a loaded
+  decision file. `planDecisions` builds its own anchors from the store, so a
+  `null`/`0`/non-integer `version` (upstream's column is `INT DEFAULT 1` —
+  nullable) is unguarded here too. Defense in depth: this tool reads over REST,
+  where upstream scans `version` into a plain Go `int`, so a true NULL fails loud
+  server-side and the reachable silent cases are non-positive/non-integer. Such a
+  memory degrades to `SKIP`
+  ("version cannot be fenced") instead of emitting a live decision: `put()` does
+  `String(version)`, so it would otherwise send `If-Match: "null"` and take a
+  400 that aborts the run mid-apply, after earlier decisions may already have
+  deleted rows. SKIP rather than throw, so one bad row cannot abort an
+  otherwise-valid audit. Asserted on the survivor, on an absorbed side (either
+  disqualifies the whole MERGE, since both legs are version-anchored), and on a
+  bare DELETE; a well-formed version still merges. `KEEP` is exempt because it
+  mutates nothing — `destructiveCost` is 0 and it is never dispatched.
 
 ## Secrets
 

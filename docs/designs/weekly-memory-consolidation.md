@@ -183,14 +183,33 @@ A fence only works if a version is available to send. `restAdapter` omits
 `version INT DEFAULT 1` — **nullable**; this repo's bootstrap hardening
 (`NOT NULL` + `CHECK (version > 0)`) is conditional on the table already
 existing, so it is skipped when the migration runs before mnemo-server creates
-it. A null version would therefore send no precondition and silently fall back
-to last-writer-wins, and it would slip the client-side guard too, because
-`current.version !== action.version` is false when both sides are null. So
+it. An unfenceable version would therefore send no precondition and silently
+fall back to last-writer-wins, and it would slip the client-side guard too,
+because `current.version !== action.version` is false when both sides are null.
+
+This guard is **defense in depth, not the only barrier**, and it is worth being
+precise about what is actually reachable. Every upstream insert hardcodes
+`Version: 1`, so a NULL row requires out-of-band SQL; and because upstream scans
+`version` into a plain Go `int`, a true NULL fails loud on any REST read
+(`converting NULL to int is unsupported`) rather than arriving as a null. This
+task is the one that could still see it, because it reads the column with direct
+SQL, where node-pg surfaces NULL as `null`. The cases that degrade *silently* —
+and so genuinely need the guard — are a non-positive or non-integer version,
+such as a hand-run `UPDATE ... SET version = 0`. So
 `routeActions` disqualifies any MERGE whose survivor or absorbed side lacks a
 positive integer version, routing it to `UNFENCEABLE_MERGE` review instead of
 auto-applying it (TC-CONSOL-050). The SQL-based archive and stale-marking legs
 need no equivalent guard: they carry the version in a `WHERE` clause, so a null
 matches no row and already fails closed into `skippedLww`.
+
+The cleanup tool needs the same guard in two places, because it has two ways to
+obtain a decision. On the replay path `validateDecisions` refuses a loaded file
+whose MERGE lacks a version anchor (TC-MEMCLEAN-048). On the fresh-scan path
+`planDecisions` builds the anchors itself, so it degrades an unfenceable memory
+to `SKIP` (TC-MEMCLEAN-051) — a `SKIP`, not a throw, so one bad row cannot abort
+an otherwise-valid audit. Without it the run would send `If-Match: "null"` and
+take patch 0008's 400 mid-apply, possibly after earlier decisions had already
+deleted rows.
 
 The survivor's embedding stays correct because the rewrite remains a
 content-bearing REST PUT, which is what makes upstream re-embed. A direct-SQL

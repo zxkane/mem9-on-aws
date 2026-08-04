@@ -357,6 +357,12 @@ postgres/tidb/db9 repositories already implemented.
   left unpatched deliberately, since a hunk against a file we never execute would
   only add drift risk at the next `MEM9_REF` bump. Expect that test to fail if
   the upstream suite is ever pointed at our image.
+- Upstream's dashboard also sends the header
+  (`dashboard/app/src/api/provider-http.ts:325`,
+  `if (version !== undefined) headers["If-Match"] = String(version)`), so it
+  would see 412s against a patched server. This repo does not build or deploy
+  the dashboard, so nothing changes today — noted for whoever bumps `MEM9_REF`
+  or ever serves that dashboard from this image.
 
 ### LLM key is read ONCE at startup, immutable — decisive for the sidecar (verified 2026-07-12)
 Probed at the pinned commit (`server/internal/config/config.go` + `llm/client.go`):

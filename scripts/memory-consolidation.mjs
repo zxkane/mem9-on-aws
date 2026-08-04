@@ -349,8 +349,16 @@ export function routeActions(memories, actions, options = {}) {
       // upstream back to last-writer-wins — issue #128's silent overwrite, with
       // no fence and no 412. It would also slip the client's own guard, since
       // `current.version !== action.version` is false when both are null.
-      // Upstream's schema is `version INT DEFAULT 1` (nullable), so this is a
-      // data condition, not a hypothetical. Review, never auto-apply.
+      //
+      // Defense in depth, not the only barrier. Upstream's column is
+      // `version INT DEFAULT 1` — nullable — so the schema guarantees nothing,
+      // and this task reads the column with direct SQL (`listActiveMemories`),
+      // where node-pg surfaces a NULL as `null` rather than erroring. But every
+      // upstream insert hardcodes `Version: 1`, so producing such a row takes
+      // out-of-band SQL; a true NULL would also fail loud on any REST read,
+      // since upstream scans `version` into a plain Go `int`. The reachable
+      // cases are a non-positive or non-integer version (e.g. a hand-run
+      // `UPDATE ... SET version = 0`), which degrade silently — hence the guard.
       if (![survivor, ...absorbed].every((m) => Number.isInteger(m.version) && m.version >= 1)) {
         review.push(reviewItem("UNFENCEABLE_MERGE", ids, byId, action.rationale));
         continue;

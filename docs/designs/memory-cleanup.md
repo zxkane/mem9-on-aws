@@ -90,7 +90,17 @@ state to make apply **resumable and self-verifying**:
 `mergedContent` is produced at classification time (deterministic input to
 apply), so apply never re-invokes the LLM.
 
-Every `version` is a positive integer and, on a MERGE, load-bearing: the
+Every `version` in a decision is a positive integer — enforced, not assumed, on
+both paths that produce one: a replay is refused at load
+(`validateDecisions`) and a fresh scan degrades the affected memory to `SKIP`
+(`planDecisions`, TC-MEMCLEAN-051). It is enforced rather than assumed because
+upstream's column is `version INT DEFAULT 1` — nullable — and this repo's
+`NOT NULL` + `CHECK (version > 0)` hardening only runs if the table already
+exists. Defense in depth: a true NULL cannot reach this tool, which reads over
+REST where upstream scans `version` into a plain Go `int` and so fails loud; the
+reachable silent cases are a non-positive or non-integer version.
+
+On a MERGE the version is load-bearing: the
 survivor's is both the re-read comparison and the `If-Match` value the fence is
 built on (patch 0008), and each absorbed one must still match at re-read. A
 replay whose MERGE lacks either is refused at load, before any API call. A

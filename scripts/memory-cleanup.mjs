@@ -158,6 +158,24 @@ function anchor(mem) {
   return { version: mem.version, contentHash: contentHash(mem.content) };
 }
 
+/**
+ * A mutation is only safe if its version can actually fence the write.
+ * Upstream's column is `version INT DEFAULT 1` — nullable — and this repo's
+ * `NOT NULL`/`CHECK (version > 0)` hardening is conditional on the table
+ * already existing, so nothing in the schema guarantees a positive version.
+ * Reachability differs from the consolidation task's: this tool reads over
+ * REST, where upstream scans `version` into a plain Go `int`, so a true NULL
+ * already fails loud server-side and the live cases are a non-positive or
+ * non-integer version. `put()` would send `String(null)` as `If-Match: "null"`, which
+ * patch 0008 rejects with a 400 that aborts the run mid-apply — possibly after
+ * earlier decisions already deleted rows. `validateDecisions` catches this on
+ * the replay path; this catches it on the fresh-scan path, where the tool
+ * generates the anchors itself (TC-MEMCLEAN-051).
+ */
+function isFenceable(mem) {
+  return Number.isInteger(mem?.version) && mem.version >= 1;
+}
+
 /** An anchor plus a human-readable snippet, for decisions an operator reviews. */
 function snapshot(mem) {
   return { ...anchor(mem), snippet: (mem.content ?? "").slice(0, SNIPPET_LEN) };
@@ -264,12 +282,24 @@ export function planDecisions(memories, verdicts) {
     if (absorbedIds.has(id)) continue; // folded into an emitting survivor's decision
 
     if (v.verdict !== "MERGE") {
+      // KEEP mutates nothing, so an unfenceable version cannot hurt it.
+      if (v.verdict !== "KEEP" && !isFenceable(byId.get(id))) {
+        decisions.push({ id, verdict: "SKIP", reason: "version cannot be fenced" });
+        continue;
+      }
       decisions.push({ id, verdict: v.verdict, reason: v.reason, ...snapshot(byId.get(id)) });
       continue;
     }
     const group = emitting.get(id);
     if (!group) {
       decisions.push({ id, verdict: "SKIP", reason: "merge without content or consenting absorbed ids" });
+      continue;
+    }
+    // Both legs of a MERGE are version-anchored, so either side being
+    // unfenceable disqualifies the whole action — absorbing fragments after an
+    // unfenced rewrite would delete content the survivor never received.
+    if (![id, ...group.absorbs].every((m) => isFenceable(byId.get(m)))) {
+      decisions.push({ id, verdict: "SKIP", reason: "version cannot be fenced" });
       continue;
     }
     decisions.push({
