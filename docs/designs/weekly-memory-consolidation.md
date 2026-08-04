@@ -142,37 +142,50 @@ Every mutation re-reads or atomically predicates current state:
 This preserves the cleanup tool's last-writer-wins guard while closing its
 previous cross-host mutex gap.
 
-### Known limit: the MERGE survivor PUT is advisory, not atomic
+### The MERGE survivor rewrite is fenced (issue #128)
 
-Independent review (Codex, 2026-08-03) flagged this and it is real. The two legs
-of a MERGE have different strength:
+Both legs of a MERGE are now version-predicated, by different mechanisms:
 
-- **Absorbed deletes ARE guarded.** Each id is re-read and dropped from the
-  delete set unless its version AND content hash still match the plan
+- **Absorbed deletes** are guarded client-side. Each id is re-read and dropped
+  from the delete set unless its version AND content hash still match the plan
   (`applyMergeDecision`), so a concurrently-edited absorbed memory is never
-  deleted.
-- **The survivor PUT is NOT fenced.** It sends `If-Match: <version>`, but
-  upstream treats that header as advisory — a mismatch only logs a server-side
-  warning (`docs/mem9-facts.md`). So an ingest write landing between the
-  survivor's GET and its PUT is overwritten by the merged content rather than
-  rejected.
+  deleted. Unchanged by #128.
+- **The survivor rewrite** is fenced server-side. It sends
+  `If-Match: <version>`, and patch 0008 makes that header **authoritative**:
+  the service passes it to `UpdateOptimistic` as the expected version, so the
+  predicate rides in the SAME `UPDATE ... WHERE id = $ AND version = $N` that
+  writes the content. A mismatch returns **412** and writes nothing.
 
-The window is the round trip between those two calls, and the advisory mutex
-(`mem9-cleanup:<stage>`) excludes other cleanup/consolidation runs but NOT live
-ingest. Consequence: at most one memory per merge group can lose a concurrent
-ingest edit; the content is recoverable only from the ingest source, not from the
-store.
+Because the check and the write are one statement, there is no window between
+them — this closes the race rather than narrowing it. Previously the header was
+advisory: a mismatch only logged a server-side warning, and an ingest write
+landing between the survivor's GET and its PUT was silently overwritten by the
+merged content.
 
-This is inherited from the cleanup tool (#102 accepted the same residual risk and
-mandates a low-ingest window), not introduced here — but consolidation runs
-UNATTENDED on a schedule, which removes the operator's ability to choose the
-window. Mitigations in force: the weekly schedule targets the lowest-ingest hour
-(Sunday 03:00 UTC), the auto tier is capped at 20 mutations per run, and
-`skippedLww` is emitted as a metric so a rising count is visible. Closing it
-properly requires either a conditional-update REST surface upstream or moving the
-survivor rewrite to the same direct-SQL, version-predicated path `archiveMemory`
-and `markMemoryStale` already use — tracked as follow-up work, not a blocker for
-the report-only rollout this PR enables.
+On a 412 both callers (`scripts/memory-cleanup.mjs` from the CLI and
+`scripts/memory-consolidation.mjs` from the scheduled task, which share
+`applyMergeDecision`) abandon the **whole** merge: `skippedLww` increments, the
+absorbed ids are left active, and the run continues. Abandoning both legs is the
+point — absorbing the fragments after a rejected rewrite would delete content
+the survivor never received. A 412 is not a failure; any other non-2xx still
+propagates and aborts the run.
+
+The survivor's embedding stays correct because the rewrite remains a
+content-bearing REST PUT, which is what makes upstream re-embed. A direct-SQL
+rewrite (the alternative considered) would have stranded a stale embedding: on
+postgres, mem9 re-embeds only when a PUT changes content, the repository writes
+`embedding` unconditionally, and the postgres scanner never populates
+`m.Embedding`. Computing the embedding in the consolidation task instead would
+have required reaching the embedder on `:8081` inside the mnemo-server task,
+which the task security group does not permit — so it would have meant a new SG
+ingress rule widening the data-plane surface. This design needs none.
+
+Residual risk, unchanged: the advisory mutex (`mem9-cleanup:<stage>`) excludes
+other cleanup/consolidation runs but NOT live ingest, so a concurrent ingest
+edit still *skips* a merge. That is now a safe, observable outcome rather than
+silent data loss. The weekly schedule still targets the lowest-ingest hour
+(Sunday 03:00 UTC), the auto tier is still capped at 20 mutations per run, and a
+rising `skippedLww` remains the signal to look at.
 
 ## Metrics And Failure Detection
 

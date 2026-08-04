@@ -5,6 +5,24 @@ injected deps). There is no CI E2E: the mem9 REST API is VPC-internal and the
 CI runner pool is outside that VPC, so live verification is an operator dry-run
 from a VPC-internal host (TC-MEMCLEAN-060 below).
 
+**On the `If-Match` fence (TC-MEMCLEAN-042…047):** the interleaving cannot be
+made deterministic against a live server from CI — the runner cannot reach the
+VPC-internal REST API, and the preview consolidation E2E is report-only, so it
+issues no writes at all. The fence itself is therefore asserted at both layers
+it exists in, and both run in CI:
+
+- **Server-side**, by the Go tests that patch 0008 ships
+  (`internal/service/memory_ifmatch_test.go`,
+  `internal/handler/memory_ifmatch_test.go`). These run inside the
+  `docker/mnemo-server` build, whose gating `go test ./internal/service/
+  ./internal/handler/ …` fails the image build. They pin: a stale `If-Match`
+  never reaches the repository write, the matching version is passed through as
+  the `UPDATE` predicate, losing the predicate race reports 412 rather than
+  404, a rejected write costs no embedding call, an accepted one still
+  re-embeds, and a request with no `If-Match` stays last-writer-wins.
+- **Client-side**, by TC-MEMCLEAN-042…047 and TC-CONSOL-038/039 here, against a
+  fake that enforces the version predicate and answers 412.
+
 ## Scan & pagination
 
 - **TC-MEMCLEAN-001** — pages through `limit=200` windows and terminates on the
@@ -73,6 +91,25 @@ from a VPC-internal host (TC-MEMCLEAN-060 below).
 - **TC-MEMCLEAN-041** — mutex: a second concurrent `--apply` fails fast on the
   existing lockfile; a stale (> 2 h) lock is broken with a warning; the lock
   path is stage-scoped and honors `--lock-file`.
+- **TC-MEMCLEAN-042** — MERGE survivor rewrite fence (issue #128): the guard
+  GET returns the expected version, then an ingest write lands **before** the
+  rewrite. The interleaving is asserted explicitly — the test mutates the store
+  inside the PUT interception, so the client's own re-read has already passed
+  and only the server-side `If-Match` fence can catch it. The concurrent
+  content survives, `skippedLww` increments, the absorbed ids stay active, and
+  zero batch-delete calls are issued. The fake server rejects the stale-version
+  rewrite with **412** (patch 0008); a fake that accepted it would make this
+  case vacuous.
+- **TC-MEMCLEAN-043** — a 412 on the survivor rewrite is a *skip*, not a run
+  failure: the fenced merge consumes no cap and logs the survivor id, while an
+  unrelated DELETE in the same run still applies and the run exits 0.
+- **TC-MEMCLEAN-044** — a successful merge sends `If-Match: <observed version>`
+  and carries `content` in the body. The content-bearing PUT is what makes
+  upstream re-embed, so the survivor's embedding matches its merged content
+  (issue #128 requirement (d) — the rewrite never strands a stale embedding).
+- **TC-MEMCLEAN-047** — only 412 is treated as a fence: a 5xx on the survivor
+  rewrite still propagates and aborts the run before the delete leg, so
+  narrowing 412 to "skip" cannot widen into swallowing transport faults.
 
 ## Secrets
 

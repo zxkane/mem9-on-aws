@@ -495,7 +495,12 @@ async function executeMerge(action, deps, metrics) {
         ...client,
         put: async (...args) => {
           const result = await client.put(...args);
-          confirmedMutations += 1;
+          // A null result means the `If-Match` fence rejected the rewrite
+          // (patch 0008, issue #128) — nothing was written, so it must not
+          // count as a confirmed mutation. Counting it would make the cap
+          // accounting and the reported mutation total claim a write the
+          // server refused.
+          if (result) confirmedMutations += 1;
           return result;
         },
       },
@@ -873,6 +878,11 @@ function restAdapter(baseUrl, tenantId, fetchImpl = fetch) {
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (method === "GET" && response.status === 404) return null;
+    // 412 = the `If-Match` precondition lost the race, so the write was NOT
+    // applied (patch 0008, issue #128). That is an expected outcome of a fenced
+    // write, not a transport failure: return null so the caller skips this
+    // action instead of aborting the run mid-apply.
+    if (version && response.status === 412) return null;
     if (!response.ok) throw new Error(`${method} ${path} -> HTTP ${response.status}`);
     return response.json();
   };

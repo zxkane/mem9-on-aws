@@ -18,7 +18,7 @@ public REST API — no mem9 patch.
 | Operation | Surface | Probed behavior |
 |---|---|---|
 | Enumerate | `GET /v1alpha2/mem9s/memories?limit=&offset=` | `limit` ≤ 200; server returns items + paging fields |
-| Rewrite | `PUT /v1alpha2/mem9s/memories/{id}` | Re-embeds when content changes. **LWW**: `If-Match` mismatch only logs a server-side warning (`service/memory.go Update`) |
+| Rewrite | `PUT /v1alpha2/mem9s/memories/{id}` | Re-embeds when content changes. **Fenced** since patch 0008 (issue #128): `If-Match` is passed to `UpdateOptimistic` as the expected version, so the predicate rides in the same `UPDATE` that writes the content — a mismatch returns **412** and writes nothing. Upstream logged the mismatch and applied the write anyway (LWW) |
 | Delete | `POST /v1alpha2/mem9s/memories/batch-delete` | `ValidateBulkDeleteIDs`: max 1000 ids per call, server-side dedup, empty list rejected (400). **Single UPDATE statement** (`repository/postgres/memory.go BulkSoftDelete`): `SET state='deleted' WHERE id IN (...) AND state != 'deleted'` — atomic per call (one statement, one implicit transaction), returns affected-row count. No per-item version predicate; already-deleted rows are skipped, not errors |
 
 **batch-delete partial-failure semantics (issue requirement):** the PG
@@ -171,9 +171,14 @@ scan (paged GET, state=active)
   this issue is per-memory durability only, matching ingest semantics.
 - **Server-side maintenance patch (0007)** — rejected: grows the patch set and
   pin-bump cost for a tool that works fine externally.
-- **`If-Match` for optimistic concurrency** — server treats mismatch as a
-  warning (LWW), so the client-side re-read + hash anchoring is the real
-  guard; we still send `If-Match` for the audit trail it leaves in server logs.
+- **`If-Match` for optimistic concurrency** — originally advisory upstream (a
+  mismatch was warned and the write applied anyway), so the client-side re-read
+  + hash anchoring was the only guard. Patch 0008 (issue #128) makes the header
+  authoritative for the MERGE survivor rewrite: the version predicate now rides
+  in the same statement that writes the content, and a 412 makes the caller skip
+  the whole merge. The client-side re-read is kept — it narrows the window
+  cheaply and still guards the absorbed-delete leg, which has no server-side
+  fence.
 - **Cross-host lock (DynamoDB)** — deliberately out of scope for an operator
   CLI; single-host lock + runbook discipline suffices, revisited in #103 where
   a scheduled task and a human may overlap.

@@ -52,9 +52,13 @@ function fakeDeps(memories, responses) {
         const item = store.get(id);
         return item?.state === "active" ? structuredClone(item) : null;
       }),
-      putMemory: vi.fn(async (id, patch) => {
-        writes.push({ type: "put", id, patch: structuredClone(patch) });
+      putMemory: vi.fn(async (id, patch, version) => {
         const item = store.get(id);
+        // `If-Match` FENCES the write (patch 0008, issue #128): a version
+        // mismatch means the server rejected it with 412 and applied nothing.
+        // Silently accepting a stale version would make the fence tests vacuous.
+        if (version && item && item.version !== version) return null;
+        writes.push({ type: "put", id, patch: structuredClone(patch) });
         Object.assign(item, patch, { version: item.version + 1 });
         return structuredClone(item);
       }),
@@ -742,6 +746,92 @@ describe("execution safety", () => {
     );
     expect(fake.writes.some(({ type }) => type === "delete")).toBe(false);
     expect(result.metrics.skippedLww).toBe(1);
+  });
+
+  it("TC-CONSOL-038: an ingest write between the survivor's read and rewrite fences the merge", async () => {
+    const memories = [
+      memory("survivor", "fragment one", [1, 0]),
+      memory("absorbed", "fragment two", [1, 0]),
+    ];
+    const fake = fakeDeps(memories, [
+      JSON.stringify({
+        actions: [{
+          type: "MERGE",
+          ids: ["survivor", "absorbed"],
+          survivor_id: "survivor",
+          merged_content: "fragment one and fragment two",
+          rationale: "same topic",
+        }],
+      }),
+    ]);
+    // Interleave explicitly: the survivor's guard GET passes, then an ingest
+    // write lands before the rewrite. Only the server-side fence catches this.
+    const realPut = fake.deps.putMemory.getMockImplementation();
+    fake.deps.putMemory.mockImplementationOnce(async (id, patch, version) => {
+      const item = fake.store.get("survivor");
+      item.content = "ingested concurrently";
+      item.version += 1;
+      return realPut(id, patch, version);
+    });
+
+    const result = await runConsolidation(
+      { stage: "prod", reportOnly: false, cap: 20 },
+      fake.deps,
+    );
+
+    // The concurrent write survives and the merged content never lands.
+    expect(fake.store.get("survivor").content).toBe("ingested concurrently");
+    expect(fake.writes.filter(({ type }) => type === "put")).toEqual([]);
+    // Absorbed ids are NOT deleted: the survivor never received their content.
+    expect(fake.store.get("absorbed").state).toBe("active");
+    expect(fake.writes.some(({ type }) => type === "delete")).toBe(false);
+    // A fenced merge is a skip, not a failed apply.
+    expect(result.metrics.skippedLww).toBe(1);
+    expect(result.metrics.merged).toBe(0);
+    expect(result.mutations).toBe(0);
+    expect(result.exitCode).toBe(0);
+    expect(
+      result.review.some((item) => item.kind === "APPLY_FAILED"),
+    ).toBe(false);
+  });
+
+  it("TC-CONSOL-039: a successful merge predicates the rewrite on the observed version", async () => {
+    const memories = [
+      memory("survivor", "fragment one", [1, 0]),
+      memory("absorbed", "fragment two", [1, 0]),
+    ];
+    const fake = fakeDeps(memories, [
+      JSON.stringify({
+        actions: [{
+          type: "MERGE",
+          ids: ["survivor", "absorbed"],
+          survivor_id: "survivor",
+          merged_content: "fragment one and fragment two",
+          rationale: "same topic",
+        }],
+      }),
+    ]);
+
+    const result = await runConsolidation(
+      { stage: "prod", reportOnly: false, cap: 20 },
+      fake.deps,
+    );
+
+    // Without the version argument the server cannot fence the rewrite.
+    expect(fake.deps.putMemory).toHaveBeenCalledWith(
+      "survivor",
+      { content: "fragment one and fragment two" },
+      1,
+    );
+    // A content-bearing PUT is what makes upstream re-embed, so the survivor's
+    // embedding matches its merged content (issue #128 requirement d).
+    expect(fake.store.get("survivor").content).toBe(
+      "fragment one and fragment two",
+    );
+    expect(fake.store.get("absorbed").state).toBe("deleted");
+    expect(result.metrics.skippedLww).toBe(0);
+    expect(result.metrics.merged).toBe(1);
+    expect(result.exitCode).toBe(0);
   });
 
   it("TC-CONSOL-011/012: report-only emits review summary and performs no writes or mutex", async () => {

@@ -282,6 +282,47 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
   monotonic memory-version predicates. Recovery reuses a valid persisted plan or
   creates a bounded replacement revision after an optimistic conflict.
 
+### `If-Match` is a FENCE, not a warning (downstream patch 0008, issue #128)
+
+**Upstream at the pinned commit:** `PUT /v1alpha2/mem9s/memories/{id}` read
+`If-Match` as an HTTP **header** (`r.Header.Get("If-Match")`, not a body field),
+discarded the `strconv.Atoi` error, and on a version mismatch only logged
+`"version conflict, applying LWW"` before applying the write anyway.
+`service/memory.go Update` then called `UpdateOptimistic(ctx, current, 0)` —
+hardcoding `0`, which **disabled** the `AND version = $N` predicate the
+postgres/tidb/db9 repositories already implemented.
+
+**Downstream patch `docker/mnemo-server/patches/0008-if-match-precondition-fence.patch`:**
+
+- `ifMatch` is threaded into `UpdateOptimistic` as the expected version, so the
+  predicate rides in the **same** `UPDATE ... WHERE id = $ AND version = $N`
+  statement that writes the content. The check and the write are one atomic
+  statement — there is no window between them.
+- A mismatch detected on the pre-read returns the new sentinel
+  `domain.ErrPreconditionFailed` → HTTP **412**, before the embedder runs, so a
+  rejected write costs no embedding call. It is deliberately distinct from
+  `ErrConflict` (→ 409, "the LLM merge replaced LWW") so a fenced caller can
+  tell "not applied" from "applied differently".
+- Losing the predicate race surfaces from the repository as `ErrNotFound` (zero
+  affected rows). With `ifMatch > 0` that is reported as 412, never as 404 — the
+  row existed at read time.
+- An unparsable or non-positive `If-Match` is now a **400**, not a silent `0`.
+  Discarding the parse error would disable the fence at exactly the moment a
+  client believed it was fenced.
+- **Blast radius:** requests that send no `If-Match` keep last-writer-wins
+  semantics (`ifMatch = 0` → no predicate). The other `MemoryService.Update`
+  callers in `handler/memory.go` pass `0`, so ingest and MCP paths are
+  unaffected. Pinned by `TestUpdateWithoutIfMatchRemainsLastWriterWins`.
+- The rewrite stays a content-bearing REST PUT, so upstream still re-embeds and
+  the survivor's embedding matches its new content. This is why the fix went
+  upstream instead of into a direct-SQL rewrite — see the content-free-`PUT`
+  section above for the stale-embedding trap that alternative would have hit,
+  and it needs no security-group change for the embedder port.
+- Callers: `scripts/memory-cleanup.mjs` (CLI) and
+  `scripts/memory-consolidation.mjs` (scheduled task) share
+  `applyMergeDecision`; both treat 412 as "skip this merge, increment
+  `skippedLww`, leave the absorbed ids active" and let any other non-2xx abort.
+
 ### LLM key is read ONCE at startup, immutable — decisive for the sidecar (verified 2026-07-12)
 Probed at the pinned commit (`server/internal/config/config.go` + `llm/client.go`):
 - `MNEMO_LLM_API_KEY` / `_BASE_URL` / `_MODEL` are read **once** in `config.Load()`

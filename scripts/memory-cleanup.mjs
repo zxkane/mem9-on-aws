@@ -301,7 +301,7 @@ function destructiveCost(decision) {
 /** Build the REST client. Counts every non-GET request so dry-run can assert 0. */
 function restClient(baseUrl, tenantId, fetchImpl, counters) {
   const base = baseUrl.replace(/\/$/, "");
-  async function call(method, path, body, { nullOn404 = false, headers = {} } = {}) {
+  async function call(method, path, body, { nullOn404 = false, nullOn412 = false, headers = {} } = {}) {
     if (method !== "GET") counters.writeCalls += 1;
     const res = await fetchImpl(`${base}${path}`, {
       method,
@@ -316,6 +316,11 @@ function restClient(baseUrl, tenantId, fetchImpl, counters) {
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (nullOn404 && res.status === 404) return null;
+    // 412 = the `If-Match` precondition lost the race, so the write was NOT
+    // applied (patch 0008). That is an expected outcome on a fenced write, not
+    // a transport failure: return null so the caller can skip this decision
+    // instead of aborting the whole run.
+    if (nullOn412 && res.status === 412) return null;
     if (!res.ok) {
       throw new Error(`${method} ${path} -> HTTP ${res.status}`);
     }
@@ -330,9 +335,17 @@ function restClient(baseUrl, tenantId, fetchImpl, counters) {
     // its row. Callers treat null as "already in the intended end state".
     get: (id) => call("GET", memoryPath(id), undefined, { nullOn404: true }),
     // If-Match is an HTTP HEADER upstream (handler reads r.Header.Get("If-Match"),
-    // probed at the pinned commit) — audit-trail only, a mismatch is LWW-warned.
+    // probed at the pinned commit). Patch 0008 makes it AUTHORITATIVE: the
+    // version predicate rides in the same UPDATE that writes the content, so
+    // there is no window for a concurrent ingest write to be overwritten.
+    // Returns null when the fence rejects the write (see nullOn412).
     put: (id, content, version) =>
-      call("PUT", memoryPath(id), { content }, { headers: { "If-Match": String(version) } }),
+      call(
+        "PUT",
+        memoryPath(id),
+        { content },
+        { nullOn412: true, headers: { "If-Match": String(version) } },
+      ),
     batchDelete: (ids) => call("POST", `${MEMORIES_PATH}/batch-delete`, { ids }),
   };
 }
@@ -490,7 +503,18 @@ export async function applyMergeDecision(decision, client, deleteQueue, counters
 
   let used = 0;
   if (needsPut) {
-    await client.put(decision.id, decision.mergedContent, decision.version);
+    // The re-read above narrows the race but cannot close it: an ingest write
+    // can still land between that GET and this PUT. The `If-Match` fence
+    // (patch 0008) is what actually closes it — a null return means the
+    // version moved and the merged content was NOT written. Abandon the whole
+    // merge: absorbing the fragments now would delete content the survivor
+    // never received.
+    const written = await client.put(decision.id, decision.mergedContent, decision.version);
+    if (!written) {
+      log(`MERGE ${decision.id}: survivor rewrite fenced by a concurrent write — skipping whole merge`);
+      counters.skippedLww += 1;
+      return 0;
+    }
     used += 1;
   }
   // Delete leg: re-read each absorbed id; drop changed or already-gone ones

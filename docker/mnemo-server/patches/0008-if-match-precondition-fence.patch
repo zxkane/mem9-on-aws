@@ -1,0 +1,435 @@
+diff --git a/server/internal/domain/errors.go b/server/internal/domain/errors.go
+index 1a7d1e4..ba45972 100644
+--- a/server/internal/domain/errors.go
++++ b/server/internal/domain/errors.go
+@@ -11,6 +11,12 @@ var (
+ 	ErrNotSupported            = errors.New("not supported")
+ 	ErrAutoVectorSearchSkipped = errors.New("auto vector search skipped")
+ 	ErrSchemaIncompatible      = errors.New("schema incompatible")
++	// ErrPreconditionFailed reports that a caller-supplied precondition (an
++	// `If-Match` version) no longer holds, so the write was NOT applied.
++	// mem9-on-aws patch (issue #128): distinct from ErrConflict so a fenced
++	// caller sees 412 and can skip, rather than a 409 that also means "the LLM
++	// merge replaced LWW".
++	ErrPreconditionFailed = errors.New("precondition failed: version changed")
+ )
+ 
+ // ValidationError wraps ErrValidation with a field-level message.
+diff --git a/server/internal/handler/handler.go b/server/internal/handler/handler.go
+index 8706895..c7f731a 100644
+--- a/server/internal/handler/handler.go
++++ b/server/internal/handler/handler.go
+@@ -337,6 +337,11 @@ func (s *Server) handleError(ctx context.Context, w http.ResponseWriter, err err
+ 		respondError(w, http.StatusNotFound, err.Error())
+ 	case errors.Is(err, domain.ErrWriteConflict):
+ 		respondError(w, http.StatusServiceUnavailable, err.Error())
++	// mem9-on-aws patch (issue #128): a failed `If-Match` precondition is 412, not
++	// 409 — the write was NOT applied, and a fenced caller must be able to tell
++	// that apart from ErrConflict's "LLM merge replaced LWW".
++	case errors.Is(err, domain.ErrPreconditionFailed):
++		respondError(w, http.StatusPreconditionFailed, err.Error())
+ 	case errors.Is(err, domain.ErrConflict):
+ 		respondError(w, http.StatusConflict, err.Error())
+ 	case errors.Is(err, domain.ErrDuplicateKey):
+diff --git a/server/internal/handler/memory.go b/server/internal/handler/memory.go
+index 9560c52..a86a60a 100644
+--- a/server/internal/handler/memory.go
++++ b/server/internal/handler/memory.go
+@@ -1339,9 +1339,21 @@ func (s *Server) updateMemory(w http.ResponseWriter, r *http.Request) {
+ 	auth := authInfo(r)
+ 	id := chi.URLParam(r, "id")
+ 
++	// mem9-on-aws patch (issue #128): `If-Match` now FENCES the write, so a header
++	// we cannot parse must fail loud. Upstream discarded the Atoi error, silently
++	// yielding 0 — which disabled the fence at exactly the moment a client
++	// believed it was fenced. A non-positive version is equally unusable.
+ 	var ifMatch int
+ 	if h := r.Header.Get("If-Match"); h != "" {
+-		ifMatch, _ = strconv.Atoi(h)
++		parsed, err := strconv.Atoi(h)
++		if err != nil || parsed <= 0 {
++			s.handleError(r.Context(), w, &domain.ValidationError{
++				Field:   "If-Match",
++				Message: "must be a positive integer memory version",
++			})
++			return
++		}
++		ifMatch = parsed
+ 	}
+ 
+ 	if auth.IsChain() {
+diff --git a/server/internal/handler/memory_ifmatch_test.go b/server/internal/handler/memory_ifmatch_test.go
+new file mode 100644
+index 0000000..386b2e5
+--- /dev/null
++++ b/server/internal/handler/memory_ifmatch_test.go
+@@ -0,0 +1,104 @@
++package handler
++
++import (
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/qiffang/mnemos/server/internal/domain"
++)
++
++// mem9-on-aws patch (issue #128): a stale `If-Match` must produce 412
++// Precondition Failed so a client can distinguish "someone else wrote" from
++// "your write landed". Previously it only logged a server-side warning and the
++// PUT succeeded, silently overwriting a concurrent ingest write.
++
++func TestUpdateMemoryStaleIfMatchReturns412(t *testing.T) {
++	memRepo := &testMemoryRepo{
++		createCalls: []*domain.Memory{
++			{ID: "mem-1", Content: "ingest wrote this", Version: 7},
++		},
++	}
++	srv := newTestServer(memRepo, &testSessionRepo{})
++
++	body := map[string]any{"content": "merged content"}
++	req := withURLParam(makeTenantRequest(t, http.MethodPut, "/memories/mem-1", body), "id", "mem-1")
++	req.Header.Set("If-Match", "3")
++	rr := httptest.NewRecorder()
++
++	srv.updateMemory(rr, req)
++
++	if rr.Code != http.StatusPreconditionFailed {
++		t.Fatalf("status = %d, want 412: %s", rr.Code, rr.Body.String())
++	}
++	if len(memRepo.updateCalls) != 0 {
++		t.Fatalf("UpdateOptimistic calls = %d, want 0 — the fence must reject before any write", len(memRepo.updateCalls))
++	}
++}
++
++func TestUpdateMemoryMatchingIfMatchStillSucceeds(t *testing.T) {
++	memRepo := &testMemoryRepo{
++		createCalls: []*domain.Memory{
++			{ID: "mem-1", Content: "fragment a", Version: 4},
++		},
++	}
++	srv := newTestServer(memRepo, &testSessionRepo{})
++
++	body := map[string]any{"content": "fragment a+b"}
++	req := withURLParam(makeTenantRequest(t, http.MethodPut, "/memories/mem-1", body), "id", "mem-1")
++	req.Header.Set("If-Match", "4")
++	rr := httptest.NewRecorder()
++
++	srv.updateMemory(rr, req)
++
++	if rr.Code != http.StatusOK {
++		t.Fatalf("status = %d, want 200: %s", rr.Code, rr.Body.String())
++	}
++	if len(memRepo.updateCalls) != 1 {
++		t.Fatalf("UpdateOptimistic calls = %d, want 1", len(memRepo.updateCalls))
++	}
++}
++
++func TestUpdateMemoryWithoutIfMatchIsUnfenced(t *testing.T) {
++	memRepo := &testMemoryRepo{
++		createCalls: []*domain.Memory{
++			{ID: "mem-1", Content: "whatever", Version: 9},
++		},
++	}
++	srv := newTestServer(memRepo, &testSessionRepo{})
++
++	body := map[string]any{"content": "overwritten"}
++	req := withURLParam(makeTenantRequest(t, http.MethodPut, "/memories/mem-1", body), "id", "mem-1")
++	rr := httptest.NewRecorder()
++
++	srv.updateMemory(rr, req)
++
++	if rr.Code != http.StatusOK {
++		t.Fatalf("status = %d, want 200 (no If-Match stays LWW): %s", rr.Code, rr.Body.String())
++	}
++}
++
++func TestUpdateMemoryUnparsableIfMatchIsRejected(t *testing.T) {
++	// `strconv.Atoi` silently yielded 0 on a garbled header, which disabled the
++	// fence exactly when a client thought it was fenced. Fail loud instead.
++	memRepo := &testMemoryRepo{
++		createCalls: []*domain.Memory{
++			{ID: "mem-1", Content: "ingest wrote this", Version: 7},
++		},
++	}
++	srv := newTestServer(memRepo, &testSessionRepo{})
++
++	body := map[string]any{"content": "merged content"}
++	req := withURLParam(makeTenantRequest(t, http.MethodPut, "/memories/mem-1", body), "id", "mem-1")
++	req.Header.Set("If-Match", `W/"7"`)
++	rr := httptest.NewRecorder()
++
++	srv.updateMemory(rr, req)
++
++	if rr.Code != http.StatusBadRequest {
++		t.Fatalf("status = %d, want 400 on an unparsable If-Match: %s", rr.Code, rr.Body.String())
++	}
++	if len(memRepo.updateCalls) != 0 {
++		t.Fatalf("UpdateOptimistic calls = %d, want 0", len(memRepo.updateCalls))
++	}
++}
+diff --git a/server/internal/service/memory.go b/server/internal/service/memory.go
+index c2f447d..6d5295d 100644
+--- a/server/internal/service/memory.go
++++ b/server/internal/service/memory.go
+@@ -1008,13 +1008,19 @@ func (s *MemoryService) Update(ctx context.Context, agentName, id, content strin
+ 		return nil, err
+ 	}
+ 
++	// mem9-on-aws patch (issue #128): `If-Match` is an AUTHORITATIVE precondition,
++	// not an advisory warning. Upstream logged this mismatch and applied the write
++	// anyway (LWW), which let an unattended MERGE survivor rewrite silently
++	// overwrite a concurrent ingest write. Reject early — before the embedder runs
++	// — so a rejected rewrite costs no embedding call.
+ 	if ifMatch > 0 && ifMatch != current.Version {
+-		slog.Warn("version conflict, applying LWW",
++		slog.Warn("version precondition failed, rejecting update",
+ 			"memory_id", id,
+ 			"expected_version", ifMatch,
+ 			"actual_version", current.Version,
+ 			"agent", agentName,
+ 		)
++		return nil, domain.ErrPreconditionFailed
+ 	}
+ 
+ 	contentChanged := false
+@@ -1045,9 +1051,25 @@ func (s *MemoryService) Update(ctx context.Context, agentName, id, content strin
+ 	}
+ 
+ 	writeStart := time.Now()
+-	err = s.memories.UpdateOptimistic(ctx, current, 0)
++	// mem9-on-aws patch (issue #128): pass `ifMatch` as the expected version so
++	// the repository appends `AND version = $N` to the SAME statement that writes
++	// the content. The check and the write are then one atomic UPDATE — there is
++	// no window for an ingest write to land between them. Upstream hardcoded 0,
++	// which disabled the predicate the repository already supported.
++	err = s.memories.UpdateOptimistic(ctx, current, ifMatch)
+ 	metrics.MemoryWriteDuration.WithLabelValues("update", metricStatus(err)).Observe(time.Since(writeStart).Seconds())
+ 	if err != nil {
++		// With a predicate in force, zero affected rows surfaces as ErrNotFound.
++		// The row existed at GET time, so that means the version moved under us —
++		// report it as a precondition failure, never as a missing memory.
++		if ifMatch > 0 && errors.Is(err, domain.ErrNotFound) {
++			slog.Warn("version precondition lost the write race, update not applied",
++				"memory_id", id,
++				"expected_version", ifMatch,
++				"agent", agentName,
++			)
++			return nil, domain.ErrPreconditionFailed
++		}
+ 		return nil, err
+ 	}
+ 
+diff --git a/server/internal/service/memory_ifmatch_test.go b/server/internal/service/memory_ifmatch_test.go
+new file mode 100644
+index 0000000..78bfd4e
+--- /dev/null
++++ b/server/internal/service/memory_ifmatch_test.go
+@@ -0,0 +1,207 @@
++package service
++
++import (
++	"context"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/qiffang/mnemos/server/internal/domain"
++	"github.com/qiffang/mnemos/server/internal/embed"
++)
++
++// mem9-on-aws patch (issue #128): `If-Match` must be an authoritative
++// precondition, not an advisory warning. These tests pin the fence at the
++// service layer, where the version predicate is threaded into the single
++// UPDATE that also writes the content — so the check and the write are atomic.
++
++// versionedMemoryRepo enforces the version predicate the way the postgres
++// repository does: `... WHERE id = $ AND version = $` affects zero rows on a
++// mismatch, which UpdateOptimistic surfaces as domain.ErrNotFound.
++type versionedMemoryRepo struct {
++	memoryRepoMock
++	stored                 *domain.Memory
++	updateExpectedVersions []int
++	updateCalls            int
++}
++
++func (m *versionedMemoryRepo) GetByID(_ context.Context, id string) (*domain.Memory, error) {
++	if m.stored == nil || m.stored.ID != id {
++		return nil, domain.ErrNotFound
++	}
++	cp := *m.stored
++	return &cp, nil
++}
++
++func (m *versionedMemoryRepo) UpdateOptimistic(_ context.Context, mem *domain.Memory, expectedVersion int) error {
++	m.updateCalls++
++	m.updateExpectedVersions = append(m.updateExpectedVersions, expectedVersion)
++	if expectedVersion > 0 && m.stored != nil && m.stored.Version != expectedVersion {
++		return domain.ErrNotFound
++	}
++	cp := *mem
++	cp.Version = m.stored.Version + 1
++	m.stored = &cp
++	return nil
++}
++
++func newFenceTestService(repo *versionedMemoryRepo) *MemoryService {
++	return NewMemoryService(repo, nil, nil, "", ModeRaw)
++}
++
++func TestUpdateWithStaleIfMatchIsRejectedAndDoesNotWrite(t *testing.T) {
++	repo := &versionedMemoryRepo{
++		stored: &domain.Memory{ID: "mem-1", Content: "ingest wrote this", Version: 7},
++	}
++	svc := newFenceTestService(repo)
++
++	_, err := svc.Update(context.Background(), "agent-1", "mem-1", "merged content", nil, nil, 3)
++
++	if !errors.Is(err, domain.ErrPreconditionFailed) {
++		t.Fatalf("Update() error = %v, want domain.ErrPreconditionFailed", err)
++	}
++	if repo.stored.Content != "ingest wrote this" {
++		t.Fatalf("content = %q, want the concurrent ingest write preserved", repo.stored.Content)
++	}
++	if repo.stored.Version != 7 {
++		t.Fatalf("version = %d, want 7 (unchanged)", repo.stored.Version)
++	}
++}
++
++func TestUpdateWithStaleIfMatchDoesNotReachTheRepositoryWrite(t *testing.T) {
++	repo := &versionedMemoryRepo{
++		stored: &domain.Memory{ID: "mem-1", Content: "ingest wrote this", Version: 7},
++	}
++	svc := newFenceTestService(repo)
++
++	if _, err := svc.Update(context.Background(), "agent-1", "mem-1", "merged", nil, nil, 3); err == nil {
++		t.Fatal("Update() error = nil, want a conflict")
++	}
++	if repo.updateCalls != 0 {
++		t.Fatalf("UpdateOptimistic calls = %d, want 0 — a mismatch must be rejected before any write", repo.updateCalls)
++	}
++}
++
++func TestUpdateWithMatchingIfMatchPassesTheVersionPredicateToTheRepository(t *testing.T) {
++	repo := &versionedMemoryRepo{
++		stored: &domain.Memory{ID: "mem-1", Content: "fragment a", Version: 4},
++	}
++	svc := newFenceTestService(repo)
++
++	updated, err := svc.Update(context.Background(), "agent-1", "mem-1", "fragment a+b", nil, nil, 4)
++	if err != nil {
++		t.Fatalf("Update() error = %v, want nil", err)
++	}
++	if updated.Content != "fragment a+b" {
++		t.Fatalf("content = %q, want the merged content", updated.Content)
++	}
++	if len(repo.updateExpectedVersions) != 1 || repo.updateExpectedVersions[0] != 4 {
++		t.Fatalf("expectedVersion args = %v, want [4] — the fence must reach the UPDATE predicate itself", repo.updateExpectedVersions)
++	}
++}
++
++func TestUpdateLosingTheVersionPredicateRaceReportsConflict(t *testing.T) {
++	// The row still matches at GET time, but an ingest write lands before the
++	// UPDATE. The predicate affects zero rows; that must surface as a conflict,
++	// never as a silent success.
++	repo := &versionedMemoryRepo{
++		stored: &domain.Memory{ID: "mem-1", Content: "fragment a", Version: 4},
++	}
++	raced := &racingVersionedRepo{versionedMemoryRepo: repo}
++
++	_, err := NewMemoryService(raced, nil, nil, "", ModeRaw).
++		Update(context.Background(), "agent-1", "mem-1", "fragment a+b", nil, nil, 4)
++
++	if !errors.Is(err, domain.ErrPreconditionFailed) {
++		t.Fatalf("Update() error = %v, want domain.ErrPreconditionFailed", err)
++	}
++}
++
++// racingVersionedRepo bumps the stored version between GetByID and the UPDATE,
++// simulating a concurrent ingest write inside the service's own round trip.
++type racingVersionedRepo struct {
++	*versionedMemoryRepo
++}
++
++func (m *racingVersionedRepo) GetByID(ctx context.Context, id string) (*domain.Memory, error) {
++	mem, err := m.versionedMemoryRepo.GetByID(ctx, id)
++	if err != nil {
++		return nil, err
++	}
++	m.stored.Version++
++	m.stored.Content = "ingest raced in"
++	return mem, nil
++}
++
++func TestUpdateWithoutIfMatchRemainsLastWriterWins(t *testing.T) {
++	// Unfenced callers (the MCP add/update path, ingest reconciliation) must be
++	// unaffected: no If-Match header means ifMatch == 0 means no predicate.
++	repo := &versionedMemoryRepo{
++		stored: &domain.Memory{ID: "mem-1", Content: "whatever", Version: 9},
++	}
++	svc := newFenceTestService(repo)
++
++	if _, err := svc.Update(context.Background(), "agent-1", "mem-1", "overwritten", nil, nil, 0); err != nil {
++		t.Fatalf("Update() error = %v, want nil", err)
++	}
++	if repo.stored.Content != "overwritten" {
++		t.Fatalf("content = %q, want the LWW overwrite to still apply", repo.stored.Content)
++	}
++	if len(repo.updateExpectedVersions) != 1 || repo.updateExpectedVersions[0] != 0 {
++		t.Fatalf("expectedVersion args = %v, want [0] — no If-Match must not add a predicate", repo.updateExpectedVersions)
++	}
++}
++
++func TestUpdateRejectedByIfMatchSkipsTheEmbeddingCall(t *testing.T) {
++	// A rejected rewrite must not burn an embedding request: the fence has to be
++	// checked before the embedder runs.
++	embedCalls := 0
++	embedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		embedCalls++
++		w.Header().Set("Content-Type", "application/json")
++		_, _ = w.Write([]byte(`{"data":[{"embedding":[0.1,0.2,0.3]}]}`))
++	}))
++	defer embedServer.Close()
++	embedder := embed.New(embed.Config{APIKey: "local", BaseURL: embedServer.URL, Model: "test-embed", Dims: 3})
++	repo := &versionedMemoryRepo{
++		stored: &domain.Memory{ID: "mem-1", Content: "ingest wrote this", Version: 7},
++	}
++	svc := NewMemoryService(repo, nil, embedder, "", ModeRaw)
++
++	if _, err := svc.Update(context.Background(), "agent-1", "mem-1", "merged", nil, nil, 3); err == nil {
++		t.Fatal("Update() error = nil, want a conflict")
++	}
++	if embedCalls != 0 {
++		t.Fatalf("embed calls = %d, want 0 on a fenced rejection", embedCalls)
++	}
++}
++
++func TestUpdateAcceptedByIfMatchStillReEmbedsTheNewContent(t *testing.T) {
++	// The load-bearing constraint from issue #128: a successful fenced rewrite
++	// must leave the survivor's embedding matching its NEW content.
++	embedded := make([]string, 0, 1)
++	embedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		buf := make([]byte, r.ContentLength)
++		_, _ = r.Body.Read(buf)
++		embedded = append(embedded, string(buf))
++		w.Header().Set("Content-Type", "application/json")
++		_, _ = w.Write([]byte(`{"data":[{"embedding":[0.4,0.5,0.6]}]}`))
++	}))
++	defer embedServer.Close()
++	embedder := embed.New(embed.Config{APIKey: "local", BaseURL: embedServer.URL, Model: "test-embed", Dims: 3})
++	repo := &versionedMemoryRepo{
++		stored: &domain.Memory{ID: "mem-1", Content: "fragment a", Version: 4},
++	}
++	svc := NewMemoryService(repo, nil, embedder, "", ModeRaw)
++
++	if _, err := svc.Update(context.Background(), "agent-1", "mem-1", "fragment a+b", nil, nil, 4); err != nil {
++		t.Fatalf("Update() error = %v, want nil", err)
++	}
++	if len(embedded) != 1 {
++		t.Fatalf("embed calls = %d, want 1 — a fenced content rewrite must still re-embed", len(embedded))
++	}
++	if len(repo.stored.Embedding) != 3 || repo.stored.Embedding[0] != 0.4 {
++		t.Fatalf("stored embedding = %v, want the freshly computed vector", repo.stored.Embedding)
++	}
++}
