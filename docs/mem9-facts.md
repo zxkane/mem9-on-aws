@@ -322,6 +322,17 @@ postgres/tidb/db9 repositories already implemented.
   `scripts/memory-consolidation.mjs` (scheduled task) share
   `applyMergeDecision`; both treat 412 as "skip this merge, increment
   `skippedLww`, leave the absorbed ids active" and let any other non-2xx abort.
+  The 412→null translation lives in each script's own REST adapter, so both are
+  tested: TC-MEMCLEAN-042/043 through a fake HTTP layer, TC-CONSOL-049 through
+  `createProductionDeps`.
+- **Known divergence from upstream's own e2e suite:** upstream
+  `e2e/api-smoke-test-round2.sh` test 6 asserts that a stale `If-Match` returns
+  **200** ("LWW semantics"), and `e2e/AGENTS.md` documents that contract. Against
+  a 0008-patched server it returns 412. The script is not applied, copied into
+  the image, or in the Dockerfile's gating test set, so nothing here runs it —
+  left unpatched deliberately, since a hunk against a file we never execute would
+  only add drift risk at the next `MEM9_REF` bump. Expect that test to fail if
+  the upstream suite is ever pointed at our image.
 
 ### LLM key is read ONCE at startup, immutable — decisive for the sidecar (verified 2026-07-12)
 Probed at the pinned commit (`server/internal/config/config.go` + `llm/client.go`):

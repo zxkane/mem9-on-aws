@@ -865,6 +865,53 @@ describe("verdict parsing units", () => {
     ).rejects.toThrow(/stage/);
   });
 
+  it("TC-MEMCLEAN-048 refuses a MERGE decision with no usable version anchor", async () => {
+    const dir = tempDir();
+    const merge = (overrides) => ({
+      stage: "test",
+      decisions: [{
+        id: "surv-1", verdict: "MERGE", reason: "frags",
+        version: 1, contentHash: contentHash("frag a"),
+        mergedContent: "frag a+b", mergedContentHash: contentHash("frag a+b"),
+        absorbs: [{ id: "abs-1", version: 1, contentHash: contentHash("frag b") }],
+        ...overrides,
+      }],
+    });
+    const replay = async (doc) => {
+      const decisionsFile = join(dir, "decisions.json");
+      writeFileSync(decisionsFile, JSON.stringify(doc));
+      const server = fakeServer([memory("surv-1", "frag a"), memory("abs-1", "frag b")]);
+      const promise = runCleanup(
+        baseOpts({ apply: true, decisionsFile }),
+        baseDeps(server, fakeLlm([]), dir),
+      );
+      return { promise, server };
+    };
+
+    // The survivor's version is the `If-Match` value. Post-patch-0008 an absent
+    // one would be sent as the literal "undefined" and earn an opaque 400
+    // mid-apply, after earlier decisions have already deleted rows. Fail at load.
+    for (const bad of [{ version: undefined }, { version: "1" }, { version: 0 }]) {
+      const { promise, server } = await replay(merge(bad));
+      await expect(promise).rejects.toThrow(/entry 0 invalid: MERGE without a version anchor/);
+      expect(server.calls).toHaveLength(0);
+    }
+
+    // An absorbed entry's version is compared against the re-read. An absent one
+    // never matches, so the fragment would be silently dropped from the delete
+    // set as "changed externally" — a misattributed LWW skip, not a real one.
+    const { promise, server } = await replay(
+      merge({ absorbs: [{ id: "abs-1", contentHash: contentHash("frag b") }] }),
+    );
+    await expect(promise).rejects.toThrow(/entry 0 invalid: MERGE with invalid absorbs/);
+    expect(server.calls).toHaveLength(0);
+
+    // The valid anchor still replays.
+    const ok = await replay(merge({}));
+    await expect(ok.promise).resolves.toMatchObject({ exitCode: 0 });
+    expect(ok.server.store.get("surv-1").content).toBe("frag a+b");
+  });
+
   it("contentHash is a stable sha256 label", () => {
     expect(contentHash("abc")).toBe(`sha256:${createHash("sha256").update("abc").digest("hex")}`);
   });

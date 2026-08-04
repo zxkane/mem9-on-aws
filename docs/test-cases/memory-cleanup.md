@@ -20,8 +20,14 @@ it exists in, and both run in CI:
   the `UPDATE` predicate, losing the predicate race reports 412 rather than
   404, a rejected write costs no embedding call, an accepted one still
   re-embeds, and a request with no `If-Match` stays last-writer-wins.
-- **Client-side**, by TC-MEMCLEAN-042…047 and TC-CONSOL-038/039 here, against a
-  fake that enforces the version predicate and answers 412.
+- **Client-side**, at both layers the callers have. TC-MEMCLEAN-042…047 fake the
+  HTTP layer, so they cover `restClient`'s 412→null translation *and*
+  `applyMergeDecision`'s reaction. The consolidation fake is one layer higher (it
+  replaces the `putMemory` dep), so TC-CONSOL-038/039 cover the reaction only —
+  TC-CONSOL-049 covers the real `restAdapter` translation separately, through
+  `createProductionDeps`. That split matters: the adapter is the half that runs
+  unattended weekly, and without a test on it a regression there would turn the
+  intended "skip and carry on" into an aborted apply.
 
 ## Scan & pagination
 
@@ -110,6 +116,15 @@ it exists in, and both run in CI:
 - **TC-MEMCLEAN-047** — only 412 is treated as a fence: a 5xx on the survivor
   rewrite still propagates and aborts the run before the delete leg, so
   narrowing 412 to "skip" cannot widen into swallowing transport faults.
+- **TC-MEMCLEAN-048** — a replayed MERGE decision whose survivor `version` is
+  absent, non-integer, or `< 1` is refused at load with zero API calls, and so
+  is one whose `absorbs` entry lacks a version. Patch 0008 made the survivor's
+  version load-bearing: it is the `If-Match` value, so an absent one would be
+  sent as the literal `"undefined"` and earn an opaque 400 *mid-apply*, after
+  earlier decisions have already deleted rows. Before the guard, that same input
+  instead reported `skippedLww: 1` — a misattributed LWW skip that reads in the
+  summary as "a concurrent write protected me", which is what
+  `validateDecisions` exists to prevent.
 
 ## Secrets
 

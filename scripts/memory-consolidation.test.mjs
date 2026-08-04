@@ -1194,6 +1194,54 @@ describe("production adapters and CLI", () => {
     expect(dbCalls.at(-1)).toEqual(["end"]);
   });
 
+  it("TC-CONSOL-049: the production REST adapter turns a fenced 412 into null, and only for a versioned write", async () => {
+    Object.assign(process.env, {
+      AWS_REGION: "ap-northeast-1",
+      MEM9_BASE_URL: "http://mnemo.local:8080/",
+      MEM9_DB_HOST: "writer.example.com",
+      MEM9_DB_NAME: "mem9",
+      MEM9_DB_SECRET: JSON.stringify({
+        username: "mem9",
+        password: "fixture-password",
+      }),
+      MEM9_TENANT_ID: "tenant-fixture",
+    });
+    // Every non-GET answers 412 so each call site is judged on its own gate,
+    // not on which URL it happened to hit.
+    const fetch = vi.fn(async () => ({
+      ok: false,
+      status: 412,
+      json: async () => ({ error: "precondition failed: version changed" }),
+    }));
+    class Client {
+      async connect() {}
+      async query() {
+        return { rows: [] };
+      }
+      async end() {}
+    }
+    const production = await createProductionDeps(
+      { stage: "prod" },
+      { Client, fetch, fromNodeProviderChain: () => "credentials", getToken: vi.fn(async () => "t") },
+    );
+
+    // This is the line the unattended weekly task depends on: without it the
+    // 412 throws, the apply aborts, and every later action is deferred instead
+    // of the intended "skip this merge and carry on".
+    await expect(
+      production.deps.putMemory("memory/1", { content: "merged" }, 2),
+    ).resolves.toBeNull();
+    expect(fetch.mock.calls[0][1].headers["If-Match"]).toBe("2");
+
+    // The fence only exists for a versioned write. An unversioned write has no
+    // precondition to lose, so a 412 there is an unexplained server answer and
+    // must still fail loud rather than be read as "skipped".
+    await expect(production.deps.deleteMemories(["a"])).rejects.toThrow(/HTTP 412/u);
+    await expect(
+      production.deps.putMemory("memory/1", { content: "merged" }),
+    ).rejects.toThrow(/HTTP 412/u);
+  });
+
   it("rejects incomplete production configuration before connecting", async () => {
     await expect(
       createProductionDeps(

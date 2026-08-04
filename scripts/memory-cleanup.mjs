@@ -679,7 +679,13 @@ function validateDecisions(decisions) {
       if (typeof d.mergedContent !== "string" || typeof d.mergedContentHash !== "string") {
         fail("MERGE without merged content/hash");
       }
-      if (!Array.isArray(d.absorbs) || d.absorbs.some((a) => !a || typeof a.id !== "string" || typeof a.contentHash !== "string")) {
+      // The survivor's version is the `If-Match` value the fence is built on
+      // (patch 0008), so an absent or non-numeric one is not a shape nit: it
+      // would be stringified into the header and rejected as an opaque 400
+      // mid-apply, after earlier decisions have already deleted rows. Versions
+      // start at 1 upstream, so 0 is no more an anchor than undefined is.
+      if (!Number.isInteger(d.version) || d.version < 1) fail("MERGE without a version anchor");
+      if (!Array.isArray(d.absorbs) || d.absorbs.some((a) => !a || typeof a.id !== "string" || typeof a.contentHash !== "string" || !Number.isInteger(a.version) || a.version < 1)) {
         fail("MERGE with invalid absorbs");
       }
     }
