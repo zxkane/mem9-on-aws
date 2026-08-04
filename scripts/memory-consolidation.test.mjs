@@ -52,9 +52,13 @@ function fakeDeps(memories, responses) {
         const item = store.get(id);
         return item?.state === "active" ? structuredClone(item) : null;
       }),
-      putMemory: vi.fn(async (id, patch) => {
-        writes.push({ type: "put", id, patch: structuredClone(patch) });
+      putMemory: vi.fn(async (id, patch, version) => {
         const item = store.get(id);
+        // `If-Match` FENCES the write (patch 0009, issue #128): a version
+        // mismatch means the server rejected it with 412 and applied nothing.
+        // Silently accepting a stale version would make the fence tests vacuous.
+        if (version && item && item.version !== version) return null;
+        writes.push({ type: "put", id, patch: structuredClone(patch) });
         Object.assign(item, patch, { version: item.version + 1 });
         return structuredClone(item);
       }),
@@ -395,6 +399,73 @@ describe("LLM action validation and tiers", () => {
     ).toMatchObject({
       rationale: "no rationale supplied",
     });
+  });
+
+  it("TC-CONSOL-050: a memory with no usable version is never auto-merged, because it cannot be fenced", () => {
+    // `If-Match` is omitted when the version is falsy (restAdapter), so upstream
+    // falls back to LWW and the fence is silently OFF — issue #128's overwrite,
+    // reintroduced. It also fails *closed-looking*: the client's own guard
+    // compares `current.version !== action.version`, and null !== null is false,
+    // so that guard passes too and the merge proceeds fully unfenced.
+    // Upstream's schema declares `version INT DEFAULT 1` with no NOT NULL. This
+    // repo's bootstrap does harden it (NOT NULL + CHECK version > 0) after
+    // creating `memories` — and the check rejects even a hand-run
+    // `SET version = 0` — so on a healthy stage the input below takes a partial
+    // migration or a dropped constraint. Asserted anyway because this task reads
+    // the column with direct SQL, where a bad value arrives silently.
+    for (const unfenceable of [null, undefined, 0, "1"]) {
+      const routed = routeActions(
+        [
+          memory("surv", "one", [1, 0], { version: unfenceable }),
+          memory("frag", "two", [1, 0]),
+        ],
+        [{
+          type: "MERGE",
+          ids: ["surv", "frag"],
+          survivor_id: "surv",
+          merged_content: "one two",
+          rationale: "same topic",
+        }],
+      );
+      expect(routed.auto).toEqual([]);
+      expect(routed.review).toContainEqual(
+        expect.objectContaining({ kind: "UNFENCEABLE_MERGE" }),
+      );
+    }
+
+    // An absorbed fragment's version is compared against its re-read before the
+    // delete, so an unfenceable one there is equally disqualifying.
+    const absorbed = routeActions(
+      [
+        memory("surv", "one", [1, 0]),
+        memory("frag", "two", [1, 0], { version: null }),
+      ],
+      [{
+        type: "MERGE",
+        ids: ["surv", "frag"],
+        survivor_id: "surv",
+        merged_content: "one two",
+        rationale: "same topic",
+      }],
+    );
+    expect(absorbed.auto).toEqual([]);
+    expect(absorbed.review).toContainEqual(
+      expect.objectContaining({ kind: "UNFENCEABLE_MERGE" }),
+    );
+
+    // A normal version still auto-merges — the guard must not disqualify everything.
+    expect(
+      routeActions(
+        [memory("surv", "one", [1, 0]), memory("frag", "two", [1, 0])],
+        [{
+          type: "MERGE",
+          ids: ["surv", "frag"],
+          survivor_id: "surv",
+          merged_content: "one two",
+          rationale: "same topic",
+        }],
+      ).auto,
+    ).toHaveLength(1);
   });
 });
 
@@ -742,6 +813,92 @@ describe("execution safety", () => {
     );
     expect(fake.writes.some(({ type }) => type === "delete")).toBe(false);
     expect(result.metrics.skippedLww).toBe(1);
+  });
+
+  it("TC-CONSOL-038: an ingest write between the survivor's read and rewrite fences the merge", async () => {
+    const memories = [
+      memory("survivor", "fragment one", [1, 0]),
+      memory("absorbed", "fragment two", [1, 0]),
+    ];
+    const fake = fakeDeps(memories, [
+      JSON.stringify({
+        actions: [{
+          type: "MERGE",
+          ids: ["survivor", "absorbed"],
+          survivor_id: "survivor",
+          merged_content: "fragment one and fragment two",
+          rationale: "same topic",
+        }],
+      }),
+    ]);
+    // Interleave explicitly: the survivor's guard GET passes, then an ingest
+    // write lands before the rewrite. Only the server-side fence catches this.
+    const realPut = fake.deps.putMemory.getMockImplementation();
+    fake.deps.putMemory.mockImplementationOnce(async (id, patch, version) => {
+      const item = fake.store.get("survivor");
+      item.content = "ingested concurrently";
+      item.version += 1;
+      return realPut(id, patch, version);
+    });
+
+    const result = await runConsolidation(
+      { stage: "prod", reportOnly: false, cap: 20 },
+      fake.deps,
+    );
+
+    // The concurrent write survives and the merged content never lands.
+    expect(fake.store.get("survivor").content).toBe("ingested concurrently");
+    expect(fake.writes.filter(({ type }) => type === "put")).toEqual([]);
+    // Absorbed ids are NOT deleted: the survivor never received their content.
+    expect(fake.store.get("absorbed").state).toBe("active");
+    expect(fake.writes.some(({ type }) => type === "delete")).toBe(false);
+    // A fenced merge is a skip, not a failed apply.
+    expect(result.metrics.skippedLww).toBe(1);
+    expect(result.metrics.merged).toBe(0);
+    expect(result.mutations).toBe(0);
+    expect(result.exitCode).toBe(0);
+    expect(
+      result.review.some((item) => item.kind === "APPLY_FAILED"),
+    ).toBe(false);
+  });
+
+  it("TC-CONSOL-039: a successful merge predicates the rewrite on the observed version", async () => {
+    const memories = [
+      memory("survivor", "fragment one", [1, 0]),
+      memory("absorbed", "fragment two", [1, 0]),
+    ];
+    const fake = fakeDeps(memories, [
+      JSON.stringify({
+        actions: [{
+          type: "MERGE",
+          ids: ["survivor", "absorbed"],
+          survivor_id: "survivor",
+          merged_content: "fragment one and fragment two",
+          rationale: "same topic",
+        }],
+      }),
+    ]);
+
+    const result = await runConsolidation(
+      { stage: "prod", reportOnly: false, cap: 20 },
+      fake.deps,
+    );
+
+    // Without the version argument the server cannot fence the rewrite.
+    expect(fake.deps.putMemory).toHaveBeenCalledWith(
+      "survivor",
+      { content: "fragment one and fragment two" },
+      1,
+    );
+    // A content-bearing PUT is what makes upstream re-embed, so the survivor's
+    // embedding matches its merged content (issue #128 requirement d).
+    expect(fake.store.get("survivor").content).toBe(
+      "fragment one and fragment two",
+    );
+    expect(fake.store.get("absorbed").state).toBe("deleted");
+    expect(result.metrics.skippedLww).toBe(0);
+    expect(result.metrics.merged).toBe(1);
+    expect(result.exitCode).toBe(0);
   });
 
   it("TC-CONSOL-011/012: report-only emits review summary and performs no writes or mutex", async () => {
@@ -1102,6 +1259,54 @@ describe("production adapters and CLI", () => {
     await production.close();
     expect(sent.at(-1)).toBe("destroyed");
     expect(dbCalls.at(-1)).toEqual(["end"]);
+  });
+
+  it("TC-CONSOL-049: the production REST adapter turns a fenced 412 into null, and only for a versioned write", async () => {
+    Object.assign(process.env, {
+      AWS_REGION: "ap-northeast-1",
+      MEM9_BASE_URL: "http://mnemo.local:8080/",
+      MEM9_DB_HOST: "writer.example.com",
+      MEM9_DB_NAME: "mem9",
+      MEM9_DB_SECRET: JSON.stringify({
+        username: "mem9",
+        password: "fixture-password",
+      }),
+      MEM9_TENANT_ID: "tenant-fixture",
+    });
+    // Every non-GET answers 412 so each call site is judged on its own gate,
+    // not on which URL it happened to hit.
+    const fetch = vi.fn(async () => ({
+      ok: false,
+      status: 412,
+      json: async () => ({ error: "precondition failed: version changed" }),
+    }));
+    class Client {
+      async connect() {}
+      async query() {
+        return { rows: [] };
+      }
+      async end() {}
+    }
+    const production = await createProductionDeps(
+      { stage: "prod" },
+      { Client, fetch, fromNodeProviderChain: () => "credentials", getToken: vi.fn(async () => "t") },
+    );
+
+    // This is the line the unattended weekly task depends on: without it the
+    // 412 throws, the apply aborts, and every later action is deferred instead
+    // of the intended "skip this merge and carry on".
+    await expect(
+      production.deps.putMemory("memory/1", { content: "merged" }, 2),
+    ).resolves.toBeNull();
+    expect(fetch.mock.calls[0][1].headers["If-Match"]).toBe("2");
+
+    // The fence only exists for a versioned write. An unversioned write has no
+    // precondition to lose, so a 412 there is an unexplained server answer and
+    // must still fail loud rather than be read as "skipped".
+    await expect(production.deps.deleteMemories(["a"])).rejects.toThrow(/HTTP 412/u);
+    await expect(
+      production.deps.putMemory("memory/1", { content: "merged" }),
+    ).rejects.toThrow(/HTTP 412/u);
   });
 
   it("rejects incomplete production configuration before connecting", async () => {

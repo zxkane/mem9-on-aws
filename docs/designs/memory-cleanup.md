@@ -18,7 +18,7 @@ public REST API — no mem9 patch.
 | Operation | Surface | Probed behavior |
 |---|---|---|
 | Enumerate | `GET /v1alpha2/mem9s/memories?limit=&offset=` | `limit` ≤ 200; server returns items + paging fields |
-| Rewrite | `PUT /v1alpha2/mem9s/memories/{id}` | Re-embeds when content changes. **LWW**: `If-Match` mismatch only logs a server-side warning (`service/memory.go Update`) |
+| Rewrite | `PUT /v1alpha2/mem9s/memories/{id}` | Re-embeds when content changes. **Fenced** since patch 0009 (issue #128): `If-Match` is passed to `UpdateOptimistic` as the expected version, so the predicate rides in the same `UPDATE` that writes the content — a mismatch returns **412** and writes nothing. Upstream logged the mismatch and applied the write anyway (LWW) |
 | Delete | `POST /v1alpha2/mem9s/memories/batch-delete` | `ValidateBulkDeleteIDs`: max 1000 ids per call, server-side dedup, empty list rejected (400). **Single UPDATE statement** (`repository/postgres/memory.go BulkSoftDelete`): `SET state='deleted' WHERE id IN (...) AND state != 'deleted'` — atomic per call (one statement, one implicit transaction), returns affected-row count. No per-item version predicate; already-deleted rows are skipped, not errors |
 
 **batch-delete partial-failure semantics (issue requirement):** the PG
@@ -89,6 +89,30 @@ state to make apply **resumable and self-verifying**:
 
 `mergedContent` is produced at classification time (deterministic input to
 apply), so apply never re-invokes the LLM.
+
+Every `version` in a decision is a positive integer — enforced, not assumed, on
+both paths that produce one: a replay is refused at load
+(`validateDecisions`) and a fresh scan degrades the affected memory to `SKIP`
+(`planDecisions`, TC-MEMCLEAN-051). This is belt-and-braces: upstream's own
+column is nullable (`version INT DEFAULT 1`), but this repo's bootstrap adds
+`NOT NULL` + `CHECK (version > 0)` — `schema.sql` `\ir`-includes the migration
+after creating `memories`, so the hardening fires on every bootstrap. Verified
+against a real bootstrap: the column comes out `NOT NULL DEFAULT 1` with
+`ck_memories_version`, and the check rejects a hand-run `UPDATE ... SET
+version = 0` as well as a bad INSERT. A store that can violate the invariant
+therefore needs a partial migration or a dropped constraint, not merely bad
+luck. It is enforced anyway because the consequence is
+disproportionate to the check: an unfenceable version reaches the wire as
+`If-Match: "null"` and earns a 400 that aborts the run mid-apply, after earlier
+decisions may already have deleted rows.
+
+On a MERGE the version is load-bearing: the
+survivor's is both the re-read comparison and the `If-Match` value the fence is
+built on (patch 0009), and each absorbed one must still match at re-read. A
+replay whose MERGE lacks either is refused at load, before any API call. A
+malformed one is worse than an error, because it fails *quietly*: the `===`
+comparison can never match, so every affected merge degrades into a
+`skippedLww` that reads as a concurrent-write protection which never happened.
 
 ## Execution model
 
@@ -171,9 +195,14 @@ scan (paged GET, state=active)
   this issue is per-memory durability only, matching ingest semantics.
 - **Server-side maintenance patch (0007)** — rejected: grows the patch set and
   pin-bump cost for a tool that works fine externally.
-- **`If-Match` for optimistic concurrency** — server treats mismatch as a
-  warning (LWW), so the client-side re-read + hash anchoring is the real
-  guard; we still send `If-Match` for the audit trail it leaves in server logs.
+- **`If-Match` for optimistic concurrency** — originally advisory upstream (a
+  mismatch was warned and the write applied anyway), so the client-side re-read
+  + hash anchoring was the only guard. Patch 0009 (issue #128) makes the header
+  authoritative for the MERGE survivor rewrite: the version predicate now rides
+  in the same statement that writes the content, and a 412 makes the caller skip
+  the whole merge. The client-side re-read is kept — it narrows the window
+  cheaply and still guards the absorbed-delete leg, which has no server-side
+  fence.
 - **Cross-host lock (DynamoDB)** — deliberately out of scope for an operator
   CLI; single-host lock + runbook discipline suffices, revisited in #103 where
   a scheduled task and a human may overlap.

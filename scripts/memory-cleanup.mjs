@@ -158,6 +158,30 @@ function anchor(mem) {
   return { version: mem.version, contentHash: contentHash(mem.content) };
 }
 
+/**
+ * A mutation is only safe if its version can actually fence the write.
+ *
+ * Belt-and-braces, and deliberately so. On a fully bootstrapped instance the
+ * column IS constrained: upstream's own `version INT DEFAULT 1` is nullable,
+ * but `docker/bootstrap/migrations/001_ingest_jobs.sql` adds `NOT NULL` and
+ * `CHECK (version > 0)`, and `schema.sql` `\ir`-includes it after creating
+ * `memories`. Verified against a real bootstrap: the column comes out
+ * `NOT NULL DEFAULT 1` with `ck_memories_version`, and the check rejects a
+ * hand-run `UPDATE ... SET version = 0` as well as a bad INSERT. So a store that
+ * can violate this needs a partial migration or a dropped constraint — the
+ * unfenceable value is not reachable by ordinary means.
+ *
+ * It is still worth having, because the failure it prevents is disproportionate
+ * to its cost: `put()` does `String(version)`, so a null would go on the wire as
+ * `If-Match: "null"`, which patch 0009 rejects with a 400 that aborts the run
+ * mid-apply — possibly after earlier decisions already deleted rows.
+ * `validateDecisions` covers the replay path; this covers the fresh-scan path,
+ * where the tool generates the anchors itself (TC-MEMCLEAN-051).
+ */
+function isFenceable(mem) {
+  return Number.isInteger(mem?.version) && mem.version >= 1;
+}
+
 /** An anchor plus a human-readable snippet, for decisions an operator reviews. */
 function snapshot(mem) {
   return { ...anchor(mem), snippet: (mem.content ?? "").slice(0, SNIPPET_LEN) };
@@ -244,10 +268,21 @@ export function planDecisions(memories, verdicts) {
   // referenced by any non-emitting group falls through to its own verdict (or
   // an explicit SKIP row) — every scanned id appears in the decision log.
   const emitting = new Map();
+  const unfenceable = new Set();
   for (const [survivor, group] of mergeGroups) {
     if (skip.has(survivor)) continue;
     if (verdictById.get(survivor)?.verdict !== "MERGE") continue;
     if (!group.mergedContent || group.absorbs.length === 0) continue;
+    // Both legs of a MERGE are version-anchored, so either side being
+    // unfenceable disqualifies the whole action — absorbing fragments after an
+    // unfenced rewrite would delete content the survivor never received. This
+    // belongs here rather than at emit time: a group that folds its absorbed
+    // ids and is only then rejected leaves those ids with no decision row at
+    // all, which is the completeness invariant above (TC-MEMCLEAN-051).
+    if (![survivor, ...group.absorbs].every((m) => isFenceable(byId.get(m)))) {
+      unfenceable.add(survivor);
+      continue;
+    }
     emitting.set(survivor, group);
   }
   const absorbedIds = new Set();
@@ -264,7 +299,16 @@ export function planDecisions(memories, verdicts) {
     if (absorbedIds.has(id)) continue; // folded into an emitting survivor's decision
 
     if (v.verdict !== "MERGE") {
+      // KEEP mutates nothing, so an unfenceable version cannot hurt it.
+      if (v.verdict !== "KEEP" && !isFenceable(byId.get(id))) {
+        decisions.push({ id, verdict: "SKIP", reason: "version cannot be fenced" });
+        continue;
+      }
       decisions.push({ id, verdict: v.verdict, reason: v.reason, ...snapshot(byId.get(id)) });
+      continue;
+    }
+    if (unfenceable.has(id)) {
+      decisions.push({ id, verdict: "SKIP", reason: "version cannot be fenced" });
       continue;
     }
     const group = emitting.get(id);
@@ -301,7 +345,7 @@ function destructiveCost(decision) {
 /** Build the REST client. Counts every non-GET request so dry-run can assert 0. */
 function restClient(baseUrl, tenantId, fetchImpl, counters) {
   const base = baseUrl.replace(/\/$/, "");
-  async function call(method, path, body, { nullOn404 = false, headers = {} } = {}) {
+  async function call(method, path, body, { nullOn404 = false, nullOn412 = false, headers = {} } = {}) {
     if (method !== "GET") counters.writeCalls += 1;
     const res = await fetchImpl(`${base}${path}`, {
       method,
@@ -316,6 +360,11 @@ function restClient(baseUrl, tenantId, fetchImpl, counters) {
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (nullOn404 && res.status === 404) return null;
+    // 412 = the `If-Match` precondition lost the race, so the write was NOT
+    // applied (patch 0009). That is an expected outcome on a fenced write, not
+    // a transport failure: return null so the caller can skip this decision
+    // instead of aborting the whole run.
+    if (nullOn412 && res.status === 412) return null;
     if (!res.ok) {
       throw new Error(`${method} ${path} -> HTTP ${res.status}`);
     }
@@ -330,9 +379,17 @@ function restClient(baseUrl, tenantId, fetchImpl, counters) {
     // its row. Callers treat null as "already in the intended end state".
     get: (id) => call("GET", memoryPath(id), undefined, { nullOn404: true }),
     // If-Match is an HTTP HEADER upstream (handler reads r.Header.Get("If-Match"),
-    // probed at the pinned commit) — audit-trail only, a mismatch is LWW-warned.
+    // probed at the pinned commit). Patch 0009 makes it AUTHORITATIVE: the
+    // version predicate rides in the same UPDATE that writes the content, so
+    // there is no window for a concurrent ingest write to be overwritten.
+    // Returns null when the fence rejects the write (see nullOn412).
     put: (id, content, version) =>
-      call("PUT", memoryPath(id), { content }, { headers: { "If-Match": String(version) } }),
+      call(
+        "PUT",
+        memoryPath(id),
+        { content },
+        { nullOn412: true, headers: { "If-Match": String(version) } },
+      ),
     batchDelete: (ids) => call("POST", `${MEMORIES_PATH}/batch-delete`, { ids }),
   };
 }
@@ -490,7 +547,18 @@ export async function applyMergeDecision(decision, client, deleteQueue, counters
 
   let used = 0;
   if (needsPut) {
-    await client.put(decision.id, decision.mergedContent, decision.version);
+    // The re-read above narrows the race but cannot close it: an ingest write
+    // can still land between that GET and this PUT. The `If-Match` fence
+    // (patch 0009) is what actually closes it — a null return means the
+    // version moved and the merged content was NOT written. Abandon the whole
+    // merge: absorbing the fragments now would delete content the survivor
+    // never received.
+    const written = await client.put(decision.id, decision.mergedContent, decision.version);
+    if (!written) {
+      log(`MERGE ${decision.id}: survivor rewrite fenced by a concurrent write — skipping whole merge`);
+      counters.skippedLww += 1;
+      return 0;
+    }
     used += 1;
   }
   // Delete leg: re-read each absorbed id; drop changed or already-gone ones
@@ -655,7 +723,16 @@ function validateDecisions(decisions) {
       if (typeof d.mergedContent !== "string" || typeof d.mergedContentHash !== "string") {
         fail("MERGE without merged content/hash");
       }
-      if (!Array.isArray(d.absorbs) || d.absorbs.some((a) => !a || typeof a.id !== "string" || typeof a.contentHash !== "string")) {
+      // A malformed version does NOT reach the wire — `needsPut` compares it
+      // with `===` against a real integer, so it degrades every MERGE into the
+      // "survivor changed externally" branch instead. That is the actual hazard:
+      // the run reports `skippedLww`, which in the summary is indistinguishable
+      // from "a concurrent write protected me", so a replay of a hand-edited
+      // file looks like a success while having applied nothing. Fail at load
+      // instead. Versions start at 1 upstream, so 0 is no more an anchor than
+      // undefined is.
+      if (!Number.isInteger(d.version) || d.version < 1) fail("MERGE without a version anchor");
+      if (!Array.isArray(d.absorbs) || d.absorbs.some((a) => !a || typeof a.id !== "string" || typeof a.contentHash !== "string" || !Number.isInteger(a.version) || a.version < 1)) {
         fail("MERGE with invalid absorbs");
       }
     }

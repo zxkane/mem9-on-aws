@@ -344,6 +344,27 @@ export function routeActions(memories, actions, options = {}) {
       const absorbed = ids
         .filter((id) => id !== survivor.id)
         .map((id) => ({ id, ...snapshot(byId.get(id)) }));
+      // A MERGE is only auto-executable if every side can actually be fenced.
+      // `restAdapter` omits `If-Match` when the version is falsy, which drops
+      // upstream back to last-writer-wins — issue #128's silent overwrite, with
+      // no fence and no 412. It would also slip the client's own guard, since
+      // `current.version !== action.version` is false when both are null.
+      //
+      // Defense in depth, and on a healthy store redundant: upstream's column
+      // is nullable (`version INT DEFAULT 1`), but this repo's bootstrap adds
+      // `NOT NULL` + `CHECK (version > 0)` after creating `memories`, and every
+      // upstream insert hardcodes `Version: 1`. Verified against a real
+      // bootstrap, the check also rejects a hand-run `SET version = 0`, so an
+      // unfenceable row needs a partial migration or a dropped constraint rather
+      // than ordinary out-of-band SQL. The guard earns its keep
+      // anyway because this task reads `version` with direct SQL
+      // (`listActiveMemories`), where node-pg surfaces a NULL as `null` rather
+      // than erroring — so unlike a REST read, nothing upstream fails loud
+      // first and the bad value would degrade silently into the branch above.
+      if (![survivor, ...absorbed].every((m) => Number.isInteger(m.version) && m.version >= 1)) {
+        review.push(reviewItem("UNFENCEABLE_MERGE", ids, byId, action.rationale));
+        continue;
+      }
       auto.push({
         type: "MERGE",
         id: survivor.id,
@@ -495,7 +516,12 @@ async function executeMerge(action, deps, metrics) {
         ...client,
         put: async (...args) => {
           const result = await client.put(...args);
-          confirmedMutations += 1;
+          // A null result means the `If-Match` fence rejected the rewrite
+          // (patch 0009, issue #128) — nothing was written, so it must not
+          // count as a confirmed mutation. Counting it would make the cap
+          // accounting and the reported mutation total claim a write the
+          // server refused.
+          if (result) confirmedMutations += 1;
           return result;
         },
       },
@@ -873,6 +899,11 @@ function restAdapter(baseUrl, tenantId, fetchImpl = fetch) {
       signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
     });
     if (method === "GET" && response.status === 404) return null;
+    // 412 = the `If-Match` precondition lost the race, so the write was NOT
+    // applied (patch 0009, issue #128). That is an expected outcome of a fenced
+    // write, not a transport failure: return null so the caller skips this
+    // action instead of aborting the run mid-apply.
+    if (version && response.status === 412) return null;
     if (!response.ok) throw new Error(`${method} ${path} -> HTTP ${response.status}`);
     return response.json();
   };

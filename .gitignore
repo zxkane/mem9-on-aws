@@ -13,6 +13,7 @@ CLAUDE.local.md
 node_modules/
 .sst/
 dist/
+coverage/
 *.tsbuildinfo
 # SST auto-generates these link-type files on `sst deploy`/`sst dev`.
 sst-env.d.ts

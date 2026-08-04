@@ -5,6 +5,36 @@ injected deps). There is no CI E2E: the mem9 REST API is VPC-internal and the
 CI runner pool is outside that VPC, so live verification is an operator dry-run
 from a VPC-internal host (TC-MEMCLEAN-060 below).
 
+**On the `If-Match` fence (TC-MEMCLEAN-042/043/044/047):** the interleaving cannot be
+made deterministic against a live server from CI — the runner cannot reach the
+VPC-internal REST API, and the preview consolidation E2E is report-only, so it
+issues no writes at all. The fence itself is therefore asserted at both layers
+it exists in, and both run in CI:
+
+- **Server-side**, by the Go tests that patch 0009 ships
+  (`internal/service/memory_ifmatch_test.go`,
+  `internal/handler/memory_ifmatch_test.go`). These run inside the
+  `docker/mnemo-server` build, whose gating `go test ./internal/service/
+  ./internal/handler/ …` fails the image build. They pin: a stale `If-Match`
+  never reaches the repository write, the matching version is passed through as
+  the `UPDATE` predicate, losing the predicate race reports 412 rather than
+  404, a rejected write costs no embedding call, an accepted one still
+  re-embeds, and a request with no `If-Match` stays last-writer-wins.
+- **Client-side**, at both layers the callers have. TC-MEMCLEAN-042/043/044/047 fake the
+  HTTP layer, so they cover `restClient`'s 412→null translation *and*
+  `applyMergeDecision`'s reaction. The consolidation fake is one layer higher (it
+  replaces the `putMemory` dep), so TC-CONSOL-038/039 cover the reaction only —
+  TC-CONSOL-049 covers the real `restAdapter` translation separately, through
+  `createProductionDeps`. That split matters: the adapter is the half that runs
+  unattended weekly, and without a test on it a regression there would turn the
+  intended "skip and carry on" into an aborted apply.
+
+A fence also needs a usable version to send, so its *inputs* are pinned
+separately from its behavior — TC-MEMCLEAN-048 on the replay path and
+TC-MEMCLEAN-051 on the fresh-scan path, plus TC-CONSOL-050 for the scheduled
+task. Those issue no HTTP calls, which is the point: they stop an unfenceable
+version before it reaches the wire.
+
 ## Scan & pagination
 
 - **TC-MEMCLEAN-001** — pages through `limit=200` windows and terminates on the
@@ -73,6 +103,63 @@ from a VPC-internal host (TC-MEMCLEAN-060 below).
 - **TC-MEMCLEAN-041** — mutex: a second concurrent `--apply` fails fast on the
   existing lockfile; a stale (> 2 h) lock is broken with a warning; the lock
   path is stage-scoped and honors `--lock-file`.
+- **TC-MEMCLEAN-042** — MERGE survivor rewrite fence (issue #128): the guard
+  GET returns the expected version, then an ingest write lands **before** the
+  rewrite. The interleaving is asserted explicitly — the test mutates the store
+  inside the PUT interception, so the client's own re-read has already passed
+  and only the server-side `If-Match` fence can catch it. The concurrent
+  content survives, `skippedLww` increments, the absorbed ids stay active, and
+  zero batch-delete calls are issued. The fake server rejects the stale-version
+  rewrite with **412** (patch 0009); a fake that accepted it would make this
+  case vacuous.
+- **TC-MEMCLEAN-043** — a 412 on the survivor rewrite is a *skip*, not a run
+  failure: the fenced merge consumes no cap and logs the survivor id, while an
+  unrelated DELETE in the same run still applies and the run exits 0.
+- **TC-MEMCLEAN-044** — a successful merge sends `If-Match: <observed version>`
+  and carries `content` in the body. A content-bearing PUT is the *precondition*
+  for upstream re-embedding (issue #128 requirement (d) — the rewrite never
+  strands a stale embedding); this test can only assert the request shape, since
+  the fake store has no embedding column. The re-embed itself is pinned
+  server-side by the patch's
+  `TestUpdateAcceptedByIfMatchStillReEmbedsTheNewContent`, which asserts the
+  stored embedding actually changed.
+- **TC-MEMCLEAN-047** — only 412 is treated as a fence: a 5xx on the survivor
+  rewrite still propagates and aborts the run before the delete leg, so
+  narrowing 412 to "skip" cannot widen into swallowing transport faults.
+- **TC-MEMCLEAN-048** — a replayed MERGE decision whose survivor `version` is
+  absent, non-integer, or `< 1` is refused at load with zero API calls, and so
+  is one whose `absorbs` entry lacks a version. The malformed version never
+  reaches the wire: `needsPut` compares it with `===` against a real integer, so
+  it silently degrades the merge into the "survivor changed externally" branch.
+  Measured before the guard, that input reported `skippedLww: 1` — a
+  misattributed LWW skip, indistinguishable in the summary from "a concurrent
+  write protected me", so a replay of a hand-edited file reads as a success
+  while applying nothing. That is exactly the failure `validateDecisions` exists
+  to convert into a loud load-time error.
+- **TC-MEMCLEAN-051** — the same unfenceable version on the **fresh-scan** path,
+  which `validateDecisions` does not cover because it only guards a loaded
+  decision file. `planDecisions` builds its own anchors from the store, so a
+  `null`/`0`/non-integer `version` is unguarded here too. Belt-and-braces:
+  upstream's column is nullable (`INT DEFAULT 1`), but this repo's bootstrap
+  hardens it to `NOT NULL` + `CHECK (version > 0)` after creating `memories` —
+  verified against a real bootstrap, the check rejects even a hand-run
+  `UPDATE ... SET version = 0` — so such a row implies a partial migration or a
+  dropped constraint. Asserted anyway because the blast radius dwarfs the check. Such a
+  memory degrades to `SKIP`
+  ("version cannot be fenced") instead of emitting a live decision: `put()` does
+  `String(version)`, so it would otherwise send `If-Match: "null"` and take a
+  400 that aborts the run mid-apply, after earlier decisions may already have
+  deleted rows. SKIP rather than throw, so one bad row cannot abort an
+  otherwise-valid audit. Asserted on the survivor, on an absorbed side (either
+  disqualifies the whole MERGE, since both legs are version-anchored), and on a
+  bare DELETE; a well-formed version still merges. `KEEP` is exempt because it
+  mutates nothing — `destructiveCost` is 0 and it is never dispatched.
+  A third case pins the interaction with TC-MEMCLEAN-021: a disqualified merge
+  must be rejected *before* its absorbed ids are folded into the survivor's
+  decision, so the guard lives in the `emitting` filter next to the other
+  non-emitting conditions. Rejecting it later still skipped the merge safely,
+  but the absorbed id then received no decision row at all — the audit log
+  silently lost a scanned id while reporting success.
 
 ## Secrets
 

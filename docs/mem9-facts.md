@@ -106,7 +106,12 @@ Verified from `server/internal/config/config.go` + `server/internal/repository/p
 
 `PUT /v1alpha2/mem9s/memories/{id}` is not a partial update at the storage layer:
 
-- `service/memory.go` re-embeds **only** when the request changes `content`.
+- `service/memory.go` re-embeds **only** when the request changes `content`, and
+  the full guard is `contentChanged && s.autoModel == "" && s.embedder != nil`.
+  We rely on `autoModel` being empty: `MNEMO_EMBED_AUTO_MODEL` is never set in
+  `infra/ecs.ts`, so the condition holds in production. Setting it would silently
+  stop re-embedding on content change, which is what makes the content-bearing
+  MERGE rewrite safe — treat it as load-bearing config, not a tuning knob.
 - `repository/postgres/memory.go` `UpdateOptimistic` writes `embedding = $4`
   **unconditionally**, from the in-memory row.
 - `scanMemory`/`scanMemoryRows` on the **postgres** path scan the embedding column
@@ -205,9 +210,10 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
   `0001-recall-min-confidence-tunables-and-zero-result-fallback`,
   `0002-ingest-durable-only-extraction-filter`, `0003-glm-request-bounds`,
   `0004-durable-ingest-queue`, `0005-atomic-ingest-apply`,
-  `0006-durable-ingest-telemetry`, `0007-postgres-session-delete`, then
-  `0008-ingest-prescreen-shadow`. The Docker build applies the complete stack
-  to the pinned upstream commit in lexical order.
+  `0006-durable-ingest-telemetry`, `0007-postgres-session-delete`,
+  `0008-ingest-prescreen-shadow`, then `0009-if-match-precondition-fence`. The
+  Docker build applies the complete stack to the pinned upstream commit in
+  lexical order.
 - Upstream asynchronous `messages[]` ingest returns 202 before starting an
   untracked goroutine. Downstream patch
   `docker/mnemo-server/patches/0004-durable-ingest-queue.patch` adds a
@@ -281,6 +287,83 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
   ADD IDs derive from the job, plan revision, and action index; UPDATE/DELETE use
   monotonic memory-version predicates. Recovery reuses a valid persisted plan or
   creates a bounded replacement revision after an optimistic conflict.
+
+### `If-Match` is a FENCE, not a warning (downstream patch 0009, issue #128)
+
+**Upstream at the pinned commit:** `PUT /v1alpha2/mem9s/memories/{id}` read
+`If-Match` as an HTTP **header** (`r.Header.Get("If-Match")`, not a body field),
+discarded the `strconv.Atoi` error, and on a version mismatch only logged
+`"version conflict, applying LWW"` before applying the write anyway.
+`service/memory.go Update` then called `UpdateOptimistic(ctx, current, 0)` —
+hardcoding `0`, which **disabled** the `AND version = $N` predicate the
+postgres/tidb/db9 repositories already implemented.
+
+**Downstream patch `docker/mnemo-server/patches/0009-if-match-precondition-fence.patch`:**
+
+- `ifMatch` is threaded into `UpdateOptimistic` as the expected version, so the
+  predicate rides in the **same** `UPDATE ... WHERE id = $ AND version = $N`
+  statement that writes the content. Being one statement, it cannot silently
+  overwrite: either the content lands or the caller gets 412.
+  Precisely: `Update` is pre-read → cheap version compare → embed → predicated
+  `UPDATE`. There are two checks, and the window between them is real — that is
+  why the `ErrNotFound`→412 remap below has to exist. The pre-read compare is
+  only an optimisation that saves an embedding call; the *predicate* is what
+  makes the write safe. So the race is closed with respect to silent overwrite,
+  which is the guarantee issue #128 needed, and it is closed rather than
+  narrowed because no interleaving can make the `UPDATE` clobber a newer row.
+- A mismatch detected on the pre-read returns the new sentinel
+  `domain.ErrPreconditionFailed` → HTTP **412**, before the embedder runs, so a
+  rejected write costs no embedding call. It is deliberately distinct from
+  `ErrConflict` (→ 409, "the LLM merge replaced LWW") so a fenced caller can
+  tell "not applied" from "applied differently".
+- Losing the predicate race surfaces from the repository as `ErrNotFound` (zero
+  affected rows). With `ifMatch > 0` that is reported as 412, never as 404 — the
+  row existed at read time.
+- An unparsable or non-positive `If-Match` is now a **400**, not a silent `0`.
+  Discarding the parse error would disable the fence at exactly the moment a
+  client believed it was fenced.
+- **Blast radius:** requests that send no `If-Match` keep last-writer-wins
+  semantics (`ifMatch = 0` → no predicate), pinned by
+  `TestUpdateWithoutIfMatchRemainsLastWriterWins`. There are four
+  `MemoryService.Update` callers post-patch, and they split two ways:
+  - The two ingest-internal ones (`handler/memory.go:727` metadata merge in
+    `ingestMessages`, `:775` tag merge in `createSmartContentWithRouting`) pass a
+    literal `0`, so smart-ingest is unaffected. The MCP surface is this repo's
+    own proxy Lambda (`infra/gateway/`), not an upstream Go package — it issues
+    only POST/GET and never sends `If-Match`, so it is unaffected too.
+  - Both PUT handler branches pass the parsed `ifMatch` and are therefore fenced
+    identically: the normal one (`:1430`) and the **Space Chain** branch
+    (`:1379`, `auth.IsChain()`, routed through `target.svc.memory`). A chain
+    client sending `If-Match` now gets 412 on a mismatch and 400 on a malformed
+    header. That is intended — the whole point is that the header means what it
+    says for every caller — but note the chain routing itself is not covered by
+    the patch's tests, which exercise the service layer and the non-chain handler.
+- The rewrite stays a content-bearing REST PUT, so upstream still re-embeds and
+  the survivor's embedding matches its new content. This is why the fix went
+  upstream instead of into a direct-SQL rewrite — see the content-free-`PUT`
+  section above for the stale-embedding trap that alternative would have hit,
+  and it needs no security-group change for the embedder port.
+- Callers: `scripts/memory-cleanup.mjs` (CLI) and
+  `scripts/memory-consolidation.mjs` (scheduled task) share
+  `applyMergeDecision`; both treat 412 as "skip this merge, increment
+  `skippedLww`, leave the absorbed ids active" and let any other non-2xx abort.
+  The 412→null translation lives in each script's own REST adapter, so both are
+  tested: TC-MEMCLEAN-042/043 through a fake HTTP layer, TC-CONSOL-049 through
+  `createProductionDeps`.
+- **Known divergence from upstream's own e2e suite:** upstream
+  `e2e/api-smoke-test-round2.sh` test 6 asserts that a stale `If-Match` returns
+  **200** ("LWW semantics"), and `e2e/AGENTS.md` documents that contract. Against
+  a 0009-patched server it returns 412. The script is not applied, copied into
+  the image, or in the Dockerfile's gating test set, so nothing here runs it —
+  left unpatched deliberately, since a hunk against a file we never execute would
+  only add drift risk at the next `MEM9_REF` bump. Expect that test to fail if
+  the upstream suite is ever pointed at our image.
+- Upstream's dashboard also sends the header
+  (`dashboard/app/src/api/provider-http.ts:325`,
+  `if (version !== undefined) headers["If-Match"] = String(version)`), so it
+  would see 412s against a patched server. This repo does not build or deploy
+  the dashboard, so nothing changes today — noted for whoever bumps `MEM9_REF`
+  or ever serves that dashboard from this image.
 
 ### LLM key is read ONCE at startup, immutable — decisive for the sidecar (verified 2026-07-12)
 Probed at the pinned commit (`server/internal/config/config.go` + `llm/client.go`):

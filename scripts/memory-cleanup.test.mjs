@@ -38,7 +38,8 @@ function memory(id, content, version = 1) {
  * Records every request; mutates the store like the probed upstream:
  *  - GET  /memories?limit&offset — pages active memories
  *  - GET  /memories/{id}         — single read (re-read guard)
- *  - PUT  /memories/{id}         — LWW update, bumps version
+ *  - PUT  /memories/{id}         — update, bumps version; a mismatched
+ *                                  `If-Match` is 412 and writes nothing
  *  - POST /memories/batch-delete — soft delete, skips already-deleted
  */
 function fakeServer(initial) {
@@ -47,7 +48,13 @@ function fakeServer(initial) {
   const fetchImpl = vi.fn(async (url, opts = {}) => {
     const method = (opts.method || "GET").toUpperCase();
     const u = new URL(url);
-    calls.push({ method, path: u.pathname, search: u.search, body: opts.body });
+    calls.push({
+      method,
+      path: u.pathname,
+      search: u.search,
+      body: opts.body,
+      ifMatch: opts.headers?.["If-Match"],
+    });
     const json = (status, body) =>
       new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json" } });
 
@@ -76,7 +83,13 @@ function fakeServer(initial) {
       const m = store.get(single[1]);
       if (!m) return json(404, { error: "not found" });
       const body = JSON.parse(opts.body);
-      // LWW: version mismatch is only a server-side warning upstream.
+      // `If-Match` FENCES the write (patch 0009, issue #128): a mismatch is 412
+      // and the write is NOT applied. Accepting a stale version here would make
+      // every fence test vacuous.
+      const ifMatch = Number(opts.headers?.["If-Match"]);
+      if (ifMatch && ifMatch !== m.version) {
+        return json(412, { error: "precondition failed: version changed" });
+      }
       if (body.content) m.content = body.content;
       m.version += 1;
       return json(200, m);
@@ -510,6 +523,183 @@ describe("concurrency guards", () => {
     expect(result.capUsed).toBe(1); // only the PUT
   });
 
+  it("TC-MEMCLEAN-042 ingest write landing between the survivor's read and rewrite is fenced out", async () => {
+    const dir = tempDir();
+    const decisions = {
+      stage: "test",
+      generatedAt: "2026-07-31T00:00:00Z",
+      decisions: [{
+        id: "surv-1", verdict: "MERGE", reason: "frags",
+        version: 1, contentHash: contentHash("frag a"),
+        mergedContent: "frag a+b", mergedContentHash: contentHash("frag a+b"),
+        absorbs: [{ id: "abs-1", version: 1, contentHash: contentHash("frag b") }],
+      }],
+    };
+    const decisionsFile = join(dir, "decisions.json");
+    writeFileSync(decisionsFile, JSON.stringify(decisions));
+
+    const server = fakeServer([memory("surv-1", "frag a"), memory("abs-1", "frag b")]);
+    // Interleave explicitly: the survivor's guard GET sees the expected version,
+    // then an ingest write lands BEFORE the rewrite. Only the server-side fence
+    // can catch this — the client's own re-read already passed.
+    const deps = baseDeps(server, fakeLlm([]), dir);
+    const realFetch = server.fetchImpl;
+    deps.fetchImpl = vi.fn(async (url, opts = {}) => {
+      const method = (opts.method || "GET").toUpperCase();
+      if (method === "PUT" && /memories\/surv-1$/.test(String(url))) {
+        const s = server.store.get("surv-1");
+        s.content = "ingested concurrently";
+        s.version += 1;
+      }
+      return realFetch(url, opts);
+    });
+    const result = await runCleanup(baseOpts({ apply: true, decisionsFile }), deps);
+
+    // The concurrent write survives; the merged content never lands.
+    expect(server.store.get("surv-1").content).toBe("ingested concurrently");
+    expect(result.skippedLww).toBeGreaterThanOrEqual(1);
+    // Absorbed ids are NOT deleted — the merge's survivor never got the content.
+    expect(server.store.get("abs-1").state).toBe("active");
+    expect(server.calls.filter((c) => c.method === "POST")).toHaveLength(0);
+    // A fenced merge is a skip, not a run failure.
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("TC-MEMCLEAN-043 a 412 on the survivor rewrite is a skip, and other decisions still apply", async () => {
+    const dir = tempDir();
+    const decisions = {
+      stage: "test",
+      generatedAt: "2026-07-31T00:00:00Z",
+      decisions: [
+        {
+          id: "surv-1", verdict: "MERGE", reason: "frags",
+          version: 1, contentHash: contentHash("frag a"),
+          mergedContent: "frag a+b", mergedContentHash: contentHash("frag a+b"),
+          absorbs: [{ id: "abs-1", version: 1, contentHash: contentHash("frag b") }],
+        },
+        { id: "junk-1", verdict: "DELETE", reason: "noise", version: 1, contentHash: contentHash("noise") },
+      ],
+    };
+    writeFileSync(join(dir, "decisions.json"), JSON.stringify(decisions));
+
+    const server = fakeServer([
+      memory("surv-1", "frag a"),
+      memory("abs-1", "frag b"),
+      memory("junk-1", "noise"),
+    ]);
+    const deps = baseDeps(server, fakeLlm([]), dir);
+    const realFetch = server.fetchImpl;
+    deps.fetchImpl = vi.fn(async (url, opts = {}) => {
+      const method = (opts.method || "GET").toUpperCase();
+      if (method === "PUT" && /memories\/surv-1$/.test(String(url))) {
+        server.store.get("surv-1").version += 1; // ingest bumps the version only
+      }
+      return realFetch(url, opts);
+    });
+    const result = await runCleanup(
+      baseOpts({ apply: true, decisionsFile: join(dir, "decisions.json") }),
+      deps,
+    );
+
+    // The fenced merge did not consume cap and did not abort the run. Charging
+    // it would shrink the blast-radius budget for the rest of the run, and a
+    // mostly-fenced run could trip the exit-4 cap abort having applied nothing:
+    // only the unrelated DELETE below may be charged.
+    expect(result.capUsed).toBe(1);
+    expect(result.skippedLww).toBeGreaterThanOrEqual(1);
+    expect(server.store.get("abs-1").state).toBe("active");
+    // ...while an unrelated DELETE in the same run still applied.
+    expect(server.store.get("junk-1").state).toBe("deleted");
+    expect(result.exitCode).toBe(0);
+    expect(deps.log).toHaveBeenCalledWith(expect.stringMatching(/surv-1.*concurrent|surv-1.*fenc|surv-1.*412/i));
+  });
+
+  it("TC-MEMCLEAN-044 a successful merge sends If-Match and leaves the survivor at the merged content", async () => {
+    const dir = tempDir();
+    const decisions = {
+      stage: "test",
+      generatedAt: "2026-07-31T00:00:00Z",
+      decisions: [{
+        id: "surv-1", verdict: "MERGE", reason: "frags",
+        version: 3, contentHash: contentHash("frag a"),
+        mergedContent: "frag a+b", mergedContentHash: contentHash("frag a+b"),
+        absorbs: [{ id: "abs-1", version: 1, contentHash: contentHash("frag b") }],
+      }],
+    };
+    writeFileSync(join(dir, "decisions.json"), JSON.stringify(decisions));
+    const server = fakeServer([memory("surv-1", "frag a", 3), memory("abs-1", "frag b")]);
+    const result = await runCleanup(
+      baseOpts({ apply: true, decisionsFile: join(dir, "decisions.json") }),
+      baseDeps(server, fakeLlm([]), dir),
+    );
+    const put = server.calls.find((c) => c.method === "PUT");
+    // The rewrite must be predicated on the observed version — without the
+    // header the server cannot fence it, and the write is unprotected.
+    expect(put.ifMatch).toBe("3");
+    // A content-bearing PUT is what makes upstream re-embed; the survivor's
+    // embedding therefore matches its new content (issue #128 requirement d).
+    expect(JSON.parse(put.body).content).toBe("frag a+b");
+    expect(server.store.get("surv-1").content).toBe("frag a+b");
+    expect(server.store.get("abs-1").state).toBe("deleted");
+    expect(result.skippedLww).toBe(0);
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("TC-MEMCLEAN-047 only 412 is a skip — any other write failure still aborts the run", async () => {
+    const dir = tempDir();
+    const decisions = {
+      stage: "test",
+      generatedAt: "2026-07-31T00:00:00Z",
+      decisions: [{
+        id: "surv-1", verdict: "MERGE", reason: "frags",
+        version: 1, contentHash: contentHash("frag a"),
+        mergedContent: "frag a+b", mergedContentHash: contentHash("frag a+b"),
+        absorbs: [{ id: "abs-1", version: 1, contentHash: contentHash("frag b") }],
+      }],
+    };
+    writeFileSync(join(dir, "decisions.json"), JSON.stringify(decisions));
+    const server = fakeServer([memory("surv-1", "frag a"), memory("abs-1", "frag b")]);
+    const deps = baseDeps(server, fakeLlm([]), dir);
+    const realFetch = server.fetchImpl;
+    deps.fetchImpl = vi.fn(async (url, opts = {}) => {
+      if ((opts.method || "GET").toUpperCase() === "PUT") {
+        return new Response(JSON.stringify({ error: "boom" }), { status: 500 });
+      }
+      return realFetch(url, opts);
+    });
+    // Narrowing 412 to "skip" must not widen into swallowing real failures: a
+    // 5xx on the survivor rewrite is a transport fault and must still abort the
+    // run (main() maps the rejection to exit 1), never be mistaken for a fence.
+    await expect(
+      runCleanup(baseOpts({ apply: true, decisionsFile: join(dir, "decisions.json") }), deps),
+    ).rejects.toThrow(/HTTP 500/);
+    // Aborted before the delete leg: the absorbed fragment is untouched.
+    expect(server.store.get("abs-1").state).toBe("active");
+    expect(server.calls.filter((c) => c.method === "POST")).toHaveLength(0);
+
+    // And 412 is opt-in per call site, not global: only a fenced write carries a
+    // precondition, so a 412 on the unversioned batch-delete has no race to have
+    // lost and must still abort. If it were swallowed to null, `flushDeletes`
+    // would then read `.deleted` off null and throw an unrelated TypeError.
+    const dir2 = tempDir();
+    writeFileSync(join(dir2, "decisions.json"), JSON.stringify({
+      stage: "test",
+      decisions: [{ id: "junk-1", verdict: "DELETE", reason: "noise", version: 1, contentHash: contentHash("noise") }],
+    }));
+    const s2 = fakeServer([memory("junk-1", "noise")]);
+    const d2 = baseDeps(s2, fakeLlm([]), dir2);
+    const realFetch2 = s2.fetchImpl;
+    d2.fetchImpl = vi.fn(async (url, opts = {}) => {
+      if (String(url).endsWith("/batch-delete")) {
+        return new Response(JSON.stringify({ error: "precondition failed" }), { status: 412 });
+      }
+      return realFetch2(url, opts);
+    });
+    await expect(
+      runCleanup(baseOpts({ apply: true, decisionsFile: join(dir2, "decisions.json") }), d2),
+    ).rejects.toThrow(/HTTP 412/);
+  });
+
   it("TC-MEMCLEAN-041 mutex blocks a second apply; stale lock broken only if holder is dead", async () => {
     const dir = tempDir();
     const lockFile = join(dir, "stage.lock");
@@ -669,6 +859,78 @@ describe("verdict parsing units", () => {
     expect(cyc.every((d) => d.verdict === "SKIP")).toBe(true);
   });
 
+  it("planDecisions SKIPs a memory whose version cannot be fenced (TC-MEMCLEAN-051)", () => {
+    // `validateDecisions` only guards the REPLAY path. A fresh scan builds its
+    // own anchors from the store, and upstream's column is `version INT
+    // DEFAULT 1` — nullable — so an unfenceable version is a data condition
+    // here too. `anchor()` copies it verbatim and `put()` does
+    // `String(version)`, so a null would go on the wire as `If-Match: "null"`,
+    // which patch 0009 rejects as a 400 that aborts the run mid-apply, after
+    // earlier decisions may already have deleted rows. SKIP instead: one bad
+    // row must not abort an otherwise-valid audit.
+    for (const version of [null, undefined, 0, "1"]) {
+      const survivor = { ...memory("s", "survivor"), version };
+      const out = planDecisions([survivor, memory("a", "absorbed")], [
+        { id: "s", verdict: "MERGE", reason: "r", merge_into: "s", absorbs: ["a"], merged_content: "x" },
+        { id: "a", verdict: "MERGE", reason: "r", merge_into: "s" },
+      ]);
+      const byId = Object.fromEntries(out.map((d) => [d.id, d]));
+      expect(byId["s"].verdict, `survivor version ${JSON.stringify(version)}`).toBe("SKIP");
+      expect(byId["s"].reason).toMatch(/cannot be fenced/i);
+      expect(out.some((d) => d.verdict === "MERGE")).toBe(false);
+    }
+
+    // An unfenceable ABSORBED side must disqualify the merge too: its delete
+    // leg is guarded by a version re-read the same way.
+    const absorbedNull = { ...memory("a", "absorbed"), version: null };
+    const out = planDecisions([memory("s", "survivor"), absorbedNull], [
+      { id: "s", verdict: "MERGE", reason: "r", merge_into: "s", absorbs: ["a"], merged_content: "x" },
+      { id: "a", verdict: "MERGE", reason: "r", merge_into: "s" },
+    ]);
+    expect(out.find((d) => d.id === "s").verdict).toBe("SKIP");
+    expect(out.some((d) => d.verdict === "MERGE")).toBe(false);
+
+    // Positive control: a well-formed version still merges, so the guard is not
+    // simply refusing everything.
+    const good = planDecisions([memory("s", "survivor"), memory("a", "absorbed")], [
+      { id: "s", verdict: "MERGE", reason: "r", merge_into: "s", absorbs: ["a"], merged_content: "x" },
+      { id: "a", verdict: "MERGE", reason: "r", merge_into: "s" },
+    ]);
+    expect(good.find((d) => d.id === "s").verdict).toBe("MERGE");
+  });
+
+  it("planDecisions still logs a decision for every scanned id when a merge is unfenceable (TC-MEMCLEAN-051)", () => {
+    // Audit completeness (TC-MEMCLEAN-021) is not suspended by the fence guard.
+    // A rejected merge must be non-emitting BEFORE its absorbed ids are folded
+    // away, exactly like the skip/verdict/missing-content rejections above it —
+    // otherwise the absorbed id is neither merged nor reported and the decision
+    // log silently loses a row the operator scanned.
+    for (const unfenceable of ["s", "a"]) {
+      const mems = [memory("s", "survivor"), memory("a", "absorbed")].map((m) =>
+        m.id === unfenceable ? { ...m, version: null } : m,
+      );
+      const out = planDecisions(mems, [
+        { id: "s", verdict: "MERGE", reason: "r", merge_into: "s", absorbs: ["a"], merged_content: "x" },
+        { id: "a", verdict: "MERGE", reason: "r", merge_into: "s" },
+      ]);
+      expect(
+        out.map((d) => d.id).sort(),
+        `unfenceable ${unfenceable}: every scanned id needs a decision row`,
+      ).toEqual(["a", "s"]);
+      expect(out.some((d) => d.verdict === "MERGE")).toBe(false);
+    }
+  });
+
+  it("planDecisions SKIPs a non-MERGE verdict whose version cannot be fenced (TC-MEMCLEAN-051)", () => {
+    // DELETE's delete leg and every other mutation anchor on the same version.
+    // A null-versioned DELETE would reach `flushDeletes` unfenced.
+    const out = planDecisions([{ ...memory("d", "noise"), version: null }], [
+      { id: "d", verdict: "DELETE", reason: "noise" },
+    ]);
+    expect(out[0].verdict).toBe("SKIP");
+    expect(out[0].reason).toMatch(/cannot be fenced/i);
+  });
+
   it("parseArgs validates flags, values, and the positive-cap guard", () => {
     expect(parseArgs(["--stage", "prod"])).toMatchObject({ stage: "prod", apply: false, cap: 50 });
     expect(
@@ -700,6 +962,53 @@ describe("verdict parsing units", () => {
         baseDeps(server, fakeLlm([]), dir),
       ),
     ).rejects.toThrow(/stage/);
+  });
+
+  it("TC-MEMCLEAN-048 refuses a MERGE decision with no usable version anchor", async () => {
+    const dir = tempDir();
+    const merge = (overrides) => ({
+      stage: "test",
+      decisions: [{
+        id: "surv-1", verdict: "MERGE", reason: "frags",
+        version: 1, contentHash: contentHash("frag a"),
+        mergedContent: "frag a+b", mergedContentHash: contentHash("frag a+b"),
+        absorbs: [{ id: "abs-1", version: 1, contentHash: contentHash("frag b") }],
+        ...overrides,
+      }],
+    });
+    const replay = async (doc) => {
+      const decisionsFile = join(dir, "decisions.json");
+      writeFileSync(decisionsFile, JSON.stringify(doc));
+      const server = fakeServer([memory("surv-1", "frag a"), memory("abs-1", "frag b")]);
+      const promise = runCleanup(
+        baseOpts({ apply: true, decisionsFile }),
+        baseDeps(server, fakeLlm([]), dir),
+      );
+      return { promise, server };
+    };
+
+    // The survivor's version is the `If-Match` value. Post-patch-0009 an absent
+    // one would be sent as the literal "undefined" and earn an opaque 400
+    // mid-apply, after earlier decisions have already deleted rows. Fail at load.
+    for (const bad of [{ version: undefined }, { version: "1" }, { version: 0 }]) {
+      const { promise, server } = await replay(merge(bad));
+      await expect(promise).rejects.toThrow(/entry 0 invalid: MERGE without a version anchor/);
+      expect(server.calls).toHaveLength(0);
+    }
+
+    // An absorbed entry's version is compared against the re-read. An absent one
+    // never matches, so the fragment would be silently dropped from the delete
+    // set as "changed externally" — a misattributed LWW skip, not a real one.
+    const { promise, server } = await replay(
+      merge({ absorbs: [{ id: "abs-1", contentHash: contentHash("frag b") }] }),
+    );
+    await expect(promise).rejects.toThrow(/entry 0 invalid: MERGE with invalid absorbs/);
+    expect(server.calls).toHaveLength(0);
+
+    // The valid anchor still replays.
+    const ok = await replay(merge({}));
+    await expect(ok.promise).resolves.toMatchObject({ exitCode: 0 });
+    expect(ok.server.store.get("surv-1").content).toBe("frag a+b");
   });
 
   it("contentHash is a stable sha256 label", () => {

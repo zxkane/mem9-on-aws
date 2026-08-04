@@ -142,37 +142,94 @@ Every mutation re-reads or atomically predicates current state:
 This preserves the cleanup tool's last-writer-wins guard while closing its
 previous cross-host mutex gap.
 
-### Known limit: the MERGE survivor PUT is advisory, not atomic
+### The MERGE survivor rewrite is fenced (issue #128)
 
-Independent review (Codex, 2026-08-03) flagged this and it is real. The two legs
-of a MERGE have different strength:
+Both legs of a MERGE are now version-predicated, by different mechanisms:
 
-- **Absorbed deletes ARE guarded.** Each id is re-read and dropped from the
-  delete set unless its version AND content hash still match the plan
+- **Absorbed deletes** are guarded client-side. Each id is re-read and dropped
+  from the delete set unless its version AND content hash still match the plan
   (`applyMergeDecision`), so a concurrently-edited absorbed memory is never
-  deleted.
-- **The survivor PUT is NOT fenced.** It sends `If-Match: <version>`, but
-  upstream treats that header as advisory — a mismatch only logs a server-side
-  warning (`docs/mem9-facts.md`). So an ingest write landing between the
-  survivor's GET and its PUT is overwritten by the merged content rather than
-  rejected.
+  deleted. Unchanged by #128.
+- **The survivor rewrite** is fenced server-side. It sends
+  `If-Match: <version>`, and patch 0009 makes that header **authoritative**:
+  the service passes it to `UpdateOptimistic` as the expected version, so the
+  predicate rides in the SAME `UPDATE ... WHERE id = $ AND version = $N` that
+  writes the content. A mismatch returns **412** and writes nothing.
 
-The window is the round trip between those two calls, and the advisory mutex
-(`mem9-cleanup:<stage>`) excludes other cleanup/consolidation runs but NOT live
-ingest. Consequence: at most one memory per merge group can lose a concurrent
-ingest edit; the content is recoverable only from the ingest source, not from the
-store.
+Because the predicate and the write are one statement, no interleaving can make
+the rewrite clobber a newer row: either the merged content lands, or the caller
+gets a 412 and nothing was written. That closes the race rather than narrowing
+it. Previously the header was advisory — a mismatch only logged a server-side
+warning, and an ingest write landing between the survivor's GET and its PUT was
+silently overwritten by the merged content.
 
-This is inherited from the cleanup tool (#102 accepted the same residual risk and
-mandates a low-ingest window), not introduced here — but consolidation runs
-UNATTENDED on a schedule, which removes the operator's ability to choose the
-window. Mitigations in force: the weekly schedule targets the lowest-ingest hour
-(Sunday 03:00 UTC), the auto tier is capped at 20 mutations per run, and
-`skippedLww` is emitted as a metric so a rising count is visible. Closing it
-properly requires either a conditional-update REST surface upstream or moving the
-survivor rewrite to the same direct-SQL, version-predicated path `archiveMemory`
-and `markMemoryStale` already use — tracked as follow-up work, not a blocker for
-the report-only rollout this PR enables.
+To be precise about where the safety comes from, since it is not the pre-read:
+upstream's `Update` does a pre-read, compares the version, embeds, then issues
+the predicated `UPDATE`. A write can still land between the compare and the
+`UPDATE`, and it is the predicate — not the compare — that catches it (see
+`TestUpdateLosingTheVersionPredicateRaceReportsConflict`). The compare only
+saves a wasted embedding call on the common case.
+
+On a 412 both callers (`scripts/memory-cleanup.mjs` from the CLI and
+`scripts/memory-consolidation.mjs` from the scheduled task, which share
+`applyMergeDecision`) abandon the **whole** merge: `skippedLww` increments, the
+absorbed ids are left active, and the run continues. Abandoning both legs is the
+point — absorbing the fragments after a rejected rewrite would delete content
+the survivor never received. A 412 is not a failure; any other non-2xx still
+propagates and aborts the run.
+
+A fence only works if a version is available to send. `restAdapter` omits
+`If-Match` when the version is falsy, so an unfenceable version would send no
+precondition at all and silently fall back to last-writer-wins — and it would
+slip the client-side guard too, because `current.version !== action.version` is
+false when both sides are null.
+
+This guard is **defense in depth, not the only barrier**, and it is worth being
+precise about what is actually reachable. Upstream's column is nullable
+(`version INT DEFAULT 1`), but this repo's bootstrap adds `NOT NULL` +
+`CHECK (version > 0)`, and `schema.sql` `\ir`-includes that migration *after*
+creating `memories`, so the hardening fires on every bootstrap. Every upstream
+insert also hardcodes `Version: 1`. Verified against a real bootstrap: the column
+comes out `NOT NULL DEFAULT 1` with `ck_memories_version`, and the check rejects a
+hand-run `UPDATE ... SET version = 0` as well as a bad INSERT — so an unfenceable
+row implies a partial migration or a dropped constraint, not ordinary
+out-of-band SQL. What
+makes the guard worth keeping is where this task reads from: unlike a REST read —
+where upstream scans `version` into a plain Go `int` and a true NULL fails loud
+(`converting NULL to int is unsupported`) — this task uses direct SQL, and
+node-pg surfaces NULL as `null`. Nothing upstream fails first, so a bad value
+degrades *silently* into the equality branch above. Hence
+`routeActions` disqualifies any MERGE whose survivor or absorbed side lacks a
+positive integer version, routing it to `UNFENCEABLE_MERGE` review instead of
+auto-applying it (TC-CONSOL-050). The SQL-based archive and stale-marking legs
+need no equivalent guard: they carry the version in a `WHERE` clause, so a null
+matches no row and already fails closed into `skippedLww`.
+
+The cleanup tool needs the same guard in two places, because it has two ways to
+obtain a decision. On the replay path `validateDecisions` refuses a loaded file
+whose MERGE lacks a version anchor (TC-MEMCLEAN-048). On the fresh-scan path
+`planDecisions` builds the anchors itself, so it degrades an unfenceable memory
+to `SKIP` (TC-MEMCLEAN-051) — a `SKIP`, not a throw, so one bad row cannot abort
+an otherwise-valid audit. Without it the run would send `If-Match: "null"` and
+take patch 0009's 400 mid-apply, possibly after earlier decisions had already
+deleted rows.
+
+The survivor's embedding stays correct because the rewrite remains a
+content-bearing REST PUT, which is what makes upstream re-embed. A direct-SQL
+rewrite (the alternative considered) would have stranded a stale embedding: on
+postgres, mem9 re-embeds only when a PUT changes content, the repository writes
+`embedding` unconditionally, and the postgres scanner never populates
+`m.Embedding`. Computing the embedding in the consolidation task instead would
+have required reaching the embedder on `:8081` inside the mnemo-server task,
+which the task security group does not permit — so it would have meant a new SG
+ingress rule widening the data-plane surface. This design needs none.
+
+Residual risk, unchanged: the advisory mutex (`mem9-cleanup:<stage>`) excludes
+other cleanup/consolidation runs but NOT live ingest, so a concurrent ingest
+edit still *skips* a merge. That is now a safe, observable outcome rather than
+silent data loss. The weekly schedule still targets the lowest-ingest hour
+(Sunday 03:00 UTC), the auto tier is still capped at 20 mutations per run, and a
+rising `skippedLww` remains the signal to look at.
 
 ## Metrics And Failure Detection
 
