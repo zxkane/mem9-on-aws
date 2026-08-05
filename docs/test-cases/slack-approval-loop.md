@@ -327,6 +327,13 @@ every TC-040..049 case green while every real click would 404.
   `SecureString` is denied by the boundary (no `kms:Encrypt`,
   no `kms:GenerateDataKey`), and `Overwrite: true` destroys the atomic claim that
   is the only reason Slack's 3-second redelivery is safe.
+- **TC-SLACKAPP-047g** — every parameter read goes through `GetParametersCommand`.
+  `ssm:GetParameter` and `ssm:GetParameters` are **distinct** IAM actions and the
+  boundary's action ceiling admits only the plural, so the singular is an
+  `AccessDenied` on the first real click. Asserted on the command **class**, not
+  the response: the two are interchangeable from the caller's side — same
+  parameter in, same value back — so only IAM can tell them apart, and an
+  injected fake answers either shape. Runtime-only otherwise.
 - **TC-SLACKAPP-048** — no secret means no deps, which is what makes the route 404.
 - **TC-SLACKAPP-049** — a secret **without** `STAGE`/`SSM_PREFIX` refuses to build
   rather than half-building. A dep set with an empty `stage` authenticates clicks
@@ -542,6 +549,72 @@ agreed with policy.
 - **TC-SLACKAPP-088** — the Lambda is `nodejs24.x` on `arm64`, and the route is
   on the existing ApiGatewayV2 — no Lambda Function URL, no new API, no new
   certificate.
+
+## The apply task's in-container runtime
+
+Everything above gets a claimed approval as far as `RunTask`. These cover what
+the container itself then does, which is where the hash-only override is either
+made safe or quietly defeated.
+
+- **TC-SLACKAPP-091** — the ids come from the **claim**
+  (`approvals/approved-{hash}`), never from `approvals/offered`. Both are seeded
+  with **different** ids, so reading the wrong record cannot pass: `offered` is
+  overwritten by every run, and reading it would apply the CURRENT run's list
+  under an approval the operator gave for an earlier one. Asserted on which names
+  were read, not only on the resulting file.
+- **TC-SLACKAPP-092** — a claim whose ids do not hash to the requested hash is
+  refused, and no ids file is written. The record's own `hash` field is set to
+  **agree** with the request, so comparing those two strings passes; only
+  re-deriving the hash over the ids makes them the thing the hash vouches for.
+- **TC-SLACKAPP-093** — a claim naming another stage is refused. Same guard as
+  #102's decision-file stage check: a preview approval must never apply to prod.
+- **TC-SLACKAPP-094** — an absent claim is refused, not treated as an empty
+  approval. SSM echoes an unknown name in `InvalidParameters` and simply omits it
+  from `Parameters`, so the value is `undefined` and must not fall through to an
+  empty ids file.
+- **TC-SLACKAPP-095** — a claim with an empty id list is refused. `[]` hashes
+  consistently, so the hash check cannot catch this one.
+- **TC-SLACKAPP-096** — a malformed claim is refused by shape, and the error never
+  quotes the value: this parameter is the one place ids legitimately live, so a
+  stack that echoed it would copy them into the log.
+- **TC-SLACKAPP-097** — the ids file is newline-delimited exactly as `--ids`
+  parses it, round-tripped through the **real** `runCleanup`. `readApprovedIds`
+  splits on `"\n"`, so a JSON array or a comma-joined line parses as one id and
+  silently approves nothing — a shape assertion alone would not catch it.
+- **TC-SLACKAPP-098** — the ids file never contains memory content and no log line
+  quotes an id. The file lands on the task's ephemeral disk and the record it is
+  built from is a plain `String` parameter, so a record that later grew a
+  `snippet` must not have it copied through. The **count** is logged instead.
+- **TC-SLACKAPP-099** — the image ships every module the entrypoints copied into it
+  can import, its lockfile agrees with its `package.json` (`npm ci` refuses to
+  install otherwise, so a stale lock means no image at all), and each entrypoint
+  has a build-time import guard. Every AWS client in these files is imported
+  **lazily**, so a missing one is invisible until that exact path runs — i.e. after
+  an approval has been spent, on a click that cannot be re-made. Asserted over
+  every specifier the file can name rather than the ones a given argv reaches: the
+  two errors are not symmetric.
+- **TC-SLACKAPP-100** — in the container the database configuration comes from the
+  environment, with **no** SSM or Secrets Manager read. The task role holds
+  `ssm:GetParameters` only under `approvals/*`, so the operator CLI's `db/*`
+  discovery is an `AccessDenied` inside the task; ECS resolves the secret through
+  the execution role instead. Asserted on the connection options, because a path
+  that read the env and handed `pg` a partly-undefined config still constructs.
+- **TC-SLACKAPP-101** — the operator CLI still resolves the database through SSM
+  and Secrets Manager. Both paths must work from one function: a container-only
+  rewrite would break the #102 runbook.
+- **TC-SLACKAPP-102** — the ids are materialized at the **exact** `--ids` path the
+  task definition passes. That path is a contract spanning two files; a file
+  written elsewhere leaves `readApprovedIds` reading a missing or stale one.
+- **TC-SLACKAPP-103** — an approval hash with no `--ids` is refused. This is the
+  loop's worst failure mode rather than a degraded one: `readApprovedIds` returns
+  null for an absent `--ids`, null means "no filter", so the run would delete every
+  `DELETE` verdict it found instead of the approved subset and exit 0 reporting
+  success.
+- **TC-SLACKAPP-104** — a mismatched claim aborts **before** the database is opened
+  and before the advisory lock is taken. Ordering, not just the error: the
+  materialization is the cheapest guard, and a tampered claim failing later would
+  hold the shared mutex for the length of its own failure and could block the
+  weekly consolidation.
 
 ## Logging and privacy
 

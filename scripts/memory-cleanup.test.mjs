@@ -12,7 +12,9 @@ import {
   buildCompleteChat,
   buildOfferedRecord,
   contentHash,
+  createCleanupDeps,
   inactiveMemoryAdapter,
+  materializeApprovedIds,
   parseArgs,
   consensusDecisions,
   parseVerdicts,
@@ -3647,5 +3649,551 @@ describe("the offered approval record (#123)", () => {
     });
     expect(JSON.stringify(ok).length).toBeLessThanOrEqual(4096);
     expect(ok.ids).toHaveLength(40);
+  });
+});
+
+describe("materializing the approved ids in the apply task (#123)", () => {
+  const OFFERED = "/mem9-on-aws/prod/approvals/offered";
+  const claimName = (hash) => `/mem9-on-aws/prod/approvals/approved-${hash}`;
+
+  /**
+   * Fake SSM whose `send` answers `GetParametersCommand` from a name→value map.
+   *
+   * Keyed on the command's `input.Names` rather than on the class, so a
+   * production switch to `GetParameterCommand` (singular) still reads here —
+   * that distinction is IAM's, and TC-SLACKAPP-047g pins it on the Lambda side.
+   * What this fake exists to model is the shape SSM actually returns: an absent
+   * name is simply MISSING from `Parameters` and echoed in `InvalidParameters`,
+   * never an empty-valued entry.
+   */
+  function fakeSsm(values) {
+    const reads = [];
+    return {
+      reads,
+      send: vi.fn(async (command) => {
+        const names = command?.input?.Names ?? [];
+        reads.push(...names);
+        const found = names.filter((n) => n in values);
+        return {
+          Parameters: found.map((n) => ({ Name: n, Value: values[n] })),
+          InvalidParameters: names.filter((n) => !(n in values)),
+        };
+      }),
+    };
+  }
+
+  const offered = (ids, extra = {}) =>
+    JSON.stringify({
+      stage: "prod",
+      hash: contentHash(ids.join("\n")),
+      ids,
+      generatedAt: "2026-08-05T00:00:00.000Z",
+      ...extra,
+    });
+
+  it("TC-SLACKAPP-091 the ids come from the CLAIM named by the hash, not from the offered record", async () => {
+    // The claim is what the operator's click actually approved. `offered` is
+    // overwritten by every run, so a task that read `offered` would delete the
+    // list the CURRENT run produced rather than the one the operator saw — and
+    // it would do so carrying a valid approval. The claim is immutable once
+    // written (`Overwrite: false`), which is the only reason a click is safe to
+    // honour minutes later.
+    //
+    // Both records are seeded with DIFFERENT ids, so a read from the wrong one
+    // cannot pass: an assertion that only counted ids, or that seeded both with
+    // the same list, would be satisfied by either source.
+    const approvedIds = ["m-approved-1", "m-approved-2"];
+    const hash = contentHash(approvedIds.join("\n"));
+    const ssm = fakeSsm({
+      [OFFERED]: offered(["m-regenerated-since"]),
+      [claimName(hash)]: JSON.stringify({
+        stage: "prod",
+        hash,
+        ids: approvedIds,
+        claimedAt: "2026-08-05T00:05:00.000Z",
+        taskArn: "arn:aws:ecs:ap-northeast-1:123456789012:task/mem9/abc",
+      }),
+    });
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+
+    await materializeApprovedIds({
+      ssm,
+      stage: "prod",
+      ssmPrefix: "/mem9-on-aws/prod",
+      hash,
+      idsFile,
+      fs: { writeFileSync },
+    });
+
+    expect(readFileSync(idsFile, "utf8").trim().split("\n")).toEqual(approvedIds);
+    expect(ssm.reads).toContain(claimName(hash));
+    expect(ssm.reads).not.toContain(OFFERED);
+  });
+
+  it("TC-SLACKAPP-092 a claim whose ids do not hash to the requested hash is refused", async () => {
+    // The hash arrives as a container override, which `DescribeTasks` echoes and
+    // any holder of ecs:RunTask on this task definition can choose. Trusting the
+    // record it names without re-deriving the hash over the ids would let a
+    // caller point the apply at a tampered record. Re-deriving makes the ids
+    // themselves the thing the hash vouches for.
+    const hash = contentHash(["m-1"].join("\n"));
+    const ssm = fakeSsm({
+      [claimName(hash)]: JSON.stringify({
+        stage: "prod",
+        hash,
+        // Hash says one id; the record carries another. The record's OWN `hash`
+        // field agrees with the request, so a check that compared those two
+        // strings would pass this.
+        ids: ["m-substituted"],
+        claimedAt: "2026-08-05T00:05:00.000Z",
+      }),
+    });
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+
+    await expect(
+      materializeApprovedIds({
+        ssm,
+        stage: "prod",
+        ssmPrefix: "/mem9-on-aws/prod",
+        hash,
+        idsFile,
+        fs: { writeFileSync },
+      }),
+    ).rejects.toThrow(/hash/u);
+    expect(() => readFileSync(idsFile, "utf8")).toThrow();
+  });
+
+  it("TC-SLACKAPP-093 a claim naming another stage is refused", async () => {
+    // Same reasoning as #102's decision-file stage guard: a preview approval must
+    // never apply to prod. The parameter PREFIX is stage-scoped, so this can only
+    // happen through a hand-written record — which is exactly the case a guard is
+    // for, since the alternative is an apply the operator never approved.
+    const ids = ["m-1"];
+    const hash = contentHash(ids.join("\n"));
+    const ssm = fakeSsm({
+      [claimName(hash)]: JSON.stringify({
+        stage: "pr-7",
+        hash,
+        ids,
+        claimedAt: "2026-08-05T00:05:00.000Z",
+      }),
+    });
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+
+    await expect(
+      materializeApprovedIds({
+        ssm,
+        stage: "prod",
+        ssmPrefix: "/mem9-on-aws/prod",
+        hash,
+        idsFile,
+        fs: { writeFileSync },
+      }),
+    ).rejects.toThrow(/stage/u);
+    expect(() => readFileSync(idsFile, "utf8")).toThrow();
+  });
+
+  it("TC-SLACKAPP-094 an absent claim is refused, not treated as an empty approval", async () => {
+    // An absent name comes back in `InvalidParameters`, missing from
+    // `Parameters` — so `find(...)?.Value` is `undefined` and a permissive path
+    // would write an EMPTY ids file. `--ids` with an empty file means "approve
+    // nothing", so the run would exit 0 having deleted nothing and the operator
+    // would read a successful apply that never happened.
+    const ssm = fakeSsm({});
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+
+    await expect(
+      materializeApprovedIds({
+        ssm,
+        stage: "prod",
+        ssmPrefix: "/mem9-on-aws/prod",
+        hash: contentHash("m-1"),
+        idsFile,
+        fs: { writeFileSync },
+      }),
+    ).rejects.toThrow(/approval record/u);
+    expect(() => readFileSync(idsFile, "utf8")).toThrow();
+  });
+
+  it("TC-SLACKAPP-095 a claim with an empty id list is refused rather than written", async () => {
+    // `[]` hashes consistently, so the hash check cannot catch it, and it is
+    // exactly what a partially-written record looks like. An empty `--ids` file
+    // is indistinguishable from "approve nothing" — a silent no-op reported as a
+    // clean apply.
+    const ids = [];
+    const hash = contentHash(ids.join("\n"));
+    const ssm = fakeSsm({
+      [claimName(hash)]: JSON.stringify({
+        stage: "prod",
+        hash,
+        ids,
+        claimedAt: "2026-08-05T00:05:00.000Z",
+      }),
+    });
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+
+    await expect(
+      materializeApprovedIds({
+        ssm,
+        stage: "prod",
+        ssmPrefix: "/mem9-on-aws/prod",
+        hash,
+        idsFile,
+        fs: { writeFileSync },
+      }),
+    ).rejects.toThrow(/no ids/u);
+    expect(() => readFileSync(idsFile, "utf8")).toThrow();
+  });
+
+  it("TC-SLACKAPP-096 a malformed claim is refused by shape", async () => {
+    // A truncated or non-JSON value must not reach `JSON.parse` unguarded: an
+    // uncaught SyntaxError exits 1 with a stack that quotes the parameter value,
+    // and this value is the one place ids legitimately live.
+    const hash = contentHash("m-1");
+    const ssm = fakeSsm({ [claimName(hash)]: '{"stage":"prod","ids":' });
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+
+    await expect(
+      materializeApprovedIds({
+        ssm,
+        stage: "prod",
+        ssmPrefix: "/mem9-on-aws/prod",
+        hash,
+        idsFile,
+        fs: { writeFileSync },
+      }),
+    ).rejects.toThrow(/approval record/u);
+    expect(() => readFileSync(idsFile, "utf8")).toThrow();
+  });
+
+  it("TC-SLACKAPP-097 the ids file is newline-delimited exactly as --ids parses it", async () => {
+    // `readApprovedIds` splits on "\n" and trims, so the two formats that would
+    // silently produce ONE id are a JSON array and a comma-joined line. Asserted
+    // by round-tripping through the real parser rather than by matching a
+    // string, so the contract is proven against the consumer.
+    const ids = ["m-1", "m-2", "m-3"];
+    const hash = contentHash(ids.join("\n"));
+    const ssm = fakeSsm({
+      [claimName(hash)]: JSON.stringify({
+        stage: "prod",
+        hash,
+        ids,
+        claimedAt: "2026-08-05T00:05:00.000Z",
+      }),
+    });
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+
+    await materializeApprovedIds({
+      ssm,
+      stage: "prod",
+      ssmPrefix: "/mem9-on-aws/prod",
+      hash,
+      idsFile,
+      fs: { writeFileSync },
+    });
+
+    // The consumer's own reading of the file, through runCleanup's --ids path:
+    // three memories offered, all three approved, all three deleted.
+    const server = fakeServer(ids.map((id) => memory(id, `c-${id}`)));
+    const llm = fakeLlm([
+      ids.map((id) => ({ id, verdict: "DELETE", reason: "stale" })),
+    ]);
+    const result = await runCleanup(
+      baseOpts({ apply: true, idsFile }),
+      baseDeps(server, llm, dir),
+    );
+    expect(result.skippedByFilter).toBe(0);
+    for (const id of ids) {
+      expect(server.store.get(id).state).toBe("deleted");
+    }
+  });
+
+  it("TC-SLACKAPP-098 the ids file never contains memory content, and no log line quotes an id", async () => {
+    // The task's log goes to CloudWatch, which is an accepted surface for
+    // snippets — but the ids file lands on the task's ephemeral disk, and the
+    // record it is built from is a plain String parameter readable by anything
+    // with ssm:GetParameters on the stage tree. A record that grew a `snippet`
+    // field must not have it copied into the file.
+    const ids = ["m-1"];
+    const hash = contentHash(ids.join("\n"));
+    const ssm = fakeSsm({
+      [claimName(hash)]: JSON.stringify({
+        stage: "prod",
+        hash,
+        ids,
+        claimedAt: "2026-08-05T00:05:00.000Z",
+        snippet: "SENTINEL-CONTENT",
+      }),
+    });
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+    const log = vi.fn();
+
+    await materializeApprovedIds({
+      ssm,
+      stage: "prod",
+      ssmPrefix: "/mem9-on-aws/prod",
+      hash,
+      idsFile,
+      fs: { writeFileSync },
+      log,
+    });
+
+    expect(readFileSync(idsFile, "utf8")).not.toContain("SENTINEL-CONTENT");
+    for (const call of log.mock.calls) {
+      expect(String(call[0])).not.toContain("SENTINEL-CONTENT");
+    }
+    // The COUNT is logged, never the ids: a log line naming them would put
+    // memory identifiers in CloudWatch for an operator who only needs to know
+    // the apply matched the approval.
+    expect(log).toHaveBeenCalled();
+    for (const call of log.mock.calls) {
+      expect(String(call[0])).not.toContain("m-1");
+    }
+  });
+});
+
+describe("the apply task's in-container runtime (#123)", () => {
+  const environmentKeys = [
+    "AWS_REGION",
+    "MEM9_APPROVAL_HASH",
+    "MEM9_BEDROCK_PROJECT",
+    "MEM9_DB_HOST",
+    "MEM9_DB_NAME",
+    "MEM9_DB_PORT",
+    "MEM9_DB_SECRET",
+    "MEM9_LLM_MODEL",
+    "MEM9_SSM_PREFIX",
+    "MEM9_TENANT_ID",
+  ];
+  afterEach(() => {
+    for (const key of environmentKeys) delete process.env[key];
+  });
+
+  /** The env the ECS task definition (infra/slack-approval.ts) actually sets. */
+  function containerEnv(extra = {}) {
+    Object.assign(process.env, {
+      AWS_REGION: "ap-northeast-1",
+      MEM9_DB_HOST: "writer.example.com",
+      MEM9_DB_NAME: "mem9",
+      MEM9_DB_PORT: "5432",
+      // ECS resolves the `ssm:` entry to the secret's JSON before the process
+      // starts, exactly as it does for the consolidation task.
+      MEM9_DB_SECRET: JSON.stringify({
+        username: "mem9",
+        password: "fixture-password",
+      }),
+      MEM9_SSM_PREFIX: "/mem9-on-aws/prod",
+      MEM9_TENANT_ID: TENANT,
+      ...extra,
+    });
+  }
+
+  /** pg double that records every construction and query. */
+  function fakeClientClass(calls) {
+    return class Client {
+      constructor(options) {
+        calls.push(["construct", options]);
+      }
+      async connect() {
+        calls.push(["connect"]);
+      }
+      async query(sql, parameters) {
+        calls.push(["query", sql, parameters]);
+        if (sql.includes("pg_try_advisory_lock")) {
+          return { rows: [{ acquired: true }] };
+        }
+        return { rows: [] };
+      }
+      async end() {
+        calls.push(["end"]);
+      }
+    };
+  }
+
+  function fakeAwsClient(values = {}) {
+    const client = {
+      sent: [],
+      send: vi.fn(async (command) => {
+        client.sent.push(command.input);
+        if (command.input.Names) {
+          const names = command.input.Names;
+          return {
+            Parameters: names
+              .filter((name) => name in values)
+              .map((name) => ({ Name: name, Value: values[name] })),
+            InvalidParameters: names.filter((name) => !(name in values)),
+          };
+        }
+        return { SecretString: values[command.input.SecretId] };
+      }),
+      destroy: () => {},
+    };
+    return client;
+  }
+
+  it("TC-SLACKAPP-100 takes its database configuration from the environment, with no SSM or Secrets Manager read", async () => {
+    // The image ships @aws-sdk/client-ssm now, so this is no longer about a
+    // missing module — it is about grants. The task role holds ssm:GetParameters
+    // ONLY under `approvals/*` (infra/slack-approval.ts), so the operator CLI's
+    // `db/*` discovery is an AccessDenied inside the container, and the DB secret
+    // arrives pre-resolved in `MEM9_DB_SECRET` instead. Mirrors
+    // memory-consolidation.mjs's createProductionDeps.
+    containerEnv();
+    const calls = [];
+    const ssm = fakeAwsClient();
+    const secrets = fakeAwsClient();
+
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: true, cap: 50 },
+      { Client: fakeClientClass(calls), ssm, secrets, getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
+    );
+
+    expect(ssm.send).not.toHaveBeenCalled();
+    expect(secrets.send).not.toHaveBeenCalled();
+    expect(production.tenantId).toBe(TENANT);
+    // Asserted on the connection options, not merely on "it connected": a path
+    // that read the env and then handed pg a partly-undefined config would still
+    // construct and would fail at TLS time with an unrelated message.
+    expect(calls[0]).toEqual([
+      "construct",
+      expect.objectContaining({
+        host: "writer.example.com",
+        port: 5432,
+        database: "mem9",
+        user: "mem9",
+        password: "fixture-password",
+      }),
+    ]);
+    // The shared mutex is what stops a click-triggered apply from racing the
+    // weekly consolidation. Absent, the two would interleave writes.
+    const mutex = await production.deps.acquireMutex("prod");
+    expect(mutex).not.toBeNull();
+    await mutex.release();
+    await production.close();
+    expect(calls.at(-1)).toEqual(["end"]);
+  });
+
+  it("TC-SLACKAPP-101 still resolves the database through SSM and Secrets Manager for the operator CLI", async () => {
+    // The operator path has no MEM9_DB_SECRET and its human IAM identity CAN read
+    // `db/*`. Both paths must keep working from one function: a container-only
+    // rewrite would break the #102 runbook the README documents.
+    process.env.AWS_REGION = "ap-northeast-1";
+    process.env.MEM9_TENANT_ID = TENANT;
+    const calls = [];
+    const secretArn =
+      "arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:mem9-db-x";
+    const ssm = fakeAwsClient({
+      "/mem9-on-aws/prod/db/host": "writer.example.com",
+      "/mem9-on-aws/prod/db/port": "5432",
+      "/mem9-on-aws/prod/db/name": "mem9",
+      "/mem9-on-aws/prod/db/secret-arn": secretArn,
+    });
+    const secrets = fakeAwsClient({
+      [secretArn]: JSON.stringify({ username: "mem9", password: "from-secret" }),
+    });
+
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: true, cap: 50 },
+      { Client: fakeClientClass(calls), ssm, secrets, getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
+    );
+
+    expect(ssm.sent[0].Names).toEqual([
+      "/mem9-on-aws/prod/db/host",
+      "/mem9-on-aws/prod/db/port",
+      "/mem9-on-aws/prod/db/name",
+      "/mem9-on-aws/prod/db/secret-arn",
+    ]);
+    expect(secrets.sent[0].SecretId).toBe(secretArn);
+    expect(calls[0][1]).toMatchObject({ password: "from-secret" });
+    await production.close();
+  });
+
+  it("TC-SLACKAPP-102 materializes the approved ids at the --ids path the task definition passes", async () => {
+    const ids = ["m-1", "m-2"];
+    const hash = contentHash(ids.join("\n"));
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+    containerEnv({ MEM9_APPROVAL_HASH: hash });
+    const ssm = fakeAwsClient({
+      [`/mem9-on-aws/prod/approvals/approved-${hash}`]: JSON.stringify({
+        stage: "prod",
+        hash,
+        ids,
+        claimedAt: "2026-08-05T00:05:00.000Z",
+      }),
+    });
+
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: true, cap: 50, idsFile },
+      {
+        Client: fakeClientClass([]),
+        ssm,
+        secrets: fakeAwsClient(),
+        getToken: vi.fn(),
+        fromNodeProviderChain: vi.fn(),
+      },
+    );
+
+    // The path is the CONTRACT with the task definition's `--ids` argument. A file
+    // written anywhere else leaves `readApprovedIds` reading a missing file, so the
+    // run dies loud — or worse, reads a stale one.
+    expect(readFileSync(idsFile, "utf8")).toBe("m-1\nm-2\n");
+    await production.close();
+  });
+
+  it("TC-SLACKAPP-103 refuses an approval hash with no ids file rather than applying unfiltered", async () => {
+    // This is the whole loop's failure mode. `readApprovedIds` returns null for a
+    // missing `--ids`, and null means "no filter" — so a hash-driven run that
+    // materialized nowhere would delete EVERY DELETE verdict in the run, not the
+    // ones the operator approved, and exit 0 reporting success.
+    const hash = contentHash(["m-1"].join("\n"));
+    containerEnv({ MEM9_APPROVAL_HASH: hash });
+
+    await expect(
+      createCleanupDeps(
+        { stage: "prod", apply: true, cap: 50 },
+        { Client: fakeClientClass([]), ssm: fakeAwsClient(), secrets: fakeAwsClient() },
+      ),
+    ).rejects.toThrow(/--ids/u);
+  });
+
+  it("TC-SLACKAPP-104 aborts before opening the database when the claim does not match the hash", async () => {
+    // Ordering, not just the error: materialization is the cheapest guard and the
+    // only one that can prove the ids are the approved ids, so it runs before the
+    // connection and before the advisory lock. Reversed, a tampered claim would
+    // hold the shared mutex for the length of its own failure and could block the
+    // weekly consolidation.
+    const ids = ["m-1"];
+    const hash = contentHash(ids.join("\n"));
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+    containerEnv({ MEM9_APPROVAL_HASH: hash });
+    const calls = [];
+    const ssm = fakeAwsClient({
+      [`/mem9-on-aws/prod/approvals/approved-${hash}`]: JSON.stringify({
+        stage: "prod",
+        // Agrees with the request, so a string comparison of the two would pass.
+        hash,
+        ids: ["m-substituted"],
+        claimedAt: "2026-08-05T00:05:00.000Z",
+      }),
+    });
+
+    await expect(
+      createCleanupDeps(
+        { stage: "prod", apply: true, cap: 50, idsFile },
+        { Client: fakeClientClass(calls), ssm, secrets: fakeAwsClient() },
+      ),
+    ).rejects.toThrow(/hash/u);
+    expect(calls).toEqual([]);
+    expect(existsSync(idsFile)).toBe(false);
   });
 });

@@ -865,6 +865,88 @@ export function buildOfferedRecord({ stage, decisions, generatedAt }) {
   return record;
 }
 
+/**
+ * Materialize the `--ids` file the apply task consumes, from the approval CLAIM
+ * the operator's click created (#123).
+ *
+ * The task receives only the list's content HASH, as an ECS container override.
+ * That is deliberate: an override is echoed by `DescribeTasks` and recorded in
+ * CloudTrail, so ids there would put memory identifiers in an audit log — and
+ * more importantly the callback's signature proves the click came from the
+ * workspace, never that any ids in the request are the ids the classifier chose.
+ * So the ids come from `approvals/approved-{hash}`, which is immutable once
+ * written (`Overwrite: false` is the claim's atomic primitive).
+ *
+ * NOT from `approvals/offered`: that record is overwritten by every run, so
+ * reading it would apply the CURRENT run's list under an approval the operator
+ * gave for an earlier one.
+ *
+ * Every guard here throws. An `--ids` file that is absent, empty, or short means
+ * "approve fewer things" to the caller, so a permissive path does not fail — it
+ * reports a clean apply that deleted nothing (or the wrong thing).
+ */
+export async function materializeApprovedIds({
+  ssm,
+  stage,
+  ssmPrefix,
+  hash,
+  idsFile,
+  fs,
+  log = () => {},
+}) {
+  const name = `${ssmPrefix}/approvals/approved-${hash}`;
+  const { GetParametersCommand } = await import("@aws-sdk/client-ssm");
+  const response = await ssm.send(new GetParametersCommand({ Names: [name] }));
+  // An absent name is echoed in `InvalidParameters` and simply MISSING from
+  // `Parameters`, so there is no empty-value case to distinguish — `?.Value` is
+  // `undefined` and must not fall through to an empty ids file.
+  const raw = (response.Parameters ?? []).find((p) => p.Name === name)?.Value;
+  if (!raw) {
+    throw new Error(`no approval record for the requested hash at ${name}`);
+  }
+
+  let record;
+  try {
+    record = JSON.parse(raw);
+  } catch {
+    // The message never quotes the value: this parameter is the one place ids
+    // legitimately live, and a stack that echoed it would copy them to the log.
+    throw new Error(`the approval record at ${name} is not valid JSON`);
+  }
+  if (!record || typeof record !== "object" || !Array.isArray(record.ids)) {
+    throw new Error(`the approval record at ${name} has no id list`);
+  }
+  // Stage-bound, like #102's decision-file guard: a preview approval must never
+  // apply to prod.
+  if (record.stage !== stage) {
+    throw new Error(
+      `the approval record names stage ${record.stage}, not ${stage}`,
+    );
+  }
+  if (record.ids.length === 0) {
+    throw new Error(`the approval record at ${name} approved no ids`);
+  }
+  // Re-derived over the IDS, not compared against the record's own `hash` field:
+  // a tampered record carries a `hash` that agrees with itself, so only
+  // recomputing makes the ids the thing the hash vouches for. Same join as
+  // `buildOfferedRecord`, with a separator no id can contain.
+  const derived = contentHash(record.ids.join("\n"));
+  if (derived !== hash) {
+    throw new Error(
+      `the approval record's ids do not match the requested hash — refusing to apply`,
+    );
+  }
+
+  // Ids only, one per line, because `readApprovedIds` splits on "\n" and trims.
+  // A JSON array or a comma-joined line would parse as a single id and silently
+  // approve nothing.
+  fs.writeFileSync(idsFile, `${record.ids.join("\n")}\n`, { mode: 0o600 });
+  // The COUNT, never the ids: an operator needs to know the apply matched the
+  // approval, not which memories it names.
+  log(`materialized ${record.ids.length} approved id(s) for ${hash}`);
+  return record.ids.length;
+}
+
 export function verdictSummary(decisions) {
   const summary = { KEEP: 0, DELETE: 0, MERGE: 0, SKIP: 0, RETAIN: 0, UNSTABLE: 0 };
   for (const d of decisions) {
@@ -2192,11 +2274,51 @@ export function parseArgs(argv) {
   return opts;
 }
 
-async function productionDatabaseMutex(stage, region) {
-  const { SSMClient, GetParametersCommand } =
-    await import("@aws-sdk/client-ssm");
-  const { SecretsManagerClient, GetSecretValueCommand } =
-    await import("@aws-sdk/client-secrets-manager");
+/**
+ * Where the database connection details come from — the environment when the
+ * runtime supplies them, otherwise the stage's own SSM tree.
+ *
+ * TWO callers with different IAM (#123). The operator CLI runs under a human
+ * identity that can read `/mem9-on-aws/{stage}/db/*` and the cluster secret, so it
+ * discovers everything itself. The Slack-triggered apply task cannot: its task
+ * role holds `ssm:GetParameters` ONLY under `approvals/*`, because a task that
+ * could read the stage tree could read the four `cleanup/*` inputs that decide
+ * which cluster and task definition an apply runs on. So ECS resolves the secret
+ * for it — `MEM9_DB_SECRET` arrives as the secret's JSON, already decrypted by the
+ * EXECUTION role at task start — and the endpoint arrives as plain `environment`.
+ * Mirrors `memory-consolidation.mjs`'s `createProductionDeps`, which is the same
+ * split for the same reason.
+ *
+ * The env path is preferred when it is COMPLETE, not when it is merely partly
+ * present: a half-set environment falling through to SSM is the behavior an
+ * operator can reason about, whereas a half-set environment used as-is hands `pg`
+ * an undefined host.
+ */
+async function resolveDatabaseConfig(stage, region, runtime) {
+  const injectedSecret = process.env.MEM9_DB_SECRET;
+  if (injectedSecret && process.env.MEM9_DB_HOST && process.env.MEM9_DB_NAME) {
+    let credentials;
+    try {
+      credentials = JSON.parse(injectedSecret);
+    } catch {
+      // Never quotes the value: this variable IS the database password.
+      throw new Error("MEM9_DB_SECRET is not valid JSON");
+    }
+    if (
+      typeof credentials.username !== "string" ||
+      typeof credentials.password !== "string"
+    ) {
+      throw new Error("MEM9_DB_SECRET is missing credentials");
+    }
+    return {
+      host: process.env.MEM9_DB_HOST,
+      port: Number(process.env.MEM9_DB_PORT || 5432),
+      database: process.env.MEM9_DB_NAME,
+      user: credentials.username,
+      password: credentials.password,
+    };
+  }
+
   const prefix = `/mem9-on-aws/${stage}/db`;
   const parameterNames = {
     host: `${prefix}/host`,
@@ -2205,11 +2327,16 @@ async function productionDatabaseMutex(stage, region) {
     secretArn: `${prefix}/secret-arn`,
   };
 
-  const ssm = new SSMClient({ region });
-  const parameterResponse = await ssm.send(
-    new GetParametersCommand({ Names: Object.values(parameterNames) }),
-  );
-  ssm.destroy();
+  const { GetParametersCommand } = await import("@aws-sdk/client-ssm");
+  const { ssm, release: releaseSsm } = await ssmClient(region, runtime);
+  let parameterResponse;
+  try {
+    parameterResponse = await ssm.send(
+      new GetParametersCommand({ Names: Object.values(parameterNames) }),
+    );
+  } finally {
+    releaseSsm();
+  }
   if (parameterResponse.InvalidParameters?.length) {
     throw new Error("database connection parameters are incomplete");
   }
@@ -2235,14 +2362,10 @@ async function productionDatabaseMutex(stage, region) {
     throw new Error("database connection parameters are incomplete");
   }
 
-  const secrets = new SecretsManagerClient({ region });
-  const secretResponse = await secrets.send(
-    new GetSecretValueCommand({ SecretId: config.secretArn }),
-  );
-  secrets.destroy();
+  const secretString = await readSecret(config.secretArn, region, runtime);
   let credentials;
   try {
-    credentials = JSON.parse(secretResponse.SecretString ?? "");
+    credentials = JSON.parse(secretString ?? "");
   } catch {
     throw new Error("database secret is not valid JSON");
   }
@@ -2252,14 +2375,57 @@ async function productionDatabaseMutex(stage, region) {
   ) {
     throw new Error("database secret is missing credentials");
   }
-
-  const { Client } = await import("pg");
-  const db = new Client({
+  return {
     host: config.host,
     port,
     database: config.database,
     user: credentials.username,
     password: credentials.password,
+  };
+}
+
+/**
+ * An SSM client plus the call that disposes it — but only when this function is
+ * the one that built it. A caller-injected client outlives this call (the same
+ * client serves the approval read and the db discovery), so destroying it here
+ * would break the second use.
+ */
+async function ssmClient(region, runtime) {
+  if (runtime.ssm) return { ssm: runtime.ssm, release: () => {} };
+  const { SSMClient } = await import("@aws-sdk/client-ssm");
+  const ssm = new SSMClient({ region });
+  return { ssm, release: () => ssm.destroy() };
+}
+
+async function readSecret(secretId, region, runtime) {
+  const { GetSecretValueCommand } = await import(
+    "@aws-sdk/client-secrets-manager"
+  );
+  if (runtime.secrets) {
+    const response = await runtime.secrets.send(
+      new GetSecretValueCommand({ SecretId: secretId }),
+    );
+    return response.SecretString;
+  }
+  const { SecretsManagerClient } = await import(
+    "@aws-sdk/client-secrets-manager"
+  );
+  const secrets = new SecretsManagerClient({ region });
+  try {
+    const response = await secrets.send(
+      new GetSecretValueCommand({ SecretId: secretId }),
+    );
+    return response.SecretString;
+  } finally {
+    secrets.destroy();
+  }
+}
+
+async function productionDatabaseMutex(stage, region, runtime) {
+  const config = await resolveDatabaseConfig(stage, region, runtime);
+  const Client = runtime.Client ?? (await import("pg")).Client;
+  const db = new Client({
+    ...config,
     ssl: { rejectUnauthorized: true },
     application_name: `mem9-cleanup-${stage}`,
   });
@@ -2290,7 +2456,7 @@ async function productionDatabaseMutex(stage, region) {
 }
 
 /**
- * Deps for `--list-inactive` / `--restore`. Deliberately NOT `productionDeps`:
+ * Deps for `--list-inactive` / `--restore`. Deliberately NOT `createCleanupDeps`:
  * recovery needs no tenant key, no service discovery, and no LLM, so requiring
  * them would make a read-only listing fail on unrelated configuration. The
  * shared mutex is passed only for an actual `--apply`, matching cleanup.
@@ -2315,27 +2481,74 @@ async function recoveryDeps(opts) {
   };
 }
 
-async function productionDeps(opts) {
+/**
+ * Build the real deps for one run — for the operator CLI and for the
+ * Slack-triggered apply task, which are the same code on different IAM (#123).
+ *
+ * `runtime` exists for the tests: every AWS client and `pg` itself is injectable,
+ * which is what lets the container path be asserted without an account. Nothing in
+ * production passes it.
+ *
+ * ORDER IS LOAD-BEARING. When `MEM9_APPROVAL_HASH` is set the ids are materialized
+ * FIRST, before the database is opened and before the advisory lock is taken:
+ * that read is the cheapest guard and the only one that can prove the ids are the
+ * approved ids, and a tampered claim that failed later would hold the shared mutex
+ * for the length of its own failure, blocking the weekly consolidation.
+ */
+export async function createCleanupDeps(opts, runtime = {}) {
   const region = process.env.AWS_REGION || "ap-northeast-1";
 
   // The explicit flag WINS over the env var: a stale MEM9_TENANT_ID from a
   // preview shell must not silently redirect an --apply aimed at another stage.
   let tenantId;
   if (opts.tenantSecretArn) {
-    const { SecretsManagerClient, GetSecretValueCommand } = await import("@aws-sdk/client-secrets-manager");
-    const sm = new SecretsManagerClient({ region });
-    const res = await sm.send(new GetSecretValueCommand({ SecretId: opts.tenantSecretArn }));
-    tenantId = res.SecretString;
+    tenantId = await readSecret(opts.tenantSecretArn, region, runtime);
   } else {
     tenantId = process.env.MEM9_TENANT_ID;
   }
   if (!tenantId) throw new Error("tenant id required: set MEM9_TENANT_ID or --tenant-secret-arn");
+
+  // The approval hash is the ECS container override the callback Lambda sets, and
+  // it is the ONLY thing that reaches the task from the click.
+  const approvalHash = process.env.MEM9_APPROVAL_HASH;
+  if (approvalHash) {
+    // A hash with nowhere to write is the loop's worst failure mode, not a
+    // degraded one: `readApprovedIds` returns null for an absent `--ids`, and null
+    // means "no filter" — so the run would delete every DELETE verdict it found
+    // rather than the ones the operator approved, and exit 0 reporting success.
+    if (!opts.idsFile) {
+      throw new Error(
+        "MEM9_APPROVAL_HASH is set but --ids is not; refusing to apply " +
+          "without the approved-id filter",
+      );
+    }
+    const ssmPrefix = process.env.MEM9_SSM_PREFIX || `/mem9-on-aws/${opts.stage}`;
+    const { ssm, release } = await ssmClient(region, runtime);
+    try {
+      await materializeApprovedIds({
+        ssm,
+        stage: opts.stage,
+        ssmPrefix,
+        hash: approvalHash,
+        idsFile: opts.idsFile,
+        fs: await import("node:fs"),
+        log: (message) =>
+          console.error(`[memory-cleanup ${new Date().toISOString()}] ${message}`),
+      });
+    } finally {
+      release();
+    }
+  }
+
   const databaseMutex = opts.apply
-    ? await productionDatabaseMutex(opts.stage, region)
+    ? await productionDatabaseMutex(opts.stage, region, runtime)
     : undefined;
 
-  const { getToken } = await import("@aws/bedrock-token-generator");
-  const { fromNodeProviderChain } = await import("@aws-sdk/credential-providers");
+  const getToken =
+    runtime.getToken ?? (await import("@aws/bedrock-token-generator")).getToken;
+  const fromNodeProviderChain =
+    runtime.fromNodeProviderChain ??
+    (await import("@aws-sdk/credential-providers")).fromNodeProviderChain;
   const completeChat = buildCompleteChat(
     { ...opts, region },
     {
@@ -2403,7 +2616,7 @@ if (isMain) {
         : await runListInactive(opts, production.deps);
       process.exitCode = result.exitCode;
     } else {
-      production = await productionDeps(opts);
+      production = await createCleanupDeps(opts);
       const result = await runCleanup(
         { ...opts, tenantId: production.tenantId },
         production.deps,
