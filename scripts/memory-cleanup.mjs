@@ -73,6 +73,10 @@ const CLASSIFY_ATTEMPTS = 2;
 const LOCK_ACQUIRE_ATTEMPTS = 2;
 const DISCOVERY_RETRIES = 3;
 const DEFAULT_CAP = 50;
+// The STANDARD Parameter Store tier's content limit. The advanced tier's 8 KB is
+// deliberately not an option: it incurs a charge and cannot be reverted to
+// standard without data loss, so the record has to fit here (#123).
+const MAX_PARAMETER_BYTES = 4096;
 const REQUEST_TIMEOUT_MS = 30_000; // REST calls; the LLM call sets its own
 const LLM_TIMEOUT_MS = 120_000;
 // Reasoning models consume output tokens on hidden reasoning BEFORE emitting
@@ -821,6 +825,46 @@ async function discoverBaseUrl(opts, deps) {
  * runs, so the only way in is a planner push site — an internal invariant, and
  * TC-SLACKAPP-066 asserts it directly rather than leaving the guard unproven.
  */
+/**
+ * The `{prefix}/approvals/offered` record: what the callback Lambda compares a
+ * button click against, and where the apply task reads its ids from (#123).
+ *
+ * Ids and a hash only, never memory content. The parameter is a plain `String`
+ * because the workload permissions boundary admits neither `kms:Encrypt` nor
+ * `kms:GenerateDataKey`, so a `SecureString` write would be denied at runtime —
+ * which makes this record readable by anything holding `ssm:GetParameters` on
+ * the stage tree, and bounds what may go in it (TC-SLACKAPP-023b).
+ *
+ * Over the limit it THROWS. Truncating would ask the operator to approve a list
+ * that is not the list they were shown, and the ids are exactly what the apply
+ * task deletes — the one failure mode here that produces a *wrong* apply rather
+ * than a failed one (TC-SLACKAPP-024).
+ */
+export function buildOfferedRecord({ stage, decisions, generatedAt }) {
+  const ids = decisions.filter((d) => d.verdict === "DELETE").map((d) => d.id);
+  const record = {
+    stage,
+    // Over the ids, so a click carrying an earlier list's hash no longer matches
+    // once the list is regenerated. Joined with a separator no id can contain, so
+    // `["ab","c"]` and `["a","bc"]` cannot collide into one hash.
+    hash: contentHash(ids.join("\n")),
+    ids,
+    generatedAt,
+  };
+  const serialized = JSON.stringify(record);
+  if (serialized.length > MAX_PARAMETER_BYTES) {
+    // Measured on the SERIALIZED value rather than the id count: a limit
+    // expressed as "N ids" drifts from the real constraint as soon as ids get
+    // longer, and bytes are what SSM rejects. `--cap` is the knob to lower.
+    throw new Error(
+      `the offered approval list is ${serialized.length} bytes, over the ` +
+        `${MAX_PARAMETER_BYTES}-byte standard parameter limit for ${ids.length} ids — ` +
+        `lower --cap rather than truncating the list the operator approves`,
+    );
+  }
+  return record;
+}
+
 export function verdictSummary(decisions) {
   const summary = { KEEP: 0, DELETE: 0, MERGE: 0, SKIP: 0, RETAIN: 0, UNSTABLE: 0 };
   for (const d of decisions) {

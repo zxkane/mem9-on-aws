@@ -10,6 +10,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   buildCompleteChat,
+  buildOfferedRecord,
   contentHash,
   inactiveMemoryAdapter,
   parseArgs,
@@ -3569,5 +3570,82 @@ describe("two-pass consensus (#123)", () => {
       expect(intersection.has(id)).toBe(true);
     }
     expect(deleteIds(decisions).size).toBeGreaterThan(0); // not vacuously empty
+  });
+});
+
+describe("the offered approval record (#123)", () => {
+  const del = (id) => ({
+    id,
+    verdict: "DELETE",
+    reason: "stale",
+    contentHash: contentHash(`c-${id}`),
+    version: 1,
+  });
+
+  it("TC-SLACKAPP-023b the offered record carries ids, a hash, a stage, and a timestamp — no memory content", () => {
+    // This parameter is a plain `String` (the boundary admits neither
+    // `kms:Encrypt` nor `kms:GenerateDataKey`, so a SecureString write is denied
+    // at runtime), readable by anything holding `ssm:GetParameters` on the stage
+    // tree. Asserted structurally over the SERIALIZED value rather than by
+    // eyeballing fields: a nested `snippet` added later would satisfy a
+    // field-by-field check and still publish memory content.
+    const record = buildOfferedRecord({
+      stage: "prod",
+      decisions: [
+        del("m-1"),
+        { ...del("m-2"), snippet: "SENTINEL-CONTENT" },
+        // Only DELETE is offered. Every other verdict in the list is a memory
+        // the run decided NOT to destroy, and a RETAIN is one policy actively
+        // protected — so a record built over every row would hand the apply task
+        // exactly the ids the protected-topic rule exists to withhold, with the
+        // operator's approval attached.
+        { id: "m-keep", verdict: "KEEP", reason: "durable" },
+        { id: "m-protected", verdict: "RETAIN", reason: "protected topic personal-finance" },
+        { id: "m-unstable", verdict: "UNSTABLE", reason: "passes disagreed on deletion" },
+      ],
+      generatedAt: "2026-08-05T00:00:00.000Z",
+    });
+    expect(Object.keys(record).sort()).toEqual(["generatedAt", "hash", "ids", "stage"]);
+    expect(record.ids).toEqual(["m-1", "m-2"]);
+    expect(record.stage).toBe("prod");
+    expect(JSON.stringify(record)).not.toMatch(/SENTINEL-CONTENT/u);
+    // The hash is over the ids, so the callback's comparison detects a
+    // regenerated list (TC-SLACKAPP-020) — and it is over a JOIN with a
+    // separator no id can contain, so two different lists whose ids concatenate
+    // identically get different hashes. Without the separator `["ab","c"]` and
+    // `["a","bc"]` are one hash, and a click approving one list would be accepted
+    // against the other.
+    expect(record.hash).toMatch(/^sha256:[0-9a-f]{64}$/u);
+    const stamp = { stage: "prod", generatedAt: "2026-08-05T00:00:00.000Z" };
+    expect(buildOfferedRecord({ ...stamp, decisions: [del("ab"), del("c")] }).hash).not.toBe(
+      buildOfferedRecord({ ...stamp, decisions: [del("a"), del("bc")] }).hash,
+    );
+  });
+
+  it("TC-SLACKAPP-024 an offered list over the 4096-byte parameter limit throws rather than truncating", () => {
+    // Truncating would ask the operator to approve a list that is not the list
+    // they were shown, and the ids are what the apply task deletes — so a
+    // silently shortened record is the one failure mode that produces a WRONG
+    // apply rather than a failed one. It must be loud.
+    //
+    // 4096 is the STANDARD tier's content limit; the advanced tier's 8 KB is not
+    // an option here, since an advanced parameter incurs a charge and cannot be
+    // reverted. `--cap 50` keeps a real record at ~2 KB, so hitting this needs a
+    // cap far above the default — which is exactly the operator mistake worth
+    // failing on.
+    const many = Array.from({ length: 200 }, (_, i) => del(`memory-with-a-realistic-id-${i}`));
+    expect(() =>
+      buildOfferedRecord({ stage: "prod", decisions: many, generatedAt: "2026-08-05T00:00:00.000Z" }),
+    ).toThrow(/4096|parameter limit/u);
+    // Asserted on the SERIALIZED length, not the id count: a limit expressed as
+    // "N ids" drifts from the real constraint the moment ids get longer, and the
+    // thing SSM rejects is bytes.
+    const ok = buildOfferedRecord({
+      stage: "prod",
+      decisions: many.slice(0, 40),
+      generatedAt: "2026-08-05T00:00:00.000Z",
+    });
+    expect(JSON.stringify(ok).length).toBeLessThanOrEqual(4096);
+    expect(ok.ids).toHaveLength(40);
   });
 });

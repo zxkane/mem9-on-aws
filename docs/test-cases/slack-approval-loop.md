@@ -85,6 +85,12 @@ concurrent applies of the same ids.
   checked first (`timingSafeEqual` throws on a length mismatch — the
   `infra/src/oauth-facade/state.ts` precedent), so a short or long signature is a
   401 and never an unhandled 500.
+- **TC-SLACKAPP-003b** — the comparison is `timingSafeEqual`, asserted
+  **structurally** over the source. Deliberately so: `===` and `timingSafeEqual`
+  are behaviourally identical, so no input can distinguish them, which makes
+  timing safety unprovable from the outside — and an invariant nothing observes is
+  exactly the kind a later refactor drops. The same assertion pins that the length
+  check precedes it, since `timingSafeEqual` throws on unequal lengths.
 - **TC-SLACKAPP-004** — a missing `X-Slack-Signature` or missing
   `X-Slack-Request-Timestamp` is rejected 401. Header lookup is
   case-insensitive: API Gateway v2 lowercases header names, and matching only
@@ -144,9 +150,25 @@ concurrent applies of the same ids.
   timestamp, and no memory content. Asserted structurally over the serialized
   value, because this parameter is a plain `String` and is readable by anything
   with `ssm:GetParameters` on the stage prefix.
+- **TC-SLACKAPP-023b** — the same structural assertion on the **offered** record
+  that 023 makes on the claim, over `buildOfferedRecord`'s serialized output — a
+  nested field added later (a `snippet` on the decision row) satisfies a
+  field-by-field check and still publishes memory content. Two further properties
+  are pinned here because nothing else can see them: only `DELETE` rows are
+  offered (a record built over every row hands the apply task the very ids the
+  protected-topic rule withheld, with the operator's approval attached), and the
+  hash is over a join with a separator no id can contain (without it `["ab","c"]`
+  and `["a","bc"]` are one hash, so a click approving one list is accepted against
+  the other).
 - **TC-SLACKAPP-024** — an offered list that would exceed the 4096-byte standard
   parameter limit fails the run loud rather than truncating. Truncating would ask
-  the operator to approve a list that is not the list they were shown.
+  the operator to approve a list that is not the list they were shown — the one
+  failure mode here that produces a *wrong* apply rather than a failed one, since
+  the ids are exactly what the apply task deletes. Asserted on the **serialized**
+  length, not an id count: a limit expressed as "N ids" drifts from the real
+  constraint as soon as ids get longer, and bytes are what SSM rejects. The
+  advanced tier's 8 KB is deliberately not the answer — it incurs a charge and
+  cannot be reverted to standard without data loss, so `--cap` is the knob.
 - **TC-SLACKAPP-025** — the record is stage-bound, and a hash whose record names
   another stage is refused. Same reasoning as #102's decision-file stage guard: a
   preview approval must never apply to prod.
@@ -157,6 +179,11 @@ concurrent applies of the same ids.
   **one** apply. The second `PutParameter` is asserted to carry
   `Overwrite: false` (the atomic claim), and the second delivery returns 200 with
   `RunTask` called exactly once across both.
+- **TC-SLACKAPP-030b** — a claim that already carries a `taskArn` starts nothing
+  **however old it is**. `claimedAt` is set far past `CLAIM_STALE_MS` on purpose: a
+  fresh timestamp lets the stale-claim branch answer the case, leaving the
+  `taskArn` branch — the one that prevents a double apply on a redelivery arriving
+  after the apply already ran — unproven.
 - **TC-SLACKAPP-031** — a losing claimant whose record has no `taskArn` and a
   fresh `claimedAt` ACKs without starting a task, and logs the list hash at error
   level so a lost approval is visible.
@@ -217,6 +244,10 @@ concurrent applies of the same ids.
 - **TC-SLACKAPP-035** — a Reject click writes no approval record, starts no task,
   and updates the message. Reject must be cheap and total: it is the button an
   operator presses when something looks wrong.
+- **TC-SLACKAPP-035b** — an **unrecognised** `action_id` starts nothing. The
+  default has to be inert: a handler that treated "not reject" as approve would
+  turn any future button — or a typo in the message template — into a deletion
+  trigger. `cleanup_approve_v2` is the case, because it is what a rename produces.
 - **TC-SLACKAPP-036** — the handler completes within the 3-second ACK budget with
   both control-plane calls faked to a realistic latency, and it does not await
   the apply task's completion. Asserted by construction — the handler never
