@@ -7,7 +7,8 @@
   "scripts": {
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
-    "test:consolidation:coverage": "vitest run scripts/memory-consolidation.test.mjs --coverage.enabled=true --coverage.include=scripts/memory-consolidation.mjs --coverage.reporter=text --coverage.thresholds.lines=80 --coverage.thresholds.functions=80 --coverage.thresholds.statements=80 --coverage.thresholds.branches=80"
+    "test:consolidation:coverage": "vitest run scripts/memory-consolidation.test.mjs --coverage.enabled=true --coverage.include=scripts/memory-consolidation.mjs --coverage.reporter=text --coverage.thresholds.lines=80 --coverage.thresholds.functions=80 --coverage.thresholds.statements=80 --coverage.thresholds.branches=80",
+    "test:cleanup:coverage": "vitest run scripts/memory-cleanup.test.mjs --coverage.enabled=true --coverage.include=scripts/memory-cleanup.mjs --coverage.reporter=text --coverage.thresholds.lines=80 --coverage.thresholds.functions=80 --coverage.thresholds.statements=80 --coverage.thresholds.branches=80"
   },
   "devDependencies": {
     "@aws-sdk/client-secrets-manager": "^3.1100.0",

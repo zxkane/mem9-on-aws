@@ -2,7 +2,7 @@
 // Test IDs map to docs/test-cases/memory-cleanup.md. All I/O is faked through
 // the injected deps object — no network, no real filesystem outside tmpdirs.
 import { createHash } from "node:crypto";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -10,11 +10,16 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   buildCompleteChat,
   contentHash,
+  inactiveMemoryAdapter,
   parseArgs,
   parseVerdicts,
   planDecisions,
   runCleanup,
+  runListInactive,
+  runRestore,
+  ARG_SPECS,
   DURABLE_ONLY_RULES,
+  USAGE,
 } from "./memory-cleanup.mjs";
 
 const tempDirs = [];
@@ -1374,5 +1379,1447 @@ describe("LLM route", () => {
     } finally {
       vi.unstubAllEnvs();
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Inactive listing & restore (TC-MEMRESTORE-001..070) — issue #124.
+// Test IDs map to docs/test-cases/memory-restore.md.
+//
+// The REST surface cannot reach these rows at all: upstream's GetByID and list
+// both select `WHERE state = 'active'` (the fakeServer above 404s a deleted id
+// for exactly that reason), so recovery has to go through SQL. #103 already
+// does, and this file's `productionDatabaseMutex` already holds a `pg` client,
+// so the tests below fake the client rather than the HTTP layer.
+
+/** Row as `memories` stores it — snake_case, because the adapter reads raw rows. */
+function inactiveRow(id, state, overrides = {}) {
+  return {
+    id,
+    content: `fact about ${id}`,
+    state,
+    version: 3,
+    updated_at: new Date("2026-06-01T09:00:00Z"),
+    // #103 sets this when it archives the loser of a contradiction; #102's
+    // soft delete never does. The asymmetry is the whole point of TC-040..042.
+    superseded_by: state === "archived" ? `winner-of-${id}` : null,
+    ...overrides,
+  };
+}
+
+/**
+ * Minimal `pg` client fake: records every statement, and answers the ones the
+ * test names. Statements are matched on a substring so the assertions stay on
+ * the SQL the adapter actually built (values included) rather than on a mock's
+ * return shape.
+ *
+ * Handlers are tried in declaration order and a COUNT also reads `FROM
+ * memories`, so declare the narrower `"count("` key first wherever both are
+ * needed — otherwise the count silently answers with the listing's rows.
+ *
+ * Every statement is checked for placeholder/values arity, because that is the
+ * one class of bug a permissive fake hides completely: real Postgres rejects a
+ * surplus bind outright ("Expected 1 parameters but got 2"), so a statement that
+ * this fake answers happily can still be a hard runtime error. Sharing one
+ * mutable values array across two statements is how that happens.
+ */
+function fakeDb(handlers = {}) {
+  const queries = [];
+  const query = vi.fn(async (text, values = []) => {
+    assertBindArity(text, values);
+    queries.push({ text, values });
+    for (const [needle, handler] of Object.entries(handlers)) {
+      if (text.includes(needle)) return handler(values);
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  return { queries, query };
+}
+
+/**
+ * Reject what the server would reject: the highest `$n` referenced must equal
+ * the number of values supplied, and every index below it must be referenced.
+ */
+function assertBindArity(text, values) {
+  const referenced = new Set(
+    [...text.matchAll(/\$(\d+)/gu)].map((m) => Number(m[1])),
+  );
+  const highest = referenced.size ? Math.max(...referenced) : 0;
+  const missing = Array.from({ length: highest }, (_, i) => i + 1).filter(
+    (n) => !referenced.has(n),
+  );
+  const detail = `${JSON.stringify(text)} values=${JSON.stringify(values)}`;
+  expect(missing, `unreferenced placeholder(s) in ${detail}`).toEqual([]);
+  expect(
+    values.length,
+    `bind arity mismatch: statement uses $1..$${highest} in ${detail}`,
+  ).toBe(highest);
+}
+
+const restoreOpts = (overrides = {}) => ({
+  stage: "test",
+  apply: false,
+  cap: 50,
+  force: false,
+  ...overrides,
+});
+
+function restoreDeps(overrides = {}) {
+  return {
+    log: vi.fn(),
+    outDir: overrides.outDir,
+    clock: () => new Date("2026-08-05T00:00:00Z").getTime(),
+    // Restore must never re-embed: `vector(1024)` survived the soft delete
+    // (schema.sql line 76). Any HTTP call would go through here, so an
+    // untouched spy is the evidence (TC-MEMRESTORE-044).
+    fetchImpl: vi.fn(async () => {
+      throw new Error("restore must not make HTTP calls");
+    }),
+    ...overrides,
+  };
+}
+
+describe("inactive-memory SQL adapter", () => {
+  it("TC-MEMRESTORE-020 filters by state and never returns active rows", async () => {
+    // The count handler is declared first and is no longer optional: the total
+    // is the truncation signal, so the adapter refuses a count that answered
+    // nothing rather than defaulting the denominator (TC-MEMRESTORE-024).
+    const db = fakeDb({
+      "count(": () => ({ rows: [{ total: "1" }] }),
+      "FROM memories": () => ({ rows: [inactiveRow("d-1", "deleted")] }),
+    });
+    const adapter = inactiveMemoryAdapter(db);
+
+    await adapter.listInactive({ state: "deleted" });
+    const scoped = db.queries.at(-1);
+    // `state = $n` alone is not enough: an unparameterised or absent state
+    // predicate would still return rows and read as a successful filter.
+    expect(scoped.values).toContain("deleted");
+    expect(scoped.text).toMatch(/state\s*=\s*\$\d/u);
+
+    await adapter.listInactive({});
+    const both = db.queries.at(-1);
+    // With no --state the query must still exclude active rows. A bare
+    // `SELECT ... FROM memories` would list the entire corpus, which for a
+    // 2811-memory store is not a listing an operator can review.
+    expect(both.text).toMatch(/state\s*(<>|!=)\s*'active'|state\s+IN\s*\(\s*'archived'\s*,\s*'deleted'\s*\)|state\s+IN\s*\(\s*'deleted'\s*,\s*'archived'\s*\)/u);
+    expect(both.values).not.toContain("active");
+  });
+
+  it("TC-MEMRESTORE-021 --since filters updated_at, the only timestamp that exists", async () => {
+    const db = fakeDb({ "count(": () => ({ rows: [{ total: "0" }] }), "FROM memories": () => ({ rows: [] }) });
+    const adapter = inactiveMemoryAdapter(db);
+    await adapter.listInactive({ since: "2026-07-01T00:00:00Z" });
+    const { text, values } = db.queries.at(-1);
+    // There is no `memories.deleted_at` — only `tenants` has one (schema.sql
+    // line 40). A query that referenced one would fail at runtime against the
+    // real database, so pin the column here where it is cheap to catch.
+    expect(text).not.toMatch(/deleted_at/u);
+    expect(text).toMatch(/updated_at\s*>=?\s*\$\d/u);
+    expect(values).toContain("2026-07-01T00:00:00Z");
+  });
+
+  it("TC-MEMRESTORE-022 --limit bounds the rows but the total is counted unbounded", async () => {
+    const db = fakeDb({
+      "count(": () => ({ rows: [{ total: "42" }] }),
+      "FROM memories": (values) =>
+        // Mirror LIMIT: the fake returns as many rows as asked for, so a
+        // missing LIMIT shows up as an unbounded listing rather than passing.
+        ({ rows: Array.from({ length: Math.min(5, values.at(-1) ?? 5) }, (_, i) => inactiveRow(`d-${i}`, "deleted")) }),
+    });
+    const adapter = inactiveMemoryAdapter(db);
+    const page = await adapter.listInactive({ limit: 2 });
+    expect(page.rows).toHaveLength(2);
+    // A silent cap is the failure mode: 2 of 42 must never read as "42 is all
+    // there is", so the total comes from a separate unbounded COUNT.
+    expect(page.total).toBe(42);
+    const counted = db.queries.find((q) => /count\(/iu.test(q.text));
+    expect(counted).toBeDefined();
+    expect(counted.text).not.toMatch(/LIMIT/iu);
+
+    // The count and the page must not share one values array. `fakeDb` records
+    // the array by reference, so if the page appended its LIMIT parameter to the
+    // count's array, the count would be recorded here carrying a parameter its
+    // SQL never references. That reads as a surplus bind — which real Postgres
+    // rejects outright — even when the live call happened to be well-formed.
+    expect(counted.values).toHaveLength(0);
+    expect(counted.values).not.toBe(db.queries.at(-1).values);
+  });
+
+  it("TC-MEMRESTORE-041 the restore UPDATE is fenced, preserves version, and touches nothing else", async () => {
+    const db = fakeDb({ "UPDATE memories": () => ({ rowCount: 1 }) });
+    const adapter = inactiveMemoryAdapter(db);
+    const ok = await adapter.restoreMemory({ id: "a-1", priorState: "archived", version: 7 });
+    expect(ok).toBe(true);
+    const { text, values } = db.queries.at(-1);
+
+    // Fenced on BOTH the observed state and version. Without the state
+    // predicate a row someone else already restored (and then edited) would be
+    // re-"restored" over their change; without the version predicate the write
+    // is unprotected in exactly the way #128 fixed for the merge path.
+    expect(text).toMatch(/state\s*=\s*\$\d/u);
+    expect(text).toMatch(/version\s*=\s*\$\d/u);
+    expect(values).toEqual(expect.arrayContaining(["a-1", "archived", 7]));
+
+    // `version` is the concurrency token #128's If-Match compares against.
+    // Restore changes no content, so bumping it would invalidate a concurrent
+    // writer's fence for nothing. Preserved, and asserted because either
+    // choice is defensible and silence is not (TC-MEMRESTORE-045).
+    expect(text).not.toMatch(/version\s*=\s*version\s*\+/u);
+
+    // `superseded_by` is PRESERVED for an archived row: it is the audit link to
+    // the winner and #103's handle on the pair. Clearing it would make a
+    // resurrected contradiction look like an ordinary independent memory.
+    expect(text).not.toMatch(/superseded_by\s*=/u);
+
+    // The embedding survived the soft delete, so restore must not clear or
+    // rewrite it — that would silently drop the row out of vector search while
+    // reporting a successful restore.
+    expect(text).not.toMatch(/embedding/iu);
+
+    // A lost fence is reported, not swallowed.
+    const stale = fakeDb({ "UPDATE memories": () => ({ rowCount: 0 }) });
+    expect(
+      await inactiveMemoryAdapter(stale).restoreMemory({ id: "a-1", priorState: "deleted", version: 1 }),
+    ).toBe(false);
+  });
+
+  it("TC-MEMRESTORE-045 the restore UPDATE sets exactly one column", async () => {
+    const db = fakeDb({ "UPDATE memories": () => ({ rowCount: 1 }) });
+    await inactiveMemoryAdapter(db).restoreMemory({ id: "a", priorState: "deleted", version: 1 });
+    const setClause = db.queries.at(-1).text.match(/SET([\s\S]*?)WHERE/iu)[1];
+    // Enumerated rather than spot-checked: a future edit that adds a column to
+    // the SET clause has to come through this assertion and say why.
+    expect(setClause.match(/\w+\s*=/gu).map((s) => s.replace(/\s*=$/u, ""))).toEqual(["state"]);
+    expect(setClause).toMatch(/'active'/u);
+  });
+
+  it("findByIds reads the pre-restore state, version, and updated_at for the log", async () => {
+    const db = fakeDb({ "FROM memories": () => ({ rows: [inactiveRow("d-1", "deleted")] }) });
+    await inactiveMemoryAdapter(db).findByIds(["d-1", "d-2"]);
+    const { text, values } = db.queries.at(-1);
+    // Parameterised as an array, never interpolated: ids come from an operator
+    // file, and this is a destructive tool holding a live database connection.
+    expect(text).toMatch(/id\s*=\s*ANY\s*\(\s*\$1\s*\)/u);
+    expect(values[0]).toEqual(["d-1", "d-2"]);
+    // The pre-restore `updated_at` cannot be recovered afterwards:
+    // trg_memories_updated is BEFORE UPDATE and unconditionally assigns NOW()
+    // (schema.sql 105-111), so it has to be read here.
+    for (const column of ["state", "version", "updated_at", "superseded_by"]) {
+      expect(text).toContain(column);
+    }
+    // Deliberately NOT scoped to inactive rows: an already-active id must come
+    // back so restore can report it as a no-op instead of "not found"
+    // (TC-MEMRESTORE-034 vs 035).
+    expect(text).not.toMatch(/state\s*(<>|!=)\s*'active'/u);
+  });
+});
+
+describe("--list-inactive", () => {
+  it("TC-MEMRESTORE-001 reports id, state, updated_at, superseded_by and a snippet, with zero writes", async () => {
+    const rows = [inactiveRow("d-1", "deleted"), inactiveRow("a-1", "archived")];
+    const db = fakeDb({
+      "count(": () => ({ rows: [{ total: "2" }] }),
+      "FROM memories": () => ({ rows }),
+    });
+    const deps = restoreDeps({ db });
+    const result = await runListInactive(restoreOpts(), deps);
+
+    expect(result.exitCode).toBe(0);
+    expect(result.rows).toHaveLength(2);
+    expect(result.rows[0]).toMatchObject({
+      id: "d-1",
+      state: "deleted",
+      superseded_by: null,
+      snippet: "fact about d-1",
+    });
+    expect(result.rows[0].updated_at).toBe("2026-06-01T09:00:00.000Z");
+    // The archived row carries its winner, which is what makes the --force
+    // refusal message in TC-040 actionable.
+    expect(result.rows[1]).toMatchObject({ state: "archived", superseded_by: "winner-of-a-1" });
+
+    // Read-only means read-only: a listing that mutated anything would be a
+    // recovery tool an operator cannot safely run against prod to look around.
+    expect(db.queries.every((q) => /^\s*SELECT/iu.test(q.text))).toBe(true);
+    expect(result.writes).toBe(0);
+    expect(deps.fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("TC-MEMRESTORE-003 an empty result says so instead of printing nothing", async () => {
+    const db = fakeDb({ "count(": () => ({ rows: [{ total: "0" }] }), "FROM memories": () => ({ rows: [] }) });
+    const deps = restoreDeps({ db });
+    const result = await runListInactive(restoreOpts(), deps);
+    expect(result.exitCode).toBe(0);
+    expect(result.rows).toHaveLength(0);
+    // A bare empty listing is indistinguishable from a broken query or a
+    // wrong-stage connection, which is the moment an operator most needs to
+    // know which one happened.
+    expect(deps.log).toHaveBeenCalledWith(expect.stringMatching(/no inactive memories/iu));
+  });
+
+  it("TC-MEMRESTORE-004 snippets are bounded, marked when truncated, and single-line", async () => {
+    const long = "x".repeat(400);
+    const db = fakeDb({
+      "count(": () => ({ rows: [{ total: "2" }] }),
+      "FROM memories": () => ({
+        rows: [
+          inactiveRow("long", "deleted", { content: long }),
+          inactiveRow("multi", "deleted", { content: "line one\nline two\nline three" }),
+        ],
+      }),
+    });
+    const result = await runListInactive(restoreOpts(), restoreDeps({ db }));
+    const [longRow, multiRow] = result.rows;
+    expect(longRow.snippet.length).toBeLessThanOrEqual(120);
+    expect(longRow.truncated).toBe(true);
+    // Unmarked truncation invites an operator to restore or discard a memory
+    // based on a sentence that was never the whole sentence.
+    expect(multiRow.truncated).toBe(false);
+    // One record per line keeps the output greppable; an embedded newline would
+    // split one memory across what looks like three records.
+    expect(multiRow.snippet).not.toContain("\n");
+    expect(multiRow.snippet).toContain("line one");
+  });
+
+  it("TC-MEMRESTORE-005 listing takes no lock, so two concurrent listings both succeed", async () => {
+    const db = fakeDb({ "count(": () => ({ rows: [{ total: "0" }] }), "FROM memories": () => ({ rows: [] }) });
+    const acquireMutex = vi.fn(async () => null);
+    const deps = restoreDeps({ db, acquireMutex });
+    const [a, b] = await Promise.all([
+      runListInactive(restoreOpts(), deps),
+      runListInactive(restoreOpts(), deps),
+    ]);
+    expect(a.exitCode).toBe(0);
+    expect(b.exitCode).toBe(0);
+    // Taking the shared apply mutex here would let a long weekly consolidation
+    // block an operator from even looking at what was deleted.
+    expect(acquireMutex).not.toHaveBeenCalled();
+  });
+
+  it("TC-MEMRESTORE-022 a truncated listing reports the total it was truncated from", async () => {
+    const db = fakeDb({
+      "count(": () => ({ rows: [{ total: "42" }] }),
+      "FROM memories": () => ({ rows: [inactiveRow("d-1", "deleted")] }),
+    });
+    const deps = restoreDeps({ db });
+    const result = await runListInactive(restoreOpts({ limit: 1 }), deps);
+    expect(result.total).toBe(42);
+    expect(deps.log).toHaveBeenCalledWith(expect.stringMatching(/1 of 42/u));
+  });
+
+  it("TC-MEMRESTORE-021 the output names updated_at as the column --since filtered", async () => {
+    const db = fakeDb({
+      "count(": () => ({ rows: [{ total: "1" }] }),
+      "FROM memories": () => ({ rows: [inactiveRow("d-1", "deleted")] }),
+    });
+    const deps = restoreDeps({ db });
+    await runListInactive(restoreOpts({ since: "2026-07-01T00:00:00Z" }), deps);
+    // Documenting the limitation in --help is not enough: the operator reading
+    // this listing is deciding what to restore from it, and a row deleted long
+    // ago but touched since is in the result set. `deleted_at` does not exist.
+    expect(deps.log).toHaveBeenCalledWith(
+      expect.stringMatching(/updated_at[\s\S]*deleted_at/u),
+    );
+  });
+
+  it("TC-MEMRESTORE-020/021 an empty listing echoes back the filters it applied", async () => {
+    const db = fakeDb({ "count(": () => ({ rows: [{ total: "0" }] }), "FROM memories": () => ({ rows: [] }) });
+    const deps = restoreDeps({ db });
+    await runListInactive(
+      restoreOpts({ state: "archived", since: "2026-07-01T00:00:00Z" }),
+      deps,
+    );
+    // "No results" plus the filters is diagnosable; "no results" alone leaves an
+    // operator unable to tell a too-narrow filter from an empty corpus.
+    const [message] = deps.log.mock.calls.at(-1);
+    expect(message).toMatch(/state=archived/u);
+    expect(message).toMatch(/since=2026-07-01T00:00:00Z/u);
+  });
+
+  it("TC-MEMRESTORE-023 one unreadable updated_at marks that row, and never kills the listing", async () => {
+    const db = fakeDb({
+      "count(": () => ({ rows: [{ total: "3" }] }),
+      "FROM memories": () => ({
+        rows: [
+          inactiveRow("d-1", "deleted"),
+          inactiveRow("d-bad", "deleted", { updated_at: "not a timestamp" }),
+          inactiveRow("d-3", "deleted"),
+        ],
+      }),
+    });
+    const deps = restoreDeps({ db });
+    // `new Date("not a timestamp").toISOString()` throws RangeError: Invalid
+    // time value — with no id, no column, and no row in the message. One
+    // unexpected value must not take down the operator's only view into
+    // inactive data, and the row it came from has to be identifiable.
+    const result = await runListInactive(restoreOpts(), deps);
+    expect(result.exitCode).toBe(0);
+    expect(result.rows.map((r) => r.id)).toEqual(["d-1", "d-bad", "d-3"]);
+    const bad = result.rows.find((r) => r.id === "d-bad");
+    expect(bad.updated_at).toBeNull();
+    expect(deps.log).toHaveBeenCalledWith(expect.stringMatching(/d-bad[\s\S]*updated_at/u));
+  });
+
+  it("TC-MEMRESTORE-024 a COUNT that answers nothing throws instead of printing 'of 0'", async () => {
+    // The denominator is the whole truncation signal: "listed 100 of 2811" is
+    // how an operator learns the page is partial. `?? 0` on a missing count row
+    // prints "listed 1 of 0" and exits 0 — a default masking a failed query,
+    // not an absent value.
+    const missing = fakeDb({ "count(": () => ({ rows: [] }), "FROM memories": () => ({ rows: [inactiveRow("d-1", "deleted")] }) });
+    await expect(runListInactive(restoreOpts(), restoreDeps({ db: missing }))).rejects.toThrow(/count/iu);
+
+    const renamed = fakeDb({ "count(": () => ({ rows: [{ tally: "7" }] }), "FROM memories": () => ({ rows: [inactiveRow("d-1", "deleted")] }) });
+    await expect(runListInactive(restoreOpts(), restoreDeps({ db: renamed }))).rejects.toThrow(/count/iu);
+  });
+
+  it("TC-MEMRESTORE-001 accepts a pre-built adapter, which is how the CLI supplies it", async () => {
+    // `recoveryDeps` spreads `inactiveMemoryAdapter(db)` into deps, so in
+    // production this branch is the ONLY one taken — untested, it would be the
+    // one seam that unit tests never reach.
+    const listInactive = vi.fn(async () => ({ rows: [inactiveRow("d-1", "deleted")], total: 1 }));
+    const result = await runListInactive(restoreOpts(), restoreDeps({ listInactive, db: undefined }));
+    expect(listInactive).toHaveBeenCalledOnce();
+    expect(result.rows[0].id).toBe("d-1");
+  });
+});
+
+describe("--restore", () => {
+  function idsFile(dir, ids) {
+    const path = join(dir, "ids.txt");
+    writeFileSync(path, `${ids.join("\n")}\n`);
+    return path;
+  }
+
+  function applyDeps(dir, rows, overrides = {}) {
+    const store = new Map(rows.map((r) => [r.id, { ...r }]));
+    const restoreMemory = vi.fn(async ({ id, priorState, version }) => {
+      const row = store.get(id);
+      if (!row || row.state !== priorState || row.version !== version) return false;
+      row.state = "active";
+      return true;
+    });
+    return {
+      store,
+      restoreMemory,
+      deps: restoreDeps({
+        outDir: dir,
+        lockFile: join(dir, "restore.lock"),
+        findByIds: vi.fn(async (ids) => ids.map((id) => store.get(id)).filter(Boolean)),
+        restoreMemory,
+        ...overrides,
+      }),
+    };
+  }
+
+  it("TC-MEMRESTORE-030 dry-run is the default: zero writes, full plan printed", async () => {
+    const dir = tempDir();
+    const { deps, store, restoreMemory } = applyDeps(dir, [inactiveRow("d-1", "deleted")]);
+    const result = await runRestore(
+      restoreOpts({ idsFile: idsFile(dir, ["d-1"]) }),
+      deps,
+    );
+    // Consistent with #102: the destructive verb is --apply, never the absence
+    // of a guard flag. An operator's first run must not change anything.
+    expect(restoreMemory).not.toHaveBeenCalled();
+    expect(store.get("d-1").state).toBe("deleted");
+    expect(result.exitCode).toBe(0);
+    expect(result.planned).toEqual(["d-1"]);
+    expect(deps.log).toHaveBeenCalledWith(expect.stringMatching(/dry-run/iu));
+  });
+
+  it("TC-MEMRESTORE-031 --apply flips listed ids to active, fenced on what was read", async () => {
+    const dir = tempDir();
+    const { deps, store, restoreMemory } = applyDeps(dir, [
+      inactiveRow("d-1", "deleted", { version: 4 }),
+      inactiveRow("d-2", "deleted", { version: 9 }),
+    ]);
+    const result = await runRestore(
+      restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-1", "d-2"]) }),
+      deps,
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.restored).toEqual(["d-1", "d-2"]);
+    expect(store.get("d-1").state).toBe("active");
+    expect(store.get("d-2").state).toBe("active");
+    // Each write carries the version and state that were actually observed for
+    // THAT row — not a shared or defaulted anchor.
+    expect(restoreMemory).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "d-1", priorState: "deleted", version: 4 }),
+    );
+    expect(restoreMemory).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "d-2", priorState: "deleted", version: 9 }),
+    );
+  });
+
+  it("TC-MEMRESTORE-032 cap reserves one mutation per id and aborts before overflowing", async () => {
+    const dir = tempDir();
+    const rows = ["d-1", "d-2", "d-3"].map((id) => inactiveRow(id, "deleted"));
+    const { deps, store, restoreMemory } = applyDeps(dir, rows);
+    const result = await runRestore(
+      restoreOpts({ apply: true, cap: 2, idsFile: idsFile(dir, ["d-1", "d-2", "d-3"]) }),
+      deps,
+    );
+    expect(result.exitCode).toBe(4);
+    expect(restoreMemory).toHaveBeenCalledTimes(2);
+    expect(store.get("d-3").state).toBe("deleted");
+    expect(result.capUsed).toBe(2);
+    // Silent truncation at the cap would read as "all three restored".
+    expect(deps.log).toHaveBeenCalledWith(expect.stringMatching(/cap/iu));
+    // The log is written even though the run aborted — this is the ONE run
+    // guaranteed to be partial, so it is the run whose record matters most. An
+    // early return on abort would lose the record of the ids that DID change.
+    const aborted = JSON.parse(readFileSync(result.logPath, "utf8"));
+    expect(aborted.entries.map((e) => e.id)).toEqual(["d-1", "d-2"]);
+    expect(aborted.entries.every((e) => e.outcome === "restored")).toBe(true);
+
+    // Exact hit (used == cap) is allowed, not off-by-one refused.
+    const dir2 = tempDir();
+    const exact = applyDeps(dir2, rows.map((r) => ({ ...r })));
+    const ok = await runRestore(
+      restoreOpts({ apply: true, cap: 3, idsFile: idsFile(dir2, ["d-1", "d-2", "d-3"]) }),
+      exact.deps,
+    );
+    expect(ok.exitCode).toBe(0);
+    expect(ok.capUsed).toBe(3);
+  });
+
+  it("TC-MEMRESTORE-033 a second concurrent restore refuses; a stale lock with a dead holder is reclaimed", async () => {
+    const dir = tempDir();
+    const lockFile = join(dir, "stage.lock");
+    const host = (await import("node:os")).hostname();
+    const rows = [inactiveRow("d-1", "deleted")];
+
+    writeFileSync(lockFile, JSON.stringify({ pid: 99999, host, at: Date.now() }));
+    const held = applyDeps(dir, rows, { lockFile, clock: () => Date.now() });
+    const blocked = await runRestore(
+      restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-1"]) }),
+      held.deps,
+    );
+    expect(blocked.exitCode).toBe(3);
+    expect(held.store.get("d-1").state).toBe("deleted");
+
+    writeFileSync(lockFile, JSON.stringify({ pid: 999999999, host, at: Date.now() - 3 * 3600 * 1000 }));
+    const stale = applyDeps(dir, rows, { lockFile, clock: () => Date.now() });
+    const reclaimed = await runRestore(
+      restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-1"]) }),
+      stale.deps,
+    );
+    // Without reclaim, one crashed run locks the operator out of recovery
+    // permanently — the worst possible time for that.
+    expect(reclaimed.exitCode).toBe(0);
+    expect(stale.store.get("d-1").state).toBe("active");
+  });
+
+  it("TC-MEMRESTORE-033 restore shares the database apply mutex with cleanup and consolidation", async () => {
+    const dir = tempDir();
+    const acquireMutex = vi.fn(async () => null);
+    const held = applyDeps(dir, [inactiveRow("d-1", "deleted")], { acquireMutex });
+    const blocked = await runRestore(
+      restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-1"]) }),
+      held.deps,
+    );
+    // A restore racing consolidation could re-activate the loser of a
+    // contradiction while #103 is mid-resolution on the same pair.
+    expect(acquireMutex).toHaveBeenCalledWith("test");
+    expect(blocked.exitCode).toBe(3);
+    expect(held.store.get("d-1").state).toBe("deleted");
+
+    const release = vi.fn(async () => {});
+    const ok = applyDeps(dir, [inactiveRow("d-1", "deleted")], {
+      acquireMutex: vi.fn(async () => ({ release })),
+    });
+    await runRestore(restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-1"]) }), ok.deps);
+    // Released even on the happy path, or the next weekly run finds it held.
+    expect(release).toHaveBeenCalledOnce();
+  });
+
+  it("TC-MEMRESTORE-033 the mutex is taken before the lockfile and released if the lockfile is held", async () => {
+    const dir = tempDir();
+    const lockFile = join(dir, "ordering.lock");
+    const host = (await import("node:os")).hostname();
+    // A live holder, so acquireLock fails and the run bails out AFTER the mutex
+    // was already taken.
+    writeFileSync(lockFile, JSON.stringify({ pid: process.pid, host, at: Date.now() }));
+
+    const order = [];
+    const release = vi.fn(async () => {
+      order.push("release");
+    });
+    const acquireMutex = vi.fn(async () => {
+      order.push("mutex");
+      return { release };
+    });
+    const ctx = applyDeps(dir, [inactiveRow("d-1", "deleted")], {
+      lockFile,
+      acquireMutex,
+      clock: () => Date.now(),
+    });
+    const result = await runRestore(
+      restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-1"]) }),
+      ctx.deps,
+    );
+    expect(result.exitCode).toBe(3);
+    // Bailing out on the lockfile while still holding the shared mutex blocks
+    // the next weekly consolidation until something else releases it — and
+    // nothing else will.
+    expect(release).toHaveBeenCalledOnce();
+    // Ordering, not just release: the mutex is acquired first, so a run that
+    // loses the lockfile race has already taken and given back the mutex.
+    expect(order).toEqual(["mutex", "release"]);
+
+    // And the same order in `runCleanup`, observed the same way. Two writers
+    // that acquire the same two locks in opposite orders deadlock; that failure
+    // appears only under real concurrency, never in CI, so both orders are
+    // pinned rather than left to match by luck.
+    const cleanupOrder = [];
+    const cleanupLock = join(dir, "cleanup-ordering.lock");
+    writeFileSync(cleanupLock, JSON.stringify({ pid: process.pid, host, at: Date.now() }));
+    const cleanupResult = await runCleanup(baseOpts({ apply: true }), {
+      ...baseDeps(fakeServer([memory("m-1", "x")]), fakeLlm([[]]), dir),
+      lockFile: cleanupLock,
+      clock: () => Date.now(),
+      acquireMutex: vi.fn(async () => {
+        cleanupOrder.push("mutex");
+        return { release: vi.fn(async () => cleanupOrder.push("release")) };
+      }),
+    });
+    expect(cleanupResult.exitCode).toBe(3);
+    expect(cleanupOrder).toEqual(["mutex", "release"]);
+  });
+
+  it("TC-MEMRESTORE-034 an already-active id is a reported no-op: exit 0, no write, no cap", async () => {
+    const dir = tempDir();
+    const { deps, restoreMemory } = applyDeps(dir, [inactiveRow("act-1", "active", { superseded_by: null })]);
+    const result = await runRestore(
+      restoreOpts({ apply: true, idsFile: idsFile(dir, ["act-1"]) }),
+      deps,
+    );
+    // Idempotence is what makes finishing a partially-applied restore safe.
+    // Treating this as an error would push an operator toward hand-written SQL.
+    expect(result.exitCode).toBe(0);
+    expect(result.alreadyActive).toEqual(["act-1"]);
+    expect(restoreMemory).not.toHaveBeenCalled();
+    expect(result.capUsed).toBe(0);
+    expect(deps.log).toHaveBeenCalledWith(expect.stringMatching(/act-1.*already active/iu));
+  });
+
+  it("TC-MEMRESTORE-035 an unknown id is reported, does not abort the rest, and changes the exit code", async () => {
+    const dir = tempDir();
+    const { deps, store } = applyDeps(dir, [inactiveRow("d-1", "deleted")]);
+    const result = await runRestore(
+      restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-1", "typo-1"]) }),
+      deps,
+    );
+    expect(store.get("d-1").state).toBe("active");
+    expect(result.notFound).toEqual(["typo-1"]);
+    // A typo must not be able to look like a clean run: the good ids still
+    // apply, but the exit code says the file was not fully honoured.
+    expect(result.exitCode).toBe(6);
+    expect(deps.log).toHaveBeenCalledWith(expect.stringMatching(/typo-1/u));
+  });
+
+  it("TC-MEMRESTORE-036 the decision log lands outside any checkout at 0600", async () => {
+    const dir = tempDir();
+    const { deps } = applyDeps(dir, [inactiveRow("d-1", "deleted")]);
+    const result = await runRestore(
+      restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-1"]) }),
+      deps,
+    );
+    const { statSync } = await import("node:fs");
+    expect(result.logPath.startsWith(dir)).toBe(true);
+    // The log holds memory snippets — instance-private data in a repo that is
+    // planned to be open-sourced.
+    expect(statSync(result.logPath).mode & 0o777).toBe(0o600);
+    expect(deps.log).toHaveBeenCalledWith(expect.stringContaining(result.logPath));
+  });
+
+  it("TC-MEMRESTORE-037 an ids file bound to another stage is refused before any read", async () => {
+    const dir = tempDir();
+    const path = join(dir, "prod-ids.json");
+    writeFileSync(path, JSON.stringify({ stage: "prod", ids: ["d-1"] }));
+    const { deps, restoreMemory } = applyDeps(dir, [inactiveRow("d-1", "deleted")]);
+    // Ids collide across stages, so a prod file replayed against preview would
+    // silently resurrect whatever happens to share those ids.
+    await expect(
+      runRestore(restoreOpts({ apply: true, idsFile: path }), deps),
+    ).rejects.toThrow(/stage/u);
+    expect(restoreMemory).not.toHaveBeenCalled();
+    expect(deps.findByIds).not.toHaveBeenCalled();
+  });
+
+  it("TC-MEMRESTORE-037 an empty ids file is an error, not a silent no-op run", async () => {
+    const dir = tempDir();
+    const path = join(dir, "empty.txt");
+    writeFileSync(path, "\n  \n");
+    const { deps } = applyDeps(dir, [inactiveRow("d-1", "deleted")]);
+    // "Restored 0 of 0" from a file the operator believed held ids is the
+    // report that ends with a second, hand-written attempt.
+    await expect(
+      runRestore(restoreOpts({ apply: true, idsFile: path }), deps),
+    ).rejects.toThrow(/no ids/iu);
+  });
+
+  it("TC-MEMRESTORE-039 a lost fence is reported as skipped, not counted as restored", async () => {
+    const dir = tempDir();
+    const { deps } = applyDeps(dir, [inactiveRow("d-1", "deleted")], {
+      restoreMemory: vi.fn(async () => false),
+    });
+    const result = await runRestore(
+      restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-1"]) }),
+      deps,
+    );
+    // rowCount 0 means the row moved between the read and the write. Counting
+    // it as restored would tell the operator a memory is back when it is not.
+    expect(result.restored).toEqual([]);
+    expect(result.fencedOut).toEqual(["d-1"]);
+    expect(result.exitCode).toBe(6);
+    // A fenced-out id is IN the log with its outcome, not omitted from it. A log
+    // that only records successes cannot answer "what did this run attempt",
+    // which is the question it exists for — and a run where every id fenced out
+    // still has to leave a record behind.
+    const logged = JSON.parse(readFileSync(result.logPath, "utf8"));
+    expect(logged.entries).toHaveLength(1);
+    expect(logged.entries[0]).toMatchObject({ id: "d-1", outcome: "fenced-out" });
+  });
+
+  it("TC-MEMRESTORE-047 a write that throws mid-run still leaves the log and the summary behind", async () => {
+    const dir = tempDir();
+    const outDir = join(dir, "logs");
+    const rows = ["d-1", "d-2", "d-3", "d-4"].map((id) => inactiveRow(id, "deleted"));
+    const store = new Map(rows.map((r) => [r.id, { ...r }]));
+    let calls = 0;
+    const ctx = applyDeps(dir, rows, {
+      outDir,
+      restoreMemory: vi.fn(async ({ id }) => {
+        calls += 1;
+        if (calls === 3) throw new Error("connection reset by peer");
+        store.get(id).state = "active";
+        return true;
+      }),
+    });
+    // The throw propagates — the run really did fail, and a destructive tool
+    // must not swallow that. What must NOT happen is that it takes the record
+    // of the two rows already flipped to active down with it: the operator's
+    // next move is reconstructing a half-applied run, and exit 1 with a bare
+    // stack tells them nothing was done.
+    await expect(
+      runRestore(restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-1", "d-2", "d-3", "d-4"]) }), ctx.deps),
+    ).rejects.toThrow(/connection reset/u);
+
+    const written = readdirSync(outDir).filter((f) => f.startsWith("restore-"));
+    expect(written).toHaveLength(1);
+    const logged = JSON.parse(readFileSync(join(outDir, written[0]), "utf8"));
+    expect(logged.entries.map((e) => e.id)).toEqual(["d-1", "d-2"]);
+    expect(ctx.deps.log).toHaveBeenCalledWith(expect.stringMatching(/apply done: restored=2/u));
+  });
+
+  it("TC-MEMRESTORE-048 a log that cannot be written degrades to the ids on stderr, never to silence", async () => {
+    const dir = tempDir();
+    // A file where a directory is expected: the ENOTDIR a typo'd --out gives,
+    // and the same shape a full disk gives at writeFileSync.
+    const blocker = join(dir, "not-a-dir");
+    writeFileSync(blocker, "x");
+    const ctx = applyDeps(dir, [inactiveRow("d-1", "deleted"), inactiveRow("d-2", "deleted")], {
+      outDir: join(blocker, "logs"),
+    });
+    const result = await runRestore(
+      restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-1", "d-2"]) }),
+      ctx.deps,
+    );
+    // Two rows ARE active. Losing the log AND the summary would leave the
+    // operator with an exception and no way to learn which ids moved, so the
+    // ids fall back to stderr and the exit code says the run needs attention.
+    expect(ctx.store.get("d-1").state).toBe("active");
+    expect(result.restored).toEqual(["d-1", "d-2"]);
+    expect(result.exitCode).toBe(1);
+    expect(result.logPath).toBeUndefined();
+    const failure = ctx.deps.log.mock.calls.flat().find((m) => /could not be written/iu.test(m));
+    expect(failure).toMatch(/d-1/u);
+    expect(failure).toMatch(/d-2/u);
+    // The fallback carries ids only. The entries hold memory snippets, and
+    // stderr on a scheduled task lands in CloudWatch — outside the 0600 file
+    // the snippets are supposed to stay in.
+    expect(failure).not.toMatch(/fact about/u);
+    expect(ctx.deps.log).toHaveBeenCalledWith(expect.stringMatching(/apply done: restored=2/u));
+  });
+
+  it("TC-MEMRESTORE-049 a failing lock or mutex release is logged and never replaces the real error", async () => {
+    const dir = tempDir();
+    const realFs = await import("node:fs");
+    const release = vi.fn(async () => {
+      throw new Error("Connection terminated unexpectedly");
+    });
+    const ctx = applyDeps(dir, [inactiveRow("d-1", "deleted")], {
+      fs: { ...realFs, rmSync: vi.fn(() => { throw new Error("EROFS: read-only file system"); }) },
+      acquireMutex: vi.fn(async () => ({ release })),
+      restoreMemory: vi.fn(async () => { throw new Error("connection reset by peer"); }),
+    });
+    // The mutex release runs `pg_advisory_unlock` on the SAME client the loop
+    // just died on, so it throws for the same reason — and an exception from a
+    // `finally` REPLACES the in-flight one. The operator would be told
+    // "Connection terminated unexpectedly" for a run that died of something
+    // else, with the real cause gone.
+    await expect(
+      runRestore(restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-1"]) }), ctx.deps),
+    ).rejects.toThrow(/connection reset by peer/u);
+    // ...and a lock that could not be removed must not skip the mutex release:
+    // a leaked advisory lock blocks the next weekly consolidation outright.
+    expect(release).toHaveBeenCalledOnce();
+    expect(ctx.deps.log).toHaveBeenCalledWith(expect.stringMatching(/EROFS/u));
+    expect(ctx.deps.log).toHaveBeenCalledWith(expect.stringMatching(/Connection terminated/u));
+  });
+
+  it("TC-MEMRESTORE-052 a dry-run whose plan exceeds --cap says so instead of exiting 0", async () => {
+    const dir = tempDir();
+    const ids = Array.from({ length: 5 }, (_, i) => `d-${i}`);
+    const ctx = applyDeps(dir, ids.map((id) => inactiveRow(id, "deleted")), {});
+    const result = await runRestore(
+      restoreOpts({ cap: 2, idsFile: idsFile(dir, ids) }),
+      ctx.deps,
+    );
+    // The dry run is where the operator decides. "would restore 5", exit 0,
+    // then --apply restores 2 and exits 4 is the plan reading as executable
+    // when it is not — the same class of defect as a silent truncation.
+    expect(result.exitCode).toBe(6);
+    expect(ctx.deps.log).toHaveBeenCalledWith(expect.stringMatching(/5[\s\S]*cap 2|cap 2[\s\S]*5/u));
+  });
+
+  it("TC-MEMRESTORE-053 a NULL updated_at is recorded as null, not as 1970", async () => {
+    const dir = tempDir();
+    const ctx = applyDeps(dir, [inactiveRow("d-1", "deleted", { updated_at: null })], {});
+    const result = await runRestore(
+      restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-1"]) }),
+      ctx.deps,
+    );
+    // `memories.updated_at` is nullable (schema.sql: TIMESTAMPTZ DEFAULT NOW(),
+    // no NOT NULL) and `new Date(null)` is epoch 0, not an error. This is the
+    // one field the log exists to preserve — #103's timeline gate reads it so a
+    // restore cannot be read as recency evidence, and a fabricated 1970 reads
+    // as maximally stale. An absent timestamp must look absent.
+    expect(result.restored).toEqual(["d-1"]);
+    const logged = JSON.parse(readFileSync(result.logPath, "utf8"));
+    expect(logged.entries[0].updatedAtBefore).toBeNull();
+  });
+
+  it("TC-MEMRESTORE-055 a NULL version is refused as unfenceable, not attempted and blamed on a race", async () => {
+    const dir = tempDir();
+    const ctx = applyDeps(dir, [
+      inactiveRow("d-1", "deleted", { version: null }),
+      inactiveRow("d-2", "deleted"),
+    ], {});
+    const result = await runRestore(
+      restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-1", "d-2"]) }),
+      ctx.deps,
+    );
+    // `version` is nullable in schema.sql too, and the NOT NULL only arrives via
+    // a migration guarded by `IF to_regclass('memories') IS NOT NULL`. In SQL
+    // `version = NULL` is never true, so the fence can never be satisfied: the
+    // row is unrestorable until the schema is fixed. Reporting that as "state or
+    // version changed since it was read" sends the operator into an unbounded
+    // retry loop against a row that cannot move.
+    expect(ctx.restoreMemory).not.toHaveBeenCalledWith(expect.objectContaining({ id: "d-1" }));
+    expect(result.restored).toEqual(["d-2"]);
+    expect(result.exitCode).toBe(6);
+    const message = ctx.deps.log.mock.calls.flat().find((m) => /d-1/u.test(m));
+    expect(message).toMatch(/version/u);
+    expect(message).not.toMatch(/changed since/u);
+  });
+
+  it("TC-MEMRESTORE-057 a JSON array ids file is rejected, not line-split into garbage", async () => {
+    const dir = tempDir();
+    const path = join(dir, "ids.json");
+    writeFileSync(path, '[\n  "m-1",\n  "m-2"\n]\n');
+    const ctx = applyDeps(dir, [inactiveRow("m-1", "deleted")], {});
+    // Line-splitting this yields ids of `[`, `"m-1",`, `"m-2"`, `]`, which
+    // present as "4 ids not found" — a format error disguised as a bad id list,
+    // and the operator's next guess is that the ids are wrong.
+    await expect(
+      runRestore(restoreOpts({ apply: true, idsFile: path }), ctx.deps),
+    ).rejects.toThrow(/array|one id per line|\{"stage"/u);
+    expect(ctx.restoreMemory).not.toHaveBeenCalled();
+  });
+
+  it("TC-MEMRESTORE-058 a fenced-out id does not consume cap", async () => {
+    const dir = tempDir();
+    const ctx = applyDeps(dir, [
+      inactiveRow("d-1", "deleted"),
+      inactiveRow("d-2", "deleted"),
+      inactiveRow("d-3", "deleted"),
+    ], {
+      restoreMemory: vi.fn(async ({ id }) => id !== "d-1"),
+    });
+    const result = await runRestore(
+      restoreOpts({ apply: true, cap: 2, idsFile: idsFile(dir, ["d-1", "d-2", "d-3"]) }),
+      ctx.deps,
+    );
+    // Same decision #102 already made for a fenced merge (TC-MEMCLEAN-043):
+    // charging a lost fence against the cap shrinks the blast-radius budget for
+    // work that never happened, and a mostly-fenced run could trip the exit-4
+    // abort having restored almost nothing. The cap is still checked BEFORE the
+    // write, so it cannot be overrun.
+    expect(result.capUsed).toBe(2);
+    expect(result.restored).toEqual(["d-2", "d-3"]);
+    expect(result.fencedOut).toEqual(["d-1"]);
+    expect(result.exitCode).toBe(6);
+  });
+
+  it("TC-MEMRESTORE-030 a dry-run that cannot fully honour the file still says so", async () => {
+    const dir = tempDir();
+    const { deps, restoreMemory } = applyDeps(dir, [inactiveRow("a-1", "archived")]);
+    const result = await runRestore(
+      restoreOpts({ idsFile: idsFile(dir, ["a-1", "typo-1"]) }),
+      deps,
+    );
+    // The dry run is where the operator decides whether to pass --apply. Exiting
+    // 0 here and 6 on apply would hide the refusal until after the decision.
+    expect(result.exitCode).toBe(6);
+    expect(result.refusedArchived).toEqual(["a-1"]);
+    expect(result.notFound).toEqual(["typo-1"]);
+    expect(restoreMemory).not.toHaveBeenCalled();
+    expect(deps.log).toHaveBeenCalledWith(
+      expect.stringMatching(/dry-run: would restore 0[\s\S]*archivedRefused=1/u),
+    );
+  });
+
+  it("TC-MEMRESTORE-037 a stage-matched JSON ids file is accepted and de-duplicated", async () => {
+    const dir = tempDir();
+    const path = join(dir, "ids.json");
+    // The form #102's own decision log emits, including a repeated id: charging
+    // the cap twice for one memory would abort a run that fits.
+    writeFileSync(path, JSON.stringify({ stage: "test", ids: ["d-1", "d-1", "d-2"] }));
+    const { deps, restoreMemory } = applyDeps(dir, [
+      inactiveRow("d-1", "deleted"),
+      inactiveRow("d-2", "deleted"),
+    ]);
+    const result = await runRestore(restoreOpts({ apply: true, idsFile: path }), deps);
+    expect(result.exitCode).toBe(0);
+    expect(result.restored).toEqual(["d-1", "d-2"]);
+    expect(restoreMemory).toHaveBeenCalledTimes(2);
+    expect(result.capUsed).toBe(2);
+  });
+
+  it("TC-MEMRESTORE-037 a JSON ids file for the right stage but with no ids array is an error", async () => {
+    const dir = tempDir();
+    const path = join(dir, "ids.json");
+    // A hand-edited or half-written log: the stage matches, so the guard passes,
+    // and the run would otherwise report a clean "restored 0 of 0".
+    writeFileSync(path, JSON.stringify({ stage: "test", decisions: [{ id: "d-1" }] }));
+    const { deps } = applyDeps(dir, [inactiveRow("d-1", "deleted")]);
+    await expect(
+      runRestore(restoreOpts({ apply: true, idsFile: path }), deps),
+    ).rejects.toThrow(/no ids/iu);
+    expect(deps.findByIds).not.toHaveBeenCalled();
+  });
+
+  it("TC-MEMRESTORE-032 a non-positive or non-finite --cap is refused before any read", async () => {
+    const dir = tempDir();
+    const { deps } = applyDeps(dir, [inactiveRow("d-1", "deleted")]);
+    // cap=0 must not read as "unbounded". A restore is a write path, so an
+    // unparseable bound has to stop the run, not default to one.
+    for (const cap of [0, -1, Number.NaN]) {
+      await expect(
+        runRestore(restoreOpts({ apply: true, cap, idsFile: idsFile(dir, ["d-1"]) }), deps),
+      ).rejects.toThrow(/cap/iu);
+    }
+    expect(deps.findByIds).not.toHaveBeenCalled();
+  });
+
+  it("TC-MEMRESTORE-031 accepts a pre-built adapter, which is how the CLI supplies it", async () => {
+    const dir = tempDir();
+    const store = new Map([["d-1", { ...inactiveRow("d-1", "deleted") }]]);
+    // Mirrors `recoveryDeps`: the adapter methods arrive spread onto deps with
+    // no `db`, so this is the shape production actually runs.
+    const deps = restoreDeps({
+      outDir: dir,
+      lockFile: join(dir, "restore.lock"),
+      findByIds: async (ids) => ids.map((id) => store.get(id)).filter(Boolean),
+      restoreMemory: async ({ id }) => {
+        store.get(id).state = "active";
+        return true;
+      },
+    });
+    const result = await runRestore(
+      restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-1"]) }),
+      deps,
+    );
+    expect(result.restored).toEqual(["d-1"]);
+    expect(store.get("d-1").state).toBe("active");
+  });
+
+  it("TC-MEMRESTORE-033 the lock and the shared mutex are released even when a write throws", async () => {
+    const dir = tempDir();
+    const lockFile = join(dir, "restore.lock");
+    const release = vi.fn(async () => {});
+    const { deps } = applyDeps(dir, [inactiveRow("d-1", "deleted")], {
+      lockFile,
+      acquireMutex: vi.fn(async () => ({ release })),
+      restoreMemory: vi.fn(async () => {
+        throw new Error("connection reset");
+      }),
+    });
+    await expect(
+      runRestore(restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-1"]) }), deps),
+    ).rejects.toThrow(/connection reset/u);
+    // A crashed apply that keeps the lock and the mutex locks the operator out
+    // of recovery and blocks the next weekly consolidation — at the worst time.
+    expect(existsSync(lockFile)).toBe(false);
+    expect(release).toHaveBeenCalledOnce();
+  });
+});
+
+describe("archived-vs-deleted separation", () => {
+  function idsFile(dir, ids) {
+    const path = join(dir, "ids.txt");
+    writeFileSync(path, `${ids.join("\n")}\n`);
+    return path;
+  }
+  function deps(dir, rows, overrides = {}) {
+    const store = new Map(rows.map((r) => [r.id, { ...r }]));
+    const restoreMemory = vi.fn(async ({ id, priorState, version }) => {
+      const row = store.get(id);
+      if (!row || row.state !== priorState || row.version !== version) return false;
+      row.state = "active";
+      return true;
+    });
+    return {
+      store,
+      restoreMemory,
+      deps: restoreDeps({
+        outDir: dir,
+        lockFile: join(dir, "restore.lock"),
+        findByIds: vi.fn(async (ids) => ids.map((id) => store.get(id)).filter(Boolean)),
+        restoreMemory,
+        ...overrides,
+      }),
+    };
+  }
+
+  it("TC-MEMRESTORE-059 a deleted row that still names a live winner is refused like an archived one", async () => {
+    const dir = tempDir();
+    // Reachable today, with only the two states: #103 archives a loser
+    // (superseded_by=winner-1) → an operator --force-restores it, and
+    // `superseded_by` is PRESERVED by design → a later #102 cleanup judges it
+    // DELETE, and the soft delete sets state='deleted' without touching
+    // superseded_by. The row is now `deleted` while still naming a live winner.
+    const ctx = deps(dir, [
+      inactiveRow("d-1", "deleted", { superseded_by: "winner-1" }),
+    ]);
+    const result = await runRestore(
+      restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-1"]) }),
+      ctx.deps,
+    );
+    // The hazard the gate exists to stop is "restoring this returns a memory
+    // that lost a contradiction while the winner is still active" — which is a
+    // statement about `superseded_by`, not about `state`. Keying on the state
+    // alone lets the row through at exit 0 with no warning, while the run's own
+    // log entry records the disqualifying fact.
+    expect(ctx.restoreMemory).not.toHaveBeenCalled();
+    expect(result.refusedArchived).toEqual(["d-1"]);
+    expect(result.exitCode).toBe(6);
+    expect(ctx.deps.log).toHaveBeenCalledWith(expect.stringContaining("winner-1"));
+  });
+
+  it("TC-MEMRESTORE-060 --force names every superseded id it is about to resurrect, on the dry run", async () => {
+    const dir = tempDir();
+    const ctx = deps(dir, [
+      inactiveRow("a-1", "archived"),
+      inactiveRow("a-2", "archived"),
+      inactiveRow("d-1", "deleted"),
+    ]);
+    const result = await runRestore(
+      restoreOpts({ force: true, idsFile: idsFile(dir, ["a-1", "a-2", "d-1"]) }),
+      ctx.deps,
+    );
+    // --force is per-run, never per id (by design), so an operator who adds it
+    // for ONE known-archived id silently consents for every other archived id in
+    // the same file. The dry run is where that decision is made, so it is where
+    // the names have to appear — after the write is too late.
+    expect(result.exitCode).toBe(0);
+    expect(result.planned).toEqual(["a-1", "a-2", "d-1"]);
+    for (const id of ["a-1", "a-2"]) {
+      expect(ctx.deps.log).toHaveBeenCalledWith(
+        expect.stringMatching(new RegExp(`${id}[\\s\\S]*winner-of-${id}`, "u")),
+      );
+    }
+    expect(ctx.deps.log).toHaveBeenCalledWith(expect.stringMatching(/archivedForced=2/u));
+    expect(ctx.restoreMemory).not.toHaveBeenCalled();
+  });
+
+  it("TC-MEMRESTORE-040 an archived id without --force is refused, names the winner, writes nothing", async () => {
+    const dir = tempDir();
+    const ctx = deps(dir, [inactiveRow("a-1", "archived")]);
+    const result = await runRestore(
+      restoreOpts({ apply: true, idsFile: idsFile(dir, ["a-1"]) }),
+      ctx.deps,
+    );
+    // Restoring the loser of a contradiction while the winner is still active
+    // puts two directly contradictory memories back in search — the exact
+    // defect #103 exists to remove. It must not happen by default.
+    expect(ctx.restoreMemory).not.toHaveBeenCalled();
+    expect(ctx.store.get("a-1").state).toBe("archived");
+    expect(result.refusedArchived).toEqual(["a-1"]);
+    expect(result.exitCode).toBe(6);
+    // The winner's id is the fact the decision turns on, so the refusal has to
+    // carry it: "use --force" alone tells the operator nothing.
+    expect(ctx.deps.log).toHaveBeenCalledWith(expect.stringContaining("winner-of-a-1"));
+    expect(ctx.deps.log).toHaveBeenCalledWith(expect.stringMatching(/--force/u));
+  });
+
+  it("TC-MEMRESTORE-041 --force restores the archived row, preserves superseded_by, still warns", async () => {
+    const dir = tempDir();
+    const ctx = deps(dir, [inactiveRow("a-1", "archived", { version: 5 })]);
+    const result = await runRestore(
+      restoreOpts({ apply: true, force: true, idsFile: idsFile(dir, ["a-1"]) }),
+      ctx.deps,
+    );
+    expect(result.exitCode).toBe(0);
+    expect(result.restored).toEqual(["a-1"]);
+    expect(ctx.store.get("a-1").state).toBe("active");
+    // Preserved: it is the audit link, and #103's re-resolution needs the pair.
+    expect(ctx.store.get("a-1").superseded_by).toBe("winner-of-a-1");
+    expect(ctx.restoreMemory).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "a-1", priorState: "archived", version: 5 }),
+    );
+    // --force suppresses the refusal, not the warning: the operator has just
+    // put a known contradiction back and the log has to say so.
+    expect(ctx.deps.log).toHaveBeenCalledWith(expect.stringContaining("winner-of-a-1"));
+  });
+
+  it("TC-MEMRESTORE-042 a mixed file restores the deleted ids and refuses EVERY archived one", async () => {
+    const dir = tempDir();
+    // TWO archived ids, deliberately. With only one, a refusal that applies to
+    // the first archived id and then silently lets the rest through is
+    // invisible — the per-id gate and a first-one-only gate agree on a
+    // single-archived file. That is the whole "--force never leaks" claim, so
+    // the case has to be able to see the difference.
+    const ctx = deps(dir, [
+      inactiveRow("d-1", "deleted"),
+      inactiveRow("a-1", "archived"),
+      inactiveRow("d-2", "deleted"),
+      inactiveRow("a-2", "archived"),
+    ]);
+    const result = await runRestore(
+      restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-1", "a-1", "d-2", "a-2"]) }),
+      ctx.deps,
+    );
+    expect(result.restored).toEqual(["d-1", "d-2"]);
+    expect(result.refusedArchived).toEqual(["a-1", "a-2"]);
+    expect(ctx.store.get("a-1").state).toBe("archived");
+    expect(ctx.store.get("a-2").state).toBe("archived");
+    // --force is per run and never inferred: if one archived id in a file could
+    // imply consent for the batch, the flag would protect nothing.
+    expect(result.exitCode).toBe(6);
+    // Both groups reported, so the operator does not have to diff the file
+    // against the store to learn what happened.
+    expect(result.restored).not.toContain("a-1");
+    expect(result.restored).not.toContain("a-2");
+    expect(ctx.restoreMemory).toHaveBeenCalledTimes(2);
+    // Each refusal names its own winner: one message covering "some archived
+    // ids" would leave the operator to work out which.
+    for (const id of ["a-1", "a-2"]) {
+      expect(ctx.deps.log).toHaveBeenCalledWith(expect.stringContaining(`winner-of-${id}`));
+    }
+  });
+
+  it("TC-MEMRESTORE-046 an unrecognised state is refused, not silently restored", async () => {
+    const dir = tempDir();
+    // Only `deleted` and `archived` exist today, so this is latent — but the
+    // whole premise of this feature is that the inactive states are NOT
+    // interchangeable, and a gate that names one state and lets everything else
+    // through treats the next one as the permissive case. A future `purged` or
+    // `quarantined` must arrive as a refusal that an operator reads, not as a
+    // restore nobody asked for.
+    const ctx = deps(dir, [
+      inactiveRow("d-1", "deleted"),
+      inactiveRow("p-1", "purged"),
+    ]);
+    const result = await runRestore(
+      restoreOpts({ apply: true, force: true, idsFile: idsFile(dir, ["d-1", "p-1"]) }),
+      ctx.deps,
+    );
+    expect(result.restored).toEqual(["d-1"]);
+    expect(ctx.store.get("p-1").state).toBe("purged");
+    // --force is consent to resurrect a contradiction loser, not blanket
+    // consent for a state this tool has never been taught to reason about.
+    expect(result.refusedUnknownState).toEqual(["p-1"]);
+    expect(result.exitCode).toBe(6);
+    expect(ctx.deps.log).toHaveBeenCalledWith(
+      expect.stringMatching(/p-1[\s\S]*purged[\s\S]*not a state this tool/u),
+    );
+  });
+
+  it("TC-MEMRESTORE-043 the log records the prior state and the pre-restore updated_at", async () => {
+    const dir = tempDir();
+    const ctx = deps(dir, [
+      inactiveRow("d-1", "deleted", { updated_at: new Date("2025-11-02T03:04:05Z") }),
+      inactiveRow("a-1", "archived"),
+    ]);
+    const result = await runRestore(
+      restoreOpts({ apply: true, force: true, idsFile: idsFile(dir, ["d-1", "a-1"]) }),
+      ctx.deps,
+    );
+    const logged = JSON.parse(readFileSync(result.logPath, "utf8"));
+    expect(logged.stage).toBe("test");
+    const byId = Object.fromEntries(logged.entries.map((e) => [e.id, e]));
+    // trg_memories_updated has already overwritten the row's updated_at with
+    // NOW() by the time this file is read back, so this is the only surviving
+    // record of how old the memory really is — and #103's timeline gate must
+    // read the real age, not mistake a restore for recency evidence.
+    expect(byId["d-1"]).toMatchObject({
+      priorState: "deleted",
+      updatedAtBefore: "2025-11-02T03:04:05.000Z",
+      outcome: "restored",
+    });
+    expect(byId["a-1"]).toMatchObject({
+      priorState: "archived",
+      supersededBy: "winner-of-a-1",
+      forced: true,
+    });
+  });
+
+  it("TC-MEMRESTORE-040/041 an archived row with no recorded winner still refuses, and still warns", async () => {
+    const dir = tempDir();
+    // Archived with a null `superseded_by`: the column is nullable, so this is
+    // representable, and it is the case where the operator has the LEAST
+    // information. Falling through to a silent restore would be backwards.
+    const rows = () => [inactiveRow("a-1", "archived", { superseded_by: null })];
+    const refused = deps(dir, rows());
+    const blocked = await runRestore(
+      restoreOpts({ apply: true, idsFile: idsFile(dir, ["a-1"]) }),
+      refused.deps,
+    );
+    expect(blocked.refusedArchived).toEqual(["a-1"]);
+    expect(refused.restoreMemory).not.toHaveBeenCalled();
+    // "superseded by null" or "superseded by undefined" reads as a bug and tells
+    // the operator nothing; it has to say the winner was not recorded.
+    expect(refused.deps.log).toHaveBeenCalledWith(
+      expect.stringMatching(/a-1: archived[\s\S]*unrecorded winner/u),
+    );
+
+    const dir2 = tempDir();
+    const forced = deps(dir2, rows());
+    const result = await runRestore(
+      restoreOpts({ apply: true, force: true, idsFile: idsFile(dir2, ["a-1"]) }),
+      forced.deps,
+    );
+    expect(result.restored).toEqual(["a-1"]);
+    // Emitted during planning (so the dry run carries it too, TC-060), which is
+    // why this reads "will be restored" rather than "restored".
+    expect(forced.deps.log).toHaveBeenCalledWith(
+      expect.stringMatching(/restored under --force[\s\S]*unrecorded winner/u),
+    );
+    const logged = JSON.parse(readFileSync(result.logPath, "utf8"));
+    expect(logged.entries[0]).toMatchObject({ supersededBy: null, forced: true });
+  });
+
+  it("TC-MEMRESTORE-036/043 a row with no content logs an empty snippet rather than crashing", async () => {
+    const dir = tempDir();
+    // `content` is not part of the fence and a row could be read with it absent;
+    // a TypeError here would abort the whole run after some ids were written.
+    const ctx = deps(dir, [inactiveRow("d-1", "deleted", { content: undefined })]);
+    const result = await runRestore(
+      restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-1"]) }),
+      ctx.deps,
+    );
+    expect(result.restored).toEqual(["d-1"]);
+    expect(JSON.parse(readFileSync(result.logPath, "utf8")).entries[0].snippet).toBe("");
+  });
+
+  it("TC-MEMRESTORE-044 restore issues no embedding request over any route", async () => {
+    const dir = tempDir();
+    // Driven through the REAL adapter over a fake `db`, not through injected
+    // method spies: that is what makes the SQL inspectable below.
+    const db = fakeDb({
+      "UPDATE memories": () => ({ rowCount: 1 }),
+      "FROM memories": () => ({ rows: [inactiveRow("d-1", "deleted")] }),
+    });
+    // `runRestore` never receives `fetchImpl`, so asserting that an injected spy
+    // went uncalled is true by construction and proves nothing. Close the routes
+    // a re-embed could actually take instead: the global fetch (what a bare
+    // `fetch(...)` resolves to), and the SQL itself.
+    const globalFetch = vi.fn(async () => {
+      throw new Error("restore must not make network calls");
+    });
+    vi.stubGlobal("fetch", globalFetch);
+    let result;
+    try {
+      result = await runRestore(
+        restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-1"]) }),
+        restoreDeps({ outDir: dir, lockFile: join(dir, "restore.lock"), db }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
+    expect(result.restored).toEqual(["d-1"]);
+    // The row was never removed and `vector(1024)` is still populated, so a
+    // re-embed would burn inference cost and could shift the vector under a
+    // different model version than the rest of the corpus.
+    expect(globalFetch).not.toHaveBeenCalled();
+    // Nor via SQL: no statement this run issued so much as mentions the column,
+    // and the run did issue statements (otherwise this loop is vacuous). The
+    // live round trip confirmed the vector is byte-identical across a restore;
+    // this is the assertion that keeps it that way in CI.
+    expect(db.queries.length).toBeGreaterThan(0);
+    for (const q of db.queries) {
+      expect(q.text).not.toMatch(/embedding/iu);
+    }
+  });
+});
+
+describe("shared apply mutex key", () => {
+  it("TC-MEMRESTORE-033 restore, cleanup, and consolidation derive one key per stage", async () => {
+    // The mutex is an advisory lock over `hashtextextended(key)`, so it only
+    // serialises the three writers if all three derive the SAME string. This is
+    // imported by memory-consolidation.mjs and used by restore's --apply, and
+    // nothing else would fail if a caller drifted to its own literal — the locks
+    // would simply stop colliding, silently.
+    const { sharedCleanupMutexKey } = await import("./memory-cleanup.mjs");
+    expect(sharedCleanupMutexKey("prod")).toBe("mem9-cleanup:prod");
+    // Stage-scoped: a preview apply must never block a prod apply.
+    expect(sharedCleanupMutexKey("preview")).not.toBe(sharedCleanupMutexKey("prod"));
+
+    const consolidation = readFileSync("scripts/memory-consolidation.mjs", "utf8");
+    expect(consolidation).toMatch(/sharedCleanupMutexKey/u);
+    expect(consolidation).not.toMatch(/["'`]mem9-cleanup:/u);
+  });
+});
+
+describe("restore CLI validation", () => {
+  it("TC-MEMRESTORE-050 rejects mode conflicts, a missing --ids, and misapplied filters", () => {
+    expect(parseArgs(["--stage", "test", "--list-inactive"])).toMatchObject({ listInactive: true });
+    expect(
+      parseArgs(["--stage", "test", "--restore", "--ids", "a.txt", "--force"]),
+    ).toMatchObject({ restore: true, idsFile: "a.txt", force: true });
+
+    // One mode per run: with both flags it is not knowable whether --apply was
+    // meant to write.
+    expect(() => parseArgs(["--stage", "test", "--list-inactive", "--restore", "--ids", "a.txt"])).toThrow(
+      /one of --list-inactive or --restore/u,
+    );
+    expect(() => parseArgs(["--stage", "test", "--restore"])).toThrow(/--restore requires --ids/u);
+    // Silently ignoring a filter on --restore is the dangerous reading: an
+    // operator who believes --state narrowed the run would restore more than
+    // they intended.
+    for (const filter of [["--state", "deleted"], ["--since", "2026-01-01T00:00:00Z"], ["--limit", "5"]]) {
+      expect(() =>
+        parseArgs(["--stage", "test", "--restore", "--ids", "a.txt", ...filter]),
+      ).toThrow(new RegExp(`${filter[0]}.*--list-inactive|--restore.*${filter[0]}`, "u"));
+    }
+    // --force only means anything for --restore.
+    expect(() => parseArgs(["--stage", "test", "--list-inactive", "--force"])).toThrow(/--force/u);
+  });
+
+  it("TC-MEMRESTORE-020/021/022 validates --state, --since, and --limit values", () => {
+    expect(parseArgs(["--stage", "test", "--list-inactive", "--state", "archived"])).toMatchObject({
+      state: "archived",
+    });
+    // An unrecognised --state must not fall through to "return everything":
+    // a typo'd filter that silently widens the listing is how an operator ends
+    // up reviewing the active corpus and restoring something never deleted.
+    expect(() => parseArgs(["--stage", "test", "--list-inactive", "--state", "purged"])).toThrow(
+      /deleted\|archived|archived\|deleted/u,
+    );
+    expect(() => parseArgs(["--stage", "test", "--list-inactive", "--state", "active"])).toThrow();
+    expect(() => parseArgs(["--stage", "test", "--list-inactive", "--since", "yesterday"])).toThrow(
+      /ISO/iu,
+    );
+    expect(
+      parseArgs(["--stage", "test", "--list-inactive", "--since", "2026-07-01T00:00:00Z"]),
+    ).toMatchObject({ since: "2026-07-01T00:00:00Z" });
+    expect(() => parseArgs(["--stage", "test", "--list-inactive", "--limit", "0"])).toThrow(/positive/u);
+    expect(() => parseArgs(["--stage", "test", "--list-inactive", "--limit", "abc"])).toThrow(/positive/u);
+  });
+
+  it("TC-MEMRESTORE-054 every flag is rejected outside the mode it belongs to", () => {
+    // Table-driven off the same `mode` field the parser reads, so a flag added to
+    // ARG_SPECS without a mode fails here rather than being silently accepted in
+    // all three modes. The rationale the parser already states for --state — an
+    // operator who believes a flag narrowed the run acts on that belief — does
+    // not stop applying at the flags that happen to have been thought of.
+    const base = { cleanup: ["--stage", "test"], list: ["--stage", "test", "--list-inactive"], restore: ["--stage", "test", "--restore", "--ids", "a.txt"] };
+    const sample = { number: "5", iso: "2026-01-01T00:00:00Z" };
+    for (const [flag, spec] of Object.entries(ARG_SPECS)) {
+      if (flag === "--help") continue;
+      const value = spec.flag ? [] : [spec.choices ? spec.choices[0] : spec.number ? sample.number : spec.iso ? sample.iso : "x"];
+      const modes = spec.mode ?? ["cleanup", "list", "restore"];
+      expect(Array.isArray(modes), `${flag} has no mode declared in ARG_SPECS`).toBe(true);
+      for (const [mode, argv] of Object.entries(base)) {
+        // A flag that IS its own mode selector is excluded: passing --restore in
+        // "restore" mode is the mode, not a misapplied flag.
+        if (["--list-inactive", "--restore"].includes(flag)) continue;
+        if (modes.includes(mode)) continue;
+        expect(
+          () => parseArgs([...argv, flag, ...value]),
+          `${flag} should be rejected in ${mode} mode`,
+        ).toThrow(flag);
+      }
+    }
+    // The specific combinations both reviewers reached for by hand.
+    expect(() => parseArgs(["--stage", "test", "--list-inactive", "--apply"])).toThrow(/--apply/u);
+    expect(() => parseArgs(["--stage", "test", "--restore", "--ids", "a.txt", "--decisions", "d.json"])).toThrow(
+      /--decisions/u,
+    );
+    // ...and the modes each flag DOES belong to still parse.
+    expect(parseArgs([...base.list, "--limit", "5"])).toMatchObject({ limit: 5 });
+    expect(parseArgs([...base.restore, "--apply", "--force"])).toMatchObject({ apply: true, force: true });
+    expect(parseArgs([...base.cleanup, "--decisions", "d.json"])).toMatchObject({ decisionsFile: "d.json" });
+  });
+
+  it("TC-MEMRESTORE-056 --limit and --cap reject non-integers Postgres would refuse", () => {
+    // `LIMIT $n` takes a bigint bind, so a fractional value fails at the server
+    // after the connection, the SSM reads, and the secret fetch have all
+    // happened. A count of memories is a count; reject it at the boundary.
+    for (const bad of ["5.5", "1e30", "Infinity"]) {
+      expect(() => parseArgs(["--stage", "test", "--list-inactive", "--limit", bad])).toThrow(/--limit/u);
+      expect(() => parseArgs(["--stage", "test", "--cap", bad])).toThrow(/--cap/u);
+    }
+    expect(parseArgs(["--stage", "test", "--list-inactive", "--limit", "250"])).toMatchObject({ limit: 250 });
+    // --lock-ttl is genuinely fractional (a 0.5-hour TTL is meaningful), so it
+    // must NOT be swept into the same rule.
+    expect(parseArgs(["--stage", "test", "--lock-ttl", "0.5"])).toMatchObject({ lockTtlHours: 0.5 });
+  });
+
+  it("TC-MEMRESTORE-051 --help documents dry-run as the default and --force as archived-only", () => {
+    expect(parseArgs(["--help"])).toMatchObject({ help: true });
+    // --help must not require --stage: an operator reaching for it does not
+    // yet know the invocation.
+    for (const flag of Object.keys(ARG_SPECS)) {
+      expect(USAGE, `${flag} is undocumented`).toContain(flag);
+    }
+    expect(USAGE).toMatch(/--restore[\s\S]*dry-run|dry-run[\s\S]*--restore/u);
+    // Case-insensitive: the assertion is that the --force entry names the state
+    // it gates, not how the prose capitalises it.
+    expect(USAGE).toMatch(/--force[\s\S]{0,200}archived/iu);
+    // There is no memories.deleted_at, so --since cannot mean "deleted since".
+    // Documenting that is the difference between a filter an operator trusts
+    // and one they misread.
+    expect(USAGE).toMatch(/--since[\s\S]{0,200}updated_at/u);
+  });
+
+  it("TC-MEMRESTORE-061 the CLI never truncates its own output through a pipe", async () => {
+    // The only case in this file that needs a real process: `process.exit()`
+    // discards writes still queued in a pipe, and no in-process test can observe
+    // that. A `--list-inactive` of 1000 rows through `| cat` loses its tail rows
+    // AND the "listed N of TOTAL" trailer — the sole signal that the page was
+    // truncated — so a partial listing reads as complete, nondeterministically.
+    // The listing itself needs a database, so this drives the same exit path
+    // through --help, which writes a comparable volume and needs nothing.
+    const { execFileSync } = await import("node:child_process");
+    const script = new URL("./memory-cleanup.mjs", import.meta.url).pathname;
+    // Every run, not one: the defect is a race, and a single green run is what
+    // makes it look fixed. `sh -c` with a pipe is what puts stdout on a pipe
+    // rather than on the test's own fd.
+    for (let i = 0; i < 5; i += 1) {
+      const piped = execFileSync("sh", ["-c", `node ${script} --help | cat`], { encoding: "utf8" });
+      expect(piped, `run ${i} was truncated`).toContain(USAGE.trimEnd());
+    }
+    // ...and the source has no `process.exit(` left to reintroduce it. Behaviour
+    // above is the real assertion; this pins the mechanism so the next exit site
+    // added to the CLI has to make the same decision deliberately.
+    const code = readFileSync(script, "utf8")
+      .split("\n")
+      .filter((line) => !/^\s*(\/\/|\*|\/\*)/u.test(line))
+      .join("\n");
+    expect(code).not.toMatch(/process\.exit\(/u);
   });
 });

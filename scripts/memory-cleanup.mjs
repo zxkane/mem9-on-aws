@@ -68,6 +68,10 @@ const UNCLASSIFIED_REASON = "classification failed after retry";
 const HOUR_MS = 3600 * 1000;
 const DEFAULT_LOCK_TTL_MS = 2 * HOUR_MS;
 const SNIPPET_LEN = 120;
+// The two inactive states, and the only values --state accepts. They are NOT
+// interchangeable: see `inactiveMemoryAdapter` and issue #124.
+const INACTIVE_STATES = ["deleted", "archived"];
+const DEFAULT_LIST_LIMIT = 100;
 
 export function sharedCleanupMutexKey(stage) {
   return `mem9-cleanup:${stage}`;
@@ -1017,33 +1021,646 @@ export function buildCompleteChat(opts, deps) {
 }
 
 // ---------------------------------------------------------------------------
+// Inactive listing & restore (issue #124)
+
+/**
+ * SQL access to memories the REST API cannot see.
+ *
+ * Not a stylistic choice: upstream's GetByID and list handler both select
+ * `WHERE state = 'active'`, so a soft-deleted or archived row 404s on the REST
+ * surface and never appears in a listing. There is no REST route that reaches
+ * them, and forking mem9 to add one would be a far larger change than reusing
+ * the `pg` client this file already opens for the shared apply mutex. #103 goes
+ * direct to Aurora for the same reason — its `archiveMemory` WRITES
+ * `state='archived'`, a transition the REST surface cannot express. It never
+ * reads an archived row: its predicate is `AND loser.state = 'active'`.
+ *
+ * `deleted` and `archived` are DIFFERENT states with different meanings:
+ *   deleted  — #102 judged the memory not worth keeping. No `superseded_by`.
+ *   archived — #103 resolved a contradiction against it. `superseded_by` names
+ *              the winner, which is still active.
+ * Restoring an archived row therefore puts a known contradiction back into
+ * search alongside its winner, which is the defect #103 exists to remove. The
+ * two states share one `UPDATE` but never one DECISION: `runRestore` branches
+ * before planning, and the gate is `superseded_by` as much as the state
+ * (TC-MEMRESTORE-042, TC-MEMRESTORE-059).
+ */
+export function inactiveMemoryAdapter(db) {
+  // Every column is load-bearing downstream: `version` is the fence value,
+  // `superseded_by` drives the archived refusal, `updated_at` is the only
+  // pre-restore age the decision log can record, and `content` is the snippet an
+  // operator reviews.
+  const READ_COLUMNS =
+    "id, content, state, version, updated_at, superseded_by";
+  return {
+    listInactive: async ({ state, since, limit } = {}) => {
+      const where = [];
+      // Built once and then COPIED per statement. Sharing one mutable array
+      // across the count and the page would make each query's parameter list
+      // depend on when the other happened to read it. `pg` uses the extended
+      // protocol, which rejects a surplus bind outright ("bind message supplies
+      // 2 parameters, but prepared statement \"\" requires 1"), so the aliasing
+      // would surface as a runtime error rather than as a wrong number.
+      const filters = [];
+      if (state) {
+        where.push(`state = $${filters.push(state)}`);
+      } else {
+        // Never a bare `SELECT ... FROM memories`: with no --state this must
+        // still exclude active rows, or "list what was deleted" would dump the
+        // entire corpus.
+        where.push("state <> 'active'");
+      }
+      // `updated_at` is the only timestamp that MOVES on deletion — there is no
+      // `memories.deleted_at` (only `tenants` has one). (`created_at` exists but
+      // records insertion.) So this filters when the row was last touched, which
+      // for a soft-deleted row is the deletion time only if nothing has touched
+      // it since. Surfaced in the output and in --help rather than left for the
+      // operator to infer.
+      if (since) where.push(`updated_at >= $${filters.push(since)}`);
+      const clause = `WHERE ${where.join(" AND ")}`;
+
+      // Counted unbounded and separately from the page: reporting "10 of 10"
+      // for a capped listing would make a silent truncation read as complete.
+      const counted = await db.query(
+        `SELECT count(*)::bigint AS total FROM memories ${clause}`,
+        [...filters],
+      );
+      const page = await db.query(
+        `SELECT ${READ_COLUMNS}
+           FROM memories ${clause}
+          ORDER BY updated_at DESC, id
+          LIMIT $${filters.length + 1}`,
+        [...filters, limit ?? DEFAULT_LIST_LIMIT],
+      );
+      // No `?? 0`. This number is the entire truncation signal — "listed 100 of
+      // 2811" is how an operator learns the page is partial — so a count query
+      // that answered nothing must fail loudly rather than default to a
+      // denominator that makes any page look complete.
+      const total = Number(counted.rows[0]?.total);
+      if (!Number.isFinite(total)) {
+        throw new Error(
+          `inactive count query returned no usable total: ${JSON.stringify(counted.rows[0] ?? null)}`,
+        );
+      }
+      return { rows: page.rows, total };
+    },
+
+    // Deliberately NOT scoped to inactive rows: an already-active id must come
+    // back so restore can report it as an idempotent no-op rather than as
+    // "not found", which is what lets an operator finish a half-applied run.
+    findByIds: async (ids) => {
+      const result = await db.query(
+        `SELECT ${READ_COLUMNS} FROM memories WHERE id = ANY($1)`,
+        [ids],
+      );
+      return result.rows;
+    },
+
+    /**
+     * Flip one row back to active, fenced on the state AND version that were
+     * read. Returns false when the fence loses, so the caller reports a skip
+     * instead of claiming a restore that did not happen.
+     *
+     * Sets exactly one column, and each omission is load-bearing:
+     *  - `version` is preserved. It is the concurrency token #128's `If-Match`
+     *    compares against; restore changes no content, so bumping it would
+     *    invalidate a concurrent writer's fence for nothing.
+     *  - `superseded_by` is preserved. It is the audit link to the winner, and
+     *    this tool's own gate reads it (TC-MEMRESTORE-059); clearing it would
+     *    make a resurrected contradiction look like an ordinary independent
+     *    memory. #103 only ever writes the column — `listActiveMemories` does not
+     *    project it — so a restored loser re-enters clustering by embedding
+     *    similarity, not by this link.
+     *  - `embedding` is untouched. The row was never removed, so `vector(1024)`
+     *    still holds the original embedding — rewriting it would burn inference
+     *    cost and could shift the vector under a different model version.
+     *  - `updated_at` cannot be preserved: `trg_memories_updated` is BEFORE
+     *    UPDATE and unconditionally assigns NOW(). The pre-restore value goes in
+     *    the decision log so the real age survives somewhere an operator can
+     *    find it. Note what that does NOT fix: #103's timeline gate compares
+     *    `updated_at` on the rows themselves and nothing reads this log, so a
+     *    restored row still presents as the fresher side of a contradiction.
+     *    That is a known limitation, recorded rather than corrected.
+     */
+    restoreMemory: async ({ id, priorState, version }) => {
+      const result = await db.query(
+        `UPDATE memories
+            SET state = 'active'
+          WHERE id = $1
+            AND state = $2
+            AND version = $3`,
+        [id, priorState, version],
+      );
+      return result.rowCount === 1;
+    },
+  };
+}
+
+/**
+ * `updated_at` as an ISO string, or null when the column holds nothing usable.
+ *
+ * It is nullable in `schema.sql` (TIMESTAMPTZ DEFAULT NOW(), no NOT NULL), and
+ * `new Date(null)` is epoch 0 rather than an error — so the unguarded form
+ * records a fabricated 1970 as fact. This is the one field the decision log
+ * exists to preserve, and it is read by an operator judging whether a memory is
+ * worth bringing back: an absent timestamp means "age unknown", while 1970 reads
+ * as a definite answer that happens to be maximally stale. An unparseable value
+ * throws `RangeError: Invalid time value` naming no row at all, which would take
+ * down a whole listing over one bad row.
+ */
+function isoOrNull(value) {
+  if (value === null || value === undefined) return null;
+  const ms = new Date(value).getTime();
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+}
+
+/** One display record per inactive row: bounded, single-line, truncation marked. */
+function inactiveRecord(row) {
+  const content = row.content ?? "";
+  const truncated = content.length > SNIPPET_LEN;
+  return {
+    id: row.id,
+    state: row.state,
+    // Serialised here rather than at the print site so the returned record is
+    // directly comparable and loggable.
+    updated_at: isoOrNull(row.updated_at),
+    superseded_by: row.superseded_by ?? null,
+    // Newlines collapse: one record per line keeps the listing greppable, and
+    // an embedded newline would split one memory across what look like three
+    // records.
+    snippet: content.slice(0, SNIPPET_LEN).replace(/\s*\n\s*/gu, " ").trim(),
+    truncated,
+  };
+}
+
+/**
+ * `--list-inactive`: read-only. Takes NO lock — neither the stage lockfile nor
+ * the shared database mutex — so an operator can always look at what was
+ * deleted, even while a weekly consolidation apply is running.
+ */
+export async function runListInactive(opts, deps) {
+  const log = deps.log || console.error;
+  const adapter = deps.listInactive ? deps : inactiveMemoryAdapter(deps.db);
+  const { rows, total } = await adapter.listInactive({
+    state: opts.state,
+    since: opts.since,
+    limit: opts.limit,
+  });
+  const records = rows.map(inactiveRecord);
+  // Named per row rather than left implicit: a null here means the row's age is
+  // unknown, and the operator is choosing what to restore from these timestamps.
+  for (const record of records) {
+    if (record.updated_at === null) {
+      log(`${record.id}: updated_at is missing or unreadable — its age is unknown from this listing`);
+    }
+  }
+
+  if (records.length === 0) {
+    // An empty listing on its own is indistinguishable from a broken query or a
+    // connection to the wrong stage — the moment an operator most needs to know
+    // which of the three happened.
+    log(`no inactive memories matched${opts.state ? ` state=${opts.state}` : ""}${opts.since ? ` since=${opts.since}` : ""}`);
+    return { exitCode: 0, rows: [], total, writes: 0 };
+  }
+  for (const record of records) log(JSON.stringify(record));
+  log(
+    `listed ${records.length} of ${total} inactive memories` +
+      (opts.since ? "; --since filters updated_at (there is no deleted_at column)" : ""),
+  );
+  return { exitCode: 0, rows: records, total, writes: 0 };
+}
+
+/**
+ * Read the ids to restore. Accepts the plain one-id-per-line form and the
+ * stage-bound JSON form; a JSON file for another stage is refused before any
+ * database read, because ids collide across stages and a prod file replayed
+ * against preview would resurrect whatever happens to share those ids.
+ */
+function readRestoreIds(fs, opts) {
+  const raw = fs.readFileSync(opts.idsFile, "utf8");
+  let ids;
+  if (raw.trimStart().startsWith("[")) {
+    // Line-splitting a JSON array yields ids of `[`, `"d-1",`, `]`, which present
+    // as "3 id(s) not found" — a format error disguised as a bad id list, and the
+    // operator's next guess is that the ids are wrong.
+    throw new Error(
+      `${opts.idsFile} is a JSON array; use one id per line, or the stage-bound ` +
+        `{"stage":"...","ids":[...]} form`,
+    );
+  }
+  if (raw.trimStart().startsWith("{")) {
+    const doc = JSON.parse(raw);
+    if (doc.stage !== opts.stage) {
+      throw new Error(
+        `ids file is for stage ${JSON.stringify(doc.stage)}, not ${JSON.stringify(opts.stage)}`,
+      );
+    }
+    ids = Array.isArray(doc.ids) ? doc.ids : [];
+  } else {
+    ids = raw.split("\n");
+  }
+  const cleaned = [...new Set(ids.map((line) => String(line).trim()).filter(Boolean))];
+  // "restored 0 of 0" from a file the operator believed held ids is the report
+  // that ends in a second, hand-written attempt against the database.
+  if (cleaned.length === 0) throw new Error(`no ids in ${opts.idsFile}`);
+  return cleaned;
+}
+
+/**
+ * `--restore`: dry-run by default; `--apply` writes. Mirrors #102's contract —
+ * the destructive verb is a flag, the blast radius is bounded by `--cap`, the
+ * run is serialised by the same stage lockfile and the same shared database
+ * mutex, and every decision is logged outside the repository.
+ *
+ * @returns {exitCode, planned, restored, alreadyActive, notFound,
+ *           refusedArchived, refusedUnknownState, fencedOut, capUsed, logPath?}
+ */
+export async function runRestore(opts, deps) {
+  const log = deps.log || console.error;
+  const fs = deps.fs || (await import("node:fs"));
+  const clock = deps.clock || Date.now;
+  const adapter = deps.findByIds ? deps : inactiveMemoryAdapter(deps.db);
+  const cap = opts.cap ?? DEFAULT_CAP;
+  if (!Number.isFinite(cap) || cap <= 0) {
+    throw new Error(`cap must be a positive finite number, got ${cap}`);
+  }
+
+  // Both throw, and both before any read: a stage-mismatched or empty ids file
+  // is an operator error to correct, not a run to report on.
+  const ids = readRestoreIds(fs, opts);
+  const rows = await adapter.findByIds(ids);
+  const byId = new Map(rows.map((row) => [row.id, row]));
+
+  const notFound = ids.filter((id) => !byId.has(id));
+  const alreadyActive = [];
+  const refusedArchived = [];
+  const refusedUnknownState = [];
+  const unfenceable = [];
+  const forced = [];
+  const planned = [];
+  for (const id of ids) {
+    const row = byId.get(id);
+    if (!row) continue;
+    if (row.state === "active") {
+      // Idempotent, not an error: re-running a partially-applied restore has to
+      // be safe, or an operator reaches for hand-written SQL instead.
+      alreadyActive.push(id);
+      log(`${id}: already active — nothing to do`);
+      continue;
+    }
+    if (!INACTIVE_STATES.includes(row.state)) {
+      // Closed set, checked before the per-state rules rather than left as the
+      // fall-through. Every inactive state needs its own judgment about what
+      // reactivating it means — `deleted` is a straight undo, `archived` puts a
+      // contradiction loser back — so a state this tool has never been taught
+      // to reason about has no safe default, and the permissive one is the
+      // worst available guess. --force does not override this: it is consent to
+      // resurrect a known loser, not consent to guess.
+      refusedUnknownState.push(id);
+      log(
+        `${id}: state "${row.state}" is not a state this tool knows how to restore ` +
+          `(expected one of ${INACTIVE_STATES.join(", ")}) — skipped`,
+      );
+      continue;
+    }
+    if (row.version === null || row.version === undefined) {
+      // `version` is nullable in schema.sql, and the NOT NULL only arrives via a
+      // migration guarded by `IF to_regclass('memories') IS NOT NULL`. In SQL
+      // `version = NULL` is never true, so the fence can never be satisfied and
+      // the row is unrestorable until the schema is fixed. Attempting the write
+      // would report it as "state or version changed since it was read", sending
+      // the operator into an unbounded retry against a row that cannot move.
+      unfenceable.push(id);
+      log(
+        `${id}: version is NULL, so the If-Match fence can never match — not attempted; ` +
+          `this needs a schema fix (memories.version SET NOT NULL), not a retry`,
+      );
+      continue;
+    }
+    // Keyed on `superseded_by` as well as the state, because `superseded_by` is
+    // the hazard: "restoring this returns a memory that lost a contradiction
+    // while the winner is still active" is a statement about the link, not about
+    // the state. The two diverge, reachably, with only today's two states — #103
+    // archives a loser, an operator --force-restores it (this tool PRESERVES
+    // `superseded_by` deliberately), then a later #102 cleanup soft-deletes it
+    // without clearing the column. That row is `deleted` and still names a live
+    // winner, so a state-only gate waves it through.
+    const superseded = row.state === "archived" || row.superseded_by != null;
+    if (superseded) {
+      const winner = row.superseded_by ?? "an unrecorded winner";
+      if (!opts.force) {
+        // The winner's id is the fact the decision turns on, so the refusal
+        // carries it: "pass --force" alone tells the operator nothing.
+        refusedArchived.push(id);
+        log(
+          `${id}: ${row.state}, superseded by ${winner} — ` +
+            `restoring it returns a memory that lost a contradiction while the winner is still ` +
+            `active; pass --force to restore it anyway`,
+        );
+        continue;
+      }
+      // Named HERE, during planning, so the dry run carries it. --force is
+      // per-run and never per id, so an operator who passes it for one known
+      // loser has silently consented for every other superseded id in the same
+      // file — and the dry run is where they decide whether to pass --apply.
+      forced.push(id);
+      log(
+        `${id}: ${row.state} — will be restored under --force; it was superseded by ` +
+          `${winner}, which is still active, so search can then return both`,
+      );
+    }
+    planned.push(id);
+  }
+
+  const result = (fields) => ({
+    planned,
+    restored: [],
+    alreadyActive,
+    notFound,
+    refusedArchived,
+    refusedUnknownState,
+    unfenceable,
+    fencedOut: [],
+    capUsed: 0,
+    ...fields,
+  });
+  // Anything the operator's file asked for that did not happen changes the exit
+  // code, so a typo or a refusal can never look like a clean run. `planned`
+  // exceeding the cap counts too: the dry run is where the operator decides, and
+  // "would restore 120" at exit 0 followed by an exit-4 apply that restored 50
+  // is a plan reading as executable when it is not.
+  const incomplete = () =>
+    notFound.length > 0 ||
+    refusedArchived.length > 0 ||
+    refusedUnknownState.length > 0 ||
+    unfenceable.length > 0 ||
+    planned.length > cap;
+
+  if (notFound.length > 0) log(`${notFound.length} id(s) not found: ${notFound.join(", ")}`);
+
+  if (!opts.apply) {
+    log(
+      `dry-run: would restore ${planned.length} memory(ies)` +
+        `${planned.length ? ` (${planned.join(", ")})` : ""}; ` +
+        `alreadyActive=${alreadyActive.length}; archivedRefused=${refusedArchived.length}; ` +
+        `archivedForced=${forced.length}; unknownStateRefused=${refusedUnknownState.length}; ` +
+        `unfenceable=${unfenceable.length}; ` +
+        `notFound=${notFound.length}; re-run with --apply to write`,
+    );
+    if (planned.length > cap) {
+      // Said on the dry run, not discovered at exit 4 after a partial apply.
+      log(
+        `plan of ${planned.length} exceeds cap ${cap} — an --apply would restore ${cap} and abort; ` +
+          `raise --cap or split the ids file`,
+      );
+    }
+    return result({ exitCode: incomplete() ? 6 : 0 });
+  }
+
+  const lockFile =
+    deps.lockFile ||
+    join(process.env.XDG_RUNTIME_DIR || join(homedir(), ".cache"), "mem9-cleanup", `${opts.stage}.lock`);
+  const ttlMs = deps.lockTtlMs ?? (opts.lockTtlHours ? opts.lockTtlHours * HOUR_MS : DEFAULT_LOCK_TTL_MS);
+  // The same shared mutex cleanup and consolidation take. A restore racing
+  // consolidation could re-activate the loser of a contradiction while #103 is
+  // mid-resolution on that very pair.
+  const sharedMutex = deps.acquireMutex ? await deps.acquireMutex(opts.stage) : undefined;
+  if (deps.acquireMutex && !sharedMutex) {
+    log("another cleanup, consolidation, or restore apply holds the shared database mutex");
+    return result({ exitCode: 3 });
+  }
+  if (!acquireLock(fs, lockFile, clock, log, ttlMs, deps.pidAlive || defaultPidAlive)) {
+    await sharedMutex?.release();
+    // "another restore" would send an operator looking for a restore that does
+    // not exist: the lockfile path is shared with `runCleanup` by default.
+    log(`another cleanup or restore run holds ${lockFile} — aborting`);
+    return result({ exitCode: 3 });
+  }
+
+  const restored = [];
+  const fencedOut = [];
+  const entries = [];
+  let capUsed = 0;
+  let capAborted = false;
+  let logPath;
+  let persistFailed = false;
+  try {
+    for (const id of planned) {
+      const row = byId.get(id);
+      // Snapshot BEFORE the write. Everything below — the fence values, the log
+      // entry, and the archived warning — describes the row as it was read, and
+      // reading `row.state` back after a successful restore would report
+      // "active" as the prior state, making the decision log worthless for the
+      // one thing it exists to record.
+      const priorState = row.state;
+      const priorVersion = row.version;
+      const supersededBy = row.superseded_by ?? null;
+      // Reservation-style cap, one mutation per id (the #102 pattern): the
+      // charge is taken BEFORE the write, and overflow aborts the run rather
+      // than silently restoring a prefix.
+      if (capUsed + 1 > cap) {
+        log(`cap exceeded: used ${capUsed} + 1 > cap ${cap} — aborting run`);
+        capAborted = true;
+        break;
+      }
+      const ok = await adapter.restoreMemory({ id, priorState, version: priorVersion });
+      // Charged only on a write that landed, matching #102's decision for a
+      // fenced merge (TC-MEMCLEAN-043): charging a lost fence shrinks the
+      // blast-radius budget for work that never happened, and a mostly-fenced
+      // run could trip the exit-4 abort having restored almost nothing. The
+      // check above still runs before the write, so the cap cannot be overrun.
+      if (ok) capUsed += 1;
+      entries.push({
+        id,
+        priorState,
+        // The only surviving record of the row's real age: by the time this file
+        // is read back, trg_memories_updated has overwritten `updated_at` with
+        // NOW() (BEFORE UPDATE, unconditional). Null when the column held
+        // nothing usable: "age unknown" is a different fact from a definite 1970.
+        updatedAtBefore: isoOrNull(row.updated_at),
+        version: priorVersion,
+        supersededBy,
+        forced: priorState === "archived" || supersededBy !== null,
+        snippet: (row.content ?? "").slice(0, SNIPPET_LEN),
+        outcome: ok ? "restored" : "fenced-out",
+      });
+      if (ok) {
+        restored.push(id);
+      } else {
+        // rowCount 0 means the row moved between the read and the write.
+        // Counting it as restored would tell the operator a memory is back
+        // when it is not.
+        fencedOut.push(id);
+        log(`${id}: state or version changed since it was read — skipped, not restored`);
+      }
+    }
+  } finally {
+    // Every step runs even if an earlier one throws, and none of them may
+    // replace the in-flight exception. A throw from a `finally` REPLACES the
+    // original: `pg_advisory_unlock` runs on the same client the loop just died
+    // on, so a dropped connection kills the release for the same reason it
+    // killed the loop — and the operator would be told "Connection terminated"
+    // for a run that died of something else. A lock file that cannot be removed
+    // must likewise not skip the mutex release: a leaked advisory lock blocks
+    // the next weekly consolidation outright.
+    for (const [what, step] of [
+      ["remove the lock file", () => fs.rmSync(lockFile, { force: true })],
+      ["release the shared database mutex", () => sharedMutex?.release()],
+      // The record goes here too: the loop can throw after rows are already
+      // active, and losing it leaves the operator reconstructing a half-applied
+      // run from nothing. The summary is emitted BEFORE the file write, so a
+      // failed write cannot cost both.
+      ["write the restore log", () => { logPath = persist(); }],
+    ]) {
+      try {
+        await step();
+      } catch (err) {
+        log(`failed to ${what}: ${err.message}`);
+        persistFailed = true;
+      }
+    }
+  }
+
+  return result({
+    // A failed log write is exit 1, not 0: rows moved and the durable record of
+    // which ones did not survive, so the run needs an operator's attention even
+    // though every write succeeded.
+    exitCode: persistFailed ? 1 : capAborted ? 4 : incomplete() || fencedOut.length > 0 ? 6 : 0,
+    restored,
+    fencedOut,
+    capUsed,
+    ...(logPath ? { logPath } : {}),
+  });
+
+  /**
+   * Emit the summary, then persist the entries. The log holds memory snippets,
+   * so it lands outside any checkout at 0600 (the repo is planned to be
+   * open-sourced) — and when it cannot be written, the fallback on stderr
+   * carries the restored IDS ONLY. Stderr on a scheduled task lands in
+   * CloudWatch, which is exactly where the snippets must not go.
+   */
+  function persist() {
+    log(
+      `apply done: restored=${restored.length}/${planned.length}; capUsed=${capUsed}/${cap}; ` +
+        `alreadyActive=${alreadyActive.length}; archivedRefused=${refusedArchived.length}; ` +
+        `archivedForced=${forced.length}; unknownStateRefused=${refusedUnknownState.length}; ` +
+        `unfenceable=${unfenceable.length}; ` +
+        `notFound=${notFound.length}; fencedOut=${fencedOut.length}`,
+    );
+    const generatedAt = new Date(clock()).toISOString();
+    const outDir = deps.outDir || join(homedir(), ".mem9-cleanup", opts.stage);
+    const target = join(outDir, `restore-${generatedAt.replace(/[:.]/g, "-")}.json`);
+    try {
+      fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
+      fs.writeFileSync(
+        target,
+        JSON.stringify({ stage: opts.stage, generatedAt, forced: Boolean(opts.force), entries }, null, 2),
+        { mode: 0o600 },
+      );
+    } catch (err) {
+      log(
+        `restore log could not be written to ${target}: ${err.message} — ` +
+          `restored ids: ${restored.join(", ") || "(none)"}; ` +
+          `fenced-out ids: ${fencedOut.join(", ") || "(none)"}`,
+      );
+      throw err;
+    }
+    log(`restore log written to ${target}`);
+    return target;
+  }
+}
+
+// ---------------------------------------------------------------------------
 // CLI wiring (not exercised by unit tests — production deps only).
 
+/** The three things this script can be asked to do; `mode` below names them. */
+const MODES = ["cleanup", "list", "restore"];
+
 // --flag -> the opts key it sets. `flag: true` takes no value; `number: true`
-// values must parse to a positive number (a NaN cap would disable the cap).
-// `choices` restricts the accepted values.
-const ARG_SPECS = {
-  "--stage": { key: "stage" },
-  "--base-url": { key: "baseUrl" },
-  "--tenant-secret-arn": { key: "tenantSecretArn" },
-  "--decisions": { key: "decisionsFile" },
-  "--ids": { key: "idsFile" },
-  "--out": { key: "outDir" },
-  "--lock-file": { key: "lockFile" },
-  "--cap": { key: "cap", number: true },
-  "--lock-ttl": { key: "lockTtlHours", number: true },
-  "--apply": { key: "apply", flag: true },
-  "--model": { key: "model" },
-  "--effort": { key: "effort", choices: REASONING_EFFORTS },
-  "--llm-region": { key: "llmRegion" },
+// values must parse to a positive number (a NaN cap would disable the cap);
+// `integer: true` additionally requires a whole number. `choices` restricts the
+// accepted values; `iso` requires a parseable ISO timestamp.
+//
+// `mode` lists the run modes the flag belongs to, and anything outside them is
+// REJECTED rather than ignored: an operator who believes --state narrowed a
+// restore would restore more than they intended, and that reasoning does not
+// stop applying at the flags that happened to be thought of first. Declaring it
+// per flag rather than as a one-off check means a flag added later has to answer
+// the question — TC-MEMRESTORE-054 fails on a missing `mode`.
+export const ARG_SPECS = {
+  "--stage": { key: "stage", mode: MODES },
+  "--base-url": { key: "baseUrl", mode: ["cleanup"] },
+  "--tenant-secret-arn": { key: "tenantSecretArn", mode: ["cleanup"] },
+  "--decisions": { key: "decisionsFile", mode: ["cleanup"] },
+  "--ids": { key: "idsFile", mode: ["cleanup", "restore"] },
+  "--out": { key: "outDir", mode: ["cleanup", "restore"] },
+  "--lock-file": { key: "lockFile", mode: ["cleanup", "restore"] },
+  "--cap": { key: "cap", integer: true, mode: ["cleanup", "restore"] },
+  "--lock-ttl": { key: "lockTtlHours", number: true, mode: ["cleanup", "restore"] },
+  "--apply": { key: "apply", flag: true, mode: ["cleanup", "restore"] },
+  "--model": { key: "model", mode: ["cleanup"] },
+  "--effort": { key: "effort", choices: REASONING_EFFORTS, mode: ["cleanup"] },
+  "--llm-region": { key: "llmRegion", mode: ["cleanup"] },
+  // Recovery modes (issue #124).
+  "--list-inactive": { key: "listInactive", flag: true, mode: ["list"] },
+  "--restore": { key: "restore", flag: true, mode: ["restore"] },
+  "--force": { key: "force", flag: true, mode: ["restore"] },
+  "--state": { key: "state", choices: INACTIVE_STATES, mode: ["list"] },
+  "--since": { key: "since", iso: true, mode: ["list"] },
+  "--limit": { key: "limit", integer: true, mode: ["list"] },
+  "--help": { key: "help", flag: true, mode: MODES },
 };
+
+export const USAGE = `memory-cleanup.mjs — audit, clean, and recover the mem9 memory store
+
+Audit and clean (issue #102) — dry-run by default, --apply writes:
+  --stage <name>              required for every mode
+  --base-url <url>            skip service discovery
+  --tenant-secret-arn <arn>   tenant key source (else MEM9_TENANT_ID)
+  --apply                     execute the plan; without it nothing is written
+  --decisions <file.json>      replay a prior dry-run's decision list
+  --ids <file>                restrict --apply to the reviewed ids in <file>
+  --cap <n>                   max mutations per run (default ${DEFAULT_CAP})
+  --out <dir>                 decision/restore log directory
+  --lock-file <path>          stage lockfile path
+  --lock-ttl <hours>          age after which a lock may be reclaimed
+  --model <id>                classifier model
+  --effort <${REASONING_EFFORTS.join("|")}>
+  --llm-region <region>       region for the reasoning-model route
+
+Recover soft-deleted and archived memories (issue #124):
+  --list-inactive             read-only listing; takes no lock
+  --state <${INACTIVE_STATES.join("|")}>   restrict the listing to one state
+                              (omit for both; the output distinguishes them)
+  --since <iso>               filter on updated_at — there is NO deleted_at
+                              column, so a row deleted long ago but touched
+                              since will still match a recent --since
+  --limit <n>                 bound the rows shown (default ${DEFAULT_LIST_LIMIT});
+                              the total matched is reported alongside
+  --restore --ids <file>      restore the listed ids. DRY-RUN IS THE DEFAULT:
+                              --apply is required to write. Bounded by --cap
+                              (one mutation per id) and serialised by the same
+                              stage lockfile and shared database mutex.
+                              Restoring an already-active id is a reported
+                              no-op, not an error.
+  --force                     required to restore an ARCHIVED memory. Archived
+                              rows lost a contradiction (#103) and their winner
+                              is still active, so restoring one puts both back
+                              into search. superseded_by is preserved either
+                              way. --force applies per run, never per id.
+  --help                      print this and exit
+
+Exit codes: 0 ok; 1 error; 2 discovery failed; 3 lock held; 4 cap exceeded;
+5 classifier broken; 6 the run completed but not everything asked for was done.`;
 
 export function parseArgs(argv) {
   const opts = { apply: false, cap: DEFAULT_CAP };
+  const seen = new Set();
   for (let i = 0; i < argv.length; i += 1) {
     const name = argv[i];
     const spec = ARG_SPECS[name];
     if (!spec) throw new Error(`unknown argument ${name}`);
+    seen.add(name);
     if (spec.flag) {
       opts[spec.key] = true;
       continue;
@@ -1054,7 +1671,17 @@ export function parseArgs(argv) {
     if (spec.choices && !spec.choices.includes(raw)) {
       throw new Error(`${name} must be one of ${spec.choices.join("|")}`);
     }
-    if (!spec.number) {
+    if (spec.iso) {
+      // A rejected value, never a silently-NaN one: `updated_at >= 'yesterday'`
+      // would be an error from the database mid-run, and a value that parsed to
+      // an unintended instant would quietly change what the operator reviews.
+      if (Number.isNaN(Date.parse(raw))) {
+        throw new Error(`${name} must be an ISO timestamp, got ${JSON.stringify(raw)}`);
+      }
+      opts[spec.key] = raw;
+      continue;
+    }
+    if (!spec.number && !spec.integer) {
       opts[spec.key] = raw;
       continue;
     }
@@ -1062,9 +1689,43 @@ export function parseArgs(argv) {
     if (!Number.isFinite(value) || value <= 0) {
       throw new Error(`${name} must be a positive number`);
     }
+    // A row count is a whole number, and `LIMIT $n` binds a bigint: `--limit 5.5`
+    // would fail at the server, after the SSM reads, the secret fetch, and the
+    // connection. `--lock-ttl` is deliberately not integer-checked — half an hour
+    // is a meaningful TTL.
+    if (spec.integer && !Number.isSafeInteger(value)) {
+      throw new Error(`${name} must be a whole number, got ${raw}`);
+    }
     opts[spec.key] = value;
   }
+  // --help must not require --stage: an operator reaching for it does not yet
+  // know the invocation.
+  if (opts.help) return opts;
   if (!opts.stage) throw new Error("--stage is required");
+  // One mode per run: with both flags set it is not knowable whether --apply
+  // was meant to write.
+  if (opts.listInactive && opts.restore) {
+    throw new Error("pass exactly one of --list-inactive or --restore");
+  }
+  if (opts.restore && !opts.idsFile) {
+    throw new Error("--restore requires --ids <file>");
+  }
+  if (!opts.restore && opts.force) {
+    throw new Error("--force applies only to --restore");
+  }
+  // Rejected, not ignored, for EVERY flag: an operator who believes a flag
+  // narrowed the run acts on that belief. `--apply` on a listing is the one that
+  // bites hardest — `recoveryDeps` keys the shared mutex on `opts.apply`, so a
+  // read-only listing would take the advisory lock and contend with the weekly
+  // consolidation, exactly what "a listing takes no lock" promises it cannot.
+  const mode = opts.listInactive ? "list" : opts.restore ? "restore" : "cleanup";
+  for (const [name, spec] of Object.entries(ARG_SPECS)) {
+    if (!seen.has(name)) continue;
+    if (spec.mode.includes(mode)) continue;
+    throw new Error(
+      `${name} applies only to ${spec.mode.map((m) => `--${m === "cleanup" ? "apply/--decisions (audit)" : m === "list" ? "list-inactive" : "restore"}`).join(" or ")}`,
+    );
+  }
   return opts;
 }
 
@@ -1142,6 +1803,10 @@ async function productionDatabaseMutex(stage, region) {
   await db.connect();
 
   return {
+    // Exposed for the recovery modes (issue #124), which read and write rows the
+    // REST API cannot see at all — its GetByID and list both filter to
+    // `state = 'active'`.
+    db,
     acquireMutex: async (lockStage) => {
       const result = await db.query(
         "SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS acquired",
@@ -1158,6 +1823,32 @@ async function productionDatabaseMutex(stage, region) {
       };
     },
     close: () => db.end(),
+  };
+}
+
+/**
+ * Deps for `--list-inactive` / `--restore`. Deliberately NOT `productionDeps`:
+ * recovery needs no tenant key, no service discovery, and no LLM, so requiring
+ * them would make a read-only listing fail on unrelated configuration. The
+ * shared mutex is passed only for an actual `--apply`, matching cleanup.
+ */
+async function recoveryDeps(opts) {
+  const region = process.env.AWS_REGION || "ap-northeast-1";
+  const database = await productionDatabaseMutex(opts.stage, region);
+  const adapter = inactiveMemoryAdapter(database.db);
+  return {
+    deps: {
+      ...adapter,
+      // A listing takes no lock, so an operator can look at what was deleted
+      // even while a weekly consolidation apply is running. Keyed on `restore`
+      // too, not `apply` alone: `--list-inactive --apply` is rejected by
+      // `parseArgs`, and this is the second line of that same defence.
+      acquireMutex: opts.apply && opts.restore ? database.acquireMutex : undefined,
+      outDir: opts.outDir,
+      lockFile: opts.lockFile,
+      log: (msg) => console.error(`[memory-cleanup ${new Date().toISOString()}] ${msg}`),
+    },
+    close: () => database.close(),
   };
 }
 
@@ -1231,17 +1922,36 @@ if (isMain) {
   let production;
   try {
     const opts = parseArgs(process.argv.slice(2));
-    production = await productionDeps(opts);
-    const result = await runCleanup(
-      { ...opts, tenantId: production.tenantId },
-      production.deps,
-    );
-    process.exit(result.exitCode);
+    if (opts.help) {
+      // stdout, not stderr: --help is the requested output, not a diagnostic.
+      console.log(USAGE);
+      // `process.exitCode`, never `process.exit()`. Every record this script
+      // produces — the whole `--list-inactive` listing and the restore summary —
+      // goes to stderr, and `process.exit()` discards writes still queued in a
+      // pipe. A truncated listing then loses both its tail rows AND the
+      // "listed N of TOTAL" trailer that is the only signal it was truncated,
+      // so a partial listing reads as complete, nondeterministically. Setting
+      // the code and letting the event loop drain is the only form that cannot.
+      process.exitCode = 0;
+    } else if (opts.listInactive || opts.restore) {
+      production = await recoveryDeps(opts);
+      const result = opts.restore
+        ? await runRestore(opts, production.deps)
+        : await runListInactive(opts, production.deps);
+      process.exitCode = result.exitCode;
+    } else {
+      production = await productionDeps(opts);
+      const result = await runCleanup(
+        { ...opts, tenantId: production.tenantId },
+        production.deps,
+      );
+      process.exitCode = result.exitCode;
+    }
   } catch (err) {
     // Full stack on a destructive tool: an operator reconstructing a
     // half-applied run needs more than one context-free message line.
     console.error(`memory-cleanup: ${err.stack || err.message}`);
-    process.exit(1);
+    process.exitCode = 1;
   } finally {
     await production?.close();
   }
