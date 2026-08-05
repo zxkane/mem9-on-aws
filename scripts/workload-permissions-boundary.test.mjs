@@ -149,6 +149,7 @@ const independentRuntimeActions = [
   "sns:Publish",
   "sqs:SendMessage",
   "ssm:GetParameters",
+  "ssm:PutParameter",
   // SST Service/Task ECS Exec channels.
   "ssmmessages:CreateControlChannel",
   "ssmmessages:CreateDataChannel",
@@ -7405,6 +7406,13 @@ describe("boundary and deploy-role templates", () => {
         "sns:Publish",
         "sqs:SendMessage",
         "ssm:GetParameters",
+        // Admitting a WRITE to the action ceiling is only safe if it is also
+        // resource-scoped. A boundary never GRANTS: effective permissions are the
+        // intersection of the boundary and the identity policy. So without this
+        // entry the boundary simply stops constraining `ssm:PutParameter` by
+        // resource, and any identity-policy grant — including an over-broad one
+        // added later — would take effect account-wide (#123).
+        "ssm:PutParameter",
       ]),
     );
     expect(bySid("DenyProjectRuntimeOutsideResources").Action).not.toEqual(
@@ -7414,6 +7422,30 @@ describe("boundary and deploy-role templates", () => {
         "ssm:GetParametersByPath",
       ]),
     );
+    // DenyProjectRuntimeOutsideResources scopes the write to the PROJECT prefix,
+    // which is every stage's whole SSM tree. That is too wide for a write: the
+    // ceiling is the only control on what a workload role may do, because
+    // identity policies are PR-authored and the deploy role's
+    // DenyUnboundedProjectRolePolicyWrites only requires that the boundary be
+    // ATTACHED, never constrains its content. Preview roles are bounded too
+    // (shouldRegisterWorkloadRoleBoundary returns true for every non-prod
+    // stage), so without a second, tighter deny a PR could grant one of its own
+    // preview Lambdas ssm:PutParameter on `/mem9-on-aws/prod/*` and overwrite
+    // prod's plain-String parameters — `oauth/allowed-callback-urls` is an
+    // open-redirect primitive, and the bootstrap/consolidation `task-def-arn`
+    // and `cluster-name` are consumed unvalidated by scripts/run-*-task.sh.
+    // SecureString parameters are already out of reach (a SecureString write
+    // needs kms:Encrypt or kms:GenerateDataKey, neither of which the ceiling
+    // admits), so the plain-String ones are exactly the exposure this closes.
+    const approvalScope = bySid("DenyPutParameterOutsideApprovalRecords");
+    expect(approvalScope).toMatchObject({
+      Effect: "Deny",
+      Action: ["ssm:PutParameter"],
+    });
+    expect(resolveTemplateValue(approvalScope.NotResource)).toEqual([
+      "arn:aws:ssm:ap-northeast-1:123456789012:" +
+        "parameter/mem9-on-aws/*/approvals/*",
+    ]);
     expect(
       bySid(
         "DenyKmsDecryptOutsideProjectParameterFunctionOrSecretContexts",
@@ -7587,12 +7619,78 @@ describe("boundary and deploy-role templates", () => {
     ).toBe(true);
   });
 
+  // Every guard on ssm:PutParameter names it as a literal, so nothing stops the
+  // NEXT write from being admitted with no resource scope at all — a mistake that
+  // stays invisible if the template and the contract library are edited
+  // consistently. This turns the allowlist into an explicit decision: a mutating
+  // action is either resource-scoped by some Deny/NotResource statement, or it is
+  // listed below as a reviewed account-wide admission.
+  it("resource-scopes every mutating action admitted to the ceiling", () => {
+    const document = expectedBoundaryPolicyDocument(boundaryContract);
+    const ceiling = document.Statement.find(({ NotAction }) => NotAction);
+    // Admitted account-wide by deliberate review. ecs:RunTask and iam:PassRole
+    // are constrained by the deploy role's PassRole scoping plus
+    // DenyEcsExecutionRolePassToOtherServices rather than by NotResource; the
+    // ec2/ssmmessages/logs entries are service-mediated calls with no useful
+    // per-resource ARN, and each is separately gated by a principal condition.
+    const reviewedGlobalWrites = new Set([
+      "bedrock-mantle:CallWithBearerToken",
+      "bedrock-mantle:CreateInference",
+      "ec2:AssignPrivateIpAddresses",
+      "ec2:CreateNetworkInterface",
+      "ec2:DeleteNetworkInterface",
+      "ec2:UnassignPrivateIpAddresses",
+      "ecs:RunTask",
+      "iam:PassRole",
+      "lambda:InvokeFunction",
+      "logs:CreateLogGroup",
+      "logs:CreateLogStream",
+      "logs:PutLogEvents",
+      "ssmmessages:CreateControlChannel",
+      "ssmmessages:CreateDataChannel",
+      "ssmmessages:OpenControlChannel",
+      "ssmmessages:OpenDataChannel",
+    ]);
+    const scopedByNotResource = new Set(
+      document.Statement.filter(
+        (statement) => statement.Effect === "Deny" && statement.NotResource,
+      ).flatMap((statement) => statement.Action ?? []),
+    );
+    const mutating =
+      /:(Put|Create|Delete|Update|Send|Publish|Run|Pass|Invoke|Assign|Unassign|Open|Call)/u;
+    for (const action of ceiling.NotAction.filter((a) => mutating.test(a))) {
+      expect(
+        scopedByNotResource.has(action) || reviewedGlobalWrites.has(action),
+        `${action} mutates but is neither resource-scoped by a Deny/NotResource ` +
+          `statement nor listed as a reviewed account-wide admission`,
+      ).toBe(true);
+    }
+  });
+
   it("keeps the boundary within the IAM managed-policy size quota", () => {
     const template = parseCloudFormation(boundaryTemplatePath);
     const size = JSON.stringify(
       resolveTemplateValue(
         template.Resources.WorkloadPermissionsBoundary.Properties.PolicyDocument,
       ),
+    ).length;
+    expect(size).toBeLessThanOrEqual(6_144);
+  });
+
+  // The assertion above measures the template, where resolveTemplateValue
+  // collapses the !If for OpenAiBedrockProjectArn to AWS::NoValue — so it only
+  // ever sizes the OpenAI-UNCONFIGURED shape. The Responses route configures
+  // that second project ARN in the live account, adding bytes CI never counted.
+  // Without this case the boundary can pass every gate and still be rejected by
+  // IAM at rollout time, which is the one failure mode a size test exists to
+  // prevent.
+  it("keeps the boundary within the IAM size quota with both Mantle projects", () => {
+    const size = JSON.stringify(
+      expectedBoundaryPolicyDocument({
+        ...boundaryContract,
+        openAiBedrockProjectArn:
+          "arn:aws:bedrock-mantle:us-west-2:123456789012:project/proj_openai",
+      }),
     ).length;
     expect(size).toBeLessThanOrEqual(6_144);
   });
