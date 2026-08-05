@@ -469,26 +469,31 @@ async function withMutatedRolloutModule(mutate, callback) {
 // defaults (AWS::NoValue removes the entry from the surrounding list).
 const NO_VALUE = Symbol("AWS::NoValue");
 
-function resolveTemplateValue(value) {
+// `openAiBedrockProjectArn` selects the CONFIGURED shape: the !If takes its true
+// branch and `!Ref OpenAiBedrockProjectArn` resolves to this value. Defaulting to
+// undefined keeps every existing caller on the unconfigured shape, which is what
+// the template's own parameter default produces.
+function resolveTemplateValue(value, openAiBedrockProjectArn) {
+  const recur = (child) => resolveTemplateValue(child, openAiBedrockProjectArn);
   if (Array.isArray(value)) {
-    // A parsed `!If [HasOpenAiBedrockProject, ...]` node: the parameter
-    // defaults to "" so the condition is false → the else branch is
+    // A parsed `!If [HasOpenAiBedrockProject, ...]` node. Unconfigured, the
+    // parameter defaults to "" so the condition is false → the else branch is
     // AWS::NoValue → the entry vanishes from the parent list.
     if (value.length === 3 && value[0] === "HasOpenAiBedrockProject") {
-      return NO_VALUE;
+      return openAiBedrockProjectArn ? recur(value[1]) : NO_VALUE;
     }
-    return value.map(resolveTemplateValue).filter((item) => item !== NO_VALUE);
+    return value.map(recur).filter((item) => item !== NO_VALUE);
   }
   if (value && typeof value === "object") {
     return Object.fromEntries(
-      Object.entries(value).map(([key, child]) => [
-        key,
-        resolveTemplateValue(child),
-      ]),
+      Object.entries(value).map(([key, child]) => [key, recur(child)]),
     );
   }
   if (typeof value !== "string") return value;
   if (value === "BedrockProjectArn") return boundaryContract.bedrockProjectArn;
+  // Only reachable from the !If true branch above; unconfigured, the whole node
+  // collapses to NO_VALUE before this can be consulted.
+  if (value === "OpenAiBedrockProjectArn") return openAiBedrockProjectArn;
   return value
     .replaceAll("${AWS::Partition}", partition)
     .replaceAll("${AWS::AccountId}", accountId)
@@ -7622,49 +7627,82 @@ describe("boundary and deploy-role templates", () => {
   // Every guard on ssm:PutParameter names it as a literal, so nothing stops the
   // NEXT write from being admitted with no resource scope at all — a mistake that
   // stays invisible if the template and the contract library are edited
-  // consistently. This turns the allowlist into an explicit decision: a mutating
-  // action is either resource-scoped by some Deny/NotResource statement, or it is
-  // listed below as a reviewed account-wide admission.
-  it("resource-scopes every mutating action admitted to the ceiling", () => {
-    const document = expectedBoundaryPolicyDocument(boundaryContract);
-    const ceiling = document.Statement.find(({ NotAction }) => NotAction);
-    // Admitted account-wide by deliberate review. ecs:RunTask and iam:PassRole
-    // are constrained by the deploy role's PassRole scoping plus
-    // DenyEcsExecutionRolePassToOtherServices rather than by NotResource; the
-    // ec2/ssmmessages/logs entries are service-mediated calls with no useful
-    // per-resource ARN, and each is separately gated by a principal condition.
-    const reviewedGlobalWrites = new Set([
-      "bedrock-mantle:CallWithBearerToken",
-      "bedrock-mantle:CreateInference",
-      "ec2:AssignPrivateIpAddresses",
-      "ec2:CreateNetworkInterface",
-      "ec2:DeleteNetworkInterface",
-      "ec2:UnassignPrivateIpAddresses",
-      "ecs:RunTask",
-      "iam:PassRole",
-      "lambda:InvokeFunction",
-      "logs:CreateLogGroup",
-      "logs:CreateLogStream",
-      "logs:PutLogEvents",
-      "ssmmessages:CreateControlChannel",
-      "ssmmessages:CreateDataChannel",
-      "ssmmessages:OpenControlChannel",
-      "ssmmessages:OpenDataChannel",
-    ]);
-    const scopedByNotResource = new Set(
+  // consistently. This turns the allowlist into an explicit decision: a
+  // non-read-only action is either resource-scoped by some Deny/NotResource
+  // statement, or it is listed below as a reviewed account-wide admission.
+  //
+  // Classify by an inverted READ-ONLY list rather than by a list of mutating
+  // verbs. Enumerating mutating verbs under-approximates in the unsafe direction:
+  // a `/:(Put|Create|Delete|...)/` form silently passed kms:Encrypt,
+  // kms:GenerateDataKey, ecs:RegisterTaskDefinition, sts:AssumeRole, and
+  // iam:AttachRolePolicy. The first two matter most here — the reason
+  // SecureString parameters are out of reach is that the ceiling admits neither,
+  // so an unnoticed admission would void that argument. Anything not obviously
+  // read-only now has to be classified deliberately.
+  const READ_ONLY_ACTION =
+    /:(Get|List|Describe|BatchCheck|BatchGet|Head|Query|Scan|Lookup|Filter|Search|Simulate)/u;
+
+  // Admitted account-wide by deliberate review, each for a reason NotResource
+  // cannot express. ecs:RunTask and iam:PassRole are constrained by the deploy
+  // role's PassRole scoping plus DenyEcsExecutionRolePassToOtherServices; the
+  // ec2/ssmmessages entries are service-mediated calls with no useful
+  // per-resource ARN and are separately gated by a principal condition; the
+  // bedrock-mantle and kms entries carry their own Condition-based denies
+  // (DenyNonShortTermMantleBearer and the five kms:Decrypt context statements).
+  const REVIEWED_GLOBAL_WRITES = [
+    "bedrock-mantle:CallWithBearerToken",
+    "ec2:AssignPrivateIpAddresses",
+    "ec2:CreateNetworkInterface",
+    "ec2:DeleteNetworkInterface",
+    "ec2:UnassignPrivateIpAddresses",
+    "ecs:RunTask",
+    "iam:PassRole",
+    "kms:Decrypt",
+    "ssmmessages:CreateControlChannel",
+    "ssmmessages:CreateDataChannel",
+    "ssmmessages:OpenControlChannel",
+    "ssmmessages:OpenDataChannel",
+  ];
+
+  const actionsScopedByNotResource = (document) =>
+    new Set(
       document.Statement.filter(
         (statement) => statement.Effect === "Deny" && statement.NotResource,
       ).flatMap((statement) => statement.Action ?? []),
     );
-    const mutating =
-      /:(Put|Create|Delete|Update|Send|Publish|Run|Pass|Invoke|Assign|Unassign|Open|Call)/u;
-    for (const action of ceiling.NotAction.filter((a) => mutating.test(a))) {
+
+  it("resource-scopes every non-read-only action admitted to the ceiling", () => {
+    const document = expectedBoundaryPolicyDocument(boundaryContract);
+    const ceiling = document.Statement.find(({ Sid }) =>
+      Sid?.startsWith("DenyOutsideRuntimeActionCeiling"),
+    );
+    const scopedByNotResource = actionsScopedByNotResource(document);
+    const reviewedGlobalWrites = new Set(REVIEWED_GLOBAL_WRITES);
+    for (const action of ceiling.NotAction.filter(
+      (candidate) => !READ_ONLY_ACTION.test(candidate),
+    )) {
       expect(
         scopedByNotResource.has(action) || reviewedGlobalWrites.has(action),
-        `${action} mutates but is neither resource-scoped by a Deny/NotResource ` +
-          `statement nor listed as a reviewed account-wide admission`,
+        `${action} is not read-only but is neither resource-scoped by a ` +
+          `Deny/NotResource statement nor listed as a reviewed account-wide ` +
+          `admission`,
       ).toBe(true);
     }
+  });
+
+  // The check above is an OR, so a redundant allowlist entry pre-authorizes a
+  // future unscoping: drop a resource-scoped action out of
+  // DenyProjectRuntimeOutsideResources and the allowlist silently catches it,
+  // turning a project-scoped write into an account-wide one with the suite still
+  // green. Requiring the two sets to be disjoint makes the allowlist mean
+  // "deliberately NOT resource-scoped" instead of merely "tolerated".
+  it("keeps the reviewed account-wide admissions disjoint from the scoped ones", () => {
+    const scopedByNotResource = actionsScopedByNotResource(
+      expectedBoundaryPolicyDocument(boundaryContract),
+    );
+    expect(
+      REVIEWED_GLOBAL_WRITES.filter((action) => scopedByNotResource.has(action)),
+    ).toEqual([]);
   });
 
   it("keeps the boundary within the IAM managed-policy size quota", () => {
@@ -7677,22 +7715,52 @@ describe("boundary and deploy-role templates", () => {
     expect(size).toBeLessThanOrEqual(6_144);
   });
 
-  // The assertion above measures the template, where resolveTemplateValue
-  // collapses the !If for OpenAiBedrockProjectArn to AWS::NoValue — so it only
-  // ever sizes the OpenAI-UNCONFIGURED shape. The Responses route configures
-  // that second project ARN in the live account, adding bytes CI never counted.
-  // Without this case the boundary can pass every gate and still be rejected by
-  // IAM at rollout time, which is the one failure mode a size test exists to
-  // prevent.
-  it("keeps the boundary within the IAM size quota with both Mantle projects", () => {
-    const size = JSON.stringify(
-      expectedBoundaryPolicyDocument({
+  // Everything above resolves the template with OpenAiBedrockProjectArn at its ""
+  // default, so the !If collapses to AWS::NoValue and only the UNCONFIGURED shape
+  // is ever checked — for both parity and size. The live account configures that
+  // second project (the Responses route runs in another region and Mantle projects
+  // are regional), so the shape that actually deploys had no coverage at all: the
+  // template could name the WRONG parameter in the true branch, or overflow the
+  // quota, and every gate would stay green.
+  //
+  // The longest project id the template's AllowedPattern permits costs more than
+  // the short fixture below, so assert a byte reserve rather than the bare quota:
+  // 6144 would only fail once there is no room left to react.
+  const OPENAI_PROJECT_ARN =
+    "arn:aws:bedrock-mantle:us-west-2:123456789012:project/proj_openai";
+  const BOUNDARY_SIZE_RESERVE = 64;
+
+  it("matches the contract library in the OpenAI-configured shape", () => {
+    const template = parseCloudFormation(boundaryTemplatePath);
+    const document = resolveTemplateValue(
+      template.Resources.WorkloadPermissionsBoundary.Properties.PolicyDocument,
+      OPENAI_PROJECT_ARN,
+    );
+    // The configured shape must differ from the unconfigured one in exactly one
+    // way: the second project ARN appears. Asserting its presence is what fails
+    // if the true branch ever refs the wrong parameter.
+    expect(
+      document.Statement.find(
+        ({ Sid }) => Sid === "DenyProjectRuntimeOutsideResources",
+      ).NotResource,
+    ).toContain(OPENAI_PROJECT_ARN);
+    expect(
+      verifyBoundaryPolicyDocument(document, {
         ...boundaryContract,
-        openAiBedrockProjectArn:
-          "arn:aws:bedrock-mantle:us-west-2:123456789012:project/proj_openai",
+        openAiBedrockProjectArn: OPENAI_PROJECT_ARN,
       }),
+    ).toBe(true);
+  });
+
+  it("keeps the OpenAI-configured boundary inside the IAM size quota", () => {
+    const template = parseCloudFormation(boundaryTemplatePath);
+    const size = JSON.stringify(
+      resolveTemplateValue(
+        template.Resources.WorkloadPermissionsBoundary.Properties.PolicyDocument,
+        OPENAI_PROJECT_ARN,
+      ),
     ).length;
-    expect(size).toBeLessThanOrEqual(6_144);
+    expect(size).toBeLessThanOrEqual(6_144 - BOUNDARY_SIZE_RESERVE);
   });
 
   it("keeps every deploy-role managed policy within the IAM size quota", () => {
