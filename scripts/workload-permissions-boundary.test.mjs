@@ -7647,7 +7647,7 @@ describe("boundary and deploy-role templates", () => {
   // keeps them, and any future sts:GetFederationToken-class admission, subject to
   // the scoping check instead of waved through on the verb.
   const CREDENTIAL_MINTING_ACTION =
-    /:(GetSecretValue|GetParameters?$|GetParameterHistory|GetParametersByPath|GetSessionToken|GetFederationToken|GetAuthorizationToken|GetCredentials|GetClusterCredentials|GetSigninToken|GetServiceBearerToken)/u;
+    /:(GetSecretValue|GetParameters?$|GetParameterHistory|GetParametersByPath|GetSessionToken|GetFederationToken|GetAuthorizationToken|GetCredentials|GetClusterCredentials|GetSigninToken|GetServiceBearerToken|GetOpenIdToken|GetComputeAuthToken)/u;
   const READ_ONLY_ACTION = (action) =>
     !CREDENTIAL_MINTING_ACTION.test(action) &&
     /:(Get|List|Describe|BatchCheck|BatchGet|Head|Query|Scan|Lookup|Filter|Search|Simulate)/u.test(
@@ -7656,11 +7656,15 @@ describe("boundary and deploy-role templates", () => {
 
   // Admitted account-wide by deliberate review, each for a reason NotResource
   // cannot express. ecs:RunTask and iam:PassRole are constrained by the deploy
-  // role's PassRole scoping plus DenyEcsExecutionRolePassToOtherServices; the
-  // ec2/ssmmessages entries are service-mediated calls with no useful
-  // per-resource ARN and are separately gated by a principal condition; the
-  // bedrock-mantle and kms entries carry their own Condition-based denies
-  // (DenyNonShortTermMantleBearer and the five kms:Decrypt context statements).
+  // role's PassRole scoping plus DenyEcsExecutionRolePassToOtherServices. The
+  // ec2 entries are service-mediated with no useful per-resource ARN AND are
+  // principal-gated (DenyEniFromNonVpcLambdaRoles + DenyEniFromFunctionCode).
+  // The bedrock-mantle and kms entries carry their own Condition-based denies
+  // (DenyNonShortTermMantleBearer and the seven kms:Decrypt context statements).
+  // The ssmmessages entries have NO further boundary deny — do not read the ec2
+  // justification as covering them. They are the ECS Exec channel APIs, which are
+  // service-mediated with no per-resource ARN, and what actually bounds them is
+  // `enableExecuteCommand` on the task plus the task role, outside this policy.
   // ecr:GetAuthorizationToken is registry-level: IAM evaluates it against the
   // registry, not a repository, so it is only ever grantable on "*" and a
   // NotResource scope would deny every image pull. The token it returns is scoped
@@ -7741,9 +7745,20 @@ describe("boundary and deploy-role templates", () => {
   // template could name the WRONG parameter in the true branch, or overflow the
   // quota, and every gate would stay green.
   //
-  // The longest project id the template's AllowedPattern permits costs more than
-  // the short fixture below, so assert a byte reserve rather than the bare quota:
-  // 6144 would only fail once there is no room left to react.
+  // Assert a byte reserve rather than the bare 6144 quota, which would only fail
+  // once there is no room left to react. The reserve does NOT bound the worst
+  // case: the template's AllowedPattern caps neither the project id nor the
+  // partition or region, so a long enough project id overflows whatever gate is
+  // set here (a 128-character id breaches even the real quota). It buys margin
+  // against the fixture shape only.
+  //
+  // 64 is close to the largest reserve this document can currently hold: the
+  // configured shape is 6023 bytes, so 121 is the ceiling and anything above that
+  // fails on commit. That is the finding, not a comfort — the statement this
+  // change added cost 189 bytes, so the next comparable statement breaches the
+  // gate and the quota at nearly the same moment. Splitting the boundary across a
+  // second managed policy is the real fix when that happens; until then this at
+  // least fails in CI rather than at rollout.
   const OPENAI_PROJECT_ARN =
     "arn:aws:bedrock-mantle:us-west-2:123456789012:project/proj_openai";
   const BOUNDARY_SIZE_RESERVE = 64;
