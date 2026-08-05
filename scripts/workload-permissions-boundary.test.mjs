@@ -7639,8 +7639,20 @@ describe("boundary and deploy-role templates", () => {
   // SecureString parameters are out of reach is that the ceiling admits neither,
   // so an unnoticed admission would void that argument. Anything not obviously
   // read-only now has to be classified deliberately.
-  const READ_ONLY_ACTION =
-    /:(Get|List|Describe|BatchCheck|BatchGet|Head|Query|Scan|Lookup|Filter|Search|Simulate)/u;
+  //
+  // `Get` alone is not enough to mean harmless: several `Get*` calls MINT
+  // credentials rather than read state, and a token is exactly the thing a
+  // resource scope must pin down. secretsmanager:GetSecretValue and
+  // ssm:GetParameters are admitted and resource-scoped today; the exception list
+  // keeps them, and any future sts:GetFederationToken-class admission, subject to
+  // the scoping check instead of waved through on the verb.
+  const CREDENTIAL_MINTING_ACTION =
+    /:(GetSecretValue|GetParameters?$|GetParameterHistory|GetParametersByPath|GetSessionToken|GetFederationToken|GetAuthorizationToken|GetCredentials|GetClusterCredentials|GetSigninToken|GetServiceBearerToken)/u;
+  const READ_ONLY_ACTION = (action) =>
+    !CREDENTIAL_MINTING_ACTION.test(action) &&
+    /:(Get|List|Describe|BatchCheck|BatchGet|Head|Query|Scan|Lookup|Filter|Search|Simulate)/u.test(
+      action,
+    );
 
   // Admitted account-wide by deliberate review, each for a reason NotResource
   // cannot express. ecs:RunTask and iam:PassRole are constrained by the deploy
@@ -7649,12 +7661,18 @@ describe("boundary and deploy-role templates", () => {
   // per-resource ARN and are separately gated by a principal condition; the
   // bedrock-mantle and kms entries carry their own Condition-based denies
   // (DenyNonShortTermMantleBearer and the five kms:Decrypt context statements).
+  // ecr:GetAuthorizationToken is registry-level: IAM evaluates it against the
+  // registry, not a repository, so it is only ever grantable on "*" and a
+  // NotResource scope would deny every image pull. The token it returns is scoped
+  // to the caller's own registry and the per-repository pull actions below stay
+  // resource-scoped, which is what actually bounds it.
   const REVIEWED_GLOBAL_WRITES = [
     "bedrock-mantle:CallWithBearerToken",
     "ec2:AssignPrivateIpAddresses",
     "ec2:CreateNetworkInterface",
     "ec2:DeleteNetworkInterface",
     "ec2:UnassignPrivateIpAddresses",
+    "ecr:GetAuthorizationToken",
     "ecs:RunTask",
     "iam:PassRole",
     "kms:Decrypt",
@@ -7679,7 +7697,7 @@ describe("boundary and deploy-role templates", () => {
     const scopedByNotResource = actionsScopedByNotResource(document);
     const reviewedGlobalWrites = new Set(REVIEWED_GLOBAL_WRITES);
     for (const action of ceiling.NotAction.filter(
-      (candidate) => !READ_ONLY_ACTION.test(candidate),
+      (candidate) => !READ_ONLY_ACTION(candidate),
     )) {
       expect(
         scopedByNotResource.has(action) || reviewedGlobalWrites.has(action),
