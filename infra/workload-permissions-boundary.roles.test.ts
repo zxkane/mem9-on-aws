@@ -7,6 +7,7 @@ import { WORKLOAD_BOUNDARY_POLICY_NAME } from "./workload-permissions-boundary";
 import {
   CONSOLIDATION_SCHEDULER_ROLE_NAME,
   EXPECTED_WORKLOAD_ROLE_NAMES,
+  SLACK_APPROVAL_ROLE_NAMES,
 } from "./workload-permissions-boundary.test-fixtures";
 
 interface MockCallArgs {
@@ -236,15 +237,23 @@ describe("workload role coverage from the real SST graph", () => {
       authorizerEnabled: false,
       label: "authorizer disabled, scheduler disabled",
       scheduleEnabled: false,
+      slackApprovalEnabled: false,
     },
     {
       authorizerEnabled: true,
       label: "authorizer enabled, scheduler enabled",
       scheduleEnabled: true,
+      slackApprovalEnabled: false,
+    },
+    {
+      authorizerEnabled: true,
+      label: "authorizer enabled, scheduler enabled, Slack approval enabled",
+      scheduleEnabled: true,
+      slackApprovalEnabled: true,
     },
   ])(
-    "TC-FACADEAUTH-004/TC-CONSOL-026: keeps the $label graph inside the workload boundary",
-    async ({ authorizerEnabled, scheduleEnabled }) => {
+    "TC-FACADEAUTH-004/TC-CONSOL-026/TC-SLACKAPP-082: keeps the $label graph inside the workload boundary",
+    async ({ authorizerEnabled, scheduleEnabled, slackApprovalEnabled }) => {
       vi.resetModules();
       const rpcServer = await startSstRpcServer();
       const previousSstServer = process.env.SST_SERVER;
@@ -255,6 +264,13 @@ describe("workload role coverage from the real SST graph", () => {
       const previousSlackWebhook = process.env.SST_SECRET_SlackWebhookUrl;
       const previousScheduleEnabled =
         process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED;
+      const previousSlackApprovalEnabled =
+        process.env.MEM9_SLACK_APPROVAL_ENABLED;
+      const previousSlackApprovalChannel =
+        process.env.MEM9_SLACK_APPROVAL_CHANNEL;
+      const previousSlackBotToken = process.env.SST_SECRET_SlackBotToken;
+      const previousSlackSigningSecret =
+        process.env.SST_SECRET_SlackSigningSecret;
       process.env.SST_SERVER = rpcServer.url;
       process.env.WORKLOAD_BOUNDARY_PROD_ENABLED = "true";
       if (authorizerEnabled) {
@@ -269,6 +285,17 @@ describe("workload role coverage from the real SST graph", () => {
         process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED = "1";
       } else {
         delete process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED;
+      }
+      if (slackApprovalEnabled) {
+        process.env.MEM9_SLACK_APPROVAL_ENABLED = "1";
+        process.env.MEM9_SLACK_APPROVAL_CHANNEL = "C0123456789";
+        process.env.SST_SECRET_SlackBotToken = "xoxb-mock-bot-token";
+        process.env.SST_SECRET_SlackSigningSecret = "mock-signing-secret";
+      } else {
+        delete process.env.MEM9_SLACK_APPROVAL_ENABLED;
+        delete process.env.MEM9_SLACK_APPROVAL_CHANNEL;
+        delete process.env.SST_SECRET_SlackBotToken;
+        delete process.env.SST_SECRET_SlackSigningSecret;
       }
       Object.assign(globalThis, {
         $app: {
@@ -350,8 +377,12 @@ describe("workload role coverage from the real SST graph", () => {
           : [...EXPECTED_WORKLOAD_ROLE_NAMES];
         if (scheduleEnabled) {
           expectedRoleNames.push(CONSOLIDATION_SCHEDULER_ROLE_NAME);
-          expectedRoleNames.sort();
         }
+        if (slackApprovalEnabled) {
+          // One `sst.aws.Task` creates BOTH a task role and an execution role.
+          expectedRoleNames.push(...SLACK_APPROVAL_ROLE_NAMES);
+        }
+        expectedRoleNames.sort();
         await pulumi.runtime.runInPulumiStack(async () => {
           const configModule = await import(
             /* @vite-ignore */ moduleUrl("sst.config.ts")
@@ -502,6 +533,10 @@ describe("workload role coverage from the real SST graph", () => {
             "MEM9_CONSOLIDATION_SCHEDULE_ENABLED",
             previousScheduleEnabled,
           ],
+          ["MEM9_SLACK_APPROVAL_ENABLED", previousSlackApprovalEnabled],
+          ["MEM9_SLACK_APPROVAL_CHANNEL", previousSlackApprovalChannel],
+          ["SST_SECRET_SlackBotToken", previousSlackBotToken],
+          ["SST_SECRET_SlackSigningSecret", previousSlackSigningSecret],
         ] as const) {
           if (value === undefined) {
             delete process.env[name];

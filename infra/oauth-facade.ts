@@ -62,6 +62,13 @@ export interface OauthFacadeOutputs {
   ssmPrefix: string;
   readerClientId: Output<string>;
   facadeUrl: Output<string>;
+  /**
+   * The façade Function's execution role NAME (not ARN — `aws.iam.RolePolicy`
+   * takes the name). `infra/slack-approval.ts` attaches the approval-record write
+   * and the RunTask/PassRole grants to this role rather than creating a second
+   * one, which would need its own workload-boundary exception (#123).
+   */
+  functionRoleName: Output<string>;
 }
 
 export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
@@ -191,6 +198,12 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
     memory: "256 MB",
     environment: {
       SSM_PREFIX: prefix,
+      // Read by buildSlackDeps (#123). It THROWS when a Slack signing secret is
+      // configured but STAGE is unset, and it throws at cold start on every
+      // invocation — so the interactions endpoint would 500 on every click while
+      // the deploy stayed green. Neither loadConfig nor resolveSsm reads STAGE,
+      // so nothing else in the config path would surface the omission.
+      STAGE: stage,
       COGNITO_ISSUER: cognitoOut.issuer,
       COGNITO_AUTHORIZE_ENDPOINT: cognitoOut.authorizeEndpoint,
       COGNITO_TOKEN_ENDPOINT: cognitoOut.tokenEndpoint,
@@ -282,5 +295,6 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
     ssmPrefix: prefix,
     readerClientId: readerClient.id,
     facadeUrl: facadeApi.url,
+    functionRoleName: facadeFn.nodes.role.name,
   };
 }

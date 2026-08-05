@@ -158,6 +158,14 @@ export default $config({
     const { gateway } = await import("./infra/gateway");
     gateway(cognitoOut, ecsOut, identityOut, facadeOut.readerClientId);
 
+    // Slack approval loop (#123): the on-demand cleanup-apply Task plus the SSM
+    // inputs and grants the façade Lambda needs to start it. Built AFTER
+    // oauthFacade() because the grants attach to that Lambda's EXISTING role
+    // rather than creating a second role needing its own boundary exception.
+    // Entirely absent unless MEM9_SLACK_APPROVAL_ENABLED=1.
+    const { slackApproval } = await import("./infra/slack-approval");
+    slackApproval(ecsOut, dbOut, identityOut, facadeOut);
+
     return {};
   },
 });
