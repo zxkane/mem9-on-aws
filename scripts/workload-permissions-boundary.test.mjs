@@ -8017,6 +8017,50 @@ describe("boundary and deploy-role templates", () => {
     ).toBe(true);
   });
 
+  // The step used to `sudo apt-get update` when shellcheck was absent, which is
+  // only ever true on the self-hosted runner (GitHub-hosted images preinstall it).
+  // Refreshing ~60 package indices to install one tool made the whole job hostage
+  // to mirror latency: two consecutive runs on this branch hung there and were
+  // cancelled at the job's 20-minute timeout with every test already passing.
+  // pip pins the version instead, which apt cannot: `apt-get install shellcheck`
+  // resolves to whatever the distro ships, so the same commit could lint against
+  // two different analyzers and produce findings that did not exist at review.
+  it("installs a pinned shellcheck without refreshing apt indices", () => {
+    const workflow = readFileSync(workflowPath, "utf8");
+    const job = parse(workflow).jobs.typecheck;
+    const step = job.steps.find(
+      (candidate) => candidate.name === "Validate workload boundary operator scripts",
+    );
+    expect(step).toBeDefined();
+    // Assert against the EXECUTABLE lines, never the raw `run`. The step's own
+    // comment names both `apt-get` and the pinned package, so a raw-text
+    // assertion would match the prose that explains the rule instead of the
+    // command that implements it — and would keep passing if the install line
+    // were deleted and only the comment survived.
+    const commands = step.run
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("#"))
+      .join("\n");
+    // 0.11.0.1 wraps upstream shellcheck 0.11.0 — the exact version the runner's
+    // apt provides today, so the pin changes the install path and nothing else.
+    // Changing installers (pipx, uv, a pinned release tarball) requires updating
+    // this assertion: it is coupled to the package and version on purpose.
+    expect(commands).toContain("shellcheck-py==0.11.0.1");
+    // A bare `pip install` with no version would reintroduce the drift this pin
+    // exists to prevent.
+    expect(commands).toMatch(/shellcheck-py==\d+\.\d+\.\d+\.\d+/u);
+    // `apt`, `apt-get`, and `aptitude` all refresh the same ~60 package indices,
+    // so matching only `apt-get` would let the flake back in under the spelling
+    // someone reaches for first when hand-patching "shellcheck: not found".
+    expect(commands).not.toMatch(/\b(apt|apt-get|aptitude)\b/u);
+    // A neutralized lint is the worst failure mode here: the step still reads
+    // correctly in a diff while enforcing nothing. Mirrors the guards the
+    // sibling cfn-lint step already carries in ecr-registry-scanning.test.mjs.
+    expect(commands).not.toMatch(/shellcheck[^\n]*\|\|\s*true/u);
+    expect(step).not.toHaveProperty("continue-on-error");
+    expect(step).not.toHaveProperty("if");
+  });
+
   it("wires both templates and rollout shell entry points into CI", () => {
     const workflow = readFileSync(workflowPath, "utf8");
     const documentationSecurityWorkflow = readFileSync(
@@ -8044,8 +8088,11 @@ describe("boundary and deploy-role templates", () => {
     expect(workflow).toContain(
       "shellcheck scripts/deploy-workload-permissions-boundary.sh",
     );
+    // With the `shellcheck ` prefix: the bare path also matches a line that
+    // merely RUNS the rollout script, so without it the one script of the three
+    // whose lint is not asserted elsewhere could stop being linted.
     expect(workflow).toContain(
-      "scripts/rollout-workload-permissions-boundary.sh",
+      "shellcheck scripts/rollout-workload-permissions-boundary.sh",
     );
     expect(workflow).toContain("uses: pulumi/actions@v7");
     expect(workflow).toContain("pulumi-version: 3.215.0");

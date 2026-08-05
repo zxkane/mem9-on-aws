@@ -183,10 +183,13 @@ jobs:
 
       - name: Validate workload boundary operator scripts
         run: |
-          if ! command -v shellcheck >/dev/null 2>&1; then
-            sudo apt-get update
-            sudo apt-get install --yes --no-install-recommends shellcheck
-          fi
+          # pip, not apt: the previous `apt-get update` refreshed every package
+          # index to install one tool and left the job at the mercy of mirror
+          # latency (two runs hung there until the 20-minute job timeout, with all
+          # tests already green). It also could not pin a version, so the same
+          # commit could lint against whatever shellcheck the distro happened to
+          # ship. 0.11.0.1 wraps upstream 0.11.0, matching what apt installed.
+          python -m pip install --disable-pip-version-check 'shellcheck-py==0.11.0.1'
           shellcheck scripts/deploy-workload-permissions-boundary.sh
           shellcheck scripts/rollout-workload-permissions-boundary.sh
           shellcheck scripts/run-consolidation-task.sh
