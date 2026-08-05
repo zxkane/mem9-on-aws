@@ -19,6 +19,23 @@
 //        [--apply] [--decisions file.json] [--ids approved.txt]
 //        [--cap 50] [--out dir] [--lock-file path] [--lock-ttl hours]
 //        [--model openai.gpt-5.6-terra] [--effort high] [--llm-region us-west-2]
+//        [--protected-topics personal-finance,operations]
+//        [--consensus-passes 2]
+//
+// --protected-topics names subject areas this tool may not mutate AT ALL: not
+// deleted, not absorbed into a merge, not rewritten as a merge survivor. Default
+// `personal-finance`; pass an empty value to protect nothing. A protected memory
+// the classifier judged deletable is reported as RETAIN with the original
+// verdict, so the report shows policy overriding the classifier rather than the
+// classifier having decided to keep it.
+//
+// --consensus-passes N runs the classifier N independent times over ONE scan and
+// offers only the ids EVERY pass judged DELETE. The measured motivation: a pass
+// reproduced 66% of its own DELETE set on a re-run, which is not reproducible
+// enough to authorize deletions from. This only ever NARROWS: a contested id is
+// reported as UNSTABLE and acted on by nobody. Minimum 2 (one pass is not a
+// quorum of itself); omitted means single-pass. N passes cost N times the
+// inference.
 //
 // The decision log and the restore log contain memory snippets — instance-private
 // data. Both are written OUTSIDE the repository (default ~/.mem9-cleanup/<stage>/)
@@ -101,6 +118,20 @@ D4. Rules 12-14 above do NOT apply. When in doubt about durability, return
     fewer facts. An empty facts array is the CORRECT output for a routine
     work session with no durable takeaways.`;
 
+/**
+ * The subject areas a memory can be assigned to (#123). Closed set: an
+ * unrecognised value is a MalformedResponse, because `protectedTopics` can only
+ * protect topics it knows about, and a silently accepted sixth topic would route
+ * finance memories somewhere the retain rule never looks.
+ */
+export const TOPICS = Object.freeze([
+  "personal-finance",
+  "engineering",
+  "content",
+  "operations",
+  "other",
+]);
+
 const CLASSIFY_SYSTEM_PROMPT = `You are auditing a shared long-lived memory store used by coding agents across sessions, machines, and tools. Judge each memory against these durability rules:
 
 ${DURABLE_ONLY_RULES}
@@ -112,9 +143,16 @@ For every memory in the input, output exactly one verdict:
   surviving id (merge_into), list the absorbed ids, and provide the merged
   content ("merged_content") that preserves all durable information.
 
+Also assign every memory exactly one "topic" from this closed set:
+${TOPICS.map((t) => `- "${t}"`).join("\n")}
+"personal-finance" covers anything about the operator's own money — holdings,
+positions, trading rules, insurance, budgets, cash planning — in any language,
+regardless of how time-sensitive it looks. Judge the subject matter, not the
+durability; the verdict already carries the durability judgment.
+
 Respond with ONLY a JSON object:
-{"verdicts":[{"id":"...","verdict":"KEEP|DELETE|MERGE","reason":"...","merge_into":"id?","absorbs":["id"...]?,"merged_content":"...?"}]}
-Every input id must appear exactly once. Never invent ids.`;
+{"verdicts":[{"id":"...","verdict":"KEEP|DELETE|MERGE","topic":"${TOPICS.join("|")}","reason":"...","merge_into":"id?","absorbs":["id"...]?,"merged_content":"...?"}]}
+Every input id must appear exactly once, with a topic. Never invent ids.`;
 
 export function contentHash(content) {
   return `sha256:${createHash("sha256").update(content ?? "").digest("hex")}`;
@@ -146,6 +184,15 @@ export function parseVerdicts(raw) {
     if (!v || typeof v.id !== "string") throw new MalformedResponse("verdict entry missing id");
     if (!["KEEP", "DELETE", "MERGE"].includes(v.verdict)) {
       throw new MalformedResponse("verdict entry has an invalid verdict value");
+    }
+    // Required on EVERY verdict, not only DELETE ones (#123). A topic consulted
+    // only where the code happens to need it protects finance memories exactly
+    // until a response arrives in a shape nobody predicted. Strictness costs a
+    // batch SKIP, which is non-destructive and reported; leniency costs the
+    // memories the operator asked to keep. Never defaulted to "other" — that is
+    // the unprotected topic.
+    if (!TOPICS.includes(v.topic)) {
+      throw new MalformedResponse("verdict entry has a missing or invalid topic");
     }
     if (v.merge_into !== undefined && typeof v.merge_into !== "string") {
       throw new MalformedResponse("merge_into must be a string");
@@ -255,11 +302,18 @@ function resolveMergeGroups(byId, verdictById, conflicted) {
  * Turn raw LLM verdicts into the persisted decision list, validating the merge
  * graph. Invalid merges (target missing/deleted/cyclic) downgrade to SKIP —
  * never to a destructive fallback.
+ *
+ * `opts.protectedTopics` names topics this tool may not mutate AT ALL (#123):
+ * not deleted, not absorbed into a merge, not rewritten as a merge survivor.
+ * One invariant rather than a per-verdict list, so a fourth verdict added later
+ * cannot silently escape it.
  */
-export function planDecisions(memories, verdicts) {
+export function planDecisions(memories, verdicts, opts = {}) {
+  const protectedTopics = opts.protectedTopics ?? DEFAULT_PROTECTED_TOPICS;
   const byId = new Map(memories.map((m) => [m.id, m]));
   const verdictById = new Map();
   const conflicted = new Set();
+  const retained = new Map();
   for (const v of verdicts) {
     if (!byId.has(v.id)) continue;
     const prior = verdictById.get(v.id);
@@ -267,6 +321,21 @@ export function planDecisions(memories, verdicts) {
     if (prior && prior.verdict !== v.verdict) conflicted.add(v.id);
     verdictById.set(v.id, v);
   }
+
+  // Withheld BEFORE the merge graph is resolved, not after: a protected id left
+  // in `verdictById` as a MERGE would consent to its own absorption, and being
+  // absorbed deletes it just as surely as DELETE does. Removing it here means the
+  // group it belonged to loses that member and — with no consenting absorbed ids
+  // left — degrades to SKIP through the existing path, so the survivor is not
+  // rewritten either. KEEP is exempt because KEEP mutates nothing: downgrading it
+  // would report policy as having overridden a decision that agreed with policy.
+  for (const [id, v] of verdictById) {
+    if (v.verdict === "KEEP") continue;
+    if (!protectedTopics.includes(v.topic)) continue;
+    retained.set(id, v);
+    verdictById.delete(id);
+  }
+
   const { mergeGroups, skip } = resolveMergeGroups(byId, verdictById, conflicted);
 
   // Only groups that will actually EMIT a MERGE decision may fold their
@@ -333,14 +402,130 @@ export function planDecisions(memories, verdicts) {
       absorbs: group.absorbs.map((a) => ({ id: a, ...anchor(byId.get(a)) })),
     });
   }
+  // `RETAIN` is its own verdict rather than a KEEP with a note: the summary
+  // counts it without special-casing, and `applyDecisions` cannot act on it by
+  // reaching a DELETE/MERGE branch. It records what the classifier actually
+  // judged, so the report shows policy overriding a deletable verdict rather
+  // than the classifier having decided to keep the memory.
+  for (const [id, v] of retained) {
+    decisions.push({
+      id,
+      verdict: "RETAIN",
+      reason: v.reason,
+      originalVerdict: v.verdict,
+      retainedReason: `protected topic ${v.topic}`,
+    });
+  }
   // Audit completeness: a memory the LLM returned no verdict for still gets a
   // row, so the decision log covers every scanned memory (TC-MEMCLEAN-021).
+  // `retained` counts as having a verdict — its ids were removed from
+  // `verdictById` above, so without this they would double-report as
+  // "no verdict returned" alongside their own RETAIN row.
   for (const [id] of byId) {
-    if (!verdictById.has(id) && !absorbedIds.has(id)) {
+    if (!verdictById.has(id) && !retained.has(id) && !absorbedIds.has(id)) {
       decisions.push({ id, verdict: "SKIP", reason: "no verdict returned" });
     }
   }
   return decisions;
+}
+
+/**
+ * Narrow N independent classification passes to the ids EVERY pass agreed to
+ * delete (#123).
+ *
+ * The measured motivation: one pass reproduced only 66% of its own DELETE set on
+ * a re-run, which is not reproducible enough to authorize deletions from. This is
+ * a narrowing operation and never a widening one — an id reaches `DELETE` only by
+ * being `DELETE` in every pass, and everything else is REPORTED rather than acted
+ * on. Each pass must already be a planned decision list (`planDecisions` output),
+ * so per-pass protection and merge-graph validation have run before the
+ * intersection: an intersection computed over raw verdicts would admit a
+ * protected id whenever one pass assigned it a different topic, and topic is a
+ * model judgment like any other (TC-SLACKAPP-075).
+ *
+ * @param passes decision arrays, or `null` for a pass that failed entirely
+ */
+export function consensusDecisions(passes) {
+  const usable = passes.filter(Boolean);
+  const report = {
+    passes: passes.length,
+    usablePasses: usable.length,
+    perPassDeletes: passes.map((p) => (p ? p.filter((d) => d.verdict === "DELETE").length : null)),
+    agreed: 0,
+    disagreed: 0,
+    mergesWithheld: 0,
+    // Consensus needs at least two usable passes BY DEFINITION. One pass is not
+    // a quorum of itself, so a run that loses a pass offers nothing and says so
+    // — "use the other pass" would quietly restore the single-pass behavior this
+    // exists to remove (TC-SLACKAPP-073).
+    consensusReached: usable.length >= 2 && usable.length === passes.length,
+  };
+
+  // Union of every id any pass judged, in first-seen order so the output is
+  // deterministic. Every id keeps a row: the decision log covers the whole scan.
+  const ids = [];
+  const seen = new Set();
+  for (const pass of usable) {
+    for (const d of pass) {
+      if (!seen.has(d.id)) {
+        seen.add(d.id);
+        ids.push(d.id);
+      }
+    }
+  }
+  const byPass = usable.map((pass) => new Map(pass.map((d) => [d.id, d])));
+
+  const decisions = [];
+  for (const id of ids) {
+    // `null` for a pass that did not judge this id at all. Absence is not
+    // agreement in either direction (TC-SLACKAPP-074).
+    const rows = byPass.map((m) => m.get(id) ?? null);
+    const verdicts = rows.map((d) => d?.verdict ?? null);
+
+    // MERGE is withheld from the offered set in v1 — the approval loop approves
+    // deletions only — and counted, so the withholding cannot read as "the
+    // classifier found no merges" (TC-SLACKAPP-076).
+    if (verdicts.includes("MERGE")) {
+      report.mergesWithheld += 1;
+      decisions.push({
+        id,
+        verdict: "UNSTABLE",
+        reason: "merge withheld from the approval loop in v1",
+        verdicts,
+      });
+      continue;
+    }
+
+    const anyDelete = verdicts.includes("DELETE");
+    const allDelete = report.consensusReached && verdicts.every((v) => v === "DELETE");
+    if (allDelete) {
+      report.agreed += 1;
+      // The FIRST pass's row carries the anchors the apply path fences against.
+      // Any pass's would do — they re-read the same store — but picking one
+      // deliberately beats picking whichever happened to be last.
+      decisions.push(rows[0]);
+      continue;
+    }
+    if (anyDelete) {
+      // Its own verdict rather than a KEEP: a KEEP would claim the classifier
+      // judged the memory durable, when in fact a pass wanted it gone and the
+      // passes disagreed — the exact number this design exists to surface.
+      report.disagreed += 1;
+      decisions.push({
+        id,
+        verdict: "UNSTABLE",
+        reason: report.consensusReached
+          ? "passes disagreed on deletion"
+          : "no consensus: a classification pass failed entirely",
+        verdicts,
+      });
+      continue;
+    }
+    // No pass wanted it deleted: keep the first pass's row as-is (KEEP, SKIP,
+    // RETAIN — all non-destructive, and each already means what it says).
+    decisions.push(rows.find(Boolean));
+  }
+  return { decisions, report };
 }
 
 function destructiveCost(decision) {
@@ -446,7 +631,7 @@ async function classifyBatch(batch, batchIndex, completeChat, log) {
   return null;
 }
 
-async function classifyAll(memories, completeChat, log) {
+async function classifyAll(memories, completeChat, log, opts = {}) {
   const decisions = [];
   let batches = 0;
   let failedBatches = 0;
@@ -468,7 +653,7 @@ async function classifyAll(memories, completeChat, log) {
       log(`discarding hallucinated verdict for unknown id ${v.id}`);
       return false;
     });
-    decisions.push(...planDecisions(batch, inBatch));
+    decisions.push(...planDecisions(batch, inBatch, opts));
   }
   return { decisions, batches, failedBatches };
 }
@@ -621,9 +806,29 @@ async function discoverBaseUrl(opts, deps) {
   throw new Error(`no healthy mnemo-server instance found for stage ${opts.stage} after ${DISCOVERY_RETRIES} attempts`);
 }
 
-function verdictSummary(decisions) {
-  const summary = { KEEP: 0, DELETE: 0, MERGE: 0, SKIP: 0 };
-  for (const d of decisions) summary[d.verdict] = (summary[d.verdict] || 0) + 1;
+/**
+ * Count every verdict, including the ones that did not occur.
+ *
+ * Zeros are printed on purpose: a run where protection matched nothing must say
+ * `"RETAIN":0`, because an omitted key is indistinguishable from a build with no
+ * protection rule at all — which is how a dropped `--protected-topics` would go
+ * unnoticed. And the key set is CLOSED: an unrecognised verdict is a routing
+ * bug (a memory on a path nothing audits), so it throws rather than quietly
+ * inventing a bucket that reads as a data oddity.
+ *
+ * Exported because that second property cannot be reached through any input:
+ * `validateDecisions` rejects an unknown verdict in a replayed file before this
+ * runs, so the only way in is a planner push site — an internal invariant, and
+ * TC-SLACKAPP-066 asserts it directly rather than leaving the guard unproven.
+ */
+export function verdictSummary(decisions) {
+  const summary = { KEEP: 0, DELETE: 0, MERGE: 0, SKIP: 0, RETAIN: 0, UNSTABLE: 0 };
+  for (const d of decisions) {
+    if (!(d.verdict in summary)) {
+      throw new Error(`decision for ${d.id} has an uncountable verdict`);
+    }
+    summary[d.verdict] += 1;
+  }
   return summary;
 }
 
@@ -726,11 +931,54 @@ async function loadDecisions(opts, deps, { client, fs, clock, log, outDir }) {
     };
   }
   const memories = await scanActiveMemories(client);
-  const { decisions, batches, failedBatches } = await classifyAll(memories, deps.completeChat, log);
+  // Each pass is a full independent classification of the SAME scan, so the
+  // passes differ only in model nondeterminism — which is exactly the variable
+  // being measured. One scan, N classifications: re-scanning per pass would let a
+  // concurrent ingest change the corpus between passes and show up as
+  // disagreement the model never had.
+  const passCount = Math.max(1, opts.consensusPasses ?? 1);
+  const runs = [];
+  for (let pass = 1; pass <= passCount; pass += 1) {
+    if (passCount > 1) log(`classification pass ${pass} of ${passCount}`);
+    runs.push(
+      await classifyAll(memories, deps.completeChat, log, {
+        protectedTopics: opts.protectedTopics,
+      }),
+    );
+  }
+  let { decisions, batches, failedBatches } = runs[0];
+  batches = runs.reduce((n, r) => n + r.batches, 0);
+  failedBatches = runs.reduce((n, r) => n + r.failedBatches, 0);
+  let consensus;
+  if (passCount > 1) {
+    // A pass whose every batch failed is passed as `null`, not as the list of SKIP
+    // rows `classifyAll` actually returned. The intersection is safe either way —
+    // a SKIP is not a DELETE — but the REPORT is not: SKIP rows read as "this pass
+    // judged the memory and declined to delete it", so the summary would blame a
+    // classifier that changed its mind for a transport that never answered.
+    const passes = runs.map((r) => (r.batches > 0 && r.failedBatches === r.batches ? null : r.decisions));
+    const result = consensusDecisions(passes);
+    decisions = result.decisions;
+    consensus = result.report;
+    log(
+      `CONSENSUS over ${consensus.passes} passes: ` +
+        consensus.perPassDeletes
+          .map((n, i) => `pass ${i + 1} DELETE=${n ?? "failed"}`)
+          .join("; ") +
+        `; agreed=${consensus.agreed}; disagreed=${consensus.disagreed}` +
+        `; merges withheld=${consensus.mergesWithheld}` +
+        reproducibility(consensus) +
+        (consensus.consensusReached
+          ? ""
+          : " — NO CONSENSUS: a pass failed entirely, so nothing is offered for deletion"),
+    );
+  }
   // Zero successful batches on a non-empty store = the classifier path is
   // broken (IAM, model id, endpoint), not "nothing to clean". Surfaced as a
   // distinct exit code so CI cannot report a green E2E for a run that never
-  // classified anything.
+  // classified anything. Summed across passes deliberately: one pass classifying
+  // the whole corpus proves the path works, so a later pass losing every batch is
+  // a transport outage the CONSENSUS line reports, not a broken classifier.
   const classifierBroken = batches > 0 && failedBatches === batches;
 
   const generatedAt = new Date(clock()).toISOString();
@@ -749,7 +997,23 @@ async function loadDecisions(opts, deps, { client, fs, clock, log, outDir }) {
     batches,
     failedBatches,
     scanned: memories.length,
+    consensus,
   };
+}
+
+/**
+ * The agreement rate, as a share of the ids ANY pass wanted deleted.
+ *
+ * Denominator choice matters and is not obvious: over the whole corpus the rate
+ * would be dominated by the KEEPs every pass trivially agrees on, so a
+ * classifier that became far less reproducible about deletions would still
+ * report ~99%. Over the contested set, the number moves when reproducibility
+ * moves — which is the only reason to report it.
+ */
+function reproducibility({ agreed, disagreed }) {
+  const contested = agreed + disagreed;
+  if (contested === 0) return "";
+  return `; agreement=${Math.round((agreed / contested) * 100)}% of ${contested} contested ids`;
 }
 
 /**
@@ -763,7 +1027,17 @@ function validateDecisions(decisions) {
       throw new Error(`decision file entry ${i} invalid: ${why}`);
     };
     if (!d || typeof d.id !== "string") fail("missing id");
-    if (!["KEEP", "DELETE", "MERGE", "SKIP"].includes(d.verdict)) fail("invalid verdict");
+    // `RETAIN` is accepted here because the planner WRITES it (#123): a dry run
+    // over a protected memory persists a RETAIN row, and rejecting it on replay
+    // would make every --apply that follows such a run fail at load — the
+    // protection rule breaking the tool it protects memories in. It carries no
+    // anchor because it is non-destructive by construction.
+    // `UNSTABLE` is admitted for the same reason as `RETAIN`: the planner WRITES
+    // it (a consensus dry run persists one row per contested id), so rejecting it
+    // would make every `--apply` replaying a consensus run fail at load — the
+    // safety mechanism breaking the tool it exists to make safe. Like RETAIN it
+    // carries no anchor, because it is non-destructive by construction.
+    if (!["KEEP", "DELETE", "MERGE", "SKIP", "RETAIN", "UNSTABLE"].includes(d.verdict)) fail("invalid verdict");
     if (d.verdict === "DELETE" && typeof d.contentHash !== "string") fail("DELETE without contentHash");
     if (d.verdict === "MERGE") {
       if (typeof d.contentHash !== "string") fail("MERGE without contentHash");
@@ -1655,8 +1929,10 @@ const MODES = ["cleanup", "list", "restore"];
 
 // --flag -> the opts key it sets. `flag: true` takes no value; `number: true`
 // values must parse to a positive number (a NaN cap would disable the cap);
-// `integer: true` additionally requires a whole number. `choices` restricts the
-// accepted values; `iso` requires a parseable ISO timestamp.
+// `integer: true` additionally requires a whole number, and `min` raises the
+// floor above the blanket `> 0`. `choices` restricts the accepted values;
+// `iso` requires a parseable ISO timestamp; `list` splits a comma-separated
+// value and validates each entry against `of`.
 //
 // `mode` lists the run modes the flag belongs to, and anything outside them is
 // REJECTED rather than ignored: an operator who believes --state narrowed a
@@ -1678,6 +1954,16 @@ export const ARG_SPECS = {
   "--model": { key: "model", mode: ["cleanup"] },
   "--effort": { key: "effort", choices: REASONING_EFFORTS, mode: ["cleanup"] },
   "--llm-region": { key: "llmRegion", mode: ["cleanup"] },
+  // Topic retention and consensus (issue #123). Both shape how the classifier
+  // decides, so both belong to the audit mode only.
+  "--protected-topics": { key: "protectedTopics", list: true, of: TOPICS, mode: ["cleanup"] },
+  "--consensus-passes": {
+    key: "consensusPasses",
+    number: true,
+    integer: true,
+    min: 2,
+    mode: ["cleanup"],
+  },
   // Recovery modes (issue #124).
   "--list-inactive": { key: "listInactive", flag: true, mode: ["list"] },
   "--restore": { key: "restore", flag: true, mode: ["restore"] },
@@ -1687,6 +1973,9 @@ export const ARG_SPECS = {
   "--limit": { key: "limit", integer: true, mode: ["list"] },
   "--help": { key: "help", flag: true, mode: MODES },
 };
+
+/** Topics this tool refuses to mutate unless the operator says otherwise (#123). */
+export const DEFAULT_PROTECTED_TOPICS = Object.freeze(["personal-finance"]);
 
 export const USAGE = `memory-cleanup.mjs — audit, clean, and recover the mem9 memory store
 
@@ -1706,6 +1995,21 @@ Audit and clean (issue #102) — dry-run by default, --apply writes:
   --model <id>                classifier model
   --effort <${REASONING_EFFORTS.join("|")}>
   --llm-region <region>       region for the reasoning-model route
+  --protected-topics <a,b>    subject areas this tool may not mutate AT ALL —
+                              not deleted, not absorbed into a merge, not
+                              rewritten as a survivor (default
+                              ${DEFAULT_PROTECTED_TOPICS.join(",")}; pass an empty value to
+                              protect nothing). A protected memory the
+                              classifier judged deletable is reported as RETAIN
+                              with the original verdict, so the report shows
+                              policy overriding the classifier.
+                              Known topics: ${TOPICS.join(", ")}
+  --consensus-passes <n>      run the classifier n independent times over ONE
+                              scan and offer only the ids EVERY pass judged
+                              DELETE. Minimum 2 — one pass is not a quorum of
+                              itself; omitted means single-pass. Only ever
+                              NARROWS: a contested id is reported UNSTABLE and
+                              acted on by nobody. Costs n times the inference.
 
 Recover soft-deleted and archived memories (issue #124):
   --list-inactive             read-only listing; takes no lock
@@ -1760,6 +2064,24 @@ export function parseArgs(argv) {
       opts[spec.key] = raw;
       continue;
     }
+    if (spec.list) {
+      // An empty string is a DELIBERATE empty list ("protect nothing"), which is
+      // why the default is applied after the loop rather than as an initial
+      // value: `opts.protectedTopics = []` must survive as an opt-out. Unknown
+      // entries are rejected by name — a typo like `personal_finance` matches no
+      // topic and would silently protect nothing, and the operator would not
+      // find out until finance memories were deleted.
+      const entries = raw === "" ? [] : raw.split(",").map((t) => t.trim());
+      const unknown = entries.filter((t) => !spec.of.includes(t));
+      if (unknown.length > 0) {
+        throw new Error(
+          `${name} has unknown ${unknown.length === 1 ? "topic" : "topics"} ` +
+            `${unknown.join(", ")}; known topics are ${spec.of.join(", ")}`,
+        );
+      }
+      opts[spec.key] = entries;
+      continue;
+    }
     if (!spec.number && !spec.integer) {
       opts[spec.key] = raw;
       continue;
@@ -1768,12 +2090,23 @@ export function parseArgs(argv) {
     if (!Number.isFinite(value) || value <= 0) {
       throw new Error(`${name} must be a positive number`);
     }
-    // A row count is a whole number, and `LIMIT $n` binds a bigint: `--limit 5.5`
-    // would fail at the server, after the SSM reads, the secret fetch, and the
-    // connection. `--lock-ttl` is deliberately not integer-checked — half an hour
-    // is a meaningful TTL.
+    // Two ways a fractional value goes wrong, and neither is a smaller version of
+    // a valid run. A row count binds a bigint — `--limit 5.5` fails at the server,
+    // after the SSM reads, the secret fetch, and the connection. A fractional
+    // `--consensus-passes` would run `Math.trunc`-many passes while the log and the
+    // report quoted the fraction, so the run's summary would disagree with its own
+    // invocation. `isSafeInteger`, not `isInteger`, because `1e30` is an integer
+    // that no bigint bind or pass loop can honor. `--lock-ttl` is deliberately NOT
+    // integer-checked — half an hour is a meaningful TTL.
     if (spec.integer && !Number.isSafeInteger(value)) {
-      throw new Error(`${name} must be a whole number, got ${raw}`);
+      throw new Error(`${name} must be a whole integer, got ${raw}`);
+    }
+    // `min` is separate from the `> 0` check because "positive" is not the
+    // constraint for every numeric flag — one consensus pass is not a quorum of
+    // itself, so accepting 1 and quietly running single-pass would restore exactly
+    // the behavior the flag exists to replace.
+    if (spec.min !== undefined && value < spec.min) {
+      throw new Error(`${name} must be at least ${spec.min}`);
     }
     opts[spec.key] = value;
   }
@@ -1805,6 +2138,13 @@ export function parseArgs(argv) {
       `${name} applies only to ${spec.mode.map((m) => `--${m === "cleanup" ? "apply/--decisions (audit)" : m === "list" ? "list-inactive" : "restore"}`).join(" or ")}`,
     );
   }
+  // Applied here, not as an initial value, so `--protected-topics ""` stays an
+  // empty list. Defaulting a *retention* rule is the safe direction: the cost of
+  // the default is finance memories that never get tidied, and the cost of no
+  // default is finance memories that get deleted. It is unconditional rather than
+  // cleanup-only because the retention rule is a property of the tool, and a
+  // reader of `opts` should not have to know the mode to know what is protected.
+  opts.protectedTopics ??= [...DEFAULT_PROTECTED_TOPICS];
   return opts;
 }
 

@@ -13,14 +13,17 @@ import {
   contentHash,
   inactiveMemoryAdapter,
   parseArgs,
+  consensusDecisions,
   parseVerdicts,
   planDecisions,
   runCleanup,
   runListInactive,
   runRestore,
   snippetLogDir,
+  verdictSummary,
   ARG_SPECS,
   DURABLE_ONLY_RULES,
+  TOPICS,
   USAGE,
 } from "./memory-cleanup.mjs";
 
@@ -117,15 +120,28 @@ function fakeServer(initial) {
   return { store, calls, fetchImpl };
 }
 
-/** LLM fake: verdictsByBatch is an array of responses (JSON string or object) per call. */
+/**
+ * LLM fake: verdictsByBatch is an array of responses (JSON string or object) per
+ * call.
+ *
+ * Object-form verdicts get `topic: "engineering"` when the key is ABSENT, so the
+ * fake models a classifier that honours the #123 contract and the pre-existing
+ * cases stay about what they were written to test. Present-but-wrong is passed
+ * through untouched (`topic: null`, `topic: "bogus"`), which is how a case
+ * expresses a non-compliant response in object form; a raw JSON string is passed
+ * through verbatim either way.
+ */
 function fakeLlm(verdictsByBatch) {
   let call = 0;
   return vi.fn(async () => {
     const v = verdictsByBatch[Math.min(call, verdictsByBatch.length - 1)];
     call += 1;
-    return typeof v === "string" ? v : JSON.stringify({ verdicts: v });
+    if (typeof v === "string") return v;
+    return JSON.stringify({ verdicts: v.map(withTopic) });
   });
 }
+
+const withTopic = (v) => ("topic" in v ? v : { ...v, topic: "engineering" });
 
 function baseDeps(server, llm, dir) {
   return {
@@ -149,7 +165,12 @@ function baseOpts(overrides = {}) {
   };
 }
 
-const keepAll = (memories) => memories.map((m) => ({ id: m.id, verdict: "KEEP", reason: "durable" }));
+// `topic` is required on every verdict (#123 / TC-SLACKAPP-051), so the fakes
+// emit it exactly as the real classifier now must. "engineering" is the neutral
+// default here: it is NOT protected, so a case that means to exercise the
+// protected-topic rule has to say so explicitly rather than inherit it.
+const keepAll = (memories) =>
+  memories.map((m) => ({ id: m.id, verdict: "KEEP", reason: "durable", topic: "engineering" }));
 
 describe("scan & pagination", () => {
   it("TC-MEMCLEAN-001 pages through windows and sees every memory once", async () => {
@@ -447,7 +468,9 @@ describe("apply, cap, --ids", () => {
     const server = fakeServer(mems);
     const llm = fakeLlm([]);
     llm.mockImplementation(async (_p, batch) =>
-      JSON.stringify({ verdicts: batch.map((m) => ({ id: m.id, verdict: "DELETE", reason: "noise" })) }),
+      JSON.stringify({
+        verdicts: batch.map((m) => ({ id: m.id, verdict: "DELETE", reason: "noise", topic: "engineering" })),
+      }),
     );
     const result = await runCleanup(
       baseOpts({ apply: true, cap: 2000 }),
@@ -878,12 +901,68 @@ describe("discovery", () => {
 
 describe("verdict parsing units", () => {
   it("parseVerdicts accepts valid shapes and rejects garbage", () => {
-    expect(parseVerdicts('{"verdicts":[{"id":"a","verdict":"KEEP","reason":"r"}]}')).toEqual([
-      { id: "a", verdict: "KEEP", reason: "r" },
+    expect(parseVerdicts('{"verdicts":[{"id":"a","verdict":"KEEP","reason":"r","topic":"engineering"}]}')).toEqual([
+      { id: "a", verdict: "KEEP", reason: "r", topic: "engineering" },
     ]);
     expect(() => parseVerdicts("nope")).toThrow();
     expect(() => parseVerdicts('{"verdicts":"x"}')).toThrow();
     expect(() => parseVerdicts('{"verdicts":[{"id":"a","verdict":"EXPLODE"}]}')).toThrow(/verdict/i);
+  });
+
+  it("TC-SLACKAPP-050 every known topic parses and survives onto the verdict", () => {
+    for (const topic of TOPICS) {
+      const [v] = parseVerdicts(
+        JSON.stringify({ verdicts: [{ id: "a", verdict: "KEEP", reason: "r", topic }] }),
+      );
+      expect(v.topic).toBe(topic);
+    }
+    // The set itself is pinned: silently adding a sixth topic would let the
+    // classifier route finance memories somewhere `protectedTopics` never looks.
+    expect([...TOPICS].sort()).toEqual([
+      "content",
+      "engineering",
+      "operations",
+      "other",
+      "personal-finance",
+    ]);
+  });
+
+  it("TC-SLACKAPP-051 a missing topic is malformed, never defaulted to `other`", () => {
+    expect(() =>
+      parseVerdicts('{"verdicts":[{"id":"a","verdict":"DELETE","reason":"r"}]}'),
+    ).toThrow(/topic/iu);
+    // Defaulting is the specific hazard: `other` is unprotected, so a batch
+    // whose model forgot the field would have every personal-finance memory in
+    // it silently eligible for deletion.
+    expect(() =>
+      parseVerdicts('{"verdicts":[{"id":"a","verdict":"KEEP","reason":"r"}]}'),
+    ).toThrow(/topic/iu);
+  });
+
+  it("TC-SLACKAPP-052 an unknown topic is malformed and the message never echoes it", () => {
+    const secretish = "personal-finance-但是我的密码是 hunter2";
+    let caught;
+    try {
+      parseVerdicts(
+        JSON.stringify({ verdicts: [{ id: "a", verdict: "KEEP", reason: "r", topic: secretish }] }),
+      );
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught?.name).toBe("MalformedResponse");
+    expect(caught.message).toMatch(/topic/iu);
+    // Fixed strings only — a response can carry memory content, and this error
+    // is logged.
+    expect(caught.message).not.toContain(secretish);
+    expect(caught.message).not.toContain("hunter2");
+  });
+
+  it("TC-SLACKAPP-053 a non-string topic is malformed, not a crash mid-plan", () => {
+    for (const topic of [["personal-finance"], { name: "other" }, 7, null, true]) {
+      expect(() =>
+        parseVerdicts(JSON.stringify({ verdicts: [{ id: "a", verdict: "KEEP", reason: "r", topic }] })),
+      ).toThrow(/topic/iu);
+    }
   });
 
   it("planDecisions never lets `absorbs` override an id's own verdict (TC-MEMCLEAN-014)", () => {
@@ -1169,7 +1248,8 @@ describe("LLM route", () => {
   });
 
   it("TC-MEMCLEAN-072: responses output_text parts reach parseVerdicts verbatim", async () => {
-    const verdicts = '{"verdicts":[{"id":"m1","verdict":"KEEP","reason":"durable"}]}';
+    const verdicts =
+      '{"verdicts":[{"id":"m1","verdict":"KEEP","reason":"durable","topic":"engineering"}]}';
     const { fetchImpl } = recorder([
       responsesReply({
         // Split across parts: the route must concatenate, not take the first.
@@ -1183,7 +1263,9 @@ describe("LLM route", () => {
 
     const raw = await completeChat("sys", [{ id: "m1" }]);
     expect(raw).toBe(verdicts);
-    expect(parseVerdicts(raw)).toEqual([{ id: "m1", verdict: "KEEP", reason: "durable" }]);
+    expect(parseVerdicts(raw)).toEqual([
+      { id: "m1", verdict: "KEEP", reason: "durable", topic: "engineering" },
+    ]);
   });
 
   it("TC-MEMCLEAN-073: a failed responses status throws instead of returning empty", async () => {
@@ -1356,10 +1438,10 @@ describe("LLM route", () => {
         const [s1, a1, a2, ...rest] = batch;
         return JSON.stringify({
           verdicts: [
-            { id: s1.id, verdict: "MERGE", reason: "frags", merge_into: s1.id,
+            { id: s1.id, verdict: "MERGE", reason: "frags", merge_into: s1.id, topic: "engineering",
               absorbs: [a1.id, a2.id], merged_content: "merged fact" },
-            { id: a1.id, verdict: "MERGE", reason: "frags", merge_into: s1.id },
-            { id: a2.id, verdict: "MERGE", reason: "frags", merge_into: s1.id },
+            { id: a1.id, verdict: "MERGE", reason: "frags", merge_into: s1.id, topic: "engineering" },
+            { id: a2.id, verdict: "MERGE", reason: "frags", merge_into: s1.id, topic: "engineering" },
             ...keepAll(rest),
           ],
         });
@@ -1388,6 +1470,57 @@ describe("LLM route", () => {
     );
     const applyLine = applyDeps.log.mock.calls.map((c) => c[0]).find((m) => m.startsWith("apply done:"));
     expect(applyLine).toMatch(/UNCLASSIFIED=20 of 60 memories \(from the replayed decision list\)/);
+  });
+
+  it("TC-SLACKAPP-054 a topic failure retries once then SKIPs the batch, like any malformed response", async () => {
+    // The spec's stated cost, asserted rather than assumed: requiring `topic` on
+    // EVERY verdict means a response that omits it batch-SKIPs the plain #102
+    // path too, including the scheduled weekly run. That is only acceptable if a
+    // topic failure lands in the SAME machinery as any other malformed response
+    // — one retry, then a non-destructive whole-batch SKIP that the
+    // "how much went unaudited" note counts. A topic check bolted on somewhere
+    // that bypasses `classifyBatch`'s retry, or that produces a SKIP the
+    // UNCLASSIFIED note does not recognise, would turn a recoverable hiccup into
+    // a silently unaudited corpus.
+    const memories = Array.from({ length: 40 }, (_, i) => memory(`m-${i}`, `fact ${i}`));
+    const server = fakeServer(memories);
+    let call = 0;
+    const llm = vi.fn(async (_p, batch) => {
+      call += 1;
+      // Batch 0 omits `topic` on BOTH attempts; batch 1 is well-formed.
+      if (call <= CLASSIFY_ATTEMPTS) {
+        return JSON.stringify({
+          verdicts: batch.map((m) => ({ id: m.id, verdict: "DELETE", reason: "stale" })),
+        });
+      }
+      return JSON.stringify({ verdicts: keepAll(batch) });
+    });
+    const deps = baseDeps(server, llm, tempDir());
+    const result = await runCleanup(baseOpts(), deps);
+
+    // Retried exactly once, not indefinitely and not zero times.
+    expect(llm).toHaveBeenCalledTimes(CLASSIFY_ATTEMPTS + 1);
+
+    // The failed batch is SKIP with the SAME reason string the note counts —
+    // not a new "bad topic" reason that the accounting would miss.
+    const skipped = result.decisions.filter((d) => d.verdict === "SKIP");
+    expect(skipped).toHaveLength(20);
+    for (const d of skipped) {
+      expect(d.reason).toBe("classification failed after retry");
+    }
+    // Non-destructive: the batch the classifier wanted to DELETE yields no
+    // DELETE decision at all.
+    expect(result.decisions.some((d) => d.verdict === "DELETE")).toBe(false);
+
+    // Counted by the unaudited note, and the retry log names the topic failure
+    // so an operator can tell a prompt-contract break from a transport outage.
+    const summaryLine = deps.log.mock.calls.map((c) => c[0]).find((m) => m.startsWith("dry-run:"));
+    expect(summaryLine).toMatch(/UNCLASSIFIED=20 of 40 memories \(1\/2 batches failed, 50%\)/);
+    const attempts = deps.log.mock.calls
+      .map((c) => c[0])
+      .filter((m) => /classification batch 0 attempt \d failed/u.test(m));
+    expect(attempts).toHaveLength(CLASSIFY_ATTEMPTS);
+    for (const line of attempts) expect(line).toMatch(/topic/iu);
   });
 
   it("TC-MEMCLEAN-081: a deterministic request-translation defect aborts the run", async () => {
@@ -2966,5 +3099,475 @@ describe("restore CLI validation", () => {
       .filter((line) => !/^\s*(\/\/|\*|\/\*)/u.test(line))
       .join("\n");
     expect(code).not.toMatch(/process\.exit\(/u);
+  });
+});
+
+describe("protected topics (#123)", () => {
+  // The invariant under test is stronger than "never offered for deletion": a
+  // protected memory is never MUTATED by this tool at all — not deleted, not
+  // absorbed into a merge, not rewritten as a merge survivor. One invariant with
+  // one test surface, rather than a per-verdict list that a fourth verdict would
+  // silently escape.
+  const finance = (id, content, version = 1) => ({ ...memory(id, content, version) });
+  const verdict = (id, v, topic, extra = {}) => ({
+    id,
+    verdict: v,
+    reason: "r",
+    topic,
+    ...extra,
+  });
+
+  it("TC-SLACKAPP-060 a protected DELETE is downgraded to RETAIN, never offered", () => {
+    const out = planDecisions(
+      [finance("f-1", "my brokerage rule"), memory("e-1", "a build flag")],
+      [verdict("f-1", "DELETE", "personal-finance"), verdict("e-1", "DELETE", "engineering")],
+      { protectedTopics: ["personal-finance"] },
+    );
+    const byId = Object.fromEntries(out.map((d) => [d.id, d]));
+
+    // Its own verdict, not a KEEP with a note: the summary counts it without
+    // special-casing, and applyDecisions cannot reach a DELETE/MERGE branch.
+    expect(byId["f-1"].verdict).toBe("RETAIN");
+    // The report must show that the classifier judged it deletable and policy
+    // overrode that — not that the classifier decided to keep it.
+    expect(byId["f-1"].originalVerdict).toBe("DELETE");
+    expect(byId["f-1"].retainedReason).toBe("protected topic personal-finance");
+    // Unprotected topics are untouched by the rule.
+    expect(byId["e-1"].verdict).toBe("DELETE");
+  });
+
+  it("TC-SLACKAPP-061 a policy retain is counted separately from SKIP", async () => {
+    // SKIP means "something went wrong or was not audited". A policy retain is
+    // neither, and conflating them would make a classifier outage and a working
+    // protection rule read identically in the summary.
+    const memories = [finance("f-1", "my positions"), memory("e-1", "a flag")];
+    const server = fakeServer(memories);
+    const llm = vi.fn(async (_p, batch) =>
+      JSON.stringify({
+        verdicts: batch.map((m) =>
+          m.id === "f-1"
+            ? verdict(m.id, "DELETE", "personal-finance")
+            : verdict(m.id, "KEEP", "engineering"),
+        ),
+      }),
+    );
+    const deps = baseDeps(server, llm, tempDir());
+    const result = await runCleanup(baseOpts({ protectedTopics: ["personal-finance"] }), deps);
+
+    const summaryLine = deps.log.mock.calls.map((c) => c[0]).find((m) => m.startsWith("dry-run:"));
+    expect(summaryLine).toContain('"RETAIN":1');
+    expect(summaryLine).not.toContain('"SKIP":1');
+    expect(result.decisions.find((d) => d.id === "f-1").verdict).toBe("RETAIN");
+  });
+
+  it("TC-SLACKAPP-066 the summary reports every verdict, zeros included, and invents no bucket", async () => {
+    // Two properties, both about a summary an operator compares across runs.
+    // Zeros must be printed: a run where protection matched nothing must say
+    // `"RETAIN":0` rather than omit the key, because an absent key is
+    // indistinguishable from a build that has no protection rule at all — the
+    // exact silence that would hide the flag being dropped from the invocation.
+    // And the key SET must be closed: `summary[d.verdict] = ... || 0` happily
+    // invents a bucket, so a verdict misspelled at one push site would report
+    // `"RETAINED":1` beside `"RETAIN":0` and look like a data oddity rather than a
+    // routing bug that put a protected memory on an unaudited path.
+    const memories = [memory("e-1", "a flag")];
+    const server = fakeServer(memories);
+    const llm = vi.fn(async (_p, batch) => JSON.stringify({ verdicts: keepAll(batch) }));
+    const deps = baseDeps(server, llm, tempDir());
+    await runCleanup(baseOpts({ protectedTopics: ["personal-finance"] }), deps);
+
+    const summaryLine = deps.log.mock.calls.map((c) => c[0]).find((m) => m.startsWith("dry-run:"));
+    const summary = JSON.parse(summaryLine.match(/\{.*\}/u)[0]);
+    expect(Object.keys(summary).sort()).toEqual(
+      ["DELETE", "KEEP", "MERGE", "RETAIN", "SKIP", "UNSTABLE"],
+    );
+    expect(summary.RETAIN).toBe(0);
+    expect(summary.UNSTABLE).toBe(0);
+    expect(summary.KEEP).toBe(1);
+
+    // Asserted directly, not through a run: `validateDecisions` rejects an unknown
+    // verdict in a replayed file before the summary is built, so no INPUT can reach
+    // this branch — only a planner push site can, and an invariant nothing can
+    // trigger from outside still has to be proven from inside or it is decoration.
+    expect(() => verdictSummary([{ id: "x", verdict: "RETAINED" }])).toThrow(/uncountable/u);
+  });
+
+  it("TC-SLACKAPP-062 a protected memory is withheld from a merge, as survivor and as absorbed", () => {
+    // Absorbing a protected memory into a survivor deletes it just as surely as
+    // DELETE does, so a rule that only checks the top-level verdict is a hole.
+    const asAbsorbed = planDecisions(
+      [memory("s-1", "survivor"), finance("f-1", "my cash plan")],
+      [
+        verdict("s-1", "MERGE", "engineering", {
+          merge_into: "s-1",
+          absorbs: ["f-1"],
+          merged_content: "merged",
+        }),
+        verdict("f-1", "MERGE", "personal-finance", { merge_into: "s-1" }),
+      ],
+      { protectedTopics: ["personal-finance"] },
+    );
+    const absorbedById = Object.fromEntries(asAbsorbed.map((d) => [d.id, d]));
+    expect(absorbedById["f-1"].verdict).toBe("RETAIN");
+    // With its only absorbed id withheld the merge has nothing to absorb, so it
+    // must not rewrite the survivor either.
+    expect(asAbsorbed.some((d) => d.verdict === "MERGE")).toBe(false);
+
+    // As the survivor: a merge REWRITES the survivor's content, which is a
+    // mutation of a protected memory even though nothing is deleted.
+    const asSurvivor = planDecisions(
+      [finance("f-2", "my brokerage"), memory("e-2", "a flag")],
+      [
+        verdict("f-2", "MERGE", "personal-finance", {
+          merge_into: "f-2",
+          absorbs: ["e-2"],
+          merged_content: "merged",
+        }),
+        verdict("e-2", "MERGE", "engineering", { merge_into: "f-2" }),
+      ],
+      { protectedTopics: ["personal-finance"] },
+    );
+    const survivorById = Object.fromEntries(asSurvivor.map((d) => [d.id, d]));
+    expect(survivorById["f-2"].verdict).toBe("RETAIN");
+    expect(asSurvivor.some((d) => d.verdict === "MERGE")).toBe(false);
+    // e-2 is not protected, but its group did not emit — it must still carry a
+    // decision row, because the decision log covers every scanned memory.
+    expect(survivorById["e-2"]).toBeDefined();
+    expect(survivorById["e-2"].verdict).not.toBe("MERGE");
+  });
+
+  it("TC-SLACKAPP-063 protectedTopics defaults to personal-finance; an empty list protects nothing", () => {
+    // Omitted → the default. An operator who wants the default omits the flag.
+    const defaulted = planDecisions(
+      [finance("f-1", "my holdings")],
+      [verdict("f-1", "DELETE", "personal-finance")],
+      {},
+    );
+    expect(defaulted[0].verdict).toBe("RETAIN");
+    expect(parseArgs(["--stage", "test"]).protectedTopics).toEqual(["personal-finance"]);
+
+    // Explicitly empty → protect nothing. A silent fallback to the default would
+    // make a deliberate opt-out impossible to express.
+    const optedOut = planDecisions(
+      [finance("f-1", "my holdings")],
+      [verdict("f-1", "DELETE", "personal-finance")],
+      { protectedTopics: [] },
+    );
+    expect(optedOut[0].verdict).toBe("DELETE");
+    expect(parseArgs(["--stage", "test", "--protected-topics", ""]).protectedTopics).toEqual([]);
+  });
+
+  it("TC-SLACKAPP-065 an --apply run issues no write for a RETAIN row", async () => {
+    // The invariant is "never mutated by this tool at all", so it has to hold on
+    // the run that actually writes — not only in the planner. RETAIN survives
+    // that path because `destructiveCost` returns 0 for it, which is exactly the
+    // kind of implicit protection a fourth verdict would inherit by accident and
+    // a refactor could remove without any test noticing.
+    const memories = [finance("f-1", "my positions"), memory("e-1", "session noise")];
+    const server = fakeServer(memories);
+    const llm = vi.fn(async (_p, batch) =>
+      JSON.stringify({
+        verdicts: batch.map((m) =>
+          m.id === "f-1"
+            ? verdict(m.id, "DELETE", "personal-finance")
+            : verdict(m.id, "DELETE", "engineering"),
+        ),
+      }),
+    );
+    const dryDeps = baseDeps(server, llm, tempDir());
+    const dry = await runCleanup(baseOpts({ protectedTopics: ["personal-finance"] }), dryDeps);
+    expect(dry.writeCalls).toBe(0);
+
+    // Replay the decision file, which is the run that deletes.
+    const applyServer = fakeServer(memories);
+    const applyDeps = baseDeps(applyServer, llm, tempDir());
+    const applied = await runCleanup(
+      baseOpts({ apply: true, decisionsFile: dry.decisionPath, protectedTopics: ["personal-finance"] }),
+      applyDeps,
+    );
+
+    // The unprotected id is deleted, proving the run was capable of deleting.
+    expect(JSON.stringify(applyServer.calls)).toContain("e-1");
+    // Asserted over EVERY call, GETs included, not just the writes. A RETAIN row
+    // that reaches the delete branch is re-read and then skipped as an "LWW
+    // guard" — it has no contentHash to match — so filtering to non-GETs would
+    // pass while protection had become accidental and the run reported the
+    // memory as protected by a concurrent write. The tool must not touch it.
+    expect(JSON.stringify(applyServer.calls)).not.toContain("f-1");
+    const lww = applyDeps.log.mock.calls.map((c) => c[0]).filter((m) => /f-1/u.test(m));
+    expect(lww).toEqual([]);
+    // And no cap was charged for it: a protected row must not shrink the
+    // blast-radius budget for work that never happens.
+    expect(applied.capUsed).toBe(1);
+  });
+
+  it("TC-SLACKAPP-064 an unrecognised protected topic is rejected at argument validation", () => {
+    // A typo that matches no topic silently protects nothing, and the operator
+    // does not find out until finance memories are deleted. Rejected up front.
+    expect(() => parseArgs(["--stage", "test", "--protected-topics", "personal_finance"])).toThrow(
+      /personal_finance/,
+    );
+    expect(() =>
+      parseArgs(["--stage", "test", "--protected-topics", "personal-finance,nope"]),
+    ).toThrow(/nope/);
+    expect(
+      parseArgs(["--stage", "test", "--protected-topics", "personal-finance,operations"])
+        .protectedTopics,
+    ).toEqual(["personal-finance", "operations"]);
+  });
+});
+
+describe("two-pass consensus (#123)", () => {
+  // The 66%-agreement finding that motivated the issue: one classification pass
+  // is not reproducible enough to authorize deletions from. Consensus is the
+  // narrowing operation — an id is offered only if EVERY pass independently said
+  // DELETE, and everything else is reported rather than acted on.
+  const del = (id, extra = {}) => ({
+    id,
+    verdict: "DELETE",
+    reason: "stale",
+    contentHash: contentHash(`c-${id}`),
+    version: 1,
+    ...extra,
+  });
+  const keep = (id) => ({ id, verdict: "KEEP", reason: "durable" });
+
+  // Numbered outside 070-079 because it is a CLI-validation case, a sibling of
+  // TC-SLACKAPP-064, rather than a property of the intersection itself.
+  it("TC-SLACKAPP-069 --consensus-passes must be an integer of at least 2", () => {
+    // 2.5 is the case that matters: `Number.isFinite` and `> 0` both accept it,
+    // the pass loop silently runs twice, and the log says "pass 1 of 2.5" while
+    // the report says 2 — a run whose own summary disagrees with its own
+    // invocation. And `--consensus-passes 1` asks for consensus and gets none,
+    // which is the single-pass behavior the flag exists to replace: refused by
+    // name rather than accepted and quietly downgraded.
+    expect(() => parseArgs(["--stage", "test", "--consensus-passes", "2.5"])).toThrow(/integer/u);
+    expect(() => parseArgs(["--stage", "test", "--consensus-passes", "1"])).toThrow(/at least 2/u);
+    expect(() => parseArgs(["--stage", "test", "--consensus-passes", "0"])).toThrow();
+    expect(parseArgs(["--stage", "test", "--consensus-passes", "3"]).consensusPasses).toBe(3);
+    // Omitted is the single-pass default, not an error: consensus is opt-in.
+    expect(parseArgs(["--stage", "test"]).consensusPasses).toBeUndefined();
+  });
+
+  it("TC-SLACKAPP-070 only ids DELETEd by both passes are offered; the rest are unstable", () => {
+    const { decisions, report } = consensusDecisions([
+      [del("both"), del("one-only"), keep("neither")],
+      [del("both"), keep("one-only"), keep("neither")],
+    ]);
+    const byId = Object.fromEntries(decisions.map((d) => [d.id, d]));
+
+    expect(byId["both"].verdict).toBe("DELETE");
+    // Its own verdict, not a KEEP: a KEEP would claim the classifier judged it
+    // durable, when in fact one pass wanted it gone and the passes disagreed —
+    // which is the number this whole design exists to surface.
+    expect(byId["one-only"].verdict).toBe("UNSTABLE");
+    expect(byId["one-only"].verdicts).toEqual(["DELETE", "KEEP"]);
+    expect(byId["neither"].verdict).toBe("KEEP");
+    expect(report.disagreed).toBe(1);
+  });
+
+  it("TC-SLACKAPP-071 the passes are independent and the INTERSECTION decides", () => {
+    // Neither "first response wins" nor "last response wins" can produce this
+    // answer: pass 1 alone would offer a+b, pass 2 alone would offer b+c.
+    const { decisions } = consensusDecisions([
+      [del("a"), del("b"), keep("c")],
+      [keep("a"), del("b"), del("c")],
+    ]);
+    const offered = decisions.filter((d) => d.verdict === "DELETE").map((d) => d.id);
+    expect(offered).toEqual(["b"]);
+  });
+
+  it("TC-SLACKAPP-072 the summary reports both pass counts, the intersection, and the disagreement rate", async () => {
+    const memories = [memory("a", "x"), memory("b", "y"), memory("c", "z")];
+    const server = fakeServer(memories);
+    let pass = 0;
+    const llm = vi.fn(async (_p, batch) => {
+      pass += 1;
+      // Pass 1 deletes a+b; pass 2 deletes b only. Intersection = {b}.
+      const deleting = pass === 1 ? ["a", "b"] : ["b"];
+      return JSON.stringify({
+        verdicts: batch.map((m) => ({
+          id: m.id,
+          verdict: deleting.includes(m.id) ? "DELETE" : "KEEP",
+          reason: "r",
+          topic: "engineering",
+        })),
+      });
+    });
+    const deps = baseDeps(server, llm, tempDir());
+    await runCleanup(baseOpts({ consensusPasses: 2 }), deps);
+
+    // A drop in reproducibility must be visible: an unreported number is a
+    // number nobody watches.
+    const line = deps.log.mock.calls.map((c) => c[0]).find((m) => /CONSENSUS/u.test(m));
+    expect(line).toMatch(/pass 1 DELETE=2/u);
+    expect(line).toMatch(/pass 2 DELETE=1/u);
+    expect(line).toMatch(/agreed=1/u);
+    expect(line).toMatch(/disagreed=1/u);
+    expect(line).toMatch(/50%/u); // 1 of 2 ids either pass wanted deleted
+  });
+
+  it("TC-SLACKAPP-073 one usable pass is NOT consensus: nothing is offered", () => {
+    // Falling back to "use the other pass" would quietly restore exactly the
+    // non-reproducible single-pass behavior consensus exists to remove.
+    const { decisions, report } = consensusDecisions([[del("a"), del("b")], null]);
+    expect(decisions.some((d) => d.verdict === "DELETE")).toBe(false);
+    expect(report.usablePasses).toBe(1);
+    expect(report.consensusReached).toBe(false);
+  });
+
+  it("TC-SLACKAPP-074 an id a later pass never judged is not treated as agreement", () => {
+    // Absence of a verdict is not a DELETE and is not a KEEP.
+    const { decisions } = consensusDecisions([
+      [del("judged-twice"), del("judged-once")],
+      [del("judged-twice")],
+    ]);
+    const byId = Object.fromEntries(decisions.map((d) => [d.id, d]));
+    expect(byId["judged-twice"].verdict).toBe("DELETE");
+    expect(byId["judged-once"].verdict).toBe("UNSTABLE");
+    expect(byId["judged-once"].verdicts).toEqual(["DELETE", null]);
+  });
+
+  it("TC-SLACKAPP-075 protection wins over the intersection, even when the passes disagree on topic", () => {
+    // Order is asserted because both orders agree today and only one keeps
+    // agreeing when a pass returns a DIFFERENT topic for the same id — the
+    // realistic failure, since topic is a model judgment like any other.
+    const out = planDecisions(
+      [memory("f-1", "my positions")],
+      [{ id: "f-1", verdict: "DELETE", reason: "r", topic: "personal-finance" }],
+      { protectedTopics: ["personal-finance"] },
+    );
+    const alsoOut = planDecisions(
+      [memory("f-1", "my positions")],
+      [{ id: "f-1", verdict: "DELETE", reason: "r", topic: "engineering" }],
+      { protectedTopics: ["personal-finance"] },
+    );
+    // Pass 2 mis-topics it, so an intersection over RAW verdicts would see
+    // DELETE/DELETE and offer it. Protection is applied per pass FIRST, so the
+    // protected pass contributes RETAIN and the id can never be offered.
+    const { decisions } = consensusDecisions([out, alsoOut]);
+    const byId = Object.fromEntries(decisions.map((d) => [d.id, d]));
+    expect(byId["f-1"].verdict).not.toBe("DELETE");
+    expect(["RETAIN", "UNSTABLE"]).toContain(byId["f-1"].verdict);
+  });
+
+  it("TC-SLACKAPP-076 MERGE is withheld from the offered set in v1, and the count is reported", () => {
+    const merge = {
+      id: "s",
+      verdict: "MERGE",
+      reason: "frags",
+      contentHash: contentHash("c-s"),
+      version: 1,
+      mergedContent: "m",
+      mergedContentHash: contentHash("m"),
+      absorbs: [{ id: "a", contentHash: contentHash("c-a"), version: 1 }],
+    };
+    const { decisions, report } = consensusDecisions([
+      [merge, del("d")],
+      [merge, del("d")],
+    ]);
+    const byId = Object.fromEntries(decisions.map((d) => [d.id, d]));
+    // v1 approves deletions only. An unreported withholding would read as "the
+    // classifier found no merges".
+    expect(byId["s"].verdict).not.toBe("MERGE");
+    expect(report.mergesWithheld).toBe(1);
+    expect(byId["d"].verdict).toBe("DELETE");
+  });
+
+  it("TC-SLACKAPP-078 a pass that failed every batch is reported as no consensus, not as disagreement", async () => {
+    // The dangerous shape: `classifyAll` reports a total failure as a full list of
+    // SKIP rows, which look exactly like "this pass judged the memory and declined
+    // to delete it". The intersection is still safe — a SKIP is not a DELETE, so
+    // nothing extra is offered — but the REPORT would claim the two passes
+    // disagreed, when in truth the second pass never ran. An operator reading
+    // "agreement=0%" would go looking for a classifier that changed its mind
+    // instead of a transport that broke.
+    const memories = [memory("a", "x"), memory("b", "y")];
+    const server = fakeServer(memories);
+    let call = 0;
+    const llm = vi.fn(async (_p, batch) => {
+      call += 1;
+      // Attempts 1 (pass 1) succeed; every later attempt (pass 2 and its retry)
+      // throws, so pass 2 loses all of its batches.
+      if (call > 1) throw new Error("transport is down");
+      return JSON.stringify({
+        verdicts: batch.map((m) => ({ id: m.id, verdict: "DELETE", reason: "r", topic: "engineering" })),
+      });
+    });
+    const deps = baseDeps(server, llm, tempDir());
+    const result = await runCleanup(baseOpts({ consensusPasses: 2 }), deps);
+
+    const line = deps.log.mock.calls.map((c) => c[0]).find((m) => /CONSENSUS/u.test(m));
+    expect(line).toMatch(/NO CONSENSUS/u);
+    expect(line).toMatch(/pass 2 DELETE=failed/u);
+    // Nothing offered, and the reason names the failure rather than a
+    // disagreement the model never had.
+    expect(result.decisions.some((d) => d.verdict === "DELETE")).toBe(false);
+    const unstable = result.decisions.filter((d) => d.verdict === "UNSTABLE");
+    expect(unstable.length).toBe(2);
+    for (const d of unstable) expect(d.reason).toMatch(/pass failed/u);
+    // A partial outage across passes is NOT the broken-classifier exit: pass 1
+    // classified the whole corpus, so the path works and 5 would misdiagnose it.
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("TC-SLACKAPP-079 a consensus dry run can be replayed with --apply", async () => {
+    // The same defect class TC-SLACKAPP-065 caught for RETAIN: the planner writes
+    // UNSTABLE rows to the decision file, so a replay validator that does not know
+    // the verdict makes every `--apply` after a consensus run fail at load — the
+    // safety mechanism breaking the tool it exists to make safe.
+    const memories = [memory("agreed", "x"), memory("contested", "y")];
+    const server = fakeServer(memories);
+    let pass = 0;
+    const llm = vi.fn(async (_p, batch) => {
+      pass += 1;
+      const deleting = pass === 1 ? ["agreed", "contested"] : ["agreed"];
+      return JSON.stringify({
+        verdicts: batch.map((m) => ({
+          id: m.id,
+          verdict: deleting.includes(m.id) ? "DELETE" : "KEEP",
+          reason: "r",
+          topic: "engineering",
+        })),
+      });
+    });
+    const dryDeps = baseDeps(server, llm, tempDir());
+    const dry = await runCleanup(baseOpts({ consensusPasses: 2 }), dryDeps);
+    expect(dry.decisions.find((d) => d.id === "contested").verdict).toBe("UNSTABLE");
+
+    const applyServer = fakeServer(memories);
+    const applyDeps = baseDeps(applyServer, llm, tempDir());
+    const applied = await runCleanup(
+      baseOpts({ apply: true, decisionsFile: dry.decisionPath }),
+      applyDeps,
+    );
+
+    expect(applied.exitCode).toBe(0);
+    // The agreed id is deleted; the contested one is not touched at all — asserted
+    // over every call, GETs included, because an UNSTABLE row that reached the
+    // delete branch would be re-read and then skipped as an LWW guard, which
+    // reports as "a concurrent write protected me" rather than as a defect.
+    expect(JSON.stringify(applyServer.calls)).toContain("agreed");
+    expect(JSON.stringify(applyServer.calls)).not.toContain("contested");
+    expect(applied.capUsed).toBe(1);
+  });
+
+  it("TC-SLACKAPP-077 consensus never widens the destructive set", () => {
+    // Asserted as a SET RELATION, not a count, so a future refactor cannot add
+    // an id sourced from anywhere other than the intersection.
+    const passes = [
+      [del("a"), del("b"), keep("c"), del("d")],
+      [del("a"), keep("b"), del("c"), del("d")],
+    ];
+    const { decisions } = consensusDecisions(passes);
+    const deleteIds = (list) =>
+      new Set(list.filter((d) => d.verdict === "DELETE").map((d) => d.id));
+    const intersection = new Set(
+      [...deleteIds(passes[0])].filter((id) => deleteIds(passes[1]).has(id)),
+    );
+    for (const id of deleteIds(decisions)) {
+      expect(intersection.has(id)).toBe(true);
+    }
+    expect(deleteIds(decisions).size).toBeGreaterThan(0); // not vacuously empty
   });
 });
