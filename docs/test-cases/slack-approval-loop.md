@@ -108,10 +108,22 @@ concurrent applies of the same ids.
 - **TC-SLACKAPP-011** — a timestamp more than 5 minutes in the **future** is also
   rejected. A one-sided check accepts a signature minted against a clock the
   attacker controls and keeps it valid indefinitely.
-- **TC-SLACKAPP-012** — a non-numeric, empty, or absurdly large timestamp is
-  rejected rather than coerced. `Number("")` is 0 and `NaN` comparisons are
-  always false, so a naive check would treat a garbage timestamp as either
-  ancient or acceptable depending on the operator; both must be an explicit 401.
+- **TC-SLACKAPP-012** — a malformed timestamp is rejected **by shape**, asserted
+  on the logged reason rather than the status code. The status cannot tell the two
+  branches apart for most inputs: `Number("")` is 0, `Number("1e999")` is Infinity
+  and `Number("-1")` is -1, all of which the skew check would also reject, just as
+  `stale timestamp`. Only `"abc"` → `NaN` is uniquely the shape check's to catch,
+  since every NaN comparison is false and `Math.abs(NaN) > MAX` therefore
+  *accepts* it. The reason string is the observable that distinguishes "recognised
+  as garbage" from "did arithmetic on garbage and got lucky", and an operator told
+  `stale timestamp` for `"abc"` would go hunting a clock skew that does not exist.
+  `Number` also **trims**, so a whitespace-padded in-window value is the one input
+  the skew check genuinely cannot see. An empty header is reported as *missing*,
+  not malformed — a different and more accurate reason.
+- **TC-SLACKAPP-012b** — a well-formed but out-of-window timestamp is `stale`, not
+  `malformed`. Without it a shape check tightened until it rejected every timestamp
+  would pass TC-012 completely while the endpoint 401'd Slack forever; this is what
+  makes the shape check a filter rather than a wall.
 
 ## Stale-hash rejection
 
@@ -150,7 +162,30 @@ concurrent applies of the same ids.
   level so a lost approval is visible.
 - **TC-SLACKAPP-032** — a losing claimant whose record has no `taskArn` and a
   `claimedAt` older than `CLAIM_STALE_MS` starts the task and stamps the ARN,
-  recovering from a Lambda that died mid-claim.
+  recovering from a Lambda that died mid-claim. The stamp is asserted through the
+  store, on the **claim's own name**: a stamp written to any other parameter still
+  carries a `taskArn` and still uses `Overwrite: true`, so asserting only the call
+  arguments passes while the claim stays `taskArn`-less forever.
+- **TC-SLACKAPP-032b** — a claim that cannot be **read** refuses; it does not
+  recover. A read failure is not an absent record, and collapsing them
+  (`.catch(() => null)`) made `Date.parse(String(undefined))` return NaN and
+  `!Number.isFinite(NaN)` make `stale` true — so a losing delivery whose read was
+  merely throttled started a **second apply of the same ids**. Two redeliveries
+  hitting one parameter inside Slack's 3-second window is exactly when a
+  `ThrottlingException` is likely. We already know the claim exists (the
+  `Overwrite: false` write lost to it), so an unreadable claim is *unknown*, and
+  unknown is precisely when starting a destructive task is unsafe.
+- **TC-SLACKAPP-032c** — a claim that **was** read but carries a corrupt
+  `claimedAt` **is** stale, so it stays recoverable. The opposite of 032b and the
+  reason the two cases cannot share one branch: `ssm:DeleteParameter` is not
+  admitted by the boundary, so if a corrupt claim were not stale nothing could ever
+  clear it and the approval would be blocked permanently.
+- **TC-SLACKAPP-032d** — a delivery arriving **after** the stale window does not
+  re-apply a stamped claim. The end-to-end consequence of 032's store assertion:
+  recovery makes the claim fresh again only because the stamp lands on the claim
+  itself, so a misdirected stamp turns every late redelivery into another apply of
+  the same ids. The event's timestamp moves with the clock, or the skew check
+  answers the case at 401 before the claim logic is reached.
 - **TC-SLACKAPP-033** — the handler **never** calls the memory delete API. All
   `fetch` calls are enumerated and asserted to be Slack or upstream only, with no
   call to the mem9 REST surface. This is the structural guarantee behind "apply
@@ -162,6 +197,23 @@ concurrent applies of the same ids.
   TC-SLACKAPP-032. The case asserts the response is not the plain success text,
   because "recorded the approval and told the operator it worked" is the worst
   available outcome.
+- **TC-SLACKAPP-034b** — a claim write that fails for any **other** reason starts
+  nothing. Only `ParameterAlreadyExists` means "another delivery won"; an
+  `AccessDeniedException` (the boundary rollout has not happened yet), a throttle,
+  or a parameter-limit error must abort. Treating them all as a lost race would send
+  the delivery down the losing-claim path, where an **absent** claim reads as
+  recoverable and starts an apply no record vouches for. The log carries the error
+  **class**, not just the message: `AccessDeniedException` is a deploy-order
+  problem whose message ("not authorized to perform ssm:PutParameter") reads like a
+  policy bug without it.
+- **TC-SLACKAPP-034c** — a stamp failure is reported loudly but does **not** fail
+  the run. The apply has already started, so calling it a failure would be wrong;
+  but the claim now lacks a `taskArn`, so a redelivery past the stale window starts
+  a second apply. Nothing else can detect that, so the log has to name it.
+- **TC-SLACKAPP-034d** — an approve click carrying no list reference reads no SSM
+  and applies nothing. Falling through would hand `undefined` to `loadOffered`,
+  where the `record.hash !== hash` mismatch happens to refuse it — by accident, and
+  only while that comparison stays in that order.
 - **TC-SLACKAPP-035** — a Reject click writes no approval record, starts no task,
   and updates the message. Reject must be cheap and total: it is the button an
   operator presses when something looks wrong.
@@ -189,6 +241,67 @@ concurrent applies of the same ids.
   present, and an OAuth misconfiguration (`hmacKey` empty → 503 on OAuth routes)
   does not disable the Slack route, nor vice versa. The two concerns share a
   Lambda; they must not share a failure mode.
+
+## Entrypoint wiring and stage config
+
+These exist because the routing cases above pass the Slack deps in directly, which
+proves `route` dispatches but says nothing about whether the deployed Lambda ever
+builds them. Mutation-proved: deleting `buildSlackDeps(cfg)` from `handler` left
+every TC-040..049 case green while every real click would 404.
+
+- **TC-SLACKAPP-044** — the Slack signing secret is read from
+  `{prefix}/slack/signing-secret` **decrypted**, in the same `GetParameters` call
+  as the OAuth values. It must be a SecureString: a signing secret in a plain
+  String parameter is readable by anything holding `ssm:GetParameters` on the
+  stage tree. The boundary admits `kms:Decrypt` scoped to
+  `parameter/mem9-on-aws/*`, so this read is inside the ceiling.
+- **TC-SLACKAPP-045** — an absent secret resolves to empty rather than throwing.
+  Every MCP client's auth loads through the same function, so enabling Slack on one
+  stage must not be able to take OAuth down on another. Deliberately unlike the
+  OAuth values, which do throw when missing.
+- **TC-SLACKAPP-046** — the parameter name is built from the injected prefix, so a
+  preview stage cannot read prod's secret. The alternative spelling — one shared
+  secret under a stage-less path — would let any preview Lambda verify and act on
+  prod's approval clicks.
+- **TC-SLACKAPP-047** — deps are built when the stage has a secret, carrying the
+  stage and prefix from env rather than a constant.
+- **TC-SLACKAPP-047b** — `runTask` reads its ECS inputs from
+  `{prefix}/cleanup/{cluster-name,task-def-arn,task-sg-id,subnet-ids}`, the same
+  parameters `scripts/run-consolidation-task.sh` reads, so it does not depend on
+  the apply task's infra existing yet — only on the names being right. The
+  `StringList` values are split to arrays, each parameter is asserted to land in
+  the field **named** for it (reading four names and asserting only that all four
+  were read passes even when `cluster` receives the task-def ARN — both are
+  non-empty strings, so the required-value check cannot tell them apart and the
+  mistake surfaces only from ECS, as an opaque validation error, after the approval
+  is claimed), `assignPublicIp` is `DISABLED`, and the
+  container override carries the **hash only**: an override is echoed by
+  `DescribeTasks` and recorded in CloudTrail, so ids there would put memory
+  identifiers in an audit log. The task reads the ids from the approved SSM record
+  instead, which is also the only thing the signature does not vouch for.
+- **TC-SLACKAPP-047c** — `RunTask` answers HTTP 200 with an **empty** `tasks[]` and
+  a populated `failures[]` when placement fails, so reading `tasks[0].taskArn`
+  unchecked resolves `undefined` and the caller stamps the claim and reports an
+  apply that never started. The same trap `run-bootstrap-task.sh` calls out.
+- **TC-SLACKAPP-047d** — an incomplete SSM input set fails **before** `RunTask`,
+  naming the missing parameter. Otherwise a missing `task-def-arn` reaches ECS as
+  `undefined` and returns an opaque validation error after the claim was written.
+- **TC-SLACKAPP-047e** — the entrypoint passes the built deps to the router,
+  asserted through `handler` on a body that reports the apply started. A bare 200
+  would not distinguish it: the 404 branch and every refusal reply are 200s too.
+- **TC-SLACKAPP-047f** — the approval record is written as a plain `String` with
+  `Overwrite: false`, and the post-`RunTask` stamp can overwrite the same record.
+  Both are runtime-only failures the handler-level cases cannot see, since the
+  handler asks for `{ overwrite: false }` and trusts the closure to send it:
+  `SecureString` is denied by the boundary (no `kms:Encrypt`,
+  no `kms:GenerateDataKey`), and `Overwrite: true` destroys the atomic claim that
+  is the only reason Slack's 3-second redelivery is safe.
+- **TC-SLACKAPP-048** — no secret means no deps, which is what makes the route 404.
+- **TC-SLACKAPP-049** — a secret **without** `STAGE`/`SSM_PREFIX` refuses to build
+  rather than half-building. A dep set with an empty `stage` authenticates clicks
+  correctly and then has `loadOffered`'s stage guard refuse every one of them —
+  a feature that looks deployed and rejects every approval. Failing at build is
+  louder and cheaper to diagnose.
 
 ## Classification: `topic`
 
