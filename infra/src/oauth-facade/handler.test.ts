@@ -1265,25 +1265,24 @@ describe("Slack deps at the Lambda entrypoint (TC-SLACKAPP-047..049)", () => {
       env: { SSM_PREFIX: "/mem9-on-aws/test", STAGE: SLACK_STAGE },
       clients: {
         ssm: {
-          send: async (cmd: { input: Record<string, unknown> }) => {
-            // The approval read (`GetParameter`, singular `Name`) vs the ECS input
-            // read (`GetParameters`, plural `Names`) — distinguished so this case
-            // reaches RunTask instead of stopping at the offered-list check.
-            if (cmd.input.Name) {
-              return {
-                Parameter: {
-                  Value: JSON.stringify({
-                    stage: SLACK_STAGE,
-                    hash: SLACK_HASH,
-                    ids: ["m-1"],
-                  }),
-                },
-              };
-            }
+          send: async (cmd) => {
+            // Both reads are `GetParameters` — the only read the action ceiling
+            // admits (TC-047g) — so they are told apart by NAME, not by command
+            // shape. The approval read has to answer the offered record or this
+            // case stops at the offered-list check and never reaches RunTask.
+            const names = ((cmd as { input: { Names?: string[] } }).input.Names) ?? [];
             return {
-              Parameters: ((cmd.input.Names as string[] | undefined) ?? []).map((Name) => ({
+              Parameters: names.map((Name) => ({
                 Name,
-                Value: Name.endsWith("/subnet-ids") ? "subnet-a" : "v",
+                Value: Name.endsWith("/approvals/offered")
+                  ? JSON.stringify({
+                      stage: SLACK_STAGE,
+                      hash: SLACK_HASH,
+                      ids: ["m-1"],
+                    })
+                  : Name.endsWith("/subnet-ids")
+                    ? "subnet-a"
+                    : "v",
               })),
             };
           },
@@ -1298,6 +1297,47 @@ describe("Slack deps at the Lambda entrypoint (TC-SLACKAPP-047..049)", () => {
     // branch and every refusal reply also produce.
     expect(res.statusCode).toBe(200);
     expect(JSON.parse(res.body).text).toMatch(/Apply started/u);
+  });
+
+  it("TC-SLACKAPP-047g every parameter read uses GetParameters, the only read the boundary admits", async () => {
+    // `ssm:GetParameter` and `ssm:GetParameters` are DISTINCT IAM actions, and the
+    // workload permissions boundary's action ceiling admits only the plural (the
+    // whole project reads through `GetParameters`, so nothing needed the singular
+    // until this handler). A `GetParameterCommand` is therefore an AccessDenied on
+    // the first real Slack click — a runtime-only failure, invisible to every test
+    // that injects a client, because an injected fake answers any command shape.
+    //
+    // Asserted on the command CLASS rather than the response, since the two commands
+    // are interchangeable from the caller's side: same parameter, same value back,
+    // and only IAM can tell them apart.
+    const { GetParametersCommand } = await import("@aws-sdk/client-ssm");
+    const sent: unknown[] = [];
+    const deps = buildSlackDeps(
+      cfg({ slackSigningSecret: "shhh" }),
+      { SSM_PREFIX: "/mem9-on-aws/pr-7", STAGE: "pr-7" },
+      {
+        ssm: {
+          send: async (cmd) => {
+            sent.push(cmd);
+            return {
+              Parameters: [
+                { Name: "/mem9-on-aws/pr-7/approvals/offered", Value: '{"ids":[]}' },
+              ],
+            };
+          },
+        },
+      },
+    );
+    const value = await deps!.getParameter("/mem9-on-aws/pr-7/approvals/offered");
+
+    expect(value).toBe('{"ids":[]}');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toBeInstanceOf(GetParametersCommand);
+    // And an absent parameter is null, not the literal string "undefined": SSM
+    // reports a missing name in `InvalidParameters`, omitting it from `Parameters`
+    // entirely rather than returning an empty value.
+    const missing = await deps!.getParameter("/mem9-on-aws/pr-7/approvals/approved-x");
+    expect(missing).toBeNull();
   });
 
   it("TC-SLACKAPP-047f the approval record is a plain String written without overwrite", async () => {

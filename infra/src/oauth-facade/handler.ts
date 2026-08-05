@@ -892,11 +892,20 @@ export function buildSlackDeps(
     ssmPrefix,
     now: () => Date.now(),
     getParameter: async (name) => {
-      const { GetParameterCommand } = await import("@aws-sdk/client-ssm");
+      // `GetParameters` (plural) for a single name, NOT `GetParameter`. They are
+      // distinct IAM actions and the workload permissions boundary's action
+      // ceiling admits only the plural — the rest of the project reads through it,
+      // so nothing needed the singular until this handler. The two are otherwise
+      // interchangeable here, which is what makes the mistake invisible: same
+      // parameter, same value back, and only IAM can tell them apart, so the
+      // failure would be an AccessDenied on the first real Slack click.
+      const { GetParametersCommand } = await import("@aws-sdk/client-ssm");
       const res = (await (await ssmClient()).send(
-        new GetParameterCommand({ Name: name }),
-      )) as { Parameter?: { Value?: string } };
-      return res.Parameter?.Value ?? null;
+        new GetParametersCommand({ Names: [name] }),
+      )) as { Parameters?: Array<{ Name?: string; Value?: string }> };
+      // An absent name comes back in `InvalidParameters` and is simply missing
+      // from `Parameters`, so there is no empty-value case to distinguish.
+      return res.Parameters?.find((p) => p.Name === name)?.Value ?? null;
     },
     putParameter: async (name, value, opts) => {
       const { PutParameterCommand } = await import("@aws-sdk/client-ssm");
