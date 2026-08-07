@@ -22,20 +22,22 @@
 //        [--protected-topics personal-finance,operations]
 //        [--consensus-passes 2]
 //
-// --protected-topics names subject areas this tool may not mutate AT ALL: not
-// deleted, not absorbed into a merge, not rewritten as a merge survivor. Default
-// `personal-finance`; pass an empty value to protect nothing. A protected memory
-// the classifier judged deletable is reported as RETAIN with the original
-// verdict, so the report shows policy overriding the classifier rather than the
-// classifier having decided to keep it.
+// What every flag DOES lives in `USAGE` (`--help`), which derives its defaults
+// from the constants rather than restating them. Recorded here is only the part
+// `--help` is the wrong place for — why the two #123 flags exist at all:
 //
-// --consensus-passes N runs the classifier N independent times over ONE scan and
-// offers only the ids EVERY pass judged DELETE. The measured motivation: a pass
-// reproduced 66% of its own DELETE set on a re-run, which is not reproducible
-// enough to authorize deletions from. This only ever NARROWS: a contested id is
-// reported as UNSTABLE and acted on by nobody. Minimum 2 (one pass is not a
-// quorum of itself); omitted means single-pass. N passes cost N times the
-// inference.
+// --protected-topics, because the cost of the retention default is finance
+// memories that never get tidied, and the cost of no default is finance memories
+// that get deleted. Protection is a policy invariant, not a verdict: a protected
+// memory the classifier judged deletable is reported as RETAIN carrying the
+// original verdict, so the report shows policy overriding the classifier rather
+// than the classifier having decided to keep it.
+//
+// --consensus-passes, because of a measurement: one pass reproduced only 66% of
+// its own DELETE set on a re-run, which is not reproducible enough to authorize
+// deletions from. Intersecting passes only ever NARROWS — a contested id is
+// reported as UNSTABLE and acted on by nobody — so the flag trades inference cost
+// for a smaller, more reproducible offered set, never a larger one.
 //
 // The decision log and the restore log contain memory snippets — instance-private
 // data. Both are written OUTSIDE the repository (default ~/.mem9-cleanup/<stage>/)
@@ -869,21 +871,6 @@ async function discoverBaseUrl(opts, deps) {
 }
 
 /**
- * Count every verdict, including the ones that did not occur.
- *
- * Zeros are printed on purpose: a run where protection matched nothing must say
- * `"RETAIN":0`, because an omitted key is indistinguishable from a build with no
- * protection rule at all — which is how a dropped `--protected-topics` would go
- * unnoticed. And the key set is CLOSED: an unrecognised verdict is a routing
- * bug (a memory on a path nothing audits), so it throws rather than quietly
- * inventing a bucket that reads as a data oddity.
- *
- * Exported because that second property cannot be reached through any input:
- * `validateDecisions` rejects an unknown verdict in a replayed file before this
- * runs, so the only way in is a planner push site — an internal invariant, and
- * TC-SLACKAPP-066 asserts it directly rather than leaving the guard unproven.
- */
-/**
  * The `{prefix}/approvals/offered` record: what the callback Lambda compares a
  * button click against, and where the apply task reads its ids from (#123).
  *
@@ -1393,6 +1380,21 @@ export async function materializeApprovedIds({
   };
 }
 
+/**
+ * Count every verdict, including the ones that did not occur.
+ *
+ * Zeros are printed on purpose: a run where protection matched nothing must say
+ * `"RETAIN":0`, because an omitted key is indistinguishable from a build with no
+ * protection rule at all — which is how a dropped `--protected-topics` would go
+ * unnoticed. And the key set is CLOSED: an unrecognised verdict is a routing
+ * bug (a memory on a path nothing audits), so it throws rather than quietly
+ * inventing a bucket that reads as a data oddity.
+ *
+ * Exported because that second property cannot be reached through any input:
+ * `validateDecisions` rejects an unknown verdict in a replayed file before this
+ * runs, so the only way in is a planner push site — an internal invariant, and
+ * TC-SLACKAPP-066 asserts it directly rather than leaving the guard unproven.
+ */
 export function verdictSummary(decisions) {
   const summary = { KEEP: 0, DELETE: 0, MERGE: 0, SKIP: 0, RETAIN: 0, UNSTABLE: 0 };
   for (const d of decisions) {
@@ -2773,11 +2775,12 @@ export function parseArgs(argv) {
     // Two ways a fractional value goes wrong, and neither is a smaller version of
     // a valid run. A row count binds a bigint — `--limit 5.5` fails at the server,
     // after the SSM reads, the secret fetch, and the connection. A fractional
-    // `--consensus-passes` would run `Math.trunc`-many passes while the log and the
-    // report quoted the fraction, so the run's summary would disagree with its own
-    // invocation. `isSafeInteger`, not `isInteger`, because `1e30` is an integer
-    // that no bigint bind or pass loop can honor. `--lock-ttl` is deliberately NOT
-    // integer-checked — half an hour is a meaningful TTL.
+    // `--consensus-passes` runs `Math.trunc`-many passes while the progress log
+    // quotes the fraction ("pass 2 of 2.5"), so a run's own log disagrees with the
+    // pass count its consensus report goes on to state. `isSafeInteger`, not
+    // `isInteger`, because `1e30` is an integer that no bigint bind or pass loop
+    // can honor. `--lock-ttl` is deliberately NOT integer-checked — half an hour
+    // is a meaningful TTL.
     if (spec.integer && !Number.isSafeInteger(value)) {
       throw new Error(`${name} must be a whole integer, got ${raw}`);
     }
@@ -2975,7 +2978,14 @@ async function readSecret(secretId, region, runtime) {
   }
 }
 
-async function productionDatabaseMutex(stage, region, runtime) {
+// `runtime` defaults here, not just at `createCleanupDeps`: the recovery path
+// (`recoveryDeps`) injects nothing, and the helpers this delegates to reach into
+// `runtime` unguarded (`ssmClient`'s `runtime.ssm`, `readSecret`'s
+// `runtime.secrets`, and `runtime.Client` just below), so an omitted argument is a
+// TypeError before the first AWS call rather than a missing-credentials error an
+// operator could act on. Defaulting at the boundary makes the CLI's two callers
+// agree without either having to remember (TC-MEMRESTORE-071).
+async function productionDatabaseMutex(stage, region, runtime = {}) {
   const config = await resolveDatabaseConfig(stage, region, runtime);
   const Client = runtime.Client ?? (await import("pg")).Client;
   const db = new Client({

@@ -1,6 +1,7 @@
 // Unit tests for scripts/memory-cleanup.mjs (issue #102).
 // Test IDs map to docs/test-cases/memory-cleanup.md. All I/O is faked through
 // the injected deps object — no network, no real filesystem outside tmpdirs.
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -52,6 +53,10 @@ const TENANT = "tenant-key-0123456789abcdef";
 // computes, derived the same way rather than hardcoded, and shared by both tests
 // of the guard so they cannot disagree about where the tree ends.
 const SCRIPT_TREE = dirname(dirname(fileURLToPath(import.meta.url)));
+
+// The CLI under test, for the two cases that need a real process (TC-MEMRESTORE-061
+// and -071). Everything else in this file injects deps instead.
+const CLI = new URL("./memory-cleanup.mjs", import.meta.url).pathname;
 
 function memory(id, content, version = 1) {
   return { id, content, version, state: "active", memory_type: "insight" };
@@ -3240,23 +3245,62 @@ describe("restore CLI validation", () => {
     // truncated — so a partial listing reads as complete, nondeterministically.
     // The listing itself needs a database, so this drives the same exit path
     // through --help, which writes a comparable volume and needs nothing.
-    const { execFileSync } = await import("node:child_process");
-    const script = new URL("./memory-cleanup.mjs", import.meta.url).pathname;
+    //
     // Every run, not one: the defect is a race, and a single green run is what
     // makes it look fixed. `sh -c` with a pipe is what puts stdout on a pipe
     // rather than on the test's own fd.
     for (let i = 0; i < 5; i += 1) {
-      const piped = execFileSync("sh", ["-c", `node ${script} --help | cat`], { encoding: "utf8" });
+      const piped = execFileSync("sh", ["-c", `node ${CLI} --help | cat`], { encoding: "utf8" });
       expect(piped, `run ${i} was truncated`).toContain(USAGE.trimEnd());
     }
     // ...and the source has no `process.exit(` left to reintroduce it. Behaviour
     // above is the real assertion; this pins the mechanism so the next exit site
     // added to the CLI has to make the same decision deliberately.
-    const code = readFileSync(script, "utf8")
+    const code = readFileSync(CLI, "utf8")
       .split("\n")
       .filter((line) => !/^\s*(\/\/|\*|\/\*)/u.test(line))
       .join("\n");
     expect(code).not.toMatch(/process\.exit\(/u);
+  });
+
+  it("TC-MEMRESTORE-071 the recovery modes reach the database layer, not a TypeError", async () => {
+    // The CLI wiring is the one layer the injected-deps tests cannot reach:
+    // `recoveryDeps` is module-private and every unit test hands fakes straight to
+    // `runListInactive`/`runRestore`, so an error in how the CLI BUILDS those deps
+    // is invisible to all of them — which is how the rebase bug this pins reached a
+    // green suite. Rationale in docs/test-cases/memory-restore.md.
+    //
+    // A nonexistent stage is the point: it fails at the SSM read either way, so
+    // the assertion is WHICH failure. An SSM/credentials diagnostic is something an
+    // operator can act on; a TypeError means the wiring is broken.
+    for (const mode of [["--list-inactive"], ["--restore", "--ids", "/dev/null"]]) {
+      let output = "";
+      try {
+        output = execFileSync(
+          "node",
+          [CLI, "--stage", "mem9-nonexistent-probe-stage", ...mode],
+          {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+            // Unset so `resolveDatabaseConfig` takes the SSM branch, which is the
+            // one that reaches `runtime`. A CI runner with these set would
+            // otherwise skip the very code path under test.
+            env: {
+              ...process.env,
+              MEM9_DB_SECRET: "",
+              MEM9_DB_HOST: "",
+              MEM9_DB_NAME: "",
+            },
+          },
+        );
+      } catch (err) {
+        output = `${err.stdout ?? ""}${err.stderr ?? ""}`;
+      }
+      expect(output, `${mode[0]} reached the deps builder`).not.toMatch(/TypeError/u);
+      expect(output, `${mode[0]} is not a wiring error`).not.toMatch(
+        /Cannot read properties of undefined/u,
+      );
+    }
   });
 });
 
