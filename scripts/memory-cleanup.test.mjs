@@ -3,8 +3,9 @@
 // the injected deps object — no network, no real filesystem outside tmpdirs.
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
@@ -17,6 +18,7 @@ import {
   runCleanup,
   runListInactive,
   runRestore,
+  snippetLogDir,
   ARG_SPECS,
   DURABLE_ONLY_RULES,
   USAGE,
@@ -33,6 +35,11 @@ afterEach(() => {
 });
 
 const TENANT = "tenant-key-0123456789abcdef";
+
+// dirname(dirname(scripts/memory-cleanup.mjs)) — the same bound `snippetLogDir`
+// computes, derived the same way rather than hardcoded, and shared by both tests
+// of the guard so they cannot disagree about where the tree ends.
+const SCRIPT_TREE = dirname(dirname(fileURLToPath(import.meta.url)));
 
 function memory(id, content, version = 1) {
   return { id, content, version, state: "active", memory_type: "insight" };
@@ -782,6 +789,62 @@ describe("secrets", () => {
     for (const call of deps.log.mock.calls) {
       expect(String(call[0])).not.toContain(TENANT);
     }
+  });
+});
+
+describe("snippet log location", () => {
+  it("TC-MEMRESTORE-064 the --out bound is the script's tree, and a sibling is not inside it", () => {
+    // No --out: the documented default, outside any checkout.
+    expect(snippetLogDir(undefined, "prod")).toBe(join(homedir(), ".mem9-cleanup", "prod"));
+    expect(snippetLogDir("", "prod")).toBe(join(homedir(), ".mem9-cleanup", "prod"));
+
+    // Inside, and the tree root itself — `relative` answers "" for the root, which
+    // is why the guard tests the two `..` forms rather than truthiness of `inside`.
+    // `..cache` is the case the `${sep}` in that check carries: a directory INSIDE
+    // the tree whose NAME begins with `..`, which a bare `startsWith("..")` would
+    // wave through as outside.
+    for (const bad of [
+      join(SCRIPT_TREE, "tmp"),
+      join(SCRIPT_TREE, "docs", "x"),
+      SCRIPT_TREE,
+      join(SCRIPT_TREE, "..cache"),
+      // The form an operator actually types. Bare and relative, resolved against
+      // cwd — which for any invocation from a checkout is the checkout.
+      "tmp-decisions",
+    ]) {
+      expect(() => snippetLogDir(bad, "prod")).toThrow(/must not be written into a checkout/u);
+    }
+
+    // A relative --out is resolved, not passed through: an accepted path comes
+    // back absolute, so the caller cannot end up writing relative to a cwd that
+    // has since changed.
+    const relOut = join("..", "mem9-logs");
+    expect(snippetLogDir(relOut, "prod")).toBe(resolve(relOut));
+
+    // Outside: the parent, and — the case a `startsWith(scriptTree)` check gets
+    // wrong — a sibling worktree whose name merely EXTENDS this one's. Refusing
+    // it would lock an operator out of the adjacent checkout for no reason.
+    const sibling = `${SCRIPT_TREE}-other`;
+    expect(snippetLogDir(sibling, "prod")).toBe(sibling);
+    expect(snippetLogDir(dirname(SCRIPT_TREE), "prod")).toBe(dirname(SCRIPT_TREE));
+    expect(snippetLogDir("/tmp/mem9-logs", "prod")).toBe(resolve("/tmp/mem9-logs"));
+  });
+
+  it("TC-MEMCLEAN-082 a cleanup --out inside the checkout is refused before the scan", async () => {
+    // The guard's other call site. It first sat at the write inside
+    // `loadDecisions`, which runs AFTER the scan and the whole classification
+    // pass: `--out ./tmp` on a prod dry run burned a reasoning-model run at
+    // `--effort high`, then threw and discarded every decision — the entire
+    // artifact of a dry run. Untested, that regression is invisible.
+    const inCheckout = join(SCRIPT_TREE, "tmp-decision-logs");
+    const server = fakeServer([memory("m-1", "x")]);
+    const llm = fakeLlm([[{ id: "m-1", verdict: "DELETE", reason: "stale" }]]);
+    await expect(runCleanup(baseOpts(), baseDeps(server, llm, inCheckout))).rejects.toThrow(
+      /must not be written into a checkout/u,
+    );
+    expect(llm).not.toHaveBeenCalled();
+    expect(server.fetchImpl).not.toHaveBeenCalled();
+    expect(existsSync(inCheckout)).toBe(false);
   });
 });
 
@@ -2261,6 +2324,88 @@ describe("--restore", () => {
     expect(result.restored).toEqual(["d-2", "d-3"]);
     expect(result.fencedOut).toEqual(["d-1"]);
     expect(result.exitCode).toBe(6);
+  });
+
+  it("TC-MEMRESTORE-062 a failed teardown does not mask the cap abort or a lost fence", async () => {
+    const realFs = await import("node:fs");
+    // Both outcome codes, against the same teardown failure. Asserted as a table
+    // because the defect was the ORDER of one ternary: with `teardownFailed`
+    // tested first, both of these reported 1, and 1 is also what an outright
+    // crash gives — so a run that had hit the cap and left the ids file
+    // half-applied was indistinguishable from one that did nothing at all.
+    const cases = [
+      {
+        what: "the cap abort",
+        ids: ["d-1", "d-2", "d-3"],
+        cap: 2,
+        overrides: {},
+        exitCode: 4,
+        restored: ["d-1", "d-2"],
+      },
+      {
+        what: "a lost fence",
+        ids: ["d-1"],
+        cap: 50,
+        overrides: { restoreMemory: vi.fn(async () => false) },
+        exitCode: 6,
+        restored: [],
+      },
+    ];
+    for (const { what, ids, cap, overrides, exitCode, restored } of cases) {
+      const dir = tempDir();
+      const ctx = applyDeps(
+        dir,
+        ["d-1", "d-2", "d-3"].map((id) => inactiveRow(id, "deleted")),
+        {
+          // An EROFS lock file: the teardown step furthest from the store, so the
+          // only thing it can legitimately change is the bookkeeping code.
+          fs: {
+            ...realFs,
+            rmSync: vi.fn(() => {
+              throw new Error("EROFS: read-only file system");
+            }),
+          },
+          ...overrides,
+        },
+      );
+      const result = await runRestore(
+        restoreOpts({ apply: true, cap, idsFile: idsFile(dir, ids) }),
+        ctx.deps,
+      );
+      expect(result.exitCode, `${what} must survive a failed teardown`).toBe(exitCode);
+      expect(result.restored).toEqual(restored);
+      // The teardown failure is never silent — it just does not win the code.
+      expect(ctx.deps.log).toHaveBeenCalledWith(expect.stringMatching(/EROFS/u));
+    }
+  });
+
+  it("TC-MEMRESTORE-063 --out inside the checkout is refused before any row moves", async () => {
+    const dir = tempDir();
+    // The repo root as an operator reviewing a plan would reach for it: the log
+    // holds memory snippets, and CI's scan-public-artifacts.mjs looks for keys,
+    // tokens, and ARNs — nothing that memory prose resembles — on a range that
+    // only exists once the commit does. The header comment said "outside the
+    // repository" and `--out` had no constraint.
+    const inCheckout = join(SCRIPT_TREE, "tmp-restore-logs");
+    const ctx = applyDeps(dir, [inactiveRow("d-1", "deleted")], { outDir: inCheckout });
+    await expect(
+      runRestore(restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-1"]) }), ctx.deps),
+    ).rejects.toThrow(/must not be written into a checkout/u);
+    // Refused at the top of the run, NOT in the teardown `finally`: rejecting it
+    // there would restore the row first and then report the operator's typo as a
+    // lost log — the one record of a run that did happen.
+    expect(ctx.store.get("d-1").state).toBe("deleted");
+    expect(ctx.deps.restoreMemory).not.toHaveBeenCalled();
+    expect(existsSync(inCheckout)).toBe(false);
+
+    // ...and the default still works, so the guard rejects the path rather than
+    // the feature.
+    const ok = applyDeps(dir, [inactiveRow("d-2", "deleted")], {});
+    const result = await runRestore(
+      restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-2"]) }),
+      ok.deps,
+    );
+    expect(result.restored).toEqual(["d-2"]);
   });
 
   it("TC-MEMRESTORE-030 a dry-run that cannot fully honour the file still says so", async () => {

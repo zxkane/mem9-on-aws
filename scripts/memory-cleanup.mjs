@@ -20,13 +20,16 @@
 //        [--cap 50] [--out dir] [--lock-file path] [--lock-ttl hours]
 //        [--model openai.gpt-5.6-terra] [--effort high] [--llm-region us-west-2]
 //
-// The decision log contains memory snippets — instance-private data. It is
-// written OUTSIDE the repository (default ~/.mem9-cleanup/<stage>/) and must
-// never be committed (the repo is planned to be open-sourced).
+// The decision log and the restore log contain memory snippets — instance-private
+// data. Both are written OUTSIDE the repository (default ~/.mem9-cleanup/<stage>/)
+// and must never be committed (the repo is planned to be open-sourced).
+// `snippetLogDir` enforces the part of that a check can reach: an `--out` inside
+// THIS script's tree is refused. Another checkout of the same repo is still the
+// operator's to avoid.
 
 import { createHash } from "node:crypto";
 import { homedir, hostname } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve, sep } from "node:path";
 import process from "node:process";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -655,10 +658,51 @@ function classificationFailureNote({ batches, failedBatches, decisions, scanned 
 }
 
 /**
+ * Where a snippet-bearing log may be written, and the check that keeps it out of
+ * a checkout.
+ *
+ * Both artifacts this script persists — the cleanup decision list and the restore
+ * log — carry `snippet` fields sliced from memory content. The header comment says
+ * they are written outside the repository, and the default
+ * `~/.mem9-cleanup/<stage>/` honours that, but `--out` overrode it with NO
+ * constraint. `--out ./tmp` in a checkout is the natural thing for an operator
+ * reviewing a plan to type, and the result is instance-private memory text in a
+ * repo that is planned to be open-sourced, in files no `.gitignore` pattern
+ * matched. A comment cannot enforce this; a thrown error can.
+ *
+ * The bound is the tree containing this script, which is the checkout when run
+ * from one. Deliberately not a `git rev-parse` probe: this must fail the same way
+ * inside the container image, where there is no git and no repository, and where
+ * `--out` is never passed anyway.
+ */
+export function snippetLogDir(outDir, stage) {
+  if (!outDir) return join(homedir(), ".mem9-cleanup", stage);
+  const target = resolve(outDir);
+  const scriptTree = dirname(dirname(fileURLToPath(import.meta.url)));
+  // `relative` answers with a `..`-prefixed path exactly when the target is
+  // OUTSIDE the tree — and with "" when it IS the tree root, which these two
+  // predicates already reject (`"".startsWith("../")` is false).
+  //
+  // Both halves are exact for a reason. The `${sep}` keeps `<tree>/..cache` — a
+  // directory INSIDE the tree whose NAME starts with `..` — from reading as
+  // outside, and the `!== ".."` catches the parent, whose relative path has no
+  // separator to match.
+  const inside = relative(scriptTree, target);
+  if (!inside.startsWith(`..${sep}`) && inside !== "..") {
+    throw new Error(
+      `--out ${outDir} resolves inside ${scriptTree}; the log holds memory ` +
+        `snippets and must not be written into a checkout — omit --out to use ` +
+        `${join(homedir(), ".mem9-cleanup", stage)}`,
+    );
+  }
+  return target;
+}
+
+/**
  * Obtain the decision list: replay a prior dry-run file, or scan + classify and
  * persist a new one outside the repo (0700/0600 — it holds memory snippets).
  */
-async function loadDecisions(opts, deps, { client, fs, clock, log }) {
+async function loadDecisions(opts, deps, { client, fs, clock, log, outDir }) {
   if (opts.decisionsFile) {
     const loaded = JSON.parse(fs.readFileSync(opts.decisionsFile, "utf8"));
     // A decision file is stage-bound: ids/hashes from one store must never be
@@ -690,7 +734,6 @@ async function loadDecisions(opts, deps, { client, fs, clock, log }) {
   const classifierBroken = batches > 0 && failedBatches === batches;
 
   const generatedAt = new Date(clock()).toISOString();
-  const outDir = deps.outDir || join(homedir(), ".mem9-cleanup", opts.stage);
   fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
   const decisionPath = join(outDir, `decisions-${generatedAt.replace(/[:.]/g, "-")}.json`);
   fs.writeFileSync(
@@ -827,6 +870,13 @@ export async function runCleanup(opts, deps) {
   if (!Number.isFinite(cap) || cap <= 0) {
     throw new Error(`cap must be a positive finite number, got ${cap}`);
   }
+  // Validated HERE, next to the cap, and not at the write site inside
+  // `loadDecisions`: there it runs AFTER the full scan and the whole
+  // classification pass, so `--out ./tmp` on a prod dry run burned a
+  // reasoning-model run at `--effort high` and then threw, discarding every
+  // decision — the entire artifact of a dry run. Same rule the restore path
+  // follows: an operator's path error fails before the expensive work, not after.
+  const outDir = snippetLogDir(deps.outDir, opts.stage);
   // Shared tail of every return: the counters object is read at return time.
   const result = (fields) => ({
     decisions: [],
@@ -851,6 +901,7 @@ export async function runCleanup(opts, deps) {
     fs,
     clock,
     log,
+    outDir,
   });
   const summary = verdictSummary(decisions);
   const failureNote = classificationFailureNote({ batches, failedBatches, decisions, scanned });
@@ -1285,8 +1336,16 @@ export async function runRestore(opts, deps) {
     throw new Error(`cap must be a positive finite number, got ${cap}`);
   }
 
-  // Both throw, and both before any read: a stage-mismatched or empty ids file
-  // is an operator error to correct, not a run to report on.
+  // Resolved HERE rather than in `persist()`, which runs in the teardown
+  // `finally`: a rejected `--out` there would be caught as "failed to write the
+  // restore log" AFTER rows had already been restored, costing the operator the
+  // record of a run that did happen. An operator error must fail before the
+  // first write, not be reported as a lost log.
+  const outDir = snippetLogDir(deps.outDir, opts.stage);
+
+  // Like the cap and the `--out` above, this throws — and all three do so before
+  // any read: a bad cap, an `--out` in a checkout, and a stage-mismatched or
+  // empty ids file are operator errors to correct, not runs to report on.
   const ids = readRestoreIds(fs, opts);
   const rows = await adapter.findByIds(ids);
   const byId = new Map(rows.map((row) => [row.id, row]));
@@ -1443,7 +1502,11 @@ export async function runRestore(opts, deps) {
   let capUsed = 0;
   let capAborted = false;
   let logPath;
-  let persistFailed = false;
+  // Any of the three teardown steps below failing. One flag for all three is
+  // deliberate: they map to the same exit code, they each name themselves in a
+  // log line, and `logPath` is left undefined when it was specifically the write
+  // — so nothing an operator needs is lost by pooling them.
+  let teardownFailed = false;
   try {
     for (const id of planned) {
       const row = byId.get(id);
@@ -1516,16 +1579,31 @@ export async function runRestore(opts, deps) {
         await step();
       } catch (err) {
         log(`failed to ${what}: ${err.message}`);
-        persistFailed = true;
+        teardownFailed = true;
       }
     }
   }
 
   return result({
-    // A failed log write is exit 1, not 0: rows moved and the durable record of
-    // which ones did not survive, so the run needs an operator's attention even
-    // though every write succeeded.
-    exitCode: persistFailed ? 1 : capAborted ? 4 : incomplete() || fencedOut.length > 0 ? 6 : 0,
+    // A failed teardown step is exit 1, not 0: rows moved and either the durable
+    // record of which ones, or the release of a lock the next run needs, did not
+    // survive — so the run needs attention even though every write succeeded.
+    //
+    // But it is tested LAST, not first. A teardown failure is about the run's
+    // bookkeeping; exits 4 and 6 are about what the run DID to the store, which
+    // is the more urgent fact and the one an operator's next command depends on.
+    // Ordering this first meant an EROFS lock file could report a clean-looking
+    // exit 1 for a run that had actually hit the cap and left the ids file
+    // half-applied — and exit 1 is also what an outright crash gives, so the
+    // partial apply was indistinguishable from a run that did nothing. Every
+    // teardown failure still names itself in a log line either way.
+    exitCode: capAborted
+      ? 4
+      : incomplete() || fencedOut.length > 0
+        ? 6
+        : teardownFailed
+          ? 1
+          : 0,
     restored,
     fencedOut,
     capUsed,
@@ -1548,7 +1626,6 @@ export async function runRestore(opts, deps) {
         `notFound=${notFound.length}; fencedOut=${fencedOut.length}`,
     );
     const generatedAt = new Date(clock()).toISOString();
-    const outDir = deps.outDir || join(homedir(), ".mem9-cleanup", opts.stage);
     const target = join(outDir, `restore-${generatedAt.replace(/[:.]/g, "-")}.json`);
     try {
       fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
@@ -1621,7 +1698,9 @@ Audit and clean (issue #102) — dry-run by default, --apply writes:
   --decisions <file.json>      replay a prior dry-run's decision list
   --ids <file>                restrict --apply to the reviewed ids in <file>
   --cap <n>                   max mutations per run (default ${DEFAULT_CAP})
-  --out <dir>                 decision/restore log directory
+  --out <dir>                 decision/restore log directory (default
+                              ~/.mem9-cleanup/<stage>/; must be outside the
+                              checkout — the log holds memory snippets)
   --lock-file <path>          stage lockfile path
   --lock-ttl <hours>          age after which a lock may be reclaimed
   --model <id>                classifier model

@@ -246,7 +246,7 @@ Restore reuses #102's vocabulary and adds one:
 | code | meaning |
 |---|---|
 | 0 | everything the ids file asked for happened |
-| 1 | error — including a run whose writes all succeeded but whose decision log could not be written (TC-MEMRESTORE-048) |
+| 1 | error — including a run whose writes all succeeded but whose teardown (log write, lock removal, or mutex release) failed (TC-MEMRESTORE-048) |
 | 3 | a lock or the shared mutex is held |
 | 4 | `--cap` exceeded; the run aborted before overflowing |
 | 6 | the run completed but not everything asked for was done — a not-found id, a refused `archived`/unknown-state/unfenceable id, a lost fence, or a dry-run plan larger than `--cap` |
@@ -259,6 +259,15 @@ A lost decision log is exit 1 rather than 6 for the opposite reason: the rows di
 move, and the durable record of *which* ones did not survive. That is not a
 partial success an operator can act on later — it is the one outcome that needs
 attention now, while the ids are still on stderr.
+
+**4 and 6 outrank 1**, and the order is load-bearing (TC-MEMRESTORE-062). All
+three teardown steps share one flag, and testing it first meant an EROFS lock
+file reported exit 1 for a run that had *also* hit the cap and left the ids file
+half-applied — indistinguishable from an outright crash, which is exit 1 too. A
+teardown failure is about the run's bookkeeping; 4 and 6 are about what the run
+did to the store, which is the fact the operator's next command depends on. Every
+teardown failure still names itself in a log line regardless of which code wins,
+and a lost log is still identifiable by an absent `logPath`.
 
 ## Durability of the record
 
@@ -277,6 +286,37 @@ that, each of which left memories restored in production with no record at all:
   `Connection terminated` for a run that died of something else — and a lock file
   that could not be removed skipped the mutex release, leaking an advisory lock
   that blocks the next weekly consolidation (TC-MEMRESTORE-049).
+
+### Where the record may be written
+
+Both snippet-bearing artifacts — the cleanup decision list and the restore log —
+go through `snippetLogDir`, which **refuses an `--out` that resolves inside the
+tree containing the script** (TC-MEMRESTORE-063). The default
+`~/.mem9-cleanup/<stage>/` was always outside a checkout, but `--out` overrode it
+with no constraint, and `--out ./tmp` is the natural thing for an operator
+reviewing a plan to type. The result was instance-private memory text in a repo
+planned to be open-sourced, in files no `.gitignore` pattern matched. CI's
+`scripts/scan-public-artifacts.mjs` would not catch them either: its detectors
+look for private keys, bearer tokens, access-key ids, and ARNs — none of which
+memory prose resembles — and it runs on a pushed range, after the commit already
+exists.
+
+The check runs at the **top** of a restore, not inside `persist()`. Rejecting it
+from the teardown `finally` would restore the rows first and then report the
+operator's typo as "failed to write the restore log", costing them the only
+record of a run that did happen. The same rule governs the cleanup path
+(TC-MEMCLEAN-082): the guard sits next to the cap validation at the top of
+`runCleanup`, not at the write inside `loadDecisions`, which runs *after* the full
+scan and the whole classification pass — there, `--out ./tmp` on a prod dry run
+burned a reasoning-model run at `--effort high` and then threw, discarding every
+decision, which is the entire artifact of a dry run.
+
+The bound is the script's own tree rather than a `git rev-parse` probe, so it
+behaves identically inside the container image, where there is no git and `--out`
+is never passed. It is computed with `path.relative`, not `startsWith`
+(TC-MEMRESTORE-064): a sibling worktree whose name merely *extends* this one's
+(`…/124-memory-restore-other`) shares the prefix but is a different checkout, and
+refusing it would lock an operator out of the adjacent tree for no reason.
 
 ## Flag/mode validation
 
