@@ -114,6 +114,15 @@ const PROJECT_RESOURCE_RUNTIME_ACTIONS = [
   "sns:Publish",
   "sqs:SendMessage",
   "ssm:GetParameters",
+  // The Slack approval record (#123 — the writer does not exist yet; this
+  // prerequisite lands first because the rollout can only apply main's
+  // template). Listed here rather than in GLOBAL_RUNTIME_ACTIONS because this
+  // list feeds BOTH the action ceiling and DenyProjectRuntimeOutsideResources,
+  // and the project SSM prefix is the only place this write belongs.
+  // GLOBAL_RUNTIME_ACTIONS entries are admitted account-wide, which is why
+  // ecs:RunTask and iam:PassRole live there and are constrained by identity
+  // policy and out-of-band review instead.
+  "ssm:PutParameter",
 ];
 const MANTLE_BEARER_ACTION = "bedrock-mantle:CallWithBearerToken";
 const GLOBAL_RUNTIME_ACTIONS = [
@@ -321,6 +330,12 @@ function boundaryContract({
     ssmParameterArn:
       `arn:${partition}:ssm:${applicationRegion}:${accountId}:` +
       "parameter/mem9-on-aws/*",
+    // The approval-record write (#123) is scoped tighter than the project
+    // prefix. See DenyPutParameterOutsideApprovalRecords for why the broader
+    // project scope is not sufficient for a WRITE.
+    ssmApprovalParameterArn:
+      `arn:${partition}:ssm:${applicationRegion}:${accountId}:` +
+      "parameter/mem9-on-aws/*/approvals/*",
     projectResources: [
       bedrockProjectArn,
       ...(openAiBedrockProjectArn ? [openAiBedrockProjectArn] : []),
@@ -348,6 +363,7 @@ export function expectedBoundaryPolicyDocument(contract) {
     policyRevision,
     projectResources,
     secretArns,
+    ssmApprovalParameterArn,
     ssmParameterArn,
   } = boundaryContract(contract);
   return {
@@ -370,6 +386,22 @@ export function expectedBoundaryPolicyDocument(contract) {
         Effect: "Deny",
         Action: [...PROJECT_RESOURCE_RUNTIME_ACTIONS],
         NotResource: projectResources,
+      },
+      // The statement above scopes the write to the PROJECT prefix — every
+      // stage's whole SSM tree — which is too wide for a WRITE. This ceiling is
+      // the only control on it: identity policies are PR-authored, and the
+      // deploy role's DenyUnboundedProjectRolePolicyWrites only requires that
+      // the boundary be ATTACHED, never constrains its content. Preview roles
+      // are bounded too, so without this a PR could grant one of its own preview
+      // Lambdas ssm:PutParameter on /mem9-on-aws/prod/* and overwrite prod's
+      // plain-String parameters. SecureStrings are already unreachable (that
+      // write needs kms:Encrypt or kms:GenerateDataKey; the ceiling admits
+      // neither), so the plain-String ones are exactly the exposure this closes.
+      {
+        Sid: "DenyPutParameterOutsideApprovalRecords",
+        Effect: "Deny",
+        Action: ["ssm:PutParameter"],
+        NotResource: [ssmApprovalParameterArn],
       },
       {
         Sid: "DenyKmsDecryptOutsideProjectParameterFunctionOrSecretContexts",

@@ -149,6 +149,7 @@ const independentRuntimeActions = [
   "sns:Publish",
   "sqs:SendMessage",
   "ssm:GetParameters",
+  "ssm:PutParameter",
   // SST Service/Task ECS Exec channels.
   "ssmmessages:CreateControlChannel",
   "ssmmessages:CreateDataChannel",
@@ -468,26 +469,31 @@ async function withMutatedRolloutModule(mutate, callback) {
 // defaults (AWS::NoValue removes the entry from the surrounding list).
 const NO_VALUE = Symbol("AWS::NoValue");
 
-function resolveTemplateValue(value) {
+// `openAiBedrockProjectArn` selects the CONFIGURED shape: the !If takes its true
+// branch and `!Ref OpenAiBedrockProjectArn` resolves to this value. Defaulting to
+// undefined keeps every existing caller on the unconfigured shape, which is what
+// the template's own parameter default produces.
+function resolveTemplateValue(value, openAiBedrockProjectArn) {
+  const recur = (child) => resolveTemplateValue(child, openAiBedrockProjectArn);
   if (Array.isArray(value)) {
-    // A parsed `!If [HasOpenAiBedrockProject, ...]` node: the parameter
-    // defaults to "" so the condition is false → the else branch is
+    // A parsed `!If [HasOpenAiBedrockProject, ...]` node. Unconfigured, the
+    // parameter defaults to "" so the condition is false → the else branch is
     // AWS::NoValue → the entry vanishes from the parent list.
     if (value.length === 3 && value[0] === "HasOpenAiBedrockProject") {
-      return NO_VALUE;
+      return openAiBedrockProjectArn ? recur(value[1]) : NO_VALUE;
     }
-    return value.map(resolveTemplateValue).filter((item) => item !== NO_VALUE);
+    return value.map(recur).filter((item) => item !== NO_VALUE);
   }
   if (value && typeof value === "object") {
     return Object.fromEntries(
-      Object.entries(value).map(([key, child]) => [
-        key,
-        resolveTemplateValue(child),
-      ]),
+      Object.entries(value).map(([key, child]) => [key, recur(child)]),
     );
   }
   if (typeof value !== "string") return value;
   if (value === "BedrockProjectArn") return boundaryContract.bedrockProjectArn;
+  // Only reachable from the !If true branch above; unconfigured, the whole node
+  // collapses to NO_VALUE before this can be consulted.
+  if (value === "OpenAiBedrockProjectArn") return openAiBedrockProjectArn;
   return value
     .replaceAll("${AWS::Partition}", partition)
     .replaceAll("${AWS::AccountId}", accountId)
@@ -7405,6 +7411,13 @@ describe("boundary and deploy-role templates", () => {
         "sns:Publish",
         "sqs:SendMessage",
         "ssm:GetParameters",
+        // Admitting a WRITE to the action ceiling is only safe if it is also
+        // resource-scoped. A boundary never GRANTS: effective permissions are the
+        // intersection of the boundary and the identity policy. So without this
+        // entry the boundary simply stops constraining `ssm:PutParameter` by
+        // resource, and any identity-policy grant — including an over-broad one
+        // added later — would take effect account-wide (#123).
+        "ssm:PutParameter",
       ]),
     );
     expect(bySid("DenyProjectRuntimeOutsideResources").Action).not.toEqual(
@@ -7414,6 +7427,30 @@ describe("boundary and deploy-role templates", () => {
         "ssm:GetParametersByPath",
       ]),
     );
+    // DenyProjectRuntimeOutsideResources scopes the write to the PROJECT prefix,
+    // which is every stage's whole SSM tree. That is too wide for a write: the
+    // ceiling is the only control on what a workload role may do, because
+    // identity policies are PR-authored and the deploy role's
+    // DenyUnboundedProjectRolePolicyWrites only requires that the boundary be
+    // ATTACHED, never constrains its content. Preview roles are bounded too
+    // (shouldRegisterWorkloadRoleBoundary returns true for every non-prod
+    // stage), so without a second, tighter deny a PR could grant one of its own
+    // preview Lambdas ssm:PutParameter on `/mem9-on-aws/prod/*` and overwrite
+    // prod's plain-String parameters — `oauth/allowed-callback-urls` is an
+    // open-redirect primitive, and the bootstrap/consolidation `task-def-arn`
+    // and `cluster-name` are consumed unvalidated by scripts/run-*-task.sh.
+    // SecureString parameters are already out of reach (a SecureString write
+    // needs kms:Encrypt or kms:GenerateDataKey, neither of which the ceiling
+    // admits), so the plain-String ones are exactly the exposure this closes.
+    const approvalScope = bySid("DenyPutParameterOutsideApprovalRecords");
+    expect(approvalScope).toMatchObject({
+      Effect: "Deny",
+      Action: ["ssm:PutParameter"],
+    });
+    expect(resolveTemplateValue(approvalScope.NotResource)).toEqual([
+      "arn:aws:ssm:ap-northeast-1:123456789012:" +
+        "parameter/mem9-on-aws/*/approvals/*",
+    ]);
     expect(
       bySid(
         "DenyKmsDecryptOutsideProjectParameterFunctionOrSecretContexts",
@@ -7587,6 +7624,109 @@ describe("boundary and deploy-role templates", () => {
     ).toBe(true);
   });
 
+  // Every guard on ssm:PutParameter names it as a literal, so nothing stops the
+  // NEXT write from being admitted with no resource scope at all — a mistake that
+  // stays invisible if the template and the contract library are edited
+  // consistently. This turns the allowlist into an explicit decision: a
+  // non-read-only action is either resource-scoped by some Deny/NotResource
+  // statement, or it is listed below as a reviewed account-wide admission.
+  //
+  // Classify by an inverted READ-ONLY list rather than by a list of mutating
+  // verbs. Enumerating mutating verbs under-approximates in the unsafe direction:
+  // a `/:(Put|Create|Delete|...)/` form silently passed kms:Encrypt,
+  // kms:GenerateDataKey, ecs:RegisterTaskDefinition, sts:AssumeRole, and
+  // iam:AttachRolePolicy. The first two matter most here — the reason
+  // SecureString parameters are out of reach is that the ceiling admits neither,
+  // so an unnoticed admission would void that argument. Anything not obviously
+  // read-only now has to be classified deliberately.
+  //
+  // `Get` alone is not enough to mean harmless: several `Get*` calls MINT
+  // credentials rather than read state, and a token is exactly the thing a
+  // resource scope must pin down. secretsmanager:GetSecretValue and
+  // ssm:GetParameters are admitted and resource-scoped today; the exception list
+  // keeps them, and any future sts:GetFederationToken-class admission, subject to
+  // the scoping check instead of waved through on the verb.
+  const CREDENTIAL_MINTING_ACTION =
+    /:(GetSecretValue|GetParameters?$|GetParameterHistory|GetParametersByPath|GetSessionToken|GetFederationToken|GetAuthorizationToken|GetCredentials|GetClusterCredentials|GetSigninToken|GetServiceBearerToken|GetOpenIdToken|GetComputeAuthToken)/u;
+  const READ_ONLY_ACTION = (action) =>
+    !CREDENTIAL_MINTING_ACTION.test(action) &&
+    /:(Get|List|Describe|BatchCheck|BatchGet|Head|Query|Scan|Lookup|Filter|Search|Simulate)/u.test(
+      action,
+    );
+
+  // Admitted account-wide by deliberate review, each for a reason NotResource
+  // cannot express. ecs:RunTask and iam:PassRole are constrained by the deploy
+  // role's PassRole scoping plus DenyEcsExecutionRolePassToOtherServices. The
+  // ec2 entries are service-mediated with no useful per-resource ARN AND are
+  // principal-gated (DenyEniFromNonVpcLambdaRoles + DenyEniFromFunctionCode).
+  // The bedrock-mantle and kms entries carry their own Condition-based denies
+  // (DenyNonShortTermMantleBearer and the seven kms:Decrypt context statements).
+  // The ssmmessages entries have NO further boundary deny — do not read the ec2
+  // justification as covering them. They are the ECS Exec channel APIs, which are
+  // service-mediated with no per-resource ARN, and what actually bounds them is
+  // `enableExecuteCommand` on the task plus the task role, outside this policy.
+  // ecr:GetAuthorizationToken is registry-level: IAM evaluates it against the
+  // registry, not a repository, so it is only ever grantable on "*" and a
+  // NotResource scope would deny every image pull. The token it returns is scoped
+  // to the caller's own registry and the per-repository pull actions below stay
+  // resource-scoped, which is what actually bounds it.
+  const REVIEWED_GLOBAL_WRITES = [
+    "bedrock-mantle:CallWithBearerToken",
+    "ec2:AssignPrivateIpAddresses",
+    "ec2:CreateNetworkInterface",
+    "ec2:DeleteNetworkInterface",
+    "ec2:UnassignPrivateIpAddresses",
+    "ecr:GetAuthorizationToken",
+    "ecs:RunTask",
+    "iam:PassRole",
+    "kms:Decrypt",
+    "ssmmessages:CreateControlChannel",
+    "ssmmessages:CreateDataChannel",
+    "ssmmessages:OpenControlChannel",
+    "ssmmessages:OpenDataChannel",
+  ];
+
+  const actionsScopedByNotResource = (document) =>
+    new Set(
+      document.Statement.filter(
+        (statement) => statement.Effect === "Deny" && statement.NotResource,
+      ).flatMap((statement) => statement.Action ?? []),
+    );
+
+  it("resource-scopes every non-read-only action admitted to the ceiling", () => {
+    const document = expectedBoundaryPolicyDocument(boundaryContract);
+    const ceiling = document.Statement.find(({ Sid }) =>
+      Sid?.startsWith("DenyOutsideRuntimeActionCeiling"),
+    );
+    const scopedByNotResource = actionsScopedByNotResource(document);
+    const reviewedGlobalWrites = new Set(REVIEWED_GLOBAL_WRITES);
+    for (const action of ceiling.NotAction.filter(
+      (candidate) => !READ_ONLY_ACTION(candidate),
+    )) {
+      expect(
+        scopedByNotResource.has(action) || reviewedGlobalWrites.has(action),
+        `${action} is not read-only but is neither resource-scoped by a ` +
+          `Deny/NotResource statement nor listed as a reviewed account-wide ` +
+          `admission`,
+      ).toBe(true);
+    }
+  });
+
+  // The check above is an OR, so a redundant allowlist entry pre-authorizes a
+  // future unscoping: drop a resource-scoped action out of
+  // DenyProjectRuntimeOutsideResources and the allowlist silently catches it,
+  // turning a project-scoped write into an account-wide one with the suite still
+  // green. Requiring the two sets to be disjoint makes the allowlist mean
+  // "deliberately NOT resource-scoped" instead of merely "tolerated".
+  it("keeps the reviewed account-wide admissions disjoint from the scoped ones", () => {
+    const scopedByNotResource = actionsScopedByNotResource(
+      expectedBoundaryPolicyDocument(boundaryContract),
+    );
+    expect(
+      REVIEWED_GLOBAL_WRITES.filter((action) => scopedByNotResource.has(action)),
+    ).toEqual([]);
+  });
+
   it("keeps the boundary within the IAM managed-policy size quota", () => {
     const template = parseCloudFormation(boundaryTemplatePath);
     const size = JSON.stringify(
@@ -7595,6 +7735,65 @@ describe("boundary and deploy-role templates", () => {
       ),
     ).length;
     expect(size).toBeLessThanOrEqual(6_144);
+  });
+
+  // Everything above resolves the template with OpenAiBedrockProjectArn at its ""
+  // default, so the !If collapses to AWS::NoValue and only the UNCONFIGURED shape
+  // is ever checked — for both parity and size. The live account configures that
+  // second project (the Responses route runs in another region and Mantle projects
+  // are regional), so the shape that actually deploys had no coverage at all: the
+  // template could name the WRONG parameter in the true branch, or overflow the
+  // quota, and every gate would stay green.
+  //
+  // Assert a byte reserve rather than the bare 6144 quota, which would only fail
+  // once there is no room left to react. The reserve does NOT bound the worst
+  // case: the template's AllowedPattern caps neither the project id nor the
+  // partition or region, so a long enough project id overflows whatever gate is
+  // set here (a 128-character id breaches even the real quota). It buys margin
+  // against the fixture shape only.
+  //
+  // 64 is close to the largest reserve this document can currently hold: the
+  // configured shape is 6023 bytes, so 121 is the ceiling and anything above that
+  // fails on commit. That is the finding, not a comfort — the statement this
+  // change added cost 189 bytes, so the next comparable statement breaches the
+  // gate and the quota at nearly the same moment. Splitting the boundary across a
+  // second managed policy is the real fix when that happens; until then this at
+  // least fails in CI rather than at rollout.
+  const OPENAI_PROJECT_ARN =
+    "arn:aws:bedrock-mantle:us-west-2:123456789012:project/proj_openai";
+  const BOUNDARY_SIZE_RESERVE = 64;
+
+  it("matches the contract library in the OpenAI-configured shape", () => {
+    const template = parseCloudFormation(boundaryTemplatePath);
+    const document = resolveTemplateValue(
+      template.Resources.WorkloadPermissionsBoundary.Properties.PolicyDocument,
+      OPENAI_PROJECT_ARN,
+    );
+    // The configured shape must differ from the unconfigured one in exactly one
+    // way: the second project ARN appears. Asserting its presence is what fails
+    // if the true branch ever refs the wrong parameter.
+    expect(
+      document.Statement.find(
+        ({ Sid }) => Sid === "DenyProjectRuntimeOutsideResources",
+      ).NotResource,
+    ).toContain(OPENAI_PROJECT_ARN);
+    expect(
+      verifyBoundaryPolicyDocument(document, {
+        ...boundaryContract,
+        openAiBedrockProjectArn: OPENAI_PROJECT_ARN,
+      }),
+    ).toBe(true);
+  });
+
+  it("keeps the OpenAI-configured boundary inside the IAM size quota", () => {
+    const template = parseCloudFormation(boundaryTemplatePath);
+    const size = JSON.stringify(
+      resolveTemplateValue(
+        template.Resources.WorkloadPermissionsBoundary.Properties.PolicyDocument,
+        OPENAI_PROJECT_ARN,
+      ),
+    ).length;
+    expect(size).toBeLessThanOrEqual(6_144 - BOUNDARY_SIZE_RESERVE);
   });
 
   it("keeps every deploy-role managed policy within the IAM size quota", () => {
@@ -7818,6 +8017,50 @@ describe("boundary and deploy-role templates", () => {
     ).toBe(true);
   });
 
+  // The step used to `sudo apt-get update` when shellcheck was absent, which is
+  // only ever true on the self-hosted runner (GitHub-hosted images preinstall it).
+  // Refreshing ~60 package indices to install one tool made the whole job hostage
+  // to mirror latency: two consecutive runs on this branch hung there and were
+  // cancelled at the job's 20-minute timeout with every test already passing.
+  // pip pins the version instead, which apt cannot: `apt-get install shellcheck`
+  // resolves to whatever the distro ships, so the same commit could lint against
+  // two different analyzers and produce findings that did not exist at review.
+  it("installs a pinned shellcheck without refreshing apt indices", () => {
+    const workflow = readFileSync(workflowPath, "utf8");
+    const job = parse(workflow).jobs.typecheck;
+    const step = job.steps.find(
+      (candidate) => candidate.name === "Validate workload boundary operator scripts",
+    );
+    expect(step).toBeDefined();
+    // Assert against the EXECUTABLE lines, never the raw `run`. The step's own
+    // comment names both `apt-get` and the pinned package, so a raw-text
+    // assertion would match the prose that explains the rule instead of the
+    // command that implements it — and would keep passing if the install line
+    // were deleted and only the comment survived.
+    const commands = step.run
+      .split("\n")
+      .filter((line) => !line.trimStart().startsWith("#"))
+      .join("\n");
+    // 0.11.0.1 wraps upstream shellcheck 0.11.0 — the exact version the runner's
+    // apt provides today, so the pin changes the install path and nothing else.
+    // Changing installers (pipx, uv, a pinned release tarball) requires updating
+    // this assertion: it is coupled to the package and version on purpose.
+    expect(commands).toContain("shellcheck-py==0.11.0.1");
+    // A bare `pip install` with no version would reintroduce the drift this pin
+    // exists to prevent.
+    expect(commands).toMatch(/shellcheck-py==\d+\.\d+\.\d+\.\d+/u);
+    // `apt`, `apt-get`, and `aptitude` all refresh the same ~60 package indices,
+    // so matching only `apt-get` would let the flake back in under the spelling
+    // someone reaches for first when hand-patching "shellcheck: not found".
+    expect(commands).not.toMatch(/\b(apt|apt-get|aptitude)\b/u);
+    // A neutralized lint is the worst failure mode here: the step still reads
+    // correctly in a diff while enforcing nothing. Mirrors the guards the
+    // sibling cfn-lint step already carries in ecr-registry-scanning.test.mjs.
+    expect(commands).not.toMatch(/shellcheck[^\n]*\|\|\s*true/u);
+    expect(step).not.toHaveProperty("continue-on-error");
+    expect(step).not.toHaveProperty("if");
+  });
+
   it("wires both templates and rollout shell entry points into CI", () => {
     const workflow = readFileSync(workflowPath, "utf8");
     const documentationSecurityWorkflow = readFileSync(
@@ -7845,8 +8088,11 @@ describe("boundary and deploy-role templates", () => {
     expect(workflow).toContain(
       "shellcheck scripts/deploy-workload-permissions-boundary.sh",
     );
+    // With the `shellcheck ` prefix: the bare path also matches a line that
+    // merely RUNS the rollout script, so without it the one script of the three
+    // whose lint is not asserted elsewhere could stop being linted.
     expect(workflow).toContain(
-      "scripts/rollout-workload-permissions-boundary.sh",
+      "shellcheck scripts/rollout-workload-permissions-boundary.sh",
     );
     expect(workflow).toContain("uses: pulumi/actions@v7");
     expect(workflow).toContain("pulumi-version: 3.215.0");

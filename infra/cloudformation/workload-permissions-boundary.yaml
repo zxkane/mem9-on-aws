@@ -71,6 +71,14 @@ Resources:
               - sqs:SendMessage
               - sns:Publish
               - ssm:GetParameters
+              # The Slack approval record (#123). Reserved ahead of the writer,
+              # which does not exist yet: Slack's 3-second ACK budget cannot
+              # cover a cleanup run, so the facade Lambda will persist the
+              # approved decision-list hash and trigger the apply task rather
+              # than delete inline. Scoped by both
+              # DenyProjectRuntimeOutsideResources and the tighter
+              # DenyPutParameterOutsideApprovalRecords below.
+              - ssm:PutParameter
               - ec2:AssignPrivateIpAddresses
               - ec2:CreateNetworkInterface
               - ec2:DeleteNetworkInterface
@@ -103,6 +111,7 @@ Resources:
               - sqs:SendMessage
               - sns:Publish
               - ssm:GetParameters
+              - ssm:PutParameter
             NotResource:
               - !Ref BedrockProjectArn
               # AWS::NoValue removes this entry entirely when unconfigured, so
@@ -117,6 +126,24 @@ Resources:
               - !Sub arn:${AWS::Partition}:sqs:${ApplicationRegion}:${AWS::AccountId}:AlertExecutionFailureQueue-*
               - !Sub arn:${AWS::Partition}:sns:${ApplicationRegion}:${AWS::AccountId}:mem9-on-aws-*-alerts
               - !Sub arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/mem9-on-aws/*
+          # The statement above scopes the write to the PROJECT prefix, i.e. every
+          # stage's whole SSM tree. That is too wide for a write, and this ceiling
+          # is the only control on it: identity policies are PR-authored, and the
+          # deploy role's DenyUnboundedProjectRolePolicyWrites only requires that
+          # the boundary be ATTACHED, never constrains its content. Preview roles
+          # are bounded too, so without this a PR could grant one of its own
+          # preview Lambdas ssm:PutParameter on /mem9-on-aws/prod/* and overwrite
+          # prod's plain-String parameters (oauth/allowed-callback-urls is an
+          # open-redirect primitive; the bootstrap/consolidation task-def-arn and
+          # cluster-name are consumed unvalidated by scripts/run-*-task.sh).
+          # SecureString parameters are already unreachable — that write needs
+          # kms:Encrypt or kms:GenerateDataKey and the ceiling admits neither.
+          - Sid: DenyPutParameterOutsideApprovalRecords
+            Effect: Deny
+            Action:
+              - ssm:PutParameter
+            NotResource:
+              - !Sub arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/mem9-on-aws/*/approvals/*
           # Lambda cold starts, SSM SecureStrings, and the two ECS task-definition
           # secret families use different KMS encryption contexts. Missing and
           # foreign contexts remain denied.
