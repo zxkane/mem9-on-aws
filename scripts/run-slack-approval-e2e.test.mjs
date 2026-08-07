@@ -48,6 +48,10 @@ function runFixture({
   stage = "pr-123",
   taskExitCode = "0",
   taskStatus = "STOPPED",
+  cluster = "mem9-cleanup-cluster",
+  stoppedReason = "Essential container in task exited",
+  facadeError = "",
+  noisyStderr = "",
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "mem9-slack-e2e-"));
   temporaryPaths.push(directory);
@@ -72,20 +76,52 @@ const option = (name) => {
   return index === -1 ? undefined : args[index + 1];
 };
 const command = args.slice(0, 2).join(" ");
+// The real CLI writes to stderr on SUCCESSFUL calls too — a botocore deprecation
+// notice, a credential-source line. Every other knob in this fake writes stderr
+// only when it also exits non-zero, which is exactly why merging the streams with
+// \`2>&1\` looked harmless: no case could produce the polluted-value shape.
+if (process.env.MOCK_NOISY_STDERR) console.error(process.env.MOCK_NOISY_STDERR);
+// The real CLI writes this to STDERR and exits 255 for an absent parameter. The
+// script distinguishes it from every other failure by that text, so a fake that
+// merely exited 255 would let an AccessDenied-style regression pass as a skip —
+// the fake has to be wrong in the same shape as reality to test anything.
+const notFound = (name) => {
+  console.error(
+    "An error occurred (ParameterNotFound) when calling the GetParameter " +
+      \`operation: Parameter \${name} not found.\`,
+  );
+  process.exit(255);
+};
+// Every OTHER way a read can fail: no ParameterNotFound text, so the script has
+// no license to treat it as "not deployed". The real CLI's exit code for these is
+// 255 as well, which is precisely why the code cannot be the discriminator.
+const readError = (name, code) => {
+  console.error(
+    \`An error occurred (\${code}) when calling the GetParameter operation: \` +
+      \`explicit deny in a service control policy or resource policy for \${name}\`,
+  );
+  process.exit(255);
+};
 if (command === "ssm get-parameter") {
   const name = option("--name") ?? "";
   if (name.endsWith("/facade/url")) {
-    if (!process.env.MOCK_FACADE) process.exit(255);
+    if (process.env.MOCK_FACADE_ERROR) {
+      readError(name, process.env.MOCK_FACADE_ERROR);
+    }
+    if (!process.env.MOCK_FACADE) notFound(name);
     console.log(process.env.MOCK_FACADE);
   } else if (name.endsWith("/slack/signing-secret")) {
-    if (!process.env.MOCK_SECRET) process.exit(255);
+    if (!process.env.MOCK_SECRET) notFound(name);
     console.log(process.env.MOCK_SECRET);
+  } else if (name.endsWith("/cleanup/cluster-name")) {
+    if (!process.env.MOCK_CLUSTER) notFound(name);
+    console.log(process.env.MOCK_CLUSTER);
   } else if (name.includes("/approvals/approved-")) {
     // Stateful, like a real stage: no claim exists until the signed click
     // creates one. A fake that served it unconditionally would make the
     // pre-click "no record was written" assertion fail against a correct script.
     if (!existsSync(process.env.MOCK_CLICKED) || !process.env.MOCK_CLAIM) {
-      process.exit(255);
+      notFound(name);
     }
     console.log(process.env.MOCK_CLAIM);
   } else {
@@ -96,9 +132,20 @@ if (command === "ssm get-parameter") {
   process.exit(0);
 } else if (command === "ecs describe-tasks") {
   const query = option("--query") ?? "";
+  // The cluster is asserted, not ignored: the script must pass the name it read
+  // from SSM. Slicing it out of the task ARN (the previous implementation) yields
+  // the task id on an account without the long-ARN opt-in, and a fake that
+  // accepted any --cluster could not tell the two apart.
+  if (option("--cluster") !== process.env.MOCK_CLUSTER) {
+    console.error(
+      "An error occurred (ClusterNotFoundException) when calling the " +
+        \`DescribeTasks operation: cluster not found: \${option("--cluster")}\`,
+    );
+    process.exit(254);
+  }
   if (query.includes("lastStatus")) console.log(process.env.MOCK_TASK_STATUS);
   else if (query.includes("exitCode")) console.log(process.env.MOCK_TASK_EXIT);
-  else console.log("Essential container in task exited");
+  else console.log(process.env.MOCK_STOP_REASON);
 } else {
   console.error("unexpected aws command:", command);
   process.exit(2);
@@ -155,6 +202,10 @@ process.stdout.write(status);
       MOCK_CLAIM: claim === null ? "" : claim,
       MOCK_TASK_EXIT: taskExitCode,
       MOCK_TASK_STATUS: taskStatus,
+      MOCK_CLUSTER: cluster,
+      MOCK_STOP_REASON: stoppedReason,
+      MOCK_FACADE_ERROR: facadeError,
+      MOCK_NOISY_STDERR: noisyStderr,
       PATH: `${bin}${delimiter}${process.env.PATH}`,
       STAGE: stage,
       AWS_REGION: "ap-northeast-1",
@@ -338,6 +389,98 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
       ),
     ).toHaveLength(0);
     expect(callRecords.filter(([tool]) => tool === "curl")).toHaveLength(0);
+  });
+
+  it("TC-SLACKAPP-090b a parameter read that fails for any reason OTHER than absence is a hard failure", () => {
+    // The distinction the gate depends on. `2>/dev/null || true` collapsed every
+    // error into "" and every "" into a skip, so an AccessDenied — say a boundary
+    // change leaving the CI role only the plural `ssm:GetParameters` — would have
+    // reported green forever while sending no request at all. That is the same
+    // vacuous-gate failure the pr-N refusal exists to prevent.
+    const { callRecords, result, output } = runFixture({ facadeError: "AccessDeniedException" });
+    expect(result.status, output).not.toBe(0);
+    expect(output).toMatch(/AccessDeniedException/u);
+    // And it must not be mistaken for the benign skip.
+    expect(output).not.toMatch(/skipping/iu);
+    expect(callRecords.filter(([tool]) => tool === "curl")).toHaveLength(0);
+  });
+
+  it("TC-SLACKAPP-090b the cluster comes from SSM, not from slicing the task ARN", () => {
+    // `${TASK_ARN##*:task/}` assumes the long ARN format. On an account without
+    // the long-ARN opt-in the ARN carries no cluster segment, so the slice yields
+    // the task id and every describe-tasks runs against a cluster that does not
+    // exist. The fake rejects a mismatched --cluster, so this fails if the script
+    // ever goes back to deriving it.
+    const { callRecords, result, output } = runFixture({
+      claim: claimWith(),
+      cluster: "mem9-real-cluster",
+    });
+    expect(result.status, output).toBe(0);
+    const describes = callRecords.filter(
+      ([tool, service, operation]) =>
+        tool === "aws" && service === "ecs" && operation === "describe-tasks",
+    );
+    expect(describes.length).toBeGreaterThanOrEqual(1);
+    for (const call of describes) {
+      expect(call).toContain("mem9-real-cluster");
+    }
+  });
+
+  it("TC-SLACKAPP-090b a task that never ran its container is named as a startup failure", () => {
+    // ECS reports a NULL exitCode as the literal "None" when the task died before
+    // the entrypoint — the predicted first-deploy outcome while the execution role
+    // is outside the boundary's secret-decrypt exception list. "exited None" would
+    // send the next engineer looking for an application bug.
+    const { result, output } = runFixture({
+      claim: claimWith(),
+      taskExitCode: "None",
+      stoppedReason: "ResourceInitializationError: unable to pull secrets",
+    });
+    expect(result.status, output).not.toBe(0);
+    expect(output).toMatch(/never ran its container/iu);
+    expect(output).toMatch(/ResourceInitializationError/u);
+  });
+
+  it("TC-SLACKAPP-090b an unexpected stoppedReason fails the run even when the exit code is 0", () => {
+    // stoppedReason used to be fetched, printed, and never asserted. A task killed
+    // by OOM can stop with a reason set, and only the essential-container message
+    // is benign here.
+    const { result, output } = runFixture({
+      claim: claimWith(),
+      taskExitCode: "0",
+      stoppedReason: "OutOfMemoryError: container killed due to memory usage",
+    });
+    expect(result.status, output).not.toBe(0);
+    expect(output).toMatch(/unexpected reason/iu);
+    expect(output).toMatch(/OutOfMemoryError/u);
+  });
+
+  it("TC-SLACKAPP-090b a warning the CLI prints on a SUCCESSFUL call never lands in the value", () => {
+    // `out=$(aws ... 2>&1)` reads as a harmless way to capture the error text for
+    // the classifier, but on the success path it prepends stderr onto the VALUE.
+    // Two of the values read here make that a real failure rather than cosmetic:
+    // the cluster name, which then matches no cluster, and the signing secret,
+    // which is HMAC'd — producing a signature the facade correctly rejects, so the
+    // harness would blame the facade for its own contamination.
+    const { callRecords, result, output } = runFixture({
+      claim: claimWith(),
+      cluster: "mem9-real-cluster",
+      noisyStderr: "urllib3 v2 only supports OpenSSL 1.1.1+",
+    });
+    expect(result.status, output).toBe(0);
+    // The signature is the load-bearing one: a polluted secret still produces a
+    // well-formed hex digest, so only the fake's own signature check can tell.
+    // The fake `curl` treats any non-matching signature as invalid, and the valid
+    // click must still have been accepted for the run to reach exit 0 at all.
+    const describes = callRecords.filter(
+      ([tool, service, operation]) =>
+        tool === "aws" && service === "ecs" && operation === "describe-tasks",
+    );
+    expect(describes.length).toBeGreaterThanOrEqual(1);
+    for (const call of describes) {
+      // The value, not the value with a warning glued to its front.
+      expect(call).toContain("mem9-real-cluster");
+    }
   });
 
   it("TC-SLACKAPP-090 a failure still removes the records it seeded", () => {

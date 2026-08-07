@@ -323,6 +323,26 @@ async function loadOffered(
 }
 
 /**
+ * The SSM parameter name of one approval claim.
+ *
+ * DUPLICATED from `claimParameterName` in scripts/memory-cleanup.mjs, which is
+ * the writer of the record this reads: the Lambda bundle and the container script
+ * share no module, and adding a build step to make them would be a larger change
+ * than the eight lines. TC-SLACKAPP-131 asserts the two agree character for
+ * character, so the duplication is checked rather than hoped for.
+ *
+ * The `:` in `sha256:...` cannot appear in an SSM parameter name — `PutParameter`
+ * answers `ValidationException`, while a READ parses it as a version/label
+ * selector, so the two operations disagree about the name. Building the name with
+ * the colon intact made every click answer "The approval could not be recorded",
+ * on every stage, because the catch below classifies by error NAME and
+ * `ValidationException` is not `ParameterAlreadyExists`.
+ */
+export function claimParameterName(ssmPrefix: string, hash: string): string {
+  return `${ssmPrefix}/approvals/approved-${hash.replace(/:/gu, "-")}`;
+}
+
+/**
  * Claim the approval and start the apply, or explain why this delivery is not
  * the one that should.
  *
@@ -333,7 +353,7 @@ async function claimAndRun(
   offered: OfferedRecord,
   deps: SlackDeps,
 ): Promise<SlackResponse> {
-  const claimName = `${deps.ssmPrefix}/approvals/approved-${offered.hash}`;
+  const claimName = claimParameterName(deps.ssmPrefix, offered.hash);
   const claim = buildClaim(offered, new Date(deps.now()).toISOString());
 
   let won = true;

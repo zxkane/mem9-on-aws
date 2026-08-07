@@ -17,6 +17,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   buildClaim,
   CLAIM_STALE_MS,
+  claimParameterName,
   handleSlackInteraction,
   type SlackDeps,
 } from "./slack-interactions.js";
@@ -84,6 +85,30 @@ function offered(overrides: Record<string, unknown> = {}) {
   });
 }
 
+/**
+ * The name constraint `PutParameter` actually enforces: a path of sub-paths, each
+ * only letters, numbers and `.-_`. Probed live in ap-northeast-1 — the `sha256:`
+ * form is rejected on write while a READ parses the colon as a version selector,
+ * so the two operations disagree about the name rather than both 404ing.
+ *
+ * Every double here used to accept any string, which is precisely why a claim name
+ * carrying `sha256:` passed the whole suite and would have answered "The approval
+ * could not be recorded" on every real click. A fake that cannot fail the way the
+ * service fails proves nothing about the name.
+ */
+function assertWritableParameterName(name: string): void {
+  if (!/^(?:\/[A-Za-z0-9_.-]+)+$/u.test(name)) {
+    throw Object.assign(
+      new Error(
+        `Parameter name: if formed as a path, it can consist of sub-paths ` +
+          `divided by slash symbol; each sub-path can be formed as a mix of ` +
+          `letters, numbers and the following 3 symbols .-_ (got ${name})`,
+      ),
+      { name: "ValidationException" },
+    );
+  }
+}
+
 function deps(overrides: Partial<SlackDeps> = {}): SlackDeps {
   return {
     signingSecret: SECRET,
@@ -91,7 +116,7 @@ function deps(overrides: Partial<SlackDeps> = {}): SlackDeps {
     ssmPrefix: "/mem9-on-aws/test",
     now: () => NOW,
     getParameter: vi.fn(async () => offered()),
-    putParameter: vi.fn(async () => {}),
+    putParameter: vi.fn(async (name: string) => assertWritableParameterName(name)),
     runTask: vi.fn(async () => "arn:aws:ecs:region:account:task/cluster/abc"),
     log: vi.fn(),
     ...overrides,
@@ -540,7 +565,7 @@ describe("Slack idempotency and the apply trigger (TC-SLACKAPP-030..036)", () =>
   /** An SSM fake whose `Overwrite: false` write is genuinely atomic. */
   function ssmFake(initialClaim?: string) {
     const store = new Map<string, string>();
-    if (initialClaim) store.set(`/mem9-on-aws/test/approvals/approved-${HASH}`, initialClaim);
+    if (initialClaim) store.set(claimParameterName("/mem9-on-aws/test", HASH), initialClaim);
     return {
       store,
       getParameter: vi.fn(async (name: string) => {
@@ -616,7 +641,7 @@ describe("Slack idempotency and the apply trigger (TC-SLACKAPP-030..036)", () =>
     // assertions above while leaving the claim `taskArn`-less forever, so every
     // delivery past the stale window applies the same ids again.
     expect(
-      JSON.parse(ssm.store.get(`/mem9-on-aws/test/approvals/approved-${HASH}`)!).taskArn,
+      JSON.parse(ssm.store.get(claimParameterName("/mem9-on-aws/test", HASH))!).taskArn,
     ).toBeTruthy();
   });
 
@@ -680,7 +705,7 @@ describe("Slack idempotency and the apply trigger (TC-SLACKAPP-030..036)", () =>
     // ~3 seconds, the second loses the `Overwrite: false` write and then gets a
     // ThrottlingException on its read. An unreadable claim is UNKNOWN, not stale,
     // and unknown is exactly when starting a destructive task is unsafe.
-    const claimName = `/mem9-on-aws/test/approvals/approved-${HASH}`;
+    const claimName = claimParameterName("/mem9-on-aws/test", HASH);
     const store = new Map<string, string>([[claimName, "irrelevant"]]);
     const d = deps({
       getParameter: vi.fn(async (name: string) => {

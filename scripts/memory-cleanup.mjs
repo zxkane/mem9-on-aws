@@ -175,6 +175,52 @@ export function contentHash(content) {
 }
 
 /**
+ * The SSM parameter name of one approval claim, derived from the offered list's
+ * content hash (#123).
+ *
+ * The `:` in `sha256:...` CANNOT appear in an SSM parameter name: `PutParameter`
+ * answers `ValidationException` ("each sub-path can be formed as a mix of letters,
+ * numbers and the following 3 symbols .-_"), and on the READ side a colon is
+ * parsed as the version/label selector instead — so the two operations disagree
+ * about what the name even is. Probed live in ap-northeast-1: the colon form is
+ * rejected on write, the dash form accepted.
+ *
+ * That made the whole loop dead on arrival, invisibly: `claimAndRun`'s catch
+ * separates "someone else won" from every other failure by the error NAME, so a
+ * `ValidationException` fell to the generic branch and answered "The approval
+ * could not be recorded" on every click, forever. Nothing caught it because every
+ * SSM test double is a Map keyed on the name string, so no double validates the
+ * name's SHAPE. `assertClaimParameterName` below is that missing validation, and
+ * the fakes call it (TC-SLACKAPP-131).
+ *
+ * The transformation replaces the separator rather than dropping the `sha256`
+ * prefix: the algorithm stays legible in the name, which is what an operator
+ * reading `describe-parameters` output needs in order to recompute it.
+ */
+export function claimParameterName(ssmPrefix, hash) {
+  return `${ssmPrefix}/approvals/approved-${String(hash).replace(/:/gu, "-")}`;
+}
+
+/**
+ * Throw unless `name` is a name SSM will actually accept on WRITE.
+ *
+ * Exported for the test doubles to call. A fake that accepts any string cannot
+ * fail the way the service does, and that gap is exactly what let the colon reach
+ * a deployed stage — so the doubles borrow the real constraint from here rather
+ * than restating it.
+ */
+export function assertClaimParameterName(name) {
+  if (!/^(?:\/[A-Za-z0-9_.-]+)+$/u.test(name)) {
+    throw new Error(
+      `ValidationException: Parameter name: if formed as a path, it can consist ` +
+        `of sub-paths divided by slash symbol; each sub-path can be formed as a ` +
+        `mix of letters, numbers and the following 3 symbols .-_ (got ${name})`,
+    );
+  }
+  return name;
+}
+
+/**
  * Parse + validate one LLM classification response. Throws MalformedResponse
  * on any malformed shape — field types included, so a hallucinated
  * `absorbs: "id"` (non-array) is caught here and handled by the retry/SKIP
@@ -1153,6 +1199,17 @@ export function buildOutcomeMessage({
   if (result.skippedByFilter > 0) {
     notes.push(`${result.skippedByFilter} not in the approved list`);
   }
+  // Distinct from the line above, and the distinction is the operator's: "not in
+  // the approved list" is the guard doing its job on something they did not
+  // approve, while this is something they DID approve that the classifier has
+  // since changed its mind about. Both leave the headline short of `approved`,
+  // and without this note the shortfall has no stated cause.
+  if (result.reclassified > 0) {
+    notes.push(
+      `${result.reclassified} approved id(s) are no longer classified as ` +
+        `deletions and were left in place`,
+    );
+  }
   // Named by what the operator has to DO about it, not by the exit code: a capped
   // run leaves approved ids untouched and needs a fresh review, a partial one has
   // a failure in the log to read. An exit code in a Slack message is a lookup.
@@ -1273,7 +1330,7 @@ export async function materializeApprovedIds({
   fs,
   log = () => {},
 }) {
-  const name = `${ssmPrefix}/approvals/approved-${hash}`;
+  const name = claimParameterName(ssmPrefix, hash);
   const { GetParametersCommand } = await import("@aws-sdk/client-ssm");
   const response = await ssm.send(new GetParametersCommand({ Names: [name] }));
   // An absent name is echoed in `InvalidParameters` and simply MISSING from
@@ -1592,6 +1649,17 @@ function readApprovedIds(fs, idsFile) {
  * Execute the destructive legs under the cap. Every mutation is preceded by a
  * re-read whose content hash must still match the decision's anchor (LWW
  * guard), so a concurrently edited memory is skipped rather than clobbered.
+ *
+ * When `approved` is present, EVERY id this function deletes must be in it — not
+ * just the id the decision is keyed on. A MERGE deletes its `absorbs[]` ids and
+ * rewrites the survivor's content, and `buildOfferedRecord` offers DELETE verdicts
+ * only, so under `--ids` a MERGE can never be an approved operation: its absorbed
+ * ids were never shown to the operator and its survivor is not a deletion at all.
+ * Gating on `decision.id` alone let a MERGE through whose absorbed ids the operator
+ * had never seen (the Slack-triggered task re-classifies rather than replaying the
+ * reviewed artifact, so the verdicts it applies are not the verdicts that were
+ * approved). That is the one thing this loop exists to prevent, so a MERGE is
+ * refused outright here rather than partially honored.
  */
 async function applyDecisions({ decisions, client, cap, approved, counters, log }) {
   const deleteQueue = [];
@@ -1599,11 +1667,43 @@ async function applyDecisions({ decisions, client, cap, approved, counters, log 
   let skippedByFilter = 0;
   let exitCode = 0;
 
+  // Approved ids this run classified as something NON-destructive. Under `--ids`
+  // the approved set is the operator's list, and a re-classification that now
+  // returns KEEP for one of those ids drops out at `cost === 0` below — so without
+  // this the outcome message says "1 of 2 approved" and offers no note explaining
+  // the missing one, which reads as a partial failure rather than a changed
+  // verdict.
+  //
+  // Seeded from the intersection with `decisions`, not from `approved` itself: an
+  // approved id that appears in NO decision was never classified at all, and
+  // `runCleanup` already reports those by name ("matched no decision") because a
+  // typo'd approval is a different problem with a different fix. Counting them
+  // here would have the same id described two contradictory ways in one run.
+  const decided = new Set(decisions.map((decision) => decision.id));
+  const unclaimed = approved
+    ? new Set([...approved].filter((id) => decided.has(id)))
+    : null;
+
   try {
     for (const decision of decisions) {
       const cost = destructiveCost(decision);
       if (cost === 0) continue;
+      unclaimed?.delete(decision.id);
       if (approved && !approved.has(decision.id)) {
+        skippedByFilter += 1;
+        continue;
+      }
+      // Counted as filtered rather than as an error: an approved-ids run that met
+      // a MERGE has classified something the operator's list cannot cover, which
+      // is a normal consequence of re-classifying, not a corrupt input. It is
+      // LOGGED because the alternative — a silent skip — is how "1 of 2 applied"
+      // becomes unexplainable.
+      if (approved && decision.verdict === "MERGE") {
+        log(
+          `MERGE ${decision.id}: refused under an approved-ids run — the offered ` +
+            `list contains deletions only, so its ${decision.absorbs.length} ` +
+            `absorbed id(s) and its content rewrite were never approved`,
+        );
         skippedByFilter += 1;
         continue;
       }
@@ -1642,7 +1742,17 @@ async function applyDecisions({ decisions, client, cap, approved, counters, log 
     // against the cap — they must not be silently dropped.
     await flushDeletes(deleteQueue, client, log);
   }
-  return { capUsed, skippedByFilter, exitCode };
+  // Only meaningful on a run that finished its loop: a cap abort leaves the tail
+  // of `decisions` unexamined, so those ids are "unapplied because the cap was
+  // reached" (already its own note) rather than "no longer classified DELETE".
+  const reclassified = exitCode === 4 ? 0 : (unclaimed?.size ?? 0);
+  if (reclassified > 0) {
+    log(
+      `${reclassified} approved id(s) are no longer classified as deletions by ` +
+        `this run and were left in place`,
+    );
+  }
+  return { capUsed, skippedByFilter, reclassified, exitCode };
 }
 
 /**
@@ -3016,10 +3126,24 @@ async function buildPostApproval(opts, region, runtime) {
  * it would cost deletions the operator already authorized.
  */
 function buildReportOutcome(opts, claim, runtime) {
-  if (!claim?.messageTs || !claim?.messageChannel) return undefined;
-  const botToken = process.env.SLACK_BOT_TOKEN;
   const log = (message) =>
     console.error(`[memory-cleanup ${new Date().toISOString()}] ${message}`);
+  if (!claim?.messageTs || !claim?.messageChannel) {
+    // Logged for the same reason the token branch below is: skipping the update
+    // leaves the review message showing its Approve button and the PRE-apply
+    // list, so the operator sees an un-actioned request for memories that are
+    // already deleted, and a re-click answers "already applied". The coordinates
+    // can legitimately be absent — `postApprovalRequest` only warns when the
+    // stamp fails — so this stays non-fatal, but it must not be invisible.
+    log(
+      `the approval claim carries no Slack message coordinates ` +
+        `(ts=${claim?.messageTs ?? "unset"}, channel=${claim?.messageChannel ?? "unset"}), ` +
+        `so the outcome cannot be posted back and the original message keeps its ` +
+        `button and pre-apply list; the apply is unaffected`,
+    );
+    return undefined;
+  }
+  const botToken = process.env.SLACK_BOT_TOKEN;
   if (!botToken) {
     log(
       `the approval was claimed against a Slack message but SLACK_BOT_TOKEN is ` +

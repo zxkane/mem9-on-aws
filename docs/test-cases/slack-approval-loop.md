@@ -578,6 +578,36 @@ agreed with policy.
 - **TC-SLACKAPP-088** — the Lambda is `nodejs24.x` on `arm64`, and the route is
   on the existing ApiGatewayV2 — no Lambda Function URL, no new API, no new
   certificate.
+- **TC-SLACKAPP-130** — an apply task that fails reaches a **human**. Every other
+  failure in this loop ends in a log line, and by then the operator has already been
+  told "Apply started"; the deletions they authorized either happened or did not,
+  and nothing else would tell them which. So a STOPPED task raises a CloudWatch
+  alarm on the stage's existing alerts topic, and four things about that are pinned:
+
+  - The EventBridge pattern matches on `taskDefinitionArn`, not on the cluster. The
+    cluster is shared with the server and the consolidation task, so a cluster-wide
+    rule would page the cleanup topic for every unrelated task failure.
+  - The exit-code filter is `{"anything-but": 0}`, not a `> 0` numeric comparison.
+    The predicted first-deploy failure is a task killed in the ECS agent's
+    secret-fetch phase, which reports **no** `exitCode` at all — precisely what a
+    numeric filter drops. `stoppedReason` rides along in the metric-filter document
+    because it is the only field where such a startup failure names itself
+    (`ResourceInitializationError`).
+  - The rule's `namePrefix` is budgeted against Pulumi's 26-character suffix for
+    every stage this project deploys, and synthesis **throws** for a stage name that
+    overruns EventBridge's 64-character limit. That is the #127 trap: a prefix that
+    fits 64 on its own still fails at CREATE, after the rest of the stack deployed.
+    `boundedNamePrefix` refuses rather than truncating on purpose — a silently
+    shortened prefix collides across stages, and two stages sharing one rule means
+    one stage's failures alarm on the other's topic.
+  - The task itself gets no `MEM9_ALERTS_TOPIC_ARN` and no `sns:Publish`. The
+    publishing is EventBridge's; `scripts/memory-cleanup.mjs` has no SNS client, so
+    a topic in its environment would read as wired-up alerting that never fires.
+
+  A stage with no alerts topic creates no alarm and still deploys the task: an alarm
+  whose `alarmActions` is `[undefined]` fails CREATE for the whole stack, which
+  would cost every preview stage its cleanup loop to gain paging it has no topic
+  for.
 
 ## Offering the list: the loop's entry point
 
@@ -740,6 +770,55 @@ made safe or quietly defeated.
   materialization is the cheapest guard, and a tampered claim failing later would
   hold the shared mutex for the length of its own failure and could block the
   weekly consolidation.
+- **TC-SLACKAPP-131** — the claim parameter name is one SSM will accept on
+  **write**, and the façade's copy of the derivation matches the script's
+  character for character.
+
+  `contentHash` returns `sha256:<hex>`, and a `:` cannot appear in an SSM parameter
+  name: `PutParameter` answers `ValidationException` ("each sub-path can be formed
+  as a mix of letters, numbers and the following 3 symbols .-_"), while a **read**
+  parses the colon as the version/label selector instead — so the two operations
+  disagree about what the name even is rather than both simply 404ing. Probed
+  against the live service: colon rejected on write, dash accepted.
+
+  Untreated this made the whole loop dead on arrival, and *silently*: `claimAndRun`
+  separates "someone else won" from every other failure by the error **name**, so a
+  `ValidationException` fell to the generic branch and answered "The approval could
+  not be recorded, so the apply did not start" for every click on every stage —
+  while pointing the operator at boundary rollout order, which is the wrong place
+  to look. Nothing caught it because every SSM double was a `Map` keyed on the name
+  string, and a `Map` cannot reject a name's **shape**. The doubles on both sides
+  now borrow the service's constraint from `assertClaimParameterName`; that, rather
+  than the one name-shape assertion, is what makes this class of defect catchable
+  at all.
+
+  The Lambda bundle and the container script share no module, so the derivation is
+  duplicated in `slack-interactions.ts`. This case asserts the two agree, because a
+  drift means the task looks for a claim at a name the Lambda never wrote and dies
+  with "no approval record" — the same symptom as a tampered claim, from a cause
+  no operator would guess.
+- **TC-SLACKAPP-132** — the approved-ids filter is authoritative for **every** id a
+  run deletes, not only the id each decision is keyed on.
+
+  `buildOfferedRecord` offers `DELETE` verdicts only, so no `MERGE` can ever be in
+  an approved list — but the filter checked `approved.has(decision.id)` on the
+  **survivor** alone, while a `MERGE` deletes its `absorbs[]` ids and rewrites the
+  survivor's content. The apply task re-classifies rather than replaying the
+  reviewed artifact (#119 is the replay path, and the task definition passes no
+  `--decisions`), so a fresh `MERGE` naming an approved id as its survivor deleted
+  memories the operator never saw and exited 0 reporting success. That is the one
+  guarantee the whole loop exists to provide, so a `MERGE` under `--ids` is refused
+  outright, counted in `skippedByFilter`, and logged. Asserted on no non-GET request
+  reaching the server at all, because a PUT writing identical content would leave
+  the store looking untouched.
+- **TC-SLACKAPP-132** — the converse, in the same pair: an approved id whose fresh
+  verdict is now `KEEP` fell out at `destructiveCost === 0` and incremented nothing,
+  so the outcome said "1 of 2 approved deletion(s)" with no note and a changed
+  verdict read as a partial failure. It is now counted as `reclassified` and gets
+  its own note, distinct from "not in the approved list": that one counts things the
+  operator did **not** approve, this counts things they did. Suppressed on a cap
+  abort, where the tail of the decision list was never examined and #121's note
+  already explains the shortfall.
 
 ## Closing the loop on the message
 
@@ -904,6 +983,39 @@ fail the run.
   reason: `infra/slack-approval.ts` fails synthesis when the flag is set and
   either secret is unseeded, and GitHub hands an unset secret to the job as an
   empty string.
+
+- **TC-SLACKAPP-090b** — the failure modes an earlier version of the harness
+  swallowed. Each is a case in `run-slack-approval-e2e.test.mjs`, and each was
+  mutation-verified: reverting the fix fails exactly the case that names it.
+
+  - **A parameter read that fails for any reason other than absence is a hard
+    failure.** `2>/dev/null || true` collapsed every error into `""` and every
+    `""` into a skip, so an `AccessDenied` — say a boundary change leaving the CI
+    role only the plural `ssm:GetParameters` — a KMS denial on
+    `--with-decryption`, throttling, expired credentials, or the wrong region all
+    read as "not deployed" and exited 0. The gate would report green forever while
+    sending no request at all: the same vacuous-gate failure the `pr-N` refusal
+    exists to prevent. The fake `aws` emits the real CLI's `ParameterNotFound`
+    text so only the one benign cause skips — a fake that merely exited 255 could
+    not tell the two apart.
+  - **The cluster comes from SSM, not from slicing the task ARN.**
+    `${TASK_ARN##*:task/}` assumes the long ARN format; on an account without the
+    long-ARN opt-in the ARN carries no cluster segment, so the slice yields the
+    task id and every `describe-tasks` runs against a cluster that does not exist.
+    The fake rejects a mismatched `--cluster` with `ClusterNotFoundException`.
+  - **A `describe-tasks` failure is not an unknown status.** Swallowing it spun
+    the full 15 minutes and then reported `lastStatus=UNKNOWN`, which reads as "the
+    task hung" and sends the next engineer to debug the apply task when the cause
+    is an IAM denial.
+  - **`exitCode: None` is named as a startup failure.** ECS reports a NULL exit
+    code as the literal `None` when the task died before its entrypoint — the
+    predicted first-deploy outcome while the execution role sits outside the
+    boundary's secret-decrypt exception list. "exited None" would send the reader
+    looking for an application bug.
+  - **An unexpected `stoppedReason` fails the run even at exit 0.**
+    `stoppedReason` was fetched, printed, and never asserted; a task killed by OOM
+    can stop with a reason set, and only `Essential container in task exited` is
+    benign here.
 
 ## Exit codes
 

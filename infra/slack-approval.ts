@@ -55,6 +55,7 @@ import type { DbOutputs } from "./db";
 import type { EcsOutputs } from "./ecs";
 import type { OauthFacadeOutputs } from "./oauth-facade";
 import type { TenantIdentityOutputs } from "./tenant-identity";
+import { taskFailureAlarm } from "./task-failure-alarm";
 import { accountId, ECR_REGION, ecrImage } from "./ecr";
 import { resolveVpc } from "./vpc";
 
@@ -62,6 +63,10 @@ const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 const BEDROCK_PROJECT = process.env.MEM9_BEDROCK_PROJECT;
 const BEDROCK_PROJECT_OPENAI = process.env.MEM9_BEDROCK_PROJECT_OPENAI || "";
 const RESPONSES_REGION = process.env.MEM9_LLM_RESPONSES_REGION || "us-west-2";
+
+// Same namespace as the consolidation alarm so both task failures aggregate in
+// one place; the metric name distinguishes them.
+const CLEANUP_FAILURE_METRIC = "CleanupApplyTaskFailures";
 
 export const SLACK_APPROVAL_ENABLED_ENV = "MEM9_SLACK_APPROVAL_ENABLED";
 export const SLACK_APPROVAL_CHANNEL_ENV = "MEM9_SLACK_APPROVAL_CHANNEL";
@@ -216,9 +221,13 @@ export function slackApproval(
       MEM9_SSM_PREFIX: prefix,
       MEM9_SLACK_APPROVAL_CHANNEL: channel,
       MEM9_APPROVED_IDS_PATH: APPROVED_IDS_PATH,
-      ...(ecsOut.alertsTopicArn
-        ? { MEM9_ALERTS_TOPIC_ARN: ecsOut.alertsTopicArn }
-        : {}),
+      // No MEM9_ALERTS_TOPIC_ARN and no sns:Publish: scripts/memory-cleanup.mjs
+      // contains no SNS code (memory-consolidation.mjs does, which is what makes
+      // the omission look like an oversight). Passing the variable and granting
+      // the action would read from this file as though alerting were wired up
+      // while nothing published, so the failure signal is the EventBridge rule
+      // and alarm below instead — which also catches the startup deaths a
+      // publish from inside the container could never report.
     },
     // Fetched by the EXECUTION role at task start, so no secret value is ever an
     // `environment` entry (those are readable by anyone holding
@@ -263,9 +272,6 @@ export function slackApproval(
           $interpolate`arn:aws:ssm:${region}:${accountId()}:parameter${prefix}/approvals/*`,
         ],
       },
-      ...(ecsOut.alertsTopicArn
-        ? [{ actions: ["sns:Publish"], resources: [ecsOut.alertsTopicArn] }]
-        : []),
     ],
     logging: { retention: "1 month" },
     transform: {
@@ -291,6 +297,40 @@ export function slackApproval(
     resolveVpc().privateSubnetIds.apply((ids) => ids.join(",")),
     "StringList",
   );
+
+  // --- The apply task's failure alarm ---
+  // Without this the whole loop has no automated failure signal. Every error path
+  // in the handler and the task ends in a log line, and a log line pages nobody:
+  // the operator is told "Apply started", the task then dies, and the next signal
+  // is a human noticing months of un-tidied memories.
+  //
+  // An EventBridge rule on ECS state change is used rather than a filter over the
+  // task's own logs BECAUSE the most likely first-deploy failure produces no
+  // application log at all: a task that dies in the ECS agent's secret-fetch phase
+  // (see the BOUNDARY NOTE at the top of this file) never runs its entrypoint.
+  // `anything-but: 0` also covers a NULL exitCode, which is exactly that case.
+  if (ecsOut.alertsTopicArn) {
+    taskFailureAlarm({
+      stem: "CleanupApplyFailure",
+      logGroupName: `/sst/cleanup-apply/${$app.stage}/task-failures`,
+      rulePrefix: `mem9-on-aws-${$app.stage}-cleanup-failure-`,
+      ruleWhat: "cleanup apply failure rule",
+      ruleDescription:
+        "Captures non-zero or absent exits from the exact cleanup apply task revision.",
+      policyName: `mem9-on-aws-${$app.stage}-cleanup-apply-events`,
+      eventName: "cleanup_apply_task_failed",
+      metricName: CLEANUP_FAILURE_METRIC,
+      alarmDescription:
+        "An approved memory cleanup apply task exited non-zero or never ran its container.",
+      taskDefinitionArn: task.taskDefinition,
+      alertsTopicArn: ecsOut.alertsTopicArn,
+      tags,
+      // On here and off for consolidation: the predicted first-deploy failure for
+      // THIS task is a death in the secret-fetch phase (see the BOUNDARY NOTE at
+      // the top of this file), and `stoppedReason` is the only field that names it.
+      includeStoppedReason: true,
+    });
+  }
 
   // --- The three grants the façade Lambda needs, on its EXISTING role ---
   new aws.iam.RolePolicy("Mem9SlackApprovalPolicy", {

@@ -40,11 +40,43 @@ if ! [[ "$STAGE" =~ ^pr-[0-9]+$ ]]; then
   exit 1
 fi
 
-# `|| true` on every probe: an absent parameter is `ParameterNotFound`, which is
-# a SKIP condition here, not a failure (see the gate below).
+# An absent parameter is a SKIP condition here; anything else is a FAILURE.
+# `2>/dev/null || true` would collapse the two, and that is not a cosmetic
+# difference: `AccessDenied` (say a boundary change that leaves the CI role only
+# the plural `ssm:GetParameters`), a KMS denial on `--with-decryption`, throttling,
+# expired credentials, or the wrong region would all read as "not deployed" and
+# exit 0. The gate would then report green forever while sending no request at
+# all — the exact failure the `pr-N` refusal above exists to prevent, so it gets
+# the same treatment: only the one benign cause skips.
+#
+# The two streams are captured SEPARATELY rather than merged with `2>&1`. On the
+# success path a merge would prepend whatever the CLI wrote to stderr — a botocore
+# deprecation notice, a credential-source line — onto the returned VALUE, and one
+# of the values returned here is the signing secret that gets HMAC'd. A polluted
+# secret produces a signature the facade rejects, which would read as the facade
+# being broken. The unit-test fakes cannot catch this: they only write to stderr
+# on the paths where they also exit non-zero.
 ssm_value() {
-  aws ssm get-parameter --name "$1" --region "$REGION" \
-    --with-decryption --query Parameter.Value --output text 2>/dev/null || true
+  local out err rc=0
+  err=$(mktemp)
+  # `|| rc=$?` rather than a bare `rc=$?` on the next line: a plain assignment is
+  # subject to errexit, and while a call in a command substitution survives it
+  # (the subshell carries the failure to the caller's assignment), a direct call
+  # would abort the script before reaching the classifier below.
+  out=$(aws ssm get-parameter --name "$1" --region "$REGION" \
+    --with-decryption --query Parameter.Value --output text 2>"$err") || rc=$?
+  local stderr_text
+  stderr_text=$(<"$err")
+  rm -f "$err"
+  if ((rc == 0)); then
+    printf '%s' "$out"
+    return 0
+  fi
+  if [[ "$stderr_text" == *ParameterNotFound* ]]; then
+    return 0
+  fi
+  echo "::error::reading $1 failed (exit ${rc}): ${stderr_text}" >&2
+  exit 1
 }
 
 FACADE=$(ssm_value "${PREFIX}/facade/url")
@@ -71,7 +103,12 @@ APPROVED_ID="mem9-e2e-nonexistent-${STAGE}"
 # refuses on a mismatch — so this is what lets the run reach the apply at all.
 IDS_HASH="sha256:$(printf '%s' "$APPROVED_ID" | shasum -a 256 | cut -d' ' -f1)"
 OFFERED_NAME="${PREFIX}/approvals/offered"
-CLAIM_NAME="${PREFIX}/approvals/approved-${IDS_HASH}"
+# The colon of `sha256:` is replaced, matching `claimParameterName` in
+# scripts/memory-cleanup.mjs and infra/src/oauth-facade/slack-interactions.ts. An
+# SSM parameter name may contain only letters, numbers and `.-_` per sub-path, so
+# the colon form is rejected by PutParameter — and on a READ it is parsed as a
+# version selector instead, which is why the mismatch does not simply 404.
+CLAIM_NAME="${PREFIX}/approvals/approved-${IDS_HASH//:/-}"
 
 cleanup() {
   # Both records, always, including on failure: `offered` is overwritten by the
@@ -177,13 +214,45 @@ echo "run-slack-approval-e2e: apply task ${TASK_ARN##*/} started"
 
 # 4. The apply task's own exit code. Without this the check passes on a click
 #    that started a task which then crashed.
-CLUSTER="${TASK_ARN##*:task/}"
-CLUSTER="${CLUSTER%%/*}"
+#
+# The cluster comes from SSM, NOT from slicing the task ARN. `${TASK_ARN##*:task/}`
+# assumes the long ARN format (`.../task/<cluster>/<id>`); on an account without
+# the long-ARN opt-in the ARN is `.../task/<id>`, so the slice yields the task id
+# and every describe-tasks below would be called with a nonexistent cluster.
+CLUSTER=$(ssm_value "${PREFIX}/cleanup/cluster-name")
+if [[ -z "$CLUSTER" || "$CLUSTER" == "None" ]]; then
+  echo "::error::no cleanup/cluster-name on ${STAGE}, so the apply task cannot be polled" >&2
+  exit 1
+fi
+
+# A failed describe is NOT an unknown status. Swallowing it would spin the full
+# 15 minutes and then report `lastStatus=UNKNOWN`, which reads as "the task hung"
+# and sends the next engineer to debug the apply task when the real cause is an
+# IAM denial or a bad cluster.
+#
+# Streams kept separate for the same reason as `ssm_value`: the value returned here
+# is compared against `STOPPED` and against exit codes, and a warning line merged
+# onto it would make the comparison silently never match — the 15-minute spin the
+# error message above is meant to rule out.
+describe_task() {
+  local out err rc=0
+  err=$(mktemp)
+  out=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
+    --region "$REGION" --query "$1" --output text 2>"$err") || rc=$?
+  local stderr_text
+  stderr_text=$(<"$err")
+  rm -f "$err"
+  if ((rc != 0)); then
+    echo "::error::describe-tasks ($1) failed (exit ${rc}): ${stderr_text}" >&2
+    exit 1
+  fi
+  printf '%s' "$out"
+}
+
 DEADLINE=$((SECONDS + 900))
 LAST_STATUS=""
 while [[ $SECONDS -lt $DEADLINE ]]; do
-  LAST_STATUS=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
-    --region "$REGION" --query 'tasks[0].lastStatus' --output text 2>/dev/null || echo "UNKNOWN")
+  LAST_STATUS=$(describe_task 'tasks[0].lastStatus')
   [[ "$LAST_STATUS" == "STOPPED" ]] && break
   sleep 10
 done
@@ -192,13 +261,28 @@ if [[ "$LAST_STATUS" != "STOPPED" ]]; then
   exit 1
 fi
 
-EXIT_CODE=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
-  --region "$REGION" --query 'tasks[0].containers[0].exitCode' --output text)
-STOP_REASON=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK_ARN" \
-  --region "$REGION" --query 'tasks[0].stoppedReason' --output text)
+EXIT_CODE=$(describe_task 'tasks[0].containers[0].exitCode')
+STOP_REASON=$(describe_task 'tasks[0].stoppedReason')
 echo "run-slack-approval-e2e: apply task stopped (exitCode=${EXIT_CODE}, reason='${STOP_REASON}')"
+# `None` means the container never produced an exit code — the task died before
+# or outside the entrypoint (a pull failure, or the secret-fetch phase, which is
+# the predicted first-deploy outcome while the execution role is not admitted to
+# the boundary's secret-decrypt exception list). Named separately because
+# "exited None" invites the reader to look for a bug in the app instead.
+if [[ "$EXIT_CODE" == "None" ]]; then
+  echo "::error::the apply task never ran its container (reason='${STOP_REASON}'); this is a startup failure, not an application exit" >&2
+  exit 1
+fi
 if [[ "$EXIT_CODE" != "0" ]]; then
   echo "::error::the apply task exited ${EXIT_CODE}" >&2
+  exit 1
+fi
+# `stoppedReason` is asserted, not merely printed: a task killed by OOM or a
+# failed secret/image pull can stop with a reason set, and the essential-container
+# message is the only benign value here.
+if [[ -n "$STOP_REASON" && "$STOP_REASON" != "None" ]] \
+  && [[ "$STOP_REASON" != *"Essential container in task exited"* ]]; then
+  echo "::error::the apply task stopped for an unexpected reason: ${STOP_REASON}" >&2
   exit 1
 fi
 

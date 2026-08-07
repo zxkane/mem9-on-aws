@@ -9,10 +9,12 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  assertClaimParameterName,
   buildApprovalMessage,
   buildCompleteChat,
   buildOfferedRecord,
   buildOutcomeMessage,
+  claimParameterName,
   contentHash,
   createCleanupDeps,
   inactiveMemoryAdapter,
@@ -149,6 +151,41 @@ function fakeLlm(verdictsByBatch) {
 }
 
 const withTopic = (v) => ("topic" in v ? v : { ...v, topic: "engineering" });
+
+/**
+ * SSM/Secrets Manager double, keyed by parameter name.
+ *
+ * `GetParameters` is the only read the workload boundary admits, so an absent name
+ * is echoed in `InvalidParameters` and simply MISSING from `Parameters` — never an
+ * exception. Fakes that threw would let a script relying on a throw pass here and
+ * silently read `undefined` in production.
+ *
+ * The name constraint is borrowed from the SERVICE (`assertClaimParameterName`)
+ * rather than accepting any string: a Map-keyed fake is precisely why a claim name
+ * carrying the `:` of `sha256:` passed this whole suite while PutParameter would
+ * have rejected it on every real click (TC-SLACKAPP-131).
+ */
+function fakeAwsClient(values = {}) {
+  const client = {
+    sent: [],
+    send: vi.fn(async (command) => {
+      client.sent.push(command.input);
+      if (command.input.Names) {
+        for (const name of command.input.Names) assertClaimParameterName(name);
+        const names = command.input.Names;
+        return {
+          Parameters: names
+            .filter((name) => name in values)
+            .map((name) => ({ Name: name, Value: values[name] })),
+          InvalidParameters: names.filter((name) => !(name in values)),
+        };
+      }
+      return { SecretString: values[command.input.SecretId] };
+    }),
+    destroy: () => {},
+  };
+  return client;
+}
 
 function baseDeps(server, llm, dir) {
   return {
@@ -415,6 +452,120 @@ describe("apply, cap, --ids", () => {
     expect(server.store.get("d1").state).toBe("deleted");
     expect(server.store.get("d2").state).toBe("active");
     expect(result.skippedByFilter).toBe(1);
+  });
+
+  it("TC-SLACKAPP-132 --ids refuses a MERGE outright, absorbed ids included", async () => {
+    // The privilege-escalation hole this closes. `buildOfferedRecord` offers
+    // DELETE verdicts only, so no MERGE can ever be in an approved list — but the
+    // filter checked `approved.has(decision.id)` on the SURVIVOR only, and a
+    // MERGE deletes its `absorbs[]` and rewrites the survivor's content. The
+    // Slack-triggered task re-classifies instead of replaying the reviewed
+    // artifact, so a fresh MERGE naming an approved id as its survivor deleted two
+    // memories the operator never saw and exited 0 reporting success.
+    const dir = tempDir();
+    const server = fakeServer([
+      memory("surv", "survivor"),
+      memory("frag-1", "fragment one"),
+      memory("frag-2", "fragment two"),
+    ]);
+    const llm = fakeLlm([
+      [
+        { id: "surv", verdict: "MERGE", reason: "r", merge_into: "surv", absorbs: ["frag-1", "frag-2"], merged_content: "MERGED" },
+        { id: "frag-1", verdict: "MERGE", reason: "r", merge_into: "surv" },
+        { id: "frag-2", verdict: "MERGE", reason: "r", merge_into: "surv" },
+      ],
+    ]);
+    const idsFile = join(dir, "approved.txt");
+    // The operator approved exactly the survivor id, as a DELETION.
+    writeFileSync(idsFile, "surv\n");
+    const deps = baseDeps(server, llm, dir);
+    const result = await runCleanup(baseOpts({ apply: true, idsFile }), deps);
+
+    // Nothing destroyed and nothing rewritten.
+    expect(server.store.get("frag-1").state).toBe("active");
+    expect(server.store.get("frag-2").state).toBe("active");
+    expect(server.store.get("surv").state).toBe("active");
+    expect(server.store.get("surv").content).toBe("survivor");
+    expect(result.capUsed).toBe(0);
+    // No write of ANY kind reached the server: asserted on the request log rather
+    // than only on the store, because a PUT that happened to write identical
+    // content would leave the store looking untouched.
+    expect(server.calls.filter((c) => c.method !== "GET")).toEqual([]);
+    // Counted AND logged: a silent skip is how a shortfall in the Slack outcome
+    // message becomes unexplainable.
+    expect(result.skippedByFilter).toBe(1);
+    const logged = deps.log.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toMatch(/refused under an approved-ids run/u);
+  });
+
+  it("TC-SLACKAPP-132 an approved id the re-classifier now KEEPs is reported, not silently dropped", async () => {
+    // The converse gap. An approved id whose fresh verdict is KEEP falls out at
+    // `destructiveCost === 0`, so it incremented nothing: the outcome message said
+    // "1 of 2 approved deletion(s)" with no note, which reads as a partial failure
+    // rather than a changed verdict.
+    const dir = tempDir();
+    const server = fakeServer([memory("d1", "x"), memory("d2", "y")]);
+    const llm = fakeLlm([
+      [
+        { id: "d1", verdict: "DELETE", reason: "noise" },
+        { id: "d2", verdict: "KEEP", reason: "durable now" },
+      ],
+    ]);
+    const idsFile = join(dir, "approved.txt");
+    writeFileSync(idsFile, "d1\nd2\n");
+    const result = await runCleanup(baseOpts({ apply: true, idsFile }), baseDeps(server, llm, dir));
+
+    expect(server.store.get("d1").state).toBe("deleted");
+    expect(server.store.get("d2").state).toBe("active");
+    expect(result.reclassified).toBe(1);
+    // Distinct from skippedByFilter: that counts things the operator did NOT
+    // approve, this counts things they DID.
+    expect(result.skippedByFilter).toBe(0);
+
+    const message = buildOutcomeMessage({
+      channel: "C1",
+      messageTs: "1.1",
+      hash: contentHash("d1\nd2"),
+      stage: "test",
+      approved: 2,
+      result,
+      appliedAt: "2026-08-05T04:00:00.000Z",
+    });
+    expect(JSON.stringify(message)).toMatch(/no longer classified as deletions/u);
+  });
+
+  it("TC-SLACKAPP-132 an approved id that matched no decision is not counted as reclassified", async () => {
+    // The two counts must not describe one id two contradictory ways. An id that
+    // appears in NO decision was never classified, so calling it "no longer
+    // classified as deletions" tells the operator the classifier changed its mind
+    // when in fact their list named something this run never saw — a typo, or an id
+    // from a different stage. `runCleanup` already reports those BY NAME, and that
+    // message is the one with the actionable fix.
+    const dir = tempDir();
+    const server = fakeServer([memory("d1", "x")]);
+    const llm = fakeLlm([[{ id: "d1", verdict: "DELETE", reason: "noise" }]]);
+    const idsFile = join(dir, "approved.txt");
+    writeFileSync(idsFile, "d1\nd-typo\n");
+    const deps = baseDeps(server, llm, dir);
+    const result = await runCleanup(baseOpts({ apply: true, idsFile }), deps);
+
+    expect(server.store.get("d1").state).toBe("deleted");
+    expect(result.reclassified).toBe(0);
+    expect(result.skippedByFilter).toBe(0);
+    const logged = deps.log.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toMatch(/1 approved id\(s\) matched no decision: d-typo/u);
+    expect(logged).not.toMatch(/no longer classified as deletions/u);
+
+    const message = buildOutcomeMessage({
+      channel: "C1",
+      messageTs: "1.1",
+      hash: contentHash("d1\nd-typo"),
+      stage: "test",
+      approved: 2,
+      result,
+      appliedAt: "2026-08-05T04:00:00.000Z",
+    });
+    expect(JSON.stringify(message)).not.toMatch(/no longer classified as deletions/u);
   });
 
   it("TC-MEMCLEAN-033 MERGE recovery is hash-anchored (three-way)", async () => {
@@ -3658,7 +3809,7 @@ describe("the offered approval record (#123)", () => {
 
 describe("materializing the approved ids in the apply task (#123)", () => {
   const OFFERED = "/mem9-on-aws/prod/approvals/offered";
-  const claimName = (hash) => `/mem9-on-aws/prod/approvals/approved-${hash}`;
+  const claimName = (hash) => claimParameterName("/mem9-on-aws/prod", hash);
 
   /**
    * Fake SSM whose `send` answers `GetParametersCommand` from a name→value map.
@@ -3694,6 +3845,51 @@ describe("materializing the approved ids in the apply task (#123)", () => {
       generatedAt: "2026-08-05T00:00:00.000Z",
       ...extra,
     });
+
+  it("TC-SLACKAPP-131 the claim name is one SSM will accept on WRITE, and matches the facade's copy", async () => {
+    // The defect this pins was total and silent: `contentHash` returns
+    // `sha256:<hex>`, and a `:` cannot appear in an SSM parameter name.
+    // PutParameter answers ValidationException, which `claimAndRun` classifies by
+    // error NAME — not `ParameterAlreadyExists`, so it fell to the generic branch
+    // and answered "The approval could not be recorded" for EVERY click on every
+    // stage. Probed live in ap-northeast-1: colon rejected on write, dash
+    // accepted. Nothing caught it because every SSM double was a Map keyed on the
+    // name string, so no double could reject a name's SHAPE.
+    const hash = contentHash("m-1");
+    expect(hash).toMatch(/^sha256:/u);
+    const name = claimParameterName("/mem9-on-aws/prod", hash);
+    expect(name).not.toContain(":");
+    expect(() => assertClaimParameterName(name)).not.toThrow();
+    // The prefix is kept rather than stripped so an operator reading
+    // describe-parameters output can still tell which algorithm produced it.
+    expect(name).toBe(`/mem9-on-aws/prod/approvals/approved-${hash.replace(":", "-")}`);
+    // And the guard has to actually reject the old form, or it is decoration.
+    expect(() =>
+      assertClaimParameterName(`/mem9-on-aws/prod/approvals/approved-${hash}`),
+    ).toThrow(/ValidationException/u);
+
+    // The WRITER of this record is the facade Lambda, which shares no module with
+    // this script — so the derivation is duplicated and this is the only thing
+    // keeping the two in agreement. A drift here means the task looks for a claim
+    // at a name the Lambda never wrote and dies with "no approval record", which
+    // is the same symptom as a tampered claim from a cause nobody would guess.
+    //
+    // Both functions are CALLED rather than their sources compared: comparing
+    // source text passes as long as the facade matches a literal in this file,
+    // which is not the property that matters and does not notice the script side
+    // changing at all. Only this direction is importable — vitest transforms the
+    // TS for an .mjs test, while an infra/*.test.ts importing the .mjs fails
+    // typecheck (TS7016), the same asymmetry noted at slack-approval.test.ts's
+    // boundaryStatements().
+    const { claimParameterName: facadeClaimParameterName } = await import(
+      "../infra/src/oauth-facade/slack-interactions.ts"
+    );
+    for (const prefix of ["/mem9-on-aws/prod", "/mem9-on-aws/pr-123"]) {
+      expect(facadeClaimParameterName(prefix, hash)).toBe(
+        claimParameterName(prefix, hash),
+      );
+    }
+  });
 
   it("TC-SLACKAPP-091 the ids come from the CLAIM named by the hash, not from the offered record", async () => {
     // The claim is what the operator's click actually approved. `offered` is
@@ -4079,27 +4275,6 @@ describe("the apply task's in-container runtime (#123)", () => {
     };
   }
 
-  function fakeAwsClient(values = {}) {
-    const client = {
-      sent: [],
-      send: vi.fn(async (command) => {
-        client.sent.push(command.input);
-        if (command.input.Names) {
-          const names = command.input.Names;
-          return {
-            Parameters: names
-              .filter((name) => name in values)
-              .map((name) => ({ Name: name, Value: values[name] })),
-            InvalidParameters: names.filter((name) => !(name in values)),
-          };
-        }
-        return { SecretString: values[command.input.SecretId] };
-      }),
-      destroy: () => {},
-    };
-    return client;
-  }
-
   it("TC-SLACKAPP-100 takes its database configuration from the environment, with no SSM or Secrets Manager read", async () => {
     // The image ships @aws-sdk/client-ssm now, so this is no longer about a
     // missing module — it is about grants. The task role holds ssm:GetParameters
@@ -4184,7 +4359,7 @@ describe("the apply task's in-container runtime (#123)", () => {
     const idsFile = join(dir, "approved.txt");
     containerEnv({ MEM9_APPROVAL_HASH: hash });
     const ssm = fakeAwsClient({
-      [`/mem9-on-aws/prod/approvals/approved-${hash}`]: JSON.stringify({
+      [claimParameterName("/mem9-on-aws/prod", hash)]: JSON.stringify({
         stage: "prod",
         hash,
         ids,
@@ -4239,7 +4414,7 @@ describe("the apply task's in-container runtime (#123)", () => {
     containerEnv({ MEM9_APPROVAL_HASH: hash });
     const calls = [];
     const ssm = fakeAwsClient({
-      [`/mem9-on-aws/prod/approvals/approved-${hash}`]: JSON.stringify({
+      [claimParameterName("/mem9-on-aws/prod", hash)]: JSON.stringify({
         stage: "prod",
         // Agrees with the request, so a string comparison of the two would pass.
         hash,
@@ -4962,28 +5137,6 @@ describe("closing the loop on the message (#123)", () => {
 });
 
 describe("wiring the outcome update into the apply run (#123)", () => {
-  /** SSM/Secrets double keyed by parameter name (the sibling describe's shape). */
-  function fakeAwsClient(values = {}) {
-    const client = {
-      sent: [],
-      send: vi.fn(async (command) => {
-        client.sent.push(command.input);
-        if (command.input.Names) {
-          const names = command.input.Names;
-          return {
-            Parameters: names
-              .filter((name) => name in values)
-              .map((name) => ({ Name: name, Value: values[name] })),
-            InvalidParameters: names.filter((name) => !(name in values)),
-          };
-        }
-        return { SecretString: values[command.input.SecretId] };
-      }),
-      destroy: () => {},
-    };
-    return client;
-  }
-
   const environmentKeys = [
     "AWS_REGION",
     "MEM9_APPROVAL_HASH",
@@ -5122,7 +5275,7 @@ describe("wiring the outcome update into the apply run (#123)", () => {
     const ssm = {
       send: vi.fn(async (command) => ({
         Parameters: (command.input.Names ?? [])
-          .filter((n) => n.endsWith(`approvals/approved-${hash}`))
+          .filter((n) => n === claimParameterName("/mem9-on-aws/prod", hash))
           .map((name) => ({
             Name: name,
             Value: JSON.stringify({
@@ -5217,7 +5370,7 @@ describe("wiring the outcome update into the apply run (#123)", () => {
     });
     delete process.env.SLACK_BOT_TOKEN;
     const ssm = fakeAwsClient({
-      [`/mem9-on-aws/prod/approvals/approved-${hash}`]: JSON.stringify({
+      [claimParameterName("/mem9-on-aws/prod", hash)]: JSON.stringify({
         stage: "prod",
         hash,
         ids,

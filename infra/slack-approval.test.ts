@@ -5,6 +5,7 @@ import type { DbOutputs } from "./db";
 import type { EcsOutputs } from "./ecs";
 import type { OauthFacadeOutputs } from "./oauth-facade";
 import type { TenantIdentityOutputs } from "./tenant-identity";
+import { cloudwatchStubs } from "./task-failure-alarm.test-fixtures";
 
 // Harness copied from infra/consolidation.test.ts: the same Output/materialize
 // pair, the same `record`/`one` resource log, and the same faithful sst.aws.Task
@@ -205,13 +206,15 @@ function installGlobals(stage: string) {
         }
       },
     },
-    cloudwatch: {
-      MetricAlarm: class {
-        constructor(logicalName: string, args: Record<string, unknown>) {
-          record("MetricAlarm", logicalName, args);
-        }
-      },
-    },
+    // The apply task's failure signal — the SAME stub set consolidation.test.ts
+    // installs, because both stacks build these six resources through
+    // `taskFailureAlarm`.
+    cloudwatch: cloudwatchStubs({
+      record,
+      out,
+      ruleName: "cleanup-failure",
+      logGroupName: "/sst/cleanup-apply/prod/task-failures",
+    }),
   };
   (globalThis as Record<string, unknown>).sst = {
     aws: {
@@ -705,6 +708,150 @@ describe("slack approval infrastructure", () => {
     // rename here makes RunTask reject the override after the claim is written.
     expect(task.logicalName).toBe("Mem9Cleanup");
     expect(args.architecture).toBe("arm64");
+  });
+
+  it("TC-SLACKAPP-130: alarms on the exact task's non-zero or ABSENT exit through SNS", async () => {
+    installGlobals("prod");
+    enable();
+    await loadAndRun();
+
+    const rule = materialize(one("EventRule", "CleanupApplyFailureRule").args) as
+      Record<string, any>;
+    const pattern = JSON.parse(rule.eventPattern);
+    // Pinned to THIS task definition revision, not to the cluster: the cluster is
+    // shared with the server and the consolidation task, so a cluster-wide rule
+    // would alarm the cleanup topic on every unrelated task failure.
+    expect(pattern).toMatchObject({
+      source: ["aws.ecs"],
+      "detail-type": ["ECS Task State Change"],
+      detail: {
+        lastStatus: ["STOPPED"],
+        taskDefinitionArn: [
+          "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-cleanup:1",
+        ],
+        // `anything-but: 0` and NOT a >0 comparison: the predicted first-deploy
+        // failure is a task that dies in the ECS agent's secret-fetch phase, which
+        // reports NO exitCode at all. A numeric filter would miss exactly that.
+        containers: { exitCode: [{ "anything-but": 0 }] },
+      },
+    });
+
+    expect(materialize(one("MetricAlarm", "CleanupApplyFailureAlarm").args))
+      .toMatchObject({
+        namespace: "mem9-on-aws",
+        metricName: "CleanupApplyTaskFailures",
+        dimensions: { stage: "prod" },
+        threshold: 1,
+        // The whole point: a task failure has to reach a human. Every other
+        // failure path in this loop ends in a log line, and a log line pages
+        // nobody — the operator was already told "Apply started".
+        alarmActions: [
+          "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
+        ],
+      });
+
+    // stoppedReason is carried into the metric-filter document because it is the
+    // only place a startup failure names itself (ResourceInitializationError).
+    const target = materialize(
+      one("EventTarget", "CleanupApplyFailureLogTarget").args,
+    ) as Record<string, any>;
+    expect(target.inputTransformer.inputPaths).toMatchObject({
+      exitCode: "$.detail.containers[0].exitCode",
+      stoppedReason: "$.detail.stoppedReason",
+    });
+    expect(JSON.parse(target.inputTransformer.inputTemplate)).toMatchObject({
+      event: "cleanup_apply_task_failed",
+      stage: "prod",
+      stoppedReason: "<stoppedReason>",
+    });
+
+    const logPolicy = JSON.parse(
+      String(
+        materialize(
+          one("LogResourcePolicy", "CleanupApplyFailureLogPolicy").args
+            .policyDocument,
+        ),
+      ),
+    );
+    expect(logPolicy.Statement).toEqual([
+      {
+        Effect: "Allow",
+        Principal: {
+          Service: ["events.amazonaws.com", "delivery.logs.amazonaws.com"],
+        },
+        Action: ["logs:CreateLogStream", "logs:PutLogEvents"],
+        Resource:
+          "arn:aws:logs:ap-northeast-1:123456789012:log-group:/sst/cleanup-apply/prod/task-failures:*",
+      },
+    ]);
+  });
+
+  it("TC-SLACKAPP-130: budgets the failure rule's name against Pulumi's suffix", async () => {
+    // The #127 trap: EventBridge caps a rule NAME at 64 characters and Pulumi
+    // appends a 26-character suffix to a namePrefix, so a prefix that fits in 64
+    // on its own still fails at CREATE time — after the rest of the stack has
+    // deployed. Every stage this project actually deploys has to fit.
+    const { PULUMI_NAME_SUFFIX_LEN } = await import("./consolidation");
+    for (const stage of ["prod", "pr-1", "pr-123", "pr-99999"]) {
+      resources = [];
+      installGlobals(stage);
+      enable();
+      await loadAndRun();
+
+      const rule = materialize(
+        one("EventRule", "CleanupApplyFailureRule").args,
+      ) as Record<string, any>;
+      expect(rule.namePrefix.length + PULUMI_NAME_SUFFIX_LEN)
+        .toBeLessThanOrEqual(64);
+    }
+  });
+
+  it("TC-SLACKAPP-130: refuses at SYNTH when a stage name overruns the rule limit", async () => {
+    // The failure has to land here rather than at CREATE. `boundedNamePrefix`
+    // throws instead of truncating on purpose: a silently shortened prefix would
+    // collide across two stages, and two stages sharing a rule means one stage's
+    // task failures alarm on the other's topic.
+    installGlobals("pr-1234567890123");
+    enable();
+    const module = await loadModule();
+    expect(() =>
+      module.slackApproval(fakeEcs(), fakeDb(), fakeIdentity(), fakeFacade()),
+    ).toThrow(/cleanup apply failure rule/u);
+  });
+
+  it("TC-SLACKAPP-130: passes no alerts topic and no sns:Publish to the task itself", async () => {
+    installGlobals("prod");
+    enable();
+    await loadAndRun();
+
+    const args = materialize(one("Task", "Mem9Cleanup").args) as Record<string, any>;
+    // scripts/memory-cleanup.mjs contains no SNS client, so a topic ARN in its
+    // environment plus an sns:Publish grant would read as wired-up alerting while
+    // nothing ever published — and would hand the task a grant it cannot use.
+    expect(Object.keys(args.environment)).not.toContain("MEM9_ALERTS_TOPIC_ARN");
+    const actions = (args.permissions as Array<Record<string, any>>).flatMap(
+      (statement) => list(statement.actions),
+    );
+    expect(actions).not.toContain("sns:Publish");
+  });
+
+  it("TC-SLACKAPP-130: creates no failure alarm when the stage has no alerts topic", async () => {
+    installGlobals("prod");
+    enable();
+    const module = await loadModule();
+    // A preview stage without an alerts topic must still deploy: an alarm whose
+    // alarmActions is [undefined] is a CREATE failure for the whole stack.
+    module.slackApproval(
+      { ...fakeEcs(), alertsTopicArn: undefined } as unknown as EcsOutputs,
+      fakeDb(),
+      fakeIdentity(),
+      fakeFacade(),
+    );
+    expect(all("MetricAlarm")).toEqual([]);
+    expect(all("EventRule")).toEqual([]);
+    expect(all("LogGroup")).toEqual([]);
+    // …and the task itself is still created, so the loop works minus the paging.
+    expect(all("Task")).toHaveLength(1);
   });
 
   it("TC-SLACKAPP-088: adds no Lambda, no API, and no certificate", async () => {
