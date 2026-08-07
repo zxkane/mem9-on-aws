@@ -15,6 +15,7 @@ import { readFile } from "node:fs/promises";
 import { describe, expect, it, vi } from "vitest";
 
 import {
+  buildClaim,
   CLAIM_STALE_MS,
   handleSlackInteraction,
   type SlackDeps,
@@ -105,6 +106,49 @@ describe("Slack signature verification (TC-SLACKAPP-001..006)", () => {
 
     expect(res.statusCode).toBe(200);
     expect(d.runTask).toHaveBeenCalledTimes(1);
+  });
+
+  it("TC-SLACKAPP-001b a base64-encoded body is decoded before verification", async () => {
+    // API Gateway base64-encodes the body whenever it does not recognise the
+    // content type as text, and the signature covers the RAW (decoded) bytes.
+    // Verifying the still-encoded string would 401 every real Slack click while
+    // every other unit test passed, because nothing else sets isBase64Encoded —
+    // a production-only failure invisible to the rest of this suite.
+    const body = payload();
+    const ts = Math.floor(NOW / 1000);
+    const d = deps();
+    const res = await handleSlackInteraction(
+      {
+        ...ev(body, { timestamp: ts }),
+        body: Buffer.from(body, "utf8").toString("base64"),
+        isBase64Encoded: true,
+      },
+      d,
+    );
+
+    expect(res.statusCode).toBe(200);
+    expect(d.runTask).toHaveBeenCalledTimes(1);
+  });
+
+  it("TC-SLACKAPP-001c a base64 body tampered with after signing is still rejected", async () => {
+    // The decode must not become a way to bypass the check: the signature is
+    // over the original body, so a different decoded payload must fail.
+    const signed = payload();
+    const ts = Math.floor(NOW / 1000);
+    const tampered = payload({}, { value: "sha256:attacker-chosen" });
+    const d = deps();
+    const res = await handleSlackInteraction(
+      {
+        ...ev(signed, { timestamp: ts }),
+        body: Buffer.from(tampered, "utf8").toString("base64"),
+        isBase64Encoded: true,
+      },
+      d,
+    );
+
+    expect(res.statusCode).toBe(401);
+    expect(d.putParameter).not.toHaveBeenCalled();
+    expect(d.runTask).not.toHaveBeenCalled();
   });
 
   it("TC-SLACKAPP-002 a body tampered with after signing is rejected 401 with no side effect", async () => {
@@ -404,6 +448,82 @@ describe("Slack stale-hash rejection (TC-SLACKAPP-020..025)", () => {
     expect(record.stage).toBe(STAGE);
   });
 
+  it("TC-SLACKAPP-023d a real click carries the coordinates from SSM into the claim, and drops half-stamped ones", async () => {
+    // TC-023c pins `buildClaim` in isolation; this pins the wiring, which is the
+    // half that actually broke: `loadOffered` narrowed the parsed record to
+    // {stage, hash, ids} and silently dropped the coordinates before the claim was
+    // ever built, so the unit could be perfect and the apply still get nothing.
+    const d = deps({
+      getParameter: vi.fn(async () =>
+        offered({ messageTs: "1754400000.000100", messageChannel: "C0APPROVAL" }),
+      ),
+    });
+    await handleSlackInteraction(ev(payload()), d);
+    const [, value] = (d.putParameter as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    expect(JSON.parse(value as string)).toMatchObject({
+      messageTs: "1754400000.000100",
+      messageChannel: "C0APPROVAL",
+    });
+
+    // A record with only one of the two, or with a non-string in either, claims
+    // without both. `chat.update` needs BOTH channel and ts, so half a pair is not
+    // a usable coordinate — carrying it forward would move the failure from here
+    // (where it is a skipped update) to the apply task (where it is an error after
+    // the deletions already happened).
+    for (const partial of [
+      { messageTs: "1754400000.000100" },
+      { messageChannel: "C0APPROVAL" },
+      { messageTs: 1754400000.0001, messageChannel: "C0APPROVAL" },
+    ]) {
+      const dp = deps({ getParameter: vi.fn(async () => offered(partial)) });
+      await handleSlackInteraction(ev(payload()), dp);
+      const [, raw] = (dp.putParameter as ReturnType<typeof vi.fn>).mock.calls[0]!;
+      expect(Object.keys(JSON.parse(raw as string)).sort(), JSON.stringify(partial)).toEqual([
+        "claimedAt",
+        "hash",
+        "ids",
+        "stage",
+      ]);
+    }
+  });
+
+  it("TC-SLACKAPP-023c the claim carries the offered record's message coordinates forward", () => {
+    // The apply task has to `chat.update` the message it was approved from, and
+    // the ONLY thing the click gives it is the hash — so the coordinates have to
+    // ride the claim. Absent, the deletion happens and the message keeps showing a
+    // live Approve button with no record of the outcome, which is the audit trail
+    // the message is supposed to be.
+    //
+    // Copied from the offered record rather than read from the interaction
+    // payload: `container.message_ts` is in the payload and is exactly the kind of
+    // caller-supplied value the signature does not vouch for — trusting it would
+    // let a workspace member point the outcome update at any message they liked.
+    const record = { stage: STAGE, hash: HASH, ids: IDS, messageTs: "1754400000.000100", messageChannel: "C0APPROVAL" };
+    const claim = buildClaim(record, "2026-08-05T12:00:00.000Z");
+    expect(claim.messageTs).toBe("1754400000.000100");
+    expect(claim.messageChannel).toBe("C0APPROVAL");
+    // Still ids, hash, stage and timestamps only — the coordinates are neither
+    // memory content nor a secret, and the record stays a plain `String`.
+    expect(Object.keys(claim).sort()).toEqual([
+      "claimedAt",
+      "hash",
+      "ids",
+      "messageChannel",
+      "messageTs",
+      "stage",
+    ]);
+
+    // An offered record with no coordinates (a run that failed its stamp, or a
+    // pre-#123 record) claims WITHOUT them rather than with `undefined` fields:
+    // `JSON.stringify` drops an undefined value, so a key that is present-but-
+    // undefined and a key that is absent serialize identically — but the apply
+    // task's own guard reads the parsed object, and `"messageTs" in record` is the
+    // difference between "update skipped" and "update attempted against ts
+    // undefined".
+    const bare = buildClaim({ stage: STAGE, hash: HASH, ids: IDS }, "2026-08-05T12:00:00.000Z");
+    expect(Object.keys(bare).sort()).toEqual(["claimedAt", "hash", "ids", "stage"]);
+  });
+
   it("TC-SLACKAPP-025 an offered record naming another stage is refused", async () => {
     // Same reasoning as #102's decision-file stage guard: a preview approval must
     // never apply to prod.
@@ -587,7 +707,11 @@ describe("Slack idempotency and the apply trigger (TC-SLACKAPP-030..036)", () =>
     expect(logged.some((m) => m.includes("ThrottlingException"))).toBe(true);
     // And the reply must NOT claim the apply is already running, which would tell
     // the operator to wait for something that may never have started.
-    expect(JSON.parse(res.body).text).toMatch(/could not/iu);
+    // Pinned to "could not CONFIRM": the claim-write-failure branch also says
+    // "could not", and the two give OPPOSITE instructions — this branch means
+    // "an apply may be running, wait", that one means "nothing was recorded,
+    // re-click". A bare /could not/ is satisfied by either.
+    expect(JSON.parse(res.body).text).toMatch(/could not confirm/iu);
   });
 
   it("TC-SLACKAPP-032c a claim READ with a corrupt claimedAt is stale, so it stays recoverable", async () => {
@@ -625,10 +749,25 @@ describe("Slack idempotency and the apply trigger (TC-SLACKAPP-030..036)", () =>
     globalThis.fetch = fetchSpy as unknown as typeof fetch;
     try {
       const d = deps();
-      await handleSlackInteraction(ev(payload()), d);
+      // `response_url` is attacker-controlled in a payload whose only validation
+      // is the signature, so a compromised or misconfigured Slack app could point
+      // it anywhere — including link-local metadata. The handler documents that it
+      // never reads it; this asserts that, rather than trusting the comment.
+      const evil = "http://169.254.169.254/latest/meta-data/";
+      await handleSlackInteraction(
+        ev(payload({ response_url: evil })),
+        d,
+      );
       for (const [url] of fetchSpy.mock.calls) {
         expect(String(url)).not.toMatch(/\/v1alpha2\/mem9s\/memories/u);
+        // No request may target the payload-supplied host at all: following
+        // `response_url` is an SSRF primitive, and the endpoint's design is that
+        // the capability is absent rather than present-and-unused.
+        expect(String(url)).not.toContain("169.254.169.254");
       }
+      // Belt and braces: with no reason to make ANY outbound HTTP call on the
+      // happy path, a new call appearing here is itself the signal.
+      expect(fetchSpy).not.toHaveBeenCalled();
     } finally {
       globalThis.fetch = original;
     }
@@ -740,7 +879,14 @@ describe("Slack idempotency and the apply trigger (TC-SLACKAPP-030..036)", () =>
     const d = deps({
       putParameter: vi.fn(async () => {
         calls += 1;
-        if (calls > 1) throw new Error("ThrottlingException: rate exceeded");
+        if (calls > 1) {
+          // `name` set, because that is where the SDK puts the class — and since
+          // TC-089 forbids logging this call's message (its value is the claim,
+          // ids and all), the name is the only place the class can be read from.
+          const err = new Error("Rate exceeded");
+          err.name = "ThrottlingException";
+          throw err;
+        }
       }),
     });
     const res = await handleSlackInteraction(ev(payload()), d);
@@ -750,6 +896,39 @@ describe("Slack idempotency and the apply trigger (TC-SLACKAPP-030..036)", () =>
     const logged = (d.log as ReturnType<typeof vi.fn>).mock.calls.map((c) => String(c[0]));
     expect(logged.some((m) => m.includes("ThrottlingException"))).toBe(true);
     expect(logged.some((m) => /second apply/iu.test(m))).toBe(true);
+  });
+
+  it("TC-SLACKAPP-034e the three ways a body yields no action are distinguishable in the log", async () => {
+    // TC-089 forbids logging the parse error, and the cheapest way to satisfy that
+    // is one flat "bad payload" for all three — which is why this exists next to
+    // it. Each reason sends the operator somewhere different: a missing field means
+    // the form encoding is wrong (a transport or API Gateway change), unparseable
+    // JSON means the body is not Slack's at all, and no actions means the message
+    // template changed. One string for all three makes those indistinguishable
+    // exactly when a 400 needs explaining, and nothing else records which happened.
+    const cases: Array<{ body: string; expect: RegExp }> = [
+      { body: "not-a-form", expect: /no payload field/iu },
+      { body: "payload=", expect: /no payload field/iu },
+      { body: `payload=${encodeURIComponent("{oops")}`, expect: /not valid JSON/iu },
+      { body: `payload=${encodeURIComponent(JSON.stringify({ actions: [] }))}`, expect: /no actions/iu },
+      { body: `payload=${encodeURIComponent(JSON.stringify({ type: "block_actions" }))}`, expect: /no actions/iu },
+    ];
+    const seen = new Set<string>();
+    for (const c of cases) {
+      const d = deps();
+      const res = await handleSlackInteraction(ev(c.body), d);
+      expect(res.statusCode).toBe(400);
+      expect(d.getParameter).not.toHaveBeenCalled();
+      const logged = (d.log as ReturnType<typeof vi.fn>).mock.calls
+        .map((call) => String(call[0]))
+        .join("\n");
+      expect(logged, `body ${JSON.stringify(c.body)}`).toMatch(c.expect);
+      seen.add(logged);
+    }
+    // Three distinct messages across five bodies. Asserted on the SET so the
+    // per-case matchers above cannot all be satisfied by one string that happens
+    // to contain every phrase.
+    expect(seen.size).toBe(3);
   });
 
   it("TC-SLACKAPP-034d an approve click carrying no list reference applies nothing", async () => {
@@ -765,5 +944,200 @@ describe("Slack idempotency and the apply trigger (TC-SLACKAPP-030..036)", () =>
     expect(d.putParameter).not.toHaveBeenCalled();
     expect(d.runTask).not.toHaveBeenCalled();
     expect(JSON.parse(res.body).text).toMatch(/no list reference/iu);
+  });
+});
+
+describe("Slack logging and privacy (TC-SLACKAPP-089)", () => {
+  // The signing secret is the credential this endpoint's whole security rests on,
+  // and CloudWatch Logs is a different access boundary from SSM SecureString: a
+  // single leaked line makes the HMAC forgeable by anyone with log read. The raw
+  // body matters for the same reason with a second twist — it is the only place a
+  // `payload` field can arrive with attacker-chosen content, so echoing it makes
+  // the log injectable.
+  //
+  // Swept across EVERY path rather than the happy one, because the happy path is
+  // the one anybody would check: an error handler that interpolates `err.message`
+  // is where a secret actually escapes, since a thrown AWS SDK error can carry the
+  // request it was built from.
+  const SNIPPET = "SENTINEL-MEMORY-SNIPPET";
+
+  function forbidden(rawBody: string) {
+    return [
+      { label: "the signing secret", value: SECRET },
+      { label: "the raw request body", value: rawBody },
+      { label: "memory content", value: SNIPPET },
+      // Held to the same standard TC-098 sets for the container: an id is a memory
+      // identifier, and CloudWatch is a wider audience than the SSM parameter the
+      // ids legitimately live in.
+      ...IDS.map((id) => ({ label: `the memory id ${id}`, value: id })),
+    ];
+  }
+
+  it("TC-SLACKAPP-089 no log line on any path carries the secret, the raw body, or memory content", async () => {
+    const withSnippet = () =>
+      JSON.stringify({
+        stage: STAGE,
+        hash: HASH,
+        ids: IDS,
+        // A record that grew a snippet field later. The offered record is asserted
+        // not to have one (TC-023b), but this handler must not become the thing
+        // that would publish it if it did.
+        snippets: { "m-1": SNIPPET },
+        generatedAt: "2026-08-05T11:59:00Z",
+      });
+
+    // `reaches` is what keeps the sweep honest. Every `not.toContain` below passes
+    // trivially for a case that returns before logging at all, so each failure case
+    // also names a phrase its OWN branch must produce — which proves the fixture
+    // drove the handler down the path the label claims. Only the valid approve has
+    // none, because a success logs nothing.
+    const cases: Array<{
+      label: string;
+      body: string;
+      d: SlackDeps;
+      sig?: string;
+      reaches?: RegExp;
+    }> = [
+      { label: "a valid approve", body: payload(), d: deps({ getParameter: vi.fn(async () => withSnippet()) }) },
+      {
+        label: "a bad signature",
+        body: payload(),
+        d: deps(),
+        sig: "v0=deadbeef",
+        reaches: /rejected a .*interactions request/iu,
+      },
+      {
+        label: "an unparseable payload",
+        body: `payload=${encodeURIComponent("{oops")}`,
+        d: deps(),
+        reaches: /unparseable/iu,
+      },
+      {
+        label: "a stale hash",
+        body: payload({}, { value: "sha256:older" }),
+        d: deps({ getParameter: vi.fn(async () => withSnippet()) }),
+      },
+      {
+        label: "an unreadable offered record",
+        reaches: /offered could not be read/iu,
+        body: payload(),
+        d: deps({
+          getParameter: vi.fn(async () => {
+            throw new Error("AccessDeniedException: not authorized to perform ssm:GetParameter");
+          }),
+        }),
+      },
+      {
+        label: "a claim write rejected on its value",
+        reaches: /claim failed/iu,
+        body: payload(),
+        d: deps({
+          // The realistic leak vector, and the only one where sensitive data is an
+          // ARGUMENT rather than a result: the claim's value is the id list, and an
+          // SSM `ValidationException` echoes the value it rejected. A handler that
+          // interpolates `err.message` here copies memory ids into CloudWatch.
+          putParameter: vi.fn(async (_name: string, value: string) => {
+            const err = new Error(`ValidationException: value failed validation: ${value}`);
+            err.name = "ValidationException";
+            throw err;
+          }),
+        }),
+      },
+      {
+        // The SECOND write, which the case above can never reach: it throws on
+        // the first, so a stamp that interpolates its own error stays untested
+        // while the claim write looks fixed. The stamp's value is the claim plus
+        // a taskArn — the same id list, one call later.
+        label: "a claim stamp rejected on its value",
+        reaches: /could not be stamped/iu,
+        body: payload(),
+        d: (() => {
+          let call = 0;
+          return deps({
+            putParameter: vi.fn(async (_name: string, value: string) => {
+              if (++call === 1) return;
+              const err = new Error(`ValidationException: value failed validation: ${value}`);
+              err.name = "ValidationException";
+              throw err;
+            }),
+          });
+        })(),
+      },
+      {
+        // `JSON.parse` quotes the first ten characters of whatever it rejected,
+        // so a payload field that starts with an id puts that id in the log —
+        // and the field is the one part of a signed request whose content the
+        // signature says nothing about.
+        label: "an unparseable payload that begins with a memory id",
+        reaches: /unparseable/iu,
+        body: `payload=${encodeURIComponent(`${IDS[0]} is not json`)}`,
+        d: deps(),
+      },
+      {
+        label: "a losing claim",
+        reaches: /stale claim/iu,
+        body: payload(),
+        d: deps({
+          putParameter: vi.fn(async () => {
+            const err = new Error("ParameterAlreadyExists");
+            err.name = "ParameterAlreadyExists";
+            throw err;
+          }),
+        }),
+      },
+      {
+        label: "a failed RunTask",
+        reaches: /RunTask failed/iu,
+        body: payload(),
+        d: deps({
+          runTask: vi.fn(async () => {
+            throw new Error("InvalidParameterException: no such task definition");
+          }),
+        }),
+      },
+      {
+        label: "an unknown action_id",
+        body: payload({}, { action_id: "something_else" }),
+        d: deps(),
+        reaches: /unrecognised action_id/iu,
+      },
+    ];
+
+    for (const { label, body, d, sig, reaches } of cases) {
+      const res = await handleSlackInteraction(
+        ev(body, sig ? { signature: sig } : {}),
+        d,
+      );
+      const logged = (d.log as ReturnType<typeof vi.fn>).mock.calls
+        .map((c) => c.map(String).join(" "))
+        .join("\n");
+      if (reaches) {
+        expect(logged, `${label} never reached the branch it exists to cover`).toMatch(reaches);
+      }
+      for (const { label: what, value } of forbidden(body)) {
+        expect(logged, `${label} logged ${what}`).not.toContain(value);
+      }
+      // The REPLY too. It is ephemeral, but "ephemeral" is a visibility scope in
+      // one workspace, not a confidentiality boundary — and the secret has no
+      // business in either.
+      expect(res.body, `${label} replied with the secret`).not.toContain(SECRET);
+      expect(res.body, `${label} replied with memory content`).not.toContain(SNIPPET);
+    }
+  });
+
+  it("TC-SLACKAPP-089 the sweep is not vacuous: the same matchers catch a handler that does leak", () => {
+    // The other half of the honesty check. `reaches` proves each case ran the
+    // branch it names; this proves the matchers themselves can fail — otherwise a
+    // typo in `forbidden` (a value that is never in any log for an unrelated
+    // reason) leaves every `not.toContain` above passing forever.
+    const d = deps();
+    const body = payload();
+    d.log(`leaked: ${SECRET} ${body} ${SNIPPET} ${IDS.join(" ")}`);
+    const logged = (d.log as ReturnType<typeof vi.fn>).mock.calls
+      .map((c) => c.map(String).join(" "))
+      .join("\n");
+    for (const { label, value } of forbidden(body)) {
+      expect(() => expect(logged).not.toContain(value), label).toThrow();
+    }
   });
 });

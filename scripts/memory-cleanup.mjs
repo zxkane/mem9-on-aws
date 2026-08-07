@@ -77,6 +77,18 @@ const DEFAULT_CAP = 50;
 // deliberately not an option: it incurs a charge and cannot be reverted to
 // standard without data loss, so the record has to fit here (#123).
 const MAX_PARAMETER_BYTES = 4096;
+// Slack's own hard ceilings on a `chat.postMessage` payload
+// (api.slack.com/reference/block-kit/blocks). A message over ANY of them is
+// rejected wholesale, so the operator sees nothing — which is why
+// `buildApprovalMessage` refuses to build one rather than letting Slack refuse
+// to render it.
+const SLACK_API_BASE = "https://slack.com/api";
+const SLACK_MAX_BLOCKS = 50;
+const SLACK_MAX_SECTION_CHARS = 3000;
+const SLACK_MAX_HEADER_CHARS = 150;
+const SLACK_TIMEOUT_MS = 15_000;
+/** Set by infra/slack-approval.ts; its presence is what enables the offer. */
+const MEM9_SLACK_CHANNEL_ENV = "MEM9_SLACK_APPROVAL_CHANNEL";
 const REQUEST_TIMEOUT_MS = 30_000; // REST calls; the LLM call sets its own
 const LLM_TIMEOUT_MS = 120_000;
 // Reasoning models consume output tokens on hidden reasoning BEFORE emitting
@@ -866,6 +878,373 @@ export function buildOfferedRecord({ stage, decisions, generatedAt }) {
 }
 
 /**
+ * The Block Kit message the operator reviews and clicks (#123).
+ *
+ * Pure and separately exported, because the interesting failures are all in the
+ * SHAPE rather than in the transport: the two `action_id`s the deployed handler
+ * branches on, the hash in both action values, and the block limits that decide
+ * whether Slack renders the message at all.
+ *
+ * Over any limit it THROWS, the same argument as `buildOfferedRecord`'s
+ * parameter fence: a message that dropped its overflow would show the operator
+ * part of a list and attach an Approve button whose hash covers all of it, which
+ * is a wrong apply rather than a failed one. Slack rejects an over-limit message
+ * wholesale anyway, so the only thing lost is a clear error.
+ */
+export function buildApprovalMessage({ record, decisions, channel }) {
+  const withheld = { RETAIN: 0, UNSTABLE: 0 };
+  const byId = new Map();
+  for (const d of decisions) {
+    byId.set(d.id, d);
+    if (d.verdict in withheld) withheld[d.verdict] += 1;
+  }
+
+  const header = `Memory cleanup review — ${record.ids.length} deletion(s) for ${record.stage}`;
+  const lines = record.ids.map((id) => {
+    const decision = byId.get(id);
+    // The snippet is the review: an id alone is not something an operator can
+    // judge. Slack and CloudWatch Logs are the approved destinations for memory
+    // content — the SSM record and the repository are not.
+    const snippet = (decision?.snippet ?? "").replace(/\s+/gu, " ").trim();
+    return `• \`${id}\` — ${decision?.reason ?? "no reason recorded"}${snippet ? `: ${snippet}` : ""}`;
+  });
+
+  const blocks = [
+    { type: "header", text: { type: "plain_text", text: header } },
+    // Counted even at zero, for the same reason `verdictSummary` prints its
+    // zeros: a protected-topic rule that started matching everything, or a
+    // consensus that collapsed, would otherwise read as a clean corpus.
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text:
+          `*Withheld from this approval:* RETAIN ${withheld.RETAIN} ` +
+          `(protected topic), UNSTABLE ${withheld.UNSTABLE} (passes disagreed). ` +
+          `Generated ${record.generatedAt}.`,
+      },
+    },
+    ...chunkSections(lines),
+    {
+      type: "actions",
+      elements: [
+        {
+          type: "button",
+          action_id: "cleanup_approve",
+          text: { type: "plain_text", text: `Approve ${record.ids.length} deletion(s)` },
+          style: "danger",
+          // The hash ONLY. A Slack action value is capped at 2000 characters so
+          // it cannot carry the ids — and must not: the signature proves a click
+          // came from the workspace, never that ids inside the payload are the
+          // ones the classifier chose. The apply task reads them from SSM.
+          value: record.hash,
+          confirm: {
+            title: { type: "plain_text", text: "Apply these deletions?" },
+            text: {
+              type: "mrkdwn",
+              text: `${record.ids.length} memories will be soft-deleted in *${record.stage}*.`,
+            },
+            confirm: { type: "plain_text", text: "Apply" },
+            deny: { type: "plain_text", text: "Cancel" },
+            style: "danger",
+          },
+        },
+        {
+          type: "button",
+          action_id: "cleanup_reject",
+          text: { type: "plain_text", text: "Reject" },
+          value: record.hash,
+        },
+      ],
+    },
+  ];
+
+  if (blocks.length > SLACK_MAX_BLOCKS) {
+    throw new Error(
+      `the review list needs ${blocks.length} Block Kit blocks, over Slack's ` +
+        `${SLACK_MAX_BLOCKS}-block message limit for ${record.ids.length} ids — ` +
+        `lower --cap rather than posting a list the operator cannot see whole`,
+    );
+  }
+  const long = blocks.find(
+    (b) => b.type === "header" && b.text.text.length > SLACK_MAX_HEADER_CHARS,
+  );
+  if (long) {
+    throw new Error(`the review header does not fit Slack's ${SLACK_MAX_HEADER_CHARS}-character limit`);
+  }
+  return { channel, text: header, blocks };
+}
+
+/**
+ * Pack the id lines into as few section blocks as Slack's per-section character
+ * limit allows.
+ *
+ * One section per id would hit the 50-block message limit at ~46 ids — below
+ * #102's default cap of 50 — so the natural spelling breaks the loop's own
+ * default. Packing keeps a cap-50 list inside a handful of blocks. A single line
+ * longer than the limit is truncated with a marker rather than dropped: the ids
+ * shown must still be the ids the hash covers, and the snippet is already a
+ * 120-character slice of the memory, so only a pathological reason string can
+ * reach this.
+ */
+function chunkSections(lines) {
+  const sections = [];
+  let current = "";
+  for (const line of lines) {
+    const clipped =
+      line.length > SLACK_MAX_SECTION_CHARS
+        ? `${line.slice(0, SLACK_MAX_SECTION_CHARS - 3)}...`
+        : line;
+    if (current && current.length + 1 + clipped.length > SLACK_MAX_SECTION_CHARS) {
+      sections.push({ type: "section", text: { type: "mrkdwn", text: current } });
+      current = clipped;
+      continue;
+    }
+    current = current ? `${current}\n${clipped}` : clipped;
+  }
+  if (current) sections.push({ type: "section", text: { type: "mrkdwn", text: current } });
+  return sections;
+}
+
+/** One Slack Web API call, with the failure mode the HTTP status does not show. */
+async function slackCall(method, body, { botToken, fetchImpl }) {
+  let response;
+  try {
+    response = await fetchImpl(`${SLACK_API_BASE}/${method}`, {
+      method: "POST",
+      // The alert-router precedent: a redirect from an API host is never worth
+      // following with a bearer token attached.
+      redirect: "manual",
+      headers: {
+        Authorization: `Bearer ${botToken}`,
+        "content-type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(SLACK_TIMEOUT_MS),
+    });
+  } catch (err) {
+    // Never the request body: it carries the memory snippets. Never the error's
+    // own `cause` chain either, which can hold the request headers.
+    throw new Error(`Slack ${method} request failed: ${err.name}`);
+  }
+  if (!response.ok) {
+    throw new Error(`Slack ${method} returned HTTP ${response.status}`);
+  }
+  // EVERY Slack Web API method answers HTTP 200 for application errors and puts
+  // the failure in `{ok: false, error}`. A `response.ok` check alone reports a
+  // message that was never delivered, and the weekly loop would look healthy
+  // while no operator ever saw a review list.
+  const payload = await response.json();
+  if (!payload?.ok) {
+    throw new Error(`Slack ${method} refused the request: ${payload?.error ?? "unknown error"}`);
+  }
+  return payload;
+}
+
+/**
+ * Offer this run's deletions to the operator: write the record, then post the
+ * message whose button the callback Lambda validates against it (#123).
+ *
+ * ORDER IS LOAD-BEARING, and in the opposite direction from
+ * `createCleanupDeps`. The record is written FIRST because posting first leaves a
+ * live Approve button that the callback rejects with "there is no current
+ * approval list" — a click spent on an operator hunting a backend fault. The
+ * write is also what invalidates LAST week's button (the callback compares the
+ * click's hash against `offered.hash`), so it happens even when this run offers
+ * nothing and even when the post then fails: a stale click must never apply a
+ * list this run's audit no longer stands behind.
+ *
+ * The `messageTs` stamp is a second write because `ts` does not exist until the
+ * post returns, and the apply task needs it to `chat.update` the message it was
+ * approved from. A stamp failure is reported, not raised — losing the audit-trail
+ * update is strictly better than refusing an approval the operator can act on.
+ */
+export async function postApprovalRequest({
+  ssm,
+  ssmPrefix,
+  stage,
+  decisions,
+  generatedAt,
+  channel,
+  botToken,
+  fetchImpl,
+  log = () => {},
+}) {
+  const record = buildOfferedRecord({ stage, decisions, generatedAt });
+  const { PutParameterCommand } = await import("@aws-sdk/client-ssm");
+  const name = `${ssmPrefix}/approvals/offered`;
+  const write = (value) =>
+    ssm.send(
+      new PutParameterCommand({
+        Name: name,
+        // Plain `String` and `Overwrite: true`, both runtime-only failures like
+        // TC-SLACKAPP-047f's: the boundary denies a `SecureString` write (no
+        // `kms:Encrypt`, no `kms:GenerateDataKey`), and `Overwrite: false` would
+        // succeed once and then fail every later week with
+        // `ParameterAlreadyExists`, silently ending the loop.
+        Type: "String",
+        Overwrite: true,
+        Value: JSON.stringify(value),
+      }),
+    );
+
+  await write(record);
+  log(`offered ${record.ids.length} id(s) for approval as ${record.hash}`);
+  if (record.ids.length === 0) {
+    // Nothing to approve, so nothing to post — but the record above still
+    // overwrote last week's list, which is the point.
+    log("no deletions to offer; posted nothing to Slack");
+    return { record, posted: false };
+  }
+
+  const message = buildApprovalMessage({ record, decisions, channel });
+  const posted = await slackCall("chat.postMessage", message, { botToken, fetchImpl });
+
+  try {
+    await write({ ...record, messageTs: posted.ts, messageChannel: posted.channel });
+  } catch (err) {
+    log(
+      `WARNING the approval list was offered and posted but the message ` +
+        `timestamp could not be stamped onto the record: ${err.message}; ` +
+        `the apply will not be able to update the Slack message`,
+    );
+  }
+  return { record, posted: true, messageTs: posted.ts, messageChannel: posted.channel };
+}
+
+/**
+ * The Block Kit message that REPLACES the review message once the apply has run
+ * (#123), so the outcome lives on the thing the operator clicked.
+ *
+ * Two properties matter and neither is cosmetic:
+ *
+ *  - The count is what was DELETED (`capUsed`), never what was approved. An
+ *    apply that approved 3 and deleted 1 has lost two to the LWW guard, and this
+ *    message is the audit trail — nothing downstream would ever correct an
+ *    optimistic number, so the operator would believe memories are gone that are
+ *    still there.
+ *  - No `actions` block. `chat.update` REPLACES the blocks wholesale, which is
+ *    what removes the buttons; leaving them would offer a hash whose claim
+ *    already exists, and the callback answers that click with "someone else is
+ *    already applying" — a dead end rather than a record.
+ *
+ * Ids are accepted and deliberately unused: the caller has them (they are the
+ * claim's), and taking the parameter makes the omission explicit rather than an
+ * accident of the signature. The review message carries ids and snippets because
+ * it is what the operator reviews; the outcome needs none, and this runs in the
+ * apply task whose log already reaches CloudWatch.
+ */
+export function buildOutcomeMessage({
+  channel,
+  messageTs,
+  hash,
+  stage,
+  approved,
+  result,
+  appliedAt,
+}) {
+  const deleted = result.capUsed ?? 0;
+  const notes = [];
+  if (result.skippedLww > 0) {
+    notes.push(
+      `${result.skippedLww} skipped — changed after the list was generated (last-write-wins guard)`,
+    );
+  }
+  if (result.skippedByFilter > 0) {
+    notes.push(`${result.skippedByFilter} not in the approved list`);
+  }
+  // Named by what the operator has to DO about it, not by the exit code: a capped
+  // run leaves approved ids untouched and needs a fresh review, a partial one has
+  // a failure in the log to read. An exit code in a Slack message is a lookup.
+  if (result.exitCode === 4) {
+    notes.push(
+      `*stopped early: the run's cap was reached*, so approved ids were left ` +
+        `unapplied — they will reappear in the next review`,
+    );
+  } else if (result.exitCode === 6) {
+    notes.push(`*completed partially* — see the task log for the failures`);
+  } else if (result.exitCode !== 0) {
+    notes.push(`*the run exited ${result.exitCode}* — see the task log`);
+  }
+
+  const headline = `Applied: ${deleted} of ${approved} approved deletion(s) in ${stage}`;
+  const blocks = [
+    { type: "header", text: { type: "plain_text", text: "Memory cleanup applied" } },
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `*${headline}*\nApproval \`${hash}\` applied ${appliedAt}.`,
+      },
+    },
+  ];
+  if (notes.length > 0) {
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: notes.map((n) => `• ${n}`).join("\n") },
+    });
+  }
+  // `text` is not required alongside `blocks`, but it is what a notification and
+  // a screen reader read — and the count is the part worth notifying.
+  return { channel, ts: messageTs, text: headline, blocks };
+}
+
+/**
+ * Update the review message with the outcome (#123). Returns whether it posted.
+ *
+ * NEVER throws and never touches the exit code. By the time this runs the
+ * deletions are done and irreversible: raising would alarm on a successful apply,
+ * and — under the callback's stale-claim recovery — a retried task would re-apply
+ * ids that are already gone. So every failure here is a loud log line and a
+ * `false`.
+ *
+ * The coordinates come from the CLAIM, which copied them from the offered record.
+ * Absent, this skips: `chat.update` requires both `channel` and `ts`, and calling
+ * with `undefined` earns a `channel_not_found` that reads like a misconfigured
+ * channel rather than an unstamped record.
+ */
+export async function updateApprovalMessage({
+  claim,
+  approved,
+  stage,
+  result,
+  appliedAt,
+  botToken,
+  fetchImpl,
+  log = () => {},
+}) {
+  if (!claim?.messageTs || !claim?.messageChannel) {
+    log(
+      `the approval claim carries no Slack message coordinates, so the outcome ` +
+        `could not update the review message; the apply itself is unaffected`,
+    );
+    return false;
+  }
+  const message = buildOutcomeMessage({
+    channel: claim.messageChannel,
+    messageTs: claim.messageTs,
+    hash: claim.hash,
+    stage,
+    // The COUNT is a parameter, not `claim.ids.length`: the container's claim
+    // carries a count and no ids by design (the ids live in the --ids file), and a
+    // signature that read them here would invite putting them back.
+    approved,
+    result,
+    appliedAt,
+  });
+  try {
+    await slackCall("chat.update", message, { botToken, fetchImpl });
+    return true;
+  } catch (err) {
+    log(
+      `WARNING the deletions were applied but the review message could not be ` +
+        `updated: ${err.message}; the message still shows the pre-apply list`,
+    );
+    return false;
+  }
+}
+
+/**
  * Materialize the `--ids` file the apply task consumes, from the approval CLAIM
  * the operator's click created (#123).
  *
@@ -944,7 +1323,17 @@ export async function materializeApprovedIds({
   // The COUNT, never the ids: an operator needs to know the apply matched the
   // approval, not which memories it names.
   log(`materialized ${record.ids.length} approved id(s) for ${hash}`);
-  return record.ids.length;
+  // The coordinates ride out of the read that was already happening. They are
+  // the only reason this returns a shape rather than a count: `chat.update` needs
+  // them and nothing else in the task does, so a second read of the same
+  // parameter would be the alternative. Ids deliberately do NOT come back — the
+  // file is where they belong, and the outcome message must not name them.
+  return {
+    count: record.ids.length,
+    messageTs: typeof record.messageTs === "string" ? record.messageTs : undefined,
+    messageChannel:
+      typeof record.messageChannel === "string" ? record.messageChannel : undefined,
+  };
 }
 
 export function verdictSummary(decisions) {
@@ -1051,6 +1440,10 @@ async function loadDecisions(opts, deps, { client, fs, clock, log, outDir }) {
     return {
       decisions: loaded.decisions,
       decisionPath: opts.decisionsFile,
+      // The FILE's stamp, not now: this run generated nothing, and an offered
+      // record claiming otherwise would date a list to the moment it was reposted.
+      // Falls back to now for a file written before the field existed.
+      generatedAt: loaded.generatedAt ?? new Date(clock()).toISOString(),
       classifierBroken: false,
       batches: 0,
       failedBatches: 0,
@@ -1119,6 +1512,9 @@ async function loadDecisions(opts, deps, { client, fs, clock, log, outDir }) {
   return {
     decisions,
     decisionPath,
+    // The SAME stamp the decision file carries, so the offered record and the
+    // artefact an operator falls back to name one moment.
+    generatedAt,
     classifierBroken,
     batches,
     failedBatches,
@@ -1296,13 +1692,15 @@ export async function runCleanup(opts, deps) {
   }
   const client = restClient(baseUrl, opts.tenantId, deps.fetchImpl, counters);
 
-  const { decisions, decisionPath, classifierBroken, batches, failedBatches, scanned } = await loadDecisions(opts, deps, {
-    client,
-    fs,
-    clock,
-    log,
-    outDir,
-  });
+  const {
+    decisions,
+    decisionPath,
+    generatedAt: decisionGeneratedAt,
+    classifierBroken,
+    batches,
+    failedBatches,
+    scanned,
+  } = await loadDecisions(opts, deps, { client, fs, clock, log, outDir });
   const summary = verdictSummary(decisions);
   const failureNote = classificationFailureNote({ batches, failedBatches, decisions, scanned });
 
@@ -1315,6 +1713,31 @@ export async function runCleanup(opts, deps) {
   }
   if (!opts.apply) {
     log(`dry-run: ${JSON.stringify(summary)}; writeCalls=${counters.writeCalls}${failureNote}`);
+    // The review run is the loop's ENTRY POINT, and only the review run: an
+    // --apply that re-offered would overwrite the very record its own claim was
+    // derived from, so a redelivered click mid-apply would be compared against a
+    // list the running task never saw. Absent when Slack is not configured, which
+    // keeps the #102 operator CLI working unchanged.
+    if (deps.postApproval) {
+      try {
+        const offer = await deps.postApproval({ decisions, generatedAt: decisionGeneratedAt });
+        log(
+          `offered ${offer.record.ids.length} id(s) to Slack as ${offer.record.hash}` +
+            (offer.posted ? "" : " (nothing posted)"),
+        );
+      } catch (err) {
+        // Exit 1, not 0. A scheduled review run whose post failed has done its
+        // audit and offered nothing, and exit 0 would make that indistinguishable
+        // from a healthy week — the operator would notice only by the absence of a
+        // message they were not expecting on any particular day. The decision list
+        // is named because it survives, and is what a manual `--apply --ids` reads.
+        log(
+          `failed to offer the review list to Slack: ${err.message}; ` +
+            `the decision list is kept at ${decisionPath}`,
+        );
+        return result({ exitCode: 1, decisions, decisionPath });
+      }
+    }
     return result({ exitCode: 0, decisions, decisionPath });
   }
 
@@ -1357,7 +1780,28 @@ export async function runCleanup(opts, deps) {
       `writeCalls=${counters.writeCalls}; skippedLww=${counters.skippedLww}; ` +
       `skippedByFilter=${applied.skippedByFilter}${failureNote}`,
   );
-  return result({ ...applied, decisions, decisionPath });
+  const outcome = result({ ...applied, decisions, decisionPath });
+  // Once, after the lock and the mutex are released, with the numbers the run
+  // ACHIEVED. Reporting inside the loop would show intermediate counts as if they
+  // were outcomes; reporting before the release would hold the shared mutex across
+  // a Slack round trip. Absent for a dry run (which POSTS instead) and for the
+  // #102 operator CLI, which has no Slack at all.
+  if (deps.reportOutcome) {
+    try {
+      await deps.reportOutcome({
+        result: outcome,
+        appliedAt: new Date(clock()).toISOString(),
+      });
+    } catch (err) {
+      // Never the exit code. The deletions are done and irreversible by now, so a
+      // non-zero exit would alarm on a successful apply — and under the callback's
+      // stale-claim recovery a retried task would re-apply ids already gone. Loud
+      // in the log instead, because a systematically broken report is otherwise
+      // invisible: the loop would keep working and keep losing its audit trail.
+      log(`WARNING the apply completed but its outcome could not be reported: ${err.message}`);
+    }
+  }
+  return outcome;
 }
 
 // ---------------------------------------------------------------------------
@@ -2482,6 +2926,121 @@ async function recoveryDeps(opts) {
 }
 
 /**
+ * The `postApproval` dep, or `undefined` when this stage has no Slack surface.
+ *
+ * ABSENT rather than present-and-inert when the channel is unset, which is what
+ * keeps #102's operator CLI working unchanged: a dep that existed
+ * unconditionally would have every hand-run dry run try to write an approval
+ * record the operator's identity may not be able to write, and would post a
+ * clickable Approve button for a list they ran locally just to look at.
+ *
+ * The token is env-first for the same reason the database config is
+ * (`resolveDatabaseConfig`): the apply task receives `SLACK_BOT_TOKEN` from ECS
+ * `ssm:`, already decrypted, and its task role holds `ssm:GetParameters` under
+ * `approvals/*` ONLY — so a read of `slack/bot-token` is an AccessDenied there.
+ * The review run has no such restriction and reads the parameter itself.
+ *
+ * A configured channel with no reachable token THROWS. Skipping the post would be
+ * the whole audit running, offering nothing, and exiting 0 — indistinguishable
+ * from a healthy week to the only person who would notice.
+ */
+async function buildPostApproval(opts, region, runtime) {
+  const channel = process.env[MEM9_SLACK_CHANNEL_ENV];
+  if (!channel) return undefined;
+
+  const ssmPrefix = process.env.MEM9_SSM_PREFIX || `/mem9-on-aws/${opts.stage}`;
+  const { ssm, release } = await ssmClient(region, runtime);
+  let botToken = process.env.SLACK_BOT_TOKEN;
+  try {
+    if (!botToken) {
+      const name = `${ssmPrefix}/slack/bot-token`;
+      const { GetParametersCommand } = await import("@aws-sdk/client-ssm");
+      // Plural, not `GetParameter`: the two are distinct IAM actions and the
+      // boundary's ceiling admits only this one (TC-SLACKAPP-047g).
+      const response = await ssm.send(
+        // The parameter is a SecureString; without decryption the value comes back
+        // as ciphertext and every post 401s with `invalid_auth`.
+        new GetParametersCommand({ Names: [name], WithDecryption: true }),
+      );
+      botToken = (response.Parameters ?? []).find((p) => p.Name === name)?.Value;
+      if (!botToken) {
+        throw new Error(
+          `${MEM9_SLACK_CHANNEL_ENV} is set but no bot token is available: ` +
+            `inject SLACK_BOT_TOKEN or seed ${name}`,
+        );
+      }
+    }
+  } catch (err) {
+    release();
+    throw err;
+  }
+
+  // The client outlives this call — it is the one every offer writes through —
+  // and is deliberately NOT threaded into `close()`, unlike the database mutex.
+  // The asymmetry is the resource: an open Postgres connection holds a server-side
+  // session and an advisory lock the next run needs released, while an SSM client
+  // holds local sockets that the entrypoint's `process.exit` reclaims. `release`
+  // is called only on the failure path above, where nothing gets to use it.
+  return async ({ decisions, generatedAt }) =>
+    postApprovalRequest({
+      ssm,
+      ssmPrefix,
+      stage: opts.stage,
+      decisions,
+      generatedAt,
+      channel,
+      botToken,
+      fetchImpl: runtime.fetchImpl ?? fetch,
+      log: (message) =>
+        console.error(`[memory-cleanup ${new Date().toISOString()}] ${message}`),
+    });
+}
+
+/**
+ * The `reportOutcome` dep, or `undefined` when there is nothing to report to.
+ *
+ * Three independent absences, all of which must DEGRADE rather than fail, because
+ * every one of them is discovered after the operator has already approved:
+ *
+ *  - No claim at all: a review run, which POSTS instead of updating. There is
+ *    nothing to update against — the message does not exist yet.
+ *  - A claim with no coordinates: a review run whose stamp write failed, or a
+ *    pre-#123 record.
+ *  - No bot token: the apply task takes it from ECS `ssm:`, already decrypted, and
+ *    its role holds `ssm:GetParameters` under `approvals/*` ONLY — so unlike
+ *    `buildPostApproval` this CANNOT read the parameter itself, and a missing
+ *    token means no update rather than an AccessDenied.
+ *
+ * The asymmetry with `buildPostApproval`, which throws on a missing token, is the
+ * point: there, failing loud costs an unposted list nobody has acted on yet; here,
+ * it would cost deletions the operator already authorized.
+ */
+function buildReportOutcome(opts, claim, runtime) {
+  if (!claim?.messageTs || !claim?.messageChannel) return undefined;
+  const botToken = process.env.SLACK_BOT_TOKEN;
+  const log = (message) =>
+    console.error(`[memory-cleanup ${new Date().toISOString()}] ${message}`);
+  if (!botToken) {
+    log(
+      `the approval was claimed against a Slack message but SLACK_BOT_TOKEN is ` +
+        `not set, so the outcome cannot be posted back; the apply is unaffected`,
+    );
+    return undefined;
+  }
+  return async ({ result, appliedAt }) =>
+    updateApprovalMessage({
+      claim,
+      approved: claim.count,
+      stage: opts.stage,
+      result,
+      appliedAt,
+      botToken,
+      fetchImpl: runtime.fetchImpl ?? fetch,
+      log,
+    });
+}
+
+/**
  * Build the real deps for one run — for the operator CLI and for the
  * Slack-triggered apply task, which are the same code on different IAM (#123).
  *
@@ -2511,6 +3070,8 @@ export async function createCleanupDeps(opts, runtime = {}) {
   // The approval hash is the ECS container override the callback Lambda sets, and
   // it is the ONLY thing that reaches the task from the click.
   const approvalHash = process.env.MEM9_APPROVAL_HASH;
+  /** What the claim said, for the outcome update. Absent on a review run. */
+  let claim;
   if (approvalHash) {
     // A hash with nowhere to write is the loop's worst failure mode, not a
     // degraded one: `readApprovedIds` returns null for an absent `--ids`, and null
@@ -2525,7 +3086,7 @@ export async function createCleanupDeps(opts, runtime = {}) {
     const ssmPrefix = process.env.MEM9_SSM_PREFIX || `/mem9-on-aws/${opts.stage}`;
     const { ssm, release } = await ssmClient(region, runtime);
     try {
-      await materializeApprovedIds({
+      claim = await materializeApprovedIds({
         ssm,
         stage: opts.stage,
         ssmPrefix,
@@ -2535,7 +3096,10 @@ export async function createCleanupDeps(opts, runtime = {}) {
         log: (message) =>
           console.error(`[memory-cleanup ${new Date().toISOString()}] ${message}`),
       });
+      claim.hash = approvalHash;
     } finally {
+      // Released here, unlike `buildPostApproval`'s client: this one has done its
+      // one read, and the outcome update goes over `fetch` rather than SSM.
       release();
     }
   }
@@ -2543,6 +3107,8 @@ export async function createCleanupDeps(opts, runtime = {}) {
   const databaseMutex = opts.apply
     ? await productionDatabaseMutex(opts.stage, region, runtime)
     : undefined;
+
+  const postApproval = await buildPostApproval(opts, region, runtime);
 
   const getToken =
     runtime.getToken ?? (await import("@aws/bedrock-token-generator")).getToken;
@@ -2584,6 +3150,8 @@ export async function createCleanupDeps(opts, runtime = {}) {
       outDir: opts.outDir,
       lockFile: opts.lockFile,
       acquireMutex: databaseMutex?.acquireMutex,
+      postApproval,
+      reportOutcome: buildReportOutcome(opts, claim, runtime),
     },
     close: async () => {
       await databaseMutex?.close();

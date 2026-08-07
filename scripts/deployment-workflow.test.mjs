@@ -399,6 +399,55 @@ describe("workflow integration", () => {
     expect(runner).not.toContain("logs get-log-events");
   });
 
+  it("TC-SLACKAPP-090: runs the Slack approval E2E on preview only, never prod", () => {
+    const source = readFileSync(workflowPath, "utf8");
+    const workflow = parse(source);
+    const previewSteps = workflow.jobs["deploy-preview"].steps;
+    const prodSteps = workflow.jobs["deploy-prod"].steps;
+    const previewDeploy = previewSteps.find(({ name }) => name === "Deploy PR stage");
+    const e2eIndex = previewSteps.findIndex(
+      ({ name }) => name === "Slack approval E2E (preview)",
+    );
+    const deployIndex = previewSteps.findIndex(({ name }) => name === "Deploy PR stage");
+
+    // After the deploy, because it POSTs to the façade the deploy creates.
+    expect(e2eIndex).toBeGreaterThan(deployIndex);
+    expect(previewSteps[e2eIndex].run).toBe("bash scripts/run-slack-approval-e2e.sh");
+    expect(previewSteps[e2eIndex].env.STAGE).toBe("${{ steps.deploy.outputs.stage }}");
+    expect(source).toContain("shellcheck scripts/run-slack-approval-e2e.sh");
+
+    // NOT on prod. The harness overwrites `approvals/offered`, so a prod run would
+    // destroy a pending human approval and approve a deletion against the live
+    // database. Asserted on the job rather than left to the comment, because
+    // copying a green preview step into deploy-prod is the obvious next edit.
+    expect(prodSteps.some(({ run }) => String(run).includes("run-slack-approval-e2e.sh"))).toBe(
+      false,
+    );
+
+    // The synth flag comes from a repo VARIABLE, not a literal "1":
+    // infra/slack-approval.ts throws when the flag is set and either secret is
+    // unseeded, and GitHub passes an unset secret as an empty string — so a
+    // hardcoded flag would fail synthesis on every PR in a repo without a Slack app.
+    expect(previewDeploy.env.MEM9_SLACK_APPROVAL_ENABLED).toBe(
+      "${{ vars.MEM9_SLACK_APPROVAL_ENABLED }}",
+    );
+    expect(previewDeploy.env.MEM9_SLACK_APPROVAL_CHANNEL).toBe(
+      "${{ vars.MEM9_SLACK_APPROVAL_CHANNEL }}",
+    );
+    expect(previewDeploy.env.SST_SECRET_SlackBotToken).toBe(
+      "${{ secrets.SLACK_BOT_TOKEN }}",
+    );
+    expect(previewDeploy.env.SST_SECRET_SlackSigningSecret).toBe(
+      "${{ secrets.SLACK_SIGNING_SECRET }}",
+    );
+
+    // And no secret is inlined into a `run:` script, where it would land in the
+    // step's rendered command rather than only in the process environment.
+    for (const step of previewSteps) {
+      expect(String(step.run ?? "")).not.toContain("secrets.SLACK_");
+    }
+  });
+
   it("uses the tested tag selector and reconciles preview and prod deployments", () => {
     const workflow = readFileSync(workflowPath, "utf8");
 

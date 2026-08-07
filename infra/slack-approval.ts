@@ -20,17 +20,31 @@
  * Lambda role would need its own workload-permissions-boundary exception, and the
  * boundary is operator-owned (rolled out separately from application deploys).
  *
- * BOUNDARY NOTE — the new task's roles are admissible under the DEPLOYED boundary
- * with no template change:
+ * BOUNDARY NOTE — the SSM half is admissible under the DEPLOYED boundary; the
+ * Secrets Manager half is NOT yet established and is a deploy-time risk:
  *   - The SecureString reads are gated by `DenyParameterContextDecryptOutsideSsm`
  *     on `kms:ViaService`, NOT on the `ECS_EXECUTION_ROLE_TOKENS` list, so an
  *     unlisted execution role may still decrypt a `/mem9-on-aws/*` parameter.
- *   - The Secrets Manager reads (`MEM9_DB_SECRET`, `MEM9_TENANT_ID`) resolve under
- *     the DEFAULT `aws/secretsmanager` key, for which AWS requires no identity
- *     `kms:Decrypt` at all — so `DenySecretContextDecryptFromNonEcsExecutionRoles`
- *     is never evaluated. If either secret is ever moved to a customer managed
- *     key, `Mem9CleanupExecutionRole-` must be added to that deny's exception
- *     list, which lives in the operator-owned boundary template.
+ *   - UNRESOLVED: the Secrets Manager reads (`MEM9_DB_SECRET`, `MEM9_TENANT_ID`)
+ *     resolve under the DEFAULT `aws/secretsmanager` key (neither secret sets
+ *     `kmsKeyId` — see infra/db.ts and infra/tenant-identity.ts). AWS needs no
+ *     identity `kms:Decrypt` ALLOW on that key, but an explicit DENY is a
+ *     different question, and three things in this repo say the deny does bite on
+ *     the service-mediated path: the boundary's own comment above
+ *     `DenySecretContextDecryptFromNonEcsExecutionRoles` says it "constrains which
+ *     project role types may use that service-mediated path"; the SecretARN
+ *     encryption-context allowlist enumerates `Mem9DbSecret-*` and
+ *     `tenant-api-key-*`, which would be pointless if the decrypt were never
+ *     attributed to the workload principal; and #122 had to admit
+ *     `Mem9ConsolidationExecutionRole-` to that same list for a task that reads
+ *     THESE SAME TWO default-key secrets (pinned by TC-CONSOL-032).
+ *     `Mem9CleanupExecutionRole-` is NOT in the list. If the deny is evaluated,
+ *     this execution role cannot fetch either secret and the task dies at startup
+ *     — AFTER the click has been spent — on every bounded stage. Adding the role
+ *     to the exception list is safe either way (it only narrows a deny, and is a
+ *     no-op if the deny never fires), but it changes the OPERATOR-OWNED template
+ *     and so needs its own guarded rollout ahead of this stack's first deploy.
+ *     Settle it before deploying, not by re-reading this comment.
  *
  * Gated on `MEM9_SLACK_APPROVAL_ENABLED=1`. Disabled means ABSENT, not
  * present-and-idle: a task definition that exists is a task definition `RunTask`

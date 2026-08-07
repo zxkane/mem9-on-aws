@@ -76,6 +76,13 @@ concurrent applies of the same ids.
   `X-Slack-Signature`. The test computes the expected value independently rather
   than calling the production signer, so a signer that agrees with itself but not
   with Slack fails here.
+- **TC-SLACKAPP-001b** — a base64-encoded body is decoded before verification.
+  API Gateway base64-encodes whenever it does not recognise the content type as
+  text, and the signature covers the decoded bytes, so verifying the encoded
+  string would 401 every real click while the rest of this suite passed — a
+  production-only failure no other case can see.
+- **TC-SLACKAPP-001c** — a base64 body tampered with after signing is still
+  rejected 401 with no side effect, so the decode cannot become a bypass.
 - **TC-SLACKAPP-002** — a body tampered with after signing is rejected with 401
   and **no** side effect: no SSM write, no `RunTask`, no upstream proxy call. The
   spies are asserted untouched, so an absent assertion cannot pass for a proven
@@ -160,6 +167,24 @@ concurrent applies of the same ids.
   hash is over a join with a separator no id can contain (without it `["ab","c"]`
   and `["a","bc"]` are one hash, so a click approving one list is accepted against
   the other).
+- **TC-SLACKAPP-023c** — the claim carries the offered record's Slack message
+  coordinates (`messageTs`, `messageChannel`) forward, and **omits** the keys
+  rather than setting them to `undefined` when the offered record has none. The
+  two serialize identically through `JSON.stringify`, but the apply task guards on
+  the parsed object, where `"messageTs" in claim` is the difference between
+  skipping the outcome update and calling `chat.update` with `ts: undefined`. The
+  coordinates are copied from the *offered record*, never from the interaction
+  payload: `container.message_ts` is right there in the payload, and the signature
+  proves the request came from Slack rather than that a workspace member did not
+  hand-craft the body — so trusting it would let anyone who can click point the
+  outcome update at any message they liked.
+- **TC-SLACKAPP-023d** — the same property through a real click, because `023c`
+  pins the unit and this pins the *wiring*: `loadOffered` narrowed the parsed
+  record to `{stage, hash, ids}`, so the coordinates were dropped before the claim
+  was ever built and the unit could be perfect while the apply got nothing. Half a
+  pair (or a non-string in either) yields neither, since `chat.update` needs both —
+  carrying one forward would move the failure from here, where it is a skipped
+  update, to the apply task, where it is an error after the deletions are done.
 - **TC-SLACKAPP-024** — an offered list that would exceed the 4096-byte standard
   parameter limit fails the run loud rather than truncating. Truncating would ask
   the operator to approve a list that is not the list they were shown — the one
@@ -217,7 +242,11 @@ concurrent applies of the same ids.
   `fetch` calls are enumerated and asserted to be Slack or upstream only, with no
   call to the mem9 REST surface. This is the structural guarantee behind "apply
   happens only in the ECS task" — a future edit that inlines a delete to save a
-  hop fails here.
+  hop fails here. The case also seeds an attacker-chosen `response_url` (a
+  link-local metadata address) and asserts no request reaches that host, and that
+  the happy path makes no outbound call at all: the handler documents that it
+  never follows `response_url` because doing so is an SSRF primitive, and this is
+  what makes that claim enforceable rather than a comment.
 - **TC-SLACKAPP-034** — a `RunTask` failure is surfaced, not swallowed: the
   response text says the apply did not start, the error is logged without the
   request body, and the claim remains so a retry can recover via
@@ -550,6 +579,96 @@ agreed with policy.
   on the existing ApiGatewayV2 — no Lambda Function URL, no new API, no new
   certificate.
 
+## Offering the list: the loop's entry point
+
+Everything above starts from a click. These cover what produces the thing to
+click on — the review run's `approvals/offered` write and its `chat.postMessage`.
+Nothing else in the loop can be exercised for real until this exists, and the
+ordering between the two writes is the part that is easy to get backwards.
+
+- **TC-SLACKAPP-105** — the record is written **before** the message is posted,
+  as a plain `String` with `Overwrite: true`. Ordering first: posting first leaves
+  a live Approve button that the callback rejects with "there is no current
+  approval list", spending a click and sending the operator after a backend fault
+  that does not exist. The type and the overwrite flag are runtime-only failures
+  like TC-SLACKAPP-047f's — the boundary denies a `SecureString` write, and
+  `Overwrite: false` would succeed once and then fail every later week with
+  `ParameterAlreadyExists`, silently ending the loop. Asserted on a shared
+  SSM+Slack event log rather than per-client call counts, because the ordering
+  between the two clients is the property.
+- **TC-SLACKAPP-106** — the message carries `record.hash` in **both** action
+  values, uses the exact `action_id`s the deployed handler branches on
+  (`cleanup_approve` / `cleanup_reject`), authenticates with a bearer bot token,
+  sets `redirect: "manual"`, and renders every offered id and its snippet. A
+  renamed `action_id` is a click the callback answers with "that button is not one
+  this app knows how to handle" — after the operator reviewed the whole list. The
+  ids-are-shown assertion is TC-SLACKAPP-024's argument on the other surface: a
+  hash covering ids the operator never saw is a *wrong* apply, not a failed one.
+- **TC-SLACKAPP-107** — a list Block Kit could not carry whole is refused rather
+  than posted. Slack's ceilings are 50 blocks per message, 3000 characters per
+  section, 2000 per button value, 150 per header, and an over-limit message is
+  rejected wholesale — so the operator sees nothing either way, and the only thing
+  a fence buys is a clear error. Note that one section per id would hit the block
+  limit at ~46 ids, **below** #102's default `--cap 50`: the id lines are packed
+  into as few sections as the character limit allows, and the test asserts every
+  limit on the built message rather than only the block count.
+- **TC-SLACKAPP-108** — `{ok: false, error}` at HTTP **200** is a failure. Every
+  Slack Web API method answers 200 for application errors, so a `response.ok`
+  check alone reports a message that was never delivered and the weekly loop looks
+  healthy while no operator ever sees a review list. The same case asserts the log
+  carries neither the bot token nor a sentinel memory snippet.
+- **TC-SLACKAPP-109** — a run with no deletions still **overwrites** the record
+  and posts nothing. The write is not conditional on there being something to
+  post: last week's Approve button is still live in the channel and its hash still
+  matches the record it was posted with, so skipping the write leaves a click that
+  applies a list this run's audit no longer stands behind.
+- **TC-SLACKAPP-110** — the message `ts` and channel are stamped onto the record
+  in a **second** write, and a stamp failure is reported without failing the
+  offer. The apply has to `chat.update` the message it was approved from and the
+  record is the only durable path for that `ts`, which does not exist until the
+  post returns. Losing the audit-trail update is strictly better than refusing an
+  approval the operator can act on.
+- **TC-SLACKAPP-111** — the message reports the `RETAIN` and `UNSTABLE` counts
+  alongside the approve set. Same argument as `verdictSummary`'s printed zeros: a
+  protected-topic rule that started matching everything, or a consensus that
+  collapsed, would otherwise read as a clean corpus.
+- **TC-SLACKAPP-112** — the offer happens on the **dry run** and never on
+  `--apply`. An apply that re-offered would overwrite the very record its own
+  claim was derived from, so a redelivery mid-apply would be compared against a
+  list the running task never saw.
+- **TC-SLACKAPP-113** — a failed offer exits **1** and names the decision list it
+  kept. A review run whose post failed has done its whole audit and offered
+  nothing; exit 0 makes that indistinguishable from a healthy week, and the
+  operator would notice only by the absence of a message they were not expecting
+  on any particular day. The decision file survives and is what a manual
+  `--apply --ids` reads.
+- **TC-SLACKAPP-114** — with no channel configured there is **no** offer dep at
+  all, so #102's operator CLI is unchanged. A dep that existed unconditionally
+  would have every hand-run dry run attempt an approval-record write the
+  operator's identity may not hold, and would post a clickable Approve button for
+  a list they ran locally just to look at.
+- **TC-SLACKAPP-115** — the bot token is read from `{prefix}/slack/bot-token`
+  **decrypted**, via `GetParameters`. It is a SecureString, so without decryption
+  the value returns as ciphertext and every post 401s with `invalid_auth`; and the
+  singular `ssm:GetParameter` is a distinct IAM action the boundary does not admit
+  (TC-SLACKAPP-047g).
+- **TC-SLACKAPP-116** — an injected `SLACK_BOT_TOKEN` wins and **no** parameter is
+  read. The apply task receives the token from ECS `ssm:` already decrypted, and
+  its task role holds `ssm:GetParameters` under `approvals/*` only — a
+  `slack/bot-token` read is an `AccessDenied` there. Same two-caller split as
+  `resolveDatabaseConfig`.
+- **TC-SLACKAPP-117** — a configured channel with no reachable token is a
+  **failure**, not a skipped post. Skipping is TC-SLACKAPP-113 with the alarm
+  removed.
+- **TC-SLACKAPP-118** — the stage, the injected SSM prefix, and the channel all
+  reach a real offer: the record lands at `{prefix}/approvals/offered` built from
+  the prefix rather than a constant, so a preview run cannot write prod's record.
+- **TC-SLACKAPP-119** — a replayed `--decisions` file is re-offered under the
+  **file's** `generatedAt`, not the moment it was reposted. This is the path an
+  operator takes to repost after a failed offer; stamping `now` would claim a
+  fresh audit for a classification that may be days old, removing their only cue
+  that they are approving stale judgments.
+
 ## The apply task's in-container runtime
 
 Everything above gets a claimed approval as far as `RunTask`. These cover what
@@ -585,6 +704,12 @@ made safe or quietly defeated.
   quotes an id. The file lands on the task's ephemeral disk and the record it is
   built from is a plain `String` parameter, so a record that later grew a
   `snippet` must not have it copied through. The **count** is logged instead.
+- **TC-SLACKAPP-098b** — what `materializeApprovedIds` *returns* is a count and the
+  Slack message coordinates, never the ids. The return value is what the outcome
+  update closes over and it travels to `chat.update`, so ids on it would reach a
+  Slack message the moment anything spread the claim into a payload — the ids file
+  is the only place they go. Both halves are asserted, since "no ids returned"
+  would also be satisfied by not writing them anywhere.
 - **TC-SLACKAPP-099** — the image ships every module the entrypoints copied into it
   can import, its lockfile agrees with its `package.json` (`npm ci` refuses to
   install otherwise, so a stale lock means no image at all), and each entrypoint
@@ -616,13 +741,112 @@ made safe or quietly defeated.
   hold the shared mutex for the length of its own failure and could block the
   weekly consolidation.
 
+## Closing the loop on the message
+
+The offer posts and the apply deletes; without these the message keeps showing a
+live Approve button and no record of what happened, which is the audit trail the
+message exists to be. Everything here runs **after** irreversible deletions, and
+that is the single constraint that shapes all of it: nothing in this section may
+fail the run.
+
+- **TC-SLACKAPP-120** — the outcome reports what was **DELETED** (`capUsed`), not
+  what was approved. An apply that approved 3 and deleted 1 lost two to the LWW
+  guard and has to say so; the approved count would tell the operator memories are
+  gone that are still there, and since this message *is* the audit trail nothing
+  downstream would ever correct it. Asserted as an ordering of the two numbers
+  rather than against a phrase, so the wording is not pinned. The `actions` block
+  is **gone**: `chat.update` replaces blocks wholesale, which is what removes the
+  buttons — leaving them would offer a hash whose claim already exists, and the
+  callback answers that click with "someone else is already applying".
+- **TC-SLACKAPP-121** — a capped (exit 4) or partial (exit 6) apply says so, and is
+  distinguishable from a clean one. Both stop early with real deletions already
+  done, so a count-only message would read identically to a complete run while the
+  operator's next move differs: a capped run left approved ids untouched and needs
+  a fresh review. Named by what to *do* about it rather than by the exit code,
+  which in a Slack message is a lookup.
+- **TC-SLACKAPP-122** — the outcome names no memory id and no content. The review
+  message carries ids and snippets because that is what the operator reviews; the
+  outcome needs neither, and this runs in the apply task whose log already reaches
+  CloudWatch — adding them widens where identifiers live for no operator benefit.
+- **TC-SLACKAPP-123** — the update targets the **claim's** coordinates, and is
+  skipped when either is absent. `chat.update` requires both `channel` and `ts`;
+  calling with `undefined` earns a `channel_not_found` that reads like a
+  misconfigured channel rather than an unstamped record. Half a pair is included
+  and is the sharper case — the second of two independent guards (the Lambda's
+  `loadOffered` is the first), placed in the process that would have to report the
+  confusing error. A skip is logged: a systematically unstamped record must not
+  look like a working loop forever.
+- **TC-SLACKAPP-124** — a refused update never turns a completed apply into a
+  failure. `edit_window_closed` or a revoked token must not make the task exit
+  non-zero: that alarms on a successful apply, and under the callback's stale-claim
+  recovery a retried task would re-apply ids that are already gone. Loud in the
+  log, harmless to the exit code.
+- **TC-SLACKAPP-125** — the apply run reports **once**, after the lockfile and the
+  shared mutex are released, with the numbers it achieved. Once because a message
+  updated per flush would show intermediate counts as if they were outcomes; after
+  the release because reporting inside the `finally` would hold the shared mutex
+  across a Slack round trip and could block the weekly consolidation. The stamp
+  comes from the run's injected clock, so two timestamps on one run agree.
+- **TC-SLACKAPP-126** — a dry run does not update (it *posts*), and an apply with no
+  report dep runs to completion. The #102 operator CLI has no Slack at all and must
+  not throw on a missing function.
+- **TC-SLACKAPP-127** — a report that throws does not change the exit code, and the
+  reason reaches the log. Same argument as 124, one layer out.
+- **TC-SLACKAPP-128** — the coordinates reach the dep the container builds, closing
+  the chain the offer started: offered record → claim → materialize → dep →
+  `chat.update`. This link carries them out of a read that was already happening,
+  which makes it the one most likely to be forgotten because nothing else needs
+  them. The hash is on the message too — it is the only handle for correlating the
+  message with the task log and the claim parameter.
+- **TC-SLACKAPP-129** — two absences that must degrade rather than fail: a review
+  run builds no report dep, and a hash-driven run with no `SLACK_BOT_TOKEN` still
+  materializes its ids and applies. The asymmetry with the *offer*, which throws on
+  a missing token, is deliberate: there, failing loud costs an unposted list nobody
+  has acted on; here, it would cost deletions the operator already authorized. The
+  apply task cannot even read the token parameter — its role holds
+  `ssm:GetParameters` under `approvals/*` only, so the value arrives through the
+  task definition's `ssm:` block, already decrypted.
+
 ## Logging and privacy
 
 - **TC-SLACKAPP-089** — no log line contains the bot token, the signing secret,
-  the raw request body, or memory content, on **any** path including every error
-  path. Asserted by capturing all log output across the failure cases and
-  matching against the secret values and a sentinel memory snippet, rather than
-  by inspecting the happy path only.
+  the raw request body, memory content, or a memory **id**, on **any** path
+  including every error path. Asserted by capturing all log output across eleven
+  cases and matching against the secret values, a sentinel memory snippet, and
+  every id, rather than by inspecting the happy path only. The reply is held to
+  the same standard: "ephemeral" is a visibility scope in one workspace, not a
+  confidentiality boundary.
+
+  The sweep is what found the leaks, and all three were the same shape — **an
+  error's `message` echoes the argument the failed call was given**:
+
+  | call | what its message can echo |
+  |---|---|
+  | the claim write | its value is the id list, and an SSM `ValidationException` quotes the value it rejected |
+  | the claim stamp | the same list one call later, which the claim-write case cannot reach because it throws first |
+  | `JSON.parse` of the `payload` field | V8 quotes the first ten characters of the input, and that field is the one part of a signed request whose content the signature says nothing about |
+
+  The fix is to log the failure **class** (`err.name`, via `failureClass`) or a
+  fixed reason string chosen in the handler — never the message. Deliberately not
+  a redactor: a substring scrub would be a guess about what the SDK chose to
+  include and would silently stop matching when it changes.
+
+  Two properties keep the sweep honest, because a `not.toContain` sweep is the
+  easiest kind of test to make vacuous:
+
+  - each failure case also asserts a phrase **its own branch** must log, which
+    proves the fixture drove the handler down the path its label claims;
+  - a companion case logs a deliberate leak and asserts every matcher **fails**
+    on it.
+
+- **TC-SLACKAPP-034e** — the three ways a body yields no action ("no payload
+  field", the field is not valid JSON, no actions) stay distinguishable in the
+  log, asserted on the SET of messages so one string containing every phrase
+  cannot satisfy it. TC-089 forbids logging the parse error, and the cheapest way
+  to satisfy that is one flat "bad payload" for all three — but each sends the
+  operator somewhere different: a missing field means the form encoding is wrong,
+  unparseable JSON means the body is not Slack's, and no actions means the
+  message template changed.
 
 ## E2E (PR preview stage)
 
@@ -632,6 +856,54 @@ made safe or quietly defeated.
   Then POST the same body with an invalid signature: expect 401 and **no** new
   record. The record is read back by name, so "no record" is a positive
   assertion rather than the absence of one.
+
+  `scripts/run-slack-approval-e2e.sh` is the harness; the CI step runs it after
+  the preview deploy, and `scripts/run-slack-approval-e2e.test.mjs` drives the
+  script itself against a fake `aws` and a fake `curl` (the fake `curl` decides
+  which POST it is by the **signature header**, exactly as the real endpoint
+  does). Seven decisions in it are load-bearing:
+
+  - **The invalid POST goes first.** After a successful click there is a record,
+    and nothing can then tell the two writers apart — so ordering is what makes
+    "no record was written" assertable at all.
+  - **Same body both times.** A different body would make the 401 provable by the
+    body rather than by the signature, which is not the property under test.
+  - **A 200 on the invalid signature is a hard failure.** A façade that accepted
+    an unsigned interaction would otherwise pass every other assertion here.
+  - **The record is read back by name, and its `taskArn` is required.** A 200
+    alone proves nothing: the handler also answers 200 for a stale hash, an
+    unknown action, and "already applied". A claim with no `taskArn` is the exact
+    state a `RunTask` failure leaves behind.
+  - **The apply task's own exit code is checked.** Without it the run passes on a
+    click that started a task which then crashed.
+  - **The signing secret reaches the HMAC through the ENVIRONMENT**, not an argv:
+    `openssl dgst -hmac "$SECRET"` is the obvious way to write this in bash and
+    would put the secret in a world-readable command line. Pinned by a static
+    assertion over the script source, because the fakes only see the commands they
+    replace and would happily let the argv version pass.
+  - **`pr-N` stages only, refused before the first write.** The harness
+    *overwrites* `approvals/offered`, so on a shared stage it destroys a pending
+    human approval — the operator's next click would be answered against CI's
+    record — and the id it approves is a **deletion** against that stage's
+    database. Hence also no prod CI step, asserted on the workflow rather than
+    left to a comment, since copying a green preview step into `deploy-prod` is
+    the obvious next edit. A refusal, not a skip: exit 0 would let a workflow edit
+    silently stop testing anything while reporting green.
+
+  The approved id is a synthetic sentinel (`mem9-e2e-nonexistent-{stage}`) that
+  cannot name a real memory, and the apply's "already gone" branch is what makes
+  the run exit 0. Both records are deleted on **every** exit, including failure:
+  the claim is written `Overwrite: false`, so a leftover would make the next run's
+  click a losing claim that starts nothing.
+
+  Both absent prerequisites — no `facade/url`, no `slack/signing-secret` — are
+  `::warning::` skips rather than failures, matching `run-oauth-facade-smoke.sh`.
+  Slack approval is gated on `MEM9_SLACK_APPROVAL_ENABLED` at synth time, so a
+  hard failure would block every PR on a feature the stage does not deploy. That
+  flag is passed from a repo **variable** rather than a literal `1` for the same
+  reason: `infra/slack-approval.ts` fails synthesis when the flag is set and
+  either secret is unseeded, and GitHub hands an unset secret to the job as an
+  empty string.
 
 ## Exit codes
 

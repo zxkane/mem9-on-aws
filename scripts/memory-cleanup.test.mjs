@@ -9,13 +9,17 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  buildApprovalMessage,
   buildCompleteChat,
   buildOfferedRecord,
+  buildOutcomeMessage,
   contentHash,
   createCleanupDeps,
   inactiveMemoryAdapter,
   materializeApprovedIds,
   parseArgs,
+  postApprovalRequest,
+  updateApprovalMessage,
   consensusDecisions,
   parseVerdicts,
   planDecisions,
@@ -3958,6 +3962,63 @@ describe("materializing the approved ids in the apply task (#123)", () => {
       expect(String(call[0])).not.toContain("m-1");
     }
   });
+
+  it("TC-SLACKAPP-098b what is returned to the caller is a count and the coordinates, never the ids", async () => {
+    // The return value is what the outcome update closes over, and it travels to
+    // `chat.update`. Ids on it would reach a Slack message the moment anything
+    // spread the claim into a payload — so the file is the ONLY place they go.
+    const ids = ["m-1", "m-2"];
+    const hash = contentHash(ids.join("\n"));
+    const ssm = fakeSsm({
+      [claimName(hash)]: JSON.stringify({
+        stage: "prod",
+        hash,
+        ids,
+        claimedAt: "2026-08-05T00:05:00.000Z",
+        messageTs: "1754400000.000100",
+        messageChannel: "C0APPROVAL",
+      }),
+    });
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+
+    const claim = await materializeApprovedIds({
+      ssm,
+      stage: "prod",
+      ssmPrefix: "/mem9-on-aws/prod",
+      hash,
+      idsFile,
+      fs: { writeFileSync },
+    });
+
+    expect(claim.count).toBe(2);
+    expect(claim.messageTs).toBe("1754400000.000100");
+    expect(claim.messageChannel).toBe("C0APPROVAL");
+    expect(JSON.stringify(claim)).not.toContain("m-1");
+    // The ids DID land, in the file, which is the other half of the same property.
+    expect(readFileSync(idsFile, "utf8")).toBe("m-1\nm-2\n");
+
+    // A record with no coordinates yields none rather than `undefined` values that
+    // would reach `chat.update` as a `channel_not_found`.
+    const bare = fakeSsm({
+      [claimName(hash)]: JSON.stringify({
+        stage: "prod",
+        hash,
+        ids,
+        claimedAt: "2026-08-05T00:05:00.000Z",
+      }),
+    });
+    const plain = await materializeApprovedIds({
+      ssm: bare,
+      stage: "prod",
+      ssmPrefix: "/mem9-on-aws/prod",
+      hash,
+      idsFile,
+      fs: { writeFileSync },
+    });
+    expect(plain.messageTs).toBeUndefined();
+    expect(plain.messageChannel).toBeUndefined();
+  });
 });
 
 describe("the apply task's in-container runtime (#123)", () => {
@@ -4195,5 +4256,995 @@ describe("the apply task's in-container runtime (#123)", () => {
     ).rejects.toThrow(/hash/u);
     expect(calls).toEqual([]);
     expect(existsSync(idsFile)).toBe(false);
+  });
+});
+
+describe("offering the list to Slack (#123)", () => {
+  const BOT_TOKEN = "xoxb-fixture-not-a-real-token";
+  const CHANNEL = "C0APPROVAL";
+  const OFFERED = "/mem9-on-aws/prod/approvals/offered";
+  const SNIPPET = "SENTINEL-MEMORY-SNIPPET";
+
+  const del = (id, snippet = `${SNIPPET}-${id}`) => ({
+    id,
+    verdict: "DELETE",
+    reason: "session-state",
+    version: 1,
+    contentHash: contentHash(`c-${id}`),
+    snippet,
+  });
+
+  /**
+   * SSM and Slack sharing ONE event log, because the ordering between them is a
+   * correctness property and not an implementation detail: a button that exists
+   * before the record it is validated against is a promise the backend cannot
+   * keep.
+   */
+  function offerFakes(slackBodies = {}) {
+    const events = [];
+    const ssm = {
+      puts: [],
+      send: vi.fn(async (command) => {
+        events.push(["ssm", command.input.Name]);
+        ssm.puts.push(command.input);
+        return {};
+      }),
+    };
+    const slack = {
+      calls: [],
+      fetchImpl: vi.fn(async (url, options = {}) => {
+        const method = String(url).split("/").pop();
+        events.push(["slack", method]);
+        slack.calls.push({
+          url: String(url),
+          method: options.method,
+          headers: options.headers,
+          redirect: options.redirect,
+          body: JSON.parse(options.body),
+        });
+        const body = slackBodies[method] ?? {
+          ok: true,
+          channel: CHANNEL,
+          ts: "1754400000.000100",
+        };
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }),
+    };
+    return { events, ssm, slack };
+  }
+
+  function offer(overrides = {}) {
+    const { ssm, slack, events } = overrides.fakes ?? offerFakes();
+    return {
+      events,
+      ssm,
+      slack,
+      log: overrides.log,
+      promise: postApprovalRequest({
+        ssm,
+        ssmPrefix: "/mem9-on-aws/prod",
+        stage: "prod",
+        decisions: overrides.decisions ?? [del("m-1"), del("m-2")],
+        generatedAt: "2026-08-05T03:00:00.000Z",
+        channel: CHANNEL,
+        botToken: BOT_TOKEN,
+        fetchImpl: slack.fetchImpl,
+        log: overrides.log ?? vi.fn(),
+      }),
+    };
+  }
+
+  it("TC-SLACKAPP-105 writes the offered record before the button exists, as an overwritable plain String", async () => {
+    const fakes = offerFakes();
+    const log = vi.fn();
+    const { promise } = offer({ fakes, log });
+    const result = await promise;
+
+    // ORDER. Posting first leaves a live Approve button whose click the callback
+    // rejects with "there is no current approval list" — a spent click and an
+    // operator hunting a backend fault. The write is also what INVALIDATES last
+    // week's button, so it must not be reachable only through the post.
+    expect(fakes.events).toEqual([
+      ["ssm", OFFERED],
+      ["slack", "chat.postMessage"],
+      ["ssm", OFFERED],
+    ]);
+    const [first] = fakes.ssm.puts;
+    expect(first.Name).toBe(OFFERED);
+    // Runtime-only, exactly like TC-SLACKAPP-047f: `SecureString` is denied by the
+    // workload boundary (no `kms:Encrypt`, no `kms:GenerateDataKey`), and
+    // `Overwrite: false` would succeed once and then fail every subsequent week
+    // with `ParameterAlreadyExists` — the loop would silently stop offering.
+    expect(first.Type).toBe("String");
+    expect(first.Overwrite).toBe(true);
+    const record = JSON.parse(first.Value);
+    expect(Object.keys(record).sort()).toEqual(["generatedAt", "hash", "ids", "stage"]);
+    expect(record.ids).toEqual(["m-1", "m-2"]);
+    expect(record.hash).toBe(contentHash("m-1\nm-2"));
+    expect(result.record.hash).toBe(record.hash);
+    expect(result.messageTs).toBe("1754400000.000100");
+  });
+
+  it("TC-SLACKAPP-106 carries that exact hash in both action values and shows every id it asks about", async () => {
+    const { promise, slack } = offer();
+    const { record } = await promise;
+    const [call] = slack.calls;
+
+    expect(call.url).toBe("https://slack.com/api/chat.postMessage");
+    expect(call.method).toBe("POST");
+    expect(call.headers.Authorization).toBe(`Bearer ${BOT_TOKEN}`);
+    // The alert-router precedent: a redirect from an API host is never something
+    // to follow with a bearer token attached.
+    expect(call.redirect).toBe("manual");
+    expect(call.body.channel).toBe(CHANNEL);
+
+    const actions = call.body.blocks.filter((b) => b.type === "actions");
+    expect(actions).toHaveLength(1);
+    const ids = actions[0].elements.map((e) => e.action_id).sort();
+    // The action ids the deployed handler branches on. A rename here is a click
+    // the callback answers with "that button is not one this app knows how to
+    // handle" — after the operator has reviewed the whole list.
+    expect(ids).toEqual(["cleanup_approve", "cleanup_reject"]);
+    for (const element of actions[0].elements) {
+      // The hash is the ONLY thing the click carries. Ids cannot ride here (the
+      // 2000-character value cap), and must not: the signature proves the request
+      // came from the workspace, never that ids inside it are the classifier's.
+      expect(element.value).toBe(record.hash);
+    }
+
+    // Every offered id appears in the message. Approving a list longer than the
+    // list shown is the one failure mode that produces a WRONG apply rather than
+    // a failed one — the same argument as TC-SLACKAPP-024, on the other surface.
+    const rendered = JSON.stringify(call.body.blocks);
+    for (const id of record.ids) expect(rendered).toContain(id);
+    // Snippets are the point of the review, and Slack is an approved destination
+    // for them (unlike the repository or the SSM record).
+    expect(rendered).toContain(SNIPPET);
+  });
+
+  it("TC-SLACKAPP-107 refuses to post a list Block Kit would not carry whole", async () => {
+    // Slack's own ceilings: 50 blocks per message, 3000 characters per section
+    // text, 2000 per button value, 150 per header. A message over any of them is
+    // rejected wholesale, so the operator sees nothing at all — but a message
+    // that silently dropped the overflow would be worse: they would approve a
+    // hash covering ids they never saw.
+    const many = Array.from({ length: 4000 }, (_, i) => del(`memory-${i}`));
+    const record = {
+      stage: "prod",
+      hash: contentHash(many.map((d) => d.id).join("\n")),
+      ids: many.map((d) => d.id),
+      generatedAt: "2026-08-05T03:00:00.000Z",
+    };
+    expect(() => buildApprovalMessage({ record, decisions: many, channel: CHANNEL })).toThrow(
+      /block|too large|does not fit/iu,
+    );
+
+    const small = [del("m-1"), del("m-2")];
+    const message = buildApprovalMessage({
+      record: buildOfferedRecord({
+        stage: "prod",
+        decisions: small,
+        generatedAt: "2026-08-05T03:00:00.000Z",
+      }),
+      decisions: small,
+      channel: CHANNEL,
+    });
+    expect(message.blocks.length).toBeLessThanOrEqual(50);
+    for (const block of message.blocks) {
+      if (block.type === "header") expect(block.text.text.length).toBeLessThanOrEqual(150);
+      if (block.type === "section") expect(block.text.text.length).toBeLessThanOrEqual(3000);
+      for (const element of block.elements ?? []) {
+        if (element.value) expect(element.value.length).toBeLessThanOrEqual(2000);
+      }
+    }
+  });
+
+  it("TC-SLACKAPP-108 treats Slack's HTTP 200 application errors as failures, without echoing the token", async () => {
+    // Every Slack Web API method answers HTTP 200 for application errors and puts
+    // the failure in `{ok: false, error}`. A `response.ok` check alone reports a
+    // message that was never delivered — and the loop would appear healthy while
+    // no operator ever sees a review list.
+    const fakes = offerFakes({
+      "chat.postMessage": { ok: false, error: "channel_not_found" },
+    });
+    const log = vi.fn();
+    await expect(offer({ fakes, log }).promise).rejects.toThrow(/channel_not_found/u);
+
+    const logged = log.mock.calls.flat().join("\n");
+    expect(logged).not.toContain(BOT_TOKEN);
+    expect(logged).not.toContain(SNIPPET);
+    // The record was already written, which is deliberate: it invalidates the
+    // previous week's button even when this week's post fails, so no stale click
+    // can apply an old list.
+    expect(fakes.ssm.puts).toHaveLength(1);
+  });
+
+  it("TC-SLACKAPP-109 overwrites the record but posts nothing when the run offers no deletions", async () => {
+    // The write is NOT conditional on there being something to post. Last week's
+    // Approve button is still live in the channel and its hash still matches the
+    // record it was posted with, so a run that skipped the write entirely would
+    // leave a click that applies a list this run's audit no longer stands behind.
+    const fakes = offerFakes();
+    const result = await offer({
+      fakes,
+      decisions: [
+        { id: "m-keep", verdict: "KEEP", reason: "durable" },
+        { id: "m-unstable", verdict: "UNSTABLE", reason: "passes disagreed on deletion" },
+      ],
+    }).promise;
+
+    expect(fakes.ssm.puts).toHaveLength(1);
+    expect(JSON.parse(fakes.ssm.puts[0].Value).ids).toEqual([]);
+    expect(fakes.slack.fetchImpl).not.toHaveBeenCalled();
+    expect(result.posted).toBe(false);
+    expect(result.messageTs).toBeUndefined();
+  });
+
+  it("TC-SLACKAPP-110 stamps the message timestamp onto the record without failing the offer", async () => {
+    // The apply task has to `chat.update` the message it was approved from, and
+    // the only durable place that `ts` can reach it is the approval record. The
+    // stamp is a SECOND write on purpose — the first has to precede the post, and
+    // `ts` does not exist until the post returns.
+    const fakes = offerFakes();
+    const result = await offer({ fakes }).promise;
+    expect(fakes.ssm.puts).toHaveLength(2);
+    const stamped = JSON.parse(fakes.ssm.puts[1].Value);
+    expect(stamped.messageTs).toBe("1754400000.000100");
+    expect(stamped.messageChannel).toBe(CHANNEL);
+    expect(stamped.hash).toBe(result.record.hash);
+    expect(stamped.ids).toEqual(["m-1", "m-2"]);
+
+    // A stamp failure does not undo a posted message or an offered list, so it is
+    // reported and the offer stands: losing the audit-trail update is strictly
+    // better than refusing an approval the operator can act on.
+    const flaky = offerFakes();
+    let put = 0;
+    flaky.ssm.send = vi.fn(async (command) => {
+      put += 1;
+      if (put === 2) throw new Error("ThrottlingException");
+      flaky.ssm.puts.push(command.input);
+      return {};
+    });
+    const log = vi.fn();
+    const survived = await offer({ fakes: flaky, log }).promise;
+    expect(survived.posted).toBe(true);
+    expect(log.mock.calls.flat().join("\n")).toMatch(/stamp|timestamp/iu);
+  });
+
+  it("TC-SLACKAPP-111 reports what policy withheld, so a shrinking approve set is visible", async () => {
+    // A RETAIN is a deletion the protected-topic rule refused and an UNSTABLE is
+    // one the passes disagreed on. Neither is offered — but a message that showed
+    // only the approve set would make a rule that started matching everything
+    // look like a clean corpus.
+    const { promise, slack } = offer({
+      decisions: [
+        del("m-1"),
+        { id: "m-protected", verdict: "RETAIN", reason: "stale", retainedReason: "protected topic personal-finance" },
+        { id: "m-unstable", verdict: "UNSTABLE", reason: "passes disagreed on deletion" },
+        { id: "m-keep", verdict: "KEEP", reason: "durable" },
+      ],
+    });
+    await promise;
+    const rendered = JSON.stringify(slack.calls[0].body.blocks);
+    expect(rendered).toMatch(/RETAIN[^0-9]*1/u);
+    expect(rendered).toMatch(/UNSTABLE[^0-9]*1/u);
+  });
+
+  it("TC-SLACKAPP-112 offers from a dry run and never from an apply", async () => {
+    // An apply that re-offered would overwrite the very record its own claim was
+    // derived from, so a redelivered click mid-apply would compare against a list
+    // the running task never saw.
+    const server = fakeServer([memory("del-1", "session noise")]);
+    const llm = fakeLlm([[{ id: "del-1", verdict: "DELETE", reason: "session-state" }]]);
+    const postApproval = vi.fn(async () => ({ posted: true, record: { hash: "sha256:x", ids: ["del-1"] } }));
+
+    const dry = await runCleanup(baseOpts(), {
+      ...baseDeps(server, llm, tempDir()),
+      postApproval,
+    });
+    expect(dry.exitCode).toBe(0);
+    expect(postApproval).toHaveBeenCalledTimes(1);
+    const [{ decisions, generatedAt }] = postApproval.mock.calls[0];
+    expect(decisions.map((d) => d.id)).toEqual(["del-1"]);
+    expect(generatedAt).toBe("2026-07-31T00:00:00.000Z");
+
+    postApproval.mockClear();
+    const applyServer = fakeServer([memory("del-1", "session noise")]);
+    const applied = await runCleanup(baseOpts({ apply: true }), {
+      ...baseDeps(applyServer, fakeLlm([[{ id: "del-1", verdict: "DELETE", reason: "session-state" }]]), tempDir()),
+      postApproval,
+    });
+    expect(applied.exitCode).toBe(0);
+    expect(postApproval).not.toHaveBeenCalled();
+  });
+
+  it("TC-SLACKAPP-113 fails the run when the offer fails, naming the decision list it kept", async () => {
+    // A scheduled review run whose post failed has done its audit and offered
+    // nothing. Exit 0 would make that indistinguishable from a healthy week, and
+    // the operator would notice only by the absence of a Slack message they were
+    // not expecting on any particular day.
+    const server = fakeServer([memory("del-1", "session noise")]);
+    const llm = fakeLlm([[{ id: "del-1", verdict: "DELETE", reason: "session-state" }]]);
+    const deps = {
+      ...baseDeps(server, llm, tempDir()),
+      postApproval: vi.fn(async () => {
+        throw new Error("channel_not_found");
+      }),
+    };
+    const result = await runCleanup(baseOpts(), deps);
+    expect(result.exitCode).toBe(1);
+    // The decision list survives the failed offer: it is the artefact the
+    // operator falls back to for a manual `--apply --ids`.
+    expect(result.decisionPath).toBeTruthy();
+    expect(existsSync(result.decisionPath)).toBe(true);
+    const logged = deps.log.mock.calls.flat().join("\n");
+    expect(logged).toMatch(/channel_not_found/u);
+    expect(logged).toContain(result.decisionPath);
+  });
+
+  it("TC-SLACKAPP-119 re-offers a replayed decision file under the FILE's stamp, not the moment it was reposted", async () => {
+    // A `--decisions <file>` dry run with Slack configured re-offers that list —
+    // the path an operator takes to repost a review after a failed offer. The
+    // record's `generatedAt` is what dates the list, so stamping it `now` would
+    // claim a fresh audit for a classification that may be days old, and the
+    // operator's only cue that they are approving stale judgments would be gone.
+    const dir = tempDir();
+    const decisionsFile = join(dir, "decisions.json");
+    writeFileSync(
+      decisionsFile,
+      JSON.stringify({
+        stage: "test",
+        generatedAt: "2026-07-24T00:00:00.000Z",
+        decisions: [
+          {
+            id: "del-1",
+            verdict: "DELETE",
+            reason: "session-state",
+            version: 1,
+            contentHash: contentHash("session noise"),
+          },
+        ],
+      }),
+    );
+    const server = fakeServer([memory("del-1", "session noise")]);
+    const postApproval = vi.fn(async () => ({ posted: true, record: { hash: "sha256:x", ids: ["del-1"] } }));
+
+    const result = await runCleanup(baseOpts({ decisionsFile }), {
+      ...baseDeps(server, fakeLlm([]), dir),
+      postApproval,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(postApproval.mock.calls[0][0].generatedAt).toBe("2026-07-24T00:00:00.000Z");
+  });
+});
+
+
+describe("wiring the offer into the review run (#123)", () => {
+  const environmentKeys = [
+    "AWS_REGION",
+    "MEM9_DB_HOST",
+    "MEM9_DB_NAME",
+    "MEM9_DB_PORT",
+    "MEM9_DB_SECRET",
+    "MEM9_SLACK_APPROVAL_CHANNEL",
+    "MEM9_SSM_PREFIX",
+    "MEM9_TENANT_ID",
+    "SLACK_BOT_TOKEN",
+  ];
+  afterEach(() => {
+    for (const key of environmentKeys) delete process.env[key];
+  });
+
+  function reviewEnv(extra = {}) {
+    Object.assign(process.env, {
+      AWS_REGION: "ap-northeast-1",
+      MEM9_SSM_PREFIX: "/mem9-on-aws/prod",
+      MEM9_TENANT_ID: TENANT,
+      ...extra,
+    });
+  }
+
+  function ssmFake(values = {}) {
+    const client = {
+      sent: [],
+      send: vi.fn(async (command) => {
+        client.sent.push(command.input);
+        if (command.input.Names) {
+          return {
+            Parameters: command.input.Names.filter((n) => n in values).map((name) => ({
+              Name: name,
+              Value: values[name],
+            })),
+            InvalidParameters: command.input.Names.filter((n) => !(n in values)),
+          };
+        }
+        return {};
+      }),
+      destroy: () => {},
+    };
+    return client;
+  }
+
+  it("TC-SLACKAPP-114 builds no offer dep when Slack is not configured, so the #102 CLI is unchanged", async () => {
+    // The operator CLI at #102 has no Slack anything. An offer dep that existed
+    // unconditionally would make every hand-run dry run try to write an approval
+    // record the operator's identity may not be able to write — and would post a
+    // clickable Approve button for a list they ran locally to look at.
+    reviewEnv();
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: false, cap: 50 },
+      { ssm: ssmFake(), getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
+    );
+    expect(production.deps.postApproval).toBeUndefined();
+    await production.close();
+  });
+
+  it("TC-SLACKAPP-115 reads the bot token from the stage tree DECRYPTED when the channel is configured", async () => {
+    reviewEnv({ MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL" });
+    const ssm = ssmFake({ "/mem9-on-aws/prod/slack/bot-token": "xoxb-from-ssm" });
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: false, cap: 50 },
+      { ssm, getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
+    );
+    expect(typeof production.deps.postApproval).toBe("function");
+    const read = ssm.sent.find((input) => input.Names);
+    expect(read.Names).toEqual(["/mem9-on-aws/prod/slack/bot-token"]);
+    // The parameter is a SecureString, so without this the value comes back as
+    // ciphertext and every post 401s with `invalid_auth`.
+    expect(read.WithDecryption).toBe(true);
+    await production.close();
+  });
+
+  it("TC-SLACKAPP-116 prefers an injected token over the stage tree, reading no parameter at all", async () => {
+    // The apply task gets `SLACK_BOT_TOKEN` from ECS `ssm:`, and its task role
+    // holds `ssm:GetParameters` under `approvals/*` ONLY — a read of
+    // `slack/bot-token` is an AccessDenied there. Env-first is what lets one
+    // function serve both identities, exactly as `resolveDatabaseConfig` does.
+    reviewEnv({ MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL", SLACK_BOT_TOKEN: "xoxb-injected" });
+    const ssm = ssmFake();
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: false, cap: 50 },
+      { ssm, getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
+    );
+    expect(typeof production.deps.postApproval).toBe("function");
+    expect(ssm.sent.filter((input) => input.Names)).toEqual([]);
+    await production.close();
+  });
+
+  it("TC-SLACKAPP-117 refuses a configured channel it has no token for, rather than offering nothing", async () => {
+    // Silently skipping the post is the TC-SLACKAPP-113 failure with the alarm
+    // removed: the run does its whole audit, offers nothing, and exits 0 — and the
+    // operator finds out by never receiving a message they were not expecting on
+    // any particular day.
+    reviewEnv({ MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL" });
+    await expect(
+      createCleanupDeps(
+        { stage: "prod", apply: false, cap: 50 },
+        { ssm: ssmFake(), getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
+      ),
+    ).rejects.toThrow(/bot-token|bot token/u);
+  });
+
+  it("TC-SLACKAPP-118 passes the stage, prefix and channel through to a real offer", async () => {
+    reviewEnv({ MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL", SLACK_BOT_TOKEN: "xoxb-injected" });
+    const ssm = ssmFake();
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ok: true, channel: "C0APPROVAL", ts: "1754400000.000200" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: false, cap: 50 },
+      { ssm, getToken: vi.fn(), fromNodeProviderChain: vi.fn(), fetchImpl },
+    );
+
+    const offer = await production.deps.postApproval({
+      decisions: [
+        {
+          id: "m-1",
+          verdict: "DELETE",
+          reason: "session-state",
+          version: 1,
+          contentHash: contentHash("c-m-1"),
+          snippet: "a session detail",
+        },
+      ],
+      generatedAt: "2026-08-05T03:00:00.000Z",
+    });
+
+    expect(offer.posted).toBe(true);
+    const put = ssm.sent.find((input) => input.Name);
+    // Built from the injected prefix, not a constant: a preview run writing prod's
+    // record would hand prod's callback a list preview generated.
+    expect(put.Name).toBe("/mem9-on-aws/prod/approvals/offered");
+    expect(JSON.parse(put.Value).stage).toBe("prod");
+    expect(JSON.parse(fetchImpl.mock.calls[0][1].body).channel).toBe("C0APPROVAL");
+    await production.close();
+  });
+});
+
+describe("closing the loop on the message (#123)", () => {
+  const BOT_TOKEN = "xoxb-fixture-not-a-real-token";
+  const CHANNEL = "C0APPROVAL";
+  const TS = "1754400000.000100";
+  const HASH = "sha256:whatever-the-claim-said";
+
+  function updateFakes(body = { ok: true, channel: CHANNEL, ts: TS }) {
+    const calls = [];
+    const fetchImpl = vi.fn(async (url, options = {}) => {
+      calls.push({
+        url: String(url),
+        headers: options.headers,
+        redirect: options.redirect,
+        body: JSON.parse(options.body),
+      });
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    return { calls, fetchImpl };
+  }
+
+  it("TC-SLACKAPP-120 the outcome update reports what was DELETED, not what was approved", async () => {
+    // The single number an operator reads off this message is the one that must
+    // not be optimistic. An apply that approved 3 and deleted 1 (two lost to the
+    // LWW guard) has to say 1 deleted and 2 skipped — reporting the approved
+    // count would tell them the memories are gone when they are still there, and
+    // this message IS the audit trail, so nothing else would ever correct it.
+    const fakes = updateFakes();
+    const message = buildOutcomeMessage({
+      channel: CHANNEL,
+      messageTs: TS,
+      hash: HASH,
+      stage: "prod",
+      approved: 3,
+      result: { capUsed: 1, skippedLww: 2, skippedByFilter: 0, exitCode: 0 },
+      appliedAt: "2026-08-05T04:00:00.000Z",
+    });
+    const flat = JSON.stringify(message);
+    expect(message.channel).toBe(CHANNEL);
+    expect(message.ts).toBe(TS);
+    // The ACHIEVED count first, the approved count second. Asserted as an
+    // ordering rather than against a phrase so it does not pin the wording: the
+    // defect this exists to catch is reporting 3 where 1 is true, and "3 of 3"
+    // fails the first of these while a swapped "3 of 1" fails the second.
+    expect(message.text).toMatch(/\b1\b[^0-9]*\b3\b/u);
+    expect(message.text).not.toMatch(/\b3\b[^0-9]*\b1\b/u);
+    expect(flat).toMatch(/2\b[^"]*(skip|unchanged|changed)/iu);
+    // The buttons are GONE. A live Approve button under an applied outcome is an
+    // invitation to click a hash whose claim already exists, which the callback
+    // answers with "someone else is already applying" — a confusing dead end
+    // rather than the record of what happened.
+    expect(flat).not.toContain("cleanup_approve");
+    expect(flat).not.toContain("cleanup_reject");
+    expect(message.blocks.some((b) => b.type === "actions")).toBe(false);
+    // `text` is not required alongside `blocks` but IS what a notification and a
+    // screen reader read, and the outcome is the part worth notifying.
+    expect(message.text).toMatch(/1\b/u);
+    void fakes;
+  });
+
+  it("TC-SLACKAPP-121 a partial or capped apply says so on the message rather than reading as clean", async () => {
+    // exitCode 4 (cap exceeded) and 6 (partial) are the two ways an apply stops
+    // early with real deletions already done. A message that showed only the
+    // count would read identically to a complete run, and the operator's next
+    // move differs: a capped run has approved ids that were never touched and
+    // needs a re-offer, a clean one does not.
+    const capped = buildOutcomeMessage({
+      channel: CHANNEL,
+      messageTs: TS,
+      hash: HASH,
+      stage: "prod",
+      approved: 60,
+      result: { capUsed: 50, skippedLww: 0, skippedByFilter: 0, exitCode: 4 },
+      appliedAt: "2026-08-05T04:00:00.000Z",
+    });
+    expect(JSON.stringify(capped)).toMatch(/cap/iu);
+
+    const clean = buildOutcomeMessage({
+      channel: CHANNEL,
+      messageTs: TS,
+      hash: HASH,
+      stage: "prod",
+      approved: 2,
+      result: { capUsed: 2, skippedLww: 0, skippedByFilter: 0, exitCode: 0 },
+      appliedAt: "2026-08-05T04:00:00.000Z",
+    });
+    expect(JSON.stringify(clean)).not.toMatch(/cap exceeded|incomplete|partial/iu);
+    // Distinguishable from each other, which is the actual requirement — two
+    // outcomes that serialize the same would make the assertion above vacuous.
+    expect(JSON.stringify(capped)).not.toBe(JSON.stringify(clean));
+  });
+
+  it("TC-SLACKAPP-122 the outcome message names no memory id and no content", async () => {
+    // The review message legitimately carries ids and snippets: it is what the
+    // operator reviews. The outcome does not need them, and this message is
+    // posted by the APPLY task, whose log already goes to CloudWatch — adding
+    // them here widens where memory identifiers live for no operator benefit.
+    const message = buildOutcomeMessage({
+      channel: CHANNEL,
+      messageTs: TS,
+      hash: HASH,
+      stage: "prod",
+      approved: 1,
+      result: { capUsed: 1, skippedLww: 0, skippedByFilter: 0, exitCode: 0 },
+      appliedAt: "2026-08-05T04:00:00.000Z",
+      ids: ["SENTINEL-MEMORY-ID"],
+    });
+    expect(JSON.stringify(message)).not.toContain("SENTINEL-MEMORY-ID");
+  });
+
+  it("TC-SLACKAPP-123 the update targets the claim's coordinates and is skipped when they are absent", async () => {
+    const fakes = updateFakes();
+    const posted = await updateApprovalMessage({
+      claim: { messageChannel: CHANNEL, messageTs: TS, hash: HASH, stage: "prod" },
+      approved: 1,
+      stage: "prod",
+      result: { capUsed: 1, skippedLww: 0, skippedByFilter: 0, exitCode: 0 },
+      appliedAt: "2026-08-05T04:00:00.000Z",
+      botToken: BOT_TOKEN,
+      fetchImpl: fakes.fetchImpl,
+    });
+    expect(posted).toBe(true);
+    expect(fakes.calls).toHaveLength(1);
+    expect(fakes.calls[0].url).toBe("https://slack.com/api/chat.update");
+    expect(fakes.calls[0].headers.Authorization).toBe(`Bearer ${BOT_TOKEN}`);
+    // Both required arguments, from the CLAIM. `chat.update` needs channel AND
+    // ts; either missing is `channel_not_found` or `message_not_found`.
+    expect(fakes.calls[0].body.channel).toBe(CHANNEL);
+    expect(fakes.calls[0].body.ts).toBe(TS);
+
+    // A claim with no coordinates (a review run whose stamp write failed, or a
+    // pre-#123 record) calls NOTHING rather than calling with undefined. The
+    // deletions still happened, so this is not an error — but it must not be
+    // silent either, or a systematically unstamped record would look like a
+    // working loop forever.
+    // HALF a pair is included, and is the sharper case: `chat.update` needs both,
+    // so one coordinate is not a usable coordinate — a guard that required both to
+    // be missing would call Slack with `ts: undefined` and earn a
+    // `channel_not_found` that reads like a misconfigured channel. The Lambda's
+    // `loadOffered` already refuses to carry half a pair into the claim, so this is
+    // the second of two independent guards, in the process that would have to
+    // report the confusing error.
+    for (const claim of [
+      { hash: HASH, stage: "prod" },
+      { hash: HASH, stage: "prod", messageTs: TS },
+      { hash: HASH, stage: "prod", messageChannel: CHANNEL },
+    ]) {
+      const none = updateFakes();
+      const log = vi.fn();
+      const skipped = await updateApprovalMessage({
+        claim,
+        approved: 1,
+        stage: "prod",
+        result: { capUsed: 1, skippedLww: 0, skippedByFilter: 0, exitCode: 0 },
+        appliedAt: "2026-08-05T04:00:00.000Z",
+        botToken: BOT_TOKEN,
+        fetchImpl: none.fetchImpl,
+        log,
+      });
+      expect(skipped, JSON.stringify(claim)).toBe(false);
+      expect(none.fetchImpl, JSON.stringify(claim)).not.toHaveBeenCalled();
+      expect(log.mock.calls.map(String).join("\n")).toMatch(/coordinate|messageTs|not update/iu);
+    }
+  });
+
+  it("TC-SLACKAPP-124 a refused update never turns a completed apply into a failure", async () => {
+    // The deletions are DONE and irreversible by the time this runs. An
+    // `edit_window_closed` or a revoked token must not make the task exit
+    // non-zero: that would alarm on a successful apply, and — worse under the
+    // callback's recovery path — a retried task would re-apply ids already gone.
+    // It must be LOUD in the log and harmless to the exit code.
+    const fakes = updateFakes({ ok: false, error: "edit_window_closed" });
+    const log = vi.fn();
+    const posted = await updateApprovalMessage({
+      claim: { messageChannel: CHANNEL, messageTs: TS, hash: HASH, stage: "prod" },
+      approved: 1,
+      stage: "prod",
+      result: { capUsed: 1, skippedLww: 0, skippedByFilter: 0, exitCode: 0 },
+      appliedAt: "2026-08-05T04:00:00.000Z",
+      botToken: BOT_TOKEN,
+      fetchImpl: fakes.fetchImpl,
+      log,
+    });
+    expect(posted).toBe(false);
+    const logged = log.mock.calls.map(String).join("\n");
+    expect(logged).toMatch(/edit_window_closed/u);
+    expect(logged).toMatch(/deletion|applied|already/iu);
+  });
+});
+
+describe("wiring the outcome update into the apply run (#123)", () => {
+  /** SSM/Secrets double keyed by parameter name (the sibling describe's shape). */
+  function fakeAwsClient(values = {}) {
+    const client = {
+      sent: [],
+      send: vi.fn(async (command) => {
+        client.sent.push(command.input);
+        if (command.input.Names) {
+          const names = command.input.Names;
+          return {
+            Parameters: names
+              .filter((name) => name in values)
+              .map((name) => ({ Name: name, Value: values[name] })),
+            InvalidParameters: names.filter((name) => !(name in values)),
+          };
+        }
+        return { SecretString: values[command.input.SecretId] };
+      }),
+      destroy: () => {},
+    };
+    return client;
+  }
+
+  const environmentKeys = [
+    "AWS_REGION",
+    "MEM9_APPROVAL_HASH",
+    "MEM9_DB_HOST",
+    "MEM9_DB_NAME",
+    "MEM9_DB_PORT",
+    "MEM9_DB_SECRET",
+    "MEM9_SLACK_APPROVAL_CHANNEL",
+    "MEM9_SSM_PREFIX",
+    "MEM9_TENANT_ID",
+    "SLACK_BOT_TOKEN",
+  ];
+  afterEach(() => {
+    for (const key of environmentKeys) delete process.env[key];
+  });
+
+  it("TC-SLACKAPP-125 the apply run reports its outcome once, with the numbers it actually achieved", async () => {
+    // Three approved, one edited between the scan and the re-read. The apply
+    // deletes two and skips one, and the message has to say two — the count the
+    // operator would otherwise take on faith.
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+    writeFileSync(idsFile, "d1\nd2\nd3\n");
+    const server = fakeServer([memory("d1", "a"), memory("d2", "b"), memory("d3", "c")]);
+    const llm = fakeLlm([
+      [
+        { id: "d1", verdict: "DELETE", reason: "stale" },
+        { id: "d2", verdict: "DELETE", reason: "stale" },
+        { id: "d3", verdict: "DELETE", reason: "stale" },
+      ],
+    ]);
+    const deps = baseDeps(server, llm, dir);
+    const realFetch = server.fetchImpl;
+    let mutated = false;
+    deps.fetchImpl = vi.fn(async (url, opts = {}) => {
+      if (!mutated && /memories\/[^/?]+$/.test(String(url))) {
+        mutated = true;
+        const d = server.store.get("d1");
+        d.content = "edited concurrently";
+        d.version += 1;
+      }
+      return realFetch(url, opts);
+    });
+    const reportOutcome = vi.fn(async () => true);
+    const result = await runCleanup(
+      baseOpts({ apply: true, idsFile }),
+      { ...deps, reportOutcome },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.capUsed).toBe(2);
+    expect(result.skippedLww).toBe(1);
+    // Once — not per decision and not per flush. A message updated three times
+    // would show intermediate counts as if they were outcomes.
+    expect(reportOutcome).toHaveBeenCalledTimes(1);
+    const reported = reportOutcome.mock.calls[0][0];
+    expect(reported.result.capUsed).toBe(2);
+    expect(reported.result.skippedLww).toBe(1);
+    expect(reported.result.exitCode).toBe(0);
+    // The stamp is the run's clock, not `Date.now()`: a container whose report is
+    // dated by wall time while everything else uses the injected clock makes two
+    // timestamps on one run disagree.
+    expect(reported.appliedAt).toBe("2026-07-31T00:00:00.000Z");
+  });
+
+  it("TC-SLACKAPP-126 a dry run and an unreported apply both leave the message alone", async () => {
+    // The review run posts; it must not also UPDATE, and the #102 operator CLI has
+    // no Slack at all — an apply with no dep must run to completion rather than
+    // throwing on a missing function.
+    const dir = tempDir();
+    const server = fakeServer([memory("d1", "a")]);
+    const llm = fakeLlm([[{ id: "d1", verdict: "DELETE", reason: "stale" }]]);
+    const reportOutcome = vi.fn(async () => true);
+    const dry = await runCleanup(baseOpts({ apply: false }), {
+      ...baseDeps(server, llm, dir),
+      reportOutcome,
+    });
+    expect(dry.exitCode).toBe(0);
+    expect(reportOutcome).not.toHaveBeenCalled();
+
+    const dir2 = tempDir();
+    const server2 = fakeServer([memory("d1", "a")]);
+    const llm2 = fakeLlm([[{ id: "d1", verdict: "DELETE", reason: "stale" }]]);
+    const plain = await runCleanup(
+      baseOpts({ apply: true }),
+      baseDeps(server2, llm2, dir2),
+    );
+    expect(plain.exitCode).toBe(0);
+    expect(server2.store.get("d1").state).toBe("deleted");
+  });
+
+  it("TC-SLACKAPP-127 a failed report does not change the exit code of a completed apply", async () => {
+    // The deletions are done and irreversible. A non-zero exit here would alarm on
+    // a successful apply, and the callback's stale-claim recovery would let a
+    // retried task re-apply ids that are already gone.
+    const dir = tempDir();
+    const server = fakeServer([memory("d1", "a")]);
+    const llm = fakeLlm([[{ id: "d1", verdict: "DELETE", reason: "stale" }]]);
+    const log = vi.fn();
+    const result = await runCleanup(baseOpts({ apply: true }), {
+      ...baseDeps(server, llm, dir),
+      log,
+      reportOutcome: vi.fn(async () => {
+        throw new Error("SENTINEL-REPORT-EXPLODED");
+      }),
+    });
+    expect(result.exitCode).toBe(0);
+    expect(server.store.get("d1").state).toBe("deleted");
+    // Loud, though: a systematically broken report must not be invisible.
+    expect(log.mock.calls.map(String).join("\n")).toMatch(/SENTINEL-REPORT-EXPLODED/u);
+  });
+
+  it("TC-SLACKAPP-128 the claim's coordinates reach the report dep the container builds", async () => {
+    // End of the chain the offer started: offered record → claim → materialize →
+    // this dep → `chat.update`. Every other link is tested; this one carries the
+    // coordinates out of the read that was already happening, which is the link
+    // most likely to be forgotten because nothing else needs them.
+    const ids = ["m-1", "m-2"];
+    const hash = contentHash(ids.join("\n"));
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+    Object.assign(process.env, {
+      AWS_REGION: "ap-northeast-1",
+      MEM9_DB_HOST: "writer.example.com",
+      MEM9_DB_NAME: "mem9",
+      MEM9_DB_PORT: "5432",
+      MEM9_DB_SECRET: JSON.stringify({ username: "mem9", password: "fixture-password" }),
+      MEM9_SSM_PREFIX: "/mem9-on-aws/prod",
+      MEM9_TENANT_ID: TENANT,
+      MEM9_APPROVAL_HASH: hash,
+      // The apply task's role holds ssm:GetParameters under approvals/* ONLY, so
+      // the token arrives through the task definition's `ssm:` block, already
+      // decrypted. A GetParameters read of slack/bot-token here is AccessDenied.
+      SLACK_BOT_TOKEN: "xoxb-fixture-not-a-real-token",
+    });
+    const ssm = {
+      send: vi.fn(async (command) => ({
+        Parameters: (command.input.Names ?? [])
+          .filter((n) => n.endsWith(`approvals/approved-${hash}`))
+          .map((name) => ({
+            Name: name,
+            Value: JSON.stringify({
+              stage: "prod",
+              hash,
+              ids,
+              claimedAt: "2026-08-05T00:05:00.000Z",
+              messageTs: "1754400000.000100",
+              messageChannel: "C0APPROVAL",
+            }),
+          })),
+        InvalidParameters: [],
+      })),
+      destroy: () => {},
+    };
+    const slackCalls = [];
+    const fetchImpl = vi.fn(async (url, options = {}) => {
+      slackCalls.push({ url: String(url), body: JSON.parse(options.body) });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: true, cap: 50, idsFile },
+      {
+        Client: class {
+          async connect() {}
+          async query() {
+            return { rows: [{ locked: true }] };
+          }
+          async end() {}
+        },
+        ssm,
+        secrets: fakeAwsClient(),
+        getToken: vi.fn(),
+        fromNodeProviderChain: vi.fn(),
+        fetchImpl,
+      },
+    );
+
+    expect(production.deps.reportOutcome).toBeTypeOf("function");
+    await production.deps.reportOutcome({
+      result: { capUsed: 2, skippedLww: 0, skippedByFilter: 0, exitCode: 0 },
+      appliedAt: "2026-08-05T04:00:00.000Z",
+    });
+    expect(slackCalls).toHaveLength(1);
+    expect(slackCalls[0].url).toBe("https://slack.com/api/chat.update");
+    expect(slackCalls[0].body.ts).toBe("1754400000.000100");
+    expect(slackCalls[0].body.channel).toBe("C0APPROVAL");
+    // No ids ANYWHERE on the way through, not just on the message. The claim the
+    // container carries is the object this dep closes over, so an id list added to
+    // `materializeApprovedIds`'s return would reach the message body the moment
+    // anything spread the claim into it — asserted on both so the omission is a
+    // property of the data, not of one call site's field list.
+    expect(JSON.stringify(slackCalls[0].body)).not.toContain("m-1");
+    expect(slackCalls[0].body.text).toMatch(/2\b[^0-9]*2\b/u);
+    // The hash identifies WHICH approval was applied, and it is the only handle an
+    // operator has for correlating this message with the task log and the claim
+    // parameter. A message without it says a cleanup happened but not which one.
+    expect(JSON.stringify(slackCalls[0].body)).toContain(hash);
+    await production.close();
+  });
+
+  it("TC-SLACKAPP-129 a review run builds no report dep, and a hash-driven run with no token still applies", async () => {
+    // Two independent absences, both of which must degrade rather than fail: a
+    // review run has no claim to update against, and a token misconfiguration must
+    // not stop deletions the operator already approved — it must cost the audit
+    // update and say so.
+    Object.assign(process.env, {
+      AWS_REGION: "ap-northeast-1",
+      MEM9_SSM_PREFIX: "/mem9-on-aws/prod",
+      MEM9_TENANT_ID: TENANT,
+    });
+    const review = await createCleanupDeps(
+      { stage: "prod", apply: false, cap: 50 },
+      { ssm: fakeAwsClient(), getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
+    );
+    expect(review.deps.reportOutcome).toBeUndefined();
+    await review.close();
+
+    const ids = ["m-1"];
+    const hash = contentHash(ids.join("\n"));
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+    Object.assign(process.env, {
+      MEM9_DB_HOST: "writer.example.com",
+      MEM9_DB_NAME: "mem9",
+      MEM9_DB_PORT: "5432",
+      MEM9_DB_SECRET: JSON.stringify({ username: "mem9", password: "fixture-password" }),
+      MEM9_APPROVAL_HASH: hash,
+    });
+    delete process.env.SLACK_BOT_TOKEN;
+    const ssm = fakeAwsClient({
+      [`/mem9-on-aws/prod/approvals/approved-${hash}`]: JSON.stringify({
+        stage: "prod",
+        hash,
+        ids,
+        claimedAt: "2026-08-05T00:05:00.000Z",
+        messageTs: "1754400000.000100",
+        messageChannel: "C0APPROVAL",
+      }),
+    });
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: true, cap: 50, idsFile },
+      {
+        Client: class {
+          async connect() {}
+          async query() {
+            return { rows: [{ locked: true }] };
+          }
+          async end() {}
+        },
+        ssm,
+        secrets: fakeAwsClient(),
+        getToken: vi.fn(),
+        fromNodeProviderChain: vi.fn(),
+      },
+    );
+    // The ids were still materialized — the apply is unaffected.
+    expect(readFileSync(idsFile, "utf8")).toBe("m-1\n");
+    expect(production.deps.reportOutcome).toBeUndefined();
+    await production.close();
   });
 });
