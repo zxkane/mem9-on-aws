@@ -24,7 +24,13 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Deps first (layer cache). The sidecar uses the token dependencies; the
-# consolidation entrypoint additionally uses PostgreSQL and SNS.
+# consolidation entrypoint additionally uses PostgreSQL and SNS, and the
+# cleanup-apply entrypoint (#123) adds SSM, Secrets Manager, and Cloud Map. Every
+# AWS client in those two files is imported LAZILY so the operator CLI pays only
+# for the paths its flags reach — which also means a missing one is invisible
+# until that exact path runs, i.e. after a Slack approval has been spent. The
+# RUN guard below is a STATIC import check and cannot see them, so
+# scripts/cleanup-image-contract.test.mjs pins this dependency list instead.
 COPY docker/llm-proxy/package*.json ./
 RUN npm ci --omit=dev --no-audit --no-fund
 
@@ -39,9 +45,16 @@ COPY scripts/memory-cleanup.mjs /app/scripts/memory-cleanup.mjs
 COPY scripts/memory-consolidation.mjs /app/scripts/memory-consolidation.mjs
 
 # Fail the BUILD, not the weekly run, if that import graph ever breaks again.
+# Per entrypoint, not once: both COPY the sidecar as `../docker/llm-proxy/`, but a
+# guard on one file says nothing about the other's own imports — and the cleanup
+# entrypoint is started by a Slack click, where a MODULE_NOT_FOUND costs an
+# approval that is already claimed and cannot be re-clicked.
 RUN node --input-type=module \
       -e "await import('/app/scripts/memory-consolidation.mjs')" \
     && echo "consolidation entrypoint imports OK"
+RUN node --input-type=module \
+      -e "await import('/app/scripts/memory-cleanup.mjs')" \
+    && echo "cleanup entrypoint imports OK"
 
 # Listens on LLM_PROXY_PORT (default 8082); mem9 reaches it at
 # http://localhost:8082/v1. Not published outside the task — localhost only.

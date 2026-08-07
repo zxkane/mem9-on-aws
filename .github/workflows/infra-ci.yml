@@ -196,6 +196,7 @@ jobs:
           shellcheck scripts/deploy-workload-permissions-boundary.sh
           shellcheck scripts/rollout-workload-permissions-boundary.sh
           shellcheck scripts/run-consolidation-task.sh
+          shellcheck scripts/run-slack-approval-e2e.sh
 
       - name: PostgreSQL durable ingest integration tests
         run: bash scripts/run-ingest-queue-integration.sh
@@ -342,6 +343,16 @@ jobs:
           # check. Read at synth time, so it must be set here — a deploy without it
           # silently strips the authorizer and reopens the finding.
           MEM9_FACADE_AUTHORIZER_ENABLED: "1"
+          # Slack approval (#123). Opt-in through repo variables/secrets rather than
+          # a literal "1": infra/slack-approval.ts FAILS SYNTHESIS when the flag is
+          # set and either secret is unseeded, and GitHub hands an unset secret to
+          # the job as an EMPTY STRING — so hardcoding the flag would break every
+          # PR on a repo that has not seeded a Slack app. Unset leaves the whole
+          # stack ABSENT (not present-and-idle) and the E2E step below skips.
+          MEM9_SLACK_APPROVAL_ENABLED: ${{ vars.MEM9_SLACK_APPROVAL_ENABLED }}
+          MEM9_SLACK_APPROVAL_CHANNEL: ${{ vars.MEM9_SLACK_APPROVAL_CHANNEL }}
+          SST_SECRET_SlackBotToken: ${{ secrets.SLACK_BOT_TOKEN }}
+          SST_SECRET_SlackSigningSecret: ${{ secrets.SLACK_SIGNING_SECRET }}
         run: |
           # PR_NUMBER comes from GitHub's pull_request payload (integer);
           # validate to short-circuit any injection risk.
@@ -414,6 +425,28 @@ jobs:
           AWS_REGION: ap-northeast-1
         run: bash scripts/run-oauth-facade-smoke.sh
 
+      - name: Slack approval E2E (preview)
+        # TC-SLACKAPP-090. A signed synthetic interaction through the deployed
+        # façade: the handler distinguishes Slack from anyone else ONLY by the
+        # signature, so this exercises the identical path a real click takes,
+        # plus everything the unit tests inject (API Gateway routing, the
+        # Lambda's own SSM/ECS grants, the task definition, the entrypoint).
+        # Self-skipping when the stage seeded no Slack secret, because approval
+        # is gated on MEM9_SLACK_APPROVAL_ENABLED at synth time — a hard failure
+        # there would block every PR on a feature the stage does not deploy.
+        #
+        # PREVIEW ONLY, and deliberately not mirrored into deploy-prod. The harness
+        # OVERWRITES `approvals/offered` to seed its synthetic id, so on prod it
+        # would destroy a pending human approval — the operator's next click would
+        # be answered against CI's record — and it approves a DELETION against the
+        # live database. The per-PR stage is disposable and holds only bootstrap
+        # data, which is what makes the same script safe there.
+        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        shell: bash
+        env:
+          STAGE: ${{ steps.deploy.outputs.stage }}
+          AWS_REGION: ap-northeast-1
+        run: bash scripts/run-slack-approval-e2e.sh
 
       - name: Auto-cleanup on deploy failure
         # Best-effort — if the deploy half-applied resources, remove them so the

@@ -35,6 +35,10 @@ import { randomBytes } from "node:crypto";
 
 import { loadConfig, type FacadeConfig } from "./config.js";
 import {
+  handleSlackInteraction,
+  type SlackDeps,
+} from "./slack-interactions.js";
+import {
   COGNITO_STATE_MAX_LENGTH,
   SIGNED_PAYLOAD_TTL_SECONDS,
   signAuthorizationCode,
@@ -166,6 +170,17 @@ function selfBaseUrl(event: ApiGwEvent): string {
   return `https://${host}`;
 }
 
+/**
+ * Container name in the cleanup apply task definition, following the
+ * `Mem9Consolidation` convention in `scripts/run-consolidation-task.sh`.
+ *
+ * A `containerOverrides` entry must name a container in the task definition, so
+ * this string and the infra definition are a contract that spans two files with
+ * nothing linking them: the infra side (TC-SLACKAPP-087) has to assert this same
+ * literal, because a mismatch is not something the unit tests here can see.
+ */
+const CLEANUP_CONTAINER_NAME = "Mem9Cleanup";
+
 function logEvent(name: string, fields: Record<string, unknown>): void {
   // One structured line per OAuth step. No token bodies — only grant_type /
   // outcome / non-secret query params.
@@ -209,15 +224,47 @@ export function isAllowedClientRedirect(
   return url.protocol === "https:" && allowedHttpsUris.includes(uri);
 }
 
-/** Pure router — all façade logic; config injected so tests need no AWS. */
+/**
+ * Pure router — all façade logic; config injected so tests need no AWS.
+ *
+ * `slack` is optional, and its absence is the feature flag: the Slack approval
+ * callback is only reachable when the entrypoint could build its deps (issue
+ * #123). A boolean flag alongside possibly-absent deps would allow the state
+ * "enabled but unconfigured", which is a runtime crash on the first click; making
+ * the deps themselves the flag removes that state from the type.
+ */
 export async function route(
   event: ApiGwEvent,
   cfg: FacadeConfig,
+  slack?: SlackDeps,
 ): Promise<ApiGwResponse> {
   const path = event.rawPath ?? event.path ?? "/";
   const method =
     event.requestContext?.http?.method ?? event.httpMethod ?? "GET";
   const base = selfBaseUrl(event);
+
+  // Matched FIRST, not merely before the catch-all. The catch-all forwards every
+  // unmatched path to the AgentCore Gateway, so a Slack payload that fell through
+  // would be sent to a component with no business seeing operator-approval data
+  // and the Gateway's error shape would be returned to Slack. Placing it here
+  // makes that impossible by construction instead of by ordering discipline, and
+  // the path cannot collide with an OAuth route.
+  //
+  // Absent deps answer 404, not a fallthrough and not 401: with no signing secret
+  // there is no key any request to this path could be authenticated against, so
+  // the endpoint genuinely is not deployed. (A CONFIGURED route with an empty
+  // secret is different — that is 401 from the handler's own fail-closed branch,
+  // because the endpoint is there and the request cannot be trusted.)
+  if (path === "/slack/interactions") {
+    if (!slack) {
+      logEvent("slack_interactions_unconfigured", { method });
+      return json(404, {
+        error: "not_found",
+        error_description: "The Slack approval callback is not enabled on this stage.",
+      });
+    }
+    return handleSlackInteraction(event, slack);
+  }
 
   // Per RFC 9728 §3.1 / RFC 8414 §3.1, a client that found the resource at
   // `<base>/mcp` queries the metadata at the resource-suffixed well-known path
@@ -743,8 +790,217 @@ function getConfig(): Promise<FacadeConfig> {
   return configPromise;
 }
 
-export async function handler(event: ApiGwEvent): Promise<ApiGwResponse> {
-  return route(event, await getConfig());
+/** Minimal client surface, injected so the unit tests reach no AWS. */
+interface AwsClientLike {
+  // `input: unknown` rather than `Record<string, unknown>`: AWS SDK command inputs
+  // are specific interfaces with no index signature, so the narrower type forced a
+  // double cast at every call site — casts that meant the constraint was never
+  // checking anything anyway.
+  send(command: { input: unknown }): Promise<unknown>;
+}
+
+/**
+ * Read the apply task's ECS inputs from the stage's SSM tree.
+ *
+ * The same parameters `scripts/run-consolidation-task.sh` reads, under the
+ * cleanup prefix — so this does not depend on the apply task's infra being
+ * authored yet, only on the names being right. Every value is required: a missing
+ * `task-def-arn` reaching `RunTask` as `undefined` would come back as an opaque
+ * validation error AFTER the approval claim was already written.
+ */
+async function readTaskInputs(
+  ssm: AwsClientLike,
+  ssmPrefix: string,
+): Promise<{ cluster: string; taskDef: string; securityGroups: string[]; subnets: string[] }> {
+  const { GetParametersCommand } = await import("@aws-sdk/client-ssm");
+  const prefix = `${ssmPrefix}/cleanup`;
+  // Keyed by the field each name populates, not positional: read back by index, a
+  // reordering would silently hand `cluster` the task-def ARN. Both are non-empty
+  // strings, so the required-value check below would pass and the mistake would
+  // surface from ECS as an opaque validation error.
+  const names = {
+    cluster: `${prefix}/cluster-name`,
+    taskDef: `${prefix}/task-def-arn`,
+    securityGroups: `${prefix}/task-sg-id`,
+    subnets: `${prefix}/subnet-ids`,
+  };
+  const res = (await ssm.send(
+    new GetParametersCommand({ Names: Object.values(names) }),
+  )) as { Parameters?: Array<{ Name?: string; Value?: string }> };
+  const byName = new Map((res.Parameters ?? []).map((p) => [p.Name, p.Value ?? ""]));
+  const get = (name: string): string => {
+    const v = byName.get(name);
+    // Named in the message rather than reported as a generic failure: the operator
+    // reading this needs to know WHICH parameter the deploy did not write.
+    if (!v) throw new Error(`missing SSM parameter ${name}`);
+    return v;
+  };
+  // StringList parameters arrive comma-joined; `RunTask` wants arrays.
+  const list = (name: string): string[] =>
+    get(name)
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+  return {
+    cluster: get(names.cluster),
+    taskDef: get(names.taskDef),
+    securityGroups: list(names.securityGroups),
+    subnets: list(names.subnets),
+  };
+}
+
+/**
+ * Build the Slack callback deps for this stage, or `undefined` if the stage has
+ * no Slack app.
+ *
+ * `undefined` is the feature flag (see `route`). Returning it rather than a
+ * half-populated dep set is deliberate: a dep set with an empty `stage` would
+ * authenticate clicks correctly and then have `loadOffered`'s stage guard refuse
+ * every one of them, which reads as a Slack problem and is really a deploy
+ * problem. Throwing on a secret-without-stage is louder and cheaper to diagnose.
+ *
+ * The AWS clients are constructed lazily INSIDE the closures, not here: a cold
+ * start that never receives a Slack click should not pay for an SSM or ECS client,
+ * and `handler.ts` must stay importable in a unit test with no ECS SDK present.
+ */
+export function buildSlackDeps(
+  cfg: FacadeConfig,
+  env: Record<string, string | undefined> = process.env,
+  clients: { ssm?: AwsClientLike; ecs?: AwsClientLike } = {},
+): SlackDeps | undefined {
+  if (!cfg.slackSigningSecret) return undefined;
+  const ssmPrefix = env.SSM_PREFIX;
+  const stage = env.STAGE;
+  if (!ssmPrefix || !stage) {
+    throw new Error(
+      "a Slack signing secret is configured but SSM_PREFIX or STAGE is not; " +
+        "refusing to build a Slack callback that would reject every approval",
+    );
+  }
+  // One resolution point for the SSM client, so an injected client is honoured on
+  // EVERY call. Two of these closures previously constructed their own, which made
+  // them unreachable from a test that thought it had injected one — the test then
+  // failed against real AWS instead of against the code.
+  const ssmClient = async (): Promise<AwsClientLike> => {
+    if (clients.ssm) return clients.ssm;
+    const { SSMClient } = await import("@aws-sdk/client-ssm");
+    return new SSMClient({});
+  };
+  return {
+    signingSecret: cfg.slackSigningSecret,
+    stage,
+    ssmPrefix,
+    now: () => Date.now(),
+    getParameter: async (name) => {
+      // `GetParameters` (plural) for a single name, NOT `GetParameter`. They are
+      // distinct IAM actions and the workload permissions boundary's action
+      // ceiling admits only the plural — the rest of the project reads through it,
+      // so nothing needed the singular until this handler. The two are otherwise
+      // interchangeable here, which is what makes the mistake invisible: same
+      // parameter, same value back, and only IAM can tell them apart, so the
+      // failure would be an AccessDenied on the first real Slack click.
+      const { GetParametersCommand } = await import("@aws-sdk/client-ssm");
+      const res = (await (await ssmClient()).send(
+        new GetParametersCommand({ Names: [name] }),
+      )) as { Parameters?: Array<{ Name?: string; Value?: string }> };
+      // An absent name comes back in `InvalidParameters` and is simply missing
+      // from `Parameters`, so there is no empty-value case to distinguish.
+      return res.Parameters?.find((p) => p.Name === name)?.Value ?? null;
+    },
+    putParameter: async (name, value, opts) => {
+      const { PutParameterCommand } = await import("@aws-sdk/client-ssm");
+      await (await ssmClient()).send(
+        new PutParameterCommand({
+          Name: name,
+          Value: value,
+          // Plain String, never SecureString: the workload boundary admits neither
+          // `kms:Encrypt` nor `kms:GenerateDataKey`, so a SecureString write would
+          // be denied at runtime. That constraint is exactly why an approval record
+          // may hold ids and a hash and never memory content.
+          Type: "String",
+          Overwrite: opts?.overwrite ?? false,
+        }),
+      );
+    },
+    runTask: async ({ hash }) => {
+      const inputs = await readTaskInputs(await ssmClient(), ssmPrefix);
+
+      const { ECSClient, RunTaskCommand } = await import("@aws-sdk/client-ecs");
+      const ecs = clients.ecs ?? new ECSClient({});
+
+      const res = (await ecs.send(
+        new RunTaskCommand({
+          cluster: inputs.cluster,
+          taskDefinition: inputs.taskDef,
+          launchType: "FARGATE",
+          networkConfiguration: {
+            awsvpcConfiguration: {
+              subnets: inputs.subnets,
+              securityGroups: inputs.securityGroups,
+              // Private subnets reached through the existing NAT path. The
+              // argument that chose ECS over a VPC-attached Lambda was "no new
+              // network surface", and ENABLED would quietly add one.
+              assignPublicIp: "DISABLED",
+            },
+          },
+          overrides: {
+            containerOverrides: [
+              {
+                name: CLEANUP_CONTAINER_NAME,
+                // Only the HASH is passed. `--ids` takes a FILE, so the ids cannot
+                // ride an override anyway, and they are already in SSM under the
+                // claim this hash names — so the task reads them from the record
+                // that was actually approved rather than from a list a caller
+                // supplied. That closes the gap the signature does not cover: it
+                // proves the click came from the workspace, never that any ids in
+                // the request are the ids the classifier chose.
+                environment: [{ name: "MEM9_APPROVAL_HASH", value: hash }],
+              },
+            ],
+          },
+        }),
+      )) as {
+        tasks?: Array<{ taskArn?: string }>;
+        failures?: Array<{ reason?: string; detail?: string }>;
+      };
+
+      // ECS answers 200 with an EMPTY `tasks[]` and a populated `failures[]` when
+      // placement fails, so reading `tasks[0].taskArn` unchecked would resolve
+      // `undefined` — and the caller would stamp the claim and tell the operator an
+      // apply started that never did. Same trap `run-bootstrap-task.sh` calls out.
+      const taskArn = res.tasks?.[0]?.taskArn;
+      if (!taskArn) {
+        const why = (res.failures ?? [])
+          .map((f) => [f.reason, f.detail].filter(Boolean).join(": "))
+          .join("; ");
+        throw new Error(`RunTask started no task${why ? `: ${why}` : ""}`);
+      }
+      return taskArn;
+    },
+    log: (message) => logEvent("slack_interactions", { message }),
+  };
+}
+
+/**
+ * Lambda entrypoint.
+ *
+ * `overrides` exists only so a test can exercise THIS wiring — that the built
+ * Slack deps actually reach `route`. Without it, removing `buildSlackDeps(cfg)`
+ * from this line leaves every unit test green while the deployed Lambda 404s every
+ * approval click, which is the one defect no isolated test of either function can
+ * see. It defaults to the real cold-start path and Lambda never passes a second
+ * argument.
+ */
+export async function handler(
+  event: ApiGwEvent,
+  overrides: {
+    loadConfig?: () => Promise<FacadeConfig>;
+    env?: Record<string, string | undefined>;
+    clients?: { ssm?: AwsClientLike; ecs?: AwsClientLike };
+  } = {},
+): Promise<ApiGwResponse> {
+  const cfg = await (overrides.loadConfig ?? getConfig)();
+  return route(event, cfg, buildSlackDeps(cfg, overrides.env, overrides.clients));
 }
 
 /** Test-only: drop the cold-start config singleton between cases. */

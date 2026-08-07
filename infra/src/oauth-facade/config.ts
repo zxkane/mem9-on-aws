@@ -48,6 +48,12 @@ export interface FacadeConfig {
   allowedClientRedirectUris: string[];
   /** HMAC key for state signing; empty disables the proxy (503). */
   hmacKey: string;
+  /**
+   * Slack app signing secret (issue #123). Empty means no Slack app is
+   * configured for this stage; the callback route then answers 404 and the OAuth
+   * façade is unaffected.
+   */
+  slackSigningSecret: string;
 }
 
 /** Minimal SSM surface used here — injected so tests need no AWS. */
@@ -137,12 +143,19 @@ export async function resolveSsm(
   userClientId: string;
   userClientSecret: string;
   allowedCallbackUrls: string;
+  slackSigningSecret: string;
 }> {
   const names = [
     `${prefix}/gateway/url`,
     `${prefix}/cognito/reader/client-id`,
     `${prefix}/cognito/reader/client-secret`,
     `${prefix}/oauth/allowed-callback-urls`,
+    // Stage-scoped by the prefix, so a preview Lambda cannot verify prod's
+    // approval clicks. Fetched in the SAME call as the OAuth values because
+    // `GetParameters` tolerates absent names (they come back in `InvalidParameters`
+    // rather than failing the call), which is what lets it be optional without a
+    // second round trip.
+    `${prefix}/slack/signing-secret`,
   ];
   const res = await ssm.send(
     new GetParametersCommand({ Names: names, WithDecryption: true }),
@@ -160,6 +173,11 @@ export async function resolveSsm(
     userClientId: get(names[1]!),
     userClientSecret: get(names[2]!),
     allowedCallbackUrls: get(names[3]!),
+    // Deliberately NOT `get`: every MCP client's auth loads through this
+    // function, so a stage with no Slack app must resolve to empty rather than
+    // throw. Enabling Slack on one stage must not be able to take OAuth down on
+    // another.
+    slackSigningSecret: byName.get(names[4]!) ?? "",
   };
 }
 
@@ -193,5 +211,6 @@ export async function loadConfig(
     ),
     // Empty (not missing) is the intended "proxy disabled" sentinel.
     hmacKey: env.OAUTH_STATE_HMAC_KEY ?? "",
+    slackSigningSecret: resolved.slackSigningSecret,
   };
 }

@@ -1068,7 +1068,84 @@ only after the initial cleanup and a report-only run show actionable drift.
 Production then runs Sunday at 03:00 UTC; previews synthesize a disabled
 schedule for infrastructure coverage.
 
+## Slack approval for cleanup deletions
 
+The step above — read the review list, copy ids into a local file, run
+`--apply --ids` — is the manual path, and it stays supported. Slack approval
+(issue #123; test cases: `docs/test-cases/slack-approval-loop.md`) replaces the
+copying with a click: the review run posts the list to a private channel with
+Approve/Reject buttons, and Approve starts the same `--apply --ids` task.
+
+What a click can and cannot do is the whole design:
+
+- The button carries a **content hash**, never ids. A Slack action `value` is
+  capped at 2000 characters, and more importantly the ids applied come from the
+  `{prefix}/approvals/offered` record, not from the payload — the signature
+  proves the request came from the workspace, not that the ids in it are the ones
+  the classifier chose.
+- A click whose hash no longer matches the current record is refused. That is
+  what stops an approval of a list read last week from applying to a corpus that
+  has since changed.
+- Exactly one delivery wins. Slack redelivers after 3 seconds, so the claim is
+  written with `Overwrite: false` and the loser branches on the record's
+  `taskArn`. Both approval records are plain `String` parameters holding **ids
+  and a hash only, never memory content**; snippets go to Slack and CloudWatch
+  Logs.
+- `--cap` still bounds a single click's blast radius (50 by default, passed
+  explicitly by the task definition), and the apply task holds the same advisory
+  mutex as scheduled consolidation.
+
+The whole feature is **absent** unless `MEM9_SLACK_APPROVAL_ENABLED=1` at deploy
+time: disabled means no task definition and no grants, because a task definition
+that exists is one `RunTask` can start. Enabling it needs a Slack app with
+`chat:write`, its Request URL pointed at `{facade-url}/slack/interactions`, and
+four values at deploy time — the flag and channel id as repository variables, the
+bot token and signing secret as repository secrets:
+
+```bash
+gh variable set MEM9_SLACK_APPROVAL_ENABLED --body 1
+gh variable set MEM9_SLACK_APPROVAL_CHANNEL --body "<private-channel-id>"
+gh secret set SLACK_BOT_TOKEN
+gh secret set SLACK_SIGNING_SECRET
+```
+
+Synthesis **fails** when the flag is set and either secret is unseeded. That is
+deliberate: GitHub exposes an unset secret as an empty string, so the failure it
+replaces is a Slack app that answers 401 to every click after a completely green
+deploy.
+
+Two prerequisites are not part of an application deploy. The workload
+permissions boundary must already admit the approval-record write
+(`ssm:PutParameter` scoped to `parameter/mem9-on-aws/*/approvals/*`) — until that
+rollout runs, the claim is denied at runtime and the click reports that the
+approval could not be recorded. Use a **private** channel: anyone who can click
+can approve a deletion, and the message shows every offered id and snippet.
+
+**Nothing scheduled posts the review list yet.** The weekly Scheduler target is
+`memory-consolidation.mjs`, which never executes a DELETE, and this stack's
+Fargate task is the `--apply` half. The offer is produced by a
+`memory-cleanup.mjs` **dry run** with a channel configured — so today that is an
+operator-initiated command, and a click can only ever apply a list a human just
+asked for:
+
+```bash
+MEM9_SLACK_APPROVAL_CHANNEL="<private-channel-id>" \
+  node scripts/memory-cleanup.mjs --stage prod \
+  --model openai.gpt-5.6-terra --effort high
+```
+
+The offer happens on the dry run and never on `--apply`: an apply that re-offered
+would overwrite the record its own claim was derived from, so a Slack redelivery
+mid-apply would be compared against a list the running task never saw. A failed
+offer exits **1** and keeps its decision file, which is what a manual
+`--apply --ids` reads.
+
+`scripts/run-slack-approval-e2e.sh` verifies a deployed stage by POSTing a
+correctly signed synthetic interaction (the handler distinguishes Slack from
+anyone else *only* by the signature) and then reading the approval record back by
+name. It refuses to run anywhere but a `pr-N` stage: it overwrites
+`approvals/offered`, which on a shared stage would destroy a pending human
+approval, and the id it approves is a deletion. CI runs it on preview only.
 
 ## License
 

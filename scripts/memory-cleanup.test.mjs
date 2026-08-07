@@ -1,6 +1,7 @@
 // Unit tests for scripts/memory-cleanup.mjs (issue #102).
 // Test IDs map to docs/test-cases/memory-cleanup.md. All I/O is faked through
 // the injected deps object — no network, no real filesystem outside tmpdirs.
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
@@ -9,18 +10,30 @@ import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  assertClaimParameterName,
+  buildApprovalMessage,
   buildCompleteChat,
+  buildOfferedRecord,
+  buildOutcomeMessage,
+  claimParameterName,
   contentHash,
+  createCleanupDeps,
   inactiveMemoryAdapter,
+  materializeApprovedIds,
   parseArgs,
+  postApprovalRequest,
+  updateApprovalMessage,
+  consensusDecisions,
   parseVerdicts,
   planDecisions,
   runCleanup,
   runListInactive,
   runRestore,
   snippetLogDir,
+  verdictSummary,
   ARG_SPECS,
   DURABLE_ONLY_RULES,
+  TOPICS,
   USAGE,
 } from "./memory-cleanup.mjs";
 
@@ -40,6 +53,10 @@ const TENANT = "tenant-key-0123456789abcdef";
 // computes, derived the same way rather than hardcoded, and shared by both tests
 // of the guard so they cannot disagree about where the tree ends.
 const SCRIPT_TREE = dirname(dirname(fileURLToPath(import.meta.url)));
+
+// The CLI under test, for the two cases that need a real process (TC-MEMRESTORE-061
+// and -071). Everything else in this file injects deps instead.
+const CLI = new URL("./memory-cleanup.mjs", import.meta.url).pathname;
 
 function memory(id, content, version = 1) {
   return { id, content, version, state: "active", memory_type: "insight" };
@@ -117,14 +134,62 @@ function fakeServer(initial) {
   return { store, calls, fetchImpl };
 }
 
-/** LLM fake: verdictsByBatch is an array of responses (JSON string or object) per call. */
+/**
+ * LLM fake: verdictsByBatch is an array of responses (JSON string or object) per
+ * call.
+ *
+ * Object-form verdicts get `topic: "engineering"` when the key is ABSENT, so the
+ * fake models a classifier that honours the #123 contract and the pre-existing
+ * cases stay about what they were written to test. Present-but-wrong is passed
+ * through untouched (`topic: null`, `topic: "bogus"`), which is how a case
+ * expresses a non-compliant response in object form; a raw JSON string is passed
+ * through verbatim either way.
+ */
 function fakeLlm(verdictsByBatch) {
   let call = 0;
   return vi.fn(async () => {
     const v = verdictsByBatch[Math.min(call, verdictsByBatch.length - 1)];
     call += 1;
-    return typeof v === "string" ? v : JSON.stringify({ verdicts: v });
+    if (typeof v === "string") return v;
+    return JSON.stringify({ verdicts: v.map(withTopic) });
   });
+}
+
+const withTopic = (v) => ("topic" in v ? v : { ...v, topic: "engineering" });
+
+/**
+ * SSM/Secrets Manager double, keyed by parameter name.
+ *
+ * `GetParameters` is the only read the workload boundary admits, so an absent name
+ * is echoed in `InvalidParameters` and simply MISSING from `Parameters` — never an
+ * exception. Fakes that threw would let a script relying on a throw pass here and
+ * silently read `undefined` in production.
+ *
+ * The name constraint is borrowed from the SERVICE (`assertClaimParameterName`)
+ * rather than accepting any string: a Map-keyed fake is precisely why a claim name
+ * carrying the `:` of `sha256:` passed this whole suite while PutParameter would
+ * have rejected it on every real click (TC-SLACKAPP-131).
+ */
+function fakeAwsClient(values = {}) {
+  const client = {
+    sent: [],
+    send: vi.fn(async (command) => {
+      client.sent.push(command.input);
+      if (command.input.Names) {
+        for (const name of command.input.Names) assertClaimParameterName(name);
+        const names = command.input.Names;
+        return {
+          Parameters: names
+            .filter((name) => name in values)
+            .map((name) => ({ Name: name, Value: values[name] })),
+          InvalidParameters: names.filter((name) => !(name in values)),
+        };
+      }
+      return { SecretString: values[command.input.SecretId] };
+    }),
+    destroy: () => {},
+  };
+  return client;
 }
 
 function baseDeps(server, llm, dir) {
@@ -149,7 +214,12 @@ function baseOpts(overrides = {}) {
   };
 }
 
-const keepAll = (memories) => memories.map((m) => ({ id: m.id, verdict: "KEEP", reason: "durable" }));
+// `topic` is required on every verdict (#123 / TC-SLACKAPP-051), so the fakes
+// emit it exactly as the real classifier now must. "engineering" is the neutral
+// default here: it is NOT protected, so a case that means to exercise the
+// protected-topic rule has to say so explicitly rather than inherit it.
+const keepAll = (memories) =>
+  memories.map((m) => ({ id: m.id, verdict: "KEEP", reason: "durable", topic: "engineering" }));
 
 describe("scan & pagination", () => {
   it("TC-MEMCLEAN-001 pages through windows and sees every memory once", async () => {
@@ -389,6 +459,120 @@ describe("apply, cap, --ids", () => {
     expect(result.skippedByFilter).toBe(1);
   });
 
+  it("TC-SLACKAPP-132 --ids refuses a MERGE outright, absorbed ids included", async () => {
+    // The privilege-escalation hole this closes. `buildOfferedRecord` offers
+    // DELETE verdicts only, so no MERGE can ever be in an approved list — but the
+    // filter checked `approved.has(decision.id)` on the SURVIVOR only, and a
+    // MERGE deletes its `absorbs[]` and rewrites the survivor's content. The
+    // Slack-triggered task re-classifies instead of replaying the reviewed
+    // artifact, so a fresh MERGE naming an approved id as its survivor deleted two
+    // memories the operator never saw and exited 0 reporting success.
+    const dir = tempDir();
+    const server = fakeServer([
+      memory("surv", "survivor"),
+      memory("frag-1", "fragment one"),
+      memory("frag-2", "fragment two"),
+    ]);
+    const llm = fakeLlm([
+      [
+        { id: "surv", verdict: "MERGE", reason: "r", merge_into: "surv", absorbs: ["frag-1", "frag-2"], merged_content: "MERGED" },
+        { id: "frag-1", verdict: "MERGE", reason: "r", merge_into: "surv" },
+        { id: "frag-2", verdict: "MERGE", reason: "r", merge_into: "surv" },
+      ],
+    ]);
+    const idsFile = join(dir, "approved.txt");
+    // The operator approved exactly the survivor id, as a DELETION.
+    writeFileSync(idsFile, "surv\n");
+    const deps = baseDeps(server, llm, dir);
+    const result = await runCleanup(baseOpts({ apply: true, idsFile }), deps);
+
+    // Nothing destroyed and nothing rewritten.
+    expect(server.store.get("frag-1").state).toBe("active");
+    expect(server.store.get("frag-2").state).toBe("active");
+    expect(server.store.get("surv").state).toBe("active");
+    expect(server.store.get("surv").content).toBe("survivor");
+    expect(result.capUsed).toBe(0);
+    // No write of ANY kind reached the server: asserted on the request log rather
+    // than only on the store, because a PUT that happened to write identical
+    // content would leave the store looking untouched.
+    expect(server.calls.filter((c) => c.method !== "GET")).toEqual([]);
+    // Counted AND logged: a silent skip is how a shortfall in the Slack outcome
+    // message becomes unexplainable.
+    expect(result.skippedByFilter).toBe(1);
+    const logged = deps.log.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toMatch(/refused under an approved-ids run/u);
+  });
+
+  it("TC-SLACKAPP-132 an approved id the re-classifier now KEEPs is reported, not silently dropped", async () => {
+    // The converse gap. An approved id whose fresh verdict is KEEP falls out at
+    // `destructiveCost === 0`, so it incremented nothing: the outcome message said
+    // "1 of 2 approved deletion(s)" with no note, which reads as a partial failure
+    // rather than a changed verdict.
+    const dir = tempDir();
+    const server = fakeServer([memory("d1", "x"), memory("d2", "y")]);
+    const llm = fakeLlm([
+      [
+        { id: "d1", verdict: "DELETE", reason: "noise" },
+        { id: "d2", verdict: "KEEP", reason: "durable now" },
+      ],
+    ]);
+    const idsFile = join(dir, "approved.txt");
+    writeFileSync(idsFile, "d1\nd2\n");
+    const result = await runCleanup(baseOpts({ apply: true, idsFile }), baseDeps(server, llm, dir));
+
+    expect(server.store.get("d1").state).toBe("deleted");
+    expect(server.store.get("d2").state).toBe("active");
+    expect(result.reclassified).toBe(1);
+    // Distinct from skippedByFilter: that counts things the operator did NOT
+    // approve, this counts things they DID.
+    expect(result.skippedByFilter).toBe(0);
+
+    const message = buildOutcomeMessage({
+      channel: "C1",
+      messageTs: "1.1",
+      hash: contentHash("d1\nd2"),
+      stage: "test",
+      approved: 2,
+      result,
+      appliedAt: "2026-08-05T04:00:00.000Z",
+    });
+    expect(JSON.stringify(message)).toMatch(/no longer classified as deletions/u);
+  });
+
+  it("TC-SLACKAPP-132 an approved id that matched no decision is not counted as reclassified", async () => {
+    // The two counts must not describe one id two contradictory ways. An id that
+    // appears in NO decision was never classified, so calling it "no longer
+    // classified as deletions" tells the operator the classifier changed its mind
+    // when in fact their list named something this run never saw — a typo, or an id
+    // from a different stage. `runCleanup` already reports those BY NAME, and that
+    // message is the one with the actionable fix.
+    const dir = tempDir();
+    const server = fakeServer([memory("d1", "x")]);
+    const llm = fakeLlm([[{ id: "d1", verdict: "DELETE", reason: "noise" }]]);
+    const idsFile = join(dir, "approved.txt");
+    writeFileSync(idsFile, "d1\nd-typo\n");
+    const deps = baseDeps(server, llm, dir);
+    const result = await runCleanup(baseOpts({ apply: true, idsFile }), deps);
+
+    expect(server.store.get("d1").state).toBe("deleted");
+    expect(result.reclassified).toBe(0);
+    expect(result.skippedByFilter).toBe(0);
+    const logged = deps.log.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toMatch(/1 approved id\(s\) matched no decision: d-typo/u);
+    expect(logged).not.toMatch(/no longer classified as deletions/u);
+
+    const message = buildOutcomeMessage({
+      channel: "C1",
+      messageTs: "1.1",
+      hash: contentHash("d1\nd-typo"),
+      stage: "test",
+      approved: 2,
+      result,
+      appliedAt: "2026-08-05T04:00:00.000Z",
+    });
+    expect(JSON.stringify(message)).not.toMatch(/no longer classified as deletions/u);
+  });
+
   it("TC-MEMCLEAN-033 MERGE recovery is hash-anchored (three-way)", async () => {
     const dir = tempDir();
     const decisions = {
@@ -447,7 +631,9 @@ describe("apply, cap, --ids", () => {
     const server = fakeServer(mems);
     const llm = fakeLlm([]);
     llm.mockImplementation(async (_p, batch) =>
-      JSON.stringify({ verdicts: batch.map((m) => ({ id: m.id, verdict: "DELETE", reason: "noise" })) }),
+      JSON.stringify({
+        verdicts: batch.map((m) => ({ id: m.id, verdict: "DELETE", reason: "noise", topic: "engineering" })),
+      }),
     );
     const result = await runCleanup(
       baseOpts({ apply: true, cap: 2000 }),
@@ -878,12 +1064,68 @@ describe("discovery", () => {
 
 describe("verdict parsing units", () => {
   it("parseVerdicts accepts valid shapes and rejects garbage", () => {
-    expect(parseVerdicts('{"verdicts":[{"id":"a","verdict":"KEEP","reason":"r"}]}')).toEqual([
-      { id: "a", verdict: "KEEP", reason: "r" },
+    expect(parseVerdicts('{"verdicts":[{"id":"a","verdict":"KEEP","reason":"r","topic":"engineering"}]}')).toEqual([
+      { id: "a", verdict: "KEEP", reason: "r", topic: "engineering" },
     ]);
     expect(() => parseVerdicts("nope")).toThrow();
     expect(() => parseVerdicts('{"verdicts":"x"}')).toThrow();
     expect(() => parseVerdicts('{"verdicts":[{"id":"a","verdict":"EXPLODE"}]}')).toThrow(/verdict/i);
+  });
+
+  it("TC-SLACKAPP-050 every known topic parses and survives onto the verdict", () => {
+    for (const topic of TOPICS) {
+      const [v] = parseVerdicts(
+        JSON.stringify({ verdicts: [{ id: "a", verdict: "KEEP", reason: "r", topic }] }),
+      );
+      expect(v.topic).toBe(topic);
+    }
+    // The set itself is pinned: silently adding a sixth topic would let the
+    // classifier route finance memories somewhere `protectedTopics` never looks.
+    expect([...TOPICS].sort()).toEqual([
+      "content",
+      "engineering",
+      "operations",
+      "other",
+      "personal-finance",
+    ]);
+  });
+
+  it("TC-SLACKAPP-051 a missing topic is malformed, never defaulted to `other`", () => {
+    expect(() =>
+      parseVerdicts('{"verdicts":[{"id":"a","verdict":"DELETE","reason":"r"}]}'),
+    ).toThrow(/topic/iu);
+    // Defaulting is the specific hazard: `other` is unprotected, so a batch
+    // whose model forgot the field would have every personal-finance memory in
+    // it silently eligible for deletion.
+    expect(() =>
+      parseVerdicts('{"verdicts":[{"id":"a","verdict":"KEEP","reason":"r"}]}'),
+    ).toThrow(/topic/iu);
+  });
+
+  it("TC-SLACKAPP-052 an unknown topic is malformed and the message never echoes it", () => {
+    const secretish = "personal-finance-但是我的密码是 hunter2";
+    let caught;
+    try {
+      parseVerdicts(
+        JSON.stringify({ verdicts: [{ id: "a", verdict: "KEEP", reason: "r", topic: secretish }] }),
+      );
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught?.name).toBe("MalformedResponse");
+    expect(caught.message).toMatch(/topic/iu);
+    // Fixed strings only — a response can carry memory content, and this error
+    // is logged.
+    expect(caught.message).not.toContain(secretish);
+    expect(caught.message).not.toContain("hunter2");
+  });
+
+  it("TC-SLACKAPP-053 a non-string topic is malformed, not a crash mid-plan", () => {
+    for (const topic of [["personal-finance"], { name: "other" }, 7, null, true]) {
+      expect(() =>
+        parseVerdicts(JSON.stringify({ verdicts: [{ id: "a", verdict: "KEEP", reason: "r", topic }] })),
+      ).toThrow(/topic/iu);
+    }
   });
 
   it("planDecisions never lets `absorbs` override an id's own verdict (TC-MEMCLEAN-014)", () => {
@@ -1169,7 +1411,8 @@ describe("LLM route", () => {
   });
 
   it("TC-MEMCLEAN-072: responses output_text parts reach parseVerdicts verbatim", async () => {
-    const verdicts = '{"verdicts":[{"id":"m1","verdict":"KEEP","reason":"durable"}]}';
+    const verdicts =
+      '{"verdicts":[{"id":"m1","verdict":"KEEP","reason":"durable","topic":"engineering"}]}';
     const { fetchImpl } = recorder([
       responsesReply({
         // Split across parts: the route must concatenate, not take the first.
@@ -1183,7 +1426,9 @@ describe("LLM route", () => {
 
     const raw = await completeChat("sys", [{ id: "m1" }]);
     expect(raw).toBe(verdicts);
-    expect(parseVerdicts(raw)).toEqual([{ id: "m1", verdict: "KEEP", reason: "durable" }]);
+    expect(parseVerdicts(raw)).toEqual([
+      { id: "m1", verdict: "KEEP", reason: "durable", topic: "engineering" },
+    ]);
   });
 
   it("TC-MEMCLEAN-073: a failed responses status throws instead of returning empty", async () => {
@@ -1356,10 +1601,10 @@ describe("LLM route", () => {
         const [s1, a1, a2, ...rest] = batch;
         return JSON.stringify({
           verdicts: [
-            { id: s1.id, verdict: "MERGE", reason: "frags", merge_into: s1.id,
+            { id: s1.id, verdict: "MERGE", reason: "frags", merge_into: s1.id, topic: "engineering",
               absorbs: [a1.id, a2.id], merged_content: "merged fact" },
-            { id: a1.id, verdict: "MERGE", reason: "frags", merge_into: s1.id },
-            { id: a2.id, verdict: "MERGE", reason: "frags", merge_into: s1.id },
+            { id: a1.id, verdict: "MERGE", reason: "frags", merge_into: s1.id, topic: "engineering" },
+            { id: a2.id, verdict: "MERGE", reason: "frags", merge_into: s1.id, topic: "engineering" },
             ...keepAll(rest),
           ],
         });
@@ -1388,6 +1633,57 @@ describe("LLM route", () => {
     );
     const applyLine = applyDeps.log.mock.calls.map((c) => c[0]).find((m) => m.startsWith("apply done:"));
     expect(applyLine).toMatch(/UNCLASSIFIED=20 of 60 memories \(from the replayed decision list\)/);
+  });
+
+  it("TC-SLACKAPP-054 a topic failure retries once then SKIPs the batch, like any malformed response", async () => {
+    // The spec's stated cost, asserted rather than assumed: requiring `topic` on
+    // EVERY verdict means a response that omits it batch-SKIPs the plain #102
+    // path too, including the scheduled weekly run. That is only acceptable if a
+    // topic failure lands in the SAME machinery as any other malformed response
+    // — one retry, then a non-destructive whole-batch SKIP that the
+    // "how much went unaudited" note counts. A topic check bolted on somewhere
+    // that bypasses `classifyBatch`'s retry, or that produces a SKIP the
+    // UNCLASSIFIED note does not recognise, would turn a recoverable hiccup into
+    // a silently unaudited corpus.
+    const memories = Array.from({ length: 40 }, (_, i) => memory(`m-${i}`, `fact ${i}`));
+    const server = fakeServer(memories);
+    let call = 0;
+    const llm = vi.fn(async (_p, batch) => {
+      call += 1;
+      // Batch 0 omits `topic` on BOTH attempts; batch 1 is well-formed.
+      if (call <= CLASSIFY_ATTEMPTS) {
+        return JSON.stringify({
+          verdicts: batch.map((m) => ({ id: m.id, verdict: "DELETE", reason: "stale" })),
+        });
+      }
+      return JSON.stringify({ verdicts: keepAll(batch) });
+    });
+    const deps = baseDeps(server, llm, tempDir());
+    const result = await runCleanup(baseOpts(), deps);
+
+    // Retried exactly once, not indefinitely and not zero times.
+    expect(llm).toHaveBeenCalledTimes(CLASSIFY_ATTEMPTS + 1);
+
+    // The failed batch is SKIP with the SAME reason string the note counts —
+    // not a new "bad topic" reason that the accounting would miss.
+    const skipped = result.decisions.filter((d) => d.verdict === "SKIP");
+    expect(skipped).toHaveLength(20);
+    for (const d of skipped) {
+      expect(d.reason).toBe("classification failed after retry");
+    }
+    // Non-destructive: the batch the classifier wanted to DELETE yields no
+    // DELETE decision at all.
+    expect(result.decisions.some((d) => d.verdict === "DELETE")).toBe(false);
+
+    // Counted by the unaudited note, and the retry log names the topic failure
+    // so an operator can tell a prompt-contract break from a transport outage.
+    const summaryLine = deps.log.mock.calls.map((c) => c[0]).find((m) => m.startsWith("dry-run:"));
+    expect(summaryLine).toMatch(/UNCLASSIFIED=20 of 40 memories \(1\/2 batches failed, 50%\)/);
+    const attempts = deps.log.mock.calls
+      .map((c) => c[0])
+      .filter((m) => /classification batch 0 attempt \d failed/u.test(m));
+    expect(attempts).toHaveLength(CLASSIFY_ATTEMPTS);
+    for (const line of attempts) expect(line).toMatch(/topic/iu);
   });
 
   it("TC-MEMCLEAN-081: a deterministic request-translation defect aborts the run", async () => {
@@ -2949,22 +3245,2203 @@ describe("restore CLI validation", () => {
     // truncated — so a partial listing reads as complete, nondeterministically.
     // The listing itself needs a database, so this drives the same exit path
     // through --help, which writes a comparable volume and needs nothing.
-    const { execFileSync } = await import("node:child_process");
-    const script = new URL("./memory-cleanup.mjs", import.meta.url).pathname;
+    //
     // Every run, not one: the defect is a race, and a single green run is what
     // makes it look fixed. `sh -c` with a pipe is what puts stdout on a pipe
     // rather than on the test's own fd.
     for (let i = 0; i < 5; i += 1) {
-      const piped = execFileSync("sh", ["-c", `node ${script} --help | cat`], { encoding: "utf8" });
+      const piped = execFileSync("sh", ["-c", `node ${CLI} --help | cat`], { encoding: "utf8" });
       expect(piped, `run ${i} was truncated`).toContain(USAGE.trimEnd());
     }
     // ...and the source has no `process.exit(` left to reintroduce it. Behaviour
     // above is the real assertion; this pins the mechanism so the next exit site
     // added to the CLI has to make the same decision deliberately.
-    const code = readFileSync(script, "utf8")
+    const code = readFileSync(CLI, "utf8")
       .split("\n")
       .filter((line) => !/^\s*(\/\/|\*|\/\*)/u.test(line))
       .join("\n");
     expect(code).not.toMatch(/process\.exit\(/u);
+  });
+
+  it("TC-MEMRESTORE-071 the recovery modes reach the database layer, not a TypeError", async () => {
+    // The CLI wiring is the one layer the injected-deps tests cannot reach:
+    // `recoveryDeps` is module-private and every unit test hands fakes straight to
+    // `runListInactive`/`runRestore`, so an error in how the CLI BUILDS those deps
+    // is invisible to all of them — which is how the rebase bug this pins reached a
+    // green suite. Rationale in docs/test-cases/memory-restore.md.
+    //
+    // A nonexistent stage is the point: it fails at the SSM read either way, so
+    // the assertion is WHICH failure. An SSM/credentials diagnostic is something an
+    // operator can act on; a TypeError means the wiring is broken.
+    for (const mode of [["--list-inactive"], ["--restore", "--ids", "/dev/null"]]) {
+      let output = "";
+      try {
+        output = execFileSync(
+          "node",
+          [CLI, "--stage", "mem9-nonexistent-probe-stage", ...mode],
+          {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+            // Unset so `resolveDatabaseConfig` takes the SSM branch, which is the
+            // one that reaches `runtime`. A CI runner with these set would
+            // otherwise skip the very code path under test.
+            env: {
+              ...process.env,
+              MEM9_DB_SECRET: "",
+              MEM9_DB_HOST: "",
+              MEM9_DB_NAME: "",
+            },
+          },
+        );
+      } catch (err) {
+        output = `${err.stdout ?? ""}${err.stderr ?? ""}`;
+      }
+      expect(output, `${mode[0]} reached the deps builder`).not.toMatch(/TypeError/u);
+      expect(output, `${mode[0]} is not a wiring error`).not.toMatch(
+        /Cannot read properties of undefined/u,
+      );
+    }
+  });
+});
+
+describe("protected topics (#123)", () => {
+  // The invariant under test is stronger than "never offered for deletion": a
+  // protected memory is never MUTATED by this tool at all — not deleted, not
+  // absorbed into a merge, not rewritten as a merge survivor. One invariant with
+  // one test surface, rather than a per-verdict list that a fourth verdict would
+  // silently escape.
+  const finance = (id, content, version = 1) => ({ ...memory(id, content, version) });
+  const verdict = (id, v, topic, extra = {}) => ({
+    id,
+    verdict: v,
+    reason: "r",
+    topic,
+    ...extra,
+  });
+
+  it("TC-SLACKAPP-060 a protected DELETE is downgraded to RETAIN, never offered", () => {
+    const out = planDecisions(
+      [finance("f-1", "my brokerage rule"), memory("e-1", "a build flag")],
+      [verdict("f-1", "DELETE", "personal-finance"), verdict("e-1", "DELETE", "engineering")],
+      { protectedTopics: ["personal-finance"] },
+    );
+    const byId = Object.fromEntries(out.map((d) => [d.id, d]));
+
+    // Its own verdict, not a KEEP with a note: the summary counts it without
+    // special-casing, and applyDecisions cannot reach a DELETE/MERGE branch.
+    expect(byId["f-1"].verdict).toBe("RETAIN");
+    // The report must show that the classifier judged it deletable and policy
+    // overrode that — not that the classifier decided to keep it.
+    expect(byId["f-1"].originalVerdict).toBe("DELETE");
+    expect(byId["f-1"].retainedReason).toBe("protected topic personal-finance");
+    // Unprotected topics are untouched by the rule.
+    expect(byId["e-1"].verdict).toBe("DELETE");
+  });
+
+  it("TC-SLACKAPP-061 a policy retain is counted separately from SKIP", async () => {
+    // SKIP means "something went wrong or was not audited". A policy retain is
+    // neither, and conflating them would make a classifier outage and a working
+    // protection rule read identically in the summary.
+    const memories = [finance("f-1", "my positions"), memory("e-1", "a flag")];
+    const server = fakeServer(memories);
+    const llm = vi.fn(async (_p, batch) =>
+      JSON.stringify({
+        verdicts: batch.map((m) =>
+          m.id === "f-1"
+            ? verdict(m.id, "DELETE", "personal-finance")
+            : verdict(m.id, "KEEP", "engineering"),
+        ),
+      }),
+    );
+    const deps = baseDeps(server, llm, tempDir());
+    const result = await runCleanup(baseOpts({ protectedTopics: ["personal-finance"] }), deps);
+
+    const summaryLine = deps.log.mock.calls.map((c) => c[0]).find((m) => m.startsWith("dry-run:"));
+    expect(summaryLine).toContain('"RETAIN":1');
+    expect(summaryLine).not.toContain('"SKIP":1');
+    expect(result.decisions.find((d) => d.id === "f-1").verdict).toBe("RETAIN");
+  });
+
+  it("TC-SLACKAPP-066 the summary reports every verdict, zeros included, and invents no bucket", async () => {
+    // Two properties, both about a summary an operator compares across runs.
+    // Zeros must be printed: a run where protection matched nothing must say
+    // `"RETAIN":0` rather than omit the key, because an absent key is
+    // indistinguishable from a build that has no protection rule at all — the
+    // exact silence that would hide the flag being dropped from the invocation.
+    // And the key SET must be closed: `summary[d.verdict] = ... || 0` happily
+    // invents a bucket, so a verdict misspelled at one push site would report
+    // `"RETAINED":1` beside `"RETAIN":0` and look like a data oddity rather than a
+    // routing bug that put a protected memory on an unaudited path.
+    const memories = [memory("e-1", "a flag")];
+    const server = fakeServer(memories);
+    const llm = vi.fn(async (_p, batch) => JSON.stringify({ verdicts: keepAll(batch) }));
+    const deps = baseDeps(server, llm, tempDir());
+    await runCleanup(baseOpts({ protectedTopics: ["personal-finance"] }), deps);
+
+    const summaryLine = deps.log.mock.calls.map((c) => c[0]).find((m) => m.startsWith("dry-run:"));
+    const summary = JSON.parse(summaryLine.match(/\{.*\}/u)[0]);
+    expect(Object.keys(summary).sort()).toEqual(
+      ["DELETE", "KEEP", "MERGE", "RETAIN", "SKIP", "UNSTABLE"],
+    );
+    expect(summary.RETAIN).toBe(0);
+    expect(summary.UNSTABLE).toBe(0);
+    expect(summary.KEEP).toBe(1);
+
+    // Asserted directly, not through a run: `validateDecisions` rejects an unknown
+    // verdict in a replayed file before the summary is built, so no INPUT can reach
+    // this branch — only a planner push site can, and an invariant nothing can
+    // trigger from outside still has to be proven from inside or it is decoration.
+    expect(() => verdictSummary([{ id: "x", verdict: "RETAINED" }])).toThrow(/uncountable/u);
+  });
+
+  it("TC-SLACKAPP-062 a protected memory is withheld from a merge, as survivor and as absorbed", () => {
+    // Absorbing a protected memory into a survivor deletes it just as surely as
+    // DELETE does, so a rule that only checks the top-level verdict is a hole.
+    const asAbsorbed = planDecisions(
+      [memory("s-1", "survivor"), finance("f-1", "my cash plan")],
+      [
+        verdict("s-1", "MERGE", "engineering", {
+          merge_into: "s-1",
+          absorbs: ["f-1"],
+          merged_content: "merged",
+        }),
+        verdict("f-1", "MERGE", "personal-finance", { merge_into: "s-1" }),
+      ],
+      { protectedTopics: ["personal-finance"] },
+    );
+    const absorbedById = Object.fromEntries(asAbsorbed.map((d) => [d.id, d]));
+    expect(absorbedById["f-1"].verdict).toBe("RETAIN");
+    // With its only absorbed id withheld the merge has nothing to absorb, so it
+    // must not rewrite the survivor either.
+    expect(asAbsorbed.some((d) => d.verdict === "MERGE")).toBe(false);
+
+    // As the survivor: a merge REWRITES the survivor's content, which is a
+    // mutation of a protected memory even though nothing is deleted.
+    const asSurvivor = planDecisions(
+      [finance("f-2", "my brokerage"), memory("e-2", "a flag")],
+      [
+        verdict("f-2", "MERGE", "personal-finance", {
+          merge_into: "f-2",
+          absorbs: ["e-2"],
+          merged_content: "merged",
+        }),
+        verdict("e-2", "MERGE", "engineering", { merge_into: "f-2" }),
+      ],
+      { protectedTopics: ["personal-finance"] },
+    );
+    const survivorById = Object.fromEntries(asSurvivor.map((d) => [d.id, d]));
+    expect(survivorById["f-2"].verdict).toBe("RETAIN");
+    expect(asSurvivor.some((d) => d.verdict === "MERGE")).toBe(false);
+    // e-2 is not protected, but its group did not emit — it must still carry a
+    // decision row, because the decision log covers every scanned memory.
+    expect(survivorById["e-2"]).toBeDefined();
+    expect(survivorById["e-2"].verdict).not.toBe("MERGE");
+  });
+
+  it("TC-SLACKAPP-063 protectedTopics defaults to personal-finance; an empty list protects nothing", () => {
+    // Omitted → the default. An operator who wants the default omits the flag.
+    const defaulted = planDecisions(
+      [finance("f-1", "my holdings")],
+      [verdict("f-1", "DELETE", "personal-finance")],
+      {},
+    );
+    expect(defaulted[0].verdict).toBe("RETAIN");
+    expect(parseArgs(["--stage", "test"]).protectedTopics).toEqual(["personal-finance"]);
+
+    // Explicitly empty → protect nothing. A silent fallback to the default would
+    // make a deliberate opt-out impossible to express.
+    const optedOut = planDecisions(
+      [finance("f-1", "my holdings")],
+      [verdict("f-1", "DELETE", "personal-finance")],
+      { protectedTopics: [] },
+    );
+    expect(optedOut[0].verdict).toBe("DELETE");
+    expect(parseArgs(["--stage", "test", "--protected-topics", ""]).protectedTopics).toEqual([]);
+  });
+
+  it("TC-SLACKAPP-065 an --apply run issues no write for a RETAIN row", async () => {
+    // The invariant is "never mutated by this tool at all", so it has to hold on
+    // the run that actually writes — not only in the planner. RETAIN survives
+    // that path because `destructiveCost` returns 0 for it, which is exactly the
+    // kind of implicit protection a fourth verdict would inherit by accident and
+    // a refactor could remove without any test noticing.
+    const memories = [finance("f-1", "my positions"), memory("e-1", "session noise")];
+    const server = fakeServer(memories);
+    const llm = vi.fn(async (_p, batch) =>
+      JSON.stringify({
+        verdicts: batch.map((m) =>
+          m.id === "f-1"
+            ? verdict(m.id, "DELETE", "personal-finance")
+            : verdict(m.id, "DELETE", "engineering"),
+        ),
+      }),
+    );
+    const dryDeps = baseDeps(server, llm, tempDir());
+    const dry = await runCleanup(baseOpts({ protectedTopics: ["personal-finance"] }), dryDeps);
+    expect(dry.writeCalls).toBe(0);
+
+    // Replay the decision file, which is the run that deletes.
+    const applyServer = fakeServer(memories);
+    const applyDeps = baseDeps(applyServer, llm, tempDir());
+    const applied = await runCleanup(
+      baseOpts({ apply: true, decisionsFile: dry.decisionPath, protectedTopics: ["personal-finance"] }),
+      applyDeps,
+    );
+
+    // The unprotected id is deleted, proving the run was capable of deleting.
+    expect(JSON.stringify(applyServer.calls)).toContain("e-1");
+    // Asserted over EVERY call, GETs included, not just the writes. A RETAIN row
+    // that reaches the delete branch is re-read and then skipped as an "LWW
+    // guard" — it has no contentHash to match — so filtering to non-GETs would
+    // pass while protection had become accidental and the run reported the
+    // memory as protected by a concurrent write. The tool must not touch it.
+    expect(JSON.stringify(applyServer.calls)).not.toContain("f-1");
+    const lww = applyDeps.log.mock.calls.map((c) => c[0]).filter((m) => /f-1/u.test(m));
+    expect(lww).toEqual([]);
+    // And no cap was charged for it: a protected row must not shrink the
+    // blast-radius budget for work that never happens.
+    expect(applied.capUsed).toBe(1);
+  });
+
+  it("TC-SLACKAPP-064 an unrecognised protected topic is rejected at argument validation", () => {
+    // A typo that matches no topic silently protects nothing, and the operator
+    // does not find out until finance memories are deleted. Rejected up front.
+    expect(() => parseArgs(["--stage", "test", "--protected-topics", "personal_finance"])).toThrow(
+      /personal_finance/,
+    );
+    expect(() =>
+      parseArgs(["--stage", "test", "--protected-topics", "personal-finance,nope"]),
+    ).toThrow(/nope/);
+    expect(
+      parseArgs(["--stage", "test", "--protected-topics", "personal-finance,operations"])
+        .protectedTopics,
+    ).toEqual(["personal-finance", "operations"]);
+  });
+});
+
+describe("two-pass consensus (#123)", () => {
+  // The 66%-agreement finding that motivated the issue: one classification pass
+  // is not reproducible enough to authorize deletions from. Consensus is the
+  // narrowing operation — an id is offered only if EVERY pass independently said
+  // DELETE, and everything else is reported rather than acted on.
+  const del = (id, extra = {}) => ({
+    id,
+    verdict: "DELETE",
+    reason: "stale",
+    contentHash: contentHash(`c-${id}`),
+    version: 1,
+    ...extra,
+  });
+  const keep = (id) => ({ id, verdict: "KEEP", reason: "durable" });
+
+  // Numbered outside 070-079 because it is a CLI-validation case, a sibling of
+  // TC-SLACKAPP-064, rather than a property of the intersection itself.
+  it("TC-SLACKAPP-069 --consensus-passes must be an integer of at least 2", () => {
+    // 2.5 is the case that matters: `Number.isFinite` and `> 0` both accept it,
+    // the pass loop silently runs twice, and the log says "pass 1 of 2.5" while
+    // the report says 2 — a run whose own summary disagrees with its own
+    // invocation. And `--consensus-passes 1` asks for consensus and gets none,
+    // which is the single-pass behavior the flag exists to replace: refused by
+    // name rather than accepted and quietly downgraded.
+    expect(() => parseArgs(["--stage", "test", "--consensus-passes", "2.5"])).toThrow(/integer/u);
+    expect(() => parseArgs(["--stage", "test", "--consensus-passes", "1"])).toThrow(/at least 2/u);
+    expect(() => parseArgs(["--stage", "test", "--consensus-passes", "0"])).toThrow();
+    expect(parseArgs(["--stage", "test", "--consensus-passes", "3"]).consensusPasses).toBe(3);
+    // Omitted is the single-pass default, not an error: consensus is opt-in.
+    expect(parseArgs(["--stage", "test"]).consensusPasses).toBeUndefined();
+  });
+
+  it("TC-SLACKAPP-070 only ids DELETEd by both passes are offered; the rest are unstable", () => {
+    const { decisions, report } = consensusDecisions([
+      [del("both"), del("one-only"), keep("neither")],
+      [del("both"), keep("one-only"), keep("neither")],
+    ]);
+    const byId = Object.fromEntries(decisions.map((d) => [d.id, d]));
+
+    expect(byId["both"].verdict).toBe("DELETE");
+    // Its own verdict, not a KEEP: a KEEP would claim the classifier judged it
+    // durable, when in fact one pass wanted it gone and the passes disagreed —
+    // which is the number this whole design exists to surface.
+    expect(byId["one-only"].verdict).toBe("UNSTABLE");
+    expect(byId["one-only"].verdicts).toEqual(["DELETE", "KEEP"]);
+    expect(byId["neither"].verdict).toBe("KEEP");
+    expect(report.disagreed).toBe(1);
+  });
+
+  it("TC-SLACKAPP-071 the passes are independent and the INTERSECTION decides", () => {
+    // Neither "first response wins" nor "last response wins" can produce this
+    // answer: pass 1 alone would offer a+b, pass 2 alone would offer b+c.
+    const { decisions } = consensusDecisions([
+      [del("a"), del("b"), keep("c")],
+      [keep("a"), del("b"), del("c")],
+    ]);
+    const offered = decisions.filter((d) => d.verdict === "DELETE").map((d) => d.id);
+    expect(offered).toEqual(["b"]);
+  });
+
+  it("TC-SLACKAPP-072 the summary reports both pass counts, the intersection, and the disagreement rate", async () => {
+    const memories = [memory("a", "x"), memory("b", "y"), memory("c", "z")];
+    const server = fakeServer(memories);
+    let pass = 0;
+    const llm = vi.fn(async (_p, batch) => {
+      pass += 1;
+      // Pass 1 deletes a+b; pass 2 deletes b only. Intersection = {b}.
+      const deleting = pass === 1 ? ["a", "b"] : ["b"];
+      return JSON.stringify({
+        verdicts: batch.map((m) => ({
+          id: m.id,
+          verdict: deleting.includes(m.id) ? "DELETE" : "KEEP",
+          reason: "r",
+          topic: "engineering",
+        })),
+      });
+    });
+    const deps = baseDeps(server, llm, tempDir());
+    await runCleanup(baseOpts({ consensusPasses: 2 }), deps);
+
+    // A drop in reproducibility must be visible: an unreported number is a
+    // number nobody watches.
+    const line = deps.log.mock.calls.map((c) => c[0]).find((m) => /CONSENSUS/u.test(m));
+    expect(line).toMatch(/pass 1 DELETE=2/u);
+    expect(line).toMatch(/pass 2 DELETE=1/u);
+    expect(line).toMatch(/agreed=1/u);
+    expect(line).toMatch(/disagreed=1/u);
+    expect(line).toMatch(/50%/u); // 1 of 2 ids either pass wanted deleted
+  });
+
+  it("TC-SLACKAPP-073 one usable pass is NOT consensus: nothing is offered", () => {
+    // Falling back to "use the other pass" would quietly restore exactly the
+    // non-reproducible single-pass behavior consensus exists to remove.
+    const { decisions, report } = consensusDecisions([[del("a"), del("b")], null]);
+    expect(decisions.some((d) => d.verdict === "DELETE")).toBe(false);
+    expect(report.usablePasses).toBe(1);
+    expect(report.consensusReached).toBe(false);
+  });
+
+  it("TC-SLACKAPP-074 an id a later pass never judged is not treated as agreement", () => {
+    // Absence of a verdict is not a DELETE and is not a KEEP.
+    const { decisions } = consensusDecisions([
+      [del("judged-twice"), del("judged-once")],
+      [del("judged-twice")],
+    ]);
+    const byId = Object.fromEntries(decisions.map((d) => [d.id, d]));
+    expect(byId["judged-twice"].verdict).toBe("DELETE");
+    expect(byId["judged-once"].verdict).toBe("UNSTABLE");
+    expect(byId["judged-once"].verdicts).toEqual(["DELETE", null]);
+  });
+
+  it("TC-SLACKAPP-075 protection wins over the intersection, even when the passes disagree on topic", () => {
+    // Order is asserted because both orders agree today and only one keeps
+    // agreeing when a pass returns a DIFFERENT topic for the same id — the
+    // realistic failure, since topic is a model judgment like any other.
+    const out = planDecisions(
+      [memory("f-1", "my positions")],
+      [{ id: "f-1", verdict: "DELETE", reason: "r", topic: "personal-finance" }],
+      { protectedTopics: ["personal-finance"] },
+    );
+    const alsoOut = planDecisions(
+      [memory("f-1", "my positions")],
+      [{ id: "f-1", verdict: "DELETE", reason: "r", topic: "engineering" }],
+      { protectedTopics: ["personal-finance"] },
+    );
+    // Pass 2 mis-topics it, so an intersection over RAW verdicts would see
+    // DELETE/DELETE and offer it. Protection is applied per pass FIRST, so the
+    // protected pass contributes RETAIN and the id can never be offered.
+    const { decisions } = consensusDecisions([out, alsoOut]);
+    const byId = Object.fromEntries(decisions.map((d) => [d.id, d]));
+    expect(byId["f-1"].verdict).not.toBe("DELETE");
+    expect(["RETAIN", "UNSTABLE"]).toContain(byId["f-1"].verdict);
+  });
+
+  it("TC-SLACKAPP-076 MERGE is withheld from the offered set in v1, and the count is reported", () => {
+    const merge = {
+      id: "s",
+      verdict: "MERGE",
+      reason: "frags",
+      contentHash: contentHash("c-s"),
+      version: 1,
+      mergedContent: "m",
+      mergedContentHash: contentHash("m"),
+      absorbs: [{ id: "a", contentHash: contentHash("c-a"), version: 1 }],
+    };
+    const { decisions, report } = consensusDecisions([
+      [merge, del("d")],
+      [merge, del("d")],
+    ]);
+    const byId = Object.fromEntries(decisions.map((d) => [d.id, d]));
+    // v1 approves deletions only. An unreported withholding would read as "the
+    // classifier found no merges".
+    expect(byId["s"].verdict).not.toBe("MERGE");
+    expect(report.mergesWithheld).toBe(1);
+    expect(byId["d"].verdict).toBe("DELETE");
+  });
+
+  it("TC-SLACKAPP-078 a pass that failed every batch is reported as no consensus, not as disagreement", async () => {
+    // The dangerous shape: `classifyAll` reports a total failure as a full list of
+    // SKIP rows, which look exactly like "this pass judged the memory and declined
+    // to delete it". The intersection is still safe — a SKIP is not a DELETE, so
+    // nothing extra is offered — but the REPORT would claim the two passes
+    // disagreed, when in truth the second pass never ran. An operator reading
+    // "agreement=0%" would go looking for a classifier that changed its mind
+    // instead of a transport that broke.
+    const memories = [memory("a", "x"), memory("b", "y")];
+    const server = fakeServer(memories);
+    let call = 0;
+    const llm = vi.fn(async (_p, batch) => {
+      call += 1;
+      // Attempts 1 (pass 1) succeed; every later attempt (pass 2 and its retry)
+      // throws, so pass 2 loses all of its batches.
+      if (call > 1) throw new Error("transport is down");
+      return JSON.stringify({
+        verdicts: batch.map((m) => ({ id: m.id, verdict: "DELETE", reason: "r", topic: "engineering" })),
+      });
+    });
+    const deps = baseDeps(server, llm, tempDir());
+    const result = await runCleanup(baseOpts({ consensusPasses: 2 }), deps);
+
+    const line = deps.log.mock.calls.map((c) => c[0]).find((m) => /CONSENSUS/u.test(m));
+    expect(line).toMatch(/NO CONSENSUS/u);
+    expect(line).toMatch(/pass 2 DELETE=failed/u);
+    // Nothing offered, and the reason names the failure rather than a
+    // disagreement the model never had.
+    expect(result.decisions.some((d) => d.verdict === "DELETE")).toBe(false);
+    const unstable = result.decisions.filter((d) => d.verdict === "UNSTABLE");
+    expect(unstable.length).toBe(2);
+    for (const d of unstable) expect(d.reason).toMatch(/pass failed/u);
+    // A partial outage across passes is NOT the broken-classifier exit: pass 1
+    // classified the whole corpus, so the path works and 5 would misdiagnose it.
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("TC-SLACKAPP-079 a consensus dry run can be replayed with --apply", async () => {
+    // The same defect class TC-SLACKAPP-065 caught for RETAIN: the planner writes
+    // UNSTABLE rows to the decision file, so a replay validator that does not know
+    // the verdict makes every `--apply` after a consensus run fail at load — the
+    // safety mechanism breaking the tool it exists to make safe.
+    const memories = [memory("agreed", "x"), memory("contested", "y")];
+    const server = fakeServer(memories);
+    let pass = 0;
+    const llm = vi.fn(async (_p, batch) => {
+      pass += 1;
+      const deleting = pass === 1 ? ["agreed", "contested"] : ["agreed"];
+      return JSON.stringify({
+        verdicts: batch.map((m) => ({
+          id: m.id,
+          verdict: deleting.includes(m.id) ? "DELETE" : "KEEP",
+          reason: "r",
+          topic: "engineering",
+        })),
+      });
+    });
+    const dryDeps = baseDeps(server, llm, tempDir());
+    const dry = await runCleanup(baseOpts({ consensusPasses: 2 }), dryDeps);
+    expect(dry.decisions.find((d) => d.id === "contested").verdict).toBe("UNSTABLE");
+
+    const applyServer = fakeServer(memories);
+    const applyDeps = baseDeps(applyServer, llm, tempDir());
+    const applied = await runCleanup(
+      baseOpts({ apply: true, decisionsFile: dry.decisionPath }),
+      applyDeps,
+    );
+
+    expect(applied.exitCode).toBe(0);
+    // The agreed id is deleted; the contested one is not touched at all — asserted
+    // over every call, GETs included, because an UNSTABLE row that reached the
+    // delete branch would be re-read and then skipped as an LWW guard, which
+    // reports as "a concurrent write protected me" rather than as a defect.
+    expect(JSON.stringify(applyServer.calls)).toContain("agreed");
+    expect(JSON.stringify(applyServer.calls)).not.toContain("contested");
+    expect(applied.capUsed).toBe(1);
+  });
+
+  it("TC-SLACKAPP-077 consensus never widens the destructive set", () => {
+    // Asserted as a SET RELATION, not a count, so a future refactor cannot add
+    // an id sourced from anywhere other than the intersection.
+    const passes = [
+      [del("a"), del("b"), keep("c"), del("d")],
+      [del("a"), keep("b"), del("c"), del("d")],
+    ];
+    const { decisions } = consensusDecisions(passes);
+    const deleteIds = (list) =>
+      new Set(list.filter((d) => d.verdict === "DELETE").map((d) => d.id));
+    const intersection = new Set(
+      [...deleteIds(passes[0])].filter((id) => deleteIds(passes[1]).has(id)),
+    );
+    for (const id of deleteIds(decisions)) {
+      expect(intersection.has(id)).toBe(true);
+    }
+    expect(deleteIds(decisions).size).toBeGreaterThan(0); // not vacuously empty
+  });
+});
+
+describe("the offered approval record (#123)", () => {
+  const del = (id) => ({
+    id,
+    verdict: "DELETE",
+    reason: "stale",
+    contentHash: contentHash(`c-${id}`),
+    version: 1,
+  });
+
+  it("TC-SLACKAPP-023b the offered record carries ids, a hash, a stage, and a timestamp — no memory content", () => {
+    // This parameter is a plain `String` (the boundary admits neither
+    // `kms:Encrypt` nor `kms:GenerateDataKey`, so a SecureString write is denied
+    // at runtime), readable by anything holding `ssm:GetParameters` on the stage
+    // tree. Asserted structurally over the SERIALIZED value rather than by
+    // eyeballing fields: a nested `snippet` added later would satisfy a
+    // field-by-field check and still publish memory content.
+    const record = buildOfferedRecord({
+      stage: "prod",
+      decisions: [
+        del("m-1"),
+        { ...del("m-2"), snippet: "SENTINEL-CONTENT" },
+        // Only DELETE is offered. Every other verdict in the list is a memory
+        // the run decided NOT to destroy, and a RETAIN is one policy actively
+        // protected — so a record built over every row would hand the apply task
+        // exactly the ids the protected-topic rule exists to withhold, with the
+        // operator's approval attached.
+        { id: "m-keep", verdict: "KEEP", reason: "durable" },
+        { id: "m-protected", verdict: "RETAIN", reason: "protected topic personal-finance" },
+        { id: "m-unstable", verdict: "UNSTABLE", reason: "passes disagreed on deletion" },
+      ],
+      generatedAt: "2026-08-05T00:00:00.000Z",
+    });
+    expect(Object.keys(record).sort()).toEqual(["generatedAt", "hash", "ids", "stage"]);
+    expect(record.ids).toEqual(["m-1", "m-2"]);
+    expect(record.stage).toBe("prod");
+    expect(JSON.stringify(record)).not.toMatch(/SENTINEL-CONTENT/u);
+    // The hash is over the ids, so the callback's comparison detects a
+    // regenerated list (TC-SLACKAPP-020) — and it is over a JOIN with a
+    // separator no id can contain, so two different lists whose ids concatenate
+    // identically get different hashes. Without the separator `["ab","c"]` and
+    // `["a","bc"]` are one hash, and a click approving one list would be accepted
+    // against the other.
+    expect(record.hash).toMatch(/^sha256:[0-9a-f]{64}$/u);
+    const stamp = { stage: "prod", generatedAt: "2026-08-05T00:00:00.000Z" };
+    expect(buildOfferedRecord({ ...stamp, decisions: [del("ab"), del("c")] }).hash).not.toBe(
+      buildOfferedRecord({ ...stamp, decisions: [del("a"), del("bc")] }).hash,
+    );
+  });
+
+  it("TC-SLACKAPP-024 an offered list over the 4096-byte parameter limit throws rather than truncating", () => {
+    // Truncating would ask the operator to approve a list that is not the list
+    // they were shown, and the ids are what the apply task deletes — so a
+    // silently shortened record is the one failure mode that produces a WRONG
+    // apply rather than a failed one. It must be loud.
+    //
+    // 4096 is the STANDARD tier's content limit; the advanced tier's 8 KB is not
+    // an option here, since an advanced parameter incurs a charge and cannot be
+    // reverted. `--cap 50` keeps a real record at ~2 KB, so hitting this needs a
+    // cap far above the default — which is exactly the operator mistake worth
+    // failing on.
+    const many = Array.from({ length: 200 }, (_, i) => del(`memory-with-a-realistic-id-${i}`));
+    expect(() =>
+      buildOfferedRecord({ stage: "prod", decisions: many, generatedAt: "2026-08-05T00:00:00.000Z" }),
+    ).toThrow(/4096|parameter limit/u);
+    // Asserted on the SERIALIZED length, not the id count: a limit expressed as
+    // "N ids" drifts from the real constraint the moment ids get longer, and the
+    // thing SSM rejects is bytes.
+    const ok = buildOfferedRecord({
+      stage: "prod",
+      decisions: many.slice(0, 40),
+      generatedAt: "2026-08-05T00:00:00.000Z",
+    });
+    expect(JSON.stringify(ok).length).toBeLessThanOrEqual(4096);
+    expect(ok.ids).toHaveLength(40);
+  });
+});
+
+describe("materializing the approved ids in the apply task (#123)", () => {
+  const OFFERED = "/mem9-on-aws/prod/approvals/offered";
+  const claimName = (hash) => claimParameterName("/mem9-on-aws/prod", hash);
+
+  /**
+   * Fake SSM whose `send` answers `GetParametersCommand` from a name→value map.
+   *
+   * Keyed on the command's `input.Names` rather than on the class, so a
+   * production switch to `GetParameterCommand` (singular) still reads here —
+   * that distinction is IAM's, and TC-SLACKAPP-047g pins it on the Lambda side.
+   * What this fake exists to model is the shape SSM actually returns: an absent
+   * name is simply MISSING from `Parameters` and echoed in `InvalidParameters`,
+   * never an empty-valued entry.
+   */
+  function fakeSsm(values) {
+    const reads = [];
+    return {
+      reads,
+      send: vi.fn(async (command) => {
+        const names = command?.input?.Names ?? [];
+        reads.push(...names);
+        const found = names.filter((n) => n in values);
+        return {
+          Parameters: found.map((n) => ({ Name: n, Value: values[n] })),
+          InvalidParameters: names.filter((n) => !(n in values)),
+        };
+      }),
+    };
+  }
+
+  const offered = (ids, extra = {}) =>
+    JSON.stringify({
+      stage: "prod",
+      hash: contentHash(ids.join("\n")),
+      ids,
+      generatedAt: "2026-08-05T00:00:00.000Z",
+      ...extra,
+    });
+
+  it("TC-SLACKAPP-131 the claim name is one SSM will accept on WRITE, and matches the facade's copy", async () => {
+    // The defect this pins was total and silent: `contentHash` returns
+    // `sha256:<hex>`, and a `:` cannot appear in an SSM parameter name.
+    // PutParameter answers ValidationException, which `claimAndRun` classifies by
+    // error NAME — not `ParameterAlreadyExists`, so it fell to the generic branch
+    // and answered "The approval could not be recorded" for EVERY click on every
+    // stage. Probed live in ap-northeast-1: colon rejected on write, dash
+    // accepted. Nothing caught it because every SSM double was a Map keyed on the
+    // name string, so no double could reject a name's SHAPE.
+    const hash = contentHash("m-1");
+    expect(hash).toMatch(/^sha256:/u);
+    const name = claimParameterName("/mem9-on-aws/prod", hash);
+    expect(name).not.toContain(":");
+    expect(() => assertClaimParameterName(name)).not.toThrow();
+    // The prefix is kept rather than stripped so an operator reading
+    // describe-parameters output can still tell which algorithm produced it.
+    expect(name).toBe(`/mem9-on-aws/prod/approvals/approved-${hash.replace(":", "-")}`);
+    // And the guard has to actually reject the old form, or it is decoration.
+    expect(() =>
+      assertClaimParameterName(`/mem9-on-aws/prod/approvals/approved-${hash}`),
+    ).toThrow(/ValidationException/u);
+
+    // The WRITER of this record is the facade Lambda, which shares no module with
+    // this script — so the derivation is duplicated and this is the only thing
+    // keeping the two in agreement. A drift here means the task looks for a claim
+    // at a name the Lambda never wrote and dies with "no approval record", which
+    // is the same symptom as a tampered claim from a cause nobody would guess.
+    //
+    // Both functions are CALLED rather than their sources compared: comparing
+    // source text passes as long as the facade matches a literal in this file,
+    // which is not the property that matters and does not notice the script side
+    // changing at all. Only this direction is importable — vitest transforms the
+    // TS for an .mjs test, while an infra/*.test.ts importing the .mjs fails
+    // typecheck (TS7016), the same asymmetry noted at slack-approval.test.ts's
+    // boundaryStatements().
+    const { claimParameterName: facadeClaimParameterName } = await import(
+      "../infra/src/oauth-facade/slack-interactions.ts"
+    );
+    for (const prefix of ["/mem9-on-aws/prod", "/mem9-on-aws/pr-123"]) {
+      expect(facadeClaimParameterName(prefix, hash)).toBe(
+        claimParameterName(prefix, hash),
+      );
+    }
+  });
+
+  it("TC-SLACKAPP-091 the ids come from the CLAIM named by the hash, not from the offered record", async () => {
+    // The claim is what the operator's click actually approved. `offered` is
+    // overwritten by every run, so a task that read `offered` would delete the
+    // list the CURRENT run produced rather than the one the operator saw — and
+    // it would do so carrying a valid approval. The claim is immutable once
+    // written (`Overwrite: false`), which is the only reason a click is safe to
+    // honour minutes later.
+    //
+    // Both records are seeded with DIFFERENT ids, so a read from the wrong one
+    // cannot pass: an assertion that only counted ids, or that seeded both with
+    // the same list, would be satisfied by either source.
+    const approvedIds = ["m-approved-1", "m-approved-2"];
+    const hash = contentHash(approvedIds.join("\n"));
+    const ssm = fakeSsm({
+      [OFFERED]: offered(["m-regenerated-since"]),
+      [claimName(hash)]: JSON.stringify({
+        stage: "prod",
+        hash,
+        ids: approvedIds,
+        claimedAt: "2026-08-05T00:05:00.000Z",
+        taskArn: "arn:aws:ecs:ap-northeast-1:123456789012:task/mem9/abc",
+      }),
+    });
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+
+    await materializeApprovedIds({
+      ssm,
+      stage: "prod",
+      ssmPrefix: "/mem9-on-aws/prod",
+      hash,
+      idsFile,
+      fs: { writeFileSync },
+    });
+
+    expect(readFileSync(idsFile, "utf8").trim().split("\n")).toEqual(approvedIds);
+    expect(ssm.reads).toContain(claimName(hash));
+    expect(ssm.reads).not.toContain(OFFERED);
+  });
+
+  it("TC-SLACKAPP-092 a claim whose ids do not hash to the requested hash is refused", async () => {
+    // The hash arrives as a container override, which `DescribeTasks` echoes and
+    // any holder of ecs:RunTask on this task definition can choose. Trusting the
+    // record it names without re-deriving the hash over the ids would let a
+    // caller point the apply at a tampered record. Re-deriving makes the ids
+    // themselves the thing the hash vouches for.
+    const hash = contentHash(["m-1"].join("\n"));
+    const ssm = fakeSsm({
+      [claimName(hash)]: JSON.stringify({
+        stage: "prod",
+        hash,
+        // Hash says one id; the record carries another. The record's OWN `hash`
+        // field agrees with the request, so a check that compared those two
+        // strings would pass this.
+        ids: ["m-substituted"],
+        claimedAt: "2026-08-05T00:05:00.000Z",
+      }),
+    });
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+
+    await expect(
+      materializeApprovedIds({
+        ssm,
+        stage: "prod",
+        ssmPrefix: "/mem9-on-aws/prod",
+        hash,
+        idsFile,
+        fs: { writeFileSync },
+      }),
+    ).rejects.toThrow(/hash/u);
+    expect(() => readFileSync(idsFile, "utf8")).toThrow();
+  });
+
+  it("TC-SLACKAPP-093 a claim naming another stage is refused", async () => {
+    // Same reasoning as #102's decision-file stage guard: a preview approval must
+    // never apply to prod. The parameter PREFIX is stage-scoped, so this can only
+    // happen through a hand-written record — which is exactly the case a guard is
+    // for, since the alternative is an apply the operator never approved.
+    const ids = ["m-1"];
+    const hash = contentHash(ids.join("\n"));
+    const ssm = fakeSsm({
+      [claimName(hash)]: JSON.stringify({
+        stage: "pr-7",
+        hash,
+        ids,
+        claimedAt: "2026-08-05T00:05:00.000Z",
+      }),
+    });
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+
+    await expect(
+      materializeApprovedIds({
+        ssm,
+        stage: "prod",
+        ssmPrefix: "/mem9-on-aws/prod",
+        hash,
+        idsFile,
+        fs: { writeFileSync },
+      }),
+    ).rejects.toThrow(/stage/u);
+    expect(() => readFileSync(idsFile, "utf8")).toThrow();
+  });
+
+  it("TC-SLACKAPP-094 an absent claim is refused, not treated as an empty approval", async () => {
+    // An absent name comes back in `InvalidParameters`, missing from
+    // `Parameters` — so `find(...)?.Value` is `undefined` and a permissive path
+    // would write an EMPTY ids file. `--ids` with an empty file means "approve
+    // nothing", so the run would exit 0 having deleted nothing and the operator
+    // would read a successful apply that never happened.
+    const ssm = fakeSsm({});
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+
+    await expect(
+      materializeApprovedIds({
+        ssm,
+        stage: "prod",
+        ssmPrefix: "/mem9-on-aws/prod",
+        hash: contentHash("m-1"),
+        idsFile,
+        fs: { writeFileSync },
+      }),
+    ).rejects.toThrow(/approval record/u);
+    expect(() => readFileSync(idsFile, "utf8")).toThrow();
+  });
+
+  it("TC-SLACKAPP-095 a claim with an empty id list is refused rather than written", async () => {
+    // `[]` hashes consistently, so the hash check cannot catch it, and it is
+    // exactly what a partially-written record looks like. An empty `--ids` file
+    // is indistinguishable from "approve nothing" — a silent no-op reported as a
+    // clean apply.
+    const ids = [];
+    const hash = contentHash(ids.join("\n"));
+    const ssm = fakeSsm({
+      [claimName(hash)]: JSON.stringify({
+        stage: "prod",
+        hash,
+        ids,
+        claimedAt: "2026-08-05T00:05:00.000Z",
+      }),
+    });
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+
+    await expect(
+      materializeApprovedIds({
+        ssm,
+        stage: "prod",
+        ssmPrefix: "/mem9-on-aws/prod",
+        hash,
+        idsFile,
+        fs: { writeFileSync },
+      }),
+    ).rejects.toThrow(/no ids/u);
+    expect(() => readFileSync(idsFile, "utf8")).toThrow();
+  });
+
+  it("TC-SLACKAPP-096 a malformed claim is refused by shape", async () => {
+    // A truncated or non-JSON value must not reach `JSON.parse` unguarded: an
+    // uncaught SyntaxError exits 1 with a stack that quotes the parameter value,
+    // and this value is the one place ids legitimately live.
+    const hash = contentHash("m-1");
+    const ssm = fakeSsm({ [claimName(hash)]: '{"stage":"prod","ids":' });
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+
+    await expect(
+      materializeApprovedIds({
+        ssm,
+        stage: "prod",
+        ssmPrefix: "/mem9-on-aws/prod",
+        hash,
+        idsFile,
+        fs: { writeFileSync },
+      }),
+    ).rejects.toThrow(/approval record/u);
+    expect(() => readFileSync(idsFile, "utf8")).toThrow();
+  });
+
+  it("TC-SLACKAPP-097 the ids file is newline-delimited exactly as --ids parses it", async () => {
+    // `readApprovedIds` splits on "\n" and trims, so the two formats that would
+    // silently produce ONE id are a JSON array and a comma-joined line. Asserted
+    // by round-tripping through the real parser rather than by matching a
+    // string, so the contract is proven against the consumer.
+    const ids = ["m-1", "m-2", "m-3"];
+    const hash = contentHash(ids.join("\n"));
+    const ssm = fakeSsm({
+      [claimName(hash)]: JSON.stringify({
+        stage: "prod",
+        hash,
+        ids,
+        claimedAt: "2026-08-05T00:05:00.000Z",
+      }),
+    });
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+
+    await materializeApprovedIds({
+      ssm,
+      stage: "prod",
+      ssmPrefix: "/mem9-on-aws/prod",
+      hash,
+      idsFile,
+      fs: { writeFileSync },
+    });
+
+    // The consumer's own reading of the file, through runCleanup's --ids path:
+    // three memories offered, all three approved, all three deleted.
+    const server = fakeServer(ids.map((id) => memory(id, `c-${id}`)));
+    const llm = fakeLlm([
+      ids.map((id) => ({ id, verdict: "DELETE", reason: "stale" })),
+    ]);
+    const result = await runCleanup(
+      baseOpts({ apply: true, idsFile }),
+      baseDeps(server, llm, dir),
+    );
+    expect(result.skippedByFilter).toBe(0);
+    for (const id of ids) {
+      expect(server.store.get(id).state).toBe("deleted");
+    }
+  });
+
+  it("TC-SLACKAPP-098 the ids file never contains memory content, and no log line quotes an id", async () => {
+    // The task's log goes to CloudWatch, which is an accepted surface for
+    // snippets — but the ids file lands on the task's ephemeral disk, and the
+    // record it is built from is a plain String parameter readable by anything
+    // with ssm:GetParameters on the stage tree. A record that grew a `snippet`
+    // field must not have it copied into the file.
+    const ids = ["m-1"];
+    const hash = contentHash(ids.join("\n"));
+    const ssm = fakeSsm({
+      [claimName(hash)]: JSON.stringify({
+        stage: "prod",
+        hash,
+        ids,
+        claimedAt: "2026-08-05T00:05:00.000Z",
+        snippet: "SENTINEL-CONTENT",
+      }),
+    });
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+    const log = vi.fn();
+
+    await materializeApprovedIds({
+      ssm,
+      stage: "prod",
+      ssmPrefix: "/mem9-on-aws/prod",
+      hash,
+      idsFile,
+      fs: { writeFileSync },
+      log,
+    });
+
+    expect(readFileSync(idsFile, "utf8")).not.toContain("SENTINEL-CONTENT");
+    for (const call of log.mock.calls) {
+      expect(String(call[0])).not.toContain("SENTINEL-CONTENT");
+    }
+    // The COUNT is logged, never the ids: a log line naming them would put
+    // memory identifiers in CloudWatch for an operator who only needs to know
+    // the apply matched the approval.
+    expect(log).toHaveBeenCalled();
+    for (const call of log.mock.calls) {
+      expect(String(call[0])).not.toContain("m-1");
+    }
+  });
+
+  it("TC-SLACKAPP-098b what is returned to the caller is a count and the coordinates, never the ids", async () => {
+    // The return value is what the outcome update closes over, and it travels to
+    // `chat.update`. Ids on it would reach a Slack message the moment anything
+    // spread the claim into a payload — so the file is the ONLY place they go.
+    const ids = ["m-1", "m-2"];
+    const hash = contentHash(ids.join("\n"));
+    const ssm = fakeSsm({
+      [claimName(hash)]: JSON.stringify({
+        stage: "prod",
+        hash,
+        ids,
+        claimedAt: "2026-08-05T00:05:00.000Z",
+        messageTs: "1754400000.000100",
+        messageChannel: "C0APPROVAL",
+      }),
+    });
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+
+    const claim = await materializeApprovedIds({
+      ssm,
+      stage: "prod",
+      ssmPrefix: "/mem9-on-aws/prod",
+      hash,
+      idsFile,
+      fs: { writeFileSync },
+    });
+
+    expect(claim.count).toBe(2);
+    expect(claim.messageTs).toBe("1754400000.000100");
+    expect(claim.messageChannel).toBe("C0APPROVAL");
+    expect(JSON.stringify(claim)).not.toContain("m-1");
+    // The ids DID land, in the file, which is the other half of the same property.
+    expect(readFileSync(idsFile, "utf8")).toBe("m-1\nm-2\n");
+
+    // A record with no coordinates yields none rather than `undefined` values that
+    // would reach `chat.update` as a `channel_not_found`.
+    const bare = fakeSsm({
+      [claimName(hash)]: JSON.stringify({
+        stage: "prod",
+        hash,
+        ids,
+        claimedAt: "2026-08-05T00:05:00.000Z",
+      }),
+    });
+    const plain = await materializeApprovedIds({
+      ssm: bare,
+      stage: "prod",
+      ssmPrefix: "/mem9-on-aws/prod",
+      hash,
+      idsFile,
+      fs: { writeFileSync },
+    });
+    expect(plain.messageTs).toBeUndefined();
+    expect(plain.messageChannel).toBeUndefined();
+  });
+});
+
+describe("the apply task's in-container runtime (#123)", () => {
+  const environmentKeys = [
+    "AWS_REGION",
+    "MEM9_APPROVAL_HASH",
+    "MEM9_BEDROCK_PROJECT",
+    "MEM9_DB_HOST",
+    "MEM9_DB_NAME",
+    "MEM9_DB_PORT",
+    "MEM9_DB_SECRET",
+    "MEM9_LLM_MODEL",
+    "MEM9_SSM_PREFIX",
+    "MEM9_TENANT_ID",
+  ];
+  afterEach(() => {
+    for (const key of environmentKeys) delete process.env[key];
+  });
+
+  /** The env the ECS task definition (infra/slack-approval.ts) actually sets. */
+  function containerEnv(extra = {}) {
+    Object.assign(process.env, {
+      AWS_REGION: "ap-northeast-1",
+      MEM9_DB_HOST: "writer.example.com",
+      MEM9_DB_NAME: "mem9",
+      MEM9_DB_PORT: "5432",
+      // ECS resolves the `ssm:` entry to the secret's JSON before the process
+      // starts, exactly as it does for the consolidation task.
+      MEM9_DB_SECRET: JSON.stringify({
+        username: "mem9",
+        password: "fixture-password",
+      }),
+      MEM9_SSM_PREFIX: "/mem9-on-aws/prod",
+      MEM9_TENANT_ID: TENANT,
+      ...extra,
+    });
+  }
+
+  /** pg double that records every construction and query. */
+  function fakeClientClass(calls) {
+    return class Client {
+      constructor(options) {
+        calls.push(["construct", options]);
+      }
+      async connect() {
+        calls.push(["connect"]);
+      }
+      async query(sql, parameters) {
+        calls.push(["query", sql, parameters]);
+        if (sql.includes("pg_try_advisory_lock")) {
+          return { rows: [{ acquired: true }] };
+        }
+        return { rows: [] };
+      }
+      async end() {
+        calls.push(["end"]);
+      }
+    };
+  }
+
+  it("TC-SLACKAPP-100 takes its database configuration from the environment, with no SSM or Secrets Manager read", async () => {
+    // The image ships @aws-sdk/client-ssm now, so this is no longer about a
+    // missing module — it is about grants. The task role holds ssm:GetParameters
+    // ONLY under `approvals/*` (infra/slack-approval.ts), so the operator CLI's
+    // `db/*` discovery is an AccessDenied inside the container, and the DB secret
+    // arrives pre-resolved in `MEM9_DB_SECRET` instead. Mirrors
+    // memory-consolidation.mjs's createProductionDeps.
+    containerEnv();
+    const calls = [];
+    const ssm = fakeAwsClient();
+    const secrets = fakeAwsClient();
+
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: true, cap: 50 },
+      { Client: fakeClientClass(calls), ssm, secrets, getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
+    );
+
+    expect(ssm.send).not.toHaveBeenCalled();
+    expect(secrets.send).not.toHaveBeenCalled();
+    expect(production.tenantId).toBe(TENANT);
+    // Asserted on the connection options, not merely on "it connected": a path
+    // that read the env and then handed pg a partly-undefined config would still
+    // construct and would fail at TLS time with an unrelated message.
+    expect(calls[0]).toEqual([
+      "construct",
+      expect.objectContaining({
+        host: "writer.example.com",
+        port: 5432,
+        database: "mem9",
+        user: "mem9",
+        password: "fixture-password",
+      }),
+    ]);
+    // The shared mutex is what stops a click-triggered apply from racing the
+    // weekly consolidation. Absent, the two would interleave writes.
+    const mutex = await production.deps.acquireMutex("prod");
+    expect(mutex).not.toBeNull();
+    await mutex.release();
+    await production.close();
+    expect(calls.at(-1)).toEqual(["end"]);
+  });
+
+  it("TC-SLACKAPP-101 still resolves the database through SSM and Secrets Manager for the operator CLI", async () => {
+    // The operator path has no MEM9_DB_SECRET and its human IAM identity CAN read
+    // `db/*`. Both paths must keep working from one function: a container-only
+    // rewrite would break the #102 runbook the README documents.
+    process.env.AWS_REGION = "ap-northeast-1";
+    process.env.MEM9_TENANT_ID = TENANT;
+    const calls = [];
+    const secretArn =
+      "arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:mem9-db-x";
+    const ssm = fakeAwsClient({
+      "/mem9-on-aws/prod/db/host": "writer.example.com",
+      "/mem9-on-aws/prod/db/port": "5432",
+      "/mem9-on-aws/prod/db/name": "mem9",
+      "/mem9-on-aws/prod/db/secret-arn": secretArn,
+    });
+    const secrets = fakeAwsClient({
+      [secretArn]: JSON.stringify({ username: "mem9", password: "from-secret" }),
+    });
+
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: true, cap: 50 },
+      { Client: fakeClientClass(calls), ssm, secrets, getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
+    );
+
+    expect(ssm.sent[0].Names).toEqual([
+      "/mem9-on-aws/prod/db/host",
+      "/mem9-on-aws/prod/db/port",
+      "/mem9-on-aws/prod/db/name",
+      "/mem9-on-aws/prod/db/secret-arn",
+    ]);
+    expect(secrets.sent[0].SecretId).toBe(secretArn);
+    expect(calls[0][1]).toMatchObject({ password: "from-secret" });
+    await production.close();
+  });
+
+  it("TC-SLACKAPP-102 materializes the approved ids at the --ids path the task definition passes", async () => {
+    const ids = ["m-1", "m-2"];
+    const hash = contentHash(ids.join("\n"));
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+    containerEnv({ MEM9_APPROVAL_HASH: hash });
+    const ssm = fakeAwsClient({
+      [claimParameterName("/mem9-on-aws/prod", hash)]: JSON.stringify({
+        stage: "prod",
+        hash,
+        ids,
+        claimedAt: "2026-08-05T00:05:00.000Z",
+      }),
+    });
+
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: true, cap: 50, idsFile },
+      {
+        Client: fakeClientClass([]),
+        ssm,
+        secrets: fakeAwsClient(),
+        getToken: vi.fn(),
+        fromNodeProviderChain: vi.fn(),
+      },
+    );
+
+    // The path is the CONTRACT with the task definition's `--ids` argument. A file
+    // written anywhere else leaves `readApprovedIds` reading a missing file, so the
+    // run dies loud — or worse, reads a stale one.
+    expect(readFileSync(idsFile, "utf8")).toBe("m-1\nm-2\n");
+    await production.close();
+  });
+
+  it("TC-SLACKAPP-103 refuses an approval hash with no ids file rather than applying unfiltered", async () => {
+    // This is the whole loop's failure mode. `readApprovedIds` returns null for a
+    // missing `--ids`, and null means "no filter" — so a hash-driven run that
+    // materialized nowhere would delete EVERY DELETE verdict in the run, not the
+    // ones the operator approved, and exit 0 reporting success.
+    const hash = contentHash(["m-1"].join("\n"));
+    containerEnv({ MEM9_APPROVAL_HASH: hash });
+
+    await expect(
+      createCleanupDeps(
+        { stage: "prod", apply: true, cap: 50 },
+        { Client: fakeClientClass([]), ssm: fakeAwsClient(), secrets: fakeAwsClient() },
+      ),
+    ).rejects.toThrow(/--ids/u);
+  });
+
+  it("TC-SLACKAPP-104 aborts before opening the database when the claim does not match the hash", async () => {
+    // Ordering, not just the error: materialization is the cheapest guard and the
+    // only one that can prove the ids are the approved ids, so it runs before the
+    // connection and before the advisory lock. Reversed, a tampered claim would
+    // hold the shared mutex for the length of its own failure and could block the
+    // weekly consolidation.
+    const ids = ["m-1"];
+    const hash = contentHash(ids.join("\n"));
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+    containerEnv({ MEM9_APPROVAL_HASH: hash });
+    const calls = [];
+    const ssm = fakeAwsClient({
+      [claimParameterName("/mem9-on-aws/prod", hash)]: JSON.stringify({
+        stage: "prod",
+        // Agrees with the request, so a string comparison of the two would pass.
+        hash,
+        ids: ["m-substituted"],
+        claimedAt: "2026-08-05T00:05:00.000Z",
+      }),
+    });
+
+    await expect(
+      createCleanupDeps(
+        { stage: "prod", apply: true, cap: 50, idsFile },
+        { Client: fakeClientClass(calls), ssm, secrets: fakeAwsClient() },
+      ),
+    ).rejects.toThrow(/hash/u);
+    expect(calls).toEqual([]);
+    expect(existsSync(idsFile)).toBe(false);
+  });
+});
+
+describe("offering the list to Slack (#123)", () => {
+  const BOT_TOKEN = "xoxb-fixture-not-a-real-token";
+  const CHANNEL = "C0APPROVAL";
+  const OFFERED = "/mem9-on-aws/prod/approvals/offered";
+  const SNIPPET = "SENTINEL-MEMORY-SNIPPET";
+
+  const del = (id, snippet = `${SNIPPET}-${id}`) => ({
+    id,
+    verdict: "DELETE",
+    reason: "session-state",
+    version: 1,
+    contentHash: contentHash(`c-${id}`),
+    snippet,
+  });
+
+  /**
+   * SSM and Slack sharing ONE event log, because the ordering between them is a
+   * correctness property and not an implementation detail: a button that exists
+   * before the record it is validated against is a promise the backend cannot
+   * keep.
+   */
+  function offerFakes(slackBodies = {}) {
+    const events = [];
+    const ssm = {
+      puts: [],
+      send: vi.fn(async (command) => {
+        events.push(["ssm", command.input.Name]);
+        ssm.puts.push(command.input);
+        return {};
+      }),
+    };
+    const slack = {
+      calls: [],
+      fetchImpl: vi.fn(async (url, options = {}) => {
+        const method = String(url).split("/").pop();
+        events.push(["slack", method]);
+        slack.calls.push({
+          url: String(url),
+          method: options.method,
+          headers: options.headers,
+          redirect: options.redirect,
+          body: JSON.parse(options.body),
+        });
+        const body = slackBodies[method] ?? {
+          ok: true,
+          channel: CHANNEL,
+          ts: "1754400000.000100",
+        };
+        return new Response(JSON.stringify(body), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      }),
+    };
+    return { events, ssm, slack };
+  }
+
+  function offer(overrides = {}) {
+    const { ssm, slack, events } = overrides.fakes ?? offerFakes();
+    return {
+      events,
+      ssm,
+      slack,
+      log: overrides.log,
+      promise: postApprovalRequest({
+        ssm,
+        ssmPrefix: "/mem9-on-aws/prod",
+        stage: "prod",
+        decisions: overrides.decisions ?? [del("m-1"), del("m-2")],
+        generatedAt: "2026-08-05T03:00:00.000Z",
+        channel: CHANNEL,
+        botToken: BOT_TOKEN,
+        fetchImpl: slack.fetchImpl,
+        log: overrides.log ?? vi.fn(),
+      }),
+    };
+  }
+
+  it("TC-SLACKAPP-105 writes the offered record before the button exists, as an overwritable plain String", async () => {
+    const fakes = offerFakes();
+    const log = vi.fn();
+    const { promise } = offer({ fakes, log });
+    const result = await promise;
+
+    // ORDER. Posting first leaves a live Approve button whose click the callback
+    // rejects with "there is no current approval list" — a spent click and an
+    // operator hunting a backend fault. The write is also what INVALIDATES last
+    // week's button, so it must not be reachable only through the post.
+    expect(fakes.events).toEqual([
+      ["ssm", OFFERED],
+      ["slack", "chat.postMessage"],
+      ["ssm", OFFERED],
+    ]);
+    const [first] = fakes.ssm.puts;
+    expect(first.Name).toBe(OFFERED);
+    // Runtime-only, exactly like TC-SLACKAPP-047f: `SecureString` is denied by the
+    // workload boundary (no `kms:Encrypt`, no `kms:GenerateDataKey`), and
+    // `Overwrite: false` would succeed once and then fail every subsequent week
+    // with `ParameterAlreadyExists` — the loop would silently stop offering.
+    expect(first.Type).toBe("String");
+    expect(first.Overwrite).toBe(true);
+    const record = JSON.parse(first.Value);
+    expect(Object.keys(record).sort()).toEqual(["generatedAt", "hash", "ids", "stage"]);
+    expect(record.ids).toEqual(["m-1", "m-2"]);
+    expect(record.hash).toBe(contentHash("m-1\nm-2"));
+    expect(result.record.hash).toBe(record.hash);
+    expect(result.messageTs).toBe("1754400000.000100");
+  });
+
+  it("TC-SLACKAPP-106 carries that exact hash in both action values and shows every id it asks about", async () => {
+    const { promise, slack } = offer();
+    const { record } = await promise;
+    const [call] = slack.calls;
+
+    expect(call.url).toBe("https://slack.com/api/chat.postMessage");
+    expect(call.method).toBe("POST");
+    expect(call.headers.Authorization).toBe(`Bearer ${BOT_TOKEN}`);
+    // The alert-router precedent: a redirect from an API host is never something
+    // to follow with a bearer token attached.
+    expect(call.redirect).toBe("manual");
+    expect(call.body.channel).toBe(CHANNEL);
+
+    const actions = call.body.blocks.filter((b) => b.type === "actions");
+    expect(actions).toHaveLength(1);
+    const ids = actions[0].elements.map((e) => e.action_id).sort();
+    // The action ids the deployed handler branches on. A rename here is a click
+    // the callback answers with "that button is not one this app knows how to
+    // handle" — after the operator has reviewed the whole list.
+    expect(ids).toEqual(["cleanup_approve", "cleanup_reject"]);
+    for (const element of actions[0].elements) {
+      // The hash is the ONLY thing the click carries. Ids cannot ride here (the
+      // 2000-character value cap), and must not: the signature proves the request
+      // came from the workspace, never that ids inside it are the classifier's.
+      expect(element.value).toBe(record.hash);
+    }
+
+    // Every offered id appears in the message. Approving a list longer than the
+    // list shown is the one failure mode that produces a WRONG apply rather than
+    // a failed one — the same argument as TC-SLACKAPP-024, on the other surface.
+    const rendered = JSON.stringify(call.body.blocks);
+    for (const id of record.ids) expect(rendered).toContain(id);
+    // Snippets are the point of the review, and Slack is an approved destination
+    // for them (unlike the repository or the SSM record).
+    expect(rendered).toContain(SNIPPET);
+  });
+
+  it("TC-SLACKAPP-107 refuses to post a list Block Kit would not carry whole", async () => {
+    // Slack's own ceilings: 50 blocks per message, 3000 characters per section
+    // text, 2000 per button value, 150 per header. A message over any of them is
+    // rejected wholesale, so the operator sees nothing at all — but a message
+    // that silently dropped the overflow would be worse: they would approve a
+    // hash covering ids they never saw.
+    const many = Array.from({ length: 4000 }, (_, i) => del(`memory-${i}`));
+    const record = {
+      stage: "prod",
+      hash: contentHash(many.map((d) => d.id).join("\n")),
+      ids: many.map((d) => d.id),
+      generatedAt: "2026-08-05T03:00:00.000Z",
+    };
+    expect(() => buildApprovalMessage({ record, decisions: many, channel: CHANNEL })).toThrow(
+      /block|too large|does not fit/iu,
+    );
+
+    const small = [del("m-1"), del("m-2")];
+    const message = buildApprovalMessage({
+      record: buildOfferedRecord({
+        stage: "prod",
+        decisions: small,
+        generatedAt: "2026-08-05T03:00:00.000Z",
+      }),
+      decisions: small,
+      channel: CHANNEL,
+    });
+    expect(message.blocks.length).toBeLessThanOrEqual(50);
+    for (const block of message.blocks) {
+      if (block.type === "header") expect(block.text.text.length).toBeLessThanOrEqual(150);
+      if (block.type === "section") expect(block.text.text.length).toBeLessThanOrEqual(3000);
+      for (const element of block.elements ?? []) {
+        if (element.value) expect(element.value.length).toBeLessThanOrEqual(2000);
+      }
+    }
+  });
+
+  it("TC-SLACKAPP-108 treats Slack's HTTP 200 application errors as failures, without echoing the token", async () => {
+    // Every Slack Web API method answers HTTP 200 for application errors and puts
+    // the failure in `{ok: false, error}`. A `response.ok` check alone reports a
+    // message that was never delivered — and the loop would appear healthy while
+    // no operator ever sees a review list.
+    const fakes = offerFakes({
+      "chat.postMessage": { ok: false, error: "channel_not_found" },
+    });
+    const log = vi.fn();
+    await expect(offer({ fakes, log }).promise).rejects.toThrow(/channel_not_found/u);
+
+    const logged = log.mock.calls.flat().join("\n");
+    expect(logged).not.toContain(BOT_TOKEN);
+    expect(logged).not.toContain(SNIPPET);
+    // The record was already written, which is deliberate: it invalidates the
+    // previous week's button even when this week's post fails, so no stale click
+    // can apply an old list.
+    expect(fakes.ssm.puts).toHaveLength(1);
+  });
+
+  it("TC-SLACKAPP-109 overwrites the record but posts nothing when the run offers no deletions", async () => {
+    // The write is NOT conditional on there being something to post. Last week's
+    // Approve button is still live in the channel and its hash still matches the
+    // record it was posted with, so a run that skipped the write entirely would
+    // leave a click that applies a list this run's audit no longer stands behind.
+    const fakes = offerFakes();
+    const result = await offer({
+      fakes,
+      decisions: [
+        { id: "m-keep", verdict: "KEEP", reason: "durable" },
+        { id: "m-unstable", verdict: "UNSTABLE", reason: "passes disagreed on deletion" },
+      ],
+    }).promise;
+
+    expect(fakes.ssm.puts).toHaveLength(1);
+    expect(JSON.parse(fakes.ssm.puts[0].Value).ids).toEqual([]);
+    expect(fakes.slack.fetchImpl).not.toHaveBeenCalled();
+    expect(result.posted).toBe(false);
+    expect(result.messageTs).toBeUndefined();
+  });
+
+  it("TC-SLACKAPP-110 stamps the message timestamp onto the record without failing the offer", async () => {
+    // The apply task has to `chat.update` the message it was approved from, and
+    // the only durable place that `ts` can reach it is the approval record. The
+    // stamp is a SECOND write on purpose — the first has to precede the post, and
+    // `ts` does not exist until the post returns.
+    const fakes = offerFakes();
+    const result = await offer({ fakes }).promise;
+    expect(fakes.ssm.puts).toHaveLength(2);
+    const stamped = JSON.parse(fakes.ssm.puts[1].Value);
+    expect(stamped.messageTs).toBe("1754400000.000100");
+    expect(stamped.messageChannel).toBe(CHANNEL);
+    expect(stamped.hash).toBe(result.record.hash);
+    expect(stamped.ids).toEqual(["m-1", "m-2"]);
+
+    // A stamp failure does not undo a posted message or an offered list, so it is
+    // reported and the offer stands: losing the audit-trail update is strictly
+    // better than refusing an approval the operator can act on.
+    const flaky = offerFakes();
+    let put = 0;
+    flaky.ssm.send = vi.fn(async (command) => {
+      put += 1;
+      if (put === 2) throw new Error("ThrottlingException");
+      flaky.ssm.puts.push(command.input);
+      return {};
+    });
+    const log = vi.fn();
+    const survived = await offer({ fakes: flaky, log }).promise;
+    expect(survived.posted).toBe(true);
+    expect(log.mock.calls.flat().join("\n")).toMatch(/stamp|timestamp/iu);
+  });
+
+  it("TC-SLACKAPP-111 reports what policy withheld, so a shrinking approve set is visible", async () => {
+    // A RETAIN is a deletion the protected-topic rule refused and an UNSTABLE is
+    // one the passes disagreed on. Neither is offered — but a message that showed
+    // only the approve set would make a rule that started matching everything
+    // look like a clean corpus.
+    const { promise, slack } = offer({
+      decisions: [
+        del("m-1"),
+        { id: "m-protected", verdict: "RETAIN", reason: "stale", retainedReason: "protected topic personal-finance" },
+        { id: "m-unstable", verdict: "UNSTABLE", reason: "passes disagreed on deletion" },
+        { id: "m-keep", verdict: "KEEP", reason: "durable" },
+      ],
+    });
+    await promise;
+    const rendered = JSON.stringify(slack.calls[0].body.blocks);
+    expect(rendered).toMatch(/RETAIN[^0-9]*1/u);
+    expect(rendered).toMatch(/UNSTABLE[^0-9]*1/u);
+  });
+
+  it("TC-SLACKAPP-112 offers from a dry run and never from an apply", async () => {
+    // An apply that re-offered would overwrite the very record its own claim was
+    // derived from, so a redelivered click mid-apply would compare against a list
+    // the running task never saw.
+    const server = fakeServer([memory("del-1", "session noise")]);
+    const llm = fakeLlm([[{ id: "del-1", verdict: "DELETE", reason: "session-state" }]]);
+    const postApproval = vi.fn(async () => ({ posted: true, record: { hash: "sha256:x", ids: ["del-1"] } }));
+
+    const dry = await runCleanup(baseOpts(), {
+      ...baseDeps(server, llm, tempDir()),
+      postApproval,
+    });
+    expect(dry.exitCode).toBe(0);
+    expect(postApproval).toHaveBeenCalledTimes(1);
+    const [{ decisions, generatedAt }] = postApproval.mock.calls[0];
+    expect(decisions.map((d) => d.id)).toEqual(["del-1"]);
+    expect(generatedAt).toBe("2026-07-31T00:00:00.000Z");
+
+    postApproval.mockClear();
+    const applyServer = fakeServer([memory("del-1", "session noise")]);
+    const applied = await runCleanup(baseOpts({ apply: true }), {
+      ...baseDeps(applyServer, fakeLlm([[{ id: "del-1", verdict: "DELETE", reason: "session-state" }]]), tempDir()),
+      postApproval,
+    });
+    expect(applied.exitCode).toBe(0);
+    expect(postApproval).not.toHaveBeenCalled();
+  });
+
+  it("TC-SLACKAPP-113 fails the run when the offer fails, naming the decision list it kept", async () => {
+    // A scheduled review run whose post failed has done its audit and offered
+    // nothing. Exit 0 would make that indistinguishable from a healthy week, and
+    // the operator would notice only by the absence of a Slack message they were
+    // not expecting on any particular day.
+    const server = fakeServer([memory("del-1", "session noise")]);
+    const llm = fakeLlm([[{ id: "del-1", verdict: "DELETE", reason: "session-state" }]]);
+    const deps = {
+      ...baseDeps(server, llm, tempDir()),
+      postApproval: vi.fn(async () => {
+        throw new Error("channel_not_found");
+      }),
+    };
+    const result = await runCleanup(baseOpts(), deps);
+    expect(result.exitCode).toBe(1);
+    // The decision list survives the failed offer: it is the artefact the
+    // operator falls back to for a manual `--apply --ids`.
+    expect(result.decisionPath).toBeTruthy();
+    expect(existsSync(result.decisionPath)).toBe(true);
+    const logged = deps.log.mock.calls.flat().join("\n");
+    expect(logged).toMatch(/channel_not_found/u);
+    expect(logged).toContain(result.decisionPath);
+  });
+
+  it("TC-SLACKAPP-119 re-offers a replayed decision file under the FILE's stamp, not the moment it was reposted", async () => {
+    // A `--decisions <file>` dry run with Slack configured re-offers that list —
+    // the path an operator takes to repost a review after a failed offer. The
+    // record's `generatedAt` is what dates the list, so stamping it `now` would
+    // claim a fresh audit for a classification that may be days old, and the
+    // operator's only cue that they are approving stale judgments would be gone.
+    const dir = tempDir();
+    const decisionsFile = join(dir, "decisions.json");
+    writeFileSync(
+      decisionsFile,
+      JSON.stringify({
+        stage: "test",
+        generatedAt: "2026-07-24T00:00:00.000Z",
+        decisions: [
+          {
+            id: "del-1",
+            verdict: "DELETE",
+            reason: "session-state",
+            version: 1,
+            contentHash: contentHash("session noise"),
+          },
+        ],
+      }),
+    );
+    const server = fakeServer([memory("del-1", "session noise")]);
+    const postApproval = vi.fn(async () => ({ posted: true, record: { hash: "sha256:x", ids: ["del-1"] } }));
+
+    const result = await runCleanup(baseOpts({ decisionsFile }), {
+      ...baseDeps(server, fakeLlm([]), dir),
+      postApproval,
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(postApproval.mock.calls[0][0].generatedAt).toBe("2026-07-24T00:00:00.000Z");
+  });
+});
+
+
+describe("wiring the offer into the review run (#123)", () => {
+  const environmentKeys = [
+    "AWS_REGION",
+    "MEM9_DB_HOST",
+    "MEM9_DB_NAME",
+    "MEM9_DB_PORT",
+    "MEM9_DB_SECRET",
+    "MEM9_SLACK_APPROVAL_CHANNEL",
+    "MEM9_SSM_PREFIX",
+    "MEM9_TENANT_ID",
+    "SLACK_BOT_TOKEN",
+  ];
+  afterEach(() => {
+    for (const key of environmentKeys) delete process.env[key];
+  });
+
+  function reviewEnv(extra = {}) {
+    Object.assign(process.env, {
+      AWS_REGION: "ap-northeast-1",
+      MEM9_SSM_PREFIX: "/mem9-on-aws/prod",
+      MEM9_TENANT_ID: TENANT,
+      ...extra,
+    });
+  }
+
+  function ssmFake(values = {}) {
+    const client = {
+      sent: [],
+      send: vi.fn(async (command) => {
+        client.sent.push(command.input);
+        if (command.input.Names) {
+          return {
+            Parameters: command.input.Names.filter((n) => n in values).map((name) => ({
+              Name: name,
+              Value: values[name],
+            })),
+            InvalidParameters: command.input.Names.filter((n) => !(n in values)),
+          };
+        }
+        return {};
+      }),
+      destroy: () => {},
+    };
+    return client;
+  }
+
+  it("TC-SLACKAPP-114 builds no offer dep when Slack is not configured, so the #102 CLI is unchanged", async () => {
+    // The operator CLI at #102 has no Slack anything. An offer dep that existed
+    // unconditionally would make every hand-run dry run try to write an approval
+    // record the operator's identity may not be able to write — and would post a
+    // clickable Approve button for a list they ran locally to look at.
+    reviewEnv();
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: false, cap: 50 },
+      { ssm: ssmFake(), getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
+    );
+    expect(production.deps.postApproval).toBeUndefined();
+    await production.close();
+  });
+
+  it("TC-SLACKAPP-115 reads the bot token from the stage tree DECRYPTED when the channel is configured", async () => {
+    reviewEnv({ MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL" });
+    const ssm = ssmFake({ "/mem9-on-aws/prod/slack/bot-token": "xoxb-from-ssm" });
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: false, cap: 50 },
+      { ssm, getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
+    );
+    expect(typeof production.deps.postApproval).toBe("function");
+    const read = ssm.sent.find((input) => input.Names);
+    expect(read.Names).toEqual(["/mem9-on-aws/prod/slack/bot-token"]);
+    // The parameter is a SecureString, so without this the value comes back as
+    // ciphertext and every post 401s with `invalid_auth`.
+    expect(read.WithDecryption).toBe(true);
+    await production.close();
+  });
+
+  it("TC-SLACKAPP-116 prefers an injected token over the stage tree, reading no parameter at all", async () => {
+    // The apply task gets `SLACK_BOT_TOKEN` from ECS `ssm:`, and its task role
+    // holds `ssm:GetParameters` under `approvals/*` ONLY — a read of
+    // `slack/bot-token` is an AccessDenied there. Env-first is what lets one
+    // function serve both identities, exactly as `resolveDatabaseConfig` does.
+    reviewEnv({ MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL", SLACK_BOT_TOKEN: "xoxb-injected" });
+    const ssm = ssmFake();
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: false, cap: 50 },
+      { ssm, getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
+    );
+    expect(typeof production.deps.postApproval).toBe("function");
+    expect(ssm.sent.filter((input) => input.Names)).toEqual([]);
+    await production.close();
+  });
+
+  it("TC-SLACKAPP-117 refuses a configured channel it has no token for, rather than offering nothing", async () => {
+    // Silently skipping the post is the TC-SLACKAPP-113 failure with the alarm
+    // removed: the run does its whole audit, offers nothing, and exits 0 — and the
+    // operator finds out by never receiving a message they were not expecting on
+    // any particular day.
+    reviewEnv({ MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL" });
+    await expect(
+      createCleanupDeps(
+        { stage: "prod", apply: false, cap: 50 },
+        { ssm: ssmFake(), getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
+      ),
+    ).rejects.toThrow(/bot-token|bot token/u);
+  });
+
+  it("TC-SLACKAPP-118 passes the stage, prefix and channel through to a real offer", async () => {
+    reviewEnv({ MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL", SLACK_BOT_TOKEN: "xoxb-injected" });
+    const ssm = ssmFake();
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ok: true, channel: "C0APPROVAL", ts: "1754400000.000200" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: false, cap: 50 },
+      { ssm, getToken: vi.fn(), fromNodeProviderChain: vi.fn(), fetchImpl },
+    );
+
+    const offer = await production.deps.postApproval({
+      decisions: [
+        {
+          id: "m-1",
+          verdict: "DELETE",
+          reason: "session-state",
+          version: 1,
+          contentHash: contentHash("c-m-1"),
+          snippet: "a session detail",
+        },
+      ],
+      generatedAt: "2026-08-05T03:00:00.000Z",
+    });
+
+    expect(offer.posted).toBe(true);
+    const put = ssm.sent.find((input) => input.Name);
+    // Built from the injected prefix, not a constant: a preview run writing prod's
+    // record would hand prod's callback a list preview generated.
+    expect(put.Name).toBe("/mem9-on-aws/prod/approvals/offered");
+    expect(JSON.parse(put.Value).stage).toBe("prod");
+    expect(JSON.parse(fetchImpl.mock.calls[0][1].body).channel).toBe("C0APPROVAL");
+    await production.close();
+  });
+});
+
+describe("closing the loop on the message (#123)", () => {
+  const BOT_TOKEN = "xoxb-fixture-not-a-real-token";
+  const CHANNEL = "C0APPROVAL";
+  const TS = "1754400000.000100";
+  const HASH = "sha256:whatever-the-claim-said";
+
+  function updateFakes(body = { ok: true, channel: CHANNEL, ts: TS }) {
+    const calls = [];
+    const fetchImpl = vi.fn(async (url, options = {}) => {
+      calls.push({
+        url: String(url),
+        headers: options.headers,
+        redirect: options.redirect,
+        body: JSON.parse(options.body),
+      });
+      return new Response(JSON.stringify(body), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    return { calls, fetchImpl };
+  }
+
+  it("TC-SLACKAPP-120 the outcome update reports what was DELETED, not what was approved", async () => {
+    // The single number an operator reads off this message is the one that must
+    // not be optimistic. An apply that approved 3 and deleted 1 (two lost to the
+    // LWW guard) has to say 1 deleted and 2 skipped — reporting the approved
+    // count would tell them the memories are gone when they are still there, and
+    // this message IS the audit trail, so nothing else would ever correct it.
+    const fakes = updateFakes();
+    const message = buildOutcomeMessage({
+      channel: CHANNEL,
+      messageTs: TS,
+      hash: HASH,
+      stage: "prod",
+      approved: 3,
+      result: { capUsed: 1, skippedLww: 2, skippedByFilter: 0, exitCode: 0 },
+      appliedAt: "2026-08-05T04:00:00.000Z",
+    });
+    const flat = JSON.stringify(message);
+    expect(message.channel).toBe(CHANNEL);
+    expect(message.ts).toBe(TS);
+    // The ACHIEVED count first, the approved count second. Asserted as an
+    // ordering rather than against a phrase so it does not pin the wording: the
+    // defect this exists to catch is reporting 3 where 1 is true, and "3 of 3"
+    // fails the first of these while a swapped "3 of 1" fails the second.
+    expect(message.text).toMatch(/\b1\b[^0-9]*\b3\b/u);
+    expect(message.text).not.toMatch(/\b3\b[^0-9]*\b1\b/u);
+    expect(flat).toMatch(/2\b[^"]*(skip|unchanged|changed)/iu);
+    // The buttons are GONE. A live Approve button under an applied outcome is an
+    // invitation to click a hash whose claim already exists, which the callback
+    // answers with "someone else is already applying" — a confusing dead end
+    // rather than the record of what happened.
+    expect(flat).not.toContain("cleanup_approve");
+    expect(flat).not.toContain("cleanup_reject");
+    expect(message.blocks.some((b) => b.type === "actions")).toBe(false);
+    // `text` is not required alongside `blocks` but IS what a notification and a
+    // screen reader read, and the outcome is the part worth notifying.
+    expect(message.text).toMatch(/1\b/u);
+    void fakes;
+  });
+
+  it("TC-SLACKAPP-121 a partial or capped apply says so on the message rather than reading as clean", async () => {
+    // exitCode 4 (cap exceeded) and 6 (partial) are the two ways an apply stops
+    // early with real deletions already done. A message that showed only the
+    // count would read identically to a complete run, and the operator's next
+    // move differs: a capped run has approved ids that were never touched and
+    // needs a re-offer, a clean one does not.
+    const capped = buildOutcomeMessage({
+      channel: CHANNEL,
+      messageTs: TS,
+      hash: HASH,
+      stage: "prod",
+      approved: 60,
+      result: { capUsed: 50, skippedLww: 0, skippedByFilter: 0, exitCode: 4 },
+      appliedAt: "2026-08-05T04:00:00.000Z",
+    });
+    expect(JSON.stringify(capped)).toMatch(/cap/iu);
+
+    const clean = buildOutcomeMessage({
+      channel: CHANNEL,
+      messageTs: TS,
+      hash: HASH,
+      stage: "prod",
+      approved: 2,
+      result: { capUsed: 2, skippedLww: 0, skippedByFilter: 0, exitCode: 0 },
+      appliedAt: "2026-08-05T04:00:00.000Z",
+    });
+    expect(JSON.stringify(clean)).not.toMatch(/cap exceeded|incomplete|partial/iu);
+    // Distinguishable from each other, which is the actual requirement — two
+    // outcomes that serialize the same would make the assertion above vacuous.
+    expect(JSON.stringify(capped)).not.toBe(JSON.stringify(clean));
+  });
+
+  it("TC-SLACKAPP-122 the outcome message names no memory id and no content", async () => {
+    // The review message legitimately carries ids and snippets: it is what the
+    // operator reviews. The outcome does not need them, and this message is
+    // posted by the APPLY task, whose log already goes to CloudWatch — adding
+    // them here widens where memory identifiers live for no operator benefit.
+    const message = buildOutcomeMessage({
+      channel: CHANNEL,
+      messageTs: TS,
+      hash: HASH,
+      stage: "prod",
+      approved: 1,
+      result: { capUsed: 1, skippedLww: 0, skippedByFilter: 0, exitCode: 0 },
+      appliedAt: "2026-08-05T04:00:00.000Z",
+      ids: ["SENTINEL-MEMORY-ID"],
+    });
+    expect(JSON.stringify(message)).not.toContain("SENTINEL-MEMORY-ID");
+  });
+
+  it("TC-SLACKAPP-123 the update targets the claim's coordinates and is skipped when they are absent", async () => {
+    const fakes = updateFakes();
+    const posted = await updateApprovalMessage({
+      claim: { messageChannel: CHANNEL, messageTs: TS, hash: HASH, stage: "prod" },
+      approved: 1,
+      stage: "prod",
+      result: { capUsed: 1, skippedLww: 0, skippedByFilter: 0, exitCode: 0 },
+      appliedAt: "2026-08-05T04:00:00.000Z",
+      botToken: BOT_TOKEN,
+      fetchImpl: fakes.fetchImpl,
+    });
+    expect(posted).toBe(true);
+    expect(fakes.calls).toHaveLength(1);
+    expect(fakes.calls[0].url).toBe("https://slack.com/api/chat.update");
+    expect(fakes.calls[0].headers.Authorization).toBe(`Bearer ${BOT_TOKEN}`);
+    // Both required arguments, from the CLAIM. `chat.update` needs channel AND
+    // ts; either missing is `channel_not_found` or `message_not_found`.
+    expect(fakes.calls[0].body.channel).toBe(CHANNEL);
+    expect(fakes.calls[0].body.ts).toBe(TS);
+
+    // A claim with no coordinates (a review run whose stamp write failed, or a
+    // pre-#123 record) calls NOTHING rather than calling with undefined. The
+    // deletions still happened, so this is not an error — but it must not be
+    // silent either, or a systematically unstamped record would look like a
+    // working loop forever.
+    // HALF a pair is included, and is the sharper case: `chat.update` needs both,
+    // so one coordinate is not a usable coordinate — a guard that required both to
+    // be missing would call Slack with `ts: undefined` and earn a
+    // `channel_not_found` that reads like a misconfigured channel. The Lambda's
+    // `loadOffered` already refuses to carry half a pair into the claim, so this is
+    // the second of two independent guards, in the process that would have to
+    // report the confusing error.
+    for (const claim of [
+      { hash: HASH, stage: "prod" },
+      { hash: HASH, stage: "prod", messageTs: TS },
+      { hash: HASH, stage: "prod", messageChannel: CHANNEL },
+    ]) {
+      const none = updateFakes();
+      const log = vi.fn();
+      const skipped = await updateApprovalMessage({
+        claim,
+        approved: 1,
+        stage: "prod",
+        result: { capUsed: 1, skippedLww: 0, skippedByFilter: 0, exitCode: 0 },
+        appliedAt: "2026-08-05T04:00:00.000Z",
+        botToken: BOT_TOKEN,
+        fetchImpl: none.fetchImpl,
+        log,
+      });
+      expect(skipped, JSON.stringify(claim)).toBe(false);
+      expect(none.fetchImpl, JSON.stringify(claim)).not.toHaveBeenCalled();
+      expect(log.mock.calls.map(String).join("\n")).toMatch(/coordinate|messageTs|not update/iu);
+    }
+  });
+
+  it("TC-SLACKAPP-124 a refused update never turns a completed apply into a failure", async () => {
+    // The deletions are DONE and irreversible by the time this runs. An
+    // `edit_window_closed` or a revoked token must not make the task exit
+    // non-zero: that would alarm on a successful apply, and — worse under the
+    // callback's recovery path — a retried task would re-apply ids already gone.
+    // It must be LOUD in the log and harmless to the exit code.
+    const fakes = updateFakes({ ok: false, error: "edit_window_closed" });
+    const log = vi.fn();
+    const posted = await updateApprovalMessage({
+      claim: { messageChannel: CHANNEL, messageTs: TS, hash: HASH, stage: "prod" },
+      approved: 1,
+      stage: "prod",
+      result: { capUsed: 1, skippedLww: 0, skippedByFilter: 0, exitCode: 0 },
+      appliedAt: "2026-08-05T04:00:00.000Z",
+      botToken: BOT_TOKEN,
+      fetchImpl: fakes.fetchImpl,
+      log,
+    });
+    expect(posted).toBe(false);
+    const logged = log.mock.calls.map(String).join("\n");
+    expect(logged).toMatch(/edit_window_closed/u);
+    expect(logged).toMatch(/deletion|applied|already/iu);
+  });
+});
+
+describe("wiring the outcome update into the apply run (#123)", () => {
+  const environmentKeys = [
+    "AWS_REGION",
+    "MEM9_APPROVAL_HASH",
+    "MEM9_DB_HOST",
+    "MEM9_DB_NAME",
+    "MEM9_DB_PORT",
+    "MEM9_DB_SECRET",
+    "MEM9_SLACK_APPROVAL_CHANNEL",
+    "MEM9_SSM_PREFIX",
+    "MEM9_TENANT_ID",
+    "SLACK_BOT_TOKEN",
+  ];
+  afterEach(() => {
+    for (const key of environmentKeys) delete process.env[key];
+  });
+
+  it("TC-SLACKAPP-125 the apply run reports its outcome once, with the numbers it actually achieved", async () => {
+    // Three approved, one edited between the scan and the re-read. The apply
+    // deletes two and skips one, and the message has to say two — the count the
+    // operator would otherwise take on faith.
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+    writeFileSync(idsFile, "d1\nd2\nd3\n");
+    const server = fakeServer([memory("d1", "a"), memory("d2", "b"), memory("d3", "c")]);
+    const llm = fakeLlm([
+      [
+        { id: "d1", verdict: "DELETE", reason: "stale" },
+        { id: "d2", verdict: "DELETE", reason: "stale" },
+        { id: "d3", verdict: "DELETE", reason: "stale" },
+      ],
+    ]);
+    const deps = baseDeps(server, llm, dir);
+    const realFetch = server.fetchImpl;
+    let mutated = false;
+    deps.fetchImpl = vi.fn(async (url, opts = {}) => {
+      if (!mutated && /memories\/[^/?]+$/.test(String(url))) {
+        mutated = true;
+        const d = server.store.get("d1");
+        d.content = "edited concurrently";
+        d.version += 1;
+      }
+      return realFetch(url, opts);
+    });
+    const reportOutcome = vi.fn(async () => true);
+    const result = await runCleanup(
+      baseOpts({ apply: true, idsFile }),
+      { ...deps, reportOutcome },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.capUsed).toBe(2);
+    expect(result.skippedLww).toBe(1);
+    // Once — not per decision and not per flush. A message updated three times
+    // would show intermediate counts as if they were outcomes.
+    expect(reportOutcome).toHaveBeenCalledTimes(1);
+    const reported = reportOutcome.mock.calls[0][0];
+    expect(reported.result.capUsed).toBe(2);
+    expect(reported.result.skippedLww).toBe(1);
+    expect(reported.result.exitCode).toBe(0);
+    // The stamp is the run's clock, not `Date.now()`: a container whose report is
+    // dated by wall time while everything else uses the injected clock makes two
+    // timestamps on one run disagree.
+    expect(reported.appliedAt).toBe("2026-07-31T00:00:00.000Z");
+  });
+
+  it("TC-SLACKAPP-126 a dry run and an unreported apply both leave the message alone", async () => {
+    // The review run posts; it must not also UPDATE, and the #102 operator CLI has
+    // no Slack at all — an apply with no dep must run to completion rather than
+    // throwing on a missing function.
+    const dir = tempDir();
+    const server = fakeServer([memory("d1", "a")]);
+    const llm = fakeLlm([[{ id: "d1", verdict: "DELETE", reason: "stale" }]]);
+    const reportOutcome = vi.fn(async () => true);
+    const dry = await runCleanup(baseOpts({ apply: false }), {
+      ...baseDeps(server, llm, dir),
+      reportOutcome,
+    });
+    expect(dry.exitCode).toBe(0);
+    expect(reportOutcome).not.toHaveBeenCalled();
+
+    const dir2 = tempDir();
+    const server2 = fakeServer([memory("d1", "a")]);
+    const llm2 = fakeLlm([[{ id: "d1", verdict: "DELETE", reason: "stale" }]]);
+    const plain = await runCleanup(
+      baseOpts({ apply: true }),
+      baseDeps(server2, llm2, dir2),
+    );
+    expect(plain.exitCode).toBe(0);
+    expect(server2.store.get("d1").state).toBe("deleted");
+  });
+
+  it("TC-SLACKAPP-127 a failed report does not change the exit code of a completed apply", async () => {
+    // The deletions are done and irreversible. A non-zero exit here would alarm on
+    // a successful apply, and the callback's stale-claim recovery would let a
+    // retried task re-apply ids that are already gone.
+    const dir = tempDir();
+    const server = fakeServer([memory("d1", "a")]);
+    const llm = fakeLlm([[{ id: "d1", verdict: "DELETE", reason: "stale" }]]);
+    const log = vi.fn();
+    const result = await runCleanup(baseOpts({ apply: true }), {
+      ...baseDeps(server, llm, dir),
+      log,
+      reportOutcome: vi.fn(async () => {
+        throw new Error("SENTINEL-REPORT-EXPLODED");
+      }),
+    });
+    expect(result.exitCode).toBe(0);
+    expect(server.store.get("d1").state).toBe("deleted");
+    // Loud, though: a systematically broken report must not be invisible.
+    expect(log.mock.calls.map(String).join("\n")).toMatch(/SENTINEL-REPORT-EXPLODED/u);
+  });
+
+  it("TC-SLACKAPP-128 the claim's coordinates reach the report dep the container builds", async () => {
+    // End of the chain the offer started: offered record → claim → materialize →
+    // this dep → `chat.update`. Every other link is tested; this one carries the
+    // coordinates out of the read that was already happening, which is the link
+    // most likely to be forgotten because nothing else needs them.
+    const ids = ["m-1", "m-2"];
+    const hash = contentHash(ids.join("\n"));
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+    Object.assign(process.env, {
+      AWS_REGION: "ap-northeast-1",
+      MEM9_DB_HOST: "writer.example.com",
+      MEM9_DB_NAME: "mem9",
+      MEM9_DB_PORT: "5432",
+      MEM9_DB_SECRET: JSON.stringify({ username: "mem9", password: "fixture-password" }),
+      MEM9_SSM_PREFIX: "/mem9-on-aws/prod",
+      MEM9_TENANT_ID: TENANT,
+      MEM9_APPROVAL_HASH: hash,
+      // The apply task's role holds ssm:GetParameters under approvals/* ONLY, so
+      // the token arrives through the task definition's `ssm:` block, already
+      // decrypted. A GetParameters read of slack/bot-token here is AccessDenied.
+      SLACK_BOT_TOKEN: "xoxb-fixture-not-a-real-token",
+    });
+    const ssm = {
+      send: vi.fn(async (command) => ({
+        Parameters: (command.input.Names ?? [])
+          .filter((n) => n === claimParameterName("/mem9-on-aws/prod", hash))
+          .map((name) => ({
+            Name: name,
+            Value: JSON.stringify({
+              stage: "prod",
+              hash,
+              ids,
+              claimedAt: "2026-08-05T00:05:00.000Z",
+              messageTs: "1754400000.000100",
+              messageChannel: "C0APPROVAL",
+            }),
+          })),
+        InvalidParameters: [],
+      })),
+      destroy: () => {},
+    };
+    const slackCalls = [];
+    const fetchImpl = vi.fn(async (url, options = {}) => {
+      slackCalls.push({ url: String(url), body: JSON.parse(options.body) });
+      return new Response(JSON.stringify({ ok: true }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    });
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: true, cap: 50, idsFile },
+      {
+        Client: class {
+          async connect() {}
+          async query() {
+            return { rows: [{ locked: true }] };
+          }
+          async end() {}
+        },
+        ssm,
+        secrets: fakeAwsClient(),
+        getToken: vi.fn(),
+        fromNodeProviderChain: vi.fn(),
+        fetchImpl,
+      },
+    );
+
+    expect(production.deps.reportOutcome).toBeTypeOf("function");
+    await production.deps.reportOutcome({
+      result: { capUsed: 2, skippedLww: 0, skippedByFilter: 0, exitCode: 0 },
+      appliedAt: "2026-08-05T04:00:00.000Z",
+    });
+    expect(slackCalls).toHaveLength(1);
+    expect(slackCalls[0].url).toBe("https://slack.com/api/chat.update");
+    expect(slackCalls[0].body.ts).toBe("1754400000.000100");
+    expect(slackCalls[0].body.channel).toBe("C0APPROVAL");
+    // No ids ANYWHERE on the way through, not just on the message. The claim the
+    // container carries is the object this dep closes over, so an id list added to
+    // `materializeApprovedIds`'s return would reach the message body the moment
+    // anything spread the claim into it — asserted on both so the omission is a
+    // property of the data, not of one call site's field list.
+    expect(JSON.stringify(slackCalls[0].body)).not.toContain("m-1");
+    expect(slackCalls[0].body.text).toMatch(/2\b[^0-9]*2\b/u);
+    // The hash identifies WHICH approval was applied, and it is the only handle an
+    // operator has for correlating this message with the task log and the claim
+    // parameter. A message without it says a cleanup happened but not which one.
+    expect(JSON.stringify(slackCalls[0].body)).toContain(hash);
+    await production.close();
+  });
+
+  it("TC-SLACKAPP-129 a review run builds no report dep, and a hash-driven run with no token still applies", async () => {
+    // Two independent absences, both of which must degrade rather than fail: a
+    // review run has no claim to update against, and a token misconfiguration must
+    // not stop deletions the operator already approved — it must cost the audit
+    // update and say so.
+    Object.assign(process.env, {
+      AWS_REGION: "ap-northeast-1",
+      MEM9_SSM_PREFIX: "/mem9-on-aws/prod",
+      MEM9_TENANT_ID: TENANT,
+    });
+    const review = await createCleanupDeps(
+      { stage: "prod", apply: false, cap: 50 },
+      { ssm: fakeAwsClient(), getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
+    );
+    expect(review.deps.reportOutcome).toBeUndefined();
+    await review.close();
+
+    const ids = ["m-1"];
+    const hash = contentHash(ids.join("\n"));
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+    Object.assign(process.env, {
+      MEM9_DB_HOST: "writer.example.com",
+      MEM9_DB_NAME: "mem9",
+      MEM9_DB_PORT: "5432",
+      MEM9_DB_SECRET: JSON.stringify({ username: "mem9", password: "fixture-password" }),
+      MEM9_APPROVAL_HASH: hash,
+    });
+    delete process.env.SLACK_BOT_TOKEN;
+    const ssm = fakeAwsClient({
+      [claimParameterName("/mem9-on-aws/prod", hash)]: JSON.stringify({
+        stage: "prod",
+        hash,
+        ids,
+        claimedAt: "2026-08-05T00:05:00.000Z",
+        messageTs: "1754400000.000100",
+        messageChannel: "C0APPROVAL",
+      }),
+    });
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: true, cap: 50, idsFile },
+      {
+        Client: class {
+          async connect() {}
+          async query() {
+            return { rows: [{ locked: true }] };
+          }
+          async end() {}
+        },
+        ssm,
+        secrets: fakeAwsClient(),
+        getToken: vi.fn(),
+        fromNodeProviderChain: vi.fn(),
+      },
+    );
+    // The ids were still materialized — the apply is unaffected.
+    expect(readFileSync(idsFile, "utf8")).toBe("m-1\n");
+    expect(production.deps.reportOutcome).toBeUndefined();
+    await production.close();
   });
 });

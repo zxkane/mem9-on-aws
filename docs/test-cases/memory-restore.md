@@ -331,6 +331,33 @@ consolidation, exactly what "a listing takes no lock" promises cannot happen.
 Declaring `mode` per flag rather than as a one-off check means a flag added later
 must answer the question — the test fails on a missing `mode`.
 
+## The CLI wiring layer
+
+`recoveryDeps` — the function that BUILDS the deps for both recovery modes — is
+module-private, and every case above hands fakes straight to `runListInactive` /
+`runRestore`. That leaves the wiring itself with no coverage from any of them, and
+it is not a theoretical gap: merging these modes with the #123 approval work left
+`recoveryDeps` calling `productionDatabaseMutex(stage, region)` after that
+function had gained a third `runtime` parameter that the helpers it delegates to
+dereference unguarded (`ssmClient`'s `runtime.ssm`, `readSecret`'s
+`runtime.secrets`). Both modes died with a `TypeError` before reaching AWS at all,
+while the full unit suite, the coverage gate, and `tsc` stayed green — nothing in
+the repo typechecks `scripts/*.mjs`.
+
+**TC-MEMRESTORE-071** runs each mode as a subprocess against a nonexistent stage.
+Both invocations fail either way, so the assertion is *which* failure — and it is
+deliberately a NEGATIVE one: no `TypeError`, and no
+`Cannot read properties of undefined`. Which diagnostic an operator actually gets
+depends on the runner (`database connection parameters are incomplete` where the
+SSM read succeeds and returns nothing, `CredentialsProviderError` where there are
+no credentials at all), so asserting one message by name would make the case fail
+on a laptop or pass for the wrong reason in CI. Both acceptable outcomes prove the
+same thing: the wiring got as far as the AWS call.
+
+`MEM9_DB_SECRET`/`_HOST`/`_NAME` are blanked so `resolveDatabaseConfig` takes the
+SSM branch — the one that reads `runtime` — since a runner with those set would
+otherwise skip the code path under test.
+
 ## Operator round trip (no CI E2E)
 
 - **TC-MEMRESTORE-070** — from a VPC-internal host on the PR preview stage:

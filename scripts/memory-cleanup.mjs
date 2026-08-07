@@ -19,6 +19,25 @@
 //        [--apply] [--decisions file.json] [--ids approved.txt]
 //        [--cap 50] [--out dir] [--lock-file path] [--lock-ttl hours]
 //        [--model openai.gpt-5.6-terra] [--effort high] [--llm-region us-west-2]
+//        [--protected-topics personal-finance,operations]
+//        [--consensus-passes 2]
+//
+// What every flag DOES lives in `USAGE` (`--help`), which derives its defaults
+// from the constants rather than restating them. Recorded here is only the part
+// `--help` is the wrong place for — why the two #123 flags exist at all:
+//
+// --protected-topics, because the cost of the retention default is finance
+// memories that never get tidied, and the cost of no default is finance memories
+// that get deleted. Protection is a policy invariant, not a verdict: a protected
+// memory the classifier judged deletable is reported as RETAIN carrying the
+// original verdict, so the report shows policy overriding the classifier rather
+// than the classifier having decided to keep it.
+//
+// --consensus-passes, because of a measurement: one pass reproduced only 66% of
+// its own DELETE set on a re-run, which is not reproducible enough to authorize
+// deletions from. Intersecting passes only ever NARROWS — a contested id is
+// reported as UNSTABLE and acted on by nobody — so the flag trades inference cost
+// for a smaller, more reproducible offered set, never a larger one.
 //
 // The decision log and the restore log contain memory snippets — instance-private
 // data. Both are written OUTSIDE the repository (default ~/.mem9-cleanup/<stage>/)
@@ -56,6 +75,22 @@ const CLASSIFY_ATTEMPTS = 2;
 const LOCK_ACQUIRE_ATTEMPTS = 2;
 const DISCOVERY_RETRIES = 3;
 const DEFAULT_CAP = 50;
+// The STANDARD Parameter Store tier's content limit. The advanced tier's 8 KB is
+// deliberately not an option: it incurs a charge and cannot be reverted to
+// standard without data loss, so the record has to fit here (#123).
+const MAX_PARAMETER_BYTES = 4096;
+// Slack's own hard ceilings on a `chat.postMessage` payload
+// (api.slack.com/reference/block-kit/blocks). A message over ANY of them is
+// rejected wholesale, so the operator sees nothing — which is why
+// `buildApprovalMessage` refuses to build one rather than letting Slack refuse
+// to render it.
+const SLACK_API_BASE = "https://slack.com/api";
+const SLACK_MAX_BLOCKS = 50;
+const SLACK_MAX_SECTION_CHARS = 3000;
+const SLACK_MAX_HEADER_CHARS = 150;
+const SLACK_TIMEOUT_MS = 15_000;
+/** Set by infra/slack-approval.ts; its presence is what enables the offer. */
+const MEM9_SLACK_CHANNEL_ENV = "MEM9_SLACK_APPROVAL_CHANNEL";
 const REQUEST_TIMEOUT_MS = 30_000; // REST calls; the LLM call sets its own
 const LLM_TIMEOUT_MS = 120_000;
 // Reasoning models consume output tokens on hidden reasoning BEFORE emitting
@@ -101,6 +136,20 @@ D4. Rules 12-14 above do NOT apply. When in doubt about durability, return
     fewer facts. An empty facts array is the CORRECT output for a routine
     work session with no durable takeaways.`;
 
+/**
+ * The subject areas a memory can be assigned to (#123). Closed set: an
+ * unrecognised value is a MalformedResponse, because `protectedTopics` can only
+ * protect topics it knows about, and a silently accepted sixth topic would route
+ * finance memories somewhere the retain rule never looks.
+ */
+export const TOPICS = Object.freeze([
+  "personal-finance",
+  "engineering",
+  "content",
+  "operations",
+  "other",
+]);
+
 const CLASSIFY_SYSTEM_PROMPT = `You are auditing a shared long-lived memory store used by coding agents across sessions, machines, and tools. Judge each memory against these durability rules:
 
 ${DURABLE_ONLY_RULES}
@@ -112,12 +161,65 @@ For every memory in the input, output exactly one verdict:
   surviving id (merge_into), list the absorbed ids, and provide the merged
   content ("merged_content") that preserves all durable information.
 
+Also assign every memory exactly one "topic" from this closed set:
+${TOPICS.map((t) => `- "${t}"`).join("\n")}
+"personal-finance" covers anything about the operator's own money — holdings,
+positions, trading rules, insurance, budgets, cash planning — in any language,
+regardless of how time-sensitive it looks. Judge the subject matter, not the
+durability; the verdict already carries the durability judgment.
+
 Respond with ONLY a JSON object:
-{"verdicts":[{"id":"...","verdict":"KEEP|DELETE|MERGE","reason":"...","merge_into":"id?","absorbs":["id"...]?,"merged_content":"...?"}]}
-Every input id must appear exactly once. Never invent ids.`;
+{"verdicts":[{"id":"...","verdict":"KEEP|DELETE|MERGE","topic":"${TOPICS.join("|")}","reason":"...","merge_into":"id?","absorbs":["id"...]?,"merged_content":"...?"}]}
+Every input id must appear exactly once, with a topic. Never invent ids.`;
 
 export function contentHash(content) {
   return `sha256:${createHash("sha256").update(content ?? "").digest("hex")}`;
+}
+
+/**
+ * The SSM parameter name of one approval claim, derived from the offered list's
+ * content hash (#123).
+ *
+ * The `:` in `sha256:...` CANNOT appear in an SSM parameter name: `PutParameter`
+ * answers `ValidationException` ("each sub-path can be formed as a mix of letters,
+ * numbers and the following 3 symbols .-_"), and on the READ side a colon is
+ * parsed as the version/label selector instead — so the two operations disagree
+ * about what the name even is. Probed live in ap-northeast-1: the colon form is
+ * rejected on write, the dash form accepted.
+ *
+ * That made the whole loop dead on arrival, invisibly: `claimAndRun`'s catch
+ * separates "someone else won" from every other failure by the error NAME, so a
+ * `ValidationException` fell to the generic branch and answered "The approval
+ * could not be recorded" on every click, forever. Nothing caught it because every
+ * SSM test double is a Map keyed on the name string, so no double validates the
+ * name's SHAPE. `assertClaimParameterName` below is that missing validation, and
+ * the fakes call it (TC-SLACKAPP-131).
+ *
+ * The transformation replaces the separator rather than dropping the `sha256`
+ * prefix: the algorithm stays legible in the name, which is what an operator
+ * reading `describe-parameters` output needs in order to recompute it.
+ */
+export function claimParameterName(ssmPrefix, hash) {
+  return `${ssmPrefix}/approvals/approved-${String(hash).replace(/:/gu, "-")}`;
+}
+
+/**
+ * Throw unless `name` is a name SSM will actually accept on WRITE.
+ *
+ * Exported for the test doubles to call. A fake that accepts any string cannot
+ * fail the way the service does, and that gap is exactly what let the colon reach
+ * a deployed stage — so the doubles borrow the real constraint from here rather
+ * than restating it.
+ */
+export function assertClaimParameterName(name) {
+  if (!/^(?:\/[A-Za-z0-9_.-]+)+$/u.test(name)) {
+    throw new Error(
+      `ValidationException: Parameter name: if formed as a path, it can consist ` +
+        `of sub-paths divided by slash symbol; each sub-path can be formed as a ` +
+        `mix of letters, numbers and the following 3 symbols .-_ (got ${name})`,
+    );
+  }
+  return name;
 }
 
 /**
@@ -146,6 +248,15 @@ export function parseVerdicts(raw) {
     if (!v || typeof v.id !== "string") throw new MalformedResponse("verdict entry missing id");
     if (!["KEEP", "DELETE", "MERGE"].includes(v.verdict)) {
       throw new MalformedResponse("verdict entry has an invalid verdict value");
+    }
+    // Required on EVERY verdict, not only DELETE ones (#123). A topic consulted
+    // only where the code happens to need it protects finance memories exactly
+    // until a response arrives in a shape nobody predicted. Strictness costs a
+    // batch SKIP, which is non-destructive and reported; leniency costs the
+    // memories the operator asked to keep. Never defaulted to "other" — that is
+    // the unprotected topic.
+    if (!TOPICS.includes(v.topic)) {
+      throw new MalformedResponse("verdict entry has a missing or invalid topic");
     }
     if (v.merge_into !== undefined && typeof v.merge_into !== "string") {
       throw new MalformedResponse("merge_into must be a string");
@@ -255,11 +366,18 @@ function resolveMergeGroups(byId, verdictById, conflicted) {
  * Turn raw LLM verdicts into the persisted decision list, validating the merge
  * graph. Invalid merges (target missing/deleted/cyclic) downgrade to SKIP —
  * never to a destructive fallback.
+ *
+ * `opts.protectedTopics` names topics this tool may not mutate AT ALL (#123):
+ * not deleted, not absorbed into a merge, not rewritten as a merge survivor.
+ * One invariant rather than a per-verdict list, so a fourth verdict added later
+ * cannot silently escape it.
  */
-export function planDecisions(memories, verdicts) {
+export function planDecisions(memories, verdicts, opts = {}) {
+  const protectedTopics = opts.protectedTopics ?? DEFAULT_PROTECTED_TOPICS;
   const byId = new Map(memories.map((m) => [m.id, m]));
   const verdictById = new Map();
   const conflicted = new Set();
+  const retained = new Map();
   for (const v of verdicts) {
     if (!byId.has(v.id)) continue;
     const prior = verdictById.get(v.id);
@@ -267,6 +385,21 @@ export function planDecisions(memories, verdicts) {
     if (prior && prior.verdict !== v.verdict) conflicted.add(v.id);
     verdictById.set(v.id, v);
   }
+
+  // Withheld BEFORE the merge graph is resolved, not after: a protected id left
+  // in `verdictById` as a MERGE would consent to its own absorption, and being
+  // absorbed deletes it just as surely as DELETE does. Removing it here means the
+  // group it belonged to loses that member and — with no consenting absorbed ids
+  // left — degrades to SKIP through the existing path, so the survivor is not
+  // rewritten either. KEEP is exempt because KEEP mutates nothing: downgrading it
+  // would report policy as having overridden a decision that agreed with policy.
+  for (const [id, v] of verdictById) {
+    if (v.verdict === "KEEP") continue;
+    if (!protectedTopics.includes(v.topic)) continue;
+    retained.set(id, v);
+    verdictById.delete(id);
+  }
+
   const { mergeGroups, skip } = resolveMergeGroups(byId, verdictById, conflicted);
 
   // Only groups that will actually EMIT a MERGE decision may fold their
@@ -333,14 +466,130 @@ export function planDecisions(memories, verdicts) {
       absorbs: group.absorbs.map((a) => ({ id: a, ...anchor(byId.get(a)) })),
     });
   }
+  // `RETAIN` is its own verdict rather than a KEEP with a note: the summary
+  // counts it without special-casing, and `applyDecisions` cannot act on it by
+  // reaching a DELETE/MERGE branch. It records what the classifier actually
+  // judged, so the report shows policy overriding a deletable verdict rather
+  // than the classifier having decided to keep the memory.
+  for (const [id, v] of retained) {
+    decisions.push({
+      id,
+      verdict: "RETAIN",
+      reason: v.reason,
+      originalVerdict: v.verdict,
+      retainedReason: `protected topic ${v.topic}`,
+    });
+  }
   // Audit completeness: a memory the LLM returned no verdict for still gets a
   // row, so the decision log covers every scanned memory (TC-MEMCLEAN-021).
+  // `retained` counts as having a verdict — its ids were removed from
+  // `verdictById` above, so without this they would double-report as
+  // "no verdict returned" alongside their own RETAIN row.
   for (const [id] of byId) {
-    if (!verdictById.has(id) && !absorbedIds.has(id)) {
+    if (!verdictById.has(id) && !retained.has(id) && !absorbedIds.has(id)) {
       decisions.push({ id, verdict: "SKIP", reason: "no verdict returned" });
     }
   }
   return decisions;
+}
+
+/**
+ * Narrow N independent classification passes to the ids EVERY pass agreed to
+ * delete (#123).
+ *
+ * The measured motivation: one pass reproduced only 66% of its own DELETE set on
+ * a re-run, which is not reproducible enough to authorize deletions from. This is
+ * a narrowing operation and never a widening one — an id reaches `DELETE` only by
+ * being `DELETE` in every pass, and everything else is REPORTED rather than acted
+ * on. Each pass must already be a planned decision list (`planDecisions` output),
+ * so per-pass protection and merge-graph validation have run before the
+ * intersection: an intersection computed over raw verdicts would admit a
+ * protected id whenever one pass assigned it a different topic, and topic is a
+ * model judgment like any other (TC-SLACKAPP-075).
+ *
+ * @param passes decision arrays, or `null` for a pass that failed entirely
+ */
+export function consensusDecisions(passes) {
+  const usable = passes.filter(Boolean);
+  const report = {
+    passes: passes.length,
+    usablePasses: usable.length,
+    perPassDeletes: passes.map((p) => (p ? p.filter((d) => d.verdict === "DELETE").length : null)),
+    agreed: 0,
+    disagreed: 0,
+    mergesWithheld: 0,
+    // Consensus needs at least two usable passes BY DEFINITION. One pass is not
+    // a quorum of itself, so a run that loses a pass offers nothing and says so
+    // — "use the other pass" would quietly restore the single-pass behavior this
+    // exists to remove (TC-SLACKAPP-073).
+    consensusReached: usable.length >= 2 && usable.length === passes.length,
+  };
+
+  // Union of every id any pass judged, in first-seen order so the output is
+  // deterministic. Every id keeps a row: the decision log covers the whole scan.
+  const ids = [];
+  const seen = new Set();
+  for (const pass of usable) {
+    for (const d of pass) {
+      if (!seen.has(d.id)) {
+        seen.add(d.id);
+        ids.push(d.id);
+      }
+    }
+  }
+  const byPass = usable.map((pass) => new Map(pass.map((d) => [d.id, d])));
+
+  const decisions = [];
+  for (const id of ids) {
+    // `null` for a pass that did not judge this id at all. Absence is not
+    // agreement in either direction (TC-SLACKAPP-074).
+    const rows = byPass.map((m) => m.get(id) ?? null);
+    const verdicts = rows.map((d) => d?.verdict ?? null);
+
+    // MERGE is withheld from the offered set in v1 — the approval loop approves
+    // deletions only — and counted, so the withholding cannot read as "the
+    // classifier found no merges" (TC-SLACKAPP-076).
+    if (verdicts.includes("MERGE")) {
+      report.mergesWithheld += 1;
+      decisions.push({
+        id,
+        verdict: "UNSTABLE",
+        reason: "merge withheld from the approval loop in v1",
+        verdicts,
+      });
+      continue;
+    }
+
+    const anyDelete = verdicts.includes("DELETE");
+    const allDelete = report.consensusReached && verdicts.every((v) => v === "DELETE");
+    if (allDelete) {
+      report.agreed += 1;
+      // The FIRST pass's row carries the anchors the apply path fences against.
+      // Any pass's would do — they re-read the same store — but picking one
+      // deliberately beats picking whichever happened to be last.
+      decisions.push(rows[0]);
+      continue;
+    }
+    if (anyDelete) {
+      // Its own verdict rather than a KEEP: a KEEP would claim the classifier
+      // judged the memory durable, when in fact a pass wanted it gone and the
+      // passes disagreed — the exact number this design exists to surface.
+      report.disagreed += 1;
+      decisions.push({
+        id,
+        verdict: "UNSTABLE",
+        reason: report.consensusReached
+          ? "passes disagreed on deletion"
+          : "no consensus: a classification pass failed entirely",
+        verdicts,
+      });
+      continue;
+    }
+    // No pass wanted it deleted: keep the first pass's row as-is (KEEP, SKIP,
+    // RETAIN — all non-destructive, and each already means what it says).
+    decisions.push(rows.find(Boolean));
+  }
+  return { decisions, report };
 }
 
 function destructiveCost(decision) {
@@ -446,7 +695,7 @@ async function classifyBatch(batch, batchIndex, completeChat, log) {
   return null;
 }
 
-async function classifyAll(memories, completeChat, log) {
+async function classifyAll(memories, completeChat, log, opts = {}) {
   const decisions = [];
   let batches = 0;
   let failedBatches = 0;
@@ -468,7 +717,7 @@ async function classifyAll(memories, completeChat, log) {
       log(`discarding hallucinated verdict for unknown id ${v.id}`);
       return false;
     });
-    decisions.push(...planDecisions(batch, inBatch));
+    decisions.push(...planDecisions(batch, inBatch, opts));
   }
   return { decisions, batches, failedBatches };
 }
@@ -621,9 +870,539 @@ async function discoverBaseUrl(opts, deps) {
   throw new Error(`no healthy mnemo-server instance found for stage ${opts.stage} after ${DISCOVERY_RETRIES} attempts`);
 }
 
-function verdictSummary(decisions) {
-  const summary = { KEEP: 0, DELETE: 0, MERGE: 0, SKIP: 0 };
-  for (const d of decisions) summary[d.verdict] = (summary[d.verdict] || 0) + 1;
+/**
+ * The `{prefix}/approvals/offered` record: what the callback Lambda compares a
+ * button click against, and where the apply task reads its ids from (#123).
+ *
+ * Ids and a hash only, never memory content. The parameter is a plain `String`
+ * because the workload permissions boundary admits neither `kms:Encrypt` nor
+ * `kms:GenerateDataKey`, so a `SecureString` write would be denied at runtime —
+ * which makes this record readable by anything holding `ssm:GetParameters` on
+ * the stage tree, and bounds what may go in it (TC-SLACKAPP-023b).
+ *
+ * Over the limit it THROWS. Truncating would ask the operator to approve a list
+ * that is not the list they were shown, and the ids are exactly what the apply
+ * task deletes — the one failure mode here that produces a *wrong* apply rather
+ * than a failed one (TC-SLACKAPP-024).
+ */
+export function buildOfferedRecord({ stage, decisions, generatedAt }) {
+  const ids = decisions.filter((d) => d.verdict === "DELETE").map((d) => d.id);
+  const record = {
+    stage,
+    // Over the ids, so a click carrying an earlier list's hash no longer matches
+    // once the list is regenerated. Joined with a separator no id can contain, so
+    // `["ab","c"]` and `["a","bc"]` cannot collide into one hash.
+    hash: contentHash(ids.join("\n")),
+    ids,
+    generatedAt,
+  };
+  const serialized = JSON.stringify(record);
+  if (serialized.length > MAX_PARAMETER_BYTES) {
+    // Measured on the SERIALIZED value rather than the id count: a limit
+    // expressed as "N ids" drifts from the real constraint as soon as ids get
+    // longer, and bytes are what SSM rejects. `--cap` is the knob to lower.
+    throw new Error(
+      `the offered approval list is ${serialized.length} bytes, over the ` +
+        `${MAX_PARAMETER_BYTES}-byte standard parameter limit for ${ids.length} ids — ` +
+        `lower --cap rather than truncating the list the operator approves`,
+    );
+  }
+  return record;
+}
+
+/**
+ * The Block Kit message the operator reviews and clicks (#123).
+ *
+ * Pure and separately exported, because the interesting failures are all in the
+ * SHAPE rather than in the transport: the two `action_id`s the deployed handler
+ * branches on, the hash in both action values, and the block limits that decide
+ * whether Slack renders the message at all.
+ *
+ * Over any limit it THROWS, the same argument as `buildOfferedRecord`'s
+ * parameter fence: a message that dropped its overflow would show the operator
+ * part of a list and attach an Approve button whose hash covers all of it, which
+ * is a wrong apply rather than a failed one. Slack rejects an over-limit message
+ * wholesale anyway, so the only thing lost is a clear error.
+ */
+export function buildApprovalMessage({ record, decisions, channel }) {
+  const withheld = { RETAIN: 0, UNSTABLE: 0 };
+  const byId = new Map();
+  for (const d of decisions) {
+    byId.set(d.id, d);
+    if (d.verdict in withheld) withheld[d.verdict] += 1;
+  }
+
+  const header = `Memory cleanup review — ${record.ids.length} deletion(s) for ${record.stage}`;
+  const lines = record.ids.map((id) => {
+    const decision = byId.get(id);
+    // The snippet is the review: an id alone is not something an operator can
+    // judge. Slack and CloudWatch Logs are the approved destinations for memory
+    // content — the SSM record and the repository are not.
+    const snippet = (decision?.snippet ?? "").replace(/\s+/gu, " ").trim();
+    return `• \`${id}\` — ${decision?.reason ?? "no reason recorded"}${snippet ? `: ${snippet}` : ""}`;
+  });
+
+  const blocks = [
+    { type: "header", text: { type: "plain_text", text: header } },
+    // Counted even at zero, for the same reason `verdictSummary` prints its
+    // zeros: a protected-topic rule that started matching everything, or a
+    // consensus that collapsed, would otherwise read as a clean corpus.
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text:
+          `*Withheld from this approval:* RETAIN ${withheld.RETAIN} ` +
+          `(protected topic), UNSTABLE ${withheld.UNSTABLE} (passes disagreed). ` +
+          `Generated ${record.generatedAt}.`,
+      },
+    },
+    ...chunkSections(lines),
+    {
+      type: "actions",
+      elements: [
+        {
+          type: "button",
+          action_id: "cleanup_approve",
+          text: { type: "plain_text", text: `Approve ${record.ids.length} deletion(s)` },
+          style: "danger",
+          // The hash ONLY. A Slack action value is capped at 2000 characters so
+          // it cannot carry the ids — and must not: the signature proves a click
+          // came from the workspace, never that ids inside the payload are the
+          // ones the classifier chose. The apply task reads them from SSM.
+          value: record.hash,
+          confirm: {
+            title: { type: "plain_text", text: "Apply these deletions?" },
+            text: {
+              type: "mrkdwn",
+              text: `${record.ids.length} memories will be soft-deleted in *${record.stage}*.`,
+            },
+            confirm: { type: "plain_text", text: "Apply" },
+            deny: { type: "plain_text", text: "Cancel" },
+            style: "danger",
+          },
+        },
+        {
+          type: "button",
+          action_id: "cleanup_reject",
+          text: { type: "plain_text", text: "Reject" },
+          value: record.hash,
+        },
+      ],
+    },
+  ];
+
+  if (blocks.length > SLACK_MAX_BLOCKS) {
+    throw new Error(
+      `the review list needs ${blocks.length} Block Kit blocks, over Slack's ` +
+        `${SLACK_MAX_BLOCKS}-block message limit for ${record.ids.length} ids — ` +
+        `lower --cap rather than posting a list the operator cannot see whole`,
+    );
+  }
+  const long = blocks.find(
+    (b) => b.type === "header" && b.text.text.length > SLACK_MAX_HEADER_CHARS,
+  );
+  if (long) {
+    throw new Error(`the review header does not fit Slack's ${SLACK_MAX_HEADER_CHARS}-character limit`);
+  }
+  return { channel, text: header, blocks };
+}
+
+/**
+ * Pack the id lines into as few section blocks as Slack's per-section character
+ * limit allows.
+ *
+ * One section per id would hit the 50-block message limit at ~46 ids — below
+ * #102's default cap of 50 — so the natural spelling breaks the loop's own
+ * default. Packing keeps a cap-50 list inside a handful of blocks. A single line
+ * longer than the limit is truncated with a marker rather than dropped: the ids
+ * shown must still be the ids the hash covers, and the snippet is already a
+ * 120-character slice of the memory, so only a pathological reason string can
+ * reach this.
+ */
+function chunkSections(lines) {
+  const sections = [];
+  let current = "";
+  for (const line of lines) {
+    const clipped =
+      line.length > SLACK_MAX_SECTION_CHARS
+        ? `${line.slice(0, SLACK_MAX_SECTION_CHARS - 3)}...`
+        : line;
+    if (current && current.length + 1 + clipped.length > SLACK_MAX_SECTION_CHARS) {
+      sections.push({ type: "section", text: { type: "mrkdwn", text: current } });
+      current = clipped;
+      continue;
+    }
+    current = current ? `${current}\n${clipped}` : clipped;
+  }
+  if (current) sections.push({ type: "section", text: { type: "mrkdwn", text: current } });
+  return sections;
+}
+
+/** One Slack Web API call, with the failure mode the HTTP status does not show. */
+async function slackCall(method, body, { botToken, fetchImpl }) {
+  let response;
+  try {
+    response = await fetchImpl(`${SLACK_API_BASE}/${method}`, {
+      method: "POST",
+      // The alert-router precedent: a redirect from an API host is never worth
+      // following with a bearer token attached.
+      redirect: "manual",
+      headers: {
+        Authorization: `Bearer ${botToken}`,
+        "content-type": "application/json; charset=utf-8",
+      },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(SLACK_TIMEOUT_MS),
+    });
+  } catch (err) {
+    // Never the request body: it carries the memory snippets. Never the error's
+    // own `cause` chain either, which can hold the request headers.
+    throw new Error(`Slack ${method} request failed: ${err.name}`);
+  }
+  if (!response.ok) {
+    throw new Error(`Slack ${method} returned HTTP ${response.status}`);
+  }
+  // EVERY Slack Web API method answers HTTP 200 for application errors and puts
+  // the failure in `{ok: false, error}`. A `response.ok` check alone reports a
+  // message that was never delivered, and the weekly loop would look healthy
+  // while no operator ever saw a review list.
+  const payload = await response.json();
+  if (!payload?.ok) {
+    throw new Error(`Slack ${method} refused the request: ${payload?.error ?? "unknown error"}`);
+  }
+  return payload;
+}
+
+/**
+ * Offer this run's deletions to the operator: write the record, then post the
+ * message whose button the callback Lambda validates against it (#123).
+ *
+ * ORDER IS LOAD-BEARING, and in the opposite direction from
+ * `createCleanupDeps`. The record is written FIRST because posting first leaves a
+ * live Approve button that the callback rejects with "there is no current
+ * approval list" — a click spent on an operator hunting a backend fault. The
+ * write is also what invalidates LAST week's button (the callback compares the
+ * click's hash against `offered.hash`), so it happens even when this run offers
+ * nothing and even when the post then fails: a stale click must never apply a
+ * list this run's audit no longer stands behind.
+ *
+ * The `messageTs` stamp is a second write because `ts` does not exist until the
+ * post returns, and the apply task needs it to `chat.update` the message it was
+ * approved from. A stamp failure is reported, not raised — losing the audit-trail
+ * update is strictly better than refusing an approval the operator can act on.
+ */
+export async function postApprovalRequest({
+  ssm,
+  ssmPrefix,
+  stage,
+  decisions,
+  generatedAt,
+  channel,
+  botToken,
+  fetchImpl,
+  log = () => {},
+}) {
+  const record = buildOfferedRecord({ stage, decisions, generatedAt });
+  const { PutParameterCommand } = await import("@aws-sdk/client-ssm");
+  const name = `${ssmPrefix}/approvals/offered`;
+  const write = (value) =>
+    ssm.send(
+      new PutParameterCommand({
+        Name: name,
+        // Plain `String` and `Overwrite: true`, both runtime-only failures like
+        // TC-SLACKAPP-047f's: the boundary denies a `SecureString` write (no
+        // `kms:Encrypt`, no `kms:GenerateDataKey`), and `Overwrite: false` would
+        // succeed once and then fail every later week with
+        // `ParameterAlreadyExists`, silently ending the loop.
+        Type: "String",
+        Overwrite: true,
+        Value: JSON.stringify(value),
+      }),
+    );
+
+  await write(record);
+  log(`offered ${record.ids.length} id(s) for approval as ${record.hash}`);
+  if (record.ids.length === 0) {
+    // Nothing to approve, so nothing to post — but the record above still
+    // overwrote last week's list, which is the point.
+    log("no deletions to offer; posted nothing to Slack");
+    return { record, posted: false };
+  }
+
+  const message = buildApprovalMessage({ record, decisions, channel });
+  const posted = await slackCall("chat.postMessage", message, { botToken, fetchImpl });
+
+  try {
+    await write({ ...record, messageTs: posted.ts, messageChannel: posted.channel });
+  } catch (err) {
+    log(
+      `WARNING the approval list was offered and posted but the message ` +
+        `timestamp could not be stamped onto the record: ${err.message}; ` +
+        `the apply will not be able to update the Slack message`,
+    );
+  }
+  return { record, posted: true, messageTs: posted.ts, messageChannel: posted.channel };
+}
+
+/**
+ * The Block Kit message that REPLACES the review message once the apply has run
+ * (#123), so the outcome lives on the thing the operator clicked.
+ *
+ * Two properties matter and neither is cosmetic:
+ *
+ *  - The count is what was DELETED (`capUsed`), never what was approved. An
+ *    apply that approved 3 and deleted 1 has lost two to the LWW guard, and this
+ *    message is the audit trail — nothing downstream would ever correct an
+ *    optimistic number, so the operator would believe memories are gone that are
+ *    still there.
+ *  - No `actions` block. `chat.update` REPLACES the blocks wholesale, which is
+ *    what removes the buttons; leaving them would offer a hash whose claim
+ *    already exists, and the callback answers that click with "someone else is
+ *    already applying" — a dead end rather than a record.
+ *
+ * Ids are accepted and deliberately unused: the caller has them (they are the
+ * claim's), and taking the parameter makes the omission explicit rather than an
+ * accident of the signature. The review message carries ids and snippets because
+ * it is what the operator reviews; the outcome needs none, and this runs in the
+ * apply task whose log already reaches CloudWatch.
+ */
+export function buildOutcomeMessage({
+  channel,
+  messageTs,
+  hash,
+  stage,
+  approved,
+  result,
+  appliedAt,
+}) {
+  const deleted = result.capUsed ?? 0;
+  const notes = [];
+  if (result.skippedLww > 0) {
+    notes.push(
+      `${result.skippedLww} skipped — changed after the list was generated (last-write-wins guard)`,
+    );
+  }
+  if (result.skippedByFilter > 0) {
+    notes.push(`${result.skippedByFilter} not in the approved list`);
+  }
+  // Distinct from the line above, and the distinction is the operator's: "not in
+  // the approved list" is the guard doing its job on something they did not
+  // approve, while this is something they DID approve that the classifier has
+  // since changed its mind about. Both leave the headline short of `approved`,
+  // and without this note the shortfall has no stated cause.
+  if (result.reclassified > 0) {
+    notes.push(
+      `${result.reclassified} approved id(s) are no longer classified as ` +
+        `deletions and were left in place`,
+    );
+  }
+  // Named by what the operator has to DO about it, not by the exit code: a capped
+  // run leaves approved ids untouched and needs a fresh review, a partial one has
+  // a failure in the log to read. An exit code in a Slack message is a lookup.
+  if (result.exitCode === 4) {
+    notes.push(
+      `*stopped early: the run's cap was reached*, so approved ids were left ` +
+        `unapplied — they will reappear in the next review`,
+    );
+  } else if (result.exitCode === 6) {
+    notes.push(`*completed partially* — see the task log for the failures`);
+  } else if (result.exitCode !== 0) {
+    notes.push(`*the run exited ${result.exitCode}* — see the task log`);
+  }
+
+  const headline = `Applied: ${deleted} of ${approved} approved deletion(s) in ${stage}`;
+  const blocks = [
+    { type: "header", text: { type: "plain_text", text: "Memory cleanup applied" } },
+    {
+      type: "section",
+      text: {
+        type: "mrkdwn",
+        text: `*${headline}*\nApproval \`${hash}\` applied ${appliedAt}.`,
+      },
+    },
+  ];
+  if (notes.length > 0) {
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: notes.map((n) => `• ${n}`).join("\n") },
+    });
+  }
+  // `text` is not required alongside `blocks`, but it is what a notification and
+  // a screen reader read — and the count is the part worth notifying.
+  return { channel, ts: messageTs, text: headline, blocks };
+}
+
+/**
+ * Update the review message with the outcome (#123). Returns whether it posted.
+ *
+ * NEVER throws and never touches the exit code. By the time this runs the
+ * deletions are done and irreversible: raising would alarm on a successful apply,
+ * and — under the callback's stale-claim recovery — a retried task would re-apply
+ * ids that are already gone. So every failure here is a loud log line and a
+ * `false`.
+ *
+ * The coordinates come from the CLAIM, which copied them from the offered record.
+ * Absent, this skips: `chat.update` requires both `channel` and `ts`, and calling
+ * with `undefined` earns a `channel_not_found` that reads like a misconfigured
+ * channel rather than an unstamped record.
+ */
+export async function updateApprovalMessage({
+  claim,
+  approved,
+  stage,
+  result,
+  appliedAt,
+  botToken,
+  fetchImpl,
+  log = () => {},
+}) {
+  if (!claim?.messageTs || !claim?.messageChannel) {
+    log(
+      `the approval claim carries no Slack message coordinates, so the outcome ` +
+        `could not update the review message; the apply itself is unaffected`,
+    );
+    return false;
+  }
+  const message = buildOutcomeMessage({
+    channel: claim.messageChannel,
+    messageTs: claim.messageTs,
+    hash: claim.hash,
+    stage,
+    // The COUNT is a parameter, not `claim.ids.length`: the container's claim
+    // carries a count and no ids by design (the ids live in the --ids file), and a
+    // signature that read them here would invite putting them back.
+    approved,
+    result,
+    appliedAt,
+  });
+  try {
+    await slackCall("chat.update", message, { botToken, fetchImpl });
+    return true;
+  } catch (err) {
+    log(
+      `WARNING the deletions were applied but the review message could not be ` +
+        `updated: ${err.message}; the message still shows the pre-apply list`,
+    );
+    return false;
+  }
+}
+
+/**
+ * Materialize the `--ids` file the apply task consumes, from the approval CLAIM
+ * the operator's click created (#123).
+ *
+ * The task receives only the list's content HASH, as an ECS container override.
+ * That is deliberate: an override is echoed by `DescribeTasks` and recorded in
+ * CloudTrail, so ids there would put memory identifiers in an audit log — and
+ * more importantly the callback's signature proves the click came from the
+ * workspace, never that any ids in the request are the ids the classifier chose.
+ * So the ids come from `approvals/approved-{hash}`, which is immutable once
+ * written (`Overwrite: false` is the claim's atomic primitive).
+ *
+ * NOT from `approvals/offered`: that record is overwritten by every run, so
+ * reading it would apply the CURRENT run's list under an approval the operator
+ * gave for an earlier one.
+ *
+ * Every guard here throws. An `--ids` file that is absent, empty, or short means
+ * "approve fewer things" to the caller, so a permissive path does not fail — it
+ * reports a clean apply that deleted nothing (or the wrong thing).
+ */
+export async function materializeApprovedIds({
+  ssm,
+  stage,
+  ssmPrefix,
+  hash,
+  idsFile,
+  fs,
+  log = () => {},
+}) {
+  const name = claimParameterName(ssmPrefix, hash);
+  const { GetParametersCommand } = await import("@aws-sdk/client-ssm");
+  const response = await ssm.send(new GetParametersCommand({ Names: [name] }));
+  // An absent name is echoed in `InvalidParameters` and simply MISSING from
+  // `Parameters`, so there is no empty-value case to distinguish — `?.Value` is
+  // `undefined` and must not fall through to an empty ids file.
+  const raw = (response.Parameters ?? []).find((p) => p.Name === name)?.Value;
+  if (!raw) {
+    throw new Error(`no approval record for the requested hash at ${name}`);
+  }
+
+  let record;
+  try {
+    record = JSON.parse(raw);
+  } catch {
+    // The message never quotes the value: this parameter is the one place ids
+    // legitimately live, and a stack that echoed it would copy them to the log.
+    throw new Error(`the approval record at ${name} is not valid JSON`);
+  }
+  if (!record || typeof record !== "object" || !Array.isArray(record.ids)) {
+    throw new Error(`the approval record at ${name} has no id list`);
+  }
+  // Stage-bound, like #102's decision-file guard: a preview approval must never
+  // apply to prod.
+  if (record.stage !== stage) {
+    throw new Error(
+      `the approval record names stage ${record.stage}, not ${stage}`,
+    );
+  }
+  if (record.ids.length === 0) {
+    throw new Error(`the approval record at ${name} approved no ids`);
+  }
+  // Re-derived over the IDS, not compared against the record's own `hash` field:
+  // a tampered record carries a `hash` that agrees with itself, so only
+  // recomputing makes the ids the thing the hash vouches for. Same join as
+  // `buildOfferedRecord`, with a separator no id can contain.
+  const derived = contentHash(record.ids.join("\n"));
+  if (derived !== hash) {
+    throw new Error(
+      `the approval record's ids do not match the requested hash — refusing to apply`,
+    );
+  }
+
+  // Ids only, one per line, because `readApprovedIds` splits on "\n" and trims.
+  // A JSON array or a comma-joined line would parse as a single id and silently
+  // approve nothing.
+  fs.writeFileSync(idsFile, `${record.ids.join("\n")}\n`, { mode: 0o600 });
+  // The COUNT, never the ids: an operator needs to know the apply matched the
+  // approval, not which memories it names.
+  log(`materialized ${record.ids.length} approved id(s) for ${hash}`);
+  // The coordinates ride out of the read that was already happening. They are
+  // the only reason this returns a shape rather than a count: `chat.update` needs
+  // them and nothing else in the task does, so a second read of the same
+  // parameter would be the alternative. Ids deliberately do NOT come back — the
+  // file is where they belong, and the outcome message must not name them.
+  return {
+    count: record.ids.length,
+    messageTs: typeof record.messageTs === "string" ? record.messageTs : undefined,
+    messageChannel:
+      typeof record.messageChannel === "string" ? record.messageChannel : undefined,
+  };
+}
+
+/**
+ * Count every verdict, including the ones that did not occur.
+ *
+ * Zeros are printed on purpose: a run where protection matched nothing must say
+ * `"RETAIN":0`, because an omitted key is indistinguishable from a build with no
+ * protection rule at all — which is how a dropped `--protected-topics` would go
+ * unnoticed. And the key set is CLOSED: an unrecognised verdict is a routing
+ * bug (a memory on a path nothing audits), so it throws rather than quietly
+ * inventing a bucket that reads as a data oddity.
+ *
+ * Exported because that second property cannot be reached through any input:
+ * `validateDecisions` rejects an unknown verdict in a replayed file before this
+ * runs, so the only way in is a planner push site — an internal invariant, and
+ * TC-SLACKAPP-066 asserts it directly rather than leaving the guard unproven.
+ */
+export function verdictSummary(decisions) {
+  const summary = { KEEP: 0, DELETE: 0, MERGE: 0, SKIP: 0, RETAIN: 0, UNSTABLE: 0 };
+  for (const d of decisions) {
+    if (!(d.verdict in summary)) {
+      throw new Error(`decision for ${d.id} has an uncountable verdict`);
+    }
+    summary[d.verdict] += 1;
+  }
   return summary;
 }
 
@@ -720,17 +1499,64 @@ async function loadDecisions(opts, deps, { client, fs, clock, log, outDir }) {
     return {
       decisions: loaded.decisions,
       decisionPath: opts.decisionsFile,
+      // The FILE's stamp, not now: this run generated nothing, and an offered
+      // record claiming otherwise would date a list to the moment it was reposted.
+      // Falls back to now for a file written before the field existed.
+      generatedAt: loaded.generatedAt ?? new Date(clock()).toISOString(),
       classifierBroken: false,
       batches: 0,
       failedBatches: 0,
     };
   }
   const memories = await scanActiveMemories(client);
-  const { decisions, batches, failedBatches } = await classifyAll(memories, deps.completeChat, log);
+  // Each pass is a full independent classification of the SAME scan, so the
+  // passes differ only in model nondeterminism — which is exactly the variable
+  // being measured. One scan, N classifications: re-scanning per pass would let a
+  // concurrent ingest change the corpus between passes and show up as
+  // disagreement the model never had.
+  const passCount = Math.max(1, opts.consensusPasses ?? 1);
+  const runs = [];
+  for (let pass = 1; pass <= passCount; pass += 1) {
+    if (passCount > 1) log(`classification pass ${pass} of ${passCount}`);
+    runs.push(
+      await classifyAll(memories, deps.completeChat, log, {
+        protectedTopics: opts.protectedTopics,
+      }),
+    );
+  }
+  let { decisions, batches, failedBatches } = runs[0];
+  batches = runs.reduce((n, r) => n + r.batches, 0);
+  failedBatches = runs.reduce((n, r) => n + r.failedBatches, 0);
+  let consensus;
+  if (passCount > 1) {
+    // A pass whose every batch failed is passed as `null`, not as the list of SKIP
+    // rows `classifyAll` actually returned. The intersection is safe either way —
+    // a SKIP is not a DELETE — but the REPORT is not: SKIP rows read as "this pass
+    // judged the memory and declined to delete it", so the summary would blame a
+    // classifier that changed its mind for a transport that never answered.
+    const passes = runs.map((r) => (r.batches > 0 && r.failedBatches === r.batches ? null : r.decisions));
+    const result = consensusDecisions(passes);
+    decisions = result.decisions;
+    consensus = result.report;
+    log(
+      `CONSENSUS over ${consensus.passes} passes: ` +
+        consensus.perPassDeletes
+          .map((n, i) => `pass ${i + 1} DELETE=${n ?? "failed"}`)
+          .join("; ") +
+        `; agreed=${consensus.agreed}; disagreed=${consensus.disagreed}` +
+        `; merges withheld=${consensus.mergesWithheld}` +
+        reproducibility(consensus) +
+        (consensus.consensusReached
+          ? ""
+          : " — NO CONSENSUS: a pass failed entirely, so nothing is offered for deletion"),
+    );
+  }
   // Zero successful batches on a non-empty store = the classifier path is
   // broken (IAM, model id, endpoint), not "nothing to clean". Surfaced as a
   // distinct exit code so CI cannot report a green E2E for a run that never
-  // classified anything.
+  // classified anything. Summed across passes deliberately: one pass classifying
+  // the whole corpus proves the path works, so a later pass losing every batch is
+  // a transport outage the CONSENSUS line reports, not a broken classifier.
   const classifierBroken = batches > 0 && failedBatches === batches;
 
   const generatedAt = new Date(clock()).toISOString();
@@ -745,11 +1571,30 @@ async function loadDecisions(opts, deps, { client, fs, clock, log, outDir }) {
   return {
     decisions,
     decisionPath,
+    // The SAME stamp the decision file carries, so the offered record and the
+    // artefact an operator falls back to name one moment.
+    generatedAt,
     classifierBroken,
     batches,
     failedBatches,
     scanned: memories.length,
+    consensus,
   };
+}
+
+/**
+ * The agreement rate, as a share of the ids ANY pass wanted deleted.
+ *
+ * Denominator choice matters and is not obvious: over the whole corpus the rate
+ * would be dominated by the KEEPs every pass trivially agrees on, so a
+ * classifier that became far less reproducible about deletions would still
+ * report ~99%. Over the contested set, the number moves when reproducibility
+ * moves — which is the only reason to report it.
+ */
+function reproducibility({ agreed, disagreed }) {
+  const contested = agreed + disagreed;
+  if (contested === 0) return "";
+  return `; agreement=${Math.round((agreed / contested) * 100)}% of ${contested} contested ids`;
 }
 
 /**
@@ -763,7 +1608,17 @@ function validateDecisions(decisions) {
       throw new Error(`decision file entry ${i} invalid: ${why}`);
     };
     if (!d || typeof d.id !== "string") fail("missing id");
-    if (!["KEEP", "DELETE", "MERGE", "SKIP"].includes(d.verdict)) fail("invalid verdict");
+    // `RETAIN` is accepted here because the planner WRITES it (#123): a dry run
+    // over a protected memory persists a RETAIN row, and rejecting it on replay
+    // would make every --apply that follows such a run fail at load — the
+    // protection rule breaking the tool it protects memories in. It carries no
+    // anchor because it is non-destructive by construction.
+    // `UNSTABLE` is admitted for the same reason as `RETAIN`: the planner WRITES
+    // it (a consensus dry run persists one row per contested id), so rejecting it
+    // would make every `--apply` replaying a consensus run fail at load — the
+    // safety mechanism breaking the tool it exists to make safe. Like RETAIN it
+    // carries no anchor, because it is non-destructive by construction.
+    if (!["KEEP", "DELETE", "MERGE", "SKIP", "RETAIN", "UNSTABLE"].includes(d.verdict)) fail("invalid verdict");
     if (d.verdict === "DELETE" && typeof d.contentHash !== "string") fail("DELETE without contentHash");
     if (d.verdict === "MERGE") {
       if (typeof d.contentHash !== "string") fail("MERGE without contentHash");
@@ -796,6 +1651,17 @@ function readApprovedIds(fs, idsFile) {
  * Execute the destructive legs under the cap. Every mutation is preceded by a
  * re-read whose content hash must still match the decision's anchor (LWW
  * guard), so a concurrently edited memory is skipped rather than clobbered.
+ *
+ * When `approved` is present, EVERY id this function deletes must be in it — not
+ * just the id the decision is keyed on. A MERGE deletes its `absorbs[]` ids and
+ * rewrites the survivor's content, and `buildOfferedRecord` offers DELETE verdicts
+ * only, so under `--ids` a MERGE can never be an approved operation: its absorbed
+ * ids were never shown to the operator and its survivor is not a deletion at all.
+ * Gating on `decision.id` alone let a MERGE through whose absorbed ids the operator
+ * had never seen (the Slack-triggered task re-classifies rather than replaying the
+ * reviewed artifact, so the verdicts it applies are not the verdicts that were
+ * approved). That is the one thing this loop exists to prevent, so a MERGE is
+ * refused outright here rather than partially honored.
  */
 async function applyDecisions({ decisions, client, cap, approved, counters, log }) {
   const deleteQueue = [];
@@ -803,11 +1669,43 @@ async function applyDecisions({ decisions, client, cap, approved, counters, log 
   let skippedByFilter = 0;
   let exitCode = 0;
 
+  // Approved ids this run classified as something NON-destructive. Under `--ids`
+  // the approved set is the operator's list, and a re-classification that now
+  // returns KEEP for one of those ids drops out at `cost === 0` below — so without
+  // this the outcome message says "1 of 2 approved" and offers no note explaining
+  // the missing one, which reads as a partial failure rather than a changed
+  // verdict.
+  //
+  // Seeded from the intersection with `decisions`, not from `approved` itself: an
+  // approved id that appears in NO decision was never classified at all, and
+  // `runCleanup` already reports those by name ("matched no decision") because a
+  // typo'd approval is a different problem with a different fix. Counting them
+  // here would have the same id described two contradictory ways in one run.
+  const decided = new Set(decisions.map((decision) => decision.id));
+  const unclaimed = approved
+    ? new Set([...approved].filter((id) => decided.has(id)))
+    : null;
+
   try {
     for (const decision of decisions) {
       const cost = destructiveCost(decision);
       if (cost === 0) continue;
+      unclaimed?.delete(decision.id);
       if (approved && !approved.has(decision.id)) {
+        skippedByFilter += 1;
+        continue;
+      }
+      // Counted as filtered rather than as an error: an approved-ids run that met
+      // a MERGE has classified something the operator's list cannot cover, which
+      // is a normal consequence of re-classifying, not a corrupt input. It is
+      // LOGGED because the alternative — a silent skip — is how "1 of 2 applied"
+      // becomes unexplainable.
+      if (approved && decision.verdict === "MERGE") {
+        log(
+          `MERGE ${decision.id}: refused under an approved-ids run — the offered ` +
+            `list contains deletions only, so its ${decision.absorbs.length} ` +
+            `absorbed id(s) and its content rewrite were never approved`,
+        );
         skippedByFilter += 1;
         continue;
       }
@@ -846,7 +1744,17 @@ async function applyDecisions({ decisions, client, cap, approved, counters, log 
     // against the cap — they must not be silently dropped.
     await flushDeletes(deleteQueue, client, log);
   }
-  return { capUsed, skippedByFilter, exitCode };
+  // Only meaningful on a run that finished its loop: a cap abort leaves the tail
+  // of `decisions` unexamined, so those ids are "unapplied because the cap was
+  // reached" (already its own note) rather than "no longer classified DELETE".
+  const reclassified = exitCode === 4 ? 0 : (unclaimed?.size ?? 0);
+  if (reclassified > 0) {
+    log(
+      `${reclassified} approved id(s) are no longer classified as deletions by ` +
+        `this run and were left in place`,
+    );
+  }
+  return { capUsed, skippedByFilter, reclassified, exitCode };
 }
 
 /**
@@ -896,13 +1804,15 @@ export async function runCleanup(opts, deps) {
   }
   const client = restClient(baseUrl, opts.tenantId, deps.fetchImpl, counters);
 
-  const { decisions, decisionPath, classifierBroken, batches, failedBatches, scanned } = await loadDecisions(opts, deps, {
-    client,
-    fs,
-    clock,
-    log,
-    outDir,
-  });
+  const {
+    decisions,
+    decisionPath,
+    generatedAt: decisionGeneratedAt,
+    classifierBroken,
+    batches,
+    failedBatches,
+    scanned,
+  } = await loadDecisions(opts, deps, { client, fs, clock, log, outDir });
   const summary = verdictSummary(decisions);
   const failureNote = classificationFailureNote({ batches, failedBatches, decisions, scanned });
 
@@ -915,6 +1825,31 @@ export async function runCleanup(opts, deps) {
   }
   if (!opts.apply) {
     log(`dry-run: ${JSON.stringify(summary)}; writeCalls=${counters.writeCalls}${failureNote}`);
+    // The review run is the loop's ENTRY POINT, and only the review run: an
+    // --apply that re-offered would overwrite the very record its own claim was
+    // derived from, so a redelivered click mid-apply would be compared against a
+    // list the running task never saw. Absent when Slack is not configured, which
+    // keeps the #102 operator CLI working unchanged.
+    if (deps.postApproval) {
+      try {
+        const offer = await deps.postApproval({ decisions, generatedAt: decisionGeneratedAt });
+        log(
+          `offered ${offer.record.ids.length} id(s) to Slack as ${offer.record.hash}` +
+            (offer.posted ? "" : " (nothing posted)"),
+        );
+      } catch (err) {
+        // Exit 1, not 0. A scheduled review run whose post failed has done its
+        // audit and offered nothing, and exit 0 would make that indistinguishable
+        // from a healthy week — the operator would notice only by the absence of a
+        // message they were not expecting on any particular day. The decision list
+        // is named because it survives, and is what a manual `--apply --ids` reads.
+        log(
+          `failed to offer the review list to Slack: ${err.message}; ` +
+            `the decision list is kept at ${decisionPath}`,
+        );
+        return result({ exitCode: 1, decisions, decisionPath });
+      }
+    }
     return result({ exitCode: 0, decisions, decisionPath });
   }
 
@@ -957,7 +1892,28 @@ export async function runCleanup(opts, deps) {
       `writeCalls=${counters.writeCalls}; skippedLww=${counters.skippedLww}; ` +
       `skippedByFilter=${applied.skippedByFilter}${failureNote}`,
   );
-  return result({ ...applied, decisions, decisionPath });
+  const outcome = result({ ...applied, decisions, decisionPath });
+  // Once, after the lock and the mutex are released, with the numbers the run
+  // ACHIEVED. Reporting inside the loop would show intermediate counts as if they
+  // were outcomes; reporting before the release would hold the shared mutex across
+  // a Slack round trip. Absent for a dry run (which POSTS instead) and for the
+  // #102 operator CLI, which has no Slack at all.
+  if (deps.reportOutcome) {
+    try {
+      await deps.reportOutcome({
+        result: outcome,
+        appliedAt: new Date(clock()).toISOString(),
+      });
+    } catch (err) {
+      // Never the exit code. The deletions are done and irreversible by now, so a
+      // non-zero exit would alarm on a successful apply — and under the callback's
+      // stale-claim recovery a retried task would re-apply ids already gone. Loud
+      // in the log instead, because a systematically broken report is otherwise
+      // invisible: the loop would keep working and keep losing its audit trail.
+      log(`WARNING the apply completed but its outcome could not be reported: ${err.message}`);
+    }
+  }
+  return outcome;
 }
 
 // ---------------------------------------------------------------------------
@@ -1655,8 +2611,10 @@ const MODES = ["cleanup", "list", "restore"];
 
 // --flag -> the opts key it sets. `flag: true` takes no value; `number: true`
 // values must parse to a positive number (a NaN cap would disable the cap);
-// `integer: true` additionally requires a whole number. `choices` restricts the
-// accepted values; `iso` requires a parseable ISO timestamp.
+// `integer: true` additionally requires a whole number, and `min` raises the
+// floor above the blanket `> 0`. `choices` restricts the accepted values;
+// `iso` requires a parseable ISO timestamp; `list` splits a comma-separated
+// value and validates each entry against `of`.
 //
 // `mode` lists the run modes the flag belongs to, and anything outside them is
 // REJECTED rather than ignored: an operator who believes --state narrowed a
@@ -1678,6 +2636,16 @@ export const ARG_SPECS = {
   "--model": { key: "model", mode: ["cleanup"] },
   "--effort": { key: "effort", choices: REASONING_EFFORTS, mode: ["cleanup"] },
   "--llm-region": { key: "llmRegion", mode: ["cleanup"] },
+  // Topic retention and consensus (issue #123). Both shape how the classifier
+  // decides, so both belong to the audit mode only.
+  "--protected-topics": { key: "protectedTopics", list: true, of: TOPICS, mode: ["cleanup"] },
+  "--consensus-passes": {
+    key: "consensusPasses",
+    number: true,
+    integer: true,
+    min: 2,
+    mode: ["cleanup"],
+  },
   // Recovery modes (issue #124).
   "--list-inactive": { key: "listInactive", flag: true, mode: ["list"] },
   "--restore": { key: "restore", flag: true, mode: ["restore"] },
@@ -1687,6 +2655,9 @@ export const ARG_SPECS = {
   "--limit": { key: "limit", integer: true, mode: ["list"] },
   "--help": { key: "help", flag: true, mode: MODES },
 };
+
+/** Topics this tool refuses to mutate unless the operator says otherwise (#123). */
+export const DEFAULT_PROTECTED_TOPICS = Object.freeze(["personal-finance"]);
 
 export const USAGE = `memory-cleanup.mjs — audit, clean, and recover the mem9 memory store
 
@@ -1706,6 +2677,21 @@ Audit and clean (issue #102) — dry-run by default, --apply writes:
   --model <id>                classifier model
   --effort <${REASONING_EFFORTS.join("|")}>
   --llm-region <region>       region for the reasoning-model route
+  --protected-topics <a,b>    subject areas this tool may not mutate AT ALL —
+                              not deleted, not absorbed into a merge, not
+                              rewritten as a survivor (default
+                              ${DEFAULT_PROTECTED_TOPICS.join(",")}; pass an empty value to
+                              protect nothing). A protected memory the
+                              classifier judged deletable is reported as RETAIN
+                              with the original verdict, so the report shows
+                              policy overriding the classifier.
+                              Known topics: ${TOPICS.join(", ")}
+  --consensus-passes <n>      run the classifier n independent times over ONE
+                              scan and offer only the ids EVERY pass judged
+                              DELETE. Minimum 2 — one pass is not a quorum of
+                              itself; omitted means single-pass. Only ever
+                              NARROWS: a contested id is reported UNSTABLE and
+                              acted on by nobody. Costs n times the inference.
 
 Recover soft-deleted and archived memories (issue #124):
   --list-inactive             read-only listing; takes no lock
@@ -1760,6 +2746,24 @@ export function parseArgs(argv) {
       opts[spec.key] = raw;
       continue;
     }
+    if (spec.list) {
+      // An empty string is a DELIBERATE empty list ("protect nothing"), which is
+      // why the default is applied after the loop rather than as an initial
+      // value: `opts.protectedTopics = []` must survive as an opt-out. Unknown
+      // entries are rejected by name — a typo like `personal_finance` matches no
+      // topic and would silently protect nothing, and the operator would not
+      // find out until finance memories were deleted.
+      const entries = raw === "" ? [] : raw.split(",").map((t) => t.trim());
+      const unknown = entries.filter((t) => !spec.of.includes(t));
+      if (unknown.length > 0) {
+        throw new Error(
+          `${name} has unknown ${unknown.length === 1 ? "topic" : "topics"} ` +
+            `${unknown.join(", ")}; known topics are ${spec.of.join(", ")}`,
+        );
+      }
+      opts[spec.key] = entries;
+      continue;
+    }
     if (!spec.number && !spec.integer) {
       opts[spec.key] = raw;
       continue;
@@ -1768,12 +2772,24 @@ export function parseArgs(argv) {
     if (!Number.isFinite(value) || value <= 0) {
       throw new Error(`${name} must be a positive number`);
     }
-    // A row count is a whole number, and `LIMIT $n` binds a bigint: `--limit 5.5`
-    // would fail at the server, after the SSM reads, the secret fetch, and the
-    // connection. `--lock-ttl` is deliberately not integer-checked — half an hour
+    // Two ways a fractional value goes wrong, and neither is a smaller version of
+    // a valid run. A row count binds a bigint — `--limit 5.5` fails at the server,
+    // after the SSM reads, the secret fetch, and the connection. A fractional
+    // `--consensus-passes` runs `Math.trunc`-many passes while the progress log
+    // quotes the fraction ("pass 2 of 2.5"), so a run's own log disagrees with the
+    // pass count its consensus report goes on to state. `isSafeInteger`, not
+    // `isInteger`, because `1e30` is an integer that no bigint bind or pass loop
+    // can honor. `--lock-ttl` is deliberately NOT integer-checked — half an hour
     // is a meaningful TTL.
     if (spec.integer && !Number.isSafeInteger(value)) {
-      throw new Error(`${name} must be a whole number, got ${raw}`);
+      throw new Error(`${name} must be a whole integer, got ${raw}`);
+    }
+    // `min` is separate from the `> 0` check because "positive" is not the
+    // constraint for every numeric flag — one consensus pass is not a quorum of
+    // itself, so accepting 1 and quietly running single-pass would restore exactly
+    // the behavior the flag exists to replace.
+    if (spec.min !== undefined && value < spec.min) {
+      throw new Error(`${name} must be at least ${spec.min}`);
     }
     opts[spec.key] = value;
   }
@@ -1805,14 +2821,61 @@ export function parseArgs(argv) {
       `${name} applies only to ${spec.mode.map((m) => `--${m === "cleanup" ? "apply/--decisions (audit)" : m === "list" ? "list-inactive" : "restore"}`).join(" or ")}`,
     );
   }
+  // Applied here, not as an initial value, so `--protected-topics ""` stays an
+  // empty list. Defaulting a *retention* rule is the safe direction: the cost of
+  // the default is finance memories that never get tidied, and the cost of no
+  // default is finance memories that get deleted. It is unconditional rather than
+  // cleanup-only because the retention rule is a property of the tool, and a
+  // reader of `opts` should not have to know the mode to know what is protected.
+  opts.protectedTopics ??= [...DEFAULT_PROTECTED_TOPICS];
   return opts;
 }
 
-async function productionDatabaseMutex(stage, region) {
-  const { SSMClient, GetParametersCommand } =
-    await import("@aws-sdk/client-ssm");
-  const { SecretsManagerClient, GetSecretValueCommand } =
-    await import("@aws-sdk/client-secrets-manager");
+/**
+ * Where the database connection details come from — the environment when the
+ * runtime supplies them, otherwise the stage's own SSM tree.
+ *
+ * TWO callers with different IAM (#123). The operator CLI runs under a human
+ * identity that can read `/mem9-on-aws/{stage}/db/*` and the cluster secret, so it
+ * discovers everything itself. The Slack-triggered apply task cannot: its task
+ * role holds `ssm:GetParameters` ONLY under `approvals/*`, because a task that
+ * could read the stage tree could read the four `cleanup/*` inputs that decide
+ * which cluster and task definition an apply runs on. So ECS resolves the secret
+ * for it — `MEM9_DB_SECRET` arrives as the secret's JSON, already decrypted by the
+ * EXECUTION role at task start — and the endpoint arrives as plain `environment`.
+ * Mirrors `memory-consolidation.mjs`'s `createProductionDeps`, which is the same
+ * split for the same reason.
+ *
+ * The env path is preferred when it is COMPLETE, not when it is merely partly
+ * present: a half-set environment falling through to SSM is the behavior an
+ * operator can reason about, whereas a half-set environment used as-is hands `pg`
+ * an undefined host.
+ */
+async function resolveDatabaseConfig(stage, region, runtime) {
+  const injectedSecret = process.env.MEM9_DB_SECRET;
+  if (injectedSecret && process.env.MEM9_DB_HOST && process.env.MEM9_DB_NAME) {
+    let credentials;
+    try {
+      credentials = JSON.parse(injectedSecret);
+    } catch {
+      // Never quotes the value: this variable IS the database password.
+      throw new Error("MEM9_DB_SECRET is not valid JSON");
+    }
+    if (
+      typeof credentials.username !== "string" ||
+      typeof credentials.password !== "string"
+    ) {
+      throw new Error("MEM9_DB_SECRET is missing credentials");
+    }
+    return {
+      host: process.env.MEM9_DB_HOST,
+      port: Number(process.env.MEM9_DB_PORT || 5432),
+      database: process.env.MEM9_DB_NAME,
+      user: credentials.username,
+      password: credentials.password,
+    };
+  }
+
   const prefix = `/mem9-on-aws/${stage}/db`;
   const parameterNames = {
     host: `${prefix}/host`,
@@ -1821,11 +2884,16 @@ async function productionDatabaseMutex(stage, region) {
     secretArn: `${prefix}/secret-arn`,
   };
 
-  const ssm = new SSMClient({ region });
-  const parameterResponse = await ssm.send(
-    new GetParametersCommand({ Names: Object.values(parameterNames) }),
-  );
-  ssm.destroy();
+  const { GetParametersCommand } = await import("@aws-sdk/client-ssm");
+  const { ssm, release: releaseSsm } = await ssmClient(region, runtime);
+  let parameterResponse;
+  try {
+    parameterResponse = await ssm.send(
+      new GetParametersCommand({ Names: Object.values(parameterNames) }),
+    );
+  } finally {
+    releaseSsm();
+  }
   if (parameterResponse.InvalidParameters?.length) {
     throw new Error("database connection parameters are incomplete");
   }
@@ -1851,14 +2919,10 @@ async function productionDatabaseMutex(stage, region) {
     throw new Error("database connection parameters are incomplete");
   }
 
-  const secrets = new SecretsManagerClient({ region });
-  const secretResponse = await secrets.send(
-    new GetSecretValueCommand({ SecretId: config.secretArn }),
-  );
-  secrets.destroy();
+  const secretString = await readSecret(config.secretArn, region, runtime);
   let credentials;
   try {
-    credentials = JSON.parse(secretResponse.SecretString ?? "");
+    credentials = JSON.parse(secretString ?? "");
   } catch {
     throw new Error("database secret is not valid JSON");
   }
@@ -1868,14 +2932,64 @@ async function productionDatabaseMutex(stage, region) {
   ) {
     throw new Error("database secret is missing credentials");
   }
-
-  const { Client } = await import("pg");
-  const db = new Client({
+  return {
     host: config.host,
     port,
     database: config.database,
     user: credentials.username,
     password: credentials.password,
+  };
+}
+
+/**
+ * An SSM client plus the call that disposes it — but only when this function is
+ * the one that built it. A caller-injected client outlives this call (the same
+ * client serves the approval read and the db discovery), so destroying it here
+ * would break the second use.
+ */
+async function ssmClient(region, runtime) {
+  if (runtime.ssm) return { ssm: runtime.ssm, release: () => {} };
+  const { SSMClient } = await import("@aws-sdk/client-ssm");
+  const ssm = new SSMClient({ region });
+  return { ssm, release: () => ssm.destroy() };
+}
+
+async function readSecret(secretId, region, runtime) {
+  const { GetSecretValueCommand } = await import(
+    "@aws-sdk/client-secrets-manager"
+  );
+  if (runtime.secrets) {
+    const response = await runtime.secrets.send(
+      new GetSecretValueCommand({ SecretId: secretId }),
+    );
+    return response.SecretString;
+  }
+  const { SecretsManagerClient } = await import(
+    "@aws-sdk/client-secrets-manager"
+  );
+  const secrets = new SecretsManagerClient({ region });
+  try {
+    const response = await secrets.send(
+      new GetSecretValueCommand({ SecretId: secretId }),
+    );
+    return response.SecretString;
+  } finally {
+    secrets.destroy();
+  }
+}
+
+// `runtime` defaults here, not just at `createCleanupDeps`: the recovery path
+// (`recoveryDeps`) injects nothing, and the helpers this delegates to reach into
+// `runtime` unguarded (`ssmClient`'s `runtime.ssm`, `readSecret`'s
+// `runtime.secrets`, and `runtime.Client` just below), so an omitted argument is a
+// TypeError before the first AWS call rather than a missing-credentials error an
+// operator could act on. Defaulting at the boundary makes the CLI's two callers
+// agree without either having to remember (TC-MEMRESTORE-071).
+async function productionDatabaseMutex(stage, region, runtime = {}) {
+  const config = await resolveDatabaseConfig(stage, region, runtime);
+  const Client = runtime.Client ?? (await import("pg")).Client;
+  const db = new Client({
+    ...config,
     ssl: { rejectUnauthorized: true },
     application_name: `mem9-cleanup-${stage}`,
   });
@@ -1906,7 +3020,7 @@ async function productionDatabaseMutex(stage, region) {
 }
 
 /**
- * Deps for `--list-inactive` / `--restore`. Deliberately NOT `productionDeps`:
+ * Deps for `--list-inactive` / `--restore`. Deliberately NOT `createCleanupDeps`:
  * recovery needs no tenant key, no service discovery, and no LLM, so requiring
  * them would make a read-only listing fail on unrelated configuration. The
  * shared mutex is passed only for an actual `--apply`, matching cleanup.
@@ -1931,27 +3045,210 @@ async function recoveryDeps(opts) {
   };
 }
 
-async function productionDeps(opts) {
+/**
+ * The `postApproval` dep, or `undefined` when this stage has no Slack surface.
+ *
+ * ABSENT rather than present-and-inert when the channel is unset, which is what
+ * keeps #102's operator CLI working unchanged: a dep that existed
+ * unconditionally would have every hand-run dry run try to write an approval
+ * record the operator's identity may not be able to write, and would post a
+ * clickable Approve button for a list they ran locally just to look at.
+ *
+ * The token is env-first for the same reason the database config is
+ * (`resolveDatabaseConfig`): the apply task receives `SLACK_BOT_TOKEN` from ECS
+ * `ssm:`, already decrypted, and its task role holds `ssm:GetParameters` under
+ * `approvals/*` ONLY — so a read of `slack/bot-token` is an AccessDenied there.
+ * The review run has no such restriction and reads the parameter itself.
+ *
+ * A configured channel with no reachable token THROWS. Skipping the post would be
+ * the whole audit running, offering nothing, and exiting 0 — indistinguishable
+ * from a healthy week to the only person who would notice.
+ */
+async function buildPostApproval(opts, region, runtime) {
+  const channel = process.env[MEM9_SLACK_CHANNEL_ENV];
+  if (!channel) return undefined;
+
+  const ssmPrefix = process.env.MEM9_SSM_PREFIX || `/mem9-on-aws/${opts.stage}`;
+  const { ssm, release } = await ssmClient(region, runtime);
+  let botToken = process.env.SLACK_BOT_TOKEN;
+  try {
+    if (!botToken) {
+      const name = `${ssmPrefix}/slack/bot-token`;
+      const { GetParametersCommand } = await import("@aws-sdk/client-ssm");
+      // Plural, not `GetParameter`: the two are distinct IAM actions and the
+      // boundary's ceiling admits only this one (TC-SLACKAPP-047g).
+      const response = await ssm.send(
+        // The parameter is a SecureString; without decryption the value comes back
+        // as ciphertext and every post 401s with `invalid_auth`.
+        new GetParametersCommand({ Names: [name], WithDecryption: true }),
+      );
+      botToken = (response.Parameters ?? []).find((p) => p.Name === name)?.Value;
+      if (!botToken) {
+        throw new Error(
+          `${MEM9_SLACK_CHANNEL_ENV} is set but no bot token is available: ` +
+            `inject SLACK_BOT_TOKEN or seed ${name}`,
+        );
+      }
+    }
+  } catch (err) {
+    release();
+    throw err;
+  }
+
+  // The client outlives this call — it is the one every offer writes through —
+  // and is deliberately NOT threaded into `close()`, unlike the database mutex.
+  // The asymmetry is the resource: an open Postgres connection holds a server-side
+  // session and an advisory lock the next run needs released, while an SSM client
+  // holds local sockets that the entrypoint's `process.exit` reclaims. `release`
+  // is called only on the failure path above, where nothing gets to use it.
+  return async ({ decisions, generatedAt }) =>
+    postApprovalRequest({
+      ssm,
+      ssmPrefix,
+      stage: opts.stage,
+      decisions,
+      generatedAt,
+      channel,
+      botToken,
+      fetchImpl: runtime.fetchImpl ?? fetch,
+      log: (message) =>
+        console.error(`[memory-cleanup ${new Date().toISOString()}] ${message}`),
+    });
+}
+
+/**
+ * The `reportOutcome` dep, or `undefined` when there is nothing to report to.
+ *
+ * Three independent absences, all of which must DEGRADE rather than fail, because
+ * every one of them is discovered after the operator has already approved:
+ *
+ *  - No claim at all: a review run, which POSTS instead of updating. There is
+ *    nothing to update against — the message does not exist yet.
+ *  - A claim with no coordinates: a review run whose stamp write failed, or a
+ *    pre-#123 record.
+ *  - No bot token: the apply task takes it from ECS `ssm:`, already decrypted, and
+ *    its role holds `ssm:GetParameters` under `approvals/*` ONLY — so unlike
+ *    `buildPostApproval` this CANNOT read the parameter itself, and a missing
+ *    token means no update rather than an AccessDenied.
+ *
+ * The asymmetry with `buildPostApproval`, which throws on a missing token, is the
+ * point: there, failing loud costs an unposted list nobody has acted on yet; here,
+ * it would cost deletions the operator already authorized.
+ */
+function buildReportOutcome(opts, claim, runtime) {
+  const log = (message) =>
+    console.error(`[memory-cleanup ${new Date().toISOString()}] ${message}`);
+  if (!claim?.messageTs || !claim?.messageChannel) {
+    // Logged for the same reason the token branch below is: skipping the update
+    // leaves the review message showing its Approve button and the PRE-apply
+    // list, so the operator sees an un-actioned request for memories that are
+    // already deleted, and a re-click answers "already applied". The coordinates
+    // can legitimately be absent — `postApprovalRequest` only warns when the
+    // stamp fails — so this stays non-fatal, but it must not be invisible.
+    log(
+      `the approval claim carries no Slack message coordinates ` +
+        `(ts=${claim?.messageTs ?? "unset"}, channel=${claim?.messageChannel ?? "unset"}), ` +
+        `so the outcome cannot be posted back and the original message keeps its ` +
+        `button and pre-apply list; the apply is unaffected`,
+    );
+    return undefined;
+  }
+  const botToken = process.env.SLACK_BOT_TOKEN;
+  if (!botToken) {
+    log(
+      `the approval was claimed against a Slack message but SLACK_BOT_TOKEN is ` +
+        `not set, so the outcome cannot be posted back; the apply is unaffected`,
+    );
+    return undefined;
+  }
+  return async ({ result, appliedAt }) =>
+    updateApprovalMessage({
+      claim,
+      approved: claim.count,
+      stage: opts.stage,
+      result,
+      appliedAt,
+      botToken,
+      fetchImpl: runtime.fetchImpl ?? fetch,
+      log,
+    });
+}
+
+/**
+ * Build the real deps for one run — for the operator CLI and for the
+ * Slack-triggered apply task, which are the same code on different IAM (#123).
+ *
+ * `runtime` exists for the tests: every AWS client and `pg` itself is injectable,
+ * which is what lets the container path be asserted without an account. Nothing in
+ * production passes it.
+ *
+ * ORDER IS LOAD-BEARING. When `MEM9_APPROVAL_HASH` is set the ids are materialized
+ * FIRST, before the database is opened and before the advisory lock is taken:
+ * that read is the cheapest guard and the only one that can prove the ids are the
+ * approved ids, and a tampered claim that failed later would hold the shared mutex
+ * for the length of its own failure, blocking the weekly consolidation.
+ */
+export async function createCleanupDeps(opts, runtime = {}) {
   const region = process.env.AWS_REGION || "ap-northeast-1";
 
   // The explicit flag WINS over the env var: a stale MEM9_TENANT_ID from a
   // preview shell must not silently redirect an --apply aimed at another stage.
   let tenantId;
   if (opts.tenantSecretArn) {
-    const { SecretsManagerClient, GetSecretValueCommand } = await import("@aws-sdk/client-secrets-manager");
-    const sm = new SecretsManagerClient({ region });
-    const res = await sm.send(new GetSecretValueCommand({ SecretId: opts.tenantSecretArn }));
-    tenantId = res.SecretString;
+    tenantId = await readSecret(opts.tenantSecretArn, region, runtime);
   } else {
     tenantId = process.env.MEM9_TENANT_ID;
   }
   if (!tenantId) throw new Error("tenant id required: set MEM9_TENANT_ID or --tenant-secret-arn");
+
+  // The approval hash is the ECS container override the callback Lambda sets, and
+  // it is the ONLY thing that reaches the task from the click.
+  const approvalHash = process.env.MEM9_APPROVAL_HASH;
+  /** What the claim said, for the outcome update. Absent on a review run. */
+  let claim;
+  if (approvalHash) {
+    // A hash with nowhere to write is the loop's worst failure mode, not a
+    // degraded one: `readApprovedIds` returns null for an absent `--ids`, and null
+    // means "no filter" — so the run would delete every DELETE verdict it found
+    // rather than the ones the operator approved, and exit 0 reporting success.
+    if (!opts.idsFile) {
+      throw new Error(
+        "MEM9_APPROVAL_HASH is set but --ids is not; refusing to apply " +
+          "without the approved-id filter",
+      );
+    }
+    const ssmPrefix = process.env.MEM9_SSM_PREFIX || `/mem9-on-aws/${opts.stage}`;
+    const { ssm, release } = await ssmClient(region, runtime);
+    try {
+      claim = await materializeApprovedIds({
+        ssm,
+        stage: opts.stage,
+        ssmPrefix,
+        hash: approvalHash,
+        idsFile: opts.idsFile,
+        fs: await import("node:fs"),
+        log: (message) =>
+          console.error(`[memory-cleanup ${new Date().toISOString()}] ${message}`),
+      });
+      claim.hash = approvalHash;
+    } finally {
+      // Released here, unlike `buildPostApproval`'s client: this one has done its
+      // one read, and the outcome update goes over `fetch` rather than SSM.
+      release();
+    }
+  }
+
   const databaseMutex = opts.apply
-    ? await productionDatabaseMutex(opts.stage, region)
+    ? await productionDatabaseMutex(opts.stage, region, runtime)
     : undefined;
 
-  const { getToken } = await import("@aws/bedrock-token-generator");
-  const { fromNodeProviderChain } = await import("@aws-sdk/credential-providers");
+  const postApproval = await buildPostApproval(opts, region, runtime);
+
+  const getToken =
+    runtime.getToken ?? (await import("@aws/bedrock-token-generator")).getToken;
+  const fromNodeProviderChain =
+    runtime.fromNodeProviderChain ??
+    (await import("@aws-sdk/credential-providers")).fromNodeProviderChain;
   const completeChat = buildCompleteChat(
     { ...opts, region },
     {
@@ -1987,6 +3284,8 @@ async function productionDeps(opts) {
       outDir: opts.outDir,
       lockFile: opts.lockFile,
       acquireMutex: databaseMutex?.acquireMutex,
+      postApproval,
+      reportOutcome: buildReportOutcome(opts, claim, runtime),
     },
     close: async () => {
       await databaseMutex?.close();
@@ -2019,7 +3318,7 @@ if (isMain) {
         : await runListInactive(opts, production.deps);
       process.exitCode = result.exitCode;
     } else {
-      production = await productionDeps(opts);
+      production = await createCleanupDeps(opts);
       const result = await runCleanup(
         { ...opts, tenantId: production.tenantId },
         production.deps,

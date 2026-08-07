@@ -3,6 +3,7 @@ import type { EcsOutputs } from "./ecs";
 import { resolveVpc } from "./vpc";
 import { accountId, ECR_REGION, ecrImage } from "./ecr";
 import type { TenantIdentityOutputs } from "./tenant-identity";
+import { taskFailureAlarm } from "./task-failure-alarm";
 
 const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 const BEDROCK_PROJECT = process.env.MEM9_BEDROCK_PROJECT;
@@ -16,7 +17,6 @@ const RESPONSES_REGION = process.env.MEM9_LLM_RESPONSES_REGION || "us-west-2";
 const SCHEDULE_ENABLED =
   process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED === "1";
 export const CONSOLIDATION_CONTAINER_NAME = "Mem9Consolidation";
-const FAILURE_NAMESPACE = "mem9-on-aws";
 const FAILURE_METRIC = "ConsolidationTaskFailures";
 
 export interface ConsolidationOutputs {
@@ -204,112 +204,25 @@ export function consolidation(
     });
 
   if (ecsOut.alertsTopicArn) {
-    const failureLogGroup = new aws.cloudwatch.LogGroup(
-      "ConsolidationTaskFailureEvents",
-      {
-        name: `/sst/consolidation/${$app.stage}/task-failures`,
-        retentionInDays: 30,
-        tags,
-      },
-    );
-    const failureRule = new aws.cloudwatch.EventRule(
-      "ConsolidationTaskFailureRule",
-      {
-        // 64-char rule limit MINUS Pulumi's 26-char suffix. The former
-        // `...-consolidation-failure-` prefix was 39 chars for `prod` alone,
-        // producing a 65-char name that PutRule rejected on the first prod
-        // deploy after merge.
-        namePrefix: boundedNamePrefix(
-          `mem9-on-aws-${$app.stage}-consol-failure-`,
-          64,
-          "consolidation failure rule",
-        ),
-        description:
-          "Captures non-zero exits from the exact consolidation task revision.",
-        eventPattern: $jsonStringify({
-          source: ["aws.ecs"],
-          "detail-type": ["ECS Task State Change"],
-          detail: {
-            lastStatus: ["STOPPED"],
-            taskDefinitionArn: [task.taskDefinition],
-            containers: {
-              exitCode: [{ "anything-but": 0 }],
-            },
-          },
-        }),
-        tags,
-      },
-    );
-
-    const failureLogPolicy = new aws.cloudwatch.LogResourcePolicy(
-      "ConsolidationTaskFailureLogPolicy",
-      {
-        policyName: `mem9-on-aws-${$app.stage}-consolidation-events`,
-        policyDocument: $jsonStringify({
-          Version: "2012-10-17",
-          Statement: [
-            {
-              Effect: "Allow",
-              Principal: {
-                Service: [
-                  "events.amazonaws.com",
-                  "delivery.logs.amazonaws.com",
-                ],
-              },
-              Action: ["logs:CreateLogStream", "logs:PutLogEvents"],
-              Resource: $interpolate`${failureLogGroup.arn}:*`,
-            },
-          ],
-        }),
-      },
-    );
-
-    new aws.cloudwatch.EventTarget(
-      "ConsolidationTaskFailureLogTarget",
-      {
-        arn: failureLogGroup.arn,
-        rule: failureRule.name,
-        inputTransformer: {
-          inputPaths: {
-            exitCode: "$.detail.containers[0].exitCode",
-          },
-          inputTemplate: JSON.stringify({
-            event: "consolidation_task_failed",
-            stage: $app.stage,
-            exitCode: "<exitCode>",
-          }),
-        },
-      },
-      { dependsOn: [failureLogPolicy] },
-    );
-
-    new aws.cloudwatch.LogMetricFilter("ConsolidationTaskFailureFilter", {
-      logGroupName: failureLogGroup.name,
-      pattern:
-        `{ $.event = "consolidation_task_failed" && ` +
-        `$.stage = "${$app.stage}" }`,
-      metricTransformation: {
-        name: FAILURE_METRIC,
-        namespace: FAILURE_NAMESPACE,
-        value: "1",
-        dimensions: { stage: "$.stage" },
-      },
-    });
-
-    new aws.cloudwatch.MetricAlarm("ConsolidationTaskFailureAlarm", {
+    taskFailureAlarm({
+      stem: "ConsolidationTaskFailure",
+      logGroupName: `/sst/consolidation/${$app.stage}/task-failures`,
+      // The former `...-consolidation-failure-` prefix was 39 chars for `prod`
+      // alone, producing a 65-char name that PutRule rejected on the first prod
+      // deploy after merge — hence the abbreviation, and hence the budget check
+      // inside the helper.
+      rulePrefix: `mem9-on-aws-${$app.stage}-consol-failure-`,
+      ruleWhat: "consolidation failure rule",
+      ruleDescription:
+        "Captures non-zero exits from the exact consolidation task revision.",
+      policyName: `mem9-on-aws-${$app.stage}-consolidation-events`,
+      eventName: "consolidation_task_failed",
+      metricName: FAILURE_METRIC,
       alarmDescription:
         "The weekly memory consolidation ECS task exited non-zero.",
-      namespace: FAILURE_NAMESPACE,
-      metricName: FAILURE_METRIC,
-      dimensions: { stage: $app.stage },
-      statistic: "Sum",
-      period: 300,
-      evaluationPeriods: 1,
-      datapointsToAlarm: 1,
-      threshold: 1,
-      comparisonOperator: "GreaterThanOrEqualToThreshold",
-      treatMissingData: "notBreaching",
-      alarmActions: [ecsOut.alertsTopicArn],
+      taskDefinitionArn: task.taskDefinition,
+      alertsTopicArn: ecsOut.alertsTopicArn,
+      tags,
     });
   }
 

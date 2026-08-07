@@ -3,9 +3,17 @@
  * Exercised through the injected `route(event, cfg)` seam — no AWS/SSM.
  */
 
+import { createHmac } from "node:crypto";
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { isAllowedClientRedirect, route } from "./handler.js";
+import {
+  buildSlackDeps,
+  handler,
+  isAllowedClientRedirect,
+  route,
+} from "./handler.js";
+import type { SlackDeps } from "./slack-interactions.js";
 import {
   signAuthorizationCode,
   signOAuthTransaction,
@@ -35,6 +43,9 @@ function cfg(overrides: Partial<FacadeConfig> = {}): FacadeConfig {
     userClientSecret: "reader-client-secret",
     allowedClientRedirectUris: [],
     hmacKey: HMAC,
+    // Empty by default: the OAuth cases must not depend on a Slack app existing,
+    // and the Slack cases inject their own deps rather than reading this.
+    slackSigningSecret: "",
     ...overrides,
   };
 }
@@ -940,5 +951,441 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
     );
     expect(res.statusCode).toBe(400);
     expect(JSON.parse(res.body).error).toBe("invalid_redirect_uri");
+  });
+});
+
+const SLACK_SECRET = "unit-test-signing-secret";
+const SLACK_STAGE = "test";
+const SLACK_HASH = "sha256:deadbeef";
+
+/**
+ * The Slack side of the façade, injected the same way `cfg` is. The Slack branch
+ * is reachable ONLY when these deps are present, which is what makes "the
+ * feature flag is unset" a structural state rather than a runtime string check.
+ */
+function slackDeps(overrides: Partial<SlackDeps> = {}): SlackDeps {
+  return {
+    signingSecret: SLACK_SECRET,
+    stage: SLACK_STAGE,
+    ssmPrefix: "/mem9-on-aws/test",
+    now: () => Date.now(),
+    getParameter: vi.fn(async () =>
+      JSON.stringify({ stage: SLACK_STAGE, hash: SLACK_HASH, ids: ["m-1"] }),
+    ),
+    putParameter: vi.fn(async () => {}),
+    runTask: vi.fn(async () => "arn:aws:ecs:region:account:task/cluster/abc"),
+    log: vi.fn(),
+    ...overrides,
+  };
+}
+
+/** Slack's scheme, computed here rather than by calling the production signer. */
+function slackEvent(
+  method = "POST",
+  opts: { secret?: string; now?: number } = {},
+) {
+  const body = `payload=${encodeURIComponent(
+    JSON.stringify({
+      type: "block_actions",
+      actions: [{ action_id: "cleanup_approve", value: SLACK_HASH }],
+    }),
+  )}`;
+  const ts = Math.floor((opts.now ?? Date.now()) / 1000);
+  const mac = createHmac("sha256", opts.secret ?? SLACK_SECRET)
+    .update(`v0:${ts}:${body}`)
+    .digest("hex");
+  return ev("/slack/interactions", method, {
+    body,
+    headers: {
+      "x-slack-request-timestamp": String(ts),
+      "x-slack-signature": `v0=${mac}`,
+      "content-type": "application/x-www-form-urlencoded",
+    },
+  });
+}
+
+describe("Slack callback routing on the shared façade (TC-SLACKAPP-040..043)", () => {
+  it("TC-SLACKAPP-040 POST /slack/interactions is matched explicitly, never proxied upstream", async () => {
+    // The façade proxies EVERY unmatched path to the AgentCore Gateway, so the
+    // failure this pins is not a 404 — it is a Slack payload arriving at the
+    // Gateway and the Gateway's error shape being returned to Slack. Asserted by
+    // watching `fetch`, because a route that returned 200 from the Slack handler
+    // AND forwarded upstream would still pass a status-only assertion.
+    // Stubbed rather than merely spied: an un-stubbed spy calls through, so a
+    // fallthrough would fail with ENOTFOUND and make the test depend on DNS
+    // resolution failing for `gateway.example`.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => new Response("upstream", { status: 200 }));
+    const slack = slackDeps();
+    const res = await route(slackEvent(), cfg(), slack);
+
+    expect(res.statusCode).toBe(200);
+    expect(slack.runTask).toHaveBeenCalledTimes(1);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("TC-SLACKAPP-041 with the feature unconfigured the path is 404, not proxied", async () => {
+    // 404 rather than a fallthrough: forwarding would send operator-approval data
+    // to a component with no business seeing it. 404 rather than 401 because
+    // without deps there is no secret any request to this path could be
+    // authenticated against — the endpoint genuinely is not here.
+    const fetchSpy = vi
+      .spyOn(globalThis, "fetch")
+      .mockImplementation(async () => new Response("upstream", { status: 200 }));
+    const res = await route(slackEvent(), cfg());
+
+    expect(res.statusCode).toBe(404);
+    expect(fetchSpy).not.toHaveBeenCalled();
+  });
+
+  it("TC-SLACKAPP-042 GET /slack/interactions is 405 and the OAuth routes are unchanged", async () => {
+    const slack = slackDeps();
+    const get = await route(slackEvent("GET"), cfg(), slack);
+    expect(get.statusCode).toBe(405);
+    expect(slack.runTask).not.toHaveBeenCalled();
+
+    // The Slack branch is additive. A regression in the OAuth flow would break
+    // every MCP client, so the metadata documents are re-asserted WITH the Slack
+    // deps present rather than trusted to be unaffected.
+    const prm = await route(
+      ev("/.well-known/oauth-protected-resource"),
+      cfg(),
+      slack,
+    );
+    expect(prm.statusCode).toBe(200);
+    expect(JSON.parse(prm.body).resource).toBe(`${BASE}/mcp`);
+
+    const asm = await route(
+      ev("/.well-known/oauth-authorization-server"),
+      cfg(),
+      slack,
+    );
+    expect(asm.statusCode).toBe(200);
+    expect(JSON.parse(asm.body).registration_endpoint).toBe(`${BASE}/register`);
+
+    const reg = await route(
+      ev("/register", "POST", { body: JSON.stringify({}) }),
+      cfg(),
+      slack,
+    );
+    expect(reg.statusCode).toBe(201);
+  });
+
+  it("TC-SLACKAPP-043 the two concerns do not share a failure mode", async () => {
+    // OAuth misconfigured, Slack fine: the redirect proxy 503s while an approval
+    // click still applies. They share a Lambda, not a fate.
+    const slack = slackDeps();
+    const broken = cfg({ hmacKey: "" });
+    const oauth = await route(ev("/oauth/authorize", "GET", { query: "state=x" }), broken, slack);
+    expect(oauth.statusCode).toBe(503);
+
+    const click = await route(slackEvent(), broken, slack);
+    expect(click.statusCode).toBe(200);
+    expect(slack.runTask).toHaveBeenCalledTimes(1);
+
+    // And the converse: an unconfigured SLACK secret fails the Slack route closed
+    // (401, from the handler's own fail-closed branch — NOT 404, which would
+    // wrongly say the endpoint is absent) while OAuth keeps working.
+    const noSecret = slackDeps({ signingSecret: "" });
+    const closed = await route(slackEvent(), cfg(), noSecret);
+    expect(closed.statusCode).toBe(401);
+    expect(noSecret.runTask).not.toHaveBeenCalled();
+
+    const stillFine = await route(ev("/.well-known/oauth-protected-resource"), cfg(), noSecret);
+    expect(stillFine.statusCode).toBe(200);
+  });
+});
+
+describe("Slack deps at the Lambda entrypoint (TC-SLACKAPP-047..049)", () => {
+  it("TC-SLACKAPP-047 deps are built when the stage has a signing secret", () => {
+    // The routing cases above prove `route` dispatches when deps are PASSED. This
+    // proves the deployed Lambda actually builds them — without it the whole
+    // feature is unreachable in production while every routing test stays green.
+    const deps = buildSlackDeps(
+      cfg({ slackSigningSecret: "shhh" }),
+      { SSM_PREFIX: "/mem9-on-aws/pr-7", STAGE: "pr-7" },
+    );
+    expect(deps).not.toBeUndefined();
+    expect(deps!.signingSecret).toBe("shhh");
+    expect(deps!.stage).toBe("pr-7");
+    expect(deps!.ssmPrefix).toBe("/mem9-on-aws/pr-7");
+  });
+
+  it("TC-SLACKAPP-048 no secret means no deps, which is what makes the route 404", () => {
+    expect(
+      buildSlackDeps(cfg({ slackSigningSecret: "" }), {
+        SSM_PREFIX: "/mem9-on-aws/pr-7",
+        STAGE: "pr-7",
+      }),
+    ).toBeUndefined();
+  });
+
+  it("TC-SLACKAPP-047b runTask reads its ECS inputs from the stage's SSM tree", async () => {
+    // The apply-task inputs live in SSM exactly as `scripts/run-consolidation-task.sh`
+    // reads them, so this dep does NOT need the apply task to exist yet in infra —
+    // it needs the names to be right. Asserted through the injected client seam so
+    // the case touches no AWS.
+    const sent: unknown[] = [];
+    const deps = buildSlackDeps(
+      cfg({ slackSigningSecret: "shhh" }),
+      { SSM_PREFIX: "/mem9-on-aws/pr-7", STAGE: "pr-7" },
+      {
+        ssm: {
+          send: async (cmd: { input: Record<string, unknown> }) => {
+            sent.push(cmd.input);
+            const names = cmd.input.Names as string[] | undefined;
+            if (!names) return {};
+            return {
+              Parameters: names.map((Name) => ({
+                Name,
+                Value: Name.endsWith("/subnet-ids")
+                  ? "subnet-a,subnet-b"
+                  : `value-for${Name.slice(Name.lastIndexOf("/"))}`,
+              })),
+            };
+          },
+        },
+        ecs: {
+          send: async (cmd: { input: Record<string, unknown> }) => {
+            sent.push(cmd.input);
+            return { tasks: [{ taskArn: "arn:aws:ecs:r:a:task/c/t1" }], failures: [] };
+          },
+        },
+      },
+    );
+    const arn = await deps!.runTask({ ids: ["m-1"], hash: "sha256:x", stage: "pr-7" });
+    expect(arn).toBe("arn:aws:ecs:r:a:task/c/t1");
+
+    const read = sent.find((i) => (i as { Names?: string[] }).Names) as { Names: string[] };
+    for (const suffix of ["cluster-name", "task-def-arn", "task-sg-id", "subnet-ids"]) {
+      expect(read.Names).toContain(`/mem9-on-aws/pr-7/cleanup/${suffix}`);
+    }
+
+    const run = sent.find((i) => (i as { taskDefinition?: string }).taskDefinition) as Record<
+      string,
+      unknown
+    >;
+    // Each parameter must land in the field NAMED for it, not merely be read. The
+    // fake echoes the name into the value so a swap is visible here: reading four
+    // names and asserting only that all four were read passes even if `cluster`
+    // receives the task-def ARN, because both are non-empty strings and the
+    // required-value check cannot tell them apart. The mistake would surface only
+    // from ECS, as an opaque validation error, after the approval was claimed.
+    expect(run.cluster).toBe("value-for/cluster-name");
+    expect(run.taskDefinition).toBe("value-for/task-def-arn");
+    // Private subnets with no public IP: the argument that chose ECS over a
+    // VPC-attached Lambda was "no new network surface", and `assignPublicIp:
+    // ENABLED` would quietly add one.
+    const net = (run.networkConfiguration as {
+      awsvpcConfiguration: { subnets: string[]; assignPublicIp: string };
+    }).awsvpcConfiguration;
+    expect(net.subnets).toEqual(["subnet-a", "subnet-b"]);
+    expect(net.assignPublicIp).toBe("DISABLED");
+
+    // The override carries the HASH ONLY. Memory ids must not ride it: an override
+    // is echoed back in `DescribeTasks` and recorded in the CloudTrail event, so
+    // ids there would put memory identifiers in an audit log the privacy rules keep
+    // them out of — and the task must read the ids from the approved SSM record
+    // anyway, not from anything a caller supplied.
+    const overrides = JSON.stringify(run.overrides);
+    expect(overrides).toContain("sha256:x");
+    expect(overrides).not.toContain("m-1");
+  });
+
+  it("TC-SLACKAPP-047c a RunTask that starts nothing is an error, not a silent success", async () => {
+    // ECS returns HTTP 200 with an empty `tasks[]` and a populated `failures[]`
+    // when placement fails, so a dep that returned `tasks[0].taskArn` without
+    // checking would resolve to `undefined` — and the handler would stamp the claim
+    // and tell the operator an apply started that never did. This is the same trap
+    // `run-bootstrap-task.sh` calls out for the CLI path.
+    const deps = buildSlackDeps(
+      cfg({ slackSigningSecret: "shhh" }),
+      { SSM_PREFIX: "/mem9-on-aws/pr-7", STAGE: "pr-7" },
+      {
+        ssm: {
+          send: async (cmd: { input: Record<string, unknown> }) => ({
+            Parameters: ((cmd.input.Names as string[] | undefined) ?? []).map((Name) => ({
+              Name,
+              Value: Name.endsWith("/subnet-ids") ? "subnet-a" : "v",
+            })),
+          }),
+        },
+        ecs: {
+          send: async () => ({
+            tasks: [],
+            failures: [{ reason: "RESOURCE:MEMORY", arn: "arn:aws:ecs:r:a:container-instance/x" }],
+          }),
+        },
+      },
+    );
+    await expect(
+      deps!.runTask({ ids: ["m-1"], hash: "sha256:x", stage: "pr-7" }),
+    ).rejects.toThrow(/RESOURCE:MEMORY/u);
+  });
+
+  it("TC-SLACKAPP-047d an incomplete SSM input set fails before RunTask", async () => {
+    // A missing `task-def-arn` would otherwise reach `RunTask` as `undefined` and
+    // come back as an opaque validation error, after the claim was already written.
+    let ranTask = false;
+    const deps = buildSlackDeps(
+      cfg({ slackSigningSecret: "shhh" }),
+      { SSM_PREFIX: "/mem9-on-aws/pr-7", STAGE: "pr-7" },
+      {
+        ssm: {
+          send: async (cmd: { input: Record<string, unknown> }) => ({
+            // `task-def-arn` deliberately absent, mirroring how `GetParameters`
+            // reports unknown names rather than failing the call.
+            Parameters: ((cmd.input.Names as string[] | undefined) ?? [])
+              .filter((n) => !n.endsWith("/task-def-arn"))
+              .map((Name) => ({ Name, Value: "v" })),
+          }),
+        },
+        ecs: {
+          send: async () => {
+            ranTask = true;
+            return { tasks: [{ taskArn: "arn" }], failures: [] };
+          },
+        },
+      },
+    );
+    await expect(
+      deps!.runTask({ ids: ["m-1"], hash: "sha256:x", stage: "pr-7" }),
+    ).rejects.toThrow(/task-def-arn/u);
+    expect(ranTask).toBe(false);
+  });
+
+  it("TC-SLACKAPP-047e the entrypoint passes the built deps to the router", async () => {
+    // The gap the isolated `buildSlackDeps` cases cannot see: deleting
+    // `buildSlackDeps(cfg)` from `handler` leaves every other case green while the
+    // deployed Lambda 404s every click. Exercised through `handler`, so the wiring
+    // itself is the thing under test.
+    const res = await handler(slackEvent(), {
+      loadConfig: async () => cfg({ slackSigningSecret: SLACK_SECRET }),
+      env: { SSM_PREFIX: "/mem9-on-aws/test", STAGE: SLACK_STAGE },
+      clients: {
+        ssm: {
+          send: async (cmd) => {
+            // Both reads are `GetParameters` — the only read the action ceiling
+            // admits (TC-047g) — so they are told apart by NAME, not by command
+            // shape. The approval read has to answer the offered record or this
+            // case stops at the offered-list check and never reaches RunTask.
+            const names = ((cmd as { input: { Names?: string[] } }).input.Names) ?? [];
+            return {
+              Parameters: names.map((Name) => ({
+                Name,
+                Value: Name.endsWith("/approvals/offered")
+                  ? JSON.stringify({
+                      stage: SLACK_STAGE,
+                      hash: SLACK_HASH,
+                      ids: ["m-1"],
+                    })
+                  : Name.endsWith("/subnet-ids")
+                    ? "subnet-a"
+                    : "v",
+              })),
+            };
+          },
+        },
+        ecs: {
+          send: async () => ({ tasks: [{ taskArn: "arn:aws:ecs:r:a:task/c/t9" }], failures: [] }),
+        },
+      },
+    });
+
+    // A 200 whose body reports the apply started — NOT merely a 200, which the 404
+    // branch and every refusal reply also produce.
+    expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).text).toMatch(/Apply started/u);
+  });
+
+  it("TC-SLACKAPP-047g every parameter read uses GetParameters, the only read the boundary admits", async () => {
+    // `ssm:GetParameter` and `ssm:GetParameters` are DISTINCT IAM actions, and the
+    // workload permissions boundary's action ceiling admits only the plural (the
+    // whole project reads through `GetParameters`, so nothing needed the singular
+    // until this handler). A `GetParameterCommand` is therefore an AccessDenied on
+    // the first real Slack click — a runtime-only failure, invisible to every test
+    // that injects a client, because an injected fake answers any command shape.
+    //
+    // Asserted on the command CLASS rather than the response, since the two commands
+    // are interchangeable from the caller's side: same parameter, same value back,
+    // and only IAM can tell them apart.
+    const { GetParametersCommand } = await import("@aws-sdk/client-ssm");
+    const sent: unknown[] = [];
+    const deps = buildSlackDeps(
+      cfg({ slackSigningSecret: "shhh" }),
+      { SSM_PREFIX: "/mem9-on-aws/pr-7", STAGE: "pr-7" },
+      {
+        ssm: {
+          send: async (cmd) => {
+            sent.push(cmd);
+            return {
+              Parameters: [
+                { Name: "/mem9-on-aws/pr-7/approvals/offered", Value: '{"ids":[]}' },
+              ],
+            };
+          },
+        },
+      },
+    );
+    const value = await deps!.getParameter("/mem9-on-aws/pr-7/approvals/offered");
+
+    expect(value).toBe('{"ids":[]}');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toBeInstanceOf(GetParametersCommand);
+    // And an absent parameter is null, not the literal string "undefined": SSM
+    // reports a missing name in `InvalidParameters`, omitting it from `Parameters`
+    // entirely rather than returning an empty value.
+    const missing = await deps!.getParameter("/mem9-on-aws/pr-7/approvals/approved-x");
+    expect(missing).toBeNull();
+  });
+
+  it("TC-SLACKAPP-047f the approval record is a plain String written without overwrite", async () => {
+    // Two runtime-only failures that no handler-level test can see, because the
+    // handler asks for `{ overwrite: false }` and trusts this closure to send it:
+    //
+    //  - `SecureString` would be DENIED by the workload permissions boundary,
+    //    which admits neither `kms:Encrypt` nor `kms:GenerateDataKey`. The failure
+    //    would be an AccessDenied on the first real click, long after CI is green.
+    //  - `Overwrite: true` silently destroys the atomic claim: `Overwrite: false`
+    //    failing with `ParameterAlreadyExists` is the ONLY thing that makes Slack's
+    //    3-second redelivery safe, so this mutation double-applies instead of ACKing.
+    const puts: Array<Record<string, unknown>> = [];
+    const deps = buildSlackDeps(
+      cfg({ slackSigningSecret: "shhh" }),
+      { SSM_PREFIX: "/mem9-on-aws/pr-7", STAGE: "pr-7" },
+      {
+        ssm: {
+          send: async (cmd) => (puts.push(cmd.input as Record<string, unknown>), {}),
+        },
+      },
+    );
+    await deps!.putParameter("/mem9-on-aws/pr-7/approvals/approved-x", "{}", {
+      overwrite: false,
+    });
+    expect(puts[0]!.Type).toBe("String");
+    expect(puts[0]!.Overwrite).toBe(false);
+
+    // And the stamp-after-RunTask path must be able to overwrite the same record.
+    await deps!.putParameter("/mem9-on-aws/pr-7/approvals/approved-x", "{}", {
+      overwrite: true,
+    });
+    expect(puts[1]!.Overwrite).toBe(true);
+  });
+
+  it("TC-SLACKAPP-049 a secret without the stage config is refused, not half-built", () => {
+    // A dep set with an empty `stage` would make the stage guard in `loadOffered`
+    // compare against "" and refuse every click — a feature that looks deployed,
+    // authenticates correctly, and then rejects every approval with a message about
+    // the wrong stage. Failing to build is louder and cheaper to diagnose.
+    for (const env of [
+      { SSM_PREFIX: "/mem9-on-aws/pr-7" },
+      { STAGE: "pr-7" },
+      { SSM_PREFIX: "/mem9-on-aws/pr-7", STAGE: "" },
+    ]) {
+      expect(() => buildSlackDeps(cfg({ slackSigningSecret: "shhh" }), env)).toThrow(
+        /SLACK|STAGE|SSM_PREFIX/u,
+      );
+    }
   });
 });

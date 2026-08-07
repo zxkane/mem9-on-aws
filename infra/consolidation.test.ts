@@ -4,6 +4,7 @@ import { parse } from "yaml";
 import type { DbOutputs } from "./db";
 import type { EcsOutputs } from "./ecs";
 import type { TenantIdentityOutputs } from "./tenant-identity";
+import { cloudwatchStubs } from "./task-failure-alarm.test-fixtures";
 
 interface Output<T> {
   value: T;
@@ -188,44 +189,16 @@ function installGlobals(stage: string) {
         }
       },
     },
-    cloudwatch: {
-      EventRule: class {
-        arn = out("arn:aws:events:ap-northeast-1:123456789012:rule/consolidation");
-        name = out("consolidation");
-        constructor(logicalName: string, args: Record<string, unknown>) {
-          record("EventRule", logicalName, args);
-        }
-      },
-      EventTarget: class {
-        constructor(logicalName: string, args: Record<string, unknown>) {
-          record("EventTarget", logicalName, args);
-        }
-      },
-      LogGroup: class {
-        arn = out(
-          "arn:aws:logs:ap-northeast-1:123456789012:log-group:/aws/events/consolidation",
-        );
-        name = out("/aws/events/consolidation");
-        constructor(logicalName: string, args: Record<string, unknown>) {
-          record("LogGroup", logicalName, args);
-        }
-      },
-      LogResourcePolicy: class {
-        constructor(logicalName: string, args: Record<string, unknown>) {
-          record("LogResourcePolicy", logicalName, args);
-        }
-      },
-      LogMetricFilter: class {
-        constructor(logicalName: string, args: Record<string, unknown>) {
-          record("LogMetricFilter", logicalName, args);
-        }
-      },
-      MetricAlarm: class {
-        constructor(logicalName: string, args: Record<string, unknown>) {
-          record("MetricAlarm", logicalName, args);
-        }
-      },
-    },
+    // The task-failure alarm's six resources. Shared with slack-approval.test.ts
+    // because both stacks now build them through one helper; MetricAlarm is also
+    // used by this stack's Scheduler TargetErrorCount alarm, which the same stub
+    // records.
+    cloudwatch: cloudwatchStubs({
+      record,
+      out,
+      ruleName: "consolidation",
+      logGroupName: "/aws/events/consolidation",
+    }),
     ssm: {
       Parameter: class {
         constructor(logicalName: string, args: Record<string, unknown>) {

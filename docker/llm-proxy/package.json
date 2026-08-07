@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "description": "OpenAI /v1/chat/completions proxy to Bedrock Mantle: refreshes the bearer and conditionally injects OpenAI-Project.",
+  "description": "OpenAI /v1/chat/completions proxy to Bedrock Mantle: refreshes the bearer and conditionally injects OpenAI-Project. Also the runtime for the consolidation and cleanup-apply entrypoints copied into the image, whose lazily-imported AWS clients are listed here (see scripts/cleanup-image-contract.test.mjs).",
   "engines": {
     "node": ">=24"
   },
@@ -12,7 +12,10 @@
   },
   "dependencies": {
     "@aws/bedrock-token-generator": "^1.1.0",
+    "@aws-sdk/client-secrets-manager": "^3.1100.0",
+    "@aws-sdk/client-servicediscovery": "^3.1100.0",
     "@aws-sdk/client-sns": "^3.1100.0",
+    "@aws-sdk/client-ssm": "^3.1092.0",
     "@aws-sdk/credential-providers": "^3.700.0",
     "pg": "^8.16.3"
   }

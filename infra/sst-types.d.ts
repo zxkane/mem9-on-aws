@@ -669,6 +669,11 @@ declare namespace sst {
       readonly name: Output<string>;
       readonly nodes: {
         function: { name: Output<string>; arn: Output<string> };
+        // The execution role. infra/slack-approval.ts attaches the approval
+        // grants to the façade Function's existing role by NAME (which is what
+        // aws.iam.RolePolicy takes) rather than creating a second Lambda role
+        // that would need its own workload-boundary exception.
+        role: { name: Output<string>; arn: Output<string> };
       };
     }
 

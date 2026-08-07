@@ -121,9 +121,16 @@ function installGlobals(stage: string) {
           created.push({ kind: "ApiGatewayV2", args: args ?? {} });
         }
       },
-      // Façade Function — SST zips the handler + makes the exec role. Exposes `.arn`.
+      // Façade Function — SST zips the handler + makes the exec role. Exposes
+      // `.arn` and `.nodes.role` (the role the approval grants attach to).
       Function: class {
         arn = out("arn:aws:lambda:ap-northeast-1:123456789012:function:facade");
+        nodes = {
+          role: {
+            name: out("facade-fn-role"),
+            arn: out("arn:aws:iam::123456789012:role/facade-fn-role"),
+          },
+        };
         constructor(_n: string, args: Record<string, unknown>) {
           created.push({ kind: "SstFunction", args });
         }
@@ -502,6 +509,31 @@ describe("oauthFacade factory", () => {
     expect(outs.readerClientId).toBeDefined();
     expect(outs.facadeUrl).toBeDefined();
     expect(outs.ssmPrefix).toBe("/mem9-on-aws/prod");
+  });
+
+  it("TC-SLACKAPP-081: sets STAGE so a configured signing secret can build the Slack callback", async () => {
+    installGlobals("prod");
+    const oauthFacade = await loadFacade();
+    oauthFacade(fakeCognitoOut());
+    const environment = only("SstFunction").environment as Record<
+      string,
+      unknown
+    >;
+    // buildSlackDeps THROWS when a signing secret exists but STAGE is unset, and
+    // it throws at cold start on EVERY invocation — so the interactions endpoint
+    // 500s for every click while the deploy stays green. Neither loadConfig nor
+    // resolveSsm reads STAGE, so nothing else in the config path surfaces this.
+    expect(unwrap(environment.STAGE)).toBe("prod");
+  });
+
+  it("TC-SLACKAPP-081: exposes the function role name so the approval grants can attach to it", async () => {
+    installGlobals("prod");
+    const oauthFacade = await loadFacade();
+    const outs = oauthFacade(fakeCognitoOut());
+    // The approval-record write and RunTask grants belong to THIS role. Without
+    // the name on the outputs, infra/slack-approval.ts cannot attach them, and a
+    // second role would need its own boundary exception.
+    expect(unwrap(outs.functionRoleName)).toBe("facade-fn-role");
   });
 
   it("exports the reader client id/secret + facade url/mcp-endpoint to SSM", async () => {
