@@ -170,6 +170,9 @@ jobs:
       - name: Consolidation coverage (root)
         run: npm run test:consolidation:coverage
 
+      - name: Cleanup and recovery coverage (root)
+        run: npm run test:cleanup:coverage
+
       - uses: actions/setup-python@v6
         with:
           python-version: "3.x"

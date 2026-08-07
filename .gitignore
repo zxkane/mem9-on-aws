@@ -57,5 +57,19 @@ scripts/upload-screenshot.sh
 scripts/write-verdict-artifact.sh
 scripts/write-verdict-body.sh
 
+# memory-cleanup.mjs decision and restore logs. These hold memory snippets
+# (instance-private data) and belong outside any checkout — `snippetLogDir`
+# refuses an `--out` that resolves in here. These patterns are the second line of
+# that defence, for a file copied in by hand or written by an older revision.
+#
+# Anchored deliberately, and so covering only the root: unanchored, they would
+# match at every depth and silently swallow an unrelated `docs/decisions-*.json`
+# or `infra/restore-*.json` — and a file that is invisibly untracked is the
+# failure mode an ignore rule is worst at revealing. A stray log in a
+# SUBdirectory is therefore NOT ignored and will show up in `git status`, which
+# for a file this size is the outcome to want.
+/decisions-*.json
+/restore-*.json
+
 # OS
 .DS_Store

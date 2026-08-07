@@ -166,6 +166,15 @@ version before it reaches the wire.
 - **TC-MEMCLEAN-050** — the tenant id/API key never appears in the decision
   log, stdout, or stderr (assertion greps all three against the configured
   key).
+- **TC-MEMCLEAN-082** — `--out` pointing inside the checkout is refused, and
+  refused *before* the scan and the classification pass. The decision list
+  carries `snippet` fields sliced from memory content, so writing it into a repo
+  planned to be open-sourced is the leak the default `~/.mem9-cleanup/<stage>/`
+  exists to prevent; `--out` overrode that with no constraint. Validating it at
+  the write site inside `loadDecisions` was not enough: `--out ./tmp` on a prod
+  dry run burned a reasoning-model run at `--effort high`, then threw and
+  discarded every decision. See *Where the record may be written* in
+  [memory-restore.md](memory-restore.md) for the shared guard.
 
 ## Discovery
 

@@ -949,21 +949,86 @@ host. Production execution is a deliberate manual flow:
    result as "these 740 are fine" — re-run before treating the audit as
    complete.
 
-Requires VPC-internal network access to `mnemo.mem9-<stage>.local:8080` (the
-script discovers the task IP via Cloud Map `DiscoverInstances`; pass
-`--base-url` explicitly when tunneling) plus IAM for `ssm:GetParameter` on
-`/mem9-on-aws/<stage>/tenant/secret-arn`, `secretsmanager:GetSecretValue` on
-the tenant secret, `servicediscovery:DiscoverInstances`, and
-`bedrock-mantle:CreateInference`/`CallWithBearerToken`. A reasoning-model run
-needs those Bedrock grants in the **responses region** as well (default
-`us-west-2`), since the bearer is minted per region; cost attribution uses
-`MEM9_BEDROCK_PROJECT_OPENAI` there and `MEM9_BEDROCK_PROJECT` in the
-application region (Mantle projects are regional and never cross-applied).
+   **The audit and clean mode** requires VPC-internal network access to
+   `mnemo.mem9-<stage>.local:8080` (the script discovers the task IP via Cloud
+   Map `DiscoverInstances`; pass `--base-url` explicitly when tunneling) plus IAM
+   for `ssm:GetParameter` on `/mem9-on-aws/<stage>/tenant/secret-arn`,
+   `secretsmanager:GetSecretValue` on the tenant secret,
+   `servicediscovery:DiscoverInstances`, and
+   `bedrock-mantle:CreateInference`/`CallWithBearerToken`. A reasoning-model run
+   needs those Bedrock grants in the **responses region** as well (default
+   `us-west-2`), since the bearer is minted per region; cost attribution uses
+   `MEM9_BEDROCK_PROJECT_OPENAI` there and `MEM9_BEDROCK_PROJECT` in the
+   application region (Mantle projects are regional and never cross-applied).
+   `--apply` additionally needs the Aurora writer endpoint and the
+   `/mem9-on-aws/<stage>/db/*` grants below, because it takes the shared advisory
+   mutex on the database. The recovery modes below need none of the REST, tenant,
+   or Bedrock access — see their own requirements.
 
-The consolidation task additionally needs the Aurora writer endpoint plus IAM for
-`/mem9-on-aws/<stage>/db/*` parameters and the DB secret. The host must trust the
-current Amazon RDS CA; set `NODE_EXTRA_CA_CERTS` to the regional RDS bundle
+### Recovering a soft-deleted or archived memory
+
+Soft deletion is reversible by design, but nothing surfaced the reversal until
+issue #124. Two read-only-by-default modes on the same script do it. Both read
+and write the database directly, because the mem9 REST API filters every read to
+`state = 'active'` — GetByID 404s on an inactive row and the list endpoint never
+returns one, so the REST surface cannot see the rows being recovered. That makes
+their requirements narrower than the audit mode's, not wider — see
+**Requirements** below.
+
+```bash
+# What is recoverable? Read-only, takes no lock, safe to run against prod
+# at any time — including while a weekly consolidation apply is running.
+node scripts/memory-cleanup.mjs --stage prod --list-inactive \
+  [--state deleted|archived] [--since 2026-07-01T00:00:00Z] [--limit 100]
+
+# Restore. Dry-run is the default; --apply writes.
+node scripts/memory-cleanup.mjs --stage prod --restore --ids recover.local.txt
+node scripts/memory-cleanup.mjs --stage prod --restore --ids recover.local.txt \
+  --apply [--cap 50] [--force]
+```
+
+`deleted` and `archived` are **not** interchangeable. `deleted` came from a #102
+cleanup judgment. `archived` came from #103 contradiction resolution and carries
+`superseded_by`: restoring it returns the *loser* of a contradiction while the
+winner is still active, so search can then return two directly contradictory
+memories — the defect #103 exists to remove. Restoring an `archived` row
+therefore requires `--force`, and both the refusal and the forced restore name
+the winning id. `superseded_by` is preserved either way, keeping the audit link
+and #103's handle on the pair.
+
+`--since` filters `updated_at`, the only timestamp that *moves on deletion* —
+there is no `memories.deleted_at`, and `created_at` records insertion. For a
+soft-deleted row `updated_at` equals the deletion time only if nothing has
+touched the row since. Restore itself moves `updated_at` to
+`NOW()` (the `BEFORE UPDATE` trigger is unconditional), so the pre-restore value
+is recorded in `~/.mem9-cleanup/<stage>/restore-*.json` (mode 0600, outside any
+checkout — it contains memory snippets and must never be committed or attached to
+issues/PRs). `version` and the `vector(1024)` embedding are untouched: the row was
+never removed, so there is nothing to re-embed.
+
+Exit codes match cleanup, plus `6`: the run finished but not everything the ids
+file asked for happened — an unknown id, a refused `archived` id, a row this tool
+does not know how to restore, or a row whose state or version moved between the
+read and the write. An already-`active` id is a reported no-op and exits 0, so
+finishing a partially-applied restore is safe. Exit `1` also covers the case
+where every write landed but the restore log could not be written: the rows moved
+and the record of which ones did not survive, so the ids on stderr are the only
+copy.
+
+**Requirements for the recovery modes:** network reachability of the **Aurora
+writer endpoint** (they never call the REST service, so no Cloud Map discovery
+and no `mnemo` reachability) plus IAM for `ssm:GetParameters` on
+`/mem9-on-aws/<stage>/db/{host,port,name,secret-arn}` and
+`secretsmanager:GetSecretValue` on the DB secret those parameters name. No tenant
+secret, no `servicediscovery:DiscoverInstances`, no Bedrock. The host must trust
+the current Amazon RDS CA; set `NODE_EXTRA_CA_CERTS` to the regional RDS bundle
 before starting Node when that CA is not already in the host trust store.
+
+Flags are validated against the mode: `--state`/`--since`/`--limit` are rejected
+on a restore, and `--apply` is rejected on a listing, rather than silently
+ignored. An operator who believes a flag narrowed the run would otherwise act on
+that belief — and `--list-inactive --apply` would make a read-only listing take
+the shared advisory mutex and contend with the weekly consolidation.
 
 ## Weekly memory consolidation
 
