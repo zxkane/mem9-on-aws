@@ -87,10 +87,20 @@ function matchesProjectLambdaRoleName(roleName, type) {
     : roleName.includes(type.roleToken);
 }
 
+// Every ECS execution role that fetches a Secrets Manager secret for `valueFrom`
+// injection has to be listed here, because
+// DenySecretContextDecryptFromNonEcsExecutionRoles is an ArnNotLike deny: an
+// omitted role is denied, not merely ungranted. Measured against the live policy
+// rather than reasoned about — the default `aws/secretsmanager` key needs no
+// identity ALLOW, which makes it tempting to conclude the deny never fires, but a
+// simulation of each role shows listed ones allowed and unlisted ones
+// explicitDeny. A missing token costs a task death in the ECS agent's
+// secret-fetch phase, before the entrypoint runs.
 const ECS_EXECUTION_ROLE_TOKENS = [
   "Mem9ServerExecutionRole-",
   "Mem9BootstrapExecutionRole-",
   "Mem9ConsolidationExecutionRole-",
+  "Mem9CleanupExecutionRole-",
 ];
 const ALLOWED_PASS_SERVICES = new Set([
   "bedrock-agentcore.amazonaws.com",
@@ -404,7 +414,7 @@ export function expectedBoundaryPolicyDocument(contract) {
         NotResource: [ssmApprovalParameterArn],
       },
       {
-        Sid: "DenyKmsDecryptOutsideProjectParameterFunctionOrSecretContexts",
+        Sid: "DenyKmsDecryptOutsideReviewedContexts",
         Effect: "Deny",
         Action: [...CONDITIONED_RUNTIME_ACTIONS],
         Resource: "*",
@@ -418,7 +428,7 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "DenyKmsDecryptOutsideSsmSecretsManagerOrProjectLambdaPath",
+        Sid: "DenyKmsDecryptOutsideReviewedViaServices",
         Effect: "Deny",
         Action: [...CONDITIONED_RUNTIME_ACTIONS],
         Resource: "*",

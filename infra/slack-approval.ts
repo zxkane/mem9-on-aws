@@ -21,30 +21,38 @@
  * boundary is operator-owned (rolled out separately from application deploys).
  *
  * BOUNDARY NOTE — the SSM half is admissible under the DEPLOYED boundary; the
- * Secrets Manager half is NOT yet established and is a deploy-time risk:
+ * Secrets Manager half REQUIRES A BOUNDARY ROLLOUT FIRST:
  *   - The SecureString reads are gated by `DenyParameterContextDecryptOutsideSsm`
  *     on `kms:ViaService`, NOT on the `ECS_EXECUTION_ROLE_TOKENS` list, so an
  *     unlisted execution role may still decrypt a `/mem9-on-aws/*` parameter.
- *   - UNRESOLVED: the Secrets Manager reads (`MEM9_DB_SECRET`, `MEM9_TENANT_ID`)
- *     resolve under the DEFAULT `aws/secretsmanager` key (neither secret sets
- *     `kmsKeyId` — see infra/db.ts and infra/tenant-identity.ts). AWS needs no
- *     identity `kms:Decrypt` ALLOW on that key, but an explicit DENY is a
- *     different question, and three things in this repo say the deny does bite on
- *     the service-mediated path: the boundary's own comment above
- *     `DenySecretContextDecryptFromNonEcsExecutionRoles` says it "constrains which
- *     project role types may use that service-mediated path"; the SecretARN
- *     encryption-context allowlist enumerates `Mem9DbSecret-*` and
- *     `tenant-api-key-*`, which would be pointless if the decrypt were never
- *     attributed to the workload principal; and #122 had to admit
- *     `Mem9ConsolidationExecutionRole-` to that same list for a task that reads
- *     THESE SAME TWO default-key secrets (pinned by TC-CONSOL-032).
- *     `Mem9CleanupExecutionRole-` is NOT in the list. If the deny is evaluated,
- *     this execution role cannot fetch either secret and the task dies at startup
- *     — AFTER the click has been spent — on every bounded stage. Adding the role
- *     to the exception list is safe either way (it only narrows a deny, and is a
- *     no-op if the deny never fires), but it changes the OPERATOR-OWNED template
- *     and so needs its own guarded rollout ahead of this stack's first deploy.
- *     Settle it before deploying, not by re-reading this comment.
+ *   - SETTLED, and the answer is that the deny DOES bite. The Secrets Manager
+ *     reads (`MEM9_DB_SECRET`, `MEM9_TENANT_ID`) resolve under the DEFAULT
+ *     `aws/secretsmanager` key (neither secret sets `kmsKeyId` — see infra/db.ts
+ *     and infra/tenant-identity.ts), and AWS needs no identity `kms:Decrypt`
+ *     ALLOW there — but an explicit DENY is a separate question, so it was
+ *     measured rather than reasoned about. Against the LIVE v10 boundary,
+ *     `iam:simulate-custom-policy` for `kms:Decrypt` on the regional
+ *     `alias/aws/secretsmanager` key, with `kms:ViaService=secretsmanager.<region>
+ *     .amazonaws.com` and a `SecretARN` encryption context matching the
+ *     allowlisted `mem9-on-aws-*-Mem9DbSecret-*` / `*-tenant-api-key-*` shapes:
+ *       Mem9ServerExecutionRole-        → allowed        (on the list)
+ *       Mem9ConsolidationExecutionRole- → allowed        (on the list, from #122)
+ *       Mem9CleanupExecutionRole-       → explicitDeny   (NOT on the list)
+ *       Mem9ConsolidationTaskRole-      → explicitDeny   (NOT on the list)
+ *     Isolating each deny statement in turn attributes it to exactly
+ *     `DenySecretContextDecryptFromNonEcsExecutionRoles`, for BOTH secrets.
+ *     CloudTrail corroborates the premise the simulation rests on: real
+ *     `SecretARN`-context Decrypt events are attributed to the calling workload
+ *     principal, not to Secrets Manager as a service, so that statement's
+ *     `aws:PrincipalArn` condition has something to match.
+ *     (Simulating this yourself requires passing `aws:PrincipalArn` as an explicit
+ *     `--context-entries` value. Inferred from `--caller-arn` alone, every role
+ *     reads as denied and the differential vanishes.)
+ *   - CONSEQUENCE: `Mem9CleanupExecutionRole-` must be admitted to
+ *     `ECS_EXECUTION_ROLE_TOKENS` in the OPERATOR-OWNED boundary template, and
+ *     that rollout must land BEFORE this stack first deploys to a bounded stage.
+ *     Without it the task dies at startup fetching its own credentials — AFTER the
+ *     click has been spent, which is the one failure mode this loop must not have.
  *
  * Gated on `MEM9_SLACK_APPROVAL_ENABLED=1`. Disabled means ABSENT, not
  * present-and-idle: a task definition that exists is a task definition `RunTask`

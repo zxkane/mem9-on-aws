@@ -60,8 +60,8 @@ current runtime roles:
 
 - ECS image pull, log delivery, and Secrets Manager startup injection.
 - ECS startup decrypt for only the DB and tenant secret families, mediated by
-  Secrets Manager in the application region and limited to the server/bootstrap
-  execution-role types.
+  Secrets Manager in the application region and limited to the four
+  execution-role types (server, bootstrap, consolidation, cleanup).
 - ECS Exec control/data channels for the server and bootstrap task roles.
 - Lambda log delivery and VPC network-interface lifecycle.
 - The OAuth facade's SSM reads and KMS decrypt, constrained to Parameter Store
@@ -86,7 +86,7 @@ resources, the project Parameter Store, Lambda function, or Secrets Manager
 `SecretARN` KMS contexts, and short-term Mantle bearers. The boundary does not
 require `kms:ViaService` for Lambda's default environment-key grant. Every other
 decrypt must be mediated by application-region SSM or Secrets Manager. A
-`SecretARN` path is further restricted to the two ECS execution-role types and
+`SecretARN` path is further restricted to the four ECS execution-role types and
 the known DB/tenant secret families; a Lambda source remains denied on this path.
 AWS returns the IAM role ARN, not an STS session ARN, for
 [`aws:PrincipalArn`](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_condition-keys.html).

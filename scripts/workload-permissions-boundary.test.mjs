@@ -7453,10 +7453,10 @@ describe("boundary and deploy-role templates", () => {
     ]);
     expect(
       bySid(
-        "DenyKmsDecryptOutsideProjectParameterFunctionOrSecretContexts",
+        "DenyKmsDecryptOutsideReviewedContexts",
       ),
     ).toEqual({
-      Sid: "DenyKmsDecryptOutsideProjectParameterFunctionOrSecretContexts",
+      Sid: "DenyKmsDecryptOutsideReviewedContexts",
       Effect: "Deny",
       Action: ["kms:Decrypt"],
       Resource: "*",
@@ -7481,9 +7481,9 @@ describe("boundary and deploy-role templates", () => {
     });
     expect(bySid("DenyKmsDecryptOutsideSsm")).toBeUndefined();
     expect(
-      bySid("DenyKmsDecryptOutsideSsmSecretsManagerOrProjectLambdaPath"),
+      bySid("DenyKmsDecryptOutsideReviewedViaServices"),
     ).toEqual({
-      Sid: "DenyKmsDecryptOutsideSsmSecretsManagerOrProjectLambdaPath",
+      Sid: "DenyKmsDecryptOutsideReviewedViaServices",
       Effect: "Deny",
       Action: ["kms:Decrypt"],
       Resource: "*",
@@ -7520,6 +7520,8 @@ describe("boundary and deploy-role templates", () => {
               "mem9-on-a*-*Mem9BootstrapExecutionRole-*",
             "arn:aws:iam::123456789012:role/" +
               "mem9-on-a*-*Mem9ConsolidationExecutionRole-*",
+            "arn:aws:iam::123456789012:role/" +
+              "mem9-on-a*-*Mem9CleanupExecutionRole-*",
           ],
         },
       },
@@ -7753,12 +7755,30 @@ describe("boundary and deploy-role templates", () => {
   // against the fixture shape only.
   //
   // 64 is close to the largest reserve this document can currently hold: the
-  // configured shape is 6023 bytes, so 121 is the ceiling and anything above that
-  // fails on commit. That is the finding, not a comfort — the statement this
-  // change added cost 189 bytes, so the next comparable statement breaches the
-  // gate and the quota at nearly the same moment. Splitting the boundary across a
-  // second managed policy is the real fix when that happens; until then this at
-  // least fails in CI rather than at rollout.
+  // configured shape is 6054 bytes, so 90 is the ceiling and anything above that
+  // fails on commit. That is the finding, not a comfort.
+  //
+  // This gate has now fired once, and the escape hatch the earlier note proposed
+  // — "split the boundary across a second managed policy" — does not exist. A
+  // role has exactly ONE permissions boundary (get-role returns a singular
+  // PermissionsBoundaryArn), and the 6144 managed-policy limit is Adjustable:
+  // False, so there is no quota increase to request either. Re-homing deny
+  // statements into an attached identity policy is not equivalent: a boundary
+  // cannot be shed by the principal, whereas anything holding
+  // iam:DetachRolePolicy can drop an identity policy. Merging denies is worse
+  // still — separate statements are a logical OR, while conditions inside one
+  // statement are ANDed, so a merge weakens enforcement.
+  //
+  // What is left is byte reduction that preserves semantics. Sid is an optional
+  // identifier and carries no authorization meaning, so shortening the longest
+  // ones is free; that is what bought the room for the fourth ECS execution-role
+  // ARN here (6095 -> 6054). Two further semantics-preserving reserves exist
+  // before scope has to give: dropping Sids entirely frees 626 bytes, and
+  // collapsing the singleton arrays to scalars another 20. Dropping the Sids
+  // costs this suite every bySid() lookup, so it is a refactor rather than a
+  // deletion; both are deliberately unspent. They mean a failure here is a
+  // prompt to choose, not yet a forced loss of enforcement. Only once they are
+  // spent does the choice narrow to a coarser scope.
   const OPENAI_PROJECT_ARN =
     "arn:aws:bedrock-mantle:us-west-2:123456789012:project/proj_openai";
   const BOUNDARY_SIZE_RESERVE = 64;
@@ -7984,6 +8004,8 @@ describe("boundary and deploy-role templates", () => {
           "mem9-on-a*-*Mem9BootstrapExecutionRole-*",
         "arn:aws:iam::123456789012:role/" +
           "mem9-on-a*-*Mem9ConsolidationExecutionRole-*",
+        "arn:aws:iam::123456789012:role/" +
+          "mem9-on-a*-*Mem9CleanupExecutionRole-*",
       ],
       Condition: {
         StringNotEquals: {

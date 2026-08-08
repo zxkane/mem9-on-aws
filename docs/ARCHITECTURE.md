@@ -558,8 +558,8 @@ Resource and condition denies constrain project resources, KMS use, short-term
 Mantle bearer use, and Lambda VPC ENI access. KMS decrypt is limited to either
 the project SSM parameter context, Lambda cold-start environment decryption
 with a project function ARN context, or one of the project DB/tenant
-`SecretARN` families through Secrets Manager from a server/bootstrap ECS
-execution role. AWS documents that Secrets Manager supplies `SecretARN` and
+`SecretARN` families through Secrets Manager from one of the four allowlisted
+ECS execution roles (server, bootstrap, consolidation, cleanup). AWS documents that Secrets Manager supplies `SecretARN` and
 `SecretVersionId` as its KMS encryption context:
 [Secrets Manager encryption](https://docs.aws.amazon.com/secretsmanager/latest/userguide/security-encryption.html).
 A decrypt without one of the three project contexts remains denied. The
@@ -568,7 +568,7 @@ because that path does not expose it consistently during permissions-boundary
 evaluation. Non-Lambda-context decrypts must come through SSM or Secrets
 Manager in the application region. Separate denies restrict Lambda contexts to
 the three required Lambda execution-role types plus the optional facade
-authorizer role, and secret contexts to the two ECS execution-role types. AWS
+authorizer role, and secret contexts to the four ECS execution-role types. AWS
 defines `aws:PrincipalArn` for an IAM role as the IAM role ARN, not its
 assumed-role session ARN:
 [global condition keys](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_condition-keys.html).
@@ -580,8 +580,8 @@ exception requires both a generated proxy-role name and
 explicitly denies the same actions to function code. The name match is
 therefore not the sole authorization check. The deploy role likewise denies
 passing any of the four allowlisted Lambda role-name patterns to a non-Lambda
-service, and denies passing either allowlisted ECS execution-role pattern to a
-non-ECS service. These `PassRole` denies do not constrain a role trust policy
+service, and denies passing any of the four allowlisted ECS execution-role
+patterns to a non-ECS service. These `PassRole` denies do not constrain a role trust policy
 supplied to `CreateRole`; the accepted trusted-writer model therefore remains
 load-bearing for direct assumption, as described below.
 
