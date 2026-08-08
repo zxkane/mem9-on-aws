@@ -147,7 +147,7 @@ Resources:
           # Lambda cold starts, SSM SecureStrings, and the two ECS task-definition
           # secret families use different KMS encryption contexts. Missing and
           # foreign contexts remain denied.
-          - Sid: DenyKmsDecryptOutsideProjectParameterFunctionOrSecretContexts
+          - Sid: DenyKmsDecryptOutsideReviewedContexts
             Effect: Deny
             Action:
               - kms:Decrypt
@@ -160,7 +160,7 @@ Resources:
                   - !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-*-Mem9DbProxySecret-*
                   - !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-*-Mem9DbSecret-*
                   - !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-*-tenant-api-key-*
-          - Sid: DenyKmsDecryptOutsideSsmSecretsManagerOrProjectLambdaPath
+          - Sid: DenyKmsDecryptOutsideReviewedViaServices
             Effect: Deny
             Action:
               - kms:Decrypt
@@ -207,6 +207,7 @@ Resources:
                   - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ServerExecutionRole-*
                   - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9BootstrapExecutionRole-*
                   - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ConsolidationExecutionRole-*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9CleanupExecutionRole-*
           # Only the reviewed Lambda execution-role types may present the Lambda
           # cold-start context. Other workload roles cannot forge it.
           - Sid: DenyLambdaContextDecryptFromNonLambdaRoles

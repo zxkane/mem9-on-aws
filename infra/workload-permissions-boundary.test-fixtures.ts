@@ -20,12 +20,18 @@ export const CONSOLIDATION_SCHEDULER_ROLE_NAME =
  * role, so both must be admitted or the exact-set assertion in
  * `workload-permissions-boundary.roles.test.ts` fails.
  *
- * Neither name appears in the operator-owned boundary's
- * `ECS_EXECUTION_ROLE_TOKENS`, and it does not need to: the task's SecureString
- * reads are gated on `kms:ViaService`, and its Secrets Manager reads resolve
- * under the default `aws/secretsmanager` key, which needs no identity
- * `kms:Decrypt`. Moving either secret to a customer managed key would require
- * adding `Mem9CleanupExecutionRole-` to that deny's exception list.
+ * `Mem9CleanupExecutionRole-` IS on the operator-owned boundary's
+ * `ECS_EXECUTION_ROLE_TOKENS` list, and has to be. The reasoning that once said
+ * otherwise — the Secrets Manager reads resolve under the default
+ * `aws/secretsmanager` key, which needs no identity `kms:Decrypt` ALLOW — is
+ * true but irrelevant: `DenySecretContextDecryptFromNonEcsExecutionRoles` is an
+ * `ArnNotLike` DENY, so an unlisted role is explicitly denied rather than merely
+ * ungranted. Simulating each role against the live boundary shows listed ones
+ * allowed and unlisted ones explicitDeny. See the BOUNDARY NOTE in
+ * `infra/slack-approval.ts` for the measurement.
+ *
+ * `Mem9CleanupTaskRole` is correctly absent: only the EXECUTION role fetches
+ * `valueFrom` secrets during task startup.
  */
 export const SLACK_APPROVAL_ROLE_NAMES = [
   "Mem9CleanupExecutionRole",
