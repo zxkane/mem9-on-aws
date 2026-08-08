@@ -27,7 +27,7 @@ Design: [`docs/designs/recall-min-confidence.md`](../designs/recall-min-confiden
 | ID | Scenario | Expected |
 |---|---|---|
 | TC-RECALL-030 | Existing keyword probe (marker string) | Unchanged; still passes |
-| TC-RECALL-031 | **Natural-language probe:** after the keyword search finds the marker, search with a ≥25-char natural-language query describing the marker fact (not containing the raw marker token verbatim-only) | ≥1 result containing the marker within the retry window |
+| TC-RECALL-031 | **Natural-language probe:** after the keyword search finds the marker, search with a ≥25-char natural-language query describing the marker fact. The query MUST NOT interpolate the run id or the marker token — a run-scoped literal makes retrieval return zero candidates, so the cutoff never runs and the probe fails for a reason unrelated to #23 (issue #137) | `total ≥ 1` within the retry window. The marker's own rank is NOT asserted: on a long-lived tenant hundreds of real memories compete for the top-N. A zero result is reported as "check `cutoff_reason` in the server log", never attributed to #23 client-side — the MCP payload carries only `{limit,memories,offset,total}` and cannot distinguish `min_confidence` from `no_candidates` |
 
 ## Build-time guards
 
