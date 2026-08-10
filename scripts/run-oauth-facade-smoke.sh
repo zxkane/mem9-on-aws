@@ -28,6 +28,25 @@ echo "run-oauth-facade-smoke: checking /.well-known/oauth-protected-resource"
 PR=$(curl -fsS "${FACADE}/.well-known/oauth-protected-resource")
 echo "$PR" | jq -e '.resource | endswith("/mcp")' >/dev/null || { echo "::error::protected-resource.resource does not end with /mcp"; exit 1; }
 
+# TC-MCPGW-079. RFC 8414 §3.3: the AS metadata `issuer` MUST be identical to the
+# issuer identifier the client inserted the well-known string into — which is the
+# `authorization_servers` entry published above. A mismatch makes a compliant
+# client (rmcp >= 3.0.0) discard the document and fail MCP startup entirely. The
+# checks above validated every other advertised field but never this one, which is
+# why the façade advertised Cognito's issuer undetected. Compared as a relationship
+# between the two live documents, so it holds on any stage/domain.
+AS_ISSUER=$(echo "$AS" | jq -er '.issuer')
+ADVERTISED_AS=$(echo "$PR" | jq -er '.authorization_servers[0]')
+if [[ "$AS_ISSUER" != "$ADVERTISED_AS" ]]; then
+  echo "::error::AS metadata issuer (${AS_ISSUER}) != authorization_servers[0] (${ADVERTISED_AS}) — RFC 8414 §3.3 violation; compliant clients will refuse this façade"
+  exit 1
+fi
+OIDC_ISSUER=$(curl -fsS "${FACADE}/.well-known/openid-configuration" | jq -er '.issuer')
+if [[ "$OIDC_ISSUER" != "$ADVERTISED_AS" ]]; then
+  echo "::error::OIDC discovery issuer (${OIDC_ISSUER}) != authorization_servers[0] (${ADVERTISED_AS}) — clients discovering via openid-configuration will refuse this façade"
+  exit 1
+fi
+
 echo "run-oauth-facade-smoke: checking /register returns a public client (no secret)"
 DCR=$(curl -fsS -X POST -H 'Content-Type: application/json' -d '{"redirect_uris":["http://localhost:8080/cb"]}' "${FACADE}/register")
 echo "$DCR" | jq -e '.client_id | length > 0' >/dev/null || { echo "::error::DCR did not return client_id"; exit 1; }

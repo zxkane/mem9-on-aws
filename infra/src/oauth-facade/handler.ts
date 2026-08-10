@@ -293,7 +293,16 @@ export async function route(
   // façade so clients hit the redirect proxy; the rest pass through to Cognito.
   if (wellKnown === "/.well-known/oauth-authorization-server") {
     return json(200, {
-      issuer: cfg.issuer,
+      // RFC 8414 §3.3: this MUST be identical to the issuer identifier the client
+      // inserted the well-known string into to build the URL it just fetched. We
+      // publish ourselves as the authorization server above
+      // (`authorization_servers: [base]`), so that identifier is `base` — NOT
+      // Cognito's issuer, even though Cognito mints and signs every token. A
+      // client that enforces §3.3 (rmcp >= 3.0.0) discards the whole document on
+      // a mismatch and fails MCP startup. Tokens keep their Cognito `iss` claim
+      // and the Gateway keeps validating against Cognito's own discovery URL;
+      // only this self-identifier is ours.
+      issuer: base,
       authorization_endpoint: `${base}/oauth/authorize`,
       token_endpoint: `${base}/oauth/token`,
       userinfo_endpoint: cfg.userinfo,
@@ -321,7 +330,9 @@ export async function route(
   // OIDC discovery (some clients only know this path).
   if (wellKnown === "/.well-known/openid-configuration") {
     return json(200, {
-      issuer: cfg.issuer,
+      // Same self-identifier rule as the RFC 8414 document above — a client that
+      // discovers us through this path applies the identical check.
+      issuer: base,
       authorization_endpoint: `${base}/oauth/authorize`,
       token_endpoint: `${base}/oauth/token`,
       userinfo_endpoint: cfg.userinfo,

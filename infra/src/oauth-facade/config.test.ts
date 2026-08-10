@@ -33,7 +33,6 @@ const fullSsm = {
 
 const baseEnv = {
   SSM_PREFIX: PREFIX,
-  COGNITO_ISSUER: "https://issuer",
   COGNITO_AUTHORIZE_ENDPOINT: "https://authz",
   COGNITO_TOKEN_ENDPOINT: "https://token",
   COGNITO_USERINFO_ENDPOINT: "https://userinfo",
@@ -81,7 +80,6 @@ describe("façade config loader (cycle-break SSM reads)", () => {
     expect(cfg.upstream).toBe("https://gw");
     expect(cfg.userClientId).toBe("cid");
     expect(cfg.userClientSecret).toBe("csecret");
-    expect(cfg.issuer).toBe("https://issuer");
     expect(cfg.hmacKey).toBe("the-key");
     expect(cfg.resourceScopes).toEqual([
       "example-mcp/query/read",
@@ -92,11 +90,15 @@ describe("façade config loader (cycle-break SSM reads)", () => {
     ]);
   });
 
+  // Asserts `reqEnv`'s fail-closed behavior via a representative required var.
+  // It used to name the upstream issuer var, which #143 removed once the façade
+  // stopped advertising that issuer — re-pointed rather than deleted so a missing
+  // required env keeps failing loudly at cold start.
   it("loadConfig throws when a required env var is missing", async () => {
-    const env = { ...baseEnv, COGNITO_ISSUER: undefined };
+    const env = { ...baseEnv, COGNITO_TOKEN_ENDPOINT: undefined };
     await expect(
       loadConfig({ ssm: ssmReturning(fullSsm), env }),
-    ).rejects.toThrow(/missing env COGNITO_ISSUER/);
+    ).rejects.toThrow(/missing env COGNITO_TOKEN_ENDPOINT/);
   });
 
   it("empty OAUTH_STATE_HMAC_KEY is preserved as the proxy-disabled sentinel", async () => {

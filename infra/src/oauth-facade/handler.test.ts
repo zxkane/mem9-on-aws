@@ -27,11 +27,16 @@ const HOST = "abc123.lambda-url.ap-northeast-1.on.aws";
 const BASE = `https://${HOST}`;
 const HMAC = "unit-test-hmac-key";
 const REMOTE_CALLBACK = "https://oauth.example.com/callback/app";
+/**
+ * The upstream Cognito issuer. Cognito still mints and signs every token, but the
+ * façade must never advertise this as the `issuer` of its OWN metadata documents
+ * (RFC 8414 §3.3) — see TC-MCPGW-079.
+ */
+const UPSTREAM_ISSUER = "https://cognito-idp.ap-northeast-1.amazonaws.com/pool";
 
 function cfg(overrides: Partial<FacadeConfig> = {}): FacadeConfig {
   return {
     upstream: "https://gateway.example/mcp-prefix",
-    issuer: "https://cognito-idp.ap-northeast-1.amazonaws.com/pool",
     authorize: "https://auth.example.com/oauth2/authorize",
     token: "https://auth.example.com/oauth2/token",
     userinfo: "https://auth.example.com/oauth2/userInfo",
@@ -143,6 +148,44 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
     );
     expect(oidc.registration_endpoint).toBe(`${BASE}/register`);
   });
+
+  // TC-MCPGW-079. RFC 8414 §3.3: the `issuer` a metadata document returns MUST be
+  // identical to the issuer identifier the client inserted the well-known string
+  // into to build the URL it fetched. We publish ourselves as the authorization
+  // server (`authorization_servers: [base]`), so that identifier is our own base —
+  // NOT Cognito's issuer, even though Cognito mints the tokens. Advertising
+  // Cognito's issuer here made rmcp >= 3.0.0 clients discard the document and fail
+  // MCP startup outright.
+  //
+  // Asserted as a RELATIONSHIP between the two documents rather than against a
+  // hardcoded host: pinning the literal string would still pass if the two
+  // documents later drifted apart, which is exactly the bug being fixed.
+  // The suffix is the only thing that varies — `wellKnown` strips a trailing
+  // `/mcp` before matching, so both variants must hold the same property.
+  it.each([
+    ["bare", ""],
+    ["resource-suffixed", "/mcp"],
+  ])(
+    "TC-MCPGW-079: advertised issuer is identical to authorization_servers[0] on %s well-known paths",
+    async (_label, suffix) => {
+      const doc = async (name: string) =>
+        JSON.parse((await route(ev(`/.well-known/${name}${suffix}`), cfg())).body);
+      const pr = await doc("oauth-protected-resource");
+      const as = await doc("oauth-authorization-server");
+      const oidc = await doc("openid-configuration");
+
+      const advertisedAs = pr.authorization_servers[0];
+      expect(advertisedAs).toBe(BASE);
+      // Both documents self-identify as the AS the client was pointed at.
+      expect(as.issuer).toBe(advertisedAs);
+      expect(oidc.issuer).toBe(advertisedAs);
+
+      // Guards a partial fix that changes only one of the two handlers: neither
+      // document may leak the upstream issuer.
+      expect(as.issuer).not.toBe(UPSTREAM_ISSUER);
+      expect(oidc.issuer).not.toBe(UPSTREAM_ISSUER);
+    },
+  );
 
   it("TC-MCPGW-062: /oauth/authorize sends Cognito a short signed handle and stores client state in a signed cookie", async () => {
     const q = new URLSearchParams({
