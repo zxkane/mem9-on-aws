@@ -48,18 +48,17 @@ afterEach(() => {
  * Deliberately spelling-independent: it audits the POSITION each expansion holds
  * in its line, not the flag preceding it, so no tool name or flag needs listing
  * and a signer rewritten around a different tool is judged by the same rule. The
- * position that exempts an expansion is the one a COMMAND could occupy — which is
- * what separates the sanctioned `NAME="$SECRET" cmd` from an `=`-bearing argument
- * to a command already underway (`awk -v key="$SECRET"`, `docker run -e K="$SECRET"`),
- * whose two preceding characters are identical and which is a real argv leak.
+ * exempting position is the one a COMMAND could occupy; `atCommandStart` below
+ * explains why that is stricter than "an identifier and an `=` precede the value",
+ * and has to be.
  *
  * @param code the script with full-line comments already stripped
  * @returns `taint` — every name transitively assigned from `SIGNING_SECRET`,
  *          `SIGNING_SECRET` first; `uses` — how many expansions of a tainted name
- *          were examined and `envUses` how many of those were prefix assignments
- *          handing the value to a child, so the caller can reject a vacuous pass;
- *          `violations` — each use of a tainted name that is neither an assignment
- *          nor inside a test builtin.
+ *          were examined and `envUses` how many of those actually handed the value
+ *          to a child through the environment, so the caller can reject a vacuous
+ *          pass; `violations` — each use of a tainted name that is neither an
+ *          assignment nor inside a test builtin.
  */
 function auditSecretTaint(code) {
   // Line continuations joined first, so every rule below sees a whole simple
@@ -71,21 +70,54 @@ function auditSecretTaint(code) {
   // bare. Used twice: to recognise the assignment an expansion sits in, and to skip
   // the assignments that may precede the command word in `A=1 B=2 cmd`.
   const ASSIGNMENT_WORD = String.raw`[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']*)`;
-  const DECLARATOR = String.raw`(?:local|export|declare|readonly)\s+`;
-  // `$NAME` or `${NAME}`, and NOT a longer name that merely starts with it —
-  // without the trailing guard, a taint on `KEY` would flag every `$KEYSTORE`.
-  const expansion = (name) =>
-    new RegExp(String.raw`\$(?:\{${name}\}|${name}(?![A-Za-z0-9_]))`, "u");
+  // A `NAME=` standing exactly where a COMMAND could start: between it and the last
+  // command boundary lies nothing but other assignment words and an optional
+  // declarator. That POSITION, rather than the mere presence of an identifier and an
+  // `=`, is what separates the sanctioned prefix assignment from an `=`-bearing
+  // argument to a command already underway — `awk -v key="$TAINTED"` and
+  // `docker run -e SEC="$TAINTED"` are identical in the two characters before the
+  // expansion yet put the value on a world-readable cmdline. Requiring the command
+  // position rejects both, and `cmd --key="$TAINTED"` with them.
+  const atCommandStart = (declarator) =>
+    new RegExp(
+      String.raw`(?:^|[;&|(){]|\b(?:then|do|else|in)\s)\s*${declarator}` +
+        String.raw`(?:${ASSIGNMENT_WORD}\s+)*[A-Za-z_][A-Za-z0-9_]*=(?:"|')?$`,
+      "u",
+    );
+  // Any assignment — standalone, prefix, or declared — versus the `export` subset,
+  // which reaches every later child's environment without a command on its own line.
+  const ASSIGNMENT = atCommandStart(String.raw`(?:(?:local|export|declare|readonly)\s+)?`);
+  const EXPORT = atCommandStart(String.raw`export\s+`);
+  // The command a prefix assignment run hands the value to, past any further
+  // assignment words: `A="$T" B=2 cmd` is one prefix run, one command.
+  const COMMAND_AFTER_PREFIX = new RegExp(String.raw`^(?:\s+${ASSIGNMENT_WORD})*\s+[^\s#;&|)]`, "u");
+  // `$NAME`, or `${NAME` followed by ANY parameter-expansion operator — `${NAME}`,
+  // but equally `${NAME:-}`, `${NAME#}`, `${NAME%%x}`, `${NAME@Q}`, `${NAME:0:99}`,
+  // `${NAME^^}`, `${NAME//a/b}`. Matching only the bare `${NAME}` left the whole
+  // audit defeasible by ONE character: `"${SIGNING_SECRET#}"` on a command line is
+  // the secret, verbatim, yet went unseen — and unseen by `uses` too, so not even
+  // the non-vacuity counter noticed. The operator does not have to be meaningful to
+  // be an exfiltration route; it only has to be syntax the auditor did not enumerate,
+  // which is the same mistake the `-hmac` allowlist made one layer up.
+  //
+  // The trailing guard on the bare form keeps a taint on `KEY` from flagging every
+  // `$KEYSTORE`, and the braced form gets it too, so `${KEYSTORE}` is not read as a
+  // modified `${KEY}`. `${#NAME}` is deliberately NOT matched: that is the length,
+  // not the value.
+  const expansion = (name, flags = "u") =>
+    new RegExp(String.raw`\$(?:\{${name}(?![A-Za-z0-9_])[^}]*\}|${name}(?![A-Za-z0-9_]))`, flags);
   // Assignments anywhere a shell word can start, not only at a line's start: a
   // launder hidden after `;` or `&&` (`if x; then B="$SECRET"; fi`) is still a
-  // launder.
+  // launder. A declarator needs no clause of its own — the space after `local` or
+  // `readonly` is itself the boundary the target name follows.
   const assignments = (line) =>
-    [...line.matchAll(/(?:^|[\s;&|(])(?:local\s+|export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(\S*)/gu)];
+    [...line.matchAll(/(?:^|[\s;&|(])([A-Za-z_][A-Za-z0-9_]*)=(\S*)/gu)];
 
   // Transitive closure over `NAME="$TAINTED"` / `NAME=$TAINTED`, repeated until it
   // stops growing: a two-hop launder (`A="$SIGNING_SECRET"; B="$A"; cmd "$B"`) is
   // no less an argv leak than a one-hop one.
-  for (let size = 0; size !== taint.size; ) {
+  let size = 0;
+  while (size !== taint.size) {
     size = taint.size;
     for (const line of lines) {
       for (const [, target, value] of assignments(line)) {
@@ -98,36 +130,28 @@ function auditSecretTaint(code) {
   let uses = 0;
   let envUses = 0;
   for (const name of taint) {
-    const pattern = expansion(name);
     for (const line of lines) {
       // Every expansion of this name on this line, judged by what precedes it.
-      for (const match of line.matchAll(new RegExp(pattern, "gu"))) {
+      for (const match of line.matchAll(expansion(name, "gu"))) {
         uses += 1;
         const before = line.slice(0, match.index);
+        const after = line.slice(match.index + match[0].length).replace(/^["']/u, "");
         // An assignment — `NAME=$TAINTED`, whether standalone, `local`/`export`, or
-        // the prefix form `NAME="$TAINTED" cmd` — is the sanctioned channel.
-        //
-        // Recognised by POSITION, not by the presence of an `=`: the `NAME=` must sit
-        // where a command could start, meaning everything between the last command
-        // boundary and it is itself an assignment word (`A=1 B="$T" cmd`) or a
-        // declarator. Checking only "an identifier and an `=` precede the expansion"
-        // is not enough — that also accepts an `=`-bearing argument to a command that
-        // has already started, and those are real argv leaks:
-        // `awk -v key="$TAINTED" ...` and `docker run -e SEC="$TAINTED" ...` both put
-        // the value on a world-readable cmdline while looking exactly like a prefix
-        // assignment from the two characters before it. Requiring the command
-        // position rejects them, and `cmd --key="$TAINTED"` with it.
-        const isAssignment = new RegExp(
-          String.raw`(?:^|[;&|(){]|\b(?:then|do|else|in)\s)\s*(?:${DECLARATOR})?` +
-            String.raw`(?:${ASSIGNMENT_WORD}\s+)*[A-Za-z_][A-Za-z0-9_]*=(?:"|')?$`,
-          "u",
-        ).test(before);
-        // `export NAME="$TAINTED"` reaches every later child's environment without a
-        // command on its own line, so it is an env use even though nothing follows.
-        // Tracked separately from the prefix form for exactly that reason.
-        const isExport = /(?:^|[;&|(]\s*)export\s+(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*[A-Za-z_][A-Za-z0-9_]*=(?:"|')?$/u.test(
-          before,
-        );
+        // the prefix form `NAME="$TAINTED" cmd` — is the sanctioned channel, since it
+        // reaches the child through the environment. See `atCommandStart` for why the
+        // position and not the `=` is what is tested.
+        if (ASSIGNMENT.test(before)) {
+          // Counted so the caller can tell "the harness signs something with this
+          // secret" from "nothing here mentions it any more". A PREFIX assignment
+          // counts only once a COMMAND is found after it; an `export` counts on its
+          // own, having no command to wait for. "Something follows on the line" would
+          // not support the claim: full-line comments are stripped before this but
+          // TRAILING ones are not, so `K="$SECRET"  # alias` would read as handing the
+          // value to a child, and a signer deleted with its alias left behind would
+          // satisfy the very non-vacuity check that exists to fail it.
+          if (EXPORT.test(before) || COMMAND_AFTER_PREFIX.test(after)) envUses += 1;
+          continue;
+        }
         // `[[ -z "$TAINTED" ]]` and `[[ "$TAINTED" == None ]]` — the emptiness
         // guard that gates the skip. A test builtin forks no child, so there is no
         // cmdline for the value to land in.
@@ -137,28 +161,32 @@ function auditSecretTaint(code) {
         // guard, so `[[ -n "$X" ]] && cmd "$TAINTED"` passed. Closed by requiring no
         // `]]`/`]` between the opening bracket and this expansion.
         const opened = before.search(/(?:^|\s)\[\[?(?:\s|$)/u);
-        const isTestBuiltin =
+        const insideTestBuiltin =
           opened !== -1 && !/(?:^|\s)\]\]?(?:\s|$|;|&|\|)/u.test(before.slice(opened));
-        if (isAssignment) {
-          // A PREFIX assignment — `NAME="$TAINTED" cmd ...` — or an `export`, is the
-          // sanctioned channel actually being exercised: either one hands the value
-          // to a child through its environment. Counted so the caller can tell "the
-          // harness signs something with this secret" from "nothing here mentions it
-          // any more".
-          //
-          // A prefix assignment is only counted once a COMMAND is found after it —
-          // skipping any further assignment words, since `A="$T" B=2 cmd` is one
-          // prefix run. "Something follows on the line" is not the same test and does
-          // not support the claim: full-line comments are stripped before this, but
-          // TRAILING ones are not, so `K="$SECRET"  # alias` would count as handing
-          // the value to a child. A signer deleted with its alias left behind would
-          // then satisfy the non-vacuity check it exists to fail.
-          const after = line.slice(match.index + match[0].length).replace(/^["']/u, "");
-          const command = new RegExp(String.raw`^(?:\s+${ASSIGNMENT_WORD})*\s+[^\s#;&|)]`, "u");
-          if (isExport || command.test(after)) envUses += 1;
-          continue;
-        }
-        if (isTestBuiltin) continue;
+        if (insideTestBuiltin) continue;
+        // A here-string is not an argv either, and the rule was inverted for it:
+        // `cmd <<<"$TAINTED"` hands the value over on a file descriptor, which is
+        // strictly MORE private than the environment this test sanctions, yet it was
+        // reported as "argv is world-readable" about a line containing no argv. A
+        // maintainer hardening the signer that way would have hit a failure telling
+        // them to do the opposite, which is worse than a missing rule. Recognised by
+        // the redirection operator, so it stays a position rule.
+        if (/(?:<<<|(?:^|\s)<)\s*["']?$/u.test(before)) continue;
+        // Everything else is a violation, INCLUDING two shapes that are safe in
+        // practice and are rejected on purpose, because admitting them costs more
+        // than the false positive does:
+        //
+        // `printf '%s' "$TAINTED" | cmd` is safe only because `printf` is a bash
+        // builtin that forks nothing. The position alone cannot tell that: an
+        // external command in the same spot — `openssl dgst -hmac "$TAINTED" | tee` —
+        // is a genuine leak, and separating them means enumerating builtins, which is
+        // the vocabulary-dependence this whole audit exists to avoid. Piping from a
+        // builtin is a refactor nobody needs; a leak waved through is not recoverable.
+        //
+        // `sign() { ... }; sign "$TAINTED"` likewise forks no process, but exempting a
+        // call to a function defined in this file would only move the question inside
+        // it: whether `$1` then reaches a command word is an analysis this does not
+        // do, so the exemption would be a laundering route with a `()` for a key.
         violations.push({ name, segment: line.trim() });
       }
     }

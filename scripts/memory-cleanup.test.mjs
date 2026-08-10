@@ -525,6 +525,42 @@ describe("apply, cap, --ids", () => {
     expect(server.store.get("d2").state).toBe("deleted");
   });
 
+  it("TC-SLACKAPP-133 an UNREADABLE --ids file aborts; it does not fall back to no filter", async () => {
+    // The third way into the same hazard, and the most plausible one: the two cases
+    // above pin what an empty file MEANS, but not what an absent-or-unreadable one
+    // does. Wrapping the read in `try { ... } catch { return null; }`, or guarding it
+    // with `existsSync`, reads as ordinary defensive tidying — "a missing file is
+    // just no filter" — and a reviewer would wave it through. Measured, it turns a
+    // typo in the `--ids` path into a run that deletes every DELETE verdict it
+    // classified and exits 0 reporting success: exactly the outcome the empty-file
+    // cases exist to prevent, reached without touching the branch they pin.
+    //
+    // So the abort is asserted as the CONTRACT, not left implicit in `readFileSync`'s
+    // behavior. A caller that cannot read the approved list knows nothing about what
+    // was approved, and "nothing was approved" and "everything is approved" are the
+    // two things it must never confuse — the Slack path supplies this file, and a
+    // path that does not resolve means the claim was never materialized.
+    const dir = tempDir();
+    const server = fakeServer([memory("d1", "x"), memory("d2", "y")]);
+    const llm = fakeLlm([
+      [
+        { id: "d1", verdict: "DELETE", reason: "noise", topic: "engineering" },
+        { id: "d2", verdict: "DELETE", reason: "noise", topic: "engineering" },
+      ],
+    ]);
+    const idsFile = join(dir, "does-not-exist", "approved.txt");
+
+    await expect(
+      runCleanup(baseOpts({ apply: true, idsFile }), baseDeps(server, llm, dir)),
+    ).rejects.toThrow(/ENOENT|no such file/iu);
+
+    // Nothing was deleted, and no write reached the server — the abort has to happen
+    // instead of the deletions, not alongside them.
+    expect(server.store.get("d1").state).toBe("active");
+    expect(server.store.get("d2").state).toBe("active");
+    expect(server.calls.filter((c) => c.method !== "GET")).toEqual([]);
+  });
+
   it("TC-SLACKAPP-132 --ids refuses a MERGE outright, absorbed ids included", async () => {
     // The privilege-escalation hole this closes. `buildOfferedRecord` offers
     // DELETE verdicts only, so no MERGE can ever be in an approved list — but the

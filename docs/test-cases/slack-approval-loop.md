@@ -837,6 +837,15 @@ made safe or quietly defeated.
   request reaching the server, since a rejected batch-delete would leave the store
   looking untouched.
 
+  An **unreadable** `--ids` file must likewise abort rather than fall back to no
+  filter. Pinning only the empty-file meaning left the same hazard reachable by a
+  more plausible edit than the one it guards: `try { … } catch { return null; }` (or
+  an `existsSync` guard) reads as ordinary defensive tidying, and turns a typo in the
+  `--ids` path into a run that deletes every `DELETE` verdict it classified and exits
+  0. A caller that cannot read the approved list knows nothing about what was
+  approved, and "nothing was approved" and "everything is approved" are the two
+  things it must never confuse.
+
 ## Closing the loop on the message
 
 The offer posts and the apply deletes; without these the message keeps showing a
@@ -1004,6 +1013,24 @@ fail the run.
     trailing comment is not a child process. The leak assertion is checked **before**
     the counters, since an argv rewrite trips both and "expected 0 to be greater than
     0" would point at a deleted signer rather than at the argv just introduced.
+
+    The expansion pattern matches `${NAME}` with **any** parameter-expansion operator
+    (`${NAME:-}`, `${NAME#}`, `${NAME@Q}`, `${NAME//a/b}`, …), not the bare braced form
+    alone. Matching only `${NAME}` made the entire audit defeasible by one character —
+    `"${SIGNING_SECRET#}"` is the secret verbatim, produces a byte-identical HMAC, and
+    was invisible to the violation scan and to `uses` alike. An operator does not have
+    to be meaningful to carry the value; it only has to be syntax nobody enumerated,
+    which is the same failure as the `-hmac` allowlist one layer up. `${#NAME}` is
+    excluded deliberately: that is the length, not the value.
+
+    A here-string (`cmd <<<"$SECRET"`) is exempt, because a redirection is not an argv
+    and a file descriptor is *more* private than the environment this pins — reporting
+    it as "argv is world-readable" told a maintainer hardening the signer to do the
+    opposite. Two safe shapes stay rejected on purpose: piping from a builtin
+    (`printf '%s' "$SECRET" | cmd`) is safe only because `printf` forks nothing, and
+    position cannot distinguish it from `openssl dgst -hmac "$SECRET" | tee`, which is
+    a real leak; and a call to a shell function defined in the same file would only
+    move the question inside the function, which this does not analyze.
   - **`pr-N` stages only, refused before the first write.** The harness
     *overwrites* `approvals/offered`, so on a shared stage it destroys a pending
     human approval — the operator's next click would be answered against CI's
