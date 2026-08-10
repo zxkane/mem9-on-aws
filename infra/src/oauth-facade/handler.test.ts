@@ -180,20 +180,6 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
     expect(oidc.registration_endpoint).toBe(`${BASE}/register`);
   });
 
-  // TC-MCPGW-079. RFC 8414 §3.3: the `issuer` a metadata document returns MUST be
-  // identical to the issuer identifier the client inserted the well-known string
-  // into to build the URL it fetched. We publish ourselves as the authorization
-  // server (`authorization_servers: [base]`), so that identifier is our own base —
-  // NOT Cognito's issuer, even though Cognito mints the tokens. Advertising
-  // Cognito's issuer here made rmcp >= 3.0.0 clients discard the document and fail
-  // MCP startup outright.
-  //
-  // Asserted BOTH ways, because either alone is insufficient. The relationship
-  // (`as.issuer === pr.authorization_servers[0]`) is what §3.3 actually requires
-  // and survives a host/stage change. The absolute anchor (`advertisedAs === BASE`)
-  // is what rules out COORDINATED drift: three documents that agree on the upstream
-  // issuer satisfy §3.3 while sending clients to Cognito, which serves no
-  // `/register` — reproducing #143's symptom by another route.
   // TC-MCPGW-081. The 401's `WWW-Authenticate` is the RFC 9728 discovery ENTRY
   // POINT: it is how a client learns where the protected-resource document lives,
   // so if this URL is wrong discovery never starts and no metadata test can see
@@ -227,6 +213,21 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
     );
   });
 
+  // TC-MCPGW-079. RFC 8414 §3.3: the `issuer` a metadata document returns MUST be
+  // identical to the issuer identifier the client inserted the well-known string
+  // into to build the URL it fetched. We publish ourselves as the authorization
+  // server (`authorization_servers: [base]`), so that identifier is our own base —
+  // NOT Cognito's issuer, even though Cognito mints the tokens. Advertising
+  // Cognito's issuer here made rmcp >= 3.0.0 clients discard the document and fail
+  // MCP startup outright.
+  //
+  // Asserted BOTH ways, because either alone is insufficient. The relationship
+  // (`as.issuer === pr.authorization_servers[0]`) is what §3.3 actually requires
+  // and survives a host/stage change. The absolute anchor (`advertisedAs === BASE`)
+  // is what rules out COORDINATED drift: three documents that agree on the upstream
+  // issuer satisfy §3.3 while sending clients to Cognito, which serves no
+  // `/register` — reproducing #143's symptom by another route.
+  //
   // The suffix is the only thing that varies — `wellKnown` strips a trailing
   // `/mcp` before matching, so both variants must hold the same property.
   it.each([
