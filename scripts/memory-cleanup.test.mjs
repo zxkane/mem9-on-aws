@@ -459,6 +459,108 @@ describe("apply, cap, --ids", () => {
     expect(result.skippedByFilter).toBe(1);
   });
 
+  it.each([
+    ["an empty", ""],
+    ["a single-newline", "\n"],
+    ["a whitespace-only", "  \n\t\n   \n"],
+  ])("TC-SLACKAPP-133 %s --ids file approves NOTHING, it does not disable the filter", async (_label, contents) => {
+    // The distinction `readApprovedIds` carries is load-bearing and was asserted
+    // only indirectly: it returns `null` for an ABSENT `--ids`, and null means "no
+    // filter" at the call site. So an empty file must yield an empty Set — a Set
+    // that admits nothing — and never null. Inverting that one branch
+    // (`return set.size > 0 ? set : null`) makes a run holding an empty approved
+    // list delete every DELETE verdict it found and exit 0 reporting success,
+    // which the apply path itself names as this loop's worst failure mode.
+    //
+    // Every other `--ids` case writes a NON-empty file, so before this the
+    // inversion passed the whole suite (issue #141). Asserted through real
+    // `runCleanup` rather than on `readApprovedIds` directly, because the hazard
+    // is what the CALL SITE does with null, not what the reader returns — and so
+    // the same hazard is caught wherever it is reintroduced. Verified against
+    // three separate sites: the reader's return, the call site's binding, and an
+    // `approved.size > 0` short-circuit added inside `applyDecisions`. Each fails
+    // all three cases below, which is the point of asserting on outcomes (nothing
+    // deleted, everything counted as filtered) rather than on one line's shape.
+    const dir = tempDir();
+    const server = fakeServer([memory("d1", "x"), memory("d2", "y")]);
+    const llm = fakeLlm([
+      [
+        { id: "d1", verdict: "DELETE", reason: "noise", topic: "engineering" },
+        { id: "d2", verdict: "DELETE", reason: "noise", topic: "engineering" },
+      ],
+    ]);
+    const idsFile = join(dir, "approved.txt");
+    writeFileSync(idsFile, contents);
+    const deps = baseDeps(server, llm, dir);
+    const result = await runCleanup(baseOpts({ apply: true, idsFile }), deps);
+
+    // Both DELETE verdicts were found and both were withheld by the filter.
+    expect(result.skippedByFilter).toBe(2);
+    expect(result.capUsed).toBe(0);
+    expect(server.store.get("d1").state).toBe("active");
+    expect(server.store.get("d2").state).toBe("active");
+    // No write of ANY kind reached the server. The store check alone cannot see a
+    // batch-delete that was sent and rejected.
+    expect(server.calls.filter((c) => c.method !== "GET")).toEqual([]);
+  });
+
+  it("TC-SLACKAPP-133 an absent --ids file still means NO filter", async () => {
+    // The other half of the same branch, pinned so a fix for the case above cannot
+    // be written as "treat empty and absent alike". The operator CLI runs with no
+    // `--ids` at all and must keep deleting what it classified; only the
+    // Slack-triggered path requires a list, and it is refused earlier (a
+    // MEM9_APPROVAL_HASH with no `--ids` throws before any classification).
+    const dir = tempDir();
+    const server = fakeServer([memory("d1", "x"), memory("d2", "y")]);
+    const llm = fakeLlm([
+      [
+        { id: "d1", verdict: "DELETE", reason: "noise", topic: "engineering" },
+        { id: "d2", verdict: "DELETE", reason: "noise", topic: "engineering" },
+      ],
+    ]);
+    const result = await runCleanup(baseOpts({ apply: true }), baseDeps(server, llm, dir));
+
+    expect(result.skippedByFilter).toBe(0);
+    expect(server.store.get("d1").state).toBe("deleted");
+    expect(server.store.get("d2").state).toBe("deleted");
+  });
+
+  it("TC-SLACKAPP-133 an UNREADABLE --ids file aborts; it does not fall back to no filter", async () => {
+    // The third way into the same hazard, and the most plausible one: the two cases
+    // above pin what an empty file MEANS, but not what an absent-or-unreadable one
+    // does. Wrapping the read in `try { ... } catch { return null; }`, or guarding it
+    // with `existsSync`, reads as ordinary defensive tidying — "a missing file is
+    // just no filter" — and a reviewer would wave it through. Measured, it turns a
+    // typo in the `--ids` path into a run that deletes every DELETE verdict it
+    // classified and exits 0 reporting success: exactly the outcome the empty-file
+    // cases exist to prevent, reached without touching the branch they pin.
+    //
+    // So the abort is asserted as the CONTRACT, not left implicit in `readFileSync`'s
+    // behavior. A caller that cannot read the approved list knows nothing about what
+    // was approved, and "nothing was approved" and "everything is approved" are the
+    // two things it must never confuse — the Slack path supplies this file, and a
+    // path that does not resolve means the claim was never materialized.
+    const dir = tempDir();
+    const server = fakeServer([memory("d1", "x"), memory("d2", "y")]);
+    const llm = fakeLlm([
+      [
+        { id: "d1", verdict: "DELETE", reason: "noise", topic: "engineering" },
+        { id: "d2", verdict: "DELETE", reason: "noise", topic: "engineering" },
+      ],
+    ]);
+    const idsFile = join(dir, "does-not-exist", "approved.txt");
+
+    await expect(
+      runCleanup(baseOpts({ apply: true, idsFile }), baseDeps(server, llm, dir)),
+    ).rejects.toThrow(/ENOENT|no such file/iu);
+
+    // Nothing was deleted, and no write reached the server — the abort has to happen
+    // instead of the deletions, not alongside them.
+    expect(server.store.get("d1").state).toBe("active");
+    expect(server.store.get("d2").state).toBe("active");
+    expect(server.calls.filter((c) => c.method !== "GET")).toEqual([]);
+  });
+
   it("TC-SLACKAPP-132 --ids refuses a MERGE outright, absorbed ids included", async () => {
     // The privilege-escalation hole this closes. `buildOfferedRecord` offers
     // DELETE verdicts only, so no MERGE can ever be in an approved list — but the

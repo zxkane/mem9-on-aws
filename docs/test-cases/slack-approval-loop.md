@@ -819,6 +819,32 @@ made safe or quietly defeated.
   operator did **not** approve, this counts things they did. Suppressed on a cap
   abort, where the tail of the decision list was never examined and #121's note
   already explains the shortfall.
+- **TC-SLACKAPP-133** — an **empty** `--ids` file approves nothing; it does not
+  disable the filter (issue #141).
+
+  `readApprovedIds` returns `null` for an **absent** `--ids`, and null means "no
+  filter" at the call site — so the empty-`Set`-vs-`null` distinction is what stands
+  between "the operator approved nothing" and "delete every `DELETE` verdict this
+  run classified, and exit 0 reporting success". The apply path already names that
+  as this loop's worst failure mode, but every other `--ids` case writes a
+  **non-empty** file, so inverting the branch to
+  `return set.size > 0 ? set : null` passed the entire suite. Covered for an empty
+  file, a lone newline and whitespace-only, plus the converse (no `--ids` at all
+  still means no filter), so a fix cannot be written as "treat empty and absent
+  alike": the operator CLI runs without `--ids` and must keep deleting what it
+  classified. Asserted through real `runCleanup` rather than on the reader directly,
+  because the hazard is what the **call site** does with null; and on no non-GET
+  request reaching the server, since a rejected batch-delete would leave the store
+  looking untouched.
+
+  An **unreadable** `--ids` file must likewise abort rather than fall back to no
+  filter. Pinning only the empty-file meaning left the same hazard reachable by a
+  more plausible edit than the one it guards: `try { … } catch { return null; }` (or
+  an `existsSync` guard) reads as ordinary defensive tidying, and turns a typo in the
+  `--ids` path into a run that deletes every `DELETE` verdict it classified and exits
+  0. A caller that cannot read the approved list knows nothing about what was
+  approved, and "nothing was approved" and "everything is approved" are the two
+  things it must never confuse.
 
 ## Closing the loop on the message
 
@@ -960,6 +986,51 @@ fail the run.
     would put the secret in a world-readable command line. Pinned by a static
     assertion over the script source, because the fakes only see the commands they
     replace and would happily let the argv version pass.
+
+    Asserted as a **taint property**, not a per-line allowlist (issue #141). The
+    first version inspected only lines mentioning `SIGNING_SECRET` and separately
+    forbade the token `-hmac`, which one alias defeated: after
+    `SIG_KEY="$SIGNING_SECRET"` the signing line no longer mentions the secret and
+    was never inspected, the alias line read as a legal env assignment, and any
+    tool whose flag is not spelled `-hmac` put the key on an argv with the suite
+    still green. `auditSecretTaint` instead takes the transitive closure of every
+    name assigned from `SIGNING_SECRET` and judges each expansion by the **position
+    it holds** — an assignment (the environment, `/proc/PID/environ`, owner-only)
+    or a command word (`/proc/PID/cmdline`, world-readable). It names no tool and no
+    flag, so a signer rewritten around a different tool is judged by the same rule.
+
+    The exempt position is specifically the one a **command** could occupy, which is
+    a stricter test than "an identifier and an `=` precede the value" and has to be:
+    `awk -v key="$SECRET"` and `docker run -e K="$SECRET"` are indistinguishable from
+    a prefix assignment by the two characters before the expansion, yet both put the
+    secret on a world-readable argv. Requiring the command position rejects them, and
+    `--key=` with them. Two counters keep the audit non-vacuous: `uses > 0` (a
+    file-wide rename of the secret cannot make it an audit of nothing) and
+    `envUses > 0` (the secret must still reach a child, through the environment — so
+    "never use it" does not pass). `envUses` requires a command **after** the prefix
+    assignment rather than merely "something follows", so deleting the signer and
+    leaving `SIG_KEY="$SIGNING_SECRET"  # unused` behind fails instead of passing: a
+    trailing comment is not a child process. The leak assertion is checked **before**
+    the counters, since an argv rewrite trips both and "expected 0 to be greater than
+    0" would point at a deleted signer rather than at the argv just introduced.
+
+    The expansion pattern matches `${NAME}` with **any** parameter-expansion operator
+    (`${NAME:-}`, `${NAME#}`, `${NAME@Q}`, `${NAME//a/b}`, …), not the bare braced form
+    alone. Matching only `${NAME}` made the entire audit defeasible by one character —
+    `"${SIGNING_SECRET#}"` is the secret verbatim, produces a byte-identical HMAC, and
+    was invisible to the violation scan and to `uses` alike. An operator does not have
+    to be meaningful to carry the value; it only has to be syntax nobody enumerated,
+    which is the same failure as the `-hmac` allowlist one layer up. `${#NAME}` is
+    excluded deliberately: that is the length, not the value.
+
+    A here-string (`cmd <<<"$SECRET"`) is exempt, because a redirection is not an argv
+    and a file descriptor is *more* private than the environment this pins — reporting
+    it as "argv is world-readable" told a maintainer hardening the signer to do the
+    opposite. Two safe shapes stay rejected on purpose: piping from a builtin
+    (`printf '%s' "$SECRET" | cmd`) is safe only because `printf` forks nothing, and
+    position cannot distinguish it from `openssl dgst -hmac "$SECRET" | tee`, which is
+    a real leak; and a call to a shell function defined in the same file would only
+    move the question inside the function, which this does not analyze.
   - **`pr-N` stages only, refused before the first write.** The harness
     *overwrites* `approvals/offered`, so on a shared stage it destroys a pending
     human approval — the operator's next click would be answered against CI's
