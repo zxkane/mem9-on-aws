@@ -252,7 +252,22 @@ echo "run-mcp-e2e: OK — write→search round-trip verified (marker found) for 
 # "this run's marker in the top 10" is a flakiness generator, not a
 # regression guard (bit run 30085629030). Finding the marker is logged as a
 # bonus signal when it happens.
-NL_QUERY="what secret marker did the e2e probe store for run ${GITHUB_RUN_ID:-local}"
+#
+# The query MUST NOT interpolate the run id or the marker (issue #137). A
+# run-scoped high-cardinality literal makes retrieval return ZERO candidates, so
+# the cutoff never runs at all and the server logs cutoff_reason=no_candidates —
+# not the min_confidence signature this probe exists to catch. The previous query
+# here interpolated the run id and was therefore deterministically zero: the probe
+# failed every prod deploy on a condition unrelated to #23. A leading "what " also
+# classifies the query as shape=exact upstream, which reorders candidate buckets,
+# but shape alone is not the cause — a shape=general query carrying the marker also
+# returns zero. Queries built from the memory's ordinary words retrieve reliably.
+#
+# So: keep the query free of the run id and the marker. Reintroducing either turns
+# a #23 cutoff guard back into a retrieval check that always fails. To re-measure,
+# compare a query's `total` here against the server's `confidence recall search`
+# log line for the same window, which reports shape and candidate count.
+NL_QUERY="recall what the mem9 end-to-end probe recorded about its secret marker"
 echo "run-mcp-e2e: natural-language recall probe (query: ${NL_QUERY})"
 NL_NONEMPTY=0
 for attempt in 1 2 3; do
@@ -269,7 +284,14 @@ for attempt in 1 2 3; do
 done
 
 if [[ "$NL_NONEMPTY" != "1" ]]; then
-  MSG="natural-language recall probe failed: a long NL query returned ZERO results (min_confidence cutoff regression — see issue #23). Last response: $(printf '%s' "${MCP_RESP:-}" | head -c 400)"
+  # Do NOT name a root cause here. The MCP response carries only
+  # {limit,memories,offset,total} — `cutoff_reason` is a server-side slog field,
+  # not part of the payload — so a client-side zero-result is consistent with a
+  # min_confidence cutoff regression (#23) AND with retrieval simply returning no
+  # candidates. The previous wording asserted #23 unconditionally and sent the
+  # last three prod investigations down the wrong path. Point at the log line
+  # that actually discriminates instead.
+  MSG="natural-language recall probe returned ZERO results for query: ${NL_QUERY} — check the mnemo-server 'confidence recall search' log line for this window: cutoff_reason=min_confidence with non-zero candidates is the issue #23 cutoff regression; cutoff_reason=no_candidates means retrieval/embedding returned nothing and #23 is NOT implicated. Last response: $(printf '%s' "${MCP_RESP:-}" | head -c 400)"
   if [[ "$SOFT" == "1" ]]; then
     echo "::warning::${MSG}"
     exit 0
@@ -284,26 +306,87 @@ echo "run-mcp-e2e: OK — natural-language recall verified (non-empty, ${NL_TOTA
 # A 401 means the llm-proxy bearer is dead — smart-ingest data is being lost
 # silently (the 2026-07-22 incident). HARD fail on any 401 regardless of
 # E2E_SOFT — an auth failure is never a timing flake.
-LOG_GROUP="/sst/cluster/mem9-on-aws-${STAGE}/mnemo-server"
+#
+# The group name comes from the ACTIVE task definition's mnemo-server
+# awslogs-group — the only reliable source. SST auto-names container log groups
+# with random hash segments and sets ignoreChanges:["name"], so the hand-computed
+# "/sst/cluster/mem9-on-aws-<stage>/mnemo-server" this used to assume matches no
+# real group on any stage: prod's is
+# /sst/cluster/<cluster>-<hash>/<service>-<hash>/mnemo-server. start-query
+# answered ResourceNotFoundException every time and the old `2>/dev/null || true`
+# turned that into an empty QUERY_ID, i.e. the "log group may not exist yet"
+# skip. This guard had therefore never run once, on any stage (issue #137).
+# infra/ecs.ts derives the alarm's group the same way for the same reason.
+LOG_GROUP=$(aws ecs describe-task-definition \
+  --task-definition "$ACTIVE_TASK_DEFINITION" \
+  --region "$REGION" \
+  --output json | jq -r \
+  '.taskDefinition.containerDefinitions[]
+   | select(.name == "mnemo-server")
+   | .logConfiguration.options["awslogs-group"] // empty')
+if [[ -z "$LOG_GROUP" ]]; then
+  echo "::error::could not read the mnemo-server awslogs-group from task definition ${ACTIVE_TASK_DEFINITION} — the issue #26 log-scan guard cannot run"
+  exit 1
+fi
+
 echo "run-mcp-e2e: log-scan for auth failures in ${LOG_GROUP} (last 10 min)"
 SCAN_START=$(( $(date +%s) - 600 ))000
 SCAN_END=$(date +%s)000
-QUERY_ID=$(aws logs start-query --region "$REGION" \
-  --log-group-name "$LOG_GROUP" \
-  --start-time "$SCAN_START" --end-time "$SCAN_END" \
-  --query-string 'filter msg = "extraction LLM call failed" and err like /401/' \
-  --output text 2>/dev/null || true)
 
-if [[ -n "$QUERY_ID" ]]; then
-  sleep 5
-  AUTH_FAILURES=$(aws logs get-query-results --region "$REGION" \
-    --query-id "$QUERY_ID" \
-    --query 'results | length(@)' --output text 2>/dev/null || echo "0")
-  if [[ "$AUTH_FAILURES" != "0" && "$AUTH_FAILURES" != "None" ]]; then
-    echo "::error::log-scan found ${AUTH_FAILURES} LLM auth failure(s) (401) in ${LOG_GROUP} during the E2E window — llm-proxy bearer may be dead (issue #24 regression). Investigate immediately."
-    exit 1
+# stderr goes to a FILE, never merged into a captured value with `2>&1`: the real
+# CLI writes to stderr on SUCCESSFUL calls too (a botocore deprecation notice, a
+# credential-source line), and merging that into the JSON below would break `jq`
+# on a call that actually worked.
+ERR_FILE=$(mktemp)
+trap 'rm -f "$ERR_FILE"' EXIT
+
+scan_for_auth_failures() {
+  local query_id out status auth_failures
+  query_id=$(aws logs start-query --region "$REGION" \
+    --log-group-name "$LOG_GROUP" \
+    --start-time "$SCAN_START" --end-time "$SCAN_END" \
+    --query-string 'filter msg = "extraction LLM call failed" and err like /401/' \
+    --output text 2>"$ERR_FILE") || query_id=""
+
+  if [[ -z "$query_id" ]]; then
+    # An absent log group is the ONE legitimate skip: a brand-new stage whose
+    # service has not written a log event yet. Every other start-query failure
+    # (throttling, an IAM regression, a malformed query string) means this guard
+    # did not run — and scoring that as "clean" is exactly how a dead llm-proxy
+    # bearer stayed invisible for weeks.
+    if grep -q 'ResourceNotFoundException' "$ERR_FILE"; then
+      echo "run-mcp-e2e: log-scan skipped — ${LOG_GROUP} does not exist yet (fresh stage, no service logs)"
+      return 0
+    fi
+    echo "::error::log-scan could not start a Logs Insights query on ${LOG_GROUP}: $(head -c 400 "$ERR_FILE")"
+    return 1
   fi
-  echo "run-mcp-e2e: log-scan clean — no auth failures in the last 10 min"
-else
-  echo "run-mcp-e2e: log-scan skipped (could not start Logs Insights query — log group may not exist yet on fresh stages)"
-fi
+
+  # Wait for the query to actually finish. A Running query returns an EMPTY
+  # results array, which the previous single `sleep 5` + one read scored as
+  # "clean" whenever Insights took longer than five seconds.
+  status="Unknown"
+  for _ in {1..20}; do
+    out=$(aws logs get-query-results --region "$REGION" \
+      --query-id "$query_id" --output json 2>"$ERR_FILE") || {
+      echo "::error::log-scan get-query-results failed on ${LOG_GROUP}: $(head -c 400 "$ERR_FILE")"
+      return 1
+    }
+    status=$(printf '%s' "$out" | jq -r '.status // "Unknown"')
+    [[ "$status" == "Running" || "$status" == "Scheduled" ]] || break
+    sleep 3
+  done
+  if [[ "$status" != "Complete" ]]; then
+    echo "::error::log-scan query on ${LOG_GROUP} ended in status ${status} (not Complete) — the issue #26 auth-failure guard did not run"
+    return 1
+  fi
+
+  auth_failures=$(printf '%s' "$out" | jq -r '.results | length')
+  if [[ "$auth_failures" != "0" ]]; then
+    echo "::error::log-scan found ${auth_failures} LLM auth failure(s) (401) in ${LOG_GROUP} during the E2E window — llm-proxy bearer may be dead (issue #24 regression). Investigate immediately."
+    return 1
+  fi
+  echo "run-mcp-e2e: log-scan clean — no auth failures in ${LOG_GROUP} in the last 10 min"
+}
+
+scan_for_auth_failures || exit 1
