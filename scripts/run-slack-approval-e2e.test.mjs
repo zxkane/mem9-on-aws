@@ -47,18 +47,31 @@ afterEach(() => {
  *
  * Deliberately spelling-independent: it audits the POSITION each expansion holds
  * in its line, not the flag preceding it, so no tool name or flag needs listing
- * and a signer rewritten around a different tool is judged by the same rule.
+ * and a signer rewritten around a different tool is judged by the same rule. The
+ * position that exempts an expansion is the one a COMMAND could occupy — which is
+ * what separates the sanctioned `NAME="$SECRET" cmd` from an `=`-bearing argument
+ * to a command already underway (`awk -v key="$SECRET"`, `docker run -e K="$SECRET"`),
+ * whose two preceding characters are identical and which is a real argv leak.
  *
  * @param code the script with full-line comments already stripped
  * @returns `taint` — every name transitively assigned from `SIGNING_SECRET`,
  *          `SIGNING_SECRET` first; `uses` — how many expansions of a tainted name
  *          were examined and `envUses` how many of those were prefix assignments
  *          handing the value to a child, so the caller can reject a vacuous pass;
- *          `violations` — each use of a tainted name that is not an assignment.
+ *          `violations` — each use of a tainted name that is neither an assignment
+ *          nor inside a test builtin.
  */
 function auditSecretTaint(code) {
-  const lines = code.split("\n");
+  // Line continuations joined first, so every rule below sees a whole simple
+  // command. Split, `NAME="$SECRET" \` ends its line and the child on the next line
+  // is invisible — which would report the sanctioned form as reaching no child.
+  const lines = code.replace(/\\\n\s*/gu, " ").split("\n");
   const taint = new Set(["SIGNING_SECRET"]);
+  // One shell word of the form `NAME=value`, value double-quoted, single-quoted, or
+  // bare. Used twice: to recognise the assignment an expansion sits in, and to skip
+  // the assignments that may precede the command word in `A=1 B=2 cmd`.
+  const ASSIGNMENT_WORD = String.raw`[A-Za-z_][A-Za-z0-9_]*=(?:"[^"]*"|'[^']*'|[^\s"']*)`;
+  const DECLARATOR = String.raw`(?:local|export|declare|readonly)\s+`;
   // `$NAME` or `${NAME}`, and NOT a longer name that merely starts with it —
   // without the trailing guard, a taint on `KEY` would flag every `$KEYSTORE`.
   const expansion = (name) =>
@@ -92,11 +105,27 @@ function auditSecretTaint(code) {
         uses += 1;
         const before = line.slice(0, match.index);
         // An assignment — `NAME=$TAINTED`, whether standalone, `local`/`export`, or
-        // the prefix form `NAME="$TAINTED" cmd` — is the sanctioned channel. The
-        // `=` must be the last thing before the expansion for this to hold, so
-        // `cmd --key="$TAINTED"` (a command WORD containing `=`) does not qualify:
-        // a word starting with `-` is a flag, not an assignment target.
-        const isAssignment = /(?:^|\s)(?:local\s+|export\s+)?[A-Za-z_][A-Za-z0-9_]*=(?:"|')?$/u.test(
+        // the prefix form `NAME="$TAINTED" cmd` — is the sanctioned channel.
+        //
+        // Recognised by POSITION, not by the presence of an `=`: the `NAME=` must sit
+        // where a command could start, meaning everything between the last command
+        // boundary and it is itself an assignment word (`A=1 B="$T" cmd`) or a
+        // declarator. Checking only "an identifier and an `=` precede the expansion"
+        // is not enough — that also accepts an `=`-bearing argument to a command that
+        // has already started, and those are real argv leaks:
+        // `awk -v key="$TAINTED" ...` and `docker run -e SEC="$TAINTED" ...` both put
+        // the value on a world-readable cmdline while looking exactly like a prefix
+        // assignment from the two characters before it. Requiring the command
+        // position rejects them, and `cmd --key="$TAINTED"` with it.
+        const isAssignment = new RegExp(
+          String.raw`(?:^|[;&|(){]|\b(?:then|do|else|in)\s)\s*(?:${DECLARATOR})?` +
+            String.raw`(?:${ASSIGNMENT_WORD}\s+)*[A-Za-z_][A-Za-z0-9_]*=(?:"|')?$`,
+          "u",
+        ).test(before);
+        // `export NAME="$TAINTED"` reaches every later child's environment without a
+        // command on its own line, so it is an env use even though nothing follows.
+        // Tracked separately from the prefix form for exactly that reason.
+        const isExport = /(?:^|[;&|(]\s*)export\s+(?:[A-Za-z_][A-Za-z0-9_]*=\S*\s+)*[A-Za-z_][A-Za-z0-9_]*=(?:"|')?$/u.test(
           before,
         );
         // `[[ -z "$TAINTED" ]]` and `[[ "$TAINTED" == None ]]` — the emptiness
@@ -111,13 +140,22 @@ function auditSecretTaint(code) {
         const isTestBuiltin =
           opened !== -1 && !/(?:^|\s)\]\]?(?:\s|$|;|&|\|)/u.test(before.slice(opened));
         if (isAssignment) {
-          // A PREFIX assignment — `NAME="$TAINTED" cmd ...` — is the sanctioned
-          // channel actually being exercised: it hands the value to a child through
-          // its environment. Counted so the caller can tell "the harness signs
-          // something with this secret" from "nothing here mentions it any more".
-          if (/\S/u.test(line.slice(match.index + match[0].length).replace(/^["']/u, ""))) {
-            envUses += 1;
-          }
+          // A PREFIX assignment — `NAME="$TAINTED" cmd ...` — or an `export`, is the
+          // sanctioned channel actually being exercised: either one hands the value
+          // to a child through its environment. Counted so the caller can tell "the
+          // harness signs something with this secret" from "nothing here mentions it
+          // any more".
+          //
+          // A prefix assignment is only counted once a COMMAND is found after it —
+          // skipping any further assignment words, since `A="$T" B=2 cmd` is one
+          // prefix run. "Something follows on the line" is not the same test and does
+          // not support the claim: full-line comments are stripped before this, but
+          // TRAILING ones are not, so `K="$SECRET"  # alias` would count as handing
+          // the value to a child. A signer deleted with its alias left behind would
+          // then satisfy the non-vacuity check it exists to fail.
+          const after = line.slice(match.index + match[0].length).replace(/^["']/u, "");
+          const command = new RegExp(String.raw`^(?:\s+${ASSIGNMENT_WORD})*\s+[^\s#;&|)]`, "u");
+          if (isExport || command.test(after)) envUses += 1;
           continue;
         }
         if (isTestBuiltin) continue;
@@ -415,11 +453,11 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
     // defeated it: after `SIG_KEY="$SIGNING_SECRET"`, the signing line no longer
     // mentions the secret and is never inspected, the alias line itself reads as a
     // legal env assignment, and any tool whose flag is not spelled `-hmac` puts the
-    // key on a world-readable argv with 16/16 still passing (issue #141). What
-    // matters is not which flag carries the value but WHICH CHANNEL: an assignment
-    // reaches the child through its environment (`/proc/PID/environ`, owner-only),
-    // a command word reaches it through `/proc/PID/cmdline`, which every user on
-    // the box can read.
+    // key on a world-readable argv with the whole suite still passing (issue #141).
+    // What matters is not which flag carries the value but WHICH CHANNEL: an
+    // assignment reaches the child through its environment (`/proc/PID/environ`,
+    // owner-only), a command word reaches it through `/proc/PID/cmdline`, which every
+    // user on the box can read.
     const { uses, envUses, violations } = auditSecretTaint(code);
     // The leak assertion comes FIRST so a real leak is reported as a leak. A
     // signer rewritten to pass the key on argv also stops passing it through the
@@ -434,10 +472,11 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
     ).toEqual([]);
     // Non-vacuity, asserted on what was EXAMINED rather than on the taint set:
     // `SIGNING_SECRET` is seeded by the auditor, so `taint` containing it proves
-    // nothing. A file-wide rename of the secret, or a signer deleted outright,
-    // drops these to zero and fails here rather than passing an audit of nothing.
-    // `envUses` is the positive half — the secret does still reach a child, and
-    // through the environment — so this cannot be satisfied by never using it.
+    // nothing. A file-wide rename of the secret drops `uses` to zero and fails here
+    // rather than passing an audit of nothing. `envUses` is the positive half — the
+    // secret does still reach a child, and through the environment — so this cannot
+    // be satisfied by never using it, nor by deleting the signer and leaving the
+    // alias assignment behind (`envUses` requires a command after the prefix).
     expect(uses).toBeGreaterThan(0);
     expect(envUses).toBeGreaterThan(0);
   });

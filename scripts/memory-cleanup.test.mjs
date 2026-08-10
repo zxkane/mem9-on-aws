@@ -460,10 +460,10 @@ describe("apply, cap, --ids", () => {
   });
 
   it.each([
-    ["empty", ""],
-    ["a single newline", "\n"],
-    ["whitespace only", "  \n\t\n   \n"],
-  ])("TC-SLACKAPP-133 an %s --ids file approves NOTHING, it does not disable the filter", async (_label, contents) => {
+    ["an empty", ""],
+    ["a single-newline", "\n"],
+    ["a whitespace-only", "  \n\t\n   \n"],
+  ])("TC-SLACKAPP-133 %s --ids file approves NOTHING, it does not disable the filter", async (_label, contents) => {
     // The distinction `readApprovedIds` carries is load-bearing and was asserted
     // only indirectly: it returns `null` for an ABSENT `--ids`, and null means "no
     // filter" at the call site. So an empty file must yield an empty Set — a Set
@@ -475,7 +475,12 @@ describe("apply, cap, --ids", () => {
     // Every other `--ids` case writes a NON-empty file, so before this the
     // inversion passed the whole suite (issue #141). Asserted through real
     // `runCleanup` rather than on `readApprovedIds` directly, because the hazard
-    // is what the CALL SITE does with null, not what the reader returns.
+    // is what the CALL SITE does with null, not what the reader returns — and so
+    // the same hazard is caught wherever it is reintroduced. Verified against
+    // three separate sites: the reader's return, the call site's binding, and an
+    // `approved.size > 0` short-circuit added inside `applyDecisions`. Each fails
+    // all three cases below, which is the point of asserting on outcomes (nothing
+    // deleted, everything counted as filtered) rather than on one line's shape.
     const dir = tempDir();
     const server = fakeServer([memory("d1", "x"), memory("d2", "y")]);
     const llm = fakeLlm([
