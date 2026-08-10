@@ -811,6 +811,23 @@ made safe or quietly defeated.
   outright, counted in `skippedByFilter`, and logged. Asserted on no non-GET request
   reaching the server at all, because a PUT writing identical content would leave
   the store looking untouched.
+- **TC-SLACKAPP-133** — an **empty** `--ids` file approves nothing; it does not
+  disable the filter (issue #141).
+
+  `readApprovedIds` returns `null` for an **absent** `--ids`, and null means "no
+  filter" at the call site — so the empty-`Set`-vs-`null` distinction is what stands
+  between "the operator approved nothing" and "delete every `DELETE` verdict this
+  run classified, and exit 0 reporting success". The apply path already names that
+  as this loop's worst failure mode, but every other `--ids` case writes a
+  **non-empty** file, so inverting the branch to
+  `return set.size > 0 ? set : null` passed the entire suite. Three shapes are
+  covered — empty, a lone newline, whitespace-only — plus the converse (no `--ids`
+  at all still means no filter), so a fix cannot be written as "treat empty and
+  absent alike": the operator CLI runs without `--ids` and must keep deleting what
+  it classified. Asserted through real `runCleanup` rather than on the reader
+  directly, because the hazard is what the **call site** does with null; and on no
+  non-GET request reaching the server, since a rejected batch-delete would leave the
+  store looking untouched.
 - **TC-SLACKAPP-132** — the converse, in the same pair: an approved id whose fresh
   verdict is now `KEEP` fell out at `destructiveCost === 0` and incremented nothing,
   so the outcome said "1 of 2 approved deletion(s)" with no note and a changed
@@ -960,6 +977,24 @@ fail the run.
     would put the secret in a world-readable command line. Pinned by a static
     assertion over the script source, because the fakes only see the commands they
     replace and would happily let the argv version pass.
+
+    Asserted as a **taint property**, not a per-line allowlist (issue #141). The
+    first version inspected only lines mentioning `SIGNING_SECRET` and separately
+    forbade the token `-hmac`, which one alias defeated: after
+    `SIG_KEY="$SIGNING_SECRET"` the signing line no longer mentions the secret and
+    was never inspected, the alias line read as a legal env assignment, and any
+    tool whose flag is not spelled `-hmac` put the key on an argv with the suite
+    still green. `auditSecretTaint` instead takes the transitive closure of every
+    name assigned from `SIGNING_SECRET` and judges each expansion by the **position
+    it holds** — an assignment (the environment, `/proc/PID/environ`, owner-only)
+    or a command word (`/proc/PID/cmdline`, world-readable). It names no tool and no
+    flag, so a signer rewritten around a different tool is judged by the same rule.
+    Two counters keep it non-vacuous: `uses > 0` (a file-wide rename of the secret
+    cannot make it an audit of nothing) and `envUses > 0` (the secret must still
+    reach a child, through the environment — so "never use it" does not pass).
+    The leak assertion is checked **before** the counters, since an argv rewrite
+    trips both and "expected 0 to be greater than 0" would point at a deleted
+    signer rather than at the argv just introduced.
   - **`pr-N` stages only, refused before the first write.** The harness
     *overwrites* `approvals/offered`, so on a shared stage it destroys a pending
     human approval — the operator's next click would be answered against CI's

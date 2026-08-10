@@ -34,6 +34,101 @@ afterEach(() => {
 });
 
 /**
+ * Taint-audit the harness source for the one property TC-SLACKAPP-090 pins: the
+ * signing secret, and anything assigned from it, may reach a child process only
+ * through the ENVIRONMENT — never as a command word.
+ *
+ * That distinction is the whole point. A prefix assignment
+ * (`NAME="$SECRET" cmd ...`) puts the value in the child's environment, readable
+ * through `/proc/PID/environ` by its owner alone. A command word (`cmd "$SECRET"`,
+ * `cmd -hmac "$SECRET"`, `cmd --key="$SECRET"`) puts it in `/proc/PID/cmdline`,
+ * which is world-readable — on a shared or self-hosted runner that is every other
+ * process on the box.
+ *
+ * Deliberately spelling-independent: it audits the POSITION each expansion holds
+ * in its line, not the flag preceding it, so no tool name or flag needs listing
+ * and a signer rewritten around a different tool is judged by the same rule.
+ *
+ * @param code the script with full-line comments already stripped
+ * @returns `taint` — every name transitively assigned from `SIGNING_SECRET`,
+ *          `SIGNING_SECRET` first; `uses` — how many expansions of a tainted name
+ *          were examined and `envUses` how many of those were prefix assignments
+ *          handing the value to a child, so the caller can reject a vacuous pass;
+ *          `violations` — each use of a tainted name that is not an assignment.
+ */
+function auditSecretTaint(code) {
+  const lines = code.split("\n");
+  const taint = new Set(["SIGNING_SECRET"]);
+  // `$NAME` or `${NAME}`, and NOT a longer name that merely starts with it —
+  // without the trailing guard, a taint on `KEY` would flag every `$KEYSTORE`.
+  const expansion = (name) =>
+    new RegExp(String.raw`\$(?:\{${name}\}|${name}(?![A-Za-z0-9_]))`, "u");
+  // Assignments anywhere a shell word can start, not only at a line's start: a
+  // launder hidden after `;` or `&&` (`if x; then B="$SECRET"; fi`) is still a
+  // launder.
+  const assignments = (line) =>
+    [...line.matchAll(/(?:^|[\s;&|(])(?:local\s+|export\s+)?([A-Za-z_][A-Za-z0-9_]*)=(\S*)/gu)];
+
+  // Transitive closure over `NAME="$TAINTED"` / `NAME=$TAINTED`, repeated until it
+  // stops growing: a two-hop launder (`A="$SIGNING_SECRET"; B="$A"; cmd "$B"`) is
+  // no less an argv leak than a one-hop one.
+  for (let size = 0; size !== taint.size; ) {
+    size = taint.size;
+    for (const line of lines) {
+      for (const [, target, value] of assignments(line)) {
+        if ([...taint].some((name) => expansion(name).test(value))) taint.add(target);
+      }
+    }
+  }
+
+  const violations = [];
+  let uses = 0;
+  let envUses = 0;
+  for (const name of taint) {
+    const pattern = expansion(name);
+    for (const line of lines) {
+      // Every expansion of this name on this line, judged by what precedes it.
+      for (const match of line.matchAll(new RegExp(pattern, "gu"))) {
+        uses += 1;
+        const before = line.slice(0, match.index);
+        // An assignment — `NAME=$TAINTED`, whether standalone, `local`/`export`, or
+        // the prefix form `NAME="$TAINTED" cmd` — is the sanctioned channel. The
+        // `=` must be the last thing before the expansion for this to hold, so
+        // `cmd --key="$TAINTED"` (a command WORD containing `=`) does not qualify:
+        // a word starting with `-` is a flag, not an assignment target.
+        const isAssignment = /(?:^|\s)(?:local\s+|export\s+)?[A-Za-z_][A-Za-z0-9_]*=(?:"|')?$/u.test(
+          before,
+        );
+        // `[[ -z "$TAINTED" ]]` and `[[ "$TAINTED" == None ]]` — the emptiness
+        // guard that gates the skip. A test builtin forks no child, so there is no
+        // cmdline for the value to land in.
+        //
+        // Scoped to the test builtin the expansion is INSIDE, not to "a `[[`
+        // appeared earlier on this line": the latter excused everything after a
+        // guard, so `[[ -n "$X" ]] && cmd "$TAINTED"` passed. Closed by requiring no
+        // `]]`/`]` between the opening bracket and this expansion.
+        const opened = before.search(/(?:^|\s)\[\[?(?:\s|$)/u);
+        const isTestBuiltin =
+          opened !== -1 && !/(?:^|\s)\]\]?(?:\s|$|;|&|\|)/u.test(before.slice(opened));
+        if (isAssignment) {
+          // A PREFIX assignment — `NAME="$TAINTED" cmd ...` — is the sanctioned
+          // channel actually being exercised: it hands the value to a child through
+          // its environment. Counted so the caller can tell "the harness signs
+          // something with this secret" from "nothing here mentions it any more".
+          if (/\S/u.test(line.slice(match.index + match[0].length).replace(/^["']/u, ""))) {
+            envUses += 1;
+          }
+          continue;
+        }
+        if (isTestBuiltin) continue;
+        violations.push({ name, segment: line.trim() });
+      }
+    }
+  }
+  return { taint: [...taint], uses, envUses, violations };
+}
+
+/**
  * Run the harness with a fake `aws` and `curl`.
  *
  * Every knob is a MOCK_* env var read inside the fakes rather than a fixture
@@ -313,19 +408,38 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
       .split("\n")
       .filter((line) => !/^\s*#/u.test(line))
       .join("\n");
-    const secretRefs = code.match(/[^\n]*\$\{?SIGNING_SECRET\}?[^\n]*/gu) ?? [];
-    expect(secretRefs.length).toBeGreaterThan(0);
-    for (const line of secretRefs) {
-      // Allowed: the SSM read that produces it, the emptiness check that gates
-      // the skip, and an `NAME="$SIGNING_SECRET"` environment assignment.
-      const isEnvAssignment = /\b[A-Z_]+="\$SIGNING_SECRET"/u.test(line);
-      const isGuard = /^\s*(SIGNING_SECRET=|if \[\[|.*-z "\$SIGNING_SECRET")/u.test(line);
-      expect(
-        isEnvAssignment || isGuard,
-        `the secret is interpolated into a command line: ${line.trim()}`,
-      ).toBe(true);
-    }
-    expect(code).not.toMatch(/-hmac\s+"?\$/u);
+
+    // Asserted as a TAINT property over the whole file, not as a per-line
+    // allowlist. The earlier version inspected only lines that mention
+    // `SIGNING_SECRET` and separately forbade the token `-hmac`, so one alias
+    // defeated it: after `SIG_KEY="$SIGNING_SECRET"`, the signing line no longer
+    // mentions the secret and is never inspected, the alias line itself reads as a
+    // legal env assignment, and any tool whose flag is not spelled `-hmac` puts the
+    // key on a world-readable argv with 16/16 still passing (issue #141). What
+    // matters is not which flag carries the value but WHICH CHANNEL: an assignment
+    // reaches the child through its environment (`/proc/PID/environ`, owner-only),
+    // a command word reaches it through `/proc/PID/cmdline`, which every user on
+    // the box can read.
+    const { uses, envUses, violations } = auditSecretTaint(code);
+    // The leak assertion comes FIRST so a real leak is reported as a leak. A
+    // signer rewritten to pass the key on argv also stops passing it through the
+    // environment, so it trips the non-vacuity check below too — and a failure
+    // reading "expected 0 to be greater than 0" would send the reader looking for a
+    // deleted signer rather than at the argv they just introduced.
+    expect(
+      violations,
+      `a name tainted by SIGNING_SECRET reaches a command argument (argv is world-readable):\n${violations
+        .map((v) => `  ${v.name}: ${v.segment}`)
+        .join("\n")}`,
+    ).toEqual([]);
+    // Non-vacuity, asserted on what was EXAMINED rather than on the taint set:
+    // `SIGNING_SECRET` is seeded by the auditor, so `taint` containing it proves
+    // nothing. A file-wide rename of the secret, or a signer deleted outright,
+    // drops these to zero and fails here rather than passing an audit of nothing.
+    // `envUses` is the positive half — the secret does still reach a child, and
+    // through the environment — so this cannot be satisfied by never using it.
+    expect(uses).toBeGreaterThan(0);
+    expect(envUses).toBeGreaterThan(0);
   });
 
   it("TC-SLACKAPP-090 a 200 on the INVALID signature fails the run", () => {
