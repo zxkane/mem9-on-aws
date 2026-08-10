@@ -41,6 +41,11 @@ echo "$PR" | jq -e '.resource | endswith("/mcp")' >/dev/null || { echo "::error:
 # assignment with no `::error::` and no field named, and moving the diagnostic into
 # a helper called as `$(field ...)` only swallows it into the captured stdout —
 # same silent non-zero exit. Verified against a mock serving a null `.issuer`.
+#
+# This block prints its own progress line for the same reason: a green job is not
+# evidence that a specific assertion ran, and without a line of its own the only
+# proof these checks executed is `set -e` having reached the next section.
+echo "run-oauth-facade-smoke: checking metadata issuer identity (RFC 8414 §3.3)"
 echo "$AS" | jq -e '(.issuer // "") != ""' >/dev/null || { echo "::error::authorization-server metadata .issuer is missing or empty"; exit 1; }
 echo "$PR" | jq -e '(.authorization_servers[0] // "") != ""' >/dev/null || { echo "::error::protected-resource .authorization_servers[0] is missing or empty"; exit 1; }
 AS_ISSUER=$(echo "$AS" | jq -r '.issuer')
@@ -65,6 +70,7 @@ if [[ "$OIDC_ISSUER" != "$ADVERTISED_AS" ]]; then
   echo "::error::OIDC discovery issuer (${OIDC_ISSUER}) != authorization_servers[0] (${ADVERTISED_AS}) — clients discovering via openid-configuration will refuse this façade"
   exit 1
 fi
+echo "run-oauth-facade-smoke: issuer identity OK — AS and OIDC both self-identify as ${ADVERTISED_AS}"
 
 echo "run-oauth-facade-smoke: checking /register returns a public client (no secret)"
 DCR=$(curl -fsS -X POST -H 'Content-Type: application/json' -d '{"redirect_uris":["http://localhost:8080/cb"]}' "${FACADE}/register")

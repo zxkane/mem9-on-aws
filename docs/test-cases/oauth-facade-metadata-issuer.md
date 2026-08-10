@@ -93,6 +93,11 @@ the script *at the assignment*, and hoisting the diagnostic into a helper invoke
 silent failure, one level less obvious. The mock is also what caught it; the first two
 attempts read as correct.
 
+The block prints its own progress line (`checking metadata issuer identity`, then
+`issuer identity OK — …`) for the same reason. On the first preview run the step passed
+with no line of its own, so the only evidence the checks had executed was `set -e`
+having reached the next section — indistinguishable from a block that was skipped.
+
 The mock harness asserts its extracted block contains every `::error::` string before
 it runs a single mode. An earlier run of it reported two spurious passes because the
 extraction had silently truncated at the first `fi`, so the checks under test were
