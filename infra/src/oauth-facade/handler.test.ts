@@ -1,5 +1,5 @@
 /**
- * Unit tests for the façade routing (TC-MCPGW-060..078).
+ * Unit tests for the façade routing (TC-MCPGW-060..081).
  * Exercised through the injected `route(event, cfg)` seam — no AWS/SSM.
  */
 
@@ -85,7 +85,7 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-describe("façade routing (TC-MCPGW-060..073)", () => {
+describe("façade routing (TC-MCPGW-060..081)", () => {
   it("TC-MCPGW-060: protected-resource metadata points at <base>/mcp", async () => {
     const res = await route(ev("/.well-known/oauth-protected-resource"), cfg());
     expect(res.statusCode).toBe(200);
@@ -126,6 +126,37 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
     expect(b.scopes_supported).not.toContain("example-mcp/query/write");
   });
 
+  // TC-MCPGW-080. The OIDC document is a full peer of the RFC 8414 one — some
+  // clients only know this path — but only its scopes and `registration_endpoint`
+  // were ever asserted, while TC-MCPGW-061 pins the AS document's endpoints. That
+  // asymmetry (one document tested, its twin trusted) is exactly what let #143
+  // ship, so the same fields are pinned on both. Verified by mutation: pointing
+  // either OIDC endpoint at the upstream Cognito value passed all 57 cases before
+  // this was added.
+  it.each([
+    ["/.well-known/oauth-authorization-server", "RFC 8414"],
+    ["/.well-known/openid-configuration", "OIDC discovery"],
+  ])(
+    "TC-MCPGW-080: %s metadata routes authorize/token through the façade and passes the rest through to Cognito",
+    async (path) => {
+      const b = JSON.parse((await route(ev(path), cfg())).body);
+      // Must be OURS: these are the redirect-proxy routes. Sending a client
+      // straight to Cognito's own endpoints skips the state/PKCE proxy and the
+      // secret injection at /oauth/token.
+      expect(b.authorization_endpoint).toBe(`${BASE}/oauth/authorize`);
+      expect(b.token_endpoint).toBe(`${BASE}/oauth/token`);
+      // Must be OURS: Cognito publishes no registration_endpoint, so DCR only
+      // works through the façade.
+      expect(b.registration_endpoint).toBe(`${BASE}/register`);
+      // Must be COGNITO'S: the façade proxies none of these, and a client that
+      // fetches JWKS itself validates tokens against this URL. Untested until
+      // now — replacing jwks_uri with a garbage value passed all 57 cases.
+      expect(b.jwks_uri).toBe(cfg().jwks);
+      expect(b.userinfo_endpoint).toBe(cfg().userinfo);
+      expect(b.revocation_endpoint).toBe(cfg().revocation);
+    },
+  );
+
   it("TC-MCPGW-061c: resource-suffixed well-known paths (/.well-known/<doc>/mcp) return the FAÇADE metadata, not the raw Gateway", async () => {
     // A spec-compliant MCP client (RFC 9728/8414) queries the resource-suffixed
     // path first. Without normalization these fell through to the catch-all proxy
@@ -157,9 +188,45 @@ describe("façade routing (TC-MCPGW-060..073)", () => {
   // Cognito's issuer here made rmcp >= 3.0.0 clients discard the document and fail
   // MCP startup outright.
   //
-  // Asserted as a RELATIONSHIP between the two documents rather than against a
-  // hardcoded host: pinning the literal string would still pass if the two
-  // documents later drifted apart, which is exactly the bug being fixed.
+  // Asserted BOTH ways, because either alone is insufficient. The relationship
+  // (`as.issuer === pr.authorization_servers[0]`) is what §3.3 actually requires
+  // and survives a host/stage change. The absolute anchor (`advertisedAs === BASE`)
+  // is what rules out COORDINATED drift: three documents that agree on the upstream
+  // issuer satisfy §3.3 while sending clients to Cognito, which serves no
+  // `/register` — reproducing #143's symptom by another route.
+  // TC-MCPGW-081. The 401's `WWW-Authenticate` is the RFC 9728 discovery ENTRY
+  // POINT: it is how a client learns where the protected-resource document lives,
+  // so if this URL is wrong discovery never starts and no metadata test can see
+  // the breakage. It embeds `base` under the same host-agreement invariant as the
+  // metadata `issuer` this PR fixes, and had no coverage at all — pointing it at
+  // an unrelated host passed all 57 cases.
+  it("TC-MCPGW-081: a 401 from upstream advertises the FAÇADE's resource metadata, not the Gateway's", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async () =>
+        new Response("unauthorized", {
+          status: 401,
+          // The raw Gateway points at its own Cognito-backed metadata, which has
+          // no /register — the value that must NOT survive the rewrite.
+          headers: {
+            "www-authenticate": `Bearer resource_metadata="${UPSTREAM_ISSUER}/.well-known/oauth-protected-resource"`,
+          },
+        }),
+    );
+    const res = await route(ev("/mcp", "POST", { body: "{}" }), cfg());
+    expect(res.statusCode).toBe(401);
+    expect(res.headers["www-authenticate"]).toBe(
+      `Bearer resource_metadata="${BASE}/.well-known/oauth-protected-resource"`,
+    );
+    // The advertised document must be the one the façade actually serves, so a
+    // client that follows this header reaches metadata naming us as the AS.
+    const pr = JSON.parse(
+      (await route(ev("/.well-known/oauth-protected-resource"), cfg())).body,
+    );
+    expect(res.headers["www-authenticate"]).toContain(
+      pr.authorization_servers[0],
+    );
+  });
+
   // The suffix is the only thing that varies — `wellKnown` strips a trailing
   // `/mcp` before matching, so both variants must hold the same property.
   it.each([
