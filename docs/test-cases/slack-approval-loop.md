@@ -198,6 +198,112 @@ concurrent applies of the same ids.
   another stage is refused. Same reasoning as #102's decision-file stage guard: a
   preview approval must never apply to prod.
 
+## Offer expiry: the 72h window (#149)
+
+A matching hash proves the list has not been *regenerated*; it says nothing about
+how old it is. Nothing else expires it either — `approvals/offered` is overwritten
+only by the next review run, so on a week the run failed (or a scan that was never
+scheduled) a matching Approve button stays clickable indefinitely, against a corpus
+that has moved on. Scheduling the scan makes that concrete rather than theoretical:
+the operator now has a button they did not ask for, arriving at 03:00 on a Saturday.
+
+The window is 72h, chosen against the weekly cadence: shorter than the gap between
+scans, so a scheduled run never collides with a live offer.
+
+The rule is enforced on **both** sides of the loop and stamped on one, and the two
+sides deliberately fail in **opposite** directions for an unjudgeable record:
+
+| | absent/unparseable `issuedAt` | why |
+| --- | --- | --- |
+| callback (`slack-interactions.ts`) | **expired** | never apply against a record of unknown age |
+| scan (`memory-cleanup.mjs`) | **replaceable** | never wedge the weekly scan on a record nobody can act on |
+
+Fail-closed on both sides deadlocks: every record written before #149 has no
+`issuedAt`, so it would be neither appliable nor replaceable and the loop would
+stop permanently with no error anywhere. The combination is safe *because* no click
+can succeed against a record the scan skipped past.
+
+- **TC-SLACKAPP-134** — a click past the window is refused, the reply names the
+  expiry and the age, and no claim is written and no task started. The reply says
+  what to do next ("the next scheduled scan will post a fresh list"), because the
+  operator has just clicked a destructive button and "nothing was applied" alone
+  reads as a fault.
+- **TC-SLACKAPP-135** — the window is inclusive at **exactly** 72h and closed one
+  millisecond later, asserted as a pair on the boundary itself. `>` versus `>=` is
+  invisible to every test not sitting on the millisecond, and the same pair is
+  asserted on the *stamping* side by TC-SLACKAPP-142 — an off-by-one that disagreed
+  across the two would leave a record the scan still protects and the facade already
+  refuses.
+- **TC-SLACKAPP-136** — a record with no `issuedAt`, or an unparseable one, is
+  refused rather than treated as unbounded. This is the fail-closed half of the
+  table above, and it is also what correctly refuses a pre-#149 record left in SSM
+  across the deploy that adds the check. The reply says "an unknown time ago", never
+  `NaNh`.
+
+  Both sides take the stamp as `unknown` and require a **string** rather than
+  handing it to `Date.parse`, which coerces. A number is a shape a hand-edited
+  parameter genuinely has, and while an epoch value yields `NaN` and would be
+  refused either way, a small one does not: `Date.parse(2027)` reads `2027` as a
+  **year** and returns a date in the future. That is a negative age and a record
+  that never expires — on the callback side a click accepted indefinitely, on the
+  scan side a pending offer it refuses to replace every week from now on. So `2027`
+  is a case in both TC-SLACKAPP-136 and TC-SLACKAPP-143; it is the only value that
+  distinguishes the guard from a cast, since every other one is already `NaN`.
+- **TC-SLACKAPP-137** — the TTL the script **stamps** is the one the facade
+  **enforces**, asserted by importing both constants. The value is duplicated for the
+  same reason `claimParameterName` is (TC-SLACKAPP-131): the Lambda bundle and the
+  container script share no module. A drift is silent in both directions — a longer
+  facade value accepts clicks the scan already considers replaceable, so the record
+  may be gone; a shorter one refuses clicks the scan still protects, so the list
+  expires with nothing able to apply it.
+- **TC-SLACKAPP-138** — a **regenerated** list is told it was regenerated, not that
+  it expired. The expiry gate sits after the hash check on purpose, and the ordering
+  is the operator's: "regenerated" means click the newer message, "expired" means
+  wait for the next scan. Backwards, it sends them hunting for a message that does
+  not exist.
+- **TC-SLACKAPP-139** — the refusal is logged with the expiry cause and the hash,
+  and never the ids. Same argument as TC-SLACKAPP-089: the log is a wider audience
+  than the parameter the ids legitimately live in, and the hash already identifies
+  the list.
+- **TC-SLACKAPP-140** — the review run refuses to overwrite an offer still inside
+  its window, **before writing anything**. Operator-initiated, the clobber was a
+  footnote — the human running the scan is the human holding the pending approval.
+  Unattended it is a live approval destroyed at 03:00 by a scan nobody watched, and
+  the operator's later click is then refused as "regenerated", pointing at a message
+  they never saw. A guard that threw after the first write would have already
+  destroyed the record it was protecting, so the read-before-write ordering is
+  asserted on a shared event log rather than a call count.
+- **TC-SLACKAPP-141** — that refusal names the age, the window, and the list size,
+  and never the ids. This message is the whole diagnosis: the run exits non-zero and
+  the alarm says only "task failed", so this line is what separates "a human is
+  mid-review, do nothing" from a real fault. The hash identifies the list; the ids
+  stay out, because a log line is a copy too.
+- **TC-SLACKAPP-142** — an offer past its window **is** replaced, and one exactly at
+  the boundary is still protected. Refusing forever would wedge the loop, and
+  replacing an expired record costs nothing because the facade refuses a click
+  against it first. Asserted as a pair for the same reason as TC-SLACKAPP-135:
+  either bound alone passes with the comparison inverted or the window doubled.
+- **TC-SLACKAPP-143** — every record the scan cannot judge is treated as
+  replaceable: no `issuedAt`, an unparseable one, a numeric one, a **year-shaped**
+  one (see TC-SLACKAPP-136), not JSON, not an object, another stage's record, and one
+  with no ids left to approve. The fail-open half of the table, and each case also
+  asserts the log renders no `NaN` — "expired 4 hours ago" computed from an unparsed
+  date is worse than silence.
+- **TC-SLACKAPP-144** — a `GetParameters` that **throws** does not block the offer,
+  and the warning carries the parameter name and the error class but not the SDK's
+  message. A throwing read is not evidence of no pending offer, so this fails open
+  and says so; treating a transient SSM error as "something is pending" would stop
+  the weekly scan on an `AccessDenied` that may have nothing to do with approvals.
+  The message is dropped because a `ValidationException` quotes the value it
+  rejected, and this parameter's value is the id list.
+- **TC-SLACKAPP-145** — `buildOfferedRecord` **refuses** to build a record without
+  a parseable `issuedAt` rather than defaulting one. Both plausible defaults are
+  wrong in ways that appear only on the replay path: `generatedAt` dates the record
+  to the *file's* stamp, so a `--decisions` repost of a four-day-old review posts a
+  list already expired on arrival (TC-SLACKAPP-119 is why that field cannot be
+  reused); and `new Date()` inside the builder makes the stamp untestable and
+  ignores the run's own clock.
+
 ## Idempotency and the apply trigger
 
 - **TC-SLACKAPP-030** — a duplicate delivery of the same interaction enqueues
@@ -608,6 +714,95 @@ agreed with policy.
   whose `alarmActions` is `[undefined]` fails CREATE for the whole stack, which
   would cost every preview stage its cleanup loop to gain paging it has no topic
   for.
+
+## Scheduling the scan (#149)
+
+Everything above is reachable only from a click, and nothing produced the thing to
+click on: the weekly consolidation schedule runs `memory-consolidation.mjs`, while
+the approval loop lives in `memory-cleanup.mjs` and was operator-initiated. These
+cover the EventBridge Scheduler schedule that closes that gap, behind its own flag
+(`MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED`) nested inside the approval flag.
+
+Two flags rather than one because the halves have different risk: the apply half is
+inert until a human clicks, while the scan runs unattended and spends two
+reasoning-model passes a week. The scan block sits *inside* the approval gate, so a
+repo with no Slack app synthesizes nothing either way.
+
+The scan is a **dry run**: no `--apply` and no `--ids`. It offers by virtue of being
+configured for a Slack channel, which is what `buildPostApproval` keys on. That is
+also what makes it safe to schedule — `runCleanup`'s dry-run branch returns before
+both the lockfile and the shared database mutex, so an unattended scan cannot
+contend with the weekly consolidation and cannot delete.
+
+- **TC-SLACKAPP-146** — with the scan flag unset, the apply half is built and there
+  is **no** schedule, schedule group, scheduler role, or scan alarm; the apply
+  failure alarm is the only alarm left. And with the scan flag set but the approval
+  loop disabled, nothing at all is built — the nesting, asserted rather than left to
+  the reading order of two `if`s.
+- **TC-SLACKAPP-147** — the schedule runs weekly on **Saturday** (`cron(0 3 ? * SAT
+  *)`), in UTC, with a flexible time window of `OFF`, on **its own** schedule group,
+  and `ENABLED` only on prod. Saturday and not Sunday: consolidation holds
+  `cron(0 3 ? * SUN *)`, and two reasoning-model workloads at the same hour is a
+  quota collision for no reason. The retry policy is one attempt inside an hour —
+  a scan is worth retrying once, and a scan retried all day would post duplicate
+  approval lists.
+- **TC-SLACKAPP-148** — the scheduler role trusts `scheduler.amazonaws.com` for
+  **this schedule group only**, by `aws:SourceAccount` and `aws:SourceArn`, with
+  `StringEquals` and no wildcard. The `SourceArn` is the **group** ARN, which is what
+  the service documents: scoping it to a schedule name or a name prefix is
+  explicitly unsupported and fails at CREATE.
+
+  A separate role rather than reusing consolidation's, and the reason is the *trust
+  policy*, not the permissions: reuse means either widening that role's
+  `aws:SourceArn` to two groups — weakening a control already deployed — or sharing
+  consolidation's group, which makes its `TargetErrorCount` alarm ambiguous across
+  two unrelated schedules, since the alarm dimensions on `ScheduleGroup`.
+- **TC-SLACKAPP-149** — the scheduler role gets `ecs:RunTask` on the **exact task
+  definition revision** and `iam:PassRole` on the task and execution roles only,
+  conditioned on `iam:PassedToService = ecs-tasks.amazonaws.com`. The action set is
+  pinned exactly, so a third action cannot be added silently.
+- **TC-SLACKAPP-150** — the container override is a dry run: **no** `--apply`, no
+  `--ids`, no `--cap`; `--consensus-passes` present and at least 2; and `--out`
+  outside `/app`. Each of those is a distinct failure. `--apply` on a schedule is an
+  unattended deletion with no human in the loop at all. `--ids` is worse than it
+  looks: `readApprovedIds` treats an absent file as "no filter", so `--ids` on a path
+  that writes nothing would apply *everything* — which is only safe because both
+  flags are absent together. Dropping `--consensus-passes` weakens the quorum that
+  `consensusDecisions` needs (one pass reproduced only 66% of its own DELETE set on
+  re-run), and unattended is exactly when nobody is watching for that. And `--out`
+  must be `/tmp/...` because `snippetLogDir` refuses a path inside the script tree,
+  which in the image *is* `/app`. The command is asserted whole, not additively.
+- **TC-SLACKAPP-151** — an invocation that never STARTS a task alarms
+  (`TargetErrorCount`, `treatMissingData: notBreaching`), dimensioned on the scan's
+  **own** group — the failure mode no task-level alarm can see, because a schedule
+  that fails to invoke produces no task to fail. A stage with no alerts topic gets no
+  alarm and still gets the schedule, for the same reason as TC-SLACKAPP-087.
+- **TC-SLACKAPP-152** — the group's `namePrefix` fits Scheduler's 38-character cap
+  and the role name IAM's 64, both budgeted against Pulumi's 26-character suffix, and
+  synthesis **throws** rather than truncating for a stage that overruns. The #127
+  trap: a name that fits on its own still fails at CREATE once the suffix is added,
+  after the rest of the stack deployed. The role name is additionally asserted to be
+  matched by the glob in the deployed deploy-role policy — a rename that fits every
+  limit and no longer matches is a deploy that fails on `iam:PassRole`.
+- **TC-SLACKAPP-153** — the task role's `ssm:PutParameter` is inside the **deployed**
+  boundary, asserted against `workload-permissions-boundary.yaml` rather than
+  reasoned about: every task action is admitted by the ceiling, and the write is
+  scoped to `{prefix}/approvals/*`, which is exactly what
+  `DenyPutParameterOutsideApprovalRecords`'s `NotResource` permits. Widened to the
+  stage prefix it would be denied by that statement at runtime — a policy that
+  synthesizes, deploys, and then fails on the first scheduled scan. **No boundary
+  change is needed for #149**; this case is what says so measurably.
+- **TC-SLACKAPP-154** — the scan scheduler role is named in **both** deploy-role
+  statements that gate a Scheduler pass: the `PassRoleConstrained` grant and the
+  paired `DenyConsolidationSchedulerRolePassToOtherServices`. This is the one
+  out-of-band step #149 needs: `PassRoleConstrained` conditions
+  `iam:PassedToService` on `lambda.amazonaws.com` and `ecs-tasks.amazonaws.com`
+  only, so it does not cover `scheduler.amazonaws.com`, and the deploy role's own
+  CloudFormation stack is not deployed by the pipeline it gates.
+  **`scripts/deploy-github-role.sh` must be rolled out BEFORE the stack first
+  deploys with the scan flag set**, or the deploy fails creating the schedule. The
+  Sids are asserted unchanged, because a renamed Sid is a silently different
+  statement to the boundary auditor that reads them.
 
 ## Offering the list: the loop's entry point
 
@@ -1087,6 +1282,43 @@ fail the run.
     `stoppedReason` was fetched, printed, and never asserted; a task killed by OOM
     can stop with a reason set, and only `Essential container in task exited` is
     benign here.
+
+- **TC-SLACKAPP-155** — the 72h window, end to end against a deployed façade. The
+  harness seeds `approvals/offered` **twice** with the same ids — therefore the same
+  hash — differing only in `issuedAt`: once 96h old, once now. The first click must
+  be refused and the second accepted, so what is proven is the TTL rather than the
+  stale-hash guard.
+
+  The unstamped seed was a real break, not a hypothetical one. Before this, the
+  harness wrote `generatedAt` alone, and `offerExpiry` reads an absent `issuedAt` as
+  **expired** (TC-SLACKAPP-136) — so the signed click was refused, and the run died
+  four steps later at "no approval record after a 200", a message that names the
+  claim write and sends the reader to the Lambda's SSM grants.
+
+  Four decisions in the expiry step are load-bearing:
+
+  - **It runs after the 401 and before the live click.** "An expired approval wrote
+    no claim" is only assertable while no claim exists; below the successful click it
+    would pass vacuously against the record that click created. Same ordering
+    argument as the invalid-signature POST, asserted rather than left to a comment.
+  - **The refusal is an HTTP 200.** Every refusal the handler makes goes through
+    `reply()`, because Slack renders a non-200 as its own "operation failed" notice
+    and shows the operator no reason at all. So the status cannot distinguish a
+    refusal from an acceptance — and a facade that refused correctly with a 5xx has a
+    gate whose output nobody can see, which is a separate case here.
+  - **The reply is matched on `expire`**, the one word no other refusal uses.
+    "Regenerated", "names stage", "could not be read" and "already been applied" are
+    all 200s with a body too, so a generic "nothing was applied" match would pass on
+    a stale-hash refusal and prove nothing about the TTL.
+  - **The claim is read back by name afterwards.** A refusal that still claimed the
+    approval — right message, apply started anyway — is invisible to the reply
+    assertion. This is the same positive-assertion discipline as the 401 step.
+
+  The fake `curl` therefore models the window itself, reading the seeded record from
+  where the real `loadOffered` reads it, and can be made wrong about it in three ways
+  (no gate at all, a cosmetic refusal, a 5xx refusal). Without a fake that *can* be
+  wrong, the whole step passes against a façade with no TTL check — the exact
+  regression the gate exists to prevent.
 
 ## Exit codes
 

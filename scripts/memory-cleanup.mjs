@@ -105,6 +105,28 @@ const DEFAULT_CHAT_MODEL = "zai.glm-5";
 const UNCLASSIFIED_REASON = "classification failed after retry";
 const HOUR_MS = 3600 * 1000;
 const DEFAULT_LOCK_TTL_MS = 2 * HOUR_MS;
+/**
+ * How long an offered approval list stays clickable (#149).
+ *
+ * The list is a snapshot of the store at scan time, and the Approve button
+ * carries only its hash — so a click days later applies verdicts taken against a
+ * corpus that has since moved. The apply's last-write-wins guard catches a
+ * memory that CHANGED, but nothing catches a verdict that merely went stale.
+ *
+ * 72h, chosen against the weekly cadence rather than for roundness: an offer
+ * expires a full four days before the next scheduled scan replaces it, so the
+ * refuse-to-overwrite branch below can be unconditional for a live offer without
+ * ever blocking the schedule. Shorter risks expiring over a long weekend; longer
+ * would let two scans contend for one record.
+ *
+ * DUPLICATED as `OFFER_TTL_MS` in infra/src/oauth-facade/slack-interactions.ts,
+ * which is the ENFORCER while this file is the stamper. TC-SLACKAPP-137 asserts
+ * the two agree, for the same reason TC-SLACKAPP-131 asserts it of
+ * `claimParameterName`: the Lambda bundle and this container script share no
+ * module, and a silent drift here means either an offer that expires before the
+ * button is refused or a button that outlives the record's own claim.
+ */
+export const OFFER_TTL_MS = 72 * HOUR_MS;
 const SNIPPET_LEN = 120;
 // The two inactive states, and the only values --state accepts. They are NOT
 // interchangeable: see `inactiveMemoryAdapter` and issue #124.
@@ -885,8 +907,20 @@ async function discoverBaseUrl(opts, deps) {
  * task deletes — the one failure mode here that produces a *wrong* apply rather
  * than a failed one (TC-SLACKAPP-024).
  */
-export function buildOfferedRecord({ stage, decisions, generatedAt }) {
+export function buildOfferedRecord({ stage, decisions, generatedAt, issuedAt }) {
   const ids = decisions.filter((d) => d.verdict === "DELETE").map((d) => d.id);
+  // Required, not defaulted to `generatedAt` or to `new Date()`. Both defaults
+  // are wrong in a way that only shows up on the replay path: `loadDecisions`
+  // returns the FILE's `generatedAt` for a `--decisions` run, so anchoring the
+  // expiry to it posts a list that expired before the operator saw it (a week-old
+  // decision file is already 96h past a 72h TTL), and an internal `new Date()`
+  // would make the record untestable at the boundary the TTL turns on.
+  if (typeof issuedAt !== "string" || Number.isNaN(Date.parse(issuedAt))) {
+    throw new Error(
+      `buildOfferedRecord needs an ISO issuedAt to anchor the ` +
+        `${OFFER_TTL_MS / HOUR_MS}h offer expiry, got ${JSON.stringify(issuedAt)}`,
+    );
+  }
   const record = {
     stage,
     // Over the ids, so a click carrying an earlier list's hash no longer matches
@@ -895,6 +929,13 @@ export function buildOfferedRecord({ stage, decisions, generatedAt }) {
     hash: contentHash(ids.join("\n")),
     ids,
     generatedAt,
+    // A SEPARATE field from `generatedAt`, and the distinction is the operator's
+    // (#149): `generatedAt` is when the classifier decided, `issuedAt` is when
+    // this record became clickable. A replay reposts old decisions, so only the
+    // second one can anchor an expiry. Deliberately NOT the Slack message `ts`,
+    // which is both caller-supplied in the callback payload and absent from the
+    // record until the best-effort second write lands.
+    issuedAt,
   };
   const serialized = JSON.stringify(record);
   if (serialized.length > MAX_PARAMETER_BYTES) {
@@ -908,6 +949,50 @@ export function buildOfferedRecord({ stage, decisions, generatedAt }) {
     );
   }
   return record;
+}
+
+/**
+ * Whether an offered record is still inside its 72h window (#149).
+ *
+ * Shared by the two sides that must agree: the scan uses it to decide whether
+ * overwriting a pending offer would destroy a live human approval, and the
+ * callback Lambda's own copy uses it to refuse a late click. Exported and pure so
+ * both boundaries are testable with an injected `now` rather than a sleep.
+ *
+ * An UNPARSEABLE or absent `issuedAt` reads as EXPIRED, which is the direction
+ * that fails closed on both sides: the callback refuses the click (the operator
+ * clicks again after the next scan) and the scan is free to replace the record.
+ * Reading it as live would do the opposite of both — accept a click against a
+ * record of unknown age, and wedge the schedule forever on a record it may never
+ * overwrite. Records written before this field existed are exactly this case.
+ */
+export function offerExpiry(record, now) {
+  // A non-string is refused rather than handed to `Date.parse`, which COERCES: a
+  // hand-edited record whose stamp is the number 2027 parses as a YEAR, giving a
+  // date in the future, a negative age, and a record that never expires — which on
+  // THIS side means a scan that refuses to replace it every week from now on, the
+  // permanent wedge the fail-open branches exist to avoid.
+  const issuedAtMs =
+    typeof record?.issuedAt === "string" ? Date.parse(record.issuedAt) : NaN;
+  // `ageMs` is left ABSENT rather than set to undefined, so a caller that
+  // interpolates it cannot render "NaNh" — the same shape the facade's twin
+  // returns for an unjudgeable stamp (TC-SLACKAPP-143 asserts no log line here
+  // ever contains NaN).
+  if (!Number.isFinite(issuedAtMs)) return { expired: true };
+  const ageMs = now - issuedAtMs;
+  // `>`, not `>=`: the record is live for exactly OFFER_TTL_MS. The boundary is
+  // asserted directly (TC-SLACKAPP-135) because an off-by-one here is invisible
+  // in every test that does not sit on it.
+  return { expired: ageMs > OFFER_TTL_MS, ageMs };
+}
+
+/** `72h`, `4h` — the TTL and an age, for one operator-facing sentence. */
+export function formatHours(ms) {
+  const hours = ms / HOUR_MS;
+  // One decimal only when it changes the number: "72h" reads as a policy, while
+  // "72.0h" reads as a measurement, and the age in the same sentence is a
+  // measurement ("4.5h").
+  return `${Number.isInteger(hours) ? hours : hours.toFixed(1)}h`;
 }
 
 /**
@@ -1075,6 +1160,64 @@ async function slackCall(method, body, { botToken, fetchImpl }) {
 }
 
 /**
+ * The offer currently occupying `approvals/offered`, if overwriting it would
+ * destroy a live human approval (#149).
+ *
+ * Returns null — meaning "go ahead" — for absent, unreadable, unparseable, an
+ * offer for another stage, an offer with no ids, and an offer past its TTL. That
+ * list is deliberately generous, and in the OPPOSITE direction from
+ * `loadOffered`'s equivalent checks in the callback: there an unreadable record
+ * must never widen what is APPLIED, so it fails closed; here it must never wedge
+ * the weekly scan on a record nobody can act on, so it fails open. The asymmetry
+ * is safe because the two guard different things — the callback refuses to delete
+ * against a record it cannot verify, and no click can succeed against a record
+ * this one skipped past.
+ *
+ * A zero-id offer is skipped because it has no Slack message and therefore no
+ * button: `postApprovalRequest` writes the record and returns without posting, so
+ * there is nothing pending for a human to review.
+ */
+async function readPendingOffer({ ssm, name, stage, now, log }) {
+  const { GetParametersCommand } = await import("@aws-sdk/client-ssm");
+  let raw;
+  try {
+    const response = await ssm.send(new GetParametersCommand({ Names: [name] }));
+    raw = (response.Parameters ?? []).find((p) => p.Name === name)?.Value;
+  } catch (err) {
+    // The NAME only, never the message: an SDK error can quote the value it
+    // rejected, and this parameter's value is the id list.
+    log(
+      `WARNING ${name} could not be read (${err.name ?? "unnamed error"}), so a ` +
+        `pending approval cannot be ruled out; offering anyway`,
+    );
+    return null;
+  }
+  if (!raw) return null;
+  let record;
+  try {
+    record = JSON.parse(raw);
+  } catch {
+    log(`${name} is not valid JSON; replacing it`);
+    return null;
+  }
+  if (!record || typeof record !== "object") return null;
+  // Stage-bound like every other read of this tree: a record naming another stage
+  // is not this stage's pending approval, and the parameter is per-stage anyway —
+  // so this only fires on a hand-edited or cross-wired record.
+  if (record.stage !== stage) {
+    log(
+      `${name} names stage ${JSON.stringify(String(record.stage))}, not this ` +
+        `stage's; replacing it`,
+    );
+    return null;
+  }
+  if (!Array.isArray(record.ids) || record.ids.length === 0) return null;
+  const { expired, ageMs } = offerExpiry(record, now);
+  if (expired) return null;
+  return { stage: record.stage, hash: record.hash, ids: record.ids, ageMs };
+}
+
+/**
  * Offer this run's deletions to the operator: write the record, then post the
  * message whose button the callback Lambda validates against it (#123).
  *
@@ -1091,6 +1234,16 @@ async function slackCall(method, body, { botToken, fetchImpl }) {
  * post returns, and the apply task needs it to `chat.update` the message it was
  * approved from. A stamp failure is reported, not raised — losing the audit-trail
  * update is strictly better than refusing an approval the operator can act on.
+ *
+ * That first write is also DESTRUCTIVE, which the scheduled scan (#149) turns from
+ * a footnote into a hazard: unattended, it would silently overwrite an offer a
+ * human is still deciding on, and the operator's click would then be refused as
+ * "regenerated" with no trace of what they were reviewing. So a LIVE offer — one
+ * inside `OFFER_TTL_MS` — is refused here instead. 72h against a weekly cadence
+ * means a scheduled scan can never actually hit this branch; it exists for the
+ * off-schedule run (an operator CLI invocation, a manual re-run after a failure)
+ * where two offers genuinely could contend. An EXPIRED offer is replaced without
+ * comment, which is what keeps the schedule self-healing.
  */
 export async function postApprovalRequest({
   ssm,
@@ -1098,14 +1251,30 @@ export async function postApprovalRequest({
   stage,
   decisions,
   generatedAt,
+  issuedAt,
   channel,
   botToken,
   fetchImpl,
+  now = Date.now,
   log = () => {},
 }) {
-  const record = buildOfferedRecord({ stage, decisions, generatedAt });
+  const record = buildOfferedRecord({ stage, decisions, generatedAt, issuedAt });
   const { PutParameterCommand } = await import("@aws-sdk/client-ssm");
   const name = `${ssmPrefix}/approvals/offered`;
+  const pending = await readPendingOffer({ ssm, name, stage, now: now(), log });
+  if (pending) {
+    // A THROW, not a `return {posted: false}`: `runCleanup` maps a post failure to
+    // exit 1 (deliberately — see its offer branch), and the schedule's task-exit
+    // alarm is what tells the operator a scan declined to run. Returning quietly
+    // would make a scan that offered nothing indistinguishable from a scan that
+    // found nothing.
+    throw new Error(
+      `an approval list for ${pending.stage} is still pending after ` +
+        `${formatHours(pending.ageMs)} of its ${formatHours(OFFER_TTL_MS)} window ` +
+        `(${pending.ids.length} id(s), ${pending.hash}) — refusing to overwrite a ` +
+        `list an operator may still be reviewing; it expires on its own`,
+    );
+  }
   const write = (value) =>
     ssm.send(
       new PutParameterCommand({
@@ -1832,7 +2001,15 @@ export async function runCleanup(opts, deps) {
     // keeps the #102 operator CLI working unchanged.
     if (deps.postApproval) {
       try {
-        const offer = await deps.postApproval({ decisions, generatedAt: decisionGeneratedAt });
+        const offer = await deps.postApproval({
+          decisions,
+          generatedAt: decisionGeneratedAt,
+          // THIS run's clock, not `decisionGeneratedAt`: on a `--decisions`
+          // replay the two differ by however long the file has sat, and anchoring
+          // the 72h window to the file's stamp would post a list that is already
+          // expired (#149).
+          issuedAt: new Date(clock()).toISOString(),
+        });
         log(
           `offered ${offer.record.ids.length} id(s) to Slack as ${offer.record.hash}` +
             (offer.posted ? "" : " (nothing posted)"),
@@ -3112,12 +3289,13 @@ async function buildPostApproval(opts, region, runtime) {
   // session and an advisory lock the next run needs released, while an SSM client
   // holds local sockets that the entrypoint's `process.exit` reclaims. `release`
   // is called only on the failure path above, where nothing gets to use it.
-  return async ({ decisions, generatedAt }) =>
+  return async ({ decisions, generatedAt, issuedAt }) =>
     postApprovalRequest({
       ssm,
       ssmPrefix,
       stage: opts.stage,
       decisions,
+      issuedAt,
       generatedAt,
       channel,
       botToken,

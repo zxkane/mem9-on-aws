@@ -19,6 +19,7 @@ import {
   CLAIM_STALE_MS,
   claimParameterName,
   handleSlackInteraction,
+  OFFER_TTL_MS,
   type SlackDeps,
 } from "./slack-interactions.js";
 
@@ -81,6 +82,12 @@ function offered(overrides: Record<string, unknown> = {}) {
     hash: HASH,
     ids: IDS,
     generatedAt: "2026-08-05T11:59:00Z",
+    // Inside the 72h window at `NOW`, so the default fixture is a CLICKABLE
+    // offer. It has to be stated rather than omitted: an absent `issuedAt` reads
+    // as expired (#149), which is the fail-closed direction — omitting it here
+    // would silently route every test in this file into the expiry branch and
+    // assert nothing about the paths they name.
+    issuedAt: "2026-08-05T11:59:00Z",
     ...overrides,
   });
 }
@@ -558,6 +565,118 @@ describe("Slack stale-hash rejection (TC-SLACKAPP-020..025)", () => {
     expect(d.runTask).not.toHaveBeenCalled();
     expect(d.putParameter).not.toHaveBeenCalled();
     expect(JSON.stringify(res.body)).toMatch(/stage/iu);
+  });
+});
+
+// 137 is deliberately absent here: it pins this file's `OFFER_TTL_MS` against the
+// container script's duplicate copy, so it lives on the STAMPING side
+// (scripts/memory-cleanup.test.mjs) where the value is written.
+describe("Slack offer expiry (TC-SLACKAPP-134..136, 138..139)", () => {
+  /** An offered record issued `ageMs` before `NOW`. */
+  const aged = (ageMs: number) =>
+    offered({ issuedAt: new Date(NOW - ageMs).toISOString() });
+
+  it("TC-SLACKAPP-134 a click past the 72h window is refused, names the expiry, and starts nothing", async () => {
+    // The list is a snapshot of the store at scan time and the button carries only
+    // its hash, so a click days later applies verdicts taken against a corpus that
+    // has since moved. The apply's last-write-wins guard catches a memory that
+    // CHANGED; nothing catches a verdict that merely went stale.
+    const d = deps({ getParameter: vi.fn(async () => aged(OFFER_TTL_MS + 1000)) });
+    const res = await handleSlackInteraction(ev(payload()), d);
+
+    // A refusal, not a slow apply: neither the claim nor the task may happen.
+    expect(d.runTask).not.toHaveBeenCalled();
+    expect(d.putParameter).not.toHaveBeenCalled();
+    expect(res.statusCode).toBe(200);
+    const text = JSON.parse(res.body).text as string;
+    // The reply has to say EXPIRED, not just "nothing was applied": the operator's
+    // next action differs (wait for the next scan vs click the newer message), and
+    // the generic refusal sends them hunting for a message that does not exist.
+    expect(text).toMatch(/expire/iu);
+    expect(text).toMatch(/72h/u);
+    expect(text).toMatch(/nothing was applied/iu);
+    // Mutation probe: deleting the expiry branch makes this line fail, because a
+    // record whose hash matches otherwise falls straight through to the claim.
+    expect(text).not.toMatch(/apply started/iu);
+  });
+
+  it("TC-SLACKAPP-135 the window is inclusive at exactly 72h and closed one millisecond later", async () => {
+    // The boundary is asserted directly because an off-by-one between `>` and
+    // `>=` is invisible in every test that is not sitting on the millisecond —
+    // and a TTL that is silently one tick short expires a list the SCAN still
+    // refuses to overwrite, which wedges the loop with nothing able to apply.
+    const live = deps({ getParameter: vi.fn(async () => aged(OFFER_TTL_MS)) });
+    const liveRes = await handleSlackInteraction(ev(payload()), live);
+    expect(live.runTask).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(liveRes.body).text).toMatch(/apply started/iu);
+
+    const dead = deps({ getParameter: vi.fn(async () => aged(OFFER_TTL_MS + 1)) });
+    const deadRes = await handleSlackInteraction(ev(payload()), dead);
+    expect(dead.runTask).not.toHaveBeenCalled();
+    expect(JSON.parse(deadRes.body).text).toMatch(/expire/iu);
+  });
+
+  it("TC-SLACKAPP-136 a record with no or unparseable issuedAt is refused, not treated as unbounded", async () => {
+    // Fails CLOSED. A record of unknown age is exactly what the TTL exists to
+    // stop, and this is also the shape of a pre-#149 record left in SSM across the
+    // deploy that adds the check — refusing costs one re-click, while accepting
+    // would apply a list of any age.
+    //
+    // `2027` is the sharp one and the reason `offerExpiry` takes `unknown` and
+    // requires a string rather than casting: `Date.parse` COERCES, and it reads a
+    // small number as a YEAR — `Date.parse(2027)` is 2027-01-01, a date in the
+    // future, so the age is negative and the list reads permanently LIVE. Every
+    // other value here yields NaN and would be refused by a cast version too, so
+    // this is the only case that can tell the two apart.
+    for (const issuedAt of [undefined, "", "not-a-date", 1754400000, 2027, null]) {
+      const record = JSON.parse(offered()) as Record<string, unknown>;
+      if (issuedAt === undefined) delete record.issuedAt;
+      else record.issuedAt = issuedAt;
+      const d = deps({ getParameter: vi.fn(async () => JSON.stringify(record)) });
+      const res = await handleSlackInteraction(ev(payload()), d);
+
+      expect(d.runTask, `issuedAt=${JSON.stringify(issuedAt)}`).not.toHaveBeenCalled();
+      expect(d.putParameter, `issuedAt=${JSON.stringify(issuedAt)}`).not.toHaveBeenCalled();
+      const text = JSON.parse(res.body).text as string;
+      expect(text, `issuedAt=${JSON.stringify(issuedAt)}`).toMatch(/expire/iu);
+      // Never "NaNh ago" or "Invalid Date": an unknown age is said in words.
+      expect(text, `issuedAt=${JSON.stringify(issuedAt)}`).not.toMatch(/NaN|Invalid Date/u);
+    }
+  });
+
+  it("TC-SLACKAPP-138 a regenerated list is told it was regenerated, not that it expired", async () => {
+    // Ordering, and it is the operator's: the expiry check sits AFTER the hash
+    // check, so a click whose list was replaced gets "regenerated" (click the
+    // newer message) rather than "expired" (wait for the next scan). Moving the
+    // expiry gate above the hash comparison turns this green message red — an
+    // old-but-replaced list is BOTH stale and mismatched, and only one of the two
+    // answers tells the operator something they can act on.
+    const d = deps({
+      getParameter: vi.fn(async () =>
+        offered({ hash: "sha256:different", issuedAt: new Date(NOW - OFFER_TTL_MS * 2).toISOString() }),
+      ),
+    });
+    const res = await handleSlackInteraction(ev(payload()), d);
+
+    expect(d.runTask).not.toHaveBeenCalled();
+    const text = JSON.parse(res.body).text as string;
+    expect(text).toMatch(/regenerated/iu);
+    expect(text).not.toMatch(/expire/iu);
+  });
+
+  it("TC-SLACKAPP-139 the refusal is logged with the expiry cause and never the ids", async () => {
+    // The operator sees a Slack reply; whoever debugs the loop sees this line. It
+    // has to name WHY the click was refused, and must not copy the id list into
+    // CloudWatch — a wider audience than the SSM parameter the ids live in.
+    const d = deps({ getParameter: vi.fn(async () => aged(OFFER_TTL_MS * 3)) });
+    await handleSlackInteraction(ev(payload()), d);
+
+    const logged = (d.log as ReturnType<typeof vi.fn>).mock.calls
+      .map((c) => String(c[0]))
+      .join("\n");
+    expect(logged).toMatch(/expired/iu);
+    expect(logged).toContain(HASH);
+    for (const id of IDS) expect(logged).not.toContain(id);
   });
 });
 

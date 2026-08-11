@@ -241,11 +241,17 @@ Resources:
               StringNotEquals:
                 iam:PassedToService: ecs-tasks.amazonaws.com
           - Sid: DenyConsolidationSchedulerRolePassToOtherServices
+            # Both Scheduler roles, in ONE statement: the Sid is load-bearing
+            # (scripts/lib/workload-permissions-boundary.mjs looks the statement up
+            # by it, and the deployed rollout state records it), so #149's cleanup
+            # scan role was added to this Resource list rather than given a second
+            # statement under a new Sid.
             Effect: Deny
             Action:
               - iam:PassRole
             Resource:
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ConsolidationSchedulerRole-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9CleanupSchedulerRole-*
             Condition:
               StringNotEquals:
                 iam:PassedToService: scheduler.amazonaws.com
@@ -510,11 +516,23 @@ Resources:
             Resource:
               - !Sub arn:${AWS::Partition}:scheduler:${ApplicationRegion}:${AWS::AccountId}:schedule-group/mem9-on-aws-*
           - Sid: PassConsolidationSchedulerRole
+            # Every Scheduler role this project creates. PassRoleConstrained above
+            # does NOT cover them: it conditions on iam:PassedToService in
+            # [lambda, ecs-tasks] only, so a scheduler.amazonaws.com pass needs this
+            # statement. Adding the #149 cleanup-scan role here (rather than under a
+            # new Sid) keeps the Sid the boundary audit looks up unchanged.
+            #
+            # ROLLOUT ORDER: this file is deployed OUT OF BAND by
+            # scripts/deploy-github-role.sh, so this widening must land BEFORE the
+            # first bounded deploy that synthesizes Mem9CleanupSchedulerRole —
+            # otherwise the deploy AccessDenies on CreateSchedule's PassRole after
+            # having already created the role and group.
             Effect: Allow
             Action:
               - iam:PassRole
             Resource:
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ConsolidationSchedulerRole-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9CleanupSchedulerRole-*
             Condition:
               StringEquals:
                 iam:PassedToService: scheduler.amazonaws.com

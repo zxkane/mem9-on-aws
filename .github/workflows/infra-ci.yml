@@ -35,6 +35,16 @@
 #   MEM9_CONSOLIDATION_SCHEDULE_ENABLED — set to 1 only after the one-shot
 #                  cleanup and an actionable report-only consolidation run.
 #                  Unset keeps the production weekly schedule absent.
+#   MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED — set to 1 only after an operator-initiated
+#                  memory-cleanup.mjs dry run has posted an actionable approval
+#                  list by hand. Unset keeps the weekly scan schedule, its
+#                  Scheduler role, and its group absent; the apply half of the
+#                  Slack loop still works from a manual offer. Separate from
+#                  MEM9_SLACK_APPROVAL_ENABLED because the apply half is inert
+#                  until a human clicks while the scan runs unattended and spends
+#                  two reasoning-model passes a week. Requires the scan Scheduler
+#                  role's iam:PassRole widening in the deploy role
+#                  (github-actions-role.yaml) to be rolled out FIRST.
 #   MEM9_LLM_RESPONSES_REGION — independent fallback region for selected OpenAI
 #                  GPT models. Unset keeps the runtime/boundary default us-west-2.
 #
@@ -409,6 +419,13 @@ jobs:
           MEM9_SLACK_APPROVAL_CHANNEL: ${{ vars.MEM9_SLACK_APPROVAL_CHANNEL }}
           SST_SECRET_SlackBotToken: ${{ secrets.SLACK_BOT_TOKEN }}
           SST_SECRET_SlackSigningSecret: ${{ secrets.SLACK_SIGNING_SECRET }}
+          # Synthesize the weekly scan's schedule, group, and Scheduler role for
+          # infra coverage — infra/slack-approval.ts keeps every non-prod schedule
+          # DISABLED, so a preview stage cannot start a classification run against
+          # the corpus prod's operator is reviewing. Literal "1" (unlike the
+          # approval flag above) because the scan block is INSIDE the approval gate:
+          # a repo that has not seeded a Slack app synthesizes nothing either way.
+          MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED: "1"
         run: |
           # PR_NUMBER comes from GitHub's pull_request payload (integer);
           # validate to short-circuit any injection risk.
@@ -1155,6 +1172,14 @@ jobs:
           # Explicit opt-in. Missing/empty keeps the schedule and Scheduler role
           # absent; the task definition remains available for report-only runs.
           MEM9_CONSOLIDATION_SCHEDULE_ENABLED: ${{ vars.MEM9_CONSOLIDATION_SCHEDULE_ENABLED }}
+          # The cleanup scan's own opt-in (#149). Missing/empty keeps the weekly
+          # scan schedule, its group, and its Scheduler role absent while leaving
+          # the apply half of the Slack loop intact — so an operator can post an
+          # approval list by hand, see it work, and turn the schedule on afterwards.
+          # Roll the deploy role's Scheduler iam:PassRole widening out FIRST
+          # (scripts/deploy-github-role.sh): without it this deploy AccessDenies on
+          # CreateSchedule's PassRole after creating the role and group.
+          MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED: ${{ vars.MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED }}
           # Compliance authorizer on the OAuth façade routes — see the preview
           # deploy step above for the full rationale. Must be set here too: the
           # flag is read at synth time, so a prod deploy without it strips the

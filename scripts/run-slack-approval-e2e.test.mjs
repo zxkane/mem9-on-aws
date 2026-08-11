@@ -213,6 +213,7 @@ function runFixture({
   stoppedReason = "Essential container in task exited",
   facadeError = "",
   noisyStderr = "",
+  expiryBehavior = "refuse",
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "mem9-slack-e2e-"));
   temporaryPaths.push(directory);
@@ -229,7 +230,7 @@ function runFixture({
     // forever. That is not hypothetical; it once spawned ~70k processes and
     // exhausted the systemd user slice's TasksMax.
     `#!${process.execPath}
-import { appendFileSync, existsSync } from "node:fs";
+import { appendFileSync, existsSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 appendFileSync(process.env.MOCK_CALLS, JSON.stringify(["aws", ...args]) + "\\n");
 const option = (name) => {
@@ -289,7 +290,18 @@ if (command === "ssm get-parameter") {
     console.error("unexpected parameter:", name);
     process.exit(2);
   }
-} else if (command === "ssm put-parameter" || command === "ssm delete-parameter") {
+} else if (command === "ssm put-parameter") {
+  // The offered record is kept, not discarded, because the fake facade below
+  // decides the TTL question from it — exactly as the real handler does, which
+  // reads \`approvals/offered\` rather than trusting anything in the payload. A fake
+  // that answered every signed click identically could not tell an expired list
+  // from a live one, so the expiry step would pass against a handler with no
+  // expiry check at all (#149).
+  if ((option("--name") ?? "").endsWith("/approvals/offered")) {
+    writeFileSync(process.env.MOCK_OFFERED, option("--value") ?? "");
+  }
+  process.exit(0);
+} else if (command === "ssm delete-parameter") {
   process.exit(0);
 } else if (command === "ecs describe-tasks") {
   const query = option("--query") ?? "";
@@ -318,11 +330,18 @@ if (command === "ssm get-parameter") {
 
   // The fake `curl` decides which POST it is by the SIGNATURE header, exactly as
   // the real endpoint does: that is the one thing this E2E exists to exercise.
+  //
+  // It also re-implements the handler's ONE other decision the harness now depends
+  // on — the 72h offer window — by reading the seeded `approvals/offered` record,
+  // which is where the real `loadOffered` reads it from too. Modelling it rather
+  // than answering every signed click alike is what gives the expiry step teeth: a
+  // fake that always accepted would pass the same whether the script stamped
+  // `issuedAt` or not, which is the exact regression this exists to catch.
   const curl = join(bin, "curl");
   writeFileSync(
     curl,
     `#!${process.execPath}
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 appendFileSync(process.env.MOCK_CALLS, JSON.stringify(["curl", ...args]) + "\\n");
 const option = (name) => {
@@ -332,14 +351,61 @@ const option = (name) => {
 const headers = args.filter((a, i) => args[i - 1] === "-H");
 const signature = headers.find((h) => /^x-slack-signature:/i.test(h)) ?? "";
 const invalid = /deadbeef|invalid/i.test(signature);
-const status = invalid ? process.env.MOCK_BAD_STATUS : process.env.MOCK_APPROVE_STATUS;
+// OFFER_TTL_MS, duplicated a third time and deliberately not imported: the value
+// lives in a .ts Lambda source and a .mjs container script, and this fake is
+// neither. TC-SLACKAPP-137 pins the two REAL copies to each other; this one only
+// has to be the same order of magnitude as the ages the script seeds, which are
+// "now" and "96h ago".
+const OFFER_TTL_MS = 72 * 60 * 60 * 1000;
+// Absent or unparseable \`issuedAt\` is EXPIRED, matching \`offerExpiry\` in
+// infra/src/oauth-facade/slack-interactions.ts. That direction is what makes an
+// unstamped seed a FAILURE here rather than a silent pass: a fake that treated an
+// unknown age as live would accept the click and the harness would report green
+// against a facade that refuses every one of its clicks in production.
+const offered = existsSync(process.env.MOCK_OFFERED)
+  ? JSON.parse(readFileSync(process.env.MOCK_OFFERED, "utf8") || "{}")
+  : {};
+const issuedAtMs = Date.parse(offered.issuedAt ?? "");
+const expired = !Number.isFinite(issuedAtMs) || Date.now() - issuedAtMs > OFFER_TTL_MS;
+// How this fake facade answers a click against an expired list. \`refuse\` is the
+// real handler; the other three are the ways it could be broken, and each has to
+// be REACHABLE for the script's expiry step to be worth anything — \`accept\` is a
+// facade with no TTL check at all, \`cosmetic\` is one whose refusal message is
+// right but which claims the approval anyway (so an apply starts), and \`error\`
+// answers the refusal with a 5xx, which Slack renders as its own "operation
+// failed" and shows the operator no reason at all.
+const behavior = process.env.MOCK_EXPIRY_BEHAVIOR || "refuse";
+const refused = expired && behavior !== "accept";
+// Slack renders a non-200 as its own "operation failed" and shows the operator
+// nothing, so EVERY refusal the real handler makes goes through \`reply()\` — a 200
+// with an ephemeral body. The refusal is in the body, never the status.
+//
+// Hence MOCK_APPROVE_STATUS answers only the click the facade ACCEPTS, and a
+// refusal's status is independent of it: keeping the two knobs separate is what
+// lets one fixture test a broken transport on the live click without also failing
+// the expiry step two steps earlier.
+let status;
+if (invalid) status = process.env.MOCK_BAD_STATUS;
+else if (!refused) status = process.env.MOCK_APPROVE_STATUS;
+else status = behavior === "error" ? "500" : "200";
 const body = invalid
   ? "unauthorized"
-  : JSON.stringify({ response_type: "ephemeral", text: "Apply started for 1 memories." });
+  : JSON.stringify({
+      response_type: "ephemeral",
+      text: refused
+        ? "That list was issued a while ago and approvals expire after 72h. Nothing was applied."
+        : "Apply started for 1 memories.",
+    });
 const out = option("-o");
 if (out) writeFileSync(out, body);
-// A 200 on the VALID signature is what creates the claim on a real stage.
-if (!invalid && status === "200") writeFileSync(process.env.MOCK_CLICKED, "1");
+// A 200 on the VALID signature is what creates the claim on a real stage — but
+// only when the handler did not refuse. \`cosmetic\` claims despite refusing, which
+// is the whole point of it.
+const accepted = !invalid && !refused && status === "200";
+const claimedDespiteRefusing = !invalid && refused && behavior === "cosmetic";
+if (accepted || claimedDespiteRefusing) {
+  writeFileSync(process.env.MOCK_CLICKED, "1");
+}
 process.stdout.write(status);
 `,
     { mode: 0o755 },
@@ -356,6 +422,10 @@ process.stdout.write(status);
       ...process.env,
       MOCK_CALLS: calls,
       MOCK_CLICKED: join(directory, "clicked"),
+      // Where the fake `aws` records the seeded offered record and the fake `curl`
+      // reads it back, standing in for the SSM parameter both really use.
+      MOCK_OFFERED: join(directory, "offered.json"),
+      MOCK_EXPIRY_BEHAVIOR: expiryBehavior,
       MOCK_FACADE: facade,
       MOCK_SECRET: secret,
       MOCK_BAD_STATUS: badSignatureStatus,
@@ -400,20 +470,23 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
     const { callRecords, result, output } = runFixture({ claim: claimWith() });
     expect(result.status, output).toBe(0);
 
+    // Three POSTs: the invalid signature, the expired list (TC-SLACKAPP-155), and
+    // the live click.
     const curls = callRecords.filter(([tool]) => tool === "curl");
-    expect(curls).toHaveLength(2);
+    expect(curls).toHaveLength(3);
 
     // The INVALID signature goes first, so "no record" is asserted before the
     // valid click creates one. Reversed, the 401 case would have to assert the
     // absence of a record that already exists, which nothing can do.
-    const [bad, good] = curls;
+    const [bad, , good] = curls;
     expect(bad.join(" ")).toMatch(/x-slack-signature:\s*v0=deadbeef/iu);
     expect(good.join(" ")).toMatch(/x-slack-signature:\s*v0=[0-9a-f]{64}/u);
 
-    // Same body both times. A different body would make the 401 provable by the
-    // body rather than by the signature, which is not the property under test.
+    // Same body every time. A different body would make the 401 provable by the
+    // body rather than by the signature, which is not the property under test —
+    // and would likewise make the expiry refusal provable by the stale-hash guard.
     const bodyOf = (call) => call[call.indexOf("--data-binary") + 1];
-    expect(bodyOf(bad)).toBe(bodyOf(good));
+    for (const call of curls) expect(bodyOf(call)).toBe(bodyOf(good));
     expect(bodyOf(good)).toMatch(/^payload=/u);
     expect(decodeURIComponent(bodyOf(good).slice("payload=".length))).toContain(
       "cleanup_approve",
@@ -703,6 +776,127 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
     // silently stop testing anything while reporting green.
     const { result } = runFixture({ stage: "prod", claim: claimWith() });
     expect(result.status).toBe(1);
+  });
+
+  it("TC-SLACKAPP-155 stamps issuedAt on the seeded offer, so the facade's TTL gate can pass it", () => {
+    // The omission this case exists for was FATAL, not cosmetic. `offerExpiry` in
+    // infra/src/oauth-facade/slack-interactions.ts reads an absent `issuedAt` as
+    // EXPIRED (fail-closed: never apply against a record of unknown age), so a seed
+    // carrying only `generatedAt` is refused at the expiry gate and the run dies
+    // four steps later at "no approval record after a 200" — a message that names
+    // the claim write and sends the reader to the Lambda's SSM grants.
+    const { callRecords, result, output } = runFixture({ claim: claimWith() });
+    expect(result.status, output).toBe(0);
+
+    const seeds = callRecords.filter(
+      ([tool, service, operation, , name]) =>
+        tool === "aws" &&
+        service === "ssm" &&
+        operation === "put-parameter" &&
+        String(name).endsWith("/approvals/offered"),
+    );
+    // Two seeds: the expired probe, then the live list. Both are asserted, because
+    // a script that stamped only the live one would leave the expiry step passing
+    // for the WRONG reason — an unstamped record is refused as expired too.
+    expect(seeds).toHaveLength(2);
+    const records = seeds.map((call) => JSON.parse(call[call.indexOf("--value") + 1]));
+    for (const record of records) {
+      expect(typeof record.issuedAt).toBe("string");
+      // A real timestamp, not the string "now" or an empty field: `Date.parse` is
+      // what the facade calls, and it is the only judge that matters.
+      expect(Number.isFinite(Date.parse(record.issuedAt))).toBe(true);
+    }
+
+    // The two ages, which is what the pair of steps is FOR: one outside the 72h
+    // window and one inside it. Both derived from the same clock, so this holds
+    // regardless of when the suite runs.
+    const OFFER_TTL_MS = 72 * 60 * 60 * 1000;
+    const ages = records.map((record) => Date.now() - Date.parse(record.issuedAt));
+    expect(ages[0]).toBeGreaterThan(OFFER_TTL_MS);
+    expect(ages[1]).toBeLessThan(OFFER_TTL_MS);
+
+    // Same ids, therefore the same hash: what changes between the refusal and the
+    // acceptance is `issuedAt` alone. A differing hash would make the refusal
+    // provable by the stale-hash guard instead of the TTL — the same
+    // same-body discipline the invalid-signature POST follows.
+    expect(records[0].hash).toBe(records[1].hash);
+    expect(records[0].ids).toEqual(records[1].ids);
+  });
+
+  it("TC-SLACKAPP-155 a facade that accepts an expired list fails the run", () => {
+    // The property the expiry step actually asserts. Without a fake that can be
+    // WRONG about the TTL, the step passes against a facade with no TTL check at
+    // all, and the harness would report green on exactly the regression #149 adds
+    // the gate to prevent.
+    const { result, output } = runFixture({
+      claim: claimWith(),
+      expiryBehavior: "accept",
+    });
+    expect(result.status, output).not.toBe(0);
+    expect(output).toMatch(/not refused as expired/iu);
+  });
+
+  it("TC-SLACKAPP-155 a refusal that still claims the approval fails the run", () => {
+    // A facade whose MESSAGE is right and whose behaviour is not: it tells the
+    // operator the list expired and starts the apply anyway. The reply assertion
+    // alone cannot see this — only reading the claim back can, which is why the
+    // expiry step ends with the same by-name read the 401 step uses.
+    const { result, output } = runFixture({
+      claim: claimWith(),
+      expiryBehavior: "cosmetic",
+    });
+    expect(result.status, output).not.toBe(0);
+    expect(output).toMatch(/the refusal is cosmetic/iu);
+  });
+
+  it("TC-SLACKAPP-155 a refusal answered with a 5xx fails the run", () => {
+    // The refusal has to reach the OPERATOR, and Slack only renders a body it got
+    // with a 200 — a non-200 becomes its own "operation failed" notice with no
+    // reason in it. So a facade that refused correctly but answered 500 has an
+    // expiry gate nobody can see the output of, which is a different bug from an
+    // absent gate and is not covered by the message assertion.
+    const { result, output } = runFixture({
+      claim: claimWith(),
+      expiryBehavior: "error",
+    });
+    expect(result.status, output).not.toBe(0);
+    expect(output).toMatch(/answered HTTP 500, not 200/u);
+    expect(output).toMatch(/shows the operator no reason/iu);
+  });
+
+  it("TC-SLACKAPP-155 the expired probe runs before any claim exists", () => {
+    // Ordering, asserted rather than left to a comment. "An expired approval wrote
+    // no claim" is only provable while no claim exists, so the probe has to sit
+    // after the 401 and before the live click — and a maintainer moving it below
+    // the successful click would find it passing vacuously against the record that
+    // click created.
+    const { callRecords, result, output } = runFixture({ claim: claimWith() });
+    expect(result.status, output).toBe(0);
+    const isSeed = ([tool, service, operation, , name]) =>
+      tool === "aws" &&
+      service === "ssm" &&
+      operation === "put-parameter" &&
+      String(name).endsWith("/approvals/offered");
+    const clicks = callRecords
+      .map((call, index) => ({ call, index }))
+      .filter(({ call }) => call[0] === "curl");
+    expect(clicks).toHaveLength(3);
+    const [bad, expiredClick, live] = clicks;
+    expect(bad.call.join(" ")).toMatch(/x-slack-signature:\s*v0=deadbeef/iu);
+    // The expired click is correctly SIGNED — the refusal is the TTL's doing, not
+    // the signature's. Sharing the signature with the live click is what proves it.
+    const signatureOf = (call) => call[call.indexOf("-H") + 1];
+    expect(expiredClick.call.join(" ")).toMatch(/x-slack-signature:\s*v0=[0-9a-f]{64}/u);
+    expect(signatureOf(expiredClick.call)).toBe(signatureOf(live.call));
+
+    // And each click is preceded by the seed it is about: no seed before the 401
+    // (nothing is written until the signature is proven to be rejected), one
+    // before each of the other two.
+    const seedsBefore = (index) =>
+      callRecords.filter((call, i) => i < index && isSeed(call)).length;
+    expect(seedsBefore(bad.index)).toBe(0);
+    expect(seedsBefore(expiredClick.index)).toBe(1);
+    expect(seedsBefore(live.index)).toBe(2);
   });
 
   it("TC-SLACKAPP-090 the approved id cannot name a real memory", () => {

@@ -121,6 +121,16 @@ const patterns = expectedRolePatterns({ partition, accountId });
 const consolidationSchedulerRolePattern =
   `arn:${partition}:iam::${accountId}:role/` +
   "mem9-on-a*-*Mem9ConsolidationSchedulerRole-*";
+// The #149 weekly cleanup scan's Scheduler role. A SECOND pattern under the SAME
+// deploy-role Sids, because those Sids are looked up by name by the boundary
+// audit and recorded in the deployed rollout state.
+const cleanupSchedulerRolePattern =
+  `arn:${partition}:iam::${accountId}:role/` +
+  "mem9-on-a*-*Mem9CleanupSchedulerRole-*";
+const schedulerRolePatterns = [
+  consolidationSchedulerRolePattern,
+  cleanupSchedulerRolePattern,
+];
 const denyPolicyId = DENY_DANGEROUS_POLICY_NAME;
 const denyPolicyArn = `arn:${partition}:iam::${accountId}:policy/${denyPolicyId}`;
 const independentRuntimeActions = [
@@ -1809,6 +1819,34 @@ describe("deployed PassRole scope", () => {
     ).toEqual(patterns);
   });
 
+  it("accepts BOTH scheduler roles in one statement, and either alone", () => {
+    // One statement naming both is the DEPLOYED shape after #149. Either alone is
+    // also valid, and that is not laxity: this function reads the LIVE deploy role,
+    // whose widening lands out of band via scripts/deploy-github-role.sh. Between
+    // that rollout and the stack deploy the live statement names one pattern while
+    // the repository names two, and a rollout must not fail on its own ordering.
+    for (const resources of [
+      schedulerRolePatterns,
+      [...schedulerRolePatterns].reverse(),
+      [consolidationSchedulerRolePattern],
+      [cleanupSchedulerRolePattern],
+    ]) {
+      expect(
+        extractPassRoleScope(
+          [
+            passRolePolicy([...patterns].reverse()),
+            consolidationSchedulerPassRolePolicy({ resources }),
+          ],
+          { partition, accountId },
+        ),
+        // The Scheduler statement contributes NOTHING to the returned scope — the
+        // roles it can reach are named by pattern, not discovered — so the answer
+        // is the generic set either way. A subset check that leaked these into the
+        // scope would make `discoverMatchingRoles` sweep the scheduler roles too.
+      ).toEqual(patterns);
+    }
+  });
+
   it.each([
     [
       "generic project roles",
@@ -1825,6 +1863,27 @@ describe("deployed PassRole scope", () => {
       consolidationSchedulerPassRolePolicy({
         resources: [
           `arn:${partition}:iam::${accountId}:role/other-scheduler-role-*`,
+        ],
+      }),
+    ],
+    [
+      // A subset check must still reject a KNOWN pattern smuggled in beside an
+      // unknown one — the case a naive `.some()` would pass.
+      "a known role beside an unknown one",
+      consolidationSchedulerPassRolePolicy({
+        resources: [
+          consolidationSchedulerRolePattern,
+          `arn:${partition}:iam::${accountId}:role/mem9-on-a*-*Mem9RogueSchedulerRole-*`,
+        ],
+      }),
+    ],
+    [
+      // And a repeat must not stand in for the second pattern.
+      "the same role twice",
+      consolidationSchedulerPassRolePolicy({
+        resources: [
+          cleanupSchedulerRolePattern,
+          cleanupSchedulerRolePattern,
         ],
       }),
     ],
@@ -8188,7 +8247,13 @@ describe("boundary and deploy-role templates", () => {
     ).toMatchObject({
       Effect: "Deny",
       Action: ["iam:PassRole"],
-      Resource: [consolidationSchedulerRolePattern],
+      // BOTH scheduler roles, in the order the lib's SCHEDULER_ROLE_TOKENS lists
+      // them. `toMatchObject` compares arrays positionally, so THIS assertion is
+      // what pins the order — `requireStatement` itself is set-based
+      // (`sameStringSet` sorts), so it would accept either arrangement. The point
+      // of pinning it here is drift against the deployed template's own ordering,
+      // not a claim that the runtime verifier cares.
+      Resource: schedulerRolePatterns,
       Condition: {
         StringNotEquals: {
           "iam:PassedToService": "scheduler.amazonaws.com",
