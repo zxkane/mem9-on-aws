@@ -524,8 +524,11 @@ jobs:
     name: Cleanup PR Preview
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.base.ref == 'main'
-    # Aurora + ECS teardown can exceed 20m on a full preview stack.
-    timeout-minutes: 30
+    # Budget: 15m first remove + up to 20m ENI detach wait + 15m retry, plus
+    # checkout/pnpm/install. The old 30m cut the FIRST remove off mid-flight (#146),
+    # which is what leaked the security groups — the job timeout must stay strictly
+    # above the sum of the inner bounds so the retry path can always complete.
+    timeout-minutes: 60
     permissions:
       id-token: write
       contents: read
@@ -632,6 +635,20 @@ jobs:
           sudo rm -f /usr/local/bin/pulumi* 2>/dev/null || true
           rm -rf ~/.config/sst/bin/ ~/.config/sst/plugins/ 2>/dev/null || true
 
+      # #146. `sst remove` deletes the VPC-attached Lambdas quickly, but AWS
+      # detaches their hyperplane ENIs ASYNCHRONOUSLY (up to ~20m). Those ENIs hold
+      # a dependency on Mem9TaskSg, so Pulumi sits retrying DeleteSecurityGroup
+      # against DependencyViolation — and on the stages that leaked, THIS JOB'S
+      # timeout fired first and cancelled the remove MID-FLIGHT. The state object
+      # was already gone by then, so the stage became invisible to a state-anchored
+      # reconciler and its SG + ENIs leaked with nothing tying them to a closed PR.
+      #
+      # So the remove gets its OWN bound (`timeout`), which the job timeout must
+      # never pre-empt. A first attempt that runs out is not a failure: the
+      # functions are deleted by then, which is precisely when waiting for the ENIs
+      # becomes useful (before the remove they are still in-use — waiting there
+      # would poll for 20 minutes and change nothing). Then one retry finishes the
+      # remove with the dependency gone, leaving SST state consistent.
       - name: Remove PR stage
         if: steps.check-state.outputs.deployed == 'true'
         shell: bash
@@ -645,8 +662,17 @@ jobs:
           case "$STAGE" in
             prod|main|production) echo "::error::Refusing to remove protected stage $STAGE"; exit 1 ;;
           esac
-          pnpm -C infra exec sst unlock --stage "$STAGE" 2>&1 || true
-          pnpm -C infra exec sst remove --stage "$STAGE" --print-logs
+          remove() {
+            pnpm -C infra exec sst unlock --stage "$STAGE" 2>&1 || true
+            timeout "$1" pnpm -C infra exec sst remove --stage "$STAGE" --print-logs
+          }
+          if remove 15m; then
+            echo "::notice::Removed stage ${STAGE} on the first attempt"
+            exit 0
+          fi
+          echo "::notice::First remove of ${STAGE} did not finish — waiting for Lambda ENIs to detach, then retrying"
+          node scripts/await-eni-detach.mts "$STAGE"
+          remove 15m
 
       - name: Comment cleanup status
         if: success() && steps.check-state.outputs.deployed == 'true'
