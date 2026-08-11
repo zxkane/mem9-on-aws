@@ -52,7 +52,11 @@ switch (command) {
     break;
   case "cloudformation describe-stacks": {
     const region = optionValue("--region");
-    if (optionValue("--query")) {
+    const query = optionValue("--query");
+    if (query?.includes("ApplicationRegion")) {
+      respond(process.env.MOCK_APPLICATION_REGION ?? "eu-west-1");
+    }
+    if (query) {
       respond("arn:aws:iam::<aws-account-id>:role/github-actions-mem9-on-aws");
     }
     if (region === "us-west-2") respond("{}");

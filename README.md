@@ -50,7 +50,7 @@ citations.
 | Dimension          | Decision                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
 | ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | IaC                | **SST v4**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| Region topology    | **Region-heterogeneous**: the current application plane and retained ECR repositories are in `ap-northeast-1`; account-global IAM ownership stacks are hosted in `us-west-2`; the optional Mantle Responses route uses its own configured region (default `us-west-2`) and regional Project.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Region topology    | **Region-heterogeneous**: `sst.config.ts` selects the application plane and retained ECR repository region; account-global IAM ownership stacks are hosted in `us-west-2`; the optional Mantle Responses route uses its own configured region (default `us-west-2`) and regional Project.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | Container registry | Four retained ECR repositories plus guarded registry-level BASIC scan-on-push for `mem9-on-aws/*`, both managed out of band                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
 | Compute            | **ECS Fargate**, **arm64**, single task (`desiredCount=1`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 | Database           | **Aurora PostgreSQL Serverless v2** + `pgvector` (mem9 `postgres` backend). `mnemo-server` and bootstrap connect directly to the cluster writer endpoint with a Secrets Manager credential. **RDS Proxy is not deployed.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
@@ -73,20 +73,30 @@ This is not a single-region deployment where one `AWS_REGION` applies to every
 resource. Treat each plane independently:
 
 - **Application plane:** SST resources, VPC, ECR images, and the primary Mantle
-  route must agree on one application region. The current IaC pins this plane to
-  `ap-northeast-1`; moving it is a coordinated IaC, workflow, bootstrap-stack,
-  and permissions-boundary change, not an ambient environment override.
+  route use `providers.aws.region` in `sst.config.ts` as their single source of
+  truth. Changing that value retargets every application consumer for a fresh
+  deployment. An ambient environment override does not move the application.
 - **IAM ownership plane:** the GitHub Actions role and workload-boundary
   CloudFormation stacks are intentionally hosted in `us-west-2`. IAM is
   account-global, while the fixed stack region prevents duplicate ownership.
 - **Optional Responses plane:** the Responses model route, its task-role grant,
   workload-boundary Project ARN, Mantle bearer, and `OpenAI-Project` value use
   their own region. The default is `us-west-2`, independently of the application
-  region.
+  region. Selecting a configured OpenAI GPT model routes it here when that model
+  is unavailable in the application region.
 
 Operator commands must use the region of the component they address. Do not
 replace these service-specific regions with one global value. A hosted OAuth
 callback may run in any region; only its exact public HTTPS URL is allowlisted.
+
+Changing the provider region does not relocate an existing live deployment:
+AWS regional resources remain in their original region. The retained workload
+boundary and GitHub Actions role record the application region and fail before
+mutation when it differs from `sst.config.ts`. Remove all old-region previews
+first, then use a separately reviewed dual-region data/resource migration.
+Region-changing PRs are blocked before AWS deployment, and closed-PR cleanup
+uses the base region so an earlier preview is not orphaned. There is
+intentionally no one-command in-place production region switch.
 
 ## Cost attribution and monthly estimate
 
@@ -256,9 +266,10 @@ The AgentCore Gateway exposes four tools over MCP (Cognito-authenticated):
   allow-all OAuth facade compliance authorizer; it is disabled by default.
   Roll out the reviewed workload-boundary update before enabling it.
 - `scripts/deploy-github-role.sh` always owns its account-global IAM stack in
-  `us-west-2` and ignores ambient `AWS_REGION`. `PROJECT_REGION` selects the
-  application region used for VPC discovery and regional bootstrap resources;
-  it does not move the SST application by itself.
+  `us-west-2` and ignores ambient `AWS_REGION`. Application VPC discovery and
+  regional bootstrap resources resolve `providers.aws.region` from
+  `sst.config.ts`. `PROJECT_REGION` is only an explicit selector when creating a
+  separate regional Mantle Project, such as the OpenAI Responses fallback.
 - Agent contributors: see [`AGENTS.md`](AGENTS.md) for repo conventions and hard rules.
 
 ### Optional hosted OAuth callback URLs
@@ -604,7 +615,7 @@ below must never be committed.
 
 ```bash
 export AWS_PROFILE="<aws-profile>"
-export AWS_REGION="<aws-region>"
+export AWS_REGION="$(node scripts/resolve-application-region.mjs)"
 export SOURCE_CLUSTER="<source-db-cluster-identifier>"
 export RESTORED_CLUSTER="<new-db-cluster-identifier>"
 export RESTORED_INSTANCE="<new-db-instance-identifier>"
@@ -1040,8 +1051,7 @@ for exit zero, and reads only its content-free `CONSOLIDATION_REVIEW_LIST`
 summary from the exact CloudWatch log stream:
 
 ```bash
-STAGE=prod AWS_REGION="<application-region>" \
-  bash scripts/run-consolidation-task.sh
+STAGE=prod bash scripts/run-consolidation-task.sh
 ```
 
 Individual `CONSOLIDATION_REVIEW` records contain memory ids, snippets, and

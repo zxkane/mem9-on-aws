@@ -1,7 +1,7 @@
 import type { DbOutputs } from "./db";
 import type { EcsOutputs } from "./ecs";
 import { resolveVpc } from "./vpc";
-import { accountId, ECR_REGION, ecrImage } from "./ecr";
+import { accountId, applicationRegion, ecrImage } from "./ecr";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import { taskFailureAlarm } from "./task-failure-alarm";
 
@@ -111,7 +111,7 @@ export function consolidation(
       actions: ["bedrock-mantle:CreateInference"],
       resources: [
         BEDROCK_PROJECT
-          ? $interpolate`arn:aws:bedrock-mantle:${ECR_REGION}:${accountId()}:project/${BEDROCK_PROJECT}`
+          ? $interpolate`arn:aws:bedrock-mantle:${applicationRegion()}:${accountId()}:project/${BEDROCK_PROJECT}`
           : "*",
         // A reasoning model is served from RESPONSES_REGION, whose project is a
         // DIFFERENT resource. Without this the task 403s on inference even though

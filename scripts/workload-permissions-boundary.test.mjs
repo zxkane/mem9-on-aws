@@ -34,7 +34,7 @@ import {
   AWS_CLI_TIMEOUT_MS,
   DEPLOY_COMMAND_TIMEOUT_MS,
   QUARANTINE_PROBE_ACTIONS,
-  createAwsCliAdapter,
+  createAwsCliAdapter as createAwsCliAdapterForRegion,
   invokeAwsCli,
   resolveAwsIdentity,
 } from "./lib/workload-permissions-boundary-aws.mjs";
@@ -112,6 +112,11 @@ const boundaryContract = {
     "arn:aws:bedrock-mantle:ap-northeast-1:123456789012:project/proj_test",
   partition,
 };
+const createAwsCliAdapter = (options) =>
+  createAwsCliAdapterForRegion({
+    applicationRegion: boundaryContract.applicationRegion,
+    ...options,
+  });
 const patterns = expectedRolePatterns({ partition, accountId });
 const consolidationSchedulerRolePattern =
   `arn:${partition}:iam::${accountId}:role/` +
@@ -588,6 +593,7 @@ function optionValues(args, name) {
 }
 
 async function runBoundaryDeployMock({
+  boundaryOpenAiRegion,
   boundarySimulationBadProbe = "",
   boundarySimulationMalformedProbe = "",
   defaultVersionDriftsAfterSimulation = false,
@@ -597,7 +603,9 @@ async function runBoundaryDeployMock({
   quarantineLostAfterSimulation = false,
   quarantine = true,
   quarantineSimulation,
+  responsesRegion,
   simulationCommandFails = false,
+  stackApplicationRegion = boundaryContract.applicationRegion,
   stackExists = true,
   stackStatus = "UPDATE_COMPLETE",
   verifyOnly = false,
@@ -928,7 +936,18 @@ case "$command" in
     elif [[ "$query" == "Stacks[0].Parameters[?ParameterKey=='PolicyRevision'].ParameterValue | [0]" ]]; then
       printf '%s\\n' 'r1'
     else
-      printf '{"Stacks":[{"StackStatus":"%s"}]}\\n' "$MOCK_STACK_STATUS"
+      jq -cn \
+        --arg region "$MOCK_STACK_APPLICATION_REGION" \
+        --arg status "$MOCK_STACK_STATUS" \
+        '{
+          Stacks: [{
+            StackStatus: $status,
+            Parameters: [{
+              ParameterKey: "ApplicationRegion",
+              ParameterValue: $region
+            }]
+          }]
+        }'
     fi
     ;;
   "cloudformation describe-stack-resources")
@@ -1070,10 +1089,20 @@ esac
           MOCK_SIMULATION: simulationPath,
           MOCK_SIMULATION_COMPLETE: simulationCompletePath,
           MOCK_SIMULATION_COMMAND_FAILS: String(simulationCommandFails),
+          MOCK_STACK_APPLICATION_REGION: stackApplicationRegion,
           MOCK_STACK_EXISTS: String(stackExists),
           MOCK_STACK_STATUS: stackStatus,
           MOCK_UPDATED: updatedPath,
           PATH: `${directory}:${dirname(process.execPath)}:${process.env.PATH}`,
+          ...(boundaryOpenAiRegion === undefined
+            ? {}
+            : {
+                WORKLOAD_BOUNDARY_OPENAI_PROJECT_REGION:
+                  boundaryOpenAiRegion,
+              }),
+          ...(responsesRegion === undefined
+            ? {}
+            : { MEM9_LLM_RESPONSES_REGION: responsesRegion }),
           WORKLOAD_BOUNDARY_MAINTENANCE_ACK: guarded ? "true" : "",
           WORKLOAD_BOUNDARY_SKIP_DOTENV: "true",
         },
@@ -1098,6 +1127,8 @@ async function runRolloutGateMock({
   dirtyWorktree = false,
   dotenvAck,
   dotenvApplicationRegion,
+  dotenvOpenAiProjectRegion,
+  dotenvResponsesRegion,
   dotenvProfile,
   dotenvProjectRegion,
   dotenvTemplateBucket,
@@ -1117,6 +1148,7 @@ async function runRolloutGateMock({
   interruptSignal,
   timeout = "30s",
   clockStepMs = 0,
+  configuredApplicationRegion = dotenvApplicationRegion ?? "ap-northeast-1",
   nodeExit = 0,
 } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "mem9-boundary-pause-"));
@@ -1133,6 +1165,8 @@ async function runRolloutGateMock({
   if (
     dotenvAck !== undefined ||
     dotenvApplicationRegion !== undefined ||
+    dotenvOpenAiProjectRegion !== undefined ||
+    dotenvResponsesRegion !== undefined ||
     dotenvProfile !== undefined ||
     dotenvProjectRegion !== undefined ||
     dotenvTemplateBucket !== undefined ||
@@ -1154,6 +1188,14 @@ async function runRolloutGateMock({
           : [
               `WORKLOAD_BOUNDARY_APPLICATION_REGION=${dotenvApplicationRegion}`,
             ]),
+        ...(dotenvOpenAiProjectRegion === undefined
+          ? []
+          : [
+              `WORKLOAD_BOUNDARY_OPENAI_PROJECT_REGION=${dotenvOpenAiProjectRegion}`,
+            ]),
+        ...(dotenvResponsesRegion === undefined
+          ? []
+          : [`MEM9_LLM_RESPONSES_REGION=${dotenvResponsesRegion}`]),
         ...(dotenvProjectRegion === undefined
           ? []
           : [`PROJECT_REGION=${dotenvProjectRegion}`]),
@@ -1316,6 +1358,8 @@ esac
 set -euo pipefail
 if [[ "\${1:-}" == "-p" ]]; then
   printf '24\\n'
+elif [[ "\${1:-}" == *"/resolve-application-region.mjs" ]]; then
+  printf '%s\\n' "$MOCK_CONFIGURED_APPLICATION_REGION"
 else
   printf 'node invoked profile=%s region=%s project_region=%s vpc=%s bucket=%s %s\\n' \
     "\${AWS_PROFILE-}" \
@@ -1360,6 +1404,7 @@ printf '%s\\n' "$((now + MOCK_CLOCK_STEP_MS * 1000000))" > "$MOCK_CLOCK"
     ...process.env,
     MOCK_CALLER_ACCOUNT: callerAccount,
     MOCK_CALLER_PARTITION: callerPartition,
+    MOCK_CONFIGURED_APPLICATION_REGION: configuredApplicationRegion,
     MOCK_NODE_EXIT: String(nodeExit),
     MOCK_NODE_WAIT_SIGNAL: String(interruptSignal !== undefined),
     MOCK_ACTIVE_WORKFLOW: activeWorkflow,
@@ -1390,10 +1435,12 @@ printf '%s\\n' "$((now + MOCK_CLOCK_STEP_MS * 1000000))" > "$MOCK_CLOCK"
   };
   for (const name of [
     "AWS_PROFILE",
+    "MEM9_LLM_RESPONSES_REGION",
     "MEM9_TEMPLATE_BUCKET",
     "MEM9_VPC_ID",
     "PROJECT_REGION",
     "WORKLOAD_BOUNDARY_APPLICATION_REGION",
+    "WORKLOAD_BOUNDARY_OPENAI_PROJECT_REGION",
   ]) {
     delete childEnv[name];
   }
@@ -1491,6 +1538,12 @@ function makeAdapter(options = {}) {
   const adapter = {
     calls,
     state,
+    async verifyBoundaryRegion() {
+      calls.push("verify-boundary-region");
+      if (options.failBoundaryRegionPreflight) {
+        throw new Error("workload boundary application region is mismatched");
+      }
+    },
     async putQuarantine({ roleName, policyName, policyDocument }) {
       calls.push(`quarantine:${roleName}:${policyName}`);
       if (options.failQuarantine) throw new Error("quarantine failed");
@@ -2355,6 +2408,46 @@ describe("production task-definition secret preflight", () => {
     ).toEqual(Object.values(productionTaskDefinitions).sort());
   });
 
+  it("preflights the retained owner region before any IAM call", async () => {
+    const calls = [];
+    const adapter = createAwsCliAdapter({
+      identity: { accountId, partition },
+      invokeAws: (args) => {
+        calls.push(args);
+        return productionPreflightAws(args);
+      },
+    });
+
+    await expect(adapter.verifyBoundaryRegion()).resolves.toBeUndefined();
+    expect(calls).toEqual([
+      [
+        "cloudformation",
+        "describe-stacks",
+        "--stack-name",
+        WORKLOAD_BOUNDARY_STACK_NAME,
+        "--region",
+        "us-west-2",
+      ],
+    ]);
+  });
+
+  it("rejects a retained owner with another application region", async () => {
+    const adapter = createAwsCliAdapter({
+      identity: { accountId, partition },
+      invokeAws: (args) => {
+        const response = structuredClone(productionPreflightAws(args));
+        response.Stacks[0].Parameters.find(
+          ({ ParameterKey }) => ParameterKey === "ApplicationRegion",
+        ).ParameterValue = "eu-west-1";
+        return response;
+      },
+    });
+
+    await expect(adapter.verifyBoundaryRegion()).rejects.toThrow(
+      /application region is mismatched/u,
+    );
+  });
+
   it.each([
     ["boundary stack read", "cloudformation describe-stacks", { Stacks: [] }],
     ["parameter read", "ssm get-parameters", { Parameters: [] }],
@@ -2410,12 +2503,13 @@ describe("guarded rollout", () => {
     ]),
   );
 
-  it("runs quarantine first and removes it only after complete verification", async () => {
+  it("preflights before quarantine and removes quarantine only after complete verification", async () => {
     const adapter = makeAdapter();
     const result = await runBoundaryRollout(adapter, options);
 
     expect(result).toEqual({ verifiedRoleCount: 3, status: "complete" });
-    expect(adapter.calls[0]).toBe(
+    expect(adapter.calls[0]).toBe("verify-boundary-region");
+    expect(adapter.calls[1]).toBe(
       `quarantine:${options.deployRoleName}:${QUARANTINE_POLICY_NAME}`,
     );
     expect(adapter.calls.indexOf("deploy-boundary")).toBeGreaterThan(
@@ -2748,7 +2842,8 @@ describe("guarded rollout", () => {
         call.startsWith("list-attached:"),
       );
       if (
-        quarantineIndex !== 0 ||
+        adapter.calls[0] !== "verify-boundary-region" ||
+        quarantineIndex !== 1 ||
         discoveryIndex < 0 ||
         quarantineIndex >= discoveryIndex
       ) {
@@ -2845,7 +2940,19 @@ describe("guarded rollout", () => {
     await expect(runBoundaryRollout(adapter, options)).rejects.toThrow(
       /quarantine failed/u,
     );
-    expect(adapter.calls).toHaveLength(1);
+    expect(adapter.calls).toEqual([
+      "verify-boundary-region",
+      `quarantine:${options.deployRoleName}:${QUARANTINE_POLICY_NAME}`,
+    ]);
+  });
+
+  it("rejects an existing application-region mismatch before IAM mutation", async () => {
+    const adapter = makeAdapter({ failBoundaryRegionPreflight: true });
+    await expect(runBoundaryRollout(adapter, options)).rejects.toThrow(
+      /application region is mismatched/u,
+    );
+    expect(adapter.calls).toEqual(["verify-boundary-region"]);
+    expect(adapter.state.quarantineInstalled).toBe(false);
   });
 
   it("fails closed before enforcement when no workload role is discovered", async () => {
@@ -3033,6 +3140,7 @@ describe("guarded rollout", () => {
       /secret preflight/u,
     );
     expect(adapter.calls).toContain("verify-prod-bindings");
+    expect(adapter.state.quarantineInstalled).toBe(true);
     expect(adapter.calls.some((call) => call.startsWith("put-boundary:"))).toBe(
       false,
     );
@@ -5742,6 +5850,7 @@ const shutdown = installSubprocessSignalHandlers();
 let outcome = "unexpected success";
 try {
   const adapter = createAwsCliAdapter({
+    applicationRegion: "ap-northeast-1",
     consistencyAttempts: 10,
     deadlineAt: Date.now() + 60_000,
     identity: { accountId: "123456789012", partition: "aws" },
@@ -6791,6 +6900,8 @@ describe("operator entry point", () => {
     const { calls, result, resumeState } = await runRolloutGateMock({
       dotenvAck: "true",
       dotenvApplicationRegion: "eu-west-1",
+      dotenvOpenAiProjectRegion: "us-east-1",
+      dotenvResponsesRegion: "us-east-1",
       dotenvProfile: "custom-operator",
       dotenvProjectRegion: "eu-west-1",
       dotenvTemplateBucket: "reviewed-template-bucket",
@@ -6804,7 +6915,13 @@ describe("operator entry point", () => {
     expect(resumeState).toContain(
       "WORKLOAD_BOUNDARY_APPLICATION_REGION=eu-west-1",
     );
-    expect(resumeState).toContain("PROJECT_REGION=eu-west-1");
+    expect(resumeState).not.toMatch(/^PROJECT_REGION=/mu);
+    expect(resumeState).toContain(
+      "WORKLOAD_BOUNDARY_OPENAI_PROJECT_REGION=us-east-1",
+    );
+    expect(resumeState).toContain(
+      "MEM9_LLM_RESPONSES_REGION=us-east-1",
+    );
     expect(resumeState).toContain(
       "MEM9_TEMPLATE_BUCKET=reviewed-template-bucket",
     );
@@ -6814,14 +6931,30 @@ describe("operator entry point", () => {
     );
   });
 
-  it("rejects conflicting application region selectors before mutation", async () => {
+  it("does not treat the independent Project region as an application selector", async () => {
     const { calls, result, resumeState } = await runRolloutGateMock({
       dotenvAck: "true",
       dotenvApplicationRegion: "eu-west-1",
       dotenvProjectRegion: "ap-northeast-1",
+      nodeExit: 9,
+    });
+    expect(result.status).toBe(9);
+    expect(result.stderr).not.toContain("Application region settings disagree");
+    expect(calls).toContain("aws sts get-caller-identity");
+    expect(calls).toContain(
+      "node invoked profile= region=eu-west-1 project_region=ap-northeast-1",
+    );
+    expect(resumeState).not.toMatch(/^PROJECT_REGION=/mu);
+  });
+
+  it("rejects an application override that disagrees with sst.config.ts", async () => {
+    const { calls, result, resumeState } = await runRolloutGateMock({
+      configuredApplicationRegion: "ap-northeast-1",
+      dotenvAck: "true",
+      dotenvApplicationRegion: "eu-west-1",
     });
     expect(result.status).toBe(2);
-    expect(result.stderr).toContain("Application region settings disagree");
+    expect(result.stderr).toContain("Application region must match sst.config.ts");
     expect(calls).not.toContain("aws sts get-caller-identity");
     expect(calls).not.toContain("workflow disable");
     expect(resumeState).toBe("");
@@ -6848,6 +6981,38 @@ describe("operator entry point", () => {
     expect(
       calls.some((call) => call.startsWith("cloudformation update-stack")),
     ).toBe(false);
+  });
+
+  it("TC-APPREGION-040: refuses an in-place application-region migration", async () => {
+    const { calls, result } = await runBoundaryDeployMock({
+      guarded: true,
+      stackApplicationRegion: "eu-west-1",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "Existing workload boundary belongs to application region eu-west-1",
+    );
+    expect(
+      calls.some((call) =>
+        /cloudformation (create-stack|update-stack)/u.test(call),
+      ),
+    ).toBe(false);
+    expect(calls.some((call) => call.startsWith("iam "))).toBe(false);
+  });
+
+  it("rejects conflicting Responses region aliases before mutation", async () => {
+    const { calls, result } = await runBoundaryDeployMock({
+      boundaryOpenAiRegion: "us-west-2",
+      responsesRegion: "us-east-1",
+    });
+    expect(result.status).toBe(2);
+    expect(result.stderr).toContain("Responses region settings disagree");
+    expect(
+      calls.some((call) =>
+        /cloudformation (create-stack|update-stack)/u.test(call),
+      ),
+    ).toBe(false);
+    expect(calls.some((call) => call.startsWith("iam "))).toBe(false);
   });
 
   it("refuses any existing policy update outside the guarded rollout", async () => {
@@ -8249,6 +8414,7 @@ describe("boundary and deploy-role templates", () => {
       resolve(root, "scripts/lib/workload-permissions-boundary-aws.mjs"),
       "utf8",
     );
+    expect(awsAdapter).not.toContain("resolveApplicationRegion");
     const rolloutModule = readFileSync(rolloutModulePath, "utf8");
     expect(awsAdapter).toContain(
       "{ signal, timeoutMs = AWS_CLI_TIMEOUT_MS } = {}",

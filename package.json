@@ -1,6 +1,7 @@
 {
   "name": "mem9-on-aws",
   "private": true,
+  "type": "module",
   "engines": {
     "node": ">=24"
   },

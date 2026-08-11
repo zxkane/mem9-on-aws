@@ -32,7 +32,7 @@ Design: [`docs/designs/ecr-registry-scanning.md`](../designs/ecr-registry-scanni
 | TC-ECR-SCAN-019 | Scan changed documentation and examples | No account ID, live ARN, API key, private repository reference, or comment permalink is present |
 | TC-ECR-SCAN-020 | Stack-owned drift but CloudFormation reports no template update | Exclusively capture the prior complete configuration in a protected local rollback file; write the exact complete declaration, never the drifted current state; a collision blocks mutation, and write/read-back failure prints a shell-escaped same-profile restore command |
 | TC-ECR-SCAN-021 | Registry state changes between initial preflight and mutation | Read and decide again immediately before mutation; external sibling rules fail closed |
-| TC-ECR-SCAN-022 | Inspect the operator identity boundary | Registry get/put belongs to the operator's `AWS_PROFILE` identity in `ap-northeast-1`, never the GitHub Actions role |
+| TC-ECR-SCAN-022 | Inspect the operator identity boundary | Registry get/put belongs to the operator's `AWS_PROFILE` identity in the `sst.config.ts` application region, never the GitHub Actions role |
 | TC-ECR-SCAN-023 | CI CloudFormation validation | After all core typechecks and unit tests run, `actions/setup-python` provides pip and a non-optional `cfn-lint` command performs schema validation; both PR and push path filters re-include the dedicated template after the general CloudFormation exclusion |
 | TC-ECR-SCAN-024 | Registry still differs after a successful owned update | Read-back verification exits nonzero instead of reporting convergence |
 | TC-ECR-SCAN-025 | Dedicated stack loses ownership after adoption | Read-back verification exits nonzero instead of accepting external state |

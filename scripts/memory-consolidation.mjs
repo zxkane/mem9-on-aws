@@ -10,6 +10,7 @@ import {
   contentHash,
   sharedCleanupMutexKey,
 } from "./memory-cleanup.mjs";
+import { resolveApplicationRegion } from "./lib/application-region.mjs";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_CAP = 20;
@@ -924,7 +925,9 @@ function restAdapter(baseUrl, tenantId, fetchImpl = fetch) {
 }
 
 export async function createProductionDeps(options, runtime = {}) {
-  const region = process.env.AWS_REGION || "ap-northeast-1";
+  const region =
+    process.env.AWS_REGION ||
+    (await resolveApplicationRegion());
   const dbSecret = parseJsonObject(process.env.MEM9_DB_SECRET);
   const tenantId = process.env.MEM9_TENANT_ID;
   const baseUrl = process.env.MEM9_BASE_URL;

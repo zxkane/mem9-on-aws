@@ -21,6 +21,14 @@ const workflowsDirectory = resolve(root, ".github/workflows");
 const workflowPath = resolve(root, ".github/workflows/infra-ci.yml");
 const rolePath = resolve(root, "infra/cloudformation/github-actions-role.yaml");
 const deployRolePath = resolve(here, "deploy-github-role.sh");
+const applicationRegionResolverPath = resolve(
+  here,
+  "resolve-application-region.mjs",
+);
+const applicationRegionLibraryPath = resolve(
+  here,
+  "lib/application-region.mjs",
+);
 const deployRoleFixturePath = resolve(
   here,
   "test-fixtures/deploy-github-role/mock-aws.mjs",
@@ -58,20 +66,41 @@ function runFixture(name) {
   return { result, callRecords };
 }
 
-function runDeployRoleFixture(args = []) {
+function runDeployRoleFixture(args = [], { existingApplicationRegion } = {}) {
   const dir = mkdtempSync(join(tmpdir(), "mem9-deploy-role-"));
   tempDirs.push(dir);
   const isolatedRoot = join(dir, "repo");
   const isolatedScripts = join(isolatedRoot, "scripts");
+  const isolatedLibrary = join(isolatedScripts, "lib");
   const mockAws = join(dir, "aws");
   const wrapperUnderTest = join(isolatedScripts, "deploy-github-role.sh");
   const calls = join(dir, "calls.jsonl");
-  mkdirSync(isolatedScripts, { recursive: true });
+  mkdirSync(isolatedLibrary, { recursive: true });
   mkdirSync(join(isolatedRoot, "infra", "cloudformation"), {
     recursive: true,
   });
   copyFileSync(deployRoleFixturePath, mockAws);
   copyFileSync(deployRolePath, wrapperUnderTest);
+  copyFileSync(
+    applicationRegionResolverPath,
+    join(isolatedScripts, "resolve-application-region.mjs"),
+  );
+  copyFileSync(
+    applicationRegionLibraryPath,
+    join(isolatedLibrary, "application-region.mjs"),
+  );
+  writeFileSync(
+    join(isolatedRoot, "sst.config.ts"),
+    [
+      "export default $config({",
+      "  app() {",
+      '    return { providers: { aws: { region: "eu-west-1" } } };',
+      "  },",
+      "  run() {},",
+      "});",
+      "",
+    ].join("\n"),
+  );
   copyFileSync(
     rolePath,
     join(isolatedRoot, "infra", "cloudformation", "github-actions-role.yaml"),
@@ -87,8 +116,9 @@ function runDeployRoleFixture(args = []) {
       AWS_CALL_LOG: calls,
       AWS_PROFILE: "fixture-operator",
       AWS_REGION: "us-east-2",
-      PROJECT_REGION: "eu-west-1",
+      PROJECT_REGION: "us-east-1",
       MEM9_TEMPLATE_BUCKET: "fixture-template-bucket",
+      MOCK_APPLICATION_REGION: existingApplicationRegion ?? "eu-west-1",
     },
   });
   const callRecords = readFileSync(calls, "utf8")
@@ -573,8 +603,9 @@ describe("Lambda VPC IAM", () => {
     const script = readFileSync(deployRolePath, "utf8");
 
     expect(script).toContain(
-      'APPLICATION_REGION="${PROJECT_REGION:-ap-northeast-1}"',
+      'APPLICATION_REGION="$(node "$_repo_root/scripts/resolve-application-region.mjs")"',
     );
+    expect(script).not.toContain('APPLICATION_REGION="${PROJECT_REGION');
     expect(script).toContain('APPLICATION_VPC_ID="${MEM9_VPC_ID:-}"');
     expect(script).toContain('"Name=tag:Name,Values=private-1*"');
     for (const parameter of [
@@ -671,6 +702,28 @@ describe("deploy-role stack region", () => {
         ({ args }) => optionValue(args, "--region") === "us-west-2",
       ),
     ).toBe(true);
+  });
+
+  it("refuses to retarget the existing IAM owner during a live region move", () => {
+    const { result, callRecords } = runDeployRoleFixture(["--update"], {
+      existingApplicationRegion: "ap-northeast-1",
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "Existing GitHub Actions role belongs to application region ap-northeast-1",
+    );
+    expect(
+      callRecords.some(
+        ({ args }) => args.slice(0, 2).join(" ") ===
+          "cloudformation update-stack",
+      ),
+    ).toBe(false);
+    expect(
+      callRecords.filter(
+        ({ args }) =>
+          args.slice(0, 2).join(" ") !== "cloudformation describe-stacks",
+      ),
+    ).toEqual([]);
   });
 });
 

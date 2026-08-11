@@ -19,8 +19,8 @@ WORKDIR /app
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates curl \
     && curl --fail --silent --show-error \
-      https://truststore.pki.rds.amazonaws.com/ap-northeast-1/ap-northeast-1-bundle.pem \
-      --output /app/ap-northeast-1-bundle.pem \
+      https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
+      --output /app/global-bundle.pem \
     && rm -rf /var/lib/apt/lists/*
 
 # Deps first (layer cache). The sidecar uses the token dependencies; the
@@ -43,6 +43,7 @@ COPY docker/llm-proxy/server.mjs ./
 COPY docker/llm-proxy/server.mjs /app/docker/llm-proxy/server.mjs
 COPY scripts/memory-cleanup.mjs /app/scripts/memory-cleanup.mjs
 COPY scripts/memory-consolidation.mjs /app/scripts/memory-consolidation.mjs
+COPY scripts/lib/application-region.mjs /app/scripts/lib/application-region.mjs
 
 # Fail the BUILD, not the weekly run, if that import graph ever breaks again.
 # Per entrypoint, not once: both COPY the sidecar as `../docker/llm-proxy/`, but a
@@ -60,5 +61,5 @@ RUN node --input-type=module \
 # http://localhost:8082/v1. Not published outside the task — localhost only.
 EXPOSE 8082
 ENV NODE_ENV=production
-ENV NODE_EXTRA_CA_CERTS=/app/ap-northeast-1-bundle.pem
+ENV NODE_EXTRA_CA_CERTS=/app/global-bundle.pem
 ENTRYPOINT ["node", "server.mjs"]

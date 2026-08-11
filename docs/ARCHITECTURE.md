@@ -42,6 +42,16 @@ mnemo-server
   -> Aurora PostgreSQL cluster writer endpoint:5432
 ```
 
+The application plane uses `providers.aws.region` in `sst.config.ts` as its
+single source of truth. SST resources, ECR image references, VPC discovery,
+primary Mantle routing, workflows, and operator scripts derive that value. The
+account-global IAM ownership stacks remain in `us-west-2`, while the optional
+Responses route has its own independently configured region and Project.
+This retargets fresh deployments; it does not relocate existing regional
+resources. Existing ownership stacks fail closed when their recorded
+`ApplicationRegion` differs, because a live move needs a dedicated dual-region
+migration after old-region previews are removed.
+
 AWS documents the Lambda target configuration used here:
 [AgentCore Lambda target configuration](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-add-target-api-target-config.html).
 The proxy function uses Lambda VPC access to reach private resources:
@@ -109,9 +119,10 @@ points to `http://localhost:8082/v1`. The local `llm-proxy`:
 The proxy routes by the requested `model`. Ids matching
 `LLM_PROXY_RESPONSES_MODEL_PREFIXES` (default `openai.gpt-5.6-` — terra/luna)
 go to the **Responses API** at `openai/v1/responses` in
-`LLM_PROXY_RESPONSES_REGION` (default us-west-2; these models are not served
-in Tokyo and reject every chat-completions path). The proxy translates
-chat-completions ⇄ Responses both ways (system → `instructions`,
+`LLM_PROXY_RESPONSES_REGION` (default `us-west-2`). This is the independent
+fallback region for selected OpenAI GPT models that are unavailable in the
+application region; they also reject every chat-completions path. The proxy
+translates chat-completions ⇄ Responses both ways (system → `instructions`,
 `max_tokens` → `max_output_tokens` capped at
 `LLM_PROXY_RESPONSES_MAX_OUTPUT_TOKENS` = 16384, `reasoning.effort` from
 `LLM_PROXY_REASONING_EFFORT` = high), so mem9 sees a normal chat-completions
@@ -507,16 +518,22 @@ also does not replace the direct-write rollback procedure above: retained state
 remains active after CloudFormation relinquishes ownership.
 
 For conflicts, export the current state with
-`aws ecr get-registry-scanning-configuration --region ap-northeast-1`, have the
-account-level owner update the complete ruleset, and rerun the wrapper. Do not
-copy sibling filters into this project's template.
+the application region resolved from `sst.config.ts`, have the account-level
+owner update the complete ruleset, and rerun the wrapper. Do not copy sibling
+filters into this project's template:
+
+```bash
+APPLICATION_REGION="$(node scripts/resolve-application-region.mjs)"
+aws ecr get-registry-scanning-configuration --region "$APPLICATION_REGION"
+```
 
 After an image push and scan completion, an operator can inspect findings
 without starting or changing a scan:
 
 ```bash
+APPLICATION_REGION="$(node scripts/resolve-application-region.mjs)"
 aws ecr describe-image-scan-findings \
-  --region ap-northeast-1 \
+  --region "$APPLICATION_REGION" \
   --repository-name mem9-on-aws/mnemo-server \
   --image-id imageTag=<image-tag> \
   --query '{status:imageScanStatus.status,counts:imageScanFindings.findingSeverityCounts,findings:imageScanFindings.findings}'
@@ -524,7 +541,7 @@ aws ecr describe-image-scan-findings \
 
 The operator identity selected by `AWS_PROFILE` must have
 `ecr:GetRegistryScanningConfiguration` and
-`ecr:PutRegistryScanningConfiguration` in `ap-northeast-1`; the read-only
+`ecr:PutRegistryScanningConfiguration` in the application region; the read-only
 findings query additionally needs `ecr:DescribeImageScanFindings` on the four
 project repository ARNs. These account-level mutation permissions are
 intentionally absent from the GitHub Actions deploy role: its OIDC trust includes
@@ -684,7 +701,7 @@ to the GitHub Actions deploy role.
       "Resource": "*",
       "Condition": {
         "StringEquals": {
-          "aws:RequestedRegion": "ap-northeast-1"
+          "aws:RequestedRegion": "<application-region>"
         }
       }
     },
@@ -693,10 +710,10 @@ to the GitHub Actions deploy role.
       "Effect": "Allow",
       "Action": "ecr:DescribeImageScanFindings",
       "Resource": [
-        "arn:aws:ecr:ap-northeast-1:<aws-account-id>:repository/mem9-on-aws/mnemo-server",
-        "arn:aws:ecr:ap-northeast-1:<aws-account-id>:repository/mem9-on-aws/qwen3-embed",
-        "arn:aws:ecr:ap-northeast-1:<aws-account-id>:repository/mem9-on-aws/bootstrap",
-        "arn:aws:ecr:ap-northeast-1:<aws-account-id>:repository/mem9-on-aws/llm-proxy"
+        "arn:aws:ecr:<application-region>:<aws-account-id>:repository/mem9-on-aws/mnemo-server",
+        "arn:aws:ecr:<application-region>:<aws-account-id>:repository/mem9-on-aws/qwen3-embed",
+        "arn:aws:ecr:<application-region>:<aws-account-id>:repository/mem9-on-aws/bootstrap",
+        "arn:aws:ecr:<application-region>:<aws-account-id>:repository/mem9-on-aws/llm-proxy"
       ]
     }
   ]
@@ -724,6 +741,11 @@ to the GitHub Actions deploy role.
 
 ## Locked decisions
 
+- `providers.aws.region` in `sst.config.ts` is the application-plane region
+  source of truth for fresh deployments; application consumers do not carry
+  independent defaults. Existing live deployments cannot be moved in place.
+- Account-global IAM ownership stacks remain in `us-west-2`. The selected
+  OpenAI GPT route uses its independent Responses region, default `us-west-2`.
 - Aurora PostgreSQL plus pgvector is the database engine.
 - Aurora automated backup retention is 14 days in production and 1 day in every
   non-production stage; PITR restores to a separate cluster.

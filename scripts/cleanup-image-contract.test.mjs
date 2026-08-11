@@ -60,7 +60,17 @@ function bareSpecifiers(source) {
  */
 function copiedEntrypoints() {
   return [
-    ...dockerfile.matchAll(/^COPY\s+(scripts\/\S+\.mjs)\s+\/app\/scripts\/\S+$/gmu),
+    ...dockerfile.matchAll(
+      /^COPY\s+(scripts\/[^/\s]+\.mjs)\s+\/app\/scripts\/[^/\s]+$/gmu,
+    ),
+  ].map((match) => match[1]);
+}
+
+function relativeSpecifiers(source) {
+  return [
+    ...source.matchAll(
+      /(?:\bfrom\s*|\bimport\s*\(\s*)["'](\.\.?\/[^"']+)["']/gu,
+    ),
   ].map((match) => match[1]);
 }
 
@@ -85,6 +95,19 @@ describe("the llm-proxy image can run the entrypoints copied into it (TC-SLACKAP
     // omitting one a path does take kills the run after the approval is spent. The
     // cheap rule is "if the file can name it, the image has it".
     expect(missing).toEqual([]);
+  });
+
+  it("ships every relative module in the copied entrypoints' static graph", () => {
+    for (const relative of copiedEntrypoints()) {
+      for (const specifier of relativeSpecifiers(read(relative))) {
+        const resolved = new URL(specifier, new URL(relative, root));
+        const sourcePath = resolved.pathname.slice(root.pathname.length);
+        expect(
+          dockerfile,
+          `${relative} imports an image file that is not copied: ${sourcePath}`,
+        ).toContain(`COPY ${sourcePath} /app/${sourcePath}`);
+      }
+    }
   });
 
   it("keeps the lockfile in agreement so `npm ci` cannot fail the image build", () => {

@@ -161,7 +161,8 @@ is not extraction-only.
 
 The daily inputs are reproducible with fixed UTC boundaries. Each command
 returns daily `Sum` datapoints; sort `Datapoints` by `Timestamp` before joining
-the three series:
+the three series. This dated dataset was collected in `ap-northeast-1`, so the
+historical query keeps that region rather than following the current provider:
 
 ```bash
 export AWS_REGION="ap-northeast-1"

@@ -22,12 +22,23 @@ import {
   repositoryMatchesFilter,
   uncoveredProjectRepositories,
 } from "./lib/ecr-registry-scanning-preflight.mjs";
+import { resolveApplicationRegion } from "./lib/application-region.mjs";
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = dirname(scriptsDir);
+const configuredApplicationRegion = await resolveApplicationRegion();
 const fixtureDir = join(scriptsDir, "test-fixtures", "ecr-registry-scanning");
 const wrapper = join(scriptsDir, "deploy-ecr-registry-scanning.sh");
 const preflight = join(scriptsDir, "lib", "ecr-registry-scanning-preflight.mjs");
+const applicationRegionResolver = join(
+  scriptsDir,
+  "resolve-application-region.mjs",
+);
+const applicationRegionLibrary = join(
+  scriptsDir,
+  "lib",
+  "application-region.mjs",
+);
 const tempDirs = [];
 const cloudFormationTags = [
   ...["!Ref", "!Sub", "!GetAtt"].map((tag) => ({ tag, resolve: (value) => value })),
@@ -113,6 +124,9 @@ async function runWrapper(fixture, stackState, options = {}) {
   const putInputFile = join(dir, "put-input.json");
   let wrapperUnderTest = wrapper;
   let operatorBackupFile = null;
+  const applicationRegion = options.repoEnv
+    ? "ap-southeast-1"
+    : (options.ecrRegion ?? configuredApplicationRegion);
   await copyFile(join(fixtureDir, "mock-aws.sh"), mockAws);
   await chmod(mockAws, 0o755);
   if (options.existingRollback) {
@@ -134,6 +148,14 @@ async function runWrapper(fixture, stackState, options = {}) {
         join(isolatedScripts, "lib", "ecr-registry-scanning-preflight.mjs"),
       ),
       copyFile(
+        applicationRegionResolver,
+        join(isolatedScripts, "resolve-application-region.mjs"),
+      ),
+      copyFile(
+        applicationRegionLibrary,
+        join(isolatedScripts, "lib", "application-region.mjs"),
+      ),
+      copyFile(
         join(repoRoot, "infra", "cloudformation", "ecr-registry-scanning.yaml"),
         join(
           isolatedRepo,
@@ -143,10 +165,22 @@ async function runWrapper(fixture, stackState, options = {}) {
         ),
       ),
       writeFile(
+        join(isolatedRepo, "sst.config.ts"),
+        [
+          "export default $config({",
+          "  app() {",
+          `    return { providers: { aws: { region: "${applicationRegion}" } } };`,
+          "  },",
+          "  run() {},",
+          "});",
+          "",
+        ].join("\n"),
+      ),
+      writeFile(
         join(isolatedRepo, ".env"),
         [
           "AWS_PROFILE=operator-real-profile",
-          "ECR_REGION=us-east-1",
+          `ECR_REGION=${applicationRegion}`,
           `ECR_SCAN_BACKUP_FILE=${operatorBackupFile}`,
           "",
         ].join("\n"),
@@ -182,7 +216,7 @@ async function runWrapper(fixture, stackState, options = {}) {
       ECR_SCAN_EXCLUSIVE_WRITER_ACK: options.exclusiveWriterAck ?? "true",
       ECR_SCAN_BACKUP_FILE: rollbackFile,
       ECR_SCAN_STACK_NAME: options.stackName ?? "",
-      ECR_REGION: options.ecrRegion ?? "ap-northeast-1",
+      ECR_REGION: options.ecrRegion ?? applicationRegion,
       AWS_PROFILE: options.awsProfile ?? "test-operator",
       PROJECT_NAME: options.projectName ?? "mem9-on-aws",
     },
@@ -245,7 +279,11 @@ function repositoryTokenDigest(token) {
 function expectRollback(
   result,
   expectedConfiguration,
-  { guidance = false, profile = "test-operator" } = {},
+  {
+    guidance = false,
+    profile = "test-operator",
+    region = configuredApplicationRegion,
+  } = {},
 ) {
   expect(JSON.parse(result.rollback)).toEqual(expectedConfiguration);
   expect(result.rollbackMode).toBe(0o600);
@@ -256,7 +294,7 @@ function expectRollback(
       "Restore the captured baseline while the exclusive-writer window remains active:",
     );
     expect(result.stderr).toContain(
-      `aws${profileArgument} ecr put-registry-scanning-configuration --region ap-northeast-1 --cli-input-json file://${result.rollbackFile}`,
+      `aws${profileArgument} ecr put-registry-scanning-configuration --region ${region} --cli-input-json file://${result.rollbackFile}`,
     );
   }
 }
@@ -706,7 +744,7 @@ describe("CloudFormation declarations", () => {
       Resource: "*",
       Condition: {
         StringEquals: {
-          "aws:RequestedRegion": "ap-northeast-1",
+          "aws:RequestedRegion": "<application-region>",
         },
       },
     });
@@ -720,7 +758,7 @@ describe("CloudFormation declarations", () => {
       Resource: projectRepositories("mem9-on-aws")
         .map(
           (repository) =>
-            `arn:aws:ecr:ap-northeast-1:<aws-account-id>:repository/${repository}`,
+            `arn:aws:ecr:<application-region>:<aws-account-id>:repository/${repository}`,
         )
         .sort(),
     });
@@ -953,7 +991,10 @@ describe("deployment wrapper fixture adapter", () => {
       else process.env.ECR_REGION = originalRegion;
     }
     expect(isolated.status).toBe(4);
-    expectRollback(isolated, driftedConfiguration, { guidance: true });
+    expectRollback(isolated, driftedConfiguration, {
+      guidance: true,
+      region: "ap-southeast-1",
+    });
     expect(isolated.operatorBackup).toBeNull();
     expect(isolated.stderr).not.toContain("operator-real-profile");
     expect(isolated.stderr).not.toContain("us-east-1");
@@ -968,7 +1009,7 @@ describe("deployment wrapper fixture adapter", () => {
     expect(JSON.parse(loaded.operatorBackup)).toEqual(driftedConfiguration);
     expect(loaded.rollback).toBe("");
     expect(loaded.stderr).toContain("--profile operator-real-profile");
-    expect(loaded.stderr).toContain("--region us-east-1");
+    expect(loaded.stderr).toContain("--region ap-southeast-1");
     expect(loaded.stderr).toContain(`file://${loaded.operatorBackupFile}`);
   });
 

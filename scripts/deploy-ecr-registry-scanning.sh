@@ -17,7 +17,7 @@
 # .env. This script is operator-run and is not part of SST or CI deployment.
 #
 # Overrides:
-#   ECR_REGION              default ap-northeast-1
+#   ECR_REGION              compatibility override; must match sst.config.ts
 #   ECR_SCAN_EXCLUSIVE_WRITER_ACK
 #                           must be true before a mutation; set only after the
 #                           account owner pauses other registry config writers
@@ -42,7 +42,12 @@ project_name="mem9-on-aws"
 # falling back under the pull-request-capable role's broad CFN permissions.
 # The preflight CLI owns project-name validation before any mutation decision.
 stack_name="ecr-registry-scanning-${project_name}"
-region="${ECR_REGION:-ap-northeast-1}"
+application_region="$(node "$repo_root/scripts/resolve-application-region.mjs")"
+region="${ECR_REGION:-$application_region}"
+if [[ "$region" != "$application_region" ]]; then
+  echo "ECR_REGION must match the sst.config.ts application region." >&2
+  exit 2
+fi
 template_file="$repo_root/infra/cloudformation/ecr-registry-scanning.yaml"
 preflight="$repo_root/scripts/lib/ecr-registry-scanning-preflight.mjs"
 

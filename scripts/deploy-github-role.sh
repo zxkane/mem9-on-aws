@@ -39,10 +39,10 @@ TEMPLATE_FILE="infra/cloudformation/github-actions-role.yaml"
 # in different regions (EntityAlreadyExists rollback). Keep all GitHub Actions
 # role stacks in one region so they share one OIDC provider collision-free.
 readonly STACK_REGION="us-west-2"
-# The application remains regional even though the IAM stack is pinned elsewhere.
-# Match infra/vpc.ts: use MEM9_VPC_ID when configured, otherwise the default VPC,
-# and authorize only the NAT-routed private-1* subnets selected by the app.
-APPLICATION_REGION="${PROJECT_REGION:-ap-northeast-1}"
+# The application remains regional even though the IAM stack is pinned
+# elsewhere. Resolve the same provider region SST uses, then discover the VPC
+# and private-1* subnets selected by the app.
+APPLICATION_REGION="$(node "$_repo_root/scripts/resolve-application-region.mjs")"
 
 MODE=""
 for arg in "$@"; do
@@ -63,6 +63,48 @@ done
 if [[ ! -f "$TEMPLATE_FILE" ]]; then
   echo "Error: template not found at $TEMPLATE_FILE (run from repo root)" >&2
   exit 2
+fi
+
+read_existing_application_region() {
+  aws cloudformation describe-stacks \
+    --stack-name "$STACK_NAME" \
+    --region "$STACK_REGION" \
+    --query "Stacks[0].Parameters[?ParameterKey=='ApplicationRegion'].ParameterValue | [0]" \
+    --output text
+}
+
+require_matching_existing_region() {
+  local existing_region="$1"
+  if [[ ! "$existing_region" =~ ^[a-z]{2}(-gov)?-[a-z0-9-]+-[0-9]+$ ]]; then
+    echo "Error: existing GitHub Actions role has no valid ApplicationRegion; no mutation was attempted." >&2
+    return 1
+  fi
+  if [[ "$existing_region" != "$APPLICATION_REGION" ]]; then
+    echo "Error: Existing GitHub Actions role belongs to application region ${existing_region}; no mutation was attempted." >&2
+    echo "Relocating a live deployment requires a dedicated dual-region migration after old-region previews are removed." >&2
+    return 1
+  fi
+}
+
+# Auto-detect create vs update before uploading a large template or touching any
+# other service. An existing owner cannot be retargeted in place.
+if [[ -z "$MODE" ]]; then
+  set +e
+  EXISTING_APPLICATION_REGION="$(read_existing_application_region 2>/dev/null)"
+  DESCRIBE_EXIT=$?
+  set -e
+  if [[ $DESCRIBE_EXIT -eq 0 ]]; then
+    require_matching_existing_region "$EXISTING_APPLICATION_REGION"
+    MODE="update"
+  else
+    MODE="create"
+  fi
+elif [[ "$MODE" == "update" ]]; then
+  if ! EXISTING_APPLICATION_REGION="$(read_existing_application_region)"; then
+    echo "Error: could not read the existing GitHub Actions role region; no mutation was attempted." >&2
+    exit 1
+  fi
+  require_matching_existing_region "$EXISTING_APPLICATION_REGION"
 fi
 
 echo "Stack:    $STACK_NAME"
@@ -183,18 +225,6 @@ PARAMS_JSON=$(printf \
   "$APPLICATION_VPC_ARN" \
   "$APPLICATION_SUBNET_ARNS")
 echo "ENI scope: $APPLICATION_REGION, one VPC, ${#PRIVATE_SUBNET_IDS[@]} private subnet(s)"
-
-# Auto-detect create vs update when the caller did not pass --create / --update.
-if [[ -z "$MODE" ]]; then
-  if aws cloudformation describe-stacks \
-      --stack-name "$STACK_NAME" \
-      --region "$STACK_REGION" \
-      >/dev/null 2>&1; then
-    MODE="update"
-  else
-    MODE="create"
-  fi
-fi
 
 case "$MODE" in
   create)

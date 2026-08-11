@@ -114,6 +114,7 @@ function installGlobals(stage: string) {
     // ecs() composes the ECR image URI from the caller's account id — never a
     // hardcoded 12-digit account number in committed code.
     getCallerIdentityOutput: () => ({ accountId: out("123456789012") }),
+    getRegionOutput: () => ({ name: out("ap-northeast-1") }),
     ec2: {
       getVpcOutput: () => ({ id: out("vpc-test") }),
       getSubnetsOutput: () => ({ ids: out(["subnet-a", "subnet-b", "subnet-c"]) }),
@@ -689,7 +690,7 @@ describe("ecs stack", () => {
     const proxy = containersByName()["llm-proxy"];
     const env = proxy.environment as Record<string, unknown>;
     expect(env.LLM_PROXY_PORT).toBe("8082"); // matches MNEMO_LLM_BASE_URL localhost:8082
-    expect(env.LLM_PROXY_REGION).toBe("ap-northeast-1"); // pinned Mantle region
+    expect(materialize(env.LLM_PROXY_REGION)).toBe("ap-northeast-1");
     // GLM-5 request bounds (TC-GLM-BOUND-021, issue #46): both proxy controls
     // are explicit in the production task definition.
     expect(env.LLM_PROXY_MAX_BODY_BYTES).toBe("1048576");

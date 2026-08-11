@@ -203,7 +203,7 @@ verify exact reviewed workflow blobs, clean exact-head checkout, and idle runs
   -> for each exact legacy role: re-read, update to Lambda-only, and read back
   -> read the complete boundary ownership stack in us-west-2
   -> require its ApplicationRegion and BedrockProjectArn parameters
-  -> read prod cluster/service/bootstrap parameters in ap-northeast-1
+  -> read prod cluster/service/bootstrap parameters in the sst.config.ts application region
   -> inspect every service deployment, RUNNING/PENDING task, and bootstrap task definition
   -> require MEM9_DB_SECRET and MEM9_TENANT_ID to reference current-account,
      current-region mem9-on-aws-* Secrets Manager ARNs

@@ -92,15 +92,22 @@ describe("readConfig", () => {
   });
 
   it("defaults the token TTL to 12h and refresh to 1h", () => {
-    const c = readConfig({});
+    const c = readConfig({ AWS_REGION: "ap-southeast-1" });
     expect(c.tokenTtlSeconds).toBe(43200); // getToken max/default
     expect(c.refreshIntervalMs).toBe(3_600_000);
     expect(c.maxBodyBytes).toBe(1_048_576);
     expect(c.maxTokens).toBe(4096);
   });
 
+  it("fails when the application region is absent", () => {
+    expect(() => readConfig({})).toThrow(
+      /LLM_PROXY_REGION or AWS_REGION is required/u,
+    );
+  });
+
   it("honors an explicit upstream override + project", () => {
     const c = readConfig({
+      AWS_REGION: "ap-southeast-1",
       LLM_PROXY_UPSTREAM_BASE: "https://x/v1",
       LLM_PROXY_OPENAI_PROJECT: "p1",
       LLM_PROXY_MAX_BODY_BYTES: "2048",

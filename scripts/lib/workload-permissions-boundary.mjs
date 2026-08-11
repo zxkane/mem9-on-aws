@@ -1618,10 +1618,17 @@ export async function runBoundaryRollout(
   ) {
     throw new Error("final GitHub interlock configuration is invalid");
   }
+  if (typeof adapter.verifyBoundaryRegion !== "function") {
+    throw new Error("boundary region preflight configuration is invalid");
+  }
   const boundedAdapter = createDeadlineAdapter(adapter, deadlineAt);
   let quarantineAttempted = false;
   let quarantineRemoved = false;
   try {
+    // Catch a retained stack from another application region before quarantine
+    // or any other IAM mutation. The full runtime binding read still runs below,
+    // immediately before boundary attachment.
+    await boundedAdapter.verifyBoundaryRegion();
     quarantineAttempted = true;
     await boundedAdapter.putQuarantine({
       roleName: deployRoleName,
