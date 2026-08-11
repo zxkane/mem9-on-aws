@@ -259,6 +259,19 @@ function displayStage(stage: string): string {
   return "<invalid-stage>";
 }
 
+/**
+ * A reportable one-line reason from an unknown thrown value. `runCommand` throws
+ * `<label> failed` and deliberately drops AWS stderr, so the message is already
+ * free of ARNs, account ids, and resource values; anything else is reduced to a
+ * constant rather than risking an unvetted string in a report or operator issue.
+ */
+function errorReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  return SAFE_ERROR_REASON.test(message) ? message : "unknown-error";
+}
+
+const SAFE_ERROR_REASON = /^[A-Za-z0-9 ._:-]{1,120}$/u;
+
 function groupResourceCounts(
   stage: string,
   resources: readonly ResourceObservation[],
@@ -755,7 +768,25 @@ export async function applyReconciliationPlan(
 
     const outcome = await adapters.sweepOrphanedNetwork(confirmed.stage);
     if (!outcome.swept) {
+      // A refused sweep must still surface in the operator issue. Some refusals
+      // never clear on their own — `sst remove` deletes the execution role, and
+      // Lambda cannot detach a hyperplane ENI without it, so an `in-use` interface
+      // can refuse forever. Recording the reason only in an apply-job log would
+      // leave that stage leaking invisibly, which is the exact failure #146 is
+      // about; the issue is the artifact an operator actually sees.
       cancelled.push({ stage: confirmed.stage, reason: outcome.reason });
+      // Recorded as `operator-review`, which is what a stage the sweep declined
+      // now is: `prepareOperatorIssue` reports exactly that action, and the
+      // reasons carry the refusal so the issue says why automation stopped.
+      stateMissing.set(
+        confirmed.stage,
+        deepFreeze({
+          ...confirmed,
+          action: "operator-review",
+          reasons: [...confirmed.reasons, `sweep-refused:${outcome.reason}`],
+        }),
+      );
+      inventoryDirty = true;
       continue;
     }
     swept.push(confirmed.stage);
@@ -1296,13 +1327,40 @@ export async function describeGroupNetworkInterfaces(
  * behind — the exact leak this drains. Verified against the stages cleaned by hand
  * for #146, every one of which had detached ENIs still pinning its SG.
  *
- * Every guard here is a REFUSAL, not an exception: the caller records the reason
- * against the stage and moves on, so one drifted stage cannot abort the run.
- * `previewNumber` is re-asserted even though the caller already checked it — this
- * function issues the only delete calls in the reconciler, and a guard that lives
- * next to the call it protects cannot be bypassed by a future caller.
+ * Every failure here is a REFUSAL, not an exception — including a failing AWS
+ * call. The caller records the reason against the stage and moves on, so one
+ * drifted stage cannot abort the run, cannot skip the remaining stages this sweep
+ * exists to drain, and cannot pre-empt a pending `sst remove` failure that the
+ * caller still has to re-throw. `previewNumber` is re-asserted even though the
+ * caller already checked it — this function issues the only delete calls in the
+ * reconciler, and a guard that lives next to the call it protects cannot be
+ * bypassed by a future caller.
  */
 export async function sweepOrphanedNetwork(
+  stage: string,
+  commandRunner: CommandRunner,
+): Promise<SweepOutcome> {
+  try {
+    return await runSweep(stage, commandRunner);
+  } catch (error) {
+    // An AWS call failed for a reason no guard anticipated. Report it as a
+    // refusal: throwing would abandon every later stage and destroy the caller's
+    // captured removal error. The message is `runCommand`'s label, which carries
+    // no ARNs, account ids, or resource values.
+    return { swept: false, reason: `sweep-failed: ${errorReason(error)}` };
+  }
+}
+
+/**
+ * Deleting a resource AWS has already deleted is the goal state, not a failure.
+ * Lambda deletes its own hyperplane ENIs asynchronously, so the sweep genuinely
+ * races it; treating NotFound as success keeps that race from filing a refusal
+ * against a stage that is in fact clean.
+ */
+const ALREADY_GONE =
+  /InvalidNetworkInterfaceID\.NotFound|InvalidGroup\.NotFound|InvalidGroupId\.Malformed/u;
+
+async function runSweep(
   stage: string,
   commandRunner: CommandRunner,
 ): Promise<SweepOutcome> {
@@ -1333,17 +1391,38 @@ export async function sweepOrphanedNetwork(
         "aws",
         ["ec2", "delete-network-interface", "--network-interface-id", eni.id],
         `network-interface sweep for ${stage}`,
+        ALREADY_GONE,
       );
       networkInterfaces += 1;
     }
   }
 
-  for (const groupId of groupIds) {
-    await commandRunner(
-      "aws",
-      ["ec2", "delete-security-group", "--group-id", groupId],
-      `security-group sweep for ${stage}`,
-    );
+  // An ENI is not the only thing that can raise `DependencyViolation`: a stage
+  // owns both `Mem9TaskSg` and `Mem9DbSg`, and the latter's ingress rule
+  // REFERENCES the former, so deleting the task SG first fails while the db SG
+  // still exists. `describe-security-groups` gives no ordering guarantee, so
+  // delete in passes and stop when a pass makes no progress — that both resolves
+  // the reference (whichever order AWS returned) and turns a genuinely stuck
+  // group into a refusal instead of a thrown DependencyViolation.
+  let pending = groupIds;
+  while (pending.length > 0) {
+    const failed: string[] = [];
+    for (const groupId of pending) {
+      try {
+        await commandRunner(
+          "aws",
+          ["ec2", "delete-security-group", "--group-id", groupId],
+          `security-group sweep for ${stage}`,
+          ALREADY_GONE,
+        );
+      } catch {
+        failed.push(groupId);
+      }
+    }
+    if (failed.length === pending.length) {
+      return { swept: false, reason: "security-group-dependency-violation" };
+    }
+    pending = failed;
   }
   return { swept: true, networkInterfaces, securityGroups: groupIds.length };
 }

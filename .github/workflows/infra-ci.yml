@@ -662,16 +662,31 @@ jobs:
           case "$STAGE" in
             prod|main|production) echo "::error::Refusing to remove protected stage $STAGE"; exit 1 ;;
           esac
+          # Clear a stale lock left by a previous run — ONCE, before the first
+          # attempt. It must not move inside `remove()`: `timeout` sends only
+          # SIGTERM, and `sst remove` fans out to a Pulumi engine that can outlive
+          # it, so an unlock on the retry path could force-clear the lock still
+          # held by a first attempt that is quietly still running. Two engines on
+          # one state object is state corruption, not a slow teardown.
+          pnpm -C infra exec sst unlock --stage "$STAGE" 2>&1 || true
+
+          # --kill-after escalates to SIGKILL 60s after SIGTERM, so a first attempt
+          # that ignores TERM cannot survive into the retry as an orphan.
           remove() {
-            pnpm -C infra exec sst unlock --stage "$STAGE" 2>&1 || true
-            timeout "$1" pnpm -C infra exec sst remove --stage "$STAGE" --print-logs
+            timeout --kill-after=60s "$1" \
+              pnpm -C infra exec sst remove --stage "$STAGE" --print-logs
           }
           if remove 15m; then
             echo "::notice::Removed stage ${STAGE} on the first attempt"
             exit 0
           fi
           echo "::notice::First remove of ${STAGE} did not finish — waiting for Lambda ENIs to detach, then retrying"
-          node scripts/await-eni-detach.mts "$STAGE"
+          # The wait's internal budget is checked BETWEEN polls, so a throttled EC2
+          # endpoint could overshoot it and push the retry past the job timeout —
+          # re-creating the mid-remove cancellation that leaked the resources. Its
+          # expiry is a non-failure by design, so an outer bound is safe to ignore.
+          timeout --kill-after=60s 22m node scripts/await-eni-detach.mts "$STAGE" || \
+            echo "::warning::ENI detach wait exceeded its outer bound — retrying the remove anyway"
           remove 15m
 
       - name: Comment cleanup status

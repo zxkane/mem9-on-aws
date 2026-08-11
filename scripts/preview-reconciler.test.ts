@@ -2,6 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
+import { DEFAULT_TIMEOUT_MS } from "./await-eni-detach.mts";
 import {
   OPERATOR_ISSUE_MARKER,
   OPERATOR_ISSUE_TITLE,
@@ -993,6 +994,188 @@ describe("orphaned network sweep", () => {
       expect(outcome).toEqual({ swept: true, networkInterfaces: 0, securityGroups: 1 });
       expect(commandRunner.deletes).toEqual([`delete-security-group:${SG_ID}`]);
     });
+
+    // A thrown AWS failure would abandon every later stage in the sweep AND
+    // destroy a captured `sst remove` error the caller still has to re-throw.
+    // Refusing keeps both intact.
+    it("TC-PREVIEW-RECON-055 refuses rather than throws when an AWS delete fails", async () => {
+      const commandRunner = sweepRunner(
+        [ownedGroup("pr-12")],
+        [{ NetworkInterfaceId: ENI_ID, Status: "available", RequesterManaged: false }],
+      );
+      vi.mocked(commandRunner).mockImplementation(async (_file, args) => {
+        if (args[1] === "delete-network-interface") throw new Error("aws ec2 delete failed");
+        if (args[1] === "describe-security-groups") {
+          return { stdout: JSON.stringify({ SecurityGroups: [ownedGroup("pr-12")] }), stderr: "" };
+        }
+        return {
+          stdout: JSON.stringify({
+            NetworkInterfaces: [
+              { NetworkInterfaceId: ENI_ID, Status: "available", RequesterManaged: false },
+            ],
+          }),
+          stderr: "",
+        };
+      });
+
+      const outcome = await sweepOrphanedNetwork("pr-12", commandRunner);
+
+      expect(outcome).toEqual({ swept: false, reason: "sweep-failed: aws ec2 delete failed" });
+    });
+
+    // Only `runCommand`'s own `<label> failed` messages are safe to report; an
+    // arbitrary thrown value could carry an ARN or account id into an issue.
+    it("TC-PREVIEW-RECON-056 redacts an unrecognized failure message", async () => {
+      const commandRunner = sweepRunner([ownedGroup("pr-12")], []);
+      vi.mocked(commandRunner).mockImplementation(async () => {
+        throw new Error("arn:aws:ec2:ap-northeast-1:123456789012:security-group/sg-0abc");
+      });
+
+      const outcome = await sweepOrphanedNetwork("pr-12", commandRunner);
+
+      expect(outcome).toEqual({ swept: false, reason: "sweep-failed: unknown-error" });
+      expect(JSON.stringify(outcome)).not.toMatch(/123456789012|arn:aws/);
+    });
+
+    // Tolerating NotFound must not become tolerating everything: an ENI we truly
+    // failed to delete has to refuse, or the sweep would delete the security group
+    // while an interface still pins it and report `swept: true` over a live leak.
+    // The distinction is `runCommand`'s allowedFailure regex, which only NotFound
+    // may match — asserted through the real runCommand, since the mock runner
+    // cannot exercise that branch.
+    it("TC-PREVIEW-RECON-060 tolerates only an already-gone resource", async () => {
+      const notFound = Object.assign(new Error("exit 254"), {
+        stderr: "An error occurred (InvalidNetworkInterfaceID.NotFound)",
+      });
+      const denied = Object.assign(new Error("exit 254"), {
+        stderr: "An error occurred (UnauthorizedOperation) when calling DeleteNetworkInterface",
+      });
+      const runner = (
+        failure: Error & { stderr: string },
+      ): CommandRunner & { deletes: string[] } => {
+        const deletes: string[] = [];
+        const fn = vi.fn(async (_file: string, args: readonly string[], label: string, allowed?: RegExp) => {
+          if (args[1] === "describe-security-groups") {
+            return { stdout: JSON.stringify({ SecurityGroups: [ownedGroup("pr-12")] }), stderr: "" };
+          }
+          if (args[1] === "describe-network-interfaces") {
+            return {
+              stdout: JSON.stringify({
+                NetworkInterfaces: [
+                  { NetworkInterfaceId: ENI_ID, Status: "available", RequesterManaged: false },
+                ],
+              }),
+              stderr: "",
+            };
+          }
+          if (args[1] === "delete-network-interface") {
+            // Exactly `runCommand`'s contract: allowedFailure decides.
+            if (allowed?.test(failure.stderr)) return null;
+            throw new Error(`${label} failed`);
+          }
+          deletes.push(`${args[1]}:${args[3]}`);
+          return { stdout: "", stderr: "" };
+        });
+        return Object.assign(fn as unknown as CommandRunner, { deletes });
+      };
+
+      const gone = runner(notFound);
+      expect(await sweepOrphanedNetwork("pr-12", gone)).toEqual({
+        swept: true,
+        networkInterfaces: 1,
+        securityGroups: 1,
+      });
+
+      const refused = runner(denied);
+      expect(await sweepOrphanedNetwork("pr-12", refused)).toEqual({
+        swept: false,
+        reason: "sweep-failed: network-interface sweep for pr-12 failed",
+      });
+      // The decisive part: the group was NOT deleted while its ENI survived.
+      expect(refused.deletes).toEqual([]);
+    });
+
+    // A stage owns both Mem9TaskSg and Mem9DbSg, and the db SG's ingress rule
+    // REFERENCES the task SG — an ENI is not the only DependencyViolation source.
+    // describe-security-groups gives no ordering guarantee, so the sweep must
+    // retry in passes rather than depend on the order AWS happened to return.
+    it("TC-PREVIEW-RECON-057 retries a security group blocked by another group's rule", async () => {
+      const TASK_SG = "sg-0aaaaaaaaaaaaaaaa";
+      const DB_SG = "sg-0bbbbbbbbbbbbbbbb";
+      const deletes: string[] = [];
+      const commandRunner = vi.fn(async (_file: string, args: readonly string[]) => {
+        if (args[1] === "describe-security-groups") {
+          return {
+            stdout: JSON.stringify({
+              SecurityGroups: [ownedGroup("pr-12", TASK_SG), ownedGroup("pr-12", DB_SG)],
+            }),
+            stderr: "",
+          };
+        }
+        if (args[1] === "describe-network-interfaces") {
+          return { stdout: JSON.stringify({ NetworkInterfaces: [] }), stderr: "" };
+        }
+        // The task SG cannot go until the db SG's referencing rule is gone.
+        if (args[3] === TASK_SG && !deletes.includes(`delete-security-group:${DB_SG}`)) {
+          throw new Error("security-group sweep for pr-12 failed");
+        }
+        deletes.push(`${args[1]}:${args[3]}`);
+        return { stdout: "", stderr: "" };
+      }) as unknown as CommandRunner;
+
+      const outcome = await sweepOrphanedNetwork("pr-12", commandRunner);
+
+      expect(outcome).toEqual({ swept: true, networkInterfaces: 0, securityGroups: 2 });
+      expect(deletes).toEqual([
+        `delete-security-group:${DB_SG}`,
+        `delete-security-group:${TASK_SG}`,
+      ]);
+    });
+
+    // A group nothing can ever delete must refuse, not loop and not throw.
+    it("TC-PREVIEW-RECON-058 refuses when no security group can be deleted", async () => {
+      const commandRunner = sweepRunner([ownedGroup("pr-12")], []);
+      vi.mocked(commandRunner).mockImplementation(async (_file, args) => {
+        if (args[1] === "describe-security-groups") {
+          return { stdout: JSON.stringify({ SecurityGroups: [ownedGroup("pr-12")] }), stderr: "" };
+        }
+        if (args[1] === "describe-network-interfaces") {
+          return { stdout: JSON.stringify({ NetworkInterfaces: [] }), stderr: "" };
+        }
+        throw new Error("security-group sweep for pr-12 failed");
+      });
+
+      const outcome = await sweepOrphanedNetwork("pr-12", commandRunner);
+
+      expect(outcome).toEqual({
+        swept: false,
+        reason: "security-group-dependency-violation",
+      });
+    });
+  });
+
+  // A refusal that clears on its own is fine; one that never clears must not be
+  // invisible. `sst remove` deletes the execution role, and Lambda cannot detach a
+  // hyperplane ENI without it, so `network-interface-in-use` can refuse forever.
+  it("TC-PREVIEW-RECON-059 reports a refused sweep in the operator issue", async () => {
+    const source = networkOnly();
+    const plan = buildReconciliationPlan(source);
+    const runtime = adapters([source, source, source]);
+    vi.mocked(runtime.sweepOrphanedNetwork).mockResolvedValue({
+      swept: false,
+      reason: "network-interface-in-use",
+    });
+
+    const result = await applyReconciliationPlan(plan, runtime, {
+      eventName: "workflow_dispatch",
+      mode: "apply",
+    });
+
+    expect(result.swept).toEqual([]);
+    expect(result.operatorIssue).toBe("created");
+    const [, body] = vi.mocked(runtime.createOperatorIssue).mock.calls[0]!;
+    expect(body).toContain("pr-12");
+    expect(body).toContain("ec2:security-group");
   });
 
   it("TC-PREVIEW-RECON-046 maps EC2 ARNs to the sweepable resource types", () => {
@@ -1129,12 +1312,28 @@ describe("workflow control flow", () => {
     const removeBounds = [...cleanupJob.matchAll(/\bremove ([0-9]+)m\b/g)].map((match) =>
       Number(match[1]),
     );
+    // The wait's OUTER bound, read from the shell rather than from
+    // DEFAULT_TIMEOUT_MS: the script's own budget is only checked between polls, so
+    // a slow AWS call can overshoot it. Summing the soft budget here would certify
+    // a ceiling nothing enforces.
+    const waitBound = Number(
+      cleanupJob.match(/timeout --kill-after=\S+ ([0-9]+)m node scripts\/await-eni-detach/)![1],
+    );
 
-    expect(cleanupJob).toMatch(/timeout "\$1" pnpm -C infra exec sst remove/);
+    expect(cleanupJob).toMatch(
+      /timeout --kill-after=\S+ "\$1" \\\n\s+pnpm -C infra exec sst remove/,
+    );
     expect(removeBounds).toHaveLength(2);
-    // +20 for the ENI wait's own default budget (await-eni-detach DEFAULT_TIMEOUT_MS).
-    const innerTotal = removeBounds.reduce((sum, value) => sum + value, 0) + 20;
+    // The wait's outer bound must not be tighter than its own internal budget,
+    // or the shell would kill it before it can emit its expiry diagnostic.
+    expect(waitBound).toBeGreaterThanOrEqual(DEFAULT_TIMEOUT_MS / 60_000);
+    const innerTotal = removeBounds.reduce((sum, value) => sum + value, 0) + waitBound;
     expect(innerTotal).toBeLessThan(jobTimeout);
+    // `sst unlock` must run ONCE, before the first attempt — never inside the
+    // retryable function, where it could clear the lock of a first attempt that
+    // SIGTERM failed to kill.
+    expect([...cleanupJob.matchAll(/sst unlock/g)]).toHaveLength(1);
+    expect(cleanupJob.indexOf("sst unlock")).toBeLessThan(cleanupJob.indexOf("remove() {"));
     // The wait must sit BETWEEN the two removes: before the first, the ENIs are
     // still in-use (the Lambdas are alive), so waiting there accomplishes nothing.
     const firstRemove = cleanupJob.indexOf("if remove 15m");

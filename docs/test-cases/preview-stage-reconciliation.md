@@ -84,6 +84,12 @@ guard below must turn a listed test red.
 | TC-PREVIEW-RECON-052 | Owned security group with no remaining interfaces | Deletes the group alone |
 | TC-PREVIEW-RECON-053 | Empty owned inventory | Never sweepable — asserted on the predicate directly, since `[].every()` is vacuously true |
 | TC-PREVIEW-RECON-054 | A redeploy re-creates SST state between the advisory pass and the pre-sweep re-plan | Sweep cancels `no-longer-sweepable`; the stage returns to `sst remove` instead of losing a live security group |
+| TC-PREVIEW-RECON-055 | An AWS delete call inside the sweep fails for an unanticipated reason | Refuses `sweep-failed: <label>`; a throw would skip every later stage and destroy the caller's captured `sst remove` error |
+| TC-PREVIEW-RECON-056 | The thrown value carries an ARN or account id | Reduced to `sweep-failed: unknown-error`; only `runCommand`'s own label shape is reportable |
+| TC-PREVIEW-RECON-057 | Stage owns both `Mem9TaskSg` and `Mem9DbSg`, whose ingress rule references the task SG | Multi-pass deletion resolves the reference in either API ordering; both groups are deleted |
+| TC-PREVIEW-RECON-058 | A security group no pass can delete | Refuses `security-group-dependency-violation` — no infinite loop, no throw |
+| TC-PREVIEW-RECON-059 | The sweep refuses (e.g. an ENI stuck `in-use` because `sst remove` deleted the execution role) | Stage is recorded `operator-review` and appears in the operator issue, so a permanently-stuck stage cannot leak invisibly |
+| TC-PREVIEW-RECON-060 | `InvalidNetworkInterfaceID.NotFound` vs. `UnauthorizedOperation` on the same delete | NotFound counts as success; any other failure refuses and the security group is NOT deleted while its interface survives |
 
 | ID | Scenario | Expected |
 |---|---|---|
