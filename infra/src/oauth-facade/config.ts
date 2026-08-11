@@ -31,8 +31,6 @@ import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 export interface FacadeConfig {
   /** AgentCore Gateway URL the façade proxies to (`/mcp` + fallthrough). */
   upstream: string;
-  /** Cognito OIDC issuer. */
-  issuer: string;
   /** Cognito Hosted-UI authorize / token / userinfo / revocation / jwks. */
   authorize: string;
   token: string;
@@ -194,7 +192,6 @@ export async function loadConfig(
   const resolved = await resolveSsm(prefix, ssm);
   return {
     upstream: resolved.upstream,
-    issuer: reqEnv(env, "COGNITO_ISSUER"),
     authorize: reqEnv(env, "COGNITO_AUTHORIZE_ENDPOINT"),
     token: reqEnv(env, "COGNITO_TOKEN_ENDPOINT"),
     userinfo: reqEnv(env, "COGNITO_USERINFO_ENDPOINT"),

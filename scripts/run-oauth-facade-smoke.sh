@@ -28,6 +28,50 @@ echo "run-oauth-facade-smoke: checking /.well-known/oauth-protected-resource"
 PR=$(curl -fsS "${FACADE}/.well-known/oauth-protected-resource")
 echo "$PR" | jq -e '.resource | endswith("/mcp")' >/dev/null || { echo "::error::protected-resource.resource does not end with /mcp"; exit 1; }
 
+# TC-MCPGW-079. RFC 8414 §3.3: the AS metadata `issuer` MUST be identical to the
+# issuer identifier the client inserted the well-known string into — which is the
+# `authorization_servers` entry published above. A mismatch makes a compliant
+# client (rmcp >= 3.0.0) discard the document and fail MCP startup entirely. The
+# checks above validated every other advertised field but never this one, which is
+# why the façade advertised Cognito's issuer undetected.
+#
+# Each field is PRESENCE-CHECKED before it is read, in this shell, using the same
+# `jq -e ... || { echo; exit 1; }` idiom as the checks above. Neither shorter form
+# works: a bare `jq -er` in the assignment lets `set -e` kill the script AT the
+# assignment with no `::error::` and no field named, and moving the diagnostic into
+# a helper called as `$(field ...)` only swallows it into the captured stdout —
+# same silent non-zero exit. Verified against a mock serving a null `.issuer`.
+#
+# This block prints its own progress line for the same reason: a green job is not
+# evidence that a specific assertion ran, and without a line of its own the only
+# proof these checks executed is `set -e` having reached the next section.
+echo "run-oauth-facade-smoke: checking metadata issuer identity (RFC 8414 §3.3)"
+echo "$AS" | jq -e '(.issuer // "") != ""' >/dev/null || { echo "::error::authorization-server metadata .issuer is missing or empty"; exit 1; }
+echo "$PR" | jq -e '(.authorization_servers[0] // "") != ""' >/dev/null || { echo "::error::protected-resource .authorization_servers[0] is missing or empty"; exit 1; }
+AS_ISSUER=$(echo "$AS" | jq -r '.issuer')
+ADVERTISED_AS=$(echo "$PR" | jq -r '.authorization_servers[0]')
+# The relationship alone is NOT enough: documents that agree on the UPSTREAM issuer
+# satisfy §3.3 while pointing clients at Cognito, which publishes no
+# `registration_endpoint` — so DCR fails and #143's symptom returns by another
+# route. Anchor to the façade URL read from SSM above, which is deployment ground
+# truth rather than a hardcoded host, so this still holds on any stage/domain.
+if [[ "${ADVERTISED_AS%/}" != "${FACADE%/}" ]]; then
+  echo "::error::protected-resource authorization_servers[0] (${ADVERTISED_AS}) is not this façade (${FACADE}) — clients would be sent elsewhere for authorization"
+  exit 1
+fi
+if [[ "$AS_ISSUER" != "$ADVERTISED_AS" ]]; then
+  echo "::error::AS metadata issuer (${AS_ISSUER}) != authorization_servers[0] (${ADVERTISED_AS}) — RFC 8414 §3.3 violation; compliant clients will refuse this façade"
+  exit 1
+fi
+OIDC=$(curl -fsS "${FACADE}/.well-known/openid-configuration")
+echo "$OIDC" | jq -e '(.issuer // "") != ""' >/dev/null || { echo "::error::openid-configuration .issuer is missing or empty"; exit 1; }
+OIDC_ISSUER=$(echo "$OIDC" | jq -r '.issuer')
+if [[ "$OIDC_ISSUER" != "$ADVERTISED_AS" ]]; then
+  echo "::error::OIDC discovery issuer (${OIDC_ISSUER}) != authorization_servers[0] (${ADVERTISED_AS}) — clients discovering via openid-configuration will refuse this façade"
+  exit 1
+fi
+echo "run-oauth-facade-smoke: issuer identity OK — AS and OIDC both self-identify as ${ADVERTISED_AS}"
+
 echo "run-oauth-facade-smoke: checking /register returns a public client (no secret)"
 DCR=$(curl -fsS -X POST -H 'Content-Type: application/json' -d '{"redirect_uris":["http://localhost:8080/cb"]}' "${FACADE}/register")
 echo "$DCR" | jq -e '.client_id | length > 0' >/dev/null || { echo "::error::DCR did not return client_id"; exit 1; }

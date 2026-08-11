@@ -204,7 +204,11 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
       // the deploy stayed green. Neither loadConfig nor resolveSsm reads STAGE,
       // so nothing else in the config path would surface the omission.
       STAGE: stage,
-      COGNITO_ISSUER: cognitoOut.issuer,
+      // The upstream Cognito issuer is deliberately NOT passed to the façade: its
+      // metadata documents must advertise their OWN issuer (RFC 8414 §3.3), which
+      // left the upstream value with no consumer (#143). The Gateway's JWT
+      // authorizer builds its discoveryUrl from `cognitoOut.issuer` directly
+      // (infra/gateway.ts), so token validation does not depend on this env.
       COGNITO_AUTHORIZE_ENDPOINT: cognitoOut.authorizeEndpoint,
       COGNITO_TOKEN_ENDPOINT: cognitoOut.tokenEndpoint,
       COGNITO_USERINFO_ENDPOINT: cognitoOut.userInfoEndpoint,
