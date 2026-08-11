@@ -1159,5 +1159,5 @@ approval, and the id it approves is a deletion. CI runs it on preview only.
 
 ## License
 
-The mem9 server (`mnemo-server`) is Apache-2.0 (upstream `mem9-ai/mem9`). See that
-project for its license; this repo's own IaC/config is provided as-is.
+This repository is licensed under the
+[Apache License 2.0](LICENSE), matching the upstream `mem9-ai/mem9` project.
