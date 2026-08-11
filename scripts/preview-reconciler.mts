@@ -16,6 +16,10 @@ const RESOURCE_TYPE_BY_SERVICE: Readonly<Record<string, Readonly<Record<string, 
     cloudwatch: { alarm: "alarm" },
     cognito: { userpool: "user-pool" },
     "cognito-idp": { userpool: "user-pool" },
+    ec2: {
+      "security-group": "security-group",
+      "network-interface": "network-interface",
+    },
     ecr: { repository: "repository" },
     ecs: {
       cluster: "cluster",
@@ -101,7 +105,25 @@ export type ResourceCount = Readonly<{
 }>;
 
 export type StageDecision = "protected" | "retain" | "candidate";
-export type StageAction = "none" | "remove-with-sst" | "operator-review";
+export type StageAction =
+  | "none"
+  | "remove-with-sst"
+  | "operator-review"
+  | "sweep-orphaned-network";
+
+/**
+ * The ONLY resource types a state-missing stage may be swept without SST state
+ * (#146). Both are recreated from scratch by the next deploy and hold no data:
+ * an orphaned `Mem9TaskSg` and the Lambda VPC hyperplane ENIs still attached to
+ * it. Every other type — Aurora clusters, S3 buckets, Cognito pools — stays on
+ * `operator-review`, because deleting one without state is destructive and
+ * irreversible. Widening this set is the whole risk of the feature; a stage is
+ * swept only when EVERY owned resource it has is in here.
+ */
+const SWEEPABLE_RESOURCE_TYPES: readonly string[] = deepFreeze([
+  "ec2:security-group",
+  "ec2:network-interface",
+]);
 
 export type StagePlan = Readonly<{
   stage: string;
@@ -135,13 +157,25 @@ export type OperatorIssueDraft = Readonly<{
 export type ApplyAdapters = ObservationAdapter &
   Readonly<{
     removeStage: (stage: string) => Promise<void>;
+    /**
+     * Delete the orphaned network scaffolding of a state-missing stage. Returns
+     * the counts it deleted, or a refusal reason when a live AWS re-check
+     * contradicts the plan. Returning a refusal rather than throwing keeps one
+     * stage's drift from aborting the rest of the run.
+     */
+    sweepOrphanedNetwork: (stage: string) => Promise<SweepOutcome>;
     findOpenOperatorIssue: (title: string, marker: string) => Promise<number | null>;
     createOperatorIssue: (title: string, body: string) => Promise<number>;
     updateOperatorIssue: (number: number, title: string, body: string) => Promise<void>;
   }>;
 
+export type SweepOutcome =
+  | Readonly<{ swept: true; networkInterfaces: number; securityGroups: number }>
+  | Readonly<{ swept: false; reason: string }>;
+
 export type ApplyResult = Readonly<{
   removed: readonly string[];
+  swept: readonly string[];
   cancelled: readonly Readonly<{ stage: string; reason: string }>[];
   operatorIssue: "none" | "created" | "updated";
 }>;
@@ -225,6 +259,19 @@ function displayStage(stage: string): string {
   return "<invalid-stage>";
 }
 
+/**
+ * A reportable one-line reason from an unknown thrown value. `runCommand` throws
+ * `<label> failed` and deliberately drops AWS stderr, so the message is already
+ * free of ARNs, account ids, and resource values; anything else is reduced to a
+ * constant rather than risking an unvetted string in a report or operator issue.
+ */
+function errorReason(error: unknown): string {
+  const message = error instanceof Error ? error.message : "";
+  return SAFE_ERROR_REASON.test(message) ? message : "unknown-error";
+}
+
+const SAFE_ERROR_REASON = /^[A-Za-z0-9 ._:-]{1,120}$/u;
+
 function groupResourceCounts(
   stage: string,
   resources: readonly ResourceObservation[],
@@ -242,6 +289,46 @@ function groupResourceCounts(
 
 function isOwnedResource(resource: ResourceObservation): boolean {
   return resource.project === "mem9-on-aws" && resource.managedBy === "sst";
+}
+
+/**
+ * True when a stage's ENTIRE owned inventory is sweepable network scaffolding.
+ * Deliberately all-or-nothing: a stage holding one SG plus an Aurora cluster is
+ * NOT swept, because the sweep would delete the SG and leave the operator a
+ * half-torn stage with a stale issue.
+ *
+ * The `length > 0` clause is load-bearing despite being unreachable from
+ * `buildReconciliationPlan` today (stage names derive from state ∪ owned
+ * resources, so a zero-resource stage always has state and short-circuits to
+ * `remove-with-sst`). Without it `[].every()` is vacuously true, so any future
+ * caller that reaches here with an empty list would be told "sweepable" — a
+ * green light to sweep a stage we know nothing about. Exported so that clause is
+ * covered by a direct unit test rather than by an unreachable plan path.
+ */
+export function isSweepableInventory(resources: readonly ResourceCount[]): boolean {
+  return (
+    resources.length > 0 &&
+    resources.every(({ resourceType }) =>
+      SWEEPABLE_RESOURCE_TYPES.includes(resourceType),
+    )
+  );
+}
+
+function candidateAction(
+  statePresent: boolean,
+  resources: readonly ResourceCount[],
+): StageAction {
+  if (statePresent) return "remove-with-sst";
+  return isSweepableInventory(resources) ? "sweep-orphaned-network" : "operator-review";
+}
+
+/**
+ * The plan reason recording WHY a candidate was classified sweepable. Derived from
+ * the action in one place, so the plan builder and the apply-time reconstruction
+ * cannot label the same verdict differently.
+ */
+function sweepReasons(action: StageAction): readonly string[] {
+  return action === "sweep-orphaned-network" ? ["network-scaffolding-only"] : [];
 }
 
 export function buildReconciliationPlan(observation: Observation): ReconciliationPlan {
@@ -380,11 +467,13 @@ export function buildReconciliationPlan(observation: Observation): Reconciliatio
       }
 
       reasons.push("grace-elapsed", statePresent ? "state-present" : "state-missing");
+      const action = candidateAction(statePresent, resources);
+      reasons.push(...sweepReasons(action));
       return {
         stage,
         prNumber,
         decision: "candidate",
-        action: statePresent ? "remove-with-sst" : "operator-review",
+        action,
         reasons,
         statePresent,
         graceAnchor,
@@ -490,16 +579,30 @@ function assertApplyTrigger(trigger: Trigger): void {
   }
 }
 
-function stateMissingForOperatorReview(
+/**
+ * Resolve a state-missing stage into the candidate plan the apply path should act
+ * on, or null when the stage is not state-missing at all.
+ *
+ * Returns a plan whose `action` is either `operator-review` (report it) or
+ * `sweep-orphaned-network` (finish it) — the caller dispatches on that field. The
+ * action is always recomputed from the fresh inventory via `candidateAction`, so
+ * the reconstruction below cannot disagree with `buildReconciliationPlan`.
+ */
+function stateMissingCandidate(
   advisory: StagePlan,
   fresh: StagePlan,
   observedAt: string,
 ): StagePlan | null {
   if (fresh.statePresent || fresh.resources.length === 0) return null;
-  if (fresh.decision === "candidate" && fresh.action === "operator-review") {
+  if (fresh.decision === "candidate" && fresh.action !== "remove-with-sst") {
     return fresh;
   }
 
+  // Deleting the state object is itself what erased the grace evidence: with the
+  // state gone AND the PR record aged out of the API window, the fresh plan has no
+  // anchor and falls back to `retain`. The advisory's anchor is still valid
+  // evidence that the grace period elapsed, so honor it rather than looping
+  // forever on a stage nothing can ever re-anchor.
   const stateWasOnlyGraceEvidence =
     advisory.decision === "candidate" &&
     advisory.graceAnchor !== null &&
@@ -512,15 +615,17 @@ function stateMissingForOperatorReview(
       timestampMs(advisory.eligibleAt, "advisory eligibility");
   if (!stateWasOnlyGraceEvidence) return null;
 
+  const action = candidateAction(fresh.statePresent, fresh.resources);
   return deepFreeze({
     ...fresh,
     decision: "candidate",
-    action: "operator-review",
+    action,
     reasons: [
       ...fresh.reasons.filter((reason) => reason !== "grace-anchor-missing"),
       "advisory-grace-evidence",
       "grace-elapsed",
       "state-missing",
+      ...sweepReasons(action),
     ],
     graceAnchor: advisory.graceAnchor,
     eligibleAt: advisory.eligibleAt,
@@ -534,9 +639,11 @@ export async function applyReconciliationPlan(
 ): Promise<ApplyResult> {
   assertApplyTrigger(trigger);
   const removed: string[] = [];
+  const swept: string[] = [];
   const cancelled: Array<{ stage: string; reason: string }> = [];
   const stateMissing = new Map<string, StagePlan>();
   const removable: StagePlan[] = [];
+  const sweepable: StagePlan[] = [];
 
   for (const advisory of plan.stages.filter(
     (stage) => stage.decision === "candidate",
@@ -553,11 +660,11 @@ export async function applyReconciliationPlan(
       continue;
     }
 
-    const missing = stateMissingForOperatorReview(
-      advisory,
-      fresh,
-      freshPlan.observedAt,
-    );
+    const missing = stateMissingCandidate(advisory, fresh, freshPlan.observedAt);
+    if (missing?.action === "sweep-orphaned-network") {
+      sweepable.push(missing);
+      continue;
+    }
     if (missing) {
       stateMissing.set(missing.stage, missing);
       cancelled.push({ stage: advisory.stage, reason: "state-missing" });
@@ -607,11 +714,11 @@ export async function applyReconciliationPlan(
       continue;
     }
 
-    const missing = stateMissingForOperatorReview(
-      stage,
-      immediate,
-      immediatePlan.observedAt,
-    );
+    const missing = stateMissingCandidate(stage, immediate, immediatePlan.observedAt);
+    if (missing?.action === "sweep-orphaned-network") {
+      sweepable.push(missing);
+      continue;
+    }
     if (missing) {
       stateMissing.set(missing.stage, missing);
       inventoryDirty = true;
@@ -636,12 +743,61 @@ export async function applyReconciliationPlan(
     removed.push(stage.stage);
   }
 
+  // Sweeps run last and independently of `removalFailure`: an SST removal that
+  // died on one stage says nothing about another stage's orphaned SG, and this is
+  // the leak the sweep exists to drain. Each stage is re-planned immediately
+  // beforehand — the same triple re-validation `removeStage` gets — so a PR
+  // reopened, a deploy started, or a non-sweepable resource appearing since the
+  // advisory all cancel the sweep rather than delete anything.
+  for (const stage of sweepable) {
+    const immediatePlan = buildReconciliationPlan(await adapters.collectObservation());
+    const immediate = immediatePlan.stages.find(
+      (candidate) => candidate.stage === stage.stage,
+    );
+    // The re-check must re-derive the sweep verdict, never inherit the fresh plan's
+    // `action` on its own: a stage the reconstruction declines has not been
+    // confirmed state-missing, and sweeping it on the strength of its action alone
+    // would delete against a stage the recheck just refused.
+    const confirmed = immediate
+      ? stateMissingCandidate(stage, immediate, immediatePlan.observedAt)
+      : null;
+    if (confirmed?.action !== "sweep-orphaned-network") {
+      cancelled.push({ stage: stage.stage, reason: "no-longer-sweepable" });
+      continue;
+    }
+
+    const outcome = await adapters.sweepOrphanedNetwork(confirmed.stage);
+    if (!outcome.swept) {
+      // A refused sweep must still surface in the operator issue. Some refusals
+      // never clear on their own — `sst remove` deletes the execution role, and
+      // Lambda cannot detach a hyperplane ENI without it, so an `in-use` interface
+      // can refuse forever. Recording the reason only in an apply-job log would
+      // leave that stage leaking invisibly, which is the exact failure #146 is
+      // about; the issue is the artifact an operator actually sees.
+      cancelled.push({ stage: confirmed.stage, reason: outcome.reason });
+      // Recorded as `operator-review`, which is what a stage the sweep declined
+      // now is: `prepareOperatorIssue` reports exactly that action, and the
+      // reasons carry the refusal so the issue says why automation stopped.
+      stateMissing.set(
+        confirmed.stage,
+        deepFreeze({
+          ...confirmed,
+          action: "operator-review",
+          reasons: [...confirmed.reasons, `sweep-refused:${outcome.reason}`],
+        }),
+      );
+      inventoryDirty = true;
+      continue;
+    }
+    swept.push(confirmed.stage);
+  }
+
   if (inventoryDirty) {
     await persistStateMissingInventory();
   }
   if (removalFailure) throw removalFailure.error;
 
-  return deepFreeze({ removed, cancelled, operatorIssue });
+  return deepFreeze({ removed, swept, cancelled, operatorIssue });
 }
 
 export async function runReport(
@@ -660,7 +816,7 @@ export type CommandRunner = (
   allowedFailure?: RegExp,
 ) => Promise<CommandResult | null>;
 
-async function runCommand(
+export async function runCommand(
   file: string,
   args: readonly string[],
   label: string,
@@ -1059,6 +1215,218 @@ function createObservationAdapter(
   };
 }
 
+function tagValue(tags: unknown, key: string): string | null {
+  for (const item of Array.isArray(tags) ? tags : []) {
+    const tag = asRecord(item);
+    if (stringOrNull(tag.Key) === key) return stringOrNull(tag.Value);
+  }
+  return null;
+}
+
+/**
+ * Live re-check of one AWS resource's ownership tags, independent of the tagging
+ * API the plan was built from. The plan's inventory can be minutes stale and is
+ * indexed by ARN only; this reads the resource itself and re-derives the three
+ * facts that authorize deletion.
+ */
+function ownsStage(tags: unknown, stage: string): boolean {
+  return (
+    tagValue(tags, "Project") === "mem9-on-aws" &&
+    tagValue(tags, "ManagedBy") === "sst" &&
+    tagValue(tags, "Stage") === stage
+  );
+}
+
+export type StageNetworkInterface = Readonly<{
+  id: string;
+  status: string;
+  requesterManaged: boolean;
+}>;
+
+/**
+ * Run an `aws ec2 describe-*` call and return the named top-level array. A missing
+ * or non-array key yields an empty list, which the callers read as "nothing owned"
+ * — safe here because every caller's next step is either to wait or to refuse.
+ */
+async function describeEc2Array(
+  args: readonly string[],
+  label: string,
+  key: string,
+  commandRunner: CommandRunner,
+): Promise<unknown[]> {
+  const result = await commandRunner("aws", ["ec2", ...args, "--output", "json"], label);
+  if (!result) return [];
+  const value = asRecord(parseJson(result.stdout, label))[key];
+  return Array.isArray(value) ? value : [];
+}
+
+/**
+ * The security groups AWS currently reports as belonging to `stage`.
+ *
+ * This is the single definition of "this stage's security group", shared by the
+ * reconciler sweep and by the teardown wait in `scripts/await-eni-detach.mts`, so
+ * the wait can never watch a different set of groups than the sweep deletes.
+ * Ownership is re-derived from each group's OWN tags rather than trusted from the
+ * server-side filter, so a filter typo cannot widen the blast radius.
+ */
+export async function ownedSecurityGroupIds(
+  stage: string,
+  commandRunner: CommandRunner,
+): Promise<string[]> {
+  const groups = await describeEc2Array(
+    [
+      "describe-security-groups",
+      "--filters",
+      `Name=tag:Stage,Values=${stage}`,
+      "Name=tag:Project,Values=mem9-on-aws",
+      "Name=tag:ManagedBy,Values=sst",
+    ],
+    `security-group inventory for ${stage}`,
+    "SecurityGroups",
+    commandRunner,
+  );
+  return groups.flatMap((item) => {
+    const group = asRecord(item);
+    const groupId = stringOrNull(group.GroupId);
+    if (!groupId || !ownsStage(group.Tags, stage)) return [];
+    return [groupId];
+  });
+}
+
+export async function describeGroupNetworkInterfaces(
+  stage: string,
+  groupId: string,
+  commandRunner: CommandRunner,
+): Promise<StageNetworkInterface[]> {
+  const interfaces = await describeEc2Array(
+    ["describe-network-interfaces", "--filters", `Name=group-id,Values=${groupId}`],
+    `network-interface inventory for ${stage}`,
+    "NetworkInterfaces",
+    commandRunner,
+  );
+  return interfaces.flatMap((item) => {
+    const eni = asRecord(item);
+    const id = stringOrNull(eni.NetworkInterfaceId);
+    if (!id) return [];
+    return [
+      {
+        id,
+        status: stringOrNull(eni.Status) ?? "unknown",
+        requesterManaged: eni.RequesterManaged === true,
+      },
+    ];
+  });
+}
+
+/**
+ * Delete a state-missing preview stage's orphaned network scaffolding: the
+ * `available` ENIs first, then the security group they hold a dependency on.
+ *
+ * ORDER IS LOAD-BEARING. `DeleteSecurityGroup` fails with `DependencyViolation`
+ * while any ENI still references the group, so sweeping the SG first leaves both
+ * behind — the exact leak this drains. Verified against the stages cleaned by hand
+ * for #146, every one of which had detached ENIs still pinning its SG.
+ *
+ * Every failure here is a REFUSAL, not an exception — including a failing AWS
+ * call. The caller records the reason against the stage and moves on, so one
+ * drifted stage cannot abort the run, cannot skip the remaining stages this sweep
+ * exists to drain, and cannot pre-empt a pending `sst remove` failure that the
+ * caller still has to re-throw. `previewNumber` is re-asserted even though the
+ * caller already checked it — this function issues the only delete calls in the
+ * reconciler, and a guard that lives next to the call it protects cannot be
+ * bypassed by a future caller.
+ */
+export async function sweepOrphanedNetwork(
+  stage: string,
+  commandRunner: CommandRunner,
+): Promise<SweepOutcome> {
+  try {
+    return await runSweep(stage, commandRunner);
+  } catch (error) {
+    // An AWS call failed for a reason no guard anticipated. Report it as a
+    // refusal: throwing would abandon every later stage and destroy the caller's
+    // captured removal error. The message is `runCommand`'s label, which carries
+    // no ARNs, account ids, or resource values.
+    return { swept: false, reason: `sweep-failed: ${errorReason(error)}` };
+  }
+}
+
+/**
+ * Deleting a resource AWS has already deleted is the goal state, not a failure.
+ * Lambda deletes its own hyperplane ENIs asynchronously, so the sweep genuinely
+ * races it; treating NotFound as success keeps that race from filing a refusal
+ * against a stage that is in fact clean.
+ */
+const ALREADY_GONE =
+  /InvalidNetworkInterfaceID\.NotFound|InvalidGroup\.NotFound|InvalidGroupId\.Malformed/u;
+
+async function runSweep(
+  stage: string,
+  commandRunner: CommandRunner,
+): Promise<SweepOutcome> {
+  if (previewNumber(stage) === null) return { swept: false, reason: "stage-protected" };
+
+  const groupIds = await ownedSecurityGroupIds(stage, commandRunner);
+  if (groupIds.length === 0) return { swept: false, reason: "no-owned-security-group" };
+
+  let networkInterfaces = 0;
+  for (const groupId of groupIds) {
+    for (const eni of await describeGroupNetworkInterfaces(
+      stage,
+      groupId,
+      commandRunner,
+    )) {
+      // `available` means detached. An `in-use` ENI belongs to a live function or
+      // task, so the stage is not actually torn down; refuse the whole sweep
+      // rather than delete around something still running.
+      if (eni.status !== "available") {
+        return { swept: false, reason: "network-interface-in-use" };
+      }
+      // Requester-managed interfaces are owned by the service that created them
+      // and cannot be deleted by this account; refusing beats a guaranteed 403.
+      if (eni.requesterManaged) {
+        return { swept: false, reason: "network-interface-requester-managed" };
+      }
+      await commandRunner(
+        "aws",
+        ["ec2", "delete-network-interface", "--network-interface-id", eni.id],
+        `network-interface sweep for ${stage}`,
+        ALREADY_GONE,
+      );
+      networkInterfaces += 1;
+    }
+  }
+
+  // An ENI is not the only thing that can raise `DependencyViolation`: a stage
+  // owns both `Mem9TaskSg` and `Mem9DbSg`, and the latter's ingress rule
+  // REFERENCES the former, so deleting the task SG first fails while the db SG
+  // still exists. `describe-security-groups` gives no ordering guarantee, so
+  // delete in passes and stop when a pass makes no progress — that both resolves
+  // the reference (whichever order AWS returned) and turns a genuinely stuck
+  // group into a refusal instead of a thrown DependencyViolation.
+  let pending = groupIds;
+  while (pending.length > 0) {
+    const failed: string[] = [];
+    for (const groupId of pending) {
+      try {
+        await commandRunner(
+          "aws",
+          ["ec2", "delete-security-group", "--group-id", groupId],
+          `security-group sweep for ${stage}`,
+          ALREADY_GONE,
+        );
+      } catch {
+        failed.push(groupId);
+      }
+    }
+    if (failed.length === pending.length) {
+      return { swept: false, reason: "security-group-dependency-violation" };
+    }
+    pending = failed;
+  }
+  return { swept: true, networkInterfaces, securityGroups: groupIds.length };
+}
+
 function createApplyAdapters(
   repository: string,
   commandRunner: CommandRunner = runCommand,
@@ -1066,6 +1434,7 @@ function createApplyAdapters(
   const observationAdapter = createObservationAdapter(repository, commandRunner);
   return {
     ...observationAdapter,
+    sweepOrphanedNetwork: (stage) => sweepOrphanedNetwork(stage, commandRunner),
     async removeStage(stage) {
       const [file, ...args] = sstRemoveCommand(stage);
       await commandRunner(
@@ -1162,7 +1531,9 @@ function validateStoredPlan(value: unknown): ReconciliationPlan {
     if (
       typeof stage.stage !== "string" ||
       !["protected", "retain", "candidate"].includes(String(stage.decision)) ||
-      !["none", "remove-with-sst", "operator-review"].includes(String(stage.action)) ||
+      !["none", "remove-with-sst", "operator-review", "sweep-orphaned-network"].includes(
+        String(stage.action),
+      ) ||
       !Array.isArray(stage.reasons) ||
       !Array.isArray(stage.resources)
     ) {
@@ -1262,6 +1633,9 @@ export async function runCli(
     options.trigger,
   );
   for (const stage of result.removed) console.log(`Removed preview stage ${stage}`);
+  for (const stage of result.swept) {
+    console.log(`Swept orphaned network scaffolding for preview stage ${stage}`);
+  }
   for (const cancellation of result.cancelled) {
     console.log(`Retained preview stage ${cancellation.stage}: ${cancellation.reason}`);
   }

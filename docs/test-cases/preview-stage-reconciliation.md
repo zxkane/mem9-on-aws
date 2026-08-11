@@ -57,3 +57,47 @@ Design: [`docs/designs/preview-stage-reconciliation.md`](../designs/preview-stag
 | TC-PREVIEW-RECON-034 | Recent completed run remains uncorrelated after head matching | It does not change another stage's matching grace anchor |
 | TC-PREVIEW-RECON-035 | SST state disappears after its timestamp supplied the advisory plan's only grace anchor | Tagged resources are reported from the still-eligible advisory evidence; no removal occurs |
 | TC-PREVIEW-RECON-036 | Multiple stages lose SST state during the final apply recheck | One cumulative operator-issue update contains every late state-missing stage |
+
+## Orphaned network sweep and bounded ENI wait (issue #146)
+
+The sweep is the only path that issues an AWS delete outside SST, so each of its
+refusals is proven by a mutation probe rather than by inspection: breaking any one
+guard below must turn a listed test red.
+
+| ID | Scenario | Expected |
+|---|---|---|
+| TC-PREVIEW-RECON-037 | Deploy-role policy vs. the four EC2 actions the sweep issues | `DescribeSecurityGroups`, `DescribeNetworkInterfaces`, `DeleteSecurityGroup`, and `DeleteNetworkInterface` are already granted; the sweep needs no new IAM |
+| TC-PREVIEW-RECON-038 | `cleanup-preview` inner bounds vs. the job `timeout-minutes` | First remove + ENI wait + retry sum strictly below the job timeout, and the wait sits between the two removes |
+| TC-PREVIEW-RECON-039 | State-missing stage whose whole owned inventory is one SG plus its ENIs | Classified `sweep-orphaned-network` with `network-scaffolding-only`, not `operator-review` |
+| TC-PREVIEW-RECON-040 | State-missing stage holding any non-SG/ENI type (Aurora, S3, Cognito, IAM role) | Stays `operator-review`; a mixed inventory is never swept |
+| TC-PREVIEW-RECON-041 | Apply over a sweepable stage | Sweep adapter runs; no operator issue is filed for that stage |
+| TC-PREVIEW-RECON-042 | Stage stops being sweepable between plan and the apply recheck | Sweep is cancelled with the recheck's reason; nothing is deleted |
+| TC-PREVIEW-RECON-043 | `prod`, `main`, and other non-preview stages | Never swept, at both the plan and the sweep layer |
+| TC-PREVIEW-RECON-044 | Sweepable stage still inside the 24-hour grace period | Retained; the sweep does not shorten the grace period |
+| TC-PREVIEW-RECON-045 | Dry-run report over a sweepable stage | Report names the planned sweep, so the plan is reviewable before apply |
+| TC-PREVIEW-RECON-046 | `security-group` and `network-interface` EC2 ARNs | Map to `ec2:security-group` and `ec2:network-interface` |
+| TC-PREVIEW-RECON-047 | End-to-end apply through the real CLI over an SG+ENI-only stage | Exact AWS call sequence deletes every ENI before its security group |
+| TC-PREVIEW-RECON-048 | `sweepOrphanedNetwork` over a detached ENI and its group | `delete-network-interface` precedes `delete-security-group`; SG-first would raise `DependencyViolation` and leak both |
+| TC-PREVIEW-RECON-049 | ENI is `in-use`, `detaching`, or requester-managed | Refuses with a reason and deletes nothing — a refusal, not a throw, so one drifted stage cannot abort the run |
+| TC-PREVIEW-RECON-050 | `sweepOrphanedNetwork` called with a non-preview stage | Refuses `stage-protected` without issuing even a describe |
+| TC-PREVIEW-RECON-051 | No security group carries this stage's `Project`/`ManagedBy`/`Stage` tags | Refuses; tags are re-derived locally so a server-side filter typo cannot widen blast radius |
+| TC-PREVIEW-RECON-052 | Owned security group with no remaining interfaces | Deletes the group alone |
+| TC-PREVIEW-RECON-053 | Empty owned inventory | Never sweepable — asserted on the predicate directly, since `[].every()` is vacuously true |
+| TC-PREVIEW-RECON-054 | A redeploy re-creates SST state between the advisory pass and the pre-sweep re-plan | Sweep cancels `no-longer-sweepable`; the stage returns to `sst remove` instead of losing a live security group |
+| TC-PREVIEW-RECON-055 | An AWS delete call inside the sweep fails for an unanticipated reason | Refuses `sweep-failed: <label>`; a throw would skip every later stage and destroy the caller's captured `sst remove` error |
+| TC-PREVIEW-RECON-056 | The thrown value carries an ARN or account id | Reduced to `sweep-failed: unknown-error`; only `runCommand`'s own label shape is reportable |
+| TC-PREVIEW-RECON-057 | Stage owns both `Mem9TaskSg` and `Mem9DbSg`, whose ingress rule references the task SG | Multi-pass deletion resolves the reference in either API ordering; both groups are deleted |
+| TC-PREVIEW-RECON-058 | A security group no pass can delete | Refuses `security-group-dependency-violation` — no infinite loop, no throw |
+| TC-PREVIEW-RECON-059 | The sweep refuses (e.g. an ENI stuck `in-use` because `sst remove` deleted the execution role) | Stage is recorded `operator-review` and appears in the operator issue, so a permanently-stuck stage cannot leak invisibly |
+| TC-PREVIEW-RECON-060 | `InvalidNetworkInterfaceID.NotFound` vs. `UnauthorizedOperation` on the same delete | NotFound counts as success; any other failure refuses and the security group is NOT deleted while its interface survives |
+
+| ID | Scenario | Expected |
+|---|---|---|
+| TC-PREVIEW-ENI-001 | Interfaces detach partway through the budget | Returns `detached` with the poll count |
+| TC-PREVIEW-ENI-002 | Interfaces never detach | Times out at exactly the budget and names the blocking interface ids |
+| TC-PREVIEW-ENI-003 | Wait expires during cleanup | Emits `::warning::`, exits 0, and defers to the reconciler sweep — failing the step would recreate the original leak |
+| TC-PREVIEW-ENI-004 | Zero or already-expired budget | Still polls once, so the diagnostic reports what is actually attached |
+| TC-PREVIEW-ENI-005 | Stage owns no security group | Returns immediately; nothing to wait for |
+| TC-PREVIEW-ENI-006 | A security group tagged for a different stage | Ignored; the wait is scoped to this stage's groups |
+| TC-PREVIEW-ENI-007 | Non-preview stage | Throws rather than waiting on protected infrastructure |
+| TC-PREVIEW-ENI-008 | Stage owns several security groups | Every group is polled before the wait concludes |
