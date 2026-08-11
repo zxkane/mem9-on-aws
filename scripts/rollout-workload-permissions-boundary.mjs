@@ -389,6 +389,7 @@ export function createGithubMaintenanceController({
 }
 
 export async function executeBoundaryRollout({
+  applicationRegion = process.env.WORKLOAD_BOUNDARY_APPLICATION_REGION,
   invokeAws,
   deployBoundary,
   deployEnforcement,
@@ -425,6 +426,7 @@ export async function executeBoundaryRollout({
     `arn:${identity.partition}:iam::${identity.accountId}:policy/` +
     WORKLOAD_BOUNDARY_POLICY_NAME;
   const adapter = createAdapter({
+    applicationRegion,
     identity,
     invokeAws,
     deployBoundary,

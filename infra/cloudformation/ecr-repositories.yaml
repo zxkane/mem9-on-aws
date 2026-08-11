@@ -5,7 +5,7 @@ Description: >
   bootstrap (schema-bootstrap task, §8), llm-proxy (LLM smart-ingest sidecar, §7).
   CI tags mem9-<sha>/latest (release) + pr-<sha> (preview); each repo's lifecycle
   keeps them on separate schedules.
-  Deploy via scripts/deploy-ecr-repositories.sh in ap-northeast-1. See §4.
+  Deploy via scripts/deploy-ecr-repositories.sh in the application region. See §4.
 
 Parameters:
   ProjectName:

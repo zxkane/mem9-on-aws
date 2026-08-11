@@ -1932,7 +1932,10 @@ export async function runCleanup(opts, deps) {
  */
 export function buildCompleteChat(opts, deps) {
   const model = opts.model || process.env.MEM9_LLM_MODEL || DEFAULT_CHAT_MODEL;
-  const appRegion = opts.region || "ap-northeast-1";
+  const appRegion = opts.region || process.env.AWS_REGION;
+  if (!appRegion) {
+    throw new Error("application region is required for cleanup inference");
+  }
   // A CLOSED object, never a spread of process.env: `readProxyConfig` is
   // written for a container where the whole LLM_PROXY_* namespace is set by
   // infra/ecs.ts. Spreading the operator's shell in would make every sidecar
@@ -3025,8 +3028,16 @@ async function productionDatabaseMutex(stage, region, runtime = {}) {
  * them would make a read-only listing fail on unrelated configuration. The
  * shared mutex is passed only for an actual `--apply`, matching cleanup.
  */
+async function resolveRuntimeApplicationRegion() {
+  if (process.env.AWS_REGION) return process.env.AWS_REGION;
+  const { resolveApplicationRegion } = await import(
+    "./lib/application-region.mjs"
+  );
+  return resolveApplicationRegion();
+}
+
 async function recoveryDeps(opts) {
-  const region = process.env.AWS_REGION || "ap-northeast-1";
+  const region = await resolveRuntimeApplicationRegion();
   const database = await productionDatabaseMutex(opts.stage, region);
   const adapter = inactiveMemoryAdapter(database.db);
   return {
@@ -3189,7 +3200,7 @@ function buildReportOutcome(opts, claim, runtime) {
  * for the length of its own failure, blocking the weekly consolidation.
  */
 export async function createCleanupDeps(opts, runtime = {}) {
-  const region = process.env.AWS_REGION || "ap-northeast-1";
+  const region = await resolveRuntimeApplicationRegion();
 
   // The explicit flag WINS over the env var: a stale MEM9_TENANT_ID from a
   // preview shell must not silently redirect an --apply aimed at another stage.

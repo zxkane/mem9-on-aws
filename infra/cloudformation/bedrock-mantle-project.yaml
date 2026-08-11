@@ -7,10 +7,10 @@ Description: >
   not attribute the GLM-5 spend, so this repository uses a Bedrock Project.
 
   NOT SST-managed — managed out-of-band (like the ECR repos + the GitHub Actions
-  role) so `sst remove` on a PR stage can't drop the shared project. Deploy in
-  ap-northeast-1 (where the ECS task calls Mantle) via
-  scripts/deploy-bedrock-mantle-project.sh, then feed the ProjectId output to CI
-  as the MEM9_BEDROCK_PROJECT env the deploy reads (infra/ecs.ts BEDROCK_PROJECT).
+  role) so `sst remove` on a PR stage can't drop the shared project. The deploy
+  script defaults to the application region from sst.config.ts; an explicitly
+  selected secondary region can host the independent Responses route. Feed the
+  ProjectId output to CI as the matching project environment value.
 
 Parameters:
   ProjectName:

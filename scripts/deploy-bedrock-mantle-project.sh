@@ -8,12 +8,12 @@
 # out-of-band (like the ECR repos + the GitHub Actions role) means `sst remove
 # --stage pr-N` cannot drop the shared project or its accumulated cost history.
 #
-# Bootstrap ONCE per AWS account (in the Tokyo region — where the ECS task calls
-# Mantle), and RE-RUN only if bedrock-mantle-project.yaml changes.
+# Bootstrap ONCE per AWS account and region, and RE-RUN only if
+# bedrock-mantle-project.yaml changes.
 #
-# Region: ap-northeast-1 (Tokyo) — MUST match the SST app region so the project
-# is in the same region the llm-proxy sidecar targets. Hard-coded (not the
-# ambient AWS_REGION) so a leftover AWS_REGION can't create it in the wrong one.
+# Region: defaults to the SST application region. PROJECT_REGION deliberately
+# selects another region for an independent model route such as OpenAI
+# Responses. Ambient AWS_REGION is ignored.
 #
 # Config: set AWS_PROFILE (and any overrides) in a gitignored .env at the repo
 # root — copy .env.example.
@@ -34,10 +34,15 @@ _repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 STACK_NAME="${STACK_NAME:-bedrock-mantle-project-mem9-on-aws}"
 TEMPLATE_FILE="infra/cloudformation/bedrock-mantle-project.yaml"
-# Tokyo — MUST equal sst.config.ts's providers.aws.region. Hard-coded, NOT read
-# from the ambient AWS_REGION (a stray value would create it in the wrong region).
-# Override deliberately with PROJECT_REGION only if the whole app moves regions.
-REGION="${PROJECT_REGION:-ap-northeast-1}"
+APPLICATION_REGION="$(node "$_repo_root/scripts/resolve-application-region.mjs")"
+REGION="${PROJECT_REGION:-$APPLICATION_REGION}"
+if [[ -n "${PROJECT_REGION:-}" ]]; then
+  PROJECT_VARIABLE="MEM9_BEDROCK_PROJECT_OPENAI"
+  PROXY_PROJECT_VARIABLE="LLM_PROXY_RESPONSES_OPENAI_PROJECT"
+else
+  PROJECT_VARIABLE="MEM9_BEDROCK_PROJECT"
+  PROXY_PROJECT_VARIABLE="LLM_PROXY_OPENAI_PROJECT"
+fi
 
 MODE=""
 for arg in "$@"; do
@@ -125,6 +130,6 @@ echo "ProjectId: $PROJECT_ID"
 echo
 echo "Next steps:"
 echo "  1. Set the CI variable so deploys inject it into the llm-proxy sidecar:"
-echo "       gh variable set MEM9_BEDROCK_PROJECT --repo zxkane/mem9-on-aws --body \"$PROJECT_ID\""
-echo "  2. infra/ecs.ts reads MEM9_BEDROCK_PROJECT → LLM_PROXY_OPENAI_PROJECT →"
+echo "       gh variable set $PROJECT_VARIABLE --repo zxkane/mem9-on-aws --body \"$PROJECT_ID\""
+echo "  2. infra/ecs.ts reads $PROJECT_VARIABLE → $PROXY_PROJECT_VARIABLE →"
 echo "     the OpenAI-Project header on calls from that configured deployment."

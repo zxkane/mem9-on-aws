@@ -6,14 +6,13 @@
 # repositories; it references them read-only. Owning them out-of-band means
 # `sst remove --stage pr-N` cannot wipe the image history prod runs on.
 #
-# Bootstrap ONCE per AWS account (in the Tokyo region — ECR is regional and
+# Bootstrap ONCE per AWS account in the application region (ECR is regional and
 # Fargate pulls same-region), and RE-RUN only if
 # infra/cloudformation/ecr-repositories.yaml changes.
 #
-# Region: ap-northeast-1 (Tokyo) — MUST match the SST app region (sst.config.ts)
-# so Fargate pulls the images from the same region (no cross-region pull cost /
-# latency). This is unlike deploy-github-role.sh, which pins us-west-2 for the
-# global IAM role stack; ECR repositories are regional data resources.
+# Region: resolved from the SST AWS provider in sst.config.ts. This is unlike
+# deploy-github-role.sh, which pins us-west-2 for the global IAM role stack; ECR
+# repositories are regional data resources.
 #
 # Config: set AWS_PROFILE (and any overrides) in a gitignored .env at the repo
 # root — copy .env.example. Targets account <aws-account-id>.
@@ -31,13 +30,15 @@ _repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 STACK_NAME="${STACK_NAME:-ecr-repositories-mem9-on-aws}"
 TEMPLATE_FILE="infra/cloudformation/ecr-repositories.yaml"
-# Tokyo — MUST equal sst.config.ts's providers.aws.region so Fargate pulls the
-# image same-region. Hard-coded, NOT read from the ambient AWS_REGION: a stray
-# AWS_REGION in the shell (e.g. left over from deploy-github-role.sh's us-west-2)
-# would silently create the repo in the wrong region, and Fargate would then pull
-# cross-region (cost + latency) or fail. Override deliberately with ECR_REGION
-# only if the whole app moves regions.
-REGION="${ECR_REGION:-ap-northeast-1}"
+# Do not read ambient AWS_REGION: a value left over from the us-west-2 IAM stack
+# would create the repositories in the wrong region. ECR_REGION remains an
+# explicit compatibility override, but must agree with the SST provider.
+APPLICATION_REGION="$(node "$_repo_root/scripts/resolve-application-region.mjs")"
+REGION="${ECR_REGION:-$APPLICATION_REGION}"
+if [[ "$REGION" != "$APPLICATION_REGION" ]]; then
+  echo "Error: ECR_REGION must match the sst.config.ts application region." >&2
+  exit 2
+fi
 
 MODE=""
 for arg in "$@"; do

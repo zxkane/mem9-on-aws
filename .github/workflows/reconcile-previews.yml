@@ -25,12 +25,26 @@ concurrency:
   group: preview-stage-reconciliation
   cancel-in-progress: false
 
-env:
-  AWS_REGION: ap-northeast-1
-
 jobs:
+  application-region:
+    name: Resolve application region
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    permissions:
+      contents: read
+    outputs:
+      region: ${{ steps.resolve.outputs.region }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 24
+      - name: Resolve SST AWS provider region
+        id: resolve
+        run: echo "region=$(node scripts/resolve-application-region.mjs)" >> "$GITHUB_OUTPUT"
+
   report:
     name: Report stale preview stages
+    needs: [application-region]
     if: vars.WORKLOAD_BOUNDARY_PROD_ENABLED == 'true'
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     timeout-minutes: 10
@@ -40,6 +54,8 @@ jobs:
       actions: read
       pull-requests: read
       issues: read
+    env:
+      AWS_REGION: ${{ needs.application-region.outputs.region }}
     steps:
       - name: Deployment maintenance gate
         env:
@@ -82,7 +98,7 @@ jobs:
 
   apply:
     name: Revalidate and reconcile preview stages
-    needs: report
+    needs: [application-region, report]
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'apply' && vars.WORKLOAD_BOUNDARY_PROD_ENABLED == 'true'
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     timeout-minutes: 45
@@ -92,6 +108,8 @@ jobs:
       actions: read
       pull-requests: read
       issues: write
+    env:
+      AWS_REGION: ${{ needs.application-region.outputs.region }}
     steps:
       - name: Deployment maintenance gate
         env:

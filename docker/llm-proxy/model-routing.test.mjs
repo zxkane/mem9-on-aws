@@ -76,7 +76,7 @@ function responsesReply(overrides = {}) {
 
 describe("readConfig responses-route fields", () => {
   it("defaults: gpt-5.6 prefix, us-west-2, derived base, high effort, 16384 cap", () => {
-    const c = readConfig({});
+    const c = readConfig({ AWS_REGION: "ap-southeast-1" });
     expect(c.responsesModelPrefixes).toEqual(["openai.gpt-5.6-"]);
     expect(c.responsesRegion).toBe("us-west-2");
     expect(c.responsesBase).toBe("https://bedrock-mantle.us-west-2.api.aws/openai/v1");
@@ -87,6 +87,7 @@ describe("readConfig responses-route fields", () => {
 
   it("honors overrides and comma-separated prefixes with empties ignored (TC-MMROUTE-002)", () => {
     const c = readConfig({
+      AWS_REGION: "ap-southeast-1",
       LLM_PROXY_RESPONSES_MODEL_PREFIXES: "openai., ,custom.reasoner-",
       LLM_PROXY_RESPONSES_REGION: "us-east-1",
       LLM_PROXY_REASONING_EFFORT: "medium",
@@ -102,7 +103,12 @@ describe("readConfig responses-route fields", () => {
   });
 
   it("rejects an invalid reasoning effort at startup", () => {
-    expect(() => readConfig({ LLM_PROXY_REASONING_EFFORT: "max" })).toThrow(/effort/i);
+    expect(() =>
+      readConfig({
+        AWS_REGION: "ap-southeast-1",
+        LLM_PROXY_REASONING_EFFORT: "max",
+      }),
+    ).toThrow(/effort/i);
   });
 });
 

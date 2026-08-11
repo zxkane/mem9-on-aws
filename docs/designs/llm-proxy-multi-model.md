@@ -6,8 +6,9 @@ Status: Approved (interactive session)
 
 ## Problem
 
-The proxy today speaks exactly one dialect: chat-completions against the
-regional (Tokyo) Mantle endpoint. The OpenAI reasoning models
+Before this change, the proxy spoke exactly one dialect: chat-completions
+against the application-region Mantle endpoint (Tokyo in the 2026-08-01
+deployment). The OpenAI reasoning models
 (`openai.gpt-5.6-terra`, `openai.gpt-5.6-luna`) are only available in
 us-west-2 / us-east-1 and ONLY via the **Responses API** at the
 `openai/v1/responses` path (probed live 2026-08-01: `/v1/chat/completions`,
@@ -26,7 +27,7 @@ The `model` field of each incoming chat-completions request selects a route:
 
 | Route | Match | Upstream | API |
 |---|---|---|---|
-| `chat` (default) | everything else (e.g. `zai.glm-5`) | `https://bedrock-mantle.<region>.api.aws/v1` (Tokyo) | chat-completions passthrough (current behavior, byte-identical) |
+| `chat` (default) | everything else (e.g. `zai.glm-5`) | `https://bedrock-mantle.<region>.api.aws/v1` (application region) | chat-completions passthrough (current behavior, byte-identical) |
 | `responses` | model starts with a configured prefix (default `openai.gpt-5.6-`) | `https://bedrock-mantle.<responsesRegion>.api.aws/openai/v1` (default us-west-2) | chat-completions ⇄ Responses translation |
 
 Switching models = change `MNEMO_LLM_MODEL` (env, task-def) or send a
@@ -41,7 +42,7 @@ different `model` per request. No proxy restart semantics change.
 | `LLM_PROXY_RESPONSES_BASE` | derived from region | Override for tests |
 | `LLM_PROXY_REASONING_EFFORT` | `high` | `reasoning.effort` when the request doesn't carry `reasoning_effort` (mem9 can't) |
 | `LLM_PROXY_RESPONSES_MAX_OUTPUT_TOKENS` | `16384` | Cap/default for `max_output_tokens` — reasoning burns output tokens first, so the chat route's 4096 cap would truncate JSON (the GLM failure mode) |
-| `LLM_PROXY_RESPONSES_OPENAI_PROJECT` | empty | `OpenAI-Project` for the responses region (projects are regional; the Tokyo id is meaningless in us-west-2). Empty → header omitted (untagged) |
+| `LLM_PROXY_RESPONSES_OPENAI_PROJECT` | empty | `OpenAI-Project` for the responses region (projects are regional; the application-region id is not reused). Empty → header omitted (untagged) |
 
 Existing chat-route config is untouched; issue #46's provider-boundary
 controls (4096 cap, byte limit, deadlines) still govern the chat route.
@@ -97,7 +98,8 @@ Cross-region calls authorize against the **requesting region's** project
 resource, and Mantle projects are regional (different ids per region):
 
 - **Task role (infra/ecs.ts)**: when `MEM9_BEDROCK_PROJECT_OPENAI` (the
-  us-west-2 project id) is set, add a second `bedrock-mantle:CreateInference`
+  Responses-region project id) is set, add a second
+  `bedrock-mantle:CreateInference`
   resource `arn:aws:bedrock-mantle:<responsesRegion>:<acct>:project/<id>` and
   inject `LLM_PROXY_RESPONSES_OPENAI_PROJECT`. Unset → no new grant; prod
   calls to the responses route would 403 (documented, fail-loud).
@@ -106,13 +108,15 @@ resource, and Mantle projects are regional (different ids per region):
   `DenyProjectRuntimeOutsideResources` NotResource list via `Fn::If`.
   Rollout = operator re-runs `deploy-workload-permissions-boundary.sh`
   (same out-of-band ownership as today).
-- **Mantle project in us-west-2**: created with the existing out-of-band
-  script (`PROJECT_REGION=us-west-2 scripts/deploy-bedrock-mantle-project.sh`).
+- **Mantle project in the Responses region**: created with the existing
+  out-of-band script (for the default,
+  `PROJECT_REGION=us-west-2 scripts/deploy-bedrock-mantle-project.sh`).
 - `bedrock-mantle:CallWithBearerToken` is already `Resource: "*"` in both the
   task role and the boundary ceiling — no change.
 
-Default posture is unchanged: GLM-5 in Tokyo, no new grants exercised until
-an operator both configures the OpenAI project AND flips the model.
+The checked-in default posture remains GLM-5 in the `sst.config.ts` application
+region. No fallback-region grant is exercised until an operator both configures
+the OpenAI project and selects the GPT model.
 
 ## Out of scope
 
@@ -120,8 +124,9 @@ an operator both configures the OpenAI project AND flips the model.
 - The Anthropic Messages surface.
 - memory-cleanup script routing through the proxy (it runs outside the task;
   its own Responses wrapper already exists for operator use).
-- Automatic model fallback (a failed responses call does not silently
-  downgrade to GLM — fail loud, mem9 retries).
+- Automatic model downgrade after a failed Responses call. Region fallback is
+  deterministic model-prefix routing; an upstream failure does not silently
+  switch the request to GLM.
 
 ## Test hooks
 

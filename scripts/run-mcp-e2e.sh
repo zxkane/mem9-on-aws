@@ -20,7 +20,7 @@
 #
 # Env:
 #   STAGE       (required) — e.g. prod / pr-7.
-#   AWS_REGION  (optional) — defaults to ap-northeast-1.
+#   AWS_REGION  (optional) — defaults to the SST application region.
 #   E2E_COGNITO_CLIENT_PREFIX (optional) — SSM prefix containing client-id and
 #               client-secret. Defaults to /mem9-on-aws/<stage>/cognito. Recovery
 #               uses a dedicated client under a separate prefix.
@@ -32,7 +32,8 @@
 set -euo pipefail
 
 STAGE="${STAGE:?STAGE is required (e.g. prod or pr-7)}"
-REGION="${AWS_REGION:-ap-northeast-1}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REGION="${AWS_REGION:-$(node "$REPO_ROOT/scripts/resolve-application-region.mjs")}"
 PREFIX="/mem9-on-aws/${STAGE}"
 COGNITO_CLIENT_PREFIX="${E2E_COGNITO_CLIENT_PREFIX:-${PREFIX}/cognito}"
 SOFT="${E2E_SOFT:-0}"

@@ -52,14 +52,14 @@
 
 import { resolveVpc } from "./vpc";
 import type { DbOutputs } from "./db";
-import { ecrImage, accountId, ECR_REGION } from "./ecr";
+import { ecrImage, accountId, applicationRegion } from "./ecr";
 import { observability } from "./observability";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import { disableMnemoServerPseudoTerminal } from "./ecs-task-definition";
 
-// Bedrock Mantle is called in the app region (= the ECR/app region, Tokyo). Used
-// only to scope the bedrock-mantle:CreateInference project ARN.
-const region = ECR_REGION;
+// The primary Mantle route follows the active SST AWS provider. The optional
+// OpenAI Responses route below remains independently regional.
+const region = applicationRegion();
 
 // Image tags. CI (push-to-main) sets MEM9_IMAGE_TAG to the exact `mem9-<sha7>` it
 // just built + pushed, so prod runs that precise commit's images; CI PR previews
@@ -113,11 +113,9 @@ const BEDROCK_PROJECT = process.env.MEM9_BEDROCK_PROJECT || "";
 // Unset → no extra IAM grant and no project env, so responses-route calls run
 // untagged where the boundary permits them and 403 where it does not.
 const BEDROCK_PROJECT_OPENAI = process.env.MEM9_BEDROCK_PROJECT_OPENAI || "";
-// OPERATOR INVARIANT: this must agree with the boundary rollout's
-// WORKLOAD_BOUNDARY_OPENAI_PROJECT_REGION (both default us-west-2). A
-// mismatch grants CreateInference in one region while the boundary's
-// NotResource lists the project of another → every responses call 403s with
-// no single place revealing why. See .env.example.
+// The boundary bootstrap consumes this same variable. The legacy
+// WORKLOAD_BOUNDARY_OPENAI_PROJECT_REGION override is accepted only when it
+// agrees, so the task grant and boundary Project cannot silently diverge.
 const RESPONSES_REGION = process.env.MEM9_LLM_RESPONSES_REGION || "us-west-2";
 
 export interface EcsOutputs {
@@ -442,10 +440,9 @@ export function ecs(dbOut: DbOutputs, identity: TenantIdentityOutputs): EcsOutpu
         image: llmProxyImage,
         environment: {
           LLM_PROXY_PORT: String(LLM_PROXY_PORT),
-          // The proxy derives the Mantle upstream from the region (AWS_REGION is
-          // set by Fargate); pin it explicitly so a region change can't silently
-          // point it at the wrong Mantle endpoint.
-          LLM_PROXY_REGION: "ap-northeast-1",
+          // Pin the provider-derived application region explicitly. The proxy
+          // must not infer its primary route from an unrelated fallback region.
+          LLM_PROXY_REGION: region,
           LLM_PROXY_MAX_BODY_BYTES: String(LLM_PROXY_MAX_BODY_BYTES),
           LLM_PROXY_MAX_TOKENS: String(LLM_PROXY_MAX_TOKENS),
           LLM_PROXY_OVERALL_DEADLINE_MS: String(LLM_PROXY_OVERALL_DEADLINE_MS),

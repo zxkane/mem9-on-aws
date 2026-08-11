@@ -218,9 +218,7 @@ export async function resolveAwsIdentity(invokeAws = invokeAwsCli) {
 
 export function createAwsCliAdapter({
   identity,
-  applicationRegion = process.env.WORKLOAD_BOUNDARY_APPLICATION_REGION ??
-    process.env.PROJECT_REGION ??
-    "ap-northeast-1",
+  applicationRegion = process.env.WORKLOAD_BOUNDARY_APPLICATION_REGION,
   invokeAws = invokeAwsCli,
   deployBoundary = deployBoundaryStack,
   deployEnforcement = deployRoleEnforcement,
@@ -410,6 +408,46 @@ export function createAwsCliAdapter({
     );
   }
 
+  async function readBoundaryStackParameters() {
+    const boundaryStackResponse = await invokeAwsCommand([
+      "cloudformation",
+      "describe-stacks",
+      "--stack-name",
+      WORKLOAD_BOUNDARY_STACK_NAME,
+      "--region",
+      OPERATOR_STACK_REGION,
+    ]);
+    if (
+      !Array.isArray(boundaryStackResponse.Stacks) ||
+      boundaryStackResponse.Stacks.length !== 1
+    ) {
+      throw new Error("workload boundary stack response is malformed");
+    }
+    const boundaryStack = boundaryStackResponse.Stacks[0];
+    if (
+      !boundaryStack ||
+      !["CREATE_COMPLETE", "UPDATE_COMPLETE"].includes(
+        boundaryStack.StackStatus,
+      ) ||
+      !Array.isArray(boundaryStack.Parameters)
+    ) {
+      throw new Error("workload boundary stack response is malformed");
+    }
+    const boundaryParameters = new Map();
+    for (const parameter of boundaryStack.Parameters) {
+      if (
+        !parameter ||
+        typeof parameter.ParameterKey !== "string" ||
+        typeof parameter.ParameterValue !== "string" ||
+        boundaryParameters.has(parameter.ParameterKey)
+      ) {
+        throw new Error("workload boundary stack response is malformed");
+      }
+      boundaryParameters.set(parameter.ParameterKey, parameter.ParameterValue);
+    }
+    return boundaryParameters;
+  }
+
   const adapter = {
     async putQuarantine(request) {
       await putQuarantine(invokeAwsCommand, request);
@@ -419,46 +457,15 @@ export function createAwsCliAdapter({
       return verifyQuarantine(invokeAwsCommand);
     },
 
+    async verifyBoundaryRegion() {
+      const boundaryParameters = await readBoundaryStackParameters();
+      if (boundaryParameters.get("ApplicationRegion") !== applicationRegion) {
+        throw new Error("workload boundary application region is mismatched");
+      }
+    },
+
     async verifyProductionRuntimeBindings() {
-      const boundaryStackResponse = await invokeAwsCommand([
-        "cloudformation",
-        "describe-stacks",
-        "--stack-name",
-        WORKLOAD_BOUNDARY_STACK_NAME,
-        "--region",
-        OPERATOR_STACK_REGION,
-      ]);
-      if (
-        !Array.isArray(boundaryStackResponse.Stacks) ||
-        boundaryStackResponse.Stacks.length !== 1
-      ) {
-        throw new Error("workload boundary stack response is malformed");
-      }
-      const boundaryStack = boundaryStackResponse.Stacks[0];
-      if (
-        !boundaryStack ||
-        !["CREATE_COMPLETE", "UPDATE_COMPLETE"].includes(
-          boundaryStack.StackStatus,
-        ) ||
-        !Array.isArray(boundaryStack.Parameters)
-      ) {
-        throw new Error("workload boundary stack response is malformed");
-      }
-      const boundaryParameters = new Map();
-      for (const parameter of boundaryStack.Parameters) {
-        if (
-          !parameter ||
-          typeof parameter.ParameterKey !== "string" ||
-          typeof parameter.ParameterValue !== "string" ||
-          boundaryParameters.has(parameter.ParameterKey)
-        ) {
-          throw new Error("workload boundary stack response is malformed");
-        }
-        boundaryParameters.set(
-          parameter.ParameterKey,
-          parameter.ParameterValue,
-        );
-      }
+      const boundaryParameters = await readBoundaryStackParameters();
       if (
         boundaryParameters.get("ApplicationRegion") !== applicationRegion ||
         !boundaryParameters.has("BedrockProjectArn")

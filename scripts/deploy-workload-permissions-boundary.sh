@@ -26,7 +26,12 @@ fi
 # IAM is global, but CloudFormation ownership is regional. Keep this stack
 # pinned beside the deploy-role stack so another region cannot claim the name.
 region="us-west-2"
-application_region="${WORKLOAD_BOUNDARY_APPLICATION_REGION:-${PROJECT_REGION:-ap-northeast-1}}"
+configured_application_region="$(node "$repo_root/scripts/resolve-application-region.mjs")"
+application_region="${WORKLOAD_BOUNDARY_APPLICATION_REGION:-$configured_application_region}"
+if [[ "$application_region" != "$configured_application_region" ]]; then
+  echo "Application region must match sst.config.ts." >&2
+  exit 2
+fi
 bedrock_stack_name="${BEDROCK_PROJECT_STACK_NAME:-bedrock-mantle-project-mem9-on-aws}"
 template_file="$repo_root/infra/cloudformation/workload-permissions-boundary.yaml"
 contract_file="$repo_root/scripts/workload-permissions-boundary-contract.json"
@@ -88,6 +93,38 @@ if [[ "$partition" == "aws-cn" ]]; then
 else
   url_suffix="amazonaws.com"
 fi
+
+set +e
+describe_output="$(aws cloudformation describe-stacks \
+  --stack-name "$stack_name" \
+  --region "$region" 2>&1)"
+describe_exit=$?
+set -e
+if [[ $describe_exit -eq 0 ]]; then
+  if ! existing_application_region="$(jq -er '
+      .Stacks
+      | select(type == "array" and length == 1)
+      | .[0].Parameters
+      | select(type == "array")
+      | map(
+          select(
+            .ParameterKey == "ApplicationRegion" and
+            (.ParameterValue | type) == "string"
+          )
+        )
+      | select(length == 1)
+      | .[0].ParameterValue
+    ' <<<"$describe_output" 2>/dev/null)"; then
+    echo "Existing workload boundary has no unique ApplicationRegion; no mutation was attempted." >&2
+    exit 1
+  fi
+  if [[ "$existing_application_region" != "$application_region" ]]; then
+    echo "Existing workload boundary belongs to application region ${existing_application_region}; no mutation was attempted." >&2
+    echo "Relocating a live deployment requires a dedicated dual-region migration after old-region previews are removed." >&2
+    exit 1
+  fi
+fi
+
 # Read the out-of-band Mantle project ARN for one region. Prints the ARN on
 # stdout when the stack exists and its output is this account's project in
 # that region; prints nothing when the stack does not exist. Any OTHER
@@ -131,7 +168,13 @@ fi
 # region. Absent stack → feature off, empty parameter, boundary unchanged.
 # Same-region as the application would duplicate the primary ARN in the
 # boundary NotResource list (an exact-document verify failure) — treat as off.
-openai_project_region="${WORKLOAD_BOUNDARY_OPENAI_PROJECT_REGION:-us-west-2}"
+if [[ -n "${MEM9_LLM_RESPONSES_REGION:-}" &&
+      -n "${WORKLOAD_BOUNDARY_OPENAI_PROJECT_REGION:-}" &&
+      "$MEM9_LLM_RESPONSES_REGION" != "$WORKLOAD_BOUNDARY_OPENAI_PROJECT_REGION" ]]; then
+  echo "Responses region settings disagree; no mutation was attempted." >&2
+  exit 2
+fi
+openai_project_region="${MEM9_LLM_RESPONSES_REGION:-${WORKLOAD_BOUNDARY_OPENAI_PROJECT_REGION:-us-west-2}}"
 if [[ "$openai_project_region" == "$application_region" ]]; then
   openai_bedrock_project_arn=""
 else
@@ -149,13 +192,6 @@ if ! aws cloudformation validate-template \
   echo "Boundary template validation failed; no stack mutation attempted." >&2
   exit 1
 fi
-
-set +e
-describe_output="$(aws cloudformation describe-stacks \
-  --stack-name "$stack_name" \
-  --region "$region" 2>&1)"
-describe_exit=$?
-set -e
 
 policy_arn=""
 policy_revision="r1"

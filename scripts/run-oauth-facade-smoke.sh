@@ -4,7 +4,8 @@
 # metadata, registration, and the authorize redirect/cookie response.
 set -euo pipefail
 STAGE="${STAGE:?STAGE is required}"
-REGION="${AWS_REGION:-ap-northeast-1}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REGION="${AWS_REGION:-$(node "$REPO_ROOT/scripts/resolve-application-region.mjs")}"
 PREFIX="/mem9-on-aws/${STAGE}"
 ssm() { aws ssm get-parameter --name "$1" --region "$REGION" --query Parameter.Value --output text; }
 

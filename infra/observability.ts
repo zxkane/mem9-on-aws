@@ -1,4 +1,4 @@
-import { ECR_REGION } from "./ecr";
+import { applicationRegion } from "./ecr";
 
 // Observability: CloudWatch metrics, dashboard, alarms, and Slack alerting for
 // the mnemo-server container (issues #26, #47, and #55). Only created for `prod`
@@ -75,6 +75,7 @@ export function observability(
   const namespace = "mem9-on-aws";
   const durableNamespace = "mem9-on-aws/DurableIngest";
   const failureQueueRetentionSeconds = 14 * 24 * 60 * 60;
+  const region = applicationRegion();
 
   // ─── Metric filters ──────────────────────────────────────────────────────
 
@@ -281,7 +282,7 @@ export function observability(
           height: 6,
           properties: {
             title: "Inference outcomes",
-            region: ECR_REGION,
+            region,
             period: 300,
             metrics: [
               providerMetric("Inferences"),
@@ -297,7 +298,7 @@ export function observability(
           height: 6,
           properties: {
             title: "Token volume",
-            region: ECR_REGION,
+            region,
             period: 300,
             metrics: [
               providerMetric("TotalInputTokens"),
@@ -321,7 +322,7 @@ export function observability(
           height: 6,
           properties: {
             title: "Job outcomes",
-            region: ECR_REGION,
+            region,
             period: 300,
             metrics: [
               durableMetric("JobsAccepted", "accepted"),
@@ -339,7 +340,7 @@ export function observability(
           height: 6,
           properties: {
             title: "Queue and telemetry health",
-            region: ECR_REGION,
+            region,
             period: 300,
             metrics: [
               durableMetric("SamplerHeartbeat"),
@@ -358,7 +359,7 @@ export function observability(
           height: 6,
           properties: {
             title: "Application phase duration",
-            region: ECR_REGION,
+            region,
             period: 300,
             metrics: [
               durableMetric("PlanDurationMs", "succeeded", "Average"),
@@ -375,7 +376,7 @@ export function observability(
           height: 6,
           properties: {
             title: "Retries and warnings",
-            region: ECR_REGION,
+            region,
             period: 300,
             metrics: [
               ...retryTransitions(),
@@ -393,7 +394,7 @@ export function observability(
           height: 6,
           properties: {
             title: "Extraction and pre-screen outcomes",
-            region: ECR_REGION,
+            region,
             period: 300,
             metrics: [
               durableMetric("ZeroFactSuccess"),

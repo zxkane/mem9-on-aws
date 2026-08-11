@@ -64,7 +64,7 @@ import type { EcsOutputs } from "./ecs";
 import type { OauthFacadeOutputs } from "./oauth-facade";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import { taskFailureAlarm } from "./task-failure-alarm";
-import { accountId, ECR_REGION, ecrImage } from "./ecr";
+import { accountId, applicationRegion, ecrImage } from "./ecr";
 import { resolveVpc } from "./vpc";
 
 const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
@@ -250,7 +250,7 @@ export function slackApproval(
         actions: ["bedrock-mantle:CreateInference"],
         resources: [
           BEDROCK_PROJECT
-            ? $interpolate`arn:aws:bedrock-mantle:${ECR_REGION}:${accountId()}:project/${BEDROCK_PROJECT}`
+            ? $interpolate`arn:aws:bedrock-mantle:${applicationRegion()}:${accountId()}:project/${BEDROCK_PROJECT}`
             : "*",
           // A reasoning model is served from RESPONSES_REGION, whose project is a
           // DIFFERENT resource — without this the task 403s on inference.

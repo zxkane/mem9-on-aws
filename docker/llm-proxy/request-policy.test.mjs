@@ -104,7 +104,7 @@ afterEach(() => {
 
 describe("GLM request policy", () => {
   it("TC-GLM-RETRY-001: uses the bounded production defaults", () => {
-    const cfg = readConfig({});
+    const cfg = readConfig({ AWS_REGION: "ap-southeast-1" });
     expect(cfg).toMatchObject({
       overallDeadlineMs: 110_000,
       maxCallMs: 108_000,

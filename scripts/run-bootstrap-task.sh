@@ -15,12 +15,13 @@
 # Env:
 #   STAGE       (required) — e.g. prod / pr-7. Selects the /mem9-on-aws/<stage>/
 #               bootstrap/* SSM params.
-#   AWS_REGION  (optional) — defaults to ap-northeast-1 (the app region).
+#   AWS_REGION  (optional) — defaults to the SST application region.
 
 set -euo pipefail
 
 STAGE="${STAGE:?STAGE is required (e.g. prod or pr-7)}"
-REGION="${AWS_REGION:-ap-northeast-1}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REGION="${AWS_REGION:-$(node "$REPO_ROOT/scripts/resolve-application-region.mjs")}"
 PREFIX="/mem9-on-aws/${STAGE}/bootstrap"
 
 echo "run-bootstrap: reading run inputs from SSM ${PREFIX}/* (region ${REGION})"

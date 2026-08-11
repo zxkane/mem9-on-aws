@@ -9,12 +9,16 @@
  * comes from the caller identity (never hardcoded) and region = the app region.
  *
  * Centralized here so ecs.ts (mnemo-server, qwen3-embed, and llm-proxy) and
- * bootstrap.ts share one composition and the same region constant.
+ * bootstrap.ts share one composition and the active provider region.
  */
 
-// Must match sst.config.ts providers.aws.region and the ECR bootstrap region
-// (scripts/deploy-ecr-repositories.sh). Tokyo — Fargate pulls same-region.
-export const ECR_REGION = "ap-northeast-1";
+let regionOut: Output<string> | undefined;
+export function applicationRegion(): Output<string> {
+  if (!regionOut) {
+    regionOut = aws.getRegionOutput().name;
+  }
+  return regionOut;
+}
 
 // Cache the caller-identity Output so repeated ecrImage()/accountId() calls don't
 // each create a new getCallerIdentityOutput invoke. Exported so ecs.ts can build
@@ -31,5 +35,5 @@ export function accountId(): Output<string> {
  * @param tag e.g. "mem9-abc1234" or "latest"
  */
 export function ecrImage(namespace: string, tag: string): Output<string> {
-  return $interpolate`${accountId()}.dkr.ecr.${ECR_REGION}.amazonaws.com/${namespace}:${tag}`;
+  return $interpolate`${accountId()}.dkr.ecr.${applicationRegion()}.amazonaws.com/${namespace}:${tag}`;
 }

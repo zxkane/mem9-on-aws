@@ -23,7 +23,8 @@
 set -euo pipefail
 
 STAGE="${STAGE:?STAGE is required (for example, prod or pr-123)}"
-REGION="${AWS_REGION:-ap-northeast-1}"
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+REGION="${AWS_REGION:-$(node "$REPO_ROOT/scripts/resolve-application-region.mjs")}"
 PREFIX="/mem9-on-aws/${STAGE}"
 
 # Disposable stages only, refused BEFORE the first write, and one pattern rather

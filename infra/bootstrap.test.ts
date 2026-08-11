@@ -70,6 +70,7 @@ function installGlobals(stage: string) {
   };
   (globalThis as Record<string, unknown>).aws = {
     getCallerIdentityOutput: () => ({ accountId: out("123456789012") }),
+    getRegionOutput: () => ({ name: out("ap-northeast-1") }),
     ec2: {
       getVpcOutput: () => ({ id: out("vpc-test") }),
       getSubnetsOutput: () => ({ ids: out(["subnet-a", "subnet-b", "subnet-c"]) }),

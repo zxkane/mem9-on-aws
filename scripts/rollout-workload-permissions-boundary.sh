@@ -48,11 +48,10 @@ fi
 if [[ "$maintenance_ack_override_set" == "x" ]]; then
   export WORKLOAD_BOUNDARY_MAINTENANCE_ACK="$maintenance_ack_override"
 fi
-effective_application_region="${WORKLOAD_BOUNDARY_APPLICATION_REGION:-${PROJECT_REGION:-ap-northeast-1}}"
-if [[ -n "${WORKLOAD_BOUNDARY_APPLICATION_REGION:-}" &&
-      -n "${PROJECT_REGION:-}" &&
-      "$WORKLOAD_BOUNDARY_APPLICATION_REGION" != "$PROJECT_REGION" ]]; then
-  echo "Application region settings disagree; no mutation was attempted." >&2
+configured_application_region="$(node "$repo_root/scripts/resolve-application-region.mjs")"
+effective_application_region="${WORKLOAD_BOUNDARY_APPLICATION_REGION:-$configured_application_region}"
+if [[ "$effective_application_region" != "$configured_application_region" ]]; then
+  echo "Application region must match sst.config.ts; no mutation was attempted." >&2
   exit 2
 fi
 if [[ ! "$effective_application_region" =~ ^[a-z]{2}(-gov)?-[a-z0-9-]+-[0-9]+$ ]]; then
@@ -60,7 +59,6 @@ if [[ ! "$effective_application_region" =~ ^[a-z]{2}(-gov)?-[a-z0-9-]+-[0-9]+$ ]
   exit 2
 fi
 export WORKLOAD_BOUNDARY_APPLICATION_REGION="$effective_application_region"
-export PROJECT_REGION="$effective_application_region"
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
@@ -338,8 +336,9 @@ write_resume_assignment() {
       AWS_CONFIG_FILE \
       AWS_SHARED_CREDENTIALS_FILE \
       AWS_CA_BUNDLE \
+      MEM9_LLM_RESPONSES_REGION \
       WORKLOAD_BOUNDARY_APPLICATION_REGION \
-      PROJECT_REGION \
+      WORKLOAD_BOUNDARY_OPENAI_PROJECT_REGION \
       BEDROCK_PROJECT_STACK_NAME \
       MEM9_TEMPLATE_BUCKET \
       MEM9_VPC_ID \

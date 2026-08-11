@@ -8,7 +8,8 @@ I/O is faked via injected deps.
 ## Route resolution
 
 - **TC-MMROUTE-001** — `zai.glm-5` (and any unmatched model) resolves to the
-  `chat` route with the Tokyo base; `openai.gpt-5.6-terra` and
+  `chat` route with the configured application-region base;
+  `openai.gpt-5.6-terra` and
   `openai.gpt-5.6-luna` resolve to the `responses` route with the
   `openai/v1` base in the responses region.
 - **TC-MMROUTE-002** — `LLM_PROXY_RESPONSES_MODEL_PREFIXES` accepts a comma
@@ -62,7 +63,8 @@ I/O is faked via injected deps.
 - **TC-MMROUTE-031** — the refresh timer refreshes every region minted so
   far; a region never used is never minted.
 - **TC-MMROUTE-032** — 401 on the responses route re-mints the RESPONSES
-  region bearer (not Tokyo's) and retries once (policy unchanged).
+  region bearer (not the application route's) and retries once (policy
+  unchanged).
 - **TC-MMROUTE-033** — health/readiness still keys on the default-region
   token only (startup semantics unchanged).
 - **TC-MMROUTE-034** — a failed lazy responses-region mint 502s that request,

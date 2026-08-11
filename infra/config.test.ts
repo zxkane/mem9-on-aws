@@ -12,15 +12,19 @@ import { describe, expect, it } from "vitest";
  * not by our CI-only shim. So the root config is type-checked at `sst deploy`
  * time, not in this unit run (mirrors the sister project's approach). Instead
  * we read it as text and pin the locked facts, so a future edit that silently
- * changes region / prod-protection / the Lambda runtime trips this test.
+ * removes the region / prod-protection / Lambda runtime trips this test.
  */
 
 const here = dirname(fileURLToPath(import.meta.url));
 const src = readFileSync(resolve(here, "../sst.config.ts"), "utf8");
 
 describe("sst.config.ts locked facts", () => {
-  it("pins region ap-northeast-1", () => {
-    expect(src).toMatch(/region:\s*["']ap-northeast-1["']/);
+  it("declares one valid AWS provider region", () => {
+    const regions = [
+      ...src.matchAll(/region:\s*["']([^"']+)["']/gu),
+    ].map((match) => match[1]);
+    expect(regions).toHaveLength(1);
+    expect(regions[0]).toMatch(/^[a-z]{2}(?:-[a-z0-9]+)+-[0-9]+$/u);
   });
 
   it("retains + protects prod state and removes non-prod state", () => {

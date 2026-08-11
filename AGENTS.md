@@ -49,17 +49,23 @@ them, update the file rather than silently diverging.
 
 ## Region topology
 
-- This deployment is region-heterogeneous. Never treat `ap-northeast-1`,
+- This deployment is region-heterogeneous. Never treat the application region,
   `us-west-2`, or one ambient `AWS_REGION` as a universal region for every
   component.
 - The application plane (SST resources, ECR images, primary Mantle route, and
-  VPC) must use one internally consistent application region. The current IaC
-  pins that plane to `ap-northeast-1`; moving it requires a coordinated code,
-  workflow, bootstrap-stack, and permissions-boundary change.
+  VPC) uses `providers.aws.region` in `sst.config.ts` as its single source of
+  truth. Changing that value retargets all application-plane consumers together
+  for a fresh deployment; it does not relocate existing regional resources.
+- An existing IAM ownership stack records its application region. A mismatch
+  with `sst.config.ts` must fail before mutation. Live relocation requires a
+  dedicated dual-region migration after every old-region preview is removed;
+  never update the boundary or deploy role in place to force the move.
 - The account-global IAM ownership stacks are intentionally hosted in
   `us-west-2`. The optional Mantle Responses route has its own independently
-  configured region and regional Project. Do not "normalize" either to the
-  application region.
+  configured region and regional Project (default `us-west-2`). OpenAI GPT
+  models selected by the configured prefix use that route when unavailable in
+  the application region. Do not "normalize" either plane to the application
+  region.
 - For operator commands, identify the component first and pass its specific
   region variable. Preserve service-specific region settings when editing
   examples or automation.

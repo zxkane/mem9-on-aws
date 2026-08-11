@@ -45,7 +45,7 @@ Parameters:
       account is allowed).
   ApplicationRegion:
     Type: String
-    Default: ap-northeast-1
+    AllowedPattern: "^[a-z]{2}(-[a-z0-9]+)+-[0-9]+$"
     Description: AWS Region where the SST application and its Lambda VPC ENIs run.
   ApplicationVpcArn:
     Type: String
@@ -998,8 +998,9 @@ Resources:
   # CI PUSH surface. Its own ManagedPolicy so (a) ComputePolicy stays under IAM's
   # 6144-byte per-policy cap, and (b) the "who can push images" footprint is
   # auditable in one place. GetAuthorizationToken is already granted (ECRPull).
-  # Push actions are scoped to the four workload repository ARNs in Tokyo. The
-  # role stack itself is in us-west-2, but ECR ARNs are regional.
+  # Push actions are scoped to the four workload repository ARNs in the
+  # application region. The role stack itself is in us-west-2, but ECR ARNs are
+  # regional.
   #
   # OUT-OF-BAND DEPLOY REQUIREMENT: apply this policy with
   # scripts/deploy-github-role.sh before CI builds need new ECR grants.
@@ -1035,10 +1036,10 @@ Resources:
               - ecr:PutImage
               - ecr:DescribeRepositories
             Resource:
-              - !Sub arn:aws:ecr:ap-northeast-1:${AWS::AccountId}:repository/${ProjectName}/mnemo-server
-              - !Sub arn:aws:ecr:ap-northeast-1:${AWS::AccountId}:repository/${ProjectName}/qwen3-embed
-              - !Sub arn:aws:ecr:ap-northeast-1:${AWS::AccountId}:repository/${ProjectName}/bootstrap
-              - !Sub arn:aws:ecr:ap-northeast-1:${AWS::AccountId}:repository/${ProjectName}/llm-proxy
+              - !Sub arn:${AWS::Partition}:ecr:${ApplicationRegion}:${AWS::AccountId}:repository/${ProjectName}/mnemo-server
+              - !Sub arn:${AWS::Partition}:ecr:${ApplicationRegion}:${AWS::AccountId}:repository/${ProjectName}/qwen3-embed
+              - !Sub arn:${AWS::Partition}:ecr:${ApplicationRegion}:${AWS::AccountId}:repository/${ProjectName}/bootstrap
+              - !Sub arn:${AWS::Partition}:ecr:${ApplicationRegion}:${AWS::AccountId}:repository/${ProjectName}/llm-proxy
   # ───────────────────────────────────────────────────────────────────────────
   # Policy 7 — MCP proxy Lambda (infra/gateway.ts): the VPC-attached proxy Lambda
   # (nodejs24.x) the AgentCore Gateway invokes to reach mnemo-server privately over
@@ -1306,9 +1307,9 @@ Resources:
               - apigateway:TagResource
               - apigateway:UntagResource
             Resource:
-              # Region wildcard: the CFN stack lives in us-west-2 but the app
-              # deploys to ap-northeast-1. API Gateway ARNs carry no account-id
-              # (empty field between the double colons), only the region matters.
+              # Region wildcard: the CFN stack lives in us-west-2 but the app can
+              # deploy elsewhere. API Gateway ARNs carry no account-id (empty
+              # field between the double colons), only the region matters.
               - "arn:aws:apigateway:*::/apis"
               - "arn:aws:apigateway:*::/apis/*"
               - "arn:aws:apigateway:*::/domainnames"

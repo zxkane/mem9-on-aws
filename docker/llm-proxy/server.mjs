@@ -103,7 +103,10 @@ function positiveInteger(raw, fallback, name) {
 
 // ── Config from env (read once) ──────────────────────────────────────────────
 export function readConfig(env = process.env) {
-  const region = env.LLM_PROXY_REGION || env.AWS_REGION || "ap-northeast-1";
+  const region = env.LLM_PROXY_REGION || env.AWS_REGION;
+  if (!region) {
+    throw new Error("LLM_PROXY_REGION or AWS_REGION is required");
+  }
   return {
     port: Number(env.LLM_PROXY_PORT || 8082),
     region,
@@ -175,8 +178,8 @@ function readResponsesRouteConfig(env) {
       DEFAULT_RESPONSES_MAX_OUTPUT_TOKENS,
       "LLM_PROXY_RESPONSES_MAX_OUTPUT_TOKENS",
     ),
-    // Mantle projects are REGIONAL: the Tokyo project id means nothing in the
-    // responses region, so each route carries its own (never cross-applied).
+    // Mantle projects are REGIONAL: the application-region project id means
+    // nothing in the responses region, so routes never cross-apply projects.
     responsesOpenaiProject: env.LLM_PROXY_RESPONSES_OPENAI_PROJECT || "",
   };
 }
@@ -445,7 +448,7 @@ function requestLog(request, now, log, attempt, startedAt, fields) {
     request_id: request.id,
     attempt,
     // Two upstreams in two regions: failures must be route-attributable or a
-    // us-west-2 outage reads like Tokyo chat traffic in the logs.
+    // fallback-region outage reads like primary chat traffic in the logs.
     ...(request.route ? { route: request.route.kind, region: request.route.region } : {}),
     ...fields,
     duration_ms: Math.max(0, Math.round(now() - startedAt)),
