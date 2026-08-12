@@ -1037,10 +1037,14 @@ export function verifyPermanentEnforcementDocuments(
     // This verifier is stricter on purpose, and it does read the LIVE role:
     // `verifyLivePolicyDocuments` in workload-permissions-boundary-aws.mjs calls it
     // against the deployed documents after enforcement. Measured 2026-08-12: the
-    // live role still names only the consolidation pattern, so this statement is
-    // reported "malformed" until the github-actions-role.yaml widening is deployed.
-    // That makes `scripts/deploy-github-role.sh` a prerequisite of the next
-    // BOUNDARY rollout, not merely of the first deploy that creates the scan role.
+    // live role still names only the consolidation pattern, so this statement
+    // THROWS `... is malformed` until the github-actions-role.yaml widening is
+    // deployed. That makes `scripts/deploy-github-role.sh` a prerequisite of the
+    // next BOUNDARY rollout, not merely of the first deploy that creates the scan
+    // role. The operator does NOT see that sentence, though: the caller's retry
+    // wrapper in workload-permissions-boundary-aws.mjs catches it bare and returns
+    // false, so the surfaced message is "permanent permissions-boundary enforcement
+    // is incomplete" with no Sid. Run this verifier directly to get the Sid.
     resources: schedulerRoleArnPatterns({ partition, accountId }),
     conditionOperator: "StringNotEquals",
     conditionKey: "iam:PassedToService",

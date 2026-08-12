@@ -571,7 +571,7 @@ describe("Slack stale-hash rejection (TC-SLACKAPP-020..025)", () => {
 // 137 is deliberately absent here: it pins this file's `OFFER_TTL_MS` against the
 // container script's duplicate copy, so it lives on the STAMPING side
 // (scripts/memory-cleanup.test.mjs) where the value is written.
-describe("Slack offer expiry (TC-SLACKAPP-134..136, 138..139)", () => {
+describe("Slack offer expiry (TC-SLACKAPP-134..136, 138..139, 158)", () => {
   /** An offered record issued `ageMs` before `NOW`. */
   const aged = (ageMs: number) =>
     offered({ issuedAt: new Date(NOW - ageMs).toISOString() });
@@ -642,6 +642,36 @@ describe("Slack offer expiry (TC-SLACKAPP-134..136, 138..139)", () => {
       // Never "NaNh ago" or "Invalid Date": an unknown age is said in words.
       expect(text, `issuedAt=${JSON.stringify(issuedAt)}`).not.toMatch(/NaN|Invalid Date/u);
     }
+  });
+
+  it("TC-SLACKAPP-158 a FUTURE issuedAt is refused, including the string form that passes the type guard", async () => {
+    // TC-SLACKAPP-136 covers the NUMBER 2027, which the `typeof === "string"` guard
+    // catches. The STRING "2027" parses to a real future date, so it passes that
+    // guard and the age goes negative — and a negative age is below the threshold,
+    // so the record reads permanently LIVE and this button never expires. That is
+    // the direction this gate must never fail in, and it fails the same way on the
+    // scan side simultaneously (TC-SLACKAPP-157), which is the one combination the
+    // deliberate opposite-directions design exists to prevent. Container clock skew
+    // reaches it with no hand edit.
+    for (const issuedAt of ["2027", "2027-01-01T00:00:00.000Z", new Date(NOW + 1000).toISOString()]) {
+      const d = deps({ getParameter: vi.fn(async () => offered({ issuedAt })) });
+      const res = await handleSlackInteraction(ev(payload()), d);
+
+      expect(d.runTask, `issuedAt=${issuedAt}`).not.toHaveBeenCalled();
+      expect(d.putParameter, `issuedAt=${issuedAt}`).not.toHaveBeenCalled();
+      const text = JSON.parse(res.body).text as string;
+      expect(text, `issuedAt=${issuedAt}`).toMatch(/expire/iu);
+      // No negative age in the reply. "-3408h ago" is not NaN, so TC-SLACKAPP-136's
+      // guard would not have caught it, and it reads as a measurement.
+      expect(text, `issuedAt=${issuedAt}`).not.toMatch(/-\d/u);
+      expect(text, `issuedAt=${issuedAt}`).not.toMatch(/NaN|Invalid Date/u);
+    }
+
+    // Age exactly zero is LIVE and must stay live: `<= 0` instead of `< 0` would
+    // pass every case above while refusing a click on a freshly posted list.
+    const fresh = deps({ getParameter: vi.fn(async () => offered({ issuedAt: new Date(NOW).toISOString() })) });
+    await handleSlackInteraction(ev(payload()), fresh);
+    expect(fresh.runTask).toHaveBeenCalledTimes(1);
   });
 
   it("TC-SLACKAPP-138 a regenerated list is told it was regenerated, not that it expired", async () => {
