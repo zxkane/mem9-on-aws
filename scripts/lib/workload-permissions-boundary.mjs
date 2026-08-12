@@ -1030,10 +1030,17 @@ export function verifyPermanentEnforcementDocuments(
     sid: "DenyConsolidationSchedulerRolePassToOtherServices",
     effect: "Deny",
     actions: ["iam:PassRole"],
-    // Both Scheduler roles under the ORIGINAL Sid. This is the frozen-state
-    // verifier for the PERMANENT enforcement documents in this repository (not the
-    // live role), so it asserts the full list — unlike `extractPassRoleScope`,
-    // which reads the live role mid-rollout and therefore checks a subset.
+    // Both Scheduler roles under the ORIGINAL Sid, asserted as the FULL list —
+    // unlike `extractPassRoleScope`, which checks a subset because it runs before
+    // and during enforcement, when the live role may legitimately lag this file.
+    //
+    // This verifier is stricter on purpose, and it does read the LIVE role:
+    // `verifyLivePolicyDocuments` in workload-permissions-boundary-aws.mjs calls it
+    // against the deployed documents after enforcement. Measured 2026-08-12: the
+    // live role still names only the consolidation pattern, so this statement is
+    // reported "malformed" until the github-actions-role.yaml widening is deployed.
+    // That makes `scripts/deploy-github-role.sh` a prerequisite of the next
+    // BOUNDARY rollout, not merely of the first deploy that creates the scan role.
     resources: schedulerRoleArnPatterns({ partition, accountId }),
     conditionOperator: "StringNotEquals",
     conditionKey: "iam:PassedToService",
