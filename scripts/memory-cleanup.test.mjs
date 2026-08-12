@@ -5163,11 +5163,16 @@ describe("offering the list to Slack (#123)", () => {
     }
   });
 
-  it("TC-SLACKAPP-144 offers anyway when the record cannot be READ, without echoing the SDK's message", async () => {
-    // A throwing GetParameters is not evidence of no pending offer, so this branch
-    // fails OPEN and says so. The alternative — treating a transient SSM error as
-    // "something is pending" — stops the weekly scan on an AccessDenied that may
-    // have nothing to do with approvals.
+  it("TC-SLACKAPP-144 refuses to overwrite when the record cannot be READ, without echoing the SDK's message", async () => {
+    // The one case on this side that fails CLOSED, and the boundary of
+    // TC-SLACKAPP-143's fail-open table. Every case there judges a record the scan
+    // actually saw and found unactionable; a throwing GetParameters means it saw
+    // nothing, so "no pending offer" is an absence of evidence, not a finding.
+    // Offering anyway overwrites whatever is there — including a list a human is
+    // mid-review on, whose hash then stops matching, so their click is refused as
+    // "regenerated" and the reviewed list is gone with nothing reporting it.
+    // Refusing instead costs one skipped week that exits 1 and trips the
+    // task-exit alarm, which is the strictly louder failure.
     const fakes = offerFakes();
     const underlying = fakes.ssm.send;
     fakes.ssm.send = vi.fn(async (command) => {
@@ -5180,18 +5185,44 @@ describe("offering the list to Slack (#123)", () => {
       }
       return underlying(command);
     });
-    const log = vi.fn();
 
-    const result = await offer({ fakes, log, now: DURING }).promise;
-    expect(result.posted).toBe(true);
+    const error = await offer({ fakes, now: DURING }).promise.then(
+      () => undefined,
+      (err) => err,
+    );
 
-    const logged = log.mock.calls.flat().join("\n");
-    expect(logged).toMatch(/WARNING/u);
-    expect(logged).toMatch(/pending approval cannot be ruled out/u);
-    expect(logged).toContain("ValidationException");
+    expect(error?.message).toMatch(/could not be read/u);
+    expect(error?.message).toMatch(/pending approval cannot be ruled out/u);
+    // The error CLASS survives, because "AccessDenied" and "ValidationException"
+    // send the operator to different places, and the alarm carries no detail.
+    expect(error?.message).toContain("ValidationException");
     // An SDK error can quote the value it rejected, and this parameter's value is
-    // the id list — so the NAME is logged and the message is not.
-    expect(logged).not.toContain(SNIPPET);
+    // the id list — so the name and class are raised and the message is not.
+    expect(error?.message).not.toContain(SNIPPET);
+
+    // Read-before-write again, for the same reason as TC-SLACKAPP-140: a refusal
+    // that landed after the first write would have destroyed the record it was
+    // protecting on the way to complaining about it.
+    expect(fakes.ssm.puts).toEqual([]);
+    expect(fakes.slack.fetchImpl).not.toHaveBeenCalled();
+
+    // A throw carrying no `name` still has to read as a diagnosis. Nothing in the
+    // SDK does this, but an interceptor, an agent hook or a `throw "string"` in a
+    // fake does, and "could not be read (undefined)" is the kind of line an
+    // operator reads as a bug in the guard rather than a fault in SSM.
+    const nameless = offerFakes();
+    const plain = nameless.ssm.send;
+    nameless.ssm.send = vi.fn(async (command) => {
+      if (command?.input?.Names) throw { toString: () => `${SNIPPET}-leaked` };
+      return plain(command);
+    });
+    const bare = await offer({ fakes: nameless, now: DURING }).promise.then(
+      () => undefined,
+      (err) => err,
+    );
+    expect(bare?.message).toContain("unnamed error");
+    expect(bare?.message).not.toContain(SNIPPET);
+    expect(nameless.ssm.puts).toEqual([]);
   });
 
   it("TC-SLACKAPP-145 refuses to stamp a record without an issuedAt to anchor the window", async () => {

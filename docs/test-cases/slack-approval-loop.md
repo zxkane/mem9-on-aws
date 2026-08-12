@@ -289,13 +289,20 @@ can succeed against a record the scan skipped past.
   with no ids left to approve. The fail-open half of the table, and each case also
   asserts the log renders no `NaN` — "expired 4 hours ago" computed from an unparsed
   date is worse than silence.
-- **TC-SLACKAPP-144** — a `GetParameters` that **throws** does not block the offer,
-  and the warning carries the parameter name and the error class but not the SDK's
-  message. A throwing read is not evidence of no pending offer, so this fails open
-  and says so; treating a transient SSM error as "something is pending" would stop
-  the weekly scan on an `AccessDenied` that may have nothing to do with approvals.
-  The message is dropped because a `ValidationException` quotes the value it
-  rejected, and this parameter's value is the id list.
+- **TC-SLACKAPP-144** — a `GetParameters` that **throws** blocks the offer, and the
+  refusal carries the parameter name and the error class but not the SDK's message.
+  This is the one case on this side that fails **closed**, and the boundary of
+  TC-SLACKAPP-143's table: every case there judges a record the scan actually saw
+  and found unactionable, whereas a throwing read means it saw nothing, so "no
+  pending offer" is an absence of evidence rather than a finding. Offering anyway
+  overwrites whatever is there, and if that is a list a human is mid-review on
+  their click is then refused as "regenerated" with nothing reporting the loss —
+  against one skipped week that exits 1 and trips the task-exit alarm. The error
+  class survives because `AccessDenied` and `ValidationException` point at
+  different faults; the message is dropped because a `ValidationException` quotes
+  the value it rejected, and this parameter's value is the id list. Read-before-write
+  is re-asserted here for TC-SLACKAPP-140's reason — a refusal landing after the
+  first write would have destroyed the record it was protecting.
 - **TC-SLACKAPP-145** — `buildOfferedRecord` **refuses** to build a record without
   a parseable `issuedAt` rather than defaulting one. Both plausible defaults are
   wrong in ways that appear only on the replay path: `generatedAt` dates the record

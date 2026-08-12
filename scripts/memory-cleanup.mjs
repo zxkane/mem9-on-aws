@@ -1163,15 +1163,23 @@ async function slackCall(method, body, { botToken, fetchImpl }) {
  * The offer currently occupying `approvals/offered`, if overwriting it would
  * destroy a live human approval (#149).
  *
- * Returns null — meaning "go ahead" — for absent, unreadable, unparseable, an
- * offer for another stage, an offer with no ids, and an offer past its TTL. That
- * list is deliberately generous, and in the OPPOSITE direction from
- * `loadOffered`'s equivalent checks in the callback: there an unreadable record
- * must never widen what is APPLIED, so it fails closed; here it must never wedge
- * the weekly scan on a record nobody can act on, so it fails open. The asymmetry
- * is safe because the two guard different things — the callback refuses to delete
- * against a record it cannot verify, and no click can succeed against a record
- * this one skipped past.
+ * Returns null — meaning "go ahead" — for absent, unparseable, an offer for
+ * another stage, an offer with no ids, and an offer past its TTL. That list is
+ * deliberately generous, and in the OPPOSITE direction from `loadOffered`'s
+ * equivalent checks in the callback: there an UNJUDGEABLE record must never widen
+ * what is APPLIED, so it fails closed; here it must never wedge the weekly scan on
+ * a record nobody can act on, so it fails open. The asymmetry is safe because the
+ * two guard different things — the callback refuses to delete against a record it
+ * cannot verify, and no click can succeed against a record this one skipped past.
+ *
+ * A FAILED READ is the one exception, and it THROWS. Every case above judges a
+ * record this function actually saw; a `GetParameters` error means it saw nothing,
+ * so "no pending offer" is not a finding but an absence of evidence. Continuing
+ * would overwrite whatever is there — including a list a human is mid-review on,
+ * whose hash then stops matching, so their click is refused as "regenerated" and
+ * the reviewed list is gone. Throwing costs one skipped week, which `runCleanup`
+ * maps to exit 1 and the schedule's task-exit alarm reports; failing open costs a
+ * destroyed approval that nothing reports at all. TC-SLACKAPP-144 pins it.
  *
  * A zero-id offer is skipped because it has no Slack message and therefore no
  * button: `postApprovalRequest` writes the record and returns without posting, so
@@ -1184,13 +1192,13 @@ async function readPendingOffer({ ssm, name, stage, now, log }) {
     const response = await ssm.send(new GetParametersCommand({ Names: [name] }));
     raw = (response.Parameters ?? []).find((p) => p.Name === name)?.Value;
   } catch (err) {
-    // The NAME only, never the message: an SDK error can quote the value it
-    // rejected, and this parameter's value is the id list.
-    log(
-      `WARNING ${name} could not be read (${err.name ?? "unnamed error"}), so a ` +
-        `pending approval cannot be ruled out; offering anyway`,
+    // The NAME and the error's TYPE only, never its message: an SDK error can quote
+    // the value it rejected, and this parameter's value is the id list.
+    throw new Error(
+      `${name} could not be read (${err.name ?? "unnamed error"}), so a pending ` +
+        `approval cannot be ruled out — refusing to overwrite what may be a list ` +
+        `an operator is still reviewing`,
     );
-    return null;
   }
   if (!raw) return null;
   let record;
