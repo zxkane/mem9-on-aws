@@ -45,6 +45,19 @@ const MAX_TIMESTAMP_SKEW_MS = 5 * 60 * 1000;
  */
 export const CLAIM_STALE_MS = 60_000;
 
+/**
+ * How long after it was issued an offered list stays clickable (#149).
+ *
+ * DUPLICATED from `OFFER_TTL_MS` in scripts/memory-cleanup.mjs, which STAMPS the
+ * `issuedAt` this measures against, for the same reason `claimParameterName` is
+ * duplicated: the Lambda bundle and the container script share no module.
+ * TC-SLACKAPP-137 asserts the two agree, because a drift here is silent in both
+ * directions — a longer value accepts clicks the scan already considers replaceable
+ * (so the record may be gone), and a shorter one refuses clicks the scan still
+ * protects (so the list expires with nothing able to apply it).
+ */
+export const OFFER_TTL_MS = 72 * 60 * 60 * 1000;
+
 export interface SlackDeps {
   /** Slack app signing secret. Empty or absent must fail CLOSED. */
   signingSecret: string;
@@ -167,6 +180,12 @@ interface OfferedRecord {
   hash: string;
   ids: string[];
   /**
+   * When the review run made this list clickable, as an ISO string — the anchor
+   * for the `OFFER_TTL_MS` window. Optional because a record written before #149
+   * has none, and `loadOffered` treats that as EXPIRED rather than as unbounded.
+   */
+  issuedAt?: string;
+  /**
    * Where the review message was posted, stamped by the review run's second
    * `approvals/offered` write. Optional because the stamp is a best-effort
    * follow-up to the post: a run whose post succeeded but whose re-write failed
@@ -261,6 +280,48 @@ function parseAction(
   return action ? { action } : { error: "the payload carries no actions" };
 }
 
+/**
+ * Whether an offered list is past its window, and how old it is (#149).
+ *
+ * An absent or unparseable `issuedAt` is EXPIRED. That is the fail-closed
+ * direction for this side of the loop: the alternative — treating an
+ * unknown-age record as live — accepts a click against a list of unbounded age,
+ * which is exactly the thing the TTL exists to stop. It also correctly refuses
+ * a pre-#149 record left in SSM across the deploy that adds this check.
+ *
+ * `age` is a human string for the reply and `undefined` when unknown, so the
+ * message says "an unknown time ago" instead of "NaNh ago".
+ */
+function offerExpiry(
+  issuedAt: unknown,
+  now: number,
+): { expired: boolean; age?: string } {
+  // `unknown`, not `string | undefined`: the caller reads this off a parsed SSM
+  // parameter, so a NUMBER is a shape a hand-edited record can genuinely have, and
+  // `Date.parse` COERCES. An epoch-milliseconds or epoch-seconds value happens to
+  // yield NaN and would be refused either way, but a small number does not:
+  // `Date.parse(2027)` reads "2027" as a YEAR, returning a date in the FUTURE — so
+  // the age is negative and the list reads permanently live, which is the one
+  // direction this gate must never fail in. Casting at the call site would compile
+  // and take that branch; requiring a string cannot. Matches the script side's
+  // treatment of a numeric stamp as unjudgeable (TC-SLACKAPP-143), and
+  // TC-SLACKAPP-136 pins it here with that exact value.
+  const issuedAtMs = typeof issuedAt === "string" ? Date.parse(issuedAt) : NaN;
+  if (!Number.isFinite(issuedAtMs)) return { expired: true };
+  const ageMs = now - issuedAtMs;
+  // `>`, not `>=`: live for exactly OFFER_TTL_MS, matching `offerExpiry` in
+  // scripts/memory-cleanup.mjs. Asserted on the boundary itself
+  // (TC-SLACKAPP-135) — an off-by-one here passes every test that is not sitting
+  // on the millisecond.
+  return { expired: ageMs > OFFER_TTL_MS, age: formatHours(ageMs) };
+}
+
+/** `72h`, `4.5h` — a duration for one operator-facing sentence. */
+function formatHours(ms: number): string {
+  const hours = ms / (60 * 60 * 1000);
+  return `${Number.isInteger(hours) ? hours : hours.toFixed(1)}h`;
+}
+
 /** Parse a stored record, returning null for anything malformed. */
 function parseRecord(raw: string | null): Record<string, unknown> | null {
   if (!raw) return null;
@@ -304,6 +365,26 @@ async function loadOffered(
   if (record.hash !== hash) {
     return { error: "That list has been regenerated since it was posted. Nothing was applied." };
   }
+  // AFTER the hash check, so an expired click is told it expired rather than that
+  // the list was regenerated. The order is the operator's: "regenerated" means
+  // click the newer message, "expired" means wait for the next scan — and getting
+  // it backwards sends them hunting for a message that does not exist.
+  const expiry = offerExpiry(record.issuedAt, deps.now());
+  if (expiry.expired) {
+    deps.log(
+      `refused an expired approval for ${hash} ` +
+        `(issuedAt=${record.issuedAt ?? "unset"}, ttl=${OFFER_TTL_MS}ms)`,
+    );
+    // Names the expiry and what to do about it. The generic "nothing was applied"
+    // suffix is kept — every refusal in this handler ends with it, and an operator
+    // who has just clicked a destructive button reads that clause first.
+    return {
+      error:
+        `That list was issued ${expiry.age ?? "an unknown time"} ago and approvals ` +
+        `expire after ${formatHours(OFFER_TTL_MS)}, so it may no longer reflect the ` +
+        `store. Nothing was applied — the next scheduled scan will post a fresh list.`,
+    };
+  }
   // The coordinates are carried forward only when both are strings. A record
   // half-stamped (or stamped with a number, which is what a hand-edited parameter
   // or a future Slack payload change would produce) yields neither, so the apply
@@ -317,6 +398,12 @@ async function loadOffered(
       stage: record.stage,
       hash: record.hash,
       ids: record.ids.filter((id): id is string => typeof id === "string"),
+      // Carried on the RECORD but deliberately not into the claim: `buildClaim`
+      // enumerates its fields, and TC-SLACKAPP-023/023c assert the claim's exact
+      // key set because the parameter is a plain `String` whose contents are
+      // bounded on purpose. The expiry decision is already made by here, so the
+      // apply task has no use for it.
+      ...(typeof record.issuedAt === "string" ? { issuedAt: record.issuedAt } : {}),
       ...coordinates,
     },
   };

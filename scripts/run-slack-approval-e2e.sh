@@ -13,7 +13,9 @@
 # facade that accepted an unsigned interaction would pass every other check here.
 # It has to precede the valid click so "no record was written" is assertable at
 # all — after a successful click there is a record, and nothing can then tell the
-# two writers apart.
+# two writers apart. The expired-offer probe (#149) is second for the same reason:
+# it is a correctly signed click that must be REFUSED and must write nothing, and
+# only a run with no claim yet can prove the second half.
 #
 # The approved id is a synthetic sentinel that names no real memory. This
 # approves a DELETION against a live stage, so an id that resolved to preview
@@ -120,11 +122,29 @@ cleanup() {
 }
 trap cleanup EXIT
 
-OFFERED=$(jq -cn --arg stage "$STAGE" --arg hash "$IDS_HASH" --arg id "$APPROVED_ID" \
-  '{stage: $stage, hash: $hash, ids: [$id], generatedAt: (now | todate)}')
-echo "run-slack-approval-e2e: seeding ${OFFERED_NAME} with one synthetic id"
-aws ssm put-parameter --name "$OFFERED_NAME" --type String --value "$OFFERED" \
-  --overwrite --region "$REGION" >/dev/null
+# `issuedAt` is what the facade measures the 72h offer window against (#149), and
+# it is REQUIRED here rather than optional: an absent or unparseable stamp reads as
+# EXPIRED on the callback side, so a record seeded without one is refused and the
+# whole check below fails at "no approval record after a 200". `jq`'s `now` rather
+# than `date -u -d`, which is GNU-only — this script also runs on macOS `shasum`.
+#
+# Ages are seconds off `now` so the two cases below stay readable: `0` is a list
+# issued this instant, and `OFFER_EXPIRED_AGE` is comfortably past the window
+# rather than one second over it, so a clock skew between the runner and the Lambda
+# cannot make the expired case accidentally live.
+OFFER_EXPIRED_AGE=$((96 * 3600))
+seed_offer() {
+  local age="$1" record
+  record=$(jq -cn --arg stage "$STAGE" --arg hash "$IDS_HASH" --arg id "$APPROVED_ID" \
+    --argjson age "$age" \
+    '{stage: $stage,
+      hash: $hash,
+      ids: [$id],
+      generatedAt: (now - $age | todate),
+      issuedAt: (now - $age | todate)}')
+  aws ssm put-parameter --name "$OFFERED_NAME" --type String --value "$record" \
+    --overwrite --region "$REGION" >/dev/null
+}
 
 # Slack's own encoding: form-urlencoded with the JSON in a `payload` field. A
 # JSON body would 400 here and pass nothing but a smoke test.
@@ -183,7 +203,45 @@ if aws ssm get-parameter --name "$CLAIM_NAME" --region "$REGION" >/dev/null 2>&1
   exit 1
 fi
 
-# 2. The correctly signed click.
+# 2. The EXPIRED offer (#149). A correctly signed click against a list issued
+#    outside the 72h window must be refused, and must write no claim.
+#
+#    This runs before the live click and after the 401 for the same reason the 401
+#    comes first: "no claim was written" is only assertable while no claim exists.
+#    Reversed, the expired probe would have to prove the absence of a record the
+#    successful click had already created.
+#
+#    The refusal is an HTTP 200 with an ephemeral Slack message, not an error
+#    status — Slack renders a non-200 as its own "operation failed" and the
+#    operator never sees the reason. So the status alone cannot distinguish this
+#    from an ACCEPTED click; the body and the absent claim are what do.
+echo "run-slack-approval-e2e: seeding ${OFFERED_NAME} with a list issued $((OFFER_EXPIRED_AGE / 3600))h ago"
+seed_offer "$OFFER_EXPIRED_AGE"
+echo "run-slack-approval-e2e: POSTing a signed click against the expired list (expecting a refusal)"
+EXPIRED_STATUS=$(post "$SIGNATURE" "$RESPONSE_BODY")
+if [[ "$EXPIRED_STATUS" != "200" ]]; then
+  echo "::error::the click against an expired list was answered HTTP ${EXPIRED_STATUS}, not 200 — Slack shows the operator no reason for a non-200" >&2
+  exit 1
+fi
+# `expire` is the one word no OTHER refusal in the handler uses: "regenerated",
+# "names stage", "could not be read" and "already been applied" are all 200s with a
+# body too, so matching a generic "nothing was applied" would pass on a stale-hash
+# refusal and prove nothing about the TTL.
+EXPIRED_REPLY=$(<"$RESPONSE_BODY")
+if ! grep -qi 'expire' <<<"$EXPIRED_REPLY"; then
+  echo "::error::the click against an expired list was not refused as expired: ${EXPIRED_REPLY}" >&2
+  exit 1
+fi
+if aws ssm get-parameter --name "$CLAIM_NAME" --region "$REGION" >/dev/null 2>&1; then
+  echo "::error::an expired approval still wrote a claim — the refusal is cosmetic and an apply may have started" >&2
+  exit 1
+fi
+
+# 3. The correctly signed click against a LIVE list. Reseeded rather than reusing
+#    the record above: same ids and therefore the same hash, so what changes
+#    between the refusal and the acceptance is only `issuedAt`.
+echo "run-slack-approval-e2e: seeding ${OFFERED_NAME} with one synthetic id, issued now"
+seed_offer 0
 echo "run-slack-approval-e2e: POSTing a correctly signed interaction (expecting 200)"
 GOOD_STATUS=$(post "$SIGNATURE" "$RESPONSE_BODY")
 if [[ "$GOOD_STATUS" != "200" ]]; then
@@ -191,8 +249,9 @@ if [[ "$GOOD_STATUS" != "200" ]]; then
   exit 1
 fi
 
-# 3. The RECORD, read back by name. A 200 alone proves nothing: the handler also
-#    answers 200 for a stale hash, an unknown action, and "already applied".
+# 4. The RECORD, read back by name. A 200 alone proves nothing: the handler also
+#    answers 200 for a stale hash, an expired list, an unknown action, and
+#    "already applied".
 echo "run-slack-approval-e2e: reading the approval record back by name"
 CLAIM=""
 for attempt in 1 2 3 4 5 6; do
@@ -213,7 +272,7 @@ if [[ -z "$TASK_ARN" ]]; then
 fi
 echo "run-slack-approval-e2e: apply task ${TASK_ARN##*/} started"
 
-# 4. The apply task's own exit code. Without this the check passes on a click
+# 5. The apply task's own exit code. Without this the check passes on a click
 #    that started a task which then crashed.
 #
 # The cluster comes from SSM, NOT from slicing the task ARN. `${TASK_ARN##*:task/}`
@@ -287,4 +346,4 @@ if [[ -n "$STOP_REASON" && "$STOP_REASON" != "None" ]] \
   exit 1
 fi
 
-echo "run-slack-approval-e2e: OK — signed click accepted, record written, apply exited 0 on ${STAGE}"
+echo "run-slack-approval-e2e: OK — expired list refused, signed click accepted, record written, apply exited 0 on ${STAGE}"

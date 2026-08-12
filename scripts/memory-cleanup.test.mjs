@@ -20,6 +20,8 @@ import {
   createCleanupDeps,
   inactiveMemoryAdapter,
   materializeApprovedIds,
+  offerExpiry,
+  OFFER_TTL_MS,
   parseArgs,
   postApprovalRequest,
   updateApprovalMessage,
@@ -3907,8 +3909,20 @@ describe("the offered approval record (#123)", () => {
         { id: "m-unstable", verdict: "UNSTABLE", reason: "passes disagreed on deletion" },
       ],
       generatedAt: "2026-08-05T00:00:00.000Z",
+      issuedAt: "2026-08-05T00:00:00.000Z",
     });
-    expect(Object.keys(record).sort()).toEqual(["generatedAt", "hash", "ids", "stage"]);
+    // `issuedAt` joins the four, and the list stays CLOSED: it is a timestamp,
+    // the same class of value as `generatedAt`, and #149's whole reason for
+    // touching this record is to bound how long it stays clickable — not to widen
+    // what it may carry. #150's merged bytes go to a separate artifact precisely
+    // because they cannot come in here.
+    expect(Object.keys(record).sort()).toEqual([
+      "generatedAt",
+      "hash",
+      "ids",
+      "issuedAt",
+      "stage",
+    ]);
     expect(record.ids).toEqual(["m-1", "m-2"]);
     expect(record.stage).toBe("prod");
     expect(JSON.stringify(record)).not.toMatch(/SENTINEL-CONTENT/u);
@@ -3919,7 +3933,11 @@ describe("the offered approval record (#123)", () => {
     // `["a","bc"]` are one hash, and a click approving one list would be accepted
     // against the other.
     expect(record.hash).toMatch(/^sha256:[0-9a-f]{64}$/u);
-    const stamp = { stage: "prod", generatedAt: "2026-08-05T00:00:00.000Z" };
+    const stamp = {
+      stage: "prod",
+      generatedAt: "2026-08-05T00:00:00.000Z",
+      issuedAt: "2026-08-05T00:00:00.000Z",
+    };
     expect(buildOfferedRecord({ ...stamp, decisions: [del("ab"), del("c")] }).hash).not.toBe(
       buildOfferedRecord({ ...stamp, decisions: [del("a"), del("bc")] }).hash,
     );
@@ -3938,7 +3956,12 @@ describe("the offered approval record (#123)", () => {
     // failing on.
     const many = Array.from({ length: 200 }, (_, i) => del(`memory-with-a-realistic-id-${i}`));
     expect(() =>
-      buildOfferedRecord({ stage: "prod", decisions: many, generatedAt: "2026-08-05T00:00:00.000Z" }),
+      buildOfferedRecord({
+        stage: "prod",
+        decisions: many,
+        generatedAt: "2026-08-05T00:00:00.000Z",
+        issuedAt: "2026-08-05T00:00:00.000Z",
+      }),
     ).toThrow(/4096|parameter limit/u);
     // Asserted on the SERIALIZED length, not the id count: a limit expressed as
     // "N ids" drifts from the real constraint the moment ids get longer, and the
@@ -3947,6 +3970,7 @@ describe("the offered approval record (#123)", () => {
       stage: "prod",
       decisions: many.slice(0, 40),
       generatedAt: "2026-08-05T00:00:00.000Z",
+      issuedAt: "2026-08-05T00:00:00.000Z",
     });
     expect(JSON.stringify(ok).length).toBeLessThanOrEqual(4096);
     expect(ok.ids).toHaveLength(40);
@@ -4035,6 +4059,36 @@ describe("materializing the approved ids in the apply task (#123)", () => {
         claimParameterName(prefix, hash),
       );
     }
+  });
+
+  it("TC-SLACKAPP-137 the offer TTL this script stamps is the one the facade enforces", async () => {
+    // Same duplication, same lack of a shared module, and the same reason this is
+    // the only thing holding the two sides together — but a worse failure than
+    // TC-SLACKAPP-131's, because it is silent in BOTH directions and neither
+    // direction errors:
+    //   facade TTL SHORTER  -> a list is refused as expired while it is still the
+    //                          newest one posted. The operator is told to wait for
+    //                          the next scheduled scan, which posts the same list,
+    //                          which is refused again. No error, no alarm, cleanup
+    //                          simply never happens again.
+    //   facade TTL LONGER   -> the scan replaces a record the facade still honours.
+    //                          The overwrite guard reads the record as dead and
+    //                          clobbers a live one, which is precisely the hazard
+    //                          #149 added it to close.
+    const { OFFER_TTL_MS: facadeTtlMs } = await import(
+      "../infra/src/oauth-facade/slack-interactions.ts"
+    );
+    expect(facadeTtlMs).toBe(OFFER_TTL_MS);
+
+    // Not just equal numbers: the STAMPER's own boundary has to fall where the
+    // ENFORCER's constant puts it. Two constants can agree while `offerExpiry`
+    // compares against something else entirely (an hour count, a half-window, a
+    // `>=`), and that mistake survives an equality assertion untouched.
+    const issuedAt = "2026-08-06T00:00:00.000Z";
+    const issuedAtMs = Date.parse(issuedAt);
+    const record = { issuedAt };
+    expect(offerExpiry(record, issuedAtMs + facadeTtlMs).expired).toBe(false);
+    expect(offerExpiry(record, issuedAtMs + facadeTtlMs + 1).expired).toBe(true);
   });
 
   it("TC-SLACKAPP-091 the ids come from the CLAIM named by the hash, not from the offered record", async () => {
@@ -4601,11 +4655,29 @@ describe("offering the list to Slack (#123)", () => {
    * before the record it is validated against is a promise the backend cannot
    * keep.
    */
-  function offerFakes(slackBodies = {}) {
+  function offerFakes(slackBodies = {}, { pending } = {}) {
     const events = [];
     const ssm = {
       puts: [],
+      // Answers BOTH commands, keyed on which input shape arrived. Before #149
+      // this fake replied `{}` to everything, which happens to read as "no
+      // pending offer" — so the refuse-to-overwrite branch would have been
+      // invisible here rather than tested. `pending` seeds the record the scan
+      // finds already in place; the reads themselves are asserted through
+      // `events`, which is what pins the read BEFORE the first write.
       send: vi.fn(async (command) => {
+        const names = command?.input?.Names;
+        if (names) {
+          events.push(["ssm-get", ...names]);
+          // The shape SSM really returns, as `fakeSsm` above models it: an absent
+          // name is echoed in `InvalidParameters` and simply MISSING from
+          // `Parameters`, never present with an empty value.
+          if (pending === undefined) return { Parameters: [], InvalidParameters: names };
+          return {
+            Parameters: names.map((name) => ({ Name: name, Value: pending })),
+            InvalidParameters: [],
+          };
+        }
         events.push(["ssm", command.input.Name]);
         ssm.puts.push(command.input);
         return {};
@@ -4650,9 +4722,11 @@ describe("offering the list to Slack (#123)", () => {
         stage: "prod",
         decisions: overrides.decisions ?? [del("m-1"), del("m-2")],
         generatedAt: "2026-08-05T03:00:00.000Z",
+        issuedAt: overrides.issuedAt ?? "2026-08-05T03:00:00.000Z",
         channel: CHANNEL,
         botToken: BOT_TOKEN,
         fetchImpl: slack.fetchImpl,
+        now: overrides.now,
         log: overrides.log ?? vi.fn(),
       }),
     };
@@ -4668,7 +4742,11 @@ describe("offering the list to Slack (#123)", () => {
     // rejects with "there is no current approval list" — a spent click and an
     // operator hunting a backend fault. The write is also what INVALIDATES last
     // week's button, so it must not be reachable only through the post.
+    // The READ comes first (#149): overwriting a record an operator is still
+    // deciding on destroys their pending approval, so the scan checks before it
+    // clobbers. Everything after it is the original #123 order.
     expect(fakes.events).toEqual([
+      ["ssm-get", OFFERED],
       ["ssm", OFFERED],
       ["slack", "chat.postMessage"],
       ["ssm", OFFERED],
@@ -4682,9 +4760,20 @@ describe("offering the list to Slack (#123)", () => {
     expect(first.Type).toBe("String");
     expect(first.Overwrite).toBe(true);
     const record = JSON.parse(first.Value);
-    expect(Object.keys(record).sort()).toEqual(["generatedAt", "hash", "ids", "stage"]);
+    expect(Object.keys(record).sort()).toEqual([
+      "generatedAt",
+      "hash",
+      "ids",
+      "issuedAt",
+      "stage",
+    ]);
     expect(record.ids).toEqual(["m-1", "m-2"]);
     expect(record.hash).toBe(contentHash("m-1\nm-2"));
+    // The value the callback measures its TTL against, so it must reach SSM on
+    // the FIRST write — the one that happens before the button exists. Stamped
+    // only on the second write it would be absent for the whole window between
+    // the post and the stamp, and an absent `issuedAt` reads as expired.
+    expect(record.issuedAt).toBe("2026-08-05T03:00:00.000Z");
     expect(result.record.hash).toBe(record.hash);
     expect(result.messageTs).toBe("1754400000.000100");
   });
@@ -4749,6 +4838,7 @@ describe("offering the list to Slack (#123)", () => {
         stage: "prod",
         decisions: small,
         generatedAt: "2026-08-05T03:00:00.000Z",
+        issuedAt: "2026-08-05T03:00:00.000Z",
       }),
       decisions: small,
       channel: CHANNEL,
@@ -4824,6 +4914,12 @@ describe("offering the list to Slack (#123)", () => {
     const flaky = offerFakes();
     let put = 0;
     flaky.ssm.send = vi.fn(async (command) => {
+      // Counts WRITES only. The pre-write read (#149) also arrives here, and
+      // counting it would make the throw land on the first write instead of the
+      // stamp — testing a different failure than the one this case names.
+      if (command?.input?.Names) {
+        return { Parameters: [], InvalidParameters: command.input.Names };
+      }
       put += 1;
       if (put === 2) throw new Error("ThrottlingException");
       flaky.ssm.puts.push(command.input);
@@ -4940,6 +5036,212 @@ describe("offering the list to Slack (#123)", () => {
 
     expect(result.exitCode).toBe(0);
     expect(postApproval.mock.calls[0][0].generatedAt).toBe("2026-07-24T00:00:00.000Z");
+  });
+
+  /**
+   * A pending record as it sits in SSM, for the overwrite guard's tests. Written
+   * out by hand rather than through `buildOfferedRecord` so that the shapes these
+   * tests care about — a missing `issuedAt`, a foreign stage — are statable at all.
+   */
+  const pendingRecord = (overrides = {}) =>
+    JSON.stringify({
+      stage: "prod",
+      hash: contentHash("m-pending"),
+      ids: ["m-pending"],
+      generatedAt: "2026-08-04T03:00:00.000Z",
+      issuedAt: "2026-08-04T03:00:00.000Z",
+      ...overrides,
+    });
+
+  // Two hours into the previous offer's window, i.e. deep inside its 72h.
+  const DURING = () => Date.parse("2026-08-04T05:00:00.000Z");
+
+  it("TC-SLACKAPP-140 refuses to overwrite an offer still inside its window, before writing anything", async () => {
+    // The hazard the schedule creates. Operator-initiated, the clobber was a
+    // footnote — the human running the scan is the same human holding the pending
+    // approval. Unattended it is a live approval destroyed at 03:00 by a scan
+    // nobody watched, and the operator's later click is refused as "regenerated"
+    // pointing at a message they never saw.
+    const fakes = offerFakes({}, { pending: pendingRecord() });
+    const log = vi.fn();
+
+    await expect(offer({ fakes, log, now: DURING }).promise).rejects.toThrow(
+      /still pending/u,
+    );
+
+    // NOTHING was written and nothing was posted. A guard that threw after the
+    // first write would have already destroyed the record it was protecting, and
+    // the message it raised would be about a record that no longer existed.
+    expect(fakes.ssm.puts).toEqual([]);
+    expect(fakes.slack.fetchImpl).not.toHaveBeenCalled();
+    expect(fakes.events).toEqual([["ssm-get", OFFERED]]);
+  });
+
+  it("TC-SLACKAPP-141 names the age, the window and the size in its refusal, and never the ids", async () => {
+    // This message is the whole diagnosis: the run exits non-zero, the alarm says
+    // only "task failed", and this line is what tells the operator the difference
+    // between "a human is mid-review, do nothing" and a real fault. So it has to
+    // carry the age (is this nearly expired?), the window (when does it clear?)
+    // and the size (is it the list I am looking at?).
+    const fakes = offerFakes({}, { pending: pendingRecord({ ids: ["m-a", "m-b"] }) });
+    const error = await offer({ fakes, now: DURING }).promise.then(
+      () => undefined,
+      (err) => err,
+    );
+
+    expect(error?.message).toMatch(/2h of its 72h window/u);
+    expect(error?.message).toMatch(/2 id\(s\)/u);
+    expect(error?.message).toContain(contentHash("m-pending"));
+    // The ids themselves stay out of it. This string reaches CloudWatch Logs and
+    // an operator's terminal, and the hash already identifies the list uniquely —
+    // TC-SLACKAPP-023's "ids and a hash only" is about what is stored, but a log
+    // line is a copy too.
+    expect(error?.message).not.toContain("m-a");
+    expect(error?.message).not.toContain("m-b");
+  });
+
+  it("TC-SLACKAPP-142 replaces an offer past its window, and one exactly at the boundary is still live", async () => {
+    // The other half: refusing forever would wedge the loop. An expired record is
+    // one no click can act on (the facade refuses it first), so replacing it costs
+    // nothing.
+    const issuedAt = "2026-08-04T03:00:00.000Z";
+    const at = (offsetMs) => () => Date.parse(issuedAt) + offsetMs;
+
+    const live = offerFakes({}, { pending: pendingRecord({ issuedAt }) });
+    await expect(
+      offer({ fakes: live, now: at(OFFER_TTL_MS) }).promise,
+    ).rejects.toThrow(/still pending/u);
+
+    // One millisecond later the same record is replaceable. Asserted as a PAIR
+    // because either bound alone passes with the comparison inverted or the window
+    // doubled.
+    const dead = offerFakes({}, { pending: pendingRecord({ issuedAt }) });
+    const result = await offer({ fakes: dead, now: at(OFFER_TTL_MS + 1) }).promise;
+    expect(result.posted).toBe(true);
+    expect(dead.ssm.puts).toHaveLength(2);
+    expect(JSON.parse(dead.ssm.puts[0].Value).ids).toEqual(["m-1", "m-2"]);
+  });
+
+  it("TC-SLACKAPP-143 treats a record it cannot judge as replaceable, in the opposite direction from the facade", async () => {
+    // The asymmetry is deliberate and it is the reason both sides are safe:
+    //   facade  — unreadable age reads EXPIRED (never apply against a record of
+    //             unknown age)
+    //   scan    — unreadable age reads REPLACEABLE (never wedge the weekly scan on
+    //             a record nobody can act on)
+    // Fail-closed on both sides deadlocks: a record with no `issuedAt` — every
+    // record written before #149 — would be un-appliable AND un-replaceable, and
+    // the loop would stop permanently with no error anywhere. The combination is
+    // safe precisely because no click can succeed against a record this scan
+    // skipped past.
+    const unjudgeable = [
+      ["no issuedAt at all", pendingRecord({ issuedAt: undefined })],
+      ["an unparseable issuedAt", pendingRecord({ issuedAt: "last tuesday" })],
+      ["a numeric issuedAt", pendingRecord({ issuedAt: 1754400000 })],
+      // The sharp one: `Date.parse` coerces, and it reads a small number as a
+      // YEAR, so `2027` is a date in the FUTURE — a negative age, a record that
+      // never expires, and a scan that refuses to replace it every week from now
+      // on. Every other numeric shape here yields NaN and is refused by a version
+      // that skips the type check too, so this is the only case that pins it.
+      ["a year-shaped issuedAt", pendingRecord({ issuedAt: 2027 })],
+      ["not JSON", "{not json"],
+      ["not an object", '"a string"'],
+      ["another stage's record", pendingRecord({ stage: "pr-123" })],
+      ["no ids left to approve", pendingRecord({ ids: [] })],
+    ];
+
+    for (const [what, pending] of unjudgeable) {
+      const fakes = offerFakes({}, { pending });
+      const log = vi.fn();
+      const result = await offer({ fakes, log, now: DURING }).promise;
+      expect(result.posted, what).toBe(true);
+      expect(fakes.slack.fetchImpl, what).toHaveBeenCalled();
+      // Whatever it says about the record, it must not render an unparsed date as
+      // arithmetic on it: "expired 4 hours ago" and "NaNh" are both worse than
+      // silence.
+      const logged = log.mock.calls.flat().join("\n");
+      expect(logged, what).not.toMatch(/NaN|Invalid Date/u);
+    }
+  });
+
+  it("TC-SLACKAPP-144 refuses to overwrite when the record cannot be READ, without echoing the SDK's message", async () => {
+    // The one case on this side that fails CLOSED, and the boundary of
+    // TC-SLACKAPP-143's fail-open table. Every case there judges a record the scan
+    // actually saw and found unactionable; a throwing GetParameters means it saw
+    // nothing, so "no pending offer" is an absence of evidence, not a finding.
+    // Offering anyway overwrites whatever is there — including a list a human is
+    // mid-review on, whose hash then stops matching, so their click is refused as
+    // "regenerated" and the reviewed list is gone with nothing reporting it.
+    // Refusing instead costs one skipped week that exits 1 and trips the
+    // task-exit alarm, which is the strictly louder failure.
+    const fakes = offerFakes();
+    const underlying = fakes.ssm.send;
+    fakes.ssm.send = vi.fn(async (command) => {
+      if (command?.input?.Names) {
+        const err = new Error(
+          `ValidationException: value ${SNIPPET}-leaked is not permitted`,
+        );
+        err.name = "ValidationException";
+        throw err;
+      }
+      return underlying(command);
+    });
+
+    const error = await offer({ fakes, now: DURING }).promise.then(
+      () => undefined,
+      (err) => err,
+    );
+
+    expect(error?.message).toMatch(/could not be read/u);
+    expect(error?.message).toMatch(/pending approval cannot be ruled out/u);
+    // The error CLASS survives, because "AccessDenied" and "ValidationException"
+    // send the operator to different places, and the alarm carries no detail.
+    expect(error?.message).toContain("ValidationException");
+    // An SDK error can quote the value it rejected, and this parameter's value is
+    // the id list — so the name and class are raised and the message is not.
+    expect(error?.message).not.toContain(SNIPPET);
+
+    // Read-before-write again, for the same reason as TC-SLACKAPP-140: a refusal
+    // that landed after the first write would have destroyed the record it was
+    // protecting on the way to complaining about it.
+    expect(fakes.ssm.puts).toEqual([]);
+    expect(fakes.slack.fetchImpl).not.toHaveBeenCalled();
+
+    // A throw carrying no `name` still has to read as a diagnosis. Nothing in the
+    // SDK does this, but an interceptor, an agent hook or a `throw "string"` in a
+    // fake does, and "could not be read (undefined)" is the kind of line an
+    // operator reads as a bug in the guard rather than a fault in SSM.
+    const nameless = offerFakes();
+    const plain = nameless.ssm.send;
+    nameless.ssm.send = vi.fn(async (command) => {
+      if (command?.input?.Names) throw { toString: () => `${SNIPPET}-leaked` };
+      return plain(command);
+    });
+    const bare = await offer({ fakes: nameless, now: DURING }).promise.then(
+      () => undefined,
+      (err) => err,
+    );
+    expect(bare?.message).toContain("unnamed error");
+    expect(bare?.message).not.toContain(SNIPPET);
+    expect(nameless.ssm.puts).toEqual([]);
+  });
+
+  it("TC-SLACKAPP-145 refuses to stamp a record without an issuedAt to anchor the window", async () => {
+    // `buildOfferedRecord` will not default this, and the two defaults it could
+    // plausibly take are both wrong in ways that only appear on the replay path:
+    // `generatedAt` dates the record to the FILE's stamp (so a `--decisions` repost
+    // of a four-day-old review posts a list already expired on arrival), and
+    // `new Date()` inside the builder makes the stamp untestable and silently
+    // ignores the run's own clock.
+    for (const issuedAt of [undefined, "", "yesterday", 1754400000, null]) {
+      expect(() =>
+        buildOfferedRecord({
+          stage: "prod",
+          decisions: [del("m-1")],
+          generatedAt: "2026-08-05T03:00:00.000Z",
+          issuedAt,
+        }),
+      ).toThrow(/issuedAt/u);
+    }
   });
 });
 
@@ -5077,6 +5379,7 @@ describe("wiring the offer into the review run (#123)", () => {
         },
       ],
       generatedAt: "2026-08-05T03:00:00.000Z",
+      issuedAt: "2026-08-05T03:00:00.000Z",
     });
 
     expect(offer.posted).toBe(true);

@@ -192,10 +192,30 @@ export function expectedRolePatterns(identity) {
   );
 }
 
-function consolidationSchedulerRoleArnPattern({ partition, accountId }) {
-  return (
-    `arn:${partition}:iam::${accountId}:role/` +
-    "mem9-on-a*-*Mem9ConsolidationSchedulerRole-*"
+/**
+ * Every EventBridge Scheduler role this project creates, in the order the deploy
+ * role's `PassConsolidationSchedulerRole` / `DenyConsolidationSchedulerRolePassTo
+ * OtherServices` statements list them.
+ *
+ * The order matches the template for readability only: `requireStatement` compares
+ * Resource through `sameStringSet`, which SORTS both sides, so reordering these two
+ * tokens changes nothing it enforces. Do not read this list as an ordering contract
+ * — what is enforced is the SET of ARN patterns, and the one assertion that does
+ * pin order is a `toMatchObject` in the test, whose array comparison is positional.
+ *
+ * Consolidation's role came first (#122); the cleanup scan's followed with #149.
+ * Both are Scheduler roles, and neither is coverable by `PassRoleConstrained`,
+ * whose `iam:PassedToService` condition names only lambda and ecs-tasks.
+ */
+const SCHEDULER_ROLE_TOKENS = [
+  "Mem9ConsolidationSchedulerRole-",
+  "Mem9CleanupSchedulerRole-",
+];
+
+function schedulerRoleArnPatterns({ partition, accountId }) {
+  return SCHEDULER_ROLE_TOKENS.map(
+    (roleToken) =>
+      `arn:${partition}:iam::${accountId}:role/mem9-on-a*-*${roleToken}*`,
   );
 }
 
@@ -678,8 +698,7 @@ function validatePassServices(statement) {
 export function extractPassRoleScope(policyDocuments, identity) {
   const expected = expectedRolePatterns(identity);
   const expectedSet = new Set(expected);
-  const schedulerRolePattern =
-    consolidationSchedulerRoleArnPattern(identity);
+  const knownSchedulerRoles = new Set(schedulerRoleArnPatterns(identity));
   const resources = new Set();
 
   for (const rawDocument of policyDocuments) {
@@ -709,13 +728,24 @@ export function extractPassRoleScope(policyDocuments, identity) {
         throw new Error("PassRole statement has no resource scope");
       }
       if (services.includes("scheduler.amazonaws.com")) {
+        // Every resource must be one of the KNOWN Scheduler role patterns, with no
+        // repeats — a SUBSET check, not an exact-list one. Requiring the full list
+        // would make this function's verdict depend on rollout order: it reads the
+        // LIVE deploy role, and #149's widening lands out of band, so between the
+        // two deploys the live statement legitimately names one pattern while this
+        // file names two. A subset check still rejects the thing that matters (a
+        // Scheduler pass to any role this project did not review) and still forbids
+        // pairing scheduler.amazonaws.com with a second service in one statement.
+        const distinct = new Set(statementResources);
         if (
           services.length !== 1 ||
-          statementResources.length !== 1 ||
-          statementResources[0] !== schedulerRolePattern
+          distinct.size !== statementResources.length ||
+          statementResources.some(
+            (resource) => !knownSchedulerRoles.has(resource),
+          )
         ) {
           throw new Error(
-            "Scheduler PassRole scope does not match the consolidation role",
+            "Scheduler PassRole scope does not match a known scheduler role",
           );
         }
         continue;
@@ -1000,9 +1030,18 @@ export function verifyPermanentEnforcementDocuments(
     sid: "DenyConsolidationSchedulerRolePassToOtherServices",
     effect: "Deny",
     actions: ["iam:PassRole"],
-    resources: [
-      consolidationSchedulerRoleArnPattern({ partition, accountId }),
-    ],
+    // Both Scheduler roles under the ORIGINAL Sid, asserted as the FULL list —
+    // unlike `extractPassRoleScope`, which checks a subset because it runs before
+    // and during enforcement, when the live role may legitimately lag this file.
+    //
+    // This verifier is stricter on purpose, and it does read the LIVE role:
+    // `verifyLivePolicyDocuments` in workload-permissions-boundary-aws.mjs calls it
+    // against the deployed documents after enforcement. Measured 2026-08-12: the
+    // live role still names only the consolidation pattern, so this statement is
+    // reported "malformed" until the github-actions-role.yaml widening is deployed.
+    // That makes `scripts/deploy-github-role.sh` a prerequisite of the next
+    // BOUNDARY rollout, not merely of the first deploy that creates the scan role.
+    resources: schedulerRoleArnPatterns({ partition, accountId }),
     conditionOperator: "StringNotEquals",
     conditionKey: "iam:PassedToService",
     conditionValue: "scheduler.amazonaws.com",

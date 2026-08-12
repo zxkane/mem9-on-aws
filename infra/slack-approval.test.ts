@@ -206,6 +206,29 @@ function installGlobals(stage: string) {
         }
       },
     },
+    // The #149 weekly scan's schedule. Same stubs consolidation.test.ts installs;
+    // the ScheduleGroup returns a NAME derived from its own namePrefix so the
+    // TargetErrorCount alarm's dimension can be proven to point at THIS group
+    // rather than at consolidation's.
+    scheduler: {
+      ScheduleGroup: class {
+        arn: Output<string>;
+        name: Output<string>;
+        constructor(logicalName: string, args: Record<string, unknown>) {
+          const name = `${String(materialize(args.namePrefix))}fixture`;
+          this.arn = out(
+            `arn:aws:scheduler:ap-northeast-1:123456789012:schedule-group/${name}`,
+          );
+          this.name = out(name);
+          record("ScheduleGroup", logicalName, args);
+        }
+      },
+      Schedule: class {
+        constructor(logicalName: string, args: Record<string, unknown>) {
+          record("Schedule", logicalName, args);
+        }
+      },
+    },
     // The apply task's failure signal — the SAME stub set consolidation.test.ts
     // installs, because both stacks build these six resources through
     // `taskFailureAlarm`.
@@ -279,6 +302,20 @@ function installGlobals(stage: string) {
   };
 }
 
+/**
+ * Drop the SST/Pulumi globals `installGlobals` planted.
+ *
+ * A case that synthesizes twice (a preview stage and then prod, say) must clear
+ * them between runs: `installGlobals` is what carries `$app.stage`, so a second
+ * `installGlobals` over live globals would leave the first stage's `$interpolate`
+ * closures reachable and the assertions would read a mixture of the two.
+ */
+function clearGlobals() {
+  for (const key of ["$app", "$interpolate", "$jsonStringify", "aws", "sst"]) {
+    delete (globalThis as Record<string, unknown>)[key];
+  }
+}
+
 async function loadModule() {
   vi.resetModules();
   return import("./slack-approval");
@@ -307,41 +344,42 @@ function list(value: unknown): string[] {
 }
 
 /**
- * Statements of the OPERATOR-OWNED boundary that this stack's role must survive.
+ * An OPERATOR-OWNED CloudFormation template, parsed with the intrinsic tags this
+ * repo's templates use.
  *
- * Read from the deployed CloudFormation template rather than from the exported
- * helper in `scripts/lib/workload-permissions-boundary.mjs`: `infra/tsconfig.json`
- * has no `allowJs`, so importing the untyped `.mjs` fails `pnpm -C infra
- * typecheck` — a CI gate. This is the same idiom TC-CONSOL-032 uses.
+ * Read from the deployed template rather than from the exported helpers in
+ * `scripts/lib/workload-permissions-boundary.mjs`: `infra/tsconfig.json` has no
+ * `allowJs`, so importing the untyped `.mjs` fails `pnpm -C infra typecheck` — a
+ * CI gate. Same idiom, and same tag list, as TC-CONSOL-031/032.
  */
+function cloudFormationTemplate(path: string) {
+  return parse(readFileSync(new URL(path, import.meta.url), "utf8"), {
+    customTags: [
+      { tag: "!Ref", resolve: (value: string) => ({ Ref: value }) },
+      { tag: "!Sub", resolve: (value: string) => ({ "Fn::Sub": value }) },
+      {
+        tag: "!Equals",
+        collection: "seq",
+        resolve: (value) => ({ "Fn::Equals": value.toJSON() }),
+      },
+      {
+        tag: "!If",
+        collection: "seq",
+        resolve: (value) => ({ "Fn::If": value.toJSON() }),
+      },
+      {
+        tag: "!GetAtt",
+        resolve: (value: string) => ({ "Fn::GetAtt": value.split(".") }),
+      },
+    ],
+  }) as { Resources: Record<string, { Properties: Record<string, any> }> };
+}
+
+/** Statements of the boundary that this stack's roles must survive. */
 function boundaryStatements(): Array<Record<string, any>> {
-  const template = parse(
-    readFileSync(
-      new URL("./cloudformation/workload-permissions-boundary.yaml", import.meta.url),
-      "utf8",
-    ),
-    {
-      customTags: [
-        { tag: "!Ref", resolve: (value: string) => ({ Ref: value }) },
-        { tag: "!Sub", resolve: (value: string) => ({ "Fn::Sub": value }) },
-        {
-          tag: "!Equals",
-          collection: "seq",
-          resolve: (value) => ({ "Fn::Equals": value.toJSON() }),
-        },
-        {
-          tag: "!If",
-          collection: "seq",
-          resolve: (value) => ({ "Fn::If": value.toJSON() }),
-        },
-        {
-          tag: "!GetAtt",
-          resolve: (value: string) => ({ "Fn::GetAtt": value.split(".") }),
-        },
-      ],
-    },
-  ) as { Resources: Record<string, { Properties: Record<string, any> }> };
-  return template.Resources.WorkloadPermissionsBoundary.Properties.PolicyDocument
+  return cloudFormationTemplate(
+    "./cloudformation/workload-permissions-boundary.yaml",
+  ).Resources.WorkloadPermissionsBoundary.Properties.PolicyDocument
     .Statement as Array<Record<string, any>>;
 }
 
@@ -380,6 +418,7 @@ const ENV_KEYS = [
   "MEM9_BEDROCK_PROJECT",
   "MEM9_BEDROCK_PROJECT_OPENAI",
   "MEM9_CLEANUP_CAP",
+  "MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED",
 ];
 
 function enable() {
@@ -387,6 +426,24 @@ function enable() {
   process.env.MEM9_SLACK_APPROVAL_CHANNEL = CHANNEL_ID;
   process.env.SST_SECRET_SlackBotToken = BOT_TOKEN;
   process.env.SST_SECRET_SlackSigningSecret = SIGNING_SECRET;
+}
+
+/**
+ * The weekly scan's own gate, on TOP of `enable()`. Separate because the loop's
+ * two halves are separately enabled: the apply half is inert until a human
+ * clicks, the scan half runs unattended and spends reasoning-model passes.
+ */
+function enableScan() {
+  process.env.MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED = "1";
+}
+
+/** The scan schedule's `target.input`, parsed. */
+function scanContainerOverride(): Record<string, any> {
+  const schedule = materialize(one("Schedule", "Mem9CleanupScan").args) as
+    Record<string, any>;
+  const input = JSON.parse(String(schedule.target.input));
+  expect(input.containerOverrides).toHaveLength(1);
+  return input.containerOverrides[0];
 }
 
 beforeEach(() => {
@@ -397,9 +454,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
-  for (const key of ["$app", "$interpolate", "$jsonStringify", "aws", "sst"]) {
-    delete (globalThis as Record<string, unknown>)[key];
-  }
+  clearGlobals();
   for (const key of ENV_KEYS) delete process.env[key];
   vi.resetModules();
 });
@@ -587,9 +642,7 @@ describe("slack approval infrastructure", () => {
         module.slackApproval(fakeEcs(), fakeDb(), fakeIdentity(), fakeFacade()),
       ).toThrow(/Slack/i);
       expect(resources).toEqual([]);
-      for (const key of ["$app", "$interpolate", "$jsonStringify", "aws", "sst"]) {
-        delete (globalThis as Record<string, unknown>)[key];
-      }
+      clearGlobals();
     }
   });
 
@@ -621,9 +674,7 @@ describe("slack approval infrastructure", () => {
     expect(args.environment.MEM9_SLACK_APPROVAL_CHANNEL).toBe(CHANNEL_ID);
 
     resources = [];
-    for (const key of ["$app", "$interpolate", "$jsonStringify", "aws", "sst"]) {
-      delete (globalThis as Record<string, unknown>)[key];
-    }
+    clearGlobals();
     installGlobals("prod");
     enable();
     delete process.env.MEM9_SLACK_APPROVAL_CHANNEL;
@@ -854,6 +905,429 @@ describe("slack approval infrastructure", () => {
     expect(all("Task")).toHaveLength(1);
   });
 
+  it("TC-SLACKAPP-146: builds the apply half with no schedule, group, role, or scan alarm while the scan flag is unset", async () => {
+    installGlobals("prod");
+    enable();
+    await loadAndRun();
+
+    // The two halves are separately enabled on purpose: an operator seeding a
+    // Slack app runs the loop by hand first. So "approval enabled" must not
+    // conscript the account into a weekly reasoning-model spend, and the scan's
+    // absence must be TOTAL — a schedule left DISABLED is a schedule an
+    // UpdateSchedule call can enable without a deploy.
+    expect(all("Schedule")).toEqual([]);
+    expect(all("ScheduleGroup")).toEqual([]);
+    expect(all("Role")).toEqual([]);
+    expect(
+      all("MetricAlarm").map(({ logicalName }) => logicalName),
+    ).toEqual(["CleanupApplyFailureAlarm"]);
+    // …and the apply half is untouched, which is the point of the split.
+    expect(all("Task")).toHaveLength(1);
+  });
+
+  it("TC-SLACKAPP-146: builds nothing at all when the scan flag is set but the loop is not enabled", async () => {
+    installGlobals("prod");
+    // The scan flag is INSIDE the approval gate, not beside it. A scan with no
+    // Slack channel configured would classify the whole corpus every week and
+    // then have nowhere to post it — `buildPostApproval` returns no poster, so
+    // the run is pure spend with no output.
+    enableScan();
+    await loadAndRun();
+
+    expect(resources).toEqual([]);
+  });
+
+  it("TC-SLACKAPP-147: schedules the scan weekly on its own group, enabled only on prod", async () => {
+    installGlobals("pr-103");
+    enable();
+    enableScan();
+    const module = await loadAndRun();
+
+    const group = materialize(
+      one("ScheduleGroup", "Mem9CleanupScanScheduleGroup").args,
+    ) as Record<string, any>;
+    expect(group).toMatchObject({
+      namePrefix: "mem9-on-aws-pr-103-cleanup-scan-",
+      tags: { ManagedBy: "sst", Project: "mem9-on-aws", Stage: "pr-103" },
+    });
+
+    let schedule = materialize(one("Schedule", "Mem9CleanupScan").args) as
+      Record<string, any>;
+    // Saturday, NOT consolidation's Sunday. Both tasks classify the same corpus
+    // through the same model and both take the shared database mutex on apply, so
+    // an overlap has one of them lose the mutex and exit 3. A day EARLIER because
+    // consolidation rewrites what a cleanup scan would classify, and the 72h offer
+    // window then closes on Tuesday — well before the next Saturday.
+    expect(schedule.scheduleExpression).toBe(module.CLEANUP_SCAN_CRON);
+    expect(schedule.scheduleExpression).toBe("cron(0 3 ? * SAT *)");
+    expect(schedule.scheduleExpression).not.toContain("SUN");
+    expect(schedule.scheduleExpressionTimezone).toBe("UTC");
+    expect(schedule.flexibleTimeWindow).toEqual({ mode: "OFF" });
+    // Its OWN group, not consolidation's: the TargetErrorCount alarm below
+    // dimensions on ScheduleGroup, so a shared group makes one alarm fire for
+    // either schedule and name neither.
+    expect(schedule.groupName).toBe("mem9-on-aws-pr-103-cleanup-scan-fixture");
+    expect(schedule.groupName).not.toContain("consolidation");
+    // A preview stage synthesizes the schedule for coverage but must not RUN it:
+    // a pr-N stage sharing the prod corpus would post a second offer against the
+    // record prod's operator is still looking at.
+    expect(schedule.state).toBe("DISABLED");
+
+    expect(schedule.target.ecsParameters).toMatchObject({
+      launchType: "FARGATE",
+      taskCount: 1,
+      taskDefinitionArn:
+        "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-cleanup:1",
+      networkConfiguration: {
+        assignPublicIp: false,
+        securityGroups: ["sg-task"],
+        // Passed as an Output, so Pulumi resolves the nested Outputs before the
+        // API call. Joining them writes "Calling [toString] on an [Output<T>] is
+        // not supported." into the request — the defect that reached two live
+        // stacks.
+        subnets: ["subnet-a", "subnet-b"],
+      },
+    });
+    expect(JSON.stringify(schedule.target.ecsParameters)).not.toMatch(
+      /Calling \[toString\]|Output<T>/u,
+    );
+    // Bounded retry: a second full classification costs a second reasoning pass,
+    // and the refuse-to-overwrite guard makes a retry AFTER a successful post fail
+    // loudly rather than clobber the offer it just made.
+    expect(schedule.target.retryPolicy).toEqual({
+      maximumEventAgeInSeconds: 3600,
+      maximumRetryAttempts: 1,
+    });
+
+    resources = [];
+    clearGlobals();
+    installGlobals("prod");
+    enable();
+    enableScan();
+    await loadAndRun();
+    schedule = materialize(one("Schedule", "Mem9CleanupScan").args) as
+      Record<string, any>;
+    expect(schedule.state).toBe("ENABLED");
+  });
+
+  it("TC-SLACKAPP-148: trusts Scheduler only for THIS schedule group, by account and source arn", async () => {
+    installGlobals("prod");
+    enable();
+    enableScan();
+    await loadAndRun();
+
+    const role = materialize(one("Role", "Mem9CleanupSchedulerRole").args) as
+      Record<string, any>;
+    // A fixed `name` containing the token both the deploy role and the boundary
+    // audit match on. Pulumi caps a role `name_prefix` at 38 and any prefix
+    // carrying `Mem9CleanupSchedulerRole-` is longer, so a namePrefix here is a
+    // CREATE-time failure; and dropping `mem9-on-aws-` AccessDenies on
+    // iam:CreateRole, which is scoped to `role/mem9-on-aws-*`.
+    expect(role.name).toBe("mem9-on-aws-prod-Mem9CleanupSchedulerRole-role");
+    expect(role.namePrefix).toBeUndefined();
+
+    const trust = JSON.parse(String(role.assumeRolePolicy));
+    expect(trust.Statement).toHaveLength(1);
+    expect(trust.Statement[0]).toEqual({
+      Effect: "Allow",
+      Principal: { Service: "scheduler.amazonaws.com" },
+      Action: "sts:AssumeRole",
+      Condition: {
+        StringEquals: {
+          "aws:SourceAccount": "123456789012",
+          // The schedule GROUP arn, and this is a REQUIREMENT rather than a
+          // choice: AWS's confused-deputy guidance for Scheduler says not to
+          // scope aws:SourceArn to a specific schedule or a schedule-name
+          // prefix. Hence StringEquals with no wildcard — and hence a role of
+          // its own, since reusing consolidation's would mean widening a
+          // deployed trust policy to a second group.
+          "aws:SourceArn":
+            "arn:aws:scheduler:ap-northeast-1:123456789012:schedule-group/mem9-on-aws-prod-cleanup-scan-fixture",
+        },
+      },
+    });
+    // Both keys present, and neither replaced by a wildcard: SourceAccount alone
+    // lets any schedule in the account assume this role, and a wildcard SourceArn
+    // is the confused-deputy hole the condition exists to close.
+    expect(JSON.stringify(trust)).not.toContain("StringLike");
+    expect(trust.Statement[0].Condition.StringEquals["aws:SourceArn"]).not.toContain(
+      "*",
+    );
+  });
+
+  it("TC-SLACKAPP-149: grants the scheduler role RunTask on one task definition and a conditioned PassRole", async () => {
+    installGlobals("prod");
+    enable();
+    enableScan();
+    await loadAndRun();
+
+    const policy = all("RolePolicy").filter(
+      ({ logicalName }) => logicalName === "Mem9CleanupSchedulerPolicy",
+    );
+    expect(policy).toHaveLength(1);
+    const document = JSON.parse(String(materialize(policy[0].args.policy)));
+    expect(document.Statement).toEqual([
+      {
+        Effect: "Allow",
+        Action: "ecs:RunTask",
+        // The exact revision, not the cluster: RunTask scoped to a cluster would
+        // let this role start the mnemo server or the consolidation task.
+        Resource:
+          "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-cleanup:1",
+      },
+      {
+        Effect: "Allow",
+        Action: "iam:PassRole",
+        Resource: [
+          "arn:aws:iam::123456789012:role/cleanup-task",
+          "arn:aws:iam::123456789012:role/cleanup-execution",
+        ],
+        // Unconditioned iam:PassRole on an ECS role is a privilege-escalation
+        // primitive — the same role could be handed to any service willing to
+        // assume it. Same condition the facade's PassCleanupTaskRoles carries.
+        Condition: {
+          StringEquals: { "iam:PassedToService": "ecs-tasks.amazonaws.com" },
+        },
+      },
+    ]);
+    // Nothing else. In particular no ssm:*, no ecs:StopTask, and no iam:PassRole
+    // for scheduler.amazonaws.com — this role is passed TO Scheduler, it does not
+    // pass roles to Scheduler itself.
+    const actions = document.Statement.flatMap((statement: Record<string, any>) =>
+      list(statement.Action),
+    );
+    expect(actions.sort()).toEqual(["ecs:RunTask", "iam:PassRole"]);
+  });
+
+  it("TC-SLACKAPP-150: overrides the command with a DRY run: no --apply, no --ids, a quorum, and an out-dir outside /app", async () => {
+    installGlobals("prod");
+    enable();
+    enableScan();
+    const module = await loadAndRun();
+
+    const override = scanContainerOverride();
+    // The container name the override targets. A rename makes RunTask reject the
+    // override, and for the SCHEDULE that surfaces as a silent week with no
+    // approval message — which looks exactly like a week with nothing to delete.
+    expect(override.name).toBe(module.CLEANUP_CONTAINER_NAME);
+    expect(override.name).toBe("Mem9Cleanup");
+
+    const command = override.command as string[];
+    expect(command[0]).toBe("/app/scripts/memory-cleanup.mjs");
+
+    // THE safety property of this schedule. `runCleanup` returns at the dry-run
+    // branch before it takes either the lockfile or the shared database mutex, so
+    // an unattended run cannot delete and cannot make the weekly consolidation
+    // exit 3. `--ids` must be absent for a second, independent reason:
+    // `readApprovedIds` treats an absent file as "no filter", which is only safe
+    // on a path that writes nothing.
+    expect(command).not.toContain("--apply");
+    expect(command).not.toContain("--ids");
+    expect(command).not.toContain("--cap");
+
+    // With no human reading the list before it is offered, the quorum is the only
+    // thing narrowing it: one pass reproduced just 66% of its own DELETE set on
+    // re-run. `consensusDecisions` needs >= 2 usable passes and the flag's `min`
+    // is 2, so this cannot be weakened to 1 without the parser refusing.
+    const passesIndex = command.indexOf("--consensus-passes");
+    expect(passesIndex).toBeGreaterThan(0);
+    expect(Number(command[passesIndex + 1])).toBe(
+      module.CLEANUP_SCAN_CONSENSUS_PASSES,
+    );
+    expect(Number(command[passesIndex + 1])).toBeGreaterThanOrEqual(2);
+
+    // `snippetLogDir` REFUSES a path inside the script tree because the log holds
+    // memory snippets, and in the image /app IS that tree — so `--out /app/...`
+    // throws before the scan starts and the schedule fails every week.
+    const outIndex = command.indexOf("--out");
+    expect(outIndex).toBeGreaterThan(0);
+    const outDir = command[outIndex + 1];
+    expect(outDir).toBe(module.CLEANUP_SCAN_OUT_DIR);
+    expect(outDir.startsWith("/app")).toBe(false);
+    expect(outDir.startsWith("/tmp/")).toBe(true);
+
+    // A FULL command, not an addition: ECS replaces `command` wholesale, so every
+    // argument the scan needs must appear here even when the task definition
+    // already sets it.
+    const stageIndex = command.indexOf("--stage");
+    expect(stageIndex).toBeGreaterThan(0);
+    expect(command[stageIndex + 1]).toBe("prod");
+    const baseUrlIndex = command.indexOf("--base-url");
+    expect(baseUrlIndex).toBeGreaterThan(0);
+    expect(command[baseUrlIndex + 1]).toBe("http://mnemo.mem9-prod.local:8080");
+
+    // No environment override at all. MEM9_SLACK_APPROVAL_CHANNEL is already in
+    // the definition and is what makes `buildPostApproval` return a poster, so the
+    // scan offers by virtue of being configured for Slack. MEM9_APPROVAL_HASH must
+    // NOT appear: it means "this run came from a click", and setting it with no
+    // `--ids` is a hard error in `createCleanupDeps`.
+    expect(override.environment).toBeUndefined();
+    const taskArgs = materialize(one("Task", "Mem9Cleanup").args) as
+      Record<string, any>;
+    expect(Object.keys(taskArgs.environment)).not.toContain("MEM9_APPROVAL_HASH");
+    expect(taskArgs.environment.MEM9_SLACK_APPROVAL_CHANNEL).toBe(CHANNEL_ID);
+    expect(JSON.stringify(override)).not.toContain("MEM9_APPROVAL_HASH");
+  });
+
+  it("TC-SLACKAPP-151: alarms on an invocation that never STARTS a task, dimensioned on the scan's own group", async () => {
+    installGlobals("prod");
+    enable();
+    enableScan();
+    await loadAndRun();
+
+    // Distinct from the apply task's exit-code alarm, which cannot see this at
+    // all: with maximumRetryAttempts 1, two failed RunTask calls (IAM drift,
+    // capacity, a task definition a teardown removed) are dropped silently. No
+    // task, no STOPPED event, no alarm — and the only symptom is a missing Slack
+    // message, indistinguishable from a clean week.
+    const alarm = materialize(
+      one("MetricAlarm", "CleanupScanScheduleTargetErrorAlarm").args,
+    ) as Record<string, any>;
+    expect(alarm).toMatchObject({
+      namespace: "AWS/Scheduler",
+      metricName: "TargetErrorCount",
+      statistic: "Sum",
+      threshold: 1,
+      comparisonOperator: "GreaterThanOrEqualToThreshold",
+      // A week with no invocation emits no datapoint, and that is not an error.
+      treatMissingData: "notBreaching",
+      alarmActions: [
+        "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
+      ],
+    });
+    // THIS group. Consolidation's alarm carries the same namespace and metric, so
+    // a dimension pointing at its group would page for consolidation failures and
+    // stay silent for the scan's.
+    expect(alarm.dimensions).toEqual({
+      ScheduleGroup: "mem9-on-aws-prod-cleanup-scan-fixture",
+    });
+    expect(String(alarm.dimensions.ScheduleGroup)).not.toContain("consolidation");
+  });
+
+  it("TC-SLACKAPP-151: still schedules the scan on a stage with no alerts topic", async () => {
+    installGlobals("prod");
+    enable();
+    enableScan();
+    const module = await loadModule();
+    // An alarm whose alarmActions is [undefined] fails CREATE for the whole
+    // stack, which would cost every preview stage its scan to gain paging it has
+    // no topic for.
+    module.slackApproval(
+      { ...fakeEcs(), alertsTopicArn: undefined } as unknown as EcsOutputs,
+      fakeDb(),
+      fakeIdentity(),
+      fakeFacade(),
+    );
+    expect(all("MetricAlarm")).toEqual([]);
+    expect(all("Schedule")).toHaveLength(1);
+    expect(all("ScheduleGroup")).toHaveLength(1);
+    expect(all("Role")).toHaveLength(1);
+  });
+
+  it("TC-SLACKAPP-153: keeps the task role's approval write inside the DEPLOYED boundary", async () => {
+    installGlobals("prod");
+    enable();
+    enableScan();
+    await loadAndRun();
+
+    // The scan is the apply task definition under a command override, so the task
+    // that posts the offer needs `ssm:PutParameter`. #149 claims this needs no
+    // boundary rollout; that claim is MEASURED here against the same template the
+    // operator deploys, because the alternative is discovering it as an opaque
+    // AccessDenied on the first scheduled Saturday.
+    const taskArgs = materialize(one("Task", "Mem9Cleanup").args) as
+      Record<string, any>;
+    const permissions = taskArgs.permissions as Array<Record<string, any>>;
+    const actions = permissions.flatMap((statement) => list(statement.actions));
+    expect(actions).toContain("ssm:PutParameter");
+
+    const boundary = boundaryStatements();
+    const ceiling = boundary.find(({ NotAction }) => NotAction);
+    expect(ceiling).toBeDefined();
+    const admitted = list(ceiling!.NotAction);
+    for (const action of actions) {
+      expect(
+        admitted.some((pattern) => globMatches(pattern, action)),
+        `${action} is outside the workload boundary action ceiling`,
+      ).toBe(true);
+    }
+
+    // DenyPutParameterOutsideApprovalRecords is a NotResource deny: one stray
+    // resource in the same statement denies the whole call, so EVERY resource the
+    // write names has to be matched by the exception.
+    const approvalDeny = boundary.find(
+      ({ Sid }) => Sid === "DenyPutParameterOutsideApprovalRecords",
+    );
+    expect(approvalDeny).toBeDefined();
+    const exceptions = (approvalDeny!.NotResource as unknown[]).map(resolveSub);
+    const putResources = permissions
+      .filter((statement) => list(statement.actions).includes("ssm:PutParameter"))
+      .flatMap((statement) => list(statement.resources));
+    expect(putResources).toEqual([
+      "arn:aws:ssm:ap-northeast-1:123456789012:parameter/mem9-on-aws/prod/approvals/*",
+    ]);
+    for (const resource of putResources) {
+      expect(
+        exceptions.some((pattern) => globMatches(pattern, resource)),
+        `${resource} is denied by DenyPutParameterOutsideApprovalRecords`,
+      ).toBe(true);
+    }
+    // `approvals/*` is the tightest scope SSM allows here — the claim and the
+    // offer are siblings — so the immutability of a claim rests on
+    // `Overwrite: false` at the write, not on IAM. What must NOT widen is the
+    // reach beyond the approval records.
+    expect(putResources).not.toContain(
+      "arn:aws:ssm:ap-northeast-1:123456789012:parameter/mem9-on-aws/prod/*",
+    );
+  });
+
+  it("TC-SLACKAPP-154: names the scan scheduler role in both deploy-role statements that gate a Scheduler pass", async () => {
+    const { CLEANUP_SCHEDULER_ROLE_ARN_PATTERN } = await loadModule();
+    const template = cloudFormationTemplate(
+      "./cloudformation/github-actions-role.yaml",
+    );
+    const arnFor = (pattern: string) =>
+      `arn:\${AWS::Partition}:iam::\${AWS::AccountId}:role/${pattern}`;
+
+    // `PassRoleConstrained` does NOT cover this: it conditions on
+    // iam:PassedToService in [lambda, ecs-tasks] only, so a
+    // scheduler.amazonaws.com pass needs the dedicated statement. Without the
+    // widening the deploy AccessDenies on CreateSchedule's PassRole AFTER having
+    // already created the role and the group.
+    const pass = (
+      template.Resources.ScaffoldPolicy.Properties.PolicyDocument
+        .Statement as Array<Record<string, any>>
+    ).find(({ Sid }) => Sid === "PassConsolidationSchedulerRole");
+    expect(pass).toBeDefined();
+    expect((pass!.Resource as unknown[]).map(resolveSub)).toContain(
+      resolveSub({ "Fn::Sub": arnFor(CLEANUP_SCHEDULER_ROLE_ARN_PATTERN) }),
+    );
+
+    // The paired Deny has to name it too. It denies iam:PassRole on these roles
+    // for any service OTHER than Scheduler, so a role missing from the Deny is a
+    // role the deploy could hand to anything the Allow above happens to permit.
+    const deny = (
+      template.Resources.DenyPolicy.Properties.PolicyDocument
+        .Statement as Array<Record<string, any>>
+    ).find(({ Sid }) => Sid === "DenyConsolidationSchedulerRolePassToOtherServices");
+    expect(deny).toBeDefined();
+    expect((deny!.Resource as unknown[]).map(resolveSub)).toContain(
+      resolveSub({ "Fn::Sub": arnFor(CLEANUP_SCHEDULER_ROLE_ARN_PATTERN) }),
+    );
+    // Kept under the ORIGINAL Sids rather than added as new statements: both the
+    // boundary audit lib and the recorded rollout state look these up BY Sid.
+    expect(deny!.Sid).toBe("DenyConsolidationSchedulerRolePassToOtherServices");
+
+    // The pattern must actually match the name the stack synthesizes. Two globs
+    // that both look right but disagree on one hyphen is a rollout that reports
+    // success and then AccessDenies.
+    installGlobals("prod");
+    const { cleanupSchedulerRoleName } = await loadModule();
+    expect(
+      globMatches(CLEANUP_SCHEDULER_ROLE_ARN_PATTERN, cleanupSchedulerRoleName("prod")),
+    ).toBe(true);
+  });
+
   it("TC-SLACKAPP-088: adds no Lambda, no API, and no certificate", async () => {
     installGlobals("prod");
     enable();
@@ -892,5 +1366,65 @@ describe("slack approval infrastructure", () => {
     expect(
       module.slackApproval(fakeEcs(), fakeDb(), fakeIdentity(), fakeFacade()),
     ).toBeUndefined();
+  });
+});
+
+describe("scan schedule name budgets (TC-SLACKAPP-152)", () => {
+  it("keeps the scan's group prefix under Scheduler's 38-char cap and its 64-char name", async () => {
+    const { cleanupScanScheduleGroupPrefix } = await loadModule();
+    const { SCHEDULE_GROUP_NAME_PREFIX_MAX, PULUMI_NAME_SUFFIX_LEN } =
+      await import("./consolidation");
+
+    // Two limits, and the prefix cap is the tighter one — which is why it is
+    // reported first. Checking only the 64-char NAME limit is the #127 trap in
+    // reverse: `mem9-on-aws-pr-99999-cleanup-scan-` fits 64 easily and still
+    // would have been rejected by Scheduler's prefix validator if it were longer.
+    for (const stage of ["prod", "pr-1", "pr-113", "pr-99999"]) {
+      const prefix = cleanupScanScheduleGroupPrefix(stage);
+      expect(prefix.length).toBeLessThanOrEqual(SCHEDULE_GROUP_NAME_PREFIX_MAX);
+      expect(prefix.length + PULUMI_NAME_SUFFIX_LEN).toBeLessThanOrEqual(64);
+      // The deploy role's Scheduler grants are scoped to
+      // `schedule-group/mem9-on-aws-*` and `schedule/mem9-on-aws-*/*`. Those are
+      // already wide enough for this new group, which is the reason the SCHEDULE
+      // needs no deploy-role change — only the scheduler ROLE does.
+      expect(prefix.startsWith("mem9-on-aws-")).toBe(true);
+    }
+    expect(cleanupScanScheduleGroupPrefix("prod")).toBe(
+      "mem9-on-aws-prod-cleanup-scan-",
+    );
+    // Loudly at synth, never at CREATE. `boundedNamePrefix` refuses rather than
+    // truncating because two stages silently shortened to the same prefix share a
+    // schedule group — and then one stage's TargetErrorCount alarm covers both.
+    expect(() => cleanupScanScheduleGroupPrefix("a".repeat(40))).toThrow(
+      /exceeds 38 characters/u,
+    );
+  });
+
+  it("keeps the scan scheduler role name matchable by the deployed patterns", async () => {
+    const { cleanupSchedulerRoleName, CLEANUP_SCHEDULER_ROLE_ARN_PATTERN } =
+      await loadModule();
+    const { IAM_ROLE_NAME_MAX } = await import("./consolidation");
+
+    for (const stage of ["prod", "pr-1", "pr-113", "pr-99999"]) {
+      const name = cleanupSchedulerRoleName(stage);
+      // IAM's own 64-char limit, not Pulumi's 38-char name_prefix cap: this uses
+      // `name`, which is the only way a name carrying the 24-char role token fits
+      // at all.
+      expect(name.length).toBeLessThanOrEqual(IAM_ROLE_NAME_MAX);
+      // Must be matched by the pattern the deploy role and the boundary audit lib
+      // both carry, and must start with `mem9-on-aws-` for the deploy role's
+      // iam:CreateRole scope.
+      expect(globMatches(CLEANUP_SCHEDULER_ROLE_ARN_PATTERN, name)).toBe(true);
+      expect(name.startsWith("mem9-on-aws-")).toBe(true);
+      // Distinct from consolidation's role: a shared name would mean a shared
+      // trust policy, and Scheduler's aws:SourceArn must name ONE schedule group.
+      expect(name).not.toContain("Consolidation");
+    }
+    expect(cleanupSchedulerRoleName("prod")).toBe(
+      "mem9-on-aws-prod-Mem9CleanupSchedulerRole-role",
+    );
+    expect(() => cleanupSchedulerRoleName("a".repeat(60))).toThrow(
+      /exceeds 64 characters/u,
+    );
   });
 });

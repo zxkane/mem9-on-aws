@@ -1080,8 +1080,18 @@ function slackDeps(overrides: Partial<SlackDeps> = {}): SlackDeps {
     stage: SLACK_STAGE,
     ssmPrefix: "/mem9-on-aws/test",
     now: () => Date.now(),
+    // `issuedAt` is stamped at call time, not at fixture-construction time, so
+    // these routing cases are never sitting near the 72h window's edge. The field
+    // is REQUIRED for the record to be clickable at all — `loadOffered` reads an
+    // absent one as expired (TC-SLACKAPP-136), so a fixture without it makes every
+    // case in this file assert routing against a refusal reply.
     getParameter: vi.fn(async () =>
-      JSON.stringify({ stage: SLACK_STAGE, hash: SLACK_HASH, ids: ["m-1"] }),
+      JSON.stringify({
+        stage: SLACK_STAGE,
+        hash: SLACK_HASH,
+        ids: ["m-1"],
+        issuedAt: new Date().toISOString(),
+      }),
     ),
     putParameter: vi.fn(async () => {}),
     runTask: vi.fn(async () => "arn:aws:ecs:region:account:task/cluster/abc"),
@@ -1390,6 +1400,10 @@ describe("Slack deps at the Lambda entrypoint (TC-SLACKAPP-047..049)", () => {
                       stage: SLACK_STAGE,
                       hash: SLACK_HASH,
                       ids: ["m-1"],
+                      // Inside the 72h window, or the wiring under test is never
+                      // reached: the expiry gate refuses first and the reply below
+                      // is the refusal rather than "Apply started".
+                      issuedAt: new Date().toISOString(),
                     })
                   : Name.endsWith("/subnet-ids")
                     ? "subnet-a"
