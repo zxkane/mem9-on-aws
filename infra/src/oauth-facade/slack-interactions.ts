@@ -283,7 +283,7 @@ function parseAction(
 /**
  * Whether an offered list is past its window, and how old it is (#149).
  *
- * An absent or unparseable `issuedAt` is EXPIRED. That is the fail-closed
+ * An absent, unparseable, or FUTURE `issuedAt` is EXPIRED. That is the fail-closed
  * direction for this side of the loop: the alternative — treating an
  * unknown-age record as live — accepts a click against a list of unbounded age,
  * which is exactly the thing the TTL exists to stop. It also correctly refuses
@@ -309,6 +309,15 @@ function offerExpiry(
   const issuedAtMs = typeof issuedAt === "string" ? Date.parse(issuedAt) : NaN;
   if (!Number.isFinite(issuedAtMs)) return { expired: true };
   const ageMs = now - issuedAtMs;
+  // The type guard above stops the NUMBER 2027; the STRING "2027" parses to a real
+  // future date and sails through it, so without this the age is negative and every
+  // comparison below reads the record as permanently live — an Approve button that
+  // never expires, which the comment above calls the one direction this gate must
+  // never fail in. The scan's copy folds a future stamp into the same unjudgeable
+  // branch, so both sides stay in agreement instead of failing unsafe together.
+  // `age` is left undefined for the same reason it is on an unparseable stamp: the
+  // reply says "an unknown time ago" rather than "-3408h ago". TC-SLACKAPP-158.
+  if (ageMs < 0) return { expired: true };
   // `>`, not `>=`: live for exactly OFFER_TTL_MS, matching `offerExpiry` in
   // scripts/memory-cleanup.mjs. Asserted on the boundary itself
   // (TC-SLACKAPP-135) — an off-by-one here passes every test that is not sitting

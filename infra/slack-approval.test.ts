@@ -1408,8 +1408,9 @@ describe("scan schedule name budgets (TC-SLACKAPP-152)", () => {
     for (const stage of ["prod", "pr-1", "pr-113", "pr-99999"]) {
       const name = cleanupSchedulerRoleName(stage);
       // IAM's own 64-char limit, not Pulumi's 38-char name_prefix cap: this uses
-      // `name`, which is the only way a name carrying the 24-char role token fits
-      // at all.
+      // `name`, which is the only way a name carrying the 25-char role token
+      // (`Mem9CleanupSchedulerRole-`, counting the trailing hyphen the glob needs)
+      // fits once the stage segment is added — 42 chars for prod, past 38.
       expect(name.length).toBeLessThanOrEqual(IAM_ROLE_NAME_MAX);
       // Must be matched by the pattern the deploy role and the boundary audit lib
       // both carry, and must start with `mem9-on-aws-` for the deploy role's

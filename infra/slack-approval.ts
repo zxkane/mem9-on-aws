@@ -198,10 +198,15 @@ export const CLEANUP_SCHEDULER_ROLE_ARN_PATTERN =
 
 /**
  * A fixed `name`, for the same three intersecting constraints documented at
- * `consolidationSchedulerRoleName`: Pulumi caps a role `name_prefix` at 38 and any
- * prefix containing `Mem9CleanupSchedulerRole-` exceeds it; the name must contain
- * that token for the deploy-role/boundary patterns to match; and it must start
- * with `mem9-on-aws-` for the deploy role's `iam:CreateRole` scope.
+ * `consolidationSchedulerRoleName`: Pulumi caps a role `name_prefix` at 38, and a
+ * prefix carrying `Mem9CleanupSchedulerRole-` (25 chars) plus the mandatory
+ * `mem9-on-aws-` reaches 37 BARE — under the cap, but 42 once the stage segment is
+ * added (48 for consolidation's 31-char token, which overflows even bare). The
+ * margin is one character, so this is a fixed name rather than a prefix; do not
+ * read the bare figure as room to drop the stage segment, which every other name in
+ * this file carries and which is what keeps two stages' roles distinct. The name
+ * must also contain that token for the deploy-role/boundary patterns to match, and
+ * start with `mem9-on-aws-` for the deploy role's `iam:CreateRole` scope.
  *
  * A SEPARATE role from `Mem9ConsolidationSchedulerRole`, and the reason is the
  * trust policy rather than the permissions. Scheduler's confused-deputy guidance

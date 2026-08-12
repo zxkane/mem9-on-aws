@@ -5036,6 +5036,16 @@ describe("offering the list to Slack (#123)", () => {
 
     expect(result.exitCode).toBe(0);
     expect(postApproval.mock.calls[0][0].generatedAt).toBe("2026-07-24T00:00:00.000Z");
+    // And `issuedAt` is THIS RUN's clock, not the file's stamp — the one assertion
+    // that pins what the CALLER passes. TC-SLACKAPP-145 pins the builder's refusal
+    // to default this field, but nothing pinned the argument, so
+    // `issuedAt: decisionGeneratedAt` — the exact substitution the comment at that
+    // call site forbids — survived the whole suite. It is the worse of the two
+    // failures available: the file's stamp is 7 days old here and would post a list
+    // already 96h into a 72h window, refused on arrival, so the loop stops with the
+    // operator clicking a button that can never work. This fixture discriminates
+    // because the two dates differ by a week.
+    expect(postApproval.mock.calls[0][0].issuedAt).toBe("2026-07-31T00:00:00.000Z");
   });
 
   /**
@@ -5050,6 +5060,11 @@ describe("offering the list to Slack (#123)", () => {
       ids: ["m-pending"],
       generatedAt: "2026-08-04T03:00:00.000Z",
       issuedAt: "2026-08-04T03:00:00.000Z",
+      // Present by DEFAULT, because a record without it has no approval button and
+      // is therefore replaceable (TC-SLACKAPP-159) — every case that means to
+      // exercise a genuinely protected offer needs the stamp, or it would be
+      // skipped for the wrong reason and still pass.
+      messageTs: "1754274000.000100",
       ...overrides,
     });
 
@@ -5242,6 +5257,68 @@ describe("offering the list to Slack (#123)", () => {
         }),
       ).toThrow(/issuedAt/u);
     }
+  });
+
+  it("TC-SLACKAPP-157 treats a FUTURE stamp as unjudgeable, including the string that defeats the type guard", async () => {
+    // The hole TC-SLACKAPP-143's table left open. Its numeric cases are refused by
+    // the `typeof === "string"` guard, but a future stamp written AS A STRING parses
+    // to a real date, so the guard passes and the age goes negative — and a negative
+    // age is below every threshold, so the record reads permanently live. That makes
+    // both sides fail UNSAFE at once, which is the one combination the deliberate
+    // opposite-directions design exists to prevent: the facade keeps an Approve
+    // button live forever while the scan refuses to replace the record every week.
+    // Container clock skew reaches this with no hand edit at all.
+    for (const issuedAt of ["2027", "2027-01-01T00:00:00.000Z"]) {
+      const fakes = offerFakes({}, { pending: pendingRecord({ issuedAt }) });
+      const log = vi.fn();
+      const result = await offer({ fakes, log, now: DURING }).promise;
+
+      // Replaceable, so the loop keeps running rather than wedging on it.
+      expect(result.posted).toBe(true);
+
+      // And no refusal sentence rendered a negative age. "-3408h of its 72h window"
+      // is not NaN, so TC-SLACKAPP-143's guard would not have caught it; a reader
+      // sees a number that cannot mean anything and no reason to distrust it.
+      const logged = log.mock.calls.flat().join("\n");
+      expect(logged).not.toMatch(/-\d/u);
+      expect(logged).not.toMatch(/NaN|Invalid Date/u);
+    }
+
+    // The boundary: `now` exactly equal to `issuedAt` is age ZERO, which is live and
+    // must stay live. Asserted beside the negative cases because `<= 0` instead of
+    // `< 0` would pass every case above while making a fresh offer replaceable — the
+    // clobber the guard exists to stop, reachable on a same-millisecond re-run.
+    const issuedAt = "2026-08-04T03:00:00.000Z";
+    const fresh = offerFakes({}, { pending: pendingRecord({ issuedAt }) });
+    await expect(
+      offer({ fakes: fresh, now: () => Date.parse(issuedAt) }).promise,
+    ).rejects.toThrow(/still pending/u);
+  });
+
+  it("TC-SLACKAPP-159 replaces an offer that has no Slack message, so a failed post cannot wedge the loop", async () => {
+    // The record is written BEFORE the post, deliberately. So a scan whose
+    // chat.postMessage then failed — revoked token, bad channel, Slack outage —
+    // leaves a record with ids and a live TTL and NO message. Guarding only on zero
+    // ids let that record refuse every retry for 72h while protecting a button that
+    // does not exist: a Saturday outage meant no cleanup until Tuesday, escapable
+    // only by an `aws ssm delete-parameter` that no message or doc mentions.
+    for (const messageTs of [undefined, "", 1754274000]) {
+      const fakes = offerFakes({}, { pending: pendingRecord({ messageTs }) });
+      const log = vi.fn();
+      const result = await offer({ fakes, log, now: DURING }).promise;
+
+      expect(result.posted).toBe(true);
+      expect(log.mock.calls.flat().join("\n")).toMatch(
+        /no Slack message timestamp/u,
+      );
+    }
+
+    // The converse, so the guard cannot be satisfied by deleting the branch: a
+    // record WITH a stamp is still protected inside its window.
+    const posted = offerFakes({}, { pending: pendingRecord() });
+    await expect(offer({ fakes: posted, now: DURING }).promise).rejects.toThrow(
+      /still pending/u,
+    );
   });
 });
 

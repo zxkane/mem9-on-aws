@@ -310,6 +310,31 @@ can succeed against a record the scan skipped past.
   list already expired on arrival (TC-SLACKAPP-119 is why that field cannot be
   reused); and `new Date()` inside the builder makes the stamp untestable and
   ignores the run's own clock.
+- **TC-SLACKAPP-157** / **TC-SLACKAPP-158** — a **future** `issuedAt` is unjudgeable
+  on **both** sides, and the string form is the case that matters. The
+  `typeof === "string"` guard both copies carry stops the *number* `2027`
+  (TC-SLACKAPP-136, TC-SLACKAPP-143), but the *string* `"2027"` parses to a real
+  future date and passes it — and a negative age is below every threshold, so the
+  record reads permanently live. Both sides then fail in the UNSAFE direction at
+  once, which is exactly what the deliberate opposite-directions design exists to
+  prevent: the facade keeps an Approve button live indefinitely while the scan
+  refuses to replace the record every week, rendering `still pending after -3408h of
+  its 72h window` — not `NaN`, so TC-SLACKAPP-143's guard passes over it. Container
+  clock skew reaches this with no hand edit. Each case asserts no negative number
+  reaches an operator-facing string, and both pin age **zero** as still live, because
+  `<= 0` would pass every negative case while making a freshly posted list
+  replaceable — the clobber the guard exists to stop.
+- **TC-SLACKAPP-159** — an offer with **no `messageTs`** is replaceable. The record
+  is written BEFORE the post (deliberately), so any scan whose `chat.postMessage`
+  then failed leaves a record with ids, a live TTL, and no message. Guarding only on
+  zero ids let that record refuse every retry for 72h while protecting a button that
+  does not exist: a revoked token or Slack outage on Saturday meant no cleanup until
+  Tuesday, escapable only by an `aws ssm delete-parameter` that no message, doc, or
+  `--help` mentions. The converse is asserted in the same case so the branch cannot
+  be satisfied by deleting it — a record WITH a stamp is still protected in-window.
+  The stamp is a second write, so a record can also lack it when only the stamp
+  failed; that window is one SSM call wide and costs an audit-trail update, which
+  `postApprovalRequest` already accepts there.
 
 ## Idempotency and the apply trigger
 
@@ -899,7 +924,14 @@ ordering between the two writes is the part that is easy to get backwards.
   **file's** `generatedAt`, not the moment it was reposted. This is the path an
   operator takes to repost after a failed offer; stamping `now` would claim a
   fresh audit for a classification that may be days old, removing their only cue
-  that they are approving stale judgments.
+  that they are approving stale judgments. The same case also pins `issuedAt` to
+  **this run's** clock, which is the only assertion on what the CALLER passes:
+  TC-SLACKAPP-145 pins the builder's refusal to default the field, but nothing
+  pinned the argument, so `issuedAt: generatedAt` — the exact substitution the
+  comment at that call site forbids — survived the entire suite. It is the worse of
+  the two available failures, because the file's stamp is a week old in this fixture
+  and would post a list already 96h into a 72h window: refused on arrival, so the
+  loop stops with the operator clicking a button that can never work.
 
 ## The apply task's in-container runtime
 

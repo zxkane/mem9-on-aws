@@ -959,11 +959,11 @@ export function buildOfferedRecord({ stage, decisions, generatedAt, issuedAt }) 
  * callback Lambda's own copy uses it to refuse a late click. Exported and pure so
  * both boundaries are testable with an injected `now` rather than a sleep.
  *
- * An UNPARSEABLE or absent `issuedAt` reads as EXPIRED, which is the direction
- * that fails closed on both sides: the callback refuses the click (the operator
- * clicks again after the next scan) and the scan is free to replace the record.
- * Reading it as live would do the opposite of both — accept a click against a
- * record of unknown age, and wedge the schedule forever on a record it may never
+ * An UNPARSEABLE, absent, or FUTURE `issuedAt` reads as EXPIRED, which is the
+ * direction that fails closed on both sides: the callback refuses the click (the
+ * operator clicks again after the next scan) and the scan is free to replace the
+ * record. Reading it as live would do the opposite of both — accept a click against
+ * a record of unknown age, and wedge the schedule forever on a record it may never
  * overwrite. Records written before this field existed are exactly this case.
  */
 export function offerExpiry(record, now) {
@@ -980,6 +980,19 @@ export function offerExpiry(record, now) {
   // ever contains NaN).
   if (!Number.isFinite(issuedAtMs)) return { expired: true };
   const ageMs = now - issuedAtMs;
+  // A NEGATIVE age is unjudgeable for the same reason an unparseable stamp is, and
+  // it is the one input that defeats the type guard above: the guard stops the
+  // NUMBER 2027, but the STRING "2027" parses to a real future date, so the check
+  // above passes and every comparison below reads the record as permanently live.
+  // Both sides then fail in the UNSAFE direction simultaneously — the facade keeps
+  // an Approve button live indefinitely while the scan refuses to replace the
+  // record every week, rendering "still pending after -3408h of its 72h window",
+  // which is not NaN and so slips past TC-SLACKAPP-143. That simultaneous failure
+  // is precisely what the deliberate opposite-directions design exists to prevent,
+  // so a future stamp is folded into the SAME unjudgeable branch rather than given
+  // a direction of its own. Container clock skew reaches this without any hand
+  // edit. TC-SLACKAPP-157 pins it here, TC-SLACKAPP-158 on the callback side.
+  if (ageMs < 0) return { expired: true };
   // `>`, not `>=`: the record is live for exactly OFFER_TTL_MS. The boundary is
   // asserted directly (TC-SLACKAPP-135) because an off-by-one here is invisible
   // in every test that does not sit on it.
@@ -1184,6 +1197,18 @@ async function slackCall(method, body, { botToken, fetchImpl }) {
  * A zero-id offer is skipped because it has no Slack message and therefore no
  * button: `postApprovalRequest` writes the record and returns without posting, so
  * there is nothing pending for a human to review.
+ *
+ * An offer with NO `messageTs` is skipped for that same reason, and it is the more
+ * likely shape: the record is written BEFORE the post (deliberately — see
+ * `postApprovalRequest`), so any scan whose `chat.postMessage` then failed leaves a
+ * record with ids, a live TTL, and no message. Guarding only on zero ids let that
+ * record block every retry for 72h while protecting a button that does not exist —
+ * a revoked token or a Slack outage on Saturday meant no cleanup until Tuesday, and
+ * the only escape was an `aws ssm delete-parameter` no message or doc mentions. The
+ * stamp is a SECOND write, so a record can also legitimately lack it when the post
+ * succeeded and only the stamp failed; that window is one SSM call wide, and losing
+ * an audit-trail update is the same cost `postApprovalRequest` already accepts there.
+ * TC-SLACKAPP-159 pins it.
  */
 async function readPendingOffer({ ssm, name, stage, now, log }) {
   const { GetParametersCommand } = await import("@aws-sdk/client-ssm");
@@ -1220,6 +1245,13 @@ async function readPendingOffer({ ssm, name, stage, now, log }) {
     return null;
   }
   if (!Array.isArray(record.ids) || record.ids.length === 0) return null;
+  if (typeof record.messageTs !== "string" || record.messageTs === "") {
+    log(
+      `${name} carries no Slack message timestamp, so no approval button exists ` +
+        `for its ${record.ids.length} id(s); replacing it`,
+    );
+    return null;
+  }
   const { expired, ageMs } = offerExpiry(record, now);
   if (expired) return null;
   return { stage: record.stage, hash: record.hash, ids: record.ids, ageMs };
