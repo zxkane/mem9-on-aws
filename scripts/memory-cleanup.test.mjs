@@ -22,6 +22,7 @@ import {
   materializeApprovedIds,
   offerExpiry,
   OFFER_TTL_MS,
+  UNPOSTED_GRACE_MS,
   parseArgs,
   postApprovalRequest,
   updateApprovalMessage,
@@ -5319,6 +5320,56 @@ describe("offering the list to Slack (#123)", () => {
     await expect(offer({ fakes: posted, now: DURING }).promise).rejects.toThrow(
       /still pending/u,
     );
+  });
+
+  it("TC-SLACKAPP-160 protects an unposted offer younger than the grace period, because mid-post looks identical to a failed post", async () => {
+    // TC-SLACKAPP-159 alone would have made this replaceable, and that is a
+    // narrower bug traded for a wider one: the stamp is a SECOND write, so between
+    // `postApprovalRequest`'s write and its stamp a record legitimately has ids, a
+    // live TTL and no message. An off-schedule run in that window would replace the
+    // list, post its OWN button, and then the first run's stamping write would put
+    // its ids back — leaving SSM describing one list and the only clickable message
+    // describing another. Age is the only thing that separates the two states:
+    // mid-post is bounded by SLACK_TIMEOUT_MS (15s), a failed post is unbounded.
+    const issuedAt = "2026-08-04T03:00:00.000Z";
+    const at = (offsetMs) => () => Date.parse(issuedAt) + offsetMs;
+    const unposted = () => pendingRecord({ issuedAt, messageTs: undefined });
+
+    // One second in: certainly mid-post, so protected and NOTHING is written.
+    const fresh = offerFakes({}, { pending: unposted() });
+    const young = await offer({ fakes: fresh, now: at(1000) }).promise.then(
+      () => undefined,
+      (err) => err,
+    );
+    expect(young?.message).toMatch(/another run may be posting right now/u);
+    // The remedy is in the message, and it is NOT the same remedy as a reviewed
+    // list: this one is retried, not waited out for three days.
+    expect(young?.message).toMatch(/retry after 0\.3h/u);
+    expect(fresh.ssm.puts).toEqual([]);
+    expect(fresh.slack.fetchImpl).not.toHaveBeenCalled();
+
+    // Exactly at the grace boundary it is treated as a failed post. `>=`, so the
+    // boundary itself is replaceable — asserted directly because an off-by-one
+    // here is invisible in every test that does not sit on it.
+    const boundary = offerFakes({}, { pending: unposted() });
+    const log = vi.fn();
+    const result = await offer({
+      fakes: boundary,
+      log,
+      now: at(UNPOSTED_GRACE_MS),
+    }).promise;
+    expect(result.posted).toBe(true);
+    expect(log.mock.calls.flat().join("\n")).toMatch(/0\.3h after it was written/u);
+
+    // And the grace period cannot be widened into the TTL by accident: a POSTED
+    // record inside the grace window is still refused as a live review, with the
+    // other remedy.
+    const stamped = offerFakes({}, { pending: pendingRecord({ issuedAt }) });
+    const still = await offer({ fakes: stamped, now: at(1000) }).promise.then(
+      () => undefined,
+      (err) => err,
+    );
+    expect(still?.message).toMatch(/an operator may still be reviewing/u);
   });
 });
 

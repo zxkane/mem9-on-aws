@@ -127,6 +127,27 @@ const DEFAULT_LOCK_TTL_MS = 2 * HOUR_MS;
  * button is refused or a button that outlives the record's own claim.
  */
 export const OFFER_TTL_MS = 72 * HOUR_MS;
+
+/**
+ * How long a record with no `messageTs` is still presumed to be MID-POST rather
+ * than a post that failed (#152).
+ *
+ * `postApprovalRequest` writes the record, posts, then stamps `messageTs` in a
+ * second write, so from a single `GetParameters` those two states are
+ * indistinguishable — both are "ids, a live TTL, no message". They differ only in
+ * AGE. Treating every unstamped record as replaceable makes a concurrent
+ * off-schedule run clobber an offer whose Slack message is about to appear;
+ * treating none of them as replaceable wedges the loop for 72h whenever a post
+ * genuinely fails, which is what this issue was filed for.
+ *
+ * 15 minutes: two orders of magnitude above `SLACK_TIMEOUT_MS` (15s, the ceiling
+ * on how long the post between the two writes can take) and two orders below the
+ * 72h TTL, so it is not a race either way. A record older than this with no stamp
+ * cannot be mid-post — the run that wrote it is long gone, and if it somehow is
+ * not, the write it eventually makes is idempotent on a list its own scan
+ * produced.
+ */
+export const UNPOSTED_GRACE_MS = HOUR_MS / 4;
 const SNIPPET_LEN = 120;
 // The two inactive states, and the only values --state accepts. They are NOT
 // interchangeable: see `inactiveMemoryAdapter` and issue #124.
@@ -1198,17 +1219,23 @@ async function slackCall(method, body, { botToken, fetchImpl }) {
  * button: `postApprovalRequest` writes the record and returns without posting, so
  * there is nothing pending for a human to review.
  *
- * An offer with NO `messageTs` is skipped for that same reason, and it is the more
- * likely shape: the record is written BEFORE the post (deliberately — see
- * `postApprovalRequest`), so any scan whose `chat.postMessage` then failed leaves a
- * record with ids, a live TTL, and no message. Guarding only on zero ids let that
- * record block every retry for 72h while protecting a button that does not exist —
- * a revoked token or a Slack outage on Saturday meant no cleanup until Tuesday, and
- * the only escape was an `aws ssm delete-parameter` no message or doc mentions. The
- * stamp is a SECOND write, so a record can also legitimately lack it when the post
- * succeeded and only the stamp failed; that window is one SSM call wide, and losing
- * an audit-trail update is the same cost `postApprovalRequest` already accepts there.
- * TC-SLACKAPP-159 pins it.
+ * An offer with no `messageTs` is skipped for that same reason once it is older
+ * than `UNPOSTED_GRACE_MS`, and it is the more likely shape: the record is written
+ * BEFORE the post (deliberately — see `postApprovalRequest`), so any scan whose
+ * `chat.postMessage` then failed leaves a record with ids, a live TTL, and no
+ * message. Guarding only on zero ids let that record block every retry for 72h
+ * while protecting a button that does not exist — a revoked token or a Slack outage
+ * on Saturday meant no cleanup until Tuesday, and the only escape was an
+ * `aws ssm delete-parameter` no message or doc mentions.
+ *
+ * The grace period is why this is not just `if (!record.messageTs) return null`. A
+ * record MID-POST has exactly the same shape as one whose post failed, because the
+ * stamp is a second write — so an unconditional skip would let a concurrent
+ * off-schedule run replace an offer whose Slack message is about to appear, and
+ * then the first run's stamping write would restore its own ids over the second
+ * run's, leaving the record and the only visible button describing different lists.
+ * Age separates the two: mid-post is bounded by `SLACK_TIMEOUT_MS`, a failed post
+ * is not. TC-SLACKAPP-159 pins the skip, TC-SLACKAPP-160 the grace.
  */
 async function readPendingOffer({ ssm, name, stage, now, log }) {
   const { GetParametersCommand } = await import("@aws-sdk/client-ssm");
@@ -1245,16 +1272,18 @@ async function readPendingOffer({ ssm, name, stage, now, log }) {
     return null;
   }
   if (!Array.isArray(record.ids) || record.ids.length === 0) return null;
-  if (typeof record.messageTs !== "string" || record.messageTs === "") {
+  const { expired, ageMs } = offerExpiry(record, now);
+  if (expired) return null;
+  const posted = typeof record.messageTs === "string" && record.messageTs !== "";
+  if (!posted && ageMs >= UNPOSTED_GRACE_MS) {
     log(
-      `${name} carries no Slack message timestamp, so no approval button exists ` +
-        `for its ${record.ids.length} id(s); replacing it`,
+      `${name} carries no Slack message timestamp ${formatHours(ageMs)} after it ` +
+        `was written, so its post failed and no approval button exists for its ` +
+        `${record.ids.length} id(s); replacing it`,
     );
     return null;
   }
-  const { expired, ageMs } = offerExpiry(record, now);
-  if (expired) return null;
-  return { stage: record.stage, hash: record.hash, ids: record.ids, ageMs };
+  return { stage: record.stage, hash: record.hash, ids: record.ids, ageMs, posted };
 }
 
 /**
@@ -1312,7 +1341,15 @@ export async function postApprovalRequest({
       `an approval list for ${pending.stage} is still pending after ` +
         `${formatHours(pending.ageMs)} of its ${formatHours(OFFER_TTL_MS)} window ` +
         `(${pending.ids.length} id(s), ${pending.hash}) — refusing to overwrite a ` +
-        `list an operator may still be reviewing; it expires on its own`,
+        (pending.posted
+          ? `list an operator may still be reviewing; it expires on its own`
+          : // No stamp yet and younger than the grace period, so another run is
+            // most likely BETWEEN its write and its post right now. Naming that
+            // explicitly matters because the remedy differs: a reviewed list is
+            // waited out, a concurrent run is re-run in a quarter hour.
+            `list another run may be posting right now; retry after ` +
+              `${formatHours(UNPOSTED_GRACE_MS)}, after which an unposted list is ` +
+              `treated as a failed post and replaced`),
     );
   }
   const write = (value) =>

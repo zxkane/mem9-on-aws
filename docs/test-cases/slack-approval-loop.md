@@ -332,9 +332,18 @@ can succeed against a record the scan skipped past.
   Tuesday, escapable only by an `aws ssm delete-parameter` that no message, doc, or
   `--help` mentions. The converse is asserted in the same case so the branch cannot
   be satisfied by deleting it — a record WITH a stamp is still protected in-window.
-  The stamp is a second write, so a record can also lack it when only the stamp
-  failed; that window is one SSM call wide and costs an audit-trail update, which
-  `postApprovalRequest` already accepts there.
+- **TC-SLACKAPP-160** — but only once the unposted record is older than
+  `UNPOSTED_GRACE_MS` (15 min). The stamp is a **second** write, so a record
+  MID-POST has the identical shape to one whose post failed, and an unconditional
+  skip traded a narrow bug for a wider one: a concurrent off-schedule run replaces
+  the list, posts its own button, and the first run's stamping write then restores
+  its own ids — SSM describing one list while the only clickable message describes
+  another. Reproduced directly against both versions before and after the fix. Age
+  is the only discriminator: mid-post is bounded by `SLACK_TIMEOUT_MS` (15s), a
+  failed post is unbounded, and the grace period sits two orders of magnitude above
+  the former and two below the 72h TTL. The case pins the boundary as replaceable
+  (`>=`), and pins that the two refusals name **different remedies** — a reviewed
+  list is waited out, a concurrent run is retried in a quarter hour.
 
 ## Idempotency and the apply trigger
 
