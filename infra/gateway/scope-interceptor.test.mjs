@@ -311,6 +311,62 @@ describe("AgentCore scope interceptor responses", () => {
     );
   });
 
+  it("fails closed when a mixed batch reuses the tools/list request id", () => {
+    const requestBody = [
+      { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      { jsonrpc: "2.0", id: 2, method: "ping" },
+    ];
+    const responseBody = [
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        error: { code: -32601, message: "Method not found" },
+      },
+      { jsonrpc: "2.0", id: 2, result: { tools } },
+    ];
+    denied(
+      interceptScopes(
+        responseEvent(requestBody, responseBody, "mem9-mcp/read"),
+      ),
+    );
+  });
+
+  it("fails closed when a batch reuses the tools/list response id", () => {
+    const requestBody = [
+      { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      { jsonrpc: "2.0", id: 7, method: "ping" },
+    ];
+    const responseBody = [
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        error: { code: -32601, message: "Method not found" },
+      },
+      { jsonrpc: "2.0", id: 2, result: { tools } },
+    ];
+    denied(
+      interceptScopes(
+        responseEvent(requestBody, responseBody, "mem9-mcp/read"),
+      ),
+    );
+  });
+
+  it("fails closed when a batch response id was not requested", () => {
+    const requestBody = [
+      { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      { jsonrpc: "2.0", id: 7, method: "ping" },
+    ];
+    const responseBody = [
+      { jsonrpc: "2.0", id: 2, result: { tools } },
+      { jsonrpc: "2.0", id: 99, result: { tools } },
+    ];
+    denied(
+      interceptScopes(
+        responseEvent(requestBody, responseBody, "mem9-mcp/read"),
+      ),
+    );
+  });
+
   it("filters structured tool discovery responses", () => {
     const response = interceptScopes(
       responseEvent(
@@ -343,6 +399,42 @@ describe("AgentCore scope interceptor responses", () => {
     );
   });
 
+  it("preserves a valid tools/list error response", () => {
+    const responseBody = {
+      jsonrpc: "2.0",
+      id: 2,
+      error: { code: -32601, message: "Method not found" },
+    };
+    expect(
+      interceptScopes(
+        responseEvent(
+          { jsonrpc: "2.0", id: 2, method: "tools/list" },
+          responseBody,
+          "mem9-mcp/read",
+        ),
+      ).mcp.transformedGatewayResponse.body,
+    ).toEqual(responseBody);
+  });
+
+  it("rejects a singleton tools/list response with error and result", () => {
+    const output = interceptScopes(
+      responseEvent(
+        { jsonrpc: "2.0", id: 2, method: "tools/list" },
+        {
+          jsonrpc: "2.0",
+          id: 2,
+          error: { code: -32601, message: "Method not found" },
+          result: { tools },
+        },
+        "mem9-mcp/read",
+      ),
+    );
+    denied(output);
+    expect(output.mcp.transformedGatewayResponse.body.error.message).toBe(
+      "Gateway tools response is unavailable",
+    );
+  });
+
   it("passes tool-call responses through, including request short-circuits", () => {
     const body = {
       jsonrpc: "2.0",
@@ -356,5 +448,81 @@ describe("AgentCore scope interceptor responses", () => {
       headers: { "Mcp-Session-Id": "session-1" },
       body,
     });
+  });
+
+  it("preserves a request short-circuit for a mixed tools/list batch", () => {
+    const requestBody = [
+      { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      toolCall("add_memory"),
+    ];
+    const shortCircuit = interceptScopes(
+      requestEvent(requestBody, "mem9-mcp/read"),
+    ).mcp.transformedGatewayResponse;
+    const event = responseEvent(
+      requestBody,
+      shortCircuit.body,
+      "mem9-mcp/read",
+    );
+    event.mcp.gatewayResponse.statusCode = shortCircuit.statusCode;
+    event.mcp.gatewayResponse.headers = shortCircuit.headers;
+
+    expect(interceptScopes(event).mcp.transformedGatewayResponse).toEqual(
+      shortCircuit,
+    );
+    denied(
+      { mcp: { transformedGatewayResponse: shortCircuit } },
+      "mem9-mcp/write",
+    );
+  });
+
+  it("rejects a batched tools/list response with error and result", () => {
+    const requestBody = [
+      { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      toolCall("search_memories"),
+    ];
+    const event = responseEvent(
+      requestBody,
+      [
+        {
+          jsonrpc: "2.0",
+          id: 2,
+          error: { code: -32601, message: "Method not found" },
+          result: { tools },
+        },
+        { jsonrpc: "2.0", id: 7, result: { content: [] } },
+      ],
+      "mem9-mcp/read",
+    );
+
+    const output = interceptScopes(event);
+    denied(output);
+    expect(output.mcp.transformedGatewayResponse.body.error.message).toBe(
+      "Gateway tools response is unavailable",
+    );
+  });
+
+  it("does not preserve a non-403 scope-shaped response", () => {
+    const requestBody = [
+      { jsonrpc: "2.0", id: 2, method: "tools/list" },
+      toolCall("search_memories"),
+    ];
+    const event = responseEvent(
+      requestBody,
+      {
+        jsonrpc: "2.0",
+        id: 2,
+        error: { code: -32003, message: "Insufficient OAuth scope" },
+      },
+      "mem9-mcp/read",
+    );
+    event.mcp.gatewayResponse.headers = {
+      "WWW-Authenticate": 'Bearer error="insufficient_scope"',
+    };
+
+    const output = interceptScopes(event);
+    denied(output);
+    expect(output.mcp.transformedGatewayResponse.body.error.message).toBe(
+      "Gateway tools response is unavailable",
+    );
   });
 });

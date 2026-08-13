@@ -59,6 +59,26 @@ function authorizationHeader(headers) {
   return typeof entry?.[1] === "string" ? entry[1] : null;
 }
 
+function isScopeDenialResponse(response) {
+  if (response?.statusCode !== 403 || !isRecord(response.body)) return false;
+  const { body } = response;
+  if (
+    !isRecord(body.error) ||
+    body.error.code !== -32003 ||
+    Object.hasOwn(body, "result")
+  ) {
+    return false;
+  }
+  if (!isRecord(response.headers)) return false;
+  const challenge = Object.entries(response.headers).find(
+    ([name]) => name.toLowerCase() === "www-authenticate",
+  )?.[1];
+  return (
+    typeof challenge === "string" &&
+    /^Bearer error="insufficient_scope"(?:, scope="[^"]+")?$/u.test(challenge)
+  );
+}
+
 function tokenScopes(headers) {
   const authorization = authorizationHeader(headers);
   const match = authorization?.match(/^Bearer\s+(\S+)$/iu);
@@ -187,7 +207,11 @@ function filterTools(tools, scopes) {
 
 function filterToolsListResponse(response, scopes) {
   if (!isRecord(response)) return null;
-  if (isRecord(response.error)) return response;
+  if (Object.hasOwn(response, "error")) {
+    return isRecord(response.error) && !Object.hasOwn(response, "result")
+      ? response
+      : null;
+  }
   if (!isRecord(response.result)) return null;
 
   let filtered = false;
@@ -238,11 +262,29 @@ function interceptResponse(mcp) {
         );
   }
 
+  // A REQUEST interceptor denial can still pass through the RESPONSE
+  // interception point. Preserve that JSON-RPC error instead of replacing it
+  // with a generic tools/list correlation failure.
+  if (!Array.isArray(responseBody) && isScopeDenialResponse(gatewayResponse)) {
+    return responseOutput(gatewayResponse);
+  }
+
   const listRequestKeys = listRequests.map(requestIdKey);
+  const responseRequestKeys = requests
+    .filter((request) => isRecord(request) && Object.hasOwn(request, "id"))
+    .map(requestIdKey);
+  const responseRequestKeySet = new Set(responseRequestKeys);
+  const responseKeys = Array.isArray(responseBody)
+    ? responseBody.map(requestIdKey)
+    : [];
   if (
     !Array.isArray(responseBody) ||
     listRequestKeys.some((key) => key === null) ||
-    new Set(listRequestKeys).size !== listRequestKeys.length
+    responseRequestKeys.some((key) => key === null) ||
+    responseRequestKeySet.size !== responseRequestKeys.length ||
+    responseKeys.some((key) => key === null) ||
+    new Set(responseKeys).size !== responseKeys.length ||
+    responseKeys.some((key) => !responseRequestKeySet.has(key))
   ) {
     return responseOutput(
       forbiddenResponse(listRequests[0], "Gateway tools response is unavailable"),

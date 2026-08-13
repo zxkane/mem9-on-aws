@@ -243,6 +243,25 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
     );
   });
 
+  it("TC-MCPGW-081c: appends resource metadata to an interceptor scope challenge", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async () =>
+        new Response("forbidden", {
+          status: 403,
+          headers: {
+            "www-authenticate":
+              'Bearer error="insufficient_scope", scope="mem9-mcp/write"',
+          },
+        }),
+    );
+    const res = await route(ev("/mcp", "POST", { body: "{}" }), cfg());
+    expect(res.statusCode).toBe(403);
+    expect(res.headers["www-authenticate"]).toBe(
+      `Bearer error="insufficient_scope", scope="mem9-mcp/write", ` +
+        `resource_metadata="${BASE}/.well-known/oauth-protected-resource"`,
+    );
+  });
+
   // TC-MCPGW-079. RFC 8414 §3.3: the `issuer` a metadata document returns MUST be
   // identical to the issuer identifier the client inserted the well-known string
   // into to build the URL it fetched. We publish ourselves as the authorization
