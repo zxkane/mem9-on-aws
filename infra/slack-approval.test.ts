@@ -1639,6 +1639,155 @@ describe("slack approval infrastructure", () => {
     expect(decisionArtifactKey("prod", "run-1")).not.toBe(
       decisionArtifactKey("pr-42", "run-1"),
     );
+    // The real hash carries a `:`, and the dash substitution is the part of this
+    // function the stage assertions above cannot see: `run-1` has no colon, so
+    // dropping the `.replace` left every one of them green. Asserted here because a
+    // key that kept the colon is legal in S3 and then unquotable in the `s3://` line
+    // an operator pastes — a divergence from `claimParameterName`'s identical
+    // treatment that only shows up at the console.
+    expect(decisionArtifactKey("prod", "sha256:abc")).toBe(
+      "decisions/prod/sha256-abc.json",
+    );
+  });
+
+  it("TC-SLACKAPP-181: passes the artifact bucket to the container as a plain environment entry", async () => {
+    installGlobals("prod");
+    enable();
+    await loadAndRun();
+
+    const taskArgs = materialize(one("Task", "Mem9Cleanup").args) as
+      Record<string, any>;
+    const bucketName = String(
+      materialize((one("BucketV2", "Mem9DecisionArtifacts").args as any).bucket),
+    );
+    // The container script gates the artifact on this variable's PRESENCE
+    // (TC-SLACKAPP-179/180), so the two files must agree on the name and on the
+    // value. A drift in the name leaves the scan silently writing the id-only
+    // record — the pre-#150 shape — with no error anywhere.
+    expect(taskArgs.environment.MEM9_DECISION_ARTIFACT_BUCKET).toBe(bucketName);
+    // `environment`, not `ssm`: a bucket name is not a secret, and the apply half's
+    // role holds `ssm:GetParameters` under `approvals/*` only — a secret-style
+    // reference would put the artifact's location behind a grant it does not have.
+    expect(taskArgs.ssm?.MEM9_DECISION_ARTIFACT_BUCKET).toBeUndefined();
+  });
+
+  it("TC-SLACKAPP-182: scopes the task's artifact grant to its OWN stage prefix", async () => {
+    installGlobals("pr-42");
+    enable();
+    await loadAndRun();
+
+    const { decisionArtifactKeyPrefix } = await loadModule();
+    const taskArgs = materialize(one("Task", "Mem9Cleanup").args) as
+      Record<string, any>;
+    const permissions = taskArgs.permissions as Array<Record<string, any>>;
+    const objectResources = permissions
+      .filter((statement) => list(statement.actions).includes("s3:PutObject"))
+      .flatMap((statement) => list(statement.resources));
+    // THIS is where cross-stage isolation lives. The boundary pins the bucket but
+    // cannot afford a per-stage key condition (6144 is a hard cap with one boundary
+    // per role), so the identity policy carries the stage and the boundary bounds
+    // only the maximum. Without the stage segment a preview stage could read — and
+    // overwrite — prod's reviewed decision list, since every stage shares one bucket.
+    expect(objectResources).toEqual(["arn:aws:s3:::mem9-audit-123456789012/decisions/pr-42/*"]);
+    // Built from the same exported helper the writer's key comes from, so a change
+    // to the layout cannot move one side only.
+    expect(decisionArtifactKeyPrefix("pr-42")).toBe("decisions/pr-42/");
+    expect(objectResources[0]).toContain(decisionArtifactKeyPrefix("pr-42"));
+    // The trailing slash is load-bearing, not formatting: `decisions/pr-4*` also
+    // matches `decisions/pr-42/...`, so a prefix without the separator would grant
+    // this stage a sibling stage's list.
+    expect(objectResources[0]).not.toContain("decisions/pr-42*");
+    expect(objectResources[0]).toMatch(/\/decisions\/pr-42\/\*$/u);
+    // No DELETE (the lifecycle rule expires the artifact; a task that could delete
+    // it could destroy the audit trail of what it deleted) and no ListBucket (the
+    // key is derived from the hash, so nothing needs to enumerate).
+    const s3Actions = permissions
+      .flatMap((statement) => list(statement.actions))
+      .filter((action) => action.startsWith("s3:"));
+    expect(s3Actions.sort()).toEqual(["s3:GetObject", "s3:PutObject"]);
+  });
+
+  it("TC-SLACKAPP-183: keeps the task's artifact grant inside the DEPLOYED boundary", async () => {
+    installGlobals("prod");
+    enable();
+    await loadAndRun();
+
+    const taskArgs = materialize(one("Task", "Mem9Cleanup").args) as
+      Record<string, any>;
+    const permissions = taskArgs.permissions as Array<Record<string, any>>;
+    const boundary = boundaryStatements();
+
+    // A grant outside the boundary is not a smaller grant — it is an AccessDenied
+    // after the scan has spent its reasoning passes, or after the approval click has
+    // been spent on the apply half. Measured against the template the operator
+    // deploys, exactly as TC-SLACKAPP-153 does for the parameter write.
+    const s3Statements = permissions.filter((statement) =>
+      list(statement.actions).some((action) => action.startsWith("s3:")),
+    );
+    const scoped = boundary.find(({ Sid }) => Sid === "Resources");
+    expect(scoped).toBeDefined();
+    const exceptions = listRaw(scoped!.NotResource).map(resolveSub);
+    // `Resources` is a NotResource deny, so EVERY resource the grant names must be
+    // matched by an exception — one stray entry denies the whole call.
+    for (const resource of s3Statements.flatMap((statement) => list(statement.resources))) {
+      expect(
+        exceptions.some((pattern) => globMatches(pattern, resource)),
+        `${resource} is denied by the boundary's Resources statement`,
+      ).toBe(true);
+    }
+
+    // The KMS half, whose failure mode is the same and whose conditions must MATCH
+    // rather than merely be admitted: `ViaService` has to be s3 (the `KmsVia` deny
+    // enumerates the permitted services) and the encryption context has to be the
+    // BARE bucket ARN, because bucket keys are on (TC-SLACKAPP-163).
+    const kms = permissions.filter((statement) =>
+      list(statement.actions).some((action) => action.startsWith("kms:")),
+    );
+    expect(kms).toHaveLength(1);
+    const conditions = new Map(
+      (kms[0].conditions as Array<Record<string, any>>).map((condition) => [
+        String(condition.variable),
+        list(condition.values),
+      ]),
+    );
+    expect(conditions.get("kms:ViaService")).toEqual(["s3.ap-northeast-1.amazonaws.com"]);
+    const contextValues = conditions.get("kms:EncryptionContext:aws:s3:arn");
+    expect(contextValues).toEqual(["arn:aws:s3:::mem9-audit-123456789012"]);
+
+    // The grant's ViaService must be one the `KmsVia` deny permits, and its context
+    // must satisfy both `KmsContext` (the Decrypt half) and `GenKey` (the write
+    // half). All three read from the deployed template, so a boundary edit that
+    // drops the s3 entry or re-adds a `/*` suffix turns this red.
+    const kmsVia = boundary.find(({ Sid }) => Sid === "KmsVia");
+    expect(
+      listRaw(kmsVia!.Condition.StringNotEqualsIfExists["kms:ViaService"])
+        .map((value) => resolveSub(value).replace("${AWS::URLSuffix}", "amazonaws.com")),
+    ).toContain("s3.ap-northeast-1.amazonaws.com");
+    for (const sid of ["KmsContext", "GenKey"]) {
+      const statement = boundary.find((entry) => entry.Sid === sid);
+      const pattern = resolveSub(
+        statement!.Condition.StringNotLikeIfExists["kms:EncryptionContext:aws:s3:arn"],
+      );
+      expect(
+        globMatches(pattern, contextValues![0]),
+        `the artifact context is denied by ${sid}`,
+      ).toBe(true);
+    }
+
+    // And every action, S3 and KMS alike, has to be inside the action ceiling —
+    // `s3:AbortMultipartUpload` notably is NOT, which is why the writer uses a
+    // single PutObject rather than lib-storage's multipart Upload.
+    const ceiling = boundary.find(({ NotAction }) => NotAction);
+    const admitted = list(ceiling!.NotAction);
+    for (const action of [...s3Statements, ...kms].flatMap((s) => list(s.actions))) {
+      expect(
+        admitted.some((pattern) => globMatches(pattern, action)),
+        `${action} is outside the workload boundary action ceiling`,
+      ).toBe(true);
+    }
+    expect(admitted.some((pattern) => globMatches(pattern, "s3:AbortMultipartUpload"))).toBe(
+      false,
+    );
   });
 
   it("TC-SLACKAPP-080: returns nothing to wire when the flag is unset", async () => {

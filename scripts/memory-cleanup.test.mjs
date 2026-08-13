@@ -18,6 +18,8 @@ import {
   claimParameterName,
   contentHash,
   createCleanupDeps,
+  decisionArtifactHash,
+  decisionArtifactKey,
   inactiveMemoryAdapter,
   materializeApprovedIds,
   offerExpiry,
@@ -25,6 +27,8 @@ import {
   UNPOSTED_GRACE_MS,
   parseArgs,
   postApprovalRequest,
+  putDecisionArtifact,
+  serializeDecisionArtifact,
   updateApprovalMessage,
   consensusDecisions,
   parseVerdicts,
@@ -3406,7 +3410,15 @@ describe("restore CLI validation", () => {
         /Cannot read properties of undefined/u,
       );
     }
-  }, 15_000);
+    // An explicit timeout because this test spawns TWO real `node` processes, each
+    // of which loads the CLI and reaches an SSM read. Measured at ~3.9s of vitest's
+    // 5000ms default on an idle machine, so its margin is load, not logic — it
+    // started failing in the full-suite run when this file grew by a dozen tests and
+    // passed in isolation every time. A timeout failure here reads as "the CLI
+    // wiring broke", which is the one thing it would not mean. Main raised the same
+    // timeout to 15s independently; this keeps the larger of the two, since the
+    // margin is machine load and this file is the one that grew.
+  }, 30_000);
 });
 
 describe("protected topics (#123)", () => {
@@ -3975,6 +3987,493 @@ describe("the offered approval record (#123)", () => {
     });
     expect(JSON.stringify(ok).length).toBeLessThanOrEqual(4096);
     expect(ok.ids).toHaveLength(40);
+  });
+
+  it("TC-SLACKAPP-024b measures the artifact coordinates INSIDE the limit it enforces", async () => {
+    // The bug this pins was a guard that ran before the record grew. The two
+    // coordinates add ~151 bytes, so a caller that assigned them onto an
+    // already-validated record opened a window where the guard said 3964 and SSM
+    // received 4115 — and the failure lands on the write that INVALIDATES last
+    // week's button, so the run dies with the previous approval still live and
+    // clickable. Fixed by making them parameters; asserted here by finding a list
+    // that fits WITHOUT them and does not fit WITH them.
+    const bucket = "mem9-audit-123456789012";
+    const key = `decisions/prod/sha256-${"a".repeat(64)}.json`;
+    const stamp = {
+      stage: "prod",
+      generatedAt: "2026-08-05T00:00:00.000Z",
+      issuedAt: "2026-08-05T00:00:00.000Z",
+    };
+    // Sized by search rather than by a hardcoded count, so the test keeps finding
+    // the boundary if a field is ever added to the record.
+    let n = 0;
+    for (let candidate = 1; candidate <= 400; candidate += 1) {
+      const decisions = Array.from({ length: candidate }, (_, i) =>
+        del(`memory-with-a-realistic-id-${i}`),
+      );
+      let bare;
+      try {
+        bare = buildOfferedRecord({ ...stamp, decisions });
+      } catch {
+        break;
+      }
+      if (Buffer.byteLength(JSON.stringify(bare), "utf8") + 151 > 4096) {
+        n = candidate;
+        break;
+      }
+    }
+    // The window must EXIST, or this test would pass against a record that simply
+    // never gets close to the limit.
+    expect(n).toBeGreaterThan(0);
+    const decisions = Array.from({ length: n }, (_, i) =>
+      del(`memory-with-a-realistic-id-${i}`),
+    );
+    // Fits without the coordinates...
+    expect(() => buildOfferedRecord({ ...stamp, decisions })).not.toThrow();
+    // ...and is refused with them, by the same guard rather than by SSM.
+    expect(() =>
+      buildOfferedRecord({ ...stamp, decisions, artifactBucket: bucket, artifactKey: key }),
+    ).toThrow(/4096|parameter limit/u);
+  });
+
+  it("TC-SLACKAPP-024c measures the record in BYTES, not UTF-16 code units", async () => {
+    // SSM's 4096 is bytes. A non-Latin id — which the store's ids do not currently
+    // use, but nothing in this record's shape forbids — measures up to 3x higher on
+    // the wire than `.length` reports, so a code-unit guard would pass a value the
+    // service rejects, again on the write that invalidates last week's button.
+    const stamp = {
+      stage: "prod",
+      generatedAt: "2026-08-05T00:00:00.000Z",
+      issuedAt: "2026-08-05T00:00:00.000Z",
+    };
+    const cjkId = (i) => `記憶-${i}-${"字".repeat(8)}`;
+    // Sized by search against the REAL record rather than a hand-built
+    // approximation of it, so the fixture cannot drift from the shape under test.
+    let found;
+    for (let n = 1; n <= 400 && !found; n += 1) {
+      const decisions = Array.from({ length: n }, (_, i) => del(cjkId(i)));
+      const serialized = JSON.stringify({
+        stage: stamp.stage,
+        hash: contentHash(decisions.map((d) => d.id).join("\n")),
+        ids: decisions.map((d) => d.id),
+        generatedAt: stamp.generatedAt,
+        issuedAt: stamp.issuedAt,
+      });
+      if (
+        serialized.length < 4096 &&
+        Buffer.byteLength(serialized, "utf8") > 4096
+      ) {
+        found = { decisions, serialized };
+      }
+    }
+    // The window must EXIST, or the assertion below would prove nothing.
+    expect(found).toBeDefined();
+    // The premise: under the limit in code units, over it in bytes.
+    expect(found.serialized.length).toBeLessThan(4096);
+    expect(Buffer.byteLength(found.serialized, "utf8")).toBeGreaterThan(4096);
+    expect(() => buildOfferedRecord({ ...stamp, decisions: found.decisions })).toThrow(
+      /4096|parameter limit/u,
+    );
+  });
+});
+
+describe("the reviewed decision artifact (#150)", () => {
+  const GENERATED_AT = "2026-08-05T03:00:00.000Z";
+
+  const del = (id) => ({
+    id,
+    verdict: "DELETE",
+    reason: "session-state",
+    version: 3,
+    contentHash: contentHash(`c-${id}`),
+  });
+
+  const merge = (id) => ({
+    id,
+    verdict: "MERGE",
+    reason: "duplicate",
+    version: 2,
+    contentHash: contentHash(`c-${id}`),
+    mergedContent: "the merged memory text",
+    mergedContentHash: contentHash("the merged memory text"),
+    absorbs: [
+      { id: `${id}-b`, contentHash: contentHash("c-b"), version: 1 },
+      { id: `${id}-a`, contentHash: contentHash("c-a"), version: 4 },
+    ],
+  });
+
+  function fakeS3() {
+    const puts = [];
+    return {
+      puts,
+      send: vi.fn(async (command) => {
+        puts.push(command.input);
+        return {};
+      }),
+    };
+  }
+
+  it("TC-SLACKAPP-168 derives the same key the provisioner grants access to", async () => {
+    // The two live in different runtimes — this file runs in the container, the
+    // other in the SST program — so they are duplicated rather than shared, exactly
+    // as `OFFER_TTL_MS` and `claimParameterName` are. A drift is not a cosmetic
+    // difference: the identity grant is `decisions/<stage>/*` and the writer's key
+    // is what PutObject is called with, so a mismatch is an AccessDenied at
+    // artifact-write time — after the whole audit has run.
+    const { decisionArtifactKey: provisioned, decisionArtifactKeyPrefix } =
+      await import("../infra/slack-approval.ts");
+    const hash = contentHash("anything");
+    for (const stage of ["prod", "pr-42"]) {
+      expect(decisionArtifactKey(stage, hash)).toBe(provisioned(stage, hash));
+      // And the writer's key must actually fall UNDER the prefix the grant is
+      // scoped to. Two functions can agree with each other and both sit outside the
+      // policy's scope, which an equality assertion alone would not notice.
+      expect(decisionArtifactKey(stage, hash).startsWith(decisionArtifactKeyPrefix(stage))).toBe(
+        true,
+      );
+    }
+    // The stage separator is load-bearing: without the trailing slash the grant's
+    // `decisions/pr-4*` also matches `decisions/pr-42/...`, so one preview stage
+    // could read another's reviewed list. Asserted as a NON-match, because that is
+    // the property the slash provides.
+    expect(decisionArtifactKey("pr-42", hash)).not.toContain(
+      decisionArtifactKeyPrefix("pr-4"),
+    );
+    // No `:` survives into the key. It is legal in S3 but reads as a port separator
+    // in the `s3://` line the writer logs and needs percent-encoding in a URL.
+    expect(decisionArtifactKey("prod", hash)).not.toContain(":");
+  });
+
+  it("TC-SLACKAPP-169 serializes every destructive field and nothing that only decorates", () => {
+    // The hash is taken over these bytes, so what is IN them is what the approval
+    // will vouch for. Anchors included: `contentHash` and `version` are what the LWW
+    // guard compares at apply time, and an artifact that omitted them would let a
+    // replay clobber a memory edited since the review.
+    const artifact = JSON.parse(
+      serializeDecisionArtifact({
+        stage: "prod",
+        generatedAt: GENERATED_AT,
+        decisions: [
+          { ...del("m-1"), snippet: "SENTINEL-CONTENT" },
+          merge("m-2"),
+          { id: "m-keep", verdict: "KEEP", reason: "durable" },
+        ],
+      }),
+    );
+
+    expect(artifact.stage).toBe("prod");
+    expect(artifact.generatedAt).toBe(GENERATED_AT);
+    const [first, second, third] = artifact.decisions;
+    expect(first).toEqual({
+      id: "m-1",
+      verdict: "DELETE",
+      contentHash: contentHash("c-m-1"),
+      version: 3,
+    });
+    // `reason` and `snippet` are ABSENT, and for different reasons. `snippet` holds
+    // memory content the report path deliberately truncates, and `reason` is model
+    // prose no reader validates — a spread of the decision would carry both into the
+    // hashed bytes, making an upstream field addition invalidate every live
+    // approval as a side effect.
+    expect(first.reason).toBeUndefined();
+    expect(first.snippet).toBeUndefined();
+    expect(JSON.stringify(artifact)).not.toMatch(/SENTINEL-CONTENT/u);
+    // A MERGE carries its merged bytes and every absorbed id's own anchors, because
+    // the apply re-reads and LWW-checks each absorbed memory separately.
+    expect(second).toEqual({
+      id: "m-2",
+      verdict: "MERGE",
+      contentHash: contentHash("c-m-2"),
+      version: 2,
+      mergedContent: "the merged memory text",
+      mergedContentHash: contentHash("the merged memory text"),
+      absorbs: [
+        { id: "m-2-b", contentHash: contentHash("c-b"), version: 1 },
+        { id: "m-2-a", contentHash: contentHash("c-a"), version: 4 },
+      ],
+    });
+    // Order PRESERVED, never sorted. Reordering `absorbs` would change the hash
+    // while approving the identical deletions, which is the one place a "cosmetic"
+    // normalization silently invalidates a live approval.
+    expect(second.absorbs.map((a) => a.id)).toEqual(["m-2-b", "m-2-a"]);
+    // A KEEP carries no anchors at all: it is non-destructive, so there is nothing
+    // for the LWW guard to compare, and a shape that drifted with fields it never
+    // uses would change the hash for no reviewed difference.
+    expect(third).toEqual({ id: "m-keep", verdict: "KEEP" });
+  });
+
+  it("TC-SLACKAPP-170 serializes canonically, so identical decisions hash identically and any reviewed change does not", () => {
+    // A hash mismatch is a REFUSAL, not a fallback (#150). So the writer and every
+    // later reader must agree on the bytes to the character, and the properties
+    // below are what make that true rather than accidental.
+    const base = { stage: "prod", generatedAt: GENERATED_AT, decisions: [del("m-1"), merge("m-2")] };
+    const serialized = serializeDecisionArtifact(base);
+
+    // No pretty-printing. `JSON.stringify(x, null, 2)` is the natural thing to
+    // reach for when a human might read the artifact, and it would make the hash
+    // depend on an indentation choice.
+    expect(serialized).not.toMatch(/\n/u);
+    // Re-serializing the same input is byte-identical — the property that lets the
+    // apply re-derive the hash from what it fetched.
+    expect(serializeDecisionArtifact(base)).toBe(serialized);
+    // And a decoration the artifact excludes cannot move the hash, so an upstream
+    // field addition does not invalidate approvals in flight.
+    expect(
+      serializeDecisionArtifact({
+        ...base,
+        decisions: [{ ...del("m-1"), reason: "different prose" }, merge("m-2")],
+      }),
+    ).toBe(serialized);
+
+    // Every reviewed change DOES move it. Each of these is a way the list could be
+    // altered after the click while the approved ids stay identical, which is the
+    // whole reason the hash covers the artifact instead of the id list.
+    const changed = {
+      "a verdict flipped": [{ ...del("m-1"), verdict: "KEEP" }, merge("m-2")],
+      "an anchor moved": [{ ...del("m-1"), version: 4 }, merge("m-2")],
+      "merged bytes edited": [
+        del("m-1"),
+        { ...merge("m-2"), mergedContent: "different merged text" },
+      ],
+      "an absorbed id added": [
+        del("m-1"),
+        {
+          ...merge("m-2"),
+          absorbs: [
+            ...merge("m-2").absorbs,
+            { id: "never-shown", contentHash: contentHash("c-x"), version: 1 },
+          ],
+        },
+      ],
+      "absorbs reordered": [
+        del("m-1"),
+        { ...merge("m-2"), absorbs: [...merge("m-2").absorbs].reverse() },
+      ],
+      "decisions reordered": [merge("m-2"), del("m-1")],
+    };
+    for (const [what, decisions] of Object.entries(changed)) {
+      expect(
+        serializeDecisionArtifact({ ...base, decisions }),
+        `${what} must change the artifact hash`,
+      ).not.toBe(serialized);
+    }
+  });
+
+  it("TC-SLACKAPP-171 distinguishes an absent anchor from one spelled present-but-undefined", () => {
+    // `JSON.stringify` DROPS undefined values, so a field written as
+    // `contentHash: decision.contentHash` on a decision that has none hashes
+    // IDENTICALLY to one where the field was never written. That is why the writer
+    // tests each field before including it rather than assigning it unconditionally
+    // — the guard is invisible in the output and only a case like this reaches it.
+    const withUndefined = serializeDecisionArtifact({
+      stage: "prod",
+      generatedAt: GENERATED_AT,
+      decisions: [{ id: "m-1", verdict: "KEEP", contentHash: undefined, version: undefined }],
+    });
+    const withAbsent = serializeDecisionArtifact({
+      stage: "prod",
+      generatedAt: GENERATED_AT,
+      decisions: [{ id: "m-1", verdict: "KEEP" }],
+    });
+    expect(withUndefined).toBe(withAbsent);
+    // A non-integer version is not an anchor either: `needsPut` compares with
+    // `===` against a real integer, so a float or a string would degrade every LWW
+    // check into the "changed externally" branch — a replay that applies nothing
+    // while reporting a clean skip.
+    const bogus = JSON.parse(
+      serializeDecisionArtifact({
+        stage: "prod",
+        generatedAt: GENERATED_AT,
+        decisions: [{ id: "m-1", verdict: "DELETE", contentHash: "sha256:x", version: "3" }],
+      }),
+    );
+    expect(bogus.decisions[0].version).toBeUndefined();
+    expect(bogus.decisions[0].contentHash).toBe("sha256:x");
+  });
+
+  it("TC-SLACKAPP-172 writes ONE PutObject, content-addressed, with a checksum and no key of its own", async () => {
+    const s3 = fakeS3();
+    const log = vi.fn();
+    const decisions = [del("m-1"), merge("m-2")];
+    const result = await putDecisionArtifact({
+      s3,
+      bucket: "mem9-audit-123456789012",
+      stage: "prod",
+      generatedAt: GENERATED_AT,
+      decisions,
+      log,
+    });
+
+    // ONE call, and it must stay one. `@aws-sdk/lib-storage`'s `Upload` switches to
+    // multipart above a threshold and calls `s3:AbortMultipartUpload` on failure —
+    // an action the workload boundary's ceiling does not admit — so the convenient
+    // wrapper works in a unit test and fails on the first large artifact inside its
+    // own error handler.
+    expect(s3.send).toHaveBeenCalledTimes(1);
+    const [put] = s3.puts;
+    expect(put.Bucket).toBe("mem9-audit-123456789012");
+    const body = serializeDecisionArtifact({ stage: "prod", generatedAt: GENERATED_AT, decisions });
+    expect(put.Body).toBe(body);
+    expect(put.ContentType).toBe("application/json");
+    // Checked by S3 against the bytes it received, so a truncated upload is
+    // rejected at write time rather than becoming an artifact the apply refuses
+    // after the click is spent.
+    expect(put.ChecksumSHA256).toBe(createHash("sha256").update(body).digest("base64"));
+    // NO `ServerSideEncryption` and NO `SSEKMSKeyId`. The bucket's default
+    // encryption already applies, and naming the algorithm here would also require
+    // naming the key — which is how a caller ends up presenting an encryption
+    // context the boundary's `GenKey` deny does not match, an AccessDenied after
+    // the audit. TC-SLACKAPP-163 asserts the bucket carries the configuration.
+    expect(put.ServerSideEncryption).toBeUndefined();
+    expect(put.SSEKMSKeyId).toBeUndefined();
+
+    // Content-addressed: the key is derivable from the hash ALONE, so the apply
+    // needs no run id plumbed through the Lambda, the claim, and the container
+    // override — each of which is a place one could be dropped or forged.
+    expect(result.hash).toBe(decisionArtifactHash(body));
+    expect(result.key).toBe(decisionArtifactKey("prod", result.hash));
+    expect(put.Key).toBe(result.key);
+    expect(result.bytes).toBe(body.length);
+
+    // The log line names the location and the size, NEVER the body or an id: it
+    // goes to CloudWatch Logs, a wider audience than the artifact's own SSE-KMS
+    // bucket.
+    const logged = log.mock.calls.map(([line]) => line).join("\n");
+    expect(logged).toContain(result.key);
+    expect(logged).not.toContain("the merged memory text");
+    expect(logged).not.toContain("m-1");
+  });
+
+  it("TC-SLACKAPP-173 rewrites the identical object for an identical list, and a different one for any change", async () => {
+    const s3 = fakeS3();
+    const write = (decisions) =>
+      putDecisionArtifact({
+        s3,
+        bucket: "mem9-audit-123456789012",
+        stage: "prod",
+        generatedAt: GENERATED_AT,
+        decisions,
+        log: vi.fn(),
+      });
+
+    // Idempotent by construction: a re-run producing the identical list writes the
+    // identical object, so a retried scan does not accumulate artifacts.
+    const first = await write([del("m-1"), merge("m-2")]);
+    const again = await write([del("m-1"), merge("m-2")]);
+    expect(again.key).toBe(first.key);
+    // Two runs producing DIFFERENT lists cannot collide, which is the property a
+    // timestamped or run-id key would not give: two runs in the same millisecond
+    // would overwrite each other's reviewed list.
+    const edited = await write([
+      del("m-1"),
+      { ...merge("m-2"), mergedContent: "silently different" },
+    ]);
+    expect(edited.key).not.toBe(first.key);
+    // A stage cannot land in another stage's prefix even for the same list.
+    const other = await putDecisionArtifact({
+      s3,
+      bucket: "mem9-audit-123456789012",
+      stage: "pr-42",
+      generatedAt: GENERATED_AT,
+      decisions: [del("m-1"), merge("m-2")],
+      log: vi.fn(),
+    });
+    expect(other.key).not.toBe(first.key);
+    expect(other.key).toContain("decisions/pr-42/");
+  });
+
+  it("TC-SLACKAPP-174 refuses an artifact over the single-PutObject bound rather than truncating or splitting", async () => {
+    const s3 = fakeS3();
+    const huge = Array.from({ length: 40 }, (_, i) => ({
+      ...merge(`m-${i}`),
+      mergedContent: "x".repeat(200_000),
+    }));
+    const err = await putDecisionArtifact({
+      s3,
+      bucket: "mem9-audit-123456789012",
+      stage: "prod",
+      generatedAt: GENERATED_AT,
+      decisions: huge,
+      log: vi.fn(),
+    }).then(
+      () => undefined,
+      (error) => error,
+    );
+    expect(err?.message).toMatch(/single-PutObject bound/u);
+    // The remedy must NOT name `--cap`, and that is a correctness claim about the
+    // message rather than a wording preference: the artifact carries one row per
+    // SCANNED memory (KEEPs included — TC-SLACKAPP-169), while `--cap` bounds only
+    // how many mutations an apply may spend and never reaches this path. Advice to
+    // lower it is inert, and doubly so on the scheduled scan, which has no operator
+    // at the keyboard and no `--cap` override wired into its task definition. When
+    // the alarm says only "task failed", this string is the entire diagnosis.
+    expect(err?.message).not.toMatch(/--cap/u);
+    expect(err?.message).toMatch(/SCANNED/u);
+    // NOTHING was written. Truncating is the same class of mistake
+    // `buildOfferedRecord` refuses — the operator would approve a hash over bytes
+    // that are not the list they were shown — and multipart is denied by the
+    // boundary, so the refusal must come before the call, not after a partial one.
+    expect(s3.send).not.toHaveBeenCalled();
+  });
+
+  it("TC-SLACKAPP-174b measures the artifact in BYTES, not UTF-16 code units", async () => {
+    // The artifact is the one place memory TEXT lives at rest, so its size guard is
+    // the one place the difference is not academic: a CJK `mergedContent` is 3 bytes
+    // per character and 1 `.length` unit. Measuring code units would pass a body S3
+    // receives as ~3x larger, which is how a write ends up needing the multipart
+    // path `s3:AbortMultipartUpload` is denied for — an AccessDenied inside the
+    // SDK's own error handler, after the scan has spent its reasoning passes.
+    const s3 = fakeS3();
+    // Under 4 MiB in code units, over it in UTF-8 bytes. CJK is 3 bytes per code
+    // unit, so the window is wide — but the count is derived rather than guessed so
+    // the fixture cannot drift onto the wrong side of it.
+    const PER_ROW = 300_000;
+    const cjk = Array.from(
+      { length: Math.ceil((4 * 1024 * 1024) / (2 * PER_ROW)) },
+      (_, i) => ({ ...merge(`m-${i}`), mergedContent: "字".repeat(PER_ROW) }),
+    );
+    const serialized = serializeDecisionArtifact({
+      stage: "prod",
+      generatedAt: GENERATED_AT,
+      decisions: cjk,
+    });
+    // The premise, asserted rather than assumed — otherwise a fixture that happened
+    // to breach both measures would make this test pass for the wrong reason.
+    expect(serialized.length).toBeLessThan(4 * 1024 * 1024);
+    expect(Buffer.byteLength(serialized, "utf8")).toBeGreaterThan(4 * 1024 * 1024);
+
+    await expect(
+      putDecisionArtifact({
+        s3,
+        bucket: "mem9-audit-123456789012",
+        stage: "prod",
+        generatedAt: GENERATED_AT,
+        decisions: cjk,
+        log: vi.fn(),
+      }),
+    ).rejects.toThrow(/single-PutObject bound/u);
+    expect(s3.send).not.toHaveBeenCalled();
+  });
+
+  it("TC-SLACKAPP-174c reports the BYTE count it wrote, not the code-unit count", async () => {
+    // The log line and the returned `bytes` are what an operator reconciles against
+    // the object's real size in S3, so a code-unit count there is a number that
+    // disagrees with the console for every non-Latin artifact.
+    const s3 = fakeS3();
+    const decisions = [{ ...merge("m-1"), mergedContent: "字".repeat(10) }];
+    const log = vi.fn();
+    const result = await putDecisionArtifact({
+      s3,
+      bucket: "mem9-audit-123456789012",
+      stage: "prod",
+      generatedAt: GENERATED_AT,
+      decisions,
+      log,
+    });
+    const body = s3.send.mock.calls[0][0].input.Body;
+    expect(result.bytes).toBe(Buffer.byteLength(body, "utf8"));
+    expect(result.bytes).toBeGreaterThan(body.length);
+    expect(log.mock.calls.flat().join("\n")).toContain(`(${result.bytes} bytes)`);
   });
 });
 
@@ -4707,15 +5206,27 @@ describe("offering the list to Slack (#123)", () => {
         });
       }),
     };
-    return { events, ssm, slack };
+    // S3 joins the SAME event log for the same reason Slack does (#150): the
+    // artifact must exist before the record that makes it clickable, and that
+    // ordering is only visible across the three fakes together.
+    const s3 = {
+      puts: [],
+      send: vi.fn(async (command) => {
+        events.push(["s3", command.input.Key]);
+        s3.puts.push(command.input);
+        return {};
+      }),
+    };
+    return { events, ssm, slack, s3 };
   }
 
   function offer(overrides = {}) {
-    const { ssm, slack, events } = overrides.fakes ?? offerFakes();
+    const { ssm, slack, s3, events } = overrides.fakes ?? offerFakes();
     return {
       events,
       ssm,
       slack,
+      s3,
       log: overrides.log,
       promise: postApprovalRequest({
         ssm,
@@ -4726,6 +5237,12 @@ describe("offering the list to Slack (#123)", () => {
         issuedAt: overrides.issuedAt ?? "2026-08-05T03:00:00.000Z",
         channel: CHANNEL,
         botToken: BOT_TOKEN,
+        // Both or neither, mirroring production: `buildPostApproval` builds the
+        // client only when the bucket is configured. Off by DEFAULT here so every
+        // pre-#150 assertion in this suite keeps exercising the artifact-less path
+        // the operator CLI still takes.
+        s3: overrides.artifactBucket ? s3 : undefined,
+        artifactBucket: overrides.artifactBucket,
         fetchImpl: slack.fetchImpl,
         now: overrides.now,
         log: overrides.log ?? vi.fn(),
@@ -4761,6 +5278,9 @@ describe("offering the list to Slack (#123)", () => {
     expect(first.Type).toBe("String");
     expect(first.Overwrite).toBe(true);
     const record = JSON.parse(first.Value);
+    // The artifact-less shape, because this offer has no bucket configured — which
+    // is the #102 operator-CLI path and the pre-#150 stage. The bucketed shape adds
+    // exactly two coordinate fields and no content (TC-SLACKAPP-176).
     expect(Object.keys(record).sort()).toEqual([
       "generatedAt",
       "hash",
@@ -5371,6 +5891,137 @@ describe("offering the list to Slack (#123)", () => {
     );
     expect(still?.message).toMatch(/an operator may still be reviewing/u);
   });
+
+  it("TC-SLACKAPP-175 writes the artifact BEFORE the record that points at it", async () => {
+    const fakes = offerFakes();
+    const { promise } = offer({ fakes, artifactBucket: "mem9-audit-123456789012" });
+    const result = await promise;
+
+    // ORDER, and in the same direction as record-before-post: the record is what a
+    // click is validated against, so a record written first would make the artifact
+    // clickable while the object may not exist. The apply must REFUSE a missing
+    // artifact rather than fall back to re-classifying, so that window is a spent
+    // approval that applies nothing. Writing the artifact first leaves only the safe
+    // failure order — an orphaned object no record names, which the lifecycle rule
+    // expires on its own.
+    expect(fakes.events).toEqual([
+      ["ssm-get", OFFERED],
+      ["s3", fakes.s3.puts[0].Key],
+      ["ssm", OFFERED],
+      ["slack", "chat.postMessage"],
+      ["ssm", OFFERED],
+    ]);
+    // The record names WHERE, and the key is the content-addressed one the writer
+    // derived — so the apply can find the object from the record alone.
+    const record = JSON.parse(fakes.ssm.puts[0].Value);
+    expect(record.artifactBucket).toBe("mem9-audit-123456789012");
+    expect(record.artifactKey).toBe(fakes.s3.puts[0].Key);
+    expect(record.artifactKey).toBe(
+      decisionArtifactKey("prod", decisionArtifactHash(fakes.s3.puts[0].Body)),
+    );
+    expect(result.record.artifactKey).toBe(record.artifactKey);
+  });
+
+  it("TC-SLACKAPP-176 keeps the offered record free of memory content even though the artifact carries it", async () => {
+    // #150's new store does NOT relax what the SSM record may hold. That parameter
+    // is a plain `String` — the boundary admits neither `kms:Encrypt` nor
+    // `kms:GenerateDataKey` for SSM, so a SecureString write is denied at runtime —
+    // and it is readable by anything holding `ssm:GetParameters` on the stage tree.
+    // The artifact exists precisely so the merged bytes have somewhere else to go,
+    // which makes restating the invariant here the point rather than a duplicate of
+    // TC-SLACKAPP-023b.
+    const fakes = offerFakes();
+    const log = vi.fn();
+    await offer({
+      fakes,
+      log,
+      artifactBucket: "mem9-audit-123456789012",
+      decisions: [
+        del("m-1"),
+        {
+          id: "m-2",
+          verdict: "MERGE",
+          reason: "duplicate",
+          version: 1,
+          contentHash: contentHash("c-m-2"),
+          mergedContent: "SENTINEL-MERGED-TEXT",
+          mergedContentHash: contentHash("SENTINEL-MERGED-TEXT"),
+          absorbs: [{ id: "m-3", contentHash: contentHash("c-m-3"), version: 1 }],
+        },
+      ],
+    }).promise;
+
+    // Asserted over the SERIALIZED value, so a nested field added later cannot slip
+    // past a field-by-field check.
+    for (const put of fakes.ssm.puts) {
+      expect(put.Value).not.toMatch(/SENTINEL-MERGED-TEXT/u);
+      expect(put.Value).not.toMatch(new RegExp(SNIPPET, "u"));
+    }
+    // The key set stays CLOSED, and the two new members are coordinates: a bucket
+    // name and a `decisions/<stage>/sha256-<hex>.json` key name no memory. Anything
+    // else appearing here is a widening that has to be argued for, not inherited.
+    const record = JSON.parse(fakes.ssm.puts[0].Value);
+    expect(Object.keys(record).sort()).toEqual([
+      "artifactBucket",
+      "artifactKey",
+      "generatedAt",
+      "hash",
+      "ids",
+      "issuedAt",
+      "stage",
+    ]);
+    // The artifact DOES carry the merged text — it has to, or a replay could not
+    // reproduce the reviewed MERGE. This asserts the content went to the SSE-KMS
+    // bucket instead of vanishing, which is what makes the record's silence a
+    // relocation rather than a loss.
+    expect(fakes.s3.puts[0].Body).toMatch(/SENTINEL-MERGED-TEXT/u);
+    // And no log line carries it, on either side.
+    expect(log.mock.calls.flat().join("\n")).not.toMatch(/SENTINEL-MERGED-TEXT/u);
+  });
+
+  it("TC-SLACKAPP-177 writes no artifact and no coordinates when no bucket is configured", async () => {
+    // The #102 operator CLI and any stage deployed before the bucket existed take
+    // this path. It must be the pre-#150 record exactly — not a record with empty
+    // coordinates, which the apply would read as "there is an artifact" and then
+    // fail to fetch.
+    const fakes = offerFakes();
+    await offer({ fakes }).promise;
+    expect(fakes.s3.send).not.toHaveBeenCalled();
+    const record = JSON.parse(fakes.ssm.puts[0].Value);
+    expect(Object.keys(record).sort()).toEqual([
+      "generatedAt",
+      "hash",
+      "ids",
+      "issuedAt",
+      "stage",
+    ]);
+    // Not merely falsy — ABSENT. `JSON.stringify` drops undefined, so a key spelled
+    // present-but-undefined would serialize identically here while
+    // `"artifactKey" in record` on the apply side answers differently.
+    expect("artifactBucket" in record).toBe(false);
+    expect("artifactKey" in record).toBe(false);
+  });
+
+  it("TC-SLACKAPP-178 offers nothing at all when the artifact cannot be written", async () => {
+    // The artifact is a PREREQUISITE, not a best-effort side effect. Degrading to an
+    // id-only offer here would post a clickable button for a list the apply cannot
+    // replay — and once MERGE is admitted, the operator would be approving verdicts
+    // whose bytes no longer exist anywhere.
+    const fakes = offerFakes();
+    fakes.s3.send = vi.fn(async () => {
+      const err = new Error("Access Denied");
+      err.name = "AccessDenied";
+      throw err;
+    });
+    await expect(
+      offer({ fakes, artifactBucket: "mem9-audit-123456789012" }).promise,
+    ).rejects.toThrow(/Access Denied/u);
+    // NEITHER the record nor the post happened, so last week's button also survives
+    // — the run failed before it invalidated anything. `runCleanup` maps this to
+    // exit 1, which is what the task-exit alarm sees.
+    expect(fakes.ssm.puts).toEqual([]);
+    expect(fakes.slack.fetchImpl).not.toHaveBeenCalled();
+  });
 });
 
 
@@ -5381,6 +6032,7 @@ describe("wiring the offer into the review run (#123)", () => {
     "MEM9_DB_NAME",
     "MEM9_DB_PORT",
     "MEM9_DB_SECRET",
+    "MEM9_DECISION_ARTIFACT_BUCKET",
     "MEM9_SLACK_APPROVAL_CHANNEL",
     "MEM9_SSM_PREFIX",
     "MEM9_TENANT_ID",
@@ -5517,6 +6169,101 @@ describe("wiring the offer into the review run (#123)", () => {
     expect(put.Name).toBe("/mem9-on-aws/prod/approvals/offered");
     expect(JSON.parse(put.Value).stage).toBe("prod");
     expect(JSON.parse(fetchImpl.mock.calls[0][1].body).channel).toBe("C0APPROVAL");
+    await production.close();
+  });
+
+  it("TC-SLACKAPP-179 wires the artifact bucket from the environment through to the offer", async () => {
+    // The bucket reaches the container as a task-definition environment entry
+    // (`infra/slack-approval.ts`, asserted from the other side by
+    // TC-SLACKAPP-181) and NOT from SSM: it is not a secret, and putting it in
+    // the parameter tree would place the artifact's location behind the same
+    // `approvals/*`-scoped grant the apply task is confined to.
+    reviewEnv({
+      MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL",
+      SLACK_BOT_TOKEN: "xoxb-injected",
+      MEM9_DECISION_ARTIFACT_BUCKET: "mem9-audit-123456789012",
+    });
+    const ssm = ssmFake();
+    const s3 = { sent: [], send: vi.fn(async (c) => (s3.sent.push(c.input), {})) };
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ok: true, channel: "C0APPROVAL", ts: "1754400000.000200" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: false, cap: 50 },
+      { ssm, s3, getToken: vi.fn(), fromNodeProviderChain: vi.fn(), fetchImpl },
+    );
+
+    const offer = await production.deps.postApproval({
+      decisions: [
+        {
+          id: "m-1",
+          verdict: "DELETE",
+          reason: "session-state",
+          version: 1,
+          contentHash: contentHash("c-m-1"),
+          snippet: "a session detail",
+        },
+      ],
+      generatedAt: "2026-08-05T03:00:00.000Z",
+      issuedAt: "2026-08-05T03:00:00.000Z",
+    });
+
+    expect(offer.posted).toBe(true);
+    // The bucket named in the environment, and the stage-scoped prefix the task's
+    // identity policy grants — a key outside `decisions/prod/` would be an
+    // AccessDenied at runtime, after the scan has done its whole audit.
+    expect(s3.sent).toHaveLength(1);
+    expect(s3.sent[0].Bucket).toBe("mem9-audit-123456789012");
+    expect(s3.sent[0].Key).toMatch(/^decisions\/prod\/sha256-[0-9a-f]{64}\.json$/u);
+    const record = JSON.parse(ssm.sent.find((input) => input.Name).Value);
+    expect(record.artifactBucket).toBe("mem9-audit-123456789012");
+    expect(record.artifactKey).toBe(s3.sent[0].Key);
+    await production.close();
+  });
+
+  it("TC-SLACKAPP-180 offers without an artifact when no bucket is configured, without constructing an S3 client", async () => {
+    // The #102 operator CLI, and any stage deployed before the bucket existed.
+    // `s3Client` is only reached when the variable is set, so a hand-run review in
+    // a shell with no S3 credentials still offers exactly what it did before #150.
+    reviewEnv({ MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL", SLACK_BOT_TOKEN: "xoxb-injected" });
+    const ssm = ssmFake();
+    const s3 = { send: vi.fn() };
+    const fetchImpl = vi.fn(
+      async () =>
+        new Response(JSON.stringify({ ok: true, channel: "C0APPROVAL", ts: "1754400000.000200" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+    );
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: false, cap: 50 },
+      { ssm, s3, getToken: vi.fn(), fromNodeProviderChain: vi.fn(), fetchImpl },
+    );
+
+    await production.deps.postApproval({
+      decisions: [
+        {
+          id: "m-1",
+          verdict: "DELETE",
+          reason: "session-state",
+          version: 1,
+          contentHash: contentHash("c-m-1"),
+        },
+      ],
+      generatedAt: "2026-08-05T03:00:00.000Z",
+      issuedAt: "2026-08-05T03:00:00.000Z",
+    });
+
+    // The injected client was AVAILABLE and still unused — so this asserts the
+    // gate is the environment variable, not the absence of a client.
+    expect(s3.send).not.toHaveBeenCalled();
+    const record = JSON.parse(ssm.sent.find((input) => input.Name).Value);
+    expect("artifactBucket" in record).toBe(false);
+    expect("artifactKey" in record).toBe(false);
     await production.close();
   });
 });

@@ -210,9 +210,42 @@ export function decisionArtifactBucketName(
  * separation is therefore a KEY-prefix property, enforced by the identity policy's
  * per-stage object scope rather than by the boundary, which only bounds the
  * maximum.
+ *
+ * DUPLICATED as `decisionArtifactKey` in scripts/memory-cleanup.mjs, which is the
+ * WRITER while this file is the provisioner — the same split as `OFFER_TTL_MS` and
+ * `claimParameterName`, and for the same reason: the container script and the SST
+ * program share no module. A drift is an AccessDenied against the per-stage object
+ * scope below, at artifact-write time, after the audit has run.
+ * TC-SLACKAPP-168 asserts the two agree character for character.
+ *
+ * Keyed by the CONTENT HASH rather than a run id, so the apply can derive the key
+ * from the approval alone (see the writer's note). The `:` in `sha256:...` takes
+ * the same dash treatment `claimParameterName` applies for SSM's sake: it is legal
+ * in an S3 key but needs percent-encoding in a URL and reads as a port separator in
+ * an `s3://` line, and one transformation for both stores is easier to verify than
+ * two.
  */
-export function decisionArtifactKey(stage: string, runId: string): string {
-  return `decisions/${stage}/${runId}.json`;
+export function decisionArtifactKey(stage: string, hash: string): string {
+  return `${decisionArtifactKeyPrefix(stage)}${hash.replace(/:/gu, "-")}.json`;
+}
+
+/**
+ * The stage's own key prefix — the thing the identity policy scopes to, and the
+ * only mechanism that keeps one stage out of another's reviewed decision list.
+ *
+ * Factored out of `decisionArtifactKey` rather than written twice because the two
+ * uses must agree by construction: the grant is `<prefix>*` and the writer's key is
+ * `<prefix><hash>.json`, so a prefix that drifted would grant access to keys the
+ * writer never produces while denying the ones it does. That failure is an
+ * AccessDenied at write time, after the audit.
+ *
+ * The trailing slash is part of the prefix and load-bearing. Without it,
+ * `decisions/pr-4*` also matches `decisions/pr-42/...` — a preview stage reading
+ * another preview stage's list — which is exactly the isolation this is here to
+ * provide.
+ */
+export function decisionArtifactKeyPrefix(stage: string): string {
+  return `decisions/${stage}/`;
 }
 
 /**
@@ -535,6 +568,12 @@ export function slackApproval(
       MEM9_SSM_PREFIX: prefix,
       MEM9_SLACK_APPROVAL_CHANNEL: channel,
       MEM9_APPROVED_IDS_PATH: APPROVED_IDS_PATH,
+      // The scan writes the reviewed decision list here and the apply reads it back
+      // (#150). Its presence is what turns the artifact on in the container script,
+      // which is why it is an environment entry rather than a derived name: a stage
+      // deployed before this bucket existed keeps writing the id-only record until
+      // it is redeployed, instead of failing on a bucket its role cannot reach.
+      MEM9_DECISION_ARTIFACT_BUCKET: artifactBucketName,
       // No MEM9_ALERTS_TOPIC_ARN and no sns:Publish: scripts/memory-cleanup.mjs
       // contains no SNS code (memory-consolidation.mjs does, which is what makes
       // the omission look like an oversight). Passing the variable and granting
@@ -598,6 +637,50 @@ export function slackApproval(
         actions: ["ssm:GetParameters", "ssm:PutParameter"],
         resources: [
           $interpolate`arn:aws:ssm:${region}:${accountId()}:parameter${prefix}/approvals/*`,
+        ],
+      },
+      // The decision artifact (#150). THIS is where cross-stage isolation is
+      // enforced: the boundary pins the bucket but cannot afford a per-stage key
+      // condition (6144 is a hard cap), so the identity policy carries the stage
+      // prefix and the boundary bounds the maximum. A preview stage's role therefore
+      // cannot read prod's reviewed list even though both stages share one bucket.
+      //
+      // `s3:PutObject` for the scan half and `s3:GetObject` for the apply half, on
+      // the ONE task definition that serves both. No `s3:DeleteObject`: the
+      // lifecycle rule expires the artifact, and a task that could delete it could
+      // destroy the audit trail of what it deleted. No `s3:ListBucket` either — the
+      // key is derived from the approval hash, so nothing here needs to enumerate.
+      {
+        actions: ["s3:GetObject", "s3:PutObject"],
+        resources: [
+          $interpolate`arn:aws:s3:::${artifactBucketName}/${decisionArtifactKeyPrefix($app.stage)}*`,
+        ],
+      },
+      // SSE-KMS needs GenerateDataKey to WRITE and Decrypt to READ, both against
+      // the AWS-managed S3 key. `Resource: "*"` because `alias/aws/s3` resolves to a
+      // per-account key id this stack cannot name without a lookup; the conditions
+      // are what scope it, and they are the same two the boundary's `GenKey` and
+      // `KmsContext` denies pin — so a drift between them is an AccessDenied here
+      // rather than a widening.
+      //
+      // The context value is the BUCKET arn with no object suffix, because the
+      // bucket runs with S3 Bucket Keys enabled (see the encryption resource above).
+      // With bucket keys the context S3 presents is the bucket ARN, not the object's
+      // — pinning `.../*` here would deny every write and read.
+      {
+        actions: ["kms:Decrypt", "kms:GenerateDataKey"],
+        resources: ["*"],
+        conditions: [
+          {
+            test: "StringEquals",
+            variable: "kms:ViaService",
+            values: [$interpolate`s3.${region}.amazonaws.com`],
+          },
+          {
+            test: "StringEquals",
+            variable: "kms:EncryptionContext:aws:s3:arn",
+            values: [$interpolate`arn:aws:s3:::${artifactBucketName}`],
+          },
         ],
       },
     ],

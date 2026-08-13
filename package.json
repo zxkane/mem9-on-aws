@@ -12,6 +12,7 @@
     "test:cleanup:coverage": "vitest run scripts/memory-cleanup.test.mjs --coverage.enabled=true --coverage.include=scripts/memory-cleanup.mjs --coverage.reporter=text --coverage.thresholds.lines=80 --coverage.thresholds.functions=80 --coverage.thresholds.statements=80 --coverage.thresholds.branches=80"
   },
   "devDependencies": {
+    "@aws-sdk/client-s3": "^3.1109.0",
     "@aws-sdk/client-secrets-manager": "^3.1109.0",
     "@aws-sdk/client-servicediscovery": "^3.1109.0",
     "@aws-sdk/client-sns": "^3.1109.0",

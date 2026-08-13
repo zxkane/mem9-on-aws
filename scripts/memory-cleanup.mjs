@@ -79,6 +79,22 @@ const DEFAULT_CAP = 50;
 // deliberately not an option: it incurs a charge and cannot be reverted to
 // standard without data loss, so the record has to fit here (#123).
 const MAX_PARAMETER_BYTES = 4096;
+// The decision artifact's ceiling (#150). NOT an S3 limit — a single PutObject
+// accepts 5 GiB — but the bound at which the convenient uploader stops being an
+// option: `@aws-sdk/lib-storage`'s `Upload` switches to multipart, whose failure
+// path calls `s3:AbortMultipartUpload`, an action the workload boundary's ceiling
+// does not admit. So the writer must stay on one PutObject, and this is the size
+// at which it says so instead of discovering it in production.
+//
+// What scales it is the SCANNED corpus, NOT `--cap`: the artifact carries one row
+// per decision, KEEPs included, because a replay has to reproduce the reviewed list
+// and not just its destructive half — while `--cap` bounds only how many mutations
+// an apply may spend. Measured, a KEEP row is ~139 bytes, so ~30k scanned memories
+// reach 4 MiB with ZERO deletions. That is a real store rather than an operator
+// mistake, which is why the error names the corpus and offers no `--cap` remedy: it
+// would be advice nobody can act on, and the scheduled scan has no operator at the
+// keyboard to act anyway.
+const MAX_ARTIFACT_BYTES = 4 * 1024 * 1024;
 // Slack's own hard ceilings on a `chat.postMessage` payload
 // (api.slack.com/reference/block-kit/blocks). A message over ANY of them is
 // rejected wholesale, so the operator sees nothing — which is why
@@ -91,6 +107,12 @@ const SLACK_MAX_HEADER_CHARS = 150;
 const SLACK_TIMEOUT_MS = 15_000;
 /** Set by infra/slack-approval.ts; its presence is what enables the offer. */
 const MEM9_SLACK_CHANNEL_ENV = "MEM9_SLACK_APPROVAL_CHANNEL";
+// Set by infra/slack-approval.ts to the bucket it provisions (#150). Its ABSENCE
+// is meaningful rather than an error: it is what keeps #102's operator CLI, and any
+// stage deployed before that bucket existed, writing the id-only record they always
+// did. So the offer degrades to no artifact instead of refusing to run — and the
+// apply refuses to replay when there is none, which is where the safety lives.
+const MEM9_DECISION_BUCKET_ENV = "MEM9_DECISION_ARTIFACT_BUCKET";
 const REQUEST_TIMEOUT_MS = 30_000; // REST calls; the LLM call sets its own
 const LLM_TIMEOUT_MS = 120_000;
 // Reasoning models consume output tokens on hidden reasoning BEFORE emitting
@@ -914,6 +936,83 @@ async function discoverBaseUrl(opts, deps) {
 }
 
 /**
+ * The reviewed decision list, serialized for the S3 artifact — the bytes the
+ * approval hash will be taken over (#150).
+ *
+ * Why the hash must cover THIS and not the id list. With an id-only hash the
+ * artifact is mutable after the offer: the operator approves ids, and the verdicts
+ * and merged bytes those ids expand to can change underneath — a `MERGE` whose
+ * `absorbs[]` grows by one id after the click deletes a memory that was never
+ * shown, and reports success. Hashing the serialized artifact makes the approval
+ * cover what was actually displayed.
+ *
+ * Serialization is CANONICAL, and that is load-bearing rather than tidiness: the
+ * writer and every later reader must agree on the bytes to the character, because
+ * a single space of difference is a hash mismatch and a hash mismatch is a refusal
+ * (#150 requires refusal, not fallback). So no `null, 2` pretty-printing, keys in a
+ * fixed order at every level, and `absorbs[]` in the order the classifier produced
+ * — reordering absorbs would change the hash while approving the same deletions,
+ * which is the one place a "cosmetic" normalization would silently invalidate live
+ * approvals.
+ *
+ * Every DESTRUCTIVE field is included and nothing is summarized. The anchors
+ * (`contentHash`, `version`) are what the LWW guard compares at apply time, so an
+ * artifact that omitted them would let a replay clobber a memory edited since the
+ * review — the hash has to vouch for the anchors too, not merely for the ids.
+ */
+export function serializeDecisionArtifact({ stage, generatedAt, decisions }) {
+  // Explicit field lists at every level rather than a spread of the decision.
+  // A spread would carry whatever the classifier happens to attach — including
+  // `snippet`, which holds memory content the report path deliberately truncates
+  // — into the hashed bytes AND into the artifact. That is not a leak here (the
+  // artifact is the one place content may live), but it makes the hash depend on
+  // fields no reader validates, so an upstream field addition would invalidate
+  // every live approval as a side effect.
+  const entries = decisions.map((decision) => {
+    const entry = {
+      id: decision.id,
+      verdict: decision.verdict,
+    };
+    // Present only where the verdict makes them meaningful, so the serialized
+    // shape of a KEEP cannot drift with fields it never uses. `undefined` is not
+    // an option: JSON.stringify DROPS undefined values, so a field spelled
+    // present-but-undefined hashes identically to an absent one and the guard
+    // below could not tell them apart.
+    if (typeof decision.contentHash === "string") {
+      entry.contentHash = decision.contentHash;
+    }
+    if (Number.isInteger(decision.version)) entry.version = decision.version;
+    if (decision.verdict === "MERGE") {
+      entry.mergedContent = decision.mergedContent;
+      entry.mergedContentHash = decision.mergedContentHash;
+      // Order PRESERVED, never sorted — see the canonical-serialization note
+      // above. Each absorbed id carries its own anchors because the apply
+      // re-reads and LWW-checks each one separately.
+      entry.absorbs = (decision.absorbs ?? []).map((absorbed) => ({
+        id: absorbed.id,
+        contentHash: absorbed.contentHash,
+        version: absorbed.version,
+      }));
+    }
+    return entry;
+  });
+  return JSON.stringify({ stage, generatedAt, decisions: entries });
+}
+
+/**
+ * The hash of a serialized artifact: the value the Approve button will carry (#150).
+ *
+ * A thin wrapper over `contentHash` on purpose. It exists so the two sides that
+ * must agree — the scan that offers and the apply that replays — name one function
+ * instead of each calling `contentHash` on something they each serialized. The bug
+ * that shape prevents is a reader that hashes its own re-serialization: identical
+ * data, different bytes, permanent refusal.
+ */
+export function decisionArtifactHash(serialized) {
+  return contentHash(serialized);
+}
+
+/**
  * The `{prefix}/approvals/offered` record: what the callback Lambda compares a
  * button click against, and where the apply task reads its ids from (#123).
  *
@@ -928,7 +1027,14 @@ async function discoverBaseUrl(opts, deps) {
  * task deletes — the one failure mode here that produces a *wrong* apply rather
  * than a failed one (TC-SLACKAPP-024).
  */
-export function buildOfferedRecord({ stage, decisions, generatedAt, issuedAt }) {
+export function buildOfferedRecord({
+  stage,
+  decisions,
+  generatedAt,
+  issuedAt,
+  artifactBucket,
+  artifactKey,
+}) {
   const ids = decisions.filter((d) => d.verdict === "DELETE").map((d) => d.id);
   // Required, not defaulted to `generatedAt` or to `new Date()`. Both defaults
   // are wrong in a way that only shows up on the replay path: `loadDecisions`
@@ -958,13 +1064,29 @@ export function buildOfferedRecord({ stage, decisions, generatedAt, issuedAt }) 
     // record until the best-effort second write lands.
     issuedAt,
   };
-  const serialized = JSON.stringify(record);
-  if (serialized.length > MAX_PARAMETER_BYTES) {
+  // Set HERE rather than assigned onto the returned record by the caller, and that
+  // is the whole reason they are parameters (#150). They add ~151 bytes, and a
+  // caller that appended them afterwards would sail past the check below and then
+  // fail at `PutParameter` — measured: a 108-id list passes the guard at 3964 bytes
+  // and hands SSM 4115. That failure lands on the write that INVALIDATES last
+  // week's button, so the run dies with the previous approval still live and
+  // clickable. Both or neither, because a record naming a bucket with no key (or
+  // the reverse) is a location the apply cannot fetch.
+  if (artifactBucket && artifactKey) {
+    record.artifactBucket = artifactBucket;
+    record.artifactKey = artifactKey;
+  }
+  // `Buffer.byteLength`, not `String.length`: the latter counts UTF-16 code units
+  // and SSM measures bytes, so a CJK id — or any non-Latin content that reached a
+  // field here — would measure up to 3x low and be rejected by the service after
+  // passing this guard.
+  const bytes = Buffer.byteLength(JSON.stringify(record), "utf8");
+  if (bytes > MAX_PARAMETER_BYTES) {
     // Measured on the SERIALIZED value rather than the id count: a limit
     // expressed as "N ids" drifts from the real constraint as soon as ids get
     // longer, and bytes are what SSM rejects. `--cap` is the knob to lower.
     throw new Error(
-      `the offered approval list is ${serialized.length} bytes, over the ` +
+      `the offered approval list is ${bytes} bytes, over the ` +
         `${MAX_PARAMETER_BYTES}-byte standard parameter limit for ${ids.length} ids — ` +
         `lower --cap rather than truncating the list the operator approves`,
     );
@@ -1287,6 +1409,133 @@ async function readPendingOffer({ ssm, name, stage, now, log }) {
 }
 
 /**
+ * Persist the reviewed decision list to S3 and return where it landed (#150).
+ *
+ * The returned `hash` is the artifact's, which is NOT yet the value the Approve
+ * button carries — the swap, and the re-derivation on the apply side that has to
+ * move with it, are one change and land with the replay wiring. What this function
+ * establishes now is that the bytes exist and are addressable before any button
+ * points at them.
+ *
+ * This is the FIRST at-rest store of memory content outside the database — a
+ * replayable `MERGE` has to carry its `mergedContent`, which is real memory text.
+ * AGENTS.md: "Data ownership is the whole point". The mitigations are therefore
+ * part of this function rather than follow-up polish:
+ *
+ *  - SSE-KMS at rest, with the bucket's own default (`aws:kms` + `alias/aws/s3`).
+ *    NOT requested per-object here: the bucket's default encryption already
+ *    applies, and naming `ServerSideEncryption` in the request would ALSO have to
+ *    name the key, which is how a caller ends up presenting an encryption context
+ *    the boundary's `GenKey` deny does not match — an AccessDenied on the write,
+ *    after the scan has done its whole audit. The bucket configuration is asserted
+ *    by TC-SLACKAPP-163 instead, which is where a mutation can reach it.
+ *  - A stage-scoped key (`decisions/<stage>/...`), because the bucket name is
+ *    account-scoped and shared across stages (see `decisionArtifactKey` in
+ *    infra/slack-approval.ts for why the bucket cannot carry the stage).
+ *  - Lifecycle expiry at the offer TTL, configured on the bucket.
+ *  - The content reaches NO log line. This function logs the key and the hash and
+ *    the byte count; it never logs the body, and the returned shape carries no
+ *    content either.
+ *
+ * A single `PutObject`, never `@aws-sdk/lib-storage`'s `Upload`. That helper
+ * switches to a multipart upload above a threshold and calls
+ * `AbortMultipartUpload` on failure — an action the workload boundary's ceiling
+ * does NOT admit (it enumerates `s3:GetObject` and `s3:PutObject` and nothing
+ * else). So the convenient wrapper would work in a unit test, work for small
+ * artifacts, and then fail on the first large one with an AccessDenied inside its
+ * own error handler. A cap on the body is the honest bound instead.
+ */
+export async function putDecisionArtifact({
+  s3,
+  bucket,
+  stage,
+  generatedAt,
+  decisions,
+  log = () => {},
+}) {
+  const { PutObjectCommand } = await import("@aws-sdk/client-s3");
+  const body = serializeDecisionArtifact({ stage, generatedAt, decisions });
+  // `Buffer.byteLength`, not `String.length`: the latter counts UTF-16 code units
+  // while S3 receives bytes, and this body carries memory TEXT — a CJK
+  // `mergedContent` measures up to 3x higher on the wire than `.length` reports, so
+  // the cheap check would pass a body that then needs the multipart path the
+  // boundary denies. The one place in this function where the difference is not
+  // academic.
+  const bytes = Buffer.byteLength(body, "utf8");
+  if (bytes > MAX_ARTIFACT_BYTES) {
+    // Refused, not split into parts and not truncated. Truncating is the same
+    // class of mistake `buildOfferedRecord` refuses for the SSM record — the
+    // operator would approve a hash over bytes that are not the list they were
+    // shown — and multipart is denied by the boundary (see above).
+    //
+    // The remedy names the CORPUS, deliberately not `--cap`. The artifact carries
+    // every decision including KEEPs, so it scales with what was scanned, while
+    // `--cap` bounds only an apply's destructive spend and never reaches this path
+    // — measured, a 30k-memory store with zero deletions breaches this. Advice to
+    // lower `--cap` would be inert here, and inert on the scheduled scan twice over,
+    // since no operator is at the keyboard to take it.
+    throw new Error(
+      `the decision artifact is ${bytes} bytes, over the ` +
+        `${MAX_ARTIFACT_BYTES}-byte single-PutObject bound for ${decisions.length} ` +
+        `decision(s) — the artifact holds one row per SCANNED memory, so this is a ` +
+        `corpus too large to review in one offer; narrow the scan rather than ` +
+        `truncating the reviewed list`,
+    );
+  }
+  const hash = decisionArtifactHash(body);
+  // Keyed by the HASH, not by a timestamp or a run id. Three properties follow,
+  // and the third is the one that matters: the key is content-addressed, so a
+  // re-run producing the identical list writes the identical object (idempotent);
+  // two runs producing different lists cannot collide; and the apply task can
+  // derive the key from the claim's hash ALONE, with no extra field to plumb
+  // through the Lambda, the claim, and the container override — every one of which
+  // is a place a run id could be dropped or forged.
+  const key = decisionArtifactKey(stage, hash);
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: body,
+      ContentType: "application/json",
+      // Checked by S3 against the body it received, so a truncated upload is
+      // rejected by the service rather than becoming an artifact whose hash the
+      // apply will refuse — a failure at write time is diagnosable, one at replay
+      // time costs the operator's click.
+      ChecksumSHA256: createHash("sha256").update(body).digest("base64"),
+    }),
+  );
+  // The key, the hash, and the SIZE. Never the body, and never a decision id: this
+  // line goes to CloudWatch Logs, which is a wider audience than the artifact's
+  // own SSE-KMS bucket.
+  log(`decision artifact written to s3://${bucket}/${key} (${bytes} bytes)`);
+  return { hash, key, bytes };
+}
+
+/**
+ * The artifact's S3 key. DUPLICATED from `decisionArtifactKey` in
+ * infra/slack-approval.ts, which is the provisioner while this file is the writer
+ * — the same split, and for the same reason, as `OFFER_TTL_MS`: the container
+ * script and the SST program share no module, and a drift here is an AccessDenied
+ * against the identity policy's per-stage object scope. TC-SLACKAPP-168 asserts
+ * the two agree.
+ *
+ * Exported for that assertion alone. Nothing outside this module builds a key — the
+ * apply reads the one the record names — so a caller reaching for this is a caller
+ * deriving a location it should have been told.
+ */
+export function decisionArtifactKey(stage, hash) {
+  // The `:` in `sha256:...` is legal in an S3 key but needs percent-encoding in a
+  // URL and reads as a port separator in an `s3://` line, so it takes the same
+  // dash treatment `claimParameterName` applies for SSM's sake. One transformation
+  // for both stores is easier to verify than two.
+  //
+  // The trailing slash after the stage is load-bearing, not formatting: the grant
+  // is `decisions/<stage>/*`, and without the separator `decisions/pr-4*` would
+  // match `decisions/pr-42/...` — one preview stage reading another's list.
+  return `decisions/${stage}/${String(hash).replace(/:/gu, "-")}.json`;
+}
+
+/**
  * Offer this run's deletions to the operator: write the record, then post the
  * message whose button the callback Lambda validates against it (#123).
  *
@@ -1324,10 +1573,11 @@ export async function postApprovalRequest({
   channel,
   botToken,
   fetchImpl,
+  s3,
+  artifactBucket,
   now = Date.now,
   log = () => {},
 }) {
-  const record = buildOfferedRecord({ stage, decisions, generatedAt, issuedAt });
   const { PutParameterCommand } = await import("@aws-sdk/client-ssm");
   const name = `${ssmPrefix}/approvals/offered`;
   const pending = await readPendingOffer({ ssm, name, stage, now: now(), log });
@@ -1366,6 +1616,61 @@ export async function postApprovalRequest({
         Value: JSON.stringify(value),
       }),
     );
+
+  // BEFORE the record, and the order is load-bearing in the same way the
+  // record-before-post order is (#150). The record is what a click is validated
+  // against, so a record written first would make the artifact CLICKABLE while the
+  // object may not exist — and the apply must REFUSE a missing artifact, never fall
+  // back to re-classifying, so that window is a spent approval that applies
+  // nothing. Writing the artifact first means the only failure order is the safe
+  // one: an orphaned artifact that no record points at, which the bucket's
+  // lifecycle rule expires on its own.
+  //
+  // Absent `s3`/`artifactBucket` writes the record exactly as #123 and #149 did,
+  // which is what keeps the #102 operator CLI and any stage without the artifact
+  // bucket working. That path can only ever apply DELETEs — `MERGE` stays withheld
+  // by `applyDecisions` unless the replay is in force — so an artifact-less offer is
+  // no weaker than what already shipped.
+  const artifact =
+    s3 && artifactBucket
+      ? await putDecisionArtifact({
+          s3,
+          bucket: artifactBucket,
+          stage,
+          generatedAt,
+          decisions,
+          log,
+        })
+      : undefined;
+
+  // Built AFTER the artifact so the two coordinates are inside the record the
+  // 4096-byte guard measures. They add ~151 bytes, and assigning them onto a
+  // record already validated without them was a real hole: a 108-id list passed at
+  // 3964 bytes and handed SSM 4115, failing on the write that invalidates last
+  // week's button.
+  //
+  // The coordinates are WHERE the artifact is, and deliberately not a third hash
+  // field. The key already embeds the artifact's hash (`decisionArtifactKey` is
+  // content-addressed), so an `artifactHash` field would be a second spelling of
+  // the same value that a hand-edited record could make disagree with the key — and
+  // #150's end state has no room for it: `hash` itself becomes the artifact's, at
+  // which point a separate field would be dead weight. Two coordinates now, two
+  // coordinates then.
+  //
+  // The BUCKET has to be recorded because it is the one part the apply cannot
+  // derive: the alternative is an environment variable the apply task and the review
+  // task must agree on out of band, and a drift there surfaces as an AccessDenied
+  // after the click has been spent. Neither field is memory content — a bucket name
+  // and a `decisions/<stage>/sha256-<hex>.json` key name no memory
+  // (TC-SLACKAPP-169).
+  const record = buildOfferedRecord({
+    stage,
+    decisions,
+    generatedAt,
+    issuedAt,
+    artifactBucket: artifact ? artifactBucket : undefined,
+    artifactKey: artifact?.key,
+  });
 
   await write(record);
   log(`offered ${record.ids.length} id(s) for approval as ${record.hash}`);
@@ -3211,6 +3516,22 @@ async function ssmClient(region, runtime) {
   return { ssm, release: () => ssm.destroy() };
 }
 
+/**
+ * The client the decision artifact is written through (#150).
+ *
+ * Region-pinned to the APPLICATION region, like every other client here. The
+ * artifact bucket is created by infra/slack-approval.ts in that region, and S3's
+ * cross-region behavior is the reason to be explicit: a mismatched region does not
+ * fail cleanly but answers `PermanentRedirect`, which reads as a bucket-name
+ * problem.
+ */
+async function s3Client(region, runtime) {
+  if (runtime.s3) return { s3: runtime.s3, release: () => {} };
+  const { S3Client } = await import("@aws-sdk/client-s3");
+  const s3 = new S3Client({ region });
+  return { s3, release: () => s3.destroy() };
+}
+
 async function readSecret(secretId, region, runtime) {
   const { GetSecretValueCommand } = await import(
     "@aws-sdk/client-secrets-manager"
@@ -3360,12 +3681,22 @@ async function buildPostApproval(opts, region, runtime) {
     throw err;
   }
 
-  // The client outlives this call — it is the one every offer writes through —
-  // and is deliberately NOT threaded into `close()`, unlike the database mutex.
+  // Built only when the bucket is configured, and NOT fetched from SSM the way the
+  // bot token is. A bucket name is not a secret, and reading it from the parameter
+  // tree would put the artifact's location behind the same `approvals/*`-scoped
+  // grant the apply task is confined to — a second failure mode for no benefit.
+  const artifactBucket = process.env[MEM9_DECISION_BUCKET_ENV];
+  const { s3 } = artifactBucket
+    ? await s3Client(region, runtime)
+    : { s3: undefined };
+
+  // The clients outlive this call — they are the ones every offer writes through —
+  // and are deliberately NOT threaded into `close()`, unlike the database mutex.
   // The asymmetry is the resource: an open Postgres connection holds a server-side
-  // session and an advisory lock the next run needs released, while an SSM client
-  // holds local sockets that the entrypoint's `process.exit` reclaims. `release`
-  // is called only on the failure path above, where nothing gets to use it.
+  // session and an advisory lock the next run needs released, while an SSM or S3
+  // client holds local sockets that the entrypoint's `process.exit` reclaims.
+  // `release` is called only on the failure path above, where nothing gets to use
+  // it.
   return async ({ decisions, generatedAt, issuedAt }) =>
     postApprovalRequest({
       ssm,
@@ -3376,6 +3707,8 @@ async function buildPostApproval(opts, region, runtime) {
       generatedAt,
       channel,
       botToken,
+      s3,
+      artifactBucket,
       fetchImpl: runtime.fetchImpl ?? fetch,
       log: (message) =>
         console.error(`[memory-cleanup ${new Date().toISOString()}] ${message}`),

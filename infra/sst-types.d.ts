@@ -590,6 +590,21 @@ declare namespace sst {
       effect?: Input<"allow" | "deny">;
       actions: Input<string>[];
       resources: Input<Input<string>[]>;
+      // Threaded into `iam.getPolicyDocumentOutput` by SST's
+      // `createTaskRole` (.sst/platform/src/components/aws/fargate.ts), where
+      // `FargateArgs.permissions` is literally `FunctionArgs["permissions"]` — so
+      // this mirrors a field the upstream type has always had rather than adding
+      // one. #150's artifact grant needs it: `kms:Decrypt`/`kms:GenerateDataKey`
+      // against `alias/aws/s3` must be `Resource: "*"` (the alias resolves to a
+      // per-account key id this stack cannot name without a lookup), which makes
+      // the conditions the ONLY thing scoping it.
+      conditions?: Input<
+        Input<{
+          test: Input<string>;
+          variable: Input<string>;
+          values: Input<Input<string>[]>;
+        }>[]
+      >;
     }
     interface ServiceArgs {
       cluster: Cluster;
