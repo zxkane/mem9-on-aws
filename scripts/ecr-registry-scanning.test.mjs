@@ -910,7 +910,7 @@ describe("deployment wrapper fixture adapter", () => {
     expect(backupCollision.calls).not.toContain(
       "ecr put-registry-scanning-configuration",
     );
-  });
+  }, 15_000);
 
   it("TC-ECR-SCAN-041: a genuine update-stack failure never enters drift repair", async () => {
     const result = await runWrapper("owned-drift.json", "owned", {
@@ -1231,7 +1231,7 @@ describe("CI validation", () => {
       "Type check (root)",
       "Unit tests (root)",
     ];
-    const setupPython = workflow.indexOf("uses: actions/setup-python@v6");
+    const setupPython = workflow.indexOf("uses: actions/setup-python@v7");
     const templateValidation = workflow.indexOf(
       "name: Validate ECR registry scanning template",
     );

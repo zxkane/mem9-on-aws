@@ -139,15 +139,15 @@ jobs:
       region: ${{ steps.resolve.outputs.region }}
       region_changed: ${{ steps.resolve.outputs.region_changed }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.head.sha || github.sha }}
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         if: github.event_name == 'pull_request'
         with:
           path: .application-region-base
           ref: ${{ github.event.pull_request.base.sha }}
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
       - name: Resolve SST AWS provider region
@@ -190,19 +190,19 @@ jobs:
     if: github.event_name == 'push' || github.event.action != 'closed'
     timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
         with:
           package_json_file: infra/package.json
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
           cache-dependency-path: infra/pnpm-lock.yaml
 
-      - uses: actions/setup-go@v6
+      - uses: actions/setup-go@v7
         with:
           go-version: "1.24.x"
           cache: false
@@ -216,7 +216,7 @@ jobs:
       - name: Install Pulumi runtime for lifecycle tests
         uses: pulumi/actions@v7
         with:
-          pulumi-version: 3.215.0
+          pulumi-version: 3.256.0
 
       - name: Type check (infra)
         run: pnpm -C infra typecheck
@@ -239,7 +239,7 @@ jobs:
       - name: Cleanup and recovery coverage (root)
         run: npm run test:cleanup:coverage
 
-      - uses: actions/setup-python@v6
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.x"
 
@@ -320,15 +320,15 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         if: steps.gate.outputs.skip != 'true'
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
         if: steps.gate.outputs.skip != 'true'
         with:
           package_json_file: infra/package.json
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         if: steps.gate.outputs.skip != 'true'
         with:
           node-version: 24
@@ -540,7 +540,7 @@ jobs:
 
       - name: Comment deploy status
         if: always() && steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
           # Overall job status includes reconciliation and any later verification,
@@ -686,17 +686,17 @@ jobs:
             echo "deployed=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         if: steps.check-state.outputs.deployed == 'true'
         with:
           ref: ${{ github.event.pull_request.base.sha }}
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
         if: steps.check-state.outputs.deployed == 'true'
         with:
           package_json_file: infra/package.json
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         if: steps.check-state.outputs.deployed == 'true'
         with:
           node-version: 24
@@ -769,7 +769,7 @@ jobs:
 
       - name: Comment cleanup status
         if: success() && steps.check-state.outputs.deployed == 'true'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         with:
           script: |
             const pr = context.payload.pull_request.number;
@@ -841,10 +841,10 @@ jobs:
             echo "skip=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
         if: steps.gate.outputs.skip != 'true'
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         if: steps.gate.outputs.skip != 'true'
         with:
           node-version: 24
@@ -902,17 +902,17 @@ jobs:
         # Enables linux/arm64 emulation on x86 runners (ubuntu-latest). A no-op
         # cost on the native-arm64 self-hosted pool.
         if: steps.gate.outputs.skip != 'true'
-        uses: docker/setup-qemu-action@v3
+        uses: docker/setup-qemu-action@v4
         with:
           platforms: arm64
 
       - name: Set up Docker Buildx
         if: steps.gate.outputs.skip != 'true'
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@v4
 
       - name: Build & push mnemo-server (arm64)
         if: steps.gate.outputs.skip != 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/mnemo-server/Dockerfile
@@ -930,7 +930,7 @@ jobs:
 
       - name: Build & push qwen3-embed (arm64)
         if: steps.gate.outputs.skip != 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/qwen3-embed/Dockerfile
@@ -943,7 +943,7 @@ jobs:
 
       - name: Build & push bootstrap (arm64)
         if: steps.gate.outputs.skip != 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/bootstrap/Dockerfile
@@ -955,7 +955,7 @@ jobs:
 
       - name: Build & push llm-proxy (arm64)
         if: steps.gate.outputs.skip != 'true'
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: .
           file: docker/llm-proxy/Dockerfile
@@ -1011,13 +1011,13 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
-      - uses: pnpm/action-setup@v5
+      - uses: pnpm/action-setup@v6
         with:
           package_json_file: infra/package.json
 
-      - uses: actions/setup-node@v5
+      - uses: actions/setup-node@v7
         with:
           node-version: 24
           cache: pnpm
@@ -1248,7 +1248,7 @@ jobs:
         # failure() fires for any failed step (gate, preflight, lock recovery,
         # deploy, reconciliation) — every one is a prod deploy that didn't land.
         if: failure()
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           COMMIT_MSG: ${{ github.event.head_commit.message }}
           DEPLOY_EVENT: ${{ github.event_name }}

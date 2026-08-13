@@ -4,7 +4,7 @@
   "engines": {
     "node": ">=24"
   },
-  "packageManager": "pnpm@10.21.0",
+  "packageManager": "pnpm@11.21.0",
   "scripts": {
     "deploy": "cd .. && sst deploy",
     "remove": "cd .. && sst remove",
@@ -15,17 +15,17 @@
     "test:consolidation:coverage": "vitest run consolidation.test.ts --coverage.enabled=true --coverage.include=consolidation.ts --coverage.reporter=text --coverage.thresholds.lines=80 --coverage.thresholds.functions=80 --coverage.thresholds.statements=80 --coverage.thresholds.branches=80"
   },
   "dependencies": {
-    "@aws-sdk/client-bedrock-agentcore-control": "^3.900.0",
-    "@aws-sdk/client-ecs": "^3.1103.0",
-    "@aws-sdk/client-ssm": "^3.700.0"
+    "@aws-sdk/client-bedrock-agentcore-control": "^3.1109.0",
+    "@aws-sdk/client-ecs": "^3.1109.0",
+    "@aws-sdk/client-ssm": "^3.1109.0"
   },
   "devDependencies": {
-    "@pulumi/pulumi": "3.215.0",
-    "@types/node": "^24.0.0",
+    "@pulumi/pulumi": "3.256.0",
+    "@types/node": "^24.13.3",
     "@vitest/coverage-v8": "4.1.10",
-    "sst": "^4.17.0",
-    "typescript": "^5.7.2",
-    "vite": "8.2.0",
+    "sst": "^4.17.1",
+    "typescript": "^6.0.3",
+    "vite": "8.2.1",
     "vitest": "^4.1.10",
     "yaml": "^2.9.0"
   }

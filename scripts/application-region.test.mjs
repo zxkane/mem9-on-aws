@@ -324,7 +324,7 @@ describe("application region consumers", () => {
       "needs.application-region.outputs.cleanup_region",
     );
     const checkout = cleanup.steps.find(
-      ({ uses }) => uses === "actions/checkout@v5",
+      ({ uses }) => uses === "actions/checkout@v7",
     );
     expect(checkout.with.ref).toContain("github.event.pull_request.base.sha");
   });
