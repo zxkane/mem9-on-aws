@@ -697,8 +697,8 @@ agreed with policy.
   and not `*`), `ecs:RunTask` is scoped to the apply task definition, and
   `iam:PassRole` is gated by `iam:PassedToService: ecs-tasks.amazonaws.com`.
 - **TC-SLACKAPP-082** — the resulting role satisfies the workload permissions
-  boundary: every action is inside the ceiling and inside
-  `DenyPutParameterOutsideApprovalRecords`. Run through the same
+  boundary: every action is inside the ceiling and inside `ParamWrite`'s
+  exception. Run through the same
   `scripts/lib/workload-permissions-boundary.mjs` helpers the boundary tests use,
   so a scoping mistake fails in CI rather than at runtime as an opaque
   `AccessDenied`.
@@ -829,8 +829,8 @@ contend with the weekly consolidation and cannot delete.
   boundary, asserted against `workload-permissions-boundary.yaml` rather than
   reasoned about: every task action is admitted by the ceiling, and the write is
   scoped to `{prefix}/approvals/*`, which is exactly what
-  `DenyPutParameterOutsideApprovalRecords`'s `NotResource` permits. Widened to the
-  stage prefix it would be denied by that statement at runtime — a policy that
+  `ParamWrite`'s `NotResource` permits. Widened to the stage prefix it would be
+  denied by that statement at runtime — a policy that
   synthesizes, deploys, and then fails on the first scheduled scan. **No boundary
   change is needed for #149**; this case is what says so measurably.
 - **TC-SLACKAPP-154** — the scan scheduler role is named in **both** deploy-role

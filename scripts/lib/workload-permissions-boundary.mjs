@@ -88,11 +88,11 @@ function matchesProjectLambdaRoleName(roleName, type) {
 }
 
 // Every ECS execution role that fetches a Secrets Manager secret for `valueFrom`
-// injection has to be listed here, because
-// DenySecretContextDecryptFromNonEcsExecutionRoles is an ArnNotLike deny: an
-// omitted role is denied, not merely ungranted. Measured against the live policy
-// rather than reasoned about — the default `aws/secretsmanager` key needs no
-// identity ALLOW, which makes it tempting to conclude the deny never fires, but a
+// injection has to be listed here, because `SecretCtxRole` (secret encryption
+// context, restricted to ECS execution roles) is an ArnNotLike deny: an omitted
+// role is denied, not merely ungranted. Measured against the live policy rather
+// than reasoned about — the default `aws/secretsmanager` key needs no identity
+// ALLOW, which makes it tempting to conclude the deny never fires, but a
 // simulation of each role shows listed ones allowed and unlisted ones
 // explicitDeny. A missing token costs a task death in the ECS agent's
 // secret-fetch phase, before the entrypoint runs.
@@ -125,13 +125,12 @@ const PROJECT_RESOURCE_RUNTIME_ACTIONS = [
   "sqs:SendMessage",
   "ssm:GetParameters",
   // The Slack approval record (#123 — the writer does not exist yet; this
-  // prerequisite lands first because the rollout can only apply main's
-  // template). Listed here rather than in GLOBAL_RUNTIME_ACTIONS because this
-  // list feeds BOTH the action ceiling and DenyProjectRuntimeOutsideResources,
-  // and the project SSM prefix is the only place this write belongs.
-  // GLOBAL_RUNTIME_ACTIONS entries are admitted account-wide, which is why
-  // ecs:RunTask and iam:PassRole live there and are constrained by identity
-  // policy and out-of-band review instead.
+  // prerequisite lands first because the rollout can only apply main's template).
+  // Listed here rather than in GLOBAL_RUNTIME_ACTIONS because this list feeds BOTH
+  // the action ceiling and the `Resources` deny, and the project SSM prefix is the
+  // only place this write belongs. GLOBAL_RUNTIME_ACTIONS entries are admitted
+  // account-wide, which is why ecs:RunTask and iam:PassRole live there and are
+  // constrained by identity policy and out-of-band review instead.
   "ssm:PutParameter",
 ];
 const MANTLE_BEARER_ACTION = "bedrock-mantle:CallWithBearerToken";
@@ -361,8 +360,8 @@ function boundaryContract({
       `arn:${partition}:ssm:${applicationRegion}:${accountId}:` +
       "parameter/mem9-on-aws/*",
     // The approval-record write (#123) is scoped tighter than the project
-    // prefix. See DenyPutParameterOutsideApprovalRecords for why the broader
-    // project scope is not sufficient for a WRITE.
+    // prefix. See the `ParamWrite` statement for why the broader project scope
+    // is not sufficient for a WRITE.
     ssmApprovalParameterArn:
       `arn:${partition}:ssm:${applicationRegion}:${accountId}:` +
       "parameter/mem9-on-aws/*/approvals/*",
@@ -400,19 +399,19 @@ export function expectedBoundaryPolicyDocument(contract) {
     Version: "2012-10-17",
     Statement: [
       {
-        Sid: "AllowRuntimeIdentityPermissions",
+        Sid: "Identity",
         Effect: "Allow",
         Action: "*",
         Resource: "*",
       },
       {
-        Sid: `DenyOutsideRuntimeActionCeiling${policyRevision}`,
+        Sid: `Ceiling${policyRevision}`,
         Effect: "Deny",
         NotAction: [...RUNTIME_ACTION_CEILING],
         Resource: "*",
       },
       {
-        Sid: "DenyProjectRuntimeOutsideResources",
+        Sid: "Resources",
         Effect: "Deny",
         Action: [...PROJECT_RESOURCE_RUNTIME_ACTIONS],
         NotResource: projectResources,
@@ -428,13 +427,13 @@ export function expectedBoundaryPolicyDocument(contract) {
       // write needs kms:Encrypt or kms:GenerateDataKey; the ceiling admits
       // neither), so the plain-String ones are exactly the exposure this closes.
       {
-        Sid: "DenyPutParameterOutsideApprovalRecords",
+        Sid: "ParamWrite",
         Effect: "Deny",
         Action: ["ssm:PutParameter"],
         NotResource: [ssmApprovalParameterArn],
       },
       {
-        Sid: "DenyKmsDecryptOutsideReviewedContexts",
+        Sid: "KmsContext",
         Effect: "Deny",
         Action: [...CONDITIONED_RUNTIME_ACTIONS],
         Resource: "*",
@@ -448,7 +447,7 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "DenyKmsDecryptOutsideReviewedViaServices",
+        Sid: "KmsVia",
         Effect: "Deny",
         Action: [...CONDITIONED_RUNTIME_ACTIONS],
         Resource: "*",
@@ -463,7 +462,7 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "DenyParameterContextDecryptOutsideSsm",
+        Sid: "ParamCtxVia",
         Effect: "Deny",
         Action: [...CONDITIONED_RUNTIME_ACTIONS],
         Resource: "*",
@@ -477,7 +476,7 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "DenySecretContextDecryptOutsideSecretsManager",
+        Sid: "SecretCtxVia",
         Effect: "Deny",
         Action: [...CONDITIONED_RUNTIME_ACTIONS],
         Resource: "*",
@@ -491,7 +490,7 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "DenySecretContextDecryptFromNonEcsExecutionRoles",
+        Sid: "SecretCtxRole",
         Effect: "Deny",
         Action: [...CONDITIONED_RUNTIME_ACTIONS],
         Resource: "*",
@@ -505,7 +504,7 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "DenyLambdaContextDecryptFromNonLambdaRoles",
+        Sid: "LambdaCtxRole",
         Effect: "Deny",
         Action: [...CONDITIONED_RUNTIME_ACTIONS],
         Resource: "*",
@@ -519,7 +518,7 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "DenyDirectKmsDecryptFromFunctionCode",
+        Sid: "FnCodeKms",
         Effect: "Deny",
         Action: [...CONDITIONED_RUNTIME_ACTIONS],
         Resource: "*",
@@ -533,7 +532,7 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "DenyNonShortTermMantleBearer",
+        Sid: "LongBearer",
         Effect: "Deny",
         Action: [MANTLE_BEARER_ACTION],
         Resource: "*",
@@ -544,7 +543,7 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "DenyEniFromNonVpcLambdaRoles",
+        Sid: "EniRole",
         Effect: "Deny",
         Action: [...NETWORK_INTERFACE_DENY_ACTIONS],
         Resource: "*",
@@ -557,7 +556,7 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "DenyEniFromFunctionCode",
+        Sid: "EniFnCode",
         Effect: "Deny",
         Action: [...NETWORK_INTERFACE_DENY_ACTIONS],
         Resource: "*",
@@ -617,6 +616,35 @@ export function verifyBoundaryPolicyDocument(document, contract) {
   const actual = list(decoded.Statement);
   const expected = expectedBoundaryPolicyDocument(contract).Statement;
   if (actual.length !== expected.length) return false;
+
+  // The loop below walks EXPECTED Sids and looks each one up in the deployed
+  // document, so its coverage of `actual` rests on the expected Sids being
+  // unique. With equal lengths plus uniqueness, expected -> actual is a bijection
+  // and every deployed statement gets compared; duplicate an expected Sid and
+  // that collapses.
+  //
+  // The reachable failure is narrower than it first looks, and the narrowing is
+  // worth recording because the obvious probes all come back clean. Two things
+  // have to hold at once. The duplicate must be VERBATIM: same-Sid statements
+  // that differ in content each fail the content comparison, so the function
+  // already returned false. And the DEPLOYED document must not carry the same
+  // duplicate, because two same-Sid statements there make `matches.length === 2`,
+  // which the check inside the loop already rejects. So an authored duplicate
+  // that reaches the live policy through this repo's own rollout is caught today
+  // — measured, not assumed.
+  //
+  // What is left is the case where the two diverge: the library holds a verbatim
+  // duplicate while the live policy holds a rogue statement under an unused Sid
+  // instead. Then both copies match the one deployed statement, both pass, the
+  // rogue one is compared against nothing, and the count still balances. Probed:
+  // that shape returns TRUE without the check below and FALSE with it, for a live
+  // document carrying `Allow` on `*`/`*`. Drift between the two is exactly the
+  // condition this function exists to detect, so it must not depend on their
+  // agreeing. #150 cut the Sids to about ten characters to reclaim bytes and
+  // appends statements next, which makes a pasted-but-unrenamed Sid the likely
+  // way the premise breaks.
+  const expectedSids = expected.map((statement) => statement.Sid);
+  if (new Set(expectedSids).size !== expectedSids.length) return false;
 
   for (const expectedStatement of expected) {
     const matches = actual.filter(

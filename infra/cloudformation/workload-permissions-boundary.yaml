@@ -46,11 +46,11 @@ Resources:
           # an explicit boundary allow. The explicit Deny/NotAction below is the
           # action ceiling; this Allow only admits identity-policy permissions
           # that survive every explicit deny.
-          - Sid: AllowRuntimeIdentityPermissions
+          - Sid: Identity
             Effect: Allow
             Action: "*"
             Resource: "*"
-          - Sid: !Sub DenyOutsideRuntimeActionCeiling${PolicyRevision}
+          - Sid: !Sub Ceiling${PolicyRevision}
             Effect: Deny
             NotAction:
               - bedrock-mantle:CreateInference
@@ -74,9 +74,8 @@ Resources:
               # which does not exist yet: Slack's 3-second ACK budget cannot
               # cover a cleanup run, so the facade Lambda will persist the
               # approved decision-list hash and trigger the apply task rather
-              # than delete inline. Scoped by both
-              # DenyProjectRuntimeOutsideResources and the tighter
-              # DenyPutParameterOutsideApprovalRecords below.
+              # than delete inline. Scoped by both the `Resources` deny and the
+              # tighter `ParamWrite` deny below.
               - ssm:PutParameter
               - ec2:AssignPrivateIpAddresses
               - ec2:CreateNetworkInterface
@@ -92,7 +91,7 @@ Resources:
               - kms:Decrypt
               - bedrock-mantle:CallWithBearerToken
             Resource: "*"
-          - Sid: DenyProjectRuntimeOutsideResources
+          - Sid: Resources
             Effect: Deny
             Action:
               - bedrock-mantle:CreateInference
@@ -137,7 +136,7 @@ Resources:
           # cluster-name are consumed unvalidated by scripts/run-*-task.sh).
           # SecureString parameters are already unreachable — that write needs
           # kms:Encrypt or kms:GenerateDataKey and the ceiling admits neither.
-          - Sid: DenyPutParameterOutsideApprovalRecords
+          - Sid: ParamWrite
             Effect: Deny
             Action:
               - ssm:PutParameter
@@ -146,7 +145,7 @@ Resources:
           # Lambda cold starts, SSM SecureStrings, and the two ECS task-definition
           # secret families use different KMS encryption contexts. Missing and
           # foreign contexts remain denied.
-          - Sid: DenyKmsDecryptOutsideReviewedContexts
+          - Sid: KmsContext
             Effect: Deny
             Action:
               - kms:Decrypt
@@ -159,7 +158,7 @@ Resources:
                   - !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-*-Mem9DbProxySecret-*
                   - !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-*-Mem9DbSecret-*
                   - !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-*-tenant-api-key-*
-          - Sid: DenyKmsDecryptOutsideReviewedViaServices
+          - Sid: KmsVia
             Effect: Deny
             Action:
               - kms:Decrypt
@@ -171,7 +170,7 @@ Resources:
                   - !Sub secretsmanager.${ApplicationRegion}.${AWS::URLSuffix}
               StringNotLikeIfExists:
                 "kms:EncryptionContext:aws:lambda:FunctionArn": !Sub arn:${AWS::Partition}:lambda:${ApplicationRegion}:${AWS::AccountId}:function:mem9-on-aws-*
-          - Sid: DenyParameterContextDecryptOutsideSsm
+          - Sid: ParamCtxVia
             Effect: Deny
             Action:
               - kms:Decrypt
@@ -181,7 +180,7 @@ Resources:
                 "kms:EncryptionContext:PARAMETER_ARN": "false"
               StringNotEqualsIfExists:
                 kms:ViaService: !Sub ssm.${ApplicationRegion}.${AWS::URLSuffix}
-          - Sid: DenySecretContextDecryptOutsideSecretsManager
+          - Sid: SecretCtxVia
             Effect: Deny
             Action:
               - kms:Decrypt
@@ -193,7 +192,7 @@ Resources:
                 kms:ViaService: !Sub secretsmanager.${ApplicationRegion}.${AWS::URLSuffix}
           # Secrets Manager's encryption context is fixed, but the boundary also
           # constrains which project role types may use that service-mediated path.
-          - Sid: DenySecretContextDecryptFromNonEcsExecutionRoles
+          - Sid: SecretCtxRole
             Effect: Deny
             Action:
               - kms:Decrypt
@@ -209,7 +208,7 @@ Resources:
                   - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9CleanupExecutionRole-*
           # Only the reviewed Lambda execution-role types may present the Lambda
           # cold-start context. Other workload roles cannot forge it.
-          - Sid: DenyLambdaContextDecryptFromNonLambdaRoles
+          - Sid: LambdaCtxRole
             Effect: Deny
             Action:
               - kms:Decrypt
@@ -226,7 +225,7 @@ Resources:
           # Encryption context is caller supplied. Block function code from
           # presenting a project Lambda context directly while preserving the
           # facade's SSM-mediated decrypt and Lambda's cold-start service path.
-          - Sid: DenyDirectKmsDecryptFromFunctionCode
+          - Sid: FnCodeKms
             Effect: Deny
             Action:
               - kms:Decrypt
@@ -236,7 +235,7 @@ Resources:
                 "lambda:SourceFunctionArn": "false"
               StringNotEqualsIfExists:
                 kms:ViaService: !Sub ssm.${ApplicationRegion}.${AWS::URLSuffix}
-          - Sid: DenyNonShortTermMantleBearer
+          - Sid: LongBearer
             Effect: Deny
             Action:
               - bedrock-mantle:CallWithBearerToken
@@ -246,7 +245,7 @@ Resources:
                 bedrock-mantle:BearerTokenType: SHORT_TERM
           # Only the VPC proxy Lambda role may expose ENI permissions to the
           # Lambda service. A second deny blocks those APIs from function code.
-          - Sid: DenyEniFromNonVpcLambdaRoles
+          - Sid: EniRole
             Effect: Deny
             Action:
               - ec2:*NetworkInterface*
@@ -257,7 +256,7 @@ Resources:
             Condition:
               ArnNotLike:
                 "aws:PrincipalArn": !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ProxyFnRole-*
-          - Sid: DenyEniFromFunctionCode
+          - Sid: EniFnCode
             Effect: Deny
             Action:
               - ec2:*NetworkInterface*

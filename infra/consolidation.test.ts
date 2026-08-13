@@ -685,7 +685,7 @@ describe("consolidation IAM templates", () => {
     );
 
     const secretRoleDeny = statements.find(
-      ({ Sid }) => Sid === "DenySecretContextDecryptFromNonEcsExecutionRoles",
+      ({ Sid }) => Sid === "SecretCtxRole",
     );
     expect(
       secretRoleDeny?.Condition.ArnNotLike["aws:PrincipalArn"],

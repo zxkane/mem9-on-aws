@@ -3449,7 +3449,7 @@ describe("quarantine and permanent policy verification", () => {
     };
     const document = expectedBoundaryPolicyDocument(contract);
     const projectStatement = document.Statement.find(
-      ({ Sid }) => Sid === "DenyProjectRuntimeOutsideResources",
+      ({ Sid }) => Sid === "Resources",
     );
     expect(projectStatement.NotResource).toContain(
       "arn:aws:bedrock-mantle:us-west-2:123456789012:project/proj_openai",
@@ -3487,10 +3487,10 @@ describe("quarantine and permanent policy verification", () => {
   it("accepts semantically equivalent reordered action and resource lists", () => {
     const document = expectedBoundaryPolicyDocument(boundaryContract);
     document.Statement.find(({ Sid }) =>
-      Sid.startsWith("DenyOutsideRuntimeActionCeiling"),
+      Sid.startsWith("Ceiling"),
     ).NotAction.reverse();
     document.Statement.find(
-      ({ Sid }) => Sid === "DenyProjectRuntimeOutsideResources",
+      ({ Sid }) => Sid === "Resources",
     ).NotResource.reverse();
     expect(verifyBoundaryPolicyDocument(document, boundaryContract)).toBe(true);
   });
@@ -3506,7 +3506,7 @@ describe("quarantine and permanent policy verification", () => {
       "action",
       (document) => {
         document.Statement.find(({ Sid }) =>
-          Sid.startsWith("DenyOutsideRuntimeActionCeiling"),
+          Sid.startsWith("Ceiling"),
         ).NotAction.push("s3:GetObject");
       },
     ],
@@ -3514,7 +3514,7 @@ describe("quarantine and permanent policy verification", () => {
       "resource",
       (document) => {
         document.Statement.find(
-          ({ Sid }) => Sid === "DenyProjectRuntimeOutsideResources",
+          ({ Sid }) => Sid === "Resources",
         ).NotResource[0] =
           "arn:aws:bedrock-mantle:ap-northeast-1:123456789012:project/wrong";
       },
@@ -3523,7 +3523,7 @@ describe("quarantine and permanent policy verification", () => {
       "condition",
       (document) => {
         document.Statement.find(
-          ({ Sid }) => Sid === "DenyNonShortTermMantleBearer",
+          ({ Sid }) => Sid === "LongBearer",
         ).Condition.StringNotEqualsIfExists["bedrock-mantle:BearerTokenType"] =
           "LONG_TERM";
       },
@@ -7568,6 +7568,16 @@ describe("operator entry point", () => {
 });
 
 describe("boundary and deploy-role templates", () => {
+  // Parse the template and resolve the boundary's policy document in one step.
+  // Omitting openAiBedrockProjectArn yields the UNCONFIGURED shape, matching the
+  // parameter's "" default; passing an ARN yields the shape the live account runs.
+  const boundaryPolicyDocument = (openAiBedrockProjectArn) =>
+    resolveTemplateValue(
+      parseCloudFormation(boundaryTemplatePath).Resources
+        .WorkloadPermissionsBoundary.Properties.PolicyDocument,
+      openAiBedrockProjectArn,
+    );
+
   it("declares a retained action and project-resource permissions ceiling", () => {
     const template = parseCloudFormation(boundaryTemplatePath);
     const boundary = template.Resources.WorkloadPermissionsBoundary;
@@ -7588,13 +7598,13 @@ describe("boundary and deploy-role templates", () => {
       statements.find((statement) => statement.Sid === sid);
     expect(allows).toEqual([
       {
-        Sid: "AllowRuntimeIdentityPermissions",
+        Sid: "Identity",
         Effect: "Allow",
         Action: "*",
         Resource: "*",
       },
     ]);
-    const actionCeiling = bySid("DenyOutsideRuntimeActionCeilingr1");
+    const actionCeiling = bySid("Ceilingr1");
     expect(actionCeiling).toMatchObject({
       Effect: "Deny",
       Resource: "*",
@@ -7611,11 +7621,7 @@ describe("boundary and deploy-role templates", () => {
         "ecr:PutRegistryScanningConfiguration",
       ]),
     );
-    expect(
-      resolveTemplateValue(
-        bySid("DenyProjectRuntimeOutsideResources").NotResource,
-      ),
-    ).toEqual(
+    expect(resolveTemplateValue(bySid("Resources").NotResource)).toEqual(
       expect.arrayContaining([
         boundaryContract.bedrockProjectArn,
         expect.stringContaining("repository/mem9-on-aws/*"),
@@ -7629,7 +7635,7 @@ describe("boundary and deploy-role templates", () => {
         expect.stringContaining("parameter/mem9-on-aws/*"),
       ]),
     );
-    expect(bySid("DenyProjectRuntimeOutsideResources").Action).toEqual(
+    expect(bySid("Resources").Action).toEqual(
       expect.arrayContaining([
         "secretsmanager:GetSecretValue",
         "sns:Publish",
@@ -7644,15 +7650,15 @@ describe("boundary and deploy-role templates", () => {
         "ssm:PutParameter",
       ]),
     );
-    expect(bySid("DenyProjectRuntimeOutsideResources").Action).not.toEqual(
+    expect(bySid("Resources").Action).not.toEqual(
       expect.arrayContaining([
         "ssm:GetParameter",
         "ssm:GetParameterHistory",
         "ssm:GetParametersByPath",
       ]),
     );
-    // DenyProjectRuntimeOutsideResources scopes the write to the PROJECT prefix,
-    // which is every stage's whole SSM tree. That is too wide for a write: the
+    // `Resources` scopes the write to the PROJECT prefix, which is every stage's
+    // whole SSM tree. That is too wide for a write: the
     // ceiling is the only control on what a workload role may do, because
     // identity policies are PR-authored and the deploy role's
     // DenyUnboundedProjectRolePolicyWrites only requires that the boundary be
@@ -7666,7 +7672,7 @@ describe("boundary and deploy-role templates", () => {
     // SecureString parameters are already out of reach (a SecureString write
     // needs kms:Encrypt or kms:GenerateDataKey, neither of which the ceiling
     // admits), so the plain-String ones are exactly the exposure this closes.
-    const approvalScope = bySid("DenyPutParameterOutsideApprovalRecords");
+    const approvalScope = bySid("ParamWrite");
     expect(approvalScope).toMatchObject({
       Effect: "Deny",
       Action: ["ssm:PutParameter"],
@@ -7675,12 +7681,8 @@ describe("boundary and deploy-role templates", () => {
       "arn:aws:ssm:ap-northeast-1:123456789012:" +
         "parameter/mem9-on-aws/*/approvals/*",
     ]);
-    expect(
-      bySid(
-        "DenyKmsDecryptOutsideReviewedContexts",
-      ),
-    ).toEqual({
-      Sid: "DenyKmsDecryptOutsideReviewedContexts",
+    expect(bySid("KmsContext")).toEqual({
+      Sid: "KmsContext",
       Effect: "Deny",
       Action: ["kms:Decrypt"],
       Resource: "*",
@@ -7704,10 +7706,8 @@ describe("boundary and deploy-role templates", () => {
       },
     });
     expect(bySid("DenyKmsDecryptOutsideSsm")).toBeUndefined();
-    expect(
-      bySid("DenyKmsDecryptOutsideReviewedViaServices"),
-    ).toEqual({
-      Sid: "DenyKmsDecryptOutsideReviewedViaServices",
+    expect(bySid("KmsVia")).toEqual({
+      Sid: "KmsVia",
       Effect: "Deny",
       Action: ["kms:Decrypt"],
       Resource: "*",
@@ -7725,10 +7725,8 @@ describe("boundary and deploy-role templates", () => {
         },
       },
     });
-    expect(
-      bySid("DenySecretContextDecryptFromNonEcsExecutionRoles"),
-    ).toEqual({
-      Sid: "DenySecretContextDecryptFromNonEcsExecutionRoles",
+    expect(bySid("SecretCtxRole")).toEqual({
+      Sid: "SecretCtxRole",
       Effect: "Deny",
       Action: ["kms:Decrypt"],
       Resource: "*",
@@ -7750,8 +7748,8 @@ describe("boundary and deploy-role templates", () => {
         },
       },
     });
-    expect(bySid("DenyParameterContextDecryptOutsideSsm")).toEqual({
-      Sid: "DenyParameterContextDecryptOutsideSsm",
+    expect(bySid("ParamCtxVia")).toEqual({
+      Sid: "ParamCtxVia",
       Effect: "Deny",
       Action: ["kms:Decrypt"],
       Resource: "*",
@@ -7764,10 +7762,8 @@ describe("boundary and deploy-role templates", () => {
         },
       },
     });
-    expect(
-      bySid("DenySecretContextDecryptOutsideSecretsManager"),
-    ).toEqual({
-      Sid: "DenySecretContextDecryptOutsideSecretsManager",
+    expect(bySid("SecretCtxVia")).toEqual({
+      Sid: "SecretCtxVia",
       Effect: "Deny",
       Action: ["kms:Decrypt"],
       Resource: "*",
@@ -7781,8 +7777,8 @@ describe("boundary and deploy-role templates", () => {
         },
       },
     });
-    expect(bySid("DenyDirectKmsDecryptFromFunctionCode")).toEqual({
-      Sid: "DenyDirectKmsDecryptFromFunctionCode",
+    expect(bySid("FnCodeKms")).toEqual({
+      Sid: "FnCodeKms",
       Effect: "Deny",
       Action: ["kms:Decrypt"],
       Resource: "*",
@@ -7795,8 +7791,8 @@ describe("boundary and deploy-role templates", () => {
         },
       },
     });
-    expect(bySid("DenyLambdaContextDecryptFromNonLambdaRoles")).toEqual({
-      Sid: "DenyLambdaContextDecryptFromNonLambdaRoles",
+    expect(bySid("LambdaCtxRole")).toEqual({
+      Sid: "LambdaCtxRole",
       Effect: "Deny",
       Action: ["kms:Decrypt"],
       Resource: "*",
@@ -7819,11 +7815,11 @@ describe("boundary and deploy-role templates", () => {
       },
     });
     expect(
-      bySid("DenyNonShortTermMantleBearer").Condition.StringNotEqualsIfExists[
+      bySid("LongBearer").Condition.StringNotEqualsIfExists[
         "bedrock-mantle:BearerTokenType"
       ],
     ).toBe("SHORT_TERM");
-    expect(bySid("DenyEniFromNonVpcLambdaRoles")).toMatchObject({
+    expect(bySid("EniRole")).toMatchObject({
       Effect: "Deny",
       Resource: "*",
       Condition: {
@@ -7833,7 +7829,7 @@ describe("boundary and deploy-role templates", () => {
         },
       },
     });
-    expect(bySid("DenyEniFromFunctionCode")).toMatchObject({
+    expect(bySid("EniFnCode")).toMatchObject({
       Effect: "Deny",
       Resource: "*",
       Condition: {
@@ -7882,11 +7878,11 @@ describe("boundary and deploy-role templates", () => {
 
   // Admitted account-wide by deliberate review, each for a reason NotResource
   // cannot express. ecs:RunTask and iam:PassRole are constrained by the deploy
-  // role's PassRole scoping plus DenyEcsExecutionRolePassToOtherServices. The
-  // ec2 entries are service-mediated with no useful per-resource ARN AND are
-  // principal-gated (DenyEniFromNonVpcLambdaRoles + DenyEniFromFunctionCode).
-  // The bedrock-mantle and kms entries carry their own Condition-based denies
-  // (DenyNonShortTermMantleBearer and the seven kms:Decrypt context statements).
+  // role's PassRole scoping plus DenyEcsExecutionRolePassToOtherServices. The ec2
+  // entries are service-mediated with no useful per-resource ARN AND are
+  // principal-gated (EniRole + EniFnCode). The bedrock-mantle and kms entries carry
+  // their own Condition-based denies (LongBearer and the seven kms:Decrypt context
+  // statements).
   // The ssmmessages entries have NO further boundary deny — do not read the ec2
   // justification as covering them. They are the ECS Exec channel APIs, which are
   // service-mediated with no per-resource ARN, and what actually bounds them is
@@ -7922,7 +7918,7 @@ describe("boundary and deploy-role templates", () => {
   it("resource-scopes every non-read-only action admitted to the ceiling", () => {
     const document = expectedBoundaryPolicyDocument(boundaryContract);
     const ceiling = document.Statement.find(({ Sid }) =>
-      Sid?.startsWith("DenyOutsideRuntimeActionCeiling"),
+      Sid?.startsWith("Ceiling"),
     );
     const scopedByNotResource = actionsScopedByNotResource(document);
     const reviewedGlobalWrites = new Set(REVIEWED_GLOBAL_WRITES);
@@ -7939,11 +7935,11 @@ describe("boundary and deploy-role templates", () => {
   });
 
   // The check above is an OR, so a redundant allowlist entry pre-authorizes a
-  // future unscoping: drop a resource-scoped action out of
-  // DenyProjectRuntimeOutsideResources and the allowlist silently catches it,
-  // turning a project-scoped write into an account-wide one with the suite still
-  // green. Requiring the two sets to be disjoint makes the allowlist mean
-  // "deliberately NOT resource-scoped" instead of merely "tolerated".
+  // future unscoping: drop a resource-scoped action out of the `Resources`
+  // statement and the allowlist silently catches it, turning a project-scoped
+  // write into an account-wide one with the suite still green. Requiring the two
+  // sets to be disjoint makes the allowlist mean "deliberately NOT
+  // resource-scoped" instead of merely "tolerated".
   it("keeps the reviewed account-wide admissions disjoint from the scoped ones", () => {
     const scopedByNotResource = actionsScopedByNotResource(
       expectedBoundaryPolicyDocument(boundaryContract),
@@ -7954,13 +7950,66 @@ describe("boundary and deploy-role templates", () => {
   });
 
   it("keeps the boundary within the IAM managed-policy size quota", () => {
-    const template = parseCloudFormation(boundaryTemplatePath);
-    const size = JSON.stringify(
-      resolveTemplateValue(
-        template.Resources.WorkloadPermissionsBoundary.Properties.PolicyDocument,
-      ),
-    ).length;
+    const size = JSON.stringify(boundaryPolicyDocument()).length;
     expect(size).toBeLessThanOrEqual(6_144);
+  });
+
+  // AWS requires this outright: "In IAM, the `Sid` value must be unique within a
+  // JSON policy" (IAM User Guide, reference_policies_elements_sid). A collision is
+  // therefore a malformed policy, not a style problem, and CloudFormation would
+  // reject the rollout — this test moves that failure from the operator's deploy to
+  // CI. The same page bounds the charset to `[A-Za-z0-9]`, which the renamed Sids
+  // satisfy.
+  //
+  // Uniqueness is also load-bearing for verifyBoundaryPolicyDocument(), which walks
+  // the EXPECTED Sids and looks each up in the deployed document: with equal
+  // statement counts, distinct names are what make expected -> deployed a bijection
+  // and so compare every deployed statement. That failure needs a VERBATIM
+  // duplicate here AND a live policy that does not carry the same duplicate, since
+  // two same-Sid statements there make `matches.length === 2` and already fail.
+  // Probed rather than argued: a duplicate consistent across both artifacts already
+  // returns FALSE today, while a verbatim duplicate in the library against a live
+  // document holding `Allow` on `*`/`*` under an unused Sid returns TRUE without
+  // the verifier's new check and FALSE with it. That drift shape is the gap.
+  //
+  // The verifier's own check cannot be reached through the public API — it
+  // generates the expected document rather than accepting one — so this asserts the
+  // invariant on the two AUTHORED artifacts, which is where a collision would be
+  // introduced. Both are checked because CI's boundary preflight compares live
+  // Sids, so a mistake in either one alone still reaches an operator.
+  //
+  // #150 cut the Sids to about ten characters each to reclaim bytes and appends
+  // statements next, which is when a copy-pasted statement whose Sid was never
+  // renamed stops being far-fetched.
+  it("gives every boundary statement a unique Sid", () => {
+    // Both shapes, even though no Sid currently sits behind the !If — the second
+    // project ARN only joins an existing NotResource list. It costs one extra
+    // resolve to keep that true as #150 appends statements.
+    for (const openAiProjectArn of [undefined, OPENAI_PROJECT_ARN]) {
+      const documents = [
+        boundaryPolicyDocument(openAiProjectArn),
+        // `openAiBedrockProjectArn` defaults to "" in the library, so passing
+        // undefined here is the unconfigured shape.
+        expectedBoundaryPolicyDocument({
+          ...boundaryContract,
+          openAiBedrockProjectArn: openAiProjectArn,
+        }),
+      ];
+      for (const document of documents) {
+        const sids = document.Statement.map(({ Sid }) => Sid);
+        // An absent Sid would make every such statement collide on `undefined`,
+        // so the uniqueness check below only means anything once they all exist.
+        expect(
+          sids.filter((sid) => typeof sid !== "string" || sid.length === 0),
+          "every statement needs a Sid for the uniqueness check to bind",
+        ).toEqual([]);
+        expect(
+          sids.filter((sid, index) => sids.indexOf(sid) !== index),
+          "duplicate Sid breaks verifyBoundaryPolicyDocument()'s coverage of " +
+            "every deployed statement",
+        ).toEqual([]);
+      }
+    }
   });
 
   // Everything above resolves the template with OpenAiBedrockProjectArn at its ""
@@ -7978,9 +8027,11 @@ describe("boundary and deploy-role templates", () => {
   // set here (a 128-character id breaches even the real quota). It buys margin
   // against the fixture shape only.
   //
-  // 64 is close to the largest reserve this document can currently hold: the
-  // configured shape is 6054 bytes, so 90 is the ceiling and anything above that
-  // fails on commit. That is the finding, not a comfort.
+  // The configured shape is 5690 bytes, so 454 is the current ceiling on this
+  // reserve. It was 90 before #150 spent the Sid-shortening reserve described
+  // below; 64 is kept rather than raised to the new maximum because the next
+  // change should fail this gate with room left to react, which a reserve pinned
+  // just under the live size cannot do.
   //
   // This gate has now fired once, and the escape hatch the earlier note proposed
   // — "split the boundary across a second managed policy" — does not exist. A
@@ -7996,30 +8047,32 @@ describe("boundary and deploy-role templates", () => {
   // What is left is byte reduction that preserves semantics. Sid is an optional
   // identifier and carries no authorization meaning, so shortening the longest
   // ones is free; that is what bought the room for the fourth ECS execution-role
-  // ARN here (6095 -> 6054). Two further semantics-preserving reserves exist
-  // before scope has to give: dropping Sids entirely frees 626 bytes, and
-  // collapsing the singleton arrays to scalars another 20. Dropping the Sids
-  // costs this suite every bySid() lookup, so it is a refactor rather than a
-  // deletion; both are deliberately unspent. They mean a failure here is a
-  // prompt to choose, not yet a forced loss of enforcement. Only once they are
-  // spent does the choice narrow to a coarser scope.
+  // ARN (6095 -> 6054), and #150 then spent the reserve in full (6054 -> 5690,
+  // Sid characters 500 -> 136) to make room for the decision-artifact grants.
+  // That reserve is now GONE: the Sids are already near-minimal, so a future
+  // overrun cannot be answered the same way twice.
+  //
+  // What remains unspent, in preference order: collapsing the singleton arrays
+  // to scalars (~20 bytes — safe for Action/NotAction/Resource/NotResource,
+  // which sameStringSet() normalizes through list(), but NOT inside Condition,
+  // where canonicalJson() compares a scalar and a one-element array as
+  // different), and dropping Sids entirely (measured at 262 bytes even after the
+  // rename, down from 626 — most of that is the `"Sid":"…",` skeleton rather
+  // than the names, which is why shortening them did not consume it. It costs
+  // this suite every bySid() lookup, so it is a refactor rather than a
+  // deletion). Between them roughly 280 bytes remain, about two statements'
+  // worth, and no third formatting reserve exists after that.
   const OPENAI_PROJECT_ARN =
     "arn:aws:bedrock-mantle:us-west-2:123456789012:project/proj_openai";
   const BOUNDARY_SIZE_RESERVE = 64;
 
   it("matches the contract library in the OpenAI-configured shape", () => {
-    const template = parseCloudFormation(boundaryTemplatePath);
-    const document = resolveTemplateValue(
-      template.Resources.WorkloadPermissionsBoundary.Properties.PolicyDocument,
-      OPENAI_PROJECT_ARN,
-    );
+    const document = boundaryPolicyDocument(OPENAI_PROJECT_ARN);
     // The configured shape must differ from the unconfigured one in exactly one
     // way: the second project ARN appears. Asserting its presence is what fails
     // if the true branch ever refs the wrong parameter.
     expect(
-      document.Statement.find(
-        ({ Sid }) => Sid === "DenyProjectRuntimeOutsideResources",
-      ).NotResource,
+      document.Statement.find(({ Sid }) => Sid === "Resources").NotResource,
     ).toContain(OPENAI_PROJECT_ARN);
     expect(
       verifyBoundaryPolicyDocument(document, {
@@ -8030,12 +8083,8 @@ describe("boundary and deploy-role templates", () => {
   });
 
   it("keeps the OpenAI-configured boundary inside the IAM size quota", () => {
-    const template = parseCloudFormation(boundaryTemplatePath);
     const size = JSON.stringify(
-      resolveTemplateValue(
-        template.Resources.WorkloadPermissionsBoundary.Properties.PolicyDocument,
-        OPENAI_PROJECT_ARN,
-      ),
+      boundaryPolicyDocument(OPENAI_PROJECT_ARN),
     ).length;
     expect(size).toBeLessThanOrEqual(6_144 - BOUNDARY_SIZE_RESERVE);
   });

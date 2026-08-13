@@ -22,9 +22,9 @@
  *
  * BOUNDARY NOTE — the SSM half is admissible under the DEPLOYED boundary; the
  * Secrets Manager half REQUIRES A BOUNDARY ROLLOUT FIRST:
- *   - The SecureString reads are gated by `DenyParameterContextDecryptOutsideSsm`
- *     on `kms:ViaService`, NOT on the `ECS_EXECUTION_ROLE_TOKENS` list, so an
- *     unlisted execution role may still decrypt a `/mem9-on-aws/*` parameter.
+ *   - The SecureString reads are gated by `ParamCtxVia` on `kms:ViaService`, NOT
+ *     on the `ECS_EXECUTION_ROLE_TOKENS` list, so an unlisted execution role may
+ *     still decrypt a `/mem9-on-aws/*` parameter.
  *   - SETTLED, and the answer is that the deny DOES bite. The Secrets Manager
  *     reads (`MEM9_DB_SECRET`, `MEM9_TENANT_ID`) resolve under the DEFAULT
  *     `aws/secretsmanager` key (neither secret sets `kmsKeyId` — see infra/db.ts
@@ -39,8 +39,8 @@
  *       Mem9ConsolidationExecutionRole- → allowed        (on the list, from #122)
  *       Mem9CleanupExecutionRole-       → explicitDeny   (NOT on the list)
  *       Mem9ConsolidationTaskRole-      → explicitDeny   (NOT on the list)
- *     Isolating each deny statement in turn attributes it to exactly
- *     `DenySecretContextDecryptFromNonEcsExecutionRoles`, for BOTH secrets.
+ *     Isolating each deny statement in turn attributes it to exactly the
+ *     `SecretCtxRole` deny, for BOTH secrets.
  *     CloudTrail corroborates the premise the simulation rests on: real
  *     `SecretARN`-context Decrypt events are attributed to the calling workload
  *     principal, not to Secrets Manager as a service, so that statement's
@@ -413,9 +413,9 @@ export function slackApproval(
       // already rested for the Lambda, which holds the identical scope.
       //
       // Admissible under the DEPLOYED boundary with no rollout: the ceiling admits
-      // `ssm:PutParameter` and `DenyPutParameterOutsideApprovalRecords` permits
-      // exactly `/mem9-on-aws/*/approvals/*`. Measured, not assumed —
-      // TC-SLACKAPP-153 asserts it against the boundary template.
+      // `ssm:PutParameter` and the `ParamWrite` deny permits exactly
+      // `/mem9-on-aws/*/approvals/*`. Measured, not assumed — TC-SLACKAPP-153
+      // asserts it against the boundary template.
       {
         actions: ["ssm:GetParameters", "ssm:PutParameter"],
         resources: [
@@ -671,7 +671,7 @@ export function slackApproval(
           // prefix also holds the reader client secret and the four cleanup task
           // inputs THIS SAME Lambda reads, so a prefix-wide write would let a
           // compromised callback repoint its own ECS target. This is also exactly
-          // what the boundary's DenyPutParameterOutsideApprovalRecords permits.
+          // what the boundary's `ParamWrite` deny permits.
           Resource: [
             $interpolate`arn:aws:ssm:${region}:${accountId()}:parameter${prefix}/approvals/*`,
           ],

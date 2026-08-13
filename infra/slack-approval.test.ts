@@ -552,11 +552,11 @@ describe("slack approval infrastructure", () => {
       ).toBe(true);
     }
 
-    // DenyPutParameterOutsideApprovalRecords is a NotResource deny, so the
-    // grant is only reachable if EVERY resource it names is matched by the
-    // exception. One stray resource in the same statement denies the whole call.
+    // `ParamWrite` is a NotResource deny, so the grant is only reachable if EVERY
+    // resource it names is matched by the exception. One stray resource in the
+    // same statement denies the whole call.
     const approvalDeny = boundary.find(
-      ({ Sid }) => Sid === "DenyPutParameterOutsideApprovalRecords",
+      ({ Sid }) => Sid === "ParamWrite",
     );
     expect(approvalDeny).toBeDefined();
     // `!Sub` resolves to an OBJECT, so these must be resolved before comparing —
@@ -570,7 +570,7 @@ describe("slack approval infrastructure", () => {
     for (const resource of putResources) {
       expect(
         exceptions.some((pattern) => globMatches(pattern, resource)),
-        `${resource} is denied by DenyPutParameterOutsideApprovalRecords`,
+        `${resource} is denied by ParamWrite`,
       ).toBe(true);
     }
   });
@@ -1252,11 +1252,11 @@ describe("slack approval infrastructure", () => {
       ).toBe(true);
     }
 
-    // DenyPutParameterOutsideApprovalRecords is a NotResource deny: one stray
-    // resource in the same statement denies the whole call, so EVERY resource the
-    // write names has to be matched by the exception.
+    // `ParamWrite` is a NotResource deny: one stray resource in the same
+    // statement denies the whole call, so EVERY resource the write names has to
+    // be matched by the exception.
     const approvalDeny = boundary.find(
-      ({ Sid }) => Sid === "DenyPutParameterOutsideApprovalRecords",
+      ({ Sid }) => Sid === "ParamWrite",
     );
     expect(approvalDeny).toBeDefined();
     const exceptions = (approvalDeny!.NotResource as unknown[]).map(resolveSub);
@@ -1269,7 +1269,7 @@ describe("slack approval infrastructure", () => {
     for (const resource of putResources) {
       expect(
         exceptions.some((pattern) => globMatches(pattern, resource)),
-        `${resource} is denied by DenyPutParameterOutsideApprovalRecords`,
+        `${resource} is denied by ParamWrite`,
       ).toBe(true);
     }
     // `approvals/*` is the tightest scope SSM allows here — the claim and the
