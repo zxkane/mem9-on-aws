@@ -344,6 +344,21 @@ function list(value: unknown): string[] {
 }
 
 /**
+ * `list()` for values that are not yet strings.
+ *
+ * IAM treats a scalar and a one-element array identically in `Action`,
+ * `NotAction`, `Resource`, and `NotResource`, and the boundary renders singletons
+ * as SCALARS to reclaim bytes against the 6144 quota (#150). So an assertion that
+ * indexes into one of those four keys must normalize first or it breaks on a
+ * purely cosmetic change — which is how this one broke. Separate from `list()`
+ * because these entries may be unresolved `!Sub` OBJECTS: `String()`-ing them
+ * first yields "[object Object]", so the caller resolves after normalizing.
+ */
+function listRaw(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [value];
+}
+
+/**
  * An OPERATOR-OWNED CloudFormation template, parsed with the intrinsic tags this
  * repo's templates use.
  *
@@ -561,8 +576,9 @@ describe("slack approval infrastructure", () => {
     expect(approvalDeny).toBeDefined();
     // `!Sub` resolves to an OBJECT, so these must be resolved before comparing —
     // stringifying them first yields "[object Object]", which matches nothing and
-    // would make the loop below fail for the wrong reason.
-    const exceptions = (approvalDeny!.NotResource as unknown[]).map(resolveSub);
+    // would make the loop below fail for the wrong reason. And `NotResource` may
+    // be a bare scalar rather than a list, so normalize before mapping.
+    const exceptions = listRaw(approvalDeny!.NotResource).map(resolveSub);
     const putResources = statements
       .filter((statement) => list(statement.Action).includes("ssm:PutParameter"))
       .flatMap((statement) => list(statement.Resource));
@@ -1259,7 +1275,7 @@ describe("slack approval infrastructure", () => {
       ({ Sid }) => Sid === "ParamWrite",
     );
     expect(approvalDeny).toBeDefined();
-    const exceptions = (approvalDeny!.NotResource as unknown[]).map(resolveSub);
+    const exceptions = listRaw(approvalDeny!.NotResource).map(resolveSub);
     const putResources = permissions
       .filter((statement) => list(statement.actions).includes("ssm:PutParameter"))
       .flatMap((statement) => list(statement.resources));
@@ -1299,7 +1315,7 @@ describe("slack approval infrastructure", () => {
         .Statement as Array<Record<string, any>>
     ).find(({ Sid }) => Sid === "PassConsolidationSchedulerRole");
     expect(pass).toBeDefined();
-    expect((pass!.Resource as unknown[]).map(resolveSub)).toContain(
+    expect(listRaw(pass!.Resource).map(resolveSub)).toContain(
       resolveSub({ "Fn::Sub": arnFor(CLEANUP_SCHEDULER_ROLE_ARN_PATTERN) }),
     );
 
@@ -1311,7 +1327,7 @@ describe("slack approval infrastructure", () => {
         .Statement as Array<Record<string, any>>
     ).find(({ Sid }) => Sid === "DenyConsolidationSchedulerRolePassToOtherServices");
     expect(deny).toBeDefined();
-    expect((deny!.Resource as unknown[]).map(resolveSub)).toContain(
+    expect(listRaw(deny!.Resource).map(resolveSub)).toContain(
       resolveSub({ "Fn::Sub": arnFor(CLEANUP_SCHEDULER_ROLE_ARN_PATTERN) }),
     );
     // Kept under the ORIGINAL Sids rather than added as new statements: both the

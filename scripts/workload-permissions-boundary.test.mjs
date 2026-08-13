@@ -159,7 +159,11 @@ const independentRuntimeActions = [
   "ecs:RunTask",
   "iam:PassRole",
   "kms:Decrypt",
+  // The decision-artifact write (#150) and the SSE-KMS data key it needs.
+  "kms:GenerateDataKey",
   "lambda:InvokeFunction",
+  "s3:GetObject",
+  "s3:PutObject",
   "secretsmanager:GetSecretValue",
   "sns:Publish",
   "sqs:SendMessage",
@@ -7669,22 +7673,42 @@ describe("boundary and deploy-role templates", () => {
     // prod's plain-String parameters — `oauth/allowed-callback-urls` is an
     // open-redirect primitive, and the bootstrap/consolidation `task-def-arn`
     // and `cluster-name` are consumed unvalidated by scripts/run-*-task.sh.
-    // SecureString parameters are already out of reach (a SecureString write
-    // needs kms:Encrypt or kms:GenerateDataKey, neither of which the ceiling
-    // admits), so the plain-String ones are exactly the exposure this closes.
+    // SecureString parameters stay out of reach, so the plain-String ones are
+    // exactly the exposure this closes — but the reason is no longer "the ceiling
+    // admits neither kms:Encrypt nor kms:GenerateDataKey". #150 admits
+    // GenerateDataKey for the artifact write, and what keeps it off the SSM path is
+    // now the `GenKey` deny, which fires unless the caller presents S3's aws:s3:arn
+    // encryption context. That is asserted directly below rather than left to this
+    // prose, because the invariant moved from an absence to a statement.
     const approvalScope = bySid("ParamWrite");
     expect(approvalScope).toMatchObject({
       Effect: "Deny",
-      Action: ["ssm:PutParameter"],
+      Action: "ssm:PutParameter",
     });
-    expect(resolveTemplateValue(approvalScope.NotResource)).toEqual([
+    expect(resolveTemplateValue(approvalScope.NotResource)).toBe(
       "arn:aws:ssm:ap-northeast-1:123456789012:" +
         "parameter/mem9-on-aws/*/approvals/*",
-    ]);
+    );
+    // The statement that keeps the sentence above true. A negated ...IfExists
+    // operator FIRES on an ABSENT key, which is what denies every caller that
+    // cannot present an artifact context — including the SSM SecureString path,
+    // which presents PARAMETER_ARN instead.
+    expect(bySid("GenKey")).toEqual({
+      Sid: "GenKey",
+      Effect: "Deny",
+      Action: "kms:GenerateDataKey",
+      Resource: "*",
+      Condition: {
+        StringNotLikeIfExists: {
+          "kms:EncryptionContext:aws:s3:arn":
+            "arn:aws:s3:::mem9-on-aws-audit-123456789012/*",
+        },
+      },
+    });
     expect(bySid("KmsContext")).toEqual({
       Sid: "KmsContext",
       Effect: "Deny",
-      Action: ["kms:Decrypt"],
+      Action: "kms:Decrypt",
       Resource: "*",
       Condition: {
         StringNotLikeIfExists: {
@@ -7702,6 +7726,11 @@ describe("boundary and deploy-role templates", () => {
             "arn:aws:secretsmanager:ap-northeast-1:123456789012:" +
               "secret:mem9-on-aws-*-tenant-api-key-*",
           ],
+          // #150. Load-bearing for the artifact READ, not defensive: dropped, a
+          // decrypt carrying only this context matches none of the keys above and
+          // this deny fires, which simulates as explicitDeny on GetObject.
+          "kms:EncryptionContext:aws:s3:arn":
+            "arn:aws:s3:::mem9-on-aws-audit-123456789012/*",
         },
       },
     });
@@ -7709,13 +7738,16 @@ describe("boundary and deploy-role templates", () => {
     expect(bySid("KmsVia")).toEqual({
       Sid: "KmsVia",
       Effect: "Deny",
-      Action: ["kms:Decrypt"],
+      Action: "kms:Decrypt",
       Resource: "*",
       Condition: {
         StringNotEqualsIfExists: {
+          // s3 is appended LAST because ParamCtxVia, SecretCtxVia, and FnCodeKms
+          // index this list by position and must keep pinning one service each.
           "kms:ViaService": [
             "ssm.ap-northeast-1.amazonaws.com",
             "secretsmanager.ap-northeast-1.amazonaws.com",
+            "s3.ap-northeast-1.amazonaws.com",
           ],
         },
         StringNotLikeIfExists: {
@@ -7728,7 +7760,7 @@ describe("boundary and deploy-role templates", () => {
     expect(bySid("SecretCtxRole")).toEqual({
       Sid: "SecretCtxRole",
       Effect: "Deny",
-      Action: ["kms:Decrypt"],
+      Action: "kms:Decrypt",
       Resource: "*",
       Condition: {
         Null: {
@@ -7751,7 +7783,7 @@ describe("boundary and deploy-role templates", () => {
     expect(bySid("ParamCtxVia")).toEqual({
       Sid: "ParamCtxVia",
       Effect: "Deny",
-      Action: ["kms:Decrypt"],
+      Action: "kms:Decrypt",
       Resource: "*",
       Condition: {
         Null: {
@@ -7765,7 +7797,7 @@ describe("boundary and deploy-role templates", () => {
     expect(bySid("SecretCtxVia")).toEqual({
       Sid: "SecretCtxVia",
       Effect: "Deny",
-      Action: ["kms:Decrypt"],
+      Action: "kms:Decrypt",
       Resource: "*",
       Condition: {
         Null: {
@@ -7780,7 +7812,7 @@ describe("boundary and deploy-role templates", () => {
     expect(bySid("FnCodeKms")).toEqual({
       Sid: "FnCodeKms",
       Effect: "Deny",
-      Action: ["kms:Decrypt"],
+      Action: "kms:Decrypt",
       Resource: "*",
       Condition: {
         Null: {
@@ -7794,7 +7826,7 @@ describe("boundary and deploy-role templates", () => {
     expect(bySid("LambdaCtxRole")).toEqual({
       Sid: "LambdaCtxRole",
       Effect: "Deny",
-      Action: ["kms:Decrypt"],
+      Action: "kms:Decrypt",
       Resource: "*",
       Condition: {
         Null: {
@@ -7902,6 +7934,18 @@ describe("boundary and deploy-role templates", () => {
     "ecs:RunTask",
     "iam:PassRole",
     "kms:Decrypt",
+    // Same justification as kms:Decrypt above, and it must be here rather than
+    // resource-scoped: KMS grants are evaluated against the KEY, and #150's
+    // artifact uses the AWS-managed alias/aws/s3, whose ARN embeds a key id the
+    // account does not choose and cannot pin in a committed template. What bounds
+    // it instead is `GenKey`, a Condition-based deny keyed to S3's own
+    // aws:s3:arn encryption context. Simulated rather than assumed: with GenKey,
+    // a SecureString write via ssm.<region> and a GenerateDataKey carrying NO
+    // context are both explicitDeny, while the artifact write stays allowed.
+    // Note s3:GetObject/s3:PutObject are deliberately NOT here — those ARE
+    // resource-scoped, by the `Resources` deny, so listing them would trip the
+    // disjointness check below, which is exactly its purpose.
+    "kms:GenerateDataKey",
     "ssmmessages:CreateControlChannel",
     "ssmmessages:CreateDataChannel",
     "ssmmessages:OpenControlChannel",
@@ -7952,6 +7996,102 @@ describe("boundary and deploy-role templates", () => {
   it("keeps the boundary within the IAM managed-policy size quota", () => {
     const size = JSON.stringify(boundaryPolicyDocument()).length;
     expect(size).toBeLessThanOrEqual(6_144);
+  });
+
+  // #150 collapsed singleton Action/NotAction/NotResource entries to scalars for
+  // bytes, so every assertion on those keys has to accept either form — the same
+  // normalization the verifier's own sameStringSet() applies through list().
+  const asList = (value) =>
+    value === undefined ? [] : Array.isArray(value) ? value : [value];
+
+  // #150 admits kms:GenerateDataKey so the decision artifact can be written with
+  // SSE-KMS. That action is ALSO what an SSM SecureString write needs, so admitting
+  // it bare would silently revoke an invariant this file and the boundary template
+  // both state in prose: SecureStrings are unreachable. `GenKey` is what keeps the
+  // prose true, and these are the structural properties that make it work.
+  //
+  // Structure rather than an AWS call because iam:simulate-custom-policy needs
+  // credentials CI does not have. That simulation IS how the design was chosen —
+  // without GenKey, a SecureString write via ssm.<region> comes back `allowed`, and
+  // so does GenerateDataKey carrying NO encryption context — and each assertion
+  // below is the structural fingerprint of one of those findings.
+  it("confines the artifact data key to S3's own encryption context", () => {
+    const document = expectedBoundaryPolicyDocument(boundaryContract);
+    const bySid = (sid) => document.Statement.find((s) => s.Sid === sid);
+    const genKey = bySid("GenKey");
+    // A DENY, not an absence of allow. The boundary's Identity statement allows
+    // `*`, so an unmatched action is admitted, not blocked.
+    expect(genKey?.Effect).toBe("Deny");
+    expect(asList(genKey.Action)).toEqual(["kms:GenerateDataKey"]);
+    // The operator must be a NEGATED ...IfExists form. That is what makes an
+    // ABSENT key fire the deny, which is the whole mechanism: a caller who cannot
+    // present an artifact context is denied rather than silently permitted. A
+    // plain StringNotLike would leave the no-context case allowed, and a
+    // non-negated StringLike would invert the statement into a near-total deny.
+    const [[operator, clause]] = Object.entries(genKey.Condition);
+    expect(operator).toBe("StringNotLikeIfExists");
+    expect(Object.keys(clause)).toEqual(["kms:EncryptionContext:aws:s3:arn"]);
+    // Keyed to the artifact, and to nothing wider. `*` here would admit any
+    // bucket's data key.
+    expect(clause["kms:EncryptionContext:aws:s3:arn"]).toBe(
+      "arn:aws:s3:::mem9-on-aws-audit-123456789012/*",
+    );
+    // The SSM path presents PARAMETER_ARN, never aws:s3:arn, which is why the
+    // SecureString write cannot satisfy the clause above. Fold GenerateDataKey
+    // into CONDITIONED_RUNTIME_ACTIONS and it would inherit the eight kms:Decrypt
+    // context denies instead — including ParamCtxVia, which admits the SSM
+    // service path — so assert it reaches exactly one statement.
+    const genKeyStatements = document.Statement.filter((statement) =>
+      asList(statement.Action).includes("kms:GenerateDataKey"),
+    ).map(({ Sid }) => Sid);
+    expect(genKeyStatements).toEqual(["GenKey"]);
+  });
+
+  // The three S3 admissions are each other's counterweight: the actions bound what
+  // may be done, the resource bounds where, and the KMS entries bound the envelope.
+  // Simulated, dropping any ONE of them either opens a path (s3:*Object admits
+  // DeleteObject on the audit artifact; a wildcard bucket segment admits a
+  // foreign-account bucket) or breaks the feature (removing either KMS entry makes
+  // the artifact read explicitDeny). Assert each separately so a regression names
+  // which property it broke.
+  it("scopes the decision artifact to an unsquattable bucket", () => {
+    const document = expectedBoundaryPolicyDocument(boundaryContract);
+    const bySid = (sid) => document.Statement.find((s) => s.Sid === sid);
+    const artifact = "arn:aws:s3:::mem9-on-aws-audit-123456789012/*";
+    // S3 bucket names are a GLOBAL namespace, so a wildcard in the BUCKET segment
+    // matches a bucket an attacker can create in their own account. Only the key
+    // segment may carry one. This is the assertion that fails if someone
+    // "simplifies" the name back to mem9-on-aws-*-decisions to save bytes.
+    const [bucket] = artifact.slice("arn:aws:s3:::".length).split("/");
+    expect(bucket).not.toContain("*");
+    expect(bucket).toContain("123456789012");
+    // Enumerated, never s3:*Object: the wildcard also admits DeleteObject and
+    // RestoreObject on the artifact the approval loop exists to produce, plus any
+    // future *Object action AWS adds.
+    const ceiling = document.Statement.find(({ Sid }) =>
+      Sid?.startsWith("Ceiling"),
+    );
+    expect(ceiling.NotAction.filter((a) => a.startsWith("s3:"))).toEqual([
+      "s3:GetObject",
+      "s3:PutObject",
+    ]);
+    // Resource-scoped by the `Resources` deny, which is why they are NOT on
+    // REVIEWED_GLOBAL_WRITES. Both directions matter: the actions must be in the
+    // deny, and the artifact must be in its NotResource escape list.
+    const resources = bySid("Resources");
+    expect(asList(resources.Action)).toEqual(
+      expect.arrayContaining(["s3:GetObject", "s3:PutObject"]),
+    );
+    expect(asList(resources.NotResource)).toContain(artifact);
+    // Both KMS entries, each proven load-bearing for the read path.
+    expect(
+      bySid("KmsContext").Condition.StringNotLikeIfExists[
+        "kms:EncryptionContext:aws:s3:arn"
+      ],
+    ).toBe(artifact);
+    expect(
+      asList(bySid("KmsVia").Condition.StringNotEqualsIfExists["kms:ViaService"]),
+    ).toContain("s3.ap-northeast-1.amazonaws.com");
   });
 
   // AWS requires this outright: "In IAM, the `Sid` value must be unique within a
@@ -8027,11 +8167,21 @@ describe("boundary and deploy-role templates", () => {
   // set here (a 128-character id breaches even the real quota). It buys margin
   // against the fixture shape only.
   //
-  // The configured shape is 5690 bytes, so 454 is the current ceiling on this
-  // reserve. It was 90 before #150 spent the Sid-shortening reserve described
-  // below; 64 is kept rather than raised to the new maximum because the next
-  // change should fail this gate with room left to react, which a reserve pinned
-  // just under the live size cannot do.
+  // The configured shape is 6119 bytes, so 25 is the current ceiling on this
+  // reserve, and it is set to exactly that. Every larger value was available
+  // before #150 spent the Sid reserve AND the singleton-array reserve on the
+  // decision-artifact grants; both are now gone. Pinning the gate to the live
+  // size costs the "fail with room left to react" property the reserve was
+  // created for — a 25-byte cushion fires on nearly any edit — and that is the
+  // honest state of this document rather than a choice: there is no room left to
+  // hold in reserve. Measured, so do not re-derive it: the reserve absorbs no
+  // library-vs-template delta. The rendered template and
+  // expectedBoundaryPolicyDocument() agree byte-for-byte (both 6119 configured,
+  // 6051 unconfigured), and the gate already resolves ap-northeast-1, the
+  // worst-case region — us-west-2 is 115 bytes shorter — so it is not a region
+  // cushion either. What it buys is early warning against the fixture shape, and
+  // the next statement to arrive will breach this gate and the hard quota within
+  // 25 bytes of each other.
   //
   // This gate has now fired once, and the escape hatch the earlier note proposed
   // — "split the boundary across a second managed policy" — does not exist. A
@@ -8052,19 +8202,28 @@ describe("boundary and deploy-role templates", () => {
   // That reserve is now GONE: the Sids are already near-minimal, so a future
   // overrun cannot be answered the same way twice.
   //
-  // What remains unspent, in preference order: collapsing the singleton arrays
-  // to scalars (~20 bytes — safe for Action/NotAction/Resource/NotResource,
-  // which sameStringSet() normalizes through list(), but NOT inside Condition,
-  // where canonicalJson() compares a scalar and a one-element array as
-  // different), and dropping Sids entirely (measured at 262 bytes even after the
-  // rename, down from 626 — most of that is the `"Sid":"…",` skeleton rather
-  // than the names, which is why shortening them did not consume it. It costs
-  // this suite every bySid() lookup, so it is a refactor rather than a
-  // deletion). Between them roughly 280 bytes remain, about two statements'
-  // worth, and no third formatting reserve exists after that.
+  // The singleton-array reserve that note listed next is now SPENT too: #150
+  // collapsed the one-element Action/NotAction/NotResource lists to scalars for 22
+  // bytes (safe because sameStringSet() normalizes those four keys through
+  // list(); NOT safe inside Condition, where canonicalJson() compares a scalar
+  // and a one-element array as different — that is why kmsViaServices[0] and the
+  // Null clauses were left alone).
+  //
+  // ONE formatting reserve remains: dropping Sids entirely, measured at 262 bytes
+  // even after the rename, most of it the `"Sid":"…",` skeleton rather than the
+  // names. It now conflicts with two things — this file's own uniqueness test and
+  // verifyBoundaryPolicyDocument()'s Sid-keyed lookup — so it is a refactor of the
+  // verifier, not a deletion, and it costs this suite every bySid() call. After
+  // that, nothing: the next admission has to be paid for in SEMANTICS, by
+  // narrowing or removing an existing grant, which is a security review rather
+  // than a formatting pass. #150 already declined three such shortcuts on
+  // measured evidence — collapsing the two Alert*Queue ARNs into one pattern
+  // (newly admits a third queue), the aws:ResourceAccount foreign-bucket guard
+  // (6280 bytes, over the hard quota), and s3:*Object in place of the two
+  // enumerated actions (admits DeleteObject on the audit artifact).
   const OPENAI_PROJECT_ARN =
     "arn:aws:bedrock-mantle:us-west-2:123456789012:project/proj_openai";
-  const BOUNDARY_SIZE_RESERVE = 64;
+  const BOUNDARY_SIZE_RESERVE = 25;
 
   it("matches the contract library in the OpenAI-configured shape", () => {
     const document = boundaryPolicyDocument(OPENAI_PROJECT_ARN);
