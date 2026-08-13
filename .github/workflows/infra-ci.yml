@@ -47,6 +47,9 @@
 #                  (github-actions-role.yaml) to be rolled out FIRST.
 #   MEM9_LLM_RESPONSES_REGION — independent fallback region for selected OpenAI
 #                  GPT models. Unset keeps the runtime/boundary default us-west-2.
+#   MEM9_COGNITO_DOMAIN_PREFIX — existing production Cognito domain prefix.
+#                  Set this before adopting derived defaults so prod keeps its
+#                  current OAuth hostname. Previews intentionally do not use it.
 #
 # Workload-boundary maintenance gate revision: 1
 
@@ -1153,6 +1156,10 @@ jobs:
         # (`mem9-<sha7>`); infra/ecs.ts reads MEM9_IMAGE_TAG.
         env:
           MEM9_IMAGE_TAG: ${{ needs.build-and-push-image.outputs.image_tag }}
+          # Preserve an existing production OAuth hostname. New repositories may
+          # leave this unset and use the account/Region/stage-derived default.
+          # Preview deploys intentionally do not receive this prod-wide value.
+          MEM9_COGNITO_DOMAIN_PREFIX: ${{ vars.MEM9_COGNITO_DOMAIN_PREFIX }}
           # Bedrock Project id → the llm-proxy sidecar's OpenAI-Project cost header
           # (infra/ecs.ts BEDROCK_PROJECT). Repo variable set out-of-band by
           # scripts/deploy-bedrock-mantle-project.sh.

@@ -265,6 +265,21 @@ The AgentCore Gateway exposes four tools over MCP (Cognito-authenticated):
 - Set `MEM9_FACADE_AUTHORIZER_ENABLED=1` at deploy time to attach the optional
   allow-all OAuth facade compliance authorizer; it is disabled by default.
   Roll out the reviewed workload-boundary update before enabling it.
+- Cognito hosted-UI prefixes share a namespace across AWS accounts in each
+  Region. New stages default to a stable `mem9-<hash>` prefix derived from the
+  AWS account, application Region, and stage; the account ID is not exposed.
+  `MEM9_COGNITO_DOMAIN_PREFIX` remains an explicit override. Before adopting
+  this change for an existing stage, preserve its current prefix so the OAuth
+  hostname is not replaced:
+
+  ```bash
+  gh variable set MEM9_COGNITO_DOMAIN_PREFIX --body "<existing-prefix>"
+  ```
+
+  Infra CI passes this repository variable only to the production deploy;
+  previews use their derived stage-specific defaults. A new repository may
+  leave it unset. Treat either choice as permanent for the stage because the
+  prefix is the OAuth token/authorize hostname.
 - `scripts/deploy-github-role.sh` always owns its account-global IAM stack in
   `us-west-2` and ignores ambient `AWS_REGION`. Application VPC discovery and
   regional bootstrap resources resolve `providers.aws.region` from

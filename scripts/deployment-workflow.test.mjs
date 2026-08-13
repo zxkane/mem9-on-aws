@@ -393,6 +393,21 @@ describe("workflow integration", () => {
     expect(workflow.match(/pnpm -C infra exec sst deploy/g)).toHaveLength(2);
   });
 
+  it("TC-COGDOMAIN-020/021: preserves prod override without sharing it with previews", () => {
+    const workflow = parse(readFileSync(workflowPath, "utf8"));
+    const previewDeploy = workflow.jobs["deploy-preview"].steps.find(
+      ({ name }) => name === "Deploy PR stage",
+    );
+    const prodDeploy = workflow.jobs["deploy-prod"].steps.find(
+      ({ name }) => name === "Deploy prod stage",
+    );
+
+    expect(previewDeploy.env).not.toHaveProperty("MEM9_COGNITO_DOMAIN_PREFIX");
+    expect(prodDeploy.env.MEM9_COGNITO_DOMAIN_PREFIX).toBe(
+      "${{ vars.MEM9_COGNITO_DOMAIN_PREFIX }}",
+    );
+  });
+
   it("TC-CONSOL-040/041: runs a report-only preview task behind the schedule gate", () => {
     const source = readFileSync(workflowPath, "utf8");
     const workflow = parse(source);
