@@ -22,14 +22,15 @@ infra/sst-env.d.ts
 # Git worktrees (feature isolation, per the dev workflow)
 .worktrees/
 
-# Autonomous-dev-team scaffolding (machine-local; recreated by `npx skills add`).
-# .agents/skills contains project-scoped skill bodies; .agents/state is hook state.
+# Autonomous-dev-team scaffolding (machine-local; reuses the user-scope install).
+# Skill bodies live under ~/.agents/skills; .agents/ retains local hook state.
 .agents/
 .codex/
 .pulumi/
 
-# Symlink scaffolding pointing into .agents/ (machine-local, recreated on install)
+# Symlink scaffolding pointing into the shared user-scope install
 hooks
+scripts/gh
 scripts/autonomous.conf
 scripts/adt-gc.sh
 scripts/autonomous-dev.sh
