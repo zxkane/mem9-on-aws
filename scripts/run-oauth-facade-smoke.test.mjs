@@ -82,6 +82,7 @@ const option = (name) => {
 };
 const url = args.at(-1) ?? "";
 const base = process.env.MOCK_FACADE;
+const supportedScopes = ["openid", "email", "mem9-mcp/read", "mem9-mcp/write"];
 if (url.endsWith("/.well-known/oauth-authorization-server")) {
   console.log(JSON.stringify({
     issuer: base,
@@ -90,6 +91,7 @@ if (url.endsWith("/.well-known/oauth-authorization-server")) {
     registration_endpoint: base + "/register",
     code_challenge_methods_supported: ["S256"],
     token_endpoint_auth_methods_supported: ["none"],
+    scopes_supported: supportedScopes,
   }));
 } else if (url.endsWith("/.well-known/oauth-protected-resource")) {
   console.log(JSON.stringify({
@@ -97,12 +99,16 @@ if (url.endsWith("/.well-known/oauth-authorization-server")) {
     authorization_servers: [base],
   }));
 } else if (url.endsWith("/.well-known/openid-configuration")) {
-  console.log(JSON.stringify({ issuer: base }));
+  console.log(JSON.stringify({
+    issuer: base,
+    scopes_supported: supportedScopes,
+  }));
 } else if (url.endsWith("/register")) {
   console.log(JSON.stringify({
     client_id: "fixture-public-client",
     redirect_uris: ["http://localhost:8080/cb"],
     token_endpoint_auth_method: "none",
+    scope: supportedScopes.join(" "),
   }));
 } else if (url.endsWith("/oauth/authorize")) {
   writeFileSync(
