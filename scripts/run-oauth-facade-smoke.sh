@@ -41,8 +41,8 @@ echo "$READER_CLIENT_CONFIG" | jq -e '.RefreshTokenRotation.RetryGracePeriodSeco
   echo "::error::reader client refresh-token retry grace period is not 10 seconds"
   exit 1
 }
-echo "$READER_CLIENT_CONFIG" | jq -e '.ExplicitAuthFlows == []' >/dev/null || {
-  echo "::error::reader client explicit auth flows are not empty; incompatible ALLOW_REFRESH_TOKEN_AUTH may be enabled"
+echo "$READER_CLIENT_CONFIG" | jq -e '.ExplicitAuthFlows == ["ALLOW_USER_SRP_AUTH"]' >/dev/null || {
+  echo "::error::reader client explicit auth flows do not exclude the incompatible ALLOW_REFRESH_TOKEN_AUTH default"
   exit 1
 }
 echo "run-oauth-facade-smoke: reader refresh-token rotation OK (10-second retry grace)"

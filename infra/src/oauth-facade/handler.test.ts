@@ -711,7 +711,7 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
   // reader secret before forwarding — the secret must never be required from,
   // nor returned to, the MCP client.
 
-  function mockTokenUpstream() {
+  function mockTokenUpstream(includeRefreshToken = true) {
     const captured: { headers?: Record<string, string>; body?: string } = {};
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (_url: string | URL | Request, init?: RequestInit) => {
@@ -720,7 +720,7 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
         return new Response(
           JSON.stringify({
             access_token: "tok",
-            refresh_token: "rotated-rt",
+            ...(includeRefreshToken ? { refresh_token: "rotated-rt" } : {}),
           }),
           {
             status: 200,
@@ -836,7 +836,7 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
     ["empty", ""],
     ["whitespace-only", "   "],
   ])(
-    "TC-OAUTH-REFRESH-006/007: a successful refresh with a %s replacement token fails without exposing credentials",
+    "TC-OAUTH-REFRESH-006/007: a successful refresh with a %s replacement token preserves the submitted token without exposing credentials",
     async (_case, replacementRefreshToken) => {
       const accessToken = "access-token-missing-refresh-sentinel";
       const idToken = "id-token-missing-refresh-sentinel";
@@ -863,13 +863,15 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
         cfg(),
       );
 
-      expect(response.statusCode).toBe(502);
+      expect(response.statusCode).toBe(200);
       expect(JSON.parse(response.body)).toEqual({
-        error: "invalid_upstream_response",
-        error_description:
-          "The upstream refresh response did not include a replacement refresh token.",
+        access_token: accessToken,
+        id_token: idToken,
+        refresh_token: submittedRefreshToken,
+        token_type: "Bearer",
+        expires_in: 3600,
       });
-      const observable = `${response.body}\n${JSON.stringify(log.mock.calls)}`;
+      const observable = JSON.stringify(log.mock.calls);
       for (const value of [
         accessToken,
         idToken,
@@ -878,6 +880,47 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
       ]) {
         expect(observable).not.toContain(value);
       }
+      expect(observable).toContain("oauth.token.missing_refresh_token");
+    },
+  );
+
+  it.each([
+    ["invalid JSON", "not-json"],
+    ["null", "null"],
+    ["an array", "[]"],
+  ])(
+    "TC-OAUTH-REFRESH-006/007: a successful refresh with %s fails safely without exposing credentials",
+    async (_case, upstreamBody) => {
+      const submittedRefreshToken = "submitted-malformed-refresh-sentinel";
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      vi.spyOn(globalThis, "fetch").mockResolvedValue(
+        new Response(upstreamBody, {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        }),
+      );
+
+      const response = await route(
+        ev("/oauth/token", "POST", {
+          body: new URLSearchParams({
+            grant_type: "refresh_token",
+            refresh_token: submittedRefreshToken,
+            client_id: "reader-client-id",
+          }).toString(),
+        }),
+        cfg(),
+      );
+
+      expect(response.statusCode).toBe(502);
+      expect(JSON.parse(response.body)).toEqual({
+        error: "invalid_upstream_response",
+        error_description:
+          "The upstream refresh response was not a JSON object.",
+      });
+      const observable = `${response.body}\n${JSON.stringify(log.mock.calls)}`;
+      expect(observable).not.toContain(submittedRefreshToken);
+      expect(observable).not.toContain("reader-client-secret");
+      expect(observable).not.toContain(upstreamBody);
     },
   );
 
@@ -959,7 +1002,7 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
   });
 
   it("TC-MCPGW-077: Basic-auth refresh (legacy Claude Code) passes through untouched — no injection", async () => {
-    const captured = mockTokenUpstream();
+    const captured = mockTokenUpstream(false);
     const basic = "Basic " + Buffer.from("reader-client-id:reader-client-secret").toString("base64");
     const form = new URLSearchParams({
       grant_type: "refresh_token",
@@ -970,6 +1013,7 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
       cfg(),
     );
     expect(res.statusCode).toBe(200);
+    expect(JSON.parse(res.body).refresh_token).toBe("rt");
     expect(captured.headers!["authorization"]).toBe(basic);
     const fwd = new URLSearchParams(captured.body!);
     expect(fwd.get("client_secret")).toBeNull();

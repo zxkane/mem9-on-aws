@@ -661,7 +661,7 @@ export async function route(
         error_description: "Failed to reach Cognito token endpoint",
       });
     }
-    const respBody = await upstream.text();
+    let respBody = await upstream.text();
     const respHeaders: Record<string, string> = {};
     upstream.headers.forEach((v, k) => {
       const lk = k.toLowerCase();
@@ -671,12 +671,31 @@ export async function route(
 
     if (upstream.ok && grantType === "refresh_token") {
       let replacementRefreshToken: unknown;
+      let parsedResponse: Record<string, unknown> | undefined;
       try {
-        replacementRefreshToken = (
-          JSON.parse(respBody) as { refresh_token?: unknown }
-        ).refresh_token;
+        const parsed: unknown = JSON.parse(respBody);
+        if (
+          typeof parsed === "object" &&
+          parsed !== null &&
+          !Array.isArray(parsed)
+        ) {
+          parsedResponse = parsed as Record<string, unknown>;
+          replacementRefreshToken = parsedResponse.refresh_token;
+        }
       } catch {
         replacementRefreshToken = undefined;
+      }
+      if (!parsedResponse) {
+        logEvent("oauth.token.invalid_response", {
+          grant_type: grantType,
+          client_auth: clientAuth,
+          status: upstream.status,
+        });
+        return json(502, {
+          error: "invalid_upstream_response",
+          error_description:
+            "The upstream refresh response was not a JSON object.",
+        });
       }
       if (
         typeof replacementRefreshToken !== "string" ||
@@ -687,11 +706,11 @@ export async function route(
           client_auth: clientAuth,
           status: upstream.status,
         });
-        return json(502, {
-          error: "invalid_upstream_response",
-          error_description:
-            "The upstream refresh response did not include a replacement refresh token.",
-        });
+        const submittedRefreshToken = inForm.get("refresh_token");
+        if (submittedRefreshToken) {
+          parsedResponse.refresh_token = submittedRefreshToken;
+          respBody = JSON.stringify(parsedResponse);
+        }
       }
     }
 

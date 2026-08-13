@@ -150,10 +150,10 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
       name: `${stage}-mem9-mcp-reader`,
       userPoolId: cognitoOut.userPoolId,
       generateSecret: true,
-      // Omitting this property enables ALLOW_REFRESH_TOKEN_AUTH by default,
-      // which Cognito rejects when refresh-token rotation is enabled. Hosted UI
-      // authorization-code OAuth does not need an explicit API auth flow.
-      explicitAuthFlows: [],
+      // Cognito restores ALLOW_REFRESH_TOKEN_AUTH when this property is absent.
+      // Keep one non-refresh API flow so the deployed client has an explicit
+      // list that excludes the flow incompatible with token rotation.
+      explicitAuthFlows: ["ALLOW_USER_SRP_AUTH"],
       refreshTokenRotation: {
         feature: "ENABLED",
         retryGracePeriodSeconds: 10,

@@ -418,7 +418,7 @@ describe("oauthFacade factory", () => {
       feature: "ENABLED",
       retryGracePeriodSeconds: 10,
     });
-    expect(client.explicitAuthFlows).toEqual([]);
+    expect(client.explicitAuthFlows).toEqual(["ALLOW_USER_SRP_AUTH"]);
   });
 
   it("provisions the façade Function on arm64 nodejs24.x with NO vpc + scoped SSM read", async () => {

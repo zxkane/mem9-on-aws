@@ -14,6 +14,13 @@ import { afterEach, describe, expect, it } from "vitest";
 
 const script = resolve("scripts/run-oauth-facade-smoke.sh");
 const temporaryPaths = [];
+const validReaderClientConfig = {
+  RefreshTokenRotation: {
+    Feature: "ENABLED",
+    RetryGracePeriodSeconds: 10,
+  },
+  ExplicitAuthFlows: ["ALLOW_USER_SRP_AUTH"],
+};
 
 afterEach(() => {
   for (const path of temporaryPaths.splice(0)) {
@@ -22,9 +29,7 @@ afterEach(() => {
 });
 
 function runFixture({
-  rotationFeature = "ENABLED",
-  graceSeconds = "10",
-  explicitAuthFlows = [],
+  readerClientConfig = validReaderClientConfig,
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "mem9-oauth-smoke-"));
   temporaryPaths.push(directory);
@@ -54,13 +59,7 @@ if (command === "ssm get-parameter") {
     process.exit(2);
   }
 } else if (command === "cognito-idp describe-user-pool-client") {
-  console.log(JSON.stringify({
-    RefreshTokenRotation: {
-      Feature: process.env.MOCK_ROTATION_FEATURE,
-      RetryGracePeriodSeconds: Number(process.env.MOCK_GRACE_SECONDS),
-    },
-    ExplicitAuthFlows: JSON.parse(process.env.MOCK_AUTH_FLOWS),
-  }));
+  console.log(process.env.MOCK_READER_CLIENT_CONFIG);
 } else {
   console.error("unexpected aws command:", command);
   process.exit(2);
@@ -128,14 +127,12 @@ if (url.endsWith("/.well-known/oauth-authorization-server")) {
     env: {
       ...process.env,
       AWS_REGION: "ap-northeast-1",
-      MOCK_AUTH_FLOWS: JSON.stringify(explicitAuthFlows),
       MOCK_CALLS: calls,
       MOCK_CLIENT_ID: "fixture-reader-client-id",
       MOCK_FACADE: "https://facade.example.com",
-      MOCK_GRACE_SECONDS: graceSeconds,
       MOCK_ISSUER:
         "https://cognito-idp.ap-northeast-1.amazonaws.com/pool-fixture",
-      MOCK_ROTATION_FEATURE: rotationFeature,
+      MOCK_READER_CLIENT_CONFIG: JSON.stringify(readerClientConfig),
       PATH: `${bin}${delimiter}${process.env.PATH}`,
       STAGE: "pr-162",
     },
@@ -174,18 +171,57 @@ describe("OAuth facade smoke harness (TC-OAUTH-REFRESH-008)", () => {
   it.each([
     [
       "rotation is disabled",
-      { rotationFeature: "DISABLED" },
+      {
+        readerClientConfig: {
+          ...validReaderClientConfig,
+          RefreshTokenRotation: {
+            ...validReaderClientConfig.RefreshTokenRotation,
+            Feature: "DISABLED",
+          },
+        },
+      },
       /refresh-token rotation is not enabled/iu,
     ],
     [
       "the retry grace period drifts",
-      { graceSeconds: "0" },
+      {
+        readerClientConfig: {
+          ...validReaderClientConfig,
+          RefreshTokenRotation: {
+            ...validReaderClientConfig.RefreshTokenRotation,
+            RetryGracePeriodSeconds: 0,
+          },
+        },
+      },
       /retry grace period is not 10 seconds/iu,
     ],
     [
-      "an explicit auth flow is configured",
-      { explicitAuthFlows: ["ALLOW_REFRESH_TOKEN_AUTH"] },
+      "the incompatible refresh auth flow is configured",
+      {
+        readerClientConfig: {
+          ...validReaderClientConfig,
+          ExplicitAuthFlows: ["ALLOW_REFRESH_TOKEN_AUTH"],
+        },
+      },
       /ALLOW_REFRESH_TOKEN_AUTH/iu,
+    ],
+    [
+      "explicit auth flows are absent and Cognito defaults apply",
+      {
+        readerClientConfig: {
+          RefreshTokenRotation: validReaderClientConfig.RefreshTokenRotation,
+        },
+      },
+      /explicit auth flows/iu,
+    ],
+    [
+      "refresh-token rotation is absent",
+      {
+        readerClientConfig: {
+          ExplicitAuthFlows: validReaderClientConfig.ExplicitAuthFlows,
+        },
+      },
+      /refresh-token rotation is not enabled/iu,
     ],
   ])("fails when %s", (_case, options, expectedError) => {
     const { result, output } = runFixture(options);
