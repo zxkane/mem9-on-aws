@@ -346,7 +346,20 @@ function boundaryContract({
   if (!/^r[0-9]{1,20}$/u.test(policyRevision)) {
     throw new Error("invalid boundary policy revision");
   }
-  const decisionArtifactArn = `arn:${partition}:s3:::mem9-on-aws-audit-${accountId}/*`;
+  // Two ARNs, not one, and the difference is load-bearing. S3's own resource
+  // scope needs the OBJECT glob; the SSE-KMS encryption context needs the BUCKET
+  // ARN, because the bucket enables S3 Bucket Keys. Documented AWS behavior, S3
+  // user guide "Using SSE-KMS -> Encryption context": "If you use SSE-KMS without
+  // enabling an S3 Bucket Key, the object ARN is used as the encryption
+  // context... If you use SSE-KMS and enable an S3 Bucket Key, the bucket ARN is
+  // used." An earlier revision of this file used the object glob for both and
+  // asserted the trailing /* covered either case. That claim was FALSE —
+  // `arn:aws:s3:::bucket/*` does not match `arn:aws:s3:::bucket`, so with bucket
+  // keys on, GenerateDataKey and Decrypt both simulate explicitDeny and every
+  // artifact write and read dies after deploy. Pinning both forms is not an
+  // option: 6215 bytes, past the hard quota.
+  const decisionArtifactBucketArn = `arn:${partition}:s3:::mem9-audit-${accountId}`;
+  const decisionArtifactArn = `${decisionArtifactBucketArn}/*`;
 
   return {
     accountId,
@@ -402,7 +415,15 @@ function boundaryContract({
     // in the key prefix instead of the bucket name. The aws:ResourceAccount
     // guard is the textbook alternative and is NOT available here: it measures
     // 6280 bytes, past the hard 6144 quota.
+    //
+    // The name is `mem9-audit-` rather than `mem9-on-aws-audit-` because the ARN
+    // renders three times: seven characters of prefix cost 21 bytes, and at the
+    // revision this document actually deploys with there are only 10 to spare
+    // (see the size gate). Nothing pins an S3 prefix for this project — the
+    // deploy role's S3State is Resource: "*" — so the shorter name costs no
+    // access, and it is free only while the bucket does not yet exist.
     decisionArtifactArn,
+    decisionArtifactBucketArn,
     projectResources: [
       bedrockProjectArn,
       ...(openAiBedrockProjectArn ? [openAiBedrockProjectArn] : []),
@@ -424,6 +445,7 @@ export function expectedBoundaryPolicyDocument(contract) {
   const {
     accountId,
     decisionArtifactArn,
+    decisionArtifactBucketArn,
     ecsExecutionRoleArns,
     kmsViaServices,
     lambdaExecutionRoleArns,
@@ -485,12 +507,13 @@ export function expectedBoundaryPolicyDocument(contract) {
             "kms:EncryptionContext:aws:lambda:FunctionArn":
               lambdaFunctionArn,
             "kms:EncryptionContext:SecretARN": secretArns,
-            // S3's SSE-KMS context key. Normally the object ARN; the BUCKET ARN
-            // when S3 Bucket Keys are enabled, which the trailing /* covers
-            // either way. Load-bearing, not defensive: removed, the artifact
-            // read simulates explicitDeny, because a decrypt carrying only this
-            // context matches none of the keys above and this deny fires.
-            "kms:EncryptionContext:aws:s3:arn": decisionArtifactArn,
+            // S3's SSE-KMS context key: the BUCKET ARN, because the bucket runs
+            // with Bucket Keys on. NOT the object glob — see where these two ARNs
+            // are derived for why that distinction is a deploy-breaking one.
+            // Load-bearing, not defensive: removed, the artifact read simulates
+            // explicitDeny, because a decrypt carrying only this context matches
+            // none of the keys above and this deny fires.
+            "kms:EncryptionContext:aws:s3:arn": decisionArtifactBucketArn,
           },
         },
       },
@@ -599,7 +622,7 @@ export function expectedBoundaryPolicyDocument(contract) {
         Resource: "*",
         Condition: {
           StringNotLikeIfExists: {
-            "kms:EncryptionContext:aws:s3:arn": decisionArtifactArn,
+            "kms:EncryptionContext:aws:s3:arn": decisionArtifactBucketArn,
           },
         },
       },

@@ -1434,7 +1434,7 @@ describe("slack approval infrastructure", () => {
     // matches a bucket an attacker creates FIRST in their own account —
     // simulated, PutObject on such a name came back `allowed`. The account id is
     // the disambiguating suffix a global namespace needs.
-    expect(name).toBe("mem9-on-aws-audit-123456789012");
+    expect(name).toBe("mem9-audit-123456789012");
     expect(name).not.toContain("*");
     expect(name).toContain("123456789012");
     // Lowercase letters, digits, and hyphens only, within S3's 63-char limit —
@@ -1467,6 +1467,16 @@ describe("slack approval infrastructure", () => {
     // Both KMS context values too: the write needs GenerateDataKey under the
     // `GenKey` deny, and the read needs Decrypt under `KmsContext`. A bucket name
     // that matched only one of the three would break exactly one direction.
+    //
+    // These pin the BARE BUCKET ARN, not the object glob, and that asymmetry with
+    // the resource scope above is the whole point of this assertion. S3 presents
+    // the bucket ARN as `aws:s3:arn` when bucket keys are enabled (S3 user guide,
+    // "Using SSE-KMS -> Encryption context"), and `bucket/*` does not match
+    // `bucket`. The first version of this test asserted `/*` on all three sites
+    // and passed while TC-163 pinned `bucketKeyEnabled: true` — two green tests
+    // describing a combination that denies every artifact write and read after
+    // deploy. Whichever way a future edit breaks the pair, one of these two tests
+    // now fails.
     const contextValues = boundary
       .filter(({ Sid }) => Sid === "KmsContext" || Sid === "GenKey")
       .map((statement) =>
@@ -1478,7 +1488,8 @@ describe("slack approval infrastructure", () => {
       );
     expect(contextValues).toHaveLength(2);
     for (const value of contextValues) {
-      expect(value).toBe(`arn:aws:s3:::${name}/*`);
+      expect(value).toBe(`arn:aws:s3:::${name}`);
+      expect(value).not.toMatch(/\/\*$/u);
     }
   });
 
@@ -1503,11 +1514,29 @@ describe("slack approval infrastructure", () => {
     expect(rule.applyServerSideEncryptionByDefault.kmsMasterKeyId).toBe(
       "alias/aws/s3",
     );
-    // Bucket keys are why the boundary's context value ends in `/*`: with them on,
-    // S3 may present the BUCKET arn instead of the object arn. Turn this off and
-    // the trailing wildcard is load-bearing for nothing; leave the wildcard off
-    // and turning this ON breaks the write. They are one decision, asserted here.
+    // Bucket keys change WHICH ARN S3 presents as `aws:s3:arn`: the bucket ARN
+    // with them on, the object ARN with them off (S3 user guide, "Using SSE-KMS ->
+    // Encryption context"). So this flag and the boundary's two context pins must
+    // agree, and TC-162 asserts the bucket-ARN half. Asserted from both sides
+    // because the mismatch is invisible until deploy: the earlier revision of this
+    // suite had bucket keys on here and `/*` there, both tests green, and every
+    // artifact write and read would have failed with a KMS AccessDenied.
     expect(rule.bucketKeyEnabled).toBe(true);
+    // Pin the coupling directly, so flipping the flag alone turns THIS test red
+    // rather than only the other one.
+    const contextArn = boundaryStatements()
+      .filter(({ Sid }) => Sid === "KmsContext" || Sid === "GenKey")
+      .map((statement) =>
+        resolveSub(
+          statement.Condition?.StringNotLikeIfExists?.[
+            "kms:EncryptionContext:aws:s3:arn"
+          ],
+        ),
+      );
+    expect(contextArn).toEqual([
+      `arn:aws:s3:::${bucketName}`,
+      `arn:aws:s3:::${bucketName}`,
+    ]);
   });
 
   it("TC-SLACKAPP-164: expires the artifact on the same 72h bound as the approval", async () => {

@@ -176,20 +176,27 @@ export const CLEANUP_CAP = 50;
  * a HARD cap (`Adjustable: False`) and a role carries exactly one boundary, so
  * that option does not exist here. The exact name costs zero extra bytes.
  *
- * Must stay byte-identical to the `Resources` NotResource entry and the two KMS
- * encryption-context values in
+ * The name is `mem9-audit-` and not the project's usual `mem9-on-aws-` prefix
+ * because the ARN renders three times in the boundary: seven characters of prefix
+ * cost 21 bytes against a 6144 HARD cap that the deployed document currently
+ * clears by 31. Nothing pins an S3 prefix for this project — the deploy role's
+ * `S3State` is `Resource: "*"` — so the shorter name costs no access.
+ *
+ * Must stay byte-identical to the `Resources` NotResource entry (as the object
+ * glob) and to the two KMS encryption-context values (as the BUCKET arn, since
+ * bucket keys are on) in
  * infra/cloudformation/workload-permissions-boundary.yaml. A drift here is an
  * AccessDenied at artifact-write time — after the click has been spent.
  */
 export function decisionArtifactBucketName(
   account: Output<string> | string,
 ): Output<string> {
-  // 12-digit account id + the 22-char literal = 34 chars, inside S3's 63-char
+  // 12-digit account id + the 11-char literal = 23 chars, inside S3's 63-char
   // bucket-name limit with room to spare, and lowercase/hyphen-only as S3
   // requires. $interpolate, never a template literal: an Output stringified into
   // one yields "Calling [toString] on an [Output<T>]" and would deploy a bucket
   // literally named that.
-  return $interpolate`mem9-on-aws-audit-${account}`;
+  return $interpolate`mem9-audit-${account}`;
 }
 
 /**
@@ -421,10 +428,17 @@ export function slackApproval(
   // neither, and the boundary already confines `kms:GenerateDataKey` to this
   // bucket's own encryption context (the `GenKey` deny).
   //
-  // Bucket keys ON: it collapses per-object KMS calls to per-bucket ones, which
-  // is why the boundary's `aws:s3:arn` context value ends in `/*` — with bucket
-  // keys enabled S3 may present the BUCKET arn rather than the object arn, and
-  // the trailing wildcard matches either.
+  // Bucket keys ON, which cuts KMS request cost by up to 99% — and which CHANGES
+  // the encryption context S3 presents. Per the S3 user guide ("Using SSE-KMS ->
+  // Encryption context"): without bucket keys the context is the object ARN; with
+  // them it is the BUCKET ARN. So this line and the boundary's two `aws:s3:arn`
+  // pins are one decision, not two. The boundary pins the bare bucket ARN for
+  // exactly this reason; `arn:aws:s3:::bucket/*` does NOT match
+  // `arn:aws:s3:::bucket`, and an earlier revision of this file paired bucket keys
+  // with the object glob — that combination simulates explicitDeny on both
+  // GenerateDataKey and Decrypt, i.e. every artifact write and read fails, and
+  // only after deploy. Flipping this to false without repinning the boundary
+  // breaks it the other way round.
   new aws.s3.BucketServerSideEncryptionConfigurationV2(
     "Mem9DecisionArtifactsEncryption",
     {

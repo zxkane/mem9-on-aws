@@ -492,8 +492,43 @@ const NO_VALUE = Symbol("AWS::NoValue");
 // branch and `!Ref OpenAiBedrockProjectArn` resolves to this value. Defaulting to
 // undefined keeps every existing caller on the unconfigured shape, which is what
 // the template's own parameter default produces.
-function resolveTemplateValue(value, openAiBedrockProjectArn) {
-  const recur = (child) => resolveTemplateValue(child, openAiBedrockProjectArn);
+// The template's own default, and what every structural assertion below reads
+// (`bySid("Ceilingr1")`). It is NOT what deploys: the guarded updater mints
+// `r$(Date.now())$(pid)`, so see WORST_CASE_POLICY_REVISION for the size gates.
+const FIXTURE_POLICY_REVISION = "r1";
+// The longest revision the template's own AllowedPattern admits. DERIVED from the
+// template rather than pinned as a literal, because a stale literal here is
+// exactly the bug this replaces: the size gates rendered the 2-character default
+// while the guarded updater mints `r$(Date.now())$(pid)` — 21 characters — and
+// read_policy_revision() reads back the last value written, so the document never
+// returns to the default. The revision reaches the document through
+// `Sid: !Sub Ceiling${PolicyRevision}`, so the gate was measuring a document 19
+// bytes smaller than the one IAM is asked to accept: it would pass at 6143 while
+// the deploy failed at 6162.
+//
+// Throw rather than fall back if the pattern's shape is unrecognized. A widened or
+// restructured pattern must re-derive this, and a silent default would restore the
+// stale-literal bug in a new costume.
+function worstCasePolicyRevision() {
+  const pattern = parseCloudFormation(boundaryTemplatePath).Parameters
+    .PolicyRevision.AllowedPattern;
+  const digits = /^\^r\[0-9\]\{1,(\d+)\}\$$/u.exec(pattern)?.[1];
+  if (!digits) {
+    throw new Error(
+      `unrecognized PolicyRevision AllowedPattern ${pattern}; re-derive the ` +
+        `worst-case revision the size gates must render`,
+    );
+  }
+  return `r${"9".repeat(Number(digits))}`;
+}
+
+function resolveTemplateValue(
+  value,
+  openAiBedrockProjectArn,
+  policyRevision = FIXTURE_POLICY_REVISION,
+) {
+  const recur = (child) =>
+    resolveTemplateValue(child, openAiBedrockProjectArn, policyRevision);
   if (Array.isArray(value)) {
     // A parsed `!If [HasOpenAiBedrockProject, ...]` node. Unconfigured, the
     // parameter defaults to "" so the condition is false → the else branch is
@@ -518,7 +553,7 @@ function resolveTemplateValue(value, openAiBedrockProjectArn) {
     .replaceAll("${AWS::AccountId}", accountId)
     .replaceAll("${AWS::URLSuffix}", "amazonaws.com")
     .replaceAll("${ApplicationRegion}", boundaryContract.applicationRegion)
-    .replaceAll("${PolicyRevision}", "r1")
+    .replaceAll("${PolicyRevision}", policyRevision)
     .replaceAll("${ProjectName}", "mem9-on-aws")
     .replaceAll("${GitHubRepo}", "mem9-on-aws");
 }
@@ -7575,11 +7610,12 @@ describe("boundary and deploy-role templates", () => {
   // Parse the template and resolve the boundary's policy document in one step.
   // Omitting openAiBedrockProjectArn yields the UNCONFIGURED shape, matching the
   // parameter's "" default; passing an ARN yields the shape the live account runs.
-  const boundaryPolicyDocument = (openAiBedrockProjectArn) =>
+  const boundaryPolicyDocument = (openAiBedrockProjectArn, policyRevision) =>
     resolveTemplateValue(
       parseCloudFormation(boundaryTemplatePath).Resources
         .WorkloadPermissionsBoundary.Properties.PolicyDocument,
       openAiBedrockProjectArn,
+      policyRevision,
     );
 
   it("declares a retained action and project-resource permissions ceiling", () => {
@@ -7701,7 +7737,7 @@ describe("boundary and deploy-role templates", () => {
       Condition: {
         StringNotLikeIfExists: {
           "kms:EncryptionContext:aws:s3:arn":
-            "arn:aws:s3:::mem9-on-aws-audit-123456789012/*",
+            "arn:aws:s3:::mem9-audit-123456789012",
         },
       },
     });
@@ -7730,7 +7766,7 @@ describe("boundary and deploy-role templates", () => {
           // decrypt carrying only this context matches none of the keys above and
           // this deny fires, which simulates as explicitDeny on GetObject.
           "kms:EncryptionContext:aws:s3:arn":
-            "arn:aws:s3:::mem9-on-aws-audit-123456789012/*",
+            "arn:aws:s3:::mem9-audit-123456789012",
         },
       },
     });
@@ -7994,7 +8030,11 @@ describe("boundary and deploy-role templates", () => {
   });
 
   it("keeps the boundary within the IAM managed-policy size quota", () => {
-    const size = JSON.stringify(boundaryPolicyDocument()).length;
+    // The worst-case revision, not the template default: `Ceiling${PolicyRevision}`
+    // carries it into the document, and the deploy script writes 21 characters.
+    const size = JSON.stringify(
+      boundaryPolicyDocument(undefined, worstCasePolicyRevision()),
+    ).length;
     expect(size).toBeLessThanOrEqual(6_144);
   });
 
@@ -8033,8 +8073,12 @@ describe("boundary and deploy-role templates", () => {
     expect(Object.keys(clause)).toEqual(["kms:EncryptionContext:aws:s3:arn"]);
     // Keyed to the artifact, and to nothing wider. `*` here would admit any
     // bucket's data key.
+    // The BARE bucket ARN, no trailing glob: bucket keys are enabled on the
+    // artifact bucket, and S3 then presents the bucket ARN as aws:s3:arn rather
+    // than the object ARN. `bucket/*` does not match `bucket`, so the object glob
+    // here simulates explicitDeny on every artifact WRITE.
     expect(clause["kms:EncryptionContext:aws:s3:arn"]).toBe(
-      "arn:aws:s3:::mem9-on-aws-audit-123456789012/*",
+      "arn:aws:s3:::mem9-audit-123456789012",
     );
     // The SSM path presents PARAMETER_ARN, never aws:s3:arn, which is why the
     // SecureString write cannot satisfy the clause above. Fold GenerateDataKey
@@ -8057,7 +8101,12 @@ describe("boundary and deploy-role templates", () => {
   it("scopes the decision artifact to an unsquattable bucket", () => {
     const document = expectedBoundaryPolicyDocument(boundaryContract);
     const bySid = (sid) => document.Statement.find((s) => s.Sid === sid);
-    const artifact = "arn:aws:s3:::mem9-on-aws-audit-123456789012/*";
+    // Two forms, and the split is load-bearing: S3's resource scope takes the
+    // OBJECT glob, the KMS encryption context takes the BUCKET arn (bucket keys are
+    // on, so S3 presents the bucket ARN). Asserting one form everywhere is how an
+    // earlier revision shipped a pair that denies every artifact read and write.
+    const artifactBucket = "arn:aws:s3:::mem9-audit-123456789012";
+    const artifact = `${artifactBucket}/*`;
     // S3 bucket names are a GLOBAL namespace, so a wildcard in the BUCKET segment
     // matches a bucket an attacker can create in their own account. Only the key
     // segment may carry one. This is the assertion that fails if someone
@@ -8088,7 +8137,7 @@ describe("boundary and deploy-role templates", () => {
       bySid("KmsContext").Condition.StringNotLikeIfExists[
         "kms:EncryptionContext:aws:s3:arn"
       ],
-    ).toBe(artifact);
+    ).toBe(artifactBucket);
     expect(
       asList(bySid("KmsVia").Condition.StringNotEqualsIfExists["kms:ViaService"]),
     ).toContain("s3.ap-northeast-1.amazonaws.com");
@@ -8167,21 +8216,27 @@ describe("boundary and deploy-role templates", () => {
   // set here (a 128-character id breaches even the real quota). It buys margin
   // against the fixture shape only.
   //
-  // The configured shape is 6119 bytes, so 25 is the current ceiling on this
-  // reserve, and it is set to exactly that. Every larger value was available
-  // before #150 spent the Sid reserve AND the singleton-array reserve on the
-  // decision-artifact grants; both are now gone. Pinning the gate to the live
-  // size costs the "fail with room left to react" property the reserve was
-  // created for — a 25-byte cushion fires on nearly any edit — and that is the
-  // honest state of this document rather than a choice: there is no room left to
-  // hold in reserve. Measured, so do not re-derive it: the reserve absorbs no
-  // library-vs-template delta. The rendered template and
-  // expectedBoundaryPolicyDocument() agree byte-for-byte (both 6119 configured,
-  // 6051 unconfigured), and the gate already resolves ap-northeast-1, the
-  // worst-case region — us-west-2 is 115 bytes shorter — so it is not a region
-  // cushion either. What it buys is early warning against the fixture shape, and
-  // the next statement to arrive will breach this gate and the hard quota within
-  // 25 bytes of each other.
+  // The configured shape is 6113 bytes AT THE REVISION THAT DEPLOYS, so 31 is the
+  // current ceiling on this reserve, and it is set to exactly that. The number was
+  // 6119/25 while these gates rendered the 2-character template default; both
+  // figures were wrong in opposite directions and nearly cancelled — the fixture
+  // document was 19 bytes cheaper than the deployed one, leaving 6 real bytes of
+  // headroom behind a gate that claimed 25. Renaming the artifact bucket
+  // (mem9-on-aws-audit- -> mem9-audit-, three renders, 21 bytes) is what bought
+  // the difference back.
+  //
+  // Measured, so do not re-derive it: the reserve absorbs no library-vs-template
+  // delta. The rendered template and expectedBoundaryPolicyDocument() agree
+  // byte-for-byte at BOTH revisions (6113/6094 configured, 6045/6026
+  // unconfigured), and the gate already resolves ap-northeast-1, the worst-case
+  // region — us-west-2 is 115 bytes shorter — so it is not a region cushion
+  // either. Every larger value was available before #150 spent the Sid reserve AND
+  // the singleton-array reserve on the decision-artifact grants; both are now
+  // gone. A 31-byte cushion fires on nearly any edit, which costs much of the
+  // "fail with room left to react" property the reserve was created for, and that
+  // is the honest state of this document rather than a choice: the next statement
+  // to arrive will breach this gate and the hard quota within 31 bytes of each
+  // other.
   //
   // This gate has now fired once, and the escape hatch the earlier note proposed
   // — "split the boundary across a second managed policy" — does not exist. A
@@ -8209,12 +8264,16 @@ describe("boundary and deploy-role templates", () => {
   // and a one-element array as different — that is why kmsViaServices[0] and the
   // Null clauses were left alone).
   //
-  // ONE formatting reserve remains: dropping Sids entirely, measured at 262 bytes
-  // even after the rename, most of it the `"Sid":"…",` skeleton rather than the
-  // names. It now conflicts with two things — this file's own uniqueness test and
+  // ONE formatting reserve remains: dropping Sids entirely, measured at 296 bytes
+  // on the deployed shape (277 at the fixture revision — the extra 19 are the long
+  // revision inside `Ceiling…`, which goes away with the Sid that carries it).
+  // Most of it is the `"Sid":"…",` skeleton rather than the 161 name characters. It
+  // conflicts with two things — this file's own uniqueness test and
   // verifyBoundaryPolicyDocument()'s Sid-keyed lookup — so it is a refactor of the
-  // verifier, not a deletion, and it costs this suite every bySid() call. After
-  // that, nothing: the next admission has to be paid for in SEMANTICS, by
+  // verifier, not a deletion, and it costs this suite every bySid() call. It also
+  // costs the drift-forcing mechanism: the guarded updater changes the document by
+  // rewriting `Ceiling${PolicyRevision}`, so removing Sids removes the only place
+  // the revision appears and something else has to carry it. After that, nothing: the next admission has to be paid for in SEMANTICS, by
   // narrowing or removing an existing grant, which is a security review rather
   // than a formatting pass. #150 already declined three such shortcuts on
   // measured evidence — collapsing the two Alert*Queue ARNs into one pattern
@@ -8223,7 +8282,7 @@ describe("boundary and deploy-role templates", () => {
   // enumerated actions (admits DeleteObject on the audit artifact).
   const OPENAI_PROJECT_ARN =
     "arn:aws:bedrock-mantle:us-west-2:123456789012:project/proj_openai";
-  const BOUNDARY_SIZE_RESERVE = 25;
+  const BOUNDARY_SIZE_RESERVE = 31;
 
   it("matches the contract library in the OpenAI-configured shape", () => {
     const document = boundaryPolicyDocument(OPENAI_PROJECT_ARN);
@@ -8243,9 +8302,32 @@ describe("boundary and deploy-role templates", () => {
 
   it("keeps the OpenAI-configured boundary inside the IAM size quota", () => {
     const size = JSON.stringify(
-      boundaryPolicyDocument(OPENAI_PROJECT_ARN),
+      boundaryPolicyDocument(OPENAI_PROJECT_ARN, worstCasePolicyRevision()),
     ).length;
     expect(size).toBeLessThanOrEqual(6_144 - BOUNDARY_SIZE_RESERVE);
+    // Exact, not merely under. The reserve is set to the ACTUAL slack, so pinning
+    // it keeps that number honest when bytes are reclaimed — and it kills the one
+    // mutation the inequality above cannot see: rendering the 2-character fixture
+    // revision here instead of the deployed one is 19 bytes cheaper and passes.
+    expect(6_144 - size).toBe(BOUNDARY_SIZE_RESERVE);
+  });
+
+  // The gate above is only as honest as the revision it renders, and the fixture
+  // default is 19 bytes shorter than what deploys. Assert the delta directly so a
+  // future edit cannot quietly point the gate back at the cheap document: this
+  // fails if the revision stops reaching the policy body at all (a `Sid` that no
+  // longer !Subs it), which is precisely the change that would make the gate
+  // measure the wrong thing again while every other assertion stayed green.
+  it("sizes the boundary against the revision the deploy script mints", () => {
+    const fixture = JSON.stringify(
+      boundaryPolicyDocument(OPENAI_PROJECT_ARN, FIXTURE_POLICY_REVISION),
+    ).length;
+    const deployed = JSON.stringify(
+      boundaryPolicyDocument(OPENAI_PROJECT_ARN, worstCasePolicyRevision()),
+    ).length;
+    expect(deployed - fixture).toBe(
+      worstCasePolicyRevision().length - FIXTURE_POLICY_REVISION.length,
+    );
   });
 
   it("keeps every deploy-role managed policy within the IAM size quota", () => {

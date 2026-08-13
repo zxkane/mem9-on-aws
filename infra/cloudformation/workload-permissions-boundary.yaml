@@ -142,8 +142,11 @@ Resources:
               # in THEIR account — simulated, PutObject on such a name came back
               # allowed, an exfiltration target for merged memory content. The
               # account id is the disambiguating suffix a global namespace needs,
-              # so the stage lives in the key prefix, not the bucket name.
-              - !Sub arn:${AWS::Partition}:s3:::mem9-on-aws-audit-${AWS::AccountId}/*
+              # so the stage lives in the key prefix, not the bucket name. This is
+              # the OBJECT glob, for S3's own resource scope; the two KMS
+              # encryption-context pins below use the BUCKET arn instead, and the
+              # difference is deploy-breaking rather than cosmetic.
+              - !Sub arn:${AWS::Partition}:s3:::mem9-audit-${AWS::AccountId}/*
           # The statement above scopes the write to the PROJECT prefix, i.e. every
           # stage's whole SSM tree. That is too wide for a write, and this ceiling
           # is the only control on it: identity policies are PR-authored, and the
@@ -178,10 +181,17 @@ Resources:
                   - !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-*-Mem9DbProxySecret-*
                   - !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-*-Mem9DbSecret-*
                   - !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-*-tenant-api-key-*
-                # S3's SSE-KMS context key: the object ARN, or the BUCKET ARN when
-                # S3 Bucket Keys are on, which the trailing /* covers either way.
+                # S3's SSE-KMS context key: the BUCKET arn, with NO trailing glob,
+                # because the artifact bucket runs with S3 Bucket Keys enabled.
+                # Documented AWS behavior (S3 user guide, "Using SSE-KMS ->
+                # Encryption context"): without bucket keys the context is the
+                # object ARN, WITH them it is the bucket ARN. An earlier revision
+                # pinned `.../*` here and claimed it covered both; it does not —
+                # `bucket/*` never matches `bucket`, so Decrypt simulated
+                # explicitDeny and every artifact read would have failed after
+                # deploy. Pinning both forms costs 6215 bytes, past the hard quota.
                 # Load-bearing — removed, the artifact read is explicitDeny.
-                "kms:EncryptionContext:aws:s3:arn": !Sub arn:${AWS::Partition}:s3:::mem9-on-aws-audit-${AWS::AccountId}/*
+                "kms:EncryptionContext:aws:s3:arn": !Sub arn:${AWS::Partition}:s3:::mem9-audit-${AWS::AccountId}
           - Sid: KmsVia
             Effect: Deny
             Action: kms:Decrypt
@@ -271,7 +281,7 @@ Resources:
             Resource: "*"
             Condition:
               StringNotLikeIfExists:
-                "kms:EncryptionContext:aws:s3:arn": !Sub arn:${AWS::Partition}:s3:::mem9-on-aws-audit-${AWS::AccountId}/*
+                "kms:EncryptionContext:aws:s3:arn": !Sub arn:${AWS::Partition}:s3:::mem9-audit-${AWS::AccountId}
           - Sid: LongBearer
             Effect: Deny
             Action: bedrock-mantle:CallWithBearerToken
