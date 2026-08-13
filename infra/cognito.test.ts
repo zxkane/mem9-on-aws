@@ -6,8 +6,23 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
  * client wiring and the SSM exports (client secret as SecureString, never plain).
  */
 
-function out<T>(value: T): { value: T; apply: (fn: (v: T) => unknown) => unknown } {
-  return { value, apply: (fn) => out(fn(value) as never) };
+interface TestOutput<T> {
+  value: T;
+  apply<U>(fn: (value: T) => U | TestOutput<U>): TestOutput<U>;
+}
+
+function isTestOutput<T>(value: T | TestOutput<T>): value is TestOutput<T> {
+  return typeof value === "object" && value !== null && "apply" in value;
+}
+
+function out<T>(value: T): TestOutput<T> {
+  return {
+    value,
+    apply<U>(fn: (input: T) => U | TestOutput<U>): TestOutput<U> {
+      const result = fn(value);
+      return isTestOutput(result) ? result : out(result);
+    },
+  };
 }
 
 interface Rec {
@@ -16,6 +31,11 @@ interface Rec {
 }
 let created: Rec[];
 let params: { name: string; type: string; value: unknown }[];
+let previousDomainPrefix: string | undefined;
+
+const ACCOUNT_ID = "123456789012";
+const REGION = "ap-northeast-1";
+const PROD_DERIVED_PREFIX = "mem9-eacc290a1cfb9bde8585";
 
 function installInterpolate() {
   (globalThis as Record<string, unknown>).$interpolate = (
@@ -49,11 +69,12 @@ function makeCtor(kind: string) {
   };
 }
 
-function installGlobals(stage: string) {
+function installGlobals(stage: string, accountId = ACCOUNT_ID, region = REGION) {
   (globalThis as Record<string, unknown>).$app = { name: "mem9-on-aws", stage };
   installInterpolate();
   (globalThis as Record<string, unknown>).aws = {
-    getRegionOutput: () => ({ name: out("ap-northeast-1") }),
+    getCallerIdentityOutput: () => ({ accountId: out(accountId) }),
+    getRegionOutput: () => ({ name: out(region) }),
     cognito: {
       UserPool: makeCtor("UserPool"),
       UserPoolDomain: makeCtor("UserPoolDomain"),
@@ -81,9 +102,16 @@ function installGlobals(stage: string) {
 beforeEach(() => {
   created = [];
   params = [];
+  previousDomainPrefix = process.env.MEM9_COGNITO_DOMAIN_PREFIX;
+  delete process.env.MEM9_COGNITO_DOMAIN_PREFIX;
 });
 afterEach(() => {
   for (const g of ["$app", "aws", "$interpolate"]) delete (globalThis as Record<string, unknown>)[g];
+  if (previousDomainPrefix === undefined) {
+    delete process.env.MEM9_COGNITO_DOMAIN_PREFIX;
+  } else {
+    process.env.MEM9_COGNITO_DOMAIN_PREFIX = previousDomainPrefix;
+  }
   vi.resetModules();
 });
 
@@ -158,8 +186,9 @@ describe("cognito stack", () => {
     cognito = await loadCognito();
     cognito();
     expect(byKind("UserPool")[0].args.name).toBe("pr-42-mem9-mcp");
-    // PR-stage domain gets the numeric suffix for deterministic re-deploys.
-    expect(byKind("UserPoolDomain")[0].args.domain).toBe("pr-42-mem9-mcp-42");
+    expect(
+      (byKind("UserPoolDomain")[0].args.domain as { value: string }).value,
+    ).toBe("mem9-464003a338eef415916e");
   });
 
   it("configures the pool for Hosted-UI (email schema + no forced re-verify)", async () => {
@@ -206,40 +235,71 @@ describe("cognito stack", () => {
     expect(out.revocationEndpoint).toBeDefined();
     expect(out.jwksUri).toBeDefined();
   });
+
+  it("TC-COGDOMAIN-014: preserves the configured production prefix", async () => {
+    process.env.MEM9_COGNITO_DOMAIN_PREFIX = "existing-prod-prefix";
+    installGlobals("prod");
+    const cognito = await loadCognito();
+    cognito();
+
+    expect(byKind("UserPoolDomain")[0].args.domain).toBe(
+      "existing-prod-prefix",
+    );
+  });
 });
 
-describe("cognitoDomainPrefix", () => {
+describe("Cognito domain prefix helpers", () => {
   // The module reads the SST-injected `aws` global at import time, so the stage
   // value here is irrelevant to these cases — the globals just have to exist.
-  async function loadPrefix() {
+  async function loadDomainHelpers() {
     installGlobals("prod");
     vi.resetModules();
-    return (await import("./cognito")).cognitoDomainPrefix;
+    const module = await import("./cognito");
+    return {
+      cognitoDomainOverride: module.cognitoDomainOverride,
+      cognitoDomainPrefix: module.cognitoDomainPrefix,
+    };
   }
 
-  it("defaults to the per-stage name, with the PR number on preview stages", async () => {
-    const cognitoDomainPrefix = await loadPrefix();
-    expect(cognitoDomainPrefix("prod", undefined)).toBe("prod-mem9-mcp");
-    expect(cognitoDomainPrefix("dev", undefined)).toBe("dev-mem9-mcp");
-    expect(cognitoDomainPrefix("pr-42", undefined)).toBe("pr-42-mem9-mcp-42");
+  it("TC-COGDOMAIN-001: derives a pinned stable default", async () => {
+    const { cognitoDomainPrefix } = await loadDomainHelpers();
+    const input = { accountId: ACCOUNT_ID, region: REGION, stage: "prod" };
+    expect(cognitoDomainPrefix(input)).toBe(PROD_DERIVED_PREFIX);
+    expect(cognitoDomainPrefix(input)).toBe(PROD_DERIVED_PREFIX);
+    expect(PROD_DERIVED_PREFIX).toMatch(/^mem9-[a-f0-9]{20}$/u);
   });
 
-  it("returns a configured override so a second AWS account can claim its own prefix", async () => {
-    const cognitoDomainPrefix = await loadPrefix();
-    // The default `prod-mem9-mcp` is unavailable once ANY account holds it, so a
-    // fork deploying prod must be able to choose a different global name.
-    expect(cognitoDomainPrefix("prod", "acme-mem9-mcp")).toBe("acme-mem9-mcp");
-    expect(cognitoDomainPrefix("prod", "  acme-mem9-mcp  ")).toBe("acme-mem9-mcp");
+  it("TC-COGDOMAIN-002/003/004: changes for every namespace input", async () => {
+    const { cognitoDomainPrefix } = await loadDomainHelpers();
+    const base = { accountId: ACCOUNT_ID, region: REGION, stage: "prod" };
+    expect(
+      cognitoDomainPrefix({ ...base, accountId: "test-account-two" }),
+    ).toBe("mem9-fd5620e61c7a89401f03");
+    expect(
+      cognitoDomainPrefix({ ...base, region: "us-west-2" }),
+    ).toBe("mem9-a0ae4801969aea22f95f");
+    expect(
+      cognitoDomainPrefix({ ...base, stage: "pr-42" }),
+    ).toBe("mem9-464003a338eef415916e");
   });
 
-  it("falls back to the default when the override is absent or blank", async () => {
-    const cognitoDomainPrefix = await loadPrefix();
-    expect(cognitoDomainPrefix("prod", "")).toBe("prod-mem9-mcp");
-    expect(cognitoDomainPrefix("prod", "   ")).toBe("prod-mem9-mcp");
+  it("TC-COGDOMAIN-010: returns a configured override", async () => {
+    const { cognitoDomainOverride } = await loadDomainHelpers();
+    expect(cognitoDomainOverride("acme-mem9-mcp")).toBe("acme-mem9-mcp");
+    expect(cognitoDomainOverride("  acme-mem9-mcp  ")).toBe(
+      "acme-mem9-mcp",
+    );
   });
 
-  it("rejects an override Cognito would refuse, at synth rather than mid-deploy", async () => {
-    const cognitoDomainPrefix = await loadPrefix();
+  it("TC-COGDOMAIN-011: falls back when the override is absent or blank", async () => {
+    const { cognitoDomainOverride } = await loadDomainHelpers();
+    expect(cognitoDomainOverride(undefined)).toBeUndefined();
+    expect(cognitoDomainOverride("")).toBeUndefined();
+    expect(cognitoDomainOverride("   ")).toBeUndefined();
+  });
+
+  it("TC-COGDOMAIN-012/013: validates Cognito syntax and reserved keywords", async () => {
+    const { cognitoDomainOverride } = await loadDomainHelpers();
     for (const invalid of [
       "Mem9-Prod", // uppercase
       "-mem9-prod", // leading hyphen
@@ -247,25 +307,21 @@ describe("cognitoDomainPrefix", () => {
       "mem9_prod", // underscore
       "mem9.prod", // dot
       "a".repeat(64), // 64 chars, one over the limit
+      "aws",
+      "acme-amazon-auth",
+      "my-cognito-login",
     ]) {
-      expect(() => cognitoDomainPrefix("prod", invalid)).toThrow(
+      expect(() => cognitoDomainOverride(invalid)).toThrow(
         /MEM9_COGNITO_DOMAIN_PREFIX/u,
       );
     }
-    // The boundary lengths themselves are valid.
-    expect(cognitoDomainPrefix("prod", "a")).toBe("a");
-    expect(cognitoDomainPrefix("prod", "a".repeat(63))).toBe("a".repeat(63));
+    expect(cognitoDomainOverride("a")).toBe("a");
+    expect(cognitoDomainOverride("a".repeat(63))).toBe("a".repeat(63));
   });
 
-  it("reads MEM9_COGNITO_DOMAIN_PREFIX from the environment by default", async () => {
-    const cognitoDomainPrefix = await loadPrefix();
-    const previous = process.env.MEM9_COGNITO_DOMAIN_PREFIX;
+  it("TC-COGDOMAIN-010: reads the override from the environment", async () => {
+    const { cognitoDomainOverride } = await loadDomainHelpers();
     process.env.MEM9_COGNITO_DOMAIN_PREFIX = "acme-mem9-mcp";
-    try {
-      expect(cognitoDomainPrefix("prod")).toBe("acme-mem9-mcp");
-    } finally {
-      if (previous === undefined) delete process.env.MEM9_COGNITO_DOMAIN_PREFIX;
-      else process.env.MEM9_COGNITO_DOMAIN_PREFIX = previous;
-    }
+    expect(cognitoDomainOverride()).toBe("acme-mem9-mcp");
   });
 });
