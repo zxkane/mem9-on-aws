@@ -331,7 +331,10 @@ transaction.
 After exact allowlist validation, the façade redirects to the client URL. It
 also wraps the Cognito authorization code in a short-lived signature so token
 exchange must present the same client redirect URL. The interactive OAuth
-client remains read-only.
+client advertises both `mem9-mcp/read` and `mem9-mcp/write`; clients may request
+either scope or both. The Gateway accepts tokens carrying at least one of those
+scopes, filters tool discovery, and requires `read` for searches and ingest
+status or `write` for memory and transcript ingestion.
 
 ### Optional production custom domain
 
@@ -853,7 +856,8 @@ Keep normal clients behind the write fence and run the existing hard-fail
 synthetic write/search probe after cutover. It writes only a generated marker
 and does not inspect existing memory content. The script first waits for ECS
 service stability, verifies every running task uses the active task definition,
-and verifies that task definition targets the restored cluster.
+verifies that task definition targets the restored cluster, then proves that
+read-only and write-only tokens see only their tools and cannot cross scopes.
 
 ```bash
 STAGE=prod \

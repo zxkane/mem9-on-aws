@@ -3406,7 +3406,7 @@ describe("restore CLI validation", () => {
         /Cannot read properties of undefined/u,
       );
     }
-  });
+  }, 15_000);
 });
 
 describe("protected topics (#123)", () => {

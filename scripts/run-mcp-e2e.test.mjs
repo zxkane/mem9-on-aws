@@ -171,7 +171,16 @@ const url = args.find((arg) => arg.startsWith("https://")) ?? "";
 const body = option("-d") ?? "";
 
 if (url.includes("token.example.com")) {
-  console.log(JSON.stringify({ access_token: "fixture-jwt", expires_in: 3600 }));
+  const scope = decodeURIComponent(
+    new URLSearchParams(body).get("scope") ?? "",
+  );
+  const token =
+    scope === "mem9/read"
+      ? "fixture-read-jwt"
+      : scope === "mem9/write"
+        ? "fixture-write-jwt"
+        : "fixture-combined-jwt";
+  console.log(JSON.stringify({ access_token: token, expires_in: 3600 }));
   process.exit(0);
 }
 
@@ -180,19 +189,47 @@ if (headerFile) writeFileSync(headerFile, "HTTP/1.1 200 OK\\r\\nContent-Type: ap
 
 const request = JSON.parse(body || "{}");
 const reply = (result) => console.log(JSON.stringify({ jsonrpc: "2.0", id: 1, result }));
+const reject = () =>
+  console.log(JSON.stringify({
+    jsonrpc: "2.0",
+    id: 1,
+    error: { code: -32003, message: "Insufficient OAuth scope" },
+  }));
 const payload = (value) => ({ isError: false, content: [{ type: "text", text: JSON.stringify(value) }] });
+const authorization = args
+  .flatMap((arg, index) => (arg === "-H" ? [args[index + 1]] : []))
+  .find((header) => header?.toLowerCase().startsWith("authorization:")) ?? "";
+const readOnly = authorization.includes("fixture-read-jwt");
+const writeOnly = authorization.includes("fixture-write-jwt");
 
 if (request.method === "initialize") {
   reply({ protocolVersion: "2025-03-26", capabilities: {}, serverInfo: { name: "fixture", version: "1" } });
 } else if (request.method === "tools/list") {
   // Namespaced exactly as AgentCore Gateway exposes OpenAPI targets.
-  reply({ tools: [
+  const tools = [
     { name: "fixture-mem9-rest___add_memory" },
     { name: "fixture-mem9-rest___search_memories" },
-  ] });
+    { name: "fixture-mem9-rest___ingest_messages" },
+    { name: "fixture-mem9-rest___get_ingest_job_status" },
+  ];
+  reply({
+    tools: tools.filter(({ name }) =>
+      readOnly
+        ? name.endsWith("search_memories") || name.endsWith("get_ingest_job_status")
+        : writeOnly
+          ? name.endsWith("add_memory") || name.endsWith("ingest_messages")
+          : true
+    ),
+  });
 } else if (request.method === "tools/call") {
   const { name, arguments: callArgs } = request.params;
-  if (name.endsWith("add_memory")) {
+  const readTool =
+    name.endsWith("search_memories") || name.endsWith("get_ingest_job_status");
+  const writeTool =
+    name.endsWith("add_memory") || name.endsWith("ingest_messages");
+  if ((readOnly && writeTool) || (writeOnly && readTool)) {
+    reject();
+  } else if (name.endsWith("add_memory")) {
     reply(payload({ status: "accepted" }));
   } else if (callArgs.q === process.env.MOCK_MARKER) {
     // Keyword probe: the exact marker always resolves.
@@ -263,6 +300,75 @@ function toolCalls(callRecords) {
     })
     .filter((request) => request?.method === "tools/call");
 }
+
+function curlRequests(callRecords) {
+  return callRecords
+    .filter(([tool]) => tool === "curl")
+    .map((args) => {
+      const bodyIndex = args.indexOf("-d");
+      if (bodyIndex === -1) return null;
+      let request;
+      try {
+        request = JSON.parse(args[bodyIndex + 1]);
+      } catch {
+        return null;
+      }
+      const headers = args.flatMap((arg, index) =>
+        arg === "-H" ? [args[index + 1]] : [],
+      );
+      return { headers, request };
+    })
+    .filter(Boolean);
+}
+
+describe("Gateway scope enforcement", () => {
+  it("requests combined, read-only, and write-only Cognito tokens", () => {
+    const { callRecords, result } = runFixture();
+    expect(result.status, result.stderr).toBe(0);
+
+    const tokenScopes = callRecords
+      .filter(
+        ([tool, ...args]) =>
+          tool === "curl" &&
+          args.some((arg) => arg.includes("token.example.com")),
+      )
+      .map(([, ...args]) => {
+        const body = args[args.indexOf("-d") + 1];
+        return decodeURIComponent(new URLSearchParams(body).get("scope"));
+      });
+    expect(tokenScopes).toEqual([
+      "mem9/read mem9/write",
+      "mem9/read",
+      "mem9/write",
+    ]);
+  });
+
+  it("probes cross-scope calls with the restricted tokens", () => {
+    const { callRecords, result } = runFixture();
+    expect(result.status, result.stderr).toBe(0);
+
+    const requests = curlRequests(callRecords);
+    expect(
+      requests.some(
+        ({ headers, request }) =>
+          headers.includes("Authorization: Bearer fixture-read-jwt") &&
+          request.method === "tools/call" &&
+          request.params.name.endsWith("add_memory"),
+      ),
+    ).toBe(true);
+    expect(
+      requests.some(
+        ({ headers, request }) =>
+          headers.includes("Authorization: Bearer fixture-write-jwt") &&
+          request.method === "tools/call" &&
+          request.params.name.endsWith("search_memories"),
+      ),
+    ).toBe(true);
+    expect(result.stdout).toContain(
+      "Gateway scope filtering and cross-scope rejection verified",
+    );
+  });
+});
 
 describe("natural-language recall probe (TC-RECALL-031)", () => {
   it("queries with no run-scoped literal, so the probe tests the cutoff and not retrieval", () => {

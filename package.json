@@ -12,17 +12,17 @@
     "test:cleanup:coverage": "vitest run scripts/memory-cleanup.test.mjs --coverage.enabled=true --coverage.include=scripts/memory-cleanup.mjs --coverage.reporter=text --coverage.thresholds.lines=80 --coverage.thresholds.functions=80 --coverage.thresholds.statements=80 --coverage.thresholds.branches=80"
   },
   "devDependencies": {
-    "@aws-sdk/client-secrets-manager": "^3.1100.0",
-    "@aws-sdk/client-servicediscovery": "^3.1100.0",
-    "@aws-sdk/client-sns": "^3.1100.0",
-    "@aws-sdk/client-ssm": "^3.1092.0",
-    "@aws-sdk/credential-providers": "^3.1100.0",
+    "@aws-sdk/client-secrets-manager": "^3.1109.0",
+    "@aws-sdk/client-servicediscovery": "^3.1109.0",
+    "@aws-sdk/client-sns": "^3.1109.0",
+    "@aws-sdk/client-ssm": "^3.1109.0",
+    "@aws-sdk/credential-providers": "^3.1109.0",
     "@aws/bedrock-token-generator": "^1.1.0",
-    "@types/node": "^24.0.0",
+    "@types/node": "^24.13.3",
     "@vitest/coverage-v8": "^4.1.10",
-    "pg": "^8.16.3",
-    "typescript": "^5.7.2",
+    "pg": "^8.23.0",
+    "typescript": "^7.0.2",
     "vitest": "^4.1.10",
-    "yaml": "^2.8.1"
+    "yaml": "^2.9.0"
   }
 }

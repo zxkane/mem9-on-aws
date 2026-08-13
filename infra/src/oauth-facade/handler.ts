@@ -318,11 +318,9 @@ export async function route(
         "client_secret_basic",
         "client_secret_post",
       ],
-      // Advertise only what the reader client actually allows: openid + email
-      // + the read resource scope. `profile` and the `write` scope are NOT in
-      // the reader client's allowedOauthScopes, so advertising them here would
-      // make a client that requests the full set fail Cognito's authorize step
-      // with `invalid_scope`.
+      // Advertise exactly what the browser client allows: openid + email + both
+      // resource scopes. The Gateway interceptor enforces each tool's required
+      // read or write scope.
       scopes_supported: ["openid", "email", ...cfg.resourceScopes],
     });
   }
@@ -344,8 +342,8 @@ export async function route(
       id_token_signing_alg_values_supported: ["RS256"],
       code_challenge_methods_supported: ["S256"],
       grant_types_supported: ["authorization_code", "refresh_token"],
-      // Aligned with the reader client's allowedOauthScopes (no `profile`, no
-      // `write`) — see the oauth-authorization-server metadata above.
+      // Aligned with the browser client's allowedOauthScopes (no `profile`) —
+      // see the oauth-authorization-server metadata above.
       scopes_supported: ["openid", "email", ...cfg.resourceScopes],
     });
   }
@@ -775,10 +773,23 @@ export async function route(
   });
   const respBody = await upstreamResp.text();
 
-  // Rewrite WWW-Authenticate so resource_metadata points back at the façade.
+  // Rewrite WWW-Authenticate so resource_metadata points back at the façade,
+  // preserving OAuth error and scope parameters from the Gateway.
   if (respHeaders["www-authenticate"]) {
-    respHeaders["www-authenticate"] =
-      `Bearer resource_metadata="${base}/.well-known/oauth-protected-resource"`;
+    const resourceMetadata =
+      `resource_metadata="${base}/.well-known/oauth-protected-resource"`;
+    const challenge = respHeaders["www-authenticate"].trim();
+    if (/^Bearer(?:\s|$)/iu.test(challenge)) {
+      const resourcePattern =
+        /\bresource_metadata=(?:"[^"]*"|[^,\s]*)/iu;
+      respHeaders["www-authenticate"] = resourcePattern.test(challenge)
+        ? challenge.replace(resourcePattern, resourceMetadata)
+        : /^Bearer\s*$/iu.test(challenge)
+          ? `Bearer ${resourceMetadata}`
+          : `${challenge}, ${resourceMetadata}`;
+    } else {
+      respHeaders["www-authenticate"] = `Bearer ${resourceMetadata}`;
+    }
   }
 
   return {

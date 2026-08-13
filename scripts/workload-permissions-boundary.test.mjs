@@ -8347,7 +8347,7 @@ describe("boundary and deploy-role templates", () => {
       "shellcheck scripts/rollout-workload-permissions-boundary.sh",
     );
     expect(workflow).toContain("uses: pulumi/actions@v7");
-    expect(workflow).toContain("pulumi-version: 3.215.0");
+    expect(workflow).toContain("pulumi-version: 3.256.0");
     expect(workflow).not.toContain("sst install --config");
     expect(workflow).not.toContain("Cache SST/Pulumi runtime");
     expect(workflow).not.toContain("node scripts/scan-public-artifacts.mjs");

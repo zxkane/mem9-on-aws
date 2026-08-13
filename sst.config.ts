@@ -36,6 +36,7 @@ export default $config({
       home: "aws",
       providers: {
         aws: {
+          version: "7.41.0",
           region: "ap-northeast-1",
           defaultTags: {
             tags: {
@@ -48,16 +49,15 @@ export default $config({
         // Avoid initializing the Cloudflare client for preview stages, which
         // intentionally never receive the production DNS token.
         ...(cloudflareEnabled
-          ? { cloudflare: { version: "6.15.0" } }
+          ? { cloudflare: { version: "6.19.0" } }
           : {}),
         // The `random` provider exposes the stable tenant RandomId and the
         // non-production OAuth RandomPassword. It must be declared here for the
         // global to bind at run() (SST only injects a provider's namespace when
         // it is in this block). Pulumi-internal (no cloud API) → no deploy-role
         // IAM. Version pinned explicitly (SST v4.17 rejects `random: true` —
-        // "Specify the version explicitly"); 4.16.6 matches the @pulumi/random
-        // version SST bundles for sst.aws.Aurora's RandomPassword.
-        random: { version: "4.16.6" },
+        // "Specify the version explicitly").
+        random: { version: "4.21.1" },
         // The `command` provider exposes the `command` global (command.local.Command)
         // used by infra/gateway.ts to provision the AgentCore GatewayTarget via the
         // DIRECT bedrock-agentcore-control API (infra/gateway/provision-target.mjs).
@@ -66,7 +66,7 @@ export default $config({
         // The Command runs on the deploy host (no cloud
         // resource of its own, so it adds no deploy-role IAM beyond the
         // bedrock-agentcore API grants used by the script). Version pinned explicitly.
-        command: { version: "1.0.1" },
+        command: { version: "1.2.1" },
       },
     };
   },

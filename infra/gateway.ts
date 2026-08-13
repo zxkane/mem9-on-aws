@@ -20,15 +20,19 @@
  * bedrock-agentcore-control `CreateGatewayTarget` API (infra/gateway/
  * provision-target.mjs) with `targetConfiguration.mcp.lambda`. The Command wrapper
  * gives a create→poll-READY→delete lifecycle + a dependsOn edge on the Lambda.
- * v1 has NO interceptor Lambda (single-operator, single-tenant → per-tool scoping
- * deferred).
+ * The proxy Lambda also runs as the Gateway's request/response interceptor:
+ * requests are authorized per tool and tools/list is filtered by OAuth scope.
  */
 
 import * as fs from "fs";
 import * as path from "path";
 import { fileURLToPath } from "url";
 import { resolveVpc } from "./vpc";
-import type { CognitoOutputs } from "./cognito";
+import {
+  MCP_RESOURCE_SCOPES,
+  MCP_TOOL_SCOPES,
+  type CognitoOutputs,
+} from "./cognito";
 import type { EcsOutputs } from "./ecs";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 
@@ -169,6 +173,7 @@ export function gateway(
   const gatewayAssetDir = fs.existsSync(path.join(moduleGatewayDir, "proxy-handler.mjs"))
     ? moduleGatewayDir
     : path.resolve(process.cwd(), "infra", "gateway");
+  const tenantKey = identity.tenantId;
 
   // --- Proxy Lambda (VPC-attached, nodejs24.x) ---
   // An `sst.aws.Function` (not a raw aws.lambda.Function): SST zips the handler,
@@ -189,7 +194,8 @@ export function gateway(
     },
     environment: {
       MEM9_SERVER_BASE_URL: $interpolate`http://${ecsOut.serviceDnsName}:${MNEMO_PORT}`,
-      MEM9_API_KEY: identity.tenantId,
+      MEM9_API_KEY: tenantKey,
+      MEM9_TOOL_SCOPES: JSON.stringify(MCP_TOOL_SCOPES),
     },
   });
 
@@ -213,7 +219,7 @@ export function gateway(
   // only lambda:InvokeFunction on that one function. (No workload-identity / secret
   // / ENI grants — those were for the removed API-key credential provider + the
   // managed-Lattice ENI path.)
-  new awsAny.iam.RolePolicy("Mem9GatewayInvokeLambda", {
+  const gatewayInvokePolicy = new awsAny.iam.RolePolicy("Mem9GatewayInvokeLambda", {
     role: gatewayServiceRole.name,
     policy: proxyFn.arn.apply((arn: string) =>
       JSON.stringify({
@@ -241,12 +247,23 @@ export function gateway(
           discoveryUrl: $interpolate`${cognitoOut.issuer}/.well-known/openid-configuration`,
           // Trust BOTH the M2M client (CI/headless) AND the browser-login reader client.
           allowedClients: [...cognitoOut.allowedClientIds, readerClientId],
+          // Gateway admission is OR-based: a token must carry at least one of
+          // these scopes. The interceptor below then enforces the tool-specific
+          // read or write scope.
+          allowedScopes: [...MCP_RESOURCE_SCOPES],
         },
       },
+      interceptorConfigurations: [
+        {
+          interceptionPoints: ["REQUEST", "RESPONSE"],
+          interceptor: { lambda: { arn: proxyFn.arn } },
+          inputConfiguration: { passRequestHeaders: true },
+        },
+      ],
       protocolConfiguration: { mcp: { supportedVersions: ["2025-03-26"] } },
       tags,
     },
-    { dependsOn: [gatewayServiceRole] },
+    { dependsOn: [gatewayServiceRole, gatewayInvokePolicy] },
   );
 
   // --- Gateway Target (Lambda) ---

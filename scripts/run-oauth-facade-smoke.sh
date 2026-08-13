@@ -24,6 +24,7 @@ echo "$AS" | jq -e '.token_endpoint | endswith("/oauth/token")' >/dev/null || { 
 echo "$AS" | jq -e '.code_challenge_methods_supported == ["S256"]' >/dev/null || { echo "::error::S256 not advertised"; exit 1; }
 echo "$AS" | jq -e '.registration_endpoint | endswith("/register")' >/dev/null || { echo "::error::no registration_endpoint"; exit 1; }
 echo "$AS" | jq -e '.token_endpoint_auth_methods_supported | index("none")' >/dev/null || { echo "::error::public-client auth method \"none\" not in token_endpoint_auth_methods_supported"; exit 1; }
+echo "$AS" | jq -e '(["mem9-mcp/read", "mem9-mcp/write"] - (.scopes_supported // [])) | length == 0' >/dev/null || { echo "::error::authorization-server metadata must advertise read and write scopes"; exit 1; }
 
 echo "run-oauth-facade-smoke: checking /.well-known/oauth-protected-resource"
 PR=$(curl -fsS "${FACADE}/.well-known/oauth-protected-resource")
@@ -66,6 +67,7 @@ if [[ "$AS_ISSUER" != "$ADVERTISED_AS" ]]; then
 fi
 OIDC=$(curl -fsS "${FACADE}/.well-known/openid-configuration")
 echo "$OIDC" | jq -e '(.issuer // "") != ""' >/dev/null || { echo "::error::openid-configuration .issuer is missing or empty"; exit 1; }
+echo "$OIDC" | jq -e '(["mem9-mcp/read", "mem9-mcp/write"] - (.scopes_supported // [])) | length == 0' >/dev/null || { echo "::error::OIDC metadata must advertise read and write scopes"; exit 1; }
 OIDC_ISSUER=$(echo "$OIDC" | jq -r '.issuer')
 if [[ "$OIDC_ISSUER" != "$ADVERTISED_AS" ]]; then
   echo "::error::OIDC discovery issuer (${OIDC_ISSUER}) != authorization_servers[0] (${ADVERTISED_AS}) — clients discovering via openid-configuration will refuse this façade"
@@ -78,6 +80,7 @@ DCR=$(curl -fsS -X POST -H 'Content-Type: application/json' -d '{"redirect_uris"
 echo "$DCR" | jq -e '.client_id | length > 0' >/dev/null || { echo "::error::DCR did not return client_id"; exit 1; }
 echo "$DCR" | jq -e 'has("client_secret") | not' >/dev/null || { echo "::error::DCR must NOT return client_secret (public client)"; exit 1; }
 echo "$DCR" | jq -e '.token_endpoint_auth_method == "none"' >/dev/null || { echo "::error::DCR token_endpoint_auth_method must be \"none\""; exit 1; }
+echo "$DCR" | jq -e '(.scope | split(" ")) as $scopes | (["mem9-mcp/read", "mem9-mcp/write"] - $scopes) | length == 0' >/dev/null || { echo "::error::DCR must return read and write scopes"; exit 1; }
 
 echo "run-oauth-facade-smoke: checking /oauth/authorize state cookie"
 AUTH_HEADERS=$(mktemp)
@@ -90,7 +93,7 @@ AUTH_STATUS=$(
     --data-urlencode 'response_type=code' \
     --data-urlencode "client_id=${CLIENT_ID}" \
     --data-urlencode 'redirect_uri=http://localhost:8080/cb' \
-    --data-urlencode 'scope=mem9-mcp/read' \
+    --data-urlencode 'scope=mem9-mcp/read mem9-mcp/write' \
     --data-urlencode 'code_challenge=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' \
     --data-urlencode 'code_challenge_method=S256' \
     --data-urlencode "state=${LONG_STATE}" \

@@ -56,7 +56,7 @@ describe("sst.config.ts locked facts", () => {
       /const cloudflareEnabled =\s*input\?\.stage === ["']prod["']\s*&&\s*Boolean\(process\.env\.MEM9_FACADE_CUSTOM_DOMAIN\?\.trim\(\)\)\s*&&\s*Boolean\(process\.env\.CLOUDFLARE_API_TOKEN\?\.trim\(\)\)/u,
     );
     expect(src).toMatch(
-      /\.\.\.\(cloudflareEnabled\s*\?\s*\{\s*cloudflare:\s*\{\s*version:\s*["']6\.15\.0["']\s*\}\s*\}\s*:\s*\{\}\)/u,
+      /\.\.\.\(cloudflareEnabled\s*\?\s*\{\s*cloudflare:\s*\{\s*version:\s*["']6\.19\.0["']\s*\}\s*\}\s*:\s*\{\}\)/u,
     );
   });
 

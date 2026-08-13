@@ -10,11 +10,12 @@
 # Steps:
 #   1. Wait for the ECS service to stabilize and verify every running task uses
 #      the service's active task definition.
-#   2. Read the Cognito token endpoint + client id/secret + scope, and the Gateway
+#   2. Read the Cognito token endpoint + client id/secret + scopes, and the Gateway
 #      MCP URL, from the stage's SSM parameters.
-#   3. Mint a Cognito `client_credentials` JWT at the token endpoint.
-#   4. Call the `add_memory` MCP tool via the Gateway (JSON-RPC `tools/call`).
-#   5. Poll the `search_memories` tool until the written memory surfaces — mem9
+#   3. Mint combined, read-only, and write-only Cognito `client_credentials` JWTs.
+#   4. Verify tools/list filtering and cross-scope tools/call rejection.
+#   5. Call the `add_memory` MCP tool via the Gateway (JSON-RPC `tools/call`).
+#   6. Poll the `search_memories` tool until the written memory surfaces — mem9
 #      ingest is ASYNC (a write returns "accepted"; it's searchable seconds later),
 #      so this retries up to ~5 min before failing.
 #
@@ -108,26 +109,47 @@ echo "run-mcp-e2e: reading MCP config from SSM ${PREFIX}/{cognito,gateway}/* (re
 TOKEN_ENDPOINT=$(ssm "${PREFIX}/cognito/token-endpoint")
 CLIENT_ID=$(ssm "${COGNITO_CLIENT_PREFIX}/client-id")
 CLIENT_SECRET=$(ssm "${COGNITO_CLIENT_PREFIX}/client-secret")
-SCOPE=$(ssm "${PREFIX}/cognito/scope")
+AVAILABLE_SCOPES=$(ssm "${PREFIX}/cognito/scope")
 GATEWAY_URL=$(ssm "${PREFIX}/gateway/url")
 
-if [[ -z "$TOKEN_ENDPOINT" || -z "$CLIENT_ID" || -z "$GATEWAY_URL" ]]; then
+if [[ -z "$TOKEN_ENDPOINT" || -z "$CLIENT_ID" || -z "$AVAILABLE_SCOPES" || -z "$GATEWAY_URL" ]]; then
   echo "::error::missing MCP SSM params under ${PREFIX} — has sst deploy run for this stage?"
   exit 1
 fi
 
-# 2. Mint the M2M JWT (client_credentials). Cognito wants form-encoded creds.
-echo "run-mcp-e2e: minting Cognito M2M token at ${TOKEN_ENDPOINT}"
-TOKEN_RESP=$(curl -fsS -X POST "$TOKEN_ENDPOINT" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -u "${CLIENT_ID}:${CLIENT_SECRET}" \
-  -d "grant_type=client_credentials&scope=$(printf '%s' "$SCOPE" | sed 's/ /%20/g')" 2>&1) || {
-    echo "::error::Cognito token request failed: $TOKEN_RESP"; exit 1; }
-JWT=$(printf '%s' "$TOKEN_RESP" | jq -r '.access_token // ""')
-if [[ -z "$JWT" || "$JWT" == "null" ]]; then
-  echo "::error::no access_token in Cognito response: $TOKEN_RESP"; exit 1
+# 2. Mint the M2M JWTs (client_credentials). The subset tokens prove that the
+# Gateway's allowedScopes is OR-based and that the interceptor enforces the
+# selected tool scope after admission.
+READ_SCOPE=$(printf '%s' "$AVAILABLE_SCOPES" | tr ' ' '\n' | grep '/read$' | head -1 || true)
+WRITE_SCOPE=$(printf '%s' "$AVAILABLE_SCOPES" | tr ' ' '\n' | grep '/write$' | head -1 || true)
+if [[ -z "$READ_SCOPE" || -z "$WRITE_SCOPE" ]]; then
+  echo "::error::Cognito scope parameter must contain read and write scopes: ${AVAILABLE_SCOPES}"
+  exit 1
 fi
-echo "run-mcp-e2e: got JWT (len ${#JWT})"
+
+mint_token() { # $1 = space-delimited requested scopes
+  local requested_scopes="$1" token_resp token
+  token_resp=$(curl -fsS -X POST "$TOKEN_ENDPOINT" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    -u "${CLIENT_ID}:${CLIENT_SECRET}" \
+    -d "grant_type=client_credentials&scope=$(printf '%s' "$requested_scopes" | sed 's/ /%20/g')" 2>&1) || {
+      echo "::error::Cognito token request failed for requested scopes '${requested_scopes}': $token_resp" >&2
+      return 1
+    }
+  token=$(printf '%s' "$token_resp" | jq -r '.access_token // ""')
+  if [[ -z "$token" || "$token" == "null" ]]; then
+    echo "::error::no access_token for requested scopes '${requested_scopes}': $token_resp" >&2
+    return 1
+  fi
+  printf '%s' "$token"
+}
+
+echo "run-mcp-e2e: minting combined, read-only, and write-only Cognito M2M tokens at ${TOKEN_ENDPOINT}"
+COMBINED_JWT=$(mint_token "$AVAILABLE_SCOPES")
+READ_JWT=$(mint_token "$READ_SCOPE")
+WRITE_JWT=$(mint_token "$WRITE_SCOPE")
+JWT="$COMBINED_JWT"
+echo "run-mcp-e2e: got scoped JWTs"
 
 # A unique marker so the search unambiguously finds THIS run's memory.
 MARKER="mcp-e2e-${STAGE}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}"
@@ -191,10 +213,63 @@ if [[ -z "$ADD_TOOL" || -z "$SEARCH_TOOL" ]]; then
   echo "::error::Gateway tools/list did not expose add_memory/search_memories. tools/list result: $(printf '%s' "$TOOLS_JSON" | head -c 500)"
   exit 1
 fi
+COMBINED_SESSION="$MCP_SESSION"
 
 tools_call() {  # $1 = tool name, $2 = args JSON → sets MCP_RESP
   mcp_post "tools/call" "$(jq -nc --arg name "$1" --argjson args "$2" '{name:$name, arguments:$args}')"
 }
+
+scope_tools_list() { # $1 = token → sets SCOPED_TOOLS_JSON
+  JWT="$1"
+  MCP_SESSION=""
+  mcp_post "initialize" '{"protocolVersion":"2025-03-26","capabilities":{},"clientInfo":{"name":"mem9-scope-e2e","version":"1"}}'
+  mcp_post "tools/list" '{}'
+  SCOPED_TOOLS_JSON=$(printf '%s' "$MCP_RESP" | mcp_result)
+}
+
+assert_tool_visible() { # $1 = scope label, $2 = tool suffix
+  if ! printf '%s' "$SCOPED_TOOLS_JSON" | jq -e --arg suffix "$2" \
+    'any((.tools // [])[]; .name | endswith($suffix))' >/dev/null; then
+    echo "::error::$1 tools/list omitted required $2 tool: $(printf '%s' "$SCOPED_TOOLS_JSON" | head -c 500)"
+    exit 1
+  fi
+}
+
+assert_tool_hidden() { # $1 = scope label, $2 = tool suffix
+  if printf '%s' "$SCOPED_TOOLS_JSON" | jq -e --arg suffix "$2" \
+    'any((.tools // [])[]; .name | endswith($suffix))' >/dev/null; then
+    echo "::error::$1 tools/list exposed forbidden $2 tool: $(printf '%s' "$SCOPED_TOOLS_JSON" | head -c 500)"
+    exit 1
+  fi
+}
+
+assert_cross_scope_denied() { # $1 = scope label, $2 = full tool name
+  tools_call "$2" '{}'
+  if ! printf '%s' "$MCP_RESP" | grep -q '"code":-32003'; then
+    echo "::error::$1 token was not denied calling $2: $(printf '%s' "$MCP_RESP" | head -c 500)"
+    exit 1
+  fi
+}
+
+echo "run-mcp-e2e: verifying read-only Gateway scope enforcement"
+scope_tools_list "$READ_JWT"
+assert_tool_visible "read-only" "search_memories"
+assert_tool_visible "read-only" "get_ingest_job_status"
+assert_tool_hidden "read-only" "add_memory"
+assert_tool_hidden "read-only" "ingest_messages"
+assert_cross_scope_denied "read-only" "$ADD_TOOL"
+
+echo "run-mcp-e2e: verifying write-only Gateway scope enforcement"
+scope_tools_list "$WRITE_JWT"
+assert_tool_visible "write-only" "add_memory"
+assert_tool_visible "write-only" "ingest_messages"
+assert_tool_hidden "write-only" "search_memories"
+assert_tool_hidden "write-only" "get_ingest_job_status"
+assert_cross_scope_denied "write-only" "$SEARCH_TOOL"
+echo "run-mcp-e2e: Gateway scope filtering and cross-scope rejection verified"
+
+JWT="$COMBINED_JWT"
+MCP_SESSION="$COMBINED_SESSION"
 
 # 3c. add_memory — retry a few times. The gateway invokes a VPC-attached proxy
 # Lambda that reaches mnemo-server over Cloud Map DNS; on a fresh stage the first
