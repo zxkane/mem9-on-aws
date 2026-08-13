@@ -717,14 +717,198 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
       async (_url: string | URL | Request, init?: RequestInit) => {
         captured.headers = (init?.headers ?? {}) as Record<string, string>;
         captured.body = String(init?.body ?? "");
-        return new Response(JSON.stringify({ access_token: "tok" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        });
+        return new Response(
+          JSON.stringify({
+            access_token: "tok",
+            refresh_token: "rotated-rt",
+          }),
+          {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          },
+        );
       },
     );
     return captured;
   }
+
+  it("TC-OAUTH-REFRESH-002/003/004/007: exchanges a code and rotates through two consecutive refreshes without logging credentials", async () => {
+    const upstreamResponses = [
+      {
+        access_token: "access-token-initial-sentinel",
+        id_token: "id-token-initial-sentinel",
+        refresh_token: "refresh-token-initial-sentinel",
+      },
+      {
+        access_token: "access-token-first-refresh-sentinel",
+        id_token: "id-token-first-refresh-sentinel",
+        refresh_token: "refresh-token-first-rotation-sentinel",
+      },
+      {
+        access_token: "access-token-second-refresh-sentinel",
+        id_token: "id-token-second-refresh-sentinel",
+        refresh_token: "refresh-token-second-rotation-sentinel",
+      },
+    ];
+    let responseIndex = 0;
+    const refreshRequests: string[] = [];
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async (_url: string | URL | Request, init?: RequestInit) => {
+        const form = new URLSearchParams(String(init?.body ?? ""));
+        const grantType = form.get("grant_type");
+        expect(form.get("client_secret")).toBe("reader-client-secret");
+        if (grantType === "refresh_token") {
+          refreshRequests.push(form.get("refresh_token") ?? "");
+        }
+        return Response.json({
+          ...upstreamResponses[responseIndex++],
+          token_type: "Bearer",
+          expires_in: 3600,
+        });
+      },
+    );
+
+    const exchange = async (form: URLSearchParams) => {
+      const response = await route(
+        ev("/oauth/token", "POST", { body: form.toString() }),
+        cfg(),
+      );
+      expect(response.statusCode).toBe(200);
+      const body = JSON.parse(response.body);
+      expect(body.refresh_token).toEqual(expect.any(String));
+      expect(body.refresh_token.length).toBeGreaterThan(0);
+      return body;
+    };
+
+    const initial = await exchange(
+      new URLSearchParams({
+        grant_type: "authorization_code",
+        code: signAuthorizationCode(
+          {
+            code: "upstream-code",
+            redirectUri: "http://127.0.0.1:5000/callback",
+          },
+          HMAC,
+          Date.now(),
+        ),
+        redirect_uri: "http://127.0.0.1:5000/callback",
+        code_verifier: "pkce-verifier",
+        client_id: "reader-client-id",
+      }),
+    );
+    const first = await exchange(
+      new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: initial.refresh_token,
+        client_id: "reader-client-id",
+      }),
+    );
+    const second = await exchange(
+      new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: first.refresh_token,
+        client_id: "reader-client-id",
+      }),
+    );
+
+    expect(initial.refresh_token).toBe(upstreamResponses[0].refresh_token);
+    expect(first.refresh_token).toBe(upstreamResponses[1].refresh_token);
+    expect(second.refresh_token).toBe(upstreamResponses[2].refresh_token);
+    expect(refreshRequests).toEqual([
+      upstreamResponses[0].refresh_token,
+      upstreamResponses[1].refresh_token,
+    ]);
+
+    const logs = JSON.stringify(log.mock.calls);
+    for (const value of [
+      ...upstreamResponses.flatMap((response) => Object.values(response)),
+      "reader-client-secret",
+      "upstream-code",
+    ]) {
+      expect(logs).not.toContain(value);
+    }
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["empty", ""],
+    ["whitespace-only", "   "],
+  ])(
+    "TC-OAUTH-REFRESH-006/007: a successful refresh with a %s replacement token fails without exposing credentials",
+    async (_case, replacementRefreshToken) => {
+      const accessToken = "access-token-missing-refresh-sentinel";
+      const idToken = "id-token-missing-refresh-sentinel";
+      const submittedRefreshToken = "submitted-refresh-token-sentinel";
+      const log = vi.spyOn(console, "log").mockImplementation(() => {});
+      vi.spyOn(globalThis, "fetch").mockImplementation(async () =>
+        Response.json({
+          access_token: accessToken,
+          id_token: idToken,
+          refresh_token: replacementRefreshToken,
+          token_type: "Bearer",
+          expires_in: 3600,
+        }),
+      );
+
+      const response = await route(
+        ev("/oauth/token", "POST", {
+          body: new URLSearchParams({
+            grant_type: "refresh_token",
+            refresh_token: submittedRefreshToken,
+            client_id: "reader-client-id",
+          }).toString(),
+        }),
+        cfg(),
+      );
+
+      expect(response.statusCode).toBe(502);
+      expect(JSON.parse(response.body)).toEqual({
+        error: "invalid_upstream_response",
+        error_description:
+          "The upstream refresh response did not include a replacement refresh token.",
+      });
+      const observable = `${response.body}\n${JSON.stringify(log.mock.calls)}`;
+      for (const value of [
+        accessToken,
+        idToken,
+        submittedRefreshToken,
+        "reader-client-secret",
+      ]) {
+        expect(observable).not.toContain(value);
+      }
+    },
+  );
+
+  it("TC-OAUTH-REFRESH-007: upstream failures do not log token values from exception text", async () => {
+    const submittedRefreshToken = "submitted-refresh-token-error-sentinel";
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockRejectedValue(
+      new Error(
+        `request failed with ${submittedRefreshToken} and reader-client-secret`,
+      ),
+    );
+
+    const response = await route(
+      ev("/oauth/token", "POST", {
+        body: new URLSearchParams({
+          grant_type: "refresh_token",
+          refresh_token: submittedRefreshToken,
+          client_id: "reader-client-id",
+        }).toString(),
+      }),
+      cfg(),
+    );
+
+    expect(response.statusCode).toBe(502);
+    expect(JSON.parse(response.body).error).toBe("upstream_unreachable");
+    const observable = `${response.body}\n${JSON.stringify(log.mock.calls)}`;
+    expect(observable).not.toContain(submittedRefreshToken);
+    expect(observable).not.toContain("reader-client-secret");
+    expect(observable).not.toContain("request failed");
+    expect(log.mock.calls.flat().join("\n")).toContain('"error_type":"Error"');
+  });
 
   it("TC-MCPGW-074: secretless refresh with the known client_id → façade injects the Cognito secret", async () => {
     const captured = mockTokenUpstream();

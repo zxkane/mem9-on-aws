@@ -654,7 +654,7 @@ export async function route(
       });
     } catch (err) {
       logEvent("oauth.token.upstream_error", {
-        error: err instanceof Error ? err.message : String(err),
+        error_type: err instanceof Error ? err.name : typeof err,
       });
       return json(502, {
         error: "upstream_unreachable",
@@ -668,6 +668,32 @@ export async function route(
       if (lk === "content-length" || lk === "transfer-encoding") return;
       respHeaders[k] = v;
     });
+
+    if (upstream.ok && grantType === "refresh_token") {
+      let replacementRefreshToken: unknown;
+      try {
+        replacementRefreshToken = (
+          JSON.parse(respBody) as { refresh_token?: unknown }
+        ).refresh_token;
+      } catch {
+        replacementRefreshToken = undefined;
+      }
+      if (
+        typeof replacementRefreshToken !== "string" ||
+        replacementRefreshToken.trim().length === 0
+      ) {
+        logEvent("oauth.token.missing_refresh_token", {
+          grant_type: grantType,
+          client_auth: clientAuth,
+          status: upstream.status,
+        });
+        return json(502, {
+          error: "invalid_upstream_response",
+          error_description:
+            "The upstream refresh response did not include a replacement refresh token.",
+        });
+      }
+    }
 
     logEvent("oauth.token", {
       grant_type: inForm.get("grant_type") ?? null,

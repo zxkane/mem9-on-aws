@@ -17,6 +17,36 @@ if [[ -z "$FACADE" ]]; then
 fi
 echo "run-oauth-facade-smoke: façade=${FACADE}"
 
+echo "run-oauth-facade-smoke: checking deployed reader refresh-token rotation"
+COGNITO_ISSUER=$(ssm "${PREFIX}/cognito/issuer")
+READER_CLIENT_ID=$(ssm "${PREFIX}/cognito/reader/client-id")
+USER_POOL_ID="${COGNITO_ISSUER##*/}"
+if [[ -z "$USER_POOL_ID" || "$USER_POOL_ID" == "$COGNITO_ISSUER" || -z "$READER_CLIENT_ID" ]]; then
+  echo "::error::reader client identifiers are missing from the stage configuration"
+  exit 1
+fi
+READER_CLIENT_CONFIG=$(
+  aws cognito-idp describe-user-pool-client \
+    --user-pool-id "$USER_POOL_ID" \
+    --client-id "$READER_CLIENT_ID" \
+    --region "$REGION" \
+    --query 'UserPoolClient.{RefreshTokenRotation:RefreshTokenRotation,ExplicitAuthFlows:ExplicitAuthFlows}' \
+    --output json
+)
+echo "$READER_CLIENT_CONFIG" | jq -e '.RefreshTokenRotation.Feature == "ENABLED"' >/dev/null || {
+  echo "::error::reader client refresh-token rotation is not enabled"
+  exit 1
+}
+echo "$READER_CLIENT_CONFIG" | jq -e '.RefreshTokenRotation.RetryGracePeriodSeconds == 10' >/dev/null || {
+  echo "::error::reader client refresh-token retry grace period is not 10 seconds"
+  exit 1
+}
+echo "$READER_CLIENT_CONFIG" | jq -e '.ExplicitAuthFlows == []' >/dev/null || {
+  echo "::error::reader client explicit auth flows are not empty; incompatible ALLOW_REFRESH_TOKEN_AUTH may be enabled"
+  exit 1
+}
+echo "run-oauth-facade-smoke: reader refresh-token rotation OK (10-second retry grace)"
+
 echo "run-oauth-facade-smoke: checking /.well-known/oauth-authorization-server"
 AS=$(curl -fsS "${FACADE}/.well-known/oauth-authorization-server")
 echo "$AS" | jq -e '.authorization_endpoint | endswith("/oauth/authorize")' >/dev/null || { echo "::error::authorization_endpoint does not point at the façade"; exit 1; }
