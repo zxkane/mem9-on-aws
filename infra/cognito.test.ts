@@ -207,3 +207,65 @@ describe("cognito stack", () => {
     expect(out.jwksUri).toBeDefined();
   });
 });
+
+describe("cognitoDomainPrefix", () => {
+  // The module reads the SST-injected `aws` global at import time, so the stage
+  // value here is irrelevant to these cases — the globals just have to exist.
+  async function loadPrefix() {
+    installGlobals("prod");
+    vi.resetModules();
+    return (await import("./cognito")).cognitoDomainPrefix;
+  }
+
+  it("defaults to the per-stage name, with the PR number on preview stages", async () => {
+    const cognitoDomainPrefix = await loadPrefix();
+    expect(cognitoDomainPrefix("prod", undefined)).toBe("prod-mem9-mcp");
+    expect(cognitoDomainPrefix("dev", undefined)).toBe("dev-mem9-mcp");
+    expect(cognitoDomainPrefix("pr-42", undefined)).toBe("pr-42-mem9-mcp-42");
+  });
+
+  it("returns a configured override so a second AWS account can claim its own prefix", async () => {
+    const cognitoDomainPrefix = await loadPrefix();
+    // The default `prod-mem9-mcp` is unavailable once ANY account holds it, so a
+    // fork deploying prod must be able to choose a different global name.
+    expect(cognitoDomainPrefix("prod", "acme-mem9-mcp")).toBe("acme-mem9-mcp");
+    expect(cognitoDomainPrefix("prod", "  acme-mem9-mcp  ")).toBe("acme-mem9-mcp");
+  });
+
+  it("falls back to the default when the override is absent or blank", async () => {
+    const cognitoDomainPrefix = await loadPrefix();
+    expect(cognitoDomainPrefix("prod", "")).toBe("prod-mem9-mcp");
+    expect(cognitoDomainPrefix("prod", "   ")).toBe("prod-mem9-mcp");
+  });
+
+  it("rejects an override Cognito would refuse, at synth rather than mid-deploy", async () => {
+    const cognitoDomainPrefix = await loadPrefix();
+    for (const invalid of [
+      "Mem9-Prod", // uppercase
+      "-mem9-prod", // leading hyphen
+      "mem9-prod-", // trailing hyphen
+      "mem9_prod", // underscore
+      "mem9.prod", // dot
+      "a".repeat(64), // 64 chars, one over the limit
+    ]) {
+      expect(() => cognitoDomainPrefix("prod", invalid)).toThrow(
+        /MEM9_COGNITO_DOMAIN_PREFIX/u,
+      );
+    }
+    // The boundary lengths themselves are valid.
+    expect(cognitoDomainPrefix("prod", "a")).toBe("a");
+    expect(cognitoDomainPrefix("prod", "a".repeat(63))).toBe("a".repeat(63));
+  });
+
+  it("reads MEM9_COGNITO_DOMAIN_PREFIX from the environment by default", async () => {
+    const cognitoDomainPrefix = await loadPrefix();
+    const previous = process.env.MEM9_COGNITO_DOMAIN_PREFIX;
+    process.env.MEM9_COGNITO_DOMAIN_PREFIX = "acme-mem9-mcp";
+    try {
+      expect(cognitoDomainPrefix("prod")).toBe("acme-mem9-mcp");
+    } finally {
+      if (previous === undefined) delete process.env.MEM9_COGNITO_DOMAIN_PREFIX;
+      else process.env.MEM9_COGNITO_DOMAIN_PREFIX = previous;
+    }
+  });
+});

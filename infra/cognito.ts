@@ -36,6 +36,36 @@ export interface CognitoOutputs {
 
 const RESOURCE_SERVER_ID = "mem9-mcp";
 
+// Cognito hosted-UI domain prefixes are unique across EVERY AWS account, not just
+// this one. `<stage>-mem9-mcp` therefore cannot be claimed by a second deployment
+// of this project once any account holds it — an account other than the original
+// operator's fails `prod` with "Domain already associated with another user pool"
+// (empirical 2026-08-12). MEM9_COGNITO_DOMAIN_PREFIX lets such a deployment pick
+// its own globally-unique prefix. It must stay stable for the life of the stage:
+// the prefix IS the OAuth token/authorize hostname, so changing it replaces the
+// domain and moves every endpoint clients have.
+export function cognitoDomainPrefix(
+  stage: string,
+  override = process.env.MEM9_COGNITO_DOMAIN_PREFIX,
+): string {
+  const configured = override?.trim();
+  if (configured) {
+    // Cognito accepts 1-63 chars of lowercase letters, digits, and hyphens, with
+    // no leading or trailing hyphen. Reject here so a typo fails at synth rather
+    // than part-way through a deploy that has already created the pool.
+    if (!/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u.test(configured)) {
+      throw new Error(
+        "MEM9_COGNITO_DOMAIN_PREFIX must be 1-63 characters of lowercase letters, digits, or hyphens, without a leading or trailing hyphen.",
+      );
+    }
+    return configured;
+  }
+  // Default: the per-stage name; PR stages append the PR number for deterministic
+  // re-deploys within one account.
+  const suffix = stage.startsWith("pr-") ? `-${stage.split("-")[1]}` : "";
+  return `${stage}-mem9-mcp${suffix}`;
+}
+
 export function cognito(): CognitoOutputs {
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const stage = $app.stage;
@@ -73,12 +103,11 @@ export function cognito(): CognitoOutputs {
     { deleteBeforeReplace: nonProd },
   );
 
-  // OAuth token endpoint domain. Cognito domains are globally unique → embed the
-  // stage; PR stages append the PR number for deterministic re-deploys.
-  const domainSuffix = stage.startsWith("pr-") ? `-${stage.split("-")[1]}` : "";
+  // OAuth token endpoint domain. Globally unique across all AWS accounts — see
+  // cognitoDomainPrefix() for the default and the per-account override.
   const domain = new awsAny.cognito.UserPoolDomain(
     "Mem9McpDomain",
-    { domain: `${stage}-mem9-mcp${domainSuffix}`, userPoolId: pool.id },
+    { domain: cognitoDomainPrefix(stage), userPoolId: pool.id },
     { deleteBeforeReplace: nonProd },
   );
 
