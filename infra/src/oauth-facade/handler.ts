@@ -654,20 +654,65 @@ export async function route(
       });
     } catch (err) {
       logEvent("oauth.token.upstream_error", {
-        error: err instanceof Error ? err.message : String(err),
+        error_type: err instanceof Error ? err.name : typeof err,
       });
       return json(502, {
         error: "upstream_unreachable",
         error_description: "Failed to reach Cognito token endpoint",
       });
     }
-    const respBody = await upstream.text();
+    let respBody = await upstream.text();
     const respHeaders: Record<string, string> = {};
     upstream.headers.forEach((v, k) => {
       const lk = k.toLowerCase();
       if (lk === "content-length" || lk === "transfer-encoding") return;
       respHeaders[k] = v;
     });
+
+    if (upstream.ok && grantType === "refresh_token") {
+      let replacementRefreshToken: unknown;
+      let parsedResponse: Record<string, unknown> | undefined;
+      try {
+        const parsed: unknown = JSON.parse(respBody);
+        if (
+          typeof parsed === "object" &&
+          parsed !== null &&
+          !Array.isArray(parsed)
+        ) {
+          parsedResponse = parsed as Record<string, unknown>;
+          replacementRefreshToken = parsedResponse.refresh_token;
+        }
+      } catch {
+        replacementRefreshToken = undefined;
+      }
+      if (!parsedResponse) {
+        logEvent("oauth.token.invalid_response", {
+          grant_type: grantType,
+          client_auth: clientAuth,
+          status: upstream.status,
+        });
+        return json(502, {
+          error: "invalid_upstream_response",
+          error_description:
+            "The upstream refresh response was not a JSON object.",
+        });
+      }
+      if (
+        typeof replacementRefreshToken !== "string" ||
+        replacementRefreshToken.trim().length === 0
+      ) {
+        logEvent("oauth.token.missing_refresh_token", {
+          grant_type: grantType,
+          client_auth: clientAuth,
+          status: upstream.status,
+        });
+        const submittedRefreshToken = inForm.get("refresh_token");
+        if (submittedRefreshToken) {
+          parsedResponse.refresh_token = submittedRefreshToken;
+          respBody = JSON.stringify(parsedResponse);
+        }
+      }
+    }
 
     logEvent("oauth.token", {
       grant_type: inForm.get("grant_type") ?? null,

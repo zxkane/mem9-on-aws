@@ -408,6 +408,19 @@ describe("oauthFacade factory", () => {
     );
   });
 
+  it("TC-OAUTH-REFRESH-001: enables refresh-token rotation without the incompatible auth flow", async () => {
+    installGlobals("prod");
+    const oauthFacade = await loadFacade();
+    oauthFacade(fakeCognitoOut());
+
+    const client = only("UserPoolClient");
+    expect(client.refreshTokenRotation).toEqual({
+      feature: "ENABLED",
+      retryGracePeriodSeconds: 10,
+    });
+    expect(client.explicitAuthFlows).toEqual(["ALLOW_USER_SRP_AUTH"]);
+  });
+
   it("provisions the façade Function on arm64 nodejs24.x with NO vpc + scoped SSM read", async () => {
     installGlobals("prod");
     const oauthFacade = await loadFacade();

@@ -253,6 +253,16 @@ The gateway trusts both implemented Cognito clients:
   `mem9-mcp/write`, or both; scope constants are shared by Cognito, the Gateway,
   and facade metadata.
 
+The interactive reader client enables Cognito refresh-token rotation with a
+10-second retry grace period. Its explicit API auth-flow list contains only
+`ALLOW_USER_SRP_AUTH`, preventing Cognito's omitted-property default from
+enabling the incompatible `ALLOW_REFRESH_TOKEN_AUTH` flow. Each successful
+refresh therefore returns a replacement refresh token. If a non-rotating
+upstream legally omits one, the facade emits a token-free diagnostic and returns
+the submitted refresh token so clients that replace their stored response stay
+compatible. A malformed successful response that is not a JSON object instead
+fails with a token-free 502.
+
 The OAuth facade accepts RFC 8252 loopback redirects by default. Hosted clients
 can be added per stage through the SST `OauthAllowedCallbackUrls` secret, whose
 value is a JSON array of exact HTTPS URLs. SST writes the selected value to the

@@ -150,7 +150,14 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
       name: `${stage}-mem9-mcp-reader`,
       userPoolId: cognitoOut.userPoolId,
       generateSecret: true,
-      explicitAuthFlows: ["ALLOW_REFRESH_TOKEN_AUTH"],
+      // Cognito restores ALLOW_REFRESH_TOKEN_AUTH when this property is absent.
+      // Keep one non-refresh API flow so the deployed client has an explicit
+      // list that excludes the flow incompatible with token rotation.
+      explicitAuthFlows: ["ALLOW_USER_SRP_AUTH"],
+      refreshTokenRotation: {
+        feature: "ENABLED",
+        retryGracePeriodSeconds: 10,
+      },
       supportedIdentityProviders: ["COGNITO"],
       callbackUrls: [$interpolate`${facadeApi.url}/oauth/callback`],
       logoutUrls: [$interpolate`${facadeApi.url}/oauth/logout`],
