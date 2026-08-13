@@ -36,7 +36,22 @@ export interface CognitoOutputs {
   allowedClientIds: Output<string>[];
 }
 
-const RESOURCE_SERVER_ID = "mem9-mcp";
+export const MCP_RESOURCE_SERVER_ID = "mem9-mcp";
+export const MCP_RESOURCE_SCOPES = [
+  `${MCP_RESOURCE_SERVER_ID}/read`,
+  `${MCP_RESOURCE_SERVER_ID}/write`,
+] as const;
+export const MCP_BROWSER_SCOPES = [
+  "openid",
+  "email",
+  ...MCP_RESOURCE_SCOPES,
+] as const;
+export const MCP_TOOL_SCOPES = {
+  add_memory: MCP_RESOURCE_SCOPES[1],
+  search_memories: MCP_RESOURCE_SCOPES[0],
+  ingest_messages: MCP_RESOURCE_SCOPES[1],
+  get_ingest_job_status: MCP_RESOURCE_SCOPES[0],
+} as const;
 const DOMAIN_HASH_NAMESPACE = "mem9-cognito-domain-v1";
 const DOMAIN_PREFIX_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const DOMAIN_RESERVED_KEYWORDS = ["aws", "amazon", "cognito"];
@@ -146,7 +161,7 @@ export function cognito(): CognitoOutputs {
   );
 
   const resourceServer = new awsAny.cognito.ResourceServer("Mem9McpResourceServer", {
-    identifier: RESOURCE_SERVER_ID,
+    identifier: MCP_RESOURCE_SERVER_ID,
     name: "mem9 MCP",
     userPoolId: pool.id,
     scopes: [
@@ -162,9 +177,10 @@ export function cognito(): CognitoOutputs {
     explicitAuthFlows: [],
     allowedOauthFlows: ["client_credentials"],
     allowedOauthFlowsUserPoolClient: true,
-    allowedOauthScopes: resourceServer.identifier.apply((id: string) => [
-      `${id}/read`,
-      `${id}/write`,
+    // Keep the resource-server output dependency while sharing the exact scope
+    // values with the browser client, Gateway authorizer, and facade metadata.
+    allowedOauthScopes: resourceServer.identifier.apply(() => [
+      ...MCP_RESOURCE_SCOPES,
     ]),
     preventUserExistenceErrors: "ENABLED",
     enableTokenRevocation: true,
@@ -206,7 +222,7 @@ export function cognito(): CognitoOutputs {
   new awsAny.ssm.Parameter("SsmCognitoScope", {
     name: `${prefix}/cognito/scope`,
     type: "String",
-    value: `${RESOURCE_SERVER_ID}/read ${RESOURCE_SERVER_ID}/write`,
+    value: MCP_RESOURCE_SCOPES.join(" "),
     tags,
   });
 
@@ -219,7 +235,7 @@ export function cognito(): CognitoOutputs {
     userInfoEndpoint,
     revocationEndpoint,
     jwksUri,
-    resourceServerId: RESOURCE_SERVER_ID,
+    resourceServerId: MCP_RESOURCE_SERVER_ID,
     clientId: client.id,
     clientSecret: client.clientSecret,
     allowedClientIds: [client.id],

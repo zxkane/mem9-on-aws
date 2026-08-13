@@ -151,8 +151,17 @@ describe("gateway stack", () => {
     expect(String((jwt.discoveryUrl as { value?: string }).value)).toContain("/.well-known/openid-configuration");
     // The M2M client plus the browser-login reader client.
     expect(jwt.allowedClients).toHaveLength(2);
-    // No interceptor in v1.
-    expect(gw.interceptorConfigurations).toBeUndefined();
+    expect(jwt.allowedScopes).toEqual([
+      "mem9-mcp/read",
+      "mem9-mcp/write",
+    ]);
+    expect(unwrap(gw.interceptorConfigurations)).toEqual([
+      {
+        interceptionPoints: ["REQUEST", "RESPONSE"],
+        interceptor: { lambda: { arn: "arn:SstFunction" } },
+        inputConfiguration: { passRequestHeaders: true },
+      },
+    ]);
   });
 
   it("TC-M2M-CLEANUP-003: trusts the M2M and reader clients", async () => {
@@ -186,6 +195,20 @@ describe("gateway stack", () => {
     expect(String((env.MEM9_SERVER_BASE_URL as { value?: string }).value)).toContain("mnemo.mem9-prod.local");
     expect(String((env.MEM9_SERVER_BASE_URL as { value?: string }).value)).toContain(":8080");
     expect(String((env.MEM9_API_KEY as { value?: string }).value)).toBe("deadbeefTENANTID");
+    expect(JSON.parse(String(env.MEM9_TOOL_SCOPES))).toEqual({
+      add_memory: "mem9-mcp/write",
+      search_memories: "mem9-mcp/read",
+      ingest_messages: "mem9-mcp/write",
+      get_ingest_job_status: "mem9-mcp/read",
+    });
+
+    const gw = only("AgentcoreGateway");
+    const interceptor = (
+      unwrap(gw.interceptorConfigurations) as Array<{
+        interceptor: { lambda: { arn: string } };
+      }>
+    )[0];
+    expect(interceptor.interceptor.lambda.arn).toBe("arn:SstFunction");
   });
 
   it("gateway service role grants ONLY lambda:InvokeFunction (no workload-identity/secret/ENI)", async () => {
@@ -221,6 +244,16 @@ describe("gateway stack", () => {
     expect(String(env.MEM9_TGT_TOOL_SCHEMA)).toContain("search_memories");
     expect(String(env.MEM9_TGT_TOOL_SCHEMA)).toContain("ingest_messages");
     expect(String(env.MEM9_TGT_TOOL_SCHEMA)).toContain("get_ingest_job_status");
+    const toolNames = JSON.parse(String(env.MEM9_TGT_TOOL_SCHEMA))
+      .map(({ name }: { name: string }) => name)
+      .sort();
+    const scopePolicy = JSON.parse(
+      String(
+        (unwrap(only("SstFunction").environment) as Record<string, unknown>)
+          .MEM9_TOOL_SCOPES,
+      ),
+    );
+    expect(Object.keys(scopePolicy).sort()).toEqual(toolNames);
     // The removed privateEndpoint/API-key/OpenAPI-schema inputs are gone.
     expect(env.MEM9_TGT_SCHEMA).toBeUndefined();
     expect(env.MEM9_TGT_APIKEY_PROVIDER_ARN).toBeUndefined();

@@ -394,6 +394,12 @@ describe("oauthFacade factory", () => {
     const c = only("UserPoolClient");
     expect(c.allowedOauthFlows).toEqual(["code"]);
     expect(c.generateSecret).toBe(true);
+    expect(c.allowedOauthScopes).toEqual([
+      "openid",
+      "email",
+      "mem9-mcp/read",
+      "mem9-mcp/write",
+    ]);
     // callbackUrls must resolve from facadeApi.url (created first).
     const callbacks = (unwrap(c.callbackUrls) as string[]).map(String);
     expect(callbacks.some((u) => u.endsWith("/oauth/callback"))).toBe(true);
@@ -462,6 +468,7 @@ describe("oauthFacade factory", () => {
     const environment = unwrap(fn.environment) as Record<string, string>;
     expect(environment).toMatchObject({
       OAUTH_STATE_HMAC_KEY: "OauthStateHmacKey-value",
+      RESOURCE_SCOPES: "mem9-mcp/read,mem9-mcp/write",
     });
     expect(environment.OAUTH_ALLOWED_CALLBACK_URLS_VERSION).toMatch(
       /^[0-9a-f]{64}$/u,

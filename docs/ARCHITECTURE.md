@@ -230,7 +230,14 @@ Cognito-authenticated MCP request
 `lambda:InvokeFunction` on the one proxy Lambda. The Lambda maps
 `add_memory`, `search_memories`, `ingest_messages`, and
 `get_ingest_job_status` to the mem9 REST API and injects the tenant
-`X-API-Key`.
+`X-API-Key`. The same Lambda is the Gateway
+[REQUEST/RESPONSE interceptor](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-interceptors-types.html).
+The [CUSTOM_JWT authorizer](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/inbound-jwt-authorizer.html)
+admits a validated token only when it has at least one of `mem9-mcp/read` or
+`mem9-mcp/write`; the interceptor then requires `read` for `search_memories`
+and `get_ingest_job_status`, requires `write` for `add_memory` and
+`ingest_messages`, and filters `tools/list` with the same mapping. Unknown
+tools and missing or malformed scope claims fail closed.
 
 `infra/ecs.ts` creates an AWS Cloud Map private DNS namespace and service. The
 proxy Lambda and ECS task share the task security group, whose self-referencing
@@ -242,7 +249,9 @@ The gateway trusts both implemented Cognito clients:
 
 - M2M `client_credentials` for CI and headless clients.
 - Authorization code with PKCE through the API Gateway v2 OAuth facade for
-  interactive clients.
+  interactive clients. Both clients can request `mem9-mcp/read`,
+  `mem9-mcp/write`, or both; scope constants are shared by Cognito, the Gateway,
+  and facade metadata.
 
 The OAuth facade accepts RFC 8252 loopback redirects by default. Hosted clients
 can be added per stage through the SST `OauthAllowedCallbackUrls` secret, whose
@@ -760,6 +769,8 @@ to the GitHub Actions deploy role.
   Mantle calls.
 - Mantle application permissions use `bedrock-mantle:*` actions on the task role.
 - The AgentCore Gateway uses a Lambda target and Cloud Map private DNS.
+- Gateway admission requires `mem9-mcp/read` or `mem9-mcp/write`; per-tool
+  request authorization and tool-discovery filtering enforce those scopes.
 - The public OAuth facade uses API Gateway v2 plus Lambda, never a Lambda
   Function URL.
 - The OAuth facade custom domain is optional, production-only, and uses an
@@ -807,7 +818,7 @@ The following ideas remain deferred and would require a new design decision:
   patch or another compatible connection mechanism.
 - More than one long-running ECS task, which would require resolving mem9's
   local batch-import filesystem assumption.
-- Per-tool or per-agent authorization beyond the current single-tenant model.
+- Per-agent authorization beyond the current single-tenant model.
 
 ## Rejected alternatives
 

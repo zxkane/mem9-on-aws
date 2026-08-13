@@ -12,8 +12,9 @@
  * CYCLE BREAK (creation order matters): the ApiGatewayV2 is created FIRST because
  * `facadeApi.url` is needed for the reader UserPoolClient's `callbackUrls`. The
  * reader client is a SEPARATE Cognito app client from the M2M client in cognito.ts
- * — it's a public authorization-code client (Hosted-UI), scoped to read-only
- * (`mem9-mcp/read`), returned via `readerClientId` for gateway.ts to trust.
+ * — it's a public authorization-code client (Hosted-UI) that supports both
+ * resource scopes, returned via the legacy `readerClientId` output for
+ * gateway.ts to trust.
  *
  * Production uses an operator-seeded `sst.Secret` and fails closed while it is
  * empty. Ephemeral stages use a stable Pulumi RandomPassword secret output so
@@ -25,7 +26,11 @@
 
 import { createHash } from "node:crypto";
 
-import type { CognitoOutputs } from "./cognito";
+import {
+  MCP_BROWSER_SCOPES,
+  MCP_RESOURCE_SCOPES,
+  type CognitoOutputs,
+} from "./cognito";
 
 // @ts-ignore - `aws`/`sst` injected globally by SST; cognito/ssm types loose.
 const awsAny = aws as unknown as Record<string, any>;
@@ -134,7 +139,7 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
     },
   });
 
-  // --- Reader UserPoolClient (authorization-code + PKCE, read-only) ---
+  // --- Browser UserPoolClient (authorization-code + PKCE, read/write scopes) ---
   // A SEPARATE app client from cognito.ts's M2M client: this one drives the
   // browser Hosted-UI flow. `generateSecret` (confidential client — the façade
   // holds the secret server-side and does the code exchange). callbackUrls /
@@ -150,7 +155,7 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
       callbackUrls: [$interpolate`${facadeApi.url}/oauth/callback`],
       logoutUrls: [$interpolate`${facadeApi.url}/oauth/logout`],
       allowedOauthFlows: ["code"],
-      allowedOauthScopes: ["openid", "email", "mem9-mcp/read"],
+      allowedOauthScopes: [...MCP_BROWSER_SCOPES],
       allowedOauthFlowsUserPoolClient: true,
       preventUserExistenceErrors: "ENABLED",
       enableTokenRevocation: true,
@@ -214,7 +219,7 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
       COGNITO_USERINFO_ENDPOINT: cognitoOut.userInfoEndpoint,
       COGNITO_REVOCATION_ENDPOINT: cognitoOut.revocationEndpoint,
       COGNITO_JWKS_URI: cognitoOut.jwksUri,
-      RESOURCE_SCOPES: "mem9-mcp/read",
+      RESOURCE_SCOPES: MCP_RESOURCE_SCOPES.join(","),
       OAUTH_STATE_HMAC_KEY: hmacKeyValue,
       OAUTH_ALLOWED_CALLBACK_URLS_VERSION: allowedCallbackUrlsVersion,
     },

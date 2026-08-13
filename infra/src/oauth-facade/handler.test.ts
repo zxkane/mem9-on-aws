@@ -42,8 +42,11 @@ function cfg(overrides: Partial<FacadeConfig> = {}): FacadeConfig {
     userinfo: "https://auth.example.com/oauth2/userInfo",
     revocation: "https://auth.example.com/oauth2/revoke",
     jwks: "https://cognito-idp.ap-northeast-1.amazonaws.com/pool/.well-known/jwks.json",
-    // Reader-client-aligned: openid + email + read only (no write).
-    resourceScopes: ["example-mcp/query/read"],
+    // Browser-client-aligned resource scopes.
+    resourceScopes: [
+      "example-mcp/query/read",
+      "example-mcp/query/write",
+    ],
     userClientId: "reader-client-id",
     userClientSecret: "reader-client-secret",
     allowedClientRedirectUris: [],
@@ -111,19 +114,26 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
       "client_secret_basic",
       "client_secret_post",
     ]);
-    // Advertised scopes must match the reader client's allowed scopes exactly
-    // — no `profile`, no `write`.
-    expect(b.scopes_supported).toEqual(["openid", "email", "example-mcp/query/read"]);
+    // Advertised scopes must match the browser client's allowed scopes exactly.
+    expect(b.scopes_supported).toEqual([
+      "openid",
+      "email",
+      "example-mcp/query/read",
+      "example-mcp/query/write",
+    ]);
     expect(b.scopes_supported).not.toContain("profile");
-    expect(b.scopes_supported).not.toContain("example-mcp/query/write");
   });
 
-  it("TC-MCPGW-061b: OIDC discovery metadata advertises reader-aligned scopes (no profile/write)", async () => {
+  it("TC-MCPGW-061b: OIDC discovery metadata advertises browser-client scopes", async () => {
     const res = await route(ev("/.well-known/openid-configuration"), cfg());
     const b = JSON.parse(res.body);
-    expect(b.scopes_supported).toEqual(["openid", "email", "example-mcp/query/read"]);
+    expect(b.scopes_supported).toEqual([
+      "openid",
+      "email",
+      "example-mcp/query/read",
+      "example-mcp/query/write",
+    ]);
     expect(b.scopes_supported).not.toContain("profile");
-    expect(b.scopes_supported).not.toContain("example-mcp/query/write");
   });
 
   // TC-MCPGW-080. The OIDC document is a full peer of the RFC 8414 one — some
@@ -213,6 +223,26 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
     );
   });
 
+  it("TC-MCPGW-081b: preserves an insufficient-scope challenge while rewriting resource metadata", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(
+      async () =>
+        new Response("forbidden", {
+          status: 403,
+          headers: {
+            "www-authenticate":
+              `Bearer error="insufficient_scope", scope="mem9-mcp/write", ` +
+              `resource_metadata="${UPSTREAM_ISSUER}/.well-known/oauth-protected-resource"`,
+          },
+        }),
+    );
+    const res = await route(ev("/mcp", "POST", { body: "{}" }), cfg());
+    expect(res.statusCode).toBe(403);
+    expect(res.headers["www-authenticate"]).toBe(
+      `Bearer error="insufficient_scope", scope="mem9-mcp/write", ` +
+        `resource_metadata="${BASE}/.well-known/oauth-protected-resource"`,
+    );
+  });
+
   // TC-MCPGW-079. RFC 8414 §3.3: the `issuer` a metadata document returns MUST be
   // identical to the issuer identifier the client inserted the well-known string
   // into to build the URL it fetched. We publish ourselves as the authorization
@@ -294,6 +324,30 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
       clientState: "orig-state",
     });
   });
+
+  it.each([
+    "example-mcp/query/read",
+    "example-mcp/query/write",
+    "example-mcp/query/read example-mcp/query/write",
+  ])(
+    "TC-MCPGW-062b: /oauth/authorize preserves the requested resource scope subset (%s)",
+    async (scope) => {
+      const q = new URLSearchParams({
+        client_id: "c",
+        redirect_uri: "http://127.0.0.1:5000/callback",
+        state: "orig-state",
+        code_challenge: "abc",
+        code_challenge_method: "S256",
+        response_type: "code",
+        scope,
+      }).toString();
+      const res = await route(ev("/oauth/authorize", "GET", { query: q }), cfg());
+      expect(res.statusCode).toBe(302);
+      expect(new URL(res.headers.location).searchParams.get("scope")).toBe(
+        scope,
+      );
+    },
+  );
 
   it("TC-MCPGW-063: /oauth/authorize without redirect_uri → 400", async () => {
     const res = await route(
@@ -798,10 +852,11 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
     expect(b.client_secret_expires_at).toBeUndefined();
     expect(b.token_endpoint_auth_method).toBe("none");
     expect(b.redirect_uris).toEqual(["http://127.0.0.1:9/cb"]);
-    // DCR scope must match the reader client (no profile/write).
-    expect(b.scope).toBe("openid email example-mcp/query/read");
+    // DCR scope must match the browser client.
+    expect(b.scope).toBe(
+      "openid email example-mcp/query/read example-mcp/query/write",
+    );
     expect(b.scope).not.toMatch(/profile/);
-    expect(b.scope).not.toMatch(/write/);
   });
 
   it("TC-MCPGW-072b: /register rejects a request for a secret-based auth method", async () => {

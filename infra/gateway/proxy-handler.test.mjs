@@ -10,6 +10,12 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 process.env.MEM9_SERVER_BASE_URL = "http://mnemo.mem9-test.local:8080";
 process.env.MEM9_API_KEY = "test-tenant-id";
+process.env.MEM9_TOOL_SCOPES = JSON.stringify({
+  add_memory: "mem9-mcp/write",
+  search_memories: "mem9-mcp/read",
+  ingest_messages: "mem9-mcp/write",
+  get_ingest_job_status: "mem9-mcp/read",
+});
 
 let handler;
 beforeAll(async () => {
@@ -25,6 +31,12 @@ function mockFetchOk(body = { status: "accepted" }) {
   }));
   vi.stubGlobal("fetch", spy);
   return spy;
+}
+
+function token(scope) {
+  const encode = (value) =>
+    Buffer.from(JSON.stringify(value)).toString("base64url");
+  return `${encode({ alg: "none" })}.${encode({ scope })}.signature`;
 }
 
 // Build a fake Lambda context naming the tool the way AgentCore does.
@@ -87,6 +99,32 @@ describe("proxy-handler ingest_messages", () => {
 });
 
 describe("proxy-handler routing (regression)", () => {
+  it("routes AgentCore interceptor events before target invocation handling", async () => {
+    const spy = mockFetchOk();
+    const body = {
+      jsonrpc: "2.0",
+      id: 1,
+      method: "tools/call",
+      params: {
+        name: "test-mem9-rest___search_memories",
+        arguments: { q: "arm64" },
+      },
+    };
+    const result = await handler({
+      interceptorInputVersion: "1.0",
+      mcp: {
+        gatewayRequest: {
+          headers: {
+            Authorization: `Bearer ${token("mem9-mcp/read")}`,
+          },
+          body,
+        },
+      },
+    });
+    expect(result.mcp.transformedGatewayRequest.body).toEqual(body);
+    expect(spy).not.toHaveBeenCalled();
+  });
+
   it("add_memory still POSTs a single content body", async () => {
     const spy = mockFetchOk();
     await handler({ content: "one fact", agent_id: "a" }, ctx("add_memory"));

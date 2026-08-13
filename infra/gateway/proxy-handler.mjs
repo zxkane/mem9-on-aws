@@ -10,12 +10,17 @@
  * private hosted zone. This keeps "no public exposure" while sidestepping the
  * rejected Lattice-target path.
  *
- * INVOCATION CONTRACT (AWS docs — "AWS Lambda function targets"):
+ * TARGET INVOCATION CONTRACT (AWS docs — "AWS Lambda function targets"):
  *   - event   = a flat map of the called tool's inputSchema properties → values
  *               (e.g. { content, agent_id } for add_memory; { q, limit } for search).
  *   - context = clientContext.Custom.bedrockAgentCoreToolName = `${target}___${tool}`
  *               (Node runtime capitalizes `Custom`). We strip the `___` prefix.
  *   - return  = the tool result as JSON (becomes the MCP tool-call result).
+ *
+ * INTERCEPTOR CONTRACT (AWS docs — "Types of interceptors"):
+ *   - event.mcp.gatewayRequest carries the parsed JSON-RPC request + bearer.
+ *   - event.mcp.gatewayResponse is present only for RESPONSE interception.
+ *   - scope-interceptor.mjs returns the transformed request or response.
  *
  * mem9 REST (the MCP tool schemas live inline in infra/gateway.ts):
  *   add_memory      → POST /v1alpha2/mem9s/memories   (X-API-Key, opt X-Mnemo-Agent-Id)
@@ -28,6 +33,10 @@
  */
 
 import { lookup as dnsLookup } from "node:dns/promises";
+import {
+  interceptScopes,
+  isScopeInterceptorEvent,
+} from "./scope-interceptor.mjs";
 
 const BASE_URL = requireEnv("MEM9_SERVER_BASE_URL").replace(/\/+$/, "");
 const API_KEY = requireEnv("MEM9_API_KEY");
@@ -209,6 +218,10 @@ async function getIngestJobStatus(input) {
 }
 
 export const handler = async (event, context) => {
+  if (isScopeInterceptorEvent(event)) {
+    return interceptScopes(event);
+  }
+
   const tool = resolveToolName(context);
   switch (tool) {
     case "add_memory":

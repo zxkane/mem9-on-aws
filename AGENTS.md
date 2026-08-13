@@ -73,9 +73,10 @@ them, update the file rather than silently diverging.
 ## OAuth operator memory
 
 - The Cognito resource server defines `mem9-mcp/read` and `mem9-mcp/write`.
-  M2M clients may request both. The browser/hosted-client OAuth facade is
-  intentionally read-only and advertises only `openid`, `email`, and
-  `mem9-mcp/read`; do not assume a facade token can call write tools.
+  M2M and browser/hosted clients may request either resource scope or both. The
+  Gateway requires at least one, then its interceptor restricts
+  `search_memories` and `get_ingest_job_status` to `read`, and `add_memory` and
+  `ingest_messages` to `write`. Tool discovery is filtered by the same mapping.
 - Hosted callback URLs come from the stage-scoped SST secret
   `OauthAllowedCallbackUrls`. This is not a GitHub Actions environment/repository
   secret, and external URLs must not be added to the Cognito reader client's
