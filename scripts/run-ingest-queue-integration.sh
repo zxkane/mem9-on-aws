@@ -14,19 +14,27 @@ cleanup() {
 }
 trap cleanup EXIT
 
-docker run --rm -d \
+docker run -d \
   --name "$CONTAINER" \
   -e POSTGRES_PASSWORD=test \
   -e POSTGRES_DB=mem9_queue \
   -p 127.0.0.1::5432 \
   postgres:17-alpine >/dev/null
 
-for attempt in $(seq 1 30); do
-  if docker exec "$CONTAINER" pg_isready -U postgres -d mem9_queue >/dev/null 2>&1; then
+for attempt in $(seq 1 60); do
+  # The image starts a temporary server before creating POSTGRES_DB, then
+  # replaces PID 1 with the final postgres process.
+  if docker exec "$CONTAINER" sh -c \
+      'test "$(cat /proc/1/comm)" = "postgres"' >/dev/null 2>&1 &&
+    docker exec "$CONTAINER" \
+      psql -qAt -v ON_ERROR_STOP=1 -U postgres -d mem9_queue \
+      -c "SELECT 1" 2>/dev/null |
+      grep -qx "1"; then
     break
   fi
-  if [[ "$attempt" == "30" ]]; then
+  if [[ "$attempt" == "60" ]]; then
     echo "PostgreSQL did not become ready" >&2
+    docker logs "$CONTAINER" >&2 || true
     exit 1
   fi
   sleep 1
