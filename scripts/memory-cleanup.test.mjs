@@ -5880,6 +5880,53 @@ describe("replaying the reviewed list instead of re-classifying (#150)", () => {
     expect(existsSync(lockFile)).toBe(false);
   });
 
+  it("TC-SLACKAPP-211 a re-offered replay is dated by the ARTIFACT's stamp, not by this run's clock", async () => {
+    // `loadDecisions` returns the artifact's own `generatedAt`, and this is the one
+    // path that RENDERS it: a review run reached with `MEM9_APPROVAL_HASH` and no
+    // `--apply` replays the reviewed list and re-offers it, and the review message
+    // says "Generated {generatedAt}". Stamping that with `new Date(clock())` would
+    // date a week-old reviewed list to the moment it was reposted — the operator
+    // would read a fresh timestamp over stale verdicts and have no way to tell.
+    //
+    // Distinct from `issuedAt`, which is deliberately THIS run's clock (#149): the
+    // 72h window has to start when the button was posted or a reposted list arrives
+    // already expired. The two must not collapse into one value, which is why this
+    // asserts both at once — a mutation that used `clock()` for both would satisfy
+    // an `issuedAt`-only assertion.
+    const ARTIFACT_STAMP = "2026-07-24T03:00:00.000Z";
+    const server = fakeServer([memory("m-1", "session noise")]);
+    const llm = fakeLlm([[]]);
+    const dir = tempDir();
+    const offered = [];
+    const result = await runCleanup(baseOpts({ apply: false }), {
+      ...baseDeps(server, llm, dir),
+      loadReviewedDecisions: async () => ({
+        generatedAt: ARTIFACT_STAMP,
+        decisions: [
+          {
+            id: "m-1",
+            verdict: "DELETE",
+            reason: "session-state",
+            version: 1,
+            contentHash: contentHash("session noise"),
+          },
+        ],
+      }),
+      postApproval: async (args) => {
+        offered.push(args);
+        return { record: { ids: ["m-1"], hash: "sha256:x" }, posted: true };
+      },
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(offered).toHaveLength(1);
+    // The ARTIFACT's stamp, verbatim — not the run clock, and not a fallback.
+    expect(offered[0].generatedAt).toBe(ARTIFACT_STAMP);
+    // ...while `issuedAt` IS the run clock, so the window starts now.
+    expect(offered[0].issuedAt).toBe(new Date("2026-07-31T00:00:00Z").toISOString());
+    expect(offered[0].generatedAt).not.toBe(offered[0].issuedAt);
+  });
+
   it("TC-SLACKAPP-201 an approved MERGE applies the REVIEWED merged bytes, not a fresh merge", async () => {
     // The acceptance criterion #150 exists for. `MERGE` apply is hash-anchored on
     // the survivor's live `contentHash`, so the approved merged bytes cannot be
@@ -7124,6 +7171,233 @@ describe("offering the list to Slack (#123)", () => {
     const plain = await offer({ fakes: legacy }).promise;
     expect(plain.record.hash).toBe(idsHash);
     expect(legacy.s3.send).not.toHaveBeenCalled();
+  });
+
+  it("TC-SLACKAPP-210 mergedContent reaches the artifact and the review message and NO other rendered surface", async () => {
+    // The structural scan #150's acceptance criteria name, in the style of
+    // TC-SLACKAPP-023b and TC-PREVIEW-RECON-028. `mergedContent` is real memory
+    // text, and the artifact is the ONE at-rest store outside the database this
+    // issue admitted — "Data ownership is the whole point". Every other surface a
+    // run renders has a wider audience than that SSE-KMS object, so the invariant is
+    // asserted over each of them together rather than per-call-site: a single
+    // sentinel swept across the whole rendered output is what makes a NEW surface
+    // added later fail here, which a per-site assertion cannot do.
+    //
+    // Enumerated deliberately, because the set is the claim:
+    //  - the SSM offered record (a plain String — the boundary denies SecureString)
+    //  - every log line, on both the offer and the apply side (CloudWatch Logs)
+    //  - the Slack outcome message (chat.update, posted after the apply)
+    //  - every error message either side can raise
+    //  - the returned result objects, which the entrypoint may print
+    // and NOT an EMF/metric surface: `scripts/memory-cleanup.mjs` has no `_aws`
+    // envelope, no `putMetric`, and no CloudWatch client — asserted below as an
+    // absence rather than left as a hole in the sweep, since #103 is where metrics
+    // arrive and this is the line they must not cross.
+    //
+    // The review MESSAGE is the deliberate exception, and it is the whole safety
+    // argument rather than a leak: the operator can only approve bytes they read,
+    // Slack is an approved destination for snippets (the repository and the SSM
+    // record are not), and TC-SLACKAPP-204 asserts the text appears there WHOLE. So
+    // this case asserts presence there and absence everywhere else — an assertion
+    // that merely banned the sentinel globally would pass on a message that showed
+    // the operator nothing.
+    const CONTENT = "SENTINEL-MERGED-BYTES-e2e-do-not-leak";
+    const decisions = [del("m-1"), merge("surv", ["frag-1"], { content: CONTENT })];
+    const fakes = offerFakes();
+    const offerLog = vi.fn();
+    const offered = await offer({
+      fakes,
+      log: offerLog,
+      decisions,
+      artifactBucket: ARTIFACT.artifactBucket,
+    }).promise;
+
+    // 1. THE ARTIFACT CARRIES IT. First, because everything below is only
+    // meaningful if the bytes went somewhere — an assertion sweep over a run that
+    // silently dropped `mergedContent` would pass every "not present" check and
+    // leave the approved merge unreplayable.
+    expect(fakes.s3.puts).toHaveLength(1);
+    expect(fakes.s3.puts[0].Body).toContain(CONTENT);
+    // And the artifact's own hash is what the button carries, so the reviewed bytes
+    // are the approved ones.
+    expect(offered.record.hash).toBe(decisionArtifactHash(fakes.s3.puts[0].Body));
+
+    // 2. THE SLACK REVIEW MESSAGE CARRIES IT — see the exception above.
+    expect(JSON.stringify(fakes.slack.calls[0].body)).toContain(CONTENT);
+
+    // 3. THE SSM RECORD DOES NOT, on either write. Asserted over the serialized
+    // value, so a nested field added later cannot slip past a field-by-field check.
+    expect(fakes.ssm.puts).toHaveLength(2);
+    for (const put of fakes.ssm.puts) expect(put.Value).not.toContain(CONTENT);
+
+    // 4. NO OFFER-SIDE LOG LINE DOES. `putDecisionArtifact` logs the key, the hash
+    // and the byte count; `postApprovalRequest` logs the id count and the hash.
+    expect(offerLog.mock.calls.flat().join("\n")).not.toContain(CONTENT);
+
+    // Now the APPLY side, replaying that same artifact through `runCleanup` — the
+    // half where the bytes are read back, written to a memory, and reported on.
+    // Anchored to match the decisions the offer above hashed: the `merge` helper
+    // stamps the survivor at version 2 and each absorbed id at 1, and `needsPut`
+    // compares both the version and the content hash with `===`. A mismatch does not
+    // fail loudly — it degrades the whole merge into the "survivor changed
+    // externally" branch, which would leave the sweep below scanning a run that
+    // applied nothing.
+    const server = fakeServer([
+      memory("surv", "c-surv", 2),
+      memory("frag-1", "c-frag-1"),
+      memory("m-1", "c-m-1"),
+    ]);
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+    writeFileSync(idsFile, `${offered.record.ids.join("\n")}\n`, { mode: 0o600 });
+    const applyLog = vi.fn();
+    const reported = [];
+    // The REAL reader over the REAL bytes S3 received, not a hand-built decision
+    // list: `loadDecisionArtifact` is a surface too (it logs and it throws), and a
+    // fixture that bypassed it would leave its log line and its four refusal
+    // messages unscanned.
+    const result = await runCleanup(
+      baseOpts({ stage: "prod", apply: true, idsFile }),
+      {
+        ...baseDeps(server, fakeLlm([[]]), dir),
+        log: applyLog,
+        loadReviewedDecisions: () =>
+          loadDecisionArtifact({
+            s3: {
+              send: async () => ({
+                Body: { transformToString: async () => fakes.s3.puts[0].Body },
+              }),
+            },
+            bucket: ARTIFACT.artifactBucket,
+            key: fakes.s3.puts[0].Key,
+            hash: offered.record.hash,
+            stage: "prod",
+            log: applyLog,
+          }),
+        reportOutcome: async (outcome) => {
+          reported.push(outcome);
+          return true;
+        },
+      },
+    );
+
+    // The reviewed bytes LANDED — same reason as (1): the sweep below proves nothing
+    // about a run that applied nothing.
+    expect(result.exitCode).toBe(0);
+    expect(server.store.get("surv").content).toBe(CONTENT);
+    expect(server.store.get("frag-1").state).toBe("deleted");
+
+    // 5. NO APPLY-SIDE LOG LINE DOES — including `loadDecisionArtifact`'s replay
+    // line, which names the count and the location only.
+    const applyLogged = applyLog.mock.calls.flat().join("\n");
+    expect(applyLogged).not.toContain(CONTENT);
+    // ...and it DID log the replay, so the absence above is not the absence of
+    // logging.
+    expect(applyLogged).toMatch(/replaying 2 reviewed decision\(s\) from s3:\/\//u);
+
+    // 6. THE OUTCOME MESSAGE DOES NOT. `chat.update` replaces the review message —
+    // whose blocks legitimately held the bytes — so this is the one surface where a
+    // careless `...record` spread would put content back into a message that no
+    // longer needs it, and this message is the run's audit trail.
+    expect(reported).toHaveLength(1);
+    const outcome = buildOutcomeMessage({
+      channel: CHANNEL,
+      messageTs: "1754400000.000100",
+      hash: offered.record.hash,
+      stage: "prod",
+      approved: offered.record.ids.length,
+      result: reported[0].result,
+      appliedAt: reported[0].appliedAt,
+    });
+    expect(JSON.stringify(outcome)).not.toContain(CONTENT);
+
+    // 7. NEITHER DOES THE RESULT OBJECT the entrypoint sets its exit code from...
+    // except through `decisions`, which IS the reviewed list and is the run's return
+    // value by design. Scanned with that one field excised, because including it
+    // would make this assertion unsatisfiable and excising the whole object would
+    // make it vacuous.
+    const { decisions: replayed, ...rest } = reported[0].result;
+    expect(JSON.stringify(rest)).not.toContain(CONTENT);
+    expect(JSON.stringify(replayed)).toContain(CONTENT);
+
+    // 8. AND NO ERROR MESSAGE DOES. Every refusal on the read path is reachable with
+    // the sentinel in the body, and each one is a string an operator reads out of a
+    // failed task's log — the tampered case especially, where a tamperer choosing
+    // the bytes would be choosing what gets logged.
+    const refusals = [];
+    // Read back off the real artifact rather than restated, so each hand-built body
+    // below differs from the approved one ONLY in the field its guard is meant to
+    // catch.
+    const { generatedAt } = JSON.parse(fakes.s3.puts[0].Body);
+    for (const [label, body, hash] of [
+      // Tampered: valid shape, right stage, different bytes.
+      ["tampered", fakes.s3.puts[0].Body, `sha256:${"0".repeat(64)}`],
+      // Malformed, wrong-stage, and schema-invalid, each self-hashed so it reaches
+      // its own guard rather than dying at the hash comparison.
+      ["malformed", `not json, but it mentions ${CONTENT}`, undefined],
+      [
+        "wrong stage",
+        serializeDecisionArtifact({ stage: "pr-7", generatedAt, decisions }),
+        undefined,
+      ],
+      [
+        "invalid",
+        serializeDecisionArtifact({
+          stage: "prod",
+          generatedAt,
+          decisions: [{ ...decisions[1], mergedContentHash: undefined }],
+        }),
+        undefined,
+      ],
+    ]) {
+      const err = await loadDecisionArtifact({
+        s3: { send: async () => ({ Body: { transformToString: async () => body } }) },
+        bucket: ARTIFACT.artifactBucket,
+        key: fakes.s3.puts[0].Key,
+        hash: hash ?? decisionArtifactHash(body),
+        stage: "prod",
+        log: () => {},
+      }).then(
+        () => undefined,
+        (e) => e,
+      );
+      expect(err, label).toBeInstanceOf(Error);
+      refusals.push(err);
+    }
+    // All four refused, and not one of them quotes the body it refused.
+    expect(refusals).toHaveLength(4);
+    for (const err of refusals) {
+      expect(err.message).not.toContain(CONTENT);
+      // Nor as a stack, which is what a raw `JSON.parse` SyntaxError would carry.
+      expect(String(err.stack)).not.toContain(CONTENT);
+    }
+
+    // 9. AND THE ARTIFACT WRITER's own over-size refusal does not either — the one
+    // error message on the OFFER side that holds the bytes when it is raised.
+    const oversized = await putDecisionArtifact({
+      s3: { send: vi.fn() },
+      bucket: ARTIFACT.artifactBucket,
+      stage: "prod",
+      generatedAt,
+      decisions: Array.from({ length: 40 }, (_, i) => ({
+        ...merge(`m-${i}`, [`f-${i}`], { content: `${CONTENT}${"x".repeat(200_000)}` }),
+      })),
+      log: vi.fn(),
+    }).then(
+      () => undefined,
+      (e) => e,
+    );
+    expect(oversized?.message).toMatch(/single-PutObject bound/u);
+    expect(oversized?.message).not.toContain(CONTENT);
+
+    // 10. NO EMF/METRIC SURFACE EXISTS to scan — asserted rather than assumed, so
+    // that adding one is a red test here rather than an unnoticed new destination.
+    // #103 is where per-call metrics arrive; a dimension or a property carrying
+    // merged text would be a fourth store nobody reviewed.
+    const source = readFileSync(new URL("./memory-cleanup.mjs", import.meta.url), "utf8");
+    for (const marker of ["_aws", "putMetric", "CloudWatchClient", "PutMetricData"]) {
+      expect(source, `${marker} appeared — extend this scan to cover it`).not.toContain(marker);
+    }
   });
 });
 

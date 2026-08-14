@@ -1,14 +1,21 @@
 # Test Cases: Slack interactive approval for cleanup deletions (issue #123)
 
+Extended by #149 (the scheduled scan that produces the thing to click on) and #150
+(the reviewed decision artifact, the replay that applies it, and `MERGE`'s
+admission to the loop that replay makes safe).
+
 Unit tests live in three places, matching the three layers the feature spans:
 
 - `infra/src/oauth-facade/slack-interactions.test.ts` — the callback handler
-  (signature, replay, stale hash, idempotent claim, ACK budget), plus the
-  routing cases in `infra/src/oauth-facade/handler.test.ts`.
+  (signature, replay, stale hash, idempotent claim, ACK budget, artifact
+  coordinates onto the claim), plus the routing cases in
+  `infra/src/oauth-facade/handler.test.ts`.
 - `scripts/memory-cleanup.test.mjs` — `topic` parsing, the protected-topic
-  downgrade, and the two-pass consensus wrapper.
+  downgrade, the two-pass consensus wrapper, the decision artifact's
+  serialization and write, and the replay path in the apply task.
 - `infra/oauth-facade.test.ts` / `infra/slack-approval.test.ts` — the route, the
-  apply task, secret handling, IAM scoping, and both flag states.
+  apply task, secret handling, IAM scoping, the artifact bucket, and both flag
+  states.
 
 E2E is a signed synthetic interaction against the PR preview facade
 (TC-SLACKAPP-090). A real Slack workspace round trip is not reproducible in CI;
@@ -32,6 +39,13 @@ admits exactly one write for this: `ssm:PutParameter` scoped to
 `offered` is overwritten by each run, which is what makes a stale click
 detectable: the button's hash is compared against `offered.hash`, and a click
 carrying any earlier list's hash no longer matches (TC-SLACKAPP-020).
+
+Since #150 both records may also carry two **artifact coordinates** — a bucket and
+a content-addressed key — and the hash covers the *artifact* rather than the id
+list whenever they are present (TC-SLACKAPP-187). Neither coordinate is memory
+content, so the constraint below is unchanged; the reviewed verdicts and a merge's
+prose live in the SSE-KMS bucket those coordinates name, and the apply **replays**
+them instead of re-classifying.
 
 Both records are plain `String`, not `SecureString`: the ceiling admits neither
 `kms:Encrypt` nor `kms:GenerateDataKey`, so a SecureString write would be denied
@@ -194,9 +208,47 @@ concurrent applies of the same ids.
   constraint as soon as ids get longer, and bytes are what SSM rejects. The
   advanced tier's 8 KB is deliberately not the answer — it incurs a charge and
   cannot be reverted to standard without data loss, so `--cap` is the knob.
+- **TC-SLACKAPP-024b** — the size guard measures the artifact coordinates **inside**
+  the limit it enforces. The two coordinates add ~151 bytes, so a caller that
+  assigned them onto an already-validated record opened a window where the guard
+  said 3964 and SSM received 4115 — and that failure lands on the very write that
+  *invalidates* last week's button, so the run dies with the previous approval
+  still live and clickable. Fixed by making them parameters of
+  `buildOfferedRecord`; asserted by searching for a list that fits **without** the
+  coordinates and does not fit **with** them, so the case keeps finding the
+  boundary if a field is ever added to the record. The hash rides along in the
+  over-limit call because the three are all-or-nothing (TC-SLACKAPP-186) — without
+  it the throw comes from the wrong guard, which is exactly what happened on first
+  run and passed a mutation that broke the size check entirely.
+- **TC-SLACKAPP-024c** — the record is measured in **bytes**, not UTF-16 code
+  units. SSM's 4096 is bytes; a non-Latin id — which the store's ids do not
+  currently use, and nothing in the record's shape forbids — measures up to 3x
+  higher on the wire than `.length` reports, so a code-unit guard passes a value
+  the service rejects, again on the write that invalidates last week's button. The
+  fixture is sized by search against the **real** record rather than a hand-built
+  approximation, and the window's existence (under the limit in code units, over it
+  in bytes) is asserted before the refusal is.
 - **TC-SLACKAPP-025** — the record is stage-bound, and a hash whose record names
   another stage is refused. Same reasoning as #102's decision-file stage guard: a
   preview approval must never apply to prod.
+- **TC-SLACKAPP-195** — a click carries the **artifact coordinates** into the
+  claim, and drops half-stamped ones. The coordinates ride the claim rather than
+  `approvals/offered` for the same reason the ids do: the next scan overwrites
+  `offered`, so an apply task reading the coordinates from there would fetch the
+  artifact of a list it was never approved for. The claim is immutable once
+  written.
+
+  This Lambda does **not** fetch or verify the artifact. Doing so would put
+  `s3:GetObject` plus a KMS grant on an internet-facing function to duplicate a
+  check the apply task must perform anyway — and the task's check is the one that
+  matters, because it is the one whose result decides what gets deleted.
+
+  A half-set claims without either coordinate. That is safe *here* only because the
+  hash was already compared against the offered record, so the click is known to be
+  for this list; the apply task then refuses on its own (TC-SLACKAPP-189) rather
+  than downgrading to the id-list check. And `buildClaim` **omits** the keys rather
+  than writing them as `undefined`, for TC-SLACKAPP-023c's reason: the two
+  serialize identically and the apply task guards on the parsed object.
 
 ## Offer expiry: the 72h window (#149)
 
@@ -664,9 +716,57 @@ agreed with policy.
   over raw verdicts. Order is asserted, because both orders produce the same
   answer today and only one keeps producing it when a pass returns a different
   topic for the same id.
-- **TC-SLACKAPP-076** — `MERGE` decisions are **not** offered via Slack in v1,
-  and the run reports how many it withheld. v1 approves deletions only; an
-  unreported withholding would read as "the classifier found no merges".
+- **TC-SLACKAPP-076** — a `MERGE` that every usable pass agreed on, absorbing the
+  same ids, survives the intersection, and **both** merge counts are reported.
+  `mergesAgreed` and `mergesWithheld` are opposite facts about the same week and
+  are printed together for `verdictSummary`'s reason: an unreported withholding
+  reads as "the classifier found no merges", and an unreported *agreement* leaves
+  the merge count in the review message with nothing to reconcile against.
+
+  The agreed merge is deliberately **not** folded into `agreed`, which is the
+  denominator of the reported DELETE reproducibility figure — the 66%
+  self-reproduction that motivated consensus. Counting merges there would raise
+  the numerator without touching the contested set, so every merge-heavy week
+  would report better deletion agreement than it measured.
+
+  Until #150 the same input was **withheld**, and that ordering is the whole
+  safety argument rather than a release-sequencing preference: the offer showed a
+  merge's deletions while the apply re-classified, so an approved merge applied
+  prose nobody had read and deleted the `absorbs[]` ids the operator never saw.
+  `MERGE` is admitted here only because the replay carries the reviewed bytes, and
+  TC-SLACKAPP-200 is the enforced half of that — a merge cannot be offered at all
+  on a path with no artifact.
+- **TC-SLACKAPP-196** — a merge both passes call a `MERGE` but absorb
+  **differently** is withheld and counted. Same survivor, same verdict, and pass 2
+  folds in one extra fragment: taking pass 1's row would offer one absorbed set
+  while a second, equally plausible one existed, and the absorbed set is exactly
+  what the approval bounds. Identical verdicts make this the case a verdict-only
+  intersection cannot see, which is why the comparison is over the absorbed ids
+  and not over the verdict alone.
+
+  The comparison is `JSON.stringify(ids)`, not a joined string, for
+  TC-SLACKAPP-023b's reason one layer in: for any separator an id could contain,
+  `["ab","c"]` and `["a","bc"]` compare equal. It is order-sensitive on purpose —
+  reordering `absorbs[]` moves the artifact hash (TC-SLACKAPP-170), so two passes
+  that agree on the set but not the order do not agree on a list that could be
+  offered.
+
+  Merged **text** is deliberately outside the agreement test. Two reasoning passes
+  never produce byte-identical prose, so requiring it would read as strict and
+  behave as an unconditional refusal of every merge. The artifact is what makes
+  the bytes safe; the quorum is only needed for the deletion set.
+- **TC-SLACKAPP-197** — a merge one pass declined is withheld, and the reason says
+  **which** disagreement it was. "Passes disagreed on merging" and "passes
+  disagreed on which ids the merge absorbs" are separated because the remedies
+  differ: the first means the passes disagreed about whether the fact is
+  fragmented at all, the second that they agreed it is and disagreed about which
+  fragments belong to it.
+- **TC-SLACKAPP-198** — a merge cannot be *agreed* when a pass failed entirely.
+  `consensusReached` is a required conjunct, not a belt-and-braces one: with one
+  usable pass, `verdicts.every(v => v === "MERGE")` over a **one**-element list is
+  trivially true, so a lost pass would promote its survivor's merge unopposed —
+  the single-pass fallback TC-SLACKAPP-073 refuses for deletions, reached by a
+  different route.
 - **TC-SLACKAPP-077** — consensus never widens the destructive set: the offered
   ids are a subset of pass-1 ∩ pass-2 DELETE ids, asserted as a set relation
   rather than a count, so a future refactor cannot add an id from anywhere else.
@@ -755,6 +855,105 @@ agreed with policy.
   whose `alarmActions` is `[undefined]` fails CREATE for the whole stack, which
   would cost every preview stage its cleanup loop to gain paging it has no topic
   for.
+
+### The decision artifact's bucket (#150)
+
+The reviewed decision list cannot live in `approvals/offered`: a `MERGE` carries
+its merged prose, that parameter is a plain `String` the boundary cannot encrypt,
+and 4096 bytes would not hold it anyway. So #150 adds one SSE-KMS bucket, and
+these cover its shape. Every property here is a *deploy-time* property whose
+failure lands at runtime — an AccessDenied after a scan has spent two reasoning
+passes, or after an approval click has been spent.
+
+- **TC-SLACKAPP-161** — the bucket is named with the **account id** and no
+  wildcard. This is a security property, not a naming style: S3 bucket names are a
+  **global** namespace, so a wildcard in the bucket segment of the boundary's ARN
+  also matches a bucket an attacker creates *first* in their own account —
+  simulated, `PutObject` on such a name came back `allowed`. The account id is the
+  disambiguating suffix a global namespace needs. The stage must **not** appear:
+  one bucket serves every stage precisely so the boundary can pin an exact name,
+  and a stage segment would put the live bucket outside the permitted ARN.
+- **TC-SLACKAPP-162** — the name matches the bucket the **deployed** boundary
+  permits, byte for byte, read out of `workload-permissions-boundary.yaml` rather
+  than reasoned about. Same discipline as TC-SLACKAPP-153 for the parameter write.
+  Three sites must agree, and the asymmetry between them is the point: the
+  `Resources` exception is the **object glob** (`bucket/*`), while both KMS
+  encryption-context pins are the **bare bucket ARN** — S3 presents the bucket ARN
+  as `aws:s3:arn` when bucket keys are enabled, and `bucket/*` does not match
+  `bucket`. The first version of this case asserted `/*` on all three and passed
+  while TC-SLACKAPP-163 pinned `bucketKeyEnabled: true`: two green tests describing
+  a combination that denies every artifact write **and** read after deploy.
+  Whichever way a future edit breaks the pair, one of the two now fails.
+- **TC-SLACKAPP-163** — the artifact is encrypted with SSE-KMS (`alias/aws/s3`) and
+  **bucket keys on**, asserted at the same bucket the name came from: a sub-resource
+  addressed elsewhere leaves this bucket on the provider default, SSE-S3, which is
+  encrypted with a key the boundary's encryption-context denies say nothing about.
+  The bucket-key flag is pinned from *both* sides — here and in 162 — because the
+  mismatch is invisible until deploy.
+- **TC-SLACKAPP-164** — the object expires on the **same 72h bound as the
+  approval**, not an independently chosen retention: past that the approval cannot
+  be clicked, so the artifact could not be replayed by anything and holding memory
+  ids longer serves no purpose. `abortIncompleteMultipartUpload` is pinned
+  separately — failed multipart writes are not covered by the expiration rule and
+  would accumulate invisibly.
+- **TC-SLACKAPP-165** — all four public-access blocks and a bucket policy that
+  **denies** non-TLS requests. Four and not three: two cover ACLs and two cover
+  bucket policies, and three-of-four leaves a way to make the object public. The
+  policy has exactly one statement and it must be a `Deny` — a bucket policy that
+  *granted* anything would widen who can reach the artifact beyond the two identity
+  policies that are supposed to be the only way in. Both ARN forms are named,
+  because bucket-level operations do not match the `/*` form and a policy naming
+  only objects leaves `ListBucket` reachable over plain HTTP.
+- **TC-SLACKAPP-166** — the bucket is **retained** on stage teardown and
+  `forceDestroy` stays off. The name is account-scoped, so every stage — including
+  each PR's preview stage — resolves to the same bucket; a preview teardown that
+  deleted it would take prod's audit trail of what was deleted with it, and
+  `forceDestroy` would empty the bucket even where the bucket survives.
+- **TC-SLACKAPP-167** — the **stage** goes in the key, not the bucket name. Once
+  the bucket became account-scoped, the key prefix is the only thing carrying
+  cross-stage separation — without it two stages write the same object and a
+  preview run could overwrite prod's reviewed list. The `:` in `sha256:<hex>` is
+  substituted to `-` here, and that is the part the stage assertions cannot see:
+  `run-1` has no colon, so dropping the `.replace` left every one of them green. A
+  colon is legal in S3 and then unquotable in the `s3://` line an operator pastes,
+  a divergence from `claimParameterName`'s identical treatment that shows up only
+  at the console.
+- **TC-SLACKAPP-168** — the **writer** derives the same key the **provisioner** grants
+  access to. The two live in different runtimes — the script runs in the container,
+  the other in the SST program — so the derivation is duplicated rather than shared,
+  exactly as `OFFER_TTL_MS` and `claimParameterName` are. A drift is not cosmetic:
+  the grant is `decisions/<stage>/*` and the writer's key is what `PutObject` is
+  called with, so a mismatch is an AccessDenied at artifact-write time, after the
+  whole audit has run. Equality alone is not enough — the key must fall **under** the
+  prefix the grant is scoped to, since two functions can agree with each other and
+  both sit outside the policy's scope. The stage separator is asserted as a
+  **non**-match (`decisions/pr-4` must not prefix `decisions/pr-42/…`), because that
+  is the property the trailing slash provides, and no `:` survives into the key.
+- **TC-SLACKAPP-181** — the bucket reaches the container as a plain
+  **`environment`** entry, not an `ssm:` reference. A bucket name is not a secret,
+  and the apply half's role holds `ssm:GetParameters` under `approvals/*` only — a
+  secret-style reference would put the artifact's location behind a grant it does
+  not have. The container gates the artifact on this variable's *presence*
+  (TC-SLACKAPP-179/180), so a drift in the name leaves the scan silently writing
+  the id-only pre-#150 record with no error anywhere.
+- **TC-SLACKAPP-182** — the task's object grant is scoped to its **own stage
+  prefix**. This is where cross-stage isolation lives: the boundary pins the bucket
+  but cannot afford a per-stage key condition (6144 is a hard cap with one boundary
+  per role), so the identity policy carries the stage and the boundary bounds only
+  the maximum. The prefix comes from the same exported helper the writer's key does,
+  so a layout change cannot move one side only. The trailing slash is load-bearing
+  rather than formatting — `decisions/pr-4*` also matches `decisions/pr-42/...`, so
+  a prefix without the separator grants a stage its sibling's list. The action set
+  is pinned to `GetObject` + `PutObject` exactly: no `DeleteObject` (the lifecycle
+  rule expires the artifact; a task that could delete it could destroy the audit
+  trail of what it deleted) and no `ListBucket` (the key is derived from the hash,
+  so nothing needs to enumerate).
+- **TC-SLACKAPP-183** — every S3 and KMS resource the task names is admitted by the
+  **deployed** boundary, and the KMS conditions must *match* rather than merely be
+  admitted: `kms:ViaService` has to be s3 (the `KmsVia` deny enumerates the
+  permitted services) and the encryption context has to be the bare bucket ARN,
+  because bucket keys are on. `Resources` is a `NotResource` deny, so **every**
+  resource must be matched by an exception — one stray entry denies the whole call.
 
 ## Scheduling the scan (#149)
 
@@ -942,6 +1141,207 @@ ordering between the two writes is the part that is easy to get backwards.
   and would post a list already 96h into a 72h window: refused on arrival, so the
   loop stops with the operator clicking a button that can never work.
 
+### Writing the reviewed decision artifact (#150)
+
+Before #150 the button's hash covered the offered **DELETE ids** and nothing else.
+That bounded *which* memories the apply could touch and never *what* it did to
+them: the apply task re-classified, and a hash over the same ids still matched. So
+the offer now also writes the reviewed list itself to S3 and hashes **that**.
+
+- **TC-SLACKAPP-169** — the artifact carries every **destructive** field and
+  nothing that only decorates. `contentHash` and `version` are in, because they are
+  what the LWW guard compares at apply time and an artifact that omitted them would
+  let a replay clobber a memory edited since the review. `reason` and `snippet` are
+  out, for different reasons: `snippet` is memory content the report path
+  deliberately truncates, and `reason` is model prose no reader validates — a
+  spread of the decision row would carry both into the hashed bytes, making an
+  upstream field addition invalidate every live approval as a side effect. A `MERGE`
+  carries its merged bytes and each absorbed id's own anchors, because the apply
+  re-reads and LWW-checks every absorbed memory separately. A `KEEP` carries no
+  anchors at all: there is nothing for the LWW guard to compare. `absorbs[]` order
+  is **preserved, never sorted** — reordering moves the hash while approving the
+  identical deletions, which is the one place a cosmetic normalization silently
+  invalidates a live approval.
+- **TC-SLACKAPP-170** — the serialization is canonical, because a hash mismatch is a
+  **refusal** and not a fallback: the writer and every later reader must agree on the
+  bytes to the character. No pretty-printing (`JSON.stringify(x, null, 2)` is the
+  natural thing to reach for when a human might read the artifact, and it would make
+  the hash depend on an indentation choice); re-serializing the same input is
+  byte-identical; and a decoration the artifact excludes cannot move the hash, so an
+  upstream field addition does not invalidate approvals in flight. Six reviewed
+  changes are each asserted to **move** it — a flipped verdict, a moved anchor,
+  edited merged bytes, an added absorbed id, reordered `absorbs`, reordered
+  decisions — since each is a way the list could be altered after the click while
+  the approved ids stay identical.
+- **TC-SLACKAPP-171** — an absent anchor is distinguished from one spelled
+  present-but-`undefined`. `JSON.stringify` **drops** undefined values, so a field
+  written unconditionally as `contentHash: decision.contentHash` on a row that has
+  none hashes *identically* to one where the field was never written — the guard is
+  invisible in the output, and only a case like this reaches it. The same case pins
+  that a non-integer `version` is not an anchor either: `needsPut` compares with
+  `===` against a real integer, so a float or a string degrades every LWW check into
+  the "changed externally" branch, a replay that applies nothing while reporting a
+  clean skip.
+- **TC-SLACKAPP-172** — **one** `PutObject`, content-addressed, with a checksum and
+  no key of its own. One call and it must stay one: `@aws-sdk/lib-storage`'s
+  `Upload` switches to multipart above a threshold and calls
+  `s3:AbortMultipartUpload` on failure — an action the boundary's ceiling does not
+  admit — so the convenient wrapper works in a unit test and fails on the first
+  large artifact *inside its own error handler*. `ChecksumSHA256` is checked by S3
+  against the bytes it received, so a truncated upload is rejected at write time
+  rather than becoming an artifact the apply refuses after the click is spent. No
+  `ServerSideEncryption` and no `SSEKMSKeyId`: the bucket default already applies,
+  and naming the algorithm here would also require naming the key, which is how a
+  caller ends up presenting an encryption context the boundary's `GenKey` deny does
+  not match. The key is derivable from the **hash alone**, so the apply needs no run
+  id plumbed through the Lambda, the claim, and the container override — each of
+  which is a place one could be dropped or forged. The log line names the location
+  and the size, never the body or an id: it goes to CloudWatch Logs, a wider
+  audience than the artifact's own SSE-KMS bucket.
+- **TC-SLACKAPP-173** — an identical list rewrites the identical object, so a
+  retried scan does not accumulate artifacts; two runs producing *different* lists
+  cannot collide, which is the property a timestamped or run-id key would not give
+  (two runs in the same millisecond would overwrite each other's reviewed list); and
+  a stage cannot land in another stage's prefix even for the same list.
+- **TC-SLACKAPP-174** — an artifact over the single-`PutObject` bound is **refused**,
+  not truncated or split, and nothing is written. Truncating is the same class of
+  mistake `buildOfferedRecord` refuses — the operator would approve a hash over
+  bytes that are not the list they were shown — and multipart is denied by the
+  boundary, so the refusal has to come before the call rather than after a partial
+  one. The remedy must **not** name `--cap`, and that is a correctness claim about
+  the message rather than a wording preference: the artifact carries one row per
+  *scanned* memory (KEEPs included), while `--cap` bounds only how many mutations an
+  apply may spend and never reaches this path. Advice to lower it is inert, and
+  doubly so on the scheduled scan, which has no operator at the keyboard and no
+  `--cap` override wired into its task definition. When the alarm says only "task
+  failed", this string is the entire diagnosis.
+- **TC-SLACKAPP-174b** — the artifact is measured in **bytes**, not UTF-16 code
+  units. This is the one place memory *text* lives at rest, so the difference is not
+  academic: a CJK `mergedContent` is 3 bytes per character and 1 `.length` unit, and
+  measuring code units passes a body S3 receives as ~3x larger — which is how a
+  write ends up needing the multipart path `s3:AbortMultipartUpload` is denied for,
+  an AccessDenied inside the SDK's own error handler after the scan has spent its
+  reasoning passes. The fixture's row count is derived rather than guessed, and the
+  window's existence is asserted, so it cannot drift onto the wrong side of the
+  bound.
+- **TC-SLACKAPP-174c** — the returned `bytes` and the log line report the **byte**
+  count, not the code-unit count. That number is what an operator reconciles against
+  the object's real size in S3, so a code-unit count disagrees with the console for
+  every non-Latin artifact.
+- **TC-SLACKAPP-184** — the artifact hash separates lists an id hash **cannot**, and
+  this is the case that argues for the whole change. The old hash covered the DELETE
+  ids only, so flipping a verdict to `KEEP` would shrink the DELETE set and move
+  even the old hash — the test therefore holds the DELETE set **byte-identical** and
+  changes something else the operator read in the offer. A `MERGE`'s absorbed ids
+  and merged text are that something: they are in the artifact, they are what a
+  replay applies, and they are invisible to a hash over the deletion ids.
+- **TC-SLACKAPP-175** — the artifact is written **before** the record that points at
+  it, in the same direction as record-before-post. A record written first would make
+  the artifact clickable while the object may not exist, and the apply must *refuse*
+  a missing artifact rather than fall back to re-classifying — so that window is a
+  spent approval that applies nothing. Writing the artifact first leaves only the
+  safe failure order: an orphaned object no record names, which the lifecycle rule
+  expires on its own. Asserted on the shared event log, since the ordering across
+  three clients is the property.
+- **TC-SLACKAPP-176** — the new store does **not** relax what the SSM record may
+  hold. That parameter is a plain `String` readable by anything with
+  `ssm:GetParameters` on the stage tree; the artifact exists precisely so the merged
+  bytes have somewhere else to go, which makes restating TC-SLACKAPP-023b's
+  invariant here the point rather than a duplicate. The record's key set stays
+  **closed** and the two new members are coordinates — a bucket name and a
+  `decisions/<stage>/sha256-<hex>.json` key — neither of which names a memory. The
+  same case asserts the merged text **did** reach the SSE-KMS bucket, which is what
+  makes the record's silence a relocation rather than a loss, and that no log line
+  carries it on either side.
+- **TC-SLACKAPP-177** — with no bucket configured there is no artifact and **no
+  coordinates**: the pre-#150 record exactly, not a record with empty ones, which
+  the apply would read as "there is an artifact" and then fail to fetch. Asserted as
+  **absent**, not falsy — `JSON.stringify` drops undefined, so a key spelled
+  present-but-undefined serializes identically here while `"artifactKey" in record`
+  on the apply side answers differently.
+- **TC-SLACKAPP-178** — an artifact that cannot be written means **nothing** is
+  offered: no record, no post. The artifact is a prerequisite, not a best-effort
+  side effect — degrading to an id-only offer would post a clickable button for a
+  list the apply cannot replay, and with `MERGE` admitted the operator would be
+  approving verdicts whose bytes no longer exist anywhere. Last week's button
+  survives, because the run failed before it invalidated anything; `runCleanup` maps
+  this to exit 1, which is what the task-exit alarm sees.
+- **TC-SLACKAPP-186** — the artifact **triple** (bucket, key, hash) is all-or-nothing,
+  refused rather than silently partial, and the two halves fail in *different*
+  places — which is why the guard is one throw rather than a both-or-neither `if`.
+  Coordinates without the hash: the apply fetches, hashes, and finds the claim's hash
+  is the id list's. Hash without coordinates: the apply has nothing to fetch, reads
+  the record as a legacy offer, and refuses for the mirror-image reason. Neither is
+  reachable through `postApprovalRequest` today; the guard exists so a second caller
+  cannot construct one and discover it a week later at a click. Only-one-present is
+  covered as well as only-one-missing, and both all-three and none are accepted —
+  the latter being the #123 record every stage without a bucket still writes.
+- **TC-SLACKAPP-187** — the record and the button carry the **artifact** hash when
+  there is an artifact and the **id-list** hash when there is not. Both spellings are
+  `sha256:` + 64 hex, so a shape assertion cannot tell them apart: the comparison has
+  to be against the other candidate value. Asserted in the record SSM received *and*
+  in the button's `value`, because a record that moved to the artifact hash while the
+  message kept the ids' one is a click the facade refuses with "no current approval
+  list". The compatibility path is chosen **here, at write time**, by whether an
+  artifact exists — not by a reader that failed to fetch one and fell back. That
+  distinction is the safety argument: a record whose hash covers an artifact must
+  never be checkable by the weaker rule.
+- **TC-SLACKAPP-179** — the bucket travels from the task definition's environment
+  through `createCleanupDeps` to a real offer, landing at the stage-scoped prefix the
+  task's identity policy grants. Not from SSM: it is not a secret, and the parameter
+  tree would place the artifact's location behind the same `approvals/*`-scoped grant
+  the apply task is confined to.
+- **TC-SLACKAPP-180** — with no bucket configured the offer happens **without
+  constructing an S3 client**, so a hand-run #102 review in a shell with no S3
+  credentials offers exactly what it did before #150. The injected client is
+  *available* and still unused, which is what makes this an assertion about the
+  environment gate rather than about the absence of a client.
+
+### Offering a MERGE (#150)
+
+- **TC-SLACKAPP-199** — the offered ids cover a merge's **survivor and every
+  absorbed id**. That list is the bound the apply enforces, so a survivor-only
+  record is an approval for a rewrite plus N deletions the list never named — the
+  same defect that made `MERGE` unofferable, moved from the apply into the record.
+  Asserted as an exact list rather than with `toContain`, so dropping the survivor
+  is caught alongside dropping the absorbs. TC-SLACKAPP-023b's no-content invariant
+  is restated for the shape that now *has* content to leak: the decision carries
+  `mergedContent` and per-absorbed `snippet`s, and neither may reach the plain
+  `String` parameter.
+- **TC-SLACKAPP-200** — a `MERGE` **cannot be offered without a decision artifact**.
+  This is #150's ordering requirement enforced rather than documented: without an
+  artifact the apply re-classifies, so the merged bytes it writes are prose
+  generated after the review and its `absorbs[]` is whatever that run decided — the
+  ids in the record would authorize deletions chosen after the click. A **throw**,
+  not a silent drop: a dropped merge would leave its absorbed ids out of a record
+  the operator is told is the list they approved.
+- **TC-SLACKAPP-204** — a merge renders its merged text **whole** and names **every**
+  id it will delete. Whole because the operator is approving those bytes: a length,
+  a hash, or a truncation is a click spent on prose nobody read. Every absorbed id
+  with its own snippet, because a summarized count ("absorbs 2 memories") is the
+  survivor-only record's defect moved onto the surface the human actually reads. The
+  header, the button label, and the confirm dialog are each pinned, and they count
+  **different** things on purpose: the header and button count *actions* (`N
+  deletion(s) and M merge(s)`), while the confirm dialog counts the memories that
+  disappear — a merge's absorbed ids are soft-deleted just as surely as a `DELETE`,
+  so `3 memories will be soft-deleted … and 1 surviving memory rewritten` is the
+  sentence that describes the footprint. A header counting the footprint would tell
+  the operator there are four deletions when they are looking at two bullets.
+- **TC-SLACKAPP-205** — a merge Slack **cannot show whole is refused**, not
+  truncated. `chunkSections` truncates an over-long line with `...`, which is safe
+  for a 120-character snippet and unsafe for merged content: the operator would
+  approve a hash over bytes they saw the beginning of. The refusal names the
+  survivor, is reachable from the real `offer()` — where the record was already
+  written, so last week's button is invalidated as intended and the post is what
+  fails — and carries **no merged bytes** in its own message. It deliberately does
+  **not** advise lowering `--cap`: the cap bounds how many decisions an apply may
+  spend and cannot shrink a single merge, so that advice is inert on this path.
+- **TC-SLACKAPP-206** — a merge-free offer keeps the pre-#150 wording **exactly**:
+  the header, the button, and the confirm sentence are asserted as literals and no
+  form of the word "merge" appears anywhere in the message. The weekly review is the
+  same message an operator has been reading since #123, and every week without a
+  merge must still look like that week.
+
 ## The apply task's in-container runtime
 
 Everything above gets a claimed approval as far as `RunTask`. These cover what
@@ -1043,17 +1443,23 @@ made safe or quietly defeated.
 - **TC-SLACKAPP-132** — the approved-ids filter is authoritative for **every** id a
   run deletes, not only the id each decision is keyed on.
 
-  `buildOfferedRecord` offers `DELETE` verdicts only, so no `MERGE` can ever be in
-  an approved list — but the filter checked `approved.has(decision.id)` on the
-  **survivor** alone, while a `MERGE` deletes its `absorbs[]` ids and rewrites the
-  survivor's content. The apply task re-classifies rather than replaying the
-  reviewed artifact (#119 is the replay path, and the task definition passes no
-  `--decisions`), so a fresh `MERGE` naming an approved id as its survivor deleted
-  memories the operator never saw and exited 0 reporting success. That is the one
-  guarantee the whole loop exists to provide, so a `MERGE` under `--ids` is refused
-  outright, counted in `skippedByFilter`, and logged. Asserted on no non-GET request
-  reaching the server at all, because a PUT writing identical content would leave
-  the store looking untouched.
+  The filter checked `approved.has(decision.id)` on the **survivor** alone, while a
+  `MERGE` deletes its `absorbs[]` ids and rewrites the survivor's content. When this
+  landed the apply task still re-classified, so a fresh `MERGE` naming an approved
+  id as its survivor deleted memories the operator never saw and exited 0 reporting
+  success — the one guarantee the whole loop exists to provide.
+
+  #150 makes this case **narrower rather than obsolete.** The offer now names every
+  absorbed id (TC-SLACKAPP-199) and a merge cannot be offered without an artifact to
+  replay (TC-SLACKAPP-200), so an ids file holding the survivor alone can no longer
+  come from a scan. It can still come from a hand-edited file or a tampered
+  artifact, and the answer must stay the same: refuse the whole merge, never absorb
+  the approved subset, which would rewrite the survivor with content whose other
+  fragments are still in the store. Counted in `skippedByFilter` and logged with the
+  **missing ids by name** — "2 of 3" tells an operator the merge was refused, and
+  the names tell them whether their ids file is wrong or the artifact is. Asserted
+  on no non-GET request reaching the server at all, because a PUT writing identical
+  content would leave the store looking untouched.
 - **TC-SLACKAPP-132** — the converse, in the same pair: an approved id whose fresh
   verdict is now `KEEP` fell out at `destructiveCost === 0` and incremented nothing,
   so the outcome said "1 of 2 approved deletion(s)" with no note and a changed
@@ -1089,6 +1495,121 @@ made safe or quietly defeated.
   approved, and "nothing was approved" and "everything is approved" are the two
   things it must never confuse.
 
+### Replaying the reviewed list instead of re-classifying (#150)
+
+TC-SLACKAPP-132 refused a `MERGE` under `--ids` because the apply task
+**re-classified**: the operator reviewed one list and the task applied another that
+merely overlapped it. These cover the replay that removes the re-classification,
+and therefore the withholding.
+
+- **TC-SLACKAPP-188** — the claim's artifact coordinates are carried through, and
+  the id re-derivation is skipped **only then**. Under #150 the claim's `hash` covers
+  the artifact, so re-deriving it over the ids (TC-SLACKAPP-092's check) would refuse
+  every artifact-bearing approval. The check is not weakened, it **moves**:
+  `loadDecisionArtifact` re-derives the same hash over the fetched bytes, which is
+  strictly more than the ids. The ids file is still written, because the artifact
+  supplies the *verdicts* and the ids file supplies the **bound**. A claim with no
+  coordinates keeps the id re-derivation, or a legacy record's ids could be swapped
+  freely under a hash that only ever covered them — asserted with a fixture whose
+  artifact hash is deliberately **not** the ids' hash, which is the mutation this
+  case exists to kill.
+- **TC-SLACKAPP-189** — a **half-set** of coordinates is refused, never read as
+  absent. Absence is meaningful here — it selects the id-list check — so reading a
+  half-set as absent makes deleting one field the cheapest possible downgrade: strip
+  `artifactKey` and the apply stops caring that the hash covers a reviewed list, then
+  re-derives over whatever ids are in the record. Refusing is the only answer that
+  does not turn a partial write into a weaker check, and nothing is materialized, so
+  the run cannot proceed on a bound it declined to validate.
+- **TC-SLACKAPP-190** — the artifact is refused **four ways** and **never** falls
+  back to the id list. The tempting alternative — catch, shrug, re-classify — is
+  exactly the behaviour #150 replaces: it applies verdicts the operator never saw
+  while holding an approval they did give. The happy path is asserted **first**, or
+  every refusal below could be passing because the reader refuses unconditionally.
+
+  1. **Unreadable** — `AccessDenied`, `NoSuchKey`, a throttle: all the same answer.
+     The error's **name** is logged, never its message, because an AWS error quotes
+     the request it rejected and that request names a key derived from the approval
+     hash. The remedy sentence says re-classification is not the alternative, since
+     that sentence is the whole diagnosis when the alarm says only "task failed".
+  2. **Tampered** — valid JSON, valid shape, right stage, different bytes. The case
+     the issue exists for. Both hashes are named so an operator can tell a tamper
+     from a stale key, and the refused body's *contents* do not reach the message: a
+     tamperer choosing the bytes would be choosing what gets logged.
+  3. **Malformed** — reachable only by matching the approved hash over non-JSON,
+     which means the offer wrote garbage rather than someone substituting it. Still a
+     refusal: there is nothing to replay either way. The hash is checked **before**
+     the parse, asserted by giving a body whose own hash is the approved one.
+     Structurally valid JSON with no `decisions` array is refused too, rather than
+     replaying `undefined` as an empty approval — which would exit 0 having done
+     nothing while consuming the approval.
+  4. **Wrong stage** — needs a hand-written object inside the stage's own prefix,
+     since the identity policy scopes the task to `decisions/<stage>/`. Which is
+     exactly when a guard earns its place: the alternative is a preview review
+     applied to prod.
+- **TC-SLACKAPP-191** — the replay thunk is wired **exactly when the claim names an
+  artifact**, and the direction matters. `MEM9_DECISION_ARTIFACT_BUCKET` is the
+  *scan* task's variable — the apply task does not carry it — so the coordinates can
+  only come from the claim. Keying on anything else would mean a hash covering a
+  reviewed list gets checked by the weaker id-list rule whenever the apply task
+  happens to be configured differently from the scan that offered it. A **thunk**,
+  so nothing is fetched during dep construction: the artifact is read inside
+  `runCleanup`, after service discovery, and a stage whose mnemo service is down
+  fails on discovery and never touches the object.
+- **TC-SLACKAPP-192** — the reviewed verdicts are applied and the classifier is
+  **never called**. Not merely disagreed with: a run that classified and then
+  discarded the result would burn Bedrock tokens on every click and be one careless
+  read away from applying the drifted list. The corpus is never paged either, so it
+  could have changed since the review without changing what gets applied. And **no
+  decision file** is written — the artifact is the durable copy, and a `MERGE`'s
+  `mergedContent` is real memory text, so a second copy on the task's ephemeral disk
+  would be a third store nobody reviewed.
+- **TC-SLACKAPP-193** — a replayed artifact is **still bounded by the approved ids**.
+  The artifact supplies the verdicts and does not widen the click: the ids file keeps
+  a tampered-but-hash-valid artifact — impossible today, but the guard is not
+  conditional on that — from reaching a memory the click never covered. This is why
+  the ids file is written on the replay path at all.
+- **TC-SLACKAPP-194** — a refused artifact **aborts the run** and applies nothing.
+  `loadDecisions` deliberately has no `try` around the replay branch, so every
+  refusal above propagates out of `runCleanup`. The lock file is never even created,
+  because the refusal is upstream of both the lock and the database — a partial apply
+  here would be the worst outcome, since the approval is spent either way.
+- **TC-SLACKAPP-201** — an approved `MERGE` applies the **reviewed merged bytes**,
+  not a fresh merge. This is the acceptance criterion #150 exists for, and the reason
+  replay is mandatory for merges rather than a nicety: `MERGE` apply is hash-anchored
+  on the survivor's live `contentHash`, so the approved merged bytes cannot be
+  reconstructed by a re-run **at all** — a fresh pass writes different prose whose
+  hash matches nothing, and the text the operator read in Slack is unrecoverable.
+  The classifier is armed with a *different* merge to prove which one landed, and the
+  absorbed id the fresh classification never named is deleted, which a re-classified
+  apply would have left active. Three ids are charged against the cap: the rewrite
+  and the two deletions.
+- **TC-SLACKAPP-202** — an id added to a merge's `absorbs[]` **after** the offer is
+  never deleted. #150 names this as the probe that must turn a named test red, and
+  this is that test. It asserts the layer *below* the hash: TC-SLACKAPP-190 refuses a
+  tampered artifact outright, while this covers an `absorbs[]` entry that reached the
+  apply anyway — a claim whose ids file predates the tampering, or a hand-run replay.
+  The whole merge is refused **entire** rather than the extra id dropped, because
+  absorbing the approved subset would rewrite the survivor with content whose other
+  fragment is still in the store. Nothing at all happens: not the extra deletion, not
+  the approved one, not the rewrite, and no non-GET request reaches the server.
+- **TC-SLACKAPP-211** — a re-offered replay is dated by the **artifact's** stamp, not
+  by the run's clock. `loadDecisions` returns the artifact's own `generatedAt`, and
+  this is the one path that renders it: a review run reached with a hash and no
+  `--apply` replays the reviewed list and re-offers it, and the review message says
+  "Generated {generatedAt}". Stamping that with the run clock would date a week-old
+  reviewed list to the moment it was reposted, and the operator would read a fresh
+  timestamp over stale verdicts with no way to tell. `issuedAt` is deliberately the
+  opposite (#149) — this run's clock, or a reposted list arrives already expired — so
+  both are asserted at once: a mutation that used the clock for each would satisfy an
+  `issuedAt`-only check.
+- **TC-SLACKAPP-203** — a fully applied merge is **not** reported as a reclassified
+  approval. `unclaimed` starts as the approved ids the run classified and each
+  applied decision clears its own, so clearing only `decision.id` leaves every
+  approved *absorbed* id behind — and the outcome says "2 approved id(s) are no
+  longer classified as deletions" about a merge that deleted both of them. The
+  typo'd-approval report ("matched no decision") has the same id-set defect and is
+  asserted silent too.
+
 ## Closing the loop on the message
 
 The offer posts and the apply deletes; without these the message keeps showing a
@@ -1106,6 +1627,13 @@ fail the run.
   is **gone**: `chat.update` replaces blocks wholesale, which is what removes the
   buttons — leaving them would offer a hash whose claim already exists, and the
   callback answers that click with "someone else is already applying".
+- **TC-SLACKAPP-207** — the outcome headline counts **changes**, not deletions,
+  because with `MERGE` admitted an applied change is no longer always a deletion.
+  `capUsed` charges a merge for its survivor's rewrite plus each absorbed id, so the
+  same number now covers a rewrite the word "deletion" misdescribes — an operator
+  reading "3 deletions" for a two-fragment merge would go looking for a memory that
+  is still there, rewritten. Asserted as an exact string plus the absence of
+  `/deletion/i`, since the defect is a word rather than a number.
 - **TC-SLACKAPP-121** — a capped (exit 4) or partial (exit 6) apply says so, and is
   distinguishable from a clean one. Both stop early with real deletions already
   done, so a count-only message would read identically to a complete run while the
@@ -1205,11 +1733,20 @@ fail the run.
   record. The record is read back by name, so "no record" is a positive
   assertion rather than the absence of one.
 
+  Since #150 the approved list is a real **artifact** uploaded to the audit bucket
+  and the click carries its byte hash, so the live click replays a list holding a
+  `MERGE` as well as a `DELETE` — the verdict the artifact exists for, since a merge
+  cannot be reoffered by a fresh classification (TC-SLACKAPP-201). Every id stays a
+  synthetic `mem9-e2e-` sentinel that no store id can collide with, and the exit 0 is
+  earned by the apply's "already gone" and "survivor no longer active" branches
+  rather than by a real deletion — a live stage's data is never touched, and a
+  `MERGE` here would otherwise *rewrite* a memory rather than only delete one.
+
   `scripts/run-slack-approval-e2e.sh` is the harness; the CI step runs it after
   the preview deploy, and `scripts/run-slack-approval-e2e.test.mjs` drives the
   script itself against a fake `aws` and a fake `curl` (the fake `curl` decides
   which POST it is by the **signature header**, exactly as the real endpoint
-  does). Seven decisions in it are load-bearing:
+  does). Eight decisions in it are load-bearing:
 
   - **The invalid POST goes first.** After a successful click there is a record,
     and nothing can then tell the two writers apart — so ordering is what makes
@@ -1224,6 +1761,20 @@ fail the run.
     state a `RunTask` failure leaves behind.
   - **The apply task's own exit code is checked.** Without it the run passes on a
     click that started a task which then crashed.
+  - **The task's own log stream must show it REPLAYED the artifact** (#150). Exit 0
+    does not separate the two things that can happen after the click: a task that
+    ignored the artifact and re-classified would find these synthetic ids absent
+    too, and would also exit 0 — so without this the `MERGE` case proves nothing.
+    The group and stream prefix come from the task definition's own
+    `awslogs-group`/`awslogs-stream-prefix`, never from a hand-composed `/sst/...`
+    path: SST names log groups with a random segment under `ignoreChanges:["name"]`,
+    so a guessed name matches no real group, every query answers
+    `ResourceNotFoundException`, and the assertion silently never runs (the shape
+    that made an earlier log scan vacuous). A container that carries no `awslogs`
+    config fails the run by name (TC-SLACKAPP-209) rather than scanning nothing.
+    Only the replayed **count** is matched, not the log line whole: that line names
+    the audit bucket, whose name embeds the account id, and preview CI logs are
+    public.
   - **The signing secret reaches the HMAC through the ENVIRONMENT**, not an argv:
     `openssl dgst -hmac "$SECRET"` is the obvious way to write this in bash and
     would put the secret in a world-readable command line. Pinned by a static
@@ -1283,11 +1834,12 @@ fail the run.
     the obvious next edit. A refusal, not a skip: exit 0 would let a workflow edit
     silently stop testing anything while reporting green.
 
-  The approved id is a synthetic sentinel (`mem9-e2e-nonexistent-{stage}`) that
-  cannot name a real memory, and the apply's "already gone" branch is what makes
-  the run exit 0. Both records are deleted on **every** exit, including failure:
-  the claim is written `Overwrite: false`, so a leftover would make the next run's
-  click a losing claim that starts nothing.
+  Both records are deleted on **every** exit, including failure: the claim is
+  written `Overwrite: false`, so a leftover would make the next run's click a losing
+  claim that starts nothing. Since #150 the cleanup also deletes **both** uploaded
+  artifacts and both possible claim names — a `MERGE`'s `mergedContent` is memory
+  text, and leaving even synthetic bytes in a readable object on a disposable stage
+  is a store nobody reviewed.
 
   Both absent prerequisites — no `facade/url`, no `slack/signing-secret` — are
   `::warning::` skips rather than failures, matching `run-oauth-facade-smoke.sh`.
@@ -1367,6 +1919,126 @@ fail the run.
   (no gate at all, a cosmetic refusal, a 5xx refusal). Without a fake that *can* be
   wrong, the whole step passes against a façade with no TTL check — the exact
   regression the gate exists to prevent.
+
+- **TC-SLACKAPP-208** — a **tampered artifact** is refused live, and **no apply task
+  runs**. The harness uploads two artifacts: the reviewed list, and a twin whose
+  `MERGE` absorbs one MORE id — a deletion the operator never saw. The offered
+  record is then seeded against the *tampered* one, stamped `issuedAt` now so the
+  refusal cannot be the TTL, and the click carries the **reviewed** hash. Under the
+  pre-#150 id-list hash that tamper was invisible: the record's `ids` are byte-
+  identical across the two, asserted rather than assumed. Under the artifact hash
+  the record's hash moves, the button no longer matches it, and the façade refuses
+  before writing anything.
+
+  Five decisions here are load-bearing:
+
+  - **It runs after the expired probe and before the live click**, the same ordering
+    argument as the 401 and the TTL step: "no claim was written" is only assertable
+    while no claim exists.
+  - **The refusal is a 200 matched on `regenerated`** — every refusal reaches the
+    operator through `reply()`, so the status cannot distinguish refusal from
+    acceptance, and a non-200 is a separate hard failure because Slack renders it as
+    its own notice and shows the operator no reason.
+  - **The same body is POSTed as every other step.** A body signed over the tampered
+    hash would be a different scenario — an operator clicking a button they *were*
+    shown — and would prove nothing about a swapped artifact.
+  - **BOTH claim names are read back.** The claim is keyed on the **offered**
+    record's hash, not the button's, so an accepted tamper writes its claim under the
+    tampered hash: a harness that checked only the reviewed name would report "no
+    apply task" about a task that was running. This is what makes "no apply task ran"
+    provable without a second Fargate lifecycle — the claim is taken
+    `Overwrite: false` **before** `RunTask`, so an absent claim IS an absent task.
+  - **A tamper that does not move the hash fails the run up front.** Asserted on the
+    two hashes before the first upload, because a twin that hashed identically would
+    make the entire case vacuous while staying green.
+
+  The byte-level half of the same guard — an artifact swapped under a record that
+  still names its old hash — is the **apply task's** refusal rather than the
+  façade's, and it stays in the four invalid-artifact unit tests (TC-SLACKAPP-190,
+  194): proving it live costs a second Fargate task lifecycle in a job that already
+  runs five E2Es, and all it would add over those tests is that the task's S3 grant
+  works, which the live click exercises on its success path.
+
+- **TC-SLACKAPP-209** — the failure modes the #150 additions could swallow. Each is a
+  case in `run-slack-approval-e2e.test.mjs`, mutation-verified the same way as
+  TC-SLACKAPP-090b: reverting the fix fails exactly the case that names it.
+
+  - **A tampered click answered without a refusal fails the run** — separately for an
+    acceptance (`not refused as a hash mismatch`), for a refusal whose reply is right
+    but which still wrote a claim (`an apply task may have deleted an id no operator
+    reviewed`), and for a 5xx (`answered HTTP 500, not 200`). Three distinguishable
+    messages, because the operator's next move differs: a façade bug, a claim-order
+    bug, and a reply the operator cannot see.
+  - **Zero replay lines fails the run**, naming the cause the count implies — the task
+    exited 0 by **re-classifying** instead of replaying, so the approved `MERGE` was
+    not what ran.
+  - **The log query uses the task definition's own group and stream prefix.** Asserted
+    on the fake's recorded `logs filter-log-events` invocations: a hash-suffixed group
+    name and a `{prefix}/{container}/{task-id}` stream, neither of which a hand-
+    composed path would produce. The same case asserts the account id appears nowhere
+    in the harness's output.
+  - **A container with no `awslogs` group/stream prefix fails by name.** Found a real
+    defect in the guard rather than in the test: `read -r A B < <(jq …select(…))`
+    returns 1 on EOF when nothing matches, and under `set -euo pipefail` that aborted
+    the script **before** its own diagnostic — the guard against a silent no-op was
+    itself silent. Explicit `=""` initializers plus `|| true` are what make the named
+    error reachable.
+  - **A non-12-digit account id is refused before any upload.** Checked over `""`,
+    the literal `None` that `sts get-caller-identity` prints when it cannot resolve
+    one, and a malformed value; each must produce zero `s3api` and zero `curl` calls,
+    since the bucket name is composed from that value and a wrong one would either
+    write to a bucket this account does not own or fail four steps later at the click.
+
+## Structural output scan
+
+- **TC-SLACKAPP-210** — `mergedContent` reaches the artifact and the Slack **review**
+  message, and **no other rendered surface**. The acceptance criterion #150 names, in
+  the style of TC-SLACKAPP-023b and TC-PREVIEW-RECON-028: `mergedContent` is real
+  memory text and the SSE-KMS artifact is the one at-rest store outside the database
+  this issue admitted, so every other surface a run renders has a wider audience.
+  Asserted as **one sentinel swept across the whole rendered output** rather than
+  per-call-site, because that is what makes a surface added later fail here — a
+  per-site assertion cannot.
+
+  The swept set is the claim, enumerated deliberately: the SSM offered record (a
+  plain `String` — the boundary denies `SecureString`), every log line on both the
+  offer and the apply side, the Slack **outcome** message (`chat.update`), every
+  error message either side can raise, and the returned result objects. And **not**
+  an EMF/metric surface: the script has no `_aws` envelope, no `putMetric`, and no
+  CloudWatch client — asserted as an absence over the source rather than left as a
+  hole, so #103 adding metrics turns this red instead of quietly opening a new
+  destination.
+
+  Three things keep it from being vacuous, which is the standing hazard of a
+  `not.toContain` sweep:
+
+  - **The review message is a presence assertion**, not an exception waived. It is the
+    whole safety argument — the operator can only approve bytes they read, Slack is an
+    approved destination for snippets where the repository and the SSM record are not,
+    and TC-SLACKAPP-204 asserts the text appears there whole. A test that merely
+    banned the sentinel globally would pass on a message that showed the operator
+    nothing.
+  - **The apply is asserted to have LANDED** — the survivor holds the reviewed bytes,
+    the absorbed id is deleted, and the replay line was logged. A sweep over a run
+    that silently dropped `mergedContent`, never posted, or never logged would pass
+    every "not present" check while proving nothing. The survivor is seeded at the
+    version the offered decision anchors, because a mismatch does not fail loudly: it
+    degrades the whole merge into the "survivor changed externally" branch, which
+    reads as a concurrent-write protection that never happened.
+  - **`result.decisions` is destructured out**, not ignored. It legitimately carries
+    the bytes on a replay — it IS the reviewed list and the run's return value — so
+    including it makes the assertion unsatisfiable while excising the whole object
+    makes it vacuous.
+
+  The replay runs through the **real** `loadDecisionArtifact` over the **real** bytes
+  S3 received, not a hand-built decision list: that reader is itself a surface (one
+  log line, four distinct refusal messages), and a fixture that bypassed it would
+  leave all five unscanned. Each refusal is reached with the sentinel in the body —
+  the tampered case especially, where a tamperer choosing the bytes would be choosing
+  what gets logged — and both `message` and `stack` are checked, since a raw
+  `JSON.parse` `SyntaxError` carries the input in the latter. `putDecisionArtifact`'s
+  over-size refusal is covered too: it is the one error on the offer side that holds
+  the bytes when it is raised.
 
 ## Exit codes
 
