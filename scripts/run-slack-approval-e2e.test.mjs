@@ -1217,14 +1217,14 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
         operation === "put-parameter" &&
         String(name).endsWith("/approvals/offered"),
     );
-    const live = JSON.parse(seeds.at(-1)[seeds.at(-1).indexOf("--value") + 1]);
+    const liveSeed = seeds.at(-1);
+    const live = JSON.parse(liveSeed[liveSeed.indexOf("--value") + 1]);
+    // BOTH coordinates, each to its exact value: `artifactCoordinates` THROWS on a
+    // half-set rather than treating it as absent, because absence means "verify this
+    // by the weaker id-list rule" and a tamperer's cheapest edit is deleting one
+    // field. So a record carrying only one of them has to fail here.
     expect(live.artifactBucket).toBe("mem9-audit-123456789012");
     expect(live.artifactKey).toBe(`decisions/pr-123/${live.hash.replace(":", "-")}.json`);
-    // Both coordinates or neither: `artifactCoordinates` THROWS on a half-set rather
-    // than treating it as absent, because absence means "verify this by the weaker
-    // id-list rule" and a tamperer's cheapest edit is deleting one field.
-    expect(typeof live.artifactBucket).toBe("string");
-    expect(typeof live.artifactKey).toBe("string");
   });
 
   it("TC-SLACKAPP-208 the tampered artifact is refused and starts no apply task", () => {
@@ -1413,8 +1413,10 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
       failingJqFilter: ".clean.hash",
     });
     expect(result.status, output).not.toBe(0);
-    // The script names its temp files on stdout only via this fixture's `jq` stub;
-    // what matters is that none of the paths it created survive.
+    // The paths come from the stubbed `mktemp`'s own log, which is what makes them
+    // ENUMERABLE — the script never names them, so without that log there is nothing
+    // to check for survival. Non-empty first: an empty list would satisfy the loop
+    // below vacuously.
     expect(temporaryBodies).not.toHaveLength(0);
     for (const path of temporaryBodies) {
       expect(existsSync(path), `${path} outlived the run: ${output}`).toBe(false);

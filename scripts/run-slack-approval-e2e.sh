@@ -297,7 +297,7 @@ put_artifact "$TAMPERED_KEY" "$TAMPERED_BODY"
 # it is REQUIRED here rather than optional: an absent or unparseable stamp reads as
 # EXPIRED on the callback side, so a record seeded without one is refused and the
 # whole check below fails at "no approval record after a 200". `jq`'s `now` rather
-# than `date -u -d`, which is GNU-only — this script also runs on macOS `shasum`.
+# than `date -u -d`, which is GNU-only — this script is also run by hand on macOS.
 #
 # Ages are seconds off `now` so the two cases below stay readable: `0` is a list
 # issued this instant, and `OFFER_EXPIRED_AGE` is comfortably past the window
