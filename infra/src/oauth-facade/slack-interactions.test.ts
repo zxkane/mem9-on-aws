@@ -519,6 +519,75 @@ describe("Slack stale-hash rejection (TC-SLACKAPP-020..025)", () => {
     }
   });
 
+  it("TC-SLACKAPP-195 a click carries the artifact coordinates into the claim, and drops half-stamped ones", async () => {
+    // The coordinates ride the CLAIM, not `approvals/offered`, and the reason is the
+    // same one that put the ids there: the next scan OVERWRITES `offered`, so an
+    // apply task that read the coordinates from it would fetch the artifact of a
+    // list it was never approved for. The claim is immutable once written.
+    //
+    // This Lambda does NOT fetch or verify the artifact. Doing so would put
+    // `s3:GetObject` plus a KMS grant on an internet-facing function in order to
+    // duplicate a check the apply task must perform anyway — and the task's check is
+    // the one that matters, because it is the one whose result decides what gets
+    // deleted.
+    const bucket = "mem9-audit-123456789012";
+    const key = "decisions/pr-42/sha256-abc.json";
+    const d = deps({
+      getParameter: vi.fn(async () =>
+        offered({ artifactBucket: bucket, artifactKey: key }),
+      ),
+    });
+    await handleSlackInteraction(ev(payload()), d);
+    const [, value] = (d.putParameter as ReturnType<typeof vi.fn>).mock.calls[0]!;
+    const claim = JSON.parse(value as string);
+    expect(claim.artifactBucket).toBe(bucket);
+    expect(claim.artifactKey).toBe(key);
+    // The key set stays CLOSED — the two new members are a bucket name and a
+    // content-addressed key, and neither is memory content. TC-SLACKAPP-023/023b's
+    // invariant is restated for the artifact rather than dropped: the record and the
+    // claim are plain `String` parameters and the merged text lives only in S3.
+    expect(Object.keys(claim).sort()).toEqual([
+      "artifactBucket",
+      "artifactKey",
+      "claimedAt",
+      "hash",
+      "ids",
+      "stage",
+    ]);
+    expect(value as string).not.toMatch(/merged/iu);
+
+    // A HALF-SET claims without either. Here that is safe only because the hash was
+    // already compared against the offered record before this point, so the click is
+    // known to be for this list; the apply task then refuses on its own rather than
+    // downgrading to the id-list check (root TC-SLACKAPP-189). Carrying half a
+    // location forward would instead hand the task a bucket with nothing to fetch.
+    for (const partial of [
+      { artifactBucket: bucket },
+      { artifactKey: key },
+      { artifactBucket: bucket, artifactKey: "" },
+      { artifactBucket: "", artifactKey: key },
+      { artifactBucket: bucket, artifactKey: 42 },
+    ]) {
+      const dp = deps({ getParameter: vi.fn(async () => offered(partial)) });
+      await handleSlackInteraction(ev(payload()), dp);
+      const [, raw] = (dp.putParameter as ReturnType<typeof vi.fn>).mock.calls[0]!;
+      expect(Object.keys(JSON.parse(raw as string)).sort(), JSON.stringify(partial)).toEqual([
+        "claimedAt",
+        "hash",
+        "ids",
+        "stage",
+      ]);
+    }
+
+    // And `buildClaim` in isolation drops them rather than emitting present-but-
+    // undefined keys: `JSON.stringify` discards an undefined value, so the two
+    // serialize identically here while the apply task's `record.artifactBucket ===
+    // undefined` check answers differently.
+    const bare = buildClaim({ stage: STAGE, hash: HASH, ids: IDS }, "2026-08-05T12:00:00.000Z");
+    expect("artifactBucket" in bare).toBe(false);
+    expect("artifactKey" in bare).toBe(false);
+  });
+
   it("TC-SLACKAPP-023c the claim carries the offered record's message coordinates forward", () => {
     // The apply task has to `chat.update` the message it was approved from, and
     // the ONLY thing the click gives it is the hash — so the coordinates have to

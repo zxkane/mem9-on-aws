@@ -21,6 +21,7 @@ import {
   decisionArtifactHash,
   decisionArtifactKey,
   inactiveMemoryAdapter,
+  loadDecisionArtifact,
   materializeApprovedIds,
   offerExpiry,
   OFFER_TTL_MS,
@@ -4030,9 +4031,18 @@ describe("the offered approval record (#123)", () => {
     );
     // Fits without the coordinates...
     expect(() => buildOfferedRecord({ ...stamp, decisions })).not.toThrow();
-    // ...and is refused with them, by the same guard rather than by SSM.
+    // ...and is refused with them, by the same guard rather than by SSM. The hash
+    // rides along because the three are all-or-nothing (TC-SLACKAPP-186) — without
+    // it this would throw for the wrong reason and pass a mutation that broke the
+    // size guard entirely, which is precisely what it did on first run.
     expect(() =>
-      buildOfferedRecord({ ...stamp, decisions, artifactBucket: bucket, artifactKey: key }),
+      buildOfferedRecord({
+        ...stamp,
+        decisions,
+        artifactBucket: bucket,
+        artifactKey: key,
+        artifactHash: `sha256:${"a".repeat(64)}`,
+      }),
     ).toThrow(/4096|parameter limit/u);
   });
 
@@ -4475,6 +4485,89 @@ describe("the reviewed decision artifact (#150)", () => {
     expect(result.bytes).toBeGreaterThan(body.length);
     expect(log.mock.calls.flat().join("\n")).toContain(`(${result.bytes} bytes)`);
   });
+
+  it("TC-SLACKAPP-184 the artifact hash separates lists an id hash cannot", () => {
+    // The sharpest form of the swap, and the case an id-list hash cannot see. The
+    // old hash covered the DELETE ids and nothing else, so it bounded WHICH
+    // memories could be touched and never WHAT was done to them. Flipping a verdict
+    // to KEEP would shrink the DELETE set and move even the old hash — so the test
+    // holds the DELETE set byte-identical and changes something else the operator
+    // read in the offer. A MERGE's absorbed ids and merged text are that something:
+    // they are in the artifact, they are what a replay applies, and they are
+    // invisible to a hash over the deletion ids.
+    const artifactOf = (decisions) =>
+      decisionArtifactHash(
+        serializeDecisionArtifact({ stage: "prod", generatedAt: GENERATED_AT, decisions }),
+      );
+
+    const base = [del("m-1"), merge("m-2")];
+    const rewritten = [
+      del("m-1"),
+      { ...merge("m-2"), mergedContent: "DIFFERENT merged text", mergedContentHash: contentHash("DIFFERENT merged text") },
+    ];
+    // The DELETE id set is identical — this is what the old hash was computed over.
+    const deleteIds = (decisions) =>
+      decisions.filter((d) => d.verdict === "DELETE").map((d) => d.id);
+    expect(deleteIds(base)).toEqual(deleteIds(rewritten));
+    expect(contentHash(deleteIds(base).join("\n"))).toBe(
+      contentHash(deleteIds(rewritten).join("\n")),
+    );
+    // ...and the artifact hash is NOT, because the merged content differs. That gap
+    // is the one the swap closes.
+    expect(artifactOf(base)).not.toBe(artifactOf(rewritten));
+
+    // Same for an absorbed id, which is the field that decides which memories a
+    // replayed MERGE destroys.
+    const reabsorbed = [
+      del("m-1"),
+      { ...merge("m-2"), absorbs: [{ id: "m-VICTIM", contentHash: contentHash("c-b"), version: 1 }] },
+    ];
+    expect(deleteIds(reabsorbed)).toEqual(deleteIds(base));
+    expect(artifactOf(reabsorbed)).not.toBe(artifactOf(base));
+  });
+
+  it("TC-SLACKAPP-186 an incomplete artifact triple is refused, not silently partial", () => {
+    // Each partial combination is an approval the operator spends on nothing, and
+    // they fail in DIFFERENT places — which is why the guard is one throw rather than
+    // a both-or-neither `if`:
+    //   coordinates without the hash -> the apply fetches, hashes, and finds the
+    //     claim's hash is the id list's.
+    //   hash without coordinates     -> the apply has nothing to fetch, reads the
+    //     record as a legacy offer, and refuses for the mirror-image reason.
+    // Neither is reachable through `postApprovalRequest` today; the guard exists so a
+    // second caller cannot construct one and discover it a week later at a click.
+    const stamp = {
+      stage: "prod",
+      generatedAt: GENERATED_AT,
+      issuedAt: GENERATED_AT,
+      decisions: [del("m-1")],
+    };
+    const full = {
+      artifactBucket: "mem9-audit-123456789012",
+      artifactKey: "decisions/prod/sha256-abc.json",
+      artifactHash: `sha256:${"a".repeat(64)}`,
+    };
+    for (const omit of ["artifactBucket", "artifactKey", "artifactHash"]) {
+      const partial = { ...full };
+      delete partial[omit];
+      expect(() => buildOfferedRecord({ ...stamp, ...partial })).toThrow(
+        /together or not at all/u,
+      );
+    }
+    // Only-one-present is refused too, not just only-one-missing.
+    for (const only of ["artifactBucket", "artifactKey", "artifactHash"]) {
+      expect(() =>
+        buildOfferedRecord({ ...stamp, [only]: full[only] }),
+      ).toThrow(/together or not at all/u);
+    }
+    // All three is accepted, or the guard would be refusing the real caller.
+    expect(() => buildOfferedRecord({ ...stamp, ...full })).not.toThrow();
+    // And none is accepted, which is the #123 record every stage without a bucket
+    // still writes.
+    const legacy = buildOfferedRecord(stamp);
+    expect(legacy.hash).toBe(contentHash("m-1"));
+    expect("artifactBucket" in legacy).toBe(false);
+  });
 });
 
 describe("materializing the approved ids in the apply task (#123)", () => {
@@ -4915,6 +5008,268 @@ describe("materializing the approved ids in the apply task (#123)", () => {
     expect(plain.messageTs).toBeUndefined();
     expect(plain.messageChannel).toBeUndefined();
   });
+
+  it("TC-SLACKAPP-188 carries the artifact coordinates through and skips the id re-derivation only then", async () => {
+    // Under #150 the claim's `hash` covers the ARTIFACT, so re-deriving it over the
+    // ids (TC-SLACKAPP-092's check) would refuse every artifact-bearing approval.
+    // The check is not weakened, it MOVES: `loadDecisionArtifact` re-derives the
+    // same hash over the fetched bytes, which is strictly more than the ids.
+    //
+    // The ids are still written, because the artifact supplies the verdicts and the
+    // ids file supplies the BOUND — `applyDecisions` refuses an id the operator did
+    // not approve (TC-SLACKAPP-191).
+    const ids = ["m-1", "m-2"];
+    const artifactHash = `sha256:${"c".repeat(64)}`;
+    // Deliberately NOT the ids' hash. If the re-derivation were still unconditional
+    // this test fails, which is the mutation it exists to kill.
+    expect(artifactHash).not.toBe(contentHash(ids.join("\n")));
+    const ssm = fakeSsm({
+      [claimName(artifactHash)]: JSON.stringify({
+        stage: "prod",
+        hash: artifactHash,
+        ids,
+        claimedAt: "2026-08-05T00:05:00.000Z",
+        artifactBucket: "mem9-audit-123456789012",
+        artifactKey: decisionArtifactKey("prod", artifactHash),
+      }),
+    });
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+
+    const claim = await materializeApprovedIds({
+      ssm,
+      stage: "prod",
+      ssmPrefix: "/mem9-on-aws/prod",
+      hash: artifactHash,
+      idsFile,
+      fs: { writeFileSync },
+    });
+
+    expect(claim.artifact).toEqual({
+      bucket: "mem9-audit-123456789012",
+      key: decisionArtifactKey("prod", artifactHash),
+    });
+    expect(readFileSync(idsFile, "utf8")).toBe("m-1\nm-2\n");
+    // Still no ids on the return value — the coordinates name a bucket and a
+    // content-addressed key, neither of which is a memory id.
+    expect(JSON.stringify(claim)).not.toContain("m-1");
+
+    // A claim with NO coordinates keeps the id re-derivation, or a legacy record's
+    // ids could be swapped freely under a hash that only ever covered them.
+    const legacyIds = ["m-9"];
+    const legacyHash = contentHash(legacyIds.join("\n"));
+    const legacy = fakeSsm({
+      [claimName(legacyHash)]: JSON.stringify({
+        stage: "prod",
+        hash: legacyHash,
+        ids: ["m-substituted"],
+        claimedAt: "2026-08-05T00:05:00.000Z",
+      }),
+    });
+    await expect(
+      materializeApprovedIds({
+        ssm: legacy,
+        stage: "prod",
+        ssmPrefix: "/mem9-on-aws/prod",
+        hash: legacyHash,
+        idsFile: join(dir, "legacy.txt"),
+        fs: { writeFileSync },
+      }),
+    ).rejects.toThrow(/do not match the requested hash/u);
+    expect(existsSync(join(dir, "legacy.txt"))).toBe(false);
+  });
+
+  it("TC-SLACKAPP-189 a half-set of coordinates is refused, never read as absent", async () => {
+    // Absence is MEANINGFUL here — it selects the id-list check — so reading a
+    // half-set as absent would make deleting one field the cheapest possible
+    // downgrade: strip `artifactKey` from a claim and the apply stops caring that
+    // the hash covers a reviewed list, then re-derives over whatever ids are in the
+    // record. Refusing is the only answer that does not turn a partial write into a
+    // weaker check.
+    const ids = ["m-1"];
+    const artifactHash = `sha256:${"d".repeat(64)}`;
+    const dir = tempDir();
+    for (const partial of [
+      { artifactBucket: "mem9-audit-123456789012" },
+      { artifactKey: decisionArtifactKey("prod", artifactHash) },
+      { artifactBucket: "mem9-audit-123456789012", artifactKey: "" },
+      { artifactBucket: "", artifactKey: decisionArtifactKey("prod", artifactHash) },
+      { artifactBucket: "mem9-audit-123456789012", artifactKey: 42 },
+    ]) {
+      const ssm = fakeSsm({
+        [claimName(artifactHash)]: JSON.stringify({
+          stage: "prod",
+          hash: artifactHash,
+          ids,
+          claimedAt: "2026-08-05T00:05:00.000Z",
+          ...partial,
+        }),
+      });
+      const idsFile = join(dir, `partial-${Object.keys(partial).join("-")}.txt`);
+      await expect(
+        materializeApprovedIds({
+          ssm,
+          stage: "prod",
+          ssmPrefix: "/mem9-on-aws/prod",
+          hash: artifactHash,
+          idsFile,
+          fs: { writeFileSync },
+        }),
+      ).rejects.toThrow(/artifact coordinates are incomplete/u);
+      // And nothing was materialized, so the run cannot proceed on a bound it
+      // refused to validate.
+      expect(existsSync(idsFile)).toBe(false);
+    }
+  });
+
+  it("TC-SLACKAPP-190 the artifact is refused four ways, and never falls back to the id list", async () => {
+    // Each of these is a way the reviewed list can fail to arrive, and for every one
+    // of them the ONLY safe answer is to stop. The tempting alternative — catch,
+    // shrug, re-classify — is exactly the behaviour #150 replaces: it applies
+    // verdicts the operator never saw while holding an approval they did give.
+    const bucket = "mem9-audit-123456789012";
+    const decisions = [
+      {
+        id: "m-1",
+        verdict: "DELETE",
+        reason: "session-state",
+        version: 1,
+        contentHash: contentHash("c-m-1"),
+      },
+    ];
+    const body = serializeDecisionArtifact({
+      stage: "prod",
+      generatedAt: "2026-08-05T03:00:00.000Z",
+      decisions,
+    });
+    const hash = decisionArtifactHash(body);
+    const key = decisionArtifactKey("prod", hash);
+    const s3Returning = (value) => ({
+      send: vi.fn(async () => {
+        if (value instanceof Error) throw value;
+        return { Body: { transformToString: async () => value } };
+      }),
+    });
+    const load = (s3, overrides = {}) =>
+      loadDecisionArtifact({ s3, bucket, key, hash, stage: "prod", ...overrides });
+
+    // The happy path FIRST, or every refusal below could be passing because the
+    // reader refuses unconditionally.
+    const log = vi.fn();
+    const ok = await load(s3Returning(body), { log });
+    // Against the SERIALIZED projection, not the input: the writer deliberately
+    // drops `reason` (it is operator prose, not a replay input), so comparing to
+    // `decisions` would assert a field the artifact does not and should not carry.
+    expect(ok.decisions).toEqual(JSON.parse(body).decisions);
+    expect(ok.decisions[0].id).toBe("m-1");
+    expect(ok.decisions[0].verdict).toBe("DELETE");
+    expect(ok.generatedAt).toBe("2026-08-05T03:00:00.000Z");
+    // The log names the location and the hash so the audit trail records WHICH list
+    // ran, and nothing else — the verdicts carry memory content.
+    const logged = log.mock.calls.flat().join("\n");
+    expect(logged).toContain(`s3://${bucket}/${key}`);
+    expect(logged).toContain(hash);
+
+    // 1. UNREADABLE. AccessDenied, NoSuchKey, a throttle — all the same answer.
+    for (const name of ["AccessDenied", "NoSuchKey", "TimeoutError"]) {
+      const err = new Error(`SDK detail quoting Key=${key} and more`);
+      err.name = name;
+      const refusal = await load(s3Returning(err)).then(
+        () => undefined,
+        (e) => e,
+      );
+      expect(refusal?.message).toMatch(/refusing to apply/u);
+      // The NAME, never the message: an AWS error quotes the request it rejected,
+      // and that request names a key derived from the approval hash.
+      expect(refusal?.message).toContain(name);
+      expect(refusal?.message).not.toContain("SDK detail");
+      // And the remedy says re-classification is not the alternative, because that
+      // sentence is the whole diagnosis when the alarm says only "task failed".
+      expect(refusal?.message).toMatch(/re-classifying/u);
+    }
+
+    // 2. TAMPERED. Valid JSON, valid shape, right stage — and different bytes. This
+    // is the case the whole issue exists for: the operator reviewed one list and S3
+    // holds another.
+    const tampered = serializeDecisionArtifact({
+      stage: "prod",
+      generatedAt: "2026-08-05T03:00:00.000Z",
+      decisions: [{ ...decisions[0], id: "m-VICTIM" }],
+    });
+    const mismatch = await load(s3Returning(tampered)).then(
+      () => undefined,
+      (e) => e,
+    );
+    expect(mismatch?.message).toMatch(/hashes to .*, not the approved/u);
+    expect(mismatch?.message).toMatch(/did not review/u);
+    // Both hashes are named, so an operator can tell a tamper from a stale key.
+    expect(mismatch?.message).toContain(decisionArtifactHash(tampered));
+    expect(mismatch?.message).toContain(hash);
+    // The refused body's contents do NOT reach the message — a tamperer choosing
+    // the bytes chooses what would be logged.
+    expect(mismatch?.message).not.toContain("m-VICTIM");
+
+    // 3. MALFORMED. Reachable only by matching the approved hash over non-JSON,
+    // which means the OFFER wrote garbage rather than someone substituting it. Still
+    // a refusal: there is nothing to replay either way. The hash is checked BEFORE
+    // the parse, so a tampered body never reaches `JSON.parse` — assert that
+    // ordering by giving a body whose own hash is the approved one.
+    const junk = "not json at all";
+    const malformed = await load(s3Returning(junk), {
+      hash: decisionArtifactHash(junk),
+    }).then(
+      () => undefined,
+      (e) => e,
+    );
+    expect(malformed?.message).toMatch(/not valid JSON despite matching the approved hash/u);
+
+    // ...and structurally-valid JSON with no decisions array is refused too, rather
+    // than replaying `undefined` as an empty approval, which would exit 0 having
+    // done nothing while consuming the approval.
+    for (const shape of ["[]", '"a string"', "{}", '{"decisions":{}}', "null"]) {
+      const err = await load(s3Returning(shape), {
+        hash: decisionArtifactHash(shape),
+      }).then(
+        () => undefined,
+        (e) => e,
+      );
+      expect(err?.message).toMatch(/no decisions array/u);
+    }
+
+    // 4. WRONG STAGE. The identity policy scopes the task to `decisions/<stage>/`,
+    // so this needs a hand-written object inside the stage's own prefix — which is
+    // exactly when a guard earns its place, since the alternative is a preview
+    // review applied to prod.
+    const crossStage = serializeDecisionArtifact({
+      stage: "pr-7",
+      generatedAt: "2026-08-05T03:00:00.000Z",
+      decisions,
+    });
+    const wrongStage = await load(s3Returning(crossStage), {
+      hash: decisionArtifactHash(crossStage),
+    }).then(
+      () => undefined,
+      (e) => e,
+    );
+    expect(wrongStage?.message).toMatch(/names stage "pr-7", not "prod"/u);
+
+    // A decision list that matches the hash but not the SCHEMA is refused by
+    // `validateDecisions`, the same function the --decisions file path uses — so an
+    // artifact cannot smuggle a shape the operator CLI would have rejected.
+    const badVerdict = serializeDecisionArtifact({
+      stage: "prod",
+      generatedAt: "2026-08-05T03:00:00.000Z",
+      decisions: [{ ...decisions[0], verdict: "PURGE" }],
+    });
+    const invalid = await load(s3Returning(badVerdict), {
+      hash: decisionArtifactHash(badVerdict),
+    }).then(
+      () => undefined,
+      (e) => e,
+    );
+    expect(invalid).toBeInstanceOf(Error);
+    expect(invalid?.message).toMatch(/verdict/u);
+  });
 });
 
 describe("the apply task's in-container runtime (#123)", () => {
@@ -5131,6 +5486,222 @@ describe("the apply task's in-container runtime (#123)", () => {
     ).rejects.toThrow(/hash/u);
     expect(calls).toEqual([]);
     expect(existsSync(idsFile)).toBe(false);
+  });
+
+  it("TC-SLACKAPP-191 wires a replay thunk exactly when the claim names an artifact", async () => {
+    // The branch is on the RECORD, not on this task's configuration, and the
+    // direction matters. `MEM9_DECISION_ARTIFACT_BUCKET` is the SCAN task's variable
+    // — the apply task does not carry it — so the coordinates can only come from the
+    // claim. Keying on anything else would mean a hash covering a reviewed list gets
+    // checked by the weaker id-list rule whenever the apply task happens to be
+    // configured differently from the scan that offered it.
+    const ids = ["m-1"];
+    const artifactHash = `sha256:${"e".repeat(64)}`;
+    const key = decisionArtifactKey("prod", artifactHash);
+    const dir = tempDir();
+    containerEnv({ MEM9_APPROVAL_HASH: artifactHash });
+
+    const withArtifact = await createCleanupDeps(
+      { stage: "prod", apply: true, cap: 50, idsFile: join(dir, "a.txt") },
+      {
+        Client: fakeClientClass([]),
+        ssm: fakeAwsClient({
+          [claimParameterName("/mem9-on-aws/prod", artifactHash)]: JSON.stringify({
+            stage: "prod",
+            hash: artifactHash,
+            ids,
+            claimedAt: "2026-08-05T00:05:00.000Z",
+            artifactBucket: "mem9-audit-123456789012",
+            artifactKey: key,
+          }),
+        }),
+        secrets: fakeAwsClient(),
+        // Injected, so no real S3Client is constructed and the GET is observable.
+        s3: {
+          send: vi.fn(async () => {
+            throw Object.assign(new Error("nope"), { name: "NoSuchKey" });
+          }),
+        },
+        getToken: vi.fn(),
+        fromNodeProviderChain: vi.fn(),
+      },
+    );
+    expect(typeof withArtifact.deps.loadReviewedDecisions).toBe("function");
+    // A THUNK: nothing was fetched during dep construction. The artifact is read
+    // inside `runCleanup`, after service discovery — so a stage whose mnemo service
+    // is down fails on discovery and never touches the object.
+    expect(
+      await withArtifact.deps.loadReviewedDecisions().then(
+        () => "resolved",
+        (err) => err.message,
+      ),
+    ).toMatch(/refusing to apply/u);
+    await withArtifact.close();
+
+    // A pre-#150 claim gets no thunk, so `loadDecisions` takes the #123 path the
+    // record was written for rather than fetching a coordinate it does not have.
+    containerEnv({ MEM9_APPROVAL_HASH: contentHash(ids.join("\n")) });
+    const legacyHash = contentHash(ids.join("\n"));
+    const legacy = await createCleanupDeps(
+      { stage: "prod", apply: true, cap: 50, idsFile: join(dir, "b.txt") },
+      {
+        Client: fakeClientClass([]),
+        ssm: fakeAwsClient({
+          [claimParameterName("/mem9-on-aws/prod", legacyHash)]: JSON.stringify({
+            stage: "prod",
+            hash: legacyHash,
+            ids,
+            claimedAt: "2026-08-05T00:05:00.000Z",
+          }),
+        }),
+        secrets: fakeAwsClient(),
+        getToken: vi.fn(),
+        fromNodeProviderChain: vi.fn(),
+      },
+    );
+    expect(legacy.deps.loadReviewedDecisions).toBeUndefined();
+    await legacy.close();
+  });
+});
+
+describe("replaying the reviewed list instead of re-classifying (#150)", () => {
+  it("TC-SLACKAPP-192 applies the reviewed verdicts and never calls the classifier", async () => {
+    // The defect #150 exists for. Before this branch, a Slack-triggered apply fell
+    // through to the scan and applied whatever a FRESH classification decided,
+    // filtered by the approved ids — so the operator reviewed one list and the task
+    // applied another that merely overlapped it. The classifier is nondeterministic
+    // (one pass reproduced only 66% of its own DELETE set on re-run), so the two
+    // lists genuinely differ.
+    //
+    // The fixture makes them differ on purpose: the reviewed artifact deletes
+    // `reviewed-1`, and the classifier — if it ran — would delete `drifted-1`
+    // instead.
+    const server = fakeServer([
+      memory("reviewed-1", "session noise the operator approved deleting"),
+      memory("drifted-1", "what a re-classification would pick instead"),
+    ]);
+    const llm = fakeLlm([
+      [
+        { id: "reviewed-1", verdict: "KEEP", reason: "drifted to keep" },
+        { id: "drifted-1", verdict: "DELETE", reason: "drifted to delete" },
+      ],
+    ]);
+    const dir = tempDir();
+    const result = await runCleanup(baseOpts({ apply: true }), {
+      ...baseDeps(server, llm, dir),
+      loadReviewedDecisions: async () => ({
+        generatedAt: "2026-08-05T03:00:00.000Z",
+        decisions: [
+          {
+            id: "reviewed-1",
+            verdict: "DELETE",
+            reason: "session-state",
+            version: 1,
+            contentHash: contentHash("session noise the operator approved deleting"),
+          },
+          { id: "drifted-1", verdict: "KEEP", reason: "durable" },
+        ],
+      }),
+    });
+
+    expect(result.exitCode).toBe(0);
+    // The REVIEWED verdicts ran...
+    expect(server.store.get("reviewed-1").state).toBe("deleted");
+    // ...and the classifier's would-be victim is untouched.
+    expect(server.store.get("drifted-1").state).toBe("active");
+    // Not called, not merely disagreed with: a run that classified and then
+    // discarded the result would burn Bedrock tokens on every click and would be one
+    // careless read away from applying the drifted list instead.
+    expect(llm).not.toHaveBeenCalled();
+    // And no scan either — the memories list is never paged, so the corpus could
+    // have changed since the review without changing what gets applied.
+    expect(server.calls.filter((c) => c.path.endsWith("/memories") && c.method === "GET")).toEqual([]);
+
+    // No decision file: the artifact IS the durable copy, and a MERGE's
+    // `mergedContent` is real memory text, so a second copy on the task's ephemeral
+    // disk would be a third store nobody reviewed.
+    expect(result.decisionPath).toBeUndefined();
+    expect(readdirSync(dir).filter((f) => f.startsWith("decisions-"))).toEqual([]);
+  });
+
+  it("TC-SLACKAPP-193 a replayed artifact is still bounded by the approved ids", async () => {
+    // The approval is the bound, and the artifact does not widen it. Both halves are
+    // needed: replaying the reviewed verdicts is what #150 adds, and the ids file is
+    // what keeps a tampered-but-hash-valid artifact — impossible today, but the
+    // guard is not conditional on that — from reaching a memory the click never
+    // covered. This is why the ids file is still written on the replay path.
+    const server = fakeServer([
+      memory("approved-1", "in the click"),
+      memory("smuggled-1", "not in the click"),
+    ]);
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+    writeFileSync(idsFile, "approved-1\n", { mode: 0o600 });
+    const llm = fakeLlm([[]]);
+    const log = vi.fn();
+
+    const result = await runCleanup(baseOpts({ apply: true, idsFile }), {
+      ...baseDeps(server, llm, dir),
+      log,
+      loadReviewedDecisions: async () => ({
+        generatedAt: "2026-08-05T03:00:00.000Z",
+        decisions: [
+          {
+            id: "approved-1",
+            verdict: "DELETE",
+            reason: "session-state",
+            version: 1,
+            contentHash: contentHash("in the click"),
+          },
+          {
+            id: "smuggled-1",
+            verdict: "DELETE",
+            reason: "session-state",
+            version: 1,
+            contentHash: contentHash("not in the click"),
+          },
+        ],
+      }),
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(server.store.get("approved-1").state).toBe("deleted");
+    // Filtered by the ids file, not by the artifact.
+    expect(server.store.get("smuggled-1").state).toBe("active");
+    expect(result.skippedByFilter).toBe(1);
+  });
+
+  it("TC-SLACKAPP-194 a refused artifact aborts the run and applies nothing", async () => {
+    // `loadDecisions` deliberately has no `try` around the replay branch, so every
+    // refusal in TC-SLACKAPP-190 propagates out of `runCleanup`. The alternative —
+    // catch and continue — falls through to the scan, which is the exact behaviour
+    // this issue removes: it would re-classify under an approval given for a
+    // reviewed list.
+    const server = fakeServer([memory("m-1", "content")]);
+    const llm = fakeLlm([[{ id: "m-1", verdict: "DELETE", reason: "noise" }]]);
+    const dir = tempDir();
+    const lockFile = join(dir, "test.lock");
+
+    await expect(
+      runCleanup(baseOpts({ apply: true }), {
+        ...baseDeps(server, llm, dir),
+        lockFile,
+        loadReviewedDecisions: async () => {
+          throw new Error(
+            `the decision artifact at s3://b/k hashes to sha256:x, not the ` +
+              `approved sha256:y — refusing to apply a list the operator did not review`,
+          );
+        },
+      }),
+    ).rejects.toThrow(/refusing to apply/u);
+
+    // NOTHING happened: no classification, no deletion, and the lock file was never
+    // even created — the refusal is upstream of both. A partial apply here would be
+    // the worst outcome, since the operator's approval is spent either way.
+    expect(llm).not.toHaveBeenCalled();
+    expect(server.store.get("m-1").state).toBe("active");
+    expect(server.calls.filter((c) => c.method !== "GET")).toEqual([]);
+    expect(existsSync(lockFile)).toBe(false);
   });
 });
 
@@ -6021,6 +6592,48 @@ describe("offering the list to Slack (#123)", () => {
     // exit 1, which is what the task-exit alarm sees.
     expect(fakes.ssm.puts).toEqual([]);
     expect(fakes.slack.fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("TC-SLACKAPP-187 hashes the ARTIFACT when there is one and the ids when there is not", async () => {
+    // The swap, at the one place both spellings are reachable. Before #150 the
+    // button's hash covered the DELETE ids only, so it bounded WHICH memories the
+    // apply could touch and never WHAT it did to them — the apply re-classified and
+    // a hash over the same ids still matched. TC-SLACKAPP-184 shows the two hashes
+    // are separable; this shows which one is actually written and clicked.
+    const withArtifact = offerFakes();
+    const offered = await offer({
+      fakes: withArtifact,
+      artifactBucket: "mem9-audit-123456789012",
+    }).promise;
+
+    const idsHash = contentHash(["m-1", "m-2"].join("\n"));
+    const artifactHash = decisionArtifactHash(withArtifact.s3.puts[0].Body);
+    // Both are `sha256:`+64 hex, so a shape assertion cannot tell them apart — the
+    // comparison has to be to the other candidate value, not to a pattern.
+    expect(idsHash).not.toBe(artifactHash);
+    expect(offered.record.hash).toBe(artifactHash);
+    expect(offered.record.hash).not.toBe(idsHash);
+    // ...in the record SSM actually received, not merely in the returned object.
+    expect(JSON.parse(withArtifact.ssm.puts[0].Value).hash).toBe(artifactHash);
+    // ...and in the button, whose `value` is what a click sends back. A record that
+    // moved to the artifact hash while the message kept the ids' one is a click the
+    // facade refuses with "no current approval list".
+    const posted = JSON.stringify(withArtifact.slack.calls[0].body);
+    expect(posted).toContain(artifactHash);
+    expect(posted).not.toContain(idsHash);
+    // The key is derived from that same hash, so the apply locates the object from
+    // the claim alone — no second lookup, nothing else to keep in step.
+    expect(offered.record.artifactKey).toBe(decisionArtifactKey("prod", artifactHash));
+
+    // WITHOUT a bucket the id-list spelling stays. This is a compatibility path
+    // chosen HERE, at write time, by whether an artifact exists — not a reader that
+    // failed to fetch one and fell back. The distinction is the safety argument: a
+    // record whose hash covers an artifact must never be checkable by the weaker
+    // rule (TC-SLACKAPP-190).
+    const legacy = offerFakes();
+    const plain = await offer({ fakes: legacy }).promise;
+    expect(plain.record.hash).toBe(idsHash);
+    expect(legacy.s3.send).not.toHaveBeenCalled();
   });
 });
 

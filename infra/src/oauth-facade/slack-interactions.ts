@@ -193,6 +193,20 @@ interface OfferedRecord {
    */
   messageTs?: string;
   messageChannel?: string;
+  /**
+   * Where the reviewed decision list lives (#150). Optional as a pair: a record
+   * written before the artifact existed, or by a stage with no bucket configured,
+   * has neither — and the apply task then verifies the approval by re-deriving over
+   * the ids, which is what #123 shipped.
+   *
+   * This Lambda does not FETCH the artifact and does not verify it. It copies the
+   * coordinates into the claim so the task reads them from an immutable record
+   * (`Overwrite: false`) rather than from `approvals/offered`, which the next scan
+   * overwrites. Adding an S3 read here would put `s3:GetObject` and a KMS grant on
+   * the internet-facing function to duplicate a check the task must do anyway.
+   */
+  artifactBucket?: string;
+  artifactKey?: string;
 }
 
 interface ApprovalClaim {
@@ -202,6 +216,8 @@ interface ApprovalClaim {
   claimedAt: string;
   messageTs?: string;
   messageChannel?: string;
+  artifactBucket?: string;
+  artifactKey?: string;
 }
 
 /**
@@ -218,6 +234,15 @@ interface ApprovalClaim {
  * task guards on the parsed object, and there `"messageTs" in claim` is the
  * difference between skipping the update and calling `chat.update` with
  * `ts: undefined`.
+ *
+ * The ARTIFACT coordinates are copied the same way and for a sharper reason (#150).
+ * They are what lets the task fetch the reviewed list the operator approved, and
+ * they must ride the CLAIM rather than be re-read from `approvals/offered`: the next
+ * scan overwrites that record, so a task reading it would fetch the artifact of the
+ * list it was NOT approved for — whose hash then would not match, spending the
+ * click on a refusal. Both or neither, mirroring what the writer set atomically; the
+ * task refuses a half-set outright rather than reading it as an absence, because
+ * absence downgrades the check to the id-list rule.
  */
 export function buildClaim(offered: OfferedRecord, claimedAt: string): ApprovalClaim {
   return {
@@ -227,6 +252,8 @@ export function buildClaim(offered: OfferedRecord, claimedAt: string): ApprovalC
     claimedAt,
     ...(offered.messageTs === undefined ? {} : { messageTs: offered.messageTs }),
     ...(offered.messageChannel === undefined ? {} : { messageChannel: offered.messageChannel }),
+    ...(offered.artifactBucket === undefined ? {} : { artifactBucket: offered.artifactBucket }),
+    ...(offered.artifactKey === undefined ? {} : { artifactKey: offered.artifactKey }),
   };
 }
 
@@ -402,6 +429,26 @@ async function loadOffered(
     typeof record.messageTs === "string" && typeof record.messageChannel === "string"
       ? { messageTs: record.messageTs, messageChannel: record.messageChannel }
       : {};
+  // The artifact's location, carried forward only as a complete pair of non-empty
+  // strings (#150). A half-set or wrongly-typed pair yields NEITHER, which sends the
+  // apply down the id-list path — and that is safe here specifically because this
+  // Lambda has already compared `record.hash` against the button's, so a record
+  // whose hash covers an artifact cannot be claimed under a different hash. The task
+  // then refuses on its own: it re-derives over the ids, gets the id-list hash, and
+  // finds it is not the artifact hash the claim carries. A spent click and a loud
+  // refusal, never a re-classification.
+  //
+  // Deliberately not validated further — no key-shape check, no prefix check. The
+  // key is only ever used by the task, whose IAM confines it to
+  // `decisions/<stage>/*`, and a check here would be a second place to keep in sync
+  // with a grant it cannot see.
+  const artifact =
+    typeof record.artifactBucket === "string" &&
+    record.artifactBucket &&
+    typeof record.artifactKey === "string" &&
+    record.artifactKey
+      ? { artifactBucket: record.artifactBucket, artifactKey: record.artifactKey }
+      : {};
   return {
     record: {
       stage: record.stage,
@@ -414,6 +461,7 @@ async function loadOffered(
       // apply task has no use for it.
       ...(typeof record.issuedAt === "string" ? { issuedAt: record.issuedAt } : {}),
       ...coordinates,
+      ...artifact,
     },
   };
 }
