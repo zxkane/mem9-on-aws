@@ -400,6 +400,19 @@ and category without credential values; a path that itself contains a detected
 value is replaced with `<redacted-path>`. Patterns and adversarial fixtures are
 encoded so they cannot match their own source.
 
+The accountless-S3 detector decides on the BUCKET SEGMENT alone, because S3
+bucket names are one global namespace and a name is a targeting hint with or
+without an account id in the ARN. Three shapes disclose no name and are exempt:
+a wildcard or interpolated segment (a pattern, not a name), a name suffixed with
+the documentation account id (the placeholder the account-id detector already
+blesses), and the bare noun `bucket` that prose about `bucket/*` versus `bucket`
+matching has to say out loud. The object key is deliberately excluded from the
+decision — keying off the whole ARN would let the trailing `/*` that every real
+S3 policy resource already ends in vouch for the name in front of it. Before
+#150 no accountless S3 ARN existed anywhere in the tree, so this rule had never
+run against real policy content; the exemptions and their limits are pinned by
+adversarial fixtures rather than by inspection.
+
 ## Recovery And Rollback
 
 - Run the printed resume command after correcting an error. It reloads the
