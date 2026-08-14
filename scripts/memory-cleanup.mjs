@@ -528,7 +528,16 @@ export function planDecisions(memories, verdicts, opts = {}) {
       ...snapshot(byId.get(id)),
       mergedContent: group.mergedContent,
       mergedContentHash: contentHash(group.mergedContent),
-      absorbs: group.absorbs.map((a) => ({ id: a, ...anchor(byId.get(a)) })),
+      // `snapshot`, not `anchor`: an absorbed id is DELETED by this decision, and
+      // once merges reach the approval loop (#150) it is the only place its snippet
+      // can come from — the absorbed member's own row is folded away above, so
+      // without this the review message would ask an operator to authorize deleting
+      // an opaque id. That is the "deletes the ids the operator never saw" failure
+      // in a milder dress. The snippet stays OUT of the hashed artifact
+      // (`serializeDecisionArtifact` projects id/contentHash/version), because it is
+      // display text no reader validates, and `contentHash` already vouches for the
+      // content it was sliced from.
+      absorbs: group.absorbs.map((a) => ({ id: a, ...snapshot(byId.get(a)) })),
     });
   }
   // `RETAIN` is its own verdict rather than a KEEP with a note: the summary
@@ -572,6 +581,15 @@ export function planDecisions(memories, verdicts, opts = {}) {
  * protected id whenever one pass assigned it a different topic, and topic is a
  * model judgment like any other (TC-SLACKAPP-075).
  *
+ * MERGE reaches the offered set here for the first time (#150), and only because
+ * the replay does. Until the artifact existed, an approved merge was applied by a
+ * FRESH classification whose merged text was different prose whose hash matched
+ * nothing, and whose `absorbs[]` could name ids no operator had seen — so the
+ * verdict was withheld outright. With the reviewed bytes replayed from the hashed
+ * artifact, what an approved merge applies is what was displayed. The narrowing
+ * rule is unchanged in kind and stricter in detail: a merge is agreed only when
+ * every pass merged the same id and named the same absorbed set.
+ *
  * @param passes decision arrays, or `null` for a pass that failed entirely
  */
 export function consensusDecisions(passes) {
@@ -582,6 +600,7 @@ export function consensusDecisions(passes) {
     perPassDeletes: passes.map((p) => (p ? p.filter((d) => d.verdict === "DELETE").length : null)),
     agreed: 0,
     disagreed: 0,
+    mergesAgreed: 0,
     mergesWithheld: 0,
     // Consensus needs at least two usable passes BY DEFINITION. One pass is not
     // a quorum of itself, so a run that loses a pass offers nothing and says so
@@ -611,17 +630,65 @@ export function consensusDecisions(passes) {
     const rows = byPass.map((m) => m.get(id) ?? null);
     const verdicts = rows.map((d) => d?.verdict ?? null);
 
-    // MERGE is withheld from the offered set in v1 — the approval loop approves
-    // deletions only — and counted, so the withholding cannot read as "the
-    // classifier found no merges" (TC-SLACKAPP-076).
+    // A MERGE survives the intersection only when every pass agreed on the same
+    // DESTRUCTIVE FOOTPRINT: MERGE for this id in all of them, absorbing the same
+    // set of ids (#150). Anything less is UNSTABLE and counted, so a withholding
+    // still cannot read as "the classifier found no merges" (TC-SLACKAPP-076).
+    //
+    // The merged TEXT is deliberately NOT part of the agreement test, and that is
+    // not a relaxation. Two passes never produce byte-identical prose, so
+    // requiring it would withhold every merge forever — the check would read as
+    // strict and behave as an unconditional refusal. What makes the text safe is
+    // the artifact instead: the bytes the operator READ in Slack are the bytes the
+    // hash covers and the replay writes, so nondeterminism cannot change what gets
+    // applied. Only the deletion set needs a quorum, because only it is
+    // irreversible and unreviewable after the fact.
     if (verdicts.includes("MERGE")) {
-      report.mergesWithheld += 1;
-      decisions.push({
-        id,
-        verdict: "UNSTABLE",
-        reason: "merge withheld from the approval loop in v1",
-        verdicts,
-      });
+      // `JSON.stringify` of the id list rather than a joined string: for any
+      // separator an id could contain, a joined comparison reads `["ab","c"]` and
+      // `["a","bc"]` as the same absorbed set, and "which ids does this merge
+      // delete" is the one comparison here that must not collide. ORDER-SENSITIVE
+      // deliberately — each pass builds its own merge graph in a deterministic
+      // order, so a different order is a different graph rather than formatting.
+      const absorbedSets = rows.map((d) =>
+        d?.verdict === "MERGE" ? JSON.stringify((d.absorbs ?? []).map((a) => a.id)) : null,
+      );
+      // Named once and used by both the gate and the reason below, which have to
+      // agree by construction: a reason that said "disagreed on which ids" for an
+      // id one pass did not merge at all would send the operator after the wrong
+      // remedy.
+      const everyPassMerged = verdicts.every((v) => v === "MERGE");
+      const agreedMerge =
+        report.consensusReached &&
+        everyPassMerged &&
+        absorbedSets.every((s) => s === absorbedSets[0]);
+      if (!agreedMerge) {
+        report.mergesWithheld += 1;
+        decisions.push({
+          id,
+          verdict: "UNSTABLE",
+          // Names WHICH disagreement, because the two have different remedies: a
+          // pass that judged the id something other than MERGE is a verdict
+          // disagreement, while identical verdicts over different absorbs lists is
+          // the model disagreeing about which fragments belong to the fact.
+          reason: everyPassMerged
+            ? "passes disagreed on which ids the merge absorbs"
+            : "passes disagreed on merging",
+          verdicts,
+        });
+        continue;
+      }
+      // Its OWN counter rather than `agreed`, which feeds `reproducibility`.
+      // `agreed`/`disagreed` measure the DELETE set — the 66% self-reproduction
+      // that motivated the consensus — and a withheld merge lands in
+      // `mergesWithheld`, not in `disagreed`. Counting agreed merges in `agreed`
+      // would raise the numerator without ever raising the denominator, so every
+      // merge-heavy week would report better deletion agreement than it had.
+      report.mergesAgreed += 1;
+      // The FIRST pass's row, for the same reason the DELETE branch takes it: any
+      // pass's anchors would do (they re-read one scan), and its `mergedContent`
+      // is what the artifact records and Slack displays.
+      decisions.push(rows[0]);
       continue;
     }
 
@@ -657,10 +724,56 @@ export function consensusDecisions(passes) {
   return { decisions, report };
 }
 
+/**
+ * Every id a decision may MUTATE OR DELETE, in a fixed order (#150).
+ *
+ * One concept behind every site that asks "what does this decision act on": the
+ * offered id list, the cap charge (`destructiveCost`), the approved-set gate and
+ * its `unclaimed` sweep, and which decisions earn a line in the review message. A
+ * MERGE touches its survivor (rewritten) and every absorbed id (deleted), and a
+ * footprint spelled per-site is how a MERGE came to be gated on `decision.id`
+ * alone — approving one id and deleting several. `decisionIds` is the deliberately
+ * WIDER question and delegates here for the merge case.
+ *
+ * The order is decision order, survivor before its absorbed ids, because the
+ * offered id list is hashed on the legacy path: a set-based derivation would make
+ * the hash depend on iteration order.
+ */
+function decisionFootprint(decision) {
+  if (decision.verdict === "DELETE") return [decision.id];
+  if (decision.verdict === "MERGE") {
+    return [decision.id, ...decision.absorbs.map((absorbed) => absorbed.id)];
+  }
+  return [];
+}
+
+/**
+ * Every id one decision NAMES, destructive or not.
+ *
+ * Distinct from `decisionFootprint`, and the difference is the verdict: a KEEP or
+ * RETAIN row names its id and touches nothing, so it belongs here and not there.
+ * The one caller that needs this rather than the footprint is the "was this
+ * approved id classified at all" question — an id the run judged and declined to
+ * delete is a changed verdict, while an id no decision mentions is a typo.
+ *
+ * A MERGE names exactly its footprint, DELEGATED rather than restated: the
+ * survivor-plus-absorbed expansion has one spelling, so the two cannot drift into
+ * disagreeing about which ids a merge involves.
+ */
+function decisionIds(decision) {
+  if (decision.verdict === "MERGE") return decisionFootprint(decision);
+  return [decision.id];
+}
+
+/**
+ * The cap charge for one decision: exactly the size of what it touches.
+ *
+ * Derived from the footprint rather than restating it, so the reservation and the
+ * approval gate cannot disagree about a MERGE's cost — the shape where a run charges
+ * 1 for an action that deletes three memories.
+ */
 function destructiveCost(decision) {
-  if (decision.verdict === "DELETE") return 1;
-  if (decision.verdict === "MERGE") return 1 + decision.absorbs.length;
-  return 0;
+  return decisionFootprint(decision).length;
 }
 
 /** Build the REST client. Counts every non-GET request so dry-run can assert 0. */
@@ -1022,6 +1135,11 @@ export function decisionArtifactHash(serialized) {
  * which makes this record readable by anything holding `ssm:GetParameters` on
  * the stage tree, and bounds what may go in it (TC-SLACKAPP-023b).
  *
+ * `ids` is every id a destructive decision TOUCHES — a merge's survivor and each
+ * of its absorbed ids, not just the DELETE verdicts (#150). The record is the
+ * approval's BOUND, so anything it omits is something the apply must refuse; a
+ * survivor-only entry would approve a rewrite plus N unnamed deletions.
+ *
  * Over the limit it THROWS. Truncating would ask the operator to approve a list
  * that is not the list they were shown, and the ids are exactly what the apply
  * task deletes — the one failure mode here that produces a *wrong* apply rather
@@ -1036,7 +1154,31 @@ export function buildOfferedRecord({
   artifactKey,
   artifactHash,
 }) {
-  const ids = decisions.filter((d) => d.verdict === "DELETE").map((d) => d.id);
+  // Every id any destructive decision TOUCHES, not the DELETE-verdict ids (#150).
+  // This list is the bound `applyDecisions` enforces, so a MERGE whose survivor
+  // alone appeared here would be an approval for a rewrite plus N deletions the
+  // list never named — the exact defect the id-level gate was protecting against
+  // when it refused MERGE outright.
+  const ids = decisions.flatMap(decisionFootprint);
+  // WITHOUT an artifact, a MERGE cannot be offered at all, and this is the guard
+  // that keeps #150's ordering true for every future caller rather than only for
+  // the one that exists (the issue: "MERGE is not offered on any code path where
+  // --decisions is not passed"). An artifact-less offer is applied by a FRESH
+  // classification: its merged prose is different bytes whose hash matches
+  // nothing, and its `absorbs[]` is whatever that run decided — so the ids above
+  // would authorize deletions chosen after the review. Throwing rather than
+  // silently dropping the merge, because a dropped merge leaves its absorbed ids
+  // in a list nothing will apply, and `record.ids` is what the operator is told
+  // they approved.
+  const merges = decisions.filter((d) => d.verdict === "MERGE");
+  if (merges.length > 0 && !artifactHash) {
+    throw new Error(
+      `${merges.length} MERGE decision(s) cannot be offered without a decision ` +
+        `artifact: a merge approved here would be applied by a fresh ` +
+        `classification, whose merged content and absorbed ids are not the ones ` +
+        `reviewed`,
+    );
+  }
   // Required, not defaulted to `generatedAt` or to `new Date()`. Both defaults
   // are wrong in a way that only shows up on the replay path: `loadDecisions`
   // returns the FILE's `generatedAt` for a `--decisions` run, so anchoring the
@@ -1197,24 +1339,91 @@ export function formatHours(ms) {
  * part of a list and attach an Approve button whose hash covers all of it, which
  * is a wrong apply rather than a failed one. Slack rejects an over-limit message
  * wholesale anyway, so the only thing lost is a clear error.
+ *
+ * A MERGE renders as what it DOES (#150): the survivor's new content in full, and
+ * every absorbed id with its own snippet. It is the largest thing this message can
+ * contain and deliberately so — the merged text is what the apply writes, so an
+ * operator who has not read those bytes has not reviewed the merge. That is why
+ * merged content is truncated NOWHERE on this path while the deletion snippets are
+ * 120-character slices: a snippet identifies a memory being removed, and the
+ * merged text IS the change being approved.
  */
 export function buildApprovalMessage({ record, decisions, channel }) {
   const withheld = { RETAIN: 0, UNSTABLE: 0 };
-  const byId = new Map();
   for (const d of decisions) {
-    byId.set(d.id, d);
     if (d.verdict in withheld) withheld[d.verdict] += 1;
   }
+  const clean = (text) => (text ?? "").replace(/\s+/gu, " ").trim();
 
-  const header = `Memory cleanup review — ${record.ids.length} deletion(s) for ${record.stage}`;
-  const lines = record.ids.map((id) => {
-    const decision = byId.get(id);
+  const deleteCount = decisions.filter((d) => d.verdict === "DELETE").length;
+  const merges = decisions.filter((d) => d.verdict === "MERGE");
+  // How many memories LEAVE the store: every DELETE plus every absorbed id. The
+  // merge survivors are excluded on purpose — they are rewritten, not removed —
+  // which is why this is not `record.ids.length` even though both are footprint
+  // arithmetic. Naming it here rather than inlining it keeps the confirm dialog's
+  // one sentence readable, and the exclusion visible.
+  const softDeleted = deleteCount + merges.reduce((n, m) => n + m.absorbs.length, 0);
+  // Counts the ACTIONS and, for merges, the ids each one removes. "N deletion(s)"
+  // alone was accurate while deletions were all there was; with merges in the loop
+  // it would name a rewrite as a deletion, or hide the absorbed ids inside a count
+  // the operator reads as "memories to be removed".
+  const header =
+    `Memory cleanup review — ${deleteCount} deletion(s)` +
+    (merges.length > 0 ? ` and ${merges.length} merge(s)` : "") +
+    ` for ${record.stage}`;
+  // One line per DECISION rather than per id — so a merge renders once, as a
+  // rewrite plus its deletions. Walking `decisions` rather than `record.ids`
+  // (which is what this did, through an id→decision Map) is required by the same
+  // change that grew the ids: an absorbed id has no decision row of its own, so an
+  // id-driven walk would print it as an unexplained "no reason recorded" bullet.
+  const lines = [];
+  for (const decision of decisions) {
+    // Skips every non-destructive verdict, derived from the footprint rather than
+    // by listing DELETE and MERGE again: a line for a KEEP or a RETAIN would put an
+    // id in a review list the approval does not cover.
+    if (decisionFootprint(decision).length === 0) continue;
     // The snippet is the review: an id alone is not something an operator can
     // judge. Slack and CloudWatch Logs are the approved destinations for memory
     // content — the SSM record and the repository are not.
-    const snippet = (decision?.snippet ?? "").replace(/\s+/gu, " ").trim();
-    return `• \`${id}\` — ${decision?.reason ?? "no reason recorded"}${snippet ? `: ${snippet}` : ""}`;
-  });
+    const snippet = clean(decision.snippet);
+    const reason = decision.reason ?? "no reason recorded";
+    if (decision.verdict !== "MERGE") {
+      lines.push(`• \`${decision.id}\` — ${reason}${snippet ? `: ${snippet}` : ""}`);
+      continue;
+    }
+    // The MERGED TEXT is shown, not summarized, and that is the whole reason a
+    // merge may be approved at all: the artifact's `mergedContent` is what the
+    // apply writes, so the operator has to have read those exact bytes. Slack is
+    // an approved destination for memory content; showing a length or a hash
+    // instead would be an approval of something unreviewed.
+    const line =
+      `• *MERGE* into \`${decision.id}\` — ${reason}` +
+      `\n    _new content_: ${clean(decision.mergedContent)}` +
+      // Each absorbed id with its own snippet, because each one is DELETED by
+      // this single approval. A count would be the "deletions the operator never
+      // saw" defect with a number in front of it.
+      decision.absorbs
+        .map((a) => `\n    _absorbs_ \`${a.id}\`${clean(a.snippet) ? `: ${clean(a.snippet)}` : ""}`)
+        .join("");
+    // Checked HERE and not left to `chunkSections`, which TRUNCATES an over-long
+    // line with a marker. That was safe while every line was a reason plus a
+    // 120-character snippet; a merge line carries the merged content in full, so
+    // truncation would show the operator part of the text and attach a button whose
+    // hash covers all of it — a wrong apply, which is the one outcome this whole
+    // path is built to exclude.
+    //
+    // The remedy is deliberately NOT "lower --cap": the cap bounds how many
+    // decisions a run applies and cannot shrink a single merge, so that advice
+    // would be inert on exactly the input that triggers this.
+    if (line.length > SLACK_MAX_SECTION_CHARS) {
+      throw new Error(
+        `the merge into ${decision.id} renders ${line.length} characters, over ` +
+          `Slack's ${SLACK_MAX_SECTION_CHARS}-character section limit — its merged ` +
+          `content cannot be shown whole, so it cannot be offered for approval`,
+      );
+    }
+    lines.push(line);
+  }
 
   const blocks = [
     { type: "header", text: { type: "plain_text", text: header } },
@@ -1238,7 +1447,16 @@ export function buildApprovalMessage({ record, decisions, channel }) {
         {
           type: "button",
           action_id: "cleanup_approve",
-          text: { type: "plain_text", text: `Approve ${record.ids.length} deletion(s)` },
+          // Named by the ACTIONS approved, while the confirm dialog below counts
+          // the memories affected. The two numbers differ for a merge and both
+          // matter: the button says what is being authorized, the dialog says how
+          // much of the store it moves.
+          text: {
+            type: "plain_text",
+            text:
+              `Approve ${deleteCount} deletion(s)` +
+              (merges.length > 0 ? ` + ${merges.length} merge(s)` : ""),
+          },
           style: "danger",
           // The hash ONLY. A Slack action value is capped at 2000 characters so
           // it cannot carry the ids — and must not: the signature proves a click
@@ -1246,10 +1464,19 @@ export function buildApprovalMessage({ record, decisions, channel }) {
           // ones the classifier chose. The apply task reads them from SSM.
           value: record.hash,
           confirm: {
-            title: { type: "plain_text", text: "Apply these deletions?" },
+            title: { type: "plain_text", text: "Apply these changes?" },
             text: {
               type: "mrkdwn",
-              text: `${record.ids.length} memories will be soft-deleted in *${record.stage}*.`,
+              // `absorbed` is stated SEPARATELY from the rewrite rather than folded
+              // into one "N memories" count, because a merge does two different
+              // things to two different sets of ids and the confirm dialog is the
+              // last thing the operator reads before the deletions happen.
+              text:
+                `${softDeleted} memories will be soft-deleted in *${record.stage}*` +
+                (merges.length > 0
+                  ? ` and ${merges.length} surviving memor${merges.length === 1 ? "y" : "ies"} rewritten`
+                  : "") +
+                `.`,
             },
             confirm: { type: "plain_text", text: "Apply" },
             deny: { type: "plain_text", text: "Cancel" },
@@ -1790,9 +2017,10 @@ export async function postApprovalRequest({
   //
   // Absent `s3`/`artifactBucket` writes the record exactly as #123 and #149 did,
   // which is what keeps the #102 operator CLI and any stage without the artifact
-  // bucket working. That path can only ever apply DELETEs — `MERGE` stays withheld
-  // by `applyDecisions` unless the replay is in force — so an artifact-less offer is
-  // no weaker than what already shipped.
+  // bucket working. That path can only ever offer DELETEs: `buildOfferedRecord`
+  // THROWS on a merge with no artifact hash rather than dropping it silently, so an
+  // artifact-less offer is no weaker than what already shipped and cannot become so
+  // by omission (#150).
   const artifact =
     s3 && artifactBucket
       ? await putDecisionArtifact({
@@ -1864,11 +2092,13 @@ export async function postApprovalRequest({
  *
  * Two properties matter and neither is cosmetic:
  *
- *  - The count is what was DELETED (`capUsed`), never what was approved. An
- *    apply that approved 3 and deleted 1 has lost two to the LWW guard, and this
+ *  - The count is what was APPLIED (`capUsed`), never what was approved. An
+ *    apply that approved 3 and applied 1 has lost two to the LWW guard, and this
  *    message is the audit trail — nothing downstream would ever correct an
  *    optimistic number, so the operator would believe memories are gone that are
- *    still there.
+ *    still there. It counts ids TOUCHED, so an applied merge contributes its
+ *    survivor rewrite as well as each absorbed deletion, which is why the headline
+ *    says "change(s)" rather than "deletion(s)" (#150).
  *  - No `actions` block. `chat.update` REPLACES the blocks wholesale, which is
  *    what removes the buttons; leaving them would offer a hash whose claim
  *    already exists, and the callback answers that click with "someone else is
@@ -1889,7 +2119,10 @@ export function buildOutcomeMessage({
   result,
   appliedAt,
 }) {
-  const deleted = result.capUsed ?? 0;
+  // `applied`, not `deleted`: since #150 `capUsed` charges a merge's survivor
+  // rewrite alongside each absorbed deletion, so the name would claim one id more
+  // was removed than was, per applied merge — see the headline note below.
+  const applied = result.capUsed ?? 0;
   const notes = [];
   if (result.skippedLww > 0) {
     notes.push(
@@ -1924,7 +2157,12 @@ export function buildOutcomeMessage({
     notes.push(`*the run exited ${result.exitCode}* — see the task log`);
   }
 
-  const headline = `Applied: ${deleted} of ${approved} approved deletion(s) in ${stage}`;
+  // "changes", not "deletion(s)". `capUsed` charges one unit per id a decision
+  // TOUCHED, and since #150 a merge charges its survivor rewrite alongside each
+  // absorbed deletion — so "N deletions" would overstate what was removed by one
+  // per applied merge. Both numbers are id counts against the same footprint, which
+  // is what keeps the ratio meaningful; naming them "changes" is what keeps it true.
+  const headline = `Applied: ${applied} of ${approved} approved change(s) in ${stage}`;
   const blocks = [
     { type: "header", text: { type: "plain_text", text: "Memory cleanup applied" } },
     {
@@ -2353,7 +2591,10 @@ async function loadDecisions(opts, deps, { client, fs, clock, log, outDir }) {
           .map((n, i) => `pass ${i + 1} DELETE=${n ?? "failed"}`)
           .join("; ") +
         `; agreed=${consensus.agreed}; disagreed=${consensus.disagreed}` +
-        `; merges withheld=${consensus.mergesWithheld}` +
+        // BOTH merge numbers, always. `merges withheld=0` alone reads as "no merges
+        // were held back" whether the classifier proposed none or agreed on all of
+        // them, and those are opposite facts about the same week.
+        `; merges agreed=${consensus.mergesAgreed}; merges withheld=${consensus.mergesWithheld}` +
         reproducibility(consensus) +
         (consensus.consensusReached
           ? ""
@@ -2461,25 +2702,24 @@ function readApprovedIds(fs, idsFile) {
  * re-read whose content hash must still match the decision's anchor (LWW
  * guard), so a concurrently edited memory is skipped rather than clobbered.
  *
- * When `approved` is present, EVERY id this function deletes must be in it — not
+ * When `approved` is present, EVERY id this function touches must be in it — not
  * just the id the decision is keyed on. A MERGE deletes its `absorbs[]` ids and
- * rewrites the survivor's content, and `buildOfferedRecord` offers DELETE verdicts
- * only, so under `--ids` a MERGE can never be an approved operation: its absorbed
- * ids were never shown to the operator and its survivor is not a deletion at all.
- * Gating on `decision.id` alone let a MERGE through whose absorbed ids the operator
- * had never seen. That is the one thing this loop exists to prevent, so a MERGE is
- * refused outright here rather than partially honored.
+ * rewrites the survivor's content, so gating on `decision.id` alone would let a
+ * merge through whose absorbed ids the operator never approved. That is the one
+ * thing this loop exists to prevent, so the gate is over the whole
+ * `decisionFootprint` and a merge missing ANY of its ids is refused entire —
+ * never partially honored by dropping the unapproved absorbs, which would apply a
+ * merge nobody reviewed (the survivor would absorb a different set than the one
+ * displayed).
  *
- * The REASON that refusal was unconditional has now changed, and the refusal has
- * deliberately not (#150). It rested on the Slack-triggered task re-classifying
- * rather than replaying, so its verdicts were not the approved verdicts at all;
- * with the replay in force they are. What still has no answer is the OFFER: the
- * message shows a deletion list, and a MERGE's absorbed ids and rewritten content
- * are not in it — so replaying a MERGE would apply something the operator was never
- * shown, which is the same defect by a shorter route. Admitting MERGE therefore
- * means changing what the offer presents and what the ids file bounds, and it lands
- * on its own after this. Ordering is the safety argument, so the guard stays until
- * the thing it substitutes for exists.
+ * A MERGE was refused unconditionally here until #150, because the Slack-triggered
+ * task re-classified rather than replayed: its merged bytes were fresh prose and
+ * its `absorbs[]` was chosen after the review, so no approval could cover them.
+ * Both halves of that are now closed — `loadDecisionArtifact` replays the reviewed
+ * list under a hash that covers the merged content, and `buildOfferedRecord` names
+ * every absorbed id in the record the operator's ids file comes from. So the
+ * footprint check is no longer a proxy for "this cannot be approved"; it is the
+ * literal question, and it is asked of the ids that were actually offered.
  */
 async function applyDecisions({ decisions, client, cap, approved, counters, log }) {
   const deleteQueue = [];
@@ -2499,31 +2739,53 @@ async function applyDecisions({ decisions, client, cap, approved, counters, log 
   // `runCleanup` already reports those by name ("matched no decision") because a
   // typo'd approval is a different problem with a different fix. Counting them
   // here would have the same id described two contradictory ways in one run.
-  const decided = new Set(decisions.map((decision) => decision.id));
+  // Over every id a decision NAMES, not just the keyed ids, because an absorbed id
+  // has no decision row of its own. This one is a statement of the concept rather
+  // than a live guard, and worth saying so: the footprint sweep below deletes a
+  // merge's absorbed ids from `unclaimed` unconditionally and BEFORE the approval
+  // gate, so `decisions.map(d => d.id)` yields identical counts today and no test
+  // separates the two. The seeding is what keeps that true if the sweep ever moves
+  // under the gate — then a refused merge's absorbed ids would survive here, and
+  // only this spelling makes "reclassified" mean the same thing for them as for a
+  // keyed id. The load-bearing use of `decisionIds` is `runCleanup`'s "matched no
+  // decision" set, where nothing sweeps (TC-SLACKAPP-203).
+  const decided = new Set(decisions.flatMap(decisionIds));
   const unclaimed = approved
     ? new Set([...approved].filter((id) => decided.has(id)))
     : null;
 
   try {
     for (const decision of decisions) {
+      const footprint = decisionFootprint(decision);
+      // `destructiveCost` is this footprint's LENGTH, so the cap charge and the
+      // approval gate below read the same list by construction — they cannot
+      // disagree about what a MERGE costs, which is the shape where a run charges 1
+      // for an action that deletes three memories. Kept as a named call rather than
+      // `footprint.length` because the cap reservation is what it means.
       const cost = destructiveCost(decision);
       if (cost === 0) continue;
-      unclaimed?.delete(decision.id);
-      if (approved && !approved.has(decision.id)) {
-        skippedByFilter += 1;
-        continue;
-      }
-      // Counted as filtered rather than as an error: an approved-ids run that met
-      // a MERGE has classified something the operator's list cannot cover, which
-      // is a normal consequence of re-classifying, not a corrupt input. It is
-      // LOGGED because the alternative — a silent skip — is how "1 of 2 applied"
-      // becomes unexplainable.
-      if (approved && decision.verdict === "MERGE") {
-        log(
-          `MERGE ${decision.id}: refused under an approved-ids run — the offered ` +
-            `list contains deletions only, so its ${decision.absorbs.length} ` +
-            `absorbed id(s) and its content rewrite were never approved`,
-        );
+      for (const id of footprint) unclaimed?.delete(id);
+      // The WHOLE footprint, so a merge is applied only when the survivor and
+      // every absorbed id were approved. Refused entire when any one is missing:
+      // dropping the unapproved ids and merging the rest would rewrite the survivor
+      // with content that absorbed fragments still present in the store, which is
+      // both a merge the operator did not review and a silent data duplication.
+      //
+      // LOGGED, and naming the missing ids, because a silent skip is how "1 of 2
+      // applied" becomes unexplainable. Reachable now only through a hand-edited
+      // ids file or an artifact whose merge names ids the record did not — the
+      // scan writes both from one decision list — which is exactly the tampering
+      // case worth naming precisely.
+      const unapproved = approved ? footprint.filter((id) => !approved.has(id)) : [];
+      if (unapproved.length > 0) {
+        if (decision.verdict === "MERGE") {
+          log(
+            `MERGE ${decision.id}: refused entire — ${unapproved.length} of its ` +
+              `${footprint.length} id(s) are not in the approved list ` +
+              `(${unapproved.join(", ")}), so the reviewed merge is not the one ` +
+              `this would apply`,
+          );
+        }
         skippedByFilter += 1;
         continue;
       }
@@ -2707,7 +2969,10 @@ export async function runCleanup(opts, deps) {
   try {
     const approved = readApprovedIds(fs, opts.idsFile);
     if (approved) {
-      const known = new Set(decisions.map((d) => d.id));
+      // Every id the decisions NAME, absorbed ids included: an approved absorbed id
+      // is matched by its survivor's row and has none of its own, so a keyed-id set
+      // would report every merge's fragments as typo'd approvals.
+      const known = new Set(decisions.flatMap(decisionIds));
       const unmatched = [...approved].filter((id) => !known.has(id));
       if (unmatched.length > 0) {
         // A typo'd approval must not silently no-op.

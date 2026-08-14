@@ -279,8 +279,11 @@ describe("classification", () => {
       mergedContent: "fragment a + b",
       mergedContentHash: contentHash("fragment a + b"),
     });
+    // The snippet is what the review message shows for an absorbed id, and this
+    // is the only place it can come from — the absorbed member's own row is folded
+    // away below (#150).
     expect(byId["surv-1"].absorbs).toEqual([
-      { id: "abs-1", version: 1, contentHash: contentHash("fragment b") },
+      { id: "abs-1", version: 1, contentHash: contentHash("fragment b"), snippet: "fragment b" },
     ]);
     // The absorbed member itself is folded into the survivor's decision.
     expect(byId["abs-1"]).toBeUndefined();
@@ -569,14 +572,18 @@ describe("apply, cap, --ids", () => {
     expect(server.calls.filter((c) => c.method !== "GET")).toEqual([]);
   });
 
-  it("TC-SLACKAPP-132 --ids refuses a MERGE outright, absorbed ids included", async () => {
-    // The privilege-escalation hole this closes. `buildOfferedRecord` offers
-    // DELETE verdicts only, so no MERGE can ever be in an approved list — but the
-    // filter checked `approved.has(decision.id)` on the SURVIVOR only, and a
-    // MERGE deletes its `absorbs[]` and rewrites the survivor's content. The
-    // Slack-triggered task re-classifies instead of replaying the reviewed
-    // artifact, so a fresh MERGE naming an approved id as its survivor deleted two
-    // memories the operator never saw and exited 0 reporting success.
+  it("TC-SLACKAPP-132 --ids refuses a PARTIALLY approved MERGE entire, absorbed ids included", async () => {
+    // The privilege-escalation hole this closes: the filter checked
+    // `approved.has(decision.id)` on the SURVIVOR only, while a MERGE deletes its
+    // `absorbs[]` and rewrites the survivor's content — so an approved survivor id
+    // deleted two memories the operator never saw and exited 0 reporting success.
+    //
+    // #150 admitted MERGE to the loop, which makes this case NARROWER and not
+    // obsolete: the offer now names every absorbed id, so an ids file that holds
+    // the survivor alone can no longer come from a scan. It can still come from a
+    // hand-edited file or a tampered artifact, and the answer must be to refuse the
+    // whole merge — never to absorb the approved subset, which would rewrite the
+    // survivor with content whose other fragments are still in the store.
     const dir = tempDir();
     const server = fakeServer([
       memory("surv", "survivor"),
@@ -591,7 +598,7 @@ describe("apply, cap, --ids", () => {
       ],
     ]);
     const idsFile = join(dir, "approved.txt");
-    // The operator approved exactly the survivor id, as a DELETION.
+    // The survivor id ALONE — two thirds of the merge's footprint missing.
     writeFileSync(idsFile, "surv\n");
     const deps = baseDeps(server, llm, dir);
     const result = await runCleanup(baseOpts({ apply: true, idsFile }), deps);
@@ -610,7 +617,12 @@ describe("apply, cap, --ids", () => {
     // message becomes unexplainable.
     expect(result.skippedByFilter).toBe(1);
     const logged = deps.log.mock.calls.map((c) => String(c[0])).join("\n");
-    expect(logged).toMatch(/refused under an approved-ids run/u);
+    expect(logged).toMatch(/refused entire/u);
+    // The MISSING ids by name, not just a count: "2 of 3" tells an operator the
+    // merge was refused, and the names tell them whether their ids file is wrong or
+    // the artifact is.
+    expect(logged).toMatch(/frag-1/u);
+    expect(logged).toMatch(/frag-2/u);
   });
 
   it("TC-SLACKAPP-132 an approved id the re-classifier now KEEPs is reported, not silently dropped", async () => {
@@ -3771,7 +3783,7 @@ describe("two-pass consensus (#123)", () => {
     expect(["RETAIN", "UNSTABLE"]).toContain(byId["f-1"].verdict);
   });
 
-  it("TC-SLACKAPP-076 MERGE is withheld from the offered set in v1, and the count is reported", () => {
+  it("TC-SLACKAPP-076 a MERGE every pass agreed on survives the intersection; the count is reported", () => {
     const merge = {
       id: "s",
       verdict: "MERGE",
@@ -3787,11 +3799,99 @@ describe("two-pass consensus (#123)", () => {
       [merge, del("d")],
     ]);
     const byId = Object.fromEntries(decisions.map((d) => [d.id, d]));
-    // v1 approves deletions only. An unreported withholding would read as "the
-    // classifier found no merges".
-    expect(byId["s"].verdict).not.toBe("MERGE");
-    expect(report.mergesWithheld).toBe(1);
+    // Admitted only once the replay carries the reviewed bytes (#150). Before it,
+    // this same input was withheld — the offer showed deletions and the apply
+    // re-classified, so an approved merge applied prose nobody had read.
+    expect(byId["s"].verdict).toBe("MERGE");
+    expect(byId["s"].mergedContent).toBe("m");
+    expect(report.mergesAgreed).toBe(1);
+    expect(report.mergesWithheld).toBe(0);
     expect(byId["d"].verdict).toBe("DELETE");
+    // NOT in `agreed`, which is the denominator of the reported deletion-agreement
+    // rate: counting merges there would raise the numerator without raising the
+    // contested set, so every merge-heavy week would report better DELETE
+    // reproducibility than it measured.
+    expect(report.agreed).toBe(1);
+  });
+
+  it("TC-SLACKAPP-196 a merge two passes absorb differently is withheld and counted", () => {
+    // The deletion-the-operator-never-saw scenario, at the consensus rather than at
+    // the artifact: both passes want the same survivor, but pass 2 folds in an extra
+    // fragment. Taking the first pass's row would offer one absorbed set while a
+    // second, equally plausible one existed — and the id set is exactly what the
+    // approval bounds. Identical verdicts make this the case a verdict-only
+    // intersection cannot see.
+    const base = {
+      id: "s",
+      verdict: "MERGE",
+      reason: "frags",
+      contentHash: contentHash("c-s"),
+      version: 1,
+      mergedContent: "m",
+      mergedContentHash: contentHash("m"),
+      absorbs: [{ id: "a", contentHash: contentHash("c-a"), version: 1 }],
+    };
+    const wider = {
+      ...base,
+      absorbs: [...base.absorbs, { id: "b", contentHash: contentHash("c-b"), version: 1 }],
+    };
+    const { decisions, report } = consensusDecisions([[base], [wider]]);
+    const byId = Object.fromEntries(decisions.map((d) => [d.id, d]));
+    expect(byId["s"].verdict).toBe("UNSTABLE");
+    expect(byId["s"].reason).toMatch(/which ids the merge absorbs/u);
+    expect(report.mergesWithheld).toBe(1);
+    expect(report.mergesAgreed).toBe(0);
+    // `b` was never a decision of its own in either pass, so the withheld survivor
+    // is the only row: the point is that nothing offers it for deletion.
+    expect(decisions.filter((d) => d.verdict === "MERGE")).toEqual([]);
+  });
+
+  it("TC-SLACKAPP-197 a merge one pass declined is withheld, and says which disagreement", () => {
+    const merge = {
+      id: "s",
+      verdict: "MERGE",
+      reason: "frags",
+      contentHash: contentHash("c-s"),
+      version: 1,
+      mergedContent: "m",
+      mergedContentHash: contentHash("m"),
+      absorbs: [{ id: "a", contentHash: contentHash("c-a"), version: 1 }],
+    };
+    const { decisions, report } = consensusDecisions([
+      [merge],
+      [{ id: "s", verdict: "KEEP", reason: "durable", contentHash: contentHash("c-s"), version: 1 }],
+    ]);
+    const byId = Object.fromEntries(decisions.map((d) => [d.id, d]));
+    expect(byId["s"].verdict).toBe("UNSTABLE");
+    // The two withholding reasons are distinguished because the remedies differ: a
+    // verdict disagreement means the passes disagreed about whether to merge at all,
+    // while an absorbs disagreement means they disagreed about which fragments
+    // belong to the fact.
+    expect(byId["s"].reason).toBe("passes disagreed on merging");
+    expect(report.mergesWithheld).toBe(1);
+  });
+
+  it("TC-SLACKAPP-198 a merge cannot be agreed when a pass failed entirely", () => {
+    // `consensusReached` is false with one usable pass, and a single pass is not a
+    // quorum of itself for a merge any more than for a deletion. Without the
+    // `consensusReached` conjunct the `every` over a ONE-element verdict list is
+    // trivially true, so a lost pass would promote its survivor's merge unopposed.
+    const merge = {
+      id: "s",
+      verdict: "MERGE",
+      reason: "frags",
+      contentHash: contentHash("c-s"),
+      version: 1,
+      mergedContent: "m",
+      mergedContentHash: contentHash("m"),
+      absorbs: [{ id: "a", contentHash: contentHash("c-a"), version: 1 }],
+    };
+    const { decisions, report } = consensusDecisions([[merge], null]);
+    const byId = Object.fromEntries(decisions.map((d) => [d.id, d]));
+    expect(byId["s"].verdict).toBe("UNSTABLE");
+    expect(report.mergesWithheld).toBe(1);
+    expect(report.mergesAgreed).toBe(0);
+    expect(report.consensusReached).toBe(false);
   });
 
   it("TC-SLACKAPP-078 a pass that failed every batch is reported as no consensus, not as disagreement", async () => {
@@ -4084,6 +4184,82 @@ describe("the offered approval record (#123)", () => {
     expect(() => buildOfferedRecord({ ...stamp, decisions: found.decisions })).toThrow(
       /4096|parameter limit/u,
     );
+  });
+
+  const mergeOf = (id, absorbed) => ({
+    id,
+    verdict: "MERGE",
+    reason: "fragments of one fact",
+    contentHash: contentHash(`c-${id}`),
+    version: 2,
+    mergedContent: "the reviewed merged text",
+    mergedContentHash: contentHash("the reviewed merged text"),
+    absorbs: absorbed.map((a) => ({
+      id: a,
+      contentHash: contentHash(`c-${a}`),
+      version: 1,
+      snippet: `snippet of ${a}`,
+    })),
+  });
+  const ARTIFACT = {
+    artifactBucket: "mem9-audit-123456789012",
+    artifactKey: `decisions/prod/sha256-${"a".repeat(64)}.json`,
+    artifactHash: `sha256:${"a".repeat(64)}`,
+  };
+  const STAMP = {
+    stage: "prod",
+    generatedAt: "2026-08-05T00:00:00.000Z",
+    issuedAt: "2026-08-05T00:00:00.000Z",
+  };
+
+  it("TC-SLACKAPP-199 the offered ids cover a merge's survivor AND every absorbed id", () => {
+    // The bound the apply enforces. A survivor-only id list is an approval for a
+    // rewrite plus N deletions the list never named — the same defect that made
+    // MERGE unofferable, moved from the apply into the record. Asserted as an exact
+    // list rather than with `toContain`, so a mutation that drops the survivor is
+    // caught alongside one that drops the absorbs.
+    const record = buildOfferedRecord({
+      ...STAMP,
+      ...ARTIFACT,
+      decisions: [del("d-1"), mergeOf("surv", ["frag-1", "frag-2"])],
+    });
+    expect(record.ids).toEqual(["d-1", "surv", "frag-1", "frag-2"]);
+    // Still no memory content, restated for the shape that now has some to leak:
+    // the merge decision carries `mergedContent` and per-absorbed `snippet`s, and
+    // this record is a plain String parameter readable by anything with
+    // `ssm:GetParameters` on the stage tree (TC-SLACKAPP-023b).
+    expect(JSON.stringify(record)).not.toMatch(/reviewed merged text|snippet of/u);
+    expect(Object.keys(record).sort()).toEqual([
+      "artifactBucket",
+      "artifactKey",
+      "generatedAt",
+      "hash",
+      "ids",
+      "issuedAt",
+      "stage",
+    ]);
+  });
+
+  it("TC-SLACKAPP-200 a MERGE cannot be offered without a decision artifact", () => {
+    // #150's ordering requirement, enforced rather than documented: "MERGE is not
+    // offered on any code path where --decisions is not passed". Without an
+    // artifact the apply re-classifies, so the merged bytes it writes are prose
+    // generated after the review and its absorbs list is whatever that run decided
+    // — the ids in the record would authorize deletions chosen after the click.
+    expect(() =>
+      buildOfferedRecord({ ...STAMP, decisions: [del("d-1"), mergeOf("surv", ["frag-1"])] }),
+    ).toThrow(/MERGE decision\(s\) cannot be offered without a decision artifact/u);
+    // A THROW and not a silent drop: a dropped merge would leave its absorbed ids
+    // out of a record the operator is told is the list they approved.
+    expect(() => buildOfferedRecord({ ...STAMP, decisions: [del("d-1")] })).not.toThrow();
+    // And with the artifact, the same input is offered.
+    expect(
+      buildOfferedRecord({
+        ...STAMP,
+        ...ARTIFACT,
+        decisions: [mergeOf("surv", ["frag-1"])],
+      }).ids,
+    ).toEqual(["surv", "frag-1"]);
   });
 });
 
@@ -5703,6 +5879,166 @@ describe("replaying the reviewed list instead of re-classifying (#150)", () => {
     expect(server.calls.filter((c) => c.method !== "GET")).toEqual([]);
     expect(existsSync(lockFile)).toBe(false);
   });
+
+  it("TC-SLACKAPP-201 an approved MERGE applies the REVIEWED merged bytes, not a fresh merge", async () => {
+    // The acceptance criterion #150 exists for. `MERGE` apply is hash-anchored on
+    // the survivor's live `contentHash`, so the approved merged bytes cannot be
+    // reconstructed by a re-run at all — a fresh pass writes different prose whose
+    // hash matches nothing, and the text the operator read in Slack is
+    // unrecoverable. The classifier here is armed with a DIFFERENT merge to prove
+    // which one landed.
+    const server = fakeServer([
+      memory("surv", "fragment a"),
+      memory("frag-1", "fragment b"),
+      memory("frag-2", "fragment c"),
+    ]);
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+    writeFileSync(idsFile, "surv\nfrag-1\nfrag-2\n", { mode: 0o600 });
+    const llm = fakeLlm([
+      [
+        { id: "surv", verdict: "MERGE", reason: "r", merge_into: "surv", absorbs: ["frag-1"], merged_content: "FRESHLY COMPUTED MERGE" },
+        { id: "frag-1", verdict: "MERGE", reason: "r", merge_into: "surv" },
+      ],
+    ]);
+
+    const result = await runCleanup(baseOpts({ apply: true, idsFile }), {
+      ...baseDeps(server, llm, dir),
+      loadReviewedDecisions: async () => ({
+        generatedAt: "2026-08-05T03:00:00.000Z",
+        decisions: [
+          {
+            id: "surv",
+            verdict: "MERGE",
+            reason: "fragments of one fact",
+            version: 1,
+            contentHash: contentHash("fragment a"),
+            mergedContent: "THE REVIEWED MERGED TEXT",
+            mergedContentHash: contentHash("THE REVIEWED MERGED TEXT"),
+            absorbs: [
+              { id: "frag-1", contentHash: contentHash("fragment b"), version: 1 },
+              { id: "frag-2", contentHash: contentHash("fragment c"), version: 1 },
+            ],
+          },
+        ],
+      }),
+    });
+
+    expect(result.exitCode).toBe(0);
+    // The reviewed bytes, exactly.
+    expect(server.store.get("surv").content).toBe("THE REVIEWED MERGED TEXT");
+    // Both absorbed ids gone — including `frag-2`, which the fresh classification
+    // did not name at all. A re-classified apply would have left it active.
+    expect(server.store.get("frag-1").state).toBe("deleted");
+    expect(server.store.get("frag-2").state).toBe("deleted");
+    // The classifier was never called, so "the merge that landed" cannot be a
+    // coincidence of the fake's ordering.
+    expect(llm).not.toHaveBeenCalled();
+    // Three ids charged against the cap: the rewrite and the two deletions.
+    expect(result.capUsed).toBe(3);
+    expect(result.skippedByFilter).toBe(0);
+  });
+
+  it("TC-SLACKAPP-202 an id added to a merge's absorbs[] after the offer is never deleted", async () => {
+    // The motivating scenario, at the layer BELOW the hash. The hash check
+    // (TC-SLACKAPP-190) is the first line and refuses a tampered artifact outright;
+    // this asserts the second, for an absorbs[] entry that reached the apply anyway
+    // — a claim whose ids file predates the tampering, or a hand-run replay. The
+    // whole merge is refused rather than the extra id dropped: absorbing the
+    // approved subset would rewrite the survivor with content whose other fragment
+    // is still in the store.
+    const server = fakeServer([
+      memory("surv", "fragment a"),
+      memory("frag-1", "fragment b"),
+      memory("victim", "a memory nobody reviewed"),
+    ]);
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+    // What the operator approved: the survivor and ONE fragment.
+    writeFileSync(idsFile, "surv\nfrag-1\n", { mode: 0o600 });
+    const log = vi.fn();
+
+    const result = await runCleanup(baseOpts({ apply: true, idsFile }), {
+      ...baseDeps(server, fakeLlm([[]]), dir),
+      log,
+      loadReviewedDecisions: async () => ({
+        generatedAt: "2026-08-05T03:00:00.000Z",
+        decisions: [
+          {
+            id: "surv",
+            verdict: "MERGE",
+            reason: "fragments of one fact",
+            version: 1,
+            contentHash: contentHash("fragment a"),
+            mergedContent: "merged",
+            mergedContentHash: contentHash("merged"),
+            absorbs: [
+              { id: "frag-1", contentHash: contentHash("fragment b"), version: 1 },
+              // The added id.
+              { id: "victim", contentHash: contentHash("a memory nobody reviewed"), version: 1 },
+            ],
+          },
+        ],
+      }),
+    });
+
+    expect(result.exitCode).toBe(0);
+    // Nothing at all happened: not the extra deletion, not the approved one, not
+    // the rewrite.
+    expect(server.store.get("victim").state).toBe("active");
+    expect(server.store.get("frag-1").state).toBe("active");
+    expect(server.store.get("surv").content).toBe("fragment a");
+    expect(server.calls.filter((c) => c.method !== "GET")).toEqual([]);
+    expect(result.capUsed).toBe(0);
+    expect(result.skippedByFilter).toBe(1);
+    const logged = log.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).toMatch(/refused entire/u);
+    expect(logged).toMatch(/victim/u);
+  });
+
+  it("TC-SLACKAPP-203 a fully applied merge is not reported as a reclassified approval", async () => {
+    // The accounting shape a keyed-id seeding gets wrong. `unclaimed` starts as the
+    // approved ids the run classified, and each applied decision clears its own —
+    // so clearing only `decision.id` leaves every approved ABSORBED id behind and
+    // the outcome message says "2 approved id(s) are no longer classified as
+    // deletions" about a merge that deleted both of them.
+    const server = fakeServer([
+      memory("surv", "fragment a"),
+      memory("frag-1", "fragment b"),
+    ]);
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+    writeFileSync(idsFile, "surv\nfrag-1\n", { mode: 0o600 });
+    const log = vi.fn();
+
+    const result = await runCleanup(baseOpts({ apply: true, idsFile }), {
+      ...baseDeps(server, fakeLlm([[]]), dir),
+      log,
+      loadReviewedDecisions: async () => ({
+        generatedAt: "2026-08-05T03:00:00.000Z",
+        decisions: [
+          {
+            id: "surv",
+            verdict: "MERGE",
+            reason: "fragments of one fact",
+            version: 1,
+            contentHash: contentHash("fragment a"),
+            mergedContent: "merged",
+            mergedContentHash: contentHash("merged"),
+            absorbs: [{ id: "frag-1", contentHash: contentHash("fragment b"), version: 1 }],
+          },
+        ],
+      }),
+    });
+
+    expect(result.exitCode).toBe(0);
+    expect(server.store.get("frag-1").state).toBe("deleted");
+    expect(result.reclassified).toBe(0);
+    const logged = log.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(logged).not.toMatch(/no longer classified/u);
+    // Nor a typo'd-approval report, whose id set has the same defect.
+    expect(logged).not.toMatch(/matched no decision/u);
+  });
 });
 
 describe("offering the list to Slack (#123)", () => {
@@ -5710,6 +6046,11 @@ describe("offering the list to Slack (#123)", () => {
   const CHANNEL = "C0APPROVAL";
   const OFFERED = "/mem9-on-aws/prod/approvals/offered";
   const SNIPPET = "SENTINEL-MEMORY-SNIPPET";
+  const MERGED = "SENTINEL-MERGED-CONTENT";
+  // Slack's own per-section ceiling, spelled as the literal it is on the wire
+  // rather than imported: a test that read the module's constant would follow a
+  // mutation that raised it, and Slack's limit does not move when ours does.
+  const SLACK_MAX_SECTION_CHARS = 3000;
 
   const del = (id, snippet = `${SNIPPET}-${id}`) => ({
     id,
@@ -5943,6 +6284,155 @@ describe("offering the list to Slack (#123)", () => {
         if (element.value) expect(element.value.length).toBeLessThanOrEqual(2000);
       }
     }
+  });
+
+  // #150's merge rendering, exercised through the same builder the real offer
+  // calls. `snippet` on each absorbed member is what `planDecisions` now supplies
+  // (it switched from `anchor` to `snapshot` for exactly this): the absorbed
+  // member's own decision row is folded into its survivor's, so without it the
+  // message would ask the operator to authorize deleting an opaque id.
+  const merge = (id, absorbed, { content = MERGED } = {}) => ({
+    id,
+    verdict: "MERGE",
+    reason: "fragments of one fact",
+    version: 2,
+    contentHash: contentHash(`c-${id}`),
+    mergedContent: content,
+    mergedContentHash: contentHash(content),
+    absorbs: absorbed.map((a) => ({
+      id: a,
+      contentHash: contentHash(`c-${a}`),
+      version: 1,
+      snippet: `${SNIPPET}-${a}`,
+    })),
+  });
+  const ARTIFACT = {
+    artifactBucket: "mem9-audit-123456789012",
+    artifactKey: `decisions/prod/sha256-${"a".repeat(64)}.json`,
+    artifactHash: `sha256:${"a".repeat(64)}`,
+  };
+  const offeredWith = (decisions) =>
+    buildOfferedRecord({
+      stage: "prod",
+      decisions,
+      generatedAt: "2026-08-05T03:00:00.000Z",
+      issuedAt: "2026-08-05T03:00:00.000Z",
+      ...ARTIFACT,
+    });
+  // The bullet text ONLY, deliberately not `JSON.stringify(blocks)`: a `...` clip
+  // inside a line still leaves the clipped prefix findable in the serialized
+  // blocks, so an assertion over the whole payload would pass on a truncated
+  // merge. Reading each section's own text is what makes "shown whole" testable.
+  const sectionText = (message) =>
+    message.blocks
+      .filter((b) => b.type === "section")
+      .map((b) => b.text.text)
+      .join("\n");
+
+  it("TC-SLACKAPP-204 a merge renders its merged text WHOLE and names every id it deletes", () => {
+    // The review message is the only place the merged bytes are ever shown, and
+    // #150's whole safety argument is that the operator read THOSE bytes: the
+    // artifact hash covers them and the replay writes them. A summary, a length or
+    // a hash here would be an approval of something unreviewed.
+    const decisions = [del("d-1"), merge("surv", ["frag-1", "frag-2"])];
+    const record = offeredWith(decisions);
+    const message = buildApprovalMessage({ record, decisions, channel: CHANNEL });
+
+    // Counted SEPARATELY. "3 deletion(s)" would have been the arithmetic of the
+    // footprint and a lie about what happens to `surv`, which is rewritten.
+    expect(message.blocks[0].text.text).toBe(
+      "Memory cleanup review — 1 deletion(s) and 1 merge(s) for prod",
+    );
+    // In full, and reachable as a substring of a section's own text rather than of
+    // the serialized blocks — see `sectionText`.
+    const sections = sectionText(message);
+    expect(sections).toContain(MERGED);
+    expect(sections).not.toContain("...");
+    // Every offered id appears, absorbed ones included, each with the snippet that
+    // is the only thing making it judgeable. Approving a list longer than the list
+    // shown is the defect that produces a WRONG apply rather than a failed one —
+    // TC-SLACKAPP-106 on the merge shape, where the extra ids are DELETIONS.
+    expect(record.ids).toEqual(["d-1", "surv", "frag-1", "frag-2"]);
+    for (const id of record.ids) expect(sections).toContain(id);
+    expect(sections).toContain(`${SNIPPET}-frag-1`);
+    expect(sections).toContain(`${SNIPPET}-frag-2`);
+    // ONE bullet per decision, not per id. An id-driven walk would print `frag-1`
+    // and `frag-2` as their own bullets reading "no reason recorded", because an
+    // absorbed member has no decision row of its own.
+    expect(sections.match(/• /gu)).toHaveLength(2);
+    expect(sections).not.toMatch(/no reason recorded/u);
+
+    // The button names the ACTIONS authorized; the confirm dialog counts the
+    // memories moved. They differ for a merge and both matter — 3 ids are touched,
+    // 2 of them removed, 1 rewritten.
+    const [approve] = message.blocks.at(-1).elements;
+    expect(approve.text.text).toBe("Approve 1 deletion(s) + 1 merge(s)");
+    expect(approve.confirm.text.text).toBe(
+      "3 memories will be soft-deleted in *prod* and 1 surviving memory rewritten.",
+    );
+  });
+
+  it("TC-SLACKAPP-205 a merge Slack cannot show whole is refused, not truncated", async () => {
+    // `chunkSections` CLIPS an over-long line with a `...` marker, which was safe
+    // while every line was a reason plus a 120-character snippet. A merge line
+    // carries the merged content in full, so a clip would show the operator part of
+    // the text under a button whose hash covers all of it.
+    const long = "x".repeat(SLACK_MAX_SECTION_CHARS + 1);
+    const decisions = [merge("surv", ["frag-1"], { content: long })];
+    const record = offeredWith(decisions);
+    let thrown;
+    try {
+      buildApprovalMessage({ record, decisions, channel: CHANNEL });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown?.message).toMatch(/cannot be shown whole/u);
+    expect(thrown.message).toMatch(/surv/u);
+    // The remedy is deliberately NOT "lower --cap": the cap bounds how many
+    // decisions a run applies and cannot shrink a single merge, so that advice
+    // would be inert on precisely the input that triggers this. The block-limit
+    // refusal above it still says --cap, and correctly.
+    expect(thrown.message).not.toMatch(/--cap/u);
+
+    // Reachable from the real offer, and it fails there the same way a Slack error
+    // does: the record was already written (that is what invalidates last week's
+    // button) and NO message was posted. A truncated post would have been worse
+    // than no post.
+    const fakes = offerFakes();
+    await expect(
+      offer({ fakes, decisions, artifactBucket: ARTIFACT.artifactBucket }).promise,
+    ).rejects.toThrow(/cannot be shown whole/u);
+    expect(fakes.ssm.puts).toHaveLength(1);
+    expect(fakes.slack.fetchImpl).not.toHaveBeenCalled();
+    // And the refusal names no memory content, unlike the message it declined to
+    // build. The id is fine (the record carries ids); the merged bytes are not.
+    expect(thrown.message).not.toContain(long);
+  });
+
+  it("TC-SLACKAPP-206 a merge-free offer keeps the pre-#150 wording exactly", () => {
+    // The DELETE-only path is what the #102 operator CLI and every artifact-less
+    // stage still take. Appending " and 0 merge(s)" or " and 0 rewritten" to it
+    // would be a cosmetic change to the one sentence an operator reads before
+    // authorizing deletions — and the counts would then never be zero-suppressed
+    // anywhere, making a real merge easy to miss.
+    const decisions = [del("m-1"), del("m-2"), { id: "m-3", verdict: "KEEP", reason: "durable" }];
+    const record = buildOfferedRecord({
+      stage: "prod",
+      decisions,
+      generatedAt: "2026-08-05T03:00:00.000Z",
+      issuedAt: "2026-08-05T03:00:00.000Z",
+    });
+    const message = buildApprovalMessage({ record, decisions, channel: CHANNEL });
+
+    expect(message.blocks[0].text.text).toBe("Memory cleanup review — 2 deletion(s) for prod");
+    const [approve] = message.blocks.at(-1).elements;
+    expect(approve.text.text).toBe("Approve 2 deletion(s)");
+    expect(approve.confirm.text.text).toBe("2 memories will be soft-deleted in *prod*.");
+    // The KEEP is not a bullet: it touches nothing, so a line for it would be an
+    // id in a review list that the approval does not cover.
+    const sections = sectionText(message);
+    expect(sections).not.toContain("m-3");
+    expect(sections).not.toMatch(/merge/iu);
   });
 
   it("TC-SLACKAPP-108 treats Slack's HTTP 200 application errors as failures, without echoing the token", async () => {
@@ -6941,6 +7431,28 @@ describe("closing the loop on the message (#123)", () => {
     // screen reader read, and the outcome is the part worth notifying.
     expect(message.text).toMatch(/1\b/u);
     void fakes;
+  });
+
+  it("TC-SLACKAPP-207 the outcome counts CHANGES, because an applied merge is not all deletions", async () => {
+    // `capUsed` charges one unit per id a decision TOUCHED, and since #150 a merge
+    // charges its survivor rewrite alongside each absorbed deletion. So the same
+    // number that used to be a deletion count now over-counts removals by one per
+    // applied merge — and this message IS the audit trail, so "3 deletions" for a
+    // merge that removed 2 and rewrote 1 is a claim nothing downstream corrects.
+    const message = buildOutcomeMessage({
+      channel: CHANNEL,
+      messageTs: TS,
+      hash: HASH,
+      stage: "prod",
+      approved: 3,
+      result: { capUsed: 3, skippedLww: 0, skippedByFilter: 0, exitCode: 0 },
+      appliedAt: "2026-08-05T04:00:00.000Z",
+    });
+    expect(message.text).toBe("Applied: 3 of 3 approved change(s) in prod");
+    // Pinned as an exact string above AND negatively here, because the wording is
+    // the whole deliverable: the numerator and denominator are unchanged, so a
+    // regression to "deletion(s)" changes nothing a count assertion could see.
+    expect(JSON.stringify(message)).not.toMatch(/deletion/iu);
   });
 
   it("TC-SLACKAPP-121 a partial or capped apply says so on the message rather than reading as clean", async () => {
