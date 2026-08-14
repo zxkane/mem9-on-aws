@@ -222,14 +222,17 @@ function runFixture({
   logGroup = "/sst/cluster/mem9-pr-123-a1b2c3/Mem9Cleanup-d4e5f6",
   logPrefix = "mem9",
   replayLines = "1",
+  failingJqFilter = "",
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "mem9-slack-e2e-"));
   temporaryPaths.push(directory);
   const bin = join(directory, "bin");
   const calls = join(directory, "calls.jsonl");
   const s3Directory = join(directory, "s3");
+  const tmpRoot = join(directory, "tmp");
   mkdirSync(bin);
   mkdirSync(s3Directory);
+  mkdirSync(tmpRoot);
 
   const aws = join(bin, "aws");
   writeFileSync(
@@ -543,6 +546,57 @@ process.stdout.write(status);
   writeFileSync(sleep, "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
   chmodSync(sleep, 0o755);
 
+  // `mktemp` is stubbed unconditionally — into THIS case's directory and recording
+  // every path it hands out, which is what lets a case assert that none of them
+  // outlived the run. It stays a real temp file with a real unique name, so the
+  // script cannot tell the difference; the only change is where it lands and that
+  // the path is logged. TMPDIR alone would not do: the paths would be knowable but
+  // not enumerable, and `mktemp` is called in `ssm_value` on every read too.
+  const mktempLog = join(directory, "mktemp.log");
+  const mktemp = join(bin, "mktemp");
+  writeFileSync(
+    mktemp,
+    `#!${process.execPath}
+import { appendFileSync, mkdtempSync } from "node:fs";
+import { join } from "node:path";
+const path = join(mkdtempSync(process.env.MOCK_TMP_ROOT + "/t-"), "body");
+appendFileSync(process.env.MOCK_MKTEMP_LOG, path + "\\n");
+// Created empty, exactly as \`mktemp\` leaves it.
+appendFileSync(path, "");
+process.stdout.write(path + "\\n");
+`,
+    { mode: 0o755 },
+  );
+  chmodSync(mktemp, 0o755);
+
+  // A `jq` that fails on ONE named filter and delegates everything else to the real
+  // binary. Used to place an exit at a chosen point in the script without editing
+  // it — the alternative, asserting on source text, could not tell a trap that runs
+  // from one that is merely written down.
+  if (failingJqFilter) {
+    const jq = join(bin, "jq");
+    writeFileSync(
+      jq,
+      `#!${process.execPath}
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+const args = process.argv.slice(2);
+if (args.includes(process.env.MOCK_FAILING_JQ_FILTER)) {
+  console.error("jq: error: simulated failure for " + process.env.MOCK_FAILING_JQ_FILTER);
+  process.exit(5);
+}
+// stdin is a here-string in every call the script makes, so it must be forwarded.
+const stdin = readFileSync(0);
+const real = spawnSync("/usr/bin/jq", args, { input: stdin, encoding: "buffer" });
+if (real.stdout) process.stdout.write(real.stdout);
+if (real.stderr) process.stderr.write(real.stderr);
+process.exit(real.status ?? 1);
+`,
+      { mode: 0o755 },
+    );
+    chmodSync(jq, 0o755);
+  }
+
   const result = spawnSync("bash", [script], {
     encoding: "utf8",
     env: {
@@ -555,6 +609,9 @@ process.stdout.write(status);
       // Where the fake `s3api` lands the uploaded artifacts, so a case can read
       // back the exact bytes the script serialized.
       MOCK_S3_DIR: s3Directory,
+      MOCK_TMP_ROOT: tmpRoot,
+      MOCK_MKTEMP_LOG: mktempLog,
+      MOCK_FAILING_JQ_FILTER: failingJqFilter,
       MOCK_EXPIRY_BEHAVIOR: expiryBehavior,
       MOCK_TAMPER_BEHAVIOR: tamperBehavior,
       MOCK_ACCOUNT_ID: accountId,
@@ -595,7 +652,19 @@ process.stdout.write(status);
       readFileSync(join(s3Directory, name), "utf8"),
     ]),
   );
-  return { callRecords, uploads, result, output: `${result.stdout}${result.stderr}` };
+  // Every path the stubbed `mktemp` handed out. `ssm_value`'s own scratch files are
+  // in here too and it removes them itself, so a case asserting "none survived"
+  // covers those as a free side-benefit.
+  const temporaryBodies = (existsSync(mktempLog) ? readFileSync(mktempLog, "utf8") : "")
+    .split("\n")
+    .filter(Boolean);
+  return {
+    callRecords,
+    uploads,
+    result,
+    temporaryBodies,
+    output: `${result.stdout}${result.stderr}`,
+  };
 }
 
 /** The claim the callback writes when it wins and RunTask succeeds. */
@@ -1320,6 +1389,33 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
         callRecords.filter(([tool, service]) => tool === "aws" && service === "s3api"),
       ).toHaveLength(0);
       expect(callRecords.filter(([tool]) => tool === "curl")).toHaveLength(0);
+    }
+  });
+
+  it("TC-SLACKAPP-212 an exit between building the artifacts and the full trap still deletes them", () => {
+    // The two temp bodies are `mktemp`ed before the `cleanup` trap that removes
+    // them is installed, and everything in between can exit: the node child under
+    // `set -e`, the `jq` reads of its output, and the identical-hash refusal. A
+    // leftover body is not a tidiness problem — one of them holds synthetic
+    // `mergedContent`, i.e. the shape of real memory text, and the runner's temp
+    // dir is covered by no lifecycle rule. So the paths must be trapped where they
+    // are created, not where the S3 cleanup arrives.
+    //
+    // Driven by a `jq` that fails on the FIRST read of the node child's output,
+    // which lands the exit squarely inside that window. The assertion is on the
+    // files, not on the exit code: a run that aborted there and left both bodies
+    // behind also exits non-zero, so an exit-code-only check would pass with the
+    // trap deleted.
+    const { result, output, temporaryBodies } = runFixture({
+      claim: claimWith(),
+      failingJqFilter: ".clean.hash",
+    });
+    expect(result.status, output).not.toBe(0);
+    // The script names its temp files on stdout only via this fixture's `jq` stub;
+    // what matters is that none of the paths it created survive.
+    expect(temporaryBodies).not.toHaveLength(0);
+    for (const path of temporaryBodies) {
+      expect(existsSync(path), `${path} outlived the run: ${output}`).toBe(false);
     }
   });
 });

@@ -1989,6 +1989,23 @@ fail the run.
     since the bucket name is composed from that value and a wrong one would either
     write to a bucket this account does not own or fail four steps later at the click.
 
+- **TC-SLACKAPP-212** — an exit between building the two artifact bodies and the full
+  `cleanup` trap still deletes them. The bodies are `mktemp`ed well before that trap is
+  installed, and three things in between can exit: the node child under `set -e`, the
+  `jq` reads of its output, and the identical-hash refusal. A leftover is not
+  untidiness — one body holds synthetic `mergedContent`, the shape of real memory text,
+  and unlike the S3 copies (3-day lifecycle) a runner's temp dir expires under no rule
+  at all. Fixed by trapping the paths where they are created, superseded rather than
+  duplicated once `cleanup` takes over.
+
+  Driven by a `jq` stub that fails on the first read of the node child's output, which
+  places the exit inside exactly that window, and asserted on the **files** rather than
+  the exit code: a run that aborted there and left both bodies behind also exits
+  non-zero, so an exit-code check would pass with the trap deleted. The fixture stubs
+  `mktemp` unconditionally — same real unique-file behavior, but into the case's own
+  directory and logging every path — because TMPDIR alone makes the paths knowable and
+  not enumerable.
+
 ## Structural output scan
 
 - **TC-SLACKAPP-210** — `mergedContent` reaches the artifact and the Slack **review**

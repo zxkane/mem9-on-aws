@@ -168,6 +168,14 @@ ARTIFACT_BUCKET="mem9-audit-${ACCOUNT_ID}"
 # authors — it is written to a temp file and uploaded, never echoed.
 ARTIFACT_BODY=$(mktemp)
 TAMPERED_BODY=$(mktemp)
+# Removed by a trap installed HERE rather than only by the full `cleanup` below,
+# because everything between this line and that one can exit: the node child under
+# `set -e`, the `jq` reads of its output, and the identical-hash refusal. Any of
+# those would otherwise leave both bodies on the runner's disk, and one of them is
+# synthetic memory text — the case for deleting the S3 copies applies to these
+# harder, since a runner's temp dir outlives no lifecycle rule. Superseded (not
+# duplicated) once `cleanup` takes over.
+trap 'rm -f "$ARTIFACT_BODY" "$TAMPERED_BODY"' EXIT
 # shellcheck disable=SC2016
 ARTIFACT_META=$(
   E2E_STAGE="$STAGE" E2E_ROOT="$REPO_ROOT" \
