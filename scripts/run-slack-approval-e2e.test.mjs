@@ -234,9 +234,24 @@ function runFixture({
   mkdirSync(s3Directory);
   mkdirSync(tmpRoot);
 
-  const aws = join(bin, "aws");
-  writeFileSync(
-    aws,
+  /**
+   * Write an executable stub onto the fixture's PATH.
+   *
+   * The `chmodSync` after the `mode` is not redundant: `writeFileSync`'s mode is
+   * masked by the process umask, so under a 0o077 umask the file lands 0o700 —
+   * still executable by this test, but the explicit chmod is what keeps that from
+   * depending on the runner's umask at all. Every stub needs both, which is the
+   * whole reason this is a helper rather than five call sites.
+   */
+  const stub = (name, source) => {
+    const path = join(bin, name);
+    writeFileSync(path, source, { mode: 0o755 });
+    chmodSync(path, 0o755);
+    return path;
+  };
+
+  stub(
+    "aws",
     // The shebang is the ABSOLUTE interpreter, never `env node`: this fixture
     // prepends `bin` to PATH (below), so `env node` would resolve to any file
     // named `node` in `bin` — and a stub that re-invokes `node` then forks
@@ -409,9 +424,7 @@ if (command === "ssm get-parameter") {
   process.exit(2);
 }
 `,
-    { mode: 0o755 },
   );
-  chmodSync(aws, 0o755);
 
   // The fake `curl` decides which POST it is by the SIGNATURE header, exactly as
   // the real endpoint does: that is the one thing this E2E exists to exercise.
@@ -422,9 +435,8 @@ if (command === "ssm get-parameter") {
   // than answering every signed click alike is what gives the expiry step teeth: a
   // fake that always accepted would pass the same whether the script stamped
   // `issuedAt` or not, which is the exact regression this exists to catch.
-  const curl = join(bin, "curl");
-  writeFileSync(
-    curl,
+  stub(
+    "curl",
     `#!${process.execPath}
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
@@ -538,13 +550,9 @@ if (accepted || claimedDespiteRefusing) {
 }
 process.stdout.write(status);
 `,
-    { mode: 0o755 },
   );
-  chmodSync(curl, 0o755);
 
-  const sleep = join(bin, "sleep");
-  writeFileSync(sleep, "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
-  chmodSync(sleep, 0o755);
+  stub("sleep", "#!/usr/bin/env bash\nexit 0\n");
 
   // `mktemp` is stubbed unconditionally — into THIS case's directory and recording
   // every path it hands out, which is what lets a case assert that none of them
@@ -553,9 +561,8 @@ process.stdout.write(status);
   // the path is logged. TMPDIR alone would not do: the paths would be knowable but
   // not enumerable, and `mktemp` is called in `ssm_value` on every read too.
   const mktempLog = join(directory, "mktemp.log");
-  const mktemp = join(bin, "mktemp");
-  writeFileSync(
-    mktemp,
+  stub(
+    "mktemp",
     `#!${process.execPath}
 import { appendFileSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
@@ -565,18 +572,15 @@ appendFileSync(process.env.MOCK_MKTEMP_LOG, path + "\\n");
 appendFileSync(path, "");
 process.stdout.write(path + "\\n");
 `,
-    { mode: 0o755 },
   );
-  chmodSync(mktemp, 0o755);
 
   // A `jq` that fails on ONE named filter and delegates everything else to the real
   // binary. Used to place an exit at a chosen point in the script without editing
   // it — the alternative, asserting on source text, could not tell a trap that runs
   // from one that is merely written down.
   if (failingJqFilter) {
-    const jq = join(bin, "jq");
-    writeFileSync(
-      jq,
+    stub(
+      "jq",
       `#!${process.execPath}
 import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -592,9 +596,7 @@ if (real.stdout) process.stdout.write(real.stdout);
 if (real.stderr) process.stderr.write(real.stderr);
 process.exit(real.status ?? 1);
 `,
-      { mode: 0o755 },
     );
-    chmodSync(jq, 0o755);
   }
 
   const result = spawnSync("bash", [script], {
