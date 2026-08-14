@@ -381,11 +381,32 @@ post() {
 # No claim under EITHER name. Both are checked on every assertion because the claim
 # is keyed on the OFFERED record's hash: a step that wrote the wrong one would
 # otherwise read as "nothing happened".
+#
+# Classified exactly like `ssm_value` above, and for the same reason stated there —
+# `>/dev/null 2>&1` inside a bare `if` collapses "absent" with AccessDenied, a
+# throttle, expired credentials, and the wrong region. Every one of those is a
+# FAILED READ, but the collapsed form reads them all as "no claim", which is this
+# function's PASS condition. That inverts the strongest assertion in the tampered
+# step, where "no claim" is the sole evidence that no apply task ran: a single
+# transient SSM error would let a facade that claims the approval and starts an
+# apply anyway report `OK` and exit 0. `set -e` cannot help, because the failure is
+# consumed by the `if` condition. So only ParameterNotFound means absent.
 assert_no_claim() {
-  local why="$1" name
+  local why="$1" name err rc
   for name in "$CLAIM_NAME" "$TAMPERED_CLAIM_NAME"; do
-    if aws ssm get-parameter --name "$name" --region "$REGION" >/dev/null 2>&1; then
+    err=$(mktemp)
+    rc=0
+    aws ssm get-parameter --name "$name" --region "$REGION" >/dev/null 2>"$err" ||
+      rc=$?
+    local stderr_text
+    stderr_text=$(<"$err")
+    rm -f "$err"
+    if ((rc == 0)); then
       echo "::error::${why} (a claim exists at ${name})" >&2
+      exit 1
+    fi
+    if [[ "$stderr_text" != *ParameterNotFound* ]]; then
+      echo "::error::${why} — could not determine whether a claim exists at ${name} (exit ${rc}): ${stderr_text}" >&2
       exit 1
     fi
   done
@@ -612,7 +633,13 @@ read -r LOG_GROUP LOG_PREFIX < <(jq -r --arg name "$CONTAINER_NAME" \
    | "\(.["awslogs-group"] // "") \(.["awslogs-stream-prefix"] // "")"' \
   <<<"$TASK_DEFINITION") || true
 if [[ -z "$LOG_GROUP" || -z "$LOG_PREFIX" ]]; then
-  echo "::error::container ${CONTAINER_NAME} in ${TASK_DEF} has no awslogs group/stream prefix — the replay assertion cannot run" >&2
+  # `${TASK_DEF##*/}` — family:revision, NOT the full ARN. `TASK_DEF` is read from
+  # SSM and carries the live account id, so interpolating it here would print that
+  # id into public CI logs on exactly the failure path a reader has to look at. The
+  # comment below already refuses to echo a matched log line for that reason; this
+  # line was contradicting it. family:revision is what identifies the definition to
+  # a reader anyway.
+  echo "::error::container ${CONTAINER_NAME} in ${TASK_DEF##*/} has no awslogs group/stream prefix — the replay assertion cannot run" >&2
   exit 1
 fi
 LOG_STREAM="${LOG_PREFIX}/${CONTAINER_NAME}/${TASK_ARN##*/}"

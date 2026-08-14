@@ -1982,12 +1982,39 @@ fail the run.
     returns 1 on EOF when nothing matches, and under `set -euo pipefail` that aborted
     the script **before** its own diagnostic — the guard against a silent no-op was
     itself silent. Explicit `=""` initializers plus `|| true` are what make the named
-    error reachable.
+    error reachable. That diagnostic names the definition as `family:revision`, not as
+    the ARN it was read from: `TASK_DEF` comes from SSM and carries the live account
+    id, so the first draft printed that id into public CI logs on exactly the failure
+    path a reader has to look at — contradicting the count-only rule two blocks below,
+    which refuses to echo a matched log line for the same reason. The account-id sweep
+    asserted on the success path cannot catch it, because this path never reaches the
+    sweep.
   - **A non-12-digit account id is refused before any upload.** Checked over `""`,
     the literal `None` that `sts get-caller-identity` prints when it cannot resolve
     one, and a malformed value; each must produce zero `s3api` and zero `curl` calls,
     since the bucket name is composed from that value and a wrong one would either
     write to a bucket this account does not own or fail four steps later at the click.
+
+- **TC-SLACKAPP-213** — a claim read that **fails** is not the same as no claim.
+  `assert_no_claim` carries the strongest assertion in the tampered step: "no apply
+  task ran" rests entirely on the claim being absent, since the claim is taken
+  `Overwrite: false` before `RunTask`. The first form asked
+  `if aws ssm get-parameter … >/dev/null 2>&1`, which collapses "absent" with
+  `AccessDenied`, a throttle, expired credentials and the wrong region — every one a
+  **failed read**, and all of them read as this function's PASS condition. That is the
+  same collapse `ssm_value` already refuses by name one function away. `set -e` cannot
+  help, because the failure is consumed by the `if` condition. So only
+  `ParameterNotFound` means absent; any other stderr fails the run saying it could not
+  tell.
+
+  Paired deliberately with the `cosmetic` façade — the real regression this step exists
+  to catch, which refuses with `regenerated` and starts an apply anyway. Under the
+  collapsed form one transient SSM error let all three `assert_no_claim` calls pass
+  silently on that façade. The run still died later, at the success-path `ssm_value`
+  read, which is why this is a near-miss rather than an exit 0 — but that catch is
+  incidental: a different assertion about a different thing, reachable only because the
+  same injected error also hit a read that classifies properly. Asserted on the message
+  rather than the exit code for that reason.
 
 - **TC-SLACKAPP-212** — an exit between building the two artifact bodies and the full
   `cleanup` trap still deletes them. The bodies are `mktemp`ed well before that trap is

@@ -223,6 +223,7 @@ function runFixture({
   logPrefix = "mem9",
   replayLines = "1",
   failingJqFilter = "",
+  claimReadError = "",
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "mem9-slack-e2e-"));
   temporaryPaths.push(directory);
@@ -320,6 +321,13 @@ if (command === "ssm get-parameter") {
     // hide the mistake this models: a click accepted against a TAMPERED record
     // writes its claim under the tampered hash, so a harness watching only the
     // reviewed name would report "no claim" while an apply was running (#150).
+    // A read that FAILS rather than answering. Distinct from every knob above
+    // because the failure has to land on the claim reads specifically: those are
+    // the ones whose "absent" answer is a PASS condition, so a collapsed
+    // classifier turns a broken read into a green run.
+    if (process.env.MOCK_CLAIM_READ_ERROR) {
+      readError(name, process.env.MOCK_CLAIM_READ_ERROR);
+    }
     const claimedHash = existsSync(process.env.MOCK_CLICKED)
       ? readFileSync(process.env.MOCK_CLICKED, "utf8").trim()
       : "";
@@ -614,6 +622,7 @@ process.exit(real.status ?? 1);
       MOCK_TMP_ROOT: tmpRoot,
       MOCK_MKTEMP_LOG: mktempLog,
       MOCK_FAILING_JQ_FILTER: failingJqFilter,
+      MOCK_CLAIM_READ_ERROR: claimReadError,
       MOCK_EXPIRY_BEHAVIOR: expiryBehavior,
       MOCK_TAMPER_BEHAVIOR: tamperBehavior,
       MOCK_ACCOUNT_ID: accountId,
@@ -1309,6 +1318,30 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
     expect(output).toMatch(/an apply task may have deleted an id no operator reviewed/iu);
   });
 
+  it("TC-SLACKAPP-213 a claim read that fails is not the same as no claim", () => {
+    // Paired deliberately with the `cosmetic` facade of the case above — the real
+    // regression this step exists to catch, which refuses with "regenerated" and
+    // starts an apply anyway. With the claim read FAILING (a throttle, an
+    // AccessDenied from a boundary that left the CI role only `ssm:GetParameters`,
+    // expired credentials, the wrong region), the old `>/dev/null 2>&1` inside a
+    // bare `if` reported "no claim exists" — its PASS condition — and the harness
+    // printed OK and exited 0 while a task was deleting ids no operator reviewed.
+    //
+    // `set -e` cannot catch it: the failure is consumed by the `if` condition. So
+    // the assertion is that the run FAILS, and that it says it could not tell
+    // rather than asserting a fact it never established. The absence of the
+    // "apply task may have deleted" line is asserted too: reaching that message
+    // would mean the read was believed after all.
+    const { result, output } = runFixture({
+      claim: claimWith(),
+      claimReadError: "ThrottlingException",
+      tamperBehavior: "cosmetic",
+    });
+    expect(result.status, output).not.toBe(0);
+    expect(output).toMatch(/could not determine whether a claim exists/iu);
+    expect(output).toMatch(/ThrottlingException/u);
+  });
+
   it("TC-SLACKAPP-208 a refusal answered with a 5xx fails the run", () => {
     // Same reason as the expiry case: Slack renders a non-200 as its own "operation
     // failed" and shows the operator no reason at all, so a correct refusal delivered
@@ -1375,6 +1408,13 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
     });
     expect(result.status, output).not.toBe(0);
     expect(output).toMatch(/no awslogs group\/stream prefix/iu);
+    // This refusal names the task definition, and `TASK_DEF` is an ARN read from
+    // SSM that carries the live account id — so the message has to name
+    // family:revision instead. The sibling account-id sweep above runs on the
+    // SUCCESS path and never reaches this line, which is how the full ARN sat here
+    // under a doc claiming the id appears nowhere in the harness's output.
+    expect(output).not.toContain("123456789012");
+    expect(output).toMatch(/mem9-cleanup:7/u);
   });
 
   it("TC-SLACKAPP-208 an account id the CLI cannot resolve is a refusal, not a malformed bucket name", () => {
