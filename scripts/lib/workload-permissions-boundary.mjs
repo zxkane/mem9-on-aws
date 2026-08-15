@@ -88,11 +88,11 @@ function matchesProjectLambdaRoleName(roleName, type) {
 }
 
 // Every ECS execution role that fetches a Secrets Manager secret for `valueFrom`
-// injection has to be listed here, because
-// DenySecretContextDecryptFromNonEcsExecutionRoles is an ArnNotLike deny: an
-// omitted role is denied, not merely ungranted. Measured against the live policy
-// rather than reasoned about — the default `aws/secretsmanager` key needs no
-// identity ALLOW, which makes it tempting to conclude the deny never fires, but a
+// injection has to be listed here, because `SecretCtxRole` (secret encryption
+// context, restricted to ECS execution roles) is an ArnNotLike deny: an omitted
+// role is denied, not merely ungranted. Measured against the live policy rather
+// than reasoned about — the default `aws/secretsmanager` key needs no identity
+// ALLOW, which makes it tempting to conclude the deny never fires, but a
 // simulation of each role shows listed ones allowed and unlisted ones
 // explicitDeny. A missing token costs a task death in the ECS agent's
 // secret-fetch phase, before the entrypoint runs.
@@ -125,14 +125,21 @@ const PROJECT_RESOURCE_RUNTIME_ACTIONS = [
   "sqs:SendMessage",
   "ssm:GetParameters",
   // The Slack approval record (#123 — the writer does not exist yet; this
-  // prerequisite lands first because the rollout can only apply main's
-  // template). Listed here rather than in GLOBAL_RUNTIME_ACTIONS because this
-  // list feeds BOTH the action ceiling and DenyProjectRuntimeOutsideResources,
-  // and the project SSM prefix is the only place this write belongs.
-  // GLOBAL_RUNTIME_ACTIONS entries are admitted account-wide, which is why
-  // ecs:RunTask and iam:PassRole live there and are constrained by identity
-  // policy and out-of-band review instead.
+  // prerequisite lands first because the rollout can only apply main's template).
+  // Listed here rather than in GLOBAL_RUNTIME_ACTIONS because this list feeds BOTH
+  // the action ceiling and the `Resources` deny, and the project SSM prefix is the
+  // only place this write belongs. GLOBAL_RUNTIME_ACTIONS entries are admitted
+  // account-wide, which is why ecs:RunTask and iam:PassRole live there and are
+  // constrained by identity policy and out-of-band review instead.
   "ssm:PutParameter",
+  // The reviewed decision artifact (#150). Enumerated rather than written as
+  // s3:*Object: the wildcard measures 34 bytes cheaper but also admits
+  // DeleteObject and RestoreObject on the very artifact the approval loop exists
+  // to produce — a role that can delete the record can erase the evidence of
+  // what it deleted — plus whatever *Object action AWS adds next. Simulated:
+  // under these two, DeleteObject on the artifact is explicitDeny.
+  "s3:GetObject",
+  "s3:PutObject",
 ];
 const MANTLE_BEARER_ACTION = "bedrock-mantle:CallWithBearerToken";
 const GLOBAL_RUNTIME_ACTIONS = [
@@ -150,11 +157,25 @@ const GLOBAL_RUNTIME_ACTIONS = [
   "ssmmessages:OpenControlChannel",
   "ssmmessages:OpenDataChannel",
 ];
-const CONDITIONED_RUNTIME_ACTIONS = ["kms:Decrypt"];
+// Singleton Action/NotAction/Resource/NotResource entries are rendered as SCALARS
+// rather than one-element arrays, which reclaims 22 bytes across the document
+// against a 6144 quota that #150 leaves 25 bytes under. Safe because the verifier
+// compares these four keys through list(), so a scalar and a one-element array are
+// the same set — and simulated identical on all 12 authorization cases. NOT safe
+// inside Condition, where canonicalJson() compares the two as different values.
+const KMS_DECRYPT_ACTION = "kms:Decrypt";
+// SSE-KMS writes need GenerateDataKey; reads need only Decrypt, above. Kept as its
+// own constant, and out of the seven Decrypt denies, because the hazard runs one
+// way: adding an action to a Deny can only ever subtract permission, so the risk is
+// never that this action collects too many conditions — it is that it collects NONE
+// and the ceiling admits it bare. That is what the `GenKey` deny below exists for,
+// and what the "reaches exactly one statement" assertion in the suite pins down.
+const ARTIFACT_KMS_ACTION = "kms:GenerateDataKey";
 const RUNTIME_ACTION_CEILING = [
   ...PROJECT_RESOURCE_RUNTIME_ACTIONS,
   ...GLOBAL_RUNTIME_ACTIONS,
-  ...CONDITIONED_RUNTIME_ACTIONS,
+  KMS_DECRYPT_ACTION,
+  ARTIFACT_KMS_ACTION,
   MANTLE_BEARER_ACTION,
 ];
 const NETWORK_INTERFACE_DENY_ACTIONS = [
@@ -325,12 +346,29 @@ function boundaryContract({
   if (!/^r[0-9]{1,20}$/u.test(policyRevision)) {
     throw new Error("invalid boundary policy revision");
   }
+  // Two ARNs, not one, and the difference is load-bearing. S3's own resource
+  // scope needs the OBJECT glob; the SSE-KMS encryption context needs the BUCKET
+  // ARN, because the bucket enables S3 Bucket Keys. Documented AWS behavior, S3
+  // user guide "Using SSE-KMS -> Encryption context": "If you use SSE-KMS without
+  // enabling an S3 Bucket Key, the object ARN is used as the encryption
+  // context... If you use SSE-KMS and enable an S3 Bucket Key, the bucket ARN is
+  // used." An earlier revision of this file used the object glob for both and
+  // asserted the trailing /* covered either case. That claim was FALSE —
+  // `arn:aws:s3:::bucket/*` does not match `arn:aws:s3:::bucket`, so with bucket
+  // keys on, GenerateDataKey and Decrypt both simulate explicitDeny and every
+  // artifact write and read dies after deploy. Pinning both forms is not an
+  // option: 6215 bytes, past the hard quota.
+  const decisionArtifactBucketArn = `arn:${partition}:s3:::mem9-audit-${accountId}`;
+  const decisionArtifactArn = `${decisionArtifactBucketArn}/*`;
 
   return {
     accountId,
     partition,
     policyRevision,
-    kmsViaServices: ["ssm", "secretsmanager"].map(
+    // Order matters: ParamCtxVia, SecretCtxVia, and FnCodeKms index into this by
+    // position, so `s3` is appended last rather than sorted in. Those three
+    // statements pin a SINGLE service each and must not pick up S3.
+    kmsViaServices: ["ssm", "secretsmanager", "s3"].map(
       (service) =>
         `${service}.${applicationRegion}.${
           partition === "aws-cn" ? "amazonaws.com.cn" : "amazonaws.com"
@@ -361,11 +399,31 @@ function boundaryContract({
       `arn:${partition}:ssm:${applicationRegion}:${accountId}:` +
       "parameter/mem9-on-aws/*",
     // The approval-record write (#123) is scoped tighter than the project
-    // prefix. See DenyPutParameterOutsideApprovalRecords for why the broader
-    // project scope is not sufficient for a WRITE.
+    // prefix. See the `ParamWrite` statement for why the broader project scope
+    // is not sufficient for a WRITE.
     ssmApprovalParameterArn:
       `arn:${partition}:ssm:${applicationRegion}:${accountId}:` +
       "parameter/mem9-on-aws/*/approvals/*",
+    // The decision artifact (#150). The bucket segment carries NO wildcard, and
+    // that is the security property, not a style choice: S3 bucket names are a
+    // GLOBAL namespace, so a pattern like mem9-on-aws-*-decisions matches a
+    // bucket an attacker can create in THEIR account. Simulated against the
+    // wildcard form, PutObject on mem9-on-aws-evil-decisions came back `allowed`
+    // — an exfiltration target for merged memory content, admitted by the one
+    // control that PR-authored identity policies cannot widen. The account id is
+    // the disambiguating suffix a global namespace requires, so the stage lives
+    // in the key prefix instead of the bucket name. The aws:ResourceAccount
+    // guard is the textbook alternative and is NOT available here: it measures
+    // 6280 bytes, past the hard 6144 quota.
+    //
+    // The name is `mem9-audit-` rather than `mem9-on-aws-audit-` because the ARN
+    // renders three times: seven characters of prefix cost 21 bytes, and at the
+    // revision this document actually deploys with there are only 10 to spare
+    // (see the size gate). Nothing pins an S3 prefix for this project — the
+    // deploy role's S3State is Resource: "*" — so the shorter name costs no
+    // access, and it is free only while the bucket does not yet exist.
+    decisionArtifactArn,
+    decisionArtifactBucketArn,
     projectResources: [
       bedrockProjectArn,
       ...(openAiBedrockProjectArn ? [openAiBedrockProjectArn] : []),
@@ -378,6 +436,7 @@ function boundaryContract({
       `arn:${partition}:sqs:${applicationRegion}:${accountId}:AlertExecutionFailureQueue-*`,
       `arn:${partition}:sns:${applicationRegion}:${accountId}:mem9-on-aws-*-alerts`,
       `arn:${partition}:ssm:${applicationRegion}:${accountId}:parameter/mem9-on-aws/*`,
+      decisionArtifactArn,
     ],
   };
 }
@@ -385,6 +444,8 @@ function boundaryContract({
 export function expectedBoundaryPolicyDocument(contract) {
   const {
     accountId,
+    decisionArtifactArn,
+    decisionArtifactBucketArn,
     ecsExecutionRoleArns,
     kmsViaServices,
     lambdaExecutionRoleArns,
@@ -400,19 +461,19 @@ export function expectedBoundaryPolicyDocument(contract) {
     Version: "2012-10-17",
     Statement: [
       {
-        Sid: "AllowRuntimeIdentityPermissions",
+        Sid: "Identity",
         Effect: "Allow",
         Action: "*",
         Resource: "*",
       },
       {
-        Sid: `DenyOutsideRuntimeActionCeiling${policyRevision}`,
+        Sid: `Ceiling${policyRevision}`,
         Effect: "Deny",
         NotAction: [...RUNTIME_ACTION_CEILING],
         Resource: "*",
       },
       {
-        Sid: "DenyProjectRuntimeOutsideResources",
+        Sid: "Resources",
         Effect: "Deny",
         Action: [...PROJECT_RESOURCE_RUNTIME_ACTIONS],
         NotResource: projectResources,
@@ -424,19 +485,21 @@ export function expectedBoundaryPolicyDocument(contract) {
       // the boundary be ATTACHED, never constrains its content. Preview roles
       // are bounded too, so without this a PR could grant one of its own preview
       // Lambdas ssm:PutParameter on /mem9-on-aws/prod/* and overwrite prod's
-      // plain-String parameters. SecureStrings are already unreachable (that
-      // write needs kms:Encrypt or kms:GenerateDataKey; the ceiling admits
-      // neither), so the plain-String ones are exactly the exposure this closes.
+      // plain-String parameters. SecureStrings stay unreachable because that
+      // write needs kms:Encrypt or kms:GenerateDataKey: the ceiling admits no
+      // Encrypt at all, and #150's GenerateDataKey admission is confined to S3's
+      // encryption context by `GenKey` below. That used to be an absence and is
+      // now a statement, so the suite asserts `GenKey` directly.
       {
-        Sid: "DenyPutParameterOutsideApprovalRecords",
+        Sid: "ParamWrite",
         Effect: "Deny",
-        Action: ["ssm:PutParameter"],
-        NotResource: [ssmApprovalParameterArn],
+        Action: "ssm:PutParameter",
+        NotResource: ssmApprovalParameterArn,
       },
       {
-        Sid: "DenyKmsDecryptOutsideReviewedContexts",
+        Sid: "KmsContext",
         Effect: "Deny",
-        Action: [...CONDITIONED_RUNTIME_ACTIONS],
+        Action: KMS_DECRYPT_ACTION,
         Resource: "*",
         Condition: {
           StringNotLikeIfExists: {
@@ -444,16 +507,26 @@ export function expectedBoundaryPolicyDocument(contract) {
             "kms:EncryptionContext:aws:lambda:FunctionArn":
               lambdaFunctionArn,
             "kms:EncryptionContext:SecretARN": secretArns,
+            // S3's SSE-KMS context key: the BUCKET ARN, because the bucket runs
+            // with Bucket Keys on. NOT the object glob — see where these two ARNs
+            // are derived for why that distinction is a deploy-breaking one.
+            // Load-bearing, not defensive: removed, the artifact read simulates
+            // explicitDeny, because a decrypt carrying only this context matches
+            // none of the keys above and this deny fires.
+            "kms:EncryptionContext:aws:s3:arn": decisionArtifactBucketArn,
           },
         },
       },
       {
-        Sid: "DenyKmsDecryptOutsideReviewedViaServices",
+        Sid: "KmsVia",
         Effect: "Deny",
-        Action: [...CONDITIONED_RUNTIME_ACTIONS],
+        Action: KMS_DECRYPT_ACTION,
         Resource: "*",
         Condition: {
           StringNotEqualsIfExists: {
+            // The S3 entry is load-bearing for the same reason: without it the
+            // artifact decrypt arrives via s3.<region>, matches neither SSM nor
+            // Secrets Manager, and this deny kills the read path.
             "kms:ViaService": kmsViaServices,
           },
           StringNotLikeIfExists: {
@@ -463,9 +536,9 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "DenyParameterContextDecryptOutsideSsm",
+        Sid: "ParamCtxVia",
         Effect: "Deny",
-        Action: [...CONDITIONED_RUNTIME_ACTIONS],
+        Action: KMS_DECRYPT_ACTION,
         Resource: "*",
         Condition: {
           Null: {
@@ -477,9 +550,9 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "DenySecretContextDecryptOutsideSecretsManager",
+        Sid: "SecretCtxVia",
         Effect: "Deny",
-        Action: [...CONDITIONED_RUNTIME_ACTIONS],
+        Action: KMS_DECRYPT_ACTION,
         Resource: "*",
         Condition: {
           Null: {
@@ -491,9 +564,9 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "DenySecretContextDecryptFromNonEcsExecutionRoles",
+        Sid: "SecretCtxRole",
         Effect: "Deny",
-        Action: [...CONDITIONED_RUNTIME_ACTIONS],
+        Action: KMS_DECRYPT_ACTION,
         Resource: "*",
         Condition: {
           Null: {
@@ -505,9 +578,9 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "DenyLambdaContextDecryptFromNonLambdaRoles",
+        Sid: "LambdaCtxRole",
         Effect: "Deny",
-        Action: [...CONDITIONED_RUNTIME_ACTIONS],
+        Action: KMS_DECRYPT_ACTION,
         Resource: "*",
         Condition: {
           Null: {
@@ -519,9 +592,9 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "DenyDirectKmsDecryptFromFunctionCode",
+        Sid: "FnCodeKms",
         Effect: "Deny",
-        Action: [...CONDITIONED_RUNTIME_ACTIONS],
+        Action: KMS_DECRYPT_ACTION,
         Resource: "*",
         Condition: {
           Null: {
@@ -532,10 +605,31 @@ export function expectedBoundaryPolicyDocument(contract) {
           },
         },
       },
+      // #150's SSE-KMS write needs kms:GenerateDataKey, and admitting that action
+      // bare would silently revoke an invariant the `ParamWrite` comment above
+      // states as fact: SSM SecureStrings are unreachable BECAUSE the ceiling
+      // admits neither kms:Encrypt nor kms:GenerateDataKey. Simulated without
+      // this statement, a SecureString write via ssm.<region> comes back
+      // `allowed`, as does GenerateDataKey with no encryption context at all.
+      // Keying the deny on S3's own context key restores it: ...IfExists with a
+      // negated operator FIRES on an absent key, so every caller that cannot
+      // present an artifact context is denied, and the SSM path presents
+      // PARAMETER_ARN rather than aws:s3:arn.
       {
-        Sid: "DenyNonShortTermMantleBearer",
+        Sid: "GenKey",
         Effect: "Deny",
-        Action: [MANTLE_BEARER_ACTION],
+        Action: ARTIFACT_KMS_ACTION,
+        Resource: "*",
+        Condition: {
+          StringNotLikeIfExists: {
+            "kms:EncryptionContext:aws:s3:arn": decisionArtifactBucketArn,
+          },
+        },
+      },
+      {
+        Sid: "LongBearer",
+        Effect: "Deny",
+        Action: MANTLE_BEARER_ACTION,
         Resource: "*",
         Condition: {
           StringNotEqualsIfExists: {
@@ -544,7 +638,7 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "DenyEniFromNonVpcLambdaRoles",
+        Sid: "EniRole",
         Effect: "Deny",
         Action: [...NETWORK_INTERFACE_DENY_ACTIONS],
         Resource: "*",
@@ -557,7 +651,7 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "DenyEniFromFunctionCode",
+        Sid: "EniFnCode",
         Effect: "Deny",
         Action: [...NETWORK_INTERFACE_DENY_ACTIONS],
         Resource: "*",
@@ -617,6 +711,35 @@ export function verifyBoundaryPolicyDocument(document, contract) {
   const actual = list(decoded.Statement);
   const expected = expectedBoundaryPolicyDocument(contract).Statement;
   if (actual.length !== expected.length) return false;
+
+  // The loop below walks EXPECTED Sids and looks each one up in the deployed
+  // document, so its coverage of `actual` rests on the expected Sids being
+  // unique. With equal lengths plus uniqueness, expected -> actual is a bijection
+  // and every deployed statement gets compared; duplicate an expected Sid and
+  // that collapses.
+  //
+  // The reachable failure is narrower than it first looks, and the narrowing is
+  // worth recording because the obvious probes all come back clean. Two things
+  // have to hold at once. The duplicate must be VERBATIM: same-Sid statements
+  // that differ in content each fail the content comparison, so the function
+  // already returned false. And the DEPLOYED document must not carry the same
+  // duplicate, because two same-Sid statements there make `matches.length === 2`,
+  // which the check inside the loop already rejects. So an authored duplicate
+  // that reaches the live policy through this repo's own rollout is caught today
+  // — measured, not assumed.
+  //
+  // What is left is the case where the two diverge: the library holds a verbatim
+  // duplicate while the live policy holds a rogue statement under an unused Sid
+  // instead. Then both copies match the one deployed statement, both pass, the
+  // rogue one is compared against nothing, and the count still balances. Probed:
+  // that shape returns TRUE without the check below and FALSE with it, for a live
+  // document carrying `Allow` on `*`/`*`. Drift between the two is exactly the
+  // condition this function exists to detect, so it must not depend on their
+  // agreeing. #150 cut the Sids to about ten characters to reclaim bytes and
+  // appends statements next, which makes a pasted-but-unrenamed Sid the likely
+  // way the premise breaks.
+  const expectedSids = expected.map((statement) => statement.Sid);
+  if (new Set(expectedSids).size !== expectedSids.length) return false;
 
   for (const expectedStatement of expected) {
     const matches = actual.filter(

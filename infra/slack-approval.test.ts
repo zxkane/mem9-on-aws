@@ -206,6 +206,55 @@ function installGlobals(stage: string) {
         }
       },
     },
+    // #150's decision artifact. `id` returns the RESOLVED bucket name rather than
+    // the logical name, because the four hardening resources address the bucket
+    // through `bucket: artifactBucket.id` — so a test can prove each one points at
+    // the same bucket the boundary permits, instead of merely existing.
+    s3: {
+      BucketV2: class {
+        id: Output<string>;
+        arn: Output<string>;
+        bucket: Output<string>;
+        constructor(
+          logicalName: string,
+          args: Record<string, unknown>,
+          opts?: Record<string, unknown>,
+        ) {
+          const name = String(materialize(args.bucket));
+          this.id = out(name);
+          this.bucket = out(name);
+          this.arn = out(`arn:aws:s3:::${name}`);
+          // Record the resource OPTIONS too: retainOnDelete is the difference
+          // between a preview stage's teardown keeping the audit trail and
+          // deleting it, and it lives in opts rather than args.
+          record("BucketV2", logicalName, { ...args, __opts: opts });
+        }
+      },
+      BucketPublicAccessBlock: class {
+        constructor(logicalName: string, args: Record<string, unknown>) {
+          record("BucketPublicAccessBlock", logicalName, args);
+        }
+      },
+      BucketServerSideEncryptionConfigurationV2: class {
+        constructor(logicalName: string, args: Record<string, unknown>) {
+          record(
+            "BucketServerSideEncryptionConfigurationV2",
+            logicalName,
+            args,
+          );
+        }
+      },
+      BucketLifecycleConfigurationV2: class {
+        constructor(logicalName: string, args: Record<string, unknown>) {
+          record("BucketLifecycleConfigurationV2", logicalName, args);
+        }
+      },
+      BucketPolicy: class {
+        constructor(logicalName: string, args: Record<string, unknown>) {
+          record("BucketPolicy", logicalName, args);
+        }
+      },
+    },
     // The #149 weekly scan's schedule. Same stubs consolidation.test.ts installs;
     // the ScheduleGroup returns a NAME derived from its own namePrefix so the
     // TargetErrorCount alarm's dimension can be proven to point at THIS group
@@ -341,6 +390,21 @@ function facadePolicyStatements(): Array<Record<string, any>> {
 
 function list(value: unknown): string[] {
   return Array.isArray(value) ? value.map(String) : [String(value)];
+}
+
+/**
+ * `list()` for values that are not yet strings.
+ *
+ * IAM treats a scalar and a one-element array identically in `Action`,
+ * `NotAction`, `Resource`, and `NotResource`, and the boundary renders singletons
+ * as SCALARS to reclaim bytes against the 6144 quota (#150). So an assertion that
+ * indexes into one of those four keys must normalize first or it breaks on a
+ * purely cosmetic change — which is how this one broke. Separate from `list()`
+ * because these entries may be unresolved `!Sub` OBJECTS: `String()`-ing them
+ * first yields "[object Object]", so the caller resolves after normalizing.
+ */
+function listRaw(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [value];
 }
 
 /**
@@ -552,17 +616,18 @@ describe("slack approval infrastructure", () => {
       ).toBe(true);
     }
 
-    // DenyPutParameterOutsideApprovalRecords is a NotResource deny, so the
-    // grant is only reachable if EVERY resource it names is matched by the
-    // exception. One stray resource in the same statement denies the whole call.
+    // `ParamWrite` is a NotResource deny, so the grant is only reachable if EVERY
+    // resource it names is matched by the exception. One stray resource in the
+    // same statement denies the whole call.
     const approvalDeny = boundary.find(
-      ({ Sid }) => Sid === "DenyPutParameterOutsideApprovalRecords",
+      ({ Sid }) => Sid === "ParamWrite",
     );
     expect(approvalDeny).toBeDefined();
     // `!Sub` resolves to an OBJECT, so these must be resolved before comparing —
     // stringifying them first yields "[object Object]", which matches nothing and
-    // would make the loop below fail for the wrong reason.
-    const exceptions = (approvalDeny!.NotResource as unknown[]).map(resolveSub);
+    // would make the loop below fail for the wrong reason. And `NotResource` may
+    // be a bare scalar rather than a list, so normalize before mapping.
+    const exceptions = listRaw(approvalDeny!.NotResource).map(resolveSub);
     const putResources = statements
       .filter((statement) => list(statement.Action).includes("ssm:PutParameter"))
       .flatMap((statement) => list(statement.Resource));
@@ -570,7 +635,7 @@ describe("slack approval infrastructure", () => {
     for (const resource of putResources) {
       expect(
         exceptions.some((pattern) => globMatches(pattern, resource)),
-        `${resource} is denied by DenyPutParameterOutsideApprovalRecords`,
+        `${resource} is denied by ParamWrite`,
       ).toBe(true);
     }
   });
@@ -1252,14 +1317,14 @@ describe("slack approval infrastructure", () => {
       ).toBe(true);
     }
 
-    // DenyPutParameterOutsideApprovalRecords is a NotResource deny: one stray
-    // resource in the same statement denies the whole call, so EVERY resource the
-    // write names has to be matched by the exception.
+    // `ParamWrite` is a NotResource deny: one stray resource in the same
+    // statement denies the whole call, so EVERY resource the write names has to
+    // be matched by the exception.
     const approvalDeny = boundary.find(
-      ({ Sid }) => Sid === "DenyPutParameterOutsideApprovalRecords",
+      ({ Sid }) => Sid === "ParamWrite",
     );
     expect(approvalDeny).toBeDefined();
-    const exceptions = (approvalDeny!.NotResource as unknown[]).map(resolveSub);
+    const exceptions = listRaw(approvalDeny!.NotResource).map(resolveSub);
     const putResources = permissions
       .filter((statement) => list(statement.actions).includes("ssm:PutParameter"))
       .flatMap((statement) => list(statement.resources));
@@ -1269,7 +1334,7 @@ describe("slack approval infrastructure", () => {
     for (const resource of putResources) {
       expect(
         exceptions.some((pattern) => globMatches(pattern, resource)),
-        `${resource} is denied by DenyPutParameterOutsideApprovalRecords`,
+        `${resource} is denied by ParamWrite`,
       ).toBe(true);
     }
     // `approvals/*` is the tightest scope SSM allows here — the claim and the
@@ -1299,7 +1364,7 @@ describe("slack approval infrastructure", () => {
         .Statement as Array<Record<string, any>>
     ).find(({ Sid }) => Sid === "PassConsolidationSchedulerRole");
     expect(pass).toBeDefined();
-    expect((pass!.Resource as unknown[]).map(resolveSub)).toContain(
+    expect(listRaw(pass!.Resource).map(resolveSub)).toContain(
       resolveSub({ "Fn::Sub": arnFor(CLEANUP_SCHEDULER_ROLE_ARN_PATTERN) }),
     );
 
@@ -1311,7 +1376,7 @@ describe("slack approval infrastructure", () => {
         .Statement as Array<Record<string, any>>
     ).find(({ Sid }) => Sid === "DenyConsolidationSchedulerRolePassToOtherServices");
     expect(deny).toBeDefined();
-    expect((deny!.Resource as unknown[]).map(resolveSub)).toContain(
+    expect(listRaw(deny!.Resource).map(resolveSub)).toContain(
       resolveSub({ "Fn::Sub": arnFor(CLEANUP_SCHEDULER_ROLE_ARN_PATTERN) }),
     );
     // Kept under the ORIGINAL Sids rather than added as new statements: both the
@@ -1354,6 +1419,374 @@ describe("slack approval infrastructure", () => {
     expect(outputs).toBeDefined();
     expect(materialize(outputs!.taskDefinitionArn)).toBe(
       "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-cleanup:1",
+    );
+  });
+
+  it("TC-SLACKAPP-161: names the artifact bucket with the ACCOUNT ID and no wildcard", async () => {
+    installGlobals("prod");
+    enable();
+    await loadAndRun();
+
+    const bucket = one("BucketV2", "Mem9DecisionArtifacts");
+    const name = String(materialize((bucket.args as any).bucket));
+    // The security property, not a style choice. S3 bucket names are a GLOBAL
+    // namespace, so a wildcard in the bucket segment of the boundary's ARN also
+    // matches a bucket an attacker creates FIRST in their own account —
+    // simulated, PutObject on such a name came back `allowed`. The account id is
+    // the disambiguating suffix a global namespace needs.
+    expect(name).toBe("mem9-audit-123456789012");
+    expect(name).not.toContain("*");
+    expect(name).toContain("123456789012");
+    // Lowercase letters, digits, and hyphens only, within S3's 63-char limit —
+    // an invalid name fails at CreateBucket, i.e. on the first deploy.
+    expect(name).toMatch(/^[a-z0-9][a-z0-9-]{1,61}[a-z0-9]$/u);
+    // NOT stage-scoped, and the stage must not leak in: one bucket serves every
+    // stage precisely so the boundary can pin an exact name. A stage segment here
+    // would put the live bucket outside the permitted ARN.
+    expect(name).not.toContain("prod");
+  });
+
+  it("TC-SLACKAPP-162: matches the bucket the DEPLOYED boundary permits, byte for byte", async () => {
+    installGlobals("prod");
+    enable();
+    await loadAndRun();
+
+    const name = String(
+      materialize((one("BucketV2", "Mem9DecisionArtifacts").args as any).bucket),
+    );
+    // The whole point of the exact name is that two files must agree. Read the
+    // operator-owned template rather than trusting that both sides were edited:
+    // a drift here is an AccessDenied at artifact-write time, AFTER the approval
+    // click has been spent, which is the one failure mode this loop must not have.
+    const boundary = boundaryStatements();
+    const scoped = boundary.find(({ Sid }) => Sid === "Resources");
+    expect(scoped).toBeDefined();
+    expect(listRaw(scoped!.NotResource).map(resolveSub)).toContain(
+      `arn:aws:s3:::${name}/*`,
+    );
+    // Both KMS context values too: the write needs GenerateDataKey under the
+    // `GenKey` deny, and the read needs Decrypt under `KmsContext`. A bucket name
+    // that matched only one of the three would break exactly one direction.
+    //
+    // These pin the BARE BUCKET ARN, not the object glob, and that asymmetry with
+    // the resource scope above is the whole point of this assertion. S3 presents
+    // the bucket ARN as `aws:s3:arn` when bucket keys are enabled (S3 user guide,
+    // "Using SSE-KMS -> Encryption context"), and `bucket/*` does not match
+    // `bucket`. The first version of this test asserted `/*` on all three sites
+    // and passed while TC-163 pinned `bucketKeyEnabled: true` — two green tests
+    // describing a combination that denies every artifact write and read after
+    // deploy. Whichever way a future edit breaks the pair, one of these two tests
+    // now fails.
+    const contextValues = boundary
+      .filter(({ Sid }) => Sid === "KmsContext" || Sid === "GenKey")
+      .map((statement) =>
+        resolveSub(
+          statement.Condition?.StringNotLikeIfExists?.[
+            "kms:EncryptionContext:aws:s3:arn"
+          ],
+        ),
+      );
+    expect(contextValues).toHaveLength(2);
+    for (const value of contextValues) {
+      expect(value).toBe(`arn:aws:s3:::${name}`);
+      expect(value).not.toMatch(/\/\*$/u);
+    }
+  });
+
+  it("TC-SLACKAPP-163: encrypts the artifact with SSE-KMS and bucket keys on", async () => {
+    installGlobals("prod");
+    enable();
+    await loadAndRun();
+
+    const bucketName = String(
+      materialize((one("BucketV2", "Mem9DecisionArtifacts").args as any).bucket),
+    );
+    const encryption = one(
+      "BucketServerSideEncryptionConfigurationV2",
+      "Mem9DecisionArtifactsEncryption",
+    ).args as any;
+    // Addressed at the SAME bucket. A sub-resource pointed elsewhere leaves this
+    // bucket on the provider default, which is SSE-S3 — encrypted, but with a key
+    // the boundary's encryption-context denies say nothing about.
+    expect(String(materialize(encryption.bucket))).toBe(bucketName);
+    const rule = encryption.rules[0];
+    expect(rule.applyServerSideEncryptionByDefault.sseAlgorithm).toBe("aws:kms");
+    expect(rule.applyServerSideEncryptionByDefault.kmsMasterKeyId).toBe(
+      "alias/aws/s3",
+    );
+    // Bucket keys change WHICH ARN S3 presents as `aws:s3:arn`: the bucket ARN
+    // with them on, the object ARN with them off (S3 user guide, "Using SSE-KMS ->
+    // Encryption context"). So this flag and the boundary's two context pins must
+    // agree, and TC-162 asserts the bucket-ARN half. Asserted from both sides
+    // because the mismatch is invisible until deploy: the earlier revision of this
+    // suite had bucket keys on here and `/*` there, both tests green, and every
+    // artifact write and read would have failed with a KMS AccessDenied.
+    expect(rule.bucketKeyEnabled).toBe(true);
+    // Pin the coupling directly, so flipping the flag alone turns THIS test red
+    // rather than only the other one.
+    const contextArn = boundaryStatements()
+      .filter(({ Sid }) => Sid === "KmsContext" || Sid === "GenKey")
+      .map((statement) =>
+        resolveSub(
+          statement.Condition?.StringNotLikeIfExists?.[
+            "kms:EncryptionContext:aws:s3:arn"
+          ],
+        ),
+      );
+    expect(contextArn).toEqual([
+      `arn:aws:s3:::${bucketName}`,
+      `arn:aws:s3:::${bucketName}`,
+    ]);
+  });
+
+  it("TC-SLACKAPP-164: expires the artifact on the same 72h bound as the approval", async () => {
+    installGlobals("prod");
+    enable();
+    await loadAndRun();
+
+    const { DECISION_ARTIFACT_TTL_DAYS } = await loadModule();
+    const bucketName = String(
+      materialize((one("BucketV2", "Mem9DecisionArtifacts").args as any).bucket),
+    );
+    const lifecycle = one(
+      "BucketLifecycleConfigurationV2",
+      "Mem9DecisionArtifactsLifecycle",
+    ).args as any;
+    expect(String(materialize(lifecycle.bucket))).toBe(bucketName);
+    const rule = lifecycle.rules[0];
+    expect(rule.status).toBe("Enabled");
+    // 3 days, matching #123's 72h offer TTL rather than an independently chosen
+    // retention: past that the approval cannot be clicked, so the artifact could
+    // not be replayed by anything and holding memory ids longer serves no purpose.
+    expect(rule.expiration.days).toBe(3);
+    expect(DECISION_ARTIFACT_TTL_DAYS).toBe(3);
+    // Failed multipart writes are NOT covered by the expiration rule and would
+    // accumulate invisibly.
+    expect(rule.abortIncompleteMultipartUpload.daysAfterInitiation).toBe(1);
+  });
+
+  it("TC-SLACKAPP-165: blocks public access and denies non-TLS requests", async () => {
+    installGlobals("prod");
+    enable();
+    await loadAndRun();
+
+    const bucketName = String(
+      materialize((one("BucketV2", "Mem9DecisionArtifacts").args as any).bucket),
+    );
+    const block = one(
+      "BucketPublicAccessBlock",
+      "Mem9DecisionArtifactsPublicAccess",
+    ).args as any;
+    expect(String(materialize(block.bucket))).toBe(bucketName);
+    // All four, because they gate different paths: two cover ACLs and two cover
+    // bucket policies, and three-of-four leaves a way to make the object public.
+    expect(block.blockPublicAcls).toBe(true);
+    expect(block.blockPublicPolicy).toBe(true);
+    expect(block.ignorePublicAcls).toBe(true);
+    expect(block.restrictPublicBuckets).toBe(true);
+
+    const policy = JSON.parse(
+      String(
+        materialize(
+          (one("BucketPolicy", "Mem9DecisionArtifactsPolicy").args as any).policy,
+        ),
+      ),
+    );
+    // Exactly one statement, and it must DENY. A bucket policy that granted
+    // anything would widen who can reach the artifact beyond the two identity
+    // policies that are supposed to be the only way in.
+    expect(policy.Statement).toHaveLength(1);
+    const [statement] = policy.Statement;
+    expect(statement.Effect).toBe("Deny");
+    expect(statement.Condition).toEqual({
+      Bool: { "aws:SecureTransport": "false" },
+    });
+    // Both ARN forms: bucket-level operations do not match the `/*` form, so a
+    // policy naming only the objects leaves ListBucket reachable over plain HTTP.
+    expect(statement.Resource).toEqual([
+      `arn:aws:s3:::${bucketName}`,
+      `arn:aws:s3:::${bucketName}/*`,
+    ]);
+  });
+
+  it("TC-SLACKAPP-166: retains the artifact bucket when a stage is torn down", async () => {
+    installGlobals("prod");
+    enable();
+    await loadAndRun();
+
+    const bucket = one("BucketV2", "Mem9DecisionArtifacts").args as any;
+    // The bucket's name is account-scoped, so EVERY stage — including each PR's
+    // preview stage — resolves to the same bucket. A preview teardown that
+    // deleted it would take prod's audit trail of what was deleted with it.
+    expect(bucket.__opts?.retainOnDelete).toBe(true);
+    // And `forceDestroy` must stay off, which is the second half of the same
+    // guarantee: it would empty the bucket even where the bucket survives.
+    expect(bucket.forceDestroy).toBe(false);
+  });
+
+  it("TC-SLACKAPP-167: puts the STAGE in the key, not the bucket name", async () => {
+    const { decisionArtifactKey } = await loadModule();
+    // Cross-stage separation moved from the bucket name to the key prefix when the
+    // bucket became account-scoped. It is therefore the key that must carry the
+    // stage — if it did not, two stages would write the same object and a preview
+    // run could overwrite prod's reviewed decision list.
+    expect(decisionArtifactKey("prod", "run-1")).toBe(
+      "decisions/prod/run-1.json",
+    );
+    expect(decisionArtifactKey("pr-42", "run-1")).toBe(
+      "decisions/pr-42/run-1.json",
+    );
+    expect(decisionArtifactKey("prod", "run-1")).not.toBe(
+      decisionArtifactKey("pr-42", "run-1"),
+    );
+    // The real hash carries a `:`, and the dash substitution is the part of this
+    // function the stage assertions above cannot see: `run-1` has no colon, so
+    // dropping the `.replace` left every one of them green. Asserted here because a
+    // key that kept the colon is legal in S3 and then unquotable in the `s3://` line
+    // an operator pastes — a divergence from `claimParameterName`'s identical
+    // treatment that only shows up at the console.
+    expect(decisionArtifactKey("prod", "sha256:abc")).toBe(
+      "decisions/prod/sha256-abc.json",
+    );
+  });
+
+  it("TC-SLACKAPP-181: passes the artifact bucket to the container as a plain environment entry", async () => {
+    installGlobals("prod");
+    enable();
+    await loadAndRun();
+
+    const taskArgs = materialize(one("Task", "Mem9Cleanup").args) as
+      Record<string, any>;
+    const bucketName = String(
+      materialize((one("BucketV2", "Mem9DecisionArtifacts").args as any).bucket),
+    );
+    // The container script gates the artifact on this variable's PRESENCE
+    // (TC-SLACKAPP-179/180), so the two files must agree on the name and on the
+    // value. A drift in the name leaves the scan silently writing the id-only
+    // record — the pre-#150 shape — with no error anywhere.
+    expect(taskArgs.environment.MEM9_DECISION_ARTIFACT_BUCKET).toBe(bucketName);
+    // `environment`, not `ssm`: a bucket name is not a secret, and the apply half's
+    // role holds `ssm:GetParameters` under `approvals/*` only — a secret-style
+    // reference would put the artifact's location behind a grant it does not have.
+    expect(taskArgs.ssm?.MEM9_DECISION_ARTIFACT_BUCKET).toBeUndefined();
+  });
+
+  it("TC-SLACKAPP-182: scopes the task's artifact grant to its OWN stage prefix", async () => {
+    installGlobals("pr-42");
+    enable();
+    await loadAndRun();
+
+    const { decisionArtifactKeyPrefix } = await loadModule();
+    const taskArgs = materialize(one("Task", "Mem9Cleanup").args) as
+      Record<string, any>;
+    const permissions = taskArgs.permissions as Array<Record<string, any>>;
+    const objectResources = permissions
+      .filter((statement) => list(statement.actions).includes("s3:PutObject"))
+      .flatMap((statement) => list(statement.resources));
+    // THIS is where cross-stage isolation lives. The boundary pins the bucket but
+    // cannot afford a per-stage key condition (6144 is a hard cap with one boundary
+    // per role), so the identity policy carries the stage and the boundary bounds
+    // only the maximum. Without the stage segment a preview stage could read — and
+    // overwrite — prod's reviewed decision list, since every stage shares one bucket.
+    expect(objectResources).toEqual(["arn:aws:s3:::mem9-audit-123456789012/decisions/pr-42/*"]);
+    // Built from the same exported helper the writer's key comes from, so a change
+    // to the layout cannot move one side only.
+    expect(decisionArtifactKeyPrefix("pr-42")).toBe("decisions/pr-42/");
+    expect(objectResources[0]).toContain(decisionArtifactKeyPrefix("pr-42"));
+    // The trailing slash is load-bearing, not formatting: `decisions/pr-4*` also
+    // matches `decisions/pr-42/...`, so a prefix without the separator would grant
+    // this stage a sibling stage's list.
+    expect(objectResources[0]).not.toContain("decisions/pr-42*");
+    expect(objectResources[0]).toMatch(/\/decisions\/pr-42\/\*$/u);
+    // No DELETE (the lifecycle rule expires the artifact; a task that could delete
+    // it could destroy the audit trail of what it deleted) and no ListBucket (the
+    // key is derived from the hash, so nothing needs to enumerate).
+    const s3Actions = permissions
+      .flatMap((statement) => list(statement.actions))
+      .filter((action) => action.startsWith("s3:"));
+    expect(s3Actions.sort()).toEqual(["s3:GetObject", "s3:PutObject"]);
+  });
+
+  it("TC-SLACKAPP-183: keeps the task's artifact grant inside the DEPLOYED boundary", async () => {
+    installGlobals("prod");
+    enable();
+    await loadAndRun();
+
+    const taskArgs = materialize(one("Task", "Mem9Cleanup").args) as
+      Record<string, any>;
+    const permissions = taskArgs.permissions as Array<Record<string, any>>;
+    const boundary = boundaryStatements();
+
+    // A grant outside the boundary is not a smaller grant — it is an AccessDenied
+    // after the scan has spent its reasoning passes, or after the approval click has
+    // been spent on the apply half. Measured against the template the operator
+    // deploys, exactly as TC-SLACKAPP-153 does for the parameter write.
+    const s3Statements = permissions.filter((statement) =>
+      list(statement.actions).some((action) => action.startsWith("s3:")),
+    );
+    const scoped = boundary.find(({ Sid }) => Sid === "Resources");
+    expect(scoped).toBeDefined();
+    const exceptions = listRaw(scoped!.NotResource).map(resolveSub);
+    // `Resources` is a NotResource deny, so EVERY resource the grant names must be
+    // matched by an exception — one stray entry denies the whole call.
+    for (const resource of s3Statements.flatMap((statement) => list(statement.resources))) {
+      expect(
+        exceptions.some((pattern) => globMatches(pattern, resource)),
+        `${resource} is denied by the boundary's Resources statement`,
+      ).toBe(true);
+    }
+
+    // The KMS half, whose failure mode is the same and whose conditions must MATCH
+    // rather than merely be admitted: `ViaService` has to be s3 (the `KmsVia` deny
+    // enumerates the permitted services) and the encryption context has to be the
+    // BARE bucket ARN, because bucket keys are on (TC-SLACKAPP-163).
+    const kms = permissions.filter((statement) =>
+      list(statement.actions).some((action) => action.startsWith("kms:")),
+    );
+    expect(kms).toHaveLength(1);
+    const conditions = new Map(
+      (kms[0].conditions as Array<Record<string, any>>).map((condition) => [
+        String(condition.variable),
+        list(condition.values),
+      ]),
+    );
+    expect(conditions.get("kms:ViaService")).toEqual(["s3.ap-northeast-1.amazonaws.com"]);
+    const contextValues = conditions.get("kms:EncryptionContext:aws:s3:arn");
+    expect(contextValues).toEqual(["arn:aws:s3:::mem9-audit-123456789012"]);
+
+    // The grant's ViaService must be one the `KmsVia` deny permits, and its context
+    // must satisfy both `KmsContext` (the Decrypt half) and `GenKey` (the write
+    // half). All three read from the deployed template, so a boundary edit that
+    // drops the s3 entry or re-adds a `/*` suffix turns this red.
+    const kmsVia = boundary.find(({ Sid }) => Sid === "KmsVia");
+    expect(
+      listRaw(kmsVia!.Condition.StringNotEqualsIfExists["kms:ViaService"])
+        .map((value) => resolveSub(value).replace("${AWS::URLSuffix}", "amazonaws.com")),
+    ).toContain("s3.ap-northeast-1.amazonaws.com");
+    for (const sid of ["KmsContext", "GenKey"]) {
+      const statement = boundary.find((entry) => entry.Sid === sid);
+      const pattern = resolveSub(
+        statement!.Condition.StringNotLikeIfExists["kms:EncryptionContext:aws:s3:arn"],
+      );
+      expect(
+        globMatches(pattern, contextValues![0]),
+        `the artifact context is denied by ${sid}`,
+      ).toBe(true);
+    }
+
+    // And every action, S3 and KMS alike, has to be inside the action ceiling —
+    // `s3:AbortMultipartUpload` notably is NOT, which is why the writer uses a
+    // single PutObject rather than lib-storage's multipart Upload.
+    const ceiling = boundary.find(({ NotAction }) => NotAction);
+    const admitted = list(ceiling!.NotAction);
+    for (const action of [...s3Statements, ...kms].flatMap((s) => list(s.actions))) {
+      expect(
+        admitted.some((pattern) => globMatches(pattern, action)),
+        `${action} is outside the workload boundary action ceiling`,
+      ).toBe(true);
+    }
+    expect(admitted.some((pattern) => globMatches(pattern, "s3:AbortMultipartUpload"))).toBe(
+      false,
     );
   });
 

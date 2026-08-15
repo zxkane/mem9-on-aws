@@ -382,6 +382,41 @@ declare namespace aws {
     }
   }
 
+  // The decision artifact's bucket (#150). Typed as classes with an `id`, because
+  // the four hardening resources all key off `bucket: artifactBucket.id` — a
+  // looser `Record<string, unknown>` shim would let a typo there through, and a
+  // sub-resource pointed at the wrong bucket is a bucket that silently keeps the
+  // provider default (unencrypted, no expiry) instead of failing the build.
+  namespace s3 {
+    interface BucketV2Args {
+      bucket: Input<string>;
+      forceDestroy?: Input<boolean>;
+      tags?: Record<string, Input<string>>;
+    }
+    class BucketV2 {
+      constructor(
+        name: string,
+        args: BucketV2Args,
+        opts?: { retainOnDelete?: boolean },
+      );
+      readonly id: Output<string>;
+      readonly arn: Output<string>;
+      readonly bucket: Output<string>;
+    }
+    class BucketPublicAccessBlock {
+      constructor(name: string, args: Record<string, unknown>, opts?: unknown);
+    }
+    class BucketServerSideEncryptionConfigurationV2 {
+      constructor(name: string, args: Record<string, unknown>, opts?: unknown);
+    }
+    class BucketLifecycleConfigurationV2 {
+      constructor(name: string, args: Record<string, unknown>, opts?: unknown);
+    }
+    class BucketPolicy {
+      constructor(name: string, args: Record<string, unknown>, opts?: unknown);
+    }
+  }
+
   namespace ssm {
     interface ParameterArgs {
       name: Input<string>;
@@ -555,6 +590,21 @@ declare namespace sst {
       effect?: Input<"allow" | "deny">;
       actions: Input<string>[];
       resources: Input<Input<string>[]>;
+      // Threaded into `iam.getPolicyDocumentOutput` by SST's
+      // `createTaskRole` (.sst/platform/src/components/aws/fargate.ts), where
+      // `FargateArgs.permissions` is literally `FunctionArgs["permissions"]` — so
+      // this mirrors a field the upstream type has always had rather than adding
+      // one. #150's artifact grant needs it: `kms:Decrypt`/`kms:GenerateDataKey`
+      // against `alias/aws/s3` must be `Resource: "*"` (the alias resolves to a
+      // per-account key id this stack cannot name without a lookup), which makes
+      // the conditions the ONLY thing scoping it.
+      conditions?: Input<
+        Input<{
+          test: Input<string>;
+          variable: Input<string>;
+          values: Input<Input<string>[]>;
+        }>[]
+      >;
     }
     interface ServiceArgs {
       cluster: Cluster;

@@ -104,8 +104,8 @@ resource, and Mantle projects are regional (different ids per region):
   inject `LLM_PROXY_RESPONSES_OPENAI_PROJECT`. Unset → no new grant; prod
   calls to the responses route would 403 (documented, fail-loud).
 - **Workload boundary (operator-owned)**: new optional parameter
-  `OpenAiBedrockProjectArn`; when non-empty it joins the
-  `DenyProjectRuntimeOutsideResources` NotResource list via `Fn::If`.
+  `OpenAiBedrockProjectArn`; when non-empty it joins the `Resources` statement's
+  NotResource list via `Fn::If`.
   Rollout = operator re-runs `deploy-workload-permissions-boundary.sh`
   (same out-of-band ownership as today).
 - **Mantle project in the Responses region**: created with the existing

@@ -15,6 +15,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -214,23 +215,51 @@ function runFixture({
   facadeError = "",
   noisyStderr = "",
   expiryBehavior = "refuse",
+  tamperBehavior = "refuse",
+  accountId = "123456789012",
+  taskDef = "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-cleanup:7",
+  containerName = "Mem9Cleanup",
+  logGroup = "/sst/cluster/mem9-pr-123-a1b2c3/Mem9Cleanup-d4e5f6",
+  logPrefix = "mem9",
+  replayLines = "1",
+  failingJqFilter = "",
+  claimReadError = "",
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "mem9-slack-e2e-"));
   temporaryPaths.push(directory);
   const bin = join(directory, "bin");
   const calls = join(directory, "calls.jsonl");
+  const s3Directory = join(directory, "s3");
+  const tmpRoot = join(directory, "tmp");
   mkdirSync(bin);
+  mkdirSync(s3Directory);
+  mkdirSync(tmpRoot);
 
-  const aws = join(bin, "aws");
-  writeFileSync(
-    aws,
+  /**
+   * Write an executable stub onto the fixture's PATH.
+   *
+   * The `chmodSync` after the `mode` is not redundant: `writeFileSync`'s mode is
+   * masked by the process umask, so under a 0o077 umask the file lands 0o700 —
+   * still executable by this test, but the explicit chmod is what keeps that from
+   * depending on the runner's umask at all. Every stub needs both, which is the
+   * whole reason this is a helper rather than five call sites.
+   */
+  const stub = (name, source) => {
+    const path = join(bin, name);
+    writeFileSync(path, source, { mode: 0o755 });
+    chmodSync(path, 0o755);
+    return path;
+  };
+
+  stub(
+    "aws",
     // The shebang is the ABSOLUTE interpreter, never `env node`: this fixture
     // prepends `bin` to PATH (below), so `env node` would resolve to any file
     // named `node` in `bin` — and a stub that re-invokes `node` then forks
     // forever. That is not hypothetical; it once spawned ~70k processes and
     // exhausted the systemd user slice's TasksMax.
     `#!${process.execPath}
-import { appendFileSync, existsSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 appendFileSync(process.env.MOCK_CALLS, JSON.stringify(["aws", ...args]) + "\\n");
 const option = (name) => {
@@ -278,11 +307,31 @@ if (command === "ssm get-parameter") {
   } else if (name.endsWith("/cleanup/cluster-name")) {
     if (!process.env.MOCK_CLUSTER) notFound(name);
     console.log(process.env.MOCK_CLUSTER);
+  } else if (name.endsWith("/cleanup/task-def-arn")) {
+    if (!process.env.MOCK_TASK_DEF) notFound(name);
+    console.log(process.env.MOCK_TASK_DEF);
   } else if (name.includes("/approvals/approved-")) {
     // Stateful, like a real stage: no claim exists until the signed click
     // creates one. A fake that served it unconditionally would make the
     // pre-click "no record was written" assertion fail against a correct script.
-    if (!existsSync(process.env.MOCK_CLICKED) || !process.env.MOCK_CLAIM) {
+    //
+    // And served under ONE name — the dashed hash of the record the click was
+    // answered against, which is what \`claimParameterName(prefix, offered.hash)\`
+    // keys the real claim on. A fake that answered every \`approved-*\` name would
+    // hide the mistake this models: a click accepted against a TAMPERED record
+    // writes its claim under the tampered hash, so a harness watching only the
+    // reviewed name would report "no claim" while an apply was running (#150).
+    // A read that FAILS rather than answering. Distinct from every knob above
+    // because the failure has to land on the claim reads specifically: those are
+    // the ones whose "absent" answer is a PASS condition, so a collapsed
+    // classifier turns a broken read into a green run.
+    if (process.env.MOCK_CLAIM_READ_ERROR) {
+      readError(name, process.env.MOCK_CLAIM_READ_ERROR);
+    }
+    const claimedHash = existsSync(process.env.MOCK_CLICKED)
+      ? readFileSync(process.env.MOCK_CLICKED, "utf8").trim()
+      : "";
+    if (!claimedHash || !process.env.MOCK_CLAIM || !name.endsWith(claimedHash)) {
       notFound(name);
     }
     console.log(process.env.MOCK_CLAIM);
@@ -303,6 +352,65 @@ if (command === "ssm get-parameter") {
   process.exit(0);
 } else if (command === "ssm delete-parameter") {
   process.exit(0);
+} else if (command === "sts get-caller-identity") {
+  // The artifact bucket is NOT an SSM parameter — it is an environment entry on
+  // the task definition — so the harness derives \`mem9-audit-<account>\` from the
+  // caller's own identity. A malformed value here is a fixture knob because the
+  // script has to refuse it: an empty or non-numeric account would build a bucket
+  // name that S3 rejects, and the resulting upload failure would read as a
+  // permissions problem.
+  console.log(process.env.MOCK_ACCOUNT_ID ?? "");
+} else if (command === "s3api put-object") {
+  // The artifact objects. Recorded rather than stored, and the BODY is read from
+  // the path the script passed: the assertions are about what the script
+  // serialized, and a fake that only logged the flags could not tell a reviewed
+  // artifact from its tampered twin.
+  const body = option("--body");
+  writeFileSync(
+    \`\${process.env.MOCK_S3_DIR}/\${(option("--key") ?? "").replace(/\\//gu, "_")}\`,
+    body ? readFileSync(body) : "",
+  );
+  // No --server-side-encryption is EXPECTED here, so it is not defaulted or
+  // validated: the bucket's own rule applies (SSE-KMS, bucket keys on), and naming
+  // the key would present an encryption context the apply task's conditioned
+  // kms:Decrypt does not match.
+  process.exit(0);
+} else if (command === "s3api delete-object") {
+  process.exit(0);
+} else if (command === "ecs describe-task-definition") {
+  // The log group and stream prefix the replay assertion needs, shaped like SST's
+  // real output: hash-suffixed names nobody can compute by hand, which is why the
+  // script reads them from here (#137) rather than assuming a \`/sst/...\` path.
+  console.log(
+    JSON.stringify({
+      taskDefinition: {
+        containerDefinitions: [
+          {
+            name: process.env.MOCK_CONTAINER_NAME,
+            logConfiguration: {
+              options: {
+                "awslogs-group": process.env.MOCK_LOG_GROUP,
+                "awslogs-stream-prefix": process.env.MOCK_LOG_PREFIX,
+              },
+            },
+          },
+        ],
+      },
+    }),
+  );
+} else if (command === "logs filter-log-events") {
+  // \`--query length(events)\` — so this answers a COUNT, which is all the script
+  // reads. The line itself names the bucket, and the bucket name carries the
+  // account id, so a harness that printed a match would leak it into public CI
+  // logs.
+  //
+  // The pattern is asserted, not ignored: a script that queried for the wrong
+  // phrase would find nothing on a healthy stage and report a re-classification
+  // that never happened.
+  const matched = (option("--filter-pattern") ?? "").includes(
+    "reviewed decision(s) from s3://",
+  );
+  console.log(matched ? (process.env.MOCK_REPLAY_LINES ?? "0") : "0");
 } else if (command === "ecs describe-tasks") {
   const query = option("--query") ?? "";
   // The cluster is asserted, not ignored: the script must pass the name it read
@@ -324,9 +432,7 @@ if (command === "ssm get-parameter") {
   process.exit(2);
 }
 `,
-    { mode: 0o755 },
   );
-  chmodSync(aws, 0o755);
 
   // The fake `curl` decides which POST it is by the SIGNATURE header, exactly as
   // the real endpoint does: that is the one thing this E2E exists to exercise.
@@ -337,9 +443,8 @@ if (command === "ssm get-parameter") {
   // than answering every signed click alike is what gives the expiry step teeth: a
   // fake that always accepted would pass the same whether the script stamped
   // `issuedAt` or not, which is the exact regression this exists to catch.
-  const curl = join(bin, "curl");
-  writeFileSync(
-    curl,
+  stub(
+    "curl",
     `#!${process.execPath}
 import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
@@ -367,6 +472,30 @@ const offered = existsSync(process.env.MOCK_OFFERED)
   : {};
 const issuedAtMs = Date.parse(offered.issuedAt ?? "");
 const expired = !Number.isFinite(issuedAtMs) || Date.now() - issuedAtMs > OFFER_TTL_MS;
+// The hash comparison \`loadOffered\` makes BEFORE the expiry check: the button's
+// value against the current record's. This is the guard the tampered-artifact step
+// exercises, and modelling it is what gives that step teeth — a fake that answered
+// every signed click alike would pass whether the façade compared hashes or not,
+// which is precisely the regression that would let an unreviewed absorbed id be
+// deleted (#150).
+//
+// Read out of the POSTed body rather than taken from a knob, so a script that
+// clicked the TAMPERED hash instead of the reviewed one would find itself accepted
+// and fail the ordering assertions instead of passing vacuously.
+const body_ = args[args.indexOf("--data-binary") + 1] ?? "";
+const clicked = (() => {
+  try {
+    const payload = new URLSearchParams(body_).get("payload") ?? "{}";
+    return JSON.parse(payload).actions?.[0]?.value ?? "";
+  } catch {
+    return "";
+  }
+})();
+// Ordered as the handler orders them: stale-hash BEFORE expiry, because an expired
+// click must be told it expired rather than that the list was regenerated, and a
+// fake with the comparison the other way round would let the script's
+// \`grep -qi 'expire'\` assertion pass on a hash mismatch.
+const staleHash = typeof offered.hash === "string" && offered.hash !== clicked;
 // How this fake facade answers a click against an expired list. \`refuse\` is the
 // real handler; the other three are the ways it could be broken, and each has to
 // be REACHABLE for the script's expiry step to be worth anything — \`accept\` is a
@@ -375,7 +504,13 @@ const expired = !Number.isFinite(issuedAtMs) || Date.now() - issuedAtMs > OFFER_
 // answers the refusal with a 5xx, which Slack renders as its own "operation
 // failed" and shows the operator no reason at all.
 const behavior = process.env.MOCK_EXPIRY_BEHAVIOR || "refuse";
-const refused = expired && behavior !== "accept";
+// How this fake facade answers a click whose hash does not match the record.
+// \`refuse\` is the real handler; \`accept\` is one with no comparison at all, which is
+// the tampered-artifact regression, and \`cosmetic\` is one that says "regenerated"
+// and claims the approval anyway — so an apply runs against a list nobody reviewed.
+const tamperBehavior = process.env.MOCK_TAMPER_BEHAVIOR || "refuse";
+const refusedForHash = staleHash && tamperBehavior !== "accept";
+const refused = refusedForHash || (expired && behavior !== "accept");
 // Slack renders a non-200 as its own "operation failed" and shows the operator
 // nothing, so EVERY refusal the real handler makes goes through \`reply()\` — a 200
 // with an ephemeral body. The refusal is in the body, never the status.
@@ -387,14 +522,20 @@ const refused = expired && behavior !== "accept";
 let status;
 if (invalid) status = process.env.MOCK_BAD_STATUS;
 else if (!refused) status = process.env.MOCK_APPROVE_STATUS;
+else if (refusedForHash) status = tamperBehavior === "error" ? "500" : "200";
 else status = behavior === "error" ? "500" : "200";
+// The refusal texts are the handler's own, in the handler's precedence: a stale
+// hash reads "regenerated" and an expired list reads "expire". The script asserts
+// the specific word for each case, so a fake that answered one generic refusal
+// would let a script pass while testing the wrong guard.
+const refusalText = refusedForHash
+  ? "That list has been regenerated since it was posted. Nothing was applied."
+  : "That list was issued a while ago and approvals expire after 72h. Nothing was applied.";
 const body = invalid
   ? "unauthorized"
   : JSON.stringify({
       response_type: "ephemeral",
-      text: refused
-        ? "That list was issued a while ago and approvals expire after 72h. Nothing was applied."
-        : "Apply started for 1 memories.",
+      text: refused ? refusalText : "Apply started for 1 memories.",
     });
 const out = option("-o");
 if (out) writeFileSync(out, body);
@@ -402,19 +543,69 @@ if (out) writeFileSync(out, body);
 // only when the handler did not refuse. \`cosmetic\` claims despite refusing, which
 // is the whole point of it.
 const accepted = !invalid && !refused && status === "200";
-const claimedDespiteRefusing = !invalid && refused && behavior === "cosmetic";
+const claimedDespiteRefusing =
+  !invalid &&
+  refused &&
+  (refusedForHash ? tamperBehavior === "cosmetic" : behavior === "cosmetic");
 if (accepted || claimedDespiteRefusing) {
-  writeFileSync(process.env.MOCK_CLICKED, "1");
+  // The dashed hash of the record this click was answered AGAINST, not the button's
+  // — that is what \`claimParameterName(prefix, offered.hash)\` keys the real claim
+  // on, so an accepted tamper is discoverable only under the tampered name.
+  writeFileSync(
+    process.env.MOCK_CLICKED,
+    String(offered.hash ?? clicked).replace(/:/gu, "-"),
+  );
 }
 process.stdout.write(status);
 `,
-    { mode: 0o755 },
   );
-  chmodSync(curl, 0o755);
 
-  const sleep = join(bin, "sleep");
-  writeFileSync(sleep, "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
-  chmodSync(sleep, 0o755);
+  stub("sleep", "#!/usr/bin/env bash\nexit 0\n");
+
+  // `mktemp` is stubbed unconditionally — into THIS case's directory and recording
+  // every path it hands out, which is what lets a case assert that none of them
+  // outlived the run. It stays a real temp file with a real unique name, so the
+  // script cannot tell the difference; the only change is where it lands and that
+  // the path is logged. TMPDIR alone would not do: the paths would be knowable but
+  // not enumerable, and `mktemp` is called in `ssm_value` on every read too.
+  const mktempLog = join(directory, "mktemp.log");
+  stub(
+    "mktemp",
+    `#!${process.execPath}
+import { appendFileSync, mkdtempSync } from "node:fs";
+import { join } from "node:path";
+const path = join(mkdtempSync(process.env.MOCK_TMP_ROOT + "/t-"), "body");
+appendFileSync(process.env.MOCK_MKTEMP_LOG, path + "\\n");
+// Created empty, exactly as \`mktemp\` leaves it.
+appendFileSync(path, "");
+process.stdout.write(path + "\\n");
+`,
+  );
+
+  // A `jq` that fails on ONE named filter and delegates everything else to the real
+  // binary. Used to place an exit at a chosen point in the script without editing
+  // it — the alternative, asserting on source text, could not tell a trap that runs
+  // from one that is merely written down.
+  if (failingJqFilter) {
+    stub(
+      "jq",
+      `#!${process.execPath}
+import { spawnSync } from "node:child_process";
+import { readFileSync } from "node:fs";
+const args = process.argv.slice(2);
+if (args.includes(process.env.MOCK_FAILING_JQ_FILTER)) {
+  console.error("jq: error: simulated failure for " + process.env.MOCK_FAILING_JQ_FILTER);
+  process.exit(5);
+}
+// stdin is a here-string in every call the script makes, so it must be forwarded.
+const stdin = readFileSync(0);
+const real = spawnSync("/usr/bin/jq", args, { input: stdin, encoding: "buffer" });
+if (real.stdout) process.stdout.write(real.stdout);
+if (real.stderr) process.stderr.write(real.stderr);
+process.exit(real.status ?? 1);
+`,
+    );
+  }
 
   const result = spawnSync("bash", [script], {
     encoding: "utf8",
@@ -425,7 +616,21 @@ process.stdout.write(status);
       // Where the fake `aws` records the seeded offered record and the fake `curl`
       // reads it back, standing in for the SSM parameter both really use.
       MOCK_OFFERED: join(directory, "offered.json"),
+      // Where the fake `s3api` lands the uploaded artifacts, so a case can read
+      // back the exact bytes the script serialized.
+      MOCK_S3_DIR: s3Directory,
+      MOCK_TMP_ROOT: tmpRoot,
+      MOCK_MKTEMP_LOG: mktempLog,
+      MOCK_FAILING_JQ_FILTER: failingJqFilter,
+      MOCK_CLAIM_READ_ERROR: claimReadError,
       MOCK_EXPIRY_BEHAVIOR: expiryBehavior,
+      MOCK_TAMPER_BEHAVIOR: tamperBehavior,
+      MOCK_ACCOUNT_ID: accountId,
+      MOCK_TASK_DEF: taskDef,
+      MOCK_CONTAINER_NAME: containerName,
+      MOCK_LOG_GROUP: logGroup,
+      MOCK_LOG_PREFIX: logPrefix,
+      MOCK_REPLAY_LINES: replayLines,
       MOCK_FACADE: facade,
       MOCK_SECRET: secret,
       MOCK_BAD_STATUS: badSignatureStatus,
@@ -450,7 +655,27 @@ process.stdout.write(status);
     .split("\n")
     .filter(Boolean)
     .map((line) => JSON.parse(line));
-  return { callRecords, result, output: `${result.stdout}${result.stderr}` };
+  // The uploaded objects, keyed by their S3 key with slashes flattened — the
+  // artifacts a case parses to assert what was actually serialized.
+  const uploads = Object.fromEntries(
+    readdirSync(s3Directory).map((name) => [
+      name,
+      readFileSync(join(s3Directory, name), "utf8"),
+    ]),
+  );
+  // Every path the stubbed `mktemp` handed out. `ssm_value`'s own scratch files are
+  // in here too and it removes them itself, so a case asserting "none survived"
+  // covers those as a free side-benefit.
+  const temporaryBodies = (existsSync(mktempLog) ? readFileSync(mktempLog, "utf8") : "")
+    .split("\n")
+    .filter(Boolean);
+  return {
+    callRecords,
+    uploads,
+    result,
+    temporaryBodies,
+    output: `${result.stdout}${result.stderr}`,
+  };
 }
 
 /** The claim the callback writes when it wins and RunTask succeeds. */
@@ -470,15 +695,15 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
     const { callRecords, result, output } = runFixture({ claim: claimWith() });
     expect(result.status, output).toBe(0);
 
-    // Three POSTs: the invalid signature, the expired list (TC-SLACKAPP-155), and
-    // the live click.
+    // Four POSTs: the invalid signature, the expired list (TC-SLACKAPP-155), the
+    // tampered artifact (TC-SLACKAPP-208), and the live click.
     const curls = callRecords.filter(([tool]) => tool === "curl");
-    expect(curls).toHaveLength(3);
+    expect(curls).toHaveLength(4);
 
     // The INVALID signature goes first, so "no record" is asserted before the
     // valid click creates one. Reversed, the 401 case would have to assert the
     // absence of a record that already exists, which nothing can do.
-    const [bad, , good] = curls;
+    const [bad, , , good] = curls;
     expect(bad.join(" ")).toMatch(/x-slack-signature:\s*v0=deadbeef/iu);
     expect(good.join(" ")).toMatch(/x-slack-signature:\s*v0=[0-9a-f]{64}/u);
 
@@ -512,14 +737,26 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
     expect(describes.length).toBeGreaterThanOrEqual(1);
     expect(describes.some((c) => c.join(" ").includes("task-abc"))).toBe(true);
 
-    // Both parameters are removed, so a rerun is not blocked by its own leftovers
-    // (the offered record is overwritten, but the claim is written with
+    // Every parameter is removed, so a rerun is not blocked by its own leftovers
+    // (the offered record is overwritten, but a claim is written with
     // Overwrite:false and would make the second run's click a losing claim).
+    // THREE names now: the offer, the reviewed claim, and the tampered claim — the
+    // last because an accepted tamper would write under its own hash, and a leftover
+    // there would silently disarm the next run's tampered-artifact step.
     const deletes = callRecords.filter(
       ([tool, service, operation]) =>
         tool === "aws" && service === "ssm" && operation === "delete-parameter",
     );
-    expect(deletes).toHaveLength(2);
+    expect(deletes).toHaveLength(3);
+
+    // And both artifact objects, so a torn-down preview stage leaves no readable
+    // list behind — the tampered one especially, since it names an id no operator
+    // reviewed.
+    const objectDeletes = callRecords.filter(
+      ([tool, service, operation]) =>
+        tool === "aws" && service === "s3api" && operation === "delete-object",
+    );
+    expect(objectDeletes).toHaveLength(2);
   });
 
   it("TC-SLACKAPP-090 the secret never reaches the output, and never an argv", () => {
@@ -795,10 +1032,12 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
         operation === "put-parameter" &&
         String(name).endsWith("/approvals/offered"),
     );
-    // Two seeds: the expired probe, then the live list. Both are asserted, because
-    // a script that stamped only the live one would leave the expiry step passing
-    // for the WRONG reason — an unstamped record is refused as expired too.
-    expect(seeds).toHaveLength(2);
+    // Three seeds: the expired probe, the tampered record, then the live list. All
+    // are asserted, because a script that stamped only the live one would leave the
+    // expiry step passing for the WRONG reason — an unstamped record is refused as
+    // expired too — and an unstamped TAMPERED record would be refused as expired
+    // rather than as a hash mismatch, passing the wrong guard's test.
+    expect(seeds).toHaveLength(3);
     const records = seeds.map((call) => JSON.parse(call[call.indexOf("--value") + 1]));
     for (const record of records) {
       expect(typeof record.issuedAt).toBe("string");
@@ -807,20 +1046,23 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
       expect(Number.isFinite(Date.parse(record.issuedAt))).toBe(true);
     }
 
-    // The two ages, which is what the pair of steps is FOR: one outside the 72h
-    // window and one inside it. Both derived from the same clock, so this holds
+    // The ages, which is what the expiry pair is FOR: the first outside the 72h
+    // window and the rest inside it. All derived from the same clock, so this holds
     // regardless of when the suite runs.
     const OFFER_TTL_MS = 72 * 60 * 60 * 1000;
     const ages = records.map((record) => Date.now() - Date.parse(record.issuedAt));
     expect(ages[0]).toBeGreaterThan(OFFER_TTL_MS);
-    expect(ages[1]).toBeLessThan(OFFER_TTL_MS);
+    for (const age of ages.slice(1)) expect(age).toBeLessThan(OFFER_TTL_MS);
 
-    // Same ids, therefore the same hash: what changes between the refusal and the
-    // acceptance is `issuedAt` alone. A differing hash would make the refusal
-    // provable by the stale-hash guard instead of the TTL — the same
-    // same-body discipline the invalid-signature POST follows.
-    expect(records[0].hash).toBe(records[1].hash);
-    expect(records[0].ids).toEqual(records[1].ids);
+    // Same ids and same hash across the EXPIRED and LIVE seeds: what changes between
+    // that refusal and the acceptance is `issuedAt` alone. A differing hash would
+    // make the refusal provable by the stale-hash guard instead of the TTL — the
+    // same same-body discipline the invalid-signature POST follows. The tampered
+    // seed in between is the deliberate exception and is asserted separately
+    // (TC-SLACKAPP-208).
+    const [expiredRecord, , liveRecord] = records;
+    expect(expiredRecord.hash).toBe(liveRecord.hash);
+    expect(expiredRecord.ids).toEqual(liveRecord.ids);
   });
 
   it("TC-SLACKAPP-155 a facade that accepts an expired list fails the run", () => {
@@ -880,8 +1122,8 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
     const clicks = callRecords
       .map((call, index) => ({ call, index }))
       .filter(({ call }) => call[0] === "curl");
-    expect(clicks).toHaveLength(3);
-    const [bad, expiredClick, live] = clicks;
+    expect(clicks).toHaveLength(4);
+    const [bad, expiredClick, , live] = clicks;
     expect(bad.call.join(" ")).toMatch(/x-slack-signature:\s*v0=deadbeef/iu);
     // The expired click is correctly SIGNED — the refusal is the TTL's doing, not
     // the signature's. Sharing the signature with the live click is what proves it.
@@ -891,29 +1133,333 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
 
     // And each click is preceded by the seed it is about: no seed before the 401
     // (nothing is written until the signature is proven to be rejected), one
-    // before each of the other two.
+    // before each of the three that follow.
     const seedsBefore = (index) =>
       callRecords.filter((call, i) => i < index && isSeed(call)).length;
     expect(seedsBefore(bad.index)).toBe(0);
     expect(seedsBefore(expiredClick.index)).toBe(1);
-    expect(seedsBefore(live.index)).toBe(2);
+    expect(seedsBefore(live.index)).toBe(3);
   });
 
-  it("TC-SLACKAPP-090 the approved id cannot name a real memory", () => {
-    // The harness approves a DELETION. An id that resolved to real preview data
-    // would delete it — so the id is a synthetic sentinel, and the apply's
-    // "already gone" branch is what makes the run exit 0.
-    const { callRecords } = runFixture({ claim: claimWith() });
+  it("TC-SLACKAPP-090 no approved id can name a real memory", () => {
+    // The harness approves a DELETION and, since #150, a MERGE — which rewrites a
+    // survivor as well as deleting its absorbed ids. An id that resolved to real
+    // preview data would be destroyed either way, so EVERY id is a synthetic
+    // sentinel and the apply's "already gone" / "survivor no longer active"
+    // branches are what make the run exit 0.
+    const { callRecords, uploads } = runFixture({ claim: claimWith() });
     const put = callRecords.find(
       ([tool, service, operation]) =>
         tool === "aws" && service === "ssm" && operation === "put-parameter",
     );
     const value = JSON.parse(put[put.indexOf("--value") + 1]);
-    expect(value.ids).toHaveLength(1);
-    expect(value.ids[0]).toMatch(/e2e/iu);
-    // Hash over the ids, the same derivation the apply task re-computes. A
-    // mismatch there refuses the apply, so this is what makes the run reach it.
+    // Three: the DELETE, the merge survivor, and the absorbed id — the merge's full
+    // destructive footprint, which is what `buildOfferedRecord` offers.
+    expect(value.ids).toHaveLength(3);
+    for (const id of value.ids) expect(id).toMatch(/^mem9-e2e-/u);
     expect(value.hash).toMatch(/^sha256:[0-9a-f]{64}$/u);
     expect(value.stage).toBe("pr-123");
+
+    // Asserted over the ARTIFACT as well, not just the record: the artifact is what
+    // the apply task replays, so an id in there that the record omits is an id no
+    // operator approved. The bound is `applyDecisions`' refusal, and this is the
+    // harness's own half of it.
+    for (const body of Object.values(uploads)) {
+      const artifact = JSON.parse(body);
+      for (const decision of artifact.decisions) {
+        expect(decision.id).toMatch(/^mem9-e2e-/u);
+        for (const absorbed of decision.absorbs ?? []) {
+          expect(absorbed.id).toMatch(/^mem9-e2e-/u);
+        }
+      }
+    }
+  });
+
+  it("TC-SLACKAPP-208 offers an approved MERGE whose artifact is built by the script under test", () => {
+    // The MERGE half of #150, and the reason the artifact is serialized by importing
+    // `serializeDecisionArtifact`/`decisionArtifactHash`/`decisionArtifactKey` rather
+    // than by hand: a hand-written JSON literal plus a shell `shasum` would prove
+    // only that the harness agrees with itself. The property that matters is that the
+    // bytes the apply task FETCHES hash to the value the button carried, and those
+    // three functions are the sole authority on it — a re-implemented key or a
+    // different field order would pass this harness and fail the real loop.
+    const { uploads, callRecords, result, output } = runFixture({ claim: claimWith() });
+    expect(result.status, output).toBe(0);
+
+    // Two objects: the reviewed list and its tampered twin.
+    const keys = Object.keys(uploads);
+    expect(keys).toHaveLength(2);
+    // The per-stage prefix, which is where cross-stage isolation lives (the boundary
+    // pins the bucket, the identity policy pins `decisions/<stage>/`). Flattened
+    // slashes, since that is how the fixture names its files.
+    for (const key of keys) expect(key).toMatch(/^decisions_pr-123_sha256-[0-9a-f]{64}\.json$/u);
+
+    const artifacts = keys.map((key) => JSON.parse(uploads[key]));
+    for (const artifact of artifacts) {
+      expect(artifact.stage).toBe("pr-123");
+      const merge = artifact.decisions.find((d) => d.verdict === "MERGE");
+      // A MERGE is the point: it is the verdict a re-classification cannot
+      // reconstruct, because `mergedContent` is prose anchored on the survivor's
+      // ORIGINAL hash. A DELETE-only artifact would leave that untested.
+      expect(merge).toBeDefined();
+      expect(typeof merge.mergedContent).toBe("string");
+      expect(merge.mergedContentHash).toMatch(/^sha256:[0-9a-f]{64}$/u);
+      expect(merge.version).toBeGreaterThanOrEqual(1);
+      // Every absorbed id carries its own anchors, because the apply re-reads and
+      // LWW-checks each one separately — an artifact without them makes
+      // `validateDecisions` refuse the replay at load.
+      for (const absorbed of merge.absorbs) {
+        expect(absorbed.contentHash).toMatch(/^sha256:[0-9a-f]{64}$/u);
+        expect(absorbed.version).toBeGreaterThanOrEqual(1);
+      }
+      expect(artifact.decisions.some((d) => d.verdict === "DELETE")).toBe(true);
+    }
+
+    // The record points at the reviewed object, in the bucket derived from the
+    // CALLER's account — the artifact bucket is a task-definition environment entry,
+    // never an SSM parameter, so deriving it is also the stricter check: it asserts
+    // the name this repo computes rather than whatever the stage was configured with.
+    const seeds = callRecords.filter(
+      ([tool, service, operation, , name]) =>
+        tool === "aws" &&
+        service === "ssm" &&
+        operation === "put-parameter" &&
+        String(name).endsWith("/approvals/offered"),
+    );
+    const liveSeed = seeds.at(-1);
+    const live = JSON.parse(liveSeed[liveSeed.indexOf("--value") + 1]);
+    // BOTH coordinates, each to its exact value: `artifactCoordinates` THROWS on a
+    // half-set rather than treating it as absent, because absence means "verify this
+    // by the weaker id-list rule" and a tamperer's cheapest edit is deleting one
+    // field. So a record carrying only one of them has to fail here.
+    expect(live.artifactBucket).toBe("mem9-audit-123456789012");
+    expect(live.artifactKey).toBe(`decisions/pr-123/${live.hash.replace(":", "-")}.json`);
+  });
+
+  it("TC-SLACKAPP-208 the tampered artifact is refused and starts no apply task", () => {
+    // #150's acceptance criterion: a tampered artifact is refused with no fallback to
+    // re-classification, and NO apply task runs. The tamper is one extra absorbed id
+    // in the artifact while the offered record's `ids` stay byte-identical — under an
+    // id-list hash that tamper was invisible; under the artifact hash the record's
+    // hash moves and the button no longer matches it.
+    const { callRecords, uploads, result, output } = runFixture({ claim: claimWith() });
+    expect(result.status, output).toBe(0);
+
+    // The two artifacts differ by exactly one absorbed id, and their hashes differ.
+    // Both halves matter: a tamper that did not move the hash would make the refusal
+    // vacuous, and a tamper elsewhere would not model an unreviewed DELETION.
+    const artifacts = Object.entries(uploads)
+      .map(([key, body]) => ({ key, ...JSON.parse(body) }))
+      .sort(
+        (a, b) =>
+          a.decisions.flatMap((d) => d.absorbs ?? []).length -
+          b.decisions.flatMap((d) => d.absorbs ?? []).length,
+      );
+    const absorbedIds = artifacts.map((a) =>
+      a.decisions.flatMap((d) => (d.absorbs ?? []).map((x) => x.id)),
+    );
+    expect(absorbedIds[1].length).toBe(absorbedIds[0].length + 1);
+    expect(artifacts[0].key).not.toBe(artifacts[1].key);
+
+    // The tampered record is seeded SECOND — after the expired probe and before the
+    // live click — because "no apply task ran" is only assertable while no claim
+    // exists, and the live click creates one.
+    const seeds = callRecords.filter(
+      ([tool, service, operation, , name]) =>
+        tool === "aws" &&
+        service === "ssm" &&
+        operation === "put-parameter" &&
+        String(name).endsWith("/approvals/offered"),
+    );
+    const records = seeds.map((call) => JSON.parse(call[call.indexOf("--value") + 1]));
+    const [, tampered, liveRecord] = records;
+    // The tamper is in the ARTIFACT, so the ids the operator saw are unchanged and
+    // only the hash and the key move. That triple is the whole scenario.
+    expect(tampered.ids).toEqual(liveRecord.ids);
+    expect(tampered.hash).not.toBe(liveRecord.hash);
+    expect(tampered.artifactKey).not.toBe(liveRecord.artifactKey);
+
+    // And the click carries the REVIEWED hash — the value the message the operator
+    // was shown put on its button. Every POST shares one body for that reason: each
+    // case differs in what the STORE says, never in what the operator clicked.
+    const curls = callRecords.filter(([tool]) => tool === "curl");
+    const bodyOf = (call) => call[call.indexOf("--data-binary") + 1];
+    const clickedHash = JSON.parse(
+      new URLSearchParams(bodyOf(curls.at(-1))).get("payload"),
+    ).actions[0].value;
+    expect(clickedHash).toBe(liveRecord.hash);
+    for (const call of curls) expect(bodyOf(call)).toBe(bodyOf(curls.at(-1)));
+  });
+
+  it("TC-SLACKAPP-208 a facade that accepts a hash-mismatched artifact fails the run", () => {
+    // The non-vacuity half. Without a fake that can be WRONG about the comparison,
+    // the tampered step passes against a façade with no hash check at all — and that
+    // façade would claim an approval covering an absorbed id nobody reviewed, then
+    // start a task that soft-deletes it.
+    const { result, output } = runFixture({
+      claim: claimWith(),
+      tamperBehavior: "accept",
+    });
+    expect(result.status, output).not.toBe(0);
+    expect(output).toMatch(/not refused as a hash mismatch/iu);
+  });
+
+  it("TC-SLACKAPP-208 a hash-mismatch refusal that still claims the approval fails the run", () => {
+    // The dangerous shape: the operator is told the list was regenerated and an apply
+    // starts anyway. The reply assertion alone cannot see it — only reading the claim
+    // back can, and it has to be read under the TAMPERED hash, because that is the
+    // name `claimParameterName(prefix, offered.hash)` keys it on. A harness watching
+    // only the reviewed name would report "no claim" while a task was deleting.
+    const { result, output } = runFixture({
+      claim: claimWith(),
+      tamperBehavior: "cosmetic",
+    });
+    expect(result.status, output).not.toBe(0);
+    expect(output).toMatch(/an apply task may have deleted an id no operator reviewed/iu);
+  });
+
+  it("TC-SLACKAPP-213 a claim read that fails is not the same as no claim", () => {
+    // Paired deliberately with the `cosmetic` facade of the case above — the real
+    // regression this step exists to catch, which refuses with "regenerated" and
+    // starts an apply anyway. With the claim read FAILING (a throttle, an
+    // AccessDenied from a boundary that left the CI role only `ssm:GetParameters`,
+    // expired credentials, the wrong region), the old `>/dev/null 2>&1` inside a
+    // bare `if` reported "no claim exists" — its PASS condition — and the harness
+    // printed OK and exited 0 while a task was deleting ids no operator reviewed.
+    //
+    // `set -e` cannot catch it: the failure is consumed by the `if` condition. So
+    // the assertion is that the run FAILS, and that it says it could not tell
+    // rather than asserting a fact it never established. The absence of the
+    // "apply task may have deleted" line is asserted too: reaching that message
+    // would mean the read was believed after all.
+    const { result, output } = runFixture({
+      claim: claimWith(),
+      claimReadError: "ThrottlingException",
+      tamperBehavior: "cosmetic",
+    });
+    expect(result.status, output).not.toBe(0);
+    expect(output).toMatch(/could not determine whether a claim exists/iu);
+    expect(output).toMatch(/ThrottlingException/u);
+  });
+
+  it("TC-SLACKAPP-208 a refusal answered with a 5xx fails the run", () => {
+    // Same reason as the expiry case: Slack renders a non-200 as its own "operation
+    // failed" and shows the operator no reason at all, so a correct refusal delivered
+    // with a 500 is a guard whose output nobody can see.
+    const { result, output } = runFixture({
+      claim: claimWith(),
+      tamperBehavior: "error",
+    });
+    expect(result.status, output).not.toBe(0);
+    expect(output).toMatch(/answered HTTP 500, not 200/u);
+  });
+
+  it("TC-SLACKAPP-209 the run fails unless the task logged an artifact replay", () => {
+    // Everything else in the harness is ALSO satisfied by a task that ignored the
+    // artifact and re-classified: the ids are synthetic, so a fresh scan finds
+    // nothing to delete and exits 0 too. This assertion is the only thing separating
+    // the two, and without it the MERGE case proves nothing.
+    const { result, output } = runFixture({ claim: claimWith(), replayLines: "0" });
+    expect(result.status, output).not.toBe(0);
+    expect(output).toMatch(/never logged an artifact replay/iu);
+    expect(output).toMatch(/re-classifying/iu);
+  });
+
+  it("TC-SLACKAPP-209 the log group and stream come from the task definition, never a computed path", () => {
+    // SST auto-names container log groups with random hash segments and sets
+    // `ignoreChanges: ["name"]`, so a hand-computed `/sst/...` path matches no real
+    // group: every query answers ResourceNotFoundException, and a swallowed error
+    // then reads as "clean". That is how the mnemo-server log-scan guard silently
+    // never ran on any stage (#137). The fixture's group name is hash-suffixed for
+    // exactly that reason — a script that computed one could not produce it.
+    const { callRecords, result, output } = runFixture({
+      claim: claimWith(),
+      logGroup: "/sst/cluster/mem9-pr-123-zz9y8x/Mem9Cleanup-w7v6u5",
+      logPrefix: "mem9",
+    });
+    expect(result.status, output).toBe(0);
+
+    const filters = callRecords.filter(
+      ([tool, service, operation]) =>
+        tool === "aws" && service === "logs" && operation === "filter-log-events",
+    );
+    expect(filters.length).toBeGreaterThanOrEqual(1);
+    for (const call of filters) {
+      expect(call).toContain("/sst/cluster/mem9-pr-123-zz9y8x/Mem9Cleanup-w7v6u5");
+      // The EXACT stream of THIS task, `<prefix>/<container>/<task id>` — not a
+      // group-wide scan, which a previous run's replay line would satisfy.
+      expect(call).toContain("mem9/Mem9Cleanup/task-abc");
+    }
+
+    // And the matched line is never echoed. It names `s3://mem9-audit-<account>/...`,
+    // so printing a match would put the account id in a public CI log.
+    expect(output).not.toContain("123456789012");
+  });
+
+  it("TC-SLACKAPP-209 a task definition whose container has no awslogs config fails the run", () => {
+    // The alternative is a `|| true` that yields an empty group name and a query that
+    // matches nothing — reported as "the task re-classified", which sends the reader
+    // to the apply path instead of to the container name that changed. The container
+    // is selected by the name the callback Lambda's `containerOverrides` targets, so
+    // a rename surfaces HERE rather than as an opaque ECS validation error.
+    const { result, output } = runFixture({
+      claim: claimWith(),
+      containerName: "SomethingElse",
+    });
+    expect(result.status, output).not.toBe(0);
+    expect(output).toMatch(/no awslogs group\/stream prefix/iu);
+    // This refusal names the task definition, and `TASK_DEF` is an ARN read from
+    // SSM that carries the live account id — so the message has to name
+    // family:revision instead. The sibling account-id sweep above runs on the
+    // SUCCESS path and never reaches this line, which is how the full ARN sat here
+    // under a doc claiming the id appears nowhere in the harness's output.
+    expect(output).not.toContain("123456789012");
+    expect(output).toMatch(/mem9-cleanup:7/u);
+  });
+
+  it("TC-SLACKAPP-208 an account id the CLI cannot resolve is a refusal, not a malformed bucket name", () => {
+    // The bucket is derived from `sts:GetCallerIdentity`, so an empty or non-numeric
+    // account would build a name S3 rejects — and the resulting upload failure reads
+    // as a permissions problem, sending the reader to the boundary. Refuse where the
+    // value is read instead.
+    for (const accountId of ["", "None", "not-an-account"]) {
+      const { callRecords, result, output } = runFixture({ accountId, claim: claimWith() });
+      expect(result.status, `${accountId}: ${output}`).not.toBe(0);
+      expect(output).toMatch(/12-digit account id/iu);
+      // And nothing was written: no artifact upload, no seeded record, no POST.
+      expect(
+        callRecords.filter(([tool, service]) => tool === "aws" && service === "s3api"),
+      ).toHaveLength(0);
+      expect(callRecords.filter(([tool]) => tool === "curl")).toHaveLength(0);
+    }
+  });
+
+  it("TC-SLACKAPP-212 an exit between building the artifacts and the full trap still deletes them", () => {
+    // The two temp bodies are `mktemp`ed before the `cleanup` trap that removes
+    // them is installed, and everything in between can exit: the node child under
+    // `set -e`, the `jq` reads of its output, and the identical-hash refusal. A
+    // leftover body is not a tidiness problem — one of them holds synthetic
+    // `mergedContent`, i.e. the shape of real memory text, and the runner's temp
+    // dir is covered by no lifecycle rule. So the paths must be trapped where they
+    // are created, not where the S3 cleanup arrives.
+    //
+    // Driven by a `jq` that fails on the FIRST read of the node child's output,
+    // which lands the exit squarely inside that window. The assertion is on the
+    // files, not on the exit code: a run that aborted there and left both bodies
+    // behind also exits non-zero, so an exit-code-only check would pass with the
+    // trap deleted.
+    const { result, output, temporaryBodies } = runFixture({
+      claim: claimWith(),
+      failingJqFilter: ".clean.hash",
+    });
+    expect(result.status, output).not.toBe(0);
+    // The paths come from the stubbed `mktemp`'s own log, which is what makes them
+    // ENUMERABLE — the script never names them, so without that log there is nothing
+    // to check for survival. Non-empty first: an empty list would satisfy the loop
+    // below vacuously.
+    expect(temporaryBodies).not.toHaveLength(0);
+    for (const path of temporaryBodies) {
+      expect(existsSync(path), `${path} outlived the run: ${output}`).toBe(false);
+    }
   });
 });

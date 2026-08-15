@@ -38,6 +38,19 @@ describe("public artifact scanner", () => {
       "accountless S3 resource ARN",
       ["arn:", "aws:s3:::operator-memory-backup"].join(""),
     ],
+    // A trailing object glob must not vouch for the bucket name in front of it:
+    // every real S3 policy resource already ends in `/*`, so keying the decision
+    // off the whole ARN instead of the bucket segment would exempt nearly all of
+    // them.
+    [
+      "accountless S3 resource ARN",
+      ["arn:", "aws:s3:::operator-memory-backup/decisions/pr-42/*"].join(""),
+    ],
+    // Non-`aws` partitions are the same disclosure.
+    [
+      "accountless S3 resource ARN",
+      ["arn:", "aws-cn:s3:::operator-memory-backup"].join(""),
+    ],
     [
       "accountless Route 53 resource ARN",
       ["arn:", "aws:route53:::hostedzone/Z123456789ABC"].join(""),
@@ -89,6 +102,24 @@ describe("public artifact scanner", () => {
     expect(scanPublicArtifactText(source)).toEqual([{ category, line: 1 }]);
   });
 
+  it("blesses only the documentation account id in a bucket suffix", () => {
+    // The bucket-suffix exemption is keyed to the documentation placeholder, not
+    // to "ends in twelve digits". A real account id there is a real bucket name,
+    // and it must still be reported as the ARN disclosure it is — not left to
+    // the account detector alone, which would go quiet the moment the same name
+    // appeared with the digits stripped. Its own case rather than a row in the
+    // table above, because it is the one fixture that legitimately trips two
+    // detectors at once, and that table asserts exactly one.
+    expect(
+      scanPublicArtifactText(
+        ["arn:", "aws:s3:::mem9-audit-", "987654", "321098"].join(""),
+      ),
+    ).toEqual([
+      { category: "AWS account identifier", line: 1 },
+      { category: "accountless S3 resource ARN", line: 1 },
+    ]);
+  });
+
   it("allows placeholders, test identifiers, and source patterns", async () => {
     expect(
       scanPublicArtifactText(
@@ -102,6 +133,19 @@ describe("public artifact scanner", () => {
           "API_KEY=${API_KEY}",
           "AWS_SECRET_ACCESS_KEY=<aws-secret-access-key>",
           ["us-east-1", "_", "A".repeat(46)].join(""),
+          // The three accountless-S3 shapes that disclose no bucket name, and
+          // that IAM policy code and its prose cannot be written without. A
+          // wildcard or interpolated segment is a pattern, not a name; the
+          // documentation account id is the placeholder blessed just above; and
+          // `bucket` is the generic noun the comments explaining `bucket/*` vs
+          // `bucket` have to say out loud. All three appear in this repo's own
+          // boundary sources, so a rule that flagged them would fail every
+          // commit that touches them.
+          ["arn:", "aws:s3:::mem9-on-aws-*-decisions/*"].join(""),
+          ["arn:", "aws:s3:::${bucketName}/*"].join(""),
+          ["arn:", "aws:s3:::mem9-audit-", "123456", "789012", "/*"].join(""),
+          ["arn:", "aws:s3:::bucket/*"].join(""),
+          ["arn:", "aws:s3:::bucket"].join(""),
         ].join("\n"),
       ),
     ).toEqual([]);

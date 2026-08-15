@@ -6,6 +6,33 @@ import { pathToFileURL } from "node:url";
 
 const TEST_ACCOUNT_ID = ["123456", "789012"].join("");
 const MAX_GIT_OUTPUT_BYTES = 32 * 1024 * 1024;
+const GENERIC_BUCKET_PLACEHOLDERS = Object.freeze(new Set(["bucket"]));
+const S3_BUCKET_NAME_PATTERN = /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/u;
+
+/**
+ * Whether an accountless S3 ARN discloses a real bucket name.
+ *
+ * S3 bucket names are one GLOBAL namespace, so a name is a targeting hint even
+ * with no account id in the ARN — that is the whole reason this detector exists.
+ * But three shapes disclose nothing, and IAM policy code cannot be written
+ * without them: a wildcard or interpolated segment is a PATTERN rather than a
+ * name, a name suffixed with the documentation account id is the same
+ * placeholder the account detector above already blesses, and `bucket` is the
+ * generic noun that prose about ARN matching has to say out loud. Anything that
+ * parses as a well-formed bucket name and is none of those is treated as real.
+ *
+ * Only the bucket segment decides this; the object key is ignored. Keying off
+ * the whole ARN would let a trailing `/*` — the ordinary object-glob form that
+ * every real S3 policy already ends in — vouch for the name in front of it.
+ */
+function disclosesBucketName(arn) {
+  const bucket = arn.replace(/^arn:[a-z0-9-]+:s3:::/iu, "").split("/")[0];
+  return (
+    S3_BUCKET_NAME_PATTERN.test(bucket) &&
+    !bucket.includes(TEST_ACCOUNT_ID) &&
+    !GENERIC_BUCKET_PLACEHOLDERS.has(bucket)
+  );
+}
 const PRIVATE_REPOSITORY_PATTERN = new RegExp(
   `\\b(?:${["quant", "scorer"].join("[-]")}|${["vid", "syllabus"].join(
     "",
@@ -103,8 +130,15 @@ const LINE_DETECTORS = Object.freeze([
   },
   {
     category: "accountless S3 resource ARN",
+    // The bucket segment admits `*` and `${...}` so a pattern is captured WHOLE
+    // and can be recognized as one. Matching only the legal-name characters
+    // would truncate `arn:aws:s3:::mem9-on-aws-*-decisions` to its prefix, and
+    // that prefix parses as a perfectly good bucket name — the wildcard form
+    // would be reported as a real disclosure on the strength of the text the
+    // regex declined to look at.
     pattern:
-      /\barn:[a-z0-9-]+:s3:::[a-z0-9](?:[a-z0-9.-]{1,61}[a-z0-9])?(?:\/[^\s"'`<>]+)?/iu,
+      /\barn:[a-z0-9-]+:s3:::[a-z0-9*${](?:[a-z0-9.*${}-]{1,61}[a-z0-9*}])?(?:\/[^\s"'`<>]+)?/iu,
+    validate: disclosesBucketName,
   },
   {
     category: "accountless Route 53 resource ARN",

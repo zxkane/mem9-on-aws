@@ -46,11 +46,11 @@ Resources:
           # an explicit boundary allow. The explicit Deny/NotAction below is the
           # action ceiling; this Allow only admits identity-policy permissions
           # that survive every explicit deny.
-          - Sid: AllowRuntimeIdentityPermissions
+          - Sid: Identity
             Effect: Allow
             Action: "*"
             Resource: "*"
-          - Sid: !Sub DenyOutsideRuntimeActionCeiling${PolicyRevision}
+          - Sid: !Sub Ceiling${PolicyRevision}
             Effect: Deny
             NotAction:
               - bedrock-mantle:CreateInference
@@ -74,10 +74,15 @@ Resources:
               # which does not exist yet: Slack's 3-second ACK budget cannot
               # cover a cleanup run, so the facade Lambda will persist the
               # approved decision-list hash and trigger the apply task rather
-              # than delete inline. Scoped by both
-              # DenyProjectRuntimeOutsideResources and the tighter
-              # DenyPutParameterOutsideApprovalRecords below.
+              # than delete inline. Scoped by both the `Resources` deny and the
+              # tighter `ParamWrite` deny below.
               - ssm:PutParameter
+              # The reviewed decision artifact (#150). Enumerated rather than
+              # s3:*Object, which is 34 bytes cheaper but also admits DeleteObject
+              # and RestoreObject on the very artifact the approval loop exists to
+              # produce, plus whatever *Object action AWS adds next.
+              - s3:GetObject
+              - s3:PutObject
               - ec2:AssignPrivateIpAddresses
               - ec2:CreateNetworkInterface
               - ec2:DeleteNetworkInterface
@@ -90,9 +95,12 @@ Resources:
               - ssmmessages:OpenControlChannel
               - ssmmessages:OpenDataChannel
               - kms:Decrypt
+              # SSE-KMS writes need this; reads need only kms:Decrypt above. The
+              # `GenKey` deny below keeps it away from SSM SecureStrings.
+              - kms:GenerateDataKey
               - bedrock-mantle:CallWithBearerToken
             Resource: "*"
-          - Sid: DenyProjectRuntimeOutsideResources
+          - Sid: Resources
             Effect: Deny
             Action:
               - bedrock-mantle:CreateInference
@@ -111,6 +119,8 @@ Resources:
               - sns:Publish
               - ssm:GetParameters
               - ssm:PutParameter
+              - s3:GetObject
+              - s3:PutObject
             NotResource:
               - !Ref BedrockProjectArn
               # AWS::NoValue removes this entry entirely when unconfigured, so
@@ -125,6 +135,18 @@ Resources:
               - !Sub arn:${AWS::Partition}:sqs:${ApplicationRegion}:${AWS::AccountId}:AlertExecutionFailureQueue-*
               - !Sub arn:${AWS::Partition}:sns:${ApplicationRegion}:${AWS::AccountId}:mem9-on-aws-*-alerts
               - !Sub arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/mem9-on-aws/*
+              # The decision artifact (#150). The bucket segment carries NO
+              # wildcard, and that is the security property rather than a style
+              # choice: S3 bucket names are a GLOBAL namespace, so a pattern like
+              # mem9-on-aws-*-decisions also matches a bucket an attacker creates
+              # in THEIR account — simulated, PutObject on such a name came back
+              # allowed, an exfiltration target for merged memory content. The
+              # account id is the disambiguating suffix a global namespace needs,
+              # so the stage lives in the key prefix, not the bucket name. This is
+              # the OBJECT glob, for S3's own resource scope; the two KMS
+              # encryption-context pins below use the BUCKET arn instead, and the
+              # difference is deploy-breaking rather than cosmetic.
+              - !Sub arn:${AWS::Partition}:s3:::mem9-audit-${AWS::AccountId}/*
           # The statement above scopes the write to the PROJECT prefix, i.e. every
           # stage's whole SSM tree. That is too wide for a write, and this ceiling
           # is the only control on it: identity policies are PR-authored, and the
@@ -135,21 +157,21 @@ Resources:
           # prod's plain-String parameters (oauth/allowed-callback-urls is an
           # open-redirect primitive; the bootstrap/consolidation task-def-arn and
           # cluster-name are consumed unvalidated by scripts/run-*-task.sh).
-          # SecureString parameters are already unreachable — that write needs
-          # kms:Encrypt or kms:GenerateDataKey and the ceiling admits neither.
-          - Sid: DenyPutParameterOutsideApprovalRecords
+          # SecureString parameters stay unreachable because that write needs
+          # kms:Encrypt or kms:GenerateDataKey: the ceiling admits no Encrypt at
+          # all, and #150's GenerateDataKey admission is confined to S3's own
+          # encryption context by the `GenKey` deny below. Remove that deny and
+          # this sentence stops being true — measured, not assumed.
+          - Sid: ParamWrite
             Effect: Deny
-            Action:
-              - ssm:PutParameter
-            NotResource:
-              - !Sub arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/mem9-on-aws/*/approvals/*
+            Action: ssm:PutParameter
+            NotResource: !Sub arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/mem9-on-aws/*/approvals/*
           # Lambda cold starts, SSM SecureStrings, and the two ECS task-definition
           # secret families use different KMS encryption contexts. Missing and
           # foreign contexts remain denied.
-          - Sid: DenyKmsDecryptOutsideReviewedContexts
+          - Sid: KmsContext
             Effect: Deny
-            Action:
-              - kms:Decrypt
+            Action: kms:Decrypt
             Resource: "*"
             Condition:
               StringNotLikeIfExists:
@@ -159,32 +181,43 @@ Resources:
                   - !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-*-Mem9DbProxySecret-*
                   - !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-*-Mem9DbSecret-*
                   - !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:mem9-on-aws-*-tenant-api-key-*
-          - Sid: DenyKmsDecryptOutsideReviewedViaServices
+                # S3's SSE-KMS context key: the BUCKET arn, with NO trailing glob,
+                # because the artifact bucket runs with S3 Bucket Keys enabled.
+                # Documented AWS behavior (S3 user guide, "Using SSE-KMS ->
+                # Encryption context"): without bucket keys the context is the
+                # object ARN, WITH them it is the bucket ARN. An earlier revision
+                # pinned `.../*` here and claimed it covered both; it does not —
+                # `bucket/*` never matches `bucket`, so Decrypt simulated
+                # explicitDeny and every artifact read would have failed after
+                # deploy. Pinning both forms costs 6215 bytes, past the hard quota.
+                # Load-bearing — removed, the artifact read is explicitDeny.
+                "kms:EncryptionContext:aws:s3:arn": !Sub arn:${AWS::Partition}:s3:::mem9-audit-${AWS::AccountId}
+          - Sid: KmsVia
             Effect: Deny
-            Action:
-              - kms:Decrypt
+            Action: kms:Decrypt
             Resource: "*"
             Condition:
               StringNotEqualsIfExists:
                 kms:ViaService:
                   - !Sub ssm.${ApplicationRegion}.${AWS::URLSuffix}
                   - !Sub secretsmanager.${ApplicationRegion}.${AWS::URLSuffix}
+                  # Also load-bearing: without it the artifact decrypt arrives via
+                  # s3.<region>, matches neither service above, and dies here.
+                  - !Sub s3.${ApplicationRegion}.${AWS::URLSuffix}
               StringNotLikeIfExists:
                 "kms:EncryptionContext:aws:lambda:FunctionArn": !Sub arn:${AWS::Partition}:lambda:${ApplicationRegion}:${AWS::AccountId}:function:mem9-on-aws-*
-          - Sid: DenyParameterContextDecryptOutsideSsm
+          - Sid: ParamCtxVia
             Effect: Deny
-            Action:
-              - kms:Decrypt
+            Action: kms:Decrypt
             Resource: "*"
             Condition:
               "Null":
                 "kms:EncryptionContext:PARAMETER_ARN": "false"
               StringNotEqualsIfExists:
                 kms:ViaService: !Sub ssm.${ApplicationRegion}.${AWS::URLSuffix}
-          - Sid: DenySecretContextDecryptOutsideSecretsManager
+          - Sid: SecretCtxVia
             Effect: Deny
-            Action:
-              - kms:Decrypt
+            Action: kms:Decrypt
             Resource: "*"
             Condition:
               "Null":
@@ -193,10 +226,9 @@ Resources:
                 kms:ViaService: !Sub secretsmanager.${ApplicationRegion}.${AWS::URLSuffix}
           # Secrets Manager's encryption context is fixed, but the boundary also
           # constrains which project role types may use that service-mediated path.
-          - Sid: DenySecretContextDecryptFromNonEcsExecutionRoles
+          - Sid: SecretCtxRole
             Effect: Deny
-            Action:
-              - kms:Decrypt
+            Action: kms:Decrypt
             Resource: "*"
             Condition:
               "Null":
@@ -209,10 +241,9 @@ Resources:
                   - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9CleanupExecutionRole-*
           # Only the reviewed Lambda execution-role types may present the Lambda
           # cold-start context. Other workload roles cannot forge it.
-          - Sid: DenyLambdaContextDecryptFromNonLambdaRoles
+          - Sid: LambdaCtxRole
             Effect: Deny
-            Action:
-              - kms:Decrypt
+            Action: kms:Decrypt
             Resource: "*"
             Condition:
               "Null":
@@ -226,27 +257,41 @@ Resources:
           # Encryption context is caller supplied. Block function code from
           # presenting a project Lambda context directly while preserving the
           # facade's SSM-mediated decrypt and Lambda's cold-start service path.
-          - Sid: DenyDirectKmsDecryptFromFunctionCode
+          - Sid: FnCodeKms
             Effect: Deny
-            Action:
-              - kms:Decrypt
+            Action: kms:Decrypt
             Resource: "*"
             Condition:
               "Null":
                 "lambda:SourceFunctionArn": "false"
               StringNotEqualsIfExists:
                 kms:ViaService: !Sub ssm.${ApplicationRegion}.${AWS::URLSuffix}
-          - Sid: DenyNonShortTermMantleBearer
+          # #150's SSE-KMS write needs kms:GenerateDataKey, and admitting it bare
+          # would silently revoke what the `ParamWrite` comment above states as
+          # fact: SecureStrings are unreachable BECAUSE the ceiling admits no
+          # GenerateDataKey. Simulated without this statement, a SecureString write
+          # via ssm.<region> comes back allowed, as does GenerateDataKey carrying no
+          # encryption context at all. Keying the deny on S3's own context key
+          # restores it: ...IfExists with a negated operator FIRES on an ABSENT key,
+          # so any caller that cannot present an artifact context is denied, and the
+          # SSM path presents PARAMETER_ARN rather than aws:s3:arn.
+          - Sid: GenKey
             Effect: Deny
-            Action:
-              - bedrock-mantle:CallWithBearerToken
+            Action: kms:GenerateDataKey
+            Resource: "*"
+            Condition:
+              StringNotLikeIfExists:
+                "kms:EncryptionContext:aws:s3:arn": !Sub arn:${AWS::Partition}:s3:::mem9-audit-${AWS::AccountId}
+          - Sid: LongBearer
+            Effect: Deny
+            Action: bedrock-mantle:CallWithBearerToken
             Resource: "*"
             Condition:
               StringNotEqualsIfExists:
                 bedrock-mantle:BearerTokenType: SHORT_TERM
           # Only the VPC proxy Lambda role may expose ENI permissions to the
           # Lambda service. A second deny blocks those APIs from function code.
-          - Sid: DenyEniFromNonVpcLambdaRoles
+          - Sid: EniRole
             Effect: Deny
             Action:
               - ec2:*NetworkInterface*
@@ -257,7 +302,7 @@ Resources:
             Condition:
               ArnNotLike:
                 "aws:PrincipalArn": !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ProxyFnRole-*
-          - Sid: DenyEniFromFunctionCode
+          - Sid: EniFnCode
             Effect: Deny
             Action:
               - ec2:*NetworkInterface*

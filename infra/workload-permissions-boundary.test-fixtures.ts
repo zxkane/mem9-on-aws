@@ -24,7 +24,7 @@ export const CONSOLIDATION_SCHEDULER_ROLE_NAME =
  * `ECS_EXECUTION_ROLE_TOKENS` list, and has to be. The reasoning that once said
  * otherwise — the Secrets Manager reads resolve under the default
  * `aws/secretsmanager` key, which needs no identity `kms:Decrypt` ALLOW — is
- * true but irrelevant: `DenySecretContextDecryptFromNonEcsExecutionRoles` is an
+ * true but irrelevant: the boundary's `SecretCtxRole` statement is an
  * `ArnNotLike` DENY, so an unlisted role is explicitly denied rather than merely
  * ungranted. Simulating each role against the live boundary shows listed ones
  * allowed and unlisted ones explicitDeny. See the BOUNDARY NOTE in

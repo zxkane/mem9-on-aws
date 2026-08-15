@@ -90,6 +90,18 @@ state to make apply **resumable and self-verifying**:
 `mergedContent` is produced at classification time (deterministic input to
 apply), so apply never re-invokes the LLM.
 
+Since issue #150 this same list has a **second, remote form**: a review run that
+offers its decisions for Slack approval also writes them to an SSE-KMS S3 object
+and hashes *that*, and the approved apply replays the object instead of
+re-classifying. The projection written there is closed and narrower than the file
+above — `{id, verdict, contentHash, version}` plus a MERGE's `mergedContent`,
+`mergedContentHash`, and `absorbs[]` anchors, with `reason` and `snippet`
+deliberately excluded so an upstream field addition cannot invalidate an approval
+in flight. That is what makes `MERGE` approvable at all: the survivor rewrite is
+hash-anchored on the *original* content hash (below), so a fresh classification
+cannot reconstruct the approved merged bytes — its prose differs and its hash
+matches nothing. See `docs/test-cases/slack-approval-loop.md`.
+
 Every `version` in a decision is a positive integer — enforced, not assumed, on
 both paths that produce one: a replay is refused at load
 (`validateDecisions`) and a fresh scan degrades the affected memory to `SKIP`
@@ -181,7 +193,10 @@ scan (paged GET, state=active)
   `--out` override) — **outside any repository checkout** (repo will be
   open-sourced; memory content must never be committable by accident). Path
   printed on exit. The file records the stage it was generated for, and apply
-  refuses to replay a file against a different stage.
+  refuses to replay a file against a different stage. An apply that replays the
+  remote artifact (#150) writes **no** decision file: the artifact is already the
+  durable copy, and a MERGE's `mergedContent` is real memory text, so a second copy
+  on the task's ephemeral disk would be a third store nobody reviewed.
 - An interrupted apply is reconstructable without a journal: the decision
   file is the full intent, and the hash-anchored re-run re-derives what has
   and hasn't been applied from server state. A per-call apply journal (and

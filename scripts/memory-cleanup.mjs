@@ -79,6 +79,22 @@ const DEFAULT_CAP = 50;
 // deliberately not an option: it incurs a charge and cannot be reverted to
 // standard without data loss, so the record has to fit here (#123).
 const MAX_PARAMETER_BYTES = 4096;
+// The decision artifact's ceiling (#150). NOT an S3 limit — a single PutObject
+// accepts 5 GiB — but the bound at which the convenient uploader stops being an
+// option: `@aws-sdk/lib-storage`'s `Upload` switches to multipart, whose failure
+// path calls `s3:AbortMultipartUpload`, an action the workload boundary's ceiling
+// does not admit. So the writer must stay on one PutObject, and this is the size
+// at which it says so instead of discovering it in production.
+//
+// What scales it is the SCANNED corpus, NOT `--cap`: the artifact carries one row
+// per decision, KEEPs included, because a replay has to reproduce the reviewed list
+// and not just its destructive half — while `--cap` bounds only how many mutations
+// an apply may spend. Measured, a KEEP row is ~139 bytes, so ~30k scanned memories
+// reach 4 MiB with ZERO deletions. That is a real store rather than an operator
+// mistake, which is why the error names the corpus and offers no `--cap` remedy: it
+// would be advice nobody can act on, and the scheduled scan has no operator at the
+// keyboard to act anyway.
+const MAX_ARTIFACT_BYTES = 4 * 1024 * 1024;
 // Slack's own hard ceilings on a `chat.postMessage` payload
 // (api.slack.com/reference/block-kit/blocks). A message over ANY of them is
 // rejected wholesale, so the operator sees nothing — which is why
@@ -91,6 +107,12 @@ const SLACK_MAX_HEADER_CHARS = 150;
 const SLACK_TIMEOUT_MS = 15_000;
 /** Set by infra/slack-approval.ts; its presence is what enables the offer. */
 const MEM9_SLACK_CHANNEL_ENV = "MEM9_SLACK_APPROVAL_CHANNEL";
+// Set by infra/slack-approval.ts to the bucket it provisions (#150). Its ABSENCE
+// is meaningful rather than an error: it is what keeps #102's operator CLI, and any
+// stage deployed before that bucket existed, writing the id-only record they always
+// did. So the offer degrades to no artifact instead of refusing to run — and the
+// apply refuses to replay when there is none, which is where the safety lives.
+const MEM9_DECISION_BUCKET_ENV = "MEM9_DECISION_ARTIFACT_BUCKET";
 const REQUEST_TIMEOUT_MS = 30_000; // REST calls; the LLM call sets its own
 const LLM_TIMEOUT_MS = 120_000;
 // Reasoning models consume output tokens on hidden reasoning BEFORE emitting
@@ -506,7 +528,16 @@ export function planDecisions(memories, verdicts, opts = {}) {
       ...snapshot(byId.get(id)),
       mergedContent: group.mergedContent,
       mergedContentHash: contentHash(group.mergedContent),
-      absorbs: group.absorbs.map((a) => ({ id: a, ...anchor(byId.get(a)) })),
+      // `snapshot`, not `anchor`: an absorbed id is DELETED by this decision, and
+      // once merges reach the approval loop (#150) it is the only place its snippet
+      // can come from — the absorbed member's own row is folded away above, so
+      // without this the review message would ask an operator to authorize deleting
+      // an opaque id. That is the "deletes the ids the operator never saw" failure
+      // in a milder dress. The snippet stays OUT of the hashed artifact
+      // (`serializeDecisionArtifact` projects id/contentHash/version), because it is
+      // display text no reader validates, and `contentHash` already vouches for the
+      // content it was sliced from.
+      absorbs: group.absorbs.map((a) => ({ id: a, ...snapshot(byId.get(a)) })),
     });
   }
   // `RETAIN` is its own verdict rather than a KEEP with a note: the summary
@@ -550,6 +581,15 @@ export function planDecisions(memories, verdicts, opts = {}) {
  * protected id whenever one pass assigned it a different topic, and topic is a
  * model judgment like any other (TC-SLACKAPP-075).
  *
+ * MERGE reaches the offered set here for the first time (#150), and only because
+ * the replay does. Until the artifact existed, an approved merge was applied by a
+ * FRESH classification whose merged text was different prose whose hash matched
+ * nothing, and whose `absorbs[]` could name ids no operator had seen — so the
+ * verdict was withheld outright. With the reviewed bytes replayed from the hashed
+ * artifact, what an approved merge applies is what was displayed. The narrowing
+ * rule is unchanged in kind and stricter in detail: a merge is agreed only when
+ * every pass merged the same id and named the same absorbed set.
+ *
  * @param passes decision arrays, or `null` for a pass that failed entirely
  */
 export function consensusDecisions(passes) {
@@ -560,6 +600,7 @@ export function consensusDecisions(passes) {
     perPassDeletes: passes.map((p) => (p ? p.filter((d) => d.verdict === "DELETE").length : null)),
     agreed: 0,
     disagreed: 0,
+    mergesAgreed: 0,
     mergesWithheld: 0,
     // Consensus needs at least two usable passes BY DEFINITION. One pass is not
     // a quorum of itself, so a run that loses a pass offers nothing and says so
@@ -589,17 +630,65 @@ export function consensusDecisions(passes) {
     const rows = byPass.map((m) => m.get(id) ?? null);
     const verdicts = rows.map((d) => d?.verdict ?? null);
 
-    // MERGE is withheld from the offered set in v1 — the approval loop approves
-    // deletions only — and counted, so the withholding cannot read as "the
-    // classifier found no merges" (TC-SLACKAPP-076).
+    // A MERGE survives the intersection only when every pass agreed on the same
+    // DESTRUCTIVE FOOTPRINT: MERGE for this id in all of them, absorbing the same
+    // set of ids (#150). Anything less is UNSTABLE and counted, so a withholding
+    // still cannot read as "the classifier found no merges" (TC-SLACKAPP-076).
+    //
+    // The merged TEXT is deliberately NOT part of the agreement test, and that is
+    // not a relaxation. Two passes never produce byte-identical prose, so
+    // requiring it would withhold every merge forever — the check would read as
+    // strict and behave as an unconditional refusal. What makes the text safe is
+    // the artifact instead: the bytes the operator READ in Slack are the bytes the
+    // hash covers and the replay writes, so nondeterminism cannot change what gets
+    // applied. Only the deletion set needs a quorum, because only it is
+    // irreversible and unreviewable after the fact.
     if (verdicts.includes("MERGE")) {
-      report.mergesWithheld += 1;
-      decisions.push({
-        id,
-        verdict: "UNSTABLE",
-        reason: "merge withheld from the approval loop in v1",
-        verdicts,
-      });
+      // `JSON.stringify` of the id list rather than a joined string: for any
+      // separator an id could contain, a joined comparison reads `["ab","c"]` and
+      // `["a","bc"]` as the same absorbed set, and "which ids does this merge
+      // delete" is the one comparison here that must not collide. ORDER-SENSITIVE
+      // deliberately — each pass builds its own merge graph in a deterministic
+      // order, so a different order is a different graph rather than formatting.
+      const absorbedSets = rows.map((d) =>
+        d?.verdict === "MERGE" ? JSON.stringify((d.absorbs ?? []).map((a) => a.id)) : null,
+      );
+      // Named once and used by both the gate and the reason below, which have to
+      // agree by construction: a reason that said "disagreed on which ids" for an
+      // id one pass did not merge at all would send the operator after the wrong
+      // remedy.
+      const everyPassMerged = verdicts.every((v) => v === "MERGE");
+      const agreedMerge =
+        report.consensusReached &&
+        everyPassMerged &&
+        absorbedSets.every((s) => s === absorbedSets[0]);
+      if (!agreedMerge) {
+        report.mergesWithheld += 1;
+        decisions.push({
+          id,
+          verdict: "UNSTABLE",
+          // Names WHICH disagreement, because the two have different remedies: a
+          // pass that judged the id something other than MERGE is a verdict
+          // disagreement, while identical verdicts over different absorbs lists is
+          // the model disagreeing about which fragments belong to the fact.
+          reason: everyPassMerged
+            ? "passes disagreed on which ids the merge absorbs"
+            : "passes disagreed on merging",
+          verdicts,
+        });
+        continue;
+      }
+      // Its OWN counter rather than `agreed`, which feeds `reproducibility`.
+      // `agreed`/`disagreed` measure the DELETE set — the 66% self-reproduction
+      // that motivated the consensus — and a withheld merge lands in
+      // `mergesWithheld`, not in `disagreed`. Counting agreed merges in `agreed`
+      // would raise the numerator without ever raising the denominator, so every
+      // merge-heavy week would report better deletion agreement than it had.
+      report.mergesAgreed += 1;
+      // The FIRST pass's row, for the same reason the DELETE branch takes it: any
+      // pass's anchors would do (they re-read one scan), and its `mergedContent`
+      // is what the artifact records and Slack displays.
+      decisions.push(rows[0]);
       continue;
     }
 
@@ -635,10 +724,56 @@ export function consensusDecisions(passes) {
   return { decisions, report };
 }
 
+/**
+ * Every id a decision may MUTATE OR DELETE, in a fixed order (#150).
+ *
+ * One concept behind every site that asks "what does this decision act on": the
+ * offered id list, the cap charge (`destructiveCost`), the approved-set gate and
+ * its `unclaimed` sweep, and which decisions earn a line in the review message. A
+ * MERGE touches its survivor (rewritten) and every absorbed id (deleted), and a
+ * footprint spelled per-site is how a MERGE came to be gated on `decision.id`
+ * alone — approving one id and deleting several. `decisionIds` is the deliberately
+ * WIDER question and delegates here for the merge case.
+ *
+ * The order is decision order, survivor before its absorbed ids, because the
+ * offered id list is hashed on the legacy path: a set-based derivation would make
+ * the hash depend on iteration order.
+ */
+function decisionFootprint(decision) {
+  if (decision.verdict === "DELETE") return [decision.id];
+  if (decision.verdict === "MERGE") {
+    return [decision.id, ...decision.absorbs.map((absorbed) => absorbed.id)];
+  }
+  return [];
+}
+
+/**
+ * Every id one decision NAMES, destructive or not.
+ *
+ * Distinct from `decisionFootprint`, and the difference is the verdict: a KEEP or
+ * RETAIN row names its id and touches nothing, so it belongs here and not there.
+ * The one caller that needs this rather than the footprint is the "was this
+ * approved id classified at all" question — an id the run judged and declined to
+ * delete is a changed verdict, while an id no decision mentions is a typo.
+ *
+ * A MERGE names exactly its footprint, DELEGATED rather than restated: the
+ * survivor-plus-absorbed expansion has one spelling, so the two cannot drift into
+ * disagreeing about which ids a merge involves.
+ */
+function decisionIds(decision) {
+  if (decision.verdict === "MERGE") return decisionFootprint(decision);
+  return [decision.id];
+}
+
+/**
+ * The cap charge for one decision: exactly the size of what it touches.
+ *
+ * Derived from the footprint rather than restating it, so the reservation and the
+ * approval gate cannot disagree about a MERGE's cost — the shape where a run charges
+ * 1 for an action that deletes three memories.
+ */
 function destructiveCost(decision) {
-  if (decision.verdict === "DELETE") return 1;
-  if (decision.verdict === "MERGE") return 1 + decision.absorbs.length;
-  return 0;
+  return decisionFootprint(decision).length;
 }
 
 /** Build the REST client. Counts every non-GET request so dry-run can assert 0. */
@@ -914,6 +1049,83 @@ async function discoverBaseUrl(opts, deps) {
 }
 
 /**
+ * The reviewed decision list, serialized for the S3 artifact — the bytes the
+ * approval hash will be taken over (#150).
+ *
+ * Why the hash must cover THIS and not the id list. With an id-only hash the
+ * artifact is mutable after the offer: the operator approves ids, and the verdicts
+ * and merged bytes those ids expand to can change underneath — a `MERGE` whose
+ * `absorbs[]` grows by one id after the click deletes a memory that was never
+ * shown, and reports success. Hashing the serialized artifact makes the approval
+ * cover what was actually displayed.
+ *
+ * Serialization is CANONICAL, and that is load-bearing rather than tidiness: the
+ * writer and every later reader must agree on the bytes to the character, because
+ * a single space of difference is a hash mismatch and a hash mismatch is a refusal
+ * (#150 requires refusal, not fallback). So no `null, 2` pretty-printing, keys in a
+ * fixed order at every level, and `absorbs[]` in the order the classifier produced
+ * — reordering absorbs would change the hash while approving the same deletions,
+ * which is the one place a "cosmetic" normalization would silently invalidate live
+ * approvals.
+ *
+ * Every DESTRUCTIVE field is included and nothing is summarized. The anchors
+ * (`contentHash`, `version`) are what the LWW guard compares at apply time, so an
+ * artifact that omitted them would let a replay clobber a memory edited since the
+ * review — the hash has to vouch for the anchors too, not merely for the ids.
+ */
+export function serializeDecisionArtifact({ stage, generatedAt, decisions }) {
+  // Explicit field lists at every level rather than a spread of the decision.
+  // A spread would carry whatever the classifier happens to attach — including
+  // `snippet`, which holds memory content the report path deliberately truncates
+  // — into the hashed bytes AND into the artifact. That is not a leak here (the
+  // artifact is the one place content may live), but it makes the hash depend on
+  // fields no reader validates, so an upstream field addition would invalidate
+  // every live approval as a side effect.
+  const entries = decisions.map((decision) => {
+    const entry = {
+      id: decision.id,
+      verdict: decision.verdict,
+    };
+    // Present only where the verdict makes them meaningful, so the serialized
+    // shape of a KEEP cannot drift with fields it never uses. `undefined` is not
+    // an option: JSON.stringify DROPS undefined values, so a field spelled
+    // present-but-undefined hashes identically to an absent one and the guard
+    // below could not tell them apart.
+    if (typeof decision.contentHash === "string") {
+      entry.contentHash = decision.contentHash;
+    }
+    if (Number.isInteger(decision.version)) entry.version = decision.version;
+    if (decision.verdict === "MERGE") {
+      entry.mergedContent = decision.mergedContent;
+      entry.mergedContentHash = decision.mergedContentHash;
+      // Order PRESERVED, never sorted — see the canonical-serialization note
+      // above. Each absorbed id carries its own anchors because the apply
+      // re-reads and LWW-checks each one separately.
+      entry.absorbs = (decision.absorbs ?? []).map((absorbed) => ({
+        id: absorbed.id,
+        contentHash: absorbed.contentHash,
+        version: absorbed.version,
+      }));
+    }
+    return entry;
+  });
+  return JSON.stringify({ stage, generatedAt, decisions: entries });
+}
+
+/**
+ * The hash of a serialized artifact: the value the Approve button will carry (#150).
+ *
+ * A thin wrapper over `contentHash` on purpose. It exists so the two sides that
+ * must agree — the scan that offers and the apply that replays — name one function
+ * instead of each calling `contentHash` on something they each serialized. The bug
+ * that shape prevents is a reader that hashes its own re-serialization: identical
+ * data, different bytes, permanent refusal.
+ */
+export function decisionArtifactHash(serialized) {
+  return contentHash(serialized);
+}
+
+/**
  * The `{prefix}/approvals/offered` record: what the callback Lambda compares a
  * button click against, and where the apply task reads its ids from (#123).
  *
@@ -923,13 +1135,50 @@ async function discoverBaseUrl(opts, deps) {
  * which makes this record readable by anything holding `ssm:GetParameters` on
  * the stage tree, and bounds what may go in it (TC-SLACKAPP-023b).
  *
+ * `ids` is every id a destructive decision TOUCHES — a merge's survivor and each
+ * of its absorbed ids, not just the DELETE verdicts (#150). The record is the
+ * approval's BOUND, so anything it omits is something the apply must refuse; a
+ * survivor-only entry would approve a rewrite plus N unnamed deletions.
+ *
  * Over the limit it THROWS. Truncating would ask the operator to approve a list
  * that is not the list they were shown, and the ids are exactly what the apply
  * task deletes — the one failure mode here that produces a *wrong* apply rather
  * than a failed one (TC-SLACKAPP-024).
  */
-export function buildOfferedRecord({ stage, decisions, generatedAt, issuedAt }) {
-  const ids = decisions.filter((d) => d.verdict === "DELETE").map((d) => d.id);
+export function buildOfferedRecord({
+  stage,
+  decisions,
+  generatedAt,
+  issuedAt,
+  artifactBucket,
+  artifactKey,
+  artifactHash,
+}) {
+  // Every id any destructive decision TOUCHES, not the DELETE-verdict ids (#150).
+  // This list is the bound `applyDecisions` enforces, so a MERGE whose survivor
+  // alone appeared here would be an approval for a rewrite plus N deletions the
+  // list never named — the exact defect the id-level gate was protecting against
+  // when it refused MERGE outright.
+  const ids = decisions.flatMap(decisionFootprint);
+  // WITHOUT an artifact, a MERGE cannot be offered at all, and this is the guard
+  // that keeps #150's ordering true for every future caller rather than only for
+  // the one that exists (the issue: "MERGE is not offered on any code path where
+  // --decisions is not passed"). An artifact-less offer is applied by a FRESH
+  // classification: its merged prose is different bytes whose hash matches
+  // nothing, and its `absorbs[]` is whatever that run decided — so the ids above
+  // would authorize deletions chosen after the review. Throwing rather than
+  // silently dropping the merge, because a dropped merge leaves its absorbed ids
+  // in a list nothing will apply, and `record.ids` is what the operator is told
+  // they approved.
+  const merges = decisions.filter((d) => d.verdict === "MERGE");
+  if (merges.length > 0 && !artifactHash) {
+    throw new Error(
+      `${merges.length} MERGE decision(s) cannot be offered without a decision ` +
+        `artifact: a merge approved here would be applied by a fresh ` +
+        `classification, whose merged content and absorbed ids are not the ones ` +
+        `reviewed`,
+    );
+  }
   // Required, not defaulted to `generatedAt` or to `new Date()`. Both defaults
   // are wrong in a way that only shows up on the replay path: `loadDecisions`
   // returns the FILE's `generatedAt` for a `--decisions` run, so anchoring the
@@ -944,10 +1193,22 @@ export function buildOfferedRecord({ stage, decisions, generatedAt, issuedAt }) 
   }
   const record = {
     stage,
-    // Over the ids, so a click carrying an earlier list's hash no longer matches
-    // once the list is regenerated. Joined with a separator no id can contain, so
-    // `["ab","c"]` and `["a","bc"]` cannot collide into one hash.
-    hash: contentHash(ids.join("\n")),
+    // Over the ARTIFACT when there is one, and over the ids when there is not
+    // (#150). Both spellings share the property the loop needs — a click carrying
+    // an earlier list's hash stops matching once the list is regenerated — but the
+    // artifact form covers strictly more: the verdicts, the anchors, and a MERGE's
+    // merged text, not merely which ids were named. That is what makes the replay
+    // bounded by what the operator SAW rather than by what a later
+    // re-classification decides, and it is why `MERGE` can only be admitted after
+    // this swap.
+    //
+    // The id-list form is the compatibility path, not a fallback in the dangerous
+    // sense: it is chosen HERE, at write time, by whether an artifact exists — never
+    // by a reader that failed to fetch one. An apply whose record names an artifact
+    // refuses when the bytes do not match (`loadDecisionArtifact`); an apply whose
+    // record names none never had one to verify. The ids join on a separator no id
+    // can contain, so `["ab","c"]` and `["a","bc"]` cannot collide.
+    hash: artifactHash ?? contentHash(ids.join("\n")),
     ids,
     generatedAt,
     // A SEPARATE field from `generatedAt`, and the distinction is the operator's
@@ -958,13 +1219,49 @@ export function buildOfferedRecord({ stage, decisions, generatedAt, issuedAt }) 
     // record until the best-effort second write lands.
     issuedAt,
   };
-  const serialized = JSON.stringify(record);
-  if (serialized.length > MAX_PARAMETER_BYTES) {
+  // ALL THREE or NONE, and the third one is why this is a throw rather than a
+  // both-or-neither `if` (#150). Every partial combination produces a record that
+  // is clickable and then unappliable — an approval the operator spends on nothing:
+  //
+  //   coordinates, `hash` over the ids  -> the apply fetches the artifact, hashes
+  //     it, and finds the claim's hash is the id-list's. Refused, correctly, but
+  //     the click is gone.
+  //   `hash` over the artifact, no coordinates -> the apply has nothing to fetch,
+  //     reads the record as a legacy id-list offer, re-derives over the ids, and
+  //     refuses for the mirror-image reason.
+  //   a bucket with no key (or the reverse) -> not a location anything can fetch.
+  //
+  // None of those is reachable through the one caller, which is exactly what makes
+  // a silent `if` the wrong shape: it would let a future second caller construct
+  // any of them and discover it a week later, at a click, with no error until then.
+  const artifactFields = [artifactBucket, artifactKey, artifactHash];
+  if (artifactFields.some(Boolean) && !artifactFields.every(Boolean)) {
+    throw new Error(
+      `buildOfferedRecord needs the artifact bucket, key, and hash together or ` +
+        `not at all; a partial set offers an approval nothing can apply`,
+    );
+  }
+  // Set HERE rather than assigned onto the returned record by the caller, and that
+  // is the whole reason they are parameters. They add ~151 bytes, and a caller that
+  // appended them afterwards would sail past the check below and then fail at
+  // `PutParameter` — measured: a 108-id list passes the guard at 3964 bytes and
+  // hands SSM 4115. That failure lands on the write that INVALIDATES last week's
+  // button, so the run dies with the previous approval still live and clickable.
+  if (artifactBucket) {
+    record.artifactBucket = artifactBucket;
+    record.artifactKey = artifactKey;
+  }
+  // `Buffer.byteLength`, not `String.length`: the latter counts UTF-16 code units
+  // and SSM measures bytes, so a CJK id — or any non-Latin content that reached a
+  // field here — would measure up to 3x low and be rejected by the service after
+  // passing this guard.
+  const bytes = Buffer.byteLength(JSON.stringify(record), "utf8");
+  if (bytes > MAX_PARAMETER_BYTES) {
     // Measured on the SERIALIZED value rather than the id count: a limit
     // expressed as "N ids" drifts from the real constraint as soon as ids get
     // longer, and bytes are what SSM rejects. `--cap` is the knob to lower.
     throw new Error(
-      `the offered approval list is ${serialized.length} bytes, over the ` +
+      `the offered approval list is ${bytes} bytes, over the ` +
         `${MAX_PARAMETER_BYTES}-byte standard parameter limit for ${ids.length} ids — ` +
         `lower --cap rather than truncating the list the operator approves`,
     );
@@ -1042,24 +1339,91 @@ export function formatHours(ms) {
  * part of a list and attach an Approve button whose hash covers all of it, which
  * is a wrong apply rather than a failed one. Slack rejects an over-limit message
  * wholesale anyway, so the only thing lost is a clear error.
+ *
+ * A MERGE renders as what it DOES (#150): the survivor's new content in full, and
+ * every absorbed id with its own snippet. It is the largest thing this message can
+ * contain and deliberately so — the merged text is what the apply writes, so an
+ * operator who has not read those bytes has not reviewed the merge. That is why
+ * merged content is truncated NOWHERE on this path while the deletion snippets are
+ * 120-character slices: a snippet identifies a memory being removed, and the
+ * merged text IS the change being approved.
  */
 export function buildApprovalMessage({ record, decisions, channel }) {
   const withheld = { RETAIN: 0, UNSTABLE: 0 };
-  const byId = new Map();
   for (const d of decisions) {
-    byId.set(d.id, d);
     if (d.verdict in withheld) withheld[d.verdict] += 1;
   }
+  const clean = (text) => (text ?? "").replace(/\s+/gu, " ").trim();
 
-  const header = `Memory cleanup review — ${record.ids.length} deletion(s) for ${record.stage}`;
-  const lines = record.ids.map((id) => {
-    const decision = byId.get(id);
+  const deleteCount = decisions.filter((d) => d.verdict === "DELETE").length;
+  const merges = decisions.filter((d) => d.verdict === "MERGE");
+  // How many memories LEAVE the store: every DELETE plus every absorbed id. The
+  // merge survivors are excluded on purpose — they are rewritten, not removed —
+  // which is why this is not `record.ids.length` even though both are footprint
+  // arithmetic. Naming it here rather than inlining it keeps the confirm dialog's
+  // one sentence readable, and the exclusion visible.
+  const softDeleted = deleteCount + merges.reduce((n, m) => n + m.absorbs.length, 0);
+  // Counts the ACTIONS and, for merges, the ids each one removes. "N deletion(s)"
+  // alone was accurate while deletions were all there was; with merges in the loop
+  // it would name a rewrite as a deletion, or hide the absorbed ids inside a count
+  // the operator reads as "memories to be removed".
+  const header =
+    `Memory cleanup review — ${deleteCount} deletion(s)` +
+    (merges.length > 0 ? ` and ${merges.length} merge(s)` : "") +
+    ` for ${record.stage}`;
+  // One line per DECISION rather than per id — so a merge renders once, as a
+  // rewrite plus its deletions. Walking `decisions` rather than `record.ids`
+  // (which is what this did, through an id→decision Map) is required by the same
+  // change that grew the ids: an absorbed id has no decision row of its own, so an
+  // id-driven walk would print it as an unexplained "no reason recorded" bullet.
+  const lines = [];
+  for (const decision of decisions) {
+    // Skips every non-destructive verdict, derived from the footprint rather than
+    // by listing DELETE and MERGE again: a line for a KEEP or a RETAIN would put an
+    // id in a review list the approval does not cover.
+    if (decisionFootprint(decision).length === 0) continue;
     // The snippet is the review: an id alone is not something an operator can
     // judge. Slack and CloudWatch Logs are the approved destinations for memory
     // content — the SSM record and the repository are not.
-    const snippet = (decision?.snippet ?? "").replace(/\s+/gu, " ").trim();
-    return `• \`${id}\` — ${decision?.reason ?? "no reason recorded"}${snippet ? `: ${snippet}` : ""}`;
-  });
+    const snippet = clean(decision.snippet);
+    const reason = decision.reason ?? "no reason recorded";
+    if (decision.verdict !== "MERGE") {
+      lines.push(`• \`${decision.id}\` — ${reason}${snippet ? `: ${snippet}` : ""}`);
+      continue;
+    }
+    // The MERGED TEXT is shown, not summarized, and that is the whole reason a
+    // merge may be approved at all: the artifact's `mergedContent` is what the
+    // apply writes, so the operator has to have read those exact bytes. Slack is
+    // an approved destination for memory content; showing a length or a hash
+    // instead would be an approval of something unreviewed.
+    const line =
+      `• *MERGE* into \`${decision.id}\` — ${reason}` +
+      `\n    _new content_: ${clean(decision.mergedContent)}` +
+      // Each absorbed id with its own snippet, because each one is DELETED by
+      // this single approval. A count would be the "deletions the operator never
+      // saw" defect with a number in front of it.
+      decision.absorbs
+        .map((a) => `\n    _absorbs_ \`${a.id}\`${clean(a.snippet) ? `: ${clean(a.snippet)}` : ""}`)
+        .join("");
+    // Checked HERE and not left to `chunkSections`, which TRUNCATES an over-long
+    // line with a marker. That was safe while every line was a reason plus a
+    // 120-character snippet; a merge line carries the merged content in full, so
+    // truncation would show the operator part of the text and attach a button whose
+    // hash covers all of it — a wrong apply, which is the one outcome this whole
+    // path is built to exclude.
+    //
+    // The remedy is deliberately NOT "lower --cap": the cap bounds how many
+    // decisions a run applies and cannot shrink a single merge, so that advice
+    // would be inert on exactly the input that triggers this.
+    if (line.length > SLACK_MAX_SECTION_CHARS) {
+      throw new Error(
+        `the merge into ${decision.id} renders ${line.length} characters, over ` +
+          `Slack's ${SLACK_MAX_SECTION_CHARS}-character section limit — its merged ` +
+          `content cannot be shown whole, so it cannot be offered for approval`,
+      );
+    }
+    lines.push(line);
+  }
 
   const blocks = [
     { type: "header", text: { type: "plain_text", text: header } },
@@ -1083,7 +1447,16 @@ export function buildApprovalMessage({ record, decisions, channel }) {
         {
           type: "button",
           action_id: "cleanup_approve",
-          text: { type: "plain_text", text: `Approve ${record.ids.length} deletion(s)` },
+          // Named by the ACTIONS approved, while the confirm dialog below counts
+          // the memories affected. The two numbers differ for a merge and both
+          // matter: the button says what is being authorized, the dialog says how
+          // much of the store it moves.
+          text: {
+            type: "plain_text",
+            text:
+              `Approve ${deleteCount} deletion(s)` +
+              (merges.length > 0 ? ` + ${merges.length} merge(s)` : ""),
+          },
           style: "danger",
           // The hash ONLY. A Slack action value is capped at 2000 characters so
           // it cannot carry the ids — and must not: the signature proves a click
@@ -1091,10 +1464,19 @@ export function buildApprovalMessage({ record, decisions, channel }) {
           // ones the classifier chose. The apply task reads them from SSM.
           value: record.hash,
           confirm: {
-            title: { type: "plain_text", text: "Apply these deletions?" },
+            title: { type: "plain_text", text: "Apply these changes?" },
             text: {
               type: "mrkdwn",
-              text: `${record.ids.length} memories will be soft-deleted in *${record.stage}*.`,
+              // `absorbed` is stated SEPARATELY from the rewrite rather than folded
+              // into one "N memories" count, because a merge does two different
+              // things to two different sets of ids and the confirm dialog is the
+              // last thing the operator reads before the deletions happen.
+              text:
+                `${softDeleted} memories will be soft-deleted in *${record.stage}*` +
+                (merges.length > 0
+                  ? ` and ${merges.length} surviving memor${merges.length === 1 ? "y" : "ies"} rewritten`
+                  : "") +
+                `.`,
             },
             confirm: { type: "plain_text", text: "Apply" },
             deny: { type: "plain_text", text: "Cancel" },
@@ -1287,6 +1669,262 @@ async function readPendingOffer({ ssm, name, stage, now, log }) {
 }
 
 /**
+ * Persist the reviewed decision list to S3 and return where it landed (#150).
+ *
+ * The returned `hash` IS the value the Approve button carries and the claim is
+ * named for, so these bytes are what the operator's click authorizes. Two
+ * consequences worth stating where the hash is produced: the artifact must exist
+ * before any record names it (`postApprovalRequest` orders the two writes for that
+ * reason), and an apply that fetches these bytes and re-hashes them to something
+ * else must REFUSE rather than re-classify — the hash is the only thing tying the
+ * click to a reviewed list.
+ *
+ * This is the FIRST at-rest store of memory content outside the database — a
+ * replayable `MERGE` has to carry its `mergedContent`, which is real memory text.
+ * AGENTS.md: "Data ownership is the whole point". The mitigations are therefore
+ * part of this function rather than follow-up polish:
+ *
+ *  - SSE-KMS at rest, with the bucket's own default (`aws:kms` + `alias/aws/s3`).
+ *    NOT requested per-object here: the bucket's default encryption already
+ *    applies, and naming `ServerSideEncryption` in the request would ALSO have to
+ *    name the key, which is how a caller ends up presenting an encryption context
+ *    the boundary's `GenKey` deny does not match — an AccessDenied on the write,
+ *    after the scan has done its whole audit. The bucket configuration is asserted
+ *    by TC-SLACKAPP-163 instead, which is where a mutation can reach it.
+ *  - A stage-scoped key (`decisions/<stage>/...`), because the bucket name is
+ *    account-scoped and shared across stages (see `decisionArtifactKey` in
+ *    infra/slack-approval.ts for why the bucket cannot carry the stage).
+ *  - Lifecycle expiry at the offer TTL, configured on the bucket.
+ *  - The content reaches NO log line. This function logs the key and the hash and
+ *    the byte count; it never logs the body, and the returned shape carries no
+ *    content either.
+ *
+ * A single `PutObject`, never `@aws-sdk/lib-storage`'s `Upload`. That helper
+ * switches to a multipart upload above a threshold and calls
+ * `AbortMultipartUpload` on failure — an action the workload boundary's ceiling
+ * does NOT admit (it enumerates `s3:GetObject` and `s3:PutObject` and nothing
+ * else). So the convenient wrapper would work in a unit test, work for small
+ * artifacts, and then fail on the first large one with an AccessDenied inside its
+ * own error handler. A cap on the body is the honest bound instead.
+ */
+export async function putDecisionArtifact({
+  s3,
+  bucket,
+  stage,
+  generatedAt,
+  decisions,
+  log = () => {},
+}) {
+  const { PutObjectCommand } = await import("@aws-sdk/client-s3");
+  const body = serializeDecisionArtifact({ stage, generatedAt, decisions });
+  // `Buffer.byteLength`, not `String.length`: the latter counts UTF-16 code units
+  // while S3 receives bytes, and this body carries memory TEXT — a CJK
+  // `mergedContent` measures up to 3x higher on the wire than `.length` reports, so
+  // the cheap check would pass a body that then needs the multipart path the
+  // boundary denies. The one place in this function where the difference is not
+  // academic.
+  const bytes = Buffer.byteLength(body, "utf8");
+  if (bytes > MAX_ARTIFACT_BYTES) {
+    // Refused, not split into parts and not truncated. Truncating is the same
+    // class of mistake `buildOfferedRecord` refuses for the SSM record — the
+    // operator would approve a hash over bytes that are not the list they were
+    // shown — and multipart is denied by the boundary (see above).
+    //
+    // The remedy names the CORPUS, deliberately not `--cap`. The artifact carries
+    // every decision including KEEPs, so it scales with what was scanned, while
+    // `--cap` bounds only an apply's destructive spend and never reaches this path
+    // — measured, a 30k-memory store with zero deletions breaches this. Advice to
+    // lower `--cap` would be inert here, and inert on the scheduled scan twice over,
+    // since no operator is at the keyboard to take it.
+    throw new Error(
+      `the decision artifact is ${bytes} bytes, over the ` +
+        `${MAX_ARTIFACT_BYTES}-byte single-PutObject bound for ${decisions.length} ` +
+        `decision(s) — the artifact holds one row per SCANNED memory, so this is a ` +
+        `corpus too large to review in one offer; narrow the scan rather than ` +
+        `truncating the reviewed list`,
+    );
+  }
+  const hash = decisionArtifactHash(body);
+  // Keyed by the HASH, not by a timestamp or a run id. Three properties follow,
+  // and the third is the one that matters: the key is content-addressed, so a
+  // re-run producing the identical list writes the identical object (idempotent);
+  // two runs producing different lists cannot collide; and the apply task can
+  // derive the key from the claim's hash ALONE, with no extra field to plumb
+  // through the Lambda, the claim, and the container override — every one of which
+  // is a place a run id could be dropped or forged.
+  const key = decisionArtifactKey(stage, hash);
+  await s3.send(
+    new PutObjectCommand({
+      Bucket: bucket,
+      Key: key,
+      Body: body,
+      ContentType: "application/json",
+      // Checked by S3 against the body it received, so a truncated upload is
+      // rejected by the service rather than becoming an artifact whose hash the
+      // apply will refuse — a failure at write time is diagnosable, one at replay
+      // time costs the operator's click.
+      ChecksumSHA256: createHash("sha256").update(body).digest("base64"),
+    }),
+  );
+  // The key, the hash, and the SIZE. Never the body, and never a decision id: this
+  // line goes to CloudWatch Logs, which is a wider audience than the artifact's
+  // own SSE-KMS bucket.
+  log(`decision artifact written to s3://${bucket}/${key} (${bytes} bytes)`);
+  return { hash, key, bytes };
+}
+
+/**
+ * Fetch the reviewed decision list the operator approved, and prove it is that
+ * list (#150).
+ *
+ * This is the replay half. Before it, the Slack-triggered apply re-ran the whole
+ * classifier and applied whatever the NEW run decided, filtered by the approved
+ * ids — so the operator approved one list and the task applied another that merely
+ * overlapped it. The ids were a real bound, but only on which memories could be
+ * touched, never on what was done to them; that is why `MERGE` had to be refused
+ * outright on that path, since its absorbed ids and content rewrite were never
+ * shown to anyone.
+ *
+ * EVERY failure here THROWS. There is no fallback to re-classification, and the
+ * absence of one is the entire safety property this function exists to provide: a
+ * reader that fell back would turn every one of the four failures below — a
+ * tampered artifact, a deleted object, a transient S3 error, a truncated body — into
+ * a silent downgrade to the exact behaviour #150 replaced, under an approval the
+ * operator gave for something else. A refused apply costs a click and a re-run; a
+ * downgraded one deletes memories nobody reviewed and reports success.
+ *
+ * The hash is RE-DERIVED over the fetched bytes and compared against the claim's,
+ * never against anything inside the artifact. An artifact that carried its own hash
+ * would vouch for itself, and the bytes are reached through a key the record names
+ * — so the claim's hash is the only value in the chain a tamperer does not control:
+ * it was written into an immutable claim (`Overwrite: false`) at click time.
+ *
+ * Deliberately NOT `s3:ListBucket`-based and NOT a prefix scan: the key comes from
+ * the record, the task holds no `s3:ListBucket`, and "the newest artifact under our
+ * prefix" would be the current scan's rather than the approved one's — the same
+ * mistake as reading `approvals/offered` instead of the claim.
+ */
+export async function loadDecisionArtifact({
+  s3,
+  bucket,
+  key,
+  hash,
+  stage,
+  log = () => {},
+}) {
+  const { GetObjectCommand } = await import("@aws-sdk/client-s3");
+  let body;
+  try {
+    const response = await s3.send(
+      new GetObjectCommand({ Bucket: bucket, Key: key }),
+    );
+    // `transformToString` rather than a stream pipe: the body is bounded at
+    // MAX_ARTIFACT_BYTES by the writer, and the SDK's helper is the only form that
+    // does not need a stream-to-buffer dance whose partial-read failure mode is
+    // silent truncation — which would hash to something else and be refused below,
+    // but diagnosed as tampering.
+    body = await response.Body.transformToString("utf8");
+  } catch (err) {
+    // `err.name`, never `err.message`. An AWS SDK error quotes the request it
+    // rejected, and this request names an S3 key derived from the approval hash —
+    // the same reason `failureClass` exists on the Lambda side. NoSuchKey and
+    // AccessDenied are both here on purpose: the operator's remedy differs (an
+    // expired artifact vs a missing grant) and the name is what distinguishes them.
+    throw new Error(
+      `the approved decision artifact at s3://${bucket}/${key} could not be ` +
+        `read (${err.name ?? "unknown error"}) — refusing to apply, because the ` +
+        `alternative is re-classifying and applying verdicts nobody approved`,
+    );
+  }
+
+  // BEFORE the parse. A tampered body is not necessarily invalid JSON, and a
+  // hash check that ran after parsing would have already handed attacker-chosen
+  // structure to `JSON.parse` and to every `typeof` below it. Cheap, total, and
+  // first.
+  const derived = decisionArtifactHash(body);
+  if (derived !== hash) {
+    // Neither hash is quoted beyond its own value and NEITHER is the body: the
+    // point of the message is which of the two sides disagreed, and an operator
+    // reconciling this needs the pair, not the contents.
+    throw new Error(
+      `the decision artifact at s3://${bucket}/${key} hashes to ${derived}, not ` +
+        `the approved ${hash} — refusing to apply a list the operator did not ` +
+        `review; re-run the scan to offer a fresh one`,
+    );
+  }
+
+  let parsed;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    // Unreachable in practice — the hash matched, so these bytes are the ones the
+    // writer serialized with `JSON.stringify` — and kept anyway, because "the guard
+    // above makes this impossible" is the reasoning that turns a future change to
+    // the writer's format into an uncaught SyntaxError whose stack quotes the body.
+    // The message quotes nothing.
+    throw new Error(
+      `the decision artifact at s3://${bucket}/${key} is not valid JSON despite ` +
+        `matching the approved hash — refusing to apply`,
+    );
+  }
+  if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.decisions)) {
+    throw new Error(
+      `the decision artifact at s3://${bucket}/${key} has no decisions array — ` +
+        `refusing to apply`,
+    );
+  }
+  // Stage-bound like the claim and like #102's decision file, and NOT redundant
+  // with the per-stage key prefix: the prefix is enforced by IAM against the
+  // key the RECORD names, so it constrains where the bytes came from, while this
+  // constrains what the bytes say about themselves. A prod claim pointing at a
+  // prod-prefixed object whose contents claim `pr-7` is the case where those differ,
+  // and it is the one an operator can produce by hand.
+  if (parsed.stage !== stage) {
+    throw new Error(
+      `the decision artifact names stage ${JSON.stringify(parsed.stage)}, not ` +
+        `${JSON.stringify(stage)} — refusing to apply`,
+    );
+  }
+  // The same validator the `--decisions` file path runs, so a replayed artifact and
+  // a replayed file are held to one shape. It throws on a DELETE with no
+  // `contentHash` and on a MERGE with no anchors, which is what keeps the LWW guard
+  // from degrading into a misattributed skip.
+  validateDecisions(parsed.decisions);
+  // The COUNT, never a verdict breakdown and never an id: this line goes to
+  // CloudWatch, and `runCleanup`'s own summary already reports the verdicts it
+  // applied.
+  log(
+    `replaying ${parsed.decisions.length} reviewed decision(s) from ` +
+      `s3://${bucket}/${key} (${hash})`,
+  );
+  return { decisions: parsed.decisions, generatedAt: parsed.generatedAt };
+}
+
+/**
+ * The artifact's S3 key. DUPLICATED from `decisionArtifactKey` in
+ * infra/slack-approval.ts, which is the provisioner while this file is the writer
+ * — the same split, and for the same reason, as `OFFER_TTL_MS`: the container
+ * script and the SST program share no module, and a drift here is an AccessDenied
+ * against the identity policy's per-stage object scope. TC-SLACKAPP-168 asserts
+ * the two agree.
+ *
+ * Exported for that assertion alone. Nothing outside this module builds a key — the
+ * apply reads the one the record names — so a caller reaching for this is a caller
+ * deriving a location it should have been told.
+ */
+export function decisionArtifactKey(stage, hash) {
+  // The `:` in `sha256:...` is legal in an S3 key but needs percent-encoding in a
+  // URL and reads as a port separator in an `s3://` line, so it takes the same
+  // dash treatment `claimParameterName` applies for SSM's sake. One transformation
+  // for both stores is easier to verify than two.
+  //
+  // The trailing slash after the stage is load-bearing, not formatting: the grant
+  // is `decisions/<stage>/*`, and without the separator `decisions/pr-4*` would
+  // match `decisions/pr-42/...` — one preview stage reading another's list.
+  return `decisions/${stage}/${String(hash).replace(/:/gu, "-")}.json`;
+}
+
+/**
  * Offer this run's deletions to the operator: write the record, then post the
  * message whose button the callback Lambda validates against it (#123).
  *
@@ -1324,10 +1962,11 @@ export async function postApprovalRequest({
   channel,
   botToken,
   fetchImpl,
+  s3,
+  artifactBucket,
   now = Date.now,
   log = () => {},
 }) {
-  const record = buildOfferedRecord({ stage, decisions, generatedAt, issuedAt });
   const { PutParameterCommand } = await import("@aws-sdk/client-ssm");
   const name = `${ssmPrefix}/approvals/offered`;
   const pending = await readPendingOffer({ ssm, name, stage, now: now(), log });
@@ -1367,6 +2006,62 @@ export async function postApprovalRequest({
       }),
     );
 
+  // BEFORE the record, and the order is load-bearing in the same way the
+  // record-before-post order is (#150). The record is what a click is validated
+  // against, so a record written first would make the artifact CLICKABLE while the
+  // object may not exist — and the apply must REFUSE a missing artifact, never fall
+  // back to re-classifying, so that window is a spent approval that applies
+  // nothing. Writing the artifact first means the only failure order is the safe
+  // one: an orphaned artifact that no record points at, which the bucket's
+  // lifecycle rule expires on its own.
+  //
+  // Absent `s3`/`artifactBucket` writes the record exactly as #123 and #149 did,
+  // which is what keeps the #102 operator CLI and any stage without the artifact
+  // bucket working. That path can only ever offer DELETEs: `buildOfferedRecord`
+  // THROWS on a merge with no artifact hash rather than dropping it silently, so an
+  // artifact-less offer is no weaker than what already shipped and cannot become so
+  // by omission (#150).
+  const artifact =
+    s3 && artifactBucket
+      ? await putDecisionArtifact({
+          s3,
+          bucket: artifactBucket,
+          stage,
+          generatedAt,
+          decisions,
+          log,
+        })
+      : undefined;
+
+  // Built AFTER the artifact so the two coordinates are inside the record the
+  // 4096-byte guard measures. They add ~151 bytes, and assigning them onto a
+  // record already validated without them was a real hole: a 108-id list passed at
+  // 3964 bytes and handed SSM 4115, failing on the write that invalidates last
+  // week's button.
+  //
+  // The artifact's hash becomes the record's `hash` — the value the button carries
+  // and the claim is named for — rather than a third field beside the coordinates.
+  // The key already embeds it (`decisionArtifactKey` is content-addressed), so a
+  // separate `artifactHash` would be a second spelling of one value that a
+  // hand-edited record could make disagree with the key, and there would then be two
+  // hashes with no rule saying which one wins.
+  //
+  // The BUCKET has to be recorded because it is the one part the apply cannot
+  // derive: the alternative is an environment variable the apply task and the review
+  // task must agree on out of band, and a drift there surfaces as an AccessDenied
+  // after the click has been spent. Neither coordinate is memory content — a bucket
+  // name and a `decisions/<stage>/sha256-<hex>.json` key name no memory
+  // (TC-SLACKAPP-169).
+  const record = buildOfferedRecord({
+    stage,
+    decisions,
+    generatedAt,
+    issuedAt,
+    artifactBucket: artifact ? artifactBucket : undefined,
+    artifactKey: artifact?.key,
+    artifactHash: artifact?.hash,
+  });
+
   await write(record);
   log(`offered ${record.ids.length} id(s) for approval as ${record.hash}`);
   if (record.ids.length === 0) {
@@ -1397,11 +2092,13 @@ export async function postApprovalRequest({
  *
  * Two properties matter and neither is cosmetic:
  *
- *  - The count is what was DELETED (`capUsed`), never what was approved. An
- *    apply that approved 3 and deleted 1 has lost two to the LWW guard, and this
+ *  - The count is what was APPLIED (`capUsed`), never what was approved. An
+ *    apply that approved 3 and applied 1 has lost two to the LWW guard, and this
  *    message is the audit trail — nothing downstream would ever correct an
  *    optimistic number, so the operator would believe memories are gone that are
- *    still there.
+ *    still there. It counts ids TOUCHED, so an applied merge contributes its
+ *    survivor rewrite as well as each absorbed deletion, which is why the headline
+ *    says "change(s)" rather than "deletion(s)" (#150).
  *  - No `actions` block. `chat.update` REPLACES the blocks wholesale, which is
  *    what removes the buttons; leaving them would offer a hash whose claim
  *    already exists, and the callback answers that click with "someone else is
@@ -1422,7 +2119,10 @@ export function buildOutcomeMessage({
   result,
   appliedAt,
 }) {
-  const deleted = result.capUsed ?? 0;
+  // `applied`, not `deleted`: since #150 `capUsed` charges a merge's survivor
+  // rewrite alongside each absorbed deletion, so the name would claim one id more
+  // was removed than was, per applied merge — see the headline note below.
+  const applied = result.capUsed ?? 0;
   const notes = [];
   if (result.skippedLww > 0) {
     notes.push(
@@ -1457,7 +2157,12 @@ export function buildOutcomeMessage({
     notes.push(`*the run exited ${result.exitCode}* — see the task log`);
   }
 
-  const headline = `Applied: ${deleted} of ${approved} approved deletion(s) in ${stage}`;
+  // "changes", not "deletion(s)". `capUsed` charges one unit per id a decision
+  // TOUCHED, and since #150 a merge charges its survivor rewrite alongside each
+  // absorbed deletion — so "N deletions" would overstate what was removed by one
+  // per applied merge. Both numbers are id counts against the same footprint, which
+  // is what keeps the ratio meaningful; naming them "changes" is what keeps it true.
+  const headline = `Applied: ${applied} of ${approved} approved change(s) in ${stage}`;
   const blocks = [
     { type: "header", text: { type: "plain_text", text: "Memory cleanup applied" } },
     {
@@ -1595,20 +2300,49 @@ export async function materializeApprovedIds({
   if (record.ids.length === 0) {
     throw new Error(`the approval record at ${name} approved no ids`);
   }
-  // Re-derived over the IDS, not compared against the record's own `hash` field:
-  // a tampered record carries a `hash` that agrees with itself, so only
-  // recomputing makes the ids the thing the hash vouches for. Same join as
-  // `buildOfferedRecord`, with a separator no id can contain.
-  const derived = contentHash(record.ids.join("\n"));
-  if (derived !== hash) {
-    throw new Error(
-      `the approval record's ids do not match the requested hash — refusing to apply`,
-    );
+  // WHERE the hash's meaning is decided, and the two cases are not interchangeable
+  // (#150):
+  //
+  //  - The record names an artifact. `hash` is then the artifact's, so nothing here
+  //    can re-derive it — the bytes are in S3 and this function holds only SSM. The
+  //    verification moves to `loadDecisionArtifact`, which fetches those bytes and
+  //    hashes them, and the ids below become a BOUND on the replay rather than the
+  //    thing the hash vouches for.
+  //  - The record names none. `hash` is over the ids, exactly as #123 shipped, and
+  //    re-deriving here is the only proof the ids are the approved ids.
+  //
+  // The branch is on the RECORD, never on whether this task happens to have an S3
+  // client or a bucket variable: a record whose `hash` covers an artifact must not
+  // be checkable by the weaker rule just because the reader was configured without
+  // S3. That direction is the dangerous one — it would accept an id list a tamperer
+  // chose while the button's hash covered a reviewed list — so an artifact-bearing
+  // record with no way to fetch the artifact is refused downstream rather than
+  // downgraded here.
+  const artifact = artifactCoordinates(record);
+  if (!artifact) {
+    // Re-derived over the IDS, not compared against the record's own `hash` field:
+    // a tampered record carries a `hash` that agrees with itself, so only
+    // recomputing makes the ids the thing the hash vouches for. Same join as
+    // `buildOfferedRecord`, with a separator no id can contain.
+    const derived = contentHash(record.ids.join("\n"));
+    if (derived !== hash) {
+      throw new Error(
+        `the approval record's ids do not match the requested hash — refusing to apply`,
+      );
+    }
   }
 
   // Ids only, one per line, because `readApprovedIds` splits on "\n" and trims.
   // A JSON array or a comma-joined line would parse as a single id and silently
   // approve nothing.
+  //
+  // Written on BOTH paths, artifact or not. Under a replay the artifact supplies the
+  // verdicts and this file still supplies the bound: `applyDecisions` refuses to
+  // touch an id the operator did not approve, so an artifact entry outside this list
+  // is not applied even though the hash vouches for it. Those two can differ
+  // legitimately — the artifact holds one row per SCANNED memory while the record
+  // holds the DELETE ids — and they can differ illegitimately if a claim were
+  // rewritten, which is the case the bound exists for.
   fs.writeFileSync(idsFile, `${record.ids.join("\n")}\n`, { mode: 0o600 });
   // The COUNT, never the ids: an operator needs to know the apply matched the
   // approval, not which memories it names.
@@ -1618,12 +2352,43 @@ export async function materializeApprovedIds({
   // them and nothing else in the task does, so a second read of the same
   // parameter would be the alternative. Ids deliberately do NOT come back — the
   // file is where they belong, and the outcome message must not name them.
+  //
+  // `artifact` rides out for the same reason, and it is why the caller does not read
+  // the record a second time: the coordinates it needs to fetch the reviewed list
+  // are in the value already parsed here, and a second read could observe a
+  // different one.
   return {
     count: record.ids.length,
+    artifact,
     messageTs: typeof record.messageTs === "string" ? record.messageTs : undefined,
     messageChannel:
       typeof record.messageChannel === "string" ? record.messageChannel : undefined,
   };
+}
+
+/**
+ * The artifact coordinates a claim carries, or undefined for a pre-#150 record.
+ *
+ * BOTH fields or neither, checked rather than assumed, because this is the read side
+ * of a record `buildOfferedRecord` writes atomically but SSM stores as a plain
+ * string an operator can edit. A half-set is refused outright rather than treated as
+ * absent: absent means "this is a #123-era id-list offer, verify it that way", and a
+ * record that named a bucket with no key would then be verified by the weaker rule —
+ * a downgrade a tamperer could trigger by DELETING one field, which is the cheapest
+ * possible edit.
+ */
+function artifactCoordinates(record) {
+  const bucket = record.artifactBucket;
+  const key = record.artifactKey;
+  if (bucket === undefined && key === undefined) return undefined;
+  if (typeof bucket !== "string" || !bucket || typeof key !== "string" || !key) {
+    throw new Error(
+      `the approval record's artifact coordinates are incomplete — refusing to ` +
+        `apply, because a partial location cannot be fetched and its absence ` +
+        `would downgrade the approval to an id-list check`,
+    );
+  }
+  return { bucket, key };
 }
 
 /**
@@ -1724,10 +2489,46 @@ export function snippetLogDir(outDir, stage) {
 }
 
 /**
- * Obtain the decision list: replay a prior dry-run file, or scan + classify and
- * persist a new one outside the repo (0700/0600 — it holds memory snippets).
+ * Obtain the decision list: replay the REVIEWED list the operator approved, replay
+ * a prior dry-run file, or scan + classify and persist a new one outside the repo
+ * (0700/0600 — it holds memory snippets).
+ *
+ * The approved-artifact branch is FIRST, and its position is the whole point of
+ * #150: before it, a Slack-triggered apply fell through to the scan below and
+ * applied whatever a fresh classification decided, filtered by the approved ids. So
+ * the operator reviewed one list and the task applied another that merely
+ * overlapped it.
  */
 async function loadDecisions(opts, deps, { client, fs, clock, log, outDir }) {
+  if (deps.loadReviewedDecisions) {
+    // No `try`. `loadDecisionArtifact` throws on all four ways the artifact can
+    // fail — unreadable, hash-mismatched, malformed, wrong stage — and catching any
+    // of them to continue would fall through to the scan below, which is precisely
+    // the behaviour this branch replaces. The refusal has to propagate out of
+    // `runCleanup` entirely: exit non-zero with nothing applied, so the operator
+    // re-runs the scan and clicks a fresh offer.
+    const reviewed = await deps.loadReviewedDecisions();
+    return {
+      decisions: reviewed.decisions,
+      // No `decisionPath`: nothing was written to disk. The artifact carries a
+      // MERGE's `mergedContent`, which is real memory text, and the S3 object under
+      // SSE-KMS is where #150 accepted that content living at rest — a second copy
+      // on the task's ephemeral disk would be a third store nobody reviewed. The
+      // messages that name `decisionPath` are the operator-CLI's "your list survives
+      // at ..." lines, and here the durable copy is the artifact itself.
+      decisionPath: undefined,
+      // The ARTIFACT's stamp: when the classifier decided, which is what the
+      // reviewed list is dated by. A replay generated nothing. Falls back to now
+      // only if the artifact predates the field.
+      generatedAt: reviewed.generatedAt ?? new Date(clock()).toISOString(),
+      // This run ran no classifier, so there is no classifier to call broken and no
+      // batch to count. Zeroes, not undefined: `classificationFailureNote` divides
+      // by `batches` and `verdictSummary` reads the list either way.
+      classifierBroken: false,
+      batches: 0,
+      failedBatches: 0,
+    };
+  }
   if (opts.decisionsFile) {
     const loaded = JSON.parse(fs.readFileSync(opts.decisionsFile, "utf8"));
     // A decision file is stage-bound: ids/hashes from one store must never be
@@ -1790,7 +2591,10 @@ async function loadDecisions(opts, deps, { client, fs, clock, log, outDir }) {
           .map((n, i) => `pass ${i + 1} DELETE=${n ?? "failed"}`)
           .join("; ") +
         `; agreed=${consensus.agreed}; disagreed=${consensus.disagreed}` +
-        `; merges withheld=${consensus.mergesWithheld}` +
+        // BOTH merge numbers, always. `merges withheld=0` alone reads as "no merges
+        // were held back" whether the classifier proposed none or agreed on all of
+        // them, and those are opposite facts about the same week.
+        `; merges agreed=${consensus.mergesAgreed}; merges withheld=${consensus.mergesWithheld}` +
         reproducibility(consensus) +
         (consensus.consensusReached
           ? ""
@@ -1898,16 +2702,24 @@ function readApprovedIds(fs, idsFile) {
  * re-read whose content hash must still match the decision's anchor (LWW
  * guard), so a concurrently edited memory is skipped rather than clobbered.
  *
- * When `approved` is present, EVERY id this function deletes must be in it — not
+ * When `approved` is present, EVERY id this function touches must be in it — not
  * just the id the decision is keyed on. A MERGE deletes its `absorbs[]` ids and
- * rewrites the survivor's content, and `buildOfferedRecord` offers DELETE verdicts
- * only, so under `--ids` a MERGE can never be an approved operation: its absorbed
- * ids were never shown to the operator and its survivor is not a deletion at all.
- * Gating on `decision.id` alone let a MERGE through whose absorbed ids the operator
- * had never seen (the Slack-triggered task re-classifies rather than replaying the
- * reviewed artifact, so the verdicts it applies are not the verdicts that were
- * approved). That is the one thing this loop exists to prevent, so a MERGE is
- * refused outright here rather than partially honored.
+ * rewrites the survivor's content, so gating on `decision.id` alone would let a
+ * merge through whose absorbed ids the operator never approved. That is the one
+ * thing this loop exists to prevent, so the gate is over the whole
+ * `decisionFootprint` and a merge missing ANY of its ids is refused entire —
+ * never partially honored by dropping the unapproved absorbs, which would apply a
+ * merge nobody reviewed (the survivor would absorb a different set than the one
+ * displayed).
+ *
+ * A MERGE was refused unconditionally here until #150, because the Slack-triggered
+ * task re-classified rather than replayed: its merged bytes were fresh prose and
+ * its `absorbs[]` was chosen after the review, so no approval could cover them.
+ * Both halves of that are now closed — `loadDecisionArtifact` replays the reviewed
+ * list under a hash that covers the merged content, and `buildOfferedRecord` names
+ * every absorbed id in the record the operator's ids file comes from. So the
+ * footprint check is no longer a proxy for "this cannot be approved"; it is the
+ * literal question, and it is asked of the ids that were actually offered.
  */
 async function applyDecisions({ decisions, client, cap, approved, counters, log }) {
   const deleteQueue = [];
@@ -1927,31 +2739,53 @@ async function applyDecisions({ decisions, client, cap, approved, counters, log 
   // `runCleanup` already reports those by name ("matched no decision") because a
   // typo'd approval is a different problem with a different fix. Counting them
   // here would have the same id described two contradictory ways in one run.
-  const decided = new Set(decisions.map((decision) => decision.id));
+  // Over every id a decision NAMES, not just the keyed ids, because an absorbed id
+  // has no decision row of its own. This one is a statement of the concept rather
+  // than a live guard, and worth saying so: the footprint sweep below deletes a
+  // merge's absorbed ids from `unclaimed` unconditionally and BEFORE the approval
+  // gate, so `decisions.map(d => d.id)` yields identical counts today and no test
+  // separates the two. The seeding is what keeps that true if the sweep ever moves
+  // under the gate — then a refused merge's absorbed ids would survive here, and
+  // only this spelling makes "reclassified" mean the same thing for them as for a
+  // keyed id. The load-bearing use of `decisionIds` is `runCleanup`'s "matched no
+  // decision" set, where nothing sweeps (TC-SLACKAPP-203).
+  const decided = new Set(decisions.flatMap(decisionIds));
   const unclaimed = approved
     ? new Set([...approved].filter((id) => decided.has(id)))
     : null;
 
   try {
     for (const decision of decisions) {
+      const footprint = decisionFootprint(decision);
+      // `destructiveCost` is this footprint's LENGTH, so the cap charge and the
+      // approval gate below read the same list by construction — they cannot
+      // disagree about what a MERGE costs, which is the shape where a run charges 1
+      // for an action that deletes three memories. Kept as a named call rather than
+      // `footprint.length` because the cap reservation is what it means.
       const cost = destructiveCost(decision);
       if (cost === 0) continue;
-      unclaimed?.delete(decision.id);
-      if (approved && !approved.has(decision.id)) {
-        skippedByFilter += 1;
-        continue;
-      }
-      // Counted as filtered rather than as an error: an approved-ids run that met
-      // a MERGE has classified something the operator's list cannot cover, which
-      // is a normal consequence of re-classifying, not a corrupt input. It is
-      // LOGGED because the alternative — a silent skip — is how "1 of 2 applied"
-      // becomes unexplainable.
-      if (approved && decision.verdict === "MERGE") {
-        log(
-          `MERGE ${decision.id}: refused under an approved-ids run — the offered ` +
-            `list contains deletions only, so its ${decision.absorbs.length} ` +
-            `absorbed id(s) and its content rewrite were never approved`,
-        );
+      for (const id of footprint) unclaimed?.delete(id);
+      // The WHOLE footprint, so a merge is applied only when the survivor and
+      // every absorbed id were approved. Refused entire when any one is missing:
+      // dropping the unapproved ids and merging the rest would rewrite the survivor
+      // with content that absorbed fragments still present in the store, which is
+      // both a merge the operator did not review and a silent data duplication.
+      //
+      // LOGGED, and naming the missing ids, because a silent skip is how "1 of 2
+      // applied" becomes unexplainable. Reachable now only through a hand-edited
+      // ids file or an artifact whose merge names ids the record did not — the
+      // scan writes both from one decision list — which is exactly the tampering
+      // case worth naming precisely.
+      const unapproved = approved ? footprint.filter((id) => !approved.has(id)) : [];
+      if (unapproved.length > 0) {
+        if (decision.verdict === "MERGE") {
+          log(
+            `MERGE ${decision.id}: refused entire — ${unapproved.length} of its ` +
+              `${footprint.length} id(s) are not in the approved list ` +
+              `(${unapproved.join(", ")}), so the reviewed merge is not the one ` +
+              `this would apply`,
+          );
+        }
         skippedByFilter += 1;
         continue;
       }
@@ -2099,7 +2933,14 @@ export async function runCleanup(opts, deps) {
         // is named because it survives, and is what a manual `--apply --ids` reads.
         log(
           `failed to offer the review list to Slack: ${err.message}; ` +
-            `the decision list is kept at ${decisionPath}`,
+            // Conditional because a replayed ARTIFACT has no on-disk path (#150) and
+            // `at undefined` would read as a bug in the path handling rather than as
+            // "this run had no file to keep". Reachable only through a hand-run
+            // `MEM9_APPROVAL_HASH` with no `--apply`; the scheduled scan always has a
+            // file and the Slack-triggered apply never reaches this branch.
+            (decisionPath
+              ? `the decision list is kept at ${decisionPath}`
+              : `this run replayed a reviewed list rather than writing one`),
         );
         return result({ exitCode: 1, decisions, decisionPath });
       }
@@ -2128,7 +2969,10 @@ export async function runCleanup(opts, deps) {
   try {
     const approved = readApprovedIds(fs, opts.idsFile);
     if (approved) {
-      const known = new Set(decisions.map((d) => d.id));
+      // Every id the decisions NAME, absorbed ids included: an approved absorbed id
+      // is matched by its survivor's row and has none of its own, so a keyed-id set
+      // would report every merge's fragments as typo'd approvals.
+      const known = new Set(decisions.flatMap(decisionIds));
       const unmatched = [...approved].filter((id) => !known.has(id));
       if (unmatched.length > 0) {
         // A typo'd approval must not silently no-op.
@@ -3211,6 +4055,22 @@ async function ssmClient(region, runtime) {
   return { ssm, release: () => ssm.destroy() };
 }
 
+/**
+ * The client the decision artifact is written through (#150).
+ *
+ * Region-pinned to the APPLICATION region, like every other client here. The
+ * artifact bucket is created by infra/slack-approval.ts in that region, and S3's
+ * cross-region behavior is the reason to be explicit: a mismatched region does not
+ * fail cleanly but answers `PermanentRedirect`, which reads as a bucket-name
+ * problem.
+ */
+async function s3Client(region, runtime) {
+  if (runtime.s3) return { s3: runtime.s3, release: () => {} };
+  const { S3Client } = await import("@aws-sdk/client-s3");
+  const s3 = new S3Client({ region });
+  return { s3, release: () => s3.destroy() };
+}
+
 async function readSecret(secretId, region, runtime) {
   const { GetSecretValueCommand } = await import(
     "@aws-sdk/client-secrets-manager"
@@ -3360,12 +4220,22 @@ async function buildPostApproval(opts, region, runtime) {
     throw err;
   }
 
-  // The client outlives this call — it is the one every offer writes through —
-  // and is deliberately NOT threaded into `close()`, unlike the database mutex.
+  // Built only when the bucket is configured, and NOT fetched from SSM the way the
+  // bot token is. A bucket name is not a secret, and reading it from the parameter
+  // tree would put the artifact's location behind the same `approvals/*`-scoped
+  // grant the apply task is confined to — a second failure mode for no benefit.
+  const artifactBucket = process.env[MEM9_DECISION_BUCKET_ENV];
+  const { s3 } = artifactBucket
+    ? await s3Client(region, runtime)
+    : { s3: undefined };
+
+  // The clients outlive this call — they are the ones every offer writes through —
+  // and are deliberately NOT threaded into `close()`, unlike the database mutex.
   // The asymmetry is the resource: an open Postgres connection holds a server-side
-  // session and an advisory lock the next run needs released, while an SSM client
-  // holds local sockets that the entrypoint's `process.exit` reclaims. `release`
-  // is called only on the failure path above, where nothing gets to use it.
+  // session and an advisory lock the next run needs released, while an SSM or S3
+  // client holds local sockets that the entrypoint's `process.exit` reclaims.
+  // `release` is called only on the failure path above, where nothing gets to use
+  // it.
   return async ({ decisions, generatedAt, issuedAt }) =>
     postApprovalRequest({
       ssm,
@@ -3376,6 +4246,8 @@ async function buildPostApproval(opts, region, runtime) {
       generatedAt,
       channel,
       botToken,
+      s3,
+      artifactBucket,
       fetchImpl: runtime.fetchImpl ?? fetch,
       log: (message) =>
         console.error(`[memory-cleanup ${new Date().toISOString()}] ${message}`),
@@ -3472,6 +4344,11 @@ export async function createCleanupDeps(opts, runtime = {}) {
   const approvalHash = process.env.MEM9_APPROVAL_HASH;
   /** What the claim said, for the outcome update. Absent on a review run. */
   let claim;
+  /**
+   * Fetch the reviewed list the click approved. Absent unless the claim named an
+   * artifact, which is what keeps a pre-#150 claim on the path it was written for.
+   */
+  let loadReviewedDecisions;
   if (approvalHash) {
     // A hash with nowhere to write is the loop's worst failure mode, not a
     // degraded one: `readApprovedIds` returns null for an absent `--ids`, and null
@@ -3501,6 +4378,36 @@ export async function createCleanupDeps(opts, runtime = {}) {
       // Released here, unlike `buildPostApproval`'s client: this one has done its
       // one read, and the outcome update goes over `fetch` rather than SSM.
       release();
+    }
+    // Present exactly when the claim named an artifact, which is what makes the
+    // replay's reach a property of the RECORD rather than of this task's
+    // configuration (#150). A claim with coordinates gets a replay; a pre-#150 claim
+    // gets the #123 behaviour it was written for.
+    //
+    // The client is built from the REGION, not from the offer's bucket variable —
+    // `MEM9_DECISION_ARTIFACT_BUCKET` is the scan task's configuration and the apply
+    // task does not carry it. So there is no "artifact named but unreachable" case to
+    // branch on here: the coordinates come from the claim, the client always exists,
+    // and an artifact this task genuinely cannot read fails inside
+    // `loadDecisionArtifact` as an AccessDenied refusal (TC-SLACKAPP-190) rather than
+    // as a fallback to re-classification.
+    if (claim.artifact) {
+      const { s3 } = await s3Client(region, runtime);
+      // A THUNK, not the fetched list. `loadDecisions` calls it inside `runCleanup`,
+      // after `discoverBaseUrl` — so a stage whose mnemo service is unreachable
+      // fails on discovery rather than after an S3 GET, and the artifact is not
+      // fetched at all on a run that cannot proceed. It also keeps the memory text
+      // out of this scope: the bytes live only as long as the call.
+      loadReviewedDecisions = () =>
+        loadDecisionArtifact({
+          s3,
+          bucket: claim.artifact.bucket,
+          key: claim.artifact.key,
+          hash: approvalHash,
+          stage: opts.stage,
+          log: (message) =>
+            console.error(`[memory-cleanup ${new Date().toISOString()}] ${message}`),
+        });
     }
   }
 
@@ -3551,6 +4458,7 @@ export async function createCleanupDeps(opts, runtime = {}) {
       lockFile: opts.lockFile,
       acquireMutex: databaseMutex?.acquireMutex,
       postApproval,
+      loadReviewedDecisions,
       reportOutcome: buildReportOutcome(opts, claim, runtime),
     },
     close: async () => {

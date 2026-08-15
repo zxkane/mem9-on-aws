@@ -22,9 +22,9 @@
  *
  * BOUNDARY NOTE — the SSM half is admissible under the DEPLOYED boundary; the
  * Secrets Manager half REQUIRES A BOUNDARY ROLLOUT FIRST:
- *   - The SecureString reads are gated by `DenyParameterContextDecryptOutsideSsm`
- *     on `kms:ViaService`, NOT on the `ECS_EXECUTION_ROLE_TOKENS` list, so an
- *     unlisted execution role may still decrypt a `/mem9-on-aws/*` parameter.
+ *   - The SecureString reads are gated by `ParamCtxVia` on `kms:ViaService`, NOT
+ *     on the `ECS_EXECUTION_ROLE_TOKENS` list, so an unlisted execution role may
+ *     still decrypt a `/mem9-on-aws/*` parameter.
  *   - SETTLED, and the answer is that the deny DOES bite. The Secrets Manager
  *     reads (`MEM9_DB_SECRET`, `MEM9_TENANT_ID`) resolve under the DEFAULT
  *     `aws/secretsmanager` key (neither secret sets `kmsKeyId` — see infra/db.ts
@@ -39,8 +39,8 @@
  *       Mem9ConsolidationExecutionRole- → allowed        (on the list, from #122)
  *       Mem9CleanupExecutionRole-       → explicitDeny   (NOT on the list)
  *       Mem9ConsolidationTaskRole-      → explicitDeny   (NOT on the list)
- *     Isolating each deny statement in turn attributes it to exactly
- *     `DenySecretContextDecryptFromNonEcsExecutionRoles`, for BOTH secrets.
+ *     Isolating each deny statement in turn attributes it to exactly the
+ *     `SecretCtxRole` deny, for BOTH secrets.
  *     CloudTrail corroborates the premise the simulation rests on: real
  *     `SecretARN`-context Decrypt events are attributed to the calling workload
  *     principal, not to Secrets Manager as a service, so that statement's
@@ -156,6 +156,109 @@ export const APPROVED_IDS_PATH = "/tmp/mem9-approved-ids.txt";
  * many memories a single click can delete.
  */
 export const CLEANUP_CAP = 50;
+
+/**
+ * The decision artifact's bucket name, and the reason it carries the ACCOUNT ID
+ * rather than the stage.
+ *
+ * S3 bucket names are a single GLOBAL namespace — not per-account, not
+ * per-region — so a boundary pattern with a wildcard in the bucket segment
+ * matches buckets in accounts this project does not own. Measured, not reasoned:
+ * against `arn:aws:s3:::mem9-on-aws-*-decisions/*`, `iam:simulate-custom-policy`
+ * returned `allowed` for `s3:PutObject` on `mem9-on-aws-evil-decisions`, a name
+ * anyone can create first. For an object that holds the reviewed deletion list,
+ * that is an exfiltration target. The account id is the disambiguating suffix a
+ * global namespace needs, so the boundary pins an EXACT bucket name and the stage
+ * moves into the key prefix instead (see `decisionArtifactKey`).
+ *
+ * The textbook alternative — keeping the wildcard and adding an
+ * `aws:ResourceAccount` condition — renders the boundary at 6280 bytes. 6144 is
+ * a HARD cap (`Adjustable: False`) and a role carries exactly one boundary, so
+ * that option does not exist here. The exact name costs zero extra bytes.
+ *
+ * The name is `mem9-audit-` and not the project's usual `mem9-on-aws-` prefix
+ * because the ARN renders three times in the boundary: seven characters of prefix
+ * cost 21 bytes against a 6144 HARD cap that the deployed document currently
+ * clears by 31. Nothing pins an S3 prefix for this project — the deploy role's
+ * `S3State` is `Resource: "*"` — so the shorter name costs no access.
+ *
+ * Must stay byte-identical to the `Resources` NotResource entry (as the object
+ * glob) and to the two KMS encryption-context values (as the BUCKET arn, since
+ * bucket keys are on) in
+ * infra/cloudformation/workload-permissions-boundary.yaml. A drift here is an
+ * AccessDenied at artifact-write time — after the click has been spent.
+ */
+export function decisionArtifactBucketName(
+  account: Output<string> | string,
+): Output<string> {
+  // 12-digit account id + the 11-char literal = 23 chars, inside S3's 63-char
+  // bucket-name limit with room to spare, and lowercase/hyphen-only as S3
+  // requires. $interpolate, never a template literal: an Output stringified into
+  // one yields "Calling [toString] on an [Output<T>]" and would deploy a bucket
+  // literally named that.
+  return $interpolate`mem9-audit-${account}`;
+}
+
+/**
+ * The artifact's key, which is where the STAGE lives now that the bucket name is
+ * account-scoped rather than stage-scoped.
+ *
+ * One bucket serves every stage. That is a deliberate consequence of pinning the
+ * bucket name to the account: the alternative — a bucket per stage — would need
+ * either a wildcard bucket segment in the boundary (squattable, see above) or one
+ * boundary entry per stage, and preview stages are created per PR. Cross-stage
+ * separation is therefore a KEY-prefix property, enforced by the identity policy's
+ * per-stage object scope rather than by the boundary, which only bounds the
+ * maximum.
+ *
+ * DUPLICATED as `decisionArtifactKey` in scripts/memory-cleanup.mjs, which is the
+ * WRITER while this file is the provisioner — the same split as `OFFER_TTL_MS` and
+ * `claimParameterName`, and for the same reason: the container script and the SST
+ * program share no module. A drift is an AccessDenied against the per-stage object
+ * scope below, at artifact-write time, after the audit has run.
+ * TC-SLACKAPP-168 asserts the two agree character for character.
+ *
+ * Keyed by the CONTENT HASH rather than a run id, so the apply can derive the key
+ * from the approval alone (see the writer's note). The `:` in `sha256:...` takes
+ * the same dash treatment `claimParameterName` applies for SSM's sake: it is legal
+ * in an S3 key but needs percent-encoding in a URL and reads as a port separator in
+ * an `s3://` line, and one transformation for both stores is easier to verify than
+ * two.
+ */
+export function decisionArtifactKey(stage: string, hash: string): string {
+  return `${decisionArtifactKeyPrefix(stage)}${hash.replace(/:/gu, "-")}.json`;
+}
+
+/**
+ * The stage's own key prefix — the thing the identity policy scopes to, and the
+ * only mechanism that keeps one stage out of another's reviewed decision list.
+ *
+ * Factored out of `decisionArtifactKey` rather than written twice because the two
+ * uses must agree by construction: the grant is `<prefix>*` and the writer's key is
+ * `<prefix><hash>.json`, so a prefix that drifted would grant access to keys the
+ * writer never produces while denying the ones it does. That failure is an
+ * AccessDenied at write time, after the audit.
+ *
+ * The trailing slash is part of the prefix and load-bearing. Without it,
+ * `decisions/pr-4*` also matches `decisions/pr-42/...` — a preview stage reading
+ * another preview stage's list — which is exactly the isolation this is here to
+ * provide.
+ */
+export function decisionArtifactKeyPrefix(stage: string): string {
+  return `decisions/${stage}/`;
+}
+
+/**
+ * How long a decision artifact lives.
+ *
+ * The artifact exists to be replayed by an apply that follows its own approval,
+ * and #123's offer TTL already expires an unclicked approval at 72h. An artifact
+ * that outlived its approval could not be replayed by anything, so this matches
+ * that bound rather than picking an independent retention: past 72h the object is
+ * unreachable by design, and keeping it would mean retaining a list of memory ids
+ * with no purpose left to serve.
+ */
+export const DECISION_ARTIFACT_TTL_DAYS = 3;
 
 /**
  * Schedule-group name prefix for the scan, under the same two limits
@@ -321,6 +424,114 @@ export function slackApproval(
   );
   param("SlackApprovalChannel", "slack/approval-channel", channel);
 
+  // ── The reviewed decision artifact (#150) ────────────────────────────────
+  // A raw `aws.s3.BucketV2` rather than `sst.aws.Bucket`: the SST component adds
+  // a bucket POLICY and public-access plumbing aimed at web-servable buckets,
+  // and this bucket must be reachable by exactly two principals through their
+  // identity policies. It is also why the four hardening resources below are
+  // explicit — with the raw provider they are not defaults.
+  //
+  // `bucket` (a fixed name) rather than `bucketPrefix`: the boundary pins the
+  // exact name, so Pulumi's random suffix would put the live bucket outside the
+  // permitted ARN. That makes the name a cross-stage singleton, which is safe
+  // here only because the KEY carries the stage.
+  const artifactBucketName = decisionArtifactBucketName(accountId());
+  const artifactBucket = new aws.s3.BucketV2("Mem9DecisionArtifacts", {
+    bucket: artifactBucketName,
+    // The bucket outlives any single stage (its name is account-scoped, so every
+    // stage shares it) and holds the audit trail of what was deleted. A preview
+    // stage's teardown must not take it with them.
+    forceDestroy: false,
+    tags,
+  }, { retainOnDelete: true });
+
+  // Block public access at the bucket level as well as the account level. The
+  // account-level setting is not visible from this stack and cannot be asserted
+  // here, so this is the copy that a test can prove is present.
+  new aws.s3.BucketPublicAccessBlock("Mem9DecisionArtifactsPublicAccess", {
+    bucket: artifactBucket.id,
+    blockPublicAcls: true,
+    blockPublicPolicy: true,
+    ignorePublicAcls: true,
+    restrictPublicBuckets: true,
+  });
+
+  // SSE-KMS with the AWS-managed S3 key. A customer-managed key would need its
+  // own key policy plus a boundary exception per principal; `alias/aws/s3` needs
+  // neither, and the boundary already confines `kms:GenerateDataKey` to this
+  // bucket's own encryption context (the `GenKey` deny).
+  //
+  // Bucket keys ON, which cuts KMS request cost by up to 99% — and which CHANGES
+  // the encryption context S3 presents. Per the S3 user guide ("Using SSE-KMS ->
+  // Encryption context"): without bucket keys the context is the object ARN; with
+  // them it is the BUCKET ARN. So this line and the boundary's two `aws:s3:arn`
+  // pins are one decision, not two. The boundary pins the bare bucket ARN for
+  // exactly this reason; `arn:aws:s3:::bucket/*` does NOT match
+  // `arn:aws:s3:::bucket`, and an earlier revision of this file paired bucket keys
+  // with the object glob — that combination simulates explicitDeny on both
+  // GenerateDataKey and Decrypt, i.e. every artifact write and read fails, and
+  // only after deploy. Flipping this to false without repinning the boundary
+  // breaks it the other way round.
+  new aws.s3.BucketServerSideEncryptionConfigurationV2(
+    "Mem9DecisionArtifactsEncryption",
+    {
+      bucket: artifactBucket.id,
+      rules: [
+        {
+          applyServerSideEncryptionByDefault: {
+            sseAlgorithm: "aws:kms",
+            kmsMasterKeyId: "alias/aws/s3",
+          },
+          bucketKeyEnabled: true,
+        },
+      ],
+    },
+  );
+
+  // Expire the artifact on the same 72h bound as the approval that would replay
+  // it (see DECISION_ARTIFACT_TTL_DAYS). `abortIncompleteMultipartUpload` covers
+  // the parts of a write that failed midway — those are not covered by the
+  // expiration rule and would otherwise accumulate silently and unbilled-for.
+  new aws.s3.BucketLifecycleConfigurationV2("Mem9DecisionArtifactsLifecycle", {
+    bucket: artifactBucket.id,
+    rules: [
+      {
+        id: "expire-decision-artifacts",
+        status: "Enabled",
+        // An empty prefix filter, stated explicitly: the rule covers every stage's
+        // key prefix, and a `filter` omitted entirely is a provider-version-
+        // dependent diff rather than a clearer intent.
+        filter: { prefix: "" },
+        expiration: { days: DECISION_ARTIFACT_TTL_DAYS },
+        abortIncompleteMultipartUpload: { daysAfterInitiation: 1 },
+      },
+    ],
+  });
+
+  // Deny any request that is not TLS. S3 has no bucket-level "require TLS"
+  // setting; `aws:SecureTransport` in a bucket policy is the mechanism. This is
+  // the ONE bucket policy statement — it constrains the transport, and grants
+  // nothing, so it does not widen who can reach the artifact.
+  new aws.s3.BucketPolicy("Mem9DecisionArtifactsPolicy", {
+    bucket: artifactBucket.id,
+    policy: $interpolate`{
+      "Version": "2012-10-17",
+      "Statement": [
+        {
+          "Sid": "DenyInsecureTransport",
+          "Effect": "Deny",
+          "Principal": "*",
+          "Action": "s3:*",
+          "Resource": [
+            "arn:aws:s3:::${artifactBucketName}",
+            "arn:aws:s3:::${artifactBucketName}/*"
+          ],
+          "Condition": { "Bool": { "aws:SecureTransport": "false" } }
+        }
+      ]
+    }`,
+  });
+
   const task = new sst.aws.Task(CLEANUP_CONTAINER_NAME, {
     cluster: ecsOut.cluster,
     architecture: "arm64",
@@ -357,6 +568,12 @@ export function slackApproval(
       MEM9_SSM_PREFIX: prefix,
       MEM9_SLACK_APPROVAL_CHANNEL: channel,
       MEM9_APPROVED_IDS_PATH: APPROVED_IDS_PATH,
+      // The scan writes the reviewed decision list here and the apply reads it back
+      // (#150). Its presence is what turns the artifact on in the container script,
+      // which is why it is an environment entry rather than a derived name: a stage
+      // deployed before this bucket existed keeps writing the id-only record until
+      // it is redeployed, instead of failing on a bucket its role cannot reach.
+      MEM9_DECISION_ARTIFACT_BUCKET: artifactBucketName,
       // No MEM9_ALERTS_TOPIC_ARN and no sns:Publish: scripts/memory-cleanup.mjs
       // contains no SNS code (memory-consolidation.mjs does, which is what makes
       // the omission look like an oversight). Passing the variable and granting
@@ -413,13 +630,57 @@ export function slackApproval(
       // already rested for the Lambda, which holds the identical scope.
       //
       // Admissible under the DEPLOYED boundary with no rollout: the ceiling admits
-      // `ssm:PutParameter` and `DenyPutParameterOutsideApprovalRecords` permits
-      // exactly `/mem9-on-aws/*/approvals/*`. Measured, not assumed —
-      // TC-SLACKAPP-153 asserts it against the boundary template.
+      // `ssm:PutParameter` and the `ParamWrite` deny permits exactly
+      // `/mem9-on-aws/*/approvals/*`. Measured, not assumed — TC-SLACKAPP-153
+      // asserts it against the boundary template.
       {
         actions: ["ssm:GetParameters", "ssm:PutParameter"],
         resources: [
           $interpolate`arn:aws:ssm:${region}:${accountId()}:parameter${prefix}/approvals/*`,
+        ],
+      },
+      // The decision artifact (#150). THIS is where cross-stage isolation is
+      // enforced: the boundary pins the bucket but cannot afford a per-stage key
+      // condition (6144 is a hard cap), so the identity policy carries the stage
+      // prefix and the boundary bounds the maximum. A preview stage's role therefore
+      // cannot read prod's reviewed list even though both stages share one bucket.
+      //
+      // `s3:PutObject` for the scan half and `s3:GetObject` for the apply half, on
+      // the ONE task definition that serves both. No `s3:DeleteObject`: the
+      // lifecycle rule expires the artifact, and a task that could delete it could
+      // destroy the audit trail of what it deleted. No `s3:ListBucket` either — the
+      // key is derived from the approval hash, so nothing here needs to enumerate.
+      {
+        actions: ["s3:GetObject", "s3:PutObject"],
+        resources: [
+          $interpolate`arn:aws:s3:::${artifactBucketName}/${decisionArtifactKeyPrefix($app.stage)}*`,
+        ],
+      },
+      // SSE-KMS needs GenerateDataKey to WRITE and Decrypt to READ, both against
+      // the AWS-managed S3 key. `Resource: "*"` because `alias/aws/s3` resolves to a
+      // per-account key id this stack cannot name without a lookup; the conditions
+      // are what scope it, and they are the same two the boundary's `GenKey` and
+      // `KmsContext` denies pin — so a drift between them is an AccessDenied here
+      // rather than a widening.
+      //
+      // The context value is the BUCKET arn with no object suffix, because the
+      // bucket runs with S3 Bucket Keys enabled (see the encryption resource above).
+      // With bucket keys the context S3 presents is the bucket ARN, not the object's
+      // — pinning `.../*` here would deny every write and read.
+      {
+        actions: ["kms:Decrypt", "kms:GenerateDataKey"],
+        resources: ["*"],
+        conditions: [
+          {
+            test: "StringEquals",
+            variable: "kms:ViaService",
+            values: [$interpolate`s3.${region}.amazonaws.com`],
+          },
+          {
+            test: "StringEquals",
+            variable: "kms:EncryptionContext:aws:s3:arn",
+            values: [$interpolate`arn:aws:s3:::${artifactBucketName}`],
+          },
         ],
       },
     ],
@@ -671,7 +932,7 @@ export function slackApproval(
           // prefix also holds the reader client secret and the four cleanup task
           // inputs THIS SAME Lambda reads, so a prefix-wide write would let a
           // compromised callback repoint its own ECS target. This is also exactly
-          // what the boundary's DenyPutParameterOutsideApprovalRecords permits.
+          // what the boundary's `ParamWrite` deny permits.
           Resource: [
             $interpolate`arn:aws:ssm:${region}:${accountId()}:parameter${prefix}/approvals/*`,
           ],
