@@ -425,112 +425,26 @@ export function slackApproval(
   param("SlackApprovalChannel", "slack/approval-channel", channel);
 
   // ── The reviewed decision artifact (#150) ────────────────────────────────
-  // A raw `aws.s3.BucketV2` rather than `sst.aws.Bucket`: the SST component adds
-  // a bucket POLICY and public-access plumbing aimed at web-servable buckets,
-  // and this bucket must be reachable by exactly two principals through their
-  // identity policies. It is also why the four hardening resources below are
-  // explicit — with the raw provider they are not defaults.
+  // The BUCKET ITSELF IS NOT DECLARED HERE — it is provisioned out-of-band by
+  // infra/cloudformation/decision-artifact-bucket.yaml
+  // (scripts/deploy-decision-artifact-bucket.sh), together with its public-access
+  // block, SSE-KMS + bucket-keys rule, 72h lifecycle rule, and TLS-only policy.
+  // This function only DERIVES the name to hand to the task and to scope grants.
   //
-  // `bucket` (a fixed name) rather than `bucketPrefix`: the boundary pins the
-  // exact name, so Pulumi's random suffix would put the live bucket outside the
-  // permitted ARN. That makes the name a cross-stage singleton, which is safe
-  // here only because the KEY carries the stage.
+  // Why it cannot live here: the boundary pins the exact bucket ARN, so the name
+  // must be fixed rather than prefixed, and it is account-scoped — every stage
+  // computes `mem9-audit-<account-id>`, while S3 bucket names are globally
+  // unique. Owned by this app, whichever stage deployed first would own the
+  // bucket and every LATER stage's CreateBucket would fail
+  // `BucketAlreadyOwnedByYou`; the AWS provider surfaces that error rather than
+  // adopting a same-owner bucket. `retainOnDelete` made it worse, not better: a
+  // torn-down preview kept the bucket and left prod's first deploy permanently
+  // failing. Provisioned out-of-band it exists once, before any stage, for all of
+  // them — which is also why the preview E2E needs no bucket setup of its own.
+  //
+  // Consumers below take this STRING, never a bucket resource handle, so nothing
+  // in this stack depends on who owns the bucket.
   const artifactBucketName = decisionArtifactBucketName(accountId());
-  const artifactBucket = new aws.s3.BucketV2("Mem9DecisionArtifacts", {
-    bucket: artifactBucketName,
-    // The bucket outlives any single stage (its name is account-scoped, so every
-    // stage shares it) and holds the audit trail of what was deleted. A preview
-    // stage's teardown must not take it with them.
-    forceDestroy: false,
-    tags,
-  }, { retainOnDelete: true });
-
-  // Block public access at the bucket level as well as the account level. The
-  // account-level setting is not visible from this stack and cannot be asserted
-  // here, so this is the copy that a test can prove is present.
-  new aws.s3.BucketPublicAccessBlock("Mem9DecisionArtifactsPublicAccess", {
-    bucket: artifactBucket.id,
-    blockPublicAcls: true,
-    blockPublicPolicy: true,
-    ignorePublicAcls: true,
-    restrictPublicBuckets: true,
-  });
-
-  // SSE-KMS with the AWS-managed S3 key. A customer-managed key would need its
-  // own key policy plus a boundary exception per principal; `alias/aws/s3` needs
-  // neither, and the boundary already confines `kms:GenerateDataKey` to this
-  // bucket's own encryption context (the `GenKey` deny).
-  //
-  // Bucket keys ON, which cuts KMS request cost by up to 99% — and which CHANGES
-  // the encryption context S3 presents. Per the S3 user guide ("Using SSE-KMS ->
-  // Encryption context"): without bucket keys the context is the object ARN; with
-  // them it is the BUCKET ARN. So this line and the boundary's two `aws:s3:arn`
-  // pins are one decision, not two. The boundary pins the bare bucket ARN for
-  // exactly this reason; `arn:aws:s3:::bucket/*` does NOT match
-  // `arn:aws:s3:::bucket`, and an earlier revision of this file paired bucket keys
-  // with the object glob — that combination simulates explicitDeny on both
-  // GenerateDataKey and Decrypt, i.e. every artifact write and read fails, and
-  // only after deploy. Flipping this to false without repinning the boundary
-  // breaks it the other way round.
-  new aws.s3.BucketServerSideEncryptionConfigurationV2(
-    "Mem9DecisionArtifactsEncryption",
-    {
-      bucket: artifactBucket.id,
-      rules: [
-        {
-          applyServerSideEncryptionByDefault: {
-            sseAlgorithm: "aws:kms",
-            kmsMasterKeyId: "alias/aws/s3",
-          },
-          bucketKeyEnabled: true,
-        },
-      ],
-    },
-  );
-
-  // Expire the artifact on the same 72h bound as the approval that would replay
-  // it (see DECISION_ARTIFACT_TTL_DAYS). `abortIncompleteMultipartUpload` covers
-  // the parts of a write that failed midway — those are not covered by the
-  // expiration rule and would otherwise accumulate silently and unbilled-for.
-  new aws.s3.BucketLifecycleConfigurationV2("Mem9DecisionArtifactsLifecycle", {
-    bucket: artifactBucket.id,
-    rules: [
-      {
-        id: "expire-decision-artifacts",
-        status: "Enabled",
-        // An empty prefix filter, stated explicitly: the rule covers every stage's
-        // key prefix, and a `filter` omitted entirely is a provider-version-
-        // dependent diff rather than a clearer intent.
-        filter: { prefix: "" },
-        expiration: { days: DECISION_ARTIFACT_TTL_DAYS },
-        abortIncompleteMultipartUpload: { daysAfterInitiation: 1 },
-      },
-    ],
-  });
-
-  // Deny any request that is not TLS. S3 has no bucket-level "require TLS"
-  // setting; `aws:SecureTransport` in a bucket policy is the mechanism. This is
-  // the ONE bucket policy statement — it constrains the transport, and grants
-  // nothing, so it does not widen who can reach the artifact.
-  new aws.s3.BucketPolicy("Mem9DecisionArtifactsPolicy", {
-    bucket: artifactBucket.id,
-    policy: $interpolate`{
-      "Version": "2012-10-17",
-      "Statement": [
-        {
-          "Sid": "DenyInsecureTransport",
-          "Effect": "Deny",
-          "Principal": "*",
-          "Action": "s3:*",
-          "Resource": [
-            "arn:aws:s3:::${artifactBucketName}",
-            "arn:aws:s3:::${artifactBucketName}/*"
-          ],
-          "Condition": { "Bool": { "aws:SecureTransport": "false" } }
-        }
-      ]
-    }`,
-  });
 
   const task = new sst.aws.Task(CLEANUP_CONTAINER_NAME, {
     cluster: ecsOut.cluster,

@@ -1,0 +1,132 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  OUT-OF-BAND reviewed-decision artifact bucket for mem9-on-aws (#123/#150).
+  Holds the audit trail of what a Slack approval authorized deleting, keyed by
+  stage, and read back by the cleanup apply task to prove the clicked hash still
+  matches the reviewed bytes.
+
+  NOT SST-managed, and the reason is a name collision rather than only teardown
+  safety. The name is account-scoped (`mem9-audit-<account-id>`) because the
+  workload permissions boundary pins that exact ARN, so every stage computes the
+  SAME name; S3 bucket names are globally unique. Owned by the SST app, whichever
+  stage deployed first would hold it and every LATER stage's CreateBucket would
+  fail `BucketAlreadyOwnedByYou` — the AWS provider surfaces that error rather
+  than adopting the existing bucket, and `retainOnDelete` means a torn-down
+  preview keeps the bucket and poisons prod. Owning it here makes it exist once,
+  before any stage, for all of them.
+
+  Bootstrap ONCE per AWS account, in the application region, via
+  scripts/deploy-decision-artifact-bucket.sh.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: mem9-on-aws
+    Description: >
+      SST app name. Tag value only — the bucket NAME is derived from the account
+      id, because that is what the boundary pins.
+
+Resources:
+  DecisionArtifactBucket:
+    Type: AWS::S3::Bucket
+    # Retain on both: the bucket is the audit trail of executed deletions, and it
+    # is shared by every stage. `DeletionPolicy` covers a stack DELETE and
+    # `UpdateReplacePolicy` a property change that REPLACES — the Pulumi original
+    # needed only `retainOnDelete` because Pulumi models replacement as a
+    # delete-after-create it also skips.
+    #
+    # There is no counterpart to the old `forceDestroy: false` because raw
+    # CloudFormation has none to set: it will not empty a bucket, and a non-empty
+    # bucket simply fails to delete. (`AutoDeleteObjects` is a CDK custom resource,
+    # not a CFN property.) So that half of the guarantee is now structural. Retain
+    # is still required, or a DELETE would try — and succeed, once the 72h
+    # lifecycle rule had emptied the bucket for it.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      # Byte-identical to `decisionArtifactBucketName()` in infra/slack-approval.ts
+      # and to the three ARNs in workload-permissions-boundary.yaml. A drift here
+      # is an AccessDenied at artifact-write time — after the click is spent.
+      BucketName: !Sub mem9-audit-${AWS::AccountId}
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          # SSE-KMS with the AWS-managed S3 key: a customer-managed key would need
+          # its own key policy plus a boundary exception per principal.
+          #
+          # Bucket keys ON, which cuts KMS request cost by up to 99% — and which
+          # CHANGES the encryption context S3 presents: without them the context is
+          # the object ARN, with them it is the BUCKET ARN. So this line and the
+          # boundary's two `aws:s3:arn` pins are one decision, not two. Flipping it
+          # to false without repinning the boundary denies every artifact write and
+          # read, and only after deploy.
+          - BucketKeyEnabled: true
+            ServerSideEncryptionByDefault:
+              SSEAlgorithm: aws:kms
+              KMSMasterKeyID: alias/aws/s3
+      LifecycleConfiguration:
+        Rules:
+          # Expire on the same 72h bound as the approval that would replay the
+          # artifact (DECISION_ARTIFACT_TTL_DAYS = 3 in infra/slack-approval.ts):
+          # past that the object is unreachable by design. Keep the two in step.
+          - Id: expire-decision-artifacts
+            Status: Enabled
+            # Every stage's key prefix — the key, not the bucket, carries the stage.
+            Prefix: ""
+            ExpirationInDays: 3
+            # The parts of a write that failed midway are NOT covered by the
+            # expiration rule and would otherwise accumulate silently.
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: ManagedBy
+          Value: cloudformation
+
+  # S3 has no bucket-level "require TLS" setting; `aws:SecureTransport` in a
+  # bucket policy is the mechanism. This is the ONE statement — it constrains the
+  # transport and grants nothing, so it does not widen who can reach the artifact.
+  # The two reader/writer principals are admitted by their IDENTITY policies.
+  DecisionArtifactBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    # Retain with the bucket it constrains, on both policies for the same reason
+    # the bucket carries both. Without DeletionPolicy a stack DELETE keeps the
+    # audit bucket (above) but calls DeleteBucketPolicy, and the retained bucket
+    # silently loses the only thing that requires TLS to reach it. UpdateReplace
+    # covers the same loss through a different door: `Bucket` is this resource's
+    # only createOnly property, so retargeting it REPLACES the policy, and the
+    # replacement's cleanup would strip TLS from the bucket being left behind.
+    # DeletionPolicy is also what makes the bucket importable: an IMPORT change
+    # set must name EVERY resource in the template, and CloudFormation rejects one
+    # whose resources lack it.
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      Bucket: !Ref DecisionArtifactBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: DenyInsecureTransport
+            Effect: Deny
+            Principal: "*"
+            Action: "s3:*"
+            Resource:
+              - !GetAtt DecisionArtifactBucket.Arn
+              - !Sub ${DecisionArtifactBucket.Arn}/*
+            Condition:
+              Bool:
+                aws:SecureTransport: "false"
+
+# Deliberately NO Outputs. Nothing needs the name fed to it — the SST app and the
+# E2E harness both DERIVE `mem9-audit-<account-id>` from the caller's account id
+# rather than reading it back, which is the stricter check. And an Outputs block
+# would not be free: CloudFormation rejects an IMPORT change set that "cannot
+# modify or add [Outputs]", and for a stack that does not exist yet, ANY output is
+# an add. Adding one here would break the adoption path the deploy script prints
+# for a bucket a stage-owned deploy already created — the one recovery this
+# template exists to make possible.

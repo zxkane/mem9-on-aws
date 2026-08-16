@@ -252,8 +252,9 @@ The AgentCore Gateway exposes four tools over MCP (Cognito-authenticated):
   `bootstrap` (schema + tenant seed).
 - `scripts/` — out-of-band bootstrap scripts (GitHub Actions IAM role, workload
   permissions boundary, four ECR repositories, guarded registry scan-on-push,
-  and Bedrock Mantle Project) that the SST app references read-only. See each
-  script's header and `.env.example` for the environment it expects.
+  Bedrock Mantle Project, and the decision-artifact bucket) that the SST app
+  references read-only. See each script's header and `.env.example` for the
+  environment it expects.
 - `docs/` — `ARCHITECTURE.md` (decisions) and `mem9-facts.md` (upstream constraints).
 
 ## Development

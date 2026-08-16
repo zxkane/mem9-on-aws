@@ -103,8 +103,16 @@ them, update the file rather than silently diverging.
 ## Out-of-band bootstrap scripts
 
 `scripts/deploy-*.sh` create resources the SST app references read-only (the
-GitHub Actions IAM role, four ECR repositories, and the Bedrock Mantle Project)
-so that a `sst remove --stage pr-N` can never wipe shared/prod state. They are NOT
-part of the CI deploy — run them once per AWS account. Each reads its config from a
-gitignored `.env` (copy `.env.example` and fill in your own AWS profile). See each
-script's header comment for what it provisions and when to re-run it.
+GitHub Actions IAM role, four ECR repositories, the Bedrock Mantle Project, and
+the decision-artifact bucket) so that a `sst remove --stage pr-N` can never wipe
+shared/prod state. They are NOT part of the CI deploy — run them once per AWS
+account. Each reads its config from a gitignored `.env` (copy `.env.example` and
+fill in your own AWS profile). See each script's header comment for what it
+provisions and when to re-run it.
+
+A resource whose NAME must be fixed and account-scoped belongs here, not in the
+SST app, and the reason is stronger than teardown safety: every stage computes the
+same name, so the first stage to deploy owns it and every later stage's create
+fails as an already-exists error the provider does not adopt through. The
+decision-artifact bucket was SST-owned and hit exactly that — see
+TC-SLACKAPP-215.

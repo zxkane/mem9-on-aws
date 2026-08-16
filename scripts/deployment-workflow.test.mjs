@@ -250,6 +250,31 @@ describe("workflow integration", () => {
     }
   });
 
+  it("TC-SLACKAPP-218: gates and lints the decision-artifact bucket template", () => {
+    const workflow = parse(readFileSync(workflowPath, "utf8"));
+    const template = "infra/cloudformation/decision-artifact-bucket.yaml";
+
+    // `!infra/cloudformation/**` excludes the whole directory, so a template is
+    // only gated if it is RE-INCLUDED after the exclusion — order decides it, not
+    // presence. Without this, a PR touching only the bucket template triggers no
+    // infra-ci run at all, and the five security properties that moved out of
+    // infra/slack-approval.ts into that file drift with nothing watching.
+    for (const trigger of ["pull_request", "push"]) {
+      const paths = workflow.on[trigger].paths;
+      expect(paths.indexOf(template)).toBeGreaterThan(
+        paths.indexOf("!infra/cloudformation/**"),
+      );
+    }
+
+    // Being gated only re-runs the suite; it does not lint. cfn-lint is what
+    // catches resource-level semantics the CFN API accepts and the unit tests do
+    // not read — a missing retention policy passed both until cfn-lint saw it.
+    const lint = workflow.jobs.typecheck.steps.find(
+      ({ name }) => name === "Validate ECR registry scanning template",
+    );
+    expect(lint.run).toContain(`cfn-lint ${template} --regions "$application_region"`);
+  });
+
   it("runs the PostgreSQL durable-ingest integration suite in CI", () => {
     const workflow = readFileSync(workflowPath, "utf8");
     expect(workflow).toContain("bash scripts/run-ingest-queue-integration.sh");

@@ -865,6 +865,18 @@ these cover its shape. Every property here is a *deploy-time* property whose
 failure lands at runtime — an AccessDenied after a scan has spent two reasoning
 passes, or after an approval click has been spent.
 
+The bucket is **out-of-band** — `infra/cloudformation/decision-artifact-bucket.yaml`,
+deployed once per account by `scripts/deploy-decision-artifact-bucket.sh` — so the
+cases below read the operator-owned template rather than this app's synthesized
+resources. It was originally SST-owned, and that could not work: the boundary pins
+the exact bucket ARN, so the name must be fixed, and it is account-scoped, so every
+stage computes the same one while S3 bucket names are globally unique. The first
+stage to deploy owned it and every later stage's `CreateBucket` failed
+`BucketAlreadyOwnedByYou` — the provider surfaces that error rather than adopting a
+same-owner bucket — while `retainOnDelete` meant a torn-down preview kept the
+bucket and left prod's first deploy permanently failing. TC-SLACKAPP-215 is what
+keeps it from coming back.
+
 - **TC-SLACKAPP-161** — the bucket is named with the **account id** and no
   wildcard. This is a security property, not a naming style: S3 bucket names are a
   **global** namespace, so a wildcard in the bucket segment of the boundary's ARN
@@ -885,17 +897,22 @@ passes, or after an approval click has been spent.
   a combination that denies every artifact write **and** read after deploy.
   Whichever way a future edit breaks the pair, one of the two now fails.
 - **TC-SLACKAPP-163** — the artifact is encrypted with SSE-KMS (`alias/aws/s3`) and
-  **bucket keys on**, asserted at the same bucket the name came from: a sub-resource
-  addressed elsewhere leaves this bucket on the provider default, SSE-S3, which is
-  encrypted with a key the boundary's encryption-context denies say nothing about.
-  The bucket-key flag is pinned from *both* sides — here and in 162 — because the
+  **bucket keys on**. In CloudFormation these are inline properties of the one
+  bucket, so "asserted at the same bucket" is now structural rather than a separate
+  check: unlike the Pulumi sub-resources they replaced, they cannot be addressed at
+  a different bucket and leave this one on the provider default (SSE-S3, encrypted
+  with a key the boundary's encryption-context denies say nothing about). The
+  bucket-key flag is still pinned from *both* sides — here and in 162 — because the
   mismatch is invisible until deploy.
 - **TC-SLACKAPP-164** — the object expires on the **same 72h bound as the
   approval**, not an independently chosen retention: past that the approval cannot
   be clicked, so the artifact could not be replayed by anything and holding memory
-  ids longer serves no purpose. `abortIncompleteMultipartUpload` is pinned
-  separately — failed multipart writes are not covered by the expiration rule and
-  would accumulate invisibly.
+  ids longer serves no purpose. Asserted twice: against the literal 3, and against
+  `DECISION_ARTIFACT_TTL_DAYS`. The second is load-bearing now that the rule lives
+  in CloudFormation while the constant stays in TypeScript — nothing but that line
+  keeps two files in two languages in step. `AbortIncompleteMultipartUpload` is
+  pinned separately — failed multipart writes are not covered by the expiration rule
+  and would accumulate invisibly.
 - **TC-SLACKAPP-165** — all four public-access blocks and a bucket policy that
   **denies** non-TLS requests. Four and not three: two cover ACLs and two cover
   bucket policies, and three-of-four leaves a way to make the object public. The
@@ -904,11 +921,57 @@ passes, or after an approval click has been spent.
   policies that are supposed to be the only way in. Both ARN forms are named,
   because bucket-level operations do not match the `/*` form and a policy naming
   only objects leaves `ListBucket` reachable over plain HTTP.
-- **TC-SLACKAPP-166** — the bucket is **retained** on stage teardown and
-  `forceDestroy` stays off. The name is account-scoped, so every stage — including
-  each PR's preview stage — resolves to the same bucket; a preview teardown that
-  deleted it would take prod's audit trail of what was deleted with it, and
-  `forceDestroy` would empty the bucket even where the bucket survives.
+- **TC-SLACKAPP-166** — the bucket is **retained**, via both `DeletionPolicy` and
+  `UpdateReplacePolicy`. Two policies and not one, because they cover different
+  events: a stack `DELETE`, and a property change that *replaces* the bucket. The
+  name is account-scoped, so every stage — including each PR's preview stage —
+  resolves to the same bucket, and losing it takes prod's audit trail of what was
+  deleted with it.
+- **TC-SLACKAPP-217** — the bucket **policy** is retained too, and the template has
+  **no `Outputs`**. Both halves are one fact: retaining the bucket without its policy
+  means a stack `DELETE` keeps the audit trail and deletes the only thing requiring
+  TLS to reach it (TC-165), so the surviving bucket is weaker than the reviewed one.
+  The same attribute is also what keeps the recovery path open, and both constraints
+  came back as rejections from a real `CreateChangeSet`, not from reading the docs:
+  an `IMPORT` change set must name **every** resource in the template ("Resources
+  [DecisionArtifactBucketPolicy] is missing from ResourceToImport list"), each of
+  those resources must carry `DeletionPolicy`, and "you cannot modify or add
+  [Outputs]" — for a stack that does not exist yet, *any* output is an add. So an
+  export block here would break adopting a bucket that a stage-owned deploy already
+  created, which is the one recovery this template exists for. Nothing consumes an
+  export: both the SST app and the E2E harness derive the name from the account id.
+  The assertion loops over every resource, so adding a third without a
+  `DeletionPolicy` fails here rather than at recovery time, when the bucket already
+  exists and the operator has no other way in. Note the docs describe import as
+  going "into an existing stack"; that describes a flow, not a constraint — a
+  probe confirmed `--change-set-type IMPORT` is accepted for a stack that does not
+  exist yet. Both resources also carry `UpdateReplacePolicy: Retain`, which closes
+  the same loss through a different door: `BucketName` is createOnly on the bucket
+  and `Bucket` is createOnly on the policy (per their live resource schemas), so
+  retargeting either **replaces** it and the replacement's cleanup deletes the
+  original. `cfn-lint` reports the missing half as `W3011`, but only as a warning
+  and only for templates the lint step actually names — see TC-SLACKAPP-218.
+- **TC-SLACKAPP-218** — `infra-ci.yml` **gates and lints** this template. The
+  workflow excludes `infra/cloudformation/**` and then re-includes specific
+  templates, so a template is gated only if it appears *after* the exclusion —
+  order decides it, not presence. This one was missing from both the
+  `pull_request` and `push` filters and from the `cfn-lint` step, so a PR touching
+  only the template triggered no run at all, while the five security properties
+  that moved out of `infra/slack-approval.ts` lived there unwatched. That gap is
+  what let a missing `UpdateReplacePolicy` reach review: the CloudFormation API
+  accepts the template, the unit tests did not read the attribute, and the only
+  tool that flags it was not pointed at the file. The case asserts the path's
+  position relative to the exclusion in both triggers *and* the `cfn-lint`
+  invocation, pinned to the application region — this bucket is deployed there,
+  not in `us-west-2` with the account-global IAM stacks.
+- **TC-SLACKAPP-215** — this stack declares **no bucket resource at all**, asserted
+  by resource *type* rather than by logical name so a rename cannot slip past. The
+  regression it guards is not hypothetical — it shipped, and it is a permanent prod
+  outage rather than a degraded one: re-adding any of the five resources restores the
+  `BucketAlreadyOwnedByYou` collision described above, with no way back short of
+  deleting the audit trail. This is the case to read first if a future change is
+  tempted to move the bucket back into the app for the convenience of a resource
+  handle.
 - **TC-SLACKAPP-167** — the **stage** goes in the key, not the bucket name. Once
   the bucket became account-scoped, the key prefix is the only thing carrying
   cross-stage separation — without it two stages write the same object and a
@@ -2015,6 +2078,19 @@ fail the run.
   incidental: a different assertion about a different thing, reachable only because the
   same injected error also hit a read that classifies properly. Asserted on the message
   rather than the exit code for that reason.
+
+- **TC-SLACKAPP-216** — an absent artifact bucket **fails** the run and names
+  `scripts/deploy-decision-artifact-bucket.sh`. The bucket is provisioned out-of-band,
+  which decoupled two facts that used to travel together: a stage holding
+  `slack/signing-secret` no longer implies the bucket exists, so this is the state a
+  fresh account is in until the bootstrap has been run once. Deliberately **not** one of
+  this harness's graceful skips — the approval loop is deployed on the stage by the time
+  this check runs, so the artifact half is genuinely broken and a skip would report a
+  green run for a loop that cannot execute a `MERGE`. Without the preflight the first
+  `put_artifact` fails with a bare `NoSuchBucket` into a discarded stdout and the run
+  surfaces later as a hash mismatch, sending the reader to the wrong file entirely.
+  Asserted to refuse *before* seeding, too: an abort that had already written
+  `approvals/offered` would leave a record the next run's click could consume.
 
 - **TC-SLACKAPP-212** — an exit between building the two artifact bodies and the full
   `cleanup` trap still deletes them. The bodies are `mktemp`ed well before that trap is

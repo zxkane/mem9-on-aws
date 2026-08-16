@@ -217,6 +217,7 @@ function runFixture({
   expiryBehavior = "refuse",
   tamperBehavior = "refuse",
   accountId = "123456789012",
+  artifactBucketMissing = "",
   taskDef = "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-cleanup:7",
   containerName = "Mem9Cleanup",
   logGroup = "/sst/cluster/mem9-pr-123-a1b2c3/Mem9Cleanup-d4e5f6",
@@ -360,6 +361,13 @@ if (command === "ssm get-parameter") {
   // name that S3 rejects, and the resulting upload failure would read as a
   // permissions problem.
   console.log(process.env.MOCK_ACCOUNT_ID ?? "");
+} else if (command === "s3api head-bucket") {
+  // The artifact bucket is provisioned OUT-OF-BAND, so the script checks it exists
+  // before seeding. A fixture knob because the interesting case is the ABSENT
+  // bucket: that used to be impossible to reach — the bucket travelled with the
+  // Slack secrets the skip gate already tested — and is now the state a fresh
+  // account is in until the bootstrap script has been run once.
+  process.exit(process.env.MOCK_ARTIFACT_BUCKET_MISSING === "1" ? 255 : 0);
 } else if (command === "s3api put-object") {
   // The artifact objects. Recorded rather than stored, and the BODY is read from
   // the path the script passed: the assertions are about what the script
@@ -626,6 +634,7 @@ process.exit(real.status ?? 1);
       MOCK_EXPIRY_BEHAVIOR: expiryBehavior,
       MOCK_TAMPER_BEHAVIOR: tamperBehavior,
       MOCK_ACCOUNT_ID: accountId,
+      MOCK_ARTIFACT_BUCKET_MISSING: artifactBucketMissing,
       MOCK_TASK_DEF: taskDef,
       MOCK_CONTAINER_NAME: containerName,
       MOCK_LOG_GROUP: logGroup,
@@ -1432,6 +1441,42 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
       ).toHaveLength(0);
       expect(callRecords.filter(([tool]) => tool === "curl")).toHaveLength(0);
     }
+  });
+
+  it("TC-SLACKAPP-216 an absent artifact bucket names the bootstrap script, and is not a skip", () => {
+    // The bucket moved OUT-OF-BAND, which decoupled two facts that used to travel
+    // together: the stage having `slack/signing-secret` no longer implies the bucket
+    // exists, so this state is reachable on any account whose bootstrap has not been
+    // run. Without the preflight the first `put_artifact` fails with a bare
+    // `NoSuchBucket` into a discarded stdout, and the run reads as a hash mismatch.
+    const { callRecords, result, output } = runFixture({
+      artifactBucketMissing: "1",
+      claim: claimWith(),
+    });
+    // A FAILURE, not one of this harness's graceful skips: the approval loop IS
+    // deployed on the stage by this point, so the artifact half is genuinely broken
+    // and a skip would report a green run for a loop that cannot execute a MERGE.
+    expect(result.status, output).not.toBe(0);
+    expect(output).toMatch(/does not exist/iu);
+    // The remedy has to name the script, since the reader's next question is what to
+    // run — and the bucket is not something a stage deploy will create for them.
+    expect(output).toMatch(/deploy-decision-artifact-bucket\.sh/u);
+    // And it refuses BEFORE seeding anything: no upload, no offered record, no POST.
+    // An abort that had already written the offered parameter would leave a record
+    // the next run's click could consume.
+    expect(
+      callRecords.filter(
+        ([tool, service, operation]) =>
+          tool === "aws" && service === "s3api" && operation === "put-object",
+      ),
+    ).toHaveLength(0);
+    expect(
+      callRecords.filter(
+        ([tool, service, operation]) =>
+          tool === "aws" && service === "ssm" && operation === "put-parameter",
+      ),
+    ).toHaveLength(0);
+    expect(callRecords.filter(([tool]) => tool === "curl")).toHaveLength(0);
   });
 
   it("TC-SLACKAPP-212 an exit between building the artifacts and the full trap still deletes them", () => {

@@ -87,6 +87,7 @@ on:
       - "infra/cloudformation/github-actions-role.yaml"
       - "infra/cloudformation/ecr-registry-scanning.yaml"
       - "infra/cloudformation/workload-permissions-boundary.yaml"
+      - "infra/cloudformation/decision-artifact-bucket.yaml"
   push:
     branches: [main]
     paths:
@@ -103,6 +104,7 @@ on:
       - "infra/cloudformation/github-actions-role.yaml"
       - "infra/cloudformation/ecr-registry-scanning.yaml"
       - "infra/cloudformation/workload-permissions-boundary.yaml"
+      - "infra/cloudformation/decision-artifact-bucket.yaml"
 
 # Per-PR concurrency for PR events (cancel superseded runs so repeated
 # `synchronize` events don't race the same `pr-N` stage's unlock/deploy);
@@ -250,6 +252,8 @@ jobs:
           cfn-lint infra/cloudformation/ecr-registry-scanning.yaml --regions "$application_region"
           cfn-lint infra/cloudformation/github-actions-role.yaml --regions us-west-2
           cfn-lint infra/cloudformation/workload-permissions-boundary.yaml --regions us-west-2
+          # Application region: this bucket is deployed there, not us-west-2.
+          cfn-lint infra/cloudformation/decision-artifact-bucket.yaml --regions "$application_region"
 
       - name: Validate workload boundary operator scripts
         run: |

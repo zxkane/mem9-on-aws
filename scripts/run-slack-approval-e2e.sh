@@ -135,6 +135,19 @@ if ! [[ "$ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
 fi
 ARTIFACT_BUCKET="mem9-audit-${ACCOUNT_ID}"
 
+# The bucket is provisioned OUT-OF-BAND, so its existence is no longer implied by
+# the stage having the Slack secrets — those two used to travel together when
+# `slackApproval()` declared the bucket. Check it here so a missing bootstrap
+# reports the script to run, rather than surfacing as a bare `NoSuchBucket` from
+# the first `put_artifact` (whose output is discarded) or, worse, as the apply
+# task failing later for a reason that looks like a hash mismatch. Hard failure,
+# not a skip: the stage HAS the approval loop deployed at this point, so the
+# artifact half genuinely is broken and a skip would hide it.
+if ! aws s3api head-bucket --bucket "$ARTIFACT_BUCKET" --region "$REGION" >/dev/null 2>&1; then
+  echo "::error::artifact bucket ${ARTIFACT_BUCKET} does not exist — bootstrap it once per account with scripts/deploy-decision-artifact-bucket.sh" >&2
+  exit 1
+fi
+
 # The reviewed list, its tampered twin, and the ids the offer will name — all
 # built by the SAME functions the scan uses, imported from the script under test.
 # Rehashing a hand-written JSON literal here would prove only that this file and
