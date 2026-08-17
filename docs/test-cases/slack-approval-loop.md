@@ -2099,3 +2099,15 @@ done). Consensus adds no code: a run with no usable consensus offered nothing
 and did nothing wrong, so it exits 0 with the disagreement rate in its summary —
 the number the operator is meant to act on, not an exit code the scheduler would
 have to interpret.
+
+## Scheduled size-limit diagnostics (#155)
+
+- **TC-SLACKAPP-215** — both the SSM parameter-limit refusal and Slack block-limit
+  refusal distinguish an unattended scheduled scan from an operator CLI run. The
+  scheduled message names an applicable operator-run review with a smaller
+  approval limit and never names `--cap`, which the schedule cannot pass. The
+  existing CLI messages keep their exact `lower --cap` advice.
+- **TC-SLACKAPP-216** — the EventBridge Scheduler container override marks only
+  that invocation as unattended. The task definition and operator CLI remain
+  unmarked, and the override still carries neither `MEM9_APPROVAL_HASH` nor any
+  destructive flag.

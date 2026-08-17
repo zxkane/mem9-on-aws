@@ -107,6 +107,7 @@ const SLACK_MAX_HEADER_CHARS = 150;
 const SLACK_TIMEOUT_MS = 15_000;
 /** Set by infra/slack-approval.ts; its presence is what enables the offer. */
 const MEM9_SLACK_CHANNEL_ENV = "MEM9_SLACK_APPROVAL_CHANNEL";
+const MEM9_UNATTENDED_ENV = "MEM9_CLEANUP_UNATTENDED";
 // Set by infra/slack-approval.ts to the bucket it provisions (#150). Its ABSENCE
 // is meaningful rather than an error: it is what keeps #102's operator CLI, and any
 // stage deployed before that bucket existed, writing the id-only record they always
@@ -1125,6 +1126,13 @@ export function decisionArtifactHash(serialized) {
   return contentHash(serialized);
 }
 
+function approvalSizeRemedy(unattended, cliRemedy) {
+  return unattended
+    ? `disable the cleanup scan schedule, then run an operator-initiated review ` +
+        `with a smaller approval limit before re-enabling the schedule`
+    : cliRemedy;
+}
+
 /**
  * The `{prefix}/approvals/offered` record: what the callback Lambda compares a
  * button click against, and where the apply task reads its ids from (#123).
@@ -1153,6 +1161,7 @@ export function buildOfferedRecord({
   artifactBucket,
   artifactKey,
   artifactHash,
+  unattended = false,
 }) {
   // Every id any destructive decision TOUCHES, not the DELETE-verdict ids (#150).
   // This list is the bound `applyDecisions` enforces, so a MERGE whose survivor
@@ -1263,7 +1272,10 @@ export function buildOfferedRecord({
     throw new Error(
       `the offered approval list is ${bytes} bytes, over the ` +
         `${MAX_PARAMETER_BYTES}-byte standard parameter limit for ${ids.length} ids — ` +
-        `lower --cap rather than truncating the list the operator approves`,
+        approvalSizeRemedy(
+          unattended,
+          `lower --cap rather than truncating the list the operator approves`,
+        ),
     );
   }
   return record;
@@ -1348,7 +1360,12 @@ export function formatHours(ms) {
  * 120-character slices: a snippet identifies a memory being removed, and the
  * merged text IS the change being approved.
  */
-export function buildApprovalMessage({ record, decisions, channel }) {
+export function buildApprovalMessage({
+  record,
+  decisions,
+  channel,
+  unattended = false,
+}) {
   const withheld = { RETAIN: 0, UNSTABLE: 0 };
   for (const d of decisions) {
     if (d.verdict in withheld) withheld[d.verdict] += 1;
@@ -1497,7 +1514,10 @@ export function buildApprovalMessage({ record, decisions, channel }) {
     throw new Error(
       `the review list needs ${blocks.length} Block Kit blocks, over Slack's ` +
         `${SLACK_MAX_BLOCKS}-block message limit for ${record.ids.length} ids — ` +
-        `lower --cap rather than posting a list the operator cannot see whole`,
+        approvalSizeRemedy(
+          unattended,
+          `lower --cap rather than posting a list the operator cannot see whole`,
+        ),
     );
   }
   const long = blocks.find(
@@ -1964,6 +1984,7 @@ export async function postApprovalRequest({
   fetchImpl,
   s3,
   artifactBucket,
+  unattended = false,
   now = Date.now,
   log = () => {},
 }) {
@@ -2060,6 +2081,7 @@ export async function postApprovalRequest({
     artifactBucket: artifact ? artifactBucket : undefined,
     artifactKey: artifact?.key,
     artifactHash: artifact?.hash,
+    unattended,
   });
 
   await write(record);
@@ -2071,7 +2093,12 @@ export async function postApprovalRequest({
     return { record, posted: false };
   }
 
-  const message = buildApprovalMessage({ record, decisions, channel });
+  const message = buildApprovalMessage({
+    record,
+    decisions,
+    channel,
+    unattended,
+  });
   const posted = await slackCall("chat.postMessage", message, { botToken, fetchImpl });
 
   try {
@@ -4248,6 +4275,7 @@ async function buildPostApproval(opts, region, runtime) {
       botToken,
       s3,
       artifactBucket,
+      unattended: process.env[MEM9_UNATTENDED_ENV] === "1",
       fetchImpl: runtime.fetchImpl ?? fetch,
       log: (message) =>
         console.error(`[memory-cleanup ${new Date().toISOString()}] ${message}`),

@@ -5457,9 +5457,12 @@ describe("the apply task's in-container runtime (#123)", () => {
     "MEM9_DB_NAME",
     "MEM9_DB_PORT",
     "MEM9_DB_SECRET",
+    "MEM9_CLEANUP_UNATTENDED",
     "MEM9_LLM_MODEL",
+    "MEM9_SLACK_APPROVAL_CHANNEL",
     "MEM9_SSM_PREFIX",
     "MEM9_TENANT_ID",
+    "SLACK_BOT_TOKEN",
   ];
   afterEach(() => {
     for (const key of environmentKeys) delete process.env[key];
@@ -5580,6 +5583,61 @@ describe("the apply task's in-container runtime (#123)", () => {
     ]);
     expect(secrets.sent[0].SecretId).toBe(secretArn);
     expect(calls[0][1]).toMatchObject({ password: "from-secret" });
+    await production.close();
+  });
+
+  it("TC-SLACKAPP-215 carries the unattended marker through both offer-size refusals", async () => {
+    containerEnv({
+      MEM9_CLEANUP_UNATTENDED: "1",
+      MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL",
+      SLACK_BOT_TOKEN: "xoxb-fixture-token",
+    });
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: false, cap: 50 },
+      {
+        ssm: fakeAwsClient(),
+        getToken: vi.fn(),
+        fromNodeProviderChain: vi.fn(),
+      },
+    );
+    const deletion = (id, reason = "session state") => ({
+      id,
+      verdict: "DELETE",
+      reason,
+      contentHash: contentHash(`content-${id}`),
+      version: 1,
+      snippet: `snippet-${id}`,
+    });
+    const offer = (decisions) =>
+      production.deps.postApproval({
+        decisions,
+        generatedAt: "2026-08-05T03:00:00.000Z",
+        issuedAt: "2026-08-05T03:00:00.000Z",
+      });
+
+    const parameterError = await offer(
+      Array.from({ length: 4000 }, (_, i) =>
+        deletion(`memory-with-a-realistic-id-${i}`),
+      ),
+    ).then(
+      () => undefined,
+      (err) => err,
+    );
+    const blockError = await offer(
+      Array.from({ length: 60 }, (_, i) =>
+        deletion(`memory-${i}`, "x".repeat(2800)),
+      ),
+    ).then(
+      () => undefined,
+      (err) => err,
+    );
+
+    for (const error of [parameterError, blockError]) {
+      expect(error?.message).toMatch(
+        /operator-initiated review with a smaller approval limit/iu,
+      );
+      expect(error?.message).not.toContain("--cap");
+    }
     await production.close();
   });
 
@@ -6331,6 +6389,56 @@ describe("offering the list to Slack (#123)", () => {
         if (element.value) expect(element.value.length).toBeLessThanOrEqual(2000);
       }
     }
+  });
+
+  it("TC-SLACKAPP-215 gives scheduled parameter and block limits an applicable remedy", () => {
+    const many = Array.from({ length: 4000 }, (_, i) =>
+      del(`memory-with-a-realistic-id-${i}`),
+    );
+    const stamp = {
+      stage: "prod",
+      decisions: many,
+      generatedAt: "2026-08-05T03:00:00.000Z",
+      issuedAt: "2026-08-05T03:00:00.000Z",
+    };
+    const messageArgs = {
+      record: {
+        stage: "prod",
+        hash: contentHash(many.map((d) => d.id).join("\n")),
+        ids: many.map((d) => d.id),
+        generatedAt: stamp.generatedAt,
+      },
+      decisions: many,
+      channel: CHANNEL,
+    };
+    const errorMessage = (action) => {
+      try {
+        action();
+      } catch (err) {
+        return err.message;
+      }
+      throw new Error("expected the size guard to refuse the review");
+    };
+
+    for (const scheduledMessage of [
+      errorMessage(() => buildOfferedRecord({ ...stamp, unattended: true })),
+      errorMessage(() =>
+        buildApprovalMessage({ ...messageArgs, unattended: true }),
+      ),
+    ]) {
+      expect(scheduledMessage).toMatch(
+        /operator-initiated review with a smaller approval limit/iu,
+      );
+      expect(scheduledMessage).toMatch(/schedule/iu);
+      expect(scheduledMessage).not.toContain("--cap");
+    }
+
+    expect(errorMessage(() => buildOfferedRecord(stamp))).toContain(
+      "lower --cap rather than truncating the list the operator approves",
+    );
+    expect(errorMessage(() => buildApprovalMessage(messageArgs))).toContain(
+      "lower --cap rather than posting a list the operator cannot see whole",
+    );
   });
 
   // #150's merge rendering, exercised through the same builder the real offer

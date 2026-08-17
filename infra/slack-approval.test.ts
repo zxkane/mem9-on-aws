@@ -1164,7 +1164,7 @@ describe("slack approval infrastructure", () => {
     expect(actions.sort()).toEqual(["ecs:RunTask", "iam:PassRole"]);
   });
 
-  it("TC-SLACKAPP-150: overrides the command with a DRY run: no --apply, no --ids, a quorum, and an out-dir outside /app", async () => {
+  it("TC-SLACKAPP-150/216: overrides the command with a marked DRY run: no --apply, no --ids, a quorum, and an out-dir outside /app", async () => {
     installGlobals("prod");
     enable();
     enableScan();
@@ -1221,14 +1221,15 @@ describe("slack approval infrastructure", () => {
     expect(baseUrlIndex).toBeGreaterThan(0);
     expect(command[baseUrlIndex + 1]).toBe("http://mnemo.mem9-prod.local:8080");
 
-    // No environment override at all. MEM9_SLACK_APPROVAL_CHANNEL is already in
-    // the definition and is what makes `buildPostApproval` return a poster, so the
-    // scan offers by virtue of being configured for Slack. MEM9_APPROVAL_HASH must
-    // NOT appear: it means "this run came from a click", and setting it with no
-    // `--ids` is a hard error in `createCleanupDeps`.
-    expect(override.environment).toBeUndefined();
+    // Only the schedule is marked unattended, so offer-size errors can name a
+    // remedy this path can actually use. The operator CLI and task definition
+    // remain unmarked and retain their existing `--cap` advice.
+    expect(override.environment).toEqual([
+      { name: "MEM9_CLEANUP_UNATTENDED", value: "1" },
+    ]);
     const taskArgs = materialize(one("Task", "Mem9Cleanup").args) as
       Record<string, any>;
+    expect(taskArgs.environment.MEM9_CLEANUP_UNATTENDED).toBeUndefined();
     expect(Object.keys(taskArgs.environment)).not.toContain("MEM9_APPROVAL_HASH");
     expect(taskArgs.environment.MEM9_SLACK_APPROVAL_CHANNEL).toBe(CHANNEL_ID);
     expect(JSON.stringify(override)).not.toContain("MEM9_APPROVAL_HASH");

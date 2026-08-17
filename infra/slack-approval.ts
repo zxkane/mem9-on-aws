@@ -853,6 +853,9 @@ export function slackApproval(
                 "--out",
                 CLEANUP_SCAN_OUT_DIR,
               ],
+              environment: [
+                { name: "MEM9_CLEANUP_UNATTENDED", value: "1" },
+              ],
               // MEM9_SLACK_APPROVAL_CHANNEL is already in the definition's
               // `environment`, and it is what makes `buildPostApproval` return a
               // poster at all — so the scan offers by virtue of being configured
