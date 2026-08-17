@@ -334,6 +334,8 @@ jobs:
 
       - uses: actions/checkout@v7
         if: steps.gate.outputs.skip != 'true'
+        with:
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@v6
         if: steps.gate.outputs.skip != 'true'
@@ -361,6 +363,8 @@ jobs:
 
       - name: Preflight — verify role is assumable
         if: steps.gate.outputs.skip != 'true'
+        env:
+          WORKLOAD_BOUNDARY_BASE_REF: ${{ github.event.pull_request.base.sha || '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -374,7 +378,7 @@ jobs:
           fi
           if ! WORKLOAD_BOUNDARY_SKIP_DOTENV=true \
             scripts/deploy-workload-permissions-boundary.sh --verify-only; then
-            echo "::error::Operator-owned workload boundary is missing or drifted"
+            echo "::error::Workload boundary preflight failed; see the diagnostic above"
             exit 1
           fi
           echo "Preflight OK: OIDC deploy role assumed"
@@ -1046,6 +1050,8 @@ jobs:
           mask-aws-account-id: true
 
       - name: Preflight — verify role is assumable
+        env:
+          WORKLOAD_BOUNDARY_BASE_REF: ${{ github.event.pull_request.base.sha || '' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -1059,7 +1065,7 @@ jobs:
           fi
           if ! WORKLOAD_BOUNDARY_SKIP_DOTENV=true \
             scripts/deploy-workload-permissions-boundary.sh --verify-only; then
-            echo "::error::Operator-owned workload boundary is missing or drifted"
+            echo "::error::Workload boundary preflight failed; see the diagnostic above"
             exit 1
           fi
           echo "Preflight OK: OIDC deploy role assumed"

@@ -713,6 +713,125 @@ function canonicalJson(value) {
   return value;
 }
 
+function sameBoundaryStatement(statement, expectedStatement) {
+  if (!statement || typeof statement !== "object") return false;
+  const expectedKeys = Object.keys(expectedStatement).sort();
+  if (!sameStringSet(Object.keys(statement), expectedKeys)) return false;
+  for (const key of ["Action", "NotAction", "Resource", "NotResource"]) {
+    if (
+      expectedStatement[key] !== undefined &&
+      !sameStringSet(statement[key], expectedStatement[key])
+    ) {
+      return false;
+    }
+  }
+  if (statement.Effect !== expectedStatement.Effect) return false;
+  return (
+    expectedStatement.Condition === undefined ||
+    JSON.stringify(canonicalJson(statement.Condition)) ===
+      JSON.stringify(canonicalJson(expectedStatement.Condition))
+  );
+}
+
+const POLICY_DIAGNOSTIC_ITEM_LIMIT = 12;
+
+function safePolicyDiagnosticToken(value, kind) {
+  if (typeof value !== "string" || value.length === 0 || value.length > 128) {
+    return "<redacted>";
+  }
+  const pattern =
+    kind === "action"
+      ? /^(?:\*|[A-Za-z0-9-]+:[A-Za-z0-9*?]+)$/u
+      : /^[A-Za-z0-9+=,.@_-]+$/u;
+  if (!pattern.test(value)) return "<redacted>";
+  return value.replace(/[0-9]{12}/gu, "<redacted-account-id>");
+}
+
+function formatPolicyDiagnosticItems(values, kind) {
+  const sanitizedCounts = new Map();
+  for (const value of new Set(values)) {
+    const safeValue = safePolicyDiagnosticToken(value, kind);
+    sanitizedCounts.set(safeValue, (sanitizedCounts.get(safeValue) ?? 0) + 1);
+  }
+  const safeValues = [...sanitizedCounts].sort(([left], [right]) =>
+    left.localeCompare(right),
+  );
+  if (safeValues.length === 0) return "(none)";
+  const visible = safeValues
+    .slice(0, POLICY_DIAGNOSTIC_ITEM_LIMIT)
+    .map(([value, count]) => `${value}${count > 1 ? ` (x${count})` : ""}`);
+  const omitted = safeValues.length - visible.length;
+  return `${visible.join(", ")}${omitted > 0 ? `, ... (+${omitted} groups)` : ""}`;
+}
+
+function policyActions(statements) {
+  const actions = [];
+  for (const statement of statements) {
+    for (const key of ["Action", "NotAction"]) {
+      for (const action of list(statement?.[key])) {
+        actions.push(typeof action === "string" ? action : "");
+      }
+    }
+  }
+  return actions;
+}
+
+export function boundaryPolicyDriftDiagnostic(document, contract) {
+  try {
+    const actualDocument = decodePolicyDocument(document);
+    const actual = list(actualDocument.Statement);
+    const expected = expectedBoundaryPolicyDocument(contract).Statement;
+    const documentShapeChanged =
+      actualDocument.Version !== "2012-10-17" ||
+      JSON.stringify(Object.keys(actualDocument).sort()) !==
+        JSON.stringify(["Statement", "Version"]);
+    const expectedSids = new Set(expected.map(({ Sid }) => Sid));
+    const actualSids = actual.map(({ Sid } = {}) => Sid);
+    const actualSidSet = new Set(
+      actualSids.filter((sid) => typeof sid === "string"),
+    );
+    const addedSids = actualSids.filter(
+      (sid) => typeof sid !== "string" || !expectedSids.has(sid),
+    );
+    const removedSids = [...expectedSids].filter(
+      (sid) => !actualSidSet.has(sid),
+    );
+    const changedSids = expected
+      .filter((expectedStatement) => {
+        const matches = actual.filter(
+          (statement) => statement?.Sid === expectedStatement.Sid,
+        );
+        return (
+          matches.length > 0 &&
+          (matches.length !== 1 ||
+            !sameBoundaryStatement(matches[0], expectedStatement))
+        );
+      })
+      .map(({ Sid }) => Sid);
+
+    const expectedActions = new Set(policyActions(expected));
+    const actualActions = new Set(policyActions(actual));
+    const addedActions = [...actualActions].filter(
+      (action) => !expectedActions.has(action),
+    );
+    const removedActions = [...expectedActions].filter(
+      (action) => !actualActions.has(action),
+    );
+
+    return [
+      "Policy delta (bounded; resources omitted):",
+      `  document shape changed: ${documentShapeChanged ? "yes" : "no"}`,
+      `  added statements: ${formatPolicyDiagnosticItems(addedSids, "sid")}`,
+      `  removed statements: ${formatPolicyDiagnosticItems(removedSids, "sid")}`,
+      `  changed statements: ${formatPolicyDiagnosticItems(changedSids, "sid")}`,
+      `  added actions: ${formatPolicyDiagnosticItems(addedActions, "action")}`,
+      `  removed actions: ${formatPolicyDiagnosticItems(removedActions, "action")}`,
+    ].join("\n");
+  } catch {
+    return "Policy delta unavailable: deployed document is malformed.";
+  }
+}
+
 export function verifyBoundaryPolicyDocument(document, contract) {
   const decoded = decodePolicyDocument(document);
   if (
@@ -759,25 +878,7 @@ export function verifyBoundaryPolicyDocument(document, contract) {
       (statement) => statement?.Sid === expectedStatement.Sid,
     );
     if (matches.length !== 1) return false;
-    const statement = matches[0];
-    const expectedKeys = Object.keys(expectedStatement).sort();
-    if (!sameStringSet(Object.keys(statement), expectedKeys)) return false;
-    for (const key of ["Action", "NotAction", "Resource", "NotResource"]) {
-      if (
-        expectedStatement[key] !== undefined &&
-        !sameStringSet(statement[key], expectedStatement[key])
-      ) {
-        return false;
-      }
-    }
-    if (statement.Effect !== expectedStatement.Effect) return false;
-    if (
-      expectedStatement.Condition !== undefined &&
-      JSON.stringify(canonicalJson(statement.Condition)) !==
-        JSON.stringify(canonicalJson(expectedStatement.Condition))
-    ) {
-      return false;
-    }
+    if (!sameBoundaryStatement(matches[0], expectedStatement)) return false;
   }
   return true;
 }

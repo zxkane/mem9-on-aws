@@ -239,19 +239,83 @@ read_policy_revision() {
   printf '%s' "$revision"
 }
 
+verify_boundary_policy_at_base() {
+  local boundary_policy="$1"
+  local base_ref="${WORKLOAD_BOUNDARY_BASE_REF:-}"
+  local source_path target_path temp_dir verifier_exit
+  local -a verifier_sources=(
+    "scripts/verify-workload-permissions-boundary.mjs"
+    "scripts/lib/workload-permissions-boundary.mjs"
+    "scripts/workload-permissions-boundary-contract.json"
+  )
+  [[ "$base_ref" =~ ^[0-9a-f]{40}$ ]] || return 2
+  git cat-file -e "${base_ref}^{commit}" >/dev/null 2>&1 || return 2
+  temp_dir="$(mktemp -d)" || return 2
+  mkdir -p "$temp_dir/scripts/lib"
+  for source_path in "${verifier_sources[@]}"; do
+    target_path="$temp_dir/$source_path"
+    if ! git show "${base_ref}:${source_path}" >"$target_path" 2>/dev/null; then
+      rm -rf "$temp_dir"
+      return 2
+    fi
+  done
+  if WORKLOAD_BOUNDARY_ACCOUNT_ID="$account_id" \
+      WORKLOAD_BOUNDARY_APPLICATION_REGION="$application_region" \
+      WORKLOAD_BOUNDARY_BEDROCK_PROJECT_ARN="$bedrock_project_arn" \
+      WORKLOAD_BOUNDARY_DECISION_ARTIFACT_BUCKET="$decision_artifact_bucket_name" \
+      WORKLOAD_BOUNDARY_OPENAI_BEDROCK_PROJECT_ARN="$openai_bedrock_project_arn" \
+      WORKLOAD_BOUNDARY_PARTITION="$partition" \
+      WORKLOAD_BOUNDARY_POLICY_REVISION="$policy_revision" \
+        node "$temp_dir/scripts/verify-workload-permissions-boundary.mjs" \
+        <<<"$boundary_policy" >/dev/null 2>&1; then
+    verifier_exit=0
+  else
+    verifier_exit=$?
+  fi
+  rm -rf "$temp_dir"
+  return "$verifier_exit"
+}
+
+report_boundary_policy_drift() {
+  local boundary_policy="$1"
+  local base_exit
+  if [[ -z "${WORKLOAD_BOUNDARY_BASE_REF:-}" ]]; then
+    echo "Unexplained deployed boundary drift: no pull request base was supplied. Investigate out-of-band IAM changes before deployment." >&2
+    return
+  fi
+  if verify_boundary_policy_at_base "$boundary_policy"; then
+    base_exit=0
+  else
+    base_exit=$?
+  fi
+  if [[ $base_exit -eq 0 ]]; then
+    echo "Expected pre-rollout boundary change: the deployed policy matches the pull request base. Run the guarded rollout, then re-run CI." >&2
+  elif [[ $base_exit -eq 1 ]]; then
+    echo "Unexplained deployed boundary drift: the live policy does not match the pull request base. Investigate out-of-band IAM changes before deployment." >&2
+  else
+    echo "Unexplained deployed boundary drift: the pull request base could not be verified. Investigate out-of-band IAM changes before deployment." >&2
+  fi
+}
+
 verify_boundary_policy() {
   local boundary_policy default_version
   default_version="$(aws iam get-policy \
     --policy-arn "$policy_arn" \
     --query 'Policy.DefaultVersionId' \
     --output text 2>/dev/null || true)"
-  [[ "$default_version" =~ ^v[1-9][0-9]*$ ]] || return 1
-  boundary_policy="$(aws iam get-policy-version \
-    --policy-arn "$policy_arn" \
-    --version-id "$default_version" \
-    --query 'PolicyVersion.Document' \
-    --output json 2>/dev/null)" || return 1
-  [[ -n "$boundary_policy" ]] || return 1
+  if [[ ! "$default_version" =~ ^v[1-9][0-9]*$ ]]; then
+    echo "Boundary policy default-version read-back failed." >&2
+    return 1
+  fi
+  if ! boundary_policy="$(aws iam get-policy-version \
+      --policy-arn "$policy_arn" \
+      --version-id "$default_version" \
+      --query 'PolicyVersion.Document' \
+      --output json 2>/dev/null)" ||
+      [[ -z "$boundary_policy" ]]; then
+    echo "Boundary policy document read-back failed." >&2
+    return 1
+  fi
   if ! WORKLOAD_BOUNDARY_ACCOUNT_ID="$account_id" \
     WORKLOAD_BOUNDARY_APPLICATION_REGION="$application_region" \
     WORKLOAD_BOUNDARY_BEDROCK_PROJECT_ARN="$bedrock_project_arn" \
@@ -261,6 +325,7 @@ verify_boundary_policy() {
     WORKLOAD_BOUNDARY_POLICY_REVISION="$policy_revision" \
       node "$repo_root/scripts/verify-workload-permissions-boundary.mjs" \
       <<<"$boundary_policy"; then
+    report_boundary_policy_drift "$boundary_policy"
     return 1
   fi
 
@@ -380,6 +445,7 @@ verify_boundary_policy() {
       ! verify_decrypt_probe explicitDeny \
         "$outside_lambda_context" "$lambda_principal_context" ||
       ! verify_decrypt_probe explicitDeny; then
+    echo "Workload permissions-boundary runtime KMS verification failed." >&2
     return 1
   fi
 
@@ -388,7 +454,10 @@ verify_boundary_policy() {
     --policy-arn "$policy_arn" \
     --query 'Policy.DefaultVersionId' \
     --output text 2>/dev/null || true)"
-  [[ "$current_default_version" == "$default_version" ]]
+  if [[ "$current_default_version" != "$default_version" ]]; then
+    echo "Workload permissions-boundary default version changed during verification." >&2
+    return 1
+  fi
 }
 
 verify_guarded_update() {
@@ -501,13 +570,19 @@ if [[ $describe_exit -eq 0 ]]; then
     echo "Boundary policy revision read-back failed." >&2
     exit 1
   }
-  if [[ "$force_guarded_recovery" != "true" ]] &&
-      verify_boundary_policy >/dev/null 2>&1; then
-    echo "Retained workload permissions-boundary stack verified."
-    exit 0
+  if [[ "$force_guarded_recovery" != "true" ]]; then
+    if [[ "$verify_only" == "true" ]]; then
+      if verify_boundary_policy; then
+        echo "Retained workload permissions-boundary stack verified."
+        exit 0
+      fi
+      exit 1
+    elif verify_boundary_policy >/dev/null 2>&1; then
+      echo "Retained workload permissions-boundary stack verified."
+      exit 0
+    fi
   fi
   if [[ "$verify_only" == "true" ]]; then
-    echo "Workload permissions-boundary policy drift detected." >&2
     exit 1
   fi
 

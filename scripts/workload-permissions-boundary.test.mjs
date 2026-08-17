@@ -1,7 +1,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -646,18 +646,23 @@ function optionValues(args, name) {
 }
 
 async function runBoundaryDeployMock({
+  basePolicyMatches,
   boundaryOpenAiRegion,
   boundarySimulationBadProbe = "",
   boundarySimulationMalformedProbe = "",
   defaultVersionDriftsAfterSimulation = false,
   decisionArtifactBucketName = "",
   decisionArtifactBucketEnv = decisionArtifactBucketName,
+  deployedPolicy,
   guarded = false,
   matching = false,
+  policyIdentityReadbackFails = false,
+  policyRevisionReadbackFails = false,
   postMutationDrift = false,
   quarantineLostAfterSimulation = false,
   quarantine = true,
   quarantineSimulation,
+  realBasePolicy = false,
   responsesRegion,
   simulationCommandFails = false,
   stackApplicationRegion = boundaryContract.applicationRegion,
@@ -669,6 +674,7 @@ async function runBoundaryDeployMock({
   const awsPath = join(directory, "aws");
   const callsPath = join(directory, "calls");
   const createdPath = join(directory, "created");
+  const deployedPath = join(directory, "deployed.json");
   const updatedPath = join(directory, "updated");
   const expectedPath = join(directory, "expected.json");
   const boundarySimulationsPath = join(
@@ -684,9 +690,30 @@ async function runBoundaryDeployMock({
       ? { decisionArtifactBucketName }
       : {}),
   });
+  const baselineBoundaryPolicy = structuredClone(expectedBoundaryPolicy);
+  for (const sid of ["Ceilingr1", "Resources"]) {
+    const statement = baselineBoundaryPolicy.Statement.find(
+      (candidate) => candidate.Sid === sid,
+    );
+    statement[sid === "Ceilingr1" ? "NotAction" : "Action"].push(
+      "iam:DeleteRole",
+    );
+  }
   await writeFile(
     expectedPath,
     JSON.stringify(expectedBoundaryPolicy),
+  );
+  await writeFile(
+    deployedPath,
+    JSON.stringify(
+      deployedPolicy ??
+        (realBasePolicy
+          ? baselineBoundaryPolicy
+          : {
+              Version: "2012-10-17",
+              Statement: [],
+            }),
+    ),
   );
   const lambdaContext =
     "ContextKeyName=kms:EncryptionContext:aws:lambda:FunctionArn," +
@@ -993,7 +1020,11 @@ case "$command" in
         printf '%s\\n' "$MOCK_STACK_STATUS"
       fi
     elif [[ "$query" == "Stacks[0].Parameters[?ParameterKey=='PolicyRevision'].ParameterValue | [0]" ]]; then
-      printf '%s\\n' 'r1'
+      if [[ "$MOCK_POLICY_REVISION_READBACK_FAILS" == "true" ]]; then
+        printf '%s\\n' 'invalid'
+      else
+        printf '%s\\n' 'r1'
+      fi
     else
       jq -cn \
         --arg region "$MOCK_STACK_APPLICATION_REGION" \
@@ -1012,7 +1043,11 @@ case "$command" in
   "cloudformation describe-stack-resources")
     query="$(arg --query "$@")"
     if [[ "$query" == "StackResources[0].PhysicalResourceId" ]]; then
-      printf '%s\\n' 'arn:aws:iam::123456789012:policy/mem9-on-aws-workload-boundary'
+      if [[ "$MOCK_POLICY_IDENTITY_READBACK_FAILS" == "true" ]]; then
+        printf '%s\\n' 'None'
+      else
+        printf '%s\\n' 'arn:aws:iam::123456789012:policy/mem9-on-aws-workload-boundary'
+      fi
     else
       printf '%s\\n' '1'
     fi
@@ -1038,7 +1073,7 @@ case "$command" in
           ( -f "$MOCK_UPDATED" || -f "$MOCK_CREATED" || "$MOCK_MATCHING" == "true" ) ]]; then
       cat "$MOCK_EXPECTED"
     else
-      printf '%s\\n' '{"Version":"2012-10-17","Statement":[]}'
+      cat "$MOCK_DEPLOYED"
     fi
     ;;
   "iam get-role-policy")
@@ -1110,6 +1145,105 @@ esac
 `,
   );
   await chmod(awsPath, 0o755);
+  let baseRef;
+  let spawnCwd = root;
+  const gitPath = join(directory, "git");
+  if (realBasePolicy) {
+    const repositoryPath = join(directory, "repository");
+    const baseLibraryPath = resolve(
+      root,
+      "scripts/lib/workload-permissions-boundary.mjs",
+    );
+    const librarySource = readFileSync(baseLibraryPath, "utf8");
+    const actionMarker =
+      '  "ssm:PutParameter",\n' +
+      "  // The reviewed decision artifact";
+    if (!librarySource.includes(actionMarker)) {
+      throw new Error("baseline action marker is missing");
+    }
+    await mkdir(join(repositoryPath, "scripts/lib"), { recursive: true });
+    await writeFile(
+      join(repositoryPath, "scripts/verify-workload-permissions-boundary.mjs"),
+      readFileSync(
+        resolve(root, "scripts/verify-workload-permissions-boundary.mjs"),
+        "utf8",
+      ),
+    );
+    await writeFile(
+      join(repositoryPath, "scripts/lib/workload-permissions-boundary.mjs"),
+      librarySource.replace(
+        actionMarker,
+        '  "ssm:PutParameter",\n' +
+          '  "iam:DeleteRole",\n' +
+          "  // The reviewed decision artifact",
+      ),
+    );
+    await writeFile(
+      join(repositoryPath, "scripts/workload-permissions-boundary-contract.json"),
+      readFileSync(rolloutContractPath, "utf8"),
+    );
+    const gitEnv = {
+      ...process.env,
+      GIT_AUTHOR_EMAIL: "test@example.com",
+      GIT_AUTHOR_NAME: "Boundary Test",
+      GIT_COMMITTER_EMAIL: "test@example.com",
+      GIT_COMMITTER_NAME: "Boundary Test",
+    };
+    const runFixtureGit = (args) => {
+      const result = spawnSync("git", args, {
+        cwd: repositoryPath,
+        encoding: "utf8",
+        env: gitEnv,
+      });
+      if (result.status !== 0) {
+        throw new Error(`fixture git command failed: ${args[0]}`);
+      }
+      return result.stdout.trim();
+    };
+    runFixtureGit(["init", "--quiet"]);
+    runFixtureGit(["add", "scripts"]);
+    const tree = runFixtureGit(["write-tree"]);
+    baseRef = runFixtureGit([
+      "commit-tree",
+      tree,
+      "-m",
+      "test: baseline boundary policy",
+    ]);
+    spawnCwd = repositoryPath;
+  } else {
+    await writeFile(
+      gitPath,
+      `#!/usr/bin/env bash
+set -euo pipefail
+if [[ "\${1:-}" == "cat-file" ]]; then
+  exit 0
+fi
+if [[ "\${1:-}" != "show" ]]; then
+  exit 1
+fi
+case "\${2:-}" in
+  *:scripts/verify-workload-permissions-boundary.mjs)
+    cat <<'EOF'
+process.stdin.resume();
+process.stdin.on("end", () => {
+  process.exitCode = process.env.MOCK_BASE_POLICY_MATCHES === "true" ? 0 : 1;
+});
+EOF
+    ;;
+  *:scripts/lib/workload-permissions-boundary.mjs)
+    printf '%s\\n' 'export {};'
+    ;;
+  *:scripts/workload-permissions-boundary-contract.json)
+    printf '%s\\n' '{}'
+    ;;
+  *)
+    exit 1
+    ;;
+esac
+`,
+    );
+    await chmod(gitPath, 0o755);
+  }
 
   try {
     const result = spawnSync(
@@ -1123,7 +1257,7 @@ esac
             : []),
       ],
       {
-        cwd: root,
+        cwd: spawnCwd,
         encoding: "utf8",
         env: {
           ...process.env,
@@ -1134,11 +1268,19 @@ esac
           MOCK_BOUNDARY_SIMULATIONS: boundarySimulationsPath,
           MOCK_CALLS: callsPath,
           MOCK_CREATED: createdPath,
+          MOCK_DEPLOYED: deployedPath,
           MOCK_DEFAULT_VERSION_DRIFTS_AFTER_SIMULATION: String(
             defaultVersionDriftsAfterSimulation,
           ),
           MOCK_EXPECTED: expectedPath,
           MOCK_MATCHING: String(matching),
+          MOCK_BASE_POLICY_MATCHES: String(basePolicyMatches),
+          MOCK_POLICY_IDENTITY_READBACK_FAILS: String(
+            policyIdentityReadbackFails,
+          ),
+          MOCK_POLICY_REVISION_READBACK_FAILS: String(
+            policyRevisionReadbackFails,
+          ),
           MOCK_POST_MUTATION_DRIFT: String(postMutationDrift),
           MOCK_QUARANTINE: String(quarantine),
           MOCK_QUARANTINE_DOC: quarantinePath,
@@ -1163,6 +1305,11 @@ esac
           ...(responsesRegion === undefined
             ? {}
             : { MEM9_LLM_RESPONSES_REGION: responsesRegion }),
+          ...(realBasePolicy
+            ? { WORKLOAD_BOUNDARY_BASE_REF: baseRef }
+            : basePolicyMatches === undefined
+              ? {}
+              : { WORKLOAD_BOUNDARY_BASE_REF: reviewedCommit }),
           WORKLOAD_BOUNDARY_MAINTENANCE_ACK: guarded ? "true" : "",
           WORKLOAD_BOUNDARY_SKIP_DOTENV: "true",
         },
@@ -7389,6 +7536,159 @@ describe("operator entry point", () => {
     ).toBe(false);
   });
 
+  it("classifies a deployed base policy as an expected pre-rollout change", async () => {
+    const { calls, result } = await runBoundaryDeployMock({
+      basePolicyMatches: true,
+      verifyOnly: true,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Expected pre-rollout boundary change");
+    expect(result.stderr).toContain("guarded rollout");
+    expect(
+      calls.some((call) =>
+        /(?:cloudformation update-stack|iam put-)/u.test(call),
+      ),
+    ).toBe(false);
+  });
+
+  it("classifies a non-base policy as unexplained deployed drift", async () => {
+    const { calls, result } = await runBoundaryDeployMock({
+      basePolicyMatches: false,
+      verifyOnly: true,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("Unexplained deployed boundary drift");
+    expect(result.stderr).toContain("out-of-band");
+    expect(
+      calls.some((call) =>
+        /(?:cloudformation update-stack|iam put-)/u.test(call),
+      ),
+    ).toBe(false);
+  });
+
+  it("executes the verifier extracted from a real base commit", async () => {
+    const { calls, result } = await runBoundaryDeployMock({
+      realBasePolicy: true,
+      verifyOnly: true,
+    });
+    expect(result.status, result.stderr).toBe(1);
+    expect(result.stderr).toContain("Expected pre-rollout boundary change");
+    expect(
+      calls.some((call) =>
+        /(?:cloudformation update-stack|iam put-)/u.test(call),
+      ),
+    ).toBe(false);
+  });
+
+  it("reports a bounded policy delta without leaking live identifiers", async () => {
+    const drifted = structuredClone(
+      expectedBoundaryPolicyDocument(boundaryContract),
+    );
+    drifted.Statement[0] = {
+      Sid: `Rogue${accountId}`,
+      Effect: "Allow",
+      Action: "iam:DeleteRole",
+      Resource: `arn:aws:iam::${accountId}:role/private-\nname`,
+    };
+    const { result } = await runBoundaryDeployMock({
+      basePolicyMatches: false,
+      deployedPolicy: drifted,
+      verifyOnly: true,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "added statements: Rogue<redacted-account-id>",
+    );
+    expect(result.stderr).toContain("removed statements: Identity");
+    expect(result.stderr).toContain("added actions: iam:DeleteRole");
+    expect(result.stderr).not.toContain(accountId);
+    expect(result.stderr).not.toContain("private-name");
+    expect(result.stderr).not.toMatch(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/u);
+  });
+
+  it("preserves the count of distinct redacted policy tokens", async () => {
+    const drifted = structuredClone(
+      expectedBoundaryPolicyDocument(boundaryContract),
+    );
+    drifted.Statement.push(
+      {
+        Sid: "unsafe sid",
+        Effect: "Deny",
+        Action: "*",
+        Resource: "*",
+      },
+      {
+        Sid: "unsafe\nsid",
+        Effect: "Deny",
+        Action: "*",
+        Resource: "*",
+      },
+    );
+    const { result } = await runBoundaryDeployMock({
+      basePolicyMatches: false,
+      deployedPolicy: drifted,
+      verifyOnly: true,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("added statements: <redacted> (x2)");
+    expect(result.stderr).not.toContain("unsafe");
+  });
+
+  it("reports top-level document drift without printing its fields", async () => {
+    const drifted = structuredClone(
+      expectedBoundaryPolicyDocument(boundaryContract),
+    );
+    drifted.Version = "2008-10-17";
+    drifted.PrivateField = `unsafe-${accountId}`;
+    const { result } = await runBoundaryDeployMock({
+      basePolicyMatches: false,
+      deployedPolicy: drifted,
+      verifyOnly: true,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("document shape changed: yes");
+    expect(result.stderr).not.toContain("PrivateField");
+    expect(result.stderr).not.toContain(accountId);
+  });
+
+  it.each([
+    [
+      "missing stack",
+      { stackExists: false },
+      "Workload permissions-boundary stack is not bootstrapped",
+    ],
+    [
+      "non-accepted stack state",
+      { stackStatus: "UPDATE_IN_PROGRESS" },
+      "Boundary stack is not in an accepted complete state",
+    ],
+    [
+      "policy identity read-back failure",
+      { policyIdentityReadbackFails: true },
+      "Boundary policy identity read-back failed",
+    ],
+    [
+      "policy revision read-back failure",
+      { policyRevisionReadbackFails: true },
+      "Boundary policy revision read-back failed",
+    ],
+  ])(
+    "keeps the %s diagnostic distinct and mutation-free",
+    async (_name, options, message) => {
+      const { calls, result } = await runBoundaryDeployMock({
+        ...options,
+        verifyOnly: true,
+      });
+      expect(result.status).toBe(1);
+      expect(result.stderr).toContain(message);
+      expect(
+        calls.some((call) =>
+          /(?:cloudformation (?:create|update)-stack|iam put-)/u.test(call),
+        ),
+      ).toBe(false);
+    },
+  );
+
   it("gates the active boundary with runtime KMS semantics", async () => {
     const { calls, result } = await runBoundaryDeployMock({
       matching: true,
@@ -7557,7 +7857,7 @@ describe("operator entry point", () => {
     });
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
-      "Workload permissions-boundary policy drift detected",
+      "Workload permissions-boundary runtime KMS verification failed",
     );
     expect(
       calls.some((call) => call.startsWith("cloudformation update-stack")),
@@ -7578,7 +7878,7 @@ describe("operator entry point", () => {
     });
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
-      "Workload permissions-boundary policy drift detected",
+      "Workload permissions-boundary runtime KMS verification failed",
     );
     expect(
       calls.some((call) => call.startsWith("cloudformation update-stack")),
@@ -7593,7 +7893,7 @@ describe("operator entry point", () => {
     });
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
-      "Workload permissions-boundary policy drift detected",
+      "Workload permissions-boundary default version changed during verification",
     );
     expect(
       calls.filter((call) => call.startsWith("iam get-policy ")),
@@ -8777,7 +9077,7 @@ describe("boundary and deploy-role templates", () => {
     );
     expect(
       workflow.match(
-        /Operator-owned workload boundary is missing or drifted/gu,
+        /Workload boundary preflight failed; see the diagnostic above/gu,
       ),
     ).toHaveLength(2);
     expect(workflow.match(/name: Deployment maintenance gate/gu)).toHaveLength(
@@ -8899,6 +9199,34 @@ describe("boundary and deploy-role templates", () => {
     expect(contract.quarantineProbeActions).toContain(
       "lambda:UpdateFunctionCode",
     );
+  });
+
+  it("passes one PR base to both boundary preflights without collapsing diagnostics", () => {
+    const workflowSource = readFileSync(workflowPath, "utf8");
+    const workflow = parse(workflowSource);
+    expect(
+      workflowSource.match(/WORKLOAD_BOUNDARY_BASE_REF:/gu),
+    ).toHaveLength(2);
+    expect(
+      workflowSource.match(
+        /Workload boundary preflight failed; see the diagnostic above/gu,
+      ),
+    ).toHaveLength(2);
+    expect(workflowSource).not.toContain(
+      "Operator-owned workload boundary is missing or drifted",
+    );
+    for (const jobName of ["deploy-preview", "deploy-prod"]) {
+      const preflights = workflow.jobs[jobName].steps.filter(
+        ({ name }) => name === "Preflight — verify role is assumable",
+      );
+      expect(preflights).toHaveLength(1);
+      expect(preflights[0].env?.WORKLOAD_BOUNDARY_BASE_REF).toBe(
+        "${{ github.event.pull_request.base.sha || '' }}",
+      );
+      expect(preflights[0].run).toContain(
+        "Workload boundary preflight failed; see the diagnostic above",
+      );
+    }
   });
 
   it("requires a mechanical deployment pause before the guarded migration", () => {
