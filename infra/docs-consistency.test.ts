@@ -9,6 +9,7 @@ const files = {
   readme: "README.md",
   architecture: "docs/ARCHITECTURE.md",
   facts: "docs/mem9-facts.md",
+  boundaryDesign: "docs/designs/workload-permissions-boundary.md",
   ecs: "infra/ecs.ts",
 } as const;
 
@@ -280,6 +281,23 @@ describe("runtime documentation", () => {
     }
     expect(text.facts).toContain(
       "optional ACM certificate and DNS-only Cloudflare records for the public OAuth",
+    );
+  });
+
+  it("TC-DOCS-010: describes the public-repository fork threat model", () => {
+    expect(text.boundaryDesign).not.toContain("This private repository");
+    expect(text.boundaryDesign).toMatch(/public repository/i);
+    expect(text.boundaryDesign).toContain("secrets.AWS_ROLE_ARN");
+    expect(text.boundaryDesign).toMatch(
+      /fork-triggerable AWS jobs in Infra CI gate on/is,
+    );
+    expect(text.boundaryDesign).toMatch(/fork.{0,80}repository secrets/is);
+    expect(text.boundaryDesign).toMatch(/GITHUB_TOKEN.{0,80}read-only/is);
+    expect(text.boundaryDesign).toMatch(
+      /pull_request.{0,120}(?:subject remains|remains in)/is,
+    );
+    expect(text.boundaryDesign).toMatch(
+      /does not rely on whether.{0,80}vars\.\*/is,
     );
   });
 });

@@ -167,12 +167,23 @@ is not claimed by this design.
 
 The repository variables and workflow gates are mechanical maintenance
 interlocks, not an authorization boundary against someone who can modify the
-workflow itself. This private repository assumes trusted writers and no
-concurrent workflow or repository-settings changes during rollout. If
-untrusted pull requests or additional writers enter the threat model, the
-operator must remove the `pull_request` subject from the deploy role's OIDC
-trust out of band before the implementation window and restore it only after
-permanent enforcement is verified.
+workflow itself. This public repository accepts untrusted fork pull requests.
+[GitHub documents](https://docs.github.com/en/actions/security-for-github-actions/security-guides/using-secrets-in-github-actions#using-secrets-in-a-workflow)
+that fork-triggered workflows do not receive repository secrets except
+`GITHUB_TOKEN`.
+[It also documents](https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target#the-risks-of-the-pull_request_target-event)
+that the fork `GITHUB_TOKEN` is read-only. The role ARN enters the workflow only
+as `secrets.AWS_ROLE_ARN`, and the fork-triggerable AWS jobs in Infra CI gate on
+that secret before trying to assume the role, so a fork job skips instead. The
+deploy role's `pull_request` subject remains in its OIDC trust; its
+unreachability therefore depends on keeping the role ARN in a repository secret
+and preserving those gates. This argument does not rely on whether `vars.*`
+reaches fork-triggered workflows: the repository-variable gates remain
+maintenance interlocks, not authorization controls. Writers who can modify the
+workflow are trusted, and no concurrent workflow or repository-settings changes
+are allowed during rollout. Before the implementation window, the operator must
+remove the `pull_request` subject from the deploy role's OIDC trust out of band
+and restore it only after permanent enforcement is verified.
 
 GitHub repository state and AWS IAM state cannot participate in one atomic
 transaction. The rollout therefore revalidates the reviewed GitHub state at the
