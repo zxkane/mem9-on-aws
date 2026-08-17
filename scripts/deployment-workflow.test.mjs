@@ -252,7 +252,10 @@ describe("workflow integration", () => {
 
   it("TC-SLACKAPP-218: gates and lints the decision-artifact bucket template", () => {
     const workflow = parse(readFileSync(workflowPath, "utf8"));
-    const template = "infra/cloudformation/decision-artifact-bucket.yaml";
+    const templates = [
+      "infra/cloudformation/decision-artifact-bucket.yaml",
+      "infra/cloudformation/decision-artifact-bucket-import.yaml",
+    ];
 
     // `!infra/cloudformation/**` excludes the whole directory, so a template is
     // only gated if it is RE-INCLUDED after the exclusion — order decides it, not
@@ -261,9 +264,11 @@ describe("workflow integration", () => {
     // infra/slack-approval.ts into that file drift with nothing watching.
     for (const trigger of ["pull_request", "push"]) {
       const paths = workflow.on[trigger].paths;
-      expect(paths.indexOf(template)).toBeGreaterThan(
-        paths.indexOf("!infra/cloudformation/**"),
-      );
+      for (const template of templates) {
+        expect(paths.indexOf(template)).toBeGreaterThan(
+          paths.indexOf("!infra/cloudformation/**"),
+        );
+      }
     }
 
     // Being gated only re-runs the suite; it does not lint. cfn-lint is what
@@ -272,7 +277,24 @@ describe("workflow integration", () => {
     const lint = workflow.jobs.typecheck.steps.find(
       ({ name }) => name === "Validate ECR registry scanning template",
     );
-    expect(lint.run).toContain(`cfn-lint ${template} --regions "$application_region"`);
+    for (const template of templates) {
+      expect(lint.run).toContain(
+        `cfn-lint ${template} --regions "$application_region"`,
+      );
+    }
+    const operatorValidation = workflow.jobs.typecheck.steps.find(
+      ({ name }) => name === "Validate workload boundary operator scripts",
+    );
+    expect(operatorValidation.run).toContain(
+      "shellcheck scripts/deploy-decision-artifact-bucket.sh",
+    );
+  });
+
+  it("TC-SLACKAPP-219: passes the decision-artifact bucket override to every AWS job", () => {
+    const workflow = parse(readFileSync(workflowPath, "utf8"));
+    expect(workflow.env.MEM9_DECISION_ARTIFACT_BUCKET).toBe(
+      "${{ vars.MEM9_DECISION_ARTIFACT_BUCKET }}",
+    );
   });
 
   it("runs the PostgreSQL durable-ingest integration suite in CI", () => {

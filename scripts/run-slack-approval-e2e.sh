@@ -120,20 +120,37 @@ if [[ -z "$SIGNING_SECRET" || "$SIGNING_SECRET" == "None" ]]; then
   exit 0
 fi
 
-# The bucket is derived, not read from SSM: `slackApproval()` publishes the
-# cluster, the task-def arn, the SG and the subnets under `cleanup/`, but the
-# artifact bucket is an ENVIRONMENT entry on the task definition and never a
-# parameter. Deriving it from the caller's own account id is also the stricter
-# check — it asserts the name this repo computes rather than the name the stage
-# happens to have been configured with, so a drift between
-# `decisionArtifactBucketName` and the deployed bucket fails here instead of
-# silently exercising whatever bucket the stage names.
+# The bucket is an environment entry on the task definition, not SSM. Use the
+# same external override as SST, the owner stack, and the workload boundary.
+# Unset keeps the account-derived default.
+valid_bucket_name() {
+  local name="$1"
+  [[ "$name" =~ ^[a-z0-9][a-z0-9-]{1,31}[a-z0-9]$ ]] &&
+    [[ "$name" != xn--* ]] &&
+    [[ "$name" != sthree-* ]] &&
+    [[ "$name" != amzn-s3-demo-* ]] &&
+    [[ "$name" != *-s3alias ]] &&
+    [[ "$name" != *--ol-s3 ]] &&
+    [[ "$name" != *--x-s3 ]] &&
+    [[ "$name" != *--table-s3 ]] &&
+    [[ "$name" != *-an ]]
+}
+
+ARTIFACT_BUCKET="${MEM9_DECISION_ARTIFACT_BUCKET:-}"
+if [[ -n "$ARTIFACT_BUCKET" ]]; then
+  if ! valid_bucket_name "$ARTIFACT_BUCKET"; then
+    echo "::error::MEM9_DECISION_ARTIFACT_BUCKET is an invalid decision-artifact bucket name" >&2
+    exit 2
+  fi
+fi
 ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
 if ! [[ "$ACCOUNT_ID" =~ ^[0-9]{12}$ ]]; then
   echo "::error::could not read a 12-digit account id from sts:GetCallerIdentity" >&2
   exit 1
 fi
-ARTIFACT_BUCKET="mem9-audit-${ACCOUNT_ID}"
+if [[ -z "$ARTIFACT_BUCKET" ]]; then
+  ARTIFACT_BUCKET="mem9-audit-${ACCOUNT_ID}"
+fi
 
 # The bucket is provisioned OUT-OF-BAND, so its existence is no longer implied by
 # the stage having the Slack secrets — those two used to travel together when
@@ -143,7 +160,8 @@ ARTIFACT_BUCKET="mem9-audit-${ACCOUNT_ID}"
 # task failing later for a reason that looks like a hash mismatch. Hard failure,
 # not a skip: the stage HAS the approval loop deployed at this point, so the
 # artifact half genuinely is broken and a skip would hide it.
-if ! aws s3api head-bucket --bucket "$ARTIFACT_BUCKET" --region "$REGION" >/dev/null 2>&1; then
+if ! aws s3api head-bucket --bucket "$ARTIFACT_BUCKET" \
+    --expected-bucket-owner "$ACCOUNT_ID" --region "$REGION" >/dev/null 2>&1; then
   echo "::error::artifact bucket ${ARTIFACT_BUCKET} does not exist — bootstrap it once per account with scripts/deploy-decision-artifact-bucket.sh" >&2
   exit 1
 fi
@@ -281,6 +299,7 @@ cleanup() {
   for key in "$ARTIFACT_KEY" "$TAMPERED_KEY"; do
     [[ -n "$key" ]] || continue
     aws s3api delete-object --bucket "$ARTIFACT_BUCKET" --key "$key" \
+      --expected-bucket-owner "$ACCOUNT_ID" \
       --region "$REGION" >/dev/null 2>&1 || true
   done
   rm -f "$ARTIFACT_BODY" "$TAMPERED_BODY"
@@ -300,7 +319,8 @@ trap cleanup EXIT
 put_artifact() {
   local key="$1" body="$2"
   aws s3api put-object --bucket "$ARTIFACT_BUCKET" --key "$key" --body "$body" \
-    --content-type application/json --region "$REGION" >/dev/null
+    --content-type application/json --expected-bucket-owner "$ACCOUNT_ID" \
+    --region "$REGION" >/dev/null
 }
 echo "run-slack-approval-e2e: uploading the reviewed decision artifact and its tampered twin"
 put_artifact "$ARTIFACT_KEY" "$ARTIFACT_BODY"

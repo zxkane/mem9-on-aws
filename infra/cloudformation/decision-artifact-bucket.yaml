@@ -5,26 +5,35 @@ Description: >
   stage, and read back by the cleanup apply task to prove the clicked hash still
   matches the reviewed bytes.
 
-  NOT SST-managed, and the reason is a name collision rather than only teardown
-  safety. The name is account-scoped (`mem9-audit-<account-id>`) because the
-  workload permissions boundary pins that exact ARN, so every stage computes the
-  SAME name; S3 bucket names are globally unique. Owned by the SST app, whichever
-  stage deployed first would hold it and every LATER stage's CreateBucket would
-  fail `BucketAlreadyOwnedByYou` — the AWS provider surfaces that error rather
-  than adopting the existing bucket, and `retainOnDelete` means a torn-down
-  preview keeps the bucket and poisons prod. Owning it here makes it exist once,
-  before any stage, for all of them.
+  NOT SST-managed. The workload boundary pins one exact account-level name
+  (default `mem9-audit-<account-id>`, or an external override), so every stage
+  uses the same globally unique S3 bucket. Per-stage ownership makes the first
+  deployment own it and every later create fail; retained previews can then
+  block production. This stack owns it once for every stage.
 
   Bootstrap ONCE per AWS account, in the application region, via
   scripts/deploy-decision-artifact-bucket.sh.
 
 Parameters:
+  DecisionArtifactBucketName:
+    Type: String
+    MinLength: 3
+    MaxLength: 33
+    AllowedPattern: "^[a-z0-9][a-z0-9-]*[a-z0-9]$"
+    ConstraintDescription: >
+      Use 3-33 lowercase letters, digits, and hyphens, beginning and ending
+      with a letter or digit. The 33-character ceiling preserves IAM boundary
+      policy quota headroom because the name is rendered three times.
+    Description: >
+      Exact account-level bucket shared by every SST stage. The deployment
+      script defaults this to mem9-audit-<account-id> and accepts
+      MEM9_DECISION_ARTIFACT_BUCKET as an override.
   ProjectName:
     Type: String
     Default: mem9-on-aws
     Description: >
-      SST app name. Tag value only — the bucket NAME is derived from the account
-      id, because that is what the boundary pins.
+      SST app name. Tag value only; DecisionArtifactBucketName controls the
+      separately configured exact bucket name.
 
 Resources:
   DecisionArtifactBucket:
@@ -44,10 +53,10 @@ Resources:
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
-      # Byte-identical to `decisionArtifactBucketName()` in infra/slack-approval.ts
-      # and to the three ARNs in workload-permissions-boundary.yaml. A drift here
-      # is an AccessDenied at artifact-write time — after the click is spent.
-      BucketName: !Sub mem9-audit-${AWS::AccountId}
+      # The bootstrap, SST app, E2E harness, and workload boundary all consume the
+      # same externally configured value. A drift is an AccessDenied at
+      # artifact-write time — after the click is spent.
+      BucketName: !Ref DecisionArtifactBucketName
       PublicAccessBlockConfiguration:
         BlockPublicAcls: true
         BlockPublicPolicy: true
@@ -101,9 +110,8 @@ Resources:
     # covers the same loss through a different door: `Bucket` is this resource's
     # only createOnly property, so retargeting it REPLACES the policy, and the
     # replacement's cleanup would strip TLS from the bucket being left behind.
-    # DeletionPolicy is also what makes the bucket importable: an IMPORT change
-    # set must name EVERY resource in the template, and CloudFormation rejects one
-    # whose resources lack it.
+    # Existing-bucket adoption deliberately omits this resource from the
+    # import-only template; the subsequent normal update creates it.
     DeletionPolicy: Retain
     UpdateReplacePolicy: Retain
     Properties:
@@ -122,11 +130,7 @@ Resources:
               Bool:
                 aws:SecureTransport: "false"
 
-# Deliberately NO Outputs. Nothing needs the name fed to it — the SST app and the
-# E2E harness both DERIVE `mem9-audit-<account-id>` from the caller's account id
-# rather than reading it back, which is the stricter check. And an Outputs block
-# would not be free: CloudFormation rejects an IMPORT change set that "cannot
-# modify or add [Outputs]", and for a stack that does not exist yet, ANY output is
-# an add. Adding one here would break the adoption path the deploy script prints
-# for a bucket a stage-owned deploy already created — the one recovery this
-# template exists to make possible.
+# Deliberately NO Outputs. The external setting is the source of truth for the
+# owner stack, boundary, SST, CI, and E2E; exporting a second value would invite
+# consumers to configure only one side. Existing-bucket adoption uses the
+# bucket-only import template, then updates to this complete declaration.

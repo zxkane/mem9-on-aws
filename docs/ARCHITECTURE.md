@@ -748,6 +748,7 @@ to the GitHub Actions deploy role.
 | Database               | Aurora PostgreSQL Serverless v2, direct writer endpoint; PITR retention prod=14 days, non-prod=1 day | `infra/db.ts`                                                                                                 |
 | Database credential    | Secrets Manager task-definition secret                                                               | `infra/db.ts`, `docker/mnemo-server/entrypoint.sh`                                                            |
 | Workload IAM ceiling   | Retained operator-owned permissions boundary; guarded live migration                                 | `infra/cloudformation/workload-permissions-boundary.yaml`, `scripts/rollout-workload-permissions-boundary.sh` |
+| Decision audit         | One retained, account-level S3 bucket shared by stages through stage-scoped key prefixes             | `infra/cloudformation/decision-artifact-bucket.yaml`, `scripts/deploy-decision-artifact-bucket.sh`             |
 | Embedding              | Local qwen3 sidecar, 1024 dimensions                                                                 | `docker/qwen3-embed/`                                                                                         |
 | Smart-ingest LLM       | Local proxy to Bedrock Mantle                                                                        | `docker/llm-proxy/`                                                                                           |
 | Mantle attribution     | `OpenAI-Project` added by `llm-proxy` when a project is configured                                   | `docker/llm-proxy/server.mjs`                                                                                 |
@@ -765,6 +766,15 @@ to the GitHub Actions deploy role.
   independent defaults. Existing live deployments cannot be moved in place.
 - Account-global IAM ownership stacks remain in `us-west-2`. The selected
   OpenAI GPT route uses its independent Responses region, default `us-west-2`.
+- The reviewed-decision artifact bucket is owned by one out-of-band
+  CloudFormation stack in the application region. SST stages reference it and
+  never own it. `MEM9_DECISION_ARTIFACT_BUCKET` may select an exact name before
+  bootstrap; unset uses `mem9-audit-<account-id>`. The bucket stack, workload
+  boundary, SST synthesis, CI, and E2E must receive the same value. Existing
+  bucket adoption imports only the bucket, then performs a normal full-template
+  update and requires live control read-back plus `IN_SYNC` drift status. Every
+  runtime and E2E S3 request also supplies the current account as
+  `ExpectedBucketOwner`.
 - Aurora PostgreSQL plus pgvector is the database engine.
 - Aurora automated backup retention is 14 days in production and 1 day in every
   non-production stage; PITR restores to a separate cluster.

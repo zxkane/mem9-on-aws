@@ -116,3 +116,8 @@ same name, so the first stage to deploy owns it and every later stage's create
 fails as an already-exists error the provider does not adopt through. The
 decision-artifact bucket was SST-owned and hit exactly that — see
 TC-SLACKAPP-215.
+
+`MEM9_DECISION_ARTIFACT_BUCKET` is the single optional override for that bucket.
+The owner stack, workload-boundary rollout, SST deploy, CI, and E2E must all use
+the same value; unset means `mem9-audit-<account-id>`. Never change it on only one
+surface or replace an already-owned bucket in place.

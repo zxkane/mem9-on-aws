@@ -80,6 +80,10 @@ const SCAN_TARGET_ERROR_METRIC = "TargetErrorCount";
 
 export const SLACK_APPROVAL_ENABLED_ENV = "MEM9_SLACK_APPROVAL_ENABLED";
 export const SLACK_APPROVAL_CHANNEL_ENV = "MEM9_SLACK_APPROVAL_CHANNEL";
+export const DECISION_ARTIFACT_BUCKET_ENV =
+  "MEM9_DECISION_ARTIFACT_BUCKET";
+export const DECISION_ARTIFACT_BUCKET_OWNER_ENV =
+  "MEM9_DECISION_ARTIFACT_BUCKET_OWNER";
 
 /**
  * The weekly scan's own gate (#149), separate from `SLACK_APPROVAL_ENABLED_ENV`.
@@ -158,8 +162,7 @@ export const APPROVED_IDS_PATH = "/tmp/mem9-approved-ids.txt";
 export const CLEANUP_CAP = 50;
 
 /**
- * The decision artifact's bucket name, and the reason it carries the ACCOUNT ID
- * rather than the stage.
+ * The decision artifact's exact account-level bucket name.
  *
  * S3 bucket names are a single GLOBAL namespace — not per-account, not
  * per-region — so a boundary pattern with a wildcard in the bucket segment
@@ -167,9 +170,10 @@ export const CLEANUP_CAP = 50;
  * against `arn:aws:s3:::mem9-on-aws-*-decisions/*`, `iam:simulate-custom-policy`
  * returned `allowed` for `s3:PutObject` on `mem9-on-aws-evil-decisions`, a name
  * anyone can create first. For an object that holds the reviewed deletion list,
- * that is an exfiltration target. The account id is the disambiguating suffix a
- * global namespace needs, so the boundary pins an EXACT bucket name and the stage
- * moves into the key prefix instead (see `decisionArtifactKey`).
+ * that is an exfiltration target. By default the account id is the disambiguating
+ * suffix a global namespace needs. An operator may instead provide one exact
+ * external name. Either way the boundary pins the exact bucket and the stage
+ * moves into the key prefix (see `decisionArtifactKey`).
  *
  * The textbook alternative — keeping the wildcard and adding an
  * `aws:ResourceAccount` condition — renders the boundary at 6280 bytes. 6144 is
@@ -182,15 +186,26 @@ export const CLEANUP_CAP = 50;
  * clears by 31. Nothing pins an S3 prefix for this project — the deploy role's
  * `S3State` is `Resource: "*"` — so the shorter name costs no access.
  *
- * Must stay byte-identical to the `Resources` NotResource entry (as the object
- * glob) and to the two KMS encryption-context values (as the BUCKET arn, since
- * bucket keys are on) in
- * infra/cloudformation/workload-permissions-boundary.yaml. A drift here is an
- * AccessDenied at artifact-write time — after the click has been spent.
+ * `MEM9_DECISION_ARTIFACT_BUCKET` is consumed by the owner stack, boundary
+ * rollout, CI, and E2E too. A drift is an AccessDenied at artifact-write time —
+ * after the click has been spent.
  */
 export function decisionArtifactBucketName(
   account: Output<string> | string,
-): Output<string> {
+): Output<string> | string {
+  const configured = process.env[DECISION_ARTIFACT_BUCKET_ENV];
+  if (configured) {
+    if (
+      !/^[a-z0-9][a-z0-9-]{1,31}[a-z0-9]$/u.test(configured) ||
+      /^(?:xn--|sthree-|amzn-s3-demo-)/u.test(configured) ||
+      /(?:-s3alias|--ol-s3|--x-s3|--table-s3|-an)$/u.test(configured)
+    ) {
+      throw new Error(
+        `${DECISION_ARTIFACT_BUCKET_ENV} is an invalid decision-artifact bucket name`,
+      );
+    }
+    return configured;
+  }
   // 12-digit account id + the 11-char literal = 23 chars, inside S3's 63-char
   // bucket-name limit with room to spare, and lowercase/hyphen-only as S3
   // requires. $interpolate, never a template literal: an Output stringified into
@@ -390,6 +405,10 @@ export function slackApproval(
     SlackBotToken: "the Slack bot token",
     SlackSigningSecret: "the Slack signing secret",
   });
+  // Resolve and validate external configuration before constructing any
+  // resource, so a malformed bucket name cannot leave a partial graph.
+  const artifactBucketOwner = accountId();
+  const artifactBucketName = decisionArtifactBucketName(artifactBucketOwner);
   const botToken = new sst.Secret("SlackBotToken").value;
   const signingSecret = new sst.Secret("SlackSigningSecret").value;
 
@@ -429,13 +448,13 @@ export function slackApproval(
   // infra/cloudformation/decision-artifact-bucket.yaml
   // (scripts/deploy-decision-artifact-bucket.sh), together with its public-access
   // block, SSE-KMS + bucket-keys rule, 72h lifecycle rule, and TLS-only policy.
-  // This function only DERIVES the name to hand to the task and to scope grants.
+  // This function resolves the configured name to hand to the task and grants.
   //
   // Why it cannot live here: the boundary pins the exact bucket ARN, so the name
-  // must be fixed rather than prefixed, and it is account-scoped — every stage
-  // computes `mem9-audit-<account-id>`, while S3 bucket names are globally
-  // unique. Owned by this app, whichever stage deployed first would own the
-  // bucket and every LATER stage's CreateBucket would fail
+  // must be fixed rather than prefixed. Every stage receives the same external
+  // override or the same account-derived default, while S3 bucket names are
+  // globally unique. Owned by this app, whichever stage deployed first would own
+  // the bucket and every LATER stage's CreateBucket would fail
   // `BucketAlreadyOwnedByYou`; the AWS provider surfaces that error rather than
   // adopting a same-owner bucket. `retainOnDelete` made it worse, not better: a
   // torn-down preview kept the bucket and left prod's first deploy permanently
@@ -444,8 +463,6 @@ export function slackApproval(
   //
   // Consumers below take this STRING, never a bucket resource handle, so nothing
   // in this stack depends on who owns the bucket.
-  const artifactBucketName = decisionArtifactBucketName(accountId());
-
   const task = new sst.aws.Task(CLEANUP_CONTAINER_NAME, {
     cluster: ecsOut.cluster,
     architecture: "arm64",
@@ -488,6 +505,10 @@ export function slackApproval(
       // deployed before this bucket existed keeps writing the id-only record until
       // it is redeployed, instead of failing on a bucket its role cannot reach.
       MEM9_DECISION_ARTIFACT_BUCKET: artifactBucketName,
+      // Every S3 Get/Put includes ExpectedBucketOwner. The exact bucket ARN in
+      // IAM prevents widening, while this account binding also blocks a
+      // cross-account bucket selected through external configuration.
+      MEM9_DECISION_ARTIFACT_BUCKET_OWNER: artifactBucketOwner,
       // No MEM9_ALERTS_TOPIC_ARN and no sns:Publish: scripts/memory-cleanup.mjs
       // contains no SNS code (memory-consolidation.mjs does, which is what makes
       // the omission look like an oversight). Passing the variable and granting

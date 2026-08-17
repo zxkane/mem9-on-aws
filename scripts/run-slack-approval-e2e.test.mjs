@@ -217,6 +217,7 @@ function runFixture({
   expiryBehavior = "refuse",
   tamperBehavior = "refuse",
   accountId = "123456789012",
+  artifactBucket = "",
   artifactBucketMissing = "",
   taskDef = "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-cleanup:7",
   containerName = "Mem9Cleanup",
@@ -354,11 +355,9 @@ if (command === "ssm get-parameter") {
 } else if (command === "ssm delete-parameter") {
   process.exit(0);
 } else if (command === "sts get-caller-identity") {
-  // The artifact bucket is NOT an SSM parameter — it is an environment entry on
-  // the task definition — so the harness derives \`mem9-audit-<account>\` from the
-  // caller's own identity. A malformed value here is a fixture knob because the
-  // script has to refuse it: an empty or non-numeric account would build a bucket
-  // name that S3 rejects, and the resulting upload failure would read as a
+  // With no external override, the harness derives the default
+  // \`mem9-audit-<account>\` from the caller identity. A malformed value here is
+  // a fixture knob because the resulting bucket name would otherwise read as a
   // permissions problem.
   console.log(process.env.MOCK_ACCOUNT_ID ?? "");
 } else if (command === "s3api head-bucket") {
@@ -654,6 +653,7 @@ process.exit(real.status ?? 1);
       PATH: `${bin}${delimiter}${process.env.PATH}`,
       STAGE: stage,
       AWS_REGION: "ap-northeast-1",
+      MEM9_DECISION_ARTIFACT_BUCKET: artifactBucket,
     },
   });
   // The log file only exists once a fake has been invoked, and the whole point of
@@ -1224,10 +1224,8 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
       expect(artifact.decisions.some((d) => d.verdict === "DELETE")).toBe(true);
     }
 
-    // The record points at the reviewed object, in the bucket derived from the
-    // CALLER's account — the artifact bucket is a task-definition environment entry,
-    // never an SSM parameter, so deriving it is also the stricter check: it asserts
-    // the name this repo computes rather than whatever the stage was configured with.
+    // With no override, the record points at the account-derived default bucket.
+    // The override path is asserted separately by TC-SLACKAPP-219.
     const seeds = callRecords.filter(
       ([tool, service, operation, , name]) =>
         tool === "aws" &&
@@ -1442,6 +1440,63 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
       expect(callRecords.filter(([tool]) => tool === "curl")).toHaveLength(0);
     }
   });
+
+  it("TC-SLACKAPP-219 binds the validated external bucket override to the caller account", () => {
+    const artifactBucket = "example-mem9-decision-artifacts";
+    const { callRecords, result, output } = runFixture({
+      artifactBucket,
+      claim: claimWith(),
+    });
+    expect(result.status, output).toBe(0);
+    expect(
+      callRecords.some(
+        ([tool, service, operation]) =>
+          tool === "aws" &&
+          service === "sts" &&
+          operation === "get-caller-identity",
+      ),
+    ).toBe(true);
+    for (const call of callRecords.filter(
+      ([tool, service]) => tool === "aws" && service === "s3api",
+    )) {
+      expect(call[call.indexOf("--bucket") + 1]).toBe(artifactBucket);
+      expect(call[call.indexOf("--expected-bucket-owner") + 1]).toBe(
+        "123456789012",
+      );
+    }
+  });
+
+  it.each([
+    "UPPERCASE",
+    "ab",
+    "192.0.2.1",
+    "bad..name",
+    "bad_name",
+    "xn--reserved",
+    "sthree-reserved",
+    "amzn-s3-demo-reserved",
+    "reserved-s3alias",
+    "reserved--ol-s3",
+    "reserved--x-s3",
+    "reserved--table-s3",
+    "reserved-an",
+    "a".repeat(34),
+  ])(
+    "TC-SLACKAPP-219 rejects invalid external bucket override %s before S3",
+    (artifactBucket) => {
+      const { callRecords, result, output } = runFixture({
+        artifactBucket,
+        claim: claimWith(),
+      });
+      expect(result.status, output).not.toBe(0);
+      expect(output).toMatch(/invalid.*bucket name/iu);
+      expect(
+        callRecords.some(
+          ([tool, service]) => tool === "aws" && service === "s3api",
+        ),
+      ).toBe(false);
+    },
+  );
 
   it("TC-SLACKAPP-216 an absent artifact bucket names the bootstrap script, and is not a skip", () => {
     // The bucket moved OUT-OF-BAND, which decoupled two facts that used to travel

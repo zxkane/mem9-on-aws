@@ -927,30 +927,17 @@ keeps it from coming back.
   name is account-scoped, so every stage — including each PR's preview stage —
   resolves to the same bucket, and losing it takes prod's audit trail of what was
   deleted with it.
-- **TC-SLACKAPP-217** — the bucket **policy** is retained too, and the template has
-  **no `Outputs`**. Both halves are one fact: retaining the bucket without its policy
+- **TC-SLACKAPP-217** — the bucket **policy** is retained too, and the full
+  template has **no `Outputs`**. Retaining the bucket without its policy
   means a stack `DELETE` keeps the audit trail and deletes the only thing requiring
   TLS to reach it (TC-165), so the surviving bucket is weaker than the reviewed one.
-  The same attribute is also what keeps the recovery path open, and both constraints
-  came back as rejections from a real `CreateChangeSet`, not from reading the docs:
-  an `IMPORT` change set must name **every** resource in the template ("Resources
-  [DecisionArtifactBucketPolicy] is missing from ResourceToImport list"), each of
-  those resources must carry `DeletionPolicy`, and "you cannot modify or add
-  [Outputs]" — for a stack that does not exist yet, *any* output is an add. So an
-  export block here would break adopting a bucket that a stage-owned deploy already
-  created, which is the one recovery this template exists for. Nothing consumes an
-  export: both the SST app and the E2E harness derive the name from the account id.
-  The assertion loops over every resource, so adding a third without a
-  `DeletionPolicy` fails here rather than at recovery time, when the bucket already
-  exists and the operator has no other way in. Note the docs describe import as
-  going "into an existing stack"; that describes a flow, not a constraint — a
-  probe confirmed `--change-set-type IMPORT` is accepted for a stack that does not
-  exist yet. Both resources also carry `UpdateReplacePolicy: Retain`, which closes
-  the same loss through a different door: `BucketName` is createOnly on the bucket
-  and `Bucket` is createOnly on the policy (per their live resource schemas), so
-  retargeting either **replaces** it and the replacement's cleanup deletes the
-  original. `cfn-lint` reports the missing half as `W3011`, but only as a warning
-  and only for templates the lint step actually names — see TC-SLACKAPP-218.
+  Both resources also carry `UpdateReplacePolicy: Retain`, which closes the same
+  loss through a different door: `BucketName` is createOnly on the bucket and
+  `Bucket` is createOnly on the policy. The absent output keeps the external
+  bucket setting as the one source of truth for every consumer instead of
+  introducing a stack export that only some deployments might follow.
+  Existing-bucket recovery is separately pinned by TC-SLACKAPP-220: import uses a
+  bucket-only template, never this final template.
 - **TC-SLACKAPP-218** — `infra-ci.yml` **gates and lints** this template. The
   workflow excludes `infra/cloudformation/**` and then re-includes specific
   templates, so a template is gated only if it appears *after* the exclusion —
@@ -964,6 +951,55 @@ keeps it from coming back.
   position relative to the exclusion in both triggers *and* the `cfn-lint`
   invocation, pinned to the application region — this bucket is deployed there,
   not in `us-west-2` with the account-global IAM stacks.
+- **TC-SLACKAPP-219** — `MEM9_DECISION_ARTIFACT_BUCKET` is one optional,
+  externally supplied bucket name for **every** consumer: the out-of-band bucket
+  stack, the SST task environment and identity policy, the workload-boundary
+  object ARN and both KMS encryption-context pins, CI, and the live E2E harness.
+  Unset, all consumers retain the account-derived `mem9-audit-<account-id>`
+  default. Set, they use the exact validated override with no account-derived
+  suffix. Invalid names and names over 33 characters fail before synthesis or an
+  AWS mutation; the ceiling preserves the 6144-byte boundary quota because the
+  exact name renders three times. The boundary keeps an exact bucket ARN rather
+  than widening the bucket segment. SST also injects the current 12-digit account
+  as `MEM9_DECISION_ARTIFACT_BUCKET_OWNER`; runtime Get/Put and E2E Head/Put/Delete
+  pass it as `ExpectedBucketOwner`, so an override cannot silently target a
+  same-named bucket in another account.
+- **TC-SLACKAPP-220** — adopting a bucket left by the old stage-owned deployment
+  uses a separate **import-only** template containing exactly the bucket, its
+  name parameter, and both retention policies. The import change set names only
+  that existing bucket. After `stack-import-complete`, a normal update applies the
+  full template, adding the TLS-only policy and reconciling public-access block,
+  SSE-KMS bucket keys, lifecycle, and tags. Importing the final template directly
+  is forbidden: the policy may not exist, and CloudFormation import records
+  properties without reconciling the live bucket.
+- **TC-SLACKAPP-221** — stack discovery, bucket discovery, import, create, update,
+  waits, and every verification read are **fail closed**. Only an explicit
+  CloudFormation "stack does not exist" response selects bootstrap, and only an
+  explicit S3 not-found response selects create rather than import. AccessDenied,
+  throttling, malformed output, or a wrong-region bucket causes no subsequent
+  mutation. Interrupted adoption has three narrow recovery paths:
+  `REVIEW_IN_PROGRESS` resumes only the fixed-name change set after its
+  description, parameter, and single bucket `Import` action read back exactly;
+  `IMPORT_IN_PROGRESS` only resumes its waiter; and
+  `IMPORT_ROLLBACK_COMPLETE` is deleted and recreated only when the stack shell
+  owns zero resources. `UPDATE_ROLLBACK_COMPLETE` retries the full update after
+  re-verifying the physical bucket. `IMPORT_ROLLBACK_FAILED`,
+  `UPDATE_ROLLBACK_FAILED`, any unknown state, and any rollback stack that still
+  owns a resource require explicit operator recovery.
+- **TC-SLACKAPP-222** — every successful create/import/update finishes with live
+  read-back of the exact bucket identity, region, four public-access blocks,
+  SSE-KMS plus bucket keys, the 3-day lifecycle and 1-day multipart abort, the
+  TLS-only bucket policy, and CloudFormation ownership of both the bucket and
+  policy resources. The script then runs stack drift detection and accepts only
+  `DETECTION_COMPLETE` plus `IN_SYNC`. A no-op update is not proof that direct
+  resource drift is absent.
+- **TC-SLACKAPP-223** — artifact reads and writes require a 12-digit
+  `MEM9_DECISION_ARTIFACT_BUCKET_OWNER` and pass it to S3 as
+  `ExpectedBucketOwner`. Both offer creation and approved cleanup refuse before
+  issuing an S3 request when the owner is absent or malformed. This keeps a
+  correctly formatted override from redirecting reviewed decision bytes to a
+  bucket owned by another account, even if identity policy configuration is
+  later widened accidentally.
 - **TC-SLACKAPP-215** — this stack declares **no bucket resource at all**, asserted
   by resource *type* rather than by logical name so a rename cannot slip past. The
   regression it guards is not hypothetical — it shipped, and it is a permanent prod
@@ -1610,14 +1646,14 @@ and therefore the withholding.
      exactly when a guard earns its place: the alternative is a preview review
      applied to prod.
 - **TC-SLACKAPP-191** — the replay thunk is wired **exactly when the claim names an
-  artifact**, and the direction matters. `MEM9_DECISION_ARTIFACT_BUCKET` is the
-  *scan* task's variable — the apply task does not carry it — so the coordinates can
-  only come from the claim. Keying on anything else would mean a hash covering a
-  reviewed list gets checked by the weaker id-list rule whenever the apply task
-  happens to be configured differently from the scan that offered it. A **thunk**,
-  so nothing is fetched during dep construction: the artifact is read inside
-  `runCleanup`, after service discovery, and a stage whose mnemo service is down
-  fails on discovery and never touches the object.
+  artifact**, and the direction matters. The offer and apply commands share one
+  task definition, but its current `MEM9_DECISION_ARTIFACT_BUCKET` may differ from
+  the value that produced an earlier approval. The reviewed claim is therefore the
+  only source for replay coordinates. Keying on current task configuration would
+  detach the clicked hash from its reviewed object after a configuration change. A
+  **thunk**, so nothing is fetched during dep construction: the artifact is read
+  inside `runCleanup`, after service discovery, and a stage whose mnemo service is
+  down fails on discovery and never touches the object.
 - **TC-SLACKAPP-192** — the reviewed verdicts are applied and the classifier is
   **never called**. Not merely disagreed with: a run that classified and then
   discarded the result would burn Bedrock tokens on every click and be one careless

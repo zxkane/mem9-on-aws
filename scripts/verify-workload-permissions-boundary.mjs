@@ -16,6 +16,8 @@ try {
           accountId: process.env.WORKLOAD_BOUNDARY_ACCOUNT_ID,
           applicationRegion: process.env.WORKLOAD_BOUNDARY_APPLICATION_REGION,
           bedrockProjectArn: process.env.WORKLOAD_BOUNDARY_BEDROCK_PROJECT_ARN,
+          decisionArtifactBucketName:
+            process.env.WORKLOAD_BOUNDARY_DECISION_ARTIFACT_BUCKET,
           openAiBedrockProjectArn:
             process.env.WORKLOAD_BOUNDARY_OPENAI_BEDROCK_PROJECT_ARN || "",
           partition: process.env.WORKLOAD_BOUNDARY_PARTITION,

@@ -56,6 +56,7 @@ afterEach(() => {
 });
 
 const TENANT = "tenant-key-0123456789abcdef";
+const EXPECTED_BUCKET_OWNER = "123456789012";
 
 // dirname(dirname(scripts/memory-cleanup.mjs)) — the same bound `snippetLogDir`
 // computes, derived the same way rather than hardcoded, and shared by both tests
@@ -4484,6 +4485,7 @@ describe("the reviewed decision artifact (#150)", () => {
     const result = await putDecisionArtifact({
       s3,
       bucket: "mem9-audit-123456789012",
+      expectedBucketOwner: EXPECTED_BUCKET_OWNER,
       stage: "prod",
       generatedAt: GENERATED_AT,
       decisions,
@@ -4498,6 +4500,7 @@ describe("the reviewed decision artifact (#150)", () => {
     expect(s3.send).toHaveBeenCalledTimes(1);
     const [put] = s3.puts;
     expect(put.Bucket).toBe("mem9-audit-123456789012");
+    expect(put.ExpectedBucketOwner).toBe(EXPECTED_BUCKET_OWNER);
     const body = serializeDecisionArtifact({ stage: "prod", generatedAt: GENERATED_AT, decisions });
     expect(put.Body).toBe(body);
     expect(put.ContentType).toBe("application/json");
@@ -4536,6 +4539,7 @@ describe("the reviewed decision artifact (#150)", () => {
       putDecisionArtifact({
         s3,
         bucket: "mem9-audit-123456789012",
+        expectedBucketOwner: EXPECTED_BUCKET_OWNER,
         stage: "prod",
         generatedAt: GENERATED_AT,
         decisions,
@@ -4559,6 +4563,7 @@ describe("the reviewed decision artifact (#150)", () => {
     const other = await putDecisionArtifact({
       s3,
       bucket: "mem9-audit-123456789012",
+      expectedBucketOwner: EXPECTED_BUCKET_OWNER,
       stage: "pr-42",
       generatedAt: GENERATED_AT,
       decisions: [del("m-1"), merge("m-2")],
@@ -4566,6 +4571,20 @@ describe("the reviewed decision artifact (#150)", () => {
     });
     expect(other.key).not.toBe(first.key);
     expect(other.key).toContain("decisions/pr-42/");
+  });
+
+  it("TC-SLACKAPP-223 refuses an artifact write without an expected bucket owner", async () => {
+    const s3 = fakeS3();
+    await expect(
+      putDecisionArtifact({
+        s3,
+        bucket: "example-mem9-decision-artifacts",
+        stage: "prod",
+        generatedAt: GENERATED_AT,
+        decisions: [del("m-1")],
+      }),
+    ).rejects.toThrow(/12-digit AWS account id/iu);
+    expect(s3.send).not.toHaveBeenCalled();
   });
 
   it("TC-SLACKAPP-174 refuses an artifact over the single-PutObject bound rather than truncating or splitting", async () => {
@@ -4577,6 +4596,7 @@ describe("the reviewed decision artifact (#150)", () => {
     const err = await putDecisionArtifact({
       s3,
       bucket: "mem9-audit-123456789012",
+      expectedBucketOwner: EXPECTED_BUCKET_OWNER,
       stage: "prod",
       generatedAt: GENERATED_AT,
       decisions: huge,
@@ -4632,6 +4652,7 @@ describe("the reviewed decision artifact (#150)", () => {
       putDecisionArtifact({
         s3,
         bucket: "mem9-audit-123456789012",
+        expectedBucketOwner: EXPECTED_BUCKET_OWNER,
         stage: "prod",
         generatedAt: GENERATED_AT,
         decisions: cjk,
@@ -4651,6 +4672,7 @@ describe("the reviewed decision artifact (#150)", () => {
     const result = await putDecisionArtifact({
       s3,
       bucket: "mem9-audit-123456789012",
+      expectedBucketOwner: EXPECTED_BUCKET_OWNER,
       stage: "prod",
       generatedAt: GENERATED_AT,
       decisions,
@@ -5327,12 +5349,24 @@ describe("materializing the approved ids in the apply task (#123)", () => {
       }),
     });
     const load = (s3, overrides = {}) =>
-      loadDecisionArtifact({ s3, bucket, key, hash, stage: "prod", ...overrides });
+      loadDecisionArtifact({
+        s3,
+        bucket,
+        expectedBucketOwner: EXPECTED_BUCKET_OWNER,
+        key,
+        hash,
+        stage: "prod",
+        ...overrides,
+      });
 
     // The happy path FIRST, or every refusal below could be passing because the
     // reader refuses unconditionally.
     const log = vi.fn();
-    const ok = await load(s3Returning(body), { log });
+    const readable = s3Returning(body);
+    const ok = await load(readable, { log });
+    expect(readable.send.mock.calls[0][0].input.ExpectedBucketOwner).toBe(
+      EXPECTED_BUCKET_OWNER,
+    );
     // Against the SERIALIZED projection, not the input: the writer deliberately
     // drops `reason` (it is operator prose, not a replay input), so comparing to
     // `decisions` would assert a field the artifact does not and should not carry.
@@ -5457,6 +5491,7 @@ describe("the apply task's in-container runtime (#123)", () => {
     "MEM9_DB_NAME",
     "MEM9_DB_PORT",
     "MEM9_DB_SECRET",
+    "MEM9_DECISION_ARTIFACT_BUCKET_OWNER",
     "MEM9_LLM_MODEL",
     "MEM9_SSM_PREFIX",
     "MEM9_TENANT_ID",
@@ -5478,6 +5513,7 @@ describe("the apply task's in-container runtime (#123)", () => {
         username: "mem9",
         password: "fixture-password",
       }),
+      MEM9_DECISION_ARTIFACT_BUCKET_OWNER: EXPECTED_BUCKET_OWNER,
       MEM9_SSM_PREFIX: "/mem9-on-aws/prod",
       MEM9_TENANT_ID: TENANT,
       ...extra,
@@ -5666,11 +5702,10 @@ describe("the apply task's in-container runtime (#123)", () => {
 
   it("TC-SLACKAPP-191 wires a replay thunk exactly when the claim names an artifact", async () => {
     // The branch is on the RECORD, not on this task's configuration, and the
-    // direction matters. `MEM9_DECISION_ARTIFACT_BUCKET` is the SCAN task's variable
-    // — the apply task does not carry it — so the coordinates can only come from the
-    // claim. Keying on anything else would mean a hash covering a reviewed list gets
-    // checked by the weaker id-list rule whenever the apply task happens to be
-    // configured differently from the scan that offered it.
+    // direction matters. The coordinates can only come from the claim. Keying on
+    // the task's configured bucket instead would mean a hash covering a reviewed
+    // list gets checked against a different location whenever configuration changed
+    // between offer and apply.
     const ids = ["m-1"];
     const artifactHash = `sha256:${"e".repeat(64)}`;
     const key = decisionArtifactKey("prod", artifactHash);
@@ -5713,6 +5748,39 @@ describe("the apply task's in-container runtime (#123)", () => {
       ),
     ).toMatch(/refusing to apply/u);
     await withArtifact.close();
+
+    containerEnv({
+      MEM9_APPROVAL_HASH: artifactHash,
+      MEM9_DECISION_ARTIFACT_BUCKET_OWNER: "",
+    });
+    await expect(
+      createCleanupDeps(
+        {
+          stage: "prod",
+          apply: true,
+          cap: 50,
+          idsFile: join(dir, "missing-owner.txt"),
+        },
+        {
+          Client: fakeClientClass([]),
+          ssm: fakeAwsClient({
+            [claimParameterName("/mem9-on-aws/prod", artifactHash)]:
+              JSON.stringify({
+                stage: "prod",
+                hash: artifactHash,
+                ids,
+                claimedAt: "2026-08-05T00:05:00.000Z",
+                artifactBucket: "example-mem9-decision-artifacts",
+                artifactKey: key,
+              }),
+          }),
+          secrets: fakeAwsClient(),
+          s3: { send: vi.fn() },
+          getToken: vi.fn(),
+          fromNodeProviderChain: vi.fn(),
+        },
+      ),
+    ).rejects.toThrow(/12-digit AWS account id/iu);
 
     // A pre-#150 claim gets no thunk, so `loadDecisions` takes the #123 path the
     // record was written for rather than fetching a coordinate it does not have.
@@ -6202,6 +6270,9 @@ describe("offering the list to Slack (#123)", () => {
         // the operator CLI still takes.
         s3: overrides.artifactBucket ? s3 : undefined,
         artifactBucket: overrides.artifactBucket,
+        artifactBucketOwner: overrides.artifactBucket
+          ? EXPECTED_BUCKET_OWNER
+          : undefined,
         fetchImpl: slack.fetchImpl,
         now: overrides.now,
         log: overrides.log ?? vi.fn(),
@@ -7269,6 +7340,7 @@ describe("offering the list to Slack (#123)", () => {
               }),
             },
             bucket: ARTIFACT.artifactBucket,
+            expectedBucketOwner: EXPECTED_BUCKET_OWNER,
             key: fakes.s3.puts[0].Key,
             hash: offered.record.hash,
             stage: "prod",
@@ -7353,6 +7425,7 @@ describe("offering the list to Slack (#123)", () => {
       const err = await loadDecisionArtifact({
         s3: { send: async () => ({ Body: { transformToString: async () => body } }) },
         bucket: ARTIFACT.artifactBucket,
+        expectedBucketOwner: EXPECTED_BUCKET_OWNER,
         key: fakes.s3.puts[0].Key,
         hash: hash ?? decisionArtifactHash(body),
         stage: "prod",
@@ -7377,6 +7450,7 @@ describe("offering the list to Slack (#123)", () => {
     const oversized = await putDecisionArtifact({
       s3: { send: vi.fn() },
       bucket: ARTIFACT.artifactBucket,
+      expectedBucketOwner: EXPECTED_BUCKET_OWNER,
       stage: "prod",
       generatedAt,
       decisions: Array.from({ length: 40 }, (_, i) => ({
@@ -7410,6 +7484,7 @@ describe("wiring the offer into the review run (#123)", () => {
     "MEM9_DB_PORT",
     "MEM9_DB_SECRET",
     "MEM9_DECISION_ARTIFACT_BUCKET",
+    "MEM9_DECISION_ARTIFACT_BUCKET_OWNER",
     "MEM9_SLACK_APPROVAL_CHANNEL",
     "MEM9_SSM_PREFIX",
     "MEM9_TENANT_ID",
@@ -7559,6 +7634,7 @@ describe("wiring the offer into the review run (#123)", () => {
       MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL",
       SLACK_BOT_TOKEN: "xoxb-injected",
       MEM9_DECISION_ARTIFACT_BUCKET: "mem9-audit-123456789012",
+      MEM9_DECISION_ARTIFACT_BUCKET_OWNER: EXPECTED_BUCKET_OWNER,
     });
     const ssm = ssmFake();
     const s3 = { sent: [], send: vi.fn(async (c) => (s3.sent.push(c.input), {})) };
@@ -7595,11 +7671,32 @@ describe("wiring the offer into the review run (#123)", () => {
     // AccessDenied at runtime, after the scan has done its whole audit.
     expect(s3.sent).toHaveLength(1);
     expect(s3.sent[0].Bucket).toBe("mem9-audit-123456789012");
+    expect(s3.sent[0].ExpectedBucketOwner).toBe(EXPECTED_BUCKET_OWNER);
     expect(s3.sent[0].Key).toMatch(/^decisions\/prod\/sha256-[0-9a-f]{64}\.json$/u);
     const record = JSON.parse(ssm.sent.find((input) => input.Name).Value);
     expect(record.artifactBucket).toBe("mem9-audit-123456789012");
     expect(record.artifactKey).toBe(s3.sent[0].Key);
     await production.close();
+  });
+
+  it("TC-SLACKAPP-223 refuses an artifact offer without an expected bucket owner", async () => {
+    reviewEnv({
+      MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL",
+      SLACK_BOT_TOKEN: "xoxb-injected",
+      MEM9_DECISION_ARTIFACT_BUCKET: "example-mem9-decision-artifacts",
+    });
+    await expect(
+      createCleanupDeps(
+        { stage: "prod", apply: false, cap: 50 },
+        {
+          ssm: ssmFake(),
+          s3: { send: vi.fn() },
+          getToken: vi.fn(),
+          fromNodeProviderChain: vi.fn(),
+          fetchImpl: vi.fn(),
+        },
+      ),
+    ).rejects.toThrow(/12-digit AWS account id/iu);
   });
 
   it("TC-SLACKAPP-180 offers without an artifact when no bucket is configured, without constructing an S3 client", async () => {

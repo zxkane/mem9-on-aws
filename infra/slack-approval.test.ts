@@ -476,6 +476,14 @@ function artifactBucketProperties(): Record<string, any> {
  * pattern can be compared against a rendered ARN.
  */
 function resolveSub(value: unknown): string {
+  if (
+    value &&
+    typeof value === "object" &&
+    "Ref" in (value as object) &&
+    (value as { Ref: string }).Ref === "DecisionArtifactBucketName"
+  ) {
+    return "mem9-audit-123456789012";
+  }
   const raw =
     value && typeof value === "object" && "Fn::Sub" in (value as object)
       ? String((value as { "Fn::Sub": string })["Fn::Sub"])
@@ -483,6 +491,7 @@ function resolveSub(value: unknown): string {
   return raw
     .replaceAll("${AWS::Partition}", "aws")
     .replaceAll("${AWS::AccountId}", "123456789012")
+    .replaceAll("${DecisionArtifactBucketName}", "mem9-audit-123456789012")
     .replaceAll("${ApplicationRegion}", "ap-northeast-1");
 }
 
@@ -507,6 +516,7 @@ const ENV_KEYS = [
   "MEM9_BEDROCK_PROJECT_OPENAI",
   "MEM9_CLEANUP_CAP",
   "MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED",
+  "MEM9_DECISION_ARTIFACT_BUCKET",
 ];
 
 function enable() {
@@ -1506,7 +1516,83 @@ describe("slack approval infrastructure", () => {
     const taskArgs = materialize(one("Task", "Mem9Cleanup").args) as
       Record<string, any>;
     expect(taskArgs.environment.MEM9_DECISION_ARTIFACT_BUCKET).toBe(name);
+    expect(taskArgs.environment.MEM9_DECISION_ARTIFACT_BUCKET_OWNER).toBe(
+      "123456789012",
+    );
   });
+
+  it("TC-SLACKAPP-219: applies one validated bucket override to the task and boundary", async () => {
+    const override = "example-mem9-decision-artifacts";
+    process.env.MEM9_DECISION_ARTIFACT_BUCKET = override;
+    installGlobals("prod");
+    enable();
+    await loadAndRun();
+
+    const taskArgs = materialize(one("Task", "Mem9Cleanup").args) as
+      Record<string, any>;
+    expect(taskArgs.environment.MEM9_DECISION_ARTIFACT_BUCKET).toBe(override);
+    expect(taskArgs.environment.MEM9_DECISION_ARTIFACT_BUCKET_OWNER).toBe(
+      "123456789012",
+    );
+    expect(
+      taskArgs.permissions
+        .filter((statement: any) =>
+          list(statement.actions).includes("s3:PutObject"),
+        )
+        .flatMap((statement: any) => list(statement.resources)),
+    ).toEqual([`arn:aws:s3:::${override}/decisions/prod/*`]);
+    expect(
+      taskArgs.permissions
+        .find((statement: any) =>
+          list(statement.actions).includes("kms:GenerateDataKey"),
+        )
+        .conditions.find(
+          (condition: any) =>
+            condition.variable === "kms:EncryptionContext:aws:s3:arn",
+        ).values,
+    ).toEqual([`arn:aws:s3:::${override}`]);
+
+    const boundary = boundaryStatements();
+    expect(
+      JSON.stringify(
+        listRaw(boundary.find(({ Sid }) => Sid === "Resources")!.NotResource),
+      ),
+    ).toContain("${DecisionArtifactBucketName}");
+  });
+
+  it.each([
+    "UPPERCASE",
+    "ab",
+    "192.0.2.1",
+    "bad..name",
+    "bad_name",
+    "xn--reserved",
+    "sthree-reserved",
+    "amzn-s3-demo-reserved",
+    "reserved-s3alias",
+    "reserved--ol-s3",
+    "reserved--x-s3",
+    "reserved--table-s3",
+    "reserved-an",
+    "a".repeat(34),
+  ])(
+    "TC-SLACKAPP-219: rejects invalid bucket override %s before synthesis",
+    async (override) => {
+      process.env.MEM9_DECISION_ARTIFACT_BUCKET = override;
+      installGlobals("prod");
+      enable();
+      const module = await loadModule();
+      expect(() =>
+        module.slackApproval(
+          fakeEcs(),
+          fakeDb(),
+          fakeIdentity(),
+          fakeFacade(),
+        ),
+      ).toThrow(/invalid.*bucket name/iu);
+      expect(resources).toEqual([]);
+    },
+  );
 
   it("TC-SLACKAPP-163: encrypts the artifact with SSE-KMS and bucket keys on", () => {
     const properties = artifactBucketProperties();
@@ -1617,7 +1703,7 @@ describe("slack approval infrastructure", () => {
     expect(bucket.UpdateReplacePolicy).toBe("Retain");
   });
 
-  it("TC-SLACKAPP-217: retains the bucket POLICY too, and stays importable", () => {
+  it("TC-SLACKAPP-217: retains the bucket policy and exposes no second config source", () => {
     const template = artifactBucketTemplate();
     const policy = Object.values(template.Resources).find(
       (resource: any) => resource.Type === "AWS::S3::BucketPolicy",
@@ -1636,23 +1722,13 @@ describe("slack approval infrastructure", () => {
     // inside the lint step at all (TC-SLACKAPP-218).
     expect(policy.UpdateReplacePolicy).toBe("Retain");
 
-    // The same attribute is also what keeps the recovery path open, which is why
-    // this is asserted here rather than left to the bucket's own case. Both facts
-    // below were rejections from a real CreateChangeSet, not inferences:
-    //   - "The following resources to import [DecisionArtifactBucketPolicy] must
-    //      have DeletionPolicy attribute specified in the template."
-    //   - "As part of the import operation, you cannot modify or add [Outputs]" —
-    //      and for a stack that does not exist yet, ANY output is an add.
-    // So an Outputs block here would break adopting a bucket that a stage-owned
-    // deploy already created, which is the one recovery this template exists for.
-    // Nothing consumes an export: both the SST app and the E2E harness DERIVE
-    // `mem9-audit-<account-id>` from the caller's account id.
+    // The external variable is the one source of truth for the owner stack,
+    // boundary, SST, CI, and E2E. A stack output would create a second source
+    // that only some consumers follow. Adoption uses the separate bucket-only
+    // import template and then a normal update to this complete declaration.
     expect(template.Outputs).toBeUndefined();
 
-    // Every resource in the template must carry DeletionPolicy for the import to
-    // validate, so assert over the whole set — adding a third resource without one
-    // turns this red here instead of at recovery time, when the bucket already
-    // exists and the operator has no other way in.
+    // Every retained control must survive stack deletion with the audit data.
     for (const [logicalId, resource] of Object.entries<any>(template.Resources)) {
       expect(resource.DeletionPolicy, logicalId).toBe("Retain");
     }
@@ -1734,6 +1810,9 @@ describe("slack approval infrastructure", () => {
     // value. A drift in the name leaves the scan silently writing the id-only
     // record — the pre-#150 shape — with no error anywhere.
     expect(taskArgs.environment.MEM9_DECISION_ARTIFACT_BUCKET).toBe(bucketName);
+    expect(taskArgs.environment.MEM9_DECISION_ARTIFACT_BUCKET_OWNER).toBe(
+      "123456789012",
+    );
     // `environment`, not `ssm`: a bucket name is not a secret, and the apply half's
     // role holds `ssm:GetParameters` under `approvals/*` only — a secret-style
     // reference would put the artifact's location behind a grant it does not have.
