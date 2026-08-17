@@ -747,10 +747,12 @@ function safePolicyDiagnosticToken(value, kind) {
   return value.replace(/[0-9]{12}/gu, "<redacted-account-id>");
 }
 
-function formatPolicyDiagnosticItems(values, kind) {
+function formatPolicyDiagnosticItems(values, kind, { trusted = false } = {}) {
   const sanitizedCounts = new Map();
   for (const value of new Set(values)) {
-    const safeValue = safePolicyDiagnosticToken(value, kind);
+    const safeValue = trusted
+      ? safePolicyDiagnosticToken(value, kind)
+      : "<redacted>";
     sanitizedCounts.set(safeValue, (sanitizedCounts.get(safeValue) ?? 0) + 1);
   }
   const safeValues = [...sanitizedCounts].sort(([left], [right]) =>
@@ -822,10 +824,10 @@ export function boundaryPolicyDriftDiagnostic(document, contract) {
       "Policy delta (bounded; resources omitted):",
       `  document shape changed: ${documentShapeChanged ? "yes" : "no"}`,
       `  added statements: ${formatPolicyDiagnosticItems(addedSids, "sid")}`,
-      `  removed statements: ${formatPolicyDiagnosticItems(removedSids, "sid")}`,
-      `  changed statements: ${formatPolicyDiagnosticItems(changedSids, "sid")}`,
+      `  removed statements: ${formatPolicyDiagnosticItems(removedSids, "sid", { trusted: true })}`,
+      `  changed statements: ${formatPolicyDiagnosticItems(changedSids, "sid", { trusted: true })}`,
       `  added actions: ${formatPolicyDiagnosticItems(addedActions, "action")}`,
-      `  removed actions: ${formatPolicyDiagnosticItems(removedActions, "action")}`,
+      `  removed actions: ${formatPolicyDiagnosticItems(removedActions, "action", { trusted: true })}`,
     ].join("\n");
   } catch {
     return "Policy delta unavailable: deployed document is malformed.";

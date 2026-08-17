@@ -335,7 +335,9 @@ CloudFormation `continue-update-rollback` operation before the guarded retry.
 The read-only deployment preflight keeps every mismatch fatal but reports its
 cause. Exact-document drift emits only a bounded list of added, removed, or
 changed statement Sids and actions; resources, complete documents, account ids,
-and uncontrolled text are never logged. On pull requests, the script also
+and uncontrolled text are never logged. Tokens present only in the live policy
+are always redacted and counted; only expected, checked-in tokens are named. On
+pull requests, the script also
 verifies the deployed document with the verifier from the trusted base commit.
 A base match is an expected pre-rollout change and points to the guarded
 rollout. A non-match, unavailable base, or non-pull-request invocation is

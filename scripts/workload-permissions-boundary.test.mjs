@@ -645,6 +645,20 @@ function optionValues(args, name) {
   return values;
 }
 
+function expectVerifyOnlyAwsCallsReadOnly(calls) {
+  const allowed = [
+    /^sts get-caller-identity(?:\s|$)/u,
+    /^cloudformation (?:describe-stacks|describe-stack-resources|validate-template)(?:\s|$)/u,
+    /^iam (?:get-policy|get-policy-version|simulate-custom-policy)(?:\s|$)/u,
+  ];
+  for (const call of calls) {
+    expect(
+      allowed.some((pattern) => pattern.test(call)),
+      `unexpected --verify-only AWS call: ${call}`,
+    ).toBe(true);
+  }
+}
+
 async function runBoundaryDeployMock({
   basePolicyMatches,
   boundaryOpenAiRegion,
@@ -7531,9 +7545,21 @@ describe("operator entry point", () => {
     });
     expect(result.status).toBe(0);
     expect(calls.some((call) => call.startsWith("iam get-policy"))).toBe(true);
+    expectVerifyOnlyAwsCallsReadOnly(calls);
     expect(
       calls.some((call) => call.startsWith("cloudformation update-stack")),
     ).toBe(false);
+  });
+
+  it.each([
+    "iam create-policy-version --policy-arn example",
+    "iam set-default-policy-version --policy-arn example",
+    "iam delete-policy-version --policy-arn example",
+    "cloudformation update-stack --stack-name example",
+  ])("rejects a mutating verify-only AWS call: %s", (call) => {
+    expect(() => expectVerifyOnlyAwsCallsReadOnly([call])).toThrow(
+      /unexpected --verify-only AWS call/u,
+    );
   });
 
   it("classifies a deployed base policy as an expected pre-rollout change", async () => {
@@ -7544,6 +7570,7 @@ describe("operator entry point", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("Expected pre-rollout boundary change");
     expect(result.stderr).toContain("guarded rollout");
+    expectVerifyOnlyAwsCallsReadOnly(calls);
     expect(
       calls.some((call) =>
         /(?:cloudformation update-stack|iam put-)/u.test(call),
@@ -7559,6 +7586,7 @@ describe("operator entry point", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("Unexplained deployed boundary drift");
     expect(result.stderr).toContain("out-of-band");
+    expectVerifyOnlyAwsCallsReadOnly(calls);
     expect(
       calls.some((call) =>
         /(?:cloudformation update-stack|iam put-)/u.test(call),
@@ -7573,6 +7601,7 @@ describe("operator entry point", () => {
     });
     expect(result.status, result.stderr).toBe(1);
     expect(result.stderr).toContain("Expected pre-rollout boundary change");
+    expectVerifyOnlyAwsCallsReadOnly(calls);
     expect(
       calls.some((call) =>
         /(?:cloudformation update-stack|iam put-)/u.test(call),
@@ -7581,29 +7610,31 @@ describe("operator entry point", () => {
   });
 
   it("reports a bounded policy delta without leaking live identifiers", async () => {
+    const credentialShapedAction = `leak:${["AKIA", "A".repeat(16)].join("")}`;
     const drifted = structuredClone(
       expectedBoundaryPolicyDocument(boundaryContract),
     );
     drifted.Statement[0] = {
       Sid: `Rogue${accountId}`,
       Effect: "Allow",
-      Action: "iam:DeleteRole",
+      Action: ["iam:DeleteRole", credentialShapedAction],
       Resource: `arn:aws:iam::${accountId}:role/private-\nname`,
     };
-    const { result } = await runBoundaryDeployMock({
+    const { calls, result } = await runBoundaryDeployMock({
       basePolicyMatches: false,
       deployedPolicy: drifted,
       verifyOnly: true,
     });
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain(
-      "added statements: Rogue<redacted-account-id>",
-    );
+    expect(result.stderr).toContain("added statements: <redacted>");
     expect(result.stderr).toContain("removed statements: Identity");
-    expect(result.stderr).toContain("added actions: iam:DeleteRole");
+    expect(result.stderr).toContain("added actions: <redacted> (x2)");
     expect(result.stderr).not.toContain(accountId);
+    expect(result.stderr).not.toContain(credentialShapedAction);
+    expect(result.stderr).not.toContain("iam:DeleteRole");
     expect(result.stderr).not.toContain("private-name");
     expect(result.stderr).not.toMatch(/[\u0000-\u0008\u000b\u000c\u000e-\u001f]/u);
+    expectVerifyOnlyAwsCallsReadOnly(calls);
   });
 
   it("preserves the count of distinct redacted policy tokens", async () => {
@@ -7624,7 +7655,7 @@ describe("operator entry point", () => {
         Resource: "*",
       },
     );
-    const { result } = await runBoundaryDeployMock({
+    const { calls, result } = await runBoundaryDeployMock({
       basePolicyMatches: false,
       deployedPolicy: drifted,
       verifyOnly: true,
@@ -7632,6 +7663,7 @@ describe("operator entry point", () => {
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("added statements: <redacted> (x2)");
     expect(result.stderr).not.toContain("unsafe");
+    expectVerifyOnlyAwsCallsReadOnly(calls);
   });
 
   it("reports top-level document drift without printing its fields", async () => {
@@ -7640,7 +7672,7 @@ describe("operator entry point", () => {
     );
     drifted.Version = "2008-10-17";
     drifted.PrivateField = `unsafe-${accountId}`;
-    const { result } = await runBoundaryDeployMock({
+    const { calls, result } = await runBoundaryDeployMock({
       basePolicyMatches: false,
       deployedPolicy: drifted,
       verifyOnly: true,
@@ -7649,6 +7681,7 @@ describe("operator entry point", () => {
     expect(result.stderr).toContain("document shape changed: yes");
     expect(result.stderr).not.toContain("PrivateField");
     expect(result.stderr).not.toContain(accountId);
+    expectVerifyOnlyAwsCallsReadOnly(calls);
   });
 
   it.each([
@@ -7681,6 +7714,7 @@ describe("operator entry point", () => {
       });
       expect(result.status).toBe(1);
       expect(result.stderr).toContain(message);
+      expectVerifyOnlyAwsCallsReadOnly(calls);
       expect(
         calls.some((call) =>
           /(?:cloudformation (?:create|update)-stack|iam put-)/u.test(call),
@@ -7859,6 +7893,7 @@ describe("operator entry point", () => {
     expect(result.stderr).toContain(
       "Workload permissions-boundary runtime KMS verification failed",
     );
+    expectVerifyOnlyAwsCallsReadOnly(calls);
     expect(
       calls.some((call) => call.startsWith("cloudformation update-stack")),
     ).toBe(false);
@@ -7880,6 +7915,7 @@ describe("operator entry point", () => {
     expect(result.stderr).toContain(
       "Workload permissions-boundary runtime KMS verification failed",
     );
+    expectVerifyOnlyAwsCallsReadOnly(calls);
     expect(
       calls.some((call) => call.startsWith("cloudformation update-stack")),
     ).toBe(false);
@@ -7895,6 +7931,7 @@ describe("operator entry point", () => {
     expect(result.stderr).toContain(
       "Workload permissions-boundary default version changed during verification",
     );
+    expectVerifyOnlyAwsCallsReadOnly(calls);
     expect(
       calls.filter((call) => call.startsWith("iam get-policy ")),
     ).toHaveLength(2);
@@ -7912,6 +7949,7 @@ describe("operator entry point", () => {
       verifyOnly: true,
     });
     expect(result.status).toBe(1);
+    expectVerifyOnlyAwsCallsReadOnly(calls);
     expect(
       calls.some(
         (call) =>
