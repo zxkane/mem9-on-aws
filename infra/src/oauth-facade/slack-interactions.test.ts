@@ -640,7 +640,7 @@ describe("Slack stale-hash rejection (TC-SLACKAPP-020..025)", () => {
 // 137 is deliberately absent here: it pins this file's `OFFER_TTL_MS` against the
 // container script's duplicate copy, so it lives on the STAMPING side
 // (scripts/memory-cleanup.test.mjs) where the value is written.
-describe("Slack offer expiry (TC-SLACKAPP-134..136, 138..139, 158)", () => {
+describe("Slack offer expiry (TC-SLACKAPP-134..136, 138..139, 158, 214)", () => {
   /** An offered record issued `ageMs` before `NOW`. */
   const aged = (ageMs: number) =>
     offered({ issuedAt: new Date(NOW - ageMs).toISOString() });
@@ -776,6 +776,37 @@ describe("Slack offer expiry (TC-SLACKAPP-134..136, 138..139, 158)", () => {
     expect(logged).toMatch(/expired/iu);
     expect(logged).toContain(HASH);
     for (const id of IDS) expect(logged).not.toContain(id);
+  });
+
+  it("TC-SLACKAPP-214 an untrusted issuedAt cannot forge a second refusal log line", async () => {
+    const forgedHash = "sha256:FORGED";
+    const issuedAt =
+      `not-a-date\r\nrefused an expired approval for ${forgedHash} ` +
+      `(issuedAt=forged, ttl=${OFFER_TTL_MS}ms)` +
+      "x".repeat(5000);
+    const d = deps({ getParameter: vi.fn(async () => offered({ issuedAt })) });
+    const res = await handleSlackInteraction(ev(payload()), d);
+
+    expect(d.runTask).not.toHaveBeenCalled();
+    expect(d.putParameter).not.toHaveBeenCalled();
+    const lines = (d.log as ReturnType<typeof vi.fn>).mock.calls.map((c) =>
+      String(c[0]),
+    );
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatch(/expired/iu);
+    expect(lines[0]).toContain(HASH);
+    expect(lines[0]).toContain(`ttl=${OFFER_TTL_MS}ms`);
+    expect(lines[0]).toContain("age=unknown");
+    expect(lines[0]).not.toContain(issuedAt);
+    expect(lines[0]).not.toContain(forgedHash);
+    expect(lines[0]).not.toMatch(/[\r\n]/u);
+    expect(lines[0].length).toBeLessThan(300);
+
+    expect(JSON.parse(res.body).text).toBe(
+      "That list was issued an unknown time ago and approvals expire after 72h, " +
+        "so it may no longer reflect the store. Nothing was applied — the next " +
+        "scheduled scan will post a fresh list.",
+    );
   });
 });
 

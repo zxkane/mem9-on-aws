@@ -217,11 +217,15 @@ function runFixture({
   expiryBehavior = "refuse",
   tamperBehavior = "refuse",
   accountId = "123456789012",
+  artifactBucket = "",
+  artifactBucketMissing = "",
   taskDef = "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-cleanup:7",
   containerName = "Mem9Cleanup",
   logGroup = "/sst/cluster/mem9-pr-123-a1b2c3/Mem9Cleanup-d4e5f6",
   logPrefix = "mem9",
   replayLines = "1",
+  logLines = "1",
+  logQueryError = "",
   failingJqFilter = "",
   claimReadError = "",
 } = {}) {
@@ -353,13 +357,18 @@ if (command === "ssm get-parameter") {
 } else if (command === "ssm delete-parameter") {
   process.exit(0);
 } else if (command === "sts get-caller-identity") {
-  // The artifact bucket is NOT an SSM parameter — it is an environment entry on
-  // the task definition — so the harness derives \`mem9-audit-<account>\` from the
-  // caller's own identity. A malformed value here is a fixture knob because the
-  // script has to refuse it: an empty or non-numeric account would build a bucket
-  // name that S3 rejects, and the resulting upload failure would read as a
+  // With no external override, the harness derives the default
+  // \`mem9-audit-<account>\` from the caller identity. A malformed value here is
+  // a fixture knob because the resulting bucket name would otherwise read as a
   // permissions problem.
   console.log(process.env.MOCK_ACCOUNT_ID ?? "");
+} else if (command === "s3api head-bucket") {
+  // The artifact bucket is provisioned OUT-OF-BAND, so the script checks it exists
+  // before seeding. A fixture knob because the interesting case is the ABSENT
+  // bucket: that used to be impossible to reach — the bucket travelled with the
+  // Slack secrets the skip gate already tested — and is now the state a fresh
+  // account is in until the bootstrap script has been run once.
+  process.exit(process.env.MOCK_ARTIFACT_BUCKET_MISSING === "1" ? 255 : 0);
 } else if (command === "s3api put-object") {
   // The artifact objects. Recorded rather than stored, and the BODY is read from
   // the path the script passed: the assertions are about what the script
@@ -407,10 +416,28 @@ if (command === "ssm get-parameter") {
   // The pattern is asserted, not ignored: a script that queried for the wrong
   // phrase would find nothing on a healthy stage and report a re-classification
   // that never happened.
-  const matched = (option("--filter-pattern") ?? "").includes(
+  if (process.env.MOCK_LOG_QUERY_ERROR) {
+    console.error(
+      \`An error occurred (\${process.env.MOCK_LOG_QUERY_ERROR}) when calling the \` +
+        "FilterLogEvents operation: simulated failure",
+    );
+    process.exit(255);
+  }
+  const pattern = option("--filter-pattern") ?? "";
+  const matched = pattern.includes(
     "reviewed decision(s) from s3://",
   );
-  console.log(matched ? (process.env.MOCK_REPLAY_LINES ?? "0") : "0");
+  const count = matched
+    ? (process.env.MOCK_REPLAY_LINES ?? "0")
+    : pattern === ""
+      ? (process.env.MOCK_LOG_LINES ?? "0")
+      : "0";
+  // AWS CLI applies a JMESPath query to each page separately for text output.
+  // Reproduce the live \`1\\n0\` shape so changing the script back from JSON
+  // makes every healthy replay fixture fail as non-numeric.
+  process.stdout.write(
+    option("--output") === "text" ? \`\${count}\\n0\\n\` : \`\${count}\\n\`,
+  );
 } else if (command === "ecs describe-tasks") {
   const query = option("--query") ?? "";
   // The cluster is asserted, not ignored: the script must pass the name it read
@@ -626,11 +653,14 @@ process.exit(real.status ?? 1);
       MOCK_EXPIRY_BEHAVIOR: expiryBehavior,
       MOCK_TAMPER_BEHAVIOR: tamperBehavior,
       MOCK_ACCOUNT_ID: accountId,
+      MOCK_ARTIFACT_BUCKET_MISSING: artifactBucketMissing,
       MOCK_TASK_DEF: taskDef,
       MOCK_CONTAINER_NAME: containerName,
       MOCK_LOG_GROUP: logGroup,
       MOCK_LOG_PREFIX: logPrefix,
       MOCK_REPLAY_LINES: replayLines,
+      MOCK_LOG_LINES: logLines,
+      MOCK_LOG_QUERY_ERROR: logQueryError,
       MOCK_FACADE: facade,
       MOCK_SECRET: secret,
       MOCK_BAD_STATUS: badSignatureStatus,
@@ -645,6 +675,7 @@ process.exit(real.status ?? 1);
       PATH: `${bin}${delimiter}${process.env.PATH}`,
       STAGE: stage,
       AWS_REGION: "ap-northeast-1",
+      MEM9_DECISION_ARTIFACT_BUCKET: artifactBucket,
     },
   });
   // The log file only exists once a fake has been invoked, and the whole point of
@@ -1215,10 +1246,8 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
       expect(artifact.decisions.some((d) => d.verdict === "DELETE")).toBe(true);
     }
 
-    // The record points at the reviewed object, in the bucket derived from the
-    // CALLER's account — the artifact bucket is a task-definition environment entry,
-    // never an SSM parameter, so deriving it is also the stricter check: it asserts
-    // the name this repo computes rather than whatever the stage was configured with.
+    // With no override, the record points at the account-derived default bucket.
+    // The override path is asserted separately by TC-SLACKAPP-219.
     const seeds = callRecords.filter(
       ([tool, service, operation, , name]) =>
         tool === "aws" &&
@@ -1365,6 +1394,36 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
     expect(output).toMatch(/re-classifying/iu);
   });
 
+  it("TC-SLACKAPP-209 reports delayed or missing log delivery when the stream has no events", () => {
+    const { callRecords, result, output } = runFixture({
+      claim: claimWith(),
+      replayLines: "0",
+      logLines: "0",
+    });
+    expect(result.status, output).not.toBe(0);
+    expect(output).toMatch(/log stream still had zero events after 120 seconds/iu);
+    expect(output).toMatch(/log delivery may be delayed/iu);
+    expect(output).not.toMatch(/re-classifying/iu);
+
+    const filters = callRecords.filter(
+      ([tool, service, operation]) =>
+        tool === "aws" && service === "logs" && operation === "filter-log-events",
+    );
+    expect(filters).toHaveLength(14);
+    expect(filters.at(-1)?.[filters.at(-1).indexOf("--filter-pattern") + 1]).toBe("");
+  });
+
+  it("TC-SLACKAPP-209 reports a CloudWatch query failure instead of treating it as zero matches", () => {
+    const { result, output } = runFixture({
+      claim: claimWith(),
+      logQueryError: "AccessDeniedException",
+    });
+    expect(result.status, output).not.toBe(0);
+    expect(output).toMatch(/CloudWatch Logs artifact-replay marker query failed/iu);
+    expect(output).toMatch(/replay assertion could not inspect/iu);
+    expect(output).not.toMatch(/never logged an artifact replay/iu);
+  });
+
   it("TC-SLACKAPP-209 the log group and stream come from the task definition, never a computed path", () => {
     // SST auto-names container log groups with random hash segments and sets
     // `ignoreChanges: ["name"]`, so a hand-computed `/sst/...` path matches no real
@@ -1389,6 +1448,9 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
       // The EXACT stream of THIS task, `<prefix>/<container>/<task id>` — not a
       // group-wide scan, which a previous run's replay line would satisfy.
       expect(call).toContain("mem9/Mem9Cleanup/task-abc");
+      // Text output applies `length(events)` once per page and yields values such
+      // as `1\n0`; JSON combines all pages before applying the query.
+      expect(call[call.indexOf("--output") + 1]).toBe("json");
     }
 
     // And the matched line is never echoed. It names `s3://mem9-audit-<account>/...`,
@@ -1432,6 +1494,99 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
       ).toHaveLength(0);
       expect(callRecords.filter(([tool]) => tool === "curl")).toHaveLength(0);
     }
+  });
+
+  it("TC-SLACKAPP-219 binds the validated external bucket override to the caller account", () => {
+    const artifactBucket = "example-mem9-decision-artifacts";
+    const { callRecords, result, output } = runFixture({
+      artifactBucket,
+      claim: claimWith(),
+    });
+    expect(result.status, output).toBe(0);
+    expect(
+      callRecords.some(
+        ([tool, service, operation]) =>
+          tool === "aws" &&
+          service === "sts" &&
+          operation === "get-caller-identity",
+      ),
+    ).toBe(true);
+    for (const call of callRecords.filter(
+      ([tool, service]) => tool === "aws" && service === "s3api",
+    )) {
+      expect(call[call.indexOf("--bucket") + 1]).toBe(artifactBucket);
+      expect(call[call.indexOf("--expected-bucket-owner") + 1]).toBe(
+        "123456789012",
+      );
+    }
+  });
+
+  it.each([
+    "UPPERCASE",
+    "ab",
+    "192.0.2.1",
+    "bad..name",
+    "bad_name",
+    "xn--reserved",
+    "sthree-reserved",
+    "amzn-s3-demo-reserved",
+    "reserved-s3alias",
+    "reserved--ol-s3",
+    "reserved--x-s3",
+    "reserved--table-s3",
+    "reserved-an",
+    "a".repeat(34),
+  ])(
+    "TC-SLACKAPP-219 rejects invalid external bucket override %s before S3",
+    (artifactBucket) => {
+      const { callRecords, result, output } = runFixture({
+        artifactBucket,
+        claim: claimWith(),
+      });
+      expect(result.status, output).not.toBe(0);
+      expect(output).toMatch(/invalid.*bucket name/iu);
+      expect(
+        callRecords.some(
+          ([tool, service]) => tool === "aws" && service === "s3api",
+        ),
+      ).toBe(false);
+    },
+  );
+
+  it("TC-SLACKAPP-216 an absent artifact bucket names the bootstrap script, and is not a skip", () => {
+    // The bucket moved OUT-OF-BAND, which decoupled two facts that used to travel
+    // together: the stage having `slack/signing-secret` no longer implies the bucket
+    // exists, so this state is reachable on any account whose bootstrap has not been
+    // run. Without the preflight the first `put_artifact` fails with a bare
+    // `NoSuchBucket` into a discarded stdout, and the run reads as a hash mismatch.
+    const { callRecords, result, output } = runFixture({
+      artifactBucketMissing: "1",
+      claim: claimWith(),
+    });
+    // A FAILURE, not one of this harness's graceful skips: the approval loop IS
+    // deployed on the stage by this point, so the artifact half is genuinely broken
+    // and a skip would report a green run for a loop that cannot execute a MERGE.
+    expect(result.status, output).not.toBe(0);
+    expect(output).toMatch(/does not exist/iu);
+    // The remedy has to name the script, since the reader's next question is what to
+    // run — and the bucket is not something a stage deploy will create for them.
+    expect(output).toMatch(/deploy-decision-artifact-bucket\.sh/u);
+    // And it refuses BEFORE seeding anything: no upload, no offered record, no POST.
+    // An abort that had already written the offered parameter would leave a record
+    // the next run's click could consume.
+    expect(
+      callRecords.filter(
+        ([tool, service, operation]) =>
+          tool === "aws" && service === "s3api" && operation === "put-object",
+      ),
+    ).toHaveLength(0);
+    expect(
+      callRecords.filter(
+        ([tool, service, operation]) =>
+          tool === "aws" && service === "ssm" && operation === "put-parameter",
+      ),
+    ).toHaveLength(0);
+    expect(callRecords.filter(([tool]) => tool === "curl")).toHaveLength(0);
   });
 
   it("TC-SLACKAPP-212 an exit between building the artifacts and the full trap still deletes them", () => {

@@ -4,6 +4,15 @@ Description: >
   workload roles. Deploy out of band before the guarded role migration.
 
 Parameters:
+  DecisionArtifactBucketName:
+    Type: String
+    MinLength: 3
+    MaxLength: 33
+    AllowedPattern: "^[a-z0-9][a-z0-9-]*[a-z0-9]$"
+    ConstraintDescription: >
+      Use 3-33 lowercase letters, digits, and hyphens, beginning and ending
+      with a letter or digit.
+    Description: Exact operator-owned bucket containing reviewed decisions.
   ApplicationRegion:
     Type: String
     AllowedPattern: "^[a-z]{2}(-[a-z0-9]+)+-[0-9]+$"
@@ -146,7 +155,7 @@ Resources:
               # the OBJECT glob, for S3's own resource scope; the two KMS
               # encryption-context pins below use the BUCKET arn instead, and the
               # difference is deploy-breaking rather than cosmetic.
-              - !Sub arn:${AWS::Partition}:s3:::mem9-audit-${AWS::AccountId}/*
+              - !Sub arn:${AWS::Partition}:s3:::${DecisionArtifactBucketName}/*
           # The statement above scopes the write to the PROJECT prefix, i.e. every
           # stage's whole SSM tree. That is too wide for a write, and this ceiling
           # is the only control on it: identity policies are PR-authored, and the
@@ -191,7 +200,7 @@ Resources:
                 # explicitDeny and every artifact read would have failed after
                 # deploy. Pinning both forms costs 6215 bytes, past the hard quota.
                 # Load-bearing — removed, the artifact read is explicitDeny.
-                "kms:EncryptionContext:aws:s3:arn": !Sub arn:${AWS::Partition}:s3:::mem9-audit-${AWS::AccountId}
+                "kms:EncryptionContext:aws:s3:arn": !Sub arn:${AWS::Partition}:s3:::${DecisionArtifactBucketName}
           - Sid: KmsVia
             Effect: Deny
             Action: kms:Decrypt
@@ -281,7 +290,7 @@ Resources:
             Resource: "*"
             Condition:
               StringNotLikeIfExists:
-                "kms:EncryptionContext:aws:s3:arn": !Sub arn:${AWS::Partition}:s3:::mem9-audit-${AWS::AccountId}
+                "kms:EncryptionContext:aws:s3:arn": !Sub arn:${AWS::Partition}:s3:::${DecisionArtifactBucketName}
           - Sid: LongBearer
             Effect: Deny
             Action: bedrock-mantle:CallWithBearerToken

@@ -159,7 +159,7 @@ const GLOBAL_RUNTIME_ACTIONS = [
 ];
 // Singleton Action/NotAction/Resource/NotResource entries are rendered as SCALARS
 // rather than one-element arrays, which reclaims 22 bytes across the document
-// against a 6144 quota that #150 leaves 25 bytes under. Safe because the verifier
+// against a 6144 quota that #150 leaves 31 bytes under. Safe because the verifier
 // compares these four keys through list(), so a scalar and a one-element array are
 // the same set — and simulated identical on all 12 authorization cases. NOT safe
 // inside Condition, where canonicalJson() compares the two as different values.
@@ -316,6 +316,7 @@ function boundaryContract({
   accountId,
   applicationRegion,
   bedrockProjectArn,
+  decisionArtifactBucketName = `mem9-audit-${accountId}`,
   openAiBedrockProjectArn = "",
   policyRevision = "r1",
 }) {
@@ -346,6 +347,17 @@ function boundaryContract({
   if (!/^r[0-9]{1,20}$/u.test(policyRevision)) {
     throw new Error("invalid boundary policy revision");
   }
+  if (
+    !/^[a-z0-9][a-z0-9-]{1,31}[a-z0-9]$/u.test(
+      decisionArtifactBucketName ?? "",
+    ) ||
+    /^(?:xn--|sthree-|amzn-s3-demo-)/u.test(decisionArtifactBucketName) ||
+    /(?:-s3alias|--ol-s3|--x-s3|--table-s3|-an)$/u.test(
+      decisionArtifactBucketName,
+    )
+  ) {
+    throw new Error("invalid decision-artifact bucket name");
+  }
   // Two ARNs, not one, and the difference is load-bearing. S3's own resource
   // scope needs the OBJECT glob; the SSE-KMS encryption context needs the BUCKET
   // ARN, because the bucket enables S3 Bucket Keys. Documented AWS behavior, S3
@@ -358,7 +370,8 @@ function boundaryContract({
   // keys on, GenerateDataKey and Decrypt both simulate explicitDeny and every
   // artifact write and read dies after deploy. Pinning both forms is not an
   // option: 6215 bytes, past the hard quota.
-  const decisionArtifactBucketArn = `arn:${partition}:s3:::mem9-audit-${accountId}`;
+  const decisionArtifactBucketArn =
+    `arn:${partition}:s3:::${decisionArtifactBucketName}`;
   const decisionArtifactArn = `${decisionArtifactBucketArn}/*`;
 
   return {
@@ -418,7 +431,7 @@ function boundaryContract({
     //
     // The name is `mem9-audit-` rather than `mem9-on-aws-audit-` because the ARN
     // renders three times: seven characters of prefix cost 21 bytes, and at the
-    // revision this document actually deploys with there are only 10 to spare
+    // revision this document actually deploys with there are only 31 to spare
     // (see the size gate). Nothing pins an S3 prefix for this project — the
     // deploy role's S3State is Resource: "*" — so the shorter name costs no
     // access, and it is free only while the bucket does not yet exist.

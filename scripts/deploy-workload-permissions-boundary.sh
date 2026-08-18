@@ -81,6 +81,25 @@ if [[ ! "$node_major" =~ ^[0-9]+$ || "$node_major" -lt 24 ]]; then
   exit 2
 fi
 
+valid_bucket_name() {
+  local name="$1"
+  [[ "$name" =~ ^[a-z0-9][a-z0-9-]{1,31}[a-z0-9]$ ]] &&
+    [[ "$name" != xn--* ]] &&
+    [[ "$name" != sthree-* ]] &&
+    [[ "$name" != amzn-s3-demo-* ]] &&
+    [[ "$name" != *-s3alias ]] &&
+    [[ "$name" != *--ol-s3 ]] &&
+    [[ "$name" != *--x-s3 ]] &&
+    [[ "$name" != *--table-s3 ]] &&
+    [[ "$name" != *-an ]]
+}
+decision_artifact_bucket_name="${MEM9_DECISION_ARTIFACT_BUCKET:-}"
+if [[ -n "$decision_artifact_bucket_name" ]] &&
+    ! valid_bucket_name "$decision_artifact_bucket_name"; then
+  echo "MEM9_DECISION_ARTIFACT_BUCKET is an invalid decision-artifact bucket name; no mutation attempted." >&2
+  exit 2
+fi
+
 identity_json="$(aws sts get-caller-identity --output json 2>/dev/null || true)"
 account_id="$(jq -r '.Account // empty' <<<"$identity_json")"
 partition="$(jq -r '.Arn // empty' <<<"$identity_json" | sed -n 's/^arn:\([^:]*\):.*/\1/p')"
@@ -88,6 +107,7 @@ if [[ ! "$account_id" =~ ^[0-9]{12}$ || ! "$partition" =~ ^[a-z0-9-]+$ ]]; then
   echo "AWS caller identity is malformed; no boundary mutation attempted." >&2
   exit 1
 fi
+decision_artifact_bucket_name="${decision_artifact_bucket_name:-mem9-audit-${account_id}}"
 if [[ "$partition" == "aws-cn" ]]; then
   url_suffix="amazonaws.com.cn"
 else
@@ -235,6 +255,7 @@ verify_boundary_policy() {
   if ! WORKLOAD_BOUNDARY_ACCOUNT_ID="$account_id" \
     WORKLOAD_BOUNDARY_APPLICATION_REGION="$application_region" \
     WORKLOAD_BOUNDARY_BEDROCK_PROJECT_ARN="$bedrock_project_arn" \
+    WORKLOAD_BOUNDARY_DECISION_ARTIFACT_BUCKET="$decision_artifact_bucket_name" \
     WORKLOAD_BOUNDARY_OPENAI_BEDROCK_PROJECT_ARN="$openai_bedrock_project_arn" \
     WORKLOAD_BOUNDARY_PARTITION="$partition" \
     WORKLOAD_BOUNDARY_POLICY_REVISION="$policy_revision" \
@@ -505,6 +526,7 @@ if [[ $describe_exit -eq 0 ]]; then
     --parameters \
       "ParameterKey=ApplicationRegion,ParameterValue=$application_region" \
       "ParameterKey=BedrockProjectArn,ParameterValue=$bedrock_project_arn" \
+      "ParameterKey=DecisionArtifactBucketName,ParameterValue=$decision_artifact_bucket_name" \
       "ParameterKey=OpenAiBedrockProjectArn,ParameterValue=$openai_bedrock_project_arn" \
       "ParameterKey=PolicyRevision,ParameterValue=$policy_revision" \
     --capabilities CAPABILITY_NAMED_IAM \
@@ -533,6 +555,7 @@ elif grep -qi "does not exist" <<<"$describe_output"; then
     --parameters \
       "ParameterKey=ApplicationRegion,ParameterValue=$application_region" \
       "ParameterKey=BedrockProjectArn,ParameterValue=$bedrock_project_arn" \
+      "ParameterKey=DecisionArtifactBucketName,ParameterValue=$decision_artifact_bucket_name" \
       "ParameterKey=OpenAiBedrockProjectArn,ParameterValue=$openai_bedrock_project_arn" \
       "ParameterKey=PolicyRevision,ParameterValue=r1" \
     --capabilities CAPABILITY_NAMED_IAM \

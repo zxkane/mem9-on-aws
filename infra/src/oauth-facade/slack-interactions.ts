@@ -409,7 +409,7 @@ async function loadOffered(
   if (expiry.expired) {
     deps.log(
       `refused an expired approval for ${hash} ` +
-        `(issuedAt=${record.issuedAt ?? "unset"}, ttl=${OFFER_TTL_MS}ms)`,
+        `(age=${expiry.age ?? "unknown"}, ttl=${OFFER_TTL_MS}ms)`,
     );
     // Names the expiry and what to do about it. The generic "nothing was applied"
     // suffix is kept — every refusal in this handler ends with it, and an operator

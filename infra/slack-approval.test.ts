@@ -206,28 +206,26 @@ function installGlobals(stage: string) {
         }
       },
     },
-    // #150's decision artifact. `id` returns the RESOLVED bucket name rather than
-    // the logical name, because the four hardening resources address the bucket
-    // through `bucket: artifactBucket.id` — so a test can prove each one points at
-    // the same bucket the boundary permits, instead of merely existing.
+    // #150's decision artifact — kept although `slackApproval()` no longer
+    // constructs ANY of these (the bucket moved out-of-band to
+    // infra/cloudformation/decision-artifact-bucket.yaml). They are retained
+    // deliberately, and this is the only place that records why: TC-SLACKAPP-215
+    // asserts none of these five kinds is declared, and without the stubs a
+    // re-added `new aws.s3.BucketV2(...)` would die with a TypeError on an
+    // undefined constructor instead of turning 215 red with its explanation of the
+    // `BucketAlreadyOwnedByYou` collision. The stubs ARE the mechanism that makes
+    // that failure readable, so deleting them as dead code would cost the diagnosis.
     s3: {
       BucketV2: class {
         id: Output<string>;
         arn: Output<string>;
         bucket: Output<string>;
-        constructor(
-          logicalName: string,
-          args: Record<string, unknown>,
-          opts?: Record<string, unknown>,
-        ) {
+        constructor(logicalName: string, args: Record<string, unknown>) {
           const name = String(materialize(args.bucket));
           this.id = out(name);
           this.bucket = out(name);
           this.arn = out(`arn:aws:s3:::${name}`);
-          // Record the resource OPTIONS too: retainOnDelete is the difference
-          // between a preview stage's teardown keeping the audit trail and
-          // deleting it, and it lives in opts rather than args.
-          record("BucketV2", logicalName, { ...args, __opts: opts });
+          record("BucketV2", logicalName, args);
         }
       },
       BucketPublicAccessBlock: class {
@@ -436,7 +434,12 @@ function cloudFormationTemplate(path: string) {
         resolve: (value: string) => ({ "Fn::GetAtt": value.split(".") }),
       },
     ],
-  }) as { Resources: Record<string, { Properties: Record<string, any> }> };
+    // `Outputs` is optional and typed deliberately: TC-217 asserts its ABSENCE,
+    // which only type-checks if the shape admits it could be present.
+  }) as {
+    Resources: Record<string, { Properties: Record<string, any> }>;
+    Outputs?: Record<string, unknown>;
+  };
 }
 
 /** Statements of the boundary that this stack's roles must survive. */
@@ -448,10 +451,39 @@ function boundaryStatements(): Array<Record<string, any>> {
 }
 
 /**
+ * The OUT-OF-BAND artifact bucket template. The bucket is not part of this stack
+ * (see TC-SLACKAPP-215 for why a fixed account-scoped name cannot be), so the
+ * settings that protect the audit trail are asserted against the template the
+ * operator deploys.
+ */
+function artifactBucketTemplate() {
+  return cloudFormationTemplate("./cloudformation/decision-artifact-bucket.yaml");
+}
+
+/** Properties of the one `AWS::S3::Bucket` in that template. */
+function artifactBucketProperties(): Record<string, any> {
+  const buckets = Object.values(artifactBucketTemplate().Resources).filter(
+    (resource: any) => resource.Type === "AWS::S3::Bucket",
+  );
+  // Exactly one: a second bucket in this template would mean the settings below
+  // were asserted against an arbitrary one of them.
+  expect(buckets).toHaveLength(1);
+  return (buckets[0] as { Properties: Record<string, any> }).Properties;
+}
+
+/**
  * `!Sub` strings resolved against the same identity the fakes use, so a template
  * pattern can be compared against a rendered ARN.
  */
 function resolveSub(value: unknown): string {
+  if (
+    value &&
+    typeof value === "object" &&
+    "Ref" in (value as object) &&
+    (value as { Ref: string }).Ref === "DecisionArtifactBucketName"
+  ) {
+    return "mem9-audit-123456789012";
+  }
   const raw =
     value && typeof value === "object" && "Fn::Sub" in (value as object)
       ? String((value as { "Fn::Sub": string })["Fn::Sub"])
@@ -459,6 +491,7 @@ function resolveSub(value: unknown): string {
   return raw
     .replaceAll("${AWS::Partition}", "aws")
     .replaceAll("${AWS::AccountId}", "123456789012")
+    .replaceAll("${DecisionArtifactBucketName}", "mem9-audit-123456789012")
     .replaceAll("${ApplicationRegion}", "ap-northeast-1");
 }
 
@@ -483,6 +516,7 @@ const ENV_KEYS = [
   "MEM9_BEDROCK_PROJECT_OPENAI",
   "MEM9_CLEANUP_CAP",
   "MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED",
+  "MEM9_DECISION_ARTIFACT_BUCKET",
 ];
 
 function enable() {
@@ -1423,12 +1457,12 @@ describe("slack approval infrastructure", () => {
   });
 
   it("TC-SLACKAPP-161: names the artifact bucket with the ACCOUNT ID and no wildcard", async () => {
-    installGlobals("prod");
-    enable();
-    await loadAndRun();
-
-    const bucket = one("BucketV2", "Mem9DecisionArtifacts");
-    const name = String(materialize((bucket.args as any).bucket));
+    // Asserted against the OUT-OF-BAND template, not this stack: the bucket is
+    // provisioned by infra/cloudformation/decision-artifact-bucket.yaml because a
+    // fixed, account-scoped name cannot be owned by a per-stage app (see
+    // TC-SLACKAPP-215). The derived name this stack passes to the task is checked
+    // in TC-SLACKAPP-181.
+    const name = resolveSub(artifactBucketProperties().BucketName);
     // The security property, not a style choice. S3 bucket names are a GLOBAL
     // namespace, so a wildcard in the bucket segment of the boundary's ARN also
     // matches a bucket an attacker creates FIRST in their own account —
@@ -1447,13 +1481,7 @@ describe("slack approval infrastructure", () => {
   });
 
   it("TC-SLACKAPP-162: matches the bucket the DEPLOYED boundary permits, byte for byte", async () => {
-    installGlobals("prod");
-    enable();
-    await loadAndRun();
-
-    const name = String(
-      materialize((one("BucketV2", "Mem9DecisionArtifacts").args as any).bucket),
-    );
+    const name = resolveSub(artifactBucketProperties().BucketName);
     // The whole point of the exact name is that two files must agree. Read the
     // operator-owned template rather than trusting that both sides were edited:
     // a drift here is an AccessDenied at artifact-write time, AFTER the approval
@@ -1467,17 +1495,7 @@ describe("slack approval infrastructure", () => {
     // Both KMS context values too: the write needs GenerateDataKey under the
     // `GenKey` deny, and the read needs Decrypt under `KmsContext`. A bucket name
     // that matched only one of the three would break exactly one direction.
-    //
-    // These pin the BARE BUCKET ARN, not the object glob, and that asymmetry with
-    // the resource scope above is the whole point of this assertion. S3 presents
-    // the bucket ARN as `aws:s3:arn` when bucket keys are enabled (S3 user guide,
-    // "Using SSE-KMS -> Encryption context"), and `bucket/*` does not match
-    // `bucket`. The first version of this test asserted `/*` on all three sites
-    // and passed while TC-163 pinned `bucketKeyEnabled: true` — two green tests
-    // describing a combination that denies every artifact write and read after
-    // deploy. Whichever way a future edit breaks the pair, one of these two tests
-    // now fails.
-    const contextValues = boundary
+    const contextArn = boundary
       .filter(({ Sid }) => Sid === "KmsContext" || Sid === "GenKey")
       .map((statement) =>
         resolveSub(
@@ -1486,42 +1504,117 @@ describe("slack approval infrastructure", () => {
           ],
         ),
       );
-    expect(contextValues).toHaveLength(2);
-    for (const value of contextValues) {
-      expect(value).toBe(`arn:aws:s3:::${name}`);
-      expect(value).not.toMatch(/\/\*$/u);
-    }
+    expect(contextArn).toEqual([
+      `arn:aws:s3:::${name}`,
+      `arn:aws:s3:::${name}`,
+    ]);
+    // And the name this STACK derives, which is what the task actually receives.
+    // The bucket moved out of this app; the two must still agree byte for byte.
+    installGlobals("prod");
+    enable();
+    await loadAndRun();
+    const taskArgs = materialize(one("Task", "Mem9Cleanup").args) as
+      Record<string, any>;
+    expect(taskArgs.environment.MEM9_DECISION_ARTIFACT_BUCKET).toBe(name);
+    expect(taskArgs.environment.MEM9_DECISION_ARTIFACT_BUCKET_OWNER).toBe(
+      "123456789012",
+    );
   });
 
-  it("TC-SLACKAPP-163: encrypts the artifact with SSE-KMS and bucket keys on", async () => {
+  it("TC-SLACKAPP-219: applies one validated bucket override to the task and boundary", async () => {
+    const override = "example-mem9-decision-artifacts";
+    process.env.MEM9_DECISION_ARTIFACT_BUCKET = override;
     installGlobals("prod");
     enable();
     await loadAndRun();
 
-    const bucketName = String(
-      materialize((one("BucketV2", "Mem9DecisionArtifacts").args as any).bucket),
+    const taskArgs = materialize(one("Task", "Mem9Cleanup").args) as
+      Record<string, any>;
+    expect(taskArgs.environment.MEM9_DECISION_ARTIFACT_BUCKET).toBe(override);
+    expect(taskArgs.environment.MEM9_DECISION_ARTIFACT_BUCKET_OWNER).toBe(
+      "123456789012",
     );
-    const encryption = one(
-      "BucketServerSideEncryptionConfigurationV2",
-      "Mem9DecisionArtifactsEncryption",
-    ).args as any;
-    // Addressed at the SAME bucket. A sub-resource pointed elsewhere leaves this
-    // bucket on the provider default, which is SSE-S3 — encrypted, but with a key
-    // the boundary's encryption-context denies say nothing about.
-    expect(String(materialize(encryption.bucket))).toBe(bucketName);
-    const rule = encryption.rules[0];
-    expect(rule.applyServerSideEncryptionByDefault.sseAlgorithm).toBe("aws:kms");
-    expect(rule.applyServerSideEncryptionByDefault.kmsMasterKeyId).toBe(
+    expect(
+      taskArgs.permissions
+        .filter((statement: any) =>
+          list(statement.actions).includes("s3:PutObject"),
+        )
+        .flatMap((statement: any) => list(statement.resources)),
+    ).toEqual([`arn:aws:s3:::${override}/decisions/prod/*`]);
+    expect(
+      taskArgs.permissions
+        .find((statement: any) =>
+          list(statement.actions).includes("kms:GenerateDataKey"),
+        )
+        .conditions.find(
+          (condition: any) =>
+            condition.variable === "kms:EncryptionContext:aws:s3:arn",
+        ).values,
+    ).toEqual([`arn:aws:s3:::${override}`]);
+
+    const boundary = boundaryStatements();
+    expect(
+      JSON.stringify(
+        listRaw(boundary.find(({ Sid }) => Sid === "Resources")!.NotResource),
+      ),
+    ).toContain("${DecisionArtifactBucketName}");
+  });
+
+  it.each([
+    "UPPERCASE",
+    "ab",
+    "192.0.2.1",
+    "bad..name",
+    "bad_name",
+    "xn--reserved",
+    "sthree-reserved",
+    "amzn-s3-demo-reserved",
+    "reserved-s3alias",
+    "reserved--ol-s3",
+    "reserved--x-s3",
+    "reserved--table-s3",
+    "reserved-an",
+    "a".repeat(34),
+  ])(
+    "TC-SLACKAPP-219: rejects invalid bucket override %s before synthesis",
+    async (override) => {
+      process.env.MEM9_DECISION_ARTIFACT_BUCKET = override;
+      installGlobals("prod");
+      enable();
+      const module = await loadModule();
+      expect(() =>
+        module.slackApproval(
+          fakeEcs(),
+          fakeDb(),
+          fakeIdentity(),
+          fakeFacade(),
+        ),
+      ).toThrow(/invalid.*bucket name/iu);
+      expect(resources).toEqual([]);
+    },
+  );
+
+  it("TC-SLACKAPP-163: encrypts the artifact with SSE-KMS and bucket keys on", () => {
+    const properties = artifactBucketProperties();
+    const name = resolveSub(properties.BucketName);
+    // All four hardening settings are INLINE properties of the one CFN bucket, so
+    // unlike the Pulumi sub-resources they cannot be addressed at a different
+    // bucket — the "same bucket" assertion the previous revision needed is now
+    // structural.
+    const [rule] =
+      properties.BucketEncryption.ServerSideEncryptionConfiguration;
+    expect(rule.ServerSideEncryptionByDefault.SSEAlgorithm).toBe("aws:kms");
+    expect(rule.ServerSideEncryptionByDefault.KMSMasterKeyID).toBe(
       "alias/aws/s3",
     );
     // Bucket keys change WHICH ARN S3 presents as `aws:s3:arn`: the bucket ARN
     // with them on, the object ARN with them off (S3 user guide, "Using SSE-KMS ->
     // Encryption context"). So this flag and the boundary's two context pins must
     // agree, and TC-162 asserts the bucket-ARN half. Asserted from both sides
-    // because the mismatch is invisible until deploy: the earlier revision of this
+    // because the mismatch is invisible until deploy: an earlier revision of this
     // suite had bucket keys on here and `/*` there, both tests green, and every
     // artifact write and read would have failed with a KMS AccessDenied.
-    expect(rule.bucketKeyEnabled).toBe(true);
+    expect(rule.BucketKeyEnabled).toBe(true);
     // Pin the coupling directly, so flipping the flag alone turns THIS test red
     // rather than only the other one.
     const contextArn = boundaryStatements()
@@ -1534,94 +1627,145 @@ describe("slack approval infrastructure", () => {
         ),
       );
     expect(contextArn).toEqual([
-      `arn:aws:s3:::${bucketName}`,
-      `arn:aws:s3:::${bucketName}`,
+      `arn:aws:s3:::${name}`,
+      `arn:aws:s3:::${name}`,
     ]);
   });
 
   it("TC-SLACKAPP-164: expires the artifact on the same 72h bound as the approval", async () => {
-    installGlobals("prod");
-    enable();
-    await loadAndRun();
-
     const { DECISION_ARTIFACT_TTL_DAYS } = await loadModule();
-    const bucketName = String(
-      materialize((one("BucketV2", "Mem9DecisionArtifacts").args as any).bucket),
-    );
-    const lifecycle = one(
-      "BucketLifecycleConfigurationV2",
-      "Mem9DecisionArtifactsLifecycle",
-    ).args as any;
-    expect(String(materialize(lifecycle.bucket))).toBe(bucketName);
-    const rule = lifecycle.rules[0];
-    expect(rule.status).toBe("Enabled");
+    const [rule] =
+      artifactBucketProperties().LifecycleConfiguration.Rules;
+    expect(rule.Status).toBe("Enabled");
     // 3 days, matching #123's 72h offer TTL rather than an independently chosen
     // retention: past that the approval cannot be clicked, so the artifact could
     // not be replayed by anything and holding memory ids longer serves no purpose.
-    expect(rule.expiration.days).toBe(3);
-    expect(DECISION_ARTIFACT_TTL_DAYS).toBe(3);
+    expect(rule.ExpirationInDays).toBe(3);
+    // The constant and the template are now in DIFFERENT files and different
+    // languages, so nothing but this line keeps them in step — the rule moved to
+    // CloudFormation while `putDecisionArtifact`'s callers still reason about the
+    // TTL from the constant. Editing one alone turns this red.
+    expect(rule.ExpirationInDays).toBe(DECISION_ARTIFACT_TTL_DAYS);
     // Failed multipart writes are NOT covered by the expiration rule and would
     // accumulate invisibly.
-    expect(rule.abortIncompleteMultipartUpload.daysAfterInitiation).toBe(1);
+    expect(rule.AbortIncompleteMultipartUpload.DaysAfterInitiation).toBe(1);
   });
 
-  it("TC-SLACKAPP-165: blocks public access and denies non-TLS requests", async () => {
-    installGlobals("prod");
-    enable();
-    await loadAndRun();
-
-    const bucketName = String(
-      materialize((one("BucketV2", "Mem9DecisionArtifacts").args as any).bucket),
-    );
-    const block = one(
-      "BucketPublicAccessBlock",
-      "Mem9DecisionArtifactsPublicAccess",
-    ).args as any;
-    expect(String(materialize(block.bucket))).toBe(bucketName);
+  it("TC-SLACKAPP-165: blocks public access and denies non-TLS requests", () => {
+    const template = artifactBucketTemplate();
+    const properties = artifactBucketProperties();
+    const block = properties.PublicAccessBlockConfiguration;
     // All four, because they gate different paths: two cover ACLs and two cover
     // bucket policies, and three-of-four leaves a way to make the object public.
-    expect(block.blockPublicAcls).toBe(true);
-    expect(block.blockPublicPolicy).toBe(true);
-    expect(block.ignorePublicAcls).toBe(true);
-    expect(block.restrictPublicBuckets).toBe(true);
+    expect(block.BlockPublicAcls).toBe(true);
+    expect(block.BlockPublicPolicy).toBe(true);
+    expect(block.IgnorePublicAcls).toBe(true);
+    expect(block.RestrictPublicBuckets).toBe(true);
 
-    const policy = JSON.parse(
-      String(
-        materialize(
-          (one("BucketPolicy", "Mem9DecisionArtifactsPolicy").args as any).policy,
-        ),
-      ),
-    );
+    const policy = Object.values(template.Resources).find(
+      (resource: any) => resource.Type === "AWS::S3::BucketPolicy",
+    ) as any;
+    expect(policy).toBeDefined();
     // Exactly one statement, and it must DENY. A bucket policy that granted
     // anything would widen who can reach the artifact beyond the two identity
     // policies that are supposed to be the only way in.
-    expect(policy.Statement).toHaveLength(1);
-    const [statement] = policy.Statement;
+    expect(policy.Properties.PolicyDocument.Statement).toHaveLength(1);
+    const [statement] = policy.Properties.PolicyDocument.Statement;
     expect(statement.Effect).toBe("Deny");
     expect(statement.Condition).toEqual({
       Bool: { "aws:SecureTransport": "false" },
     });
-    // Both ARN forms: bucket-level operations do not match the `/*` form, so a
-    // policy naming only the objects leaves ListBucket reachable over plain HTTP.
+    // Both ARN forms, in order, and both naming THIS bucket. Bucket-level
+    // operations do not match the `/*` form, so a policy naming only the objects
+    // leaves ListBucket reachable over plain HTTP. The two forms use different
+    // intrinsics because CFN has no `!GetAtt`-with-suffix — hence comparing the
+    // parsed intrinsics rather than a rendered string. `bucketRef` is read from the
+    // policy's own target so the entries cannot drift to a DIFFERENT bucket's ARN:
+    // an earlier revision classified the forms with a regex that accepted any
+    // logical id, and a mutant pointing the object entry at `SomeOtherBucket` kept
+    // the whole suite green.
+    const bucketRef = policy.Properties.Bucket.Ref;
     expect(statement.Resource).toEqual([
-      `arn:aws:s3:::${bucketName}`,
-      `arn:aws:s3:::${bucketName}/*`,
+      { "Fn::GetAtt": [bucketRef, "Arn"] },
+      { "Fn::Sub": `\${${bucketRef}.Arn}/*` },
     ]);
   });
 
-  it("TC-SLACKAPP-166: retains the artifact bucket when a stage is torn down", async () => {
+  it("TC-SLACKAPP-166: retains the artifact bucket when a stage is torn down", () => {
+    const bucket = Object.values(artifactBucketTemplate().Resources).find(
+      (resource: any) => resource.Type === "AWS::S3::Bucket",
+    ) as any;
+    // The bucket's name is account-scoped, so EVERY stage — including each PR's
+    // preview stage — resolves to the same bucket. Deleting it would take prod's
+    // audit trail of what was deleted with it. Both policies, because they cover
+    // different events: a stack DELETE and a property change that REPLACES.
+    expect(bucket.DeletionPolicy).toBe("Retain");
+    expect(bucket.UpdateReplacePolicy).toBe("Retain");
+  });
+
+  it("TC-SLACKAPP-217: retains the bucket policy and exposes no second config source", () => {
+    const template = artifactBucketTemplate();
+    const policy = Object.values(template.Resources).find(
+      (resource: any) => resource.Type === "AWS::S3::BucketPolicy",
+    ) as any;
+    // Retaining the bucket without its policy is worse than it looks: the stack
+    // DELETE keeps the audit bucket and deletes the ONLY thing requiring TLS to
+    // reach it (TC-165), so the retained bucket quietly ends up weaker than the
+    // one that was reviewed.
+    expect(policy.DeletionPolicy).toBe("Retain");
+
+    // `UpdateReplacePolicy` closes the same loss through a different door: `Bucket`
+    // is this resource's only createOnly property (per its live resource schema), so
+    // retargeting it REPLACES the policy, and the replacement's cleanup would strip
+    // TLS from the bucket left behind. Asserted here rather than left to cfn-lint's
+    // W3011 — which does catch it, but only warns, and only once this template is
+    // inside the lint step at all (TC-SLACKAPP-218).
+    expect(policy.UpdateReplacePolicy).toBe("Retain");
+
+    // The external variable is the one source of truth for the owner stack,
+    // boundary, SST, CI, and E2E. A stack output would create a second source
+    // that only some consumers follow. Adoption uses the separate bucket-only
+    // import template and then a normal update to this complete declaration.
+    expect(template.Outputs).toBeUndefined();
+
+    // Every retained control must survive stack deletion with the audit data.
+    for (const [logicalId, resource] of Object.entries<any>(template.Resources)) {
+      expect(resource.DeletionPolicy, logicalId).toBe("Retain");
+    }
+  });
+
+  it("TC-SLACKAPP-215: declares NO bucket resource in this stack", async () => {
     installGlobals("prod");
     enable();
     await loadAndRun();
 
-    const bucket = one("BucketV2", "Mem9DecisionArtifacts").args as any;
-    // The bucket's name is account-scoped, so EVERY stage — including each PR's
-    // preview stage — resolves to the same bucket. A preview teardown that
-    // deleted it would take prod's audit trail of what was deleted with it.
-    expect(bucket.__opts?.retainOnDelete).toBe(true);
-    // And `forceDestroy` must stay off, which is the second half of the same
-    // guarantee: it would empty the bucket even where the bucket survives.
-    expect(bucket.forceDestroy).toBe(false);
+    // The regression this guards is a permanent, self-inflicted prod outage, and
+    // it is not hypothetical — it shipped. A fixed account-scoped name plus a
+    // per-stage owner means whichever stage deploys FIRST owns the bucket and
+    // every later stage's CreateBucket fails `BucketAlreadyOwnedByYou`; the AWS
+    // provider surfaces that error rather than adopting a same-owner bucket, and
+    // `retainOnDelete` meant a torn-down preview kept the bucket and left prod's
+    // first deploy failing with no way back short of deleting the audit trail.
+    // Re-adding ANY of the five resources here reintroduces it, so assert their
+    // absence by TYPE rather than by name — a rename would slip past a name check.
+    //
+    // The list covers `aws.s3.*`, which is what the deleted code used. A bucket
+    // re-added through a DIFFERENT namespace does not slip past silently, but it
+    // fails less usefully: probed with `new sst.aws.Bucket(...)`, this case goes
+    // red on `TypeError: sst.aws.Bucket is not a constructor` — caught, but
+    // without the explanation above. Adding a stub for that component would trade
+    // the TypeError for this assertion; it is deliberately not stubbed, since an
+    // unstubbed constructor cannot silently succeed.
+    for (const type of [
+      "BucketV2",
+      "Bucket",
+      "BucketPublicAccessBlock",
+      "BucketServerSideEncryptionConfigurationV2",
+      "BucketLifecycleConfigurationV2",
+      "BucketPolicy",
+    ]) {
+      expect(all(type)).toHaveLength(0);
+    }
   });
 
   it("TC-SLACKAPP-167: puts the STAGE in the key, not the bucket name", async () => {
@@ -1657,14 +1801,18 @@ describe("slack approval infrastructure", () => {
 
     const taskArgs = materialize(one("Task", "Mem9Cleanup").args) as
       Record<string, any>;
-    const bucketName = String(
-      materialize((one("BucketV2", "Mem9DecisionArtifacts").args as any).bucket),
-    );
+    // Read from the out-of-band template, which is now the only declaration of
+    // the bucket: this stack derives the name and the operator provisions it, so
+    // this assertion spans the two files that must agree.
+    const bucketName = resolveSub(artifactBucketProperties().BucketName);
     // The container script gates the artifact on this variable's PRESENCE
     // (TC-SLACKAPP-179/180), so the two files must agree on the name and on the
     // value. A drift in the name leaves the scan silently writing the id-only
     // record — the pre-#150 shape — with no error anywhere.
     expect(taskArgs.environment.MEM9_DECISION_ARTIFACT_BUCKET).toBe(bucketName);
+    expect(taskArgs.environment.MEM9_DECISION_ARTIFACT_BUCKET_OWNER).toBe(
+      "123456789012",
+    );
     // `environment`, not `ssm`: a bucket name is not a secret, and the apply half's
     // role holds `ssm:GetParameters` under `approvals/*` only — a secret-style
     // reference would put the artifact's location behind a grant it does not have.
