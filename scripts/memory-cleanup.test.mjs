@@ -4066,9 +4066,9 @@ describe("the offered approval record (#123)", () => {
     //
     // 4096 is the STANDARD tier's content limit; the advanced tier's 8 KB is not
     // an option here, since an advanced parameter incurs a charge and cannot be
-    // reverted. `--cap 50` keeps a real record at ~2 KB, so hitting this needs a
-    // cap far above the default — which is exactly the operator mistake worth
-    // failing on.
+    // reverted. What reaches the limit is the SCANNED corpus, not the cap: a
+    // ~120-id consensus set breaches it at any `--cap` value, because the cap is
+    // spent at apply time and this guard runs before that (TC-SLACKAPP-224).
     const many = Array.from({ length: 200 }, (_, i) => del(`memory-with-a-realistic-id-${i}`));
     expect(() =>
       buildOfferedRecord({
@@ -6508,8 +6508,8 @@ describe("offering the list to Slack (#123)", () => {
     expect(thrown.message).toMatch(/surv/u);
     // The remedy is deliberately NOT "lower --cap": the cap bounds how many
     // decisions a run applies and cannot shrink a single merge, so that advice
-    // would be inert on precisely the input that triggers this. The block-limit
-    // refusal above it still says --cap, and correctly.
+    // would be inert on precisely the input that triggers this. The two size
+    // refusals around it now say the same (TC-SLACKAPP-224, TC-SLACKAPP-225).
     expect(thrown.message).not.toMatch(/--cap/u);
 
     // Reachable from the real offer, and it fails there the same way a Slack error
@@ -6525,6 +6525,94 @@ describe("offering the list to Slack (#123)", () => {
     // And the refusal names no memory content, unlike the message it declined to
     // build. The id is fine (the record carries ids); the merged bytes are not.
     expect(thrown.message).not.toContain(long);
+  });
+
+  it("TC-SLACKAPP-224 the parameter-limit refusal names the scanned set, not a flag (#155)", async () => {
+    // `--cap` never reaches this throw. `buildOfferedRecord` is not given a cap —
+    // `cap` is read only inside `applyDecisions`, at apply time — and the guard
+    // fires before any apply exists to spend one, so the SAME error came back
+    // byte-for-byte at `--cap 50` and `--cap 10` (measured on #155). The old
+    // "lower --cap" clause was therefore false on the operator CLI, not merely
+    // inert on the scheduled scan, whose container override passes no flags at all.
+    const many = Array.from({ length: 200 }, (_, i) => del(`memory-with-a-realistic-id-${i}`));
+    let thrown;
+    try {
+      offeredWith(many);
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown?.message).toMatch(/over the 4096-byte standard parameter limit/u);
+    // Names what actually drives the bytes, and a remedy that EXISTS on both paths.
+    // Deliberately not "narrow the scan": there is no scan bound to turn down
+    // (`scanActiveMemories` exhausts every page and `--limit` is list-only), so that
+    // would be a second inert clause. The decision list survives this throw and a
+    // hand-run `--apply --ids` over a subset is the documented way through.
+    expect(thrown.message).toMatch(/every id a destructive decision TOUCHES/u);
+    expect(thrown.message).toMatch(/review it in batches from the kept decision list/u);
+    // "offered set", never "consensus set": the same builders serve the single-pass
+    // operator dry run, where there is no quorum to blame for the size.
+    expect(thrown.message).not.toMatch(/consensus set/u);
+    // No FLAG at all, not merely no `--cap`: the scheduled scan is the path that
+    // cannot act on one, so a later `--consensus-passes` or `--protected-topics`
+    // clause would reintroduce this defect under a new name.
+    expect(thrown.message).not.toMatch(/--[a-z]/u);
+
+    // Reachable from the real offer, where it fails BEFORE the write — unlike the
+    // block-limit refusal, which fires with the record already in place. Nothing
+    // was written, so a scan that cannot offer leaves last week's button as it
+    // found it instead of invalidating it and then refusing to replace it.
+    const fakes = offerFakes();
+    await expect(offer({ fakes, decisions: many }).promise).rejects.toThrow(
+      /review it in batches from the kept decision list/u,
+    );
+    expect(fakes.ssm.puts).toHaveLength(0);
+    expect(fakes.slack.fetchImpl).not.toHaveBeenCalled();
+  });
+
+  it("TC-SLACKAPP-225 the block-limit refusal names the reviewed decisions, not a flag (#155)", async () => {
+    // The same defect as TC-SLACKAPP-224 on the Slack surface: the block count
+    // scales with the decisions being reviewed, one line each, while `--cap` bounds
+    // an apply's mutations and is never read by this builder either.
+    //
+    // Driven through the REAL offer, because this refusal is reachable there — which
+    // is not obvious and was got wrong once. The two surfaces measure different
+    // things: the record carries ids ONLY, while the message renders a line per
+    // decision INCLUDING its reason. So a wordy classifier fits the 4096-byte record
+    // comfortably and still overflows Slack: 48 ids with ~2900-character reasons is a
+    // record well under the limit and more than 50 blocks.
+    const wordy = Array.from({ length: 48 }, (_, i) => ({
+      ...del(`m-${i}`),
+      reason: "x".repeat(2900),
+    }));
+    const record = offeredWith(wordy);
+    // The premise, asserted rather than asserted-about: the record passed the guard
+    // that TC-SLACKAPP-224 covers, so what follows is the SECOND ceiling and not the
+    // first one in disguise.
+    expect(Buffer.byteLength(JSON.stringify(record), "utf8")).toBeLessThanOrEqual(4096);
+
+    let thrown;
+    try {
+      buildApprovalMessage({ record, decisions: wordy, channel: CHANNEL });
+    } catch (err) {
+      thrown = err;
+    }
+    expect(thrown?.message).toMatch(/over Slack's 50-block message limit/u);
+    expect(thrown.message).toMatch(/one line per reviewed decision/u);
+    expect(thrown.message).toMatch(/review it in batches from the kept decision list/u);
+    expect(thrown.message).not.toMatch(/consensus set/u);
+    expect(thrown.message).not.toMatch(/--[a-z]/u);
+
+    // And from the real offer, where it fails AFTER the write — the record is what
+    // invalidates last week's button, so a scan that cannot render the message has
+    // already replaced the previous offer and posted nothing. Same ordering
+    // TC-SLACKAPP-205 pins for the merge case, and the opposite of the
+    // parameter-limit refusal in TC-SLACKAPP-224.
+    const fakes = offerFakes();
+    await expect(offer({ fakes, decisions: wordy }).promise).rejects.toThrow(
+      /review it in batches from the kept decision list/u,
+    );
+    expect(fakes.ssm.puts).toHaveLength(1);
+    expect(fakes.slack.fetchImpl).not.toHaveBeenCalled();
   });
 
   it("TC-SLACKAPP-206 a merge-free offer keeps the pre-#150 wording exactly", () => {

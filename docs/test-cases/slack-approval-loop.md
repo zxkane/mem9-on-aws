@@ -207,7 +207,8 @@ concurrent applies of the same ids.
   length, not an id count: a limit expressed as "N ids" drifts from the real
   constraint as soon as ids get longer, and bytes are what SSM rejects. The
   advanced tier's 8 KB is deliberately not the answer — it incurs a charge and
-  cannot be reverted to standard without data loss, so `--cap` is the knob.
+  cannot be reverted to standard without data loss, so the offered set has to fit
+  here, and what has to shrink is the scan (TC-SLACKAPP-224), not the cap.
 - **TC-SLACKAPP-024b** — the size guard measures the artifact coordinates **inside**
   the limit it enforces. The two coordinates add ~151 bytes, so a caller that
   assigned them onto an already-validated record opened a window where the guard
@@ -228,6 +229,28 @@ concurrent applies of the same ids.
   fixture is sized by search against the **real** record rather than a hand-built
   approximation, and the window's existence (under the limit in code units, over it
   in bytes) is asserted before the refusal is.
+- **TC-SLACKAPP-224** — the parameter-limit refusal names the **scanned set**, and
+  no flag at all (#155). `--cap` never reaches this throw: it is not a parameter of
+  `buildOfferedRecord`, it is read only inside `applyDecisions` at apply time, and
+  the guard fires before an apply exists — measured, the byte-identical error at
+  `--cap 50` and `--cap 10`. So the old "lower `--cap`" clause was *false* on the
+  operator CLI, not merely inert on the scheduled scan, and it was the whole
+  diagnosis at the one moment it is the only one available. The replacement names
+  what actually drives the bytes (every id a destructive decision touches) and points
+  at a lever that EXISTS on both paths: the decision list survives the throw, and a
+  hand-run `--apply --ids` over a reviewed subset is the documented way through —
+  which is also what `runCleanup`'s exit-1 line already names. Deliberately **not**
+  "narrow the scan", the wording the adjacent artifact refusal uses: there is no scan
+  bound to turn down (`scanActiveMemories` exhausts every page and `--limit` is
+  list-only), so that would have replaced one inert clause with another. The same
+  reason the diagnosis says "offered set" rather than "consensus set": these builders
+  also serve the single-pass operator dry run, where there is no quorum to blame.
+  Asserted against **any** flag, not just `--cap`: a later `--consensus-passes` or
+  `--protected-topics` clause would reintroduce the defect under a new name on the
+  path that can pass neither. Also asserted through the real offer, where this
+  refusal fires **before** the write, so a scan that cannot offer leaves last
+  week's button as it found it rather than invalidating it and then refusing to
+  replace it.
 - **TC-SLACKAPP-025** — the record is stage-bound, and a hash whose record names
   another stage is refused. Same reasoning as #102's decision-file stage guard: a
   preview approval must never apply to prod.
@@ -1183,6 +1206,21 @@ ordering between the two writes is the part that is easy to get backwards.
   limit at ~46 ids, **below** #102's default `--cap 50`: the id lines are packed
   into as few sections as the character limit allows, and the test asserts every
   limit on the built message rather than only the block count.
+- **TC-SLACKAPP-225** — the block-limit refusal names the **reviewed decisions**,
+  and no flag at all (#155): TC-SLACKAPP-224's defect on the Slack surface, fixed
+  the same way and asserted the same way. The block count scales with the decisions
+  under review, one line each, while the cap bounds an apply's mutations and never
+  reaches this builder either. Driven through the **real offer**, because the two
+  ceilings measure different things and assuming otherwise was wrong once: the SSM
+  record carries ids only, while the message renders each decision's **reason** as
+  well — so a wordy classifier fits 4096 bytes comfortably and still overflows Slack.
+  Measured: 48 ids with ~2900-character reasons is a record far under the parameter
+  limit and more than 50 blocks. The case asserts that premise (the record passes the
+  first guard) before asserting the second refusal, so it cannot silently become a
+  second copy of TC-SLACKAPP-224. Through the offer it fails **after** the write —
+  the record has already invalidated last week's button and nothing was posted, the
+  ordering TC-SLACKAPP-205 pins for the merge case and the opposite of
+  TC-SLACKAPP-224's.
 - **TC-SLACKAPP-108** — `{ok: false, error}` at HTTP **200** is a failure. Every
   Slack Web API method answers 200 for application errors, so a `response.ok`
   check alone reports a message that was never delivered and the weekly loop looks
