@@ -6766,6 +6766,53 @@ describe("offering the list to Slack (#123)", () => {
     expect(postApproval).not.toHaveBeenCalled();
   });
 
+  it("TC-SLACKAPP-226 names the unset channel variable when the offer step is skipped (#157)", async () => {
+    // An absent `postApproval` dep is CORRECT — `buildPostApproval` returns
+    // undefined for an unset channel so #102's operator CLI neither writes an
+    // approval record the operator may not be able to write nor posts a button for
+    // a list they ran locally just to look at. What was missing is the line saying
+    // so: without it a scheduled scan that lost its channel variable did its whole
+    // audit, offered nothing, exited 0, and produced logs identical to a healthy
+    // week's. Synth already refuses a prod scan with no channel, so what this line
+    // diagnoses is drift — an entry edited out of the task definition after deploy,
+    // or a hand-run container — which is exactly the case no other check sees.
+    const server = fakeServer([memory("del-1", "session noise")]);
+    const llm = fakeLlm([[{ id: "del-1", verdict: "DELETE", reason: "session-state" }]]);
+    const deps = baseDeps(server, llm, tempDir());
+    expect(deps.postApproval).toBeUndefined();
+    const skipped = await runCleanup(baseOpts(), deps);
+
+    const logged = deps.log.mock.calls.flat().join("\n");
+    // The variable spelled as the LITERAL the task definition carries, not imported
+    // from the module: a test reading the module's own constant would follow a
+    // rename and keep passing while every existing deployment's logs named a
+    // variable the code no longer reads.
+    expect(logged).toContain("MEM9_SLACK_APPROVAL_CHANNEL");
+    expect(logged).toMatch(/skipping the Slack offer/u);
+    // Still a no-op, not a throw: the operator CLI runs this path every time, so a
+    // fix that drifted into failing closed would break the configuration the dep's
+    // absence exists to serve. The decision list is still written — that is the
+    // deliverable of a dry run — but nothing was deleted, rewritten, or posted.
+    expect(skipped.exitCode).toBe(0);
+    expect(existsSync(skipped.decisionPath)).toBe(true);
+    expect(server.calls.filter((c) => c.method !== "GET")).toEqual([]);
+    expect(server.calls.some((c) => c.path.includes("chat.postMessage"))).toBe(false);
+
+    // The converse, so the branch cannot be satisfied by logging unconditionally: a
+    // run WITH a poster reports what it offered and never says it skipped.
+    const offering = fakeServer([memory("del-1", "session noise")]);
+    const offeringDeps = {
+      ...baseDeps(offering, fakeLlm([[{ id: "del-1", verdict: "DELETE", reason: "session-state" }]]), tempDir()),
+      postApproval: vi.fn(async () => ({ posted: true, record: { hash: "sha256:x", ids: ["del-1"] } })),
+    };
+    const offered = await runCleanup(baseOpts(), offeringDeps);
+    const offeredLog = offeringDeps.log.mock.calls.flat().join("\n");
+    expect(offered.exitCode).toBe(0);
+    expect(offeredLog).toMatch(/offered 1 id\(s\) to Slack/u);
+    expect(offeredLog).not.toMatch(/skipping the Slack offer/u);
+    expect(offeredLog).not.toContain("MEM9_SLACK_APPROVAL_CHANNEL");
+  });
+
   it("TC-SLACKAPP-113 fails the run when the offer fails, naming the decision list it kept", async () => {
     // A scheduled review run whose post failed has done its audit and offered
     // nothing. Exit 0 would make that indistinguishable from a healthy week, and

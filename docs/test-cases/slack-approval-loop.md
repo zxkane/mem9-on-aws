@@ -1256,6 +1256,20 @@ ordering between the two writes is the part that is easy to get backwards.
   would have every hand-run dry run attempt an approval-record write the
   operator's identity may not hold, and would post a clickable Approve button for
   a list they ran locally just to look at.
+- **TC-SLACKAPP-226** — the skipped offer step is **logged**, naming the unset
+  variable (#157). TC-SLACKAPP-114's design is correct and unchanged; what was
+  missing is the line saying it happened. Without it a scheduled scan that lost
+  `MEM9_SLACK_APPROVAL_CHANNEL` did its whole audit, offered nothing, exited 0, and
+  left logs indistinguishable from a healthy week with nothing to clean — the same
+  outcome the adjacent "configured channel with no reachable token **throws**"
+  decision was written to avoid, reached by a different route. Deliberately still
+  **not** a throw: an absent channel is the operator-CLI configuration and must keep
+  working. Synth refuses a prod scan with no channel, so what this diagnoses is
+  drift (an entry edited out of the task definition after deploy) or a hand-run
+  container — neither of which any other check sees, which is also why the fix is
+  one log line and not a startup validation. The case asserts the exit code is still
+  0, that nothing was written or posted, and the converse — a run WITH a poster does
+  not emit the line, so the branch cannot be satisfied by logging unconditionally.
 - **TC-SLACKAPP-115** — the bot token is read from `{prefix}/slack/bot-token`
   **decrypted**, via `GetParameters`. It is a SecureString, so without decryption
   the value returns as ciphertext and every post 401s with `invalid_auth`; and the
