@@ -2276,10 +2276,11 @@ indistinguishable from a classifier that degraded far enough to collapse the
 consensus without tripping `classifierBroken` (which needs **every** batch to
 fail). Design: [`docs/designs/quiet-scan-alarm.md`](../designs/quiet-scan-alarm.md).
 
-The 14-day judgement cannot live in an alarm at all: `Period` ×
-`EvaluationPeriods` is capped at 604800s, so one alarm sees at most one weekly
-scan. The streak is therefore derived in the scan from one immutable record per
-ISO week, and the alarm degrades to a static `>= 2`.
+A judgement spanning two runs cannot live in an alarm at all: `Period` ×
+`EvaluationPeriods` is capped at 604800s — seven days — and a window guaranteed to
+hold two consecutive weekly runs would have to be longer than that. The streak is
+therefore derived in the scan from one immutable record per ISO week, and the alarm
+degrades to a static `>= 2`.
 
 - **TC-SLACKAPP-227** — two `LogMetricFilter`s read the **same** JSON line off the
   scan's own task log group: `QuietScanWeeks` from `$.quietWeeks` and `ScanRan`
@@ -2347,6 +2348,17 @@ ISO week, and the alarm degrades to a static `>= 2`.
   whose value will not parse is treated as a read failure too, not as absence:
   absence legitimately breaks the streak, and corruption lowering it silently would
   be the same defect wearing a different hat.
+- **TC-SLACKAPP-238** — a stored record that **parses** but is not a week record is
+  refused, not absorbed. `{"offered":"0"}` is valid JSON and reads as NOT zero, so it
+  would break the streak and publish a SMALLER count — this feature's own failure
+  mode arriving as data rather than as an error. The reader therefore shape-checks
+  every record (integer non-negative `offered`, and an `isoWeek`/`stage` that match
+  the key it was found under) and treats a failure the way it treats an unreadable
+  parameter: no count published, reported for a non-zero exit, offer untouched. Eight
+  shapes are covered — string, missing, fractional and negative counts, another week,
+  another stage, a bare number, `null` — plus the converse, that a well-formed record
+  is still accepted and counted, so the validator cannot be satisfied by rejecting
+  everything. The refusal names the fields it judged, never the stored value.
 - **TC-SLACKAPP-235** — the week bookkeeping runs **last** — after the record, the
   post, and the stamp — and never throws. Both properties keep one ordering true: an
   alarm's input must not be able to cost an operator their review list. A throttled

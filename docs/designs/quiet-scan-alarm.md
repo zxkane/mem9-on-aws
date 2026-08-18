@@ -10,17 +10,22 @@ intersection while every batch still "succeeds".
 
 ## The constraint that shapes everything below
 
-A CloudWatch alarm's evaluation window is capped at 604,800 s (`Period` ×
-`EvaluationPeriods`, [PutMetricAlarm][putmetricalarm]). The scan is weekly
-(`CLEANUP_SCAN_CRON`), so two consecutive scans are 14 days apart and **one
-alarm can observe at most one scan**. ">= 2 consecutive zero-offer weeks" is
-therefore not expressible in a single alarm by any combination of `period`,
+A CloudWatch alarm's total evaluation window is capped at 604,800 s — seven days
+— for `Period` × `EvaluationPeriods` ([PutMetricAlarm][putmetricalarm]). The scan
+is weekly (`CLEANUP_SCAN_CRON`), so consecutive runs are seven days apart, and a
+window that is *guaranteed* to contain two of them has to be longer than seven
+days. `period=604800, evaluationPeriods=2` is 1,209,600 s and is rejected;
+`period=86400, evaluationPeriods=7, datapointsToAlarm=2` is a seven-day window
+that holds one weekly run, so the second breaching datapoint never exists. So no
+single alarm can be relied on to see both runs, and ">= 2 consecutive zero-offer
+weeks" is not expressible in one by any combination of `period`,
 `evaluationPeriods`, `datapointsToAlarm`, or metric math; latching flips on the
 first quiet week, and a composite alarm combines instantaneous child states
 (`ALARM(A) AND ALARM(A)` is `A`) with no accumulator.
 
-So the 14-day memory has to be persisted somewhere. This design puts the
-smallest possible amount of it in SSM and keeps the alarm dumb.
+So memory spanning two runs — more than the seven days an alarm can see — has to
+be persisted somewhere. This design puts the smallest possible amount of it in
+SSM and keeps the alarm dumb.
 
 [putmetricalarm]: https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_PutMetricAlarm.html
 
@@ -57,8 +62,12 @@ year per stage, far inside the SSM quota).
 first, recomputed from scratch every run: count contiguous **present**
 zero-offer records ending at the current week. An **absent** record does not
 extend the streak — the semantics are asserted rather than left implicit,
-because the natural mistake (skip the gap and keep counting) turns a missing
-week into a silent false negative.
+because the natural mistake (skip the gap and keep counting) would *invent*
+contiguity: a week whose record was never written would then be treated as quiet,
+and two real quiet weeks either side of it would page as a streak of three. That
+is a false **positive**, and the issue text called it a false negative; the
+direction matters, because it is the reason absence breaks the streak rather than
+being tolerated.
 
 One `isoWeek` function serves both the writer and the reader. A W52/W53
 disagreement between two implementations would produce a *permanent* false
@@ -126,7 +135,8 @@ so it is not "restored" by analogy.
 
 ## Rejected
 
-- **A single alarm with a 14-day window** — over the hard cap.
+- **A single alarm whose window spans two runs** — it would have to exceed seven
+  days, which is over the hard cap.
 - **A counter parameter** — read-modify-write on a path with retries.
 - **An independent scheduled evaluator** reading metrics instead of the scan
   deriving its own count. It would decouple watcher from watched, but costs a

@@ -93,9 +93,10 @@ const SCAN_QUIET_WEEKS_METRIC = "QuietScanWeeks";
 const SCAN_RAN_METRIC = "ScanRan";
 const SCAN_OUTCOME_EVENT = "cleanup_scan_outcome";
 // The alarm's whole judgement, and the reason the streak is derived in the scan
-// rather than by an alarm: `Period` × `EvaluationPeriods` is capped at 604800s, so
-// a WEEKLY metric gives one alarm at most one datapoint and ">= 2 consecutive
-// weeks" cannot be expressed here at all. See docs/designs/quiet-scan-alarm.md.
+// rather than by an alarm: `Period` × `EvaluationPeriods` is capped at 604800s —
+// seven days — while a window guaranteed to hold two consecutive weekly runs would
+// have to be longer than that, so ">= 2 consecutive weeks" cannot be expressed here
+// at all. See docs/designs/quiet-scan-alarm.md.
 const SCAN_QUIET_WEEKS_THRESHOLD = 2;
 // Exactly at the cap, therefore legal, and the longest window that can hold the
 // one datapoint a weekly scan produces.
@@ -914,9 +915,10 @@ export function slackApproval(
         metricTransformation: {
           name: SCAN_QUIET_WEEKS_METRIC,
           namespace: SCAN_METRIC_NAMESPACE,
-          // The DERIVED count, not `1`: the 14-day judgement cannot live in the
-          // alarm, so the scan computes it from its own per-week records and the
-          // alarm only compares it to a static threshold.
+          // The DERIVED count, not `1`: a judgement spanning two weekly runs cannot
+          // live in an alarm whose window is capped at seven days, so the scan
+          // computes it from its own per-week records and the alarm only compares it
+          // to a static threshold.
           value: "$.quietWeeks",
           dimensions: { stage: "$.stage" },
         },

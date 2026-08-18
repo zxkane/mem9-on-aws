@@ -6929,7 +6929,7 @@ describe("offering the list to Slack (#123)", () => {
     // lower value for `$.quietWeeks`, which is the suppression this guards against.
     expect(run.emit).not.toHaveBeenCalled();
     const logged = log.mock.calls.flat().join("\n");
-    expect(logged).toMatch(/scan-outcome history for prod could not be read/u);
+    expect(logged).toMatch(/scan-outcome history for prod could not be used/u);
     expect(logged).toContain("2026-W32");
 
     // A record whose value will not PARSE is a read failure too, not an absence.
@@ -6942,6 +6942,68 @@ describe("offering the list to Slack (#123)", () => {
     const corrupted = offer({ fakes: corrupt, decisions: [del("m-1")] });
     expect((await corrupted.promise).outcome.failed).toBe("read");
     expect(corrupted.emit).not.toHaveBeenCalled();
+  });
+
+  it("TC-SLACKAPP-238 refuses a week record that PARSES but is not a week record (#154)", async () => {
+    // The gap `JSON.parse` alone leaves, and the most dangerous shape in this
+    // feature: `{"offered":"0"}` is valid JSON and reads as NOT zero, so it would
+    // break the streak and publish a SMALLER count — silently suppressing the page
+    // this issue exists to raise. Same for a record that describes a different week
+    // or a different stage: it is not evidence about the week it was found under.
+    // Every case here must be reported, not absorbed.
+    const cases = {
+      "a string count": { stage: "prod", isoWeek: "2026-W31", offered: "0" },
+      "a missing count": { stage: "prod", isoWeek: "2026-W31" },
+      "a fractional count": { stage: "prod", isoWeek: "2026-W31", offered: 0.5 },
+      "a negative count": { stage: "prod", isoWeek: "2026-W31", offered: -1 },
+      "another week": { stage: "prod", isoWeek: "2026-W12", offered: 0 },
+      "another stage": { stage: "pr-9", isoWeek: "2026-W31", offered: 0 },
+      "a bare number": 0,
+      "null": null,
+    };
+    for (const [what, value] of Object.entries(cases)) {
+      const fakes = offerFakes(
+        {},
+        { weeks: { [SCAN_OUTCOME("2026-W31")]: JSON.stringify(value) } },
+      );
+      const log = vi.fn();
+      const run = offer({ fakes, log, decisions: [del("m-1")] });
+      const offered = await run.promise;
+      // No count published, and the run is flagged for a non-zero exit — never a
+      // lower number derived from a record nothing can vouch for.
+      expect(offered.outcome, what).toMatchObject({ failed: "read" });
+      expect(offered.outcome.quietWeeks, what).toBeUndefined();
+      expect(run.emit, what).not.toHaveBeenCalled();
+      // And the offer still stood: this is bookkeeping, and the operator's list was
+      // written and posted before any of it ran.
+      expect(offered.posted, what).toBe(true);
+      const logged = log.mock.calls.flat().join("\n");
+      expect(logged, what).toMatch(/does not describe that week/u);
+      // The refusal names the fields it judged, not the stored value verbatim.
+      expect(logged, what).toContain("2026-W31");
+    }
+
+    // The converse, so the validator cannot be satisfied by rejecting everything: a
+    // well-formed record is still accepted and still counted.
+    const good = offerFakes(
+      {},
+      {
+        weeks: {
+          [SCAN_OUTCOME("2026-W31")]: JSON.stringify({
+            stage: "prod",
+            isoWeek: "2026-W31",
+            offered: 0,
+            at: "2026-07-29T03:00:00.000Z",
+          }),
+        },
+      },
+    );
+    const accepted = offer({
+      fakes: good,
+      decisions: [{ id: "m-keep", verdict: "KEEP", reason: "durable" }],
+    });
+    await accepted.promise;
+    expect(accepted.emit.mock.calls[0][0].quietWeeks).toBe(2);
   });
 
   it("TC-SLACKAPP-235 keeps the week bookkeeping last, so it cannot cost an offer (#154)", async () => {

@@ -1130,14 +1130,15 @@ export function decisionArtifactHash(serialized) {
 /**
  * The scheduled scan's week history (#154), and the reason it exists in SSM at all.
  *
- * A CloudWatch alarm's evaluation window is capped at 604800s (`Period` ×
- * `EvaluationPeriods`), and the scan is WEEKLY — so two consecutive scans are 14
- * days apart and one alarm can observe at most one of them. ">= 2 consecutive
- * zero-offer weeks" is therefore not expressible in any single alarm, by any
- * combination of period, evaluationPeriods, datapointsToAlarm, or metric math.
- * The 14-day memory has to be persisted, so it lives here as the smallest thing
- * that works: one immutable record per ISO week, and a pure function over the last
- * few of them. The alarm stays dumb (`>= 2` on a static threshold).
+ * A CloudWatch alarm's total evaluation window is capped at 604800s — seven days —
+ * for `Period` × `EvaluationPeriods`, and the scan is WEEKLY. A window guaranteed to
+ * contain two consecutive runs would have to be longer than seven days, which the cap
+ * rejects (`period=604800, evaluationPeriods=2` is 1209600s), so ">= 2 consecutive
+ * zero-offer weeks" is not expressible in any single alarm, by any combination of
+ * period, evaluationPeriods, datapointsToAlarm, or metric math. Memory spanning two
+ * runs therefore has to be persisted, and it lives here as the smallest thing that
+ * works: one immutable record per ISO week, and a pure function over the last few of
+ * them. The alarm stays dumb (`>= 2` on a static threshold).
  *
  * A per-week KEY, deliberately not a counter. A same-week retry is then an
  * idempotent rewrite of one key — no read-modify-write, so no double-increment
@@ -1234,6 +1235,40 @@ export function quietWeekStreak(weeks, records) {
 }
 
 /**
+ * A stored week record, or a throw.
+ *
+ * Shape-checked, not merely parsed, and the difference is the whole point:
+ * `{"offered":"0"}` is valid JSON, reads as NOT zero, and would break the streak —
+ * publishing a LOWER count than the truth and suppressing the page. That is this
+ * feature's own failure mode arriving as data rather than as an error, so a record
+ * that does not describe its own week with an integer count is treated the way an
+ * unreadable one is: loudly, with no count published at all.
+ *
+ * The error names the two fields it judged and never the raw value. Neither field
+ * carries memory content (a stage, an ISO week and a count), so this stays inside
+ * the same no-content rule the offered record and the log lines follow.
+ */
+function parseWeekRecord({ week, stage, value }) {
+  const record = JSON.parse(value);
+  const usable =
+    record !== null &&
+    typeof record === "object" &&
+    record.isoWeek === week &&
+    record.stage === stage &&
+    Number.isInteger(record.offered) &&
+    record.offered >= 0;
+  if (!usable) {
+    throw new Error(
+      `the scan-outcome record for ${week} does not describe that week for ` +
+        `${stage} (isoWeek=${JSON.stringify(record?.isoWeek)}, ` +
+        `stage=${JSON.stringify(record?.stage)}, ` +
+        `offered=${JSON.stringify(record?.offered)})`,
+    );
+  }
+  return record;
+}
+
+/**
  * Write this week's record, derive the streak from the weeks before it, and report
  * both to the caller.
  *
@@ -1311,17 +1346,22 @@ export async function recordScanOutcome({
         (each) => scanOutcomeParameterName(ssmPrefix, each) === parameter.Name,
       );
       if (!found) continue;
-      // A value that will not parse is treated as a read FAILURE, not as absence.
-      // Absence lowers the streak legitimately; a corrupt record lowering it would
-      // be this issue's own failure mode — a silently smaller number suppressing
-      // the page — so it is reported loudly and the count is withheld.
-      records[found] = JSON.parse(parameter.Value);
+      // A value that will not parse — or parses into something that is not a week
+      // record — is treated as a read FAILURE, not as absence. Absence lowers the
+      // streak legitimately; a corrupt record lowering it would be this issue's own
+      // failure mode, a silently smaller number suppressing the page, so it is
+      // reported loudly and the count is withheld.
+      records[found] = parseWeekRecord({
+        week: found,
+        stage,
+        value: parameter.Value,
+      });
     }
   } catch (err) {
     log(
-      `the scan-outcome history for ${stage} could not be read (${err.message}), ` +
-        `so no quiet-week count was published for ${week}; this week's own record ` +
-        `was written`,
+      `the scan-outcome history for ${stage} could not be used ` +
+        `(${err.message}), so no quiet-week count was published for ${week}; ` +
+        `this week's own record was written`,
     );
     return { isoWeek: week, offered, failed: "read" };
   }
