@@ -332,6 +332,19 @@ forces an update even when the current managed-policy document matches;
 `--verify-only` rejects it. `UPDATE_ROLLBACK_FAILED` requires an explicit
 CloudFormation `continue-update-rollback` operation before the guarded retry.
 
+The read-only deployment preflight keeps every mismatch fatal but reports its
+cause. Exact-document drift emits only a bounded list of added, removed, or
+changed statement Sids and actions; resources, complete documents, account ids,
+and uncontrolled text are never logged. Tokens present only in the live policy
+are always redacted and counted; only expected, checked-in tokens are named. On
+pull requests, the script also
+verifies the deployed document with the verifier from the trusted base commit.
+A base match is an expected pre-rollout change and points to the guarded
+rollout. A non-match, unavailable base, or non-pull-request invocation is
+unexplained deployed drift and must be investigated as a possible out-of-band
+IAM change. KMS simulation failure and a default-version race have separate
+messages and remain mutation-free.
+
 Every AWS CLI call has a 60-second process timeout, GitHub CLI calls have a
 30-second timeout, deploy subprocesses have a 20-minute timeout, and the whole
 shell-preflight-through-resume operation shares one absolute 60-minute hard
