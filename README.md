@@ -252,8 +252,9 @@ The AgentCore Gateway exposes four tools over MCP (Cognito-authenticated):
   `bootstrap` (schema + tenant seed).
 - `scripts/` — out-of-band bootstrap scripts (GitHub Actions IAM role, workload
   permissions boundary, four ECR repositories, guarded registry scan-on-push,
-  and Bedrock Mantle Project) that the SST app references read-only. See each
-  script's header and `.env.example` for the environment it expects.
+  Bedrock Mantle Project, and the decision-artifact bucket) that the SST app
+  references read-only. See each script's header and `.env.example` for the
+  environment it expects.
 - `docs/` — `ARCHITECTURE.md` (decisions) and `mem9-facts.md` (upstream constraints).
 
 ## Development
@@ -286,6 +287,75 @@ The AgentCore Gateway exposes four tools over MCP (Cognito-authenticated):
   `sst.config.ts`. `PROJECT_REGION` is only an explicit selector when creating a
   separate regional Mantle Project, such as the OpenAI Responses fallback.
 - Agent contributors: see [`AGENTS.md`](AGENTS.md) for repo conventions and hard rules.
+
+### Decision-artifact bucket bootstrap
+
+The Slack cleanup approval loop stores the reviewed decision bytes in one
+account-level S3 bucket. Every SST stage shares that bucket and is isolated by
+its `decisions/<stage>/` key prefix. The bucket must therefore be provisioned
+before enabling Slack approval; an SST stage never creates or deletes it.
+
+For the default `mem9-audit-<aws-account-id>` name:
+
+```bash
+# If .env does not already exist, copy .env.example and set AWS_PROFILE.
+scripts/deploy-decision-artifact-bucket.sh
+```
+
+To choose a different name, set one value everywhere before the first bootstrap:
+
+```bash
+# In the gitignored .env used by operator scripts:
+MEM9_DECISION_ARTIFACT_BUCKET=example-mem9-decision-artifacts
+
+scripts/deploy-decision-artifact-bucket.sh
+gh variable set MEM9_DECISION_ARTIFACT_BUCKET \
+  --body "example-mem9-decision-artifacts"
+```
+
+If the workload boundary stack is new and unattached, create it with the same
+environment:
+
+```bash
+scripts/deploy-workload-permissions-boundary.sh
+```
+
+If the boundary already exists, update it only through the guarded
+[workload permissions-boundary rollout](#workload-permissions-boundary-rollout).
+That procedure requires the deployment maintenance pause, a clean merged
+default-branch checkout, and `WORKLOAD_BOUNDARY_MAINTENANCE_ACK=true`; do not run
+the rollout as an unguarded bootstrap command.
+
+The name must be 3–33 lowercase letters, digits, or hyphens, beginning and
+ending with a letter or digit, and cannot use an S3-reserved prefix or suffix.
+The 33-character ceiling preserves the workload boundary's 6144-byte
+managed-policy quota because the exact name appears three times. The same value
+scopes the bucket stack, SST task grants, workload boundary, preview E2E, and CI
+deploys. Leave both `.env` and the repository variable unset to use the default.
+Do not change the value after the stack owns a bucket: the script refuses that
+replacement because it would split the audit trail and the boundary. A rename
+needs a dedicated data and IAM migration.
+
+On a fresh account the script creates the full stack. If the old stage-owned
+deployment left the bucket behind, the script automatically imports only that
+bucket with `decision-artifact-bucket-import.yaml`, waits for
+`stack-import-complete`, then applies the full template. This second update is
+required because CloudFormation import records properties but does not reconcile
+public-access block, encryption, lifecycle, tags, or create the TLS-only policy.
+Every path finishes by reading those controls back and requiring CloudFormation
+drift status `IN_SYNC`. Re-running the script updates and verifies the existing
+owner stack. If a full update rolls back, rerun after fixing the cause;
+`UPDATE_ROLLBACK_COMPLETE` is recoverable after the script re-verifies the
+physical bucket, while `UPDATE_ROLLBACK_FAILED` first requires
+`continue-update-rollback`.
+
+The adoption phase is rerunnable after interruption. A pending
+`REVIEW_IN_PROGRESS` stack resumes only when the fixed import change set reads
+back exactly, and `IMPORT_IN_PROGRESS` resumes only its waiter. An
+`IMPORT_ROLLBACK_COMPLETE` stack is recreated only after the script confirms its
+stack shell owns no resources. `IMPORT_ROLLBACK_FAILED`, an unrecognized change
+set, or any rollback stack that still owns a resource is left untouched for
+explicit CloudFormation recovery.
 
 ### Optional hosted OAuth callback URLs
 
@@ -1143,12 +1213,15 @@ deliberate: GitHub exposes an unset secret as an empty string, so the failure it
 replaces is a Slack app that answers 401 to every click after a completely green
 deploy.
 
-Two prerequisites are not part of an application deploy. The workload
-permissions boundary must already admit the approval-record write
+Two infrastructure prerequisites are not part of an application deploy. The
+decision-artifact bucket must be bootstrapped as described above, and the
+workload permissions boundary must already admit the approval-record write
 (`ssm:PutParameter` scoped to `parameter/mem9-on-aws/*/approvals/*`) — until that
 rollout runs, the claim is denied at runtime and the click reports that the
-approval could not be recorded. Use a **private** channel: anyone who can click
-can approve a deletion, and the message shows every offered id and snippet.
+approval could not be recorded. If the bucket name is overridden, roll out the
+boundary with the same `MEM9_DECISION_ARTIFACT_BUCKET` value before deploying
+any stage. Use a **private** channel: anyone who can click can approve a deletion,
+and the message shows every offered id and snippet.
 
 **Nothing scheduled posts the review list yet.** The weekly Scheduler target is
 `memory-consolidation.mjs`, which never executes a DELETE, and this stack's

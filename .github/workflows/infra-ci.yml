@@ -50,6 +50,9 @@
 #   MEM9_COGNITO_DOMAIN_PREFIX — existing production Cognito domain prefix.
 #                  Set this before adopting derived defaults so prod keeps its
 #                  current OAuth hostname. Previews intentionally do not use it.
+#   MEM9_DECISION_ARTIFACT_BUCKET — exact account-level bucket bootstrapped by
+#                  scripts/deploy-decision-artifact-bucket.sh. Unset uses
+#                  mem9-audit-<account-id>. The boundary must use the same value.
 #
 # Workload-boundary maintenance gate revision: 1
 
@@ -87,6 +90,8 @@ on:
       - "infra/cloudformation/github-actions-role.yaml"
       - "infra/cloudformation/ecr-registry-scanning.yaml"
       - "infra/cloudformation/workload-permissions-boundary.yaml"
+      - "infra/cloudformation/decision-artifact-bucket.yaml"
+      - "infra/cloudformation/decision-artifact-bucket-import.yaml"
   push:
     branches: [main]
     paths:
@@ -103,6 +108,8 @@ on:
       - "infra/cloudformation/github-actions-role.yaml"
       - "infra/cloudformation/ecr-registry-scanning.yaml"
       - "infra/cloudformation/workload-permissions-boundary.yaml"
+      - "infra/cloudformation/decision-artifact-bucket.yaml"
+      - "infra/cloudformation/decision-artifact-bucket-import.yaml"
 
 # Per-PR concurrency for PR events (cancel superseded runs so repeated
 # `synchronize` events don't race the same `pr-N` stage's unlock/deploy);
@@ -122,6 +129,7 @@ concurrency:
 
 env:
   ROLE_NAME: github-actions-mem9-on-aws
+  MEM9_DECISION_ARTIFACT_BUCKET: ${{ vars.MEM9_DECISION_ARTIFACT_BUCKET }}
   # The out-of-band ECR repo namespace (infra/cloudformation/ecr-repositories.yaml).
   # build-and-push-image builds four images under it: <ns>/mnemo-server,
   # <ns>/qwen3-embed, <ns>/bootstrap, <ns>/llm-proxy. Deploy stages reference
@@ -250,6 +258,9 @@ jobs:
           cfn-lint infra/cloudformation/ecr-registry-scanning.yaml --regions "$application_region"
           cfn-lint infra/cloudformation/github-actions-role.yaml --regions us-west-2
           cfn-lint infra/cloudformation/workload-permissions-boundary.yaml --regions us-west-2
+          # Application region: this bucket is deployed there, not us-west-2.
+          cfn-lint infra/cloudformation/decision-artifact-bucket.yaml --regions "$application_region"
+          cfn-lint infra/cloudformation/decision-artifact-bucket-import.yaml --regions "$application_region"
 
       - name: Validate workload boundary operator scripts
         run: |
@@ -261,6 +272,7 @@ jobs:
           # ship. 0.11.0.1 wraps upstream 0.11.0, matching what apt installed.
           python -m pip install --disable-pip-version-check 'shellcheck-py==0.11.0.1'
           shellcheck scripts/deploy-workload-permissions-boundary.sh
+          shellcheck scripts/deploy-decision-artifact-bucket.sh
           shellcheck scripts/rollout-workload-permissions-boundary.sh
           shellcheck scripts/run-consolidation-task.sh
           shellcheck scripts/run-slack-approval-e2e.sh

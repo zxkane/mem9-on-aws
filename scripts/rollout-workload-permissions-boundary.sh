@@ -59,6 +59,19 @@ if [[ ! "$effective_application_region" =~ ^[a-z]{2}(-gov)?-[a-z0-9-]+-[0-9]+$ ]
   exit 2
 fi
 export WORKLOAD_BOUNDARY_APPLICATION_REGION="$effective_application_region"
+if [[ -n "${MEM9_DECISION_ARTIFACT_BUCKET:-}" ]] &&
+    { [[ ! "$MEM9_DECISION_ARTIFACT_BUCKET" =~ ^[a-z0-9][a-z0-9-]{1,31}[a-z0-9]$ ]] ||
+      [[ "$MEM9_DECISION_ARTIFACT_BUCKET" == xn--* ]] ||
+      [[ "$MEM9_DECISION_ARTIFACT_BUCKET" == sthree-* ]] ||
+      [[ "$MEM9_DECISION_ARTIFACT_BUCKET" == amzn-s3-demo-* ]] ||
+      [[ "$MEM9_DECISION_ARTIFACT_BUCKET" == *-s3alias ]] ||
+      [[ "$MEM9_DECISION_ARTIFACT_BUCKET" == *--ol-s3 ]] ||
+      [[ "$MEM9_DECISION_ARTIFACT_BUCKET" == *--x-s3 ]] ||
+      [[ "$MEM9_DECISION_ARTIFACT_BUCKET" == *--table-s3 ]] ||
+      [[ "$MEM9_DECISION_ARTIFACT_BUCKET" == *-an ]]; }; then
+  echo "MEM9_DECISION_ARTIFACT_BUCKET is an invalid decision-artifact bucket name; no mutation was attempted." >&2
+  exit 2
+fi
 
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
   sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
@@ -336,6 +349,7 @@ write_resume_assignment() {
       AWS_CONFIG_FILE \
       AWS_SHARED_CREDENTIALS_FILE \
       AWS_CA_BUNDLE \
+      MEM9_DECISION_ARTIFACT_BUCKET \
       MEM9_LLM_RESPONSES_REGION \
       WORKLOAD_BOUNDARY_APPLICATION_REGION \
       WORKLOAD_BOUNDARY_OPENAI_PROJECT_REGION \

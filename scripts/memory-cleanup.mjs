@@ -113,6 +113,8 @@ const MEM9_SLACK_CHANNEL_ENV = "MEM9_SLACK_APPROVAL_CHANNEL";
 // did. So the offer degrades to no artifact instead of refusing to run — and the
 // apply refuses to replay when there is none, which is where the safety lives.
 const MEM9_DECISION_BUCKET_ENV = "MEM9_DECISION_ARTIFACT_BUCKET";
+const MEM9_DECISION_BUCKET_OWNER_ENV =
+  "MEM9_DECISION_ARTIFACT_BUCKET_OWNER";
 const REQUEST_TIMEOUT_MS = 30_000; // REST calls; the LLM call sets its own
 const LLM_TIMEOUT_MS = 120_000;
 // Reasoning models consume output tokens on hidden reasoning BEFORE emitting
@@ -1710,11 +1712,13 @@ async function readPendingOffer({ ssm, name, stage, now, log }) {
 export async function putDecisionArtifact({
   s3,
   bucket,
+  expectedBucketOwner,
   stage,
   generatedAt,
   decisions,
   log = () => {},
 }) {
+  requireDecisionArtifactBucketOwner(expectedBucketOwner);
   const { PutObjectCommand } = await import("@aws-sdk/client-s3");
   const body = serializeDecisionArtifact({ stage, generatedAt, decisions });
   // `Buffer.byteLength`, not `String.length`: the latter counts UTF-16 code units
@@ -1756,6 +1760,7 @@ export async function putDecisionArtifact({
   await s3.send(
     new PutObjectCommand({
       Bucket: bucket,
+      ExpectedBucketOwner: expectedBucketOwner,
       Key: key,
       Body: body,
       ContentType: "application/json",
@@ -1807,16 +1812,22 @@ export async function putDecisionArtifact({
 export async function loadDecisionArtifact({
   s3,
   bucket,
+  expectedBucketOwner,
   key,
   hash,
   stage,
   log = () => {},
 }) {
+  requireDecisionArtifactBucketOwner(expectedBucketOwner);
   const { GetObjectCommand } = await import("@aws-sdk/client-s3");
   let body;
   try {
     const response = await s3.send(
-      new GetObjectCommand({ Bucket: bucket, Key: key }),
+      new GetObjectCommand({
+        Bucket: bucket,
+        ExpectedBucketOwner: expectedBucketOwner,
+        Key: key,
+      }),
     );
     // `transformToString` rather than a stream pipe: the body is bounded at
     // MAX_ARTIFACT_BYTES by the writer, and the SDK's helper is the only form that
@@ -1964,6 +1975,7 @@ export async function postApprovalRequest({
   fetchImpl,
   s3,
   artifactBucket,
+  artifactBucketOwner,
   now = Date.now,
   log = () => {},
 }) {
@@ -2026,6 +2038,7 @@ export async function postApprovalRequest({
       ? await putDecisionArtifact({
           s3,
           bucket: artifactBucket,
+          expectedBucketOwner: artifactBucketOwner,
           stage,
           generatedAt,
           decisions,
@@ -2389,6 +2402,16 @@ function artifactCoordinates(record) {
     );
   }
   return { bucket, key };
+}
+
+function requireDecisionArtifactBucketOwner(value) {
+  if (!/^[0-9]{12}$/u.test(value ?? "")) {
+    throw new Error(
+      `${MEM9_DECISION_BUCKET_OWNER_ENV} must be a 12-digit AWS account id ` +
+        `when a decision artifact is read or written`,
+    );
+  }
+  return value;
 }
 
 /**
@@ -4225,6 +4248,11 @@ async function buildPostApproval(opts, region, runtime) {
   // tree would put the artifact's location behind the same `approvals/*`-scoped
   // grant the apply task is confined to — a second failure mode for no benefit.
   const artifactBucket = process.env[MEM9_DECISION_BUCKET_ENV];
+  const artifactBucketOwner = artifactBucket
+    ? requireDecisionArtifactBucketOwner(
+        process.env[MEM9_DECISION_BUCKET_OWNER_ENV],
+      )
+    : undefined;
   const { s3 } = artifactBucket
     ? await s3Client(region, runtime)
     : { s3: undefined };
@@ -4248,6 +4276,7 @@ async function buildPostApproval(opts, region, runtime) {
       botToken,
       s3,
       artifactBucket,
+      artifactBucketOwner,
       fetchImpl: runtime.fetchImpl ?? fetch,
       log: (message) =>
         console.error(`[memory-cleanup ${new Date().toISOString()}] ${message}`),
@@ -4384,14 +4413,16 @@ export async function createCleanupDeps(opts, runtime = {}) {
     // configuration (#150). A claim with coordinates gets a replay; a pre-#150 claim
     // gets the #123 behaviour it was written for.
     //
-    // The client is built from the REGION, not from the offer's bucket variable —
-    // `MEM9_DECISION_ARTIFACT_BUCKET` is the scan task's configuration and the apply
-    // task does not carry it. So there is no "artifact named but unreachable" case to
-    // branch on here: the coordinates come from the claim, the client always exists,
-    // and an artifact this task genuinely cannot read fails inside
-    // `loadDecisionArtifact` as an AccessDenied refusal (TC-SLACKAPP-190) rather than
-    // as a fallback to re-classification.
+    // The client is built from the REGION, while replay coordinates come from the
+    // reviewed claim rather than the task definition's current bucket setting. That
+    // setting can change between offer and apply. There is no "artifact named but
+    // unreachable" branch here: the client always exists, and an artifact this task
+    // genuinely cannot read fails inside `loadDecisionArtifact` as an AccessDenied
+    // refusal (TC-SLACKAPP-190), never as a fallback to re-classification.
     if (claim.artifact) {
+      const expectedBucketOwner = requireDecisionArtifactBucketOwner(
+        process.env[MEM9_DECISION_BUCKET_OWNER_ENV],
+      );
       const { s3 } = await s3Client(region, runtime);
       // A THUNK, not the fetched list. `loadDecisions` calls it inside `runCleanup`,
       // after `discoverBaseUrl` — so a stage whose mnemo service is unreachable
@@ -4402,6 +4433,7 @@ export async function createCleanupDeps(opts, runtime = {}) {
         loadDecisionArtifact({
           s3,
           bucket: claim.artifact.bucket,
+          expectedBucketOwner,
           key: claim.artifact.key,
           hash: approvalHash,
           stage: opts.stage,
