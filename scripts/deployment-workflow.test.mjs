@@ -421,6 +421,15 @@ describe("workflow integration", () => {
     const healthSmoke = readFileSync(healthSmokePath, "utf8");
     expect(healthSmoke).toContain("--tty=false");
     expect(healthSmoke).toContain("validate-emf-event.mjs --docker-stream");
+    expect(healthSmoke).toContain(
+      'server_logs=$(docker logs "$SERVER_CONTAINER" 2>&1)',
+    );
+    expect(healthSmoke).not.toMatch(
+      /docker logs "\$SERVER_CONTAINER" 2>&1 \|\s*grep -Eq "migration applied/,
+    );
+    expect(healthSmoke).not.toContain(
+      `printf '%s\\n' "$server_logs" | grep -Fq "$DB_PASSWORD"`,
+    );
   });
 
   it("uses one enabled rollout after baking the repeatable migration into startup", () => {
