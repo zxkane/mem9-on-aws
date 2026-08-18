@@ -2994,6 +2994,19 @@ export async function runCleanup(opts, deps) {
         );
         return result({ exitCode: 1, decisions, decisionPath });
       }
+    } else {
+      // One line, and deliberately NOT a throw (#157). An absent poster is the
+      // legitimate #102 operator-CLI configuration, so failing closed here would
+      // break the very path `buildPostApproval`'s undefined return exists to serve.
+      // What the line buys is a distinction the logs could not otherwise make: this
+      // run had no Slack surface by design, versus this run should have offered and
+      // did not. Synth refuses a prod scan with no channel, so the reachable causes
+      // are drift — an entry edited out of the task definition after deploy — and a
+      // hand-run container, neither of which any other check sees.
+      log(
+        `skipping the Slack offer: ${MEM9_SLACK_CHANNEL_ENV} is not set, so this ` +
+          `run reviewed the list without offering it`,
+      );
     }
     return result({ exitCode: 0, decisions, decisionPath });
   }
