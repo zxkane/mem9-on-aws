@@ -41,6 +41,19 @@ scan run ──► offered record  (approvals/offered, unchanged)
                     └─ LogMetricFilter → ScanRan ────────► alarm: FILL(...,0) < 1
 ```
 
+### Only the schedule contributes
+
+`MEM9_CLEANUP_SCHEDULED=1` is set on the EventBridge Scheduler container override
+and nowhere else — not on the task definition, so neither the apply half nor the
+operator CLI carries it. It gates the week record and the metric line, and nothing
+else: an off-schedule dry run still writes and posts its offer exactly as before.
+
+Without the gate, an operator's hand-run would be indistinguishable from a
+scheduled one in the data, in both directions: a hand-run that offered nothing
+could supply the **second** quiet week and page for a classifier that is fine, and
+*any* hand-run would publish `ScanRan` and hold the liveness alarm green for
+another seven days while the Scheduler was dead.
+
 ### Per-week record, not a counter
 
 Key: `{prefix}/approvals/scan-outcome-<iso-week>`, value

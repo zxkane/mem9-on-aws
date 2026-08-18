@@ -6407,6 +6407,10 @@ describe("offering the list to Slack (#123)", () => {
         // pass their own `now`.
         now: overrides.now ?? (() => Date.parse("2026-08-05T03:00:00.000Z")),
         emit,
+        // These cases model the SCHEDULED scan, which is the only run that keeps week
+        // history (#154). TC-SLACKAPP-239 covers the operator-CLI side, where the
+        // marker is absent and none of it happens.
+        scheduled: overrides.scheduled ?? true,
         log: overrides.log ?? vi.fn(),
       }),
     };
@@ -6938,11 +6942,23 @@ describe("offering the list to Slack (#123)", () => {
     // be this issue's own failure mode wearing a different hat.
     const corrupt = offerFakes(
       {},
-      { weeks: { [SCAN_OUTCOME("2026-W31")]: "{not json" } },
+      { weeks: { [SCAN_OUTCOME("2026-W31")]: "{not json SENTINEL-STORED-BYTES" } },
     );
-    const corrupted = offer({ fakes: corrupt, decisions: [del("m-1")] });
+    const corruptLog = vi.fn();
+    const corrupted = offer({
+      fakes: corrupt,
+      log: corruptLog,
+      decisions: [del("m-1")],
+    });
     expect((await corrupted.promise).outcome.failed).toBe("read");
     expect(corrupted.emit).not.toHaveBeenCalled();
+    // Node quotes a slice of the input in its own `JSON.parse` message, and this text
+    // is logged — so the parse error is discarded and replaced. The stored bytes of a
+    // record that could not be trusted must not reach CloudWatch through the very
+    // path that refused to trust it.
+    const corruptLogged = corruptLog.mock.calls.flat().join("\n");
+    expect(corruptLogged).toMatch(/is not valid JSON/u);
+    expect(corruptLogged).not.toContain("SENTINEL-STORED-BYTES");
   });
 
   it("TC-SLACKAPP-238 refuses a week record that PARSES but is not a week record (#154)", async () => {
@@ -8051,6 +8067,7 @@ describe("offering the list to Slack (#123)", () => {
 describe("wiring the offer into the review run (#123)", () => {
   const environmentKeys = [
     "AWS_REGION",
+    "MEM9_CLEANUP_SCHEDULED",
     "MEM9_DB_HOST",
     "MEM9_DB_NAME",
     "MEM9_DB_PORT",
@@ -8106,6 +8123,9 @@ describe("wiring the offer into the review run (#123)", () => {
     reviewEnv({
       MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL",
       SLACK_BOT_TOKEN: "xoxb-injected",
+      // The marker the Scheduler override sets. Without it there is no week history
+      // and no metric line at all, which is TC-SLACKAPP-239's half of this contract.
+      MEM9_CLEANUP_SCHEDULED: "1",
     });
     const production = await createCleanupDeps(
       { stage: "prod", apply: false, cap: 50 },
@@ -8138,6 +8158,54 @@ describe("wiring the offer into the review run (#123)", () => {
       const prefixed = stderr.mock.calls.flat().filter((each) => typeof each === "string");
       expect(prefixed.length).toBeGreaterThan(0);
       for (const each of prefixed) expect(each).toMatch(/^\[memory-cleanup /u);
+    } finally {
+      stdout.mockRestore();
+      stderr.mockRestore();
+      await production.close();
+    }
+  });
+
+  it("TC-SLACKAPP-239 keeps an off-schedule run out of the week history entirely (#154)", async () => {
+    // An operator's hand-run dry run with Slack configured is a real offer and a real
+    // list, and it is NOT a datapoint about the schedule. Two failure modes if it
+    // were: a hand-run that offered nothing could supply the SECOND quiet week and
+    // page for a classifier that is fine, and ANY hand-run would publish `ScanRan`,
+    // holding the liveness alarm green for another seven days while the Scheduler was
+    // dead. So the marker gates the bookkeeping, and the offer is untouched by it.
+    reviewEnv({
+      MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL",
+      SLACK_BOT_TOKEN: "xoxb-injected",
+    });
+    expect(process.env.MEM9_CLEANUP_SCHEDULED).toBeUndefined();
+    const ssm = ssmFake();
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: false, cap: 50 },
+      { ssm, getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
+    );
+    const stdout = vi.spyOn(console, "log").mockImplementation(() => {});
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      const offered = await production.deps.postApproval({
+        decisions: [],
+        generatedAt: "2026-08-05T03:00:00.000Z",
+        issuedAt: "2026-08-05T03:00:00.000Z",
+      });
+      // The offer happened: the record was written, which is what invalidates a
+      // previous offer, and the run reports it exactly as before.
+      const writes = ssm.sent.filter((input) => input.Name);
+      expect(writes.map((input) => input.Name)).toEqual([
+        "/mem9-on-aws/prod/approvals/offered",
+      ]);
+      expect(offered.record.ids).toEqual([]);
+      // And nothing else: no week record, no history read, no metric line, and no
+      // `outcome` for `runCleanup` to change an exit code over.
+      expect(
+        ssm.sent.filter((input) =>
+          JSON.stringify(input).includes("scan-outcome"),
+        ),
+      ).toEqual([]);
+      expect(stdout).not.toHaveBeenCalled();
+      expect(offered.outcome).toBeUndefined();
     } finally {
       stdout.mockRestore();
       stderr.mockRestore();

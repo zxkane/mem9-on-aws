@@ -107,6 +107,19 @@ const SLACK_MAX_HEADER_CHARS = 150;
 const SLACK_TIMEOUT_MS = 15_000;
 /** Set by infra/slack-approval.ts; its presence is what enables the offer. */
 const MEM9_SLACK_CHANNEL_ENV = "MEM9_SLACK_APPROVAL_CHANNEL";
+/**
+ * Set to "1" by the EventBridge Scheduler override in infra/slack-approval.ts, and
+ * by nothing else (#154).
+ *
+ * It gates the week history and the outcome metrics, because an operator's
+ * off-schedule dry run is not evidence about the schedule. Without the gate a
+ * hand-run that offered nothing could supply the SECOND quiet week and page for a
+ * classifier that is fine, and any hand-run would publish `ScanRan` — holding the
+ * liveness alarm green for another seven days while the Scheduler was in fact dead.
+ * The offer itself is unaffected: a hand-run still writes and posts exactly as it
+ * did before.
+ */
+const MEM9_CLEANUP_SCHEDULED_ENV = "MEM9_CLEANUP_SCHEDULED";
 // Set by infra/slack-approval.ts to the bucket it provisions (#150). Its ABSENCE
 // is meaningful rather than an error: it is what keeps #102's operator CLI, and any
 // stage deployed before that bucket existed, writing the id-only record they always
@@ -1251,7 +1264,17 @@ export function quietWeekStreak(weeks, records) {
  * message are this run's own, not the record's.
  */
 function parseWeekRecord({ week, stage, value }) {
-  const record = JSON.parse(value);
+  let record;
+  try {
+    record = JSON.parse(value);
+  } catch {
+    // The parse error is DISCARDED rather than forwarded. Node quotes a slice of the
+    // input in its message ("Unexpected token 'x', \"{not json\" is not valid JSON"),
+    // and this text is logged — so forwarding it would put unreviewed stored bytes
+    // into CloudWatch on exactly the path that exists because the record cannot be
+    // trusted.
+    throw new Error(`the scan-outcome record for ${week} is not valid JSON`);
+  }
   const shaped = record !== null && typeof record === "object";
   const failed = shaped
     ? [
@@ -2256,6 +2279,10 @@ export async function postApprovalRequest({
   // caller that has no metric surface prints nothing; `buildPostApproval` wires
   // the real emitter for the deployed scan.
   emit = () => {},
+  // Whether this invocation came from the SCHEDULE. Only a scheduled run keeps week
+  // history and publishes metrics; see MEM9_CLEANUP_SCHEDULED_ENV for why an
+  // operator's dry run must not.
+  scheduled = false,
 }) {
   const { PutParameterCommand } = await import("@aws-sdk/client-ssm");
   const name = `${ssmPrefix}/approvals/offered`;
@@ -2362,6 +2389,10 @@ export async function postApprovalRequest({
   // throwing for the same reason. The count published is what was OFFERED, which is
   // the number a collapsed consensus drives to zero (#154).
   const withOutcome = async (offer) => {
+    // An off-schedule run returns here untouched: no week record, no metrics, no
+    // exit-code change. Its offer is real and its list is real, but it is not a
+    // datapoint about the schedule (MEM9_CLEANUP_SCHEDULED_ENV).
+    if (!scheduled) return offer;
     const outcome = await recordScanOutcome({
       ssm,
       ssmPrefix,
@@ -4637,6 +4668,7 @@ async function buildPostApproval(opts, region, runtime) {
       // `log` adds — makes `{ $.event = ... }` stop matching, silently, with the
       // alarms then reading no datapoints and sitting green forever.
       emit: (event) => console.log(JSON.stringify(event)),
+      scheduled: process.env[MEM9_CLEANUP_SCHEDULED_ENV] === "1",
     });
 }
 

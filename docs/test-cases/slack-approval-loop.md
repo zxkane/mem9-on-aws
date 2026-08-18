@@ -2364,8 +2364,11 @@ degrades to a static `>= 2`.
   mode arriving as data rather than as an error. The reader therefore shape-checks
   every record (integer non-negative `offered`, and an `isoWeek`/`stage` that match
   the key it was found under) and treats a failure the way it treats an unreadable
-  parameter: no count published, reported for a non-zero exit, offer untouched. Eight
-  shapes are covered — string, missing, fractional and negative counts, another week,
+  parameter: no count published, reported for a non-zero exit, offer untouched. A
+  value that will not parse at all is reported with a FIXED message: Node quotes a
+  slice of the input in its own `JSON.parse` error, and this text is logged, so
+  forwarding it would put unreviewed stored bytes into CloudWatch through the very
+  path that refused to trust them. Eight shapes are covered — string, missing, fractional and negative counts, another week,
   another stage, a bare number, `null` — plus the converse, that a well-formed record
   is still accepted and counted, so the validator cannot be satisfied by rejecting
   everything. The refusal names the fields it judged, never the stored value.
@@ -2381,6 +2384,17 @@ degrades to a static `>= 2`.
   published. Exit 0 on the first would leave the streak alarm a gap it reads as
   `notBreaching`; exit non-zero on the second would page for a healthy run most
   weeks of the year.
+- **TC-SLACKAPP-239** — an **off-schedule** run stays out of the week history
+  entirely. `MEM9_CLEANUP_SCHEDULED=1` is set on the Scheduler container override and
+  nowhere else — never on the task definition (asserted in TC-SLACKAPP-150/227's
+  neighbourhood), so the apply half and the operator CLI are unmarked. Without the
+  gate a hand-run would be a datapoint about the schedule in both directions: one
+  that offered nothing could supply the **second** quiet week and page for a healthy
+  classifier, and *any* hand-run would publish `ScanRan`, holding the liveness alarm
+  green for another seven days while the Scheduler was dead. The case asserts the
+  offer still happens (the `approvals/offered` write, which is what invalidates a
+  previous offer) and that nothing else does: no week record, no history read, no
+  metric line, and no `outcome` for `runCleanup` to change an exit code over.
 - **TC-SLACKAPP-237** — the production emitter writes the line **unprefixed** to
   stdout, asserted on the real `createCleanupDeps` wiring. `log` prefixes every line
   with `[memory-cleanup <iso>]`, and a `{ $.event = ... }` filter needs the event to

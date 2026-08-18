@@ -1255,14 +1255,22 @@ describe("slack approval infrastructure", () => {
     expect(baseUrlIndex).toBeGreaterThan(0);
     expect(command[baseUrlIndex + 1]).toBe("http://mnemo.mem9-prod.local:8080");
 
-    // No environment override at all. MEM9_SLACK_APPROVAL_CHANNEL is already in
-    // the definition and is what makes `buildPostApproval` return a poster, so the
-    // scan offers by virtue of being configured for Slack. MEM9_APPROVAL_HASH must
-    // NOT appear: it means "this run came from a click", and setting it with no
-    // `--ids` is a hard error in `createCleanupDeps`.
-    expect(override.environment).toBeUndefined();
+    // ONE environment entry, and it marks provenance rather than changing behaviour:
+    // #154's week history and outcome metrics are evidence about the SCHEDULE, so an
+    // operator's off-schedule dry run must not contribute to them
+    // (TC-SLACKAPP-239). MEM9_SLACK_APPROVAL_CHANNEL is already in the definition and
+    // is what makes `buildPostApproval` return a poster, so the scan still offers by
+    // virtue of being configured for Slack. MEM9_APPROVAL_HASH must NOT appear: it
+    // means "this run came from a click", and setting it with no `--ids` is a hard
+    // error in `createCleanupDeps`.
+    expect(override.environment).toEqual([
+      { name: "MEM9_CLEANUP_SCHEDULED", value: "1" },
+    ]);
     const taskArgs = materialize(one("Task", "Mem9Cleanup").args) as
       Record<string, any>;
+    // NEVER on the task definition: that is what keeps the apply half and the
+    // operator CLI unmarked, so only an invocation the Scheduler made counts.
+    expect(Object.keys(taskArgs.environment)).not.toContain("MEM9_CLEANUP_SCHEDULED");
     expect(Object.keys(taskArgs.environment)).not.toContain("MEM9_APPROVAL_HASH");
     expect(taskArgs.environment.MEM9_SLACK_APPROVAL_CHANNEL).toBe(CHANNEL_ID);
     expect(JSON.stringify(override)).not.toContain("MEM9_APPROVAL_HASH");

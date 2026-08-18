@@ -828,6 +828,18 @@ export function slackApproval(
                 "--out",
                 CLEANUP_SCAN_OUT_DIR,
               ],
+              // The ONE variable this override adds, and it marks provenance rather
+              // than changing behaviour: #154's week history and outcome metrics are
+              // evidence about the SCHEDULE, so an operator's off-schedule dry run
+              // must not contribute to them. Without it a hand-run offering nothing
+              // could supply the second quiet week, and any hand-run would publish
+              // `ScanRan` and hold the liveness alarm green for another seven days
+              // while the Scheduler was dead. It is set HERE, on the override, and
+              // never on the task definition — which is what keeps the apply half and
+              // the operator CLI unmarked.
+              environment: [
+                { name: "MEM9_CLEANUP_SCHEDULED", value: "1" },
+              ],
               // MEM9_SLACK_APPROVAL_CHANNEL is already in the definition's
               // `environment`, and it is what makes `buildPostApproval` return a
               // poster at all — so the scan offers by virtue of being configured
