@@ -1204,11 +1204,17 @@ ordering between the two writes is the part that is easy to get backwards.
   and no flag at all (#155): TC-SLACKAPP-224's defect on the Slack surface, fixed
   the same way and asserted the same way. The block count scales with the decisions
   under review, one line each, while the cap bounds an apply's mutations and never
-  reaches this builder either. Driven from a hand-built record, as TC-SLACKAPP-107
-  is, and for a reason worth recording: a decision set large enough to need 50+
-  blocks cannot arrive through `buildOfferedRecord`, which refuses it at 4096 bytes
-  first — so this refusal is only reachable with a record built outside that guard,
-  and that is the input it is tested on.
+  reaches this builder either. Driven through the **real offer**, because the two
+  ceilings measure different things and assuming otherwise was wrong once: the SSM
+  record carries ids only, while the message renders each decision's **reason** as
+  well — so a wordy classifier fits 4096 bytes comfortably and still overflows Slack.
+  Measured: 48 ids with ~2900-character reasons is a record far under the parameter
+  limit and more than 50 blocks. The case asserts that premise (the record passes the
+  first guard) before asserting the second refusal, so it cannot silently become a
+  second copy of TC-SLACKAPP-224. Through the offer it fails **after** the write —
+  the record has already invalidated last week's button and nothing was posted, the
+  ordering TC-SLACKAPP-205 pins for the merge case and the opposite of
+  TC-SLACKAPP-224's.
 - **TC-SLACKAPP-108** — `{ok: false, error}` at HTTP **200** is a failure. Every
   Slack Web API method answers 200 for application errors, so a `response.ok`
   check alone reports a message that was never delivered and the weekly loop looks

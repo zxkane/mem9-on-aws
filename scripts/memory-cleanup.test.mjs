@@ -6562,25 +6562,30 @@ describe("offering the list to Slack (#123)", () => {
     expect(fakes.slack.fetchImpl).not.toHaveBeenCalled();
   });
 
-  it("TC-SLACKAPP-225 the block-limit refusal names the reviewed decisions, not a flag (#155)", () => {
+  it("TC-SLACKAPP-225 the block-limit refusal names the reviewed decisions, not a flag (#155)", async () => {
     // The same defect as TC-SLACKAPP-224 on the Slack surface: the block count
     // scales with the decisions being reviewed, one line each, while `--cap` bounds
     // an apply's mutations and is never read by this builder either.
     //
-    // Driven from a hand-built record, as TC-SLACKAPP-107 is: a decision set large
-    // enough to need 50+ blocks cannot arrive through `buildOfferedRecord`, which
-    // would have refused it at 4096 bytes first. So this refusal is only reachable
-    // with a record built outside that guard, and that is the input it is tested on.
-    const many = Array.from({ length: 4000 }, (_, i) => del(`memory-${i}`));
-    const record = {
-      stage: "prod",
-      hash: contentHash(many.map((d) => d.id).join("\n")),
-      ids: many.map((d) => d.id),
-      generatedAt: "2026-08-05T03:00:00.000Z",
-    };
+    // Driven through the REAL offer, because this refusal is reachable there — which
+    // is not obvious and was got wrong once. The two surfaces measure different
+    // things: the record carries ids ONLY, while the message renders a line per
+    // decision INCLUDING its reason. So a wordy classifier fits the 4096-byte record
+    // comfortably and still overflows Slack: 48 ids with ~2900-character reasons is a
+    // record well under the limit and more than 50 blocks.
+    const wordy = Array.from({ length: 48 }, (_, i) => ({
+      ...del(`m-${i}`),
+      reason: "x".repeat(2900),
+    }));
+    const record = offeredWith(wordy);
+    // The premise, asserted rather than asserted-about: the record passed the guard
+    // that TC-SLACKAPP-224 covers, so what follows is the SECOND ceiling and not the
+    // first one in disguise.
+    expect(Buffer.byteLength(JSON.stringify(record), "utf8")).toBeLessThanOrEqual(4096);
+
     let thrown;
     try {
-      buildApprovalMessage({ record, decisions: many, channel: CHANNEL });
+      buildApprovalMessage({ record, decisions: wordy, channel: CHANNEL });
     } catch (err) {
       thrown = err;
     }
@@ -6588,6 +6593,18 @@ describe("offering the list to Slack (#123)", () => {
     expect(thrown.message).toMatch(/one line per reviewed decision/u);
     expect(thrown.message).toMatch(/narrow the scan/u);
     expect(thrown.message).not.toMatch(/--[a-z]/u);
+
+    // And from the real offer, where it fails AFTER the write — the record is what
+    // invalidates last week's button, so a scan that cannot render the message has
+    // already replaced the previous offer and posted nothing. Same ordering
+    // TC-SLACKAPP-205 pins for the merge case, and the opposite of the
+    // parameter-limit refusal in TC-SLACKAPP-224.
+    const fakes = offerFakes();
+    await expect(offer({ fakes, decisions: wordy }).promise).rejects.toThrow(
+      /narrow the scan/u,
+    );
+    expect(fakes.ssm.puts).toHaveLength(1);
+    expect(fakes.slack.fetchImpl).not.toHaveBeenCalled();
   });
 
   it("TC-SLACKAPP-206 a merge-free offer keeps the pre-#150 wording exactly", () => {
