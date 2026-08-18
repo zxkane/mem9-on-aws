@@ -872,6 +872,18 @@ these cover its shape. Every property here is a *deploy-time* property whose
 failure lands at runtime — an AccessDenied after a scan has spent two reasoning
 passes, or after an approval click has been spent.
 
+The bucket is **out-of-band** — `infra/cloudformation/decision-artifact-bucket.yaml`,
+deployed once per account by `scripts/deploy-decision-artifact-bucket.sh` — so the
+cases below read the operator-owned template rather than this app's synthesized
+resources. It was originally SST-owned, and that could not work: the boundary pins
+the exact bucket ARN, so the name must be fixed, and it is account-scoped, so every
+stage computes the same one while S3 bucket names are globally unique. The first
+stage to deploy owned it and every later stage's `CreateBucket` failed
+`BucketAlreadyOwnedByYou` — the provider surfaces that error rather than adopting a
+same-owner bucket — while `retainOnDelete` meant a torn-down preview kept the
+bucket and left prod's first deploy permanently failing. TC-SLACKAPP-215 is what
+keeps it from coming back.
+
 - **TC-SLACKAPP-161** — the bucket is named with the **account id** and no
   wildcard. This is a security property, not a naming style: S3 bucket names are a
   **global** namespace, so a wildcard in the bucket segment of the boundary's ARN
@@ -892,17 +904,22 @@ passes, or after an approval click has been spent.
   a combination that denies every artifact write **and** read after deploy.
   Whichever way a future edit breaks the pair, one of the two now fails.
 - **TC-SLACKAPP-163** — the artifact is encrypted with SSE-KMS (`alias/aws/s3`) and
-  **bucket keys on**, asserted at the same bucket the name came from: a sub-resource
-  addressed elsewhere leaves this bucket on the provider default, SSE-S3, which is
-  encrypted with a key the boundary's encryption-context denies say nothing about.
-  The bucket-key flag is pinned from *both* sides — here and in 162 — because the
+  **bucket keys on**. In CloudFormation these are inline properties of the one
+  bucket, so "asserted at the same bucket" is now structural rather than a separate
+  check: unlike the Pulumi sub-resources they replaced, they cannot be addressed at
+  a different bucket and leave this one on the provider default (SSE-S3, encrypted
+  with a key the boundary's encryption-context denies say nothing about). The
+  bucket-key flag is still pinned from *both* sides — here and in 162 — because the
   mismatch is invisible until deploy.
 - **TC-SLACKAPP-164** — the object expires on the **same 72h bound as the
   approval**, not an independently chosen retention: past that the approval cannot
   be clicked, so the artifact could not be replayed by anything and holding memory
-  ids longer serves no purpose. `abortIncompleteMultipartUpload` is pinned
-  separately — failed multipart writes are not covered by the expiration rule and
-  would accumulate invisibly.
+  ids longer serves no purpose. Asserted twice: against the literal 3, and against
+  `DECISION_ARTIFACT_TTL_DAYS`. The second is load-bearing now that the rule lives
+  in CloudFormation while the constant stays in TypeScript — nothing but that line
+  keeps two files in two languages in step. `AbortIncompleteMultipartUpload` is
+  pinned separately — failed multipart writes are not covered by the expiration rule
+  and would accumulate invisibly.
 - **TC-SLACKAPP-165** — all four public-access blocks and a bucket policy that
   **denies** non-TLS requests. Four and not three: two cover ACLs and two cover
   bucket policies, and three-of-four leaves a way to make the object public. The
@@ -911,11 +928,93 @@ passes, or after an approval click has been spent.
   policies that are supposed to be the only way in. Both ARN forms are named,
   because bucket-level operations do not match the `/*` form and a policy naming
   only objects leaves `ListBucket` reachable over plain HTTP.
-- **TC-SLACKAPP-166** — the bucket is **retained** on stage teardown and
-  `forceDestroy` stays off. The name is account-scoped, so every stage — including
-  each PR's preview stage — resolves to the same bucket; a preview teardown that
-  deleted it would take prod's audit trail of what was deleted with it, and
-  `forceDestroy` would empty the bucket even where the bucket survives.
+- **TC-SLACKAPP-166** — the bucket is **retained**, via both `DeletionPolicy` and
+  `UpdateReplacePolicy`. Two policies and not one, because they cover different
+  events: a stack `DELETE`, and a property change that *replaces* the bucket. The
+  name is account-scoped, so every stage — including each PR's preview stage —
+  resolves to the same bucket, and losing it takes prod's audit trail of what was
+  deleted with it.
+- **TC-SLACKAPP-217** — the bucket **policy** is retained too, and the full
+  template has **no `Outputs`**. Retaining the bucket without its policy
+  means a stack `DELETE` keeps the audit trail and deletes the only thing requiring
+  TLS to reach it (TC-165), so the surviving bucket is weaker than the reviewed one.
+  Both resources also carry `UpdateReplacePolicy: Retain`, which closes the same
+  loss through a different door: `BucketName` is createOnly on the bucket and
+  `Bucket` is createOnly on the policy. The absent output keeps the external
+  bucket setting as the one source of truth for every consumer instead of
+  introducing a stack export that only some deployments might follow.
+  Existing-bucket recovery is separately pinned by TC-SLACKAPP-220: import uses a
+  bucket-only template, never this final template.
+- **TC-SLACKAPP-218** — `infra-ci.yml` **gates and lints** this template. The
+  workflow excludes `infra/cloudformation/**` and then re-includes specific
+  templates, so a template is gated only if it appears *after* the exclusion —
+  order decides it, not presence. This one was missing from both the
+  `pull_request` and `push` filters and from the `cfn-lint` step, so a PR touching
+  only the template triggered no run at all, while the five security properties
+  that moved out of `infra/slack-approval.ts` lived there unwatched. That gap is
+  what let a missing `UpdateReplacePolicy` reach review: the CloudFormation API
+  accepts the template, the unit tests did not read the attribute, and the only
+  tool that flags it was not pointed at the file. The case asserts the path's
+  position relative to the exclusion in both triggers *and* the `cfn-lint`
+  invocation, pinned to the application region — this bucket is deployed there,
+  not in `us-west-2` with the account-global IAM stacks.
+- **TC-SLACKAPP-219** — `MEM9_DECISION_ARTIFACT_BUCKET` is one optional,
+  externally supplied bucket name for **every** consumer: the out-of-band bucket
+  stack, the SST task environment and identity policy, the workload-boundary
+  object ARN and both KMS encryption-context pins, CI, and the live E2E harness.
+  Unset, all consumers retain the account-derived `mem9-audit-<account-id>`
+  default. Set, they use the exact validated override with no account-derived
+  suffix. Invalid names and names over 33 characters fail before synthesis or an
+  AWS mutation; the ceiling preserves the 6144-byte boundary quota because the
+  exact name renders three times. The boundary keeps an exact bucket ARN rather
+  than widening the bucket segment. SST also injects the current 12-digit account
+  as `MEM9_DECISION_ARTIFACT_BUCKET_OWNER`; runtime Get/Put and E2E Head/Put/Delete
+  pass it as `ExpectedBucketOwner`, so an override cannot silently target a
+  same-named bucket in another account.
+- **TC-SLACKAPP-220** — adopting a bucket left by the old stage-owned deployment
+  uses a separate **import-only** template containing exactly the bucket, its
+  name parameter, and both retention policies. The import change set names only
+  that existing bucket. After `stack-import-complete`, a normal update applies the
+  full template, adding the TLS-only policy and reconciling public-access block,
+  SSE-KMS bucket keys, lifecycle, and tags. Importing the final template directly
+  is forbidden: the policy may not exist, and CloudFormation import records
+  properties without reconciling the live bucket.
+- **TC-SLACKAPP-221** — stack discovery, bucket discovery, import, create, update,
+  waits, and every verification read are **fail closed**. Only an explicit
+  CloudFormation "stack does not exist" response selects bootstrap, and only an
+  explicit S3 not-found response selects create rather than import. AccessDenied,
+  throttling, malformed output, or a wrong-region bucket causes no subsequent
+  mutation. Interrupted adoption has three narrow recovery paths:
+  `REVIEW_IN_PROGRESS` resumes only the fixed-name change set after its
+  description, parameter, and single bucket `Import` action read back exactly;
+  `IMPORT_IN_PROGRESS` only resumes its waiter; and
+  `IMPORT_ROLLBACK_COMPLETE` is deleted and recreated only when the stack shell
+  owns zero resources. `UPDATE_ROLLBACK_COMPLETE` retries the full update after
+  re-verifying the physical bucket. `IMPORT_ROLLBACK_FAILED`,
+  `UPDATE_ROLLBACK_FAILED`, any unknown state, and any rollback stack that still
+  owns a resource require explicit operator recovery.
+- **TC-SLACKAPP-222** — every successful create/import/update finishes with live
+  read-back of the exact bucket identity, region, four public-access blocks,
+  SSE-KMS plus bucket keys, the 3-day lifecycle and 1-day multipart abort, the
+  TLS-only bucket policy, and CloudFormation ownership of both the bucket and
+  policy resources. The script then runs stack drift detection and accepts only
+  `DETECTION_COMPLETE` plus `IN_SYNC`. A no-op update is not proof that direct
+  resource drift is absent.
+- **TC-SLACKAPP-223** — artifact reads and writes require a 12-digit
+  `MEM9_DECISION_ARTIFACT_BUCKET_OWNER` and pass it to S3 as
+  `ExpectedBucketOwner`. Both offer creation and approved cleanup refuse before
+  issuing an S3 request when the owner is absent or malformed. This keeps a
+  correctly formatted override from redirecting reviewed decision bytes to a
+  bucket owned by another account, even if identity policy configuration is
+  later widened accidentally.
+- **TC-SLACKAPP-215** — this stack declares **no bucket resource at all**, asserted
+  by resource *type* rather than by logical name so a rename cannot slip past. The
+  regression it guards is not hypothetical — it shipped, and it is a permanent prod
+  outage rather than a degraded one: re-adding any of the five resources restores the
+  `BucketAlreadyOwnedByYou` collision described above, with no way back short of
+  deleting the audit trail. This is the case to read first if a future change is
+  tempted to move the bucket back into the app for the convenience of a resource
+  handle.
 - **TC-SLACKAPP-167** — the **stage** goes in the key, not the bucket name. Once
   the bucket became account-scoped, the key prefix is the only thing carrying
   cross-stage separation — without it two stages write the same object and a
@@ -1554,14 +1653,14 @@ and therefore the withholding.
      exactly when a guard earns its place: the alternative is a preview review
      applied to prod.
 - **TC-SLACKAPP-191** — the replay thunk is wired **exactly when the claim names an
-  artifact**, and the direction matters. `MEM9_DECISION_ARTIFACT_BUCKET` is the
-  *scan* task's variable — the apply task does not carry it — so the coordinates can
-  only come from the claim. Keying on anything else would mean a hash covering a
-  reviewed list gets checked by the weaker id-list rule whenever the apply task
-  happens to be configured differently from the scan that offered it. A **thunk**,
-  so nothing is fetched during dep construction: the artifact is read inside
-  `runCleanup`, after service discovery, and a stage whose mnemo service is down
-  fails on discovery and never touches the object.
+  artifact**, and the direction matters. The offer and apply commands share one
+  task definition, but its current `MEM9_DECISION_ARTIFACT_BUCKET` may differ from
+  the value that produced an earlier approval. The reviewed claim is therefore the
+  only source for replay coordinates. Keying on current task configuration would
+  detach the clicked hash from its reviewed object after a configuration change. A
+  **thunk**, so nothing is fetched during dep construction: the artifact is read
+  inside `runCleanup`, after service discovery, and a stage whose mnemo service is
+  down fails on discovery and never touches the object.
 - **TC-SLACKAPP-192** — the reviewed verdicts are applied and the classifier is
   **never called**. Not merely disagreed with: a run that classified and then
   discarded the result would burn Bedrock tokens on every click and be one careless
@@ -1781,7 +1880,13 @@ fail the run.
     config fails the run by name (TC-SLACKAPP-209) rather than scanning nothing.
     Only the replayed **count** is matched, not the log line whole: that line names
     the audit bucket, whose name embeds the account id, and preview CI logs are
-    public.
+    public. The marker is polled for two minutes to allow CloudWatch delivery.
+    A failed `FilterLogEvents` call is a query failure, never zero matches; after
+    the marker poll expires, an empty-pattern count distinguishes a populated
+    stream missing the replay marker from a stream whose logs have not arrived.
+    The AWS CLI query uses JSON output: text output applies `length(events)` once
+    per page and can return `1` then `0`, while JSON aggregates pages before the
+    query and returns one count.
   - **The signing secret reaches the HMAC through the ENVIRONMENT**, not an argv:
     `openssl dgst -hmac "$SECRET"` is the obvious way to write this in bash and
     would put the secret in a world-readable command line. Pinned by a static
@@ -1976,9 +2081,16 @@ fail the run.
     reviewed`), and for a 5xx (`answered HTTP 500, not 200`). Three distinguishable
     messages, because the operator's next move differs: a façade bug, a claim-order
     bug, and a reply the operator cannot see.
-  - **Zero replay lines fails the run**, naming the cause the count implies — the task
-    exited 0 by **re-classifying** instead of replaying, so the approved `MERGE` was
-    not what ran.
+  - **Zero replay lines fails the run after a two-minute poll.** A second,
+    empty-pattern count decides what can actually be inferred: a populated stream
+    missing the marker means the task exited 0 by **re-classifying** instead of
+    replaying, while a stream with zero total events reports delayed log delivery
+    or wrong stream configuration and does not claim which application path ran.
+  - **A failed CloudWatch Logs query fails distinctly.** The harness suppresses the
+    raw AWS error so account-scoped identifiers cannot enter public CI output, but
+    preserves the nonzero status and reports that the replay assertion could not
+    inspect the stream. It never turns `AccessDenied`, throttling, or a missing log
+    group into a zero-event diagnosis.
   - **The log query uses the task definition's own group and stream prefix.** Asserted
     on the fake's recorded `logs filter-log-events` invocations: a hash-suffixed group
     name and a `{prefix}/{container}/{task-id}` stream, neither of which a hand-
@@ -2022,6 +2134,19 @@ fail the run.
   incidental: a different assertion about a different thing, reachable only because the
   same injected error also hit a read that classifies properly. Asserted on the message
   rather than the exit code for that reason.
+
+- **TC-SLACKAPP-216** — an absent artifact bucket **fails** the run and names
+  `scripts/deploy-decision-artifact-bucket.sh`. The bucket is provisioned out-of-band,
+  which decoupled two facts that used to travel together: a stage holding
+  `slack/signing-secret` no longer implies the bucket exists, so this is the state a
+  fresh account is in until the bootstrap has been run once. Deliberately **not** one of
+  this harness's graceful skips — the approval loop is deployed on the stage by the time
+  this check runs, so the artifact half is genuinely broken and a skip would report a
+  green run for a loop that cannot execute a `MERGE`. Without the preflight the first
+  `put_artifact` fails with a bare `NoSuchBucket` into a discarded stdout and the run
+  surfaces later as a hash mismatch, sending the reader to the wrong file entirely.
+  Asserted to refuse *before* seeding, too: an abort that had already written
+  `approvals/offered` would leave a record the next run's click could consume.
 
 - **TC-SLACKAPP-212** — an exit between building the two artifact bodies and the full
   `cleanup` trap still deletes them. The bodies are `mktemp`ed well before that trap is

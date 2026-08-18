@@ -176,10 +176,10 @@ if [ "$server_healthy" != true ]; then
   exit 1
 fi
 
-if ! docker logs "$SERVER_CONTAINER" 2>&1 |
-    grep -Eq "migration applied after [1-9][0-9]* retries"; then
+server_logs=$(docker logs "$SERVER_CONTAINER" 2>&1)
+if ! grep -Eq "migration applied after [1-9][0-9]* retries" <<<"$server_logs"; then
   echo "mnemo-health-smoke: startup migration did not recover after PostgreSQL became reachable" >&2
-  docker logs "$SERVER_CONTAINER" >&2
+  printf '%s\n' "$server_logs" >&2
   exit 1
 fi
 
@@ -223,8 +223,7 @@ if [ "$migration_complete" != "t" ]; then
   docker logs "$SERVER_CONTAINER" >&2
   exit 1
 fi
-server_logs=$(docker logs "$SERVER_CONTAINER" 2>&1)
-if printf '%s\n' "$server_logs" | grep -Fq "$DB_PASSWORD"; then
+if grep -Fq "$DB_PASSWORD" <<<"$server_logs"; then
   echo "mnemo-health-smoke: database password appeared in server logs" >&2
   exit 1
 fi

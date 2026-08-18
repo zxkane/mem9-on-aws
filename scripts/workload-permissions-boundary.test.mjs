@@ -1,6 +1,6 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -545,6 +545,9 @@ function resolveTemplateValue(
   }
   if (typeof value !== "string") return value;
   if (value === "BedrockProjectArn") return boundaryContract.bedrockProjectArn;
+  if (value === "DecisionArtifactBucketName") {
+    return "mem9-audit-123456789012";
+  }
   // Only reachable from the !If true branch above; unconfigured, the whole node
   // collapses to NO_VALUE before this can be consulted.
   if (value === "OpenAiBedrockProjectArn") return openAiBedrockProjectArn;
@@ -553,6 +556,7 @@ function resolveTemplateValue(
     .replaceAll("${AWS::AccountId}", accountId)
     .replaceAll("${AWS::URLSuffix}", "amazonaws.com")
     .replaceAll("${ApplicationRegion}", boundaryContract.applicationRegion)
+    .replaceAll("${DecisionArtifactBucketName}", "mem9-audit-123456789012")
     .replaceAll("${PolicyRevision}", policyRevision)
     .replaceAll("${ProjectName}", "mem9-on-aws")
     .replaceAll("${GitHubRepo}", "mem9-on-aws");
@@ -646,6 +650,8 @@ async function runBoundaryDeployMock({
   boundarySimulationBadProbe = "",
   boundarySimulationMalformedProbe = "",
   defaultVersionDriftsAfterSimulation = false,
+  decisionArtifactBucketName = "",
+  decisionArtifactBucketEnv = decisionArtifactBucketName,
   guarded = false,
   matching = false,
   postMutationDrift = false,
@@ -672,8 +678,12 @@ async function runBoundaryDeployMock({
   const quarantinePath = join(directory, "quarantine.json");
   const simulationPath = join(directory, "simulation.json");
   const simulationCompletePath = join(directory, "simulation-complete");
-  const expectedBoundaryPolicy =
-    expectedBoundaryPolicyDocument(boundaryContract);
+  const expectedBoundaryPolicy = expectedBoundaryPolicyDocument({
+    ...boundaryContract,
+    ...(decisionArtifactBucketName
+      ? { decisionArtifactBucketName }
+      : {}),
+  });
   await writeFile(
     expectedPath,
     JSON.stringify(expectedBoundaryPolicy),
@@ -1142,6 +1152,7 @@ esac
           MOCK_STACK_EXISTS: String(stackExists),
           MOCK_STACK_STATUS: stackStatus,
           MOCK_UPDATED: updatedPath,
+          MEM9_DECISION_ARTIFACT_BUCKET: decisionArtifactBucketEnv,
           PATH: `${directory}:${dirname(process.execPath)}:${process.env.PATH}`,
           ...(boundaryOpenAiRegion === undefined
             ? {}
@@ -1158,7 +1169,10 @@ esac
       },
     );
     return {
-      calls: readFileSync(callsPath, "utf8").trim().split("\n"),
+      calls: (existsSync(callsPath) ? readFileSync(callsPath, "utf8") : "")
+        .trim()
+        .split("\n")
+        .filter(Boolean),
       result,
     };
   } finally {
@@ -1176,6 +1190,7 @@ async function runRolloutGateMock({
   dirtyWorktree = false,
   dotenvAck,
   dotenvApplicationRegion,
+  dotenvDecisionArtifactBucket,
   dotenvOpenAiProjectRegion,
   dotenvResponsesRegion,
   dotenvProfile,
@@ -1214,6 +1229,7 @@ async function runRolloutGateMock({
   if (
     dotenvAck !== undefined ||
     dotenvApplicationRegion !== undefined ||
+    dotenvDecisionArtifactBucket !== undefined ||
     dotenvOpenAiProjectRegion !== undefined ||
     dotenvResponsesRegion !== undefined ||
     dotenvProfile !== undefined ||
@@ -1236,6 +1252,11 @@ async function runRolloutGateMock({
           ? []
           : [
               `WORKLOAD_BOUNDARY_APPLICATION_REGION=${dotenvApplicationRegion}`,
+            ]),
+        ...(dotenvDecisionArtifactBucket === undefined
+          ? []
+          : [
+              `MEM9_DECISION_ARTIFACT_BUCKET=${dotenvDecisionArtifactBucket}`,
             ]),
         ...(dotenvOpenAiProjectRegion === undefined
           ? []
@@ -1477,13 +1498,18 @@ printf '%s\\n' "$((now + MOCK_CLOCK_STEP_MS * 1000000))" > "$MOCK_CLOCK"
     WORKLOAD_BOUNDARY_GH_TIMEOUT: timeout,
     WORKLOAD_BOUNDARY_MAINTENANCE_ACK: "true",
     WORKLOAD_BOUNDARY_SKIP_DOTENV:
-      dotenvAck === undefined && dotenvProfile === undefined ? "true" : "false",
+      dotenvAck === undefined &&
+      dotenvDecisionArtifactBucket === undefined &&
+      dotenvProfile === undefined
+        ? "true"
+        : "false",
     ...(repositoryOverride === undefined
       ? {}
       : { GITHUB_REPOSITORY: repositoryOverride }),
   };
   for (const name of [
     "AWS_PROFILE",
+    "MEM9_DECISION_ARTIFACT_BUCKET",
     "MEM9_LLM_RESPONSES_REGION",
     "MEM9_TEMPLATE_BUCKET",
     "MEM9_VPC_ID",
@@ -6998,6 +7024,7 @@ describe("operator entry point", () => {
     const { calls, result, resumeState } = await runRolloutGateMock({
       dotenvAck: "true",
       dotenvApplicationRegion: "eu-west-1",
+      dotenvDecisionArtifactBucket: "example-mem9-decision-artifacts",
       dotenvOpenAiProjectRegion: "us-east-1",
       dotenvResponsesRegion: "us-east-1",
       dotenvProfile: "custom-operator",
@@ -7013,6 +7040,9 @@ describe("operator entry point", () => {
     expect(resumeState).toContain(
       "WORKLOAD_BOUNDARY_APPLICATION_REGION=eu-west-1",
     );
+    expect(resumeState).toContain(
+      "MEM9_DECISION_ARTIFACT_BUCKET=example-mem9-decision-artifacts",
+    );
     expect(resumeState).not.toMatch(/^PROJECT_REGION=/mu);
     expect(resumeState).toContain(
       "WORKLOAD_BOUNDARY_OPENAI_PROJECT_REGION=us-east-1",
@@ -7027,6 +7057,17 @@ describe("operator entry point", () => {
     expect(ROLLOUT_RESUME_COMMAND).toContain(
       "WORKLOAD_BOUNDARY_SKIP_DOTENV=false",
     );
+  });
+
+  it("TC-SLACKAPP-219 rejects an S3-reserved bucket before rollout gates", async () => {
+    const { calls, result, resumeState } = await runRolloutGateMock({
+      dotenvDecisionArtifactBucket: "sthree-reserved",
+    });
+    expect(result.status).toBe(2);
+    expect(result.stderr).toMatch(/invalid.*bucket name/iu);
+    expect(calls).not.toContain("variable get");
+    expect(calls).not.toContain("node invoked");
+    expect(resumeState).toBe("");
   });
 
   it("does not treat the independent Project region as an application selector", async () => {
@@ -7177,6 +7218,35 @@ describe("operator entry point", () => {
     expect(
       calls.filter((call) => call.startsWith("iam get-role-policy")),
     ).toHaveLength(2);
+  });
+
+  it("TC-SLACKAPP-219 passes the exact bucket override to the boundary stack", async () => {
+    const decisionArtifactBucketName = "example-mem9-decision-artifacts";
+    const { calls, result } = await runBoundaryDeployMock({
+      decisionArtifactBucketName,
+      guarded: true,
+    });
+    expect(result.status).toBe(0);
+    const update = calls.find((call) =>
+      call.startsWith("cloudformation update-stack"),
+    );
+    expect(update).toContain(
+      `ParameterKey=DecisionArtifactBucketName,ParameterValue=${decisionArtifactBucketName}`,
+    );
+  });
+
+  it("TC-SLACKAPP-219 rejects an S3-reserved bucket name before boundary mutation", async () => {
+    const { calls, result } = await runBoundaryDeployMock({
+      decisionArtifactBucketEnv: "sthree-reserved",
+      guarded: true,
+    });
+    expect(result.status).toBe(2);
+    expect(result.stderr).toMatch(/invalid.*bucket name/iu);
+    expect(
+      calls.some((call) =>
+        /cloudformation (create-stack|update-stack)/u.test(call),
+      ),
+    ).toBe(false);
   });
 
   it("refuses a guarded update when quarantine disappears after simulation", async () => {
@@ -8143,6 +8213,25 @@ describe("boundary and deploy-role templates", () => {
     ).toContain("s3.ap-northeast-1.amazonaws.com");
   });
 
+  it("TC-SLACKAPP-219 renders an exact custom decision-artifact bucket", () => {
+    const bucket = "example-mem9-decision-artifacts";
+    const document = expectedBoundaryPolicyDocument({
+      ...boundaryContract,
+      decisionArtifactBucketName: bucket,
+    });
+    const bySid = (sid) => document.Statement.find((entry) => entry.Sid === sid);
+    expect(asList(bySid("Resources").NotResource)).toContain(
+      `arn:aws:s3:::${bucket}/*`,
+    );
+    for (const sid of ["KmsContext", "GenKey"]) {
+      expect(
+        bySid(sid).Condition.StringNotLikeIfExists[
+          "kms:EncryptionContext:aws:s3:arn"
+        ],
+      ).toBe(`arn:aws:s3:::${bucket}`);
+    }
+  });
+
   // AWS requires this outright: "In IAM, the `Sid` value must be unique within a
   // JSON policy" (IAM User Guide, reference_policies_elements_sid). A collision is
   // therefore a malformed policy, not a style problem, and CloudFormation would
@@ -8310,6 +8399,34 @@ describe("boundary and deploy-role templates", () => {
     // mutation the inequality above cannot see: rendering the 2-character fixture
     // revision here instead of the deployed one is 19 bytes cheaper and passes.
     expect(6_144 - size).toBe(BOUNDARY_SIZE_RESERVE);
+  });
+
+  it("TC-SLACKAPP-219 reserves enough policy bytes for a 33-character bucket", () => {
+    const document = expectedBoundaryPolicyDocument({
+      ...boundaryContract,
+      decisionArtifactBucketName: "a".repeat(33),
+      openAiBedrockProjectArn: OPENAI_PROJECT_ARN,
+      policyRevision: worstCasePolicyRevision(),
+    });
+    expect(JSON.stringify(document).length).toBeLessThanOrEqual(6_144);
+    for (const invalidName of [
+      "a".repeat(34),
+      "xn--reserved",
+      "sthree-reserved",
+      "amzn-s3-demo-reserved",
+      "reserved-s3alias",
+      "reserved--ol-s3",
+      "reserved--x-s3",
+      "reserved--table-s3",
+      "reserved-an",
+    ]) {
+      expect(() =>
+        expectedBoundaryPolicyDocument({
+          ...boundaryContract,
+          decisionArtifactBucketName: invalidName,
+        }),
+      ).toThrow(/invalid decision-artifact bucket name/iu);
+    }
   });
 
   // The gate above is only as honest as the revision it renders, and the fixture

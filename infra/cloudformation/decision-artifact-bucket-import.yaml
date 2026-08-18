@@ -1,0 +1,29 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Import-only bridge for adopting the retained decision-artifact bucket left by
+  the former stage-owned deployment. After import, the deployment script updates
+  the stack with decision-artifact-bucket.yaml to reconcile all controls and add
+  the TLS-only bucket policy.
+
+Parameters:
+  DecisionArtifactBucketName:
+    Type: String
+    MinLength: 3
+    MaxLength: 33
+    AllowedPattern: "^[a-z0-9][a-z0-9-]*[a-z0-9]$"
+    ConstraintDescription: >
+      Use 3-33 lowercase letters, digits, and hyphens, beginning and ending
+      with a letter or digit. The 33-character ceiling preserves IAM boundary
+      policy quota headroom because the name is rendered three times.
+    Description: >
+      Exact account-level bucket shared by every SST stage. The deployment
+      script defaults this to mem9-audit-<account-id> and accepts
+      MEM9_DECISION_ARTIFACT_BUCKET as an override.
+
+Resources:
+  DecisionArtifactBucket:
+    Type: AWS::S3::Bucket
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      BucketName: !Ref DecisionArtifactBucketName
