@@ -317,6 +317,13 @@ can succeed against a record the scan skipped past.
   and never the ids. Same argument as TC-SLACKAPP-089: the log is a wider audience
   than the parameter the ids legitimately live in, and the hash already identifies
   the list.
+- **TC-SLACKAPP-214** — an unparseable `issuedAt` containing newline, carriage
+  return, a forged refusal for another hash, and thousands of trailing characters
+  is never copied into the expired-approval log line. The refusal still logs the
+  real hash, the TTL, and a bounded derived age, while the Slack reply remains
+  byte-for-byte the existing unknown-age response. This pins the concrete audit
+  failure: one caller-controlled parameter value must not render a second plausible
+  refusal for a hash that was never clicked.
 - **TC-SLACKAPP-140** — the review run refuses to overwrite an offer still inside
   its window, **before writing anything**. Operator-initiated, the clobber was a
   footnote — the human running the scan is the human holding the pending approval.
