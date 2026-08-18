@@ -236,10 +236,16 @@ concurrent applies of the same ids.
   `--cap 50` and `--cap 10`. So the old "lower `--cap`" clause was *false* on the
   operator CLI, not merely inert on the scheduled scan, and it was the whole
   diagnosis at the one moment it is the only one available. The replacement names
-  what actually drives the bytes (every id a destructive decision touches) and
-  gives the same remedy the artifact refusal already gives for the same class of
-  input — `narrow the scan` — so the two ceilings speak with one voice. Asserted
-  against **any** flag, not just `--cap`: a later `--consensus-passes` or
+  what actually drives the bytes (every id a destructive decision touches) and points
+  at a lever that EXISTS on both paths: the decision list survives the throw, and a
+  hand-run `--apply --ids` over a reviewed subset is the documented way through —
+  which is also what `runCleanup`'s exit-1 line already names. Deliberately **not**
+  "narrow the scan", the wording the adjacent artifact refusal uses: there is no scan
+  bound to turn down (`scanActiveMemories` exhausts every page and `--limit` is
+  list-only), so that would have replaced one inert clause with another. The same
+  reason the diagnosis says "offered set" rather than "consensus set": these builders
+  also serve the single-pass operator dry run, where there is no quorum to blame.
+  Asserted against **any** flag, not just `--cap`: a later `--consensus-passes` or
   `--protected-topics` clause would reintroduce the defect under a new name on the
   path that can pass neither. Also asserted through the real offer, where this
   refusal fires **before** the write, so a scan that cannot offer leaves last

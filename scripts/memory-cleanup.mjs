@@ -1263,20 +1263,28 @@ export function buildOfferedRecord({
     // expressed as "N ids" drifts from the real constraint as soon as ids get
     // longer, and bytes are what SSM rejects.
     //
-    // The remedy names the SCANNED corpus, deliberately not `--cap` (#155), for
-    // the same reason MAX_ARTIFACT_BYTES does: this record holds every id a
-    // destructive decision touches, so it scales with what the scan found, while
-    // `cap` is read only inside `applyDecisions` and is not even a parameter of
-    // this builder. Measured, the identical error at `--cap 50` and `--cap 10` —
-    // the throw precedes the apply the cap would bound. So "lower --cap" was
-    // false on the operator CLI, and inert as well on the scheduled scan, which
-    // passes no flags and has no operator at the keyboard to pass one.
+    // Deliberately not `--cap` (#155): this record holds every id a destructive
+    // decision touches, so it scales with what the scan found, while `cap` is read
+    // only inside `applyDecisions` and is not even a parameter of this builder.
+    // Measured, the identical error at `--cap 50` and `--cap 10` — the throw precedes
+    // the apply the cap would bound. So "lower --cap" was false on the operator CLI,
+    // and inert as well on the scheduled scan, which passes no flags and has no
+    // operator at the keyboard to pass one.
+    //
+    // What the remedy names instead is something that EXISTS on both paths. Not
+    // "narrow the scan": there is no scan bound to turn down — `scanActiveMemories`
+    // exhausts every page and `--limit` is list-only — so that would be a second
+    // inert clause. The decision list on disk is the real lever: it survives this
+    // throw, and a hand-run `--apply --ids` over a reviewed subset is the documented
+    // way through, which is also what `runCleanup`'s exit-1 line already points at.
+    // "offered set", not "consensus set": these builders serve the single-pass
+    // operator dry run too, where there is no quorum to blame.
     throw new Error(
       `the offered approval list is ${bytes} bytes, over the ` +
         `${MAX_PARAMETER_BYTES}-byte standard parameter limit for ${ids.length} ids — ` +
-        `the record holds every id a destructive decision TOUCHES, so this is a ` +
-        `consensus set too large to offer in one record; narrow the scan rather ` +
-        `than truncating the list the operator approves`,
+        `the record holds every id a destructive decision TOUCHES, so this is an ` +
+        `offered set too large for one record; review it in batches from the kept ` +
+        `decision list rather than truncating the list the operator approves`,
     );
   }
   return record;
@@ -1507,16 +1515,18 @@ export function buildApprovalMessage({ record, decisions, channel }) {
   ];
 
   if (blocks.length > SLACK_MAX_BLOCKS) {
-    // Same remedy as `buildOfferedRecord`'s parameter-limit refusal and for the
-    // same reason (#155): the block count scales with the decisions under review,
-    // one line each, while `cap` bounds an apply's mutations and never reaches
-    // this builder either.
+    // Same remedy as `buildOfferedRecord`'s parameter-limit refusal and for the same
+    // reasons (#155): the block count scales with the decisions under review, one
+    // line each, while `cap` bounds an apply's mutations and never reaches this
+    // builder either. Note this ceiling is reachable with a record that PASSED the
+    // 4096-byte one — the record carries ids, this renders reasons — so the two are
+    // genuinely different limits and not one guard twice (TC-SLACKAPP-225).
     throw new Error(
       `the review list needs ${blocks.length} Block Kit blocks, over Slack's ` +
         `${SLACK_MAX_BLOCKS}-block message limit for ${record.ids.length} ids — ` +
-        `the message renders one line per reviewed decision, so this is a ` +
-        `consensus set too large to show whole; narrow the scan rather than ` +
-        `posting a list the operator cannot see whole`,
+        `the message renders one line per reviewed decision, so this is an offered ` +
+        `set too large to show whole; review it in batches from the kept decision ` +
+        `list rather than posting a list the operator cannot see whole`,
     );
   }
   const long = blocks.find(

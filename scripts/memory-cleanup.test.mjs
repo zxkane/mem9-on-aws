@@ -6542,11 +6542,16 @@ describe("offering the list to Slack (#123)", () => {
       thrown = err;
     }
     expect(thrown?.message).toMatch(/over the 4096-byte standard parameter limit/u);
-    // Names what actually drives the bytes, and the same remedy the artifact
-    // refusal already gives for the same class of input (MAX_ARTIFACT_BYTES),
-    // rather than a third voice for one more size ceiling.
+    // Names what actually drives the bytes, and a remedy that EXISTS on both paths.
+    // Deliberately not "narrow the scan": there is no scan bound to turn down
+    // (`scanActiveMemories` exhausts every page and `--limit` is list-only), so that
+    // would be a second inert clause. The decision list survives this throw and a
+    // hand-run `--apply --ids` over a subset is the documented way through.
     expect(thrown.message).toMatch(/every id a destructive decision TOUCHES/u);
-    expect(thrown.message).toMatch(/narrow the scan/u);
+    expect(thrown.message).toMatch(/review it in batches from the kept decision list/u);
+    // "offered set", never "consensus set": the same builders serve the single-pass
+    // operator dry run, where there is no quorum to blame for the size.
+    expect(thrown.message).not.toMatch(/consensus set/u);
     // No FLAG at all, not merely no `--cap`: the scheduled scan is the path that
     // cannot act on one, so a later `--consensus-passes` or `--protected-topics`
     // clause would reintroduce this defect under a new name.
@@ -6557,7 +6562,9 @@ describe("offering the list to Slack (#123)", () => {
     // was written, so a scan that cannot offer leaves last week's button as it
     // found it instead of invalidating it and then refusing to replace it.
     const fakes = offerFakes();
-    await expect(offer({ fakes, decisions: many }).promise).rejects.toThrow(/narrow the scan/u);
+    await expect(offer({ fakes, decisions: many }).promise).rejects.toThrow(
+      /review it in batches from the kept decision list/u,
+    );
     expect(fakes.ssm.puts).toHaveLength(0);
     expect(fakes.slack.fetchImpl).not.toHaveBeenCalled();
   });
@@ -6591,7 +6598,8 @@ describe("offering the list to Slack (#123)", () => {
     }
     expect(thrown?.message).toMatch(/over Slack's 50-block message limit/u);
     expect(thrown.message).toMatch(/one line per reviewed decision/u);
-    expect(thrown.message).toMatch(/narrow the scan/u);
+    expect(thrown.message).toMatch(/review it in batches from the kept decision list/u);
+    expect(thrown.message).not.toMatch(/consensus set/u);
     expect(thrown.message).not.toMatch(/--[a-z]/u);
 
     // And from the real offer, where it fails AFTER the write — the record is what
@@ -6601,7 +6609,7 @@ describe("offering the list to Slack (#123)", () => {
     // parameter-limit refusal in TC-SLACKAPP-224.
     const fakes = offerFakes();
     await expect(offer({ fakes, decisions: wordy }).promise).rejects.toThrow(
-      /narrow the scan/u,
+      /review it in batches from the kept decision list/u,
     );
     expect(fakes.ssm.puts).toHaveLength(1);
     expect(fakes.slack.fetchImpl).not.toHaveBeenCalled();
