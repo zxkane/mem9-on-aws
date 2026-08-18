@@ -2268,6 +2268,105 @@ fail the run.
   over-size refusal is covered too: it is the one error on the offer side that holds
   the bytes when it is raised.
 
+## The scan's outcome signal (#154)
+
+A scheduled scan whose consensus DELETE set is empty writes the record, posts
+nothing, exits 0, and nothing reports it — correct for a quiet week, and
+indistinguishable from a classifier that degraded far enough to collapse the
+consensus without tripping `classifierBroken` (which needs **every** batch to
+fail). Design: [`docs/designs/quiet-scan-alarm.md`](../designs/quiet-scan-alarm.md).
+
+The 14-day judgement cannot live in an alarm at all: `Period` ×
+`EvaluationPeriods` is capped at 604800s, so one alarm sees at most one weekly
+scan. The streak is therefore derived in the scan from one immutable record per
+ISO week, and the alarm degrades to a static `>= 2`.
+
+- **TC-SLACKAPP-227** — two `LogMetricFilter`s read the **same** JSON line off the
+  scan's own task log group: `QuietScanWeeks` from `$.quietWeeks` and `ScanRan`
+  from `$.scanRan`, both dimensioned on `$.stage`, both matching
+  `{ $.event = "cleanup_scan_outcome" && $.stage = "<stage>" }`. The group is the
+  TASK's, not the `task-failures` group the EventBridge rule delivers into — a
+  filter there would match nothing and leave both alarms green with no datapoints,
+  which is this issue's own defect reproduced in its wiring. The metric value is
+  the derived count rather than a constant `1` because no alarm can accumulate
+  across two weekly runs.
+- **TC-SLACKAPP-228** — the streak alarm fires at **2** and not at 1, with
+  `statistic: Maximum`, `period: 604800`, `evaluationPeriods: 1`,
+  `datapointsToAlarm: 1`, `treatMissingData: notBreaching`, and the existing alerts
+  topic. `Maximum`, not `Sum`: the value is a level, so summing two runs in one
+  window would page at 1 + 1 — two ordinary quiet weeks that were not consecutive.
+  604800 × 1 is exactly at the cap, therefore legal. The case also asserts there
+  are **no** `metricQueries` and no `IF(`: a volume guard protects a *rate's*
+  denominator, and this value is a count of consecutive discrete runs with one run
+  per period, so a guard could only suppress genuine signal. Asserted so it is not
+  "restored" later by analogy to the ingest zero-fact alarm.
+- **TC-SLACKAPP-229** — the liveness alarm uses `FILL(scan_ran, 0) < 1` and is armed
+  **only** where the schedule's state is `ENABLED`. Without it the streak alarm
+  fails open: a scan that never runs publishes nothing, and `notBreaching` reads
+  that silence as health forever — the same defect one layer up, and the ECS
+  task-exit alarm cannot see a task that never started. `treatMissingData` cannot
+  express "missing is a breach" for a metric absent from the whole window; `FILL`
+  can. The stage gating shares ONE expression with the schedule's own `state`, and
+  the case asserts a preview stage gets the streak alarm but not the liveness alarm
+  — otherwise every preview pages every seven days for a scan it never runs.
+- **TC-SLACKAPP-230** — the whole signal costs the task **no new IAM**: no
+  `cloudwatch:*` and no `logs:*` on the task role, and the week records land under
+  the `approvals/*` grant that already exists (`ssm:GetParameters` +
+  `ssm:PutParameter`, unchanged). That is why the signal is a log line rather than a
+  metric the task publishes — a publish grant would need room in the workload
+  permissions boundary, which renders near IAM's 6144-character hard ceiling.
+- **TC-SLACKAPP-231** — ISO week numbering, asserted against literals across four
+  real year boundaries (2026-W01, 2026-W53 from a 2027 date, 2020-W53, 2022-W52,
+  2025-W01 from a 2024 date). One function serves the writer and the reader, because
+  a W52/W53 disagreement between two implementations is not an off-by-one — it is a
+  reader looking up keys nothing writes, and an alarm that never fires again. UTC
+  only: the scan runs 03:00 Saturday UTC, and a local reading west of Greenwich
+  would file that instant under the previous week. `recentIsoWeeks` walks back by
+  whole weeks and re-derives each key rather than decrementing a week number, and
+  reads four weeks — headroom over the threshold of 2, and inside
+  `GetParameters`' ten-name limit.
+- **TC-SLACKAPP-232** — the streak counts only **contiguous, present, zero-offer**
+  weeks ending at the current one: 0 for a busy week, 1 after one quiet week (the
+  boundary that must NOT breach), 2 and 3 as they accumulate, reset to 1 by a
+  non-zero week in between. An **absent** record breaks it, asserted explicitly:
+  the tempting alternative — skip the gap and keep counting — invents contiguity
+  that never existed, and one never-written record would then push the count over
+  the threshold on its own.
+- **TC-SLACKAPP-233** — end to end through the real offer: the week record is
+  written as a plain `String` with `Overwrite: true` (a SecureString write is denied
+  by the boundary; `Overwrite: false` would make a same-week retry fail with
+  `ParameterAlreadyExists`), only the PRIOR weeks are read, and one JSON object is
+  emitted carrying both metrics. A same-week **retry** rewrites the one key and
+  derives the same count — the reason the record is keyed per week instead of being
+  a counter, so there is no read-modify-write to race. A week that offered ids
+  publishes its count with a streak of 0.
+- **TC-SLACKAPP-234** — a failed history read publishes **nothing** and is reported
+  for a non-zero exit; the offer itself is written, posted, and returned intact. The
+  mechanism partly watches itself, so the failure to design against is not a crash
+  but a read that quietly yields a SMALLER count and suppresses the page. A record
+  whose value will not parse is treated as a read failure too, not as absence:
+  absence legitimately breaks the streak, and corruption lowering it silently would
+  be the same defect wearing a different hat.
+- **TC-SLACKAPP-235** — the week bookkeeping runs **last** — after the record, the
+  post, and the stamp — and never throws. Both properties keep one ordering true: an
+  alarm's input must not be able to cost an operator their review list. A throttled
+  `PutParameter` on the week record leaves the offer posted, publishes no count, and
+  is reported; run earlier, or allowed to throw, it would either block the post or
+  surface as "failed to offer the review list to Slack".
+- **TC-SLACKAPP-236** — `runCleanup` exits **1** when the count could not be
+  derived, naming the week and not claiming the offer failed, with the decision list
+  still on disk; and exits **0** for a genuinely quiet week whose count was
+  published. Exit 0 on the first would leave the streak alarm a gap it reads as
+  `notBreaching`; exit non-zero on the second would page for a healthy run most
+  weeks of the year.
+- **TC-SLACKAPP-237** — the production emitter writes the line **unprefixed** to
+  stdout, asserted on the real `createCleanupDeps` wiring. `log` prefixes every line
+  with `[memory-cleanup <iso>]`, and a `{ $.event = ... }` filter needs the event to
+  BE the JSON object — so a prefixed line matches nothing, publishes no datapoint,
+  and leaves both alarms green with nothing to show they went blind. The case also
+  pins that the human-readable lines are still prefixed and still on stderr, so
+  nothing changed for consumers parsing that format.
+
 ## Exit codes
 
 The cleanup script's existing vocabulary is unchanged (0 ok, 1 error, 2
@@ -2276,3 +2375,8 @@ done). Consensus adds no code: a run with no usable consensus offered nothing
 and did nothing wrong, so it exits 0 with the disagreement rate in its summary —
 the number the operator is meant to act on, not an exit code the scheduler would
 have to interpret.
+
+#154 adds no code either. A scan that cannot derive its quiet-week count exits
+**1** — the existing "error" code, which the ECS task-exit alarm already watches
+— rather than a new one the scheduler would have to interpret. A genuinely quiet
+week still exits 0 (TC-SLACKAPP-236).

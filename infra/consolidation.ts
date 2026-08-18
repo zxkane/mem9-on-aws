@@ -94,6 +94,45 @@ export function consolidationSchedulerRoleName(stage: string): string {
   return name;
 }
 
+/**
+ * The `awslogs-group` an `sst.aws.Task`'s container writes to.
+ *
+ * SST names the group itself and exposes no accessor for it, so the only reliable
+ * source is the container definition it rendered. Shared by the two stacks that
+ * attach CloudWatch resources to a task's own output — consolidation's failure
+ * wiring and the cleanup scan's outcome filters (#154) — because a second copy of
+ * this read is a second place for the container-name lookup to silently return
+ * undefined and take a metric filter with it.
+ *
+ * Throws rather than returning undefined: a filter or subscription pointed at an
+ * empty group name deploys fine and matches nothing forever.
+ */
+export function taskContainerLogGroupName(
+  task: sst.aws.Task,
+  containerName: string,
+  what: string,
+): Output<string> {
+  return task.nodes.taskDefinition
+    .apply(
+      (definition) =>
+        (definition as { containerDefinitions: Output<string> })
+          .containerDefinitions,
+    )
+    .apply((raw) => {
+      const definitions = JSON.parse(raw) as {
+        name: string;
+        logConfiguration?: { options?: Record<string, string> };
+      }[];
+      const name = definitions.find(
+        (container) => container.name === containerName,
+      )?.logConfiguration?.options?.["awslogs-group"];
+      if (!name) {
+        throw new Error(`${what} awslogs-group not found in task definition`);
+      }
+      return name;
+    });
+}
+
 export function consolidation(
   ecsOut: EcsOutputs,
   dbOut: DbOutputs,
@@ -183,25 +222,11 @@ export function consolidation(
     },
   });
 
-  const taskLogGroupName = task.nodes.taskDefinition
-    .apply(
-      (definition) =>
-        (definition as { containerDefinitions: Output<string> })
-          .containerDefinitions,
-    )
-    .apply((raw) => {
-      const definitions = JSON.parse(raw) as {
-        name: string;
-        logConfiguration?: { options?: Record<string, string> };
-      }[];
-      const name = definitions.find(
-        (container) => container.name === CONSOLIDATION_CONTAINER_NAME,
-      )?.logConfiguration?.options?.["awslogs-group"];
-      if (!name) {
-        throw new Error("consolidation awslogs-group not found in task definition");
-      }
-      return name;
-    });
+  const taskLogGroupName = taskContainerLogGroupName(
+    task,
+    CONSOLIDATION_CONTAINER_NAME,
+    "consolidation",
+  );
 
   if (ecsOut.alertsTopicArn) {
     taskFailureAlarm({

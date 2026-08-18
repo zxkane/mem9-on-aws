@@ -65,7 +65,12 @@ import type { OauthFacadeOutputs } from "./oauth-facade";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import { taskFailureAlarm } from "./task-failure-alarm";
 import { accountId, applicationRegion, ecrImage } from "./ecr";
-import { boundedNamePrefix, IAM_ROLE_NAME_MAX, SCHEDULE_GROUP_NAME_PREFIX_MAX } from "./consolidation";
+import {
+  boundedNamePrefix,
+  IAM_ROLE_NAME_MAX,
+  SCHEDULE_GROUP_NAME_PREFIX_MAX,
+  taskContainerLogGroupName,
+} from "./consolidation";
 import { resolveVpc } from "./vpc";
 
 const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
@@ -77,6 +82,24 @@ const RESPONSES_REGION = process.env.MEM9_LLM_RESPONSES_REGION || "us-west-2";
 // one place; the metric name distinguishes them.
 const CLEANUP_FAILURE_METRIC = "CleanupApplyTaskFailures";
 const SCAN_TARGET_ERROR_METRIC = "TargetErrorCount";
+
+// #154's two metrics, both sourced from ONE JSON log line the scan emits
+// (`SCAN_OUTCOME_EVENT` in scripts/memory-cleanup.mjs). A metric sourced from a log
+// filter needs no publish grant, so neither alarm costs the scan task any IAM — and
+// it must not acquire any: the workload permissions boundary renders near IAM's
+// non-adjustable 6144-character ceiling.
+const SCAN_METRIC_NAMESPACE = "mem9-on-aws/CleanupScan";
+const SCAN_QUIET_WEEKS_METRIC = "QuietScanWeeks";
+const SCAN_RAN_METRIC = "ScanRan";
+const SCAN_OUTCOME_EVENT = "cleanup_scan_outcome";
+// The alarm's whole judgement, and the reason the streak is derived in the scan
+// rather than by an alarm: `Period` × `EvaluationPeriods` is capped at 604800s, so
+// a WEEKLY metric gives one alarm at most one datapoint and ">= 2 consecutive
+// weeks" cannot be expressed here at all. See docs/designs/quiet-scan-alarm.md.
+const SCAN_QUIET_WEEKS_THRESHOLD = 2;
+// Exactly at the cap, therefore legal, and the longest window that can hold the
+// one datapoint a weekly scan produces.
+const SCAN_ALARM_PERIOD_SECONDS = 604_800;
 
 export const SLACK_APPROVAL_ENABLED_ENV = "MEM9_SLACK_APPROVAL_ENABLED";
 export const SLACK_APPROVAL_CHANNEL_ENV = "MEM9_SLACK_APPROVAL_CHANNEL";
@@ -627,6 +650,22 @@ export function slackApproval(
     },
   });
 
+  // The scan writes its outcome line to the TASK's own log group, so #154's metric
+  // filters have to attach to that group rather than to the `task-failures` group
+  // the EventBridge rule delivers into. SST names the group itself, and the only
+  // reliable way to learn the name is the container definition it rendered — the
+  // same read `infra/consolidation.ts` does for the same reason.
+  const scanLogGroupName = taskContainerLogGroupName(
+    task,
+    CLEANUP_CONTAINER_NAME,
+    "cleanup",
+  );
+
+  // ONE source for the schedule's state and for whether #154's liveness alarm is
+  // armed. Two independent copies of this condition is how you get a preview stage
+  // paging every seven days for a scan it was never meant to run.
+  const scanScheduleState = $app.stage === "prod" ? "ENABLED" : "DISABLED";
+
   // --- The four inputs `readTaskInputs` reads to start the task ---
   // Keyed by the field each one populates. Both the cluster name and the task-def
   // ARN are non-empty strings, so swapping them passes the handler's own
@@ -749,7 +788,7 @@ export function slackApproval(
       groupName: scanScheduleGroup.name,
       scheduleExpression: CLEANUP_SCAN_CRON,
       scheduleExpressionTimezone: "UTC",
-      state: $app.stage === "prod" ? "ENABLED" : "DISABLED",
+      state: scanScheduleState,
       flexibleTimeWindow: { mode: "OFF" },
       target: {
         arn: ecsOut.cluster.nodes.cluster.arn,
@@ -850,6 +889,127 @@ export function slackApproval(
         treatMissingData: "notBreaching",
         alarmActions: [ecsOut.alertsTopicArn],
       });
+    }
+
+    // --- The scan's OUTCOME signals (#154) ---
+    //
+    // What every alarm above cannot see: a scan that runs, succeeds, and offers
+    // NOTHING. `consensusDecisions` needs >= 2 usable passes agreeing, and one pass
+    // reproduced only 66% of its own DELETE set on re-run — so a partial classifier
+    // degradation can collapse the intersection to zero without tripping
+    // `classifierBroken` (which needs EVERY batch to fail). The run then exits 0,
+    // which the task-exit alarm cannot see by construction.
+    //
+    // Both filters read the SAME line, so the scan emits once and neither metric
+    // needs task IAM. The stage is matched in the pattern as well as carried as a
+    // dimension: the apply half of this task definition shares the log group, and a
+    // pattern that matched only on `event` would count another stage's line if the
+    // group were ever shared further.
+    if (ecsOut.alertsTopicArn) {
+      const scanOutcomePattern =
+        `{ $.event = "${SCAN_OUTCOME_EVENT}" && $.stage = "${$app.stage}" }`;
+      new aws.cloudwatch.LogMetricFilter("CleanupScanQuietWeeksFilter", {
+        logGroupName: scanLogGroupName,
+        pattern: scanOutcomePattern,
+        metricTransformation: {
+          name: SCAN_QUIET_WEEKS_METRIC,
+          namespace: SCAN_METRIC_NAMESPACE,
+          // The DERIVED count, not `1`: the 14-day judgement cannot live in the
+          // alarm, so the scan computes it from its own per-week records and the
+          // alarm only compares it to a static threshold.
+          value: "$.quietWeeks",
+          dimensions: { stage: "$.stage" },
+        },
+      });
+      new aws.cloudwatch.LogMetricFilter("CleanupScanRanFilter", {
+        logGroupName: scanLogGroupName,
+        pattern: scanOutcomePattern,
+        metricTransformation: {
+          name: SCAN_RAN_METRIC,
+          namespace: SCAN_METRIC_NAMESPACE,
+          value: "$.scanRan",
+          dimensions: { stage: "$.stage" },
+        },
+      });
+
+      new aws.cloudwatch.MetricAlarm("CleanupScanQuietWeeksAlarm", {
+        alarmDescription:
+          "The weekly memory cleanup scan offered zero ids for two consecutive " +
+          "weeks, which a collapsed classifier consensus produces silently.",
+        namespace: SCAN_METRIC_NAMESPACE,
+        metricName: SCAN_QUIET_WEEKS_METRIC,
+        dimensions: { stage: $app.stage },
+        // Maximum, not Sum: the value is a level (this run's streak), so summing two
+        // runs inside one window would page at 1 + 1.
+        statistic: "Maximum",
+        period: SCAN_ALARM_PERIOD_SECONDS,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        threshold: SCAN_QUIET_WEEKS_THRESHOLD,
+        comparisonOperator: "GreaterThanOrEqualToThreshold",
+        // A stage whose scan has not run yet emits nothing, and `missing` would hold
+        // this in INSUFFICIENT_DATA forever. Silence is covered by the liveness
+        // alarm below, deliberately and not by this one.
+        treatMissingData: "notBreaching",
+        // NO volume guard, and this is not an omission. A volume guard protects a
+        // RATE's denominator (see observability.ts's zero-fact-rate alarm, which
+        // needs `succeeded > 50` because ingest runs thousands of jobs a day). This
+        // value is a count of consecutive discrete runs with exactly one run per
+        // period by construction, so the "high zero rate on low volume" failure it
+        // guards against cannot arise — and a guard here would SUPPRESS the genuine
+        // consecutive-quiet signal, since there is no denominator to protect.
+        alarmActions: [ecsOut.alertsTopicArn],
+      });
+
+      // The streak alarm fails OPEN on its own: if the scan never runs — schedule
+      // flipped to DISABLED, a task definition deleted by a teardown, scheduler
+      // misconfiguration — no datapoint is published and `notBreaching` keeps it
+      // green forever. That is the same "silence reads as health" defect this whole
+      // section exists to close, one layer up, and the ECS task-exit alarm cannot
+      // see a task that never started.
+      //
+      // `FILL(scan_ran, 0)` converts a missing period into a concrete breaching
+      // value, which `treatMissingData` cannot do — the pattern
+      // `DurableIngestTelemetryLivenessAlarm` (infra/observability.ts) establishes.
+      //
+      // Armed ONLY where the schedule's state is ENABLED. Every other stage runs no
+      // scan by design, so an unconditional liveness alarm would page continuously
+      // on each preview.
+      if (scanScheduleState === "ENABLED") {
+        new aws.cloudwatch.MetricAlarm("CleanupScanLivenessAlarm", {
+          alarmDescription:
+            "No weekly memory cleanup scan reported an outcome in the last seven " +
+            "days, so the quiet-week alarm has no input and cannot page.",
+          metricQueries: [
+            {
+              id: "scan_ran",
+              metric: {
+                namespace: SCAN_METRIC_NAMESPACE,
+                metricName: SCAN_RAN_METRIC,
+                dimensions: { stage: $app.stage },
+                stat: "Sum",
+                period: SCAN_ALARM_PERIOD_SECONDS,
+              },
+              returnData: false,
+            },
+            {
+              id: "scan_ran_present",
+              expression: `FILL(scan_ran, 0)`,
+              label: "Scan outcome reported",
+              returnData: true,
+            },
+          ],
+          evaluationPeriods: 1,
+          datapointsToAlarm: 1,
+          threshold: 1,
+          comparisonOperator: "LessThanThreshold",
+          // FILL makes every currently missing period an explicit breach, so an
+          // older healthy datapoint from CloudWatch's wider sliding range cannot
+          // defer it.
+          treatMissingData: "breaching",
+          alarmActions: [ecsOut.alertsTopicArn],
+        });
+      }
     }
   }
 

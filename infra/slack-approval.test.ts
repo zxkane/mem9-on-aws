@@ -1323,6 +1323,171 @@ describe("slack approval infrastructure", () => {
     expect(all("Role")).toHaveLength(1);
   });
 
+  it("TC-SLACKAPP-227: filters the scan's own log group for both outcome metrics", async () => {
+    installGlobals("prod");
+    enable();
+    enableScan();
+    await loadAndRun();
+
+    const filters = all("LogMetricFilter").map(
+      (filter) => [filter.logicalName, materialize(filter.args) as Record<string, any>] as const,
+    );
+    const outcome = filters.filter(([name]) => name.startsWith("CleanupScan"));
+    expect(outcome.map(([name]) => name)).toEqual([
+      "CleanupScanQuietWeeksFilter",
+      "CleanupScanRanFilter",
+    ]);
+
+    for (const [, args] of outcome) {
+      // The TASK's group, not the `task-failures` group the EventBridge rule
+      // delivers into: the scan writes its outcome line to its own stdout, so a
+      // filter on the failures group would match nothing and both alarms would sit
+      // green with no datapoints — the failure this whole feature exists to prevent,
+      // reproduced in its own wiring.
+      expect(args.logGroupName).toBe("/sst/cleanup");
+      // JSON form, which is the entire reason the scan emits an unprefixed line: the
+      // human-readable lines carry a `[memory-cleanup <iso>]` prefix and no
+      // `{ $.field = ... }` pattern can read them.
+      expect(args.pattern).toBe(
+        '{ $.event = "cleanup_scan_outcome" && $.stage = "prod" }',
+      );
+      expect(args.metricTransformation.namespace).toBe("mem9-on-aws/CleanupScan");
+      expect(args.metricTransformation.dimensions).toEqual({ stage: "$.stage" });
+    }
+
+    // The DERIVED count, not a constant 1: the 604800s evaluation cap means no alarm
+    // can accumulate across two weekly runs, so the scan computes the streak and the
+    // metric carries it.
+    const [, quietWeeks] = outcome[0];
+    expect(quietWeeks.metricTransformation.name).toBe("QuietScanWeeks");
+    expect(quietWeeks.metricTransformation.value).toBe("$.quietWeeks");
+    // Read off the SAME line, which is what keeps the liveness metric free of task
+    // IAM — nothing here publishes a metric directly.
+    const [, scanRan] = outcome[1];
+    expect(scanRan.metricTransformation.name).toBe("ScanRan");
+    expect(scanRan.metricTransformation.value).toBe("$.scanRan");
+  });
+
+  it("TC-SLACKAPP-228: alarms at two consecutive quiet weeks and not at one, with no volume guard", async () => {
+    installGlobals("prod");
+    enable();
+    enableScan();
+    await loadAndRun();
+
+    const alarm = materialize(one("MetricAlarm", "CleanupScanQuietWeeksAlarm").args) as
+      Record<string, any>;
+    expect(alarm).toMatchObject({
+      namespace: "mem9-on-aws/CleanupScan",
+      metricName: "QuietScanWeeks",
+      // Maximum, not Sum: the value is a LEVEL (this run's streak). Summing two runs
+      // inside one window would page at 1 + 1, which is two ordinary quiet weeks
+      // that were not consecutive.
+      statistic: "Maximum",
+      // Exactly at CloudWatch's 604800s cap for `Period` × `EvaluationPeriods`, and
+      // therefore legal — one more evaluation period would be rejected outright.
+      period: 604_800,
+      evaluationPeriods: 1,
+      datapointsToAlarm: 1,
+      threshold: 2,
+      comparisonOperator: "GreaterThanOrEqualToThreshold",
+      // A stage whose scan has not run yet publishes nothing, and `missing` would
+      // hold this in INSUFFICIENT_DATA forever. Silence is the liveness alarm's job.
+      treatMissingData: "notBreaching",
+      alarmActions: [
+        "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
+      ],
+    });
+    expect(alarm.dimensions).toEqual({ stage: "prod" });
+    // NO volume guard, asserted so it cannot be "restored" by analogy to the ingest
+    // zero-fact alarm (which needs `succeeded > 50` because a rate needs a
+    // denominator). This value is a count of consecutive discrete runs with exactly
+    // one run per period, so a guard would only ever SUPPRESS real signal.
+    expect(alarm.metricQueries).toBeUndefined();
+    expect(JSON.stringify(alarm)).not.toContain("IF(");
+  });
+
+  it("TC-SLACKAPP-229: FILLs the liveness gap and arms only where the schedule is ENABLED", async () => {
+    installGlobals("prod");
+    enable();
+    enableScan();
+    await loadAndRun();
+
+    const alarm = materialize(one("MetricAlarm", "CleanupScanLivenessAlarm").args) as
+      Record<string, any>;
+    // The streak alarm fails OPEN on its own: no scan means no datapoint, and
+    // `notBreaching` then reads silence as health forever. `treatMissingData` cannot
+    // express "missing is a breach" for a metric that has never been published in
+    // the window — `FILL` can, by turning the gap into a concrete 0.
+    expect(alarm.metricQueries[0].metric).toMatchObject({
+      namespace: "mem9-on-aws/CleanupScan",
+      metricName: "ScanRan",
+      stat: "Sum",
+      period: 604_800,
+    });
+    expect(alarm.metricQueries[0].returnData).toBe(false);
+    expect(alarm.metricQueries[1].expression).toBe("FILL(scan_ran, 0)");
+    expect(alarm.metricQueries[1].returnData).toBe(true);
+    expect(alarm).toMatchObject({
+      evaluationPeriods: 1,
+      threshold: 1,
+      comparisonOperator: "LessThanThreshold",
+      treatMissingData: "breaching",
+      alarmActions: [
+        "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
+      ],
+    });
+
+    // A preview stage runs no scan — its schedule is created DISABLED — so an
+    // unconditional liveness alarm would page it every seven days for a task it was
+    // never meant to run. The streak filters and alarm still exist there (they cost
+    // nothing and page on nothing), which is what keeps the two conditions separate.
+    resources = [];
+    installGlobals("pr-123");
+    enable();
+    enableScan();
+    await loadAndRun();
+    const schedule = materialize(one("Schedule", "Mem9CleanupScan").args) as
+      Record<string, any>;
+    expect(schedule.state).toBe("DISABLED");
+    expect(
+      all("MetricAlarm").map((alarmResource) => alarmResource.logicalName),
+    ).not.toContain("CleanupScanLivenessAlarm");
+    expect(
+      all("MetricAlarm").map((alarmResource) => alarmResource.logicalName),
+    ).toContain("CleanupScanQuietWeeksAlarm");
+  });
+
+  it("TC-SLACKAPP-230: buys both outcome metrics with no new task IAM", async () => {
+    installGlobals("prod");
+    enable();
+    enableScan();
+    await loadAndRun();
+
+    // The whole reason the signal is a log line rather than a metric the task
+    // publishes: `cloudwatch:PutMetricData` on the task role would need room in the
+    // workload permissions boundary, which renders near IAM's 6144-character hard
+    // ceiling — a limit that cannot be raised and cannot be split across a second
+    // policy. A log-filter metric costs the task nothing.
+    const taskArgs = materialize(one("Task", "Mem9Cleanup").args) as Record<string, any>;
+    const actions = (taskArgs.permissions as Array<Record<string, any>>).flatMap(
+      (statement) => list(statement.actions),
+    );
+    expect(actions.filter((action) => action.startsWith("cloudwatch:"))).toEqual([]);
+    expect(actions.filter((action) => action.startsWith("logs:"))).toEqual([]);
+    // And the week records land under the grant that already exists, so no statement
+    // was added either: `approvals/*` covers `approvals/scan-outcome-<iso-week>`.
+    const ssmStatement = (taskArgs.permissions as Array<Record<string, any>>).find(
+      (statement) => list(statement.actions).includes("ssm:PutParameter"),
+    );
+    expect(list(ssmStatement!.actions).sort()).toEqual([
+      "ssm:GetParameters",
+      "ssm:PutParameter",
+    ]);
+    expect(list(ssmStatement!.resources)).toEqual([
+      "arn:aws:ssm:ap-northeast-1:123456789012:parameter/mem9-on-aws/prod/approvals/*",
+    ]);
+  });
+
   it("TC-SLACKAPP-153: keeps the task role's approval write inside the DEPLOYED boundary", async () => {
     installGlobals("prod");
     enable();

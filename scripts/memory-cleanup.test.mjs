@@ -29,6 +29,11 @@ import {
   parseArgs,
   postApprovalRequest,
   putDecisionArtifact,
+  isoWeek,
+  recentIsoWeeks,
+  scanOutcomeParameterName,
+  quietWeekStreak,
+  recordScanOutcome,
   serializeDecisionArtifact,
   updateApprovalMessage,
   consensusDecisions,
@@ -6156,10 +6161,111 @@ describe("replaying the reviewed list instead of re-classifying (#150)", () => {
   });
 });
 
+describe("the scheduled scan's week history (#154)", () => {
+  it("TC-SLACKAPP-231 numbers ISO weeks the way both the writer and the reader must agree on", () => {
+    // ONE function serves the write and the read, so a W52/W53 disagreement here is
+    // not an off-by-one — it is a reader looking up weeks nothing ever writes, and
+    // an alarm that never fires again. Every case below is a real year boundary,
+    // asserted against literals rather than against a second implementation.
+    //
+    // ISO-8601 takes the week-numbering YEAR from the week's Thursday (§3.17), which
+    // is why a January date can belong to the previous year's W52 or W53.
+    const week = (iso) => isoWeek(Date.parse(iso));
+    expect(week("2026-01-01T00:00:00Z")).toBe("2026-W01"); // a Thursday: its own W01
+    expect(week("2026-08-05T03:00:00Z")).toBe("2026-W32"); // the fixture clock
+    expect(week("2026-12-31T23:59:59Z")).toBe("2026-W53"); // Thu 2026-12-31 → W53
+    expect(week("2027-01-01T00:00:00Z")).toBe("2026-W53"); // Friday: still 2026
+    expect(week("2021-01-01T00:00:00Z")).toBe("2020-W53"); // Friday: 2020 had 53
+    expect(week("2023-01-01T00:00:00Z")).toBe("2022-W52"); // Sunday: 2022 had 52
+    expect(week("2024-12-30T00:00:00Z")).toBe("2025-W01"); // Monday: next year's W01
+
+    // The scan runs at 03:00 UTC on a Saturday, so the arithmetic is UTC-only. A
+    // local-time reading west of the prime meridian would put that instant in the
+    // previous week and the record would be written under a key the next run does
+    // not look up.
+    expect(week("2026-08-08T03:00:00Z")).toBe("2026-W32");
+    expect(week("2026-08-10T03:00:00Z")).toBe("2026-W33");
+
+    // Walked back by whole weeks and re-derived, NOT by decrementing a week number,
+    // which would have to know whether the previous year had 52 or 53 weeks.
+    expect(recentIsoWeeks(Date.parse("2026-08-05T03:00:00Z"))).toEqual([
+      "2026-W32",
+      "2026-W31",
+      "2026-W30",
+      "2026-W29",
+    ]);
+    expect(recentIsoWeeks(Date.parse("2027-01-07T03:00:00Z"))).toEqual([
+      "2027-W01",
+      "2026-W53",
+      "2026-W52",
+      "2026-W51",
+    ]);
+    // Four weeks read, and that bound matters twice: `GetParameters` takes at most
+    // ten names, and the threshold this feeds is 2 — so four is headroom, not a
+    // number to grow casually.
+    expect(recentIsoWeeks(Date.now())).toHaveLength(4);
+    expect(scanOutcomeParameterName("/mem9-on-aws/prod", "2026-W32")).toBe(
+      "/mem9-on-aws/prod/approvals/scan-outcome-2026-W32",
+    );
+  });
+
+  it("TC-SLACKAPP-232 counts only contiguous, present, zero-offer weeks", () => {
+    // The alarm's whole input, as a pure function, because the 604800s evaluation
+    // cap means no alarm can derive it: two weekly scans are 14 days apart, so one
+    // alarm sees at most one of them.
+    const weeks = ["2026-W32", "2026-W31", "2026-W30", "2026-W29"];
+    const quiet = (week) => [week, { offered: 0 }];
+    const busy = (week, offered = 3) => [week, { offered }];
+
+    expect(quietWeekStreak(weeks, Object.fromEntries([busy("2026-W32")]))).toBe(0);
+    // ONE quiet week is the boundary that must NOT breach: it is a normal week with
+    // nothing to clean, and paging on it would page most weeks.
+    expect(quietWeekStreak(weeks, Object.fromEntries([quiet("2026-W32")]))).toBe(1);
+    expect(
+      quietWeekStreak(weeks, Object.fromEntries([quiet("2026-W32"), quiet("2026-W31")])),
+    ).toBe(2);
+    expect(
+      quietWeekStreak(
+        weeks,
+        Object.fromEntries([quiet("2026-W32"), quiet("2026-W31"), quiet("2026-W30")]),
+      ),
+    ).toBe(3);
+
+    // A non-zero week RESETS it rather than being skipped: the signal is
+    // consecutive, so one week that offered something means the classifier was
+    // producing a consensus that recently.
+    expect(
+      quietWeekStreak(
+        weeks,
+        Object.fromEntries([quiet("2026-W32"), busy("2026-W31"), quiet("2026-W30")]),
+      ),
+    ).toBe(1);
+
+    // An ABSENT record breaks the streak. Asserted explicitly because the tempting
+    // alternative — skip the gap and keep counting — invents contiguity that never
+    // existed, and a week whose record was never written would then push the count
+    // over the threshold on its own.
+    expect(
+      quietWeekStreak(
+        weeks,
+        Object.fromEntries([quiet("2026-W32"), quiet("2026-W30"), quiet("2026-W29")]),
+      ),
+    ).toBe(1);
+    // Including the current week: no record at all is a count of 0, never a
+    // pessimistic guess.
+    expect(quietWeekStreak(weeks, {})).toBe(0);
+  });
+});
+
 describe("offering the list to Slack (#123)", () => {
   const BOT_TOKEN = "xoxb-fixture-not-a-real-token";
   const CHANNEL = "C0APPROVAL";
   const OFFERED = "/mem9-on-aws/prod/approvals/offered";
+  // Spelled out rather than built with the module's own `scanOutcomeParameterName`:
+  // a fixture that derived the name the same way the code does would follow a rename
+  // into a set of weeks nothing writes. The ISO week keys come from the fixture clock
+  // (2026-08-05 → W32); TC-SLACKAPP-231 is what pins the arithmetic itself.
+  const SCAN_OUTCOME = (week) => `/mem9-on-aws/prod/approvals/scan-outcome-${week}`;
   const SNIPPET = "SENTINEL-MEMORY-SNIPPET";
   const MERGED = "SENTINEL-MERGED-CONTENT";
   // Slack's own per-section ceiling, spelled as the literal it is on the wire
@@ -6182,7 +6288,7 @@ describe("offering the list to Slack (#123)", () => {
    * before the record it is validated against is a promise the backend cannot
    * keep.
    */
-  function offerFakes(slackBodies = {}, { pending } = {}) {
+  function offerFakes(slackBodies = {}, { pending, weeks = {}, failRead, failWrite } = {}) {
     const events = [];
     const ssm = {
       puts: [],
@@ -6196,6 +6302,18 @@ describe("offering the list to Slack (#123)", () => {
         const names = command?.input?.Names;
         if (names) {
           events.push(["ssm-get", ...names]);
+          // #154's week history is answered by NAME, so a case can seed one week and
+          // leave the next absent. Answering every name with `pending` — which this
+          // fake did while `approvals/offered` was the only read — would have made
+          // every week look present and the streak untestable.
+          if (names.every((name) => name.includes("/scan-outcome-"))) {
+            if (failRead) throw new Error("ssm unavailable");
+            const found = names.filter((name) => name in weeks);
+            return {
+              Parameters: found.map((name) => ({ Name: name, Value: weeks[name] })),
+              InvalidParameters: names.filter((name) => !(name in weeks)),
+            };
+          }
           // The shape SSM really returns, as `fakeSsm` above models it: an absent
           // name is echoed in `InvalidParameters` and simply MISSING from
           // `Parameters`, never present with an empty value.
@@ -6204,6 +6322,9 @@ describe("offering the list to Slack (#123)", () => {
             Parameters: names.map((name) => ({ Name: name, Value: pending })),
             InvalidParameters: [],
           };
+        }
+        if (failWrite && command.input.Name.includes("/scan-outcome-")) {
+          throw new Error("ssm throttled");
         }
         events.push(["ssm", command.input.Name]);
         ssm.puts.push(command.input);
@@ -6249,11 +6370,16 @@ describe("offering the list to Slack (#123)", () => {
 
   function offer(overrides = {}) {
     const { ssm, slack, s3, events } = overrides.fakes ?? offerFakes();
+    // Always a spy, never the real emitter: #154's JSON line is a fourth
+    // destination for run data, and every case that asserts what a destination may
+    // carry needs to be able to read it (TC-SLACKAPP-210).
+    const emit = overrides.emit ?? vi.fn();
     return {
       events,
       ssm,
       slack,
       s3,
+      emit,
       log: overrides.log,
       promise: postApprovalRequest({
         ssm,
@@ -6274,7 +6400,12 @@ describe("offering the list to Slack (#123)", () => {
           ? EXPECTED_BUCKET_OWNER
           : undefined,
         fetchImpl: slack.fetchImpl,
-        now: overrides.now,
+        // A FIXED default clock, not `Date.now`. The week keys #154's records are
+        // named for come from this value, so a real clock would make every asserted
+        // parameter name drift once a week. Cases that exercise the offer TTL still
+        // pass their own `now`.
+        now: overrides.now ?? (() => Date.parse("2026-08-05T03:00:00.000Z")),
+        emit,
         log: overrides.log ?? vi.fn(),
       }),
     };
@@ -6293,11 +6424,21 @@ describe("offering the list to Slack (#123)", () => {
     // The READ comes first (#149): overwriting a record an operator is still
     // deciding on destroys their pending approval, so the scan checks before it
     // clobbers. Everything after it is the original #123 order.
+    // #154's week bookkeeping is LAST, after the post and the stamp, and that
+    // position is a property: it is input to an alarm, so it must never be able to
+    // stop a review list from reaching the operator (TC-SLACKAPP-235).
     expect(fakes.events).toEqual([
       ["ssm-get", OFFERED],
       ["ssm", OFFERED],
       ["slack", "chat.postMessage"],
       ["ssm", OFFERED],
+      ["ssm", SCAN_OUTCOME("2026-W32")],
+      [
+        "ssm-get",
+        SCAN_OUTCOME("2026-W31"),
+        SCAN_OUTCOME("2026-W30"),
+        SCAN_OUTCOME("2026-W29"),
+      ],
     ]);
     const [first] = fakes.ssm.puts;
     expect(first.Name).toBe(OFFERED);
@@ -6675,11 +6816,159 @@ describe("offering the list to Slack (#123)", () => {
       ],
     }).promise;
 
-    expect(fakes.ssm.puts).toHaveLength(1);
+    // Two writes: the empty offered record, then #154's week record. The empty
+    // record is still written — that is what invalidates last week's button — and
+    // the week record is what a zero-offer streak is later derived from.
+    expect(fakes.ssm.puts).toHaveLength(2);
     expect(JSON.parse(fakes.ssm.puts[0].Value).ids).toEqual([]);
+    expect(fakes.ssm.puts[1].Name).toBe(SCAN_OUTCOME("2026-W32"));
+    expect(JSON.parse(fakes.ssm.puts[1].Value).offered).toBe(0);
     expect(fakes.slack.fetchImpl).not.toHaveBeenCalled();
     expect(result.posted).toBe(false);
     expect(result.messageTs).toBeUndefined();
+  });
+
+  it("TC-SLACKAPP-233 writes the week record and publishes the derived streak (#154)", async () => {
+    // The signal a zero-offer week produces, end to end through the real offer. What
+    // it is for: `consensusDecisions` needs >= 2 usable passes to AGREE, and one pass
+    // reproduced only 66% of its own DELETE set on re-run — so a partial classifier
+    // degradation can empty the intersection while every batch still succeeds, and
+    // the run then exits 0, which no task-exit alarm can see.
+    const weekRecord = (week, offered) =>
+      JSON.stringify({ stage: "prod", isoWeek: week, offered, at: `${week}-fixture` });
+    const seeded = () =>
+      offerFakes(
+        {},
+        { weeks: { [SCAN_OUTCOME("2026-W31")]: weekRecord("2026-W31", 0) } },
+      );
+    const nothingToOffer = [
+      { id: "m-keep", verdict: "KEEP", reason: "durable" },
+      { id: "m-unstable", verdict: "UNSTABLE", reason: "passes disagreed on deletion" },
+    ];
+
+    const fakes = seeded();
+    const quiet = offer({ fakes, decisions: nothingToOffer });
+    await quiet.promise;
+
+    const weekPut = fakes.ssm.puts.find((put) => put.Name === SCAN_OUTCOME("2026-W32"));
+    expect(JSON.parse(weekPut.Value)).toMatchObject({
+      stage: "prod",
+      isoWeek: "2026-W32",
+      offered: 0,
+    });
+    // Same two runtime constraints as `approvals/offered`: the boundary denies a
+    // SecureString write, and `Overwrite: false` would make a same-week retry fail
+    // with `ParameterAlreadyExists` instead of rewriting one week.
+    expect(weekPut.Type).toBe("String");
+    expect(weekPut.Overwrite).toBe(true);
+    // Only the PRIOR weeks are read: the current week is the value this run just
+    // computed, so reading it back would make the derivation depend on
+    // read-after-write timing for no gain.
+    const historyRead = fakes.ssm.send.mock.calls
+      .map(([command]) => command.input.Names)
+      .find((names) => names?.some((name) => name.includes("/scan-outcome-")));
+    expect(historyRead).toEqual([
+      SCAN_OUTCOME("2026-W31"),
+      SCAN_OUTCOME("2026-W30"),
+      SCAN_OUTCOME("2026-W29"),
+    ]);
+
+    // ONE JSON object, carrying both metrics the two alarms read. Asserted whole:
+    // an extra field would be a new destination for run data, and a missing one is
+    // an alarm with no input.
+    expect(quiet.emit.mock.calls).toHaveLength(1);
+    // The event name as the LITERAL, not the imported constant: it is a contract
+    // with `infra/slack-approval.ts`'s filter pattern, which cannot import from this
+    // file (it runs in the Pulumi program, not the container). Pinned by literal on
+    // both sides, a rename turns one of the two red instead of leaving them
+    // disagreeing with every alarm silently dark.
+    expect(quiet.emit.mock.calls[0][0]).toEqual({
+      event: "cleanup_scan_outcome",
+      stage: "prod",
+      isoWeek: "2026-W32",
+      offered: 0,
+      quietWeeks: 2,
+      scanRan: 1,
+    });
+
+    // A same-week RETRY — the schedule has maximumRetryAttempts 1 — rewrites the one
+    // key and derives the same count. This is why the record is keyed per week
+    // rather than being a counter: there is no read-modify-write to race.
+    const retryFakes = seeded();
+    const retry = offer({ fakes: retryFakes, decisions: nothingToOffer });
+    await retry.promise;
+    expect(retry.emit.mock.calls[0][0].quietWeeks).toBe(2);
+    expect(
+      retryFakes.ssm.puts.filter((put) => put.Name.includes("/scan-outcome-")),
+    ).toHaveLength(1);
+
+    // A week that DID offer publishes its count and a streak of 0: the classifier
+    // produced a consensus, which is the condition the alarm must not fire on.
+    const busyFakes = seeded();
+    const busy = offer({ fakes: busyFakes, decisions: [del("m-1"), del("m-2")] });
+    await busy.promise;
+    expect(busy.emit.mock.calls[0][0]).toMatchObject({ offered: 2, quietWeeks: 0 });
+  });
+
+  it("TC-SLACKAPP-234 withholds the count when the history cannot be read, and never rounds it down (#154)", async () => {
+    // The mechanism partly watches itself: the scan computes the number its own
+    // alarm reads. So the failure to design against is not a crash, it is a read
+    // that quietly yields a SMALLER count and suppresses the page. A failed read
+    // publishes NOTHING and is reported for a non-zero exit instead.
+    const failing = offerFakes({}, { failRead: true });
+    const log = vi.fn();
+    const run = offer({ fakes: failing, log, decisions: [del("m-1")] });
+    const offered = await run.promise;
+
+    // The offer itself is untouched: written, posted, and returned as posted. The
+    // history is bookkeeping and must not cost the operator their review list.
+    expect(offered.posted).toBe(true);
+    expect(failing.slack.calls).toHaveLength(1);
+    expect(offered.outcome).toMatchObject({ isoWeek: "2026-W32", failed: "read" });
+    // NOTHING published. A line without `quietWeeks` would make the filter publish a
+    // lower value for `$.quietWeeks`, which is the suppression this guards against.
+    expect(run.emit).not.toHaveBeenCalled();
+    const logged = log.mock.calls.flat().join("\n");
+    expect(logged).toMatch(/scan-outcome history for prod could not be read/u);
+    expect(logged).toContain("2026-W32");
+
+    // A record whose value will not PARSE is a read failure too, not an absence.
+    // Absence legitimately breaks the streak; corruption lowering it silently would
+    // be this issue's own failure mode wearing a different hat.
+    const corrupt = offerFakes(
+      {},
+      { weeks: { [SCAN_OUTCOME("2026-W31")]: "{not json" } },
+    );
+    const corrupted = offer({ fakes: corrupt, decisions: [del("m-1")] });
+    expect((await corrupted.promise).outcome.failed).toBe("read");
+    expect(corrupted.emit).not.toHaveBeenCalled();
+  });
+
+  it("TC-SLACKAPP-235 keeps the week bookkeeping last, so it cannot cost an offer (#154)", async () => {
+    // ORDER, asserted as a property rather than inherited from where the call
+    // happens to sit: the week record is written after the offered record, after the
+    // post, and after the stamp. Earlier, a throttled `PutParameter` on a telemetry
+    // parameter would stop an operator's review list from being posted at all.
+    const failing = offerFakes({}, { failWrite: true });
+    const log = vi.fn();
+    const run = offer({ fakes: failing, log, decisions: [del("m-1")] });
+    const offered = await run.promise;
+
+    expect(offered.posted).toBe(true);
+    expect(failing.slack.calls).toHaveLength(1);
+    // The offered record and its stamp both landed; only the week record failed.
+    expect(failing.ssm.puts.map((put) => put.Name)).toEqual([
+      "/mem9-on-aws/prod/approvals/offered",
+      "/mem9-on-aws/prod/approvals/offered",
+    ]);
+    expect(offered.outcome).toMatchObject({ failed: "write" });
+    expect(run.emit).not.toHaveBeenCalled();
+    // Reported, not swallowed: next week's derivation will read this week as absent,
+    // so the run must not exit 0 — `runCleanup` maps this to exit 1
+    // (TC-SLACKAPP-236).
+    expect(log.mock.calls.flat().join("\n")).toMatch(
+      /scan-outcome record \(2026-W32\) could not be written/u,
+    );
   });
 
   it("TC-SLACKAPP-110 stamps the message timestamp onto the record without failing the offer", async () => {
@@ -6689,7 +6978,8 @@ describe("offering the list to Slack (#123)", () => {
     // `ts` does not exist until the post returns.
     const fakes = offerFakes();
     const result = await offer({ fakes }).promise;
-    expect(fakes.ssm.puts).toHaveLength(2);
+    // Three writes now: the record, the stamp, and #154's week record last.
+    expect(fakes.ssm.puts).toHaveLength(3);
     const stamped = JSON.parse(fakes.ssm.puts[1].Value);
     expect(stamped.messageTs).toBe("1754400000.000100");
     expect(stamped.messageChannel).toBe(CHANNEL);
@@ -6811,6 +7101,53 @@ describe("offering the list to Slack (#123)", () => {
     expect(offeredLog).toMatch(/offered 1 id\(s\) to Slack/u);
     expect(offeredLog).not.toMatch(/skipping the Slack offer/u);
     expect(offeredLog).not.toContain("MEM9_SLACK_APPROVAL_CHANNEL");
+  });
+
+  it("TC-SLACKAPP-236 exits non-zero when the quiet-week count is missing, and 0 when the week is merely quiet (#154)", async () => {
+    // The scan derives the number its own alarm reads, so a run that could not derive
+    // it has to say so through the one channel that already pages: the task-exit
+    // alarm. Exit 0 there would leave the streak alarm with a gap it reads as
+    // `notBreaching` — silence standing in for health, which is the defect #154 was
+    // filed against.
+    const server = fakeServer([memory("del-1", "session noise")]);
+    const llm = fakeLlm([[{ id: "del-1", verdict: "DELETE", reason: "session-state" }]]);
+    const deps = {
+      ...baseDeps(server, llm, tempDir()),
+      // The offer SUCCEEDED — written and posted — and only the bookkeeping failed.
+      // That is the case a `posted`-based exit code would score as a clean week.
+      postApproval: vi.fn(async () => ({
+        record: { ids: ["del-1"], hash: "sha256:x" },
+        posted: true,
+        outcome: { isoWeek: "2026-W32", offered: 1, failed: "read" },
+      })),
+    };
+    const failed = await runCleanup(baseOpts(), deps);
+    expect(failed.exitCode).toBe(1);
+    const logged = deps.log.mock.calls.flat().join("\n");
+    // Names the week and says what is missing, rather than reporting it as an offer
+    // failure — the offer is fine, and TC-SLACKAPP-113's line would send the
+    // operator looking at Slack.
+    expect(logged).toMatch(/quiet-week count for 2026-W32 could not be derived/u);
+    expect(logged).not.toMatch(/failed to offer the review list/u);
+    // The decision list still survives, as on every other exit-1 path.
+    expect(existsSync(failed.decisionPath)).toBe(true);
+
+    // And the whole point of the exit code being conditional: a genuinely quiet week
+    // — zero ids offered, streak derived and published — is NOT a failure. Exiting
+    // non-zero here would page for a healthy run every time there was nothing to
+    // clean, which is most weeks.
+    const quietServer = fakeServer([memory("keep-1", "durable decision")]);
+    const quietDeps = {
+      ...baseDeps(quietServer, fakeLlm([[{ id: "keep-1", verdict: "KEEP", reason: "durable" }]]), tempDir()),
+      postApproval: vi.fn(async () => ({
+        record: { ids: [], hash: "sha256:y" },
+        posted: false,
+        outcome: { isoWeek: "2026-W32", offered: 0, quietWeeks: 2 },
+      })),
+    };
+    const quiet = await runCleanup(baseOpts(), quietDeps);
+    expect(quiet.exitCode).toBe(0);
+    expect(quietDeps.log.mock.calls.flat().join("\n")).not.toMatch(/exiting non-zero/u);
   });
 
   it("TC-SLACKAPP-113 fails the run when the offer fails, naming the decision list it kept", async () => {
@@ -6968,7 +7305,8 @@ describe("offering the list to Slack (#123)", () => {
     const dead = offerFakes({}, { pending: pendingRecord({ issuedAt }) });
     const result = await offer({ fakes: dead, now: at(OFFER_TTL_MS + 1) }).promise;
     expect(result.posted).toBe(true);
-    expect(dead.ssm.puts).toHaveLength(2);
+    // Record, stamp, and #154's week record.
+    expect(dead.ssm.puts).toHaveLength(3);
     expect(JSON.parse(dead.ssm.puts[0].Value).ids).toEqual(["m-1", "m-2"]);
   });
 
@@ -7224,6 +7562,15 @@ describe("offering the list to Slack (#123)", () => {
       ["ssm", OFFERED],
       ["slack", "chat.postMessage"],
       ["ssm", OFFERED],
+      // #154's week bookkeeping, last on purpose: an alarm's input must not be able
+      // to stop the artifact, the record, or the post (TC-SLACKAPP-235).
+      ["ssm", SCAN_OUTCOME("2026-W32")],
+      [
+        "ssm-get",
+        SCAN_OUTCOME("2026-W31"),
+        SCAN_OUTCOME("2026-W30"),
+        SCAN_OUTCOME("2026-W29"),
+      ],
     ]);
     // The record names WHERE, and the key is the content-addressed one the writer
     // derived — so the apply can find the object from the record alone.
@@ -7411,9 +7758,11 @@ describe("offering the list to Slack (#123)", () => {
     const decisions = [del("m-1"), merge("surv", ["frag-1"], { content: CONTENT })];
     const fakes = offerFakes();
     const offerLog = vi.fn();
+    const emit = vi.fn();
     const offered = await offer({
       fakes,
       log: offerLog,
+      emit,
       decisions,
       artifactBucket: ARTIFACT.artifactBucket,
     }).promise;
@@ -7433,12 +7782,30 @@ describe("offering the list to Slack (#123)", () => {
 
     // 3. THE SSM RECORD DOES NOT, on either write. Asserted over the serialized
     // value, so a nested field added later cannot slip past a field-by-field check.
-    expect(fakes.ssm.puts).toHaveLength(2);
+    // Three writes since #154 — the record, the stamp, and the week record — and the
+    // sweep runs over ALL of them, which is what keeps a later field on the newest
+    // write from carrying memory text into a parameter.
+    expect(fakes.ssm.puts).toHaveLength(3);
     for (const put of fakes.ssm.puts) expect(put.Value).not.toContain(CONTENT);
 
     // 4. NO OFFER-SIDE LOG LINE DOES. `putDecisionArtifact` logs the key, the hash
     // and the byte count; `postApprovalRequest` logs the id count and the hash.
     expect(offerLog.mock.calls.flat().join("\n")).not.toContain(CONTENT);
+
+    // 4b. NOR DOES #154's JSON LINE, the destination this feature added. It carries
+    // an ISO week, two counts and a stage — no id, and certainly no merged text —
+    // and it goes to stdout where the metric filters read it, so a field added later
+    // would put memory content into CloudWatch metrics as a dimension value.
+    expect(JSON.stringify(emit.mock.calls)).not.toContain(CONTENT);
+    expect(emit).toHaveBeenCalledTimes(1);
+    expect(Object.keys(emit.mock.calls[0][0]).sort()).toEqual([
+      "event",
+      "isoWeek",
+      "offered",
+      "quietWeeks",
+      "scanRan",
+      "stage",
+    ]);
 
     // Now the APPLY side, replaying that same artifact through `runCleanup` — the
     // half where the bytes are read back, written to a memory, and reported on.
@@ -7658,6 +8025,55 @@ describe("wiring the offer into the review run (#123)", () => {
     };
     return client;
   }
+
+  it("TC-SLACKAPP-237 emits the scan-outcome line UNPREFIXED, on its own stream (#154)", async () => {
+    // The whole reason #154 has a second emission surface. `log` prefixes every line
+    // with `[memory-cleanup <iso>]`, and a CloudWatch `{ $.event = ... }` filter
+    // needs the log event to BE the JSON object — so a prefixed line matches
+    // nothing, publishes no datapoint, and leaves both alarms sitting green forever
+    // with nothing to show that they went blind. Asserted on the REAL production
+    // wiring, because that is where the prefix would be reintroduced.
+    reviewEnv({
+      MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL",
+      SLACK_BOT_TOKEN: "xoxb-injected",
+    });
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: false, cap: 50 },
+      { ssm: ssmFake(), getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
+    );
+    const stdout = vi.spyOn(console, "log").mockImplementation(() => {});
+    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      // An empty decision list: nothing to post, so this exercises the offer path
+      // without needing Slack, and it is also the exact input the alarm is about.
+      await production.deps.postApproval({
+        decisions: [],
+        generatedAt: "2026-08-05T03:00:00.000Z",
+        issuedAt: "2026-08-05T03:00:00.000Z",
+      });
+      expect(stdout).toHaveBeenCalledTimes(1);
+      const [line] = stdout.mock.calls[0];
+      expect(line.startsWith("{")).toBe(true);
+      expect(line).not.toMatch(/^\[memory-cleanup/u);
+      expect(JSON.parse(line)).toMatchObject({
+        // The literal, for the reason TC-SLACKAPP-233 records.
+        event: "cleanup_scan_outcome",
+        stage: "prod",
+        offered: 0,
+        scanRan: 1,
+      });
+      // And the two surfaces stay separate: the human-readable lines are still
+      // prefixed and still on stderr, so nothing here changed what other consumers
+      // parse.
+      const prefixed = stderr.mock.calls.flat().filter((each) => typeof each === "string");
+      expect(prefixed.length).toBeGreaterThan(0);
+      for (const each of prefixed) expect(each).toMatch(/^\[memory-cleanup /u);
+    } finally {
+      stdout.mockRestore();
+      stderr.mockRestore();
+      await production.close();
+    }
+  });
 
   it("TC-SLACKAPP-114 builds no offer dep when Slack is not configured, so the #102 CLI is unchanged", async () => {
     // The operator CLI at #102 has no Slack anything. An offer dep that existed
