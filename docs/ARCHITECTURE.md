@@ -693,8 +693,15 @@ GitHub and IAM provide no cross-system atomic transaction, so the final
 revalidation narrows rather than eliminates the interval between observing
 GitHub state and deleting the IAM quarantine. The trusted-writer maintenance
 window requires no concurrent workflow or repository-settings changes in that
-interval. An untrusted-PR model requires removing the OIDC `pull_request`
-subject out of band until permanent enforcement is verified.
+interval. This public repository's fork-triggered `pull_request` runs receive
+neither repository secrets nor write permissions, so they cannot request the
+OIDC token and the checked-in AWS steps also skip without
+`secrets.AWS_ROLE_ARN`. ARN secrecy is not an authorization boundary: the
+deploy role still trusts the repository's `pull_request` subject for
+same-repository previews. Before any workflow gives untrusted pull-request code
+`id-token: write`, including a `pull_request_target` path, the workflow's
+emitted subject must be identified and every matching deploy-role trust entry
+removed out of band until permanent enforcement is verified.
 Any rollback must preserve the transform, production activation, future
 `CreateRole` boundary enforcement, and the boundary-removal deny. Production
 execution and redacted evidence belong to the release-verification procedure.

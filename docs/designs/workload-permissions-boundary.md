@@ -102,9 +102,10 @@ or AgentCore and every allowlisted ECS execution-role type from being passed to
 Lambda or AgentCore. This is a `PassRole` control, not proof of role provenance:
 `CreateRole` does not expose the submitted trust policy as an IAM condition key,
 so a repository writer could create a matching role that is directly assumable.
-The accepted trusted-writer model excludes that caller. An untrusted-PR model
-must first remove the GitHub OIDC `pull_request` subject out of band. Before any
-stack module is imported, one global
+The accepted trusted-writer model excludes that caller. Before any workflow can
+give untrusted pull-request code a GitHub OIDC token, the emitted subject must
+be identified and every matching deploy-role trust entry removed out of band.
+Before any stack module is imported, one global
 `sst.aws.Function` component transform overrides every generated execution role
 with one exact trust statement for `lambda.amazonaws.com`. This also covers
 future application Functions. It compensates for the pinned SST version
@@ -167,12 +168,32 @@ is not claimed by this design.
 
 The repository variables and workflow gates are mechanical maintenance
 interlocks, not an authorization boundary against someone who can modify the
-workflow itself. This private repository assumes trusted writers and no
-concurrent workflow or repository-settings changes during rollout. If
-untrusted pull requests or additional writers enter the threat model, the
-operator must remove the `pull_request` subject from the deploy role's OIDC
-trust out of band before the implementation window and restore it only after
-permanent enforcement is verified.
+workflow itself. This public repository accepts untrusted fork pull requests.
+[GitHub documents](https://docs.github.com/en/actions/security-for-github-actions/security-guides/using-secrets-in-github-actions#using-secrets-in-a-workflow)
+that fork-triggered workflows do not receive repository secrets except
+`GITHUB_TOKEN`.
+[It also documents](https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax#how-permissions-are-calculated-for-a-workflow-job)
+that fork-triggered `pull_request` runs have every requested write permission
+reduced to read-only. The `id-token` permission supports only `write` or `none`,
+and
+[GitHub requires `id-token: write`](https://docs.github.com/en/actions/reference/security/oidc#workflow-permissions-for-the-requesting-the-oidc-token)
+to request an OIDC token. A public-fork run therefore cannot mint the token
+needed by `AssumeRoleWithWebIdentity`. The role ARN enters the checked-in
+workflow only as `secrets.AWS_ROLE_ARN`, so the fork-triggerable AWS jobs also
+skip their official AWS path when that secret is absent. That gate is an
+operational interlock. A role ARN is an identifier, not an authorization
+boundary; IAM authorizes the token against the role's audience and subject
+conditions.
+
+The deploy role's `pull_request` subject remains in its OIDC trust for
+same-repository preview runs. This argument does not rely on whether `vars.*`
+reaches fork-triggered workflows. Writers who can modify same-repository
+workflow code are trusted, and no concurrent workflow or repository-settings
+changes are allowed during rollout. Before any workflow can give untrusted
+pull-request code `id-token: write`, including a `pull_request_target` path, the
+operator must identify the subject that workflow emits and remove every
+matching subject from the deploy-role trust out of band. Trust is restored only
+after permanent enforcement is verified.
 
 GitHub repository state and AWS IAM state cannot participate in one atomic
 transaction. The rollout therefore revalidates the reviewed GitHub state at the

@@ -597,14 +597,22 @@ Live migration and production smoke evidence are recorded by the production
 release-verification procedure, not by CI for this change.
 
 The maintenance variables and workflow checks are operational interlocks for
-this private, trusted-writer repository. They cannot stop a repository writer
-from editing the workflow itself, and GitHub state plus IAM state cannot be
-validated and changed in one atomic transaction. The final GitHub revalidation
-narrows that cross-system window; the trusted-writer rule and prohibition on
-concurrent repository-settings changes close it operationally. Before accepting
-untrusted pull requests, remove the `pull_request` subject from the deploy role
-trust out of band and restore it only after the guarded migration has verified
-permanent enforcement.
+trusted repository writers. They cannot stop a writer from editing the workflow
+itself, and GitHub state plus IAM state cannot be validated and changed in one
+atomic transaction. This public repository also accepts fork pull requests.
+GitHub withholds repository secrets and reduces write permissions on
+fork-triggered `pull_request` runs; because `id-token` supports only `write` or
+`none`, those runs cannot request an OIDC token. The missing
+`secrets.AWS_ROLE_ARN` also makes the checked-in AWS steps skip, but the role ARN
+is an identifier, not an authorization boundary. The deploy role still trusts
+the repository's `pull_request` subject for same-repository preview runs.
+Before any workflow can give untrusted pull-request code `id-token: write` (for
+example through `pull_request_target`), identify the subject that workflow
+emits and remove every matching subject from the deploy-role trust out of band.
+Restore trust only after the guarded migration has verified permanent
+enforcement. The final GitHub revalidation narrows the cross-system window; the
+trusted-writer rule and prohibition on concurrent repository-settings changes
+close it operationally.
 
 ## Production alert runbook
 

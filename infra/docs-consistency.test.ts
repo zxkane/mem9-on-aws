@@ -9,6 +9,9 @@ const files = {
   readme: "README.md",
   architecture: "docs/ARCHITECTURE.md",
   facts: "docs/mem9-facts.md",
+  boundaryDesign: "docs/designs/workload-permissions-boundary.md",
+  infraCi: ".github/workflows/infra-ci.yml",
+  githubActionsRole: "infra/cloudformation/github-actions-role.yaml",
   ecs: "infra/ecs.ts",
 } as const;
 
@@ -281,5 +284,66 @@ describe("runtime documentation", () => {
     expect(text.facts).toContain(
       "optional ACM certificate and DNS-only Cloudflare records for the public OAuth",
     );
+  });
+
+  it("TC-DOCS-010: describes the public-repository fork threat model", () => {
+    for (const source of [
+      text.readme,
+      text.architecture,
+      text.boundaryDesign,
+    ]) {
+      expect(source).not.toMatch(
+        /this\s+private(?:,|\s)[\s\S]{0,120}repository/i,
+      );
+      expect(source).toMatch(/public repository/i);
+    }
+
+    expect(text.infraCi).toContain(
+      "HAS_AWS: ${{ secrets.AWS_ROLE_ARN }}",
+    );
+    expect(text.infraCi).toMatch(
+      /deploy-preview:[\s\S]{0,1600}permissions:[\s\S]{0,200}id-token: write/,
+    );
+    expect(text.githubActionsRole).toContain(
+      "- !Sub repo:${GitHubOrg}/${GitHubRepo}:pull_request",
+    );
+    expect(text.boundaryDesign).toContain("secrets.AWS_ROLE_ARN");
+    expect(text.boundaryDesign).toMatch(
+      /fork-triggered.{0,120}do not receive repository secrets/is,
+    );
+    expect(text.boundaryDesign).toMatch(
+      /fork-triggered.{0,120}write permission.{0,120}read-only/is,
+    );
+    expect(text.boundaryDesign).toMatch(
+      /id-token.{0,80}write.{0,80}none/is,
+    );
+    expect(text.boundaryDesign).toMatch(
+      /role ARN.{0,80}(?:not the authorization\s+boundary|not an authorization\s+boundary)/is,
+    );
+    expect(text.boundaryDesign).not.toMatch(
+      /unreachab.{0,120}keeping the role ARN.{0,80}secret/is,
+    );
+    expect(text.boundaryDesign).not.toContain(
+      "the `pull_request` subject must be removed from that role",
+    );
+    expect(text.boundaryDesign).toMatch(
+      /pull_request.{0,120}subject remains/is,
+    );
+    expect(text.boundaryDesign).toMatch(
+      /does not rely on whether.{0,80}vars\.\*/is,
+    );
+    for (const source of [
+      text.readme,
+      text.architecture,
+      text.boundaryDesign,
+    ]) {
+      expect(source).toMatch(
+        /untrusted\s+pull-request\s+code.{0,120}id-token: write/is,
+      );
+      expect(source).toContain("pull_request_target");
+      expect(source).toMatch(
+        /(?:identify.{0,120}subject.{0,120}every\s+matching|subject.{0,120}identified.{0,120}every\s+matching)/is,
+      );
+    }
   });
 });
