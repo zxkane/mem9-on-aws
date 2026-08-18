@@ -1873,7 +1873,10 @@ fail the run.
     config fails the run by name (TC-SLACKAPP-209) rather than scanning nothing.
     Only the replayed **count** is matched, not the log line whole: that line names
     the audit bucket, whose name embeds the account id, and preview CI logs are
-    public.
+    public. The marker is polled for two minutes to allow CloudWatch delivery.
+    A failed `FilterLogEvents` call is a query failure, never zero matches; after
+    the marker poll expires, an empty-pattern count distinguishes a populated
+    stream missing the replay marker from a stream whose logs have not arrived.
   - **The signing secret reaches the HMAC through the ENVIRONMENT**, not an argv:
     `openssl dgst -hmac "$SECRET"` is the obvious way to write this in bash and
     would put the secret in a world-readable command line. Pinned by a static
@@ -2068,9 +2071,16 @@ fail the run.
     reviewed`), and for a 5xx (`answered HTTP 500, not 200`). Three distinguishable
     messages, because the operator's next move differs: a façade bug, a claim-order
     bug, and a reply the operator cannot see.
-  - **Zero replay lines fails the run**, naming the cause the count implies — the task
-    exited 0 by **re-classifying** instead of replaying, so the approved `MERGE` was
-    not what ran.
+  - **Zero replay lines fails the run after a two-minute poll.** A second,
+    empty-pattern count decides what can actually be inferred: a populated stream
+    missing the marker means the task exited 0 by **re-classifying** instead of
+    replaying, while a stream with zero total events reports delayed log delivery
+    or wrong stream configuration and does not claim which application path ran.
+  - **A failed CloudWatch Logs query fails distinctly.** The harness suppresses the
+    raw AWS error so account-scoped identifiers cannot enter public CI output, but
+    preserves the nonzero status and reports that the replay assertion could not
+    inspect the stream. It never turns `AccessDenied`, throttling, or a missing log
+    group into a zero-event diagnosis.
   - **The log query uses the task definition's own group and stream prefix.** Asserted
     on the fake's recorded `logs filter-log-events` invocations: a hash-suffixed group
     name and a `{prefix}/{container}/{task-id}` stream, neither of which a hand-

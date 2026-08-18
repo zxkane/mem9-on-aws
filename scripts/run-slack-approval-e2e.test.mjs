@@ -224,6 +224,8 @@ function runFixture({
   logGroup = "/sst/cluster/mem9-pr-123-a1b2c3/Mem9Cleanup-d4e5f6",
   logPrefix = "mem9",
   replayLines = "1",
+  logLines = "1",
+  logQueryError = "",
   failingJqFilter = "",
   claimReadError = "",
 } = {}) {
@@ -414,10 +416,24 @@ if (command === "ssm get-parameter") {
   // The pattern is asserted, not ignored: a script that queried for the wrong
   // phrase would find nothing on a healthy stage and report a re-classification
   // that never happened.
-  const matched = (option("--filter-pattern") ?? "").includes(
+  if (process.env.MOCK_LOG_QUERY_ERROR) {
+    console.error(
+      \`An error occurred (\${process.env.MOCK_LOG_QUERY_ERROR}) when calling the \` +
+        "FilterLogEvents operation: simulated failure",
+    );
+    process.exit(255);
+  }
+  const pattern = option("--filter-pattern") ?? "";
+  const matched = pattern.includes(
     "reviewed decision(s) from s3://",
   );
-  console.log(matched ? (process.env.MOCK_REPLAY_LINES ?? "0") : "0");
+  console.log(
+    matched
+      ? (process.env.MOCK_REPLAY_LINES ?? "0")
+      : pattern === ""
+        ? (process.env.MOCK_LOG_LINES ?? "0")
+        : "0",
+  );
 } else if (command === "ecs describe-tasks") {
   const query = option("--query") ?? "";
   // The cluster is asserted, not ignored: the script must pass the name it read
@@ -639,6 +655,8 @@ process.exit(real.status ?? 1);
       MOCK_LOG_GROUP: logGroup,
       MOCK_LOG_PREFIX: logPrefix,
       MOCK_REPLAY_LINES: replayLines,
+      MOCK_LOG_LINES: logLines,
+      MOCK_LOG_QUERY_ERROR: logQueryError,
       MOCK_FACADE: facade,
       MOCK_SECRET: secret,
       MOCK_BAD_STATUS: badSignatureStatus,
@@ -1370,6 +1388,36 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
     expect(result.status, output).not.toBe(0);
     expect(output).toMatch(/never logged an artifact replay/iu);
     expect(output).toMatch(/re-classifying/iu);
+  });
+
+  it("TC-SLACKAPP-209 reports delayed or missing log delivery when the stream has no events", () => {
+    const { callRecords, result, output } = runFixture({
+      claim: claimWith(),
+      replayLines: "0",
+      logLines: "0",
+    });
+    expect(result.status, output).not.toBe(0);
+    expect(output).toMatch(/log stream still had zero events after 120 seconds/iu);
+    expect(output).toMatch(/log delivery may be delayed/iu);
+    expect(output).not.toMatch(/re-classifying/iu);
+
+    const filters = callRecords.filter(
+      ([tool, service, operation]) =>
+        tool === "aws" && service === "logs" && operation === "filter-log-events",
+    );
+    expect(filters).toHaveLength(14);
+    expect(filters.at(-1)?.[filters.at(-1).indexOf("--filter-pattern") + 1]).toBe("");
+  });
+
+  it("TC-SLACKAPP-209 reports a CloudWatch query failure instead of treating it as zero matches", () => {
+    const { result, output } = runFixture({
+      claim: claimWith(),
+      logQueryError: "AccessDeniedException",
+    });
+    expect(result.status, output).not.toBe(0);
+    expect(output).toMatch(/CloudWatch Logs artifact-replay marker query failed/iu);
+    expect(output).toMatch(/replay assertion could not inspect/iu);
+    expect(output).not.toMatch(/never logged an artifact replay/iu);
   });
 
   it("TC-SLACKAPP-209 the log group and stream come from the task definition, never a computed path", () => {

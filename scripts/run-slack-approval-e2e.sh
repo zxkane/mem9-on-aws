@@ -688,25 +688,62 @@ LOG_STREAM="${LOG_PREFIX}/${CONTAINER_NAME}/${TASK_ARN##*/}"
 # assertion — `loadDecisionArtifact` emits this line only after the fetched bytes
 # hashed to the approved value, so its presence IS "the reviewed list was replayed".
 echo "run-slack-approval-e2e: checking ${LOG_STREAM} for the artifact-replay line"
-REPLAYED=0
-for attempt in 1 2 3 4 5 6; do
-  MATCHES=$(aws logs filter-log-events \
+
+# AWS CLI paginates `filter-log-events` by default. That matters because the API
+# may return an empty page with a next token even when a later page has events.
+# Keep stderr out of public CI logs (an AWS error can contain account-scoped
+# identifiers), but never turn a failed query into a zero count.
+cloudwatch_event_count() {
+  local filter_pattern="$1"
+  local query_name="$2"
+  local count
+
+  count=$(aws logs filter-log-events \
     --log-group-name "$LOG_GROUP" \
     --log-stream-names "$LOG_STREAM" \
-    --filter-pattern '"reviewed decision(s) from s3://"' \
+    --filter-pattern "$filter_pattern" \
     --start-time "$((TIMESTAMP * 1000))" \
     --region "$REGION" \
     --query 'length(events)' \
-    --output text 2>/dev/null || true)
-  if [[ "$MATCHES" =~ ^[0-9]+$ ]] && ((MATCHES > 0)); then
+    --output text 2>/dev/null) || {
+      local status=$?
+      echo "::error::the CloudWatch Logs ${query_name} query failed (exit ${status}); the replay assertion could not inspect the apply task stream" >&2
+      return "$status"
+    }
+
+  if [[ ! "$count" =~ ^[0-9]+$ ]]; then
+    echo "::error::the CloudWatch Logs ${query_name} query returned a non-numeric event count; the replay assertion could not inspect the apply task stream" >&2
+    return 1
+  fi
+  printf '%s' "$count"
+}
+
+REPLAYED=0
+REPLAY_POLL_ATTEMPTS=13
+REPLAY_POLL_INTERVAL_SECONDS=10
+for ((attempt = 1; attempt <= REPLAY_POLL_ATTEMPTS; attempt += 1)); do
+  if ! MATCHES=$(cloudwatch_event_count \
+    '"reviewed decision(s) from s3://"' "artifact-replay marker"); then
+    exit 1
+  fi
+  if ((MATCHES > 0)); then
     REPLAYED=$MATCHES
     break
   fi
-  echo "run-slack-approval-e2e: replay line not visible yet (attempt ${attempt}/6)"
-  sleep 10
+  echo "run-slack-approval-e2e: replay line not visible yet (attempt ${attempt}/${REPLAY_POLL_ATTEMPTS})"
+  if ((attempt < REPLAY_POLL_ATTEMPTS)); then
+    sleep "$REPLAY_POLL_INTERVAL_SECONDS"
+  fi
 done
 if ((REPLAYED == 0)); then
-  echo "::error::the apply task never logged an artifact replay — it exited 0 by re-classifying instead of applying the reviewed list, so the approved MERGE was not what ran" >&2
+  if ! TOTAL_EVENTS=$(cloudwatch_event_count "" "total-event diagnostic"); then
+    exit 1
+  fi
+  if ((TOTAL_EVENTS == 0)); then
+    echo "::error::the apply task log stream still had zero events after 120 seconds; CloudWatch log delivery may be delayed or the stream configuration may be wrong, so the artifact replay could not be proven" >&2
+  else
+    echo "::error::the apply task log stream contained ${TOTAL_EVENTS} event(s) but never logged an artifact replay — it exited 0 by re-classifying instead of applying the reviewed list, so the approved MERGE was not what ran" >&2
+  fi
   exit 1
 fi
 
