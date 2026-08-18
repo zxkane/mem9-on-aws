@@ -65,7 +65,12 @@ import type { OauthFacadeOutputs } from "./oauth-facade";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import { taskFailureAlarm } from "./task-failure-alarm";
 import { accountId, applicationRegion, ecrImage } from "./ecr";
-import { boundedNamePrefix, IAM_ROLE_NAME_MAX, SCHEDULE_GROUP_NAME_PREFIX_MAX } from "./consolidation";
+import {
+  boundedNamePrefix,
+  IAM_ROLE_NAME_MAX,
+  SCHEDULE_GROUP_NAME_PREFIX_MAX,
+  taskContainerLogGroupName,
+} from "./consolidation";
 import { resolveVpc } from "./vpc";
 
 const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
@@ -77,6 +82,25 @@ const RESPONSES_REGION = process.env.MEM9_LLM_RESPONSES_REGION || "us-west-2";
 // one place; the metric name distinguishes them.
 const CLEANUP_FAILURE_METRIC = "CleanupApplyTaskFailures";
 const SCAN_TARGET_ERROR_METRIC = "TargetErrorCount";
+
+// #154's two metrics, both sourced from ONE JSON log line the scan emits
+// (`SCAN_OUTCOME_EVENT` in scripts/memory-cleanup.mjs). A metric sourced from a log
+// filter needs no publish grant, so neither alarm costs the scan task any IAM — and
+// it must not acquire any: the workload permissions boundary renders near IAM's
+// non-adjustable 6144-character ceiling.
+const SCAN_METRIC_NAMESPACE = "mem9-on-aws/CleanupScan";
+const SCAN_QUIET_WEEKS_METRIC = "QuietScanWeeks";
+const SCAN_RAN_METRIC = "ScanRan";
+const SCAN_OUTCOME_EVENT = "cleanup_scan_outcome";
+// The alarm's whole judgement, and the reason the streak is derived in the scan
+// rather than by an alarm: `Period` × `EvaluationPeriods` is capped at 604800s —
+// seven days — while a window guaranteed to hold two consecutive weekly runs would
+// have to be longer than that, so ">= 2 consecutive weeks" cannot be expressed here
+// at all. See docs/designs/quiet-scan-alarm.md.
+const SCAN_QUIET_WEEKS_THRESHOLD = 2;
+// Exactly at the cap, therefore legal, and the longest window that can hold the
+// one datapoint a weekly scan produces.
+const SCAN_ALARM_PERIOD_SECONDS = 604_800;
 
 export const SLACK_APPROVAL_ENABLED_ENV = "MEM9_SLACK_APPROVAL_ENABLED";
 export const SLACK_APPROVAL_CHANNEL_ENV = "MEM9_SLACK_APPROVAL_CHANNEL";
@@ -627,6 +651,22 @@ export function slackApproval(
     },
   });
 
+  // The scan writes its outcome line to the TASK's own log group, so #154's metric
+  // filters have to attach to that group rather than to the `task-failures` group
+  // the EventBridge rule delivers into. SST names the group itself, and the only
+  // reliable way to learn the name is the container definition it rendered — the
+  // same read `infra/consolidation.ts` does for the same reason.
+  const scanLogGroupName = taskContainerLogGroupName(
+    task,
+    CLEANUP_CONTAINER_NAME,
+    "cleanup",
+  );
+
+  // ONE source for the schedule's state and for whether #154's liveness alarm is
+  // armed. Two independent copies of this condition is how you get a preview stage
+  // paging every seven days for a scan it was never meant to run.
+  const scanScheduleState = $app.stage === "prod" ? "ENABLED" : "DISABLED";
+
   // --- The four inputs `readTaskInputs` reads to start the task ---
   // Keyed by the field each one populates. Both the cluster name and the task-def
   // ARN are non-empty strings, so swapping them passes the handler's own
@@ -749,7 +789,7 @@ export function slackApproval(
       groupName: scanScheduleGroup.name,
       scheduleExpression: CLEANUP_SCAN_CRON,
       scheduleExpressionTimezone: "UTC",
-      state: $app.stage === "prod" ? "ENABLED" : "DISABLED",
+      state: scanScheduleState,
       flexibleTimeWindow: { mode: "OFF" },
       target: {
         arn: ecsOut.cluster.nodes.cluster.arn,
@@ -787,6 +827,18 @@ export function slackApproval(
                 // CLEANUP_SCAN_OUT_DIR.
                 "--out",
                 CLEANUP_SCAN_OUT_DIR,
+              ],
+              // The ONE variable this override adds, and it marks provenance rather
+              // than changing behaviour: #154's week history and outcome metrics are
+              // evidence about the SCHEDULE, so an operator's off-schedule dry run
+              // must not contribute to them. Without it a hand-run offering nothing
+              // could supply the second quiet week, and any hand-run would publish
+              // `ScanRan` and hold the liveness alarm green for another seven days
+              // while the Scheduler was dead. It is set HERE, on the override, and
+              // never on the task definition — which is what keeps the apply half and
+              // the operator CLI unmarked.
+              environment: [
+                { name: "MEM9_CLEANUP_SCHEDULED", value: "1" },
               ],
               // MEM9_SLACK_APPROVAL_CHANNEL is already in the definition's
               // `environment`, and it is what makes `buildPostApproval` return a
@@ -850,6 +902,187 @@ export function slackApproval(
         treatMissingData: "notBreaching",
         alarmActions: [ecsOut.alertsTopicArn],
       });
+    }
+
+    // --- The scan's OUTCOME signals (#154) ---
+    //
+    // What every alarm above cannot see: a scan that runs, succeeds, and offers
+    // NOTHING. `consensusDecisions` needs >= 2 usable passes agreeing, and one pass
+    // reproduced only 66% of its own DELETE set on re-run — so a partial classifier
+    // degradation can collapse the intersection to zero without tripping
+    // `classifierBroken` (which needs EVERY batch to fail). The run then exits 0,
+    // which the task-exit alarm cannot see by construction.
+    //
+    // Both filters read the SAME line, so the scan emits once and neither metric
+    // needs task IAM. The stage is matched in the pattern as well as carried as a
+    // dimension: the apply half of this task definition shares the log group, and a
+    // pattern that matched only on `event` would count another stage's line if the
+    // group were ever shared further.
+    if (ecsOut.alertsTopicArn) {
+      const scanOutcomePattern =
+        `{ $.event = "${SCAN_OUTCOME_EVENT}" && $.stage = "${$app.stage}" }`;
+      new aws.cloudwatch.LogMetricFilter("CleanupScanQuietWeeksFilter", {
+        logGroupName: scanLogGroupName,
+        pattern: scanOutcomePattern,
+        metricTransformation: {
+          name: SCAN_QUIET_WEEKS_METRIC,
+          namespace: SCAN_METRIC_NAMESPACE,
+          // The DERIVED count, not `1`: a judgement spanning two weekly runs cannot
+          // live in an alarm whose window is capped at seven days, so the scan
+          // computes it from its own per-week records and the alarm only compares it
+          // to a static threshold.
+          value: "$.quietWeeks",
+          dimensions: { stage: "$.stage" },
+        },
+      });
+      new aws.cloudwatch.LogMetricFilter("CleanupScanRanFilter", {
+        logGroupName: scanLogGroupName,
+        pattern: scanOutcomePattern,
+        metricTransformation: {
+          name: SCAN_RAN_METRIC,
+          namespace: SCAN_METRIC_NAMESPACE,
+          value: "$.scanRan",
+          dimensions: { stage: "$.stage" },
+        },
+      });
+
+      new aws.cloudwatch.MetricAlarm("CleanupScanQuietWeeksAlarm", {
+        alarmDescription:
+          "The weekly memory cleanup scan offered zero ids for two consecutive " +
+          "weeks, which a collapsed classifier consensus produces silently.",
+        namespace: SCAN_METRIC_NAMESPACE,
+        metricName: SCAN_QUIET_WEEKS_METRIC,
+        dimensions: { stage: $app.stage },
+        // Maximum, not Sum: the value is a level (this run's streak), so summing two
+        // runs inside one window would page at 1 + 1.
+        statistic: "Maximum",
+        period: SCAN_ALARM_PERIOD_SECONDS,
+        evaluationPeriods: 1,
+        datapointsToAlarm: 1,
+        threshold: SCAN_QUIET_WEEKS_THRESHOLD,
+        comparisonOperator: "GreaterThanOrEqualToThreshold",
+        // A stage whose scan has not run yet emits nothing, and `missing` would hold
+        // this in INSUFFICIENT_DATA forever. Silence is covered by the liveness
+        // alarm below, deliberately and not by this one.
+        treatMissingData: "notBreaching",
+        // NO volume guard, and this is not an omission. A volume guard protects a
+        // RATE's denominator (see observability.ts's zero-fact-rate alarm, which
+        // needs `succeeded > 50` because ingest runs thousands of jobs a day). This
+        // value is a count of consecutive discrete runs with exactly one run per
+        // period by construction, so the "high zero rate on low volume" failure it
+        // guards against cannot arise — and a guard here would SUPPRESS the genuine
+        // consecutive-quiet signal, since there is no denominator to protect.
+        alarmActions: [ecsOut.alertsTopicArn],
+      });
+
+      // The streak alarm fails OPEN on its own: if the scan never runs — schedule
+      // flipped to DISABLED, a task definition deleted by a teardown, scheduler
+      // misconfiguration — no datapoint is published and `notBreaching` keeps it
+      // green forever. That is the same "silence reads as health" defect this whole
+      // section exists to close, one layer up, and the ECS task-exit alarm cannot
+      // see a task that never started.
+      //
+      // `FILL(scan_ran, 0)` converts a missing period into a concrete breaching
+      // value, which `treatMissingData` cannot do — the pattern
+      // `DurableIngestTelemetryLivenessAlarm` (infra/observability.ts) establishes.
+      //
+      // Armed ONLY where the schedule's state is ENABLED. Every other stage runs no
+      // scan by design, so an unconditional liveness alarm would page continuously
+      // on each preview.
+      if (scanScheduleState === "ENABLED") {
+        const livenessAlarm = new aws.cloudwatch.MetricAlarm("CleanupScanLivenessAlarm", {
+          alarmDescription:
+            "No weekly memory cleanup scan reported an outcome in the last seven " +
+            "days, so the quiet-week alarm has no input and cannot page.",
+          metricQueries: [
+            {
+              id: "scan_ran",
+              metric: {
+                namespace: SCAN_METRIC_NAMESPACE,
+                metricName: SCAN_RAN_METRIC,
+                dimensions: { stage: $app.stage },
+                stat: "Sum",
+                period: SCAN_ALARM_PERIOD_SECONDS,
+              },
+              returnData: false,
+            },
+            {
+              id: "scan_ran_present",
+              expression: `FILL(scan_ran, 0)`,
+              label: "Scan outcome reported",
+              returnData: true,
+            },
+          ],
+          evaluationPeriods: 1,
+          datapointsToAlarm: 1,
+          threshold: 1,
+          comparisonOperator: "LessThanThreshold",
+          // FILL makes every currently missing period an explicit breach, so an
+          // older healthy datapoint from CloudWatch's wider sliding range cannot
+          // defer it.
+          treatMissingData: "breaching",
+          // NO actions here. They hang off the composite below, which is what gives
+          // them a bounded grace — the same split `DurableIngestTelemetryLiveness*`
+          // uses in infra/observability.ts.
+        });
+
+        // An always-OK alarm whose only job is to be something the composite can
+        // wait on: `ActionsSuppressorWaitPeriod` is "the maximum time the composite
+        // waits for the suppressor to go into ALARM", so a suppressor that never
+        // alarms delays actions by exactly that period and no longer. `Minimum` of a
+        // metric that only ever publishes 1 is never below 0, and an empty window
+        // reads notBreaching, so this is OK in every state by construction.
+        const livenessDelayGuard = new aws.cloudwatch.MetricAlarm(
+          "CleanupScanLivenessActionDelayGuard",
+          {
+            alarmDescription:
+              "Always-OK guard that gives the cleanup scan liveness alarm one " +
+              "bounded grace period before it notifies.",
+            namespace: SCAN_METRIC_NAMESPACE,
+            metricName: SCAN_RAN_METRIC,
+            dimensions: { stage: $app.stage },
+            statistic: "Minimum",
+            period: SCAN_ALARM_PERIOD_SECONDS,
+            evaluationPeriods: 1,
+            threshold: 0,
+            comparisonOperator: "LessThanThreshold",
+            treatMissingData: "notBreaching",
+          },
+        );
+
+        new aws.cloudwatch.CompositeAlarm("CleanupScanLivenessNotification", {
+          alarmName: `mem9-on-aws-${$app.stage}-cleanup-scan-liveness`,
+          alarmDescription:
+            "No weekly memory cleanup scan reported an outcome in the last seven " +
+            "days. EXPECTED ONCE when the schedule is first enabled on a stage: " +
+            "until the first scheduled run publishes a datapoint there is no way " +
+            "for CloudWatch to tell 'not due yet' from 'stopped', and it clears " +
+            "itself after that run.",
+          alarmRule: livenessAlarm.arn.apply((arn) => `ALARM("${arn}")`),
+          // The grace is deliberately ONE HOUR and not one cadence. It absorbs the
+          // transients that are worth absorbing — a deploy landing while a scan is
+          // in flight, and the hourly re-evaluation of a multi-day window — while a
+          // cadence-long wait would delay every REAL page by a week, since a
+          // never-alarming suppressor delays actions unconditionally rather than
+          // only at enablement.
+          //
+          // What it does NOT do is suppress the first-enablement page above. That
+          // would need to distinguish "no scan was due yet" from "the scan stopped",
+          // which is not derivable from a metric whose evaluation window is capped
+          // below the scan's own cadence. The state that could answer it is the SSM
+          // week history, and reading that from outside the scan means a second
+          // scheduled principal with `cloudwatch:GetMetricData` — explicitly out of
+          // scope for #154, and revisitable if the noise ever justifies it.
+          actionsSuppressor: {
+            alarm: livenessDelayGuard.arn,
+            waitPeriod: 3600,
+            extensionPeriod: 0,
+          },
+          alarmActions: [ecsOut.alertsTopicArn],
+          // No okActions: CloudWatch restarts the wait after a state change during
+          // suppression, so a recovery could be delivered without a prior page.
+        });
+      }
     }
   }
 

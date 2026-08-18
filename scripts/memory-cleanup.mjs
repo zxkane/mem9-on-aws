@@ -107,6 +107,19 @@ const SLACK_MAX_HEADER_CHARS = 150;
 const SLACK_TIMEOUT_MS = 15_000;
 /** Set by infra/slack-approval.ts; its presence is what enables the offer. */
 const MEM9_SLACK_CHANNEL_ENV = "MEM9_SLACK_APPROVAL_CHANNEL";
+/**
+ * Set to "1" by the EventBridge Scheduler override in infra/slack-approval.ts, and
+ * by nothing else (#154).
+ *
+ * It gates the week history and the outcome metrics, because an operator's
+ * off-schedule dry run is not evidence about the schedule. Without the gate a
+ * hand-run that offered nothing could supply the SECOND quiet week and page for a
+ * classifier that is fine, and any hand-run would publish `ScanRan` — holding the
+ * liveness alarm green for another seven days while the Scheduler was in fact dead.
+ * The offer itself is unaffected: a hand-run still writes and posts exactly as it
+ * did before.
+ */
+const MEM9_CLEANUP_SCHEDULED_ENV = "MEM9_CLEANUP_SCHEDULED";
 // Set by infra/slack-approval.ts to the bucket it provisions (#150). Its ABSENCE
 // is meaningful rather than an error: it is what keeps #102's operator CLI, and any
 // stage deployed before that bucket existed, writing the id-only record they always
@@ -1128,6 +1141,260 @@ export function decisionArtifactHash(serialized) {
 }
 
 /**
+ * The scheduled scan's week history (#154), and the reason it exists in SSM at all.
+ *
+ * A CloudWatch alarm's total evaluation window is capped at 604800s — seven days —
+ * for `Period` × `EvaluationPeriods`, and the scan is WEEKLY. A window guaranteed to
+ * contain two consecutive runs would have to be longer than seven days, which the cap
+ * rejects (`period=604800, evaluationPeriods=2` is 1209600s), so ">= 2 consecutive
+ * zero-offer weeks" is not expressible in any single alarm, by any combination of
+ * period, evaluationPeriods, datapointsToAlarm, or metric math. Memory spanning two
+ * runs therefore has to be persisted, and it lives here as the smallest thing that
+ * works: one immutable record per ISO week, and a pure function over the last few of
+ * them. The alarm stays dumb (`>= 2` on a static threshold).
+ *
+ * A per-week KEY, deliberately not a counter. A same-week retry is then an
+ * idempotent rewrite of one key — no read-modify-write, so no double-increment
+ * race to defend — and a corrupted or deleted key costs one week of history rather
+ * than the series. It also costs NO new IAM: the scan task role already holds
+ * `ssm:GetParameters` and `ssm:PutParameter` on `{prefix}/approvals/*`, and the
+ * workload permissions boundary renders near IAM's non-adjustable 6144-character
+ * ceiling, which is not a budget this feature may spend.
+ *
+ * These records are the alarm's ONLY memory. Nothing prunes them (~52 small
+ * parameters per year per stage, far inside the SSM quota) and nothing should:
+ * deleting them as "stale" silently resets the streak and the alarm goes quiet.
+ */
+const SCAN_OUTCOME_WEEKS = 4;
+const WEEK_MS = 7 * 24 * 60 * 60 * 1000;
+/**
+ * The `event` field the log-metric filters match on.
+ *
+ * DUPLICATED as a literal in `infra/slack-approval.ts`, which cannot import it: that
+ * file runs in the Pulumi program, and importing this module would drag the AWS SDK
+ * and the whole CLI into synth. Both sides are therefore pinned to the literal by
+ * their own tests (TC-SLACKAPP-227 on the filter pattern, TC-SLACKAPP-233 and
+ * TC-SLACKAPP-237 on the emitted line), so a rename on either side turns a test red
+ * rather than leaving the filters matching nothing and both alarms silently dark.
+ */
+export const SCAN_OUTCOME_EVENT = "cleanup_scan_outcome";
+
+/**
+ * The ISO-8601 week-numbering key (`2026-W33`) for a timestamp.
+ *
+ * ONE function for the writer and the reader, because an off-by-one or a W52/W53
+ * year-boundary disagreement between two implementations is not a wrong number —
+ * it is a permanent false negative, where the reader looks up weeks the writer
+ * never writes and the alarm never fires again.
+ *
+ * The week-numbering YEAR is taken from the THURSDAY of the week (ISO-8601 §3.17),
+ * which is what makes the year boundary fall out instead of needing special cases:
+ * 2027-01-01 is a Friday, so its Thursday is 2026-12-31 and the key is `2026-W53`.
+ * UTC throughout — the schedule is a UTC cron, and a local-time reading would move
+ * a Saturday 03:00 run into a different week west of the prime meridian.
+ */
+export function isoWeek(ms) {
+  const date = new Date(ms);
+  const thursday = new Date(
+    Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate()),
+  );
+  // Mon=1..Sun=7, so `+ 4 - isoDay` lands on this ISO week's Thursday.
+  const isoDay = thursday.getUTCDay() || 7;
+  thursday.setUTCDate(thursday.getUTCDate() + 4 - isoDay);
+  const year = thursday.getUTCFullYear();
+  const week = Math.ceil(
+    ((thursday.getTime() - Date.UTC(year, 0, 1)) / 86_400_000 + 1) / 7,
+  );
+  return `${year}-W${String(week).padStart(2, "0")}`;
+}
+
+/**
+ * This week's key and the `count - 1` before it, newest first.
+ *
+ * Derived by subtracting whole weeks from the timestamp and re-deriving each key
+ * through `isoWeek`, NOT by decrementing a week number: the latter has to know
+ * whether the previous year had 52 or 53 weeks, which is the arithmetic this
+ * function exists to avoid duplicating.
+ */
+export function recentIsoWeeks(ms, count = SCAN_OUTCOME_WEEKS) {
+  return Array.from({ length: count }, (_, index) => isoWeek(ms - index * WEEK_MS));
+}
+
+export function scanOutcomeParameterName(ssmPrefix, week) {
+  return `${ssmPrefix}/approvals/scan-outcome-${week}`;
+}
+
+/**
+ * Consecutive zero-offer weeks ending at the current one, recomputed from scratch.
+ *
+ * Never incremented, so a re-run cannot double-count and a lost record cannot
+ * corrupt a running total. `weeks` is newest-first (`recentIsoWeeks`).
+ *
+ * An ABSENT record does not extend the streak, and that is a decision rather than
+ * an accident of the loop: the tempting alternative — skip the gap and keep
+ * counting — turns a week whose record never got written into a silent false
+ * positive on the alarm's own input. A gap breaks it, the scan-liveness alarm
+ * covers the never-ran case that produces gaps, and the count then only ever
+ * describes contiguous, present, zero-offer weeks.
+ */
+export function quietWeekStreak(weeks, records) {
+  let streak = 0;
+  for (const week of weeks) {
+    const record = records[week];
+    if (!record || record.offered !== 0) break;
+    streak += 1;
+  }
+  return streak;
+}
+
+/**
+ * A stored week record, or a throw.
+ *
+ * Shape-checked, not merely parsed, and the difference is the whole point:
+ * `{"offered":"0"}` is valid JSON, reads as NOT zero, and would break the streak —
+ * publishing a LOWER count than the truth and suppressing the page. That is this
+ * feature's own failure mode arriving as data rather than as an error, so a record
+ * that does not describe its own week with an integer count is treated the way an
+ * unreadable one is: loudly, with no count published at all.
+ *
+ * The error names WHICH fields failed and never their values. A record that failed
+ * validation is by definition not known to hold what this code put there, and the
+ * error text reaches CloudWatch — so echoing the stored bytes back would be the one
+ * way this path could publish content nobody reviewed. The week and stage in the
+ * message are this run's own, not the record's.
+ */
+function parseWeekRecord({ week, stage, value }) {
+  let record;
+  try {
+    record = JSON.parse(value);
+  } catch {
+    // The parse error is DISCARDED rather than forwarded. Node quotes a slice of the
+    // input in its message ("Unexpected token 'x', \"{not json\" is not valid JSON"),
+    // and this text is logged — so forwarding it would put unreviewed stored bytes
+    // into CloudWatch on exactly the path that exists because the record cannot be
+    // trusted.
+    throw new Error(`the scan-outcome record for ${week} is not valid JSON`);
+  }
+  const shaped = record !== null && typeof record === "object";
+  const failed = shaped
+    ? [
+        record.isoWeek === week ? undefined : "isoWeek",
+        record.stage === stage ? undefined : "stage",
+        Number.isInteger(record.offered) && record.offered >= 0
+          ? undefined
+          : "offered",
+      ].filter(Boolean)
+    : ["the record itself"];
+  if (failed.length > 0) {
+    throw new Error(
+      `the scan-outcome record for ${week} does not describe that week for ` +
+        `${stage}: ${failed.join(", ")} did not validate`,
+    );
+  }
+  return record;
+}
+
+/**
+ * Write this week's record, derive the streak from the weeks before it, and report
+ * both to the caller.
+ *
+ * The write comes FIRST and is unconditional: the record is history for future runs
+ * and must not be lost because this run's read of older weeks failed. The current
+ * week is then taken from the in-memory value rather than read back, which keeps
+ * the derivation independent of read-after-write timing on a parameter this same
+ * call just wrote.
+ *
+ * A failed read is NOT reported as absence. The scan computes the number its own
+ * alarm reads, so the failure mode worth designing against is a read that silently
+ * yields a LOWER count and suppresses the page. Absence is legitimate and breaks
+ * the streak; a thrown read, or a record whose value will not parse, publishes NO
+ * streak value at all and is reported as `failed` for the caller to exit non-zero
+ * on, so the existing task-exit alarm fires instead.
+ *
+ * Nothing here THROWS, and that is deliberate: this is bookkeeping for an alarm,
+ * and the caller runs it after the review list is already offered and posted. A
+ * throw would propagate into `runCleanup`'s offer-failure branch and report a
+ * telemetry fault as "failed to offer the review list to Slack" — while also, if it
+ * ran earlier, letting a failed parameter write stop an operator's review list from
+ * being posted at all. Both failures are reported instead, and both still exit
+ * non-zero.
+ */
+export async function recordScanOutcome({
+  ssm,
+  ssmPrefix,
+  stage,
+  offered,
+  now = Date.now,
+  log = () => {},
+}) {
+  const { GetParametersCommand, PutParameterCommand } = await import(
+    "@aws-sdk/client-ssm"
+  );
+  const at = new Date(now()).toISOString();
+  const weeks = recentIsoWeeks(now());
+  const [week] = weeks;
+  const current = { stage, isoWeek: week, offered, at };
+  try {
+    await ssm.send(
+      new PutParameterCommand({
+        // Plain `String` with `Overwrite: true`, for the same two runtime reasons as
+        // `approvals/offered`: the boundary denies a `SecureString` write, and
+        // `Overwrite: false` would make a same-week retry fail with
+        // `ParameterAlreadyExists` instead of rewriting one week idempotently.
+        Name: scanOutcomeParameterName(ssmPrefix, week),
+        Type: "String",
+        Overwrite: true,
+        Value: JSON.stringify(current),
+      }),
+    );
+  } catch (err) {
+    log(
+      `this week's scan-outcome record (${week}) could not be written ` +
+        `(${err.message}), so no quiet-week count was published and next week's ` +
+        `streak will read this week as absent`,
+    );
+    return { isoWeek: week, offered, failed: "write" };
+  }
+
+  const prior = weeks.slice(1);
+  const records = { [week]: current };
+  try {
+    const response = await ssm.send(
+      // Plural, not `GetParameter`: the two are distinct IAM actions and the
+      // boundary admits only this one. `SCAN_OUTCOME_WEEKS` is also what keeps this
+      // to a single call — `GetParameters` takes at most 10 names.
+      new GetParametersCommand({
+        Names: prior.map((each) => scanOutcomeParameterName(ssmPrefix, each)),
+      }),
+    );
+    for (const parameter of response.Parameters ?? []) {
+      const found = prior.find(
+        (each) => scanOutcomeParameterName(ssmPrefix, each) === parameter.Name,
+      );
+      if (!found) continue;
+      // A value that will not parse — or parses into something that is not a week
+      // record — is treated as a read FAILURE, not as absence. Absence lowers the
+      // streak legitimately; a corrupt record lowering it would be this issue's own
+      // failure mode, a silently smaller number suppressing the page, so it is
+      // reported loudly and the count is withheld.
+      records[found] = parseWeekRecord({
+        week: found,
+        stage,
+        value: parameter.Value,
+      });
+    }
+  } catch (err) {
+    log(
+      `the scan-outcome history for ${stage} could not be used ` +
+        `(${err.message}), so no quiet-week count was published for ${week}; ` +
+        `this week's own record was written`,
+    );
+    return { isoWeek: week, offered, failed: "read" };
+  }
+  return { isoWeek: week, offered, quietWeeks: quietWeekStreak(weeks, records) };
+}
+
+/**
  * The `{prefix}/approvals/offered` record: what the callback Lambda compares a
  * button click against, and where the apply task reads its ids from (#123).
  *
@@ -2005,6 +2272,17 @@ export async function postApprovalRequest({
   artifactBucketOwner,
   now = Date.now,
   log = () => {},
+  // Separate from `log` because the CONSUMER is different: `log` prefixes every
+  // line with `[memory-cleanup <iso>]`, which is exactly what forecloses a
+  // CloudWatch `{ $.field = ... }` metric filter. `emit` writes one unprefixed
+  // JSON object, which is what the two #154 filters read. Noop by default so a
+  // caller that has no metric surface prints nothing; `buildPostApproval` wires
+  // the real emitter for the deployed scan.
+  emit = () => {},
+  // Whether this invocation came from the SCHEDULE. Only a scheduled run keeps week
+  // history and publishes metrics; see MEM9_CLEANUP_SCHEDULED_ENV for why an
+  // operator's dry run must not.
+  scheduled = false,
 }) {
   const { PutParameterCommand } = await import("@aws-sdk/client-ssm");
   const name = `${ssmPrefix}/approvals/offered`;
@@ -2104,11 +2382,55 @@ export async function postApprovalRequest({
 
   await write(record);
   log(`offered ${record.ids.length} id(s) for approval as ${record.hash}`);
+
+  // LAST in every branch, after the offer is written and (when non-empty) posted:
+  // this is bookkeeping for an alarm, and it must not be able to stop a review list
+  // from reaching the operator. `recordScanOutcome` returns its failures rather than
+  // throwing for the same reason. The count published is what was OFFERED, which is
+  // the number a collapsed consensus drives to zero (#154).
+  const withOutcome = async (offer) => {
+    // An off-schedule run returns here untouched: no week record, no metrics, no
+    // exit-code change. Its offer is real and its list is real, but it is not a
+    // datapoint about the schedule (MEM9_CLEANUP_SCHEDULED_ENV).
+    if (!scheduled) return offer;
+    const outcome = await recordScanOutcome({
+      ssm,
+      ssmPrefix,
+      stage,
+      offered: record.ids.length,
+      now,
+      log,
+    });
+    if (!outcome.failed) {
+      // One JSON object per run, IN ADDITION to the plain-text lines around it,
+      // which survive verbatim because other consumers parse that format. Nothing
+      // is published when the history failed: a filter reading `$.quietWeeks` from
+      // a line that lacks it would publish a lower value, which is the alarm
+      // suppression this whole path exists to prevent. The non-zero exit is the
+      // signal there instead.
+      //
+      // `scanRan: 1` rides the SAME line as the count so the liveness alarm's
+      // metric costs no extra IAM — a metric sourced from a log filter needs no
+      // publish grant at all, and the scan task role must never acquire one. There
+      // is deliberately no metric client in this file; TC-SLACKAPP-210 scans for
+      // one, and this line is the whole emission surface it has to cover.
+      emit({
+        event: SCAN_OUTCOME_EVENT,
+        stage,
+        isoWeek: outcome.isoWeek,
+        offered: outcome.offered,
+        quietWeeks: outcome.quietWeeks,
+        scanRan: 1,
+      });
+    }
+    return { ...offer, outcome };
+  };
+
   if (record.ids.length === 0) {
     // Nothing to approve, so nothing to post — but the record above still
     // overwrote last week's list, which is the point.
     log("no deletions to offer; posted nothing to Slack");
-    return { record, posted: false };
+    return withOutcome({ record, posted: false });
   }
 
   const message = buildApprovalMessage({ record, decisions, channel });
@@ -2123,7 +2445,12 @@ export async function postApprovalRequest({
         `the apply will not be able to update the Slack message`,
     );
   }
-  return { record, posted: true, messageTs: posted.ts, messageChannel: posted.channel };
+  return withOutcome({
+    record,
+    posted: true,
+    messageTs: posted.ts,
+    messageChannel: posted.channel,
+  });
 }
 
 /**
@@ -2975,6 +3302,21 @@ export async function runCleanup(opts, deps) {
           `offered ${offer.record.ids.length} id(s) to Slack as ${offer.record.hash}` +
             (offer.posted ? "" : " (nothing posted)"),
         );
+        if (offer.outcome?.failed) {
+          // Exit 1 with the offer itself intact: the list was written and (when
+          // non-empty) posted, so this is not an offer failure. What failed is the
+          // input to the quiet-week alarm, and a run that cannot compute that number
+          // must not exit 0 — a silent zero-offer streak is the exact condition
+          // #154 exists to surface, and the task-exit alarm is what covers the scan
+          // when its own signal is unavailable. `recordScanOutcome` logged which
+          // week and why.
+          log(
+            `exiting non-zero: the quiet-week count for ` +
+              `${offer.outcome.isoWeek} could not be derived, so its alarm has no ` +
+              `input for this run`,
+          );
+          return result({ exitCode: 1, decisions, decisionPath });
+        }
       } catch (err) {
         // Exit 1, not 0. A scheduled review run whose post failed has done its
         // audit and offered nothing, and exit 0 would make that indistinguishable
@@ -4320,6 +4662,13 @@ async function buildPostApproval(opts, region, runtime) {
       fetchImpl: runtime.fetchImpl ?? fetch,
       log: (message) =>
         console.error(`[memory-cleanup ${new Date().toISOString()}] ${message}`),
+      // `console.log` and nothing else on the line: the awslogs driver ships stdout
+      // and stderr to the same group, and the #154 metric filters need the whole
+      // event to BE the JSON object. Any prefix — including the timestamped one
+      // `log` adds — makes `{ $.event = ... }` stop matching, silently, with the
+      // alarms then reading no datapoints and sitting green forever.
+      emit: (event) => console.log(JSON.stringify(event)),
+      scheduled: process.env[MEM9_CLEANUP_SCHEDULED_ENV] === "1",
     });
 }
 

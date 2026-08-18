@@ -7,10 +7,10 @@
  * keep their own `record`/`out` (each owns its own resource log), so those are
  * passed in rather than imported.
  *
- * Only `EventRule` and `LogGroup` expose attributes, and only the ones the helper
- * reads back — `logGroup.arn` for the resource policy, `rule.name` for the target.
- * A stub with more attributes than the real code consumes invites an assertion on
- * a value nothing produces.
+ * Only the attributes the real code reads back are exposed — `logGroup.arn` for the
+ * resource policy, `rule.name` for the target, and `metricAlarm.arn` for a composite
+ * alarm's rule and suppressor (#154). A stub with more attributes than the real code
+ * consumes invites an assertion on a value nothing produces.
  */
 export interface TaskFailureAlarmStubOptions {
   /** Recorder the host harness uses to log created resources. */
@@ -58,8 +58,22 @@ export function cloudwatchStubs(options: TaskFailureAlarmStubOptions) {
       }
     },
     MetricAlarm: class {
+      // The ARN is read back by a composite alarm's `alarmRule` and by its
+      // `actionsSuppressor` (#154), the same way observability.test.ts's stub
+      // exposes it. Derived from the logical name so a rule naming the wrong alarm
+      // is visible in the assertion rather than matching by accident.
+      arn: unknown;
       constructor(logicalName: string, args: Record<string, unknown>) {
+        this.arn = out(
+          `arn:aws:cloudwatch:ap-northeast-1:123456789012:alarm:` +
+            `mem9-on-aws-prod-${logicalName}`,
+        );
         record("MetricAlarm", logicalName, args);
+      }
+    },
+    CompositeAlarm: class {
+      constructor(logicalName: string, args: Record<string, unknown>) {
+        record("CompositeAlarm", logicalName, args);
       }
     },
   };
