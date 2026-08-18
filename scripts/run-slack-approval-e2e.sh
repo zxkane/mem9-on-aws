@@ -689,8 +689,10 @@ LOG_STREAM="${LOG_PREFIX}/${CONTAINER_NAME}/${TASK_ARN##*/}"
 # hashed to the approved value, so its presence IS "the reviewed list was replayed".
 echo "run-slack-approval-e2e: checking ${LOG_STREAM} for the artifact-replay line"
 
-# AWS CLI paginates `filter-log-events` by default. That matters because the API
-# may return an empty page with a next token even when a later page has events.
+# AWS CLI paginates `filter-log-events` by default. JSON output is load-bearing:
+# the CLI combines all pages before applying the query, while text output applies
+# `length(events)` to EACH page and prints values such as `1\n0`. The API may
+# return an empty page with a next token even when another page has the marker.
 # Keep stderr out of public CI logs (an AWS error can contain account-scoped
 # identifiers), but never turn a failed query into a zero count.
 cloudwatch_event_count() {
@@ -705,7 +707,7 @@ cloudwatch_event_count() {
     --start-time "$((TIMESTAMP * 1000))" \
     --region "$REGION" \
     --query 'length(events)' \
-    --output text 2>/dev/null) || {
+    --output json 2>/dev/null) || {
       local status=$?
       echo "::error::the CloudWatch Logs ${query_name} query failed (exit ${status}); the replay assertion could not inspect the apply task stream" >&2
       return "$status"

@@ -427,12 +427,16 @@ if (command === "ssm get-parameter") {
   const matched = pattern.includes(
     "reviewed decision(s) from s3://",
   );
-  console.log(
-    matched
-      ? (process.env.MOCK_REPLAY_LINES ?? "0")
-      : pattern === ""
-        ? (process.env.MOCK_LOG_LINES ?? "0")
-        : "0",
+  const count = matched
+    ? (process.env.MOCK_REPLAY_LINES ?? "0")
+    : pattern === ""
+      ? (process.env.MOCK_LOG_LINES ?? "0")
+      : "0";
+  // AWS CLI applies a JMESPath query to each page separately for text output.
+  // Reproduce the live \`1\\n0\` shape so changing the script back from JSON
+  // makes every healthy replay fixture fail as non-numeric.
+  process.stdout.write(
+    option("--output") === "text" ? \`\${count}\\n0\\n\` : \`\${count}\\n\`,
   );
 } else if (command === "ecs describe-tasks") {
   const query = option("--query") ?? "";
@@ -1444,6 +1448,9 @@ describe("Slack approval E2E harness (TC-SLACKAPP-090)", () => {
       // The EXACT stream of THIS task, `<prefix>/<container>/<task id>` — not a
       // group-wide scan, which a previous run's replay line would satisfy.
       expect(call).toContain("mem9/Mem9Cleanup/task-abc");
+      // Text output applies `length(events)` once per page and yields values such
+      // as `1\n0`; JSON combines all pages before applying the query.
+      expect(call[call.indexOf("--output") + 1]).toBe("json");
     }
 
     // And the matched line is never echoed. It names `s3://mem9-audit-<account>/...`,

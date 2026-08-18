@@ -1877,6 +1877,9 @@ fail the run.
     A failed `FilterLogEvents` call is a query failure, never zero matches; after
     the marker poll expires, an empty-pattern count distinguishes a populated
     stream missing the replay marker from a stream whose logs have not arrived.
+    The AWS CLI query uses JSON output: text output applies `length(events)` once
+    per page and can return `1` then `0`, while JSON aggregates pages before the
+    query and returns one count.
   - **The signing secret reaches the HMAC through the ENVIRONMENT**, not an argv:
     `openssl dgst -hmac "$SECRET"` is the obvious way to write this in bash and
     would put the secret in a world-readable command line. Pinned by a static
