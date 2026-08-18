@@ -1261,11 +1261,22 @@ export function buildOfferedRecord({
   if (bytes > MAX_PARAMETER_BYTES) {
     // Measured on the SERIALIZED value rather than the id count: a limit
     // expressed as "N ids" drifts from the real constraint as soon as ids get
-    // longer, and bytes are what SSM rejects. `--cap` is the knob to lower.
+    // longer, and bytes are what SSM rejects.
+    //
+    // The remedy names the SCANNED corpus, deliberately not `--cap` (#155), for
+    // the same reason MAX_ARTIFACT_BYTES does: this record holds every id a
+    // destructive decision touches, so it scales with what the scan found, while
+    // `cap` is read only inside `applyDecisions` and is not even a parameter of
+    // this builder. Measured, the identical error at `--cap 50` and `--cap 10` —
+    // the throw precedes the apply the cap would bound. So "lower --cap" was
+    // false on the operator CLI, and inert as well on the scheduled scan, which
+    // passes no flags and has no operator at the keyboard to pass one.
     throw new Error(
       `the offered approval list is ${bytes} bytes, over the ` +
         `${MAX_PARAMETER_BYTES}-byte standard parameter limit for ${ids.length} ids — ` +
-        `lower --cap rather than truncating the list the operator approves`,
+        `the record holds every id a destructive decision TOUCHES, so this is a ` +
+        `consensus set too large to offer in one record; narrow the scan rather ` +
+        `than truncating the list the operator approves`,
     );
   }
   return record;
@@ -1496,10 +1507,16 @@ export function buildApprovalMessage({ record, decisions, channel }) {
   ];
 
   if (blocks.length > SLACK_MAX_BLOCKS) {
+    // Same remedy as `buildOfferedRecord`'s parameter-limit refusal and for the
+    // same reason (#155): the block count scales with the decisions under review,
+    // one line each, while `cap` bounds an apply's mutations and never reaches
+    // this builder either.
     throw new Error(
       `the review list needs ${blocks.length} Block Kit blocks, over Slack's ` +
         `${SLACK_MAX_BLOCKS}-block message limit for ${record.ids.length} ids — ` +
-        `lower --cap rather than posting a list the operator cannot see whole`,
+        `the message renders one line per reviewed decision, so this is a ` +
+        `consensus set too large to show whole; narrow the scan rather than ` +
+        `posting a list the operator cannot see whole`,
     );
   }
   const long = blocks.find(
