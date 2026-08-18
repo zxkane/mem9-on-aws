@@ -126,6 +126,26 @@ concrete breaching value, which `treatMissingData` cannot do
 precedent). It arms only on stages whose schedule state is `ENABLED` — today
 `prod` — or every other stage would page continuously.
 
+Its actions hang off a composite alarm with an `actionsSuppressor`, following the
+same three-resource split as the ingest precedent: the metric alarm carries no
+actions, an always-OK guard alarm exists only to be waited on, and
+`ActionsSuppressorWaitPeriod` delays notification by a bounded hour. That absorbs
+the transients worth absorbing — a deploy landing while a scan is in flight, and
+the hourly re-evaluation of a multi-day window. It is deliberately an hour rather
+than a cadence: a suppressor that never enters `ALARM` delays actions
+*unconditionally*, so a week-long wait would postpone every real page by a week.
+
+**One expected page at first enablement, accepted rather than papered over.**
+Until the first scheduled run publishes a datapoint, nothing distinguishes "no
+scan was due yet" from "the scan stopped" — that distinction needs memory older
+than the seven days an alarm can evaluate, which is the same wall the streak hit.
+The state that could answer it is the SSM week history, and reading it from
+outside the scan means a second scheduled principal with
+`cloudwatch:GetMetricData`, which #154 puts out of scope. So the alarm fires once
+when a stage first enables the schedule and clears after that stage's first
+Saturday; the alarm description says so, so an operator reading the page knows
+which of the two it is.
+
 **No volume guard, deliberately.** A volume guard protects a *rate's*
 denominator; `quietWeeks` is a count of consecutive discrete runs with exactly
 one run per period by construction, so the "high zero rate on low volume"

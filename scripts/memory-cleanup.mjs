@@ -1244,25 +1244,28 @@ export function quietWeekStreak(weeks, records) {
  * that does not describe its own week with an integer count is treated the way an
  * unreadable one is: loudly, with no count published at all.
  *
- * The error names the two fields it judged and never the raw value. Neither field
- * carries memory content (a stage, an ISO week and a count), so this stays inside
- * the same no-content rule the offered record and the log lines follow.
+ * The error names WHICH fields failed and never their values. A record that failed
+ * validation is by definition not known to hold what this code put there, and the
+ * error text reaches CloudWatch — so echoing the stored bytes back would be the one
+ * way this path could publish content nobody reviewed. The week and stage in the
+ * message are this run's own, not the record's.
  */
 function parseWeekRecord({ week, stage, value }) {
   const record = JSON.parse(value);
-  const usable =
-    record !== null &&
-    typeof record === "object" &&
-    record.isoWeek === week &&
-    record.stage === stage &&
-    Number.isInteger(record.offered) &&
-    record.offered >= 0;
-  if (!usable) {
+  const shaped = record !== null && typeof record === "object";
+  const failed = shaped
+    ? [
+        record.isoWeek === week ? undefined : "isoWeek",
+        record.stage === stage ? undefined : "stage",
+        Number.isInteger(record.offered) && record.offered >= 0
+          ? undefined
+          : "offered",
+      ].filter(Boolean)
+    : ["the record itself"];
+  if (failed.length > 0) {
     throw new Error(
       `the scan-outcome record for ${week} does not describe that week for ` +
-        `${stage} (isoWeek=${JSON.stringify(record?.isoWeek)}, ` +
-        `stage=${JSON.stringify(record?.stage)}, ` +
-        `offered=${JSON.stringify(record?.offered)})`,
+        `${stage}: ${failed.join(", ")} did not validate`,
     );
   }
   return record;

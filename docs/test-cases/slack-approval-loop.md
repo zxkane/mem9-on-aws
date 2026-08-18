@@ -2308,8 +2308,18 @@ degrades to a static `>= 2`.
   task-exit alarm cannot see a task that never started. `treatMissingData` cannot
   express "missing is a breach" for a metric absent from the whole window; `FILL`
   can. The stage gating shares ONE expression with the schedule's own `state`, and
-  the case asserts a preview stage gets the streak alarm but not the liveness alarm
-  — otherwise every preview pages every seven days for a scan it never runs.
+  the case asserts a preview stage gets the streak alarm but not the liveness alarm,
+  nor its guard, nor its composite — otherwise every preview pages every seven days
+  for a scan it never runs. The metric alarm carries **no** actions: they hang off a
+  composite alarm whose `actionsSuppressor` is an always-OK guard with a one-hour
+  `waitPeriod`, which absorbs a deploy landing while a scan is in flight and the
+  hourly re-evaluation of a multi-day window. One hour and not one cadence, because a
+  suppressor that never enters ALARM delays actions unconditionally — a week-long
+  wait would postpone every real page by a week. The case also asserts the
+  description records the one page that is **not** suppressible: at first enablement,
+  before any datapoint exists, nothing distinguishes "not due yet" from "stopped"
+  inside a window capped below the scan's own cadence, so the alarm fires once and
+  clears after that stage's first scheduled run.
 - **TC-SLACKAPP-230** — the whole signal costs the task **no new IAM**: no
   `cloudwatch:*` and no `logs:*` on the task role, and the week records land under
   the `approvals/*` grant that already exists (`ssm:GetParameters` +

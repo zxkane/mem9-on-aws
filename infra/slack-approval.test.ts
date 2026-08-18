@@ -1432,10 +1432,51 @@ describe("slack approval infrastructure", () => {
       threshold: 1,
       comparisonOperator: "LessThanThreshold",
       treatMissingData: "breaching",
-      alarmActions: [
-        "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
-      ],
     });
+    // NO actions on the raw alarm: they hang off the composite, which is what gives
+    // them a bounded grace. Actions here would page straight through it.
+    expect(alarm.alarmActions).toBeUndefined();
+
+    // The grace, and its bound. A never-alarming suppressor delays actions by
+    // exactly `waitPeriod` and no longer, so this absorbs a deploy landing while a
+    // scan is in flight — and is deliberately an hour rather than a cadence, since a
+    // week-long wait would delay every real page by a week.
+    const guard = materialize(
+      one("MetricAlarm", "CleanupScanLivenessActionDelayGuard").args,
+    ) as Record<string, any>;
+    expect(guard).toMatchObject({
+      namespace: "mem9-on-aws/CleanupScan",
+      metricName: "ScanRan",
+      statistic: "Minimum",
+      threshold: 0,
+      comparisonOperator: "LessThanThreshold",
+      treatMissingData: "notBreaching",
+    });
+    expect(guard.alarmActions).toBeUndefined();
+    const composite = materialize(
+      one("CompositeAlarm", "CleanupScanLivenessNotification").args,
+    ) as Record<string, any>;
+    expect(composite.alarmRule).toBe(
+      'ALARM("arn:aws:cloudwatch:ap-northeast-1:123456789012:alarm:' +
+        'mem9-on-aws-prod-CleanupScanLivenessAlarm")',
+    );
+    expect(composite.actionsSuppressor).toEqual({
+      alarm:
+        "arn:aws:cloudwatch:ap-northeast-1:123456789012:alarm:" +
+        "mem9-on-aws-prod-CleanupScanLivenessActionDelayGuard",
+      waitPeriod: 3600,
+      extensionPeriod: 0,
+    });
+    expect(composite.alarmActions).toEqual([
+      "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
+    ]);
+    // No okActions: CloudWatch restarts the wait on a state change during
+    // suppression, so a recovery could be delivered with no prior page.
+    expect(composite.okActions).toBeUndefined();
+    // The description says the first-enablement page is expected, because it is not
+    // suppressible: until the first run publishes, nothing distinguishes "not due
+    // yet" from "stopped" inside a window capped below the scan's own cadence.
+    expect(String(composite.alarmDescription)).toMatch(/EXPECTED ONCE/u);
 
     // A preview stage runs no scan — its schedule is created DISABLED — so an
     // unconditional liveness alarm would page it every seven days for a task it was
@@ -1452,6 +1493,12 @@ describe("slack approval infrastructure", () => {
     expect(
       all("MetricAlarm").map((alarmResource) => alarmResource.logicalName),
     ).not.toContain("CleanupScanLivenessAlarm");
+    // Its guard and its notification go with it, or a preview would carry an alarm
+    // whose rule names an alarm that does not exist.
+    expect(
+      all("MetricAlarm").map((alarmResource) => alarmResource.logicalName),
+    ).not.toContain("CleanupScanLivenessActionDelayGuard");
+    expect(all("CompositeAlarm")).toEqual([]);
     expect(
       all("MetricAlarm").map((alarmResource) => alarmResource.logicalName),
     ).toContain("CleanupScanQuietWeeksAlarm");

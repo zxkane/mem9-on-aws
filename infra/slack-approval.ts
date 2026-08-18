@@ -978,7 +978,7 @@ export function slackApproval(
       // scan by design, so an unconditional liveness alarm would page continuously
       // on each preview.
       if (scanScheduleState === "ENABLED") {
-        new aws.cloudwatch.MetricAlarm("CleanupScanLivenessAlarm", {
+        const livenessAlarm = new aws.cloudwatch.MetricAlarm("CleanupScanLivenessAlarm", {
           alarmDescription:
             "No weekly memory cleanup scan reported an outcome in the last seven " +
             "days, so the quiet-week alarm has no input and cannot page.",
@@ -1009,7 +1009,66 @@ export function slackApproval(
           // older healthy datapoint from CloudWatch's wider sliding range cannot
           // defer it.
           treatMissingData: "breaching",
+          // NO actions here. They hang off the composite below, which is what gives
+          // them a bounded grace — the same split `DurableIngestTelemetryLiveness*`
+          // uses in infra/observability.ts.
+        });
+
+        // An always-OK alarm whose only job is to be something the composite can
+        // wait on: `ActionsSuppressorWaitPeriod` is "the maximum time the composite
+        // waits for the suppressor to go into ALARM", so a suppressor that never
+        // alarms delays actions by exactly that period and no longer. `Minimum` of a
+        // metric that only ever publishes 1 is never below 0, and an empty window
+        // reads notBreaching, so this is OK in every state by construction.
+        const livenessDelayGuard = new aws.cloudwatch.MetricAlarm(
+          "CleanupScanLivenessActionDelayGuard",
+          {
+            alarmDescription:
+              "Always-OK guard that gives the cleanup scan liveness alarm one " +
+              "bounded grace period before it notifies.",
+            namespace: SCAN_METRIC_NAMESPACE,
+            metricName: SCAN_RAN_METRIC,
+            dimensions: { stage: $app.stage },
+            statistic: "Minimum",
+            period: SCAN_ALARM_PERIOD_SECONDS,
+            evaluationPeriods: 1,
+            threshold: 0,
+            comparisonOperator: "LessThanThreshold",
+            treatMissingData: "notBreaching",
+          },
+        );
+
+        new aws.cloudwatch.CompositeAlarm("CleanupScanLivenessNotification", {
+          alarmName: `mem9-on-aws-${$app.stage}-cleanup-scan-liveness`,
+          alarmDescription:
+            "No weekly memory cleanup scan reported an outcome in the last seven " +
+            "days. EXPECTED ONCE when the schedule is first enabled on a stage: " +
+            "until the first scheduled run publishes a datapoint there is no way " +
+            "for CloudWatch to tell 'not due yet' from 'stopped', and it clears " +
+            "itself after that run.",
+          alarmRule: livenessAlarm.arn.apply((arn) => `ALARM("${arn}")`),
+          // The grace is deliberately ONE HOUR and not one cadence. It absorbs the
+          // transients that are worth absorbing — a deploy landing while a scan is
+          // in flight, and the hourly re-evaluation of a multi-day window — while a
+          // cadence-long wait would delay every REAL page by a week, since a
+          // never-alarming suppressor delays actions unconditionally rather than
+          // only at enablement.
+          //
+          // What it does NOT do is suppress the first-enablement page above. That
+          // would need to distinguish "no scan was due yet" from "the scan stopped",
+          // which is not derivable from a metric whose evaluation window is capped
+          // below the scan's own cadence. The state that could answer it is the SSM
+          // week history, and reading that from outside the scan means a second
+          // scheduled principal with `cloudwatch:GetMetricData` — explicitly out of
+          // scope for #154, and revisitable if the noise ever justifies it.
+          actionsSuppressor: {
+            alarm: livenessDelayGuard.arn,
+            waitPeriod: 3600,
+            extensionPeriod: 0,
+          },
           alarmActions: [ecsOut.alertsTopicArn],
+          // No okActions: CloudWatch restarts the wait after a state change during
+          // suppression, so a recovery could be delivered without a prior page.
         });
       }
     }

@@ -6211,8 +6211,9 @@ describe("the scheduled scan's week history (#154)", () => {
 
   it("TC-SLACKAPP-232 counts only contiguous, present, zero-offer weeks", () => {
     // The alarm's whole input, as a pure function, because the 604800s evaluation
-    // cap means no alarm can derive it: two weekly scans are 14 days apart, so one
-    // alarm sees at most one of them.
+    // cap means no alarm can derive it: consecutive weekly scans are seven days
+    // apart, and a window guaranteed to contain two of them has to be longer than
+    // the seven-day maximum for `Period` × `EvaluationPeriods`.
     const weeks = ["2026-W32", "2026-W31", "2026-W30", "2026-W29"];
     const quiet = (week) => [week, { offered: 0 }];
     const busy = (week, offered = 3) => [week, { offered }];
@@ -6979,8 +6980,15 @@ describe("offering the list to Slack (#123)", () => {
       expect(offered.posted, what).toBe(true);
       const logged = log.mock.calls.flat().join("\n");
       expect(logged, what).toMatch(/does not describe that week/u);
-      // The refusal names the fields it judged, not the stored value verbatim.
+      expect(logged, what).toMatch(/did not validate/u);
+      // The week and stage named are THIS RUN's, and no stored field VALUE is echoed:
+      // a record that failed validation is not known to hold what this code wrote, and
+      // the error text reaches CloudWatch.
       expect(logged, what).toContain("2026-W31");
+      if (value && typeof value === "object" && typeof value.isoWeek === "string") {
+        expect(logged, what).not.toContain("2026-W12");
+      }
+      expect(logged, what).not.toContain("pr-9");
     }
 
     // The converse, so the validator cannot be satisfied by rejecting everything: a
