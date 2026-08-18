@@ -661,6 +661,7 @@ function expectVerifyOnlyAwsCallsReadOnly(calls) {
 
 async function runBoundaryDeployMock({
   basePolicyMatches,
+  baseRefAvailable = true,
   boundaryOpenAiRegion,
   boundarySimulationBadProbe = "",
   boundarySimulationMalformedProbe = "",
@@ -1230,7 +1231,8 @@ esac
       `#!/usr/bin/env bash
 set -euo pipefail
 if [[ "\${1:-}" == "cat-file" ]]; then
-  exit 0
+  [[ "$MOCK_BASE_REF_AVAILABLE" == "true" ]]
+  exit
 fi
 if [[ "\${1:-}" != "show" ]]; then
   exit 1
@@ -1289,6 +1291,7 @@ esac
           MOCK_EXPECTED: expectedPath,
           MOCK_MATCHING: String(matching),
           MOCK_BASE_POLICY_MATCHES: String(basePolicyMatches),
+          MOCK_BASE_REF_AVAILABLE: String(baseRefAvailable),
           MOCK_POLICY_IDENTITY_READBACK_FAILS: String(
             policyIdentityReadbackFails,
           ),
@@ -7594,8 +7597,22 @@ describe("operator entry point", () => {
     ).toBe(false);
   });
 
+  it("classifies an unavailable pull request base as unexplained drift", async () => {
+    const { calls, result } = await runBoundaryDeployMock({
+      basePolicyMatches: false,
+      baseRefAvailable: false,
+      verifyOnly: true,
+    });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "pull request base could not be verified",
+    );
+    expectVerifyOnlyAwsCallsReadOnly(calls);
+  });
+
   it("executes the verifier extracted from a real base commit", async () => {
     const { calls, result } = await runBoundaryDeployMock({
+      decisionArtifactBucketName: "example-mem9-decision-artifacts",
       realBasePolicy: true,
       verifyOnly: true,
     });
@@ -9253,6 +9270,11 @@ describe("boundary and deploy-role templates", () => {
     expect(workflowSource).not.toContain(
       "Operator-owned workload boundary is missing or drifted",
     );
+    const previewCheckouts = workflow.jobs["deploy-preview"].steps.filter(
+      ({ uses }) => uses === "actions/checkout@v7",
+    );
+    expect(previewCheckouts).toHaveLength(1);
+    expect(previewCheckouts[0].with?.["fetch-depth"]).toBe(0);
     for (const jobName of ["deploy-preview", "deploy-prod"]) {
       const preflights = workflow.jobs[jobName].steps.filter(
         ({ name }) => name === "Preflight — verify role is assumable",
