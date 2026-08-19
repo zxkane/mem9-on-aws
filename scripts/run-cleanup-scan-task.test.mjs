@@ -28,8 +28,11 @@ function runFixture({
   invalidParameters = [],
   runFailures = [],
   baseUrl = `http://mnemo.mem9-${stage}.local:8080`,
+  deployedCap = "50",
   offer,
   offerModified = 4_102_444_800,
+  reviewArtifactKey,
+  reviewArtifactHash,
   waitSeconds,
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "mem9-cleanup-scan-runner-"));
@@ -90,7 +93,7 @@ if (command === "ssm get-parameters") {
           "--ids",
           "/tmp/approved-ids.txt",
           "--cap",
-          "50"
+          process.env.MOCK_DEPLOYED_CAP
         ],
       }],
     },
@@ -145,6 +148,7 @@ if (command === "ssm get-parameters") {
     AWS_CALLS: calls,
     CONFIRM_PROD_SCAN: confirmProd,
     MOCK_BASE_URL: baseUrl,
+    MOCK_DEPLOYED_CAP: deployedCap,
     MOCK_EXIT_CODE: String(exitCode),
     MOCK_INVALID_PARAMETERS: JSON.stringify(invalidParameters),
     MOCK_OFFER: JSON.stringify(offered),
@@ -154,6 +158,14 @@ if (command === "ssm get-parameters") {
     PATH: `${bin}${delimiter}${process.env.PATH}`,
     STAGE: stage,
   };
+  delete env.MEM9_REVIEW_ARTIFACT_KEY;
+  delete env.MEM9_REVIEW_ARTIFACT_HASH;
+  if (reviewArtifactKey !== undefined) {
+    env.MEM9_REVIEW_ARTIFACT_KEY = reviewArtifactKey;
+  }
+  if (reviewArtifactHash !== undefined) {
+    env.MEM9_REVIEW_ARTIFACT_HASH = reviewArtifactHash;
+  }
   if (waitSeconds !== undefined) {
     env.CLEANUP_SCAN_WAIT_SECONDS = String(waitSeconds);
   }
@@ -199,6 +211,20 @@ describe("manual cleanup scan ECS runner", () => {
       const valid = runFixture({ waitSeconds });
       expect(valid.result.status, valid.result.stderr).toBe(0);
     }
+
+    for (const replay of [
+      { reviewArtifactKey: "decisions/prod/private.json" },
+      { reviewArtifactHash: `sha256:${"a".repeat(64)}` },
+      {
+        reviewArtifactKey: "decisions/prod/private.json",
+        reviewArtifactHash: "not-a-hash",
+      },
+    ]) {
+      const invalid = runFixture(replay);
+      expect(invalid.result.status).toBe(1);
+      expect(invalid.callRecords).toEqual([]);
+      expect(invalid.result.stderr).toContain("MEM9_REVIEW_ARTIFACT");
+    }
   });
 
   it("TC-SLACKAPP-242: starts only the deployed dry-run command in private networking", () => {
@@ -242,6 +268,8 @@ describe("manual cleanup scan ECS runner", () => {
           "http://mnemo.mem9-prod.local:8080",
           "--consensus-passes",
           "2",
+          "--cap",
+          "50",
           "--out",
           "/tmp/mem9-cleanup-scan",
         ],
@@ -259,6 +287,39 @@ describe("manual cleanup scan ECS runner", () => {
       "DEADLINE=$((SECONDS + CLEANUP_SCAN_WAIT_SECONDS))",
     );
     expect(source).not.toContain("SECONDS + 5400");
+  });
+
+  it("TC-SLACKAPP-245: replays a paired private artifact under the deployed cap", () => {
+    const reviewArtifactKey =
+      `decisions/prod/sha256-${"b".repeat(64)}.json`;
+    const reviewArtifactHash = `sha256:${"b".repeat(64)}`;
+    const { callRecords, result } = runFixture({
+      reviewArtifactKey,
+      reviewArtifactHash,
+    });
+    expect(result.status, result.stderr).toBe(0);
+
+    const runCall = callRecords.find(
+      ([service, operation]) =>
+        service === "ecs" && operation === "run-task",
+    );
+    const overrides = JSON.parse(
+      runCall[runCall.indexOf("--overrides") + 1],
+    );
+    expect(overrides.containerOverrides[0].environment).toEqual([
+      { name: "MEM9_REVIEW_ARTIFACT_KEY", value: reviewArtifactKey },
+      { name: "MEM9_REVIEW_ARTIFACT_HASH", value: reviewArtifactHash },
+    ]);
+    const command = overrides.containerOverrides[0].command;
+    expect(
+      command.slice(command.indexOf("--cap"), command.indexOf("--cap") + 2),
+    ).toEqual(["--cap", "50"]);
+    expect(command).not.toContain("--apply");
+
+    const output = `${result.stdout}\n${result.stderr}`;
+    expect(output).toContain("artifact replay task");
+    expect(output).not.toContain(reviewArtifactKey);
+    expect(output).not.toContain(reviewArtifactHash);
   });
 
   it("TC-SLACKAPP-243: verifies a fresh artifact-backed offer without leaking it", () => {
@@ -301,6 +362,18 @@ describe("manual cleanup scan ECS runner", () => {
     });
     expect(crossStage.result.status).toBe(1);
     expect(crossStage.result.stderr).toContain("base URL");
+
+    for (const deployedCap of ["", "0", "1.5", "invalid"]) {
+      const badCap = runFixture({ deployedCap });
+      expect(badCap.result.status).toBe(1);
+      expect(badCap.result.stderr).toContain("no valid --cap");
+      expect(
+        badCap.callRecords.some(
+          ([service, operation]) =>
+            service === "ecs" && operation === "run-task",
+        ),
+      ).toBe(false);
+    }
 
     const launch = runFixture({
       runFailures: [{ arn: "redacted", reason: "RESOURCE:CPU" }],

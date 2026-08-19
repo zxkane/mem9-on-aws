@@ -42,6 +42,7 @@ import {
   runCleanup,
   runListInactive,
   runRestore,
+  selectApprovalBatch,
   snippetLogDir,
   verdictSummary,
   ARG_SPECS,
@@ -4218,6 +4219,41 @@ describe("the offered approval record (#123)", () => {
     issuedAt: "2026-08-05T00:00:00.000Z",
   };
 
+  it("TC-SLACKAPP-246 selects deterministic whole decisions under the apply footprint cap", () => {
+    const keep = { id: "keep", verdict: "KEEP", reason: "durable" };
+    const retain = { id: "retain", verdict: "RETAIN", reason: "protected" };
+    const first = mergeOf("surv-a", ["frag-a1", "frag-a2"]);
+    const deferred = mergeOf("surv-b", ["frag-b1", "frag-b2"]);
+    const filler = del("delete-a");
+    const tail = del("delete-b");
+    const decisions = [keep, first, deferred, retain, filler, tail];
+
+    const batch = selectApprovalBatch(decisions, 4);
+
+    // Original order is retained. The second cost-3 MERGE does not fit after the
+    // first, but the later cost-1 DELETE fills the remaining capacity.
+    expect(batch.decisions).toEqual([keep, first, retain, filler]);
+    expect(batch).toMatchObject({
+      offeredDecisions: 2,
+      totalDecisions: 4,
+      deferredDecisions: 2,
+      offeredIds: 4,
+      totalIds: 8,
+      deferredIds: 4,
+    });
+    // Every non-destructive row survives so the message's withheld counts still
+    // describe the full scan, not just this approval batch.
+    expect(batch.decisions).toContain(keep);
+    expect(batch.decisions).toContain(retain);
+  });
+
+  it("TC-SLACKAPP-247 refuses one destructive decision larger than the apply cap", () => {
+    const oversized = mergeOf("survivor", ["a", "b", "c", "d"]);
+    expect(() => selectApprovalBatch([oversized, del("later")], 4)).toThrow(
+      /one MERGE decision touches 5 ids.*cannot be split/iu,
+    );
+  });
+
   it("TC-SLACKAPP-199 the offered ids cover a merge's survivor AND every absorbed id", () => {
     // The bound the apply enforces. A survivor-only id list is an approval for a
     // rewrite plus N deletions the list never named — the same defect that made
@@ -5496,8 +5532,11 @@ describe("the apply task's in-container runtime (#123)", () => {
     "MEM9_DB_NAME",
     "MEM9_DB_PORT",
     "MEM9_DB_SECRET",
+    "MEM9_DECISION_ARTIFACT_BUCKET",
     "MEM9_DECISION_ARTIFACT_BUCKET_OWNER",
     "MEM9_LLM_MODEL",
+    "MEM9_REVIEW_ARTIFACT_HASH",
+    "MEM9_REVIEW_ARTIFACT_KEY",
     "MEM9_SSM_PREFIX",
     "MEM9_TENANT_ID",
   ];
@@ -5811,6 +5850,108 @@ describe("the apply task's in-container runtime (#123)", () => {
     expect(legacy.deps.loadReviewedDecisions).toBeUndefined();
     await legacy.close();
   });
+
+  it("TC-SLACKAPP-249 validates review-only artifact replay before any AWS read", async () => {
+    const hash = `sha256:${"f".repeat(64)}`;
+    const key = decisionArtifactKey("prod", hash);
+    const runtime = {
+      s3: { send: vi.fn() },
+      getToken: vi.fn(),
+      fromNodeProviderChain: vi.fn(),
+    };
+
+    containerEnv({ MEM9_REVIEW_ARTIFACT_KEY: key });
+    await expect(
+      createCleanupDeps({ stage: "prod", apply: false, cap: 50 }, runtime),
+    ).rejects.toThrow(/must be set together/u);
+    expect(runtime.s3.send).not.toHaveBeenCalled();
+
+    delete process.env.MEM9_REVIEW_ARTIFACT_KEY;
+    containerEnv({
+      MEM9_REVIEW_ARTIFACT_KEY: key,
+      MEM9_REVIEW_ARTIFACT_HASH: "not-a-hash",
+    });
+    await expect(
+      createCleanupDeps({ stage: "prod", apply: false, cap: 50 }, runtime),
+    ).rejects.toThrow(/sha256 content hash/u);
+
+    containerEnv({
+      MEM9_REVIEW_ARTIFACT_KEY: key,
+      MEM9_REVIEW_ARTIFACT_HASH: hash,
+      MEM9_DECISION_ARTIFACT_BUCKET: "mem9-audit-123456789012",
+    });
+    await expect(
+      createCleanupDeps({ stage: "prod", apply: true, cap: 50 }, runtime),
+    ).rejects.toThrow(/review-only.*--apply/iu);
+
+    containerEnv({
+      MEM9_APPROVAL_HASH: hash,
+      MEM9_REVIEW_ARTIFACT_KEY: key,
+      MEM9_REVIEW_ARTIFACT_HASH: hash,
+    });
+    await expect(
+      createCleanupDeps({ stage: "prod", apply: false, cap: 50 }, runtime),
+    ).rejects.toThrow(/cannot be combined with MEM9_APPROVAL_HASH/u);
+
+    delete process.env.MEM9_APPROVAL_HASH;
+    delete process.env.MEM9_DECISION_ARTIFACT_BUCKET;
+    await expect(
+      createCleanupDeps({ stage: "prod", apply: false, cap: 50 }, runtime),
+    ).rejects.toThrow(/requires MEM9_DECISION_ARTIFACT_BUCKET/u);
+
+    containerEnv({
+      MEM9_REVIEW_ARTIFACT_KEY: decisionArtifactKey("pr-42", hash),
+      MEM9_REVIEW_ARTIFACT_HASH: hash,
+      MEM9_DECISION_ARTIFACT_BUCKET: "mem9-audit-123456789012",
+    });
+    await expect(
+      createCleanupDeps({ stage: "prod", apply: false, cap: 50 }, runtime),
+    ).rejects.toThrow(/does not match the requested stage and hash/u);
+    expect(runtime.s3.send).not.toHaveBeenCalled();
+  });
+
+  it("TC-SLACKAPP-250 loads a review artifact without constructing a classifier pass", async () => {
+    const decisions = [{
+      id: "reviewed-1",
+      verdict: "DELETE",
+      reason: "session-state",
+      version: 1,
+      contentHash: contentHash("reviewed content"),
+    }];
+    const body = serializeDecisionArtifact({
+      stage: "prod",
+      generatedAt: "2026-08-05T03:00:00.000Z",
+      decisions,
+    });
+    const hash = decisionArtifactHash(body);
+    const key = decisionArtifactKey("prod", hash);
+    const s3 = {
+      send: vi.fn(async () => ({
+        Body: { transformToString: async () => body },
+      })),
+    };
+    const getToken = vi.fn();
+    containerEnv({
+      MEM9_DECISION_ARTIFACT_BUCKET: "mem9-audit-123456789012",
+      MEM9_REVIEW_ARTIFACT_KEY: key,
+      MEM9_REVIEW_ARTIFACT_HASH: hash,
+    });
+
+    const production = await createCleanupDeps(
+      { stage: "prod", apply: false, cap: 50 },
+      {
+        s3,
+        getToken,
+        fromNodeProviderChain: vi.fn(),
+      },
+    );
+    const loaded = await production.deps.loadReviewedDecisions();
+
+    expect(loaded.decisions).toEqual(JSON.parse(body).decisions);
+    expect(s3.send).toHaveBeenCalledTimes(1);
+    expect(getToken).not.toHaveBeenCalled();
+    await production.close();
+  });
 });
 
 describe("replaying the reviewed list instead of re-classifying (#150)", () => {
@@ -5918,6 +6059,48 @@ describe("replaying the reviewed list instead of re-classifying (#150)", () => {
     // Filtered by the ids file, not by the artifact.
     expect(server.store.get("smuggled-1").state).toBe("active");
     expect(result.skippedByFilter).toBe(1);
+  });
+
+  it("TC-SLACKAPP-248 applies only one claimed batch from a larger artifact", async () => {
+    const memories = Array.from(
+      { length: 51 },
+      (_, index) => memory(`batched-${index}`, `content-${index}`),
+    );
+    const server = fakeServer(memories);
+    const dir = tempDir();
+    const idsFile = join(dir, "approved.txt");
+    writeFileSync(
+      idsFile,
+      `${memories.slice(0, 50).map(({ id }) => id).join("\n")}\n`,
+      { mode: 0o600 },
+    );
+    const llm = fakeLlm([[]]);
+
+    const result = await runCleanup(
+      baseOpts({ apply: true, cap: 50, idsFile }),
+      {
+        ...baseDeps(server, llm, dir),
+        loadReviewedDecisions: async () => ({
+          generatedAt: "2026-08-05T03:00:00.000Z",
+          decisions: memories.map(({ id, content, version }) => ({
+            id,
+            verdict: "DELETE",
+            reason: "session-state",
+            version,
+            contentHash: contentHash(content),
+          })),
+        }),
+      },
+    );
+
+    expect(result.exitCode).toBe(0);
+    expect(result.capUsed).toBe(50);
+    expect(result.skippedByFilter).toBe(1);
+    for (const { id } of memories.slice(0, 50)) {
+      expect(server.store.get(id).state).toBe("deleted");
+    }
+    expect(server.store.get("batched-50").state).toBe("active");
+    expect(llm).not.toHaveBeenCalled();
   });
 
   it("TC-SLACKAPP-194 a refused artifact aborts the run and applies nothing", async () => {
@@ -6411,6 +6594,7 @@ describe("offering the list to Slack (#123)", () => {
         // history (#154). TC-SLACKAPP-239 covers the operator-CLI side, where the
         // marker is absent and none of it happens.
         scheduled: overrides.scheduled ?? true,
+        approvalCap: overrides.approvalCap,
         log: overrides.log ?? vi.fn(),
       }),
     };
@@ -6673,13 +6857,9 @@ describe("offering the list to Slack (#123)", () => {
     expect(thrown.message).not.toContain(long);
   });
 
-  it("TC-SLACKAPP-224 the parameter-limit refusal names the scanned set, not a flag (#155)", async () => {
-    // `--cap` never reaches this throw. `buildOfferedRecord` is not given a cap —
-    // `cap` is read only inside `applyDecisions`, at apply time — and the guard
-    // fires before any apply exists to spend one, so the SAME error came back
-    // byte-for-byte at `--cap 50` and `--cap 10` (measured on #155). The old
-    // "lower --cap" clause was therefore false on the operator CLI, not merely
-    // inert on the scheduled scan, whose container override passes no flags at all.
+  it("TC-SLACKAPP-224 keeps the pure size fence while the real offer batches a large scan", async () => {
+    // The low-level builder still refuses oversized input. It has no artifact to
+    // retain the deferred decisions and must never silently truncate a caller.
     const many = Array.from({ length: 200 }, (_, i) => del(`memory-with-a-realistic-id-${i}`));
     let thrown;
     try {
@@ -6698,21 +6878,41 @@ describe("offering the list to Slack (#123)", () => {
     // "offered set", never "consensus set": the same builders serve the single-pass
     // operator dry run, where there is no quorum to blame for the size.
     expect(thrown.message).not.toMatch(/consensus set/u);
-    // No FLAG at all, not merely no `--cap`: the scheduled scan is the path that
-    // cannot act on one, so a later `--consensus-passes` or `--protected-topics`
-    // clause would reintroduce this defect under a new name.
     expect(thrown.message).not.toMatch(/--[a-z]/u);
 
-    // Reachable from the real offer, where it fails BEFORE the write — unlike the
-    // block-limit refusal, which fires with the record already in place. Nothing
-    // was written, so a scan that cannot offer leaves last week's button as it
-    // found it instead of invalidating it and then refusing to replace it.
+    // The real offer owns both stores, so it writes the complete artifact and
+    // derives one operable batch for SSM/Slack under the same cap apply enforces.
     const fakes = offerFakes();
-    await expect(offer({ fakes, decisions: many }).promise).rejects.toThrow(
-      /review it in batches from the kept decision list/u,
+    const result = await offer({
+      fakes,
+      decisions: many,
+      artifactBucket: ARTIFACT.artifactBucket,
+      approvalCap: 50,
+    }).promise;
+    expect(result.record.ids).toEqual(many.slice(0, 50).map((decision) => decision.id));
+    expect(result.batch).toMatchObject({
+      offeredDecisions: 50,
+      totalDecisions: 200,
+      deferredDecisions: 150,
+      offeredIds: 50,
+      totalIds: 200,
+      deferredIds: 150,
+    });
+    expect(fakes.ssm.puts.length).toBeGreaterThanOrEqual(2);
+    expect(Buffer.byteLength(fakes.ssm.puts[0].Value, "utf8")).toBeLessThanOrEqual(4096);
+    expect(fakes.s3.puts).toHaveLength(1);
+    const artifact = JSON.parse(fakes.s3.puts[0].Body);
+    expect(artifact.decisions).toHaveLength(200);
+
+    const rendered = JSON.stringify(fakes.slack.calls[0].body.blocks);
+    expect(rendered).toContain(many[49].id);
+    expect(rendered).not.toContain(many[50].id);
+    expect(rendered).toContain(
+      "50 of 200 destructive decision(s), touching 50 of 200 id(s)",
     );
-    expect(fakes.ssm.puts).toHaveLength(0);
-    expect(fakes.slack.fetchImpl).not.toHaveBeenCalled();
+    expect(rendered).toContain(
+      "150 decision(s), touching 150 id(s), are deferred",
+    );
   });
 
   it("TC-SLACKAPP-225 the block-limit refusal names the reviewed decisions, not a flag (#155)", async () => {

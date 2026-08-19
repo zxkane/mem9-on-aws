@@ -8,6 +8,8 @@ set -euo pipefail
 STAGE="${STAGE:?STAGE is required (prod or pr-N)}"
 CONFIRM_PROD_SCAN="${CONFIRM_PROD_SCAN:-}"
 CLEANUP_SCAN_WAIT_SECONDS="${CLEANUP_SCAN_WAIT_SECONDS:-43200}"
+REVIEW_ARTIFACT_KEY="${MEM9_REVIEW_ARTIFACT_KEY:-}"
+REVIEW_ARTIFACT_HASH="${MEM9_REVIEW_ARTIFACT_HASH:-}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REGION="${AWS_REGION:-$(node "$REPO_ROOT/scripts/resolve-application-region.mjs")}"
 PREFIX="/mem9-on-aws/${STAGE}"
@@ -26,6 +28,16 @@ fi
 if ! [[ "$CLEANUP_SCAN_WAIT_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
    (( CLEANUP_SCAN_WAIT_SECONDS < 60 || CLEANUP_SCAN_WAIT_SECONDS > 43200 )); then
   echo "::error::CLEANUP_SCAN_WAIT_SECONDS must be an integer from 60 to 43200" >&2
+  exit 1
+fi
+if [[ ( -n "$REVIEW_ARTIFACT_KEY" && -z "$REVIEW_ARTIFACT_HASH" ) ||
+      ( -z "$REVIEW_ARTIFACT_KEY" && -n "$REVIEW_ARTIFACT_HASH" ) ]]; then
+  echo "::error::MEM9_REVIEW_ARTIFACT_KEY and MEM9_REVIEW_ARTIFACT_HASH must be set together" >&2
+  exit 1
+fi
+if [[ -n "$REVIEW_ARTIFACT_HASH" &&
+      ! "$REVIEW_ARTIFACT_HASH" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  echo "::error::MEM9_REVIEW_ARTIFACT_HASH must be a sha256 content hash" >&2
   exit 1
 fi
 
@@ -109,9 +121,25 @@ BASE_URL=$(jq -r --arg name "$CONTAINER_NAME" '
   ]
   | if length == 1 then .[0] else empty end
 ' <<<"$TASK_DEFINITION")
+CAP=$(jq -r --arg name "$CONTAINER_NAME" '
+  [
+    .taskDefinition.containerDefinitions[]
+    | select(.name == $name)
+    | .command as $command
+    | ($command | index("--cap")) as $index
+    | select($index != null and ($index + 1) < ($command | length))
+    | $command[$index + 1]
+    | select(type == "string")
+  ]
+  | if length == 1 then .[0] else empty end
+' <<<"$TASK_DEFINITION")
 EXPECTED_BASE_URL="http://mnemo.mem9-${STAGE}.local:8080"
 if [[ "$BASE_URL" != "$EXPECTED_BASE_URL" ]]; then
   echo "::error::deployed cleanup task base URL does not match stage ${STAGE}" >&2
+  exit 1
+fi
+if ! [[ "$CAP" =~ ^[1-9][0-9]*$ ]]; then
+  echo "::error::deployed cleanup task has no valid --cap" >&2
   exit 1
 fi
 
@@ -119,6 +147,9 @@ OVERRIDES=$(jq -cn \
   --arg name "$CONTAINER_NAME" \
   --arg stage "$STAGE" \
   --arg baseUrl "$BASE_URL" \
+  --arg cap "$CAP" \
+  --arg reviewArtifactKey "$REVIEW_ARTIFACT_KEY" \
+  --arg reviewArtifactHash "$REVIEW_ARTIFACT_HASH" \
   '{
     containerOverrides: [{
       name: $name,
@@ -130,14 +161,29 @@ OVERRIDES=$(jq -cn \
         $baseUrl,
         "--consensus-passes",
         "2",
+        "--cap",
+        $cap,
         "--out",
         "/tmp/mem9-cleanup-scan"
       ]
-    }]
+    } + (
+      if $reviewArtifactKey == "" then {}
+      else {
+        environment: [
+          {name: "MEM9_REVIEW_ARTIFACT_KEY", value: $reviewArtifactKey},
+          {name: "MEM9_REVIEW_ARTIFACT_HASH", value: $reviewArtifactHash}
+        ]
+      }
+      end
+    )]
   }')
 START_TIME_SECONDS=$(date +%s)
 
-echo "run-cleanup-scan: starting manual dry-run task"
+if [[ -n "$REVIEW_ARTIFACT_KEY" ]]; then
+  echo "run-cleanup-scan: starting manual artifact replay task"
+else
+  echo "run-cleanup-scan: starting manual dry-run task"
+fi
 RUN_OUT=$(aws ecs run-task \
   --cluster "$CLUSTER" \
   --task-definition "$TASK_DEF" \

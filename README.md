@@ -1198,9 +1198,15 @@ What a click can and cannot do is the whole design:
   `taskArn`. Both approval records are plain `String` parameters holding **ids
   and a hash only, never memory content**; snippets go to Slack and CloudWatch
   Logs.
-- `--cap` still bounds a single click's blast radius (50 by default, passed
-  explicitly by the task definition), and the apply task holds the same advisory
-  mutex as scheduled consolidation.
+- `--cap` bounds both the offered batch and a single click's blast radius (50 by
+  default, passed explicitly by the task definition and scheduled/manual scan
+  commands). The full decision artifact is unchanged; the offer deterministically
+  packs complete DELETE/MERGE decisions in original order until their footprint
+  reaches the cap, never splits a MERGE, and may use a later smaller decision to
+  fill remaining capacity. Slack reports offered, total, and deferred counts.
+- Apply verifies the full artifact hash and then uses the immutable claim ids to
+  filter that artifact, so deferred decisions cannot be applied by the current
+  click. A later weekly scan reclassifies the remaining backlog.
 
 The whole feature is **absent** unless `MEM9_SLACK_APPROVAL_ENABLED=1` at deploy
 time: disabled means no task definition and no grants, because a task definition
@@ -1242,14 +1248,29 @@ CONFIRM_PROD_SCAN=prod STAGE=prod \
 ```
 
 The runner reads the deployed task and private-network inputs from SSM, verifies
-the task's Cloud Map URL belongs to the requested stage, starts the same
-two-consensus-pass command the weekly schedule uses, waits for exit zero, and
-requires a fresh artifact-backed offer. It never passes `--apply`, `--ids`, or
-`MEM9_CLEANUP_SCHEDULED`; the hand-run cannot mutate memories and cannot satisfy
-the weekly liveness signal. Its output contains only the offered count. Review
-the private Slack message and click Approve there to exercise the real
-signature, claim, artifact replay, cap, LWW fence, soft-delete, and shared
-advisory-mutex path.
+the task's Cloud Map URL belongs to the requested stage, inherits the deployed
+apply command's `--cap`, starts the same two-consensus-pass command the weekly
+schedule uses, waits for exit zero, and requires a fresh artifact-backed offer.
+It never passes `--apply`, `--ids`, or `MEM9_CLEANUP_SCHEDULED`; the hand-run
+cannot mutate memories and cannot satisfy the weekly liveness signal. Its output
+contains only the offered count. Review the private Slack message and click
+Approve there to exercise the real signature, claim, artifact replay, cap, LWW
+fence, soft-delete, and shared advisory-mutex path.
+
+If a completed scan wrote its artifact but failed before creating the offer, the
+same runner can replay that trusted artifact without scanning or classifying
+again. Supply both machine-local values; either one alone, a non-content hash, a
+cross-stage key, or any replay combined with `--apply` is refused:
+
+```bash
+MEM9_REVIEW_ARTIFACT_KEY="decisions/prod/sha256-<hash>.json" \
+MEM9_REVIEW_ARTIFACT_HASH="sha256:<hash>" \
+CONFIRM_PROD_SCAN=prod STAGE=prod \
+  bash scripts/run-cleanup-scan-task.sh
+```
+
+Recover those coordinates only from the private log of the completed trusted
+scan. Do not publish the key or hash.
 
 The runner's observation budget defaults to twelve hours because a two-pass scan of
 a production corpus with thousands of active memories can exceed 90 minutes.
