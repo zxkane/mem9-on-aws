@@ -2420,7 +2420,11 @@ commands copied from the Scheduler resource.
   `pr-N` stages, and production additionally requires
   `CONFIRM_PROD_SCAN=prod` before the first AWS call. The scan is read-only with
   respect to memories but writes an offer and may replace an expired one, so an
-  accidental production invocation is still operationally significant.
+  accidental production invocation is still operationally significant. Its
+  observer budget defaults to six hours and accepts only an explicit integer
+  from 60 to 43200 seconds; malformed, shorter, or unbounded values fail
+  before any AWS call. The budget controls the local observer only, not the ECS
+  task that Scheduler invokes directly.
 - **TC-SLACKAPP-242** — the runner reads the four deployed cleanup task inputs,
   reads the task definition, and requires its `--base-url` to equal the exact
   stage-scoped private Cloud Map URL before starting Fargate in those private

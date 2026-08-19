@@ -7,6 +7,7 @@ set -euo pipefail
 
 STAGE="${STAGE:?STAGE is required (prod or pr-N)}"
 CONFIRM_PROD_SCAN="${CONFIRM_PROD_SCAN:-}"
+CLEANUP_SCAN_WAIT_SECONDS="${CLEANUP_SCAN_WAIT_SECONDS:-21600}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REGION="${AWS_REGION:-$(node "$REPO_ROOT/scripts/resolve-application-region.mjs")}"
 PREFIX="/mem9-on-aws/${STAGE}"
@@ -20,6 +21,11 @@ if [[ "$STAGE" != "prod" && ! "$STAGE" =~ ^pr-[1-9][0-9]*$ ]]; then
 fi
 if [[ "$STAGE" == "prod" && "$CONFIRM_PROD_SCAN" != "prod" ]]; then
   echo "::error::set CONFIRM_PROD_SCAN=prod to start a production approval scan" >&2
+  exit 1
+fi
+if ! [[ "$CLEANUP_SCAN_WAIT_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
+   (( CLEANUP_SCAN_WAIT_SECONDS < 60 || CLEANUP_SCAN_WAIT_SECONDS > 43200 )); then
+  echo "::error::CLEANUP_SCAN_WAIT_SECONDS must be an integer from 60 to 43200" >&2
   exit 1
 fi
 
@@ -153,7 +159,7 @@ if [[ -z "$TASK_ARN" ]]; then
 fi
 
 echo "run-cleanup-scan: waiting for the dry-run task to stop"
-DEADLINE=$((SECONDS + 5400))
+DEADLINE=$((SECONDS + CLEANUP_SCAN_WAIT_SECONDS))
 TASK_STATE=""
 while [[ $SECONDS -lt $DEADLINE ]]; do
   if ! TASK_STATE=$(aws ecs describe-tasks \
@@ -170,7 +176,7 @@ while [[ $SECONDS -lt $DEADLINE ]]; do
   sleep 10
 done
 if [[ "$(jq -r '.tasks[0].lastStatus // empty' <<<"$TASK_STATE")" != "STOPPED" ]]; then
-  echo "::error::cleanup scan task did not stop within 90 minutes" >&2
+  echo "::error::cleanup scan task did not stop within ${CLEANUP_SCAN_WAIT_SECONDS}s; task remains running, do not start another scan" >&2
   exit 1
 fi
 

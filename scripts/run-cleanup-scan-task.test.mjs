@@ -30,6 +30,7 @@ function runFixture({
   baseUrl = `http://mnemo.mem9-${stage}.local:8080`,
   offer,
   offerModified = 4_102_444_800,
+  waitSeconds,
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "mem9-cleanup-scan-runner-"));
   temporaryPaths.push(directory);
@@ -139,22 +140,27 @@ if (command === "ssm get-parameters") {
     { mode: 0o755 },
   );
 
+  const env = {
+    ...process.env,
+    AWS_CALLS: calls,
+    CONFIRM_PROD_SCAN: confirmProd,
+    MOCK_BASE_URL: baseUrl,
+    MOCK_EXIT_CODE: String(exitCode),
+    MOCK_INVALID_PARAMETERS: JSON.stringify(invalidParameters),
+    MOCK_OFFER: JSON.stringify(offered),
+    MOCK_OFFER_MODIFIED: String(offerModified),
+    MOCK_RUN_FAILURES: JSON.stringify(runFailures),
+    MOCK_STAGE: stage,
+    PATH: `${bin}${delimiter}${process.env.PATH}`,
+    STAGE: stage,
+  };
+  if (waitSeconds !== undefined) {
+    env.CLEANUP_SCAN_WAIT_SECONDS = String(waitSeconds);
+  }
+
   const result = spawnSync("bash", [script], {
     encoding: "utf8",
-    env: {
-      ...process.env,
-      AWS_CALLS: calls,
-      CONFIRM_PROD_SCAN: confirmProd,
-      MOCK_BASE_URL: baseUrl,
-      MOCK_EXIT_CODE: String(exitCode),
-      MOCK_INVALID_PARAMETERS: JSON.stringify(invalidParameters),
-      MOCK_OFFER: JSON.stringify(offered),
-      MOCK_OFFER_MODIFIED: String(offerModified),
-      MOCK_RUN_FAILURES: JSON.stringify(runFailures),
-      MOCK_STAGE: stage,
-      PATH: `${bin}${delimiter}${process.env.PATH}`,
-      STAGE: stage,
-    },
+    env,
   });
   const callRecords = (existsSync(calls) ? readFileSync(calls, "utf8") : "")
     .trim()
@@ -180,6 +186,19 @@ describe("manual cleanup scan ECS runner", () => {
 
     const preview = runFixture({ stage: "pr-42", confirmProd: "" });
     expect(preview.result.status, preview.result.stderr).toBe(0);
+
+    for (const waitSeconds of ["0", "59", "43201", "1.5", "invalid"]) {
+      const invalid = runFixture({ waitSeconds });
+      expect(invalid.result.status).toBe(1);
+      expect(invalid.callRecords).toEqual([]);
+      expect(invalid.result.stderr).toContain(
+        "CLEANUP_SCAN_WAIT_SECONDS must be an integer from 60 to 43200",
+      );
+    }
+    for (const waitSeconds of ["60", "3600", "43200"]) {
+      const valid = runFixture({ waitSeconds });
+      expect(valid.result.status, valid.result.stderr).toBe(0);
+    }
   });
 
   it("TC-SLACKAPP-242: starts only the deployed dry-run command in private networking", () => {
@@ -231,6 +250,15 @@ describe("manual cleanup scan ECS runner", () => {
     expect(JSON.stringify(overrides)).not.toMatch(
       /--apply|--ids|MEM9_CLEANUP_SCHEDULED/u,
     );
+
+    const source = readFileSync(script, "utf8");
+    expect(source).toContain(
+      'CLEANUP_SCAN_WAIT_SECONDS="${CLEANUP_SCAN_WAIT_SECONDS:-21600}"',
+    );
+    expect(source).toContain(
+      "DEADLINE=$((SECONDS + CLEANUP_SCAN_WAIT_SECONDS))",
+    );
+    expect(source).not.toContain("SECONDS + 5400");
   });
 
   it("TC-SLACKAPP-243: verifies a fresh artifact-backed offer without leaking it", () => {
