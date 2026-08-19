@@ -463,6 +463,11 @@ Each run emits content-free EMF in namespace `mem9-on-aws` with only the
 - `ConsolidationReviewItems`
 - `ConsolidationSkippedLww`
 
+The production adapter emits that record through a dedicated
+`stdout.write(JSON.stringify(record) + "\n")` path. The EMF log event must be
+exactly one root JSON object followed by one LF, with no CR or other data before
+or after the object; ordinary `console.log` is not used for this record.
+
 In production, an exact-task ECS STOPPED event with a non-zero container exit code produces
 `ConsolidationTaskFailures` in the same namespace and stage dimension. Its
 alarm targets the existing SNS-to-Slack delivery path. Its log resource policy

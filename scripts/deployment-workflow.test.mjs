@@ -38,6 +38,7 @@ const bootstrapTaskPath = resolve(here, "run-bootstrap-task.sh");
 const emfSmokePath = resolve(here, "run-mnemo-emf-smoke.sh");
 const healthSmokePath = resolve(here, "run-mnemo-health-smoke.sh");
 const consolidationRunnerPath = resolve(here, "run-consolidation-task.sh");
+const cleanupScanRunnerPath = resolve(here, "run-cleanup-scan-task.sh");
 const fakeAwsPath = resolve(here, "fixtures/fake-aws.mjs");
 const tempDirs = [];
 
@@ -506,6 +507,7 @@ describe("workflow integration", () => {
     const previewSteps = workflow.jobs["deploy-preview"].steps;
     const prodSteps = workflow.jobs["deploy-prod"].steps;
     const previewDeploy = previewSteps.find(({ name }) => name === "Deploy PR stage");
+    const prodDeploy = prodSteps.find(({ name }) => name === "Deploy prod stage");
     const e2eIndex = previewSteps.findIndex(
       ({ name }) => name === "Slack approval E2E (preview)",
     );
@@ -516,6 +518,10 @@ describe("workflow integration", () => {
     expect(previewSteps[e2eIndex].run).toBe("bash scripts/run-slack-approval-e2e.sh");
     expect(previewSteps[e2eIndex].env.STAGE).toBe("${{ steps.deploy.outputs.stage }}");
     expect(source).toContain("shellcheck scripts/run-slack-approval-e2e.sh");
+    expect(source).toContain("shellcheck scripts/run-cleanup-scan-task.sh");
+    expect(readFileSync(cleanupScanRunnerPath, "utf8")).toContain(
+      'CONFIRM_PROD_SCAN="${CONFIRM_PROD_SCAN:-}"',
+    );
 
     // NOT on prod. The harness overwrites `approvals/offered`, so a prod run would
     // destroy a pending human approval and approve a deletion against the live
@@ -542,9 +548,26 @@ describe("workflow integration", () => {
       "${{ secrets.SLACK_SIGNING_SECRET }}",
     );
 
+    // TC-SLACKAPP-240: the same four synth-time values must reach prod. The
+    // cleanup scan flag is nested inside the approval gate, so passing only the
+    // scan flag makes it dead configuration: no task, SSM inputs, alarms, or
+    // schedule are synthesized.
+    expect(prodDeploy.env.MEM9_SLACK_APPROVAL_ENABLED).toBe(
+      "${{ vars.MEM9_SLACK_APPROVAL_ENABLED }}",
+    );
+    expect(prodDeploy.env.MEM9_SLACK_APPROVAL_CHANNEL).toBe(
+      "${{ vars.MEM9_SLACK_APPROVAL_CHANNEL }}",
+    );
+    expect(prodDeploy.env.SST_SECRET_SlackBotToken).toBe(
+      "${{ secrets.SLACK_BOT_TOKEN }}",
+    );
+    expect(prodDeploy.env.SST_SECRET_SlackSigningSecret).toBe(
+      "${{ secrets.SLACK_SIGNING_SECRET }}",
+    );
+
     // And no secret is inlined into a `run:` script, where it would land in the
     // step's rendered command rather than only in the process environment.
-    for (const step of previewSteps) {
+    for (const step of [...previewSteps, ...prodSteps]) {
       expect(String(step.run ?? "")).not.toContain("secrets.SLACK_");
     }
   });

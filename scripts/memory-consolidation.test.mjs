@@ -1129,6 +1129,7 @@ describe("production adapters and CLI", () => {
     });
     const dbCalls = [];
     const sent = [];
+    const writeStdout = vi.fn();
     const getToken = vi.fn(async () => `bearer-${getToken.mock.calls.length}`);
     let mantleCalls = 0;
     const fetch = vi.fn(async (url, init) => {
@@ -1209,6 +1210,7 @@ describe("production adapters and CLI", () => {
         getToken,
         PublishCommand,
         SNSClient,
+        writeStdout,
       },
     );
     const memories = await production.deps.listActiveMemories();
@@ -1256,6 +1258,20 @@ describe("production adapters and CLI", () => {
     });
     expect(sent[0].TopicArn).toContain("mem9-on-aws-prod-alerts");
     expect(sent[0].Message).not.toMatch(/private content|tenant-fixture/);
+    const emf = buildEmfRecord("prod", {
+      scanned: 2,
+      merged: 0,
+      archived: 0,
+      flaggedStale: 0,
+      reviewItems: 1,
+      skippedLww: 0,
+    }, NOW);
+    production.deps.emitMetrics(emf);
+    expect(writeStdout).toHaveBeenCalledOnce();
+    const [emfLine] = writeStdout.mock.calls[0];
+    expect(emfLine.endsWith("\n")).toBe(true);
+    expect(emfLine.endsWith("\r\n")).toBe(false);
+    expect(JSON.parse(emfLine)).toEqual(emf);
     await production.close();
     expect(sent.at(-1)).toBe("destroyed");
     expect(dbCalls.at(-1)).toEqual(["end"]);
@@ -1366,5 +1382,23 @@ describe("content-free telemetry", () => {
     ]);
     expect(record.stage).toBe("prod");
     expect(JSON.stringify(record)).not.toMatch(/content|snippet|rationale|embedding|tenant/i);
+  });
+
+  it("TC-CONSOL-051: routes metrics through the dedicated emitter", async () => {
+    const fake = fakeDeps([], []);
+    fake.deps.emitMetrics = vi.fn();
+
+    await runConsolidation(
+      { stage: "prod", reportOnly: true },
+      fake.deps,
+    );
+
+    expect(fake.deps.emitMetrics).toHaveBeenCalledOnce();
+    expect(fake.deps.emitMetrics.mock.calls[0][0]).toMatchObject({
+      stage: "prod",
+      ConsolidationScanned: 0,
+      ConsolidationReviewItems: 0,
+    });
+    expect(fake.logs.some((line) => line.includes('"_aws"'))).toBe(false);
   });
 });

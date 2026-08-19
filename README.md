@@ -1231,18 +1231,38 @@ boundary with the same `MEM9_DECISION_ARTIFACT_BUCKET` value before deploying
 any stage. Use a **private** channel: anyone who can click can approve a deletion,
 and the message shows every offered id and snippet.
 
-**Nothing scheduled posts the review list yet.** The weekly Scheduler target is
-`memory-consolidation.mjs`, which never executes a DELETE, and this stack's
-Fargate task is the `--apply` half. The offer is produced by a
-`memory-cleanup.mjs` **dry run** with a channel configured — so today that is an
-operator-initiated command, and a click can only ever apply a list a human just
-asked for:
+The production rollout intentionally separates the approval/apply half from the
+unattended scan. First deploy with `MEM9_SLACK_APPROVAL_ENABLED=1` and leave
+`MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED` unset. Then run the deployed task once in
+manual dry-run mode:
 
 ```bash
-MEM9_SLACK_APPROVAL_CHANNEL="<private-channel-id>" \
-  node scripts/memory-cleanup.mjs --stage prod \
-  --model openai.gpt-5.6-terra --effort high
+CONFIRM_PROD_SCAN=prod STAGE=prod \
+  bash scripts/run-cleanup-scan-task.sh
 ```
+
+The runner reads the deployed task and private-network inputs from SSM, verifies
+the task's Cloud Map URL belongs to the requested stage, starts the same
+two-consensus-pass command the weekly schedule uses, waits for exit zero, and
+requires a fresh artifact-backed offer. It never passes `--apply`, `--ids`, or
+`MEM9_CLEANUP_SCHEDULED`; the hand-run cannot mutate memories and cannot satisfy
+the weekly liveness signal. Its output contains only the offered count. Review
+the private Slack message and click Approve there to exercise the real
+signature, claim, artifact replay, cap, LWW fence, soft-delete, and shared
+advisory-mutex path.
+
+After that production drill succeeds, enable and deploy the weekly scan:
+
+```bash
+gh variable set MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED --body 1
+gh workflow run "Infra CI" --ref main
+```
+
+Production then scans Saturday at 03:00 UTC, one day before consolidation. The
+scan uses two independent classifier passes and offers only their destructive
+consensus. The first enablement is expected to raise the cleanup-scan liveness
+alarm once, because no scheduled datapoint exists yet; the first successful
+Saturday scan clears it.
 
 The offer happens on the dry run and never on `--apply`: an apply that re-offered
 would overwrite the record its own claim was derived from, so a Slack redelivery

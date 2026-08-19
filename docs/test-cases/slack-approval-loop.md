@@ -2403,6 +2403,40 @@ degrades to a static `>= 2`.
   pins that the human-readable lines are still prefixed and still on stderr, so
   nothing changed for consumers parsing that format.
 
+## Production wiring and operator scan
+
+The scheduled scan cannot be the first production invocation. The approval/apply
+half is deployed while the scan flag is absent, then an operator starts the exact
+deployed task in dry-run mode and completes one real Slack approval before enabling
+the schedule. This section pins that rollout path rather than leaving it as a set of
+commands copied from the Scheduler resource.
+
+- **TC-SLACKAPP-240** — the production deploy receives the same four synth-time
+  Slack values as preview: approval flag, channel, bot token, and signing secret.
+  `MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED` is nested inside the approval gate, so
+  passing the scan flag without these values synthesizes nothing. The secrets
+  remain step environment entries and never appear in `run:` text.
+- **TC-SLACKAPP-241** — `run-cleanup-scan-task.sh` accepts only `prod` and strict
+  `pr-N` stages, and production additionally requires
+  `CONFIRM_PROD_SCAN=prod` before the first AWS call. The scan is read-only with
+  respect to memories but writes an offer and may replace an expired one, so an
+  accidental production invocation is still operationally significant.
+- **TC-SLACKAPP-242** — the runner reads the four deployed cleanup task inputs,
+  reads the task definition, and requires its `--base-url` to equal the exact
+  stage-scoped private Cloud Map URL before starting Fargate in those private
+  subnets and security group. Its full command is the scheduled scan command:
+  two consensus passes and an output directory outside `/app`, with no
+  `--apply`, `--ids`, or `MEM9_CLEANUP_SCHEDULED`. A hand-run must not mutate
+  memories or publish evidence that the weekly schedule ran.
+- **TC-SLACKAPP-243** — after exit zero the runner requires a fresh, shaped
+  `approvals/offered` record for the requested stage with artifact coordinates.
+  It reports only the offered count. Memory ids, the full hash, bucket, key, and
+  task ARN never reach stdout or stderr.
+- **TC-SLACKAPP-244** — missing task inputs, a cross-stage base URL, RunTask
+  failures, non-zero or absent container exits, and a missing, stale, malformed,
+  wrong-stage, or artifact-less offer all fail closed. None is translated into a
+  successful drill.
+
 ## Exit codes
 
 The cleanup script's existing vocabulary is unchanged (0 ok, 1 error, 2

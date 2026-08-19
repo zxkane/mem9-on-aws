@@ -274,6 +274,7 @@ jobs:
           shellcheck scripts/deploy-workload-permissions-boundary.sh
           shellcheck scripts/deploy-decision-artifact-bucket.sh
           shellcheck scripts/rollout-workload-permissions-boundary.sh
+          shellcheck scripts/run-cleanup-scan-task.sh
           shellcheck scripts/run-consolidation-task.sh
           shellcheck scripts/run-slack-approval-e2e.sh
 
@@ -1194,6 +1195,14 @@ jobs:
           # The image applies the repeatable atomic-ingest migration before the
           # server starts, so one enabled rollout is safe.
           MEM9_DURABLE_INGEST_ENABLED: "1"
+          # The approval/apply half is independently gated from the unattended
+          # scan. Pass the same four synth-time values as preview so production
+          # can deploy that inert half first; an unset approval flag still keeps
+          # the entire stack absent.
+          MEM9_SLACK_APPROVAL_ENABLED: ${{ vars.MEM9_SLACK_APPROVAL_ENABLED }}
+          MEM9_SLACK_APPROVAL_CHANNEL: ${{ vars.MEM9_SLACK_APPROVAL_CHANNEL }}
+          SST_SECRET_SlackBotToken: ${{ secrets.SLACK_BOT_TOKEN }}
+          SST_SECRET_SlackSigningSecret: ${{ secrets.SLACK_SIGNING_SECRET }}
           # Explicit opt-in. Missing/empty keeps the schedule and Scheduler role
           # absent; the task definition remains available for report-only runs.
           MEM9_CONSOLIDATION_SCHEDULE_ENABLED: ${{ vars.MEM9_CONSOLIDATION_SCHEDULE_ENABLED }}

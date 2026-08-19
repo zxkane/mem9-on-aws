@@ -845,7 +845,9 @@ export async function runConsolidation(options, deps) {
       reviewItems: review.length,
     })}`,
   );
-  deps.log(JSON.stringify(buildEmfRecord(stage, metrics, clock())));
+  const emf = buildEmfRecord(stage, metrics, clock());
+  if (deps.emitMetrics) deps.emitMetrics(emf);
+  else deps.log(JSON.stringify(emf));
 
   if (!reportOnly && review.length > 0) {
     await deps.publishSummary(summaryPayload(stage, metrics));
@@ -957,6 +959,8 @@ export async function createProductionDeps(options, runtime = {}) {
   await db.connect();
 
   const fetchImpl = runtime.fetch ?? fetch;
+  const writeStdout =
+    runtime.writeStdout ?? process.stdout.write.bind(process.stdout);
   const rest = restAdapter(baseUrl, tenantId, fetchImpl);
   const getToken =
     runtime.getToken ??
@@ -1092,6 +1096,7 @@ export async function createProductionDeps(options, runtime = {}) {
       },
       completeChat,
       publishSummary,
+      emitMetrics: (record) => writeStdout(`${JSON.stringify(record)}\n`),
       log: (line) => console.log(line),
     },
     close: async () => {
