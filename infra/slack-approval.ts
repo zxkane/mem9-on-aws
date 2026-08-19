@@ -823,6 +823,11 @@ export function slackApproval(
                 // quorum is the only thing narrowing it.
                 "--consensus-passes",
                 String(CLEANUP_SCAN_CONSENSUS_PASSES),
+                // The offer selector and the apply task share one footprint
+                // contract. A scheduled scan that omitted this would silently
+                // fall back to the script default if CLEANUP_CAP ever changed.
+                "--cap",
+                String(CLEANUP_CAP),
                 // Outside /app, which `snippetLogDir` requires — see
                 // CLEANUP_SCAN_OUT_DIR.
                 "--out",

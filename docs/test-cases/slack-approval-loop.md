@@ -50,11 +50,11 @@ them instead of re-classifying.
 Both records are plain `String`, not `SecureString`: the ceiling admits neither
 `kms:Encrypt` nor `kms:GenerateDataKey`, so a SecureString write would be denied
 at runtime. That bounds what may go in them — **ids and a hash only, never
-memory content** (TC-SLACKAPP-023). Snippets go to Slack and CloudWatch Logs,
-which is also why `--cap` bounds the offered list: a cap-50 record is ~2 KB
-against the standard tier's 4096-byte limit, and a run that would exceed the
-parameter limit must fail loud rather than truncate the list it is asking the
-operator to approve (TC-SLACKAPP-024).
+memory content** (TC-SLACKAPP-023). Snippets go to Slack and CloudWatch Logs.
+The full artifact remains the durable source, while `--cap` bounds the offered
+SSM/Slack batch and the apply to the same complete-decision footprint. The
+low-level record builder still fails loud rather than truncate oversized input
+(TC-SLACKAPP-024).
 
 ## Why the record is claimed before the task is started
 
@@ -207,8 +207,8 @@ concurrent applies of the same ids.
   length, not an id count: a limit expressed as "N ids" drifts from the real
   constraint as soon as ids get longer, and bytes are what SSM rejects. The
   advanced tier's 8 KB is deliberately not the answer — it incurs a charge and
-  cannot be reverted to standard without data loss, so the offered set has to fit
-  here, and what has to shrink is the scan (TC-SLACKAPP-224), not the cap.
+  cannot be reverted to standard without data loss, so every selected batch still
+  has to fit here (TC-SLACKAPP-224).
 - **TC-SLACKAPP-024b** — the size guard measures the artifact coordinates **inside**
   the limit it enforces. The two coordinates add ~151 bytes, so a caller that
   assigned them onto an already-validated record opened a window where the guard
@@ -229,28 +229,19 @@ concurrent applies of the same ids.
   fixture is sized by search against the **real** record rather than a hand-built
   approximation, and the window's existence (under the limit in code units, over it
   in bytes) is asserted before the refusal is.
-- **TC-SLACKAPP-224** — the parameter-limit refusal names the **scanned set**, and
-  no flag at all (#155). `--cap` never reaches this throw: it is not a parameter of
-  `buildOfferedRecord`, it is read only inside `applyDecisions` at apply time, and
-  the guard fires before an apply exists — measured, the byte-identical error at
-  `--cap 50` and `--cap 10`. So the old "lower `--cap`" clause was *false* on the
-  operator CLI, not merely inert on the scheduled scan, and it was the whole
-  diagnosis at the one moment it is the only one available. The replacement names
-  what actually drives the bytes (every id a destructive decision touches) and points
-  at a lever that EXISTS on both paths: the decision list survives the throw, and a
-  hand-run `--apply --ids` over a reviewed subset is the documented way through —
-  which is also what `runCleanup`'s exit-1 line already names. Deliberately **not**
-  "narrow the scan", the wording the adjacent artifact refusal uses: there is no scan
-  bound to turn down (`scanActiveMemories` exhausts every page and `--limit` is
-  list-only), so that would have replaced one inert clause with another. The same
-  reason the diagnosis says "offered set" rather than "consensus set": these builders
-  also serve the single-pass operator dry run, where there is no quorum to blame.
-  Asserted against **any** flag, not just `--cap`: a later `--consensus-passes` or
-  `--protected-topics` clause would reintroduce the defect under a new name on the
-  path that can pass neither. Also asserted through the real offer, where this
-  refusal fires **before** the write, so a scan that cannot offer leaves last
-  week's button as it found it rather than invalidating it and then refusing to
-  replace it.
+- **TC-SLACKAPP-224** — the low-level record builder keeps its 4096-byte refusal
+  and never truncates direct input, while the real offer writes the **complete**
+  artifact and selects one cap-bounded SSM/Slack batch. The test starts with 200
+  realistic DELETE ids: direct construction refuses, but `postApprovalRequest`
+  writes all 200 decisions to S3, offers only the first 50 ids, keeps the parameter
+  under 4096 bytes, and renders offered/total/deferred decision and id counts.
+  The first deferred id and snippet are absent from Slack.
+- **TC-SLACKAPP-246** — batch selection is deterministic in original order,
+  preserves every non-destructive row for full-scan RETAIN/UNSTABLE counts, never
+  splits a MERGE, and allows a later smaller decision to fill capacity left by an
+  earlier decision that did not fit.
+- **TC-SLACKAPP-247** — one decision whose complete footprint exceeds the cap is
+  refused loudly. A MERGE cannot be split across approvals.
 - **TC-SLACKAPP-025** — the record is stage-bound, and a hash whose record names
   another stage is refused. Same reasoning as #102's decision-file stage guard: a
   preview approval must never apply to prod.
@@ -1131,8 +1122,9 @@ contend with the weekly consolidation and cannot delete.
   conditioned on `iam:PassedToService = ecs-tasks.amazonaws.com`. The action set is
   pinned exactly, so a third action cannot be added silently.
 - **TC-SLACKAPP-150** — the container override is a dry run: **no** `--apply`, no
-  `--ids`, no `--cap`; `--consensus-passes` present and at least 2; and `--out`
-  outside `/app`. Each of those is a distinct failure. `--apply` on a schedule is an
+  `--ids`; `--consensus-passes` present and at least 2; `--cap` equal to the apply
+  task's exported `CLEANUP_CAP`; and `--out` outside `/app`. Each is a distinct
+  contract. `--apply` on a schedule is an
   unattended deletion with no human in the loop at all. `--ids` is worse than it
   looks: `readApprovedIds` treats an absent file as "no filter", so `--ids` on a path
   that writes nothing would apply *everything* — which is only safe because both
@@ -1369,10 +1361,9 @@ the offer now also writes the reviewed list itself to S3 and hashes **that**.
   one. The remedy must **not** name `--cap`, and that is a correctness claim about
   the message rather than a wording preference: the artifact carries one row per
   *scanned* memory (KEEPs included), while `--cap` bounds only how many mutations an
-  apply may spend and never reaches this path. Advice to lower it is inert, and
-  doubly so on the scheduled scan, which has no operator at the keyboard and no
-  `--cap` override wired into its task definition. When the alarm says only "task
-  failed", this string is the entire diagnosis.
+  apply may spend and never reaches this path. Advice to lower it is inert even
+  though the scheduled scan now carries the same explicit cap as apply. When the
+  alarm says only "task failed", this string is the entire diagnosis.
 - **TC-SLACKAPP-174b** — the artifact is measured in **bytes**, not UTF-16 code
   units. This is the one place memory *text* lives at rest, so the difference is not
   academic: a CJK `mergedContent` is 3 bytes per character and 1 `.length` unit, and
@@ -1726,6 +1717,15 @@ and therefore the withholding.
   a tampered-but-hash-valid artifact — impossible today, but the guard is not
   conditional on that — from reaching a memory the click never covered. This is why
   the ids file is written on the replay path at all.
+- **TC-SLACKAPP-248** — the same property at the real batch boundary: a full
+  51-decision artifact plus a 50-id claim applies exactly 50, leaves the deferred
+  memory active, and never calls the classifier.
+- **TC-SLACKAPP-249** — review-only replay requires a paired key/hash, a canonical
+  SHA-256 hash, the configured artifact bucket, and the exact stage/hash-derived
+  key. It cannot be combined with `MEM9_APPROVAL_HASH` or `--apply`, and invalid
+  input is refused before an S3 read.
+- **TC-SLACKAPP-250** — a valid review-only replay loads and validates the full
+  artifact through the normal hash/stage path without invoking the classifier.
 - **TC-SLACKAPP-194** — a refused artifact **aborts the run** and applies nothing.
   `loadDecisions` deliberately has no `try` around the replay branch, so every
   refusal above propagates out of `runCleanup`. The lock file is never even created,
@@ -2429,9 +2429,11 @@ commands copied from the Scheduler resource.
   reads the task definition, and requires its `--base-url` to equal the exact
   stage-scoped private Cloud Map URL before starting Fargate in those private
   subnets and security group. Its full command is the scheduled scan command:
-  two consensus passes and an output directory outside `/app`, with no
-  `--apply`, `--ids`, or `MEM9_CLEANUP_SCHEDULED`. A hand-run must not mutate
-  memories or publish evidence that the weekly schedule ran.
+  two consensus passes, the `--cap` extracted from the deployed apply task, and
+  an output directory outside `/app`, with no `--apply`, `--ids`, or
+  `MEM9_CLEANUP_SCHEDULED`. A missing or malformed deployed cap fails before
+  RunTask. A hand-run must not mutate memories or publish evidence that the weekly
+  schedule ran.
 - **TC-SLACKAPP-243** — after exit zero the runner requires a fresh, shaped
   `approvals/offered` record for the requested stage with artifact coordinates.
   It reports only the offered count. Memory ids, the full hash, bucket, key, and
@@ -2440,6 +2442,10 @@ commands copied from the Scheduler resource.
   failures, non-zero or absent container exits, and a missing, stale, malformed,
   wrong-stage, or artifact-less offer all fail closed. None is translated into a
   successful drill.
+- **TC-SLACKAPP-245** — paired `MEM9_REVIEW_ARTIFACT_KEY` /
+  `MEM9_REVIEW_ARTIFACT_HASH` values are passed only as ECS environment overrides,
+  retain the deployed cap, and never appear in runner output. One missing value or
+  a malformed hash fails before any AWS call. The command remains review-only.
 
 ## Exit codes
 

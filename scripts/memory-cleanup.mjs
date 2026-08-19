@@ -86,14 +86,13 @@ const MAX_PARAMETER_BYTES = 4096;
 // does not admit. So the writer must stay on one PutObject, and this is the size
 // at which it says so instead of discovering it in production.
 //
-// What scales it is the SCANNED corpus, NOT `--cap`: the artifact carries one row
-// per decision, KEEPs included, because a replay has to reproduce the reviewed list
-// and not just its destructive half — while `--cap` bounds only how many mutations
-// an apply may spend. Measured, a KEEP row is ~139 bytes, so ~30k scanned memories
-// reach 4 MiB with ZERO deletions. That is a real store rather than an operator
-// mistake, which is why the error names the corpus and offers no `--cap` remedy: it
-// would be advice nobody can act on, and the scheduled scan has no operator at the
-// keyboard to act anyway.
+// What scales it is the SCANNED corpus, NOT the selected approval batch: the
+// artifact carries one row per decision, KEEPs included, because a replay has to
+// reproduce the reviewed list and not just its destructive half. `--cap` bounds
+// the SSM/Slack batch and the apply, but cannot shrink this durable source.
+// Measured, a KEEP row is ~139 bytes, so ~30k scanned memories reach 4 MiB with
+// ZERO deletions. That is a real store rather than an operator mistake, which is
+// why the artifact-size error names the corpus and offers no `--cap` remedy.
 const MAX_ARTIFACT_BYTES = 4 * 1024 * 1024;
 // Slack's own hard ceilings on a `chat.postMessage` payload
 // (api.slack.com/reference/block-kit/blocks). A message over ANY of them is
@@ -128,6 +127,8 @@ const MEM9_CLEANUP_SCHEDULED_ENV = "MEM9_CLEANUP_SCHEDULED";
 const MEM9_DECISION_BUCKET_ENV = "MEM9_DECISION_ARTIFACT_BUCKET";
 const MEM9_DECISION_BUCKET_OWNER_ENV =
   "MEM9_DECISION_ARTIFACT_BUCKET_OWNER";
+const MEM9_REVIEW_ARTIFACT_KEY_ENV = "MEM9_REVIEW_ARTIFACT_KEY";
+const MEM9_REVIEW_ARTIFACT_HASH_ENV = "MEM9_REVIEW_ARTIFACT_HASH";
 const REQUEST_TIMEOUT_MS = 30_000; // REST calls; the LLM call sets its own
 const LLM_TIMEOUT_MS = 120_000;
 // Reasoning models consume output tokens on hidden reasoning BEFORE emitting
@@ -789,6 +790,54 @@ function decisionIds(decision) {
  */
 function destructiveCost(decision) {
   return decisionFootprint(decision).length;
+}
+
+/**
+ * Select one complete approval batch under the same footprint cap the apply
+ * path enforces. The full decision list remains in the artifact; only the ids
+ * selected here enter the offered record and Slack message.
+ */
+export function selectApprovalBatch(decisions, cap = DEFAULT_CAP) {
+  if (!Number.isSafeInteger(cap) || cap <= 0) {
+    throw new Error(`approval batch cap must be a positive whole integer, got ${cap}`);
+  }
+
+  const destructive = decisions.filter((decision) => destructiveCost(decision) > 0);
+  const oversized = destructive.find((decision) => destructiveCost(decision) > cap);
+  if (oversized) {
+    const cost = destructiveCost(oversized);
+    throw new Error(
+      `one ${oversized.verdict} decision touches ${cost} ids, over the approval ` +
+        `and apply cap of ${cap}; a decision cannot be split across approvals`,
+    );
+  }
+
+  const selected = new Set();
+  let offeredIds = 0;
+  let totalIds = 0;
+  for (const decision of destructive) {
+    const cost = destructiveCost(decision);
+    totalIds += cost;
+    if (offeredIds + cost <= cap) {
+      selected.add(decision);
+      offeredIds += cost;
+    }
+  }
+
+  const offeredDecisions = destructive.filter((decision) => selected.has(decision));
+  return {
+    // Preserve every non-destructive row so the Slack withheld counts still
+    // describe the complete scan while destructive lines stay batch-bounded.
+    decisions: decisions.filter(
+      (decision) => destructiveCost(decision) === 0 || selected.has(decision),
+    ),
+    offeredDecisions: offeredDecisions.length,
+    totalDecisions: destructive.length,
+    deferredDecisions: destructive.length - offeredDecisions.length,
+    offeredIds,
+    totalIds,
+    deferredIds: totalIds - offeredIds,
+  };
 }
 
 /** Build the REST client. Counts every non-GET request so dry-run can assert 0. */
@@ -1530,13 +1579,9 @@ export function buildOfferedRecord({
     // expressed as "N ids" drifts from the real constraint as soon as ids get
     // longer, and bytes are what SSM rejects.
     //
-    // Deliberately not `--cap` (#155): this record holds every id a destructive
-    // decision touches, so it scales with what the scan found, while `cap` is read
-    // only inside `applyDecisions` and is not even a parameter of this builder.
-    // Measured, the identical error at `--cap 50` and `--cap 10` — the throw precedes
-    // the apply the cap would bound. So "lower --cap" was false on the operator CLI,
-    // and inert as well on the scheduled scan, which passes no flags and has no
-    // operator at the keyboard to pass one.
+    // Deliberately not `--cap` (#155): this low-level builder has no authority to
+    // select or truncate its input. `postApprovalRequest` passes it one already
+    // selected batch; direct callers must do the same or handle this refusal.
     //
     // What the remedy names instead is something that EXISTS on both paths. Not
     // "narrow the scan": there is no scan bound to turn down — `scanActiveMemories`
@@ -1544,7 +1589,7 @@ export function buildOfferedRecord({
     // inert clause. The decision list on disk is the real lever: it survives this
     // throw, and a hand-run `--apply --ids` over a reviewed subset is the documented
     // way through, which is also what `runCleanup`'s exit-1 line already points at.
-    // "offered set", not "consensus set": these builders serve the single-pass
+    // "offered set", not "consensus set": this builder serves the single-pass
     // operator dry run too, where there is no quorum to blame.
     throw new Error(
       `the offered approval list is ${bytes} bytes, over the ` +
@@ -1636,7 +1681,7 @@ export function formatHours(ms) {
  * 120-character slices: a snippet identifies a memory being removed, and the
  * merged text IS the change being approved.
  */
-export function buildApprovalMessage({ record, decisions, channel }) {
+export function buildApprovalMessage({ record, decisions, channel, batch }) {
   const withheld = { RETAIN: 0, UNSTABLE: 0 };
   for (const d of decisions) {
     if (d.verdict in withheld) withheld[d.verdict] += 1;
@@ -1728,6 +1773,20 @@ export function buildApprovalMessage({ record, decisions, channel }) {
           `Generated ${record.generatedAt}.`,
       },
     },
+    ...(batch?.deferredDecisions > 0
+      ? [{
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text:
+              `*Approval batch:* ${batch.offeredDecisions} of ` +
+              `${batch.totalDecisions} destructive decision(s), touching ` +
+              `${batch.offeredIds} of ${batch.totalIds} id(s). ` +
+              `${batch.deferredDecisions} decision(s), touching ` +
+              `${batch.deferredIds} id(s), are deferred to a later scan.`,
+          },
+        }]
+      : []),
     ...chunkSections(lines),
     {
       type: "actions",
@@ -2030,10 +2089,9 @@ export async function putDecisionArtifact({
     //
     // The remedy names the CORPUS, deliberately not `--cap`. The artifact carries
     // every decision including KEEPs, so it scales with what was scanned, while
-    // `--cap` bounds only an apply's destructive spend and never reaches this path
-    // — measured, a 30k-memory store with zero deletions breaches this. Advice to
-    // lower `--cap` would be inert here, and inert on the scheduled scan twice over,
-    // since no operator is at the keyboard to take it.
+    // `--cap` bounds only the selected offer and apply — measured, a 30k-memory
+    // store with zero deletions breaches this. Advice to lower `--cap` would be
+    // inert here.
     throw new Error(
       `the decision artifact is ${bytes} bytes, over the ` +
         `${MAX_ARTIFACT_BYTES}-byte single-PutObject bound for ${decisions.length} ` +
@@ -2279,6 +2337,7 @@ export async function postApprovalRequest({
   // caller that has no metric surface prints nothing; `buildPostApproval` wires
   // the real emitter for the deployed scan.
   emit = () => {},
+  approvalCap = DEFAULT_CAP,
   // Whether this invocation came from the SCHEDULE. Only a scheduled run keeps week
   // history and publishes metrics; see MEM9_CLEANUP_SCHEDULED_ENV for why an
   // operator's dry run must not.
@@ -2306,6 +2365,16 @@ export async function postApprovalRequest({
             `list another run may be posting right now; retry after ` +
               `${formatHours(UNPOSTED_GRACE_MS)}, after which an unposted list is ` +
               `treated as a failed post and replaced`),
+    );
+  }
+  const batch = selectApprovalBatch(decisions, approvalCap);
+  if (batch.deferredDecisions > 0) {
+    log(
+      `approval batch selected ${batch.offeredDecisions} of ` +
+        `${batch.totalDecisions} destructive decision(s), touching ` +
+        `${batch.offeredIds} of ${batch.totalIds} id(s); ` +
+        `${batch.deferredDecisions} decision(s), touching ` +
+        `${batch.deferredIds} id(s), are deferred`,
     );
   }
   const write = (value) =>
@@ -2372,7 +2441,7 @@ export async function postApprovalRequest({
   // (TC-SLACKAPP-169).
   const record = buildOfferedRecord({
     stage,
-    decisions,
+    decisions: batch.decisions,
     generatedAt,
     issuedAt,
     artifactBucket: artifact ? artifactBucket : undefined,
@@ -2430,10 +2499,15 @@ export async function postApprovalRequest({
     // Nothing to approve, so nothing to post — but the record above still
     // overwrote last week's list, which is the point.
     log("no deletions to offer; posted nothing to Slack");
-    return withOutcome({ record, posted: false });
+    return withOutcome({ record, posted: false, batch });
   }
 
-  const message = buildApprovalMessage({ record, decisions, channel });
+  const message = buildApprovalMessage({
+    record,
+    decisions: batch.decisions,
+    channel,
+    batch,
+  });
   const posted = await slackCall("chat.postMessage", message, { botToken, fetchImpl });
 
   try {
@@ -2450,6 +2524,7 @@ export async function postApprovalRequest({
     posted: true,
     messageTs: posted.ts,
     messageChannel: posted.channel,
+    batch,
   });
 }
 
@@ -4669,6 +4744,7 @@ async function buildPostApproval(opts, region, runtime) {
       // alarms then reading no datapoints and sitting green forever.
       emit: (event) => console.log(JSON.stringify(event)),
       scheduled: process.env[MEM9_CLEANUP_SCHEDULED_ENV] === "1",
+      approvalCap: opts.cap,
     });
 }
 
@@ -4760,6 +4836,27 @@ export async function createCleanupDeps(opts, runtime = {}) {
   // The approval hash is the ECS container override the callback Lambda sets, and
   // it is the ONLY thing that reaches the task from the click.
   const approvalHash = process.env.MEM9_APPROVAL_HASH;
+  const reviewArtifactKey = process.env[MEM9_REVIEW_ARTIFACT_KEY_ENV];
+  const reviewArtifactHash = process.env[MEM9_REVIEW_ARTIFACT_HASH_ENV];
+  if (Boolean(reviewArtifactKey) !== Boolean(reviewArtifactHash)) {
+    throw new Error(
+      `${MEM9_REVIEW_ARTIFACT_KEY_ENV} and ${MEM9_REVIEW_ARTIFACT_HASH_ENV} ` +
+        `must be set together`,
+    );
+  }
+  if (approvalHash && reviewArtifactKey) {
+    throw new Error(
+      `${MEM9_REVIEW_ARTIFACT_KEY_ENV} cannot be combined with MEM9_APPROVAL_HASH`,
+    );
+  }
+  if (
+    reviewArtifactHash &&
+    !/^sha256:[0-9a-f]{64}$/u.test(reviewArtifactHash)
+  ) {
+    throw new Error(
+      `${MEM9_REVIEW_ARTIFACT_HASH_ENV} must be a sha256 content hash`,
+    );
+  }
   /** What the claim said, for the outcome update. Absent on a review run. */
   let claim;
   /**
@@ -4830,6 +4927,40 @@ export async function createCleanupDeps(opts, runtime = {}) {
             console.error(`[memory-cleanup ${new Date().toISOString()}] ${message}`),
         });
     }
+  } else if (reviewArtifactKey) {
+    if (opts.apply) {
+      throw new Error(
+        `${MEM9_REVIEW_ARTIFACT_KEY_ENV} is review-only and cannot be combined ` +
+          `with --apply`,
+      );
+    }
+    const artifactBucket = process.env[MEM9_DECISION_BUCKET_ENV];
+    if (!artifactBucket) {
+      throw new Error(
+        `${MEM9_REVIEW_ARTIFACT_KEY_ENV} requires ${MEM9_DECISION_BUCKET_ENV}`,
+      );
+    }
+    const expectedKey = decisionArtifactKey(opts.stage, reviewArtifactHash);
+    if (reviewArtifactKey !== expectedKey) {
+      throw new Error(
+        `${MEM9_REVIEW_ARTIFACT_KEY_ENV} does not match the requested stage and hash`,
+      );
+    }
+    const expectedBucketOwner = requireDecisionArtifactBucketOwner(
+      process.env[MEM9_DECISION_BUCKET_OWNER_ENV],
+    );
+    const { s3 } = await s3Client(region, runtime);
+    loadReviewedDecisions = () =>
+      loadDecisionArtifact({
+        s3,
+        bucket: artifactBucket,
+        expectedBucketOwner,
+        key: reviewArtifactKey,
+        hash: reviewArtifactHash,
+        stage: opts.stage,
+        log: (message) =>
+          console.error(`[memory-cleanup ${new Date().toISOString()}] ${message}`),
+      });
   }
 
   const databaseMutex = opts.apply

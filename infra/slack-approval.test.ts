@@ -1222,7 +1222,9 @@ describe("slack approval infrastructure", () => {
     // on a path that writes nothing.
     expect(command).not.toContain("--apply");
     expect(command).not.toContain("--ids");
-    expect(command).not.toContain("--cap");
+    const capIndex = command.indexOf("--cap");
+    expect(capIndex).toBeGreaterThan(0);
+    expect(Number(command[capIndex + 1])).toBe(module.CLEANUP_CAP);
 
     // With no human reading the list before it is offered, the quorum is the only
     // thing narrowing it: one pass reproduced just 66% of its own DELETE set on
