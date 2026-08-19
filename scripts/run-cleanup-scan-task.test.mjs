@@ -253,7 +253,7 @@ describe("manual cleanup scan ECS runner", () => {
 
     const source = readFileSync(script, "utf8");
     expect(source).toContain(
-      'CLEANUP_SCAN_WAIT_SECONDS="${CLEANUP_SCAN_WAIT_SECONDS:-21600}"',
+      'CLEANUP_SCAN_WAIT_SECONDS="${CLEANUP_SCAN_WAIT_SECONDS:-43200}"',
     );
     expect(source).toContain(
       "DEADLINE=$((SECONDS + CLEANUP_SCAN_WAIT_SECONDS))",

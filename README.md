@@ -1251,7 +1251,7 @@ the private Slack message and click Approve there to exercise the real
 signature, claim, artifact replay, cap, LWW fence, soft-delete, and shared
 advisory-mutex path.
 
-The runner's observation budget defaults to six hours because a two-pass scan of
+The runner's observation budget defaults to twelve hours because a two-pass scan of
 a production corpus with thousands of active memories can exceed 90 minutes.
 Set `CLEANUP_SCAN_WAIT_SECONDS` to an integer from 60 to 43200 to override
 that budget. This bounds only how long the local runner waits; EventBridge
