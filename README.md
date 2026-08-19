@@ -1251,6 +1251,14 @@ the private Slack message and click Approve there to exercise the real
 signature, claim, artifact replay, cap, LWW fence, soft-delete, and shared
 advisory-mutex path.
 
+The runner's observation budget defaults to six hours because a two-pass scan of
+a production corpus with thousands of active memories can exceed 90 minutes.
+Set `CLEANUP_SCAN_WAIT_SECONDS` to an integer from 60 to 43200 to override
+that budget. This bounds only how long the local runner waits; EventBridge
+Scheduler invokes the ECS task directly, and an expired observer does not stop
+an in-flight task. If the runner times out, do not start a second scan: inspect
+the task started by `mem9-cleanup-operator-prod` and its offer before retrying.
+
 After that production drill succeeds, enable and deploy the weekly scan:
 
 ```bash
