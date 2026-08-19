@@ -7,7 +7,7 @@ set -euo pipefail
 
 STAGE="${STAGE:?STAGE is required (prod or pr-N)}"
 CONFIRM_PROD_SCAN="${CONFIRM_PROD_SCAN:-}"
-CLEANUP_SCAN_WAIT_SECONDS="${CLEANUP_SCAN_WAIT_SECONDS:-21600}"
+CLEANUP_SCAN_WAIT_SECONDS="${CLEANUP_SCAN_WAIT_SECONDS:-43200}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REGION="${AWS_REGION:-$(node "$REPO_ROOT/scripts/resolve-application-region.mjs")}"
 PREFIX="/mem9-on-aws/${STAGE}"
