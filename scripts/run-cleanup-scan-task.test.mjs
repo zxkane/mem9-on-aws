@@ -122,7 +122,7 @@ if (command === "ssm get-parameters") {
   console.log(JSON.stringify({
     Parameter: {
       Name: option("--name"),
-      LastModifiedDate: Number(process.env.MOCK_OFFER_MODIFIED),
+      LastModifiedDate: JSON.parse(process.env.MOCK_OFFER_MODIFIED),
       Value: process.env.MOCK_OFFER,
     },
   }));
@@ -152,7 +152,7 @@ if (command === "ssm get-parameters") {
     MOCK_EXIT_CODE: String(exitCode),
     MOCK_INVALID_PARAMETERS: JSON.stringify(invalidParameters),
     MOCK_OFFER: JSON.stringify(offered),
-    MOCK_OFFER_MODIFIED: String(offerModified),
+    MOCK_OFFER_MODIFIED: JSON.stringify(offerModified),
     MOCK_RUN_FAILURES: JSON.stringify(runFailures),
     MOCK_STAGE: stage,
     PATH: `${bin}${delimiter}${process.env.PATH}`,
@@ -327,6 +327,11 @@ describe("manual cleanup scan ECS runner", () => {
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain("recorded 1 reviewed id(s)");
 
+    const isoTimestamp = runFixture({
+      offerModified: "2100-01-01T00:00:00+00:00",
+    });
+    expect(isoTimestamp.result.status, isoTimestamp.result.stderr).toBe(0);
+
     const output = `${result.stdout}\n${result.stderr}`;
     for (const privateValue of [
       "private-memory-id",
@@ -388,6 +393,15 @@ describe("manual cleanup scan ECS runner", () => {
     const stale = runFixture({ offerModified: 4_102_444_600 });
     expect(stale.result.status).toBe(1);
     expect(stale.result.stderr).toContain("fresh approval offer");
+
+    for (const offerModified of [
+      "2099-12-31T23:58:00+00:00",
+      "not-an-aws-timestamp",
+    ]) {
+      const invalidDate = runFixture({ offerModified });
+      expect(invalidDate.result.status).toBe(1);
+      expect(invalidDate.result.stderr).toContain("fresh approval offer");
+    }
 
     const noArtifact = runFixture({
       offer: {

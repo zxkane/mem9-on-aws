@@ -253,11 +253,19 @@ if ! OFFER_RESPONSE=$(aws ssm get-parameter \
 fi
 OFFER_MODIFIED=$(jq -r '
   .Parameter.LastModifiedDate
-  | select(type == "number")
+  | if type == "number" then tostring
+    elif type == "string" and length > 0 then .
+    else empty
+    end
 ' <<<"$OFFER_RESPONSE")
-if [[ -z "$OFFER_MODIFIED" ]] ||
-   ! awk -v modified="$OFFER_MODIFIED" -v started="$START_TIME_SECONDS" \
-      'BEGIN { exit !(modified >= started) }'; then
+OFFER_MODIFIED_SECONDS=""
+if [[ "$OFFER_MODIFIED" =~ ^[0-9]+([.][0-9]+)?$ ]]; then
+  OFFER_MODIFIED_SECONDS="${OFFER_MODIFIED%%.*}"
+elif [[ -n "$OFFER_MODIFIED" ]]; then
+  OFFER_MODIFIED_SECONDS=$(date -d "$OFFER_MODIFIED" +%s 2>/dev/null || true)
+fi
+if ! [[ "$OFFER_MODIFIED_SECONDS" =~ ^[0-9]+$ ]] ||
+   (( OFFER_MODIFIED_SECONDS < START_TIME_SECONDS )); then
   echo "::error::cleanup scan completed without a fresh approval offer" >&2
   exit 1
 fi
