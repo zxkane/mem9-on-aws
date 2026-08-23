@@ -1208,26 +1208,40 @@ describe("production adapters and CLI", () => {
     "SLACK_BOT_TOKEN",
   ];
 
+  const setProductionEnvironment = (overrides = {}) => {
+    Object.assign(process.env, {
+      AWS_REGION: "ap-northeast-1",
+      MEM9_BASE_URL: "http://mnemo.local:8080/",
+      MEM9_DB_HOST: "writer.example.com",
+      MEM9_DB_NAME: "mem9",
+      MEM9_DB_SECRET: JSON.stringify({
+        username: "mem9",
+        password: "fixture-password",
+      }),
+      MEM9_TENANT_ID: "tenant-fixture",
+      ...overrides,
+    });
+  };
+
+  class NoopClient {
+    async connect() {}
+    async query() {
+      return { rows: [] };
+    }
+    async end() {}
+  }
+
   afterEach(() => {
     for (const key of environmentKeys) delete process.env[key];
   });
 
   it("TC-CONSOL-016: connects DB/REST/Mantle/SNS adapters without exposing content", async () => {
-    Object.assign(process.env, {
-      AWS_REGION: "ap-northeast-1",
+    setProductionEnvironment({
       MEM9_ALERTS_TOPIC_ARN:
         "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
-      MEM9_BASE_URL: "http://mnemo.local:8080/",
       MEM9_BEDROCK_PROJECT: "project-test",
-      MEM9_DB_HOST: "writer.example.com",
-      MEM9_DB_NAME: "mem9",
       MEM9_DB_PORT: "5432",
-      MEM9_DB_SECRET: JSON.stringify({
-        username: "mem9",
-        password: "fixture-password",
-      }),
       MEM9_LLM_MODEL: "zai.glm-5",
-      MEM9_TENANT_ID: "tenant-fixture",
     });
     const dbCalls = [];
     const sent = [];
@@ -1382,18 +1396,69 @@ describe("production adapters and CLI", () => {
     expect(dbCalls.at(-1)).toEqual(["end"]);
   });
 
-  it("TC-CONSOL-049: the production REST adapter turns a fenced 412 into null, and only for a versioned write", async () => {
-    Object.assign(process.env, {
-      AWS_REGION: "ap-northeast-1",
-      MEM9_BASE_URL: "http://mnemo.local:8080/",
-      MEM9_DB_HOST: "writer.example.com",
-      MEM9_DB_NAME: "mem9",
-      MEM9_DB_SECRET: JSON.stringify({
-        username: "mem9",
-        password: "fixture-password",
-      }),
-      MEM9_TENANT_ID: "tenant-fixture",
+  it("TC-CONSOL-077: exercises the production Slack digest transport", async () => {
+    delete process.env.MEM9_SLACK_APPROVAL_CHANNEL;
+    delete process.env.SLACK_BOT_TOKEN;
+    setProductionEnvironment();
+    const fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, ts: "123.456" }),
+    }));
+    const production = await createProductionDeps(
+      { stage: "prod" },
+      {
+        Client: NoopClient,
+        fetch,
+        fromNodeProviderChain: () => "credentials",
+        getToken: vi.fn(async () => "fixture-bearer"),
+      },
+    );
+    const message = {
+      text: "Weekly memory consolidation digest",
+      blocks: [{ type: "section", text: { type: "mrkdwn", text: "Digest" } }],
+    };
+
+    await expect(production.deps.postDigest(message)).resolves.toBeUndefined();
+    expect(fetch).not.toHaveBeenCalled();
+
+    process.env.MEM9_SLACK_APPROVAL_CHANNEL = "C0123456789";
+    await expect(production.deps.postDigest(message)).rejects.toThrow(
+      "Slack digest configuration is incomplete",
+    );
+    expect(fetch).not.toHaveBeenCalled();
+
+    process.env.SLACK_BOT_TOKEN = "fixture-slack-token";
+    await expect(production.deps.postDigest(message)).resolves.toBeUndefined();
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(fetch.mock.calls[0][0]).toBe(
+      "https://slack.com/api/chat.postMessage",
+    );
+    expect(fetch.mock.calls[0][1]).toMatchObject({
+      method: "POST",
+      headers: {
+        authorization: "Bearer fixture-slack-token",
+        "content-type": "application/json; charset=utf-8",
+      },
     });
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({
+      channel: "C0123456789",
+      ...message,
+    });
+
+    fetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: false, error: "channel_not_found" }),
+    });
+    await expect(production.deps.postDigest(message)).rejects.toThrow(
+      "Slack chat.postMessage failed: HTTP 200 channel_not_found",
+    );
+    await production.close();
+  });
+
+  it("TC-CONSOL-049: the production REST adapter turns a fenced 412 into null, and only for a versioned write", async () => {
+    setProductionEnvironment();
     // Every non-GET answers 412 so each call site is judged on its own gate,
     // not on which URL it happened to hit.
     const fetch = vi.fn(async () => ({
@@ -1401,16 +1466,14 @@ describe("production adapters and CLI", () => {
       status: 412,
       json: async () => ({ error: "precondition failed: version changed" }),
     }));
-    class Client {
-      async connect() {}
-      async query() {
-        return { rows: [] };
-      }
-      async end() {}
-    }
     const production = await createProductionDeps(
       { stage: "prod" },
-      { Client, fetch, fromNodeProviderChain: () => "credentials", getToken: vi.fn(async () => "t") },
+      {
+        Client: NoopClient,
+        fetch,
+        fromNodeProviderChain: () => "credentials",
+        getToken: vi.fn(async () => "t"),
+      },
     );
 
     // This is the line the unattended weekly task depends on: without it the
@@ -1430,30 +1493,35 @@ describe("production adapters and CLI", () => {
     ).rejects.toThrow(/HTTP 412/u);
   });
 
-  it("TC-CONSOL-064: uses owner-bound conditional S3 reads and writes", async () => {
-    Object.assign(process.env, {
-      AWS_REGION: "ap-northeast-1",
-      MEM9_BASE_URL: "http://mnemo.local:8080/",
-      MEM9_DB_HOST: "writer.example.com",
-      MEM9_DB_NAME: "mem9",
-      MEM9_DB_SECRET: JSON.stringify({
-        username: "mem9",
-        password: "fixture-password",
-      }),
+  it("TC-CONSOL-064/078: validates owner-bound conditional S3 state", async () => {
+    setProductionEnvironment({
       MEM9_DECISION_ARTIFACT_BUCKET: "example-mem9-artifacts",
       MEM9_DECISION_ARTIFACT_BUCKET_OWNER: "123456789012",
-      MEM9_TENANT_ID: "tenant-fixture",
     });
     const sent = [];
     let readMode = "missing";
     let writeMode = "ok";
-    class Client {
-      async connect() {}
-      async query() {
-        return { rows: [] };
-      }
-      async end() {}
-    }
+    let putCalls = 0;
+    const operatorTopic = {
+      topicId: `sha256:${"b".repeat(64)}`,
+      payloadHash: `sha256:${"2".repeat(64)}`,
+      kind: "DELETE",
+      disposition: "OPERATOR_DECISION",
+    };
+    const healthTopic = {
+      topicId: `sha256:${"a".repeat(64)}`,
+      payloadHash: `sha256:${"1".repeat(64)}`,
+      kind: "APPLY_FAILED",
+      disposition: "SYSTEM_HEALTH",
+    };
+    const storedState = {
+      schemaVersion: DIGEST_SCHEMA_VERSION,
+      stage: "prod",
+      generatedAt: "2026-08-16T03:00:00.000Z",
+      unchangedRuns: 2,
+      kindCounts: { DELETE: 1, APPLY_FAILED: 1 },
+      topics: [operatorTopic, healthTopic],
+    };
     class GetObjectCommand {
       constructor(input) {
         this.input = input;
@@ -1479,21 +1547,30 @@ describe("production adapters and CLI", () => {
               Body: { transformToString: async () => "{not-json" },
             };
           }
+          if (readMode === "schema-invalid") {
+            return {
+              ETag: '"etag-1"',
+              Body: {
+                transformToString: async () =>
+                  JSON.stringify({
+                    ...storedState,
+                    topics: [{
+                      ...healthTopic,
+                      disposition: "NOT_A_DISPOSITION",
+                    }],
+                  }),
+              },
+            };
+          }
           return {
             ETag: '"etag-1"',
             Body: {
               transformToString: async () =>
-                serializeDigestState({
-                  schemaVersion: DIGEST_SCHEMA_VERSION,
-                  stage: "prod",
-                  generatedAt: "2026-08-16T03:00:00.000Z",
-                  unchangedRuns: 0,
-                  kindCounts: {},
-                  topics: [],
-                }),
+                serializeDigestState(storedState),
             },
           };
         }
+        putCalls += 1;
         if (writeMode === "precondition") {
           const error = new Error("stale");
           error.name = "PreconditionFailed";
@@ -1507,7 +1584,12 @@ describe("production adapters and CLI", () => {
     }
     const production = await createProductionDeps(
       { stage: "prod" },
-      { Client, GetObjectCommand, PutObjectCommand, S3Client },
+      {
+        Client: NoopClient,
+        GetObjectCommand,
+        PutObjectCommand,
+        S3Client,
+      },
     );
     expect(await production.deps.loadDigestState()).toEqual({
       status: "missing",
@@ -1530,10 +1612,15 @@ describe("production adapters and CLI", () => {
     expect(sent.at(-1)).not.toHaveProperty("IfMatch");
 
     readMode = "ok";
-    expect(await production.deps.loadDigestState()).toEqual({
+    const loaded = await production.deps.loadDigestState();
+    expect(loaded).toEqual({
       status: "ok",
       etag: '"etag-1"',
-      state: expect.objectContaining({ stage: "prod", topics: [] }),
+      state: {
+        ...storedState,
+        kindCounts: { APPLY_FAILED: 1, DELETE: 1 },
+        topics: [healthTopic, operatorTopic],
+      },
     });
     await production.deps.writeDigestState({ state, etag: '"etag-1"' });
     expect(sent.at(-1)).toMatchObject({
@@ -1555,6 +1642,45 @@ describe("production adapters and CLI", () => {
     await expect(
       production.deps.writeDigestState({ state, etag: '"etag-1"' }),
     ).rejects.toThrow("S3 unavailable");
+
+    readMode = "schema-invalid";
+    writeMode = "ok";
+    await expect(production.deps.loadDigestState()).resolves.toMatchObject({
+      status: "invalid",
+      etag: '"etag-1"',
+      errorClass: "Error",
+    });
+    const putCallsBeforeInvalidProcessing = putCalls;
+    const degraded = await processScheduledDigest(
+      {
+        stage: "prod",
+        review: [],
+        byId: new Map(),
+        metrics: {
+          scanned: 0,
+          merged: 0,
+          archived: 0,
+          flaggedStale: 0,
+          reviewItems: 0,
+          skippedLww: 0,
+        },
+        mutations: 0,
+        attemptedClusters: 0,
+        classificationFailures: 0,
+        now: NOW,
+      },
+      {
+        ...production.deps,
+        postDigest: vi.fn(async () => {}),
+        publishHealthAlarm: vi.fn(async () => {}),
+        log: vi.fn(),
+      },
+    );
+    expect(degraded).toMatchObject({
+      dedupUnavailable: true,
+      failed: true,
+    });
+    expect(putCalls).toBe(putCallsBeforeInvalidProcessing);
     await production.close();
   });
 
