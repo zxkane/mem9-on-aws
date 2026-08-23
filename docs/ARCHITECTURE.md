@@ -443,8 +443,39 @@ requires the selected winner to be strictly newer by both `created_at` and
 `updated_at`; either side carrying a prior consolidation stale marker makes the
 pair review-only. Every DELETE and every contradiction without that corroborated
 timeline remains review-only.
-Review records with ids, bounded snippets, and rationale persist only in the
-task's CloudWatch Logs. The SNS-to-Slack path receives counts only.
+
+Review records with ids, bounded snippets, and rationale persist in the task's
+private CloudWatch Logs as the complete audit surface. Scheduled apply runs
+also classify each record deterministically as `OPERATOR_DECISION`,
+`DEFERRED_RETRY`, or `SYSTEM_HEALTH`. Report-only records do not participate in
+digest state or notification.
+
+The scheduled target alone sets `MEM9_CONSOLIDATION_SCHEDULED=1`. That run
+compares stable topic hashes with the prior content-free snapshot at
+`consolidation-digests/<stage>/current-v1.json` in the existing operator-owned
+audit bucket. Topic identity includes only schema version, kind, and sorted
+unique memory ids; a separate payload hash includes current content hashes.
+This distinguishes `new`, `updated`, `continuing`, and `resolved` topics without
+storing memory ids, text, snippets, or rationale. The task reads and
+conditionally writes only that exact stage key with `ExpectedBucketOwner`,
+`If-None-Match` on creation, and `If-Match` on updates. It has no S3 list or
+delete permission. The bucket keeps `decisions/` on its three-day lifecycle and
+`consolidation-digests/` for 70 days.
+
+When the existing Slack configuration is enabled, a scheduled run posts one
+private digest with totals, at most ten risk-ordered disposition/kind groups,
+and at most three bounded current samples per group. Unchanged-only runs are
+suppressed except for every fourth reminder; a newly observed
+`CLUSTER_TOO_LARGE` group is always selected. SNS is reserved for content-free
+system-health alarms at the documented run-level thresholds. A failed state
+read emits `ConsolidationDedupUnavailable`, avoids `new`/`resolved` claims and
+state overwrites, and sends degraded notifications when configured. Because S3
+returns `403` for both a missing key without `ListBucket` and some read failures,
+the task may attempt only an `If-None-Match: *` create after those notifications.
+That initializes a missing snapshot while an existing unreadable snapshot
+returns `412` and remains untouched. Required
+notifications happen before the conditional state commit, and notification or
+state failures never roll back confirmed memory mutations.
 
 Cleanup and consolidation apply modes share the PostgreSQL advisory key
 `mem9-cleanup:<stage>` for cross-host exclusion. Both retain optimistic
@@ -462,6 +493,7 @@ Each run emits content-free EMF in namespace `mem9-on-aws` with only the
 - `ConsolidationFlaggedStale`
 - `ConsolidationReviewItems`
 - `ConsolidationSkippedLww`
+- `ConsolidationDedupUnavailable`
 
 The production adapter emits that record through a dedicated
 `stdout.write(JSON.stringify(record) + "\n")` path. The EMF log event must be

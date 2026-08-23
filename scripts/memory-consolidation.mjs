@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { createHash } from "node:crypto";
 import process from "node:process";
 import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -35,7 +36,79 @@ export const CONSOLIDATION_METRICS = [
   "ConsolidationFlaggedStale",
   "ConsolidationReviewItems",
   "ConsolidationSkippedLww",
+  "ConsolidationDedupUnavailable",
 ];
+
+export const DIGEST_SCHEMA_VERSION = 1;
+const DIGEST_STATE_PREFIX = "consolidation-digests";
+const DIGEST_STATE_FILENAME = "current-v1.json";
+const DIGEST_MAX_GROUPS = 10;
+const DIGEST_MAX_SAMPLES = 3;
+const DIGEST_REMINDER_INTERVAL = 4;
+const DISPOSITION_OPERATOR = "OPERATOR_DECISION";
+const DISPOSITION_DEFERRED = "DEFERRED_RETRY";
+const DISPOSITION_HEALTH = "SYSTEM_HEALTH";
+
+const REVIEW_KIND_POLICIES = new Map([
+  ["APPLY_FAILED", {
+    disposition: DISPOSITION_HEALTH,
+    priority: 0,
+    escalation: "immediate",
+  }],
+  ["UNFENCEABLE_MERGE", {
+    disposition: DISPOSITION_HEALTH,
+    priority: 1,
+    escalation: "immediate",
+  }],
+  ["CLASSIFICATION_FAILED", {
+    disposition: DISPOSITION_HEALTH,
+    priority: 2,
+    escalation: "classification",
+  }],
+  ["UNKNOWN_ID", {
+    disposition: DISPOSITION_HEALTH,
+    priority: 3,
+    escalation: "threshold",
+  }],
+  ["CONFLICTING_ACTION", {
+    disposition: DISPOSITION_HEALTH,
+    priority: 4,
+    escalation: "threshold",
+  }],
+  ["INVALID_MERGE", {
+    disposition: DISPOSITION_HEALTH,
+    priority: 5,
+    escalation: "threshold",
+  }],
+  ["INVALID_STALE", {
+    disposition: DISPOSITION_HEALTH,
+    priority: 6,
+    escalation: "threshold",
+  }],
+  ["INELIGIBLE_STALE", {
+    disposition: DISPOSITION_HEALTH,
+    priority: 7,
+    escalation: "threshold",
+  }],
+  ["DELETE", { disposition: DISPOSITION_OPERATOR, priority: 0 }],
+  ["CONTRADICTION", { disposition: DISPOSITION_OPERATOR, priority: 1 }],
+  ["LOCK_HELD", {
+    disposition: DISPOSITION_DEFERRED,
+    priority: 0,
+    escalation: "repeat",
+  }],
+  ["CLUSTER_TOO_LARGE", {
+    disposition: DISPOSITION_DEFERRED,
+    priority: 1,
+    escalation: "repeat",
+  }],
+  ["TAG_LIMIT_REACHED", {
+    disposition: DISPOSITION_DEFERRED,
+    priority: 2,
+    escalation: "repeat",
+  }],
+  ["CAP_DEFERRED", { disposition: DISPOSITION_DEFERRED, priority: 3 }],
+]);
 
 const ACTION_TYPES = new Set([
   "KEEP",
@@ -227,12 +300,13 @@ function boundedRationale(value) {
   return String(value || "no rationale supplied").slice(0, MAX_RATIONALE_LENGTH);
 }
 
-function reviewItem(kind, ids, byId, rationale) {
+function reviewItem(kind, ids, byId, rationale, extra = {}) {
   return {
     kind,
     ids,
     snippets: ids.map((id) => String(byId.get(id)?.content ?? "").slice(0, SNIPPET_LENGTH)),
     rationale: boundedRationale(rationale),
+    ...extra,
   };
 }
 
@@ -241,6 +315,413 @@ function snapshot(memory) {
     version: memory.version,
     contentHash: contentHash(memory.content),
   };
+}
+
+function sha256(value) {
+  return `sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+function sortedUniqueIds(ids) {
+  return [
+    ...new Set(
+      (Array.isArray(ids) ? ids : []).filter(
+        (id) => typeof id === "string" && id.length > 0,
+      ),
+    ),
+  ].sort();
+}
+
+function boundedSamples(...collections) {
+  const samples = [];
+  const seen = new Set();
+  for (const collection of collections) {
+    for (const value of Array.isArray(collection) ? collection : []) {
+      const sample = String(value ?? "").slice(0, SNIPPET_LENGTH);
+      if (!sample || seen.has(sample)) continue;
+      seen.add(sample);
+      samples.push(sample);
+      if (samples.length === DIGEST_MAX_SAMPLES) return samples;
+    }
+  }
+  return samples;
+}
+
+export function reviewDisposition(kind) {
+  if (typeof kind !== "string" || kind.startsWith("REPORT_ONLY_")) return null;
+  return REVIEW_KIND_POLICIES.get(kind)?.disposition ?? DISPOSITION_HEALTH;
+}
+
+export function buildReviewTopic(item, byId) {
+  const disposition = reviewDisposition(item?.kind);
+  if (!disposition) return null;
+  const ids = sortedUniqueIds(item.ids);
+  const topicId = sha256(JSON.stringify([
+    DIGEST_SCHEMA_VERSION,
+    item.kind,
+    ids,
+  ]));
+  const payloadHash = sha256(JSON.stringify([
+    topicId,
+    ids.map((id) => [
+      id,
+      byId.has(id) ? contentHash(byId.get(id)?.content) : "missing",
+    ]),
+  ]));
+  return {
+    topicId,
+    payloadHash,
+    kind: item.kind,
+    disposition,
+    samples: boundedSamples(ids.map((id) => byId.get(id)?.content)),
+  };
+}
+
+function buildCurrentTopics(review, byId) {
+  const topics = new Map();
+  for (const item of review) {
+    const topic = buildReviewTopic(item, byId);
+    if (!topic) continue;
+    const existing = topics.get(topic.topicId);
+    if (!existing) {
+      topics.set(topic.topicId, topic);
+      continue;
+    }
+    existing.samples = boundedSamples(existing.samples, topic.samples);
+  }
+  return [...topics.values()].sort((left, right) =>
+    left.topicId.localeCompare(right.topicId));
+}
+
+export function compareDigestTopics(
+  currentTopics,
+  previousState,
+  options = {},
+) {
+  if (options.dedupAvailable === false) {
+    return {
+      current: currentTopics.map((topic) => ({
+        ...topic,
+        transition: "continuing",
+      })),
+      resolved: [],
+    };
+  }
+  const previous = new Map(
+    (previousState?.topics ?? []).map((topic) => [topic.topicId, topic]),
+  );
+  const currentIds = new Set();
+  const current = currentTopics.map((topic) => {
+    currentIds.add(topic.topicId);
+    const prior = previous.get(topic.topicId);
+    return {
+      ...topic,
+      transition: !prior
+        ? "new"
+        : prior.payloadHash === topic.payloadHash
+          ? "continuing"
+          : "updated",
+    };
+  });
+  const resolved = [...previous.values()]
+    .filter((topic) => !currentIds.has(topic.topicId))
+    .map((topic) => ({ ...topic, transition: "resolved", samples: [] }))
+    .sort((left, right) => left.topicId.localeCompare(right.topicId));
+  return { current, resolved };
+}
+
+function countReviewKinds(review) {
+  const counts = {};
+  for (const item of review) {
+    if (!reviewDisposition(item?.kind)) continue;
+    counts[item.kind] = (counts[item.kind] ?? 0) + 1;
+  }
+  return Object.fromEntries(
+    Object.entries(counts).sort(([left], [right]) =>
+      left.localeCompare(right)),
+  );
+}
+
+function addHealthReason(reasons, reason) {
+  const key = JSON.stringify(reason);
+  if (!reasons.some((candidate) => JSON.stringify(candidate) === key)) {
+    reasons.push(reason);
+  }
+}
+
+export function evaluateDigestHealth({
+  review,
+  previousState,
+  attemptedClusters,
+  classificationFailures,
+  scanned,
+}) {
+  const kindCounts = countReviewKinds(review);
+  const previousCounts = previousState?.kindCounts ?? {};
+  const reasons = [];
+
+  for (const [kind, count] of Object.entries(kindCounts)) {
+    const policy = REVIEW_KIND_POLICIES.get(kind);
+    if (!policy) {
+      addHealthReason(reasons, { kind, count, rule: "unknown_kind" });
+      continue;
+    }
+    if (policy.escalation === "immediate") {
+      addHealthReason(reasons, { kind, count, rule: "immediate" });
+      continue;
+    }
+    if (
+      policy.escalation === "threshold" &&
+      (count >= 10 || (previousCounts[kind] ?? 0) > 0)
+    ) {
+      addHealthReason(reasons, {
+        kind,
+        count,
+        rule: count >= 10 ? "count_threshold" : "consecutive_run",
+      });
+    }
+    if (
+      policy.escalation === "repeat" &&
+      (previousCounts[kind] ?? 0) > 0
+    ) {
+      addHealthReason(reasons, {
+        kind,
+        count,
+        rule: "consecutive_run",
+      });
+    }
+  }
+
+  if (
+    classificationFailures >= 10 ||
+    (attemptedClusters > 0 &&
+      classificationFailures / attemptedClusters >= 0.2)
+  ) {
+    addHealthReason(reasons, {
+      kind: "CLASSIFICATION_FAILED",
+      count: classificationFailures,
+      attempted: attemptedClusters,
+      rule:
+        classificationFailures >= 10
+          ? "count_threshold"
+          : "ratio_threshold",
+    });
+  }
+
+  const oversizedIds = new Set();
+  for (const item of review) {
+    if (item.kind !== "CLUSTER_TOO_LARGE") continue;
+    for (const id of sortedUniqueIds(item.ids)) oversizedIds.add(id);
+  }
+  if (scanned > 0 && oversizedIds.size / scanned >= 0.2) {
+    addHealthReason(reasons, {
+      kind: "CLUSTER_TOO_LARGE",
+      count: kindCounts.CLUSTER_TOO_LARGE ?? 0,
+      affectedMemories: oversizedIds.size,
+      scanned,
+      rule: "affected_memory_ratio",
+    });
+  }
+
+  return { alarm: reasons.length > 0, reasons, kindCounts };
+}
+
+function dispositionPriority(disposition) {
+  if (disposition === DISPOSITION_HEALTH) return 0;
+  if (disposition === DISPOSITION_OPERATOR) return 1;
+  return 2;
+}
+
+function kindPriority(group) {
+  return REVIEW_KIND_POLICIES.get(group.kind)?.priority ?? 99;
+}
+
+function buildDigestGroups(transitions) {
+  const groups = new Map();
+  for (const topic of [...transitions.current, ...transitions.resolved]) {
+    const key = `${topic.disposition}\u0000${topic.kind}`;
+    const group = groups.get(key) ?? {
+      disposition: topic.disposition,
+      kind: topic.kind,
+      new: 0,
+      updated: 0,
+      continuing: 0,
+      resolved: 0,
+      samples: [],
+    };
+    group[topic.transition] += 1;
+    if (topic.transition !== "resolved") {
+      group.samples = boundedSamples(group.samples, topic.samples);
+    }
+    groups.set(key, group);
+  }
+  const ordered = [...groups.values()].sort((left, right) => {
+    const disposition =
+      dispositionPriority(left.disposition) -
+      dispositionPriority(right.disposition);
+    if (disposition !== 0) return disposition;
+    const kind = kindPriority(left) - kindPriority(right);
+    if (kind !== 0) return kind;
+    const leftChanges = left.new + left.updated + left.resolved;
+    const rightChanges = right.new + right.updated + right.resolved;
+    if (leftChanges !== rightChanges) return rightChanges - leftChanges;
+    return left.kind.localeCompare(right.kind);
+  });
+  const selected = ordered.slice(0, DIGEST_MAX_GROUPS);
+  const oversized = ordered.find(
+    (group) => group.kind === "CLUSTER_TOO_LARGE" && group.new > 0,
+  );
+  if (
+    oversized &&
+    !selected.includes(oversized) &&
+    selected.length === DIGEST_MAX_GROUPS
+  ) {
+    selected[selected.length - 1] = oversized;
+  }
+  return selected;
+}
+
+function slackEscape(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+function buildSlackDigestMessage({
+  stage,
+  metrics,
+  mutations,
+  groups,
+  reminder,
+  degraded,
+}) {
+  const summary =
+    `Scanned ${metrics.scanned}; mutations ${mutations} ` +
+    `(merged ${metrics.merged}, archived ${metrics.archived}, stale ${metrics.flaggedStale}); ` +
+    `review records ${metrics.reviewItems}; skipped LWW ${metrics.skippedLww}.` +
+    `${reminder ? " Fourth unchanged-run reminder." : ""}` +
+    `${degraded ? " Deduplication unavailable; transitions are degraded." : ""}`;
+  const blocks = [
+    {
+      type: "header",
+      text: {
+        type: "plain_text",
+        text: `Weekly consolidation: ${stage}`.slice(0, 150),
+      },
+    },
+    {
+      type: "section",
+      text: { type: "mrkdwn", text: slackEscape(summary) },
+    },
+  ];
+  for (const group of groups) {
+    const lines = [
+      `*${slackEscape(group.disposition)} / ${slackEscape(group.kind)}*`,
+      `new ${group.new} | updated ${group.updated} | continuing ${group.continuing} | resolved ${group.resolved}`,
+      ...group.samples.map((sample) => `• ${slackEscape(sample)}`),
+    ];
+    blocks.push({
+      type: "section",
+      text: { type: "mrkdwn", text: lines.join("\n").slice(0, 3000) },
+    });
+  }
+  return {
+    text: `Weekly memory consolidation digest for ${stage}`,
+    blocks,
+  };
+}
+
+export function buildDigestOutcome({
+  stage,
+  review,
+  byId,
+  previousState,
+  metrics,
+  mutations,
+  attemptedClusters,
+  classificationFailures,
+  now,
+  dedupAvailable = true,
+}) {
+  const degraded = !dedupAvailable;
+  const currentTopics = buildCurrentTopics(review, byId);
+  const transitions = compareDigestTopics(currentTopics, previousState, {
+    dedupAvailable,
+  });
+  const changed = dedupAvailable && [
+    ...transitions.current,
+    ...transitions.resolved,
+  ].some((topic) => topic.transition !== "continuing");
+  const unchangedRuns = changed
+    ? 0
+    : (Number.isInteger(previousState?.unchangedRuns)
+        ? previousState.unchangedRuns
+        : 0) + 1;
+  const reminder =
+    dedupAvailable &&
+    !changed &&
+    unchangedRuns % DIGEST_REMINDER_INTERVAL === 0;
+  const groups = buildDigestGroups(transitions);
+  const health = evaluateDigestHealth({
+    review,
+    previousState,
+    attemptedClusters,
+    classificationFailures,
+    scanned: metrics.scanned,
+  });
+  const nextState = {
+    schemaVersion: DIGEST_SCHEMA_VERSION,
+    stage,
+    generatedAt: new Date(now).toISOString(),
+    unchangedRuns,
+    kindCounts: health.kindCounts,
+    topics: currentTopics.map(
+      ({ topicId, payloadHash, kind, disposition }) => ({
+        topicId,
+        payloadHash,
+        kind,
+        disposition,
+      }),
+    ),
+  };
+  const shouldPost = degraded || changed || reminder;
+  return {
+    transitions,
+    groups,
+    reminder,
+    shouldPost,
+    health,
+    nextState,
+    slackMessage: buildSlackDigestMessage({
+      stage,
+      metrics,
+      mutations,
+      groups,
+      reminder,
+      degraded,
+    }),
+  };
+}
+
+export function serializeDigestState(state) {
+  return JSON.stringify({
+    schemaVersion: state.schemaVersion,
+    stage: state.stage,
+    generatedAt: state.generatedAt,
+    unchangedRuns: state.unchangedRuns,
+    kindCounts: Object.fromEntries(
+      Object.entries(state.kindCounts ?? {}).sort(([left], [right]) =>
+        left.localeCompare(right)),
+    ),
+    topics: [...(state.topics ?? [])]
+      .map(({ topicId, payloadHash, kind, disposition }) => ({
+        topicId,
+        payloadHash,
+        kind,
+        disposition,
+      }))
+      .sort((left, right) => left.topicId.localeCompare(right.topicId)),
+  });
 }
 
 /**
@@ -419,6 +900,7 @@ export function buildEmfRecord(stage, metrics, now = Date.now()) {
     ConsolidationFlaggedStale: metrics.flaggedStale,
     ConsolidationReviewItems: metrics.reviewItems,
     ConsolidationSkippedLww: metrics.skippedLww,
+    ConsolidationDedupUnavailable: metrics.dedupUnavailable ?? 0,
   };
   return {
     _aws: {
@@ -628,18 +1110,6 @@ function reportOnlyReview(action, byId) {
   );
 }
 
-function summaryPayload(stage, metrics) {
-  return {
-    stage,
-    scanned: metrics.scanned,
-    merged: metrics.merged,
-    archived: metrics.archived,
-    flaggedStale: metrics.flaggedStale,
-    reviewItems: metrics.reviewItems,
-    skippedLww: metrics.skippedLww,
-  };
-}
-
 async function executeAutoAction(action, deps, metrics, clock) {
   if (action.type === "MERGE") {
     return { used: await executeMerge(action, deps, metrics) };
@@ -734,18 +1204,9 @@ async function applyAutoActions(actions, context) {
                   }`
                 : ""
             }; operator review required`,
+            { abortedCount: actions.length - index - 1 },
           ),
         );
-        for (const deferred of actions.slice(index + 1)) {
-          review.push(
-            reviewItem(
-              "APPLY_ABORTED",
-              deferred.ids,
-              byId,
-              "deferred after an earlier mutation failed",
-            ),
-          );
-        }
         break;
       }
     }
@@ -768,12 +1229,124 @@ async function applyAutoActions(actions, context) {
   return { failed, mutations, review };
 }
 
+export async function processScheduledDigest(input, deps) {
+  let previousState;
+  let etag;
+  let stateMissing = false;
+  let dedupUnavailable = false;
+  try {
+    const loaded = await deps.loadDigestState();
+    if (loaded?.status === "missing") {
+      stateMissing = true;
+    } else if (loaded?.status === "ok" && loaded.state && loaded.etag) {
+      previousState = loaded.state;
+      etag = loaded.etag;
+    } else {
+      throw new Error("digest state read returned an invalid result");
+    }
+  } catch (error) {
+    dedupUnavailable = true;
+    deps.log(
+      `CONSOLIDATION_DIGEST ${JSON.stringify({
+        event: "dedup_unavailable",
+        stage: input.stage,
+        errorClass: error?.name || "Error",
+      })}`,
+    );
+  }
+
+  const outcome = buildDigestOutcome({
+    ...input,
+    previousState,
+    dedupAvailable: !dedupUnavailable,
+  });
+  const alarm = {
+    stage: input.stage,
+    event: "weekly_consolidation_health",
+    degraded: dedupUnavailable,
+    reasons: [
+      ...outcome.health.reasons,
+      ...(dedupUnavailable
+        ? [{ kind: "DIGEST_STATE", count: 1, rule: "dedup_unavailable" }]
+        : []),
+    ],
+    totals: {
+      scanned: input.metrics.scanned,
+      attemptedClusters: input.attemptedClusters,
+      classificationFailures: input.classificationFailures,
+      reviewItems: input.metrics.reviewItems,
+      mutations: input.mutations,
+    },
+  };
+
+  let notificationFailed = false;
+  if (outcome.shouldPost && deps.postDigest) {
+    try {
+      await deps.postDigest(outcome.slackMessage);
+    } catch (error) {
+      notificationFailed = true;
+      deps.log(
+        `CONSOLIDATION_DIGEST ${JSON.stringify({
+          event: "slack_delivery_failed",
+          stage: input.stage,
+          errorClass: error?.name || "Error",
+        })}`,
+      );
+    }
+  }
+  if ((outcome.health.alarm || dedupUnavailable) && deps.publishHealthAlarm) {
+    try {
+      await deps.publishHealthAlarm(alarm);
+    } catch (error) {
+      notificationFailed = true;
+      deps.log(
+        `CONSOLIDATION_DIGEST ${JSON.stringify({
+          event: "health_alarm_delivery_failed",
+          stage: input.stage,
+          errorClass: error?.name || "Error",
+        })}`,
+      );
+    }
+  }
+
+  let stateWriteFailed = false;
+  if (!notificationFailed) {
+    try {
+      await deps.writeDigestState({
+        state: outcome.nextState,
+        ...(!dedupUnavailable && !stateMissing ? { etag } : {}),
+      });
+    } catch (error) {
+      stateWriteFailed = true;
+      deps.log(
+        `CONSOLIDATION_DIGEST ${JSON.stringify({
+          event: "state_write_failed",
+          stage: input.stage,
+          errorClass: error?.name || "Error",
+          preconditionFailed:
+            error?.$metadata?.httpStatusCode === 412 ||
+            error?.name === "PreconditionFailed",
+        })}`,
+      );
+    }
+  }
+
+  return {
+    ...outcome,
+    alarm,
+    dedupUnavailable,
+    failed: dedupUnavailable || notificationFailed || stateWriteFailed,
+    mutations: input.mutations,
+  };
+}
+
 /**
  * Run one consolidation pass over injected adapters.
  */
 export async function runConsolidation(options, deps) {
   const stage = options.stage;
   const reportOnly = options.reportOnly ?? true;
+  const scheduled = options.scheduled ?? false;
   const cap = options.cap ?? DEFAULT_CAP;
   const clock = deps.clock ?? Date.now;
   if (!stage) throw new Error("stage is required");
@@ -813,6 +1386,7 @@ export async function runConsolidation(options, deps) {
     flaggedStale: 0,
     reviewItems: 0,
     skippedLww: 0,
+    dedupUnavailable: 0,
   };
   let mutations = 0;
   let applyFailed = false;
@@ -843,19 +1417,41 @@ export async function runConsolidation(options, deps) {
       stage,
       reportOnly,
       reviewItems: review.length,
+      digestEnabled: scheduled && !reportOnly,
     })}`,
   );
+  let digestFailed = false;
+  if (scheduled && !reportOnly) {
+    const currentMemories = (await deps.listActiveMemories()).filter(
+      isConsolidationCandidate,
+    );
+    const digestById = new Map(
+      currentMemories.map((memory) => [memory.id, memory]),
+    );
+    const digest = await processScheduledDigest(
+      {
+        stage,
+        review,
+        byId: digestById,
+        metrics,
+        mutations,
+        attemptedClusters: routed.attempted,
+        classificationFailures: routed.failed,
+        now: clock(),
+      },
+      deps,
+    );
+    metrics.dedupUnavailable = digest.dedupUnavailable ? 1 : 0;
+    digestFailed = digest.failed;
+  }
   const emf = buildEmfRecord(stage, metrics, clock());
   if (deps.emitMetrics) deps.emitMetrics(emf);
   else deps.log(JSON.stringify(emf));
 
-  if (!reportOnly && review.length > 0) {
-    await deps.publishSummary(summaryPayload(stage, metrics));
-  }
-
   return {
     exitCode:
       applyFailed ||
+      digestFailed ||
       (routed.attempted > 0 && routed.failed === routed.attempted)
         ? 1
         : 0,
@@ -886,6 +1482,108 @@ function parseJsonObject(value) {
   } catch {
     return {};
   }
+}
+
+function digestStateKey(stage) {
+  return `${DIGEST_STATE_PREFIX}/${stage}/${DIGEST_STATE_FILENAME}`;
+}
+
+function requireDigestBucketOwner(value) {
+  if (!/^\d{12}$/u.test(value ?? "")) {
+    throw new Error(
+      "MEM9_DECISION_ARTIFACT_BUCKET_OWNER must be a 12-digit AWS account id",
+    );
+  }
+  return value;
+}
+
+function exactKeys(value, allowed) {
+  return Object.keys(value).every((key) => allowed.includes(key));
+}
+
+function normalizeDigestState(value, expectedStage) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    !exactKeys(value, [
+      "schemaVersion",
+      "stage",
+      "generatedAt",
+      "unchangedRuns",
+      "kindCounts",
+      "topics",
+    ]) ||
+    value.schemaVersion !== DIGEST_SCHEMA_VERSION ||
+    value.stage !== expectedStage ||
+    typeof value.generatedAt !== "string" ||
+    !Number.isFinite(Date.parse(value.generatedAt)) ||
+    !Number.isInteger(value.unchangedRuns) ||
+    value.unchangedRuns < 0 ||
+    !value.kindCounts ||
+    typeof value.kindCounts !== "object" ||
+    Array.isArray(value.kindCounts) ||
+    !Array.isArray(value.topics)
+  ) {
+    throw new Error("digest state is invalid");
+  }
+  const kindCounts = {};
+  for (const [kind, count] of Object.entries(value.kindCounts)) {
+    if (
+      typeof kind !== "string" ||
+      !Number.isInteger(count) ||
+      count < 0
+    ) {
+      throw new Error("digest state kind counts are invalid");
+    }
+    kindCounts[kind] = count;
+  }
+  const seen = new Set();
+  const topics = value.topics.map((topic) => {
+    if (
+      !topic ||
+      typeof topic !== "object" ||
+      Array.isArray(topic) ||
+      !exactKeys(topic, ["topicId", "payloadHash", "kind", "disposition"]) ||
+      !/^sha256:[0-9a-f]{64}$/u.test(topic.topicId ?? "") ||
+      !/^sha256:[0-9a-f]{64}$/u.test(topic.payloadHash ?? "") ||
+      typeof topic.kind !== "string" ||
+      ![
+        DISPOSITION_OPERATOR,
+        DISPOSITION_DEFERRED,
+        DISPOSITION_HEALTH,
+      ].includes(topic.disposition) ||
+      seen.has(topic.topicId)
+    ) {
+      throw new Error("digest state topics are invalid");
+    }
+    seen.add(topic.topicId);
+    return {
+      topicId: topic.topicId,
+      payloadHash: topic.payloadHash,
+      kind: topic.kind,
+      disposition: topic.disposition,
+    };
+  });
+  return {
+    schemaVersion: DIGEST_SCHEMA_VERSION,
+    stage: expectedStage,
+    generatedAt: value.generatedAt,
+    unchangedRuns: value.unchangedRuns,
+    kindCounts: Object.fromEntries(
+      Object.entries(kindCounts).sort(([left], [right]) =>
+        left.localeCompare(right)),
+    ),
+    topics: topics.sort((left, right) =>
+      left.topicId.localeCompare(right.topicId)),
+  };
+}
+
+async function responseBodyText(body) {
+  if (body?.transformToString) return body.transformToString();
+  if (typeof body === "string") return body;
+  if (body instanceof Uint8Array) return Buffer.from(body).toString("utf8");
+  throw new Error("digest state response body is unavailable");
 }
 
 function restAdapter(baseUrl, tenantId, fetchImpl = fetch) {
@@ -984,7 +1682,8 @@ export async function createProductionDeps(options, runtime = {}) {
   );
 
   let sns;
-  const publishSummary = async (summary) => {
+  let s3;
+  const publishHealthAlarm = async (alarm) => {
     const topicArn = process.env.MEM9_ALERTS_TOPIC_ARN;
     if (!topicArn) return;
     const snsModule =
@@ -997,20 +1696,137 @@ export async function createProductionDeps(options, runtime = {}) {
       new PublishCommand({
         TopicArn: topicArn,
         Message: JSON.stringify({
-          AlarmName: "WeeklyMemoryConsolidationReview",
+          AlarmName: "WeeklyMemoryConsolidationHealth",
           NewStateValue: "ALARM",
           NewStateReason:
-            `Review required: ${summary.reviewItems} item(s); ` +
-            `scanned=${summary.scanned}, merged=${summary.merged}, ` +
-            `archived=${summary.archived}, stale=${summary.flaggedStale}, ` +
-            `skipped_lww=${summary.skippedLww}`,
+            `Health escalation: ${alarm.reasons
+              .map((reason) => `${reason.kind}:${reason.rule}:${reason.count}`)
+              .join(", ")}; scanned=${alarm.totals.scanned}, ` +
+            `attempted=${alarm.totals.attemptedClusters}, ` +
+            `classification_failed=${alarm.totals.classificationFailures}, ` +
+            `review_items=${alarm.totals.reviewItems}, ` +
+            `mutations=${alarm.totals.mutations}`,
           StateChangeTime: new Date().toISOString(),
           Region: region,
           AlarmDescription:
-            "Weekly memory consolidation produced operator review items.",
+            "Weekly memory consolidation crossed an actionable health threshold.",
         }),
       }),
     );
+  };
+
+  const digestS3 = async () => {
+    if (s3) return s3;
+    const s3Module =
+      runtime.S3Client &&
+      runtime.GetObjectCommand &&
+      runtime.PutObjectCommand
+        ? runtime
+        : await import("@aws-sdk/client-s3");
+    s3 = {
+      client: new s3Module.S3Client({ region }),
+      GetObjectCommand: s3Module.GetObjectCommand,
+      PutObjectCommand: s3Module.PutObjectCommand,
+    };
+    return s3;
+  };
+
+  const digestBucketConfig = () => {
+    const bucket = process.env.MEM9_DECISION_ARTIFACT_BUCKET;
+    if (!bucket) {
+      throw new Error("MEM9_DECISION_ARTIFACT_BUCKET is required");
+    }
+    return {
+      bucket,
+      owner: requireDigestBucketOwner(
+        process.env.MEM9_DECISION_ARTIFACT_BUCKET_OWNER,
+      ),
+      key: digestStateKey(options.stage),
+    };
+  };
+
+  const loadDigestState = async () => {
+    const { bucket, owner, key } = digestBucketConfig();
+    const { client, GetObjectCommand } = await digestS3();
+    let response;
+    try {
+      response = await client.send(
+        new GetObjectCommand({
+          Bucket: bucket,
+          Key: key,
+          ExpectedBucketOwner: owner,
+        }),
+      );
+    } catch (error) {
+      if (
+        error?.name === "NoSuchKey" ||
+        error?.name === "NotFound" ||
+        error?.$metadata?.httpStatusCode === 404
+      ) {
+        return { status: "missing" };
+      }
+      throw error;
+    }
+    if (!response.ETag) throw new Error("digest state response has no ETag");
+    let parsed;
+    try {
+      parsed = JSON.parse(await responseBodyText(response.Body));
+    } catch (error) {
+      throw new Error("digest state is not valid JSON", { cause: error });
+    }
+    return {
+      status: "ok",
+      etag: response.ETag,
+      state: normalizeDigestState(parsed, options.stage),
+    };
+  };
+
+  const writeDigestState = async ({ state, etag }) => {
+    const { bucket, owner, key } = digestBucketConfig();
+    const { client, PutObjectCommand } = await digestS3();
+    await client.send(
+      new PutObjectCommand({
+        Bucket: bucket,
+        Key: key,
+        ExpectedBucketOwner: owner,
+        Body: serializeDigestState(state),
+        ContentType: "application/json",
+        ...(etag ? { IfMatch: etag } : { IfNoneMatch: "*" }),
+      }),
+    );
+  };
+
+  const postDigest = async (message) => {
+    const channel = process.env.MEM9_SLACK_APPROVAL_CHANNEL;
+    const botToken = process.env.SLACK_BOT_TOKEN;
+    if (!channel && !botToken) return;
+    if (!channel || !botToken) {
+      throw new Error("Slack digest configuration is incomplete");
+    }
+    const response = await fetchImpl(
+      "https://slack.com/api/chat.postMessage",
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${botToken}`,
+          "content-type": "application/json; charset=utf-8",
+        },
+        body: JSON.stringify({ channel, ...message }),
+        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+      },
+    );
+    let payload;
+    try {
+      payload = await response.json();
+    } catch {
+      payload = null;
+    }
+    if (!response.ok || payload?.ok !== true) {
+      throw new Error(
+        `Slack chat.postMessage failed: HTTP ${response.status} ` +
+        `${payload?.error || "invalid_response"}`,
+      );
+    }
   };
 
   return {
@@ -1095,12 +1911,16 @@ export async function createProductionDeps(options, runtime = {}) {
         return result.rowCount === 1;
       },
       completeChat,
-      publishSummary,
+      loadDigestState,
+      writeDigestState,
+      postDigest,
+      publishHealthAlarm,
       emitMetrics: (record) => writeStdout(`${JSON.stringify(record)}\n`),
       log: (line) => console.log(line),
     },
     close: async () => {
       await sns?.destroy();
+      s3?.client.destroy();
       await db.end();
     },
   };
@@ -1110,6 +1930,7 @@ export function parseConsolidationArgs(argv) {
   const options = {
     stage: process.env.MEM9_STAGE,
     reportOnly: process.env.MEM9_CONSOLIDATION_REPORT_ONLY !== "0",
+    scheduled: process.env.MEM9_CONSOLIDATION_SCHEDULED === "1",
     checkLlm: false,
     cap: DEFAULT_CAP,
   };

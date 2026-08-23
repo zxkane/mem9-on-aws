@@ -3,7 +3,12 @@ import type { EcsOutputs } from "./ecs";
 import { resolveVpc } from "./vpc";
 import { accountId, applicationRegion, ecrImage } from "./ecr";
 import type { TenantIdentityOutputs } from "./tenant-identity";
+import type { SlackApprovalOutputs } from "./slack-approval";
 import { taskFailureAlarm } from "./task-failure-alarm";
+import {
+  consolidationDigestKey,
+  decisionArtifactBucketName,
+} from "./decision-artifact";
 
 const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 const BEDROCK_PROJECT = process.env.MEM9_BEDROCK_PROJECT;
@@ -137,6 +142,10 @@ export function consolidation(
   ecsOut: EcsOutputs,
   dbOut: DbOutputs,
   identity: TenantIdentityOutputs,
+  slackApprovalOut?: Pick<
+    SlackApprovalOutputs,
+    "botTokenParameterArn" | "channel"
+  >,
 ): ConsolidationOutputs {
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const tags = {
@@ -145,6 +154,9 @@ export function consolidation(
     ManagedBy: "sst",
   };
   const image = ecrImage("mem9-on-aws/llm-proxy", IMAGE_TAG);
+  const artifactBucketOwner = accountId();
+  const artifactBucketName = decisionArtifactBucketName(artifactBucketOwner);
+  const region = aws.getRegionOutput().name;
   const taskPermissions: sst.aws.FargatePermission[] = [
     {
       actions: ["bedrock-mantle:CreateInference"],
@@ -171,11 +183,37 @@ export function consolidation(
       ],
       resources: ["*"],
     },
-    ...(ecsOut.alertsTopicArn
+    ...(SCHEDULE_ENABLED && ecsOut.alertsTopicArn
       ? [
           {
             actions: ["sns:Publish"],
             resources: [ecsOut.alertsTopicArn],
+          },
+        ]
+      : []),
+    ...(SCHEDULE_ENABLED
+      ? [
+          {
+            actions: ["s3:GetObject", "s3:PutObject"],
+            resources: [
+              $interpolate`arn:aws:s3:::${artifactBucketName}/${consolidationDigestKey($app.stage)}`,
+            ],
+          },
+          {
+            actions: ["kms:Decrypt", "kms:GenerateDataKey"],
+            resources: ["*"],
+            conditions: [
+              {
+                test: "StringEquals",
+                variable: "kms:ViaService",
+                values: [$interpolate`s3.${region}.amazonaws.com`],
+              },
+              {
+                test: "StringEquals",
+                variable: "kms:EncryptionContext:aws:s3:arn",
+                values: [$interpolate`arn:aws:s3:::${artifactBucketName}`],
+              },
+            ],
           },
         ]
       : []),
@@ -205,13 +243,25 @@ export function consolidation(
       MEM9_BEDROCK_PROJECT_OPENAI: BEDROCK_PROJECT_OPENAI,
       MEM9_LLM_RESPONSES_REGION: RESPONSES_REGION,
       MEM9_CONSOLIDATION_REPORT_ONLY: "1",
-      ...(ecsOut.alertsTopicArn
+      ...(SCHEDULE_ENABLED
+        ? {
+            MEM9_DECISION_ARTIFACT_BUCKET: artifactBucketName,
+            MEM9_DECISION_ARTIFACT_BUCKET_OWNER: artifactBucketOwner,
+          }
+        : {}),
+      ...(SCHEDULE_ENABLED && slackApprovalOut
+        ? { MEM9_SLACK_APPROVAL_CHANNEL: slackApprovalOut.channel }
+        : {}),
+      ...(SCHEDULE_ENABLED && ecsOut.alertsTopicArn
         ? { MEM9_ALERTS_TOPIC_ARN: ecsOut.alertsTopicArn }
         : {}),
     },
     ssm: {
       MEM9_DB_SECRET: dbOut.secretArn,
       MEM9_TENANT_ID: identity.tenantSecretArn,
+      ...(SCHEDULE_ENABLED && slackApprovalOut
+        ? { SLACK_BOT_TOKEN: slackApprovalOut.botTokenParameterArn }
+        : {}),
     },
     permissions: taskPermissions,
     logging: { retention: "1 month" },
@@ -396,6 +446,10 @@ export function consolidation(
                 {
                   name: "MEM9_CONSOLIDATION_REPORT_ONLY",
                   value: "0",
+                },
+                {
+                  name: "MEM9_CONSOLIDATION_SCHEDULED",
+                  value: "1",
                 },
               ],
             },

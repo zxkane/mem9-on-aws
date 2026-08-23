@@ -271,13 +271,21 @@ switch (command) {
     break;
   case "s3api get-bucket-lifecycle-configuration":
     console.log(JSON.stringify({
-      Rules: [{
-        ID: "expire-decision-artifacts",
-        Status: "Enabled",
-        Filter: { Prefix: "" },
-        Expiration: { Days: 3 },
-        AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 },
-      }],
+      Rules: [
+        {
+          ID: "expire-decision-artifacts",
+          Status: "Enabled",
+          Filter: { Prefix: "decisions/" },
+          Expiration: { Days: 3 },
+          AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 },
+        },
+        {
+          ID: "expire-consolidation-digests",
+          Status: "Enabled",
+          Filter: { Prefix: "consolidation-digests/" },
+          Expiration: { Days: 70 },
+        },
+      ],
     }));
     break;
   case "s3api get-bucket-policy":

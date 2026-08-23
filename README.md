@@ -1145,7 +1145,8 @@ active memories with each other. The task always defaults to report-only.
 `scripts/run-consolidation-task.sh` starts that deployed task explicitly with
 `--report-only --check-llm`, performs a content-free live Mantle smoke, waits
 for exit zero, and reads only its content-free `CONSOLIDATION_REVIEW_LIST`
-summary from the exact CloudWatch log stream:
+summary from the exact CloudWatch log stream. The harness requires the marker
+to report `digestEnabled: false`:
 
 ```bash
 STAGE=prod bash scripts/run-consolidation-task.sh
@@ -1174,6 +1175,24 @@ setting the repository variable `MEM9_CONSOLIDATION_SCHEDULE_ENABLED` to `1`
 only after the initial cleanup and a report-only run show actionable drift.
 Production then runs Sunday at 03:00 UTC; previews synthesize a disabled
 schedule for infrastructure coverage.
+
+Only that scheduled target enables digest state and notifications. It groups
+current review topics into operator-decision, deferred-retry, and system-health
+risk tiers, compares them with the previous weekly snapshot, and posts one
+private Slack digest when the existing Slack bot/channel configuration is
+enabled. The digest is bounded to ten groups and three samples per group;
+unchanged-only runs are suppressed except for every fourth reminder. It has no
+approval buttons.
+
+The content-free snapshot is stored in the existing audit bucket at
+`consolidation-digests/<stage>/current-v1.json` with an owner check and
+conditional writes. It contains hashes, kinds, counters, and timestamps only,
+never memory ids or content. The task can get and put only its exact stage key;
+it cannot list or delete objects. The bucket retains decision artifacts for
+three days and consolidation digest state for 70 days. SNS alerts are emitted
+only for run-level health thresholds or degraded deduplication, not merely
+because review records exist. Manual apply and preview report-only runs neither
+read nor write digest state and do not post the weekly digest.
 
 ## Slack approval for cleanup deletions
 

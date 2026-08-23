@@ -66,6 +66,22 @@ import type { TenantIdentityOutputs } from "./tenant-identity";
 import { taskFailureAlarm } from "./task-failure-alarm";
 import { accountId, applicationRegion, ecrImage } from "./ecr";
 import {
+  DECISION_ARTIFACT_BUCKET_ENV,
+  DECISION_ARTIFACT_BUCKET_OWNER_ENV,
+  DECISION_ARTIFACT_TTL_DAYS,
+  decisionArtifactBucketName,
+  decisionArtifactKey,
+  decisionArtifactKeyPrefix,
+} from "./decision-artifact";
+export {
+  DECISION_ARTIFACT_BUCKET_ENV,
+  DECISION_ARTIFACT_BUCKET_OWNER_ENV,
+  DECISION_ARTIFACT_TTL_DAYS,
+  decisionArtifactBucketName,
+  decisionArtifactKey,
+  decisionArtifactKeyPrefix,
+};
+import {
   boundedNamePrefix,
   IAM_ROLE_NAME_MAX,
   SCHEDULE_GROUP_NAME_PREFIX_MAX,
@@ -104,10 +120,6 @@ const SCAN_ALARM_PERIOD_SECONDS = 604_800;
 
 export const SLACK_APPROVAL_ENABLED_ENV = "MEM9_SLACK_APPROVAL_ENABLED";
 export const SLACK_APPROVAL_CHANNEL_ENV = "MEM9_SLACK_APPROVAL_CHANNEL";
-export const DECISION_ARTIFACT_BUCKET_ENV =
-  "MEM9_DECISION_ARTIFACT_BUCKET";
-export const DECISION_ARTIFACT_BUCKET_OWNER_ENV =
-  "MEM9_DECISION_ARTIFACT_BUCKET_OWNER";
 
 /**
  * The weekly scan's own gate (#149), separate from `SLACK_APPROVAL_ENABLED_ENV`.
@@ -186,120 +198,6 @@ export const APPROVED_IDS_PATH = "/tmp/mem9-approved-ids.txt";
 export const CLEANUP_CAP = 50;
 
 /**
- * The decision artifact's exact account-level bucket name.
- *
- * S3 bucket names are a single GLOBAL namespace — not per-account, not
- * per-region — so a boundary pattern with a wildcard in the bucket segment
- * matches buckets in accounts this project does not own. Measured, not reasoned:
- * against `arn:aws:s3:::mem9-on-aws-*-decisions/*`, `iam:simulate-custom-policy`
- * returned `allowed` for `s3:PutObject` on `mem9-on-aws-evil-decisions`, a name
- * anyone can create first. For an object that holds the reviewed deletion list,
- * that is an exfiltration target. By default the account id is the disambiguating
- * suffix a global namespace needs. An operator may instead provide one exact
- * external name. Either way the boundary pins the exact bucket and the stage
- * moves into the key prefix (see `decisionArtifactKey`).
- *
- * The textbook alternative — keeping the wildcard and adding an
- * `aws:ResourceAccount` condition — renders the boundary at 6280 bytes. 6144 is
- * a HARD cap (`Adjustable: False`) and a role carries exactly one boundary, so
- * that option does not exist here. The exact name costs zero extra bytes.
- *
- * The name is `mem9-audit-` and not the project's usual `mem9-on-aws-` prefix
- * because the ARN renders three times in the boundary: seven characters of prefix
- * cost 21 bytes against a 6144 HARD cap that the deployed document currently
- * clears by 31. Nothing pins an S3 prefix for this project — the deploy role's
- * `S3State` is `Resource: "*"` — so the shorter name costs no access.
- *
- * `MEM9_DECISION_ARTIFACT_BUCKET` is consumed by the owner stack, boundary
- * rollout, CI, and E2E too. A drift is an AccessDenied at artifact-write time —
- * after the click has been spent.
- */
-export function decisionArtifactBucketName(
-  account: Output<string> | string,
-): Output<string> | string {
-  const configured = process.env[DECISION_ARTIFACT_BUCKET_ENV];
-  if (configured) {
-    if (
-      !/^[a-z0-9][a-z0-9-]{1,31}[a-z0-9]$/u.test(configured) ||
-      /^(?:xn--|sthree-|amzn-s3-demo-)/u.test(configured) ||
-      /(?:-s3alias|--ol-s3|--x-s3|--table-s3|-an)$/u.test(configured)
-    ) {
-      throw new Error(
-        `${DECISION_ARTIFACT_BUCKET_ENV} is an invalid decision-artifact bucket name`,
-      );
-    }
-    return configured;
-  }
-  // 12-digit account id + the 11-char literal = 23 chars, inside S3's 63-char
-  // bucket-name limit with room to spare, and lowercase/hyphen-only as S3
-  // requires. $interpolate, never a template literal: an Output stringified into
-  // one yields "Calling [toString] on an [Output<T>]" and would deploy a bucket
-  // literally named that.
-  return $interpolate`mem9-audit-${account}`;
-}
-
-/**
- * The artifact's key, which is where the STAGE lives now that the bucket name is
- * account-scoped rather than stage-scoped.
- *
- * One bucket serves every stage. That is a deliberate consequence of pinning the
- * bucket name to the account: the alternative — a bucket per stage — would need
- * either a wildcard bucket segment in the boundary (squattable, see above) or one
- * boundary entry per stage, and preview stages are created per PR. Cross-stage
- * separation is therefore a KEY-prefix property, enforced by the identity policy's
- * per-stage object scope rather than by the boundary, which only bounds the
- * maximum.
- *
- * DUPLICATED as `decisionArtifactKey` in scripts/memory-cleanup.mjs, which is the
- * WRITER while this file is the provisioner — the same split as `OFFER_TTL_MS` and
- * `claimParameterName`, and for the same reason: the container script and the SST
- * program share no module. A drift is an AccessDenied against the per-stage object
- * scope below, at artifact-write time, after the audit has run.
- * TC-SLACKAPP-168 asserts the two agree character for character.
- *
- * Keyed by the CONTENT HASH rather than a run id, so the apply can derive the key
- * from the approval alone (see the writer's note). The `:` in `sha256:...` takes
- * the same dash treatment `claimParameterName` applies for SSM's sake: it is legal
- * in an S3 key but needs percent-encoding in a URL and reads as a port separator in
- * an `s3://` line, and one transformation for both stores is easier to verify than
- * two.
- */
-export function decisionArtifactKey(stage: string, hash: string): string {
-  return `${decisionArtifactKeyPrefix(stage)}${hash.replace(/:/gu, "-")}.json`;
-}
-
-/**
- * The stage's own key prefix — the thing the identity policy scopes to, and the
- * only mechanism that keeps one stage out of another's reviewed decision list.
- *
- * Factored out of `decisionArtifactKey` rather than written twice because the two
- * uses must agree by construction: the grant is `<prefix>*` and the writer's key is
- * `<prefix><hash>.json`, so a prefix that drifted would grant access to keys the
- * writer never produces while denying the ones it does. That failure is an
- * AccessDenied at write time, after the audit.
- *
- * The trailing slash is part of the prefix and load-bearing. Without it,
- * `decisions/pr-4*` also matches `decisions/pr-42/...` — a preview stage reading
- * another preview stage's list — which is exactly the isolation this is here to
- * provide.
- */
-export function decisionArtifactKeyPrefix(stage: string): string {
-  return `decisions/${stage}/`;
-}
-
-/**
- * How long a decision artifact lives.
- *
- * The artifact exists to be replayed by an apply that follows its own approval,
- * and #123's offer TTL already expires an unclicked approval at 72h. An artifact
- * that outlived its approval could not be replayed by anything, so this matches
- * that bound rather than picking an independent retention: past 72h the object is
- * unreachable by design, and keeping it would mean retaining a list of memory ids
- * with no purpose left to serve.
- */
-export const DECISION_ARTIFACT_TTL_DAYS = 3;
-
-/**
  * Schedule-group name prefix for the scan, under the same two limits
  * consolidation's helper checks and for the same reasons — Scheduler's 38-char
  * `name_prefix` cap (the tighter one, so it is reported first) and the 64-char
@@ -373,6 +271,8 @@ export function cleanupSchedulerRoleName(stage: string): string {
 
 export interface SlackApprovalOutputs {
   taskDefinitionArn: Output<string>;
+  botTokenParameterArn: Output<string>;
+  channel: string;
 }
 
 /**
@@ -1132,5 +1032,9 @@ export function slackApproval(
     }),
   });
 
-  return { taskDefinitionArn: task.taskDefinition };
+  return {
+    taskDefinitionArn: task.taskDefinition,
+    botTokenParameterArn: botTokenParameter.arn,
+    channel,
+  };
 }

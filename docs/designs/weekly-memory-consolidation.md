@@ -1,7 +1,7 @@
 # Design Canvas: weekly memory consolidation
 
-Feature: weekly contradiction, fragment, and staleness consolidation (issue #103)
-Date: 2026-08-01
+Feature: weekly contradiction, fragment, staleness, and review digests (issues #103 and #183)
+Date: 2026-08-23
 Status: Approved (autonomous mode)
 
 ## Problem
@@ -28,8 +28,10 @@ EventBridge Scheduler group + schedule (weekly, explicit enablement only)
             batch-delete absorbed fragments (MERGE contract)
             PUT stale tags/metadata
        -> Aurora optimistic state='archived' update for a timeline loser
-       -> stdout: review records + content-free EMF
-       -> SNS topic: content-free review summary -> existing Slack router
+       -> stdout: complete private review records + content-free EMF
+       -> S3: content-free cross-run digest snapshot (scheduled apply only)
+       -> Slack Web API: one bounded private weekly digest (when configured)
+       -> SNS topic: content-free health alarm only when thresholds breach
 ```
 
 The task reuses the `llm-proxy` image because that image already contains the
@@ -122,9 +124,111 @@ Each review line is a single structured stdout record prefixed
 records persist in CloudWatch Logs. Review content is never written to task
 ephemeral storage, repository artifacts, issues, PRs, or metrics.
 
-The SNS message contains counts only. It uses the existing alarm-shaped payload
-accepted by the SNS-to-Slack alert router. Approved DELETE ids remain a manual
-`memory-cleanup.mjs --apply --ids` operation.
+Approved DELETE ids remain a manual `memory-cleanup.mjs --apply --ids`
+operation.
+
+## Risk-Tiered Weekly Digest
+
+The complete review list remains in private `CONSOLIDATION_REVIEW` CloudWatch
+records. A scheduled apply run also derives a bounded operator digest from those
+records. Report-only and manual apply runs never load or write digest state and
+never post the weekly digest.
+
+Every review kind maps deterministically:
+
+- `OPERATOR_DECISION`: `DELETE` and ambiguous `CONTRADICTION`.
+- `DEFERRED_RETRY`: `CAP_DEFERRED`, `LOCK_HELD`, `CLUSTER_TOO_LARGE`, and
+  `TAG_LIMIT_REACHED`.
+- `SYSTEM_HEALTH`: `APPLY_FAILED`, `UNFENCEABLE_MERGE`,
+  `CLASSIFICATION_FAILED`, `UNKNOWN_ID`, `CONFLICTING_ACTION`, `INVALID_MERGE`,
+  `INVALID_STALE`, `INELIGIBLE_STALE`, and every unknown kind.
+
+`REPORT_ONLY_*` kinds are audit records only. They are excluded before topic
+construction, state comparison, Slack, and SNS.
+
+### Topic identity and payload state
+
+One topic represents one stable review subject:
+
+```text
+topicId = sha256(schemaVersion + reviewKind + sortedUniqueMemoryIds)
+payloadHash = sha256(topicId + sorted(id, currentContentHash))
+```
+
+The topic id deliberately excludes versions, rationale, snippets, and list
+position. The payload hash deliberately includes content hashes but excludes
+metadata and versions. Reordering ids or changing only a version therefore
+continues the topic; changing current content updates it.
+
+The snapshot lives at
+`consolidation-digests/<stage>/current-v1.json` in the existing operator-owned
+decision-artifact bucket. It contains only schema version, topic ids, payload
+hashes, kinds, dispositions, counters, and timestamps. It never contains memory
+ids, text, snippets, rationale, embeddings, or model output.
+
+Each scheduled run compares current topics with the previous snapshot:
+
+- current only: `new`;
+- same topic id with a different payload hash: `updated`;
+- same topic id and payload hash: `continuing`;
+- previous only: `resolved`.
+
+The first write uses `If-None-Match: *`. Updates use `If-Match` with the ETag
+returned by the read. Every S3 request supplies `ExpectedBucketOwner`. A failed
+precondition loses the race and leaves the winning snapshot intact.
+
+### Bounded presentation
+
+Slack receives at most one message per scheduled run. It contains run and
+mutation totals, then at most ten disposition/kind groups. Each group reports
+`new`, `updated`, `continuing`, and `resolved` counts and at most three bounded
+samples drawn from current review records. It contains no approval buttons or
+bulk controls.
+
+Groups sort by operator risk: system health, operator decisions, then deferred
+retry. Within a tier, explicit severity and change counts determine order. A
+newly observed `CLUSTER_TOO_LARGE` group is forced into the ten-group window for
+that run even when higher-ranked groups fill it.
+
+A run whose topics are all continuing is suppressed. The snapshot tracks the
+consecutive unchanged scheduled-run count, and every fourth such run sends a
+reminder. Any new, updated, or resolved topic resets the count.
+
+### Health escalation
+
+SNS is no longer a proxy for "review list is non-empty." It receives one
+content-free alarm only when run-level health rules breach:
+
+- any `APPLY_FAILED`, `UNFENCEABLE_MERGE`, or unknown kind;
+- classification failures reach 10 clusters or 20 percent of attempted
+  clusters;
+- another system-health kind reaches 10 records or was present in the previous
+  scheduled run;
+- `LOCK_HELD`, `CLUSTER_TOO_LARGE`, or `TAG_LIMIT_REACHED` was present in the
+  previous scheduled run;
+- unique memories affected by oversized clusters reach 20 percent of scanned
+  memories.
+
+The alarm contains only stage, kind/count summaries, thresholds, and run totals.
+It never contains topic ids, memory ids, content hashes, snippets, or rationale.
+
+### Failure ordering
+
+Confirmed memory mutations happen before digest delivery and are never rolled
+back. Required Slack and SNS notifications are attempted before snapshot
+commit. The snapshot is committed only when every required notification
+succeeds, preferring a duplicate notification on the next run over recording an
+undelivered digest as complete.
+
+If the state read is unavailable or corrupt, the run emits a content-free
+`dedup_unavailable` log/metric, does not claim `new` or `resolved`, does not
+overwrite state, and sends a degraded Slack digest plus health alarm when those
+transports are configured. S3 returns `403` for a missing key when the task has
+the required object permissions but deliberately lacks `ListBucket`, so after
+notification the degraded path may attempt only `If-None-Match: *`. A genuinely
+missing key is initialized; an existing unreadable key returns `412` and is
+unchanged. Slack, SNS, state-write, or conditional-write failure may make the
+task exit nonzero, but cannot alter already confirmed memory mutations.
 
 ## Concurrency And LWW
 
@@ -259,7 +363,10 @@ https://docs.aws.amazon.com/AmazonECS/latest/developerguide/ecs_task_events.html
 ## IAM
 
 - Consolidation task role: Mantle inference, content-free log/EMF writes, and
-  scoped SNS publish to the existing alert topic.
+  scoped SNS publish to the existing alert topic; stage-scoped
+  `s3:GetObject`/`s3:PutObject` for the digest snapshot; and Slack delivery only
+  when the existing private bot/channel configuration is enabled. It receives
+  no S3 list or delete permission.
 - Consolidation execution role: ECR/log startup permissions from SST plus the
   two Secrets Manager references injected by ECS.
 - Scheduler role: `ecs:RunTask` on the exact task definition and `iam:PassRole`
@@ -279,5 +386,5 @@ Preview CI creates a disabled schedule and runs the task once with a
 proves live Mantle bearer, IAM, and model connectivity even when no preview
 memory forms a cluster. The harness waits for STOPPED, requires exit code zero,
 then queries the task log stream for the mandatory `CONSOLIDATION_REVIEW_LIST`
-summary line. Report-only suppresses MERGE, archive, stale, and notification
-writes.
+summary line and requires its `digestEnabled` field to be false. Report-only
+suppresses MERGE, archive, stale, S3 digest-state, and Slack/SNS digest writes.

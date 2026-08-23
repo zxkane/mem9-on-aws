@@ -161,11 +161,16 @@ for attempt in 1 2 3 4 5 6; do
   # those records carry private memory content that must not reach CI output
   # (this repo is planned to be open-sourced). Select the line that STARTS with
   # the marker, then re-emit only the known content-free fields.
-  SUMMARY=$(printf '%s\n' "$MARKER" | jq -Rr '
+  SUMMARY=$(printf '%s\n' "$MARKER" | jq -Rr --arg stage "$STAGE" '
     select(startswith("CONSOLIDATION_REVIEW_LIST "))
     | ltrimstr("CONSOLIDATION_REVIEW_LIST ")
     | fromjson?
-    | {stage, reportOnly, reviewItems}
+    | select(
+        .stage == $stage
+        and .reportOnly == true
+        and .digestEnabled == false
+      )
+    | {stage, reportOnly, reviewItems, digestEnabled}
     | tostring' | head -1)
   if [[ -n "$SUMMARY" ]]; then
     printf 'CONSOLIDATION_REVIEW_LIST %s\n' "$SUMMARY"

@@ -1,0 +1,17 @@
+{
+  "stage": "prod",
+  "groups": [
+    { "kind": "APPLY_FAILED", "count": 90 },
+    { "kind": "UNFENCEABLE_MERGE", "count": 90 },
+    { "kind": "CLASSIFICATION_FAILED", "count": 90 },
+    { "kind": "UNKNOWN_ID", "count": 90 },
+    { "kind": "CONFLICTING_ACTION", "count": 90 },
+    { "kind": "INVALID_MERGE", "count": 90 },
+    { "kind": "INVALID_STALE", "count": 90 },
+    { "kind": "INELIGIBLE_STALE", "count": 90 },
+    { "kind": "DELETE", "count": 90 },
+    { "kind": "CONTRADICTION", "count": 90 },
+    { "kind": "CAP_DEFERRED", "count": 90 },
+    { "kind": "CLUSTER_TOO_LARGE", "count": 90 }
+  ]
+}
