@@ -719,6 +719,21 @@ describe("execution safety", () => {
       ConsolidationMerged: 1,
       ConsolidationReviewItems: 1,
     });
+    expect(fake.writes).toContainEqual(
+      expect.objectContaining({
+        type: "health",
+        alarm: expect.objectContaining({
+          reasons: [
+            expect.objectContaining({
+              kind: "APPLY_FAILED",
+              rule: "immediate",
+            }),
+          ],
+        }),
+      }),
+    );
+    expect(fake.writes.some(({ type }) => type === "slack")).toBe(false);
+    expect(fake.writes.some(({ type }) => type === "state")).toBe(false);
   });
 
   it("TC-CONSOL-017: records a survivor PUT when MERGE deletion fails", async () => {
@@ -1134,7 +1149,22 @@ describe("execution safety", () => {
         ids: ["a", "b"],
       }),
     );
-    expect(fake.writes.filter(({ type }) => type !== "notify")).toEqual([]);
+    expect(
+      fake.writes.filter(({ type }) => type !== "health"),
+    ).toEqual([]);
+    expect(fake.writes).toContainEqual(
+      expect.objectContaining({
+        type: "health",
+        alarm: expect.objectContaining({
+          reasons: [
+            expect.objectContaining({
+              kind: "CLASSIFICATION_FAILED",
+              rule: "ratio_threshold",
+            }),
+          ],
+        }),
+      }),
+    );
     expect(result.exitCode).toBe(1);
   });
 
@@ -1513,9 +1543,10 @@ describe("production adapters and CLI", () => {
     expect(sent.at(-1)).not.toHaveProperty("IfNoneMatch");
 
     readMode = "corrupt";
-    await expect(production.deps.loadDigestState()).rejects.toThrow(
-      /digest state/iu,
-    );
+    await expect(production.deps.loadDigestState()).resolves.toMatchObject({
+      status: "invalid",
+      etag: '"etag-1"',
+    });
     writeMode = "precondition";
     await expect(
       production.deps.writeDigestState({ state, etag: '"stale"' }),
@@ -1604,6 +1635,62 @@ describe("content-free telemetry", () => {
       ConsolidationReviewItems: 0,
     });
     expect(fake.logs.some((line) => line.includes('"_aws"'))).toBe(false);
+  });
+
+  it("TC-CONSOL-073: preserves EMF and confirmed mutations when the digest refresh fails", async () => {
+    const fake = fakeDeps(
+      [
+        memory("survivor", "first fragment", [1, 0]),
+        memory("absorbed", "second fragment", [0.99, 0.01]),
+      ],
+      [JSON.stringify({
+        actions: [{
+          type: "MERGE",
+          ids: ["survivor", "absorbed"],
+          survivor_id: "survivor",
+          merged_content: "merged memory",
+          rationale: "same topic",
+        }],
+      })],
+    );
+    const listActiveMemories =
+      fake.deps.listActiveMemories.getMockImplementation();
+    fake.deps.listActiveMemories
+      .mockImplementationOnce(listActiveMemories)
+      .mockRejectedValueOnce(new Error("post-mutation refresh failed"));
+    fake.deps.emitMetrics = vi.fn();
+
+    const result = await runConsolidation(
+      {
+        stage: "prod",
+        reportOnly: false,
+        scheduled: true,
+        cap: 20,
+      },
+      fake.deps,
+    );
+
+    expect(result).toMatchObject({
+      exitCode: 1,
+      mutations: 2,
+      metrics: {
+        merged: 1,
+        dedupUnavailable: 1,
+      },
+    });
+    expect(fake.deps.emitMetrics).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ConsolidationMerged: 1,
+        ConsolidationDedupUnavailable: 1,
+      }),
+    );
+    expect(fake.writes).toContainEqual(
+      expect.objectContaining({
+        type: "health",
+        alarm: expect.objectContaining({ degraded: true }),
+      }),
+    );
+    expect(fake.writes.some(({ type }) => type === "state")).toBe(false);
   });
 });
 
@@ -1905,6 +1992,58 @@ describe("risk-tiered consolidation digests", () => {
     expect(changed.nextState.unchangedRuns).toBe(0);
   });
 
+  it("TC-CONSOL-074: posts an unchanged digest when the current run raises a health alarm", () => {
+    const review = [{
+      kind: "APPLY_FAILED",
+      ids: [],
+      snippets: [],
+      rationale: "first failure mode",
+    }];
+    const first = buildDigestOutcome({
+      stage: "prod",
+      review,
+      byId: new Map(),
+      previousState: undefined,
+      metrics: {
+        scanned: 1,
+        merged: 0,
+        archived: 0,
+        flaggedStale: 0,
+        reviewItems: 1,
+        skippedLww: 0,
+      },
+      mutations: 0,
+      attemptedClusters: 1,
+      classificationFailures: 0,
+      now: NOW,
+    });
+    const repeated = buildDigestOutcome({
+      stage: "prod",
+      review: [{ ...review[0], rationale: "different failure mode" }],
+      byId: new Map(),
+      previousState: first.nextState,
+      metrics: {
+        scanned: 1,
+        merged: 0,
+        archived: 0,
+        flaggedStale: 0,
+        reviewItems: 1,
+        skippedLww: 0,
+      },
+      mutations: 0,
+      attemptedClusters: 1,
+      classificationFailures: 0,
+      now: NOW + 1,
+    });
+
+    expect(repeated.transitions.current).toEqual([
+      expect.objectContaining({ transition: "continuing" }),
+    ]);
+    expect(repeated.health.alarm).toBe(true);
+    expect(repeated.shouldPost).toBe(true);
+    expect(repeated.reminder).toBe(false);
+  });
+
   it("TC-CONSOL-058/059: bounds groups and samples while forcing new oversized clusters visible", () => {
     const kinds = [
       "APPLY_FAILED",
@@ -2185,6 +2324,69 @@ describe("risk-tiered consolidation digests", () => {
     expect(JSON.stringify(calls.find(([kind]) => kind === "sns"))).not.toContain(
       "private alpha",
     );
+  });
+
+  it("TC-CONSOL-072: never overwrites a corrupt snapshot", async () => {
+    const writeDigestState = vi.fn(async () => {});
+    const postDigest = vi.fn(async () => {});
+    const publishHealthAlarm = vi.fn(async () => {});
+    const result = await processScheduledDigest(
+      {
+        stage: "prod",
+        review: [{
+          kind: "DELETE",
+          ids: ["a"],
+          snippets: ["private alpha"],
+          rationale: "manual",
+        }],
+        byId: new Map([["a", memory("a", "private alpha", [1, 0])]]),
+        metrics: {
+          scanned: 1,
+          merged: 0,
+          archived: 0,
+          flaggedStale: 0,
+          reviewItems: 1,
+          skippedLww: 0,
+        },
+        mutations: 0,
+        attemptedClusters: 1,
+        classificationFailures: 0,
+        now: NOW,
+      },
+      {
+        loadDigestState: vi.fn(async () => ({
+          status: "invalid",
+          etag: '"corrupt-etag"',
+          errorClass: "SyntaxError",
+        })),
+        postDigest,
+        publishHealthAlarm,
+        writeDigestState,
+        log: vi.fn(),
+      },
+    );
+
+    expect(result).toMatchObject({
+      dedupUnavailable: true,
+      failed: true,
+    });
+    expect(postDigest).toHaveBeenCalledOnce();
+    expect(publishHealthAlarm).toHaveBeenCalledOnce();
+    expect(JSON.stringify(postDigest.mock.calls[0][0])).toContain(
+      "Deduplication unavailable",
+    );
+    expect(publishHealthAlarm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        degraded: true,
+        reasons: expect.arrayContaining([
+          expect.objectContaining({
+            kind: "DIGEST_STATE",
+            rule: "dedup_unavailable",
+          }),
+        ]),
+      }),
+    );
+    expect(writeDigestState).not.toHaveBeenCalled();
   });
 
   it("TC-CONSOL-065: serializes only content-free snapshot state", () => {

@@ -48,6 +48,7 @@ function runFixture({
   bucket = "absent",
   bucketName = "",
   changeSetMismatch = false,
+  digestAbort = true,
   drift = "IN_SYNC",
   recoveryHasResource = false,
   stack = "absent",
@@ -284,6 +285,9 @@ switch (command) {
           Status: "Enabled",
           Filter: { Prefix: "consolidation-digests/" },
           Expiration: { Days: 70 },
+          ...(process.env.MOCK_DIGEST_ABORT === "true"
+            ? { AbortIncompleteMultipartUpload: { DaysAfterInitiation: 1 } }
+            : {}),
         },
       ],
     }));
@@ -338,6 +342,7 @@ switch (command) {
       MOCK_BUCKET: bucket,
       MOCK_CALLS: calls,
       MOCK_CHANGE_SET_MISMATCH: String(changeSetMismatch),
+      MOCK_DIGEST_ABORT: String(digestAbort),
       MOCK_DRIFT: drift,
       MOCK_FULL_STACK_CREATED: join(directory, "full-stack-created"),
       MOCK_IMPORTED: join(directory, "imported"),
@@ -608,6 +613,12 @@ describe("decision-artifact bucket bootstrap", () => {
         ),
       ).toBe(true);
     }
+  });
+
+  it("TC-CONSOL-070 rejects a digest lifecycle without multipart cleanup", () => {
+    const { output, result } = runFixture({ digestAbort: false });
+    expect(result.status, output).not.toBe(0);
+    expect(output).toMatch(/lifecycle read-back mismatch/iu);
   });
 
   it("TC-SLACKAPP-222 requires CloudFormation to own the TLS bucket policy", () => {

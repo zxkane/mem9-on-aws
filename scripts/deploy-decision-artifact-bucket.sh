@@ -598,6 +598,7 @@ if ! jq -e '
         == "consolidation-digests/"
       )
       and $digests.Expiration.Days >= 70
+      and $digests.AbortIncompleteMultipartUpload.DaysAfterInitiation == 1
   ' <<<"$lifecycle" >/dev/null; then
   echo "Decision-artifact lifecycle read-back mismatch." >&2
   exit 1

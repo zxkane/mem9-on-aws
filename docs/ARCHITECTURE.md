@@ -467,13 +467,16 @@ private digest with totals, at most ten risk-ordered disposition/kind groups,
 and at most three bounded current samples per group. Unchanged-only runs are
 suppressed except for every fourth reminder; a newly observed
 `CLUSTER_TOO_LARGE` group is always selected. SNS is reserved for content-free
-system-health alarms at the documented run-level thresholds. A failed state
+system-health alarms at the documented run-level thresholds; manual apply runs
+evaluate current-run thresholds without loading digest state. A failed state
 read emits `ConsolidationDedupUnavailable`, avoids `new`/`resolved` claims and
 state overwrites, and sends degraded notifications when configured. Because S3
 returns `403` for both a missing key without `ListBucket` and some read failures,
 the task may attempt only an `If-None-Match: *` create after those notifications.
 That initializes a missing snapshot while an existing unreadable snapshot
-returns `412` and remains untouched. Required
+returns `412` and remains untouched. A readable but invalid snapshot is never
+overwritten automatically. The operator must pause the schedule and delete that
+exact stage key before the next run can initialize a replacement. Required
 notifications happen before the conditional state commit, and notification or
 state failures never roll back confirmed memory mutations.
 

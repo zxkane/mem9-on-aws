@@ -132,7 +132,8 @@ operation.
 The complete review list remains in private `CONSOLIDATION_REVIEW` CloudWatch
 records. A scheduled apply run also derives a bounded operator digest from those
 records. Report-only and manual apply runs never load or write digest state and
-never post the weekly digest.
+never post the weekly digest. Manual apply still evaluates current-run health
+thresholds and can publish a content-free health alarm.
 
 Every review kind maps deterministically:
 
@@ -220,15 +221,39 @@ commit. The snapshot is committed only when every required notification
 succeeds, preferring a duplicate notification on the next run over recording an
 undelivered digest as complete.
 
-If the state read is unavailable or corrupt, the run emits a content-free
+If the state read is unavailable or invalid, the run emits a content-free
 `dedup_unavailable` log/metric, does not claim `new` or `resolved`, does not
-overwrite state, and sends a degraded Slack digest plus health alarm when those
-transports are configured. S3 returns `403` for a missing key when the task has
-the required object permissions but deliberately lacks `ListBucket`, so after
-notification the degraded path may attempt only `If-None-Match: *`. A genuinely
-missing key is initialized; an existing unreadable key returns `412` and is
-unchanged. Slack, SNS, state-write, or conditional-write failure may make the
-task exit nonzero, but cannot alter already confirmed memory mutations.
+overwrite known state, and sends a degraded Slack digest plus health alarm when
+those transports are configured. S3 returns `403` for a missing key when the
+task has the required object permissions but deliberately lacks `ListBucket`,
+so after notification the degraded path may attempt only `If-None-Match: *`. A
+genuinely missing key is initialized; an existing unreadable key returns `412`
+and is unchanged. If S3 returned the object but its JSON or schema is invalid,
+the task performs no state write. Slack, SNS, state-write, or conditional-write
+failure may make the task exit nonzero, but cannot alter already confirmed
+memory mutations.
+
+To recover an invalid snapshot, first pause the schedule and confirm no
+consolidation task is running. Then delete only the affected stage key with an
+operator identity that owns the bucket:
+
+```bash
+aws s3api delete-object \
+  --bucket <decision-artifact-bucket> \
+  --key "consolidation-digests/<stage>/current-v1.json" \
+  --expected-bucket-owner <aws-account-id> \
+  --region <application-region>
+```
+
+The next scheduled run uses `If-None-Match: *` to initialize a fresh snapshot.
+
+The decision-artifact bucket is operator-owned and out of band. Before enabling
+the schedule on an account that already has the bucket, re-run
+`scripts/deploy-decision-artifact-bucket.sh` and require its two-rule lifecycle
+read-back to pass. Otherwise the old bucket-wide three-day rule expires the
+weekly snapshot before the next run. The first scheduled run for a stage is
+expected to degrade once because a missing key is masked as `403`; its successful
+`If-None-Match` write initializes the snapshot for the following week.
 
 ## Concurrency And LWW
 

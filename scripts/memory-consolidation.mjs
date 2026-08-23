@@ -684,7 +684,7 @@ export function buildDigestOutcome({
       }),
     ),
   };
-  const shouldPost = degraded || changed || reminder;
+  const shouldPost = degraded || changed || reminder || health.alarm;
   return {
     transitions,
     groups,
@@ -1232,27 +1232,39 @@ async function applyAutoActions(actions, context) {
 export async function processScheduledDigest(input, deps) {
   let previousState;
   let etag;
-  let stateMissing = false;
   let dedupUnavailable = false;
-  try {
-    const loaded = await deps.loadDigestState();
-    if (loaded?.status === "missing") {
-      stateMissing = true;
-    } else if (loaded?.status === "ok" && loaded.state && loaded.etag) {
-      previousState = loaded.state;
-      etag = loaded.etag;
-    } else {
-      throw new Error("digest state read returned an invalid result");
-    }
-  } catch (error) {
+  let stateWriteAllowed = input.stateWriteAllowed !== false;
+
+  const markDedupUnavailable = (errorClass) => {
     dedupUnavailable = true;
     deps.log(
       `CONSOLIDATION_DIGEST ${JSON.stringify({
         event: "dedup_unavailable",
         stage: input.stage,
-        errorClass: error?.name || "Error",
+        errorClass: errorClass || "Error",
       })}`,
     );
+  };
+
+  if (input.dedupUnavailableError) {
+    markDedupUnavailable(input.dedupUnavailableError?.name);
+  } else {
+    try {
+      const loaded = await deps.loadDigestState();
+      if (loaded?.status === "missing") {
+        // The first snapshot is created with If-None-Match below.
+      } else if (loaded?.status === "ok" && loaded.state && loaded.etag) {
+        previousState = loaded.state;
+        etag = loaded.etag;
+      } else if (loaded?.status === "invalid") {
+        stateWriteAllowed = false;
+        markDedupUnavailable(loaded.errorClass);
+      } else {
+        throw new Error("digest state read returned an invalid result");
+      }
+    } catch (error) {
+      markDedupUnavailable(error?.name);
+    }
   }
 
   const outcome = buildDigestOutcome({
@@ -1260,24 +1272,19 @@ export async function processScheduledDigest(input, deps) {
     previousState,
     dedupAvailable: !dedupUnavailable,
   });
-  const alarm = {
+  const alarm = buildHealthAlarm({
     stage: input.stage,
     event: "weekly_consolidation_health",
+    health: outcome.health,
     degraded: dedupUnavailable,
-    reasons: [
-      ...outcome.health.reasons,
-      ...(dedupUnavailable
-        ? [{ kind: "DIGEST_STATE", count: 1, rule: "dedup_unavailable" }]
-        : []),
-    ],
-    totals: {
-      scanned: input.metrics.scanned,
-      attemptedClusters: input.attemptedClusters,
-      classificationFailures: input.classificationFailures,
-      reviewItems: input.metrics.reviewItems,
-      mutations: input.mutations,
-    },
-  };
+    metrics: input.metrics,
+    mutations: input.mutations,
+    attemptedClusters: input.attemptedClusters,
+    classificationFailures: input.classificationFailures,
+    extraReasons: dedupUnavailable
+      ? [{ kind: "DIGEST_STATE", count: 1, rule: "dedup_unavailable" }]
+      : [],
+  });
 
   let notificationFailed = false;
   if (outcome.shouldPost && deps.postDigest) {
@@ -1310,11 +1317,11 @@ export async function processScheduledDigest(input, deps) {
   }
 
   let stateWriteFailed = false;
-  if (!notificationFailed) {
+  if (!notificationFailed && stateWriteAllowed) {
     try {
       await deps.writeDigestState({
         state: outcome.nextState,
-        ...(!dedupUnavailable && !stateMissing ? { etag } : {}),
+        ...(etag ? { etag } : {}),
       });
     } catch (error) {
       stateWriteFailed = true;
@@ -1337,6 +1344,32 @@ export async function processScheduledDigest(input, deps) {
     dedupUnavailable,
     failed: dedupUnavailable || notificationFailed || stateWriteFailed,
     mutations: input.mutations,
+  };
+}
+
+function buildHealthAlarm({
+  stage,
+  event,
+  health,
+  degraded,
+  metrics,
+  mutations,
+  attemptedClusters,
+  classificationFailures,
+  extraReasons = [],
+}) {
+  return {
+    stage,
+    event,
+    degraded,
+    reasons: [...health.reasons, ...extraReasons],
+    totals: {
+      scanned: metrics.scanned,
+      attemptedClusters,
+      classificationFailures,
+      reviewItems: metrics.reviewItems,
+      mutations,
+    },
   };
 }
 
@@ -1420,29 +1453,138 @@ export async function runConsolidation(options, deps) {
       digestEnabled: scheduled && !reportOnly,
     })}`,
   );
+  let notificationFailed = false;
   let digestFailed = false;
   if (scheduled && !reportOnly) {
-    const currentMemories = (await deps.listActiveMemories()).filter(
-      isConsolidationCandidate,
-    );
-    const digestById = new Map(
-      currentMemories.map((memory) => [memory.id, memory]),
-    );
-    const digest = await processScheduledDigest(
-      {
-        stage,
+    let digestById = byId;
+    let dedupUnavailableError;
+    try {
+      const currentMemories = (await deps.listActiveMemories()).filter(
+        isConsolidationCandidate,
+      );
+      digestById = new Map(
+        currentMemories.map((memory) => [memory.id, memory]),
+      );
+    } catch (error) {
+      dedupUnavailableError = error;
+    }
+
+    const digestInput = {
+      stage,
+      review,
+      byId: digestById,
+      metrics,
+      mutations,
+      attemptedClusters: routed.attempted,
+      classificationFailures: routed.failed,
+      now: clock(),
+      ...(dedupUnavailableError
+        ? {
+            dedupUnavailableError,
+            stateWriteAllowed: false,
+          }
+        : {}),
+    };
+    try {
+      const digest = await processScheduledDigest(digestInput, deps);
+      metrics.dedupUnavailable = digest.dedupUnavailable ? 1 : 0;
+      digestFailed = digest.failed;
+    } catch (error) {
+      metrics.dedupUnavailable = 1;
+      digestFailed = true;
+      deps.log(
+        `CONSOLIDATION_DIGEST ${JSON.stringify({
+          event: "dedup_unavailable",
+          stage,
+          errorClass: error?.name || "Error",
+        })}`,
+      );
+      const health = evaluateDigestHealth({
         review,
-        byId: digestById,
-        metrics,
-        mutations,
+        previousState: undefined,
         attemptedClusters: routed.attempted,
         classificationFailures: routed.failed,
-        now: clock(),
-      },
-      deps,
-    );
-    metrics.dedupUnavailable = digest.dedupUnavailable ? 1 : 0;
-    digestFailed = digest.failed;
+        scanned: metrics.scanned,
+      });
+      if (deps.postDigest) {
+        try {
+          await deps.postDigest(buildSlackDigestMessage({
+            stage,
+            metrics,
+            mutations,
+            groups: [],
+            reminder: false,
+            degraded: true,
+          }));
+        } catch (slackError) {
+          deps.log(
+            `CONSOLIDATION_DIGEST ${JSON.stringify({
+              event: "slack_delivery_failed",
+              stage,
+              errorClass: slackError?.name || "Error",
+            })}`,
+          );
+        }
+      }
+      if (deps.publishHealthAlarm) {
+        try {
+          await deps.publishHealthAlarm(buildHealthAlarm({
+            stage,
+            event: "weekly_consolidation_health",
+            health,
+            degraded: true,
+            metrics,
+            mutations,
+            attemptedClusters: routed.attempted,
+            classificationFailures: routed.failed,
+            extraReasons: [{
+              kind: "DIGEST_STATE",
+              count: 1,
+              rule: "dedup_unavailable",
+            }],
+          }));
+        } catch (alarmError) {
+          deps.log(
+            `CONSOLIDATION_DIGEST ${JSON.stringify({
+              event: "health_alarm_delivery_failed",
+              stage,
+              errorClass: alarmError?.name || "Error",
+            })}`,
+          );
+        }
+      }
+    }
+  } else if (!reportOnly) {
+    const health = evaluateDigestHealth({
+      review,
+      previousState: undefined,
+      attemptedClusters: routed.attempted,
+      classificationFailures: routed.failed,
+      scanned: metrics.scanned,
+    });
+    if (health.alarm && deps.publishHealthAlarm) {
+      try {
+        await deps.publishHealthAlarm(buildHealthAlarm({
+          stage,
+          event: "manual_consolidation_health",
+          health,
+          degraded: false,
+          metrics,
+          mutations,
+          attemptedClusters: routed.attempted,
+          classificationFailures: routed.failed,
+        }));
+      } catch (error) {
+        notificationFailed = true;
+        deps.log(
+          `CONSOLIDATION_DIGEST ${JSON.stringify({
+            event: "health_alarm_delivery_failed",
+            stage,
+            errorClass: error?.name || "Error",
+          })}`,
+        );
+      }
+    }
   }
   const emf = buildEmfRecord(stage, metrics, clock());
   if (deps.emitMetrics) deps.emitMetrics(emf);
@@ -1451,6 +1593,7 @@ export async function runConsolidation(options, deps) {
   return {
     exitCode:
       applyFailed ||
+      notificationFailed ||
       digestFailed ||
       (routed.attempted > 0 && routed.failed === routed.attempted)
         ? 1
@@ -1768,17 +1911,30 @@ export async function createProductionDeps(options, runtime = {}) {
       throw error;
     }
     if (!response.ETag) throw new Error("digest state response has no ETag");
+    const body = await responseBodyText(response.Body);
     let parsed;
     try {
-      parsed = JSON.parse(await responseBodyText(response.Body));
+      parsed = JSON.parse(body);
     } catch (error) {
-      throw new Error("digest state is not valid JSON", { cause: error });
+      return {
+        status: "invalid",
+        etag: response.ETag,
+        errorClass: error?.name || "SyntaxError",
+      };
     }
-    return {
-      status: "ok",
-      etag: response.ETag,
-      state: normalizeDigestState(parsed, options.stage),
-    };
+    try {
+      return {
+        status: "ok",
+        etag: response.ETag,
+        state: normalizeDigestState(parsed, options.stage),
+      };
+    } catch (error) {
+      return {
+        status: "invalid",
+        etag: response.ETag,
+        errorClass: error?.name || "Error",
+      };
+    }
   };
 
   const writeDigestState = async ({ state, etag }) => {

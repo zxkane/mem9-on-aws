@@ -183,7 +183,7 @@ export function consolidation(
       ],
       resources: ["*"],
     },
-    ...(SCHEDULE_ENABLED && ecsOut.alertsTopicArn
+    ...(ecsOut.alertsTopicArn
       ? [
           {
             actions: ["sns:Publish"],
@@ -252,7 +252,7 @@ export function consolidation(
       ...(SCHEDULE_ENABLED && slackApprovalOut
         ? { MEM9_SLACK_APPROVAL_CHANNEL: slackApprovalOut.channel }
         : {}),
-      ...(SCHEDULE_ENABLED && ecsOut.alertsTopicArn
+      ...(ecsOut.alertsTopicArn
         ? { MEM9_ALERTS_TOPIC_ARN: ecsOut.alertsTopicArn }
         : {}),
     },

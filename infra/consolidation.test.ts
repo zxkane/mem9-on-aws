@@ -311,7 +311,16 @@ describe("consolidation task and schedule", () => {
     expect(args.environment.MEM9_CONSOLIDATION_REPORT_ONLY).toBe("1");
     expect(args.environment.MEM9_CONSOLIDATION_SCHEDULED).toBeUndefined();
     expect(args.environment.MEM9_SLACK_APPROVAL_CHANNEL).toBeUndefined();
+    expect(args.environment.MEM9_ALERTS_TOPIC_ARN).toBe(
+      "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
+    );
     expect(materialize(args.ssm)).not.toHaveProperty("SLACK_BOT_TOKEN");
+    expect(args.permissions).toContainEqual({
+      actions: ["sns:Publish"],
+      resources: [
+        "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
+      ],
+    });
 
     // The task classifies with MEM9_LLM_MODEL, and an `openai.gpt-5.6-*` value
     // routes through buildCompleteChat to the Responses API in ANOTHER region.
@@ -809,12 +818,18 @@ describe("consolidation IAM templates", () => {
       Prefix: "decisions/",
       Status: "Enabled",
       ExpirationInDays: 3,
+      AbortIncompleteMultipartUpload: {
+        DaysAfterInitiation: 1,
+      },
     }));
     expect(rules).toContainEqual(expect.objectContaining({
       Id: "expire-consolidation-digests",
       Prefix: "consolidation-digests/",
       Status: "Enabled",
       ExpirationInDays: expect.any(Number),
+      AbortIncompleteMultipartUpload: {
+        DaysAfterInitiation: 1,
+      },
     }));
     const digestRule = rules.find(
       ({ Id }) => Id === "expire-consolidation-digests",
@@ -835,6 +850,10 @@ describe("consolidation docs and metrics", () => {
     );
     const readme = readFileSync(
       new URL("../README.md", import.meta.url),
+      "utf8",
+    );
+    const design = readFileSync(
+      new URL("../docs/designs/weekly-memory-consolidation.md", import.meta.url),
       "utf8",
     );
     const metricBlock = runtime.match(
@@ -859,6 +878,14 @@ describe("consolidation docs and metrics", () => {
     expect(runtime).toContain('Dimensions: [["stage"]]');
     expect(architecture).toContain("only the\n`stage` dimension");
     expect(readme).toContain("MEM9_CONSOLIDATION_SCHEDULE_ENABLED");
+    expect(readme).toMatch(
+      /re-run\s+`scripts\/deploy-decision-artifact-bucket\.sh`/u,
+    );
+    expect(readme).toMatch(/two-rule lifecycle\s+read-back/u);
+    expect(readme).toContain("first scheduled run");
+    expect(design).toMatch(
+      /re-run\s+`scripts\/deploy-decision-artifact-bucket\.sh`/u,
+    );
 
     const rootPackage = JSON.parse(
       readFileSync(new URL("../package.json", import.meta.url), "utf8"),

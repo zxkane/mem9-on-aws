@@ -96,6 +96,8 @@ Resources:
             Status: Enabled
             Prefix: consolidation-digests/
             ExpirationInDays: 70
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
       Tags:
         - Key: Project
           Value: !Ref ProjectName
