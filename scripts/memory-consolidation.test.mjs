@@ -2,14 +2,25 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   CONSOLIDATION_METRICS,
+  DIGEST_SCHEMA_VERSION,
+  buildDigestOutcome,
   buildEmfRecord,
+  buildReviewTopic,
   clusterMemories,
+  compareDigestTopics,
   createProductionDeps,
+  evaluateDigestHealth,
   parseActions,
   parseConsolidationArgs,
+  processScheduledDigest,
+  reviewDisposition,
   routeActions,
   runConsolidation,
+  serializeDigestState,
 } from "./memory-consolidation.mjs";
+import largeDigestFixture from "./fixtures/consolidation-digest-large-v1.json" with {
+  type: "json",
+};
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const NOW = Date.parse("2026-08-01T00:00:00Z");
@@ -106,8 +117,15 @@ function fakeDeps(memories, responses) {
         item.superseded_by = supersededBy;
         return true;
       }),
-      publishSummary: vi.fn(async (summary) => {
-        writes.push({ type: "notify", summary: structuredClone(summary) });
+      loadDigestState: vi.fn(async () => ({ status: "missing" })),
+      writeDigestState: vi.fn(async (input) => {
+        writes.push({ type: "state", input: structuredClone(input) });
+      }),
+      postDigest: vi.fn(async (message) => {
+        writes.push({ type: "slack", message: structuredClone(message) });
+      }),
+      publishHealthAlarm: vi.fn(async (alarm) => {
+        writes.push({ type: "health", alarm: structuredClone(alarm) });
       }),
       log: (line) => logs.push(line),
       clock: () => NOW,
@@ -158,6 +176,31 @@ describe("embedding clustering", () => {
     expect(fake.completeChat).not.toHaveBeenCalled();
     expect(result.metrics.scanned).toBe(0);
     expect(result.review).toEqual([]);
+  });
+
+  it("handles unusable vectors and missing timestamps conservatively", () => {
+    const invalidVectors = [
+      memory("invalid", "invalid", undefined),
+      memory("zero", "zero", [0, 0]),
+      memory("valid", "valid", [1, 0]),
+    ];
+    expect(
+      clusterMemories(invalidVectors, {
+        now: NOW,
+        staleAfterMs: { insight: Number.POSITIVE_INFINITY },
+      }),
+    ).toEqual([]);
+
+    const unknownType = memory("unknown-type", "old", [1, 0], {
+      memory_type: "future-type",
+      updated_at: undefined,
+    });
+    expect(
+      clusterMemories([unknownType], {
+        now: NOW,
+        staleAfterMs: { insight: DAY_MS },
+      }),
+    ).toEqual([[unknownType]]);
   });
 });
 
@@ -330,6 +373,12 @@ describe("LLM action validation and tiers", () => {
       expect.objectContaining({ kind: "CONFLICTING_ACTION" }),
       expect.objectContaining({ kind: "CONFLICTING_ACTION" }),
     ]);
+    expect(
+      routeActions(memories, [
+        { type: "KEEP", ids: ["b"], rationale: "unchanged" },
+        { type: "KEEP", ids: [], rationale: "empty" },
+      ]),
+    ).toEqual({ auto: [], review: [] });
     expect(
       routeActions(memories, [
         { type: "MERGE", ids: ["a"], survivor_id: "a", rationale: "short" },
@@ -670,6 +719,21 @@ describe("execution safety", () => {
       ConsolidationMerged: 1,
       ConsolidationReviewItems: 1,
     });
+    expect(fake.writes).toContainEqual(
+      expect.objectContaining({
+        type: "health",
+        alarm: expect.objectContaining({
+          reasons: [
+            expect.objectContaining({
+              kind: "APPLY_FAILED",
+              rule: "immediate",
+            }),
+          ],
+        }),
+      }),
+    );
+    expect(fake.writes.some(({ type }) => type === "slack")).toBe(false);
+    expect(fake.writes.some(({ type }) => type === "state")).toBe(false);
   });
 
   it("TC-CONSOL-017: records a survivor PUT when MERGE deletion fails", async () => {
@@ -917,9 +981,29 @@ describe("execution safety", () => {
 
     expect(fake.writes).toEqual([]);
     expect(fake.deps.acquireMutex).not.toHaveBeenCalled();
-    expect(fake.deps.publishSummary).not.toHaveBeenCalled();
+    expect(fake.deps.loadDigestState).not.toHaveBeenCalled();
+    expect(fake.deps.postDigest).not.toHaveBeenCalled();
+    expect(fake.deps.publishHealthAlarm).not.toHaveBeenCalled();
     expect(fake.logs.some((line) => line.startsWith("CONSOLIDATION_REVIEW "))).toBe(true);
     expect(fake.logs.some((line) => line.startsWith("CONSOLIDATION_REVIEW_LIST "))).toBe(true);
+    expect(result.exitCode).toBe(0);
+  });
+
+  it("TC-CONSOL-067: manual apply does not touch weekly digest transports", async () => {
+    const fake = fakeDeps(
+      [memory("a", "remove me", [1, 0])],
+      ['{"actions":[{"type":"DELETE","ids":["a"],"rationale":"candidate"}]}'],
+    );
+
+    const result = await runConsolidation(
+      { stage: "prod", reportOnly: false, scheduled: false, cap: 20 },
+      fake.deps,
+    );
+
+    expect(fake.deps.loadDigestState).not.toHaveBeenCalled();
+    expect(fake.deps.writeDigestState).not.toHaveBeenCalled();
+    expect(fake.deps.postDigest).not.toHaveBeenCalled();
+    expect(fake.deps.publishHealthAlarm).not.toHaveBeenCalled();
     expect(result.exitCode).toBe(0);
   });
 
@@ -1033,7 +1117,6 @@ describe("execution safety", () => {
     expect(report.deps.putMemory).not.toHaveBeenCalled();
     expect(report.deps.archiveMemory).not.toHaveBeenCalled();
     expect(report.deps.deleteMemories).not.toHaveBeenCalled();
-    expect(report.deps.publishSummary).not.toHaveBeenCalled();
     expect(reportResult.mutations).toBe(0);
     expect(report.store.get("stale").tags).not.toContain("stale");
 
@@ -1049,7 +1132,6 @@ describe("execution safety", () => {
     expect(lockedResult.review).toContainEqual(
       expect.objectContaining({ kind: "LOCK_HELD" }),
     );
-    expect(locked.deps.publishSummary).toHaveBeenCalledOnce();
   });
 
   it("TC-CONSOL-003: turns a classifier failure into review-only output", async () => {
@@ -1067,7 +1149,22 @@ describe("execution safety", () => {
         ids: ["a", "b"],
       }),
     );
-    expect(fake.writes.filter(({ type }) => type !== "notify")).toEqual([]);
+    expect(
+      fake.writes.filter(({ type }) => type !== "health"),
+    ).toEqual([]);
+    expect(fake.writes).toContainEqual(
+      expect.objectContaining({
+        type: "health",
+        alarm: expect.objectContaining({
+          reasons: [
+            expect.objectContaining({
+              kind: "CLASSIFICATION_FAILED",
+              rule: "ratio_threshold",
+            }),
+          ],
+        }),
+      }),
+    );
     expect(result.exitCode).toBe(1);
   });
 
@@ -1097,35 +1194,54 @@ describe("production adapters and CLI", () => {
     "MEM9_BASE_URL",
     "MEM9_BEDROCK_PROJECT",
     "MEM9_CONSOLIDATION_REPORT_ONLY",
+    "MEM9_CONSOLIDATION_SCHEDULED",
     "MEM9_DB_HOST",
     "MEM9_DB_NAME",
     "MEM9_DB_PORT",
     "MEM9_DB_SECRET",
+    "MEM9_DECISION_ARTIFACT_BUCKET",
+    "MEM9_DECISION_ARTIFACT_BUCKET_OWNER",
     "MEM9_LLM_MODEL",
+    "MEM9_SLACK_APPROVAL_CHANNEL",
     "MEM9_STAGE",
     "MEM9_TENANT_ID",
+    "SLACK_BOT_TOKEN",
   ];
+
+  const setProductionEnvironment = (overrides = {}) => {
+    Object.assign(process.env, {
+      AWS_REGION: "ap-northeast-1",
+      MEM9_BASE_URL: "http://mnemo.local:8080/",
+      MEM9_DB_HOST: "writer.example.com",
+      MEM9_DB_NAME: "mem9",
+      MEM9_DB_SECRET: JSON.stringify({
+        username: "mem9",
+        password: "fixture-password",
+      }),
+      MEM9_TENANT_ID: "tenant-fixture",
+      ...overrides,
+    });
+  };
+
+  class NoopClient {
+    async connect() {}
+    async query() {
+      return { rows: [] };
+    }
+    async end() {}
+  }
 
   afterEach(() => {
     for (const key of environmentKeys) delete process.env[key];
   });
 
   it("TC-CONSOL-016: connects DB/REST/Mantle/SNS adapters without exposing content", async () => {
-    Object.assign(process.env, {
-      AWS_REGION: "ap-northeast-1",
+    setProductionEnvironment({
       MEM9_ALERTS_TOPIC_ARN:
         "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
-      MEM9_BASE_URL: "http://mnemo.local:8080/",
       MEM9_BEDROCK_PROJECT: "project-test",
-      MEM9_DB_HOST: "writer.example.com",
-      MEM9_DB_NAME: "mem9",
       MEM9_DB_PORT: "5432",
-      MEM9_DB_SECRET: JSON.stringify({
-        username: "mem9",
-        password: "fixture-password",
-      }),
       MEM9_LLM_MODEL: "zai.glm-5",
-      MEM9_TENANT_ID: "tenant-fixture",
     });
     const dbCalls = [];
     const sent = [];
@@ -1248,16 +1364,19 @@ describe("production adapters and CLI", () => {
       "project-test",
     );
 
-    await production.deps.publishSummary({
-      scanned: 2,
-      merged: 0,
-      archived: 0,
-      flaggedStale: 0,
-      reviewItems: 1,
-      skippedLww: 0,
+    await production.deps.publishHealthAlarm({
+      reasons: [{ kind: "APPLY_FAILED", rule: "immediate", count: 1 }],
+      totals: {
+        scanned: 2,
+        attemptedClusters: 1,
+        classificationFailures: 0,
+        reviewItems: 1,
+        mutations: 0,
+      },
     });
     expect(sent[0].TopicArn).toContain("mem9-on-aws-prod-alerts");
     expect(sent[0].Message).not.toMatch(/private content|tenant-fixture/);
+    expect(sent[0].Message).toContain("WeeklyMemoryConsolidationHealth");
     const emf = buildEmfRecord("prod", {
       scanned: 2,
       merged: 0,
@@ -1277,18 +1396,69 @@ describe("production adapters and CLI", () => {
     expect(dbCalls.at(-1)).toEqual(["end"]);
   });
 
-  it("TC-CONSOL-049: the production REST adapter turns a fenced 412 into null, and only for a versioned write", async () => {
-    Object.assign(process.env, {
-      AWS_REGION: "ap-northeast-1",
-      MEM9_BASE_URL: "http://mnemo.local:8080/",
-      MEM9_DB_HOST: "writer.example.com",
-      MEM9_DB_NAME: "mem9",
-      MEM9_DB_SECRET: JSON.stringify({
-        username: "mem9",
-        password: "fixture-password",
-      }),
-      MEM9_TENANT_ID: "tenant-fixture",
+  it("TC-CONSOL-077: exercises the production Slack digest transport", async () => {
+    delete process.env.MEM9_SLACK_APPROVAL_CHANNEL;
+    delete process.env.SLACK_BOT_TOKEN;
+    setProductionEnvironment();
+    const fetch = vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: true, ts: "123.456" }),
+    }));
+    const production = await createProductionDeps(
+      { stage: "prod" },
+      {
+        Client: NoopClient,
+        fetch,
+        fromNodeProviderChain: () => "credentials",
+        getToken: vi.fn(async () => "fixture-bearer"),
+      },
+    );
+    const message = {
+      text: "Weekly memory consolidation digest",
+      blocks: [{ type: "section", text: { type: "mrkdwn", text: "Digest" } }],
+    };
+
+    await expect(production.deps.postDigest(message)).resolves.toBeUndefined();
+    expect(fetch).not.toHaveBeenCalled();
+
+    process.env.MEM9_SLACK_APPROVAL_CHANNEL = "C0123456789";
+    await expect(production.deps.postDigest(message)).rejects.toThrow(
+      "Slack digest configuration is incomplete",
+    );
+    expect(fetch).not.toHaveBeenCalled();
+
+    process.env.SLACK_BOT_TOKEN = "fixture-slack-token";
+    await expect(production.deps.postDigest(message)).resolves.toBeUndefined();
+    expect(fetch).toHaveBeenCalledOnce();
+    expect(fetch.mock.calls[0][0]).toBe(
+      "https://slack.com/api/chat.postMessage",
+    );
+    expect(fetch.mock.calls[0][1]).toMatchObject({
+      method: "POST",
+      headers: {
+        authorization: "Bearer fixture-slack-token",
+        "content-type": "application/json; charset=utf-8",
+      },
     });
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({
+      channel: "C0123456789",
+      ...message,
+    });
+
+    fetch.mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({ ok: false, error: "channel_not_found" }),
+    });
+    await expect(production.deps.postDigest(message)).rejects.toThrow(
+      "Slack chat.postMessage failed: HTTP 200 channel_not_found",
+    );
+    await production.close();
+  });
+
+  it("TC-CONSOL-049: the production REST adapter turns a fenced 412 into null, and only for a versioned write", async () => {
+    setProductionEnvironment();
     // Every non-GET answers 412 so each call site is judged on its own gate,
     // not on which URL it happened to hit.
     const fetch = vi.fn(async () => ({
@@ -1296,16 +1466,14 @@ describe("production adapters and CLI", () => {
       status: 412,
       json: async () => ({ error: "precondition failed: version changed" }),
     }));
-    class Client {
-      async connect() {}
-      async query() {
-        return { rows: [] };
-      }
-      async end() {}
-    }
     const production = await createProductionDeps(
       { stage: "prod" },
-      { Client, fetch, fromNodeProviderChain: () => "credentials", getToken: vi.fn(async () => "t") },
+      {
+        Client: NoopClient,
+        fetch,
+        fromNodeProviderChain: () => "credentials",
+        getToken: vi.fn(async () => "t"),
+      },
     );
 
     // This is the line the unattended weekly task depends on: without it the
@@ -1325,6 +1493,197 @@ describe("production adapters and CLI", () => {
     ).rejects.toThrow(/HTTP 412/u);
   });
 
+  it("TC-CONSOL-064/078: validates owner-bound conditional S3 state", async () => {
+    setProductionEnvironment({
+      MEM9_DECISION_ARTIFACT_BUCKET: "example-mem9-artifacts",
+      MEM9_DECISION_ARTIFACT_BUCKET_OWNER: "123456789012",
+    });
+    const sent = [];
+    let readMode = "missing";
+    let writeMode = "ok";
+    let putCalls = 0;
+    const operatorTopic = {
+      topicId: `sha256:${"b".repeat(64)}`,
+      payloadHash: `sha256:${"2".repeat(64)}`,
+      kind: "DELETE",
+      disposition: "OPERATOR_DECISION",
+    };
+    const healthTopic = {
+      topicId: `sha256:${"a".repeat(64)}`,
+      payloadHash: `sha256:${"1".repeat(64)}`,
+      kind: "APPLY_FAILED",
+      disposition: "SYSTEM_HEALTH",
+    };
+    const storedState = {
+      schemaVersion: DIGEST_SCHEMA_VERSION,
+      stage: "prod",
+      generatedAt: "2026-08-16T03:00:00.000Z",
+      unchangedRuns: 2,
+      kindCounts: { DELETE: 1, APPLY_FAILED: 1 },
+      topics: [operatorTopic, healthTopic],
+    };
+    class GetObjectCommand {
+      constructor(input) {
+        this.input = input;
+      }
+    }
+    class PutObjectCommand {
+      constructor(input) {
+        this.input = input;
+      }
+    }
+    class S3Client {
+      async send(command) {
+        sent.push(command.input);
+        if (command instanceof GetObjectCommand) {
+          if (readMode === "missing") {
+            const error = new Error("missing");
+            error.name = "NoSuchKey";
+            throw error;
+          }
+          if (readMode === "corrupt") {
+            return {
+              ETag: '"etag-1"',
+              Body: { transformToString: async () => "{not-json" },
+            };
+          }
+          if (readMode === "schema-invalid") {
+            return {
+              ETag: '"etag-1"',
+              Body: {
+                transformToString: async () =>
+                  JSON.stringify({
+                    ...storedState,
+                    topics: [{
+                      ...healthTopic,
+                      disposition: "NOT_A_DISPOSITION",
+                    }],
+                  }),
+              },
+            };
+          }
+          return {
+            ETag: '"etag-1"',
+            Body: {
+              transformToString: async () =>
+                serializeDigestState(storedState),
+            },
+          };
+        }
+        putCalls += 1;
+        if (writeMode === "precondition") {
+          const error = new Error("stale");
+          error.name = "PreconditionFailed";
+          error.$metadata = { httpStatusCode: 412 };
+          throw error;
+        }
+        if (writeMode === "failure") throw new Error("S3 unavailable");
+        return { ETag: '"etag-2"' };
+      }
+      destroy() {}
+    }
+    const production = await createProductionDeps(
+      { stage: "prod" },
+      {
+        Client: NoopClient,
+        GetObjectCommand,
+        PutObjectCommand,
+        S3Client,
+      },
+    );
+    expect(await production.deps.loadDigestState()).toEqual({
+      status: "missing",
+    });
+    const state = {
+      schemaVersion: DIGEST_SCHEMA_VERSION,
+      stage: "prod",
+      generatedAt: "2026-08-23T03:00:00.000Z",
+      unchangedRuns: 0,
+      kindCounts: {},
+      topics: [],
+    };
+    await production.deps.writeDigestState({ state });
+    expect(sent.at(-1)).toMatchObject({
+      Bucket: "example-mem9-artifacts",
+      Key: "consolidation-digests/prod/current-v1.json",
+      ExpectedBucketOwner: "123456789012",
+      IfNoneMatch: "*",
+    });
+    expect(sent.at(-1)).not.toHaveProperty("IfMatch");
+
+    readMode = "ok";
+    const loaded = await production.deps.loadDigestState();
+    expect(loaded).toEqual({
+      status: "ok",
+      etag: '"etag-1"',
+      state: {
+        ...storedState,
+        kindCounts: { APPLY_FAILED: 1, DELETE: 1 },
+        topics: [healthTopic, operatorTopic],
+      },
+    });
+    await production.deps.writeDigestState({ state, etag: '"etag-1"' });
+    expect(sent.at(-1)).toMatchObject({
+      ExpectedBucketOwner: "123456789012",
+      IfMatch: '"etag-1"',
+    });
+    expect(sent.at(-1)).not.toHaveProperty("IfNoneMatch");
+
+    readMode = "corrupt";
+    await expect(production.deps.loadDigestState()).resolves.toMatchObject({
+      status: "invalid",
+      etag: '"etag-1"',
+    });
+    writeMode = "precondition";
+    await expect(
+      production.deps.writeDigestState({ state, etag: '"stale"' }),
+    ).rejects.toMatchObject({ name: "PreconditionFailed" });
+    writeMode = "failure";
+    await expect(
+      production.deps.writeDigestState({ state, etag: '"etag-1"' }),
+    ).rejects.toThrow("S3 unavailable");
+
+    readMode = "schema-invalid";
+    writeMode = "ok";
+    await expect(production.deps.loadDigestState()).resolves.toMatchObject({
+      status: "invalid",
+      etag: '"etag-1"',
+      errorClass: "Error",
+    });
+    const putCallsBeforeInvalidProcessing = putCalls;
+    const degraded = await processScheduledDigest(
+      {
+        stage: "prod",
+        review: [],
+        byId: new Map(),
+        metrics: {
+          scanned: 0,
+          merged: 0,
+          archived: 0,
+          flaggedStale: 0,
+          reviewItems: 0,
+          skippedLww: 0,
+        },
+        mutations: 0,
+        attemptedClusters: 0,
+        classificationFailures: 0,
+        now: NOW,
+      },
+      {
+        ...production.deps,
+        postDigest: vi.fn(async () => {}),
+        publishHealthAlarm: vi.fn(async () => {}),
+        log: vi.fn(),
+      },
+    );
+    expect(degraded).toMatchObject({
+      dedupUnavailable: true,
+      failed: true,
+    });
+    expect(putCalls).toBe(putCallsBeforeInvalidProcessing);
+    await production.close();
+  });
+
   it("rejects incomplete production configuration before connecting", async () => {
     await expect(
       createProductionDeps(
@@ -1341,6 +1700,7 @@ describe("production adapters and CLI", () => {
     ).toEqual({
       stage: "prod",
       reportOnly: true,
+      scheduled: false,
       checkLlm: true,
       cap: 7,
     });
@@ -1364,6 +1724,7 @@ describe("content-free telemetry", () => {
       "ConsolidationFlaggedStale",
       "ConsolidationReviewItems",
       "ConsolidationSkippedLww",
+      "ConsolidationDedupUnavailable",
     ]);
     const record = buildEmfRecord("prod", {
       scanned: 10,
@@ -1400,5 +1761,914 @@ describe("content-free telemetry", () => {
       ConsolidationReviewItems: 0,
     });
     expect(fake.logs.some((line) => line.includes('"_aws"'))).toBe(false);
+  });
+
+  it("TC-CONSOL-073: preserves EMF and confirmed mutations when the digest refresh fails", async () => {
+    const fake = fakeDeps(
+      [
+        memory("survivor", "first fragment", [1, 0]),
+        memory("absorbed", "second fragment", [0.99, 0.01]),
+      ],
+      [JSON.stringify({
+        actions: [{
+          type: "MERGE",
+          ids: ["survivor", "absorbed"],
+          survivor_id: "survivor",
+          merged_content: "merged memory",
+          rationale: "same topic",
+        }],
+      })],
+    );
+    const listActiveMemories =
+      fake.deps.listActiveMemories.getMockImplementation();
+    fake.deps.listActiveMemories
+      .mockImplementationOnce(listActiveMemories)
+      .mockRejectedValueOnce(new Error("post-mutation refresh failed"));
+    fake.deps.emitMetrics = vi.fn();
+
+    const result = await runConsolidation(
+      {
+        stage: "prod",
+        reportOnly: false,
+        scheduled: true,
+        cap: 20,
+      },
+      fake.deps,
+    );
+
+    expect(result).toMatchObject({
+      exitCode: 1,
+      mutations: 2,
+      metrics: {
+        merged: 1,
+        dedupUnavailable: 1,
+      },
+    });
+    expect(fake.deps.emitMetrics).toHaveBeenCalledWith(
+      expect.objectContaining({
+        ConsolidationMerged: 1,
+        ConsolidationDedupUnavailable: 1,
+      }),
+    );
+    expect(fake.writes).toContainEqual(
+      expect.objectContaining({
+        type: "health",
+        alarm: expect.objectContaining({ degraded: true }),
+      }),
+    );
+    expect(fake.writes.some(({ type }) => type === "state")).toBe(false);
+  });
+});
+
+describe("risk-tiered consolidation digests", () => {
+  const operatorKinds = ["DELETE", "CONTRADICTION"];
+  const deferredKinds = [
+    "CAP_DEFERRED",
+    "LOCK_HELD",
+    "CLUSTER_TOO_LARGE",
+    "TAG_LIMIT_REACHED",
+  ];
+  const healthKinds = [
+    "APPLY_FAILED",
+    "UNFENCEABLE_MERGE",
+    "CLASSIFICATION_FAILED",
+    "UNKNOWN_ID",
+    "CONFLICTING_ACTION",
+    "INVALID_MERGE",
+    "INVALID_STALE",
+    "INELIGIBLE_STALE",
+  ];
+
+  it("TC-CONSOL-052: maps every review kind and excludes report-only records", () => {
+    for (const kind of operatorKinds) {
+      expect(reviewDisposition(kind)).toBe("OPERATOR_DECISION");
+    }
+    for (const kind of deferredKinds) {
+      expect(reviewDisposition(kind)).toBe("DEFERRED_RETRY");
+    }
+    for (const kind of healthKinds) {
+      expect(reviewDisposition(kind)).toBe("SYSTEM_HEALTH");
+    }
+    expect(reviewDisposition("FUTURE_UNKNOWN_KIND")).toBe("SYSTEM_HEALTH");
+    expect(reviewDisposition("REPORT_ONLY_MERGE")).toBeNull();
+    expect(reviewDisposition(undefined)).toBeNull();
+  });
+
+  it("TC-CONSOL-053: folds deferred actions into APPLY_FAILED.abortedCount", async () => {
+    const memories = [
+      memory("a", "merge a", [1, 0]),
+      memory("b", "merge b", [0.99, 0.01]),
+      memory("c", "stale c", [0, 1], {
+        updated_at: "2025-01-01T00:00:00Z",
+      }),
+      memory("d", "stale d", [0, 0.99], {
+        updated_at: "2025-01-01T00:00:00Z",
+      }),
+    ];
+    const fake = fakeDeps(memories, [
+      JSON.stringify({
+        actions: [
+          {
+            type: "MERGE",
+            ids: ["a", "b"],
+            survivor_id: "a",
+            merged_content: "merged",
+            rationale: "merge",
+          },
+        ],
+      }),
+      JSON.stringify({
+        actions: [
+          { type: "STALE", ids: ["c"], rationale: "old" },
+          { type: "STALE", ids: ["d"], rationale: "old" },
+        ],
+      }),
+    ]);
+    fake.deps.deleteMemories.mockRejectedValueOnce(new Error("delete failed"));
+
+    const result = await runConsolidation(
+      { stage: "prod", reportOnly: false },
+      fake.deps,
+    );
+
+    expect(result.review.filter(({ kind }) => kind === "APPLY_FAILED")).toEqual([
+      expect.objectContaining({ abortedCount: 2 }),
+    ]);
+    expect(result.review.some(({ kind }) => kind === "APPLY_ABORTED")).toBe(false);
+  });
+
+  it("hashes current content after a partially confirmed merge", async () => {
+    const memories = [
+      memory("survivor", "fragment one", [1, 0]),
+      memory("absorbed", "fragment two", [0.99, 0.01]),
+    ];
+    const fake = fakeDeps(memories, [
+      JSON.stringify({
+        actions: [{
+          type: "MERGE",
+          ids: ["survivor", "absorbed"],
+          survivor_id: "survivor",
+          merged_content: "merged current content",
+          rationale: "same topic",
+        }],
+      }),
+    ]);
+    fake.deps.deleteMemories.mockRejectedValueOnce(new Error("delete failed"));
+
+    const result = await runConsolidation(
+      {
+        stage: "prod",
+        reportOnly: false,
+        scheduled: true,
+        cap: 20,
+      },
+      fake.deps,
+    );
+
+    const failedReview = result.review.find(
+      ({ kind }) => kind === "APPLY_FAILED",
+    );
+    const currentById = new Map(
+      [...fake.store.values()]
+        .filter(({ state }) => state === "active")
+        .map((item) => [item.id, item]),
+    );
+    const expected = buildReviewTopic(failedReview, currentById);
+    const stateWrite = fake.writes.find(({ type }) => type === "state");
+    expect(stateWrite.input.state.topics).toContainEqual(
+      expect.objectContaining({ payloadHash: expected.payloadHash }),
+    );
+  });
+
+  it("TC-CONSOL-054/055: separates stable topic identity from mutable content", () => {
+    const original = memory("a", "alpha", [1, 0]);
+    const other = memory("b", "beta", [0.99, 0.01]);
+    const byId = new Map([
+      ["a", original],
+      ["b", other],
+    ]);
+    const item = {
+      kind: "DELETE",
+      ids: ["b", "a", "a"],
+      snippets: ["alpha"],
+      rationale: "first",
+    };
+    const first = buildReviewTopic(item, byId);
+    const metadataOnly = buildReviewTopic(
+      {
+        ...item,
+        ids: ["a", "b"],
+        rationale: "changed",
+        snippets: ["changed"],
+      },
+      new Map([
+        ["a", { ...original, version: 9, metadata: { changed: true } }],
+        ["b", other],
+      ]),
+    );
+    expect(metadataOnly.topicId).toBe(first.topicId);
+    expect(metadataOnly.payloadHash).toBe(first.payloadHash);
+
+    const contentChanged = buildReviewTopic(
+      { ...item, ids: ["a", "b"] },
+      new Map([
+        ["a", { ...original, content: "alpha changed" }],
+        ["b", other],
+      ]),
+    );
+    expect(contentChanged.topicId).toBe(first.topicId);
+    expect(contentChanged.payloadHash).not.toBe(first.payloadHash);
+
+    expect(buildReviewTopic(
+      { kind: "REPORT_ONLY_MERGE", ids: ["a"], snippets: ["alpha"] },
+      byId,
+    )).toBeNull();
+    const sparse = buildReviewTopic(
+      { kind: "DELETE", ids: "invalid", snippets: "invalid" },
+      new Map(),
+    );
+    const missing = buildReviewTopic(
+      { kind: "DELETE", ids: ["missing"], snippets: [null] },
+      new Map(),
+    );
+    expect(sparse.samples).toEqual([]);
+    expect(missing.samples).toEqual([]);
+    expect(missing.payloadHash).not.toBe(sparse.payloadHash);
+  });
+
+  it("TC-CONSOL-056: classifies new, updated, continuing, and resolved topics", () => {
+    const byId = new Map([
+      ["new", memory("new", "new", [1, 0])],
+      ["updated", memory("updated", "updated-v2", [1, 0])],
+      ["continuing", memory("continuing", "same", [1, 0])],
+    ]);
+    const current = [
+      buildReviewTopic(
+        { kind: "DELETE", ids: ["new"], snippets: [], rationale: "" },
+        byId,
+      ),
+      buildReviewTopic(
+        { kind: "DELETE", ids: ["updated"], snippets: [], rationale: "" },
+        byId,
+      ),
+      buildReviewTopic(
+        { kind: "DELETE", ids: ["continuing"], snippets: [], rationale: "" },
+        byId,
+      ),
+    ];
+    const previousUpdated = buildReviewTopic(
+      { kind: "DELETE", ids: ["updated"], snippets: [], rationale: "" },
+      new Map([["updated", memory("updated", "updated-v1", [1, 0])]]),
+    );
+    const previousContinuing = current[2];
+    const previousResolved = buildReviewTopic(
+      { kind: "DELETE", ids: ["resolved"], snippets: [], rationale: "" },
+      new Map([["resolved", memory("resolved", "gone", [1, 0])]]),
+    );
+    const previousState = {
+      schemaVersion: DIGEST_SCHEMA_VERSION,
+      stage: "prod",
+      generatedAt: "2026-07-26T00:00:00.000Z",
+      unchangedRuns: 0,
+      kindCounts: {},
+      topics: [previousUpdated, previousContinuing, previousResolved].map(
+        ({ topicId, payloadHash, kind, disposition }) => ({
+          topicId,
+          payloadHash,
+          kind,
+          disposition,
+        }),
+      ),
+    };
+
+    const compared = compareDigestTopics(current, previousState);
+    expect(compared.current.map(({ transition }) => transition).sort()).toEqual([
+      "continuing",
+      "new",
+      "updated",
+    ]);
+    expect(compared.resolved).toHaveLength(1);
+    expect(compared.resolved[0]).toMatchObject({ transition: "resolved" });
+  });
+
+  it("TC-CONSOL-057: reminds only on the fourth unchanged scheduled run", () => {
+    const byId = new Map([["a", memory("a", "same", [1, 0])]]);
+    const review = [{
+      kind: "DELETE",
+      ids: ["a"],
+      snippets: ["same"],
+      rationale: "manual",
+    }];
+    let previousState;
+    const reminders = [];
+    for (let run = 1; run <= 5; run += 1) {
+      const outcome = buildDigestOutcome({
+        stage: "prod",
+        review,
+        byId,
+        previousState,
+        metrics: {
+          scanned: 1,
+          merged: 0,
+          archived: 0,
+          flaggedStale: 0,
+          reviewItems: 1,
+          skippedLww: 0,
+        },
+        mutations: 0,
+        attemptedClusters: 1,
+        classificationFailures: 0,
+        now: NOW + run,
+      });
+      reminders.push({ post: outcome.shouldPost, reminder: outcome.reminder });
+      previousState = outcome.nextState;
+    }
+    expect(reminders).toEqual([
+      { post: true, reminder: false },
+      { post: false, reminder: false },
+      { post: false, reminder: false },
+      { post: false, reminder: false },
+      { post: true, reminder: true },
+    ]);
+
+    const changed = buildDigestOutcome({
+      stage: "prod",
+      review: [...review, {
+        kind: "DELETE",
+        ids: ["b"],
+        snippets: ["new"],
+        rationale: "manual",
+      }],
+      byId: new Map([...byId, ["b", memory("b", "new", [1, 0])]]),
+      previousState,
+      metrics: {
+        scanned: 2,
+        merged: 0,
+        archived: 0,
+        flaggedStale: 0,
+        reviewItems: 2,
+        skippedLww: 0,
+      },
+      mutations: 0,
+      attemptedClusters: 1,
+      classificationFailures: 0,
+      now: NOW + 6,
+    });
+    expect(changed.shouldPost).toBe(true);
+    expect(changed.nextState.unchangedRuns).toBe(0);
+  });
+
+  it("TC-CONSOL-074: posts an unchanged digest when the current run raises a health alarm", () => {
+    const review = [{
+      kind: "APPLY_FAILED",
+      ids: [],
+      snippets: [],
+      rationale: "first failure mode",
+    }];
+    const first = buildDigestOutcome({
+      stage: "prod",
+      review,
+      byId: new Map(),
+      previousState: undefined,
+      metrics: {
+        scanned: 1,
+        merged: 0,
+        archived: 0,
+        flaggedStale: 0,
+        reviewItems: 1,
+        skippedLww: 0,
+      },
+      mutations: 0,
+      attemptedClusters: 1,
+      classificationFailures: 0,
+      now: NOW,
+    });
+    const repeated = buildDigestOutcome({
+      stage: "prod",
+      review: [{ ...review[0], rationale: "different failure mode" }],
+      byId: new Map(),
+      previousState: first.nextState,
+      metrics: {
+        scanned: 1,
+        merged: 0,
+        archived: 0,
+        flaggedStale: 0,
+        reviewItems: 1,
+        skippedLww: 0,
+      },
+      mutations: 0,
+      attemptedClusters: 1,
+      classificationFailures: 0,
+      now: NOW + 1,
+    });
+
+    expect(repeated.transitions.current).toEqual([
+      expect.objectContaining({ transition: "continuing" }),
+    ]);
+    expect(repeated.health.alarm).toBe(true);
+    expect(repeated.shouldPost).toBe(true);
+    expect(repeated.reminder).toBe(false);
+  });
+
+  it("TC-CONSOL-058/059: bounds groups and samples while forcing new oversized clusters visible", () => {
+    const kinds = [
+      "APPLY_FAILED",
+      "UNFENCEABLE_MERGE",
+      "CLASSIFICATION_FAILED",
+      "UNKNOWN_ID",
+      "CONFLICTING_ACTION",
+      "INVALID_MERGE",
+      "INVALID_STALE",
+      "INELIGIBLE_STALE",
+      "DELETE",
+      "CONTRADICTION",
+      "CAP_DEFERRED",
+      "LOCK_HELD",
+      "TAG_LIMIT_REACHED",
+      "CLUSTER_TOO_LARGE",
+      "FUTURE_UNKNOWN_KIND",
+    ];
+    const byId = new Map();
+    const review = [];
+    for (const [kindIndex, kind] of kinds.entries()) {
+      for (let sample = 0; sample < 5; sample += 1) {
+        const id = `${kindIndex}-${sample}`;
+        byId.set(id, memory(id, `sample ${id}`, [1, 0]));
+        review.push({
+          kind,
+          ids: [id],
+          snippets: [`sample ${id}`],
+          rationale: "fixture",
+        });
+      }
+    }
+    const outcome = buildDigestOutcome({
+      stage: "prod",
+      review,
+      byId,
+      previousState: undefined,
+      metrics: {
+        scanned: byId.size,
+        merged: 1,
+        archived: 2,
+        flaggedStale: 3,
+        reviewItems: review.length,
+        skippedLww: 4,
+      },
+      mutations: 6,
+      attemptedClusters: 20,
+      classificationFailures: 0,
+      now: NOW,
+    });
+
+    expect(outcome.groups).toHaveLength(10);
+    expect(
+      outcome.groups.some(({ kind }) => kind === "CLUSTER_TOO_LARGE"),
+    ).toBe(true);
+    expect(outcome.groups.every(({ samples }) => samples.length <= 3)).toBe(true);
+    expect(outcome.slackMessage.blocks).toHaveLength(12);
+    expect(JSON.stringify(outcome.slackMessage)).not.toMatch(
+      /"type":"actions"|approve|reject|bulk/iu,
+    );
+  });
+
+  it("TC-CONSOL-060: evaluates immediate, count, ratio, repeat, and affected-memory thresholds", () => {
+    const item = (kind, ids = []) => ({
+      kind,
+      ids,
+      snippets: [],
+      rationale: "",
+    });
+    expect(evaluateDigestHealth({
+      review: [item("APPLY_FAILED")],
+      previousState: undefined,
+      attemptedClusters: 1,
+      classificationFailures: 0,
+      scanned: 100,
+    }).alarm).toBe(true);
+    expect(evaluateDigestHealth({
+      review: [item("UNFENCEABLE_MERGE", ["a"])],
+      previousState: undefined,
+      attemptedClusters: 1,
+      classificationFailures: 0,
+      scanned: 100,
+    }).alarm).toBe(true);
+    expect(evaluateDigestHealth({
+      review: [item("FUTURE_UNKNOWN_KIND", ["a"])],
+      previousState: undefined,
+      attemptedClusters: 1,
+      classificationFailures: 0,
+      scanned: 100,
+    }).alarm).toBe(true);
+    expect(evaluateDigestHealth({
+      review: Array.from({ length: 9 }, () => item("CLASSIFICATION_FAILED")),
+      previousState: undefined,
+      attemptedClusters: 50,
+      classificationFailures: 9,
+      scanned: 100,
+    }).alarm).toBe(false);
+    expect(evaluateDigestHealth({
+      review: Array.from({ length: 10 }, () => item("CLASSIFICATION_FAILED")),
+      previousState: undefined,
+      attemptedClusters: 100,
+      classificationFailures: 10,
+      scanned: 100,
+    }).alarm).toBe(true);
+    expect(evaluateDigestHealth({
+      review: [item("CLASSIFICATION_FAILED")],
+      previousState: undefined,
+      attemptedClusters: 5,
+      classificationFailures: 1,
+      scanned: 100,
+    }).alarm).toBe(true);
+    expect(evaluateDigestHealth({
+      review: Array.from({ length: 10 }, (_, index) =>
+        item("INVALID_MERGE", [`id-${index}`])),
+      previousState: undefined,
+      attemptedClusters: 20,
+      classificationFailures: 0,
+      scanned: 100,
+    }).alarm).toBe(true);
+    expect(evaluateDigestHealth({
+      review: [item("INVALID_MERGE", ["a"])],
+      previousState: { kindCounts: { INVALID_MERGE: 1 } },
+      attemptedClusters: 20,
+      classificationFailures: 0,
+      scanned: 100,
+    }).alarm).toBe(true);
+    for (const kind of ["LOCK_HELD", "CLUSTER_TOO_LARGE", "TAG_LIMIT_REACHED"]) {
+      expect(evaluateDigestHealth({
+        review: [item(kind, ["a"])],
+        previousState: { kindCounts: { [kind]: 1 } },
+        attemptedClusters: 20,
+        classificationFailures: 0,
+        scanned: 100,
+      }).alarm, kind).toBe(true);
+    }
+    expect(evaluateDigestHealth({
+      review: [item(
+        "CLUSTER_TOO_LARGE",
+        Array.from({ length: 20 }, (_, index) => `id-${index}`),
+      )],
+      previousState: undefined,
+      attemptedClusters: 20,
+      classificationFailures: 0,
+      scanned: 100,
+    }).alarm).toBe(true);
+    expect(evaluateDigestHealth({
+      review: [item("REPORT_ONLY_MERGE")],
+      previousState: undefined,
+      attemptedClusters: 1,
+      classificationFailures: 0,
+      scanned: 0,
+    })).toEqual({ alarm: false, reasons: [], kindCounts: {} });
+  });
+
+  it("TC-CONSOL-061/062: delivers required notifications before state and preserves confirmed mutations on failure", async () => {
+    const order = [];
+    const base = {
+      stage: "prod",
+      review: [{
+        kind: "APPLY_FAILED",
+        ids: [],
+        snippets: [],
+        rationale: "failed",
+      }],
+      byId: new Map(),
+      metrics: {
+        scanned: 1,
+        merged: 1,
+        archived: 0,
+        flaggedStale: 0,
+        reviewItems: 1,
+        skippedLww: 0,
+      },
+      mutations: 1,
+      attemptedClusters: 1,
+      classificationFailures: 0,
+      now: NOW,
+    };
+    const deps = {
+      loadDigestState: vi.fn(async () => {
+        order.push("read");
+        return { status: "missing" };
+      }),
+      postDigest: vi.fn(async () => {
+        order.push("slack");
+      }),
+      publishHealthAlarm: vi.fn(async () => {
+        order.push("sns");
+      }),
+      writeDigestState: vi.fn(async () => {
+        order.push("state");
+      }),
+      log: vi.fn(),
+    };
+    const delivered = await processScheduledDigest(base, deps);
+    expect(delivered.failed).toBe(false);
+    expect(order).toEqual(["read", "slack", "sns", "state"]);
+
+    for (const transport of ["slack", "sns", "state"]) {
+      order.length = 0;
+      deps.postDigest.mockImplementation(async () => {
+        order.push("slack");
+        if (transport === "slack") throw new Error("slack failed");
+      });
+      deps.publishHealthAlarm.mockImplementation(async () => {
+        order.push("sns");
+        if (transport === "sns") throw new Error("sns failed");
+      });
+      deps.writeDigestState.mockImplementation(async () => {
+        order.push("state");
+        if (transport === "state") throw new Error("S3 failed");
+      });
+      const failed = await processScheduledDigest(base, deps);
+      expect(failed.failed, transport).toBe(true);
+      expect(failed.mutations).toBe(1);
+      if (transport === "slack") {
+        expect(order).toEqual(["read", "slack", "sns"]);
+      } else if (transport === "sns") {
+        expect(order).toEqual(["read", "slack", "sns"]);
+      } else {
+        expect(order).toEqual(["read", "slack", "sns", "state"]);
+      }
+    }
+  });
+
+  it("TC-CONSOL-063: degrades on unreadable state and permits only conditional creation", async () => {
+    const calls = [];
+    const writeDigestState = vi.fn(async (input) =>
+      calls.push(["state", input]));
+    const result = await processScheduledDigest(
+      {
+        stage: "prod",
+        review: [{
+          kind: "DELETE",
+          ids: ["a"],
+          snippets: ["private alpha"],
+          rationale: "manual",
+        }],
+        byId: new Map([["a", memory("a", "private alpha", [1, 0])]]),
+        metrics: {
+          scanned: 1,
+          merged: 0,
+          archived: 0,
+          flaggedStale: 0,
+          reviewItems: 1,
+          skippedLww: 0,
+        },
+        mutations: 0,
+        attemptedClusters: 1,
+        classificationFailures: 0,
+        now: NOW,
+      },
+      {
+        loadDigestState: vi.fn(async () => {
+          throw new Error("AccessDenied");
+        }),
+        postDigest: vi.fn(async (message) => calls.push(["slack", message])),
+        publishHealthAlarm: vi.fn(async (alarm) => calls.push(["sns", alarm])),
+        writeDigestState,
+        log: vi.fn((line) => calls.push(["log", line])),
+      },
+    );
+
+    expect(result.dedupUnavailable).toBe(true);
+    expect(result.transitions.current).toEqual([
+      expect.objectContaining({ transition: "continuing" }),
+    ]);
+    expect(result.transitions.resolved).toEqual([]);
+    expect(calls.map(([kind]) => kind)).toEqual([
+      "log",
+      "slack",
+      "sns",
+      "state",
+    ]);
+    expect(writeDigestState).toHaveBeenCalledWith({
+      state: result.nextState,
+    });
+    expect(JSON.stringify(calls.find(([kind]) => kind === "sns"))).not.toContain(
+      "private alpha",
+    );
+  });
+
+  it("TC-CONSOL-072: never overwrites a corrupt snapshot", async () => {
+    const writeDigestState = vi.fn(async () => {});
+    const postDigest = vi.fn(async () => {});
+    const publishHealthAlarm = vi.fn(async () => {});
+    const result = await processScheduledDigest(
+      {
+        stage: "prod",
+        review: [{
+          kind: "DELETE",
+          ids: ["a"],
+          snippets: ["private alpha"],
+          rationale: "manual",
+        }],
+        byId: new Map([["a", memory("a", "private alpha", [1, 0])]]),
+        metrics: {
+          scanned: 1,
+          merged: 0,
+          archived: 0,
+          flaggedStale: 0,
+          reviewItems: 1,
+          skippedLww: 0,
+        },
+        mutations: 0,
+        attemptedClusters: 1,
+        classificationFailures: 0,
+        now: NOW,
+      },
+      {
+        loadDigestState: vi.fn(async () => ({
+          status: "invalid",
+          etag: '"corrupt-etag"',
+          errorClass: "SyntaxError",
+        })),
+        postDigest,
+        publishHealthAlarm,
+        writeDigestState,
+        log: vi.fn(),
+      },
+    );
+
+    expect(result).toMatchObject({
+      dedupUnavailable: true,
+      failed: true,
+    });
+    expect(postDigest).toHaveBeenCalledOnce();
+    expect(publishHealthAlarm).toHaveBeenCalledOnce();
+    expect(JSON.stringify(postDigest.mock.calls[0][0])).toContain(
+      "Deduplication unavailable",
+    );
+    expect(publishHealthAlarm).toHaveBeenCalledWith(
+      expect.objectContaining({
+        degraded: true,
+        reasons: expect.arrayContaining([
+          expect.objectContaining({
+            kind: "DIGEST_STATE",
+            rule: "dedup_unavailable",
+          }),
+        ]),
+      }),
+    );
+    expect(writeDigestState).not.toHaveBeenCalled();
+  });
+
+  it("TC-CONSOL-065: serializes only content-free snapshot state", () => {
+    const byId = new Map([
+      ["private-id", memory("private-id", "private memory text", [1, 0])],
+    ]);
+    const outcome = buildDigestOutcome({
+      stage: "prod",
+      review: [{
+        kind: "DELETE",
+        ids: ["private-id"],
+        snippets: ["private memory text"],
+        rationale: "private rationale",
+      }],
+      byId,
+      previousState: undefined,
+      metrics: {
+        scanned: 1,
+        merged: 0,
+        archived: 0,
+        flaggedStale: 0,
+        reviewItems: 1,
+        skippedLww: 0,
+      },
+      mutations: 0,
+      attemptedClusters: 1,
+      classificationFailures: 0,
+      now: NOW,
+    });
+    const serialized = serializeDigestState(outcome.nextState);
+    expect(serialized).not.toMatch(
+      /private-id|private memory text|private rationale|snippet|rationale|ids/iu,
+    );
+    expect(JSON.parse(serialized)).toEqual(outcome.nextState);
+    expect(JSON.parse(serializeDigestState({
+      schemaVersion: DIGEST_SCHEMA_VERSION,
+      stage: "prod",
+      generatedAt: new Date(NOW).toISOString(),
+      unchangedRuns: 0,
+    }))).toMatchObject({ kindCounts: {}, topics: [] });
+  });
+
+  it("TC-CONSOL-066: integrates bounded delivery and state across 1,000-record runs", async () => {
+    const makeRun = (second) => {
+      const review = [];
+      const byId = new Map();
+      for (const group of largeDigestFixture.groups) {
+        for (let index = 0; index < group.count; index += 1) {
+          if (second && index === 1) continue;
+          const id = `${group.kind}-${index}`;
+          const content =
+            second && index === 0
+              ? `updated ${group.kind}`
+              : `sample ${group.kind} ${index}`;
+          byId.set(id, memory(id, content, [1, 0]));
+          review.push({
+            kind: group.kind,
+            ids: [id],
+            snippets: [content],
+            rationale: "fixture",
+          });
+        }
+        if (second) {
+          const id = `${group.kind}-new`;
+          byId.set(id, memory(id, `new ${group.kind}`, [1, 0]));
+          review.push({
+            kind: group.kind,
+            ids: [id],
+            snippets: [`new ${group.kind}`],
+            rationale: "fixture",
+          });
+        }
+      }
+      return { review, byId };
+    };
+    const firstRun = makeRun(false);
+    expect(firstRun.review.length).toBeGreaterThan(1_000);
+    let persisted;
+    let etagSequence = 0;
+    const deliveryOrder = [];
+    const postDigest = vi.fn(async (message) => {
+      deliveryOrder.push("slack");
+      expect(message.blocks.length).toBeLessThanOrEqual(12);
+    });
+    const writeDigestState = vi.fn(async ({ state, etag }) => {
+      deliveryOrder.push("state");
+      expect(etag).toBe(persisted?.etag);
+      persisted = {
+        state: JSON.parse(serializeDigestState(state)),
+        etag: `"etag-${etagSequence += 1}"`,
+      };
+    });
+    const deps = {
+      loadDigestState: vi.fn(async () =>
+        persisted
+          ? { status: "ok", ...persisted }
+          : { status: "missing" }),
+      postDigest,
+      publishHealthAlarm: vi.fn(async () => {
+        deliveryOrder.push("sns");
+      }),
+      writeDigestState,
+      log: vi.fn(),
+    };
+    const first = await processScheduledDigest({
+      stage: largeDigestFixture.stage,
+      ...firstRun,
+      metrics: {
+        scanned: firstRun.byId.size,
+        merged: 0,
+        archived: 0,
+        flaggedStale: 0,
+        reviewItems: firstRun.review.length,
+        skippedLww: 0,
+      },
+      mutations: 0,
+      attemptedClusters: firstRun.review.length,
+      classificationFailures: 90,
+      now: NOW,
+    }, deps);
+    const secondRun = makeRun(true);
+    const second = await processScheduledDigest({
+      stage: largeDigestFixture.stage,
+      ...secondRun,
+      metrics: {
+        scanned: secondRun.byId.size,
+        merged: 0,
+        archived: 0,
+        flaggedStale: 0,
+        reviewItems: secondRun.review.length,
+        skippedLww: 0,
+      },
+      mutations: 0,
+      attemptedClusters: secondRun.review.length,
+      classificationFailures: 90,
+      now: NOW + 1,
+    }, deps);
+
+    for (const outcome of [first, second]) {
+      expect(outcome.groups.length).toBeLessThanOrEqual(10);
+      expect(outcome.groups.every(({ samples }) => samples.length <= 3)).toBe(true);
+      expect(outcome.slackMessage.blocks.length).toBeLessThanOrEqual(12);
+    }
+    expect(second.transitions.current.some(({ transition }) => transition === "new")).toBe(true);
+    expect(second.transitions.current.some(({ transition }) => transition === "updated")).toBe(true);
+    expect(second.transitions.current.some(({ transition }) => transition === "continuing")).toBe(true);
+    expect(second.transitions.resolved.length).toBeGreaterThan(0);
+    expect(postDigest).toHaveBeenCalledTimes(2);
+    expect(writeDigestState).toHaveBeenCalledTimes(2);
+    expect(deliveryOrder).toEqual([
+      "slack",
+      "sns",
+      "state",
+      "slack",
+      "sns",
+      "state",
+    ]);
   });
 });

@@ -583,13 +583,22 @@ if ! lifecycle="$(aws s3api get-bucket-lifecycle-configuration \
 fi
 if ! jq -e '
     .Rules
-    | select(type == "array" and length == 1)
-    | .[0]
-    | .ID == "expire-decision-artifacts"
-      and .Status == "Enabled"
-      and ((.Filter.Prefix // .Prefix // "") == "")
-      and .Expiration.Days == 3
-      and .AbortIncompleteMultipartUpload.DaysAfterInitiation == 1
+    | select(type == "array" and length == 2)
+    | map({key: .ID, value: .})
+    | from_entries
+    | .["expire-decision-artifacts"] as $decisions
+    | .["expire-consolidation-digests"] as $digests
+    | $decisions.Status == "Enabled"
+      and (($decisions.Filter.Prefix // $decisions.Prefix // "") == "decisions/")
+      and $decisions.Expiration.Days == 3
+      and $decisions.AbortIncompleteMultipartUpload.DaysAfterInitiation == 1
+      and $digests.Status == "Enabled"
+      and (
+        ($digests.Filter.Prefix // $digests.Prefix // "")
+        == "consolidation-digests/"
+      )
+      and $digests.Expiration.Days >= 70
+      and $digests.AbortIncompleteMultipartUpload.DaysAfterInitiation == 1
   ' <<<"$lifecycle" >/dev/null; then
   echo "Decision-artifact lifecycle read-back mismatch." >&2
   exit 1

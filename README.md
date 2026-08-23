@@ -290,10 +290,12 @@ The AgentCore Gateway exposes four tools over MCP (Cognito-authenticated):
 
 ### Decision-artifact bucket bootstrap
 
-The Slack cleanup approval loop stores the reviewed decision bytes in one
-account-level S3 bucket. Every SST stage shares that bucket and is isolated by
-its `decisions/<stage>/` key prefix. The bucket must therefore be provisioned
-before enabling Slack approval; an SST stage never creates or deletes it.
+The Slack cleanup approval loop stores reviewed decision bytes under
+`decisions/<stage>/`, and scheduled consolidation stores content-free state
+under `consolidation-digests/<stage>/`, in one account-level S3 bucket. Every
+SST stage shares that bucket. It must therefore be provisioned before enabling
+Slack approval or scheduled consolidation; an SST stage never creates or
+deletes it.
 
 For the default `mem9-audit-<aws-account-id>` name:
 
@@ -348,6 +350,14 @@ owner stack. If a full update rolls back, rerun after fixing the cause;
 `UPDATE_ROLLBACK_COMPLETE` is recoverable after the script re-verifies the
 physical bucket, while `UPDATE_ROLLBACK_FAILED` first requires
 `continue-update-rollback`.
+
+Existing buckets from before consolidation digests still have the old
+bucket-wide three-day lifecycle. Before setting
+`MEM9_CONSOLIDATION_SCHEDULE_ENABLED=1`, re-run
+`scripts/deploy-decision-artifact-bucket.sh` and require its two-rule lifecycle
+read-back to pass: `decisions/` expires after three days and
+`consolidation-digests/` after at least 70 days, with incomplete multipart
+uploads aborted after one day on both prefixes.
 
 The adoption phase is rerunnable after interruption. A pending
 `REVIEW_IN_PROGRESS` stack resumes only when the fixed import change set reads
@@ -1145,7 +1155,8 @@ active memories with each other. The task always defaults to report-only.
 `scripts/run-consolidation-task.sh` starts that deployed task explicitly with
 `--report-only --check-llm`, performs a content-free live Mantle smoke, waits
 for exit zero, and reads only its content-free `CONSOLIDATION_REVIEW_LIST`
-summary from the exact CloudWatch log stream:
+summary from the exact CloudWatch log stream. The harness requires the marker
+to report `digestEnabled: false`:
 
 ```bash
 STAGE=prod bash scripts/run-consolidation-task.sh
@@ -1174,6 +1185,39 @@ setting the repository variable `MEM9_CONSOLIDATION_SCHEDULE_ENABLED` to `1`
 only after the initial cleanup and a report-only run show actionable drift.
 Production then runs Sunday at 03:00 UTC; previews synthesize a disabled
 schedule for infrastructure coverage.
+
+Only that scheduled target enables digest state and notifications. It groups
+current review topics into operator-decision, deferred-retry, and system-health
+risk tiers, compares them with the previous weekly snapshot, and posts one
+private Slack digest when the existing Slack bot/channel configuration is
+enabled. The digest is bounded to ten groups and three samples per group;
+unchanged-only runs are suppressed except for every fourth reminder. It has no
+approval buttons.
+
+The content-free snapshot is stored in the existing audit bucket at
+`consolidation-digests/<stage>/current-v1.json` with an owner check and
+conditional writes. It contains hashes, kinds, counters, and timestamps only,
+never memory ids or content. The task can get and put only its exact stage key;
+it cannot list or delete objects. The bucket retains decision artifacts for
+three days and consolidation digest state for 70 days. SNS alerts are emitted
+only for run-level health thresholds or degraded deduplication, not merely
+because review records exist. Manual apply and preview report-only runs neither
+read nor write digest state and do not post the weekly digest; a manual apply
+can still publish a threshold-based content-free health alarm.
+
+Because the task deliberately lacks `s3:ListBucket`, S3 can return `403` for the
+missing snapshot on a newly enabled stage. The first scheduled run therefore
+sends a degraded digest and health alarm, conditionally creates the snapshot,
+and exits nonzero once. The following scheduled run reads that snapshot
+normally. Treat repeated degraded runs as an S3 or lifecycle failure, not as
+expected initialization.
+
+If CloudWatch reports a readable but invalid digest snapshot, the task leaves it
+untouched. Pause the schedule, confirm no consolidation task is running, and
+delete only `consolidation-digests/<stage>/current-v1.json` with the documented
+`aws s3api delete-object` recovery command, the expected bucket owner, and the
+application region. The next scheduled run conditionally initializes a fresh
+snapshot.
 
 ## Slack approval for cleanup deletions
 

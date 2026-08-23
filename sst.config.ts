@@ -136,12 +136,6 @@ export default $config({
     const { bootstrap } = await import("./infra/bootstrap");
     bootstrap(ecsOut.cluster, dbOut, identityOut);
 
-    // Weekly cross-memory consolidation. The task always exists for a
-    // report-only preview run; its Scheduler and execution role are synthesized
-    // only behind MEM9_CONSOLIDATION_SCHEDULE_ENABLED.
-    const { consolidation } = await import("./infra/consolidation");
-    consolidation(ecsOut, dbOut, identityOut);
-
     // MCP surface (§6/§6a): Cognito M2M → AgentCore Gateway → a VPC-attached proxy
     // Lambda that reaches mnemo-server privately over Cloud Map DNS. Threaded as
     // direct Pulumi Outputs (no SSM read-back). cognito is independent; gateway()
@@ -164,7 +158,20 @@ export default $config({
     // rather than creating a second role needing its own boundary exception.
     // Entirely absent unless MEM9_SLACK_APPROVAL_ENABLED=1.
     const { slackApproval } = await import("./infra/slack-approval");
-    slackApproval(ecsOut, dbOut, identityOut, facadeOut);
+    const slackApprovalOut = slackApproval(
+      ecsOut,
+      dbOut,
+      identityOut,
+      facadeOut,
+    );
+
+    // Weekly cross-memory consolidation. The task always exists for a
+    // report-only preview run; its Scheduler and execution role are synthesized
+    // only behind MEM9_CONSOLIDATION_SCHEDULE_ENABLED. When Slack approval is
+    // configured, the digest reuses that stack's existing bot-token parameter
+    // and private channel rather than declaring another secret.
+    const { consolidation } = await import("./infra/consolidation");
+    consolidation(ecsOut, dbOut, identityOut, slackApprovalOut);
 
     return {};
   },

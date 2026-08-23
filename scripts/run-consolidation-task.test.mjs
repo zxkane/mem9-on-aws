@@ -20,7 +20,11 @@ afterEach(() => {
   }
 });
 
-function runFixture({ exitCode = "0", marker = true } = {}) {
+function runFixture({
+  exitCode = "0",
+  marker = true,
+  digestEnabled = false,
+} = {}) {
   const directory = mkdtempSync(join(tmpdir(), "mem9-consolidation-runner-"));
   temporaryPaths.push(directory);
   const bin = join(directory, "bin");
@@ -81,7 +85,7 @@ if (command === "ssm get-parameters") {
   }));
 } else if (command === "logs filter-log-events") {
   if (process.env.MOCK_MARKER === "true") {
-    console.log('CONSOLIDATION_REVIEW_LIST {"stage":"pr-103","reportOnly":true,"reviewItems":0}');
+    console.log('CONSOLIDATION_REVIEW_LIST {"stage":"pr-103","reportOnly":true,"reviewItems":0,"digestEnabled":' + process.env.MOCK_DIGEST_ENABLED + '}');
   }
 } else {
   console.error("unexpected aws command:", command, args.join(" "));
@@ -100,6 +104,7 @@ if (command === "ssm get-parameters") {
       ...process.env,
       AWS_CALLS: calls,
       MOCK_EXIT_CODE: exitCode,
+      MOCK_DIGEST_ENABLED: String(digestEnabled),
       MOCK_MARKER: String(marker),
       PATH: `${bin}${delimiter}${process.env.PATH}`,
       STAGE: "pr-103",
@@ -118,6 +123,7 @@ describe("report-only consolidation ECS runner", () => {
     const { callRecords, result } = runFixture();
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain("CONSOLIDATION_REVIEW_LIST");
+    expect(result.stdout).toContain('"digestEnabled":false');
 
     const runCalls = callRecords.filter(
       ([service, operation]) => service === "ecs" && operation === "run-task",
@@ -142,6 +148,9 @@ describe("report-only consolidation ECS runner", () => {
         },
       ],
     });
+    expect(JSON.stringify(overrides)).not.toContain(
+      "MEM9_CONSOLIDATION_SCHEDULED",
+    );
 
     const logCall = callRecords.find(
       ([service, operation]) =>
@@ -151,6 +160,12 @@ describe("report-only consolidation ECS runner", () => {
     expect(logCall).toContain("sst/Mem9Consolidation/task-123");
     expect(logCall).toContain('"CONSOLIDATION_REVIEW_LIST"');
     expect(logCall.join(" ")).not.toContain("CONSOLIDATION_REVIEW ");
+  });
+
+  it("TC-CONSOL-071: rejects a report-only marker that enables digest work", () => {
+    const { result } = runFixture({ digestEnabled: true });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("CONSOLIDATION_REVIEW_LIST");
   });
 
   it("TC-CONSOL-041: fails when the exact task stream has no summary marker", () => {

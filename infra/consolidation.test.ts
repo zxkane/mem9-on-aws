@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
 import type { DbOutputs } from "./db";
 import type { EcsOutputs } from "./ecs";
+import type { SlackApprovalOutputs } from "./slack-approval";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import { cloudwatchStubs } from "./task-failure-alarm.test-fixtures";
 
@@ -251,14 +252,25 @@ function installGlobals(stage: string) {
   };
 }
 
-async function loadAndRun(stage = "prod") {
+async function loadAndRun(stage = "prod", withSlack = false) {
   vi.resetModules();
   const consolidationModule = await import("./consolidation");
+  const slackOut = withSlack
+    ? {
+        botTokenParameterArn: out(
+          "arn:aws:ssm:ap-northeast-1:123456789012:parameter/mem9-on-aws/prod/slack/bot-token",
+        ),
+        channel: "C0123456789",
+      } as unknown as Pick<
+        SlackApprovalOutputs,
+        "botTokenParameterArn" | "channel"
+      >
+    : undefined;
   consolidationModule.consolidation(fakeEcs(
     stage === "prod"
       ? "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts"
       : undefined,
-  ), fakeDb(), fakeIdentity());
+  ), fakeDb(), fakeIdentity(), slackOut);
   return consolidationModule;
 }
 
@@ -297,6 +309,18 @@ describe("consolidation task and schedule", () => {
     expect(args.entrypoint).toEqual(["node"]);
     expect(args.command).toEqual(["/app/scripts/memory-consolidation.mjs"]);
     expect(args.environment.MEM9_CONSOLIDATION_REPORT_ONLY).toBe("1");
+    expect(args.environment.MEM9_CONSOLIDATION_SCHEDULED).toBeUndefined();
+    expect(args.environment.MEM9_SLACK_APPROVAL_CHANNEL).toBeUndefined();
+    expect(args.environment.MEM9_ALERTS_TOPIC_ARN).toBe(
+      "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
+    );
+    expect(materialize(args.ssm)).not.toHaveProperty("SLACK_BOT_TOKEN");
+    expect(args.permissions).toContainEqual({
+      actions: ["sns:Publish"],
+      resources: [
+        "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
+      ],
+    });
 
     // The task classifies with MEM9_LLM_MODEL, and an `openai.gpt-5.6-*` value
     // routes through buildCompleteChat to the Responses API in ANOTHER region.
@@ -428,6 +452,10 @@ describe("consolidation task and schedule", () => {
               name: "MEM9_CONSOLIDATION_REPORT_ONLY",
               value: "0",
             },
+            {
+              name: "MEM9_CONSOLIDATION_SCHEDULED",
+              value: "1",
+            },
           ],
         },
       ],
@@ -482,6 +510,31 @@ describe("consolidation task and schedule", () => {
       actions: ["sns:Publish"],
       resources: [
         "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
+      ],
+    });
+    expect(task.permissions).toContainEqual({
+      actions: ["s3:GetObject", "s3:PutObject"],
+      resources: [
+        "arn:aws:s3:::mem9-audit-123456789012/consolidation-digests/prod/current-v1.json",
+      ],
+    });
+    expect(JSON.stringify(task.permissions)).not.toMatch(
+      /s3:ListBucket|s3:DeleteObject/u,
+    );
+    expect(task.permissions).toContainEqual({
+      actions: ["kms:Decrypt", "kms:GenerateDataKey"],
+      resources: ["*"],
+      conditions: [
+        {
+          test: "StringEquals",
+          variable: "kms:ViaService",
+          values: ["s3.ap-northeast-1.amazonaws.com"],
+        },
+        {
+          test: "StringEquals",
+          variable: "kms:EncryptionContext:aws:s3:arn",
+          values: ["arn:aws:s3:::mem9-audit-123456789012"],
+        },
       ],
     });
     expect(JSON.stringify(task.permissions)).not.toContain(
@@ -681,8 +734,20 @@ describe("consolidation IAM templates", () => {
       .PolicyDocument.Statement as Array<Record<string, any>>;
     const ceiling = statements.find(({ NotAction }) => NotAction);
     expect(ceiling?.NotAction).toEqual(
-      expect.arrayContaining(["ecs:RunTask", "iam:PassRole", "sns:Publish"]),
+      expect.arrayContaining([
+        "ecs:RunTask",
+        "iam:PassRole",
+        "sns:Publish",
+        "s3:GetObject",
+        "s3:PutObject",
+        "kms:GenerateDataKey",
+      ]),
     );
+    const resourceDeny = statements.find(({ Sid }) => Sid === "Resources");
+    expect(resourceDeny?.NotResource).toContainEqual({
+      "Fn::Sub":
+        "arn:${AWS::Partition}:s3:::${DecisionArtifactBucketName}/*",
+    });
 
     const secretRoleDeny = statements.find(
       ({ Sid }) => Sid === "SecretCtxRole",
@@ -693,6 +758,83 @@ describe("consolidation IAM templates", () => {
       "Fn::Sub":
         "arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ConsolidationExecutionRole-*",
     });
+  });
+
+  it("TC-CONSOL-067/068: activates digest state only from Scheduler and conditionally reuses Slack wiring", async () => {
+    process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED = "1";
+    installGlobals("prod");
+    const module = await loadAndRun("prod", true);
+
+    const task = materialize(one("Task", "Mem9Consolidation").args) as Record<
+      string,
+      any
+    >;
+    expect(task.environment).toMatchObject({
+      MEM9_CONSOLIDATION_REPORT_ONLY: "1",
+      MEM9_SLACK_APPROVAL_CHANNEL: "C0123456789",
+      MEM9_DECISION_ARTIFACT_BUCKET: "mem9-audit-123456789012",
+      MEM9_DECISION_ARTIFACT_BUCKET_OWNER: "123456789012",
+    });
+    expect(task.environment.MEM9_CONSOLIDATION_SCHEDULED).toBeUndefined();
+    expect(materialize(task.ssm)).toMatchObject({
+      SLACK_BOT_TOKEN:
+        "arn:aws:ssm:ap-northeast-1:123456789012:parameter/mem9-on-aws/prod/slack/bot-token",
+    });
+
+    const schedule = materialize(one("Schedule").args) as Record<string, any>;
+    expect(JSON.parse(schedule.target.input)).toEqual({
+      containerOverrides: [{
+        name: module.CONSOLIDATION_CONTAINER_NAME,
+        environment: [
+          { name: "MEM9_CONSOLIDATION_REPORT_ONLY", value: "0" },
+          { name: "MEM9_CONSOLIDATION_SCHEDULED", value: "1" },
+        ],
+      }],
+    });
+
+    const config = readFileSync(
+      new URL("../sst.config.ts", import.meta.url),
+      "utf8",
+    );
+    const slackIndex = config.indexOf(
+      "const slackApprovalOut = slackApproval(",
+    );
+    expect(slackIndex).toBeGreaterThan(0);
+    expect(
+      config.indexOf(
+        "consolidation(ecsOut, dbOut, identityOut, slackApprovalOut)",
+      ),
+    ).toBeGreaterThan(slackIndex);
+  });
+
+  it("TC-CONSOL-070: splits decision and digest lifecycle retention", () => {
+    const template = cloudFormationTemplate(
+      "./cloudformation/decision-artifact-bucket.yaml",
+    );
+    const rules = template.Resources.DecisionArtifactBucket.Properties
+      .LifecycleConfiguration.Rules as Array<Record<string, any>>;
+    expect(rules).toContainEqual(expect.objectContaining({
+      Id: "expire-decision-artifacts",
+      Prefix: "decisions/",
+      Status: "Enabled",
+      ExpirationInDays: 3,
+      AbortIncompleteMultipartUpload: {
+        DaysAfterInitiation: 1,
+      },
+    }));
+    expect(rules).toContainEqual(expect.objectContaining({
+      Id: "expire-consolidation-digests",
+      Prefix: "consolidation-digests/",
+      Status: "Enabled",
+      ExpirationInDays: expect.any(Number),
+      AbortIncompleteMultipartUpload: {
+        DaysAfterInitiation: 1,
+      },
+    }));
+    const digestRule = rules.find(
+      ({ Id }) => Id === "expire-consolidation-digests",
+    );
+    expect(digestRule?.ExpirationInDays).toBeGreaterThanOrEqual(70);
   });
 });
 
@@ -710,6 +852,10 @@ describe("consolidation docs and metrics", () => {
       new URL("../README.md", import.meta.url),
       "utf8",
     );
+    const design = readFileSync(
+      new URL("../docs/designs/weekly-memory-consolidation.md", import.meta.url),
+      "utf8",
+    );
     const metricBlock = runtime.match(
       /export const CONSOLIDATION_METRICS = \[(?<body>[\s\S]*?)\];/u,
     )?.groups?.body;
@@ -723,6 +869,7 @@ describe("consolidation docs and metrics", () => {
       "ConsolidationFlaggedStale",
       "ConsolidationReviewItems",
       "ConsolidationSkippedLww",
+      "ConsolidationDedupUnavailable",
     ]);
     for (const metric of [...metrics, "ConsolidationTaskFailures"]) {
       expect(architecture).toContain(metric);
@@ -731,6 +878,14 @@ describe("consolidation docs and metrics", () => {
     expect(runtime).toContain('Dimensions: [["stage"]]');
     expect(architecture).toContain("only the\n`stage` dimension");
     expect(readme).toContain("MEM9_CONSOLIDATION_SCHEDULE_ENABLED");
+    expect(readme).toMatch(
+      /re-run\s+`scripts\/deploy-decision-artifact-bucket\.sh`/u,
+    );
+    expect(readme).toMatch(/two-rule lifecycle\s+read-back/u);
+    expect(readme).toContain("first scheduled run");
+    expect(design).toMatch(
+      /re-run\s+`scripts\/deploy-decision-artifact-bucket\.sh`/u,
+    );
 
     const rootPackage = JSON.parse(
       readFileSync(new URL("../package.json", import.meta.url), "utf8"),

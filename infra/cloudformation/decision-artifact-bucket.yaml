@@ -1,9 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
 Description: >
-  OUT-OF-BAND reviewed-decision artifact bucket for mem9-on-aws (#123/#150).
-  Holds the audit trail of what a Slack approval authorized deleting, keyed by
-  stage, and read back by the cleanup apply task to prove the clicked hash still
-  matches the reviewed bytes.
+  OUT-OF-BAND operator artifact bucket for mem9-on-aws (#123/#150/#183).
+  Holds reviewed Slack deletion decisions and content-free weekly consolidation
+  digest snapshots, each keyed by stage.
 
   NOT SST-managed. The workload boundary pins one exact account-level name
   (default `mem9-audit-<account-id>`, or an external override), so every stage
@@ -84,11 +83,19 @@ Resources:
           # past that the object is unreachable by design. Keep the two in step.
           - Id: expire-decision-artifacts
             Status: Enabled
-            # Every stage's key prefix — the key, not the bucket, carries the stage.
-            Prefix: ""
+            # Every stage lives below decisions/<stage>/.
+            Prefix: decisions/
             ExpirationInDays: 3
             # The parts of a write that failed midway are NOT covered by the
             # expiration rule and would otherwise accumulate silently.
+            AbortIncompleteMultipartUpload:
+              DaysAfterInitiation: 1
+          # Cross-run digest snapshots are content-free but need enough history
+          # to diagnose weekly reminder and health-threshold behavior.
+          - Id: expire-consolidation-digests
+            Status: Enabled
+            Prefix: consolidation-digests/
+            ExpirationInDays: 70
             AbortIncompleteMultipartUpload:
               DaysAfterInitiation: 1
       Tags:
