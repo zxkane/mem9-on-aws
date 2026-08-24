@@ -4,11 +4,12 @@ interface StringOutput {
 
 /**
  * SST enables a pseudo-terminal for every Fargate container. Disable it only
- * for the non-interactive process whose stdout carries one EMF document per
- * line; all other synthesized container settings remain SST-owned.
+ * for a named non-interactive process; all other synthesized container
+ * settings remain SST-owned.
  */
-export function disableMnemoServerPseudoTerminal(
+export function disableTaskContainerPseudoTerminal(
   args: Record<string, unknown>,
+  containerName: string,
 ): void {
   const definitions = args.containerDefinitions as StringOutput | undefined;
   if (!definitions || typeof definitions.apply !== "function") {
@@ -20,11 +21,21 @@ export function disableMnemoServerPseudoTerminal(
       name: string;
       pseudoTerminal?: boolean;
     }[];
-    const mnemo = parsed.find((container) => container.name === "mnemo-server");
-    if (!mnemo) {
-      throw new Error("mnemo-server container not found in task definition");
+    const target = parsed.find(
+      (container) => container.name === containerName,
+    );
+    if (!target) {
+      throw new Error(
+        `${containerName} container not found in task definition`,
+      );
     }
-    mnemo.pseudoTerminal = false;
+    target.pseudoTerminal = false;
     return JSON.stringify(parsed);
   });
+}
+
+export function disableMnemoServerPseudoTerminal(
+  args: Record<string, unknown>,
+): void {
+  disableTaskContainerPseudoTerminal(args, "mnemo-server");
 }

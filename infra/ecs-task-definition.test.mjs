@@ -7,7 +7,10 @@ import {
 } from "../.sst/platform/node_modules/@pulumi/pulumi/index.js";
 import { createTaskDefinition } from "../.sst/platform/src/components/aws/fargate.ts";
 import { bootstrap } from "../.sst/platform/src/components/aws/helpers/bootstrap.ts";
-import { disableMnemoServerPseudoTerminal } from "./ecs-task-definition";
+import {
+  disableMnemoServerPseudoTerminal,
+  disableTaskContainerPseudoTerminal,
+} from "./ecs-task-definition";
 
 const registered = [];
 
@@ -53,6 +56,21 @@ describe("real SST task-definition synthesis", () => {
     ).toThrow("task definition containerDefinitions output not found");
   });
 
+  it("fails when the synthesized container definitions are malformed JSON", () => {
+    const containerDefinitions = {
+      apply(callback) {
+        return callback("{");
+      },
+    };
+
+    expect(() =>
+      disableTaskContainerPseudoTerminal(
+        { containerDefinitions },
+        "Mem9Consolidation",
+      ),
+    ).toThrow(SyntaxError);
+  });
+
   it("fails when the synthesized task omits mnemo-server", () => {
     const containerDefinitions = {
       apply(callback) {
@@ -68,6 +86,21 @@ describe("real SST task-definition synthesis", () => {
     expect(() =>
       disableMnemoServerPseudoTerminal({ containerDefinitions }),
     ).toThrow("mnemo-server container not found in task definition");
+  });
+
+  it("fails when a requested named container is absent", () => {
+    const containerDefinitions = {
+      apply(callback) {
+        return callback(JSON.stringify([{ name: "another-container" }]));
+      },
+    };
+
+    expect(() =>
+      disableTaskContainerPseudoTerminal(
+        { containerDefinitions },
+        "Mem9Consolidation",
+      ),
+    ).toThrow("Mem9Consolidation container not found in task definition");
   });
 
   it("TC-EMF-004: disables only mnemo-server TTY and preserves awslogs", async () => {
@@ -151,5 +184,83 @@ describe("real SST task-definition synthesis", () => {
         },
       });
     }
+  });
+
+  it("TC-CONSOL-079: disables the named consolidation TTY in real SST synthesis", async () => {
+    registered.length = 0;
+    const parent = new ComponentResource(
+      "test:index:Parent",
+      "consolidation-parent",
+    );
+    const taskDefinition = createTaskDefinition(
+      "Mem9Consolidation",
+      {
+        cluster: {
+          nodes: {
+            cluster: {
+              name: output("mem9-cluster"),
+            },
+          },
+        },
+        transform: {
+          taskDefinition: (args) => {
+            disableTaskContainerPseudoTerminal(args, "Mem9Consolidation");
+            args.tags = {
+              ...(args.tags ?? {}),
+              ManagedBy: "sst",
+              Project: "mem9-on-aws",
+              Stage: "prod",
+            };
+          },
+        },
+      },
+      {},
+      parent,
+      output([
+        {
+          name: "Mem9Consolidation",
+          image: "example.com/consolidation:test",
+          logging: {
+            name: "/sst/cluster/test/task/Mem9Consolidation",
+            retention: "1 month",
+          },
+          environment: {},
+          ssm: {},
+        },
+      ]),
+      output("arm64"),
+      output("1 vCPU"),
+      output("2 GB"),
+      output("20 GB"),
+      { arn: output("arn:aws:iam::123456789012:role/task") },
+      { arn: output("arn:aws:iam::123456789012:role/execution") },
+    );
+    const task = await taskDefinition.promise();
+    await task.urn.promise();
+
+    const resource = registered.find(
+      (candidate) =>
+        candidate.type === "aws:ecs/taskDefinition:TaskDefinition",
+    );
+    const definitions = JSON.parse(
+      String(resource?.inputs.containerDefinitions),
+    );
+
+    expect(resource?.inputs.tags).toMatchObject({
+      ManagedBy: "sst",
+      Project: "mem9-on-aws",
+      Stage: "prod",
+    });
+    expect(definitions).toHaveLength(1);
+    expect(definitions[0].pseudoTerminal).toBe(false);
+    expect(definitions[0]).not.toHaveProperty("interactive");
+    expect(definitions[0].logConfiguration).toEqual({
+      logDriver: "awslogs",
+      options: {
+        "awslogs-group": "/sst/cluster/test/task/Mem9Consolidation",
+        "awslogs-region": "ap-northeast-1",
+        "awslogs-stream-prefix": "/service",
+      },
+    });
   });
 });

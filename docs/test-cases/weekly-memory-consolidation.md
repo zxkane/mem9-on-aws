@@ -19,7 +19,7 @@ Preview E2E runs the deployed task in report-only mode.
 | TC-CONSOL-010 | Auto actions would cost 21 mutations | At most 20 mutations execute; the overflow action is review-deferred before its first write |
 | TC-CONSOL-011 | Report-only run has MERGE/archive/stale decisions | No REST, SQL mutation, mutex, or SNS publish occurs |
 | TC-CONSOL-012 | Review records are emitted | Each has kind, ids, snippets, and rationale; the list summary is always emitted |
-| TC-CONSOL-013 | Run completes with mixed outcomes | EMF uses namespace `mem9-on-aws`, only the `stage` dimension, and the six documented metric names |
+| TC-CONSOL-013 | Run completes with mixed outcomes | EMF uses namespace `mem9-on-aws`, only the `stage` dimension, and the seven documented metric names |
 | TC-CONSOL-014 | Manual cleanup and consolidation attempt apply concurrently | The shared PostgreSQL advisory mutex admits one holder and the other exits without mutation |
 | TC-CONSOL-015 | SNS review summary is published | Payload contains counts/stage only and no ids, snippets, rationale, content, embeddings, or tenant key |
 | TC-CONSOL-016 | Production adapters are exercised with fake DB/REST/Mantle/SNS clients | TLS DB config, bearer refresh, mutex/archive SQL, REST LWW headers, redacted SNS payload, and shutdown are verified |
@@ -82,6 +82,7 @@ Preview E2E runs the deployed task in report-only mode.
 | TC-CONSOL-069 | Inspect consolidation task IAM and workload boundary | The task has only stage-scoped digest `s3:GetObject`/`s3:PutObject`, no list/delete, matching KMS context permissions, and the existing boundary admits the path |
 | TC-CONSOL-070 | Inspect the operator-owned bucket lifecycle | `decisions/` retains its three-day expiry, `consolidation-digests/` has a separate expiry of at least 70 days, and both prefixes abort incomplete multipart uploads after one day |
 | TC-CONSOL-076 | Inspect rollout documentation for an existing decision-artifact bucket | Before schedule enablement, the operator is told to re-run `scripts/deploy-decision-artifact-bucket.sh`, require its two-rule lifecycle read-back, and expect the first scheduled run to degrade once when a missing key is masked as 403 |
+| TC-CONSOL-079 | Inspect the synthesized consolidation task definition | The exact `Mem9Consolidation` container has `pseudoTerminal: false`, leaves `interactive` unset, and preserves its `awslogs` configuration while the task transform also preserves and adds tags |
 
 ## Preview E2E
 

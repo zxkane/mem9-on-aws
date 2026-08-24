@@ -9,6 +9,7 @@ import {
   consolidationDigestKey,
   decisionArtifactBucketName,
 } from "./decision-artifact";
+import { disableTaskContainerPseudoTerminal } from "./ecs-task-definition";
 
 const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 const BEDROCK_PROJECT = process.env.MEM9_BEDROCK_PROJECT;
@@ -267,6 +268,10 @@ export function consolidation(
     logging: { retention: "1 month" },
     transform: {
       taskDefinition: (args) => {
+        disableTaskContainerPseudoTerminal(
+          args,
+          CONSOLIDATION_CONTAINER_NAME,
+        );
         args.tags = { ...(args.tags ?? {}), ...tags };
       },
     },
