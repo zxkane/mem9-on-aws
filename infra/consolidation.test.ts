@@ -296,7 +296,7 @@ afterEach(() => {
 });
 
 describe("consolidation task and schedule", () => {
-  it("TC-CONSOL-020/023/028: always defines a report task but omits the ungated schedule", async () => {
+  it("TC-CONSOL-020/023/028/079: always defines a report task but omits the ungated schedule", async () => {
     installGlobals("prod");
     await loadAndRun();
 
@@ -358,13 +358,37 @@ describe("consolidation task and schedule", () => {
       resources.filter((resource) => resource.kind === "ScheduleGroup"),
     ).toEqual([]);
     expect(resources.filter((resource) => resource.kind === "Role")).toEqual([]);
-    const transformed = { tags: { Existing: "tag" } };
+    const originalDefinition = {
+      name: "Mem9Consolidation",
+      pseudoTerminal: true,
+      logConfiguration: {
+        logDriver: "awslogs",
+        options: {
+          "awslogs-group": "/sst/consolidation",
+          "awslogs-region": "ap-northeast-1",
+          "awslogs-stream-prefix": "/task",
+        },
+      },
+    };
+    const transformed = {
+      tags: { Existing: "tag" },
+      containerDefinitions: out(JSON.stringify([originalDefinition])),
+    };
     args.transform.taskDefinition(transformed);
     expect(transformed.tags).toMatchObject({
       Existing: "tag",
+      ManagedBy: "sst",
       Project: "mem9-on-aws",
       Stage: "prod",
     });
+    expect(
+      JSON.parse(String(materialize(transformed.containerDefinitions))),
+    ).toEqual([
+      {
+        ...originalDefinition,
+        pseudoTerminal: false,
+      },
+    ]);
 
     const parameterNames = resources
       .filter((resource) => resource.kind === "Parameter")
