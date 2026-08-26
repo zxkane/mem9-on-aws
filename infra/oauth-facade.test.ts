@@ -38,7 +38,6 @@ let randomPasswords: {
   name: string;
   args: Record<string, unknown>;
 }[];
-let previousFacadeAuthorizerEnabled: string | undefined;
 let previousFacadeCustomDomain: string | undefined;
 let previousCloudflareApiToken: string | undefined;
 let previousCloudflareZoneId: string | undefined;
@@ -169,12 +168,9 @@ beforeEach(() => {
   routeSpy = vi.fn();
   authorizerId = out("facade-allow-all-authorizer-id");
   addAuthorizerSpy = vi.fn(() => ({ id: authorizerId }));
-  previousFacadeAuthorizerEnabled =
-    process.env.MEM9_FACADE_AUTHORIZER_ENABLED;
   previousFacadeCustomDomain = process.env.MEM9_FACADE_CUSTOM_DOMAIN;
   previousCloudflareApiToken = process.env.CLOUDFLARE_API_TOKEN;
   previousCloudflareZoneId = process.env.CLOUDFLARE_ZONE_ID;
-  delete process.env.MEM9_FACADE_AUTHORIZER_ENABLED;
   delete process.env.MEM9_FACADE_CUSTOM_DOMAIN;
   delete process.env.CLOUDFLARE_API_TOKEN;
   delete process.env.CLOUDFLARE_ZONE_ID;
@@ -182,12 +178,6 @@ beforeEach(() => {
 afterEach(() => {
   for (const g of ["$app", "aws", "sst", "random", "$interpolate"])
     delete (globalThis as Record<string, unknown>)[g];
-  if (previousFacadeAuthorizerEnabled === undefined) {
-    delete process.env.MEM9_FACADE_AUTHORIZER_ENABLED;
-  } else {
-    process.env.MEM9_FACADE_AUTHORIZER_ENABLED =
-      previousFacadeAuthorizerEnabled;
-  }
   if (previousFacadeCustomDomain === undefined) {
     delete process.env.MEM9_FACADE_CUSTOM_DOMAIN;
   } else {
@@ -244,24 +234,7 @@ function only(kind: string) {
 }
 
 describe("oauthFacade factory", () => {
-  it("TC-FACADEAUTH-001: leaves both routes unchanged when the switch is off", async () => {
-    installGlobals("prod");
-    const oauthFacade = await loadFacade();
-    oauthFacade(fakeCognitoOut());
-
-    expect(addAuthorizerSpy).not.toHaveBeenCalled();
-    expect(routeSpy.mock.calls.map(([route]) => route)).toEqual([
-      "ANY /{proxy+}",
-      "ANY /",
-    ]);
-    for (const routeCall of routeSpy.mock.calls) {
-      expect(routeCall).toHaveLength(2);
-      expect(routeCall[2]).toBeUndefined();
-    }
-  });
-
-  it("TC-FACADEAUTH-002: binds the allow-all authorizer to both routes when enabled", async () => {
-    process.env.MEM9_FACADE_AUTHORIZER_ENABLED = "1";
+  it("TC-FACADEAUTH-001: always creates the allow-all authorizer", async () => {
     installGlobals("prod");
     const oauthFacade = await loadFacade();
     oauthFacade(fakeCognitoOut());
@@ -285,6 +258,13 @@ describe("oauthFacade factory", () => {
         ttl: "0 seconds",
       },
     });
+  });
+
+  it("TC-FACADEAUTH-002: binds the allow-all authorizer to both public routes", async () => {
+    installGlobals("prod");
+    const oauthFacade = await loadFacade();
+    oauthFacade(fakeCognitoOut());
+
     expect(routeSpy.mock.calls.map(([route]) => route)).toEqual([
       "ANY /{proxy+}",
       "ANY /",
