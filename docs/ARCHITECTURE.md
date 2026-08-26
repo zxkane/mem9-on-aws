@@ -684,7 +684,8 @@ temporary quarantine therefore cannot satisfy the permanent check.
 This avoids principal-simulator Organizations decisions that do not represent
 live authorization in a management account, where SCPs do not apply. The
 rollout then expands the deployed `iam:PassRole` scope with full pagination and
-validates the alert-router, OAuth-facade, and VPC-proxy Lambda role trusts.
+validates the alert-router, OAuth-facade, facade-authorizer, and VPC-proxy
+Lambda role trusts.
 During initial discovery only, it repairs the single exact legacy shape
 containing Lambda plus current-account root: the complete inventory must first
 contain no other unexpected trust, and each repair is guarded by an immediate

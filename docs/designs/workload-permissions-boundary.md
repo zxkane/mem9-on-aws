@@ -218,7 +218,7 @@ verify exact reviewed workflow blobs, clean exact-head checkout, and idle runs
   -> install/verify boundary stack
   -> read PassRole scope A
   -> enumerate matching roles
-  -> classify all alert-router, OAuth-facade, and VPC-proxy Lambda role trusts
+  -> classify all alert-router, OAuth-facade, facade-authorizer, and VPC-proxy Lambda role trusts
   -> fail before trust mutation unless every non-current policy is the exact
      Lambda plus current-account-root legacy shape
   -> for each exact legacy role: re-read, update to Lambda-only, and read back
@@ -408,11 +408,11 @@ authorizer role is always present and every role receives the exact boundary
 through the real Pulumi transform.
 
 A separate test uses Pulumi Automation API with a local file backend and two
-updates across dynamic fixtures derived from all eight actual role descriptors.
+updates across dynamic fixtures derived from all ten actual role descriptors.
 The real Pulumi engine executes create, update, and destroy. The provider fails
 every create, update, or delete that does not carry the exact boundary, exported
-pre-destroy state retains that boundary in all eight inputs and outputs, and
-engine summaries prove eight role creates, updates, and deletes plus the stack
+pre-destroy state retains that boundary in all ten inputs and outputs, and
+engine summaries prove ten role creates, updates, and deletes plus the stack
 resource. The provider exposes no boundary-detach operation.
 
 The state-machine mutation tests rewrite and import the real rollout module.
