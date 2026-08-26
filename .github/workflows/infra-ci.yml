@@ -484,6 +484,7 @@ jobs:
         shell: bash
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
+          CONSOLIDATION_TASK_WAIT_SECONDS: "1200"
         run: bash scripts/run-consolidation-task.sh
 
       - name: MCP write-search E2E (preview, soft)

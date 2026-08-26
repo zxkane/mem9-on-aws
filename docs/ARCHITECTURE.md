@@ -439,8 +439,10 @@ production runs Sunday at 03:00 UTC. Production enablement is an operator
 decision after the one-shot cleanup and a report-only pass show actionable
 drift. `scripts/run-consolidation-task.sh` is the preview and operator harness:
 it overrides the container command with `--report-only --check-llm`, performs a
-content-free live Mantle smoke, waits for exit zero, and queries only the exact
-task stream's content-free review-list marker.
+content-free live Mantle smoke, waits up to the bounded
+`CONSOLIDATION_TASK_WAIT_SECONDS` observer budget (12 hours by default) for exit
+zero, and queries only the exact task stream's content-free review-list marker.
+The observer timeout does not stop the report-only ECS task.
 
 Automatic execution is capped at 20 mutations. It can merge fragments through
 the cleanup MERGE contract, archive only the strictly older side of a

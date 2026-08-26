@@ -491,6 +491,9 @@ describe("workflow integration", () => {
     expect(previewSteps[consolidationIndex].run).toBe(
       "bash scripts/run-consolidation-task.sh",
     );
+    expect(
+      previewSteps[consolidationIndex].env.CONSOLIDATION_TASK_WAIT_SECONDS,
+    ).toBe("1200");
     expect(source).toContain("shellcheck scripts/run-consolidation-task.sh");
 
     const runner = readFileSync(consolidationRunnerPath, "utf8");

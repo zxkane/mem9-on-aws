@@ -5,6 +5,7 @@
 set -euo pipefail
 
 STAGE="${STAGE:?STAGE is required (for example, prod or pr-103)}"
+CONSOLIDATION_TASK_WAIT_SECONDS="${CONSOLIDATION_TASK_WAIT_SECONDS-43200}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REGION="${AWS_REGION:-$(node "$REPO_ROOT/scripts/resolve-application-region.mjs")}"
 PREFIX="/mem9-on-aws/${STAGE}/consolidation"
@@ -12,6 +13,12 @@ CONTAINER_NAME="Mem9Consolidation"
 
 if ! [[ "$STAGE" =~ ^[A-Za-z0-9-]+$ ]]; then
   echo "::error::invalid consolidation stage: ${STAGE}" >&2
+  exit 1
+fi
+if ! [[ "$CONSOLIDATION_TASK_WAIT_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
+   (( CONSOLIDATION_TASK_WAIT_SECONDS < 60 ||
+      CONSOLIDATION_TASK_WAIT_SECONDS > 43200 )); then
+  echo "::error::CONSOLIDATION_TASK_WAIT_SECONDS must be an integer from 60 to 43200" >&2
   exit 1
 fi
 
@@ -23,10 +30,13 @@ PARAMETER_NAMES=(
   "${PREFIX}/log-group-name"
 )
 echo "run-consolidation: reading report-task inputs from ${PREFIX}/*"
-PARAMETERS=$(aws ssm get-parameters \
-  --names "${PARAMETER_NAMES[@]}" \
-  --region "$REGION" \
-  --output json)
+if ! PARAMETERS=$(aws ssm get-parameters \
+    --names "${PARAMETER_NAMES[@]}" \
+    --region "$REGION" \
+    --output json 2>/dev/null); then
+  echo "::error::could not read consolidation task configuration" >&2
+  exit 1
+fi
 
 if [[ "$(jq '.InvalidParameters | length' <<<"$PARAMETERS")" != "0" ]]; then
   echo "::error::missing consolidation SSM parameters under ${PREFIX}" >&2
@@ -76,27 +86,30 @@ OVERRIDES=$(jq -cn --arg name "$CONTAINER_NAME" \
   }')
 START_TIME_MS=$(( $(date +%s) * 1000 ))
 
-echo "run-consolidation: starting report-only task on ${CLUSTER}"
-RUN_OUT=$(aws ecs run-task \
-  --cluster "$CLUSTER" \
-  --task-definition "$TASK_DEF" \
-  --launch-type FARGATE \
-  --count 1 \
-  --network-configuration "$NETWORK_CONFIG" \
-  --overrides "$OVERRIDES" \
-  --region "$REGION" \
-  --output json)
+echo "run-consolidation: starting report-only task"
+if ! RUN_OUT=$(aws ecs run-task \
+    --cluster "$CLUSTER" \
+    --task-definition "$TASK_DEF" \
+    --launch-type FARGATE \
+    --count 1 \
+    --network-configuration "$NETWORK_CONFIG" \
+    --overrides "$OVERRIDES" \
+    --region "$REGION" \
+    --output json 2>/dev/null); then
+  echo "::error::consolidation run-task request failed" >&2
+  exit 1
+fi
 TASK_ARN=$(jq -r '.tasks[0].taskArn // empty' <<<"$RUN_OUT")
 if [[ -z "$TASK_ARN" ]]; then
-  echo "::error::consolidation run-task started no task; failures:" >&2
-  jq -c '.failures // []' <<<"$RUN_OUT" >&2
+  FAILURE_COUNT=$(jq '(.failures // []) | length' <<<"$RUN_OUT")
+  echo "::error::consolidation run-task started no task (${FAILURE_COUNT} failure records)" >&2
   exit 1
 fi
 
-echo "run-consolidation: started ${TASK_ARN##*/}, waiting for STOPPED"
-DEADLINE=$((SECONDS + 1200))
+echo "run-consolidation: task started, waiting for STOPPED"
+DEADLINE_EPOCH=$(( $(date +%s) + CONSOLIDATION_TASK_WAIT_SECONDS ))
 LAST_STATUS=""
-while [[ $SECONDS -lt $DEADLINE ]]; do
+while (( $(date +%s) < DEADLINE_EPOCH )); do
   LAST_STATUS=$(aws ecs describe-tasks \
     --cluster "$CLUSTER" \
     --tasks "$TASK_ARN" \
@@ -107,32 +120,32 @@ while [[ $SECONDS -lt $DEADLINE ]]; do
   sleep 10
 done
 if [[ "$LAST_STATUS" != "STOPPED" ]]; then
-  echo "::error::report-only consolidation did not stop within 20 minutes" >&2
+  echo "::error::report-only consolidation did not stop within ${CONSOLIDATION_TASK_WAIT_SECONDS}s; task remains running, do not start another report-only run" >&2
   exit 1
 fi
 
-EXIT_CODE=$(aws ecs describe-tasks \
-  --cluster "$CLUSTER" \
-  --tasks "$TASK_ARN" \
-  --region "$REGION" \
-  --query 'tasks[0].containers[0].exitCode' \
-  --output text)
-STOP_REASON=$(aws ecs describe-tasks \
-  --cluster "$CLUSTER" \
-  --tasks "$TASK_ARN" \
-  --region "$REGION" \
-  --query 'tasks[0].stoppedReason' \
-  --output text)
-echo "run-consolidation: task stopped (exitCode=${EXIT_CODE}, reason='${STOP_REASON}')"
+if ! EXIT_CODE=$(aws ecs describe-tasks \
+    --cluster "$CLUSTER" \
+    --tasks "$TASK_ARN" \
+    --region "$REGION" \
+    --query 'tasks[0].containers[0].exitCode' \
+    --output text 2>/dev/null); then
+  echo "::error::could not read the stopped consolidation task result" >&2
+  exit 1
+fi
+echo "run-consolidation: task stopped (exitCode=${EXIT_CODE})"
 if [[ "$EXIT_CODE" != "0" ]]; then
   echo "::error::report-only consolidation exited ${EXIT_CODE}" >&2
   exit 1
 fi
 
-TASK_DEFINITION=$(aws ecs describe-task-definition \
-  --task-definition "$TASK_DEF" \
-  --region "$REGION" \
-  --output json)
+if ! TASK_DEFINITION=$(aws ecs describe-task-definition \
+    --task-definition "$TASK_DEF" \
+    --region "$REGION" \
+    --output json 2>/dev/null); then
+  echo "::error::could not read the consolidation task log configuration" >&2
+  exit 1
+fi
 LOG_PREFIX=$(jq -r --arg name "$CONTAINER_NAME" \
   '.taskDefinition.containerDefinitions[]
    | select(.name == $name)
