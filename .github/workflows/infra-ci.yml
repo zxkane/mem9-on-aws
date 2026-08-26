@@ -420,15 +420,6 @@ jobs:
           # Synthesize the Scheduler resource for infra coverage, but
           # infra/consolidation.ts keeps every preview schedule DISABLED.
           MEM9_CONSOLIDATION_SCHEDULE_ENABLED: "1"
-          # Attaches the allow-all compliance authorizer to the OAuth façade
-          # routes (infra/oauth-facade.ts), flipping them from AuthorizationType
-          # NONE to CUSTOM so the Palisade APIGv2NotNoneAuthorizer finding clears.
-          # It gates nothing: empty identity sources mean the gateway invokes it on
-          # every request (so anonymous OAuth discovery keeps working) and it always
-          # returns isAuthorized. Real auth stays in the façade Lambda's /mcp bearer
-          # check. Read at synth time, so it must be set here — a deploy without it
-          # silently strips the authorizer and reopens the finding.
-          MEM9_FACADE_AUTHORIZER_ENABLED: "1"
           # Slack approval (#123). Opt-in through repo variables/secrets rather than
           # a literal "1": infra/slack-approval.ts FAILS SYNTHESIS when the flag is
           # set and either secret is unseeded, and GitHub hands an unset secret to
@@ -1214,11 +1205,6 @@ jobs:
           # (scripts/deploy-github-role.sh): without it this deploy AccessDenies on
           # CreateSchedule's PassRole after creating the role and group.
           MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED: ${{ vars.MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED }}
-          # Compliance authorizer on the OAuth façade routes — see the preview
-          # deploy step above for the full rationale. Must be set here too: the
-          # flag is read at synth time, so a prod deploy without it strips the
-          # authorizer and reopens the Palisade finding.
-          MEM9_FACADE_AUTHORIZER_ENABLED: "1"
           # Optional production hostname. SST creates the regional ACM
           # certificate, API mapping, and DNS-only Cloudflare records.
           # Previews intentionally receive none of these three values.

@@ -117,7 +117,7 @@ guarded rollout and normal deployment preflight custom-simulates 17
 `kms:Decrypt` cases against the live default boundary version:
 
 - Project Lambda function context without `kms:ViaService`: allowed.
-- Optional facade-authorizer Lambda context without `kms:ViaService`: allowed.
+- Facade-authorizer Lambda context without `kms:ViaService`: allowed.
 - Project SSM parameter context from function code via SSM: allowed.
 - Project DB secret from the server execution role via Secrets Manager: allowed.
 - Project tenant secret from the bootstrap execution role via Secrets Manager:
@@ -388,8 +388,8 @@ The GitHub Actions role:
 - permits `PutRolePolicy` and `AttachRolePolicy` only when the target role
   already carries the exact boundary;
 - explicitly denies `DeleteRolePermissionsBoundary`;
-- prevents all four allowlisted Lambda execution-role types, including the
-  optional facade authorizer, from being passed to non-Lambda services;
+- prevents all four required Lambda execution-role types, including the facade
+  authorizer, from being passed to non-Lambda services;
 - keeps read, detach, inline-policy delete, and role delete for preview cleanup;
 - explicitly denies mutation of the boundary policy and the operator-owned
   boundary, deploy-role, and ECR scanning ownership stacks.
@@ -402,11 +402,10 @@ boundary association together.
 
 ## Pulumi Role And Lifecycle Evidence
 
-One infrastructure test derives both switch-state workload-role inventories
-from the project source and installed SST component implementation. It proves
-that the default graph contains exactly eight AWS IAM roles, the enabled graph
-adds only the facade-authorizer role, and every role in both graphs receives the
-exact boundary through the real Pulumi transform.
+One infrastructure test derives the workload-role inventory from the project
+source and installed SST component implementation. It proves that the facade
+authorizer role is always present and every role receives the exact boundary
+through the real Pulumi transform.
 
 A separate test uses Pulumi Automation API with a local file backend and two
 updates across dynamic fixtures derived from all eight actual role descriptors.

@@ -234,32 +234,27 @@ afterEach(() => {
 describe("workload role coverage from the real SST graph", () => {
   it.each([
     {
-      authorizerEnabled: false,
-      label: "authorizer disabled, scheduler disabled",
+      label: "scheduler disabled",
       scheduleEnabled: false,
       slackApprovalEnabled: false,
     },
     {
-      authorizerEnabled: true,
-      label: "authorizer enabled, scheduler enabled",
+      label: "scheduler enabled",
       scheduleEnabled: true,
       slackApprovalEnabled: false,
     },
     {
-      authorizerEnabled: true,
-      label: "authorizer enabled, scheduler enabled, Slack approval enabled",
+      label: "scheduler enabled, Slack approval enabled",
       scheduleEnabled: true,
       slackApprovalEnabled: true,
     },
   ])(
     "TC-FACADEAUTH-004/TC-CONSOL-026/TC-SLACKAPP-082: keeps the $label graph inside the workload boundary",
-    async ({ authorizerEnabled, scheduleEnabled, slackApprovalEnabled }) => {
+    async ({ scheduleEnabled, slackApprovalEnabled }) => {
       vi.resetModules();
       const rpcServer = await startSstRpcServer();
       const previousSstServer = process.env.SST_SERVER;
       const previousBoundaryFlag = process.env.WORKLOAD_BOUNDARY_PROD_ENABLED;
-      const previousFacadeAuthorizerEnabled =
-        process.env.MEM9_FACADE_AUTHORIZER_ENABLED;
       const previousMantleProject = process.env.MEM9_BEDROCK_PROJECT;
       const previousSlackWebhook = process.env.SST_SECRET_SlackWebhookUrl;
       const previousScheduleEnabled =
@@ -273,11 +268,6 @@ describe("workload role coverage from the real SST graph", () => {
         process.env.SST_SECRET_SlackSigningSecret;
       process.env.SST_SERVER = rpcServer.url;
       process.env.WORKLOAD_BOUNDARY_PROD_ENABLED = "true";
-      if (authorizerEnabled) {
-        process.env.MEM9_FACADE_AUTHORIZER_ENABLED = "1";
-      } else {
-        delete process.env.MEM9_FACADE_AUTHORIZER_ENABLED;
-      }
       process.env.MEM9_BEDROCK_PROJECT = "mock-project";
       process.env.SST_SECRET_SlackWebhookUrl =
         "https://hooks.example.com/services/mock";
@@ -372,9 +362,10 @@ describe("workload role coverage from the real SST graph", () => {
       });
 
       try {
-        const expectedRoleNames = authorizerEnabled
-          ? [...EXPECTED_WORKLOAD_ROLE_NAMES, authorizerRoleLogicalName].sort()
-          : [...EXPECTED_WORKLOAD_ROLE_NAMES];
+        const expectedRoleNames = [
+          ...EXPECTED_WORKLOAD_ROLE_NAMES,
+          authorizerRoleLogicalName,
+        ].sort();
         if (scheduleEnabled) {
           expectedRoleNames.push(CONSOLIDATION_SCHEDULER_ROLE_NAME);
         }
@@ -447,29 +438,23 @@ describe("workload role coverage from the real SST graph", () => {
         const authorizers = recordedResources.filter(
           ({ type }) => type === "aws:apigatewayv2/authorizer:Authorizer",
         );
-        if (authorizerEnabled) {
-          expect(authorizerRole?.inputs).toMatchObject({
-            name: "mem9-on-aws-prod-Mem9OauthFacadeAllowAllRole",
-            permissionsBoundary: expectedBoundary,
-          });
-          expect(authorizerFunction?.inputs).toMatchObject({
-            architectures: ["arm64"],
-            name: "mem9-on-aws-prod-Mem9OauthFacadeAllowAll",
-            runtime: "nodejs24.x",
-          });
-          expect(authorizers).toHaveLength(1);
-          expect(authorizers[0]?.inputs).toMatchObject({
-            authorizerPayloadFormatVersion: "2.0",
-            authorizerResultTtlInSeconds: 0,
-            authorizerType: "REQUEST",
-            enableSimpleResponses: true,
-            identitySources: [],
-          });
-        } else {
-          expect(authorizerRole).toBeUndefined();
-          expect(authorizerFunction).toBeUndefined();
-          expect(authorizers).toHaveLength(0);
-        }
+        expect(authorizerRole?.inputs).toMatchObject({
+          name: "mem9-on-aws-prod-Mem9OauthFacadeAllowAllRole",
+          permissionsBoundary: expectedBoundary,
+        });
+        expect(authorizerFunction?.inputs).toMatchObject({
+          architectures: ["arm64"],
+          name: "mem9-on-aws-prod-Mem9OauthFacadeAllowAll",
+          runtime: "nodejs24.x",
+        });
+        expect(authorizers).toHaveLength(1);
+        expect(authorizers[0]?.inputs).toMatchObject({
+          authorizerPayloadFormatVersion: "2.0",
+          authorizerResultTtlInSeconds: 0,
+          authorizerType: "REQUEST",
+          enableSimpleResponses: true,
+          identitySources: [],
+        });
 
         const routes = recordedResources.filter(
           ({ type }) => type === "aws:apigatewayv2/route:Route",
@@ -480,19 +465,13 @@ describe("workload role coverage from the real SST graph", () => {
           "ANY /{proxy+}",
         ]);
         for (const { inputs } of routes) {
-          expect(inputs.authorizationType).toBe(
-            authorizerEnabled ? "CUSTOM" : "NONE",
-          );
-          if (authorizerEnabled) {
-            expect(inputs.authorizerId).toBe(`${authorizers[0]?.name}-id`);
-          } else {
-            expect(inputs.authorizerId).toBeUndefined();
-          }
+          expect(inputs.authorizationType).toBe("CUSTOM");
+          expect(inputs.authorizerId).toBe(`${authorizers[0]?.name}-id`);
         }
 
         const lambdaRoleNames = [
           "Mem9AlertRouterRole",
-          ...(authorizerEnabled ? [authorizerRoleLogicalName] : []),
+          authorizerRoleLogicalName,
           "Mem9OauthFacadeFnRole",
           "Mem9ProxyFnRole",
         ];
@@ -523,10 +502,6 @@ describe("workload role coverage from the real SST graph", () => {
         }
         for (const [name, value] of [
           ["WORKLOAD_BOUNDARY_PROD_ENABLED", previousBoundaryFlag],
-          [
-            "MEM9_FACADE_AUTHORIZER_ENABLED",
-            previousFacadeAuthorizerEnabled,
-          ],
           ["MEM9_BEDROCK_PROJECT", previousMantleProject],
           ["SST_SECRET_SlackWebhookUrl", previousSlackWebhook],
           [

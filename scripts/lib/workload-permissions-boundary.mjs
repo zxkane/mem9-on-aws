@@ -43,7 +43,6 @@ const LAMBDA_EXECUTION_ROLE_TYPES = [
     functionToken: "Mem9OauthFacadeAllowAll",
     roleToken: "Mem9OauthFacadeAllowAllRole",
     isVpcProxy: false,
-    optional: true,
     stableName: true,
   },
   {
@@ -1542,7 +1541,7 @@ export function validateProductionRuntimeBindings({
     const count = lambdaFunctions.filter(({ FunctionName }) =>
       matchesProductionLambdaFunctionName(FunctionName, type),
     ).length;
-    if (type.optional ? count > 1 : count !== 1) {
+    if (count !== 1) {
       throw new Error("production Lambda inventory is incomplete");
     }
   }

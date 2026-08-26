@@ -309,6 +309,12 @@ DNS-only and under SST ownership. See
 [ACM DNS renewal](https://docs.aws.amazon.com/acm/latest/userguide/dns-renewal-validation.html).
 These public facade resources do not expose `mnemo-server`.
 
+Both internet-reachable API Gateway routes always use a Lambda request
+authorizer with payload format 2.0 simple responses, no identity sources, and
+zero cache TTL. The authorizer deliberately returns `isAuthorized: true` so
+OAuth discovery, registration, and browser flows remain public. The facade
+handler remains responsible for the actual `/mcp` bearer-token check.
+
 ### Schema bootstrap and data
 
 `infra/bootstrap.ts` defines a separate one-shot arm64 ECS task. CI invokes it
@@ -643,8 +649,8 @@ boundary does not require `kms:ViaService` for the Lambda cold-start path
 because that path does not expose it consistently during permissions-boundary
 evaluation. Non-Lambda-context decrypts must come through SSM or Secrets
 Manager in the application region. Separate denies restrict Lambda contexts to
-the three required Lambda execution-role types plus the optional facade
-authorizer role, and secret contexts to the four ECS execution-role types. AWS
+the four required Lambda execution-role types, including the facade authorizer
+role, and secret contexts to the four ECS execution-role types. AWS
 defines `aws:PrincipalArn` for an IAM role as the IAM role ARN, not its
 assumed-role session ARN:
 [global condition keys](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_condition-keys.html).
@@ -712,7 +718,7 @@ A failure retains quarantine and is recovered by re-running the same command.
 Normal preview and production deployment preflights use the read-only
 `--verify-only` path, so a permissive policy drift at the same stable ARN blocks
 deployment rather than satisfying an ARN-only check. That path also
-custom-simulates the live boundary's 17 KMS cases: required and optional project
+custom-simulates the live boundary's 17 KMS cases: all four required project
 Lambda, SSM, server-secret, and bootstrap-secret paths must be allowed; direct
 SSM/secret, foreign-secret, cross-region, task-role secret, Lambda-role secret,
 direct function-code, mismatched service/context pairs, forged/out-of-project
@@ -840,6 +846,9 @@ to the GitHub Actions deploy role.
   request authorization and tool-discovery filtering enforce those scopes.
 - The public OAuth facade uses API Gateway v2 plus Lambda, never a Lambda
   Function URL.
+- Both public OAuth facade routes always attach the no-identity, zero-cache,
+  allow-all Lambda request authorizer; application authentication remains in the
+  facade handler.
 - The OAuth facade custom domain is optional, production-only, and uses an
   existing Cloudflare zone with DNS-only records; previews use `execute-api`.
 - Schema bootstrap is a separate one-shot ECS task.

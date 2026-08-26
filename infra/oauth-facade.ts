@@ -34,8 +34,6 @@ import {
 
 // @ts-ignore - `aws`/`sst` injected globally by SST; cognito/ssm types loose.
 const awsAny = aws as unknown as Record<string, any>;
-const FACADE_AUTHORIZER_ENABLED =
-  process.env.MEM9_FACADE_AUTHORIZER_ENABLED === "1";
 const FACADE_CUSTOM_DOMAIN_ENV = "MEM9_FACADE_CUSTOM_DOMAIN";
 const CLOUDFLARE_API_TOKEN_ENV = "CLOUDFLARE_API_TOKEN";
 const CLOUDFLARE_ZONE_ID_ENV = "CLOUDFLARE_ZONE_ID";
@@ -260,34 +258,32 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
 
   // --- Routes ---
   // A catch-all proxy (the handler routes internally by path/method) + the root.
-  const authorizer = FACADE_AUTHORIZER_ENABLED
-    ? facadeApi.addAuthorizer({
-        name: "Mem9OauthFacadeAllowAll",
-        lambda: {
-          function: {
-            handler: "infra/src/oauth-facade/authorizer.handler",
-            architecture: "arm64",
-            name: `mem9-on-aws-${stage}-Mem9OauthFacadeAllowAll`,
-            transform: {
-              role: {
-                name: `mem9-on-aws-${stage}-Mem9OauthFacadeAllowAllRole`,
-              },
-            },
+  // API Gateway requires an authorizer on every internet-reachable route. These
+  // protocol endpoints must remain public, so the request authorizer has no
+  // identity sources or cache and always returns an HTTP API v2 simple Allow.
+  // Real `/mcp` bearer enforcement remains in the facade handler.
+  const authorizer = facadeApi.addAuthorizer({
+    name: "Mem9OauthFacadeAllowAll",
+    lambda: {
+      function: {
+        handler: "infra/src/oauth-facade/authorizer.handler",
+        architecture: "arm64",
+        name: `mem9-on-aws-${stage}-Mem9OauthFacadeAllowAll`,
+        transform: {
+          role: {
+            name: `mem9-on-aws-${stage}-Mem9OauthFacadeAllowAllRole`,
           },
-          identitySources: [],
-          response: "simple",
-          ttl: "0 seconds",
         },
-      })
-    : undefined;
+      },
+      identitySources: [],
+      response: "simple",
+      ttl: "0 seconds",
+    },
+  });
   const addRoute = (route: string) => {
-    if (authorizer) {
-      facadeApi.route(route, facadeFn.arn, {
-        auth: { lambda: authorizer.id },
-      });
-    } else {
-      facadeApi.route(route, facadeFn.arn);
-    }
+    facadeApi.route(route, facadeFn.arn, {
+      auth: { lambda: authorizer.id },
+    });
   };
   addRoute("ANY /{proxy+}");
   addRoute("ANY /");

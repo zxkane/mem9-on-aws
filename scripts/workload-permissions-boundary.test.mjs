@@ -212,7 +212,10 @@ const facadeAuthorizerRoleArn =
   `arn:aws:iam::${accountId}:role/${facadeAuthorizerRoleName}`;
 const facadeAuthorizerFunctionName =
   "mem9-on-aws-prod-Mem9OauthFacadeAllowAll";
-const expectedProductionRoleNames = Object.values(productionRoleNames).sort();
+const expectedProductionRoleNames = [
+  ...Object.values(productionRoleNames),
+  facadeAuthorizerRoleName,
+].sort();
 
 function taskDefinition(arn, family) {
   const bootstrap = family.includes("Bootstrap");
@@ -362,16 +365,24 @@ function productionPreflightAws(args, override = {}) {
           ["Mem9AlertRouter", productionRoleArns.alertRouter],
           ["Mem9OauthFacadeFn", productionRoleArns.oauthFacade],
           ["Mem9ProxyFn", productionRoleArns.proxy],
-        ].map(([logicalName, roleArn]) => {
-          const FunctionName = `mem9-on-aws-prod-${logicalName}-fixture`;
-          return {
+        ]
+          .map(([logicalName, roleArn]) => {
+            const FunctionName = `mem9-on-aws-prod-${logicalName}-fixture`;
+            return {
+              FunctionArn:
+                `arn:aws:lambda:ap-northeast-1:${accountId}:function:` +
+                FunctionName,
+              FunctionName,
+              Role: roleArn,
+            };
+          })
+          .concat({
             FunctionArn:
               `arn:aws:lambda:ap-northeast-1:${accountId}:function:` +
-              FunctionName,
-            FunctionName,
-            Role: roleArn,
-          };
-        }),
+              facadeAuthorizerFunctionName,
+            FunctionName: facadeAuthorizerFunctionName,
+            Role: facadeAuthorizerRoleArn,
+          }),
       };
     case "bedrock-agentcore-control get-gateway":
       return {
@@ -2417,17 +2428,24 @@ describe("production task-definition secret preflight", () => {
     );
   });
 
-  it("TC-FACADEAUTH-005: accepts the optional facade authorizer Lambda binding", () => {
+  it("TC-FACADEAUTH-005: requires the facade authorizer Lambda binding", () => {
     const input = validRuntimeInput();
-    input.lambdaFunctions.push({
-      FunctionArn:
-        `arn:aws:lambda:ap-northeast-1:${accountId}:function:` +
-        facadeAuthorizerFunctionName,
-      FunctionName: facadeAuthorizerFunctionName,
-      Role: facadeAuthorizerRoleArn,
-    });
-    expect(validateProductionRuntimeBindings(input)).toEqual(
-      [...expectedProductionRoleNames, facadeAuthorizerRoleName].sort(),
+    input.lambdaFunctions = input.lambdaFunctions.filter(
+      ({ FunctionName }) => FunctionName !== facadeAuthorizerFunctionName,
+    );
+    expect(() => validateProductionRuntimeBindings(input)).toThrow(
+      /Lambda inventory is incomplete/u,
+    );
+  });
+
+  it("rejects a facade authorizer Lambda without an execution role", () => {
+    const input = validRuntimeInput();
+    const authorizer = input.lambdaFunctions.find(
+      ({ FunctionName }) => FunctionName === facadeAuthorizerFunctionName,
+    );
+    delete authorizer.Role;
+    expect(() => validateProductionRuntimeBindings(input)).toThrow(
+      /runtime role ARN is malformed/u,
     );
   });
 
@@ -2438,16 +2456,19 @@ describe("production task-definition secret preflight", () => {
     ],
     ["suffixed token", `${facadeAuthorizerFunctionName}Suffix`],
   ])(
-    "rejects a non-exact optional facade authorizer Function name: %s",
+    "rejects a non-exact facade authorizer Function name: %s",
     (_name, FunctionName) => {
       const input = validRuntimeInput();
-      input.lambdaFunctions.push({
+      const index = input.lambdaFunctions.findIndex(
+        (fn) => fn.FunctionName === facadeAuthorizerFunctionName,
+      );
+      input.lambdaFunctions[index] = {
         FunctionArn:
           `arn:aws:lambda:ap-northeast-1:${accountId}:function:` +
           FunctionName,
         FunctionName,
         Role: facadeAuthorizerRoleArn,
-      });
+      };
       expect(() => validateProductionRuntimeBindings(input)).toThrow(
         /Lambda inventory is incomplete/u,
       );
@@ -2461,16 +2482,19 @@ describe("production task-definition secret preflight", () => {
     ],
     ["suffixed token", `${facadeAuthorizerRoleName}Suffix`],
   ])(
-    "rejects a non-exact optional facade authorizer role name: %s",
+    "rejects a non-exact facade authorizer role name: %s",
     (_name, roleName) => {
       const input = validRuntimeInput();
-      input.lambdaFunctions.push({
+      const index = input.lambdaFunctions.findIndex(
+        (fn) => fn.FunctionName === facadeAuthorizerFunctionName,
+      );
+      input.lambdaFunctions[index] = {
         FunctionArn:
           `arn:aws:lambda:ap-northeast-1:${accountId}:function:` +
           facadeAuthorizerFunctionName,
         FunctionName: facadeAuthorizerFunctionName,
         Role: `arn:aws:iam::${accountId}:role/${roleName}`,
-      });
+      };
       expect(() => validateProductionRuntimeBindings(input)).toThrow(
         /Lambda role binding is malformed/u,
       );
@@ -4999,6 +5023,10 @@ describe("stateful AWS CLI adapter", () => {
   it("runs the complete paginated migration and removes quarantine last", async () => {
     const calls = [];
     const boundaries = new Map();
+    const retainedPreviewRoleNames = [
+      "mem9-on-aw-pr-70-short-role",
+      "mem9-on-a-pr-70-shortest-role",
+    ];
     const state = {
       boundaryDeployed: false,
       deploymentPaused: true,
@@ -5202,18 +5230,11 @@ describe("stateful AWS CLI adapter", () => {
         case "iam list-roles":
           return marker === "roles-2"
             ? {
-                Roles: [
-                  {
-                    Arn: role("mem9-on-aw-pr-70-short-role").arn,
-                    AssumeRolePolicyDocument: undefined,
-                    RoleName: "mem9-on-aw-pr-70-short-role",
-                  },
-                  {
-                    Arn: role("mem9-on-a-pr-70-shortest-role").arn,
-                    AssumeRolePolicyDocument: undefined,
-                    RoleName: "mem9-on-a-pr-70-shortest-role",
-                  },
-                ],
+                Roles: retainedPreviewRoleNames.map((name) => ({
+                  Arn: role(name).arn,
+                  AssumeRolePolicyDocument: undefined,
+                  RoleName: name,
+                })),
                 IsTruncated: false,
               }
             : {
@@ -5291,7 +5312,12 @@ describe("stateful AWS CLI adapter", () => {
       resumeCommand: "safe-resume-command",
     });
 
-    expect(result).toEqual({ verifiedRoleCount: 10, status: "complete" });
+    const expectedVerifiedRoleCount =
+      expectedProductionRoleNames.length + retainedPreviewRoleNames.length;
+    expect(result).toEqual({
+      verifiedRoleCount: expectedVerifiedRoleCount,
+      status: "complete",
+    });
     expect(state).toEqual({
       boundaryDeployed: true,
       deploymentPaused: false,
@@ -5301,7 +5327,7 @@ describe("stateful AWS CLI adapter", () => {
       workflowsEnabled: true,
     });
     expect([...boundaries.values()]).toEqual(
-      Array.from({ length: 10 }, () => boundaryArn),
+      Array.from({ length: expectedVerifiedRoleCount }, () => boundaryArn),
     );
     expect(
       calls.findIndex(

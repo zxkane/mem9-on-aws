@@ -263,9 +263,10 @@ The AgentCore Gateway exposes four tools over MCP (Cognito-authenticated):
   Lambda `nodejs24.x`). The Go build for mnemo-server targets **arm64**.
 - Copy `.env.example` to `.env` and fill in your AWS profile before running the
   `scripts/deploy-*.sh` bootstrap scripts.
-- Set `MEM9_FACADE_AUTHORIZER_ENABLED=1` at deploy time to attach the optional
-  allow-all OAuth facade compliance authorizer; it is disabled by default.
-  Roll out the reviewed workload-boundary update before enabling it.
+- The public OAuth facade always attaches its allow-all Lambda request
+  authorizer to both API Gateway routes. It has no identity sources or cache, so
+  anonymous protocol endpoints remain reachable; the facade handler still
+  enforces the real `/mcp` bearer check.
 - Cognito hosted-UI prefixes share a namespace across AWS accounts in each
   Region. New stages default to a stable `mem9-<hash>` prefix derived from the
   AWS account, application Region, and stage; the account ID is not exposed.
@@ -503,8 +504,8 @@ custom-simulates every quarantine action against the policy's default `*`
 resource. It reads the exact quarantine again after simulation before any
 boundary mutation. It then deploys or verifies the retained boundary stack,
 derives the complete migration set from the deployed `iam:PassRole` policies,
-classifies the three required Lambda execution-role types plus the optional
-facade authorizer role, and repairs only the exact legacy trust containing
+classifies the four required Lambda execution-role types, including the facade
+authorizer role, and repairs only the exact legacy trust containing
 Lambda plus the current-account root. It validates the complete inventory before
 any trust write, then re-reads immediately before each update and reads back the
 exact Lambda-only result. Any unknown principal, extra field, or later trust
@@ -537,7 +538,7 @@ already fired.
 Normal AWS deployment preflights call the boundary script with `--verify-only`.
 They compare the current default policy version with the repository contract and
 then custom-simulate 17 KMS boundary cases. The allowed paths are project Lambda
-contexts for the required and optional role types, an SSM-mediated project
+contexts for the four required role types, an SSM-mediated project
 parameter, and Secrets Manager-mediated project DB/tenant secrets from the
 server or bootstrap ECS execution-role type. Direct service-context use,
 foreign/cross-region service paths, task/Lambda roles presenting a secret
