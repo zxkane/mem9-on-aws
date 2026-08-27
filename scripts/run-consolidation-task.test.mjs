@@ -24,18 +24,59 @@ function runFixture({
   exitCode = "0",
   marker = true,
   digestEnabled = false,
+  statusSequence = ["STOPPED"],
+  sleepAdvanceSeconds,
+  sleepAdvanceSequence,
+  waitSeconds,
+  runFailures = [],
+  failCommand,
+  failureStderr = "",
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "mem9-consolidation-runner-"));
   temporaryPaths.push(directory);
   const bin = join(directory, "bin");
   const calls = join(directory, "calls.jsonl");
+  const statusIndex = join(directory, "status-index");
+  const bashEnv = join(directory, "bash-env");
+  const clock = join(directory, "clock");
   mkdirSync(bin);
+  writeFileSync(calls, "");
+  writeFileSync(statusIndex, "0");
+  writeFileSync(clock, "4102444800");
+  writeFileSync(
+    bashEnv,
+    `MOCK_SLEEP_INDEX=0
+sleep() {
+  local advance="\${MOCK_SLEEP_ADVANCE_SECONDS:-$1}"
+  if [[ -n "\${MOCK_SLEEP_ADVANCE_SEQUENCE:-}" ]]; then
+    local -a advances
+    IFS=',' read -r -a advances <<<"$MOCK_SLEEP_ADVANCE_SEQUENCE"
+    advance="\${advances[$MOCK_SLEEP_INDEX]:-$1}"
+    MOCK_SLEEP_INDEX=$((MOCK_SLEEP_INDEX + 1))
+  fi
+  local current
+  current=$(<"$MOCK_CLOCK")
+  printf '%s' "$((current + advance))" >"$MOCK_CLOCK"
+}
+`,
+  );
+  writeFileSync(
+    join(bin, "date"),
+    `#!/usr/bin/env bash
+if [[ "\${1:-}" == "+%s" ]]; then
+  cat "$MOCK_CLOCK"
+else
+  /bin/date "$@"
+fi
+`,
+    { mode: 0o755 },
+  );
 
   const aws = join(bin, "aws");
   writeFileSync(
     aws,
     `#!/usr/bin/env node
-import { appendFileSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 appendFileSync(process.env.AWS_CALLS, JSON.stringify(args) + "\\n");
 const option = (name) => {
@@ -43,6 +84,13 @@ const option = (name) => {
   return index === -1 ? undefined : args[index + 1];
 };
 const command = args.slice(0, 2).join(" ");
+const failureKey = command === "ecs describe-tasks"
+  ? command + ":" + option("--query")
+  : command;
+if (failureKey === process.env.MOCK_FAIL_COMMAND) {
+  console.error(process.env.MOCK_FAILURE_STDERR);
+  process.exit(1);
+}
 if (command === "ssm get-parameters") {
   const names = args.slice(args.indexOf("--names") + 1, args.indexOf("--region"));
   const values = {
@@ -60,15 +108,21 @@ if (command === "ssm get-parameters") {
     })),
   }));
 } else if (command === "ecs run-task") {
+  const failures = JSON.parse(process.env.MOCK_RUN_FAILURES);
   console.log(JSON.stringify({
-    failures: [],
-    tasks: [{
+    failures,
+    tasks: failures.length === 0 ? [{
       taskArn: "arn:aws:ecs:ap-northeast-1:123456789012:task/mem9-preview-cluster/task-123",
-    }],
+    }] : [],
   }));
 } else if (command === "ecs describe-tasks") {
   const query = option("--query");
-  if (query?.includes("lastStatus")) console.log("STOPPED");
+  if (query?.includes("lastStatus")) {
+    const statuses = JSON.parse(process.env.MOCK_STATUS_SEQUENCE);
+    const index = Number(readFileSync(process.env.MOCK_STATUS_INDEX, "utf8"));
+    console.log(statuses[Math.min(index, statuses.length - 1)]);
+    writeFileSync(process.env.MOCK_STATUS_INDEX, String(index + 1));
+  }
   else if (query?.includes("exitCode")) console.log(process.env.MOCK_EXIT_CODE);
   else if (query?.includes("stoppedReason")) console.log("Essential container in task exited");
   else console.log(JSON.stringify({ tasks: [] }));
@@ -95,20 +149,36 @@ if (command === "ssm get-parameters") {
     { mode: 0o755 },
   );
   chmodSync(aws, 0o755);
-  const sleep = join(bin, "sleep");
-  writeFileSync(sleep, "#!/usr/bin/env bash\nexit 0\n", { mode: 0o755 });
 
+  const env = {
+    ...process.env,
+    AWS_CALLS: calls,
+    BASH_ENV: bashEnv,
+    MOCK_EXIT_CODE: exitCode,
+    MOCK_DIGEST_ENABLED: String(digestEnabled),
+    MOCK_CLOCK: clock,
+    MOCK_FAIL_COMMAND: failCommand ?? "",
+    MOCK_FAILURE_STDERR: failureStderr,
+    MOCK_MARKER: String(marker),
+    MOCK_RUN_FAILURES: JSON.stringify(runFailures),
+    MOCK_STATUS_INDEX: statusIndex,
+    MOCK_STATUS_SEQUENCE: JSON.stringify(statusSequence),
+    PATH: `${bin}${delimiter}${process.env.PATH}`,
+    STAGE: "pr-103",
+  };
+  delete env.CONSOLIDATION_TASK_WAIT_SECONDS;
+  if (waitSeconds !== undefined) {
+    env.CONSOLIDATION_TASK_WAIT_SECONDS = String(waitSeconds);
+  }
+  if (sleepAdvanceSeconds !== undefined) {
+    env.MOCK_SLEEP_ADVANCE_SECONDS = String(sleepAdvanceSeconds);
+  }
+  if (sleepAdvanceSequence !== undefined) {
+    env.MOCK_SLEEP_ADVANCE_SEQUENCE = sleepAdvanceSequence.join(",");
+  }
   const result = spawnSync("bash", [script], {
     encoding: "utf8",
-    env: {
-      ...process.env,
-      AWS_CALLS: calls,
-      MOCK_EXIT_CODE: exitCode,
-      MOCK_DIGEST_ENABLED: String(digestEnabled),
-      MOCK_MARKER: String(marker),
-      PATH: `${bin}${delimiter}${process.env.PATH}`,
-      STAGE: "pr-103",
-    },
+    env,
   });
   const callRecords = readFileSync(calls, "utf8")
     .trim()
@@ -118,12 +188,25 @@ if (command === "ssm get-parameters") {
   return { callRecords, result };
 }
 
+function expectOutputOmits(result, forbiddenValues) {
+  const output = `${result.stdout}\n${result.stderr}`;
+  for (const value of forbiddenValues) {
+    expect(output).not.toContain(value);
+  }
+}
+
 describe("report-only consolidation ECS runner", () => {
   it("TC-CONSOL-040/041: forces report-only and reads only the exact task marker", () => {
     const { callRecords, result } = runFixture();
     expect(result.status, result.stderr).toBe(0);
     expect(result.stdout).toContain("CONSOLIDATION_REVIEW_LIST");
     expect(result.stdout).toContain('"digestEnabled":false');
+    expectOutputOmits(result, [
+      "task-123",
+      "arn:aws",
+      "123456789012",
+      "Essential container in task exited",
+    ]);
 
     const runCalls = callRecords.filter(
       ([service, operation]) => service === "ecs" && operation === "run-task",
@@ -151,6 +234,23 @@ describe("report-only consolidation ECS runner", () => {
     expect(JSON.stringify(overrides)).not.toContain(
       "MEM9_CONSOLIDATION_SCHEDULED",
     );
+    expect(runCalls[0]).toEqual(
+      expect.arrayContaining([
+        "--task-definition",
+        "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-consolidation:7",
+      ]),
+    );
+    expect(
+      JSON.parse(
+        runCalls[0][runCalls[0].indexOf("--network-configuration") + 1],
+      ),
+    ).toEqual({
+      awsvpcConfiguration: {
+        subnets: ["subnet-a", "subnet-b"],
+        securityGroups: ["sg-consolidation"],
+        assignPublicIp: "DISABLED",
+      },
+    });
 
     const logCall = callRecords.find(
       ([service, operation]) =>
@@ -178,6 +278,130 @@ describe("report-only consolidation ECS runner", () => {
           service === "logs" && operation === "filter-log-events",
       ),
     ).toHaveLength(6);
+  });
+
+  it("TC-CONSOL-080: tolerates a production-sized task beyond 20 minutes", () => {
+    const { callRecords, result } = runFixture({
+      statusSequence: [
+        "RUNNING",
+        "RUNNING",
+        "RUNNING",
+        "RUNNING",
+        "RUNNING",
+        "RUNNING",
+        "RUNNING",
+        "RUNNING",
+        "STOPPED",
+      ],
+      sleepAdvanceSeconds: 600,
+    });
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain(
+      'CONSOLIDATION_REVIEW_LIST {"stage":"pr-103","reportOnly":true,"reviewItems":0,"digestEnabled":false}',
+    );
+    expect(
+      callRecords.filter(
+        ([service, operation, ...args]) =>
+          service === "ecs" &&
+          operation === "describe-tasks" &&
+          args.includes("tasks[0].lastStatus"),
+      ),
+    ).toHaveLength(9);
+  });
+
+  it("TC-CONSOL-081: validates the bounded wait before any AWS call", () => {
+    for (const waitSeconds of ["", "0", "59", "43201", "1.5", "invalid"]) {
+      const invalid = runFixture({ waitSeconds });
+      expect(invalid.result.status).toBe(1);
+      expect(invalid.callRecords).toEqual([]);
+      expect(invalid.result.stderr).toContain(
+        "CONSOLIDATION_TASK_WAIT_SECONDS must be an integer from 60 to 43200",
+      );
+    }
+
+    for (const waitSeconds of ["60", "3600", "43200"]) {
+      const valid = runFixture({ waitSeconds });
+      expect(valid.result.status, valid.result.stderr).toBe(0);
+    }
+  });
+
+  it("TC-CONSOL-082: rejects a non-zero final container exit", () => {
+    const { callRecords, result } = runFixture({ exitCode: "17" });
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("report-only consolidation exited 17");
+    expect(
+      callRecords.some(
+        ([service, operation]) =>
+          service === "logs" && operation === "filter-log-events",
+      ),
+    ).toBe(false);
+  });
+
+  it("TC-CONSOL-083: expires at the default bound without stopping or leaking the task", () => {
+    const timedOut = runFixture({
+      statusSequence: ["RUNNING", "RUNNING", "STOPPED"],
+      sleepAdvanceSequence: [43199, 1],
+    });
+    expect(timedOut.result.status).toBe(1);
+    expect(timedOut.result.stderr).toContain(
+      "did not stop within 43200s; task remains running",
+    );
+    expect(
+      timedOut.callRecords.filter(
+        ([service, operation, ...args]) =>
+          service === "ecs" &&
+          operation === "describe-tasks" &&
+          args.includes("tasks[0].lastStatus"),
+      ),
+    ).toHaveLength(2);
+    expect(
+      timedOut.callRecords.some(
+        ([service, operation]) =>
+          (service === "ecs" && operation === "stop-task") ||
+          (service === "logs" && operation === "filter-log-events"),
+      ),
+    ).toBe(false);
+    expectOutputOmits(timedOut.result, [
+      "task-123",
+      "arn:aws",
+      "123456789012",
+    ]);
+
+    const failedStart = runFixture({
+      runFailures: [{
+        arn: "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/private:9",
+        reason: "private failure detail",
+      }],
+    });
+    expect(failedStart.result.status).toBe(1);
+    expect(failedStart.result.stderr).toContain(
+      "run-task started no task (1 failure records)",
+    );
+    expectOutputOmits(failedStart.result, [
+      "private failure detail",
+      "arn:aws",
+      "123456789012",
+    ]);
+
+    for (const failCommand of [
+      "ssm get-parameters",
+      "ecs describe-tasks:tasks[0].containers[0].exitCode",
+      "ecs describe-task-definition",
+    ]) {
+      const failedRead = runFixture({
+        failCommand,
+        failureStderr:
+          "private error arn:aws:ecs:ap-northeast-1:123456789012:task/task-123",
+      });
+      expect(failedRead.result.status).toBe(1);
+      expectOutputOmits(failedRead.result, [
+        "private error",
+        "task-123",
+        "arn:aws",
+        "123456789012",
+      ]);
+    }
   });
 });
 

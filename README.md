@@ -1157,7 +1157,10 @@ active memories with each other. The task always defaults to report-only.
 `--report-only --check-llm`, performs a content-free live Mantle smoke, waits
 for exit zero, and reads only its content-free `CONSOLIDATION_REVIEW_LIST`
 summary from the exact CloudWatch log stream. The harness requires the marker
-to report `digestEnabled: false`:
+to report `digestEnabled: false`. Its local observer budget defaults to twelve
+hours; set `CONSOLIDATION_TASK_WAIT_SECONDS` to an integer from 60 through
+43,200 to use a shorter bound. A timeout stops only the local observer and
+leaves the exact report-only ECS task running:
 
 ```bash
 STAGE=prod bash scripts/run-consolidation-task.sh
