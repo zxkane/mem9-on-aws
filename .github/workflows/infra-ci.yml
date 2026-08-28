@@ -41,6 +41,10 @@
 #                  database is additive_ready. Set to 1 only after the guarded
 #                  freeze/backfill/enforce run reaches constraints_complete and
 #                  namespace/group/M2M bindings have been reconciled.
+#   MEM9_TRANSPORT_SIGNING_ACTIVE_SLOT — active transport key slot, `a` or `b`.
+#   MEM9_TRANSPORT_SIGNING_SLOT_A_REVISION / SLOT_B_REVISION — increment only
+#                  the inactive slot, deploy, then switch the active slot and
+#                  deploy again. These selectors are non-secret.
 #   MEM9_DECISION_ARTIFACT_BUCKET — exact account-level bucket bootstrapped by
 #                  scripts/deploy-decision-artifact-bucket.sh. Unset uses
 #                  mem9-audit-<account-id>. The boundary must use the same value.
@@ -122,6 +126,9 @@ concurrency:
 env:
   ROLE_NAME: github-actions-mem9-on-aws
   MEM9_DECISION_ARTIFACT_BUCKET: ${{ vars.MEM9_DECISION_ARTIFACT_BUCKET }}
+  MEM9_TRANSPORT_SIGNING_ACTIVE_SLOT: ${{ vars.MEM9_TRANSPORT_SIGNING_ACTIVE_SLOT }}
+  MEM9_TRANSPORT_SIGNING_SLOT_A_REVISION: ${{ vars.MEM9_TRANSPORT_SIGNING_SLOT_A_REVISION }}
+  MEM9_TRANSPORT_SIGNING_SLOT_B_REVISION: ${{ vars.MEM9_TRANSPORT_SIGNING_SLOT_B_REVISION }}
   # The out-of-band ECR repo namespace (infra/cloudformation/ecr-repositories.yaml).
   # build-and-push-image builds four images under it: <ns>/mnemo-server,
   # <ns>/qwen3-embed, <ns>/bootstrap, <ns>/llm-proxy. Deploy stages reference

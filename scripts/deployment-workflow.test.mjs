@@ -409,6 +409,19 @@ describe("workflow integration", () => {
     );
   });
 
+  it("TC-GROUPNS-133: passes non-secret transport key slot controls to every deploy", () => {
+    const workflow = parse(readFileSync(workflowPath, "utf8"));
+    expect(workflow.env.MEM9_TRANSPORT_SIGNING_ACTIVE_SLOT).toBe(
+      "${{ vars.MEM9_TRANSPORT_SIGNING_ACTIVE_SLOT }}",
+    );
+    expect(workflow.env.MEM9_TRANSPORT_SIGNING_SLOT_A_REVISION).toBe(
+      "${{ vars.MEM9_TRANSPORT_SIGNING_SLOT_A_REVISION }}",
+    );
+    expect(workflow.env.MEM9_TRANSPORT_SIGNING_SLOT_B_REVISION).toBe(
+      "${{ vars.MEM9_TRANSPORT_SIGNING_SLOT_B_REVISION }}",
+    );
+  });
+
   it("runs the PostgreSQL durable-ingest integration suite in CI", () => {
     const workflow = readFileSync(workflowPath, "utf8");
     expect(workflow).toContain("bash scripts/run-ingest-queue-integration.sh");

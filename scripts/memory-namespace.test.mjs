@@ -12,14 +12,19 @@ import { delimiter, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 
 import {
+  deriveClientKey,
   deriveGroupKey,
   deriveHumanPrincipalKey,
+  deriveM2MPrincipalKey,
   readDesiredState,
   validateDesiredState,
 } from "./lib/memory-namespace.mjs";
 import { manageAccess } from "./manage-memory-access.mjs";
 import { assertMigrationPhase } from "./migrate-memory-namespaces.mjs";
-import { previewNamespaceDesiredState } from "./prepare-preview-memory-namespaces.mjs";
+import {
+  preparePreviewMemoryNamespaces,
+  previewNamespaceDesiredState,
+} from "./prepare-preview-memory-namespaces.mjs";
 import { reconcileNamespaces } from "./reconcile-memory-namespaces.mjs";
 
 function desired() {
@@ -269,6 +274,205 @@ describe("memory namespace operator config", () => {
       new Set(state.m2m_bindings.map(({ principal_key }) => principal_key))
         .size,
     ).toBe(3);
+  });
+
+  it("TC-GROUPNS-132: converges replaced PR fixture clients to the current A/B slots", async () => {
+    const issuer = "https://cognito-idp.example.com/pool";
+    const state = previewNamespaceDesiredState({
+      issuer,
+      defaultClientId: "default-client",
+      alpha: {
+        clientId: "alpha-client",
+        slug: "preview-alpha",
+        group: "memory-preview-alpha",
+      },
+      beta: {
+        clientId: "beta-client",
+        slug: "preview-beta",
+        group: "memory-preview-beta",
+      },
+    });
+    const namespaceIDs = new Map([
+      ["preview-alpha", "namespace-alpha"],
+      ["preview-beta", "namespace-beta"],
+    ]);
+    const principalIDs = new Map(
+      state.m2m_bindings.map(({ principal_key }, index) => [
+        principal_key,
+        `principal-${index + 1}`,
+      ]),
+    );
+    const queries = [];
+    const cognito = {
+      async send(command) {
+        if (command.constructor.name === "ListGroupsCommand") {
+          return {
+            Groups: state.namespaces.map(({ cognito_group }) => ({
+              GroupName: cognito_group,
+              Description: "Managed team memory namespace",
+            })),
+          };
+        }
+        throw new Error(
+          `unexpected Cognito command ${command.constructor.name}`,
+        );
+      },
+    };
+    const db = {
+      async query(sql, values = []) {
+        const text = String(sql);
+        queries.push({ text, values });
+        if (text.includes("INSERT INTO memory_namespaces")) {
+          return {
+            rowCount: 1,
+            rows: [{ namespace_id: namespaceIDs.get(values[1]) }],
+          };
+        }
+        if (text.includes("INSERT INTO memory_principals")) {
+          return {
+            rowCount: 1,
+            rows: [{ principal_id: principalIDs.get(values[1]) }],
+          };
+        }
+        if (
+          text.includes("FROM memory_m2m_namespace_bindings") &&
+          text.includes("WHERE client_key = $1")
+        ) {
+          return { rowCount: 0, rows: [] };
+        }
+        if (text.includes("NOT (binding.client_key = ANY")) {
+          return {
+            rowCount: 2,
+            rows: [
+              {
+                client_key: "a".repeat(64),
+                principal_id: "principal-stale-alpha",
+              },
+              {
+                client_key: "b".repeat(64),
+                principal_id: "principal-stale-beta",
+              },
+            ],
+          };
+        }
+        if (text.includes("SELECT slug, display_name, status")) {
+          return {
+            rows: state.namespaces.map(
+              ({ slug, display_name, status }) => ({
+                slug,
+                display_name,
+                status,
+              }),
+            ),
+          };
+        }
+        if (text.includes("binding.group_key")) {
+          return {
+            rows: state.namespaces.map(
+              ({
+                slug,
+                cognito_group,
+                default_role,
+                jit_enabled,
+                status,
+              }) => ({
+                group_key: deriveGroupKey(issuer, cognito_group),
+                namespace_slug: slug,
+                default_role,
+                jit_enabled,
+                status,
+              }),
+            ),
+          };
+        }
+        if (
+          text.includes("binding.client_key") &&
+          text.includes("principal.principal_key")
+        ) {
+          return {
+            rows: state.m2m_bindings.map(
+              ({
+                client_key,
+                principal_key,
+                namespace_slug,
+                role,
+                status,
+              }) => ({
+                client_key,
+                principal_key,
+                namespace_slug,
+                role,
+                status,
+                principal_status: status,
+                membership_role: role,
+                membership_status:
+                  status === "active" ? "active" : "revoked",
+              }),
+            ),
+          };
+        }
+        if (text.includes("FROM memory_namespace_migration_state")) {
+          return {
+            rowCount: 1,
+            rows: [{ phase: "constraints_complete" }],
+          };
+        }
+        return { rowCount: 1, rows: [] };
+      },
+    };
+
+    const result = await preparePreviewMemoryNamespaces({
+      db,
+      cognito,
+      issuer,
+      userPoolId: "pool",
+      stage: "pr-42",
+      desired: state,
+      migrationPath: "/unused.sql",
+    });
+
+    const staleLock = queries.find(({ text }) =>
+      text.includes("NOT (binding.client_key = ANY"),
+    );
+    expect(staleLock.values[0]).toEqual([
+      "namespace-alpha",
+      "namespace-beta",
+    ]);
+    expect(staleLock.values[1].toSorted()).toEqual(
+      [
+        deriveClientKey(issuer, "default-client"),
+        deriveClientKey(issuer, "alpha-client"),
+        deriveClientKey(issuer, "beta-client"),
+      ].toSorted(),
+    );
+    for (const fragment of [
+      "UPDATE memory_namespace_memberships",
+      "UPDATE memory_principals",
+      "DELETE FROM memory_m2m_namespace_bindings",
+    ]) {
+      const query = queries.find(
+        ({ text }) =>
+          text.includes(fragment) &&
+          text.includes("ANY($1::varchar[])"),
+      );
+      expect(query.values[0]).toEqual(
+        fragment.startsWith("DELETE")
+          ? ["a".repeat(64), "b".repeat(64)]
+          : ["principal-stale-alpha", "principal-stale-beta"],
+      );
+    }
+    expect(result.reconciliation.drift.total).toBe(0);
+    expect(
+      new Set(
+        state.m2m_bindings.map(({ principal_key }) => principal_key),
+      ),
+    ).toEqual(
+      new Set([
+        deriveM2MPrincipalKey(issuer, "default-client"),
+        deriveM2MPrincipalKey(issuer, "alpha-client"),
+        deriveM2MPrincipalKey(issuer, "beta-client"),
+      ]),
+    );
   });
 
   it("runs the live namespace gate without putting secrets or bearers in curl argv", async () => {

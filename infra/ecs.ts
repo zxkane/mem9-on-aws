@@ -394,16 +394,23 @@ export function ecs(
           MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS: "10000",
           MNEMO_NAMESPACE_EXACT_VECTOR_TIMEOUT: "2s",
           MNEMO_TRANSPORT_ISSUER: "gateway-target",
+          // Non-secret keyring digest. SSM values are injected only when a task
+          // starts, so changing this value creates a new task definition and
+          // guarantees the rolling service deployment consumes the new keyring.
+          MNEMO_TRANSPORT_SIGNING_REVISION:
+            namespaceIdentity.transportSigningRevision,
           // Bound prompt construction before the provider-boundary byte check.
           MNEMO_MAX_EXTRACTION_CONVERSATION_RUNES: String(MAX_EXTRACTION_CONVERSATION_RUNES),
         },
-        // Secret injection (== ECS `secrets: valueFrom`): the DB secret lands as an
-        // env var from Secrets Manager at task start. Never a literal in git.
+        // Secret injection (== ECS `secrets: valueFrom`): DB/tenant values come
+        // from Secrets Manager and the transport key comes from a stage-scoped
+        // SSM SecureString. Values never appear as literals in git or the task
+        // definition.
         ssm: {
           MEM9_DB_SECRET: dbSecretArn,
           MEM9_TENANT_ID: identity.tenantSecretArn,
           MNEMO_TRANSPORT_SIGNING_KEYS:
-            namespaceIdentity.transportSigningSecretArn,
+            namespaceIdentity.transportSigningParameterArn,
         },
         // Process liveness only: /healthz confirms the HTTP server is responding,
         // but intentionally does not probe Aurora, qwen3, the LLM proxy, or an
@@ -504,6 +511,8 @@ export function ecs(
         args.triggers = {
           ...(args.triggers ?? {}),
           taskTagPropagation: "v1",
+          transportSigningRevision:
+            namespaceIdentity.transportSigningRevision,
         };
         // Register the service in Cloud Map (§6a) so it gets the stable
         // `mnemo.mem9-<stage>.local` A record ECS keeps pointed at the task's

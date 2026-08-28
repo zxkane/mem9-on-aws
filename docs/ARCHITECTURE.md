@@ -94,10 +94,10 @@ whose credentials are available to application containers, from the
 which the ECS agent uses to start the task. This repository follows that split:
 
 - The task role is used by `llm-proxy` for Mantle inference.
-- The task execution role retrieves the referenced Secrets Manager value while
-  starting `mnemo-server`. AWS documents
-  `secretsmanager:GetSecretValue` on the execution role for task-definition
-  secret references.
+- The task execution role retrieves task-definition references from Secrets
+  Manager and Parameter Store while starting `mnemo-server`. AWS documents
+  `secretsmanager:GetSecretValue`, `ssm:GetParameters`, and `kms:Decrypt` on the
+  execution role for those secret references.
 
 ### LLM request path and IAM
 
@@ -242,6 +242,15 @@ arguments, and signs a separate 30-second transport envelope. It maps
 `X-API-Key`. `mnemo-server` accepts namespace identity only from a valid
 allowlisted transport issuer; a bare tenant key or forged derived headers do not
 grant namespace access.
+
+The stage transport keyring is an SSM SecureString with stable A/B slots and
+always contains both keys plus the active signing slot. Envelopes carry stable
+`kid` values `a` or `b`, so old and new tasks resolve a signature to the same
+key during a rolling deployment. A non-secret SHA-256 revision is included in
+the ECS task definition and service trigger because Parameter Store updates do
+not change an already running container. Operators rotate the inactive slot in
+one deployment, then switch the active slot in a second deployment, preserving
+verifier overlap throughout both rolling replacements.
 
 The [CUSTOM_JWT authorizer](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/inbound-jwt-authorizer.html)
 admits a validated token only when it has at least one of `mem9-mcp/read` or

@@ -233,12 +233,37 @@ export function parseSigningKeys(raw) {
   } catch {
     throw new Error("signing keys must be a JSON object");
   }
-  if (!isRecord(parsed) || typeof parsed.current !== "string") {
+  if (!isRecord(parsed)) {
+    throw new Error("signing keys must be a JSON object");
+  }
+
+  const keyIds = Object.hasOwn(parsed, "active")
+    ? ["a", "b"]
+    : ["current", "previous"];
+  const currentKid = Object.hasOwn(parsed, "active")
+    ? parsed.active
+    : "current";
+  if (
+    keyIds[0] === "a" &&
+    currentKid !== "a" &&
+    currentKid !== "b"
+  ) {
+    throw new Error("signing keys active slot must be a or b");
+  }
+  if (keyIds[0] === "current" && typeof parsed.current !== "string") {
     throw new Error("signing keys require current");
   }
   const keys = new Map();
-  for (const kid of ["current", "previous"]) {
-    if (parsed[kid] === undefined || parsed[kid] === "") continue;
+  for (const kid of keyIds) {
+    if (
+      parsed[kid] === undefined ||
+      parsed[kid] === ""
+    ) {
+      if (keyIds[0] === "a") {
+        throw new Error(`signing key ${kid} is required`);
+      }
+      continue;
+    }
     if (typeof parsed[kid] !== "string") {
       throw new Error(`signing key ${kid} is invalid`);
     }
@@ -253,7 +278,7 @@ export function parseSigningKeys(raw) {
     }
     keys.set(kid, key);
   }
-  return Object.freeze({ currentKid: "current", keys });
+  return Object.freeze({ currentKid, keys });
 }
 
 function signPayload(payload, keys) {

@@ -20,7 +20,9 @@ process.env.MEM9_IDENTITY_SIGNING_KEYS = JSON.stringify({
   current: Buffer.alloc(32, 4).toString("base64url"),
 });
 process.env.MEM9_TRANSPORT_SIGNING_KEYS = JSON.stringify({
-  current: Buffer.alloc(32, 5).toString("base64url"),
+  active: "a",
+  a: Buffer.alloc(32, 5).toString("base64url"),
+  b: Buffer.alloc(32, 6).toString("base64url"),
 });
 process.env.MEM9_TRANSPORT_ISSUER = "gateway-target";
 

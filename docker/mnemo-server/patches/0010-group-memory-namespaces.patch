@@ -1135,10 +1135,10 @@ index 0000000000000000000000000000000000000000..5f9086051b796ea9e253f7ec69fe524b
 +		return nil, fmt.Errorf("parse MNEMO_TRANSPORT_SIGNING_KEYS: %w", err)
 +	}
 +	keys := make(map[string][]byte, len(encoded))
-+	for _, kid := range []string{"current", "previous"} {
++	for _, kid := range []string{"a", "b"} {
 +		value := encoded[kid]
 +		if value == "" {
-+			continue
++			return nil, fmt.Errorf("transport signing key %s is required", kid)
 +		}
 +		key, err := base64.RawURLEncoding.DecodeString(value)
 +		if err != nil || len(key) < 32 {
@@ -1146,8 +1146,8 @@ index 0000000000000000000000000000000000000000..5f9086051b796ea9e253f7ec69fe524b
 +		}
 +		keys[kid] = key
 +	}
-+	if len(keys["current"]) == 0 {
-+		return nil, errors.New("transport signing key current is required")
++	if len(keys["a"]) == 0 {
++		return nil, errors.New("transport signing key a is required")
 +	}
 +	return &NamespaceAuthorizer{
 +		issuer: issuer,
@@ -1544,7 +1544,7 @@ index 0000000000000000000000000000000000000000..fa6131f9ef929332ed0f8f26969c421f
 +	t.Helper()
 +	key := bytes.Repeat([]byte{7}, 32)
 +	raw, err := json.Marshal(map[string]string{
-+		"current": base64.RawURLEncoding.EncodeToString(key),
++		"a": base64.RawURLEncoding.EncodeToString(key), "b": base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{8}, 32)),
 +	})
 +	if err != nil {
 +		t.Fatal(err)
@@ -1574,7 +1574,7 @@ index 0000000000000000000000000000000000000000..fa6131f9ef929332ed0f8f26969c421f
 +	body := []byte(`{"content":"team fact"}`)
 +	digest := sha256.Sum256(body)
 +	payload := transportEnvelope{
-+		Version: 1, KeyID: "current", Issuer: "gateway-target",
++		Version: 1, KeyID: "a", Issuer: "gateway-target",
 +		IssuedAt: 1_787_875_200, ExpiresAt: 1_787_875_230,
 +		Method: http.MethodPost, Path: "/v1alpha2/mem9s/memories",
 +		BodyHash:     hex.EncodeToString(digest[:]),
@@ -1592,19 +1592,19 @@ index 0000000000000000000000000000000000000000..fa6131f9ef929332ed0f8f26969c421f
 +	}
 +}
 +
-+func TestNamespaceTransportAcceptsCurrentAndPreviousKeys(t *testing.T) {
-+	current := bytes.Repeat([]byte{7}, 32)
-+	previous := bytes.Repeat([]byte{8}, 32)
++func TestNamespaceTransportAcceptsStableSlotKeys(t *testing.T) {
++	slotA := bytes.Repeat([]byte{7}, 32)
++	slotB := bytes.Repeat([]byte{8}, 32)
 +	raw, _ := json.Marshal(map[string]string{
-+		"current":  base64.RawURLEncoding.EncodeToString(current),
-+		"previous": base64.RawURLEncoding.EncodeToString(previous),
++		"a": base64.RawURLEncoding.EncodeToString(slotA),
++		"b": base64.RawURLEncoding.EncodeToString(slotB),
 +	})
 +	authorizer, err := NewNamespaceAuthorizer("gateway-target", string(raw))
 +	if err != nil {
 +		t.Fatal(err)
 +	}
 +	authorizer.now = func() time.Time { return time.Unix(1_787_875_200, 0) }
-+	for kid, key := range map[string][]byte{"current": current, "previous": previous} {
++	for kid, key := range map[string][]byte{"a": slotA, "b": slotB} {
 +		digest := sha256.Sum256(nil)
 +		payload := transportEnvelope{
 +			Version: 1, KeyID: kid, Issuer: "gateway-target",
@@ -1636,7 +1636,7 @@ index 0000000000000000000000000000000000000000..fa6131f9ef929332ed0f8f26969c421f
 +	t.Helper()
 +	digest := sha256.Sum256(body)
 +	payload := transportEnvelope{
-+		Version: 1, KeyID: "current", Issuer: "gateway-target",
++		Version: 1, KeyID: "a", Issuer: "gateway-target",
 +		IssuedAt: 1_787_875_200, ExpiresAt: 1_787_875_230,
 +		Method: method, Path: path,
 +		BodyHash:      hex.EncodeToString(digest[:]),

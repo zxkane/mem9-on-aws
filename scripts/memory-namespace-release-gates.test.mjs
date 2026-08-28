@@ -38,11 +38,11 @@ describe("memory namespace coverage ownership map", () => {
     expect(inventory.kind).toBe("coverage_ownership_map");
   });
 
-  it("TC-GROUPNS-001..130: assigns every acceptance criterion exactly once", () => {
+  it("TC-GROUPNS-001..133: assigns every acceptance criterion exactly once", () => {
     const assigned = inventory.capabilities.flatMap(({ acceptance }) =>
       expandAcceptance(acceptance),
     );
-    const expected = Array.from({ length: 130 }, (_, index) =>
+    const expected = Array.from({ length: 133 }, (_, index) =>
       (index + 1).toString().padStart(3, "0"),
     );
 
@@ -152,7 +152,7 @@ describe("memory namespace coverage ownership map", () => {
       ...document.matchAll(/\bTC-GROUPNS-(\d{3})\b/g),
     ].map((match) => match[1]);
     const unique = [...new Set(documented)].toSorted();
-    const expected = Array.from({ length: 130 }, (_, index) =>
+    const expected = Array.from({ length: 133 }, (_, index) =>
       (index + 1).toString().padStart(3, "0"),
     );
 

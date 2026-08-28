@@ -72,10 +72,13 @@ function fakeTenantIdentity(): TenantIdentityOutputs {
 function fakeNamespaceIdentity(): NamespaceIdentityOutputs {
   return {
     identitySigningKeys: out('{"current":"identity"}'),
-    transportSigningKeys: out('{"current":"transport"}'),
-    transportSigningSecretArn: out(
-      "arn:aws:secretsmanager:x:y:secret:mem9-on-aws-prod-transport-z",
+    transportSigningKeys: out(
+      '{"active":"a","a":"transport-a","b":"transport-b"}',
     ),
+    transportSigningParameterArn: out(
+      "arn:aws:ssm:x:y:parameter/mem9-on-aws/prod/namespace/transport-signing-keys",
+    ),
+    transportSigningRevision: out("transport-revision"),
   } as unknown as NamespaceIdentityOutputs;
 }
 
@@ -445,6 +448,9 @@ describe("ecs stack", () => {
     // TC-ECS-COST-004: propagation applies only at task creation.
     expect(svcArgs.forceNewDeployment).toBe(true);
     expect(svcArgs.triggers).toMatchObject({ taskTagPropagation: "v1" });
+    expect(
+      materialize(svcArgs.triggers.transportSigningRevision),
+    ).toBe("transport-revision");
     // TC-ECS-COST-003: cost attribution must not disturb private discovery.
     expect(svcArgs.serviceRegistries).toBeDefined();
     expect(svcArgs.serviceRegistries.registryArn).toBeDefined();
@@ -604,6 +610,9 @@ describe("ecs stack", () => {
     expect(env.MNEMO_DURABLE_INGEST_ENABLED).toBe("1");
     expect(env.MNEMO_DURABLE_INGEST_METRIC_STAGE).toBe("prod");
     expect(env.MNEMO_NAMESPACE_REQUIRED).toBe("0");
+    expect(materialize(env.MNEMO_TRANSPORT_SIGNING_REVISION)).toBe(
+      "transport-revision",
+    );
     // GLM-5 request bound (TC-GLM-BOUND-020, issue #46): patch configuration
     // is explicit in ECS, not left to an image default.
     expect(env.MNEMO_MAX_EXTRACTION_CONVERSATION_RUNES).toBe("200000");
@@ -611,6 +620,9 @@ describe("ecs stack", () => {
     const ssm = mnemo.ssm as Record<string, unknown>;
     expect(ssm.MEM9_DB_SECRET).toBeDefined();
     expect(ssm.MEM9_TENANT_ID).toBeDefined();
+    expect(materialize(ssm.MNEMO_TRANSPORT_SIGNING_KEYS)).toBe(
+      "arn:aws:ssm:x:y:parameter/mem9-on-aws/prod/namespace/transport-signing-keys",
+    );
     // No plaintext password anywhere in env.
     for (const [k, v] of Object.entries(env)) {
       expect(k.toLowerCase()).not.toContain("password");

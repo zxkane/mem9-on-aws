@@ -24,6 +24,13 @@ const SIGNING_KEYS = {
   current: Buffer.alloc(32, 1).toString("base64url"),
   previous: Buffer.alloc(32, 2).toString("base64url"),
 };
+const TRANSPORT_SLOT_A = Buffer.alloc(32, 3).toString("base64url");
+const TRANSPORT_SLOT_B = Buffer.alloc(32, 4).toString("base64url");
+const TRANSPORT_KEYS = {
+  active: "a",
+  a: TRANSPORT_SLOT_A,
+  b: TRANSPORT_SLOT_B,
+};
 
 function jwt(claims) {
   const encode = (value) =>
@@ -255,7 +262,7 @@ describe("canonical signed contexts", () => {
   });
 
   it("TC-GROUPNS-034/126: creates a separately signed target transport envelope", () => {
-    const keys = parseSigningKeys(JSON.stringify(SIGNING_KEYS));
+    const keys = parseSigningKeys(JSON.stringify(TRANSPORT_KEYS));
     const now = 1_787_875_200;
     const body = JSON.stringify({ content: "team fact" });
     const envelope = createTransportEnvelope({
@@ -304,5 +311,78 @@ describe("canonical signed contexts", () => {
     expect(decoded.body_hash).toBe(
       createHash("sha256").update(body).digest("hex"),
     );
+    expect(decoded.kid).toBe("a");
+  });
+
+  it("TC-GROUPNS-133: stable slot IDs preserve both rolling-deploy overlap windows", () => {
+    const slotB2 = Buffer.alloc(32, 5).toString("base64url");
+    const identity = {
+      principal_key: "a".repeat(64),
+      principal_type: "m2m",
+      client_key: "b".repeat(64),
+      group_keys: [],
+    };
+    const request = {
+      issuer: "gateway-target",
+      method: "GET",
+      path: "/v1alpha2/mem9s/memories?q=rotation",
+      identity,
+      now: 1_787_875_200,
+    };
+
+    const initialVerifier = parseSigningKeys(
+      JSON.stringify(TRANSPORT_KEYS),
+    );
+    const preparedSigner = parseSigningKeys(
+      JSON.stringify({
+        active: "a",
+        a: TRANSPORT_SLOT_A,
+        b: slotB2,
+      }),
+    );
+    const preparedEnvelope = createTransportEnvelope({
+      ...request,
+      keys: preparedSigner,
+    });
+    expect(
+      verifyTransportEnvelope({
+        ...request,
+        envelope: preparedEnvelope,
+        keys: initialVerifier,
+      }).kid,
+    ).toBe("a");
+
+    const preparedVerifier = parseSigningKeys(
+      JSON.stringify({
+        active: "a",
+        a: TRANSPORT_SLOT_A,
+        b: slotB2,
+      }),
+    );
+    const activatedSigner = parseSigningKeys(
+      JSON.stringify({
+        active: "b",
+        a: TRANSPORT_SLOT_A,
+        b: slotB2,
+      }),
+    );
+    const activatedEnvelope = createTransportEnvelope({
+      ...request,
+      keys: activatedSigner,
+    });
+    expect(
+      verifyTransportEnvelope({
+        ...request,
+        envelope: activatedEnvelope,
+        keys: preparedVerifier,
+      }).kid,
+    ).toBe("b");
+
+    for (const invalid of [
+      { active: "current", a: TRANSPORT_SLOT_A, b: TRANSPORT_SLOT_B },
+      { active: "a", a: TRANSPORT_SLOT_A },
+    ]) {
+      expect(() => parseSigningKeys(JSON.stringify(invalid))).toThrow();
+    }
   });
 });

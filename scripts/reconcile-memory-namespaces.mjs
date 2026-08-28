@@ -198,7 +198,28 @@ export async function reconcileNamespaces({
   userPoolId,
   cognito,
   db,
+  authoritativeM2MNamespaceSlugs = [],
 }) {
+  if (!Array.isArray(authoritativeM2MNamespaceSlugs)) {
+    throw new Error("authoritative M2M namespace slugs must be an array");
+  }
+  const desiredNamespaceSlugs = new Set(
+    desired.namespaces.map(({ slug }) => slug),
+  );
+  const authoritativeM2MNamespaces = new Set(
+    authoritativeM2MNamespaceSlugs,
+  );
+  if (
+    authoritativeM2MNamespaces.size !==
+      authoritativeM2MNamespaceSlugs.length ||
+    [...authoritativeM2MNamespaces].some(
+      (slug) => !desiredNamespaceSlugs.has(slug),
+    )
+  ) {
+    throw new Error(
+      "authoritative M2M namespace slugs must be unique desired namespaces",
+    );
+  }
   const existingGroups = await listGroups(cognito, userPoolId);
   for (const item of desired.namespaces) {
     const description = "Managed team memory namespace";
@@ -346,6 +367,56 @@ export async function reconcileNamespaces({
           binding.client_key,
         ],
       );
+    }
+
+    if (authoritativeM2MNamespaces.size > 0) {
+      const authoritativeNamespaceIDs = [
+        ...authoritativeM2MNamespaces,
+      ].map((slug) => namespaceIDs.get(slug));
+      const desiredClientKeys = desired.m2m_bindings
+        .filter(({ namespace_slug }) =>
+          authoritativeM2MNamespaces.has(namespace_slug),
+        )
+        .map(({ client_key }) => client_key);
+      const staleBindings = await db.query(
+        `SELECT binding.client_key, binding.principal_id
+         FROM memory_m2m_namespace_bindings AS binding
+         WHERE binding.namespace_id = ANY($1::varchar[])
+           AND NOT (binding.client_key = ANY($2::varchar[]))
+         ORDER BY binding.client_key
+         FOR UPDATE`,
+        [authoritativeNamespaceIDs, desiredClientKeys],
+      );
+      if (staleBindings.rowCount > 0) {
+        const staleClientKeys = staleBindings.rows.map(
+          ({ client_key }) => client_key,
+        );
+        const stalePrincipalIDs = [
+          ...new Set(
+            staleBindings.rows.map(({ principal_id }) => principal_id),
+          ),
+        ];
+        await db.query(
+          `UPDATE memory_namespace_memberships
+           SET status = 'revoked',
+               revoked_at = statement_timestamp()
+           WHERE principal_id = ANY($1::varchar[])
+             AND status = 'active'`,
+          [stalePrincipalIDs],
+        );
+        await db.query(
+          `UPDATE memory_principals
+           SET status = 'disabled'
+           WHERE principal_id = ANY($1::varchar[])
+             AND principal_type = 'm2m'`,
+          [stalePrincipalIDs],
+        );
+        await db.query(
+          `DELETE FROM memory_m2m_namespace_bindings
+           WHERE client_key = ANY($1::varchar[])`,
+          [staleClientKeys],
+        );
+      }
     }
     await db.query("COMMIT");
     return {

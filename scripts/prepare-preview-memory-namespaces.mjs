@@ -104,7 +104,15 @@ export async function preparePreviewMemoryNamespaces({
     userPoolId,
     cognito,
     db,
+    authoritativeM2MNamespaceSlugs: desired.namespaces.map(
+      ({ slug }) => slug,
+    ),
   });
+  if (reconciliation.drift.total !== 0) {
+    throw new Error(
+      `preview namespace reconciliation did not converge: ${reconciliation.drift.total} drift items`,
+    );
+  }
   let phase = await migrationPhase(db);
   if (phase === "constraints_complete") {
     return { phase, reconciliation };

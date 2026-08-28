@@ -150,9 +150,14 @@ function fakeNamespaceIdentity(): NamespaceIdentityOutputs {
       JSON.stringify({ current: Buffer.alloc(32, 4).toString("base64url") }),
     ),
     transportSigningKeys: out(
-      JSON.stringify({ current: Buffer.alloc(32, 5).toString("base64url") }),
+      JSON.stringify({
+        active: "a",
+        a: Buffer.alloc(32, 5).toString("base64url"),
+        b: Buffer.alloc(32, 6).toString("base64url"),
+      }),
     ),
-    transportSigningSecretArn: out("arn:transport-secret"),
+    transportSigningParameterArn: out("arn:transport-parameter"),
+    transportSigningRevision: out("transport-revision"),
   } as unknown as NamespaceIdentityOutputs;
 }
 function only(kind: string) {

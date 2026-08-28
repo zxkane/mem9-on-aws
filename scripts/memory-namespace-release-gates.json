@@ -142,12 +142,24 @@
     {
       "id": "team-review-hardening",
       "state": "enabled_v1",
-      "acceptance": ["115-130"],
+      "acceptance": ["115-130", "132"],
       "verification": [
         "infra/gateway/namespace-auth.test.mjs",
         "scripts/memory-namespace.test.mjs",
         "docker/mnemo-server/patches/0010-group-memory-namespaces.patch",
         "scripts/run-ingest-queue-integration.sh"
+      ]
+    },
+    {
+      "id": "transport-key-delivery",
+      "state": "enabled_v1",
+      "acceptance": ["131", "133"],
+      "verification": [
+        "infra/gateway/namespace-auth.test.mjs",
+        "infra/namespace-identity.test.ts",
+        "infra/ecs.test.ts",
+        ".github/workflows/infra-ci.yml",
+        "scripts/deployment-workflow.test.mjs"
       ]
     }
   ]
