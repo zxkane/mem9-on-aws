@@ -8,18 +8,53 @@
 
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
+import {
+  INTERNAL_AUTH_FIELD,
+  createInternalContext,
+  parseSigningKeys,
+} from "./namespace-auth.mjs";
+
 process.env.MEM9_SERVER_BASE_URL = "http://mnemo.mem9-test.local:8080";
 process.env.MEM9_API_KEY = "test-tenant-id";
-process.env.MEM9_TOOL_SCOPES = JSON.stringify({
-  add_memory: "mem9-mcp/write",
-  search_memories: "mem9-mcp/read",
-  ingest_messages: "mem9-mcp/write",
-  get_ingest_job_status: "mem9-mcp/read",
+process.env.MEM9_IDENTITY_SIGNING_KEYS = JSON.stringify({
+  current: Buffer.alloc(32, 4).toString("base64url"),
 });
+process.env.MEM9_TRANSPORT_SIGNING_KEYS = JSON.stringify({
+  current: Buffer.alloc(32, 5).toString("base64url"),
+});
+process.env.MEM9_TRANSPORT_ISSUER = "gateway-target";
 
+const identityKeys = parseSigningKeys(process.env.MEM9_IDENTITY_SIGNING_KEYS);
+let rawHandler;
 let handler;
 beforeAll(async () => {
-  ({ handler } = await import("./proxy-handler.mjs"));
+  ({ handler: rawHandler } = await import("./proxy-handler.mjs"));
+  handler = (input, context) => {
+    const rawTool =
+      context?.clientContext?.Custom?.bedrockAgentCoreToolName ?? "";
+    const tool = rawTool.includes("___")
+      ? rawTool.slice(rawTool.lastIndexOf("___") + 3)
+      : rawTool;
+    const args = { ...(input ?? {}) };
+    delete args[INTERNAL_AUTH_FIELD];
+    return rawHandler(
+      {
+        ...args,
+        [INTERNAL_AUTH_FIELD]: createInternalContext({
+          invocation: { tool, arguments: args },
+          identity: {
+            issuer: "https://cognito-idp.example.invalid/pool",
+            principalType: "human",
+            subject: "human-subject",
+            clientId: "reader-client",
+            groups: ["team-a"],
+          },
+          keys: identityKeys,
+        }),
+      },
+      context,
+    );
+  };
 });
 
 // Capture the single fetch call and return an OK JSON response.
@@ -31,12 +66,6 @@ function mockFetchOk(body = { status: "accepted" }) {
   }));
   vi.stubGlobal("fetch", spy);
   return spy;
-}
-
-function token(scope) {
-  const encode = (value) =>
-    Buffer.from(JSON.stringify(value)).toString("base64url");
-  return `${encode({ alg: "none" })}.${encode({ scope })}.signature`;
 }
 
 // Build a fake Lambda context naming the tool the way AgentCore does.
@@ -64,6 +93,7 @@ describe("proxy-handler ingest_messages", () => {
     expect(url).toBe("http://mnemo.mem9-test.local:8080/v1alpha2/mem9s/memories");
     expect(init.method).toBe("POST");
     expect(init.headers["X-API-Key"]).toBe("test-tenant-id");
+    expect(init.headers["X-Mem9-Transport"]).toMatch(/^[^.]+\.[0-9a-f]{64}$/u);
     expect(init.headers["X-Mnemo-Agent-Id"]).toBe("claude-code-x");
     const sent = JSON.parse(init.body);
     expect(sent).toEqual({
@@ -99,29 +129,14 @@ describe("proxy-handler ingest_messages", () => {
 });
 
 describe("proxy-handler routing (regression)", () => {
-  it("routes AgentCore interceptor events before target invocation handling", async () => {
+  it("rejects interceptor events because identity and target Lambdas are split", async () => {
     const spy = mockFetchOk();
-    const body = {
-      jsonrpc: "2.0",
-      id: 1,
-      method: "tools/call",
-      params: {
-        name: "test-mem9-rest___search_memories",
-        arguments: { q: "arm64" },
-      },
-    };
-    const result = await handler({
-      interceptorInputVersion: "1.0",
-      mcp: {
-        gatewayRequest: {
-          headers: {
-            Authorization: `Bearer ${token("mem9-mcp/read")}`,
-          },
-          body,
-        },
-      },
-    });
-    expect(result.mcp.transformedGatewayRequest.body).toEqual(body);
+    await expect(
+      rawHandler(
+        { interceptorInputVersion: "1.0", mcp: {} },
+        ctx("search_memories"),
+      ),
+    ).rejects.toThrow(/internal context/u);
     expect(spy).not.toHaveBeenCalled();
   });
 
@@ -132,6 +147,7 @@ describe("proxy-handler routing (regression)", () => {
     expect(url).toBe("http://mnemo.mem9-test.local:8080/v1alpha2/mem9s/memories");
     expect(init.method).toBe("POST");
     expect(JSON.parse(init.body)).toEqual({ content: "one fact", agent_id: "a" });
+    expect(init.body).not.toContain(INTERNAL_AUTH_FIELD);
   });
 
   it("search_memories GETs with the query string", async () => {
@@ -147,6 +163,31 @@ describe("proxy-handler routing (regression)", () => {
   it("throws on an unknown tool", async () => {
     mockFetchOk();
     await expect(handler({}, ctx("delete_everything"))).rejects.toThrow(/unknown tool/);
+  });
+
+  it("TC-GROUPNS-030/034: rejects a tampered context before fetch", async () => {
+    const spy = mockFetchOk();
+    const tool = "search_memories";
+    const args = { q: "arm64" };
+    const context = structuredClone(createInternalContext({
+      invocation: { tool, arguments: args },
+      identity: {
+        issuer: "https://cognito-idp.example.invalid/pool",
+        principalType: "human",
+        subject: "human-subject",
+        clientId: "reader-client",
+        groups: ["team-a"],
+      },
+      keys: identityKeys,
+    }));
+    context.request_hash = "0".repeat(64);
+    await expect(
+      rawHandler(
+        { ...args, [INTERNAL_AUTH_FIELD]: context },
+        ctx(tool),
+      ),
+    ).rejects.toThrow(/request hash|signature/u);
+    expect(spy).not.toHaveBeenCalled();
   });
 });
 

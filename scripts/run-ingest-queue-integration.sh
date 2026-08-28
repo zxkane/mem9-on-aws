@@ -19,7 +19,7 @@ docker run -d \
   -e POSTGRES_PASSWORD=test \
   -e POSTGRES_DB=mem9_queue \
   -p 127.0.0.1::5432 \
-  postgres:17-alpine >/dev/null
+  pgvector/pgvector:pg17 >/dev/null
 
 for attempt in $(seq 1 60); do
   # The image starts a temporary server before creating POSTGRES_DB, then
@@ -39,6 +39,8 @@ for attempt in $(seq 1 60); do
   fi
   sleep 1
 done
+
+docker cp "$ROOT/docker/bootstrap/." "$CONTAINER:/bootstrap"
 
 apply_migration() {
   local database=$1
@@ -188,21 +190,47 @@ docker exec "$CONTAINER" psql -qAt -v ON_ERROR_STOP=1 -U postgres -d mem9_queue_
   -c "SELECT count(*) FROM ingest_jobs WHERE tenant_id = ''" |
   grep -qx "2"
 
+# Full namespace schema: this is the template cloned by the patched Go
+# integration tests. Apply the additive schema twice, advance an empty database
+# through the explicit enforcement migration twice, and then run every server
+# package against that exact constrained shape.
+docker exec "$CONTAINER" \
+  psql -q -v ON_ERROR_STOP=1 -U postgres -d postgres \
+  -c "CREATE DATABASE mem9_namespace_test"
+docker exec "$CONTAINER" \
+  psql -q -v ON_ERROR_STOP=1 -U postgres -d mem9_namespace_test \
+  -f /bootstrap/schema.sql
+docker exec "$CONTAINER" \
+  psql -q -v ON_ERROR_STOP=1 -U postgres -d mem9_namespace_test \
+  -f /bootstrap/migrations/002_memory_namespaces.sql
+PORT=$(docker port "$CONTAINER" 5432/tcp | head -n 1 | awk -F: '{print $NF}')
+export MNEMO_TEST_POSTGRES_DSN="postgres://postgres:test@127.0.0.1:${PORT}/mem9_namespace_test?sslmode=disable"
+MNEMO_DSN="$MNEMO_TEST_POSTGRES_DSN" \
+  node "$ROOT/scripts/migrate-memory-namespaces.mjs" freeze
+MEM9_LEGACY_NAMESPACE_ID="60000000-0000-4000-8000-000000000201" \
+MEM9_LEGACY_SERVICE_PRINCIPAL_ID="70000000-0000-4000-8000-000000000201" \
+MEM9_SHARED_HISTORY_ACKNOWLEDGEMENT="I_ACKNOWLEDGE_EXISTING_MEMORY_IS_SHARED_TEAM_HISTORY" \
+MNEMO_DSN="$MNEMO_TEST_POSTGRES_DSN" \
+  node "$ROOT/scripts/migrate-memory-namespaces.mjs" backfill \
+    --stage ci \
+    --namespace integration-team \
+    --display-name "Integration Team"
+MNEMO_DSN="$MNEMO_TEST_POSTGRES_DSN" \
+  node "$ROOT/scripts/migrate-memory-namespaces.mjs" enforce
+MNEMO_DSN="$MNEMO_TEST_POSTGRES_DSN" \
+  node "$ROOT/scripts/migrate-memory-namespaces.mjs" enforce
+
 git -C "$TMP_DIR" init -q upstream
 git -C "$TMP_DIR/upstream" remote add origin https://github.com/mem9-ai/mem9.git
 git -C "$TMP_DIR/upstream" fetch -q --depth 1 origin "$MEM9_REF"
 git -C "$TMP_DIR/upstream" checkout -q FETCH_HEAD
 git -C "$TMP_DIR/upstream" apply "$ROOT"/docker/mnemo-server/patches/*.patch
-
-PORT=$(docker port "$CONTAINER" 5432/tcp | head -n 1 | awk -F: '{print $NF}')
-export MNEMO_TEST_POSTGRES_DSN="postgres://postgres:test@127.0.0.1:${PORT}/mem9_queue?sslmode=disable"
+QUERY_INVENTORY_ARGS=(--upstream "$TMP_DIR/upstream")
+if [[ "${MEM9_WRITE_QUERY_INVENTORY:-0}" == "1" ]]; then
+  QUERY_INVENTORY_ARGS+=(--write)
+fi
+node "$ROOT/scripts/verify-memory-namespace-query-inventory.mjs" \
+  "${QUERY_INVENTORY_ARGS[@]}"
 
 cd "$TMP_DIR/upstream/server"
-go test -count=1 \
-  ./internal/repository \
-  ./internal/repository/postgres \
-  ./internal/ingestqueue \
-  ./internal/handler \
-  ./internal/service \
-  ./internal/config \
-  ./cmd/mnemo-server
+go test -count=1 ./...

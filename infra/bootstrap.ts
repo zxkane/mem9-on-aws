@@ -23,6 +23,7 @@ import type { DbOutputs } from "./db";
 import { ecrImage } from "./ecr";
 import { resolveVpc } from "./vpc";
 import type { TenantIdentityOutputs } from "./tenant-identity";
+import type { CognitoOutputs } from "./cognito";
 
 const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 
@@ -41,10 +42,25 @@ export function bootstrap(
   cluster: sst.aws.Cluster,
   dbOut: DbOutputs,
   identity: TenantIdentityOutputs,
+  cognito: CognitoOutputs,
 ): BootstrapOutputs {
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const tags = { Project: "mem9-on-aws", Stage: $app.stage, ManagedBy: "sst" };
   const { privateSubnetIds } = resolveVpc();
+  const region = aws.getRegionOutput().name;
+  const [previewAlpha, previewBeta] = cognito.previewNamespaceClients;
+  const previewNamespaceFixtures =
+    cognito.previewNamespaceClients.length === 2
+      ? {
+          MEM9_PREVIEW_NAMESPACE_DEFAULT_CLIENT_ID: cognito.clientId,
+          MEM9_PREVIEW_NAMESPACE_ALPHA_CLIENT_ID: previewAlpha.clientId,
+          MEM9_PREVIEW_NAMESPACE_ALPHA_SLUG: previewAlpha.namespaceSlug,
+          MEM9_PREVIEW_NAMESPACE_ALPHA_GROUP: previewAlpha.cognitoGroup,
+          MEM9_PREVIEW_NAMESPACE_BETA_CLIENT_ID: previewBeta.clientId,
+          MEM9_PREVIEW_NAMESPACE_BETA_SLUG: previewBeta.namespaceSlug,
+          MEM9_PREVIEW_NAMESPACE_BETA_GROUP: previewBeta.cognitoGroup,
+        }
+      : undefined;
 
   const image = ecrImage("mem9-on-aws/bootstrap", IMAGE_TAG);
 
@@ -58,9 +74,18 @@ export function bootstrap(
     memory: "0.5 GB",
     image,
     environment: {
+      // Workflow compatibility marker. The PR deploy path inspects an existing
+      // task definition before deciding whether it can safely resume namespace
+      // cutover in required mode or must first deploy this compatible revision.
+      MEM9_NAMESPACE_BOOTSTRAP_VERSION: "1",
       MEM9_DB_HOST: dbOut.host,
       MEM9_DB_PORT: dbOut.port.apply((p) => String(p)),
       MEM9_DB_NAME: dbOut.database,
+      MEM9_STAGE: $app.stage,
+      MEM9_COGNITO_ISSUER: cognito.issuer,
+      MEM9_COGNITO_USER_POOL_ID: cognito.userPoolId,
+      AWS_REGION: region,
+      ...(previewNamespaceFixtures ?? {}),
     },
     // Secret injection (== ECS secrets valueFrom): the DB creds JSON + the tenant
     // id, both resolved from Secrets Manager at task start, never literals.
@@ -68,6 +93,20 @@ export function bootstrap(
       MEM9_DB_SECRET: dbOut.secretArn,
       MEM9_TENANT_ID: identity.tenantSecretArn,
     },
+    ...(previewNamespaceFixtures
+      ? {
+          permissions: [
+            {
+              actions: [
+                "cognito-idp:CreateGroup",
+                "cognito-idp:ListGroups",
+                "cognito-idp:UpdateGroup",
+              ],
+              resources: [cognito.userPoolArn],
+            },
+          ],
+        }
+      : {}),
     logging: { retention: "1 month" },
     transform: {
       taskDefinition: (args) => {

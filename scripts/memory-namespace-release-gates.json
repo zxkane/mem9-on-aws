@@ -1,0 +1,154 @@
+{
+  "version": 2,
+  "kind": "coverage_ownership_map",
+  "acceptance_document": "docs/test-cases/cognito-group-memory-namespaces.md",
+  "capabilities": [
+    {
+      "id": "group-routing",
+      "state": "enabled_v1",
+      "acceptance": ["001-010"],
+      "verification": [
+        "infra/gateway/namespace-auth.test.mjs",
+        "infra/namespace-identity.test.ts",
+        "scripts/run-ingest-queue-integration.sh"
+      ]
+    },
+    {
+      "id": "token-and-client-classification",
+      "state": "enabled_v1",
+      "acceptance": ["011-020"],
+      "verification": [
+        "infra/gateway/identity-interceptor.test.mjs",
+        "infra/gateway/namespace-auth.test.mjs",
+        "infra/oauth-facade.test.ts"
+      ]
+    },
+    {
+      "id": "derived-keys-and-privacy",
+      "state": "enabled_v1",
+      "acceptance": ["021-026"],
+      "verification": [
+        "infra/gateway/namespace-auth.test.mjs",
+        "scripts/memory-namespace.test.mjs"
+      ]
+    },
+    {
+      "id": "gateway-context-and-transport",
+      "state": "enabled_v1",
+      "acceptance": ["027-036"],
+      "verification": [
+        "infra/gateway/identity-interceptor.test.mjs",
+        "infra/gateway/namespace-auth.test.mjs",
+        "infra/gateway/proxy-handler.test.mjs",
+        "infra/gateway.test.ts",
+        "scripts/run-mcp-e2e.sh"
+      ]
+    },
+    {
+      "id": "control-plane-and-membership",
+      "state": "enabled_v1",
+      "acceptance": ["037-048"],
+      "verification": [
+        "infra/namespace-schema.test.ts",
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch",
+        "scripts/run-ingest-queue-integration.sh"
+      ]
+    },
+    {
+      "id": "access-management",
+      "state": "enabled_v1",
+      "acceptance": ["049-058"],
+      "verification": [
+        "scripts/memory-namespace.test.mjs",
+        "scripts/run-memory-namespace-integration.sh"
+      ]
+    },
+    {
+      "id": "schema-and-migration",
+      "state": "enabled_v1",
+      "acceptance": ["059-072"],
+      "verification": [
+        "infra/namespace-schema.test.ts",
+        "scripts/run-memory-namespace-integration.sh"
+      ]
+    },
+    {
+      "id": "memory-session-search",
+      "state": "enabled_v1",
+      "acceptance": ["073-083"],
+      "verification": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch",
+        "scripts/run-ingest-queue-integration.sh"
+      ]
+    },
+    {
+      "id": "durable-ingest",
+      "state": "enabled_v1",
+      "acceptance": ["084-095"],
+      "verification": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch",
+        "scripts/run-ingest-queue-integration.sh"
+      ]
+    },
+    {
+      "id": "query-inventory-and-analysis",
+      "state": "enabled_v1",
+      "acceptance": ["096", "105"],
+      "verification": [
+        "scripts/memory-namespace-query-inventory.test.mjs",
+        "scripts/verify-memory-namespace-query-inventory.mjs",
+        "scripts/memory-namespace-query-inventory.json"
+      ]
+    },
+    {
+      "id": "maintenance-paths",
+      "state": "disabled_v1",
+      "acceptance": ["097-101", "103-104"],
+      "verification": [
+        "sst.config.ts",
+        ".github/workflows/infra-ci.yml",
+        "scripts/memory-cleanup.mjs",
+        "scripts/memory-consolidation.mjs",
+        "scripts/memory-namespace-query-inventory.json",
+        "scripts/memory-namespace-release-gates.test.mjs"
+      ]
+    },
+    {
+      "id": "namespace-aware-slack-approval",
+      "state": "future_capability",
+      "acceptance": ["102"],
+      "verification": [
+        "docs/designs/cognito-group-memory-namespaces.md"
+      ]
+    },
+    {
+      "id": "rollout-rollback-and-operations",
+      "state": "enabled_v1",
+      "acceptance": ["106", "108-113"],
+      "verification": [
+        "scripts/run-memory-namespace-integration.sh",
+        "scripts/deployment-workflow.test.mjs",
+        "infra/ecs.test.ts"
+      ]
+    },
+    {
+      "id": "snapshot-and-restore-follow-up",
+      "state": "postdeploy_nonblocking",
+      "acceptance": ["107", "114"],
+      "verification": [
+        "docs/designs/cognito-group-memory-namespaces.md"
+      ]
+    },
+    {
+      "id": "team-review-hardening",
+      "state": "enabled_v1",
+      "acceptance": ["115-130"],
+      "verification": [
+        "infra/gateway/namespace-auth.test.mjs",
+        "scripts/memory-namespace.test.mjs",
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch",
+        "scripts/run-ingest-queue-integration.sh"
+      ]
+    }
+  ]
+}

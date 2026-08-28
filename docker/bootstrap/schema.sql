@@ -95,11 +95,30 @@ CREATE INDEX IF NOT EXISTS idx_updated ON memories(updated_at);
 -- FTS: matches FTSSearch's to_tsvector('english', content) expression exactly.
 CREATE INDEX IF NOT EXISTS idx_memories_fts
     ON memories USING GIN (to_tsvector('english', content));
--- pgvector ANN index for cosine (embedding <=> $q). HNSW is the pgvector default
--- for good recall/latency; vector_cosine_ops matches mem9's `<=>` cosine operator.
--- Built even while empty; pgvector fills it as rows arrive.
-CREATE INDEX IF NOT EXISTS idx_memories_embedding
-    ON memories USING hnsw (embedding vector_cosine_ops);
+-- pgvector ANN index for compatibility mode. Namespace enforcement drops this
+-- tenant-wide index because post-filtered ANN candidates are not a valid
+-- isolation boundary. A later idempotent bootstrap must not recreate it after
+-- constraints_complete.
+DO $$
+DECLARE
+    namespace_enforced BOOLEAN := FALSE;
+BEGIN
+    IF to_regclass('public.memory_namespace_migration_state') IS NOT NULL THEN
+        EXECUTE
+            'SELECT EXISTS (
+                 SELECT 1
+                 FROM memory_namespace_migration_state
+                 WHERE singleton_id
+                   AND phase = ''constraints_complete''
+             )'
+        INTO namespace_enforced;
+    END IF;
+    IF NOT namespace_enforced THEN
+        CREATE INDEX IF NOT EXISTS idx_memories_embedding
+            ON memories USING hnsw (embedding vector_cosine_ops);
+    END IF;
+END
+$$;
 
 -- mem9's updated_at auto-touch trigger (from TenantMemorySchemaPostgres).
 CREATE OR REPLACE FUNCTION update_updated_at() RETURNS TRIGGER AS $$
@@ -145,3 +164,6 @@ CREATE TRIGGER trg_upload_tasks_updated BEFORE UPDATE ON upload_tasks
 
 -- 5) Tenant-local durable ingest queue (disabled by default at runtime).
 \ir migrations/001_ingest_jobs.sql
+
+-- 6) Additive team-memory namespace control and data-plane columns.
+\ir migrations/002_memory_namespaces.sql

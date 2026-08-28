@@ -2,8 +2,9 @@
  * `gateway` stack — AgentCore Gateway MCP surface (§6/§6a), Lambda-proxy path.
  *
  * The globally-reachable, Cognito-authed MCP endpoint. Inbound = CUSTOM_JWT
- * (Cognito M2M). The target is a **Lambda-proxy GatewayTarget**: AgentCore invokes
- * a VPC-attached proxy Lambda (docker-less zip, nodejs24.x) that reaches
+ * (Cognito M2M). A non-VPC identity interceptor classifies and signs the
+ * authenticated principal. The target is a **Lambda-proxy GatewayTarget**:
+ * AgentCore invokes a separate VPC-attached proxy Lambda (nodejs24.x) that reaches
  * mnemo-server PRIVATELY over Cloud Map DNS (`mnemo.mem9-<stage>.local:8080`),
  * injecting the X-API-Key (= tenant id). No ALB, ACM cert, or VPC Lattice is
  * deployed; Cloud Map owns the VPC-associated Route 53 private hosted zone.
@@ -20,8 +21,8 @@
  * bedrock-agentcore-control `CreateGatewayTarget` API (infra/gateway/
  * provision-target.mjs) with `targetConfiguration.mcp.lambda`. The Command wrapper
  * gives a create→poll-READY→delete lifecycle + a dependsOn edge on the Lambda.
- * The proxy Lambda also runs as the Gateway's request/response interceptor:
- * requests are authorized per tool and tools/list is filtered by OAuth scope.
+ * The target verifies the interceptor context and sends mnemo-server a
+ * separately signed, short-lived transport envelope.
  */
 
 import * as fs from "fs";
@@ -35,6 +36,7 @@ import {
 } from "./cognito";
 import type { EcsOutputs } from "./ecs";
 import type { TenantIdentityOutputs } from "./tenant-identity";
+import type { NamespaceIdentityOutputs } from "./namespace-identity";
 
 // @ts-ignore - `aws` injected globally by SST; bedrock/iam/ssm types loose.
 const awsAny = aws as unknown as Record<string, any>;
@@ -156,6 +158,7 @@ export function gateway(
   ecsOut: EcsOutputs,
   identity: TenantIdentityOutputs,
   readerClientId: Output<string>,
+  namespaceIdentity: NamespaceIdentityOutputs,
 ): GatewayOutputs {
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const stage = $app.stage;
@@ -175,7 +178,26 @@ export function gateway(
     : path.resolve(process.cwd(), "infra", "gateway");
   const tenantKey = identity.tenantId;
 
-  // --- Proxy Lambda (VPC-attached, nodejs24.x) ---
+  const identitySigningKeys = namespaceIdentity.identitySigningKeys;
+  const transportSigningKeys = namespaceIdentity.transportSigningKeys;
+  const clientRegistry = $jsonStringify({
+    human: [readerClientId],
+    m2m: cognitoOut.allowedClientIds,
+  });
+
+  // --- Identity interceptor Lambda (non-VPC, nodejs24.x) ---
+  const identityFn = new sst.aws.Function("Mem9IdentityInterceptorFn", {
+    handler: "infra/gateway/identity-interceptor.handler",
+    runtime: "nodejs24.x",
+    timeout: "10 seconds",
+    environment: {
+      MEM9_TOOL_SCOPES: JSON.stringify(MCP_TOOL_SCOPES),
+      MEM9_CLIENT_REGISTRY: clientRegistry,
+      MEM9_IDENTITY_SIGNING_KEYS: identitySigningKeys,
+    },
+  });
+
+  // --- Proxy target Lambda (VPC-attached, nodejs24.x) ---
   // An `sst.aws.Function` (not a raw aws.lambda.Function): SST zips the handler,
   // creates the exec role with the VPC-ENI + logs perms, and forces nodejs24.x via
   // the sst.config $transform. Attaches to the task SG (shares it with mnemo-server)
@@ -195,7 +217,9 @@ export function gateway(
     environment: {
       MEM9_SERVER_BASE_URL: $interpolate`http://${ecsOut.serviceDnsName}:${MNEMO_PORT}`,
       MEM9_API_KEY: tenantKey,
-      MEM9_TOOL_SCOPES: JSON.stringify(MCP_TOOL_SCOPES),
+      MEM9_IDENTITY_SIGNING_KEYS: identitySigningKeys,
+      MEM9_TRANSPORT_SIGNING_KEYS: transportSigningKeys,
+      MEM9_TRANSPORT_ISSUER: "gateway-target",
     },
   });
 
@@ -215,17 +239,25 @@ export function gateway(
     }),
     tags,
   });
-  // Least privilege: the gateway invokes the proxy Lambda AS THIS ROLE, so it needs
-  // only lambda:InvokeFunction on that one function. (No workload-identity / secret
+  // Least privilege: the gateway invokes the interceptor and target AS THIS ROLE,
+  // so it needs only lambda:InvokeFunction on those two functions. (No workload-identity / secret
   // / ENI grants — those were for the removed API-key credential provider + the
   // managed-Lattice ENI path.)
   const gatewayInvokePolicy = new awsAny.iam.RolePolicy("Mem9GatewayInvokeLambda", {
     role: gatewayServiceRole.name,
-    policy: proxyFn.arn.apply((arn: string) =>
-      JSON.stringify({
-        Version: "2012-10-17",
-        Statement: [{ Effect: "Allow", Action: "lambda:InvokeFunction", Resource: arn }],
-      }),
+    policy: proxyFn.arn.apply((proxyArn: string) =>
+      identityFn.arn.apply((identityArn: string) =>
+        JSON.stringify({
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Action: "lambda:InvokeFunction",
+              Resource: [identityArn, proxyArn],
+            },
+          ],
+        }),
+      ),
     ),
   });
 
@@ -256,7 +288,7 @@ export function gateway(
       interceptorConfigurations: [
         {
           interceptionPoints: ["REQUEST", "RESPONSE"],
-          interceptor: { lambda: { arn: proxyFn.arn } },
+          interceptor: { lambda: { arn: identityFn.arn } },
           inputConfiguration: { passRequestHeaders: true },
         },
       ],
@@ -287,7 +319,12 @@ export function gateway(
       // Re-run create (delete-then-recreate) when the gateway, the Lambda, or the
       // tool schema changes. A fire-once Command has no read/diff, so out-of-band
       // drift needs a trigger bump or `sst refresh`; a failed create always re-runs.
-      triggers: [bedrockGateway.gatewayId, proxyFn.arn, toolSchemaJson],
+      triggers: [
+        bedrockGateway.gatewayId,
+        identityFn.arn,
+        proxyFn.arn,
+        toolSchemaJson,
+      ],
       environment: {
         MEM9_TGT_REGION: region,
         MEM9_TGT_GATEWAY_ID: bedrockGateway.gatewayId,
@@ -299,7 +336,7 @@ export function gateway(
       },
     },
     {
-      dependsOn: [bedrockGateway, proxyFn],
+      dependsOn: [bedrockGateway, identityFn, proxyFn],
       // A `triggers` change (e.g. the tool schema) REPLACES this Command. Pulumi's
       // default replace order is create-new-THEN-delete-old — and because the create
       // step reuses an existing READY target, the new create was a no-op and the

@@ -220,21 +220,32 @@ The current inbound path is:
 
 ```text
 Cognito-authenticated MCP request
-  -> AgentCore Gateway Lambda target
-  -> proxy Lambda with nodejs24.x and VPC access
+  -> AgentCore Gateway CUSTOM_JWT authorizer
+  -> non-VPC identity interceptor Lambda
+  -> VPC proxy target Lambda with nodejs24.x
+  -> signed target-to-server transport envelope
   -> http://mnemo.mem9-<stage>.local:8080
-  -> mnemo-server
+  -> mnemo-server namespace middleware
 ```
 
 `infra/gateway.ts` grants the gateway service role
-`lambda:InvokeFunction` on the one proxy Lambda. The Lambda maps
+`lambda:InvokeFunction` on exactly the identity interceptor and proxy target.
+The interceptor classifies the validated Cognito client as human or M2M,
+requires an access token, derives privacy-preserving principal/client/group
+lookup keys, enforces OAuth tool scopes, and signs a request-bound internal
+context. It has no VPC, database credential, tenant key, or server network path.
+
+The proxy target verifies that context, strips caller authorization and internal
+arguments, and signs a separate 30-second transport envelope. It maps
 `add_memory`, `search_memories`, `ingest_messages`, and
 `get_ingest_job_status` to the mem9 REST API and injects the tenant
-`X-API-Key`. The same Lambda is the Gateway
-[REQUEST/RESPONSE interceptor](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-interceptors-types.html).
+`X-API-Key`. `mnemo-server` accepts namespace identity only from a valid
+allowlisted transport issuer; a bare tenant key or forged derived headers do not
+grant namespace access.
+
 The [CUSTOM_JWT authorizer](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/inbound-jwt-authorizer.html)
 admits a validated token only when it has at least one of `mem9-mcp/read` or
-`mem9-mcp/write`; the interceptor then requires `read` for `search_memories`
+`mem9-mcp/write`. The interceptor requires `read` for `search_memories`
 and `get_ingest_job_status`, requires `write` for `add_memory` and
 `ingest_messages`, and filters `tools/list` with the same mapping. Unknown
 tools and missing or malformed scope claims fail closed.
@@ -261,7 +272,8 @@ refresh therefore returns a replacement refresh token. If a non-rotating
 upstream legally omits one, the facade emits a token-free diagnostic and returns
 the submitted refresh token so clients that replace their stored response stay
 compatible. A malformed successful response that is not a JSON object instead
-fails with a token-free 502.
+fails with a token-free 502. The access-token lifetime is explicitly 15 minutes
+so a direct Cognito group change has a bounded stale-claim window.
 
 The OAuth facade accepts RFC 8252 loopback redirects by default. Hosted clients
 can be added per stage through the SST `OauthAllowedCallbackUrls` secret, whose
@@ -327,18 +339,72 @@ after deployment with `scripts/run-bootstrap-task.sh`. It:
 The task is idempotent and connects directly to the Aurora writer endpoint. It is
 not one of the three long-running application containers.
 
-The `mnemo-server` image contains the additive `ingest_jobs` migration and its
-entrypoint applies it before starting the server or worker. CI therefore uses
-one rollout with durable routing enabled, reconciles that healthy deployment,
-and then runs the bootstrap task for the complete schema and tenant seed. The
-bootstrap repeats the same migration after creating the memory schema, which
-also guarantees the memory-version backfill on a fresh environment.
+The `mnemo-server` image contains the complete base schema plus the additive
+migrations. Its entrypoint applies the base tables first and then includes
+`001_ingest_jobs.sql` and `002_memory_namespaces.sql` before starting the server
+or worker. This ordering makes first startup valid against an empty database.
+CI then runs the bootstrap task, which repeats the idempotent schema and seeds
+the tenant.
 The image applies the downstream patches in this fixed order:
 `0001-recall-min-confidence-tunables-and-zero-result-fallback`,
 `0002-ingest-durable-only-extraction-filter`, `0003-glm-request-bounds`,
 `0004-durable-ingest-queue`, `0005-atomic-ingest-apply`,
 `0006-durable-ingest-telemetry`, `0007-postgres-session-delete`, and
-`0008-ingest-prescreen-shadow`.
+`0008-ingest-prescreen-shadow`, `0009-if-match-precondition-fence`, and
+`0010-group-memory-namespaces`.
+
+The namespace release is additive by default. Bootstrap applies
+`002_memory_namespaces.sql`, creating the control plane plus nullable namespace
+columns and write-freeze triggers. `MEM9_NAMESPACE_REQUIRED` defaults to `0`,
+so the compatible release can start while the live database is still
+`additive_ready`. A private one-shot operator task performs preflight, freeze,
+catalog-verified concurrent index creation, embedding-preserving direct-SQL
+backfill, and `003_enforce_memory_namespaces.sql`. The backfill computes its
+ordered embedding digest inside PostgreSQL, stores the exact legacy seed
+binding, and rejects a retry with different IDs or metadata. The enforcement
+DDL runs as one bounded transaction and is rerun from its beginning after a
+rollback. Required mode is enabled only after the database records
+`constraints_complete`.
+
+Fresh `pr-N` stages exercise the complete switch without production inputs.
+Their bootstrap creates two synthetic namespaces and managed groups in the
+preview pool, binds temporary M2M clients in the same Aurora database, and
+advances the empty database to `constraints_complete`. CI redeploys the same
+revision with `MEM9_NAMESPACE_REQUIRED=1`, then hard-fails unless both clients
+recall their own marker, the default client recalls alpha's marker through its
+shared binding, and neither foreign-marker query returns the other namespace's
+marker. The PostgreSQL integration suite supplies the deterministic exhaustive
+isolation proof. The temporary clients, groups, namespaces, and database
+disappear with the preview stage.
+Subsequent runs inspect the deployed namespace-bootstrap version marker. A
+feature-aware task is invoked before a direct required-mode deployment; a
+legacy task receives the compatibility deployment first. This makes
+cancellation during cutover recoverable without restarting a completed
+namespace database in compatibility mode.
+
+Human routing uses exact Cognito group bindings, but Aurora memberships are the
+authorization source of truth. A human token must match exactly one configured
+group and one active membership; unrelated groups are ignored, ambiguous groups
+fail closed, and a revoked membership is never recreated by JIT. M2M clients use
+an explicit client/principal/namespace binding. Memory, session, job, plan,
+status, reconciliation, and worker paths carry an immutable namespace scope.
+Vector recall materializes and exactly ranks only the namespace subset, with a
+row ceiling and statement timeout; the tenant-wide HNSW index is removed during
+enforcement.
+
+Cleanup approval and consolidation are not synthesized by the namespace v1
+application graph. Their retained direct CLI entry points fail before creating
+production adapters, and
+upload processing, webhooks, and Space Chains remain unsupported. The production
+cutover requires a manual snapshot, queue drain, service scale-to-zero, operator
+migration, group/binding reconciliation, user assignment, required-mode deploy,
+and two-namespace smoke. The operator commands do not stop ECS or mutate Gateway
+traffic. The local runner does stop its own unfinished operator task on timeout
+or interruption and reattaches only to an active task with the same
+content-free operation fingerprint. It retains short-lived inputs when ECS
+cannot confirm `STOPPED`; the container forwards termination and force-kills an
+unresponsive child within the ECS stop window. See the README cutover runbook and
+`docs/designs/cognito-group-memory-namespaces.md`.
 Asynchronous `messages[]` ingest commits a canonical job before returning
 instead of launching the upstream untracked goroutine. Scope-level advisory
 locks serialize enqueue and claim, each claim attempt is a write-fencing
@@ -423,6 +489,13 @@ only for mem9's batch-import implementation; normal add, search, and CRUD paths
 do not require persistent task storage.
 
 ### Weekly memory consolidation
+
+Namespace v1 disables this complete resource graph. The implementation below is
+retained for redesign context, but no current SST stage creates the task,
+schedule, digest wiring, cleanup scan, or Slack approval path. Re-enablement
+requires a separate namespace-aware design and acceptance review. Direct
+cleanup, restore, and consolidation CLI entry points also fail before database,
+REST, model, S3, SSM, or Slack adapters are created.
 
 `infra/consolidation.ts` defines a separate arm64 Fargate task in the existing
 cluster. The task reads active memories and embeddings from Aurora, builds
@@ -797,23 +870,23 @@ to the GitHub Actions deploy role.
 
 ### Component map
 
-| Layer                  | Current resource or component                                                                        | Source                                                                                                        |
-| ---------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------- |
-| Container registry     | Four retained ECR repositories plus guarded registry-level BASIC scan-on-push                        | `infra/cloudformation/ecr-repositories.yaml`, `infra/cloudformation/ecr-registry-scanning.yaml`               |
-| Compute                | ECS Fargate, arm64, one task, three containers                                                       | `infra/ecs.ts`                                                                                                |
-| Database               | Aurora PostgreSQL Serverless v2, direct writer endpoint; PITR retention prod=14 days, non-prod=1 day | `infra/db.ts`                                                                                                 |
-| Database credential    | Secrets Manager task-definition secret                                                               | `infra/db.ts`, `docker/mnemo-server/entrypoint.sh`                                                            |
-| Workload IAM ceiling   | Retained operator-owned permissions boundary; guarded live migration                                 | `infra/cloudformation/workload-permissions-boundary.yaml`, `scripts/rollout-workload-permissions-boundary.sh` |
-| Decision audit         | One retained, account-level S3 bucket shared by stages through stage-scoped key prefixes             | `infra/cloudformation/decision-artifact-bucket.yaml`, `scripts/deploy-decision-artifact-bucket.sh`             |
-| Embedding              | Local qwen3 sidecar, 1024 dimensions                                                                 | `docker/qwen3-embed/`                                                                                         |
-| Smart-ingest LLM       | Local proxy to Bedrock Mantle                                                                        | `docker/llm-proxy/`                                                                                           |
-| Mantle attribution     | `OpenAI-Project` added by `llm-proxy` when a project is configured                                   | `docker/llm-proxy/server.mjs`                                                                                 |
+| Layer                  | Current resource or component                                                                        | Source                                                                                                                                                        |
+| ---------------------- | ---------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Container registry     | Four retained ECR repositories plus guarded registry-level BASIC scan-on-push                        | `infra/cloudformation/ecr-repositories.yaml`, `infra/cloudformation/ecr-registry-scanning.yaml`                                                               |
+| Compute                | ECS Fargate, arm64, one task, three containers                                                       | `infra/ecs.ts`                                                                                                                                                |
+| Database               | Aurora PostgreSQL Serverless v2, direct writer endpoint; PITR retention prod=14 days, non-prod=1 day | `infra/db.ts`                                                                                                                                                 |
+| Database credential    | Secrets Manager task-definition secret                                                               | `infra/db.ts`, `docker/mnemo-server/entrypoint.sh`                                                                                                            |
+| Workload IAM ceiling   | Retained operator-owned permissions boundary; guarded live migration                                 | `infra/cloudformation/workload-permissions-boundary.yaml`, `scripts/rollout-workload-permissions-boundary.sh`                                                 |
+| Decision audit         | One retained, account-level S3 bucket shared by stages through stage-scoped key prefixes             | `infra/cloudformation/decision-artifact-bucket.yaml`, `scripts/deploy-decision-artifact-bucket.sh`                                                            |
+| Embedding              | Local qwen3 sidecar, 1024 dimensions                                                                 | `docker/qwen3-embed/`                                                                                                                                         |
+| Smart-ingest LLM       | Local proxy to Bedrock Mantle                                                                        | `docker/llm-proxy/`                                                                                                                                           |
+| Mantle attribution     | `OpenAI-Project` added by `llm-proxy` when a project is configured                                   | `docker/llm-proxy/server.mjs`                                                                                                                                 |
 | Ingest observability   | Content-free EMF metrics, shadow pre-screen rates, CloudWatch dashboard, and production alarms       | `docker/mnemo-server/patches/0006-durable-ingest-telemetry.patch`, `docker/mnemo-server/patches/0008-ingest-prescreen-shadow.patch`, `infra/observability.ts` |
-| Memory consolidation   | Opt-in weekly Scheduler task, private review logs, safe mutation cap, and failure alarm              | `infra/consolidation.ts`, `scripts/memory-consolidation.mjs`                                                  |
-| MCP surface            | AgentCore Gateway Lambda target                                                                      | `infra/gateway.ts`                                                                                            |
-| Private service lookup | AWS Cloud Map                                                                                        | `infra/ecs.ts`                                                                                                |
-| Inbound auth           | Cognito M2M plus OAuth2 PKCE facade; optional production API Gateway custom domain                  | `infra/cognito.ts`, `infra/oauth-facade.ts`                                                                   |
-| Schema setup           | Startup atomic-ingest migration plus one-shot ECS bootstrap for the complete schema and tenant seed  | `docker/mnemo-server/entrypoint.sh`, `infra/bootstrap.ts`, `docker/bootstrap/migrations/`                     |
+| Memory consolidation   | Opt-in weekly Scheduler task, private review logs, safe mutation cap, and failure alarm              | `infra/consolidation.ts`, `scripts/memory-consolidation.mjs`                                                                                                  |
+| MCP surface            | AgentCore Gateway Lambda target                                                                      | `infra/gateway.ts`                                                                                                                                            |
+| Private service lookup | AWS Cloud Map                                                                                        | `infra/ecs.ts`                                                                                                                                                |
+| Inbound auth           | Cognito M2M plus OAuth2 PKCE facade; optional production API Gateway custom domain                   | `infra/cognito.ts`, `infra/oauth-facade.ts`                                                                                                                   |
+| Schema setup           | Startup atomic-ingest migration plus one-shot ECS bootstrap for the complete schema and tenant seed  | `docker/mnemo-server/entrypoint.sh`, `infra/bootstrap.ts`, `docker/bootstrap/migrations/`                                                                     |
 
 ## Locked decisions
 
@@ -855,8 +928,8 @@ to the GitHub Actions deploy role.
 - The OAuth facade custom domain is optional, production-only, and uses an
   existing Cloudflare zone with DNS-only records; previews use `execute-api`.
 - Schema bootstrap is a separate one-shot ECS task.
-- Weekly cross-memory consolidation is absent by default and enabled only by
-  `MEM9_CONSOLIDATION_SCHEDULE_ENABLED=1`; deletion remains manual.
+- Weekly cross-memory consolidation, cleanup scan, and Slack approval are absent
+  in namespace v1; legacy enablement variables are not passed to SST.
 - ECR scan-on-push is a guarded out-of-band registry singleton, separate from
   the retained repository stack.
 - Every application IAM role is synthesized with the fixed operator-owned

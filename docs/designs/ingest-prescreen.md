@@ -55,6 +55,8 @@ frozen before labels are read.
   the latest applied plan in `ingest_job_plans`. The temporary feature rows
   retain both tenant and job keys because plans use the composite
   `(tenant_id, job_id, plan_revision)` primary key. Neither key is emitted.
+  The operator binds one `namespace_id`; both source tables compare directly to
+  that value, and the plan lookup also checks equality with the selected job.
 - **Ground truth:** the applied plan JSON's `zero_fact=true` is zero-fact.
   `zero_fact` uses `omitempty`, so its absence after the label boundary means
   extraction produced at least one fact. Older plans are excluded because an
@@ -102,6 +104,7 @@ trap 'rm -f "$PGPASSFILE"' EXIT
 # Populate PGPASSFILE from the approved secret without printing the password.
 
 psql -X --quiet --tuples-only --no-align \
+  --set=namespace_id=<namespace-uuid> \
   --set=analysis_cutoff=2026-07-31T10:00:00Z \
   --set=label_start=2026-07-27T06:00:00Z \
   --set=window_days=30 \
@@ -121,6 +124,9 @@ jq -e -s '
   )
 ' /tmp/ingest-prescreen-report.local.jsonl
 ```
+
+`namespace_id` is mandatory. One invocation evaluates one team namespace; the
+query never aggregates jobs or plans from another namespace.
 
 The production run used a one-off private Fargate task based on the existing
 bootstrap image and task-injected database configuration. The task definition

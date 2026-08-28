@@ -120,6 +120,8 @@ export default $config({
     // private Gateway proxy. ECS containers receive it from Secrets Manager.
     const { tenantIdentity } = await import("./infra/tenant-identity");
     const identityOut = tenantIdentity();
+    const { namespaceIdentity } = await import("./infra/namespace-identity");
+    const namespaceIdentityOut = namespaceIdentity();
 
     // ECS Fargate cluster + the mnemo-server service. Three containers:
     // mnemo-server, qwen3-embed (localhost /v1/embeddings, dims 1024), and
@@ -127,14 +129,7 @@ export default $config({
     // Takes db()'s Outputs DIRECTLY (a real Pulumi dependency) — NOT an SSM
     // read-back, which would fail on a fresh stage's first deploy.
     const { ecs } = await import("./infra/ecs");
-    const ecsOut = ecs(dbOut, identityOut);
-
-    // Schema-bootstrap one-shot Task (§8): defines a short-lived task that applies
-    // pgvector + the memories(vector 1024) schema + seeds one tenant. Reuses the
-    // ECS cluster + db Outputs. SST only DEFINES the task; CI runs it via
-    // `aws ecs run-task` after deploy (see .github/workflows/infra-ci.yml).
-    const { bootstrap } = await import("./infra/bootstrap");
-    bootstrap(ecsOut.cluster, dbOut, identityOut);
+    const ecsOut = ecs(dbOut, identityOut, namespaceIdentityOut);
 
     // MCP surface (§6/§6a): Cognito M2M → AgentCore Gateway → a VPC-attached proxy
     // Lambda that reaches mnemo-server privately over Cloud Map DNS. Threaded as
@@ -143,6 +138,12 @@ export default $config({
     // id (identityOut) for the outbound X-API-Key.
     const { cognito } = await import("./infra/cognito");
     const cognitoOut = cognito();
+    // Schema-bootstrap and namespace-operator one-shot Task (§8): applies the
+    // schema in its default mode, and can run guarded namespace reconciliation,
+    // migration, and access-management commands inside the VPC. CI invokes the
+    // default bootstrap mode after deploy; operator commands are explicit.
+    const { bootstrap } = await import("./infra/bootstrap");
+    bootstrap(ecsOut.cluster, dbOut, identityOut, cognitoOut);
     // OAuth2 browser-login façade (§6): ApiGatewayV2 + reader client + façade
     // Lambda. Built BEFORE gateway() because it produces the reader client id the
     // gateway must trust. The façade reads gateway/url from SSM at RUNTIME, so it
@@ -150,28 +151,28 @@ export default $config({
     const { oauthFacade } = await import("./infra/oauth-facade");
     const facadeOut = oauthFacade(cognitoOut);
     const { gateway } = await import("./infra/gateway");
-    gateway(cognitoOut, ecsOut, identityOut, facadeOut.readerClientId);
-
-    // Slack approval loop (#123): the on-demand cleanup-apply Task plus the SSM
-    // inputs and grants the façade Lambda needs to start it. Built AFTER
-    // oauthFacade() because the grants attach to that Lambda's EXISTING role
-    // rather than creating a second role needing its own boundary exception.
-    // Entirely absent unless MEM9_SLACK_APPROVAL_ENABLED=1.
-    const { slackApproval } = await import("./infra/slack-approval");
-    const slackApprovalOut = slackApproval(
+    gateway(
+      cognitoOut,
       ecsOut,
-      dbOut,
       identityOut,
-      facadeOut,
+      facadeOut.readerClientId,
+      namespaceIdentityOut,
     );
 
-    // Weekly cross-memory consolidation. The task always exists for a
-    // report-only preview run; its Scheduler and execution role are synthesized
-    // only behind MEM9_CONSOLIDATION_SCHEDULE_ENABLED. When Slack approval is
-    // configured, the digest reuses that stack's existing bot-token parameter
-    // and private channel rather than declaring another secret.
-    const { consolidation } = await import("./infra/consolidation");
-    consolidation(ecsOut, dbOut, identityOut, slackApprovalOut);
+    // Cleanup approval and consolidation remain disabled until their offer,
+    // artifact, lock, model-input, and apply contracts carry one namespace.
+    const namespaceMaintenanceEnabled = false;
+    if (namespaceMaintenanceEnabled) {
+      const { slackApproval } = await import("./infra/slack-approval");
+      const slackApprovalOut = slackApproval(
+        ecsOut,
+        dbOut,
+        identityOut,
+        facadeOut,
+      );
+      const { consolidation } = await import("./infra/consolidation");
+      consolidation(ecsOut, dbOut, identityOut, slackApprovalOut);
+    }
 
     return {};
   },

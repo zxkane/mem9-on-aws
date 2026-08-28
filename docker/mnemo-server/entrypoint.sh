@@ -54,11 +54,14 @@ if [ -z "${MNEMO_DSN:-}" ]; then
   echo "entrypoint: assembled MNEMO_DSN=postgres://${DB_USER_URI}:***@${MEM9_DB_HOST}:${MEM9_DB_PORT}/${MEM9_DB_NAME}?sslmode=require"
 fi
 
-# Apply the repeatable atomic-ingest migration before the process can become
-# healthy or route durable jobs. A URI must be supplied through psql's dbname
-# connection parameter; PGDATABASE treats the same URI as a literal database
-# name. The ECS path uses discrete libpq variables so its password stays out of
-# process arguments. A caller-supplied local MNEMO_DSN uses --dbname directly.
+# Apply the complete repeatable base schema before the process can become
+# healthy. schema.sql creates the base tables first, then includes the durable
+# ingest and namespace migrations in dependency order. This is required on a
+# brand-new stage where ECS starts before the later one-shot tenant bootstrap.
+# A URI must be supplied through psql's dbname connection parameter; PGDATABASE
+# treats the same URI as a literal database name. The ECS path uses discrete
+# libpq variables so its password stays out of process arguments. A
+# caller-supplied local MNEMO_DSN uses --dbname directly.
 run_migration() {
   if [ "$MNEMO_DSN_ASSEMBLED" = true ]; then
     PGHOST="$MEM9_DB_HOST" \
@@ -68,10 +71,10 @@ run_migration() {
       PGPASSWORD="$DB_PASS" \
       PGSSLMODE=require \
       psql --quiet --no-password -v ON_ERROR_STOP=1 \
-        -f /usr/local/share/mem9/001_ingest_jobs.sql
+        -f /usr/local/share/mem9/schema.sql
   else
     psql --dbname="$MNEMO_DSN" --quiet -v ON_ERROR_STOP=1 \
-      -f /usr/local/share/mem9/001_ingest_jobs.sql
+      -f /usr/local/share/mem9/schema.sql
   fi
 }
 

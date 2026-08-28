@@ -53,7 +53,9 @@ per-tenant DB" architecture (a `tenants` row carries db_host/user/pass/name per
 tenant); for a single operator you run one active tenant.
 
 ### DB connection mechanism (probed — decisive for IAM-auth question)
+
 Verified from `server/internal/config/config.go` + `server/internal/repository/postgres/postgres.go`:
+
 - The **control-plane** connection is a **single static DSN env var `MNEMO_DSN`**
   (required; `os.Getenv("MNEMO_DSN")`). mem9 does **NOT** assemble the DSN from
   separate host/user/pass/dbname/sslmode env vars — there are no such vars.
@@ -88,9 +90,10 @@ Verified from `server/internal/config/config.go` + `server/internal/repository/p
   row's creds and the control-plane DSN target the same cluster.
 
 ### postgres backend (the one we use)
+
 - Uses **`github.com/pgvector/pgvector-go`**. Column `embedding vector(N)`.
 - **VectorSearch** = pgvector cosine: `... embedding <=> $q AS distance ORDER BY
-  embedding <=> $q`. Requires **pre-computed query embedding** (mnemo-server
+embedding <=> $q`. Requires **pre-computed query embedding** (mnemo-server
   calls the embedding MaaS, then queries).
 - **FTSSearch** = PostgreSQL `to_tsvector('english', ...)` + `plainto_tsquery` +
   `ts_rank`. (English analyzer — note for CJK content, a known class of issue;
@@ -102,6 +105,7 @@ Verified from `server/internal/config/config.go` + `server/internal/repository/p
   `CREATE EXTENSION IF NOT EXISTS vector;`.
 
 #### A content-free `PUT` NULLS the embedding on postgres (probed in prod 2026-08-03)
+
 **Decisive for any tool that updates tags/metadata without changing content.**
 
 `PUT /v1alpha2/mem9s/memories/{id}` is not a partial update at the storage layer:
@@ -133,6 +137,7 @@ future path must use REST, it has to send the unchanged `content` too so
 `contentChanged` triggers a re-embed, and pay the embedding cost.
 
 ### tidb backend (NOT viable on Aurora)
+
 - Uses TiDB `VECTOR(N)` type, `VEC_COSINE_DISTANCE`, and optionally
   `EMBED_TEXT("tidbcloud_free/...", content)` GENERATED column for **server-side
   auto-embedding** (TiDB Cloud Serverless only). Vector index needs TiFlash.
@@ -140,21 +145,24 @@ future path must use REST, it has to send the unchanged `content` too so
   MySQL/tidb path cannot run on Aurora MySQL. This is why PG is chosen.
 
 ### Schema bootstrap gotcha (observed in POC)
+
 - Control-plane schema file `server/schema_pg.sql` ≠ the **tenant runtime schema**
   in `server/internal/tenant/schema.go`. In the self-host POC, list/search
   returned empty and logs showed `validate schema: memories app_id index:
-  memories.idx_app is missing` — the control-plane file did not create the
+memories.idx_app is missing` — the control-plane file did not create the
   `idx_app` index the runtime validator requires. **Bootstrap must apply the
   tenant runtime schema (idx_app, FTS, vector column at the right dims), not just
   the control-plane file.** Verify exact DDL from `tenant/schema.go` at build time.
 - On the PG backend mem9 does NOT create the `memories` table at runtime — the
   `TenantMemorySchemaPostgres` constant has NO call site (only webhooks/usage get
-  `EnsureSchema`); startup only *validates* `app_id`+`idx_app`. **So our bootstrap
+  `EnsureSchema`); startup only _validates_ `app_id`+`idx_app`. **So our bootstrap
   creates the full memories schema** (with `vector(1024)`, GIN FTS, HNSW).
 
 ### DB connection per request = PER-TENANT creds from the `tenants` row (decisive)
+
 Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
 `service/upload.go` + `domain/types.go` (`DSNForBackend`) + `tenant/pool.go`:
+
 - On **every** memory request, mem9's auth middleware loads the tenant row, calls
   `enc.Decrypt(t.DBPassword)` (with `MNEMO_ENCRYPT_TYPE=plain` default → the stored
   value is used **literally**), then `pool.Get(id, t.DSNForBackend(backend))` and
@@ -211,9 +219,9 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
   `0002-ingest-durable-only-extraction-filter`, `0003-glm-request-bounds`,
   `0004-durable-ingest-queue`, `0005-atomic-ingest-apply`,
   `0006-durable-ingest-telemetry`, `0007-postgres-session-delete`,
-  `0008-ingest-prescreen-shadow`, then `0009-if-match-precondition-fence`. The
-  Docker build applies the complete stack to the pinned upstream commit in
-  lexical order.
+  `0008-ingest-prescreen-shadow`, `0009-if-match-precondition-fence`, then
+  `0010-group-memory-namespaces`. The Docker build applies the complete stack to
+  the pinned upstream commit in lexical order.
 - Upstream asynchronous `messages[]` ingest returns 202 before starting an
   untracked goroutine. Downstream patch
   `docker/mnemo-server/patches/0004-durable-ingest-queue.patch` adds a
@@ -288,6 +296,63 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
   monotonic memory-version predicates. Recovery reuses a valid persisted plan or
   creates a bounded replacement revision after an optimistic conflict.
 
+### Enabled Cognito group-routed team namespaces (downstream patch 0010)
+
+- One PostgreSQL database and one mem9 tenant are shared by all small teams.
+  Isolation is a required `namespace_id` data-plane key, not a per-user
+  database, schema, server, or embedding service.
+- Gateway identity is split across two Lambdas. A non-VPC interceptor validates
+  the deployed human/M2M client registry, access-token shape, OAuth scope, and
+  bounded Cognito groups, then signs derived lookup keys. The VPC target verifies
+  that request-bound context and creates a different signed transport envelope
+  for mnemo-server. Neither caller-supplied namespace IDs nor bare derived
+  headers are trusted.
+- For humans, Cognito group claims establish eligibility only. Aurora
+  `memory_namespace_memberships` remains the active role/revocation source. A
+  request must match exactly one configured group binding; unrelated groups are
+  ignored, multiple recognized groups fail closed, and JIT never reactivates a
+  revoked membership or creates a second active human namespace.
+- M2M access uses an explicit client-key binding, principal, and matching active
+  membership. Gateway `allowedClients` admission alone grants no memory access.
+- Patch 0010 carries namespace and actor identity through memory CRUD, exact
+  vector/FTS search, sessions, ingest canonicalization, queue rows, plans,
+  claims, status, reconciliation, and atomic apply. Foreign object/job IDs are
+  scoped to the caller namespace and appear not found.
+- Namespace vector recall does not post-filter tenant-wide HNSW candidates.
+  It materializes the namespace subset in one read-only transaction, enforces
+  `MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS`, applies a local statement timeout,
+  and exactly orders cosine distance. Enforcement drops the old tenant-wide
+  HNSW index.
+- Startup with `MNEMO_NAMESPACE_REQUIRED=1` requires database phase
+  `constraints_complete`; unset/`0` is compatibility mode for the initial
+  additive deployment. There is no fallback to a default namespace in required
+  mode.
+- The mnemo entrypoint applies the complete base schema before additive
+  migrations `001` and `002`, so a fresh empty database has its base tables
+  before namespace columns are added. Bootstrap repeats the idempotent schema
+  and seeds the tenant. Namespace data-plane indexes are not built at startup.
+- The private operator task runs guarded preflight, freeze, catalog-verified
+  concurrent index creation, embedding-preserving direct-SQL backfill, and
+  `003_enforce_memory_namespaces.sql`. Backfill stores an immutable legacy seed
+  binding and compares a bounded database-side ordered digest plus
+  null/zero-vector counts before and after; any mismatch fails.
+- A fresh `pr-N` preview needs no production namespace or user input. Bootstrap
+  creates two synthetic namespace/group definitions and temporary M2M bindings
+  in that stage's shared database, completes the empty-database migration, and
+  CI redeploys with required mode before running a hard cross-namespace Gateway
+  test. This validates the deployed M2M path; human group-token routing remains
+  a separate Gateway-smoke surface.
+- A later run whose deployed task carries the namespace-bootstrap version
+  marker invokes that task before deployment and then uses required mode
+  directly. A legacy preview task without the marker receives one compatibility
+  deployment first. This is necessary because compatibility startup accepts only
+  `additive_ready`, while a completed preview database remains
+  `constraints_complete`.
+- The migration command does not drain or scale ECS. Production cutover must
+  stop write-capable traffic and scale mnemo-server to zero before `freeze`.
+  Cleanup approval, consolidation, upload processing, webhooks, and Space Chains
+  remain disabled until each path has a complete namespace contract.
+
 ### `If-Match` is a FENCE, not a warning (downstream patch 0009, issue #128)
 
 **Upstream at the pinned commit:** `PUT /v1alpha2/mem9s/memories/{id}` read
@@ -307,7 +372,7 @@ postgres/tidb/db9 repositories already implemented.
   Precisely: `Update` is pre-read → cheap version compare → embed → predicated
   `UPDATE`. There are two checks, and the window between them is real — that is
   why the `ErrNotFound`→412 remap below has to exist. The pre-read compare is
-  only an optimisation that saves an embedding call; the *predicate* is what
+  only an optimisation that saves an embedding call; the _predicate_ is what
   makes the write safe. So the race is closed with respect to silent overwrite,
   which is the guarantee issue #128 needed, and it is closed rather than
   narrowed because no interleaving can make the `UPDATE` clobber a newer row.
@@ -366,7 +431,9 @@ postgres/tidb/db9 repositories already implemented.
   or ever serves that dashboard from this image.
 
 ### LLM key is read ONCE at startup, immutable — decisive for the sidecar (verified 2026-07-12)
+
 Probed at the pinned commit (`server/internal/config/config.go` + `llm/client.go`):
+
 - `MNEMO_LLM_API_KEY` / `_BASE_URL` / `_MODEL` are read **once** in `config.Load()`
   (called once in `main`) and copied into an **immutable `Client` struct field**
   (`apiKey`/`baseURL`/`model`). **NO reload path** — no SIGHUP handler (only
@@ -406,7 +473,7 @@ this repo — **empirically live 2026-07-12** (ap-northeast-1):
   **HTTP 200**, OpenAI-shaped body (`choices[0].message.content`). The bearer's
   default+max TTL is **12h** (`token.js`: `DEFAULT/MAX_TOKEN_EXPIRES_IN_SECONDS = 43200`),
   and minting is a **pure local SigV4 presign** (no network call) → the token-refresh
-  cadence is ~hourly, not the 15-min figure that was the *RDS IAM* token, not this one.
+  cadence is ~hourly, not the 15-min figure that was the _RDS IAM_ token, not this one.
 - **Mantle IS OpenAI-compatible.** Endpoint `https://bedrock-mantle.{region}.api.aws/v1`;
   surfaces = **Chat Completions** + **Responses** (OpenAI-compatible) + **Messages**
   (Anthropic). "Bring OpenAI SDK code by changing only base URL + API key."
@@ -481,7 +548,7 @@ this repo — **empirically live 2026-07-12** (ap-northeast-1):
   commit, `CGO_ENABLED=0 GOARCH=arm64 go build ./cmd/mnemo-server`, into
   `alpine:3.19` — so CI needs only Docker (no host Go, no separate mem9
   checkout). Built for **arm64** (Graviton Fargate) via `docker buildx
-  --platform=linux/arm64`.
+--platform=linux/arm64`.
 - **Vendored pin (LOCKED): `mem9-ai/mem9` @ `d4638c8458abeb209a1b3a20472a1328c4acd149`**
   (main tip, committed 2026-07-10). It is the `MEM9_REF` build-arg default in the
   Dockerfile. **Bumping the pin = change `MEM9_REF` + re-verify every fact in

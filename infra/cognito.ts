@@ -23,6 +23,7 @@ const awsAny = aws as unknown as Record<string, any>;
 export interface CognitoOutputs {
   ssmPrefix: string;
   userPoolId: Output<string>;
+  userPoolArn: Output<string>;
   issuer: Output<string>;
   tokenEndpoint: Output<string>;
   authorizeEndpoint: Output<string>;
@@ -34,6 +35,15 @@ export interface CognitoOutputs {
   clientSecret: Output<string>;
   // The list of client ids the Gateway JWT authorizer trusts (allowedClients).
   allowedClientIds: Output<string>[];
+  previewNamespaceClients: PreviewNamespaceClient[];
+}
+
+export interface PreviewNamespaceClient {
+  namespaceSlug: string;
+  cognitoGroup: string;
+  clientId: Output<string>;
+  clientSecret: Output<string>;
+  ssmPrefix: string;
 }
 
 export const MCP_RESOURCE_SERVER_ID = "mem9-mcp";
@@ -55,6 +65,11 @@ export const MCP_TOOL_SCOPES = {
 const DOMAIN_HASH_NAMESPACE = "mem9-cognito-domain-v1";
 const DOMAIN_PREFIX_PATTERN = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/u;
 const DOMAIN_RESERVED_KEYWORDS = ["aws", "amazon", "cognito"];
+const PREVIEW_STAGE_PATTERN = /^pr-[1-9][0-9]*$/u;
+
+export function isPullRequestStage(stage: string): boolean {
+  return PREVIEW_STAGE_PATTERN.test(stage);
+}
 
 export interface CognitoDomainPrefixInput {
   accountId: string;
@@ -185,6 +200,66 @@ export function cognito(): CognitoOutputs {
     preventUserExistenceErrors: "ENABLED",
     enableTokenRevocation: true,
   });
+  const previewNamespaceClients: PreviewNamespaceClient[] = [];
+  if (isPullRequestStage(stage)) {
+    for (const fixture of [
+      {
+        logicalName: "Mem9PreviewNamespaceAlphaClient",
+        suffix: "alpha",
+        namespaceSlug: "preview-alpha",
+        cognitoGroup: "memory-preview-alpha",
+      },
+      {
+        logicalName: "Mem9PreviewNamespaceBetaClient",
+        suffix: "beta",
+        namespaceSlug: "preview-beta",
+        cognitoGroup: "memory-preview-beta",
+      },
+    ]) {
+      const previewClient = new awsAny.cognito.UserPoolClient(
+        fixture.logicalName,
+        {
+          name: `${stage}-namespace-${fixture.suffix}-e2e`,
+          userPoolId: pool.id,
+          generateSecret: true,
+          explicitAuthFlows: [],
+          allowedOauthFlows: ["client_credentials"],
+          allowedOauthFlowsUserPoolClient: true,
+          allowedOauthScopes: resourceServer.identifier.apply(() => [
+            ...MCP_RESOURCE_SCOPES,
+          ]),
+          preventUserExistenceErrors: "ENABLED",
+          enableTokenRevocation: true,
+        },
+      );
+      const fixturePrefix = `${prefix}/cognito/namespace-e2e-${fixture.suffix}`;
+      new awsAny.ssm.Parameter(
+        `SsmPreviewNamespace${fixture.suffix}ClientId`,
+        {
+          name: `${fixturePrefix}/client-id`,
+          type: "String",
+          value: previewClient.id,
+          tags,
+        },
+      );
+      new awsAny.ssm.Parameter(
+        `SsmPreviewNamespace${fixture.suffix}ClientSecret`,
+        {
+          name: `${fixturePrefix}/client-secret`,
+          type: "SecureString",
+          value: previewClient.clientSecret,
+          tags,
+        },
+      );
+      previewNamespaceClients.push({
+        namespaceSlug: fixture.namespaceSlug,
+        cognitoGroup: fixture.cognitoGroup,
+        clientId: previewClient.id,
+        clientSecret: previewClient.clientSecret,
+        ssmPrefix: fixturePrefix,
+      });
+    }
+  }
 
   // $interpolate (NOT a template literal) resolves the embedded Output<string>s;
   // a plain literal would stringify them and break CFN/JWT-authorizer validation.
@@ -199,6 +274,12 @@ export function cognito(): CognitoOutputs {
     name: `${prefix}/cognito/issuer`,
     type: "String",
     value: issuer,
+    tags,
+  });
+  new awsAny.ssm.Parameter("SsmCognitoUserPoolId", {
+    name: `${prefix}/cognito/user-pool-id`,
+    type: "String",
+    value: pool.id,
     tags,
   });
   new awsAny.ssm.Parameter("SsmCognitoTokenEndpoint", {
@@ -229,6 +310,7 @@ export function cognito(): CognitoOutputs {
   return {
     ssmPrefix: prefix,
     userPoolId: pool.id,
+    userPoolArn: pool.arn,
     issuer,
     tokenEndpoint,
     authorizeEndpoint,
@@ -238,6 +320,10 @@ export function cognito(): CognitoOutputs {
     resourceServerId: MCP_RESOURCE_SERVER_ID,
     clientId: client.id,
     clientSecret: client.clientSecret,
-    allowedClientIds: [client.id],
+    allowedClientIds: [
+      client.id,
+      ...previewNamespaceClients.map((fixture) => fixture.clientId),
+    ],
+    previewNamespaceClients,
   };
 }

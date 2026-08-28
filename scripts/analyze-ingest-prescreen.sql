@@ -7,6 +7,7 @@
 -- Output is bounded JSONL: no content, tenant/job/session identifier, or hash
 -- leaves PostgreSQL. Invoke psql with:
 --
+--   --set=namespace_id=<namespace-uuid>
 --   --set=analysis_cutoff=2026-07-31T10:00:00Z
 --   --set=label_start=2026-07-27T06:00:00Z
 --   --set=window_days=30
@@ -15,6 +16,12 @@
 -- label_start is a fixed, coarsened timestamp after the zero_fact deployment
 -- reached ECS steady state. false uses omitempty in the persisted plan, so
 -- pre-deployment plans cannot be labeled from their payload alone.
+
+\if :{?namespace_id}
+\else
+  \echo 'namespace_id is required' >&2
+  \quit 3
+\endif
 
 \if :{?analysis_cutoff}
 \else
@@ -40,6 +47,7 @@ BEGIN TRANSACTION READ WRITE;
 CREATE TEMP TABLE ingest_prescreen_features (
   job_id varchar(36) NOT NULL,
   tenant_id varchar(36) NOT NULL,
+  namespace_id varchar(36) NOT NULL,
   split text NOT NULL,
   zero_fact boolean NOT NULL,
   message_count int NOT NULL,
@@ -166,6 +174,7 @@ decoded_jobs AS MATERIALIZED (
     -- for the composite ingest_job_plans key used by the taxonomy lookup.
     job.job_id,
     job.tenant_id,
+    job.namespace_id,
     mod(
       (
         'x' || substr(
@@ -196,13 +205,16 @@ decoded_jobs AS MATERIALIZED (
       convert_from(retained.plan_payload, 'UTF8')::jsonb AS plan_json
     FROM ingest_job_plans AS retained
     WHERE retained.tenant_id = job.tenant_id
+      AND retained.namespace_id = :'namespace_id'
+      AND retained.namespace_id = job.namespace_id
       AND retained.job_id = job.job_id
       AND retained.state = 'applied'
     ORDER BY retained.plan_revision DESC
     LIMIT 1
   ) AS plan ON TRUE
   CROSS JOIN parameters
-  WHERE job.state = 'succeeded'
+  WHERE job.namespace_id = :'namespace_id'
+    AND job.state = 'succeeded'
     AND job.mode = 'smart'
     AND plan.applied_at >= greatest(
       parameters.label_start,
@@ -249,6 +261,7 @@ features AS (
   SELECT
     job.job_id,
     job.tenant_id,
+    job.namespace_id,
     CASE
       WHEN job.split_bucket = 0 THEN 'tuning'
       ELSE 'held_out'
@@ -389,6 +402,7 @@ categorized AS (
     SELECT convert_from(retained.plan_payload, 'UTF8')::jsonb AS plan_json
     FROM ingest_job_plans AS retained
     WHERE retained.tenant_id = hit.tenant_id
+      AND retained.namespace_id = :'namespace_id'
       AND retained.job_id = hit.job_id
       AND retained.state = 'applied'
     ORDER BY retained.plan_revision DESC

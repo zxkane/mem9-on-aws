@@ -44,11 +44,13 @@ function baseResponses() {
       ],
       InvalidParameters: [],
     },
-    "ecs wait": undefined,
     "ecs describe-services": {
       services: [
         {
           serviceArn: `arn:aws:ecs:${REGION}:${ACCOUNT}:service/mem9-cluster/mem9-service`,
+          desiredCount: 1,
+          runningCount: 1,
+          pendingCount: 0,
           deployments: [
             {
               status: "PRIMARY",
@@ -88,14 +90,13 @@ describe("reconcileDeployment", () => {
     expect(result.reasons).toEqual([]);
     expect(calls).toEqual([
       "ssm get-parameters",
-      "ecs wait",
       "ecs describe-services",
       "ecs list-tasks",
       "ecs describe-tasks",
     ]);
   });
 
-  it("waits for PRIMARY rollout completion after the stable waiter returns", () => {
+  it("waits for PRIMARY rollout completion", () => {
     let serviceReads = 0;
     const sleep = vi.fn();
     const completed = baseResponses()["ecs describe-services"];
@@ -106,6 +107,9 @@ describe("reconcileDeployment", () => {
         return {
           services: [
             {
+              desiredCount: 1,
+              runningCount: 0,
+              pendingCount: 1,
               deployments: [
                 {
                   status: "PRIMARY",
@@ -133,6 +137,9 @@ describe("reconcileDeployment", () => {
       "ecs describe-services": {
         services: [
           {
+            desiredCount: 1,
+            runningCount: 0,
+            pendingCount: 1,
             deployments: [
               {
                 status: "PRIMARY",
@@ -162,7 +169,20 @@ describe("reconcileDeployment", () => {
   it("detects exported-new/ECS-old drift without exposing ARNs or account IDs", () => {
     const { runAws } = mockAws({
       "ecs describe-services": {
-        services: [{ deployments: [{ status: "PRIMARY", taskDefinition: OLD_TASK_DEF }] }],
+        services: [
+          {
+            desiredCount: 1,
+            runningCount: 1,
+            pendingCount: 0,
+            deployments: [
+              {
+                status: "PRIMARY",
+                rolloutState: "COMPLETED",
+                taskDefinition: OLD_TASK_DEF,
+              },
+            ],
+          },
+        ],
         failures: [],
       },
       "ecs describe-tasks": {
@@ -209,22 +229,43 @@ describe("reconcileDeployment", () => {
   });
 
   it("detects multiple unresolved service deployments", () => {
+    const sleep = vi.fn();
     const { runAws } = mockAws({
       "ecs describe-services": {
         services: [
           {
+            desiredCount: 1,
+            runningCount: 1,
+            pendingCount: 0,
             deployments: [
-              { status: "PRIMARY", taskDefinition: DESIRED_TASK_DEF },
-              { status: "ACTIVE", taskDefinition: OLD_TASK_DEF },
+              {
+                status: "PRIMARY",
+                rolloutState: "COMPLETED",
+                taskDefinition: DESIRED_TASK_DEF,
+              },
+              {
+                status: "ACTIVE",
+                rolloutState: "COMPLETED",
+                taskDefinition: OLD_TASK_DEF,
+              },
             ],
           },
         ],
         failures: [],
       },
     });
-    const result = reconcileDeployment({ stage: "prod", runAws });
+    const result = reconcileDeployment({
+      stage: "prod",
+      runAws,
+      sleep,
+      rolloutPollAttempts: 1,
+      rolloutPollIntervalMs: 1,
+    });
 
-    expect(result.reasons).toContain("multiple_deployments");
+    expect(result.reasons).toEqual(
+      expect.arrayContaining(["stabilization_timeout", "multiple_deployments"]),
+    );
+    expect(sleep).not.toHaveBeenCalled();
   });
 
   it("detects mixed running task definitions", () => {
@@ -242,17 +283,119 @@ describe("reconcileDeployment", () => {
     );
   });
 
-  it("treats stabilization timeout as a mismatch and stops before state reads", () => {
-    const timeout = Object.assign(new Error("waiter failed"), {
-      command: "ecs.wait",
-      status: 255,
+  it("bounds stability polling and still inspects safe state on timeout", () => {
+    const sleep = vi.fn();
+    const { runAws, calls } = mockAws({
+      "ecs describe-services": {
+        services: [
+          {
+            desiredCount: 1,
+            runningCount: 0,
+            pendingCount: 1,
+            deployments: [
+              {
+                status: "PRIMARY",
+                rolloutState: "IN_PROGRESS",
+                taskDefinition: DESIRED_TASK_DEF,
+              },
+            ],
+          },
+        ],
+        failures: [],
+      },
+      "ecs list-tasks": { taskArns: [] },
     });
-    const { runAws, calls } = mockAws({ "ecs wait": timeout });
-    const result = reconcileDeployment({ stage: "prod", runAws });
+    const result = reconcileDeployment({
+      stage: "prod",
+      runAws,
+      sleep,
+      rolloutPollAttempts: 3,
+      rolloutPollIntervalMs: 1,
+    });
 
-    expect(result.reasons).toEqual(["stabilization_timeout"]);
-    expect(calls).toEqual(["ssm get-parameters", "ecs wait"]);
-    expect(formatReconciliationDiagnostic(result)).not.toContain("waiter failed");
+    expect(result.reasons).toEqual([
+      "stabilization_timeout",
+      "primary_not_completed",
+      "no_running_tasks",
+    ]);
+    expect(sleep).toHaveBeenCalledTimes(2);
+    expect(calls).toEqual([
+      "ssm get-parameters",
+      "ecs describe-services",
+      "ecs describe-services",
+      "ecs describe-services",
+      "ecs list-tasks",
+    ]);
+  });
+
+  it("stops polling immediately when the deployment circuit breaker fails", () => {
+    const sleep = vi.fn();
+    const { runAws, calls } = mockAws({
+      "ecs describe-services": {
+        services: [
+          {
+            desiredCount: 1,
+            runningCount: 0,
+            pendingCount: 0,
+            deployments: [
+              {
+                status: "PRIMARY",
+                rolloutState: "FAILED",
+                taskDefinition: DESIRED_TASK_DEF,
+              },
+            ],
+          },
+        ],
+        failures: [],
+      },
+      "ecs list-tasks": { taskArns: [] },
+    });
+
+    const result = reconcileDeployment({ stage: "prod", runAws, sleep });
+
+    expect(result.reasons).toEqual(["primary_failed", "no_running_tasks"]);
+    expect(sleep).not.toHaveBeenCalled();
+    expect(calls.filter((call) => call === "ecs describe-services")).toHaveLength(1);
+  });
+
+  it("ignores a failed historical deployment while the desired PRIMARY recovers", () => {
+    let serviceReads = 0;
+    const sleep = vi.fn();
+    const completed = baseResponses()["ecs describe-services"];
+    const { runAws, calls } = mockAws({
+      "ecs describe-services": () => {
+        serviceReads += 1;
+        if (serviceReads > 1) return completed;
+        return {
+          services: [
+            {
+              desiredCount: 1,
+              runningCount: 0,
+              pendingCount: 1,
+              deployments: [
+                {
+                  status: "PRIMARY",
+                  rolloutState: "IN_PROGRESS",
+                  taskDefinition: DESIRED_TASK_DEF,
+                },
+                {
+                  status: "ACTIVE",
+                  rolloutState: "FAILED",
+                  taskDefinition: OLD_TASK_DEF,
+                },
+              ],
+            },
+          ],
+          failures: [],
+        };
+      },
+    });
+
+    const result = reconcileDeployment({ stage: "prod", runAws, sleep });
+
+    expect(result.ok).toBe(true);
+    expect(sleep).toHaveBeenCalledOnce();
+    expect(calls.filter((call) => call === "ecs describe-services")).toHaveLength(2);
   });
 
   it("redacts account-like values even when malformed desired state contains them", () => {
@@ -289,14 +432,11 @@ describe("rollout poll budget", () => {
     } = await import("./reconcile-ecs-deployment.mjs");
 
     const budgetMs = (ROLLOUT_POLL_ATTEMPTS - 1) * ROLLOUT_POLL_INTERVAL_MS;
-    // A budget at or below the floor makes the check a coin flip on a healthy
-    // deploy: 12 attempts (~110s) and 30 attempts (~290s) both landed inside the
-    // 270-390s band a real cold start needs, and pr-113 failed at 389s with
-    // `primary_not_completed,task_not_running` on a deploy that was fine.
+    // The AWS services-stable waiter is about 10 minutes and timed out on a
+    // healthy fresh preview before any task reached RUNNING. Keep enough room
+    // for the measured 30-35 minute end-to-end bring-up after SST returns.
     expect(budgetMs).toBeGreaterThan(ROLLOUT_HEALTH_FLOOR_MS);
-    // Want real margin over the observed worst case, not a hair above the floor.
-    expect(budgetMs).toBeGreaterThanOrEqual(500_000);
-    // But it must stay well inside the workflow job's 60-minute timeout.
-    expect(budgetMs).toBeLessThan(20 * 60 * 1000);
+    expect(budgetMs).toBeGreaterThanOrEqual(25 * 60 * 1000);
+    expect(budgetMs).toBeLessThan(35 * 60 * 1000);
   });
 });

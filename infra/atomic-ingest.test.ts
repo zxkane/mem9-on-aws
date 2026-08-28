@@ -26,8 +26,12 @@ describe("atomic durable ingest wiring", () => {
     expect(migration).toMatch(
       /state IN \('succeeded', 'dead'\) THEN 'finalizing'/,
     );
-    expect(migration).toMatch(/ALTER TABLE memories ADD COLUMN IF NOT EXISTS version/);
-    expect(migration).toMatch(/UPDATE memories\s+SET version = 1\s+WHERE version IS NULL/);
+    expect(migration).toMatch(
+      /ALTER TABLE memories ADD COLUMN IF NOT EXISTS version/,
+    );
+    expect(migration).toMatch(
+      /UPDATE memories\s+SET version = 1\s+WHERE version IS NULL/,
+    );
     expect(migration).toMatch(/ALTER COLUMN version SET NOT NULL/);
     expect(migration.toLowerCase()).not.toContain("operation_ledger");
   });
@@ -35,32 +39,58 @@ describe("atomic durable ingest wiring", () => {
   it("enables production in one rollout after startup migration", () => {
     const ecs = readFileSync(resolve(root, "infra/ecs.ts"), "utf8");
     const config = readFileSync(resolve(root, "sst.config.ts"), "utf8");
-    const workflow = readFileSync(resolve(root, ".github/workflows/infra-ci.yml"), "utf8");
-    const dockerfile = readFileSync(resolve(root, "docker/mnemo-server/Dockerfile"), "utf8");
+    const workflow = readFileSync(
+      resolve(root, ".github/workflows/infra-ci.yml"),
+      "utf8",
+    );
+    const dockerfile = readFileSync(
+      resolve(root, "docker/mnemo-server/Dockerfile"),
+      "utf8",
+    );
     const entrypoint = readFileSync(
       resolve(root, "docker/mnemo-server/entrypoint.sh"),
       "utf8",
     );
+    const schema = readFileSync(
+      resolve(root, "docker/bootstrap/schema.sql"),
+      "utf8",
+    );
     const patch = readFileSync(
-      resolve(root, "docker/mnemo-server/patches/0005-atomic-ingest-apply.patch"),
+      resolve(
+        root,
+        "docker/mnemo-server/patches/0005-atomic-ingest-apply.patch",
+      ),
       "utf8",
     );
     expect(ecs).toContain("process.env.MEM9_DURABLE_INGEST_ENABLED");
-    expect(workflow.match(/MEM9_DURABLE_INGEST_ENABLED: "1"/g)).toHaveLength(2);
+    expect(workflow.match(/MEM9_DURABLE_INGEST_ENABLED: "1"/g)).toHaveLength(3);
     expect(workflow).not.toContain('MEM9_DURABLE_INGEST_ENABLED: "0"');
     expect(workflow).not.toContain("Enable durable ingest after bootstrap");
     expect(dockerfile).toContain("postgresql-client");
-    expect(dockerfile).toContain("001_ingest_jobs.sql");
+    expect(dockerfile).toContain(
+      "COPY docker/bootstrap/schema.sql /usr/local/share/mem9/schema.sql",
+    );
+    expect(dockerfile).toContain(
+      "COPY docker/bootstrap/migrations/ /usr/local/share/mem9/migrations/",
+    );
     expect(entrypoint).not.toContain('PGDATABASE="$MNEMO_DSN" psql');
     expect(entrypoint).toContain('psql --dbname="$MNEMO_DSN"');
+    expect(entrypoint).toContain("-f /usr/local/share/mem9/schema.sql");
+    expect(schema.indexOf("\\ir migrations/001_ingest_jobs.sql")).toBeLessThan(
+      schema.indexOf("\\ir migrations/002_memory_namespaces.sql"),
+    );
     expect(entrypoint).toContain('PGDATABASE="$MEM9_DB_NAME"');
     expect(entrypoint).toContain('PGPASSWORD="$DB_PASS"');
     expect(entrypoint).toContain("PGCONNECT_TIMEOUT");
-    expect(entrypoint).toContain('while [ "$i" -le "$MIGRATION_MAX_ATTEMPTS" ]');
+    expect(entrypoint).toContain(
+      'while [ "$i" -le "$MIGRATION_MAX_ATTEMPTS" ]',
+    );
     expect(entrypoint).toContain("MIGRATION_RETRY_DELAY_SECONDS");
     expect(entrypoint).toContain("MIGRATION_SUCCEEDED=false");
     expect(entrypoint).toContain('if [ "$MIGRATION_SUCCEEDED" != true ]');
-    expect(entrypoint).toContain('if [ "$MIGRATION_RETRY_BUDGET_SECONDS" -ge 300 ]');
+    expect(entrypoint).toContain(
+      'if [ "$MIGRATION_RETRY_BUDGET_SECONDS" -ge 300 ]',
+    );
     expect(entrypoint.indexOf('psql --dbname="$MNEMO_DSN"')).toBeLessThan(
       entrypoint.indexOf("exec /usr/local/bin/mnemo-server"),
     );
@@ -83,6 +113,8 @@ describe("atomic durable ingest wiring", () => {
     expect(config).toContain("tenantIdentity");
     expect(patch).toContain("NewWorker");
     expect(patch).toContain("NewDurableProcessor");
-    expect(patch).not.toMatch(/^\+\s*go func\(lease \*runtimeusage\.OperationLease\)/m);
+    expect(patch).not.toMatch(
+      /^\+\s*go func\(lease \*runtimeusage\.OperationLease\)/m,
+    );
   });
 });

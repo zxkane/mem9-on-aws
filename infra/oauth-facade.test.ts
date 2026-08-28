@@ -401,6 +401,18 @@ describe("oauthFacade factory", () => {
     expect(client.explicitAuthFlows).toEqual(["ALLOW_USER_SRP_AUTH"]);
   });
 
+  it("TC-GROUPNS-020: bounds stale group claims with a 15-minute access token", async () => {
+    installGlobals("prod");
+    const oauthFacade = await loadFacade();
+    oauthFacade(fakeCognitoOut());
+
+    const client = only("UserPoolClient");
+    expect(client.accessTokenValidity).toBe(15);
+    expect(client.tokenValidityUnits).toMatchObject({
+      accessToken: "minutes",
+    });
+  });
+
   it("provisions the façade Function on arm64 nodejs24.x with NO vpc + scoped SSM read", async () => {
     installGlobals("prod");
     const oauthFacade = await loadFacade();
