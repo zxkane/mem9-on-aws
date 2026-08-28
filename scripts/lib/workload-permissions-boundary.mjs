@@ -33,11 +33,19 @@ export const ROLLOUT_TIMEOUT_MS = rolloutContract.rolloutTimeoutMs;
 export const ROLLOUT_SHUTDOWN_GRACE_MS = rolloutContract.shutdownGraceMs;
 
 const ROLE_PREFIXES = ["mem9-on-aws-", "mem9-on-aw-", "mem9-on-a-"];
+const SST_PHYSICAL_NAME_SUFFIX_PATTERN = /^[abcdefhkmnorstuvwxz]{8}$/u;
 const LAMBDA_EXECUTION_ROLE_TYPES = [
   {
     functionToken: "Mem9AlertRouter",
     roleToken: "Mem9AlertRouterRole-",
     isVpcProxy: false,
+  },
+  {
+    functionToken: "Mem9IdentityInterceptorFn",
+    roleToken: "Mem9IdentityInterceptorFnRole-",
+    isVpcProxy: false,
+    requiredInProduction: false,
+    strictGeneratedName: true,
   },
   {
     functionToken: "Mem9OauthFacadeAllowAll",
@@ -66,18 +74,36 @@ function lambdaExecutionRoleArnPatterns({ partition, accountId }) {
 }
 
 function matchesProductionLambdaFunctionName(functionName, type) {
-  return (
-    typeof functionName === "string" &&
-    (type.stableName
-      ? functionName === `mem9-on-aws-prod-${type.functionToken}`
-      : functionName.includes(type.functionToken))
-  );
+  if (typeof functionName !== "string") return false;
+  if (type.stableName) {
+    return functionName === `mem9-on-aws-prod-${type.functionToken}`;
+  }
+  if (type.strictGeneratedName) {
+    const prefix = `mem9-on-aws-prod-${type.functionToken}Function-`;
+    return (
+      functionName.startsWith(prefix) &&
+      SST_PHYSICAL_NAME_SUFFIX_PATTERN.test(functionName.slice(prefix.length))
+    );
+  }
+  return functionName.includes(type.functionToken);
 }
 
 function matchesProductionLambdaRoleName(roleName, type) {
-  return type.stableName
-    ? roleName === `mem9-on-aws-prod-${type.roleToken}`
-    : roleName.includes(type.roleToken);
+  if (type.stableName) {
+    return roleName === `mem9-on-aws-prod-${type.roleToken}`;
+  }
+  if (type.strictGeneratedName) {
+    return ROLE_PREFIXES.some((prefix) => {
+      const generatedPrefix = `${prefix}prod-${type.roleToken}`;
+      return (
+        roleName.startsWith(generatedPrefix) &&
+        SST_PHYSICAL_NAME_SUFFIX_PATTERN.test(
+          roleName.slice(generatedPrefix.length),
+        )
+      );
+    });
+  }
+  return roleName.includes(type.roleToken);
 }
 
 function matchesProjectLambdaRoleName(roleName, type) {
@@ -87,7 +113,7 @@ function matchesProjectLambdaRoleName(roleName, type) {
 }
 
 // Every ECS execution role that fetches a Secrets Manager secret for `valueFrom`
-// injection has to be listed here, because `SecretCtxRole` (secret encryption
+// injection has to be listed here, because `S` (secret encryption
 // context, restricted to ECS execution roles) is an ArnNotLike deny: an omitted
 // role is denied, not merely ungranted. Measured against the live policy rather
 // than reasoned about — the default `aws/secretsmanager` key needs no identity
@@ -189,6 +215,7 @@ const MAX_IAM_ITEMS = 10_000;
 // and as an anchored matcher for validating a region on its own.
 const ANY_REGION_SOURCE = "[a-z]{2}(?:-gov)?-[a-z]+-[0-9]";
 const REGION_PATTERN = new RegExp(`^${ANY_REGION_SOURCE}$`, "u");
+const MANTLE_PROJECT_ID_SOURCE = "(?:default|proj_[a-z0-9]{1,20})";
 
 function list(value) {
   if (value === undefined) return [];
@@ -305,7 +332,7 @@ function mantleProjectArnPattern({ partition, accountId, regionSource }) {
   return new RegExp(
     `^arn:${RegExp.escape(partition)}:bedrock-mantle:` +
       `${regionSource}:${RegExp.escape(accountId)}:` +
-      "project/[A-Za-z0-9_-]+$",
+      `project/${MANTLE_PROJECT_ID_SOURCE}$`,
     "u",
   );
 }
@@ -473,19 +500,19 @@ export function expectedBoundaryPolicyDocument(contract) {
     Version: "2012-10-17",
     Statement: [
       {
-        Sid: "Identity",
+        Sid: "I",
         Effect: "Allow",
         Action: "*",
         Resource: "*",
       },
       {
-        Sid: `Ceiling${policyRevision}`,
+        Sid: `C${policyRevision}`,
         Effect: "Deny",
         NotAction: [...RUNTIME_ACTION_CEILING],
         Resource: "*",
       },
       {
-        Sid: "Resources",
+        Sid: "R",
         Effect: "Deny",
         Action: [...PROJECT_RESOURCE_RUNTIME_ACTIONS],
         NotResource: projectResources,
@@ -503,13 +530,13 @@ export function expectedBoundaryPolicyDocument(contract) {
       // encryption context by `GenKey` below. That used to be an absence and is
       // now a statement, so the suite asserts `GenKey` directly.
       {
-        Sid: "ParamWrite",
+        Sid: "P",
         Effect: "Deny",
         Action: "ssm:PutParameter",
         NotResource: ssmApprovalParameterArn,
       },
       {
-        Sid: "KmsContext",
+        Sid: "K",
         Effect: "Deny",
         Action: KMS_DECRYPT_ACTION,
         Resource: "*",
@@ -530,7 +557,7 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "KmsVia",
+        Sid: "V",
         Effect: "Deny",
         Action: KMS_DECRYPT_ACTION,
         Resource: "*",
@@ -548,7 +575,7 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "ParamCtxVia",
+        Sid: "A",
         Effect: "Deny",
         Action: KMS_DECRYPT_ACTION,
         Resource: "*",
@@ -562,7 +589,7 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "SecretCtxVia",
+        Sid: "B",
         Effect: "Deny",
         Action: KMS_DECRYPT_ACTION,
         Resource: "*",
@@ -576,7 +603,7 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "SecretCtxRole",
+        Sid: "S",
         Effect: "Deny",
         Action: KMS_DECRYPT_ACTION,
         Resource: "*",
@@ -590,7 +617,7 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "LambdaCtxRole",
+        Sid: "L",
         Effect: "Deny",
         Action: KMS_DECRYPT_ACTION,
         Resource: "*",
@@ -604,7 +631,7 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "FnCodeKms",
+        Sid: "F",
         Effect: "Deny",
         Action: KMS_DECRYPT_ACTION,
         Resource: "*",
@@ -639,7 +666,7 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "LongBearer",
+        Sid: "T",
         Effect: "Deny",
         Action: MANTLE_BEARER_ACTION,
         Resource: "*",
@@ -663,7 +690,7 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "EniFnCode",
+        Sid: "N",
         Effect: "Deny",
         Action: [...NETWORK_INTERFACE_DENY_ACTIONS],
         Resource: "*",
@@ -1480,7 +1507,7 @@ export function validateProductionRuntimeBindings({
   const projectArnPattern = new RegExp(
     `^arn:${RegExp.escape(partition)}:bedrock-mantle:` +
       `${RegExp.escape(applicationRegion)}:${RegExp.escape(accountId)}:` +
-      "project/([A-Za-z0-9_-]+)$",
+      `project/(${MANTLE_PROJECT_ID_SOURCE})$`,
     "u",
   );
   const projectId = projectArnPattern.exec(bedrockProjectArn ?? "")?.[1];
@@ -1541,7 +1568,10 @@ export function validateProductionRuntimeBindings({
     const count = lambdaFunctions.filter(({ FunctionName }) =>
       matchesProductionLambdaFunctionName(FunctionName, type),
     ).length;
-    if (count !== 1) {
+    if (
+      (type.requiredInProduction === false && count > 1) ||
+      (type.requiredInProduction !== false && count !== 1)
+    ) {
       throw new Error("production Lambda inventory is incomplete");
     }
   }

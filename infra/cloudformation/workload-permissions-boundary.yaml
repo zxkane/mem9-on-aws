@@ -19,12 +19,19 @@ Parameters:
     Description: Region containing the mem9-on-aws workload resources.
   BedrockProjectArn:
     Type: String
-    AllowedPattern: "^arn:[a-z0-9-]+:bedrock-mantle:[a-z0-9-]+:[0-9]{12}:project/[A-Za-z0-9_-]+$"
+    AllowedPattern: "^arn:[a-z0-9-]+:bedrock-mantle:[a-z0-9-]+:[0-9]{12}:project/(default|proj_[a-z0-9]{1,20})$"
+    ConstraintDescription: >
+      Use a same-account Bedrock Mantle project ARN whose service-generated
+      project id is `default` or `proj_` plus at most 20 lowercase letters or digits.
     Description: Exact operator-owned Bedrock Mantle project used by smart ingest.
   OpenAiBedrockProjectArn:
     Type: String
     Default: ""
-    AllowedPattern: "^(arn:[a-z0-9-]+:bedrock-mantle:[a-z0-9-]+:[0-9]{12}:project/[A-Za-z0-9_-]+)?$"
+    AllowedPattern: "^(arn:[a-z0-9-]+:bedrock-mantle:[a-z0-9-]+:[0-9]{12}:project/(default|proj_[a-z0-9]{1,20}))?$"
+    ConstraintDescription: >
+      Leave empty or use a same-account Bedrock Mantle project ARN whose
+      service-generated project id is `default` or `proj_` plus at most 20
+      lowercase letters or digits.
     Description: >
       Optional second Bedrock Mantle project ARN for the llm-proxy Responses
       route (OpenAI reasoning models; regional project in the responses
@@ -55,11 +62,11 @@ Resources:
           # an explicit boundary allow. The explicit Deny/NotAction below is the
           # action ceiling; this Allow only admits identity-policy permissions
           # that survive every explicit deny.
-          - Sid: Identity
+          - Sid: I
             Effect: Allow
             Action: "*"
             Resource: "*"
-          - Sid: !Sub Ceiling${PolicyRevision}
+          - Sid: !Sub C${PolicyRevision}
             Effect: Deny
             NotAction:
               - bedrock-mantle:CreateInference
@@ -109,7 +116,7 @@ Resources:
               - kms:GenerateDataKey
               - bedrock-mantle:CallWithBearerToken
             Resource: "*"
-          - Sid: Resources
+          - Sid: R
             Effect: Deny
             Action:
               - bedrock-mantle:CreateInference
@@ -171,14 +178,14 @@ Resources:
           # all, and #150's GenerateDataKey admission is confined to S3's own
           # encryption context by the `GenKey` deny below. Remove that deny and
           # this sentence stops being true — measured, not assumed.
-          - Sid: ParamWrite
+          - Sid: P
             Effect: Deny
             Action: ssm:PutParameter
             NotResource: !Sub arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/mem9-on-aws/*/approvals/*
           # Lambda cold starts, SSM SecureStrings, and the two ECS task-definition
           # secret families use different KMS encryption contexts. Missing and
           # foreign contexts remain denied.
-          - Sid: KmsContext
+          - Sid: K
             Effect: Deny
             Action: kms:Decrypt
             Resource: "*"
@@ -201,7 +208,7 @@ Resources:
                 # deploy. Pinning both forms costs 6215 bytes, past the hard quota.
                 # Load-bearing — removed, the artifact read is explicitDeny.
                 "kms:EncryptionContext:aws:s3:arn": !Sub arn:${AWS::Partition}:s3:::${DecisionArtifactBucketName}
-          - Sid: KmsVia
+          - Sid: V
             Effect: Deny
             Action: kms:Decrypt
             Resource: "*"
@@ -215,7 +222,7 @@ Resources:
                   - !Sub s3.${ApplicationRegion}.${AWS::URLSuffix}
               StringNotLikeIfExists:
                 "kms:EncryptionContext:aws:lambda:FunctionArn": !Sub arn:${AWS::Partition}:lambda:${ApplicationRegion}:${AWS::AccountId}:function:mem9-on-aws-*
-          - Sid: ParamCtxVia
+          - Sid: A
             Effect: Deny
             Action: kms:Decrypt
             Resource: "*"
@@ -224,7 +231,7 @@ Resources:
                 "kms:EncryptionContext:PARAMETER_ARN": "false"
               StringNotEqualsIfExists:
                 kms:ViaService: !Sub ssm.${ApplicationRegion}.${AWS::URLSuffix}
-          - Sid: SecretCtxVia
+          - Sid: B
             Effect: Deny
             Action: kms:Decrypt
             Resource: "*"
@@ -235,7 +242,7 @@ Resources:
                 kms:ViaService: !Sub secretsmanager.${ApplicationRegion}.${AWS::URLSuffix}
           # Secrets Manager's encryption context is fixed, but the boundary also
           # constrains which project role types may use that service-mediated path.
-          - Sid: SecretCtxRole
+          - Sid: S
             Effect: Deny
             Action: kms:Decrypt
             Resource: "*"
@@ -250,7 +257,7 @@ Resources:
                   - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9CleanupExecutionRole-*
           # Only the reviewed Lambda execution-role types may present the Lambda
           # cold-start context. Other workload roles cannot forge it.
-          - Sid: LambdaCtxRole
+          - Sid: L
             Effect: Deny
             Action: kms:Decrypt
             Resource: "*"
@@ -260,13 +267,14 @@ Resources:
               ArnNotLike:
                 "aws:PrincipalArn":
                   - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9AlertRouterRole-*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9IdentityInterceptorFnRole-*
                   - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9OauthFacadeAllowAllRole
                   - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9OauthFacadeFnRole-*
                   - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ProxyFnRole-*
           # Encryption context is caller supplied. Block function code from
           # presenting a project Lambda context directly while preserving the
           # facade's SSM-mediated decrypt and Lambda's cold-start service path.
-          - Sid: FnCodeKms
+          - Sid: F
             Effect: Deny
             Action: kms:Decrypt
             Resource: "*"
@@ -291,7 +299,7 @@ Resources:
             Condition:
               StringNotLikeIfExists:
                 "kms:EncryptionContext:aws:s3:arn": !Sub arn:${AWS::Partition}:s3:::${DecisionArtifactBucketName}
-          - Sid: LongBearer
+          - Sid: T
             Effect: Deny
             Action: bedrock-mantle:CallWithBearerToken
             Resource: "*"
@@ -311,7 +319,7 @@ Resources:
             Condition:
               ArnNotLike:
                 "aws:PrincipalArn": !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ProxyFnRole-*
-          - Sid: EniFnCode
+          - Sid: N
             Effect: Deny
             Action:
               - ec2:*NetworkInterface*

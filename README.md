@@ -504,12 +504,15 @@ custom-simulates every quarantine action against the policy's default `*`
 resource. It reads the exact quarantine again after simulation before any
 boundary mutation. It then deploys or verifies the retained boundary stack,
 derives the complete migration set from the deployed `iam:PassRole` policies,
-classifies the four required Lambda execution-role types, including the facade
-authorizer role, and repairs only the exact legacy trust containing
+classifies the four currently required Lambda execution-role types plus the
+pre-authorized namespace identity-interceptor role, and repairs only the exact
+legacy trust containing
 Lambda plus the current-account root. It validates the complete inventory before
 any trust write, then re-reads immediately before each update and reads back the
 exact Lambda-only result. Any unknown principal, extra field, or later trust
-drift fails closed; frozen-state checks never repair.
+drift fails closed; frozen-state checks never repair. The interceptor remains
+optional until the namespace feature has created it, but is accepted only with
+its exact reviewed function/role binding when present.
 The command then checks all production service deployments, RUNNING/PENDING
 tasks, and the bootstrap task definition before the first boundary mutation.
 Every task definition
@@ -537,8 +540,9 @@ already fired.
 
 Normal AWS deployment preflights call the boundary script with `--verify-only`.
 They compare the current default policy version with the repository contract and
-then custom-simulate 17 KMS boundary cases. The allowed paths are project Lambda
-contexts for the four required role types, an SSM-mediated project
+then custom-simulate 18 KMS boundary cases. The allowed paths are project Lambda
+contexts for the four required role types plus the pre-authorized namespace
+identity-interceptor role, an SSM-mediated project
 parameter, and Secrets Manager-mediated project DB/tenant secrets from the
 server or bootstrap ECS execution-role type. Direct service-context use,
 foreign/cross-region service paths, task/Lambda roles presenting a secret
