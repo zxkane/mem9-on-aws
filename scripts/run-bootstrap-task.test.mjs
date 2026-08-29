@@ -77,7 +77,11 @@ if (command === "ssm get-parameter") {
   }
 } else if (command === "logs filter-log-events") {
   console.log(JSON.stringify({
-    events: [{ message: "preview namespace preparation failed: fixture failure" }]
+    events: Array.from({ length: 205 }, (_, index) => ({
+      message: index === 204
+        ? "preview namespace preparation failed: fixture failure"
+        : \`schema notice \${index}\`
+    }))
   }));
 } else {
   console.error("unexpected aws command:", command);
@@ -117,6 +121,7 @@ describe("schema bootstrap ECS runner", () => {
     expect(output).toContain(
       "preview namespace preparation failed: fixture failure",
     );
+    expect(output).not.toContain("schema notice 0");
     const logCall = callRecords.find(
       ([service, operation]) =>
         service === "logs" && operation === "filter-log-events",
@@ -129,6 +134,7 @@ describe("schema bootstrap ECS runner", () => {
         "/service/Mem9Bootstrap/task-private",
       ]),
     );
+    expect(logCall).not.toContain("--limit");
     expect(
       callRecords.some(
         ([service, operation]) =>

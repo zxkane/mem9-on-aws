@@ -108,11 +108,10 @@ print_task_logs() {
       --log-group-name "$LOG_GROUP" \
       --log-stream-name-prefix "$stream" \
       --region "$REGION" \
-      --limit 200 \
       --output json 2>/dev/null || true)
     if printf '%s' "$events" | jq -e '.events | length > 0' >/dev/null 2>&1; then
       echo "----- bootstrap task logs (${LOG_GROUP} / ${stream}) -----"
-      printf '%s' "$events" | jq -r '.events[].message'
+      printf '%s' "$events" | jq -r '.events[-200:][] | .message'
       echo "----- end bootstrap task logs -----"
       return 0
     fi

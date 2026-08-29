@@ -11,7 +11,13 @@
 
 FROM node:24-alpine
 
-RUN apk add --no-cache jq postgresql17-client
+RUN apk add --no-cache ca-certificates curl jq postgresql17-client \
+    && mkdir -p /bootstrap \
+    && curl --fail --silent --show-error \
+      https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
+      --output /bootstrap/global-bundle.pem
+
+ENV NODE_EXTRA_CA_CERTS=/bootstrap/global-bundle.pem
 
 COPY docker/bootstrap/schema.sql /bootstrap/schema.sql
 COPY docker/bootstrap/migrations/ /bootstrap/migrations/
