@@ -109,7 +109,19 @@ if (request.method === "initialize") {
     id: 1,
     result: {
       tools: [
-        { name: "fixture___add_memory" },
+        {
+          name: "fixture___add_memory",
+          inputSchema: {
+            type: "object",
+            properties: {
+              memory_type: {
+                type: "string",
+                description:
+                  "Optional explicit memory type. Only pinned is supported."
+              }
+            }
+          }
+        },
         {
           name: "fixture___search_memories",
           inputSchema: {
@@ -130,6 +142,9 @@ if (request.method === "initialize") {
   const tool = request.params.name;
   const input = request.params.arguments;
   if (tool.endsWith("add_memory")) {
+    if (input.memory_type !== "pinned") {
+      process.exit(3);
+    }
     if (
       auth === "alpha" &&
       (input.namespace_id !== "forged-beta-namespace" ||
@@ -503,6 +518,7 @@ describe("memory namespace operator config", () => {
       "shared memory ID matched; cross-namespace keyword results absent",
     );
     expect(curlArgv).toContain('\\"search_mode\\":\\"keyword\\"');
+    expect(curlArgv).toContain('\\"memory_type\\":\\"pinned\\"');
     expect(headers).toContain("Mcp-Session-Id: fixture-default");
     expect(headers).toContain("Mcp-Session-Id: fixture-alpha");
     expect(headers).toContain("Mcp-Session-Id: fixture-beta");

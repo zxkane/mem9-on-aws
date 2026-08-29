@@ -61,11 +61,16 @@ const TOOL_SCHEMA = [
   {
     name: "add_memory",
     description:
-      "Add a memory (raw content) for later recall. Writes are async; returns {status:'accepted'}.",
+      "Add a memory for later recall. Default writes use smart extraction; memory_type pinned stores the content directly.",
     inputSchema: {
       type: "object",
       properties: {
         content: { type: "string", description: "Raw content to store as a memory." },
+        memory_type: {
+          type: "string",
+          description:
+            "Optional explicit memory type. Only pinned is supported; pinned stores content directly without smart extraction.",
+        },
         agent_id: {
           type: "string",
           description: "Optional agent id to attribute the write to (per-agent scoping).",

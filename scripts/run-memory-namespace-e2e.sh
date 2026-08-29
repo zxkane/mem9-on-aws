@@ -160,6 +160,19 @@ resolve_tools() {
     echo "::error::search_memories does not advertise its keyword search_mode input"
     exit 1
   fi
+  if ! printf '%s' "$tools" | jq -e \
+    'any(
+       (.tools // [])[];
+       (.name | endswith("add_memory"))
+       and (.inputSchema.properties.memory_type.type == "string")
+       and (
+         (.inputSchema.properties.memory_type.description // "")
+         | test("pinned"; "i")
+       )
+     )' >/dev/null; then
+    echo "::error::add_memory does not advertise its pinned memory_type input"
+    exit 1
+  fi
 }
 
 call_tool() {
@@ -231,6 +244,7 @@ call_tool "$ALPHA_AUTH_CONFIG" alpha "$ADD_TOOL" \
   "$(jq -nc --arg content "PR namespace isolation marker ${ALPHA_MARKER}" \
     '{
       content:$content,
+      memory_type:"pinned",
       namespace_id:"forged-beta-namespace",
       namespace_slug:"preview-beta"
     }')"
@@ -238,7 +252,7 @@ assert_call_succeeded "alpha namespace write"
 
 call_tool "$BETA_AUTH_CONFIG" beta "$ADD_TOOL" \
   "$(jq -nc --arg content "PR namespace isolation marker ${BETA_MARKER}" \
-    '{content:$content}')"
+    '{content:$content,memory_type:"pinned"}')"
 assert_call_succeeded "beta namespace write"
 
 echo "run-memory-namespace-e2e: polling both isolated namespaces"
@@ -271,7 +285,7 @@ while [[ $SECONDS -lt $DEADLINE ]]; do
 done
 
 if [[ -z "$ALPHA_MEMORY_ID" || -z "$BETA_MEMORY_ID" ]]; then
-  echo "::error::one or both namespace writes were not found by keyword search within 6 minutes"
+  echo "::error::one or both pinned namespace writes were not found by keyword search within 6 minutes"
   exit 1
 fi
 

@@ -176,12 +176,18 @@ function safeJson(text) {
 }
 
 async function addMemory(input, identity) {
-  // Body carries content OR messages (+ optional agent_id/tags/metadata). Agent
-  // scoping can come via the header or the body's agent_id; forward whichever is set.
-  const { agent_id, ...body } = input ?? {};
+  const { content, agent_id, memory_type } = input ?? {};
+  if (typeof content !== "string" || !content.trim()) {
+    throw new Error("add_memory requires non-empty 'content'");
+  }
+  if (memory_type != null && String(memory_type) !== "pinned") {
+    throw new Error("add_memory memory_type must be 'pinned'");
+  }
   const headers = { "Content-Type": "application/json" };
   if (agent_id) headers["X-Mnemo-Agent-Id"] = String(agent_id);
-  const payload = agent_id ? { ...body, agent_id } : body;
+  const payload = { content };
+  if (memory_type != null) payload.memory_type = "pinned";
+  if (agent_id) payload.agent_id = String(agent_id);
   return mem9Fetch(MEMORIES_PATH, {
     method: "POST",
     headers,

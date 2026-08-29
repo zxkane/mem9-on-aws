@@ -142,14 +142,39 @@ describe("proxy-handler routing (regression)", () => {
     expect(spy).not.toHaveBeenCalled();
   });
 
-  it("add_memory still POSTs a single content body", async () => {
+  it("add_memory forwards pinned content and strips namespace-shaped input", async () => {
     const spy = mockFetchOk();
-    await handler({ content: "one fact", agent_id: "a" }, ctx("add_memory"));
+    await handler(
+      {
+        content: "one fact",
+        agent_id: "a",
+        memory_type: "pinned",
+        namespace_id: "forged-namespace",
+        namespace_slug: "forged-slug",
+      },
+      ctx("add_memory"),
+    );
     const [url, init] = spy.mock.calls[0];
     expect(url).toBe("http://mnemo.mem9-test.local:8080/v1alpha2/mem9s/memories");
     expect(init.method).toBe("POST");
-    expect(JSON.parse(init.body)).toEqual({ content: "one fact", agent_id: "a" });
+    expect(JSON.parse(init.body)).toEqual({
+      content: "one fact",
+      memory_type: "pinned",
+      agent_id: "a",
+    });
     expect(init.body).not.toContain(INTERNAL_AUTH_FIELD);
+    expect(init.body).not.toContain("namespace");
+  });
+
+  it("rejects unsupported add_memory types before calling mnemo-server", async () => {
+    const spy = mockFetchOk();
+    await expect(
+      handler(
+        { content: "one fact", memory_type: "insight" },
+        ctx("add_memory"),
+      ),
+    ).rejects.toThrow(/memory_type/u);
+    expect(spy).not.toHaveBeenCalled();
   });
 
   it("search_memories GETs with the query string", async () => {
