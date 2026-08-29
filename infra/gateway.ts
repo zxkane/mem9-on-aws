@@ -25,9 +25,6 @@
  * separately signed, short-lived transport envelope.
  */
 
-import * as fs from "fs";
-import * as path from "path";
-import { fileURLToPath } from "url";
 import { resolveVpc } from "./vpc";
 import {
   MCP_RESOURCE_SCOPES,
@@ -40,9 +37,6 @@ import type { NamespaceIdentityOutputs } from "./namespace-identity";
 
 // @ts-ignore - `aws` injected globally by SST; bedrock/iam/ssm types loose.
 const awsAny = aws as unknown as Record<string, any>;
-
-const gatewayFilename = fileURLToPath(import.meta.url);
-const gatewayDirname = path.dirname(gatewayFilename);
 
 const MNEMO_PORT = 8080;
 
@@ -178,15 +172,6 @@ export function gateway(
   // The GatewayTarget provision script (below) needs the region for its SDK client.
   const region = awsAny.getRegionOutput().name;
 
-  // Resolve the `infra/gateway/` directory that holds the target-provision
-  // script. SST's esbuild bundle relocates the config, so `gatewayDirname`
-  // (from import.meta.url) may not point at the source tree — fall back to the
-  // workspace-root `infra/gateway`. The `node <script>` invocation below needs a
-  // correct path (the proxy Lambda's handler uses an app-root-relative string).
-  const moduleGatewayDir = path.resolve(gatewayDirname, "gateway");
-  const gatewayAssetDir = fs.existsSync(path.join(moduleGatewayDir, "proxy-handler.mjs"))
-    ? moduleGatewayDir
-    : path.resolve(process.cwd(), "infra", "gateway");
   const tenantKey = identity.tenantId;
 
   const identitySigningKeys = namespaceIdentity.identitySigningKeys;
@@ -214,9 +199,8 @@ export function gateway(
   // the sst.config $transform. Attaches to the task SG (shares it with mnemo-server)
   // so the self-ingress :8080 rule in ecs.ts lets it reach the server. Env carries
   // the Cloud Map URL + the X-API-Key (tenant id). The handler path is app-root-
-  // relative (SST resolves handlers from the sst.config.ts dir, not the esbuild
-  // bundle location — so no gatewayDirname/cwd dance needed here, unlike the
-  // provision-target.mjs `node` invocation below).
+  // relative (SST resolves handlers from the sst.config.ts dir). The local
+  // provision command below separately resolves the checkout root at runtime.
   const proxyFn = new sst.aws.Function("Mem9ProxyFn", {
     handler: "infra/gateway/proxy-handler.handler",
     runtime: "nodejs24.x",
@@ -317,14 +301,13 @@ export function gateway(
   // Command wrapper still gives a clean create→poll-READY→delete lifecycle + a
   // dependsOn edge on the proxy Lambda + gateway.
   const targetName = `${stage}-mem9-rest`;
-  // Persist a checkout-relative script path in Pulumi state. An absolute path
-  // ties the delete command to the runner that deployed the stage, so teardown
-  // from another runner or an operator checkout cannot find the script.
-  const provisionScript = path.relative(
-    process.cwd(),
-    path.join(gatewayAssetDir, "provision-target.mjs"),
-  );
-  const provisionCommand = `node ${JSON.stringify(provisionScript)}`;
+  // Persist a checkout-portable command in Pulumi state. SST runs local commands
+  // from `.sst/platform`, not the repository root, while teardown may run from a
+  // different checkout than deployment. Resolve the CURRENT checkout root at
+  // command runtime so both create and delete find the repository-owned script.
+  const provisionScript = "infra/gateway/provision-target.mjs";
+  const provisionCommand =
+    `node "$(git rev-parse --show-toplevel)/${provisionScript}"`;
   const toolSchemaJson = JSON.stringify(TOOL_SCHEMA);
   // `command.local.Command`'s `environment` block applies to BOTH create and
   // delete, so MEM9_TGT_OP can't live there (it must differ per lifecycle) — set it

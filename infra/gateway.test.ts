@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CognitoOutputs } from "./cognito";
@@ -291,9 +293,20 @@ describe("gateway stack", () => {
     expect(createCommand).toContain("MEM9_TGT_OP=create");
     expect(deleteCommand).toContain("MEM9_TGT_OP=delete");
     for (const command of [createCommand, deleteCommand]) {
-      const script = JSON.parse(command.slice(command.indexOf(" node ") + 6));
-      expect(path.isAbsolute(script)).toBe(false);
-      expect(script).toMatch(/gateway[/\\]provision-target\.mjs$/u);
+      const scriptExpression = command.slice(command.indexOf(" node ") + 6);
+      expect(scriptExpression).toBe(
+        '"$(git rev-parse --show-toplevel)/infra/gateway/provision-target.mjs"',
+      );
+      const resolvedScript = execFileSync(
+        "sh",
+        ["-c", `printf '%s' ${scriptExpression}`],
+        {
+          cwd: path.resolve(import.meta.dirname, "gateway"),
+          encoding: "utf8",
+        },
+      );
+      expect(path.isAbsolute(resolvedScript)).toBe(true);
+      expect(fs.existsSync(resolvedScript)).toBe(true);
     }
     const env = unwrap(cmd.environment) as Record<string, unknown>;
     // Lambda target inputs: the proxy Lambda ARN + the inline tool schema (both tools).
