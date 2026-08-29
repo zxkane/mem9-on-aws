@@ -1,8 +1,9 @@
 /**
  * Wait briefly for an already-running `sst remove` to finish deleting both its
- * state object and every AWS resource still carrying this stage's ownership
- * tags. State disappearance alone is not success: a timed-out remove can delete
- * state before Lambda ENIs, security groups, or IAM roles are gone.
+ * live checkpoint resources and every AWS resource still carrying this stage's
+ * ownership tags. An empty retained SST state object is allowed, but checkpoint
+ * completion alone is not success: Lambda ENIs, security groups, or IAM roles
+ * can remain after Pulumi has removed its live resources.
  */
 
 import path from "node:path";
@@ -91,7 +92,9 @@ async function main(): Promise<void> {
       positiveEnvInteger("SST_REMOVE_SETTLEMENT_SLEEP_SECONDS", 5) * 1_000,
   });
   if (result.outcome === "removed") {
-    console.log(`await-sst-stage-removal: ${stage} state and owned resources are absent`);
+    console.log(
+      `await-sst-stage-removal: ${stage} live state and owned resources are absent`,
+    );
     return;
   }
   console.error(
