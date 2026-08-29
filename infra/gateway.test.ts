@@ -295,7 +295,16 @@ describe("gateway stack", () => {
     expect(String(env.MEM9_TGT_TOOL_SCHEMA)).toContain("search_memories");
     expect(String(env.MEM9_TGT_TOOL_SCHEMA)).toContain("ingest_messages");
     expect(String(env.MEM9_TGT_TOOL_SCHEMA)).toContain("get_ingest_job_status");
-    const toolNames = JSON.parse(String(env.MEM9_TGT_TOOL_SCHEMA))
+    const toolSchema = JSON.parse(String(env.MEM9_TGT_TOOL_SCHEMA));
+    const searchModeSchema = toolSchema.find(
+      ({ name }: { name: string }) => name === "search_memories",
+    ).inputSchema.properties.search_mode;
+    expect(searchModeSchema).toEqual({
+      type: "string",
+      description:
+        "Optional search mode. Defaults to semantic; keyword performs exact substring matching.",
+    });
+    const toolNames = toolSchema
       .map(({ name }: { name: string }) => name)
       .sort();
     const identityFn = all("SstFunction").find((fn) =>

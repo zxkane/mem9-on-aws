@@ -151,9 +151,13 @@ resolve_tools() {
     'any(
        (.tools // [])[];
        (.name | endswith("search_memories"))
-       and ((.inputSchema.properties.search_mode.enum // []) | index("keyword") != null)
+       and (.inputSchema.properties.search_mode.type == "string")
+       and (
+         (.inputSchema.properties.search_mode.description // "")
+         | test("keyword"; "i")
+       )
      )' >/dev/null; then
-    echo "::error::search_memories does not advertise keyword mode"
+    echo "::error::search_memories does not advertise its keyword search_mode input"
     exit 1
   fi
 }

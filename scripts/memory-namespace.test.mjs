@@ -117,7 +117,8 @@ if (request.method === "initialize") {
             properties: {
               search_mode: {
                 type: "string",
-                enum: ["semantic", "keyword"]
+                description:
+                  "Optional search mode. Defaults to semantic; keyword performs exact substring matching."
               }
             }
           }

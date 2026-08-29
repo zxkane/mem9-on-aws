@@ -54,9 +54,9 @@ const MNEMO_PORT = 8080;
 // SHAPE: this schema is passed to the DIRECT bedrock-agentcore-control
 // `CreateGatewayTarget` API (via provision-target.mjs), so it uses the SDK's
 // `SchemaDefinition` shape — `properties` is a MAP keyed by property name and
-// `required` is an ARRAY of names (standard JSON-schema), NOT the pulumi typed-
-// resource's list-of-{name,required:boolean}. (Getting this wrong => the API
-// rejects with "Unexpected field type".)
+// `required` is an ARRAY of names, NOT the pulumi typed-resource's list-of-
+// {name,required:boolean}. This is a restricted JSON-schema subset: enum and
+// other unmodeled keywords are discarded by the SDK serializer.
 const TOOL_SCHEMA = [
   {
     name: "add_memory",
@@ -85,7 +85,6 @@ const TOOL_SCHEMA = [
         limit: { type: "integer", description: "Max results to return (default 20)." },
         search_mode: {
           type: "string",
-          enum: ["semantic", "keyword"],
           description:
             "Optional search mode. Defaults to semantic; keyword performs exact substring matching.",
         },
