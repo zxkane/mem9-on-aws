@@ -165,12 +165,11 @@ export function classifyAccessToken(token, registry) {
     });
   }
 
-  if (typeof claims.sub === "string" && claims.sub.length > 0) {
-    throw new Error("m2m access token has an unexpected sub claim");
-  }
   if (claims["cognito:groups"] !== undefined) {
     throw new Error("m2m access token has an unexpected group claim");
   }
+  // Cognito client-credentials tokens include sub, but the machine identity is
+  // the Gateway-verified and registry-classified app client.
   return Object.freeze({
     issuer,
     clientId,

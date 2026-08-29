@@ -79,6 +79,7 @@ describe("namespace identity derivation", () => {
     const m2m = classifyAccessToken(
       jwt({
         iss: ISSUER,
+        sub: "machine-token-subject",
         client_id: M2M_CLIENT,
         token_use: "access",
         scope: "mem9-mcp/read",
@@ -90,6 +91,12 @@ describe("namespace identity derivation", () => {
       subject: M2M_CLIENT,
       groups: [],
     });
+    expect(
+      derivePrincipalKey(m2m.issuer, m2m.principalType, m2m.subject),
+    ).toBe(derivePrincipalKey(ISSUER, "m2m", M2M_CLIENT));
+    expect(
+      derivePrincipalKey(m2m.issuer, m2m.principalType, m2m.subject),
+    ).not.toBe(derivePrincipalKey(ISSUER, "m2m", "machine-token-subject"));
 
     expect(() =>
       classifyAccessToken(

@@ -1,6 +1,10 @@
 import { beforeAll, describe, expect, it } from "vitest";
 
-import { INTERNAL_AUTH_FIELD } from "./namespace-auth.mjs";
+import {
+  INTERNAL_AUTH_FIELD,
+  deriveClientKey,
+  derivePrincipalKey,
+} from "./namespace-auth.mjs";
 
 const ISSUER = "https://cognito-idp.example.invalid/pool";
 const HUMAN_CLIENT = "reader-client";
@@ -92,6 +96,33 @@ describe("identity interceptor", () => {
       expect(JSON.stringify(output)).not.toContain("unknown-client");
       expect(JSON.stringify(output)).not.toContain("human-subject");
     }
+  });
+
+  it("classifies Cognito client-credentials tokens that include sub", async () => {
+    const output = await handler(
+      event(
+        { content: "team fact" },
+        {
+          client_id: "m2m-client",
+          sub: "machine-token-subject",
+          scope: "mem9-mcp/read",
+          "cognito:groups": undefined,
+        },
+      ),
+    );
+    const context =
+      output.mcp.transformedGatewayRequest.body.params.arguments[
+        INTERNAL_AUTH_FIELD
+      ];
+    expect(context).toMatchObject({
+      principal_type: "m2m",
+      principal_key: derivePrincipalKey(ISSUER, "m2m", "m2m-client"),
+      client_key: deriveClientKey(ISSUER, "m2m-client"),
+      group_keys: [],
+    });
+    expect(context.principal_key).not.toBe(
+      derivePrincipalKey(ISSUER, "m2m", "machine-token-subject"),
+    );
   });
 
   it("does not attach internal identity to non-tool protocol requests", async () => {
