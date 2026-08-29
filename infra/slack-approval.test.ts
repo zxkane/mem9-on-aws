@@ -650,11 +650,11 @@ describe("slack approval infrastructure", () => {
       ).toBe(true);
     }
 
-    // `ParamWrite` is a NotResource deny, so the grant is only reachable if EVERY
+    // The approval `P` statement is a NotResource deny, so the grant is only reachable if EVERY
     // resource it names is matched by the exception. One stray resource in the
     // same statement denies the whole call.
     const approvalDeny = boundary.find(
-      ({ Sid }) => Sid === "ParamWrite",
+      ({ Sid }) => Sid === "P",
     );
     expect(approvalDeny).toBeDefined();
     // `!Sub` resolves to an OBJECT, so these must be resolved before comparing —
@@ -669,7 +669,7 @@ describe("slack approval infrastructure", () => {
     for (const resource of putResources) {
       expect(
         exceptions.some((pattern) => globMatches(pattern, resource)),
-        `${resource} is denied by ParamWrite`,
+        `${resource} is denied by the approval resource boundary`,
       ).toBe(true);
     }
   });
@@ -1577,7 +1577,7 @@ describe("slack approval infrastructure", () => {
     // statement denies the whole call, so EVERY resource the write names has to
     // be matched by the exception.
     const approvalDeny = boundary.find(
-      ({ Sid }) => Sid === "ParamWrite",
+      ({ Sid }) => Sid === "P",
     );
     expect(approvalDeny).toBeDefined();
     const exceptions = listRaw(approvalDeny!.NotResource).map(resolveSub);
@@ -1709,7 +1709,7 @@ describe("slack approval infrastructure", () => {
     // a drift here is an AccessDenied at artifact-write time, AFTER the approval
     // click has been spent, which is the one failure mode this loop must not have.
     const boundary = boundaryStatements();
-    const scoped = boundary.find(({ Sid }) => Sid === "Resources");
+    const scoped = boundary.find(({ Sid }) => Sid === "R");
     expect(scoped).toBeDefined();
     expect(listRaw(scoped!.NotResource).map(resolveSub)).toContain(
       `arn:aws:s3:::${name}/*`,
@@ -1718,7 +1718,7 @@ describe("slack approval infrastructure", () => {
     // `GenKey` deny, and the read needs Decrypt under `KmsContext`. A bucket name
     // that matched only one of the three would break exactly one direction.
     const contextArn = boundary
-      .filter(({ Sid }) => Sid === "KmsContext" || Sid === "GenKey")
+      .filter(({ Sid }) => Sid === "K" || Sid === "GenKey")
       .map((statement) =>
         resolveSub(
           statement.Condition?.StringNotLikeIfExists?.[
@@ -1777,7 +1777,7 @@ describe("slack approval infrastructure", () => {
     const boundary = boundaryStatements();
     expect(
       JSON.stringify(
-        listRaw(boundary.find(({ Sid }) => Sid === "Resources")!.NotResource),
+        listRaw(boundary.find(({ Sid }) => Sid === "R")!.NotResource),
       ),
     ).toContain("${DecisionArtifactBucketName}");
   });
@@ -1840,7 +1840,7 @@ describe("slack approval infrastructure", () => {
     // Pin the coupling directly, so flipping the flag alone turns THIS test red
     // rather than only the other one.
     const contextArn = boundaryStatements()
-      .filter(({ Sid }) => Sid === "KmsContext" || Sid === "GenKey")
+      .filter(({ Sid }) => Sid === "K" || Sid === "GenKey")
       .map((statement) =>
         resolveSub(
           statement.Condition?.StringNotLikeIfExists?.[
@@ -2094,10 +2094,10 @@ describe("slack approval infrastructure", () => {
     const s3Statements = permissions.filter((statement) =>
       list(statement.actions).some((action) => action.startsWith("s3:")),
     );
-    const scoped = boundary.find(({ Sid }) => Sid === "Resources");
+    const scoped = boundary.find(({ Sid }) => Sid === "R");
     expect(scoped).toBeDefined();
     const exceptions = listRaw(scoped!.NotResource).map(resolveSub);
-    // `Resources` is a NotResource deny, so EVERY resource the grant names must be
+    // `R` is a NotResource deny, so EVERY resource the grant names must be
     // matched by an exception — one stray entry denies the whole call.
     for (const resource of s3Statements.flatMap((statement) => list(statement.resources))) {
       expect(
@@ -2125,15 +2125,15 @@ describe("slack approval infrastructure", () => {
     expect(contextValues).toEqual(["arn:aws:s3:::mem9-audit-123456789012"]);
 
     // The grant's ViaService must be one the `KmsVia` deny permits, and its context
-    // must satisfy both `KmsContext` (the Decrypt half) and `GenKey` (the write
+    // must satisfy both `K` (the Decrypt half) and `GenKey` (the write
     // half). All three read from the deployed template, so a boundary edit that
     // drops the s3 entry or re-adds a `/*` suffix turns this red.
-    const kmsVia = boundary.find(({ Sid }) => Sid === "KmsVia");
+    const kmsVia = boundary.find(({ Sid }) => Sid === "V");
     expect(
       listRaw(kmsVia!.Condition.StringNotEqualsIfExists["kms:ViaService"])
         .map((value) => resolveSub(value).replace("${AWS::URLSuffix}", "amazonaws.com")),
     ).toContain("s3.ap-northeast-1.amazonaws.com");
-    for (const sid of ["KmsContext", "GenKey"]) {
+    for (const sid of ["K", "GenKey"]) {
       const statement = boundary.find((entry) => entry.Sid === sid);
       const pattern = resolveSub(
         statement!.Condition.StringNotLikeIfExists["kms:EncryptionContext:aws:s3:arn"],

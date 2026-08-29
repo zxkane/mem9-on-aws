@@ -112,6 +112,7 @@ const boundaryContract = {
     "arn:aws:bedrock-mantle:ap-northeast-1:123456789012:project/proj_test",
   partition,
 };
+const MAX_MANTLE_PROJECT_ID = `proj_${"z".repeat(20)}`;
 const createAwsCliAdapter = (options) =>
   createAwsCliAdapterForRegion({
     applicationRegion: boundaryContract.applicationRegion,
@@ -212,6 +213,12 @@ const facadeAuthorizerRoleArn =
   `arn:aws:iam::${accountId}:role/${facadeAuthorizerRoleName}`;
 const facadeAuthorizerFunctionName =
   "mem9-on-aws-prod-Mem9OauthFacadeAllowAll";
+const identityInterceptorRoleName =
+  "mem9-on-aws-prod-Mem9IdentityInterceptorFnRole-abcdefhk";
+const identityInterceptorRoleArn =
+  `arn:aws:iam::${accountId}:role/${identityInterceptorRoleName}`;
+const identityInterceptorFunctionName =
+  "mem9-on-aws-prod-Mem9IdentityInterceptorFnFunction-abcdefhk";
 const expectedProductionRoleNames = [
   ...Object.values(productionRoleNames),
   facadeAuthorizerRoleName,
@@ -504,7 +511,7 @@ const NO_VALUE = Symbol("AWS::NoValue");
 // undefined keeps every existing caller on the unconfigured shape, which is what
 // the template's own parameter default produces.
 // The template's own default, and what every structural assertion below reads
-// (`bySid("Ceilingr1")`). It is NOT what deploys: the guarded updater mints
+// (`bySid("Cr1")`). It is NOT what deploys: the guarded updater mints
 // `r$(Date.now())$(pid)`, so see WORST_CASE_POLICY_REVISION for the size gates.
 const FIXTURE_POLICY_REVISION = "r1";
 // The longest revision the template's own AllowedPattern admits. DERIVED from the
@@ -513,7 +520,7 @@ const FIXTURE_POLICY_REVISION = "r1";
 // while the guarded updater mints `r$(Date.now())$(pid)` — 21 characters — and
 // read_policy_revision() reads back the last value written, so the document never
 // returns to the default. The revision reaches the document through
-// `Sid: !Sub Ceiling${PolicyRevision}`, so the gate was measuring a document 19
+// `Sid: !Sub C${PolicyRevision}`, so the gate was measuring a document 19
 // bytes smaller than the one IAM is asked to accept: it would pass at 6143 while
 // the deploy failed at 6162.
 //
@@ -537,9 +544,15 @@ function resolveTemplateValue(
   value,
   openAiBedrockProjectArn,
   policyRevision = FIXTURE_POLICY_REVISION,
+  bedrockProjectArn = boundaryContract.bedrockProjectArn,
 ) {
   const recur = (child) =>
-    resolveTemplateValue(child, openAiBedrockProjectArn, policyRevision);
+    resolveTemplateValue(
+      child,
+      openAiBedrockProjectArn,
+      policyRevision,
+      bedrockProjectArn,
+    );
   if (Array.isArray(value)) {
     // A parsed `!If [HasOpenAiBedrockProject, ...]` node. Unconfigured, the
     // parameter defaults to "" so the condition is false → the else branch is
@@ -555,7 +568,7 @@ function resolveTemplateValue(
     );
   }
   if (typeof value !== "string") return value;
-  if (value === "BedrockProjectArn") return boundaryContract.bedrockProjectArn;
+  if (value === "BedrockProjectArn") return bedrockProjectArn;
   if (value === "DecisionArtifactBucketName") {
     return "mem9-audit-123456789012";
   }
@@ -717,11 +730,11 @@ async function runBoundaryDeployMock({
       : {}),
   });
   const baselineBoundaryPolicy = structuredClone(expectedBoundaryPolicy);
-  for (const sid of ["Ceilingr1", "Resources"]) {
+  for (const sid of ["Cr1", "R"]) {
     const statement = baselineBoundaryPolicy.Statement.find(
       (candidate) => candidate.Sid === sid,
     );
-    statement[sid === "Ceilingr1" ? "NotAction" : "Action"].push(
+    statement[sid === "Cr1" ? "NotAction" : "Action"].push(
       "iam:DeleteRole",
     );
   }
@@ -749,6 +762,11 @@ async function runBoundaryDeployMock({
     "ContextKeyName=aws:PrincipalArn," +
     "ContextKeyValues=arn:aws:iam::123456789012:role/" +
     "mem9-on-aws-prod-Mem9OauthFacadeFnRole-regression-probe," +
+    "ContextKeyType=string";
+  const identityInterceptorPrincipalContext =
+    "ContextKeyName=aws:PrincipalArn," +
+    "ContextKeyValues=arn:aws:iam::123456789012:role/" +
+    "mem9-on-aws-prod-Mem9IdentityInterceptorFnRole-regression-probe," +
     "ContextKeyType=string";
   const facadeAuthorizerPrincipalContext =
     "ContextKeyName=aws:PrincipalArn," +
@@ -837,6 +855,14 @@ async function runBoundaryDeployMock({
           name: "project-lambda",
           decision: "allowed",
           contextEntries: [lambdaContext, lambdaPrincipalContext],
+        },
+        {
+          name: "identity-interceptor-lambda",
+          decision: "allowed",
+          contextEntries: [
+            lambdaContext,
+            identityInterceptorPrincipalContext,
+          ],
         },
         {
           name: "facade-authorizer-lambda",
@@ -2428,6 +2454,112 @@ describe("production task-definition secret preflight", () => {
     );
   });
 
+  it("TC-IAM-BOUNDARY-103: recognizes the optional future identity interceptor binding", () => {
+    const input = validRuntimeInput();
+    input.lambdaFunctions.push({
+      FunctionArn:
+        `arn:aws:lambda:ap-northeast-1:${accountId}:function:` +
+        identityInterceptorFunctionName,
+      FunctionName: identityInterceptorFunctionName,
+      Role: identityInterceptorRoleArn,
+    });
+    expect(validateProductionRuntimeBindings(input)).toEqual(
+      [...expectedProductionRoleNames, identityInterceptorRoleName].sort(),
+    );
+  });
+
+  it("TC-IAM-BOUNDARY-103: rejects an optional identity interceptor bound to another role type", () => {
+    const input = validRuntimeInput();
+    input.lambdaFunctions.push({
+      FunctionArn:
+        `arn:aws:lambda:ap-northeast-1:${accountId}:function:` +
+        identityInterceptorFunctionName,
+      FunctionName: identityInterceptorFunctionName,
+      Role: productionRoleArns.proxy,
+    });
+    expect(() => validateProductionRuntimeBindings(input)).toThrow(
+      /Lambda role binding is malformed/u,
+    );
+  });
+
+  it("TC-IAM-BOUNDARY-103: rejects multiple optional identity interceptor bindings", () => {
+    const input = validRuntimeInput();
+    input.lambdaFunctions.push(
+      {
+        FunctionArn:
+          `arn:aws:lambda:ap-northeast-1:${accountId}:function:` +
+          identityInterceptorFunctionName,
+        FunctionName: identityInterceptorFunctionName,
+        Role: identityInterceptorRoleArn,
+      },
+      {
+        FunctionArn:
+          `arn:aws:lambda:ap-northeast-1:${accountId}:function:` +
+          "mem9-on-aws-prod-Mem9IdentityInterceptorFnFunction-mnorstuv",
+        FunctionName:
+          "mem9-on-aws-prod-Mem9IdentityInterceptorFnFunction-mnorstuv",
+        Role:
+          `arn:aws:iam::${accountId}:role/` +
+          "mem9-on-aws-prod-Mem9IdentityInterceptorFnRole-mnorstuv",
+      },
+    );
+    expect(() => validateProductionRuntimeBindings(input)).toThrow(
+      /Lambda inventory is incomplete/u,
+    );
+  });
+
+  it.each([
+    [
+      "prefixed function token",
+      "mem9-on-aws-prod-XMem9IdentityInterceptorFnFunction-abcdefhk",
+      identityInterceptorRoleName,
+    ],
+    [
+      "suffixed function token",
+      "mem9-on-aws-prod-Mem9IdentityInterceptorFnSuffixFunction-abcdefhk",
+      identityInterceptorRoleName,
+    ],
+    [
+      "prefixed role token",
+      identityInterceptorFunctionName,
+      "mem9-on-aws-prod-XMem9IdentityInterceptorFnRole-abcdefhk",
+    ],
+    [
+      "suffixed role token",
+      identityInterceptorFunctionName,
+      "mem9-on-aws-prod-Mem9IdentityInterceptorFnRoleSuffix-abcdefhk",
+    ],
+    [
+      "missing Function physical-name segment",
+      "mem9-on-aws-prod-Mem9IdentityInterceptorFn-abcdefhk",
+      identityInterceptorRoleName,
+    ],
+    [
+      "wrong function suffix alphabet",
+      "mem9-on-aws-prod-Mem9IdentityInterceptorFnFunction-abcdefgi",
+      identityInterceptorRoleName,
+    ],
+    [
+      "wrong role suffix length",
+      identityInterceptorFunctionName,
+      "mem9-on-aws-prod-Mem9IdentityInterceptorFnRole-abcdefh",
+    ],
+  ])(
+    "TC-IAM-BOUNDARY-103: rejects an interceptor %s",
+    (_name, functionName, roleName) => {
+      const input = validRuntimeInput();
+      input.lambdaFunctions.push({
+        FunctionArn:
+          `arn:aws:lambda:ap-northeast-1:${accountId}:function:${functionName}`,
+        FunctionName: functionName,
+        Role: `arn:aws:iam::${accountId}:role/${roleName}`,
+      });
+      expect(() => validateProductionRuntimeBindings(input)).toThrow(
+        /Lambda (?:inventory is incomplete|role binding is malformed)/u,
+      );
+    },
+  );
+
   it("TC-FACADEAUTH-005: requires the facade authorizer Lambda binding", () => {
     const input = validRuntimeInput();
     input.lambdaFunctions = input.lambdaFunctions.filter(
@@ -3702,7 +3834,7 @@ describe("quarantine and permanent policy verification", () => {
     };
     const document = expectedBoundaryPolicyDocument(contract);
     const projectStatement = document.Statement.find(
-      ({ Sid }) => Sid === "Resources",
+      ({ Sid }) => Sid === "R",
     );
     expect(projectStatement.NotResource).toContain(
       "arn:aws:bedrock-mantle:us-west-2:123456789012:project/proj_openai",
@@ -3726,6 +3858,7 @@ describe("quarantine and permanent policy verification", () => {
     for (const bad of [
       `arn:aws:bedrock-mantle:us-west-2:${foreignAccount}:project/p`, // foreign account
       `arn:aws:bedrock:us-west-2:${accountId}:project/p`, // wrong service
+      `arn:aws:bedrock-mantle:us-west-2:${accountId}:project/proj_${"z".repeat(21)}`,
       "not-an-arn",
     ]) {
       expect(() =>
@@ -3737,13 +3870,34 @@ describe("quarantine and permanent policy verification", () => {
     }
   });
 
+  it("TC-IAM-BOUNDARY-104: accepts only service-valid Mantle project id lengths", () => {
+    expect(() =>
+      expectedBoundaryPolicyDocument({
+        ...boundaryContract,
+        bedrockProjectArn:
+          `arn:aws:bedrock-mantle:ap-northeast-1:${accountId}:project/` +
+          MAX_MANTLE_PROJECT_ID,
+        openAiBedrockProjectArn:
+          `arn:aws:bedrock-mantle:us-west-2:${accountId}:project/default`,
+      }),
+    ).not.toThrow();
+    expect(() =>
+      expectedBoundaryPolicyDocument({
+        ...boundaryContract,
+        bedrockProjectArn:
+          `arn:aws:bedrock-mantle:ap-northeast-1:${accountId}:project/proj_` +
+          "z".repeat(21),
+      }),
+    ).toThrow(/invalid Bedrock Mantle project ARN/u);
+  });
+
   it("accepts semantically equivalent reordered action and resource lists", () => {
     const document = expectedBoundaryPolicyDocument(boundaryContract);
-    document.Statement.find(({ Sid }) =>
-      Sid.startsWith("Ceiling"),
+    document.Statement.find(
+      ({ Sid }) => Sid === `C${FIXTURE_POLICY_REVISION}`,
     ).NotAction.reverse();
     document.Statement.find(
-      ({ Sid }) => Sid === "Resources",
+      ({ Sid }) => Sid === "R",
     ).NotResource.reverse();
     expect(verifyBoundaryPolicyDocument(document, boundaryContract)).toBe(true);
   });
@@ -3758,8 +3912,8 @@ describe("quarantine and permanent policy verification", () => {
     [
       "action",
       (document) => {
-        document.Statement.find(({ Sid }) =>
-          Sid.startsWith("Ceiling"),
+        document.Statement.find(
+          ({ Sid }) => Sid === `C${FIXTURE_POLICY_REVISION}`,
         ).NotAction.push("s3:GetObject");
       },
     ],
@@ -3767,7 +3921,7 @@ describe("quarantine and permanent policy verification", () => {
       "resource",
       (document) => {
         document.Statement.find(
-          ({ Sid }) => Sid === "Resources",
+          ({ Sid }) => Sid === "R",
         ).NotResource[0] =
           "arn:aws:bedrock-mantle:ap-northeast-1:123456789012:project/wrong";
       },
@@ -3776,7 +3930,7 @@ describe("quarantine and permanent policy verification", () => {
       "condition",
       (document) => {
         document.Statement.find(
-          ({ Sid }) => Sid === "LongBearer",
+          ({ Sid }) => Sid === "T",
         ).Condition.StringNotEqualsIfExists["bedrock-mantle:BearerTokenType"] =
           "LONG_TERM";
       },
@@ -7670,7 +7824,7 @@ describe("operator entry point", () => {
     });
     expect(result.status).toBe(1);
     expect(result.stderr).toContain("added statements: <redacted>");
-    expect(result.stderr).toContain("removed statements: Identity");
+    expect(result.stderr).toContain("removed statements: I");
     expect(result.stderr).toContain("added actions: <redacted> (x2)");
     expect(result.stderr).not.toContain(accountId);
     expect(result.stderr).not.toContain(credentialShapedAction);
@@ -7777,7 +7931,7 @@ describe("operator entry point", () => {
         call.startsWith("iam simulate-custom-policy") &&
         call.includes("--permissions-boundary-policy-input-list"),
     );
-    expect(simulations).toHaveLength(17);
+    expect(simulations).toHaveLength(18);
     const projectLambda = simulations.find(
       (call) =>
         call.includes("function:mem9-on-aws-regression-probe") &&
@@ -7788,6 +7942,17 @@ describe("operator entry point", () => {
       "ContextKeyName=kms:EncryptionContext:aws:lambda:FunctionArn",
     );
     expect(projectLambda).not.toContain("ContextKeyName=kms:ViaService");
+    const identityInterceptorLambda = simulations.find(
+      (call) =>
+        call.includes("function:mem9-on-aws-regression-probe") &&
+        call.includes("Mem9IdentityInterceptorFnRole-regression-probe"),
+    );
+    expect(identityInterceptorLambda).toContain(
+      "ContextKeyName=kms:EncryptionContext:aws:lambda:FunctionArn",
+    );
+    expect(identityInterceptorLambda).not.toContain(
+      "ContextKeyName=kms:ViaService",
+    );
     const facadeAuthorizerLambda = simulations.find(
       (call) =>
         call.includes("function:mem9-on-aws-regression-probe") &&
@@ -8061,15 +8226,20 @@ describe("boundary and deploy-role templates", () => {
   // Parse the template and resolve the boundary's policy document in one step.
   // Omitting openAiBedrockProjectArn yields the UNCONFIGURED shape, matching the
   // parameter's "" default; passing an ARN yields the shape the live account runs.
-  const boundaryPolicyDocument = (openAiBedrockProjectArn, policyRevision) =>
+  const boundaryPolicyDocument = (
+    openAiBedrockProjectArn,
+    policyRevision,
+    bedrockProjectArn,
+  ) =>
     resolveTemplateValue(
       parseCloudFormation(boundaryTemplatePath).Resources
         .WorkloadPermissionsBoundary.Properties.PolicyDocument,
       openAiBedrockProjectArn,
       policyRevision,
+      bedrockProjectArn,
     );
 
-  it("declares a retained action and project-resource permissions ceiling", () => {
+  it("TC-IAM-BOUNDARY-102 declares a retained action and project-resource permissions ceiling", () => {
     const template = parseCloudFormation(boundaryTemplatePath);
     const boundary = template.Resources.WorkloadPermissionsBoundary;
     expect(boundary.Type).toBe("AWS::IAM::ManagedPolicy");
@@ -8089,13 +8259,13 @@ describe("boundary and deploy-role templates", () => {
       statements.find((statement) => statement.Sid === sid);
     expect(allows).toEqual([
       {
-        Sid: "Identity",
+        Sid: "I",
         Effect: "Allow",
         Action: "*",
         Resource: "*",
       },
     ]);
-    const actionCeiling = bySid("Ceilingr1");
+    const actionCeiling = bySid("Cr1");
     expect(actionCeiling).toMatchObject({
       Effect: "Deny",
       Resource: "*",
@@ -8112,7 +8282,7 @@ describe("boundary and deploy-role templates", () => {
         "ecr:PutRegistryScanningConfiguration",
       ]),
     );
-    expect(resolveTemplateValue(bySid("Resources").NotResource)).toEqual(
+    expect(resolveTemplateValue(bySid("R").NotResource)).toEqual(
       expect.arrayContaining([
         boundaryContract.bedrockProjectArn,
         expect.stringContaining("repository/mem9-on-aws/*"),
@@ -8126,7 +8296,7 @@ describe("boundary and deploy-role templates", () => {
         expect.stringContaining("parameter/mem9-on-aws/*"),
       ]),
     );
-    expect(bySid("Resources").Action).toEqual(
+    expect(bySid("R").Action).toEqual(
       expect.arrayContaining([
         "secretsmanager:GetSecretValue",
         "sns:Publish",
@@ -8141,14 +8311,14 @@ describe("boundary and deploy-role templates", () => {
         "ssm:PutParameter",
       ]),
     );
-    expect(bySid("Resources").Action).not.toEqual(
+    expect(bySid("R").Action).not.toEqual(
       expect.arrayContaining([
         "ssm:GetParameter",
         "ssm:GetParameterHistory",
         "ssm:GetParametersByPath",
       ]),
     );
-    // `Resources` scopes the write to the PROJECT prefix, which is every stage's
+    // `R` scopes the write to the PROJECT prefix, which is every stage's
     // whole SSM tree. That is too wide for a write: the
     // ceiling is the only control on what a workload role may do, because
     // identity policies are PR-authored and the deploy role's
@@ -8167,7 +8337,7 @@ describe("boundary and deploy-role templates", () => {
     // now the `GenKey` deny, which fires unless the caller presents S3's aws:s3:arn
     // encryption context. That is asserted directly below rather than left to this
     // prose, because the invariant moved from an absence to a statement.
-    const approvalScope = bySid("ParamWrite");
+    const approvalScope = bySid("P");
     expect(approvalScope).toMatchObject({
       Effect: "Deny",
       Action: "ssm:PutParameter",
@@ -8192,8 +8362,8 @@ describe("boundary and deploy-role templates", () => {
         },
       },
     });
-    expect(bySid("KmsContext")).toEqual({
-      Sid: "KmsContext",
+    expect(bySid("K")).toEqual({
+      Sid: "K",
       Effect: "Deny",
       Action: "kms:Decrypt",
       Resource: "*",
@@ -8222,14 +8392,14 @@ describe("boundary and deploy-role templates", () => {
       },
     });
     expect(bySid("DenyKmsDecryptOutsideSsm")).toBeUndefined();
-    expect(bySid("KmsVia")).toEqual({
-      Sid: "KmsVia",
+    expect(bySid("V")).toEqual({
+      Sid: "V",
       Effect: "Deny",
       Action: "kms:Decrypt",
       Resource: "*",
       Condition: {
         StringNotEqualsIfExists: {
-          // s3 is appended LAST because ParamCtxVia, SecretCtxVia, and FnCodeKms
+          // s3 is appended LAST because A, B, and F
           // index this list by position and must keep pinning one service each.
           "kms:ViaService": [
             "ssm.ap-northeast-1.amazonaws.com",
@@ -8244,8 +8414,8 @@ describe("boundary and deploy-role templates", () => {
         },
       },
     });
-    expect(bySid("SecretCtxRole")).toEqual({
-      Sid: "SecretCtxRole",
+    expect(bySid("S")).toEqual({
+      Sid: "S",
       Effect: "Deny",
       Action: "kms:Decrypt",
       Resource: "*",
@@ -8267,8 +8437,8 @@ describe("boundary and deploy-role templates", () => {
         },
       },
     });
-    expect(bySid("ParamCtxVia")).toEqual({
-      Sid: "ParamCtxVia",
+    expect(bySid("A")).toEqual({
+      Sid: "A",
       Effect: "Deny",
       Action: "kms:Decrypt",
       Resource: "*",
@@ -8281,8 +8451,8 @@ describe("boundary and deploy-role templates", () => {
         },
       },
     });
-    expect(bySid("SecretCtxVia")).toEqual({
-      Sid: "SecretCtxVia",
+    expect(bySid("B")).toEqual({
+      Sid: "B",
       Effect: "Deny",
       Action: "kms:Decrypt",
       Resource: "*",
@@ -8296,8 +8466,8 @@ describe("boundary and deploy-role templates", () => {
         },
       },
     });
-    expect(bySid("FnCodeKms")).toEqual({
-      Sid: "FnCodeKms",
+    expect(bySid("F")).toEqual({
+      Sid: "F",
       Effect: "Deny",
       Action: "kms:Decrypt",
       Resource: "*",
@@ -8310,8 +8480,8 @@ describe("boundary and deploy-role templates", () => {
         },
       },
     });
-    expect(bySid("LambdaCtxRole")).toEqual({
-      Sid: "LambdaCtxRole",
+    expect(bySid("L")).toEqual({
+      Sid: "L",
       Effect: "Deny",
       Action: "kms:Decrypt",
       Resource: "*",
@@ -8324,6 +8494,8 @@ describe("boundary and deploy-role templates", () => {
             "arn:aws:iam::123456789012:role/" +
               "mem9-on-a*-*Mem9AlertRouterRole-*",
             "arn:aws:iam::123456789012:role/" +
+              "mem9-on-a*-*Mem9IdentityInterceptorFnRole-*",
+            "arn:aws:iam::123456789012:role/" +
               "mem9-on-a*-*Mem9OauthFacadeAllowAllRole",
             "arn:aws:iam::123456789012:role/" +
               "mem9-on-a*-*Mem9OauthFacadeFnRole-*",
@@ -8334,7 +8506,7 @@ describe("boundary and deploy-role templates", () => {
       },
     });
     expect(
-      bySid("LongBearer").Condition.StringNotEqualsIfExists[
+      bySid("T").Condition.StringNotEqualsIfExists[
         "bedrock-mantle:BearerTokenType"
       ],
     ).toBe("SHORT_TERM");
@@ -8348,7 +8520,7 @@ describe("boundary and deploy-role templates", () => {
         },
       },
     });
-    expect(bySid("EniFnCode")).toMatchObject({
+    expect(bySid("N")).toMatchObject({
       Effect: "Deny",
       Resource: "*",
       Condition: {
@@ -8399,8 +8571,8 @@ describe("boundary and deploy-role templates", () => {
   // cannot express. ecs:RunTask and iam:PassRole are constrained by the deploy
   // role's PassRole scoping plus DenyEcsExecutionRolePassToOtherServices. The ec2
   // entries are service-mediated with no useful per-resource ARN AND are
-  // principal-gated (EniRole + EniFnCode). The bedrock-mantle and kms entries carry
-  // their own Condition-based denies (LongBearer and the seven kms:Decrypt context
+  // principal-gated (EniRole + N). The bedrock-mantle and kms entries carry
+  // their own Condition-based denies (T and the seven kms:Decrypt context
   // statements).
   // The ssmmessages entries have NO further boundary deny — do not read the ec2
   // justification as covering them. They are the ECS Exec channel APIs, which are
@@ -8430,7 +8602,7 @@ describe("boundary and deploy-role templates", () => {
     // a SecureString write via ssm.<region> and a GenerateDataKey carrying NO
     // context are both explicitDeny, while the artifact write stays allowed.
     // Note s3:GetObject/s3:PutObject are deliberately NOT here — those ARE
-    // resource-scoped, by the `Resources` deny, so listing them would trip the
+    // resource-scoped, by the `R` deny, so listing them would trip the
     // disjointness check below, which is exactly its purpose.
     "kms:GenerateDataKey",
     "ssmmessages:CreateControlChannel",
@@ -8448,8 +8620,8 @@ describe("boundary and deploy-role templates", () => {
 
   it("resource-scopes every non-read-only action admitted to the ceiling", () => {
     const document = expectedBoundaryPolicyDocument(boundaryContract);
-    const ceiling = document.Statement.find(({ Sid }) =>
-      Sid?.startsWith("Ceiling"),
+    const ceiling = document.Statement.find(
+      ({ Sid }) => Sid === `C${FIXTURE_POLICY_REVISION}`,
     );
     const scopedByNotResource = actionsScopedByNotResource(document);
     const reviewedGlobalWrites = new Set(REVIEWED_GLOBAL_WRITES);
@@ -8466,7 +8638,7 @@ describe("boundary and deploy-role templates", () => {
   });
 
   // The check above is an OR, so a redundant allowlist entry pre-authorizes a
-  // future unscoping: drop a resource-scoped action out of the `Resources`
+  // future unscoping: drop a resource-scoped action out of the `R`
   // statement and the allowlist silently catches it, turning a project-scoped
   // write into an account-wide one with the suite still green. Requiring the two
   // sets to be disjoint makes the allowlist mean "deliberately NOT
@@ -8481,7 +8653,7 @@ describe("boundary and deploy-role templates", () => {
   });
 
   it("keeps the boundary within the IAM managed-policy size quota", () => {
-    // The worst-case revision, not the template default: `Ceiling${PolicyRevision}`
+    // The worst-case revision, not the template default: `C${PolicyRevision}`
     // carries it into the document, and the deploy script writes 21 characters.
     const size = JSON.stringify(
       boundaryPolicyDocument(undefined, worstCasePolicyRevision()),
@@ -8534,7 +8706,7 @@ describe("boundary and deploy-role templates", () => {
     // The SSM path presents PARAMETER_ARN, never aws:s3:arn, which is why the
     // SecureString write cannot satisfy the clause above. Fold GenerateDataKey
     // into CONDITIONED_RUNTIME_ACTIONS and it would inherit the eight kms:Decrypt
-    // context denies instead — including ParamCtxVia, which admits the SSM
+    // context denies instead — including A, which admits the SSM
     // service path — so assert it reaches exactly one statement.
     const genKeyStatements = document.Statement.filter((statement) =>
       asList(statement.Action).includes("kms:GenerateDataKey"),
@@ -8568,29 +8740,29 @@ describe("boundary and deploy-role templates", () => {
     // Enumerated, never s3:*Object: the wildcard also admits DeleteObject and
     // RestoreObject on the artifact the approval loop exists to produce, plus any
     // future *Object action AWS adds.
-    const ceiling = document.Statement.find(({ Sid }) =>
-      Sid?.startsWith("Ceiling"),
+    const ceiling = document.Statement.find(
+      ({ Sid }) => Sid === `C${FIXTURE_POLICY_REVISION}`,
     );
     expect(ceiling.NotAction.filter((a) => a.startsWith("s3:"))).toEqual([
       "s3:GetObject",
       "s3:PutObject",
     ]);
-    // Resource-scoped by the `Resources` deny, which is why they are NOT on
+    // Resource-scoped by the `R` deny, which is why they are NOT on
     // REVIEWED_GLOBAL_WRITES. Both directions matter: the actions must be in the
     // deny, and the artifact must be in its NotResource escape list.
-    const resources = bySid("Resources");
+    const resources = bySid("R");
     expect(asList(resources.Action)).toEqual(
       expect.arrayContaining(["s3:GetObject", "s3:PutObject"]),
     );
     expect(asList(resources.NotResource)).toContain(artifact);
     // Both KMS entries, each proven load-bearing for the read path.
     expect(
-      bySid("KmsContext").Condition.StringNotLikeIfExists[
+      bySid("K").Condition.StringNotLikeIfExists[
         "kms:EncryptionContext:aws:s3:arn"
       ],
     ).toBe(artifactBucket);
     expect(
-      asList(bySid("KmsVia").Condition.StringNotEqualsIfExists["kms:ViaService"]),
+      asList(bySid("V").Condition.StringNotEqualsIfExists["kms:ViaService"]),
     ).toContain("s3.ap-northeast-1.amazonaws.com");
   });
 
@@ -8601,10 +8773,10 @@ describe("boundary and deploy-role templates", () => {
       decisionArtifactBucketName: bucket,
     });
     const bySid = (sid) => document.Statement.find((entry) => entry.Sid === sid);
-    expect(asList(bySid("Resources").NotResource)).toContain(
+    expect(asList(bySid("R").NotResource)).toContain(
       `arn:aws:s3:::${bucket}/*`,
     );
-    for (const sid of ["KmsContext", "GenKey"]) {
+    for (const sid of ["K", "GenKey"]) {
       expect(
         bySid(sid).Condition.StringNotLikeIfExists[
           "kms:EncryptionContext:aws:s3:arn"
@@ -8671,88 +8843,19 @@ describe("boundary and deploy-role templates", () => {
     }
   });
 
-  // Everything above resolves the template with OpenAiBedrockProjectArn at its ""
-  // default, so the !If collapses to AWS::NoValue and only the UNCONFIGURED shape
-  // is ever checked — for both parity and size. The live account configures that
-  // second project (the Responses route runs in another region and Mantle projects
-  // are regional), so the shape that actually deploys had no coverage at all: the
-  // template could name the WRONG parameter in the true branch, or overflow the
-  // quota, and every gate would stay green.
-  //
-  // Assert a byte reserve rather than the bare 6144 quota, which would only fail
-  // once there is no room left to react. The reserve does NOT bound the worst
-  // case: the template's AllowedPattern caps neither the project id nor the
-  // partition or region, so a long enough project id overflows whatever gate is
-  // set here (a 128-character id breaches even the real quota). It buys margin
-  // against the fixture shape only.
-  //
-  // The configured shape is 6113 bytes AT THE REVISION THAT DEPLOYS, so 31 is the
-  // current ceiling on this reserve, and it is set to exactly that. The number was
-  // 6119/25 while these gates rendered the 2-character template default; both
-  // figures were wrong in opposite directions and nearly cancelled — the fixture
-  // document was 19 bytes cheaper than the deployed one, leaving 6 real bytes of
-  // headroom behind a gate that claimed 25. Renaming the artifact bucket
-  // (mem9-on-aws-audit- -> mem9-audit-, three renders, 21 bytes) is what bought
-  // the difference back.
-  //
-  // Measured, so do not re-derive it: the reserve absorbs no library-vs-template
-  // delta. The rendered template and expectedBoundaryPolicyDocument() agree
-  // byte-for-byte at BOTH revisions (6113/6094 configured, 6045/6026
-  // unconfigured), and the gate already resolves ap-northeast-1, the worst-case
-  // region — us-west-2 is 115 bytes shorter — so it is not a region cushion
-  // either. Every larger value was available before #150 spent the Sid reserve AND
-  // the singleton-array reserve on the decision-artifact grants; both are now
-  // gone. A 31-byte cushion fires on nearly any edit, which costs much of the
-  // "fail with room left to react" property the reserve was created for, and that
-  // is the honest state of this document rather than a choice: the next statement
-  // to arrive will breach this gate and the hard quota within 31 bytes of each
-  // other.
-  //
-  // This gate has now fired once, and the escape hatch the earlier note proposed
-  // — "split the boundary across a second managed policy" — does not exist. A
-  // role has exactly ONE permissions boundary (get-role returns a singular
-  // PermissionsBoundaryArn), and the 6144 managed-policy limit is Adjustable:
-  // False, so there is no quota increase to request either. Re-homing deny
-  // statements into an attached identity policy is not equivalent: a boundary
-  // cannot be shed by the principal, whereas anything holding
-  // iam:DetachRolePolicy can drop an identity policy. Merging denies is worse
-  // still — separate statements are a logical OR, while conditions inside one
-  // statement are ANDed, so a merge weakens enforcement.
-  //
-  // What is left is byte reduction that preserves semantics. Sid is an optional
-  // identifier and carries no authorization meaning, so shortening the longest
-  // ones is free; that is what bought the room for the fourth ECS execution-role
-  // ARN (6095 -> 6054), and #150 then spent the reserve in full (6054 -> 5690,
-  // Sid characters 500 -> 136) to make room for the decision-artifact grants.
-  // That reserve is now GONE: the Sids are already near-minimal, so a future
-  // overrun cannot be answered the same way twice.
-  //
-  // The singleton-array reserve that note listed next is now SPENT too: #150
-  // collapsed the one-element Action/NotAction/NotResource lists to scalars for 22
-  // bytes (safe because sameStringSet() normalizes those four keys through
-  // list(); NOT safe inside Condition, where canonicalJson() compares a scalar
-  // and a one-element array as different — that is why kmsViaServices[0] and the
-  // Null clauses were left alone).
-  //
-  // ONE formatting reserve remains: dropping Sids entirely, measured at 296 bytes
-  // on the deployed shape (277 at the fixture revision — the extra 19 are the long
-  // revision inside `Ceiling…`, which goes away with the Sid that carries it).
-  // Most of it is the `"Sid":"…",` skeleton rather than the 161 name characters. It
-  // conflicts with two things — this file's own uniqueness test and
-  // verifyBoundaryPolicyDocument()'s Sid-keyed lookup — so it is a refactor of the
-  // verifier, not a deletion, and it costs this suite every bySid() call. It also
-  // costs the drift-forcing mechanism: the guarded updater changes the document by
-  // rewriting `Ceiling${PolicyRevision}`, so removing Sids removes the only place
-  // the revision appears and something else has to carry it. After that, nothing: the next admission has to be paid for in SEMANTICS, by
-  // narrowing or removing an existing grant, which is a security review rather
-  // than a formatting pass. #150 already declined three such shortcuts on
-  // measured evidence — collapsing the two Alert*Queue ARNs into one pattern
-  // (newly admits a third queue), the aws:ResourceAccount foreign-bucket guard
-  // (6280 bytes, over the hard quota), and s3:*Object in place of the two
-  // enumerated actions (admits DeleteObject on the audit artifact).
+  // Measure the configured shape with both service-valid 25-character project
+  // ids and the longest revision accepted by the operator. #207 adds the
+  // 77-character interceptor role pattern and reclaims the required bytes by
+  // shortening 13 authorization-neutral Sids to 47 characters in total.
   const OPENAI_PROJECT_ARN =
     "arn:aws:bedrock-mantle:us-west-2:123456789012:project/proj_openai";
-  const BOUNDARY_SIZE_RESERVE = 31;
+  const MAX_PRIMARY_PROJECT_ARN =
+    "arn:aws:bedrock-mantle:ap-northeast-1:123456789012:project/" +
+    MAX_MANTLE_PROJECT_ID;
+  const MAX_OPENAI_PROJECT_ARN =
+    "arn:aws:bedrock-mantle:us-west-2:123456789012:project/" +
+    MAX_MANTLE_PROJECT_ID;
+  const BOUNDARY_SIZE_RESERVE = 38;
 
   it("matches the contract library in the OpenAI-configured shape", () => {
     const document = boundaryPolicyDocument(OPENAI_PROJECT_ARN);
@@ -8760,7 +8863,7 @@ describe("boundary and deploy-role templates", () => {
     // way: the second project ARN appears. Asserting its presence is what fails
     // if the true branch ever refs the wrong parameter.
     expect(
-      document.Statement.find(({ Sid }) => Sid === "Resources").NotResource,
+      document.Statement.find(({ Sid }) => Sid === "R").NotResource,
     ).toContain(OPENAI_PROJECT_ARN);
     expect(
       verifyBoundaryPolicyDocument(document, {
@@ -8770,15 +8873,32 @@ describe("boundary and deploy-role templates", () => {
     ).toBe(true);
   });
 
-  it("keeps the OpenAI-configured boundary inside the IAM size quota", () => {
+  it("TC-IAM-BOUNDARY-104 keeps the worst-case configured boundary inside the IAM size quota", () => {
+    const template = parseCloudFormation(boundaryTemplatePath);
+    expect(template.Parameters.BedrockProjectArn.AllowedPattern).toContain(
+      "project/(default|proj_[a-z0-9]{1,20})",
+    );
+    expect(template.Parameters.OpenAiBedrockProjectArn.AllowedPattern).toContain(
+      "project/(default|proj_[a-z0-9]{1,20})",
+    );
+    const policyRevision = worstCasePolicyRevision();
+    const document = boundaryPolicyDocument(
+      MAX_OPENAI_PROJECT_ARN,
+      policyRevision,
+      MAX_PRIMARY_PROJECT_ARN,
+    );
+    expect(
+      verifyBoundaryPolicyDocument(document, {
+        ...boundaryContract,
+        bedrockProjectArn: MAX_PRIMARY_PROJECT_ARN,
+        openAiBedrockProjectArn: MAX_OPENAI_PROJECT_ARN,
+        policyRevision,
+      }),
+    ).toBe(true);
     const size = JSON.stringify(
-      boundaryPolicyDocument(OPENAI_PROJECT_ARN, worstCasePolicyRevision()),
+      document,
     ).length;
     expect(size).toBeLessThanOrEqual(6_144 - BOUNDARY_SIZE_RESERVE);
-    // Exact, not merely under. The reserve is set to the ACTUAL slack, so pinning
-    // it keeps that number honest when bytes are reclaimed — and it kills the one
-    // mutation the inequality above cannot see: rendering the 2-character fixture
-    // revision here instead of the deployed one is 19 bytes cheaper and passes.
     expect(6_144 - size).toBe(BOUNDARY_SIZE_RESERVE);
   });
 
@@ -8992,6 +9112,8 @@ describe("boundary and deploy-role templates", () => {
       Action: ["iam:PassRole"],
       Resource: [
         "arn:aws:iam::123456789012:role/mem9-on-a*-*Mem9AlertRouterRole-*",
+        "arn:aws:iam::123456789012:role/" +
+          "mem9-on-a*-*Mem9IdentityInterceptorFnRole-*",
         "arn:aws:iam::123456789012:role/mem9-on-a*-*Mem9OauthFacadeAllowAllRole",
         "arn:aws:iam::123456789012:role/mem9-on-a*-*Mem9OauthFacadeFnRole-*",
         "arn:aws:iam::123456789012:role/mem9-on-a*-*Mem9ProxyFnRole-*",
