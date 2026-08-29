@@ -1190,8 +1190,13 @@ Resources:
               - cognito-idp:DescribeUserPoolClient
               - cognito-idp:UpdateUserPoolClient
               - cognito-idp:DeleteUserPoolClient
+              - cognito-idp:CreateGroup
+              - cognito-idp:GetGroup
+              - cognito-idp:UpdateGroup
+              - cognito-idp:DeleteGroup
               - cognito-idp:ListUserPools
               - cognito-idp:ListUserPoolClients
+              - cognito-idp:ListGroups
               - cognito-idp:ListResourceServers
               - cognito-idp:TagResource
               - cognito-idp:UntagResource

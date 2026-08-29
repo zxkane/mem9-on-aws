@@ -368,6 +368,21 @@ describe("workflow integration", () => {
     expect(runner).not.toContain("describe-db-clusters");
   });
 
+  it("grants the deploy role only the Cognito group lifecycle used by IaC", () => {
+    const role = readFileSync(rolePath, "utf8");
+    const actions = actionSetForSid(role, "Cognito");
+
+    expect(actions).toEqual(
+      expect.arrayContaining([
+        "cognito-idp:CreateGroup",
+        "cognito-idp:GetGroup",
+        "cognito-idp:UpdateGroup",
+        "cognito-idp:DeleteGroup",
+        "cognito-idp:ListGroups",
+      ]),
+    );
+    expect(actions.some((action) => action.includes("Admin"))).toBe(false);
+  });
   it("TC-SLACKAPP-218: gates and lints the decision-artifact bucket template", () => {
     const workflow = parse(readFileSync(workflowPath, "utf8"));
     const templates = [
