@@ -303,18 +303,12 @@ describe("memory namespace operator config", () => {
       ]),
     );
     const queries = [];
+    let cognitoCalls = 0;
     const cognito = {
       async send(command) {
-        if (command.constructor.name === "ListGroupsCommand") {
-          return {
-            Groups: state.namespaces.map(({ cognito_group }) => ({
-              GroupName: cognito_group,
-              Description: "Managed team memory namespace",
-            })),
-          };
-        }
+        cognitoCalls += 1;
         throw new Error(
-          `unexpected Cognito command ${command.constructor.name}`,
+          `preview bootstrap must not call Cognito: ${command.constructor.name}`,
         );
       },
     };
@@ -431,6 +425,7 @@ describe("memory namespace operator config", () => {
       migrationPath: "/unused.sql",
     });
 
+    expect(cognitoCalls).toBe(0);
     const staleLock = queries.find(({ text }) =>
       text.includes("NOT (binding.client_key = ANY"),
     );

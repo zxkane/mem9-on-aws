@@ -80,6 +80,7 @@ function installGlobals(stage: string, accountId = ACCOUNT_ID, region = REGION) 
       UserPoolDomain: makeCtor("UserPoolDomain"),
       ResourceServer: makeCtor("ResourceServer"),
       UserPoolClient: makeCtor("UserPoolClient"),
+      UserGroup: makeCtor("UserGroup"),
     },
     ssm: {
       Parameter: class {
@@ -180,6 +181,16 @@ describe("cognito stack", () => {
       "pr-42-mem9-mcp-client",
       "pr-42-namespace-alpha-e2e",
       "pr-42-namespace-beta-e2e",
+    ]);
+    expect(byKind("UserGroup").map(({ args }) => args)).toMatchObject([
+      {
+        name: "memory-preview-alpha",
+        description: "Managed team memory namespace",
+      },
+      {
+        name: "memory-preview-beta",
+        description: "Managed team memory namespace",
+      },
     ]);
     expect(outs.allowedClientIds).toHaveLength(3);
     expect(outs.previewNamespaceClients).toMatchObject([

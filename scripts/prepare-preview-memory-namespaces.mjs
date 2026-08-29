@@ -1,9 +1,6 @@
 #!/usr/bin/env node
 
 import process from "node:process";
-import {
-  CognitoIdentityProviderClient,
-} from "@aws-sdk/client-cognito-identity-provider";
 import pg from "pg";
 
 import {
@@ -91,9 +88,7 @@ async function migrationPhase(db) {
 
 export async function preparePreviewMemoryNamespaces({
   db,
-  cognito,
   issuer,
-  userPoolId,
   stage,
   desired,
   migrationPath,
@@ -101,12 +96,11 @@ export async function preparePreviewMemoryNamespaces({
   const reconciliation = await reconcileNamespaces({
     desired,
     issuer,
-    userPoolId,
-    cognito,
     db,
     authoritativeM2MNamespaceSlugs: desired.namespaces.map(
       ({ slug }) => slug,
     ),
+    manageCognitoGroups: false,
   });
   if (reconciliation.drift.total !== 0) {
     throw new Error(
@@ -158,7 +152,6 @@ async function main() {
     throw new Error("preview namespace fixtures require a pr-N stage");
   }
   const issuer = requireEnv("MEM9_COGNITO_ISSUER");
-  const userPoolId = requireEnv("MEM9_COGNITO_USER_POOL_ID");
   const desired = previewNamespaceDesiredState({
     issuer,
     defaultClientId: requireEnv(
@@ -175,17 +168,12 @@ async function main() {
       group: requireEnv("MEM9_PREVIEW_NAMESPACE_BETA_GROUP"),
     },
   });
-  const cognito = new CognitoIdentityProviderClient({
-    region: requireEnv("AWS_REGION"),
-  });
   const db = new pg.Client({ connectionString: databaseDsn() });
   await db.connect();
   try {
     const result = await preparePreviewMemoryNamespaces({
       db,
-      cognito,
       issuer,
-      userPoolId,
       stage,
       desired,
       migrationPath:
@@ -200,7 +188,6 @@ async function main() {
       })}\n`,
     );
   } finally {
-    cognito.destroy();
     await db.end();
   }
 }

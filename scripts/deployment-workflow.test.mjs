@@ -277,6 +277,12 @@ describe("workflow integration", () => {
     expect(failedRemove.run).toContain("remove 15m");
     expect(failedRemove.run).toContain('await-eni-detach.mts "$STAGE"');
     expect(failedRemove.run.match(/remove 15m/g)).toHaveLength(2);
+    expect(
+      failedRemove.run.match(/await-sst-stage-removal\.mts/g),
+    ).toHaveLength(2);
+    expect(failedRemove.run).toContain(
+      "Do not force-unlock a possibly live engine",
+    );
     const previewDeploy = workflow.jobs["deploy-preview"].steps.find(
       ({ name }) => name === "Deploy PR stage",
     );

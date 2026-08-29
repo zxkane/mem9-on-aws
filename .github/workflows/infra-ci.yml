@@ -732,7 +732,22 @@ jobs:
           echo "::notice::First remove of ${STAGE} did not finish — waiting for Lambda ENIs to detach, then retrying"
           timeout --kill-after=60s 22m node scripts/await-eni-detach.mts "$STAGE" || \
             echo "::warning::ENI detach wait exceeded its outer bound — retrying the remove anyway"
-          remove 15m
+          if timeout --kill-after=30s 3m node scripts/await-sst-stage-removal.mts "$STAGE"; then
+            echo "::notice::Original remove completed while ${STAGE} dependencies settled"
+            exit 0
+          fi
+          if remove 15m; then
+            exit 0
+          fi
+          # An orphaned Pulumi child can finish immediately after a retry reports
+          # the still-held SST lock. Do not force-unlock a possibly live engine;
+          # accept the cleanup only when the stage state actually disappears.
+          if timeout --kill-after=30s 3m node scripts/await-sst-stage-removal.mts "$STAGE"; then
+            echo "::notice::Original remove completed after the retry returned"
+            exit 0
+          fi
+          echo "::error::Failed stage ${STAGE} still has SST state or stage-owned AWS resources after cleanup attempts"
+          exit 1
 
   # ───────────────────────────────────────────────────────────────────────────
   # cleanup-preview — PR closed/merged → remove stage `pr-N`.
@@ -746,7 +761,7 @@ jobs:
     # checkout/pnpm/install. The old 30m cut the FIRST remove off mid-flight (#146),
     # which is what leaked the security groups — the job timeout must stay strictly
     # above the sum of the inner bounds so the retry path can always complete.
-    timeout-minutes: 60
+    timeout-minutes: 70
     permissions:
       id-token: write
       contents: read
@@ -908,7 +923,21 @@ jobs:
           # expiry is a non-failure by design, so an outer bound is safe to ignore.
           timeout --kill-after=60s 22m node scripts/await-eni-detach.mts "$STAGE" || \
             echo "::warning::ENI detach wait exceeded its outer bound — retrying the remove anyway"
-          remove 15m
+          if timeout --kill-after=30s 3m node scripts/await-sst-stage-removal.mts "$STAGE"; then
+            echo "::notice::Original remove completed while ${STAGE} dependencies settled"
+            exit 0
+          fi
+          if remove 15m; then
+            exit 0
+          fi
+          # A retry can race the original Pulumi engine's final unlock. Confirm
+          # state removal instead of force-clearing a lock that may still be live.
+          if timeout --kill-after=30s 3m node scripts/await-sst-stage-removal.mts "$STAGE"; then
+            echo "::notice::Original remove completed after the retry returned"
+            exit 0
+          fi
+          echo "::error::Stage ${STAGE} still has SST state or stage-owned AWS resources after cleanup attempts"
+          exit 1
 
       - name: Comment cleanup status
         if: success() && steps.check-state.outputs.deployed == 'true'

@@ -1190,6 +1190,38 @@ async function collectIamRoles(
   return observations;
 }
 
+export type StageOwnershipObservation = Readonly<{
+  statePresent: boolean;
+  resources: readonly ResourceCount[];
+}>;
+
+/**
+ * Observe the two facts a cleanup job needs before it can report success:
+ * the SST state object is gone, and no AWS resource still advertises ownership
+ * by the same PR stage. IAM roles are included explicitly because the Resource
+ * Groups Tagging API does not inventory them.
+ */
+export async function observeStageOwnership(
+  stage: string,
+  commandRunner: CommandRunner = runCommand,
+): Promise<StageOwnershipObservation> {
+  if (previewNumber(stage) === null) {
+    throw new Error("Refusing unsafe stage observation");
+  }
+  const [stateObjects, taggedResources, iamRoles] = await Promise.all([
+    collectStateObjects(commandRunner),
+    collectResources(commandRunner),
+    collectIamRoles(commandRunner),
+  ]);
+  const ownedResources = [...taggedResources, ...iamRoles].filter(
+    isOwnedResource,
+  );
+  return deepFreeze({
+    statePresent: stateObjects.some((item) => item.stage === stage),
+    resources: groupResourceCounts(stage, ownedResources),
+  });
+}
+
 function createObservationAdapter(
   repository: string,
   commandRunner: CommandRunner = runCommand,

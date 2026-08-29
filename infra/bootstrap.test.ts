@@ -203,26 +203,12 @@ describe("bootstrap stack", () => {
     expect(tasks[0].args.permissions).toBeUndefined();
   });
 
-  it("grants a pr-N bootstrap only the group actions needed for synthetic namespace fixtures", async () => {
+  it("keeps a pr-N bootstrap unprivileged while injecting synthetic namespace fixtures", async () => {
     installGlobals("pr-42");
     const bootstrap = await loadBootstrap(true);
     bootstrap(fakeCluster, fakeDbOut());
     const args = tasks[0].args;
-    expect(args.permissions).toEqual([
-      {
-        actions: [
-          "cognito-idp:CreateGroup",
-          "cognito-idp:ListGroups",
-          "cognito-idp:UpdateGroup",
-        ],
-        resources: [
-          expect.objectContaining({
-            value:
-              "arn:aws:cognito-idp:ap-northeast-1:123456789012:userpool/pool-test",
-          }),
-        ],
-      },
-    ]);
+    expect(args.permissions).toBeUndefined();
     expect(args.environment).toMatchObject({
       MEM9_PREVIEW_NAMESPACE_DEFAULT_CLIENT_ID: expect.objectContaining({
         value: "default-client",

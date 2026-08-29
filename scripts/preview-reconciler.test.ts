@@ -1319,6 +1319,11 @@ describe("workflow control flow", () => {
     const waitBound = Number(
       cleanupJob.match(/timeout --kill-after=\S+ ([0-9]+)m node scripts\/await-eni-detach/)![1],
     );
+    const settlementBounds = [
+      ...cleanupJob.matchAll(
+        /timeout --kill-after=\S+ ([0-9]+)m node scripts\/await-sst-stage-removal\.mts/g,
+      ),
+    ].map((match) => Number(match[1]));
 
     expect(cleanupJob).toMatch(
       /timeout --kill-after=\S+ "\$1" \\\n\s+pnpm -C infra exec sst remove/,
@@ -1327,8 +1332,12 @@ describe("workflow control flow", () => {
     // The wait's outer bound must not be tighter than its own internal budget,
     // or the shell would kill it before it can emit its expiry diagnostic.
     expect(waitBound).toBeGreaterThanOrEqual(DEFAULT_TIMEOUT_MS / 60_000);
-    const innerTotal = removeBounds.reduce((sum, value) => sum + value, 0) + waitBound;
+    const innerTotal =
+      removeBounds.reduce((sum, value) => sum + value, 0) +
+      waitBound +
+      settlementBounds.reduce((sum, value) => sum + value, 0);
     expect(innerTotal).toBeLessThan(jobTimeout);
+    expect(settlementBounds).toEqual([3, 3]);
     // `sst unlock` must run ONCE, before the first attempt — never inside the
     // retryable function, where it could clear the lock of a first attempt that
     // SIGTERM failed to kill.
@@ -1342,5 +1351,8 @@ describe("workflow control flow", () => {
     expect(firstRemove).toBeGreaterThan(-1);
     expect(wait).toBeGreaterThan(firstRemove);
     expect(retry).toBeGreaterThan(wait);
+    expect(cleanupJob).toContain(
+      "Confirm\n          # state removal instead of force-clearing a lock",
+    );
   });
 });

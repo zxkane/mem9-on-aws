@@ -121,23 +121,35 @@ async function readDatabaseState(db) {
   };
 }
 
-async function readDrift({ desired, issuer, userPoolId, cognito, db }) {
+async function readDrift({
+  desired,
+  issuer,
+  userPoolId,
+  cognito,
+  db,
+  manageCognitoGroups,
+}) {
   const [groups, database] = await Promise.all([
-    listGroups(cognito, userPoolId),
+    manageCognitoGroups
+      ? listGroups(cognito, userPoolId)
+      : Promise.resolve(undefined),
     readDatabaseState(db),
   ]);
   const managedDescription = "Managed team memory namespace";
   const desiredGroupNames = new Set(
     desired.namespaces.map((item) => item.cognito_group),
   );
-  const cognitoDrift = {
-    missing: [...desiredGroupNames].filter((name) => !groups.has(name)).length,
-    extra: [...groups.values()].filter(
-      (group) =>
-        group.Description === managedDescription &&
-        !desiredGroupNames.has(group.GroupName),
-    ).length,
-  };
+  const cognitoDrift = groups
+    ? {
+        missing: [...desiredGroupNames].filter((name) => !groups.has(name))
+          .length,
+        extra: [...groups.values()].filter(
+          (group) =>
+            group.Description === managedDescription &&
+            !desiredGroupNames.has(group.GroupName),
+        ).length,
+      }
+    : { missing: 0, extra: 0 };
   const expectedNamespaces = new Map(
     desired.namespaces.map((item) => [
       item.slug,
@@ -199,6 +211,7 @@ export async function reconcileNamespaces({
   cognito,
   db,
   authoritativeM2MNamespaceSlugs = [],
+  manageCognitoGroups = true,
 }) {
   if (!Array.isArray(authoritativeM2MNamespaceSlugs)) {
     throw new Error("authoritative M2M namespace slugs must be an array");
@@ -220,26 +233,33 @@ export async function reconcileNamespaces({
       "authoritative M2M namespace slugs must be unique desired namespaces",
     );
   }
-  const existingGroups = await listGroups(cognito, userPoolId);
-  for (const item of desired.namespaces) {
-    const description = "Managed team memory namespace";
-    const existing = existingGroups.get(item.cognito_group);
-    if (!existing) {
-      await cognito.send(
-        new CreateGroupCommand({
-          UserPoolId: userPoolId,
-          GroupName: item.cognito_group,
-          Description: description,
-        }),
+  if (manageCognitoGroups) {
+    if (!cognito || !userPoolId) {
+      throw new Error(
+        "Cognito client and user pool id are required to manage groups",
       );
-    } else if (existing.Description !== description) {
-      await cognito.send(
-        new UpdateGroupCommand({
-          UserPoolId: userPoolId,
-          GroupName: item.cognito_group,
-          Description: description,
-        }),
-      );
+    }
+    const existingGroups = await listGroups(cognito, userPoolId);
+    for (const item of desired.namespaces) {
+      const description = "Managed team memory namespace";
+      const existing = existingGroups.get(item.cognito_group);
+      if (!existing) {
+        await cognito.send(
+          new CreateGroupCommand({
+            UserPoolId: userPoolId,
+            GroupName: item.cognito_group,
+            Description: description,
+          }),
+        );
+      } else if (existing.Description !== description) {
+        await cognito.send(
+          new UpdateGroupCommand({
+            UserPoolId: userPoolId,
+            GroupName: item.cognito_group,
+            Description: description,
+          }),
+        );
+      }
     }
   }
 
@@ -428,6 +448,7 @@ export async function reconcileNamespaces({
         userPoolId,
         cognito,
         db,
+        manageCognitoGroups,
       }),
     };
   } catch (error) {

@@ -36,6 +36,21 @@ if [[ -z "$CLUSTER" || -z "$TASK_DEF" || -z "$TASK_SG" || -z "$SUBNETS_CSV" ]]; 
   exit 1
 fi
 
+# Resolve the exact awslogs destination from the deployed task definition before
+# starting the task. The deploy role already has DescribeTaskDefinition and
+# FilterLogEvents; using these values avoids broad log-group discovery and does
+# not require DescribeLogStreams/GetLogEvents.
+TASK_DEF_JSON=$(aws ecs describe-task-definition \
+  --task-definition "$TASK_DEF" \
+  --region "$REGION" \
+  --output json 2>/dev/null || true)
+LOG_CONTAINER_NAME=$(printf '%s' "$TASK_DEF_JSON" | jq -r \
+  '.taskDefinition.containerDefinitions[0].name // empty' 2>/dev/null || true)
+LOG_GROUP=$(printf '%s' "$TASK_DEF_JSON" | jq -r \
+  '.taskDefinition.containerDefinitions[0].logConfiguration.options["awslogs-group"] // empty' 2>/dev/null || true)
+LOG_STREAM_PREFIX=$(printf '%s' "$TASK_DEF_JSON" | jq -r \
+  '.taskDefinition.containerDefinitions[0].logConfiguration.options["awslogs-stream-prefix"] // empty' 2>/dev/null || true)
+
 # NO RDS Proxy readiness gate: this project connects mem9 + this bootstrap task
 # DIRECTLY to the Aurora cluster writer endpoint (no proxy — see infra/db.ts). SST's
 # sst.aws.Aurora deploy already waits for the cluster to be `available`, so by the
@@ -77,39 +92,34 @@ echo "run-bootstrap: started ${TASK_ARN##*/}, waiting for it to stop..."
 
 # Print the task's own CloudWatch logs INLINE (debuggable even after auto-cleanup
 # tears the stage down). Called on ANY failure path — wait timeout OR non-zero
-# exit. SST logs the container to /sst/cluster/<cluster>/...Bootstrap.../<container>.
-# Retries for CloudWatch ingestion lag (the task just stopped seconds ago) and
-# falls back to a broader query if the cluster-scoped one misses.
+# exit. The awslogs stream name is <prefix>/<container>/<task-id>, so the exact
+# task definition plus task ARN identifies one stream without account-wide log
+# discovery. Retries cover CloudWatch ingestion lag after the task stops.
 print_task_logs() {
-  local lg stream attempt
+  local attempt events stream task_id
+  if [[ -z "$LOG_GROUP" || -z "$LOG_STREAM_PREFIX" || -z "$LOG_CONTAINER_NAME" ]]; then
+    echo "run-bootstrap: WARNING — task definition has no readable awslogs configuration"
+    return 0
+  fi
+  task_id="${TASK_ARN##*/}"
+  stream="${LOG_STREAM_PREFIX}/${LOG_CONTAINER_NAME}/${task_id}"
   for attempt in 1 2 3 4 5; do
-    # Prefer the cluster-scoped Bootstrap log group; fall back to any Bootstrap
-    # group for this stage's SSM prefix if the cluster substring doesn't match.
-    lg=$(aws logs describe-log-groups --region "$REGION" \
-      --query "logGroups[?contains(logGroupName,'${CLUSTER}') && contains(logGroupName,'Bootstrap')].logGroupName | [0]" \
-      --output text 2>/dev/null || true)
-    if [[ -z "$lg" || "$lg" == "None" ]]; then
-      lg=$(aws logs describe-log-groups --region "$REGION" \
-        --query "logGroups[?contains(logGroupName,'${STAGE}') && contains(logGroupName,'Bootstrap')].logGroupName | [0]" \
-        --output text 2>/dev/null || true)
-    fi
-    if [[ -n "$lg" && "$lg" != "None" ]]; then
-      stream=$(aws logs describe-log-streams --log-group-name "$lg" --region "$REGION" \
-        --order-by LastEventTime --descending --max-items 1 \
-        --query 'logStreams[0].logStreamName' --output text 2>/dev/null || true)
-      if [[ -n "$stream" && "$stream" != "None" ]]; then
-        echo "----- bootstrap task logs (${lg} / ${stream}) -----"
-        aws logs get-log-events --log-group-name "$lg" --log-stream-name "$stream" \
-          --region "$REGION" --limit 200 --start-from-head \
-          --query 'events[].message' --output text 2>/dev/null || true
-        echo "----- end bootstrap task logs -----"
-        return 0
-      fi
+    events=$(aws logs filter-log-events \
+      --log-group-name "$LOG_GROUP" \
+      --log-stream-name-prefix "$stream" \
+      --region "$REGION" \
+      --limit 200 \
+      --output json 2>/dev/null || true)
+    if printf '%s' "$events" | jq -e '.events | length > 0' >/dev/null 2>&1; then
+      echo "----- bootstrap task logs (${LOG_GROUP} / ${stream}) -----"
+      printf '%s' "$events" | jq -r '.events[].message'
+      echo "----- end bootstrap task logs -----"
+      return 0
     fi
     echo "run-bootstrap: task logs not available yet (attempt ${attempt}/5), waiting 8s for CloudWatch ingestion..."
     sleep 8
   done
-  echo "run-bootstrap: WARNING — could not retrieve bootstrap task logs (log group may be gone). cluster=${CLUSTER}"
+  echo "run-bootstrap: WARNING — could not retrieve bootstrap task logs (log group may be gone). group=${LOG_GROUP} stream=${stream}"
 }
 
 # Manual wait loop (NOT `aws ecs wait`, whose 100×6s=10m cap can't be raised via

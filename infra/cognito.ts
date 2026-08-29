@@ -205,17 +205,24 @@ export function cognito(): CognitoOutputs {
     for (const fixture of [
       {
         logicalName: "Mem9PreviewNamespaceAlphaClient",
+        groupLogicalName: "Mem9PreviewNamespaceAlphaGroup",
         suffix: "alpha",
         namespaceSlug: "preview-alpha",
         cognitoGroup: "memory-preview-alpha",
       },
       {
         logicalName: "Mem9PreviewNamespaceBetaClient",
+        groupLogicalName: "Mem9PreviewNamespaceBetaGroup",
         suffix: "beta",
         namespaceSlug: "preview-beta",
         cognitoGroup: "memory-preview-beta",
       },
     ]) {
+      new awsAny.cognito.UserGroup(fixture.groupLogicalName, {
+        name: fixture.cognitoGroup,
+        userPoolId: pool.id,
+        description: "Managed team memory namespace",
+      });
       const previewClient = new awsAny.cognito.UserPoolClient(
         fixture.logicalName,
         {

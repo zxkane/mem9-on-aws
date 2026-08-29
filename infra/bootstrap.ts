@@ -93,20 +93,6 @@ export function bootstrap(
       MEM9_DB_SECRET: dbOut.secretArn,
       MEM9_TENANT_ID: identity.tenantSecretArn,
     },
-    ...(previewNamespaceFixtures
-      ? {
-          permissions: [
-            {
-              actions: [
-                "cognito-idp:CreateGroup",
-                "cognito-idp:ListGroups",
-                "cognito-idp:UpdateGroup",
-              ],
-              resources: [cognito.userPoolArn],
-            },
-          ],
-        }
-      : {}),
     logging: { retention: "1 month" },
     transform: {
       taskDefinition: (args) => {
