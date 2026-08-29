@@ -767,14 +767,14 @@ describe("consolidation IAM templates", () => {
         "kms:GenerateDataKey",
       ]),
     );
-    const resourceDeny = statements.find(({ Sid }) => Sid === "Resources");
+    const resourceDeny = statements.find(({ Sid }) => Sid === "R");
     expect(resourceDeny?.NotResource).toContainEqual({
       "Fn::Sub":
         "arn:${AWS::Partition}:s3:::${DecisionArtifactBucketName}/*",
     });
 
     const secretRoleDeny = statements.find(
-      ({ Sid }) => Sid === "SecretCtxRole",
+      ({ Sid }) => Sid === "S",
     );
     expect(
       secretRoleDeny?.Condition.ArnNotLike["aws:PrincipalArn"],

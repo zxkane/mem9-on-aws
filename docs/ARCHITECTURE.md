@@ -651,8 +651,10 @@ boundary does not require `kms:ViaService` for the Lambda cold-start path
 because that path does not expose it consistently during permissions-boundary
 evaluation. Non-Lambda-context decrypts must come through SSM or Secrets
 Manager in the application region. Separate denies restrict Lambda contexts to
-the four required Lambda execution-role types, including the facade authorizer
-role, and secret contexts to the four ECS execution-role types. AWS
+the four currently required Lambda execution-role types plus the pre-authorized
+namespace identity-interceptor role, and restrict secret contexts to the four
+ECS execution-role types. The interceptor remains optional in the production
+inventory until the namespace feature is deployed. AWS
 defines `aws:PrincipalArn` for an IAM role as the IAM role ARN, not its
 assumed-role session ARN:
 [global condition keys](https://docs.aws.amazon.com/IAM/latest/UserGuide/reference_policies_condition-keys.html).
@@ -663,7 +665,7 @@ exception requires both a generated proxy-role name and
 `iam:PassedToService` restricted to Lambda; `lambda:SourceFunctionArn`
 explicitly denies the same actions to function code. The name match is
 therefore not the sole authorization check. The deploy role likewise denies
-passing any of the four allowlisted Lambda role-name patterns to a non-Lambda
+passing any of the five allowlisted Lambda role-name patterns to a non-Lambda
 service, and denies passing any of the four allowlisted ECS execution-role
 patterns to a non-ECS service. These `PassRole` denies do not constrain a role trust policy
 supplied to `CreateRole`; the accepted trusted-writer model therefore remains
@@ -687,7 +689,9 @@ This avoids principal-simulator Organizations decisions that do not represent
 live authorization in a management account, where SCPs do not apply. The
 rollout then expands the deployed `iam:PassRole` scope with full pagination and
 validates the alert-router, OAuth-facade, facade-authorizer, and VPC-proxy
-Lambda role trusts.
+Lambda role trusts. It also recognizes the exact future identity-interceptor
+function/role binding when present, without requiring it before the namespace
+feature rollout.
 During initial discovery only, it repairs the single exact legacy shape
 containing Lambda plus current-account root: the complete inventory must first
 contain no other unexpected trust, and each repair is guarded by an immediate
@@ -721,8 +725,9 @@ A failure retains quarantine and is recovered by re-running the same command.
 Normal preview and production deployment preflights use the read-only
 `--verify-only` path, so a permissive policy drift at the same stable ARN blocks
 deployment rather than satisfying an ARN-only check. That path also
-custom-simulates the live boundary's 17 KMS cases: all four required project
-Lambda, SSM, server-secret, and bootstrap-secret paths must be allowed; direct
+custom-simulates the live boundary's 18 KMS cases: all four required project
+Lambda roles plus the namespace identity-interceptor role, SSM, server-secret,
+and bootstrap-secret paths must be allowed; direct
 SSM/secret, foreign-secret, cross-region, task-role secret, Lambda-role secret,
 direct function-code, mismatched service/context pairs, forged/out-of-project
 Lambda, and missing-context paths must be explicit denies. It then confirms

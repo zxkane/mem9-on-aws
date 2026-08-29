@@ -218,6 +218,7 @@ Resources:
               - iam:PassRole
             Resource:
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9AlertRouterRole-*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9IdentityInterceptorFnRole-*
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9OauthFacadeAllowAllRole
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9OauthFacadeFnRole-*
               - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ProxyFnRole-*
