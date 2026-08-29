@@ -76,12 +76,19 @@ const TOOL_SCHEMA = [
   },
   {
     name: "search_memories",
-    description: "Search stored memories by semantic query; returns the most relevant memories.",
+    description:
+      "Search stored memories; semantic search is the default and keyword mode performs exact substring matching.",
     inputSchema: {
       type: "object",
       properties: {
         q: { type: "string", description: "The natural-language search query." },
         limit: { type: "integer", description: "Max results to return (default 20)." },
+        search_mode: {
+          type: "string",
+          enum: ["semantic", "keyword"],
+          description:
+            "Optional search mode. Defaults to semantic; keyword performs exact substring matching.",
+        },
         agent_id: {
           type: "string",
           description: "Optional: restrict results to memories written by this agent.",

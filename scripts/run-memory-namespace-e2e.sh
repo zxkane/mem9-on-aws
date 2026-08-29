@@ -3,9 +3,9 @@
 #
 # Two short-lived Cognito M2M clients are bound to different namespaces in the
 # same preview database. The stage's default M2M client shares preview-alpha.
-# Each fixture recalls its own marker, the default client must recall alpha's
-# marker, and foreign-marker queries must not return the other marker. The
-# deterministic PostgreSQL integration suite proves exhaustive row isolation.
+# Keyword search resolves each fixture's exact memory ID, the default client
+# must resolve alpha's same ID, and foreign-marker queries must return no rows.
+# The deterministic PostgreSQL integration suite proves exhaustive row isolation.
 
 set -euo pipefail
 
@@ -147,6 +147,15 @@ resolve_tools() {
     echo "::error::namespace fixture client cannot discover memory tools"
     exit 1
   fi
+  if ! printf '%s' "$tools" | jq -e \
+    'any(
+       (.tools // [])[];
+       (.name | endswith("search_memories"))
+       and ((.inputSchema.properties.search_mode.enum // []) | index("keyword") != null)
+     )' >/dev/null; then
+    echo "::error::search_memories does not advertise keyword mode"
+    exit 1
+  fi
 }
 
 call_tool() {
@@ -183,9 +192,26 @@ parse_search_payload() {
   SEARCH_PAYLOAD="$payload"
 }
 
-payload_contains_marker() {
-  printf '%s' "$SEARCH_PAYLOAD" | jq -e --arg marker "$1" \
-    'tostring | contains($marker)' >/dev/null
+payload_memory_id_for_marker() {
+  printf '%s' "$SEARCH_PAYLOAD" | jq -er --arg marker "$1" \
+    '[
+       .memories[]
+       | select((.content | type) == "string" and (.content | contains($marker)))
+       | .id
+       | select(type == "string" and length > 0)
+     ]
+     | unique
+     | if length == 1 then .[0] else empty end'
+}
+
+payload_contains_memory_id() {
+  printf '%s' "$SEARCH_PAYLOAD" | jq -e --arg memory_id "$1" \
+    'any(.memories[]?; .id == $memory_id)' >/dev/null
+}
+
+payload_has_memories() {
+  printf '%s' "$SEARCH_PAYLOAD" | jq -e \
+    '(.memories | length) > 0 or .total > 0' >/dev/null
 }
 
 initialize "$ALPHA_AUTH_CONFIG" alpha
@@ -213,58 +239,63 @@ assert_call_succeeded "beta namespace write"
 
 echo "run-memory-namespace-e2e: polling both isolated namespaces"
 DEADLINE=$((SECONDS + 360))
-ALPHA_FOUND=0
-BETA_FOUND=0
+ALPHA_MEMORY_ID=""
+BETA_MEMORY_ID=""
 while [[ $SECONDS -lt $DEADLINE ]]; do
-  if [[ "$ALPHA_FOUND" != "1" ]]; then
+  if [[ -z "$ALPHA_MEMORY_ID" ]]; then
     call_tool "$ALPHA_AUTH_CONFIG" alpha "$SEARCH_TOOL" \
-      "$(jq -nc --arg q "$ALPHA_MARKER" '{q:$q,limit:100}')"
+      "$(jq -nc --arg q "$ALPHA_MARKER" \
+        '{q:$q,limit:100,search_mode:"keyword"}')"
     parse_search_payload "alpha own-marker search"
-    if payload_contains_marker "$ALPHA_MARKER"; then
-      ALPHA_FOUND=1
+    if memory_id=$(payload_memory_id_for_marker "$ALPHA_MARKER"); then
+      ALPHA_MEMORY_ID="$memory_id"
     fi
   fi
-  if [[ "$BETA_FOUND" != "1" ]]; then
+  if [[ -z "$BETA_MEMORY_ID" ]]; then
     call_tool "$BETA_AUTH_CONFIG" beta "$SEARCH_TOOL" \
-      "$(jq -nc --arg q "$BETA_MARKER" '{q:$q,limit:100}')"
+      "$(jq -nc --arg q "$BETA_MARKER" \
+        '{q:$q,limit:100,search_mode:"keyword"}')"
     parse_search_payload "beta own-marker search"
-    if payload_contains_marker "$BETA_MARKER"; then
-      BETA_FOUND=1
+    if memory_id=$(payload_memory_id_for_marker "$BETA_MARKER"); then
+      BETA_MEMORY_ID="$memory_id"
     fi
   fi
-  if [[ "$ALPHA_FOUND" == "1" && "$BETA_FOUND" == "1" ]]; then
+  if [[ -n "$ALPHA_MEMORY_ID" && -n "$BETA_MEMORY_ID" ]]; then
     break
   fi
   sleep 15
 done
 
-if [[ "$ALPHA_FOUND" != "1" || "$BETA_FOUND" != "1" ]]; then
-  echo "::error::one or both namespace markers were not recalled within 6 minutes"
+if [[ -z "$ALPHA_MEMORY_ID" || -z "$BETA_MEMORY_ID" ]]; then
+  echo "::error::one or both namespace writes were not found by keyword search within 6 minutes"
   exit 1
 fi
 
 call_tool "$DEFAULT_AUTH_CONFIG" default "$SEARCH_TOOL" \
-  "$(jq -nc --arg q "$ALPHA_MARKER" '{q:$q,limit:100}')"
+  "$(jq -nc --arg q "$ALPHA_MARKER" \
+    '{q:$q,limit:100,search_mode:"keyword"}')"
 parse_search_payload "default-client shared-alpha search"
-if ! payload_contains_marker "$ALPHA_MARKER"; then
+if ! payload_contains_memory_id "$ALPHA_MEMORY_ID"; then
   echo "::error::default client did not observe its shared alpha namespace"
   exit 1
 fi
 
 call_tool "$ALPHA_AUTH_CONFIG" alpha "$SEARCH_TOOL" \
-  "$(jq -nc --arg q "$BETA_MARKER" '{q:$q,limit:100}')"
+  "$(jq -nc --arg q "$BETA_MARKER" \
+    '{q:$q,limit:100,search_mode:"keyword"}')"
 parse_search_payload "alpha foreign-marker search"
-if payload_contains_marker "$BETA_MARKER"; then
+if payload_contains_memory_id "$BETA_MEMORY_ID" || payload_has_memories; then
   echo "::error::alpha namespace observed beta memory"
   exit 1
 fi
 
 call_tool "$BETA_AUTH_CONFIG" beta "$SEARCH_TOOL" \
-  "$(jq -nc --arg q "$ALPHA_MARKER" '{q:$q,limit:100}')"
+  "$(jq -nc --arg q "$ALPHA_MARKER" \
+    '{q:$q,limit:100,search_mode:"keyword"}')"
 parse_search_payload "beta foreign-marker search"
-if payload_contains_marker "$ALPHA_MARKER"; then
+if payload_contains_memory_id "$ALPHA_MEMORY_ID" || payload_has_memories; then
   echo "::error::beta namespace observed alpha memory"
   exit 1
 fi
 
-echo "run-memory-namespace-e2e: OK — shared namespace recalled; cross-namespace markers absent"
+echo "run-memory-namespace-e2e: OK — shared memory ID matched; cross-namespace keyword results absent"

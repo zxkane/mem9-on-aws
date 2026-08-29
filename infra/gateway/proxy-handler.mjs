@@ -24,7 +24,7 @@
  *
  * mem9 REST (the MCP tool schemas live inline in infra/gateway.ts):
  *   add_memory      → POST /v1alpha2/mem9s/memories   (X-API-Key, opt X-Mnemo-Agent-Id)
- *   search_memories → GET  /v1alpha2/mem9s/memories?q=&limit=&offset=&agent_id=
+ *   search_memories → GET  /v1alpha2/mem9s/memories?q=&limit=&offset=&agent_id=&search_mode=
  * Outbound auth to mnemo-server = the X-API-Key header (= the tenant id).
  *
  * Config via env (set in infra/gateway.ts):
@@ -190,12 +190,19 @@ async function addMemory(input, identity) {
 }
 
 async function searchMemories(input, identity) {
-  const { q, limit, offset, agent_id } = input ?? {};
+  const { q, limit, offset, agent_id, search_mode } = input ?? {};
   if (!q) throw new Error("search_memories requires 'q'");
   const params = new URLSearchParams({ q: String(q) });
   if (limit != null) params.set("limit", String(limit));
   if (offset != null) params.set("offset", String(offset));
   if (agent_id) params.set("agent_id", String(agent_id));
+  if (search_mode != null) {
+    const mode = String(search_mode);
+    if (mode !== "semantic" && mode !== "keyword") {
+      throw new Error("search_memories search_mode must be 'semantic' or 'keyword'");
+    }
+    params.set("search_mode", mode);
+  }
   return mem9Fetch(
     `${MEMORIES_PATH}?${params.toString()}`,
     { method: "GET" },

@@ -154,12 +154,24 @@ describe("proxy-handler routing (regression)", () => {
 
   it("search_memories GETs with the query string", async () => {
     const spy = mockFetchOk({ memories: [], total: 0 });
-    await handler({ q: "arm64", limit: 5 }, ctx("search_memories"));
+    await handler(
+      { q: "arm64", limit: 5, search_mode: "keyword" },
+      ctx("search_memories"),
+    );
     const [url, init] = spy.mock.calls[0];
     expect(init.method).toBe("GET");
     expect(url).toContain("/v1alpha2/mem9s/memories?");
     expect(url).toContain("q=arm64");
     expect(url).toContain("limit=5");
+    expect(url).toContain("search_mode=keyword");
+  });
+
+  it("rejects unsupported search modes before calling mnemo-server", async () => {
+    const spy = mockFetchOk({ memories: [], total: 0 });
+    await expect(
+      handler({ q: "arm64", search_mode: "fuzzy" }, ctx("search_memories")),
+    ).rejects.toThrow(/search_mode/u);
+    expect(spy).not.toHaveBeenCalled();
   });
 
   it("throws on an unknown tool", async () => {

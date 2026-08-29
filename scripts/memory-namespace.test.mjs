@@ -110,7 +110,18 @@ if (request.method === "initialize") {
     result: {
       tools: [
         { name: "fixture___add_memory" },
-        { name: "fixture___search_memories" }
+        {
+          name: "fixture___search_memories",
+          inputSchema: {
+            type: "object",
+            properties: {
+              search_mode: {
+                type: "string",
+                enum: ["semantic", "keyword"]
+              }
+            }
+          }
+        }
       ]
     }
   };
@@ -131,7 +142,11 @@ if (request.method === "initialize") {
       result: { content: [{ text: JSON.stringify({ status: "accepted" }) }] }
     };
   } else {
+    if (input.search_mode !== "keyword") {
+      process.exit(3);
+    }
     const ownPrefix = auth === "beta" ? "namespace-beta" : "namespace-alpha";
+    const ownID = auth === "beta" ? "memory-beta-id" : "memory-alpha-id";
     const foreign = !input.q.includes(ownPrefix);
     if (foreign && process.env.MCP_FAKE_FAILURE === "cross-http") {
       status = "500";
@@ -145,7 +160,10 @@ if (request.method === "initialize") {
     } else {
       const memories = foreign
         ? []
-        : [{ content: "PR namespace isolation marker " + input.q }];
+        : [{
+            id: ownID,
+            content: "PR namespace isolation marker " + input.q
+          }];
       body = {
         jsonrpc: "2.0",
         id: 1,
@@ -481,8 +499,9 @@ describe("memory namespace operator config", () => {
     );
     expect(result.status).toBe(0);
     expect(result.stdout).toContain(
-      "shared namespace recalled; cross-namespace markers absent",
+      "shared memory ID matched; cross-namespace keyword results absent",
     );
+    expect(curlArgv).toContain('\\"search_mode\\":\\"keyword\\"');
     expect(headers).toContain("Mcp-Session-Id: fixture-default");
     expect(headers).toContain("Mcp-Session-Id: fixture-alpha");
     expect(headers).toContain("Mcp-Session-Id: fixture-beta");
