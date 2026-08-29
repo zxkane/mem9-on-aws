@@ -317,7 +317,14 @@ export function gateway(
   // Command wrapper still gives a clean create→poll-READY→delete lifecycle + a
   // dependsOn edge on the proxy Lambda + gateway.
   const targetName = `${stage}-mem9-rest`;
-  const provisionScript = path.join(gatewayAssetDir, "provision-target.mjs");
+  // Persist a checkout-relative script path in Pulumi state. An absolute path
+  // ties the delete command to the runner that deployed the stage, so teardown
+  // from another runner or an operator checkout cannot find the script.
+  const provisionScript = path.relative(
+    process.cwd(),
+    path.join(gatewayAssetDir, "provision-target.mjs"),
+  );
+  const provisionCommand = `node ${JSON.stringify(provisionScript)}`;
   const toolSchemaJson = JSON.stringify(TOOL_SCHEMA);
   // `command.local.Command`'s `environment` block applies to BOTH create and
   // delete, so MEM9_TGT_OP can't live there (it must differ per lifecycle) — set it
@@ -325,8 +332,8 @@ export function gateway(
   new command.local.Command(
     "Mem9GatewayTarget",
     {
-      create: $interpolate`MEM9_TGT_OP=create node ${provisionScript}`,
-      delete: $interpolate`MEM9_TGT_OP=delete node ${provisionScript}`,
+      create: $interpolate`MEM9_TGT_OP=create ${provisionCommand}`,
+      delete: $interpolate`MEM9_TGT_OP=delete ${provisionCommand}`,
       // Re-run create (delete-then-recreate) when the gateway, the Lambda, or the
       // tool schema changes. A fire-once Command has no read/diff, so out-of-band
       // drift needs a trigger bump or `sst refresh`; a failed create always re-runs.

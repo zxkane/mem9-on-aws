@@ -1,3 +1,4 @@
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CognitoOutputs } from "./cognito";
 import type { EcsOutputs } from "./ecs";
@@ -285,9 +286,15 @@ describe("gateway stack", () => {
     const gateway = await loadGateway();
     gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>, fakeNamespaceIdentity());
     const cmd = only("LocalCommand");
-    expect(String(unwrap(cmd.create))).toContain("MEM9_TGT_OP=create");
-    expect(String(unwrap(cmd.create))).toContain("provision-target.mjs");
-    expect(String(unwrap(cmd.delete))).toContain("MEM9_TGT_OP=delete");
+    const createCommand = String(unwrap(cmd.create));
+    const deleteCommand = String(unwrap(cmd.delete));
+    expect(createCommand).toContain("MEM9_TGT_OP=create");
+    expect(deleteCommand).toContain("MEM9_TGT_OP=delete");
+    for (const command of [createCommand, deleteCommand]) {
+      const script = JSON.parse(command.slice(command.indexOf(" node ") + 6));
+      expect(path.isAbsolute(script)).toBe(false);
+      expect(script).toMatch(/gateway[/\\]provision-target\.mjs$/u);
+    }
     const env = unwrap(cmd.environment) as Record<string, unknown>;
     // Lambda target inputs: the proxy Lambda ARN + the inline tool schema (both tools).
     expect(env.MEM9_TGT_LAMBDA_ARN).toBeDefined();
