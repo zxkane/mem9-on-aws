@@ -55,34 +55,32 @@ function countMapDrift(expected, actual) {
 }
 
 async function readDatabaseState(db) {
-  const [namespaces, groupBindings, m2mBindings] = await Promise.all([
-    db.query(
-      `SELECT slug, display_name, status
-       FROM memory_namespaces`,
-    ),
-    db.query(
-      `SELECT binding.group_key, namespace.slug AS namespace_slug,
-              binding.default_role, binding.jit_enabled, binding.status
-       FROM memory_cognito_group_bindings AS binding
-       JOIN memory_namespaces AS namespace
-         ON namespace.namespace_id = binding.namespace_id`,
-    ),
-    db.query(
-      `SELECT binding.client_key, principal.principal_key,
-              namespace.slug AS namespace_slug, binding.role, binding.status,
-              principal.status AS principal_status,
-              membership.role AS membership_role,
-              membership.status AS membership_status
-       FROM memory_m2m_namespace_bindings AS binding
-       JOIN memory_principals AS principal
-         ON principal.principal_id = binding.principal_id
-       JOIN memory_namespaces AS namespace
-         ON namespace.namespace_id = binding.namespace_id
-       LEFT JOIN memory_namespace_memberships AS membership
-         ON membership.namespace_id = binding.namespace_id
-        AND membership.principal_id = binding.principal_id`,
-    ),
-  ]);
+  const namespaces = await db.query(
+    `SELECT slug, display_name, status
+     FROM memory_namespaces`,
+  );
+  const groupBindings = await db.query(
+    `SELECT binding.group_key, namespace.slug AS namespace_slug,
+            binding.default_role, binding.jit_enabled, binding.status
+     FROM memory_cognito_group_bindings AS binding
+     JOIN memory_namespaces AS namespace
+       ON namespace.namespace_id = binding.namespace_id`,
+  );
+  const m2mBindings = await db.query(
+    `SELECT binding.client_key, principal.principal_key,
+            namespace.slug AS namespace_slug, binding.role, binding.status,
+            principal.status AS principal_status,
+            membership.role AS membership_role,
+            membership.status AS membership_status
+     FROM memory_m2m_namespace_bindings AS binding
+     JOIN memory_principals AS principal
+       ON principal.principal_id = binding.principal_id
+     JOIN memory_namespaces AS namespace
+       ON namespace.namespace_id = binding.namespace_id
+     LEFT JOIN memory_namespace_memberships AS membership
+       ON membership.namespace_id = binding.namespace_id
+      AND membership.principal_id = binding.principal_id`,
+  );
   return {
     namespaces: new Map(
       namespaces.rows.map((row) => [
@@ -371,8 +369,11 @@ export async function reconcileNamespaces({
         `INSERT INTO memory_namespace_memberships (
            namespace_id, principal_id, role, status, source_type, source_key,
            revoked_at
-         ) VALUES ($1, $2, $3, $4, 'm2m_binding', $5,
-           CASE WHEN $4 = 'active' THEN NULL ELSE statement_timestamp() END)
+         ) VALUES ($1, $2, $3, $4::varchar, 'm2m_binding', $5,
+           CASE
+             WHEN $4::varchar = 'active' THEN NULL
+             ELSE statement_timestamp()
+           END)
          ON CONFLICT (namespace_id, principal_id) DO UPDATE
          SET role = EXCLUDED.role,
              status = EXCLUDED.status,

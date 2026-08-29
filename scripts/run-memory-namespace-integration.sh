@@ -5,6 +5,7 @@ set -euo pipefail
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 CONTAINER="mem9-namespace-migration-${RANDOM}-${BASHPID}"
 DATABASE="mem9_namespace_migration"
+PREVIEW_DATABASE="mem9_preview_namespace"
 NAMESPACE_ID="60000000-0000-4000-8000-000000000101"
 PRINCIPAL_ID="70000000-0000-4000-8000-000000000101"
 OTHER_NAMESPACE_ID="60000000-0000-4000-8000-000000000102"
@@ -487,5 +488,66 @@ if psql_sql "
   echo "enforced schema accepted a null namespace" >&2
   exit 1
 fi
+
+# Exercise the full preview bootstrap sequence against a fresh database:
+# additive schema, namespace reconciliation, freeze/backfill, and enforcement.
+docker exec "$CONTAINER" createdb -U postgres "$PREVIEW_DATABASE"
+docker exec \
+  -e "MNEMO_DSN=postgres://postgres:test@127.0.0.1:5432/${PREVIEW_DATABASE}?sslmode=disable" \
+  -e MNEMO_MIGRATION_MAX_ATTEMPTS=1 \
+  "$CONTAINER" \
+  /usr/local/bin/mem9-entrypoint.sh
+
+MEM9_REPO_ROOT="$ROOT" \
+PREVIEW_DSN="postgres://postgres:test@127.0.0.1:${PORT}/${PREVIEW_DATABASE}?sslmode=disable" \
+  node --input-type=module <<'NODE'
+import { pathToFileURL } from "node:url";
+import pg from "pg";
+
+const root = process.env.MEM9_REPO_ROOT;
+const issuer = "https://cognito-idp.example.com/pool";
+const {
+  preparePreviewMemoryNamespaces,
+  previewNamespaceDesiredState,
+} = await import(
+  pathToFileURL(`${root}/scripts/prepare-preview-memory-namespaces.mjs`)
+);
+const desired = previewNamespaceDesiredState({
+  issuer,
+  defaultClientId: "integration-default-client",
+  alpha: {
+    clientId: "integration-alpha-client",
+    slug: "integration-alpha",
+    group: "memory-integration-alpha",
+  },
+  beta: {
+    clientId: "integration-beta-client",
+    slug: "integration-beta",
+    group: "memory-integration-beta",
+  },
+});
+const db = new pg.Client({ connectionString: process.env.PREVIEW_DSN });
+await db.connect();
+try {
+  const result = await preparePreviewMemoryNamespaces({
+    db,
+    issuer,
+    stage: "pr-42",
+    desired,
+    migrationPath:
+      `${root}/docker/bootstrap/migrations/003_enforce_memory_namespaces.sql`,
+  });
+  if (
+    result.phase !== "constraints_complete" ||
+    result.reconciliation.drift.total !== 0
+  ) {
+    throw new Error(
+      `preview preparation did not converge: ${JSON.stringify(result)}`,
+    );
+  }
+} finally {
+  await db.end();
+}
+NODE
 
 echo "memory namespace migration integration: OK"
