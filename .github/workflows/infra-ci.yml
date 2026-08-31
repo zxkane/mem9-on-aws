@@ -32,24 +32,19 @@
 #                  to true only after every live role is bounded. Every AWS job
 #                  stays disabled until true; prod also fails synthesis unless
 #                  the value is explicitly true or false.
-#   MEM9_CONSOLIDATION_SCHEDULE_ENABLED — set to 1 only after the one-shot
-#                  cleanup and an actionable report-only consolidation run.
-#                  Unset keeps the production weekly schedule absent.
-#   MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED — set to 1 only after an operator-initiated
-#                  memory-cleanup.mjs dry run has posted an actionable approval
-#                  list by hand. Unset keeps the weekly scan schedule, its
-#                  Scheduler role, and its group absent; the apply half of the
-#                  Slack loop still works from a manual offer. Separate from
-#                  MEM9_SLACK_APPROVAL_ENABLED because the apply half is inert
-#                  until a human clicks while the scan runs unattended and spends
-#                  two reasoning-model passes a week. Requires the scan Scheduler
-#                  role's iam:PassRole widening in the deploy role
-#                  (github-actions-role.yaml) to be rolled out FIRST.
 #   MEM9_LLM_RESPONSES_REGION — independent fallback region for selected OpenAI
 #                  GPT models. Unset keeps the runtime/boundary default us-west-2.
 #   MEM9_COGNITO_DOMAIN_PREFIX — existing production Cognito domain prefix.
 #                  Set this before adopting derived defaults so prod keeps its
 #                  current OAuth hostname. Previews intentionally do not use it.
+#   MEM9_NAMESPACE_REQUIRED — namespace cutover gate. Leave unset/0 while the
+#                  database is additive_ready. Set to 1 only after the guarded
+#                  freeze/backfill/enforce run reaches constraints_complete and
+#                  namespace/group/M2M bindings have been reconciled.
+#   MEM9_TRANSPORT_SIGNING_ACTIVE_SLOT — active transport key slot, `a` or `b`.
+#   MEM9_TRANSPORT_SIGNING_SLOT_A_REVISION / SLOT_B_REVISION — increment only
+#                  the inactive slot, deploy, then switch the active slot and
+#                  deploy again. These selectors are non-secret.
 #   MEM9_DECISION_ARTIFACT_BUCKET — exact account-level bucket bootstrapped by
 #                  scripts/deploy-decision-artifact-bucket.sh. Unset uses
 #                  mem9-audit-<account-id>. The boundary must use the same value.
@@ -92,6 +87,7 @@ on:
       - "infra/cloudformation/workload-permissions-boundary.yaml"
       - "infra/cloudformation/decision-artifact-bucket.yaml"
       - "infra/cloudformation/decision-artifact-bucket-import.yaml"
+      - "infra/cloudformation/memory-namespace-operator-role.yaml"
   push:
     branches: [main]
     paths:
@@ -110,13 +106,13 @@ on:
       - "infra/cloudformation/workload-permissions-boundary.yaml"
       - "infra/cloudformation/decision-artifact-bucket.yaml"
       - "infra/cloudformation/decision-artifact-bucket-import.yaml"
+      - "infra/cloudformation/memory-namespace-operator-role.yaml"
 
-# Per-PR concurrency for PR events (cancel superseded runs so repeated
-# `synchronize` events don't race the same `pr-N` stage's unlock/deploy);
-# singleton for push-to-main AND manual workflow_dispatch (both deploy prod).
-# Critical: the prod group is NOT cancel-in-progress — prod must never be
-# interrupted mid-deploy by a subsequent merge or dispatch. The `|| 'unknown'`
-# guard protects format() during push/dispatch events where
+# Per-PR concurrency serializes repeated `synchronize` events so the same
+# `pr-N` stage never races unlock/deploy/cleanup. Superseded runs are not
+# cancelled: a cancelled workflow would also cancel its dependent teardown.
+# Push-to-main and manual workflow_dispatch share one serialized prod group.
+# The `|| 'unknown'` guard protects format() during push/dispatch events where
 # pull_request.number is null.
 concurrency:
   group: >-
@@ -125,11 +121,14 @@ concurrency:
         && 'infra-deploy-prod'
         || format('infra-ci-pr-{0}', github.event.pull_request.number || 'unknown')
     }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  cancel-in-progress: false
 
 env:
   ROLE_NAME: github-actions-mem9-on-aws
   MEM9_DECISION_ARTIFACT_BUCKET: ${{ vars.MEM9_DECISION_ARTIFACT_BUCKET }}
+  MEM9_TRANSPORT_SIGNING_ACTIVE_SLOT: ${{ vars.MEM9_TRANSPORT_SIGNING_ACTIVE_SLOT }}
+  MEM9_TRANSPORT_SIGNING_SLOT_A_REVISION: ${{ vars.MEM9_TRANSPORT_SIGNING_SLOT_A_REVISION }}
+  MEM9_TRANSPORT_SIGNING_SLOT_B_REVISION: ${{ vars.MEM9_TRANSPORT_SIGNING_SLOT_B_REVISION }}
   # The out-of-band ECR repo namespace (infra/cloudformation/ecr-repositories.yaml).
   # build-and-push-image builds four images under it: <ns>/mnemo-server,
   # <ns>/qwen3-embed, <ns>/bootstrap, <ns>/llm-proxy. Deploy stages reference
@@ -261,6 +260,7 @@ jobs:
           # Application region: this bucket is deployed there, not us-west-2.
           cfn-lint infra/cloudformation/decision-artifact-bucket.yaml --regions "$application_region"
           cfn-lint infra/cloudformation/decision-artifact-bucket-import.yaml --regions "$application_region"
+          cfn-lint infra/cloudformation/memory-namespace-operator-role.yaml --regions us-west-2
 
       - name: Validate workload boundary operator scripts
         run: |
@@ -277,9 +277,18 @@ jobs:
           shellcheck scripts/run-cleanup-scan-task.sh
           shellcheck scripts/run-consolidation-task.sh
           shellcheck scripts/run-slack-approval-e2e.sh
+          shellcheck scripts/run-ingest-queue-integration.sh
+          shellcheck scripts/run-memory-namespace-integration.sh
+          shellcheck scripts/run-memory-namespace-e2e.sh
+          shellcheck scripts/run-memory-namespace-task.sh
+          shellcheck scripts/lib/memory-namespace-operator.sh
+          shellcheck scripts/deploy-memory-namespace-operator-role.sh
 
       - name: PostgreSQL durable ingest integration tests
         run: bash scripts/run-ingest-queue-integration.sh
+
+      - name: PostgreSQL namespace migration rehearsal
+        run: bash scripts/run-memory-namespace-integration.sh
 
   # ───────────────────────────────────────────────────────────────────────────
   # deploy-preview — PR opened/synchronized/reopened → stage `pr-N`.
@@ -296,9 +305,14 @@ jobs:
     # ~1.2 GB qwen3 image pull + 180s health-check startPeriod, plus the tiny
     # llm-proxy sidecar) + the bootstrap DB-retry + run-task. No RDS Proxy
     # (dropped — see infra/db.ts), so no proxy warmup wait. Measured first
-    # bring-up ~30-35m; 60m leaves room for the report-only consolidation E2E
-    # deploy.
+    # bring-up ~30-35m. The read-only ECS reconciliation budget is just under
+    # 30m because the AWS services-stable waiter is fixed at ~10m and proved too
+    # short for a fresh preview. A deploy job failure or timeout starts a
+    # separate dependent cleanup job; explicit whole-workflow cancellation is
+    # operator-controlled and does not guarantee downstream teardown.
     timeout-minutes: 60
+    outputs:
+      stage: ${{ steps.deploy.outputs.stage }}
     permissions:
       id-token: write
       contents: read
@@ -417,26 +431,10 @@ jobs:
           # The image applies the repeatable atomic-ingest migration before the
           # server starts, so one enabled rollout is safe.
           MEM9_DURABLE_INGEST_ENABLED: "1"
-          # Synthesize the Scheduler resource for infra coverage, but
-          # infra/consolidation.ts keeps every preview schedule DISABLED.
-          MEM9_CONSOLIDATION_SCHEDULE_ENABLED: "1"
-          # Slack approval (#123). Opt-in through repo variables/secrets rather than
-          # a literal "1": infra/slack-approval.ts FAILS SYNTHESIS when the flag is
-          # set and either secret is unseeded, and GitHub hands an unset secret to
-          # the job as an EMPTY STRING — so hardcoding the flag would break every
-          # PR on a repo that has not seeded a Slack app. Unset leaves the whole
-          # stack ABSENT (not present-and-idle) and the E2E step below skips.
-          MEM9_SLACK_APPROVAL_ENABLED: ${{ vars.MEM9_SLACK_APPROVAL_ENABLED }}
-          MEM9_SLACK_APPROVAL_CHANNEL: ${{ vars.MEM9_SLACK_APPROVAL_CHANNEL }}
-          SST_SECRET_SlackBotToken: ${{ secrets.SLACK_BOT_TOKEN }}
-          SST_SECRET_SlackSigningSecret: ${{ secrets.SLACK_SIGNING_SECRET }}
-          # Synthesize the weekly scan's schedule, group, and Scheduler role for
-          # infra coverage — infra/slack-approval.ts keeps every non-prod schedule
-          # DISABLED, so a preview stage cannot start a classification run against
-          # the corpus prod's operator is reviewing. Literal "1" (unlike the
-          # approval flag above) because the scan block is INSIDE the approval gate:
-          # a repo that has not seeded a Slack app synthesizes nothing either way.
-          MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED: "1"
+          # Fresh previews start compatibly. The deploy script overrides this
+          # to 1 when the stage already exists, after first rerunning that
+          # stage's bootstrap task so a cancelled cutover resumes before deploy.
+          MEM9_NAMESPACE_REQUIRED: "0"
         run: |
           # PR_NUMBER comes from GitHub's pull_request payload (integer);
           # validate to short-circuit any injection risk.
@@ -447,6 +445,46 @@ jobs:
           STAGE="pr-${PR_NUMBER}"
           echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
           echo "Deploying to stage: $STAGE"
+
+          # A previous namespace-aware run may have been cancelled after its
+          # bootstrap advanced the database beyond additive_ready. Compatibility
+          # mode cannot start against that database. A preview created by an
+          # older revision can also have this SSM parameter while lacking all
+          # namespace migrations. Inspect the task-definition marker to
+          # distinguish those states: namespace-aware stages resume bootstrap
+          # and deploy directly in required mode; legacy and brand-new stages
+          # use the two-step 0 -> bootstrap -> 1 path below.
+          PARAMETER_ERROR=$(mktemp)
+          trap 'rm -f "$PARAMETER_ERROR"' EXIT
+          set +e
+          EXISTING_TASK_DEF=$(aws ssm get-parameter \
+            --name "/mem9-on-aws/${STAGE}/bootstrap/task-def-arn" \
+            --region "$AWS_REGION" \
+            --query Parameter.Value \
+            --output text 2>"$PARAMETER_ERROR")
+          PARAMETER_STATUS=$?
+          set -e
+          if [ "$PARAMETER_STATUS" -eq 0 ]; then
+            BOOTSTRAP_VERSION=$(aws ecs describe-task-definition \
+              --task-definition "$EXISTING_TASK_DEF" \
+              --region "$AWS_REGION" \
+              --query "taskDefinition.containerDefinitions[0].environment[?name=='MEM9_NAMESPACE_BOOTSTRAP_VERSION'].value | [0]" \
+              --output text)
+            if [ "$BOOTSTRAP_VERSION" = "1" ]; then
+              echo "Namespace-aware preview detected; resuming its bootstrap"
+              STAGE="$STAGE" bash scripts/run-bootstrap-task.sh
+              export MEM9_NAMESPACE_REQUIRED="1"
+            else
+              echo "Legacy preview detected; deploying namespace compatibility first"
+              export MEM9_NAMESPACE_REQUIRED="0"
+            fi
+          elif grep -q "ParameterNotFound" "$PARAMETER_ERROR"; then
+            export MEM9_NAMESPACE_REQUIRED="0"
+          else
+            echo "::error::Could not determine whether preview stage exists: $(head -c 400 "$PARAMETER_ERROR")"
+            exit "$PARAMETER_STATUS"
+          fi
+          echo "initial_namespace_required=$MEM9_NAMESPACE_REQUIRED" >> "$GITHUB_OUTPUT"
 
           # Clear any stale SST state lock left by a cancelled previous run.
           pnpm -C infra exec sst unlock --stage "$STAGE" 2>&1 || true
@@ -477,15 +515,29 @@ jobs:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: bash scripts/run-bootstrap-task.sh
 
-      - name: Run report-only consolidation task (preview)
-        # Runs the exact deployed image/task/network path, requires exit 0, and
-        # prints only the content-free REVIEW_LIST summary from its exact stream.
-        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+      - name: Deploy PR namespace enforcement
+        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '' && steps.deploy.outputs.initial_namespace_required == '0'
         shell: bash
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
-          CONSOLIDATION_TASK_WAIT_SECONDS: "1200"
-        run: bash scripts/run-consolidation-task.sh
+          MEM9_IMAGE_TAG: ${{ needs.build-and-push-image.outputs.image_tag || 'latest' }}
+          MEM9_BEDROCK_PROJECT: ${{ vars.MEM9_BEDROCK_PROJECT }}
+          MEM9_BEDROCK_PROJECT_OPENAI: ${{ vars.MEM9_BEDROCK_PROJECT_OPENAI }}
+          MEM9_LLM_MODEL: ${{ vars.MEM9_LLM_MODEL }}
+          MEM9_DURABLE_INGEST_ENABLED: "1"
+          # The preview bootstrap created two synthetic namespaces, reconciled
+          # their Cognito groups/M2M bindings, and completed the empty-database
+          # migration. The second deploy proves the real namespace-required
+          # server can start before any isolation E2E traffic is sent.
+          MEM9_NAMESPACE_REQUIRED: "1"
+        run: |
+          pnpm -C infra exec sst deploy --stage "$STAGE" --print-logs
+
+      - name: Reconcile namespace-enforced preview ECS deployment
+        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '' && steps.deploy.outputs.initial_namespace_required == '0'
+        env:
+          STAGE: ${{ steps.deploy.outputs.stage }}
+        run: node scripts/reconcile-ecs-deployment.mjs --stage "$STAGE"
 
       - name: MCP write-search E2E (preview, soft)
         # The first live write->search round-trip (section 6/6a): Cognito M2M JWT
@@ -503,49 +555,21 @@ jobs:
           E2E_SOFT: "1"
         run: bash scripts/run-mcp-e2e.sh
 
+      - name: Shared-database namespace isolation E2E (preview, hard)
+        # Two temporary M2M clients write into different namespaces in this
+        # stage's one Aurora database. Each must recall its own marker and must
+        # not observe the other marker. The script rejects non-pr-N stages.
+        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        shell: bash
+        env:
+          STAGE: ${{ steps.deploy.outputs.stage }}
+        run: bash scripts/run-memory-namespace-e2e.sh
+
       - name: OAuth façade smoke (preview)
         if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: bash scripts/run-oauth-facade-smoke.sh
-
-      - name: Slack approval E2E (preview)
-        # TC-SLACKAPP-090. A signed synthetic interaction through the deployed
-        # façade: the handler distinguishes Slack from anyone else ONLY by the
-        # signature, so this exercises the identical path a real click takes,
-        # plus everything the unit tests inject (API Gateway routing, the
-        # Lambda's own SSM/ECS grants, the task definition, the entrypoint).
-        # Self-skipping when the stage seeded no Slack secret, because approval
-        # is gated on MEM9_SLACK_APPROVAL_ENABLED at synth time — a hard failure
-        # there would block every PR on a feature the stage does not deploy.
-        #
-        # PREVIEW ONLY, and deliberately not mirrored into deploy-prod. The harness
-        # OVERWRITES `approvals/offered` to seed its synthetic id, so on prod it
-        # would destroy a pending human approval — the operator's next click would
-        # be answered against CI's record — and it approves a DELETION against the
-        # live database. The per-PR stage is disposable and holds only bootstrap
-        # data, which is what makes the same script safe there.
-        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
-        shell: bash
-        env:
-          STAGE: ${{ steps.deploy.outputs.stage }}
-        run: bash scripts/run-slack-approval-e2e.sh
-
-      - name: Auto-cleanup on deploy failure
-        # Best-effort — if the deploy half-applied resources, remove them so the
-        # next push doesn't accumulate orphan state.
-        if: failure() && steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
-        env:
-          STAGE: ${{ steps.deploy.outputs.stage }}
-        shell: bash
-        continue-on-error: true
-        run: |
-          if ! [[ "$STAGE" =~ ^pr- ]]; then
-            echo "::notice::Auto-cleanup only for pr-* stages; STAGE is protected"
-            exit 0
-          fi
-          echo "Deploy failed for $STAGE — attempting auto-cleanup"
-          pnpm -C infra exec sst remove --stage "$STAGE" 2>&1 || true
 
       - name: Comment deploy status
         if: always() && steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
@@ -601,6 +625,131 @@ jobs:
             }
 
   # ───────────────────────────────────────────────────────────────────────────
+  # cleanup-failed-preview — teardown runs independently after a preview deploy
+  # job fails or times out, so that job's timeout cannot kill sst remove.
+  # ───────────────────────────────────────────────────────────────────────────
+  cleanup-failed-preview:
+    name: Cleanup Failed PR Preview
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    needs: [application-region, deploy-preview]
+    if: >-
+      always() &&
+      github.event_name == 'pull_request' &&
+      github.event.action != 'closed' &&
+      github.event.pull_request.base.ref == 'main' &&
+      needs.deploy-preview.result != 'success' &&
+      needs.deploy-preview.outputs.stage != ''
+    # Inner worst case is 55m: two 15m removes and one 22m ENI wait, each with
+    # a 60s kill-after allowance. Keep 15m for checkout, install, OIDC, unlock,
+    # and process startup so the job timeout cannot pre-empt the final retry.
+    timeout-minutes: 70
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: ${{ needs.application-region.outputs.region }}
+      STAGE: ${{ needs.deploy-preview.outputs.stage }}
+    steps:
+      - name: Deployment maintenance gate
+        env:
+          PAUSED: ${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}
+        run: |
+          if [ "$PAUSED" = "true" ]; then
+            echo "::error::AWS deployments are paused for guarded IAM maintenance"
+            exit 1
+          fi
+
+      - name: Gate on AWS_ROLE_ARN
+        id: gate
+        env:
+          BOUNDARY_ENFORCED: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
+          HAS_AWS: ${{ secrets.AWS_ROLE_ARN }}
+        run: |
+          if [ "$BOUNDARY_ENFORCED" != "true" ]; then
+            echo "::notice::Guarded workload-boundary migration is incomplete — skipping failed preview cleanup"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "$HAS_AWS" ]; then
+            echo "::notice::AWS_ROLE_ARN not configured — skipping failed preview cleanup"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/checkout@v7
+        if: steps.gate.outputs.skip != 'true'
+
+      - uses: pnpm/action-setup@v6
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          package_json_file: infra/package.json
+
+      - uses: actions/setup-node@v7
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: infra/pnpm-lock.yaml
+
+      - name: Install infra dependencies
+        if: steps.gate.outputs.skip != 'true'
+        run: pnpm -C infra install --frozen-lockfile
+
+      - name: Remove conflicting Pulumi installation
+        if: steps.gate.outputs.skip != 'true'
+        run: |
+          sudo rm -f /usr/local/bin/pulumi* 2>/dev/null || true
+          rm -rf ~/.pulumi/plugins/ 2>/dev/null || true
+          rm -rf ~/.config/sst/bin/ ~/.config/sst/plugins/ 2>/dev/null || true
+
+      - name: Configure AWS credentials (OIDC)
+        if: steps.gate.outputs.skip != 'true'
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
+
+      - name: Remove failed PR stage
+        if: steps.gate.outputs.skip != 'true'
+        shell: bash
+        run: |
+          if ! [[ "$STAGE" =~ ^pr-[0-9]+$ ]]; then
+            echo "::error::Refusing to remove invalid or protected stage $STAGE"
+            exit 1
+          fi
+          # Clear the stale lock once. It must remain outside remove(): the
+          # timed-out Pulumi child may still own the lock until kill-after fires.
+          pnpm -C infra exec sst unlock --stage "$STAGE" 2>&1 || true
+
+          remove() {
+            timeout --kill-after=60s "$1" \
+              pnpm -C infra exec sst remove --stage "$STAGE" --print-logs
+          }
+          if remove 15m; then
+            echo "::notice::Removed failed stage ${STAGE} on the first attempt"
+            exit 0
+          fi
+          echo "::notice::First remove of ${STAGE} did not finish — waiting for Lambda ENIs to detach, then retrying"
+          timeout --kill-after=60s 22m node scripts/await-eni-detach.mts "$STAGE" || \
+            echo "::warning::ENI detach wait exceeded its outer bound — retrying the remove anyway"
+          if timeout --kill-after=30s 3m node scripts/await-sst-stage-removal.mts "$STAGE"; then
+            echo "::notice::Original remove completed while ${STAGE} dependencies settled"
+            exit 0
+          fi
+          if remove 15m; then
+            exit 0
+          fi
+          # An orphaned Pulumi child can finish immediately after a retry reports
+          # the still-held SST lock. Do not force-unlock a possibly live engine;
+          # accept the cleanup only when the stage state actually disappears.
+          if timeout --kill-after=30s 3m node scripts/await-sst-stage-removal.mts "$STAGE"; then
+            echo "::notice::Original remove completed after the retry returned"
+            exit 0
+          fi
+          echo "::error::Failed stage ${STAGE} still has SST state or stage-owned AWS resources after cleanup attempts"
+          exit 1
+
+  # ───────────────────────────────────────────────────────────────────────────
   # cleanup-preview — PR closed/merged → remove stage `pr-N`.
   # ───────────────────────────────────────────────────────────────────────────
   cleanup-preview:
@@ -612,7 +761,7 @@ jobs:
     # checkout/pnpm/install. The old 30m cut the FIRST remove off mid-flight (#146),
     # which is what leaked the security groups — the job timeout must stay strictly
     # above the sum of the inner bounds so the retry path can always complete.
-    timeout-minutes: 60
+    timeout-minutes: 70
     permissions:
       id-token: write
       contents: read
@@ -774,7 +923,21 @@ jobs:
           # expiry is a non-failure by design, so an outer bound is safe to ignore.
           timeout --kill-after=60s 22m node scripts/await-eni-detach.mts "$STAGE" || \
             echo "::warning::ENI detach wait exceeded its outer bound — retrying the remove anyway"
-          remove 15m
+          if timeout --kill-after=30s 3m node scripts/await-sst-stage-removal.mts "$STAGE"; then
+            echo "::notice::Original remove completed while ${STAGE} dependencies settled"
+            exit 0
+          fi
+          if remove 15m; then
+            exit 0
+          fi
+          # A retry can race the original Pulumi engine's final unlock. Confirm
+          # state removal instead of force-clearing a lock that may still be live.
+          if timeout --kill-after=30s 3m node scripts/await-sst-stage-removal.mts "$STAGE"; then
+            echo "::notice::Original remove completed after the retry returned"
+            exit 0
+          fi
+          echo "::error::Stage ${STAGE} still has SST state or stage-owned AWS resources after cleanup attempts"
+          exit 1
 
       - name: Comment cleanup status
         if: success() && steps.check-state.outputs.deployed == 'true'
@@ -986,13 +1149,13 @@ jobs:
     environment: prod
     # Full-stack prod: Aurora + the 3-container ECS task (qwen3 image pull + 180s
     # health startPeriod) + the bootstrap run-task. No RDS Proxy (dropped — see
-    # infra/db.ts). Fresh bring-up ~30-35m (measured); 50m gives headroom. Prod is
-    # singleton/non-cancelable, so a long timeout doesn't waste runners on dupes.
-    timeout-minutes: 50
+    # infra/db.ts). Fresh bring-up ~30-35m (measured); the custom reconciliation
+    # can wait just under 30m, and bootstrap/E2E follow it. The failure reporter
+    # is a separate always() job, so it still runs if this 75m budget is exhausted.
+    timeout-minutes: 75
     permissions:
       id-token: write
       contents: read
-      issues: write
     env:
       AWS_REGION: ${{ needs.application-region.outputs.region }}
       MEM9_LLM_RESPONSES_REGION: ${{ vars.MEM9_LLM_RESPONSES_REGION }}
@@ -1068,6 +1231,15 @@ jobs:
           sudo rm -f /usr/local/bin/pulumi* 2>/dev/null || true
           rm -rf ~/.pulumi/plugins/ 2>/dev/null || true
           rm -rf ~/.config/sst/bin/ ~/.config/sst/plugins/ 2>/dev/null || true
+
+      - name: Verify namespace cutover phase
+        if: vars.MEM9_NAMESPACE_REQUIRED == '1'
+        shell: bash
+        env:
+          STAGE: prod
+        run: >-
+          bash scripts/run-memory-namespace-task.sh assert-phase
+          --expected-phase constraints_complete
 
       - name: Recover stale SST prod lock
         # Recovers from "Concurrent update detected" left by a previous
@@ -1187,25 +1359,10 @@ jobs:
           # The image applies the repeatable atomic-ingest migration before the
           # server starts, so one enabled rollout is safe.
           MEM9_DURABLE_INGEST_ENABLED: "1"
-          # The approval/apply half is independently gated from the unattended
-          # scan. Pass the same four synth-time values as preview so production
-          # can deploy that inert half first; an unset approval flag still keeps
-          # the entire stack absent.
-          MEM9_SLACK_APPROVAL_ENABLED: ${{ vars.MEM9_SLACK_APPROVAL_ENABLED }}
-          MEM9_SLACK_APPROVAL_CHANNEL: ${{ vars.MEM9_SLACK_APPROVAL_CHANNEL }}
-          SST_SECRET_SlackBotToken: ${{ secrets.SLACK_BOT_TOKEN }}
-          SST_SECRET_SlackSigningSecret: ${{ secrets.SLACK_SIGNING_SECRET }}
-          # Explicit opt-in. Missing/empty keeps the schedule and Scheduler role
-          # absent; the task definition remains available for report-only runs.
-          MEM9_CONSOLIDATION_SCHEDULE_ENABLED: ${{ vars.MEM9_CONSOLIDATION_SCHEDULE_ENABLED }}
-          # The cleanup scan's own opt-in (#149). Missing/empty keeps the weekly
-          # scan schedule, its group, and its Scheduler role absent while leaving
-          # the apply half of the Slack loop intact — so an operator can post an
-          # approval list by hand, see it work, and turn the schedule on afterwards.
-          # Roll the deploy role's Scheduler iam:PassRole widening out FIRST
-          # (scripts/deploy-github-role.sh): without it this deploy AccessDenies on
-          # CreateSchedule's PassRole after creating the role and group.
-          MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED: ${{ vars.MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED }}
+          # This must remain unset/0 through the additive deployment and guarded
+          # migration. The namespace rollout runbook changes it only after the
+          # database reports constraints_complete.
+          MEM9_NAMESPACE_REQUIRED: ${{ vars.MEM9_NAMESPACE_REQUIRED }}
           # Optional production hostname. SST creates the regional ACM
           # certificate, API mapping, and DNS-only Cloudflare records.
           # Previews intentionally receive none of these three values.
@@ -1258,10 +1415,20 @@ jobs:
           STAGE: prod
         run: bash scripts/run-oauth-facade-smoke.sh
 
+  report-prod-failure:
+    name: Report prod deploy failure
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    needs: [deploy-prod]
+    if: >-
+      always() &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      needs.deploy-prod.result != 'success'
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
       - name: Create issue on prod deploy failure
-        # failure() fires for any failed step (gate, preflight, lock recovery,
-        # deploy, reconciliation) — every one is a prod deploy that didn't land.
-        if: failure()
         uses: actions/github-script@v9
         env:
           COMMIT_MSG: ${{ github.event.head_commit.message }}

@@ -7,21 +7,12 @@ import { resolve } from "node:path";
 const APP_CONTAINERS = ["mnemo-server", "qwen3-embed", "llm-proxy"];
 const SAFE_VALUE = /^[A-Za-z0-9._:-]+$/;
 const ACCOUNT_ID = /\d{12}/;
-// A FRESH preview stack is the slow case, and the floor is set by the task's own
-// health contract rather than by network luck: `qwen3-embed` declares a
-// startPeriod of 180s because its ONNX session-create reads ~2.4 GB
-// (infra/ecs.ts), then needs a 30s-interval health check to pass before the task
-// counts as healthy — so the EARLIEST a cold start can report COMPLETED is ~210s,
-// and 270-390s is the realistic band once ECS settles the deployment.
-//
-// This budget was 12 attempts (~110s), which only ever passed because the
-// DescribeServices round trips padded it: a measured SUCCESSFUL run (#121) took
-// 132s. Raising it to 30 (~290s) was still inside the band, so it stayed a coin
-// flip — pr-113 then failed at 389s with `primary_not_completed,task_not_running`
-// on a deploy that was itself healthy. 60 attempts (~590s) clears the band with
-// real margin while staying far under the job's 60-minute budget, and a genuinely
-// stuck rollout still fails, just later.
-export const ROLLOUT_POLL_ATTEMPTS = 60;
+// The AWS services-stable waiter is fixed at 40 checks with a 15s delay, about
+// 10 minutes. A fresh preview can exceed that while Aurora, the arm64 task, and
+// qwen3-embed's 180s health start period converge. Poll DescribeServices
+// directly for just under 30 minutes so the verifier keeps its read-only
+// contract while covering the measured 30-35 minute end-to-end bring-up.
+export const ROLLOUT_POLL_ATTEMPTS = 180;
 export const ROLLOUT_POLL_INTERVAL_MS = 10_000;
 // The qwen3-embed startPeriod (infra/ecs.ts) plus one health interval is the
 // EARLIEST a cold start can report COMPLETED. Exported so a test can assert the
@@ -138,9 +129,40 @@ function describeService(cluster, service, runAws) {
   ]);
 }
 
-function waitForPrimaryRollout({
+function isSettledService(response) {
+  if ((response?.failures ?? []).length > 0) return false;
+  const services = response?.services ?? [];
+  if (services.length !== 1) return false;
+
+  const service = services[0];
+  const deployments = service.deployments ?? [];
+  const primaries = deployments.filter((deployment) => deployment.status === "PRIMARY");
+  if (deployments.length !== 1 || primaries.length !== 1) return false;
+
+  const primary = primaries[0];
+  return (
+    primary.rolloutState === "COMPLETED" &&
+    service.pendingCount === 0 &&
+    service.runningCount === service.desiredCount
+  );
+}
+
+function hasFailedDesiredPrimary(response, desiredTaskDefinition) {
+  const services = response?.services ?? [];
+  return services.some((service) =>
+    (service.deployments ?? []).some(
+      (deployment) =>
+        deployment.status === "PRIMARY" &&
+        deployment.taskDefinition === desiredTaskDefinition &&
+        deployment.rolloutState === "FAILED",
+    ),
+  );
+}
+
+function waitForServiceStability({
   cluster,
   service,
+  desiredTaskDefinition,
   runAws,
   sleep,
   rolloutPollAttempts,
@@ -149,18 +171,15 @@ function waitForPrimaryRollout({
   let response;
   for (let attempt = 0; attempt < rolloutPollAttempts; attempt += 1) {
     response = describeService(cluster, service, runAws);
-    const services = response?.services ?? [];
-    const deployments = services[0]?.deployments ?? [];
-    const primaries = deployments.filter((deployment) => deployment.status === "PRIMARY");
-    const rolloutState =
-      services.length === 1 && deployments.length === 1 && primaries.length === 1
-        ? primaries[0].rolloutState
-        : undefined;
-
-    if (rolloutState !== "IN_PROGRESS") return response;
+    if (
+      isSettledService(response) ||
+      hasFailedDesiredPrimary(response, desiredTaskDefinition)
+    ) {
+      return { response, timedOut: false };
+    }
     if (attempt + 1 < rolloutPollAttempts) sleep(rolloutPollIntervalMs);
   }
-  return response;
+  return { response, timedOut: true };
 }
 
 export function reconcileDeployment({
@@ -185,32 +204,20 @@ export function reconcileDeployment({
 
   const result = emptyResult(stage, desired.taskDefinition, desired.imageTag);
 
-  try {
-    runAws([
-      "ecs",
-      "wait",
-      "services-stable",
-      "--cluster",
-      desired.cluster,
-      "--services",
-      desired.service,
-    ]);
-  } catch {
-    addReason(result, "stabilization_timeout");
-    return result;
-  }
-
   let serviceResponse;
   let taskArns;
   try {
-    serviceResponse = waitForPrimaryRollout({
+    const stability = waitForServiceStability({
       cluster: desired.cluster,
       service: desired.service,
+      desiredTaskDefinition: desired.taskDefinition,
       runAws,
       sleep,
       rolloutPollAttempts,
       rolloutPollIntervalMs,
     });
+    serviceResponse = stability.response;
+    if (stability.timedOut) addReason(result, "stabilization_timeout");
     taskArns =
       runAws([
         "ecs",
@@ -243,7 +250,12 @@ export function reconcileDeployment({
     if (primaries[0].taskDefinition !== desired.taskDefinition) {
       addReason(result, "primary_task_definition");
     }
-    if (primaries[0].rolloutState && primaries[0].rolloutState !== "COMPLETED") {
+    if (primaries[0].rolloutState === "FAILED") {
+      addReason(result, "primary_failed");
+    } else if (
+      primaries[0].rolloutState &&
+      primaries[0].rolloutState !== "COMPLETED"
+    ) {
       addReason(result, "primary_not_completed");
     }
   }

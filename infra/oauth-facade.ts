@@ -162,6 +162,10 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
       allowedOauthFlows: ["code"],
       allowedOauthScopes: [...MCP_BROWSER_SCOPES],
       allowedOauthFlowsUserPoolClient: true,
+      accessTokenValidity: 15,
+      tokenValidityUnits: {
+        accessToken: "minutes",
+      },
       preventUserExistenceErrors: "ENABLED",
       enableTokenRevocation: true,
     },

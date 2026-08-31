@@ -178,6 +178,7 @@ Resources:
             Resource:
               - !Sub arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/workload-permissions-boundary-${ProjectName}/*
               - !Sub arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/github-actions-${GitHubRepo}/*
+              - !Sub arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/memory-namespace-operator-${ProjectName}/*
           - Sid: DenyUnboundedProjectRoleCreation
             # Negated ARN conditions also match a missing request/resource key,
             # so CreateRole without a boundary and boundary replacement with any

@@ -47,25 +47,25 @@ rather than silently diverging.
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for rationale and official AWS
 citations.
 
-| Dimension          | Decision                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| IaC                | **SST v4**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| Region topology    | **Region-heterogeneous**: `sst.config.ts` selects the application plane and retained ECR repository region; account-global IAM ownership stacks are hosted in `us-west-2`; the optional Mantle Responses route uses its own configured region (default `us-west-2`) and regional Project.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| Container registry | Four retained ECR repositories plus guarded registry-level BASIC scan-on-push for `mem9-on-aws/*`, both managed out of band                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                            |
-| Compute            | **ECS Fargate**, **arm64**, single task (`desiredCount=1`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| Database           | **Aurora PostgreSQL Serverless v2** + `pgvector` (mem9 `postgres` backend). `mnemo-server` and bootstrap connect directly to the cluster writer endpoint with a Secrets Manager credential. **RDS Proxy is not deployed.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| VPC                | **Reuse the account default VPC** (private subnets with NAT egress)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
-| MCP surface        | **AgentCore Gateway** (MCP → mnemo-server REST API)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Dimension          | Decision                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| ------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| IaC                | **SST v4**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Region topology    | **Region-heterogeneous**: `sst.config.ts` selects the application plane and retained ECR repository region; account-global IAM ownership stacks are hosted in `us-west-2`; the optional Mantle Responses route uses its own configured region (default `us-west-2`) and regional Project.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Container registry | Four retained ECR repositories plus guarded registry-level BASIC scan-on-push for `mem9-on-aws/*`, both managed out of band                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Compute            | **ECS Fargate**, **arm64**, single task (`desiredCount=1`)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| Database           | **Aurora PostgreSQL Serverless v2** + `pgvector` (mem9 `postgres` backend). `mnemo-server` and bootstrap connect directly to the cluster writer endpoint with a Secrets Manager credential. **RDS Proxy is not deployed.**                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| VPC                | **Reuse the account default VPC** (private subnets with NAT egress)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
+| MCP surface        | **AgentCore Gateway** (MCP → mnemo-server REST API)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | Gateway → server   | **Private** (a [Lambda-proxy GatewayTarget](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-add-target-api-target-config.html)): AgentCore invokes a VPC-attached proxy Lambda with [`lambda:InvokeFunction`](https://docs.aws.amazon.com/bedrock-agentcore/latest/devguide/gateway-prerequisites-permissions.html). The Lambda uses [VPC connectivity](https://docs.aws.amazon.com/lambda/latest/dg/configuration-vpc.html) and [AWS Cloud Map private DNS](https://docs.aws.amazon.com/cloud-map/latest/api/API_CreatePrivateDnsNamespace.html) (`mnemo.mem9-<stage>.local:8080`) to reach mnemo-server with the `X-API-Key` (= tenant id). No ALB, VPC Lattice, or public server endpoint is deployed; the optional OAuth façade custom domain is a separate API Gateway concern. |
-| Auth (inbound)     | **Cognito M2M** (`client_credentials`) + an OAuth2 browser-login façade (`authorization_code` + PKCE) for interactive MCP clients                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| LLM (smart-ingest) | `mnemo-server` calls the **local `llm-proxy` sidecar** at `http://localhost:8082/v1`. The proxy refreshes a short-term Mantle bearer, injects `OpenAI-Project` when `MEM9_BEDROCK_PROJECT` is configured, and calls Bedrock Mantle. Each request has one 110-second deadline and at most two Mantle calls. The task role uses `bedrock-mantle:CreateInference` and `bedrock-mantle:CallWithBearerToken`; `mnemo-server` never calls Mantle directly.                                                                                                                                                                                                                                                                                                                   |
-| Embedding          | qwen3 OpenAI-compatible `/embeddings` as an **ECS sidecar** (localhost, always warm), **dims 1024**. Not Mantle, not a third-party API.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| ECS task           | **3 containers**: mnemo-server + qwen3-embed sidecar + llm-proxy sidecar                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                               |
-| Schema bootstrap   | **startup atomic-ingest migration** before `mnemo-server`, plus a **one-shot ECS task** on deploy (pgvector + tenant runtime schema incl. `idx_app`/FTS/`vector(1024)` + seed 1 tenant)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
-| Durable ingest     | Transcript `messages[]` requests enqueue durable Aurora jobs. Immutable, materialized plans apply raw sessions, tags, memory actions, and job success in one PostgreSQL transaction; authenticated REST and Gateway status lookups are tenant-scoped.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| Consolidation      | An opt-in Sunday 03:00 UTC Scheduler task clusters existing memories, uses GLM-5 to detect contradictions/fragments/staleness, auto-applies at most 20 safe mutations, and sends every deletion or ambiguous contradiction to private review. The schedule is absent unless `MEM9_CONSOLIDATION_SCHEDULE_ENABLED=1`; the task remains available for report-only runs. |
-| Tenancy            | **single tenant** (one `X-API-Key`); writes carry **`X-Mnemo-Agent-Id`** to reserve per-agent scoping                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
-| Replicas           | **Single** (`desiredCount=1`) — single-writer, sidesteps mem9's local-disk import dir                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Auth (inbound)     | **Cognito M2M** (`client_credentials`) + an OAuth2 browser-login façade (`authorization_code` + PKCE) for interactive MCP clients                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| LLM (smart-ingest) | `mnemo-server` calls the **local `llm-proxy` sidecar** at `http://localhost:8082/v1`. The proxy refreshes a short-term Mantle bearer, injects `OpenAI-Project` when `MEM9_BEDROCK_PROJECT` is configured, and calls Bedrock Mantle. Each request has one 110-second deadline and at most two Mantle calls. The task role uses `bedrock-mantle:CreateInference` and `bedrock-mantle:CallWithBearerToken`; `mnemo-server` never calls Mantle directly.                                                                                                                                                                                                                                                                                                                                                       |
+| Embedding          | qwen3 OpenAI-compatible `/embeddings` as an **ECS sidecar** (localhost, always warm), **dims 1024**. Not Mantle, not a third-party API.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| ECS task           | **3 containers**: mnemo-server + qwen3-embed sidecar + llm-proxy sidecar                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
+| Schema bootstrap   | **startup atomic-ingest migration** before `mnemo-server`, plus a **one-shot ECS task** on deploy (pgvector + tenant runtime schema incl. `idx_app`/FTS/`vector(1024)` + seed 1 tenant)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Durable ingest     | Transcript `messages[]` requests enqueue durable Aurora jobs. Immutable, materialized plans apply raw sessions, tags, memory actions, and job success in one PostgreSQL transaction; authenticated REST and Gateway status lookups are tenant-scoped.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| Consolidation      | **Disabled in namespace v1.** The prior task implementation remains in the repository for redesign, but SST and CI do not synthesize or launch cleanup, consolidation, cleanup-scan, or Slack-approval resources until every content-bearing contract is namespace-bound.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Tenancy            | **single tenant** (one `X-API-Key`); writes carry **`X-Mnemo-Agent-Id`** to reserve per-agent scoping                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| Replicas           | **Single** (`desiredCount=1`) — single-writer, sidesteps mem9's local-disk import dir                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
 ### Region topology
 
@@ -103,11 +103,11 @@ intentionally no one-command in-place production region switch.
 The billing model has three attribution scopes. Keep them separate rather than
 forcing every charge through one `Stage=prod` filter:
 
-| Scope | Cost Explorer attribution | Included resources |
-| ----- | ------------------------- | ------------------ |
-| Production | `Project=mem9-on-aws` **and** `Stage=prod` | SST-managed Aurora, ECS, Lambda, API Gateway, AgentCore Gateway, CloudWatch, Secrets Manager, and related resources |
-| Mantle inference | Service `Amazon Bedrock` **and** `Project=mem9-on-aws` | Chat Completions requests associated with the retained Bedrock Project |
-| Shared | `Project=mem9-on-aws`, excluding service `Amazon Bedrock`; group by `Stage` and retain only the no-`Stage` bucket | Retained ECR repositories, the Bedrock Project resource, and other intentionally stage-neutral resources |
+| Scope            | Cost Explorer attribution                                                                                         | Included resources                                                                                                  |
+| ---------------- | ----------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Production       | `Project=mem9-on-aws` **and** `Stage=prod`                                                                        | SST-managed Aurora, ECS, Lambda, API Gateway, AgentCore Gateway, CloudWatch, Secrets Manager, and related resources |
+| Mantle inference | Service `Amazon Bedrock` **and** `Project=mem9-on-aws`                                                            | Chat Completions requests associated with the retained Bedrock Project                                              |
+| Shared           | `Project=mem9-on-aws`, excluding service `Amazon Bedrock`; group by `Stage` and retain only the no-`Stage` bucket | Retained ECR repositories, the Bedrock Project resource, and other intentionally stage-neutral resources            |
 
 SST applies `Project`, `Stage`, and `ManagedBy` as default tags. The retained
 Bedrock Project is different: it intentionally has no `Stage`, and `llm-proxy`
@@ -163,7 +163,7 @@ backfill](https://docs.aws.amazon.com/cli/latest/reference/ce/start-cost-allocat
    record types. Use amortized cost instead if commitments must be allocated.
 2. Produce the production, Mantle, and shared scopes above as separate reports,
    then sum them. Keep the scopes mutually exclusive by excluding `Amazon
-   Bedrock` and retaining only the no-`Stage` bucket in the shared scope. Group
+Bedrock` and retaining only the no-`Stage` bucket in the shared scope. Group
    each scope by AWS service and usage type.
 3. Reconcile every service total against its tagged total. Investigate the
    no-tag bucket, especially for Fargate tasks, model calls without a Project,
@@ -192,13 +192,13 @@ account. They assume one continuously running production task, near-idle
 database capacity, low API traffic, and 730.5 hours per average month. Prices
 vary by Region and can change.
 
-| Cost driver | Assumption | Approximate monthly cost |
-| ----------- | ---------- | ------------------------ |
-| ECS Fargate | One arm64 task, 2 vCPU and 6 GB, running continuously | **$78** |
-| Aurora PostgreSQL Serverless v2 | 0.5 ACU floor with light storage, I/O, and backup usage | **$50-60** |
-| Supporting services | CloudWatch dashboard/alarms/logs, Secrets Manager, ECR storage, Lambda, API Gateway, Cognito, and low-volume AgentCore Gateway | **$5-20** |
-| Core total before model usage and shared networking | Production baseline | **$135-160** |
-| Bedrock Mantle | Input and output tokens for the selected model | **Variable** |
+| Cost driver                                         | Assumption                                                                                                                     | Approximate monthly cost |
+| --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------ |
+| ECS Fargate                                         | One arm64 task, 2 vCPU and 6 GB, running continuously                                                                          | **$78**                  |
+| Aurora PostgreSQL Serverless v2                     | 0.5 ACU floor with light storage, I/O, and backup usage                                                                        | **$50-60**               |
+| Supporting services                                 | CloudWatch dashboard/alarms/logs, Secrets Manager, ECR storage, Lambda, API Gateway, Cognito, and low-volume AgentCore Gateway | **$5-20**                |
+| Core total before model usage and shared networking | Production baseline                                                                                                            | **$135-160**             |
+| Bedrock Mantle                                      | Input and output tokens for the selected model                                                                                 | **Variable**             |
 
 The Fargate estimate uses representative regional arm64 rates:
 `2 x 730.5 x $0.04045` for vCPU plus
@@ -241,7 +241,7 @@ The AgentCore Gateway exposes four tools over MCP (Cognito-authenticated):
 - `ingest_messages` — smart-ingest a conversation window (`messages[]`, optional
   `session_id`/`agent_id`/`mode`) for LLM extraction into memories.
 - `get_ingest_job_status` — read the tenant-scoped state and approved outcome
-  metadata for a durable ingest job.
+  metadata for a durable ingest job inside the caller's team namespace.
 
 ## Layout
 
@@ -282,12 +282,175 @@ The AgentCore Gateway exposes four tools over MCP (Cognito-authenticated):
   previews use their derived stage-specific defaults. A new repository may
   leave it unset. Treat either choice as permanent for the stage because the
   prefix is the OAuth token/authorize hostname.
+
 - `scripts/deploy-github-role.sh` always owns its account-global IAM stack in
   `us-west-2` and ignores ambient `AWS_REGION`. Application VPC discovery and
   regional bootstrap resources resolve `providers.aws.region` from
   `sst.config.ts`. `PROJECT_REGION` is only an explicit selector when creating a
   separate regional Mantle Project, such as the OpenAI Responses fallback.
 - Agent contributors: see [`AGENTS.md`](AGENTS.md) for repo conventions and hard rules.
+
+### Team memory namespaces and production cutover
+
+One Aurora database is shared by all teams. A managed Cognito group routes a
+human to one internal namespace, while Aurora memberships remain the
+authorization, role, revocation, and audit source of truth. Users in the same
+managed group share memory; users in different managed groups cannot read or
+mutate each other's memories, sessions, jobs, or plans. Clients never submit a
+namespace ID. M2M clients use explicit database bindings instead of Cognito
+groups.
+
+The implementation is additive and defaults to compatibility mode:
+
+```text
+MEM9_NAMESPACE_REQUIRED=0  server starts only while database is additive_ready
+MEM9_NAMESPACE_REQUIRED=1  server requires constraints_complete
+```
+
+Production consumes the repository variable. A fresh `pr-N` preview uses an
+automated synthetic cutover instead: its first deployment forces `0`, bootstrap creates
+`preview-alpha` and `preview-beta` in that preview's one Aurora database,
+reconciles two managed Cognito groups plus temporary M2M bindings, completes the
+empty-database migration, and a second deployment forces `1`. CI then performs
+a live-Gateway test in which each temporary client recalls its own marker, the
+stage's default M2M client recalls the alpha marker through the same shared
+namespace, and neither fixture returns the other namespace's marker. No
+production namespace, user, or memory value is needed for this preview gate,
+and all fixture resources are removed with the PR stage. On a later run for the
+same PR, CI first reruns the existing idempotent bootstrap task, then deploys
+directly with `1`; this recovers a run cancelled during cutover and never
+restarts a completed database in compatibility mode.
+
+Transport signing uses stable A/B key slots. GitHub repository variables
+`MEM9_TRANSPORT_SIGNING_ACTIVE_SLOT`,
+`MEM9_TRANSPORT_SIGNING_SLOT_A_REVISION`, and
+`MEM9_TRANSPORT_SIGNING_SLOT_B_REVISION` default to `a`, `v1`, and `v1` when
+unset. To rotate, increment only the inactive slot revision and deploy; after
+the rollout is healthy, switch the active slot and deploy again. Never rotate
+both slots or switch active slots in the same deployment that changes a
+revision. The keyring digest changes the ECS task definition, so the rolling
+tasks consume the new SSM SecureString instead of retaining the value injected
+at their previous start.
+
+Do not set the repository variable to `1` on an existing stage until the
+following guarded cutover is complete. The migration commands operate inside a
+private bootstrap Fargate task; they do not stop ECS, disable traffic, create a
+snapshot, or prevent Cognito administration on their own.
+
+1. Deploy the reviewed release with `MEM9_NAMESPACE_REQUIRED` unset or `0`, then
+   run the normal bootstrap. This installs the additive schema while the current
+   corpus remains available.
+2. Deploy the retained operator task role after the compatible release exports
+   the stage's user-pool ID:
+
+   ```bash
+   MEM9_NAMESPACE_OPERATOR_STAGE=prod \
+     scripts/deploy-memory-namespace-operator-role.sh
+   ```
+
+   The account has one fixed `memory-namespace-operator-mem9-on-aws` ownership
+   stack in `us-west-2`. Its first deployment binds it to the selected stage
+   and application region. Later runs may refresh that stage's user-pool ID,
+   but cannot retarget the retained role to another stage or application
+   region. The script verifies the final CloudFormation parameters even when
+   the update is a no-op.
+
+3. Create a manual Aurora snapshot and record the latest restorable time in a
+   private operator record. Pause user/group onboarding, disable write-capable
+   event sources, drain durable jobs, scale the mnemo-server ECS service to zero,
+   and wait for no running or pending application task.
+4. Run `preflight`; it must report zero non-terminal jobs and active uploads.
+   Then freeze database writers. Do not run `freeze` while the application
+   service is still running. `freeze` waits for existing DML transactions under
+   bounded table locks, rechecks durable jobs and uploads in the same
+   transaction, and changes the phase only when both remain drained.
+
+   ```bash
+   STAGE=prod scripts/run-memory-namespace-task.sh preflight
+   STAGE=prod scripts/run-memory-namespace-task.sh freeze
+   ```
+
+5. Backfill all historical data into one explicitly approved legacy team
+   namespace. Use new random UUIDs for the namespace and unattributed service
+   principal; never reuse IDs from another stage. The first backfill invocation
+   permanently binds the migration state to those IDs and the supplied
+   namespace metadata. A retry must use the exact same values.
+
+   ```bash
+   STAGE=prod scripts/run-memory-namespace-task.sh backfill \
+     --legacy-namespace-id <legacy-namespace-uuid> \
+     --legacy-service-principal-id <legacy-service-principal-uuid> \
+     --namespace <legacy-team-slug> \
+     --display-name "<legacy-team-display-name>" \
+     --acknowledge-shared-history \
+       I_ACKNOWLEDGE_EXISTING_MEMORY_IS_SHARED_TEAM_HISTORY
+
+   STAGE=prod scripts/run-memory-namespace-task.sh enforce
+   ```
+
+6. Prepare a gitignored desired-state JSON file from
+   `scripts/memory-namespaces.example.json`, set its mode to `600`, reconcile
+   the Cognito groups and Aurora bindings, then assign each enabled user to
+   exactly one namespace. Supply usernames through an owner-only file or stdin;
+   do not put them in tracked files or command arguments.
+
+   ```bash
+   cp scripts/memory-namespaces.example.json namespace-config.local.json
+   chmod 600 namespace-config.local.json
+
+   STAGE=prod scripts/run-memory-namespace-task.sh reconcile \
+     --config namespace-config.local.json
+
+   STAGE=prod scripts/run-memory-namespace-task.sh assign-user \
+     --config namespace-config.local.json \
+     --username-file <username.local.txt> \
+     --namespace <team-slug>
+   ```
+
+7. Verify the database phase is `constraints_complete`, every human has exactly
+   one managed group and active membership, and every enabled M2M client has one
+   binding. Set the repository variable and deploy. When the variable is `1`,
+   CI first launches the existing private operator task with
+   `assert-phase constraints_complete`; a mismatch fails before SST deployment
+   and reports only the observed and required phase:
+
+   ```bash
+   gh variable set MEM9_NAMESPACE_REQUIRED --body "1"
+   gh workflow run "Infra CI" --ref main
+   ```
+
+8. Restore the service's desired count, reopen traffic, require fresh user
+   tokens, and run same-group sharing plus cross-group denial smoke tests.
+   Cleanup approval, consolidation, upload processing, webhooks, and Space
+   Chains stay disabled until they receive a separately reviewed namespace
+   contract.
+
+The caller of `scripts/run-memory-namespace-task.sh` needs constrained
+`ecs:RunTask`, `ecs:ListTasks`, `ecs:DescribeTasks`, and `ecs:StopTask`
+permissions for the stage bootstrap task plus `iam:PassRole` only for
+`mem9-on-aws-namespace-operator`. The runner identifies active work with a
+content-free operation fingerprint. It reattaches only to the same invocation,
+refuses a different concurrent invocation, and on timeout, interruption, or
+local failure stops the task before deleting short-lived SecureString inputs.
+If ECS does not confirm `STOPPED`, the command fails and retains those inputs
+for recovery instead of deleting data that a task may still need. The container
+forwards termination to its child and uses a bounded kill watchdog. The task
+uses the existing private database network path.
+
+The authoritative design and acceptance criteria are
+[`docs/designs/cognito-group-memory-namespaces.md`](docs/designs/cognito-group-memory-namespaces.md)
+and
+[`docs/test-cases/cognito-group-memory-namespaces.md`](docs/test-cases/cognito-group-memory-namespaces.md).
+
+CI also verifies the version-controlled scoped-SQL manifest at
+`scripts/memory-namespace-query-inventory.json` against the complete patched
+upstream source and its exact trusted-exception policy. It also checks
+`scripts/memory-namespace-release-gates.json` as a coverage ownership map so
+every `TC-GROUPNS-001..137` criterion has exactly one owning capability and a
+named verification surface. The map is not an AC execution result. The deployed
+PR namespace check is implemented by
+`scripts/run-memory-namespace-e2e.sh`; human Cognito-group token cases remain
+separate Gateway-smoke gates.
 
 ### Decision-artifact bucket bootstrap
 
@@ -351,6 +514,11 @@ owner stack. If a full update rolls back, rerun after fixing the cause;
 `UPDATE_ROLLBACK_COMPLETE` is recoverable after the script re-verifies the
 physical bucket, while `UPDATE_ROLLBACK_FAILED` first requires
 `continue-update-rollback`.
+
+The remaining decision-artifact and consolidation instructions describe the
+pre-namespace implementation and are not an enablement path for namespace v1.
+Do not set the old cleanup/consolidation variables until a separately reviewed
+namespace-aware design reintroduces those resources.
 
 Existing buckets from before consolidation digests still have the old
 bucket-wide three-day lifecycle. Before setting
@@ -1007,15 +1175,19 @@ After deploying a revision that introduces this workflow, re-run
 read-only `tag:GetResources`, `iam:ListRoles`, and scoped `iam:ListRoleTags`
 grants used for inventory discovery.
 
-## Memory cleanup (operator runbook)
+## Memory cleanup (legacy redesign context)
 
 `scripts/memory-cleanup.mjs` retroactively audits the memory store against the
 same D1–D4 durability rules smart-ingest enforces (issue #102; design:
 `docs/designs/memory-cleanup.md`). The mem9 REST API is VPC-internal and the
 CI runner pool lives outside that VPC, so there is no CI E2E for this tool —
 behavior is pinned by the unit suite (`scripts/memory-cleanup.test.mjs`), and
-live verification is the operator dry-run below, executed from a VPC-internal
-host. Production execution is a deliberate manual flow:
+the implementation remains for a future namespace-aware redesign.
+
+> Namespace v1 status: disabled. Every non-help CLI invocation exits before
+> creating SQL, REST, model, S3, SSM, or Slack production adapters. The commands
+> below document the pre-namespace behavior and are not an enablement or
+> operator path.
 
 1. **Dry-run** (read-only; classifies every active memory):
 
@@ -1066,7 +1238,7 @@ host. Production execution is a deliberate manual flow:
    classification failed for every batch.
 
    **Read the `UNCLASSIFIED=` count in the summary before trusting a run.**
-   Exit 5 fires only when *every* batch fails, so a partial classifier outage
+   Exit 5 fires only when _every_ batch fails, so a partial classifier outage
    exits 0; the summary reports how many memories went unaudited and what share
    of batches failed. "We never looked at these 740 memories" is not the same
    result as "these 740 are fine" — re-run before treating the audit as
@@ -1112,14 +1284,14 @@ node scripts/memory-cleanup.mjs --stage prod --restore --ids recover.local.txt \
 
 `deleted` and `archived` are **not** interchangeable. `deleted` came from a #102
 cleanup judgment. `archived` came from #103 contradiction resolution and carries
-`superseded_by`: restoring it returns the *loser* of a contradiction while the
+`superseded_by`: restoring it returns the _loser_ of a contradiction while the
 winner is still active, so search can then return two directly contradictory
 memories — the defect #103 exists to remove. Restoring an `archived` row
 therefore requires `--force`, and both the refusal and the forced restore name
 the winning id. `superseded_by` is preserved either way, keeping the audit link
 and #103's handle on the pair.
 
-`--since` filters `updated_at`, the only timestamp that *moves on deletion* —
+`--since` filters `updated_at`, the only timestamp that _moves on deletion_ —
 there is no `memories.deleted_at`, and `created_at` records insertion. For a
 soft-deleted row `updated_at` equals the deletion time only if nothing has
 touched the row since. Restore itself moves `updated_at` to
@@ -1153,7 +1325,7 @@ ignored. An operator who believes a flag narrowed the run would otherwise act on
 that belief — and `--list-inactive --apply` would make a read-only listing take
 the shared advisory mutex and contend with the weekly consolidation.
 
-## Weekly memory consolidation
+## Weekly memory consolidation (legacy redesign context)
 
 `infra/consolidation.ts` defines an arm64 Fargate task that compares existing
 active memories with each other. The task always defaults to report-only.
@@ -1169,6 +1341,10 @@ leaves the exact report-only ECS task running:
 ```bash
 STAGE=prod bash scripts/run-consolidation-task.sh
 ```
+
+> Namespace v1 status: disabled. SST and CI do not create or launch this task,
+> and direct `memory-consolidation.mjs` execution exits before creating
+> production adapters.
 
 Individual `CONSOLIDATION_REVIEW` records contain memory ids, snippets, and
 rationale. Review them only in the private task log group. Do not paste them
@@ -1229,8 +1405,13 @@ snapshot.
 
 ## Slack approval for cleanup deletions
 
-The step above — read the review list, copy ids into a local file, run
-`--apply --ids` — is the manual path, and it stays supported. Slack approval
+> Namespace v1 status: disabled. SST and CI intentionally ignore the prior
+> cleanup/consolidation/Slack enablement variables, synthesize no related task,
+> schedule, or approval resources, and run no related E2E step. The contract
+> below is retained as redesign context only.
+
+The step above describes the pre-namespace manual path and is disabled in
+namespace v1. Slack approval
 (issue #123; test cases: `docs/test-cases/slack-approval-loop.md`) replaces the
 copying with a click: the review run posts the list to a private channel with
 Approve/Reject buttons, and Approve starts the same `--apply --ids` task.
@@ -1353,7 +1534,7 @@ offer exits **1** and keeps its decision file, which is what a manual
 
 `scripts/run-slack-approval-e2e.sh` verifies a deployed stage by POSTing a
 correctly signed synthetic interaction (the handler distinguishes Slack from
-anyone else *only* by the signature) and then reading the approval record back by
+anyone else _only_ by the signature) and then reading the approval record back by
 name. It refuses to run anywhere but a `pr-N` stage: it overwrites
 `approvals/offered`, which on a shared stage would destroy a pending human
 approval, and the id it approves is a deletion. CI runs it on preview only.

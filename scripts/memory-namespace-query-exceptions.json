@@ -1,0 +1,280 @@
+{
+  "version": 1,
+  "exceptions": [
+    {
+      "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
+      "statement_sha256": "48ed27824e4973e8b0b825e1c9390c3dddb7f43649374fb570aec73c3507da79",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "OldestQueuedAge is a tenant-wide queue health metric and returns no memory content.",
+      "rationale": "The queue coordinator intentionally observes every namespace in the single self-hosted tenant; claimed jobs carry namespace_id and all planning and apply mutations revalidate that scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/ingest_job_integration_test.go",
+        "upstream/server/internal/repository/postgres/ingest_plan_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
+      "statement_sha256": "a943eb67b946ec694d9e2b3d9ad40684bf1eae5b9498b098b487a822f512870a",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Terminal runtime finalization claims one tenant-owned job and returns its namespace.",
+      "rationale": "The queue coordinator intentionally observes every namespace in the single self-hosted tenant; claimed jobs carry namespace_id and all planning and apply mutations revalidate that scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/ingest_job_integration_test.go",
+        "upstream/server/internal/repository/postgres/ingest_plan_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
+      "statement_sha256": "78bd23af3653d9da2a218b1da149978d4e2b490ea741c53c54436907bdb25ee4",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Fair-claim scope discovery returns namespace_id as part of every candidate.",
+      "rationale": "The queue coordinator intentionally observes every namespace in the single self-hosted tenant; claimed jobs carry namespace_id and all planning and apply mutations revalidate that scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/ingest_job_integration_test.go",
+        "upstream/server/internal/repository/postgres/ingest_plan_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
+      "statement_sha256": "550b6920777d660b533b6b369cf20b888e80719aaff583f1a1632d381856a5b4",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "The tenant-wide claim cursor selects only queue ordering keys.",
+      "rationale": "The queue coordinator intentionally observes every namespace in the single self-hosted tenant; claimed jobs carry namespace_id and all planning and apply mutations revalidate that scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/ingest_job_integration_test.go",
+        "upstream/server/internal/repository/postgres/ingest_plan_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/memory.go",
+      "statement_sha256": "2d8b14a2049960e906054e8a3089d6d173d99b7a5df409e1f9a7ef84ce4204fe",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Legacy INSERT literal used only when MemoryRepo has no namespace scope.",
+      "rationale": "The literal is an additive compatibility branch or a query fragment whose namespace predicate is appended when MemoryRepo carries a namespace; namespace-required startup and integration tests reject an empty scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/namespace_integration_test.go",
+        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/memory.go",
+      "statement_sha256": "e9e9503d1faea6b564619e917496ff6f28f4fea7b3d20925ecb410a393b7d515",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Legacy GetByID branch used only when MemoryRepo has no namespace scope.",
+      "rationale": "The literal is an additive compatibility branch or a query fragment whose namespace predicate is appended when MemoryRepo carries a namespace; namespace-required startup and integration tests reject an empty scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/namespace_integration_test.go",
+        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/memory.go",
+      "statement_sha256": "548afb7f5b231ff2bfc676d825f663d40343ce90ebb1d6d948a42bc9fab5734f",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "UpdateOptimistic appends id, namespace_id, state, and version predicates before execution.",
+      "rationale": "The literal is an additive compatibility branch or a query fragment whose namespace predicate is appended when MemoryRepo carries a namespace; namespace-required startup and integration tests reject an empty scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/namespace_integration_test.go",
+        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/memory.go",
+      "statement_sha256": "669a51c12b154e4ef9d886e993edb62926ae68e26a8b2ad3e79a10680ae37dfb",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "SoftDelete lock query appends namespace_id before FOR UPDATE.",
+      "rationale": "The literal is an additive compatibility branch or a query fragment whose namespace predicate is appended when MemoryRepo carries a namespace; namespace-required startup and integration tests reject an empty scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/namespace_integration_test.go",
+        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/memory.go",
+      "statement_sha256": "7f187c5ebf3b2487e02c02e08410fc60f9c1b20c157b04aa01ce72983f9a0a0a",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "SoftDelete update appends a namespace-qualified WHERE clause before execution.",
+      "rationale": "The literal is an additive compatibility branch or a query fragment whose namespace predicate is appended when MemoryRepo carries a namespace; namespace-required startup and integration tests reject an empty scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/namespace_integration_test.go",
+        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/memory.go",
+      "statement_sha256": "6ba7f5cb050ba379522a9e30255d5aa446609ec7714f6e91127a4d458edb9cf1",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "BulkSoftDelete appends namespace_id after the generated id placeholders.",
+      "rationale": "The literal is an additive compatibility branch or a query fragment whose namespace predicate is appended when MemoryRepo carries a namespace; namespace-required startup and integration tests reject an empty scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/namespace_integration_test.go",
+        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/memory.go",
+      "statement_sha256": "0357be0ab8e7132e4c75752164620fc8203de8137eaa1ae39dbe56ebf235d6f6",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Legacy ArchiveMemory branch used only when MemoryRepo has no namespace scope.",
+      "rationale": "The literal is an additive compatibility branch or a query fragment whose namespace predicate is appended when MemoryRepo carries a namespace; namespace-required startup and integration tests reject an empty scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/namespace_integration_test.go",
+        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/memory.go",
+      "statement_sha256": "547631f07f504d4fffdefee4209cd0614b423b12ec1ac1dc32ffbae533903256",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "ArchiveAndCreate appends a namespace-qualified WHERE clause before execution.",
+      "rationale": "The literal is an additive compatibility branch or a query fragment whose namespace predicate is appended when MemoryRepo carries a namespace; namespace-required startup and integration tests reject an empty scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/namespace_integration_test.go",
+        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/memory.go",
+      "statement_sha256": "115765db9141f98577497adeb11ef7d08130ebcabbdae09fb0a3e261af3493ae",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Legacy state update branch used only when MemoryRepo has no namespace scope.",
+      "rationale": "The literal is an additive compatibility branch or a query fragment whose namespace predicate is appended when MemoryRepo carries a namespace; namespace-required startup and integration tests reject an empty scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/namespace_integration_test.go",
+        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/memory.go",
+      "statement_sha256": "8e964d1ba6335b18a20311c1f71da1b24495d3a82466611b10503d48313f11e5",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "List count uses buildWhere, which includes namespace_id for a scoped MemoryRepo.",
+      "rationale": "The literal is an additive compatibility branch or a query fragment whose namespace predicate is appended when MemoryRepo carries a namespace; namespace-required startup and integration tests reject an empty scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/namespace_integration_test.go",
+        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/memory.go",
+      "statement_sha256": "4e15abd6a44dbca652d048b18e82793241520f5985c61024ec5d4ce24610ab49",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "List data query uses buildWhere, which includes namespace_id for a scoped MemoryRepo.",
+      "rationale": "The literal is an additive compatibility branch or a query fragment whose namespace predicate is appended when MemoryRepo carries a namespace; namespace-required startup and integration tests reject an empty scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/namespace_integration_test.go",
+        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/memory.go",
+      "statement_sha256": "29a19effa18f77e2e59a9ca54d99a50fa31084e13e2bc31d0d7a3a64cd4984c2",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Count appends namespace_id before execution.",
+      "rationale": "The literal is an additive compatibility branch or a query fragment whose namespace predicate is appended when MemoryRepo carries a namespace; namespace-required startup and integration tests reject an empty scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/namespace_integration_test.go",
+        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/memory.go",
+      "statement_sha256": "c45ceba44200ce85dfb65c2ffa11376e8d5a5da89a0dcd7ad18004dc7712d6f7",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "ListBootstrap appends namespace_id before ordering and execution.",
+      "rationale": "The literal is an additive compatibility branch or a query fragment whose namespace predicate is appended when MemoryRepo carries a namespace; namespace-required startup and integration tests reject an empty scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/namespace_integration_test.go",
+        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/memory.go",
+      "statement_sha256": "6d09f4882f15965794fa4ebd990cae6fe939fd3ad750a0d7dc6a38758cfc872b",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Legacy approximate vector search runs only when MemoryRepo has no namespace scope.",
+      "rationale": "The literal is an additive compatibility branch or a query fragment whose namespace predicate is appended when MemoryRepo carries a namespace; namespace-required startup and integration tests reject an empty scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/namespace_integration_test.go",
+        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/memory.go",
+      "statement_sha256": "4a3cbdd1a3171a22fc2fc44b374e28f87a095bb7d18d793ab89554a28df36269",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Exact vector search receives namespace_id in BuildFilterConds before materializing the CTE.",
+      "rationale": "The literal is an additive compatibility branch or a query fragment whose namespace predicate is appended when MemoryRepo carries a namespace; namespace-required startup and integration tests reject an empty scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/namespace_integration_test.go",
+        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/memory.go",
+      "statement_sha256": "9e9667fbb9579df0506520933d231d72f15286bcc2d89dbf12be8955e9f53843",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "KeywordSearch receives namespace_id in BuildFilterConds.",
+      "rationale": "The literal is an additive compatibility branch or a query fragment whose namespace predicate is appended when MemoryRepo carries a namespace; namespace-required startup and integration tests reject an empty scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/namespace_integration_test.go",
+        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/memory.go",
+      "statement_sha256": "33f8ce969553bd56fd7623d3b34318fc5b93fef47f07207e3e72bd1695f022bb",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "FTSSearch receives namespace_id in BuildFilterConds.",
+      "rationale": "The literal is an additive compatibility branch or a query fragment whose namespace predicate is appended when MemoryRepo carries a namespace; namespace-required startup and integration tests reject an empty scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/namespace_integration_test.go",
+        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/memory.go",
+      "statement_sha256": "a10dc8094155f066fc18f452f8cd1155e1fd826040de91aee06d5d942dc164d3",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "CountStats appends namespace_id before execution.",
+      "rationale": "The literal is an additive compatibility branch or a query fragment whose namespace predicate is appended when MemoryRepo carries a namespace; namespace-required startup and integration tests reject an empty scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/namespace_integration_test.go",
+        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/session_delete.go",
+      "statement_sha256": "bb935e33b83c857d47f6998017155483d323ce8bb97dc0b250b764e1951d0af8",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Session SoftDelete lock appends namespace_id before FOR UPDATE.",
+      "rationale": "The query fragment appends namespace_id whenever SessionDeleteRepo carries a scope; namespace-required startup and integration tests reject an empty scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/namespace_integration_test.go",
+        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/session_delete.go",
+      "statement_sha256": "f0d19c1b1f9da403f78c4c71fc845b18dd216a14799182c964604daa5dcf8342",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Session SoftDelete update appends a namespace-qualified WHERE clause before execution.",
+      "rationale": "The query fragment appends namespace_id whenever SessionDeleteRepo carries a scope; namespace-required startup and integration tests reject an empty scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/namespace_integration_test.go",
+        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
+      ]
+    },
+    {
+      "owner": "upstream/server/internal/repository/postgres/session_delete.go",
+      "statement_sha256": "91767cf2f8c47bbd56e555b89fd85692c208f83c746ebeba3bb6474ea6182ca7",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Session BulkSoftDelete appends namespace_id after generated id placeholders.",
+      "rationale": "The query fragment appends namespace_id whenever SessionDeleteRepo carries a scope; namespace-required startup and integration tests reject an empty scope.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/namespace_integration_test.go",
+        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
+      ]
+    }
+  ]
+}

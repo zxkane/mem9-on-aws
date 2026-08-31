@@ -5,9 +5,7 @@ import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { WORKLOAD_BOUNDARY_POLICY_NAME } from "./workload-permissions-boundary";
 import {
-  CONSOLIDATION_SCHEDULER_ROLE_NAME,
   EXPECTED_WORKLOAD_ROLE_NAMES,
-  SLACK_APPROVAL_ROLE_NAMES,
 } from "./workload-permissions-boundary.test-fixtures";
 
 interface MockCallArgs {
@@ -366,13 +364,8 @@ describe("workload role coverage from the real SST graph", () => {
           ...EXPECTED_WORKLOAD_ROLE_NAMES,
           authorizerRoleLogicalName,
         ].sort();
-        if (scheduleEnabled) {
-          expectedRoleNames.push(CONSOLIDATION_SCHEDULER_ROLE_NAME);
-        }
-        if (slackApprovalEnabled) {
-          // One `sst.aws.Task` creates BOTH a task role and an execution role.
-          expectedRoleNames.push(...SLACK_APPROVAL_ROLE_NAMES);
-        }
+        // Namespace v1 keeps consolidation and Slack cleanup absent regardless
+        // of their legacy flags until their content-bearing state is scoped.
         expectedRoleNames.sort();
         await pulumi.runtime.runInPulumiStack(async () => {
           const configModule = await import(

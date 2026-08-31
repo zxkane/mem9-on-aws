@@ -125,6 +125,7 @@ describe("public artifact scanner", () => {
       scanPublicArtifactText(
         [
           "account=123456789012",
+          "namespace_id=60000000-0000-4000-8000-000000000001",
           "arn:aws:iam::<aws-account-id>:role/example-role",
           "https://{api-id}.execute-api.{region}.amazonaws.com",
           "https://{domain-prefix}.auth.{region}.amazoncognito.com",

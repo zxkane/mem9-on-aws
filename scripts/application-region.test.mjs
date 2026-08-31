@@ -252,15 +252,23 @@ describe("application region consumers", () => {
   });
 
   it("TC-APPREGION-015: uses the commercial-region RDS CA bundle", () => {
-    const dockerfile = readFileSync(
+    for (const [relativePath, certificatePath] of [
+      ["docker/llm-proxy/Dockerfile", "/app/global-bundle.pem"],
+      ["docker/bootstrap/Dockerfile", "/bootstrap/global-bundle.pem"],
+    ]) {
+      const dockerfile = readFileSync(resolve(root, relativePath), "utf8");
+      expect(dockerfile, relativePath).toContain(
+        "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem",
+      );
+      expect(dockerfile, relativePath).toContain(
+        `NODE_EXTRA_CA_CERTS=${certificatePath}`,
+      );
+    }
+    const proxyDockerfile = readFileSync(
       resolve(root, "docker/llm-proxy/Dockerfile"),
       "utf8",
     );
-    expect(dockerfile).toContain(
-      "https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem",
-    );
-    expect(dockerfile).toContain("NODE_EXTRA_CA_CERTS=/app/global-bundle.pem");
-    expect(dockerfile).toContain(
+    expect(proxyDockerfile).toContain(
       "COPY scripts/lib/application-region.mjs /app/scripts/lib/application-region.mjs",
     );
   });

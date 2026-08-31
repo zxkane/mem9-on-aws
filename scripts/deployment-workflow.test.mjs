@@ -227,6 +227,7 @@ describe("workflow integration", () => {
     expect(credentialJobs.sort()).toEqual(
       [
         "infra-ci.yml:build-and-push-image",
+        "infra-ci.yml:cleanup-failed-preview",
         "infra-ci.yml:cleanup-preview",
         "infra-ci.yml:deploy-preview",
         "infra-ci.yml:deploy-prod",
@@ -251,6 +252,122 @@ describe("workflow integration", () => {
     }
   });
 
+  it("boots a fresh preview compatibly, then enforces namespaces before isolation E2E", () => {
+    const workflow = parse(readFileSync(workflowPath, "utf8"));
+    expect(workflow.concurrency["cancel-in-progress"]).toBe(false);
+    expect(workflow.jobs["deploy-preview"]["timeout-minutes"]).toBe(60);
+    const failedCleanup = workflow.jobs["cleanup-failed-preview"];
+    const innerCleanupBudgetMinutes = 16 + 23 + 16;
+    expect(failedCleanup["timeout-minutes"]).toBeGreaterThanOrEqual(
+      innerCleanupBudgetMinutes + 10,
+    );
+    expect(failedCleanup["timeout-minutes"]).toBe(70);
+    expect(failedCleanup.needs).toContain("deploy-preview");
+    expect(failedCleanup.if).toContain("always()");
+    expect(failedCleanup.if).toContain("needs.deploy-preview.result != 'success'");
+    expect(failedCleanup.if).toContain("needs.deploy-preview.outputs.stage != ''");
+    const failedPulumiCleanup = failedCleanup.steps.find(
+      ({ name }) => name === "Remove conflicting Pulumi installation",
+    );
+    expect(failedPulumiCleanup.run).toContain("~/.pulumi/plugins/");
+    expect(failedPulumiCleanup.run).toContain("~/.config/sst/plugins/");
+    const failedRemove = failedCleanup.steps.find(
+      ({ name }) => name === "Remove failed PR stage",
+    );
+    expect(failedRemove.run).toContain("remove 15m");
+    expect(failedRemove.run).toContain('await-eni-detach.mts "$STAGE"');
+    expect(failedRemove.run.match(/remove 15m/g)).toHaveLength(2);
+    expect(
+      failedRemove.run.match(/await-sst-stage-removal\.mts/g),
+    ).toHaveLength(2);
+    expect(failedRemove.run).toContain(
+      "Do not force-unlock a possibly live engine",
+    );
+    const previewDeploy = workflow.jobs["deploy-preview"].steps.find(
+      ({ name }) => name === "Deploy PR stage",
+    );
+    const previewEnforcement = workflow.jobs["deploy-preview"].steps.find(
+      ({ name }) => name === "Deploy PR namespace enforcement",
+    );
+    const prodDeploy = workflow.jobs["deploy-prod"].steps.find(
+      ({ name }) => name === "Deploy prod stage",
+    );
+    expect(previewDeploy?.env?.MEM9_NAMESPACE_REQUIRED).toBe("0");
+    expect(previewEnforcement?.env?.MEM9_NAMESPACE_REQUIRED).toBe("1");
+    expect(previewDeploy?.run).toContain(
+      "/bootstrap/task-def-arn",
+    );
+    expect(previewDeploy?.run).toContain(
+      "MEM9_NAMESPACE_BOOTSTRAP_VERSION",
+    );
+    expect(previewDeploy?.run).toContain(
+      'if [ "$BOOTSTRAP_VERSION" = "1" ]',
+    );
+    expect(previewDeploy?.run).toContain(
+      "Legacy preview detected; deploying namespace compatibility first",
+    );
+    expect(previewDeploy?.run).toContain(
+      'STAGE="$STAGE" bash scripts/run-bootstrap-task.sh',
+    );
+    expect(previewDeploy?.run).toContain(
+      'export MEM9_NAMESPACE_REQUIRED="1"',
+    );
+    expect(previewDeploy?.run).toContain(
+      "initial_namespace_required=$MEM9_NAMESPACE_REQUIRED",
+    );
+    expect(previewEnforcement?.if).toContain(
+      "steps.deploy.outputs.initial_namespace_required == '0'",
+    );
+    expect(prodDeploy?.env?.MEM9_NAMESPACE_REQUIRED).toBe(
+      "${{ vars.MEM9_NAMESPACE_REQUIRED }}",
+    );
+
+    const steps = workflow.jobs["deploy-preview"].steps;
+    const bootstrapIndex = steps.findIndex(
+      ({ name }) => name === "Run schema-bootstrap task (preview)",
+    );
+    const enforcementIndex = steps.findIndex(
+      ({ name }) => name === "Deploy PR namespace enforcement",
+    );
+    const isolationIndex = steps.findIndex(
+      ({ name }) =>
+        name === "Shared-database namespace isolation E2E (preview, hard)",
+    );
+    expect(bootstrapIndex).toBeGreaterThanOrEqual(0);
+    expect(enforcementIndex).toBeGreaterThan(bootstrapIndex);
+    expect(isolationIndex).toBeGreaterThan(enforcementIndex);
+    expect(steps[isolationIndex].run).toBe(
+      "bash scripts/run-memory-namespace-e2e.sh",
+    );
+  });
+
+  it("TC-GROUPNS-125: verifies constraints_complete before a required prod deploy", () => {
+    const workflow = parse(readFileSync(workflowPath, "utf8"));
+    const steps = workflow.jobs["deploy-prod"].steps;
+    const phaseGateIndex = steps.findIndex(
+      ({ name }) => name === "Verify namespace cutover phase",
+    );
+    const deployIndex = steps.findIndex(
+      ({ name }) => name === "Deploy prod stage",
+    );
+    const phaseGate = steps[phaseGateIndex];
+
+    expect(phaseGateIndex).toBeGreaterThanOrEqual(0);
+    expect(phaseGateIndex).toBeLessThan(deployIndex);
+    expect(phaseGate.if).toBe("vars.MEM9_NAMESPACE_REQUIRED == '1'");
+    expect(phaseGate.env.STAGE).toBe("prod");
+    expect(phaseGate.run).toContain(
+      "run-memory-namespace-task.sh assert-phase --expected-phase constraints_complete",
+    );
+
+    const runner = readFileSync(
+      resolve(here, "run-memory-namespace-task.sh"),
+      "utf8",
+    );
+    expect(runner).toContain("observed ${OBSERVED_PHASE}; required ${EXPECTED_PHASE}");
+    expect(runner).not.toContain("describe-db-clusters");
+  });
+
   it("grants the deploy role only the Cognito group lifecycle used by IaC", () => {
     const role = readFileSync(rolePath, "utf8");
     const actions = actionSetForSid(role, "Cognito");
@@ -266,7 +383,6 @@ describe("workflow integration", () => {
     );
     expect(actions.some((action) => action.includes("Admin"))).toBe(false);
   });
-
   it("TC-SLACKAPP-218: gates and lints the decision-artifact bucket template", () => {
     const workflow = parse(readFileSync(workflowPath, "utf8"));
     const templates = [
@@ -311,6 +427,19 @@ describe("workflow integration", () => {
     const workflow = parse(readFileSync(workflowPath, "utf8"));
     expect(workflow.env.MEM9_DECISION_ARTIFACT_BUCKET).toBe(
       "${{ vars.MEM9_DECISION_ARTIFACT_BUCKET }}",
+    );
+  });
+
+  it("TC-GROUPNS-133: passes non-secret transport key slot controls to every deploy", () => {
+    const workflow = parse(readFileSync(workflowPath, "utf8"));
+    expect(workflow.env.MEM9_TRANSPORT_SIGNING_ACTIVE_SLOT).toBe(
+      "${{ vars.MEM9_TRANSPORT_SIGNING_ACTIVE_SLOT }}",
+    );
+    expect(workflow.env.MEM9_TRANSPORT_SIGNING_SLOT_A_REVISION).toBe(
+      "${{ vars.MEM9_TRANSPORT_SIGNING_SLOT_A_REVISION }}",
+    );
+    expect(workflow.env.MEM9_TRANSPORT_SIGNING_SLOT_B_REVISION).toBe(
+      "${{ vars.MEM9_TRANSPORT_SIGNING_SLOT_B_REVISION }}",
     );
   });
 
@@ -436,6 +565,7 @@ describe("workflow integration", () => {
       "MNEMO_VALIDATE_EMF=true",
     );
     const healthSmoke = readFileSync(healthSmokePath, "utf8");
+    expect(healthSmoke).toContain('POSTGRES_IMAGE="pgvector/pgvector:pg17"');
     expect(healthSmoke).toContain("--tty=false");
     expect(healthSmoke).toContain("validate-emf-event.mjs --docker-stream");
     expect(healthSmoke).toContain(
@@ -460,10 +590,10 @@ describe("workflow integration", () => {
       expect(reconcile).toBeGreaterThanOrEqual(0);
       expect(bootstrap).toBeGreaterThan(reconcile);
     }
-    expect(workflow.match(/MEM9_DURABLE_INGEST_ENABLED: "1"/g)).toHaveLength(2);
+    expect(workflow.match(/MEM9_DURABLE_INGEST_ENABLED: "1"/g)).toHaveLength(3);
     expect(workflow).not.toContain('MEM9_DURABLE_INGEST_ENABLED: "0"');
     expect(workflow).not.toContain("Enable durable ingest after bootstrap");
-    expect(workflow.match(/pnpm -C infra exec sst deploy/g)).toHaveLength(2);
+    expect(workflow.match(/pnpm -C infra exec sst deploy/g)).toHaveLength(3);
   });
 
   it("TC-COGDOMAIN-020/021: preserves prod override without sharing it with previews", () => {
@@ -481,7 +611,7 @@ describe("workflow integration", () => {
     );
   });
 
-  it("TC-CONSOL-040/041: runs a report-only preview task behind the schedule gate", () => {
+  it("TC-GROUPNS-099/101: keeps consolidation absent from namespace deployments", () => {
     const source = readFileSync(workflowPath, "utf8");
     const workflow = parse(source);
     const previewSteps = workflow.jobs["deploy-preview"].steps;
@@ -492,110 +622,54 @@ describe("workflow integration", () => {
     const prodDeploy = prodSteps.find(
       ({ name }) => name === "Deploy prod stage",
     );
-    const bootstrapIndex = previewSteps.findIndex(
-      ({ name }) => name === "Run schema-bootstrap task (preview)",
+    expect(previewDeploy.env).not.toHaveProperty(
+      "MEM9_CONSOLIDATION_SCHEDULE_ENABLED",
     );
-    const consolidationIndex = previewSteps.findIndex(
-      ({ name }) => name === "Run report-only consolidation task (preview)",
-    );
-
-    expect(previewDeploy.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED).toBe("1");
-    expect(prodDeploy.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED).toBe(
-      "${{ vars.MEM9_CONSOLIDATION_SCHEDULE_ENABLED }}",
-    );
-    expect(consolidationIndex).toBeGreaterThan(bootstrapIndex);
-    expect(previewSteps[consolidationIndex].run).toBe(
-      "bash scripts/run-consolidation-task.sh",
+    expect(prodDeploy.env).not.toHaveProperty(
+      "MEM9_CONSOLIDATION_SCHEDULE_ENABLED",
     );
     expect(
-      previewSteps[consolidationIndex].env.CONSOLIDATION_TASK_WAIT_SECONDS,
-    ).toBe("1200");
-    expect(source).toContain("shellcheck scripts/run-consolidation-task.sh");
-
-    const runner = readFileSync(consolidationRunnerPath, "utf8");
-    expect(runner).toContain('"--report-only"');
-    expect(runner).toContain('"--check-llm"');
-    expect(runner).toContain("logs filter-log-events");
-    expect(runner).toContain('"CONSOLIDATION_REVIEW_LIST"');
-    expect(runner).not.toContain("logs get-log-events");
+      previewSteps.some(({ run }) =>
+        String(run).includes("run-consolidation-task.sh"),
+      ),
+    ).toBe(false);
+    expect(
+      prodSteps.some(({ run }) =>
+        String(run).includes("run-consolidation-task.sh"),
+      ),
+    ).toBe(false);
   });
 
-  it("TC-SLACKAPP-090: runs the Slack approval E2E on preview only, never prod", () => {
+  it("TC-GROUPNS-101: keeps cleanup scan and Slack approval absent", () => {
     const source = readFileSync(workflowPath, "utf8");
     const workflow = parse(source);
     const previewSteps = workflow.jobs["deploy-preview"].steps;
     const prodSteps = workflow.jobs["deploy-prod"].steps;
     const previewDeploy = previewSteps.find(({ name }) => name === "Deploy PR stage");
     const prodDeploy = prodSteps.find(({ name }) => name === "Deploy prod stage");
-    const e2eIndex = previewSteps.findIndex(
-      ({ name }) => name === "Slack approval E2E (preview)",
-    );
-    const deployIndex = previewSteps.findIndex(({ name }) => name === "Deploy PR stage");
-
-    // After the deploy, because it POSTs to the façade the deploy creates.
-    expect(e2eIndex).toBeGreaterThan(deployIndex);
-    expect(previewSteps[e2eIndex].run).toBe("bash scripts/run-slack-approval-e2e.sh");
-    expect(previewSteps[e2eIndex].env.STAGE).toBe("${{ steps.deploy.outputs.stage }}");
-    expect(source).toContain("shellcheck scripts/run-slack-approval-e2e.sh");
-    expect(source).toContain("shellcheck scripts/run-cleanup-scan-task.sh");
-    expect(readFileSync(cleanupScanRunnerPath, "utf8")).toContain(
-      'CONFIRM_PROD_SCAN="${CONFIRM_PROD_SCAN:-}"',
-    );
-
-    // NOT on prod. The harness overwrites `approvals/offered`, so a prod run would
-    // destroy a pending human approval and approve a deletion against the live
-    // database. Asserted on the job rather than left to the comment, because
-    // copying a green preview step into deploy-prod is the obvious next edit.
-    expect(prodSteps.some(({ run }) => String(run).includes("run-slack-approval-e2e.sh"))).toBe(
-      false,
-    );
-
-    // The synth flag comes from a repo VARIABLE, not a literal "1":
-    // infra/slack-approval.ts throws when the flag is set and either secret is
-    // unseeded, and GitHub passes an unset secret as an empty string — so a
-    // hardcoded flag would fail synthesis on every PR in a repo without a Slack app.
-    expect(previewDeploy.env.MEM9_SLACK_APPROVAL_ENABLED).toBe(
-      "${{ vars.MEM9_SLACK_APPROVAL_ENABLED }}",
-    );
-    expect(previewDeploy.env.MEM9_SLACK_APPROVAL_CHANNEL).toBe(
-      "${{ vars.MEM9_SLACK_APPROVAL_CHANNEL }}",
-    );
-    expect(previewDeploy.env.SST_SECRET_SlackBotToken).toBe(
-      "${{ secrets.SLACK_BOT_TOKEN }}",
-    );
-    expect(previewDeploy.env.SST_SECRET_SlackSigningSecret).toBe(
-      "${{ secrets.SLACK_SIGNING_SECRET }}",
-    );
-
-    // TC-SLACKAPP-240: the same four synth-time values must reach prod. The
-    // cleanup scan flag is nested inside the approval gate, so passing only the
-    // scan flag makes it dead configuration: no task, SSM inputs, alarms, or
-    // schedule are synthesized.
-    expect(prodDeploy.env.MEM9_SLACK_APPROVAL_ENABLED).toBe(
-      "${{ vars.MEM9_SLACK_APPROVAL_ENABLED }}",
-    );
-    expect(prodDeploy.env.MEM9_SLACK_APPROVAL_CHANNEL).toBe(
-      "${{ vars.MEM9_SLACK_APPROVAL_CHANNEL }}",
-    );
-    expect(prodDeploy.env.SST_SECRET_SlackBotToken).toBe(
-      "${{ secrets.SLACK_BOT_TOKEN }}",
-    );
-    expect(prodDeploy.env.SST_SECRET_SlackSigningSecret).toBe(
-      "${{ secrets.SLACK_SIGNING_SECRET }}",
-    );
-
-    // And no secret is inlined into a `run:` script, where it would land in the
-    // step's rendered command rather than only in the process environment.
-    for (const step of [...previewSteps, ...prodSteps]) {
-      expect(String(step.run ?? "")).not.toContain("secrets.SLACK_");
+    for (const deploy of [previewDeploy, prodDeploy]) {
+      for (const name of [
+        "MEM9_SLACK_APPROVAL_ENABLED",
+        "MEM9_SLACK_APPROVAL_CHANNEL",
+        "SST_SECRET_SlackBotToken",
+        "SST_SECRET_SlackSigningSecret",
+        "MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED",
+      ]) {
+        expect(deploy.env).not.toHaveProperty(name);
+      }
     }
+    expect(
+      [...previewSteps, ...prodSteps].some(({ run }) =>
+        String(run).includes("run-slack-approval-e2e.sh"),
+      ),
+    ).toBe(false);
   });
 
   it("uses the tested tag selector and reconciles preview and prod deployments", () => {
     const workflow = readFileSync(workflowPath, "utf8");
 
     expect(workflow).toContain("node scripts/image-tags.mjs");
-    expect(workflow.match(/node scripts\/reconcile-ecs-deployment\.mjs/g)).toHaveLength(2);
+    expect(workflow.match(/node scripts\/reconcile-ecs-deployment\.mjs/g)).toHaveLength(3);
   });
 
   it("TC-ECS-COST-005: propagates bootstrap task tags at task creation", () => {
@@ -610,15 +684,19 @@ describe("workflow integration", () => {
     expect(runTask).toContain("--enable-ecs-managed-tags");
   });
 
-  it("routes a reconciliation failure through the existing prod failure reporter", () => {
-    const workflow = readFileSync(workflowPath, "utf8");
-    const reconcile = workflow.indexOf("name: Reconcile prod ECS deployment");
-    const failureReporter = workflow.indexOf("name: Create issue on prod deploy failure");
+  it("reports prod failures from an independent always job", () => {
+    const workflow = parse(readFileSync(workflowPath, "utf8"));
+    expect(workflow.jobs["deploy-prod"]["timeout-minutes"]).toBe(75);
+    expect(workflow.jobs["deploy-prod"].permissions).not.toHaveProperty("issues");
 
-    expect(reconcile).toBeGreaterThanOrEqual(0);
-    expect(failureReporter).toBeGreaterThan(reconcile);
-    const reporterBlock = workflow.slice(failureReporter, failureReporter + 500);
-    expect(reporterBlock).toContain("if: failure()");
+    const reporter = workflow.jobs["report-prod-failure"];
+    expect(reporter.needs).toContain("deploy-prod");
+    expect(reporter.if).toContain("always()");
+    expect(reporter.if).toContain("needs.deploy-prod.result != 'success'");
+    expect(reporter.permissions.issues).toBe("write");
+    expect(
+      reporter.steps.some(({ name }) => name === "Create issue on prod deploy failure"),
+    ).toBe(true);
   });
 
   it("reports preview reconciliation failures using the overall job status", () => {
@@ -849,7 +927,6 @@ describe("reconciliation command fixtures", () => {
     expect(result.stdout).toContain("status=match");
     expect(calls).toEqual([
       "ssm get-parameters",
-      "ecs wait",
       "ecs describe-services",
       "ecs list-tasks",
       "ecs describe-tasks",

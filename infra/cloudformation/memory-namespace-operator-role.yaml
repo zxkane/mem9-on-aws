@@ -1,0 +1,62 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  Retained operator-owned ECS task role for mem9 namespace reconciliation,
+  access management, and guarded database migration.
+
+Parameters:
+  ApplicationRegion:
+    Type: String
+    AllowedPattern: "^[a-z]{2}(-[a-z0-9]+)+-[0-9]+$"
+  Stage:
+    Type: String
+    Default: prod
+    AllowedPattern: "^[a-z0-9-]+$"
+  CognitoUserPoolId:
+    Type: String
+    AllowedPattern: "^[a-z0-9-]+_[A-Za-z0-9]+$"
+
+Resources:
+  MemoryNamespaceOperatorRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RoleName: mem9-on-aws-namespace-operator
+      Description: Private one-shot mem9 namespace operator
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: mem9-memory-namespace-operator
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: ExactUserPool
+                Effect: Allow
+                Action:
+                  - cognito-idp:AdminAddUserToGroup
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminListGroupsForUser
+                  - cognito-idp:AdminRemoveUserFromGroup
+                  - cognito-idp:CreateGroup
+                  - cognito-idp:ListGroups
+                  - cognito-idp:UpdateGroup
+                Resource: !Sub arn:${AWS::Partition}:cognito-idp:${ApplicationRegion}:${AWS::AccountId}:userpool/${CognitoUserPoolId}
+              - Sid: EphemeralInputs
+                Effect: Allow
+                Action:
+                  - ssm:GetParameters
+                Resource: !Sub arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/mem9-on-aws/${Stage}/namespace-operator/*
+      Tags:
+        - Key: Project
+          Value: mem9-on-aws
+        - Key: ManagedBy
+          Value: cloudformation
+
+Outputs:
+  RoleArn:
+    Value: !GetAtt MemoryNamespaceOperatorRole.Arn

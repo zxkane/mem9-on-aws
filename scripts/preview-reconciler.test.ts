@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
@@ -7,12 +8,15 @@ import {
   OPERATOR_ISSUE_MARKER,
   OPERATOR_ISSUE_TITLE,
   applyReconciliationPlan,
+  awsCommandEnvironment,
   buildReconciliationPlan,
+  filterLiveTaggedResources,
   isSweepableInventory,
   prepareOperatorIssue,
   renderPlanReport,
   resourceTypeFromArn,
   sstRemoveCommand,
+  stateObjectHasLiveDeployment,
   sweepOrphanedNetwork,
   upsertOperatorIssue,
   type Observation,
@@ -1319,6 +1323,11 @@ describe("workflow control flow", () => {
     const waitBound = Number(
       cleanupJob.match(/timeout --kill-after=\S+ ([0-9]+)m node scripts\/await-eni-detach/)![1],
     );
+    const settlementBounds = [
+      ...cleanupJob.matchAll(
+        /timeout --kill-after=\S+ ([0-9]+)m node scripts\/await-sst-stage-removal\.mts/g,
+      ),
+    ].map((match) => Number(match[1]));
 
     expect(cleanupJob).toMatch(
       /timeout --kill-after=\S+ "\$1" \\\n\s+pnpm -C infra exec sst remove/,
@@ -1327,8 +1336,12 @@ describe("workflow control flow", () => {
     // The wait's outer bound must not be tighter than its own internal budget,
     // or the shell would kill it before it can emit its expiry diagnostic.
     expect(waitBound).toBeGreaterThanOrEqual(DEFAULT_TIMEOUT_MS / 60_000);
-    const innerTotal = removeBounds.reduce((sum, value) => sum + value, 0) + waitBound;
+    const innerTotal =
+      removeBounds.reduce((sum, value) => sum + value, 0) +
+      waitBound +
+      settlementBounds.reduce((sum, value) => sum + value, 0);
     expect(innerTotal).toBeLessThan(jobTimeout);
+    expect(settlementBounds).toEqual([3, 3]);
     // `sst unlock` must run ONCE, before the first attempt — never inside the
     // retryable function, where it could clear the lock of a first attempt that
     // SIGTERM failed to kill.
@@ -1342,5 +1355,168 @@ describe("workflow control flow", () => {
     expect(firstRemove).toBeGreaterThan(-1);
     expect(wait).toBeGreaterThan(firstRemove);
     expect(retry).toBeGreaterThan(wait);
+    expect(cleanupJob).toContain(
+      "Confirm\n          # state removal instead of force-clearing a lock",
+    );
+  });
+
+  it("TC-PREVIEW-RECON-039 defaults AWS inventory to the configured application region", async () => {
+    const configuredRegion = execFileSync(
+      process.execPath,
+      [path.resolve(import.meta.dirname, "resolve-application-region.mjs")],
+      { encoding: "utf8" },
+    ).trim();
+    const environment = await awsCommandEnvironment({
+      AWS_DEFAULT_REGION: "us-west-2",
+    });
+
+    expect(environment.AWS_REGION).toBe(configuredRegion);
+    expect(environment.AWS_DEFAULT_REGION).toBe(configuredRegion);
+  });
+
+  it("TC-PREVIEW-RECON-040 preserves an explicit old-region cleanup override", async () => {
+    const environment = await awsCommandEnvironment({
+      AWS_REGION: "eu-west-1",
+      AWS_DEFAULT_REGION: "us-west-2",
+    });
+
+    expect(environment.AWS_REGION).toBe("eu-west-1");
+    expect(environment.AWS_DEFAULT_REGION).toBe("eu-west-1");
+  });
+});
+
+describe("SST state observation", () => {
+  it("TC-PREVIEW-RECON-041 ignores the empty checkpoint retained after remove", () => {
+    expect(
+      stateObjectHasLiveDeployment(
+        JSON.stringify({
+          checkpoint: {
+            latest: {
+              manifest: {},
+              metadata: {},
+              secrets_providers: {},
+            },
+            stack: "fixture",
+          },
+          version: 3,
+        }),
+      ),
+    ).toBe(false);
+  });
+
+  it("TC-PREVIEW-RECON-042 recognizes resources and pending operations as live state", () => {
+    const state = (latest: Record<string, unknown>) =>
+      JSON.stringify({
+        checkpoint: { latest, stack: "fixture" },
+        version: 3,
+      });
+
+    expect(stateObjectHasLiveDeployment(state({ resources: [{ urn: "fixture" }] }))).toBe(
+      true,
+    );
+    expect(
+      stateObjectHasLiveDeployment(
+        state({ pending_operations: [{ resource: "fixture" }] }),
+      ),
+    ).toBe(true);
+  });
+
+  it("TC-PREVIEW-RECON-043 fails closed on a malformed checkpoint", () => {
+    expect(() => stateObjectHasLiveDeployment("{}")).toThrow(
+      "SST state checkpoint is missing",
+    );
+    expect(() =>
+      stateObjectHasLiveDeployment(
+        JSON.stringify({ checkpoint: { latest: { resources: {} } } }),
+      ),
+    ).toThrow("SST state resources are invalid");
+  });
+});
+
+describe("tagged resource liveness", () => {
+  it("TC-PREVIEW-RECON-044 drops inactive historical ECS/Cognito entries", async () => {
+    const runner: CommandRunner = vi.fn(async (_file, args, _label, allowedFailure) => {
+      if (args[1] === "describe-clusters") {
+        return {
+          stdout: JSON.stringify({
+            clusters: [{ clusterArn: "arn:cluster:active", status: "ACTIVE" }],
+            failures: [],
+          }),
+          stderr: "",
+        };
+      }
+      if (args[1] === "list-task-definitions") {
+        return {
+          stdout: JSON.stringify({
+            taskDefinitionArns: ["arn:task-definition:active"],
+          }),
+          stderr: "",
+        };
+      }
+      if (args[1] === "describe-services") {
+        return {
+          stdout: JSON.stringify({
+            failures: [],
+            services: [{ serviceArn: args.at(-1), status: "INACTIVE" }],
+          }),
+          stderr: "",
+        };
+      }
+      if (args[1] === "describe-tasks") {
+        return {
+          stdout: JSON.stringify({
+            failures: [],
+            tasks: [{ lastStatus: "STOPPED", taskArn: args.at(-1) }],
+          }),
+          stderr: "",
+        };
+      }
+      if (args[1] === "list-user-pools") {
+        expect(allowedFailure).toBeUndefined();
+        return {
+          stdout: JSON.stringify({ UserPools: [] }),
+          stderr: "",
+        };
+      }
+      throw new Error(`Unexpected command: ${args.join(" ")}`);
+    });
+    const resource = (
+      arn: string,
+      resourceType: string,
+    ): import("./preview-reconciler.mts").ResourceObservation => ({
+      arn,
+      managedBy: "sst",
+      project: "mem9-on-aws",
+      resourceType,
+      stage: "pr-206",
+    });
+    const unknown = {
+      managedBy: "sst",
+      project: "mem9-on-aws",
+      resourceType: "rds:cluster",
+      stage: "pr-206",
+    } as const;
+
+    const live = await filterLiveTaggedResources(
+      [
+        resource("arn:cluster:active", "ecs:cluster"),
+        resource("arn:task-definition:active", "ecs:task-definition"),
+        resource("arn:task-definition:inactive", "ecs:task-definition"),
+        resource(
+          "arn:aws:ecs:region:account:service/removed-cluster/service",
+          "ecs:service",
+        ),
+        resource("arn:aws:ecs:region:account:task/removed-cluster/task", "ecs:task"),
+        resource("arn:aws:cognito-idp:region:account:userpool/removed", "cognito-idp:user-pool"),
+        unknown,
+      ],
+      runner,
+    );
+
+    expect(live).toEqual([
+      resource("arn:cluster:active", "ecs:cluster"),
+      resource("arn:task-definition:active", "ecs:task-definition"),
+      unknown,
+    ]);
   });
 });

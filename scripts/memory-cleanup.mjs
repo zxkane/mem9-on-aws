@@ -65,6 +65,9 @@ import {
   REASONING_EFFORTS,
   RequestValidationError,
 } from "../docker/llm-proxy/server.mjs";
+import {
+  assertNamespaceV1LegacyMaintenanceDisabled,
+} from "./lib/memory-namespace.mjs";
 
 const MEMORIES_PATH = "/v1alpha2/mem9s/memories";
 const LIST_PAGE_LIMIT = 200; // server max for GET /memories
@@ -5037,13 +5040,16 @@ if (isMain) {
       // so a partial listing reads as complete, nondeterministically. Setting
       // the code and letting the event loop drain is the only form that cannot.
       process.exitCode = 0;
-    } else if (opts.listInactive || opts.restore) {
+    } else {
+      assertNamespaceV1LegacyMaintenanceDisabled("memory-cleanup");
+    }
+    if (!opts.help && (opts.listInactive || opts.restore)) {
       production = await recoveryDeps(opts);
       const result = opts.restore
         ? await runRestore(opts, production.deps)
         : await runListInactive(opts, production.deps);
       process.exitCode = result.exitCode;
-    } else {
+    } else if (!opts.help) {
       production = await createCleanupDeps(opts);
       const result = await runCleanup(
         { ...opts, tenantId: production.tenantId },

@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbOutputs } from "./db";
 import type { TenantIdentityOutputs } from "./tenant-identity";
+import type { CognitoOutputs } from "./cognito";
 
 /**
  * Unit tests for the `bootstrap` stack factory (the one-shot schema-bootstrap
@@ -47,6 +48,37 @@ function fakeTenantIdentity(): TenantIdentityOutputs {
     ),
     tenantId: out("0123456789abcdef0123456789abcdef"),
   } as unknown as TenantIdentityOutputs;
+}
+
+function fakeCognito(preview = false): CognitoOutputs {
+  return {
+    userPoolId: out("pool-test"),
+    userPoolArn: out("arn:aws:cognito-idp:ap-northeast-1:123456789012:userpool/pool-test"),
+    issuer: out(
+      "https://cognito-idp.ap-northeast-1.amazonaws.com/pool-test",
+    ),
+    clientId: out("default-client"),
+    previewNamespaceClients: preview
+      ? [
+          {
+            namespaceSlug: "preview-alpha",
+            cognitoGroup: "memory-preview-alpha",
+            clientId: out("alpha-client"),
+            clientSecret: out("alpha-secret"),
+            ssmPrefix:
+              "/mem9-on-aws/pr-42/cognito/namespace-e2e-alpha",
+          },
+          {
+            namespaceSlug: "preview-beta",
+            cognitoGroup: "memory-preview-beta",
+            clientId: out("beta-client"),
+            clientSecret: out("beta-secret"),
+            ssmPrefix:
+              "/mem9-on-aws/pr-42/cognito/namespace-e2e-beta",
+          },
+        ]
+      : [],
+  } as unknown as CognitoOutputs;
 }
 
 function installGlobals(stage: string) {
@@ -112,11 +144,11 @@ afterEach(() => {
   vi.resetModules();
 });
 
-async function loadBootstrap() {
+async function loadBootstrap(preview = false) {
   vi.resetModules();
   const { bootstrap } = await import("./bootstrap");
   return (cluster: sst.aws.Cluster, dbOut: DbOutputs) =>
-    bootstrap(cluster, dbOut, fakeTenantIdentity());
+    bootstrap(cluster, dbOut, fakeTenantIdentity(), fakeCognito(preview));
 }
 
 describe("bootstrap stack", () => {
@@ -149,6 +181,10 @@ describe("bootstrap stack", () => {
     const env = args.environment as Record<string, unknown>;
     expect(env.MEM9_DB_HOST).toBeDefined();
     expect(env.MEM9_DB_NAME).toBeDefined();
+    expect(env.MEM9_STAGE).toBe("prod");
+    expect(env.MEM9_NAMESPACE_BOOTSTRAP_VERSION).toBe("1");
+    expect(env.MEM9_COGNITO_ISSUER).toBeDefined();
+    expect(env.MEM9_COGNITO_USER_POOL_ID).toBeDefined();
     const ssm = args.ssm as Record<string, unknown>;
     // Both the DB creds JSON and the tenant id come from Secrets Manager.
     expect(ssm.MEM9_DB_SECRET).toBeDefined();
@@ -158,6 +194,34 @@ describe("bootstrap stack", () => {
       expect(k.toLowerCase()).not.toContain("password");
       expect(String(v)).not.toMatch(/password/i);
     }
+  });
+
+  it("keeps the default bootstrap task unprivileged for namespace administration", async () => {
+    installGlobals("prod");
+    const bootstrap = await loadBootstrap();
+    bootstrap(fakeCluster, fakeDbOut());
+    expect(tasks[0].args.permissions).toBeUndefined();
+  });
+
+  it("keeps a pr-N bootstrap unprivileged while injecting synthetic namespace fixtures", async () => {
+    installGlobals("pr-42");
+    const bootstrap = await loadBootstrap(true);
+    bootstrap(fakeCluster, fakeDbOut());
+    const args = tasks[0].args;
+    expect(args.permissions).toBeUndefined();
+    expect(args.environment).toMatchObject({
+      MEM9_PREVIEW_NAMESPACE_DEFAULT_CLIENT_ID: expect.objectContaining({
+        value: "default-client",
+      }),
+      MEM9_PREVIEW_NAMESPACE_ALPHA_CLIENT_ID: expect.objectContaining({
+        value: "alpha-client",
+      }),
+      MEM9_PREVIEW_NAMESPACE_ALPHA_SLUG: "preview-alpha",
+      MEM9_PREVIEW_NAMESPACE_BETA_CLIENT_ID: expect.objectContaining({
+        value: "beta-client",
+      }),
+      MEM9_PREVIEW_NAMESPACE_BETA_SLUG: "preview-beta",
+    });
   });
 
   it("exports the CI run-task inputs under /mem9-on-aws/${stage}/bootstrap/", async () => {

@@ -80,6 +80,7 @@ function installGlobals(stage: string, accountId = ACCOUNT_ID, region = REGION) 
       UserPoolDomain: makeCtor("UserPoolDomain"),
       ResourceServer: makeCtor("ResourceServer"),
       UserPoolClient: makeCtor("UserPoolClient"),
+      UserGroup: makeCtor("UserGroup"),
     },
     ssm: {
       Parameter: class {
@@ -169,6 +170,53 @@ describe("cognito stack", () => {
       value: "UserPoolClient-1-id",
     });
     expect(params.some((p) => p.name.includes("/cognito/client2/"))).toBe(false);
+  });
+
+  it("creates two additional namespace clients only for pr-N stages", async () => {
+    installGlobals("pr-42");
+    const cognito = await loadCognito();
+    const outs = cognito();
+    const clients = byKind("UserPoolClient");
+    expect(clients.map(({ args }) => args.name)).toEqual([
+      "pr-42-mem9-mcp-client",
+      "pr-42-namespace-alpha-e2e",
+      "pr-42-namespace-beta-e2e",
+    ]);
+    expect(byKind("UserGroup").map(({ args }) => args)).toMatchObject([
+      {
+        name: "memory-preview-alpha",
+        description: "Managed team memory namespace",
+      },
+      {
+        name: "memory-preview-beta",
+        description: "Managed team memory namespace",
+      },
+    ]);
+    expect(outs.allowedClientIds).toHaveLength(3);
+    expect(outs.previewNamespaceClients).toMatchObject([
+      {
+        namespaceSlug: "preview-alpha",
+        cognitoGroup: "memory-preview-alpha",
+        ssmPrefix:
+          "/mem9-on-aws/pr-42/cognito/namespace-e2e-alpha",
+      },
+      {
+        namespaceSlug: "preview-beta",
+        cognitoGroup: "memory-preview-beta",
+        ssmPrefix:
+          "/mem9-on-aws/pr-42/cognito/namespace-e2e-beta",
+      },
+    ]);
+    expect(
+      params.find((p) =>
+        p.name.endsWith("/cognito/namespace-e2e-alpha/client-secret"),
+      ),
+    ).toMatchObject({ type: "SecureString", value: "SECRET-VALUE-2" });
+    expect(
+      params.find((p) =>
+        p.name.endsWith("/cognito/namespace-e2e-beta/client-secret"),
+      ),
+    ).toMatchObject({ type: "SecureString", value: "SECRET-VALUE-3" });
   });
 
   it("uses deleteBeforeReplace on non-prod, not on prod (pool replacement wipes clients)", async () => {

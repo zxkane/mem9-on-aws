@@ -23,14 +23,14 @@
         "InvalidParameters": []
       }
     },
-    "ecs wait": {
-      "status": 0
-    },
     "ecs describe-services": {
       "stdout": {
         "services": [
           {
             "serviceArn": "arn:aws:ecs:ap-northeast-1:123456789012:service/mem9-cluster/mem9-service",
+            "desiredCount": 1,
+            "runningCount": 1,
+            "pendingCount": 0,
             "deployments": [
               {
                 "status": "PRIMARY",

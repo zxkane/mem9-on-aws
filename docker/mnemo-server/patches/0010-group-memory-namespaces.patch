@@ -1,0 +1,4569 @@
+diff --git a/server/cmd/mnemo-server/main.go b/server/cmd/mnemo-server/main.go
+index 5ff934bc04eb2512229b759c1fbd40dc97c7ce16..3b72bbf04556c605d90d664991645049c26ee3bd 100644
+--- a/server/cmd/mnemo-server/main.go
++++ b/server/cmd/mnemo-server/main.go
+@@ -2,6 +2,7 @@ package main
+ 
+ import (
+ 	"context"
++	"database/sql"
+ 	"fmt"
+ 	"io"
+ 	"log/slog"
+@@ -13,6 +14,7 @@ import (
+ 	"time"
+ 
+ 	"github.com/qiffang/mnemos/server/internal/config"
++	"github.com/qiffang/mnemos/server/internal/domain"
+ 	"github.com/qiffang/mnemos/server/internal/embed"
+ 	"github.com/qiffang/mnemos/server/internal/encrypt"
+ 	"github.com/qiffang/mnemos/server/internal/handler"
+@@ -59,6 +61,17 @@ func main() {
+ 		logger.Error("durable ingest startup rejected", "err", err)
+ 		os.Exit(1)
+ 	}
++	var namespaceAuthorizer *middleware.NamespaceAuthorizer
++	if cfg.NamespaceRequired {
++		namespaceAuthorizer, err = middleware.NewNamespaceAuthorizer(
++			cfg.TransportIssuer,
++			cfg.TransportSigningKeys,
++		)
++		if err != nil {
++			logger.Error("namespace authorization startup rejected", "err", err)
++			os.Exit(1)
++		}
++	}
+ 
+ 	db, err := repository.NewDB(cfg.DBBackend, cfg.DSN)
+ 	if err != nil {
+@@ -67,6 +80,14 @@ func main() {
+ 	}
+ 	defer db.Close()
+ 	logger.Info("database connected", "backend", cfg.DBBackend)
++	if err := validateNamespaceStartup(
++		context.Background(),
++		db,
++		cfg.NamespaceRequired,
++	); err != nil {
++		logger.Error("namespace database startup rejected", "err", err)
++		os.Exit(1)
++	}
+ 
+ 	// Warn if encryption type is non-default — changing this later breaks existing tenants.
+ 	if cfg.EncryptType != "" && cfg.EncryptType != "plain" {
+@@ -126,15 +147,21 @@ func main() {
+ 	}
+ 	allowLocalWebhookHTTP := cfg.Env != "prod" && cfg.Env != "production"
+ 	webhookSvc := webhook.NewService(webhookStore, encryptor, allowLocalWebhookHTTP)
+-	webhookWorkerCtx, webhookWorkerCancel := context.WithCancel(context.Background())
+-	defer webhookWorkerCancel()
+-	go func() {
+-		err := webhook.NewDispatcher(webhookStore, webhookSvc, webhook.DispatcherConfig{}, logger).Run(webhookWorkerCtx)
+-		if err != nil && err != context.Canceled {
+-			logger.Error("webhook dispatcher stopped", "err", err)
+-		}
+-	}()
+-	logger.Info("webhook dispatcher initialized", "allow_local_http", allowLocalWebhookHTTP)
++	var webhookWorkerCancel context.CancelFunc
++	if cfg.NamespaceRequired {
++		logger.Info("webhook dispatcher disabled while namespace enforcement is active")
++	} else {
++		var webhookWorkerCtx context.Context
++		webhookWorkerCtx, webhookWorkerCancel = context.WithCancel(context.Background())
++		defer webhookWorkerCancel()
++		go func() {
++			err := webhook.NewDispatcher(webhookStore, webhookSvc, webhook.DispatcherConfig{}, logger).Run(webhookWorkerCtx)
++			if err != nil && err != context.Canceled {
++				logger.Error("webhook dispatcher stopped", "err", err)
++			}
++		}()
++		logger.Info("webhook dispatcher initialized", "allow_local_http", allowLocalWebhookHTTP)
++	}
+ 
+ 	// Repositories.
+ 	tenantRepo := repository.NewTenantRepo(cfg.DBBackend, db)
+@@ -305,10 +332,10 @@ func main() {
+ 	var apiKeyMW func(http.Handler) http.Handler
+ 	if spendLimitAdjuster != nil {
+ 		tenantMW = middleware.ResolveTenant(tenantRepo, tenantPool, encryptor, cfg.ClusterBlacklist, middleware.WithSpendLimitAdjuster(spendLimitAdjuster, spendLimitCooldown, autoSpendLimitCfg))
+-		apiKeyMW = middleware.ResolveApiKey(tenantRepo, tenantPool, encryptor, cfg.ClusterBlacklist, middleware.WithSpendLimitAdjuster(spendLimitAdjuster, spendLimitCooldown, autoSpendLimitCfg), middleware.WithSpaceChainRepo(spaceChainRepo))
++		apiKeyMW = middleware.ResolveApiKey(tenantRepo, tenantPool, encryptor, cfg.ClusterBlacklist, middleware.WithSpendLimitAdjuster(spendLimitAdjuster, spendLimitCooldown, autoSpendLimitCfg), middleware.WithSpaceChainRepo(spaceChainRepo), middleware.WithNamespaceAuthorizer(namespaceAuthorizer))
+ 	} else {
+ 		tenantMW = middleware.ResolveTenant(tenantRepo, tenantPool, encryptor, cfg.ClusterBlacklist)
+-		apiKeyMW = middleware.ResolveApiKey(tenantRepo, tenantPool, encryptor, cfg.ClusterBlacklist, middleware.WithSpaceChainRepo(spaceChainRepo))
++		apiKeyMW = middleware.ResolveApiKey(tenantRepo, tenantPool, encryptor, cfg.ClusterBlacklist, middleware.WithSpaceChainRepo(spaceChainRepo), middleware.WithNamespaceAuthorizer(namespaceAuthorizer))
+ 	}
+ 	rl := middleware.NewRateLimiter(cfg.RateLimit, cfg.RateBurst)
+ 	defer rl.Stop()
+@@ -329,6 +356,7 @@ func main() {
+ 		WithWebhookService(webhookSvc).
+ 		WithActivityTracker(activityTracker).
+ 		WithDisableSessionSave(cfg.DisableSessionSave).
++		WithNamespaceRequired(cfg.NamespaceRequired).
+ 		WithDurableIngest(cfg.DurableIngestEnabled).
+ 		WithDurableIngestTelemetry(durableTelemetry)
+ 	router := srv.Router(tenantMW, rateMW, apiKeyMW, middleware.CORS(cfg.CORSAllowedOrigins))
+@@ -356,7 +384,31 @@ func main() {
+ 			"",
+ 			runtimeUsageManager,
+ 			logger,
+-		)
++		).WithNamespaceIngestFactory(func(job *ingestqueue.Job) *service.IngestService {
++			if job == nil || job.NamespaceID == "" || job.PrincipalID == "" {
++				return nil
++			}
++			scope := domain.NamespaceScope{
++				TenantID:    job.TenantID,
++				NamespaceID: job.NamespaceID,
++				PrincipalID: job.PrincipalID,
++			}
++			repo := repository.NewMemoryRepo(
++				cfg.DBBackend,
++				db,
++				cfg.EmbedAutoModel,
++				cfg.FTSEnabled,
++				"",
++				scope,
++			)
++			return service.NewIngestService(
++				repo,
++				llmClient,
++				embedder,
++				cfg.EmbedAutoModel,
++				service.IngestMode(cfg.IngestMode),
++			)
++		})
+ 		workerConfig := ingestqueue.DefaultWorkerConfig()
+ 		workerConfig.Enabled = true
+ 		workerConfig.Telemetry = durableTelemetry
+@@ -387,30 +439,35 @@ func main() {
+ 		IdleTimeout:  60 * time.Second,
+ 	}
+ 
+-	// Upload worker (async file ingest).
+-	workerCtx, workerCancel := context.WithCancel(context.Background())
+-	defer workerCancel()
+-	uploadWorker := service.NewUploadWorker(
+-		uploadTaskRepo,
+-		tenantRepo,
+-		tenantPool,
+-		embedder,
+-		llmClient,
+-		cfg.EmbedAutoModel,
+-		cfg.EmbedAutoDims,
+-		cfg.EmbedDims,
+-		cfg.FTSEnabled,
+-		service.IngestMode(cfg.IngestMode),
+-		logger,
+-		cfg.WorkerConcurrency,
+-		encryptor,
+-		activityTracker,
+-	)
+-	go func() {
+-		if err := uploadWorker.Run(workerCtx); err != nil {
+-			logger.Error("upload worker error", "err", err)
+-		}
+-	}()
++	var workerCancel context.CancelFunc
++	if cfg.NamespaceRequired {
++		logger.Info("upload worker disabled while namespace enforcement is active")
++	} else {
++		var workerCtx context.Context
++		workerCtx, workerCancel = context.WithCancel(context.Background())
++		defer workerCancel()
++		uploadWorker := service.NewUploadWorker(
++			uploadTaskRepo,
++			tenantRepo,
++			tenantPool,
++			embedder,
++			llmClient,
++			cfg.EmbedAutoModel,
++			cfg.EmbedAutoDims,
++			cfg.EmbedDims,
++			cfg.FTSEnabled,
++			service.IngestMode(cfg.IngestMode),
++			logger,
++			cfg.WorkerConcurrency,
++			encryptor,
++			activityTracker,
++		)
++		go func() {
++			if err := uploadWorker.Run(workerCtx); err != nil {
++				logger.Error("upload worker error", "err", err)
++			}
++		}()
++	}
+ 
+ 	// Graceful shutdown.
+ 	go func() {
+@@ -425,8 +482,12 @@ func main() {
+ 		if durableWorkerCancel != nil {
+ 			durableWorkerCancel()
+ 		}
+-		webhookWorkerCancel()
+-		workerCancel() // Stop upload worker first.
++		if webhookWorkerCancel != nil {
++			webhookWorkerCancel()
++		}
++		if workerCancel != nil {
++			workerCancel()
++		}
+ 
+ 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+ 		defer cancel()
+@@ -456,6 +517,50 @@ func validateDurableIngestStartup(enabled bool, backend, tenantID string) error
+ 	return nil
+ }
+ 
++func validateNamespaceStartup(
++	ctx context.Context,
++	db *sql.DB,
++	required bool,
++) error {
++	var phase string
++	if err := db.QueryRowContext(ctx, `
++		SELECT phase
++		FROM memory_namespace_migration_state
++		WHERE singleton_id`).Scan(&phase); err != nil {
++		return fmt.Errorf("read namespace migration phase: %w", err)
++	}
++	if !required {
++		if phase != "additive_ready" {
++			return fmt.Errorf(
++				"namespace compatibility mode cannot start in phase %q",
++				phase,
++			)
++		}
++		return nil
++	}
++	if phase != "constraints_complete" {
++		return fmt.Errorf("unsupported namespace migration phase %q", phase)
++	}
++	var unassigned int
++	if err := db.QueryRowContext(ctx, `
++		SELECT
++			(SELECT COUNT(*) FROM memories WHERE namespace_id IS NULL)
++		  + (SELECT COUNT(*) FROM sessions
++		     WHERE namespace_id IS NULL OR principal_id IS NULL)
++		  + (SELECT COUNT(*) FROM ingest_jobs
++		     WHERE namespace_id IS NULL OR principal_id IS NULL)
++		  + (SELECT COUNT(*) FROM ingest_job_plans
++		     WHERE namespace_id IS NULL OR principal_id IS NULL)
++		  + (SELECT COUNT(*) FROM upload_tasks
++		     WHERE namespace_id IS NULL)`).Scan(&unassigned); err != nil {
++		return fmt.Errorf("verify namespace assignments: %w", err)
++	}
++	if unassigned != 0 {
++		return fmt.Errorf("namespace migration has %d unassigned rows", unassigned)
++	}
++	return nil
++}
++
+ func redactMeteringURLForLog(raw string) string {
+ 	if raw == "" {
+ 		return ""
+diff --git a/server/cmd/mnemo-server/namespace_startup_integration_test.go b/server/cmd/mnemo-server/namespace_startup_integration_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..3c218d27de47c49f6d7a36ae1088045de2b57e2a
+--- /dev/null
++++ b/server/cmd/mnemo-server/namespace_startup_integration_test.go
+@@ -0,0 +1,100 @@
++package main
++
++import (
++	"context"
++	"os"
++	"strings"
++	"testing"
++
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++func TestValidateNamespaceStartupPostgres(t *testing.T) {
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
++	}
++	db := testutil.OpenIsolatedPostgres(t, dsn)
++	if err := validateNamespaceStartup(context.Background(), db, true); err != nil {
++		t.Fatalf("completed schema rejected: %v", err)
++	}
++	if err := validateNamespaceStartup(context.Background(), db, false); err == nil ||
++		!strings.Contains(err.Error(), "compatibility mode cannot start") {
++		t.Fatalf("compatibility mode completed-phase error = %v", err)
++	}
++	if _, err := db.Exec(`
++		UPDATE memory_namespace_migration_state
++		SET phase = 'frozen', legacy_namespace_id = NULL, legacy_principal_id = NULL, legacy_namespace_slug = NULL, legacy_namespace_display_name = NULL, legacy_principal_key = NULL
++		WHERE singleton_id`); err != nil {
++		t.Fatal(err)
++	}
++	if err := validateNamespaceStartup(context.Background(), db, true); err == nil ||
++		!strings.Contains(err.Error(), "unsupported namespace migration phase") {
++		t.Fatalf("frozen phase error = %v", err)
++	}
++	if _, err := db.Exec(`
++		UPDATE memory_namespace_migration_state
++		SET phase = 'application_ready', legacy_namespace_id = '60000000-0000-4000-8000-000000000201', legacy_principal_id = '70000000-0000-4000-8000-000000000201', legacy_namespace_slug = 'integration-team', legacy_namespace_display_name = 'Integration Team', legacy_principal_key = repeat('d', 64)
++		WHERE singleton_id`); err != nil {
++		t.Fatal(err)
++	}
++	if err := validateNamespaceStartup(context.Background(), db, true); err == nil ||
++		!strings.Contains(err.Error(), "unsupported namespace migration phase") {
++		t.Fatalf("application-ready phase error = %v", err)
++	}
++	if _, err := db.Exec(`
++		UPDATE memory_namespace_migration_state
++		SET phase = 'constraints_complete'
++		WHERE singleton_id`); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.Exec(`
++		ALTER TABLE sessions ALTER COLUMN principal_id DROP NOT NULL`); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.Exec(`
++		INSERT INTO sessions (
++			id, session_id, app_id, role, content, content_hash, namespace_id
++		) VALUES (
++			'95000000-0000-4000-8000-000000000001',
++			'session', 'app', 'user', 'content', repeat('c', 64), $1
++		)`,
++		testutil.TestNamespaceID,
++	); err != nil {
++		t.Fatal(err)
++	}
++	if err := validateNamespaceStartup(context.Background(), db, true); err == nil ||
++		!strings.Contains(err.Error(), "1 unassigned rows") {
++		t.Fatalf("unassigned session error = %v", err)
++	}
++	if _, err := db.Exec(`DELETE FROM sessions`); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.Exec(`
++		ALTER TABLE upload_tasks ALTER COLUMN namespace_id DROP NOT NULL`); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.Exec(`
++		INSERT INTO upload_tasks (
++			task_id, tenant_id, file_name, file_path, file_type, status
++		) VALUES (
++			'95000000-0000-4000-8000-000000000002',
++			'tenant-a', 'test.txt', '/tmp/test.txt', 'txt', 'completed'
++		)`); err != nil {
++		t.Fatal(err)
++	}
++	if err := validateNamespaceStartup(context.Background(), db, true); err == nil ||
++		!strings.Contains(err.Error(), "1 unassigned rows") {
++		t.Fatalf("unassigned upload error = %v", err)
++	}
++
++	if _, err := db.Exec(`
++		UPDATE memory_namespace_migration_state
++		SET phase = 'additive_ready', legacy_namespace_id = NULL, legacy_principal_id = NULL, legacy_namespace_slug = NULL, legacy_namespace_display_name = NULL, legacy_principal_key = NULL
++		WHERE singleton_id`); err != nil {
++		t.Fatal(err)
++	}
++	if err := validateNamespaceStartup(context.Background(), db, false); err != nil {
++		t.Fatalf("additive compatibility phase rejected: %v", err)
++	}
++}
+diff --git a/server/internal/config/config.go b/server/internal/config/config.go
+index 633477846ad6f807251778107d96228bd76fcfdf..9c0d4c0fb70f5d08d4f902ad4261ea30f02c71bf 100644
+--- a/server/internal/config/config.go
++++ b/server/internal/config/config.go
+@@ -40,6 +40,9 @@ type Config struct {
+ 	DurableIngestEnabled     bool
+ 	DurableIngestTenantID    string
+ 	DurableIngestMetricStage string
++	NamespaceRequired        bool
++	TransportIssuer          string
++	TransportSigningKeys     string `json:"-"`
+ 
+ 	// DisableSessionSave skips raw session row persistence for message ingest.
+ 	// Smart ingest still extracts and reconciles facts into insight memories.
+@@ -193,6 +196,9 @@ func Load() (*Config, error) {
+ 		DurableIngestEnabled:             envBool("MNEMO_DURABLE_INGEST_ENABLED", false),
+ 		DurableIngestTenantID:            strings.TrimSpace(os.Getenv("MEM9_TENANT_ID")),
+ 		DurableIngestMetricStage:         strings.TrimSpace(os.Getenv("MNEMO_DURABLE_INGEST_METRIC_STAGE")),
++		NamespaceRequired:                envBool("MNEMO_NAMESPACE_REQUIRED", false),
++		TransportIssuer:                  strings.TrimSpace(os.Getenv("MNEMO_TRANSPORT_ISSUER")),
++		TransportSigningKeys:             strings.TrimSpace(os.Getenv("MNEMO_TRANSPORT_SIGNING_KEYS")),
+ 		DisableSessionSave:               envBool("MNEMO_DISABLE_SESSION_SAVE", false),
+ 		TiDBZeroEnabled:                  envBool("MNEMO_TIDB_ZERO_ENABLED", true),
+ 		TiDBZeroAPIURL:                   envOr("MNEMO_TIDB_ZERO_API_URL", "https://zero.tidbapi.com/v1alpha1"),
+diff --git a/server/internal/domain/errors.go b/server/internal/domain/errors.go
+index ba459724e9e61cfc444b69518c650ec1b5e498c0..304223229982011984bc30153da607fa60a2f7f0 100644
+--- a/server/internal/domain/errors.go
++++ b/server/internal/domain/errors.go
+@@ -11,6 +11,8 @@ var (
+ 	ErrNotSupported            = errors.New("not supported")
+ 	ErrAutoVectorSearchSkipped = errors.New("auto vector search skipped")
+ 	ErrSchemaIncompatible      = errors.New("schema incompatible")
++	ErrNamespaceVectorCapacity = errors.New("namespace_vector_capacity")
++	ErrNamespaceVectorTimeout  = errors.New("namespace_vector_timeout")
+ 	// ErrPreconditionFailed reports that a caller-supplied precondition (an
+ 	// `If-Match` version) no longer holds, so the write was NOT applied.
+ 	// mem9-on-aws patch (issue #128): distinct from ErrConflict so a fenced
+diff --git a/server/internal/domain/types.go b/server/internal/domain/types.go
+index 1cb48f4bfb8becdcb77049845a5c760dc7776be8..609e3f3339a51e9fe1be1978e0e1ebac4cb8efc2 100644
+--- a/server/internal/domain/types.go
++++ b/server/internal/domain/types.go
+@@ -81,10 +81,20 @@ type AuthInfo struct {
+ 	// service APIs. It must not be logged raw.
+ 	APIKeySubject string
+ 
++	Namespace *NamespaceScope
++
+ 	// Chain is non-nil when X-API-Key resolved to a Space Chain key.
+ 	Chain *ChainAuth
+ }
+ 
++type NamespaceScope struct {
++	TenantID      string
++	NamespaceID   string
++	PrincipalID   string
++	PrincipalType string
++	Role          string
++}
++
+ func (a *AuthInfo) IsChain() bool {
+ 	return a != nil && a.Chain != nil
+ }
+diff --git a/server/internal/handler/durable_ingest_test.go b/server/internal/handler/durable_ingest_test.go
+index bc2de92ad91f2ea23a949231ae23697a1a0874e7..428e3072c75191d2e8b5e65733278c2355de05cf 100644
+--- a/server/internal/handler/durable_ingest_test.go
++++ b/server/internal/handler/durable_ingest_test.go
+@@ -33,9 +33,9 @@ func (r *handlerIngestRepo) Enqueue(ctx context.Context, input ingestqueue.Enque
+ 	return r.enqueue(ctx, input)
+ }
+ 
+-func (r *handlerIngestRepo) Get(ctx context.Context, tenantID, jobID string) (*ingestqueue.Job, error) {
++func (r *handlerIngestRepo) Get(ctx context.Context, tenantID, namespaceID, jobID string) (*ingestqueue.Job, error) {
+ 	if r.get == nil {
+-		return r.Repository.Get(ctx, tenantID, jobID)
++		return r.Repository.Get(ctx, tenantID, namespaceID, jobID)
+ 	}
+ 	return r.get(ctx, tenantID, jobID)
+ }
+@@ -48,6 +48,13 @@ func durableRequest(t *testing.T, tenant string, db *sql.DB, body map[string]any
+ 		TenantDB:  db,
+ 		ClusterID: "cluster-a",
+ 		AgentName: "authenticated-agent",
++		Namespace: &domain.NamespaceScope{
++			TenantID:      tenant,
++			NamespaceID:   testutil.TestNamespaceID,
++			PrincipalID:   testutil.TestPrincipalID,
++			PrincipalType: "service",
++			Role:          "owner",
++		},
+ 	}
+ 	return req.WithContext(middleware.WithAuthContext(req.Context(), auth))
+ }
+diff --git a/server/internal/handler/handler.go b/server/internal/handler/handler.go
+index c7f731a93bb9ff144ddafc926b96c7dc7f9adaf1..ab88c0ffcc87d09cd5ff98d787096151fb5acf16 100644
+--- a/server/internal/handler/handler.go
++++ b/server/internal/handler/handler.go
+@@ -51,6 +51,7 @@ type Server struct {
+ 	svcCache             sync.Map
+ 	chainRecallStopScore float64
+ 	disableSessionSave   bool
++	namespaceRequired    bool
+ 	durableIngestEnabled bool
+ 	durableTelemetry     ingestqueue.Telemetry
+ 	ingestRepoFactory    func(string, *sql.DB) ingestqueue.Repository
+@@ -119,6 +120,11 @@ func (s *Server) WithDisableSessionSave(disabled bool) *Server {
+ 	return s
+ }
+ 
++func (s *Server) WithNamespaceRequired(required bool) *Server {
++	s.namespaceRequired = required
++	return s
++}
++
+ func (s *Server) WithDurableIngest(enabled bool) *Server {
+ 	s.durableIngestEnabled = enabled
+ 	return s
+@@ -141,14 +147,20 @@ type tenantSvcKey string
+ 
+ // resolveServices returns the correct services for a request.
+ func (s *Server) resolveServices(auth *domain.AuthInfo) resolvedSvc {
++	scopeKey := ""
++	var scopes []domain.NamespaceScope
++	if auth.Namespace != nil {
++		scopeKey = ":" + auth.Namespace.NamespaceID + ":" + auth.Namespace.PrincipalID
++		scopes = append(scopes, *auth.Namespace)
++	}
+ 	if auth.TenantID == "" {
+-		key := tenantSvcKey(fmt.Sprintf("db-%p", auth.TenantDB))
++		key := tenantSvcKey(fmt.Sprintf("db-%p%s", auth.TenantDB, scopeKey))
+ 		if cached, ok := s.svcCache.Load(key); ok {
+ 			return cached.(resolvedSvc)
+ 		}
+ 		schemaReady := s.ensureTenantRuntimeSchema(auth)
+-		memRepo := repository.NewMemoryRepo(s.dbBackend, auth.TenantDB, s.autoModel, s.ftsEnabled, auth.ClusterID)
+-		sessRepo := repository.NewSessionRepo(s.dbBackend, auth.TenantDB, s.autoModel, s.ftsEnabled, auth.ClusterID)
++		memRepo := repository.NewMemoryRepo(s.dbBackend, auth.TenantDB, s.autoModel, s.ftsEnabled, auth.ClusterID, scopes...)
++		sessRepo := repository.NewSessionRepo(s.dbBackend, auth.TenantDB, s.autoModel, s.ftsEnabled, auth.ClusterID, scopes...)
+ 		svc := resolvedSvc{
+ 			memory:  service.NewMemoryService(memRepo, s.llmClient, s.embedder, s.autoModel, s.ingestMode),
+ 			ingest:  service.NewIngestService(memRepo, s.llmClient, s.embedder, s.autoModel, s.ingestMode),
+@@ -160,13 +172,13 @@ func (s *Server) resolveServices(auth *domain.AuthInfo) resolvedSvc {
+ 		actual, _ := s.svcCache.LoadOrStore(key, svc)
+ 		return actual.(resolvedSvc)
+ 	}
+-	key := tenantSvcKey(fmt.Sprintf("%s-%p", auth.TenantID, auth.TenantDB))
++	key := tenantSvcKey(fmt.Sprintf("%s-%p%s", auth.TenantID, auth.TenantDB, scopeKey))
+ 	if cached, ok := s.svcCache.Load(key); ok {
+ 		return cached.(resolvedSvc)
+ 	}
+ 	schemaReady := s.ensureTenantRuntimeSchema(auth)
+-	memRepo := repository.NewMemoryRepo(s.dbBackend, auth.TenantDB, s.autoModel, s.ftsEnabled, auth.ClusterID)
+-	sessRepo := repository.NewSessionRepo(s.dbBackend, auth.TenantDB, s.autoModel, s.ftsEnabled, auth.ClusterID)
++	memRepo := repository.NewMemoryRepo(s.dbBackend, auth.TenantDB, s.autoModel, s.ftsEnabled, auth.ClusterID, scopes...)
++	sessRepo := repository.NewSessionRepo(s.dbBackend, auth.TenantDB, s.autoModel, s.ftsEnabled, auth.ClusterID, scopes...)
+ 	svc := resolvedSvc{
+ 		memory:  service.NewMemoryService(memRepo, s.llmClient, s.embedder, s.autoModel, s.ingestMode),
+ 		ingest:  service.NewIngestService(memRepo, s.llmClient, s.embedder, s.autoModel, s.ingestMode),
+@@ -230,54 +242,47 @@ func (s *Server) Router(
+ 
+ 	r.Get("/metrics", promhttp.Handler().ServeHTTP)
+ 
+-	// Provision a new tenant — no auth, no body.
+-	r.Post("/v1alpha1/mem9s", s.provisionMem9s)
+-
+-	// Key status validates X-API-Key against control-plane state only.
+-	r.Get("/v1alpha2/status", s.getKeyStatus)
+-	r.Get("/v1alpha2/mem9s/runtime-state", s.getRuntimeState)
+-
+-	r.Post("/v1alpha2/space-chains", s.createSpaceChain)
+-	r.Get("/v1alpha2/space-chains/by-key", s.getSpaceChainByKey)
+-	r.Route("/v1alpha2/space-chains/{chainID}", func(r chi.Router) {
+-		r.Get("/", s.getSpaceChain)
+-		r.Patch("/", s.updateSpaceChain)
+-		r.Delete("/", s.deleteSpaceChain)
+-		r.Get("/nodes", s.listSpaceChainNodes)
+-		r.Put("/nodes", s.replaceSpaceChainNodes)
+-		r.Put("/nodes/{nodeID}/routing-policy", s.updateSpaceChainNodeRoutingPolicy)
+-		r.Get("/bindings", s.listSpaceChainBindings)
+-		r.Post("/bindings", s.createSpaceChainBinding)
+-		r.Patch("/bindings/{bindingID}", s.disableSpaceChainBinding)
+-		r.Get("/webhooks", s.listSpaceChainWebhooks)
+-		r.Post("/webhooks", s.createSpaceChainWebhook)
+-		r.Get("/webhooks/{webhookID}", s.getSpaceChainWebhook)
+-		r.Patch("/webhooks/{webhookID}", s.updateSpaceChainWebhook)
+-		r.Delete("/webhooks/{webhookID}", s.deleteSpaceChainWebhook)
+-		r.Post("/webhooks/{webhookID}/test", s.testSpaceChainWebhook)
+-		r.Post("/webhooks/{webhookID}/rotate-secret", s.rotateSpaceChainWebhookSecret)
+-		r.Get("/webhook-deliveries", s.listSpaceChainWebhookDeliveries)
+-	})
+-
+-	// Tenant-scoped routes — tenantMW resolves {tenantID} to DB connection.
+-	r.Route("/v1alpha1/mem9s/{tenantID}", func(r chi.Router) {
+-		r.Use(tenantMW)
+-
+-		// Memory CRUD.
+-		r.Post("/memories", s.createMemory)
+-		r.Get("/memories", s.listMemories)
+-		r.Get("/memories/{id}", s.getMemory)
+-		r.Put("/memories/{id}", s.updateMemory)
+-		r.Delete("/memories/{id}", s.deleteMemory)
+-
+-		// Imports (async file ingest).
+-		r.Post("/imports", s.createTask)
+-		r.Get("/imports", s.listTasks)
+-		r.Get("/imports/{id}", s.getTask)
++	if !s.namespaceRequired {
++		// Namespace-required deployments do not expose legacy tenant-wide paths.
++		r.Post("/v1alpha1/mem9s", s.provisionMem9s)
++		r.Get("/v1alpha2/status", s.getKeyStatus)
++		r.Get("/v1alpha2/mem9s/runtime-state", s.getRuntimeState)
++
++		r.Post("/v1alpha2/space-chains", s.createSpaceChain)
++		r.Get("/v1alpha2/space-chains/by-key", s.getSpaceChainByKey)
++		r.Route("/v1alpha2/space-chains/{chainID}", func(r chi.Router) {
++			r.Get("/", s.getSpaceChain)
++			r.Patch("/", s.updateSpaceChain)
++			r.Delete("/", s.deleteSpaceChain)
++			r.Get("/nodes", s.listSpaceChainNodes)
++			r.Put("/nodes", s.replaceSpaceChainNodes)
++			r.Put("/nodes/{nodeID}/routing-policy", s.updateSpaceChainNodeRoutingPolicy)
++			r.Get("/bindings", s.listSpaceChainBindings)
++			r.Post("/bindings", s.createSpaceChainBinding)
++			r.Patch("/bindings/{bindingID}", s.disableSpaceChainBinding)
++			r.Get("/webhooks", s.listSpaceChainWebhooks)
++			r.Post("/webhooks", s.createSpaceChainWebhook)
++			r.Get("/webhooks/{webhookID}", s.getSpaceChainWebhook)
++			r.Patch("/webhooks/{webhookID}", s.updateSpaceChainWebhook)
++			r.Delete("/webhooks/{webhookID}", s.deleteSpaceChainWebhook)
++			r.Post("/webhooks/{webhookID}/test", s.testSpaceChainWebhook)
++			r.Post("/webhooks/{webhookID}/rotate-secret", s.rotateSpaceChainWebhookSecret)
++			r.Get("/webhook-deliveries", s.listSpaceChainWebhookDeliveries)
++		})
+ 
+-		// Session messages (raw captured turns).
+-		r.Get("/session-messages", s.handleListSessionMessages)
+-	})
++		r.Route("/v1alpha1/mem9s/{tenantID}", func(r chi.Router) {
++			r.Use(tenantMW)
++			r.Post("/memories", s.createMemory)
++			r.Get("/memories", s.listMemories)
++			r.Get("/memories/{id}", s.getMemory)
++			r.Put("/memories/{id}", s.updateMemory)
++			r.Delete("/memories/{id}", s.deleteMemory)
++			r.Post("/imports", s.createTask)
++			r.Get("/imports", s.listTasks)
++			r.Get("/imports/{id}", s.getTask)
++			r.Get("/session-messages", s.handleListSessionMessages)
++		})
++	}
+ 
+ 	r.Route("/v1alpha2/mem9s", func(r chi.Router) {
+ 		r.Use(apiKeyMW)
+@@ -288,27 +293,30 @@ func (s *Server) Router(
+ 		r.Put("/memories/{id}", s.updateMemory)
+ 		r.Delete("/memories/{id}", s.deleteMemory)
+ 		r.Post("/memories/batch-delete", s.batchDeleteMemories)
+-		r.Get("/webhooks", s.listTenantWebhooks)
+-		r.Post("/webhooks", s.createTenantWebhook)
+-		r.Get("/webhooks/{webhookID}", s.getTenantWebhook)
+-		r.Patch("/webhooks/{webhookID}", s.updateTenantWebhook)
+-		r.Delete("/webhooks/{webhookID}", s.deleteTenantWebhook)
+-		r.Post("/webhooks/{webhookID}/test", s.testTenantWebhook)
+-		r.Post("/webhooks/{webhookID}/rotate-secret", s.rotateTenantWebhookSecret)
+-		r.Get("/webhook-deliveries", s.listTenantWebhookDeliveries)
+-
+-		r.Post("/imports", s.createTask)
+-		r.Get("/imports", s.listTasks)
+-		r.Get("/imports/{id}", s.getTask)
++		if !s.namespaceRequired {
++			r.Get("/webhooks", s.listTenantWebhooks)
++			r.Post("/webhooks", s.createTenantWebhook)
++			r.Get("/webhooks/{webhookID}", s.getTenantWebhook)
++			r.Patch("/webhooks/{webhookID}", s.updateTenantWebhook)
++			r.Delete("/webhooks/{webhookID}", s.deleteTenantWebhook)
++			r.Post("/webhooks/{webhookID}/test", s.testTenantWebhook)
++			r.Post("/webhooks/{webhookID}/rotate-secret", s.rotateTenantWebhookSecret)
++			r.Get("/webhook-deliveries", s.listTenantWebhookDeliveries)
++			r.Post("/imports", s.createTask)
++			r.Get("/imports", s.listTasks)
++			r.Get("/imports/{id}", s.getTask)
++		}
+ 
+ 		// Session messages (raw captured turns).
+ 		r.Get("/session-messages", s.handleListSessionMessages)
+ 		r.Get("/ingest-jobs/{jobID}", s.getIngestJobStatus)
+ 		// Raw-session edit overlay (display-only; only affects Session Search
+ 		// rendering, never the sessions/memories tables or recall).
+-		r.Put("/session-messages/{id}", s.editSessionMessage)
+-		r.Get("/session-messages/{id}/edit", s.getSessionMessageEdit)
+-		r.Delete("/session-messages/{id}/edit", s.deleteSessionMessageEdit)
++		if !s.namespaceRequired {
++			r.Put("/session-messages/{id}", s.editSessionMessage)
++			r.Get("/session-messages/{id}/edit", s.getSessionMessageEdit)
++			r.Delete("/session-messages/{id}/edit", s.deleteSessionMessageEdit)
++		}
+ 	})
+ 
+ 	return r
+@@ -352,6 +360,10 @@ func (s *Server) handleError(ctx context.Context, w http.ResponseWriter, err err
+ 		respondError(w, http.StatusNotImplemented, err.Error())
+ 	case errors.Is(err, domain.ErrSchemaIncompatible):
+ 		respondError(w, http.StatusConflict, err.Error())
++	case errors.Is(err, domain.ErrNamespaceVectorCapacity):
++		respondError(w, http.StatusUnprocessableEntity, "namespace_vector_capacity")
++	case errors.Is(err, domain.ErrNamespaceVectorTimeout):
++		respondError(w, http.StatusServiceUnavailable, "namespace_vector_timeout")
+ 	default:
+ 		s.logger.Error("internal error", "err", err, "request_id", reqid.FromContext(ctx))
+ 		respondError(w, http.StatusInternalServerError, "internal server error")
+diff --git a/server/internal/handler/ingest_job_status.go b/server/internal/handler/ingest_job_status.go
+index 49339ad25e0597aaea1c48900f2460e3e9da4575..0c55e447da32802656874ef643507c5f315e74e7 100644
+--- a/server/internal/handler/ingest_job_status.go
++++ b/server/internal/handler/ingest_job_status.go
+@@ -32,7 +32,11 @@ func (s *Server) getIngestJobStatus(w http.ResponseWriter, r *http.Request) {
+ 		respondError(w, http.StatusNotFound, "ingest job not found")
+ 		return
+ 	}
+-	job, err := repo.Get(r.Context(), auth.TenantID, jobID)
++	namespaceID := ""
++	if auth.Namespace != nil {
++		namespaceID = auth.Namespace.NamespaceID
++	}
++	job, err := repo.Get(r.Context(), auth.TenantID, namespaceID, jobID)
+ 	if err != nil {
+ 		if !errors.Is(err, sql.ErrNoRows) {
+ 			s.logger.Warn("ingest job status lookup failed", "operation", "status")
+diff --git a/server/internal/handler/memory.go b/server/internal/handler/memory.go
+index a86a60a0304f3917e1b8980e33e216d5d9701eef..13cf3337b003b84dcfb5d01f8635bb5a6b9ae342 100644
+--- a/server/internal/handler/memory.go
++++ b/server/internal/handler/memory.go
+@@ -553,6 +553,20 @@ func (s *Server) enqueueDurableIngest(
+ 		Messages:           messages,
+ 		Metadata:           req.Metadata,
+ 	})
++	if auth.Namespace != nil {
++		envelope, err = ingestqueue.Canonicalize(ingestqueue.CanonicalInput{
++			TenantID:           auth.TenantID,
++			NamespaceID:        auth.Namespace.NamespaceID,
++			PrincipalID:        auth.Namespace.PrincipalID,
++			AgentID:            req.AgentID,
++			AppID:              req.AppID,
++			SessionID:          req.SessionID,
++			Mode:               string(mode),
++			DisableSessionSave: req.DisableSessionSave,
++			Messages:           messages,
++			Metadata:           req.Metadata,
++		})
++	}
+ 	if err != nil {
+ 		if errors.Is(err, ingestqueue.ErrCanonicalPayloadTooLarge) {
+ 			return nil, &domain.ValidationError{
+@@ -577,6 +591,10 @@ func (s *Server) enqueueDurableIngest(
+ 		Mode:               string(mode),
+ 		DisableSessionSave: req.DisableSessionSave,
+ 	}
++	if auth.Namespace != nil {
++		input.NamespaceID = auth.Namespace.NamespaceID
++		input.PrincipalID = auth.Namespace.PrincipalID
++	}
+ 	if lease != nil && lease.Reserved {
+ 		input.RuntimeOperationID = lease.OperationID
+ 		input.RuntimeClusterID = auth.ClusterID
+diff --git a/server/internal/handler/namespace_routes_test.go b/server/internal/handler/namespace_routes_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a294d379871ed3ee63a23e66db0839a90d798426
+--- /dev/null
++++ b/server/internal/handler/namespace_routes_test.go
+@@ -0,0 +1,64 @@
++package handler
++
++import (
++	"io"
++	"log/slog"
++	"net/http"
++	"net/http/httptest"
++	"testing"
++
++	"github.com/qiffang/mnemos/server/internal/service"
++)
++
++func passMiddleware(next http.Handler) http.Handler {
++	return next
++}
++
++func TestNamespaceRequiredRouterHidesUnsupportedRoutes(t *testing.T) {
++	srv := NewServer(
++		nil,
++		nil,
++		"",
++		nil,
++		nil,
++		"",
++		false,
++		service.ModeSmart,
++		"postgres",
++		slog.New(slog.NewTextHandler(io.Discard, nil)),
++	).WithNamespaceRequired(true)
++	router := srv.Router(
++		passMiddleware,
++		passMiddleware,
++		passMiddleware,
++		passMiddleware,
++	)
++
++	for _, tc := range []struct {
++		method string
++		path   string
++	}{
++		{http.MethodPost, "/v1alpha1/mem9s"},
++		{http.MethodGet, "/v1alpha2/status"},
++		{http.MethodPost, "/v1alpha2/space-chains"},
++		{http.MethodPost, "/v1alpha1/mem9s/tenant-a/memories"},
++		{http.MethodPost, "/v1alpha2/mem9s/imports"},
++		{http.MethodPost, "/v1alpha2/mem9s/webhooks"},
++		{http.MethodPut, "/v1alpha2/mem9s/session-messages/message-a"},
++	} {
++		t.Run(tc.method+" "+tc.path, func(t *testing.T) {
++			recorder := httptest.NewRecorder()
++			router.ServeHTTP(
++				recorder,
++				httptest.NewRequest(tc.method, tc.path, nil),
++			)
++			if recorder.Code != http.StatusNotFound {
++				t.Fatalf(
++					"status = %d, want 404: %s",
++					recorder.Code,
++					recorder.Body.String(),
++				)
++			}
++		})
++	}
++}
+diff --git a/server/internal/handler/session_delete_postgres_integration_test.go b/server/internal/handler/session_delete_postgres_integration_test.go
+index d413bfb69e0bc38b840aa6867172e5c2093fcb52..06287b639f140215d2a2d4fb32ac287b40a078e9 100644
+--- a/server/internal/handler/session_delete_postgres_integration_test.go
++++ b/server/internal/handler/session_delete_postgres_integration_test.go
+@@ -57,6 +57,13 @@ func postgresSessionDeleteRequest(
+ 		TenantDB:  db,
+ 		ClusterID: "cluster-" + tenantID,
+ 		AgentName: "authenticated-agent",
++		Namespace: &domain.NamespaceScope{
++			TenantID:      tenantID,
++			NamespaceID:   testutil.TestNamespaceID,
++			PrincipalID:   testutil.TestPrincipalID,
++			PrincipalType: "service",
++			Role:          "owner",
++		},
+ 	}
+ 	return req.WithContext(middleware.WithAuthContext(req.Context(), auth))
+ }
+@@ -145,9 +152,11 @@ func TestPostgresAuthenticatedMixedBatchDelete(t *testing.T) {
+ 	unrequestedSessionID := "20000000-0000-4000-8000-00000000a013"
+ 	unknownID := "20000000-0000-4000-8000-00000000a098"
+ 	if _, err := db.Exec(`
+-		INSERT INTO memories (id, content, state, created_at, updated_at)
+-		VALUES ($1, 'memory row', 'active', $2, $2)
+-	`, memoryID, originalUpdatedAt); err != nil {
++		INSERT INTO memories (
++			id, content, state, namespace_id, created_at, updated_at
++		)
++		VALUES ($1, 'memory row', 'active', $2, $3, $3)
++	`, memoryID, testutil.TestNamespaceID, originalUpdatedAt); err != nil {
+ 		t.Fatalf("insert memory: %v", err)
+ 	}
+ 	testutil.InsertSessionRow(t, db, activeSessionID, domain.StateActive, originalUpdatedAt)
+@@ -260,9 +269,11 @@ func TestPostgresAuthenticatedDeleteWithoutSessionsTable(t *testing.T) {
+ 	originalUpdatedAt := time.Date(2026, 6, 7, 8, 9, 10, 0, time.UTC)
+ 	memoryID := "20000000-0000-4000-8000-00000000a020"
+ 	if _, err := db.Exec(`
+-		INSERT INTO memories (id, content, state, created_at, updated_at)
+-		VALUES ($1, 'memory row', 'active', $2, $2)
+-	`, memoryID, originalUpdatedAt); err != nil {
++		INSERT INTO memories (
++			id, content, state, namespace_id, created_at, updated_at
++		)
++		VALUES ($1, 'memory row', 'active', $2, $3, $3)
++	`, memoryID, testutil.TestNamespaceID, originalUpdatedAt); err != nil {
+ 		t.Fatalf("insert memory: %v", err)
+ 	}
+ 	batch := postgresSessionDeleteRequest(
+diff --git a/server/internal/ingestqueue/canonical.go b/server/internal/ingestqueue/canonical.go
+index b528e4ea4a53e7dfffd7c20f677ec8c76bf52135..af91ca013cb01341976dbb8f9d77c9152fe24531 100644
+--- a/server/internal/ingestqueue/canonical.go
++++ b/server/internal/ingestqueue/canonical.go
+@@ -17,6 +17,12 @@ func Canonicalize(input CanonicalInput) (CanonicalEnvelope, error) {
+ 	if strings.TrimSpace(input.TenantID) == "" {
+ 		return CanonicalEnvelope{}, fmt.Errorf("tenant_id is required")
+ 	}
++	if (strings.TrimSpace(input.NamespaceID) == "") !=
++		(strings.TrimSpace(input.PrincipalID) == "") {
++		return CanonicalEnvelope{}, fmt.Errorf(
++			"namespace_id and principal_id must be provided together",
++		)
++	}
+ 	if input.Mode == "" {
+ 		input.Mode = "smart"
+ 	}
+@@ -41,6 +47,8 @@ func Canonicalize(input CanonicalInput) (CanonicalEnvelope, error) {
+ 	envelope := map[string]any{
+ 		"version":            "ingest-v1",
+ 		"tenant_id":          input.TenantID,
++		"namespace_id":       input.NamespaceID,
++		"principal_id":       input.PrincipalID,
+ 		"agent_id":           input.AgentID,
+ 		"app_id":             input.AppID,
+ 		"session_id":         input.SessionID,
+diff --git a/server/internal/ingestqueue/plan.go b/server/internal/ingestqueue/plan.go
+index 81420867ab19bf488e5915fa9c4aed1b435bc02d..98a51ba1a477de8e23b4bbc573f0d1f40db66c98 100644
+--- a/server/internal/ingestqueue/plan.go
++++ b/server/internal/ingestqueue/plan.go
+@@ -21,6 +21,13 @@ func FinalizePlan(input AtomicPlan) (AtomicPlan, error) {
+ 	if strings.TrimSpace(plan.JobID) == "" || strings.TrimSpace(plan.TenantID) == "" {
+ 		return AtomicPlan{}, fmt.Errorf("%w: job and tenant are required", ErrPlanInvalid)
+ 	}
++	if (strings.TrimSpace(plan.NamespaceID) == "") !=
++		(strings.TrimSpace(plan.PrincipalID) == "") {
++		return AtomicPlan{}, fmt.Errorf(
++			"%w: namespace and principal must be provided together",
++			ErrPlanInvalid,
++		)
++	}
+ 	if plan.Revision < 1 || plan.AttemptGeneration < 1 {
+ 		return AtomicPlan{}, fmt.Errorf("%w: revision and attempt must be positive", ErrPlanInvalid)
+ 	}
+diff --git a/server/internal/ingestqueue/types.go b/server/internal/ingestqueue/types.go
+index a999ca1304e3c014d7966f92cd56af34e9d79458..5ff7ad6954ea4ac3269c17afe17ca2e6e47ac826 100644
+--- a/server/internal/ingestqueue/types.go
++++ b/server/internal/ingestqueue/types.go
+@@ -69,6 +69,8 @@ type Message struct {
+ 
+ type CanonicalInput struct {
+ 	TenantID           string
++	NamespaceID        string
++	PrincipalID        string
+ 	AgentID            string
+ 	AppID              string
+ 	SessionID          string
+@@ -86,6 +88,8 @@ type CanonicalEnvelope struct {
+ type EnqueueInput struct {
+ 	ID                          string
+ 	TenantID                    string
++	NamespaceID                 string
++	PrincipalID                 string
+ 	IdempotencyKey              string
+ 	CanonicalPayload            json.RawMessage
+ 	AgentID                     string
+@@ -105,6 +109,8 @@ type Job struct {
+ 	TerminalTransition          bool
+ 	ClaimedAt                   time.Time
+ 	TenantID                    string
++	NamespaceID                 string
++	PrincipalID                 string
+ 	IdempotencyKey              string
+ 	CanonicalPayload            json.RawMessage
+ 	AgentID                     string
+@@ -140,18 +146,22 @@ type Job struct {
+ }
+ 
+ type LeaseRef struct {
+-	TenantID   string
+-	JobID      string
+-	Owner      string
+-	Generation int
++	TenantID    string
++	NamespaceID string
++	PrincipalID string
++	JobID       string
++	Owner       string
++	Generation  int
+ }
+ 
+ func (j *Job) LeaseRef() LeaseRef {
+ 	return LeaseRef{
+-		TenantID:   j.TenantID,
+-		JobID:      j.ID,
+-		Owner:      j.LeaseOwner,
+-		Generation: j.AttemptCount,
++		TenantID:    j.TenantID,
++		NamespaceID: j.NamespaceID,
++		PrincipalID: j.PrincipalID,
++		JobID:       j.ID,
++		Owner:       j.LeaseOwner,
++		Generation:  j.AttemptCount,
+ 	}
+ }
+ 
+@@ -181,7 +191,7 @@ type Processor interface {
+ 
+ type Repository interface {
+ 	Enqueue(context.Context, EnqueueInput) (*Job, error)
+-	Get(context.Context, string, string) (*Job, error)
++	Get(context.Context, string, string, string) (*Job, error)
+ 	OldestQueuedAge(context.Context, string) (time.Duration, bool, error)
+ 	Claim(context.Context, string, string, time.Duration, int) (*Job, error)
+ 	StartPlanning(context.Context, LeaseRef) error
+@@ -247,6 +257,8 @@ type AtomicPlan struct {
+ 	Version                string            `json:"version"`
+ 	JobID                  string            `json:"job_id"`
+ 	TenantID               string            `json:"tenant_id"`
++	NamespaceID            string            `json:"namespace_id,omitempty"`
++	PrincipalID            string            `json:"principal_id,omitempty"`
+ 	Revision               int               `json:"plan_revision"`
+ 	AttemptGeneration      int               `json:"attempt_generation"`
+ 	Sessions               []SessionUpsert   `json:"sessions"`
+diff --git a/server/internal/ingestqueue/worker_integration_test.go b/server/internal/ingestqueue/worker_integration_test.go
+index a3ca4ff0d5eaed4cc160786ae828deb96bc9b86b..b4fee339bdd800b4cfb3313696806f4febaae7d8 100644
+--- a/server/internal/ingestqueue/worker_integration_test.go
++++ b/server/internal/ingestqueue/worker_integration_test.go
+@@ -36,6 +36,8 @@ func workerEnqueue(t *testing.T, repo *postgres.IngestJobRepo, index int, sessio
+ 	job, err := repo.Enqueue(context.Background(), ingestqueue.EnqueueInput{
+ 		ID:               fmt.Sprintf("10000000-0000-4000-8000-%012d", index),
+ 		TenantID:         "tenant-worker",
++		NamespaceID:      testutil.TestNamespaceID,
++		PrincipalID:      testutil.TestPrincipalID,
+ 		IdempotencyKey:   key,
+ 		CanonicalPayload: []byte(`{"version":"ingest-v1"}`),
+ 		AgentID:          "agent",
+@@ -86,6 +88,8 @@ func workerAtomicPlan(
+ 	return ingestqueue.FinalizePlan(ingestqueue.AtomicPlan{
+ 		JobID:             job.ID,
+ 		TenantID:          job.TenantID,
++		NamespaceID:       job.NamespaceID,
++		PrincipalID:       job.PrincipalID,
+ 		Revision:          revision,
+ 		AttemptGeneration: job.AttemptCount,
+ 	})
+diff --git a/server/internal/middleware/auth.go b/server/internal/middleware/auth.go
+index b64d6b340c7b380e5436b92487bb2afc81619919..da3484a8b569c20b2af53cfe7d84926d8b73834f 100644
+--- a/server/internal/middleware/auth.go
++++ b/server/internal/middleware/auth.go
+@@ -39,6 +39,7 @@ type authConfig struct {
+ 	spendLimitCooldown *SpendLimitCooldown
+ 	autoSpendLimitCfg  AutoSpendLimitConfig
+ 	spaceChains        repository.SpaceChainRepo
++	namespaceAuth      *NamespaceAuthorizer
+ }
+ 
+ // AutoSpendLimitConfig controls auto spend-limit adjustment behavior.
+@@ -63,6 +64,12 @@ func WithSpaceChainRepo(chains repository.SpaceChainRepo) authOption {
+ 	}
+ }
+ 
++func WithNamespaceAuthorizer(authorizer *NamespaceAuthorizer) authOption {
++	return func(c *authConfig) {
++		c.namespaceAuth = authorizer
++	}
++}
++
+ func isSpendLimitError(err error) bool {
+ 	return err != nil && strings.Contains(err.Error(), "usage quota being exhausted")
+ }
+@@ -352,6 +359,10 @@ func ResolveApiKey(
+ 			}
+ 
+ 			if strings.HasPrefix(apiKey, domain.ChainKeyPrefix) {
++				if state.namespaceAuth != nil {
++					writeError(w, http.StatusForbidden, "memory namespace authorization failed")
++					return
++				}
+ 				if state.spaceChains == nil {
+ 					writeError(w, http.StatusServiceUnavailable, "space chain auth unavailable")
+ 					return
+@@ -505,6 +516,21 @@ func ResolveApiKey(
+ 				ClusterID:     t.ClusterID,
+ 				APIKeySubject: apiKey,
+ 			}
++			if state.namespaceAuth != nil {
++				scope, err := state.namespaceAuth.Authorize(
++					r.Context(),
++					db,
++					t.ID,
++					r,
++				)
++				if err != nil {
++					if !writeNamespaceAuthError(w, err) {
++						writeError(w, http.StatusForbidden, "memory namespace authorization failed")
++					}
++					return
++				}
++				info.Namespace = scope
++			}
+ 			if agentID := r.Header.Get(AgentIDHeader); agentID != "" {
+ 				info.AgentName = agentID
+ 			}
+diff --git a/server/internal/middleware/namespace_auth.go b/server/internal/middleware/namespace_auth.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..5f9086051b796ea9e253f7ec69fe524bc768f6e8
+--- /dev/null
++++ b/server/internal/middleware/namespace_auth.go
+@@ -0,0 +1,456 @@
++package middleware
++
++import (
++	"context"
++	"crypto/hmac"
++	"crypto/sha256"
++	"database/sql"
++	"encoding/base64"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"regexp"
++	"slices"
++	"strings"
++	"time"
++
++	"github.com/google/uuid"
++
++	"github.com/qiffang/mnemos/server/internal/domain"
++)
++
++const (
++	TransportHeader       = "X-Mem9-Transport"
++	maxTransportBodyBytes = 1 << 20
++	maxTransportGroups    = 32
++)
++
++var hex64Pattern = regexp.MustCompile(`^[0-9a-f]{64}$`)
++
++type namespaceAuthError struct {
++	status int
++	msg    string
++	err    error
++}
++
++func (e *namespaceAuthError) Error() string {
++	if e.err != nil {
++		return e.err.Error()
++	}
++	return e.msg
++}
++
++func (e *namespaceAuthError) Unwrap() error { return e.err }
++
++type transportEnvelope struct {
++	Version       int      `json:"v"`
++	KeyID         string   `json:"kid"`
++	Issuer        string   `json:"issuer"`
++	IssuedAt      int64    `json:"issued_at"`
++	ExpiresAt     int64    `json:"expires_at"`
++	Method        string   `json:"method"`
++	Path          string   `json:"path"`
++	BodyHash      string   `json:"body_hash"`
++	PrincipalKey  string   `json:"principal_key"`
++	PrincipalType string   `json:"principal_type"`
++	ClientKey     string   `json:"client_key"`
++	GroupKeys     []string `json:"group_keys"`
++}
++
++type NamespaceAuthorizer struct {
++	issuer string
++	keys   map[string][]byte
++	now    func() time.Time
++}
++
++func NewNamespaceAuthorizer(issuer, rawKeys string) (*NamespaceAuthorizer, error) {
++	if strings.TrimSpace(issuer) == "" {
++		return nil, errors.New("MNEMO_TRANSPORT_ISSUER is required")
++	}
++	var encoded map[string]string
++	if err := json.Unmarshal([]byte(rawKeys), &encoded); err != nil {
++		return nil, fmt.Errorf("parse MNEMO_TRANSPORT_SIGNING_KEYS: %w", err)
++	}
++	keys := make(map[string][]byte, len(encoded))
++	for _, kid := range []string{"a", "b"} {
++		value := encoded[kid]
++		if value == "" {
++			return nil, fmt.Errorf("transport signing key %s is required", kid)
++		}
++		key, err := base64.RawURLEncoding.DecodeString(value)
++		if err != nil || len(key) < 32 {
++			return nil, fmt.Errorf("transport signing key %s is invalid", kid)
++		}
++		keys[kid] = key
++	}
++	if len(keys["a"]) == 0 {
++		return nil, errors.New("transport signing key a is required")
++	}
++	return &NamespaceAuthorizer{
++		issuer: issuer,
++		keys:   keys,
++		now:    time.Now,
++	}, nil
++}
++
++func (a *NamespaceAuthorizer) Authorize(
++	ctx context.Context,
++	db *sql.DB,
++	tenantID string,
++	r *http.Request,
++) (*domain.NamespaceScope, error) {
++	identity, err := a.verifyRequest(r)
++	if err != nil {
++		return nil, &namespaceAuthError{
++			status: http.StatusForbidden,
++			msg:    "memory namespace authorization failed",
++			err:    err,
++		}
++	}
++	scope, err := a.resolveScope(ctx, db, tenantID, identity)
++	if err != nil {
++		return nil, err
++	}
++	if scope.Role == "viewer" && r.Method != http.MethodGet && r.Method != http.MethodHead {
++		return nil, &namespaceAuthError{
++			status: http.StatusForbidden,
++			msg:    "memory namespace role denied",
++		}
++	}
++	return scope, nil
++}
++
++func (a *NamespaceAuthorizer) verifyRequest(r *http.Request) (transportEnvelope, error) {
++	var identity transportEnvelope
++	raw := strings.TrimSpace(r.Header.Get(TransportHeader))
++	parts := strings.Split(raw, ".")
++	if len(parts) != 2 {
++		return identity, errors.New("transport envelope is malformed")
++	}
++	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
++	if err != nil {
++		return identity, errors.New("transport envelope payload is malformed")
++	}
++	if err := json.Unmarshal(payload, &identity); err != nil {
++		return identity, errors.New("transport envelope payload is malformed")
++	}
++	key := a.keys[identity.KeyID]
++	if len(key) == 0 {
++		return identity, errors.New("transport envelope key is unknown")
++	}
++	macBytes, err := hex.DecodeString(parts[1])
++	if err != nil || len(macBytes) != sha256.Size {
++		return identity, errors.New("transport envelope signature is malformed")
++	}
++	expected := hmac.New(sha256.New, key)
++	_, _ = expected.Write(payload)
++	if !hmac.Equal(macBytes, expected.Sum(nil)) {
++		return identity, errors.New("transport envelope signature mismatch")
++	}
++
++	body := []byte{}
++	if r.Body != nil {
++		body, err = io.ReadAll(io.LimitReader(r.Body, maxTransportBodyBytes+1))
++		if err != nil {
++			return identity, errors.New("read transport request body")
++		}
++		if len(body) > maxTransportBodyBytes {
++			return identity, errors.New("transport request body is too large")
++		}
++		r.Body = io.NopCloser(strings.NewReader(string(body)))
++	}
++	bodyDigest := sha256.Sum256(body)
++	now := a.now().Unix()
++	if identity.Version != 1 ||
++		identity.Issuer != a.issuer ||
++		identity.Method != strings.ToUpper(r.Method) ||
++		identity.Path != r.URL.RequestURI() ||
++		identity.BodyHash != hex.EncodeToString(bodyDigest[:]) ||
++		!hex64Pattern.MatchString(identity.PrincipalKey) ||
++		!hex64Pattern.MatchString(identity.ClientKey) ||
++		(identity.PrincipalType != "human" && identity.PrincipalType != "m2m") ||
++		identity.ExpiresAt < now ||
++		identity.IssuedAt > now+5 ||
++		identity.ExpiresAt-identity.IssuedAt != 30 {
++		return identity, errors.New("transport envelope request binding is invalid")
++	}
++	if len(identity.GroupKeys) > maxTransportGroups ||
++		!slices.IsSorted(identity.GroupKeys) {
++		return identity, errors.New("transport group keys are invalid")
++	}
++	seen := make(map[string]struct{}, len(identity.GroupKeys))
++	for _, key := range identity.GroupKeys {
++		if !hex64Pattern.MatchString(key) {
++			return identity, errors.New("transport group key is invalid")
++		}
++		if _, exists := seen[key]; exists {
++			return identity, errors.New("transport group keys are duplicated")
++		}
++		seen[key] = struct{}{}
++	}
++	if identity.PrincipalType == "m2m" && len(identity.GroupKeys) != 0 {
++		return identity, errors.New("m2m transport cannot carry group keys")
++	}
++	return identity, nil
++}
++
++func (a *NamespaceAuthorizer) resolveScope(
++	ctx context.Context,
++	db *sql.DB,
++	tenantID string,
++	identity transportEnvelope,
++) (*domain.NamespaceScope, error) {
++	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelReadCommitted})
++	if err != nil {
++		return nil, &namespaceAuthError{status: http.StatusServiceUnavailable, msg: "namespace authorization unavailable", err: err}
++	}
++	defer tx.Rollback()
++
++	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, identity.PrincipalKey); err != nil {
++		return nil, &namespaceAuthError{status: http.StatusServiceUnavailable, msg: "namespace authorization unavailable", err: err}
++	}
++
++	var scope *domain.NamespaceScope
++	switch identity.PrincipalType {
++	case "human":
++		scope, err = resolveHumanScope(ctx, tx, tenantID, identity)
++	case "m2m":
++		scope, err = resolveM2MScope(ctx, tx, tenantID, identity)
++	default:
++		err = errors.New("unsupported principal type")
++	}
++	if err != nil {
++		return nil, err
++	}
++	if err := tx.Commit(); err != nil {
++		return nil, &namespaceAuthError{status: http.StatusServiceUnavailable, msg: "namespace authorization unavailable", err: err}
++	}
++	return scope, nil
++}
++
++type groupBinding struct {
++	groupKey    string
++	namespaceID string
++	defaultRole string
++	jitEnabled  bool
++}
++
++func resolveHumanScope(
++	ctx context.Context,
++	tx *sql.Tx,
++	tenantID string,
++	identity transportEnvelope,
++) (*domain.NamespaceScope, error) {
++	if len(identity.GroupKeys) == 0 {
++		return nil, &namespaceAuthError{status: http.StatusForbidden, msg: "namespace membership required"}
++	}
++	placeholders := make([]string, len(identity.GroupKeys))
++	args := make([]any, len(identity.GroupKeys))
++	for i, key := range identity.GroupKeys {
++		placeholders[i] = fmt.Sprintf("$%d", i+1)
++		args[i] = key
++	}
++	rows, err := tx.QueryContext(ctx, `
++		SELECT binding.group_key, binding.namespace_id,
++		       binding.default_role, binding.jit_enabled
++		FROM memory_cognito_group_bindings AS binding
++		JOIN memory_namespaces AS namespace
++		  ON namespace.namespace_id = binding.namespace_id
++		WHERE binding.status = 'active'
++		  AND namespace.status = 'active'
++		  AND binding.group_key IN (`+strings.Join(placeholders, ",")+`)`,
++		args...,
++	)
++	if err != nil {
++		return nil, &namespaceAuthError{status: http.StatusServiceUnavailable, msg: "namespace authorization unavailable", err: err}
++	}
++	defer rows.Close()
++	var bindings []groupBinding
++	for rows.Next() {
++		var binding groupBinding
++		if err := rows.Scan(&binding.groupKey, &binding.namespaceID, &binding.defaultRole, &binding.jitEnabled); err != nil {
++			return nil, &namespaceAuthError{status: http.StatusServiceUnavailable, msg: "namespace authorization unavailable", err: err}
++		}
++		bindings = append(bindings, binding)
++	}
++	if err := rows.Err(); err != nil {
++		return nil, &namespaceAuthError{status: http.StatusServiceUnavailable, msg: "namespace authorization unavailable", err: err}
++	}
++	if len(bindings) == 0 {
++		return nil, &namespaceAuthError{status: http.StatusForbidden, msg: "namespace membership required"}
++	}
++	if len(bindings) != 1 {
++		return nil, &namespaceAuthError{status: http.StatusConflict, msg: "ambiguous memory namespace"}
++	}
++	binding := bindings[0]
++
++	principalID, err := upsertPrincipal(ctx, tx, identity.PrincipalKey, "human")
++	if err != nil {
++		return nil, err
++	}
++	var role, status string
++	err = tx.QueryRowContext(ctx, `
++		SELECT role, status
++		FROM memory_namespace_memberships
++		WHERE namespace_id = $1 AND principal_id = $2
++		FOR UPDATE`,
++		binding.namespaceID,
++		principalID,
++	).Scan(&role, &status)
++	switch {
++	case err == nil && status == "active":
++	case err == nil:
++		return nil, &namespaceAuthError{status: http.StatusForbidden, msg: "namespace membership revoked"}
++	case !errors.Is(err, sql.ErrNoRows):
++		return nil, &namespaceAuthError{status: http.StatusServiceUnavailable, msg: "namespace authorization unavailable", err: err}
++	case !binding.jitEnabled:
++		return nil, &namespaceAuthError{status: http.StatusForbidden, msg: "namespace membership required"}
++	default:
++		var other int
++		if err := tx.QueryRowContext(ctx, `
++			SELECT COUNT(*)
++			FROM memory_namespace_memberships
++			WHERE principal_id = $1 AND status = 'active'`,
++			principalID,
++		).Scan(&other); err != nil {
++			return nil, &namespaceAuthError{status: http.StatusServiceUnavailable, msg: "namespace authorization unavailable", err: err}
++		}
++		if other != 0 {
++			return nil, &namespaceAuthError{status: http.StatusConflict, msg: "namespace membership conflict"}
++		}
++		role = binding.defaultRole
++		if _, err := tx.ExecContext(ctx, `
++			INSERT INTO memory_namespace_memberships (
++				namespace_id, principal_id, role, status,
++				source_type, source_key, granted_at
++			) VALUES ($1, $2, $3, 'active', 'cognito_group', $4, NOW())`,
++			binding.namespaceID,
++			principalID,
++			role,
++			binding.groupKey,
++		); err != nil {
++			return nil, &namespaceAuthError{status: http.StatusServiceUnavailable, msg: "namespace authorization unavailable", err: err}
++		}
++	}
++	var activeCount int
++	if err := tx.QueryRowContext(ctx, `
++		SELECT COUNT(*)
++		FROM memory_namespace_memberships
++		WHERE principal_id = $1 AND status = 'active'`,
++		principalID,
++	).Scan(&activeCount); err != nil {
++		return nil, &namespaceAuthError{status: http.StatusServiceUnavailable, msg: "namespace authorization unavailable", err: err}
++	}
++	if activeCount != 1 {
++		return nil, &namespaceAuthError{status: http.StatusConflict, msg: "namespace membership conflict"}
++	}
++	return &domain.NamespaceScope{
++		TenantID: tenantID, NamespaceID: binding.namespaceID,
++		PrincipalID: principalID, PrincipalType: "human", Role: role,
++	}, nil
++}
++
++func upsertPrincipal(
++	ctx context.Context,
++	tx *sql.Tx,
++	principalKey string,
++	principalType string,
++) (string, error) {
++	var principalID, storedType, status string
++	err := tx.QueryRowContext(ctx, `
++		INSERT INTO memory_principals (
++			principal_id, principal_key, principal_type,
++			status, created_at, last_seen_at
++		) VALUES ($1, $2, $3, 'active', NOW(), NOW())
++		ON CONFLICT (principal_key) DO UPDATE
++		SET last_seen_at = NOW()
++		RETURNING principal_id, principal_type, status`,
++		uuid.NewString(),
++		principalKey,
++		principalType,
++	).Scan(&principalID, &storedType, &status)
++	if err != nil {
++		return "", &namespaceAuthError{status: http.StatusServiceUnavailable, msg: "namespace authorization unavailable", err: err}
++	}
++	if storedType != principalType || status != "active" {
++		return "", &namespaceAuthError{status: http.StatusForbidden, msg: "memory principal denied"}
++	}
++	return principalID, nil
++}
++
++func resolveM2MScope(
++	ctx context.Context,
++	tx *sql.Tx,
++	tenantID string,
++	identity transportEnvelope,
++) (*domain.NamespaceScope, error) {
++	var principalID, principalType, principalStatus string
++	var namespaceID, namespaceStatus, bindingStatus string
++	var bindingRole, membershipRole, membershipStatus string
++	err := tx.QueryRowContext(ctx, `
++		SELECT principal.principal_id, principal.principal_type,
++		       principal.status, binding.namespace_id, binding.role,
++		       binding.status, namespace.status, membership.role,
++		       membership.status
++		FROM memory_m2m_namespace_bindings AS binding
++		JOIN memory_principals AS principal
++		  ON principal.principal_id = binding.principal_id
++		JOIN memory_namespaces AS namespace
++		  ON namespace.namespace_id = binding.namespace_id
++		JOIN memory_namespace_memberships AS membership
++		  ON membership.namespace_id = binding.namespace_id
++		 AND membership.principal_id = binding.principal_id
++		WHERE binding.client_key = $1
++		  AND principal.principal_key = $2
++		FOR UPDATE`,
++		identity.ClientKey,
++		identity.PrincipalKey,
++	).Scan(
++		&principalID,
++		&principalType,
++		&principalStatus,
++		&namespaceID,
++		&bindingRole,
++		&bindingStatus,
++		&namespaceStatus,
++		&membershipRole,
++		&membershipStatus,
++	)
++	if errors.Is(err, sql.ErrNoRows) {
++		return nil, &namespaceAuthError{status: http.StatusForbidden, msg: "namespace membership required"}
++	}
++	if err != nil {
++		return nil, &namespaceAuthError{status: http.StatusServiceUnavailable, msg: "namespace authorization unavailable", err: err}
++	}
++	if principalType != "m2m" ||
++		principalStatus != "active" ||
++		bindingStatus != "active" ||
++		namespaceStatus != "active" ||
++		membershipStatus != "active" ||
++		membershipRole != bindingRole {
++		return nil, &namespaceAuthError{status: http.StatusForbidden, msg: "namespace membership denied"}
++	}
++	if _, err := tx.ExecContext(ctx, `
++		UPDATE memory_principals SET last_seen_at = NOW()
++		WHERE principal_id = $1`,
++		principalID,
++	); err != nil {
++		return nil, &namespaceAuthError{status: http.StatusServiceUnavailable, msg: "namespace authorization unavailable", err: err}
++	}
++	return &domain.NamespaceScope{
++		TenantID: tenantID, NamespaceID: namespaceID,
++		PrincipalID: principalID, PrincipalType: "m2m", Role: membershipRole,
++	}, nil
++}
++
++func writeNamespaceAuthError(w http.ResponseWriter, err error) bool {
++	var authErr *namespaceAuthError
++	if !errors.As(err, &authErr) {
++		return false
++	}
++	writeError(w, authErr.status, authErr.msg)
++	return true
++}
+diff --git a/server/internal/middleware/namespace_auth_test.go b/server/internal/middleware/namespace_auth_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..fa6131f9ef929332ed0f8f26969c421f5518f9ff
+--- /dev/null
++++ b/server/internal/middleware/namespace_auth_test.go
+@@ -0,0 +1,309 @@
++package middleware
++
++import (
++	"bytes"
++	"context"
++	"crypto/hmac"
++	"crypto/sha256"
++	"encoding/base64"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++func testNamespaceAuthorizer(t *testing.T) (*NamespaceAuthorizer, []byte) {
++	t.Helper()
++	key := bytes.Repeat([]byte{7}, 32)
++	raw, err := json.Marshal(map[string]string{
++		"a": base64.RawURLEncoding.EncodeToString(key), "b": base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{8}, 32)),
++	})
++	if err != nil {
++		t.Fatal(err)
++	}
++	authorizer, err := NewNamespaceAuthorizer("gateway-target", string(raw))
++	if err != nil {
++		t.Fatal(err)
++	}
++	authorizer.now = func() time.Time { return time.Unix(1_787_875_200, 0) }
++	return authorizer, key
++}
++
++func signedTransport(t *testing.T, key []byte, payload transportEnvelope) string {
++	t.Helper()
++	raw, err := json.Marshal(payload)
++	if err != nil {
++		t.Fatal(err)
++	}
++	mac := hmac.New(sha256.New, key)
++	_, _ = mac.Write(raw)
++	return base64.RawURLEncoding.EncodeToString(raw) + "." +
++		hex.EncodeToString(mac.Sum(nil))
++}
++
++func TestNamespaceTransportRejectsTamperedBody(t *testing.T) {
++	authorizer, key := testNamespaceAuthorizer(t)
++	body := []byte(`{"content":"team fact"}`)
++	digest := sha256.Sum256(body)
++	payload := transportEnvelope{
++		Version: 1, KeyID: "a", Issuer: "gateway-target",
++		IssuedAt: 1_787_875_200, ExpiresAt: 1_787_875_230,
++		Method: http.MethodPost, Path: "/v1alpha2/mem9s/memories",
++		BodyHash:     hex.EncodeToString(digest[:]),
++		PrincipalKey: bytesToHex(1), PrincipalType: "human",
++		ClientKey: bytesToHex(2), GroupKeys: []string{bytesToHex(3)},
++	}
++	req := httptest.NewRequest(
++		http.MethodPost,
++		payload.Path,
++		bytes.NewBufferString(`{"content":"changed"}`),
++	)
++	req.Header.Set(TransportHeader, signedTransport(t, key, payload))
++	if _, err := authorizer.verifyRequest(req); err == nil {
++		t.Fatal("tampered body was accepted")
++	}
++}
++
++func TestNamespaceTransportAcceptsStableSlotKeys(t *testing.T) {
++	slotA := bytes.Repeat([]byte{7}, 32)
++	slotB := bytes.Repeat([]byte{8}, 32)
++	raw, _ := json.Marshal(map[string]string{
++		"a": base64.RawURLEncoding.EncodeToString(slotA),
++		"b": base64.RawURLEncoding.EncodeToString(slotB),
++	})
++	authorizer, err := NewNamespaceAuthorizer("gateway-target", string(raw))
++	if err != nil {
++		t.Fatal(err)
++	}
++	authorizer.now = func() time.Time { return time.Unix(1_787_875_200, 0) }
++	for kid, key := range map[string][]byte{"a": slotA, "b": slotB} {
++		digest := sha256.Sum256(nil)
++		payload := transportEnvelope{
++			Version: 1, KeyID: kid, Issuer: "gateway-target",
++			IssuedAt: 1_787_875_200, ExpiresAt: 1_787_875_230,
++			Method: http.MethodGet, Path: "/v1alpha2/mem9s/memories?q=x",
++			BodyHash:     hex.EncodeToString(digest[:]),
++			PrincipalKey: bytesToHex(1), PrincipalType: "m2m",
++			ClientKey: bytesToHex(2), GroupKeys: []string{},
++		}
++		req := httptest.NewRequest(http.MethodGet, payload.Path, nil)
++		req.Header.Set(TransportHeader, signedTransport(t, key, payload))
++		if _, err := authorizer.verifyRequest(req); err != nil {
++			t.Fatalf("%s key rejected: %v", kid, err)
++		}
++	}
++}
++
++func namespaceRequest(
++	t *testing.T,
++	key []byte,
++	method string,
++	path string,
++	body []byte,
++	principalKey string,
++	principalType string,
++	clientKey string,
++	groupKeys []string,
++) *http.Request {
++	t.Helper()
++	digest := sha256.Sum256(body)
++	payload := transportEnvelope{
++		Version: 1, KeyID: "a", Issuer: "gateway-target",
++		IssuedAt: 1_787_875_200, ExpiresAt: 1_787_875_230,
++		Method: method, Path: path,
++		BodyHash:      hex.EncodeToString(digest[:]),
++		PrincipalKey:  principalKey,
++		PrincipalType: principalType,
++		ClientKey:     clientKey,
++		GroupKeys:     groupKeys,
++	}
++	req := httptest.NewRequest(method, path, bytes.NewReader(body))
++	req.Header.Set(TransportHeader, signedTransport(t, key, payload))
++	return req
++}
++
++func TestNamespaceAuthorizerPostgresHumanAndM2MResolution(t *testing.T) {
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
++	}
++	db := testutil.OpenIsolatedPostgres(t, dsn)
++	authorizer, key := testNamespaceAuthorizer(t)
++	groupA := bytesToHex(3)
++	groupB := bytesToHex(4)
++	if _, err := db.Exec(`
++		INSERT INTO memory_cognito_group_bindings (
++			group_key, namespace_id, default_role, jit_enabled, status
++		) VALUES
++			($1, $2, 'member', TRUE, 'active'),
++			($3, $4, 'member', TRUE, 'active')`,
++		groupA,
++		testutil.TestNamespaceID,
++		groupB,
++		testutil.TestOtherNamespaceID,
++	); err != nil {
++		t.Fatal(err)
++	}
++
++	humanKey := bytesToHex(5)
++	humanRequest := func(method string, groups []string) *http.Request {
++		return namespaceRequest(
++			t,
++			key,
++			method,
++			"/v1alpha2/mem9s/memories",
++			nil,
++			humanKey,
++			"human",
++			bytesToHex(9),
++			groups,
++		)
++	}
++	scope, err := authorizer.Authorize(
++		context.Background(),
++		db,
++		"tenant-a",
++		humanRequest(http.MethodGet, []string{groupA}),
++	)
++	if err != nil {
++		t.Fatalf("JIT authorize: %v", err)
++	}
++	if scope.NamespaceID != testutil.TestNamespaceID ||
++		scope.PrincipalType != "human" ||
++		scope.Role != "member" {
++		t.Fatalf("JIT scope = %+v", scope)
++	}
++	firstPrincipalID := scope.PrincipalID
++	scope, err = authorizer.Authorize(
++		context.Background(),
++		db,
++		"tenant-a",
++		humanRequest(http.MethodGet, []string{groupA}),
++	)
++	if err != nil || scope.PrincipalID != firstPrincipalID {
++		t.Fatalf("repeat JIT scope = (%+v, %v)", scope, err)
++	}
++	var memberships int
++	if err := db.QueryRow(`
++		SELECT count(*)
++		FROM memory_namespace_memberships
++		WHERE principal_id = $1
++		  AND namespace_id = $2
++		  AND source_type = 'cognito_group'
++		  AND source_key = $3`,
++		firstPrincipalID,
++		testutil.TestNamespaceID,
++		groupA,
++	).Scan(&memberships); err != nil {
++		t.Fatal(err)
++	}
++	if memberships != 1 {
++		t.Fatalf("JIT memberships = %d, want 1", memberships)
++	}
++
++	if _, err := db.Exec(`
++		UPDATE memory_namespace_memberships
++		SET role = 'viewer'
++		WHERE namespace_id = $1 AND principal_id = $2`,
++		testutil.TestNamespaceID,
++		firstPrincipalID,
++	); err != nil {
++		t.Fatal(err)
++	}
++	_, err = authorizer.Authorize(
++		context.Background(),
++		db,
++		"tenant-a",
++		humanRequest(http.MethodPost, []string{groupA}),
++	)
++	var roleDenied *namespaceAuthError
++	if !errors.As(err, &roleDenied) ||
++		roleDenied.status != http.StatusForbidden {
++		t.Fatalf("viewer write error = %v, want forbidden", err)
++	}
++
++	_, err = authorizer.Authorize(
++		context.Background(),
++		db,
++		"tenant-a",
++		namespaceRequest(
++			t,
++			key,
++			http.MethodGet,
++			"/v1alpha2/mem9s/memories",
++			nil,
++			bytesToHex(6),
++			"human",
++			bytesToHex(9),
++			[]string{groupA, groupB},
++		),
++	)
++	var ambiguous *namespaceAuthError
++	if !errors.As(err, &ambiguous) ||
++		ambiguous.status != http.StatusConflict {
++		t.Fatalf("ambiguous group error = %v, want conflict", err)
++	}
++
++	const m2mPrincipalID = "94000000-0000-4000-8000-000000000001"
++	m2mPrincipalKey := bytesToHex(7)
++	m2mClientKey := bytesToHex(8)
++	if _, err := db.Exec(`
++		INSERT INTO memory_principals (
++			principal_id, principal_key, principal_type, status
++		) VALUES ($1, $2, 'm2m', 'active');
++	`, m2mPrincipalID, m2mPrincipalKey); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.Exec(`
++		INSERT INTO memory_namespace_memberships (
++			namespace_id, principal_id, role, status, source_type, source_key
++		) VALUES ($1, $2, 'member', 'active', 'm2m_binding', $3)`,
++		testutil.TestOtherNamespaceID,
++		m2mPrincipalID,
++		m2mClientKey,
++	); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.Exec(`
++		INSERT INTO memory_m2m_namespace_bindings (
++			client_key, principal_id, namespace_id, role, status
++		) VALUES ($1, $2, $3, 'member', 'active')`,
++		m2mClientKey,
++		m2mPrincipalID,
++		testutil.TestOtherNamespaceID,
++	); err != nil {
++		t.Fatal(err)
++	}
++	m2mScope, err := authorizer.Authorize(
++		context.Background(),
++		db,
++		"tenant-a",
++		namespaceRequest(
++			t,
++			key,
++			http.MethodGet,
++			"/v1alpha2/mem9s/memories",
++			nil,
++			m2mPrincipalKey,
++			"m2m",
++			m2mClientKey,
++			nil,
++		),
++	)
++	if err != nil ||
++		m2mScope.NamespaceID != testutil.TestOtherNamespaceID ||
++		m2mScope.PrincipalID != m2mPrincipalID ||
++		m2mScope.PrincipalType != "m2m" {
++		t.Fatalf("M2M scope = (%+v, %v)", m2mScope, err)
++	}
++}
++
++func bytesToHex(value byte) string {
++	return hex.EncodeToString(bytes.Repeat([]byte{value}, 32))
++}
+diff --git a/server/internal/repository/factory.go b/server/internal/repository/factory.go
+index 5a9c452e767951a630d9a48c63e8576a0f9f98af..d7f963310c00dc651f8fb12359fd54ad41d5940f 100644
+--- a/server/internal/repository/factory.go
++++ b/server/internal/repository/factory.go
+@@ -87,12 +87,12 @@ type stubUTMRepo struct{}
+ func (stubUTMRepo) Create(_ context.Context, _ *domain.TenantUTM) error { return nil }
+ 
+ // autoModel is used by tidb and db9 backends for auto-embedding features.
+-func NewMemoryRepo(backend string, db *sql.DB, autoModel string, ftsEnabled bool, clusterID string) MemoryRepo {
++func NewMemoryRepo(backend string, db *sql.DB, autoModel string, ftsEnabled bool, clusterID string, scopes ...domain.NamespaceScope) MemoryRepo {
+ 	switch backend {
+ 	case "db9":
+ 		return db9.NewMemoryRepo(db, autoModel, ftsEnabled, clusterID)
+ 	case "postgres":
+-		return postgres.NewMemoryRepo(db, ftsEnabled, clusterID)
++		return postgres.NewMemoryRepo(db, ftsEnabled, clusterID, scopes...)
+ 	default:
+ 		return tidb.NewMemoryRepo(db, autoModel, ftsEnabled, clusterID)
+ 	}
+@@ -101,13 +101,17 @@ func NewMemoryRepo(backend string, db *sql.DB, autoModel string, ftsEnabled bool
+ // NewSessionRepo creates a SessionRepo for the specified backend.
+ // PostgreSQL supports deletion of durable-ingest session rows; its other
+ // capabilities remain stubbed.
+-func NewSessionRepo(backend string, db *sql.DB, autoModel string, ftsEnabled bool, clusterID string) SessionRepo {
++func NewSessionRepo(backend string, db *sql.DB, autoModel string, ftsEnabled bool, clusterID string, scopes ...domain.NamespaceScope) SessionRepo {
+ 	switch backend {
+ 	case "tidb", "":
+ 		return tidb.NewSessionRepo(db, autoModel, ftsEnabled, clusterID)
+ 	case "postgres":
++		deletes := postgres.NewSessionDeleteRepo(db)
++		if len(scopes) > 0 {
++			deletes = postgres.NewSessionDeleteRepo(db, scopes[0])
++		}
+ 		return postgresSessionRepo{
+-			deletes: postgres.NewSessionDeleteRepo(db),
++			deletes: deletes,
+ 		}
+ 	default:
+ 		return stubSessionRepo{}
+diff --git a/server/internal/repository/postgres/ingest_job.go b/server/internal/repository/postgres/ingest_job.go
+index 16f3a2115a8fd7cb5daa6d248e352eb8518fe294..9e526c3139322fb14f38c5d092dfd0b89a06f335 100644
+--- a/server/internal/repository/postgres/ingest_job.go
++++ b/server/internal/repository/postgres/ingest_job.go
+@@ -16,7 +16,7 @@ import (
+ )
+ 
+ const ingestJobColumns = `
+-	job_id, tenant_id, idempotency_key, canonical_payload,
++	job_id, tenant_id, namespace_id, principal_id, idempotency_key, canonical_payload,
+ 	agent_id, app_id, session_id, mode, disable_session_save,
+ 	runtime_operation_id, runtime_cluster_id, runtime_agent_name,
+ 	runtime_reservation_expires_at, runtime_finalization_state,
+@@ -30,6 +30,8 @@ const ownedTransitionGuardQuery = `
+ 	FROM ingest_jobs
+ 	WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
+ 	  AND attempt_count = $4
++	  AND namespace_id IS NOT DISTINCT FROM $5
++	  AND principal_id IS NOT DISTINCT FROM $6
+ 	  AND state IN ('processing', 'planning', 'applying')
+ 	  AND lease_expires_at > statement_timestamp()
+ 	FOR UPDATE`
+@@ -46,10 +48,11 @@ type IngestJobRepo struct {
+ }
+ 
+ type ingestJobScope struct {
+-	tenantID  string
+-	agentID   string
+-	appID     string
+-	sessionID string
++	tenantID    string
++	namespaceID string
++	agentID     string
++	appID       string
++	sessionID   string
+ }
+ 
+ type ingestJobCandidate struct {
+@@ -88,10 +91,11 @@ func (r *IngestJobRepo) Enqueue(ctx context.Context, input ingestqueue.EnqueueIn
+ 	defer tx.Rollback()
+ 
+ 	scope := ingestJobScope{
+-		tenantID:  input.TenantID,
+-		agentID:   input.AgentID,
+-		appID:     input.AppID,
+-		sessionID: input.SessionID,
++		tenantID:    input.TenantID,
++		namespaceID: input.NamespaceID,
++		agentID:     input.AgentID,
++		appID:       input.AppID,
++		sessionID:   input.SessionID,
+ 	}
+ 	if err := lockIngestJobScope(ctx, tx, scope); err != nil {
+ 		return nil, fmt.Errorf("lock ingest enqueue scope: %w", err)
+@@ -99,18 +103,22 @@ func (r *IngestJobRepo) Enqueue(ctx context.Context, input ingestqueue.EnqueueIn
+ 
+ 	row := tx.QueryRowContext(ctx, `
+ 		INSERT INTO ingest_jobs (
+-			job_id, tenant_id, idempotency_key, canonical_payload,
++			job_id, tenant_id, namespace_id, principal_id,
++			idempotency_key, canonical_payload,
+ 			agent_id, app_id, session_id, mode, disable_session_save,
+ 			runtime_operation_id, runtime_cluster_id, runtime_agent_name,
+ 			runtime_reservation_expires_at, runtime_finalization_state,
+ 			available_at, created_at, updated_at
+ 		)
+-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14,
++		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
++			$14, $15, $16,
+ 			statement_timestamp(), statement_timestamp(), statement_timestamp())
+-		ON CONFLICT (tenant_id, idempotency_key) DO NOTHING
++		ON CONFLICT (tenant_id, namespace_id, idempotency_key) DO NOTHING
+ 		RETURNING `+ingestJobColumns,
+ 		input.ID,
+ 		input.TenantID,
++		nullString(input.NamespaceID),
++		nullString(input.PrincipalID),
+ 		input.IdempotencyKey,
+ 		[]byte(input.CanonicalPayload),
+ 		input.AgentID,
+@@ -130,8 +138,11 @@ func (r *IngestJobRepo) Enqueue(ctx context.Context, input ingestqueue.EnqueueIn
+ 		job, err = scanIngestJob(tx.QueryRowContext(ctx, `
+ 			SELECT `+ingestJobColumns+`
+ 			FROM ingest_jobs
+-			WHERE tenant_id = $1 AND idempotency_key = $2`,
++			WHERE tenant_id = $1
++			  AND namespace_id IS NOT DISTINCT FROM $2
++			  AND idempotency_key = $3`,
+ 			input.TenantID,
++			nullString(input.NamespaceID),
+ 			input.IdempotencyKey,
+ 		))
+ 	}
+@@ -158,8 +169,11 @@ func (r *IngestJobRepo) resolveAmbiguousEnqueue(
+ 	job, err := scanIngestJob(r.db.QueryRowContext(ctx, `
+ 		SELECT `+ingestJobColumns+`
+ 		FROM ingest_jobs
+-		WHERE tenant_id = $1 AND idempotency_key = $2`,
++		WHERE tenant_id = $1
++		  AND namespace_id IS NOT DISTINCT FROM $2
++		  AND idempotency_key = $3`,
+ 		input.TenantID,
++		nullString(input.NamespaceID),
+ 		input.IdempotencyKey,
+ 	))
+ 	if err == nil {
+@@ -181,12 +195,20 @@ func (r *IngestJobRepo) resolveAmbiguousEnqueue(
+ 	)
+ }
+ 
+-func (r *IngestJobRepo) Get(ctx context.Context, tenantID, jobID string) (*ingestqueue.Job, error) {
++func (r *IngestJobRepo) Get(
++	ctx context.Context,
++	tenantID string,
++	namespaceID string,
++	jobID string,
++) (*ingestqueue.Job, error) {
+ 	job, err := scanIngestJob(r.db.QueryRowContext(ctx, `
+ 		SELECT `+ingestJobColumns+`
+ 		FROM ingest_jobs
+-		WHERE tenant_id = $1 AND job_id = $2`,
++		WHERE tenant_id = $1
++		  AND namespace_id IS NOT DISTINCT FROM $2
++		  AND job_id = $3`,
+ 		tenantID,
++		nullString(namespaceID),
+ 		jobID,
+ 	))
+ 	if err != nil {
+@@ -289,9 +311,10 @@ func (r *IngestJobRepo) Claim(
+ 				SELECT job_id
+ 				FROM ingest_jobs
+ 				WHERE tenant_id = $1
+-				  AND agent_id = $2
+-				  AND app_id = $3
+-				  AND session_id = $4
++				  AND namespace_id IS NOT DISTINCT FROM $2
++				  AND agent_id = $3
++				  AND app_id = $4
++				  AND session_id = $5
+ 				  AND state NOT IN ('succeeded', 'dead')
+ 				ORDER BY created_at, job_id
+ 				LIMIT 1
+@@ -310,6 +333,7 @@ func (r *IngestJobRepo) Claim(
+ 			JOIN head ON head.job_id = job.job_id
+ 			FOR UPDATE OF job SKIP LOCKED`,
+ 			scope.tenantID,
++			nullString(scope.namespaceID),
+ 			scope.agentID,
+ 			scope.appID,
+ 			scope.sessionID,
+@@ -337,18 +361,21 @@ func (r *IngestJobRepo) Claim(
+ 						THEN 'finalizing' ELSE NULL END,
+ 					lease_owner = CASE
+ 						WHEN runtime_operation_id IS NOT NULL
+-						THEN $3 ELSE NULL END,
++						THEN $4 ELSE NULL END,
+ 					lease_expires_at = CASE
+ 						WHEN runtime_operation_id IS NOT NULL
+ 						THEN statement_timestamp()
+-							+ ($4 * interval '1 microsecond')
++							+ ($5 * interval '1 microsecond')
+ 						ELSE NULL END,
+ 					heartbeat_at = statement_timestamp(),
+ 					completed_at = statement_timestamp(),
+ 					updated_at = statement_timestamp()
+-				WHERE tenant_id = $1 AND job_id = $2
++				WHERE tenant_id = $1
++				  AND namespace_id IS NOT DISTINCT FROM $2
++				  AND job_id = $3
+ 				RETURNING `+ingestJobColumns,
+ 				tenantID,
++				nullString(scope.namespaceID),
+ 				jobID,
+ 				owner,
+ 				lease.Microseconds(),
+@@ -367,17 +394,20 @@ func (r *IngestJobRepo) Claim(
+ 			UPDATE ingest_jobs AS job
+ 			SET state = 'processing',
+ 				attempt_count = job.attempt_count + 1,
+-				lease_owner = $3,
++				lease_owner = $4,
+ 				lease_expires_at = statement_timestamp()
+-					+ ($4 * interval '1 microsecond'),
++					+ ($5 * interval '1 microsecond'),
+ 				heartbeat_at = statement_timestamp(),
+ 				apply_warning_count = 0,
+ 				error_class = NULL,
+ 				completed_at = NULL,
+ 				updated_at = statement_timestamp()
+-			WHERE job.tenant_id = $1 AND job.job_id = $2
++			WHERE job.tenant_id = $1
++			  AND job.namespace_id IS NOT DISTINCT FROM $2
++			  AND job.job_id = $3
+ 			RETURNING `+prefixedIngestJobColumns("job"),
+ 			tenantID,
++			nullString(scope.namespaceID),
+ 			jobID,
+ 			owner,
+ 			lease.Microseconds(),
+@@ -449,7 +479,8 @@ func selectClaimableIngestJobScopes(
+ 		afterCreatedAt = cursor.afterCreated
+ 	}
+ 	rows, err := tx.QueryContext(ctx, `
+-		SELECT j.tenant_id, j.agent_id, j.app_id, j.session_id,
++		SELECT j.tenant_id, COALESCE(j.namespace_id, ''),
++			j.agent_id, j.app_id, j.session_id,
+ 			j.created_at, j.job_id
+ 		FROM ingest_jobs AS j
+ 		WHERE j.tenant_id = $1
+@@ -470,6 +501,7 @@ func selectClaimableIngestJobScopes(
+ 			SELECT 1
+ 			FROM ingest_jobs AS earlier
+ 			WHERE earlier.tenant_id = j.tenant_id
++			  AND earlier.namespace_id IS NOT DISTINCT FROM j.namespace_id
+ 			  AND earlier.agent_id = j.agent_id
+ 			  AND earlier.app_id = j.app_id
+ 			  AND earlier.session_id = j.session_id
+@@ -497,6 +529,7 @@ func selectClaimableIngestJobScopes(
+ 		var candidate ingestJobCandidate
+ 		if err := rows.Scan(
+ 			&candidate.scope.tenantID,
++			&candidate.scope.namespaceID,
+ 			&candidate.scope.agentID,
+ 			&candidate.scope.appID,
+ 			&candidate.scope.sessionID,
+@@ -569,8 +602,10 @@ func lockIngestJobScope(ctx context.Context, tx *sql.Tx, scope ingestJobScope) e
+ 			hashtextextended($1::text,
+ 				hashtextextended($2::text,
+ 					hashtextextended($3::text,
+-						hashtextextended($4::text, 0)))))`,
++						hashtextextended($4::text,
++							hashtextextended($5::text, 0))))))`,
+ 		scope.tenantID,
++		scope.namespaceID,
+ 		scope.agentID,
+ 		scope.appID,
+ 		scope.sessionID,
+@@ -585,8 +620,10 @@ func tryLockIngestJobScope(ctx context.Context, tx *sql.Tx, scope ingestJobScope
+ 			hashtextextended($1::text,
+ 				hashtextextended($2::text,
+ 					hashtextextended($3::text,
+-						hashtextextended($4::text, 0)))))`,
++						hashtextextended($4::text,
++							hashtextextended($5::text, 0))))))`,
+ 		scope.tenantID,
++		scope.namespaceID,
+ 		scope.agentID,
+ 		scope.appID,
+ 		scope.sessionID,
+@@ -616,6 +653,8 @@ func (r *IngestJobRepo) StartPlanning(ctx context.Context, lease ingestqueue.Lea
+ 		SET state = 'planning', updated_at = statement_timestamp()
+ 		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
+ 		  AND attempt_count = $4
++		  AND namespace_id IS NOT DISTINCT FROM $5
++		  AND principal_id IS NOT DISTINCT FROM $6
+ 		  AND state = 'processing'
+ 		  AND lease_expires_at > statement_timestamp()`)
+ }
+@@ -633,26 +672,28 @@ func (r *IngestJobRepo) Fail(
+ 	}
+ 	return r.ownedTransition(ctx, lease, `
+ 		UPDATE ingest_jobs
+-		SET state = $5::varchar,
++		SET state = $7::varchar,
+ 			available_at = statement_timestamp()
+-				+ ($6 * interval '1 microsecond'),
+-			error_class = $7,
++				+ ($8 * interval '1 microsecond'),
++			error_class = $9,
+ 			runtime_finalization_state = CASE
+-				WHEN $5::varchar = 'dead' AND runtime_operation_id IS NOT NULL
++				WHEN $7::varchar = 'dead' AND runtime_operation_id IS NOT NULL
+ 				THEN 'finalizing'
+ 				ELSE runtime_finalization_state END,
+ 			lease_owner = CASE
+-				WHEN $5::varchar = 'dead' AND runtime_operation_id IS NOT NULL
++				WHEN $7::varchar = 'dead' AND runtime_operation_id IS NOT NULL
+ 				THEN lease_owner ELSE NULL END,
+ 			lease_expires_at = CASE
+-				WHEN $5::varchar = 'dead' AND runtime_operation_id IS NOT NULL
++				WHEN $7::varchar = 'dead' AND runtime_operation_id IS NOT NULL
+ 				THEN lease_expires_at ELSE NULL END,
+ 			heartbeat_at = statement_timestamp(),
+-			completed_at = CASE WHEN $5::varchar = 'dead'
++			completed_at = CASE WHEN $7::varchar = 'dead'
+ 				THEN statement_timestamp() ELSE NULL END,
+ 			updated_at = statement_timestamp()
+ 		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
+ 		  AND attempt_count = $4
++		  AND namespace_id IS NOT DISTINCT FROM $5
++		  AND principal_id IS NOT DISTINCT FROM $6
+ 		  AND state IN ('processing', 'planning', 'applying')
+ 		  AND lease_expires_at > statement_timestamp()`,
+ 		string(failure.State),
+@@ -674,6 +715,8 @@ func (r *IngestJobRepo) CompleteTerminalFinalization(
+ 			updated_at = statement_timestamp()
+ 		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
+ 		  AND attempt_count = $4
++		  AND namespace_id IS NOT DISTINCT FROM $5
++		  AND principal_id IS NOT DISTINCT FROM $6
+ 		  AND state IN ('succeeded', 'dead')
+ 		  AND runtime_finalization_state = 'finalizing'
+ 		  AND lease_expires_at > statement_timestamp()`,
+@@ -681,6 +724,8 @@ func (r *IngestJobRepo) CompleteTerminalFinalization(
+ 		lease.JobID,
+ 		lease.Owner,
+ 		lease.Generation,
++		nullString(lease.NamespaceID),
++		nullString(lease.PrincipalID),
+ 	)
+ 	if err != nil {
+ 		return fmt.Errorf("complete terminal ingest finalization: %w", err)
+@@ -706,23 +751,25 @@ func (r *IngestJobRepo) ReplaceRuntimeReservation(
+ 	}
+ 	result, err := r.db.ExecContext(ctx, `
+ 		UPDATE ingest_jobs
+-		SET runtime_operation_id = $5,
+-			runtime_cluster_id = $6,
+-			runtime_agent_name = $7,
+-			runtime_reservation_expires_at = $8,
++		SET runtime_operation_id = $7,
++			runtime_cluster_id = $8,
++			runtime_agent_name = $9,
++			runtime_reservation_expires_at = $10,
+ 			runtime_finalization_state = CASE
+-				WHEN $5::varchar IS NULL THEN NULL
++				WHEN $7::varchar IS NULL THEN NULL
+ 				WHEN state IN ('succeeded', 'dead') THEN 'finalizing'
+ 				ELSE 'reserved' END,
+ 			lease_owner = CASE
+-				WHEN state IN ('succeeded', 'dead') AND $5::varchar IS NULL
++				WHEN state IN ('succeeded', 'dead') AND $7::varchar IS NULL
+ 				THEN NULL ELSE lease_owner END,
+ 			lease_expires_at = CASE
+-				WHEN state IN ('succeeded', 'dead') AND $5::varchar IS NULL
++				WHEN state IN ('succeeded', 'dead') AND $7::varchar IS NULL
+ 				THEN NULL ELSE lease_expires_at END,
+ 			updated_at = statement_timestamp()
+ 		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
+ 		  AND attempt_count = $4
++		  AND namespace_id IS NOT DISTINCT FROM $5
++		  AND principal_id IS NOT DISTINCT FROM $6
+ 		  AND (
+ 			(
+ 				state IN ('processing', 'planning', 'applying')
+@@ -738,6 +785,8 @@ func (r *IngestJobRepo) ReplaceRuntimeReservation(
+ 		lease.JobID,
+ 		lease.Owner,
+ 		lease.Generation,
++		nullString(lease.NamespaceID),
++		nullString(lease.PrincipalID),
+ 		nullString(reservation.OperationID),
+ 		nullString(reservation.ClusterID),
+ 		nullString(reservation.AgentName),
+@@ -767,11 +816,13 @@ func (r *IngestJobRepo) Heartbeat(
+ 	return r.ownedTransition(ctx, leaseRef, `
+ 		UPDATE ingest_jobs
+ 		SET lease_expires_at = statement_timestamp()
+-				+ ($5 * interval '1 microsecond'),
++				+ ($7 * interval '1 microsecond'),
+ 			heartbeat_at = statement_timestamp(),
+ 			updated_at = statement_timestamp()
+ 		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
+ 		  AND attempt_count = $4
++		  AND namespace_id IS NOT DISTINCT FROM $5
++		  AND principal_id IS NOT DISTINCT FROM $6
+ 		  AND state IN ('processing', 'planning', 'applying')
+ 		  AND lease_expires_at > statement_timestamp()`,
+ 		lease.Microseconds(),
+@@ -796,6 +847,8 @@ func (r *IngestJobRepo) ownedTransition(
+ 		lease.JobID,
+ 		lease.Owner,
+ 		lease.Generation,
++		nullString(lease.NamespaceID),
++		nullString(lease.PrincipalID),
+ 	).Scan(&locked)
+ 	if errors.Is(err, sql.ErrNoRows) {
+ 		return ingestqueue.ErrLeaseLost
+@@ -809,6 +862,8 @@ func (r *IngestJobRepo) ownedTransition(
+ 		lease.JobID,
+ 		lease.Owner,
+ 		lease.Generation,
++		nullString(lease.NamespaceID),
++		nullString(lease.PrincipalID),
+ 	}
+ 	queryArgs = append(queryArgs, args...)
+ 	result, err := tx.ExecContext(ctx, query, queryArgs...)
+@@ -835,6 +890,8 @@ type rowScanner interface {
+ func scanIngestJob(row rowScanner) (*ingestqueue.Job, error) {
+ 	var (
+ 		job                         ingestqueue.Job
++		namespaceID                 sql.NullString
++		principalID                 sql.NullString
+ 		state                       string
+ 		leaseOwner                  sql.NullString
+ 		leaseExpiresAt              sql.NullTime
+@@ -854,6 +911,8 @@ func scanIngestJob(row rowScanner) (*ingestqueue.Job, error) {
+ 	if err := row.Scan(
+ 		&job.ID,
+ 		&job.TenantID,
++		&namespaceID,
++		&principalID,
+ 		&job.IdempotencyKey,
+ 		&job.CanonicalPayload,
+ 		&job.AgentID,
+@@ -888,6 +947,8 @@ func scanIngestJob(row rowScanner) (*ingestqueue.Job, error) {
+ 		return nil, err
+ 	}
+ 	job.State = ingestqueue.State(state)
++	job.NamespaceID = namespaceID.String
++	job.PrincipalID = principalID.String
+ 	job.LeaseOwner = leaseOwner.String
+ 	job.ActivePlanRevision = int(activeRevision.Int64)
+ 	job.ActivePlanHash = activePlanHash.String
+@@ -917,7 +978,8 @@ func scanIngestJob(row rowScanner) (*ingestqueue.Job, error) {
+ 
+ func prefixedIngestJobColumns(prefix string) string {
+ 	columns := []string{
+-		"job_id", "tenant_id", "idempotency_key", "canonical_payload",
++		"job_id", "tenant_id", "namespace_id", "principal_id",
++		"idempotency_key", "canonical_payload",
+ 		"agent_id", "app_id", "session_id", "mode", "disable_session_save",
+ 		"runtime_operation_id", "runtime_cluster_id", "runtime_agent_name",
+ 		"runtime_reservation_expires_at", "runtime_finalization_state",
+diff --git a/server/internal/repository/postgres/ingest_job_integration_test.go b/server/internal/repository/postgres/ingest_job_integration_test.go
+index 4dcad05ae348637abbd42aa475570fca704cedd9..c7f23a666ed4e3b25a63aee7c578a5b9438896e1 100644
+--- a/server/internal/repository/postgres/ingest_job_integration_test.go
++++ b/server/internal/repository/postgres/ingest_job_integration_test.go
+@@ -33,6 +33,8 @@ func enqueueInput(tenant, session, key string) ingestqueue.EnqueueInput {
+ 	return ingestqueue.EnqueueInput{
+ 		ID:                 "00000000-0000-4000-8000-000000000001",
+ 		TenantID:           tenant,
++		NamespaceID:        testutil.TestNamespaceID,
++		PrincipalID:        testutil.TestPrincipalID,
+ 		IdempotencyKey:     key,
+ 		CanonicalPayload:   []byte(`{"version":"ingest-v1"}`),
+ 		AgentID:            "agent-a",
+@@ -62,6 +64,8 @@ func atomicPlanForJob(
+ 	plan, err := ingestqueue.FinalizePlan(ingestqueue.AtomicPlan{
+ 		JobID:             job.ID,
+ 		TenantID:          job.TenantID,
++		NamespaceID:       job.NamespaceID,
++		PrincipalID:       job.PrincipalID,
+ 		Revision:          revision,
+ 		AttemptGeneration: job.AttemptCount,
+ 		WarningCount:      warnings,
+@@ -101,13 +105,15 @@ func insertIngestJobAt(
+ 	t.Helper()
+ 	if _, err := execer.ExecContext(context.Background(), `
+ 		INSERT INTO ingest_jobs (
+-			job_id, tenant_id, idempotency_key, canonical_payload,
++			job_id, tenant_id, namespace_id, principal_id,
++			idempotency_key, canonical_payload,
+ 			agent_id, app_id, session_id, mode, disable_session_save,
+ 			available_at, created_at, updated_at
+ 		)
+-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9,
+-			statement_timestamp(), $10, statement_timestamp())
+-	`, input.ID, input.TenantID, input.IdempotencyKey, []byte(input.CanonicalPayload),
++		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11,
++			statement_timestamp(), $12, statement_timestamp())
++	`, input.ID, input.TenantID, input.NamespaceID, input.PrincipalID,
++		input.IdempotencyKey, []byte(input.CanonicalPayload),
+ 		input.AgentID, input.AppID, input.SessionID, input.Mode, input.DisableSessionSave,
+ 		createdAt,
+ 	); err != nil {
+@@ -426,7 +432,7 @@ func TestIngestJobRecoversSucceededRuntimeFinalizationLease(t *testing.T) {
+ 	}
+ 	applyEmptyPlan(t, repo, claimed, 0)
+ 
+-	succeeded, err := repo.Get(context.Background(), input.TenantID, input.ID)
++	succeeded, err := repo.Get(context.Background(), input.TenantID, input.NamespaceID, input.ID)
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -469,7 +475,7 @@ func TestIngestJobRecoversSucceededRuntimeFinalizationLease(t *testing.T) {
+ 	); err != nil {
+ 		t.Fatal(err)
+ 	}
+-	completed, err := repo.Get(context.Background(), input.TenantID, input.ID)
++	completed, err := repo.Get(context.Background(), input.TenantID, input.NamespaceID, input.ID)
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -507,7 +513,7 @@ func TestIngestJobTerminalReclaimFencesStaleSameOwnerCallback(t *testing.T) {
+ 		t.Fatal(err)
+ 	}
+ 	applyEmptyPlan(t, repo, claimed, 0)
+-	terminal, err := repo.Get(context.Background(), input.TenantID, input.ID)
++	terminal, err := repo.Get(context.Background(), input.TenantID, input.NamespaceID, input.ID)
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -554,7 +560,7 @@ func TestIngestJobTerminalReclaimFencesStaleSameOwnerCallback(t *testing.T) {
+ 	); !errors.Is(err, ingestqueue.ErrLeaseLost) {
+ 		t.Fatalf("stale terminal callback error = %v, want ErrLeaseLost", err)
+ 	}
+-	stillFinalizing, err := repo.Get(context.Background(), input.TenantID, input.ID)
++	stillFinalizing, err := repo.Get(context.Background(), input.TenantID, input.NamespaceID, input.ID)
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -598,7 +604,7 @@ func TestIngestJobRecoversDeadRuntimeFinalizationLease(t *testing.T) {
+ 	}); err != nil {
+ 		t.Fatal(err)
+ 	}
+-	dead, err := repo.Get(context.Background(), input.TenantID, input.ID)
++	dead, err := repo.Get(context.Background(), input.TenantID, input.NamespaceID, input.ID)
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -758,7 +764,7 @@ func TestIngestJobPersistsPayloadScopeCountersAndPlan(t *testing.T) {
+ 		t.Fatal(err)
+ 	}
+ 	applyEmptyPlan(t, repo, claimed, 2)
+-	got, err := repo.Get(context.Background(), input.TenantID, claimed.ID)
++	got, err := repo.Get(context.Background(), input.TenantID, input.NamespaceID, claimed.ID)
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -909,10 +915,11 @@ func TestIngestJobDelayedEnqueueCommitPreservesFIFO(t *testing.T) {
+ 	}
+ 	defer earlierTx.Rollback()
+ 	if err := lockIngestJobScope(context.Background(), earlierTx, ingestJobScope{
+-		tenantID:  earlier.TenantID,
+-		agentID:   earlier.AgentID,
+-		appID:     earlier.AppID,
+-		sessionID: earlier.SessionID,
++		tenantID:    earlier.TenantID,
++		namespaceID: earlier.NamespaceID,
++		agentID:     earlier.AgentID,
++		appID:       earlier.AppID,
++		sessionID:   earlier.SessionID,
+ 	}); err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -978,10 +985,11 @@ func TestIngestJobDelayedEnqueueWithMultipleClaimersDoesNotDeadlock(t *testing.T
+ 	}
+ 	defer earlierTx.Rollback()
+ 	if err := lockIngestJobScope(context.Background(), earlierTx, ingestJobScope{
+-		tenantID:  earlier.TenantID,
+-		agentID:   earlier.AgentID,
+-		appID:     earlier.AppID,
+-		sessionID: earlier.SessionID,
++		tenantID:    earlier.TenantID,
++		namespaceID: earlier.NamespaceID,
++		agentID:     earlier.AgentID,
++		appID:       earlier.AppID,
++		sessionID:   earlier.SessionID,
+ 	}); err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -1028,10 +1036,11 @@ func TestIngestJobScopeSerializationDoesNotBlockOtherScopes(t *testing.T) {
+ 	}
+ 	defer holder.Rollback()
+ 	if err := lockIngestJobScope(context.Background(), holder, ingestJobScope{
+-		tenantID:  blocked.TenantID,
+-		agentID:   blocked.AgentID,
+-		appID:     blocked.AppID,
+-		sessionID: blocked.SessionID,
++		tenantID:    blocked.TenantID,
++		namespaceID: blocked.NamespaceID,
++		agentID:     blocked.AgentID,
++		appID:       blocked.AppID,
++		sessionID:   blocked.SessionID,
+ 	}); err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -1088,10 +1097,11 @@ func TestIngestJobContendedScopeDoesNotBlockOtherScope(t *testing.T) {
+ 	}
+ 	defer holder.Rollback()
+ 	if err := lockIngestJobScope(context.Background(), holder, ingestJobScope{
+-		tenantID:  contended.TenantID,
+-		agentID:   contended.AgentID,
+-		appID:     contended.AppID,
+-		sessionID: contended.SessionID,
++		tenantID:    contended.TenantID,
++		namespaceID: contended.NamespaceID,
++		agentID:     contended.AgentID,
++		appID:       contended.AppID,
++		sessionID:   contended.SessionID,
+ 	}); err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -1131,10 +1141,11 @@ func TestIngestJobClaimRotatesPastContendedCandidatePage(t *testing.T) {
+ 		insertIngestJobAt(t, db, input, createdAt.Add(time.Duration(i)*time.Millisecond))
+ 		if i < maxClaimCandidateScopes {
+ 			if err := lockIngestJobScope(context.Background(), holder, ingestJobScope{
+-				tenantID:  input.TenantID,
+-				agentID:   input.AgentID,
+-				appID:     input.AppID,
+-				sessionID: input.SessionID,
++				tenantID:    input.TenantID,
++				namespaceID: input.NamespaceID,
++				agentID:     input.AgentID,
++				appID:       input.AppID,
++				sessionID:   input.SessionID,
+ 			}); err != nil {
+ 				t.Fatal(err)
+ 			}
+@@ -1193,10 +1204,11 @@ func TestIngestJobClaimHighWaterSweepSurvivesQueueGrowth(t *testing.T) {
+ 			target = input
+ 		}
+ 		if err := lockIngestJobScope(context.Background(), holder, ingestJobScope{
+-			tenantID:  input.TenantID,
+-			agentID:   input.AgentID,
+-			appID:     input.AppID,
+-			sessionID: input.SessionID,
++			tenantID:    input.TenantID,
++			namespaceID: input.NamespaceID,
++			agentID:     input.AgentID,
++			appID:       input.AppID,
++			sessionID:   input.SessionID,
+ 		}); err != nil {
+ 			t.Fatal(err)
+ 		}
+diff --git a/server/internal/repository/postgres/ingest_plan.go b/server/internal/repository/postgres/ingest_plan.go
+index f989f25222da2bb9b756dd5ae9831fb6f0123e06..c7e34949749596b31b435bf610b3a0aae4d8534f 100644
+--- a/server/internal/repository/postgres/ingest_plan.go
++++ b/server/internal/repository/postgres/ingest_plan.go
+@@ -31,8 +31,11 @@ func (r *IngestJobRepo) NextPlanRevision(
+ 	if err := tx.QueryRowContext(ctx, `
+ 		SELECT COALESCE(MAX(plan_revision), 0) + 1
+ 		FROM ingest_job_plans
+-		WHERE tenant_id = $1 AND job_id = $2`,
++		WHERE tenant_id = $1
++		  AND namespace_id IS NOT DISTINCT FROM $2
++		  AND job_id = $3`,
+ 		lease.TenantID,
++		nullString(lease.NamespaceID),
+ 		lease.JobID,
+ 	).Scan(&revision); err != nil {
+ 		return 0, fmt.Errorf("read next ingest plan revision: %w", err)
+@@ -57,20 +60,25 @@ func (r *IngestJobRepo) LoadPlan(
+ 		FROM ingest_jobs AS job
+ 		JOIN ingest_job_plans AS plan
+ 		  ON plan.tenant_id = job.tenant_id
++		 AND plan.namespace_id IS NOT DISTINCT FROM job.namespace_id
+ 		 AND plan.job_id = job.job_id
+ 		 AND plan.plan_revision = job.active_plan_revision
+ 		 AND plan.plan_hash = job.active_plan_hash
+ 		WHERE job.tenant_id = $1
+-		  AND job.job_id = $2
+-		  AND job.lease_owner = $3
+-		  AND job.attempt_count = $4
++		  AND job.namespace_id IS NOT DISTINCT FROM $2
++		  AND job.job_id = $3
++		  AND job.lease_owner = $4
++		  AND job.attempt_count = $5
++		  AND job.principal_id IS NOT DISTINCT FROM $6
+ 		  AND job.state = 'planning'
+ 		  AND job.lease_expires_at > statement_timestamp()
+ 		  AND plan.state = 'valid'`,
+ 		lease.TenantID,
++		nullString(lease.NamespaceID),
+ 		lease.JobID,
+ 		lease.Owner,
+ 		lease.Generation,
++		nullString(lease.PrincipalID),
+ 	).Scan(&payload, &revision, &hash)
+ 	if errors.Is(err, sql.ErrNoRows) {
+ 		return nil, nil
+@@ -83,16 +91,22 @@ func (r *IngestJobRepo) LoadPlan(
+ 	if err := json.Unmarshal(payload, &plan); err != nil {
+ 		plan.JobID = lease.JobID
+ 		plan.TenantID = lease.TenantID
++		plan.NamespaceID = lease.NamespaceID
++		plan.PrincipalID = lease.PrincipalID
+ 		plan.Revision = revision
+ 		plan.Hash = hash
+ 		return &plan, fmt.Errorf("%w: decode persisted plan", ingestqueue.ErrPlanInvalid)
+ 	}
+ 	if plan.JobID != lease.JobID ||
+ 		plan.TenantID != lease.TenantID ||
++		plan.NamespaceID != lease.NamespaceID ||
++		plan.PrincipalID != lease.PrincipalID ||
+ 		plan.Revision != revision ||
+ 		plan.Hash != hash {
+ 		plan.JobID = lease.JobID
+ 		plan.TenantID = lease.TenantID
++		plan.NamespaceID = lease.NamespaceID
++		plan.PrincipalID = lease.PrincipalID
+ 		plan.Revision = revision
+ 		plan.Hash = hash
+ 		return &plan, fmt.Errorf("%w: persisted plan identity mismatch", ingestqueue.ErrPlanInvalid)
+@@ -126,13 +140,16 @@ func (r *IngestJobRepo) SavePlan(
+ 
+ 	if _, err := tx.ExecContext(ctx, `
+ 		INSERT INTO ingest_job_plans (
+-			tenant_id, job_id, plan_revision, attempt_generation,
++			tenant_id, namespace_id, principal_id, job_id,
++			plan_revision, attempt_generation,
+ 			plan_hash, plan_payload, state, truncated_fact_count,
+ 			warning_count, warning_class, created_at
+ 		)
+-		VALUES ($1, $2, $3, $4, $5, $6, 'valid', $7, $8, $9,
++		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'valid', $9, $10, $11,
+ 			statement_timestamp())`,
+ 		lease.TenantID,
++		nullString(lease.NamespaceID),
++		nullString(lease.PrincipalID),
+ 		lease.JobID,
+ 		plan.Revision,
+ 		lease.Generation,
+@@ -147,23 +164,27 @@ func (r *IngestJobRepo) SavePlan(
+ 	result, err := tx.ExecContext(ctx, `
+ 		UPDATE ingest_jobs
+ 		SET state = 'applying',
+-			plan_payload = $5,
+-			active_plan_revision = $6,
+-			active_plan_hash = $7,
+-			plan_warning_count = $8,
++			plan_payload = $7,
++			active_plan_revision = $8,
++			active_plan_hash = $9,
++			plan_warning_count = $10,
+ 			apply_warning_count = 0,
+-			warning_count = $8,
+-			warning_class = $9,
+-			truncated_fact_count = $10,
++			warning_count = $10,
++			warning_class = $11,
++			truncated_fact_count = $12,
+ 			updated_at = statement_timestamp()
+ 		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
+ 		  AND attempt_count = $4
++		  AND namespace_id IS NOT DISTINCT FROM $5
++		  AND principal_id IS NOT DISTINCT FROM $6
+ 		  AND state = 'planning'
+ 		  AND lease_expires_at > statement_timestamp()`,
+ 		lease.TenantID,
+ 		lease.JobID,
+ 		lease.Owner,
+ 		lease.Generation,
++		nullString(lease.NamespaceID),
++		nullString(lease.PrincipalID),
+ 		[]byte(payload),
+ 		plan.Revision,
+ 		plan.Hash,
+@@ -197,14 +218,17 @@ func (r *IngestJobRepo) ResumePlan(
+ 			updated_at = statement_timestamp()
+ 		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
+ 		  AND attempt_count = $4
++		  AND namespace_id IS NOT DISTINCT FROM $5
++		  AND principal_id IS NOT DISTINCT FROM $6
+ 		  AND state = 'planning'
+-		  AND active_plan_revision = $5
+-		  AND active_plan_hash = $6
++		  AND active_plan_revision = $7
++		  AND active_plan_hash = $8
+ 		  AND lease_expires_at > statement_timestamp()
+ 		  AND EXISTS (
+ 			SELECT 1 FROM ingest_job_plans
+ 			WHERE tenant_id = $1 AND job_id = $2
+-			  AND plan_revision = $5 AND plan_hash = $6
++			  AND namespace_id IS NOT DISTINCT FROM $5
++			  AND plan_revision = $7 AND plan_hash = $8
+ 			  AND state = 'valid'
+ 		  )`,
+ 		plan.Revision,
+@@ -231,10 +255,13 @@ func (r *IngestJobRepo) MarkPlanStale(
+ 	result, err := tx.ExecContext(ctx, `
+ 		UPDATE ingest_job_plans
+ 		SET state = 'stale', stale_at = statement_timestamp()
+-		WHERE tenant_id = $1 AND job_id = $2
+-		  AND plan_revision = $3 AND plan_hash = $4
++		WHERE tenant_id = $1
++		  AND namespace_id IS NOT DISTINCT FROM $2
++		  AND job_id = $3
++		  AND plan_revision = $4 AND plan_hash = $5
+ 		  AND state = 'valid'`,
+ 		lease.TenantID,
++		nullString(lease.NamespaceID),
+ 		lease.JobID,
+ 		plan.Revision,
+ 		plan.Hash,
+@@ -259,14 +286,18 @@ func (r *IngestJobRepo) MarkPlanStale(
+ 			updated_at = statement_timestamp()
+ 		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
+ 		  AND attempt_count = $4
++		  AND namespace_id IS NOT DISTINCT FROM $5
++		  AND principal_id IS NOT DISTINCT FROM $6
+ 		  AND state IN ('planning', 'applying')
+-		  AND active_plan_revision = $5
+-		  AND active_plan_hash = $6
++		  AND active_plan_revision = $7
++		  AND active_plan_hash = $8
+ 		  AND lease_expires_at > statement_timestamp()`,
+ 		lease.TenantID,
+ 		lease.JobID,
+ 		lease.Owner,
+ 		lease.Generation,
++		nullString(lease.NamespaceID),
++		nullString(lease.PrincipalID),
+ 		plan.Revision,
+ 		plan.Hash,
+ 	)
+@@ -331,16 +362,22 @@ func (r *IngestJobRepo) ApplyPlan(
+ 	}
+ 
+ 	for index, session := range plan.Sessions {
++		conflictTarget := `(app_id, session_id, content_hash)`
++		if lease.NamespaceID != "" {
++			conflictTarget = `(namespace_id, app_id, session_id, content_hash)`
++		}
+ 		if _, err := tx.ExecContext(ctx, `
+ 			INSERT INTO sessions (
+-				id, session_id, agent_id, app_id, source, seq, role,
++				id, namespace_id, principal_id,
++				session_id, agent_id, app_id, source, seq, role,
+ 				content, content_type, content_hash, tags, state,
+ 				created_at, updated_at
+ 			)
+ 			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10,
+-				$11, 'active', statement_timestamp(), statement_timestamp())
+-			ON CONFLICT (app_id, session_id, content_hash) DO UPDATE
++				$11, $12, $13, 'active', statement_timestamp(), statement_timestamp())
++			ON CONFLICT `+conflictTarget+` DO UPDATE
+ 			SET agent_id = EXCLUDED.agent_id,
++				principal_id = EXCLUDED.principal_id,
+ 				source = EXCLUDED.source,
+ 				seq = EXCLUDED.seq,
+ 				role = EXCLUDED.role,
+@@ -349,6 +386,8 @@ func (r *IngestJobRepo) ApplyPlan(
+ 				state = 'active',
+ 				updated_at = statement_timestamp()`,
+ 			session.ID,
++			nullString(lease.NamespaceID),
++			nullString(lease.PrincipalID),
+ 			nullString(session.SessionID),
+ 			nullString(session.AgentID),
+ 			session.AppID,
+@@ -370,10 +409,15 @@ func (r *IngestJobRepo) ApplyPlan(
+ 
+ 	for index, patch := range plan.MessageTagPatches {
+ 		result, err := tx.ExecContext(ctx, `
+-			UPDATE sessions
+-			SET tags = $1, updated_at = statement_timestamp()
+-			WHERE app_id = $2 AND session_id = $3 AND content_hash = $4`,
++				UPDATE sessions
++				SET tags = $1,
++					principal_id = $2,
++					updated_at = statement_timestamp()
++				WHERE namespace_id IS NOT DISTINCT FROM $3
++				  AND app_id = $4 AND session_id = $5 AND content_hash = $6`,
+ 			marshalTags(patch.Tags),
++			nullString(lease.PrincipalID),
++			nullString(lease.NamespaceID),
+ 			patch.AppID,
+ 			patch.SessionID,
+ 			patch.ContentHash,
+@@ -399,10 +443,12 @@ func (r *IngestJobRepo) ApplyPlan(
+ 				INSERT INTO memories (
+ 					id, content, source, tags, metadata, embedding,
+ 					memory_type, agent_id, session_id, app_id, state,
+-					version, updated_by, created_at, updated_at
++					version, updated_by, namespace_id,
++					created_by_principal_id, updated_by_principal_id,
++					created_at, updated_at
+ 				)
+ 				VALUES ($1, $2, $3, $4, $5, $6, 'insight', $7, $8,
+-					$9, 'active', 1, $10, statement_timestamp(),
++					$9, 'active', 1, $10, $11, $12, $12, statement_timestamp(),
+ 					statement_timestamp())`,
+ 				action.TargetID,
+ 				action.Content,
+@@ -414,6 +460,8 @@ func (r *IngestJobRepo) ApplyPlan(
+ 				nullString(action.SessionID),
+ 				action.AppID,
+ 				nullString(action.UpdatedBy),
++				nullString(lease.NamespaceID),
++				nullString(lease.PrincipalID),
+ 			)
+ 		case ingestqueue.ActionUpdate:
+ 			result, err = tx.ExecContext(ctx, `
+@@ -428,8 +476,11 @@ func (r *IngestJobRepo) ApplyPlan(
+ 					app_id = $8,
+ 					version = version + 1,
+ 					updated_by = $9,
++					updated_by_principal_id = $10,
+ 					updated_at = statement_timestamp()
+-				WHERE id = $10 AND state = 'active' AND version = $11`,
++				WHERE id = $11
++				  AND namespace_id IS NOT DISTINCT FROM $12
++				  AND state = 'active' AND version = $13`,
+ 				action.Content,
+ 				nullString(action.Source),
+ 				item.tags,
+@@ -439,7 +490,9 @@ func (r *IngestJobRepo) ApplyPlan(
+ 				nullString(action.SessionID),
+ 				action.AppID,
+ 				nullString(action.UpdatedBy),
++				nullString(lease.PrincipalID),
+ 				action.TargetID,
++				nullString(lease.NamespaceID),
+ 				action.ExpectedVersion,
+ 			)
+ 		case ingestqueue.ActionDelete:
+@@ -448,10 +501,15 @@ func (r *IngestJobRepo) ApplyPlan(
+ 				SET state = 'deleted',
+ 					version = version + 1,
+ 					updated_by = $1,
++					updated_by_principal_id = $2,
+ 					updated_at = statement_timestamp()
+-				WHERE id = $2 AND state = 'active' AND version = $3`,
++				WHERE id = $3
++				  AND namespace_id IS NOT DISTINCT FROM $4
++				  AND state = 'active' AND version = $5`,
+ 				nullString(action.UpdatedBy),
++				nullString(lease.PrincipalID),
+ 				action.TargetID,
++				nullString(lease.NamespaceID),
+ 				action.ExpectedVersion,
+ 			)
+ 		default:
+@@ -476,9 +534,9 @@ func (r *IngestJobRepo) ApplyPlan(
+ 		UPDATE ingest_jobs
+ 		SET state = 'succeeded',
+ 			apply_warning_count = 0,
+-			warning_count = $7,
+-			warning_class = $8,
+-			truncated_fact_count = $9,
++			warning_count = $9,
++			warning_class = $10,
++			truncated_fact_count = $11,
+ 			error_class = NULL,
+ 			runtime_finalization_state = CASE
+ 				WHEN runtime_operation_id IS NOT NULL
+@@ -494,14 +552,18 @@ func (r *IngestJobRepo) ApplyPlan(
+ 			updated_at = statement_timestamp()
+ 		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
+ 		  AND attempt_count = $4
++		  AND namespace_id IS NOT DISTINCT FROM $5
++		  AND principal_id IS NOT DISTINCT FROM $6
+ 		  AND state = 'applying'
+-		  AND active_plan_revision = $5
+-		  AND active_plan_hash = $6
++		  AND active_plan_revision = $7
++		  AND active_plan_hash = $8
+ 		  AND lease_expires_at > statement_timestamp()`,
+ 		lease.TenantID,
+ 		lease.JobID,
+ 		lease.Owner,
+ 		lease.Generation,
++		nullString(lease.NamespaceID),
++		nullString(lease.PrincipalID),
+ 		plan.Revision,
+ 		plan.Hash,
+ 		plan.WarningCount,
+@@ -517,10 +579,13 @@ func (r *IngestJobRepo) ApplyPlan(
+ 	result, err = tx.ExecContext(ctx, `
+ 		UPDATE ingest_job_plans
+ 		SET state = 'applied', applied_at = statement_timestamp()
+-		WHERE tenant_id = $1 AND job_id = $2
+-		  AND plan_revision = $3 AND plan_hash = $4
++		WHERE tenant_id = $1
++		  AND namespace_id IS NOT DISTINCT FROM $2
++		  AND job_id = $3
++		  AND plan_revision = $4 AND plan_hash = $5
+ 		  AND state = 'valid'`,
+ 		lease.TenantID,
++		nullString(lease.NamespaceID),
+ 		lease.JobID,
+ 		plan.Revision,
+ 		plan.Hash,
+@@ -552,7 +617,7 @@ func (r *IngestJobRepo) resolveAmbiguousApply(
+ ) (ingestqueue.ApplyResult, error) {
+ 	ctx, cancel := context.WithTimeout(context.Background(), ambiguousCommitReadTimeout)
+ 	defer cancel()
+-	job, err := r.Get(ctx, lease.TenantID, lease.JobID)
++	job, err := r.Get(ctx, lease.TenantID, lease.NamespaceID, lease.JobID)
+ 	if err == nil && job.State == ingestqueue.StateSucceeded {
+ 		return outcome, nil
+ 	}
+@@ -566,7 +631,10 @@ func validateOwnedPlan(lease ingestqueue.LeaseRef, plan ingestqueue.AtomicPlan)
+ 	if err := ingestqueue.ValidatePlan(plan); err != nil {
+ 		return err
+ 	}
+-	if plan.JobID != lease.JobID || plan.TenantID != lease.TenantID {
++	if plan.JobID != lease.JobID ||
++		plan.TenantID != lease.TenantID ||
++		plan.NamespaceID != lease.NamespaceID ||
++		plan.PrincipalID != lease.PrincipalID {
+ 		return fmt.Errorf("%w: plan ownership mismatch", ingestqueue.ErrPlanInvalid)
+ 	}
+ 	return nil
+@@ -579,6 +647,8 @@ func lockOwnedIngestJob(ctx context.Context, tx *sql.Tx, lease ingestqueue.Lease
+ 		lease.JobID,
+ 		lease.Owner,
+ 		lease.Generation,
++		nullString(lease.NamespaceID),
++		nullString(lease.PrincipalID),
+ 	).Scan(&locked)
+ 	if errors.Is(err, sql.ErrNoRows) {
+ 		return ingestqueue.ErrLeaseLost
+@@ -598,18 +668,37 @@ func lockApplyingPlan(
+ 	var locked int
+ 	err := tx.QueryRowContext(ctx, `
+ 		SELECT 1
+-		FROM ingest_jobs
++		FROM ingest_jobs AS job
+ 		WHERE tenant_id = $1 AND job_id = $2 AND lease_owner = $3
+ 		  AND attempt_count = $4
++		  AND namespace_id IS NOT DISTINCT FROM $5
++		  AND principal_id IS NOT DISTINCT FROM $6
+ 		  AND state = 'applying'
+-		  AND active_plan_revision = $5
+-		  AND active_plan_hash = $6
++		  AND active_plan_revision = $7
++		  AND active_plan_hash = $8
+ 		  AND lease_expires_at > statement_timestamp()
++		  AND (
++			$5::varchar IS NULL
++			OR (
++				EXISTS (
++					SELECT 1 FROM memory_namespaces AS namespace
++					WHERE namespace.namespace_id = $5
++					  AND namespace.status = 'active'
++				)
++				AND EXISTS (
++					SELECT 1 FROM memory_principals AS principal
++					WHERE principal.principal_id = $6
++					  AND principal.status = 'active'
++				)
++			)
++		  )
+ 		FOR UPDATE`,
+ 		lease.TenantID,
+ 		lease.JobID,
+ 		lease.Owner,
+ 		lease.Generation,
++		nullString(lease.NamespaceID),
++		nullString(lease.PrincipalID),
+ 		plan.Revision,
+ 		plan.Hash,
+ 	).Scan(&locked)
+diff --git a/server/internal/repository/postgres/ingest_plan_integration_test.go b/server/internal/repository/postgres/ingest_plan_integration_test.go
+index 9212eb5327da12d8d4f8ab71855786f6b730a787..6f6251f83e5d474ec77cf4c56770e42bb0529562 100644
+--- a/server/internal/repository/postgres/ingest_plan_integration_test.go
++++ b/server/internal/repository/postgres/ingest_plan_integration_test.go
+@@ -2,6 +2,7 @@ package postgres
+ 
+ import (
+ 	"context"
++	"database/sql"
+ 	"errors"
+ 	"fmt"
+ 	"testing"
+@@ -10,6 +11,28 @@ import (
+ 	"github.com/qiffang/mnemos/server/internal/ingestqueue"
+ )
+ 
++func waitForPostgresLockWait(t *testing.T, db *sql.DB, pid int) {
++	t.Helper()
++	deadline := time.Now().Add(2 * time.Second)
++	for time.Now().Before(deadline) {
++		var waiting bool
++		err := db.QueryRow(`
++			SELECT COALESCE(wait_event_type = 'Lock', FALSE)
++			FROM pg_stat_activity
++			WHERE pid = $1`,
++			pid,
++		).Scan(&waiting)
++		if err == nil && waiting {
++			return
++		}
++		if err != nil && !errors.Is(err, sql.ErrNoRows) {
++			t.Fatalf("inspect revoke lock wait: %v", err)
++		}
++		time.Sleep(5 * time.Millisecond)
++	}
++	t.Fatalf("revoke backend %d did not wait for the apply job lock", pid)
++}
++
+ func prepareAtomicIntegrationPlan(
+ 	t *testing.T,
+ 	repo *IngestJobRepo,
+@@ -38,6 +61,8 @@ func prepareAtomicIntegrationPlan(
+ 	plan, err := ingestqueue.FinalizePlan(ingestqueue.AtomicPlan{
+ 		JobID:             claimed.ID,
+ 		TenantID:          claimed.TenantID,
++		NamespaceID:       claimed.NamespaceID,
++		PrincipalID:       claimed.PrincipalID,
+ 		Revision:          1,
+ 		AttemptGeneration: claimed.AttemptCount,
+ 		Sessions: []ingestqueue.SessionUpsert{
+@@ -105,7 +130,7 @@ func assertAtomicMutationCounts(
+ 	if err := repo.db.QueryRow(`SELECT count(*) FROM memories`).Scan(&memories); err != nil {
+ 		t.Fatal(err)
+ 	}
+-	got, err := repo.Get(context.Background(), job.TenantID, job.ID)
++	got, err := repo.Get(context.Background(), job.TenantID, job.NamespaceID, job.ID)
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -244,6 +269,206 @@ func TestAtomicApplyCommitsMutationsAndSuccessTogether(t *testing.T) {
+ 	assertAtomicMutationCounts(t, repo, job, 1, 2, ingestqueue.StateSucceeded)
+ }
+ 
++// TC-GROUPNS-122/128: emergency revoke and atomic apply have one legal order.
++func TestEmergencyRevokeLinearizesAgainstAtomicApply(t *testing.T) {
++	t.Run("apply commits before revoke", func(t *testing.T) {
++		db := ingestTestDB(t)
++		repo := NewIngestJobRepo(db)
++		job, plan := prepareAtomicIntegrationPlan(
++			t,
++			repo,
++			"1280000000000000000000000000000000000000000000000000000000000001",
++		)
++
++		applyPaused := make(chan struct{})
++		releaseApply := make(chan struct{})
++		repo.applyHook = func(point string) error {
++			if point == "after_action_0" {
++				close(applyPaused)
++				<-releaseApply
++			}
++			return nil
++		}
++		applyDone := make(chan error, 1)
++		go func() {
++			_, err := repo.ApplyPlan(context.Background(), job.LeaseRef(), plan)
++			applyDone <- err
++		}()
++		select {
++		case <-applyPaused:
++		case <-time.After(2 * time.Second):
++			t.Fatal("apply did not reach the injected pause")
++		}
++
++		revokePID := make(chan int, 1)
++		revokeDone := make(chan error, 1)
++		go func() {
++			tx, err := db.BeginTx(context.Background(), nil)
++			if err != nil {
++				revokeDone <- err
++				return
++			}
++			defer tx.Rollback()
++			var pid int
++			if err := tx.QueryRow(`SELECT pg_backend_pid()`).Scan(&pid); err != nil {
++				revokeDone <- err
++				return
++			}
++			if _, err := tx.Exec(`
++				UPDATE memory_namespace_memberships
++				SET status = 'revoked', revoked_at = statement_timestamp()
++				WHERE principal_id = $1 AND status = 'active'`,
++				job.PrincipalID,
++			); err != nil {
++				revokeDone <- err
++				return
++			}
++			if _, err := tx.Exec(`
++				UPDATE memory_principals
++				SET status = 'disabled'
++				WHERE principal_id = $1`,
++				job.PrincipalID,
++			); err != nil {
++				revokeDone <- err
++				return
++			}
++			revokePID <- pid
++			result, err := tx.Exec(`
++				UPDATE ingest_jobs
++				SET state = 'dead',
++					error_class = 'principal_emergency_revoked',
++					lease_owner = NULL,
++					lease_expires_at = NULL,
++					completed_at = statement_timestamp(),
++					updated_at = statement_timestamp()
++				WHERE principal_id = $1
++				  AND state NOT IN ('succeeded', 'dead')`,
++				job.PrincipalID,
++			)
++			if err != nil {
++				revokeDone <- err
++				return
++			}
++			affected, err := result.RowsAffected()
++			if err != nil {
++				revokeDone <- err
++				return
++			}
++			if affected != 0 {
++				revokeDone <- fmt.Errorf(
++					"revoke changed %d jobs after apply committed",
++					affected,
++				)
++				return
++			}
++			revokeDone <- tx.Commit()
++		}()
++
++		var pid int
++		select {
++		case pid = <-revokePID:
++		case err := <-revokeDone:
++			t.Fatalf("revoke failed before lock wait: %v", err)
++		case <-time.After(2 * time.Second):
++			t.Fatal("revoke did not reach the job update")
++		}
++		waitForPostgresLockWait(t, db, pid)
++		close(releaseApply)
++
++		if err := <-applyDone; err != nil {
++			t.Fatalf("apply-first result: %v", err)
++		}
++		if err := <-revokeDone; err != nil {
++			t.Fatalf("apply-first revoke: %v", err)
++		}
++		assertAtomicMutationCounts(
++			t,
++			repo,
++			job,
++			1,
++			2,
++			ingestqueue.StateSucceeded,
++		)
++		var principalStatus, membershipStatus string
++		if err := db.QueryRow(`
++			SELECT principal.status, membership.status
++			FROM memory_principals AS principal
++			JOIN memory_namespace_memberships AS membership
++			  ON membership.principal_id = principal.principal_id
++			WHERE principal.principal_id = $1
++			  AND membership.namespace_id = $2`,
++			job.PrincipalID,
++			job.NamespaceID,
++		).Scan(&principalStatus, &membershipStatus); err != nil {
++			t.Fatal(err)
++		}
++		if principalStatus != "disabled" || membershipStatus != "revoked" {
++			t.Fatalf(
++				"principal=%s membership=%s, want disabled/revoked",
++				principalStatus,
++				membershipStatus,
++			)
++		}
++	})
++
++	t.Run("revoke commits before apply", func(t *testing.T) {
++		db := ingestTestDB(t)
++		repo := NewIngestJobRepo(db)
++		job, plan := prepareAtomicIntegrationPlan(
++			t,
++			repo,
++			"1280000000000000000000000000000000000000000000000000000000000002",
++		)
++		tx, err := db.BeginTx(context.Background(), nil)
++		if err != nil {
++			t.Fatal(err)
++		}
++		defer tx.Rollback()
++		if _, err := tx.Exec(`
++			UPDATE memory_namespace_memberships
++			SET status = 'revoked', revoked_at = statement_timestamp()
++			WHERE principal_id = $1 AND status = 'active'`,
++			job.PrincipalID,
++		); err != nil {
++			t.Fatal(err)
++		}
++		if _, err := tx.Exec(`
++			UPDATE memory_principals
++			SET status = 'disabled'
++			WHERE principal_id = $1`,
++			job.PrincipalID,
++		); err != nil {
++			t.Fatal(err)
++		}
++		if _, err := tx.Exec(`
++			UPDATE ingest_jobs
++			SET state = 'dead',
++				error_class = 'principal_emergency_revoked',
++				lease_owner = NULL,
++				lease_expires_at = NULL,
++				completed_at = statement_timestamp(),
++				updated_at = statement_timestamp()
++			WHERE principal_id = $1
++			  AND state NOT IN ('succeeded', 'dead')`,
++			job.PrincipalID,
++		); err != nil {
++			t.Fatal(err)
++		}
++		if err := tx.Commit(); err != nil {
++			t.Fatal(err)
++		}
++
++		if _, err := repo.ApplyPlan(
++			context.Background(),
++			job.LeaseRef(),
++			plan,
++		); !errors.Is(err, ingestqueue.ErrLeaseLost) {
++			t.Fatalf("revoke-first apply error = %v, want lease lost", err)
++		}
++		assertAtomicMutationCounts(t, repo, job, 0, 0, ingestqueue.StateDead)
++	})
++}
++
+ func TestAtomicApplyConflictRollsBackAndNextRevisionSucceeds(t *testing.T) {
+ 	db := ingestTestDB(t)
+ 	repo := NewIngestJobRepo(db)
+@@ -269,9 +494,12 @@ func TestAtomicApplyConflictRollsBackAndNextRevisionSucceeds(t *testing.T) {
+ 	}
+ 	const existingID = "54000000-0000-4000-8000-000000000099"
+ 	if _, err := db.Exec(`
+-		INSERT INTO memories (id, content, app_id, state, version)
+-		VALUES ($1, 'original', 'app-a', 'active', 1)`,
++		INSERT INTO memories (
++			id, content, app_id, state, version, namespace_id
++		)
++		VALUES ($1, 'original', 'app-a', 'active', 1, $2)`,
+ 		existingID,
++		claimed.NamespaceID,
+ 	); err != nil {
+ 		t.Fatal(err)
+ 	}
+@@ -279,6 +507,8 @@ func TestAtomicApplyConflictRollsBackAndNextRevisionSucceeds(t *testing.T) {
+ 		plan, err := ingestqueue.FinalizePlan(ingestqueue.AtomicPlan{
+ 			JobID:             claimed.ID,
+ 			TenantID:          claimed.TenantID,
++			NamespaceID:       claimed.NamespaceID,
++			PrincipalID:       claimed.PrincipalID,
+ 			Revision:          revision,
+ 			AttemptGeneration: claimed.AttemptCount,
+ 			Actions: []ingestqueue.MemoryAction{
+diff --git a/server/internal/repository/postgres/memory.go b/server/internal/repository/postgres/memory.go
+index 883bb626a2816d8ac693cfe032240404786e8b68..932946e155cbff7271129791d69e8d41ebbdd0cb 100644
+--- a/server/internal/repository/postgres/memory.go
++++ b/server/internal/repository/postgres/memory.go
+@@ -4,24 +4,38 @@ import (
+ 	"context"
+ 	"database/sql"
+ 	"encoding/json"
++	"errors"
+ 	"fmt"
+ 	"log/slog"
++	"os"
++	"strconv"
+ 	"strings"
+ 	"sync/atomic"
++	"time"
+ 
++	"github.com/jackc/pgx/v5/pgconn"
+ 	"github.com/pgvector/pgvector-go"
+ 
+ 	"github.com/qiffang/mnemos/server/internal/domain"
+ )
+ 
+ type MemoryRepo struct {
+-	db           *sql.DB
+-	ftsAvailable atomic.Bool
+-	clusterID    string
++	db                 *sql.DB
++	ftsAvailable       atomic.Bool
++	clusterID          string
++	namespaceID        string
++	principalID        string
++	exactVectorMaxRows int
++	exactVectorTimeout time.Duration
+ }
+ 
+-func NewMemoryRepo(db *sql.DB, ftsEnabled bool, clusterID string) *MemoryRepo {
++func NewMemoryRepo(db *sql.DB, ftsEnabled bool, clusterID string, scopes ...domain.NamespaceScope) *MemoryRepo {
+ 	r := &MemoryRepo{db: db, clusterID: clusterID}
++	if len(scopes) > 0 {
++		r.namespaceID = scopes[0].NamespaceID
++		r.principalID = scopes[0].PrincipalID
++		r.exactVectorMaxRows, r.exactVectorTimeout = namespaceExactVectorConfig()
++	}
+ 	r.ftsAvailable.Store(ftsEnabled)
+ 	if ftsEnabled {
+ 		slog.Info("FTS search enabled via MNEMO_FTS_ENABLED")
+@@ -39,12 +53,31 @@ func (r *MemoryRepo) Create(ctx context.Context, m *domain.Memory) error {
+ 	if memoryType == "" {
+ 		memoryType = string(domain.TypePinned)
+ 	}
++	if r.namespaceID == "" {
++		_, err := r.db.ExecContext(ctx,
++			`INSERT INTO memories (id, content, source, tags, metadata, embedding, memory_type, agent_id, session_id, app_id, state, version, updated_by, created_at, updated_at)
++			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active', $11, $12, NOW(), NOW())`,
++			m.ID, m.Content, nullString(m.Source),
++			tagsJSON, nullJSON(m.Metadata), vecToParam(m.Embedding), memoryType, nullString(m.AgentID), nullString(m.SessionID), m.AppID,
++			m.Version, nullString(m.UpdatedBy),
++		)
++		if err != nil {
++			return fmt.Errorf("create memory: %w", err)
++		}
++		return nil
++	}
+ 	_, err := r.db.ExecContext(ctx,
+-		`INSERT INTO memories (id, content, source, tags, metadata, embedding, memory_type, agent_id, session_id, app_id, state, version, updated_by, created_at, updated_at)
+-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active', $11, $12, NOW(), NOW())`,
++		`INSERT INTO memories (
++			id, content, source, tags, metadata, embedding, memory_type,
++			agent_id, session_id, app_id, state, version, updated_by,
++			namespace_id, created_by_principal_id, updated_by_principal_id,
++			created_at, updated_at
++		 )
++		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active',
++		         $11, $12, $13, $14, $14, NOW(), NOW())`,
+ 		m.ID, m.Content, nullString(m.Source),
+ 		tagsJSON, nullJSON(m.Metadata), vecToParam(m.Embedding), memoryType, nullString(m.AgentID), nullString(m.SessionID), m.AppID,
+-		m.Version, nullString(m.UpdatedBy),
++		m.Version, nullString(m.UpdatedBy), r.namespaceID, r.principalID,
+ 	)
+ 	if err != nil {
+ 		return fmt.Errorf("create memory: %w", err)
+@@ -53,6 +86,14 @@ func (r *MemoryRepo) Create(ctx context.Context, m *domain.Memory) error {
+ }
+ 
+ func (r *MemoryRepo) GetByID(ctx context.Context, id string) (*domain.Memory, error) {
++	if r.namespaceID != "" {
++		row := r.db.QueryRowContext(ctx,
++			`SELECT `+allColumns+` FROM memories
++			 WHERE id = $1 AND namespace_id = $2 AND state = 'active'`,
++			id, r.namespaceID,
++		)
++		return scanMemory(row)
++	}
+ 	row := r.db.QueryRowContext(ctx,
+ 		`SELECT `+allColumns+` FROM memories WHERE id = $1 AND state = 'active'`, id,
+ 	)
+@@ -62,9 +103,20 @@ func (r *MemoryRepo) GetByID(ctx context.Context, id string) (*domain.Memory, er
+ func (r *MemoryRepo) UpdateOptimistic(ctx context.Context, m *domain.Memory, expectedVersion int) error {
+ 	tagsJSON := marshalTags(m.Tags)
+ 
+-	query := `UPDATE memories SET content = $1, tags = $2, metadata = $3, embedding = $4, version = version + 1, updated_by = $5, updated_at = NOW()
+-		 WHERE id = $6`
+-	args := []any{m.Content, tagsJSON, nullJSON(m.Metadata), vecToParam(m.Embedding), nullString(m.UpdatedBy), m.ID}
++	query := `UPDATE memories
++		 SET content = $1, tags = $2, metadata = $3, embedding = $4,
++		     version = version + 1, updated_by = $5, updated_at = NOW()`
++	args := []any{m.Content, tagsJSON, nullJSON(m.Metadata), vecToParam(m.Embedding), nullString(m.UpdatedBy)}
++	if r.namespaceID != "" {
++		query += fmt.Sprintf(", updated_by_principal_id = $%d", len(args)+1)
++		args = append(args, r.principalID)
++	}
++	query += fmt.Sprintf(" WHERE id = $%d", len(args)+1)
++	args = append(args, m.ID)
++	if r.namespaceID != "" {
++		query += fmt.Sprintf(" AND namespace_id = $%d", len(args)+1)
++		args = append(args, r.namespaceID)
++	}
+ 
+ 	if expectedVersion > 0 {
+ 		query += fmt.Sprintf(" AND version = $%d", len(args)+1)
+@@ -90,10 +142,14 @@ func (r *MemoryRepo) SoftDelete(ctx context.Context, id, agentName string) (int6
+ 	defer tx.Rollback()
+ 
+ 	var state sql.NullString
+-	err = tx.QueryRowContext(ctx,
+-		`SELECT state FROM memories WHERE id = $1 FOR UPDATE`,
+-		id,
+-	).Scan(&state)
++	lockQuery := `SELECT state FROM memories WHERE id = $1`
++	lockArgs := []any{id}
++	if r.namespaceID != "" {
++		lockQuery += ` AND namespace_id = $2`
++		lockArgs = append(lockArgs, r.namespaceID)
++	}
++	lockQuery += ` FOR UPDATE`
++	err = tx.QueryRowContext(ctx, lockQuery, lockArgs...).Scan(&state)
+ 	if err == sql.ErrNoRows {
+ 		return 0, domain.ErrNotFound
+ 	}
+@@ -104,10 +160,15 @@ func (r *MemoryRepo) SoftDelete(ctx context.Context, id, agentName string) (int6
+ 	if state.String == string(domain.StateDeleted) {
+ 		return 0, tx.Commit()
+ 	}
+-	_, err = tx.ExecContext(ctx,
+-		`UPDATE memories SET state = 'deleted', updated_at = NOW() WHERE id = $1`,
+-		id,
+-	)
++	updateQuery := `UPDATE memories SET state = 'deleted', updated_at = NOW()`
++	updateArgs := []any{id}
++	if r.namespaceID != "" {
++		updateQuery += `, updated_by_principal_id = $2 WHERE id = $1 AND namespace_id = $3`
++		updateArgs = append(updateArgs, r.principalID, r.namespaceID)
++	} else {
++		updateQuery += ` WHERE id = $1`
++	}
++	_, err = tx.ExecContext(ctx, updateQuery, updateArgs...)
+ 	if err != nil {
+ 		return 0, fmt.Errorf("soft delete update: %w", err)
+ 	}
+@@ -130,8 +191,17 @@ func (r *MemoryRepo) BulkSoftDelete(ctx context.Context, ids []string, agentName
+ 		args[i] = id
+ 	}
+ 
+-	query := `UPDATE memories SET state = 'deleted', updated_at = NOW()
+-		 WHERE id IN (` + strings.Join(placeholders, ",") + `) AND state != 'deleted'`
++	setClause := `state = 'deleted', updated_at = NOW()`
++	if r.namespaceID != "" {
++		setClause += fmt.Sprintf(", updated_by_principal_id = $%d", len(args)+1)
++		args = append(args, r.principalID)
++	}
++	query := `UPDATE memories SET ` + setClause +
++		` WHERE id IN (` + strings.Join(placeholders, ",") + `) AND state != 'deleted'`
++	if r.namespaceID != "" {
++		query += fmt.Sprintf(" AND namespace_id = $%d", len(args)+1)
++		args = append(args, r.namespaceID)
++	}
+ 
+ 	result, err := r.db.ExecContext(ctx, query, args...)
+ 	if err != nil {
+@@ -143,6 +213,21 @@ func (r *MemoryRepo) BulkSoftDelete(ctx context.Context, ids []string, agentName
+ }
+ 
+ func (r *MemoryRepo) ArchiveMemory(ctx context.Context, id, supersededBy string) error {
++	if r.namespaceID != "" {
++		result, err := r.db.ExecContext(ctx,
++			`UPDATE memories SET state = 'archived', superseded_by = $1,
++			        updated_by_principal_id = $2, updated_at = NOW()
++			 WHERE id = $3 AND namespace_id = $4 AND state = 'active'`,
++			supersededBy, r.principalID, id, r.namespaceID,
++		)
++		if err != nil {
++			return err
++		}
++		if n, _ := result.RowsAffected(); n == 0 {
++			return domain.ErrNotFound
++		}
++		return nil
++	}
+ 	result, err := r.db.ExecContext(ctx,
+ 		`UPDATE memories SET state = 'archived', superseded_by = $1, updated_at = NOW()
+ 		 WHERE id = $2 AND state = 'active'`,
+@@ -164,11 +249,15 @@ func (r *MemoryRepo) ArchiveAndCreate(ctx context.Context, archiveID, superseded
+ 	}
+ 	defer tx.Rollback()
+ 
+-	result, err := tx.ExecContext(ctx,
+-		`UPDATE memories SET state = 'archived', superseded_by = $1, updated_at = NOW()
+-		 WHERE id = $2 AND state = 'active'`,
+-		supersededBy, archiveID,
+-	)
++	archiveQuery := `UPDATE memories SET state = 'archived', superseded_by = $1, updated_at = NOW()`
++	archiveArgs := []any{supersededBy, archiveID}
++	if r.namespaceID != "" {
++		archiveQuery += `, updated_by_principal_id = $3 WHERE id = $2 AND namespace_id = $4 AND state = 'active'`
++		archiveArgs = append(archiveArgs, r.principalID, r.namespaceID)
++	} else {
++		archiveQuery += ` WHERE id = $2 AND state = 'active'`
++	}
++	result, err := tx.ExecContext(ctx, archiveQuery, archiveArgs...)
+ 	if err != nil {
+ 		return fmt.Errorf("archive old memory: %w", err)
+ 	}
+@@ -182,13 +271,29 @@ func (r *MemoryRepo) ArchiveAndCreate(ctx context.Context, archiveID, superseded
+ 		memoryType = string(domain.TypePinned)
+ 	}
+ 
+-	_, err = tx.ExecContext(ctx,
+-		`INSERT INTO memories (id, content, source, tags, metadata, embedding, memory_type, agent_id, session_id, app_id, state, version, updated_by, created_at, updated_at)
+-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active', $11, $12, NOW(), NOW())`,
+-		newMem.ID, newMem.Content, nullString(newMem.Source),
+-		tagsJSON, nullJSON(newMem.Metadata), vecToParam(newMem.Embedding), memoryType, nullString(newMem.AgentID), nullString(newMem.SessionID), newMem.AppID,
+-		newMem.Version, nullString(newMem.UpdatedBy),
+-	)
++	if r.namespaceID != "" {
++		_, err = tx.ExecContext(ctx,
++			`INSERT INTO memories (
++				id, content, source, tags, metadata, embedding, memory_type,
++				agent_id, session_id, app_id, state, version, updated_by,
++				namespace_id, created_by_principal_id, updated_by_principal_id,
++				created_at, updated_at
++			 )
++			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active',
++			         $11, $12, $13, $14, $14, NOW(), NOW())`,
++			newMem.ID, newMem.Content, nullString(newMem.Source),
++			tagsJSON, nullJSON(newMem.Metadata), vecToParam(newMem.Embedding), memoryType, nullString(newMem.AgentID), nullString(newMem.SessionID), newMem.AppID,
++			newMem.Version, nullString(newMem.UpdatedBy), r.namespaceID, r.principalID,
++		)
++	} else {
++		_, err = tx.ExecContext(ctx,
++			`INSERT INTO memories (id, content, source, tags, metadata, embedding, memory_type, agent_id, session_id, app_id, state, version, updated_by, created_at, updated_at)
++			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active', $11, $12, NOW(), NOW())`,
++			newMem.ID, newMem.Content, nullString(newMem.Source),
++			tagsJSON, nullJSON(newMem.Metadata), vecToParam(newMem.Embedding), memoryType, nullString(newMem.AgentID), nullString(newMem.SessionID), newMem.AppID,
++			newMem.Version, nullString(newMem.UpdatedBy),
++		)
++	}
+ 	if err != nil {
+ 		return fmt.Errorf("create new memory: %w", err)
+ 	}
+@@ -197,6 +302,21 @@ func (r *MemoryRepo) ArchiveAndCreate(ctx context.Context, archiveID, superseded
+ }
+ 
+ func (r *MemoryRepo) SetState(ctx context.Context, id string, state domain.MemoryState) error {
++	if r.namespaceID != "" {
++		result, err := r.db.ExecContext(ctx,
++			`UPDATE memories SET state = $1, updated_by_principal_id = $2,
++			        updated_at = NOW()
++			 WHERE id = $3 AND namespace_id = $4 AND state = 'active'`,
++			string(state), r.principalID, id, r.namespaceID,
++		)
++		if err != nil {
++			return err
++		}
++		if n, _ := result.RowsAffected(); n == 0 {
++			return domain.ErrNotFound
++		}
++		return nil
++	}
+ 	result, err := r.db.ExecContext(ctx,
+ 		`UPDATE memories SET state = $1, updated_at = NOW() WHERE id = $2 AND state = 'active'`,
+ 		string(state), id,
+@@ -279,9 +399,13 @@ func memoryListOrderBy(f domain.MemoryFilter) string {
+ 
+ func (r *MemoryRepo) Count(ctx context.Context) (int, error) {
+ 	var count int
+-	err := r.db.QueryRowContext(ctx,
+-		`SELECT COUNT(*) FROM memories WHERE state = 'active'`,
+-	).Scan(&count)
++	query := `SELECT COUNT(*) FROM memories WHERE state = 'active'`
++	args := []any{}
++	if r.namespaceID != "" {
++		query += ` AND namespace_id = $1`
++		args = append(args, r.namespaceID)
++	}
++	err := r.db.QueryRowContext(ctx, query, args...).Scan(&count)
+ 	if err != nil {
+ 		slog.Error("count memories failed", "cluster_id", r.clusterID, "err", err)
+ 		return 0, fmt.Errorf("count memories: %w", err)
+@@ -293,10 +417,15 @@ func (r *MemoryRepo) ListBootstrap(ctx context.Context, limit int) ([]domain.Mem
+ 	if limit <= 0 || limit > 100 {
+ 		limit = 20
+ 	}
+-	rows, err := r.db.QueryContext(ctx,
+-		`SELECT `+allColumns+` FROM memories WHERE state = 'active' ORDER BY updated_at DESC LIMIT $1`,
+-		limit,
+-	)
++	query := `SELECT ` + allColumns + ` FROM memories WHERE state = 'active'`
++	args := []any{}
++	if r.namespaceID != "" {
++		query += ` AND namespace_id = $1`
++		args = append(args, r.namespaceID)
++	}
++	query += fmt.Sprintf(` ORDER BY updated_at DESC LIMIT $%d`, len(args)+1)
++	args = append(args, limit)
++	rows, err := r.db.QueryContext(ctx, query, args...)
+ 	if err != nil {
+ 		slog.Error("list bootstrap failed", "cluster_id", r.clusterID, "err", err)
+ 		return nil, fmt.Errorf("list bootstrap: %w", err)
+@@ -327,13 +456,30 @@ func (r *MemoryRepo) BulkCreate(ctx context.Context, memories []*domain.Memory)
+ 		if memoryType == "" {
+ 			memoryType = string(domain.TypePinned)
+ 		}
+-		_, execErr := tx.ExecContext(ctx,
+-			`INSERT INTO memories (id, content, source, tags, metadata, embedding, memory_type, agent_id, session_id, app_id, state, version, updated_by, created_at, updated_at)
+-			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active', $11, $12, NOW(), NOW())`,
+-			m.ID, m.Content, nullString(m.Source),
+-			tagsJSON, nullJSON(m.Metadata), vecToParam(m.Embedding), memoryType, nullString(m.AgentID), nullString(m.SessionID), m.AppID,
+-			m.Version, nullString(m.UpdatedBy),
+-		)
++		var execErr error
++		if r.namespaceID != "" {
++			_, execErr = tx.ExecContext(ctx,
++				`INSERT INTO memories (
++					id, content, source, tags, metadata, embedding, memory_type,
++					agent_id, session_id, app_id, state, version, updated_by,
++					namespace_id, created_by_principal_id, updated_by_principal_id,
++					created_at, updated_at
++				 )
++				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active',
++				         $11, $12, $13, $14, $14, NOW(), NOW())`,
++				m.ID, m.Content, nullString(m.Source),
++				tagsJSON, nullJSON(m.Metadata), vecToParam(m.Embedding), memoryType, nullString(m.AgentID), nullString(m.SessionID), m.AppID,
++				m.Version, nullString(m.UpdatedBy), r.namespaceID, r.principalID,
++			)
++		} else {
++			_, execErr = tx.ExecContext(ctx,
++				`INSERT INTO memories (id, content, source, tags, metadata, embedding, memory_type, agent_id, session_id, app_id, state, version, updated_by, created_at, updated_at)
++				 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active', $11, $12, NOW(), NOW())`,
++				m.ID, m.Content, nullString(m.Source),
++				tagsJSON, nullJSON(m.Metadata), vecToParam(m.Embedding), memoryType, nullString(m.AgentID), nullString(m.SessionID), m.AppID,
++				m.Version, nullString(m.UpdatedBy),
++			)
++		}
+ 		if execErr != nil {
+ 			if isDuplicateKey(execErr) {
+ 				return fmt.Errorf("bulk insert memory %s: %w", m.ID, domain.ErrDuplicateKey)
+@@ -352,6 +498,15 @@ func (r *MemoryRepo) VectorSearch(ctx context.Context, queryVec []float32, f dom
+ 
+ 	conds, args := r.BuildFilterConds(f)
+ 	conds = append(conds, "embedding IS NOT NULL")
++	if r.namespaceID != "" {
++		return r.exactNamespaceVectorSearch(
++			ctx,
++			conds,
++			args,
++			queryVec,
++			limit,
++		)
++	}
+ 
+ 	// The query vector is the next parameter
+ 	vecParamIdx := len(args) + 1
+@@ -387,6 +542,135 @@ func (r *MemoryRepo) VectorSearch(ctx context.Context, queryVec []float32, f dom
+ 	return memories, rows.Err()
+ }
+ 
++func (r *MemoryRepo) exactNamespaceVectorSearch(
++	ctx context.Context,
++	conds []string,
++	filterArgs []any,
++	queryVec []float32,
++	limit int,
++) ([]domain.Memory, error) {
++	tx, err := r.db.BeginTx(ctx, &sql.TxOptions{
++		Isolation: sql.LevelRepeatableRead,
++		ReadOnly:  true,
++	})
++	if err != nil {
++		return nil, fmt.Errorf("begin exact namespace vector search: %w", err)
++	}
++	defer tx.Rollback()
++
++	timeout := r.exactVectorTimeout
++	if timeout <= 0 {
++		timeout = 2 * time.Second
++	}
++	if _, err := tx.ExecContext(
++		ctx,
++		`SELECT set_config('statement_timeout', $1, true)`,
++		strconv.FormatInt(timeout.Milliseconds(), 10),
++	); err != nil {
++		return nil, classifyNamespaceVectorError(err)
++	}
++	if _, err := tx.ExecContext(ctx, `SET LOCAL enable_indexscan = off`); err != nil {
++		return nil, classifyNamespaceVectorError(err)
++	}
++	if _, err := tx.ExecContext(ctx, `SET LOCAL enable_bitmapscan = off`); err != nil {
++		return nil, classifyNamespaceVectorError(err)
++	}
++
++	var rowsInNamespace int
++	if err := tx.QueryRowContext(ctx, `
++		SELECT COUNT(*)
++		FROM memories
++		WHERE namespace_id = $1
++		  AND state = 'active'
++		  AND embedding IS NOT NULL`,
++		r.namespaceID,
++	).Scan(&rowsInNamespace); err != nil {
++		return nil, classifyNamespaceVectorError(err)
++	}
++	maxRows := r.exactVectorMaxRows
++	if maxRows <= 0 {
++		maxRows = 10000
++	}
++	if rowsInNamespace > maxRows {
++		return nil, fmt.Errorf(
++			"%w: namespace row count exceeds %d",
++			domain.ErrNamespaceVectorCapacity,
++			maxRows,
++		)
++	}
++
++	vecParamIdx := len(filterArgs) + 1
++	limitParamIdx := vecParamIdx + 1
++	query := fmt.Sprintf(`
++		WITH namespace_memories AS MATERIALIZED (
++			SELECT %s
++			FROM memories
++			WHERE %s
++		)
++		SELECT %s, embedding <=> $%d AS distance
++		FROM namespace_memories
++		ORDER BY embedding <=> $%d
++		LIMIT $%d`,
++		allColumns,
++		strings.Join(conds, " AND "),
++		allColumns,
++		vecParamIdx,
++		vecParamIdx,
++		limitParamIdx,
++	)
++	args := make([]any, 0, len(filterArgs)+2)
++	args = append(args, filterArgs...)
++	args = append(args, pgvector.NewVector(queryVec), limit)
++	rows, err := tx.QueryContext(ctx, query, args...)
++	if err != nil {
++		return nil, classifyNamespaceVectorError(err)
++	}
++	var memories []domain.Memory
++	for rows.Next() {
++		memory, scanErr := scanMemoryRowsWithDistance(rows)
++		if scanErr != nil {
++			rows.Close()
++			return nil, scanErr
++		}
++		memories = append(memories, *memory)
++	}
++	if err := rows.Err(); err != nil {
++		rows.Close()
++		return nil, classifyNamespaceVectorError(err)
++	}
++	if err := rows.Close(); err != nil {
++		return nil, err
++	}
++	if err := tx.Commit(); err != nil {
++		return nil, classifyNamespaceVectorError(err)
++	}
++	return memories, nil
++}
++
++func classifyNamespaceVectorError(err error) error {
++	var pgErr *pgconn.PgError
++	if errors.As(err, &pgErr) && pgErr.Code == "57014" {
++		return fmt.Errorf("%w: exact vector statement timed out", domain.ErrNamespaceVectorTimeout)
++	}
++	return err
++}
++
++func namespaceExactVectorConfig() (int, time.Duration) {
++	maxRows := 10000
++	if raw := strings.TrimSpace(os.Getenv("MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS")); raw != "" {
++		if parsed, err := strconv.Atoi(raw); err == nil && parsed > 0 {
++			maxRows = parsed
++		}
++	}
++	timeout := 2 * time.Second
++	if raw := strings.TrimSpace(os.Getenv("MNEMO_NAMESPACE_EXACT_VECTOR_TIMEOUT")); raw != "" {
++		if parsed, err := time.ParseDuration(raw); err == nil && parsed > 0 {
++			timeout = parsed
++		}
++	}
++	return maxRows, timeout
++}
++
+ // AutoVectorSearch is not supported with PostgreSQL (TiDB-specific feature).
+ // It falls back to returning nil — callers should use VectorSearch with pre-computed embeddings.
+ func (r *MemoryRepo) AutoVectorSearch(ctx context.Context, queryText string, f domain.MemoryFilter, limit int) ([]domain.Memory, error) {
+@@ -476,6 +760,11 @@ func (r *MemoryRepo) BuildFilterConds(f domain.MemoryFilter) ([]string, []any) {
+ 	conds := []string{}
+ 	args := []any{}
+ 	paramIdx := 1
++	if r.namespaceID != "" {
++		conds = append(conds, fmt.Sprintf("namespace_id = $%d", paramIdx))
++		args = append(args, r.namespaceID)
++		paramIdx++
++	}
+ 
+ 	if f.State == "all" {
+ 		// no state filter
+@@ -739,10 +1028,14 @@ func (r *MemoryRepo) NearDupSearch(_ context.Context, _ string, _ domain.MemoryF
+ }
+ 
+ func (r *MemoryRepo) CountStats(ctx context.Context) (total int64, last7d int64, err error) {
+-	row := r.db.QueryRowContext(ctx,
+-		`SELECT COUNT(*), COUNT(CASE WHEN created_at >= NOW() - INTERVAL '7 days' THEN 1 END)
+-		 FROM memories WHERE state = 'active'`,
+-	)
++	query := `SELECT COUNT(*), COUNT(CASE WHEN created_at >= NOW() - INTERVAL '7 days' THEN 1 END)
++		 FROM memories WHERE state = 'active'`
++	args := []any{}
++	if r.namespaceID != "" {
++		query += ` AND namespace_id = $1`
++		args = append(args, r.namespaceID)
++	}
++	row := r.db.QueryRowContext(ctx, query, args...)
+ 	if err = row.Scan(&total, &last7d); err != nil {
+ 		return 0, 0, fmt.Errorf("count stats: %w", err)
+ 	}
+diff --git a/server/internal/repository/postgres/namespace_integration_test.go b/server/internal/repository/postgres/namespace_integration_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..89b2dabdf6c64ac8ff6f9c7c3f46c76a968ff249
+--- /dev/null
++++ b/server/internal/repository/postgres/namespace_integration_test.go
+@@ -0,0 +1,202 @@
++package postgres
++
++import (
++	"context"
++	"errors"
++	"testing"
++
++	"github.com/qiffang/mnemos/server/internal/domain"
++	"github.com/qiffang/mnemos/server/internal/ingestqueue"
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++func TestPostgresMemoryRepoNamespaceIsolation(t *testing.T) {
++	db := ingestTestDB(t)
++	scopeA := testutil.TestNamespaceScope()
++	scopeB := domain.NamespaceScope{
++		NamespaceID:   testutil.TestOtherNamespaceID,
++		PrincipalID:   testutil.TestOtherPrincipalID,
++		PrincipalType: "service",
++		Role:          "owner",
++	}
++	repoA := NewMemoryRepo(db, true, "", scopeA)
++	repoB := NewMemoryRepo(db, true, "", scopeB)
++
++	embeddingA := make([]float32, 1024)
++	embeddingA[0] = 1
++	embeddingB := make([]float32, 1024)
++	embeddingB[1] = 1
++	memoryA := &domain.Memory{
++		ID:         "91000000-0000-4000-8000-000000000001",
++		Content:    "shared keyword from team A",
++		MemoryType: domain.TypePinned,
++		AppID:      "app",
++		State:      domain.StateActive,
++		Version:    1,
++		Embedding:  embeddingA,
++	}
++	memoryB := &domain.Memory{
++		ID:         "91000000-0000-4000-8000-000000000002",
++		Content:    "shared keyword from team B",
++		MemoryType: domain.TypePinned,
++		AppID:      "app",
++		State:      domain.StateActive,
++		Version:    1,
++		Embedding:  embeddingB,
++	}
++	if err := repoA.Create(context.Background(), memoryA); err != nil {
++		t.Fatalf("create namespace A memory: %v", err)
++	}
++	if err := repoB.Create(context.Background(), memoryB); err != nil {
++		t.Fatalf("create namespace B memory: %v", err)
++	}
++
++	for _, tc := range []struct {
++		name      string
++		repo      *MemoryRepo
++		ownID     string
++		foreignID string
++	}{
++		{"namespace A", repoA, memoryA.ID, memoryB.ID},
++		{"namespace B", repoB, memoryB.ID, memoryA.ID},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			if _, err := tc.repo.GetByID(context.Background(), tc.ownID); err != nil {
++				t.Fatalf("read own memory: %v", err)
++			}
++			if _, err := tc.repo.GetByID(context.Background(), tc.foreignID); !errors.Is(
++				err,
++				domain.ErrNotFound,
++			) {
++				t.Fatalf("cross-namespace read error = %v, want ErrNotFound", err)
++			}
++			count, err := tc.repo.Count(context.Background())
++			if err != nil || count != 1 {
++				t.Fatalf("namespace count = (%d, %v), want (1, nil)", count, err)
++			}
++			results, err := tc.repo.KeywordSearch(
++				context.Background(),
++				"shared keyword",
++				domain.MemoryFilter{},
++				10,
++			)
++			if err != nil || len(results) != 1 || results[0].ID != tc.ownID {
++				t.Fatalf("namespace keyword results = (%+v, %v)", results, err)
++			}
++		})
++	}
++
++	vectorResults, err := repoA.VectorSearch(
++		context.Background(),
++		embeddingA,
++		domain.MemoryFilter{MinScore: -1},
++		10,
++	)
++	if err != nil || len(vectorResults) != 1 || vectorResults[0].ID != memoryA.ID {
++		t.Fatalf("namespace vector results = (%+v, %v)", vectorResults, err)
++	}
++	if _, err := repoA.SoftDelete(
++		context.Background(),
++		memoryB.ID,
++		"operator",
++	); !errors.Is(err, domain.ErrNotFound) {
++		t.Fatalf("cross-namespace delete error = %v, want ErrNotFound", err)
++	}
++	if _, err := repoB.GetByID(context.Background(), memoryB.ID); err != nil {
++		t.Fatalf("cross-namespace delete changed foreign memory: %v", err)
++	}
++
++	var namespaceA, principalA, namespaceB, principalB string
++	if err := db.QueryRow(`
++		SELECT namespace_id, created_by_principal_id
++		FROM memories
++		WHERE id = $1`,
++		memoryA.ID,
++	).Scan(&namespaceA, &principalA); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.QueryRow(`
++		SELECT namespace_id, created_by_principal_id
++		FROM memories
++		WHERE id = $1`,
++		memoryB.ID,
++	).Scan(&namespaceB, &principalB); err != nil {
++		t.Fatal(err)
++	}
++	if namespaceA != scopeA.NamespaceID || principalA != scopeA.PrincipalID ||
++		namespaceB != scopeB.NamespaceID || principalB != scopeB.PrincipalID {
++		t.Fatalf(
++			"audit ownership A=%s/%s B=%s/%s",
++			namespaceA,
++			principalA,
++			namespaceB,
++			principalB,
++		)
++	}
++}
++
++func TestPostgresIngestIdempotencyAndLeaseAreNamespaceScoped(t *testing.T) {
++	db := ingestTestDB(t)
++	repo := NewIngestJobRepo(db)
++	const key = "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
++
++	inputA := enqueueInput("tenant-a", "session-a", key)
++	inputA.ID = "92000000-0000-4000-8000-000000000001"
++	jobA := enqueueJob(t, repo, inputA)
++
++	inputB := enqueueInput("tenant-a", "session-a", key)
++	inputB.ID = "92000000-0000-4000-8000-000000000002"
++	inputB.NamespaceID = testutil.TestOtherNamespaceID
++	inputB.PrincipalID = testutil.TestOtherPrincipalID
++	jobB := enqueueJob(t, repo, inputB)
++
++	if jobA.ID == jobB.ID {
++		t.Fatal("cross-namespace idempotency reused a job")
++	}
++	var count int
++	if err := db.QueryRow(`
++		SELECT count(*)
++		FROM ingest_jobs
++		WHERE tenant_id = $1 AND idempotency_key = $2`,
++		"tenant-a",
++		key,
++	).Scan(&count); err != nil {
++		t.Fatal(err)
++	}
++	if count != 2 {
++		t.Fatalf("cross-namespace idempotency rows = %d, want 2", count)
++	}
++	if _, err := repo.Get(
++		context.Background(),
++		jobA.TenantID,
++		jobB.NamespaceID,
++		jobA.ID,
++	); err == nil {
++		t.Fatal("cross-namespace job lookup succeeded")
++	}
++
++	claimed, err := repo.Claim(
++		context.Background(),
++		"tenant-a",
++		"worker-a",
++		ingestqueue.DefaultWorkerConfig().Lease,
++		ingestqueue.MaxAttempts,
++	)
++	if err != nil {
++		t.Fatal(err)
++	}
++	wrongNamespace := claimed.LeaseRef()
++	if wrongNamespace.NamespaceID == inputA.NamespaceID {
++		wrongNamespace.NamespaceID = inputB.NamespaceID
++		wrongNamespace.PrincipalID = inputB.PrincipalID
++	} else {
++		wrongNamespace.NamespaceID = inputA.NamespaceID
++		wrongNamespace.PrincipalID = inputA.PrincipalID
++	}
++	if err := repo.StartPlanning(
++		context.Background(),
++		wrongNamespace,
++	); !errors.Is(err, ingestqueue.ErrLeaseLost) {
++		t.Fatalf("cross-namespace lease error = %v, want ErrLeaseLost", err)
++	}
++}
+diff --git a/server/internal/repository/postgres/session_delete.go b/server/internal/repository/postgres/session_delete.go
+index 0017d75363d1905b1169aa20b55dbb3c070ab954..74a6b00de9a31adaec412d9ddc21a18778671cef 100644
+--- a/server/internal/repository/postgres/session_delete.go
++++ b/server/internal/repository/postgres/session_delete.go
+@@ -15,11 +15,18 @@ import (
+ // SessionDeleteRepo supplies the PostgreSQL raw-session deletion methods.
+ // Other SessionRepo capabilities remain unsupported by the factory adapter.
+ type SessionDeleteRepo struct {
+-	db *sql.DB
++	db          *sql.DB
++	namespaceID string
++	principalID string
+ }
+ 
+-func NewSessionDeleteRepo(db *sql.DB) *SessionDeleteRepo {
+-	return &SessionDeleteRepo{db: db}
++func NewSessionDeleteRepo(db *sql.DB, scopes ...domain.NamespaceScope) *SessionDeleteRepo {
++	repo := &SessionDeleteRepo{db: db}
++	if len(scopes) > 0 {
++		repo.namespaceID = scopes[0].NamespaceID
++		repo.principalID = scopes[0].PrincipalID
++	}
++	return repo
+ }
+ 
+ func (r *SessionDeleteRepo) SoftDelete(ctx context.Context, id, _ string) (int64, error) {
+@@ -30,11 +37,14 @@ func (r *SessionDeleteRepo) SoftDelete(ctx context.Context, id, _ string) (int64
+ 	defer tx.Rollback()
+ 
+ 	var state string
+-	err = tx.QueryRowContext(
+-		ctx,
+-		`SELECT state FROM sessions WHERE id = $1 FOR UPDATE`,
+-		id,
+-	).Scan(&state)
++	lockQuery := `SELECT state FROM sessions WHERE id = $1`
++	lockArgs := []any{id}
++	if r.namespaceID != "" {
++		lockQuery += ` AND namespace_id = $2`
++		lockArgs = append(lockArgs, r.namespaceID)
++	}
++	lockQuery += ` FOR UPDATE`
++	err = tx.QueryRowContext(ctx, lockQuery, lockArgs...).Scan(&state)
+ 	if err == sql.ErrNoRows {
+ 		return 0, domain.ErrNotFound
+ 	}
+@@ -52,13 +62,17 @@ func (r *SessionDeleteRepo) SoftDelete(ctx context.Context, id, _ string) (int64
+ 		return 0, nil
+ 	}
+ 
+-	result, err := tx.ExecContext(
+-		ctx,
+-		`UPDATE sessions
+-		 SET state = 'deleted', updated_at = statement_timestamp()
+-		 WHERE id = $1`,
+-		id,
+-	)
++	updateQuery := `UPDATE sessions
++		 SET state = 'deleted', updated_at = statement_timestamp()`
++	updateArgs := []any{id}
++	if r.namespaceID != "" {
++		updateQuery += `, updated_by_principal_id = $2
++		 WHERE id = $1 AND namespace_id = $3`
++		updateArgs = append(updateArgs, r.principalID, r.namespaceID)
++	} else {
++		updateQuery += ` WHERE id = $1`
++	}
++	result, err := tx.ExecContext(ctx, updateQuery, updateArgs...)
+ 	if err != nil {
+ 		return 0, fmt.Errorf("session soft delete update: %w", err)
+ 	}
+@@ -87,12 +101,18 @@ func (r *SessionDeleteRepo) BulkSoftDelete(
+ 		placeholders[i] = fmt.Sprintf("$%d", i+1)
+ 		args[i] = id
+ 	}
+-	result, err := r.db.ExecContext(
+-		ctx,
+-		`UPDATE sessions SET state = 'deleted', updated_at = clock_timestamp()
+-		 WHERE id IN (`+strings.Join(placeholders, ",")+`) AND state != 'deleted'`,
+-		args...,
+-	)
++	setClause := `state = 'deleted', updated_at = clock_timestamp()`
++	if r.namespaceID != "" {
++		setClause += fmt.Sprintf(", updated_by_principal_id = $%d", len(args)+1)
++		args = append(args, r.principalID)
++	}
++	query := `UPDATE sessions SET ` + setClause +
++		` WHERE id IN (` + strings.Join(placeholders, ",") + `) AND state != 'deleted'`
++	if r.namespaceID != "" {
++		query += fmt.Sprintf(" AND namespace_id = $%d", len(args)+1)
++		args = append(args, r.namespaceID)
++	}
++	result, err := r.db.ExecContext(ctx, query, args...)
+ 	if err != nil {
+ 		if isUndefinedTableError(err) {
+ 			return 0, nil
+diff --git a/server/internal/repository/session_delete_integration_test.go b/server/internal/repository/session_delete_integration_test.go
+index 87946b2213fbe6680a635a52918c6949cbf79d6b..fdf4403ede00d7a1f91348dcae049f96cfc38578 100644
+--- a/server/internal/repository/session_delete_integration_test.go
++++ b/server/internal/repository/session_delete_integration_test.go
+@@ -56,7 +56,9 @@ func TestPostgresSessionRepoSoftDeleteIsIdempotent(t *testing.T) {
+ 	id := "10000000-0000-4000-8000-00000000a001"
+ 	testutil.InsertSessionRow(t, db, id, domain.StateActive, originalUpdatedAt)
+ 
+-	repo := NewSessionRepo("postgres", db, "", false, "cluster-a")
++	repo := NewSessionRepo(
++		"postgres", db, "", false, "cluster-a", testutil.TestNamespaceScope(),
++	)
+ 	deleted, err := repo.SoftDelete(ctx, id, "agent-a")
+ 	if err != nil {
+ 		t.Fatalf("SoftDelete: %v", err)
+@@ -119,7 +121,9 @@ func TestPostgresSessionRepoSoftDeleteLocksExactRow(t *testing.T) {
+ 		t.Fatal(err)
+ 	}
+ 
+-	repo := NewSessionRepo("postgres", db, "", false, "cluster-a")
++	repo := NewSessionRepo(
++		"postgres", db, "", false, "cluster-a", testutil.TestNamespaceScope(),
++	)
+ 	type result struct {
+ 		deleted int64
+ 		err     error
+@@ -189,7 +193,9 @@ func TestPostgresSessionRepoSoftDeleteObservesConcurrentDelete(t *testing.T) {
+ 		t.Fatal(err)
+ 	}
+ 
+-	repo := NewSessionRepo("postgres", db, "", false, "cluster-a")
++	repo := NewSessionRepo(
++		"postgres", db, "", false, "cluster-a", testutil.TestNamespaceScope(),
++	)
+ 	type result struct {
+ 		deleted int64
+ 		err     error
+@@ -251,7 +257,9 @@ func TestPostgresSessionRepoBulkSoftDeletePreservesTimestampOrderAfterLockWait(t
+ 		t.Fatal(err)
+ 	}
+ 
+-	repo := NewSessionRepo("postgres", db, "", false, "cluster-a")
++	repo := NewSessionRepo(
++		"postgres", db, "", false, "cluster-a", testutil.TestNamespaceScope(),
++	)
+ 	type result struct {
+ 		deleted int64
+ 		err     error
+@@ -309,7 +317,9 @@ func TestPostgresSessionRepoBulkSoftDeleteCountsDistinctActiveRows(t *testing.T)
+ 	testutil.InsertSessionRow(t, db, alreadyDeleted, domain.StateDeleted, originalUpdatedAt)
+ 	testutil.InsertSessionRow(t, db, unrequested, domain.StateActive, originalUpdatedAt)
+ 
+-	repo := NewSessionRepo("postgres", db, "", false, "cluster-a")
++	repo := NewSessionRepo(
++		"postgres", db, "", false, "cluster-a", testutil.TestNamespaceScope(),
++	)
+ 	ids := []string{
+ 		activeA,
+ 		activeA,
+@@ -366,7 +376,9 @@ func TestPostgresSessionRepoWithoutSessionsTable(t *testing.T) {
+ 	if _, err := db.Exec(`DROP TABLE sessions`); err != nil {
+ 		t.Fatalf("drop sessions table: %v", err)
+ 	}
+-	repo := NewSessionRepo("postgres", db, "", false, "cluster-a")
++	repo := NewSessionRepo(
++		"postgres", db, "", false, "cluster-a", testutil.TestNamespaceScope(),
++	)
+ 
+ 	deleted, err := repo.SoftDelete(context.Background(), "missing", "agent-a")
+ 	if !errors.Is(err, domain.ErrNotFound) || deleted != 0 {
+diff --git a/server/internal/service/durable_ingest.go b/server/internal/service/durable_ingest.go
+index 2b452c48f44aee0c078fe7072bd4ad3ebb2eabbf..2caf27506258b4f9b247b2d06fde4fd247a916c5 100644
+--- a/server/internal/service/durable_ingest.go
++++ b/server/internal/service/durable_ingest.go
+@@ -23,6 +23,8 @@ const durablePostCommitTimeout = 10 * time.Second
+ type durableCanonicalEnvelope struct {
+ 	Version            string           `json:"version"`
+ 	TenantID           string           `json:"tenant_id"`
++	NamespaceID        string           `json:"namespace_id"`
++	PrincipalID        string           `json:"principal_id"`
+ 	AgentID            string           `json:"agent_id"`
+ 	AppID              string           `json:"app_id"`
+ 	SessionID          string           `json:"session_id"`
+@@ -45,6 +47,7 @@ type DurableProcessor struct {
+ 	clusterID    string
+ 	runtimeUsage durableRuntimeUsageFinalizer
+ 	logger       *slog.Logger
++	ingestForJob func(*ingestqueue.Job) *IngestService
+ }
+ 
+ type durableRuntimeUsageFinalizer interface {
+@@ -134,14 +137,50 @@ func NewDurableProcessor(
+ 	}
+ }
+ 
++func (p *DurableProcessor) WithNamespaceIngestFactory(
++	factory func(*ingestqueue.Job) *IngestService,
++) *DurableProcessor {
++	p.ingestForJob = factory
++	return p
++}
++
++func (p *DurableProcessor) scopedIngest(
++	job *ingestqueue.Job,
++) (*IngestService, error) {
++	if job == nil {
++		return nil, ingestqueue.ErrProcessorUnavailable
++	}
++	if job.NamespaceID == "" {
++		if p.ingest == nil {
++			return nil, ingestqueue.ErrProcessorUnavailable
++		}
++		return p.ingest, nil
++	}
++	if p.ingestForJob == nil {
++		return nil, fmt.Errorf(
++			"%w: namespace ingest factory unavailable",
++			ingestqueue.ErrProcessorUnavailable,
++		)
++	}
++	ingest := p.ingestForJob(job)
++	if ingest == nil {
++		return nil, ingestqueue.ErrProcessorUnavailable
++	}
++	return ingest, nil
++}
++
+ func (p *DurableProcessor) Plan(
+ 	ctx context.Context,
+ 	job *ingestqueue.Job,
+ 	revision int,
+ ) (ingestqueue.AtomicPlan, error) {
+-	if p == nil || p.ingest == nil || job == nil {
++	if p == nil || job == nil {
+ 		return ingestqueue.AtomicPlan{}, ingestqueue.ErrProcessorUnavailable
+ 	}
++	ingest, err := p.scopedIngest(job)
++	if err != nil {
++		return ingestqueue.AtomicPlan{}, err
++	}
+ 	var envelope durableCanonicalEnvelope
+ 	decoder := json.NewDecoder(bytes.NewReader(job.CanonicalPayload))
+ 	decoder.DisallowUnknownFields()
+@@ -150,6 +189,9 @@ func (p *DurableProcessor) Plan(
+ 	}
+ 	if envelope.Version != "ingest-v1" ||
+ 		envelope.TenantID != job.TenantID ||
++		envelope.NamespaceID != job.NamespaceID ||
++		envelope.PrincipalID != job.PrincipalID ||
++		(envelope.NamespaceID == "") != (envelope.PrincipalID == "") ||
+ 		envelope.TenantID == "" ||
+ 		len(envelope.Messages) == 0 {
+ 		return ingestqueue.AtomicPlan{}, fmt.Errorf("%w: canonical envelope", ingestqueue.ErrPlanInvalid)
+@@ -159,6 +201,8 @@ func (p *DurableProcessor) Plan(
+ 		Version:           ingestqueue.PlanVersion,
+ 		JobID:             job.ID,
+ 		TenantID:          job.TenantID,
++		NamespaceID:       job.NamespaceID,
++		PrincipalID:       job.PrincipalID,
+ 		Revision:          revision,
+ 		AttemptGeneration: job.AttemptCount,
+ 		Sessions:          []ingestqueue.SessionUpsert{},
+@@ -202,9 +246,9 @@ func (p *DurableProcessor) Plan(
+ 
+ 	mode := envelope.Mode
+ 	if mode == "" {
+-		mode = p.ingest.mode
++		mode = ingest.mode
+ 	}
+-	if mode == ModeRaw || p.ingest.llm == nil {
++	if mode == ModeRaw || ingest.llm == nil {
+ 		content := strings.TrimSpace(formatConversation(messages))
+ 		if content != "" {
+ 			content = truncateRunes(content, maxExtractionConversationRunes)
+@@ -219,7 +263,7 @@ func (p *DurableProcessor) Plan(
+ 				UpdatedBy:   envelope.AgentID,
+ 				SourceOrder: 0,
+ 			}
+-			if err := p.materializeEmbedding(ctx, &action); err != nil {
++			if err := materializeDurableEmbedding(ctx, ingest, &action); err != nil {
+ 				return ingestqueue.AtomicPlan{}, err
+ 			}
+ 			plan.Actions = append(plan.Actions, action)
+@@ -235,7 +279,7 @@ func (p *DurableProcessor) Plan(
+ 	plan.PrescreenPolicyVersion = job.PrescreenPolicyVersion
+ 	plan.PrescreenWouldSkip = job.PrescreenWouldSkip
+ 
+-	phase1, err := p.ingest.ExtractPhase1(ctx, messages)
++	phase1, err := ingest.ExtractPhase1(ctx, messages)
+ 	if err != nil {
+ 		return ingestqueue.AtomicPlan{}, fmt.Errorf("durable extraction: %w", err)
+ 	}
+@@ -269,7 +313,7 @@ func (p *DurableProcessor) Plan(
+ 		}
+ 	}
+ 
+-	actions, warningCount, warningClass, err := p.ingest.planReconciliation(
++	actions, warningCount, warningClass, err := ingest.planReconciliation(
+ 		ctx,
+ 		job.CreatedAt,
+ 		envelope.AgentID,
+@@ -285,23 +329,24 @@ func (p *DurableProcessor) Plan(
+ 	plan.WarningCount = warningCount
+ 	plan.WarningClass = warningClass
+ 	for index := range plan.Actions {
+-		if err := p.materializeEmbedding(ctx, &plan.Actions[index]); err != nil {
++		if err := materializeDurableEmbedding(ctx, ingest, &plan.Actions[index]); err != nil {
+ 			return ingestqueue.AtomicPlan{}, err
+ 		}
+ 	}
+ 	return ingestqueue.FinalizePlan(plan)
+ }
+ 
+-func (p *DurableProcessor) materializeEmbedding(
++func materializeDurableEmbedding(
+ 	ctx context.Context,
++	ingest *IngestService,
+ 	action *ingestqueue.MemoryAction,
+ ) error {
+ 	if action.Kind == ingestqueue.ActionDelete ||
+-		p.ingest.autoModel != "" ||
+-		p.ingest.embedder == nil {
++		ingest.autoModel != "" ||
++		ingest.embedder == nil {
+ 		return nil
+ 	}
+-	embedding, err := p.ingest.embedder.Embed(ctx, action.Content)
++	embedding, err := ingest.embedder.Embed(ctx, action.Content)
+ 	if err != nil {
+ 		return fmt.Errorf("materialize durable embedding: %w", err)
+ 	}
+@@ -320,10 +365,18 @@ func (p *DurableProcessor) PostCommit(
+ 	}
+ 	ctx, cancel := context.WithTimeout(context.Background(), durablePostCommitTimeout)
+ 	defer cancel()
++	ingest, err := p.scopedIngest(job)
++	if err != nil {
++		p.logger.Error(
++			"durable ingest post-commit repository unavailable",
++			"error_class", "namespace_repository_unavailable",
++		)
++		return
++	}
+ 	meteringOutcome := "skipped"
+ 	webhookOutcome := "skipped"
+ 	if p.metering != nil {
+-		total, _, err := p.ingest.memories.CountStats(ctx)
++		total, _, err := ingest.memories.CountStats(ctx)
+ 		if err != nil {
+ 			meteringOutcome = "failed"
+ 		} else {
+@@ -339,14 +392,14 @@ func (p *DurableProcessor) PostCommit(
+ 			meteringOutcome = "queued"
+ 		}
+ 	}
+-	if p.webhooks != nil {
++	if p.webhooks != nil && job.NamespaceID == "" {
+ 		webhookOutcome = "queued"
+ 		for _, action := range plan.Actions {
+ 			var eventType string
+ 			var data any
+ 			switch action.Kind {
+ 			case ingestqueue.ActionAdd:
+-				memory, err := p.ingest.memories.GetByID(ctx, action.TargetID)
++				memory, err := ingest.memories.GetByID(ctx, action.TargetID)
+ 				if err != nil {
+ 					webhookOutcome = "partial"
+ 					continue
+@@ -405,7 +458,9 @@ func (p *DurableProcessor) FinalizeTerminal(
+ 		}
+ 		if err := ingestqueue.ValidatePlan(*plan); err != nil ||
+ 			plan.JobID != job.ID ||
+-			plan.TenantID != job.TenantID {
++			plan.TenantID != job.TenantID ||
++			plan.NamespaceID != job.NamespaceID ||
++			plan.PrincipalID != job.PrincipalID {
+ 			return fmt.Errorf("%w: terminal plan ownership", ingestqueue.ErrPlanInvalid)
+ 		}
+ 		memoryIDs := make([]string, 0, len(plan.Actions))
+diff --git a/server/internal/service/durable_ingest_prescreen_integration_test.go b/server/internal/service/durable_ingest_prescreen_integration_test.go
+index 972cbbfa5e8666eebdfd8db79e2f2a63c49830f4..5141891af0c01eacabe5fad46aa46491e1834f9a 100644
+--- a/server/internal/service/durable_ingest_prescreen_integration_test.go
++++ b/server/internal/service/durable_ingest_prescreen_integration_test.go
+@@ -67,7 +67,12 @@ func TestPostgresDurableWorkerPrescreenShadowOutcomes(t *testing.T) {
+ 		t.Run(tc.name, func(t *testing.T) {
+ 			db := testutil.OpenIsolatedPostgres(t, dsn)
+ 			jobRepo := postgres.NewIngestJobRepo(db)
+-			memoryRepo := postgres.NewMemoryRepo(db, false, "")
++			memoryRepo := postgres.NewMemoryRepo(
++				db,
++				false,
++				"",
++				testutil.TestNamespaceScope(),
++			)
+ 
+ 			var llmCalls atomic.Int32
+ 			llmServer := httptest.NewServer(http.HandlerFunc(
+@@ -96,11 +101,13 @@ func TestPostgresDurableWorkerPrescreenShadowOutcomes(t *testing.T) {
+ 			defer llmServer.Close()
+ 
+ 			canonical, err := ingestqueue.Canonicalize(ingestqueue.CanonicalInput{
+-				TenantID:  "tenant-prescreen",
+-				AgentID:   "agent-prescreen",
+-				AppID:     "app-prescreen",
+-				SessionID: "session-prescreen",
+-				Mode:      "smart",
++				TenantID:    "tenant-prescreen",
++				NamespaceID: testutil.TestNamespaceID,
++				PrincipalID: testutil.TestPrincipalID,
++				AgentID:     "agent-prescreen",
++				AppID:       "app-prescreen",
++				SessionID:   "session-prescreen",
++				Mode:        "smart",
+ 				Messages: []ingestqueue.Message{{
+ 					Role:    "user",
+ 					Content: "PRIVATE-INTEGRATION-CONTENT",
+@@ -112,6 +119,8 @@ func TestPostgresDurableWorkerPrescreenShadowOutcomes(t *testing.T) {
+ 			if _, err := jobRepo.Enqueue(context.Background(), ingestqueue.EnqueueInput{
+ 				ID:               tc.jobID,
+ 				TenantID:         "tenant-prescreen",
++				NamespaceID:      testutil.TestNamespaceID,
++				PrincipalID:      testutil.TestPrincipalID,
+ 				IdempotencyKey:   canonical.IdempotencyKey,
+ 				CanonicalPayload: canonical.Payload,
+ 				AgentID:          "agent-prescreen",
+@@ -128,16 +137,25 @@ func TestPostgresDurableWorkerPrescreenShadowOutcomes(t *testing.T) {
+ 				Model:   "test-model",
+ 			})
+ 			committed := make(chan struct{})
+-			processor := &prescreenIntegrationProcessor{
+-				DurableProcessor: NewDurableProcessor(
+-					NewIngestService(memoryRepo, client, nil, "", ModeSmart),
+-					nil,
++			durableProcessor := NewDurableProcessor(
++				nil,
++				nil,
++				nil,
++				"",
++				nil,
++				nil,
++			).WithNamespaceIngestFactory(func(*ingestqueue.Job) *IngestService {
++				return NewIngestService(
++					memoryRepo,
++					client,
+ 					nil,
+ 					"",
+-					nil,
+-					nil,
+-				),
+-				committed: committed,
++					ModeSmart,
++				)
++			})
++			processor := &prescreenIntegrationProcessor{
++				DurableProcessor: durableProcessor,
++				committed:        committed,
+ 			}
+ 			var output bytes.Buffer
+ 			cfg := ingestqueue.DefaultWorkerConfig()
+@@ -171,6 +189,7 @@ func TestPostgresDurableWorkerPrescreenShadowOutcomes(t *testing.T) {
+ 			job, err := jobRepo.Get(
+ 				context.Background(),
+ 				"tenant-prescreen",
++				testutil.TestNamespaceID,
+ 				tc.jobID,
+ 			)
+ 			if err != nil {
+diff --git a/server/internal/service/ingest.go b/server/internal/service/ingest.go
+index 76ea4de9f07aee29d710a7c3df554030d32009bd..76cf67e783ec689a789fb59f766f884945358757 100644
+--- a/server/internal/service/ingest.go
++++ b/server/internal/service/ingest.go
+@@ -1359,6 +1359,7 @@ type factSearchResult struct {
+ 	attempts   int
+ 	candidates []existingMemoryCandidate
+ 	successes  int
++	fatal      error
+ }
+ 
+ // gatherExistingMemories searches relevant memories for each fact, deduplicates
+@@ -1427,6 +1428,9 @@ func (s *IngestService) gatherExistingMemories(ctx context.Context, agentID, app
+ 
+ 	var searchAttempts, searchSuccesses int
+ 	for _, searchResult := range searchResults {
++		if searchResult.fatal != nil {
++			return nil, searchResult.fatal
++		}
+ 		searchAttempts += searchResult.attempts
+ 		searchSuccesses += searchResult.successes
+ 		addUnseen(searchResult.candidates)
+@@ -1508,6 +1512,11 @@ func (s *IngestService) searchExistingMemoriesForFact(
+ 			var vecErr error
+ 			vecMatches, vecErr = s.memories.VectorSearch(ctx, vec, filter, perFactLimit)
+ 			if vecErr != nil {
++				if errors.Is(vecErr, domain.ErrNamespaceVectorCapacity) ||
++					errors.Is(vecErr, domain.ErrNamespaceVectorTimeout) {
++					result.fatal = vecErr
++					return result
++				}
+ 				slog.Warn("gatherExistingMemories: vector search failed for fact, continuing with keyword leg", "fact_len", len(fact), "err", vecErr)
+ 			} else {
+ 				result.successes++
+diff --git a/server/internal/testutil/postgres.go b/server/internal/testutil/postgres.go
+index c44f4bd789909ae1e07c83a8e1db07f47c3ffc5e..fb93b2dcf7670def31800c74c516ee89794103b2 100644
+--- a/server/internal/testutil/postgres.go
++++ b/server/internal/testutil/postgres.go
+@@ -67,5 +67,6 @@ func OpenIsolatedPostgres(t testing.TB, dsn string) *sql.DB {
+ 	if err := db.PingContext(context.Background()); err != nil {
+ 		t.Fatalf("connect to isolated postgres database: %v", err)
+ 	}
++	EnsureTestNamespaceIdentity(t, db)
+ 	return db
+ }
+diff --git a/server/internal/testutil/session.go b/server/internal/testutil/session.go
+index 1b798e8990d98b537cc67e8ddf4b7ee06a69ea50..8593c2147e988bd51b36b0eacc23892a88f4e725 100644
+--- a/server/internal/testutil/session.go
++++ b/server/internal/testutil/session.go
+@@ -1,6 +1,7 @@
+ package testutil
+ 
+ import (
++	"context"
+ 	"crypto/sha256"
+ 	"database/sql"
+ 	"encoding/hex"
+@@ -10,6 +11,75 @@ import (
+ 	"github.com/qiffang/mnemos/server/internal/domain"
+ )
+ 
++const (
++	TestNamespaceID      = "60000000-0000-4000-8000-000000000001"
++	TestPrincipalID      = "70000000-0000-4000-8000-000000000001"
++	TestOtherNamespaceID = "60000000-0000-4000-8000-000000000002"
++	TestOtherPrincipalID = "70000000-0000-4000-8000-000000000002"
++)
++
++func TestNamespaceScope() domain.NamespaceScope {
++	return domain.NamespaceScope{
++		NamespaceID:   TestNamespaceID,
++		PrincipalID:   TestPrincipalID,
++		PrincipalType: "service",
++		Role:          "owner",
++	}
++}
++
++func EnsureTestNamespaceIdentity(t testing.TB, db *sql.DB) {
++	t.Helper()
++	var present bool
++	if err := db.QueryRowContext(
++		context.Background(),
++		`SELECT to_regclass('memory_namespaces') IS NOT NULL`,
++	).Scan(&present); err != nil {
++		t.Fatalf("inspect namespace test schema: %v", err)
++	}
++	if !present {
++		return
++	}
++	ctx := context.Background()
++	tx, err := db.BeginTx(ctx, nil)
++	if err != nil {
++		t.Fatalf("begin namespace test identity seed: %v", err)
++	}
++	defer tx.Rollback()
++	if _, err := tx.ExecContext(ctx, `
++		INSERT INTO memory_namespaces (
++			namespace_id, slug, display_name, status
++		) VALUES
++			($1, 'test-team', 'Test Team', 'active'),
++			($2, 'other-team', 'Other Team', 'active')
++		ON CONFLICT (namespace_id) DO NOTHING
++	`, TestNamespaceID, TestOtherNamespaceID); err != nil {
++		t.Fatalf("seed namespace test namespaces: %v", err)
++	}
++	if _, err := tx.ExecContext(ctx, `
++		INSERT INTO memory_principals (
++			principal_id, principal_key, principal_type, status
++		) VALUES
++			($1, repeat('a', 64), 'service', 'active'),
++			($2, repeat('b', 64), 'service', 'active')
++		ON CONFLICT (principal_id) DO NOTHING
++	`, TestPrincipalID, TestOtherPrincipalID); err != nil {
++		t.Fatalf("seed namespace test principals: %v", err)
++	}
++	if _, err := tx.ExecContext(ctx, `
++		INSERT INTO memory_namespace_memberships (
++			namespace_id, principal_id, role, status, source_type
++		) VALUES
++			($1, $2, 'owner', 'active', 'service'),
++			($3, $4, 'owner', 'active', 'service')
++		ON CONFLICT (namespace_id, principal_id) DO NOTHING
++	`, TestNamespaceID, TestPrincipalID, TestOtherNamespaceID, TestOtherPrincipalID); err != nil {
++		t.Fatalf("seed namespace test memberships: %v", err)
++	}
++	if err := tx.Commit(); err != nil {
++		t.Fatalf("commit namespace test identity seed: %v", err)
++	}
++}
++
+ func RecreateMemoryDeleteTable(t testing.TB, db *sql.DB) {
+ 	t.Helper()
+ 	if _, err := db.Exec(`DROP TABLE IF EXISTS memories`); err != nil {
+@@ -31,6 +101,9 @@ func RecreateMemoryDeleteTable(t testing.TB, db *sql.DB) {
+ 			version INT DEFAULT 1,
+ 			updated_by VARCHAR(100),
+ 			superseded_by VARCHAR(36),
++			namespace_id VARCHAR(36) NOT NULL,
++			created_by_principal_id VARCHAR(36),
++			updated_by_principal_id VARCHAR(36),
+ 			created_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp(),
+ 			updated_at TIMESTAMPTZ NOT NULL DEFAULT statement_timestamp()
+ 		)
+@@ -51,10 +124,14 @@ func InsertSessionRow(
+ 	if _, err := db.Exec(`
+ 		INSERT INTO sessions (
+ 			id, session_id, app_id, role, content, content_hash, state,
+-			created_at, updated_at
++			namespace_id, principal_id, created_at, updated_at
++		)
++		VALUES (
++			$1, 'session-delete', 'app-delete', 'user', $2, $3, $4,
++			$5, $6, $7, $7
+ 		)
+-		VALUES ($1, 'session-delete', 'app-delete', 'user', $2, $3, $4, $5, $5)
+-	`, id, "content-"+id, hex.EncodeToString(contentHash[:]), state, updatedAt); err != nil {
++	`, id, "content-"+id, hex.EncodeToString(contentHash[:]), state,
++		TestNamespaceID, TestPrincipalID, updatedAt); err != nil {
+ 		t.Fatalf("insert session %s: %v", id, err)
+ 	}
+ }

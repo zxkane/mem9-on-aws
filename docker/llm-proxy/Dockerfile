@@ -44,6 +44,7 @@ COPY docker/llm-proxy/server.mjs /app/docker/llm-proxy/server.mjs
 COPY scripts/memory-cleanup.mjs /app/scripts/memory-cleanup.mjs
 COPY scripts/memory-consolidation.mjs /app/scripts/memory-consolidation.mjs
 COPY scripts/lib/application-region.mjs /app/scripts/lib/application-region.mjs
+COPY scripts/lib/memory-namespace.mjs /app/scripts/lib/memory-namespace.mjs
 
 # Fail the BUILD, not the weekly run, if that import graph ever breaks again.
 # Per entrypoint, not once: both COPY the sidecar as `../docker/llm-proxy/`, but a

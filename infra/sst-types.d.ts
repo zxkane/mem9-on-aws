@@ -470,6 +470,7 @@ declare namespace random {
   interface RandomPasswordArgs {
     length: Input<number>;
     special?: Input<boolean>;
+    keepers?: Record<string, Input<string>>;
   }
   class RandomPassword {
     constructor(name: string, args: RandomPasswordArgs);

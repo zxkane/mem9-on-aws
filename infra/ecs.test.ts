@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { DbOutputs } from "./db";
 import type { TenantIdentityOutputs } from "./tenant-identity";
+import type { NamespaceIdentityOutputs } from "./namespace-identity";
 
 /**
  * Unit tests for the `ecs` stack factory. Mocks the SST globals ($app,
@@ -66,6 +67,19 @@ function fakeTenantIdentity(): TenantIdentityOutputs {
     ),
     tenantId: out("0123456789abcdef0123456789abcdef"),
   } as unknown as TenantIdentityOutputs;
+}
+
+function fakeNamespaceIdentity(): NamespaceIdentityOutputs {
+  return {
+    identitySigningKeys: out('{"current":"identity"}'),
+    transportSigningKeys: out(
+      '{"active":"a","a":"transport-a","b":"transport-b"}',
+    ),
+    transportSigningParameterArn: out(
+      "arn:aws:ssm:x:y:parameter/mem9-on-aws/prod/namespace/transport-signing-keys",
+    ),
+    transportSigningRevision: out("transport-revision"),
+  } as unknown as NamespaceIdentityOutputs;
 }
 
 // $interpolate mock: mirror Pulumi's tagged-template — unwrap out<T> values (and
@@ -309,6 +323,7 @@ afterEach(() => {
   delete process.env.MEM9_BEDROCK_PROJECT;
   delete process.env.MEM9_BEDROCK_PROJECT_OPENAI;
   delete process.env.MEM9_DURABLE_INGEST_ENABLED;
+  delete process.env.MEM9_NAMESPACE_REQUIRED;
   delete process.env.SST_SECRET_SlackWebhookUrl;
   vi.resetModules();
 });
@@ -316,7 +331,8 @@ afterEach(() => {
 async function loadEcs() {
   vi.resetModules();
   const { ecs } = await import("./ecs");
-  return (dbOut: DbOutputs) => ecs(dbOut, fakeTenantIdentity());
+  return (dbOut: DbOutputs) =>
+    ecs(dbOut, fakeTenantIdentity(), fakeNamespaceIdentity());
 }
 
 describe("ecs stack", () => {
@@ -432,6 +448,9 @@ describe("ecs stack", () => {
     // TC-ECS-COST-004: propagation applies only at task creation.
     expect(svcArgs.forceNewDeployment).toBe(true);
     expect(svcArgs.triggers).toMatchObject({ taskTagPropagation: "v1" });
+    expect(
+      materialize(svcArgs.triggers.transportSigningRevision),
+    ).toBe("transport-revision");
     // TC-ECS-COST-003: cost attribution must not disturb private discovery.
     expect(svcArgs.serviceRegistries).toBeDefined();
     expect(svcArgs.serviceRegistries.registryArn).toBeDefined();
@@ -590,6 +609,10 @@ describe("ecs stack", () => {
     expect(env.MNEMO_INGEST_DURABLE_ONLY).toBe("1");
     expect(env.MNEMO_DURABLE_INGEST_ENABLED).toBe("1");
     expect(env.MNEMO_DURABLE_INGEST_METRIC_STAGE).toBe("prod");
+    expect(env.MNEMO_NAMESPACE_REQUIRED).toBe("0");
+    expect(materialize(env.MNEMO_TRANSPORT_SIGNING_REVISION)).toBe(
+      "transport-revision",
+    );
     // GLM-5 request bound (TC-GLM-BOUND-020, issue #46): patch configuration
     // is explicit in ECS, not left to an image default.
     expect(env.MNEMO_MAX_EXTRACTION_CONVERSATION_RUNES).toBe("200000");
@@ -597,11 +620,35 @@ describe("ecs stack", () => {
     const ssm = mnemo.ssm as Record<string, unknown>;
     expect(ssm.MEM9_DB_SECRET).toBeDefined();
     expect(ssm.MEM9_TENANT_ID).toBeDefined();
+    expect(materialize(ssm.MNEMO_TRANSPORT_SIGNING_KEYS)).toBe(
+      "arn:aws:ssm:x:y:parameter/mem9-on-aws/prod/namespace/transport-signing-keys",
+    );
     // No plaintext password anywhere in env.
     for (const [k, v] of Object.entries(env)) {
       expect(k.toLowerCase()).not.toContain("password");
       expect(String(v)).not.toMatch(/password/i);
     }
+  });
+
+  it("TC-GROUPNS-125: namespace-required mode is an explicit validated cutover gate", async () => {
+    process.env.MEM9_NAMESPACE_REQUIRED = "1";
+    installGlobals("prod");
+    let ecs = await loadEcs();
+    ecs(fakeDbOut());
+    expect(
+      (containersByName()["mnemo-server"].environment as Record<string, unknown>)
+        .MNEMO_NAMESPACE_REQUIRED,
+    ).toBe("1");
+
+    for (const g of ["$app", "aws", "sst", "command", "$interpolate", "$jsonStringify"])
+      delete (globalThis as Record<string, unknown>)[g];
+    services = [];
+    created = [];
+    process.env.MEM9_NAMESPACE_REQUIRED = "yes";
+    installGlobals("prod");
+    await expect(loadEcs()).rejects.toThrow(
+      "MEM9_NAMESPACE_REQUIRED must be 0 or 1",
+    );
   });
 
   it("wires the mnemo-server terminal override into SST task synthesis", async () => {

@@ -6,6 +6,11 @@ import { promisify } from "node:util";
 
 const execFileAsync = promisify(execFile);
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const APPLICATION_REGION_RESOLVER = path.join(
+  REPO_ROOT,
+  "scripts",
+  "resolve-application-region.mjs",
+);
 const PREVIEW_STAGE = /^pr-([0-9]+)$/;
 const SAFE_RESOURCE_TYPE = /^[a-z0-9][a-z0-9-]*(?::[a-z0-9][a-z0-9._-]*)?$/;
 const GRACE_PERIOD_MS = 24 * 60 * 60 * 1_000;
@@ -85,6 +90,7 @@ export type ResourceObservation = Readonly<{
   resourceType: string;
   project: string;
   managedBy: string;
+  arn?: string;
 }>;
 
 export type Observation = Readonly<{
@@ -816,6 +822,44 @@ export type CommandRunner = (
   allowedFailure?: RegExp,
 ) => Promise<CommandResult | null>;
 
+let applicationRegionPromise: Promise<string> | undefined;
+
+async function resolveConfiguredApplicationRegion(): Promise<string> {
+  applicationRegionPromise ??= execFileAsync(
+    process.execPath,
+    [APPLICATION_REGION_RESOLVER],
+    {
+      cwd: REPO_ROOT,
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+      env: process.env,
+    },
+  ).then(({ stdout }) => {
+    const region = stdout.trim();
+    if (!/^[a-z]{2}(?:-[a-z0-9]+)+-[0-9]+$/u.test(region)) {
+      throw new Error("Configured application region is invalid");
+    }
+    return region;
+  });
+  return applicationRegionPromise;
+}
+
+/**
+ * AWS preview inventory is application-plane state. Prefer an explicit
+ * workflow/operator AWS_REGION (including an old-region cleanup), but never
+ * fall back to an unrelated profile's AWS_DEFAULT_REGION.
+ */
+export async function awsCommandEnvironment(
+  source: NodeJS.ProcessEnv = process.env,
+): Promise<NodeJS.ProcessEnv> {
+  const region = source.AWS_REGION?.trim() || (await resolveConfiguredApplicationRegion());
+  return {
+    ...source,
+    AWS_REGION: region,
+    AWS_DEFAULT_REGION: region,
+  };
+}
+
 export async function runCommand(
   file: string,
   args: readonly string[],
@@ -827,7 +871,7 @@ export async function runCommand(
       cwd: REPO_ROOT,
       encoding: "utf8",
       maxBuffer: 20 * 1024 * 1024,
-      env: process.env,
+      env: file === "aws" ? await awsCommandEnvironment() : process.env,
     });
     return { stdout: result.stdout, stderr: result.stderr };
   } catch (error) {
@@ -1067,14 +1111,58 @@ async function collectStateObjects(
   const contents = asRecord(parseJson(listing!.stdout, "SST state objects")).Contents;
   if (!Array.isArray(contents)) return [];
 
-  return contents.flatMap((item): StateObjectObservation[] => {
+  const observations: StateObjectObservation[] = [];
+  for (const item of contents) {
     const object = asRecord(item);
     const key = stringOrNull(object.Key);
     const lastModified = stringOrNull(object.LastModified);
     const match = key?.match(/^app\/mem9-on-aws\/(.+)\.json$/);
-    if (!match || lastModified === null) return [];
-    return [{ stage: match[1], lastModified }];
-  });
+    if (!match || !key || lastModified === null) continue;
+    const state = await commandRunner(
+      "aws",
+      [
+        "s3",
+        "cp",
+        `s3://${stateBucket}/${key}`,
+        "-",
+        "--only-show-errors",
+      ],
+      "SST state content observation",
+    );
+    if (stateObjectHasLiveDeployment(state!.stdout)) {
+      observations.push({ stage: match[1], lastModified });
+    }
+  }
+  return observations;
+}
+
+/**
+ * SST 4.17 retains a small state object after a successful remove. That empty
+ * checkpoint is not a deployed stage; only live Pulumi resources or pending
+ * operations make the state actionable.
+ */
+export function stateObjectHasLiveDeployment(value: string): boolean {
+  const document = asRecord(parseJson(value, "SST state content"));
+  if (!("checkpoint" in document)) {
+    throw new Error("SST state checkpoint is missing");
+  }
+  const checkpoint = asRecord(document.checkpoint);
+  if (!("latest" in checkpoint)) {
+    throw new Error("SST state latest checkpoint is missing");
+  }
+  const latest = asRecord(checkpoint.latest);
+  const resources = latest.resources;
+  const pendingOperations = latest.pending_operations;
+  if (resources !== undefined && !Array.isArray(resources)) {
+    throw new Error("SST state resources are invalid");
+  }
+  if (pendingOperations !== undefined && !Array.isArray(pendingOperations)) {
+    throw new Error("SST state pending operations are invalid");
+  }
+  return (
+    (Array.isArray(resources) && resources.length > 0) ||
+    (Array.isArray(pendingOperations) && pendingOperations.length > 0)
+  );
 }
 
 export function resourceTypeFromArn(arn: string): string {
@@ -1128,6 +1216,7 @@ async function collectResources(
     if (resourceType === "iam:role") return [];
     return [
       {
+        arn,
         stage,
         resourceType,
         project: tags.get("Project") ?? "",
@@ -1190,6 +1279,214 @@ async function collectIamRoles(
   return observations;
 }
 
+function chunks<T>(items: readonly T[], size: number): T[][] {
+  const result: T[][] = [];
+  for (let index = 0; index < items.length; index += size) {
+    result.push(items.slice(index, index + size));
+  }
+  return result;
+}
+
+function ecsClusterFromResourceArn(arn: string, kind: "service" | "task"): string | null {
+  const marker = `:${kind}/`;
+  const path = arn.includes(marker) ? arn.split(marker)[1] : "";
+  const cluster = path.split("/")[0];
+  return cluster || null;
+}
+
+/**
+ * Resource Groups Tagging API explicitly returns currently OR previously tagged
+ * resources. Re-check the historical resource families it can retain after
+ * deletion so cleanup does not block forever on inactive ECS revisions or
+ * deleted Cognito pools.
+ */
+export async function filterLiveTaggedResources(
+  resources: readonly ResourceObservation[],
+  commandRunner: CommandRunner = runCommand,
+): Promise<ResourceObservation[]> {
+  const liveArns = new Set<string>();
+  const historicalTypes = new Set([
+    "cognito-idp:user-pool",
+    "ecs:cluster",
+    "ecs:service",
+    "ecs:task",
+    "ecs:task-definition",
+  ]);
+  const byType = new Map<string, ResourceObservation[]>();
+  for (const resource of resources) {
+    if (!historicalTypes.has(resource.resourceType) || !resource.arn) continue;
+    const group = byType.get(resource.resourceType) ?? [];
+    group.push(resource);
+    byType.set(resource.resourceType, group);
+  }
+
+  for (const batch of chunks(byType.get("ecs:cluster") ?? [], 100)) {
+    const result = await commandRunner(
+      "aws",
+      ["ecs", "describe-clusters", "--clusters", ...batch.map(({ arn }) => arn!)],
+      "ECS cluster liveness observation",
+    );
+    const clusters = asRecord(parseJson(result!.stdout, "ECS clusters")).clusters;
+    for (const item of Array.isArray(clusters) ? clusters : []) {
+      const cluster = asRecord(item);
+      const arn = stringOrNull(cluster.clusterArn);
+      const status = stringOrNull(cluster.status);
+      if (arn && status !== "INACTIVE") liveArns.add(arn);
+    }
+  }
+
+  const taskDefinitions = byType.get("ecs:task-definition") ?? [];
+  if (taskDefinitions.length > 0) {
+    const result = await commandRunner(
+      "aws",
+      ["ecs", "list-task-definitions", "--status", "ACTIVE"],
+      "ECS active task-definition observation",
+    );
+    const active = asRecord(
+      parseJson(result!.stdout, "ECS active task definitions"),
+    ).taskDefinitionArns;
+    const activeArns = new Set(
+      (Array.isArray(active) ? active : []).flatMap((item) => {
+        const arn = stringOrNull(item);
+        return arn ? [arn] : [];
+      }),
+    );
+    for (const resource of taskDefinitions) {
+      if (activeArns.has(resource.arn!)) liveArns.add(resource.arn!);
+    }
+  }
+
+  const groupedEcsResources = (
+    kind: "service" | "task",
+  ): Map<string, ResourceObservation[]> => {
+    const grouped = new Map<string, ResourceObservation[]>();
+    for (const resource of byType.get(`ecs:${kind}`) ?? []) {
+      const cluster = ecsClusterFromResourceArn(resource.arn!, kind);
+      if (!cluster) continue;
+      const group = grouped.get(cluster) ?? [];
+      group.push(resource);
+      grouped.set(cluster, group);
+    }
+    return grouped;
+  };
+
+  for (const [cluster, services] of groupedEcsResources("service")) {
+    for (const batch of chunks(services, 10)) {
+      const result = await commandRunner(
+        "aws",
+        [
+          "ecs",
+          "describe-services",
+          "--cluster",
+          cluster,
+          "--services",
+          ...batch.map(({ arn }) => arn!),
+        ],
+        "ECS service liveness observation",
+        /ClusterNotFoundException|InvalidParameterException/,
+      );
+      if (result === null) continue;
+      const items = asRecord(parseJson(result.stdout, "ECS services")).services;
+      for (const item of Array.isArray(items) ? items : []) {
+        const service = asRecord(item);
+        const arn = stringOrNull(service.serviceArn);
+        const status = stringOrNull(service.status);
+        if (arn && status !== "INACTIVE") liveArns.add(arn);
+      }
+    }
+  }
+
+  for (const [cluster, tasks] of groupedEcsResources("task")) {
+    for (const batch of chunks(tasks, 100)) {
+      const result = await commandRunner(
+        "aws",
+        [
+          "ecs",
+          "describe-tasks",
+          "--cluster",
+          cluster,
+          "--tasks",
+          ...batch.map(({ arn }) => arn!),
+        ],
+        "ECS task liveness observation",
+        /ClusterNotFoundException|InvalidParameterException/,
+      );
+      if (result === null) continue;
+      const items = asRecord(parseJson(result.stdout, "ECS tasks")).tasks;
+      for (const item of Array.isArray(items) ? items : []) {
+        const task = asRecord(item);
+        const arn = stringOrNull(task.taskArn);
+        const status = stringOrNull(task.lastStatus);
+        if (arn && status !== "STOPPED") liveArns.add(arn);
+      }
+    }
+  }
+
+  const userPools = byType.get("cognito-idp:user-pool") ?? [];
+  if (userPools.length > 0) {
+    const result = await commandRunner(
+      "aws",
+      ["cognito-idp", "list-user-pools", "--max-results", "60"],
+      "Cognito active user-pool observation",
+    );
+    const listed = asRecord(parseJson(result!.stdout, "Cognito user pools")).UserPools;
+    const activeIds = new Set(
+      (Array.isArray(listed) ? listed : []).flatMap((item) => {
+        const id = stringOrNull(asRecord(item).Id);
+        return id ? [id] : [];
+      }),
+    );
+    for (const resource of userPools) {
+      const userPoolId = resource.arn!.split(":userpool/")[1];
+      if (userPoolId && activeIds.has(userPoolId)) liveArns.add(resource.arn!);
+    }
+  }
+
+  return resources.filter(
+    (resource) =>
+      !historicalTypes.has(resource.resourceType) ||
+      !resource.arn ||
+      liveArns.has(resource.arn),
+  );
+}
+
+export type StageOwnershipObservation = Readonly<{
+  statePresent: boolean;
+  resources: readonly ResourceCount[];
+}>;
+
+/**
+ * Observe the two facts a cleanup job needs before it can report success:
+ * the SST checkpoint has no live resources or pending operations, and no AWS
+ * resource still advertises ownership by the same PR stage. IAM roles are
+ * included explicitly because the Resource Groups Tagging API does not
+ * inventory them.
+ */
+export async function observeStageOwnership(
+  stage: string,
+  commandRunner: CommandRunner = runCommand,
+): Promise<StageOwnershipObservation> {
+  if (previewNumber(stage) === null) {
+    throw new Error("Refusing unsafe stage observation");
+  }
+  const [stateObjects, taggedResourceCandidates, iamRoles] = await Promise.all([
+    collectStateObjects(commandRunner),
+    collectResources(commandRunner),
+    collectIamRoles(commandRunner),
+  ]);
+  const taggedResources = await filterLiveTaggedResources(
+    taggedResourceCandidates.filter((resource) => resource.stage === stage),
+    commandRunner,
+  );
+  const ownedResources = [...taggedResources, ...iamRoles].filter(
+    isOwnedResource,
+  );
+  return deepFreeze({
+    statePresent: stateObjects.some((item) => item.stage === stage),
+    resources: groupResourceCounts(stage, ownedResources),
+  });
+}
+
 function createObservationAdapter(
   repository: string,
   commandRunner: CommandRunner = runCommand,
@@ -1198,12 +1495,17 @@ function createObservationAdapter(
   return {
     async collectObservation() {
       const pullRequests = await collectPullRequests(repository, commandRunner);
-      const [workflowRuns, stateObjects, taggedResources, iamRoles] = await Promise.all([
-        collectWorkflowRuns(repository, pullRequests, commandRunner),
-        collectStateObjects(commandRunner),
-        collectResources(commandRunner),
-        collectIamRoles(commandRunner),
-      ]);
+      const [workflowRuns, stateObjects, taggedResourceCandidates, iamRoles] =
+        await Promise.all([
+          collectWorkflowRuns(repository, pullRequests, commandRunner),
+          collectStateObjects(commandRunner),
+          collectResources(commandRunner),
+          collectIamRoles(commandRunner),
+        ]);
+      const taggedResources = await filterLiveTaggedResources(
+        taggedResourceCandidates,
+        commandRunner,
+      );
       return {
         observedAt: new Date().toISOString(),
         pullRequests: pullRequests.observations,

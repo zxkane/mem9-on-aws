@@ -1335,6 +1335,7 @@ export function verifyPermanentEnforcementDocuments(
     actions: STACK_MUTATION_ACTIONS,
     resources: [
       `${stackPrefix}/github-actions-mem9-on-aws/*`,
+      `${stackPrefix}/memory-namespace-operator-mem9-on-aws/*`,
       `${stackPrefix}/workload-permissions-boundary-mem9-on-aws/*`,
     ],
   });

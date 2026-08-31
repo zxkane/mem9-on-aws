@@ -23,8 +23,10 @@ Use two small Node.js 24 command modules:
    `pull_request` returns only `pr-<sha7>`.
 2. `scripts/reconcile-ecs-deployment.mjs` is a detection-only verifier. It reads
    the exact task-definition ARN and release tag exported by the current SST
-   deployment, waits for ECS service stability, then inspects the service
-   deployments and every running task.
+   deployment, polls `DescribeServices` until the desired deployment is stable,
+   then inspects every running task. The poll is just under 30 minutes because
+   the AWS `services-stable` waiter is fixed at 15-second checks and 40 attempts
+   (about 10 minutes), which is shorter than a measured fresh preview cold start.
 
 SST exports two new String parameters:
 
@@ -47,9 +49,10 @@ GitHub event + commit SHA
   -> SST creates task definition and exports task-definition ARN + image tag
   -> reconcile-ecs-deployment.mjs
        -> SSM GetParameters
-       -> ECS services-stable waiter
-       -> ECS DescribeServices (one PRIMARY deployment)
-          -> bounded follow-up polling while rolloutState is IN_PROGRESS
+       -> bounded ECS DescribeServices polling
+          -> one desired PRIMARY deployment
+          -> rolloutState COMPLETED
+          -> pendingCount 0 and runningCount == desiredCount
        -> ECS ListTasks (RUNNING for this service)
        -> ECS DescribeTasks (task-definition ARN + three container images)
        -> match: continue deployment job
@@ -60,7 +63,7 @@ GitHub event + commit SHA
 
 A deployment matches only when all of these are true:
 
-- ECS stabilization succeeds.
+- ECS reaches the desired stable state within the bounded poll window.
 - The service has exactly one resolved deployment and one PRIMARY deployment.
 - The PRIMARY rollout reaches `COMPLETED` within the bounded follow-up window.
 - The PRIMARY deployment task definition exactly equals the exported ARN.
@@ -70,8 +73,26 @@ A deployment matches only when all of these are true:
 - Every application container image uses the exported release tag.
 
 Mixed task definitions, mixed tags, missing tasks or containers, AWS lookup
-failures, waiter timeout, and an incomplete PRIMARY rollout after the bounded
-follow-up window are mismatches.
+failures, poll timeout, a failed deployment circuit breaker, and an incomplete
+PRIMARY rollout are mismatches. A timeout still performs the safe read-only
+service/task inspection so diagnostics distinguish a slow rollout from drift.
+Only a failed PRIMARY for the desired task definition terminates polling;
+historical `ACTIVE/FAILED` deployments are ignored while a newer PRIMARY
+continues.
+
+Preview failure cleanup runs in a separate 70-minute dependent job keyed by the
+validated `pr-N` stage output. It runs after a failed deploy job or job timeout,
+using the same bounded 15-minute remove, ENI-detach wait, and 15-minute retry as
+PR-close cleanup. The three commands can consume 55 minutes including their
+`kill-after` allowances; the remaining 15 minutes cover runner setup, Pulumi
+cache cleanup, OIDC, unlock, and process startup. PR workflow runs for the same
+stage are serialized without `cancel-in-progress`, so a newer commit waits for
+the prior deployment or cleanup instead of cancelling teardown or racing the
+same SST state. Production failure reporting likewise runs in a separate
+`always()` job based on `needs.deploy-prod.result`; it can create the failure
+issue when the 75-minute production deploy job fails or times out. Explicit
+cancellation of the whole workflow is operator-controlled and is not claimed
+to run downstream jobs.
 
 ## Diagnostics And IAM
 
@@ -94,11 +115,13 @@ but these four reads are grouped and asserted as the reconciliation surface.
 
 - Pure function tests pin event-to-tag behavior and workflow use of the module.
 - Mock-response tests pin reconciliation parsing and redacted diagnostics.
+- Budget tests keep the stability window between 25 and 35 minutes and keep the
+  preview cleanup and production failure reporting independent from deployment
+  job failure or timeout.
 - Deterministic fake AWS CLI fixtures execute the command for match and
   mismatch paths and record every API call.
 - IAM tests assert the reconciliation action set exactly matches command use.
-- Workflow tests assert a mismatch exits through the existing failure-reporting
-  step.
+- Workflow tests assert a mismatch is reported by the independent failure job.
 
 ## Rollback
 

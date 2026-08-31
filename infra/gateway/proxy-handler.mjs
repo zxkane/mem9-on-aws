@@ -24,7 +24,7 @@
  *
  * mem9 REST (the MCP tool schemas live inline in infra/gateway.ts):
  *   add_memory      → POST /v1alpha2/mem9s/memories   (X-API-Key, opt X-Mnemo-Agent-Id)
- *   search_memories → GET  /v1alpha2/mem9s/memories?q=&limit=&offset=&agent_id=
+ *   search_memories → GET  /v1alpha2/mem9s/memories?q=&limit=&offset=&agent_id=&search_mode=
  * Outbound auth to mnemo-server = the X-API-Key header (= the tenant id).
  *
  * Config via env (set in infra/gateway.ts):
@@ -34,12 +34,21 @@
 
 import { lookup as dnsLookup } from "node:dns/promises";
 import {
-  interceptScopes,
-  isScopeInterceptorEvent,
-} from "./scope-interceptor.mjs";
+  INTERNAL_AUTH_FIELD,
+  createTransportEnvelope,
+  parseSigningKeys,
+  verifyInternalContext,
+} from "./namespace-auth.mjs";
 
 const BASE_URL = requireEnv("MEM9_SERVER_BASE_URL").replace(/\/+$/, "");
 const API_KEY = requireEnv("MEM9_API_KEY");
+const IDENTITY_SIGNING_KEYS = parseSigningKeys(
+  requireEnv("MEM9_IDENTITY_SIGNING_KEYS"),
+);
+const TRANSPORT_SIGNING_KEYS = parseSigningKeys(
+  requireEnv("MEM9_TRANSPORT_SIGNING_KEYS"),
+);
+const TRANSPORT_ISSUER = requireEnv("MEM9_TRANSPORT_ISSUER");
 const TOOL_DELIM = "___";
 const MEMORIES_PATH = "/v1alpha2/mem9s/memories";
 const INGEST_JOBS_PATH = "/v1alpha2/mem9s/ingest-jobs";
@@ -98,14 +107,26 @@ async function probeHost() {
   }
 }
 
-async function mem9FetchOnce(path, init) {
+async function mem9FetchOnce(path, init, identity) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
   try {
+    const requestBody = typeof init.body === "string" ? init.body : "";
     const res = await fetch(`${BASE_URL}${path}`, {
       ...init,
       signal: controller.signal,
-      headers: { "X-API-Key": API_KEY, ...(init.headers ?? {}) },
+      headers: {
+        "X-API-Key": API_KEY,
+        "X-Mem9-Transport": createTransportEnvelope({
+          issuer: TRANSPORT_ISSUER,
+          method: init.method,
+          path,
+          body: requestBody,
+          identity,
+          keys: TRANSPORT_SIGNING_KEYS,
+        }),
+        ...(init.headers ?? {}),
+      },
     });
     const text = await res.text();
     const body = text ? safeJson(text) : {};
@@ -118,7 +139,7 @@ async function mem9FetchOnce(path, init) {
   }
 }
 
-async function mem9Fetch(path, init) {
+async function mem9Fetch(path, init, identity) {
   // Retry the mnemo-server call a few times. A VPC-attached Lambda's FIRST DNS
   // lookup of the Cloud Map name (`mnemo.mem9-<stage>.local`) can transiently miss
   // on a cold start — right after the ECS task registers its A record — and undici
@@ -129,7 +150,7 @@ async function mem9Fetch(path, init) {
   let lastErr;
   for (let i = 1; i <= ATTEMPTS; i++) {
     try {
-      return await mem9FetchOnce(path, init);
+      return await mem9FetchOnce(path, init, identity);
     } catch (e) {
       lastErr = e;
       if (e instanceof Mem9HttpError && !e.retryable) throw e;
@@ -154,31 +175,48 @@ function safeJson(text) {
   }
 }
 
-async function addMemory(input) {
-  // Body carries content OR messages (+ optional agent_id/tags/metadata). Agent
-  // scoping can come via the header or the body's agent_id; forward whichever is set.
-  const { agent_id, ...body } = input ?? {};
+async function addMemory(input, identity) {
+  const { content, agent_id, memory_type } = input ?? {};
+  if (typeof content !== "string" || !content.trim()) {
+    throw new Error("add_memory requires non-empty 'content'");
+  }
+  if (memory_type != null && String(memory_type) !== "pinned") {
+    throw new Error("add_memory memory_type must be 'pinned'");
+  }
   const headers = { "Content-Type": "application/json" };
   if (agent_id) headers["X-Mnemo-Agent-Id"] = String(agent_id);
-  const payload = agent_id ? { ...body, agent_id } : body;
+  const payload = { content };
+  if (memory_type != null) payload.memory_type = "pinned";
+  if (agent_id) payload.agent_id = String(agent_id);
   return mem9Fetch(MEMORIES_PATH, {
     method: "POST",
     headers,
     body: JSON.stringify(payload),
-  });
+  }, identity);
 }
 
-async function searchMemories(input) {
-  const { q, limit, offset, agent_id } = input ?? {};
+async function searchMemories(input, identity) {
+  const { q, limit, offset, agent_id, search_mode } = input ?? {};
   if (!q) throw new Error("search_memories requires 'q'");
   const params = new URLSearchParams({ q: String(q) });
   if (limit != null) params.set("limit", String(limit));
   if (offset != null) params.set("offset", String(offset));
   if (agent_id) params.set("agent_id", String(agent_id));
-  return mem9Fetch(`${MEMORIES_PATH}?${params.toString()}`, { method: "GET" });
+  if (search_mode != null) {
+    const mode = String(search_mode);
+    if (mode !== "semantic" && mode !== "keyword") {
+      throw new Error("search_memories search_mode must be 'semantic' or 'keyword'");
+    }
+    params.set("search_mode", mode);
+  }
+  return mem9Fetch(
+    `${MEMORIES_PATH}?${params.toString()}`,
+    { method: "GET" },
+    identity,
+  );
 }
 
-async function ingestMessages(input) {
+async function ingestMessages(input, identity) {
   // Same endpoint as add_memory; mnemo-server smart-ingests when the body carries
   // messages[] (LLM extraction) rather than a single content string. Default
   // mode=smart matches the upstream Claude Code plugin's transcript ingest.
@@ -195,17 +233,19 @@ async function ingestMessages(input) {
     method: "POST",
     headers,
     body: JSON.stringify(payload),
-  });
+  }, identity);
 }
 
-async function getIngestJobStatus(input) {
+async function getIngestJobStatus(input, identity) {
   const { job_id } = input ?? {};
   if (typeof job_id !== "string" || !job_id.trim()) {
     throw new Error("get_ingest_job_status requires 'job_id'");
   }
-  const status = await mem9Fetch(`${INGEST_JOBS_PATH}/${encodeURIComponent(job_id.trim())}`, {
-    method: "GET",
-  });
+  const status = await mem9Fetch(
+    `${INGEST_JOBS_PATH}/${encodeURIComponent(job_id.trim())}`,
+    { method: "GET" },
+    identity,
+  );
   if (status == null || typeof status !== "object" || Array.isArray(status)) {
     throw new Error("mnemo-server returned an invalid ingest job status");
   }
@@ -218,20 +258,25 @@ async function getIngestJobStatus(input) {
 }
 
 export const handler = async (event, context) => {
-  if (isScopeInterceptorEvent(event)) {
-    return interceptScopes(event);
+  if (event == null || typeof event !== "object" || Array.isArray(event)) {
+    throw new Error("target invocation is invalid");
   }
-
   const tool = resolveToolName(context);
+  const { [INTERNAL_AUTH_FIELD]: internalContext, ...input } = event;
+  const identity = verifyInternalContext({
+    context: internalContext,
+    invocation: { tool, arguments: input },
+    keys: IDENTITY_SIGNING_KEYS,
+  });
   switch (tool) {
     case "add_memory":
-      return addMemory(event);
+      return addMemory(input, identity);
     case "search_memories":
-      return searchMemories(event);
+      return searchMemories(input, identity);
     case "ingest_messages":
-      return ingestMessages(event);
+      return ingestMessages(input, identity);
     case "get_ingest_job_status":
-      return getIngestJobStatus(event);
+      return getIngestJobStatus(input, identity);
     default:
       throw new Error(`unknown tool: ${tool}`);
   }

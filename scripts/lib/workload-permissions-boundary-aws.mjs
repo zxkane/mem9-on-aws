@@ -249,6 +249,9 @@ export function createAwsCliAdapter({
   const boundaryStackArn =
     `arn:${partition}:cloudformation:us-west-2:${accountId}:stack/` +
     `${WORKLOAD_BOUNDARY_STACK_NAME}/propagation-probe`;
+  const namespaceOperatorStackArn =
+    `arn:${partition}:cloudformation:us-west-2:${accountId}:stack/` +
+    "memory-namespace-operator-mem9-on-aws/propagation-probe";
   const ecrScanningStackArn =
     `arn:${partition}:cloudformation:us-west-2:${accountId}:stack/` +
     "ecr-registry-scanning-mem9-on-aws/propagation-probe";
@@ -881,6 +884,10 @@ export function createAwsCliAdapter({
         {
           action: "cloudformation:UpdateStack",
           resource: boundaryStackArn,
+        },
+        {
+          action: "cloudformation:UpdateStack",
+          resource: namespaceOperatorStackArn,
         },
         {
           action: "cloudformation:UpdateStack",

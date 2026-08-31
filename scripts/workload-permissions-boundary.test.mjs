@@ -4287,7 +4287,7 @@ describe("stateful AWS CLI adapter", () => {
     await expect(
       adapter.verifyPermanentEnforcement({ boundaryArn }),
     ).resolves.toBe(true);
-    expect(simulationCalls).toHaveLength(7);
+    expect(simulationCalls).toHaveLength(8);
     for (const args of simulationCalls) {
       expect(JSON.parse(argument(args, "--policy-input-list"))).toEqual(
         deployedDenyPolicyDocument(),
@@ -4305,6 +4305,10 @@ describe("stateful AWS CLI adapter", () => {
       [
         "cloudformation:UpdateStack",
         `arn:aws:cloudformation:us-west-2:${accountId}:stack/${WORKLOAD_BOUNDARY_STACK_NAME}/propagation-probe`,
+      ],
+      [
+        "cloudformation:UpdateStack",
+        `arn:aws:cloudformation:us-west-2:${accountId}:stack/memory-namespace-operator-mem9-on-aws/propagation-probe`,
       ],
       [
         "cloudformation:UpdateStack",
@@ -4348,7 +4352,7 @@ describe("stateful AWS CLI adapter", () => {
     await expect(
       adapter.verifyPermanentEnforcement({ boundaryArn }),
     ).resolves.toBe(true);
-    expect(simulationCalls).toBe(7);
+    expect(simulationCalls).toBe(8);
   });
 
   it("accepts an RFC3986-encoded permanent deny policy document", async () => {
@@ -4946,6 +4950,7 @@ describe("stateful AWS CLI adapter", () => {
       "iam:CreatePolicyVersion",
       "cloudformation:UpdateStack",
       "cloudformation:UpdateStack",
+      "cloudformation:UpdateStack",
       "iam:CreateRole",
       "iam:PutRolePolicy",
       "iam:DeleteRolePermissionsBoundary",
@@ -4984,11 +4989,13 @@ describe("stateful AWS CLI adapter", () => {
       "iam:CreatePolicyVersion",
       "cloudformation:UpdateStack",
       "cloudformation:UpdateStack",
+      "cloudformation:UpdateStack",
       "iam:CreateRole",
       "iam:PutRolePolicy",
       "iam:DeleteRolePermissionsBoundary",
       "iam:PassRole",
       "iam:CreatePolicyVersion",
+      "cloudformation:UpdateStack",
       "cloudformation:UpdateStack",
       "cloudformation:UpdateStack",
       "iam:CreateRole",
@@ -5232,6 +5239,9 @@ describe("stateful AWS CLI adapter", () => {
                   resource === boundaryArn ||
                   resource.includes(
                     ":stack/workload-permissions-boundary-mem9-on-aws/",
+                  ) ||
+                  resource.includes(
+                    ":stack/memory-namespace-operator-mem9-on-aws/",
                   ) ||
                   resource.includes(
                     ":stack/ecr-registry-scanning-mem9-on-aws/",
@@ -9284,7 +9294,7 @@ describe("boundary and deploy-role templates", () => {
       ),
     ).toHaveLength(2);
     expect(workflow.match(/name: Deployment maintenance gate/gu)).toHaveLength(
-      4,
+      5,
     );
     expect(
       reconciliationWorkflow.match(/name: Deployment maintenance gate/gu),

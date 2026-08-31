@@ -148,6 +148,15 @@ function mockCommands({
             : [],
         });
       }
+      if (file === "aws" && args[0] === "s3" && args[1] === "cp") {
+        return json({
+          checkpoint: {
+            latest: statePresent ? { resources: [{ urn: "fixture" }] } : {},
+            stack: "fixture",
+          },
+          version: 3,
+        });
+      }
       if (file === "aws" && args[0] === "resourcegroupstaggingapi") {
         const stageTags = [
           { Key: "Project", Value: "mem9-on-aws" },
@@ -173,6 +182,13 @@ function mockCommands({
                   Tags: stageTags,
                 },
               ],
+        });
+      }
+      if (file === "aws" && args[0] === "ecs" && args[1] === "describe-services") {
+        const serviceArn = args[args.indexOf("--services") + 1];
+        return json({
+          failures: [],
+          services: [{ serviceArn, status: "ACTIVE" }],
         });
       }
       if (file === "aws" && args[0] === "iam" && args[1] === "list-roles") {

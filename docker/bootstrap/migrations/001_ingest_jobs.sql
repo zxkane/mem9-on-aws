@@ -250,8 +250,26 @@ CREATE TABLE IF NOT EXISTS ingest_job_plans (
     )
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_ingest_job_plans_hash
-    ON ingest_job_plans (tenant_id, job_id, plan_hash);
+DO $$
+DECLARE
+    namespace_enforced BOOLEAN := FALSE;
+BEGIN
+    IF to_regclass('memory_namespace_migration_state') IS NOT NULL THEN
+        EXECUTE
+            'SELECT EXISTS (
+                SELECT 1
+                FROM memory_namespace_migration_state
+                WHERE singleton_id
+                  AND phase = ''constraints_complete''
+            )'
+        INTO namespace_enforced;
+    END IF;
+    IF NOT namespace_enforced THEN
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_ingest_job_plans_hash
+            ON ingest_job_plans (tenant_id, job_id, plan_hash);
+    END IF;
+END
+$$;
 
 CREATE INDEX IF NOT EXISTS idx_ingest_job_plans_active
     ON ingest_job_plans (tenant_id, job_id, plan_revision DESC)
@@ -280,8 +298,26 @@ CREATE TABLE IF NOT EXISTS sessions (
     )
 );
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_sessions_message
-    ON sessions (app_id, session_id, content_hash);
+DO $$
+DECLARE
+    namespace_enforced BOOLEAN := FALSE;
+BEGIN
+    IF to_regclass('memory_namespace_migration_state') IS NOT NULL THEN
+        EXECUTE
+            'SELECT EXISTS (
+                SELECT 1
+                FROM memory_namespace_migration_state
+                WHERE singleton_id
+                  AND phase = ''constraints_complete''
+            )'
+        INTO namespace_enforced;
+    END IF;
+    IF NOT namespace_enforced THEN
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_sessions_message
+            ON sessions (app_id, session_id, content_hash);
+    END IF;
+END
+$$;
 
 CREATE INDEX IF NOT EXISTS idx_sessions_scope
     ON sessions (app_id, session_id, seq, id)
@@ -311,8 +347,26 @@ BEGIN
 END
 $$;
 
-CREATE UNIQUE INDEX IF NOT EXISTS uq_ingest_jobs_tenant_idempotency
-    ON ingest_jobs (tenant_id, idempotency_key);
+DO $$
+DECLARE
+    namespace_enforced BOOLEAN := FALSE;
+BEGIN
+    IF to_regclass('memory_namespace_migration_state') IS NOT NULL THEN
+        EXECUTE
+            'SELECT EXISTS (
+                SELECT 1
+                FROM memory_namespace_migration_state
+                WHERE singleton_id
+                  AND phase = ''constraints_complete''
+            )'
+        INTO namespace_enforced;
+    END IF;
+    IF NOT namespace_enforced THEN
+        CREATE UNIQUE INDEX IF NOT EXISTS uq_ingest_jobs_tenant_idempotency
+            ON ingest_jobs (tenant_id, idempotency_key);
+    END IF;
+END
+$$;
 
 CREATE INDEX IF NOT EXISTS idx_ingest_jobs_fifo
     ON ingest_jobs (tenant_id, agent_id, app_id, session_id, created_at, job_id)

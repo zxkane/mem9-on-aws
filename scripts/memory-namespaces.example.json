@@ -1,0 +1,13 @@
+{
+  "namespaces": [
+    {
+      "slug": "team-a",
+      "display_name": "Team A",
+      "cognito_group": "mem9-team-a",
+      "default_role": "member",
+      "jit_enabled": true,
+      "status": "active"
+    }
+  ],
+  "m2m_bindings": []
+}

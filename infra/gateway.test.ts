@@ -1,7 +1,11 @@
+import { execFileSync } from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CognitoOutputs } from "./cognito";
 import type { EcsOutputs } from "./ecs";
 import type { TenantIdentityOutputs } from "./tenant-identity";
+import type { NamespaceIdentityOutputs } from "./namespace-identity";
 
 /**
  * Unit tests for the `gateway` stack (Lambda-proxy target): the CUSTOM_JWT
@@ -68,6 +72,8 @@ function makeCtor(kind: string) {
 function installGlobals(stage: string) {
   (globalThis as Record<string, unknown>).$app = { name: "mem9-on-aws", stage };
   installInterpolate();
+  (globalThis as Record<string, unknown>).$jsonStringify = (value: unknown) =>
+    out(JSON.stringify(unwrap(value)));
   (globalThis as Record<string, unknown>).aws = {
     getRegionOutput: () => ({ name: out("ap-northeast-1") }),
     ec2: {
@@ -99,6 +105,14 @@ function installGlobals(stage: string) {
   (globalThis as Record<string, unknown>).command = {
     local: { Command: makeCtor("LocalCommand") },
   };
+  (globalThis as Record<string, unknown>).random = {
+    RandomPassword: class {
+      result = out(Buffer.alloc(48, 7).toString("base64url"));
+      constructor(_name: string, args: Record<string, unknown>) {
+        created.push({ kind: "RandomPassword", args });
+      }
+    },
+  };
 }
 
 beforeEach(() => {
@@ -106,7 +120,7 @@ beforeEach(() => {
   params = [];
 });
 afterEach(() => {
-  for (const g of ["$app", "aws", "sst", "command", "$interpolate"]) delete (globalThis as Record<string, unknown>)[g];
+  for (const g of ["$app", "aws", "sst", "command", "random", "$interpolate", "$jsonStringify"]) delete (globalThis as Record<string, unknown>)[g];
   vi.resetModules();
 });
 
@@ -133,17 +147,37 @@ function fakeIdentity(): TenantIdentityOutputs {
     tenantSecretArn: out("arn:secret"),
   } as unknown as TenantIdentityOutputs;
 }
+function fakeNamespaceIdentity(): NamespaceIdentityOutputs {
+  return {
+    identitySigningKeys: out(
+      JSON.stringify({ current: Buffer.alloc(32, 4).toString("base64url") }),
+    ),
+    transportSigningKeys: out(
+      JSON.stringify({
+        active: "a",
+        a: Buffer.alloc(32, 5).toString("base64url"),
+        b: Buffer.alloc(32, 6).toString("base64url"),
+      }),
+    ),
+    transportSigningParameterArn: out("arn:transport-parameter"),
+    transportSigningRevision: out("transport-revision"),
+  } as unknown as NamespaceIdentityOutputs;
+}
 function only(kind: string) {
   const rs = created.filter((r) => r.kind === kind);
   expect(rs).toHaveLength(1);
   return rs[0].args;
 }
 
+function all(kind: string) {
+  return created.filter((r) => r.kind === kind).map((r) => r.args);
+}
+
 describe("gateway stack", () => {
   it("creates a CUSTOM_JWT MCP gateway matching on allowedClients (not aud)", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
-    gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>);
+    gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>, fakeNamespaceIdentity());
     const gw = only("AgentcoreGateway");
     expect(gw.protocolType).toBe("MCP");
     expect(gw.authorizerType).toBe("CUSTOM_JWT");
@@ -167,7 +201,7 @@ describe("gateway stack", () => {
   it("TC-M2M-CLEANUP-003: trusts the M2M and reader clients", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
-    gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>);
+    gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>, fakeNamespaceIdentity());
     const gw = only("AgentcoreGateway");
     const jwt = (gw.authorizerConfiguration as any).customJwtAuthorizer;
     // The list is [...cognitoOut.allowedClientIds, readerClientId]; each entry is an
@@ -179,23 +213,43 @@ describe("gateway stack", () => {
     expect(clients).toContain("reader-client-id-test");
   });
 
-  it("provisions a VPC-attached nodejs24.x proxy Lambda carrying the Cloud Map URL + X-API-Key", async () => {
+  it("TC-GROUPNS-035: splits a non-VPC identity interceptor from the VPC target", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
-    gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>);
-    const fn = only("SstFunction");
-    expect(fn.runtime).toBe("nodejs24.x");
-    expect(String(fn.handler)).toContain("proxy-handler.handler");
-    // VPC-attached (private subnets + the task SG so it can reach mnemo-server).
-    const vpc = fn.vpc as Record<string, unknown>;
+    gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>, fakeNamespaceIdentity());
+    const functions = all("SstFunction");
+    expect(functions).toHaveLength(2);
+    const interceptorFn = functions.find((fn) =>
+      String(fn.handler).includes("identity-interceptor.handler"),
+    );
+    const targetFn = functions.find((fn) =>
+      String(fn.handler).includes("proxy-handler.handler"),
+    );
+    expect(interceptorFn).toBeDefined();
+    expect(targetFn).toBeDefined();
+    expect(interceptorFn?.runtime).toBe("nodejs24.x");
+    expect(interceptorFn?.vpc).toBeUndefined();
+    expect(
+      (interceptorFn?.environment as Record<string, unknown>).MEM9_API_KEY,
+    ).toBeUndefined();
+
+    expect(targetFn?.runtime).toBe("nodejs24.x");
+    const vpc = targetFn?.vpc as Record<string, unknown>;
     expect(vpc.privateSubnets).toBeDefined();
     expect(vpc.securityGroups).toBeDefined();
     // Env (flat on sst.aws.Function): the Cloud Map base URL + the tenant key.
-    const env = fn.environment as Record<string, any>;
+    const env = targetFn?.environment as Record<string, any>;
     expect(String((env.MEM9_SERVER_BASE_URL as { value?: string }).value)).toContain("mnemo.mem9-prod.local");
     expect(String((env.MEM9_SERVER_BASE_URL as { value?: string }).value)).toContain(":8080");
     expect(String((env.MEM9_API_KEY as { value?: string }).value)).toBe("deadbeefTENANTID");
-    expect(JSON.parse(String(env.MEM9_TOOL_SCOPES))).toEqual({
+    expect(
+      JSON.parse(
+        String(
+          (interceptorFn?.environment as Record<string, unknown>)
+            .MEM9_TOOL_SCOPES,
+        ),
+      ),
+    ).toEqual({
       add_memory: "mem9-mcp/write",
       search_memories: "mem9-mcp/read",
       ingest_messages: "mem9-mcp/write",
@@ -214,7 +268,7 @@ describe("gateway stack", () => {
   it("gateway service role grants ONLY lambda:InvokeFunction (no workload-identity/secret/ENI)", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
-    gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>);
+    gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>, fakeNamespaceIdentity());
     // Two roles are created: the Lambda exec role + the gateway service role. Find
     // the gateway-invoke RolePolicy (its doc is an apply()'d Output over the ARN).
     const rolePolicies = created.filter((r) => r.kind === "RolePolicy");
@@ -232,11 +286,28 @@ describe("gateway stack", () => {
   it("provisions the target via a command.local.Command driving a mcp.lambda CreateGatewayTarget", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
-    gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>);
+    gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>, fakeNamespaceIdentity());
     const cmd = only("LocalCommand");
-    expect(String(unwrap(cmd.create))).toContain("MEM9_TGT_OP=create");
-    expect(String(unwrap(cmd.create))).toContain("provision-target.mjs");
-    expect(String(unwrap(cmd.delete))).toContain("MEM9_TGT_OP=delete");
+    const createCommand = String(unwrap(cmd.create));
+    const deleteCommand = String(unwrap(cmd.delete));
+    expect(createCommand).toContain("MEM9_TGT_OP=create");
+    expect(deleteCommand).toContain("MEM9_TGT_OP=delete");
+    for (const command of [createCommand, deleteCommand]) {
+      const scriptExpression = command.slice(command.indexOf(" node ") + 6);
+      expect(scriptExpression).toBe(
+        '"$(git rev-parse --show-toplevel)/infra/gateway/provision-target.mjs"',
+      );
+      const resolvedScript = execFileSync(
+        "sh",
+        ["-c", `printf '%s' ${scriptExpression}`],
+        {
+          cwd: path.resolve(import.meta.dirname, "gateway"),
+          encoding: "utf8",
+        },
+      );
+      expect(path.isAbsolute(resolvedScript)).toBe(true);
+      expect(fs.existsSync(resolvedScript)).toBe(true);
+    }
     const env = unwrap(cmd.environment) as Record<string, unknown>;
     // Lambda target inputs: the proxy Lambda ARN + the inline tool schema (both tools).
     expect(env.MEM9_TGT_LAMBDA_ARN).toBeDefined();
@@ -244,12 +315,24 @@ describe("gateway stack", () => {
     expect(String(env.MEM9_TGT_TOOL_SCHEMA)).toContain("search_memories");
     expect(String(env.MEM9_TGT_TOOL_SCHEMA)).toContain("ingest_messages");
     expect(String(env.MEM9_TGT_TOOL_SCHEMA)).toContain("get_ingest_job_status");
-    const toolNames = JSON.parse(String(env.MEM9_TGT_TOOL_SCHEMA))
+    const toolSchema = JSON.parse(String(env.MEM9_TGT_TOOL_SCHEMA));
+    const searchModeSchema = toolSchema.find(
+      ({ name }: { name: string }) => name === "search_memories",
+    ).inputSchema.properties.search_mode;
+    expect(searchModeSchema).toEqual({
+      type: "string",
+      description:
+        "Optional search mode. Defaults to semantic; keyword performs exact substring matching.",
+    });
+    const toolNames = toolSchema
       .map(({ name }: { name: string }) => name)
       .sort();
+    const identityFn = all("SstFunction").find((fn) =>
+      String(fn.handler).includes("identity-interceptor.handler"),
+    );
     const scopePolicy = JSON.parse(
       String(
-        (unwrap(only("SstFunction").environment) as Record<string, unknown>)
+        (unwrap(identityFn?.environment) as Record<string, unknown>)
           .MEM9_TOOL_SCOPES,
       ),
     );

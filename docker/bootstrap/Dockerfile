@@ -9,13 +9,27 @@
 # postgres:17 client matches the Aurora PostgreSQL 17.x engine (infra/db.ts).
 # Runs on arm64 (task architecture) — postgres + jq are multi-arch.
 
-FROM postgres:17-alpine
+FROM node:24-alpine
 
-RUN apk add --no-cache jq
+RUN apk add --no-cache ca-certificates curl jq postgresql17-client \
+    && mkdir -p /bootstrap \
+    && curl --fail --silent --show-error \
+      https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
+      --output /bootstrap/global-bundle.pem
+
+ENV NODE_EXTRA_CA_CERTS=/bootstrap/global-bundle.pem
 
 COPY docker/bootstrap/schema.sql /bootstrap/schema.sql
 COPY docker/bootstrap/migrations/ /bootstrap/migrations/
 COPY docker/bootstrap/entrypoint.sh /bootstrap/entrypoint.sh
+COPY docker/bootstrap/operator-entrypoint.mjs /bootstrap/operator/operator-entrypoint.mjs
+COPY scripts/lib/memory-namespace.mjs /bootstrap/operator/scripts/lib/memory-namespace.mjs
+COPY scripts/manage-memory-access.mjs /bootstrap/operator/scripts/manage-memory-access.mjs
+COPY scripts/migrate-memory-namespaces.mjs /bootstrap/operator/scripts/migrate-memory-namespaces.mjs
+COPY scripts/prepare-preview-memory-namespaces.mjs /bootstrap/operator/scripts/prepare-preview-memory-namespaces.mjs
+COPY scripts/reconcile-memory-namespaces.mjs /bootstrap/operator/scripts/reconcile-memory-namespaces.mjs
+COPY package.json package-lock.json /bootstrap/operator/
+RUN cd /bootstrap/operator && npm ci --omit=dev
 RUN chmod +x /bootstrap/entrypoint.sh
 
 # One-shot: applies schema + seeds the tenant, then exits 0. Not a server.

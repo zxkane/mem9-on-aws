@@ -2,8 +2,9 @@
  * `gateway` stack — AgentCore Gateway MCP surface (§6/§6a), Lambda-proxy path.
  *
  * The globally-reachable, Cognito-authed MCP endpoint. Inbound = CUSTOM_JWT
- * (Cognito M2M). The target is a **Lambda-proxy GatewayTarget**: AgentCore invokes
- * a VPC-attached proxy Lambda (docker-less zip, nodejs24.x) that reaches
+ * (Cognito M2M). A non-VPC identity interceptor classifies and signs the
+ * authenticated principal. The target is a **Lambda-proxy GatewayTarget**:
+ * AgentCore invokes a separate VPC-attached proxy Lambda (nodejs24.x) that reaches
  * mnemo-server PRIVATELY over Cloud Map DNS (`mnemo.mem9-<stage>.local:8080`),
  * injecting the X-API-Key (= tenant id). No ALB, ACM cert, or VPC Lattice is
  * deployed; Cloud Map owns the VPC-associated Route 53 private hosted zone.
@@ -20,13 +21,10 @@
  * bedrock-agentcore-control `CreateGatewayTarget` API (infra/gateway/
  * provision-target.mjs) with `targetConfiguration.mcp.lambda`. The Command wrapper
  * gives a create→poll-READY→delete lifecycle + a dependsOn edge on the Lambda.
- * The proxy Lambda also runs as the Gateway's request/response interceptor:
- * requests are authorized per tool and tools/list is filtered by OAuth scope.
+ * The target verifies the interceptor context and sends mnemo-server a
+ * separately signed, short-lived transport envelope.
  */
 
-import * as fs from "fs";
-import * as path from "path";
-import { fileURLToPath } from "url";
 import { resolveVpc } from "./vpc";
 import {
   MCP_RESOURCE_SCOPES,
@@ -35,12 +33,10 @@ import {
 } from "./cognito";
 import type { EcsOutputs } from "./ecs";
 import type { TenantIdentityOutputs } from "./tenant-identity";
+import type { NamespaceIdentityOutputs } from "./namespace-identity";
 
 // @ts-ignore - `aws` injected globally by SST; bedrock/iam/ssm types loose.
 const awsAny = aws as unknown as Record<string, any>;
-
-const gatewayFilename = fileURLToPath(import.meta.url);
-const gatewayDirname = path.dirname(gatewayFilename);
 
 const MNEMO_PORT = 8080;
 
@@ -52,18 +48,23 @@ const MNEMO_PORT = 8080;
 // SHAPE: this schema is passed to the DIRECT bedrock-agentcore-control
 // `CreateGatewayTarget` API (via provision-target.mjs), so it uses the SDK's
 // `SchemaDefinition` shape — `properties` is a MAP keyed by property name and
-// `required` is an ARRAY of names (standard JSON-schema), NOT the pulumi typed-
-// resource's list-of-{name,required:boolean}. (Getting this wrong => the API
-// rejects with "Unexpected field type".)
+// `required` is an ARRAY of names, NOT the pulumi typed-resource's list-of-
+// {name,required:boolean}. This is a restricted JSON-schema subset: enum and
+// other unmodeled keywords are discarded by the SDK serializer.
 const TOOL_SCHEMA = [
   {
     name: "add_memory",
     description:
-      "Add a memory (raw content) for later recall. Writes are async; returns {status:'accepted'}.",
+      "Add a memory for later recall. Default writes use smart extraction; memory_type pinned stores the content directly.",
     inputSchema: {
       type: "object",
       properties: {
         content: { type: "string", description: "Raw content to store as a memory." },
+        memory_type: {
+          type: "string",
+          description:
+            "Optional explicit memory type. Only pinned is supported; pinned stores content directly without smart extraction.",
+        },
         agent_id: {
           type: "string",
           description: "Optional agent id to attribute the write to (per-agent scoping).",
@@ -74,12 +75,18 @@ const TOOL_SCHEMA = [
   },
   {
     name: "search_memories",
-    description: "Search stored memories by semantic query; returns the most relevant memories.",
+    description:
+      "Search stored memories; semantic search is the default and keyword mode performs exact substring matching.",
     inputSchema: {
       type: "object",
       properties: {
         q: { type: "string", description: "The natural-language search query." },
         limit: { type: "integer", description: "Max results to return (default 20)." },
+        search_mode: {
+          type: "string",
+          description:
+            "Optional search mode. Defaults to semantic; keyword performs exact substring matching.",
+        },
         agent_id: {
           type: "string",
           description: "Optional: restrict results to memories written by this agent.",
@@ -156,6 +163,7 @@ export function gateway(
   ecsOut: EcsOutputs,
   identity: TenantIdentityOutputs,
   readerClientId: Output<string>,
+  namespaceIdentity: NamespaceIdentityOutputs,
 ): GatewayOutputs {
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const stage = $app.stage;
@@ -164,26 +172,35 @@ export function gateway(
   // The GatewayTarget provision script (below) needs the region for its SDK client.
   const region = awsAny.getRegionOutput().name;
 
-  // Resolve the `infra/gateway/` directory that holds the target-provision
-  // script. SST's esbuild bundle relocates the config, so `gatewayDirname`
-  // (from import.meta.url) may not point at the source tree — fall back to the
-  // workspace-root `infra/gateway`. The `node <script>` invocation below needs a
-  // correct path (the proxy Lambda's handler uses an app-root-relative string).
-  const moduleGatewayDir = path.resolve(gatewayDirname, "gateway");
-  const gatewayAssetDir = fs.existsSync(path.join(moduleGatewayDir, "proxy-handler.mjs"))
-    ? moduleGatewayDir
-    : path.resolve(process.cwd(), "infra", "gateway");
   const tenantKey = identity.tenantId;
 
-  // --- Proxy Lambda (VPC-attached, nodejs24.x) ---
+  const identitySigningKeys = namespaceIdentity.identitySigningKeys;
+  const transportSigningKeys = namespaceIdentity.transportSigningKeys;
+  const clientRegistry = $jsonStringify({
+    human: [readerClientId],
+    m2m: cognitoOut.allowedClientIds,
+  });
+
+  // --- Identity interceptor Lambda (non-VPC, nodejs24.x) ---
+  const identityFn = new sst.aws.Function("Mem9IdentityInterceptorFn", {
+    handler: "infra/gateway/identity-interceptor.handler",
+    runtime: "nodejs24.x",
+    timeout: "10 seconds",
+    environment: {
+      MEM9_TOOL_SCOPES: JSON.stringify(MCP_TOOL_SCOPES),
+      MEM9_CLIENT_REGISTRY: clientRegistry,
+      MEM9_IDENTITY_SIGNING_KEYS: identitySigningKeys,
+    },
+  });
+
+  // --- Proxy target Lambda (VPC-attached, nodejs24.x) ---
   // An `sst.aws.Function` (not a raw aws.lambda.Function): SST zips the handler,
   // creates the exec role with the VPC-ENI + logs perms, and forces nodejs24.x via
   // the sst.config $transform. Attaches to the task SG (shares it with mnemo-server)
   // so the self-ingress :8080 rule in ecs.ts lets it reach the server. Env carries
   // the Cloud Map URL + the X-API-Key (tenant id). The handler path is app-root-
-  // relative (SST resolves handlers from the sst.config.ts dir, not the esbuild
-  // bundle location — so no gatewayDirname/cwd dance needed here, unlike the
-  // provision-target.mjs `node` invocation below).
+  // relative (SST resolves handlers from the sst.config.ts dir). The local
+  // provision command below separately resolves the checkout root at runtime.
   const proxyFn = new sst.aws.Function("Mem9ProxyFn", {
     handler: "infra/gateway/proxy-handler.handler",
     runtime: "nodejs24.x",
@@ -195,7 +212,9 @@ export function gateway(
     environment: {
       MEM9_SERVER_BASE_URL: $interpolate`http://${ecsOut.serviceDnsName}:${MNEMO_PORT}`,
       MEM9_API_KEY: tenantKey,
-      MEM9_TOOL_SCOPES: JSON.stringify(MCP_TOOL_SCOPES),
+      MEM9_IDENTITY_SIGNING_KEYS: identitySigningKeys,
+      MEM9_TRANSPORT_SIGNING_KEYS: transportSigningKeys,
+      MEM9_TRANSPORT_ISSUER: "gateway-target",
     },
   });
 
@@ -215,17 +234,25 @@ export function gateway(
     }),
     tags,
   });
-  // Least privilege: the gateway invokes the proxy Lambda AS THIS ROLE, so it needs
-  // only lambda:InvokeFunction on that one function. (No workload-identity / secret
+  // Least privilege: the gateway invokes the interceptor and target AS THIS ROLE,
+  // so it needs only lambda:InvokeFunction on those two functions. (No workload-identity / secret
   // / ENI grants — those were for the removed API-key credential provider + the
   // managed-Lattice ENI path.)
   const gatewayInvokePolicy = new awsAny.iam.RolePolicy("Mem9GatewayInvokeLambda", {
     role: gatewayServiceRole.name,
-    policy: proxyFn.arn.apply((arn: string) =>
-      JSON.stringify({
-        Version: "2012-10-17",
-        Statement: [{ Effect: "Allow", Action: "lambda:InvokeFunction", Resource: arn }],
-      }),
+    policy: proxyFn.arn.apply((proxyArn: string) =>
+      identityFn.arn.apply((identityArn: string) =>
+        JSON.stringify({
+          Version: "2012-10-17",
+          Statement: [
+            {
+              Effect: "Allow",
+              Action: "lambda:InvokeFunction",
+              Resource: [identityArn, proxyArn],
+            },
+          ],
+        }),
+      ),
     ),
   });
 
@@ -256,7 +283,7 @@ export function gateway(
       interceptorConfigurations: [
         {
           interceptionPoints: ["REQUEST", "RESPONSE"],
-          interceptor: { lambda: { arn: proxyFn.arn } },
+          interceptor: { lambda: { arn: identityFn.arn } },
           inputConfiguration: { passRequestHeaders: true },
         },
       ],
@@ -274,7 +301,13 @@ export function gateway(
   // Command wrapper still gives a clean create→poll-READY→delete lifecycle + a
   // dependsOn edge on the proxy Lambda + gateway.
   const targetName = `${stage}-mem9-rest`;
-  const provisionScript = path.join(gatewayAssetDir, "provision-target.mjs");
+  // Persist a checkout-portable command in Pulumi state. SST runs local commands
+  // from `.sst/platform`, not the repository root, while teardown may run from a
+  // different checkout than deployment. Resolve the CURRENT checkout root at
+  // command runtime so both create and delete find the repository-owned script.
+  const provisionScript = "infra/gateway/provision-target.mjs";
+  const provisionCommand =
+    `node "$(git rev-parse --show-toplevel)/${provisionScript}"`;
   const toolSchemaJson = JSON.stringify(TOOL_SCHEMA);
   // `command.local.Command`'s `environment` block applies to BOTH create and
   // delete, so MEM9_TGT_OP can't live there (it must differ per lifecycle) — set it
@@ -282,12 +315,17 @@ export function gateway(
   new command.local.Command(
     "Mem9GatewayTarget",
     {
-      create: $interpolate`MEM9_TGT_OP=create node ${provisionScript}`,
-      delete: $interpolate`MEM9_TGT_OP=delete node ${provisionScript}`,
+      create: $interpolate`MEM9_TGT_OP=create ${provisionCommand}`,
+      delete: $interpolate`MEM9_TGT_OP=delete ${provisionCommand}`,
       // Re-run create (delete-then-recreate) when the gateway, the Lambda, or the
       // tool schema changes. A fire-once Command has no read/diff, so out-of-band
       // drift needs a trigger bump or `sst refresh`; a failed create always re-runs.
-      triggers: [bedrockGateway.gatewayId, proxyFn.arn, toolSchemaJson],
+      triggers: [
+        bedrockGateway.gatewayId,
+        identityFn.arn,
+        proxyFn.arn,
+        toolSchemaJson,
+      ],
       environment: {
         MEM9_TGT_REGION: region,
         MEM9_TGT_GATEWAY_ID: bedrockGateway.gatewayId,
@@ -299,7 +337,7 @@ export function gateway(
       },
     },
     {
-      dependsOn: [bedrockGateway, proxyFn],
+      dependsOn: [bedrockGateway, identityFn, proxyFn],
       // A `triggers` change (e.g. the tool schema) REPLACES this Command. Pulumi's
       // default replace order is create-new-THEN-delete-old — and because the create
       // step reuses an existing READY target, the new create was a no-op and the

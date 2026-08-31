@@ -55,6 +55,7 @@ import type { DbOutputs } from "./db";
 import { ecrImage, accountId, applicationRegion } from "./ecr";
 import { observability } from "./observability";
 import type { TenantIdentityOutputs } from "./tenant-identity";
+import type { NamespaceIdentityOutputs } from "./namespace-identity";
 import { disableMnemoServerPseudoTerminal } from "./ecs-task-definition";
 
 // The primary Mantle route follows the active SST AWS provider. The optional
@@ -71,6 +72,10 @@ const region = applicationRegion();
 const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 const DURABLE_INGEST_ENABLED =
   process.env.MEM9_DURABLE_INGEST_ENABLED === "1" ? "1" : "0";
+const NAMESPACE_REQUIRED = process.env.MEM9_NAMESPACE_REQUIRED ?? "0";
+if (!["0", "1"].includes(NAMESPACE_REQUIRED)) {
+  throw new Error("MEM9_NAMESPACE_REQUIRED must be 0 or 1");
+}
 const DURABLE_INGEST_METRIC_STAGE = $app.stage === "prod" ? "prod" : "";
 
 // The qwen3-embed sidecar listens here; mem9 calls it over localhost. Not exposed
@@ -142,7 +147,11 @@ export interface EcsOutputs {
  *   ("couldn't find resource"). Passing the Outputs threads a real Pulumi
  *   dependency so ECS waits for the DB resources.
  */
-export function ecs(dbOut: DbOutputs, identity: TenantIdentityOutputs): EcsOutputs {
+export function ecs(
+  dbOut: DbOutputs,
+  identity: TenantIdentityOutputs,
+  namespaceIdentity: NamespaceIdentityOutputs,
+): EcsOutputs {
   if ($app.stage === "prod" && !BEDROCK_PROJECT) {
     throw new Error("MEM9_BEDROCK_PROJECT is required for production observability");
   }
@@ -377,14 +386,31 @@ export function ecs(dbOut: DbOutputs, identity: TenantIdentityOutputs): EcsOutpu
           // Preview stages exercise durable processing without creating a new
           // permanent CloudWatch custom-metric dimension for every PR.
           MNEMO_DURABLE_INGEST_METRIC_STAGE: DURABLE_INGEST_METRIC_STAGE,
+          // This is a cutover gate, not a normal feature default. Keep it off
+          // while production is still on additive_ready; the operator enables
+          // it only after freeze/backfill/enforce reaches constraints_complete
+          // and the Cognito/Aurora namespace bindings are reconciled.
+          MNEMO_NAMESPACE_REQUIRED: NAMESPACE_REQUIRED,
+          MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS: "10000",
+          MNEMO_NAMESPACE_EXACT_VECTOR_TIMEOUT: "2s",
+          MNEMO_TRANSPORT_ISSUER: "gateway-target",
+          // Non-secret keyring digest. SSM values are injected only when a task
+          // starts, so changing this value creates a new task definition and
+          // guarantees the rolling service deployment consumes the new keyring.
+          MNEMO_TRANSPORT_SIGNING_REVISION:
+            namespaceIdentity.transportSigningRevision,
           // Bound prompt construction before the provider-boundary byte check.
           MNEMO_MAX_EXTRACTION_CONVERSATION_RUNES: String(MAX_EXTRACTION_CONVERSATION_RUNES),
         },
-        // Secret injection (== ECS `secrets: valueFrom`): the DB secret lands as an
-        // env var from Secrets Manager at task start. Never a literal in git.
+        // Secret injection (== ECS `secrets: valueFrom`): DB/tenant values come
+        // from Secrets Manager and the transport key comes from a stage-scoped
+        // SSM SecureString. Values never appear as literals in git or the task
+        // definition.
         ssm: {
           MEM9_DB_SECRET: dbSecretArn,
           MEM9_TENANT_ID: identity.tenantSecretArn,
+          MNEMO_TRANSPORT_SIGNING_KEYS:
+            namespaceIdentity.transportSigningParameterArn,
         },
         // Process liveness only: /healthz confirms the HTTP server is responding,
         // but intentionally does not probe Aurora, qwen3, the LLM proxy, or an
@@ -485,6 +511,8 @@ export function ecs(dbOut: DbOutputs, identity: TenantIdentityOutputs): EcsOutpu
         args.triggers = {
           ...(args.triggers ?? {}),
           taskTagPropagation: "v1",
+          transportSigningRevision:
+            namespaceIdentity.transportSigningRevision,
         };
         // Register the service in Cloud Map (§6a) so it gets the stable
         // `mnemo.mem9-<stage>.local` A record ECS keeps pointed at the task's

@@ -12,6 +12,10 @@ import {
   sharedCleanupMutexKey,
 } from "./memory-cleanup.mjs";
 import { resolveApplicationRegion } from "./lib/application-region.mjs";
+import {
+  assertNamespaceV1LegacyMaintenanceDisabled,
+  LEGACY_MAINTENANCE_DISABLED_CODE,
+} from "./lib/memory-namespace.mjs";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_CAP = 20;
@@ -2117,6 +2121,7 @@ if (isMain) {
   let production;
   try {
     const options = parseConsolidationArgs(process.argv.slice(2));
+    assertNamespaceV1LegacyMaintenanceDisabled("memory-consolidation");
     production = await createProductionDeps(options);
     const result = await runConsolidation(options, production.deps);
     process.exitCode = result.exitCode;
@@ -2125,6 +2130,10 @@ if (isMain) {
       JSON.stringify({
         event: "consolidation_failed",
         errorClass: error?.name || "Error",
+        reason:
+          error?.code === LEGACY_MAINTENANCE_DISABLED_CODE
+            ? error.message
+            : undefined,
       }),
     );
     process.exitCode = 1;

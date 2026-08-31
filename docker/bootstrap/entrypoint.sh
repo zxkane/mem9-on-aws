@@ -22,6 +22,13 @@ set -eu
 : "${MEM9_DB_SECRET:?MEM9_DB_SECRET (Secrets Manager JSON {username,password}) required}"
 : "${MEM9_TENANT_ID:?MEM9_TENANT_ID (the X-API-Key / tenants.id to seed) required}"
 
+# The same private-network task definition also runs namespace operator
+# commands. The Node entrypoint constructs MNEMO_DSN without printing it, reads
+# short-lived SecureString inputs, and invokes only a fixed operation allowlist.
+if [ -n "${MEM9_BOOTSTRAP_OPERATION:-}" ]; then
+  exec node /bootstrap/operator/operator-entrypoint.mjs
+fi
+
 DB_USER=$(printf '%s' "$MEM9_DB_SECRET" | jq -re '(.username // error("missing .username"))') || {
   echo "bootstrap: MEM9_DB_SECRET has no .username" >&2; exit 1; }
 DB_PASS=$(printf '%s' "$MEM9_DB_SECRET" | jq -re '(.password // error("missing .password"))') || {
@@ -117,5 +124,10 @@ ON CONFLICT (id) DO UPDATE SET
   status      = 'active',
   updated_at  = NOW();
 SQL
+
+if [ -n "${MEM9_PREVIEW_NAMESPACE_ALPHA_CLIENT_ID:-}" ]; then
+  echo "bootstrap: preparing isolated PR namespace fixtures"
+  node /bootstrap/operator/scripts/prepare-preview-memory-namespaces.mjs
+fi
 
 echo "bootstrap: done — schema applied + tenant ${MEM9_TENANT_ID} active"
