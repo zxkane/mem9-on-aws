@@ -54,9 +54,9 @@ The repository implementation includes:
 - a retained least-privilege namespace operator role;
 - `MEM9_NAMESPACE_REQUIRED`, which defaults to `0` and keeps an existing stage
   compatible until the database reaches `constraints_complete`;
-- a version-controlled 278-statement scoped-SQL manifest generated from the
+- a version-controlled 279-statement scoped-SQL manifest generated from the
   complete patched upstream and local operator/DDL surfaces;
-- a coverage ownership map assigning every `TC-GROUPNS-001..133` criterion to
+- a coverage ownership map assigning every `TC-GROUPNS-001..137` criterion to
   exactly one capability and named verification surface without claiming that
   the mapped surface has executed or passed;
 - unit, infrastructure, fresh-upstream patch, and PostgreSQL migration tests.

@@ -446,7 +446,7 @@ CI also verifies the version-controlled scoped-SQL manifest at
 `scripts/memory-namespace-query-inventory.json` against the complete patched
 upstream source and its exact trusted-exception policy. It also checks
 `scripts/memory-namespace-release-gates.json` as a coverage ownership map so
-every `TC-GROUPNS-001..133` criterion has exactly one owning capability and a
+every `TC-GROUPNS-001..137` criterion has exactly one owning capability and a
 named verification surface. The map is not an AC execution result. The deployed
 PR namespace check is implemented by
 `scripts/run-memory-namespace-e2e.sh`; human Cognito-group token cases remain

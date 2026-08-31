@@ -1575,9 +1575,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "3f910b06aea436594c0d",
+      "id": "291944e60b2fe74fc4fc",
       "owner": "docker/bootstrap/schema.sql",
-      "line": 126,
+      "line": 135,
       "tables": [
         "memories"
       ],
@@ -1592,9 +1592,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "c32dc9d516c194323f22",
+      "id": "cca82d070e4c628ae1b5",
       "owner": "docker/bootstrap/schema.sql",
-      "line": 127,
+      "line": 136,
       "tables": [
         "memories"
       ],
@@ -1609,9 +1609,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "728723f7add45c46b2c0",
+      "id": "16141ad82341372576e5",
       "owner": "docker/bootstrap/schema.sql",
-      "line": 129,
+      "line": 138,
       "tables": [
         "upload_tasks"
       ],
@@ -1626,9 +1626,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "c11f81e8b6e85abed375",
+      "id": "95f5e416c05010cf8b5f",
       "owner": "docker/bootstrap/schema.sql",
-      "line": 156,
+      "line": 165,
       "tables": [
         "upload_tasks"
       ],
@@ -1643,9 +1643,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "407aa5f9d4e7cdb451c1",
+      "id": "7764334122e53889326f",
       "owner": "docker/bootstrap/schema.sql",
-      "line": 157,
+      "line": 166,
       "tables": [
         "upload_tasks"
       ],
@@ -1660,9 +1660,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "d578ebabb0b2641050b0",
+      "id": "e3a75faa587b8f13707c",
       "owner": "docker/bootstrap/schema.sql",
-      "line": 158,
+      "line": 167,
       "tables": [
         "upload_tasks"
       ],
@@ -1677,9 +1677,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "78ab583776d1aff2262a",
+      "id": "1a84312eb44c67183bff",
       "owner": "docker/bootstrap/schema.sql",
-      "line": 161,
+      "line": 170,
       "tables": [
         "upload_tasks"
       ],
@@ -2094,9 +2094,27 @@
       "namespace_evidence": null
     },
     {
-      "id": "36a1f9e5c121cefabba0",
+      "id": "5d231656a19d7ae5d8be",
       "owner": "scripts/migrate-memory-namespaces.mjs",
-      "line": 627,
+      "line": 460,
+      "tables": [
+        "ingest_jobs",
+        "upload_tasks"
+      ],
+      "statement_sha256": "22de9b2953c7c7d287557aded9027ecf0d04f16e63a9e7ca2277a773e01f18f4",
+      "statement": "SELECT (SELECT COUNT(*)::int FROM ingest_jobs WHERE state NOT IN ('succeeded', 'dead')) AS nonterminal_jobs, (SELECT COUNT(*)::int FROM upload_tasks WHERE status IN ('pending', 'processing')) AS active_uploads",
+      "classification": "migration_operator",
+      "rationale": "The phased writer-fenced migration intentionally inventories and backfills legacy rows.",
+      "coverage": [
+        "scripts/memory-namespace.test.mjs",
+        "scripts/run-memory-namespace-integration.sh"
+      ],
+      "namespace_evidence": null
+    },
+    {
+      "id": "16de945a1972a2778088",
+      "owner": "scripts/migrate-memory-namespaces.mjs",
+      "line": 650,
       "tables": [
         "memories"
       ],
@@ -2111,9 +2129,9 @@
       "namespace_evidence": "namespace_id = $1"
     },
     {
-      "id": "ccba6bc2539435c5220b",
+      "id": "208b099a455eb2eaa23d",
       "owner": "scripts/migrate-memory-namespaces.mjs",
-      "line": 640,
+      "line": 663,
       "tables": [
         "sessions"
       ],
@@ -2128,9 +2146,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "625485ba9d4b39de3889",
+      "id": "6de7831c83f302ffd739",
       "owner": "scripts/migrate-memory-namespaces.mjs",
-      "line": 656,
+      "line": 679,
       "tables": [
         "ingest_jobs"
       ],
@@ -2145,9 +2163,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "d86ac183829acccdfadf",
+      "id": "7fcd0f1903d5782a4317",
       "owner": "scripts/migrate-memory-namespaces.mjs",
-      "line": 672,
+      "line": 695,
       "tables": [
         "ingest_job_plans",
         "ingest_jobs"
@@ -2163,9 +2181,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "40cf16e9469672cf023c",
+      "id": "d261434bbc3f4eb9807d",
       "owner": "scripts/migrate-memory-namespaces.mjs",
-      "line": 692,
+      "line": 715,
       "tables": [
         "upload_tasks"
       ],
@@ -2180,9 +2198,9 @@
       "namespace_evidence": "namespace_id = $1"
     },
     {
-      "id": "8abaec22146b70a37b05",
+      "id": "1de1b3009fb07b1dbe1d",
       "owner": "scripts/migrate-memory-namespaces.mjs",
-      "line": 714,
+      "line": 737,
       "tables": [
         "ingest_job_plans",
         "ingest_jobs",
