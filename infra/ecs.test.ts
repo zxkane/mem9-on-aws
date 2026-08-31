@@ -651,6 +651,18 @@ describe("ecs stack", () => {
     );
   });
 
+  it("treats an unset GitHub repository variable as compatibility mode", async () => {
+    process.env.MEM9_NAMESPACE_REQUIRED = "";
+    installGlobals("prod");
+    const ecs = await loadEcs();
+    ecs(fakeDbOut());
+
+    expect(
+      (containersByName()["mnemo-server"].environment as Record<string, unknown>)
+        .MNEMO_NAMESPACE_REQUIRED,
+    ).toBe("0");
+  });
+
   it("wires the mnemo-server terminal override into SST task synthesis", async () => {
     installGlobals("prod");
     const ecs = await loadEcs();
