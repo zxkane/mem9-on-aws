@@ -267,7 +267,7 @@ new file mode 100644
 index 0000000000000000000000000000000000000000..3c218d27de47c49f6d7a36ae1088045de2b57e2a
 --- /dev/null
 +++ b/server/cmd/mnemo-server/namespace_startup_integration_test.go
-@@ -0,0 +1,100 @@
+@@ -0,0 +1,104 @@
 +package main
 +
 +import (
@@ -297,6 +297,10 @@ index 0000000000000000000000000000000000000000..3c218d27de47c49f6d7a36ae1088045d
 +		SET phase = 'frozen', legacy_namespace_id = NULL, legacy_principal_id = NULL, legacy_namespace_slug = NULL, legacy_namespace_display_name = NULL, legacy_principal_key = NULL
 +		WHERE singleton_id`); err != nil {
 +		t.Fatal(err)
++	}
++	if err := validateNamespaceStartup(context.Background(), db, false); err == nil ||
++		!strings.Contains(err.Error(), "compatibility mode cannot start") {
++		t.Fatalf("compatibility frozen-phase error = %v", err)
 +	}
 +	if err := validateNamespaceStartup(context.Background(), db, true); err == nil ||
 +		!strings.Contains(err.Error(), "unsupported namespace migration phase") {

@@ -220,6 +220,21 @@ MNEMO_DSN="$MNEMO_TEST_POSTGRES_DSN" \
 MNEMO_DSN="$MNEMO_TEST_POSTGRES_DSN" \
   node "$ROOT/scripts/migrate-memory-namespaces.mjs" enforce
 
+docker exec "$CONTAINER" \
+  psql -q -v ON_ERROR_STOP=1 -U postgres -d postgres \
+  -c "CREATE DATABASE mem9_namespace_frozen TEMPLATE mem9_namespace_test"
+docker exec "$CONTAINER" \
+  psql -q -v ON_ERROR_STOP=1 -U postgres -d mem9_namespace_frozen \
+  -c "UPDATE memory_namespace_migration_state
+      SET phase = 'frozen',
+          legacy_namespace_id = NULL,
+          legacy_principal_id = NULL,
+          legacy_namespace_slug = NULL,
+          legacy_namespace_display_name = NULL,
+          legacy_principal_key = NULL
+      WHERE singleton_id"
+FROZEN_DSN="postgres://postgres:test@127.0.0.1:${PORT}/mem9_namespace_frozen?sslmode=disable"
+
 git -C "$TMP_DIR" init -q upstream
 git -C "$TMP_DIR/upstream" remote add origin https://github.com/mem9-ai/mem9.git
 git -C "$TMP_DIR/upstream" fetch -q --depth 1 origin "$MEM9_REF"
@@ -233,4 +248,39 @@ node "$ROOT/scripts/verify-memory-namespace-query-inventory.mjs" \
   "${QUERY_INVENTORY_ARGS[@]}"
 
 cd "$TMP_DIR/upstream/server"
+go build -o "$TMP_DIR/mnemo-server" ./cmd/mnemo-server
+
+assert_frozen_server_startup_rejected() {
+  local namespace_required=$1
+  local expected=$2
+  local output
+  local status
+  set +e
+  output=$(
+    timeout 10s env -i \
+      PATH="$PATH" \
+      MNEMO_DSN="$FROZEN_DSN" \
+      MNEMO_DB_BACKEND=postgres \
+      MNEMO_NAMESPACE_REQUIRED="$namespace_required" \
+      MNEMO_TRANSPORT_ISSUER=integration-gateway \
+      MNEMO_TRANSPORT_SIGNING_KEYS='{"a":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","b":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}' \
+      "$TMP_DIR/mnemo-server" 2>&1
+  )
+  status=$?
+  set -e
+  [[ "$status" -eq 1 ]] || {
+    echo "mnemo-server exited ${status}, expected frozen startup to exit 1" >&2
+    exit 1
+  }
+  printf '%s' "$output" | grep -q "namespace database startup rejected"
+  printf '%s' "$output" | grep -q "$expected"
+}
+
+assert_frozen_server_startup_rejected \
+  false \
+  "namespace compatibility mode cannot start in phase"
+assert_frozen_server_startup_rejected \
+  true \
+  "unsupported namespace migration phase"
+
 go test -count=1 ./...
