@@ -161,6 +161,18 @@
         ".github/workflows/infra-ci.yml",
         "scripts/deployment-workflow.test.mjs"
       ]
+    },
+    {
+      "id": "review-remediation",
+      "state": "enabled_v1",
+      "acceptance": ["134-137"],
+      "verification": [
+        "scripts/run-memory-namespace-integration.sh",
+        "scripts/memory-namespace.test.mjs",
+        "infra/cloudformation/github-actions-role.yaml",
+        "scripts/reconcile-memory-namespaces.mjs",
+        "scripts/workload-permissions-boundary.test.mjs"
+      ]
     }
   ]
 }

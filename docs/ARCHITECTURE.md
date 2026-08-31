@@ -370,10 +370,21 @@ so the compatible release can start while the live database is still
 catalog-verified concurrent index creation, embedding-preserving direct-SQL
 backfill, and `003_enforce_memory_namespaces.sql`. The backfill computes its
 ordered embedding digest inside PostgreSQL, stores the exact legacy seed
-binding, and rejects a retry with different IDs or metadata. The enforcement
-DDL runs as one bounded transaction and is rerun from its beginning after a
-rollback. Required mode is enabled only after the database records
-`constraints_complete`.
+binding, preserves historical `updated_at` while assigning namespace metadata,
+and rejects a retry with different IDs or metadata. Freeze waits for existing
+DML table locks and rechecks non-terminal jobs and active uploads before
+committing the writer-fence phase. The enforcement DDL runs as one bounded
+transaction and is rerun from its beginning after a rollback. Required mode is
+enabled only after the database records `constraints_complete`.
+
+The retained namespace operator role is owned by the fixed
+`memory-namespace-operator-mem9-on-aws` CloudFormation stack in `us-west-2`.
+The first deployment binds that account-global owner to one stage and
+application region. The operator script rejects later retargeting, distinguishes
+a missing stack from a failed read, and verifies the final stack parameters
+after create, update, or no-op. The GitHub deploy role explicitly denies
+mutation of this owner stack despite its broader CloudFormation provisioning
+grant.
 
 Fresh `pr-N` stages exercise the complete switch without production inputs.
 Their bootstrap creates two synthetic namespaces and managed groups in the

@@ -122,7 +122,16 @@ $$;
 
 -- mem9's updated_at auto-touch trigger (from TenantMemorySchemaPostgres).
 CREATE OR REPLACE FUNCTION update_updated_at() RETURNS TRIGGER AS $$
-BEGIN NEW.updated_at = NOW(); RETURN NEW; END;
+BEGIN
+    IF current_setting(
+        'mem9.namespace_migration_actor',
+        TRUE
+    ) = 'backfill' THEN
+        RETURN NEW;
+    END IF;
+    NEW.updated_at = NOW();
+    RETURN NEW;
+END;
 $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS trg_memories_updated ON memories;
 CREATE TRIGGER trg_memories_updated BEFORE UPDATE ON memories

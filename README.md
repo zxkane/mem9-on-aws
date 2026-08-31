@@ -348,13 +348,22 @@ snapshot, or prevent Cognito administration on their own.
      scripts/deploy-memory-namespace-operator-role.sh
    ```
 
+   The account has one fixed `memory-namespace-operator-mem9-on-aws` ownership
+   stack in `us-west-2`. Its first deployment binds it to the selected stage
+   and application region. Later runs may refresh that stage's user-pool ID,
+   but cannot retarget the retained role to another stage or application
+   region. The script verifies the final CloudFormation parameters even when
+   the update is a no-op.
+
 3. Create a manual Aurora snapshot and record the latest restorable time in a
    private operator record. Pause user/group onboarding, disable write-capable
    event sources, drain durable jobs, scale the mnemo-server ECS service to zero,
    and wait for no running or pending application task.
 4. Run `preflight`; it must report zero non-terminal jobs and active uploads.
    Then freeze database writers. Do not run `freeze` while the application
-   service is still running.
+   service is still running. `freeze` waits for existing DML transactions under
+   bounded table locks, rechecks durable jobs and uploads in the same
+   transaction, and changes the phase only when both remain drained.
 
    ```bash
    STAGE=prod scripts/run-memory-namespace-task.sh preflight

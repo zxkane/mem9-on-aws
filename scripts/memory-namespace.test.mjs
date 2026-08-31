@@ -43,6 +43,146 @@ function desired() {
   };
 }
 
+async function runOperatorRoleFixture(
+  mode,
+  existingRegion,
+  existingStage = "prod",
+) {
+  const directory = await mkdtemp(join(tmpdir(), "mem9-operator-role-"));
+  const bin = join(directory, "bin");
+  const callsPath = join(directory, "calls.jsonl");
+  const describeCountPath = join(directory, "describe-count");
+  await mkdir(bin);
+  await writeFile(
+    join(bin, "aws"),
+    `#!/usr/bin/env node
+import {
+  appendFileSync,
+  existsSync,
+  readFileSync,
+  writeFileSync,
+} from "node:fs";
+
+const args = process.argv.slice(2);
+appendFileSync(process.env.AWS_CALL_LOG, JSON.stringify(args) + "\\n");
+const command = args.slice(0, 2).join(" ");
+const fixturePoolId = [
+  process.env.MOCK_APPLICATION_REGION,
+  "fixturepool",
+].join("_");
+if (command === "ssm get-parameter") {
+  process.stdout.write(fixturePoolId + "\\n");
+  process.exit(0);
+}
+if (command === "cloudformation describe-stacks") {
+  const count = existsSync(process.env.AWS_DESCRIBE_COUNT)
+    ? Number(readFileSync(process.env.AWS_DESCRIBE_COUNT, "utf8"))
+    : 0;
+  writeFileSync(process.env.AWS_DESCRIBE_COUNT, String(count + 1));
+  if (process.env.MOCK_MODE === "access-denied") {
+    process.stderr.write(
+      "An error occurred (AccessDenied) when calling DescribeStacks\\n",
+    );
+    process.exit(254);
+  }
+  if (process.env.MOCK_MODE === "missing" && count === 0) {
+    process.stderr.write(
+      "An error occurred (ValidationError) when calling DescribeStacks: " +
+        "Stack with id fixture does not exist\\n",
+    );
+    process.exit(255);
+  }
+  const parameters = [
+    {
+      ParameterKey: "ApplicationRegion",
+      ParameterValue:
+        process.env.MOCK_EXISTING_REGION ?? process.env.MOCK_APPLICATION_REGION,
+    },
+    {
+      ParameterKey: "Stage",
+      ParameterValue: process.env.MOCK_EXISTING_STAGE,
+    },
+    {
+      ParameterKey: "CognitoUserPoolId",
+      ParameterValue:
+        process.env.MOCK_MODE === "final-mismatch" && count > 0
+          ? [process.env.MOCK_APPLICATION_REGION, "otherpool"].join("_")
+          : fixturePoolId,
+    },
+  ];
+  process.stdout.write(
+    JSON.stringify({
+      Stacks: [{ StackStatus: "UPDATE_COMPLETE", Parameters: parameters }],
+    }),
+  );
+  process.exit(0);
+}
+if (command === "cloudformation update-stack") {
+  if (process.env.MOCK_MODE === "no-updates") {
+    process.stderr.write("No updates are to be performed.\\n");
+    process.exit(255);
+  }
+  process.stdout.write(JSON.stringify({ StackId: "fixture-stack" }));
+  process.exit(0);
+}
+if (
+  command === "cloudformation wait" ||
+  command === "cloudformation create-stack"
+) {
+  process.exit(0);
+}
+process.stderr.write("unexpected aws command: " + command + "\\n");
+process.exit(2);
+`,
+    { mode: 0o755 },
+  );
+
+  const regionResult = spawnSync(
+    process.execPath,
+    [resolve(import.meta.dirname, "resolve-application-region.mjs")],
+    { encoding: "utf8" },
+  );
+  if (regionResult.status !== 0) {
+    throw new Error(regionResult.stderr);
+  }
+  const applicationRegion = regionResult.stdout.trim();
+
+  try {
+    const result = spawnSync(
+      "bash",
+      [
+        resolve(
+          import.meta.dirname,
+          "deploy-memory-namespace-operator-role.sh",
+        ),
+      ],
+      {
+        encoding: "utf8",
+        env: {
+          ...process.env,
+          PATH: `${bin}${delimiter}${process.env.PATH}`,
+          AWS_CALL_LOG: callsPath,
+          AWS_DESCRIBE_COUNT: describeCountPath,
+          MOCK_APPLICATION_REGION: applicationRegion,
+          MOCK_EXISTING_REGION: existingRegion,
+          MOCK_EXISTING_STAGE: existingStage,
+          MOCK_MODE: mode,
+          MOCK_STAGE: "prod",
+          MEM9_NAMESPACE_OPERATOR_STAGE: "prod",
+        },
+      },
+    );
+    const calls = (await readFile(callsPath, "utf8"))
+      .trim()
+      .split("\n")
+      .filter(Boolean)
+      .map((line) => JSON.parse(line));
+    return { result, calls };
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+}
+
 async function runNamespaceE2EFixture(failure = "") {
   const directory = await mkdtemp(join(tmpdir(), "mem9-namespace-e2e-"));
   const bin = join(directory, "bin");
@@ -674,6 +814,114 @@ describe("memory namespace operator config", () => {
     expect(deployResult.stderr).toContain("expected prod or dev");
   });
 
+  it("TC-GROUPNS-136: refuses to retarget the retained operator stack", async () => {
+    const { result, calls } = await runOperatorRoleFixture(
+      "match",
+      "eu-west-1",
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "belongs to application region eu-west-1",
+    );
+    expect(
+      calls.some(
+        (args) =>
+          args.slice(0, 2).join(" ") === "cloudformation update-stack",
+      ),
+    ).toBe(false);
+  });
+
+  it("TC-GROUPNS-136: refuses to retarget the retained operator stage", async () => {
+    const { result, calls } = await runOperatorRoleFixture(
+      "match",
+      undefined,
+      "dev",
+    );
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain("belongs to stage dev");
+    expect(
+      calls.some(
+        (args) =>
+          args.slice(0, 2).join(" ") === "cloudformation update-stack",
+      ),
+    ).toBe(false);
+  });
+
+  it("TC-GROUPNS-136: does not treat DescribeStacks denial as absence", async () => {
+    const { result, calls } = await runOperatorRoleFixture("access-denied");
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("AccessDenied");
+    expect(
+      calls.some(
+        (args) =>
+          args.slice(0, 2).join(" ") === "cloudformation create-stack",
+      ),
+    ).toBe(false);
+  });
+
+  it("TC-GROUPNS-136: creates only after an explicit missing-stack response", async () => {
+    const { result, calls } = await runOperatorRoleFixture("missing");
+
+    expect(result.status, result.stderr).toBe(0);
+    expect(
+      calls.filter(
+        (args) =>
+          args.slice(0, 2).join(" ") === "cloudformation create-stack",
+      ),
+    ).toHaveLength(1);
+  });
+
+  it("TC-GROUPNS-136: rejects mismatched final stack parameters", async () => {
+    const { result, calls } = await runOperatorRoleFixture("final-mismatch");
+
+    expect(result.status).toBe(1);
+    expect(result.stderr).toContain(
+      "Final namespace operator stack parameters do not match",
+    );
+    expect(
+      calls.filter(
+        (args) =>
+          args.slice(0, 2).join(" ") === "cloudformation describe-stacks",
+      ),
+    ).toHaveLength(2);
+  });
+
+  it("TC-GROUPNS-136: fixes and protects the retained stack identity", async () => {
+    const script = await readFile(
+      resolve(
+        import.meta.dirname,
+        "deploy-memory-namespace-operator-role.sh",
+      ),
+      "utf8",
+    );
+    const deployRole = await readFile(
+      resolve(
+        import.meta.dirname,
+        "../infra/cloudformation/github-actions-role.yaml",
+      ),
+      "utf8",
+    );
+    const { result, calls } = await runOperatorRoleFixture("no-updates");
+
+    expect(script).toContain(
+      'STACK_NAME="memory-namespace-operator-mem9-on-aws"',
+    );
+    expect(script).not.toContain("MEM9_NAMESPACE_OPERATOR_STACK_NAME");
+    expect(deployRole).toContain(
+      "stack/memory-namespace-operator-${ProjectName}/*",
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(
+      calls.filter(
+        (args) =>
+          args.slice(0, 2).join(" ") === "cloudformation describe-stacks",
+      ),
+    ).toHaveLength(2);
+  });
+
   it("reattaches or stops the single stage operator task safely", async () => {
     const runner = await readFile(
       resolve(import.meta.dirname, "run-memory-namespace-task.sh"),
@@ -744,6 +992,43 @@ describe("memory namespace migration gates", () => {
 });
 
 describe("memory namespace access state machines", () => {
+  it("TC-GROUPNS-137: reports committed reconciliation verification failure without rollback", async () => {
+    const queries = [];
+    const db = {
+      async query(sql) {
+        const text = String(sql);
+        queries.push(text);
+        if (text.includes("RETURNING namespace_id")) {
+          return {
+            rowCount: 1,
+            rows: [{ namespace_id: "namespace-a" }],
+          };
+        }
+        if (text.includes("SELECT slug, display_name, status")) {
+          throw new Error("verification unavailable");
+        }
+        return { rowCount: 1, rows: [] };
+      },
+    };
+
+    await expect(
+      reconcileNamespaces({
+        desired: validateDesiredState(desired()),
+        issuer: "issuer-a",
+        userPoolId: undefined,
+        cognito: undefined,
+        db,
+        manageCognitoGroups: false,
+      }),
+    ).rejects.toThrow(
+      "namespace reconciliation committed but drift verification failed",
+    );
+    expect(queries).toContain("COMMIT");
+    expect(queries.slice(queries.indexOf("COMMIT") + 1)).not.toContain(
+      "ROLLBACK",
+    );
+  });
+
   it("TC-GROUPNS-122: commits emergency database revocation before Cognito removal", async () => {
     const groups = new Set(["mem9-team-a"]);
     let databaseCommitted = false;

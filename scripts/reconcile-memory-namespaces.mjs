@@ -440,22 +440,32 @@ export async function reconcileNamespaces({
       }
     }
     await db.query("COMMIT");
-    return {
-      namespace_count: desired.namespaces.length,
-      m2m_binding_count: desired.m2m_bindings.length,
-      drift: await readDrift({
-        desired,
-        issuer,
-        userPoolId,
-        cognito,
-        db,
-        manageCognitoGroups,
-      }),
-    };
   } catch (error) {
     await db.query("ROLLBACK");
     throw error;
   }
+
+  let drift;
+  try {
+    drift = await readDrift({
+      desired,
+      issuer,
+      userPoolId,
+      cognito,
+      db,
+      manageCognitoGroups,
+    });
+  } catch (cause) {
+    throw new Error(
+      "namespace reconciliation committed but drift verification failed",
+      { cause },
+    );
+  }
+  return {
+    namespace_count: desired.namespaces.length,
+    m2m_binding_count: desired.m2m_bindings.length,
+    drift,
+  };
 }
 
 async function main() {

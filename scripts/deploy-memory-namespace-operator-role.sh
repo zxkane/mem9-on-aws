@@ -43,8 +43,52 @@ case "$STAGE" in
     ;;
 esac
 APPLICATION_REGION=$(node "$ROOT/scripts/resolve-application-region.mjs")
-STACK_NAME="${MEM9_NAMESPACE_OPERATOR_STACK_NAME:-memory-namespace-operator-mem9-on-aws}"
+STACK_NAME="memory-namespace-operator-mem9-on-aws"
 TEMPLATE="$ROOT/infra/cloudformation/memory-namespace-operator-role.yaml"
+
+read_stack_parameter() {
+  local description=$1
+  local parameter=$2
+  local values
+  local count
+  if ! values=$(jq -cer \
+    --arg parameter "$parameter" \
+    '[.Stacks[0].Parameters[]?
+      | select(.ParameterKey == $parameter)
+      | .ParameterValue]' <<<"$description"); then
+    echo "CloudFormation stack description is malformed" >&2
+    return 1
+  fi
+  count=$(jq -r 'length' <<<"$values")
+  if [[ "$count" != "1" ]]; then
+    echo "CloudFormation stack must have exactly one ${parameter} parameter" >&2
+    return 1
+  fi
+  jq -r '.[0]' <<<"$values"
+}
+
+verify_stack_description() {
+  local description=$1
+  local context=$2
+  local stack_count
+  local stack_status
+  if ! stack_count=$(jq -er '.Stacks | length' <<<"$description") ||
+    [[ "$stack_count" != "1" ]]; then
+    echo "${context} CloudFormation response must contain exactly one stack" >&2
+    return 1
+  fi
+  if ! stack_status=$(jq -er '.Stacks[0].StackStatus' <<<"$description"); then
+    echo "${context} CloudFormation stack status is missing" >&2
+    return 1
+  fi
+  case "$stack_status" in
+    CREATE_COMPLETE|UPDATE_COMPLETE) ;;
+    *)
+      echo "${context} CloudFormation stack is not stable: ${stack_status}" >&2
+      return 1
+      ;;
+  esac
+}
 
 USER_POOL_ID=$(aws ssm get-parameter \
   --name "/mem9-on-aws/${STAGE}/cognito/user-pool-id" \
@@ -62,9 +106,40 @@ PARAMETERS=(
   "ParameterKey=CognitoUserPoolId,ParameterValue=${USER_POOL_ID}"
 )
 
-if aws cloudformation describe-stacks \
+set +e
+STACK_DESCRIPTION=$(aws cloudformation describe-stacks \
   --stack-name "$STACK_NAME" \
-  --region "$STACK_REGION" >/dev/null 2>&1; then
+  --region "$STACK_REGION" \
+  --output json 2>&1)
+DESCRIBE_STATUS=$?
+set -e
+
+STACK_EXISTS=true
+if [[ $DESCRIBE_STATUS -ne 0 ]]; then
+  if grep -Eq 'ValidationError.*(does not exist|not exist)' \
+    <<<"$STACK_DESCRIPTION"; then
+    STACK_EXISTS=false
+  else
+    printf '%s\n' "$STACK_DESCRIPTION" >&2
+    exit "$DESCRIBE_STATUS"
+  fi
+fi
+
+if [[ "$STACK_EXISTS" == "true" ]]; then
+  verify_stack_description "$STACK_DESCRIPTION" "Existing"
+  EXISTING_APPLICATION_REGION=$(
+    read_stack_parameter "$STACK_DESCRIPTION" "ApplicationRegion"
+  )
+  EXISTING_STAGE=$(read_stack_parameter "$STACK_DESCRIPTION" "Stage")
+  if [[ "$EXISTING_APPLICATION_REGION" != "$APPLICATION_REGION" ]]; then
+    echo "Existing namespace operator stack belongs to application region ${EXISTING_APPLICATION_REGION}; refusing to retarget it to ${APPLICATION_REGION}." >&2
+    exit 1
+  fi
+  if [[ "$EXISTING_STAGE" != "$STAGE" ]]; then
+    echo "Existing namespace operator stack belongs to stage ${EXISTING_STAGE}; refusing to retarget it to ${STAGE}." >&2
+    exit 1
+  fi
+
   set +e
   OUTPUT=$(aws cloudformation update-stack \
     --stack-name "$STACK_NAME" \
@@ -77,14 +152,15 @@ if aws cloudformation describe-stacks \
   if [[ $STATUS -ne 0 ]]; then
     if grep -q "No updates are to be performed" <<<"$OUTPUT"; then
       echo "memory namespace operator role: no changes"
-      exit 0
+    else
+      printf '%s\n' "$OUTPUT" >&2
+      exit "$STATUS"
     fi
-    printf '%s\n' "$OUTPUT" >&2
-    exit "$STATUS"
+  else
+    aws cloudformation wait stack-update-complete \
+      --stack-name "$STACK_NAME" \
+      --region "$STACK_REGION"
   fi
-  aws cloudformation wait stack-update-complete \
-    --stack-name "$STACK_NAME" \
-    --region "$STACK_REGION"
 else
   aws cloudformation create-stack \
     --stack-name "$STACK_NAME" \
@@ -96,6 +172,25 @@ else
   aws cloudformation wait stack-create-complete \
     --stack-name "$STACK_NAME" \
     --region "$STACK_REGION"
+fi
+
+STACK_DESCRIPTION=$(aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" \
+  --region "$STACK_REGION" \
+  --output json)
+verify_stack_description "$STACK_DESCRIPTION" "Final"
+FINAL_APPLICATION_REGION=$(
+  read_stack_parameter "$STACK_DESCRIPTION" "ApplicationRegion"
+)
+FINAL_STAGE=$(read_stack_parameter "$STACK_DESCRIPTION" "Stage")
+FINAL_USER_POOL_ID=$(
+  read_stack_parameter "$STACK_DESCRIPTION" "CognitoUserPoolId"
+)
+if [[ "$FINAL_APPLICATION_REGION" != "$APPLICATION_REGION" ||
+  "$FINAL_STAGE" != "$STAGE" ||
+  "$FINAL_USER_POOL_ID" != "$USER_POOL_ID" ]]; then
+  echo "Final namespace operator stack parameters do not match the requested owner." >&2
+  exit 1
 fi
 
 echo "memory namespace operator role: ready"

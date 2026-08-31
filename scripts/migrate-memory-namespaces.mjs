@@ -447,6 +447,29 @@ export async function freezeNamespaceWriters(db) {
     if (!["additive_ready", "frozen"].includes(observed.phase)) {
       throw new Error(`cannot freeze from phase ${observed.phase}`);
     }
+    await db.query(`SET LOCAL lock_timeout = '5s'`);
+    await db.query(
+      `LOCK TABLE
+         memories,
+         sessions,
+         ingest_jobs,
+         ingest_job_plans,
+         upload_tasks
+       IN SHARE MODE`,
+    );
+    const drain = await db.query(`
+      SELECT
+        (SELECT COUNT(*)::int FROM ingest_jobs
+         WHERE state NOT IN ('succeeded', 'dead')) AS nonterminal_jobs,
+        (SELECT COUNT(*)::int FROM upload_tasks
+         WHERE status IN ('pending', 'processing')) AS active_uploads
+    `);
+    if (
+      Number(drain.rows[0].nonterminal_jobs) !== 0 ||
+      Number(drain.rows[0].active_uploads) !== 0
+    ) {
+      throw new Error("writers or asynchronous work are not drained");
+    }
     await db.query(
       `UPDATE memory_namespace_migration_state
        SET phase = 'frozen',

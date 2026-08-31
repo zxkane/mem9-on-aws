@@ -117,25 +117,25 @@ printf '%s' "$PHASE_ERROR" |
 
 psql_sql "
   INSERT INTO memories (
-    id, content, embedding, memory_type, app_id, state, version
+    id, content, embedding, memory_type, app_id, state, version, updated_at
   ) VALUES
     (
       '81000000-0000-4000-8000-000000000001',
       'legacy nonzero vector',
       (ARRAY[1::real] || array_fill(0::real, ARRAY[1023]))::vector,
-      'pinned', 'legacy-app', 'active', 1
+      'pinned', 'legacy-app', 'active', 1, '2024-01-01T00:00:01Z'
     ),
     (
       '81000000-0000-4000-8000-000000000002',
       'legacy zero vector',
       array_fill(0::real, ARRAY[1024])::vector,
-      'pinned', 'legacy-app', 'active', 1
+      'pinned', 'legacy-app', 'active', 1, '2024-01-01T00:00:02Z'
     ),
     (
       '81000000-0000-4000-8000-000000000003',
       'legacy null vector',
       NULL,
-      'pinned', 'legacy-app', 'active', 1
+      'pinned', 'legacy-app', 'active', 1, '2024-01-01T00:00:03Z'
     );
 
   INSERT INTO sessions (
@@ -175,14 +175,15 @@ psql_sql "
   );
 
   INSERT INTO upload_tasks (
-    task_id, tenant_id, file_name, file_path, file_type, status
+    task_id, tenant_id, file_name, file_path, file_type, status, updated_at
   ) VALUES (
     '84000000-0000-4000-8000-000000000001',
     'legacy-tenant',
     'legacy.txt',
     '/tmp/legacy.txt',
     'text',
-    'done'
+    'done',
+    '2024-01-01T00:00:04Z'
   );
 "
 
@@ -193,6 +194,120 @@ BEFORE_EMBEDDINGS=$(psql_value "
   ))
   FROM memories
 ")
+
+BEFORE_UPDATED_AT=$(psql_value "
+  SELECT md5(string_agg(id || ':' || updated_at::text, E'\n' ORDER BY id))
+  FROM (
+    SELECT id, updated_at FROM memories WHERE id LIKE '81%'
+    UNION ALL
+    SELECT task_id AS id, updated_at FROM upload_tasks WHERE task_id LIKE '84%'
+  ) AS historical_rows
+")
+
+# TC-GROUPNS-123/135: freeze must reject already-visible durable work before
+# changing the phase.
+psql_sql "
+  INSERT INTO ingest_jobs (
+    job_id, tenant_id, idempotency_key, canonical_payload, state
+  ) VALUES (
+    '83000000-0000-4000-8000-000000000002',
+    'legacy-tenant',
+    repeat('d', 64),
+    convert_to('{}', 'UTF8'),
+    'queued'
+  )
+"
+set +e
+PENDING_FREEZE_ERROR=$(
+  node "$ROOT/scripts/migrate-memory-namespaces.mjs" freeze 2>&1
+)
+PENDING_FREEZE_STATUS=$?
+set -e
+[[ "$PENDING_FREEZE_STATUS" -ne 0 ]] || {
+  echo "freeze accepted a visible pending ingest job" >&2
+  exit 1
+}
+printf '%s' "$PENDING_FREEZE_ERROR" |
+  grep -q "writers or asynchronous work are not drained"
+psql_value "
+  SELECT phase FROM memory_namespace_migration_state WHERE singleton_id
+" | grep -qx "additive_ready"
+psql_sql "
+  DELETE FROM ingest_jobs
+  WHERE job_id = '83000000-0000-4000-8000-000000000002'
+"
+
+# TC-GROUPNS-135: a writer that already holds its DML table lock must finish
+# before freeze evaluates the durable queue. Its committed pending row then
+# causes the freeze transaction to roll back.
+docker exec "$CONTAINER" \
+  psql -q -v ON_ERROR_STOP=1 -U postgres -d "$DATABASE" -c "
+    BEGIN;
+    LOCK TABLE ingest_jobs IN ROW EXCLUSIVE MODE;
+    SELECT pg_sleep(1);
+    INSERT INTO ingest_jobs (
+      job_id, tenant_id, idempotency_key, canonical_payload, state
+    ) VALUES (
+      '83000000-0000-4000-8000-000000000003',
+      'legacy-tenant',
+      repeat('e', 64),
+      convert_to('{}', 'UTF8'),
+      'queued'
+    );
+    COMMIT;
+  " >/dev/null &
+WRITER_PID=$!
+WRITER_READY=false
+for _ in $(seq 1 50); do
+  if psql_value "
+    SELECT EXISTS (
+      SELECT 1
+      FROM pg_locks
+      WHERE relation = 'ingest_jobs'::regclass
+        AND mode = 'RowExclusiveLock'
+        AND granted
+    )
+  " | grep -qx "t"; then
+    WRITER_READY=true
+    break
+  fi
+  sleep 0.1
+done
+if [[ "$WRITER_READY" != "true" ]]; then
+  echo "failed to acquire namespace freeze writer lock" >&2
+  wait "$WRITER_PID" || true
+  exit 1
+fi
+set +e
+RACING_FREEZE_ERROR=$(
+  node "$ROOT/scripts/migrate-memory-namespaces.mjs" freeze 2>&1
+)
+RACING_FREEZE_STATUS=$?
+wait "$WRITER_PID"
+WRITER_STATUS=$?
+set -e
+[[ "$WRITER_STATUS" == "0" ]] || {
+  echo "existing namespace writer did not commit before freeze" >&2
+  exit 1
+}
+[[ "$RACING_FREEZE_STATUS" -ne 0 ]] || {
+  echo "freeze committed before an existing writer drained" >&2
+  exit 1
+}
+printf '%s' "$RACING_FREEZE_ERROR" |
+  grep -q "writers or asynchronous work are not drained"
+psql_value "
+  SELECT phase FROM memory_namespace_migration_state WHERE singleton_id
+" | grep -qx "additive_ready"
+psql_value "
+  SELECT COUNT(*) FROM ingest_jobs
+  WHERE job_id = '83000000-0000-4000-8000-000000000003'
+    AND state = 'queued'
+" | grep -qx "1"
+psql_sql "
+  DELETE FROM ingest_jobs
+  WHERE job_id = '83000000-0000-4000-8000-000000000003'
+"
 
 node "$ROOT/scripts/migrate-memory-namespaces.mjs" freeze |
   grep -q '"phase":"frozen"'
@@ -258,6 +373,21 @@ printf '%s' "$BACKFILL_RESULT" |
     and .embedding.null_count == 1
     and .embedding.zero_vector_count == 1
   ' >/dev/null
+
+# TC-GROUPNS-134: assigning namespace ownership is metadata backfill, not a
+# content update. Historical cleanup and ordering timestamps must not move.
+AFTER_UPDATED_AT=$(psql_value "
+  SELECT md5(string_agg(id || ':' || updated_at::text, E'\n' ORDER BY id))
+  FROM (
+    SELECT id, updated_at FROM memories WHERE id LIKE '81%'
+    UNION ALL
+    SELECT task_id AS id, updated_at FROM upload_tasks WHERE task_id LIKE '84%'
+  ) AS historical_rows
+")
+if [[ "$BEFORE_UPDATED_AT" != "$AFTER_UPDATED_AT" ]]; then
+  echo "historical updated_at changed during namespace backfill" >&2
+  exit 1
+fi
 
 # A retry after application_ready is bound to the original legacy seed. It
 # cannot create a second namespace/principal or silently claim success with
