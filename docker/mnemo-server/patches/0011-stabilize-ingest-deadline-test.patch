@@ -1,0 +1,56 @@
+diff --git a/server/internal/repository/postgres/ingest_job_integration_test.go b/server/internal/repository/postgres/ingest_job_integration_test.go
+index c7f23a6..0848454 100644
+--- a/server/internal/repository/postgres/ingest_job_integration_test.go
++++ b/server/internal/repository/postgres/ingest_job_integration_test.go
+@@ -1503,13 +1503,25 @@ func TestIngestJobBlockedWritesUsePostLockDatabaseTime(t *testing.T) {
+ 			}()
+ 			<-started
+ 			time.Sleep(lockWait)
++			var lockReleaseBaseline time.Time
++			if err := blocker.QueryRow(`SELECT statement_timestamp()`).Scan(&lockReleaseBaseline); err != nil {
++				t.Fatal(err)
++			}
+ 			if err := blocker.Commit(); err != nil {
+ 				t.Fatal(err)
+ 			}
+ 			if err := <-result; err != nil {
+ 				t.Fatal(err)
+ 			}
+-			assertDatabaseDeadline(t, db, job.ID, test.field, deadline)
++			// Observation latency must not affect the database-time assertion.
++			time.Sleep(3 * deadline / 4)
++			assertDatabaseDeadlineAtOrAfter(
++				t,
++				db,
++				job.ID,
++				test.field,
++				lockReleaseBaseline.Add(deadline),
++			)
+ 		})
+ 	}
+ }
+@@ -1583,3 +1595,24 @@ func assertDatabaseDeadline(t *testing.T, db *sql.DB, jobID, column string, want
+ 		t.Fatalf("%s remaining = %v, want (%v, %v]", column, remaining, want/2, want)
+ 	}
+ }
++
++func assertDatabaseDeadlineAtOrAfter(
++	t *testing.T,
++	db *sql.DB,
++	jobID string,
++	column string,
++	earliest time.Time,
++) {
++	t.Helper()
++	var actual time.Time
++	query := fmt.Sprintf(
++		`SELECT %s FROM ingest_jobs WHERE job_id = $1`,
++		column,
++	)
++	if err := db.QueryRow(query, jobID).Scan(&actual); err != nil {
++		t.Fatal(err)
++	}
++	if actual.Before(earliest) {
++		t.Fatalf("%s = %v, want at or after %v", column, actual, earliest)
++	}
++}

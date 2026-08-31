@@ -312,13 +312,142 @@ psql_sql "
 node "$ROOT/scripts/migrate-memory-namespaces.mjs" freeze |
   grep -q '"phase":"frozen"'
 
-if psql_sql "
+# TC-GROUPNS-062: exercise the real maintenance entry points while the
+# database is frozen. Clear ambient credentials and endpoints so a regressed
+# guard cannot reach operator-owned infrastructure during this destructive test.
+assert_legacy_maintenance_disabled() {
+  local script=$1
+  local output
+  local status
+  set +e
+  output=$(
+    timeout 10s env -i \
+      PATH="$PATH" \
+      HOME=/nonexistent \
+      AWS_CONFIG_FILE=/dev/null \
+      AWS_SHARED_CREDENTIALS_FILE=/dev/null \
+      AWS_EC2_METADATA_DISABLED=true \
+      MNEMO_DSN="postgres://invalid:invalid@127.0.0.1:1/invalid?sslmode=disable" \
+      node "$ROOT/scripts/$script" --stage ci --apply 2>&1
+  )
+  status=$?
+  set -e
+  [[ "$status" -eq 1 ]] || {
+    echo "${script} exited ${status}, expected the namespace guard to exit 1" >&2
+    exit 1
+  }
+  printf '%s' "$output" |
+    grep -q "legacy maintenance is disabled in memory namespace v1"
+}
+
+assert_legacy_maintenance_disabled memory-cleanup.mjs
+assert_legacy_maintenance_disabled memory-consolidation.mjs
+
+FROZEN_PLAN_BEFORE=$(psql_value "
+  SELECT state || ':' || COALESCE(applied_at::text, '<null>')
+  FROM ingest_job_plans
+  WHERE job_id = '83000000-0000-4000-8000-000000000001'
+")
+
+assert_frozen_write_rejected() {
+  local surface=$1
+  local statement=$2
+  local output
+  local status
+  set +e
+  output=$(psql_sql "$statement" 2>&1)
+  status=$?
+  set -e
+  if [[ "$status" -eq 0 ]]; then
+    echo "${surface} write bypassed the namespace freeze" >&2
+    exit 1
+  fi
+  printf '%s' "$output" |
+    grep -q "memory namespace migration writer freeze is active"
+}
+
+# The compiled server process also refuses to start in this phase in the
+# upstream integration. These statements prove the database backstop across
+# every scoped table if any stopped process or direct script still reaches SQL.
+assert_frozen_write_rejected "REST memory create" "
   INSERT INTO memories (id, content)
   VALUES ('85000000-0000-4000-8000-000000000001', 'must be frozen')
-" >/dev/null 2>&1; then
-  echo "database writer fence did not reject a frozen-phase write" >&2
-  exit 1
-fi
+"
+assert_frozen_write_rejected "worker enqueue" "
+  INSERT INTO ingest_jobs (
+    job_id, tenant_id, idempotency_key, canonical_payload, state
+  ) VALUES (
+    '83000000-0000-4000-8000-000000000004',
+    'legacy-tenant',
+    repeat('f', 64),
+    convert_to('{}', 'UTF8'),
+    'queued'
+  )
+"
+assert_frozen_write_rejected "worker session apply" "
+  INSERT INTO sessions (
+    id, session_id, app_id, role, content, content_hash, state
+  ) VALUES (
+    '82000000-0000-4000-8000-000000000002',
+    'frozen-session',
+    'legacy-app',
+    'user',
+    'must be frozen',
+    repeat('f', 64),
+    'active'
+  )
+"
+assert_frozen_write_rejected "worker plan persist" "
+  INSERT INTO ingest_job_plans (
+    tenant_id, job_id, plan_revision, attempt_generation, plan_hash,
+    plan_payload, state
+  ) VALUES (
+    'legacy-tenant',
+    '83000000-0000-4000-8000-000000000001',
+    2,
+    1,
+    repeat('e', 64),
+    convert_to('{}', 'UTF8'),
+    'valid'
+  )
+"
+assert_frozen_write_rejected "worker plan apply" "
+  UPDATE ingest_job_plans
+  SET state = 'applied', applied_at = statement_timestamp()
+  WHERE job_id = '83000000-0000-4000-8000-000000000001'
+"
+assert_frozen_write_rejected "upload worker reset" "
+  UPDATE upload_tasks
+  SET status = 'processing'
+  WHERE task_id = '84000000-0000-4000-8000-000000000001'
+"
+assert_frozen_write_rejected "maintenance archive" "
+  UPDATE memories
+  SET state = 'archived'
+  WHERE id = '81000000-0000-4000-8000-000000000001'
+"
+
+psql_value "
+  SELECT state || ':' || COALESCE(applied_at::text, '<null>')
+  FROM ingest_job_plans
+  WHERE job_id = '83000000-0000-4000-8000-000000000001'
+" | grep -Fqx -- "$FROZEN_PLAN_BEFORE"
+
+psql_value "
+  SELECT
+    (SELECT COUNT(*) FROM memories
+     WHERE id = '85000000-0000-4000-8000-000000000001') || ':' ||
+    (SELECT COUNT(*) FROM sessions
+     WHERE id = '82000000-0000-4000-8000-000000000002') || ':' ||
+    (SELECT COUNT(*) FROM ingest_jobs
+     WHERE job_id = '83000000-0000-4000-8000-000000000004') || ':' ||
+    (SELECT COUNT(*) FROM ingest_job_plans
+     WHERE job_id = '83000000-0000-4000-8000-000000000001') || ':' ||
+    (SELECT status FROM upload_tasks
+     WHERE task_id = '84000000-0000-4000-8000-000000000001') || ':' ||
+    (SELECT state FROM memories
+     WHERE id = '81000000-0000-4000-8000-000000000001')
+" | grep -qx "0:0:0:1:done:active"
 
 # A valid index with the expected name but the opposite predicate is not a
 # resumable checkpoint. Catalog validation must reject it before any backfill
