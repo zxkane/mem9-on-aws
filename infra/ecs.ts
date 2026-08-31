@@ -72,7 +72,7 @@ const region = applicationRegion();
 const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 const DURABLE_INGEST_ENABLED =
   process.env.MEM9_DURABLE_INGEST_ENABLED === "1" ? "1" : "0";
-const NAMESPACE_REQUIRED = process.env.MEM9_NAMESPACE_REQUIRED ?? "0";
+const NAMESPACE_REQUIRED = process.env.MEM9_NAMESPACE_REQUIRED || "0";
 if (!["0", "1"].includes(NAMESPACE_REQUIRED)) {
   throw new Error("MEM9_NAMESPACE_REQUIRED must be 0 or 1");
 }
