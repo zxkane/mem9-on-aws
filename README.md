@@ -261,6 +261,20 @@ The AgentCore Gateway exposes four tools over MCP (Cognito-authenticated):
 
 - **Node.js 24 LTS** everywhere (`.nvmrc` = 24, `engines.node >= 24`, CI +
   Lambda `nodejs24.x`). The Go build for mnemo-server targets **arm64**.
+- Container security updates cover all three service images and the bootstrap
+  image. Node sidecars use `node:24-trixie-slim`; mnemo-server uses Alpine 3.24
+  and Go 1.27; bootstrap uses Node 24 and the PostgreSQL 17 client on Alpine
+  3.24. Every image build
+  pulls the current base and bypasses the `runtime` stage cache to run
+  `apt-get dist-upgrade` or `apk upgrade`; the Go builder is refreshed too.
+  The separate Qwen `model` stage retains its dependency/model cache while its
+  base digest is unchanged; a new base digest rebuilds it as well.
+  Node health checks replace curl, avoiding its libssh2 dependency. BusyBox,
+  musl, and PCRE2 remain where required and receive distribution updates.
+  For equivalent local builds, pass `--pull --no-cache-filter runtime` to
+  `docker buildx build` (`--no-cache-filter builder,runtime` for mnemo-server).
+  Publish and deploy the rebuilt release tag, then re-scan its image digest;
+  existing images and running tasks are not patched by a Dockerfile edit.
 - Copy `.env.example` to `.env` and fill in your AWS profile before running the
   `scripts/deploy-*.sh` bootstrap scripts.
 - The public OAuth facade always attaches its allow-all Lambda request

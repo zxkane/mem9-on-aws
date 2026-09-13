@@ -8,20 +8,26 @@
 # with a static dummy key to localhost and never needs a restart on rotation, and
 # no mem9 source fork is required. See docker/llm-proxy/server.mjs header.
 #
-# Lightweight: no model, pure Node. node:24-slim (Debian bookworm) is multi-arch →
+# Lightweight: no model, pure Node. node:24-trixie-slim is multi-arch →
 # the arm64 variant is pulled for --platform=linux/arm64 (Graviton Fargate, project
-# standard). curl for the ECS health check (bookworm-slim ships none).
+# standard). Node handles health checks and the build-time RDS CA download.
 
-FROM node:24-slim
+FROM node:24-trixie-slim AS runtime
 
 WORKDIR /app
 
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates curl \
-    && curl --fail --silent --show-error \
-      https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
-      --output /app/global-bundle.pem \
+    && apt-get dist-upgrade -y \
+    && apt-get install -y --no-install-recommends ca-certificates \
     && rm -rf /var/lib/apt/lists/*
+
+RUN node --input-type=module -e "\
+      const response = await fetch('https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem', { signal: AbortSignal.timeout(30000) }); \
+      if (!response.ok) throw new Error('RDS CA download failed: ' + response.status); \
+      const { writeFile } = await import('node:fs/promises'); \
+      await writeFile('/app/global-bundle.pem', new Uint8Array(await response.arrayBuffer()));"
+
+COPY docker/healthcheck.mjs ./healthcheck.mjs
 
 # Deps first (layer cache). The sidecar uses the token dependencies; the
 # consolidation entrypoint additionally uses PostgreSQL and SNS, and the

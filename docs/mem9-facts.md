@@ -544,9 +544,9 @@ this repo — **empirically live 2026-07-12** (ap-northeast-1):
   **`github.com/qiffang/mnemos/server`**; the server module lives under `server/`
   (`server/{go.mod,go.sum,cmd/mnemo-server/main.go,internal,schema_pg.sql}`).
 - **Our build (this repo, `docker/mnemo-server/Dockerfile`):** a self-contained
-  **multi-stage** build — `golang:1.24-alpine` builder git-fetches the pinned
+  **multi-stage** build — `golang:1.27-alpine3.24` builder git-fetches the pinned
   commit, `CGO_ENABLED=0 GOARCH=arm64 go build ./cmd/mnemo-server`, into
-  `alpine:3.19` — so CI needs only Docker (no host Go, no separate mem9
+  `alpine:3.24` — so CI needs only Docker (no host Go, no separate mem9
   checkout). Built for **arm64** (Graviton Fargate) via `docker buildx
 --platform=linux/arm64`.
 - **Vendored pin (LOCKED): `mem9-ai/mem9` @ `d4638c8458abeb209a1b3a20472a1328c4acd149`**

@@ -16,7 +16,7 @@
 # Module path is github.com/qiffang/mnemos/server; the server lives under server/.
 
 # ── builder ──────────────────────────────────────────────────────────────────
-# go.mod requires Go 1.24 (toolchain go1.24.6). Alpine builder keeps the image
+# go.mod requires Go >=1.24; use the supported Go 1.27 toolchain. Alpine keeps the image
 # small; the binary is static (CGO off) so the runtime needs no libc from here.
 #
 # `--platform=$BUILDPLATFORM` runs the Go toolchain NATIVELY on the builder host
@@ -25,11 +25,12 @@
 # CI runners. mem9 is pure Go (CGO off), so cross-compiling is a plain GOARCH
 # switch, no emulation needed. BUILDPLATFORM/TARGETARCH are auto-injected by
 # buildx.
-FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine3.24 AS builder
 
 # git to fetch the pinned source; ca-certificates so `go mod download` can reach
 # the module proxy over TLS.
-RUN apk add --no-cache git ca-certificates
+RUN apk upgrade --no-cache \
+    && apk add --no-cache git ca-certificates
 
 # The exact upstream commit to vendor. A full 40-char SHA (not a branch/tag) so
 # the build is reproducible and can never drift under us.
@@ -65,7 +66,7 @@ RUN go mod download \
 # ── runtime ──────────────────────────────────────────────────────────────────
 # Matches upstream's Alpine runtime base; the static binary is supplemented only
 # with TLS/secret parsing and the PostgreSQL migration client.
-FROM alpine:3.19
+FROM alpine:3.24 AS runtime
 
 # ca-certificates: TLS to the Aurora writer endpoint. qwen3-embed and llm-proxy
 # are localhost HTTP sidecars; mnemo-server does not call Bedrock directly.
@@ -74,7 +75,8 @@ FROM alpine:3.19
 # jq's @uri. postgresql-client applies the additive durable-ingest migration
 # before the server starts, so an enabled replacement cannot accept work before
 # its atomic queue schema exists.
-RUN apk add --no-cache ca-certificates jq postgresql-client
+RUN apk upgrade --no-cache \
+    && apk add --no-cache ca-certificates jq postgresql17-client
 
 COPY --from=builder /out/mnemo-server /usr/local/bin/mnemo-server
 COPY docker/bootstrap/schema.sql /usr/local/share/mem9/schema.sql
