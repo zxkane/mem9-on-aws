@@ -27,8 +27,11 @@
  */
 
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
+import { createHmac } from "node:crypto";
 
 export interface FacadeConfig {
+  authMode?: "managed" | "oidc";
+  tokenAuthMethod?: "none" | "client_secret_basic" | "client_secret_post";
   /** AgentCore Gateway URL the façade proxies to (`/mcp` + fallthrough). */
   upstream: string;
   /** Cognito Hosted-UI authorize / token / userinfo / revocation / jwks. */
@@ -136,6 +139,8 @@ export function parseAllowedCallbackUrls(raw = ""): string[] {
 export async function resolveSsm(
   prefix: string,
   ssm: SsmLike,
+  publicClient = false,
+  credentialPrefix = `${prefix}/cognito/reader`,
 ): Promise<{
   upstream: string;
   userClientId: string;
@@ -145,8 +150,8 @@ export async function resolveSsm(
 }> {
   const names = [
     `${prefix}/gateway/url`,
-    `${prefix}/cognito/reader/client-id`,
-    `${prefix}/cognito/reader/client-secret`,
+    `${credentialPrefix}/client-id`,
+    `${credentialPrefix}/client-secret`,
     `${prefix}/oauth/allowed-callback-urls`,
     // Stage-scoped by the prefix, so a preview Lambda cannot verify prod's
     // approval clicks. Fetched in the SAME call as the OAuth values because
@@ -169,7 +174,7 @@ export async function resolveSsm(
   return {
     upstream: get(names[0]!),
     userClientId: get(names[1]!),
-    userClientSecret: get(names[2]!),
+    userClientSecret: publicClient ? "" : get(names[2]!),
     allowedCallbackUrls: get(names[3]!),
     // Deliberately NOT `get`: every MCP client's auth loads through this
     // function, so a stage with no Slack app must resolve to empty rather than
@@ -189,13 +194,47 @@ export async function loadConfig(
   const env = opts.env ?? process.env;
   const ssm = opts.ssm ?? new SSMClient({});
   const prefix = reqEnv(env, "SSM_PREFIX");
-  const resolved = await resolveSsm(prefix, ssm);
+  const authMode = env.AUTH_MODE ?? "managed";
+  const method = env.AUTH_TOKEN_AUTH_METHOD ?? "client_secret_post";
+  if (
+    !["managed", "oidc"].includes(authMode) ||
+    !["none", "client_secret_basic", "client_secret_post"].includes(method)
+  )
+    throw new Error("Invalid authentication runtime configuration");
+  const credentialPrefix =
+    authMode === "oidc"
+      ? reqEnv(env, "AUTH_CREDENTIAL_PREFIX")
+      : `${prefix}/cognito/reader`;
+  if (
+    authMode === "oidc" &&
+    !credentialPrefix.startsWith(`${prefix}/auth/providers/`)
+  )
+    throw new Error("External credentials require a provider-bound SSM prefix");
+  const resolved = await resolveSsm(
+    prefix,
+    ssm,
+    method === "none",
+    credentialPrefix,
+  );
+  const hmacKey = env.OAUTH_STATE_HMAC_KEY ?? "";
   return {
+    ...(env.AUTH_MODE
+      ? {
+          authMode: authMode as "managed" | "oidc",
+          tokenAuthMethod: method as FacadeConfig["tokenAuthMethod"],
+        }
+      : {}),
     upstream: resolved.upstream,
     authorize: reqEnv(env, "COGNITO_AUTHORIZE_ENDPOINT"),
     token: reqEnv(env, "COGNITO_TOKEN_ENDPOINT"),
-    userinfo: reqEnv(env, "COGNITO_USERINFO_ENDPOINT"),
-    revocation: reqEnv(env, "COGNITO_REVOCATION_ENDPOINT"),
+    userinfo:
+      authMode === "oidc"
+        ? env.COGNITO_USERINFO_ENDPOINT ?? ""
+        : reqEnv(env, "COGNITO_USERINFO_ENDPOINT"),
+    revocation:
+      authMode === "oidc"
+        ? env.COGNITO_REVOCATION_ENDPOINT ?? ""
+        : reqEnv(env, "COGNITO_REVOCATION_ENDPOINT"),
     jwks: reqEnv(env, "COGNITO_JWKS_URI"),
     resourceScopes: (env.RESOURCE_SCOPES ?? "")
       .split(",")
@@ -207,7 +246,12 @@ export async function loadConfig(
       resolved.allowedCallbackUrls,
     ),
     // Empty (not missing) is the intended "proxy disabled" sentinel.
-    hmacKey: env.OAUTH_STATE_HMAC_KEY ?? "",
+    hmacKey:
+      hmacKey && env.AUTH_CONTEXT_VERSION
+        ? createHmac("sha256", hmacKey)
+            .update(env.AUTH_CONTEXT_VERSION)
+            .digest("hex")
+        : hmacKey,
     slackSigningSecret: resolved.slackSigningSecret,
   };
 }

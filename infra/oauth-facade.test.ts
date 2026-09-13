@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CognitoOutputs } from "./cognito";
+import { readAuthConfig } from "./auth-config";
 
 /**
  * Unit tests for the `oauthFacade` factory — the OAuth2 browser-login façade
@@ -500,9 +501,7 @@ describe("oauthFacade factory", () => {
       },
     ]);
     expect(
-      created
-        .filter(({ kind }) => kind === "Secret")
-        .map(({ args }) => args),
+      created.filter(({ kind }) => kind === "Secret").map(({ args }) => args),
     ).toEqual([{ name: "OauthAllowedCallbackUrls", fallback: "[]" }]);
     const environment = only("SstFunction").environment as Record<
       string,
@@ -564,4 +563,57 @@ describe("oauthFacade factory", () => {
     );
     expect(secretParam?.type).toBe("SecureString");
   });
+});
+
+describe("external identity provider infrastructure", () => {
+  it.each([false, true])(
+    "selects external credentials while retaining legacy resources only when requested (%s)",
+    async (retain) => {
+      installGlobals("prod");
+      const auth = readAuthConfig({
+        MEM9_AUTH_MODE: "oidc",
+        MEM9_OIDC_ISSUER: "https://issuer.example.com/pool",
+        MEM9_OIDC_CLIENT_ID: "external-browser",
+        MEM9_OIDC_M2M_CLIENT_ID: "external-machine",
+        SST_SECRET_OidcM2mClientSecret: "fixture-secret",
+      });
+      Object.assign(auth.oidc!, {
+        authorizeEndpoint: "https://login.example.com/authorize",
+        tokenEndpoint: "https://login.example.com/token",
+        jwksUri: "https://issuer.example.com/keys",
+      });
+      const facade = await loadFacade();
+      const outputs = facade(retain ? fakeCognitoOut() : undefined, auth);
+      expect(
+        created.filter((resource) => resource.kind === "UserPoolClient"),
+      ).toHaveLength(retain ? 1 : 0);
+      expect(unwrap(outputs.readerClientId)).toBe("external-browser");
+      const environment = created.find(
+        (resource) => resource.kind === "SstFunction",
+      )!.args.environment as Record<string, unknown>;
+      expect(unwrap(environment.AUTH_TOKEN_AUTH_METHOD)).toBe("none");
+      expect(unwrap(environment.COGNITO_TOKEN_ENDPOINT)).toBe(
+        "https://login.example.com/token",
+      );
+      expect(
+        params.find((parameter) => parameter.name.endsWith("/auth/mode"))
+          ?.value,
+      ).toBe("oidc");
+      expect(
+        params.find((parameter) =>
+          parameter.name.endsWith("/m2m/client-secret"),
+        )?.type,
+      ).toBe("SecureString");
+      expect(
+        params.find((parameter) =>
+          parameter.name.endsWith("/browser/client-id"),
+        )?.value,
+      ).toBe("external-browser");
+      expect(
+        params.find((parameter) =>
+          parameter.name.endsWith("/cognito/reader/client-id"),
+        )?.value,
+      ).toBe(retain ? "reader-id" : undefined);
+    },
+  );
 });

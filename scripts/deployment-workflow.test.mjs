@@ -950,3 +950,17 @@ describe("reconciliation command fixtures", () => {
     );
   });
 });
+
+it("external OIDC secrets are wired only to production, with credentials passed through SST", () => {
+  const workflow = parse(readFileSync(workflowPath, "utf8"));
+  const env = workflow.jobs["deploy-prod"].env;
+  expect(env.MEM9_AUTH_MODE).toContain("secrets.MEM9_AUTH_MODE");
+  expect(env.MEM9_OIDC_ISSUER).toContain("secrets.MEM9_OIDC_ISSUER");
+  expect(env.MEM9_AUTH_REQUIRED_GROUP).toContain("secrets.MEM9_AUTH_REQUIRED_GROUP");
+  expect(env.SST_SECRET_OidcM2mClientSecret).toContain("secrets.MEM9_OIDC_M2M_CLIENT_SECRET");
+  expect(env.MEM9_RETAIN_MANAGED_AUTH).toContain("secrets.MEM9_RETAIN_MANAGED_AUTH");
+  for (const [name, job] of Object.entries(workflow.jobs)) {
+    if (name === "deploy-prod") continue;
+    expect(JSON.stringify(job)).not.toMatch(/secrets\.MEM9_(OIDC|AUTH|RETAIN_MANAGED_AUTH)/u);
+  }
+});

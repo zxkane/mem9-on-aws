@@ -18,12 +18,18 @@ const PREFIX = "/example-app/pr-7/mcp";
 function ssmReturning(params: Record<string, string>): SsmLike {
   return {
     send: vi.fn(async () => ({
-      Parameters: Object.entries(params).map(([Name, Value]) => ({ Name, Value })),
+      Parameters: Object.entries(params).map(([Name, Value]) => ({
+        Name,
+        Value,
+      })),
     })),
   };
 }
 
 const fullSsm = {
+  [`${PREFIX}/auth/providers/provider-a/browser/client-id`]: "external-client",
+  [`${PREFIX}/auth/providers/provider-a/browser/client-secret`]:
+    "external-secret",
   [`${PREFIX}/gateway/url`]: "https://gw",
   [`${PREFIX}/cognito/reader/client-id`]: "cid",
   [`${PREFIX}/cognito/reader/client-secret`]: "csecret",
@@ -42,6 +48,75 @@ const baseEnv = {
   OAUTH_STATE_HMAC_KEY: "the-key",
 };
 
+describe("external OIDC runtime configuration", () => {
+  it("keeps old Lambda credentials separate from newly deployed provider credentials", async () => {
+    const store = ssmReturning(fullSsm);
+    const old = await loadConfig({ env: baseEnv, ssm: store });
+    const current = await loadConfig({
+      env: {
+        ...baseEnv,
+        AUTH_MODE: "oidc",
+        AUTH_TOKEN_AUTH_METHOD: "client_secret_basic",
+        AUTH_CREDENTIAL_PREFIX: `${PREFIX}/auth/providers/provider-a/browser`,
+        COGNITO_TOKEN_ENDPOINT: "https://new-provider.example.com/token",
+      },
+      ssm: store,
+    });
+    expect(old).toMatchObject({
+      userClientId: "cid",
+      userClientSecret: "csecret",
+      token: "https://token",
+    });
+    expect(current).toMatchObject({
+      userClientId: "external-client",
+      userClientSecret: "external-secret",
+      token: "https://new-provider.example.com/token",
+    });
+  });
+  it("supports an upstream public client even when a retained legacy secret exists", async () => {
+    const result = await loadConfig({
+      env: {
+        ...baseEnv,
+        AUTH_MODE: "oidc",
+        AUTH_TOKEN_AUTH_METHOD: "none",
+        AUTH_CREDENTIAL_PREFIX: `${PREFIX}/auth/providers/provider-a/browser`,
+      },
+      ssm: ssmReturning(fullSsm),
+    });
+    expect(result.userClientSecret).toBe("");
+    const publicParams: Record<string, string> = { ...fullSsm };
+    delete publicParams[
+      `${PREFIX}/auth/providers/provider-a/browser/client-secret`
+    ];
+    await expect(
+      loadConfig({
+        env: {
+          ...baseEnv,
+          AUTH_MODE: "oidc",
+          AUTH_TOKEN_AUTH_METHOD: "none",
+          AUTH_CREDENTIAL_PREFIX: `${PREFIX}/auth/providers/provider-a/browser`,
+        },
+        ssm: ssmReturning(publicParams),
+      }),
+    ).resolves.toMatchObject({ userClientSecret: "" });
+  });
+  it("binds state/code signing to provider context and preserves disabled HMAC", async () => {
+    const config = async (version: string, key = "key") =>
+      loadConfig({
+        env: {
+          ...baseEnv,
+          AUTH_CONTEXT_VERSION: version,
+          OAUTH_STATE_HMAC_KEY: key,
+        },
+        ssm: ssmReturning(fullSsm),
+      });
+    expect((await config("provider-a")).hmacKey).not.toBe(
+      (await config("provider-b")).hmacKey,
+    );
+    expect((await config("provider-a", "")).hmacKey).toBe("");
+  });
+});
+
 describe("façade config loader (cycle-break SSM reads)", () => {
   it("resolveSsm fetches gateway/url + reader client id/secret with decryption", async () => {
     const ssm = ssmReturning(fullSsm);
@@ -50,8 +125,7 @@ describe("façade config loader (cycle-break SSM reads)", () => {
       upstream: "https://gw",
       userClientId: "cid",
       userClientSecret: "csecret",
-      allowedCallbackUrls:
-        '["https://oauth.example.com/callback/app"]',
+      allowedCallbackUrls: '["https://oauth.example.com/callback/app"]',
       // `fullSsm` has no Slack app, and an exhaustive `toEqual` is kept
       // deliberately: loosening it to `objectContaining` would stop this case from
       // noticing a value silently added to the config surface.
@@ -121,12 +195,7 @@ describe("façade config loader (cycle-break SSM reads)", () => {
     ).toEqual(["https://oauth.example.com/callback/app"]);
     expect(
       parseAllowedCallbackUrls(
-        JSON.stringify(
-          Array.from(
-            { length: 21 },
-            () => "https://x.co/c",
-          ),
-        ),
+        JSON.stringify(Array.from({ length: 21 }, () => "https://x.co/c")),
       ),
     ).toEqual(["https://x.co/c"]);
     expect(parseAllowedCallbackUrls("")).toEqual([]);
@@ -146,12 +215,7 @@ describe("façade config loader (cycle-break SSM reads)", () => {
     ],
     [
       "too many callbacks",
-      JSON.stringify(
-        Array.from(
-          { length: 21 },
-          (_, i) => `https://x.co/${i}`,
-        ),
-      ),
+      JSON.stringify(Array.from({ length: 21 }, (_, i) => `https://x.co/${i}`)),
     ],
   ])("TC-OAUTH-CALLBACK-003: rejects %s", (_case, raw) => {
     expect(() => parseAllowedCallbackUrls(raw)).toThrow(

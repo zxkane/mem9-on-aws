@@ -30,6 +30,7 @@ afterEach(() => {
 
 function runFixture({
   readerClientConfig = validReaderClientConfig,
+  authMode = "managed",
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "mem9-oauth-smoke-"));
   temporaryPaths.push(directory);
@@ -52,6 +53,8 @@ const command = args.slice(0, 2).join(" ");
 if (command === "ssm get-parameter") {
   const name = option("--name") ?? "";
   if (name.endsWith("/facade/url")) console.log(process.env.MOCK_FACADE);
+  else if (name.endsWith("/auth/mode")) console.log(process.env.MEM9_AUTH_MODE);
+  else if (name.endsWith("/auth/issuer")) console.log(process.env.MEM9_OIDC_ISSUER);
   else if (name.endsWith("/cognito/issuer")) console.log(process.env.MOCK_ISSUER);
   else if (name.endsWith("/cognito/reader/client-id")) console.log(process.env.MOCK_CLIENT_ID);
   else {
@@ -133,6 +136,8 @@ if (url.endsWith("/.well-known/oauth-authorization-server")) {
     env: {
       ...process.env,
       AWS_REGION: "ap-northeast-1",
+      MEM9_AUTH_MODE: authMode,
+      MEM9_OIDC_ISSUER: "https://issuer.example.com/pool",
       MOCK_CALLS: calls,
       MOCK_CLIENT_ID: "fixture-reader-client-id",
       MOCK_FACADE: "https://facade.example.com",
@@ -156,6 +161,12 @@ if (url.endsWith("/.well-known/oauth-authorization-server")) {
 }
 
 describe("OAuth facade smoke harness (TC-OAUTH-REFRESH-008)", () => {
+  it("checks external auth without inspecting or mutating an external user pool", () => {
+    const {callRecords,result,output}=runFixture({authMode:"oidc"});
+    expect(result.status,output).toBe(0);
+    expect(callRecords.some((call)=>call[0]==="aws" && call[1]==="cognito-idp")).toBe(false);
+    expect(output).toContain("external provider configuration selected");
+  });
   it("passes only after inspecting enabled rotation and keeps credentials out of output", () => {
     const { callRecords, result, output } = runFixture();
 

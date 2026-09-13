@@ -43,10 +43,7 @@ function cfg(overrides: Partial<FacadeConfig> = {}): FacadeConfig {
     revocation: "https://auth.example.com/oauth2/revoke",
     jwks: "https://cognito-idp.ap-northeast-1.amazonaws.com/pool/.well-known/jwks.json",
     // Browser-client-aligned resource scopes.
-    resourceScopes: [
-      "example-mcp/query/read",
-      "example-mcp/query/write",
-    ],
+    resourceScopes: ["example-mcp/query/read", "example-mcp/query/write"],
     userClientId: "reader-client-id",
     userClientSecret: "reader-client-secret",
     allowedClientRedirectUris: [],
@@ -78,14 +75,126 @@ function ev(
   };
 }
 
-function requestCookies(
-  response: { cookies?: string[] },
-): string[] {
+function requestCookies(response: { cookies?: string[] }): string[] {
   return (response.cookies ?? []).map((cookie) => cookie.split(";", 1)[0]!);
 }
 
 afterEach(() => {
   vi.restoreAllMocks();
+});
+
+describe("external OIDC facade", () => {
+  it.each(["none", "client_secret_basic", "client_secret_post"] as const)(
+    "exchanges and refreshes using the configured %s method",
+    async (tokenAuthMethod) => {
+      const config = cfg({
+        authMode: "oidc",
+        tokenAuthMethod,
+        userClientSecret: tokenAuthMethod === "none" ? "" : "provider-secret",
+      });
+      const fetcher = vi
+        .spyOn(globalThis, "fetch")
+        .mockImplementation(async () =>
+          Response.json({ access_token: "access", refresh_token: "rotated" }),
+        );
+      const redirectUri = "http://localhost:8080/cb";
+      const signedCode = signAuthorizationCode(
+        { code: "upstream-code", redirectUri },
+        config.hmacKey,
+        Date.now(),
+      );
+      for (const grant of [
+        {
+          grant_type: "authorization_code",
+          code: signedCode,
+          code_verifier: "v".repeat(43),
+          redirect_uri: redirectUri,
+        },
+        { grant_type: "refresh_token", refresh_token: "original" },
+      ]) {
+        const result = await route(
+          ev("/oauth/token", "POST", {
+            body: new URLSearchParams(
+              Object.entries({ ...grant, client_id: config.userClientId }).map(
+                ([k, v]) => [k, String(v)] as [string, string],
+              ),
+            ).toString(),
+          }),
+          config,
+        );
+        expect(result.statusCode).toBe(200);
+        const [, init] = fetcher.mock.calls.at(-1)!;
+        const form = new URLSearchParams(String(init!.body));
+        expect(init!.redirect).toBe("error");
+        expect(form.get("client_id")).toBe(config.userClientId);
+        expect(form.has("client_secret")).toBe(
+          tokenAuthMethod === "client_secret_post",
+        );
+        expect(
+          Boolean((init!.headers as Record<string, string>).authorization),
+        ).toBe(tokenAuthMethod === "client_secret_basic");
+        if (grant.grant_type === "authorization_code") {
+          expect(form.get("code")).toBe("upstream-code");
+          expect(form.get("redirect_uri")).toBe(`${BASE}/oauth/callback`);
+        }
+      }
+    },
+  );
+  it.each([
+    { client_id: "foreign", grant_type: "refresh_token" },
+    { client_id: "reader-client-id", grant_type: "client_credentials" },
+    {
+      client_id: "reader-client-id",
+      grant_type: "refresh_token",
+      client_secret: "caller-secret",
+    },
+  ])(
+    "rejects alternate clients and caller credentials before contacting the provider",
+    async (body) => {
+      const fetcher = vi.spyOn(globalThis, "fetch");
+      const result = await route(
+        ev("/oauth/token", "POST", {
+          body: new URLSearchParams(
+            Object.entries(body).map(
+              ([k, v]) => [k, String(v)] as [string, string],
+            ),
+          ).toString(),
+        }),
+        cfg({
+          authMode: "oidc",
+          tokenAuthMethod: "none",
+          userClientSecret: "",
+        }),
+      );
+      expect(result.statusCode).toBe(401);
+      expect(fetcher).not.toHaveBeenCalled();
+    },
+  );
+  it("rejects duplicate client IDs and an incoming Basic header", async () => {
+    const config = cfg({ authMode: "oidc", tokenAuthMethod: "none" });
+    for (const opts of [
+      {
+        body: "client_id=reader-client-id&client_id=foreign&grant_type=refresh_token",
+      },
+      {
+        body: "client_id=reader-client-id&grant_type=refresh_token",
+        headers: { Authorization: "Basic untrusted" },
+      },
+    ])
+      expect(
+        (await route(ev("/oauth/token", "POST", opts), config)).statusCode,
+      ).toBe(401);
+  });
+  it("does not advertise unavailable provider endpoints", async () => {
+    const result = await route(
+      ev("/.well-known/oauth-authorization-server"),
+      cfg({ authMode: "oidc", userinfo: "", revocation: "" }),
+    );
+    expect(JSON.parse(result.body)).not.toHaveProperty("userinfo_endpoint");
+    expect(
+      JSON.parse(result.body).token_endpoint_auth_methods_supported,
+    ).toEqual(["none"]);
+  });
 });
 
 describe("façade routing (TC-MCPGW-060..081)", () => {
@@ -173,13 +282,15 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
     // and returned the raw AgentCore Gateway's Cognito metadata (no /register DCR),
     // breaking discovery. All three must resolve to the façade's own metadata.
     const pr = JSON.parse(
-      (await route(ev("/.well-known/oauth-protected-resource/mcp"), cfg())).body,
+      (await route(ev("/.well-known/oauth-protected-resource/mcp"), cfg()))
+        .body,
     );
     expect(pr.resource).toBe(`${BASE}/mcp`);
     expect(pr.authorization_servers).toEqual([BASE]);
 
     const as = JSON.parse(
-      (await route(ev("/.well-known/oauth-authorization-server/mcp"), cfg())).body,
+      (await route(ev("/.well-known/oauth-authorization-server/mcp"), cfg()))
+        .body,
     );
     expect(as.authorization_endpoint).toBe(`${BASE}/oauth/authorize`);
     expect(as.registration_endpoint).toBe(`${BASE}/register`);
@@ -286,7 +397,9 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
     "TC-MCPGW-079: advertised issuer is identical to authorization_servers[0] on %s well-known paths",
     async (_label, suffix) => {
       const doc = async (name: string) =>
-        JSON.parse((await route(ev(`/.well-known/${name}${suffix}`), cfg())).body);
+        JSON.parse(
+          (await route(ev(`/.well-known/${name}${suffix}`), cfg())).body,
+        );
       const pr = await doc("oauth-protected-resource");
       const as = await doc("oauth-authorization-server");
       const oidc = await doc("openid-configuration");
@@ -360,7 +473,10 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
         response_type: "code",
         scope,
       }).toString();
-      const res = await route(ev("/oauth/authorize", "GET", { query: q }), cfg());
+      const res = await route(
+        ev("/oauth/authorize", "GET", { query: q }),
+        cfg(),
+      );
       expect(res.statusCode).toBe(302);
       expect(new URL(res.headers.location).searchParams.get("scope")).toBe(
         scope,
@@ -433,9 +549,9 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
       config,
     );
     expect(authRes.statusCode).toBe(302);
-    const cognitoState = new URL(
-      authRes.headers.location,
-    ).searchParams.get("state");
+    const cognitoState = new URL(authRes.headers.location).searchParams.get(
+      "state",
+    );
     expect(cognitoState).toBeTruthy();
     expect(cognitoState!.length).toBeLessThanOrEqual(1024);
 
@@ -631,7 +747,9 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
     const firstCookieName = firstCookie.slice(0, firstCookie.indexOf("="));
     const secondCookieName = secondCookie.slice(0, secondCookie.indexOf("="));
     expect(secondCookieName).toBe(firstCookieName);
-    const firstState = new URL(first.headers.location).searchParams.get("state")!;
+    const firstState = new URL(first.headers.location).searchParams.get(
+      "state",
+    )!;
     const secondState = new URL(second.headers.location).searchParams.get(
       "state",
     )!;
@@ -960,10 +1078,7 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
       refresh_token: "rt",
       client_id: "reader-client-id",
     }).toString();
-    const res = await route(
-      ev("/oauth/token", "POST", { body: form }),
-      cfg(),
-    );
+    const res = await route(ev("/oauth/token", "POST", { body: form }), cfg());
     expect(res.statusCode).toBe(200);
     const fwd = new URLSearchParams(captured.body!);
     expect(fwd.get("client_secret")).toBe("reader-client-secret");
@@ -978,10 +1093,7 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
       refresh_token: "rt",
       client_id: "attacker-client-id",
     }).toString();
-    const res = await route(
-      ev("/oauth/token", "POST", { body: form }),
-      cfg(),
-    );
+    const res = await route(ev("/oauth/token", "POST", { body: form }), cfg());
     expect(res.statusCode).toBe(401);
     expect(JSON.parse(res.body).error).toBe("invalid_client");
     expect(fetchSpy).not.toHaveBeenCalled();
@@ -993,23 +1105,25 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
       grant_type: "refresh_token",
       refresh_token: "rt",
     }).toString();
-    const res = await route(
-      ev("/oauth/token", "POST", { body: form }),
-      cfg(),
-    );
+    const res = await route(ev("/oauth/token", "POST", { body: form }), cfg());
     expect(res.statusCode).toBe(401);
     expect(fetchSpy).not.toHaveBeenCalled();
   });
 
   it("TC-MCPGW-077: Basic-auth refresh (legacy Claude Code) passes through untouched — no injection", async () => {
     const captured = mockTokenUpstream(false);
-    const basic = "Basic " + Buffer.from("reader-client-id:reader-client-secret").toString("base64");
+    const basic =
+      "Basic " +
+      Buffer.from("reader-client-id:reader-client-secret").toString("base64");
     const form = new URLSearchParams({
       grant_type: "refresh_token",
       refresh_token: "rt",
     }).toString();
     const res = await route(
-      ev("/oauth/token", "POST", { body: form, headers: { authorization: basic } }),
+      ev("/oauth/token", "POST", {
+        body: form,
+        headers: { authorization: basic },
+      }),
       cfg(),
     );
     expect(res.statusCode).toBe(200);
@@ -1027,10 +1141,7 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
       client_id: "reader-client-id",
       client_secret: "caller-supplied-secret",
     }).toString();
-    const res = await route(
-      ev("/oauth/token", "POST", { body: form }),
-      cfg(),
-    );
+    const res = await route(ev("/oauth/token", "POST", { body: form }), cfg());
     expect(res.statusCode).toBe(200);
     const fwd = new URLSearchParams(captured.body!);
     expect(fwd.get("client_secret")).toBe("caller-supplied-secret");
@@ -1052,10 +1163,7 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
       code_verifier: "v",
       client_id: "reader-client-id",
     }).toString();
-    const res = await route(
-      ev("/oauth/token", "POST", { body: form }),
-      cfg(),
-    );
+    const res = await route(ev("/oauth/token", "POST", { body: form }), cfg());
     expect(res.statusCode).toBe(200);
     const fwd = new URLSearchParams(captured.body!);
     expect(fwd.get("client_secret")).toBe("reader-client-secret");
@@ -1086,7 +1194,9 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
 
   it("TC-MCPGW-072: /register returns a PUBLIC client — no secret, auth method none (RFC 7591 DCR)", async () => {
     const res = await route(
-      ev("/register", "POST", { body: JSON.stringify({ redirect_uris: ["http://127.0.0.1:9/cb"] }) }),
+      ev("/register", "POST", {
+        body: JSON.stringify({ redirect_uris: ["http://127.0.0.1:9/cb"] }),
+      }),
       cfg(),
     );
     expect(res.statusCode).toBe(201);
@@ -1130,8 +1240,7 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
   });
 
   it("TC-OAUTH-CALLBACK-004/005: accepts an exact configured HTTPS callback through authorize and callback", async () => {
-    const configuredCallback =
-      `${REMOTE_CALLBACK}?tenant=example&code=stale&error=stale`;
+    const configuredCallback = `${REMOTE_CALLBACK}?tenant=example&code=stale&error=stale`;
     const config = cfg({ allowedClientRedirectUris: [configuredCallback] });
     const authQ = new URLSearchParams({
       redirect_uri: configuredCallback,
@@ -1355,9 +1464,7 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
     const res = await route(
       ev("/register", "POST", {
         body: JSON.stringify({
-          redirect_uris: [
-            `http://localhost:8080/${"x".repeat(4000)}`,
-          ],
+          redirect_uris: [`http://localhost:8080/${"x".repeat(4000)}`],
         }),
       }),
       cfg(),
@@ -1439,7 +1546,9 @@ describe("Slack callback routing on the shared façade (TC-SLACKAPP-040..043)", 
     // resolution failing for `gateway.example`.
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
-      .mockImplementation(async () => new Response("upstream", { status: 200 }));
+      .mockImplementation(
+        async () => new Response("upstream", { status: 200 }),
+      );
     const slack = slackDeps();
     const res = await route(slackEvent(), cfg(), slack);
 
@@ -1455,7 +1564,9 @@ describe("Slack callback routing on the shared façade (TC-SLACKAPP-040..043)", 
     // authenticated against — the endpoint genuinely is not here.
     const fetchSpy = vi
       .spyOn(globalThis, "fetch")
-      .mockImplementation(async () => new Response("upstream", { status: 200 }));
+      .mockImplementation(
+        async () => new Response("upstream", { status: 200 }),
+      );
     const res = await route(slackEvent(), cfg());
 
     expect(res.statusCode).toBe(404);
@@ -1500,7 +1611,11 @@ describe("Slack callback routing on the shared façade (TC-SLACKAPP-040..043)", 
     // click still applies. They share a Lambda, not a fate.
     const slack = slackDeps();
     const broken = cfg({ hmacKey: "" });
-    const oauth = await route(ev("/oauth/authorize", "GET", { query: "state=x" }), broken, slack);
+    const oauth = await route(
+      ev("/oauth/authorize", "GET", { query: "state=x" }),
+      broken,
+      slack,
+    );
     expect(oauth.statusCode).toBe(503);
 
     const click = await route(slackEvent(), broken, slack);
@@ -1515,7 +1630,11 @@ describe("Slack callback routing on the shared façade (TC-SLACKAPP-040..043)", 
     expect(closed.statusCode).toBe(401);
     expect(noSecret.runTask).not.toHaveBeenCalled();
 
-    const stillFine = await route(ev("/.well-known/oauth-protected-resource"), cfg(), noSecret);
+    const stillFine = await route(
+      ev("/.well-known/oauth-protected-resource"),
+      cfg(),
+      noSecret,
+    );
     expect(stillFine.statusCode).toBe(200);
   });
 });
@@ -1525,10 +1644,10 @@ describe("Slack deps at the Lambda entrypoint (TC-SLACKAPP-047..049)", () => {
     // The routing cases above prove `route` dispatches when deps are PASSED. This
     // proves the deployed Lambda actually builds them — without it the whole
     // feature is unreachable in production while every routing test stays green.
-    const deps = buildSlackDeps(
-      cfg({ slackSigningSecret: "shhh" }),
-      { SSM_PREFIX: "/mem9-on-aws/pr-7", STAGE: "pr-7" },
-    );
+    const deps = buildSlackDeps(cfg({ slackSigningSecret: "shhh" }), {
+      SSM_PREFIX: "/mem9-on-aws/pr-7",
+      STAGE: "pr-7",
+    });
     expect(deps).not.toBeUndefined();
     expect(deps!.signingSecret).toBe("shhh");
     expect(deps!.stage).toBe("pr-7");
@@ -1572,23 +1691,36 @@ describe("Slack deps at the Lambda entrypoint (TC-SLACKAPP-047..049)", () => {
         ecs: {
           send: async (cmd: { input: Record<string, unknown> }) => {
             sent.push(cmd.input);
-            return { tasks: [{ taskArn: "arn:aws:ecs:r:a:task/c/t1" }], failures: [] };
+            return {
+              tasks: [{ taskArn: "arn:aws:ecs:r:a:task/c/t1" }],
+              failures: [],
+            };
           },
         },
       },
     );
-    const arn = await deps!.runTask({ ids: ["m-1"], hash: "sha256:x", stage: "pr-7" });
+    const arn = await deps!.runTask({
+      ids: ["m-1"],
+      hash: "sha256:x",
+      stage: "pr-7",
+    });
     expect(arn).toBe("arn:aws:ecs:r:a:task/c/t1");
 
-    const read = sent.find((i) => (i as { Names?: string[] }).Names) as { Names: string[] };
-    for (const suffix of ["cluster-name", "task-def-arn", "task-sg-id", "subnet-ids"]) {
+    const read = sent.find((i) => (i as { Names?: string[] }).Names) as {
+      Names: string[];
+    };
+    for (const suffix of [
+      "cluster-name",
+      "task-def-arn",
+      "task-sg-id",
+      "subnet-ids",
+    ]) {
       expect(read.Names).toContain(`/mem9-on-aws/pr-7/cleanup/${suffix}`);
     }
 
-    const run = sent.find((i) => (i as { taskDefinition?: string }).taskDefinition) as Record<
-      string,
-      unknown
-    >;
+    const run = sent.find(
+      (i) => (i as { taskDefinition?: string }).taskDefinition,
+    ) as Record<string, unknown>;
     // Each parameter must land in the field NAMED for it, not merely be read. The
     // fake echoes the name into the value so a swap is visible here: reading four
     // names and asserting only that all four were read passes even if `cluster`
@@ -1600,9 +1732,11 @@ describe("Slack deps at the Lambda entrypoint (TC-SLACKAPP-047..049)", () => {
     // Private subnets with no public IP: the argument that chose ECS over a
     // VPC-attached Lambda was "no new network surface", and `assignPublicIp:
     // ENABLED` would quietly add one.
-    const net = (run.networkConfiguration as {
-      awsvpcConfiguration: { subnets: string[]; assignPublicIp: string };
-    }).awsvpcConfiguration;
+    const net = (
+      run.networkConfiguration as {
+        awsvpcConfiguration: { subnets: string[]; assignPublicIp: string };
+      }
+    ).awsvpcConfiguration;
     expect(net.subnets).toEqual(["subnet-a", "subnet-b"]);
     expect(net.assignPublicIp).toBe("DISABLED");
 
@@ -1628,16 +1762,23 @@ describe("Slack deps at the Lambda entrypoint (TC-SLACKAPP-047..049)", () => {
       {
         ssm: {
           send: async (cmd: { input: Record<string, unknown> }) => ({
-            Parameters: ((cmd.input.Names as string[] | undefined) ?? []).map((Name) => ({
-              Name,
-              Value: Name.endsWith("/subnet-ids") ? "subnet-a" : "v",
-            })),
+            Parameters: ((cmd.input.Names as string[] | undefined) ?? []).map(
+              (Name) => ({
+                Name,
+                Value: Name.endsWith("/subnet-ids") ? "subnet-a" : "v",
+              }),
+            ),
           }),
         },
         ecs: {
           send: async () => ({
             tasks: [],
-            failures: [{ reason: "RESOURCE:MEMORY", arn: "arn:aws:ecs:r:a:container-instance/x" }],
+            failures: [
+              {
+                reason: "RESOURCE:MEMORY",
+                arn: "arn:aws:ecs:r:a:container-instance/x",
+              },
+            ],
           }),
         },
       },
@@ -1693,7 +1834,8 @@ describe("Slack deps at the Lambda entrypoint (TC-SLACKAPP-047..049)", () => {
             // admits (TC-047g) — so they are told apart by NAME, not by command
             // shape. The approval read has to answer the offered record or this
             // case stops at the offered-list check and never reaches RunTask.
-            const names = ((cmd as { input: { Names?: string[] } }).input.Names) ?? [];
+            const names =
+              (cmd as { input: { Names?: string[] } }).input.Names ?? [];
             return {
               Parameters: names.map((Name) => ({
                 Name,
@@ -1715,7 +1857,10 @@ describe("Slack deps at the Lambda entrypoint (TC-SLACKAPP-047..049)", () => {
           },
         },
         ecs: {
-          send: async () => ({ tasks: [{ taskArn: "arn:aws:ecs:r:a:task/c/t9" }], failures: [] }),
+          send: async () => ({
+            tasks: [{ taskArn: "arn:aws:ecs:r:a:task/c/t9" }],
+            failures: [],
+          }),
         },
       },
     });
@@ -1748,14 +1893,19 @@ describe("Slack deps at the Lambda entrypoint (TC-SLACKAPP-047..049)", () => {
             sent.push(cmd);
             return {
               Parameters: [
-                { Name: "/mem9-on-aws/pr-7/approvals/offered", Value: '{"ids":[]}' },
+                {
+                  Name: "/mem9-on-aws/pr-7/approvals/offered",
+                  Value: '{"ids":[]}',
+                },
               ],
             };
           },
         },
       },
     );
-    const value = await deps!.getParameter("/mem9-on-aws/pr-7/approvals/offered");
+    const value = await deps!.getParameter(
+      "/mem9-on-aws/pr-7/approvals/offered",
+    );
 
     expect(value).toBe('{"ids":[]}');
     expect(sent).toHaveLength(1);
@@ -1763,7 +1913,9 @@ describe("Slack deps at the Lambda entrypoint (TC-SLACKAPP-047..049)", () => {
     // And an absent parameter is null, not the literal string "undefined": SSM
     // reports a missing name in `InvalidParameters`, omitting it from `Parameters`
     // entirely rather than returning an empty value.
-    const missing = await deps!.getParameter("/mem9-on-aws/pr-7/approvals/approved-x");
+    const missing = await deps!.getParameter(
+      "/mem9-on-aws/pr-7/approvals/approved-x",
+    );
     expect(missing).toBeNull();
   });
 
@@ -1783,7 +1935,9 @@ describe("Slack deps at the Lambda entrypoint (TC-SLACKAPP-047..049)", () => {
       { SSM_PREFIX: "/mem9-on-aws/pr-7", STAGE: "pr-7" },
       {
         ssm: {
-          send: async (cmd) => (puts.push(cmd.input as Record<string, unknown>), {}),
+          send: async (cmd) => (
+            puts.push(cmd.input as Record<string, unknown>), {}
+          ),
         },
       },
     );
@@ -1810,9 +1964,9 @@ describe("Slack deps at the Lambda entrypoint (TC-SLACKAPP-047..049)", () => {
       { STAGE: "pr-7" },
       { SSM_PREFIX: "/mem9-on-aws/pr-7", STAGE: "" },
     ]) {
-      expect(() => buildSlackDeps(cfg({ slackSigningSecret: "shhh" }), env)).toThrow(
-        /SLACK|STAGE|SSM_PREFIX/u,
-      );
+      expect(() =>
+        buildSlackDeps(cfg({ slackSigningSecret: "shhh" }), env),
+      ).toThrow(/SLACK|STAGE|SSM_PREFIX/u);
     }
   });
 });

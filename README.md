@@ -1553,6 +1553,105 @@ name. It refuses to run anywhere but a `pr-N` stage: it overwrites
 `approvals/offered`, which on a shared stage would destroy a pending human
 approval, and the id it approves is a deletion. CI runs it on preview only.
 
+## External OIDC authentication
+
+By default, a stage creates its own Cognito pool and separate human/M2M
+clients. Set `MEM9_AUTH_MODE=oidc` to use an existing provider instead. External
+mode does not create or manage that provider's pool, users, groups, clients or
+scopes. The provider must support Authorization Code with S256 PKCE and signed
+JWT access tokens carrying `mem9-mcp/read` and/or `mem9-mcp/write`. Opaque access
+tokens are not supported. Cognito's public-client flow is supported even though
+its discovery document omits some PKCE/public-client capabilities.
+
+The production job reads the following GitHub Actions Secrets. Unset settings
+preserve managed authentication. Preview jobs do not receive these settings and
+continue to create isolated managed pools and namespace fixtures.
+
+| Secret | Value / behavior |
+| --- | --- |
+| `MEM9_AUTH_MODE` | `managed` (default) or `oidc` |
+| `MEM9_OIDC_ISSUER` | Exact HTTPS issuer, preserving any trailing slash |
+| `MEM9_OIDC_CLIENT_ID` | Dedicated browser/facade client |
+| `MEM9_OIDC_CLIENT_SECRET` | Optional; omit for a public client |
+| `MEM9_OIDC_TOKEN_AUTH_METHOD` | `none`, `client_secret_basic`, or `client_secret_post`; defaults according to secret presence |
+| `MEM9_OIDC_M2M_CLIENT_ID` | Dedicated machine client; paired with its secret |
+| `MEM9_OIDC_M2M_CLIENT_SECRET` | Machine secret; required for production M2M smoke tests |
+| `MEM9_OIDC_AUDIENCE` | Optional API audience, distinct from client IDs |
+| `MEM9_OIDC_CLIENT_ID_CLAIM` | Defaults to `client_id`; another claim such as `cid` requires an API audience |
+| `MEM9_AUTH_REQUIRED_GROUP` | Optional exact human group; unset adds no group restriction |
+| `MEM9_AUTH_GROUP_CLAIM` | Defaults to `cognito:groups` in managed mode and `groups` in external mode; select `cognito:groups` for an external Cognito pool |
+| `MEM9_RETAIN_MANAGED_AUTH` | Set to `1` when switching an existing managed stage, keeping its old pool and clients under SST ownership for recovery |
+
+Client secrets enter SST through `SST_SECRET_OidcClientSecret` and
+`SST_SECRET_OidcM2mClientSecret`, become secret Outputs, and are stored in
+stage-scoped SSM SecureString parameters. For local commands use those SST
+environment names in a machine-local, gitignored file. Never paste secret
+values into command arguments or output them. Provider-specific credential paths bind each Lambda version to its issuer,
+client and token endpoint. Old paths are retained across provider changes so
+a cold start cannot send a new provider secret to an old endpoint; remove
+retained paths only after the recovery window. For a public upstream client the
+facade neither requires nor forwards a client secret, including any retained
+legacy secret. The public MCP registration remains secretless in either mode.
+
+Discovery is checked before resource registration, including an exact issuer
+match and HTTPS endpoints. Gateway validates the signature, issuer, client or
+audience, expiry and resource scopes. The identity interceptor independently
+classifies the registered human/machine client, checks the configured human
+group on every MCP method, and retains the signed namespace context. Missing
+groups do not confer machine access. A non-Cognito JWT without `token_use`
+requires a distinct configured API audience; an explicit ID token is rejected.
+The provider's own token lifetime bounds stale group claims. Group validation
+protects direct Gateway calls as well as calls through the facade.
+
+Register exactly `<facade-origin>/oauth/callback` at the external provider,
+with the existing facade HTTPS origin. The application's region and provider's
+region can differ. Hosted MCP client callbacks remain in the existing
+`OauthAllowedCallbackUrls` allowlist, not the provider's client registration.
+Only the provider owns login branding, membership and refresh-token policy.
+
+### Existing-stage cutover
+
+This change preserves the tenant ID, memories, embeddings, sessions and ingest
+jobs. Admitted human group members and the registered dedicated M2M client
+share the existing data, subject to scopes and any already-enabled namespace
+authorization. This release does not introduce personal ownership mapping,
+copy data, or turn off namespace enforcement.
+
+1. Verify the external client, callback and read/write scopes, along with an
+   allowed and a denied human account and the dedicated M2M client. Confirm a
+   restorable backup and record content-free pre-cutover data counts.
+2. Check the stage's `MEM9_NAMESPACE_REQUIRED` setting. Compatibility mode
+   preserves shared access. An already-enforced namespace deployment needs
+   explicit bindings for the new issuer, group, human principals and M2M
+   identity before switching; old issuer hashes will not match. Do not change
+   the namespace gate to bypass authorization. External group lifecycle is
+   administered at the provider; the bootstrap task does not receive an external
+   user-pool ID for group-management commands. Namespace phase checks and
+   database migration remain available; namespace reconciliation writes database
+   bindings without managing external groups. Provision the namespace operator
+   role with `MEM9_AUTH_MODE=oidc` to omit Cognito grants while preserving its
+   existing stage/region ownership checks.
+3. Configure production secrets, including `MEM9_RETAIN_MANAGED_AUTH=1` for an
+   existing pool, and review the SST diff. Reject deletion/replacement of the
+   existing tenant, database or retained authentication resources. Coordinate
+   a short authentication maintenance window while facade and Gateway update.
+4. Deploy the same stage. The external-mode smoke checks the active provider
+   contract without using Cognito administration APIs in the application region.
+   MCP E2E obtains external machine tokens from the active SSM configuration and
+   verifies read/write restrictions. Complete a real browser code/refresh flow,
+   allowed/denied group checks and direct-Gateway denial checks before reopening.
+5. Reauthenticate MCP clients; their registered client ID and provider change.
+   In-flight state/code wrappers are invalidated by provider/client binding.
+   Verify both admitted users recall the same pre-existing data, the machine
+   can access it, and old-provider tokens fail at the new Gateway.
+
+Rollback restores a reviewed complete auth configuration using the retained
+pool, including its client registry, group policy and any namespace bindings.
+It never disables group/namespace authorization or restores old data over new
+writes. Keep the old pool until the recovery window closes; its removal is a
+separate change. Empty or inconsistent external settings fail closed, and
+switching secrets alone does not update deployed resources.
+
 ## License
 
 This repository is licensed under the

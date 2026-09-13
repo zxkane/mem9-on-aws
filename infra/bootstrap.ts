@@ -24,6 +24,7 @@ import { ecrImage } from "./ecr";
 import { resolveVpc } from "./vpc";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import type { CognitoOutputs } from "./cognito";
+import type { AuthConfig } from "./auth-config";
 
 const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 
@@ -42,15 +43,16 @@ export function bootstrap(
   cluster: sst.aws.Cluster,
   dbOut: DbOutputs,
   identity: TenantIdentityOutputs,
-  cognito: CognitoOutputs,
+  cognito: CognitoOutputs | undefined,
+  auth?: AuthConfig,
 ): BootstrapOutputs {
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const tags = { Project: "mem9-on-aws", Stage: $app.stage, ManagedBy: "sst" };
   const { privateSubnetIds } = resolveVpc();
   const region = aws.getRegionOutput().name;
-  const [previewAlpha, previewBeta] = cognito.previewNamespaceClients;
+  const [previewAlpha, previewBeta] = cognito?.previewNamespaceClients ?? [];
   const previewNamespaceFixtures =
-    cognito.previewNamespaceClients.length === 2
+    !auth?.oidc && cognito?.previewNamespaceClients.length === 2
       ? {
           MEM9_PREVIEW_NAMESPACE_DEFAULT_CLIENT_ID: cognito.clientId,
           MEM9_PREVIEW_NAMESPACE_ALPHA_CLIENT_ID: previewAlpha.clientId,
@@ -82,8 +84,11 @@ export function bootstrap(
       MEM9_DB_PORT: dbOut.port.apply((p) => String(p)),
       MEM9_DB_NAME: dbOut.database,
       MEM9_STAGE: $app.stage,
-      MEM9_COGNITO_ISSUER: cognito.issuer,
-      MEM9_COGNITO_USER_POOL_ID: cognito.userPoolId,
+      MEM9_AUTH_MODE: auth?.mode ?? "managed",
+      MEM9_COGNITO_ISSUER: auth?.oidc?.issuer ?? cognito!.issuer,
+      // External providers own user/group lifecycle. Never pass the retained
+      // legacy pool here alongside the new issuer to an operator command.
+      MEM9_COGNITO_USER_POOL_ID: auth?.oidc ? "" : cognito!.userPoolId,
       AWS_REGION: region,
       ...(previewNamespaceFixtures ?? {}),
     },

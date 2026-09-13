@@ -17,6 +17,9 @@ if [[ -z "$FACADE" ]]; then
 fi
 echo "run-oauth-facade-smoke: façade=${FACADE}"
 
+AUTH_MODE="${MEM9_AUTH_MODE:-managed}"
+[[ "$AUTH_MODE" == "managed" || "$AUTH_MODE" == "oidc" ]] || { echo "::error::invalid MEM9_AUTH_MODE"; exit 1; }
+if [[ "$AUTH_MODE" == "managed" ]]; then
 echo "run-oauth-facade-smoke: checking deployed reader refresh-token rotation"
 COGNITO_ISSUER=$(ssm "${PREFIX}/cognito/issuer")
 READER_CLIENT_ID=$(ssm "${PREFIX}/cognito/reader/client-id")
@@ -46,6 +49,14 @@ echo "$READER_CLIENT_CONFIG" | jq -e '.ExplicitAuthFlows == ["ALLOW_USER_SRP_AUT
   exit 1
 }
 echo "run-oauth-facade-smoke: reader refresh-token rotation OK (10-second retry grace)"
+else
+  # External identity resources are read-only to this deployment and may live
+  # in another region/account. Check the deployed auth contract, not pool APIs.
+  [[ "$(ssm "${PREFIX}/auth/mode")" == "oidc" ]] || { echo "::error::deployed authentication mode mismatch"; exit 1; }
+  DEPLOYED_ISSUER=$(ssm "${PREFIX}/auth/issuer")
+  [[ "$DEPLOYED_ISSUER" == "${MEM9_OIDC_ISSUER:?external issuer required}" ]] || { echo "::error::deployed issuer mismatch"; exit 1; }
+  echo "run-oauth-facade-smoke: external provider configuration selected"
+fi
 
 echo "run-oauth-facade-smoke: checking /.well-known/oauth-authorization-server"
 AS=$(curl -fsS "${FACADE}/.well-known/oauth-authorization-server")

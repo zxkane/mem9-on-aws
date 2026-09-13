@@ -14,8 +14,9 @@ usage:
   MEM9_NAMESPACE_OPERATOR_STAGE=<prod|dev> \
     scripts/deploy-memory-namespace-operator-role.sh
 
-The compatible SST release must already export the selected stage's Cognito
-user-pool ID to SSM. The retained CloudFormation stack is hosted in us-west-2.
+Managed mode reads the stage's Cognito user-pool ID from SSM. With
+MEM9_AUTH_MODE=oidc, the role has no Cognito administration permissions.
+The retained CloudFormation stack is hosted in us-west-2.
 EOF
 }
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
@@ -90,7 +91,10 @@ verify_stack_description() {
   esac
 }
 
-USER_POOL_ID=$(aws ssm get-parameter \
+USER_POOL_ID=""
+case "${MEM9_AUTH_MODE:-managed}" in
+managed)
+  USER_POOL_ID=$(aws ssm get-parameter \
   --name "/mem9-on-aws/${STAGE}/cognito/user-pool-id" \
   --region "$APPLICATION_REGION" \
   --query Parameter.Value \
@@ -98,7 +102,11 @@ USER_POOL_ID=$(aws ssm get-parameter \
 if [[ ! "$USER_POOL_ID" =~ ^[a-z0-9-]+_[A-Za-z0-9]+$ ]]; then
   echo "Cognito user-pool id is missing or malformed; deploy the compatible SST release first." >&2
   exit 1
-fi
+  fi
+  ;;
+oidc) ;;
+*) echo "MEM9_AUTH_MODE must be managed or oidc" >&2; exit 2 ;;
+esac
 
 PARAMETERS=(
   "ParameterKey=ApplicationRegion,ParameterValue=${APPLICATION_REGION}"

@@ -260,7 +260,8 @@ export async function route(
       logEvent("slack_interactions_unconfigured", { method });
       return json(404, {
         error: "not_found",
-        error_description: "The Slack approval callback is not enabled on this stage.",
+        error_description:
+          "The Slack approval callback is not enabled on this stage.",
       });
     }
     return handleSlackInteraction(event, slack);
@@ -305,19 +306,18 @@ export async function route(
       issuer: base,
       authorization_endpoint: `${base}/oauth/authorize`,
       token_endpoint: `${base}/oauth/token`,
-      userinfo_endpoint: cfg.userinfo,
-      revocation_endpoint: cfg.revocation,
+      ...(cfg.userinfo ? { userinfo_endpoint: cfg.userinfo } : {}),
+      ...(cfg.revocation ? { revocation_endpoint: cfg.revocation } : {}),
       jwks_uri: cfg.jwks,
       registration_endpoint: `${base}/register`,
       response_types_supported: ["code"],
       response_modes_supported: ["query"],
       grant_types_supported: ["authorization_code", "refresh_token"],
       code_challenge_methods_supported: ["S256"],
-      token_endpoint_auth_methods_supported: [
-        "none",
-        "client_secret_basic",
-        "client_secret_post",
-      ],
+      token_endpoint_auth_methods_supported:
+        cfg.authMode === "oidc"
+          ? ["none"]
+          : ["none", "client_secret_basic", "client_secret_post"],
       // Advertise exactly what the browser client allows: openid + email + both
       // resource scopes. The Gateway interceptor enforces each tool's required
       // read or write scope.
@@ -333,13 +333,17 @@ export async function route(
       issuer: base,
       authorization_endpoint: `${base}/oauth/authorize`,
       token_endpoint: `${base}/oauth/token`,
-      userinfo_endpoint: cfg.userinfo,
-      revocation_endpoint: cfg.revocation,
+      ...(cfg.userinfo ? { userinfo_endpoint: cfg.userinfo } : {}),
+      ...(cfg.revocation ? { revocation_endpoint: cfg.revocation } : {}),
       jwks_uri: cfg.jwks,
       registration_endpoint: `${base}/register`,
       response_types_supported: ["code"],
       subject_types_supported: ["public"],
       id_token_signing_alg_values_supported: ["RS256"],
+      token_endpoint_auth_methods_supported:
+        cfg.authMode === "oidc"
+          ? ["none"]
+          : ["none", "client_secret_basic", "client_secret_post"],
       code_challenge_methods_supported: ["S256"],
       grant_types_supported: ["authorization_code", "refresh_token"],
       // Aligned with the browser client's allowedOauthScopes (no `profile`) —
@@ -355,6 +359,16 @@ export async function route(
     if (misconfigured) return misconfigured;
 
     const inParams = new URLSearchParams(event.rawQueryString ?? "");
+    if (
+      cfg.authMode === "oidc" &&
+      (inParams.get("client_id") !== cfg.userClientId ||
+        inParams.get("response_type") !== "code" ||
+        [...inParams.keys()].some((key) => inParams.getAll(key).length !== 1))
+    )
+      return json(400, {
+        error: "invalid_request",
+        error_description: "Invalid OAuth client or authorization request",
+      });
     const clientRedirect = inParams.get("redirect_uri");
     const clientState = inParams.get("state") ?? "";
     if (!clientRedirect) {
@@ -364,15 +378,11 @@ export async function route(
       });
     }
     if (
-      !isAllowedClientRedirect(
-        clientRedirect,
-        cfg.allowedClientRedirectUris,
-      )
+      !isAllowedClientRedirect(clientRedirect, cfg.allowedClientRedirectUris)
     ) {
       return json(400, {
         error: "invalid_request",
-        error_description:
-          "redirect_uri must be an allowed callback URL",
+        error_description: "redirect_uri must be an allowed callback URL",
       });
     }
     // Require PKCE so the auth code is useless without the code_verifier.
@@ -436,9 +446,7 @@ export async function route(
       client_id: inParams.get("client_id") ?? null,
       has_pkce: inParams.get("code_challenge") !== null,
     });
-    return redirect(`${cfg.authorize}?${out.toString()}`, [
-      transactionCookie,
-    ]);
+    return redirect(`${cfg.authorize}?${out.toString()}`, [transactionCookie]);
   }
 
   // GET /oauth/callback — verify HMAC, decode original client state +
@@ -545,8 +553,26 @@ export async function route(
   if (path === "/oauth/token" && method === "POST") {
     const rawBody = event.isBase64Encoded
       ? Buffer.from(event.body ?? "", "base64").toString("utf8")
-      : (event.body ?? "");
+      : event.body ?? "";
     const inForm = new URLSearchParams(rawBody);
+
+    if (
+      cfg.authMode === "oidc" &&
+      (inForm.get("client_id") !== cfg.userClientId ||
+        !["authorization_code", "refresh_token"].includes(
+          inForm.get("grant_type") ?? "",
+        ) ||
+        inForm.has("client_secret") ||
+        Object.keys(event.headers ?? {}).some(
+          (key) => key.toLowerCase() === "authorization",
+        ) ||
+        [...inForm.keys()].some((key) => inForm.getAll(key).length !== 1))
+    )
+      return json(401, {
+        error: "invalid_client",
+        error_description:
+          "The facade accepts only its registered public client",
+      });
 
     const grantType = inForm.get("grant_type");
     const clientRedirect = inForm.get("redirect_uri");
@@ -561,10 +587,7 @@ export async function route(
         });
       }
       if (
-        !isAllowedClientRedirect(
-          clientRedirect,
-          cfg.allowedClientRedirectUris,
-        )
+        !isAllowedClientRedirect(clientRedirect, cfg.allowedClientRedirectUris)
       ) {
         return json(400, {
           error: "invalid_request",
@@ -594,10 +617,7 @@ export async function route(
       inForm.set("code", codePayload.c);
     } else if (
       clientRedirect &&
-      !isAllowedClientRedirect(
-        clientRedirect,
-        cfg.allowedClientRedirectUris,
-      )
+      !isAllowedClientRedirect(clientRedirect, cfg.allowedClientRedirectUris)
     ) {
       return json(400, {
         error: "invalid_request",
@@ -629,7 +649,19 @@ export async function route(
     // client and inject the Cognito confidential-client secret so Cognito's token
     // endpoint accepts the request — PKCE-only clients (Codex) never hold it.
     let injectedSecret = false;
-    if (clientAuth === "none") {
+    if (cfg.authMode === "oidc") {
+      if (cfg.tokenAuthMethod === "client_secret_basic") {
+        fwdHeaders.authorization = `Basic ${Buffer.from(
+          `${encodeURIComponent(cfg.userClientId)}:${encodeURIComponent(
+            cfg.userClientSecret,
+          )}`,
+        ).toString("base64")}`;
+        injectedSecret = true;
+      } else if (cfg.tokenAuthMethod === "client_secret_post") {
+        inForm.set("client_secret", cfg.userClientSecret);
+        injectedSecret = true;
+      }
+    } else if (clientAuth === "none") {
       const formClientId = inForm.get("client_id");
       if (formClientId !== cfg.userClientId) {
         logEvent("oauth.token.public_client_rejected", {
@@ -651,6 +683,8 @@ export async function route(
         method: "POST",
         headers: fwdHeaders,
         body: inForm.toString(),
+        redirect: "error",
+        signal: AbortSignal.timeout(15000),
       });
     } catch (err) {
       logEvent("oauth.token.upstream_error", {
@@ -658,7 +692,7 @@ export async function route(
       });
       return json(502, {
         error: "upstream_unreachable",
-        error_description: "Failed to reach Cognito token endpoint",
+        error_description: "Failed to reach identity provider token endpoint",
       });
     }
     let respBody = await upstream.text();
@@ -721,7 +755,11 @@ export async function route(
       status: upstream.status,
     });
 
-    return { statusCode: upstream.status, headers: respHeaders, body: respBody };
+    return {
+      statusCode: upstream.status,
+      headers: respHeaders,
+      body: respBody,
+    };
   }
 
   // Cognito Hosted-UI sign-out landing.
@@ -821,12 +859,10 @@ export async function route(
   // Rewrite WWW-Authenticate so resource_metadata points back at the façade,
   // preserving OAuth error and scope parameters from the Gateway.
   if (respHeaders["www-authenticate"]) {
-    const resourceMetadata =
-      `resource_metadata="${base}/.well-known/oauth-protected-resource"`;
+    const resourceMetadata = `resource_metadata="${base}/.well-known/oauth-protected-resource"`;
     const challenge = respHeaders["www-authenticate"].trim();
     if (/^Bearer(?:\s|$)/iu.test(challenge)) {
-      const resourcePattern =
-        /\bresource_metadata=(?:"[^"]*"|[^,\s]*)/iu;
+      const resourcePattern = /\bresource_metadata=(?:"[^"]*"|[^,\s]*)/iu;
       respHeaders["www-authenticate"] = resourcePattern.test(challenge)
         ? challenge.replace(resourcePattern, resourceMetadata)
         : /^Bearer\s*$/iu.test(challenge)
@@ -878,7 +914,12 @@ interface AwsClientLike {
 async function readTaskInputs(
   ssm: AwsClientLike,
   ssmPrefix: string,
-): Promise<{ cluster: string; taskDef: string; securityGroups: string[]; subnets: string[] }> {
+): Promise<{
+  cluster: string;
+  taskDef: string;
+  securityGroups: string[];
+  subnets: string[];
+}> {
   const { GetParametersCommand } = await import("@aws-sdk/client-ssm");
   const prefix = `${ssmPrefix}/cleanup`;
   // Keyed by the field each name populates, not positional: read back by index, a
@@ -894,7 +935,9 @@ async function readTaskInputs(
   const res = (await ssm.send(
     new GetParametersCommand({ Names: Object.values(names) }),
   )) as { Parameters?: Array<{ Name?: string; Value?: string }> };
-  const byName = new Map((res.Parameters ?? []).map((p) => [p.Name, p.Value ?? ""]));
+  const byName = new Map(
+    (res.Parameters ?? []).map((p) => [p.Name, p.Value ?? ""]),
+  );
   const get = (name: string): string => {
     const v = byName.get(name);
     // Named in the message rather than reported as a generic failure: the operator
@@ -967,16 +1010,20 @@ export function buildSlackDeps(
       // parameter, same value back, and only IAM can tell them apart, so the
       // failure would be an AccessDenied on the first real Slack click.
       const { GetParametersCommand } = await import("@aws-sdk/client-ssm");
-      const res = (await (await ssmClient()).send(
-        new GetParametersCommand({ Names: [name] }),
-      )) as { Parameters?: Array<{ Name?: string; Value?: string }> };
+      const res = (await (
+        await ssmClient()
+      ).send(new GetParametersCommand({ Names: [name] }))) as {
+        Parameters?: Array<{ Name?: string; Value?: string }>;
+      };
       // An absent name comes back in `InvalidParameters` and is simply missing
       // from `Parameters`, so there is no empty-value case to distinguish.
       return res.Parameters?.find((p) => p.Name === name)?.Value ?? null;
     },
     putParameter: async (name, value, opts) => {
       const { PutParameterCommand } = await import("@aws-sdk/client-ssm");
-      await (await ssmClient()).send(
+      await (
+        await ssmClient()
+      ).send(
         new PutParameterCommand({
           Name: name,
           Value: value,
@@ -1067,7 +1114,11 @@ export async function handler(
   } = {},
 ): Promise<ApiGwResponse> {
   const cfg = await (overrides.loadConfig ?? getConfig)();
-  return route(event, cfg, buildSlackDeps(cfg, overrides.env, overrides.clients));
+  return route(
+    event,
+    cfg,
+    buildSlackDeps(cfg, overrides.env, overrides.clients),
+  );
 }
 
 /** Test-only: drop the cold-start config singleton between cases. */

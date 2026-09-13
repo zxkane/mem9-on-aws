@@ -37,6 +37,16 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REGION="${AWS_REGION:-$(node "$REPO_ROOT/scripts/resolve-application-region.mjs")}"
 PREFIX="/mem9-on-aws/${STAGE}"
 COGNITO_CLIENT_PREFIX="${E2E_COGNITO_CLIENT_PREFIX:-${PREFIX}/cognito}"
+AUTH_PREFIX="${PREFIX}/cognito"
+case "${MEM9_AUTH_MODE:-managed}" in
+  managed) ;;
+  oidc)
+    AUTH_PREFIX=$(aws ssm get-parameter --name "${PREFIX}/auth/provider-prefix" --region "$REGION" --query Parameter.Value --output text)
+    [[ "$AUTH_PREFIX" == "${PREFIX}/auth/providers/"* ]] || { echo "::error::invalid provider configuration prefix"; exit 1; }
+    COGNITO_CLIENT_PREFIX="${E2E_COGNITO_CLIENT_PREFIX:-${AUTH_PREFIX}/m2m}"
+    ;;
+  *) echo "::error::invalid MEM9_AUTH_MODE"; exit 1 ;;
+esac
 SOFT="${E2E_SOFT:-0}"
 
 ssm() { aws ssm get-parameter --name "$1" --region "$REGION" --with-decryption --query Parameter.Value --output text; }
@@ -69,9 +79,10 @@ if [[ -z "$ACTIVE_TASK_DEFINITION" || "$ACTIVE_TASK_DEFINITION" == "null" ]] ||
   exit 1
 fi
 
+mapfile -t TASK_ARNS < <(printf '%s' "$TASK_ARNS_JSON" | jq -r '.[]')
 TASKS_JSON=$(aws ecs describe-tasks \
   --cluster "$ECS_CLUSTER" \
-  --tasks $(printf '%s' "$TASK_ARNS_JSON" | jq -r '.[]') \
+  --tasks "${TASK_ARNS[@]}" \
   --region "$REGION" \
   --output json)
 TASK_DEF_MISMATCHES=$(printf '%s' "$TASKS_JSON" | jq --arg active "$ACTIVE_TASK_DEFINITION" \
@@ -106,10 +117,10 @@ fi
 echo "run-mcp-e2e: ECS service stable; all running tasks use the active task definition"
 
 echo "run-mcp-e2e: reading MCP config from SSM ${PREFIX}/{cognito,gateway}/* (region ${REGION})"
-TOKEN_ENDPOINT=$(ssm "${PREFIX}/cognito/token-endpoint")
+TOKEN_ENDPOINT=$(ssm "${AUTH_PREFIX}/token-endpoint")
 CLIENT_ID=$(ssm "${COGNITO_CLIENT_PREFIX}/client-id")
 CLIENT_SECRET=$(ssm "${COGNITO_CLIENT_PREFIX}/client-secret")
-AVAILABLE_SCOPES=$(ssm "${PREFIX}/cognito/scope")
+AVAILABLE_SCOPES=$(ssm "${AUTH_PREFIX}/scope")
 GATEWAY_URL=$(ssm "${PREFIX}/gateway/url")
 
 if [[ -z "$TOKEN_ENDPOINT" || -z "$CLIENT_ID" || -z "$AVAILABLE_SCOPES" || -z "$GATEWAY_URL" ]]; then
@@ -128,17 +139,18 @@ if [[ -z "$READ_SCOPE" || -z "$WRITE_SCOPE" ]]; then
 fi
 
 mint_token() { # $1 = space-delimited requested scopes
-  local requested_scopes="$1" token_resp token
+  local requested_scopes="$1" token_resp token basic_auth
+  basic_auth=$(E2E_CLIENT_ID="$CLIENT_ID" E2E_CLIENT_SECRET="$CLIENT_SECRET" node -e 'process.stdout.write(Buffer.from(encodeURIComponent(process.env.E2E_CLIENT_ID)+":"+encodeURIComponent(process.env.E2E_CLIENT_SECRET)).toString("base64"))')
   token_resp=$(curl -fsS -X POST "$TOKEN_ENDPOINT" \
     -H "Content-Type: application/x-www-form-urlencoded" \
-    -u "${CLIENT_ID}:${CLIENT_SECRET}" \
+    -H @<(printf 'Authorization: Basic %s\n' "$basic_auth") \
     -d "grant_type=client_credentials&scope=$(printf '%s' "$requested_scopes" | sed 's/ /%20/g')" 2>&1) || {
-      echo "::error::Cognito token request failed for requested scopes '${requested_scopes}': $token_resp" >&2
+      echo "::error::Identity provider token request failed" >&2
       return 1
     }
   token=$(printf '%s' "$token_resp" | jq -r '.access_token // ""')
   if [[ -z "$token" || "$token" == "null" ]]; then
-    echo "::error::no access_token for requested scopes '${requested_scopes}': $token_resp" >&2
+    echo "::error::Identity provider returned no access_token" >&2
     return 1
   fi
   printf '%s' "$token"

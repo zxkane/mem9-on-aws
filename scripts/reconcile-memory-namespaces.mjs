@@ -481,7 +481,8 @@ async function main() {
   const issuer = process.env.MEM9_COGNITO_ISSUER;
   const userPoolId = process.env.MEM9_COGNITO_USER_POOL_ID;
   const dsn = process.env.MNEMO_DSN;
-  if (!configPath || !issuer || !userPoolId || !dsn) {
+  const manageCognitoGroups = process.env.MEM9_AUTH_MODE !== "oidc";
+  if (!configPath || !issuer || (manageCognitoGroups && !userPoolId) || !dsn) {
     throw new Error(
       "MEM9_NAMESPACE_CONFIG, MEM9_COGNITO_ISSUER, " +
         "MEM9_COGNITO_USER_POOL_ID, and MNEMO_DSN are required",
@@ -489,7 +490,7 @@ async function main() {
   }
   const desired = await readDesiredState(configPath);
   const region = args.region ?? process.env.AWS_REGION;
-  const cognito = new CognitoIdentityProviderClient({ region });
+  const cognito = manageCognitoGroups ? new CognitoIdentityProviderClient({ region }) : undefined;
   const db = new pg.Client({ connectionString: dsn });
   await db.connect();
   try {
@@ -499,10 +500,11 @@ async function main() {
       userPoolId,
       cognito,
       db,
+      manageCognitoGroups,
     });
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } finally {
-    cognito.destroy();
+    cognito?.destroy();
     await db.end();
   }
 }

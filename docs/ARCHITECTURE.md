@@ -216,6 +216,24 @@ container starts.
 
 ### Gateway and private networking
 
+Authentication defaults to the stage-owned Cognito resources. With
+`MEM9_AUTH_MODE=oidc`, deployment validates external discovery before resource
+creation and configures the same Gateway/facade with the external issuer and
+dedicated human/M2M clients. The optional group claim gate is applied to humans
+on every MCP method; missing groups never select machine authorization. The
+provider owns its clients, groups and users. An existing managed pool can remain
+under SST ownership through `MEM9_RETAIN_MANAGED_AUTH=1`, but only the selected
+provider is trusted by Gateway. The facade supports public upstream clients and
+server-held basic/post client secrets; its state-signing context binds issuer,
+client, token endpoint and facade origin.
+
+The existing tenant and data are retained. The namespace signing and backend
+authorization contracts below still apply; an enforced namespace installation
+must reconcile new issuer-scoped identities and bindings before auth cutover.
+The external-mode bootstrap uses the active issuer and intentionally has no
+Cognito user-pool ID for provider administration. See the README's external
+OIDC configuration and existing-stage cutover procedure.
+
 The current inbound path is:
 
 ```text

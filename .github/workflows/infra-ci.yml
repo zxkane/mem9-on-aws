@@ -1167,6 +1167,20 @@ jobs:
     env:
       AWS_REGION: ${{ needs.application-region.outputs.region }}
       MEM9_LLM_RESPONSES_REGION: ${{ vars.MEM9_LLM_RESPONSES_REGION }}
+      # Authentication is an operator choice. Preview jobs receive none of these
+      # settings and continue to create isolated Cognito pools and test clients.
+      MEM9_AUTH_MODE: ${{ secrets.MEM9_AUTH_MODE || 'managed' }}
+      MEM9_OIDC_ISSUER: ${{ secrets.MEM9_OIDC_ISSUER }}
+      MEM9_OIDC_CLIENT_ID: ${{ secrets.MEM9_OIDC_CLIENT_ID }}
+      SST_SECRET_OidcClientSecret: ${{ secrets.MEM9_OIDC_CLIENT_SECRET }}
+      MEM9_OIDC_TOKEN_AUTH_METHOD: ${{ secrets.MEM9_OIDC_TOKEN_AUTH_METHOD }}
+      MEM9_OIDC_M2M_CLIENT_ID: ${{ secrets.MEM9_OIDC_M2M_CLIENT_ID }}
+      SST_SECRET_OidcM2mClientSecret: ${{ secrets.MEM9_OIDC_M2M_CLIENT_SECRET }}
+      MEM9_OIDC_AUDIENCE: ${{ secrets.MEM9_OIDC_AUDIENCE }}
+      MEM9_OIDC_CLIENT_ID_CLAIM: ${{ secrets.MEM9_OIDC_CLIENT_ID_CLAIM }}
+      MEM9_AUTH_REQUIRED_GROUP: ${{ secrets.MEM9_AUTH_REQUIRED_GROUP }}
+      MEM9_AUTH_GROUP_CLAIM: ${{ secrets.MEM9_AUTH_GROUP_CLAIM }}
+      MEM9_RETAIN_MANAGED_AUTH: ${{ secrets.MEM9_RETAIN_MANAGED_AUTH }}
     steps:
       - name: Deployment maintenance gate
         env:

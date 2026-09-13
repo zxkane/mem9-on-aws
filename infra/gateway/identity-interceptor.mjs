@@ -29,14 +29,13 @@ function isRecord(value) {
 
 function config() {
   registry ??= parseClientRegistry(process.env.MEM9_CLIENT_REGISTRY);
-  signingKeys ??= parseSigningKeys(
-    process.env.MEM9_IDENTITY_SIGNING_KEYS,
-  );
+  signingKeys ??= parseSigningKeys(process.env.MEM9_IDENTITY_SIGNING_KEYS);
   return { registry, signingKeys };
 }
 
 function authorizationToken(headers) {
-  if (!isRecord(headers)) throw new Error("authorization header is unavailable");
+  if (!isRecord(headers))
+    throw new Error("authorization header is unavailable");
   const authorization = Object.entries(headers).find(
     ([name]) => name.toLowerCase() === "authorization",
   )?.[1];
@@ -73,18 +72,13 @@ function denial(body) {
   };
 }
 
-function attachIdentity(body, headers) {
+function attachIdentity(body, identity, keys) {
   const requests = Array.isArray(body) ? body : [body];
   const calls = requests.filter(
     (request) => isRecord(request) && request.method === "tools/call",
   );
   if (calls.length === 0) return body;
 
-  const { registry: clientRegistry, signingKeys: keys } = config();
-  const identity = classifyAccessToken(
-    authorizationToken(headers),
-    clientRegistry,
-  );
   const transformed = requests.map((request) => {
     if (!calls.includes(request)) return request;
     const tool = bareToolName(request.params?.name);
@@ -114,21 +108,28 @@ function attachIdentity(body, headers) {
 }
 
 export const handler = async (event) => {
-  const scoped = interceptScopes(event);
-  if (
-    event?.mcp?.gatewayResponse != null ||
-    scoped?.mcp?.transformedGatewayResponse != null
-  ) {
-    return scoped;
-  }
   try {
+    // Authenticate every method, including initialize/tools/list and responses.
+    // Gateway has already verified the JWT signature before invoking us.
+    const { registry: clientRegistry, signingKeys: keys } = config();
+    const identity = classifyAccessToken(
+      authorizationToken(event?.mcp?.gatewayRequest?.headers),
+      clientRegistry,
+    );
+    const scoped = interceptScopes(event);
+    if (
+      event?.mcp?.gatewayResponse != null ||
+      scoped?.mcp?.transformedGatewayResponse != null
+    )
+      return scoped;
     return {
       interceptorOutputVersion: "1.0",
       mcp: {
         transformedGatewayRequest: {
           body: attachIdentity(
             scoped.mcp.transformedGatewayRequest.body,
-            event.mcp.gatewayRequest.headers,
+            identity,
+            keys,
           ),
         },
       },

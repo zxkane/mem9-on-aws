@@ -71,6 +71,8 @@ export default $config({
     };
   },
   async run() {
+    const { resolveAuthConfig } = await import("./infra/auth-config");
+    const authConfig = await resolveAuthConfig();
     // SST 4.17's Function component tests the Pulumi dev-mode Output as a
     // JavaScript boolean, so its generated execution-role trust always includes
     // the same-account root. Force every application Function back to the exact
@@ -137,19 +139,19 @@ export default $config({
     // takes ecsOut (the Cloud Map DNS name + task SG the Lambda uses) + the tenant
     // id (identityOut) for the outbound X-API-Key.
     const { cognito } = await import("./infra/cognito");
-    const cognitoOut = cognito();
+    const cognitoOut = authConfig.mode === "managed" || authConfig.retainManaged ? cognito() : undefined;
     // Schema-bootstrap and namespace-operator one-shot Task (§8): applies the
     // schema in its default mode, and can run guarded namespace reconciliation,
     // migration, and access-management commands inside the VPC. CI invokes the
     // default bootstrap mode after deploy; operator commands are explicit.
     const { bootstrap } = await import("./infra/bootstrap");
-    bootstrap(ecsOut.cluster, dbOut, identityOut, cognitoOut);
+    bootstrap(ecsOut.cluster, dbOut, identityOut, cognitoOut, authConfig);
     // OAuth2 browser-login façade (§6): ApiGatewayV2 + reader client + façade
     // Lambda. Built BEFORE gateway() because it produces the reader client id the
     // gateway must trust. The façade reads gateway/url from SSM at RUNTIME, so it
     // takes only cognitoOut (no gateway dep) — keeping the graph acyclic.
     const { oauthFacade } = await import("./infra/oauth-facade");
-    const facadeOut = oauthFacade(cognitoOut);
+    const facadeOut = oauthFacade(cognitoOut, authConfig);
     const { gateway } = await import("./infra/gateway");
     gateway(
       cognitoOut,
@@ -157,6 +159,7 @@ export default $config({
       identityOut,
       facadeOut.readerClientId,
       namespaceIdentityOut,
+      authConfig,
     );
 
     // Cleanup approval and consolidation remain disabled until their offer,

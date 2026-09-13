@@ -34,6 +34,7 @@ import {
 import type { EcsOutputs } from "./ecs";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import type { NamespaceIdentityOutputs } from "./namespace-identity";
+import type { AuthConfig } from "./auth-config";
 
 // @ts-ignore - `aws` injected globally by SST; bedrock/iam/ssm types loose.
 const awsAny = aws as unknown as Record<string, any>;
@@ -59,7 +60,10 @@ const TOOL_SCHEMA = [
     inputSchema: {
       type: "object",
       properties: {
-        content: { type: "string", description: "Raw content to store as a memory." },
+        content: {
+          type: "string",
+          description: "Raw content to store as a memory.",
+        },
         memory_type: {
           type: "string",
           description:
@@ -67,7 +71,8 @@ const TOOL_SCHEMA = [
         },
         agent_id: {
           type: "string",
-          description: "Optional agent id to attribute the write to (per-agent scoping).",
+          description:
+            "Optional agent id to attribute the write to (per-agent scoping).",
         },
       },
       required: ["content"],
@@ -80,8 +85,14 @@ const TOOL_SCHEMA = [
     inputSchema: {
       type: "object",
       properties: {
-        q: { type: "string", description: "The natural-language search query." },
-        limit: { type: "integer", description: "Max results to return (default 20)." },
+        q: {
+          type: "string",
+          description: "The natural-language search query.",
+        },
+        limit: {
+          type: "integer",
+          description: "Max results to return (default 20).",
+        },
         search_mode: {
           type: "string",
           description:
@@ -89,7 +100,8 @@ const TOOL_SCHEMA = [
         },
         agent_id: {
           type: "string",
-          description: "Optional: restrict results to memories written by this agent.",
+          description:
+            "Optional: restrict results to memories written by this agent.",
         },
       },
       required: ["q"],
@@ -126,11 +138,13 @@ const TOOL_SCHEMA = [
         },
         agent_id: {
           type: "string",
-          description: "Optional agent id to attribute the write to (per-agent scoping).",
+          description:
+            "Optional agent id to attribute the write to (per-agent scoping).",
         },
         mode: {
           type: "string",
-          description: "Ingest mode: 'smart' (LLM extraction, default) or 'raw'.",
+          description:
+            "Ingest mode: 'smart' (LLM extraction, default) or 'raw'.",
         },
       },
       required: ["messages"],
@@ -138,7 +152,8 @@ const TOOL_SCHEMA = [
   },
   {
     name: "get_ingest_job_status",
-    description: "Get the state and timestamps of an accepted transcript-ingest job.",
+    description:
+      "Get the state and timestamps of an accepted transcript-ingest job.",
     inputSchema: {
       type: "object",
       properties: {
@@ -159,12 +174,26 @@ export interface GatewayOutputs {
 }
 
 export function gateway(
-  cognitoOut: CognitoOutputs,
+  cognitoOut: CognitoOutputs | undefined,
   ecsOut: EcsOutputs,
   identity: TenantIdentityOutputs,
   readerClientId: Output<string>,
   namespaceIdentity: NamespaceIdentityOutputs,
+  auth: AuthConfig = {
+    mode: "managed",
+    retainManaged: false,
+    groupClaim: "cognito:groups",
+  },
 ): GatewayOutputs {
+  const external = auth.oidc;
+  if (!external && !cognitoOut)
+    throw new Error("Managed authentication requires Cognito");
+  const issuer = external?.issuer ?? cognitoOut!.issuer;
+  const machineClientIds = external
+    ? external.m2mClientId
+      ? [$interpolate`${external.m2mClientId}`]
+      : []
+    : cognitoOut!.allowedClientIds;
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const stage = $app.stage;
   const tags = { Project: "mem9-on-aws", Stage: stage, ManagedBy: "sst" };
@@ -178,7 +207,12 @@ export function gateway(
   const transportSigningKeys = namespaceIdentity.transportSigningKeys;
   const clientRegistry = $jsonStringify({
     human: [readerClientId],
-    m2m: cognitoOut.allowedClientIds,
+    m2m: machineClientIds,
+    issuer,
+    clientIdClaim: external?.clientIdClaim ?? "client_id",
+    groupClaim: auth.groupClaim,
+    requiredGroup: auth.requiredGroup ?? null,
+    audience: external?.audience ?? null,
   });
 
   // --- Identity interceptor Lambda (non-VPC, nodejs24.x) ---
@@ -238,23 +272,26 @@ export function gateway(
   // so it needs only lambda:InvokeFunction on those two functions. (No workload-identity / secret
   // / ENI grants — those were for the removed API-key credential provider + the
   // managed-Lattice ENI path.)
-  const gatewayInvokePolicy = new awsAny.iam.RolePolicy("Mem9GatewayInvokeLambda", {
-    role: gatewayServiceRole.name,
-    policy: proxyFn.arn.apply((proxyArn: string) =>
-      identityFn.arn.apply((identityArn: string) =>
-        JSON.stringify({
-          Version: "2012-10-17",
-          Statement: [
-            {
-              Effect: "Allow",
-              Action: "lambda:InvokeFunction",
-              Resource: [identityArn, proxyArn],
-            },
-          ],
-        }),
+  const gatewayInvokePolicy = new awsAny.iam.RolePolicy(
+    "Mem9GatewayInvokeLambda",
+    {
+      role: gatewayServiceRole.name,
+      policy: proxyFn.arn.apply((proxyArn: string) =>
+        identityFn.arn.apply((identityArn: string) =>
+          JSON.stringify({
+            Version: "2012-10-17",
+            Statement: [
+              {
+                Effect: "Allow",
+                Action: "lambda:InvokeFunction",
+                Resource: [identityArn, proxyArn],
+              },
+            ],
+          }),
+        ),
       ),
-    ),
-  });
+    },
+  );
 
   // --- AgentCore Gateway (typed aws.bedrock.AgentcoreGateway) ---
   // CUSTOM_JWT authorizer matching on allowedClients (Cognito client_credentials
@@ -271,9 +308,16 @@ export function gateway(
       roleArn: gatewayServiceRole.arn,
       authorizerConfiguration: {
         customJwtAuthorizer: {
-          discoveryUrl: $interpolate`${cognitoOut.issuer}/.well-known/openid-configuration`,
+          discoveryUrl:
+            external?.discoveryUrl ??
+            $interpolate`${issuer}/.well-known/openid-configuration`,
           // Trust BOTH the M2M client (CI/headless) AND the browser-login reader client.
-          allowedClients: [...cognitoOut.allowedClientIds, readerClientId],
+          ...(!external || external.clientIdClaim === "client_id"
+            ? { allowedClients: [...machineClientIds, readerClientId] }
+            : {}),
+          ...(external?.audience
+            ? { allowedAudience: [external.audience] }
+            : {}),
           // Gateway admission is OR-based: a token must carry at least one of
           // these scopes. The interceptor below then enforces the tool-specific
           // read or write scope.
@@ -306,8 +350,7 @@ export function gateway(
   // different checkout than deployment. Resolve the CURRENT checkout root at
   // command runtime so both create and delete find the repository-owned script.
   const provisionScript = "infra/gateway/provision-target.mjs";
-  const provisionCommand =
-    `node "$(git rev-parse --show-toplevel)/${provisionScript}"`;
+  const provisionCommand = `node "$(git rev-parse --show-toplevel)/${provisionScript}"`;
   const toolSchemaJson = JSON.stringify(TOOL_SCHEMA);
   // `command.local.Command`'s `environment` block applies to BOTH create and
   // delete, so MEM9_TGT_OP can't live there (it must differ per lifecycle) — set it

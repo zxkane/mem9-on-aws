@@ -47,6 +47,7 @@ async function runOperatorRoleFixture(
   mode,
   existingRegion,
   existingStage = "prod",
+  authMode = "managed",
 ) {
   const directory = await mkdtemp(join(tmpdir(), "mem9-operator-role-"));
   const bin = join(directory, "bin");
@@ -71,6 +72,7 @@ const fixturePoolId = [
   "fixturepool",
 ].join("_");
 if (command === "ssm get-parameter") {
+  if (process.env.MEM9_AUTH_MODE === "oidc") process.exit(99);
   process.stdout.write(fixturePoolId + "\\n");
   process.exit(0);
 }
@@ -107,7 +109,7 @@ if (command === "cloudformation describe-stacks") {
       ParameterValue:
         process.env.MOCK_MODE === "final-mismatch" && count > 0
           ? [process.env.MOCK_APPLICATION_REGION, "otherpool"].join("_")
-          : fixturePoolId,
+          : process.env.MEM9_AUTH_MODE === "oidc" ? "" : fixturePoolId,
     },
   ];
   process.stdout.write(
@@ -169,6 +171,7 @@ process.exit(2);
           MOCK_MODE: mode,
           MOCK_STAGE: "prod",
           MEM9_NAMESPACE_OPERATOR_STAGE: "prod",
+          MEM9_AUTH_MODE: authMode,
         },
       },
     );
@@ -1393,4 +1396,12 @@ describe("memory namespace access state machines", () => {
       total: 3,
     });
   });
+});
+
+it("provisions a fresh external-provider operator role without querying a managed pool", async () => {
+  const {result,calls}=await runOperatorRoleFixture("missing",undefined,"prod","oidc");
+  expect(result.status,result.stderr).toBe(0);
+  expect(calls.some((call)=>call.slice(0,2).join(" ")==="ssm get-parameter")).toBe(false);
+  const create=calls.find((call)=>call.slice(0,2).join(" ")==="cloudformation create-stack");
+  expect(create).toContain("ParameterKey=CognitoUserPoolId,ParameterValue=");
 });
