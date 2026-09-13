@@ -217,6 +217,9 @@ export async function loadConfig(
     credentialPrefix,
   );
   const hmacKey = env.OAUTH_STATE_HMAC_KEY ?? "";
+  if (authMode === "oidc" && hmacKey && !env.AUTH_CONTEXT_VERSION) {
+    throw new Error("AUTH_CONTEXT_VERSION is required for external OAuth");
+  }
   return {
     ...(env.AUTH_MODE
       ? {

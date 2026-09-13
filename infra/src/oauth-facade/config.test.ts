@@ -49,6 +49,19 @@ const baseEnv = {
 };
 
 describe("external OIDC runtime configuration", () => {
+  it("fails closed when enabled external OAuth has no provider signing context", async () => {
+    await expect(
+      loadConfig({
+        env: {
+          ...baseEnv,
+          AUTH_MODE: "oidc",
+          AUTH_TOKEN_AUTH_METHOD: "none",
+          AUTH_CREDENTIAL_PREFIX: `${PREFIX}/auth/providers/provider-a/browser`,
+        },
+        ssm: ssmReturning(fullSsm),
+      }),
+    ).rejects.toThrow("AUTH_CONTEXT_VERSION is required");
+  });
   it("keeps old Lambda credentials separate from newly deployed provider credentials", async () => {
     const store = ssmReturning(fullSsm);
     const old = await loadConfig({ env: baseEnv, ssm: store });
@@ -56,6 +69,7 @@ describe("external OIDC runtime configuration", () => {
       env: {
         ...baseEnv,
         AUTH_MODE: "oidc",
+        AUTH_CONTEXT_VERSION: "provider-a",
         AUTH_TOKEN_AUTH_METHOD: "client_secret_basic",
         AUTH_CREDENTIAL_PREFIX: `${PREFIX}/auth/providers/provider-a/browser`,
         COGNITO_TOKEN_ENDPOINT: "https://new-provider.example.com/token",
@@ -78,6 +92,7 @@ describe("external OIDC runtime configuration", () => {
       env: {
         ...baseEnv,
         AUTH_MODE: "oidc",
+        AUTH_CONTEXT_VERSION: "provider-a",
         AUTH_TOKEN_AUTH_METHOD: "none",
         AUTH_CREDENTIAL_PREFIX: `${PREFIX}/auth/providers/provider-a/browser`,
       },
@@ -93,6 +108,7 @@ describe("external OIDC runtime configuration", () => {
         env: {
           ...baseEnv,
           AUTH_MODE: "oidc",
+          AUTH_CONTEXT_VERSION: "provider-a",
           AUTH_TOKEN_AUTH_METHOD: "none",
           AUTH_CREDENTIAL_PREFIX: `${PREFIX}/auth/providers/provider-a/browser`,
         },
