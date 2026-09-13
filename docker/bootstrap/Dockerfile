@@ -3,19 +3,23 @@
 # A short-lived task run on each deploy that applies the pgvector + control-plane
 # + memories(vector 1024) schema and seeds one active tenant, then exits. Uses
 # psql (from the postgres client) + jq (to parse the Secrets Manager JSON). Kept
-# separate from the mnemo-server image because that alpine image has no psql; this
-# is a tiny throwaway runner, not a long-lived service.
+# separate from the mnemo-server startup migration because it applies the full
+# schema and tenant seed; this is a one-shot runner, not a long-lived service.
 #
 # postgres:17 client matches the Aurora PostgreSQL 17.x engine (infra/db.ts).
 # Runs on arm64 (task architecture) — postgres + jq are multi-arch.
 
-FROM node:24-alpine
+FROM node:24-alpine3.24 AS runtime
 
-RUN apk add --no-cache ca-certificates curl jq postgresql17-client \
-    && mkdir -p /bootstrap \
-    && curl --fail --silent --show-error \
-      https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem \
-      --output /bootstrap/global-bundle.pem
+RUN apk upgrade --no-cache \
+    && apk add --no-cache ca-certificates jq postgresql17-client \
+    && mkdir -p /bootstrap
+
+RUN node --input-type=module -e "\
+      const response = await fetch('https://truststore.pki.rds.amazonaws.com/global/global-bundle.pem', { signal: AbortSignal.timeout(30000) }); \
+      if (!response.ok) throw new Error('RDS CA download failed: ' + response.status); \
+      const { writeFile } = await import('node:fs/promises'); \
+      await writeFile('/bootstrap/global-bundle.pem', new Uint8Array(await response.arrayBuffer()));"
 
 ENV NODE_EXTRA_CA_CERTS=/bootstrap/global-bundle.pem
 

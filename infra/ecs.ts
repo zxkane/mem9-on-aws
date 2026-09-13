@@ -451,10 +451,9 @@ export function ecs(
         // and ECS starts both containers together — the health check keeps the
         // task from being marked healthy until the embedder is actually ready.
         health: {
-          // curl is installed in the qwen3-embed image (node:24-slim/Debian);
-          // -f fails on non-2xx, so a 503 "still loading" keeps the container
-          // unhealthy until the model finishes loading.
-          command: ["CMD-SHELL", `curl -fsS http://localhost:${EMBED_PORT}/health || exit 1`],
+          // Node fails on non-2xx and times out before the ECS health deadline.
+          // A 503 keeps the container unhealthy until the model finishes loading.
+          command: ["CMD", "node", "/app/healthcheck.mjs", `http://localhost:${EMBED_PORT}/health`],
           startPeriod: "180 seconds",
           interval: "30 seconds",
           timeout: "5 seconds",
@@ -481,11 +480,11 @@ export function ecs(
         },
         logging: { retention: "1 month" },
         // /health flips to 200 only once the first Bedrock bearer is minted (a
-        // local presign, sub-second) — fast, no model load. curl -f keeps the
+        // local presign, sub-second) — fast, no model load. The Node check keeps the
         // container unhealthy until then so mnemo-server isn't marked healthy
         // before smart-ingest can actually auth.
         health: {
-          command: ["CMD-SHELL", `curl -fsS http://localhost:${LLM_PROXY_PORT}/health || exit 1`],
+          command: ["CMD", "node", "/app/healthcheck.mjs", `http://localhost:${LLM_PROXY_PORT}/health`],
           startPeriod: "30 seconds",
           interval: "30 seconds",
           timeout: "5 seconds",

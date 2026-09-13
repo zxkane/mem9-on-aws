@@ -1088,6 +1088,8 @@ jobs:
         with:
           context: .
           file: docker/mnemo-server/Dockerfile
+          pull: true
+          no-cache-filters: builder,runtime
           platforms: linux/arm64
           push: true
           tags: ${{ steps.tags.outputs.mnemo_tags }}
@@ -1106,6 +1108,8 @@ jobs:
         with:
           context: .
           file: docker/qwen3-embed/Dockerfile
+          pull: true
+          no-cache-filters: runtime
           platforms: linux/arm64
           push: true
           tags: ${{ steps.tags.outputs.embed_tags }}
@@ -1119,6 +1123,8 @@ jobs:
         with:
           context: .
           file: docker/bootstrap/Dockerfile
+          pull: true
+          no-cache-filters: runtime
           platforms: linux/arm64
           push: true
           tags: ${{ steps.tags.outputs.bootstrap_tags }}
@@ -1131,6 +1137,8 @@ jobs:
         with:
           context: .
           file: docker/llm-proxy/Dockerfile
+          pull: true
+          no-cache-filters: runtime
           platforms: linux/arm64
           push: true
           tags: ${{ steps.tags.outputs.llm_proxy_tags }}

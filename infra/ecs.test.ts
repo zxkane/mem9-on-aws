@@ -735,7 +735,9 @@ describe("ecs stack", () => {
     expect(env.QWEN3_EMBED_PORT).toBe("8081");
     const health = embed.health as Record<string, unknown>;
     expect(health).toBeDefined();
-    expect(String((health.command as string[]).join(" "))).toContain("/health");
+    expect(health.command).toEqual([
+      "CMD", "node", "/app/healthcheck.mjs", "http://localhost:8081/health",
+    ]);
     // Long startPeriod so the slow ONNX model load doesn't fail the health check.
     expect(String(health.startPeriod)).toMatch(/180/);
     // The embed container carries NO DB secret (only mnemo-server needs it).
@@ -759,7 +761,9 @@ describe("ecs stack", () => {
     // — the proxy omits the header when unset).
     expect("LLM_PROXY_OPENAI_PROJECT" in env).toBe(true);
     const health = proxy.health as Record<string, unknown>;
-    expect(String((health.command as string[]).join(" "))).toContain("/health");
+    expect(health.command).toEqual([
+      "CMD", "node", "/app/healthcheck.mjs", "http://localhost:8082/health",
+    ]);
     // The proxy carries NO DB secret (only mnemo-server needs it) and no real key
     // in env — the bearer is minted at runtime from the task role.
     expect(proxy.ssm).toBeUndefined();
