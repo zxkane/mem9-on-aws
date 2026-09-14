@@ -31,6 +31,10 @@ afterEach(() => {
 function runFixture({
   readerClientConfig = validReaderClientConfig,
   authMode = "managed",
+  forwardedResource = false,
+  upstreamError = false,
+  upstreamStatus = 302,
+  upstreamLocation = "https://auth.example.com/login",
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "mem9-oauth-smoke-"));
   temporaryPaths.push(directory);
@@ -118,10 +122,17 @@ if (url.endsWith("/.well-known/oauth-authorization-server")) {
     option("-D"),
     "HTTP/1.1 302 Found\\r\\n" +
       "Set-Cookie: __Secure-mem9-oauth=fixture; Path=/oauth/callback; Secure; HttpOnly; SameSite=Lax\\r\\n" +
-      "Location: https://auth.example.com/oauth2/authorize?state=short-state\\r\\n\\r\\n",
+      "Location: https://auth.example.com/oauth2/authorize?state=short-state&scope=mem9-mcp%2Fread+mem9-mcp%2Fwrite" +
+      (process.env.MOCK_FORWARDED_RESOURCE === "true" ? "&resource=https%3A%2F%2Ffacade.example.com%2Fmcp" : "") + "\\r\\n\\r\\n",
   );
   writeFileSync(option("-o"), "");
   process.stdout.write("302");
+} else if (url.startsWith("https://auth.example.com/oauth2/authorize?")) {
+  const location = process.env.MOCK_UPSTREAM_ERROR === "true"
+    ? base + "/oauth/callback?error=invalid_request&error_description=scope-resource-mismatch"
+    : process.env.MOCK_UPSTREAM_LOCATION;
+  writeFileSync(option("-D"), "HTTP/1.1 " + process.env.MOCK_UPSTREAM_STATUS + "\\r\\n" + (location ? "Location: " + location + "\\r\\n" : "") + "\\r\\n");
+  process.stdout.write(process.env.MOCK_UPSTREAM_STATUS);
 } else {
   console.error("unexpected curl URL:", url);
   process.exit(2);
@@ -144,6 +155,10 @@ if (url.endsWith("/.well-known/oauth-authorization-server")) {
       MOCK_ISSUER:
         "https://cognito-idp.ap-northeast-1.amazonaws.com/pool-fixture",
       MOCK_READER_CLIENT_CONFIG: JSON.stringify(readerClientConfig),
+      MOCK_FORWARDED_RESOURCE: String(forwardedResource),
+      MOCK_UPSTREAM_ERROR: String(upstreamError),
+      MOCK_UPSTREAM_STATUS: String(upstreamStatus),
+      MOCK_UPSTREAM_LOCATION: upstreamLocation,
       PATH: `${bin}${delimiter}${process.env.PATH}`,
       STAGE: "pr-162",
     },
@@ -161,6 +176,42 @@ if (url.endsWith("/.well-known/oauth-authorization-server")) {
 }
 
 describe("OAuth facade smoke harness (TC-OAUTH-REFRESH-008)", () => {
+  it.each(["managed", "oidc"])("sends the advertised resource and checks the %s provider's authorization response", (authMode) => {
+    const { callRecords, result, output } = runFixture({ authMode });
+    expect(result.status, output).toBe(0);
+    const authorize = callRecords.find((call) => call[0] === "curl" && call.at(-1).endsWith("/oauth/authorize"));
+    expect(authorize).toContain("resource=https://facade.example.com/mcp");
+    expect(callRecords.some((call) => call[0] === "curl" && call.at(-1).startsWith("https://auth.example.com/oauth2/authorize?"))).toBe(true);
+    expect(output).toContain("no immediate OAuth rejection from upstream");
+  });
+
+  it("fails when the facade forwards its resource URL to the provider", () => {
+    const { result, output } = runFixture({ forwardedResource: true });
+    expect(result.status).not.toBe(0);
+    expect(output).toContain("facade resource must not be forwarded");
+  });
+
+  it("fails when the provider immediately returns an OAuth error", () => {
+    const { result, output } = runFixture({ upstreamError: true });
+    expect(result.status).not.toBe(0);
+    expect(output).toContain("upstream authorization returned an OAuth error");
+    expect(output).not.toContain("scope-resource-mismatch");
+  });
+
+  it("accepts a directly served login page without a redirect", () => {
+    const { result, output } = runFixture({ upstreamStatus: 200, upstreamLocation: "" });
+    expect(result.status, output).toBe(0);
+  });
+
+  it.each([
+    ["", "missing Location"],
+    ["https://[invalid", "invalid Location"],
+  ])("rejects an unusable provider redirect (%s)", (upstreamLocation, diagnostic) => {
+    const { result, output } = runFixture({ upstreamLocation });
+    expect(result.status).not.toBe(0);
+    expect(output).toContain(diagnostic);
+  });
+
   it("checks external auth without inspecting or mutating an external user pool", () => {
     const {callRecords,result,output}=runFixture({authMode:"oidc"});
     expect(result.status,output).toBe(0);
