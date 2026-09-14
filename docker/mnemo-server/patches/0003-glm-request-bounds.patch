@@ -1,51 +1,39 @@
 diff --git a/server/internal/service/ingest.go b/server/internal/service/ingest.go
-index d4fd17f..0cef98d 100644
+index 5f08bdd4ff98ecd2dd21e13942f15133d447f994..573157d119fde8ac1789032fcf8496a96fe73a61 100644
 --- a/server/internal/service/ingest.go
 +++ b/server/internal/service/ingest.go
-@@ -30,23 +30,22 @@ const (
+@@ -30,14 +30,13 @@ const (
  )
  
  const (
 -	maxExtractionConversationRunes = 1000000
 -	factTypeQueryIntent            = "query_intent"
 -	factTypeRawFallback            = "raw_fallback"
+-	factTypeTransientStatus        = "transient_status"
+-	factTypeEphemeralIntent        = "ephemeral_intent"
+-	factTypeActivityLog            = "activity_log"
+-	factTypeOperationalLog         = "operational_log"
 -	rawFallbackTag                 = "raw-fallback"
-+	factTypeQueryIntent = "query_intent"
-+	factTypeRawFallback = "raw_fallback"
-+	rawFallbackTag      = "raw-fallback"
++	factTypeQueryIntent     = "query_intent"
++	factTypeRawFallback     = "raw_fallback"
++	factTypeTransientStatus = "transient_status"
++	factTypeEphemeralIntent = "ephemeral_intent"
++	factTypeActivityLog     = "activity_log"
++	factTypeOperationalLog  = "operational_log"
++	rawFallbackTag          = "raw-fallback"
  )
  
  var formattedConversationMessageRE = regexp.MustCompile(`(?:^|\n\n)([A-Za-z][A-Za-z0-9_-]*): `)
- 
- // IngestRequest is the input for the ingest pipeline.
- type IngestRequest struct {
--	Messages           []IngestMessage  `json:"messages"`
--	SessionID          string           `json:"session_id"`
--	AgentID            string           `json:"agent_id"`
--	AppID              string           `json:"appId,omitempty"`
--	Mode               IngestMode       `json:"mode"`
--	DisableSessionSave bool             `json:"disableSessionSave,omitempty"`
--	Metadata           json.RawMessage  `json:"metadata,omitempty"`
-+	Messages           []IngestMessage `json:"messages"`
-+	SessionID          string          `json:"session_id"`
-+	AgentID            string          `json:"agent_id"`
-+	AppID              string          `json:"appId,omitempty"`
-+	Mode               IngestMode      `json:"mode"`
-+	DisableSessionSave bool            `json:"disableSessionSave,omitempty"`
-+	Metadata           json.RawMessage `json:"metadata,omitempty"`
- }
- 
- // IngestMessage represents a single conversation message.
-@@ -138,7 +137,7 @@ func (s *IngestService) Ingest(ctx context.Context, agentName string, req Ingest
+@@ -189,7 +188,7 @@ func (s *IngestService) Ingest(ctx context.Context, agentName string, req Ingest
  	}
  
  	// Cap conversation size to avoid blowing LLM token limits.
 -	formatted = truncateRunes(formatted, maxExtractionConversationRunes)
 +	formatted = truncateConversationRunes(formatted, maxExtractionConversationRunes)
  
- 	changes, warnings, err := s.extractAndReconcile(ctx, agentName, req.AgentID, req.AppID, req.SessionID, formatted)
+ 	changes, warnings, err := s.extractAndReconcile(ctx, agentName, req.AgentID, req.AppID, req.SessionID, formatted, req.ExternalProvenance)
  	if err != nil {
-@@ -230,7 +229,7 @@ func prepareExtractionInput(messages []IngestMessage, maxConversationRunes int)
+@@ -355,7 +354,7 @@ func prepareExtractionInputWithPolicy(messages []IngestMessage, maxConversationR
  	if len(input.messages) == 0 {
  		return input
  	}
@@ -54,7 +42,7 @@ index d4fd17f..0cef98d 100644
  	return input
  }
  
-@@ -1733,6 +1732,22 @@ func truncateRunes(s string, maxRunes int) string {
+@@ -1965,6 +1964,22 @@ func truncateRunes(s string, maxRunes int) string {
  	return string(runes[:maxRunes]) + "..."
  }
  
@@ -78,7 +66,7 @@ index d4fd17f..0cef98d 100644
  	if err != nil {
  		return "error"
 diff --git a/server/internal/service/ingest_config.go b/server/internal/service/ingest_config.go
-index db19036..39b6eda 100644
+index db19036771804b174626299eb9c24976e18c5af5..39b6eda2cdb788b2e4d101f11bcba8fa018e4ab5 100644
 --- a/server/internal/service/ingest_config.go
 +++ b/server/internal/service/ingest_config.go
 @@ -17,9 +17,17 @@ package service
@@ -121,7 +109,7 @@ index db19036..39b6eda 100644
  
  ## Durability filter (deployment override — ACTIVE)
 diff --git a/server/internal/service/ingest_config_test.go b/server/internal/service/ingest_config_test.go
-index 89effd4..506521d 100644
+index 89effd4b6f4e038e02011dde15e66e96c7874943..506521dfe6d2a214440df92bf87846c4ca2f0796 100644
 --- a/server/internal/service/ingest_config_test.go
 +++ b/server/internal/service/ingest_config_test.go
 @@ -6,10 +6,12 @@ package service

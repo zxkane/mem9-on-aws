@@ -75,7 +75,94 @@ const ctx = (tool) => ({
   clientContext: { Custom: { bedrockAgentCoreToolName: `test-mem9-rest___${tool}` } },
 });
 
-afterEach(() => vi.unstubAllGlobals());
+afterEach(() => {
+  vi.unstubAllGlobals();
+  vi.restoreAllMocks();
+  vi.useRealTimers();
+});
+
+describe("proxy total request budget (TC-UPSTREAM-002/003/004)", () => {
+  function stalledFetch(bodyOnly = false) {
+    const spy = vi.fn(async (_url, { signal }) => {
+      const stalled = () => new Promise((_resolve, reject) => {
+        if (signal.aborted) reject(signal.reason);
+        else signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+      });
+      if (bodyOnly) return { ok: true, status: 200, text: stalled };
+      return stalled();
+    });
+    vi.stubGlobal("fetch", spy);
+    return spy;
+  }
+
+  it.each([false, true])("cancels a stalled response, including body=%s, once", async (bodyOnly) => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const spy = stalledFetch(bodyOnly);
+    let error;
+    const pending = handler({ q: "test" }, ctx("search_memories")).catch((e) => { error = e; });
+    await vi.advanceTimersByTimeAsync(25_001);
+    expect(error).toBeInstanceOf(Error);
+    expect(spy).toHaveBeenCalledTimes(1);
+    expect(spy.mock.calls[0][1].signal.aborted).toBe(true);
+    await pending;
+  });
+
+  it("reserves time for the Lambda response", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const spy = stalledFetch();
+    let error;
+    const pending = handler({ q: "test" }, {
+      ...ctx("search_memories"), getRemainingTimeInMillis: () => 3000,
+    }).catch((e) => { error = e; });
+    await vi.advanceTimersByTimeAsync(2001);
+    expect(error).toBeInstanceOf(Error);
+    expect(spy).toHaveBeenCalledTimes(1);
+    await pending;
+  });
+
+  it("includes retries and backoff in the original deadline", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const spy = stalledFetch();
+    spy.mockRejectedValueOnce(new TypeError("fetch failed"));
+    let error;
+    const pending = handler({ q: "test" }, ctx("search_memories")).catch((e) => { error = e; });
+    await vi.advanceTimersByTimeAsync(25_001);
+    expect(error).toBeInstanceOf(Error);
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy.mock.calls[1][1].signal.aborted).toBe(true);
+    await pending;
+  });
+
+  it("retries fast failures with a fresh signed envelope and preserves partial results", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const response = { memories: [{ id: "kept" }], total: 1, partial: true, warnings: [{ code: "branch_timeout" }] };
+    const spy = mockFetchOk(response);
+    spy.mockRejectedValueOnce(new TypeError("fetch failed"));
+    const pending = handler({ q: "test" }, ctx("search_memories"));
+    await vi.advanceTimersByTimeAsync(1501);
+    expect(await pending).toEqual(response);
+    expect(spy).toHaveBeenCalledTimes(2);
+    expect(spy.mock.calls[0][1].headers["X-Mem9-Transport"]).not.toBe(spy.mock.calls[1][1].headers["X-Mem9-Transport"]);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps the server's terminal 504 authoritative", async () => {
+    vi.useFakeTimers();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const spy = vi.fn(async () => ({ ok: false, status: 504, text: async () => '{"error":"recall deadline exceeded"}' }));
+    vi.stubGlobal("fetch", spy);
+    let error;
+    const pending = handler({ q: "test" }, ctx("search_memories")).catch((e) => { error = e; });
+    await vi.advanceTimersByTimeAsync(0);
+    expect(error?.status).toBe(504);
+    expect(spy).toHaveBeenCalledTimes(1);
+    await pending;
+  });
+});
 
 describe("proxy-handler ingest_messages", () => {
   it("POSTs a smart-ingest body (mode defaults to smart, messages passed through)", async () => {

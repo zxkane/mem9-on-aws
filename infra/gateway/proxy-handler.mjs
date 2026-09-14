@@ -32,7 +32,7 @@
  *   MEM9_API_KEY          the tenant id (X-API-Key). Not logged.
  */
 
-import { lookup as dnsLookup } from "node:dns/promises";
+import { PROXY_TIMEOUT_MS, LAMBDA_RESPONSE_RESERVE_MS } from "./request-limits.mjs";
 import {
   INTERNAL_AUTH_FIELD,
   createTransportEnvelope,
@@ -62,9 +62,6 @@ const INGEST_STATUS_FIELDS = [
   "updated_at",
   "completed_at",
 ];
-// mem9 writes are async; a single request should still return promptly. Give the
-// backend a generous-but-bounded budget (Lambda timeout is the real ceiling).
-const FETCH_TIMEOUT_MS = 25_000;
 
 function requireEnv(name) {
   const v = process.env[name];
@@ -82,7 +79,42 @@ function resolveToolName(context) {
   return i >= 0 ? raw.slice(i + TOOL_DELIM.length) : raw;
 }
 
-const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+async function sleep(ms, signal) {
+  signal.throwIfAborted();
+  await new Promise((resolve, reject) => {
+    const abort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener("abort", abort);
+      reject(signal.reason);
+    };
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", abort);
+      resolve();
+    }, ms);
+    signal.addEventListener("abort", abort, { once: true });
+  });
+}
+
+async function withinProxyBudget(context, run) {
+  const remaining = context?.getRemainingTimeInMillis?.();
+  const timeout = Number.isFinite(remaining)
+    ? Math.min(PROXY_TIMEOUT_MS, Math.max(0, remaining - LAMBDA_RESPONSE_RESERVE_MS))
+    : PROXY_TIMEOUT_MS;
+  const exhausted = new Error("mnemo-server request budget exhausted");
+  exhausted.name = "TimeoutError";
+  if (timeout <= 0) throw exhausted;
+  const controller = new AbortController();
+  const deadline = performance.now() + timeout;
+  const timer = setTimeout(() => controller.abort(exhausted), timeout);
+  try {
+    return await run({
+      signal: controller.signal,
+      remaining: () => Math.max(0, deadline - performance.now()),
+    });
+  } finally {
+    clearTimeout(timer);
+  }
+}
 
 class Mem9HttpError extends Error {
   constructor(method, path, status, body) {
@@ -90,78 +122,59 @@ class Mem9HttpError extends Error {
     const detail = isStatusLookup || !body ? "" : `: ${body.slice(0, 500)}`;
     super(`mnemo-server ${method} ${path} returned ${status}${detail}`);
     this.status = status;
-    this.retryable = status === 408 || status === 429 || status >= 500;
+    this.retryable = status === 408 || status === 429 || (status >= 500 && status !== 504);
   }
 }
 
-/** Diagnostic: resolve the mnemo-server host so a failed fetch's logs distinguish
- *  a DNS miss (ENOTFOUND/EAI_AGAIN — Cloud Map A record not resolvable) from a
- *  connection failure (ECONNREFUSED — resolves but nothing listening on :8080). */
-async function probeHost() {
-  try {
-    const host = new URL(BASE_URL).hostname;
-    const addrs = await dnsLookup(host, { all: true });
-    return `dns ${host} → ${addrs.map((a) => a.address).join(",")}`;
-  } catch (e) {
-    return `dns lookup failed: ${e?.code ?? e?.message ?? e}`;
+async function mem9FetchOnce(path, init, identity, budget) {
+  budget.signal.throwIfAborted();
+  const requestBody = typeof init.body === "string" ? init.body : "";
+  const res = await fetch(`${BASE_URL}${path}`, {
+    ...init,
+    signal: budget.signal,
+    headers: {
+      "X-API-Key": API_KEY,
+      "X-Mem9-Transport": createTransportEnvelope({
+        issuer: TRANSPORT_ISSUER,
+        method: init.method,
+        path,
+        body: requestBody,
+        identity,
+        keys: TRANSPORT_SIGNING_KEYS,
+      }),
+      ...(init.headers ?? {}),
+    },
+  });
+  const text = await res.text();
+  const body = text ? safeJson(text) : {};
+  if (!res.ok) {
+    throw new Mem9HttpError(init.method, path, res.status, text);
   }
+  return body;
 }
 
-async function mem9FetchOnce(path, init, identity) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
-  try {
-    const requestBody = typeof init.body === "string" ? init.body : "";
-    const res = await fetch(`${BASE_URL}${path}`, {
-      ...init,
-      signal: controller.signal,
-      headers: {
-        "X-API-Key": API_KEY,
-        "X-Mem9-Transport": createTransportEnvelope({
-          issuer: TRANSPORT_ISSUER,
-          method: init.method,
-          path,
-          body: requestBody,
-          identity,
-          keys: TRANSPORT_SIGNING_KEYS,
-        }),
-        ...(init.headers ?? {}),
-      },
-    });
-    const text = await res.text();
-    const body = text ? safeJson(text) : {};
-    if (!res.ok) {
-      throw new Mem9HttpError(init.method, path, res.status, text);
-    }
-    return body;
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-async function mem9Fetch(path, init, identity) {
+async function mem9Fetch(path, init, identity, budget) {
   // Retry the mnemo-server call a few times. A VPC-attached Lambda's FIRST DNS
   // lookup of the Cloud Map name (`mnemo.mem9-<stage>.local`) can transiently miss
   // on a cold start — right after the ECS task registers its A record — and undici
   // surfaces that as a bare `TypeError: fetch failed`. Short spaced retries clear
-  // the transient without masking a real config gap (which fails all attempts, and
-  // the URL logged below then points at the fix — DNS vs SG vs port).
+  // the transient while one total deadline bounds attempts, body reads, and backoff.
   const ATTEMPTS = 4;
   let lastErr;
   for (let i = 1; i <= ATTEMPTS; i++) {
     try {
-      return await mem9FetchOnce(path, init, identity);
+      return await mem9FetchOnce(path, init, identity, budget);
     } catch (e) {
       lastErr = e;
+      budget.signal.throwIfAborted();
       if (e instanceof Mem9HttpError && !e.retryable) throw e;
       const cause = e?.cause ? ` (cause: ${e.cause.code ?? e.cause.message ?? e.cause})` : "";
-      // On the last attempt, probe DNS so the logs pinpoint the failure class
-      // (DNS-miss vs conn-refused) rather than a bare "fetch failed".
-      const probe = i === ATTEMPTS ? ` [${await probeHost()}]` : "";
       console.error(
-        `mem9Fetch ${init.method} ${BASE_URL}${path} attempt ${i}/${ATTEMPTS} failed: ${e?.message ?? e}${cause}${probe}`,
+        `mem9Fetch ${init.method} ${BASE_URL}${path} attempt ${i}/${ATTEMPTS} failed: ${e?.message ?? e}${cause}`,
       );
-      if (i < ATTEMPTS) await sleep(1500 * i);
+      const delay = 1500 * i;
+      if (i === ATTEMPTS || budget.remaining() <= delay + 1000) throw e;
+      await sleep(delay, budget.signal);
     }
   }
   throw lastErr;
@@ -175,7 +188,7 @@ function safeJson(text) {
   }
 }
 
-async function addMemory(input, identity) {
+async function addMemory(input, identity, budget) {
   const { content, agent_id, memory_type } = input ?? {};
   if (typeof content !== "string" || !content.trim()) {
     throw new Error("add_memory requires non-empty 'content'");
@@ -192,10 +205,10 @@ async function addMemory(input, identity) {
     method: "POST",
     headers,
     body: JSON.stringify(payload),
-  }, identity);
+  }, identity, budget);
 }
 
-async function searchMemories(input, identity) {
+async function searchMemories(input, identity, budget) {
   const { q, limit, offset, agent_id, search_mode } = input ?? {};
   if (!q) throw new Error("search_memories requires 'q'");
   const params = new URLSearchParams({ q: String(q) });
@@ -213,10 +226,11 @@ async function searchMemories(input, identity) {
     `${MEMORIES_PATH}?${params.toString()}`,
     { method: "GET" },
     identity,
+    budget,
   );
 }
 
-async function ingestMessages(input, identity) {
+async function ingestMessages(input, identity, budget) {
   // Same endpoint as add_memory; mnemo-server smart-ingests when the body carries
   // messages[] (LLM extraction) rather than a single content string. Default
   // mode=smart matches the upstream Claude Code plugin's transcript ingest.
@@ -233,10 +247,10 @@ async function ingestMessages(input, identity) {
     method: "POST",
     headers,
     body: JSON.stringify(payload),
-  }, identity);
+  }, identity, budget);
 }
 
-async function getIngestJobStatus(input, identity) {
+async function getIngestJobStatus(input, identity, budget) {
   const { job_id } = input ?? {};
   if (typeof job_id !== "string" || !job_id.trim()) {
     throw new Error("get_ingest_job_status requires 'job_id'");
@@ -245,6 +259,7 @@ async function getIngestJobStatus(input, identity) {
     `${INGEST_JOBS_PATH}/${encodeURIComponent(job_id.trim())}`,
     { method: "GET" },
     identity,
+    budget,
   );
   if (status == null || typeof status !== "object" || Array.isArray(status)) {
     throw new Error("mnemo-server returned an invalid ingest job status");
@@ -268,16 +283,18 @@ export const handler = async (event, context) => {
     invocation: { tool, arguments: input },
     keys: IDENTITY_SIGNING_KEYS,
   });
-  switch (tool) {
-    case "add_memory":
-      return addMemory(input, identity);
-    case "search_memories":
-      return searchMemories(input, identity);
-    case "ingest_messages":
-      return ingestMessages(input, identity);
-    case "get_ingest_job_status":
-      return getIngestJobStatus(input, identity);
-    default:
-      throw new Error(`unknown tool: ${tool}`);
-  }
+  return withinProxyBudget(context, (budget) => {
+    switch (tool) {
+      case "add_memory":
+        return addMemory(input, identity, budget);
+      case "search_memories":
+        return searchMemories(input, identity, budget);
+      case "ingest_messages":
+        return ingestMessages(input, identity, budget);
+      case "get_ingest_job_status":
+        return getIngestJobStatus(input, identity, budget);
+      default:
+        throw new Error(`unknown tool: ${tool}`);
+    }
+  });
 };

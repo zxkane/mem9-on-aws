@@ -1,0 +1,128 @@
+diff --git a/server/cmd/mnemo-server/durable_extraction_config_test.go b/server/cmd/mnemo-server/durable_extraction_config_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..06299c7b59009131470f10131540455f2f52abc5
+--- /dev/null
++++ b/server/cmd/mnemo-server/durable_extraction_config_test.go
+@@ -0,0 +1,51 @@
++package main
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++
++	"github.com/qiffang/mnemos/server/internal/config"
++	"github.com/qiffang/mnemos/server/internal/llm"
++	"github.com/qiffang/mnemos/server/internal/service"
++)
++
++// TC-UPSTREAM-005 exercises the constructor shared by both durable worker paths.
++func TestDurableWorkerAssistantPolicy(t *testing.T) {
++	for _, enabled := range []bool{false, true} {
++		t.Run(map[bool]string{false: "default user only", true: "explicit assistant opt in"}[enabled], func(t *testing.T) {
++			prompts := make(chan string, 1)
++			endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++				var req struct {
++					Messages []struct {
++						Content string `json:"content"`
++					} `json:"messages"`
++				}
++				if err := json.NewDecoder(r.Body).Decode(&req); err != nil || len(req.Messages) == 0 {
++					http.Error(w, "invalid request", 400)
++					return
++				}
++				prompts <- req.Messages[0].Content
++				json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]string{"content": `{"facts":[],"message_tags":[[],[]]}`}}}})
++			}))
++			defer endpoint.Close()
++			cfg := &config.Config{IngestMode: "smart", FactExtractionIncludeAssistant: enabled}
++			client := llm.New(llm.Config{APIKey: "local", BaseURL: endpoint.URL, Model: "test"})
++			svc := newDurableIngestService(cfg, nil, client, nil)
++			_, err := svc.ExtractPhase1(context.Background(), []service.IngestMessage{{Role: "user", Content: "Which database is configured?"}, {Role: "assistant", Content: "PostgreSQL is the configured database."}})
++			if err != nil {
++				t.Fatal(err)
++			}
++			prompt := <-prompts
++			if strings.Contains(prompt, "Extract durable facts from both user and assistant messages") != enabled {
++				t.Fatal("durable constructor did not apply the configured assistant policy")
++			}
++			if strings.Contains(prompt, "Extract facts ONLY from the user's messages") == enabled {
++				t.Fatal("user-only policy did not match configuration")
++			}
++		})
++	}
++}
+diff --git a/server/cmd/mnemo-server/main.go b/server/cmd/mnemo-server/main.go
+index 7f595668ae2ed35bdc35b7b339ae89820b6cc88a..f41ac429fcd044b014f5a1506cc120c71493fd9f 100644
+--- a/server/cmd/mnemo-server/main.go
++++ b/server/cmd/mnemo-server/main.go
+@@ -356,13 +356,7 @@ func main() {
+ 			cfg.FTSEnabled,
+ 			"",
+ 		)
+-		ingestSvc := service.NewIngestService(
+-			memRepo,
+-			llmClient,
+-			embedder,
+-			cfg.EmbedAutoModel,
+-			service.IngestMode(cfg.IngestMode),
+-		)
++		ingestSvc := newDurableIngestService(cfg, memRepo, llmClient, embedder)
+ 		processor := service.NewDurableProcessor(
+ 			ingestSvc,
+ 			meteringWriter,
+@@ -387,13 +381,7 @@ func main() {
+ 				"",
+ 				scope,
+ 			)
+-			return service.NewIngestService(
+-				repo,
+-				llmClient,
+-				embedder,
+-				cfg.EmbedAutoModel,
+-				service.IngestMode(cfg.IngestMode),
+-			)
++			return newDurableIngestService(cfg, repo, llmClient, embedder)
+ 		})
+ 		workerConfig := ingestqueue.DefaultWorkerConfig()
+ 		workerConfig.Enabled = true
+@@ -580,3 +568,10 @@ func redactMeteringURLForLog(raw string) string {
+ 	}
+ 	return u.Scheme + "://" + u.Host
+ }
++
++// Keep the global worker and its namespace-specific replacements on the same
++// extraction policy. Production leaves assistant extraction disabled.
++func newDurableIngestService(cfg *config.Config, repo repository.MemoryRepo, client *llm.Client, embedder *embed.Embedder) *service.IngestService {
++	return service.NewIngestService(repo, client, embedder, cfg.EmbedAutoModel,
++		service.IngestMode(cfg.IngestMode), service.WithAssistantFactExtraction(cfg.FactExtractionIncludeAssistant))
++}
+diff --git a/server/internal/handler/durable_ingest_test.go b/server/internal/handler/durable_ingest_test.go
+index 3b1b2d55048571dc89046e56112bdaa8cbdfc06a..882b20969a08f0162872f6a4f518ef33ef5e47a1 100644
+--- a/server/internal/handler/durable_ingest_test.go
++++ b/server/internal/handler/durable_ingest_test.go
+@@ -599,3 +599,21 @@ func TestDurableIngestPostgresCommitAndDedupIntegration(t *testing.T) {
+ 		t.Fatalf("semantically different requests produced %d rows, want 2", count)
+ 	}
+ }
++
++// Upstream provenance is not in ingest-v1: do not acknowledge work that drops it.
++func TestDurableIngestRejectsUnsupportedExternalProvenance(t *testing.T) {
++	repo := &testMemoryRepo{}
++	srv := newTestServer(repo, &testSessionRepo{}).WithDurableIngest(true)
++	req := makeRequest(t, http.MethodPost, "/memories", map[string]any{
++		"messages": []map[string]string{{"role": "user", "content": "A durable fact"}},
++		"metadata": map[string]any{"external_provenance": map[string]string{"schema": "agent9/message-source@1", "source_message_id": "source-message"}},
++	})
++	rr := httptest.NewRecorder()
++	srv.createMemory(rr, req)
++	if rr.Code != http.StatusBadRequest {
++		t.Fatalf("status=%d, want 400: %s", rr.Code, rr.Body.String())
++	}
++	if len(repo.createCalls) != 0 {
++		t.Fatal("unsupported provenance started memory work")
++	}
++}

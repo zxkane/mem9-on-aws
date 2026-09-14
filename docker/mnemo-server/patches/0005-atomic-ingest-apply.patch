@@ -1,5 +1,5 @@
 diff --git a/server/cmd/mnemo-server/durable_ingest_test.go b/server/cmd/mnemo-server/durable_ingest_test.go
-index ca547d4..d5c2447 100644
+index ca547d49858e3ccdc5a53ce497469dce8a1dc280..d5c244787223716cab8503772c1edbb5b9608f63 100644
 --- a/server/cmd/mnemo-server/durable_ingest_test.go
 +++ b/server/cmd/mnemo-server/durable_ingest_test.go
 @@ -1,17 +1,20 @@
@@ -31,7 +31,7 @@ index ca547d4..d5c2447 100644
  	}
  }
 diff --git a/server/cmd/mnemo-server/main.go b/server/cmd/mnemo-server/main.go
-index 9ee45f3..1983012 100644
+index c9950ff7c63f2a3e9a878351febcceee4fd03760..5fcc897c78d83766cbb69c03388d315069ee8307 100644
 --- a/server/cmd/mnemo-server/main.go
 +++ b/server/cmd/mnemo-server/main.go
 @@ -2,6 +2,7 @@ package main
@@ -55,7 +55,7 @@ index 9ee45f3..1983012 100644
  		logger.Error("durable ingest startup rejected", "err", err)
  		os.Exit(1)
  	}
-@@ -310,6 +315,51 @@ func main() {
+@@ -296,6 +301,51 @@ func main() {
  		WithDurableIngest(cfg.DurableIngestEnabled)
  	router := srv.Router(tenantMW, rateMW, apiKeyMW, middleware.CORS(cfg.CORSAllowedOrigins))
  
@@ -107,7 +107,7 @@ index 9ee45f3..1983012 100644
  	httpSrv := &http.Server{
  		Addr:         ":" + cfg.Port,
  		Handler:      router,
-@@ -353,6 +403,9 @@ func main() {
+@@ -340,6 +390,9 @@ func main() {
  		if runtimeUsageWorkerCancel != nil {
  			runtimeUsageWorkerCancel()
  		}
@@ -117,8 +117,8 @@ index 9ee45f3..1983012 100644
  		webhookWorkerCancel()
  		workerCancel() // Stop upload worker first.
  
-@@ -371,9 +424,15 @@ func main() {
- 	logger.Info("server stopped")
+@@ -380,9 +433,15 @@ func newRuntimeUsageConfig(cfg *config.Config, outbox runtimeusage.OutboxStore)
+ 	}
  }
  
 -func validateDurableIngestStartup(enabled bool) error {
@@ -137,10 +137,10 @@ index 9ee45f3..1983012 100644
  	return nil
  }
 diff --git a/server/internal/config/config.go b/server/internal/config/config.go
-index 028934b..7f90b14 100644
+index 75cde5b8322351060b57aa10f80895a43231b398..e13dce10257c7d858b6f187e6c57f6d6886c2061 100644
 --- a/server/internal/config/config.go
 +++ b/server/internal/config/config.go
-@@ -32,12 +32,13 @@ type Config struct {
+@@ -34,12 +34,13 @@ type Config struct {
  	EmbedModel   string
  	EmbedDims    int
  
@@ -158,18 +158,18 @@ index 028934b..7f90b14 100644
 +	DurableIngestEnabled  bool
 +	DurableIngestTenantID string
  
- 	// DisableSessionSave skips raw session row persistence for message ingest.
- 	// Smart ingest still extracts and reconciles facts into insight memories.
-@@ -189,6 +190,7 @@ func Load() (*Config, error) {
- 		LLMTemperature:                   envFloat("MNEMO_LLM_TEMPERATURE", 0.1),
+ 	// FactExtractionIncludeAssistant allows smart ingest to extract durable facts
+ 	// from assistant turns in addition to user turns. Disabled by default.
+@@ -221,6 +222,7 @@ func Load() (*Config, error) {
  		IngestMode:                       envOr("MNEMO_INGEST_MODE", "smart"),
+ 		FactExtractionIncludeAssistant:   envBool("MNEMO_FACT_EXTRACTION_INCLUDE_ASSISTANT", false),
  		DurableIngestEnabled:             envBool("MNEMO_DURABLE_INGEST_ENABLED", false),
 +		DurableIngestTenantID:            strings.TrimSpace(os.Getenv("MEM9_TENANT_ID")),
  		DisableSessionSave:               envBool("MNEMO_DISABLE_SESSION_SAVE", false),
  		TiDBZeroEnabled:                  envBool("MNEMO_TIDB_ZERO_ENABLED", true),
  		TiDBZeroAPIURL:                   envOr("MNEMO_TIDB_ZERO_API_URL", "https://zero.tidbapi.com/v1alpha1"),
 diff --git a/server/internal/config/durable_ingest_test.go b/server/internal/config/durable_ingest_test.go
-index 62731e1..1fa2b72 100644
+index 62731e15f6669a79990c7a57491932132cc61098..1fa2b7265c2c23f38db031778a0b03d7bf09e976 100644
 --- a/server/internal/config/durable_ingest_test.go
 +++ b/server/internal/config/durable_ingest_test.go
 @@ -5,6 +5,7 @@ import "testing"
@@ -195,7 +195,7 @@ index 62731e1..1fa2b72 100644
 +	}
  }
 diff --git a/server/internal/handler/durable_ingest_test.go b/server/internal/handler/durable_ingest_test.go
-index 4783202..43fd2b7 100644
+index b07c9537797fed089bed5731eaca0c84755a64a8..b96599247206af782de582d35cbe80946e14916e 100644
 --- a/server/internal/handler/durable_ingest_test.go
 +++ b/server/internal/handler/durable_ingest_test.go
 @@ -5,6 +5,7 @@ import (
@@ -407,10 +407,10 @@ index 4783202..43fd2b7 100644
  	srv := newTestServer(&testMemoryRepo{}, &testSessionRepo{}).WithDurableIngest(true)
  	var mu sync.Mutex
 diff --git a/server/internal/handler/handler.go b/server/internal/handler/handler.go
-index 4edbd6c..dd2d5b5 100644
+index 98aea3982065d81ea52ad1ff368108f9a885cccc..ccbb5b709e92a925a37ad196cbdce66672f1c919 100644
 --- a/server/internal/handler/handler.go
 +++ b/server/internal/handler/handler.go
-@@ -297,6 +297,7 @@ func (s *Server) Router(
+@@ -315,6 +315,7 @@ func (s *Server) Router(
  
  		// Session messages (raw captured turns).
  		r.Get("/session-messages", s.handleListSessionMessages)
@@ -420,7 +420,7 @@ index 4edbd6c..dd2d5b5 100644
  		r.Put("/session-messages/{id}", s.editSessionMessage)
 diff --git a/server/internal/handler/ingest_job_status.go b/server/internal/handler/ingest_job_status.go
 new file mode 100644
-index 0000000..49339ad
+index 0000000000000000000000000000000000000000..49339ad25e0597aaea1c48900f2460e3e9da4575
 --- /dev/null
 +++ b/server/internal/handler/ingest_job_status.go
 @@ -0,0 +1,53 @@
@@ -479,7 +479,7 @@ index 0000000..49339ad
 +}
 diff --git a/server/internal/handler/ingest_job_status_test.go b/server/internal/handler/ingest_job_status_test.go
 new file mode 100644
-index 0000000..5a18842
+index 0000000000000000000000000000000000000000..5a18842fa7ebc988c17200765502d57e742a1259
 --- /dev/null
 +++ b/server/internal/handler/ingest_job_status_test.go
 @@ -0,0 +1,106 @@
@@ -590,15 +590,19 @@ index 0000000..5a18842
 +	}
 +}
 diff --git a/server/internal/handler/memory.go b/server/internal/handler/memory.go
-index bff6a81..e88df72 100644
+index cd936fc10d837c4e64ce45eb236f8b3dff068c39..4dd0868ba45f20487e69088c9b046804cfd1f934 100644
 --- a/server/internal/handler/memory.go
 +++ b/server/internal/handler/memory.go
-@@ -106,10 +106,42 @@ func (s *Server) createMemory(w http.ResponseWriter, r *http.Request) {
- 			Metadata:           append(json.RawMessage(nil), req.Metadata...),
+@@ -112,10 +112,46 @@ func (s *Server) createMemory(w http.ResponseWriter, r *http.Request) {
+ 			ExternalProvenance: externalProvenance,
  		}
  
 -		if s.durableIngestEnabled && !req.Sync {
 +		if !req.Sync {
++			if externalProvenance != nil {
++				s.handleError(r.Context(), w, &domain.ValidationError{Field: "metadata.external_provenance", Message: "external provenance requires synchronous ingest"})
++				return
++			}
 +			if !s.durableIngestEnabled {
 +				respondError(w, http.StatusServiceUnavailable, "durable ingest is unavailable")
 +				return
@@ -621,7 +625,7 @@ index bff6a81..e88df72 100644
 +					1,
 +				)
 +				if err != nil {
-+					s.handleRuntimeUsageError(w, err)
++					s.handleRuntimeUsageError(r.Context(), w, err, runtimeUsageReserveErrorDetails(auth, runtimeusage.MeterMemoryWriteRequests))
 +					return
 +				}
 +			}
@@ -629,8 +633,8 @@ index bff6a81..e88df72 100644
  			if err != nil {
 +				if s.runtimeUsageEnabled() &&
 +					!errors.Is(err, ingestqueue.ErrEnqueueCommitAmbiguous) {
-+					s.runtimeUsage.AfterMemoryCreateFailure(
-+						context.Background(),
++					s.afterRuntimeUsageMemoryCreateFailure(
++						r.Context(),
 +						lease,
 +						err,
 +					)
@@ -638,14 +642,14 @@ index bff6a81..e88df72 100644
  				if errors.Is(err, domain.ErrValidation) {
  					s.handleError(r.Context(), w, err)
  					return
-@@ -118,6 +150,14 @@ func (s *Server) createMemory(w http.ResponseWriter, r *http.Request) {
+@@ -124,6 +160,14 @@ func (s *Server) createMemory(w http.ResponseWriter, r *http.Request) {
  				respondError(w, http.StatusServiceUnavailable, "durable ingest enqueue failed")
  				return
  			}
 +			if lease != nil && lease.Reserved &&
 +				job.RuntimeOperationID != lease.OperationID {
-+				s.runtimeUsage.AfterMemoryCreateFailure(
-+					context.Background(),
++				s.afterRuntimeUsageMemoryCreateFailure(
++					r.Context(),
 +					lease,
 +					errors.New("duplicate durable ingest job"),
 +				)
@@ -653,7 +657,7 @@ index bff6a81..e88df72 100644
  			respond(w, http.StatusAccepted, map[string]string{
  				"job_id": job.ID,
  				"state":  string(job.State),
-@@ -125,133 +165,79 @@ func (s *Server) createMemory(w http.ResponseWriter, r *http.Request) {
+@@ -131,126 +175,74 @@ func (s *Server) createMemory(w http.ResponseWriter, r *http.Request) {
  			return
  		}
  
@@ -669,12 +673,12 @@ index bff6a81..e88df72 100644
 -				var err error
 -				lease, err = s.runtimeUsage.BeforeMemoryCreate(syncCtx, subjectFromAuth(auth), 1)
 -				if err != nil {
--					s.handleRuntimeUsageError(w, err)
+-					s.handleRuntimeUsageError(syncCtx, w, err, runtimeUsageReserveErrorDetails(auth, runtimeusage.MeterMemoryWriteRequests))
 -					return
 -				}
 -				defer func() {
 -					if !finalized {
--						s.runtimeUsage.AfterMemoryCreateFailure(context.Background(), lease, context.Canceled)
+-						s.afterRuntimeUsageMemoryCreateFailure(r.Context(), lease, context.Canceled)
 -					}
 -				}()
 -			}
@@ -687,7 +691,7 @@ index bff6a81..e88df72 100644
 +			lease, err = s.runtimeUsage.BeforeMemoryCreate(syncCtx, subjectFromAuth(auth), 1)
  			if err != nil {
 -				if s.runtimeUsageEnabled() {
--					s.runtimeUsage.AfterMemoryCreateFailure(context.Background(), lease, err)
+-					s.afterRuntimeUsageMemoryCreateFailure(r.Context(), lease, err)
 -					finalized = true
 -				}
 -				if isSyncIngestTimeout(syncCtx, err) {
@@ -696,17 +700,17 @@ index bff6a81..e88df72 100644
 -					return
 -				}
 -				s.handleError(syncCtx, w, err)
-+				s.handleRuntimeUsageError(w, err)
++				s.handleRuntimeUsageError(syncCtx, w, err, runtimeUsageReserveErrorDetails(auth, runtimeusage.MeterMemoryWriteRequests))
  				return
  			}
 -			if result != nil && result.Status == "failed" {
 -				if s.runtimeUsageEnabled() {
 -					err := errors.New("ingest reconciliation failed")
--					s.runtimeUsage.AfterMemoryCreateFailure(context.Background(), lease, err)
+-					s.afterRuntimeUsageMemoryCreateFailure(r.Context(), lease, err)
 -					finalized = true
 +			defer func() {
 +				if !finalized {
-+					s.runtimeUsage.AfterMemoryCreateFailure(context.Background(), lease, context.Canceled)
++					s.afterRuntimeUsageMemoryCreateFailure(r.Context(), lease, context.Canceled)
  				}
 -				respondError(w, http.StatusInternalServerError, "ingest reconciliation failed")
 -				return
@@ -716,7 +720,7 @@ index bff6a81..e88df72 100644
 +		result, err := s.ingestMessages(syncCtx, auth, svc, ingestReq, chainAuth)
 +		if err != nil {
 +			if s.runtimeUsageEnabled() {
-+				s.runtimeUsage.AfterMemoryCreateFailure(context.Background(), lease, err)
++				s.afterRuntimeUsageMemoryCreateFailure(r.Context(), lease, err)
 +				finalized = true
  			}
 -			var written int64
@@ -736,24 +740,19 @@ index bff6a81..e88df72 100644
 -				if result != nil {
 -					ids = result.InsightIDs
 -				}
--				if err := withRuntimeUsagePostSuccessContext(func(ctx context.Context) error {
+-				if err := withRuntimeUsagePostSuccessContext(r.Context(), func(ctx context.Context) error {
 -					return s.runtimeUsage.AfterMemoryCreateSuccess(ctx, lease, runtimeusage.MemoryCreateResult{
 -						MemoryIDs:       ids,
 -						AgentName:       auth.AgentName,
 -						ObjectsAffected: written,
 -					})
 -				}); err != nil {
--					s.logger.Error("runtime usage sync ingest finalization failed",
--						"operation_id", lease.OperationID,
--						"tenant_id", auth.TenantID,
--						"cluster_id", auth.ClusterID,
--						"err", err)
 -					finalized = true
--					s.handleRuntimeUsageError(w, err)
+-					s.handleRuntimeUsageError(r.Context(), w, err, runtimeUsageFinalizeErrorDetails(lease))
 -					return
 -				}
 +				err := errors.New("ingest reconciliation failed")
-+				s.runtimeUsage.AfterMemoryCreateFailure(context.Background(), lease, err)
++				s.afterRuntimeUsageMemoryCreateFailure(r.Context(), lease, err)
  				finalized = true
  			}
 -			s.recordIngestMetering(auth, svc)
@@ -766,7 +765,7 @@ index bff6a81..e88df72 100644
 -				var err error
 -				lease, err = s.runtimeUsage.BeforeMemoryCreate(r.Context(), subjectFromAuth(auth), 1)
 -				if err != nil {
--					s.handleRuntimeUsageError(w, err)
+-					s.handleRuntimeUsageError(r.Context(), w, err, runtimeUsageReserveErrorDetails(auth, runtimeusage.MeterMemoryWriteRequests))
 -					return
 -				}
 +			respondError(w, http.StatusInternalServerError, "ingest reconciliation failed")
@@ -785,14 +784,14 @@ index bff6a81..e88df72 100644
 -				result, err := s.ingestMessages(context.Background(), auth, svc, ingestReq, chainAuth)
 -				if err != nil {
 -					if s.runtimeUsageEnabled() {
--						s.runtimeUsage.AfterMemoryCreateFailure(context.Background(), lease, err)
+-						s.afterRuntimeUsageMemoryCreateFailure(r.Context(), lease, err)
 -					}
 -					slog.Error("async ingest failed", "session", ingestReq.SessionID, "err", err)
 -					return
 -				}
 -				if result != nil && result.Status == "failed" {
 -					if s.runtimeUsageEnabled() {
--						s.runtimeUsage.AfterMemoryCreateFailure(context.Background(), lease, errors.New("ingest reconciliation failed"))
+-						s.afterRuntimeUsageMemoryCreateFailure(r.Context(), lease, errors.New("ingest reconciliation failed"))
 -					}
 -					slog.Error("async ingest reconcile failed", "session", ingestReq.SessionID)
 -					return
@@ -806,16 +805,14 @@ index bff6a81..e88df72 100644
 -					if result != nil {
 -						ids = result.InsightIDs
 -					}
--					if err := s.runtimeUsage.AfterMemoryCreateSuccess(context.Background(), lease, runtimeusage.MemoryCreateResult{
--						MemoryIDs:       ids,
--						AgentName:       auth.AgentName,
--						ObjectsAffected: written,
+-					if err := withRuntimeUsagePostSuccessContext(r.Context(), func(ctx context.Context) error {
+-						return s.runtimeUsage.AfterMemoryCreateSuccess(ctx, lease, runtimeusage.MemoryCreateResult{
+-							MemoryIDs:       ids,
+-							AgentName:       auth.AgentName,
+-							ObjectsAffected: written,
+-						})
 -					}); err != nil {
--						s.logger.Error("runtime usage async ingest finalization failed",
--							"operation_id", lease.OperationID,
--							"tenant_id", auth.TenantID,
--							"cluster_id", auth.ClusterID,
--							"err", err)
+-						s.logRuntimeUsageBackgroundFinalizeError(r.Context(), err, runtimeUsageFinalizeErrorDetails(lease))
 -						return
 -					}
 -				}
@@ -823,20 +820,15 @@ index bff6a81..e88df72 100644
 -				s.afterSuccessfulIngest(auth, svc, written)
 -			}(lease)
 -			respond(w, http.StatusAccepted, statusResponseWithRuntimeNotice("accepted", s.runtimeResponseNotice(r.Context(), auth)))
-+			if err := withRuntimeUsagePostSuccessContext(func(ctx context.Context) error {
++			if err := withRuntimeUsagePostSuccessContext(r.Context(), func(ctx context.Context) error {
 +				return s.runtimeUsage.AfterMemoryCreateSuccess(ctx, lease, runtimeusage.MemoryCreateResult{
 +					MemoryIDs:       ids,
 +					AgentName:       auth.AgentName,
 +					ObjectsAffected: written,
 +				})
 +			}); err != nil {
-+				s.logger.Error("runtime usage sync ingest finalization failed",
-+					"operation_id", lease.OperationID,
-+					"tenant_id", auth.TenantID,
-+					"cluster_id", auth.ClusterID,
-+					"err", err)
 +				finalized = true
-+				s.handleRuntimeUsageError(w, err)
++				s.handleRuntimeUsageError(r.Context(), w, err, runtimeUsageFinalizeErrorDetails(lease))
 +				return
 +			}
 +			finalized = true
@@ -848,7 +840,7 @@ index bff6a81..e88df72 100644
  		return
  	}
  
-@@ -536,7 +522,12 @@ func (s *Server) createMemory(w http.ResponseWriter, r *http.Request) {
+@@ -516,7 +508,12 @@ func (s *Server) createMemory(w http.ResponseWriter, r *http.Request) {
  	}
  }
  
@@ -862,7 +854,7 @@ index bff6a81..e88df72 100644
  	mode := req.Mode
  	if mode == "" {
  		mode = s.ingestMode
-@@ -575,7 +566,7 @@ func (s *Server) enqueueDurableIngest(ctx context.Context, auth *domain.AuthInfo
+@@ -555,7 +552,7 @@ func (s *Server) enqueueDurableIngest(ctx context.Context, auth *domain.AuthInfo
  	if repo == nil {
  		return nil, errors.New("durable ingest requires PostgreSQL")
  	}
@@ -871,7 +863,7 @@ index bff6a81..e88df72 100644
  		ID:                 uuid.NewString(),
  		TenantID:           auth.TenantID,
  		IdempotencyKey:     envelope.IdempotencyKey,
-@@ -585,7 +576,14 @@ func (s *Server) enqueueDurableIngest(ctx context.Context, auth *domain.AuthInfo
+@@ -565,7 +562,14 @@ func (s *Server) enqueueDurableIngest(ctx context.Context, auth *domain.AuthInfo
  		SessionID:          req.SessionID,
  		Mode:               string(mode),
  		DisableSessionSave: req.DisableSessionSave,
@@ -888,10 +880,10 @@ index bff6a81..e88df72 100644
  		return nil, err
  	}
 diff --git a/server/internal/handler/memory_test.go b/server/internal/handler/memory_test.go
-index 85fcb0e..84d95e5 100644
+index 327b5b31f3c798aef34427476f6a305c42babce9..4e7d7b1301675a195cd99c9aa75cfe4fc405d6d8 100644
 --- a/server/internal/handler/memory_test.go
 +++ b/server/internal/handler/memory_test.go
-@@ -485,7 +485,11 @@ func (m *captureRuntimeUsageManager) BeforeMemoryCreate(_ context.Context, subje
+@@ -536,7 +536,11 @@ func (m *captureRuntimeUsageManager) BeforeMemoryCreate(_ context.Context, subje
  			return nil, err
  		}
  	}
@@ -904,7 +896,7 @@ index 85fcb0e..84d95e5 100644
  }
  func (m *captureRuntimeUsageManager) AfterMemoryCreateSuccess(ctx context.Context, _ *runtimeusage.OperationLease, result runtimeusage.MemoryCreateResult) error {
  	m.mu.Lock()
-@@ -495,10 +499,11 @@ func (m *captureRuntimeUsageManager) AfterMemoryCreateSuccess(ctx context.Contex
+@@ -546,10 +550,11 @@ func (m *captureRuntimeUsageManager) AfterMemoryCreateSuccess(ctx context.Contex
  	m.createSuccessContextErrs = append(m.createSuccessContextErrs, ctx.Err())
  	return m.afterCreateSuccessErr
  }
@@ -917,7 +909,7 @@ index 85fcb0e..84d95e5 100644
  }
  func (m *captureRuntimeUsageManager) BeforeMemoryUpdate(_ context.Context, subject runtimeusage.Subject) (*runtimeusage.OperationLease, error) {
  	m.beforeUpdateCalls++
-@@ -2542,48 +2547,15 @@ func TestCreateMemory_AsyncMessages_Returns202(t *testing.T) {
+@@ -3250,20 +3255,12 @@ func TestCreateMemory_AsyncMessages_Returns202(t *testing.T) {
  
  	srv.createMemory(rr, req)
  
@@ -933,6 +925,36 @@ index 85fcb0e..84d95e5 100644
 -		t.Errorf("expected status=accepted, got %q", resp["status"])
 +	if rr.Code != http.StatusServiceUnavailable {
 +		t.Errorf("expected 503, got %d: %s", rr.Code, rr.Body.String())
+ 	}
+ }
+ 
+-func TestCreateMemory_AsyncMessagesValidatesExternalProvenanceBeforeAcceptance(t *testing.T) {
++func TestCreateMemory_SyncMessagesValidatesExternalProvenanceBeforeWork(t *testing.T) {
+ 	validEnvelope := func(sourceMessageID string) map[string]any {
+ 		return map[string]any{
+ 			"external_provenance": map[string]any{
+@@ -3283,9 +3280,9 @@ func TestCreateMemory_AsyncMessagesValidatesExternalProvenanceBeforeAcceptance(t
+ 		metadata   any
+ 		wantStatus int
+ 	}{
+-		{name: "legacy metadata", messages: defaultMessages, metadata: map[string]any{"source": "legacy"}, wantStatus: http.StatusAccepted},
+-		{name: "exact envelope", messages: defaultMessages, metadata: validEnvelope(strings.Repeat("🙂", 64)), wantStatus: http.StatusAccepted},
+-		{name: "opaque id is not normalized", messages: defaultMessages, metadata: validEnvelope(" Message-ID "), wantStatus: http.StatusAccepted},
++		{name: "legacy metadata", messages: defaultMessages, metadata: map[string]any{"source": "legacy"}, wantStatus: http.StatusOK},
++		{name: "exact envelope", messages: defaultMessages, metadata: validEnvelope(strings.Repeat("🙂", 64)), wantStatus: http.StatusOK},
++		{name: "opaque id is not normalized", messages: defaultMessages, metadata: validEnvelope(" Message-ID "), wantStatus: http.StatusOK},
+ 		{name: "unknown schema", messages: defaultMessages, metadata: map[string]any{"external_provenance": map[string]any{"schema": "agent9/message-source@2", "source_message_id": "message_user"}}, wantStatus: http.StatusBadRequest},
+ 		{name: "missing member", messages: defaultMessages, metadata: map[string]any{"external_provenance": map[string]any{"schema": "agent9/message-source@1"}}, wantStatus: http.StatusBadRequest},
+ 		{name: "unexpected member", messages: defaultMessages, metadata: map[string]any{"external_provenance": map[string]any{"schema": "agent9/message-source@1", "source_message_id": "message_user", "session_id": "untrusted"}}, wantStatus: http.StatusBadRequest},
+@@ -3300,6 +3297,7 @@ func TestCreateMemory_AsyncMessagesValidatesExternalProvenanceBeforeAcceptance(t
+ 			srv := newTestServer(&testMemoryRepo{}, &testSessionRepo{})
+ 			req := makeRequest(t, http.MethodPost, "/memories", map[string]any{
+ 				"messages":   tt.messages,
++				"sync":       true,
+ 				"content":    tt.content,
+ 				"session_id": "test-session",
+ 				"metadata":   tt.metadata,
+@@ -3315,35 +3313,10 @@ func TestCreateMemory_AsyncMessagesValidatesExternalProvenanceBeforeAcceptance(t
  	}
  }
  
@@ -970,7 +992,7 @@ index 85fcb0e..84d95e5 100644
  	body := map[string]any{
  		"messages": []map[string]string{
  			{"role": "user", "content": "I like green tea"},
-@@ -2596,66 +2568,31 @@ func TestCreateMemory_AsyncMessages_DisableSessionSaveSkipsRawSession(t *testing
+@@ -3356,66 +3329,31 @@ func TestCreateMemory_AsyncMessages_DisableSessionSaveSkipsRawSession(t *testing
  
  	srv.createMemory(rr, req)
  
@@ -1049,7 +1071,7 @@ index 85fcb0e..84d95e5 100644
  	body := map[string]any{
  		"messages": []map[string]string{
  			{"role": "user", "content": "hello"},
-@@ -2668,10 +2605,10 @@ func TestCreateMemory_AsyncMessages_ReconcileFailed_DoesNotRecordIngestMetering(
+@@ -3428,10 +3366,10 @@ func TestCreateMemory_AsyncMessages_ReconcileFailed_DoesNotRecordIngestMetering(
  
  	srv.createMemory(rr, req)
  
@@ -1065,7 +1087,7 @@ index 85fcb0e..84d95e5 100644
  func TestBulkCreateMemoriesTriggersPostWriteHooks(t *testing.T) {
 diff --git a/server/internal/ingestqueue/plan.go b/server/internal/ingestqueue/plan.go
 new file mode 100644
-index 0000000..f3621ec
+index 0000000000000000000000000000000000000000..f3621ec579011e5e4043d0f77cc3d6a2659f8d66
 --- /dev/null
 +++ b/server/internal/ingestqueue/plan.go
 @@ -0,0 +1,238 @@
@@ -1309,7 +1331,7 @@ index 0000000..f3621ec
 +}
 diff --git a/server/internal/ingestqueue/plan_test.go b/server/internal/ingestqueue/plan_test.go
 new file mode 100644
-index 0000000..b4002bc
+index 0000000000000000000000000000000000000000..b4002bc85f6aee2ca4f6b3a68ec55928778f88c5
 --- /dev/null
 +++ b/server/internal/ingestqueue/plan_test.go
 @@ -0,0 +1,206 @@
@@ -1520,7 +1542,7 @@ index 0000000..b4002bc
 +	}
 +}
 diff --git a/server/internal/ingestqueue/types.go b/server/internal/ingestqueue/types.go
-index 775a61a..cbe4831 100644
+index 775a61af6caad210486da3fce1f26b52a6e9888a..cbe48313bfa66edcbc00aa35c8a211434f3f92b9 100644
 --- a/server/internal/ingestqueue/types.go
 +++ b/server/internal/ingestqueue/types.go
 @@ -18,15 +18,32 @@ const (
@@ -1757,7 +1779,7 @@ index 775a61a..cbe4831 100644
 +	WarningCount  int
  }
 diff --git a/server/internal/ingestqueue/worker.go b/server/internal/ingestqueue/worker.go
-index 392cfbc..0fa0942 100644
+index 392cfbc90be389be736cacfe884a2c06b5c10cd3..0fa094268190ec552b8bca8e7b67719369d949d6 100644
 --- a/server/internal/ingestqueue/worker.go
 +++ b/server/internal/ingestqueue/worker.go
 @@ -15,6 +15,8 @@ import (
@@ -2098,7 +2120,7 @@ index 392cfbc..0fa0942 100644
  	}
  	return ErrorClassification{Class: "permanent_unknown"}
 diff --git a/server/internal/ingestqueue/worker_integration_test.go b/server/internal/ingestqueue/worker_integration_test.go
-index 24f51b9..e00e6ac 100644
+index 24f51b974b5d56c227a525d4e01ed3078c823aae..e00e6ac84d8fd67bda5e4a481809e10cf7b08fbf 100644
 --- a/server/internal/ingestqueue/worker_integration_test.go
 +++ b/server/internal/ingestqueue/worker_integration_test.go
 @@ -3,7 +3,7 @@ package ingestqueue_test
@@ -2310,7 +2332,7 @@ index 24f51b9..e00e6ac 100644
  	cfg := ingestqueue.DefaultWorkerConfig()
  	cfg.Enabled = true
 diff --git a/server/internal/ingestqueue/worker_test.go b/server/internal/ingestqueue/worker_test.go
-index 39f0ce2..0106f32 100644
+index 39f0ce2eeeb43f796784e61472725a7dbdf62683..0106f3242589d71b7e1a57d62476fa19a3695306 100644
 --- a/server/internal/ingestqueue/worker_test.go
 +++ b/server/internal/ingestqueue/worker_test.go
 @@ -3,7 +3,6 @@ package ingestqueue
@@ -3080,7 +3102,7 @@ index 39f0ce2..0106f32 100644
  	var logs bytes.Buffer
  	cfg := DefaultWorkerConfig()
 diff --git a/server/internal/repository/postgres/ingest_job.go b/server/internal/repository/postgres/ingest_job.go
-index 39986ad..76d3e7b 100644
+index 39986adda12a54af8a9a80ea4d15dde0b0050df8..76d3e7b58bb41967cf5374a76d71d5f07247818c 100644
 --- a/server/internal/repository/postgres/ingest_job.go
 +++ b/server/internal/repository/postgres/ingest_job.go
 @@ -10,15 +10,20 @@ import (
@@ -3622,7 +3644,7 @@ index 39986ad..76d3e7b 100644
 +	return value
 +}
 diff --git a/server/internal/repository/postgres/ingest_job_integration_test.go b/server/internal/repository/postgres/ingest_job_integration_test.go
-index 3094d84..adb3ad4 100644
+index 3094d845f87aa37c1bb803b4b3f58d897219438f..adb3ad4689bce34229be4535568305583ca0c084 100644
 --- a/server/internal/repository/postgres/ingest_job_integration_test.go
 +++ b/server/internal/repository/postgres/ingest_job_integration_test.go
 @@ -52,6 +52,42 @@ func enqueueJob(t *testing.T, repo *IngestJobRepo, input ingestqueue.EnqueueInpu
@@ -4111,7 +4133,7 @@ index 3094d84..adb3ad4 100644
  	}
 diff --git a/server/internal/repository/postgres/ingest_plan.go b/server/internal/repository/postgres/ingest_plan.go
 new file mode 100644
-index 0000000..f989f25
+index 0000000000000000000000000000000000000000..f989f25222da2bb9b756dd5ae9831fb6f0123e06
 --- /dev/null
 +++ b/server/internal/repository/postgres/ingest_plan.go
 @@ -0,0 +1,652 @@
@@ -4769,7 +4791,7 @@ index 0000000..f989f25
 +}
 diff --git a/server/internal/repository/postgres/ingest_plan_integration_test.go b/server/internal/repository/postgres/ingest_plan_integration_test.go
 new file mode 100644
-index 0000000..9212eb5
+index 0000000000000000000000000000000000000000..9212eb5327da12d8d4f8ab71855786f6b730a787
 --- /dev/null
 +++ b/server/internal/repository/postgres/ingest_plan_integration_test.go
 @@ -0,0 +1,488 @@
@@ -5262,10 +5284,10 @@ index 0000000..9212eb5
 +	assertAtomicMutationCounts(t, repo, recovered, 1, 2, ingestqueue.StateSucceeded)
 +}
 diff --git a/server/internal/runtimeusage/manager.go b/server/internal/runtimeusage/manager.go
-index da57b97..361a5f5 100644
+index 66c26c41c4f031df1c3254a34d634879e651cb62..650ce12ace4d1ac1ef4cca3d7ca1ae13e1c9c2cb 100644
 --- a/server/internal/runtimeusage/manager.go
 +++ b/server/internal/runtimeusage/manager.go
-@@ -68,7 +68,9 @@ func (noopManager) BeforeMemoryCreate(context.Context, Subject, int64) (*Operati
+@@ -90,7 +90,9 @@ func (noopManager) BeforeMemoryCreate(context.Context, Subject, int64) (*Operati
  func (noopManager) AfterMemoryCreateSuccess(context.Context, *OperationLease, MemoryCreateResult) error {
  	return nil
  }
@@ -5276,7 +5298,7 @@ index da57b97..361a5f5 100644
  func (noopManager) BeforeMemoryUpdate(context.Context, Subject) (*OperationLease, error) {
  	return nil, nil
  }
-@@ -153,7 +155,7 @@ func (m *manager) AfterRecallSuccess(ctx context.Context, lease *OperationLease,
+@@ -175,7 +177,7 @@ func (m *manager) AfterRecallSuccess(ctx context.Context, lease *OperationLease,
  }
  
  func (m *manager) AfterRecallFailure(ctx context.Context, lease *OperationLease, cause error) {
@@ -5285,7 +5307,7 @@ index da57b97..361a5f5 100644
  }
  
  func (m *manager) BeforeMemoryCreate(ctx context.Context, subject Subject, _ int64) (*OperationLease, error) {
-@@ -179,8 +181,8 @@ func (m *manager) AfterMemoryCreateSuccess(ctx context.Context, lease *Operation
+@@ -201,8 +203,8 @@ func (m *manager) AfterMemoryCreateSuccess(ctx context.Context, lease *Operation
  	return nil
  }
  
@@ -5296,7 +5318,7 @@ index da57b97..361a5f5 100644
  }
  
  func (m *manager) BeforeMemoryUpdate(ctx context.Context, subject Subject) (*OperationLease, error) {
-@@ -207,7 +209,7 @@ func (m *manager) AfterMemoryUpdateSuccess(ctx context.Context, lease *Operation
+@@ -229,7 +231,7 @@ func (m *manager) AfterMemoryUpdateSuccess(ctx context.Context, lease *Operation
  }
  
  func (m *manager) AfterMemoryUpdateFailure(ctx context.Context, lease *OperationLease, cause error) {
@@ -5305,7 +5327,7 @@ index da57b97..361a5f5 100644
  }
  
  func (m *manager) BeforeMemoryDelete(ctx context.Context, subject Subject) (*OperationLease, error) {
-@@ -234,7 +236,7 @@ func (m *manager) AfterMemoryDeleteSuccess(ctx context.Context, lease *Operation
+@@ -256,7 +258,7 @@ func (m *manager) AfterMemoryDeleteSuccess(ctx context.Context, lease *Operation
  }
  
  func (m *manager) AfterMemoryDeleteFailure(ctx context.Context, lease *OperationLease, cause error) {
@@ -5314,32 +5336,26 @@ index da57b97..361a5f5 100644
  }
  
  func (m *manager) reserve(ctx context.Context, subject Subject, meter string, units int64) (*OperationLease, error) {
-@@ -250,7 +252,12 @@ func (m *manager) reserve(ctx context.Context, subject Subject, meter string, un
- 		Units:       units,
- 		Reserved:    true,
+@@ -274,8 +276,16 @@ func (m *manager) reserve(ctx context.Context, subject Subject, meter string, un
  	}
--	_, err = m.client.Reserve(ctx, subject, operationID, Operation{Meter: meter, Units: units})
-+	reservation, err := m.client.Reserve(
-+		ctx,
-+		subject,
-+		operationID,
-+		Operation{Meter: meter, Units: units},
-+	)
- 	if err != nil {
- 		var denied *QuotaDeniedError
- 		if errors.As(err, &denied) {
-@@ -273,13 +280,21 @@ func (m *manager) reserve(ctx context.Context, subject Subject, meter string, un
+ 	op := Operation{Meter: meter, Units: units}
+ 	for attempt := 0; attempt < reservationMaxAttempts; attempt++ {
+-		_, err = m.client.Reserve(ctx, subject, operationID, op)
++		reservation, reserveErr := m.client.Reserve(ctx, subject, operationID, op)
++		err = reserveErr
+ 		if err == nil {
++			if reservation == nil {
++				return nil, errors.New("runtime usage reservation response is empty")
++			}
++			lease.ExpiresAt = reservation.ExpiresAt
++			if lease.ExpiresAt.IsZero() && m.cfg.ReservationTTL > 0 {
++				lease.ExpiresAt = m.now().UTC().Add(m.cfg.ReservationTTL)
++			}
+ 			return lease, nil
  		}
- 		return nil, err
+ 		if ctxErr := ctx.Err(); ctxErr != nil {
+@@ -359,10 +369,11 @@ func waitForContext(ctx context.Context, delay time.Duration) error {
  	}
-+	if reservation == nil {
-+		return nil, errors.New("runtime usage reservation response is empty")
-+	}
-+	lease.ExpiresAt = reservation.ExpiresAt
-+	if lease.ExpiresAt.IsZero() && m.cfg.ReservationTTL > 0 {
-+		lease.ExpiresAt = m.now().UTC().Add(m.cfg.ReservationTTL)
-+	}
- 	return lease, nil
  }
  
 -func (m *manager) release(ctx context.Context, lease *OperationLease, reason string, detail string) {
@@ -5352,7 +5368,7 @@ index da57b97..361a5f5 100644
  	if m.outbox != nil {
  		if err := m.outbox.StoreReleasePending(ctx, lease, reason); err != nil {
  			m.logger.WarnContext(ctx, "runtime usage release pending outbox failed",
-@@ -288,6 +303,8 @@ func (m *manager) release(ctx context.Context, lease *OperationLease, reason str
+@@ -371,6 +382,8 @@ func (m *manager) release(ctx context.Context, lease *OperationLease, reason str
  				"cluster_id", lease.Subject.ClusterID,
  				"err", err,
  			)
@@ -5361,7 +5377,7 @@ index da57b97..361a5f5 100644
  		}
  		if detail != "" && detail != reason {
  			m.markRetryable(ctx, lease.OperationID, errors.New(detail))
-@@ -301,7 +318,10 @@ func (m *manager) release(ctx context.Context, lease *OperationLease, reason str
+@@ -384,7 +397,10 @@ func (m *manager) release(ctx context.Context, lease *OperationLease, reason str
  			"cluster_id", lease.Subject.ClusterID,
  			"err", err,
  		)
@@ -5373,7 +5389,7 @@ index da57b97..361a5f5 100644
  	}
  	if m.outbox != nil {
  		if err := m.outbox.MarkOperationDone(ctx, lease.OperationID, "reservationReleased"); err != nil {
-@@ -313,10 +333,14 @@ func (m *manager) release(ctx context.Context, lease *OperationLease, reason str
+@@ -396,10 +412,14 @@ func (m *manager) release(ctx context.Context, lease *OperationLease, reason str
  			)
  		}
  	}
@@ -5389,15 +5405,17 @@ index da57b97..361a5f5 100644
  		EventType:  eventType,
  		Meter:      lease.Meter,
 diff --git a/server/internal/runtimeusage/manager_test.go b/server/internal/runtimeusage/manager_test.go
-index 1bd1edc..c678f72 100644
+index c25ae468a5d5757f060473b5a52b289bab8ebc8e..881d290712ec2b60b1d177808bcd94794fa904d3 100644
 --- a/server/internal/runtimeusage/manager_test.go
 +++ b/server/internal/runtimeusage/manager_test.go
-@@ -15,17 +15,18 @@ import (
+@@ -19,21 +19,22 @@ import (
  )
  
  type fakeQuotaClient struct {
 -	mu               sync.Mutex
 -	reserveOps       []Operation
+-	reserveSubjects  []Subject
+-	reserveIDs       []string
 -	finalized        []string
 -	finalizeSubjects []Subject
 -	state            RuntimeState
@@ -5406,9 +5424,13 @@ index 1bd1edc..c678f72 100644
 -	stateErr         error
 -	stateDelay       time.Duration
 -	reserveErr       error
+-	reserveErrs      []error
+-	reserveHook      func(context.Context, Subject, string, Operation) (*Reservation, error)
 -	finalizeErr      error
 +	mu                sync.Mutex
 +	reserveOps        []Operation
++	reserveSubjects   []Subject
++	reserveIDs        []string
 +	finalized         []string
 +	finalizeSubjects  []Subject
 +	state             RuntimeState
@@ -5417,15 +5439,17 @@ index 1bd1edc..c678f72 100644
 +	stateErr          error
 +	stateDelay        time.Duration
 +	reserveErr        error
++	reserveErrs       []error
++	reserveHook       func(context.Context, Subject, string, Operation) (*Reservation, error)
 +	finalizeErr       error
 +	reservationExpiry time.Time
  }
  
  func (c *fakeQuotaClient) RuntimeState(_ context.Context, subject Subject) (RuntimeState, error) {
-@@ -54,7 +55,13 @@ func (c *fakeQuotaClient) Reserve(_ context.Context, _ Subject, operationID stri
+@@ -71,7 +72,13 @@ func (c *fakeQuotaClient) Reserve(ctx context.Context, subject Subject, operatio
+ 	if c.err != nil {
  		return nil, c.err
  	}
- 	c.reserveOps = append(c.reserveOps, op)
 -	return &Reservation{OperationID: operationID, Meter: op.Meter, Units: op.Units, Status: "reserved"}, nil
 +	return &Reservation{
 +		OperationID: operationID,
@@ -5437,7 +5461,7 @@ index 1bd1edc..c678f72 100644
  }
  
  func (c *fakeQuotaClient) FinalizeReservation(_ context.Context, subject Subject, operationID string, status string, reason string) error {
-@@ -88,6 +95,7 @@ type fakeOutboxStore struct {
+@@ -105,6 +112,7 @@ type fakeOutboxStore struct {
  	retryable      int
  	unknown        int
  	commitErr      error
@@ -5445,7 +5469,7 @@ index 1bd1edc..c678f72 100644
  	releaseReasons []string
  	retryReasons   []string
  }
-@@ -100,7 +108,7 @@ func (s *fakeOutboxStore) StoreCommitPending(context.Context, *OperationLease, M
+@@ -117,7 +125,7 @@ func (s *fakeOutboxStore) StoreCommitPending(context.Context, *OperationLease, M
  func (s *fakeOutboxStore) StoreReleasePending(_ context.Context, _ *OperationLease, reason string) error {
  	s.releasePending++
  	s.releaseReasons = append(s.releaseReasons, reason)
@@ -5454,7 +5478,7 @@ index 1bd1edc..c678f72 100644
  }
  
  func (s *fakeOutboxStore) MarkOperationDone(context.Context, string, string) error {
-@@ -802,6 +810,34 @@ func TestManagerMemoryDeleteFailureReleasesReservation(t *testing.T) {
+@@ -1755,6 +1763,34 @@ func TestManagerMemoryDeleteFailureReleasesReservation(t *testing.T) {
  	}
  }
  
@@ -5489,7 +5513,7 @@ index 1bd1edc..c678f72 100644
  func TestManagerFailOpenDoesNotBypassQuotaDenied(t *testing.T) {
  	quota := &fakeQuotaClient{reserveErr: &QuotaDeniedError{StatusCode: 402}}
  	manager := NewManager(Config{Enabled: true, FailOpen: true}, quota, &captureWriter{}, nil)
-@@ -863,6 +899,48 @@ func TestManagerMemoryCreateCommitFailureWithOutboxQueuesRetryAndReturnsSuccess(
+@@ -1816,6 +1852,48 @@ func TestManagerMemoryCreateCommitFailureWithOutboxQueuesRetryAndReturnsSuccess(
  	}
  }
  
@@ -5539,10 +5563,10 @@ index 1bd1edc..c678f72 100644
  	quota := &fakeQuotaClient{finalizeErr: &UnavailableError{Err: errString("timeout")}}
  	writer := &captureWriter{}
 diff --git a/server/internal/runtimeusage/types.go b/server/internal/runtimeusage/types.go
-index 590766c..50034e5 100644
+index 3437d46cc82f356e284e3048f21b3a6b2e29ebc4..16343670fe3aa02d6e4bec0203741757a3d9f570 100644
 --- a/server/internal/runtimeusage/types.go
 +++ b/server/internal/runtimeusage/types.go
-@@ -93,6 +93,8 @@ type OperationLease struct {
+@@ -95,6 +95,8 @@ type OperationLease struct {
  	Meter       string
  	Units       int64
  	Reserved    bool
@@ -5551,7 +5575,7 @@ index 590766c..50034e5 100644
  }
  
  type Operation struct {
-@@ -343,7 +345,7 @@ type Manager interface {
+@@ -345,7 +347,7 @@ type Manager interface {
  	AfterRecallFailure(ctx context.Context, lease *OperationLease, cause error)
  	BeforeMemoryCreate(ctx context.Context, subject Subject, units int64) (*OperationLease, error)
  	AfterMemoryCreateSuccess(ctx context.Context, lease *OperationLease, result MemoryCreateResult) error
@@ -5562,7 +5586,7 @@ index 590766c..50034e5 100644
  	AfterMemoryUpdateFailure(ctx context.Context, lease *OperationLease, cause error)
 diff --git a/server/internal/service/durable_ingest.go b/server/internal/service/durable_ingest.go
 new file mode 100644
-index 0000000..d38bb8a
+index 0000000000000000000000000000000000000000..d38bb8a7619de53a325255f13368cebc81db9cde
 --- /dev/null
 +++ b/server/internal/service/durable_ingest.go
 @@ -0,0 +1,734 @@
@@ -6302,7 +6326,7 @@ index 0000000..d38bb8a
 +}
 diff --git a/server/internal/service/durable_ingest_test.go b/server/internal/service/durable_ingest_test.go
 new file mode 100644
-index 0000000..160941b
+index 0000000000000000000000000000000000000000..160941bb1fd61bda59a7234716e4be51e99f9bdb
 --- /dev/null
 +++ b/server/internal/service/durable_ingest_test.go
 @@ -0,0 +1,304 @@

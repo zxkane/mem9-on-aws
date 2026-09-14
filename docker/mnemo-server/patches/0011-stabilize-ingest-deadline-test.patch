@@ -1,5 +1,5 @@
 diff --git a/server/internal/repository/postgres/ingest_job_integration_test.go b/server/internal/repository/postgres/ingest_job_integration_test.go
-index c7f23a6..0848454 100644
+index c7f23a666ed4e3b25a63aee7c578a5b9438896e1..0848454641b012b8878e078d9561c88384d92554 100644
 --- a/server/internal/repository/postgres/ingest_job_integration_test.go
 +++ b/server/internal/repository/postgres/ingest_job_integration_test.go
 @@ -1503,13 +1503,25 @@ func TestIngestJobBlockedWritesUsePostLockDatabaseTime(t *testing.T) {

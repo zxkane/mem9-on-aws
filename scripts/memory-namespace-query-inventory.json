@@ -7,7 +7,7 @@
     "memories",
     "sessions"
   ],
-  "upstream_ref": "d4638c8458abeb209a1b3a20472a1328c4acd149",
+  "upstream_ref": "5af03a68c072651e9c64d1b8b1265e36b7354671",
   "trusted_exception_policy": "scripts/memory-namespace-query-exceptions.json",
   "statements": [
     {
@@ -2219,9 +2219,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "0de8495ac47adcbbab97",
+      "id": "6c73767d053269f87c74",
       "owner": "upstream/server/cmd/mnemo-server/main.go",
-      "line": 545,
+      "line": 542,
       "tables": [
         "ingest_job_plans",
         "ingest_jobs",
@@ -3330,9 +3330,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "b0cb50a2b8ab43de00ff",
+      "id": "16877f56858ec45f12a3",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 402,
+      "line": 406,
       "tables": [
         "memories"
       ],
@@ -3347,9 +3347,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "6466aad4dc113e821bac",
+      "id": "d10076cdc4f7703419f6",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 420,
+      "line": 424,
       "tables": [
         "memories"
       ],
@@ -3364,9 +3364,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "1daebfddeea0b5167050",
+      "id": "8c404b6abbbc09908125",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 462,
+      "line": 466,
       "tables": [
         "memories"
       ],
@@ -3380,9 +3380,9 @@
       "namespace_evidence": "INSERT column namespace_id"
     },
     {
-      "id": "e9170e8295b280d86a8f",
+      "id": "4f950683e33ed0595a09",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 476,
+      "line": 480,
       "tables": [
         "memories"
       ],
@@ -3397,9 +3397,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "f2aee5e9ef3d3a3408fb",
+      "id": "0cc6f15f1a893324bf80",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 517,
+      "line": 521,
       "tables": [
         "memories"
       ],
@@ -3414,9 +3414,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "4a61cf5c93ce0083bfc0",
+      "id": "7f97f391a86bd1ce022e",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 580,
+      "line": 584,
       "tables": [
         "memories"
       ],
@@ -3430,9 +3430,9 @@
       "namespace_evidence": "namespace_id = $1"
     },
     {
-      "id": "d18102ec0d781c2a7353",
+      "id": "d96c2d35509de30d120e",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 604,
+      "line": 608,
       "tables": [
         "memories"
       ],
@@ -3447,9 +3447,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "ffa626e0fc73dd23cef8",
+      "id": "a546a3c9e94a2c045707",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 691,
+      "line": 695,
       "tables": [
         "memories"
       ],
@@ -3464,9 +3464,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "0f1b20e005a787df207e",
+      "id": "f19faf155b3862599aa1",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 719,
+      "line": 723,
       "tables": [
         "memories"
       ],
@@ -3481,9 +3481,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "a1faef200cae692ce5ad",
+      "id": "9a2c362fec82a631aac9",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 1031,
+      "line": 1049,
       "tables": [
         "memories"
       ],
@@ -3711,9 +3711,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "e7b9a04373bfc170df13",
+      "id": "3b0806ee2b95686cabc9",
       "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 55,
+      "line": 52,
       "tables": [
         "memories"
       ],
@@ -3728,9 +3728,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "f0c97abf6319699936b4",
+      "id": "7c984f64fb1c36f23884",
       "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 67,
+      "line": 64,
       "tables": [
         "memories"
       ],
@@ -3745,9 +3745,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "2b6aee2e5841fe5458db",
+      "id": "79ace6af93a1c36e7181",
       "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 81,
+      "line": 78,
       "tables": [
         "memories"
       ],
@@ -3762,9 +3762,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "697836a41cc159117a9c",
+      "id": "e0acab2576c8d1c50bf6",
       "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 98,
+      "line": 95,
       "tables": [
         "memories"
       ],
@@ -3779,9 +3779,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "ec735eec2f05f1601083",
+      "id": "4460f9b447f919dc1810",
       "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 133,
+      "line": 130,
       "tables": [
         "memories"
       ],
@@ -3796,9 +3796,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "dcad2f062299873c183f",
+      "id": "304bb453cd64976698d0",
       "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 137,
+      "line": 134,
       "tables": [
         "memories"
       ],
@@ -3813,9 +3813,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "d7288f38c010b0ca60ed",
+      "id": "dee61c468c20cbbb1014",
       "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 166,
+      "line": 163,
       "tables": [
         "memories"
       ],
@@ -3830,9 +3830,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "982d35b4f6fcec67e816",
+      "id": "3c27b8a619423f23d28a",
       "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 180,
+      "line": 177,
       "tables": [
         "memories"
       ],
@@ -3847,9 +3847,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "3277cb790fcd47030266",
+      "id": "3930344f8c79f4fb94d5",
       "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 209,
+      "line": 206,
       "tables": [
         "memories"
       ],
@@ -3864,9 +3864,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "0bd45ca5660369d7cf45",
+      "id": "7d70b4f12340d8890fed",
       "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 223,
+      "line": 220,
       "tables": [
         "memories"
       ],
@@ -3881,9 +3881,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "0d0ac18159f8ad0be4f1",
+      "id": "63c8d59ad670b6a10d93",
       "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 244,
+      "line": 241,
       "tables": [
         "memories"
       ],
@@ -3898,9 +3898,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "94a2cbd1f1a81d88d10d",
+      "id": "2916cc80ff5db73c2487",
       "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 263,
+      "line": 260,
       "tables": [
         "memories"
       ],
@@ -3915,9 +3915,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "d32e27664c486c53550b",
+      "id": "7f29ee0d2dc8af3f986a",
       "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 271,
+      "line": 268,
       "tables": [
         "memories"
       ],
@@ -3932,9 +3932,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "47d447164aadb91040a0",
+      "id": "0ae7722cf234675d933d",
       "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 287,
+      "line": 284,
       "tables": [
         "memories"
       ],
@@ -3949,9 +3949,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "595b10fc0e42ccf71348",
+      "id": "b22aeae268cabe18a10f",
       "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 304,
+      "line": 301,
       "tables": [
         "memories"
       ],
@@ -3966,9 +3966,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "6ce380e28c0d1fde6253",
+      "id": "7c28a88d183511bb7cc2",
       "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 320,
+      "line": 317,
       "tables": [
         "memories"
       ],
@@ -3983,14 +3983,15 @@
       "namespace_evidence": null
     },
     {
-      "id": "f3eb6bc18189762678be",
+      "id": "64986d49669a0ec42684",
       "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 369,
+      "line": 374,
       "tables": [
-        "memories"
+        "memories",
+        "sessions"
       ],
-      "statement_sha256": "29a19effa18f77e2e59a9ca54d99a50fa31084e13e2bc31d0d7a3a64cd4984c2",
-      "statement": "SELECT COUNT(*) FROM memories WHERE state = 'active'",
+      "statement_sha256": "c81c44b6791ebe34acbc1642f5be2f9b62107b3aa42687600610731e29b5a127",
+      "statement": "SELECT (SELECT COUNT(*) FROM memories WHERE {{dynamic}}) + (SELECT COUNT(*) FROM sessions WHERE {{dynamic}}) AS total",
       "classification": "unsupported_backend",
       "rationale": "The AWS image is pinned to PostgreSQL; DB9 and TiDB repositories are not selectable in this deployment.",
       "coverage": [
@@ -4000,94 +4001,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "a042c809e855d5eecc9f",
+      "id": "3141ba021ccb70260a65",
       "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 383,
-      "tables": [
-        "memories"
-      ],
-      "statement_sha256": "f9338847b2bdda9b5cc9e9fa99c4b33bcf5270d3c64415e7f48806751ef91d2b",
-      "statement": "SELECT id, content, source, tags, metadata, memory_type, agent_id, session_id, app_id, state, version, updated_by, created_at, updated_at, superseded_by FROM memories WHERE state = 'active' ORDER BY updated_at DESC LIMIT ?",
-      "classification": "unsupported_backend",
-      "rationale": "The AWS image is pinned to PostgreSQL; DB9 and TiDB repositories are not selectable in this deployment.",
-      "coverage": [
-        "infra/ecs.test.ts",
-        "docker/mnemo-server/Dockerfile"
-      ],
-      "namespace_evidence": null
-    },
-    {
-      "id": "6ae1b25b69e43958faa6",
-      "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 412,
-      "tables": [
-        "memories"
-      ],
-      "statement_sha256": "dea3d47ee2e3e2230250d759b01955140f07c466d9ef5ab03661f8bb9b67bedc",
-      "statement": "INSERT INTO memories (id, content, source, tags, metadata, memory_type, agent_id, session_id, app_id, state, version, updated_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NOW(), NOW())",
-      "classification": "unsupported_backend",
-      "rationale": "The AWS image is pinned to PostgreSQL; DB9 and TiDB repositories are not selectable in this deployment.",
-      "coverage": [
-        "infra/ecs.test.ts",
-        "docker/mnemo-server/Dockerfile"
-      ],
-      "namespace_evidence": null
-    },
-    {
-      "id": "447731f57fdd9fdd1958",
-      "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 415,
-      "tables": [
-        "memories"
-      ],
-      "statement_sha256": "09827dc067a468b520bf2e93ccc3a95abc3370200a5d51da0eb4a995f1a929aa",
-      "statement": "INSERT INTO memories (id, content, source, tags, metadata, embedding, memory_type, agent_id, session_id, app_id, state, version, updated_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NOW(), NOW())",
-      "classification": "unsupported_backend",
-      "rationale": "The AWS image is pinned to PostgreSQL; DB9 and TiDB repositories are not selectable in this deployment.",
-      "coverage": [
-        "infra/ecs.test.ts",
-        "docker/mnemo-server/Dockerfile"
-      ],
-      "namespace_evidence": null
-    },
-    {
-      "id": "c4d9f7c5828e3d7d0a1f",
-      "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 469,
-      "tables": [
-        "memories"
-      ],
-      "statement_sha256": "599755cd2b3bdd9b16027a79553f9f4f683a93958c4af6a50587c8f70226343c",
-      "statement": "SELECT id, content, source, tags, metadata, memory_type, agent_id, session_id, app_id, state, version, updated_by, created_at, updated_at, superseded_by, VEC_COSINE_DISTANCE(embedding, ?) AS distance FROM memories WHERE {{dynamic}} ORDER BY VEC_COSINE_DISTANCE(embedding, ?) LIMIT ?",
-      "classification": "unsupported_backend",
-      "rationale": "The AWS image is pinned to PostgreSQL; DB9 and TiDB repositories are not selectable in this deployment.",
-      "coverage": [
-        "infra/ecs.test.ts",
-        "docker/mnemo-server/Dockerfile"
-      ],
-      "namespace_evidence": null
-    },
-    {
-      "id": "360baff12093ecde51f7",
-      "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 510,
-      "tables": [
-        "memories"
-      ],
-      "statement_sha256": "2bdd5cb1a66aa898587c9422827e0f299f3625b4212f57e8b4a4263d73a7c5e0",
-      "statement": "SELECT id, content, source, tags, metadata, memory_type, agent_id, session_id, app_id, state, version, updated_by, created_at, updated_at, superseded_by, VEC_EMBED_COSINE_DISTANCE(embedding, ?) AS distance FROM memories WHERE {{dynamic}} ORDER BY VEC_EMBED_COSINE_DISTANCE(embedding, ?) LIMIT ?",
-      "classification": "unsupported_backend",
-      "rationale": "The AWS image is pinned to PostgreSQL; DB9 and TiDB repositories are not selectable in this deployment.",
-      "coverage": [
-        "infra/ecs.test.ts",
-        "docker/mnemo-server/Dockerfile"
-      ],
-      "namespace_evidence": null
-    },
-    {
-      "id": "a8b89f7bf210e6a13e8c",
-      "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 553,
+      "line": 423,
       "tables": [
         "memories"
       ],
@@ -4102,9 +4018,145 @@
       "namespace_evidence": null
     },
     {
-      "id": "7bccd1055ed33ae9158c",
+      "id": "1f1a78ee9c3f11f035b8",
       "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 679,
+      "line": 431,
+      "tables": [
+        "sessions"
+      ],
+      "statement_sha256": "b12ab12e5b4ba3c0b48a0040a7cf9c18d4a589fdc848f7e6c7bb49763624fe41",
+      "statement": "SELECT id, content, source, tags, JSON_OBJECT('role', COALESCE(role, ''), 'seq', seq, 'content_type', COALESCE(content_type, '')) AS metadata, 'session' AS memory_type, agent_id, session_id, app_id, state, 0 AS version, NULL AS updated_by, created_at, created_at AS updated_at, NULL AS superseded_by FROM sessions WHERE {{dynamic}} ORDER BY created_at DESC LIMIT ?",
+      "classification": "unsupported_backend",
+      "rationale": "The AWS image is pinned to PostgreSQL; DB9 and TiDB repositories are not selectable in this deployment.",
+      "coverage": [
+        "infra/ecs.test.ts",
+        "docker/mnemo-server/Dockerfile"
+      ],
+      "namespace_evidence": null
+    },
+    {
+      "id": "3cafb9201b1e2325abf9",
+      "owner": "upstream/server/internal/repository/tidb/memory.go",
+      "line": 575,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "29a19effa18f77e2e59a9ca54d99a50fa31084e13e2bc31d0d7a3a64cd4984c2",
+      "statement": "SELECT COUNT(*) FROM memories WHERE state = 'active'",
+      "classification": "unsupported_backend",
+      "rationale": "The AWS image is pinned to PostgreSQL; DB9 and TiDB repositories are not selectable in this deployment.",
+      "coverage": [
+        "infra/ecs.test.ts",
+        "docker/mnemo-server/Dockerfile"
+      ],
+      "namespace_evidence": null
+    },
+    {
+      "id": "31ac448b160f3b3f3b62",
+      "owner": "upstream/server/internal/repository/tidb/memory.go",
+      "line": 589,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "f9338847b2bdda9b5cc9e9fa99c4b33bcf5270d3c64415e7f48806751ef91d2b",
+      "statement": "SELECT id, content, source, tags, metadata, memory_type, agent_id, session_id, app_id, state, version, updated_by, created_at, updated_at, superseded_by FROM memories WHERE state = 'active' ORDER BY updated_at DESC LIMIT ?",
+      "classification": "unsupported_backend",
+      "rationale": "The AWS image is pinned to PostgreSQL; DB9 and TiDB repositories are not selectable in this deployment.",
+      "coverage": [
+        "infra/ecs.test.ts",
+        "docker/mnemo-server/Dockerfile"
+      ],
+      "namespace_evidence": null
+    },
+    {
+      "id": "8400201f4e9ac0f0cb8c",
+      "owner": "upstream/server/internal/repository/tidb/memory.go",
+      "line": 618,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "dea3d47ee2e3e2230250d759b01955140f07c466d9ef5ab03661f8bb9b67bedc",
+      "statement": "INSERT INTO memories (id, content, source, tags, metadata, memory_type, agent_id, session_id, app_id, state, version, updated_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NOW(), NOW())",
+      "classification": "unsupported_backend",
+      "rationale": "The AWS image is pinned to PostgreSQL; DB9 and TiDB repositories are not selectable in this deployment.",
+      "coverage": [
+        "infra/ecs.test.ts",
+        "docker/mnemo-server/Dockerfile"
+      ],
+      "namespace_evidence": null
+    },
+    {
+      "id": "dc9628406f4af041ed6b",
+      "owner": "upstream/server/internal/repository/tidb/memory.go",
+      "line": 621,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "09827dc067a468b520bf2e93ccc3a95abc3370200a5d51da0eb4a995f1a929aa",
+      "statement": "INSERT INTO memories (id, content, source, tags, metadata, embedding, memory_type, agent_id, session_id, app_id, state, version, updated_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, NOW(), NOW())",
+      "classification": "unsupported_backend",
+      "rationale": "The AWS image is pinned to PostgreSQL; DB9 and TiDB repositories are not selectable in this deployment.",
+      "coverage": [
+        "infra/ecs.test.ts",
+        "docker/mnemo-server/Dockerfile"
+      ],
+      "namespace_evidence": null
+    },
+    {
+      "id": "b2b24f572391d96ee351",
+      "owner": "upstream/server/internal/repository/tidb/memory.go",
+      "line": 675,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "599755cd2b3bdd9b16027a79553f9f4f683a93958c4af6a50587c8f70226343c",
+      "statement": "SELECT id, content, source, tags, metadata, memory_type, agent_id, session_id, app_id, state, version, updated_by, created_at, updated_at, superseded_by, VEC_COSINE_DISTANCE(embedding, ?) AS distance FROM memories WHERE {{dynamic}} ORDER BY VEC_COSINE_DISTANCE(embedding, ?) LIMIT ?",
+      "classification": "unsupported_backend",
+      "rationale": "The AWS image is pinned to PostgreSQL; DB9 and TiDB repositories are not selectable in this deployment.",
+      "coverage": [
+        "infra/ecs.test.ts",
+        "docker/mnemo-server/Dockerfile"
+      ],
+      "namespace_evidence": null
+    },
+    {
+      "id": "220c106b1b4c0f5c963e",
+      "owner": "upstream/server/internal/repository/tidb/memory.go",
+      "line": 717,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "2bdd5cb1a66aa898587c9422827e0f299f3625b4212f57e8b4a4263d73a7c5e0",
+      "statement": "SELECT id, content, source, tags, metadata, memory_type, agent_id, session_id, app_id, state, version, updated_by, created_at, updated_at, superseded_by, VEC_EMBED_COSINE_DISTANCE(embedding, ?) AS distance FROM memories WHERE {{dynamic}} ORDER BY VEC_EMBED_COSINE_DISTANCE(embedding, ?) LIMIT ?",
+      "classification": "unsupported_backend",
+      "rationale": "The AWS image is pinned to PostgreSQL; DB9 and TiDB repositories are not selectable in this deployment.",
+      "coverage": [
+        "infra/ecs.test.ts",
+        "docker/mnemo-server/Dockerfile"
+      ],
+      "namespace_evidence": null
+    },
+    {
+      "id": "2a68a42ebbf3570b6af7",
+      "owner": "upstream/server/internal/repository/tidb/memory.go",
+      "line": 761,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "55459fc11c3365482c7faec272941ae34b1172bd73dc9d8afea8b58860f9c15c",
+      "statement": "SELECT id, content, source, tags, metadata, memory_type, agent_id, session_id, app_id, state, version, updated_by, created_at, updated_at, superseded_by FROM memories WHERE {{dynamic}} ORDER BY updated_at DESC LIMIT ?",
+      "classification": "unsupported_backend",
+      "rationale": "The AWS image is pinned to PostgreSQL; DB9 and TiDB repositories are not selectable in this deployment.",
+      "coverage": [
+        "infra/ecs.test.ts",
+        "docker/mnemo-server/Dockerfile"
+      ],
+      "namespace_evidence": null
+    },
+    {
+      "id": "f2ccaf85596e6197c57c",
+      "owner": "upstream/server/internal/repository/tidb/memory.go",
+      "line": 849,
       "tables": [
         "memories"
       ],
@@ -4119,9 +4171,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "baa171643e5be1df32b8",
+      "id": "b21bbe1867631ace908e",
       "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 720,
+      "line": 890,
       "tables": [
         "memories"
       ],
@@ -4136,9 +4188,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "bd470dbde7877273a8be",
+      "id": "286db36f1b9ac4b61444",
       "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 1083,
+      "line": 1253,
       "tables": [
         "memories"
       ],
@@ -4153,9 +4205,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "57d0350dcc41afcff17e",
+      "id": "953f93c5b6033ca3adc1",
       "owner": "upstream/server/internal/repository/tidb/memory.go",
-      "line": 1101,
+      "line": 1271,
       "tables": [
         "memories"
       ],
@@ -4289,9 +4341,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "dcf32c493348fa3bd2d0",
+      "id": "2f18594666d16400716b",
       "owner": "upstream/server/internal/repository/tidb/sessions.go",
-      "line": 258,
+      "line": 262,
       "tables": [
         "sessions"
       ],
@@ -4306,9 +4358,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "067ee9deeb33cb7b3543",
+      "id": "6225341b022ce8c24de1",
       "owner": "upstream/server/internal/repository/tidb/sessions.go",
-      "line": 276,
+      "line": 280,
       "tables": [
         "sessions"
       ],
@@ -4323,9 +4375,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "5e56c0528412b487f6b5",
+      "id": "9854cb0884014eb568cc",
       "owner": "upstream/server/internal/repository/tidb/sessions.go",
-      "line": 323,
+      "line": 327,
       "tables": [
         "sessions"
       ],
@@ -4340,9 +4392,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "b174c1c4d6a3fd554ee4",
+      "id": "18a26e609f9d8bcbe31d",
       "owner": "upstream/server/internal/repository/tidb/sessions.go",
-      "line": 363,
+      "line": 368,
       "tables": [
         "sessions"
       ],
@@ -4357,9 +4409,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "6a115df0a5cce87daa90",
+      "id": "e417fa30267665c9c829",
       "owner": "upstream/server/internal/repository/tidb/sessions.go",
-      "line": 460,
+      "line": 446,
       "tables": [
         "sessions"
       ],
@@ -4374,9 +4426,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "c1cc9041121db25d6e9a",
+      "id": "7d55298eb84ea2c6a7b1",
       "owner": "upstream/server/internal/repository/tidb/sessions.go",
-      "line": 501,
+      "line": 487,
       "tables": [
         "sessions"
       ],
@@ -4391,9 +4443,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "5230e585224444eb3308",
+      "id": "edfa564ea0ee75389d52",
       "owner": "upstream/server/internal/repository/tidb/sessions.go",
-      "line": 544,
+      "line": 530,
       "tables": [
         "sessions"
       ],
@@ -4408,9 +4460,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "0a7ef3c88078b158d746",
+      "id": "324eaccc6ef03ac87917",
       "owner": "upstream/server/internal/repository/tidb/sessions.go",
-      "line": 666,
+      "line": 653,
       "tables": [
         "sessions"
       ],

@@ -28,7 +28,7 @@ index d5c244787223716cab8503772c1edbb5b9608f63..9b2d41d45746f7f0cf6697c2600efdfc
 +	}
 +}
 diff --git a/server/cmd/mnemo-server/main.go b/server/cmd/mnemo-server/main.go
-index 19830120da5e4ae9851dfb5be0b22df24e25c80f..5ff934bc04eb2512229b759c1fbd40dc97c7ce16 100644
+index 5fcc897c78d83766cbb69c03388d315069ee8307..156ec212202616f77bac1eb37bbd320b2a4ae4ef 100644
 --- a/server/cmd/mnemo-server/main.go
 +++ b/server/cmd/mnemo-server/main.go
 @@ -3,6 +3,7 @@ package main
@@ -57,7 +57,7 @@ index 19830120da5e4ae9851dfb5be0b22df24e25c80f..5ff934bc04eb2512229b759c1fbd40dc
  func main() {
  	logger := slog.New(reqid.NewHandler(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{
  		Level:     slog.LevelInfo,
-@@ -303,6 +315,11 @@ func main() {
+@@ -287,6 +299,11 @@ func main() {
  	rateMW := rl.Middleware()
  
  	activityTracker := service.NewActivityTracker(tenantRepo, logger)
@@ -69,17 +69,17 @@ index 19830120da5e4ae9851dfb5be0b22df24e25c80f..5ff934bc04eb2512229b759c1fbd40dc
  
  	// Handler.
  	srv := handler.NewServer(tenantSvc, uploadTaskRepo, cfg.UploadDir, embedder, llmClient, cfg.EmbedAutoModel, cfg.FTSEnabled, service.IngestMode(cfg.IngestMode), cfg.DBBackend, logger).
-@@ -312,7 +329,8 @@ func main() {
- 		WithWebhookService(webhookSvc).
- 		WithActivityTracker(activityTracker).
+@@ -298,7 +315,8 @@ func main() {
  		WithDisableSessionSave(cfg.DisableSessionSave).
+ 		WithAssistantFactExtraction(cfg.FactExtractionIncludeAssistant).
+ 		WithRecallRequestBudget(cfg.RecallRequestTimeout, cfg.RecallResponseReserve).
 -		WithDurableIngest(cfg.DurableIngestEnabled)
 +		WithDurableIngest(cfg.DurableIngestEnabled).
 +		WithDurableIngestTelemetry(durableTelemetry)
  	router := srv.Router(tenantMW, rateMW, apiKeyMW, middleware.CORS(cfg.CORSAllowedOrigins))
  
  	var durableWorkerCancel context.CancelFunc
-@@ -341,6 +359,7 @@ func main() {
+@@ -327,6 +345,7 @@ func main() {
  		)
  		workerConfig := ingestqueue.DefaultWorkerConfig()
  		workerConfig.Enabled = true
@@ -88,10 +88,10 @@ index 19830120da5e4ae9851dfb5be0b22df24e25c80f..5ff934bc04eb2512229b759c1fbd40dc
  		durableWorkerCtx, durableWorkerCancel = context.WithCancel(context.Background())
  		defer durableWorkerCancel()
 diff --git a/server/internal/config/config.go b/server/internal/config/config.go
-index 7f90b14bc5782eeedd51ab0146b95a15a2a0ec73..633477846ad6f807251778107d96228bd76fcfdf 100644
+index e13dce10257c7d858b6f187e6c57f6d6886c2061..7c5081fa4ce4364073f95cc1797010f96b3716ab 100644
 --- a/server/internal/config/config.go
 +++ b/server/internal/config/config.go
-@@ -32,13 +32,14 @@ type Config struct {
+@@ -34,13 +34,14 @@ type Config struct {
  	EmbedModel   string
  	EmbedDims    int
  
@@ -111,10 +111,10 @@ index 7f90b14bc5782eeedd51ab0146b95a15a2a0ec73..633477846ad6f807251778107d96228b
 +	DurableIngestTenantID    string
 +	DurableIngestMetricStage string
  
- 	// DisableSessionSave skips raw session row persistence for message ingest.
- 	// Smart ingest still extracts and reconciles facts into insight memories.
-@@ -191,6 +192,7 @@ func Load() (*Config, error) {
- 		IngestMode:                       envOr("MNEMO_INGEST_MODE", "smart"),
+ 	// FactExtractionIncludeAssistant allows smart ingest to extract durable facts
+ 	// from assistant turns in addition to user turns. Disabled by default.
+@@ -223,6 +224,7 @@ func Load() (*Config, error) {
+ 		FactExtractionIncludeAssistant:   envBool("MNEMO_FACT_EXTRACTION_INCLUDE_ASSISTANT", false),
  		DurableIngestEnabled:             envBool("MNEMO_DURABLE_INGEST_ENABLED", false),
  		DurableIngestTenantID:            strings.TrimSpace(os.Getenv("MEM9_TENANT_ID")),
 +		DurableIngestMetricStage:         strings.TrimSpace(os.Getenv("MNEMO_DURABLE_INGEST_METRIC_STAGE")),
@@ -158,7 +158,7 @@ index 1fa2b7265c2c23f38db031778a0b03d7bf09e976..df85321fb496c2eefe266e6cf9b7292b
 +	}
  }
 diff --git a/server/internal/handler/durable_ingest_test.go b/server/internal/handler/durable_ingest_test.go
-index 43fd2b713ef671080e87ee773e89e9700ddeccf4..bc2de92ad91f2ea23a949231ae23697a1a0874e7 100644
+index b96599247206af782de582d35cbe80946e14916e..37811a2a12e52f99168630373b231620d9b0ce3d 100644
 --- a/server/internal/handler/durable_ingest_test.go
 +++ b/server/internal/handler/durable_ingest_test.go
 @@ -1,6 +1,7 @@
@@ -218,18 +218,18 @@ index 43fd2b713ef671080e87ee773e89e9700ddeccf4..bc2de92ad91f2ea23a949231ae23697a
  	srv := newTestServer(&testMemoryRepo{}, &testSessionRepo{}).WithDurableIngest(true)
  	srv.ingestRepoFactory = func(string, *sql.DB) ingestqueue.Repository {
 diff --git a/server/internal/handler/handler.go b/server/internal/handler/handler.go
-index dd2d5b5607c282d9aa54c5dee2d6a3f568bc2d15..8706895e06ec09c84498562881f6e6da9f3299d7 100644
+index ccbb5b709e92a925a37ad196cbdce66672f1c919..ffea499c60f019d7ca36883359992e15e631a5ca 100644
 --- a/server/internal/handler/handler.go
 +++ b/server/internal/handler/handler.go
-@@ -52,6 +52,7 @@ type Server struct {
- 	chainRecallStopScore float64
- 	disableSessionSave   bool
- 	durableIngestEnabled bool
-+	durableTelemetry     ingestqueue.Telemetry
- 	ingestRepoFactory    func(string, *sql.DB) ingestqueue.Repository
+@@ -56,6 +56,7 @@ type Server struct {
+ 	recallResponseReserve time.Duration
+ 	durableIngestEnabled  bool
+ 	ingestRepoFactory     func(string, *sql.DB) ingestqueue.Repository
++	durableTelemetry      ingestqueue.Telemetry
  }
  
-@@ -123,6 +124,11 @@ func (s *Server) WithDurableIngest(enabled bool) *Server {
+ // NewServer creates a new HTTP handler server.
+@@ -139,6 +140,11 @@ func (s *Server) WithDurableIngest(enabled bool) *Server {
  	return s
  }
  
@@ -242,10 +242,10 @@ index dd2d5b5607c282d9aa54c5dee2d6a3f568bc2d15..8706895e06ec09c84498562881f6e6da
  // Services are always backed by the tenant's dedicated DB.
  type resolvedSvc struct {
 diff --git a/server/internal/handler/memory.go b/server/internal/handler/memory.go
-index e88df72091ac8a7079fe8e56ae03a39bf3dcd0cb..9560c52ffbc57b70699c336ad19d734d14635c02 100644
+index 4dd0868ba45f20487e69088c9b046804cfd1f934..e36480b3f5c3a6fb4cfb7e171f20e411abc7ccfc 100644
 --- a/server/internal/handler/memory.go
 +++ b/server/internal/handler/memory.go
-@@ -587,6 +587,9 @@ func (s *Server) enqueueDurableIngest(
+@@ -573,6 +573,9 @@ func (s *Server) enqueueDurableIngest(
  	if err != nil {
  		return nil, err
  	}
@@ -307,7 +307,7 @@ index b4002bc85f6aee2ca4f6b3a68ec55928778f88c5..e7b3c7ff5ff2ec91f24f0c5e77d0829d
  		JobID:             "00000000-0000-4000-8000-000000000054",
 diff --git a/server/internal/ingestqueue/telemetry.go b/server/internal/ingestqueue/telemetry.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..32ec348477295ae023e17dc549a89481aedaadbb
+index 0000000000000000000000000000000000000000..a5a9c89eaa227b742392d936aad488c99c24a4ce
 --- /dev/null
 +++ b/server/internal/ingestqueue/telemetry.go
 @@ -0,0 +1,307 @@
@@ -620,7 +620,7 @@ index 0000000000000000000000000000000000000000..32ec348477295ae023e17dc549a89481
 +}
 diff --git a/server/internal/ingestqueue/telemetry_test.go b/server/internal/ingestqueue/telemetry_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..f316ca45d3ea7359474c3a1bd8244765629ea232
+index 0000000000000000000000000000000000000000..8bf0f1fd4c4f4290cc740c8ca436b3eff23fa21f
 --- /dev/null
 +++ b/server/internal/ingestqueue/telemetry_test.go
 @@ -0,0 +1,365 @@
@@ -1042,7 +1042,7 @@ index cbe48313bfa66edcbc00aa35c8a211434f3f92b9..93434f7bbba6f3aa8c7a5a3402fef4bb
  }
  
 diff --git a/server/internal/ingestqueue/worker.go b/server/internal/ingestqueue/worker.go
-index 0fa094268190ec552b8bca8e7b67719369d949d6..a2cc8905ed18370eb55ab9755ddfa7a34ad20d16 100644
+index 0fa094268190ec552b8bca8e7b67719369d949d6..357898bd838d91934eff9ba3bc1c34524fcf069b 100644
 --- a/server/internal/ingestqueue/worker.go
 +++ b/server/internal/ingestqueue/worker.go
 @@ -19,6 +19,8 @@ const terminalFinalizationWriteTimeout = 5 * time.Second
@@ -1199,7 +1199,7 @@ index 0fa094268190ec552b8bca8e7b67719369d949d6..a2cc8905ed18370eb55ab9755ddfa7a3
  	jobCtx, cancel := context.WithTimeout(ctx, w.config.JobTimeout)
  	lease := job.LeaseRef()
  	var leaseLost atomic.Bool
-@@ -199,9 +278,14 @@ func (w *Worker) process(ctx context.Context, job *Job) {
+@@ -199,9 +279,14 @@ func (w *Worker) process(ctx context.Context, job *Job) {
  		job,
  		w.config.JobTimeout+runtimeReservationFinalizationBuffer,
  	); err != nil {
@@ -1215,7 +1215,7 @@ index 0fa094268190ec552b8bca8e7b67719369d949d6..a2cc8905ed18370eb55ab9755ddfa7a3
  	if err := w.repo.StartPlanning(jobCtx, lease); err != nil {
  		return
  	}
-@@ -212,7 +296,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
+@@ -212,7 +297,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
  			persisted, err := w.repo.LoadPlan(jobCtx, lease)
  			if err != nil {
  				if !errors.Is(err, ErrPlanInvalid) || persisted == nil {
@@ -1224,7 +1224,7 @@ index 0fa094268190ec552b8bca8e7b67719369d949d6..a2cc8905ed18370eb55ab9755ddfa7a3
  					return
  				}
  				if staleErr := w.repo.MarkPlanStale(jobCtx, lease, *persisted); staleErr != nil {
-@@ -220,7 +304,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
+@@ -220,7 +305,7 @@ func (w *Worker) process(ctx context.Context, job *Job) {
  				}
  			} else if persisted != nil {
  				if persisted.JobID != job.ID || persisted.TenantID != job.TenantID {
@@ -1233,7 +1233,7 @@ index 0fa094268190ec552b8bca8e7b67719369d949d6..a2cc8905ed18370eb55ab9755ddfa7a3
  					return
  				}
  				if err := w.repo.ResumePlan(jobCtx, lease, *persisted); err != nil {
-@@ -232,24 +316,24 @@ func (w *Worker) process(ctx context.Context, job *Job) {
+@@ -232,24 +317,24 @@ func (w *Worker) process(ctx context.Context, job *Job) {
  
  		if plan == nil {
  			if createdRevisions >= MaxPlanRevisionsPerAttempt {
@@ -1262,7 +1262,7 @@ index 0fa094268190ec552b8bca8e7b67719369d949d6..a2cc8905ed18370eb55ab9755ddfa7a3
  				return
  			}
  			if err := w.repo.SavePlan(jobCtx, lease, built); err != nil {
-@@ -259,27 +343,32 @@ func (w *Worker) process(ctx context.Context, job *Job) {
+@@ -259,27 +344,32 @@ func (w *Worker) process(ctx context.Context, job *Job) {
  			plan = &built
  		}
  
@@ -1297,7 +1297,7 @@ index 0fa094268190ec552b8bca8e7b67719369d949d6..a2cc8905ed18370eb55ab9755ddfa7a3
  			"state", StateSucceeded,
  			"attempt", job.AttemptCount,
  			"plan_revision", plan.Revision,
-@@ -307,7 +396,6 @@ func (w *Worker) processTerminal(
+@@ -307,7 +397,6 @@ func (w *Worker) processTerminal(
  		); err != nil {
  			w.logger.Error(
  				"durable ingest terminal reservation refresh failed",
@@ -1305,7 +1305,7 @@ index 0fa094268190ec552b8bca8e7b67719369d949d6..a2cc8905ed18370eb55ab9755ddfa7a3
  				"state", job.State,
  				"error_class", "runtime_reservation",
  			)
-@@ -320,7 +408,6 @@ func (w *Worker) processTerminal(
+@@ -320,7 +409,6 @@ func (w *Worker) processTerminal(
  	if err := w.processor.FinalizeTerminal(ctx, job, plan); err != nil {
  		w.logger.Error(
  			"durable ingest terminal finalization failed",
@@ -1313,7 +1313,7 @@ index 0fa094268190ec552b8bca8e7b67719369d949d6..a2cc8905ed18370eb55ab9755ddfa7a3
  			"state", job.State,
  			"error_class", "runtime_finalization",
  		)
-@@ -334,7 +421,6 @@ func (w *Worker) processTerminal(
+@@ -334,7 +422,6 @@ func (w *Worker) processTerminal(
  	if err := w.repo.CompleteTerminalFinalization(writeCtx, job.LeaseRef()); err != nil {
  		w.logger.Error(
  			"durable ingest terminal finalization completion failed",
@@ -1321,7 +1321,7 @@ index 0fa094268190ec552b8bca8e7b67719369d949d6..a2cc8905ed18370eb55ab9755ddfa7a3
  			"state", job.State,
  			"error_class", "database_error",
  		)
-@@ -369,7 +455,7 @@ func (w *Worker) ensureRuntimeReservation(
+@@ -369,7 +456,7 @@ func (w *Worker) ensureRuntimeReservation(
  			!replacement.ExpiresAt.After(minimumExpiry)) {
  		replacementJob := jobWithRuntimeReservation(job, replacement)
  		renewer.ReleaseRuntimeReservation(ctx, replacementJob)
@@ -1330,7 +1330,7 @@ index 0fa094268190ec552b8bca8e7b67719369d949d6..a2cc8905ed18370eb55ab9755ddfa7a3
  	}
  	if err := w.repo.ReplaceRuntimeReservation(
  		ctx,
-@@ -452,6 +538,7 @@ func (w *Worker) fail(
+@@ -452,6 +539,7 @@ func (w *Worker) fail(
  	lease LeaseRef,
  	err error,
  	leaseLost bool,
@@ -1338,7 +1338,7 @@ index 0fa094268190ec552b8bca8e7b67719369d949d6..a2cc8905ed18370eb55ab9755ddfa7a3
  ) {
  	if parent.Err() != nil || leaseLost {
  		return
-@@ -474,6 +561,7 @@ func (w *Worker) fail(
+@@ -474,6 +562,7 @@ func (w *Worker) fail(
  	); err != nil {
  		return
  	}
@@ -1346,7 +1346,7 @@ index 0fa094268190ec552b8bca8e7b67719369d949d6..a2cc8905ed18370eb55ab9755ddfa7a3
  	if failure.State == StateDead {
  		job.State = StateDead
  		job.ErrorClass = failure.ErrorClass
-@@ -483,13 +571,68 @@ func (w *Worker) fail(
+@@ -483,13 +572,68 @@ func (w *Worker) fail(
  		}
  	}
  	w.logger.Info("durable ingest job failed",
@@ -1416,7 +1416,7 @@ index 0fa094268190ec552b8bca8e7b67719369d949d6..a2cc8905ed18370eb55ab9755ddfa7a3
  func FullJitterBackoff(attempt int, random float64) time.Duration {
  	if attempt < 1 {
  		attempt = 1
-@@ -527,10 +670,10 @@ type ErrorClassification struct {
+@@ -527,10 +671,10 @@ type ErrorClassification struct {
  
  func ClassifyError(err error) ErrorClassification {
  	if errors.Is(err, context.DeadlineExceeded) {
@@ -1429,7 +1429,7 @@ index 0fa094268190ec552b8bca8e7b67719369d949d6..a2cc8905ed18370eb55ab9755ddfa7a3
  	}
  	var httpError *llm.HTTPStatusError
  	if errors.As(err, &httpError) {
-@@ -539,13 +682,13 @@ func ClassifyError(err error) ErrorClassification {
+@@ -539,13 +683,13 @@ func ClassifyError(err error) ErrorClassification {
  	var outcome *OutcomeError
  	if errors.As(err, &outcome) {
  		switch outcome.class {
@@ -1448,7 +1448,7 @@ index 0fa094268190ec552b8bca8e7b67719369d949d6..a2cc8905ed18370eb55ab9755ddfa7a3
  			return ErrorClassification{Class: outcome.class}
  		}
  	}
-@@ -555,29 +698,29 @@ func ClassifyError(err error) ErrorClassification {
+@@ -555,29 +699,29 @@ func ClassifyError(err error) ErrorClassification {
  	if errors.As(err, &stateError) {
  		switch stateError.SQLState() {
  		case "40P01", "40001":
@@ -1527,7 +1527,7 @@ index e00e6ac84d8fd67bda5e4a481809e10cf7b08fbf..a3ca4ff0d5eaed4cc160786ae828deb9
  
  func TestPostgresWorkerPermanentFailureUnblocksFollower(t *testing.T) {
 diff --git a/server/internal/ingestqueue/worker_test.go b/server/internal/ingestqueue/worker_test.go
-index 0106f3242589d71b7e1a57d62476fa19a3695306..4178db3dc7afef6d0a3dde38b7f5f2e375dfc089 100644
+index 0106f3242589d71b7e1a57d62476fa19a3695306..7b52ae3be8af181f9e9414a9594d82ea62b8331f 100644
 --- a/server/internal/ingestqueue/worker_test.go
 +++ b/server/internal/ingestqueue/worker_test.go
 @@ -32,6 +32,17 @@ type fakeRepo struct {
@@ -2402,10 +2402,10 @@ index 160941bb1fd61bda59a7234716e4be51e99f9bdb..330ac91a1a0e22687d7dccc7acd7632c
  	embedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
  		w.Header().Set("Content-Type", "application/json")
 diff --git a/server/internal/service/ingest.go b/server/internal/service/ingest.go
-index 0cef98db4121fcfeffb627848a5a928098708efd..76ea4de9f07aee29d710a7c3df554030d32009bd 100644
+index 573157d119fde8ac1789032fcf8496a96fe73a61..99fd6e2a5c0d346078f4268e828428a4b4dbb83e 100644
 --- a/server/internal/service/ingest.go
 +++ b/server/internal/service/ingest.go
-@@ -661,7 +661,7 @@ func normalizeParsedFacts(raw string, parsed []ExtractedFact) []ExtractedFact {
+@@ -813,7 +813,7 @@ func normalizeParsedFacts(raw string, parsed []ExtractedFact) []ExtractedFact {
  	var flat flattenedFact
  	if err := json.Unmarshal([]byte(cleaned), &flat); err == nil {
  		if t := strings.TrimSpace(flat.Text); t != "" {
@@ -2415,7 +2415,7 @@ index 0cef98db4121fcfeffb627848a5a928098708efd..76ea4de9f07aee29d710a7c3df554030
  		}
  	}
 diff --git a/server/internal/service/ingest_test.go b/server/internal/service/ingest_test.go
-index b8f8e1f156db7df71d4cbdee6738a805095a24eb..f5e59ff17157417b3c7ea931407c3af75a37339b 100644
+index 39dd4d02b5147ea8c86e32acf63aa8a68a5c6921..ab6d20f90ee5a70f37a246f6f028c06acc933cdc 100644
 --- a/server/internal/service/ingest_test.go
 +++ b/server/internal/service/ingest_test.go
 @@ -1,11 +1,13 @@
@@ -2432,7 +2432,7 @@ index b8f8e1f156db7df71d4cbdee6738a805095a24eb..f5e59ff17157417b3c7ea931407c3af7
  	"net/http"
  	"net/http/httptest"
  	"reflect"
-@@ -3073,6 +3075,25 @@ func TestExtractFactsFlattenedFactWithText(t *testing.T) {
+@@ -3717,6 +3719,25 @@ func TestExtractFactsFlattenedFactWithText(t *testing.T) {
  	}
  }
  

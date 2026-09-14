@@ -1,6 +1,6 @@
 diff --git a/server/internal/handler/session_delete_postgres_integration_test.go b/server/internal/handler/session_delete_postgres_integration_test.go
 new file mode 100644
-index 0000000..d413bfb
+index 0000000000000000000000000000000000000000..d413bfb69e0bc38b840aa6867172e5c2093fcb52
 --- /dev/null
 +++ b/server/internal/handler/session_delete_postgres_integration_test.go
 @@ -0,0 +1,301 @@
@@ -306,7 +306,7 @@ index 0000000..d413bfb
 +	}
 +}
 diff --git a/server/internal/repository/factory.go b/server/internal/repository/factory.go
-index 929b8ea..5a9c452 100644
+index 929b8ea8d9963bf01cace2a6bc1d6282cb3e98b9..5a9c452e767951a630d9a48c63e8576a0f9f98af 100644
 --- a/server/internal/repository/factory.go
 +++ b/server/internal/repository/factory.go
 @@ -99,17 +99,34 @@ func NewMemoryRepo(backend string, db *sql.DB, autoModel string, ftsEnabled bool
@@ -348,7 +348,7 @@ index 929b8ea..5a9c452 100644
  // IsTableNotFoundError no-op pattern). ListBySessionIDs returns ErrNotSupported
 diff --git a/server/internal/repository/postgres/session_delete.go b/server/internal/repository/postgres/session_delete.go
 new file mode 100644
-index 0000000..0017d75
+index 0000000000000000000000000000000000000000..0017d75363d1905b1169aa20b55dbb3c070ab954
 --- /dev/null
 +++ b/server/internal/repository/postgres/session_delete.go
 @@ -0,0 +1,112 @@
@@ -466,7 +466,7 @@ index 0000000..0017d75
 +}
 diff --git a/server/internal/repository/session_delete_integration_test.go b/server/internal/repository/session_delete_integration_test.go
 new file mode 100644
-index 0000000..87946b2
+index 0000000000000000000000000000000000000000..87946b2213fbe6680a635a52918c6949cbf79d6b
 --- /dev/null
 +++ b/server/internal/repository/session_delete_integration_test.go
 @@ -0,0 +1,402 @@
@@ -874,7 +874,7 @@ index 0000000..87946b2
 +}
 diff --git a/server/internal/testutil/session.go b/server/internal/testutil/session.go
 new file mode 100644
-index 0000000..1b798e8
+index 0000000000000000000000000000000000000000..1b798e8990d98b537cc67e8ddf4b7ee06a69ea50
 --- /dev/null
 +++ b/server/internal/testutil/session.go
 @@ -0,0 +1,77 @@

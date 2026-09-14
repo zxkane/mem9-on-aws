@@ -1,0 +1,444 @@
+diff --git a/server/internal/handler/chain_runtime.go b/server/internal/handler/chain_runtime.go
+index 1a729d9d2f58a028eb4084e073e87831714dedab..6be0b82f72691492de64209c639fb44119d80de0 100644
+--- a/server/internal/handler/chain_runtime.go
++++ b/server/internal/handler/chain_runtime.go
+@@ -120,7 +120,7 @@ func (s *Server) reconcileRoutedChainFacts(ctx context.Context, auth *domain.Aut
+ 				s.enqueueRoutedFactWebhook(ctx, auth, nodeAuth, node, factsForTarget, nil, req.AgentID, req.AppID, req.SessionID)
+ 				return
+ 			}
+-			targetSvc := s.resolveServices(nodeAuth)
++			targetSvc := s.resolveServices(ctx, nodeAuth)
+ 			var lease *runtimeusage.OperationLease
+ 			if s.runtimeUsageEnabled() {
+ 				var err error
+@@ -275,7 +275,7 @@ func (s *Server) findChainMemoryTargetWithOptions(ctx context.Context, auth *dom
+ 	}
+ 	for _, node := range auth.Chain.Nodes {
+ 		nodeAuth := chainNodeAuth(auth, node)
+-		svc := s.resolveServices(nodeAuth)
++		svc := s.resolveServices(ctx, nodeAuth)
+ 		if _, err := svc.memory.Get(ctx, id); err != nil {
+ 			if errors.Is(err, domain.ErrNotFound) {
+ 				if !includeSessions {
+@@ -439,7 +439,7 @@ func (s *Server) listChainMemoriesContentKeyword(ctx context.Context, auth *doma
+ 		group.Go(func() error {
+ 			nodeStartedAt := time.Now()
+ 			nodeAuth := chainNodeAuth(auth, node)
+-			svc := s.resolveServices(nodeAuth)
++			svc := s.resolveServices(groupCtx, nodeAuth)
+ 			memories, _, err := s.listLocalMemoriesContentKeyword(groupCtx, svc, perNodeFilter)
+ 			if observation := memoryListObservationFromContext(groupCtx); observation != nil {
+ 				observation.recordPage("chain", len(memories), time.Since(nodeStartedAt))
+@@ -507,7 +507,7 @@ func (s *Server) listChainNodeMemories(
+ ) (chainNodeMemoryResult, error) {
+ 	nodeStartedAt := time.Now()
+ 	nodeAuth := chainNodeAuth(auth, node)
+-	svc := s.resolveServices(nodeAuth)
++	svc := s.resolveServices(ctx, nodeAuth)
+ 
+ 	var (
+ 		memories []domain.Memory
+@@ -645,7 +645,7 @@ func (s *Server) getChainMemory(ctx context.Context, auth *domain.AuthInfo, id s
+ 	}
+ 	for _, node := range auth.Chain.Nodes {
+ 		nodeAuth := chainNodeAuth(auth, node)
+-		svc := s.resolveServices(nodeAuth)
++		svc := s.resolveServices(ctx, nodeAuth)
+ 		mem, err := svc.memory.Get(ctx, id)
+ 		if err != nil {
+ 			if errors.Is(err, domain.ErrNotFound) {
+@@ -790,7 +790,7 @@ func (s *Server) listChainSessionMessages(ctx context.Context, auth *domain.Auth
+ 	messages := []sessionMessageResponse{}
+ 	for _, node := range auth.Chain.Nodes {
+ 		nodeAuth := chainNodeAuth(auth, node)
+-		svc := s.resolveServices(nodeAuth)
++		svc := s.resolveServices(ctx, nodeAuth)
+ 		sessions, err := svc.session.ListBySessionIDs(ctx, sessionIDs, appID, limitPerSession)
+ 		if err != nil {
+ 			return nil, err
+diff --git a/server/internal/handler/handler.go b/server/internal/handler/handler.go
+index d203b183cb23482cdad85cd10ecc378993600ceb..0ca4fa01813ae031a137c50d09651cc8ce70d78c 100644
+--- a/server/internal/handler/handler.go
++++ b/server/internal/handler/handler.go
+@@ -162,7 +162,7 @@ type resolvedSvc struct {
+ type tenantSvcKey string
+ 
+ // resolveServices returns the correct services for a request.
+-func (s *Server) resolveServices(auth *domain.AuthInfo) resolvedSvc {
++func (s *Server) resolveServices(ctx context.Context, auth *domain.AuthInfo) resolvedSvc {
+ 	scopeKey := ""
+ 	var scopes []domain.NamespaceScope
+ 	if auth.Namespace != nil {
+@@ -174,7 +174,7 @@ func (s *Server) resolveServices(auth *domain.AuthInfo) resolvedSvc {
+ 		if cached, ok := s.svcCache.Load(key); ok {
+ 			return cached.(resolvedSvc)
+ 		}
+-		schemaReady := s.ensureTenantRuntimeSchema(auth)
++		schemaReady := s.ensureTenantRuntimeSchema(ctx, auth)
+ 		memRepo := repository.NewMemoryRepo(s.dbBackend, auth.TenantDB, s.autoModel, s.ftsEnabled, auth.ClusterID, scopes...)
+ 		sessRepo := repository.NewSessionRepo(s.dbBackend, auth.TenantDB, s.autoModel, s.ftsEnabled, auth.ClusterID, scopes...)
+ 		ingestOption := service.WithAssistantFactExtraction(s.includeAssistantFacts)
+@@ -193,7 +193,7 @@ func (s *Server) resolveServices(auth *domain.AuthInfo) resolvedSvc {
+ 	if cached, ok := s.svcCache.Load(key); ok {
+ 		return cached.(resolvedSvc)
+ 	}
+-	schemaReady := s.ensureTenantRuntimeSchema(auth)
++	schemaReady := s.ensureTenantRuntimeSchema(ctx, auth)
+ 	memRepo := repository.NewMemoryRepo(s.dbBackend, auth.TenantDB, s.autoModel, s.ftsEnabled, auth.ClusterID, scopes...)
+ 	sessRepo := repository.NewSessionRepo(s.dbBackend, auth.TenantDB, s.autoModel, s.ftsEnabled, auth.ClusterID, scopes...)
+ 	ingestOption := service.WithAssistantFactExtraction(s.includeAssistantFacts)
+@@ -209,11 +209,11 @@ func (s *Server) resolveServices(auth *domain.AuthInfo) resolvedSvc {
+ 	return actual.(resolvedSvc)
+ }
+ 
+-func (s *Server) ensureTenantRuntimeSchema(auth *domain.AuthInfo) bool {
++func (s *Server) ensureTenantRuntimeSchema(parent context.Context, auth *domain.AuthInfo) bool {
+ 	if s.tenant == nil || auth == nil || auth.TenantDB == nil {
+ 		return true
+ 	}
+-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
++	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
+ 	defer cancel()
+ 	if err := s.tenant.EnsureRuntimeSchema(ctx, auth.TenantDB); err != nil {
+ 		logger := s.logger
+diff --git a/server/internal/handler/memory.go b/server/internal/handler/memory.go
+index 14b19b0264cdbb09fbd0c24ef51e9346c67832fc..3699f55cfcc3116de2b84669b7f5ede109884923 100644
+--- a/server/internal/handler/memory.go
++++ b/server/internal/handler/memory.go
+@@ -69,7 +69,7 @@ func (s *Server) createMemory(w http.ResponseWriter, r *http.Request) {
+ 			return
+ 		}
+ 	}
+-	svc := s.resolveServices(auth)
++	svc := s.resolveServices(r.Context(), auth)
+ 
+ 	agentID := req.AgentID
+ 	if agentID == "" {
+@@ -1029,7 +1029,7 @@ func (s *Server) listMemories(w http.ResponseWriter, r *http.Request) {
+ 			memories, total, err = s.listChainMemories(listCtx, auth, filter)
+ 		}
+ 	} else {
+-		svc := s.resolveServices(auth)
++		svc := s.resolveServices(r.Context(), auth)
+ 		switch {
+ 		case filter.Query == "" && filter.MemoryType == "":
+ 			memories, total, err = svc.memory.ListAllTypes(listCtx, filter)
+@@ -1077,7 +1077,7 @@ func (s *Server) listMemories(w http.ResponseWriter, r *http.Request) {
+ 	// untouched, so memory/fact recall is unaffected.
+ 	if !auth.IsChain() {
+ 		overlayStartedAt := time.Now()
+-		memories = s.resolveServices(auth).session.ApplySessionOverlay(responseCtx, memories)
++		memories = s.resolveServices(responseCtx, auth).session.ApplySessionOverlay(responseCtx, memories)
+ 		listObservation.overlayDuration = time.Since(overlayStartedAt)
+ 	}
+ 	if !contentKeywordSearch && rawQuery != "" && classifyRecallQueryShape(rawQuery) == recallQueryShapeTime {
+@@ -1416,7 +1416,7 @@ func (s *Server) getMemory(w http.ResponseWriter, r *http.Request) {
+ 		return
+ 	}
+ 
+-	svc := s.resolveServices(auth)
++	svc := s.resolveServices(r.Context(), auth)
+ 	mem, err := svc.memory.Get(r.Context(), id)
+ 	if errors.Is(err, domain.ErrNotFound) {
+ 		mem, err = svc.session.Get(r.Context(), id)
+@@ -1516,7 +1516,7 @@ func (s *Server) updateMemory(w http.ResponseWriter, r *http.Request) {
+ 		return
+ 	}
+ 
+-	svc := s.resolveServices(auth)
++	svc := s.resolveServices(r.Context(), auth)
+ 	var lease *runtimeusage.OperationLease
+ 	finalized := false
+ 	if s.runtimeUsageEnabled() {
+@@ -1619,7 +1619,7 @@ func (s *Server) deleteMemory(w http.ResponseWriter, r *http.Request) {
+ 		return
+ 	}
+ 
+-	svc := s.resolveServices(auth)
++	svc := s.resolveServices(r.Context(), auth)
+ 	var lease *runtimeusage.OperationLease
+ 	finalized := false
+ 	if s.runtimeUsageEnabled() {
+@@ -1757,7 +1757,7 @@ func (s *Server) batchDeleteMemories(w http.ResponseWriter, r *http.Request) {
+ 		return
+ 	}
+ 
+-	svc := s.resolveServices(auth)
++	svc := s.resolveServices(r.Context(), auth)
+ 	deleteIDs, err := service.ValidateBulkDeleteIDs(req.IDs)
+ 	if err != nil {
+ 		s.handleError(r.Context(), w, err)
+@@ -1873,7 +1873,7 @@ func (s *Server) bulkCreateMemories(w http.ResponseWriter, r *http.Request) {
+ 			return
+ 		}
+ 	}
+-	svc := s.resolveServices(auth)
++	svc := s.resolveServices(r.Context(), auth)
+ 	if err := service.ValidateBulkMemoryInputs(req.Memories); err != nil {
+ 		s.handleError(r.Context(), w, err)
+ 		return
+@@ -1936,7 +1936,7 @@ func (s *Server) bootstrapMemories(w http.ResponseWriter, r *http.Request) {
+ 		}
+ 	}
+ 
+-	svc := s.resolveServices(auth)
++	svc := s.resolveServices(r.Context(), auth)
+ 
+ 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+ 	if limit <= 0 {
+@@ -2038,7 +2038,7 @@ func (s *Server) handleListSessionMessages(w http.ResponseWriter, r *http.Reques
+ 		return
+ 	}
+ 
+-	svc := s.resolveServices(auth)
++	svc := s.resolveServices(r.Context(), auth)
+ 	sessions, err := svc.session.ListBySessionIDs(r.Context(), sessionIDs, appIDFilter, limitPerSession)
+ 	if err != nil {
+ 		s.handleError(r.Context(), w, err)
+diff --git a/server/internal/handler/memory_test.go b/server/internal/handler/memory_test.go
+index 4e7d7b1301675a195cd99c9aa75cfe4fc405d6d8..f2b451aac68ea270336df466d58ad752aab29e56 100644
+--- a/server/internal/handler/memory_test.go
++++ b/server/internal/handler/memory_test.go
+@@ -844,7 +844,7 @@ func TestResolveServicesDoesNotCacheAfterRuntimeSchemaEnsureFailure(t *testing.T
+ 	}
+ 	key := tenantSvcKey(fmt.Sprintf("%s-%p", auth.TenantID, auth.TenantDB))
+ 
+-	first := srv.resolveServices(auth)
++	first := srv.resolveServices(context.Background(), auth)
+ 	if first.memory == nil || first.ingest == nil || first.session == nil {
+ 		t.Fatal("resolveServices returned incomplete services")
+ 	}
+@@ -852,7 +852,7 @@ func TestResolveServicesDoesNotCacheAfterRuntimeSchemaEnsureFailure(t *testing.T
+ 		t.Fatal("runtime schema ensure failure must not cache services")
+ 	}
+ 
+-	second := srv.resolveServices(auth)
++	second := srv.resolveServices(context.Background(), auth)
+ 	if _, ok := srv.svcCache.Load(key); ok {
+ 		t.Fatal("runtime schema retry failure must not cache services")
+ 	}
+@@ -5330,7 +5330,7 @@ func TestDefaultConfidenceRecallSearch_FansOutPoolSearchesConcurrently(t *testin
+ 	}
+ 	srv := newTestServer(memRepo, sessRepo)
+ 	auth := &domain.AuthInfo{ClusterID: "cluster-a"}
+-	svc := srv.resolveServices(auth)
++	svc := srv.resolveServices(context.Background(), auth)
+ 	ctx, cancel := context.WithTimeout(context.Background(), 250*time.Millisecond)
+ 	defer cancel()
+ 
+diff --git a/server/internal/handler/recall_budget_test.go b/server/internal/handler/recall_budget_test.go
+index 7d9ac3af9ba7a3aed42ec55b24afe5806264c228..a2df9280740f26b0f6b4d17deead3533b69aeb0c 100644
+--- a/server/internal/handler/recall_budget_test.go
++++ b/server/internal/handler/recall_budget_test.go
+@@ -477,7 +477,7 @@ func TestDefaultConfidenceRecallSearch_PropagatesBranchDeadlineToRepositories(t
+ 	defer cancel()
+ 	_ = requestCtx
+ 
+-	_, _, err := srv.defaultConfidenceRecallSearch(workCtx, &domain.AuthInfo{}, srv.resolveServices(&domain.AuthInfo{}), domain.MemoryFilter{
++	_, _, err := srv.defaultConfidenceRecallSearch(workCtx, &domain.AuthInfo{}, srv.resolveServices(workCtx, &domain.AuthInfo{}), domain.MemoryFilter{
+ 		Query: "what happened",
+ 		Limit: 10,
+ 	})
+diff --git a/server/internal/handler/recall_failure_log_test.go b/server/internal/handler/recall_failure_log_test.go
+index 143f34561c3e0d718425c27b62ba6d1bb7312f2d..4b3654cf6eaad01e77ef3f8992447999e3f97483 100644
+--- a/server/internal/handler/recall_failure_log_test.go
++++ b/server/internal/handler/recall_failure_log_test.go
+@@ -49,7 +49,7 @@ func TestDefaultConfidenceRecallSearch_LogsPrimaryFailureAndSiblingCancellation(
+ 	auth := &domain.AuthInfo{ClusterID: "cluster-recall"}
+ 	ctx := reqid.NewContext(context.Background(), "request-recall")
+ 
+-	_, _, err := srv.defaultConfidenceRecallSearch(ctx, auth, srv.resolveServices(auth), domain.MemoryFilter{
++	_, _, err := srv.defaultConfidenceRecallSearch(ctx, auth, srv.resolveServices(ctx, auth), domain.MemoryFilter{
+ 		Query: "what happened",
+ 		Limit: 10,
+ 	})
+@@ -132,7 +132,7 @@ func TestDefaultConfidenceRecallSearch_LogsRequestCancellationOrigin(t *testing.
+ 			ctx, cancel := tt.newContext(baseCtx)
+ 			defer cancel()
+ 
+-			_, _, err := srv.defaultConfidenceRecallSearch(ctx, auth, srv.resolveServices(auth), domain.MemoryFilter{
++			_, _, err := srv.defaultConfidenceRecallSearch(ctx, auth, srv.resolveServices(ctx, auth), domain.MemoryFilter{
+ 				Query: "what happened",
+ 				Limit: 10,
+ 			})
+diff --git a/server/internal/handler/recall_schema_budget_integration_test.go b/server/internal/handler/recall_schema_budget_integration_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..58b80246477f8b5c9d39825ec990117d15e72efe
+--- /dev/null
++++ b/server/internal/handler/recall_schema_budget_integration_test.go
+@@ -0,0 +1,56 @@
++package handler
++
++import (
++	"context"
++	"log/slog"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/service"
++	"github.com/qiffang/mnemos/server/internal/tenant"
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++func TestRecallColdSchemaRespectsRequestBudget(t *testing.T) {
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
++	}
++	db := testutil.OpenIsolatedPostgres(t, dsn)
++	db.SetMaxOpenConns(1)
++	held, err := db.Conn(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer held.Close()
++	// Let a regressed implementation finish without waiting for its 30s timeout.
++	release := time.AfterFunc(time.Second, func() { held.Close() })
++	defer release.Stop()
++	pool := tenant.NewPool(tenant.PoolConfig{Backend: "postgres"})
++	defer pool.Close()
++	tenantSvc := service.NewTenantService(nil, nil, pool, nil, "", 0, 0, false, nil)
++	srv := NewServer(tenantSvc, nil, "", nil, nil, "", false, service.ModeSmart, "postgres", slog.Default()).WithRecallRequestBudget(100*time.Millisecond, 20*time.Millisecond)
++	pass := func(next http.Handler) http.Handler { return next }
++	router := srv.Router(pass, pass, pass, pass)
++	req := postgresSessionDeleteRequest(t, http.MethodGet, "/v1alpha2/mem9s/memories?q=configuration", nil, "tenant-a", db)
++	rr := httptest.NewRecorder()
++	start := time.Now()
++	router.ServeHTTP(rr, req)
++	if elapsed := time.Since(start); elapsed > 750*time.Millisecond {
++		t.Fatalf("cold schema ignored Recall budget: %s", elapsed)
++	}
++	if rr.Code != http.StatusGatewayTimeout {
++		t.Fatalf("status=%d, want 504: %s", rr.Code, rr.Body.String())
++	}
++	if db.Stats().WaitCount == 0 {
++		t.Fatal("test never waited for the schema connection")
++	}
++	cached := false
++	srv.svcCache.Range(func(_, _ any) bool { cached = true; return false })
++	if cached {
++		t.Fatal("failed schema check cached services")
++	}
++}
+diff --git a/server/internal/handler/session_edit.go b/server/internal/handler/session_edit.go
+index 5938ea4e54324c87ef44ffb5e256383940817899..860b047a51284a312648ac98db0757e958fcd3a2 100644
+--- a/server/internal/handler/session_edit.go
++++ b/server/internal/handler/session_edit.go
+@@ -59,7 +59,7 @@ func (s *Server) editSessionMessage(w http.ResponseWriter, r *http.Request) {
+ 		return
+ 	}
+ 
+-	svc := s.resolveServices(auth)
++	svc := s.resolveServices(r.Context(), auth)
+ 	edit, effective, err := svc.session.EditSessionOverlay(r.Context(), id, req.Content, req.Tags, auth.AgentName, req.Reason)
+ 	if err != nil {
+ 		s.handleError(r.Context(), w, err)
+@@ -84,7 +84,7 @@ func (s *Server) getSessionMessageEdit(w http.ResponseWriter, r *http.Request) {
+ 		return
+ 	}
+ 	id := chi.URLParam(r, "id")
+-	svc := s.resolveServices(auth)
++	svc := s.resolveServices(r.Context(), auth)
+ 	edit, err := svc.session.GetSessionOverlay(r.Context(), id)
+ 	if err != nil {
+ 		s.handleError(r.Context(), w, err)
+@@ -104,7 +104,7 @@ func (s *Server) deleteSessionMessageEdit(w http.ResponseWriter, r *http.Request
+ 		return
+ 	}
+ 	id := chi.URLParam(r, "id")
+-	svc := s.resolveServices(auth)
++	svc := s.resolveServices(r.Context(), auth)
+ 	removed, err := svc.session.DeleteSessionOverlay(r.Context(), id)
+ 	if err != nil {
+ 		s.handleError(r.Context(), w, err)
+diff --git a/server/internal/service/durable_operational_fact_test.go b/server/internal/service/durable_operational_fact_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..1311180592649da9be18f9ab7c4bc97684f0badd
+--- /dev/null
++++ b/server/internal/service/durable_operational_fact_test.go
+@@ -0,0 +1,28 @@
++package service
++
++import "testing"
++
++func TestDurableOperationalFactsKeepConfigurationAndLessons(t *testing.T) {
++	old := ingestDurableOnly
++	ingestDurableOnly = true
++	defer func() { ingestDurableOnly = old }()
++	for _, text := range []string{
++		"The default temporary workspace for every CI job is /tmp/builds",
++		"The smoke test failed because the deploy role lacked permission; the bootstrap role policy must be updated before deployment",
++		"默认临时工作区固定为 /tmp/builds",
++		"调试日志不能记录凭据，原因是日志被长期保留",
++	} {
++		if reason, _ := longTermFactDropReason(ExtractedFact{Text: text, FactType: "fact"}); reason != "" {
++			t.Errorf("durable fact dropped as %s: %s", reason, text)
++		}
++	}
++	for _, fact := range []ExtractedFact{
++		{Text: "Smoke test failed today", FactType: "fact"},
++		{Text: "临时工作区是 /tmp/mem9", FactType: "fact"},
++		{Text: "The default temporary workspace is /tmp/builds", FactType: factTypeOperationalLog},
++	} {
++		if reason, _ := longTermFactDropReason(fact); reason == "" {
++			t.Errorf("transient fact was retained: %s", fact.Text)
++		}
++	}
++}
+diff --git a/server/internal/service/ingest.go b/server/internal/service/ingest.go
+index 1410e1a073f1f0008a66b63dae4aef5d479a22ad..5ed448383ebfdf5951d6666b8f86c743c170323f 100644
+--- a/server/internal/service/ingest.go
++++ b/server/internal/service/ingest.go
+@@ -285,6 +285,10 @@ func longTermFactDropReason(f ExtractedFact) (string, string) {
+ 	return "", ""
+ }
+ 
++// In coding-agent mode, an operational phrase can describe durable configuration
++// or a causal lesson. Explicit transient fact types are still rejected first.
++var durableOperationalContextRE = regexp.MustCompile(`(?i)\b(?:default|configured|standard)\b.*\b(?:workspace|directory|path|table|timeout|retry|policy)\b|\b(?:workspace|directory|path|table|timeout|retry|policy)\b.*\b(?:default|configured|standard)\b|\b(?:because|caused by|root cause|lesson learned|workaround)\b|(?:默认|固定|配置|约定).{0,80}(?:目录|路径|工作区|超时|重试|策略)|(?:原因是|根因|经验|解决方法)`)
++
+ func serverGuardDropReason(text string) string {
+ 	text = strings.TrimSpace(text)
+ 	if text == "" {
+@@ -301,6 +305,9 @@ func serverGuardDropReason(text string) string {
+ 	case isActivityLogText(text), chineseActivityLogRE.MatchString(text):
+ 		return factTypeActivityLog
+ 	case operationalLogRE.MatchString(text), chineseOperationalLogRE.MatchString(text):
++		if ingestDurableOnly && durableOperationalContextRE.MatchString(text) {
++			return ""
++		}
+ 		return factTypeOperationalLog
+ 	default:
+ 		return ""
+@@ -1582,7 +1589,6 @@ type factSearchResult struct {
+ 	candidates []existingMemoryCandidate
+ 	fatalErr   error
+ 	successes  int
+-	fatal      error
+ }
+ 
+ // gatherExistingMemories searches relevant memories for each fact, deduplicates
+@@ -1652,10 +1658,7 @@ func (s *IngestService) gatherExistingMemories(ctx context.Context, agentID, app
+ 	var searchAttempts, searchSuccesses int
+ 	for _, searchResult := range searchResults {
+ 		if searchResult.fatalErr != nil {
+-			return nil, fmt.Errorf("existing memory FTS search incomplete: %w", searchResult.fatalErr)
+-		}
+-		if searchResult.fatal != nil {
+-			return nil, searchResult.fatal
++			return nil, searchResult.fatalErr
+ 		}
+ 		searchAttempts += searchResult.attempts
+ 		searchSuccesses += searchResult.successes
+@@ -1743,7 +1746,7 @@ func (s *IngestService) searchExistingMemoriesForFact(
+ 			if vecErr != nil {
+ 				if errors.Is(vecErr, domain.ErrNamespaceVectorCapacity) ||
+ 					errors.Is(vecErr, domain.ErrNamespaceVectorTimeout) {
+-					result.fatal = vecErr
++					result.fatalErr = vecErr
+ 					return result
+ 				}
+ 				slog.Warn("gatherExistingMemories: vector search failed for fact, continuing with keyword leg", "fact_len", len(fact), "err", vecErr)
