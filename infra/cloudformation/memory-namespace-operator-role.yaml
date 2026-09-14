@@ -13,7 +13,12 @@ Parameters:
     AllowedPattern: "^[a-z0-9-]+$"
   CognitoUserPoolId:
     Type: String
-    AllowedPattern: "^[a-z0-9-]+_[A-Za-z0-9]+$"
+    Default: ""
+    Description: Managed pool ID; leave empty for external OIDC without Cognito grants.
+    AllowedPattern: "^([a-z0-9-]+_[A-Za-z0-9]+)?$"
+
+Conditions:
+  HasManagedPool: !Not [!Equals [!Ref CognitoUserPoolId, ""]]
 
 Resources:
   MemoryNamespaceOperatorRole:
@@ -35,17 +40,20 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
-              - Sid: ExactUserPool
-                Effect: Allow
-                Action:
-                  - cognito-idp:AdminAddUserToGroup
-                  - cognito-idp:AdminGetUser
-                  - cognito-idp:AdminListGroupsForUser
-                  - cognito-idp:AdminRemoveUserFromGroup
-                  - cognito-idp:CreateGroup
-                  - cognito-idp:ListGroups
-                  - cognito-idp:UpdateGroup
-                Resource: !Sub arn:${AWS::Partition}:cognito-idp:${ApplicationRegion}:${AWS::AccountId}:userpool/${CognitoUserPoolId}
+              - !If
+                - HasManagedPool
+                - Sid: ExactUserPool
+                  Effect: Allow
+                  Action:
+                    - cognito-idp:AdminAddUserToGroup
+                    - cognito-idp:AdminGetUser
+                    - cognito-idp:AdminListGroupsForUser
+                    - cognito-idp:AdminRemoveUserFromGroup
+                    - cognito-idp:CreateGroup
+                    - cognito-idp:ListGroups
+                    - cognito-idp:UpdateGroup
+                  Resource: !Sub arn:${AWS::Partition}:cognito-idp:${ApplicationRegion}:${AWS::AccountId}:userpool/${CognitoUserPoolId}
+                - !Ref AWS::NoValue
               - Sid: EphemeralInputs
                 Effect: Allow
                 Action:

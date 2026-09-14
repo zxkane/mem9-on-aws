@@ -3,6 +3,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { CognitoOutputs } from "./cognito";
+import { readAuthConfig } from "./auth-config";
 import type { EcsOutputs } from "./ecs";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import type { NamespaceIdentityOutputs } from "./namespace-identity";
@@ -14,7 +15,10 @@ import type { NamespaceIdentityOutputs } from "./namespace-identity";
  * GatewayTarget provisioned via a command.local.Command.
  */
 
-function out<T>(value: T): { value: T; apply: (fn: (v: T) => unknown) => unknown } {
+function out<T>(value: T): {
+  value: T;
+  apply: (fn: (v: T) => unknown) => unknown;
+} {
   return { value, apply: (fn) => out(fn(value) as never) };
 }
 
@@ -49,7 +53,10 @@ function installInterpolate() {
       s += str;
       if (i < values.length) {
         const v = values[i];
-        s += typeof v === "object" && v && "value" in v ? String((v as { value: unknown }).value) : String(v);
+        s +=
+          typeof v === "object" && v && "value" in v
+            ? String((v as { value: unknown }).value)
+            : String(v);
       }
     });
     return out(s);
@@ -59,11 +66,18 @@ function installInterpolate() {
 function makeCtor(kind: string) {
   return class {
     name = out(`${kind}-name`);
-    arn = { value: `arn:${kind}`, apply: (fn: (v: string) => unknown) => out(fn(`arn:${kind}`) as never) };
+    arn = {
+      value: `arn:${kind}`,
+      apply: (fn: (v: string) => unknown) => out(fn(`arn:${kind}`) as never),
+    };
     id = out(`${kind}-id`);
     gatewayId = out("gw-123");
     gatewayUrl = out("https://gateway.example.com/mcp");
-    constructor(_n: string, args: Record<string, unknown>, opts?: Record<string, unknown>) {
+    constructor(
+      _n: string,
+      args: Record<string, unknown>,
+      opts?: Record<string, unknown>,
+    ) {
       created.push({ kind, args, opts });
     }
   };
@@ -78,7 +92,9 @@ function installGlobals(stage: string) {
     getRegionOutput: () => ({ name: out("ap-northeast-1") }),
     ec2: {
       getVpcOutput: () => ({ id: out("vpc-test") }),
-      getSubnetsOutput: () => ({ ids: out(["subnet-a", "subnet-b", "subnet-c"]) }),
+      getSubnetsOutput: () => ({
+        ids: out(["subnet-a", "subnet-b", "subnet-c"]),
+      }),
     },
     iam: { Role: makeCtor("Role"), RolePolicy: makeCtor("RolePolicy") },
     bedrock: {
@@ -120,7 +136,16 @@ beforeEach(() => {
   params = [];
 });
 afterEach(() => {
-  for (const g of ["$app", "aws", "sst", "command", "random", "$interpolate", "$jsonStringify"]) delete (globalThis as Record<string, unknown>)[g];
+  for (const g of [
+    "$app",
+    "aws",
+    "sst",
+    "command",
+    "random",
+    "$interpolate",
+    "$jsonStringify",
+  ])
+    delete (globalThis as Record<string, unknown>)[g];
   vi.resetModules();
 });
 
@@ -177,18 +202,23 @@ describe("gateway stack", () => {
   it("creates a CUSTOM_JWT MCP gateway matching on allowedClients (not aud)", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
-    gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>, fakeNamespaceIdentity());
+    gateway(
+      fakeCognito(),
+      fakeEcs(),
+      fakeIdentity(),
+      out("reader-client-id-test") as unknown as Output<string>,
+      fakeNamespaceIdentity(),
+    );
     const gw = only("AgentcoreGateway");
     expect(gw.protocolType).toBe("MCP");
     expect(gw.authorizerType).toBe("CUSTOM_JWT");
     const jwt = (gw.authorizerConfiguration as any).customJwtAuthorizer;
-    expect(String((jwt.discoveryUrl as { value?: string }).value)).toContain("/.well-known/openid-configuration");
+    expect(String((jwt.discoveryUrl as { value?: string }).value)).toContain(
+      "/.well-known/openid-configuration",
+    );
     // The M2M client plus the browser-login reader client.
     expect(jwt.allowedClients).toHaveLength(2);
-    expect(jwt.allowedScopes).toEqual([
-      "mem9-mcp/read",
-      "mem9-mcp/write",
-    ]);
+    expect(jwt.allowedScopes).toEqual(["mem9-mcp/read", "mem9-mcp/write"]);
     expect(unwrap(gw.interceptorConfigurations)).toEqual([
       {
         interceptionPoints: ["REQUEST", "RESPONSE"],
@@ -201,12 +231,18 @@ describe("gateway stack", () => {
   it("TC-M2M-CLEANUP-003: trusts the M2M and reader clients", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
-    gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>, fakeNamespaceIdentity());
+    gateway(
+      fakeCognito(),
+      fakeEcs(),
+      fakeIdentity(),
+      out("reader-client-id-test") as unknown as Output<string>,
+      fakeNamespaceIdentity(),
+    );
     const gw = only("AgentcoreGateway");
     const jwt = (gw.authorizerConfiguration as any).customJwtAuthorizer;
     // The list is [...cognitoOut.allowedClientIds, readerClientId]; each entry is an
     // out<string> wrapper, so unwrap to compare the underlying client ids.
-    const clients = (unwrap(jwt.allowedClients) as string[]);
+    const clients = unwrap(jwt.allowedClients) as string[];
     // The M2M client from fakeCognito().allowedClientIds.
     expect(clients).toContain("client-1");
     // The browser-login reader client passed as the 4th arg.
@@ -216,7 +252,13 @@ describe("gateway stack", () => {
   it("TC-GROUPNS-035: splits a non-VPC identity interceptor from the VPC target", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
-    gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>, fakeNamespaceIdentity());
+    gateway(
+      fakeCognito(),
+      fakeEcs(),
+      fakeIdentity(),
+      out("reader-client-id-test") as unknown as Output<string>,
+      fakeNamespaceIdentity(),
+    );
     const functions = all("SstFunction");
     expect(functions).toHaveLength(2);
     const interceptorFn = functions.find((fn) =>
@@ -239,9 +281,15 @@ describe("gateway stack", () => {
     expect(vpc.securityGroups).toBeDefined();
     // Env (flat on sst.aws.Function): the Cloud Map base URL + the tenant key.
     const env = targetFn?.environment as Record<string, any>;
-    expect(String((env.MEM9_SERVER_BASE_URL as { value?: string }).value)).toContain("mnemo.mem9-prod.local");
-    expect(String((env.MEM9_SERVER_BASE_URL as { value?: string }).value)).toContain(":8080");
-    expect(String((env.MEM9_API_KEY as { value?: string }).value)).toBe("deadbeefTENANTID");
+    expect(
+      String((env.MEM9_SERVER_BASE_URL as { value?: string }).value),
+    ).toContain("mnemo.mem9-prod.local");
+    expect(
+      String((env.MEM9_SERVER_BASE_URL as { value?: string }).value),
+    ).toContain(":8080");
+    expect(String((env.MEM9_API_KEY as { value?: string }).value)).toBe(
+      "deadbeefTENANTID",
+    );
     expect(
       JSON.parse(
         String(
@@ -268,7 +316,13 @@ describe("gateway stack", () => {
   it("gateway service role grants ONLY lambda:InvokeFunction (no workload-identity/secret/ENI)", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
-    gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>, fakeNamespaceIdentity());
+    gateway(
+      fakeCognito(),
+      fakeEcs(),
+      fakeIdentity(),
+      out("reader-client-id-test") as unknown as Output<string>,
+      fakeNamespaceIdentity(),
+    );
     // Two roles are created: the Lambda exec role + the gateway service role. Find
     // the gateway-invoke RolePolicy (its doc is an apply()'d Output over the ARN).
     const rolePolicies = created.filter((r) => r.kind === "RolePolicy");
@@ -286,7 +340,13 @@ describe("gateway stack", () => {
   it("provisions the target via a command.local.Command driving a mcp.lambda CreateGatewayTarget", async () => {
     installGlobals("prod");
     const gateway = await loadGateway();
-    gateway(fakeCognito(), fakeEcs(), fakeIdentity(), out("reader-client-id-test") as unknown as Output<string>, fakeNamespaceIdentity());
+    gateway(
+      fakeCognito(),
+      fakeEcs(),
+      fakeIdentity(),
+      out("reader-client-id-test") as unknown as Output<string>,
+      fakeNamespaceIdentity(),
+    );
     const cmd = only("LocalCommand");
     const createCommand = String(unwrap(cmd.create));
     const deleteCommand = String(unwrap(cmd.delete));
@@ -344,12 +404,62 @@ describe("gateway stack", () => {
     expect(env.MEM9_TGT_GATEWAY_ID).toBeDefined();
     expect(env.MEM9_TGT_NAME).toBe("prod-mem9-rest");
     // No API-key credential provider resource is created for a Lambda target.
-    expect(created.filter((r) => r.kind === "AgentcoreApiKeyCredentialProvider")).toHaveLength(0);
+    expect(
+      created.filter((r) => r.kind === "AgentcoreApiKeyCredentialProvider"),
+    ).toHaveLength(0);
     // Gateway url/id exported to SSM.
-    expect(params.map((p) => p.name)).toContain("/mem9-on-aws/prod/gateway/url");
+    expect(params.map((p) => p.name)).toContain(
+      "/mem9-on-aws/prod/gateway/url",
+    );
     // deleteBeforeReplace guards against the create-then-delete replace order that
     // wiped the target on a tool-schema change (PR #16 prod outage).
     const cmdRec = created.find((r) => r.kind === "LocalCommand");
     expect(cmdRec?.opts?.deleteBeforeReplace).toBe(true);
+  });
+});
+
+describe("external OIDC gateway admission", () => {
+  it("trusts only selected external clients even when the legacy pool is retained", async () => {
+    installGlobals("prod");
+    const auth = readAuthConfig({
+      MEM9_AUTH_MODE: "oidc",
+      MEM9_OIDC_ISSUER: "https://issuer.example.com/pool",
+      MEM9_OIDC_CLIENT_ID: "external-browser",
+      MEM9_OIDC_M2M_CLIENT_ID: "external-machine",
+      SST_SECRET_OidcM2mClientSecret: "fixture-secret",
+      MEM9_AUTH_REQUIRED_GROUP: "team-a",
+      MEM9_AUTH_GROUP_CLAIM: "groups",
+    });
+    const gateway = await loadGateway();
+    gateway(
+      fakeCognito(),
+      fakeEcs(),
+      fakeIdentity(),
+      out("external-browser") as unknown as Output<string>,
+      fakeNamespaceIdentity(),
+      auth,
+    );
+    const config = (
+      unwrap(only("AgentcoreGateway").authorizerConfiguration) as {
+        customJwtAuthorizer: Record<string, unknown>;
+      }
+    ).customJwtAuthorizer;
+    expect(config.allowedClients).toEqual([
+      "external-machine",
+      "external-browser",
+    ]);
+    expect(config.discoveryUrl).toBe(
+      "https://issuer.example.com/pool/.well-known/openid-configuration",
+    );
+    const env = all("SstFunction").find(
+      (resource) =>
+        resource.handler === "infra/gateway/identity-interceptor.handler",
+    )!.environment as Record<string, unknown>;
+    expect(JSON.parse(String(unwrap(env.MEM9_CLIENT_REGISTRY)))).toMatchObject({
+      human: ["external-browser"],
+      m2m: ["external-machine"],
+      requiredGroup: "team-a",
+      issuer: "https://issuer.example.com/pool",
+    });
   });
 });

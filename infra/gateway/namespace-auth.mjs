@@ -1,8 +1,4 @@
-import {
-  createHash,
-  createHmac,
-  timingSafeEqual,
-} from "node:crypto";
+import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 
 export const INTERNAL_AUTH_FIELD = "__mem9_auth_v2";
 export const MAX_GROUPS = 32;
@@ -93,10 +89,46 @@ export function parseClientRegistry(raw) {
       throw new Error(`client id is configured as both human and m2m`);
     }
   }
-  if (human.size === 0 || m2m.size === 0) {
-    throw new Error("client registry requires at least one human and m2m client");
+  if (human.size === 0) {
+    throw new Error("client registry requires at least one human client");
   }
-  return Object.freeze({ human, m2m });
+  const issuer =
+    parsed.issuer == null
+      ? undefined
+      : requiredString(parsed.issuer, "issuer", ISSUER_PATTERN);
+  const clientIdClaim = requiredString(
+    parsed.clientIdClaim ?? "client_id",
+    "client claim",
+    CLIENT_ID_PATTERN,
+  );
+  const groupClaim = requiredString(
+    parsed.groupClaim ?? "cognito:groups",
+    "group claim",
+    CLIENT_ID_PATTERN,
+  );
+  const requiredGroup =
+    parsed.requiredGroup == null
+      ? undefined
+      : requiredString(
+          parsed.requiredGroup,
+          "required group",
+          CLIENT_ID_PATTERN,
+        );
+  const audience =
+    parsed.audience == null
+      ? undefined
+      : requiredString(parsed.audience, "audience", CLIENT_ID_PATTERN);
+  if (audience && (human.has(audience) || m2m.has(audience)))
+    throw new Error("API audience must differ from client IDs");
+  return Object.freeze({
+    human,
+    m2m,
+    issuer,
+    clientIdClaim,
+    groupClaim,
+    requiredGroup,
+    audience,
+  });
 }
 
 function decodeJwtPayload(token) {
@@ -120,12 +152,26 @@ function decodeJwtPayload(token) {
 
 export function classifyAccessToken(token, registry) {
   const claims = decodeJwtPayload(token);
-  if (claims.token_use !== "access") {
+  // Cognito explicitly labels access tokens. Other issuers must provide a
+  // distinct configured API audience; ID-token audiences are client IDs.
+  if (
+    claims.token_use !== "access" &&
+    !(claims.token_use === undefined && registry.audience)
+  ) {
     throw new Error("token_use must be access");
   }
   const issuer = requiredString(claims.iss, "iss", ISSUER_PATTERN);
+  if (registry.issuer && issuer !== registry.issuer)
+    throw new Error("issuer mismatch");
+  if (
+    registry.audience &&
+    !(Array.isArray(claims.aud) ? claims.aud : [claims.aud]).includes(
+      registry.audience,
+    )
+  )
+    throw new Error("audience mismatch");
   const clientId = requiredString(
-    claims.client_id,
+    claims[registry.clientIdClaim],
     "client_id",
     CLIENT_ID_PATTERN,
   );
@@ -141,21 +187,24 @@ export function classifyAccessToken(token, registry) {
     }
     const subject = claims.sub;
     let groups = [];
-    if (claims["cognito:groups"] !== undefined) {
+    if (claims[registry.groupClaim] !== undefined) {
       if (
-        !Array.isArray(claims["cognito:groups"]) ||
-        !claims["cognito:groups"].every(
-          (group) =>
-            typeof group === "string" && CLIENT_ID_PATTERN.test(group),
+        !Array.isArray(claims[registry.groupClaim]) ||
+        !claims[registry.groupClaim].every(
+          (group) => typeof group === "string" && CLIENT_ID_PATTERN.test(group),
         )
       ) {
         throw new Error("cognito:groups must be an array of strings");
       }
-      groups = [...claims["cognito:groups"]];
+      groups = [...claims[registry.groupClaim]];
     }
     if (groups.length > MAX_GROUPS) {
-      throw new Error(`cognito:groups must contain at most ${MAX_GROUPS} values`);
+      throw new Error(
+        `cognito:groups must contain at most ${MAX_GROUPS} values`,
+      );
     }
+    if (registry.requiredGroup && !groups.includes(registry.requiredGroup))
+      throw new Error("required group is missing");
     return Object.freeze({
       issuer,
       clientId,
@@ -165,7 +214,7 @@ export function classifyAccessToken(token, registry) {
     });
   }
 
-  if (claims["cognito:groups"] !== undefined) {
+  if (claims[registry.groupClaim] !== undefined) {
     throw new Error("m2m access token has an unexpected group claim");
   }
   // Cognito client-credentials tokens include sub, but the machine identity is
@@ -180,11 +229,16 @@ export function classifyAccessToken(token, registry) {
 }
 
 function normalizeCanonical(value) {
-  if (value === null || typeof value === "boolean" || typeof value === "string") {
+  if (
+    value === null ||
+    typeof value === "boolean" ||
+    typeof value === "string"
+  ) {
     return value;
   }
   if (typeof value === "number") {
-    if (!Number.isFinite(value)) throw new Error("canonical JSON requires a finite number");
+    if (!Number.isFinite(value))
+      throw new Error("canonical JSON requires a finite number");
     return value;
   }
   if (Array.isArray(value)) return value.map(normalizeCanonical);
@@ -242,11 +296,7 @@ export function parseSigningKeys(raw) {
   const currentKid = Object.hasOwn(parsed, "active")
     ? parsed.active
     : "current";
-  if (
-    keyIds[0] === "a" &&
-    currentKid !== "a" &&
-    currentKid !== "b"
-  ) {
+  if (keyIds[0] === "a" && currentKid !== "a" && currentKid !== "b") {
     throw new Error("signing keys active slot must be a or b");
   }
   if (keyIds[0] === "current" && typeof parsed.current !== "string") {
@@ -254,10 +304,7 @@ export function parseSigningKeys(raw) {
   }
   const keys = new Map();
   for (const kid of keyIds) {
-    if (
-      parsed[kid] === undefined ||
-      parsed[kid] === ""
-    ) {
+    if (parsed[kid] === undefined || parsed[kid] === "") {
       if (keyIds[0] === "a") {
         throw new Error(`signing key ${kid} is required`);
       }
@@ -283,9 +330,7 @@ export function parseSigningKeys(raw) {
 function signPayload(payload, keys) {
   const key = keys.keys.get(payload.kid);
   if (!key) throw new Error("unknown signing key id");
-  return createHmac("sha256", key)
-    .update(canonicalJson(payload))
-    .digest("hex");
+  return createHmac("sha256", key).update(canonicalJson(payload)).digest("hex");
 }
 
 function verifyMac(payload, mac, keys) {
@@ -293,12 +338,7 @@ function verifyMac(payload, mac, keys) {
     throw new Error("signature is malformed");
   }
   const expected = signPayload(payload, keys);
-  if (
-    !timingSafeEqual(
-      Buffer.from(mac, "hex"),
-      Buffer.from(expected, "hex"),
-    )
-  ) {
+  if (!timingSafeEqual(Buffer.from(mac, "hex"), Buffer.from(expected, "hex"))) {
     throw new Error("signature mismatch");
   }
 }
@@ -344,12 +384,7 @@ export function createInternalContext({ invocation, identity, keys, now }) {
   return Object.freeze({ ...payload, mac: signPayload(payload, keys) });
 }
 
-export function verifyInternalContext({
-  context,
-  invocation,
-  keys,
-  now,
-}) {
+export function verifyInternalContext({ context, invocation, keys, now }) {
   if (!isRecord(context)) throw new Error("internal context is unavailable");
   const { mac, ...payload } = context;
   if (
@@ -367,7 +402,8 @@ export function verifyInternalContext({
   }
   validateGroupKeys(payload.group_keys);
   const currentTime = Math.floor(now ?? Date.now() / 1000);
-  if (payload.expires_at < currentTime) throw new Error("internal context expired");
+  if (payload.expires_at < currentTime)
+    throw new Error("internal context expired");
   if (
     payload.issued_at > currentTime + 5 ||
     payload.expires_at - payload.issued_at !== CONTEXT_TTL_SECONDS
@@ -375,7 +411,8 @@ export function verifyInternalContext({
     throw new Error("internal context time window is invalid");
   }
   const sanitized = sanitizedInvocation(invocation);
-  if (payload.tool !== sanitized.tool) throw new Error("internal context tool mismatch");
+  if (payload.tool !== sanitized.tool)
+    throw new Error("internal context tool mismatch");
   if (payload.request_hash !== requestHash(invocation)) {
     throw new Error("internal context request hash mismatch");
   }
@@ -421,7 +458,8 @@ export function verifyTransportEnvelope({
   keys,
   now,
 }) {
-  if (typeof envelope !== "string") throw new Error("transport envelope is unavailable");
+  if (typeof envelope !== "string")
+    throw new Error("transport envelope is unavailable");
   const parts = envelope.split(".");
   if (parts.length !== 2) throw new Error("transport envelope is malformed");
   let payload;
@@ -445,7 +483,8 @@ export function verifyTransportEnvelope({
   }
   validateGroupKeys(payload.group_keys);
   const currentTime = Math.floor(now ?? Date.now() / 1000);
-  if (payload.expires_at < currentTime) throw new Error("transport envelope expired");
+  if (payload.expires_at < currentTime)
+    throw new Error("transport envelope expired");
   if (
     payload.issued_at > currentTime + 5 ||
     payload.expires_at - payload.issued_at !== CONTEXT_TTL_SECONDS

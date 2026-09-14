@@ -25,6 +25,7 @@
  */
 
 import { createHash } from "node:crypto";
+import type { AuthConfig } from "./auth-config";
 
 import {
   MCP_BROWSER_SCOPES,
@@ -74,7 +75,17 @@ export interface OauthFacadeOutputs {
   functionRoleName: Output<string>;
 }
 
-export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
+export function oauthFacade(
+  cognitoOut: CognitoOutputs | undefined,
+  auth: AuthConfig = {
+    mode: "managed",
+    retainManaged: false,
+    groupClaim: "cognito:groups",
+  },
+): OauthFacadeOutputs {
+  const external = auth.oidc;
+  if (!external && !cognitoOut)
+    throw new Error("Managed authentication requires Cognito");
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const stage = $app.stage;
   const tags = { Project: "mem9-on-aws", Stage: stage, ManagedBy: "sst" };
@@ -89,7 +100,9 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
       !cloudflareZoneId && CLOUDFLARE_ZONE_ID_ENV,
     ].filter(Boolean);
     throw new Error(
-      `${FACADE_CUSTOM_DOMAIN_ENV} requires ${missing.join(" and ")} for Cloudflare DNS.`,
+      `${FACADE_CUSTOM_DOMAIN_ENV} requires ${missing.join(
+        " and ",
+      )} for Cloudflare DNS.`,
     );
   }
   const customDomainConfig = customDomain
@@ -111,13 +124,19 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
     suffix: string,
     value: Output<string>,
     secure = false,
+    retain = false,
   ) =>
-    new awsAny.ssm.Parameter(logicalName, {
-      name: `${prefix}/${suffix}`,
-      type: secure ? "SecureString" : "String",
-      value,
-      tags,
-    });
+    new awsAny.ssm.Parameter(
+      logicalName,
+      {
+        name: `${prefix}/${suffix}`,
+        type: secure ? "SecureString" : "String",
+        value,
+        tags,
+        ...(retain ? { overwrite: true } : {}),
+      },
+      retain ? { retainOnDelete: true, protect: false } : {},
+    );
 
   // --- ApiGatewayV2 (created FIRST — cycle break) ---
   // CORS scoped to the headers an MCP client sends: the bearer, JSON bodies, the
@@ -142,35 +161,155 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
   // browser Hosted-UI flow. `generateSecret` (confidential client — the façade
   // holds the secret server-side and does the code exchange). callbackUrls /
   // logoutUrls point back at THIS api's routes (hence the create-first ordering).
-  const readerClient = new awsAny.cognito.UserPoolClient(
-    "Mem9McpReaderClient",
-    {
-      name: `${stage}-mem9-mcp-reader`,
-      userPoolId: cognitoOut.userPoolId,
-      generateSecret: true,
-      // Cognito restores ALLOW_REFRESH_TOKEN_AUTH when this property is absent.
-      // Keep one non-refresh API flow so the deployed client has an explicit
-      // list that excludes the flow incompatible with token rotation.
-      explicitAuthFlows: ["ALLOW_USER_SRP_AUTH"],
-      refreshTokenRotation: {
-        feature: "ENABLED",
-        retryGracePeriodSeconds: 10,
-      },
-      supportedIdentityProviders: ["COGNITO"],
-      callbackUrls: [$interpolate`${facadeApi.url}/oauth/callback`],
-      logoutUrls: [$interpolate`${facadeApi.url}/oauth/logout`],
-      allowedOauthFlows: ["code"],
-      allowedOauthScopes: [...MCP_BROWSER_SCOPES],
-      allowedOauthFlowsUserPoolClient: true,
-      accessTokenValidity: 15,
-      tokenValidityUnits: {
-        accessToken: "minutes",
-      },
-      preventUserExistenceErrors: "ENABLED",
-      enableTokenRevocation: true,
-    },
-    { dependsOn: [facadeApi] },
+  const readerClient = cognitoOut
+    ? new awsAny.cognito.UserPoolClient(
+        "Mem9McpReaderClient",
+        {
+          name: `${stage}-mem9-mcp-reader`,
+          userPoolId: cognitoOut.userPoolId,
+          generateSecret: true,
+          // Cognito restores ALLOW_REFRESH_TOKEN_AUTH when this property is absent.
+          // Keep one non-refresh API flow so the deployed client has an explicit
+          // list that excludes the flow incompatible with token rotation.
+          explicitAuthFlows: ["ALLOW_USER_SRP_AUTH"],
+          refreshTokenRotation: {
+            feature: "ENABLED",
+            retryGracePeriodSeconds: 10,
+          },
+          supportedIdentityProviders: ["COGNITO"],
+          callbackUrls: [$interpolate`${facadeApi.url}/oauth/callback`],
+          logoutUrls: [$interpolate`${facadeApi.url}/oauth/logout`],
+          allowedOauthFlows: ["code"],
+          allowedOauthScopes: [...MCP_BROWSER_SCOPES],
+          allowedOauthFlowsUserPoolClient: true,
+          accessTokenValidity: 15,
+          tokenValidityUnits: {
+            accessToken: "minutes",
+          },
+          preventUserExistenceErrors: "ENABLED",
+          enableTokenRevocation: true,
+        },
+        { dependsOn: [facadeApi] },
+      )
+    : undefined;
+
+  const readerClientId = external
+    ? $interpolate`${external.clientId}`
+    : readerClient!.id;
+  const activeClientSecret = external
+    ? external.clientSecret
+      ? new sst.Secret("OidcClientSecret").value
+      : undefined
+    : readerClient!.clientSecret;
+  // Keep legacy credentials unchanged for Lambda versions still using legacy
+  // endpoints. External credentials never overwrite these shared SSM names.
+  const legacyReaderIdParam = readerClient
+    ? param("SsmReaderClientId", "cognito/reader/client-id", readerClient.id)
+    : undefined;
+  const legacyReaderSecretParam = readerClient
+    ? param(
+        "SsmReaderClientSecret",
+        "cognito/reader/client-secret",
+        readerClient.clientSecret,
+        true,
+      )
+    : undefined;
+  const issuer = external?.issuer ?? cognitoOut!.issuer;
+  const tokenEndpoint = external?.tokenEndpoint ?? cognitoOut!.tokenEndpoint;
+  const providerKey = external
+    ? createHash("sha256")
+        .update(
+          JSON.stringify([
+            external.issuer,
+            external.clientId,
+            external.tokenEndpoint,
+            external.tokenAuthMethod,
+            external.m2mClientId ?? null,
+          ]),
+        )
+        .digest("hex")
+    : undefined;
+  const providerSuffix = `auth/providers/${providerKey}`;
+  const credentialPrefix = external
+    ? `${prefix}/${providerSuffix}/browser`
+    : `${prefix}/cognito/reader`;
+  const readerIdParam = external
+    ? param(
+        "SsmOidcReaderClientId",
+        `${providerSuffix}/browser/client-id`,
+        readerClientId,
+        false,
+        true,
+      )
+    : legacyReaderIdParam!;
+  const readerSecretParam = external
+    ? activeClientSecret
+      ? param(
+          "SsmOidcReaderClientSecret",
+          `${providerSuffix}/browser/client-secret`,
+          activeClientSecret,
+          true,
+          true,
+        )
+      : undefined
+    : legacyReaderSecretParam;
+  param("SsmAuthMode", "auth/mode", $interpolate`${auth.mode}`);
+  param("SsmAuthIssuer", "auth/issuer", $interpolate`${issuer}`);
+  param(
+    "SsmAuthTokenEndpoint",
+    "auth/token-endpoint",
+    $interpolate`${tokenEndpoint}`,
   );
+  param(
+    "SsmAuthScope",
+    "auth/scope",
+    $interpolate`${MCP_RESOURCE_SCOPES.join(" ")}`,
+  );
+  if (external?.m2mClientId) {
+    param(
+      "SsmOidcM2mClientId",
+      `${providerSuffix}/m2m/client-id`,
+      $interpolate`${external.m2mClientId}`,
+      false,
+      true,
+    );
+    param(
+      "SsmOidcM2mClientSecret",
+      `${providerSuffix}/m2m/client-secret`,
+      new sst.Secret("OidcM2mClientSecret").value,
+      true,
+      true,
+    );
+  }
+  if (external) {
+    param(
+      "SsmOidcProviderTokenEndpoint",
+      `${providerSuffix}/token-endpoint`,
+      $interpolate`${tokenEndpoint}`,
+      false,
+      true,
+    );
+    param(
+      "SsmOidcProviderScope",
+      `${providerSuffix}/scope`,
+      $interpolate`${MCP_RESOURCE_SCOPES.join(" ")}`,
+      false,
+      true,
+    );
+    param(
+      "SsmOidcProviderPrefix",
+      "auth/provider-prefix",
+      $interpolate`${prefix}/${providerSuffix}`,
+    );
+  }
+  const authContext = $interpolate`${issuer}|${readerIdParam.value}|${tokenEndpoint}|${facadeApi.url}`;
+  const authContextVersion = authContext.apply((value: string) =>
+    createHash("sha256").update(value).digest("hex"),
+  );
+  const secretVersion =
+    readerSecretParam?.value.apply((value: string) =>
+      createHash("sha256").update(value).digest("hex"),
+    ) ?? "none";
 
   // Production fails closed until its operator-owned key is seeded. Ephemeral
   // stages get a secret Pulumi output that remains stable across stack updates
@@ -184,10 +323,7 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
         }).result;
   // Stage-scoped JSON array of exact HTTPS callbacks for hosted MCP clients.
   // Loopback callbacks remain built in; an empty array preserves that default.
-  const allowedCallbackUrls = new sst.Secret(
-    "OauthAllowedCallbackUrls",
-    "[]",
-  );
+  const allowedCallbackUrls = new sst.Secret("OauthAllowedCallbackUrls", "[]");
   const allowedCallbackUrlsParameter = param(
     "SsmAllowedCallbackUrls",
     "oauth/allowed-callback-urls",
@@ -223,11 +359,19 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
       // left the upstream value with no consumer (#143). The Gateway's JWT
       // authorizer builds its discoveryUrl from `cognitoOut.issuer` directly
       // (infra/gateway.ts), so token validation does not depend on this env.
-      COGNITO_AUTHORIZE_ENDPOINT: cognitoOut.authorizeEndpoint,
-      COGNITO_TOKEN_ENDPOINT: cognitoOut.tokenEndpoint,
-      COGNITO_USERINFO_ENDPOINT: cognitoOut.userInfoEndpoint,
-      COGNITO_REVOCATION_ENDPOINT: cognitoOut.revocationEndpoint,
-      COGNITO_JWKS_URI: cognitoOut.jwksUri,
+      AUTH_MODE: auth.mode,
+      AUTH_CREDENTIAL_PREFIX: credentialPrefix,
+      AUTH_TOKEN_AUTH_METHOD: external?.tokenAuthMethod ?? "client_secret_post",
+      AUTH_CONTEXT_VERSION: authContextVersion,
+      AUTH_CLIENT_SECRET_VERSION: secretVersion,
+      COGNITO_AUTHORIZE_ENDPOINT:
+        external?.authorizeEndpoint ?? cognitoOut!.authorizeEndpoint,
+      COGNITO_TOKEN_ENDPOINT: tokenEndpoint,
+      COGNITO_USERINFO_ENDPOINT:
+        external?.userInfoEndpoint ?? cognitoOut!.userInfoEndpoint,
+      COGNITO_REVOCATION_ENDPOINT:
+        external?.revocationEndpoint ?? cognitoOut!.revocationEndpoint,
+      COGNITO_JWKS_URI: external?.jwksUri ?? cognitoOut!.jwksUri,
       RESOURCE_SCOPES: MCP_RESOURCE_SCOPES.join(","),
       OAUTH_STATE_HMAC_KEY: hmacKeyValue,
       OAUTH_ALLOWED_CALLBACK_URLS_VERSION: allowedCallbackUrlsVersion,
@@ -293,13 +437,6 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
   addRoute("ANY /");
 
   // --- SSM exports ---
-  param("SsmReaderClientId", "cognito/reader/client-id", readerClient.id);
-  param(
-    "SsmReaderClientSecret",
-    "cognito/reader/client-secret",
-    readerClient.clientSecret,
-    true,
-  );
   param("SsmFacadeUrl", "facade/url", facadeApi.url);
   param(
     "SsmFacadeMcpEndpoint",
@@ -309,7 +446,7 @@ export function oauthFacade(cognitoOut: CognitoOutputs): OauthFacadeOutputs {
 
   return {
     ssmPrefix: prefix,
-    readerClientId: readerClient.id,
+    readerClientId,
     facadeUrl: facadeApi.url,
     functionRoleName: facadeFn.nodes.role.name,
   };

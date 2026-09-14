@@ -45,6 +45,7 @@ afterEach(() => {
 
 /** Run the harness with a fake `aws`, `curl`, and `sleep`. */
 function runFixture({
+  authMode = "managed",
   logGroup = HASHED_LOG_GROUP,
   nlTotal = "1",
   startQueryError = "",
@@ -85,6 +86,11 @@ if (command === "ssm get-parameter") {
     "/cognito/client-id": "fixture-client-id",
     "/cognito/client-secret": "fixture-client-secret",
     "/cognito/scope": "mem9/read mem9/write",
+    "/auth/provider-prefix": "/mem9-on-aws/pr-137/auth/providers/fixture",
+    "/auth/providers/fixture/token-endpoint": "https://token.example.com/oauth2/token",
+    "/auth/providers/fixture/m2m/client-id": "fixture-client-id",
+    "/auth/providers/fixture/m2m/client-secret": "fixture-client-secret",
+    "/auth/providers/fixture/scope": "mem9/read mem9/write",
     "/gateway/url": "https://gateway.example.com/mcp",
   };
   const suffix = Object.keys(values).find((key) => name.endsWith(key));
@@ -263,6 +269,7 @@ if (request.method === "initialize") {
     env: {
       ...process.env,
       AWS_REGION: "ap-northeast-1",
+      MEM9_AUTH_MODE: authMode,
       E2E_SOFT: soft,
       GITHUB_RUN_ATTEMPT: RUN_ATTEMPT,
       GITHUB_RUN_ID: RUN_ID,
@@ -473,4 +480,14 @@ describe("log-scan hardening (issue #26 guard, detects the #24 failure mode)", (
     expect(result.status).toBe(1);
     expect(result.stdout + result.stderr).toContain("could not read the mnemo-server awslogs-group");
   });
+});
+
+it("uses external M2M configuration without putting credentials in curl argv", () => {
+  const { result, callRecords, output } = runFixture({ authMode: "oidc" });
+  expect(result.status, output).toBe(0);
+  const awsCalls = callRecords.filter((call) => call[0] === "aws");
+  expect(JSON.stringify(awsCalls)).toContain("/auth/providers/fixture/m2m/client-id");
+  expect(JSON.stringify(awsCalls)).not.toContain("/cognito/client-id");
+  const curlCalls = callRecords.filter((call) => call[0] === "curl");
+  expect(JSON.stringify(curlCalls)).not.toContain("fixture-client-secret");
 });

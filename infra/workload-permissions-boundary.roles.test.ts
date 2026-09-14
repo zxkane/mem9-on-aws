@@ -114,6 +114,9 @@ function mockNewResource(args: MockResourceArgs): {
     case "aws:cognito/userPool:UserPool":
       state.endpoint = `cognito-idp.${region}.amazonaws.com/mock`;
       break;
+    case "aws:cognito/userPoolClient:UserPoolClient":
+      if (args.inputs.generateSecret) state.clientSecret = "mock-client-secret";
+      break;
     case "aws:servicediscovery/privateDnsNamespace:PrivateDnsNamespace":
       state.hostedZone = "zone-mock";
       break;

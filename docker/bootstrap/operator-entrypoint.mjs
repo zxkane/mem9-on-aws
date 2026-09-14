@@ -7,8 +7,6 @@ import { join } from "node:path";
 import process from "node:process";
 import { GetParametersCommand, SSMClient } from "@aws-sdk/client-ssm";
 
-const OPERATION = requireEnv("MEM9_BOOTSTRAP_OPERATION");
-const REGION = requireEnv("AWS_REGION");
 const SCRIPT_ROOT = "/bootstrap/operator/scripts";
 const SIGNAL_EXIT_CODES = Object.freeze({ SIGINT: 130, SIGTERM: 143 });
 const CHILD_STOP_TIMEOUT_MS = 25_000;
@@ -65,7 +63,7 @@ function databaseDsn() {
 async function readParameters(names) {
   const unique = [...new Set(names.filter(Boolean))];
   if (unique.length === 0) return new Map();
-  const client = new SSMClient({ region: REGION });
+  const client = new SSMClient({ region: requireEnv("AWS_REGION") });
   try {
     const response = await client.send(
       new GetParametersCommand({
@@ -115,7 +113,8 @@ function run(script, args, env) {
   });
 }
 
-async function main() {
+export async function main() {
+  const OPERATION = requireEnv("MEM9_BOOTSTRAP_OPERATION");
   const configParameter = process.env.MEM9_NAMESPACE_CONFIG_PARAMETER;
   const usernameParameter = process.env.MEM9_NAMESPACE_USERNAME_PARAMETER;
   const values = await readParameters([configParameter, usernameParameter]);
@@ -126,7 +125,7 @@ async function main() {
       MNEMO_DSN: databaseDsn(),
       MEM9_STAGE: requireEnv("MEM9_STAGE"),
       MEM9_COGNITO_ISSUER: requireEnv("MEM9_COGNITO_ISSUER"),
-      MEM9_COGNITO_USER_POOL_ID: requireEnv("MEM9_COGNITO_USER_POOL_ID"),
+      MEM9_COGNITO_USER_POOL_ID: process.env.MEM9_COGNITO_USER_POOL_ID ?? "",
     };
     let configPath;
     if (configParameter) {
@@ -145,6 +144,8 @@ async function main() {
     }
 
     if (OPERATION === "namespace-reconcile") {
+      if (env.MEM9_AUTH_MODE !== "oidc")
+        requireEnv("MEM9_COGNITO_USER_POOL_ID");
       if (!configPath)
         throw new Error("namespace config parameter is required");
       await run(
@@ -159,6 +160,9 @@ async function main() {
         OPERATION,
       )
     ) {
+      if (env.MEM9_AUTH_MODE === "oidc")
+        throw new Error("Manage external users at the identity provider");
+      requireEnv("MEM9_COGNITO_USER_POOL_ID");
       if (!configPath || !usernamePath) {
         throw new Error(
           "namespace config and username parameters are required",
@@ -224,7 +228,8 @@ async function main() {
   }
 }
 
-main().catch((error) => {
-  process.stderr.write(`namespace operator failed: ${error.message}\n`);
-  process.exitCode = Number.isInteger(error.exitCode) ? error.exitCode : 1;
-});
+if (process.argv[1] === new URL(import.meta.url).pathname)
+  main().catch((error) => {
+    process.stderr.write(`namespace operator failed: ${error.message}\n`);
+    process.exitCode = Number.isInteger(error.exitCode) ? error.exitCode : 1;
+  });

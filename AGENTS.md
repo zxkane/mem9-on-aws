@@ -49,6 +49,19 @@ them, update the file rather than silently diverging.
 
 ## Region topology
 
+- Authentication defaults to a managed Cognito pool. External OIDC is selected
+  explicitly with `MEM9_AUTH_MODE=oidc`; never infer a fallback when its settings
+  or discovery fail. Production auth settings come from GitHub Actions Secrets;
+  previews retain managed pools. External issuers have their own region and
+  lifecycle, and this project must not administer their users or groups.
+- Human group admission is optional and exact; machines are classified only by
+  their separately registered client IDs. Preserve tool scopes and signed
+  namespace context. The existing shared tenant/data remain in place for the
+  auth cutover. Existing namespace enforcement and issuer-scoped bindings are
+  independent constraints and must never be bypassed to make a new login work.
+- Set `MEM9_RETAIN_MANAGED_AUTH=1` when switching an existing managed stage, and
+  review that its pool, clients, stable tenant and database are preserved.
+
 - This deployment is region-heterogeneous. Never treat the application region,
   `us-west-2`, or one ambient `AWS_REGION` as a universal region for every
   component.
