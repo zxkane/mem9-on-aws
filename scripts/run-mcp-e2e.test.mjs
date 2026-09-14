@@ -378,6 +378,19 @@ describe("Gateway scope enforcement", () => {
 });
 
 describe("natural-language recall probe (TC-RECALL-031)", () => {
+  it("writes a durable synthetic configuration through smart extraction", () => {
+    const { callRecords, result } = runFixture();
+    expect(result.status, result.stderr).toBe(0);
+    const write = toolCalls(callRecords).find(({ params }) =>
+      params.name.endsWith("add_memory") && params.arguments.content,
+    ).params.arguments;
+    expect(write).not.toHaveProperty("memory_type");
+    expect(write.content).toContain(MARKER);
+    expect(write.content).toMatch(/synthetic.*fixture project/u);
+    expect(write.content).toContain("PostgreSQL");
+    expect(write.content).toContain("1024");
+  });
+
   it("queries with no run-scoped literal, so the probe tests the cutoff and not retrieval", () => {
     const { callRecords, result } = runFixture();
     expect(result.status, result.stderr).toBe(0);

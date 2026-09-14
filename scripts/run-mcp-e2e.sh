@@ -165,7 +165,10 @@ echo "run-mcp-e2e: got scoped JWTs"
 
 # A unique marker so the search unambiguously finds THIS run's memory.
 MARKER="mcp-e2e-${STAGE}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}"
-MEMORY_TEXT="mem9 MCP e2e probe: the secret marker is ${MARKER}."
+# Smart extraction intentionally drops transient probe/status text. Exercise it
+# with a durable configuration for an explicitly synthetic fixture project.
+# Keep the default smart path: pinning the memory would bypass the LLM check.
+MEMORY_TEXT="The synthetic E2E fixture project ${MARKER} uses PostgreSQL for durable memory storage and a self-hosted Qwen3 embedding model with 1024 dimensions. This is the fixture project's established configuration."
 
 # MCP streamable-HTTP session id (captured from initialize; propagated on later
 # calls if the Gateway is stateful). Empty is fine for a stateless Gateway.
@@ -355,7 +358,7 @@ echo "run-mcp-e2e: OK — write→search round-trip verified (marker found) for 
 # a #23 cutoff guard back into a retrieval check that always fails. To re-measure,
 # compare a query's `total` here against the server's `confidence recall search`
 # log line for the same window, which reports shape and candidate count.
-NL_QUERY="recall what the mem9 end-to-end probe recorded about its secret marker"
+NL_QUERY="recall the synthetic E2E fixture project's durable memory storage and local embedding configuration"
 echo "run-mcp-e2e: natural-language recall probe (query: ${NL_QUERY})"
 NL_NONEMPTY=0
 for attempt in 1 2 3; do

@@ -19,6 +19,7 @@ remains disabled. Existing database schemas and embedding dimensions are retaine
 | TC-UPSTREAM-011 | Preview deployment uses the migrated image | Health, authenticated MCP, namespace isolation, and OAuth smoke checks pass |
 | TC-UPSTREAM-012 | Cold-cache schema check waits for a PostgreSQL connection | Recall returns its deadline response, cancels schema work, and leaves the failed service bundle uncached |
 | TC-UPSTREAM-013 | Durable configuration/lessons contain operational phrases | Coding-agent durable mode preserves the useful fact while rejecting transient status and explicit operational-log classifications |
+| TC-UPSTREAM-014 | Live MCP smart-write smoke uses a synthetic project's established configuration | The marked fact is retrieved and NL recall is non-empty; the harness does not bypass extraction with pinned memory and passes with `E2E_SOFT=0` |
 
 Run the existing root/infra tests, `scripts/run-ingest-queue-integration.sh`,
 `scripts/run-memory-namespace-integration.sh`, and

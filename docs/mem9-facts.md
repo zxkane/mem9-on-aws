@@ -224,6 +224,12 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
   lessons containing operational phrases when durable-only mode is enabled;
   explicit transient fact types and plain session status are still rejected.
   The bounded formatter in patch 0003 remains active.
+- The MCP smart-write smoke uses established configuration for an explicitly
+  synthetic fixture project. The old one-off "e2e secret marker" input produced
+  zero extracted facts despite a successful provider response under the new
+  extraction policy. The smoke still sends only `content` (not `memory_type:
+  pinned`) so it exercises the real LLM path, and its natural-language query
+  remains free of the unique run marker.
 - Patch 0014 threads request/branch contexts through cold-cache schema checks.
   A blocked connection acquisition cannot outlive the Recall deadline or caller
   cancellation; failed schema checks remain uncached.
