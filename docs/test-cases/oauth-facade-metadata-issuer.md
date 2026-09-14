@@ -22,6 +22,24 @@ discovery URL. Only the metadata *self-identifier* is the façade's.
 
 ## Unit tests
 
+### Browser identity scopes
+
+Clients without a scope setting must discover a complete browser grant. The
+authorization facade also supplies the identity scopes when a client requests
+only resource permissions, preserving the explicit resource-scope subset.
+
+| ID | Scenario | Expected |
+|---|---|---|
+| TC-OAUTH-SCOPES-001 | Managed and external-provider PRM, AS and OIDC metadata, on bare and suffixed paths, plus DCR | Same `openid email` and configured resource scopes |
+| TC-OAUTH-SCOPES-002 | Hosted and loopback clients request read-only, write-only, both, identity-only, already complete or repeated scope tokens | Add missing identity scopes and deduplicate; never add an unrequested resource permission |
+| TC-OAUTH-SCOPES-003 | Scope is omitted | Use the advertised browser scopes as explicit defaults |
+| TC-OAUTH-SCOPES-004 | Scope is explicitly empty/whitespace or repeated as a query parameter | Reject before creating a transaction; do not interpret an ambiguous request as full permissions |
+| TC-OAUTH-SCOPES-005 | Code exchange and refresh submit a narrower scope | Preserve token-request scopes; do not expand preexisting grants |
+| TC-OAUTH-SCOPES-006 | Deployment smoke sees missing identity scopes in PRM or in the upstream authorization redirect | Fail the smoke even if the provider serves a login page |
+| TC-OAUTH-SCOPES-007 | Enriched authorization, callback and code exchange receive a provider JWT without an OAuth response `scope` | Report the actual JWT access-token scope, including provider narrowing; never invent write permission |
+| TC-OAUTH-SCOPES-008 | Token or refresh response contains an explicit scope, or omits it | Preserve explicit scope; otherwise recover the provider JWT scope and retain refresh-token fallback |
+| TC-OAUTH-SCOPES-009 | A successful token response provides neither valid response scope nor valid JWT scope | Fail without returning or logging credentials |
+
 ### Protected-resource request boundary
 
 Modern MCP clients send the advertised `<base>/mcp` as `resource` together
@@ -30,7 +48,7 @@ the upstream provider can use a different resource-server namespace.
 
 | ID | Scenario | Expected |
 |---|---|---|
-| TC-OAUTH-RESOURCE-001 | Managed and external-provider authorization requests include the advertised resource, or omit it for compatibility | Redirect preserves scopes, client and PKCE; facade resource is consumed before the upstream request |
+| TC-OAUTH-RESOURCE-001 | Managed and external-provider authorization requests include the advertised resource, or omit it for compatibility | Redirect preserves resource permissions, client and PKCE; facade resource is consumed before the upstream request |
 | TC-OAUTH-RESOURCE-002 | Code exchange or refresh includes the advertised resource | Resource is consumed; grant credentials and requested scopes are preserved |
 | TC-OAUTH-RESOURCE-003 | Authorize, code exchange or refresh includes an empty, foreign, duplicated, multiple, fragment-bearing or query-bearing resource | `invalid_target` before redirect, cookie creation or provider fetch |
 | TC-OAUTH-RESOURCE-004 | Deployment smoke sends the advertised resource and follows the provider authorization request once | Provider does not receive the facade resource; any immediate OAuth error fails the smoke |

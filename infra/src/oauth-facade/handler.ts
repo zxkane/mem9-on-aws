@@ -170,6 +170,38 @@ function selfBaseUrl(event: ApiGwEvent): string {
   return `https://${host}`;
 }
 
+const BROWSER_IDENTITY_SCOPES = ["openid", "email"];
+
+// Only called on a response from the configured HTTPS token endpoint. Reading
+// its JWT scope reports the provider's grant; it does not authenticate a token.
+// The Gateway still verifies the JWT signature, issuer, client and permissions.
+function providerGrantedScope(
+  response: Record<string, unknown>,
+): string | undefined {
+  let scope = response.scope;
+  if (scope === undefined) {
+    if (typeof response.access_token !== "string") return undefined;
+    const parts = response.access_token.split(".");
+    if (parts.length !== 3 || parts.some((part) => !part)) return undefined;
+    try {
+      const claims: unknown = JSON.parse(
+        Buffer.from(parts[1]!, "base64url").toString("utf8"),
+      );
+      if (typeof claims !== "object" || claims === null || Array.isArray(claims)) {
+        return undefined;
+      }
+      scope = (claims as Record<string, unknown>).scope;
+    } catch {
+      return undefined;
+    }
+  }
+  // RFC 6749 scope tokens are nonempty ASCII strings separated by spaces.
+  return typeof scope === "string" &&
+    /^[\x21\x23-\x5B\x5D-\x7E]+(?: [\x21\x23-\x5B\x5D-\x7E]+)*$/u.test(scope)
+    ? scope
+    : undefined;
+}
+
 /**
  * Container name in the cleanup apply task definition, following the
  * `Mem9Consolidation` convention in `scripts/run-consolidation-task.sh`.
@@ -263,6 +295,9 @@ export async function route(
   const method =
     event.requestContext?.http?.method ?? event.httpMethod ?? "GET";
   const base = selfBaseUrl(event);
+  const browserScopes = [
+    ...new Set([...BROWSER_IDENTITY_SCOPES, ...cfg.resourceScopes]),
+  ];
 
   // Matched FIRST, not merely before the catch-all. The catch-all forwards every
   // unmatched path to the AgentCore Gateway, so a Slack payload that fell through
@@ -306,7 +341,7 @@ export async function route(
     return json(200, {
       resource: `${base}/mcp`,
       authorization_servers: [base],
-      scopes_supported: cfg.resourceScopes,
+      scopes_supported: browserScopes,
       bearer_methods_supported: ["header"],
     });
   }
@@ -342,7 +377,7 @@ export async function route(
       // Advertise exactly what the browser client allows: openid + email + both
       // resource scopes. The Gateway interceptor enforces each tool's required
       // read or write scope.
-      scopes_supported: ["openid", "email", ...cfg.resourceScopes],
+      scopes_supported: browserScopes,
     });
   }
 
@@ -369,7 +404,7 @@ export async function route(
       grant_types_supported: ["authorization_code", "refresh_token"],
       // Aligned with the browser client's allowedOauthScopes (no `profile`) —
       // see the oauth-authorization-server metadata above.
-      scopes_supported: ["openid", "email", ...cfg.resourceScopes],
+      scopes_supported: browserScopes,
     });
   }
 
@@ -382,6 +417,29 @@ export async function route(
     const inParams = new URLSearchParams(event.rawQueryString ?? "");
     const resourceError = consumeFacadeResource(inParams, base);
     if (resourceError) return resourceError;
+    const scopeValues = inParams.getAll("scope");
+    if (scopeValues.length > 1) {
+      return json(400, {
+        error: "invalid_request",
+        error_description: "scope must appear at most once",
+      });
+    }
+    if (scopeValues.length === 1 && !scopeValues[0]!.trim()) {
+      return json(400, {
+        error: "invalid_scope",
+        error_description: "scope must not be empty",
+      });
+    }
+    // Browser login needs identity scopes even when a client only requests MCP
+    // permissions. Preserve explicit resource permissions; omitted scope uses
+    // the advertised defaults. Do not expand scopes on token/refresh requests.
+    const requestedScopes = scopeValues.length
+      ? scopeValues[0]!.trim().split(/\s+/u)
+      : cfg.resourceScopes;
+    const upstreamScope = [...new Set([
+      ...BROWSER_IDENTITY_SCOPES,
+      ...requestedScopes,
+    ])].join(" ");
     if (
       cfg.authMode === "oidc" &&
       (inParams.get("client_id") !== cfg.userClientId ||
@@ -464,6 +522,7 @@ export async function route(
     }
     out.set("redirect_uri", `${base}/oauth/callback`);
     out.set("state", facadeState);
+    out.set("scope", upstreamScope);
 
     logEvent("oauth.authorize", {
       client_id: inParams.get("client_id") ?? null,
@@ -728,7 +787,7 @@ export async function route(
       respHeaders[k] = v;
     });
 
-    if (upstream.ok && grantType === "refresh_token") {
+    if (upstream.ok) {
       let replacementRefreshToken: unknown;
       let parsedResponse: Record<string, unknown> | undefined;
       try {
@@ -753,12 +812,25 @@ export async function route(
         return json(502, {
           error: "invalid_upstream_response",
           error_description:
-            "The upstream refresh response was not a JSON object.",
+            "The upstream token response was not a JSON object.",
         });
       }
+      const grantedScope = providerGrantedScope(parsedResponse);
+      if (!grantedScope) {
+        logEvent("oauth.token.invalid_scope_response", {
+          grant_type: grantType,
+          client_auth: clientAuth,
+        });
+        return json(502, {
+          error: "invalid_upstream_response",
+          error_description: "The upstream token response did not provide valid granted scopes.",
+        });
+      }
+      parsedResponse.scope = grantedScope;
       if (
-        typeof replacementRefreshToken !== "string" ||
-        replacementRefreshToken.trim().length === 0
+        grantType === "refresh_token" &&
+        (typeof replacementRefreshToken !== "string" ||
+          replacementRefreshToken.trim().length === 0)
       ) {
         logEvent("oauth.token.missing_refresh_token", {
           grant_type: grantType,
@@ -768,9 +840,9 @@ export async function route(
         const submittedRefreshToken = inForm.get("refresh_token");
         if (submittedRefreshToken) {
           parsedResponse.refresh_token = submittedRefreshToken;
-          respBody = JSON.stringify(parsedResponse);
         }
       }
+      respBody = JSON.stringify(parsedResponse);
     }
 
     logEvent("oauth.token", {
@@ -848,7 +920,7 @@ export async function route(
       grant_types: ["authorization_code", "refresh_token"],
       response_types: ["code"],
       token_endpoint_auth_method: "none",
-      scope: ["openid", "email", ...cfg.resourceScopes].join(" "),
+      scope: browserScopes.join(" "),
     });
   }
 

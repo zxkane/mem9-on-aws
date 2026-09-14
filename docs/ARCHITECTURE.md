@@ -328,11 +328,27 @@ compatible. A malformed successful response that is not a JSON object instead
 fails with a token-free 502. The access-token lifetime is explicitly 15 minutes
 so a direct Cognito group change has a bounded stale-claim window.
 
+The OAuth facade publishes `openid email` together with the configured resource
+scopes in protected-resource metadata, authorization-server metadata, OIDC
+discovery and dynamic client registration. Hosted clients can discover a complete
+browser grant without a manual scope setting. On authorization, the facade adds
+missing identity scopes while preserving explicitly requested resource permissions:
+read-only stays read-only, and identity-only requests gain no memory permissions.
+Omitted scope uses the advertised browser scopes; an explicitly empty scope or
+repeated scope query parameter is rejected. Unknown scope tokens remain subject
+to provider validation. Token-exchange and refresh scopes are not expanded, so
+previously issued grants retain their existing scope contract.
+Successful token responses preserve the provider's explicit `scope`; when it is
+omitted, the facade reports the actual scope claim from the provider-returned JWT
+access token. This is response metadata, not JWT authentication: the Gateway
+continues to verify signatures and authorization claims. A response with neither
+source of valid scopes fails closed instead of inventing the advertised grant.
+
 The OAuth facade accepts the advertised `<base>/mcp` as the optional `resource`
 on authorization, code-exchange and refresh requests. Empty, foreign or repeated
 resource values fail with `invalid_target`. The facade consumes this identifier
 before contacting the provider, whose custom scopes can use a different resource
-server namespace. This bridge preserves the configured scopes and dedicated
+server namespace. This bridge preserves resource permissions and dedicated
 client binding; it does not mint or add an `aud` claim to upstream tokens.
 Gateway client/scope validation and human group enforcement remain the access
 boundary. Providers requiring an upstream resource/audience parameter need a

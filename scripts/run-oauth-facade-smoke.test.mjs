@@ -35,6 +35,8 @@ function runFixture({
   upstreamError = false,
   upstreamStatus = 302,
   upstreamLocation = "https://auth.example.com/login",
+  missingIdentityMetadata = false,
+  upstreamScope = "openid email mem9-mcp/read mem9-mcp/write",
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "mem9-oauth-smoke-"));
   temporaryPaths.push(directory);
@@ -104,6 +106,8 @@ if (url.endsWith("/.well-known/oauth-authorization-server")) {
   console.log(JSON.stringify({
     resource: base + "/mcp",
     authorization_servers: [base],
+    scopes_supported: process.env.MOCK_MISSING_IDENTITY_METADATA === "true"
+      ? ["mem9-mcp/read", "mem9-mcp/write"] : supportedScopes,
   }));
 } else if (url.endsWith("/.well-known/openid-configuration")) {
   console.log(JSON.stringify({
@@ -122,7 +126,7 @@ if (url.endsWith("/.well-known/oauth-authorization-server")) {
     option("-D"),
     "HTTP/1.1 302 Found\\r\\n" +
       "Set-Cookie: __Secure-mem9-oauth=fixture; Path=/oauth/callback; Secure; HttpOnly; SameSite=Lax\\r\\n" +
-      "Location: https://auth.example.com/oauth2/authorize?state=short-state&scope=mem9-mcp%2Fread+mem9-mcp%2Fwrite" +
+      "Location: https://auth.example.com/oauth2/authorize?state=short-state&scope=" + encodeURIComponent(process.env.MOCK_UPSTREAM_SCOPE) +
       (process.env.MOCK_FORWARDED_RESOURCE === "true" ? "&resource=https%3A%2F%2Ffacade.example.com%2Fmcp" : "") + "\\r\\n\\r\\n",
   );
   writeFileSync(option("-o"), "");
@@ -159,6 +163,8 @@ if (url.endsWith("/.well-known/oauth-authorization-server")) {
       MOCK_UPSTREAM_ERROR: String(upstreamError),
       MOCK_UPSTREAM_STATUS: String(upstreamStatus),
       MOCK_UPSTREAM_LOCATION: upstreamLocation,
+      MOCK_MISSING_IDENTITY_METADATA: String(missingIdentityMetadata),
+      MOCK_UPSTREAM_SCOPE: upstreamScope,
       PATH: `${bin}${delimiter}${process.env.PATH}`,
       STAGE: "pr-162",
     },
@@ -176,6 +182,22 @@ if (url.endsWith("/.well-known/oauth-authorization-server")) {
 }
 
 describe("OAuth facade smoke harness (TC-OAUTH-REFRESH-008)", () => {
+  it("rejects resource metadata that omits browser identity scopes", () => {
+    const { result, output } = runFixture({ missingIdentityMetadata: true });
+    expect(result.status).not.toBe(0);
+    expect(output).toContain("protected-resource metadata must advertise identity and resource scopes");
+  });
+
+  it.each([
+    "mem9-mcp/read mem9-mcp/write",
+    "openid mem9-mcp/read mem9-mcp/write",
+    "openid email mem9-mcp/read mem9-mcp/write provider/extra",
+  ])("rejects incorrect upstream authorization scopes (%s)", (upstreamScope) => {
+    const { result, output } = runFixture({ upstreamScope });
+    expect(result.status).not.toBe(0);
+    expect(output).toContain("authorize must include identity scopes and preserve requested resource scopes");
+  });
+
   it.each(["managed", "oidc"])("sends the advertised resource and checks the %s provider's authorization response", (authMode) => {
     const { callRecords, result, output } = runFixture({ authMode });
     expect(result.status, output).toBe(0);
