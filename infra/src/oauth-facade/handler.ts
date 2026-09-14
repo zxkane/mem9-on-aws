@@ -198,6 +198,27 @@ function ensureHmacConfigured(cfg: FacadeConfig): ApiGwResponse | null {
   return null;
 }
 
+// MCP's resource identifies this facade, while the provider's custom scopes
+// can belong to a different resource-server namespace. Validate that boundary
+// here; forwarding the facade URL can make Cognito reject otherwise valid scopes.
+function consumeFacadeResource(
+  params: URLSearchParams,
+  base: string,
+): ApiGwResponse | null {
+  const resources = params.getAll("resource");
+  if (
+    resources.length > 1 ||
+    (resources.length === 1 && resources[0] !== `${base}/mcp`)
+  ) {
+    return json(400, {
+      error: "invalid_target",
+      error_description: "resource must identify this facade's advertised MCP endpoint",
+    });
+  }
+  params.delete("resource");
+  return null;
+}
+
 /**
  * Native-app loopback redirect_uri validation (RFC 8252 §7.3) plus exact-match
  * HTTPS callbacks configured for hosted clients. Without this the façade would
@@ -359,6 +380,8 @@ export async function route(
     if (misconfigured) return misconfigured;
 
     const inParams = new URLSearchParams(event.rawQueryString ?? "");
+    const resourceError = consumeFacadeResource(inParams, base);
+    if (resourceError) return resourceError;
     if (
       cfg.authMode === "oidc" &&
       (inParams.get("client_id") !== cfg.userClientId ||
@@ -555,6 +578,8 @@ export async function route(
       ? Buffer.from(event.body ?? "", "base64").toString("utf8")
       : event.body ?? "";
     const inForm = new URLSearchParams(rawBody);
+    const resourceError = consumeFacadeResource(inForm, base);
+    if (resourceError) return resourceError;
 
     if (
       cfg.authMode === "oidc" &&

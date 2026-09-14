@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # run-oauth-facade-smoke.sh — verify the OAuth façade's public protocol boundary.
 # The full authorization-code flow needs an interactive login, so CI validates
-# metadata, registration, and the authorize redirect/cookie response.
+# metadata, registration, and the authorize redirect/cookie response, then checks
+# the provider's first response for an immediate OAuth rejection.
 set -euo pipefail
 STAGE="${STAGE:?STAGE is required}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -126,8 +127,10 @@ echo "$DCR" | jq -e '(.scope | split(" ")) as $scopes | (["mem9-mcp/read", "mem9
 echo "run-oauth-facade-smoke: checking /oauth/authorize state cookie"
 AUTH_HEADERS=$(mktemp)
 AUTH_BODY=$(mktemp)
-trap 'rm -f "$AUTH_HEADERS" "$AUTH_BODY"' EXIT
+UPSTREAM_HEADERS=$(mktemp)
+trap 'rm -f "$AUTH_HEADERS" "$AUTH_BODY" "$UPSTREAM_HEADERS"' EXIT
 CLIENT_ID=$(echo "$DCR" | jq -er '.client_id')
+RESOURCE=$(echo "$PR" | jq -er '.resource')
 LONG_STATE=$(printf '%*s' 2200 '' | tr ' ' g)
 AUTH_STATUS=$(
   curl -sS -G -D "$AUTH_HEADERS" -o "$AUTH_BODY" -w '%{http_code}' \
@@ -135,6 +138,7 @@ AUTH_STATUS=$(
     --data-urlencode "client_id=${CLIENT_ID}" \
     --data-urlencode 'redirect_uri=http://localhost:8080/cb' \
     --data-urlencode 'scope=mem9-mcp/read mem9-mcp/write' \
+    --data-urlencode "resource=${RESOURCE}" \
     --data-urlencode 'code_challenge=AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA' \
     --data-urlencode 'code_challenge_method=S256' \
     --data-urlencode "state=${LONG_STATE}" \
@@ -180,5 +184,52 @@ COGNITO_STATE_LENGTH=$(
 )
 (( COGNITO_STATE_LENGTH > 0 && COGNITO_STATE_LENGTH <= 1024 )) || { echo "::error::upstream state exceeds Cognito limit"; exit 1; }
 [[ "$LOCATION" != *"$LONG_STATE"* ]] || { echo "::error::client state leaked into the upstream redirect"; exit 1; }
+
+LOCATION="$LOCATION" node --input-type=module -e '
+  const location = new URL(process.env.LOCATION);
+  if (location.protocol !== "https:") {
+    console.error("::error::provider authorization URL must use HTTPS");
+    process.exit(1);
+  }
+  if (location.searchParams.has("resource")) {
+    console.error("::error::facade resource must not be forwarded to the provider");
+    process.exit(1);
+  }
+  if (location.searchParams.get("scope") !== "mem9-mcp/read mem9-mcp/write") {
+    console.error("::error::authorize must preserve requested scopes");
+    process.exit(1);
+  }
+'
+
+echo "run-oauth-facade-smoke: checking upstream authorization before interactive login"
+UPSTREAM_STATUS=$(curl -sS --proto '=https' --max-time 20 -D "$UPSTREAM_HEADERS" -o /dev/null -w '%{http_code}' "$LOCATION")
+[[ "$UPSTREAM_STATUS" == 200 || "$UPSTREAM_STATUS" =~ ^30[2378]$ ]] || {
+  echo "::error::upstream authorization returned HTTP ${UPSTREAM_STATUS}"
+  exit 1
+}
+UPSTREAM_HEADERS="$UPSTREAM_HEADERS" UPSTREAM_STATUS="$UPSTREAM_STATUS" LOCATION="$LOCATION" node --input-type=module -e '
+  import { readFileSync } from "node:fs";
+  const header = readFileSync(process.env.UPSTREAM_HEADERS, "utf8")
+    .split(/\r?\n/u).find(line => /^location:/iu.test(line));
+  const location = header?.replace(/^location:\s*/iu, "").trim();
+  if (process.env.UPSTREAM_STATUS !== "200" && !location) {
+    console.error("::error::upstream authorization redirect is missing Location");
+    process.exit(1);
+  }
+  if (location) {
+    let next;
+    try {
+      next = new URL(location, process.env.LOCATION);
+    } catch {
+      console.error("::error::upstream authorization redirect has invalid Location");
+      process.exit(1);
+    }
+    if (next.searchParams.has("error") || next.searchParams.has("error_description")) {
+      console.error("::error::upstream authorization returned an OAuth error");
+      process.exit(1);
+    }
+  }
+'
+echo "run-oauth-facade-smoke: no immediate OAuth rejection from upstream"
 
 echo "run-oauth-facade-smoke: OK — façade metadata valid for stage ${STAGE}"

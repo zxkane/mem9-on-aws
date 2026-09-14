@@ -302,6 +302,16 @@ compatible. A malformed successful response that is not a JSON object instead
 fails with a token-free 502. The access-token lifetime is explicitly 15 minutes
 so a direct Cognito group change has a bounded stale-claim window.
 
+The OAuth facade accepts the advertised `<base>/mcp` as the optional `resource`
+on authorization, code-exchange and refresh requests. Empty, foreign or repeated
+resource values fail with `invalid_target`. The facade consumes this identifier
+before contacting the provider, whose custom scopes can use a different resource
+server namespace. This bridge preserves the configured scopes and dedicated
+client binding; it does not mint or add an `aud` claim to upstream tokens.
+Gateway client/scope validation and human group enforcement remain the access
+boundary. Providers requiring an upstream resource/audience parameter need a
+separate explicit integration; the facade URL is never forwarded implicitly.
+
 The OAuth facade accepts RFC 8252 loopback redirects by default. Hosted clients
 can be added per stage through the SST `OauthAllowedCallbackUrls` secret, whose
 value is a JSON array of exact HTTPS URLs. SST writes the selected value to the

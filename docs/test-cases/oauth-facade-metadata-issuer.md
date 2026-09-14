@@ -22,6 +22,19 @@ discovery URL. Only the metadata *self-identifier* is the façade's.
 
 ## Unit tests
 
+### Protected-resource request boundary
+
+Modern MCP clients send the advertised `<base>/mcp` as `resource` together
+with the configured custom scopes. That identifier belongs to the facade;
+the upstream provider can use a different resource-server namespace.
+
+| ID | Scenario | Expected |
+|---|---|---|
+| TC-OAUTH-RESOURCE-001 | Managed and external-provider authorization requests include the advertised resource, or omit it for compatibility | Redirect preserves scopes, client and PKCE; facade resource is consumed before the upstream request |
+| TC-OAUTH-RESOURCE-002 | Code exchange or refresh includes the advertised resource | Resource is consumed; grant credentials and requested scopes are preserved |
+| TC-OAUTH-RESOURCE-003 | Authorize, code exchange or refresh includes an empty, foreign, duplicated, multiple, fragment-bearing or query-bearing resource | `invalid_target` before redirect, cookie creation or provider fetch |
+| TC-OAUTH-RESOURCE-004 | Deployment smoke sends the advertised resource and follows the provider authorization request once | Provider does not receive the facade resource; any immediate OAuth error fails the smoke |
+
 `infra/src/oauth-facade/handler.test.ts`
 
 | ID | Scenario | Expected |

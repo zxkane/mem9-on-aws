@@ -83,6 +83,87 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
+describe.each(["managed", "oidc"] as const)("%s OAuth resource indicators", (authMode) => {
+  const config = () => cfg({ authMode, tokenAuthMethod: "none" });
+  const redirectUri = "http://127.0.0.1:3118/callback/client";
+  const scope = "openid email example-mcp/query/read example-mcp/query/write";
+  const authorize = () => new URLSearchParams({
+    client_id: config().userClientId,
+    response_type: "code",
+    redirect_uri: redirectUri,
+    state: "client-state",
+    code_challenge: "c".repeat(43),
+    code_challenge_method: "S256",
+    scope,
+  });
+  const token = (grant: string) => new URLSearchParams({
+    client_id: config().userClientId,
+    grant_type: grant,
+    scope,
+    ...(grant === "authorization_code" ? {
+      code: signAuthorizationCode({ code: "provider-code", redirectUri }, HMAC, Date.now()),
+      code_verifier: "v".repeat(43),
+      redirect_uri: redirectUri,
+    } : { refresh_token: "provider-refresh-token" }),
+  });
+
+  it.each([false, true])("authorizes with the facade resource present=%s without forwarding it to the provider", async (present) => {
+    const params = authorize();
+    if (present) params.set("resource", `${BASE}/mcp`);
+    const response = await route(ev("/oauth/authorize", "GET", { query: params.toString() }), config());
+    expect(response.statusCode).toBe(302);
+    const forwarded = new URL(response.headers.location).searchParams;
+    expect(forwarded.has("resource")).toBe(false);
+    expect(forwarded.get("scope")).toBe(scope);
+    expect(forwarded.get("client_id")).toBe(config().userClientId);
+    expect(forwarded.get("code_challenge")).toBe(params.get("code_challenge"));
+    expect(forwarded.get("code_challenge_method")).toBe("S256");
+    expect(forwarded.get("redirect_uri")).toBe(`${BASE}/oauth/callback`);
+  });
+
+  it.each(["authorization_code", "refresh_token"])("consumes the facade resource during %s while preserving scopes and grant credentials", async (grant) => {
+    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ access_token: "access", refresh_token: "rotated" }));
+    const params = token(grant);
+    params.set("resource", `${BASE}/mcp`);
+    const response = await route(ev("/oauth/token", "POST", { body: params.toString() }), config());
+    expect(response.statusCode).toBe(200);
+    const forwarded = new URLSearchParams(String(fetcher.mock.calls[0]![1]!.body));
+    expect(forwarded.has("resource")).toBe(false);
+    expect(forwarded.get("scope")).toBe(scope);
+    expect(forwarded.get("grant_type")).toBe(grant);
+    expect(forwarded.get("client_id")).toBe(config().userClientId);
+    if (grant === "authorization_code") {
+      expect(forwarded.get("code")).toBe("provider-code");
+      expect(forwarded.get("code_verifier")).toBe("v".repeat(43));
+    } else {
+      expect(forwarded.get("refresh_token")).toBe("provider-refresh-token");
+    }
+  });
+
+  it.each([
+    ["foreign", ["https://other.example.com/mcp"]],
+    ["empty", [""]],
+    ["duplicate", [`${BASE}/mcp`, `${BASE}/mcp`]],
+    ["multiple targets", [`${BASE}/mcp`, "https://other.example.com/mcp"]],
+    ["fragment", [`${BASE}/mcp#fragment`]],
+    ["query", [`${BASE}/mcp?other=1`]],
+  ])("rejects %s resources before redirecting or exchanging tokens", async (_label, resources) => {
+    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ access_token: "must-not-issue" }));
+    for (const grant of ["authorize", "authorization_code", "refresh_token"]) {
+      const params = grant === "authorize" ? authorize() : token(grant);
+      for (const resource of resources) params.append("resource", resource);
+      const response = await route(grant === "authorize"
+        ? ev("/oauth/authorize", "GET", { query: params.toString() })
+        : ev("/oauth/token", "POST", { body: params.toString() }), config());
+      expect(response.statusCode).toBe(400);
+      expect(JSON.parse(response.body).error).toBe("invalid_target");
+      expect(response.headers.location).toBeUndefined();
+      expect(response.cookies).toBeUndefined();
+    }
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+});
+
 describe("external OIDC facade", () => {
   it.each(["none", "client_secret_basic", "client_secret_post"] as const)(
     "exchanges and refreshes using the configured %s method",
