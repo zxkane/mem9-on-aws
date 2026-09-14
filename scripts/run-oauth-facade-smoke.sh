@@ -71,6 +71,7 @@ echo "$AS" | jq -e '(["mem9-mcp/read", "mem9-mcp/write"] - (.scopes_supported //
 echo "run-oauth-facade-smoke: checking /.well-known/oauth-protected-resource"
 PR=$(curl -fsS "${FACADE}/.well-known/oauth-protected-resource")
 echo "$PR" | jq -e '.resource | endswith("/mcp")' >/dev/null || { echo "::error::protected-resource.resource does not end with /mcp"; exit 1; }
+echo "$PR" | jq -e '(["openid", "email", "mem9-mcp/read", "mem9-mcp/write"] - (.scopes_supported // [])) | length == 0' >/dev/null || { echo "::error::protected-resource metadata must advertise identity and resource scopes"; exit 1; }
 
 # TC-MCPGW-079. RFC 8414 §3.3: the AS metadata `issuer` MUST be identical to the
 # issuer identifier the client inserted the well-known string into — which is the
@@ -195,8 +196,10 @@ LOCATION="$LOCATION" node --input-type=module -e '
     console.error("::error::facade resource must not be forwarded to the provider");
     process.exit(1);
   }
-  if (location.searchParams.get("scope") !== "mem9-mcp/read mem9-mcp/write") {
-    console.error("::error::authorize must preserve requested scopes");
+  const scopes = new Set((location.searchParams.get("scope") ?? "").split(" "));
+  const expected = ["openid", "email", "mem9-mcp/read", "mem9-mcp/write"];
+  if (scopes.size !== expected.length || !expected.every(scope => scopes.has(scope))) {
+    console.error("::error::authorize must include identity scopes and preserve requested resource scopes");
     process.exit(1);
   }
 '

@@ -27,6 +27,15 @@ const HOST = "abc123.lambda-url.ap-northeast-1.on.aws";
 const BASE = `https://${HOST}`;
 const HMAC = "unit-test-hmac-key";
 const REMOTE_CALLBACK = "https://oauth.example.com/callback/app";
+const TOKEN_SCOPE = "openid email example-mcp/query/read";
+
+function providerAccessToken(claims: Record<string, unknown>) {
+  return [
+    Buffer.from(JSON.stringify({ alg: "RS256", typ: "JWT" })).toString("base64url"),
+    Buffer.from(JSON.stringify(claims)).toString("base64url"),
+    "provider-signature-fixture",
+  ].join(".");
+}
 /**
  * The upstream Cognito issuer. Cognito still mints and signs every token, but the
  * façade must never advertise this as the `issuer` of its OWN metadata documents
@@ -122,7 +131,7 @@ describe.each(["managed", "oidc"] as const)("%s OAuth resource indicators", (aut
   });
 
   it.each(["authorization_code", "refresh_token"])("consumes the facade resource during %s while preserving scopes and grant credentials", async (grant) => {
-    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ access_token: "access", refresh_token: "rotated" }));
+    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ access_token: "access", refresh_token: "rotated", scope }));
     const params = token(grant);
     params.set("resource", `${BASE}/mcp`);
     const response = await route(ev("/oauth/token", "POST", { body: params.toString() }), config());
@@ -164,6 +173,179 @@ describe.each(["managed", "oidc"] as const)("%s OAuth resource indicators", (aut
   });
 });
 
+describe.each(["managed", "oidc"] as const)("%s browser identity scopes", (authMode) => {
+  const config = () => cfg({
+    authMode,
+    tokenAuthMethod: "none",
+    allowedClientRedirectUris: [REMOTE_CALLBACK],
+  });
+  const browserScopes = ["openid", "email", ...cfg().resourceScopes];
+
+  function authorizeParams(scope?: string, redirectUri = REMOTE_CALLBACK) {
+    const params = new URLSearchParams({
+      client_id: config().userClientId,
+      response_type: "code",
+      redirect_uri: redirectUri,
+      state: "hosted-client-state",
+      code_challenge: "c".repeat(43),
+      code_challenge_method: "S256",
+      resource: `${BASE}/mcp`,
+    });
+    if (scope !== undefined) params.set("scope", scope);
+    return params;
+  }
+
+  it("publishes the same complete browser scopes through every discovery route and registration", async () => {
+    for (const name of ["oauth-protected-resource", "oauth-authorization-server", "openid-configuration"]) {
+      for (const suffix of ["", "/mcp"]) {
+        const response = await route(ev(`/.well-known/${name}${suffix}`), config());
+        expect(JSON.parse(response.body).scopes_supported).toEqual(browserScopes);
+      }
+    }
+    const registration = await route(ev("/register", "POST", {
+      body: JSON.stringify({ redirect_uris: [REMOTE_CALLBACK] }),
+    }), config());
+    expect(JSON.parse(registration.body).scope.split(" ")).toEqual(browserScopes);
+  });
+
+  it.each([
+    [undefined, browserScopes],
+    ["example-mcp/query/read", ["openid", "email", "example-mcp/query/read"]],
+    ["example-mcp/query/write", ["openid", "email", "example-mcp/query/write"]],
+    ["example-mcp/query/write example-mcp/query/read", ["openid", "email", "example-mcp/query/write", "example-mcp/query/read"]],
+    ["openid email", ["openid", "email"]],
+    ["openid email example-mcp/query/read", ["openid", "email", "example-mcp/query/read"]],
+    ["openid example-mcp/query/read openid example-mcp/query/read", ["openid", "email", "example-mcp/query/read"]],
+    ["provider/unsupported", ["openid", "email", "provider/unsupported"]],
+  ] as const)("adds identity scopes without broadening explicit resource permissions (%s)", async (scope, expected) => {
+    for (const redirectUri of [REMOTE_CALLBACK, "http://127.0.0.1:3118/callback/client"]) {
+      const params = authorizeParams(scope, redirectUri);
+      const response = await route(ev("/oauth/authorize", "GET", { query: params.toString() }), config());
+      expect(response.statusCode).toBe(302);
+      const forwarded = new URL(response.headers.location).searchParams;
+      expect(forwarded.get("scope")?.split(" ")).toEqual(expected);
+      expect(forwarded.has("resource")).toBe(false);
+      expect(forwarded.get("client_id")).toBe(config().userClientId);
+      expect(forwarded.get("code_challenge")).toBe(params.get("code_challenge"));
+      expect(forwarded.get("code_challenge_method")).toBe("S256");
+      expect(forwarded.get("redirect_uri")).toBe(`${BASE}/oauth/callback`);
+    }
+  });
+
+  it.each(["", "   "])("rejects an explicitly empty scope before creating a transaction (%j)", async (scope) => {
+    const response = await route(ev("/oauth/authorize", "GET", {
+      query: authorizeParams(scope).toString(),
+    }), config());
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).error).toBe("invalid_scope");
+    expect(response.cookies).toBeUndefined();
+  });
+
+  it("rejects ambiguous repeated scope parameters", async () => {
+    const params = authorizeParams("example-mcp/query/read");
+    params.append("scope", "example-mcp/query/write");
+    const response = await route(ev("/oauth/authorize", "GET", { query: params.toString() }), config());
+    expect(response.statusCode).toBe(400);
+    expect(JSON.parse(response.body).error).toBe("invalid_request");
+    expect(response.cookies).toBeUndefined();
+  });
+
+  it.each(["authorization_code", "refresh_token"])("does not expand an existing grant's token-request scope (%s)", async (grant) => {
+    const fetcher = vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({
+      access_token: "access",
+      refresh_token: "rotated",
+      scope: "example-mcp/query/read",
+    }));
+    const params = new URLSearchParams({
+      client_id: config().userClientId,
+      grant_type: grant,
+      scope: "example-mcp/query/read",
+      ...(grant === "authorization_code" ? {
+        redirect_uri: REMOTE_CALLBACK,
+        code: signAuthorizationCode({ code: "provider-code", redirectUri: REMOTE_CALLBACK }, HMAC, Date.now()),
+        code_verifier: "v".repeat(43),
+      } : { refresh_token: "provider-refresh-token" }),
+    });
+    const response = await route(ev("/oauth/token", "POST", { body: params.toString() }), config());
+    expect(response.statusCode).toBe(200);
+    const forwarded = new URLSearchParams(String(fetcher.mock.calls[0]![1]!.body));
+    expect(forwarded.get("scope")).toBe("example-mcp/query/read");
+  });
+
+  it.each([
+    "example-mcp/query/read",
+    "example-mcp/query/read example-mcp/query/write",
+  ])("reports actual provider-granted scopes after enriched authorization (%s)", async (requested) => {
+    const accessToken = providerAccessToken({ scope: TOKEN_SCOPE });
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json({ access_token: accessToken }));
+    const authorization = await route(ev("/oauth/authorize", "GET", {
+      query: authorizeParams(requested).toString(),
+    }), config());
+    const state = new URL(authorization.headers.location).searchParams.get("state")!;
+    const callback = await route(ev("/oauth/callback", "GET", {
+      query: new URLSearchParams({ code: "provider-code", state }).toString(),
+      cookies: requestCookies(authorization),
+    }), config());
+    const code = new URL(callback.headers.location).searchParams.get("code")!;
+    const response = await route(ev("/oauth/token", "POST", {
+      body: new URLSearchParams({
+        client_id: config().userClientId,
+        grant_type: "authorization_code",
+        code,
+        code_verifier: "v".repeat(43),
+        redirect_uri: REMOTE_CALLBACK,
+      }).toString(),
+    }), config());
+    expect(response.statusCode).toBe(200);
+    expect(JSON.parse(response.body)).toEqual({ access_token: accessToken, scope: TOKEN_SCOPE });
+    expect(JSON.parse(response.body).scope).not.toContain("example-mcp/query/write");
+  });
+
+  it("preserves an explicit upstream scope and derives missing refresh scope from the new access token", async () => {
+    const upstreamScope = "example-mcp/query/read";
+    const fetcher = vi.spyOn(globalThis, "fetch")
+      .mockResolvedValueOnce(Response.json({ access_token: "opaque-fixture", scope: upstreamScope }))
+      .mockResolvedValueOnce(Response.json({ access_token: providerAccessToken({ scope: TOKEN_SCOPE }) }));
+    for (const expected of [upstreamScope, TOKEN_SCOPE]) {
+      const response = await route(ev("/oauth/token", "POST", {
+        body: new URLSearchParams({
+          client_id: config().userClientId,
+          grant_type: "refresh_token",
+          refresh_token: "submitted-refresh-token",
+          scope: "example-mcp/query/read",
+        }).toString(),
+      }), config());
+      expect(response.statusCode).toBe(200);
+      expect(JSON.parse(response.body).scope).toBe(expected);
+      expect(JSON.parse(response.body).refresh_token).toBe("submitted-refresh-token");
+    }
+    expect(fetcher).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { access_token: "opaque-secret-sentinel" },
+    { access_token: "bad.jwt.secret-sentinel" },
+    { access_token: providerAccessToken({}) },
+    { access_token: providerAccessToken({ scope: ["example-mcp/query/read"] }) },
+    { access_token: providerAccessToken({ scope: TOKEN_SCOPE }), scope: null },
+  ])("fails without disclosing a token when granted scopes cannot be established", async (upstream) => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json(upstream));
+    const response = await route(ev("/oauth/token", "POST", {
+      body: new URLSearchParams({
+        client_id: config().userClientId,
+        grant_type: "refresh_token",
+        refresh_token: "refresh-secret-sentinel",
+      }).toString(),
+    }), config());
+    expect(response.statusCode).toBe(502);
+    expect(JSON.parse(response.body).error).toBe("invalid_upstream_response");
+    const observable = response.body + JSON.stringify(log.mock.calls);
+    expect(observable).not.toContain(upstream.access_token);
+    expect(observable).not.toContain("refresh-secret-sentinel");
+  });
+});
+
 describe("external OIDC facade", () => {
   it.each(["none", "client_secret_basic", "client_secret_post"] as const)(
     "exchanges and refreshes using the configured %s method",
@@ -176,7 +358,7 @@ describe("external OIDC facade", () => {
       const fetcher = vi
         .spyOn(globalThis, "fetch")
         .mockImplementation(async () =>
-          Response.json({ access_token: "access", refresh_token: "rotated" }),
+          Response.json({ access_token: "access", refresh_token: "rotated", scope: TOKEN_SCOPE }),
         );
       const redirectUri = "http://localhost:8080/cb";
       const signedCode = signAuthorizationCode(
@@ -560,7 +742,7 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
       );
       expect(res.statusCode).toBe(302);
       expect(new URL(res.headers.location).searchParams.get("scope")).toBe(
-        scope,
+        `openid email ${scope}`,
       );
     },
   );
@@ -870,7 +1052,7 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(
       async (url: string | URL | Request, init?: RequestInit) => {
         captured = { url: String(url), body: String(init?.body ?? "") };
-        return new Response(JSON.stringify({ access_token: "tok" }), {
+        return new Response(JSON.stringify({ access_token: "tok", scope: TOKEN_SCOPE }), {
           status: 200,
           headers: { "content-type": "application/json" },
         });
@@ -919,6 +1101,7 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
         return new Response(
           JSON.stringify({
             access_token: "tok",
+            scope: TOKEN_SCOPE,
             ...(includeRefreshToken ? { refresh_token: "rotated-rt" } : {}),
           }),
           {
@@ -963,6 +1146,7 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
         }
         return Response.json({
           ...upstreamResponses[responseIndex++],
+          scope: TOKEN_SCOPE,
           token_type: "Bearer",
           expires_in: 3600,
         });
@@ -1045,6 +1229,7 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
         Response.json({
           access_token: accessToken,
           id_token: idToken,
+          scope: TOKEN_SCOPE,
           refresh_token: replacementRefreshToken,
           token_type: "Bearer",
           expires_in: 3600,
@@ -1066,6 +1251,7 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
       expect(JSON.parse(response.body)).toEqual({
         access_token: accessToken,
         id_token: idToken,
+        scope: TOKEN_SCOPE,
         refresh_token: submittedRefreshToken,
         token_type: "Bearer",
         expires_in: 3600,
@@ -1114,7 +1300,7 @@ describe("façade routing (TC-MCPGW-060..081)", () => {
       expect(JSON.parse(response.body)).toEqual({
         error: "invalid_upstream_response",
         error_description:
-          "The upstream refresh response was not a JSON object.",
+          "The upstream token response was not a JSON object.",
       });
       const observable = `${response.body}\n${JSON.stringify(log.mock.calls)}`;
       expect(observable).not.toContain(submittedRefreshToken);
