@@ -203,8 +203,12 @@ docker exec "$CONTAINER" \
 docker exec "$CONTAINER" \
   psql -q -v ON_ERROR_STOP=1 -U postgres -d mem9_namespace_test \
   -f /bootstrap/migrations/002_memory_namespaces.sql
+docker exec "$CONTAINER" \
+  psql -q -v ON_ERROR_STOP=1 -U postgres -d postgres \
+  -c "CREATE DATABASE mem9_namespace_compat TEMPLATE mem9_namespace_test"
 PORT=$(docker port "$CONTAINER" 5432/tcp | head -n 1 | awk -F: '{print $NF}')
 export MNEMO_TEST_POSTGRES_DSN="postgres://postgres:test@127.0.0.1:${PORT}/mem9_namespace_test?sslmode=disable"
+export MNEMO_TEST_POSTGRES_COMPAT_DSN="postgres://postgres:test@127.0.0.1:${PORT}/mem9_namespace_compat?sslmode=disable"
 MNEMO_DSN="$MNEMO_TEST_POSTGRES_DSN" \
   node "$ROOT/scripts/migrate-memory-namespaces.mjs" freeze
 MEM9_LEGACY_NAMESPACE_ID="60000000-0000-4000-8000-000000000201" \

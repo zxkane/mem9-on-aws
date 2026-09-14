@@ -244,6 +244,17 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
 
 ### Enabled atomic durable ingest (downstream patches)
 
+`0015-ingest-namespace-compatibility.patch` keeps admission compatible with the
+database migration phase. An unscoped authenticated request uses the legacy
+`(tenant_id, idempotency_key)` conflict target while the additive schema is
+active. A scoped request uses `(tenant_id, namespace_id, idempotency_key)`;
+neither path falls back when its matching index is absent. Both immutable SQL
+variants appear in the reviewed query inventory. The integration suite exercises
+additive, enforced, and partially indexed schemas, and the deployed MCP smoke
+requires transcript enqueue, idempotent replay, and a succeeded job even when
+ordinary search checks are configured soft. Existing migration procedures must
+still keep writers stopped through namespace cutover.
+
 - The ordered downstream stack is
   `0001-recall-min-confidence-tunables-and-zero-result-fallback`,
   `0002-ingest-durable-only-extraction-filter`, `0003-glm-request-bounds`,
@@ -253,7 +264,8 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
   `0010-group-memory-namespaces`, `0011-stabilize-ingest-deadline-test`,
   `0012-preserve-postgres-update-embedding`, and
   `0013-upstream-durable-compatibility`, and
-  `0014-recall-schema-budget-and-durable-facts`. The Docker build applies the complete stack to
+  `0014-recall-schema-budget-and-durable-facts`, and
+  `0015-ingest-namespace-compatibility`. The Docker build applies the complete stack to
   the pinned upstream commit in lexical order.
 - Upstream asynchronous `messages[]` ingest returns 202 before starting an
   untracked goroutine. Downstream patch

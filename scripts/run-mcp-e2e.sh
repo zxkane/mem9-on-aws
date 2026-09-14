@@ -223,8 +223,10 @@ resolve_tool() {  # $1 = operationId suffix → prints the full exposed tool nam
 }
 ADD_TOOL=$(resolve_tool "add_memory")
 SEARCH_TOOL=$(resolve_tool "search_memories")
+INGEST_TOOL=$(resolve_tool "ingest_messages")
+INGEST_STATUS_TOOL=$(resolve_tool "get_ingest_job_status")
 echo "run-mcp-e2e: resolved tools — add='${ADD_TOOL:-?}' search='${SEARCH_TOOL:-?}'"
-if [[ -z "$ADD_TOOL" || -z "$SEARCH_TOOL" ]]; then
+if [[ -z "$ADD_TOOL" || -z "$SEARCH_TOOL" || -z "$INGEST_TOOL" || -z "$INGEST_STATUS_TOOL" ]]; then
   echo "::error::Gateway tools/list did not expose add_memory/search_memories. tools/list result: $(printf '%s' "$TOOLS_JSON" | head -c 500)"
   exit 1
 fi
@@ -305,6 +307,55 @@ done
 if [[ "$ADD_OK" != "1" ]]; then
   echo "::error::add_memory returned an MCP error after retries: $MCP_RESP"; exit 1
 fi
+
+# Durable admission must be checked separately from the explicit-content path.
+# This runs before any soft search exit so enqueue failures cannot appear green.
+durable_result() {
+  local result
+  result=$(printf '%s' "$MCP_RESP" | mcp_result)
+  if [[ -z "$result" ]] || ! printf '%s' "$result" | jq -e '.isError != true and (.content[0].text | type == "string")' >/dev/null; then
+    echo "::error::durable ingest returned an MCP error or invalid response" >&2
+    return 1
+  fi
+  printf '%s' "$result" | jq -ec '.content[0].text | fromjson | select(type == "object")'
+}
+
+DURABLE_MARKER="ingest-e2e-${STAGE}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}"
+INGEST_ARGS=$(jq -nc --arg marker "$DURABLE_MARKER" '{
+  session_id:$marker, agent_id:"mem9-e2e", mode:"smart",
+  messages:[{role:"user",content:("The synthetic transcript fixture project " + $marker + " uses blue as its established documentation accent color.")}]
+}')
+tools_call "$INGEST_TOOL" "$INGEST_ARGS"
+JOB_ID=$(durable_result | jq -er '.job_id | select(type == "string" and length > 0)')
+tools_call "$INGEST_TOOL" "$INGEST_ARGS"
+REPLAY_JOB_ID=$(durable_result | jq -er '.job_id | select(type == "string" and length > 0)')
+if [[ "$JOB_ID" != "$REPLAY_JOB_ID" ]]; then
+  echo "::error::durable ingest replay created a different job" >&2
+  exit 1
+fi
+INGEST_DEADLINE=$((SECONDS + 300))
+INGEST_SUCCEEDED=0
+while [[ "$SECONDS" -lt "$INGEST_DEADLINE" ]]; do
+  tools_call "$INGEST_STATUS_TOOL" "$(jq -nc --arg id "$JOB_ID" '{job_id:$id}')"
+  JOB_RESULT=$(durable_result)
+  STATUS_JOB_ID=$(printf '%s' "$JOB_RESULT" | jq -er '.job_id | select(type == "string")')
+  if [[ "$STATUS_JOB_ID" != "$JOB_ID" ]]; then
+    echo "::error::durable status returned a different job" >&2
+    exit 1
+  fi
+  JOB_STATE=$(printf '%s' "$JOB_RESULT" | jq -er '.state | select(type == "string")')
+  case "$JOB_STATE" in
+    succeeded) INGEST_SUCCEEDED=1; break ;;
+    dead) echo "::error::durable ingest job reached dead state" >&2; exit 1 ;;
+    queued|processing|planning|applying|retry_wait) sleep 3 ;;
+    *) echo "::error::durable ingest returned an unknown job state" >&2; exit 1 ;;
+  esac
+done
+if [[ "$INGEST_SUCCEEDED" != "1" ]]; then
+  echo "::error::durable ingest did not commit within five minutes" >&2
+  exit 1
+fi
+echo "run-mcp-e2e: OK — durable transcript committed and replay deduplicated"
 
 # 4. Poll search_memories until the marker surfaces (async ingest → retry ~5 min).
 echo "run-mcp-e2e: polling ${SEARCH_TOOL} for the marker (async ingest; up to ~5 min)"
