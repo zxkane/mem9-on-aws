@@ -1,9 +1,9 @@
 diff --git a/server/internal/handler/ingest_compat_integration_test.go b/server/internal/handler/ingest_compat_integration_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..d7cd8a96f8b4f122eb0d36790111a49983e145b5
+index 0000000000000000000000000000000000000000..16f0beea4228933ec46a4cc42d8c621da414d675
 --- /dev/null
 +++ b/server/internal/handler/ingest_compat_integration_test.go
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,122 @@
 +package handler
 +
 +import (
@@ -50,7 +50,9 @@ index 0000000000000000000000000000000000000000..d7cd8a96f8b4f122eb0d36790111a499
 +			t.Fatalf("enqueue got %d, want 202: %s", rr.Code, rr.Body.String())
 +		}
 +		var response map[string]string
-+		json.NewDecoder(rr.Body).Decode(&response)
++		if err := json.NewDecoder(rr.Body).Decode(&response); err != nil {
++			t.Fatalf("decode enqueue response: %v", err)
++		}
 +		if id != "" && id != response["job_id"] {
 +			t.Fatal("duplicate request returned another job")
 +		}
