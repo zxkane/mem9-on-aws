@@ -52,6 +52,10 @@ function runFixture({
   queryStatus = "Complete",
   authFailures = "0",
   soft = "0",
+  ingestError = false,
+  ingestState = "succeeded",
+  duplicateJobMismatch = false,
+  statusJobMismatch = false,
 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "mem9-mcp-e2e-"));
   temporaryPaths.push(directory);
@@ -166,7 +170,7 @@ if (command === "ssm get-parameter") {
   writeFileSync(
     curl,
     `#!${process.execPath}
-import { appendFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 const args = process.argv.slice(2);
 appendFileSync(process.env.MOCK_CALLS, JSON.stringify(["curl", ...args]) + "\\n");
 const option = (name) => {
@@ -237,6 +241,19 @@ if (request.method === "initialize") {
     reject();
   } else if (name.endsWith("add_memory")) {
     reply(payload({ status: "accepted" }));
+  } else if (name.endsWith("ingest_messages")) {
+    const countPath = process.env.MOCK_CALLS + ".ingest-count";
+    const count = (existsSync(countPath) ? Number(readFileSync(countPath, "utf8")) : 0) + 1;
+    writeFileSync(countPath, String(count));
+    reply(process.env.MOCK_INGEST_ERROR === "1"
+      ? { isError: true, content: [{ type: "text", text: "enqueue unavailable" }] }
+      : payload({ job_id: process.env.MOCK_DUPLICATE_JOB_MISMATCH === "1" ? "fixture-job-" + count : "fixture-job", state: "queued" }));
+  } else if (name.endsWith("get_ingest_job_status")) {
+    const countPath = process.env.MOCK_CALLS + ".status-count";
+    const count = (existsSync(countPath) ? Number(readFileSync(countPath, "utf8")) : 0);
+    writeFileSync(countPath, String(count + 1));
+    const states = process.env.MOCK_INGEST_STATE.split(",");
+    reply(payload({ job_id: process.env.MOCK_STATUS_JOB_MISMATCH === "1" ? "different-job" : callArgs.job_id, state: states[Math.min(count, states.length - 1)] }));
   } else if (callArgs.q === process.env.MOCK_MARKER) {
     // Keyword probe: the exact marker always resolves.
     reply(payload({
@@ -280,6 +297,10 @@ if (request.method === "initialize") {
       MOCK_NL_TOTAL: nlTotal,
       MOCK_QUERY_STATUS: queryStatus,
       MOCK_START_QUERY_ERROR: startQueryError,
+      MOCK_INGEST_ERROR: ingestError ? "1" : "0",
+      MOCK_INGEST_STATE: ingestState,
+      MOCK_DUPLICATE_JOB_MISMATCH: duplicateJobMismatch ? "1" : "0",
+      MOCK_STATUS_JOB_MISMATCH: statusJobMismatch ? "1" : "0",
       PATH: `${bin}${delimiter}${process.env.PATH}`,
       STAGE,
     },
@@ -374,6 +395,35 @@ describe("Gateway scope enforcement", () => {
     expect(result.stdout).toContain(
       "Gateway scope filtering and cross-scope rejection verified",
     );
+  });
+});
+
+describe("durable transcript smoke", () => {
+  it("waits through retry_wait before terminal success", () => {
+    const { callRecords, result } = runFixture({ ingestState: "retry_wait,succeeded" });
+    expect(result.status, result.stderr).toBe(0);
+    expect(toolCalls(callRecords).filter(({ params }) => params.name.endsWith("get_ingest_job_status"))).toHaveLength(2);
+  });
+  it("requires committed enqueue, idempotent replay, and terminal success", () => {
+    const { callRecords, result } = runFixture();
+    expect(result.status, result.stderr).toBe(0);
+    const calls = toolCalls(callRecords);
+    const ingests = calls.filter(({ params }) => params.name.endsWith("ingest_messages"));
+    expect(ingests).toHaveLength(2);
+    expect(ingests[0].params.arguments).toEqual(ingests[1].params.arguments);
+    expect(ingests[0].params.arguments.mode).toBe("smart");
+    expect(ingests[0].params.arguments.messages[0].content).not.toContain(MARKER);
+    expect(calls.some(({ params }) => params.name.endsWith("get_ingest_job_status"))).toBe(true);
+    expect(result.stdout).toContain("durable transcript committed");
+  });
+  it.each([
+    { ingestError: true },
+    { ingestState: "dead" },
+    { duplicateJobMismatch: true },
+    { statusJobMismatch: true },
+  ])("fails even in soft mode on a durable-path failure: %j", (failure) => {
+    const { result } = runFixture({ ...failure, soft: "1" });
+    expect(result.status).not.toBe(0);
   });
 });
 

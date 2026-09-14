@@ -1,0 +1,245 @@
+diff --git a/server/internal/handler/ingest_compat_integration_test.go b/server/internal/handler/ingest_compat_integration_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..d7cd8a96f8b4f122eb0d36790111a49983e145b5
+--- /dev/null
++++ b/server/internal/handler/ingest_compat_integration_test.go
+@@ -0,0 +1,120 @@
++package handler
++
++import (
++	"context"
++	"database/sql"
++	"encoding/json"
++	"errors"
++	"io"
++	"log/slog"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/domain"
++	"github.com/qiffang/mnemos/server/internal/embed"
++	"github.com/qiffang/mnemos/server/internal/ingestqueue"
++	"github.com/qiffang/mnemos/server/internal/llm"
++	"github.com/qiffang/mnemos/server/internal/middleware"
++	"github.com/qiffang/mnemos/server/internal/repository/postgres"
++	"github.com/qiffang/mnemos/server/internal/service"
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++// TC-COMPAT-001..003: use the real additive schema, before namespace enforcement.
++func TestCompatibilityTranscriptCompletesBeforeNamespaceCutover(t *testing.T) {
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_COMPAT_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_COMPAT_DSN is not set")
++	}
++	db := testutil.OpenIsolatedPostgres(t, dsn)
++	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
++	srv := NewServer(nil, nil, "", nil, nil, "", false, service.ModeSmart, "postgres", logger).WithDurableIngest(true)
++	body := map[string]any{"messages": []map[string]string{{"role": "user", "content": "Compatibility fixture uses PostgreSQL"}}, "session_id": "compat-session", "appId": "compat-app"}
++	var id string
++	for range 2 {
++		req := makeRequest(t, http.MethodPost, "/memories", body)
++		req = req.WithContext(middleware.WithAuthContext(req.Context(), &domain.AuthInfo{TenantID: "compat-tenant", TenantDB: db, AgentName: "compat-agent"}))
++		rr := httptest.NewRecorder()
++		srv.createMemory(rr, req)
++		if rr.Code != http.StatusAccepted {
++			t.Fatalf("enqueue got %d, want 202: %s", rr.Code, rr.Body.String())
++		}
++		var response map[string]string
++		json.NewDecoder(rr.Body).Decode(&response)
++		if id != "" && id != response["job_id"] {
++			t.Fatal("duplicate request returned another job")
++		}
++		id = response["job_id"]
++	}
++	repo := postgres.NewIngestJobRepo(db)
++	job, err := repo.Get(context.Background(), "compat-tenant", "", id)
++	if err != nil || job.State != ingestqueue.StateQueued {
++		t.Fatalf("202 did not commit a queued job: %v %v", job, err)
++	}
++	for _, scope := range [][2]string{{"other-tenant", ""}, {"compat-tenant", testutil.TestNamespaceID}} {
++		if _, err := repo.Get(context.Background(), scope[0], scope[1], id); !errors.Is(err, sql.ErrNoRows) {
++			t.Fatalf("foreign job read: %v", err)
++		}
++	}
++	vector := make([]float32, 1024)
++	vector[0] = 1
++	var llmCalls atomic.Int32
++	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		if r.URL.Path == "/embeddings" {
++			json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": vector}}})
++			return
++		}
++		llmCalls.Add(1)
++		json.NewEncoder(w).Encode(map[string]any{"choices": []map[string]any{{"message": map[string]string{"content": `{"facts":[{"text":"Compatibility fixture uses PostgreSQL","tags":["configuration"]}],"message_tags":[["configuration"]]}`}}}})
++	}))
++	defer endpoint.Close()
++	memoryRepo := postgres.NewMemoryRepo(db, false, "")
++	embedder := embed.New(embed.Config{BaseURL: endpoint.URL, Model: "test", Dims: 1024})
++	client := llm.New(llm.Config{APIKey: "local", BaseURL: endpoint.URL, Model: "test"})
++	processor := service.NewDurableProcessor(service.NewIngestService(memoryRepo, client, embedder, "", service.ModeSmart), nil, nil, "", nil, logger)
++	cfg := ingestqueue.DefaultWorkerConfig()
++	cfg.Enabled = true
++	cfg.PollInterval = time.Millisecond
++	ctx, cancel := context.WithCancel(context.Background())
++	defer cancel()
++	done := make(chan error, 1)
++	go func() {
++		done <- ingestqueue.NewWorker(repo, processor, "compat-tenant", "compat-worker", cfg, logger).Run(ctx)
++	}()
++	deadline := time.Now().Add(5 * time.Second)
++	for time.Now().Before(deadline) {
++		job, err = repo.Get(context.Background(), "compat-tenant", "", id)
++		if err != nil || job.State == ingestqueue.StateSucceeded || job.State == ingestqueue.StateDead {
++			break
++		}
++		time.Sleep(10 * time.Millisecond)
++	}
++	cancel()
++	if err := <-done; err != nil {
++		t.Fatal(err)
++	}
++	if err != nil || job.State != ingestqueue.StateSucceeded {
++		t.Fatalf("compatibility job did not succeed: %+v %v", job, err)
++	}
++	if llmCalls.Load() == 0 {
++		t.Fatal("smart worker bypassed extraction")
++	}
++	var sessions, memories int
++	if err := db.QueryRow(`SELECT count(*) FROM sessions WHERE namespace_id IS NULL`).Scan(&sessions); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.QueryRow(`SELECT count(*) FROM memories WHERE namespace_id IS NULL`).Scan(&memories); err != nil {
++		t.Fatal(err)
++	}
++	if sessions != 1 || memories != 1 {
++		t.Fatalf("sessions=%d memories=%d, want one atomic result", sessions, memories)
++	}
++	found, err := memoryRepo.VectorSearch(context.Background(), vector, domain.MemoryFilter{}, 5)
++	if err != nil || len(found) != 1 {
++		t.Fatalf("compat recall: %v %v", found, err)
++	}
++}
+diff --git a/server/internal/repository/postgres/ingest_compat_integration_test.go b/server/internal/repository/postgres/ingest_compat_integration_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..b16f306e6aae0a8f457395770acea810876205bb
+--- /dev/null
++++ b/server/internal/repository/postgres/ingest_compat_integration_test.go
+@@ -0,0 +1,73 @@
++package postgres
++
++import (
++	"context"
++	"os"
++	"testing"
++
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++func TestIngestSchemaScopeMismatchNeverFallsBack(t *testing.T) {
++	for _, tc := range []struct {
++		name, env string
++		scoped    bool
++	}{
++		{"scoped request before cutover", "MNEMO_TEST_POSTGRES_COMPAT_DSN", true},
++		{"unscoped request after cutover", "MNEMO_TEST_POSTGRES_DSN", false},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			dsn := os.Getenv(tc.env)
++			if dsn == "" {
++				t.Skip(tc.env + " is not set")
++			}
++			db := testutil.OpenIsolatedPostgres(t, dsn)
++			repo := NewIngestJobRepo(db)
++			input := enqueueInput("tenant", "session", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
++			if !tc.scoped {
++				input.NamespaceID = ""
++				input.PrincipalID = ""
++			}
++			if _, err := repo.Enqueue(context.Background(), input); err == nil {
++				t.Fatal("mismatched schema/scope was accepted")
++			}
++			var count int
++			if err := db.QueryRow(`SELECT count(*) FROM ingest_jobs`).Scan(&count); err != nil {
++				t.Fatal(err)
++			}
++			if count != 0 {
++				t.Fatal("mismatched enqueue persisted a job")
++			}
++		})
++	}
++}
++
++func TestIngestPartialCutoverDoesNotReturnForeignNamespaceJob(t *testing.T) {
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_COMPAT_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_COMPAT_DSN is not set")
++	}
++	db := testutil.OpenIsolatedPostgres(t, dsn)
++	if _, err := db.Exec(`CREATE UNIQUE INDEX compat_namespace_key ON ingest_jobs (tenant_id, namespace_id, idempotency_key)`); err != nil {
++		t.Fatal(err)
++	}
++	repo := NewIngestJobRepo(db)
++	scoped := enqueueInput("tenant", "session", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
++	if _, err := repo.Enqueue(context.Background(), scoped); err != nil {
++		t.Fatal(err)
++	}
++	legacy := scoped
++	legacy.ID = "00000000-0000-4000-8000-000000000002"
++	legacy.NamespaceID = ""
++	legacy.PrincipalID = ""
++	if job, err := repo.Enqueue(context.Background(), legacy); err == nil || job != nil {
++		t.Fatalf("legacy conflict exposed a scoped job: %+v %v", job, err)
++	}
++	var count int
++	if err := db.QueryRow(`SELECT count(*) FROM ingest_jobs`).Scan(&count); err != nil {
++		t.Fatal(err)
++	}
++	if count != 1 {
++		t.Fatalf("row count=%d, want unchanged 1", count)
++	}
++}
+diff --git a/server/internal/repository/postgres/ingest_job.go b/server/internal/repository/postgres/ingest_job.go
+index 9e526c3139322fb14f38c5d092dfd0b89a06f335..f2e81cf694abdb65086627d1ebb8d540ef1f592a 100644
+--- a/server/internal/repository/postgres/ingest_job.go
++++ b/server/internal/repository/postgres/ingest_job.go
+@@ -101,7 +101,7 @@ func (r *IngestJobRepo) Enqueue(ctx context.Context, input ingestqueue.EnqueueIn
+ 		return nil, fmt.Errorf("lock ingest enqueue scope: %w", err)
+ 	}
+ 
+-	row := tx.QueryRowContext(ctx, `
++	const insertJob = `
+ 		INSERT INTO ingest_jobs (
+ 			job_id, tenant_id, namespace_id, principal_id,
+ 			idempotency_key, canonical_payload,
+@@ -113,8 +113,8 @@ func (r *IngestJobRepo) Enqueue(ctx context.Context, input ingestqueue.EnqueueIn
+ 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13,
+ 			$14, $15, $16,
+ 			statement_timestamp(), statement_timestamp(), statement_timestamp())
+-		ON CONFLICT (tenant_id, namespace_id, idempotency_key) DO NOTHING
+-		RETURNING `+ingestJobColumns,
++	`
++	args := []any{
+ 		input.ID,
+ 		input.TenantID,
+ 		nullString(input.NamespaceID),
+@@ -131,7 +131,14 @@ func (r *IngestJobRepo) Enqueue(ctx context.Context, input ingestqueue.EnqueueIn
+ 		nullString(input.RuntimeAgentName),
+ 		nullRuntimeTime(input.RuntimeReservationExpiresAt),
+ 		runtimeFinalizationState(input.RuntimeOperationID),
+-	)
++	}
++	// Keep both immutable SQL variants visible to the namespace query inventory.
++	var row *sql.Row
++	if input.NamespaceID == "" {
++		row = tx.QueryRowContext(ctx, insertJob+`ON CONFLICT (tenant_id, idempotency_key) DO NOTHING RETURNING `+ingestJobColumns, args...)
++	} else {
++		row = tx.QueryRowContext(ctx, insertJob+`ON CONFLICT (tenant_id, namespace_id, idempotency_key) DO NOTHING RETURNING `+ingestJobColumns, args...)
++	}
+ 	job, err := scanIngestJob(row)
+ 	newlyEnqueued := err == nil
+ 	if errors.Is(err, sql.ErrNoRows) {

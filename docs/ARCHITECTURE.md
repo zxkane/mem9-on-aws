@@ -433,7 +433,14 @@ The image applies the downstream patches in this fixed order:
 `0010-group-memory-namespaces`, `0011-stabilize-ingest-deadline-test`,
 `0012-preserve-postgres-update-embedding`, and
 `0013-upstream-durable-compatibility`, and
-`0014-recall-schema-budget-and-durable-facts`.
+`0014-recall-schema-budget-and-durable-facts`, and
+`0015-ingest-namespace-compatibility`.
+
+Before namespace cutover, durable enqueue uses the additive schema's legacy
+tenant/idempotency index. Scoped jobs use the namespace/idempotency index and do
+not fall back to tenant-wide uniqueness. Separate additive/enforced integration
+templates and a mandatory MCP enqueue/replay/job-success smoke exercise both
+migration phases without changing the production namespace gate.
 
 The namespace release is additive by default. Bootstrap applies
 `002_memory_namespaces.sql`, creating the control plane plus nullable namespace
