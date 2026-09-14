@@ -1,8 +1,8 @@
 diff --git a/server/internal/handler/recall.go b/server/internal/handler/recall.go
-index a241081..5ab7797 100644
+index 70b87132291ec3c35f18045ce0ba024242ea9018..1a28501b4271c6e9ecc13ce25ae4ac705be3dac9 100644
 --- a/server/internal/handler/recall.go
 +++ b/server/internal/handler/recall.go
-@@ -213,6 +213,10 @@ func (s *Server) defaultConfidenceRecallSearch(
+@@ -284,6 +284,10 @@ func (s *Server) defaultConfidenceRecallSearch(
  	selectionDuration := time.Since(selectionStart)
  
  	memories := append(pinned, mixed...)
@@ -10,10 +10,10 @@ index a241081..5ab7797 100644
 +	// cutoff rejected every candidate — see recall_config.go.
 +	allCandidates := append(append(append([]service.RecallCandidate{}, pinnedCandidates...), insightCandidates...), sessionCandidates...)
 +	memories, cutoffReason = applyZeroResultFallback(profile.shape, budget, allCandidates, memories, cutoffReason)
- 	slog.InfoContext(ctx, "confidence recall search",
- 		"cluster_id", auth.ClusterID,
- 		"query_len", len(filter.Query),
-@@ -254,7 +258,7 @@ func (s *Server) singlePoolConfidenceRecallSearch(
+ 	logger := s.logger
+ 	if logger == nil {
+ 		logger = slog.Default()
+@@ -614,7 +618,7 @@ func (s *Server) singlePoolConfidenceRecallSearch(
  	var (
  		candidates     []service.RecallCandidate
  		err            error
@@ -22,7 +22,7 @@ index a241081..5ab7797 100644
  		applyGapCutoff = true
  	)
  
-@@ -268,7 +272,7 @@ func (s *Server) singlePoolConfidenceRecallSearch(
+@@ -628,7 +632,7 @@ func (s *Server) singlePoolConfidenceRecallSearch(
  		candidates, err = svc.session.SearchCandidates(ctx, effectiveFilter, service.RecallSourceSession, recallCandidateOptions(profile.shape, false))
  	case string(domain.TypePinned):
  		candidates, err = svc.memory.SearchCandidates(ctx, effectiveFilter, service.RecallSourcePinned, recallCandidateOptions(profile.shape, false))
@@ -31,7 +31,7 @@ index a241081..5ab7797 100644
  		applyGapCutoff = false
  	case string(domain.TypeInsight):
  		candidates, err = svc.memory.SearchCandidates(ctx, effectiveFilter, service.RecallSourceInsight, recallCandidateOptions(profile.shape, true))
-@@ -293,6 +297,7 @@ func (s *Server) singlePoolConfidenceRecallSearch(
+@@ -653,6 +657,7 @@ func (s *Server) singlePoolConfidenceRecallSearch(
  		memories, cutoffReason = selectTopRecallCandidates(profile.shape, effectiveFilter.Limit, minConfidence, applyGapCutoff, candidates, nil)
  		stats.mode = "top"
  	}
@@ -39,7 +39,7 @@ index a241081..5ab7797 100644
  	selectionDuration := time.Since(selectionStart)
  
  	pinnedSelected := 0
-@@ -498,7 +503,7 @@ func selectPinnedRecallCandidates(
+@@ -858,7 +863,7 @@ func selectPinnedRecallCandidates(
  	if isRecallIdentifierLiteral(profile.lower) {
  		keepMax = budget
  	}
@@ -48,7 +48,7 @@ index a241081..5ab7797 100644
  	seen := make(map[string]struct{}, len(selected))
  	for _, mem := range selected {
  		seen[recallMemoryKey(mem)] = struct{}{}
-@@ -518,7 +523,7 @@ func selectMixedRecallCandidates(
+@@ -878,7 +883,7 @@ func selectMixedRecallCandidates(
  	if shouldUseBalancedTopSelection(profile.shape) {
  		return selectBalancedRecallCandidates(profile, budget, candidates, seen)
  	}
@@ -57,7 +57,7 @@ index a241081..5ab7797 100644
  	return memories, cutoffReason, recallSelectionStats{mode: "top"}
  }
  
-@@ -632,7 +637,7 @@ func selectBalancedRecallCandidates(
+@@ -992,7 +997,7 @@ func selectBalancedRecallCandidates(
  	for round := 0; round < balancedSelectionRounds && len(selected) < budget; round++ {
  		progress := false
  		for i := range buckets {
@@ -66,7 +66,7 @@ index a241081..5ab7797 100644
  			if !ok {
  				continue
  			}
-@@ -661,7 +666,7 @@ func selectBalancedRecallCandidates(
+@@ -1021,7 +1026,7 @@ func selectBalancedRecallCandidates(
  		}
  
  		confidence := recallConfidenceValue(candidate.Memory)
@@ -75,7 +75,7 @@ index a241081..5ab7797 100644
  			cutoffReason = "min_confidence"
  			break
  		}
-@@ -715,7 +720,7 @@ func selectEnumerationRecallCandidates(
+@@ -1075,7 +1080,7 @@ func selectEnumerationRecallCandidates(
  	for len(selected) < budget && progress {
  		progress = false
  		for i := range buckets {
@@ -84,7 +84,7 @@ index a241081..5ab7797 100644
  			if !ok {
  				continue
  			}
-@@ -739,7 +744,7 @@ func selectEnumerationRecallCandidates(
+@@ -1099,7 +1104,7 @@ func selectEnumerationRecallCandidates(
  			continue
  		}
  		confidence := recallConfidenceValue(candidate.Memory)
@@ -95,7 +95,7 @@ index a241081..5ab7797 100644
  		}
 diff --git a/server/internal/handler/recall_config.go b/server/internal/handler/recall_config.go
 new file mode 100644
-index 0000000..2483894
+index 0000000000000000000000000000000000000000..2483894514709a3250a6f587929c2cd96849bdb2
 --- /dev/null
 +++ b/server/internal/handler/recall_config.go
 @@ -0,0 +1,87 @@
@@ -188,7 +188,7 @@ index 0000000..2483894
 +}
 diff --git a/server/internal/handler/recall_config_test.go b/server/internal/handler/recall_config_test.go
 new file mode 100644
-index 0000000..630ced2
+index 0000000000000000000000000000000000000000..630ced2026d8790631776cfa106a36c3554ffc23
 --- /dev/null
 +++ b/server/internal/handler/recall_config_test.go
 @@ -0,0 +1,161 @@

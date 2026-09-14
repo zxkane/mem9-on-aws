@@ -11,7 +11,7 @@
 #   - mem9 is pure Go (CGO_ENABLED=0), so it cross-compiles to arm64 with zero
 #     source change (GOARCH=arm64). Targets AWS Graviton Fargate (§4, arm64).
 #
-# Pin: mem9-ai/mem9 @ d4638c8458abeb209a1b3a20472a1328c4acd149 (main, 2026-07-10).
+# Pin: mem9-ai/mem9 @ 5af03a68c072651e9c64d1b8b1265e36b7354671 (main, 2026-08-25).
 # Bump = change MEM9_REF below + re-verify docs/mem9-facts.md against the new tree.
 # Module path is github.com/qiffang/mnemos/server; the server lives under server/.
 
@@ -34,7 +34,7 @@ RUN apk upgrade --no-cache \
 
 # The exact upstream commit to vendor. A full 40-char SHA (not a branch/tag) so
 # the build is reproducible and can never drift under us.
-ARG MEM9_REF=d4638c8458abeb209a1b3a20472a1328c4acd149
+ARG MEM9_REF=5af03a68c072651e9c64d1b8b1265e36b7354671
 # Target arch for the static binary, auto-injected by buildx from --platform
 # (linux/arm64 → arm64). Defaulted so a plain `docker build` still works.
 ARG TARGETARCH=arm64

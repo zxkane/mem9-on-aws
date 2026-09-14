@@ -63,6 +63,32 @@ AWS Cloud Map documents that a private DNS namespace automatically creates the
 associated Route 53 private hosted zone:
 [CreatePrivateDnsNamespace](https://docs.aws.amazon.com/cloud-map/latest/api/API_CreatePrivateDnsNamespace.html).
 
+### Upstream compatibility
+
+The image pins upstream mem9 at `5af03a68c072651e9c64d1b8b1265e36b7354671`
+(2026-08-25) and applies the complete downstream stack. Durable queue/atomic
+apply, confidence fallback, If-Match fencing, and namespace enforcement remain
+part of the runtime. Patch 0012 separately backports PostgreSQL vector
+preservation from unmerged upstream PR #470. The server schema and 1024-dimensional
+embedding contract are unchanged; no new migration or vector rebuild is needed.
+
+Recall has a 20-second server budget including two seconds reserved for the
+response. The VPC proxy spends at most 25 seconds across all fetch attempts,
+response-body reads, and backoff, with an additional one-second Lambda response
+reserve when the remaining invocation time is shorter. The Lambda remains at
+30 seconds. Partial Recall responses pass through; a terminal 504 is authoritative.
+Shared constants and behavioral proxy tests keep these budgets aligned.
+Cold-cache schema validation inherits the same request/branch context; it cannot
+extend the Recall deadline through an independent background timeout.
+
+Assistant fact extraction is explicitly disabled in ECS. Both durable-worker
+constructors honor the upstream option, but enablement requires a separate
+quality evaluation. Upstream external provenance is synchronous-only in this
+build: asynchronous requests using it fail before queue acceptance because
+`ingest-v1` does not carry its provenance contract. See
+[`mem9-facts.md`](mem9-facts.md) and the
+[migration acceptance tests](test-cases/mem9-upstream-migration.md).
+
 ### ECS task
 
 `infra/ecs.ts` defines one arm64 Fargate service with `desiredCount=1`, 2 vCPU,
@@ -387,8 +413,11 @@ The image applies the downstream patches in this fixed order:
 `0002-ingest-durable-only-extraction-filter`, `0003-glm-request-bounds`,
 `0004-durable-ingest-queue`, `0005-atomic-ingest-apply`,
 `0006-durable-ingest-telemetry`, `0007-postgres-session-delete`, and
-`0008-ingest-prescreen-shadow`, `0009-if-match-precondition-fence`, and
-`0010-group-memory-namespaces`.
+`0008-ingest-prescreen-shadow`, `0009-if-match-precondition-fence`,
+`0010-group-memory-namespaces`, `0011-stabilize-ingest-deadline-test`,
+`0012-preserve-postgres-update-embedding`, and
+`0013-upstream-durable-compatibility`, and
+`0014-recall-schema-budget-and-durable-facts`.
 
 The namespace release is additive by default. Bootstrap applies
 `002_memory_namespaces.sql`, creating the control plane plus nullable namespace

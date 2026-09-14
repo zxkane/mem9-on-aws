@@ -1,11 +1,11 @@
 diff --git a/server/internal/domain/errors.go b/server/internal/domain/errors.go
-index 1a7d1e4..ba45972 100644
+index 2030d12efd287e4c44eabe434b3bd5a82e1f0429..13ba0e8aae3311b3705d07f1dd87ec2f2d5555a8 100644
 --- a/server/internal/domain/errors.go
 +++ b/server/internal/domain/errors.go
-@@ -11,6 +11,12 @@ var (
- 	ErrNotSupported            = errors.New("not supported")
+@@ -12,6 +12,12 @@ var (
  	ErrAutoVectorSearchSkipped = errors.New("auto vector search skipped")
  	ErrSchemaIncompatible      = errors.New("schema incompatible")
+ 	ErrFTSSearchTruncated      = errors.New("fts search truncated")
 +	// ErrPreconditionFailed reports that a caller-supplied precondition (an
 +	// `If-Match` version) no longer holds, so the write was NOT applied.
 +	// mem9-on-aws patch (issue #128): distinct from ErrConflict so a fenced
@@ -16,26 +16,26 @@ index 1a7d1e4..ba45972 100644
  
  // ValidationError wraps ErrValidation with a field-level message.
 diff --git a/server/internal/handler/handler.go b/server/internal/handler/handler.go
-index 8706895..c7f731a 100644
+index ffea499c60f019d7ca36883359992e15e631a5ca..994f322f494dd389399b87a83229717f56069c16 100644
 --- a/server/internal/handler/handler.go
 +++ b/server/internal/handler/handler.go
-@@ -337,6 +337,11 @@ func (s *Server) handleError(ctx context.Context, w http.ResponseWriter, err err
- 		respondError(w, http.StatusNotFound, err.Error())
+@@ -377,6 +377,11 @@ func (s *Server) handleError(ctx context.Context, w http.ResponseWriter, err err
+ 		return respondError(w, http.StatusNotFound, err.Error())
  	case errors.Is(err, domain.ErrWriteConflict):
- 		respondError(w, http.StatusServiceUnavailable, err.Error())
+ 		return respondError(w, http.StatusServiceUnavailable, err.Error())
 +	// mem9-on-aws patch (issue #128): a failed `If-Match` precondition is 412, not
 +	// 409 — the write was NOT applied, and a fenced caller must be able to tell
 +	// that apart from ErrConflict's "LLM merge replaced LWW".
 +	case errors.Is(err, domain.ErrPreconditionFailed):
-+		respondError(w, http.StatusPreconditionFailed, err.Error())
++		return respondError(w, http.StatusPreconditionFailed, err.Error())
  	case errors.Is(err, domain.ErrConflict):
- 		respondError(w, http.StatusConflict, err.Error())
+ 		return respondError(w, http.StatusConflict, err.Error())
  	case errors.Is(err, domain.ErrDuplicateKey):
 diff --git a/server/internal/handler/memory.go b/server/internal/handler/memory.go
-index 9560c52..a86a60a 100644
+index e36480b3f5c3a6fb4cfb7e171f20e411abc7ccfc..e0ce9346616d941bacd8e484a9b2662a9853aee1 100644
 --- a/server/internal/handler/memory.go
 +++ b/server/internal/handler/memory.go
-@@ -1339,9 +1339,21 @@ func (s *Server) updateMemory(w http.ResponseWriter, r *http.Request) {
+@@ -1431,9 +1431,21 @@ func (s *Server) updateMemory(w http.ResponseWriter, r *http.Request) {
  	auth := authInfo(r)
  	id := chi.URLParam(r, "id")
  
@@ -60,7 +60,7 @@ index 9560c52..a86a60a 100644
  	if auth.IsChain() {
 diff --git a/server/internal/handler/memory_ifmatch_test.go b/server/internal/handler/memory_ifmatch_test.go
 new file mode 100644
-index 0000000..ec0f078
+index 0000000000000000000000000000000000000000..ec0f078f81b4d5f0b50bd68e7f41428a33cc11cc
 --- /dev/null
 +++ b/server/internal/handler/memory_ifmatch_test.go
 @@ -0,0 +1,118 @@
@@ -183,10 +183,10 @@ index 0000000..ec0f078
 +	}
 +}
 diff --git a/server/internal/service/memory.go b/server/internal/service/memory.go
-index c2f447d..6d5295d 100644
+index 1c05707c59992fcce9aa82e0c6b8139ca6098878..26ab214973d401f20234ff1d5ee7f90e07df9de4 100644
 --- a/server/internal/service/memory.go
 +++ b/server/internal/service/memory.go
-@@ -1008,13 +1008,19 @@ func (s *MemoryService) Update(ctx context.Context, agentName, id, content strin
+@@ -1046,13 +1046,19 @@ func (s *MemoryService) Update(ctx context.Context, agentName, id, content strin
  		return nil, err
  	}
  
@@ -207,7 +207,7 @@ index c2f447d..6d5295d 100644
  	}
  
  	contentChanged := false
-@@ -1045,9 +1051,25 @@ func (s *MemoryService) Update(ctx context.Context, agentName, id, content strin
+@@ -1087,9 +1093,25 @@ func (s *MemoryService) Update(ctx context.Context, agentName, id, content strin
  	}
  
  	writeStart := time.Now()
@@ -236,7 +236,7 @@ index c2f447d..6d5295d 100644
  
 diff --git a/server/internal/service/memory_ifmatch_test.go b/server/internal/service/memory_ifmatch_test.go
 new file mode 100644
-index 0000000..78bfd4e
+index 0000000000000000000000000000000000000000..78bfd4ea106da78dc947dbc6d0ec4c3d4bb4069c
 --- /dev/null
 +++ b/server/internal/service/memory_ifmatch_test.go
 @@ -0,0 +1,207 @@

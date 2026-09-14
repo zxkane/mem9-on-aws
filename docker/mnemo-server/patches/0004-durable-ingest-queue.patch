@@ -1,6 +1,6 @@
 diff --git a/server/cmd/mnemo-server/durable_ingest_test.go b/server/cmd/mnemo-server/durable_ingest_test.go
 new file mode 100644
-index 0000000..ca547d4
+index 0000000000000000000000000000000000000000..ca547d49858e3ccdc5a53ce497469dce8a1dc280
 --- /dev/null
 +++ b/server/cmd/mnemo-server/durable_ingest_test.go
 @@ -0,0 +1,17 @@
@@ -22,7 +22,7 @@ index 0000000..ca547d4
 +	}
 +}
 diff --git a/server/cmd/mnemo-server/main.go b/server/cmd/mnemo-server/main.go
-index c019f1d..9ee45f3 100644
+index 4cf34662bead4dfdca1f45dbe2471ed449c65b38..c9950ff7c63f2a3e9a878351febcceee4fd03760 100644
 --- a/server/cmd/mnemo-server/main.go
 +++ b/server/cmd/mnemo-server/main.go
 @@ -14,6 +14,7 @@ import (
@@ -44,18 +44,18 @@ index c019f1d..9ee45f3 100644
  
  	db, err := repository.NewDB(cfg.DBBackend, cfg.DSN)
  	if err != nil {
-@@ -301,7 +306,8 @@ func main() {
- 		WithRuntimeUsage(runtimeUsageManager).
- 		WithWebhookService(webhookSvc).
+@@ -287,7 +292,8 @@ func main() {
  		WithActivityTracker(activityTracker).
--		WithDisableSessionSave(cfg.DisableSessionSave)
-+		WithDisableSessionSave(cfg.DisableSessionSave).
+ 		WithDisableSessionSave(cfg.DisableSessionSave).
+ 		WithAssistantFactExtraction(cfg.FactExtractionIncludeAssistant).
+-		WithRecallRequestBudget(cfg.RecallRequestTimeout, cfg.RecallResponseReserve)
++		WithRecallRequestBudget(cfg.RecallRequestTimeout, cfg.RecallResponseReserve).
 +		WithDurableIngest(cfg.DurableIngestEnabled)
  	router := srv.Router(tenantMW, rateMW, apiKeyMW, middleware.CORS(cfg.CORSAllowedOrigins))
  
  	httpSrv := &http.Server{
-@@ -365,6 +371,13 @@ func main() {
- 	logger.Info("server stopped")
+@@ -374,6 +380,13 @@ func newRuntimeUsageConfig(cfg *config.Config, outbox runtimeusage.OutboxStore)
+ 	}
  }
  
 +func validateDurableIngestStartup(enabled bool) error {
@@ -69,10 +69,10 @@ index c019f1d..9ee45f3 100644
  	if raw == "" {
  		return ""
 diff --git a/server/internal/config/config.go b/server/internal/config/config.go
-index 6410adc..028934b 100644
+index 25be75803a5ba88c1a86ebd03e058a010cc48025..75cde5b8322351060b57aa10f80895a43231b398 100644
 --- a/server/internal/config/config.go
 +++ b/server/internal/config/config.go
-@@ -32,11 +32,12 @@ type Config struct {
+@@ -34,11 +34,12 @@ type Config struct {
  	EmbedModel   string
  	EmbedDims    int
  
@@ -88,19 +88,19 @@ index 6410adc..028934b 100644
 +	IngestMode           string
 +	DurableIngestEnabled bool
  
- 	// DisableSessionSave skips raw session row persistence for message ingest.
- 	// Smart ingest still extracts and reconciles facts into insight memories.
-@@ -187,6 +188,7 @@ func Load() (*Config, error) {
- 		LLMModel:                         envOr("MNEMO_LLM_MODEL", "gpt-4o-mini"),
+ 	// FactExtractionIncludeAssistant allows smart ingest to extract durable facts
+ 	// from assistant turns in addition to user turns. Disabled by default.
+@@ -219,6 +220,7 @@ func Load() (*Config, error) {
  		LLMTemperature:                   envFloat("MNEMO_LLM_TEMPERATURE", 0.1),
  		IngestMode:                       envOr("MNEMO_INGEST_MODE", "smart"),
+ 		FactExtractionIncludeAssistant:   envBool("MNEMO_FACT_EXTRACTION_INCLUDE_ASSISTANT", false),
 +		DurableIngestEnabled:             envBool("MNEMO_DURABLE_INGEST_ENABLED", false),
  		DisableSessionSave:               envBool("MNEMO_DISABLE_SESSION_SAVE", false),
  		TiDBZeroEnabled:                  envBool("MNEMO_TIDB_ZERO_ENABLED", true),
  		TiDBZeroAPIURL:                   envOr("MNEMO_TIDB_ZERO_API_URL", "https://zero.tidbapi.com/v1alpha1"),
 diff --git a/server/internal/config/durable_ingest_test.go b/server/internal/config/durable_ingest_test.go
 new file mode 100644
-index 0000000..62731e1
+index 0000000000000000000000000000000000000000..62731e15f6669a79990c7a57491932132cc61098
 --- /dev/null
 +++ b/server/internal/config/durable_ingest_test.go
 @@ -0,0 +1,24 @@
@@ -130,7 +130,7 @@ index 0000000..62731e1
 +}
 diff --git a/server/internal/handler/durable_ingest_test.go b/server/internal/handler/durable_ingest_test.go
 new file mode 100644
-index 0000000..4783202
+index 0000000000000000000000000000000000000000..b07c9537797fed089bed5731eaca0c84755a64a8
 --- /dev/null
 +++ b/server/internal/handler/durable_ingest_test.go
 @@ -0,0 +1,383 @@
@@ -324,8 +324,8 @@ index 0000000..4783202
 +		}
 +	}
 +	for _, fields := range []map[string]any{
-+		{"api_key": "transport-value-a", "request_id": "request-a"},
-+		{"api_key": "transport-value-b", "request_id": "request-b"},
++		{"api_key": "dummy-a", "request_id": "request-a"},
++		{"api_key": "dummy-b", "request_id": "request-b"},
 +	} {
 +		fields["messages"] = []map[string]string{{"role": "user", "content": "hello"}}
 +		rr := httptest.NewRecorder()
@@ -338,7 +338,7 @@ index 0000000..4783202
 +		t.Fatalf("transport-only fields changed hashes: %#v", hashes)
 +	}
 +	for _, payload := range payloads {
-+		if strings.Contains(payload, "transport-value") || strings.Contains(payload, "request-") {
++		if strings.Contains(payload, "dummy-") || strings.Contains(payload, "request-") {
 +			t.Fatalf("canonical payload retained a transport field: %s", payload)
 +		}
 +	}
@@ -518,7 +518,7 @@ index 0000000..4783202
 +	}
 +}
 diff --git a/server/internal/handler/handler.go b/server/internal/handler/handler.go
-index c5fe14e..4edbd6c 100644
+index 715e243d551486db83abdf5508e2a3a315a0ff67..98aea3982065d81ea52ad1ff368108f9a885cccc 100644
 --- a/server/internal/handler/handler.go
 +++ b/server/internal/handler/handler.go
 @@ -2,6 +2,7 @@ package handler
@@ -537,24 +537,24 @@ index c5fe14e..4edbd6c 100644
  	"github.com/qiffang/mnemos/server/internal/llm"
  	"github.com/qiffang/mnemos/server/internal/metering"
  	"github.com/qiffang/mnemos/server/internal/metrics"
-@@ -49,6 +51,8 @@ type Server struct {
- 	svcCache             sync.Map
- 	chainRecallStopScore float64
- 	disableSessionSave   bool
-+	durableIngestEnabled bool
-+	ingestRepoFactory    func(string, *sql.DB) ingestqueue.Repository
+@@ -52,6 +54,8 @@ type Server struct {
+ 	includeAssistantFacts bool
+ 	recallRequestTimeout  time.Duration
+ 	recallResponseReserve time.Duration
++	durableIngestEnabled  bool
++	ingestRepoFactory     func(string, *sql.DB) ingestqueue.Repository
  }
  
  // NewServer creates a new HTTP handler server.
-@@ -77,6 +81,7 @@ func NewServer(
- 		logger:               logger,
- 		startedAt:            time.Now().UTC(),
- 		chainRecallStopScore: 0.8,
-+		ingestRepoFactory:    repository.NewIngestJobRepo,
+@@ -82,6 +86,7 @@ func NewServer(
+ 		chainRecallStopScore:  0.8,
+ 		recallRequestTimeout:  defaultRecallRequestTimeout,
+ 		recallResponseReserve: defaultRecallResponseReserve,
++		ingestRepoFactory:     repository.NewIngestJobRepo,
  	}
  }
  
-@@ -113,6 +118,11 @@ func (s *Server) WithDisableSessionSave(disabled bool) *Server {
+@@ -129,6 +134,11 @@ func (s *Server) WithRecallRequestBudget(timeout, responseReserve time.Duration)
  	return s
  }
  
@@ -567,7 +567,7 @@ index c5fe14e..4edbd6c 100644
  // Services are always backed by the tenant's dedicated DB.
  type resolvedSvc struct {
 diff --git a/server/internal/handler/memory.go b/server/internal/handler/memory.go
-index 39e40f1..bff6a81 100644
+index e529a9c1338b90d62c9584d29f30144fb14d05e8..cd936fc10d837c4e64ce45eb236f8b3dff068c39 100644
 --- a/server/internal/handler/memory.go
 +++ b/server/internal/handler/memory.go
 @@ -14,7 +14,9 @@ import (
@@ -580,8 +580,8 @@ index 39e40f1..bff6a81 100644
  	"github.com/qiffang/mnemos/server/internal/metrics"
  	"github.com/qiffang/mnemos/server/internal/runtimeusage"
  	"github.com/qiffang/mnemos/server/internal/service"
-@@ -104,6 +106,25 @@ func (s *Server) createMemory(w http.ResponseWriter, r *http.Request) {
- 			Metadata:           append(json.RawMessage(nil), req.Metadata...),
+@@ -110,6 +112,25 @@ func (s *Server) createMemory(w http.ResponseWriter, r *http.Request) {
+ 			ExternalProvenance: externalProvenance,
  		}
  
 +		if s.durableIngestEnabled && !req.Sync {
@@ -606,7 +606,7 @@ index 39e40f1..bff6a81 100644
  		if req.Sync {
  			syncCtx, cancel := context.WithTimeout(r.Context(), syncIngestTimeout)
  			defer cancel()
-@@ -515,6 +536,62 @@ func (s *Server) createMemory(w http.ResponseWriter, r *http.Request) {
+@@ -495,6 +516,62 @@ func (s *Server) createMemory(w http.ResponseWriter, r *http.Request) {
  	}
  }
  
@@ -671,7 +671,7 @@ index 39e40f1..bff6a81 100644
  func (s *Server) ingestMessages(ctx context.Context, auth *domain.AuthInfo, svc resolvedSvc, req service.IngestRequest, chainAuth *domain.AuthInfo) (*service.IngestResult, error) {
 diff --git a/server/internal/ingestqueue/canonical.go b/server/internal/ingestqueue/canonical.go
 new file mode 100644
-index 0000000..b528e4e
+index 0000000000000000000000000000000000000000..b528e4ea4a53e7dfffd7c20f677ec8c76bf52135
 --- /dev/null
 +++ b/server/internal/ingestqueue/canonical.go
 @@ -0,0 +1,198 @@
@@ -875,7 +875,7 @@ index 0000000..b528e4e
 +}
 diff --git a/server/internal/ingestqueue/canonical_test.go b/server/internal/ingestqueue/canonical_test.go
 new file mode 100644
-index 0000000..3d041c4
+index 0000000000000000000000000000000000000000..3d041c44e8686f50e7271325365839ae5dfb05ff
 --- /dev/null
 +++ b/server/internal/ingestqueue/canonical_test.go
 @@ -0,0 +1,190 @@
@@ -1071,7 +1071,7 @@ index 0000000..3d041c4
 +}
 diff --git a/server/internal/ingestqueue/types.go b/server/internal/ingestqueue/types.go
 new file mode 100644
-index 0000000..775a61a
+index 0000000000000000000000000000000000000000..775a61af6caad210486da3fce1f26b52a6e9888a
 --- /dev/null
 +++ b/server/internal/ingestqueue/types.go
 @@ -0,0 +1,133 @@
@@ -1210,7 +1210,7 @@ index 0000000..775a61a
 +}
 diff --git a/server/internal/ingestqueue/worker.go b/server/internal/ingestqueue/worker.go
 new file mode 100644
-index 0000000..392cfbc
+index 0000000000000000000000000000000000000000..392cfbc90be389be736cacfe884a2c06b5c10cd3
 --- /dev/null
 +++ b/server/internal/ingestqueue/worker.go
 @@ -0,0 +1,364 @@
@@ -1580,7 +1580,7 @@ index 0000000..392cfbc
 +}
 diff --git a/server/internal/ingestqueue/worker_integration_test.go b/server/internal/ingestqueue/worker_integration_test.go
 new file mode 100644
-index 0000000..24f51b9
+index 0000000000000000000000000000000000000000..24f51b974b5d56c227a525d4e01ed3078c823aae
 --- /dev/null
 +++ b/server/internal/ingestqueue/worker_integration_test.go
 @@ -0,0 +1,233 @@
@@ -1819,7 +1819,7 @@ index 0000000..24f51b9
 +}
 diff --git a/server/internal/ingestqueue/worker_test.go b/server/internal/ingestqueue/worker_test.go
 new file mode 100644
-index 0000000..39f0ce2
+index 0000000000000000000000000000000000000000..39f0ce2eeeb43f796784e61472725a7dbdf62683
 --- /dev/null
 +++ b/server/internal/ingestqueue/worker_test.go
 @@ -0,0 +1,495 @@
@@ -2319,7 +2319,7 @@ index 0000000..39f0ce2
 +	}
 +}
 diff --git a/server/internal/repository/factory.go b/server/internal/repository/factory.go
-index c0c9bd2..929b8ea 100644
+index c0c9bd20615950a535a12c157061c14fe9df1332..929b8ea8d9963bf01cace2a6bc1d6282cb3e98b9 100644
 --- a/server/internal/repository/factory.go
 +++ b/server/internal/repository/factory.go
 @@ -6,6 +6,7 @@ import (
@@ -2347,7 +2347,7 @@ index c0c9bd2..929b8ea 100644
  	switch backend {
 diff --git a/server/internal/repository/postgres/ingest_job.go b/server/internal/repository/postgres/ingest_job.go
 new file mode 100644
-index 0000000..39986ad
+index 0000000000000000000000000000000000000000..39986adda12a54af8a9a80ea4d15dde0b0050df8
 --- /dev/null
 +++ b/server/internal/repository/postgres/ingest_job.go
 @@ -0,0 +1,700 @@
@@ -3053,7 +3053,7 @@ index 0000000..39986ad
 +}
 diff --git a/server/internal/repository/postgres/ingest_job_integration_test.go b/server/internal/repository/postgres/ingest_job_integration_test.go
 new file mode 100644
-index 0000000..3094d84
+index 0000000000000000000000000000000000000000..3094d845f87aa37c1bb803b4b3f58d897219438f
 --- /dev/null
 +++ b/server/internal/repository/postgres/ingest_job_integration_test.go
 @@ -0,0 +1,1190 @@
@@ -4249,7 +4249,7 @@ index 0000000..3094d84
 +}
 diff --git a/server/internal/testutil/postgres.go b/server/internal/testutil/postgres.go
 new file mode 100644
-index 0000000..c44f4bd
+index 0000000000000000000000000000000000000000..c44f4bd789909ae1e07c83a8e1db07f47c3ffc5e
 --- /dev/null
 +++ b/server/internal/testutil/postgres.go
 @@ -0,0 +1,71 @@

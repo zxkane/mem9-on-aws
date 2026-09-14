@@ -57,6 +57,7 @@ import { observability } from "./observability";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import type { NamespaceIdentityOutputs } from "./namespace-identity";
 import { disableMnemoServerPseudoTerminal } from "./ecs-task-definition";
+import { RECALL_TIMEOUT_MS, RECALL_RESPONSE_RESERVE_MS } from "./gateway/request-limits.mjs";
 
 // The primary Mantle route follows the active SST AWS provider. The optional
 // OpenAI Responses route below remains independently regional.
@@ -374,6 +375,10 @@ export function ecs(
           // candidates exist (cutoff_reason=zero_result_fallback in the logs).
           MNEMO_RECALL_MIN_CONFIDENCE: "40",
           MNEMO_RECALL_ZERO_RESULT_FALLBACK: "1",
+          MNEMO_RECALL_REQUEST_TIMEOUT: `${RECALL_TIMEOUT_MS / 1000}s`,
+          MNEMO_RECALL_RESPONSE_RESERVE: `${RECALL_RESPONSE_RESERVE_MS / 1000}s`,
+          // Enable assistant extraction only after a separate quality evaluation.
+          MNEMO_FACT_EXTRACTION_INCLUDE_ASSISTANT: "false",
           // Ingest durability filter (issue #25): appends a durability
           // override section to the extraction prompt so only facts useful in
           // future sessions are stored (decisions, preferences, gotchas);

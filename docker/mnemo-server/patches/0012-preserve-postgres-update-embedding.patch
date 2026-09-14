@@ -1,0 +1,172 @@
+diff --git a/server/internal/handler/memory_update_embedding_integration_test.go b/server/internal/handler/memory_update_embedding_integration_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..9c5fcf3d23b42ae71111dfe6ca63ce8fc95c9a1d
+--- /dev/null
++++ b/server/internal/handler/memory_update_embedding_integration_test.go
+@@ -0,0 +1,107 @@
++package handler
++
++import (
++	"context"
++	"database/sql"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"strconv"
++	"sync/atomic"
++	"testing"
++
++	"github.com/pgvector/pgvector-go"
++	"github.com/qiffang/mnemos/server/internal/domain"
++	"github.com/qiffang/mnemos/server/internal/embed"
++	"github.com/qiffang/mnemos/server/internal/middleware"
++	"github.com/qiffang/mnemos/server/internal/repository/postgres"
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++// TC-UPSTREAM-006/007: real PostgreSQL, HTTP fencing and namespace isolation.
++func TestPostgresUpdatePreservesEmbeddingAndFences(t *testing.T) {
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
++	}
++	db := testutil.OpenIsolatedPostgres(t, dsn)
++	scope := testutil.TestNamespaceScope()
++	repo := postgres.NewMemoryRepo(db, true, "", scope)
++	original := make([]float32, 1024)
++	original[0] = 1
++	replacement := make([]float32, 1024)
++	replacement[1] = 1
++	const id = "91000000-0000-4000-8000-000000000012"
++	if err := repo.Create(context.Background(), &domain.Memory{ID: id, Content: "original durable fact", MemoryType: domain.TypePinned, State: domain.StateActive, Version: 1, Embedding: original}); err != nil {
++		t.Fatal(err)
++	}
++	var embedCalls atomic.Int32
++	endpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		embedCalls.Add(1)
++		json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"embedding": replacement}}})
++	}))
++	defer endpoint.Close()
++	srv := postgresSessionDeleteServer()
++	srv.embedder = embed.New(embed.Config{BaseURL: endpoint.URL, Model: "test", Dims: 1024})
++	put := func(server *Server, body any, version int, foreign bool, expected int) {
++		t.Helper()
++		req := withURLParam(postgresSessionDeleteRequest(t, http.MethodPut, "/memories/"+id, body, "tenant-a", db), "id", id)
++		req.Header.Set("If-Match", strconv.Itoa(version))
++		if foreign {
++			auth := *authInfo(req)
++			other := *auth.Namespace
++			other.NamespaceID = testutil.TestOtherNamespaceID
++			other.PrincipalID = testutil.TestOtherPrincipalID
++			auth.Namespace = &other
++			req = req.WithContext(middleware.WithAuthContext(req.Context(), &auth))
++		}
++		rr := httptest.NewRecorder()
++		server.updateMemory(rr, req)
++		if rr.Code != expected {
++			t.Fatalf("PUT got %d, want %d: %s", rr.Code, expected, rr.Body.String())
++		}
++	}
++	assertRow := func(version int, content string, vector []float32) {
++		t.Helper()
++		var stored sql.NullString
++		var gotContent string
++		var gotVersion int
++		if err := db.QueryRow(`SELECT embedding::text, content, version FROM memories WHERE id=$1 AND namespace_id=$2`, id, scope.NamespaceID).Scan(&stored, &gotContent, &gotVersion); err != nil {
++			t.Fatal(err)
++		}
++		if gotVersion != version || gotContent != content {
++			t.Fatalf("row got version=%d content=%q", gotVersion, gotContent)
++		}
++		if vector == nil {
++			if stored.Valid {
++				t.Fatal("stale vector retained without embedder")
++			}
++			return
++		}
++		if !stored.Valid || stored.String != pgvector.NewVector(vector).String() {
++			t.Fatal("stored vector was cleared or changed")
++		}
++		results, err := repo.VectorSearch(context.Background(), vector, domain.MemoryFilter{}, 10)
++		if err != nil || len(results) != 1 || results[0].ID != id {
++			t.Fatalf("semantic recall after update: %v %v", results, err)
++		}
++	}
++	put(srv, map[string]any{"tags": []string{"updated"}}, 1, false, http.StatusOK)
++	assertRow(2, "original durable fact", original)
++	put(srv, map[string]any{"metadata": map[string]string{"kind": "stable"}}, 2, false, http.StatusOK)
++	assertRow(3, "original durable fact", original)
++	put(srv, map[string]string{"content": "stale overwrite"}, 1, false, http.StatusPreconditionFailed)
++	put(srv, map[string]string{"content": "foreign overwrite"}, 3, true, http.StatusNotFound)
++	assertRow(3, "original durable fact", original)
++	if embedCalls.Load() != 0 {
++		t.Fatal("metadata-only/rejected updates invoked embedding")
++	}
++	put(srv, map[string]string{"content": "replacement durable fact"}, 3, false, http.StatusOK)
++	assertRow(4, "replacement durable fact", replacement)
++	if embedCalls.Load() != 1 {
++		t.Fatal("content update did not embed exactly once")
++	}
++	put(postgresSessionDeleteServer(), map[string]string{"content": "keyword only fact"}, 4, false, http.StatusOK)
++	assertRow(5, "keyword only fact", nil)
++}
+diff --git a/server/internal/repository/postgres/memory.go b/server/internal/repository/postgres/memory.go
+index 62e66f5df5f790f47ea6c11cdf8c3ebb2172f102..41f29c06f9cc503ce041ecdcdee3c3910ee253ee 100644
+--- a/server/internal/repository/postgres/memory.go
++++ b/server/internal/repository/postgres/memory.go
+@@ -865,6 +865,7 @@ func scanMemory(row *sql.Row) (*domain.Memory, error) {
+ 	m.SupersededBy = supersededBy.String
+ 	m.Tags = unmarshalTags(tagsJSON)
+ 	m.Metadata = unmarshalRawJSON(metadataJSON)
++	m.Embedding = parseVec(embeddingStr)
+ 	return &m, nil
+ }
+ 
+@@ -1011,6 +1012,19 @@ func nullJSON(data json.RawMessage) any {
+ 	return []byte(data)
+ }
+ 
++// parseVec preserves client-computed embeddings during GetByID/read-modify-write.
++// Backport of mem9-ai/mem9 PR #470, scoped to the PostgreSQL backend.
++func parseVec(s sql.NullString) []float32 {
++	if !s.Valid || len(s.String) < 2 {
++		return nil
++	}
++	var vector pgvector.Vector
++	if err := vector.Parse(s.String); err != nil {
++		return nil
++	}
++	return vector.Slice()
++}
++
+ // vecToParam converts a float32 slice to a pgvector.Vector for use as a query parameter.
+ func vecToParam(embedding []float32) any {
+ 	if len(embedding) == 0 {
+diff --git a/server/internal/service/memory.go b/server/internal/service/memory.go
+index 26ab214973d401f20234ff1d5ee7f90e07df9de4..9a986800a326b2342e0ff179bcea0e5576cd7153 100644
+--- a/server/internal/service/memory.go
++++ b/server/internal/service/memory.go
+@@ -1084,12 +1084,17 @@ func (s *MemoryService) Update(ctx context.Context, agentName, id, content strin
+ 	}
+ 	current.UpdatedBy = agentName
+ 
+-	if contentChanged && s.autoModel == "" && s.embedder != nil {
+-		embedding, err := s.embedder.Embed(ctx, current.Content)
+-		if err != nil {
+-			return nil, err
++	if contentChanged && s.autoModel == "" {
++		if s.embedder != nil {
++			embedding, err := s.embedder.Embed(ctx, current.Content)
++			if err != nil {
++				return nil, err
++			}
++			current.Embedding = embedding
++		} else {
++			// The old vector no longer describes the new content.
++			current.Embedding = nil
+ 		}
+-		current.Embedding = embedding
+ 	}
+ 
+ 	writeStart := time.Now()

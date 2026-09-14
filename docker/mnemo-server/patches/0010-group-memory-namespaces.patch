@@ -1,5 +1,5 @@
 diff --git a/server/cmd/mnemo-server/main.go b/server/cmd/mnemo-server/main.go
-index 5ff934bc04eb2512229b759c1fbd40dc97c7ce16..3b72bbf04556c605d90d664991645049c26ee3bd 100644
+index 156ec212202616f77bac1eb37bbd320b2a4ae4ef..7f595668ae2ed35bdc35b7b339ae89820b6cc88a 100644
 --- a/server/cmd/mnemo-server/main.go
 +++ b/server/cmd/mnemo-server/main.go
 @@ -2,6 +2,7 @@ package main
@@ -82,7 +82,7 @@ index 5ff934bc04eb2512229b759c1fbd40dc97c7ce16..3b72bbf04556c605d90d664991645049
  
  	// Repositories.
  	tenantRepo := repository.NewTenantRepo(cfg.DBBackend, db)
-@@ -305,10 +332,10 @@ func main() {
+@@ -289,10 +316,10 @@ func main() {
  	var apiKeyMW func(http.Handler) http.Handler
  	if spendLimitAdjuster != nil {
  		tenantMW = middleware.ResolveTenant(tenantRepo, tenantPool, encryptor, cfg.ClusterBlacklist, middleware.WithSpendLimitAdjuster(spendLimitAdjuster, spendLimitCooldown, autoSpendLimitCfg))
@@ -93,17 +93,17 @@ index 5ff934bc04eb2512229b759c1fbd40dc97c7ce16..3b72bbf04556c605d90d664991645049
 -		apiKeyMW = middleware.ResolveApiKey(tenantRepo, tenantPool, encryptor, cfg.ClusterBlacklist, middleware.WithSpaceChainRepo(spaceChainRepo))
 +		apiKeyMW = middleware.ResolveApiKey(tenantRepo, tenantPool, encryptor, cfg.ClusterBlacklist, middleware.WithSpaceChainRepo(spaceChainRepo), middleware.WithNamespaceAuthorizer(namespaceAuthorizer))
  	}
- 	rl := middleware.NewRateLimiter(cfg.RateLimit, cfg.RateBurst)
+ 	rl := middleware.NewRateLimiter(cfg.RateLimit, cfg.RateBurst, cfg.RuntimeUsageInternalSecret)
  	defer rl.Stop()
-@@ -329,6 +356,7 @@ func main() {
- 		WithWebhookService(webhookSvc).
- 		WithActivityTracker(activityTracker).
+@@ -315,6 +342,7 @@ func main() {
  		WithDisableSessionSave(cfg.DisableSessionSave).
+ 		WithAssistantFactExtraction(cfg.FactExtractionIncludeAssistant).
+ 		WithRecallRequestBudget(cfg.RecallRequestTimeout, cfg.RecallResponseReserve).
 +		WithNamespaceRequired(cfg.NamespaceRequired).
  		WithDurableIngest(cfg.DurableIngestEnabled).
  		WithDurableIngestTelemetry(durableTelemetry)
  	router := srv.Router(tenantMW, rateMW, apiKeyMW, middleware.CORS(cfg.CORSAllowedOrigins))
-@@ -356,7 +384,31 @@ func main() {
+@@ -342,7 +370,31 @@ func main() {
  			"",
  			runtimeUsageManager,
  			logger,
@@ -136,7 +136,7 @@ index 5ff934bc04eb2512229b759c1fbd40dc97c7ce16..3b72bbf04556c605d90d664991645049
  		workerConfig := ingestqueue.DefaultWorkerConfig()
  		workerConfig.Enabled = true
  		workerConfig.Telemetry = durableTelemetry
-@@ -387,30 +439,35 @@ func main() {
+@@ -373,31 +425,36 @@ func main() {
  		IdleTimeout:  60 * time.Second,
  	}
  
@@ -158,6 +158,7 @@ index 5ff934bc04eb2512229b759c1fbd40dc97c7ce16..3b72bbf04556c605d90d664991645049
 -		cfg.WorkerConcurrency,
 -		encryptor,
 -		activityTracker,
+-		service.WithAssistantFactExtraction(cfg.FactExtractionIncludeAssistant),
 -	)
 -	go func() {
 -		if err := uploadWorker.Run(workerCtx); err != nil {
@@ -186,6 +187,7 @@ index 5ff934bc04eb2512229b759c1fbd40dc97c7ce16..3b72bbf04556c605d90d664991645049
 +			cfg.WorkerConcurrency,
 +			encryptor,
 +			activityTracker,
++			service.WithAssistantFactExtraction(cfg.FactExtractionIncludeAssistant),
 +		)
 +		go func() {
 +			if err := uploadWorker.Run(workerCtx); err != nil {
@@ -196,7 +198,7 @@ index 5ff934bc04eb2512229b759c1fbd40dc97c7ce16..3b72bbf04556c605d90d664991645049
  
  	// Graceful shutdown.
  	go func() {
-@@ -425,8 +482,12 @@ func main() {
+@@ -412,8 +469,12 @@ func main() {
  		if durableWorkerCancel != nil {
  			durableWorkerCancel()
  		}
@@ -211,7 +213,7 @@ index 5ff934bc04eb2512229b759c1fbd40dc97c7ce16..3b72bbf04556c605d90d664991645049
  
  		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
  		defer cancel()
-@@ -456,6 +517,50 @@ func validateDurableIngestStartup(enabled bool, backend, tenantID string) error
+@@ -465,6 +526,50 @@ func validateDurableIngestStartup(enabled bool, backend, tenantID string) error
  	return nil
  }
  
@@ -264,7 +266,7 @@ index 5ff934bc04eb2512229b759c1fbd40dc97c7ce16..3b72bbf04556c605d90d664991645049
  		return ""
 diff --git a/server/cmd/mnemo-server/namespace_startup_integration_test.go b/server/cmd/mnemo-server/namespace_startup_integration_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..3c218d27de47c49f6d7a36ae1088045de2b57e2a
+index 0000000000000000000000000000000000000000..403fba75dc71d556343b57a0b5be0685031ad111
 --- /dev/null
 +++ b/server/cmd/mnemo-server/namespace_startup_integration_test.go
 @@ -0,0 +1,104 @@
@@ -373,10 +375,10 @@ index 0000000000000000000000000000000000000000..3c218d27de47c49f6d7a36ae1088045d
 +	}
 +}
 diff --git a/server/internal/config/config.go b/server/internal/config/config.go
-index 633477846ad6f807251778107d96228bd76fcfdf..9c0d4c0fb70f5d08d4f902ad4261ea30f02c71bf 100644
+index 7c5081fa4ce4364073f95cc1797010f96b3716ab..0e0a9561bd2ae47e320c91fe94b7c639ed8fe051 100644
 --- a/server/internal/config/config.go
 +++ b/server/internal/config/config.go
-@@ -40,6 +40,9 @@ type Config struct {
+@@ -42,6 +42,9 @@ type Config struct {
  	DurableIngestEnabled     bool
  	DurableIngestTenantID    string
  	DurableIngestMetricStage string
@@ -384,9 +386,9 @@ index 633477846ad6f807251778107d96228bd76fcfdf..9c0d4c0fb70f5d08d4f902ad4261ea30
 +	TransportIssuer          string
 +	TransportSigningKeys     string `json:"-"`
  
- 	// DisableSessionSave skips raw session row persistence for message ingest.
- 	// Smart ingest still extracts and reconciles facts into insight memories.
-@@ -193,6 +196,9 @@ func Load() (*Config, error) {
+ 	// FactExtractionIncludeAssistant allows smart ingest to extract durable facts
+ 	// from assistant turns in addition to user turns. Disabled by default.
+@@ -225,6 +228,9 @@ func Load() (*Config, error) {
  		DurableIngestEnabled:             envBool("MNEMO_DURABLE_INGEST_ENABLED", false),
  		DurableIngestTenantID:            strings.TrimSpace(os.Getenv("MEM9_TENANT_ID")),
  		DurableIngestMetricStage:         strings.TrimSpace(os.Getenv("MNEMO_DURABLE_INGEST_METRIC_STAGE")),
@@ -397,13 +399,13 @@ index 633477846ad6f807251778107d96228bd76fcfdf..9c0d4c0fb70f5d08d4f902ad4261ea30
  		TiDBZeroEnabled:                  envBool("MNEMO_TIDB_ZERO_ENABLED", true),
  		TiDBZeroAPIURL:                   envOr("MNEMO_TIDB_ZERO_API_URL", "https://zero.tidbapi.com/v1alpha1"),
 diff --git a/server/internal/domain/errors.go b/server/internal/domain/errors.go
-index ba459724e9e61cfc444b69518c650ec1b5e498c0..304223229982011984bc30153da607fa60a2f7f0 100644
+index 13ba0e8aae3311b3705d07f1dd87ec2f2d5555a8..f3a5558dafb4300f6772ac5c05c1ae4aa7856d26 100644
 --- a/server/internal/domain/errors.go
 +++ b/server/internal/domain/errors.go
-@@ -11,6 +11,8 @@ var (
- 	ErrNotSupported            = errors.New("not supported")
+@@ -12,6 +12,8 @@ var (
  	ErrAutoVectorSearchSkipped = errors.New("auto vector search skipped")
  	ErrSchemaIncompatible      = errors.New("schema incompatible")
+ 	ErrFTSSearchTruncated      = errors.New("fts search truncated")
 +	ErrNamespaceVectorCapacity = errors.New("namespace_vector_capacity")
 +	ErrNamespaceVectorTimeout  = errors.New("namespace_vector_timeout")
  	// ErrPreconditionFailed reports that a caller-supplied precondition (an
@@ -435,7 +437,7 @@ index 1cb48f4bfb8becdcb77049845a5c760dc7776be8..609e3f3339a51e9fe1be1978e0e1ebac
  	return a != nil && a.Chain != nil
  }
 diff --git a/server/internal/handler/durable_ingest_test.go b/server/internal/handler/durable_ingest_test.go
-index bc2de92ad91f2ea23a949231ae23697a1a0874e7..428e3072c75191d2e8b5e65733278c2355de05cf 100644
+index 37811a2a12e52f99168630373b231620d9b0ce3d..3b1b2d55048571dc89046e56112bdaa8cbdfc06a 100644
 --- a/server/internal/handler/durable_ingest_test.go
 +++ b/server/internal/handler/durable_ingest_test.go
 @@ -33,9 +33,9 @@ func (r *handlerIngestRepo) Enqueue(ctx context.Context, input ingestqueue.Enque
@@ -465,18 +467,18 @@ index bc2de92ad91f2ea23a949231ae23697a1a0874e7..428e3072c75191d2e8b5e65733278c23
  	return req.WithContext(middleware.WithAuthContext(req.Context(), auth))
  }
 diff --git a/server/internal/handler/handler.go b/server/internal/handler/handler.go
-index c7f731a93bb9ff144ddafc926b96c7dc7f9adaf1..ab88c0ffcc87d09cd5ff98d787096151fb5acf16 100644
+index 994f322f494dd389399b87a83229717f56069c16..d203b183cb23482cdad85cd10ecc378993600ceb 100644
 --- a/server/internal/handler/handler.go
 +++ b/server/internal/handler/handler.go
-@@ -51,6 +51,7 @@ type Server struct {
- 	svcCache             sync.Map
- 	chainRecallStopScore float64
- 	disableSessionSave   bool
-+	namespaceRequired    bool
- 	durableIngestEnabled bool
- 	durableTelemetry     ingestqueue.Telemetry
- 	ingestRepoFactory    func(string, *sql.DB) ingestqueue.Repository
-@@ -119,6 +120,11 @@ func (s *Server) WithDisableSessionSave(disabled bool) *Server {
+@@ -57,6 +57,7 @@ type Server struct {
+ 	durableIngestEnabled  bool
+ 	ingestRepoFactory     func(string, *sql.DB) ingestqueue.Repository
+ 	durableTelemetry      ingestqueue.Telemetry
++	namespaceRequired     bool
+ }
+ 
+ // NewServer creates a new HTTP handler server.
+@@ -135,6 +136,11 @@ func (s *Server) WithRecallRequestBudget(timeout, responseReserve time.Duration)
  	return s
  }
  
@@ -488,7 +490,7 @@ index c7f731a93bb9ff144ddafc926b96c7dc7f9adaf1..ab88c0ffcc87d09cd5ff98d787096151
  func (s *Server) WithDurableIngest(enabled bool) *Server {
  	s.durableIngestEnabled = enabled
  	return s
-@@ -141,14 +147,20 @@ type tenantSvcKey string
+@@ -157,14 +163,20 @@ type tenantSvcKey string
  
  // resolveServices returns the correct services for a request.
  func (s *Server) resolveServices(auth *domain.AuthInfo) resolvedSvc {
@@ -509,10 +511,10 @@ index c7f731a93bb9ff144ddafc926b96c7dc7f9adaf1..ab88c0ffcc87d09cd5ff98d787096151
 -		sessRepo := repository.NewSessionRepo(s.dbBackend, auth.TenantDB, s.autoModel, s.ftsEnabled, auth.ClusterID)
 +		memRepo := repository.NewMemoryRepo(s.dbBackend, auth.TenantDB, s.autoModel, s.ftsEnabled, auth.ClusterID, scopes...)
 +		sessRepo := repository.NewSessionRepo(s.dbBackend, auth.TenantDB, s.autoModel, s.ftsEnabled, auth.ClusterID, scopes...)
+ 		ingestOption := service.WithAssistantFactExtraction(s.includeAssistantFacts)
  		svc := resolvedSvc{
- 			memory:  service.NewMemoryService(memRepo, s.llmClient, s.embedder, s.autoModel, s.ingestMode),
- 			ingest:  service.NewIngestService(memRepo, s.llmClient, s.embedder, s.autoModel, s.ingestMode),
-@@ -160,13 +172,13 @@ func (s *Server) resolveServices(auth *domain.AuthInfo) resolvedSvc {
+ 			memory:  service.NewMemoryService(memRepo, s.llmClient, s.embedder, s.autoModel, s.ingestMode, ingestOption),
+@@ -177,13 +189,13 @@ func (s *Server) resolveServices(auth *domain.AuthInfo) resolvedSvc {
  		actual, _ := s.svcCache.LoadOrStore(key, svc)
  		return actual.(resolvedSvc)
  	}
@@ -526,10 +528,10 @@ index c7f731a93bb9ff144ddafc926b96c7dc7f9adaf1..ab88c0ffcc87d09cd5ff98d787096151
 -	sessRepo := repository.NewSessionRepo(s.dbBackend, auth.TenantDB, s.autoModel, s.ftsEnabled, auth.ClusterID)
 +	memRepo := repository.NewMemoryRepo(s.dbBackend, auth.TenantDB, s.autoModel, s.ftsEnabled, auth.ClusterID, scopes...)
 +	sessRepo := repository.NewSessionRepo(s.dbBackend, auth.TenantDB, s.autoModel, s.ftsEnabled, auth.ClusterID, scopes...)
+ 	ingestOption := service.WithAssistantFactExtraction(s.includeAssistantFacts)
  	svc := resolvedSvc{
- 		memory:  service.NewMemoryService(memRepo, s.llmClient, s.embedder, s.autoModel, s.ingestMode),
- 		ingest:  service.NewIngestService(memRepo, s.llmClient, s.embedder, s.autoModel, s.ingestMode),
-@@ -230,54 +242,47 @@ func (s *Server) Router(
+ 		memory:  service.NewMemoryService(memRepo, s.llmClient, s.embedder, s.autoModel, s.ingestMode, ingestOption),
+@@ -248,54 +260,47 @@ func (s *Server) Router(
  
  	r.Get("/metrics", promhttp.Handler().ServeHTTP)
  
@@ -624,7 +626,7 @@ index c7f731a93bb9ff144ddafc926b96c7dc7f9adaf1..ab88c0ffcc87d09cd5ff98d787096151
  
  	r.Route("/v1alpha2/mem9s", func(r chi.Router) {
  		r.Use(apiKeyMW)
-@@ -288,27 +293,30 @@ func (s *Server) Router(
+@@ -306,27 +311,30 @@ func (s *Server) Router(
  		r.Put("/memories/{id}", s.updateMemory)
  		r.Delete("/memories/{id}", s.deleteMemory)
  		r.Post("/memories/batch-delete", s.batchDeleteMemories)
@@ -670,17 +672,17 @@ index c7f731a93bb9ff144ddafc926b96c7dc7f9adaf1..ab88c0ffcc87d09cd5ff98d787096151
  	})
  
  	return r
-@@ -352,6 +360,10 @@ func (s *Server) handleError(ctx context.Context, w http.ResponseWriter, err err
- 		respondError(w, http.StatusNotImplemented, err.Error())
+@@ -392,6 +400,10 @@ func (s *Server) handleError(ctx context.Context, w http.ResponseWriter, err err
+ 		return respondError(w, http.StatusNotImplemented, err.Error())
  	case errors.Is(err, domain.ErrSchemaIncompatible):
- 		respondError(w, http.StatusConflict, err.Error())
+ 		return respondError(w, http.StatusConflict, err.Error())
 +	case errors.Is(err, domain.ErrNamespaceVectorCapacity):
-+		respondError(w, http.StatusUnprocessableEntity, "namespace_vector_capacity")
++		return respondError(w, http.StatusUnprocessableEntity, "namespace_vector_capacity")
 +	case errors.Is(err, domain.ErrNamespaceVectorTimeout):
-+		respondError(w, http.StatusServiceUnavailable, "namespace_vector_timeout")
++		return respondError(w, http.StatusServiceUnavailable, "namespace_vector_timeout")
  	default:
- 		s.logger.Error("internal error", "err", err, "request_id", reqid.FromContext(ctx))
- 		respondError(w, http.StatusInternalServerError, "internal server error")
+ 		classification := classifyInternalError(err)
+ 		status := http.StatusInternalServerError
 diff --git a/server/internal/handler/ingest_job_status.go b/server/internal/handler/ingest_job_status.go
 index 49339ad25e0597aaea1c48900f2460e3e9da4575..0c55e447da32802656874ef643507c5f315e74e7 100644
 --- a/server/internal/handler/ingest_job_status.go
@@ -699,10 +701,10 @@ index 49339ad25e0597aaea1c48900f2460e3e9da4575..0c55e447da32802656874ef643507c5f
  		if !errors.Is(err, sql.ErrNoRows) {
  			s.logger.Warn("ingest job status lookup failed", "operation", "status")
 diff --git a/server/internal/handler/memory.go b/server/internal/handler/memory.go
-index a86a60a0304f3917e1b8980e33e216d5d9701eef..13cf3337b003b84dcfb5d01f8635bb5a6b9ae342 100644
+index e0ce9346616d941bacd8e484a9b2662a9853aee1..14b19b0264cdbb09fbd0c24ef51e9346c67832fc 100644
 --- a/server/internal/handler/memory.go
 +++ b/server/internal/handler/memory.go
-@@ -553,6 +553,20 @@ func (s *Server) enqueueDurableIngest(
+@@ -539,6 +539,20 @@ func (s *Server) enqueueDurableIngest(
  		Messages:           messages,
  		Metadata:           req.Metadata,
  	})
@@ -723,7 +725,7 @@ index a86a60a0304f3917e1b8980e33e216d5d9701eef..13cf3337b003b84dcfb5d01f8635bb5a
  	if err != nil {
  		if errors.Is(err, ingestqueue.ErrCanonicalPayloadTooLarge) {
  			return nil, &domain.ValidationError{
-@@ -577,6 +591,10 @@ func (s *Server) enqueueDurableIngest(
+@@ -563,6 +577,10 @@ func (s *Server) enqueueDurableIngest(
  		Mode:               string(mode),
  		DisableSessionSave: req.DisableSessionSave,
  	}
@@ -1058,7 +1060,7 @@ index b64d6b340c7b380e5436b92487bb2afc81619919..da3484a8b569c20b2af53cfe7d84926d
  			}
 diff --git a/server/internal/middleware/namespace_auth.go b/server/internal/middleware/namespace_auth.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..5f9086051b796ea9e253f7ec69fe524bc768f6e8
+index 0000000000000000000000000000000000000000..7d7a4fc312d1aa7e6fbba0c70cd69a8af4942d8d
 --- /dev/null
 +++ b/server/internal/middleware/namespace_auth.go
 @@ -0,0 +1,456 @@
@@ -1520,7 +1522,7 @@ index 0000000000000000000000000000000000000000..5f9086051b796ea9e253f7ec69fe524b
 +}
 diff --git a/server/internal/middleware/namespace_auth_test.go b/server/internal/middleware/namespace_auth_test.go
 new file mode 100644
-index 0000000000000000000000000000000000000000..fa6131f9ef929332ed0f8f26969c421f5518f9ff
+index 0000000000000000000000000000000000000000..5f5b19640c14ebbf778da9cee6cdafd4091c7f35
 --- /dev/null
 +++ b/server/internal/middleware/namespace_auth_test.go
 @@ -0,0 +1,309 @@
@@ -3200,7 +3202,7 @@ index 9212eb5327da12d8d4f8ab71855786f6b730a787..6f6251f83e5d474ec77cf4c56770e42b
  			AttemptGeneration: claimed.AttemptCount,
  			Actions: []ingestqueue.MemoryAction{
 diff --git a/server/internal/repository/postgres/memory.go b/server/internal/repository/postgres/memory.go
-index 883bb626a2816d8ac693cfe032240404786e8b68..932946e155cbff7271129791d69e8d41ebbdd0cb 100644
+index 8bfb13095f28fff3ea83299c47cf609f682f2fa5..62e66f5df5f790f47ea6c11cdf8c3ebb2172f102 100644
 --- a/server/internal/repository/postgres/memory.go
 +++ b/server/internal/repository/postgres/memory.go
 @@ -4,24 +4,38 @@ import (
@@ -3481,7 +3483,7 @@ index 883bb626a2816d8ac693cfe032240404786e8b68..932946e155cbff7271129791d69e8d41
  	result, err := r.db.ExecContext(ctx,
  		`UPDATE memories SET state = $1, updated_at = NOW() WHERE id = $2 AND state = 'active'`,
  		string(state), id,
-@@ -279,9 +399,13 @@ func memoryListOrderBy(f domain.MemoryFilter) string {
+@@ -283,9 +403,13 @@ func memoryListOrderBy(f domain.MemoryFilter) string {
  
  func (r *MemoryRepo) Count(ctx context.Context) (int, error) {
  	var count int
@@ -3498,7 +3500,7 @@ index 883bb626a2816d8ac693cfe032240404786e8b68..932946e155cbff7271129791d69e8d41
  	if err != nil {
  		slog.Error("count memories failed", "cluster_id", r.clusterID, "err", err)
  		return 0, fmt.Errorf("count memories: %w", err)
-@@ -293,10 +417,15 @@ func (r *MemoryRepo) ListBootstrap(ctx context.Context, limit int) ([]domain.Mem
+@@ -297,10 +421,15 @@ func (r *MemoryRepo) ListBootstrap(ctx context.Context, limit int) ([]domain.Mem
  	if limit <= 0 || limit > 100 {
  		limit = 20
  	}
@@ -3518,7 +3520,7 @@ index 883bb626a2816d8ac693cfe032240404786e8b68..932946e155cbff7271129791d69e8d41
  	if err != nil {
  		slog.Error("list bootstrap failed", "cluster_id", r.clusterID, "err", err)
  		return nil, fmt.Errorf("list bootstrap: %w", err)
-@@ -327,13 +456,30 @@ func (r *MemoryRepo) BulkCreate(ctx context.Context, memories []*domain.Memory)
+@@ -331,13 +460,30 @@ func (r *MemoryRepo) BulkCreate(ctx context.Context, memories []*domain.Memory)
  		if memoryType == "" {
  			memoryType = string(domain.TypePinned)
  		}
@@ -3556,7 +3558,7 @@ index 883bb626a2816d8ac693cfe032240404786e8b68..932946e155cbff7271129791d69e8d41
  		if execErr != nil {
  			if isDuplicateKey(execErr) {
  				return fmt.Errorf("bulk insert memory %s: %w", m.ID, domain.ErrDuplicateKey)
-@@ -352,6 +498,15 @@ func (r *MemoryRepo) VectorSearch(ctx context.Context, queryVec []float32, f dom
+@@ -356,6 +502,15 @@ func (r *MemoryRepo) VectorSearch(ctx context.Context, queryVec []float32, f dom
  
  	conds, args := r.BuildFilterConds(f)
  	conds = append(conds, "embedding IS NOT NULL")
@@ -3572,7 +3574,7 @@ index 883bb626a2816d8ac693cfe032240404786e8b68..932946e155cbff7271129791d69e8d41
  
  	// The query vector is the next parameter
  	vecParamIdx := len(args) + 1
-@@ -387,6 +542,135 @@ func (r *MemoryRepo) VectorSearch(ctx context.Context, queryVec []float32, f dom
+@@ -391,6 +546,135 @@ func (r *MemoryRepo) VectorSearch(ctx context.Context, queryVec []float32, f dom
  	return memories, rows.Err()
  }
  
@@ -3708,7 +3710,7 @@ index 883bb626a2816d8ac693cfe032240404786e8b68..932946e155cbff7271129791d69e8d41
  // AutoVectorSearch is not supported with PostgreSQL (TiDB-specific feature).
  // It falls back to returning nil — callers should use VectorSearch with pre-computed embeddings.
  func (r *MemoryRepo) AutoVectorSearch(ctx context.Context, queryText string, f domain.MemoryFilter, limit int) ([]domain.Memory, error) {
-@@ -476,6 +760,11 @@ func (r *MemoryRepo) BuildFilterConds(f domain.MemoryFilter) ([]string, []any) {
+@@ -480,6 +764,11 @@ func (r *MemoryRepo) BuildFilterConds(f domain.MemoryFilter) ([]string, []any) {
  	conds := []string{}
  	args := []any{}
  	paramIdx := 1
@@ -3720,7 +3722,7 @@ index 883bb626a2816d8ac693cfe032240404786e8b68..932946e155cbff7271129791d69e8d41
  
  	if f.State == "all" {
  		// no state filter
-@@ -739,10 +1028,14 @@ func (r *MemoryRepo) NearDupSearch(_ context.Context, _ string, _ domain.MemoryF
+@@ -743,10 +1032,14 @@ func (r *MemoryRepo) NearDupSearch(_ context.Context, _ string, _ domain.MemoryF
  }
  
  func (r *MemoryRepo) CountStats(ctx context.Context) (total int64, last7d int64, err error) {
@@ -4411,28 +4413,28 @@ index 972cbbfa5e8666eebdfd8db79e2f2a63c49830f4..5141891af0c01eacabe5fad46aa46491
  			)
  			if err != nil {
 diff --git a/server/internal/service/ingest.go b/server/internal/service/ingest.go
-index 76ea4de9f07aee29d710a7c3df554030d32009bd..76cf67e783ec689a789fb59f766f884945358757 100644
+index 99fd6e2a5c0d346078f4268e828428a4b4dbb83e..1410e1a073f1f0008a66b63dae4aef5d479a22ad 100644
 --- a/server/internal/service/ingest.go
 +++ b/server/internal/service/ingest.go
-@@ -1359,6 +1359,7 @@ type factSearchResult struct {
- 	attempts   int
+@@ -1582,6 +1582,7 @@ type factSearchResult struct {
  	candidates []existingMemoryCandidate
+ 	fatalErr   error
  	successes  int
 +	fatal      error
  }
  
  // gatherExistingMemories searches relevant memories for each fact, deduplicates
-@@ -1427,6 +1428,9 @@ func (s *IngestService) gatherExistingMemories(ctx context.Context, agentID, app
- 
- 	var searchAttempts, searchSuccesses int
- 	for _, searchResult := range searchResults {
+@@ -1653,6 +1654,9 @@ func (s *IngestService) gatherExistingMemories(ctx context.Context, agentID, app
+ 		if searchResult.fatalErr != nil {
+ 			return nil, fmt.Errorf("existing memory FTS search incomplete: %w", searchResult.fatalErr)
+ 		}
 +		if searchResult.fatal != nil {
 +			return nil, searchResult.fatal
 +		}
  		searchAttempts += searchResult.attempts
  		searchSuccesses += searchResult.successes
  		addUnseen(searchResult.candidates)
-@@ -1508,6 +1512,11 @@ func (s *IngestService) searchExistingMemoriesForFact(
+@@ -1737,6 +1741,11 @@ func (s *IngestService) searchExistingMemoriesForFact(
  			var vecErr error
  			vecMatches, vecErr = s.memories.VectorSearch(ctx, vec, filter, perFactLimit)
  			if vecErr != nil {

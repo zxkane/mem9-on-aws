@@ -1,8 +1,10 @@
 diff --git a/server/internal/ingestqueue/plan.go b/server/internal/ingestqueue/plan.go
-index f3621ec..8142086 100644
+index f3621ec579011e5e4043d0f77cc3d6a2659f8d66..81420867ab19bf488e5915fa9c4aed1b435bc02d 100644
 --- a/server/internal/ingestqueue/plan.go
 +++ b/server/internal/ingestqueue/plan.go
-@@ -29,2 +29,15 @@ func FinalizePlan(input AtomicPlan) (AtomicPlan, error) {
+@@ -27,6 +27,19 @@ func FinalizePlan(input AtomicPlan) (AtomicPlan, error) {
+ 	if plan.TruncatedFactCount < 0 || plan.WarningCount < 0 {
+ 		return AtomicPlan{}, fmt.Errorf("%w: warning counters must not be negative", ErrPlanInvalid)
  	}
 +	if plan.PrescreenPolicyVersion == "" {
 +		if plan.PrescreenWouldSkip {
@@ -18,11 +20,15 @@ index f3621ec..8142086 100644
 +		)
 +	}
  
+ 	sort.SliceStable(plan.Sessions, func(i, j int) bool {
+ 		left, right := plan.Sessions[i], plan.Sessions[j]
 diff --git a/server/internal/ingestqueue/plan_test.go b/server/internal/ingestqueue/plan_test.go
-index e7b3c7f..9ceac23 100644
+index e7b3c7ff5ff2ec91f24f0c5e77d0829d39e6bc8c..9ceac2367923705d62bff19d8213deb6029d7d89 100644
 --- a/server/internal/ingestqueue/plan_test.go
 +++ b/server/internal/ingestqueue/plan_test.go
-@@ -197,2 +197,43 @@ func TestFinalizePlanOmitsFalseZeroFactForExistingPlanHashes(t *testing.T) {
+@@ -195,6 +195,47 @@ func TestFinalizePlanOmitsFalseZeroFactForExistingPlanHashes(t *testing.T) {
+ 	}
+ }
  
 +func TestFinalizePlanValidatesAndHashesPrescreenDecision(t *testing.T) {
 +	base := AtomicPlan{
@@ -66,9 +72,11 @@ index e7b3c7f..9ceac23 100644
 +}
 +
  func TestFinalizePlanUsesEveryMaterializedFieldAsActionTieBreaker(t *testing.T) {
+ 	base := AtomicPlan{
+ 		JobID:             "00000000-0000-4000-8000-000000000054",
 diff --git a/server/internal/ingestqueue/prescreen.go b/server/internal/ingestqueue/prescreen.go
 new file mode 100644
-index 0000000..b369852
+index 0000000000000000000000000000000000000000..b3698527edad32511846fd2373439949dcaf7484
 --- /dev/null
 +++ b/server/internal/ingestqueue/prescreen.go
 @@ -0,0 +1,35 @@
@@ -109,7 +117,7 @@ index 0000000..b369852
 +}
 diff --git a/server/internal/ingestqueue/prescreen_test.go b/server/internal/ingestqueue/prescreen_test.go
 new file mode 100644
-index 0000000..a160966
+index 0000000000000000000000000000000000000000..a160966b8d03cac073403740e2e3ad6fed863d4d
 --- /dev/null
 +++ b/server/internal/ingestqueue/prescreen_test.go
 @@ -0,0 +1,78 @@
@@ -192,14 +200,20 @@ index 0000000..a160966
 +	}
 +}
 diff --git a/server/internal/ingestqueue/telemetry.go b/server/internal/ingestqueue/telemetry.go
-index a5a9c89..5773b94 100644
+index a5a9c89eaa227b742392d936aad488c99c24a4ce..5773b94dfab97e5d24738b328136442b02cd5332 100644
 --- a/server/internal/ingestqueue/telemetry.go
 +++ b/server/internal/ingestqueue/telemetry.go
-@@ -14,2 +14,3 @@ type Telemetry interface {
+@@ -12,6 +12,7 @@ const DurableMetricNamespace = "mem9-on-aws/DurableIngest"
+ type Telemetry interface {
+ 	Accepted()
  	Result(ResultMetrics)
 +	Prescreen(PrescreenMetrics)
  	SamplerHeartbeat()
-@@ -32,2 +33,8 @@ type ResultMetrics struct {
+ 	QueueAge(time.Duration)
+ }
+@@ -30,6 +31,12 @@ type ResultMetrics struct {
+ 	ZeroFactSuccess    bool
+ }
  
 +type PrescreenMetrics struct {
 +	PolicyVersion string
@@ -208,14 +222,22 @@ index a5a9c89..5773b94 100644
 +}
 +
  type emfTelemetry struct {
-@@ -74,2 +81,6 @@ type emfEnvelope struct {
+ 	stage  string
+ 	output io.Writer
+@@ -72,6 +79,10 @@ type emfEnvelope struct {
+ 	Warnings                          *int        `json:"Warnings,omitempty"`
+ 	TruncatedFacts                    *int        `json:"TruncatedFacts,omitempty"`
  	ZeroFactSuccess                   *int        `json:"ZeroFactSuccess,omitempty"`
 +	PolicyVersion                     string      `json:"policy_version,omitempty"`
 +	PrescreenEvaluated                *int        `json:"PrescreenEvaluated,omitempty"`
 +	PrescreenWouldSkip                *int        `json:"PrescreenWouldSkip,omitempty"`
 +	PrescreenFalseSkip                *int        `json:"PrescreenFalseSkip,omitempty"`
  	SamplerHeartbeat                  *int        `json:"SamplerHeartbeat,omitempty"`
-@@ -210,2 +221,22 @@ func (t *emfTelemetry) Result(metrics ResultMetrics) {
+ 	OldestQueuedAgeMs                 *int64      `json:"OldestQueuedAgeMs,omitempty"`
+ }
+@@ -208,6 +219,26 @@ func (t *emfTelemetry) Result(metrics ResultMetrics) {
+ 	t.write(record, directives)
+ }
  
 +func (t *emfTelemetry) Prescreen(metrics PrescreenMetrics) {
 +	t.write(
@@ -238,7 +260,11 @@ index a5a9c89..5773b94 100644
 +}
 +
  func (t *emfTelemetry) SamplerHeartbeat() {
-@@ -283,2 +314,9 @@ func boundedErrorClass(class string) string {
+ 	t.write(
+ 		emfEnvelope{
+@@ -281,6 +312,13 @@ func boundedErrorClass(class string) string {
+ 	return "other"
+ }
  
 +func boundedPrescreenPolicyVersion(version string) string {
 +	if knownPrescreenPolicyVersion(version) {
@@ -248,16 +274,24 @@ index a5a9c89..5773b94 100644
 +}
 +
  func durationMilliseconds(duration time.Duration) int64 {
+ 	if duration < 0 {
+ 		return 0
 diff --git a/server/internal/ingestqueue/telemetry_test.go b/server/internal/ingestqueue/telemetry_test.go
-index 8bf0f1f..e15fc06 100644
+index 8bf0f1fd4c4f4290cc740c8ca436b3eff23fa21f..e15fc06c66e08ddb0bce70fc2e4daa8a497cefba 100644
 --- a/server/internal/ingestqueue/telemetry_test.go
 +++ b/server/internal/ingestqueue/telemetry_test.go
-@@ -48,3 +48,3 @@ func assertBoundedMetricDimensions(t *testing.T, records []map[string]any) {
+@@ -46,7 +46,7 @@ func assertBoundedMetricDimensions(t *testing.T, records []map[string]any) {
+ 				for _, rawName := range rawDimensions.([]any) {
+ 					name := rawName.(string)
  					switch name {
 -					case "stage", "result_class", "error_class":
 +					case "stage", "result_class", "error_class", "policy_version":
  					default:
-@@ -288,2 +288,64 @@ func TestEMFTelemetryTerminalFailureClassification(t *testing.T) {
+ 						t.Fatalf("unbounded dimension %q in %#v", name, directive)
+ 					}
+@@ -286,6 +286,68 @@ func TestEMFTelemetryTerminalFailureClassification(t *testing.T) {
+ 	}
+ }
  
 +func TestEMFTelemetryPrescreenCountersAndFalseSkipClassification(t *testing.T) {
 +	var output bytes.Buffer
@@ -322,27 +356,43 @@ index 8bf0f1f..e15fc06 100644
 +}
 +
  func TestEMFTelemetrySchemaContainsNoHighCardinalityFields(t *testing.T) {
-@@ -303,2 +365,6 @@ func TestEMFTelemetrySchemaContainsNoHighCardinalityFields(t *testing.T) {
+ 	var output bytes.Buffer
+ 	telemetry := NewEMFTelemetry("prod", &output, nil)
+@@ -301,6 +363,10 @@ func TestEMFTelemetrySchemaContainsNoHighCardinalityFields(t *testing.T) {
+ 		ResultClass: string(StateDead),
+ 		ErrorClass:  "deadline",
  	})
 +	telemetry.Prescreen(PrescreenMetrics{
 +		PolicyVersion: "PRIVATE-IDENTIFIER-HASH-LENGTH-LEXICAL",
 +		WouldSkip:     true,
 +	})
  	telemetry.SamplerHeartbeat()
-@@ -311,2 +377,3 @@ func TestEMFTelemetrySchemaContainsNoHighCardinalityFields(t *testing.T) {
+ 	telemetry.QueueAge(time.Minute)
+ 	assertBoundedMetricDimensions(t, telemetryRecords(t, output.String()))
+@@ -309,6 +375,7 @@ func TestEMFTelemetrySchemaContainsNoHighCardinalityFields(t *testing.T) {
+ 	for _, forbidden := range []string{
+ 		"tenant", "agent", "app_id", "session", "job_id", "request",
  		"payload", "hash", "message", "fact_content", "embedding",
 +		"identifier", "length", "lexical", "private",
  	} {
+ 		if strings.Contains(serialized, forbidden) {
+ 			t.Fatalf("EMF contains forbidden field %q: %s", forbidden, serialized)
 diff --git a/server/internal/ingestqueue/types.go b/server/internal/ingestqueue/types.go
-index 93434f7..a999ca1 100644
+index 93434f7bbba6f3aa8c7a5a3402fef4bb7e52aba4..a999ca1304e3c014d7966f92cd56af34e9d79458 100644
 --- a/server/internal/ingestqueue/types.go
 +++ b/server/internal/ingestqueue/types.go
-@@ -137,2 +137,4 @@ type Job struct {
+@@ -135,6 +135,8 @@ type Job struct {
+ 	CreatedAt                   time.Time
+ 	UpdatedAt                   time.Time
  	CompletedAt                 *time.Time
 +	PrescreenPolicyVersion      string
 +	PrescreenWouldSkip          bool
  }
-@@ -244,15 +246,17 @@ type MemoryAction struct {
+ 
+ type LeaseRef struct {
+@@ -242,19 +244,21 @@ type MemoryAction struct {
+ }
+ 
  type AtomicPlan struct {
 -	Version            string            `json:"version"`
 -	JobID              string            `json:"job_id"`
@@ -373,11 +423,15 @@ index 93434f7..a999ca1 100644
 +	PrescreenWouldSkip     bool              `json:"prescreen_would_skip,omitempty"`
 +	Hash                   string            `json:"plan_hash,omitempty"`
  }
+ 
+ type ApplyResult struct {
 diff --git a/server/internal/ingestqueue/worker.go b/server/internal/ingestqueue/worker.go
-index 357898b..74f9889 100644
+index 357898bd838d91934eff9ba3bc1c34524fcf069b..74f98896b333bc1fcb758b62c67f92d34161b724 100644
 --- a/server/internal/ingestqueue/worker.go
 +++ b/server/internal/ingestqueue/worker.go
-@@ -327,2 +327,8 @@ func (w *Worker) process(ctx context.Context, job *Job) {
+@@ -325,6 +325,12 @@ func (w *Worker) process(ctx context.Context, job *Job) {
+ 				failPlanning(err)
+ 				return
  			}
 +			job.PrescreenPolicyVersion = ""
 +			job.PrescreenWouldSkip = false
@@ -386,7 +440,11 @@ index 357898b..74f9889 100644
 +				job.PrescreenWouldSkip = decision.WouldSkip
 +			}
  			built, err := w.processor.Plan(jobCtx, job, revision)
-@@ -610,2 +616,11 @@ func (w *Worker) emitResult(
+ 			if err != nil {
+ 				failPlanning(err)
+@@ -608,6 +614,15 @@ func (w *Worker) emitResult(
+ 		metrics.ZeroFactSuccess = plan.ZeroFact
+ 	}
  	w.config.Telemetry.Result(metrics)
 +	if state == StateSucceeded &&
 +		plan != nil &&
@@ -398,11 +456,15 @@ index 357898b..74f9889 100644
 +		})
 +	}
  }
+ 
+ func (w *Worker) emitClaimedTerminal(job *Job) {
 diff --git a/server/internal/ingestqueue/worker_test.go b/server/internal/ingestqueue/worker_test.go
-index 7b52ae3..b8e1f4c 100644
+index 7b52ae3be8af181f9e9414a9594d82ea62b8331f..b8e1f4cf0720e4d6279a87a318d0c6e257930d05 100644
 --- a/server/internal/ingestqueue/worker_test.go
 +++ b/server/internal/ingestqueue/worker_test.go
-@@ -872,2 +872,156 @@ func TestWorkerKeepsPlanAndPostCommitOutsideApplyTransaction(t *testing.T) {
+@@ -870,6 +870,160 @@ func TestWorkerKeepsPlanAndPostCommitOutsideApplyTransaction(t *testing.T) {
+ 	}
+ }
  
 +func TestWorkerPrescreenDecisionsRemainPassThrough(t *testing.T) {
 +	for _, tc := range []struct {
@@ -559,7 +621,11 @@ index 7b52ae3..b8e1f4c 100644
 +}
 +
  func TestWorkerReusesPersistedPlanAfterRecovery(t *testing.T) {
-@@ -880,7 +1034,9 @@ func TestWorkerReusesPersistedPlanAfterRecovery(t *testing.T) {
+ 	job := &Job{
+ 		ID:           "job-recovered",
+@@ -878,11 +1032,13 @@ func TestWorkerReusesPersistedPlanAfterRecovery(t *testing.T) {
+ 		AttemptCount: 2,
+ 	}
  	persisted, err := FinalizePlan(AtomicPlan{
 -		JobID:             job.ID,
 -		TenantID:          job.TenantID,
@@ -574,35 +640,51 @@ index 7b52ae3..b8e1f4c 100644
 +		PrescreenPolicyVersion: PrescreenPolicyMessageCountV1,
 +		PrescreenWouldSkip:     true,
  	})
-@@ -917,2 +1073,5 @@ func TestWorkerReusesPersistedPlanAfterRecovery(t *testing.T) {
+ 	if err != nil {
+ 		t.Fatal(err)
+@@ -915,12 +1071,15 @@ func TestWorkerReusesPersistedPlanAfterRecovery(t *testing.T) {
+ 			return AtomicPlan{}, errors.New("recovery must not replan")
+ 		},
  	}
 +	var output bytes.Buffer
 +	cfg := DefaultWorkerConfig()
 +	cfg.Telemetry = NewEMFTelemetry("prod", &output, nil)
  	NewWorker(
-@@ -922,3 +1081,3 @@ func TestWorkerReusesPersistedPlanAfterRecovery(t *testing.T) {
+ 		repo,
+ 		processor,
+ 		job.TenantID,
  		job.LeaseOwner,
 -		DefaultWorkerConfig(),
 +		cfg,
  		slog.New(slog.NewTextHandler(io.Discard, nil)),
-@@ -933,2 +1092,5 @@ func TestWorkerReusesPersistedPlanAfterRecovery(t *testing.T) {
+ 	).process(context.Background(), job)
+ 	if planCalls.Load() != 0 || resumeCalls.Load() != 1 || applyCalls.Load() != 1 {
+@@ -931,6 +1090,9 @@ func TestWorkerReusesPersistedPlanAfterRecovery(t *testing.T) {
+ 			applyCalls.Load(),
+ 		)
  	}
 +	if !strings.Contains(output.String(), `"PrescreenFalseSkip":1`) {
 +		t.Fatalf("persisted pre-screen decision was not emitted: %s", output.String())
 +	}
  }
+ 
+ func TestWorkerCapsConflictReplanningAtThreeRevisions(t *testing.T) {
 diff --git a/server/internal/service/durable_ingest.go b/server/internal/service/durable_ingest.go
-index 6316855..2b452c4 100644
+index 631685506935174613eab67f3cc689aed92b51a5..2b452c48f44aee0c078fe7072bd4ad3ebb2eabbf 100644
 --- a/server/internal/service/durable_ingest.go
 +++ b/server/internal/service/durable_ingest.go
-@@ -234,2 +234,4 @@ func (p *DurableProcessor) Plan(
+@@ -232,6 +232,8 @@ func (p *DurableProcessor) Plan(
+ 			Message: fmt.Sprintf("unsupported mode %q", mode),
+ 		}
  	}
 +	plan.PrescreenPolicyVersion = job.PrescreenPolicyVersion
 +	plan.PrescreenWouldSkip = job.PrescreenWouldSkip
  
+ 	phase1, err := p.ingest.ExtractPhase1(ctx, messages)
+ 	if err != nil {
 diff --git a/server/internal/service/durable_ingest_prescreen_integration_test.go b/server/internal/service/durable_ingest_prescreen_integration_test.go
 new file mode 100644
-index 0000000..972cbbf
+index 0000000000000000000000000000000000000000..972cbbfa5e8666eebdfd8db79e2f2a63c49830f4
 --- /dev/null
 +++ b/server/internal/service/durable_ingest_prescreen_integration_test.go
 @@ -0,0 +1,242 @@
@@ -849,10 +931,12 @@ index 0000000..972cbbf
 +	}
 +}
 diff --git a/server/internal/service/durable_ingest_test.go b/server/internal/service/durable_ingest_test.go
-index 330ac91..75d4521 100644
+index 330ac91a1a0e22687d7dccc7acd7632ceb05d3fb..75d4521ffdb144ef4d495ade360738711f076526 100644
 --- a/server/internal/service/durable_ingest_test.go
 +++ b/server/internal/service/durable_ingest_test.go
-@@ -225,2 +225,136 @@ func TestDurableProcessorDoesNotMarkNonzeroFactNoopAsZeroFact(t *testing.T) {
+@@ -223,6 +223,140 @@ func TestDurableProcessorDoesNotMarkNonzeroFactNoopAsZeroFact(t *testing.T) {
+ 	}
+ }
  
 +func TestDurableProcessorPrescreenStillInvokesExtraction(t *testing.T) {
 +	for _, tc := range []struct {
@@ -989,3 +1073,5 @@ index 330ac91..75d4521 100644
 +}
 +
  func TestDurableProcessorMaterializesEmbeddingInPlan(t *testing.T) {
+ 	embedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+ 		w.Header().Set("Content-Type", "application/json")

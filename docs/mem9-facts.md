@@ -2,7 +2,7 @@
 
 Probed directly from the `mem9-ai/mem9` source (server is Go, under `server/`).
 Unless a different date is stated, source-level observations are **empirical
-against the pinned upstream commit and were rechecked 2026-07-24**. These are the
+against upstream `5af03a6` plus the downstream patches and were rechecked 2026-09-14**. These are the
 facts the current runtime in [`ARCHITECTURE.md`](ARCHITECTURE.md) relies on.
 Re-verify them whenever the pinned commit changes.
 
@@ -10,9 +10,9 @@ Re-verify them whenever the pinned commit changes.
 
 - Repo: `mem9-ai/mem9`. Server binary: `mnemo-server` (Go, `server/cmd/mnemo-server`).
 - License: **Apache-2.0** (self-host, modify, commercial — all allowed).
-- SaaS (`api.mem9.ai`) and self-host run the **same server code**; migration
-  between them is a base-URL + DSN change (no lock-in). SaaS billing (for
-  reference): per Add/Retrieve request, Free = 13k add + 1.3k retrieval/mo.
+- This deployment builds upstream source with downstream durability and namespace
+  extensions. Its data remains in the operator-owned PostgreSQL database; hosted
+  SaaS is not part of the request path.
 
 ## Runtime shape
 
@@ -24,7 +24,7 @@ Re-verify them whenever the pinned commit changes.
 - Endpoints: `POST/GET/GET{id}/PUT{id}/DELETE{id} /v1alpha2/mem9s/memories`,
   batch-delete, `/imports`, `/session-messages`, `/status`, webhooks, space-chains.
 - **Unauthenticated health/liveness (registered BEFORE the auth middleware,
-  verified handler.go:205 @ pinned SHA):** `GET /healthz` → 200 `{"status":"ok"}`
+  verified in `handler.go` at the current pin):** `GET /healthz` → 200 `{"status":"ok"}`
   and `GET /versionz` → 200 `{go_version,started_at}`. `/healthz` is **process
   liveness only**: it does not query the database, embedding sidecar, LLM proxy,
   or an end-to-end memory path, and must not be treated as dependency readiness.
@@ -104,37 +104,27 @@ embedding <=> $q`. Requires **pre-computed query embedding** (mnemo-server
 - Default schema (`server/schema_pg.sql`) ships `embedding vector(1536)` and
   `CREATE EXTENSION IF NOT EXISTS vector;`.
 
-#### A content-free `PUT` NULLS the embedding on postgres (probed in prod 2026-08-03)
+#### Metadata-only updates preserve embeddings (downstream patch 0012)
 
-**Decisive for any tool that updates tags/metadata without changing content.**
+The unpatched upstream still discards the vector in `GetByID` and unconditionally
+writes it in `UpdateOptimistic`. A tags/metadata-only PUT can therefore clear a
+stored embedding. This was observed in production on 2026-08-03 and reproduced
+against the new pin with the PostgreSQL HTTP integration test before the fix.
+Upstream PR #470 remains unmerged as of 2026-09-14.
 
-`PUT /v1alpha2/mem9s/memories/{id}` is not a partial update at the storage layer:
+`0012-preserve-postgres-update-embedding.patch` backports the PostgreSQL fix:
+`scanMemory` hydrates the vector used by read-modify-write. Tags-only and
+metadata-only PUTs preserve it without an embedding call. A content-bearing PUT
+still re-embeds when an embedder is configured; without an embedder it clears the
+old-content vector. `MNEMO_EMBED_AUTO_MODEL` remains unset for this PostgreSQL
+deployment. Patch 0009 still enforces `If-Match`, including a raced write, and
+namespace predicates still fence every update.
 
-- `service/memory.go` re-embeds **only** when the request changes `content`, and
-  the full guard is `contentChanged && s.autoModel == "" && s.embedder != nil`.
-  We rely on `autoModel` being empty: `MNEMO_EMBED_AUTO_MODEL` is never set in
-  `infra/ecs.ts`, so the condition holds in production. Setting it would silently
-  stop re-embedding on content change, which is what makes the content-bearing
-  MERGE rewrite safe — treat it as load-bearing config, not a tuning knob.
-- `repository/postgres/memory.go` `UpdateOptimistic` writes `embedding = $4`
-  **unconditionally**, from the in-memory row.
-- `scanMemory`/`scanMemoryRows` on the **postgres** path scan the embedding column
-  into a discarded local and **never assign `m.Embedding`** (the TiDB path does).
-  So the read-modify-write round-trips `nil` → `embedding = NULL`.
-
-Verified against prod: a probe memory that ranked **first** for its own topic
-became permanently unfindable by semantic search after a tags-only `PUT`, while
-`GET` still returned it `state=active` with the new tag and `version` bumped.
-`VectorSearch` filters `embedding IS NOT NULL`, so the row survives in
-list/get and silently leaves recall — unrecoverable without recomputing the
-vector.
-
-**Consequence:** a tags/metadata-only mutation must go **direct to Aurora**
-(`UPDATE ... SET tags=…, metadata=… WHERE id=… AND version=… AND content=…`),
-not through the REST `PUT`. `scripts/memory-consolidation.mjs`'s
-`markMemoryStale` adapter does exactly this; `executeStale` documents why. If a
-future path must use REST, it has to send the unchanged `content` too so
-`contentChanged` triggers a re-embed, and pay the embedding cost.
+The real PostgreSQL HTTP test checks stored vectors, semantic recall after each
+metadata update, 412 for a stale version, 404 for a foreign namespace, and content
+updates with/without an embedder. This prevents new vector loss; it does not
+repair vectors previously cleared. Existing cleanup/consolidation SQL adapters
+remain disabled by namespace v1 and are not switched to REST by this upgrade.
 
 ### tidb backend (NOT viable on Aurora)
 
@@ -212,6 +202,46 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
   embedder is set → **without an embedding endpoint, PG backend does keyword-only
   (FTS), NO vector search.** So the embedding MaaS is required for semantic recall.
 
+### Upstream refresh and request contracts (2026-09-14)
+
+- The source pin advances from `d4638c8` to `5af03a6` (2026-08-25), 44 upstream
+  commits including Recall budgets/partial responses (#445, #449), bounded list
+  behavior, durable fact filtering (#370), and optional assistant extraction
+  (#451). PostgreSQL schema, module dependencies, and the embedding/LLM clients
+  are unchanged across these pins. Existing vectors stay 1024-dimensional and
+  this refresh adds no database migration.
+- Recall runs with a 20-second total server budget and a 2-second response
+  reserve. The proxy has one 25-second deadline across all attempts, body reads,
+  and backoff, shortened to Lambda remaining time minus one second when needed.
+  The Lambda timeout remains 30 seconds. Terminal server 504s are not retried;
+  successful `partial` and `warnings` fields pass through unchanged.
+- `MNEMO_FACT_EXTRACTION_INCLUDE_ASSISTANT=false` is explicit in ECS. Patch 0013
+  shares the constructor for the global durable worker and namespace-specific
+  replacements, so both honor this setting. Enabling it requires a separate
+  extraction-quality evaluation; the upgrade keeps user-only extraction.
+- Upstream's durable-fact guards complement the coding-agent durability override
+  in patch 0002. Patch 0014 preserves explicitly durable configuration and causal
+  lessons containing operational phrases when durable-only mode is enabled;
+  explicit transient fact types and plain session status are still rejected.
+  The bounded formatter in patch 0003 remains active.
+- The MCP smart-write smoke uses established configuration for an explicitly
+  synthetic fixture project. The old one-off "e2e secret marker" input produced
+  zero extracted facts despite a successful provider response under the new
+  extraction policy. The smoke still sends only `content` (not `memory_type:
+  pinned`) so it exercises the real LLM path, and its natural-language query
+  remains free of the unique run marker.
+- Patch 0014 threads request/branch contexts through cold-cache schema checks.
+  A blocked connection acquisition cannot outlive the Recall deadline or caller
+  cancellation; failed schema checks remain uncached.
+- The upstream Agent9 external-provenance envelope is supported only on the
+  existing synchronous ingest path. Durable `ingest-v1` does not serialize that
+  contract, so async requests carrying it return 400 before reservation/enqueue
+  rather than acknowledge and discard it. The MCP tools do not expose that field.
+- `ListAllTypes` delegates to the namespace-scoped PostgreSQL list implementation;
+  TiDB-specific list/FTS optimizations do not add a PostgreSQL search path. The
+  reviewed SQL inventory is regenerated for the new source pin without new
+  namespace exceptions.
+
 ### Enabled atomic durable ingest (downstream patches)
 
 - The ordered downstream stack is
@@ -219,8 +249,11 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
   `0002-ingest-durable-only-extraction-filter`, `0003-glm-request-bounds`,
   `0004-durable-ingest-queue`, `0005-atomic-ingest-apply`,
   `0006-durable-ingest-telemetry`, `0007-postgres-session-delete`,
-  `0008-ingest-prescreen-shadow`, `0009-if-match-precondition-fence`, then
-  `0010-group-memory-namespaces`. The Docker build applies the complete stack to
+  `0008-ingest-prescreen-shadow`, `0009-if-match-precondition-fence`,
+  `0010-group-memory-namespaces`, `0011-stabilize-ingest-deadline-test`,
+  `0012-preserve-postgres-update-embedding`, and
+  `0013-upstream-durable-compatibility`, and
+  `0014-recall-schema-budget-and-durable-facts`. The Docker build applies the complete stack to
   the pinned upstream commit in lexical order.
 - Upstream asynchronous `messages[]` ingest returns 202 before starting an
   untracked goroutine. Downstream patch
@@ -529,7 +562,7 @@ this repo — **empirically live 2026-07-12** (ap-northeast-1):
   switch to `GOARCH=arm64` + `docker build --platform=linux/arm64` for Graviton.
   No source change needed.
 
-### Packaging: no release/tag/public image → we PIN a source SHA (verified 2026-07-11)
+### Packaging: no release/tag/public image → we PIN a source SHA (rechecked 2026-09-14)
 
 - **mem9-ai/mem9 publishes NO GitHub release, NO tag, and NO public image.**
   `gh api repos/mem9-ai/mem9/{releases,tags}` both return empty. Their own CI
@@ -549,8 +582,8 @@ this repo — **empirically live 2026-07-12** (ap-northeast-1):
   `alpine:3.24` — so CI needs only Docker (no host Go, no separate mem9
   checkout). Built for **arm64** (Graviton Fargate) via `docker buildx
 --platform=linux/arm64`.
-- **Vendored pin (LOCKED): `mem9-ai/mem9` @ `d4638c8458abeb209a1b3a20472a1328c4acd149`**
-  (main tip, committed 2026-07-10). It is the `MEM9_REF` build-arg default in the
+- **Vendored pin (LOCKED): `mem9-ai/mem9` @ `5af03a68c072651e9c64d1b8b1265e36b7354671`**
+  (main tip as checked 2026-09-14, committed 2026-08-25). It is the `MEM9_REF` build-arg default in the
   Dockerfile. **Bumping the pin = change `MEM9_REF` + re-verify every fact in
   this file against the new tree** (schema, config env vars, DB driver path).
 - **Entrypoint (`docker/mnemo-server/entrypoint.sh`)** bridges the static-DSN

@@ -605,6 +605,10 @@ describe("ecs stack", () => {
     // fallback on — both consumed by the patched mnemo-server image.
     expect(env.MNEMO_RECALL_MIN_CONFIDENCE).toBe("40");
     expect(env.MNEMO_RECALL_ZERO_RESULT_FALLBACK).toBe("1");
+    // TC-UPSTREAM-003: server work ends before the proxy's total budget.
+    expect(env.MNEMO_RECALL_REQUEST_TIMEOUT).toBe("20s");
+    expect(env.MNEMO_RECALL_RESPONSE_RESERVE).toBe("2s");
+    expect(env.MNEMO_FACT_EXTRACTION_INCLUDE_ASSISTANT).toBe("false");
     // Ingest durability (TC-INGEST-020, issue #25): only durable facts stored.
     expect(env.MNEMO_INGEST_DURABLE_ONLY).toBe("1");
     expect(env.MNEMO_DURABLE_INGEST_ENABLED).toBe("1");

@@ -1,18 +1,18 @@
 diff --git a/server/internal/service/ingest.go b/server/internal/service/ingest.go
-index b25f8ec..d4fd17f 100644
+index 2b3a6fad006a6ab3d607c5c639aebe28b2014f88..5f08bdd4ff98ecd2dd21e13942f15133d447f994 100644
 --- a/server/internal/service/ingest.go
 +++ b/server/internal/service/ingest.go
-@@ -949,6 +949,7 @@ Output: {"facts": [{"text": "Working remotely this week", "tags": ["work", "time
- Return ONLY valid JSON. No markdown fences, no explanation.
+@@ -1171,6 +1171,7 @@ The "facts" array must contain durable facts only. Return an empty array when al
+ eligible source content is non-durable, while still returning message_tags for every message.
  
- {"facts": [{"text": "fact one", "tags": ["tag1", "tag2"], "fact_type": "fact"}, {"text": "User asked about X", "fact_type": "query_intent"}], "message_tags": [["tag1", "tag2"], ["tag3"], [], ...]}`
+ {"facts": [{"text": "fact one", "tags": ["tag1", "tag2"], "fact_type": "fact"}], "message_tags": [["tag1", "tag2"], ["tag3"]]}`
 +	systemPrompt += durableOnlyPromptSection() // mem9-on-aws patch (issue #25)
  	systemPrompt += routingPromptSection(routingTargets)
  
  	userPrompt := fmt.Sprintf("Extract facts and assign message tags.\n\n%s", input.formatted)
 diff --git a/server/internal/service/ingest_config.go b/server/internal/service/ingest_config.go
 new file mode 100644
-index 0000000..db19036
+index 0000000000000000000000000000000000000000..db19036771804b174626299eb9c24976e18c5af5
 --- /dev/null
 +++ b/server/internal/service/ingest_config.go
 @@ -0,0 +1,77 @@
@@ -95,7 +95,7 @@ index 0000000..db19036
 +}
 diff --git a/server/internal/service/ingest_config_test.go b/server/internal/service/ingest_config_test.go
 new file mode 100644
-index 0000000..89effd4
+index 0000000000000000000000000000000000000000..89effd4b6f4e038e02011dde15e66e96c7874943
 --- /dev/null
 +++ b/server/internal/service/ingest_config_test.go
 @@ -0,0 +1,140 @@
