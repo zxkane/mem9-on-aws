@@ -333,7 +333,9 @@ The real preview driver extends the existing cases with these checks:
   advisory-lock wait and finish with one matching group and membership.
 
 The operator manifest and consistency checks reject production or a mismatched
-target before provisioning users or opening a database connection. Cleanup must
+target before provisioning users or opening a database connection. The proxy's
+configured log destination must match the operator-pinned log group, including
+custom SST groups; a mismatch fails before secret retrieval. Cleanup must
 remove only owned synthetic users, close independent SQL sessions and browser
 contexts, and report incomplete cleanup as an incomplete run. These cases do not
 grant automatic user administration to an untrusted PR workflow.

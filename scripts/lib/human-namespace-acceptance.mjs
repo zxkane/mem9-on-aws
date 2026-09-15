@@ -103,6 +103,7 @@ export function validateDeploymentManifest(value) {
       "facadeUrl",
       "gatewayUrl",
       "proxyFunctionArn",
+      "proxyLogGroup",
       "database",
       "namespaces",
     ]),
@@ -142,6 +143,12 @@ export function validateDeploymentManifest(value) {
         `arn:aws:lambda:${value.region}:${value.accountId}:function:mem9-on-aws-${value.stage}-`,
       ),
     "pinned_preview_proxy_required",
+  );
+  requireCase(
+    typeof value.proxyLogGroup === "string" &&
+      /^[A-Za-z0-9./_#-]{1,512}$/.test(value.proxyLogGroup) &&
+      !value.proxyLogGroup.startsWith("aws/"),
+    "pinned_proxy_log_group_required",
   );
   const db = value.database;
   requireCase(

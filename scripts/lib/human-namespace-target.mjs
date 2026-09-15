@@ -153,14 +153,16 @@ export async function verifyHumanPreviewTarget(
       "--query",
       "{arn:FunctionArn,group:LoggingConfig.LogGroup,stage:Environment.Variables.MEM9_ACCEPTANCE_STAGE}",
     );
-    const expectedLogGroup = `/aws/lambda/${manifest.proxyFunctionArn.split(":function:")[1]}`;
+    const actualLogGroup =
+      proxy.group ||
+      `/aws/lambda/${manifest.proxyFunctionArn.split(":function:")[1]}`;
     check(
       proxy.arn === manifest.proxyFunctionArn &&
         proxy.stage === manifest.stage &&
-        (!proxy.group || proxy.group === expectedLogGroup),
+        actualLogGroup === manifest.proxyLogGroup,
       "preview_denial_diagnostics_unavailable",
     );
-    auditLogGroup = expectedLogGroup;
+    auditLogGroup = manifest.proxyLogGroup;
   }
   const cluster = (
     await aws(

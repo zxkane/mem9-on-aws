@@ -24,6 +24,7 @@ export const manifestFixture = () => ({
   gatewayUrl: "https://gateway.example.com/mcp",
   proxyFunctionArn:
     "arn:aws:lambda:ap-northeast-1:123456789012:function:mem9-on-aws-pr-42-Mem9ProxyFn-fixture",
+  proxyLogGroup: "/aws/lambda/mem9-on-aws-pr-42-Mem9ProxyFn-fixture",
   database: {
     host: "database.example.com",
     port: 5432,

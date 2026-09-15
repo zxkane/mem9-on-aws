@@ -561,7 +561,8 @@ work alongside preview/production deployment-role separation.
 
 Create a mode-600 `deployment.local.json` containing operator-verified targets.
 Names and tags are consistency checks; independently pin the actual preview
-pool, database resource ID, secret reference, account, and deployed commit.
+pool, database resource ID, secret reference, account, deployed commit, and proxy
+log group from its Lambda `LoggingConfig.LogGroup` (which SST may customize).
 Never publish this file or derive authorization from PR-controlled tags alone.
 For GitHub pull-request builds, `commit` is the deployed synthetic merge commit
 (`refs/pull/<number>/merge`), not just the source branch head. Run the clean
@@ -578,6 +579,7 @@ checkout of that same commit; its `pr-<sha7>` image tag is checked before mutati
   "facadeUrl": "https://facade.example.com",
   "gatewayUrl": "https://gateway.example.com/mcp",
   "proxyFunctionArn": "arn:aws:lambda:<application-region>:<aws-account-id>:function:<preview-proxy-function-name>",
+  "proxyLogGroup": "<exact-preview-proxy-log-group>",
   "database": {
     "host": "database.example.com",
     "port": 5432,
@@ -625,7 +627,8 @@ Gateway masks Lambda errors. Each negative case therefore requires a matching
 PR-only proxy diagnostic containing its invocation hash and exact backend
 403/409 status; an arbitrary tool error, 429, or backend outage fails the test.
 These diagnostics contain no arguments or identity values and are disabled in
-production. The operator reads only the pinned proxy's default log group.
+production. The operator reads only the explicitly pinned proxy log group;
+preflight rejects a configured log destination that differs from the manifest.
 
 Successful cleanup disables fixture principals before deleting owned users and
 removes the credential file. If cleanup is incomplete, retain that file and use

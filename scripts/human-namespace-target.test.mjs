@@ -13,6 +13,7 @@ function fixture() {
     gatewayUrl: "https://gateway.example.com/mcp",
     proxyFunctionArn:
       "arn:aws:lambda:ap-northeast-1:123456789012:function:mem9-on-aws-pr-42-Mem9ProxyFn-fixture",
+    proxyLogGroup: "/aws/lambda/mem9-on-aws-pr-42-Mem9ProxyFn-fixture",
     database: {
       host: "database.example.com",
       port: 5432,
@@ -131,6 +132,41 @@ function fixture() {
   return { manifest, pool, responses, aws, cognito, db, connectFactory };
 }
 describe("trusted preview target pinning", () => {
+  it("reads denial proof from an explicitly pinned custom Lambda log group", async () => {
+    const f = fixture(),
+      hash = "a".repeat(64);
+    f.manifest.proxyLogGroup = "/sst/preview-proxy-logs";
+    f.responses["lambda/get-function-configuration"].group =
+      f.manifest.proxyLogGroup;
+    f.responses["logs/filter-log-events"] = {
+      events: [{
+        message: JSON.stringify({
+          event: "namespace_acceptance_http_error",
+          request_hash: hash,
+          status: 403,
+        }),
+      }],
+    };
+    const target = await verifyHumanPreviewTarget(f.manifest, f);
+    expect(await target.readDenialStatus(hash, Date.now())).toBe(403);
+    const call = f.aws.mock.calls.find(([service]) => service === "logs");
+    expect(call[call.indexOf("--log-group-name") + 1]).toBe(
+      f.manifest.proxyLogGroup,
+    );
+  });
+  it("rejects a changed log destination before reading secrets or connecting", async () => {
+    const f = fixture();
+    f.manifest.proxyLogGroup = "/sst/pinned-preview-logs";
+    f.responses["lambda/get-function-configuration"].group =
+      "/sst/another-destination";
+    await expect(verifyHumanPreviewTarget(f.manifest, f)).rejects.toThrow(
+      "preview_denial_diagnostics_unavailable",
+    );
+    expect(f.connectFactory).not.toHaveBeenCalled();
+    expect(f.aws.mock.calls.some(([service, op]) =>
+      service === "secretsmanager" && op === "get-secret-value",
+    )).toBe(false);
+  });
   it("follows empty CloudWatch pages before accepting correlated status", async () => {
     const f = fixture(),
       ordinary = f.aws.getMockImplementation(),
