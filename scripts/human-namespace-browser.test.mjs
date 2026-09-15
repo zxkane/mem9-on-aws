@@ -24,9 +24,17 @@ describe("human OAuth/MCP client guards", () => {
         },
         url: () => "https://login.example.com/login",
         locator: () => ({
-          first: () => ({ fill: async () => {}, isVisible: async () => true }),
+          first: () => ({
+            fill: async () => {},
+            isVisible: async () => true,
+            locator: () => ({ locator: () => page.submit }),
+          }),
         }),
-        getByRole: () => ({
+        getByRole: () => {
+          throw new Error("classic_form_has_submit_aria_label");
+        },
+        submit: {
+          count: async () => 1,
           click: async () => {
             const malformed = await new Promise((resolve, reject) => {
               const request = httpRequest(
@@ -57,7 +65,7 @@ describe("human OAuth/MCP client guards", () => {
             valid.searchParams.set("code", "opaque-code");
             expect((await fetch(valid)).status).toBe(200);
           },
-        }),
+        },
       };
       const close = vi.fn(async () => {
           if (closeFails) throw new Error("injected_context_close_failure");

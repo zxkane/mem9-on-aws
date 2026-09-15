@@ -272,7 +272,13 @@ export class HumanOAuthBrowser {
       if (!(await passwordInput.isVisible()))
         await page.getByRole("button", { name: /^(next|continue)$/i }).click();
       await passwordInput.fill(password);
-      await page.getByRole("button", { name: /^(sign in|log in)$/i }).click();
+      const submit = passwordInput
+        .locator("xpath=ancestor::form[1]")
+        .locator(
+          'input[type="submit"]:visible, button[type="submit"]:visible, button:not([type]):visible',
+        );
+      check((await submit.count()) === 1, "login_submit_not_unique");
+      await submit.click();
       let timer;
       const redirected = await Promise.race([
         completed,
