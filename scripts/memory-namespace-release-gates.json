@@ -49,6 +49,8 @@
       "state": "enabled_v1",
       "acceptance": ["037-048"],
       "verification": [
+        "scripts/memory-namespace-lifecycle.test.mjs",
+        "docker/mnemo-server/patches/0017-namespace-lifecycle-fencing.patch",
         "infra/namespace-schema.test.ts",
         "docker/mnemo-server/patches/0010-group-memory-namespaces.patch",
         "scripts/run-ingest-queue-integration.sh"
@@ -70,6 +72,7 @@
       "state": "enabled_v1",
       "acceptance": ["059-072"],
       "verification": [
+        "docker/mnemo-server/patches/0017-namespace-lifecycle-fencing.patch",
         "infra/namespace-schema.test.ts",
         "scripts/run-memory-namespace-integration.sh"
       ]
@@ -88,6 +91,9 @@
       "state": "enabled_v1",
       "acceptance": ["084-095"],
       "verification": [
+        "scripts/run-memory-namespace-e2e.sh",
+        "scripts/memory-namespace-lifecycle.test.mjs",
+        "docker/mnemo-server/patches/0017-namespace-lifecycle-fencing.patch",
         "docker/mnemo-server/patches/0010-group-memory-namespaces.patch",
         "scripts/run-ingest-queue-integration.sh"
       ]
@@ -146,6 +152,7 @@
       "state": "enabled_v1",
       "acceptance": ["115-130", "132"],
       "verification": [
+        "docker/mnemo-server/patches/0017-namespace-lifecycle-fencing.patch",
         "infra/gateway/namespace-auth.test.mjs",
         "scripts/memory-namespace.test.mjs",
         "docker/mnemo-server/patches/0010-group-memory-namespaces.patch",

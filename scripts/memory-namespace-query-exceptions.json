@@ -276,6 +276,17 @@
         "upstream/server/internal/repository/postgres/namespace_integration_test.go",
         "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
       ]
+    },
+    {
+      "owner": "scripts/lib/memory-ingest-cancellation.mjs",
+      "statement_sha256": "599336e69ce4c9ca87ba63899a461d30deddc97bec33b0492bd9dcb531043d3f",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Lifecycle operators cancel all nonterminal jobs of an explicitly disabled principal, including previously accepted work in former namespaces.",
+      "rationale": "Only the private reconciliation and emergency-revoke operators call this statement after disabling its named principals in the same transaction. The shared lifecycle writer lock orders overlapping cancellations; job-row locks fence apply. Runtime finalization is preserved.",
+      "coverage": [
+        "scripts/memory-namespace-lifecycle.test.mjs",
+        "upstream/server/internal/repository/postgres/namespace_lifecycle_integration_test.go"
+      ]
     }
   ]
 }

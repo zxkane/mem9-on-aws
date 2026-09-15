@@ -430,7 +430,8 @@ The image applies the downstream patches in this fixed order:
 `0013-upstream-durable-compatibility`, and
 `0014-recall-schema-budget-and-durable-facts`, and
 `0015-ingest-namespace-compatibility`, and
-`0016-namespace-vector-late-hydration`.
+`0016-namespace-vector-late-hydration`, and
+`0017-namespace-lifecycle-fencing`.
 
 Before namespace cutover, durable enqueue uses the additive schema's legacy
 tenant/idempotency index. Scoped jobs use the namespace/idempotency index and do

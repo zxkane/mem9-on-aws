@@ -47,7 +47,10 @@ function database() {
           rowCount: 1,
           rows: [{ principal_id: "principal", status: "active" }],
         };
-      if (sql.includes("FROM memory_namespaces") && sql.includes("FOR UPDATE"))
+      if (
+        sql.includes("FROM memory_namespaces") &&
+        (sql.includes("FOR UPDATE") || sql.includes("FOR SHARE"))
+      )
         return { rowCount: 1, rows: [{ namespace_id: "namespace" }] };
       return { rowCount: 0, rows: [] };
     }),

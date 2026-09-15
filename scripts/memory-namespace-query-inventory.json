@@ -1727,19 +1727,35 @@
       "namespace_evidence": "namespace_id = :'namespace_id'"
     },
     {
-      "id": "7895750447c777b5b8ac",
-      "owner": "scripts/manage-memory-access.mjs",
-      "line": 202,
+      "id": "28f817d36d253848074d",
+      "owner": "scripts/lib/memory-ingest-cancellation.mjs",
+      "line": 12,
       "tables": [
         "ingest_jobs"
       ],
-      "statement_sha256": "d7ceaff563a6c969de2142fd3f701eb155fe17be38c215a25d17d5ccb7c21aae",
-      "statement": "UPDATE ingest_jobs SET state = 'dead', error_class = 'principal_emergency_revoked', lease_owner = NULL, lease_expires_at = NULL, completed_at = statement_timestamp(), updated_at = statement_timestamp() WHERE principal_id = $1 AND state NOT IN ('succeeded', 'dead')",
-      "classification": "emergency_control_plane",
-      "rationale": "Emergency revocation intentionally cancels every non-terminal job owned by the disabled principal.",
+      "statement_sha256": "a36df3bd9b8d2309a1f162a2df69e9056791b1fbf3200224e0bdfa4ffab0b644",
+      "statement": "UPDATE ingest_jobs SET state = 'dead', error_class = 'namespace_disabled', runtime_finalization_state = CASE WHEN runtime_operation_id IS NOT NULL THEN 'finalizing' ELSE NULL END, lease_owner = NULL, lease_expires_at = NULL, completed_at = statement_timestamp(), updated_at = statement_timestamp() WHERE namespace_id = $1 AND state NOT IN ('succeeded', 'dead')",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
       "coverage": [
-        "scripts/memory-namespace.test.mjs",
         "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "namespace_id = $1"
+    },
+    {
+      "id": "9edddb5968141e892fe4",
+      "owner": "scripts/lib/memory-ingest-cancellation.mjs",
+      "line": 25,
+      "tables": [
+        "ingest_jobs"
+      ],
+      "statement_sha256": "599336e69ce4c9ca87ba63899a461d30deddc97bec33b0492bd9dcb531043d3f",
+      "statement": "UPDATE ingest_jobs SET state = 'dead', error_class = $2, runtime_finalization_state = CASE WHEN runtime_operation_id IS NOT NULL THEN 'finalizing' ELSE NULL END, lease_owner = NULL, lease_expires_at = NULL, completed_at = statement_timestamp(), updated_at = statement_timestamp() WHERE principal_id = ANY($1::varchar[]) AND state NOT IN ('succeeded', 'dead')",
+      "classification": "namespace_composed_or_compatibility",
+      "rationale": "Only the private reconciliation and emergency-revoke operators call this statement after disabling its named principals in the same transaction. The shared lifecycle writer lock orders overlapping cancellations; job-row locks fence apply. Runtime finalization is preserved.",
+      "coverage": [
+        "scripts/memory-namespace-lifecycle.test.mjs",
+        "upstream/server/internal/repository/postgres/namespace_lifecycle_integration_test.go"
       ],
       "namespace_evidence": null
     },
@@ -2544,9 +2560,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $5"
     },
     {
-      "id": "2e9aae3656234035c0a3",
+      "id": "72f68eeac8ce5e2e16f8",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 104,
+      "line": 121,
       "tables": [
         "ingest_jobs"
       ],
@@ -2560,9 +2576,9 @@
       "namespace_evidence": "INSERT column namespace_id"
     },
     {
-      "id": "31646becefa4092ba358",
+      "id": "a0702b5364b0fd28f98c",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 138,
+      "line": 155,
       "tables": [
         "ingest_jobs"
       ],
@@ -2576,9 +2592,9 @@
       "namespace_evidence": "INSERT column namespace_id"
     },
     {
-      "id": "4fb43b91aa14bfb8107c",
+      "id": "b96f6bd139b128f2ab5e",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 140,
+      "line": 157,
       "tables": [
         "ingest_jobs"
       ],
@@ -2592,9 +2608,9 @@
       "namespace_evidence": "INSERT column namespace_id"
     },
     {
-      "id": "16c39c814bffa0648430",
+      "id": "1b1ecf445107f286ddb2",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 145,
+      "line": 162,
       "tables": [
         "ingest_jobs"
       ],
@@ -2608,9 +2624,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $2"
     },
     {
-      "id": "7a3b5a6f5dda6a6f3f70",
+      "id": "458a42a254010c2fb916",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 176,
+      "line": 198,
       "tables": [
         "ingest_jobs"
       ],
@@ -2624,9 +2640,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $2"
     },
     {
-      "id": "e8b78967fd1dd950bd44",
+      "id": "66d024aaa3272b48a9a5",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 211,
+      "line": 233,
       "tables": [
         "ingest_jobs"
       ],
@@ -2640,9 +2656,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $2"
     },
     {
-      "id": "a34799e531133e302c25",
+      "id": "35d49826577bf904815f",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 232,
+      "line": 254,
       "tables": [
         "ingest_jobs"
       ],
@@ -2657,9 +2673,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "3c0b7848a1c9aaadb186",
+      "id": "980a9f5a50c7dd19f2bb",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 316,
+      "line": 338,
       "tables": [
         "ingest_jobs"
       ],
@@ -2673,9 +2689,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $2"
     },
     {
-      "id": "bb36f7054fbc62449fd6",
+      "id": "a358fc84119017ee6029",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 362,
+      "line": 384,
       "tables": [
         "ingest_jobs"
       ],
@@ -2689,9 +2705,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $2"
     },
     {
-      "id": "e4161d1ebe440206c007",
+      "id": "b8509d0d37a38079761f",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 400,
+      "line": 422,
       "tables": [
         "ingest_jobs"
       ],
@@ -2705,9 +2721,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $2"
     },
     {
-      "id": "ea04280ba1d38aeb881e",
+      "id": "0eb88b38d70baa39096e",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 444,
+      "line": 466,
       "tables": [
         "ingest_jobs"
       ],
@@ -2722,9 +2738,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "5d436c7b1cdfb3ba5e23",
+      "id": "825ce8188cc10eda5edc",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 488,
+      "line": 500,
       "tables": [
         "ingest_jobs"
       ],
@@ -2739,9 +2755,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "a06987755bf17a6f3c51",
+      "id": "122dce6a2b2975b6b5f3",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 566,
+      "line": 590,
       "tables": [
         "ingest_jobs"
       ],
@@ -2756,9 +2772,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "64b0e75fc6a73012a88c",
+      "id": "8717f411481d0ddb595d",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 658,
+      "line": 682,
       "tables": [
         "ingest_jobs"
       ],
@@ -2772,9 +2788,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $5"
     },
     {
-      "id": "2e9ae9e153975d76cbf7",
+      "id": "99ef28683cedadebaa2b",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 680,
+      "line": 704,
       "tables": [
         "ingest_jobs"
       ],
@@ -2788,9 +2804,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $5"
     },
     {
-      "id": "d20b1d8558e6947c2823",
+      "id": "016bd089b996e94d7171",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 716,
+      "line": 740,
       "tables": [
         "ingest_jobs"
       ],
@@ -2804,9 +2820,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $5"
     },
     {
-      "id": "5db40476aab0af77c9b7",
+      "id": "5667f7d7d979a7833234",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 759,
+      "line": 783,
       "tables": [
         "ingest_jobs"
       ],
@@ -2820,9 +2836,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $5"
     },
     {
-      "id": "c94a3db5fbb7d76f10c7",
+      "id": "363a82d948691f5af8b1",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 823,
+      "line": 847,
       "tables": [
         "ingest_jobs"
       ],
@@ -2950,9 +2966,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $5"
     },
     {
-      "id": "cc135c0bb2cc840afaf0",
+      "id": "ed9f7289d5a5b689e023",
       "owner": "upstream/server/internal/repository/postgres/ingest_plan.go",
-      "line": 369,
+      "line": 372,
       "tables": [
         "sessions"
       ],
@@ -2966,9 +2982,9 @@
       "namespace_evidence": "INSERT column namespace_id"
     },
     {
-      "id": "ba1b615abcbbf3841ffc",
+      "id": "91cf77f6f924aa58ebde",
       "owner": "upstream/server/internal/repository/postgres/ingest_plan.go",
-      "line": 411,
+      "line": 414,
       "tables": [
         "sessions"
       ],
@@ -2982,9 +2998,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $3"
     },
     {
-      "id": "2240220e7f6bb9b304ce",
+      "id": "6469fbf929bad48bcf34",
       "owner": "upstream/server/internal/repository/postgres/ingest_plan.go",
-      "line": 442,
+      "line": 445,
       "tables": [
         "memories"
       ],
@@ -2998,9 +3014,9 @@
       "namespace_evidence": "INSERT column namespace_id"
     },
     {
-      "id": "14c5ce0cb0463e19b4cd",
+      "id": "fdfd5263f051be1fc342",
       "owner": "upstream/server/internal/repository/postgres/ingest_plan.go",
-      "line": 467,
+      "line": 470,
       "tables": [
         "memories"
       ],
@@ -3014,9 +3030,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $12"
     },
     {
-      "id": "30fd656dafeaac1f735a",
+      "id": "4fe9c24c4b941d347f8a",
       "owner": "upstream/server/internal/repository/postgres/ingest_plan.go",
-      "line": 499,
+      "line": 502,
       "tables": [
         "memories"
       ],
@@ -3030,9 +3046,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $4"
     },
     {
-      "id": "b56ec2ec6b7af4bac986",
+      "id": "5d5e91dd25915cd04acd",
       "owner": "upstream/server/internal/repository/postgres/ingest_plan.go",
-      "line": 533,
+      "line": 536,
       "tables": [
         "ingest_jobs"
       ],
@@ -3046,9 +3062,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $5"
     },
     {
-      "id": "2e68bc295a58d6cba3a5",
+      "id": "9a4268fb10e23580b844",
       "owner": "upstream/server/internal/repository/postgres/ingest_plan.go",
-      "line": 579,
+      "line": 582,
       "tables": [
         "ingest_job_plans"
       ],
@@ -3062,9 +3078,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $2"
     },
     {
-      "id": "9a81fbfb6c9864844930",
+      "id": "240782746f21fac71469",
       "owner": "upstream/server/internal/repository/postgres/ingest_plan.go",
-      "line": 669,
+      "line": 672,
       "tables": [
         "ingest_jobs"
       ],

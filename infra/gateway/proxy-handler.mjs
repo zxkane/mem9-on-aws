@@ -116,7 +116,8 @@ class Mem9HttpError extends Error {
   constructor(method, path, status, body) {
     const isStatusLookup = path.startsWith(`${INGEST_JOBS_PATH}/`);
     const detail = isStatusLookup || !body ? "" : `: ${body.slice(0, 500)}`;
-    super(`mnemo-server ${method} ${path} returned ${status}${detail}`);
+    const publicPath = isStatusLookup ? `${INGEST_JOBS_PATH}/:job_id` : path;
+    super(`mnemo-server ${method} ${publicPath} returned ${status}${detail}`);
     this.status = status;
     this.retryable = status === 408 || status === 429 || (status >= 500 && status !== 504);
   }

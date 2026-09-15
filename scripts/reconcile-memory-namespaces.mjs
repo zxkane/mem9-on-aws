@@ -1,4 +1,9 @@
 #!/usr/bin/env node
+import {
+  lockNamespaceLifecycle,
+  cancelNamespaceIngestJobs,
+  cancelPrincipalIngestJobs,
+} from "./lib/memory-ingest-cancellation.mjs";
 
 import { randomUUID } from "node:crypto";
 import process from "node:process";
@@ -183,10 +188,7 @@ async function readDrift({
     ]),
   );
   const namespaces = countMapDrift(expectedNamespaces, database.namespaces);
-  const group_bindings = countMapDrift(
-    expectedGroups,
-    database.groupBindings,
-  );
+  const group_bindings = countMapDrift(expectedGroups, database.groupBindings);
   const m2m_bindings = countMapDrift(expectedM2M, database.m2mBindings);
   return {
     cognito: cognitoDrift,
@@ -217,12 +219,9 @@ export async function reconcileNamespaces({
   const desiredNamespaceSlugs = new Set(
     desired.namespaces.map(({ slug }) => slug),
   );
-  const authoritativeM2MNamespaces = new Set(
-    authoritativeM2MNamespaceSlugs,
-  );
+  const authoritativeM2MNamespaces = new Set(authoritativeM2MNamespaceSlugs);
   if (
-    authoritativeM2MNamespaces.size !==
-      authoritativeM2MNamespaceSlugs.length ||
+    authoritativeM2MNamespaces.size !== authoritativeM2MNamespaceSlugs.length ||
     [...authoritativeM2MNamespaces].some(
       (slug) => !desiredNamespaceSlugs.has(slug),
     )
@@ -263,8 +262,36 @@ export async function reconcileNamespaces({
 
   await db.query("BEGIN");
   try {
+    // Serialize desired-state transactions, including remaps and pruning across
+    // disjoint/reversed namespace lists. Runtime requests do not take this lock.
+    await lockNamespaceLifecycle(db);
+    // Lock both ends of a binding remap before touching principals or jobs.
+    // NO KEY UPDATE remains compatible with atomic apply's parent FK checks.
+    await db.query(
+      `SELECT namespace.namespace_id
+       FROM memory_namespaces AS namespace
+       WHERE namespace.slug = ANY($1::varchar[])
+          OR namespace.namespace_id IN (
+            SELECT namespace_id FROM memory_cognito_group_bindings
+            WHERE group_key = ANY($2::varchar[])
+            UNION
+            SELECT namespace_id FROM memory_m2m_namespace_bindings
+            WHERE client_key = ANY($3::varchar[])
+          )
+       ORDER BY namespace.namespace_id
+       FOR NO KEY UPDATE OF namespace`,
+      [
+        desired.namespaces.map((item) => item.slug),
+        desired.namespaces.map((item) =>
+          deriveGroupKey(issuer, item.cognito_group),
+        ),
+        desired.m2m_bindings.map((item) => item.client_key),
+      ],
+    );
     const namespaceIDs = new Map();
-    for (const item of desired.namespaces) {
+    for (const item of [...desired.namespaces].sort((a, b) =>
+      a.slug.localeCompare(b.slug),
+    )) {
       const result = await db.query(
         `INSERT INTO memory_namespaces (
            namespace_id, slug, display_name, status, updated_at
@@ -278,6 +305,9 @@ export async function reconcileNamespaces({
       );
       const namespaceID = result.rows[0].namespace_id;
       namespaceIDs.set(item.slug, namespaceID);
+      if (item.status === "disabled") {
+        await cancelNamespaceIngestJobs(db, namespaceID);
+      }
       await db.query(
         `INSERT INTO memory_cognito_group_bindings (
            group_key, namespace_id, default_role, jit_enabled, status, updated_at
@@ -315,6 +345,13 @@ export async function reconcileNamespaces({
       }
       const principalID = principalResult.rows[0].principal_id;
       const namespaceID = namespaceIDs.get(binding.namespace_slug);
+      if (binding.status === "disabled") {
+        await cancelPrincipalIngestJobs(
+          db,
+          [principalID],
+          "principal_disabled",
+        );
+      }
       const existingBinding = await db.query(
         `SELECT principal_id
          FROM memory_m2m_namespace_bindings
@@ -336,6 +373,11 @@ export async function reconcileNamespaces({
            SET status = 'disabled'
            WHERE principal_id = $1`,
           [previousPrincipalID],
+        );
+        await cancelPrincipalIngestJobs(
+          db,
+          [previousPrincipalID],
+          "principal_disabled",
         );
       }
       await db.query(
@@ -391,9 +433,9 @@ export async function reconcileNamespaces({
     }
 
     if (authoritativeM2MNamespaces.size > 0) {
-      const authoritativeNamespaceIDs = [
-        ...authoritativeM2MNamespaces,
-      ].map((slug) => namespaceIDs.get(slug));
+      const authoritativeNamespaceIDs = [...authoritativeM2MNamespaces].map(
+        (slug) => namespaceIDs.get(slug),
+      );
       const desiredClientKeys = desired.m2m_bindings
         .filter(({ namespace_slug }) =>
           authoritativeM2MNamespaces.has(namespace_slug),
@@ -431,6 +473,11 @@ export async function reconcileNamespaces({
            WHERE principal_id = ANY($1::varchar[])
              AND principal_type = 'm2m'`,
           [stalePrincipalIDs],
+        );
+        await cancelPrincipalIngestJobs(
+          db,
+          stalePrincipalIDs,
+          "principal_disabled",
         );
         await db.query(
           `DELETE FROM memory_m2m_namespace_bindings
@@ -490,7 +537,9 @@ async function main() {
   }
   const desired = await readDesiredState(configPath);
   const region = args.region ?? process.env.AWS_REGION;
-  const cognito = manageCognitoGroups ? new CognitoIdentityProviderClient({ region }) : undefined;
+  const cognito = manageCognitoGroups
+    ? new CognitoIdentityProviderClient({ region })
+    : undefined;
   const db = new pg.Client({ connectionString: dsn });
   await db.connect();
   try {

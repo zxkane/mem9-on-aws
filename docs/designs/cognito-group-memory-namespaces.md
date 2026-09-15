@@ -2,7 +2,7 @@
 
 Feature: multiple team memory namespaces in one Aurora PostgreSQL database
 Date: 2026-08-28
-Status: Implemented behind a rollout gate; live AWS cutover and smoke pending
+Status: Namespace-capable implementation with explicit migration and acceptance gates
 
 ## Decision Summary
 
@@ -54,7 +54,7 @@ The repository implementation includes:
 - a retained least-privilege namespace operator role;
 - `MEM9_NAMESPACE_REQUIRED`, which defaults to `0` and keeps an existing stage
   compatible until the database reaches `constraints_complete`;
-- a version-controlled 284-statement scoped-SQL manifest generated from the
+- a version-controlled 285-statement scoped-SQL manifest generated from the
   complete patched upstream and local operator/DDL surfaces;
 - a coverage ownership map assigning every `TC-GROUPNS-001..144` criterion to
   exactly one capability and named verification surface without claiming that
@@ -68,6 +68,38 @@ also execute the documented service drain and write freeze; the database
 operator command intentionally does not scale ECS or mutate Gateway resources.
 
 ## User-Visible Contract
+
+### Namespace lifecycle and admission fencing
+
+Disabling a namespace through reconciliation changes its status and terminally
+cancels its nonterminal ingest jobs in one transaction. Completed jobs and other
+namespaces remain intact. Re-enabling a namespace does not revive cancelled work.
+The cancellation reason is the bounded `namespace_disabled` class.
+
+Lifecycle writers (reconciliation and emergency revoke) share one transaction
+advisory lock, preventing overlapping namespace/principal cancellations from
+locking job rows in conflicting orders. Reconciliation first locks every
+existing source and destination namespace with `FOR NO KEY UPDATE`; this remains
+compatible with apply's foreign-key `KEY SHARE` locks. Namespace status updates
+and job cancellation remain separate statements so cancellation sees enqueues
+that committed while the status update waited.
+
+Authorization and assignment lock the target namespace before mutating a
+principal. M2M authorization re-reads binding and membership after its explicit
+namespace/principal locks. Reconciliation also cancels jobs when an M2M principal
+is disabled, replaced, or pruned. Cancellation clears leases and moves reserved
+runtime usage to `finalizing` so workers can settle it.
+
+An enqueue transaction locks the active namespace and principal with `FOR SHARE`
+before taking its queue-scope lock or inserting a job. This prevents admission after a namespace
+disable or emergency principal revocation commits. Normal membership revocation
+does not cancel already accepted team work.
+
+Apply and cancellation serialize on the ingest-job row. Apply may complete before
+disable commits, or cancellation wins and apply writes no content. Apply must not
+acquire a namespace lock after the job lock, which would invert the operator's
+namespace-to-job order. Synthetic PostgreSQL tests observe lock waits and verify
+both orders, rollback on failure, and isolation from other namespaces.
 
 ### External identity provider administration
 
@@ -698,6 +730,16 @@ sequential scan, maximum candidate rows visited per page, lock-wait budget, and
 p95 claim latency. Indexes are not required to begin with `namespace_id` if the
 trusted worker's queue scan does not filter one namespace before claiming.
 Every claimed row still carries immutable namespace identity.
+
+The synthetic PostgreSQL 17 acceptance fixture contains 24,096 jobs across two
+namespaces: 4,096 pending jobs (four per team/session FIFO scope) and 20,000
+terminal jobs. `namespace_claim_plan_test.go` runs the actual candidate query
+with `EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)` without planner overrides. It
+requires `idx_ingest_jobs_claim_cursor`, no sequential scan of `ingest_jobs`,
+at most 512 outer candidate rows visited, and at most 32 returned scopes. With
+one queue head locked, 24 real claims must each finish within 250 ms, with p95
+at most 100 ms. These are repeatable fixture regression limits; they are not a
+production capacity claim.
 
 ## Required Namespace Scope
 
