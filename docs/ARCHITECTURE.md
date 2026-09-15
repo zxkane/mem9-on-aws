@@ -466,6 +466,13 @@ after create, update, or no-op. The GitHub deploy role explicitly denies
 mutation of this owner stack despite its broader CloudFormation provisioning
 grant.
 
+The operator role trust requires the owning account and an ECS source ARN in
+the application region. It does not use the ownership stack's region.
+The wildcard covers ECS clusters because task-role trust does not support
+scoping `aws:SourceArn` to one cluster; caller-side `RunTask` and `PassRole`
+permissions still restrict operator execution to the stage's bootstrap task.
+See [ECS task IAM roles](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/task-iam-roles.html).
+
 Fresh `pr-N` stages exercise the complete switch without production inputs.
 Their bootstrap creates two synthetic namespaces and managed groups in the
 preview pool, binds temporary M2M clients in the same Aurora database, and

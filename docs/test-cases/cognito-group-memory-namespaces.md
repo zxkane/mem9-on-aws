@@ -217,6 +217,11 @@ not substitute for the human `cognito:groups` Gateway smokes named below.
 | TC-GROUPNS-136 | The retained namespace operator stack is redeployed with a different application region, stage, or caller visibility | The fixed owner stack rejects region/stage retargeting, distinguishes absence from read failure, verifies final parameters, and is explicitly denied to the PR deploy role | Unit + infra static         |
 | TC-GROUPNS-137 | Reconciliation commits but its post-commit drift read fails                                             | The command reports committed-but-unverified state and does not issue a misleading rollback                                                                               | Unit                        |
 
+`TC-GROUPNS-136` also verifies that the retained operator role trusts only ECS
+tasks from the owning account and application region, independently of the
+region hosting the CloudFormation ownership stack. Runtime operator-task
+execution verifies that the scoped trust still delivers credentials.
+
 ## External provider access administration
 
 | ID | Scenario | Expected | Surface |

@@ -10,6 +10,7 @@ import {
 import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
+import { parse } from "yaml";
 
 import {
   deriveClientKey,
@@ -923,6 +924,26 @@ describe("memory namespace operator config", () => {
           args.slice(0, 2).join(" ") === "cloudformation describe-stacks",
       ),
     ).toHaveLength(2);
+  });
+
+  it("TC-GROUPNS-136: scopes operator trust to the owning account and application region", async () => {
+    const template = parse(await readFile(resolve(import.meta.dirname,
+      "../infra/cloudformation/memory-namespace-operator-role.yaml"), "utf8"), {
+      customTags: [
+        ...["!Ref", "!Sub", "!GetAtt"].map((tag) => ({ tag, resolve: (value) => value })),
+        ...["!If", "!Equals", "!Not"].map((tag) => ({ tag, collection: "seq", resolve: (value) => value })),
+      ],
+    });
+    const trust = template.Resources.MemoryNamespaceOperatorRole.Properties.AssumeRolePolicyDocument;
+    expect(trust.Statement).toEqual([{
+      Effect: "Allow",
+      Principal: { Service: "ecs-tasks.amazonaws.com" },
+      Action: "sts:AssumeRole",
+      Condition: {
+        StringEquals: { "aws:SourceAccount": "AWS::AccountId" },
+        ArnLike: { "aws:SourceArn": "arn:${AWS::Partition}:ecs:${ApplicationRegion}:${AWS::AccountId}:*" },
+      },
+    }]);
   });
 
   it("reattaches or stops the single stage operator task safely", async () => {

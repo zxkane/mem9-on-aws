@@ -35,6 +35,11 @@ Resources:
             Principal:
               Service: ecs-tasks.amazonaws.com
             Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub arn:${AWS::Partition}:ecs:${ApplicationRegion}:${AWS::AccountId}:*
       Policies:
         - PolicyName: mem9-memory-namespace-operator
           PolicyDocument:
