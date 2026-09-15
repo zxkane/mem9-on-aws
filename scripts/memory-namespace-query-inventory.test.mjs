@@ -129,7 +129,9 @@ func query() string {
         execFileSync(
           "go",
           ["run", resolve(root, "scripts/extract-go-sql.go"), server],
-          { encoding: "utf8" },
+          // A cold Go toolchain build can exceed 20s on a shared runner.
+          // Bound the subprocess separately from the enclosing test budget.
+          { encoding: "utf8", timeout: 45_000 },
         ),
       );
 
@@ -145,7 +147,7 @@ func query() string {
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
-  }, 20_000);
+  }, 60_000);
 
   it("TC-GROUPNS-096: classifies an explicit namespace predicate", () => {
     expect(
