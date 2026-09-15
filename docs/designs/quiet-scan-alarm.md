@@ -4,9 +4,9 @@ A scheduled cleanup scan whose consensus DELETE set is empty writes the offered
 record, posts nothing, exits 0, and nothing reports it. That is correct for a
 genuinely quiet week and indistinguishable from a classifier that degraded far
 enough to collapse the consensus without tripping `classifierBroken` — which
-needs **every** batch to fail. The measured basis: one pass reproduced only 66%
-of its own DELETE set on re-run, so a *partial* degradation can empty the
-intersection while every batch still "succeeds".
+needs **every** batch to fail. Disagreement between independent classifier
+passes can empty the intersection while every batch still succeeds. Synthetic
+fixtures verify this case without publishing operator classification results.
 
 ## The constraint that shapes everything below
 

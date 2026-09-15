@@ -128,8 +128,8 @@ describe("db stack", () => {
     expect(auroras).toHaveLength(1);
     const args = auroras[0].args;
     expect(args.engine).toBe("postgres");
-    // No RDS Proxy. After the dated empirical observation in infra/db.ts, mem9
-    // connects to the cluster writer endpoint directly.
+    // The declared architecture omits RDS Proxy and connects mem9 directly
+    // to the cluster writer endpoint.
     expect(args.proxy).toBeUndefined();
     expect(args.database).toBe("mem9");
     expect((args.scaling as { min: string; max: string }).min).toBe("1 ACU");

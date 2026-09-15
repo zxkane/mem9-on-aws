@@ -37,6 +37,13 @@ them, update the file rather than silently diverging.
 - **Data ownership is the whole point**: any change that sends memory content or
   embeddings to a third party (e.g. OpenAI direct, a mem9 SaaS) violates the
   project's reason to exist — flag it, don't silently adopt it.
+- **Public artifacts describe the product, not a personal deployment**: keep
+  operator identities and group mappings, live rollout status, resource
+  inventories, corpus counts/checksums, workload measurements, capacity approvals,
+  and actual spending in owner-only gitignored records. This applies to source,
+  docs, issues, PR bodies, comments, and reviews. Public evidence must use
+  reproducible synthetic fixtures; documented defaults and clearly labeled
+  public pricing examples are appropriate.
 - **CI runners**: workflows select their runner via the `RUNNER_LABEL` repo
   variable with a lazy ternary so an unset variable falls back to GitHub-hosted:
 

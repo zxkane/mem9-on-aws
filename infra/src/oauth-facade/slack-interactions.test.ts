@@ -93,15 +93,11 @@ function offered(overrides: Record<string, unknown> = {}) {
 }
 
 /**
- * The name constraint `PutParameter` actually enforces: a path of sub-paths, each
- * only letters, numbers and `.-_`. Probed live in ap-northeast-1 — the `sha256:`
- * form is rejected on write while a READ parses the colon as a version selector,
- * so the two operations disagree about the name rather than both 404ing.
- *
- * Every double here used to accept any string, which is precisely why a claim name
- * carrying `sha256:` passed the whole suite and would have answered "The approval
- * could not be recorded" on every real click. A fake that cannot fail the way the
- * service fails proves nothing about the name.
+ * Model the writable claim-name format used by this project: slash-separated
+ * segments containing letters, numbers, dots, hyphens, and underscores.
+ * Reject the unconverted `sha256:` separator as `ValidationException` so
+ * tests exercise the write-failure path instead of accepting arbitrary
+ * Map keys. Keep this double aligned with `assertClaimParameterName`.
  */
 function assertWritableParameterName(name: string): void {
   if (!/^(?:\/[A-Za-z0-9_.-]+)+$/u.test(name)) {

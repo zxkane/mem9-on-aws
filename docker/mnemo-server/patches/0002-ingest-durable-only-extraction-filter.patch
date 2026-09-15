@@ -79,11 +79,11 @@ index 0000000000000000000000000000000000000000..db19036771804b174626299eb9c24976
 +  - "偏好用中文讨论架构问题"
 +
 +Examples to reject:
-+  - "User is using mem9 MCP server with Codex"
-+  - "Already authenticated to mem9 earlier"
-+  - "Session ID is 15210913-87ce-44a0"
-+  - "Reviewed committed HEAD b90598a and found 2 remaining test-coverage findings"
-+  - "之前已经对 mem9 进行过 auth 认证"`
++  - "A demo client just opened a tool connection"
++  - "The example client signed in during this session"
++  - "Temporary run token is example-run"
++  - "The sample check just finished with temporary warnings"
++  - "本次示例会话刚完成工具登录"`
 +
 +// durableOnlyPromptSection returns the override section when the durability
 +// filter is enabled, else "" (prompt byte-identical to upstream).

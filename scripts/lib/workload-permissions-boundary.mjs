@@ -112,15 +112,11 @@ function matchesProjectLambdaRoleName(roleName, type) {
     : roleName.includes(type.roleToken);
 }
 
-// Every ECS execution role that fetches a Secrets Manager secret for `valueFrom`
-// injection has to be listed here, because `S` (secret encryption
-// context, restricted to ECS execution roles) is an ArnNotLike deny: an omitted
-// role is denied, not merely ungranted. Measured against the live policy rather
-// than reasoned about — the default `aws/secretsmanager` key needs no identity
-// ALLOW, which makes it tempting to conclude the deny never fires, but a
-// simulation of each role shows listed ones allowed and unlisted ones
-// explicitDeny. A missing token costs a task death in the ECS agent's
-// secret-fetch phase, before the entrypoint runs.
+// List every ECS execution-role pattern needed for task-start secret injection.
+// Keep these patterns aligned with the task definitions and the boundary's
+// secret-context restriction. Cover listed and unlisted roles with synthetic
+// policy/context cases. Verify the deployed boundary before enabling a new role;
+// an identity-policy grant alone does not establish boundary compatibility.
 const ECS_EXECUTION_ROLE_TOKENS = [
   "Mem9ServerExecutionRole-",
   "Mem9BootstrapExecutionRole-",
@@ -1299,17 +1295,11 @@ export function verifyPermanentEnforcementDocuments(
     // unlike `extractPassRoleScope`, which checks a subset because it runs before
     // and during enforcement, when the live role may legitimately lag this file.
     //
-    // This verifier is stricter on purpose, and it does read the LIVE role:
-    // `verifyLivePolicyDocuments` in workload-permissions-boundary-aws.mjs calls it
-    // against the deployed documents after enforcement. Measured 2026-08-12: the
-    // live role still names only the consolidation pattern, so this statement
-    // THROWS `... is malformed` until the github-actions-role.yaml widening is
-    // deployed. That makes `scripts/deploy-github-role.sh` a prerequisite of the
-    // next BOUNDARY rollout, not merely of the first deploy that creates the scan
-    // role. The operator does NOT see that sentence, though: the caller's retry
-    // wrapper in workload-permissions-boundary-aws.mjs catches it bare and returns
-    // false, so the surfaced message is "permanent permissions-boundary enforcement
-    // is incomplete" with no Sid. Run this verifier directly to get the Sid.
+    // verifyLivePolicyDocuments checks deployed documents after enforcement.
+    // A role missing either Scheduler pattern must fail this exact-set check.
+    // Deploy required github-actions-role.yaml changes before the next boundary
+    // rollout. The retry wrapper may report only that permanent enforcement is
+    // incomplete; run this verifier directly to identify the failing Sid.
     resources: schedulerRoleArnPatterns({ partition, accountId }),
     conditionOperator: "StringNotEquals",
     conditionKey: "iam:PassedToService",

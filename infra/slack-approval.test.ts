@@ -7,10 +7,9 @@ import type { OauthFacadeOutputs } from "./oauth-facade";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import { cloudwatchStubs } from "./task-failure-alarm.test-fixtures";
 
-// Harness copied from infra/consolidation.test.ts: the same Output/materialize
-// pair, the same `record`/`one` resource log, and the same faithful sst.aws.Task
-// stub (whose `subnets`/`securityGroups` ELEMENTS are Outputs, which is how the
-// `.join(",")` defect reached a live stack twice).
+// Harness follows infra/consolidation.test.ts's Output/materialize helpers
+// and resource recorder. Stub subnet/security-group entries as Outputs to
+// expose accidental stringification before API payload resolution.
 interface Output<T> {
   value: T;
   apply(fn: (value: T) => unknown): unknown;
@@ -1080,10 +1079,8 @@ describe("slack approval infrastructure", () => {
       networkConfiguration: {
         assignPublicIp: false,
         securityGroups: ["sg-task"],
-        // Passed as an Output, so Pulumi resolves the nested Outputs before the
-        // API call. Joining them writes "Calling [toString] on an [Output<T>] is
-        // not supported." into the request — the defect that reached two live
-        // stacks.
+        // The resolved payload must contain subnet strings. Joining unresolved
+        // Outputs would insert a diagnostic string instead of this fixture array.
         subnets: ["subnet-a", "subnet-b"],
       },
     });
@@ -1227,8 +1224,8 @@ describe("slack approval infrastructure", () => {
     expect(Number(command[capIndex + 1])).toBe(module.CLEANUP_CAP);
 
     // With no human reading the list before it is offered, the quorum is the only
-    // thing narrowing it: one pass reproduced just 66% of its own DELETE set on
-    // re-run. `consensusDecisions` needs >= 2 usable passes and the flag's `min`
+    // thing narrowing classifier disagreement. `consensusDecisions` needs
+    // >= 2 usable passes and the flag's `min`
     // is 2, so this cannot be weakened to 1 without the parser refusing.
     const passesIndex = command.indexOf("--consensus-passes");
     expect(passesIndex).toBeGreaterThan(0);

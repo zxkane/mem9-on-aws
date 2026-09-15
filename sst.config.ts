@@ -61,11 +61,9 @@ export default $config({
         // The `command` provider exposes the `command` global (command.local.Command)
         // used by infra/gateway.ts to provision the AgentCore GatewayTarget via the
         // DIRECT bedrock-agentcore-control API (infra/gateway/provision-target.mjs).
-        // Empirical 2026-07-14: CloudControl reported FAILED for the rejected
-        // private-endpoint path while the identical direct API call reached READY.
-        // The Command runs on the deploy host (no cloud
-        // resource of its own, so it adds no deploy-role IAM beyond the
-        // bedrock-agentcore API grants used by the script). Version pinned explicitly.
+        // The command drives target creation, readiness polling, and deletion,
+        // preserving a dependency on the proxy Lambda. Run it with the required
+        // bedrock-agentcore API permissions. Version pinned explicitly.
         command: { version: "1.2.1" },
       },
     };

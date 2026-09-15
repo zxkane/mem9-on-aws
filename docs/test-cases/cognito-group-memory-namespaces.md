@@ -154,16 +154,18 @@ is exercised by `VectorSearch` and `EXPLAIN ANALYZE`: results must match a
 namespace-local brute-force baseline, foreign and filtered rows stay out, the
 distance tuples remain narrow, and an available HNSW index never selects
 candidates. Capacity and statement-timeout failures remain fail closed.
-The rollout benchmark uses the existing corpus without logging its content,
-retains the two-second production deadline, and verifies top-K 10 and 50.
+Public benchmark evidence must use a documented synthetic corpus, retain the
+configured two-second deadline, and verify top-K 10 and 50. Keep measurements
+from real operator data in private records.
 
 ## Durable Ingest
 
-The production capacity check for `TC-GROUPNS-083/112` includes actual result
+The capacity check for `TC-GROUPNS-083/112` includes actual result
 fetching after Aurora scales down, not only `EXPLAIN ANALYZE` on a warm cache.
-Production keeps a 1 ACU floor; development/preview remain at 0.5 ACU, and every
-stage retains its 4 ACU maximum. Verify the actual capacity metric together
-with cache size, query results, and the unchanged two-second SQL guard.
+Use synthetic fixture data and record the configured capacity range. The IaC
+defaults are 1 ACU minimum for production, 0.5 ACU for development/previews, and
+4 ACU maximum. Verify capacity together with cache size, query results, and the
+two-second SQL guard. Public evidence must not describe a personal deployment.
 
 | ID             | Scenario                                                      | Expected                                                                                                                      | Surface                   |
 | -------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------- |

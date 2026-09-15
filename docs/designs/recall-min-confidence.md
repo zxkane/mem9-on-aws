@@ -2,12 +2,9 @@
 
 ## Problem
 
-Production recall is effectively broken: over 2026-07-16 → 2026-07-23, 88% of
-`search_memories` calls (117/133) returned **zero results**. Every zero-result
-search had candidates (avg ~37 insight candidates); all were rejected by the
-selection stage with `cutoff_reason: "min_confidence"`. Long natural-language
-queries (≥25 chars, what the recall hooks tell every agent to send) averaged
-0.11 results vs 5.5 for short keyword queries.
+Fixed confidence thresholds can suppress every candidate for some query
+shapes. Configuration and bounded fallback behavior need independent synthetic
+tests; operator recall distributions and search histories remain private.
 
 Root cause: the upstream selection thresholds are **hard-coded consts** in
 `server/internal/handler/recall.go` at the pinned commit:
@@ -20,8 +17,7 @@ Root cause: the upstream selection thresholds are **hard-coded consts** in
 
 The confidence score (`buildRecallConfidence`) is dominated by
 `0.55*rrfNorm + 0.20*vecNorm + bonuses`. Long natural-language queries dilute
-RRF/vector agreement, so real hits routinely score below 65 and the whole
-result set is cut off.
+RRF/vector agreement, so a candidate can fall below the configured threshold and be excluded.
 
 ## Decision
 
@@ -53,7 +49,7 @@ MNEMO_RECALL_ZERO_RESULT_FALLBACK:  "1"
 ```
 
 Belt and suspenders: even if 40 is still too high for some query shapes, the
-fallback guarantees a non-empty best-effort answer whenever candidates exist.
+fallback can return candidates that also clear its configured floor.
 
 ## Patch mechanism
 

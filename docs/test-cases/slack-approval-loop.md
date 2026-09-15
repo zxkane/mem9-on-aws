@@ -714,8 +714,7 @@ agreed with policy.
   consensus is opt-in and costs N times the inference.
 - **TC-SLACKAPP-070** — an id marked `DELETE` by both passes is offered; an id
   marked `DELETE` by only one pass is not, and appears in the review list
-  labelled unstable. This is the acceptance criterion for the 66%-agreement
-  finding that motivated the issue.
+  labelled unstable. Synthetic fixtures exercise disagreement between passes.
 - **TC-SLACKAPP-071** — the two passes are independent requests, not one response
   reused. The fake `completeChat` returns different verdicts per call and the
   case asserts both were called with the same input and that the intersection —
@@ -745,8 +744,7 @@ agreed with policy.
   the merge count in the review message with nothing to reconcile against.
 
   The agreed merge is deliberately **not** folded into `agreed`, which is the
-  denominator of the reported DELETE reproducibility figure — the 66%
-  self-reproduction that motivated consensus. Counting merges there would raise
+  denominator of the reported DELETE reproducibility figure. Counting merges there would raise
   the numerator without touching the contested set, so every merge-heavy week
   would report better deletion agreement than it measured.
 
@@ -1129,8 +1127,8 @@ contend with the weekly consolidation and cannot delete.
   looks: `readApprovedIds` treats an absent file as "no filter", so `--ids` on a path
   that writes nothing would apply *everything* — which is only safe because both
   flags are absent together. Dropping `--consensus-passes` weakens the quorum that
-  `consensusDecisions` needs (one pass reproduced only 66% of its own DELETE set on
-  re-run), and unattended is exactly when nobody is watching for that. And `--out`
+  `consensusDecisions` needs to narrow disagreement between classifier passes.
+  Unattended runs require that guard. And `--out`
   must be `/tmp/...` because `snippetLogDir` refuses a path inside the script tree,
   which in the image *is* `/app`. The command is asserted whole, not additively.
 - **TC-SLACKAPP-151** — an invocation that never STARTS a task alarms
@@ -1566,23 +1564,12 @@ made safe or quietly defeated.
   **write**, and the façade's copy of the derivation matches the script's
   character for character.
 
-  `contentHash` returns `sha256:<hex>`, and a `:` cannot appear in an SSM parameter
-  name: `PutParameter` answers `ValidationException` ("each sub-path can be formed
-  as a mix of letters, numbers and the following 3 symbols .-_"), while a **read**
-  parses the colon as the version/label selector instead — so the two operations
-  disagree about what the name even is rather than both simply 404ing. Probed
-  against the live service: colon rejected on write, dash accepted.
-
-  Untreated this made the whole loop dead on arrival, and *silently*: `claimAndRun`
-  separates "someone else won" from every other failure by the error **name**, so a
-  `ValidationException` fell to the generic branch and answered "The approval could
-  not be recorded, so the apply did not start" for every click on every stage —
-  while pointing the operator at boundary rollout order, which is the wrong place
-  to look. Nothing caught it because every SSM double was a `Map` keyed on the name
-  string, and a `Map` cannot reject a name's **shape**. The doubles on both sides
-  now borrow the service's constraint from `assertClaimParameterName`; that, rather
-  than the one name-shape assertion, is what makes this class of defect catchable
-  at all.
+  `contentHash` returns `sha256:<hex>`; the claim-name derivation converts the
+  separator to the project's writable `sha256-<hex>` form. Both implementations
+  and their test doubles must enforce `assertClaimParameterName`. An unconverted
+  name must raise `ValidationException`, independently of the
+  `ParameterAlreadyExists` duplicate-claim case. The fake must validate the name
+  rather than accept every string as a Map key.
 
   The Lambda bundle and the container script share no module, so the derivation is
   duplicated in `slack-interactions.ts`. This case asserts the two agree, because a

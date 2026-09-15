@@ -23,14 +23,9 @@ import { applicationRegion } from "./ecr";
 
 export interface ObservabilityInputs {
   stage: string;
-  // The mnemo-server log group name, read from the SERVICE'S TASK DEFINITION
-  // (an Output<string>) — never a hand-computed string. SST names container
-  // log groups with a random physical-name hash AND creates them with
-  // `ignoreChanges: ["name"]`, so a pinned `logging.name` silently never
-  // materializes on a stack whose group already exists (prod incident:
-  // metric filters 400'd ResourceNotFoundException on a name that would
-  // never exist). Deriving from the task def both yields the REAL name and
-  // threads a Pulumi dependency edge through the log group's creator.
+  // Use the resolved log-group name from the service task definition, not a
+  // hand-computed name. Passing the Output also preserves the dependency on
+  // the component that creates the group.
   logGroupName: Output<string>;
   slackWebhookUrl?: Input<string>;
   mantleProject?: string;
@@ -47,11 +42,8 @@ export const DURABLE_FAILURE_RATIO_EXPRESSION =
 // zero-fact jobs reads 100% and would otherwise page.
 export const ZERO_FACT_RATE_EXPRESSION = "IF(succeeded > 50, zero_rate, 0)";
 // Exactly 1.0: breach only when NOT ONE of the day's 50+ succeeded jobs
-// extracted a fact. A fractional threshold reads as a comfortable margin over
-// the 96% worst healthy day but is not one — at 200 jobs, 0.995 would page on a
-// day that extracted a single real fact. "Any extraction at all" is the honest
-// line for a blackout detector, and it cannot false-positive on traffic that is
-// still producing memories.
+// extracted a fact. A fact-producing job anywhere in the evaluation window
+// clears this blackout alarm. Partial quality degradation is a separate concern.
 export const ZERO_FACT_ALARM_THRESHOLD = 1;
 
 export const PRESCREEN_POLICY_VERSION = "msg-count-le-1-v1";
@@ -502,23 +494,11 @@ export function observability(
   // SUCCEEDED job (0 or 1), so its Average over a window IS the zero-fact rate
   // — no second metric is needed for the ratio.
   //
-  // Deliberately a blackout detector, not a sensitive quality monitor. Measured
-  // healthy prod baseline: 96/82/91/90/77% by day, and SIX CONSECUTIVE 100%
-  // hours (Jul 30) — most agent sessions genuinely carry no durable takeaway,
-  // the documented correct outcome of rule D4. Those six hours total 134 jobs
-  // with zero facts, which is why the window is DAILY and the threshold is
-  // exactly 1.0: a sub-day window or a fractional threshold would page on that
-  // healthy stretch. Over the calendar day those hours belong to, Jul 30
-  // extracted 35 facts from 377 jobs and stays quiet.
-  //
-  // NOTE the evaluation window SLIDES: CloudWatch advances it by a minute and
-  // does not align it to the wall clock, and @pulumi/aws at the pinned version
-  // exposes no `evaluationWindow` to request wall-clock alignment. So this is
-  // not literally a per-calendar-day check — some 24h window could enclose the
-  // 134-job stretch plus quieter hours. That is an accepted residual: the
-  // threshold of exactly 1.0 means any single fact-producing job anywhere in
-  // the window clears it, and the stretch above is bracketed on both sides by
-  // fact-producing hours in the real series.
+  // The daily window and threshold of exactly 1.0 define a blackout detector.
+  // A fact-producing job anywhere in the evaluation window clears the alarm.
+  // The window is sliding, not a calendar-day aggregate. Synthetic tests cover
+  // all-zero intervals, mixed outcomes, and the traffic guard; operator traffic
+  // baselines belong in private records.
   //
   // What it catches: "the extractor returns nothing, ever" — a bad model swap,
   // a broken prompt, a translation regression yielding empty content. What it
@@ -526,10 +506,9 @@ export function observability(
   // metric at all (that is #104/#106's shadow scoring).
   new aws.cloudwatch.MetricAlarm("DurableIngestZeroFactRateAlarm", {
     alarmDescription:
-      "Not one of 50+ succeeded ingest jobs extracted a fact in 24h. Suspect a " +
-      "broken extractor (model swap, prompt, or llm-proxy translation), not " +
-      "normal traffic: healthy days run 77-96% zero-fact but always extract " +
-      "something. Check MNEMO_LLM_MODEL and the llm-proxy request log.",
+      "Not one of 50+ succeeded ingest jobs extracted a fact in 24h. " +
+      "Investigate the selected model, extraction prompt, and llm-proxy " +
+      "translation. Check MNEMO_LLM_MODEL and the llm-proxy request log.",
     metricQueries: [
       {
         id: "zero_rate",

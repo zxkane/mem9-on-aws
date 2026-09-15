@@ -146,16 +146,11 @@ every metric alarm declares missing-data behavior:
   `IF(JobsSucceeded > 50, rate, 0)`, missing data not breaching. Because
   `ZeroFactSuccess` is emitted once per succeeded job, its `Average` is the
   zero-fact rate directly. This is a smart-extraction *blackout* backstop, not
-  a quality monitor: the measured healthy baseline runs 77–96% by day, so a high
-  zero-fact rate is normal (rule D4's correct outcome for a session with no
-  durable takeaway) and only "not one of 50+ jobs extracted anything" is
-  conclusive — a bad model swap, a broken prompt, an llm-proxy translation
-  regression. The window must be a full day and the threshold exactly 1.0:
-  six consecutive healthy hours (Jul 30) totalled 134 jobs with zero facts, so
-  a sub-day window or a fractional threshold pages on healthy traffic, while
-  over its real day that traffic extracted 35 facts from 377 jobs. Subtle
-  quality drift is not observable in this metric; that is the pre-screen
-  scoring work's scope.
+  a quality monitor. The threshold of exactly 1.0 detects an all-zero window;
+  any fact-producing job in that window keeps the alarm quiet. Validate mixed
+  outcomes and the traffic guard with synthetic fixtures. Operator traffic
+  baselines remain private. Subtle quality drift is outside this metric's scope
+  and requires separate evaluation.
 
 The obsolete `ingest_dropped` filter is removed because durable jobs now have
 explicit retry and dead outcomes.

@@ -50,4 +50,4 @@ Responses route remain independently regional.
 | ID | Scenario | Expected result |
 | --- | --- | --- |
 | TC-APPREGION-030 | Read current deployment and operator guidance | It refers to the `sst.config.ts` application region rather than presenting Tokyo as immutable |
-| TC-APPREGION-031 | Read empirical or rejected-alternative records | The original observed region and date remain intact |
+| TC-APPREGION-031 | Read service endpoint examples | Public examples parameterize the service region and exclude operator deployment records |

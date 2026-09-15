@@ -1528,7 +1528,7 @@ describe("LLM route", () => {
       model: "openai.gpt-5.6-terra",
       instructions: "sysprompt",
       reasoning: { effort: "high" },
-      // 4096 truncates reasoning output mid-JSON — the measured GLM-5 failure.
+      // Pin the Responses route's output budget independently of the chat route.
       max_output_tokens: 24000,
     });
     expect(calls[0].body.input).toEqual([
@@ -1640,9 +1640,9 @@ describe("LLM route", () => {
   });
 
   it("TC-MEMCLEAN-074c: a near-miss model id must not silently use the 4096 cap", async () => {
-    // Prefix matching is exact: a typo or the next model generation would
-    // otherwise route to chat-completions at the truncating cap and produce a
-    // run that looks successful while a third of the corpus goes unclassified.
+    // These near-miss IDs do not match the configured Responses prefix.
+    // Pin their chat-route budget explicitly so route changes require
+    // a deliberate update to this test.
     for (const model of ["openai.gpt-5.6terra", "openai.gpt-6-terra", "OPENAI.GPT-5.6-TERRA"]) {
       const { calls, fetchImpl } = recorder([chatReply('{"verdicts":[]}')]);
       await build({ model }, { fetchImpl })("sys", []);
@@ -1987,9 +1987,9 @@ describe("inactive-memory SQL adapter", () => {
 
     await adapter.listInactive({});
     const both = db.queries.at(-1);
-    // With no --state the query must still exclude active rows. A bare
-    // `SELECT ... FROM memories` would list the entire corpus, which for a
-    // 2811-memory store is not a listing an operator can review.
+    // This fixture has one inactive row and reports total=1. The SQL must
+    // still exclude active rows when no --state is supplied; the fake
+    // returns its seeded row without evaluating that predicate.
     expect(both.text).toMatch(/state\s*(<>|!=)\s*'active'|state\s+IN\s*\(\s*'archived'\s*,\s*'deleted'\s*\)|state\s+IN\s*\(\s*'deleted'\s*,\s*'archived'\s*\)/u);
     expect(both.values).not.toContain("active");
   });
@@ -2249,10 +2249,9 @@ describe("--list-inactive", () => {
   });
 
   it("TC-MEMRESTORE-024 a COUNT that answers nothing throws instead of printing 'of 0'", async () => {
-    // The denominator is the whole truncation signal: "listed 100 of 2811" is
-    // how an operator learns the page is partial. `?? 0` on a missing count row
-    // prints "listed 1 of 0" and exits 0 — a default masking a failed query,
-    // not an absent value.
+    // Both fixtures return one row but no usable total: the count is missing
+    // or is under the wrong field name. Treating either as zero would print
+    // "listed 1 of 0" and disguise a failed count query as a valid listing.
     const missing = fakeDb({ "count(": () => ({ rows: [] }), "FROM memories": () => ({ rows: [inactiveRow("d-1", "deleted")] }) });
     await expect(runListInactive(restoreOpts(), restoreDeps({ db: missing }))).rejects.toThrow(/count/iu);
 
@@ -3657,8 +3656,7 @@ describe("protected topics (#123)", () => {
 });
 
 describe("two-pass consensus (#123)", () => {
-  // The 66%-agreement finding that motivated the issue: one classification pass
-  // is not reproducible enough to authorize deletions from. Consensus is the
+  // Independent classification can disagree. Consensus is the
   // narrowing operation — an id is offered only if EVERY pass independently said
   // DELETE, and everything else is reported rather than acted on.
   const del = (id, extra = {}) => ({
@@ -4849,14 +4847,10 @@ describe("materializing the approved ids in the apply task (#123)", () => {
     });
 
   it("TC-SLACKAPP-131 the claim name is one SSM will accept on WRITE, and matches the facade's copy", async () => {
-    // The defect this pins was total and silent: `contentHash` returns
-    // `sha256:<hex>`, and a `:` cannot appear in an SSM parameter name.
-    // PutParameter answers ValidationException, which `claimAndRun` classifies by
-    // error NAME — not `ParameterAlreadyExists`, so it fell to the generic branch
-    // and answered "The approval could not be recorded" for EVERY click on every
-    // stage. Probed live in ap-northeast-1: colon rejected on write, dash
-    // accepted. Nothing caught it because every SSM double was a Map keyed on the
-    // name string, so no double could reject a name's SHAPE.
+    // contentHash uses sha256:<hex>; claimParameterName must convert the
+    // separator and match the facade implementation. The name validator
+    // and SSM fakes must reject the unconverted form as ValidationException,
+    // rather than accepting every string as a Map key.
     const hash = contentHash("m-1");
     expect(hash).toMatch(/^sha256:/u);
     const name = claimParameterName("/mem9-on-aws/prod", hash);
@@ -5959,9 +5953,8 @@ describe("replaying the reviewed list instead of re-classifying (#150)", () => {
     // The defect #150 exists for. Before this branch, a Slack-triggered apply fell
     // through to the scan and applied whatever a FRESH classification decided,
     // filtered by the approved ids — so the operator reviewed one list and the task
-    // applied another that merely overlapped it. The classifier is nondeterministic
-    // (one pass reproduced only 66% of its own DELETE set on re-run), so the two
-    // lists genuinely differ.
+    // applied another that merely overlapped it. Independent classification can
+    // change the result, so the fixture deliberately supplies conflicting lists.
     //
     // The fixture makes them differ on purpose: the reviewed artifact deletes
     // `reviewed-1`, and the classifier — if it ran — would delete `drifted-1`
@@ -7035,9 +7028,8 @@ describe("offering the list to Slack (#123)", () => {
 
   it("TC-SLACKAPP-233 writes the week record and publishes the derived streak (#154)", async () => {
     // The signal a zero-offer week produces, end to end through the real offer. What
-    // it is for: `consensusDecisions` needs >= 2 usable passes to AGREE, and one pass
-    // reproduced only 66% of its own DELETE set on re-run — so a partial classifier
-    // degradation can empty the intersection while every batch still succeeds, and
+    // it is for: `consensusDecisions` needs >= 2 usable passes to AGREE. Classifier
+    // disagreement can empty the intersection while every batch still succeeds, and
     // the run then exits 0, which no task-exit alarm can see.
     const weekRecord = (week, offered) =>
       JSON.stringify({ stage: "prod", isoWeek: week, offered, at: `${week}-fixture` });

@@ -9,13 +9,10 @@
  * injecting the X-API-Key (= tenant id). No ALB, ACM cert, or VPC Lattice is
  * deployed; Cloud Map owns the VPC-associated Route 53 private hosted zone.
  *
- * WHY A LAMBDA TARGET (not ALB + self-managed-Lattice privateEndpoint): that path
- * FAILED to stabilize 100% of the time in the full CI deploy — an AgentCore
- * control-plane internal error on the self-managed-Lattice privateEndpoint target
- * in ap-northeast-1 (verified: the identical config reached READY in isolation but
- * never in a full-stack deploy). A Lambda target is AgentCore's out-of-the-box
- * private path — "the gateway can immediately invoke Lambda functions configured
- * with VPC access" — so it sidesteps Lattice entirely.
+ * The Lambda target connects the authenticated Gateway to the private server.
+ * Preserve the VPC network path, service discovery, and signed namespace
+ * context when changing this integration. Validate the deployed path with
+ * synthetic requests.
  *
  * The target is provisioned via a `command.local.Command` driving the direct
  * bedrock-agentcore-control `CreateGatewayTarget` API (infra/gateway/

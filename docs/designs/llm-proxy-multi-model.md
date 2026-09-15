@@ -6,20 +6,12 @@ Status: Approved (interactive session)
 
 ## Problem
 
-Before this change, the proxy spoke exactly one dialect: chat-completions
-against the application-region Mantle endpoint (Tokyo in the 2026-08-01
-deployment). The OpenAI reasoning models
-(`openai.gpt-5.6-terra`, `openai.gpt-5.6-luna`) are only available in
-us-west-2 / us-east-1 and ONLY via the **Responses API** at the
-`openai/v1/responses` path (probed live 2026-08-01: `/v1/chat/completions`,
-`/v1/responses`, and `openai/v1/chat/completions` all 400 with "does not
-support"; `openai/v1/responses` returns 200). mem9's LLM client is immutable
-chat-completions — so model switching must happen in the proxy: translate the
-API surface and hop regions, keyed on the requested `model`.
-
-Evidence this matters: the prod memory-cleanup dry-run had 33% classification
-SKIPs under GLM-5 (JSON truncation at max_tokens=4096); the terra-high rerun
-had zero.
+The proxy needs to support configured model routes while exposing the
+Chat Completions contract expected by mem9. It translates selected model
+prefixes to the Responses API and uses the independently configured region
+for that route. Validate model availability against AWS documentation and
+exercise the translations with synthetic fixtures. Operator model probes,
+deployment-region histories, and workload comparisons remain private.
 
 ## Routing model
 
@@ -41,7 +33,7 @@ different `model` per request. No proxy restart semantics change.
 | `LLM_PROXY_RESPONSES_REGION` | `us-west-2` | Region for the responses route (bearer + endpoint) |
 | `LLM_PROXY_RESPONSES_BASE` | derived from region | Override for tests |
 | `LLM_PROXY_REASONING_EFFORT` | `high` | `reasoning.effort` when the request doesn't carry `reasoning_effort` (mem9 can't) |
-| `LLM_PROXY_RESPONSES_MAX_OUTPUT_TOKENS` | `16384` | Cap/default for `max_output_tokens` — reasoning burns output tokens first, so the chat route's 4096 cap would truncate JSON (the GLM failure mode) |
+| `LLM_PROXY_RESPONSES_MAX_OUTPUT_TOKENS` | `16384` | Cap/default for `max_output_tokens`; validate the budget and truncation handling with synthetic fixtures |
 | `LLM_PROXY_RESPONSES_OPENAI_PROJECT` | empty | `OpenAI-Project` for the responses region (projects are regional; the application-region id is not reused). Empty → header omitted (untagged) |
 
 Existing chat-route config is untouched; issue #46's provider-boundary
