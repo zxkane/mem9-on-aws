@@ -129,6 +129,11 @@ not substitute for the human `cognito:groups` Gateway smokes named below.
 
 ## Memory, Session, And Search Isolation
 
+`TC-GROUPNS-072/125` also execute the standalone `enforce` command from the built
+bootstrap image against PostgreSQL. Its repository-relative SQL asset must be
+present in the image; a preview-only preparation path with an explicit file
+override is insufficient evidence for this operator command.
+
 | ID             | Scenario                                                          | Expected                                                                                                                                   | Surface                |
 | -------------- | ----------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------ | ---------------------- |
 | TC-GROUPNS-073 | Namespace A searches content present only in B                    | Vector, FTS, count, and fallback outputs contain no B data                                                                                 | PostgreSQL integration |

@@ -458,6 +458,11 @@ committing the writer-fence phase. The enforcement DDL runs as one bounded
 transaction and is rerun from its beginning after a rollback. Required mode is
 enabled only after the database records `constraints_complete`.
 
+The bootstrap image also preserves the operator script's repository-relative
+path to enforcement SQL. The migration rehearsal executes `enforce` from the
+built image against PostgreSQL, covering this packaged entry point separately
+from preview preparation, which supplies an explicit migration path.
+
 The retained namespace operator role is owned by the fixed
 `memory-namespace-operator-mem9-on-aws` CloudFormation stack in `us-west-2`.
 The first deployment binds that account-global owner to one stage and

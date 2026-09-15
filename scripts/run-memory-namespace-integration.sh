@@ -4,6 +4,7 @@ set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 CONTAINER="mem9-namespace-migration-${RANDOM}-${BASHPID}"
+OPERATOR_IMAGE="mem9-namespace-operator-test:${RANDOM}-${BASHPID}"
 DATABASE="mem9_namespace_migration"
 PREVIEW_DATABASE="mem9_preview_namespace"
 NAMESPACE_ID="60000000-0000-4000-8000-000000000101"
@@ -14,6 +15,7 @@ ACKNOWLEDGEMENT="I_ACKNOWLEDGE_EXISTING_MEMORY_IS_SHARED_TEAM_HISTORY"
 
 cleanup() {
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
+  docker image rm "$OPERATOR_IMAGE" >/dev/null 2>&1 || true
 }
 trap cleanup EXIT
 
@@ -811,5 +813,16 @@ NODE
 
 MEM9_NAMESPACE_TEST_DSN="$MNEMO_DSN" \
   "$ROOT/node_modules/.bin/vitest" run "$ROOT/scripts/memory-external-access.test.mjs"
+
+# Exercise the operator's own relative SQL lookup from the actual image. The
+# preview preparation path passes an explicit migration file and cannot catch
+# an omitted runtime asset in the standalone enforcement command.
+docker build --quiet -f "$ROOT/docker/bootstrap/Dockerfile" \
+  -t "$OPERATOR_IMAGE" "$ROOT" >/dev/null
+docker run --rm --network "container:${CONTAINER}" \
+  -e "MNEMO_DSN=postgres://postgres:test@127.0.0.1:5432/${DATABASE}?sslmode=disable" \
+  --entrypoint node "$OPERATOR_IMAGE" \
+  /bootstrap/operator/scripts/migrate-memory-namespaces.mjs enforce |
+  jq -e '.phase == "constraints_complete"' >/dev/null
 
 echo "memory namespace migration integration: OK"
