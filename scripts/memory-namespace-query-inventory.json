@@ -3446,9 +3446,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "7f97f391a86bd1ce022e",
+      "id": "bf9be7c5d62d2db7e8bf",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 584,
+      "line": 578,
       "tables": [
         "memories"
       ],
@@ -3462,19 +3462,20 @@
       "namespace_evidence": "namespace_id = $1"
     },
     {
-      "id": "d96c2d35509de30d120e",
+      "id": "5fac11e5cd792d6a4e9d",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 608,
+      "line": 637,
       "tables": [
         "memories"
       ],
-      "statement_sha256": "4a3cbdd1a3171a22fc2fc44b374e28f87a095bb7d18d793ab89554a28df36269",
-      "statement": "WITH namespace_memories AS MATERIALIZED ( SELECT {{dynamic}} FROM memories WHERE {{dynamic}} ) SELECT {{dynamic}}, embedding <=> ${{dynamic}} AS distance FROM namespace_memories ORDER BY embedding <=> ${{dynamic}} LIMIT ${{dynamic}}",
+      "statement_sha256": "857f452920fb6a6326de6a6eb2f04782b8acfd8bf9e9a8e5e30a1710917b75fe",
+      "statement": "WITH namespace_distances AS MATERIALIZED ( SELECT id, embedding <=> ${{dynamic}} AS distance FROM memories WHERE {{dynamic}} ), namespace_top_k AS MATERIALIZED ( SELECT id, distance FROM namespace_distances ORDER BY distance LIMIT ${{dynamic}} ) SELECT {{dynamic}}, namespace_top_k.distance FROM memories JOIN namespace_top_k USING (id) WHERE {{dynamic}} ORDER BY namespace_top_k.distance",
       "classification": "namespace_composed_or_compatibility",
-      "rationale": "The literal is an additive compatibility branch or a query fragment whose namespace predicate is appended when MemoryRepo carries a namespace; namespace-required startup and integration tests reject an empty scope.",
+      "rationale": "The namespace-scoped repository composes the same predicates at candidate selection and hydration; materialized scalar distances prevent approximate candidate selection while primary-key hydration remains available.",
       "coverage": [
         "upstream/server/internal/repository/postgres/namespace_integration_test.go",
-        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go"
+        "upstream/server/cmd/mnemo-server/namespace_startup_integration_test.go",
+        "upstream/server/internal/repository/postgres/namespace_vector_query_test.go"
       ],
       "namespace_evidence": null
     },

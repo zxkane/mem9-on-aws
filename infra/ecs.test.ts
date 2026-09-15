@@ -655,6 +655,15 @@ describe("ecs stack", () => {
     );
   });
 
+  it("TC-GROUPNS-080: pins the measured exact-search capacity without extending its deadline", async () => {
+    installGlobals("prod");
+    const ecs = await loadEcs();
+    ecs(fakeDbOut());
+    const env = containersByName()["mnemo-server"].environment as Record<string, unknown>;
+    expect(env.MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS).toBe("20000");
+    expect(env.MNEMO_NAMESPACE_EXACT_VECTOR_TIMEOUT).toBe("2s");
+  });
+
   it("treats an unset GitHub repository variable as compatibility mode", async () => {
     process.env.MEM9_NAMESPACE_REQUIRED = "";
     installGlobals("prod");
