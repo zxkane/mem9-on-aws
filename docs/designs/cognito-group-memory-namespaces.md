@@ -54,7 +54,7 @@ The repository implementation includes:
 - a retained least-privilege namespace operator role;
 - `MEM9_NAMESPACE_REQUIRED`, which defaults to `0` and keeps an existing stage
   compatible until the database reaches `constraints_complete`;
-- a version-controlled 285-statement scoped-SQL manifest generated from the
+- a version-controlled 290-statement scoped-SQL manifest generated from the
   complete patched upstream and local operator/DDL surfaces;
 - a coverage ownership map assigning every `TC-GROUPNS-001..144` criterion to
   exactly one capability and named verification surface without claiming that
@@ -68,6 +68,62 @@ also execute the documented service drain and write freeze; the database
 operator command intentionally does not scale ECS or mutate Gateway resources.
 
 ## User-Visible Contract
+
+### Human OAuth preview acceptance
+
+The human release gate runs only on a `pr-N` stage with managed authentication.
+It drives authorization code plus PKCE through the existing OAuth facade and
+Cognito login page, then sends the resulting human access tokens to the deployed
+Gateway. A native loopback callback is intercepted by the test browser; no
+additional callback allowlist entry or authentication bypass is introduced.
+
+Synthetic identities use generated credentials held in owner-only temporary
+files. Database credentials are loaded from the pinned secret reference only
+after target validation. User creation suppresses messages.
+The existing two preview namespaces and their explicitly registered groups are
+reused. Group-name prefixes remain an operator convention, not an implicit
+namespace-creation API.
+
+A trusted operator runs the reviewed candidate from an authorized VPC host or
+one database tunnel. An owner-only deployment manifest pins the account, region,
+preview stage, deployed commit, exact pool, database resource/secret, and HTTP
+endpoints. Names and tags are additional consistency checks, not ownership proof.
+The runner reuses the existing reconciliation and access-management functions
+with actual Cognito and PostgreSQL connections. Concurrent commands retain
+independent SQL sessions through advisory unlock.
+
+This slice adds no user-administration grant to CI or deployed workloads. The
+existing shared boundary is near its policy-size limit, and mutable pool tags
+cannot establish a safe preview-only permission ceiling. Automated human release
+gating remains coupled to the separately tracked deploy-role isolation work.
+
+The browser driver interleaves Gateway requests with operator batches. The
+matrix covers first-login JIT, same-team sharing, cross-team denial, zero and
+multiple recognized groups, unrelated groups, role intersection, a failed grant
+and retry, A-to-B-to-A movement, stale-token revocation, and emergency cancel.
+The operator batch separately injects failures at each mutation boundary and
+observes real advisory-lock waits between concurrent commands. Accepted team
+data remains in its original namespace after a user moves.
+
+Because Gateway masks Lambda failures, generic MCP errors alone are not denial
+evidence. PR proxy diagnostics record only the verified invocation hash and
+backend HTTP status. The driver uses a unique invocation for each negative case
+and requires its expected 403/409 record in the pinned proxy log group. Transport
+errors and unrelated tool failures fail the run. Diagnostics are disabled for
+production and never record arguments, bearer tokens, or identity lookup keys.
+
+Cleanup first disables fixture principals, then removes only owned synthetic
+users. The runner closes database sessions and browser contexts before removing
+generated credentials; incomplete cleanup makes the run incomplete. Test output contains named cases,
+counts, and pass/fail states; it excludes credentials, raw identities, lookup
+keys, memory text, and deployment identifiers. CI runs the same case logic with
+real PostgreSQL and a simulated provider; required live evidence comes from the
+operator's real preview run and does not claim hostile-PR execution isolation.
+
+Recovery records bind to account, region, pool, database resource/name, and the
+ordered namespace IDs, excluding mutable commit/readiness state. Records are
+atomically replaced with owner-only permissions. Cleanup evidence is distinct
+from acceptance evidence and never overwrites a previous run's result.
 
 ### Namespace lifecycle and admission fencing
 

@@ -33,6 +33,7 @@ import {
   INTERNAL_AUTH_FIELD,
   createTransportEnvelope,
   parseSigningKeys,
+  requestHash,
   verifyInternalContext,
 } from "./namespace-auth.mjs";
 
@@ -45,6 +46,10 @@ const TRANSPORT_SIGNING_KEYS = parseSigningKeys(
   requireEnv("MEM9_TRANSPORT_SIGNING_KEYS"),
 );
 const TRANSPORT_ISSUER = requireEnv("MEM9_TRANSPORT_ISSUER");
+const ACCEPTANCE_STAGE = process.env.MEM9_ACCEPTANCE_STAGE || "";
+if (ACCEPTANCE_STAGE && !/^pr-[1-9][0-9]*$/.test(ACCEPTANCE_STAGE)) {
+  throw new Error("acceptance diagnostics require a PR stage");
+}
 const TOOL_DELIM = "___";
 const MEMORIES_PATH = "/v1alpha2/mem9s/memories";
 const INGEST_JOBS_PATH = "/v1alpha2/mem9s/ingest-jobs";
@@ -280,18 +285,32 @@ export const handler = async (event, context) => {
     invocation: { tool, arguments: input },
     keys: IDENTITY_SIGNING_KEYS,
   });
-  return withinProxyBudget(context, (budget) => {
-    switch (tool) {
-      case "add_memory":
-        return addMemory(input, identity, budget);
-      case "search_memories":
-        return searchMemories(input, identity, budget);
-      case "ingest_messages":
-        return ingestMessages(input, identity, budget);
-      case "get_ingest_job_status":
-        return getIngestJobStatus(input, identity, budget);
-      default:
-        throw new Error(`unknown tool: ${tool}`);
+  try {
+    return await withinProxyBudget(context, (budget) => {
+      switch (tool) {
+        case "add_memory":
+          return addMemory(input, identity, budget);
+        case "search_memories":
+          return searchMemories(input, identity, budget);
+        case "ingest_messages":
+          return ingestMessages(input, identity, budget);
+        case "get_ingest_job_status":
+          return getIngestJobStatus(input, identity, budget);
+        default:
+          throw new Error(`unknown tool: ${tool}`);
+      }
+    });
+  } catch (error) {
+    // Gateway intentionally masks Lambda failures. The operator-run preview
+    // gate correlates this content-free record with its unique invocation so
+    // a backend outage cannot masquerade as an expected authorization denial.
+    if (ACCEPTANCE_STAGE && error instanceof Mem9HttpError) {
+      console.log(JSON.stringify({
+        event: "namespace_acceptance_http_error",
+        request_hash: requestHash({ tool, arguments: input }),
+        status: error.status,
+      }));
     }
-  });
+    throw error;
+  }
 };

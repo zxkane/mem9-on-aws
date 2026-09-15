@@ -246,6 +246,7 @@ export function gateway(
       MEM9_IDENTITY_SIGNING_KEYS: identitySigningKeys,
       MEM9_TRANSPORT_SIGNING_KEYS: transportSigningKeys,
       MEM9_TRANSPORT_ISSUER: "gateway-target",
+      MEM9_ACCEPTANCE_STAGE: /^pr-[1-9][0-9]*$/.test(stage) ? stage : "",
     },
   });
 
@@ -403,6 +404,12 @@ export function gateway(
     name: `${prefix}/gateway/id`,
     type: "String",
     value: gatewayId,
+    tags,
+  });
+  new awsAny.ssm.Parameter("SsmGatewayProxyFunctionArn", {
+    name: `${prefix}/gateway/proxy-function-arn`,
+    type: "String",
+    value: proxyFn.arn,
     tags,
   });
 
