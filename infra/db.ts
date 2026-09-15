@@ -28,9 +28,9 @@
  * schema is applied by the one-shot schema-bootstrap task on deploy (§8), which
  * connects to this cluster. This stack only provisions the cluster + creds.
  *
- * Cost note: Aurora Serverless v2 has a ~0.5 ACU idle floor (~$40–50/mo) — this
- * is the project's largest line. Only deployed on real stages; PR previews get it
- * too (they exercise the real path), so preview stages carry the cost until closed.
+ * Production retains a 1 ACU floor for the namespace search working set.
+ * Development and previews retain 0.5 ACU. Capacity pricing is regional;
+ * previews carry their idle cost until their stage is removed.
  */
 
 import { resolveVpc } from "./vpc";
@@ -103,17 +103,15 @@ export function db(): DbOutputs {
   // with it via the injected DSN. See the header for the dated
   // PENDING_PROXY_CAPACITY deployment observation.
   //
-  // scaling.min = "0.5 ACU" (the LOCKED floor, ARCHITECTURE.md §3/§9) — NOT
-  // "0 ACU". We keep 0.5 (not auto-pause min 0): a paused instance would add
-  // ~15-30s cold-resume latency to the first request after idle, and mem9 is a
-  // long-lived server holding a connection, so it rarely idles long enough to
-  // pause anyway. Max 4 ACU is ample headroom for a single operator.
+  // Actual result fetching must remain within the namespace SQL deadline after
+  // scale-down. Production's corpus outgrew the 0.5 ACU cache; keep its floor at
+  // 1 ACU. Small preview/development databases retain their existing floor.
   const aurora = new sst.aws.Aurora("Mem9Db", {
     engine: "postgres",
     version: "17.4",
     database: "mem9",
     scaling: {
-      min: "0.5 ACU",
+      min: $app.stage === "prod" ? "1 ACU" : "0.5 ACU",
       max: "4 ACU",
     },
     vpc: {

@@ -132,10 +132,17 @@ describe("db stack", () => {
     // connects to the cluster writer endpoint directly.
     expect(args.proxy).toBeUndefined();
     expect(args.database).toBe("mem9");
-    expect((args.scaling as { min: string; max: string }).min).toBe("0.5 ACU");
+    expect((args.scaling as { min: string; max: string }).min).toBe("1 ACU");
     expect((args.scaling as { min: string; max: string }).max).toBe("4 ACU");
     expect(args.vpc).toBeDefined();
     expect((args.vpc as { securityGroups: unknown }).securityGroups).toBeDefined();
+  });
+
+  it.each(["dev", "pr-42"])("keeps the existing preview/development capacity floor for %s", async (stage) => {
+    installGlobals(stage);
+    const db = await loadDb();
+    db();
+    expect(auroras[0].args.scaling).toEqual({ min: "0.5 ACU", max: "4 ACU" });
   });
 
   it("sets NO transform.proxy hook (there is no proxy to configure)", async () => {
