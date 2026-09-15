@@ -30,6 +30,9 @@ COPY docker/bootstrap/operator-entrypoint.mjs /bootstrap/operator/operator-entry
 COPY scripts/lib/memory-namespace.mjs /bootstrap/operator/scripts/lib/memory-namespace.mjs
 COPY scripts/manage-memory-access.mjs /bootstrap/operator/scripts/manage-memory-access.mjs
 COPY scripts/migrate-memory-namespaces.mjs /bootstrap/operator/scripts/migrate-memory-namespaces.mjs
+# The standalone operator resolves its enforcement SQL relative to scripts/,
+# just as it does in a checkout. Preserve that layout alongside bootstrap's SQL.
+COPY docker/bootstrap/migrations/003_enforce_memory_namespaces.sql /bootstrap/operator/docker/bootstrap/migrations/003_enforce_memory_namespaces.sql
 COPY scripts/prepare-preview-memory-namespaces.mjs /bootstrap/operator/scripts/prepare-preview-memory-namespaces.mjs
 COPY scripts/reconcile-memory-namespaces.mjs /bootstrap/operator/scripts/reconcile-memory-namespaces.mjs
 COPY package.json package-lock.json /bootstrap/operator/
