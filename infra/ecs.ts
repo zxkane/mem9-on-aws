@@ -32,10 +32,8 @@
  * MCP REACHABILITY (§6a): the AgentCore Gateway reaches mnemo-server via a
  * VPC-attached proxy Lambda (infra/gateway.ts), NOT a public/ALB endpoint. This
  * stack registers the service in AWS Cloud Map (`mnemo.mem9-<stage>.local`) so the
- * Lambda can resolve + reach the task privately over HTTP:8080. (Earlier revisions
- * used an internal ALB + VPC Lattice privateEndpoint. Empirical 2026-07-14: that
- * AgentCore target path failed to stabilize, so the repository replaced it with
- * the Lambda target.)
+ * Lambda can resolve + reach the task privately over HTTP:8080. This is the
+ * service-discovery path used by the Lambda target in infra/gateway.ts.
  *
  * SCHEMA BOOTSTRAP (separate one-shot task — infra/bootstrap.ts):
  * mem9 does NOT create the PG memories table (it only validates idx_app at
@@ -98,17 +96,15 @@ const MAX_EXTRACTION_CONVERSATION_RUNES = 200_000;
 // task privately via the Cloud Map DNS name registered below.
 const MNEMO_PORT = 8080;
 
-// The GLM-5 model id mem9 sends as `model` on each /chat/completions (Mantle
-// Chat-Completions model, verified live — see docs/mem9-facts.md). Overridable
-// via env for a model swap without a code change.
+// Default model passed to the local proxy in chat-completions requests.
+// MEM9_LLM_MODEL overrides it; validate a selected model against its configured
+// route and region using synthetic requests.
 const LLM_MODEL = process.env.MEM9_LLM_MODEL || "zai.glm-5";
 
-// Bedrock Project id for Mantle cost attribution (the OpenAI-Project header the
-// proxy injects). Mantle does NOT support IAM-principal attribution, so this is
-// how GLM-5 spend is tagged. CI sets MEM9_BEDROCK_PROJECT from the out-of-band
-// Bedrock Project stack output. Non-production stages may omit it and run
-// untagged; production rejects an empty value below. See
-// infra/cloudformation/bedrock-mantle-project.yaml.
+// Bedrock Project id passed by the proxy in its OpenAI-Project header.
+// CI supplies MEM9_BEDROCK_PROJECT from the out-of-band Project stack output.
+// Non-production stages may omit it; production rejects an empty value below.
+// See infra/cloudformation/bedrock-mantle-project.yaml.
 const BEDROCK_PROJECT = process.env.MEM9_BEDROCK_PROJECT || "";
 
 // Optional second Bedrock Project for the llm-proxy's Responses route (OpenAI
@@ -368,11 +364,11 @@ export function ecs(
           MNEMO_LLM_BASE_URL: `http://localhost:${LLM_PROXY_PORT}/v1`,
           MNEMO_LLM_MODEL: LLM_MODEL,
           MNEMO_LLM_API_KEY: "local", // dummy; the proxy holds the real bearer
-          // Recall tuning (issue #23, docker/mnemo-server/patches/): upstream's
-          // hard-coded min-confidence 65 rejected ~88% of prod searches
-          // (natural-language queries score low). 40 admits them; the
-          // zero-result fallback guarantees a best-effort answer whenever
-          // candidates exist (cutoff_reason=zero_result_fallback in the logs).
+          // Recall tuning (issue #23, docker/mnemo-server/patches/): configure
+          // the selection threshold and enable the opt-in zero-result fallback.
+          // Fallback candidates must still meet its minimum confidence floor.
+          // Verify low-confidence candidate selection and fallback behavior
+          // with synthetic recall fixtures.
           MNEMO_RECALL_MIN_CONFIDENCE: "40",
           MNEMO_RECALL_ZERO_RESULT_FALLBACK: "1",
           MNEMO_RECALL_REQUEST_TIMEOUT: `${RECALL_TIMEOUT_MS / 1000}s`,
@@ -434,13 +430,9 @@ export function ecs(
           timeout: "5 seconds",
           retries: 3,
         },
-        // Per-container logging: with `containers[]`, top-level `logging` is
-        // forbidden (SST rejects it alongside containers) — each container sets
-        // its own. Do NOT pin `logging.name`: SST creates the LogGroup with
-        // `ignoreChanges: ["name"]`, so on a stack whose group already exists
-        // a rename is silently ignored — the pinned name never materializes
-        // (prod incident: metric filters 400'd ResourceNotFoundException
-        // forever). observability.ts reads the REAL name from the task def.
+        // With `containers[]`, configure logging per container. Preserve generated
+        // log-group names; observability.ts reads the resolved group from the task
+        // definition so metric filters target the group the container actually uses.
         logging: { retention: "1 month" },
       },
       {

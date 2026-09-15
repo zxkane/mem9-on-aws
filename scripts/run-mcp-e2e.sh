@@ -384,31 +384,19 @@ fi
 echo "run-mcp-e2e: OK — write→search round-trip verified (marker found) for stage ${STAGE}"
 
 # 5. Natural-language recall probe (TC-RECALL-031, issue #23). The keyword
-# search above proves the memory is indexed; now assert that a long (≥25 char)
-# natural-language query — the style the recall hooks instruct agents to use —
-# returns a NON-EMPTY result set. That is the exact #23 regression signature:
-# the hard-coded min_confidence cutoff rejected ALL candidates for long
-# queries (cutoff_reason=min_confidence, 88% zero-hit) regardless of match
-# quality. Rank ORDER is deliberately NOT asserted: on a long-lived tenant
-# (prod) hundreds of real memories legitimately compete for the top-N, so
-# "this run's marker in the top 10" is a flakiness generator, not a
-# regression guard (bit run 30085629030). Finding the marker is logged as a
-# bonus signal when it happens.
+# search above proves the synthetic marker is indexed. This probe additionally
+# requires non-empty results for a long natural-language query, exercising
+# candidate selection and the configured confidence/fallback policy.
 #
-# The query MUST NOT interpolate the run id or the marker (issue #137). A
-# run-scoped high-cardinality literal makes retrieval return ZERO candidates, so
-# the cutoff never runs at all and the server logs cutoff_reason=no_candidates —
-# not the min_confidence signature this probe exists to catch. The previous query
-# here interpolated the run id and was therefore deterministically zero: the probe
-# failed every prod deploy on a condition unrelated to #23. A leading "what " also
-# classifies the query as shape=exact upstream, which reorders candidate buckets,
-# but shape alone is not the cause — a shape=general query carrying the marker also
-# returns zero. Queries built from the memory's ordinary words retrieve reliably.
+# Do not require the run's marker to occupy a particular rank: other matching
+# records can compete for the result budget. Marker presence is a bonus signal.
 #
-# So: keep the query free of the run id and the marker. Reintroducing either turns
-# a #23 cutoff guard back into a retrieval check that always fails. To re-measure,
-# compare a query's `total` here against the server's `confidence recall search`
-# log line for the same window, which reports shape and candidate count.
+# Keep the query free of the run id and marker (issue #137). A unique literal
+# can produce no candidates, bypassing the confidence cutoff this probe covers.
+# Use the fixture's durable configuration terms instead of transient identifiers.
+# When diagnosing the synthetic probe, compare the response total with the
+# server's candidate count, query shape, and cutoff reason. Keep unrelated
+# operator queries and recall measurements out of public evidence.
 NL_QUERY="recall the synthetic E2E fixture project's durable memory storage and local embedding configuration"
 echo "run-mcp-e2e: natural-language recall probe (query: ${NL_QUERY})"
 NL_NONEMPTY=0

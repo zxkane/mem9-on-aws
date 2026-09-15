@@ -28,9 +28,9 @@
 // fail on connectivity), and injects it per forwarded request. It adds
 // OpenAI-Project only when LLM_PROXY_OPENAI_PROJECT is configured.
 //
-// Verified live 2026-07-12: getToken({credentials,region}) → bearer;
-// POST bedrock-mantle.ap-northeast-1.../v1/chat/completions {model:"zai.glm-5"}
-// → HTTP 200 (see the mantle-token-12h-expiry memory).
+// Validate each configured model/route/region with synthetic requests.
+// Public evidence must identify the fixture and configuration; retain
+// operator invocation records outside the repository.
 //
 // Testability: the HTTP server is built by createProxyServer(cfg), with the
 // token minter + upstream fetch injectable, so unit tests exercise the real
@@ -42,11 +42,10 @@ import { createServer } from "node:http";
 
 const DEFAULT_MAX_BODY_BYTES = 1_048_576;
 const DEFAULT_MAX_TOKENS = 4096;
-// Responses route (OpenAI reasoning models — terra/luna). Reasoning burns
-// output tokens before any visible text, so the cap must sit far above the
-// chat route's 4096 or long JSON replies truncate (the GLM failure mode this
-// route exists to fix). Probed live 2026-08-01: these models 400 on every
-// chat-completions path; only `openai/v1/responses` serves them.
+// Model prefixes select the Responses route and its independent output budget.
+// Keep chat and Responses request translation and token budgets separately
+// configurable. Validate complete and truncated replies with synthetic
+// fixtures for the selected model, endpoint, and region.
 const DEFAULT_RESPONSES_MODEL_PREFIXES = ["openai.gpt-5.6-"];
 const DEFAULT_RESPONSES_REGION = "us-west-2";
 export const DEFAULT_REASONING_EFFORT = "high";

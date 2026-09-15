@@ -11,11 +11,8 @@
  *   - Two security groups: a `db` SG (allows 5432 from the `task` SG only) and a
  *     `task` SG (attached to the ECS mnemo-server task).
  *
- * NO RDS PROXY (repository deployment observation, empirical 2026-07-12). The
- * former proxy target remained PENDING_PROXY_CAPACITY for more than 40 minutes at
- * the selected 0.5 ACU floor in two regions, so the repository removed the proxy.
- * mem9 now connects directly to the Aurora cluster writer endpoint. This
- * observation is not a general AWS root-cause or capacity guarantee.
+ * NO RDS PROXY: mem9 and bootstrap connect directly to the Aurora cluster
+ * writer endpoint. Operator-specific deployment diagnostics remain private.
  *
  * DB AUTH (LOCKED, §3a): NOT native IAM — mem9 reads a single static MNEMO_DSN
  * once at startup (pgx stdlib, no credential refresh), so a ~15-min IAM token
@@ -100,12 +97,11 @@ export function db(): DbOutputs {
   // mem9 + the bootstrap task connect to directly (verified: aurora.ts `host`
   // getter returns `proxy?.endpoint ?? cluster.endpoint`). Password is
   // auto-generated + stored in Secrets Manager (secretArn); mem9 authenticates
-  // with it via the injected DSN. See the header for the dated
-  // PENDING_PROXY_CAPACITY deployment observation.
+  // with it via the injected DSN.
   //
-  // Actual result fetching must remain within the namespace SQL deadline after
-  // scale-down. Production's corpus outgrew the 0.5 ACU cache; keep its floor at
-  // 1 ACU. Small preview/development databases retain their existing floor.
+  // Retain cache for namespace-scoped search after capacity scale-down.
+  // The production-stage minimum defaults to 1 ACU; development and preview
+  // stages default to 0.5 ACU. Workload measurements belong in operator records.
   const aurora = new sst.aws.Aurora("Mem9Db", {
     engine: "postgres",
     version: "17.4",

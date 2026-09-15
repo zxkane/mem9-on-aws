@@ -44,6 +44,27 @@ for attempt in $(seq 1 60); do
 done
 
 docker cp "$ROOT/docker/bootstrap/." "$CONTAINER:/bootstrap"
+docker cp "$ROOT/scripts/analyze-ingest-prescreen.sql" \
+  "$CONTAINER:/bootstrap/analyze-ingest-prescreen.sql"
+
+# Analysis has no deployment-specific namespace or time defaults. Missing
+# inputs must fail before any source table is read, even on an empty database.
+for missing in namespace_id analysis_cutoff label_start; do
+  prescreen_args=()
+  [[ "$missing" == namespace_id ]] || prescreen_args+=(-v "namespace_id=$NAMESPACE_ID")
+  [[ "$missing" == analysis_cutoff ]] || prescreen_args+=(-v analysis_cutoff=2001-02-01T00:00:00Z)
+  [[ "$missing" == label_start ]] || prescreen_args+=(-v label_start=2001-01-01T00:00:00Z)
+  if prescreen_output=$(docker exec "$CONTAINER" \
+    psql -qAt -v ON_ERROR_STOP=1 -U postgres -d "$DATABASE" \
+    "${prescreen_args[@]}" -f /bootstrap/analyze-ingest-prescreen.sql 2>&1); then
+    echo "prescreen analysis accepted missing $missing" >&2
+    exit 1
+  fi
+  if [[ "$prescreen_output" != *"$missing is required"* ]]; then
+    echo "prescreen analysis failed without the expected $missing guard" >&2
+    exit 1
+  fi
+done
 docker exec "$CONTAINER" mkdir -p /usr/local/share/mem9
 docker cp \
   "$ROOT/docker/bootstrap/schema.sql" \
@@ -85,6 +106,15 @@ docker exec \
 
 # The same complete schema reruns on later starts and remains idempotent.
 psql_file /usr/local/share/mem9/schema.sql
+
+# Explicit synthetic bounds work against the initialized empty fixture.
+docker exec "$CONTAINER" \
+  psql -qAt -v ON_ERROR_STOP=1 -U postgres -d "$DATABASE" \
+  -v "namespace_id=$NAMESPACE_ID" \
+  -v analysis_cutoff=2001-02-01T00:00:00Z \
+  -v label_start=2001-01-01T00:00:00Z \
+  -f /bootstrap/analyze-ingest-prescreen.sql |
+  python3 -c 'import json,sys; rows=[json.loads(line) for line in sys.stdin if line.strip()]; assert any(row.get("section")=="complete" and row["data"]["consistent"] is True for row in rows)'
 
 psql_value "SELECT to_regclass('idx_memories_namespace_state') IS NULL" |
   grep -qx "t"

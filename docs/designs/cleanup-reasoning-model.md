@@ -6,19 +6,13 @@ Status: Approved (interactive session)
 
 ## Problem
 
-Two gaps left open after the model comparison (GLM-5 vs terra vs luna):
+Two gaps in cleanup model support and extraction monitoring:
 
-1. **The cleanup script cannot reach a reasoning model.** `productionDeps`
-   hard-codes Bedrock Mantle's `/v1/chat/completions` with `max_tokens: 4096`.
-   The `openai.gpt-5.6-*` models are Responses-API-only and live in a different
-   region, so the only way to run cleanup on terra was a gitignored operator
-   wrapper. That wrapper is the thing that produced the current prod decision
-   list — an unreviewable, untested path for a destructive tool.
-
-   Measured on the same 2271-memory corpus: GLM-5 left **740 memories (33%)
-   unclassified** (32 of 117 batches failed JSON twice, root cause `max_tokens:
-   4096` truncation); terra had **zero** classification failures. The batch
-   ceiling, not the prompt, is the limiting factor.
+1. **The cleanup script needs a configurable reasoning-model route.** The
+   original `productionDeps` path used Chat Completions with a 4096-token cap.
+   Cleanup needs the same configurable Responses route and bounded output
+   handling as the local proxy. Route selection and truncation handling must
+   be tested with synthetic fixtures; operator model comparisons remain private.
 
 2. **Nothing watches smart-ingest extraction quality.** A model swap that
    silently degrades extraction is invisible: `ZeroFactSuccess` counts a
@@ -40,31 +34,22 @@ Route selection is by model prefix, exactly as the sidecar does it — so
 `--model openai.gpt-5.6-terra` picks the Responses API in the responses region,
 and `zai.glm-5` keeps the existing chat-completions request byte for byte. Its
 *reply* handling gains one guard: a `finish_reason: "length"` response now fails
-the batch instead of forwarding partial text. On the chat route that previously
-reached `parseVerdicts` and almost always failed JSON parse anyway (the measured
-GLM-5 mode); in the rare case the partial text parsed, it produced actionable
-verdicts from an unfinished reply, so failing is strictly safer.
+the batch instead of forwarding partial text. A truncated reply could previously reach `parseVerdicts` on the chat route.
+Even syntactically valid partial JSON must not produce actionable verdicts.
 
 ### Why the token cap differs per route
 
-`max_tokens: 4096` is correct for GLM-5 and *catastrophic* for a reasoning
-model: reasoning tokens are billed and consumed as output tokens before any
-visible text is produced, so a 4096 cap truncates the JSON mid-object. That is
-precisely the GLM-5 failure mode, and it would recur on terra at the same cap.
-The responses route therefore defaults to a much larger output budget
-(`RESPONSES_MAX_OUTPUT_TOKENS = 24_000`, the value that ran the corpus clean)
-and the chat route keeps 4096.
+The routes have separate output-budget settings: the Responses route defaults
+to `RESPONSES_MAX_OUTPUT_TOKENS = 24_000`, while the chat route keeps 4096.
+Validate budget and batch size with synthetic fixtures for the selected model;
+these defaults do not guarantee complete classification for every workload.
 
-A truncated reply is rejected outright rather than parsed: at a 24k budget,
-truncation is the *expected* failure mode, and it can land on syntactically
-valid JSON (a partial verdict list, or a MERGE whose `merged_content` is cut
-mid-sentence). Classifying that would delete memories the model never finished
-judging and overwrite a survivor with half a fact, so `finish_reason: "length"`
-fails the batch and the existing retry→SKIP machinery takes over.
+A truncated reply can contain syntactically valid but incomplete decisions.
+Reject it before classification so that incomplete DELETE or MERGE decisions
+cannot change memory. The existing retry and SKIP handling covers failed batches.
 
-`LLM_TIMEOUT_MS` also rises to 300s on the responses route only: observed p50
-was ~3.4s but max 29.5s, and a high-effort batch legitimately runs longer than
-the 120s the chat route allows.
+`LLM_TIMEOUT_MS` is 300s on the Responses route and 120s on the chat route.
+Keep workload-specific latency measurements in private operator records.
 
 ### Non-goals
 
@@ -76,52 +61,26 @@ the 120s the chat route allows.
 
 ## Part 2: `ZeroFactSuccess` quality alarm
 
-### The measurement that shaped this
+### Metric contract
 
-`ZeroFactSuccess` is emitted **once per succeeded job** (verified against prod:
-a 6h bucket has `Sum=105`, `SampleCount=133`, and `JobsSucceeded=133` for the
-same window). So `Average` of `ZeroFactSuccess` *is* the zero-fact rate
-directly, with no second metric needed — the metric is a 0/1 gauge per job, not
-a sparse counter.
-
-The naive alarm ("rate too high") is **not viable**, and the baseline says why:
-
-| Window (prod, healthy) | zero-fact rate |
-|---|---|
-| Jul 28 | 96% |
-| Jul 29 | 82% |
-| Jul 30 | 91% |
-| Jul 31 | 90% |
-| Aug 1 | 77% |
-| Jul 30 17:00–23:00 (hourly) | **100%, 100%, 100%, 100%, 100%, 100%** |
-
-Six consecutive fully-zero-fact hours occur in a **healthy** baseline — most
-agent sessions genuinely carry no durable takeaway, which is the documented
-correct outcome of rule D4. Any threshold that would catch a broken extractor
-within hours also fires constantly on normal traffic. This is why the alarm is
-scoped as below, and why the earlier framing of "watch that the rate stays in
-the 82–98% band" cannot be implemented as an hourly alarm.
+`ZeroFactSuccess` is emitted **once per succeeded job** as a 0/1 value.
+Its `Average` is therefore the zero-fact rate. A high zero-fact rate alone
+does not prove failure: sessions without durable facts may legitimately produce
+no extraction. Public verification uses synthetic all-zero, mixed-outcome,
+and traffic-boundary fixtures; operator traffic baselines remain private.
 
 ### What the alarm actually asserts
 
-A **daily** window (`period: 86400`) at a threshold **above the observed
-maximum**, alarming only on a *sustained, total* extraction blackout:
+A **daily** window (`period: 86400`) detects a total extraction blackout:
 
 - `Average(ZeroFactSuccess) >= 1.0` over 24h, with `Sum(JobsSucceeded) > 50`
-  guarding against a low-traffic day trivially reading 100%. The threshold is
-  **exactly** 1.0, not a fraction: 0.995 looks like a comfortable margin over
-  the 96% worst healthy day but is not one — at 200 jobs it pages on a day that
-  extracted a single real fact. "Not one extraction succeeded" is the honest
-  line for a blackout detector and cannot false-positive while memories are
-  still being written.
-- Daily is the shortest window where the healthy signal separates from the
-  broken one at all (windows are 24h and sliding, not calendar-aligned — see
-  Known limits). The six healthy 100% hours above total 134 succeeded jobs
-  with zero facts — past the traffic guard and a breach at any threshold — so
-  an hourly (or any sub-day) window would page on that stretch. Aggregated over
-  its real day, the same traffic extracted 35 facts from 377 jobs.
-- `treatMissingData: notBreaching` — no ingest traffic is not a quality
-  regression (and the liveness alarm already owns "telemetry stopped").
+  guarding against low traffic. Any successful extraction within the evaluation
+  window keeps this alarm quiet; partial degradation is a separate concern.
+- The 24-hour window is sliding, not calendar-aligned. An all-zero short
+  interval can sit inside a mixed-outcome day; synthetic tests cover this
+  aggregation behavior without replaying operator traffic.
+- `treatMissingData: notBreaching` treats missing traffic as non-breaching;
+  telemetry liveness is monitored separately.
 
 This is deliberately a **backstop, not a sensitive detector**. It catches "the
 extractor returns nothing, ever" (a bad model swap, a broken prompt, a
@@ -133,11 +92,9 @@ limit here so the alarm is not mistaken for coverage it does not provide.
 ## Classification-failure visibility
 
 `classifierBroken` (exit 5) fires only when **every** batch fails. A partial
-outage therefore exits 0, and its SKIPs land in the same bucket as legitimate
-planner SKIPs — so the measured GLM-5 run, which failed 27% of batches, reported
-success. Every terminal summary now states how many memories went unclassified
-and what share of batches failed, because on a destructive tool "we did not look
-at 740 memories" must not read the same as "those 740 are fine".
+outage can exit 0, with its SKIPs in the same category as planner SKIPs.
+Every terminal summary therefore states how many memories went unclassified
+and what share of batches failed. Unclassified memories have not passed the audit.
 
 Relatedly, a request the translator rejects is a deterministic defect thrown
 before any network call: it fails identically on all batches, so it aborts the
@@ -157,9 +114,7 @@ Stated so it is not mistaken for coverage it lacks:
   reads healthy here; the telemetry-liveness alarm owns it.
 - **The 24h window slides.** CloudWatch advances the evaluation window by a
   minute and does not align it to the wall clock, and `@pulumi/aws` at the
-  pinned version exposes no `evaluationWindow` for wall-clock alignment. The
-  baseline figures above are calendar-day aggregates, so "daily" means "a 24h
-  window", not "midnight to midnight". Accepted: at a threshold of exactly 1.0
+  pinned version exposes no `evaluationWindow` for wall-clock alignment. Here "daily" means "a 24h window", not "midnight to midnight". Accepted: at a threshold of exactly 1.0
   a single fact-producing job anywhere in the window clears the alarm.
 - **A single surviving extraction silences it.** By construction — see the
   threshold rationale. This is a blackout detector, not a degradation detector.

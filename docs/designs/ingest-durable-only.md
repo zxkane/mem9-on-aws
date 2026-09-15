@@ -2,18 +2,16 @@
 
 ## Problem
 
-smart-ingest stores transient session observations as long-lived memories
-(e.g. "User is using mem9 MCP server with Codex", "already authenticated to
-mem9 before", "Session ID is …"). These dilute recall quality and compete with
-high-value memories in vector search. Over 2026-07-16→23, manually stored
-`add_memory` facts (decisions, gotchas, preferences) were consistently more
-useful on recall than smart-extracted ones.
+Transient session observations can dilute long-lived memory. Illustrative
+examples include a tool finishing a request or a temporary connection opening.
+Extraction should prefer durable decisions, gotchas, and preferences over
+short-lived execution status. Operator memory contents and recall comparisons
+belong in private records.
 
 Root cause: the upstream extraction prompt (`server/internal/service/ingest.go`,
 rules 12-14) is tuned for personal-assistant activity logging ("prefer a
 faithful fact over an empty array", "current status should usually become one
-fact"). Our deployment stores SHARED, LONG-LIVED, cross-agent memory — a
-fundamentally different use case.
+fact"). The durable-only mode targets shared, long-lived cross-agent memory.
 
 ## Decision
 
@@ -27,7 +25,7 @@ base rules that:
   transient identifiers (session ids, CI run numbers, checkpoint SHAs)
 - **Overrides** rules 12-14 (those push toward extraction; ours push toward
   omission) — an empty facts array is correct for a routine work session
-- Provides concrete examples (from real prod noise) of what to keep vs reject
+- Provides generic durability criteria and synthetic examples for verification
 
 This is a `server/internal/service/ingest_config.go` + a 2-line wire into
 `ingest.go`; the patch applies on top of `0001-recall-*.patch`. Defaults = off,

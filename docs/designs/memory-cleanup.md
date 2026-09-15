@@ -41,11 +41,10 @@ instances only) because a host outside the private hosted zone cannot resolve
 healthy instances (rolling deploy) → first instance, logged. `--base-url`
 overrides discovery when tunneling.
 
-**No CI E2E** (decided after two live attempts): the self-hosted runner pool
-runs in a different VPC (different region), so it can never reach the
-VPC-internal REST API; an SG-to-SG ingress rule was tried and reverted.
-Behavior is pinned by the unit suite; live verification is the runbook's
-operator dry-run (TC-MEMCLEAN-060).
+Live cleanup verification requires an authorized network path to the private
+service. Use synthetic fixtures in a suitable test environment and retain
+operator network experiments in private records. Unit tests cover the injected
+adapters and failure behavior (TC-MEMCLEAN-060).
 
 The tenant API key (== tenant id) is read from Secrets Manager
 (`--tenant-secret-arn`, same source ECS injects), or from `MEM9_TENANT_ID` for

@@ -31,8 +31,7 @@ Re-verify them whenever the pinned commit changes.
   It is reachable unauthenticated for the ECS container health check.
 - Search query param is `q` (`GET /v1alpha2/mem9s/memories?q=...`).
 - Writes return `{"status":"accepted"}` and are processed **asynchronously** —
-  list/search may return empty for a few seconds/minutes after write until the
-  ingest+index pipeline completes. (Observed on both self-host POC and SaaS.)
+  list/search may remain empty until the ingest and index pipeline completes.
 
 ## Statefulness / filesystem
 
@@ -108,8 +107,8 @@ embedding <=> $q`. Requires **pre-computed query embedding** (mnemo-server
 
 The unpatched upstream still discards the vector in `GetByID` and unconditionally
 writes it in `UpdateOptimistic`. A tags/metadata-only PUT can therefore clear a
-stored embedding. This was observed in production on 2026-08-03 and reproduced
-against the new pin with the PostgreSQL HTTP integration test before the fix.
+stored embedding. The PostgreSQL HTTP integration test reproduces this behavior
+against the new pin before the fix.
 Upstream PR #470 remains unmerged as of 2026-09-14.
 
 `0012-preserve-postgres-update-embedding.patch` backports the PostgreSQL fix:
@@ -134,13 +133,11 @@ remain disabled by namespace v1 and are not switched to REST by this upgrade.
 - **None of `VECTOR`/`VEC_COSINE`/`EMBED_TEXT` exist in Aurora MySQL** → mem9's
   MySQL/tidb path cannot run on Aurora MySQL. This is why PG is chosen.
 
-### Schema bootstrap gotcha (observed in POC)
+### Schema bootstrap contract
 
 - Control-plane schema file `server/schema_pg.sql` ≠ the **tenant runtime schema**
-  in `server/internal/tenant/schema.go`. In the self-host POC, list/search
-  returned empty and logs showed `validate schema: memories app_id index:
-memories.idx_app is missing` — the control-plane file did not create the
-  `idx_app` index the runtime validator requires. **Bootstrap must apply the
+  in `server/internal/tenant/schema.go`. The runtime validator requires `idx_app`;
+  applying only the control-plane file is insufficient. **Bootstrap must apply the
   tenant runtime schema (idx_app, FTS, vector column at the right dims), not just
   the control-plane file.** Verify exact DDL from `tenant/schema.go` at build time.
 - On the PG backend mem9 does NOT create the `memories` table at runtime — the
@@ -513,23 +510,15 @@ Probed at the pinned commit (`server/internal/config/config.go` + `llm/client.go
 
 ## Bedrock Mantle facts (for the LLM/embedding decision)
 
-Verified against AWS docs + production usage, and — for
-this repo — **empirically live 2026-07-12** (ap-northeast-1):
-
-- **Live proof:** `getToken({credentials, region})` (from `@aws/bedrock-token-generator`)
-  → a `bedrock-api-key-…` bearer; `POST https://bedrock-mantle.ap-northeast-1.api.aws/v1/chat/completions`
-  with `{model:"zai.glm-5", messages:[…]}` + `Authorization: Bearer <bearer>` →
-  **HTTP 200**, OpenAI-shaped body (`choices[0].message.content`). The bearer's
-  default+max TTL is **12h** (`token.js`: `DEFAULT/MAX_TOKEN_EXPIRES_IN_SECONDS = 43200`),
-  and minting is a **pure local SigV4 presign** (no network call) → the token-refresh
-  cadence is ~hourly, not the 15-min figure that was the _RDS IAM_ token, not this one.
+These notes describe AWS documentation and the repository integration.
+Model/region smoke tests must use synthetic requests; operator invocation
+records and workload measurements remain private.
 - **Mantle IS OpenAI-compatible.** Endpoint `https://bedrock-mantle.{region}.api.aws/v1`;
   surfaces = **Chat Completions** + **Responses** (OpenAI-compatible) + **Messages**
   (Anthropic). "Bring OpenAI SDK code by changing only base URL + API key."
-- **mem9 speaks `/chat/completions` only** → the smart-ingest LLM must be a
-  **Chat-Completions** model on Mantle: **GLM-5** (GLM-5 runs on Mantle in
-  production), Claude Sonnet/Fable 5, DeepSeek, Gemma, etc. **GPT-5.4 / 5.5
-  are Responses-API only → NOT usable by mem9** without a source change.
+- **mem9 speaks `/chat/completions`** to the local proxy. The proxy can translate
+  configured model prefixes to the Responses API. Verify model availability
+  for the selected route and region using the AWS documentation.
 - **Mantle has NO `/embeddings`.** All Bedrock embedding models (Titan Text V2,
   Cohere embed-v4, Nova MM) are **`bedrock-runtime` ONLY**, and bedrock-runtime is
   **not** OpenAI-compatible for embeddings (it's InvokeModel). → embedding must be
@@ -620,7 +609,7 @@ this repo — **empirically live 2026-07-12** (ap-northeast-1):
   Multi-replica writes would rely on Aurora's MVCC (fine for the DB) but hit the
   local-disk import limitation above.
 
-## AWS facts and empirical deployment observations
+## AWS facts and infrastructure configuration
 
 - The current IaC provisions Aurora PostgreSQL 17.4 Serverless v2 and applies
   `CREATE EXTENSION vector` in the bootstrap task.
@@ -629,16 +618,11 @@ this repo — **empirically live 2026-07-12** (ap-northeast-1):
   [Aurora cluster endpoints](https://docs.aws.amazon.com/AmazonRDS/latest/AuroraUserGuide/Aurora.Endpoints.Cluster.html).
 - The ECS stack consumes the account default VPC through
   `aws.ec2.getVpc({ default: true })` and selects the NAT-routed private subnets.
-- **Empirical account observation, 2026-07-12:** the default VPC contains both
-  NAT-routed and no-NAT private subnets. `infra/vpc.ts` selects the intended
-  group by its `private-1*` Name tag. Concrete resource ids are intentionally not
-  recorded.
-- **Empirical deployment observation, 2026-07-12:** the former RDS Proxy target
-  remained `PENDING_PROXY_CAPACITY` for more than 40 minutes at the selected
-  0.5 ACU floor in two regions. The repository removed the proxy. mem9 and the
-  bootstrap task now connect directly to the Aurora cluster writer endpoint.
-  This observation is not presented as a general AWS root-cause or capacity
-  guarantee.
+- `infra/vpc.ts` selects private subnets by the `private-1*` Name tag. Operators
+  must provide the required networking in their chosen application region;
+  actual subnet inventories remain private.
+- RDS Proxy is absent from the current architecture. mem9 and bootstrap connect
+  directly to the Aurora cluster writer endpoint.
 
 ### AgentCore Gateway private egress to VPC — Lambda-proxy (the VPC-Lattice path was abandoned)
 
@@ -660,15 +644,7 @@ The function uses
 [Lambda VPC connectivity](https://docs.aws.amazon.com/lambda/latest/dg/configuration-vpc.html)
 to reach Cloud Map and mnemo-server.
 
-**REJECTED alternative — OpenAPI/MCP target with `privateEndpoint` (VPC Lattice):**
-this was the original design and it is a real, documented feature, BUT the
-self-managed-VPC-Lattice `privateEndpoint` GatewayTarget **failed to stabilize 100%
-of the time in the full CI deploy** — an AgentCore control-plane internal error on
-that combination in ap-northeast-1 (the identical config reached READY in isolated
-direct-API tests but never in a full-stack deploy). We could not resolve it from IaC
-(ruled out CloudControl-vs-SDK, CUSTOM_JWT-vs-IAM, RC-not-ACTIVE, domain-verification,
-spaced retries), so we pivoted to the Lambda target. For the record, the rejected
-path's shape was: `privateEndpoint.managedVpcResource`/`selfManagedLatticeResource`
-→ an **internal ALB with a public ACM cert** (Lattice targets are HTTPS; a plain-HTTP
-backend needs the ALB+cert in front) → mnemo-server:8080, with an **API-key credential
-provider** for outbound auth (SigV4 is NOT compatible with ALB/EC2 backends).
+**Alternative — OpenAPI/MCP target with `privateEndpoint` (VPC Lattice):**
+this is outside the current implementation. The repository uses the Lambda
+target and private Cloud Map path described above. Keep operator-specific
+deployment experiments and diagnostics in private records.

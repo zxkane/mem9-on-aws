@@ -19,15 +19,10 @@ export const CONSOLIDATION_SCHEDULER_ROLE_NAME =
  * role, so both must be admitted or the exact-set assertion in
  * `workload-permissions-boundary.roles.test.ts` fails.
  *
- * `Mem9CleanupExecutionRole-` IS on the operator-owned boundary's
- * `ECS_EXECUTION_ROLE_TOKENS` list, and has to be. The reasoning that once said
- * otherwise — the Secrets Manager reads resolve under the default
- * `aws/secretsmanager` key, which needs no identity `kms:Decrypt` ALLOW — is
- * true but irrelevant: the boundary's `SecretCtxRole` statement is an
- * `ArnNotLike` DENY, so an unlisted role is explicitly denied rather than merely
- * ungranted. Simulating each role against the live boundary shows listed ones
- * allowed and unlisted ones explicitDeny. See the BOUNDARY NOTE in
- * `infra/slack-approval.ts` for the measurement.
+ * Keep `Mem9CleanupExecutionRole-` in `ECS_EXECUTION_ROLE_TOKENS` so the
+ * boundary template covers this task's startup secret-injection role.
+ * Exercise listed and unlisted roles with synthetic policy/context fixtures;
+ * template assertions do not establish the state of any deployed policy.
  *
  * `Mem9CleanupTaskRole` is correctly absent: only the EXECUTION role fetches
  * `valueFrom` secrets during task startup.

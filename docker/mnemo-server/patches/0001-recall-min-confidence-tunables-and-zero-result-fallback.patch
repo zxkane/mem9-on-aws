@@ -103,9 +103,9 @@ index 0000000000000000000000000000000000000000..2483894514709a3250a6f587929c2cd9
 +
 +// Recall selection tunables (mem9-on-aws patch, issue #23).
 +//
-+// Upstream hard-codes the selection min-confidence thresholds; in production
-+// long natural-language queries score below defaultMixedMinConfidence and the
-+// whole result set is cut off (cutoff_reason=min_confidence, 88% zero-hit).
++// Upstream uses fixed selection min-confidence thresholds. Candidates below
++// those thresholds can leave selection empty (cutoff_reason=min_confidence).
++// Validate threshold and fallback behavior with synthetic recall fixtures.
 +// This file makes the thresholds env-tunable and adds an opt-in zero-result
 +// fallback. All defaults equal upstream behavior, so with no env set the
 +// patch is a no-op.

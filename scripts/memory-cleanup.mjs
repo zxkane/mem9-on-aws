@@ -33,15 +33,14 @@
 // original verdict, so the report shows policy overriding the classifier rather
 // than the classifier having decided to keep it.
 //
-// --consensus-passes, because of a measurement: one pass reproduced only 66% of
-// its own DELETE set on a re-run, which is not reproducible enough to authorize
-// deletions from. Intersecting passes only ever NARROWS — a contested id is
+// --consensus-passes narrows disagreement between independent classifications.
+// Intersecting passes only ever NARROWS — a contested id is
 // reported as UNSTABLE and acted on by nobody — so the flag trades inference cost
 // for a smaller, more reproducible offered set, never a larger one.
 //
 // The decision log and the restore log contain memory snippets — instance-private
 // data. Both are written OUTSIDE the repository (default ~/.mem9-cleanup/<stage>/)
-// and must never be committed (the repo is planned to be open-sourced).
+// and must never be committed to this public repository.
 // `snippetLogDir` enforces the part of that a check can reach: an `--out` inside
 // THIS script's tree is refused. Another checkout of the same repo is still the
 // operator's to avoid.
@@ -134,12 +133,10 @@ const MEM9_REVIEW_ARTIFACT_KEY_ENV = "MEM9_REVIEW_ARTIFACT_KEY";
 const MEM9_REVIEW_ARTIFACT_HASH_ENV = "MEM9_REVIEW_ARTIFACT_HASH";
 const REQUEST_TIMEOUT_MS = 30_000; // REST calls; the LLM call sets its own
 const LLM_TIMEOUT_MS = 120_000;
-// Reasoning models consume output tokens on hidden reasoning BEFORE emitting
-// visible text, so the chat route's 4096 cap truncates the verdict JSON
-// mid-object — the measured root cause of GLM-5 leaving 33% of the corpus
-// unclassified. 24k is the budget that classified the full corpus clean.
+// Responses and chat routes have independent output budgets. Truncated replies
+// fail classification; validate budget and batch size with synthetic fixtures.
 const RESPONSES_MAX_OUTPUT_TOKENS = 24_000;
-const RESPONSES_TIMEOUT_MS = 300_000; // observed max ~30s; high effort runs longer
+const RESPONSES_TIMEOUT_MS = 300_000;
 const DEFAULT_CHAT_MODEL = "zai.glm-5";
 // The SKIP reason for a batch the classifier never judged. Counted in the run
 // summary, so it must stay in sync with the decision rows.
@@ -264,24 +261,13 @@ export function contentHash(content) {
  * The SSM parameter name of one approval claim, derived from the offered list's
  * content hash (#123).
  *
- * The `:` in `sha256:...` CANNOT appear in an SSM parameter name: `PutParameter`
- * answers `ValidationException` ("each sub-path can be formed as a mix of letters,
- * numbers and the following 3 symbols .-_"), and on the READ side a colon is
- * parsed as the version/label selector instead — so the two operations disagree
- * about what the name even is. Probed live in ap-northeast-1: the colon form is
- * rejected on write, the dash form accepted.
+ * Replace `sha256:` with `sha256-`, retaining the algorithm prefix so the
+ * claim name remains recognizable. The cleanup and facade implementations
+ * must derive the same name and satisfy `assertClaimParameterName`.
  *
- * That made the whole loop dead on arrival, invisibly: `claimAndRun`'s catch
- * separates "someone else won" from every other failure by the error NAME, so a
- * `ValidationException` fell to the generic branch and answered "The approval
- * could not be recorded" on every click, forever. Nothing caught it because every
- * SSM test double is a Map keyed on the name string, so no double validates the
- * name's SHAPE. `assertClaimParameterName` below is that missing validation, and
- * the fakes call it (TC-SLACKAPP-131).
- *
- * The transformation replaces the separator rather than dropping the `sha256`
- * prefix: the algorithm stays legible in the name, which is what an operator
- * reading `describe-parameters` output needs in order to recompute it.
+ * Test doubles must reject invalid names with `ValidationException`
+ * (TC-SLACKAPP-131). Keep that failure distinct from
+ * `ParameterAlreadyExists` in `claimAndRun`'s duplicate-claim handling.
  */
 export function claimParameterName(ssmPrefix, hash) {
   return `${ssmPrefix}/approvals/approved-${String(hash).replace(/:/gu, "-")}`;
@@ -590,9 +576,8 @@ export function planDecisions(memories, verdicts, opts = {}) {
  * Narrow N independent classification passes to the ids EVERY pass agreed to
  * delete (#123).
  *
- * The measured motivation: one pass reproduced only 66% of its own DELETE set on
- * a re-run, which is not reproducible enough to authorize deletions from. This is
- * a narrowing operation and never a widening one — an id reaches `DELETE` only by
+ * Independent classifications can disagree. This is a narrowing operation and
+ * never a widening one — an id reaches `DELETE` only by
  * being `DELETE` in every pass, and everything else is REPORTED rather than acted
  * on. Each pass must already be a planned decision list (`planDecisions` output),
  * so per-pass protection and merge-graph validation have run before the
@@ -698,8 +683,7 @@ export function consensusDecisions(passes) {
         continue;
       }
       // Its OWN counter rather than `agreed`, which feeds `reproducibility`.
-      // `agreed`/`disagreed` measure the DELETE set — the 66% self-reproduction
-      // that motivated the consensus — and a withheld merge lands in
+      // `agreed`/`disagreed` measure agreement on the DELETE set; a withheld merge lands in
       // `mergesWithheld`, not in `disagreed`. Counting agreed merges in `agreed`
       // would raise the numerator without ever raising the denominator, so every
       // merge-heavy week would report better deletion agreement than it had.
@@ -2878,8 +2862,8 @@ export function verdictSummary(decisions) {
  * Without this, a partial transport outage is invisible: its SKIPs land in the
  * same bucket as legitimate planner SKIPs (invalid merge graph, contradictory
  * verdicts), and `classifierBroken` only fires when EVERY batch failed — so a
- * run that classified one batch of 117 still exits 0 and reads as a clean
- * audit. The measured GLM-5 run failed 27% of batches and reported exit 0.
+ * run that classified only a small subset of batches can still exit 0 as a clean
+ * audit. Partial batch failure must remain visible even when the process exits 0.
  */
 function classificationFailureNote({ batches, failedBatches, decisions, scanned }) {
   const unclassified = decisions.filter(
@@ -3683,10 +3667,10 @@ export function inactiveMemoryAdapter(db) {
           LIMIT $${filters.length + 1}`,
         [...filters, limit ?? DEFAULT_LIST_LIMIT],
       );
-      // No `?? 0`. This number is the entire truncation signal — "listed 100 of
-      // 2811" is how an operator learns the page is partial — so a count query
-      // that answered nothing must fail loudly rather than default to a
-      // denominator that makes any page look complete.
+      // The count is the truncation signal. Constructed example: a page of
+      // 1 row out of 2 matches is partial. A missing total must fail loudly;
+      // defaulting it to zero would disguise a failed count query as a valid
+      // listing.
       const total = Number(counted.rows[0]?.total);
       if (!Number.isFinite(total)) {
         throw new Error(

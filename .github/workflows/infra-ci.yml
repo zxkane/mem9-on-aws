@@ -1157,7 +1157,7 @@ jobs:
     environment: prod
     # Full-stack prod: Aurora + the 3-container ECS task (qwen3 image pull + 180s
     # health startPeriod) + the bootstrap run-task. No RDS Proxy (dropped — see
-    # infra/db.ts). Fresh bring-up ~30-35m (measured); the custom reconciliation
+    # infra/db.ts). The configured custom reconciliation budget
     # can wait just under 30m, and bootstrap/E2E follow it. The failure reporter
     # is a separate always() job, so it still runs if this 75m budget is exhausted.
     timeout-minutes: 75

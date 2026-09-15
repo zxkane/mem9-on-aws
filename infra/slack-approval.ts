@@ -20,39 +20,11 @@
  * Lambda role would need its own workload-permissions-boundary exception, and the
  * boundary is operator-owned (rolled out separately from application deploys).
  *
- * BOUNDARY NOTE — the SSM half is admissible under the DEPLOYED boundary; the
- * Secrets Manager half REQUIRES A BOUNDARY ROLLOUT FIRST:
- *   - The SecureString reads are gated by `ParamCtxVia` on `kms:ViaService`, NOT
- *     on the `ECS_EXECUTION_ROLE_TOKENS` list, so an unlisted execution role may
- *     still decrypt a `/mem9-on-aws/*` parameter.
- *   - SETTLED, and the answer is that the deny DOES bite. The Secrets Manager
- *     reads (`MEM9_DB_SECRET`, `MEM9_TENANT_ID`) resolve under the DEFAULT
- *     `aws/secretsmanager` key (neither secret sets `kmsKeyId` — see infra/db.ts
- *     and infra/tenant-identity.ts), and AWS needs no identity `kms:Decrypt`
- *     ALLOW there — but an explicit DENY is a separate question, so it was
- *     measured rather than reasoned about. Against the LIVE v10 boundary,
- *     `iam:simulate-custom-policy` for `kms:Decrypt` on the regional
- *     `alias/aws/secretsmanager` key, with `kms:ViaService=secretsmanager.<region>
- *     .amazonaws.com` and a `SecretARN` encryption context matching the
- *     allowlisted `mem9-on-aws-*-Mem9DbSecret-*` / `*-tenant-api-key-*` shapes:
- *       Mem9ServerExecutionRole-        → allowed        (on the list)
- *       Mem9ConsolidationExecutionRole- → allowed        (on the list, from #122)
- *       Mem9CleanupExecutionRole-       → explicitDeny   (NOT on the list)
- *       Mem9ConsolidationTaskRole-      → explicitDeny   (NOT on the list)
- *     Isolating each deny statement in turn attributes it to exactly the
- *     `SecretCtxRole` deny, for BOTH secrets.
- *     CloudTrail corroborates the premise the simulation rests on: real
- *     `SecretARN`-context Decrypt events are attributed to the calling workload
- *     principal, not to Secrets Manager as a service, so that statement's
- *     `aws:PrincipalArn` condition has something to match.
- *     (Simulating this yourself requires passing `aws:PrincipalArn` as an explicit
- *     `--context-entries` value. Inferred from `--caller-arn` alone, every role
- *     reads as denied and the differential vanishes.)
- *   - CONSEQUENCE: `Mem9CleanupExecutionRole-` must be admitted to
- *     `ECS_EXECUTION_ROLE_TOKENS` in the OPERATOR-OWNED boundary template, and
- *     that rollout must land BEFORE this stack first deploys to a bounded stage.
- *     Without it the task dies at startup fetching its own credentials — AFTER the
- *     click has been spent, which is the one failure mode this loop must not have.
+ * Before enabling a namespace-safe successor, verify its execution role can
+ * read the required SecureStrings and Secrets Manager values under the
+ * operator-owned workload boundary. Required role-pattern changes belong in
+ * that boundary and its synthetic role/context tests before application rollout.
+ * Live policy versions, simulation results, and CloudTrail records remain private.
  *
  * Gated on `MEM9_SLACK_APPROVAL_ENABLED=1`. Disabled means ABSENT, not
  * present-and-idle: a task definition that exists is a task definition `RunTask`
@@ -154,10 +126,9 @@ export const CLEANUP_SCAN_CRON = "cron(0 3 ? * SAT *)";
  * to run unattended at all.
  *
  * `--consensus-passes 2` offers only the ids EVERY pass judged DELETE. The
- * measurement behind it (memory-cleanup.mjs's own header): one pass reproduced
- * only 66% of its own DELETE set on re-run. Operator-initiated, a human reading
- * the list absorbs that nondeterminism; unattended, the quorum is the only thing
- * that does. `consensusDecisions` requires >= 2 usable passes and the flag's
+ * classifier can return different decisions across runs. A human reviewing
+ * an operator-initiated list can inspect that variation; unattended, the quorum
+ * narrows the result. `consensusDecisions` requires >= 2 usable passes and the flag's
  * `min` is 2, so this cannot be weakened to 1 without the parser rejecting it.
  *
  * Costs two inference runs per week, which is the price of the property.
@@ -488,10 +459,10 @@ export function slackApproval(
       // `Overwrite: false` at the write rather than on IAM. That is where it
       // already rested for the Lambda, which holds the identical scope.
       //
-      // Admissible under the DEPLOYED boundary with no rollout: the ceiling admits
-      // `ssm:PutParameter` and the `ParamWrite` deny permits exactly
-      // `/mem9-on-aws/*/approvals/*`. Measured, not assumed — TC-SLACKAPP-153
-      // asserts it against the boundary template.
+      // TC-SLACKAPP-153 checks this grant against the repository's boundary
+      // template, including the scoped approvals path. That static check does
+      // not establish the deployed policy state; verify the boundary before
+      // enabling this path.
       {
         actions: ["ssm:GetParameters", "ssm:PutParameter"],
         resources: [
@@ -718,8 +689,7 @@ export function slackApproval(
                 "--base-url",
                 $interpolate`http://${ecsOut.serviceDnsName}:8080`,
                 // Not optional for an unattended run. See
-                // CLEANUP_SCAN_CONSENSUS_PASSES: a single pass reproduced 66% of
-                // its own DELETE set, and with no human reading the list the
+                // CLEANUP_SCAN_CONSENSUS_PASSES: with no human reading the list the
                 // quorum is the only thing narrowing it.
                 "--consensus-passes",
                 String(CLEANUP_SCAN_CONSENSUS_PASSES),
@@ -767,8 +737,8 @@ export function slackApproval(
           networkConfiguration: {
             assignPublicIp: task.assignPublicIp,
             securityGroups: task.securityGroups,
-            // Passed as an Output so Pulumi resolves the nested Outputs before the
-            // API call — the `.join(",")` defect that reached two live stacks.
+            // Preserve the Output-valued subnet array so Pulumi resolves its elements
+            // before the API call; do not join or stringify unresolved Outputs.
             subnets: task.subnets,
           },
         },
@@ -812,9 +782,8 @@ export function slackApproval(
     // --- The scan's OUTCOME signals (#154) ---
     //
     // What every alarm above cannot see: a scan that runs, succeeds, and offers
-    // NOTHING. `consensusDecisions` needs >= 2 usable passes agreeing, and one pass
-    // reproduced only 66% of its own DELETE set on re-run — so a partial classifier
-    // degradation can collapse the intersection to zero without tripping
+    // NOTHING. `consensusDecisions` needs >= 2 usable passes agreeing. Classifier
+    // disagreement can collapse the intersection to zero without tripping
     // `classifierBroken` (which needs EVERY batch to fail). The run then exits 0,
     // which the task-exit alarm cannot see by construction.
     //

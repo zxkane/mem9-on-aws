@@ -360,7 +360,8 @@ describe("application region consumers", () => {
       resolve(root, "docs/mem9-facts.md"),
       "utf8",
     );
-    expect(facts).toContain("empirically live 2026-07-12");
-    expect(facts).toContain("bedrock-mantle.ap-northeast-1.api.aws");
+    expect(facts).toContain("bedrock-mantle.{region}.api.aws");
+    expect(facts).not.toContain("bedrock-mantle.ap-northeast-1.api.aws");
+    expect(facts).not.toContain("empirically live");
   });
 });

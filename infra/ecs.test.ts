@@ -655,7 +655,7 @@ describe("ecs stack", () => {
     );
   });
 
-  it("TC-GROUPNS-080: pins the measured exact-search capacity without extending its deadline", async () => {
+  it("TC-GROUPNS-080: pins the configured exact-search capacity without extending its deadline", async () => {
     installGlobals("prod");
     const ecs = await loadEcs();
     ecs(fakeDbOut());

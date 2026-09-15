@@ -4,14 +4,11 @@
  * bedrock-agentcore-control `CreateGatewayTarget` API, wrapped by an SST
  * `command.local.Command` (see infra/gateway.ts).
  *
- * WHY A LAMBDA TARGET: the earlier ALB + self-managed-VPC-Lattice privateEndpoint
- * target failed to stabilize 100% of the time in the full CI deploy (an AgentCore
- * control-plane internal error on that combination in ap-northeast-1). A Lambda
- * target is AgentCore's out-of-the-box private path — no privateEndpoint, no
- * Lattice — so it sidesteps that failure. The gateway invokes a VPC-attached proxy
- * Lambda that reaches mnemo-server over Cloud Map DNS (see infra/gateway/
- * proxy-handler.mjs). This Command drives the target's lifecycle (create → poll to
- * READY; delete on teardown) so SST gets a real dependency edge on the Lambda.
+ * This project uses a VPC-attached proxy Lambda to reach mnemo-server over
+ * Cloud Map DNS (see infra/gateway/proxy-handler.mjs). The command drives the
+ * target's create -> poll-READY -> delete lifecycle and preserves SST's
+ * dependency on the Lambda. Validate target readiness and private connectivity
+ * with synthetic requests before relying on the integration.
  *
  * Contract (driven entirely by env vars, so the SST Command can pass Outputs):
  *   MEM9_TGT_OP           create | delete

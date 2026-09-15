@@ -232,7 +232,7 @@ describe("runtime documentation", () => {
     }
   });
 
-  it("TC-DOCS-008: cites AWS docs and dates empirical deployment observations", () => {
+  it("TC-DOCS-008: cites AWS docs without publishing operator deployment records", () => {
     const citations = [
       "AmazonECS/latest/developerguide/task-iam-roles.html",
       "AmazonECS/latest/developerguide/task_execution_IAM_role.html",
@@ -257,15 +257,15 @@ describe("runtime documentation", () => {
     expect(text.architecture).toContain(
       "Empirical source observation, rechecked 2026-07-24",
     );
-    expect(text.architecture).toContain(
-      "Repository deployment observation, empirical 2026-07-12",
-    );
     expect(text.facts).toContain(
       "source-level observations are **empirical",
     );
-    expect(text.facts).toContain(
-      "**Empirical deployment observation, 2026-07-12:**",
-    );
+    expect(text.facts).toContain("AWS facts and infrastructure configuration");
+    expect(authoritativeDocs).not.toMatch(/empirical (?:account|deployment) observation/i);
+    expect(authoritativeDocs).not.toMatch(/empirically live|observed in production|measured on the same/i);
+    const cleanupDesign = readFileSync(resolve(root, "docs/designs/cleanup-reasoning-model.md"), "utf8");
+    const cleanupCases = readFileSync(resolve(root, "docs/test-cases/cleanup-reasoning-model.md"), "utf8");
+    expect(`${cleanupDesign}\n${cleanupCases}`).not.toMatch(/verified against prod|Window \(prod, healthy\)|measured healthy daily rates|current prod decision/i);
   });
 
   it("TC-DOCS-009: documents the optional production facade domain boundary", () => {

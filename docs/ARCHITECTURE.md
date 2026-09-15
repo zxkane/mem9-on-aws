@@ -188,10 +188,8 @@ defines `CallWithBearerToken` for Mantle bearer authentication, and the
 [Bedrock tagging documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/tagging.html)
 defines the singular `ListTagsForResource` action.
 
-Repository-specific empirical observation, 2026-07-12: a bearer minted from
-task-equivalent AWS credentials successfully invoked the configured Mantle Chat
-Completions model in the application region. This observation supports the
-selected model and endpoint; it is not a general AWS availability claim.
+Validate the selected model and endpoint using synthetic requests. Keep
+operator-specific invocation records private.
 
 ### Database path
 
@@ -230,11 +228,8 @@ Empirical source observation, rechecked 2026-07-24 against the pinned mem9
 commit: mem9 reads a static DSN once and has no credential refresh hook. A token
 inserted into that DSN would therefore expire for future pool connections.
 
-Repository deployment observation, empirical 2026-07-12: the former RDS Proxy
-target remained `PENDING_PROXY_CAPACITY` for more than 40 minutes at the chosen
-0.5 ACU floor in two regions. The repository removed that proxy and now uses the
-writer endpoint. This document does not generalize the observed behavior into an
-AWS service guarantee or root-cause claim.
+The current architecture omits RDS Proxy and uses the writer endpoint directly.
+Operator-specific deployment diagnostics belong in private records.
 
 Automatic database credential rotation is not configured. Rotation would also
 require a task restart because ECS injects task-definition secrets only when the
@@ -507,23 +502,17 @@ the same namespace and filter predicates. Ordinary B-tree scans remain
 available for hydration. The materialization boundaries prevent tenant-wide
 HNSW candidate selection; enforcement also removes that index. ECS pins a
 20,000-active-vector ceiling per namespace and a two-second statement timeout.
-The read-only rollout probe on roughly 15,000 1024-dimensional active vectors
-observed about 85–123 ms SQL execution for top-K 10 and 50, after the former
-query exceeded two seconds. These are single-session SQL measurements, excluding
-embedding-provider and network time. A second probe retained the two-second
-limit across four concurrent connections and 24 queries; the slowest SQL
-execution was 467 ms. The regression verifies exact results and query-plan
-structure independently of these environment-dependent timings.
+The regression verifies exact results and query-plan structure using synthetic
+fixtures. Public performance evidence must describe a reproducible fixture and
+its resource settings, without exposing an operator's corpus or measurements.
+Measure complete-result fetching after scale-down as well as warm plans, and
+include concurrent requests when validating the two-second guard.
 
-Capacity verification also fetches complete records after scale-down. On the
-existing corpus, the 0.5 ACU floor reduced the PostgreSQL buffer cache to about
-128 MiB, and full-result reads reached roughly eight seconds, causing the
-two-second guard to reject real recall/reconciliation requests. Production uses
-a 1 ACU floor; full-result checks at that floor completed within the deadline,
-including four concurrent connections. Development and previews retain 0.5 ACU,
-and the maximum remains 4 ACU for every stage. This raises the production
-capacity-cost floor; compare regional ACU pricing and actual usage before
-changing it. Query deadlines and namespace isolation remain unchanged.
+The IaC default is a 1 ACU minimum for the production stage, 0.5 ACU for
+development and previews, and a 4 ACU maximum for every stage. These are product
+configuration defaults, not a report of any operator's deployment. Capacity
+selection must account for the workload's cache needs and regional pricing;
+keep deployment-specific measurements and decisions in private records.
 
 With an external provider, its administrators own groups while the private
 access task manages Aurora authorization through an owner-only `issuer`/`sub`
@@ -1138,8 +1127,8 @@ task contains `mnemo-server`, `qwen3-embed`, and `llm-proxy`.
 
 ### RDS Proxy
 
-Rejected after the empirical 2026-07-12 deployment behavior described above.
-The current single-task workload connects directly to the writer endpoint.
+Not part of the current architecture. The single-task workload connects
+directly to the writer endpoint.
 
 ### Native IAM database auth without a mem9 change
 
@@ -1148,9 +1137,9 @@ tokens.
 
 ### AgentCore OpenAPI private endpoint through VPC Lattice and ALB
 
-Rejected after repeated empirical deployment failures on 2026-07-14. The
-implemented Lambda target is smaller and uses the gateway service role plus
-`lambda:InvokeFunction`.
+Not part of the current architecture. The implemented Lambda target uses the
+gateway service role plus `lambda:InvokeFunction` and the existing private
+service-discovery path.
 
 ### Mantle or a third-party embedding API
 

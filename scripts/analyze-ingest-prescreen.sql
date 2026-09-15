@@ -8,29 +8,27 @@
 -- leaves PostgreSQL. Invoke psql with:
 --
 --   --set=namespace_id=<namespace-uuid>
---   --set=analysis_cutoff=2026-07-31T10:00:00Z
---   --set=label_start=2026-07-27T06:00:00Z
+--   --set=analysis_cutoff=<analysis-cutoff-timestamp>
+--   --set=label_start=<label-validity-start-timestamp>
 --   --set=window_days=30
 --   --file scripts/analyze-ingest-prescreen.sql
 --
--- label_start is a fixed, coarsened timestamp after the zero_fact deployment
--- reached ECS steady state. false uses omitempty in the persisted plan, so
--- pre-deployment plans cannot be labeled from their payload alone.
+-- The operator supplies the analysis cutoff and the time from which zero_fact
+-- labels are authoritative. Older plans cannot be labeled from omission alone.
 
 \if :{?namespace_id}
 \else
-  \echo 'namespace_id is required' >&2
-  \quit 3
+  DO $$ BEGIN RAISE EXCEPTION 'namespace_id is required'; END $$;
 \endif
 
 \if :{?analysis_cutoff}
 \else
-  \set analysis_cutoff '2026-07-31T10:00:00Z'
+  DO $$ BEGIN RAISE EXCEPTION 'analysis_cutoff is required'; END $$;
 \endif
 
 \if :{?label_start}
 \else
-  \set label_start '2026-07-27T06:00:00Z'
+  DO $$ BEGIN RAISE EXCEPTION 'label_start is required'; END $$;
 \endif
 
 \if :{?window_days}

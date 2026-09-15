@@ -605,7 +605,7 @@ describe("observability alert delivery", () => {
     );
     expect(prescreenRate(0, 0)).toBe(0);
     expect(prescreenRate(10, 100)).toBe(0.1);
-    expect(prescreenRate(3, 683)).toBeCloseTo(0.004392, 6);
+    expect(prescreenRate(2, 400)).toBeCloseTo(0.005, 6);
 
     observability(prodInputs);
     const body = JSON.parse(
@@ -781,7 +781,7 @@ describe("observability alert delivery", () => {
           dimensions: { stage: "prod" },
           // ZeroFactSuccess is 0/1 per succeeded job, so Average IS the rate.
           stat: "Average",
-          // Daily, not hourly: healthy prod runs six consecutive 100% HOURS.
+          // Pin the configured daily evaluation period independently of fixtures.
           period: 86400,
         },
         returnData: false,
@@ -1033,52 +1033,28 @@ describe("observability alert delivery", () => {
     expect(durableFailureRatio(3, 30)).toBe(0.1);
   });
 
-  it("TC-INGEST-METRIC-031/032: zero-fact alarm clears the measured healthy baseline", () => {
-    // Pin the shipped expression as a LITERAL. The mirror below reimplements
-    // this math, so comparing the constant to itself would let a mutation of
-    // either the guard value or the branch order pass unnoticed.
+  it("TC-INGEST-METRIC-031/032: zero-fact alarm handles synthetic outcomes and boundaries", () => {
+    // Literal expectations keep the guard and threshold independent of the
+    // helper that evaluates the expression.
     expect(ZERO_FACT_RATE_EXPRESSION).toBe("IF(succeeded > 50, zero_rate, 0)");
-    // Exactly 1.0, not a fraction: at 200 jobs, 0.995 pages on a day that
-    // extracted a single real fact.
     expect(ZERO_FACT_ALARM_THRESHOLD).toBe(1);
 
-    // Real prod daily buckets (Jul 28 - Aug 1, 2026), zero-fact / succeeded.
-    // Every one is a HEALTHY day: a high zero-fact rate is the correct outcome
-    // of rule D4 for sessions with no durable takeaway.
-    for (const [zero, succeeded] of [
-      [97, 101], // 96%
-      [144, 176], // 82%
-      [342, 377], // 91%
-      [280, 312], // 90%
-      [231, 300], // 77%
-    ]) {
+    // Constructed fixtures, not a replay of operator traffic.
+    for (const [zero, succeeded] of [[0, 120], [45, 150], [125, 250], [299, 300]]) {
       expect(zeroFactBreaches(zero, succeeded)).toBe(false);
     }
 
-    // Six consecutive 100% HOURS from the same healthy baseline (Jul 30
-    // 17:00-23:00). Aggregated they are 134 succeeded jobs with ZERO facts —
-    // past the traffic guard and a breach at any threshold. This is the
-    // concrete reason the window is a full day: evaluated hourly (or over any
-    // sub-day window covering this stretch) the alarm would page on traffic
-    // that was healthy.
-    const healthyHours = [41, 3, 27, 8, 37, 18];
-    const stretch = healthyHours.reduce((sum, jobs) => sum + jobs, 0);
-    expect(stretch).toBe(134);
+    // An all-zero short interval can sit inside a mixed-outcome full window.
+    const zeroOnlyIntervals = Array(4).fill(20) as number[];
+    const stretch = zeroOnlyIntervals.reduce((sum, jobs) => sum + jobs, 0);
+    expect(stretch).toBe(80);
     expect(zeroFactBreaches(stretch, stretch)).toBe(true);
-    // Over the real day those hours belong to, the same traffic stays quiet:
-    // Jul 30 extracted 35 facts across 377 jobs.
-    expect(zeroFactBreaches(342, 377)).toBe(false);
+    expect(zeroFactBreaches(stretch, stretch * 2)).toBe(false);
 
-    // A quiet day that is entirely zero-fact still cannot page: too few jobs
-    // to distinguish a blackout from normal low-signal traffic.
     expect(zeroFactBreaches(50, 50)).toBe(false);
-    expect(zeroFactBreaches(51, 51)).toBe(true); // one job past the guard
-
-    // The boundary that matters: ONE successful extraction keeps it quiet, at
-    // the smallest healthy daily volume observed (101 jobs). The alarm asserts
-    // a TOTAL blackout, never degraded quality (that is #104/#106's scope).
-    expect(zeroFactBreaches(101, 101)).toBe(true);
-    expect(zeroFactBreaches(100, 101)).toBe(false);
+    expect(zeroFactBreaches(51, 51)).toBe(true);
+    expect(zeroFactBreaches(100, 100)).toBe(true);
+    expect(zeroFactBreaches(99, 100)).toBe(false);
     expect(zeroFactBreaches(299, 300)).toBe(false);
   });
 

@@ -275,7 +275,13 @@ func query() string {
     );
 
     expect(sql).toContain("--set=namespace_id=<namespace-uuid>");
-    expect(sql).toMatch(/\\if :\{\?namespace_id\}[\s\S]*\\else[\s\S]*\\quit/);
+    for (const name of ["namespace_id", "analysis_cutoff", "label_start"]) {
+      const start = sql.indexOf(`\\if :{?${name}}`);
+      const end = sql.indexOf("\\endif", start);
+      expect(start).toBeGreaterThan(-1);
+      expect(sql.slice(start, end)).toContain(`RAISE EXCEPTION '${name} is required'`);
+      expect(end).toBeLessThan(sql.indexOf("BEGIN TRANSACTION READ WRITE"));
+    }
     expect(sql).toMatch(
       /FROM ingest_jobs AS job[\s\S]*WHERE job\.namespace_id = :'namespace_id'/,
     );

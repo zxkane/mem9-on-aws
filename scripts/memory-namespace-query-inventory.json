@@ -1694,9 +1694,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "d838468163280964b464",
+      "id": "9e9b625faff685adff5f",
       "owner": "scripts/analyze-ingest-prescreen.sql",
-      "line": 161,
+      "line": 159,
       "tables": [
         "ingest_job_plans",
         "ingest_jobs"
@@ -1711,9 +1711,9 @@
       "namespace_evidence": "namespace_id = :'namespace_id'"
     },
     {
-      "id": "17f384ecead434ba0764",
+      "id": "2702d1a5033deaa26a2b",
       "owner": "scripts/analyze-ingest-prescreen.sql",
-      "line": 334,
+      "line": 332,
       "tables": [
         "ingest_job_plans"
       ],
@@ -1744,9 +1744,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "8ab16ec73ac98e102c08",
+      "id": "d44d3c090700f7ad42f6",
       "owner": "scripts/memory-cleanup.mjs",
-      "line": 3676,
+      "line": 3660,
       "tables": [
         "memories"
       ],
@@ -1762,9 +1762,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "14803b7b89b3c966a6a5",
+      "id": "f054160018e55976a9e5",
       "owner": "scripts/memory-cleanup.mjs",
-      "line": 3680,
+      "line": 3664,
       "tables": [
         "memories"
       ],
@@ -1780,9 +1780,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "d1b1a18547317ac4834f",
+      "id": "6c6305925ff8e49e984c",
       "owner": "scripts/memory-cleanup.mjs",
-      "line": 3704,
+      "line": 3688,
       "tables": [
         "memories"
       ],
@@ -1798,9 +1798,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "7c5eee62bd90cb1bda14",
+      "id": "45a2b3e9fd3979a8160c",
       "owner": "scripts/memory-cleanup.mjs",
-      "line": 3738,
+      "line": 3722,
       "tables": [
         "memories"
       ],
@@ -1816,9 +1816,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "d8bce15b13087fb4ce22",
+      "id": "9ca4fda8367c5c79fc7a",
       "owner": "scripts/memory-consolidation.mjs",
-      "line": 1997,
+      "line": 1995,
       "tables": [
         "memories"
       ],
@@ -1834,9 +1834,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "40878b182c0a597f25b4",
+      "id": "d014c34af222b158c875",
       "owner": "scripts/memory-consolidation.mjs",
-      "line": 2034,
+      "line": 2032,
       "tables": [
         "memories"
       ],
@@ -1852,9 +1852,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "6087f7321085e067ec42",
+      "id": "a6281c4be7ec23d24acb",
       "owner": "scripts/memory-consolidation.mjs",
-      "line": 2061,
+      "line": 2059,
       "tables": [
         "memories"
       ],

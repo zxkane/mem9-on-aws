@@ -323,8 +323,16 @@ mutate each other's memories, sessions, jobs, or plans. Clients never submit a
 namespace ID. M2M clients use explicit database bindings instead of Cognito
 groups.
 
+A deployment can use one registered namespace. Additional business groups and
+namespaces are optional; the application does not require a second one. In
+namespace-required mode, each human must match exactly one registered namespace
+group and have an active membership. `mem9-<team-slug>` is an example naming
+convention, not an enforced prefix or an instruction to create a namespace.
+Bindings use exact configured group names.
+
 For an external Cognito pool, keep the application admission group (the value
-of `MEM9_AUTH_REQUIRED_GROUP`) separate from namespace groups. For example:
+of the optional `MEM9_AUTH_REQUIRED_GROUP`) separate from namespace groups.
+Omitting that admission check does not bypass namespace authorization. For example:
 
 | Human | Provider groups | Memory namespace |
 | --- | --- | --- |
@@ -358,6 +366,11 @@ and all fixture resources are removed with the PR stage. On a later run for the
 same PR, CI first reruns the existing idempotent bootstrap task, then deploys
 directly with `1`; this recovers a run cancelled during cutover and never
 restarts a completed database in compatibility mode.
+
+The two synthetic preview namespaces are required to test cross-namespace
+isolation. They do not impose a second namespace on a deployment. Public test
+reports use fixture data only; real identity mappings, corpus measurements, and
+rollout records remain private to the operator.
 
 Transport signing uses stable A/B key slots. GitHub repository variables
 `MEM9_TRANSPORT_SIGNING_ACTIVE_SLOT`,
@@ -1288,11 +1301,9 @@ the implementation remains for a future namespace-aware redesign.
    omitted, it falls back to `MEM9_LLM_MODEL` and then `zai.glm-5`. An
    `openai.gpt-5.6-*` value routes to the Responses API in `--llm-region`
    (default `us-west-2`) with a 24k output budget; anything else uses
-   chat-completions in the application region. Measured on the same
-   2271-memory corpus: GLM-5 left **33% of memories unclassified** (batch JSON
-   truncated at its 4096-token cap) while `gpt-5.6-terra` had zero
-   classification failures and found ~6× more merge groups. GLM-5 remains
-   usable and is the cheaper zero-cross-region-dependency fallback.
+   chat-completions in the application region. Validate the chosen route and
+   output budget with synthetic classification fixtures. Truncated responses
+   must fail the batch; keep workload-specific model comparisons private.
 
    The decision list is written to `~/.mem9-cleanup/prod/decisions-*.json`
    (mode 0600, outside any checkout — it contains memory content and must
@@ -1325,9 +1336,8 @@ the implementation remains for a future namespace-aware redesign.
    **Read the `UNCLASSIFIED=` count in the summary before trusting a run.**
    Exit 5 fires only when _every_ batch fails, so a partial classifier outage
    exits 0; the summary reports how many memories went unaudited and what share
-   of batches failed. "We never looked at these 740 memories" is not the same
-   result as "these 740 are fine" — re-run before treating the audit as
-   complete.
+   of batches failed. Unclassified memories have not passed the audit; re-run
+   the failed classifications before treating it as complete.
 
    **The audit and clean mode** requires VPC-internal network access to
    `mnemo.mem9-<stage>.local:8080` (the script discovers the task IP via Cloud
@@ -1590,8 +1600,8 @@ CONFIRM_PROD_SCAN=prod STAGE=prod \
 Recover those coordinates only from the private log of the completed trusted
 scan. Do not publish the key or hash.
 
-The runner's observation budget defaults to twelve hours because a two-pass scan of
-a production corpus with thousands of active memories can exceed 90 minutes.
+The runner's observation budget defaults to twelve hours to accommodate long
+two-pass scans. Select an observation budget appropriate to the workload.
 Set `CLEANUP_SCAN_WAIT_SECONDS` to an integer from 60 to 43200 to override
 that budget. This bounds only how long the local runner waits; EventBridge
 Scheduler invokes the ECS task directly, and an expired observer does not stop

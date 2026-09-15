@@ -1065,11 +1065,9 @@ async function executeStale(action, deps, metrics, clock) {
   // scanner never populates `m.Embedding` (unlike the TiDB one). So a
   // content-free PUT round-trips a nil embedding and stores NULL.
   //
-  // Verified against prod at pinned commit d4638c8: a probe memory that ranked
-  // first for its own topic became permanently unfindable by semantic search
-  // after a tags-only PUT, while GET still returned it as active with the tag
-  // applied. VectorSearch filters `embedding IS NOT NULL`, and clusterMemories
-  // does too, so consolidation could never even revisit what it erased.
+  // VectorSearch and clusterMemories both filter out NULL embeddings, so stale
+  // marking must leave the stored vector intact. Integration tests cover
+  // embedding preservation with synthetic memory fixtures.
   //
   // Stale marking therefore goes straight to Aurora with the same version+content
   // guard archiveMemory uses. That leaves the embedding column untouched.

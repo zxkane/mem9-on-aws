@@ -1,14 +1,10 @@
 /**
  * AgentCore Gateway → mnemo-server proxy Lambda (§6a, Lambda-target path).
  *
- * WHY A LAMBDA TARGET: the ALB + self-managed-VPC-Lattice privateEndpoint target
- * failed to stabilize 100% of the time (an AgentCore control-plane internal error
- * on that combination in ap-northeast-1). A **Lambda target** is AgentCore's
- * out-of-the-box private path: the gateway invokes this VPC-attached function
- * directly with no ALB, certificate, or Lattice target. The function reaches
- * mnemo-server over Cloud Map DNS; Cloud Map owns the VPC-associated Route 53
- * private hosted zone. This keeps "no public exposure" while sidestepping the
- * rejected Lattice-target path.
+ * The Gateway invokes this VPC-attached function, which reaches mnemo-server
+ * over Cloud Map DNS. Keep the backend connection private and preserve
+ * the scope checks and signed namespace context described below.
+ * Validate the complete Gateway-to-server path with synthetic requests.
  *
  * TARGET INVOCATION CONTRACT (AWS docs — "AWS Lambda function targets"):
  *   - event   = a flat map of the called tool's inputSchema properties → values
