@@ -434,7 +434,8 @@ The image applies the downstream patches in this fixed order:
 `0012-preserve-postgres-update-embedding`, and
 `0013-upstream-durable-compatibility`, and
 `0014-recall-schema-budget-and-durable-facts`, and
-`0015-ingest-namespace-compatibility`.
+`0015-ingest-namespace-compatibility`, and
+`0016-namespace-vector-late-hydration`.
 
 Before namespace cutover, durable enqueue uses the additive schema's legacy
 tenant/idempotency index. Scoped jobs use the namespace/idempotency index and do
@@ -495,9 +496,19 @@ group and one active membership; unrelated groups are ignored, ambiguous groups
 fail closed, and a revoked membership is never recreated by JIT. M2M clients use
 an explicit client/principal/namespace binding. Memory, session, job, plan,
 status, reconciliation, and worker paths carry an immutable namespace scope.
-Vector recall materializes and exactly ranks only the namespace subset, with a
-row ceiling and statement timeout; the tenant-wide HNSW index is removed during
-enforcement.
+Vector recall materializes only IDs and exact distances within the namespace,
+selects top-K from those scalar rows, then hydrates the selected records with
+the same namespace and filter predicates. Ordinary B-tree scans remain
+available for hydration. The materialization boundaries prevent tenant-wide
+HNSW candidate selection; enforcement also removes that index. ECS pins a
+20,000-active-vector ceiling per namespace and a two-second statement timeout.
+The read-only rollout probe on roughly 15,000 1024-dimensional active vectors
+observed about 85–123 ms SQL execution for top-K 10 and 50, after the former
+query exceeded two seconds. These are single-session SQL measurements, excluding
+embedding-provider and network time. A second probe retained the two-second
+limit across four concurrent connections and 24 queries; the slowest SQL
+execution was 467 ms. The regression verifies exact results and query-plan
+structure independently of these environment-dependent timings.
 
 With an external provider, its administrators own groups while the private
 access task manages Aurora authorization through an owner-only `issuer`/`sub`

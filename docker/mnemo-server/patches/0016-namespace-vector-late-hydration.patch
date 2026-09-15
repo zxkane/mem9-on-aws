@@ -1,0 +1,259 @@
+diff --git a/server/internal/repository/postgres/memory.go b/server/internal/repository/postgres/memory.go
+index 41f29c0..f087a1b 100644
+--- a/server/internal/repository/postgres/memory.go
++++ b/server/internal/repository/postgres/memory.go
+@@ -573,12 +573,6 @@ func (r *MemoryRepo) exactNamespaceVectorSearch(
+ 	); err != nil {
+ 		return nil, classifyNamespaceVectorError(err)
+ 	}
+-	if _, err := tx.ExecContext(ctx, `SET LOCAL enable_indexscan = off`); err != nil {
+-		return nil, classifyNamespaceVectorError(err)
+-	}
+-	if _, err := tx.ExecContext(ctx, `SET LOCAL enable_bitmapscan = off`); err != nil {
+-		return nil, classifyNamespaceVectorError(err)
+-	}
+ 
+ 	var rowsInNamespace int
+ 	if err := tx.QueryRowContext(ctx, `
+@@ -605,23 +599,7 @@ func (r *MemoryRepo) exactNamespaceVectorSearch(
+ 
+ 	vecParamIdx := len(filterArgs) + 1
+ 	limitParamIdx := vecParamIdx + 1
+-	query := fmt.Sprintf(`
+-		WITH namespace_memories AS MATERIALIZED (
+-			SELECT %s
+-			FROM memories
+-			WHERE %s
+-		)
+-		SELECT %s, embedding <=> $%d AS distance
+-		FROM namespace_memories
+-		ORDER BY embedding <=> $%d
+-		LIMIT $%d`,
+-		allColumns,
+-		strings.Join(conds, " AND "),
+-		allColumns,
+-		vecParamIdx,
+-		vecParamIdx,
+-		limitParamIdx,
+-	)
++	query := namespaceVectorQuery(conds, vecParamIdx, limitParamIdx)
+ 	args := make([]any, 0, len(filterArgs)+2)
+ 	args = append(args, filterArgs...)
+ 	args = append(args, pgvector.NewVector(queryVec), limit)
+@@ -651,6 +629,28 @@ func (r *MemoryRepo) exactNamespaceVectorSearch(
+ 	return memories, nil
+ }
+ 
++// Materializing exact distances before sorting prevents approximate-index
++// candidate selection. Full records are read only for the selected IDs; ordinary
++// B-tree scans stay available for that namespace-fenced hydration.
++func namespaceVectorQuery(conds []string, vectorParameter, limitParameter int) string {
++	where := strings.Join(conds, " AND ")
++	return fmt.Sprintf(`
++		WITH namespace_distances AS MATERIALIZED (
++			SELECT id, embedding <=> $%d AS distance
++			FROM memories
++			WHERE %s
++		), namespace_top_k AS MATERIALIZED (
++			SELECT id, distance FROM namespace_distances
++			ORDER BY distance LIMIT $%d
++		)
++		SELECT %s, namespace_top_k.distance
++		FROM memories JOIN namespace_top_k USING (id)
++		WHERE %s
++		ORDER BY namespace_top_k.distance`,
++		vectorParameter, where, limitParameter, allColumns, where,
++	)
++}
++
+ func classifyNamespaceVectorError(err error) error {
+ 	var pgErr *pgconn.PgError
+ 	if errors.As(err, &pgErr) && pgErr.Code == "57014" {
+diff --git a/server/internal/repository/postgres/namespace_vector_query_test.go b/server/internal/repository/postgres/namespace_vector_query_test.go
+new file mode 100644
+index 0000000..7f1548b
+--- /dev/null
++++ b/server/internal/repository/postgres/namespace_vector_query_test.go
+@@ -0,0 +1,182 @@
++package postgres
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"math"
++	"sort"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/pgvector/pgvector-go"
++	"github.com/qiffang/mnemos/server/internal/domain"
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++func TestNamespaceVectorHydratesOnlyExactTopK(t *testing.T) {
++	db := ingestTestDB(t)
++	ctx := context.Background()
++	scope := testutil.TestNamespaceScope()
++	repo := NewMemoryRepo(db, false, "", scope)
++	queryVector := make([]float32, 1024)
++	queryVector[0] = 1
++	const population = 128
++	memories := make([]*domain.Memory, 0, population)
++	type expectedMemory struct {
++		id    string
++		score float64
++	}
++	expected := make([]expectedMemory, 0, population)
++	for i := 0; i < population; i++ {
++		vector := make([]float32, 1024)
++		vector[0], vector[1] = 1, float32(i+1)/10
++		for j := 2; j < len(vector); j++ {
++			vector[j] = float32(math.Sin(float64((i+1)*j))) / 1000
++		}
++		var squared float64
++		for _, value := range vector {
++			squared += float64(value) * float64(value)
++		}
++		id := fmt.Sprintf("96000000-0000-4000-8000-%012d", i+1)
++		expected = append(expected, expectedMemory{id, 1 / math.Sqrt(squared)})
++		memories = append(memories, &domain.Memory{ID: id, Content: strings.Repeat("hydrate only selected content ", 200),
++			Embedding: vector, MemoryType: domain.TypePinned, AppID: "selected", Version: 1})
++	}
++	if err := repo.BulkCreate(ctx, memories); err != nil {
++		t.Fatal(err)
++	}
++	sort.Slice(expected, func(i, j int) bool { return expected[i].score > expected[j].score })
++	other := NewMemoryRepo(db, false, "", domain.NamespaceScope{NamespaceID: testutil.TestOtherNamespaceID,
++		PrincipalID: testutil.TestOtherPrincipalID, PrincipalType: "service", Role: "owner"})
++	for _, seed := range []struct {
++		repo    *MemoryRepo
++		id, app string
++		vector  []float32
++		deleted bool
++	}{
++		{other, "96000000-0000-4000-8000-000000000900", "selected", queryVector, false},
++		{repo, "96000000-0000-4000-8000-000000000901", "excluded", queryVector, false},
++		{repo, "96000000-0000-4000-8000-000000000902", "selected", nil, false},
++		{repo, "96000000-0000-4000-8000-000000000903", "selected", queryVector, true},
++	} {
++		if err := seed.repo.Create(ctx, &domain.Memory{ID: seed.id, Content: "excluded nearest candidate", AppID: seed.app,
++			Embedding: seed.vector, MemoryType: domain.TypePinned, Version: 1}); err != nil {
++			t.Fatal(err)
++		}
++		if seed.deleted {
++			if _, err := seed.repo.SoftDelete(ctx, seed.id, "fixture"); err != nil {
++				t.Fatal(err)
++			}
++		}
++	}
++	if _, err := db.Exec("CREATE INDEX namespace_ann_probe ON memories USING hnsw (embedding vector_cosine_ops)"); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.Exec("ANALYZE memories"); err != nil {
++		t.Fatal(err)
++	}
++	app := "selected"
++	filter := domain.MemoryFilter{AppID: &app, MinScore: -1}
++	repo.exactVectorMaxRows = population + 1
++	for _, limit := range []int{10, 50} {
++		rows, err := repo.VectorSearch(ctx, queryVector, filter, limit)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if len(rows) != limit {
++			t.Fatalf("got %d rows, want %d", len(rows), limit)
++		}
++		for i, row := range rows {
++			if row.ID != expected[i].id || row.Score == nil || math.Abs(*row.Score-expected[i].score) > 0.00001 {
++				t.Fatalf("rank %d does not match namespace-local brute force", i)
++			}
++			if row.Content != memories[0].Content || row.AppID != app || row.Version != 1 {
++				t.Fatal("selected memory was not fully hydrated")
++			}
++		}
++	}
++	conds, args := repo.BuildFilterConds(filter)
++	conds = append(conds, "embedding IS NOT NULL")
++	vectorParameter := len(args) + 1
++	query := namespaceVectorQuery(conds, vectorParameter, vectorParameter+1)
++	args = append(args, pgvector.NewVector(queryVector), 10)
++	tx, err := db.BeginTx(ctx, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer tx.Rollback()
++	if _, err := tx.Exec("SET LOCAL work_mem='64kB'"); err != nil {
++		t.Fatal(err)
++	}
++	var raw []byte
++	if err := tx.QueryRow("EXPLAIN (ANALYZE, VERBOSE, BUFFERS, FORMAT JSON) "+query, args...).Scan(&raw); err != nil {
++		t.Fatal(err)
++	}
++	type planNode struct {
++		Subplan     string            `json:"Subplan Name"`
++		Index       string            `json:"Index Name"`
++		Width       int               `json:"Plan Width"`
++		Rows        int               `json:"Actual Rows"`
++		Output      []string          `json:"Output"`
++		TempWritten int               `json:"Temp Written Blocks"`
++		Plans       []json.RawMessage `json:"Plans"`
++	}
++	var explain []struct{ Plan json.RawMessage }
++	if err := json.Unmarshal(raw, &explain); err != nil {
++		t.Fatal(err)
++	}
++	var distancesFound, topKFound bool
++	var inspect func(json.RawMessage)
++	inspect = func(raw json.RawMessage) {
++		var node planNode
++		if err := json.Unmarshal(raw, &node); err != nil {
++			t.Fatal(err)
++		}
++		if node.Index == "namespace_ann_probe" {
++			t.Fatal("exact search used an approximate index")
++		}
++		if node.Subplan == "CTE namespace_distances" {
++			distancesFound = true
++			if node.Width > 64 || len(node.Output) != 2 || node.Rows != population || node.TempWritten != 0 {
++				t.Fatalf("distance materialization: width=%d columns=%d rows=%d temp=%d", node.Width, len(node.Output), node.Rows, node.TempWritten)
++			}
++		}
++		if node.Subplan == "CTE namespace_top_k" {
++			topKFound = true
++			if node.Rows != 10 {
++				t.Fatalf("hydration candidates=%d", node.Rows)
++			}
++		}
++		for _, child := range node.Plans {
++			inspect(child)
++		}
++	}
++	inspect(explain[0].Plan)
++	if !distancesFound || !topKFound {
++		t.Fatal("missing materialized distance/top-K boundaries")
++	}
++	if err := tx.Rollback(); err != nil {
++		t.Fatal(err)
++	}
++
++	repo.exactVectorMaxRows = population
++	if _, err := repo.VectorSearch(ctx, queryVector, filter, 10); !errors.Is(err, domain.ErrNamespaceVectorCapacity) {
++		t.Fatalf("capacity error=%v", err)
++	}
++	repo.exactVectorMaxRows = population + 1
++	repo.exactVectorTimeout = 50 * time.Millisecond
++	lock, err := db.BeginTx(ctx, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer lock.Rollback()
++	if _, err := lock.Exec("LOCK TABLE memories IN ACCESS EXCLUSIVE MODE"); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := repo.VectorSearch(ctx, queryVector, filter, 10); !errors.Is(err, domain.ErrNamespaceVectorTimeout) {
++		t.Fatalf("timeout error=%v", err)
++	}
++}

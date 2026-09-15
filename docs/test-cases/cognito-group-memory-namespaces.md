@@ -143,6 +143,15 @@ not substitute for the human `cognito:groups` Gateway smokes named below.
 | TC-GROUPNS-082 | Exact vector statement times out                                  | Search returns retryable `namespace_vector_timeout` and never uses tenant-wide HNSW fallback                                               | PostgreSQL integration |
 | TC-GROUPNS-083 | Documented two-namespace benchmark runs at the configured ceiling | Search p95 is no more than 120 percent of the approved exact-scan baseline, excluding embedding time                                       | PR benchmark           |
 
+`TC-GROUPNS-080..082` also cover materializing only IDs and exact distances,
+then hydrating full records for the selected top-K. The production SQL builder
+is exercised by `VectorSearch` and `EXPLAIN ANALYZE`: results must match a
+namespace-local brute-force baseline, foreign and filtered rows stay out, the
+distance tuples remain narrow, and an available HNSW index never selects
+candidates. Capacity and statement-timeout failures remain fail closed.
+The rollout benchmark uses the existing corpus without logging its content,
+retains the two-second production deadline, and verifies top-K 10 and 50.
+
 ## Durable Ingest
 
 | ID             | Scenario                                                      | Expected                                                                                                                      | Surface                   |
