@@ -1727,9 +1727,9 @@
       "namespace_evidence": "namespace_id = :'namespace_id'"
     },
     {
-      "id": "4cf01d2fc06510f04cd3",
+      "id": "7895750447c777b5b8ac",
       "owner": "scripts/manage-memory-access.mjs",
-      "line": 137,
+      "line": 202,
       "tables": [
         "ingest_jobs"
       ],

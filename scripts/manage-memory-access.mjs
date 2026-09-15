@@ -15,7 +15,9 @@ import {
   deriveHumanPrincipalKey,
   parseOperatorArgs,
   readDesiredState,
+  readExternalIdentity,
   readUsername,
+  validateExternalIdentity,
 } from "./lib/memory-namespace.mjs";
 
 const USAGE = `usage:
@@ -29,6 +31,12 @@ commands:
 
 required environment:
   MEM9_COGNITO_ISSUER MEM9_COGNITO_USER_POOL_ID MNEMO_DSN
+
+external provider mode (MEM9_AUTH_MODE=oidc):
+  Use --identity-file <owner-only-json> instead of --username-file.
+  The file contains exactly {"issuer":"https://id.example.com","sub":"provider-subject"}.
+  Only Aurora access changes; manage groups at the identity provider.
+  MEM9_COGNITO_USER_POOL_ID is not required.
 `;
 
 function userSubject(response) {
@@ -58,19 +66,36 @@ async function userGroups(client, userPoolId, username) {
   return names;
 }
 
-export async function manageAccess({
+function validateAccessInput({
   command,
   emergency,
   namespaceSlug,
   username,
   desired,
   issuer,
-  userPoolId,
-  cognito,
-  db,
+  authMode = "managed",
+  externalIdentity,
 }) {
-  if (!["assign-user", "move-user", "revoke-user", "show-user"].includes(command)) {
+  if (
+    !["assign-user", "move-user", "revoke-user", "show-user"].includes(command)
+  ) {
     throw new Error("unsupported access command");
+  }
+  if (!["managed", "oidc"].includes(authMode))
+    throw new Error("unsupported auth mode");
+  const external = authMode === "oidc";
+  if (external ? username !== undefined : externalIdentity !== undefined) {
+    throw new Error("identity input does not match authentication mode");
+  }
+  const subject = external
+    ? validateExternalIdentity(externalIdentity, issuer).sub
+    : undefined;
+  const assigning = command === "assign-user" || command === "move-user";
+  if (
+    (emergency && command !== "revoke-user") ||
+    (!assigning && namespaceSlug)
+  ) {
+    throw new Error("invalid access command options");
   }
   const target = namespaceSlug
     ? desired.namespaces.find((item) => item.slug === namespaceSlug)
@@ -82,10 +107,65 @@ export async function manageAccess({
     throw new Error("target namespace is unknown or disabled");
   }
 
-  const user = await cognito.send(
-    new AdminGetUserCommand({ UserPoolId: userPoolId, Username: username }),
+  return { external, subject, target };
+}
+
+export async function manageAccess({
+  command,
+  emergency,
+  namespaceSlug,
+  username,
+  desired,
+  issuer,
+  userPoolId,
+  cognito,
+  db,
+  authMode = "managed",
+  externalIdentity,
+}) {
+  const { external, subject, target } = validateAccessInput({
+    command,
+    emergency,
+    namespaceSlug,
+    username,
+    desired,
+    issuer,
+    authMode,
+    externalIdentity,
+  });
+
+  const principalKey = deriveHumanPrincipalKey(
+    issuer,
+    external
+      ? subject
+      : userSubject(
+          await cognito.send(
+            new AdminGetUserCommand({
+              UserPoolId: userPoolId,
+              Username: username,
+            }),
+          ),
+        ),
   );
-  const principalKey = deriveHumanPrincipalKey(issuer, userSubject(user));
+  if (command === "show-user") {
+    const result = await db.query(
+      `SELECT principal.status AS principal_status,
+              COUNT(*) FILTER (WHERE membership.status = 'active')::int AS active_memberships,
+              COUNT(*) FILTER (WHERE membership.status = 'revoked')::int AS revoked_memberships
+       FROM memory_principals AS principal
+       LEFT JOIN memory_namespace_memberships AS membership USING (principal_id)
+       WHERE principal.principal_key = $1 AND principal.principal_type = 'human'
+       GROUP BY principal.principal_id, principal.status`,
+      [principalKey],
+    );
+    return (
+      result.rows[0] ?? {
+        principal_status: "absent",
+        active_memberships: 0,
+        revoked_memberships: 0,
+      }
+    );
+  }
   await db.query(`SELECT pg_advisory_lock(hashtext($1))`, [principalKey]);
   try {
     const principalResult = await db.query(
@@ -102,21 +182,6 @@ export async function manageAccess({
       throw new Error("human principal type conflict");
     }
     const principalID = principalResult.rows[0].principal_id;
-    if (command === "show-user") {
-      const result = await db.query(
-        `SELECT COUNT(*) FILTER (WHERE status = 'active')::int AS active,
-                COUNT(*) FILTER (WHERE status = 'revoked')::int AS revoked
-         FROM memory_namespace_memberships
-         WHERE principal_id = $1`,
-        [principalID],
-      );
-      return {
-        principal_status: principalResult.rows[0].status,
-        active_memberships: result.rows[0].active,
-        revoked_memberships: result.rows[0].revoked,
-      };
-    }
-
     let targetNamespaceID;
     await db.query("BEGIN");
     try {
@@ -145,11 +210,26 @@ export async function manageAccess({
              AND state NOT IN ('succeeded', 'dead')`,
           [principalID],
         );
-      } else {
+      } else if (target) {
         await db.query(
           `UPDATE memory_principals
            SET status = 'active'
            WHERE principal_id = $1`,
+          [principalID],
+        );
+      }
+      if (external && command === "revoke-user") {
+        // Provider tokens can predate first use. Tombstones also block JIT for
+        // an existing namespace in which this human never had a membership.
+        await db.query(
+          `INSERT INTO memory_namespace_memberships (
+             namespace_id, principal_id, role, status, source_type,
+             source_key, granted_at, revoked_at
+           ) SELECT namespace_id, $1, 'member', 'revoked', 'operator', NULL,
+                    statement_timestamp(), statement_timestamp()
+             FROM memory_namespaces
+           ON CONFLICT (namespace_id, principal_id) DO UPDATE
+           SET status = 'revoked', revoked_at = statement_timestamp()`,
           [principalID],
         );
       }
@@ -189,38 +269,40 @@ export async function manageAccess({
       throw error;
     }
 
-    const managedGroups = new Set(
-      desired.namespaces.map((item) => item.cognito_group),
-    );
-    for (const groupName of await userGroups(cognito, userPoolId, username)) {
-      if (managedGroups.has(groupName)) {
+    if (!external) {
+      const managedGroups = new Set(
+        desired.namespaces.map((item) => item.cognito_group),
+      );
+      for (const groupName of await userGroups(cognito, userPoolId, username)) {
+        if (managedGroups.has(groupName)) {
+          await cognito.send(
+            new AdminRemoveUserFromGroupCommand({
+              UserPoolId: userPoolId,
+              Username: username,
+              GroupName: groupName,
+            }),
+          );
+        }
+      }
+
+      if (target) {
         await cognito.send(
-          new AdminRemoveUserFromGroupCommand({
+          new AdminAddUserToGroupCommand({
             UserPoolId: userPoolId,
             Username: username,
-            GroupName: groupName,
+            GroupName: target.cognito_group,
           }),
         );
+        const recognized = (
+          await userGroups(cognito, userPoolId, username)
+        ).filter((groupName) => managedGroups.has(groupName));
+        if (recognized.length !== 1 || recognized[0] !== target.cognito_group) {
+          throw new Error("Cognito group verification failed");
+        }
       }
     }
 
     if (target) {
-      await cognito.send(
-        new AdminAddUserToGroupCommand({
-          UserPoolId: userPoolId,
-          Username: username,
-          GroupName: target.cognito_group,
-        }),
-      );
-      const recognized = (await userGroups(cognito, userPoolId, username)).filter(
-        (groupName) => managedGroups.has(groupName),
-      );
-      if (
-        recognized.length !== 1 ||
-        recognized[0] !== target.cognito_group
-      ) {
-        throw new Error("Cognito group verification failed");
-      }
       await db.query("BEGIN");
       try {
         const namespace = await db.query(
@@ -275,37 +357,57 @@ async function main() {
   const issuer = process.env.MEM9_COGNITO_ISSUER;
   const userPoolId = process.env.MEM9_COGNITO_USER_POOL_ID;
   const dsn = process.env.MNEMO_DSN;
-  if (!configPath || !issuer || !userPoolId || !dsn) {
+  const authMode = process.env.MEM9_AUTH_MODE ?? "managed";
+  if (!["managed", "oidc"].includes(authMode))
+    throw new Error("unsupported auth mode");
+  const external = authMode === "oidc";
+  if (!configPath || !issuer || (!external && !userPoolId) || !dsn) {
     throw new Error(
       "MEM9_NAMESPACE_CONFIG, MEM9_COGNITO_ISSUER, " +
         "MEM9_COGNITO_USER_POOL_ID, and MNEMO_DSN are required",
     );
   }
-  if (args.username) {
-    throw new Error("pass username through stdin or --username-file, not argv");
+  if (
+    args.username ||
+    args.sub ||
+    args.subject ||
+    args.identity ||
+    (external ? args.username_file : args.identity_file)
+  ) {
+    throw new Error(
+      "use the authentication mode's identity file; never pass identity values in argv",
+    );
   }
   const desired = await readDesiredState(configPath);
-  const username = await readUsername({ file: args.username_file });
-  const cognito = new CognitoIdentityProviderClient({
-    region: args.region ?? process.env.AWS_REGION,
-  });
+  const externalIdentity = external
+    ? await readExternalIdentity(args.identity_file, issuer)
+    : undefined;
+  const username = external
+    ? undefined
+    : await readUsername({ file: args.username_file });
+  const request = {
+    command: args.command,
+    emergency: args.emergency === true,
+    namespaceSlug: args.namespace,
+    username,
+    desired,
+    issuer,
+    authMode,
+    externalIdentity,
+  };
+  validateAccessInput(request);
+  const cognito = external
+    ? undefined
+    : new CognitoIdentityProviderClient({
+        region: args.region ?? process.env.AWS_REGION,
+      });
   const db = new pg.Client({ connectionString: dsn });
   await db.connect();
   try {
-    const result = await manageAccess({
-      command: args.command,
-      emergency: args.emergency === true,
-      namespaceSlug: args.namespace,
-      username,
-      desired,
-      issuer,
-      userPoolId,
-      cognito,
-      db,
-    });
+    const result = await manageAccess({ ...request, userPoolId, cognito, db });
     process.stdout.write(`${JSON.stringify(result)}\n`);
   } finally {
-    cognito.destroy();
+    cognito?.destroy();
     await db.end();
   }
 }

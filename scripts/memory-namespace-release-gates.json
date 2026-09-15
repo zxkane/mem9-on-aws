@@ -57,8 +57,10 @@
     {
       "id": "access-management",
       "state": "enabled_v1",
-      "acceptance": ["049-058"],
+      "acceptance": ["049-058", "138-144"],
       "verification": [
+        "scripts/memory-external-access.test.mjs",
+        "docker/bootstrap/operator-entrypoint.test.mjs",
         "scripts/memory-namespace.test.mjs",
         "scripts/run-memory-namespace-integration.sh"
       ]

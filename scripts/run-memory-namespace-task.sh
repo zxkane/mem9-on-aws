@@ -33,6 +33,10 @@ operations:
   revoke-user --config <owner-only-json> --username-file <owner-only-file>
               [--emergency]
   show-user --config <owner-only-json> --username-file <owner-only-file>
+
+External identity provider: replace --username-file with --identity-file.
+The owner-only JSON must contain the deployed issuer and exact provider sub.
+Groups remain managed at the external identity provider.
 EOF
 }
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
@@ -58,6 +62,7 @@ esac
 
 CONFIG_FILE=""
 USERNAME_FILE=""
+IDENTITY_FILE=""
 NAMESPACE_SLUG=""
 DISPLAY_NAME=""
 LEGACY_NAMESPACE_ID=""
@@ -74,6 +79,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     --username-file)
       USERNAME_FILE="${2:-}"
+      shift 2
+      ;;
+    --identity-file)
+      IDENTITY_FILE="${2:-}"
       shift 2
       ;;
     --namespace)
@@ -112,16 +121,26 @@ while [[ $# -gt 0 ]]; do
 done
 
 need_config=false
-need_username=false
+need_input=false
 case "$OPERATION" in
   reconcile)
     need_config=true
     ;;
   assign-user|move-user|revoke-user|show-user)
     need_config=true
-    need_username=true
+    need_input=true
     ;;
 esac
+
+if [[ -n "$IDENTITY_FILE" && ( -n "$USERNAME_FILE" || "$need_input" != "true" ) ]]; then
+  echo "--identity-file requires an access command and cannot accompany --username-file" >&2
+  exit 2
+fi
+if [[ "$EMERGENCY" == "1" && "$OPERATION" != "revoke-user" ]] ||
+  [[ ( "$OPERATION" == "revoke-user" || "$OPERATION" == "show-user" ) && -n "$NAMESPACE_SLUG" ]]; then
+  echo "invalid access command options" >&2
+  exit 2
+fi
 
 if [[ "$need_config" == "true" ]]; then
   [[ -f "$CONFIG_FILE" ]] || { echo "--config is required" >&2; exit 2; }
@@ -228,29 +247,35 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-if [[ "$need_username" == "true" && -z "$USERNAME_FILE" ]]; then
-  USERNAME_FILE="$TMP_DIR/username"
-  umask 077
-  cat >"$USERNAME_FILE"
+INPUT_KIND="username"
+INPUT_FILE="$USERNAME_FILE"
+if [[ -n "$IDENTITY_FILE" ]]; then
+  INPUT_KIND="identity"
+  INPUT_FILE="$IDENTITY_FILE"
 fi
-if [[ "$need_username" == "true" ]]; then
-  [[ -f "$USERNAME_FILE" ]] || {
-    echo "username input is required through stdin or --username-file" >&2
+if [[ "$need_input" == "true" && -z "$INPUT_FILE" ]]; then
+  INPUT_FILE="$TMP_DIR/username"
+  umask 077
+  cat >"$INPUT_FILE"
+fi
+if [[ "$need_input" == "true" ]]; then
+  [[ -f "$INPUT_FILE" ]] || {
+    echo "identity input is required through stdin or an identity file" >&2
     exit 2
   }
-  [[ "$(stat -c '%a' "$USERNAME_FILE")" == "600" ]] || {
-    echo "username file must have mode 600" >&2
+  [[ "$(stat -c '%a' "$INPUT_FILE")" == "600" ]] || {
+    echo "identity input file must have mode 600" >&2
     exit 2
   }
 fi
 
 CONFIG_HASH=""
-USERNAME_HASH=""
+INPUT_HASH=""
 if [[ "$need_config" == "true" ]]; then
   CONFIG_HASH=$(sha256sum "$CONFIG_FILE" | awk '{print $1}')
 fi
-if [[ "$need_username" == "true" ]]; then
-  USERNAME_HASH=$(sha256sum "$USERNAME_FILE" | awk '{print $1}')
+if [[ "$need_input" == "true" ]]; then
+  INPUT_HASH=$(sha256sum "$INPUT_FILE" | awk '{print $1}')
 fi
 OPERATION_KEY=$(
   jq -cn \
@@ -263,7 +288,8 @@ OPERATION_KEY=$(
     --arg emergency "$EMERGENCY" \
     --arg expectedPhase "$EXPECTED_PHASE" \
     --arg configHash "$CONFIG_HASH" \
-    --arg usernameHash "$USERNAME_HASH" \
+    --arg inputHash "$INPUT_HASH" \
+    --arg inputKind "$INPUT_KIND" \
     '{
       operation:$operation,
       namespace:$namespace,
@@ -274,7 +300,8 @@ OPERATION_KEY=$(
       emergency:$emergency,
       expectedPhase:$expectedPhase,
       configHash:$configHash,
-      usernameHash:$usernameHash
+      inputHash:$inputHash,
+      inputKind:$inputKind
     }' |
     sha256sum |
     awk '{print $1}'
@@ -302,13 +329,19 @@ put_secure_parameter() {
 
 CONFIG_PARAMETER=""
 USERNAME_PARAMETER=""
+IDENTITY_PARAMETER=""
 if [[ "$need_config" == "true" ]]; then
   CONFIG_PARAMETER="${PARAM_PREFIX}/config"
   put_secure_parameter "$CONFIG_PARAMETER" "$CONFIG_FILE"
 fi
-if [[ "$need_username" == "true" ]]; then
-  USERNAME_PARAMETER="${PARAM_PREFIX}/username"
-  put_secure_parameter "$USERNAME_PARAMETER" "$USERNAME_FILE"
+if [[ "$need_input" == "true" ]]; then
+  if [[ "$INPUT_KIND" == "identity" ]]; then
+    IDENTITY_PARAMETER="${PARAM_PREFIX}/identity"
+    put_secure_parameter "$IDENTITY_PARAMETER" "$INPUT_FILE"
+  else
+    USERNAME_PARAMETER="${PARAM_PREFIX}/username"
+    put_secure_parameter "$USERNAME_PARAMETER" "$INPUT_FILE"
+  fi
 fi
 
 PREFIX="/mem9-on-aws/${STAGE}/bootstrap"
@@ -341,6 +374,7 @@ ENVIRONMENT=$(
     --arg operation "$TASK_OPERATION" \
     --arg config "$CONFIG_PARAMETER" \
     --arg username "$USERNAME_PARAMETER" \
+    --arg identity "$IDENTITY_PARAMETER" \
     --arg namespace "$NAMESPACE_SLUG" \
     --arg emergency "$EMERGENCY" \
     --arg legacyNamespace "$LEGACY_NAMESPACE_ID" \
@@ -353,6 +387,7 @@ ENVIRONMENT=$(
         {name:"MEM9_BOOTSTRAP_OPERATION",value:$operation},
         {name:"MEM9_NAMESPACE_CONFIG_PARAMETER",value:$config},
         {name:"MEM9_NAMESPACE_USERNAME_PARAMETER",value:$username},
+        {name:"MEM9_NAMESPACE_IDENTITY_PARAMETER",value:$identity},
         {name:"MEM9_NAMESPACE_SLUG",value:$namespace},
         {name:"MEM9_NAMESPACE_EMERGENCY",value:$emergency},
         {name:"MEM9_LEGACY_NAMESPACE_ID",value:$legacyNamespace},
@@ -437,6 +472,7 @@ if [[ "$EXISTING_COUNT" -eq 1 ]]; then
     | select(
         .name == "MEM9_NAMESPACE_CONFIG_PARAMETER"
         or .name == "MEM9_NAMESPACE_USERNAME_PARAMETER"
+        or .name == "MEM9_NAMESPACE_IDENTITY_PARAMETER"
       )
     | .value
     | select(length > 0)

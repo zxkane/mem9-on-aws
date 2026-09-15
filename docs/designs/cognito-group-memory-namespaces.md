@@ -54,9 +54,9 @@ The repository implementation includes:
 - a retained least-privilege namespace operator role;
 - `MEM9_NAMESPACE_REQUIRED`, which defaults to `0` and keeps an existing stage
   compatible until the database reaches `constraints_complete`;
-- a version-controlled 279-statement scoped-SQL manifest generated from the
+- a version-controlled 284-statement scoped-SQL manifest generated from the
   complete patched upstream and local operator/DDL surfaces;
-- a coverage ownership map assigning every `TC-GROUPNS-001..137` criterion to
+- a coverage ownership map assigning every `TC-GROUPNS-001..144` criterion to
   exactly one capability and named verification surface without claiming that
   the mapped surface has executed or passed;
 - unit, infrastructure, fresh-upstream patch, and PostgreSQL migration tests.
@@ -68,6 +68,34 @@ also execute the documented service drain and write freeze; the database
 operator command intentionally does not scale ECS or mutate Gateway resources.
 
 ## User-Visible Contract
+
+### External identity provider administration
+
+After authentication moves to an external provider, group names in desired
+state still bind to the active issuer. Keep the application admission group
+separate from namespace groups: an enabled human has the admission group and
+exactly one namespace group. An admission group shared by every user must not
+be bound to a namespace.
+
+Provider administrators own group lifecycle. The private namespace access task
+manages Aurora memberships using an owner-only identity file containing the
+exact deployed `issuer` and provider `sub`; it never resolves an email or a
+legacy-pool username. The existing commands accept `--identity-file` in external
+mode and retain `--username-file` in managed mode. Mode/input mismatches and a
+foreign issuer fail before database mutation or provider calls.
+
+External moves use database revoke, provider group update, then explicit
+database assignment and fresh tokens. Assignment shares the managed workflow's
+per-principal lock and revoked target tombstone. Normal revoke creates revoked
+memberships in all existing namespaces, including for a user who has never
+logged in, so an unexpired group claim cannot recreate access through JIT.
+Accepted jobs remain valid after normal revoke. Emergency revoke additionally
+disables the principal and cancels nonterminal jobs; normal revoke never
+reactivates that principal. Explicit assignment is the operator recovery path.
+The show command reads membership counts without creating a principal.
+
+This adaptation changes neither the provider's groups nor the production
+namespace gate. Live backfill still requires explicit historical ownership.
 
 ### Human users
 

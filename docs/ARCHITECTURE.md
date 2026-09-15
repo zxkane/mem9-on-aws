@@ -492,6 +492,19 @@ Vector recall materializes and exactly ranks only the namespace subset, with a
 row ceiling and statement timeout; the tenant-wide HNSW index is removed during
 enforcement.
 
+With an external provider, its administrators own groups while the private
+access task manages Aurora authorization through an owner-only `issuer`/`sub`
+identity file. It verifies the exact deployed issuer and never resolves a
+legacy username or changes external groups. Assignment and movement share the
+managed path's per-principal lock and revoked target tombstone. External normal
+revoke seeds revoked memberships in all existing namespaces to block first-use
+JIT from stale tokens, without canceling accepted jobs. Emergency revoke also
+disables the principal and cancels jobs; normal revoke preserves that disabled
+state. Explicit operator assignment restores it. Read-only user inspection
+does not create a principal. The application admission group remains separate
+from every namespace group, so membership in the admission group cannot select
+a shared default namespace.
+
 Cleanup approval and consolidation are not synthesized by the namespace v1
 application graph. Their retained direct CLI entry points fail before creating
 production adapters, and

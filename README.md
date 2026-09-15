@@ -314,6 +314,21 @@ mutate each other's memories, sessions, jobs, or plans. Clients never submit a
 namespace ID. M2M clients use explicit database bindings instead of Cognito
 groups.
 
+For an external Cognito pool, keep the application admission group (the value
+of `MEM9_AUTH_REQUIRED_GROUP`) separate from namespace groups. For example:
+
+| Human | Provider groups | Memory namespace |
+| --- | --- | --- |
+| First and second team members | `mem9-access`, `mem9-team-a` | `team-a`, shared |
+| Another team member | `mem9-access`, `mem9-team-b` | `team-b`, isolated |
+
+The admission group `mem9-access` is not a namespace binding. Bind only
+`mem9-team-a` and `mem9-team-b` in desired state; unrelated groups are ignored.
+Two namespace groups cause rejection, regardless of Cognito group precedence.
+Use `MEM9_AUTH_GROUP_CLAIM=cognito:groups` for an external Cognito pool.
+Creating groups alone does not isolate compatibility-mode data: complete the
+backfill and required-mode cutover below before onboarding another team.
+
 The implementation is additive and defaults to compatibility mode:
 
 ```text
@@ -361,6 +376,11 @@ snapshot, or prevent Cognito administration on their own.
    MEM9_NAMESPACE_OPERATOR_STAGE=prod \
      scripts/deploy-memory-namespace-operator-role.sh
    ```
+
+   For external authentication, also pass `MEM9_AUTH_MODE=oidc`; the retained
+   role then has no Cognito administration grants. Use the application account
+   credentials for this role and the private task, and the provider account's
+   credentials and region only for provider group administration.
 
    The account has one fixed `memory-namespace-operator-mem9-on-aws` ownership
    stack in `us-west-2`. Its first deployment binds it to the selected stage
@@ -420,6 +440,48 @@ snapshot, or prevent Cognito administration on their own.
      --username-file <username.local.txt> \
      --namespace <team-slug>
    ```
+
+   In external mode, reconciliation writes Aurora bindings without changing
+   provider groups. Create the namespace groups and assign users at the
+   provider. The `cognito_group` configuration field still contains the exact
+   group name even though its lifecycle is external. Keep the same legacy
+   namespace slug used by backfill; reconciliation preserves its internal ID.
+
+   Use an owner-only `identity.local.json` containing exactly the current
+   provider's issuer and immutable `sub`, obtained from its administration
+   records. An email, display name, or old-pool username is not a substitute:
+
+   ```json
+   {"issuer":"https://id.example.com/pool","sub":"provider-subject"}
+   ```
+
+   ```bash
+   chmod 600 identity.local.json
+   STAGE=prod scripts/run-memory-namespace-task.sh assign-user \
+     --config namespace-config.local.json \
+     --identity-file identity.local.json --namespace <team-slug>
+
+   STAGE=prod scripts/run-memory-namespace-task.sh show-user \
+     --config namespace-config.local.json --identity-file identity.local.json
+   ```
+
+   These commands change only Aurora authorization and verify the file's
+   issuer against the deployed task. For an external user move, first run
+   `revoke-user --identity-file ...`, update the provider to exactly one target
+   namespace group, then run `assign-user --identity-file ... --namespace ...`
+   and obtain a fresh token. Normal revoke blocks JIT even before first login
+   and allows accepted jobs to finish. `revoke-user --emergency` also disables
+   the principal and cancels nonterminal jobs. A subsequent normal revoke
+   preserves the disabled state; explicit assignment is required to restore it.
+   `show-user` reports status/counts and does not create users or memberships.
+
+   Bind each enabled M2M client to one namespace in `m2m_bindings`; human groups
+   do not authorize machine clients. Derive its `client_key` and `principal_key`
+   with `deriveClientKey(activeIssuer, clientId)` and
+   `deriveM2MPrincipalKey(activeIssuer, clientId)` from
+   `scripts/lib/memory-namespace.mjs`. Keep provider values and generated
+   bindings in mode-600 gitignored files. A shared machine client cannot route
+   to multiple namespaces.
 
 7. Verify the database phase is `constraints_complete`, every human has exactly
    one managed group and active membership, and every enabled M2M client has one
@@ -1628,7 +1690,9 @@ copy data, or turn off namespace enforcement.
    administered at the provider; the bootstrap task does not receive an external
    user-pool ID for group-management commands. Namespace phase checks and
    database migration remain available; namespace reconciliation writes database
-   bindings without managing external groups. Provision the namespace operator
+   bindings without managing external groups. Access commands use an
+   issuer-bound `--identity-file` for Aurora membership administration as
+   described in the namespace cutover runbook. Provision the namespace operator
    role with `MEM9_AUTH_MODE=oidc` to omit Cognito grants while preserving its
    existing stage/region ownership checks.
 3. Configure production secrets, including `MEM9_RETAIN_MANAGED_AUTH=1` for an

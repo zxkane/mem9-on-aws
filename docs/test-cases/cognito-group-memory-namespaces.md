@@ -217,6 +217,18 @@ not substitute for the human `cognito:groups` Gateway smokes named below.
 | TC-GROUPNS-136 | The retained namespace operator stack is redeployed with a different application region, stage, or caller visibility | The fixed owner stack rejects region/stage retargeting, distinguishes absence from read failure, verifies final parameters, and is explicitly denied to the PR deploy role | Unit + infra static         |
 | TC-GROUPNS-137 | Reconciliation commits but its post-commit drift read fails                                             | The command reports committed-but-unverified state and does not issue a misleading rollback                                                                               | Unit                        |
 
+## External provider access administration
+
+| ID | Scenario | Expected | Surface |
+| --- | --- | --- | --- |
+| TC-GROUPNS-138 | External access input has another issuer, missing/ambiguous subject, extra fields, or unsafe file permissions | Reject before database or Cognito access; require an exact issuer/sub identity file | Unit + task entrypoint |
+| TC-GROUPNS-139 | External user is assigned A, moved B, then moved A again | One active membership, old memberships revoked, provider is never mutated | Unit + PostgreSQL |
+| TC-GROUPNS-140 | External final grant fails or two commands contend for one principal | Target tombstone blocks JIT; shared principal lock serializes commands | Unit + PostgreSQL |
+| TC-GROUPNS-141 | Normal revoke runs before the external user's first request, or follows emergency revoke | All existing namespaces have revoked tombstones; pending jobs survive normal revoke; disabled principal stays disabled | PostgreSQL |
+| TC-GROUPNS-142 | Show reads an unknown external user | No principal/membership is created and output contains counts/status only | Unit + PostgreSQL |
+| TC-GROUPNS-143 | Runner receives an identity file and external-mode task dispatches it | Subject travels only through a temporary SecureString and private file; managed/external input confusion is rejected | Runner + task entrypoint |
+| TC-GROUPNS-144 | Operator requests unsupported mode, emergency assignment, or a target on revoke | Reject before database/provider calls | Unit |
+
 ## Release Gates
 
 The feature cannot be enabled until:
