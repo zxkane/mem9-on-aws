@@ -365,15 +365,19 @@ describe("proxy-handler get_ingest_job_status", () => {
     const logSpy = vi.spyOn(console, "error").mockImplementation(() => {});
     vi.stubGlobal("fetch", fetchSpy);
 
-    let message = "";
-    try {
-      await handler({ job_id: "job-other" }, ctx("get_ingest_job_status"));
-    } catch (error) {
-      message = String(error);
+    const messages = [];
+    for (const job_id of ["job-other", "job-unknown"]) {
+      try {
+        await handler({ job_id }, ctx("get_ingest_job_status"));
+      } catch (error) {
+        messages.push(String(error));
+      }
     }
-    expect(message).toContain("returned 404");
-    expect(message).not.toContain("payload-leak");
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    expect(messages).toHaveLength(2);
+    expect(messages[0]).toBe(messages[1]);
+    expect(messages[0]).toContain("returned 404");
+    expect(messages[0]).not.toMatch(/payload-leak|job-other|job-unknown/);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
     expect(logSpy).not.toHaveBeenCalled();
   });
 
