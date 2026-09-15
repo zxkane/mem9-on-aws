@@ -12,6 +12,7 @@ import {
   INTERNAL_AUTH_FIELD,
   createInternalContext,
   parseSigningKeys,
+  requestHash,
 } from "./namespace-auth.mjs";
 
 process.env.MEM9_SERVER_BASE_URL = "http://mnemo.mem9-test.local:8080";
@@ -318,6 +319,24 @@ describe("proxy-handler routing (regression)", () => {
 });
 
 describe("proxy-handler get_ingest_job_status", () => {
+  it("records only hash and backend status for an opted-in PR acceptance request", async()=>{
+    const previous=process.env.MEM9_ACCEPTANCE_STAGE;
+    process.env.MEM9_ACCEPTANCE_STAGE="pr-42";
+    vi.resetModules();
+    const log=vi.spyOn(console,"log").mockImplementation(()=>{});
+    vi.stubGlobal("fetch",vi.fn(async()=>({ok:false,status:403,text:async()=>'{"error":"namespace membership revoked"}'})));
+    try{
+      const {handler:previewHandler}=await import("./proxy-handler.mjs");
+      const invocation={tool:"search_memories",arguments:{q:"private-query-marker"}};
+      const context=createInternalContext({invocation,identity:{issuer:"https://cognito-idp.example.invalid/pool",principalType:"human",subject:"private-subject-marker",clientId:"reader-client",groups:["team-a"]},keys:identityKeys});
+      await expect(previewHandler({...invocation.arguments,[INTERNAL_AUTH_FIELD]:context},ctx("search_memories"))).rejects.toThrow("returned 403");
+      expect(log.mock.calls).toEqual([[JSON.stringify({event:"namespace_acceptance_http_error",request_hash:requestHash(invocation),status:403})]]);
+      expect(JSON.stringify(log.mock.calls)).not.toMatch(/private-query-marker|private-subject-marker|reader-client/);
+    } finally {
+      if(previous===undefined)delete process.env.MEM9_ACCEPTANCE_STAGE;else process.env.MEM9_ACCEPTANCE_STAGE=previous;
+      vi.resetModules();
+    }
+  });
   it("GETs status with the configured tenant key and accepts only job_id", async () => {
     const status = {
       job_id: "job-54",

@@ -25,6 +25,7 @@
     "@aws/bedrock-token-generator": "^1.1.0",
     "@types/node": "^24.13.3",
     "@vitest/coverage-v8": "^4.1.10",
+    "playwright": "1.63.0",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10",
     "yaml": "^2.9.0"

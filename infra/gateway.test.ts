@@ -281,6 +281,7 @@ describe("gateway stack", () => {
     expect(vpc.securityGroups).toBeDefined();
     // Env (flat on sst.aws.Function): the Cloud Map base URL + the tenant key.
     const env = targetFn?.environment as Record<string, any>;
+    expect(env.MEM9_ACCEPTANCE_STAGE).toBe("");
     expect(
       String((env.MEM9_SERVER_BASE_URL as { value?: string }).value),
     ).toContain("mnemo.mem9-prod.local");
