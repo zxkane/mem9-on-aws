@@ -209,6 +209,43 @@ export async function readUsername({ file, stdin = process.stdin } = {}) {
   return username;
 }
 
+export function validateExternalIdentity(value, issuer) {
+  if (
+    !value ||
+    typeof value !== "object" ||
+    Array.isArray(value) ||
+    Object.keys(value).length !== 2 ||
+    value.issuer !== issuer ||
+    typeof issuer !== "string" ||
+    !issuer.startsWith("https://") ||
+    typeof value.sub !== "string" ||
+    value.sub !== value.sub.trim() ||
+    !/^[\x21-\x7e]{1,256}$/u.test(value.sub)
+  ) {
+    throw new Error(
+      "Invalid external identity: exact deployed issuer and subject are required",
+    );
+  }
+  return { issuer: value.issuer, sub: value.sub };
+}
+
+export async function readExternalIdentity(path, issuer) {
+  if (!path) throw new Error("External identity requires --identity-file");
+  const metadata = await stat(path);
+  if (!metadata.isFile() || (metadata.mode & 0o077) !== 0) {
+    throw new Error("external identity file must be owner-only (mode 600)");
+  }
+  if (metadata.size > 4096)
+    throw new Error("External identity file is too large");
+  let value;
+  try {
+    value = JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    throw new Error("Invalid external identity JSON");
+  }
+  return validateExternalIdentity(value, issuer);
+}
+
 export function parseOperatorArgs(argv) {
   if (argv[0] === "--help" || argv[0] === "-h") {
     return { help: true };

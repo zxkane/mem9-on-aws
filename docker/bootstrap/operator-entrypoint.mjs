@@ -117,7 +117,32 @@ export async function main() {
   const OPERATION = requireEnv("MEM9_BOOTSTRAP_OPERATION");
   const configParameter = process.env.MEM9_NAMESPACE_CONFIG_PARAMETER;
   const usernameParameter = process.env.MEM9_NAMESPACE_USERNAME_PARAMETER;
-  const values = await readParameters([configParameter, usernameParameter]);
+  const identityParameter = process.env.MEM9_NAMESPACE_IDENTITY_PARAMETER;
+  const accessOperation = [
+    "assign-user",
+    "move-user",
+    "revoke-user",
+    "show-user",
+  ].includes(OPERATION);
+  if (accessOperation) {
+    const mode = process.env.MEM9_AUTH_MODE ?? "managed";
+    if (!["managed", "oidc"].includes(mode))
+      throw new Error("unsupported auth mode");
+    if (
+      mode === "oidc"
+        ? !identityParameter || usernameParameter
+        : !usernameParameter || identityParameter
+    ) {
+      throw new Error("identity input does not match authentication mode");
+    }
+  } else if (identityParameter || usernameParameter) {
+    throw new Error("identity input requires an access command");
+  }
+  const values = await readParameters([
+    configParameter,
+    usernameParameter,
+    identityParameter,
+  ]);
   const directory = await mkdtemp(join(tmpdir(), "mem9-namespace-operator-"));
   try {
     const env = {
@@ -142,6 +167,14 @@ export async function main() {
       });
       await chmod(usernamePath, 0o600);
     }
+    let identityPath;
+    if (identityParameter) {
+      identityPath = join(directory, "identity.json");
+      await writeFile(identityPath, values.get(identityParameter), {
+        mode: 0o600,
+      });
+      await chmod(identityPath, 0o600);
+    }
 
     if (OPERATION === "namespace-reconcile") {
       if (env.MEM9_AUTH_MODE !== "oidc")
@@ -155,25 +188,20 @@ export async function main() {
       );
       return;
     }
-    if (
-      ["assign-user", "move-user", "revoke-user", "show-user"].includes(
-        OPERATION,
-      )
-    ) {
-      if (env.MEM9_AUTH_MODE === "oidc")
-        throw new Error("Manage external users at the identity provider");
-      requireEnv("MEM9_COGNITO_USER_POOL_ID");
-      if (!configPath || !usernamePath) {
+    if (accessOperation) {
+      const external = env.MEM9_AUTH_MODE === "oidc";
+      if (!external) requireEnv("MEM9_COGNITO_USER_POOL_ID");
+      if (!configPath || !(external ? identityPath : usernamePath)) {
         throw new Error(
-          "namespace config and username parameters are required",
+          "namespace config and identity parameters are required",
         );
       }
       const args = [
         OPERATION,
         "--config",
         configPath,
-        "--username-file",
-        usernamePath,
+        external ? "--identity-file" : "--username-file",
+        external ? identityPath : usernamePath,
       ];
       if (process.env.MEM9_NAMESPACE_SLUG) {
         args.push("--namespace", process.env.MEM9_NAMESPACE_SLUG);

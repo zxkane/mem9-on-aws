@@ -809,4 +809,7 @@ try {
 }
 NODE
 
+MEM9_NAMESPACE_TEST_DSN="$MNEMO_DSN" \
+  "$ROOT/node_modules/.bin/vitest" run "$ROOT/scripts/memory-external-access.test.mjs"
+
 echo "memory namespace migration integration: OK"
