@@ -74,7 +74,7 @@ operator command intentionally does not scale ECS or mutate Gateway resources.
 The human release gate runs only on a `pr-N` stage with managed authentication.
 It drives authorization code plus PKCE through the existing OAuth facade and
 Cognito login page, then sends the resulting human access tokens to the deployed
-Gateway. A native loopback callback is intercepted by the test browser; no
+Gateway. A native callback listener binds an ephemeral loopback port; no
 additional callback allowlist entry or authentication bypass is introduced.
 
 Synthetic identities use generated credentials held in owner-only temporary

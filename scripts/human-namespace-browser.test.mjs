@@ -1,7 +1,10 @@
 import { describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
+import { request as httpRequest } from "node:http";
 import {
   checkOAuthCallback,
   HumanMcpClient,
+  HumanOAuthBrowser,
   parseRpcResponse,
 } from "./lib/human-namespace-browser.mjs";
 
@@ -10,6 +13,113 @@ const token = () => {
   return `head.${Buffer.from(JSON.stringify({ iat: now, exp: now + 900, token_use: "access", sub: "fixture", client_id: "fixture-client", scope: "mem9-mcp/read mem9-mcp/write" })).toString("base64url")}.sig`;
 };
 describe("human OAuth/MCP client guards", () => {
+  it.each([false, true])(
+    "receives loopback redirects and closes the listener (context-close failure=%s)",
+    async (closeFails) => {
+      let callback, authorize;
+      const page = {
+        setDefaultTimeout() {},
+        async goto(url) {
+          authorize = new URL(url);
+        },
+        url: () => "https://login.example.com/login",
+        locator: () => ({
+          first: () => ({ fill: async () => {}, isVisible: async () => true }),
+        }),
+        getByRole: () => ({
+          click: async () => {
+            const malformed = await new Promise((resolve, reject) => {
+              const request = httpRequest(
+                {
+                  hostname: "127.0.0.1",
+                  port: new URL(callback).port,
+                  path: "//",
+                  method: "GET",
+                },
+                (response) => {
+                  response.resume();
+                  response.on("end", () => resolve(response.statusCode));
+                },
+              );
+              request.on("error", reject);
+              request.end();
+            });
+            expect(malformed).toBe(400);
+            const invalid = new URL(callback);
+            invalid.searchParams.set("state", "wrong");
+            invalid.searchParams.set("code", "invalid");
+            expect((await fetch(invalid)).status).toBe(400);
+            const valid = new URL(callback);
+            valid.searchParams.set(
+              "state",
+              authorize.searchParams.get("state"),
+            );
+            valid.searchParams.set("code", "opaque-code");
+            expect((await fetch(valid)).status).toBe(200);
+          },
+        }),
+      };
+      const close = vi.fn(async () => {
+          if (closeFails) throw new Error("injected_context_close_failure");
+        }),
+        browser = {
+          newContext: async () => ({
+            route: async () => {},
+            newPage: async () => page,
+            close,
+          }),
+        };
+      const fetchImpl = async (url, options) => {
+        if (url.endsWith("/register")) {
+          callback = JSON.parse(options.body).redirect_uris[0];
+          return {
+            status: 201,
+            json: async () => ({ client_id: "fixture-client" }),
+          };
+        }
+        const form = new URLSearchParams(options.body);
+        expect(form.get("code")).toBe("opaque-code");
+        expect(
+          createHash("sha256")
+            .update(form.get("code_verifier"))
+            .digest("base64url"),
+        ).toBe(authorize.searchParams.get("code_challenge"));
+        const now = Math.floor(Date.now() / 1000),
+          claims = {
+            iss: "fixture-issuer",
+            sub: "fixture",
+            client_id: "fixture-client",
+            token_use: "access",
+            scope: "mem9-mcp/read mem9-mcp/write",
+            iat: now,
+            exp: now + 900,
+          };
+        return {
+          ok: true,
+          json: async () => ({
+            access_token: `header.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.signature`,
+          }),
+        };
+      };
+      const client = new HumanOAuthBrowser({
+        browser,
+        facadeUrl: "https://facade.example.com",
+        providerOrigin: "https://login.example.com",
+        issuer: "fixture-issuer",
+        fetchImpl,
+      });
+      const login = client.login({
+        username: "fixture-user",
+        password: "fixture-password",
+        subject: "fixture",
+      });
+      if (closeFails)
+        await expect(login).rejects.toThrow("injected_context_close_failure");
+      else await login;
+      expect(close).toHaveBeenCalledTimes(1);
+      await expect(fetch(callback)).rejects.toThrow();
+    },
+  );
   it.each(["rate_limit", "protocol", "backend_failure", "missing_proof"])(
     "does not accept %s as a namespace denial",
     async (mode) => {

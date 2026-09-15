@@ -1,5 +1,6 @@
 import { HumanAcceptanceError } from "./human-namespace-acceptance.mjs";
 import { randomBytes, createHash } from "node:crypto";
+import { createServer } from "node:http";
 import { validateHumanAccessToken } from "./human-namespace-acceptance.mjs";
 import { requestHash } from "../../infra/gateway/namespace-auth.mjs";
 
@@ -177,35 +178,69 @@ export class HumanOAuthBrowser {
     const verifier = randomBytes(32).toString("base64url"),
       state = randomBytes(24).toString("base64url");
     const challenge = createHash("sha256").update(verifier).digest("base64url");
-    const callback = `http://127.0.0.1:43891/callback/${randomBytes(12).toString("hex")}`;
-    const registration = await this.fetch(`${this.facade}/register`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        redirect_uris: [callback],
-        token_endpoint_auth_method: "none",
-      }),
-      signal: AbortSignal.timeout(30000),
+    const callbackPath = `/callback/${randomBytes(12).toString("hex")}`;
+    let receive, callback, context;
+    const completed = new Promise((resolve) => {
+      receive = resolve;
     });
-    check(registration.status === 201, "oauth_registration_failed");
-    const { client_id: clientId } = await registration.json();
-    check(
-      typeof clientId === "string" && clientId.length > 0,
-      "oauth_registration_client_missing",
-    );
-    const authorize = new URL(`${this.facade}/oauth/authorize`);
-    for (const [name, value] of Object.entries({
-      response_type: "code",
-      client_id: clientId,
-      redirect_uri: callback,
-      scope: "mem9-mcp/read mem9-mcp/write",
-      state,
-      code_challenge: challenge,
-      code_challenge_method: "S256",
-    }))
-      authorize.searchParams.set(name, value);
-    const context = await this.browser.newContext({ serviceWorkers: "block" });
+    const listener = createServer((request, response) => {
+      let url;
+      try {
+        url = new URL(request.url, "http://127.0.0.1");
+      } catch {
+        response.writeHead(400);
+        response.end();
+        return;
+      }
+      if (
+        request.method !== "GET" ||
+        url.pathname !== callbackPath ||
+        url.searchParams.get("state") !== state
+      ) {
+        response.writeHead(400);
+        response.end();
+        return;
+      }
+      receive(callback + url.search);
+      response.writeHead(200, {
+        "content-type": "text/plain",
+        "cache-control": "no-store",
+      });
+      response.end("Authorization received.");
+    });
+    await new Promise((resolve, reject) => {
+      listener.once("error", reject);
+      listener.listen(0, "127.0.0.1", resolve);
+    });
+    callback = `http://127.0.0.1:${listener.address().port}${callbackPath}`;
     try {
+      const registration = await this.fetch(`${this.facade}/register`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          redirect_uris: [callback],
+          token_endpoint_auth_method: "none",
+        }),
+        signal: AbortSignal.timeout(30000),
+      });
+      check(registration.status === 201, "oauth_registration_failed");
+      const { client_id: clientId } = await registration.json();
+      check(
+        typeof clientId === "string" && clientId.length > 0,
+        "oauth_registration_client_missing",
+      );
+      const authorize = new URL(`${this.facade}/oauth/authorize`);
+      for (const [name, value] of Object.entries({
+        response_type: "code",
+        client_id: clientId,
+        redirect_uri: callback,
+        scope: "mem9-mcp/read mem9-mcp/write",
+        state,
+        code_challenge: challenge,
+        code_challenge_method: "S256",
+      }))
+        authorize.searchParams.set(name, value);
+      context = await this.browser.newContext({ serviceWorkers: "block" });
       const allowed = new Set([
         new URL(this.facade).origin,
         this.providerOrigin,
@@ -217,18 +252,6 @@ export class HumanOAuthBrowser {
           ? route.abort()
           : route.continue(),
       );
-      let receive;
-      const completed = new Promise((resolve) => {
-        receive = resolve;
-      });
-      await context.route(`${callback}**`, async (route) => {
-        receive(route.request().url());
-        await route.fulfill({
-          status: 200,
-          contentType: "text/plain",
-          body: "Authorization received.",
-        });
-      });
       const page = await context.newPage();
       page.setDefaultTimeout(30000);
       await page.goto(authorize.href, {
@@ -284,7 +307,12 @@ export class HumanOAuthBrowser {
       );
       return tokens.access_token;
     } finally {
-      await context.close();
+      try {
+        await context?.close();
+      } finally {
+        listener.closeAllConnections();
+        await new Promise((resolve) => listener.close(resolve));
+      }
     }
   }
 }
