@@ -195,14 +195,23 @@ vary by Region and can change.
 | Cost driver                                         | Assumption                                                                                                                     | Approximate monthly cost |
 | --------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------ |
 | ECS Fargate                                         | One arm64 task, 2 vCPU and 6 GB, running continuously                                                                          | **$78**                  |
-| Aurora PostgreSQL Serverless v2                     | 0.5 ACU floor with light storage, I/O, and backup usage                                                                        | **$50-60**               |
+| Aurora PostgreSQL Serverless v2 capacity            | Production 1 ACU floor; Tokyo Standard capacity example at $0.15/ACU-hour                                                     | **$110**                 |
+| Aurora storage, I/O, and backup                     | Depends on retained data and request volume                                                                                  | **Variable**             |
 | Supporting services                                 | CloudWatch dashboard/alarms/logs, Secrets Manager, ECR storage, Lambda, API Gateway, Cognito, and low-volume AgentCore Gateway | **$5-20**                |
-| Core total before model usage and shared networking | Production baseline                                                                                                            | **$135-160**             |
+| Core total before variable storage/I/O, model usage and shared networking | Production compute and supporting-service baseline                                                               | **$193-208**             |
 | Bedrock Mantle                                      | Input and output tokens for the selected model                                                                                 | **Variable**             |
 
 The Fargate estimate uses representative regional arm64 rates:
 `2 x 730.5 x $0.04045` for vCPU plus
 `6 x 730.5 x $0.00442` for memory, or approximately **$78/month**.
+
+The Aurora capacity example uses the Tokyo Standard on-demand rate returned by
+the AWS Price List API on 2026-09-15: `1 x 730.5 x $0.15`, or **$109.58/month**.
+Development and preview stages retain the 0.5 ACU floor, about **$54.79/month**
+at that rate. Raising the production minimum from 0.5 to 1 increases the
+capacity-cost floor by at most about **$55/month**; the actual difference depends
+on time already spent above 0.5 ACU and any storage/I/O savings from caching.
+These figures exclude discounts and taxes and are not universal regional rates.
 
 The Fargate task and Aurora floor dominate the fixed cost. The qwen3 embedding
 model drives the 2 vCPU/6 GB task size; reduce it only after CPU and memory

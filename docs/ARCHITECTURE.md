@@ -515,6 +515,16 @@ limit across four concurrent connections and 24 queries; the slowest SQL
 execution was 467 ms. The regression verifies exact results and query-plan
 structure independently of these environment-dependent timings.
 
+Capacity verification also fetches complete records after scale-down. On the
+existing corpus, the 0.5 ACU floor reduced the PostgreSQL buffer cache to about
+128 MiB, and full-result reads reached roughly eight seconds, causing the
+two-second guard to reject real recall/reconciliation requests. Production uses
+a 1 ACU floor; full-result checks at that floor completed within the deadline,
+including four concurrent connections. Development and previews retain 0.5 ACU,
+and the maximum remains 4 ACU for every stage. This raises the production
+capacity-cost floor; compare regional ACU pricing and actual usage before
+changing it. Query deadlines and namespace isolation remain unchanged.
+
 With an external provider, its administrators own groups while the private
 access task manages Aurora authorization through an owner-only `issuer`/`sub`
 identity file. It verifies the exact deployed issuer and never resolves a

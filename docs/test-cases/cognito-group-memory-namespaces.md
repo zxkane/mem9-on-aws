@@ -159,6 +159,12 @@ retains the two-second production deadline, and verifies top-K 10 and 50.
 
 ## Durable Ingest
 
+The production capacity check for `TC-GROUPNS-083/112` includes actual result
+fetching after Aurora scales down, not only `EXPLAIN ANALYZE` on a warm cache.
+Production keeps a 1 ACU floor; development/preview remain at 0.5 ACU, and every
+stage retains its 4 ACU maximum. Verify the actual capacity metric together
+with cache size, query results, and the unchanged two-second SQL guard.
+
 | ID             | Scenario                                                      | Expected                                                                                                                      | Surface                   |
 | -------------- | ------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------- | ------------------------- |
 | TC-GROUPNS-084 | Eligible principal enqueues ingest                            | Job persists tenant, namespace, principal, payload, and state before accepted response                                        | PostgreSQL integration    |
