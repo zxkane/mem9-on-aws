@@ -263,7 +263,8 @@ still keep writers stopped through namespace cutover.
   `0013-upstream-durable-compatibility`, and
   `0014-recall-schema-budget-and-durable-facts`, and
   `0015-ingest-namespace-compatibility`, and
-  `0016-namespace-vector-late-hydration`. The Docker build applies the complete stack to
+  `0016-namespace-vector-late-hydration`, and
+  `0017-namespace-lifecycle-fencing`. The Docker build applies the complete stack to
   the pinned upstream commit in lexical order.
 - Upstream asynchronous `messages[]` ingest returns 202 before starting an
   untracked goroutine. Downstream patch

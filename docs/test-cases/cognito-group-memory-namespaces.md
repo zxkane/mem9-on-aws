@@ -160,6 +160,26 @@ from real operator data in private records.
 
 ## Durable Ingest
 
+Lifecycle completion for #193/#194/#200 uses synthetic PostgreSQL fixtures:
+
+- `TC-GROUPNS-037/038/040/118`: concurrent first-login enrollment, an existing
+  principal racing for two namespaces, and a revoked membership that JIT cannot
+  reactivate. Observe database lock waits instead of inferring them from sleeps.
+- `TC-GROUPNS-046/048/119`: concurrent M2M reconciliation and transaction rollback
+  when the matching membership cannot be written.
+- `TC-GROUPNS-067..069`: equal logical session and idempotency keys coexist across
+  namespaces, duplicates within one namespace fail, and a plan cannot reference
+  a job in a different namespace.
+- `TC-GROUPNS-084..094`: persisted ownership, canonical input and plan mismatch
+  rejection, namespace-local reconciliation, claim plan bounds, cross-namespace
+  status privacy, and normal-revoke completion with original attribution.
+- `TC-GROUPNS-095/122/128`: namespace disable cancels nonterminal jobs atomically;
+  late enqueue fails, completed/foreign jobs remain intact, re-enable does not
+  revive jobs, and apply/disable races have only the two legal commit orders.
+- PR preview: equal transcript submissions create independent namespace jobs;
+  replay is idempotent, a same-namespace client can poll the job, and a foreign
+  job is indistinguishable from an unknown job.
+
 The capacity check for `TC-GROUPNS-083/112` includes actual result
 fetching after Aurora scales down, not only `EXPLAIN ANALYZE` on a warm cache.
 Use synthetic fixture data and record the configured capacity range. The IaC
@@ -285,3 +305,27 @@ The feature cannot be enabled until:
    rollback target.
 10. TC-GROUPNS-107 and 114 remain tracked as a non-blocking, non-autonomous
     post-deploy operator follow-up.
+
+## Namespace lifecycle verification surfaces
+
+Patch `0017-namespace-lifecycle-fencing.patch` adds the following executable
+acceptance tests. `scripts/run-ingest-queue-integration.sh` applies the complete
+patch stack to a fresh pinned upstream checkout, runs the real Node operators
+against isolated migrated PostgreSQL databases, and runs all Go packages.
+
+| Acceptance | Executable evidence |
+| --- | --- |
+| 037/038/040/118 | `TestConcurrentHumanJITAndRevokedTombstones`, `TestHumanJITFailureRollsBackPrincipal` |
+| 046/048/119 | `scripts/memory-namespace-lifecycle.test.mjs`: concurrent reconciliation, matching binding/membership, replacement/prune, rollback |
+| 067..069 | `TestNamespaceSessionAndPlanCompositeConstraints`: equal cross-team keys, same-team uniqueness, exact FK SQLSTATE/constraint names |
+| 086/087 | `TestNamespaceClaimQueryPlanBounds`: actual candidate SQL, cursor index, no sequential scan, bounded candidates/latency |
+| 088/090/091 | `TestDurableNamespacePayloadOverridesFailBeforeProcessing`, `TestPlanOwnershipOverridesRejectedWithoutMutation` |
+| 089 | `TestDurableReconciliationExcludesCloserForeignVectors`: closer foreign vectors never reach model context |
+| 094 | `TestNormalMembershipRevokePreservesAcceptedActor` |
+| 095/122/128 | Node lifecycle suite; `TestEnqueueDisableAdmissionRace`, `TestNamespaceDisableLinearizesBeforeFirstApplyForeignKey`, `TestCancelledRuntimeReservationCanBeFinalized` |
+| 084/085/092/093 | `scripts/run-memory-namespace-e2e.sh`: independent cross-team ingest jobs, same-team replay/status, generic foreign/unknown status and terminal success |
+
+The existing migration rehearsal remains the execution gate for additive DDL
+idempotence, legacy-shaped row preservation, phase guards, and enforcement.
+The coverage ownership map names verification surfaces; it does not replace
+execution evidence or enable still-disabled maintenance capabilities.

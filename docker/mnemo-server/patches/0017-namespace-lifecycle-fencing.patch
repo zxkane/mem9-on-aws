@@ -1,0 +1,1420 @@
+diff --git a/server/internal/ingestqueue/namespace_canonical_test.go b/server/internal/ingestqueue/namespace_canonical_test.go
+new file mode 100644
+index 0000000..015764e
+--- /dev/null
++++ b/server/internal/ingestqueue/namespace_canonical_test.go
+@@ -0,0 +1,37 @@
++package ingestqueue
++
++import (
++	"bytes"
++	"testing"
++)
++
++func TestCanonicalNamespaceAndActorAreImmutableInputs(t *testing.T) {
++	input := CanonicalInput{TenantID: "tenant-a", NamespaceID: "namespace-a", PrincipalID: "principal-a", SessionID: "shared-session", Mode: "smart", Messages: []Message{{Role: "user", Content: "synthetic team fact"}}}
++	original, err := Canonicalize(input)
++	if err != nil {
++		t.Fatal(err)
++	}
++	replay, err := Canonicalize(input)
++	if err != nil || !bytes.Equal(original.Payload, replay.Payload) || original.IdempotencyKey != replay.IdempotencyKey {
++		t.Fatalf("unstable canonical replay: %v", err)
++	}
++	for _, field := range []string{"namespace", "principal"} {
++		changed := input
++		if field == "namespace" {
++			changed.NamespaceID = "namespace-b"
++		} else {
++			changed.PrincipalID = "principal-b"
++		}
++		canonical, err := Canonicalize(changed)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if bytes.Equal(original.Payload, canonical.Payload) || original.IdempotencyKey == canonical.IdempotencyKey {
++			t.Fatalf("%s absent from canonical identity", field)
++		}
++	}
++	input.PrincipalID = ""
++	if _, err := Canonicalize(input); err == nil {
++		t.Fatal("partial namespace identity accepted")
++	}
++}
+diff --git a/server/internal/middleware/namespace_auth.go b/server/internal/middleware/namespace_auth.go
+index 7d7a4fc..0d5ebcd 100644
+--- a/server/internal/middleware/namespace_auth.go
++++ b/server/internal/middleware/namespace_auth.go
+@@ -238,18 +238,10 @@ type groupBinding struct {
+ 	jitEnabled  bool
+ }
+ 
+-func resolveHumanScope(
+-	ctx context.Context,
+-	tx *sql.Tx,
+-	tenantID string,
+-	identity transportEnvelope,
+-) (*domain.NamespaceScope, error) {
+-	if len(identity.GroupKeys) == 0 {
+-		return nil, &namespaceAuthError{status: http.StatusForbidden, msg: "namespace membership required"}
+-	}
+-	placeholders := make([]string, len(identity.GroupKeys))
+-	args := make([]any, len(identity.GroupKeys))
+-	for i, key := range identity.GroupKeys {
++func readHumanGroupBindings(ctx context.Context, tx *sql.Tx, groupKeys []string) ([]groupBinding, error) {
++	placeholders := make([]string, len(groupKeys))
++	args := make([]any, len(groupKeys))
++	for i, key := range groupKeys {
+ 		placeholders[i] = fmt.Sprintf("$%d", i+1)
+ 		args[i] = key
+ 	}
+@@ -279,6 +271,22 @@ func resolveHumanScope(
+ 	if err := rows.Err(); err != nil {
+ 		return nil, &namespaceAuthError{status: http.StatusServiceUnavailable, msg: "namespace authorization unavailable", err: err}
+ 	}
++	return bindings, nil
++}
++
++func resolveHumanScope(
++	ctx context.Context,
++	tx *sql.Tx,
++	tenantID string,
++	identity transportEnvelope,
++) (*domain.NamespaceScope, error) {
++	if len(identity.GroupKeys) == 0 {
++		return nil, &namespaceAuthError{status: http.StatusForbidden, msg: "namespace membership required"}
++	}
++	bindings, err := readHumanGroupBindings(ctx, tx, identity.GroupKeys)
++	if err != nil {
++		return nil, err
++	}
+ 	if len(bindings) == 0 {
+ 		return nil, &namespaceAuthError{status: http.StatusForbidden, msg: "namespace membership required"}
+ 	}
+@@ -286,6 +294,22 @@ func resolveHumanScope(
+ 		return nil, &namespaceAuthError{status: http.StatusConflict, msg: "ambiguous memory namespace"}
+ 	}
+ 	binding := bindings[0]
++	if err := lockActiveNamespace(ctx, tx, binding.namespaceID); err != nil {
++		return nil, err
++	}
++	// Re-evaluate the whole token group set after waiting: reconciliation may
++	// have activated another group while leaving the selected binding intact.
++	confirmed, err := readHumanGroupBindings(ctx, tx, identity.GroupKeys)
++	if err != nil {
++		return nil, err
++	}
++	if len(confirmed) > 1 {
++		return nil, &namespaceAuthError{status: http.StatusConflict, msg: "ambiguous memory namespace"}
++	}
++	if len(confirmed) != 1 || confirmed[0].namespaceID != binding.namespaceID {
++		return nil, &namespaceAuthError{status: http.StatusForbidden, msg: "namespace binding changed"}
++	}
++	binding = confirmed[0]
+ 
+ 	principalID, err := upsertPrincipal(ctx, tx, identity.PrincipalKey, "human")
+ 	if err != nil {
+@@ -381,12 +405,45 @@ func upsertPrincipal(
+ 	return principalID, nil
+ }
+ 
++func lockActiveNamespace(ctx context.Context, tx *sql.Tx, namespaceID string) error {
++	var active int
++	err := tx.QueryRowContext(ctx, `SELECT 1 FROM memory_namespaces
++		WHERE namespace_id = $1 AND status = 'active' FOR SHARE`, namespaceID).Scan(&active)
++	if errors.Is(err, sql.ErrNoRows) {
++		return &namespaceAuthError{status: http.StatusForbidden, msg: "namespace membership required"}
++	}
++	if err != nil {
++		return &namespaceAuthError{status: http.StatusServiceUnavailable, msg: "namespace authorization unavailable", err: err}
++	}
++	return nil
++}
++
+ func resolveM2MScope(
+ 	ctx context.Context,
+ 	tx *sql.Tx,
+ 	tenantID string,
+ 	identity transportEnvelope,
+ ) (*domain.NamespaceScope, error) {
++	var expectedNamespace string
++	if err := tx.QueryRowContext(ctx, `SELECT namespace_id FROM memory_m2m_namespace_bindings WHERE client_key = $1`, identity.ClientKey).Scan(&expectedNamespace); err != nil {
++		if errors.Is(err, sql.ErrNoRows) {
++			return nil, &namespaceAuthError{status: http.StatusForbidden, msg: "namespace membership required"}
++		}
++		return nil, &namespaceAuthError{status: http.StatusServiceUnavailable, msg: "namespace authorization unavailable", err: err}
++	}
++	if err := lockActiveNamespace(ctx, tx, expectedNamespace); err != nil {
++		return nil, err
++	}
++	var lockedPrincipal string
++	if err := tx.QueryRowContext(ctx, `SELECT principal_id FROM memory_principals
++		WHERE principal_key = $1 FOR NO KEY UPDATE`, identity.PrincipalKey).Scan(&lockedPrincipal); err != nil {
++		if errors.Is(err, sql.ErrNoRows) {
++			return nil, &namespaceAuthError{status: http.StatusForbidden, msg: "namespace membership required"}
++		}
++		return nil, &namespaceAuthError{status: http.StatusServiceUnavailable, msg: "namespace authorization unavailable", err: err}
++	}
++	// Fresh snapshot after both locks; no joined FOR UPDATE with unspecified
++	// parent lock order. Reconciliation holds both ends of every binding remap.
+ 	var principalID, principalType, principalStatus string
+ 	var namespaceID, namespaceStatus, bindingStatus string
+ 	var bindingRole, membershipRole, membershipStatus string
+@@ -404,8 +461,7 @@ func resolveM2MScope(
+ 		  ON membership.namespace_id = binding.namespace_id
+ 		 AND membership.principal_id = binding.principal_id
+ 		WHERE binding.client_key = $1
+-		  AND principal.principal_key = $2
+-		FOR UPDATE`,
++		  AND principal.principal_key = $2`,
+ 		identity.ClientKey,
+ 		identity.PrincipalKey,
+ 	).Scan(
+@@ -425,7 +481,7 @@ func resolveM2MScope(
+ 	if err != nil {
+ 		return nil, &namespaceAuthError{status: http.StatusServiceUnavailable, msg: "namespace authorization unavailable", err: err}
+ 	}
+-	if principalType != "m2m" ||
++	if namespaceID != expectedNamespace || principalID != lockedPrincipal || principalType != "m2m" ||
+ 		principalStatus != "active" ||
+ 		bindingStatus != "active" ||
+ 		namespaceStatus != "active" ||
+diff --git a/server/internal/middleware/namespace_concurrency_test.go b/server/internal/middleware/namespace_concurrency_test.go
+new file mode 100644
+index 0000000..64a7fc1
+--- /dev/null
++++ b/server/internal/middleware/namespace_concurrency_test.go
+@@ -0,0 +1,214 @@
++package middleware
++
++import (
++	"context"
++	"database/sql"
++	"errors"
++	"fmt"
++	"net/http"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++func waitAuthorizationLocks(t *testing.T, db *sql.DB, count int) {
++	t.Helper()
++	deadline := time.Now().Add(3 * time.Second)
++	for time.Now().Before(deadline) {
++		var n int
++		if err := db.QueryRow(`SELECT count(*) FROM pg_locks l JOIN pg_stat_activity a ON a.pid=l.pid WHERE a.datname=current_database() AND l.locktype='advisory' AND NOT l.granted`).Scan(&n); err != nil {
++			t.Fatal(err)
++		}
++		if n >= count {
++			return
++		}
++		time.Sleep(5 * time.Millisecond)
++	}
++	t.Fatal("authorizations did not contend on principal advisory lock")
++}
++
++func TestConcurrentHumanJITAndRevokedTombstones(t *testing.T) {
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
++	}
++	for _, mode := range []string{"same-group", "different-groups", "revoked-before-first-use", "disabled"} {
++		t.Run(mode, func(t *testing.T) {
++			db := testutil.OpenIsolatedPostgres(t, dsn)
++			authorizer, _ := testNamespaceAuthorizer(t)
++			groupA, groupB, principalKey := bytesToHex(13), bytesToHex(14), bytesToHex(15)
++			for i, ns := range []string{testutil.TestNamespaceID, testutil.TestOtherNamespaceID} {
++				group := groupA
++				if i == 1 {
++					group = groupB
++				}
++				if _, err := db.Exec(`INSERT INTO memory_cognito_group_bindings(group_key,namespace_id,default_role,jit_enabled,status) VALUES($1,$2,'member',true,'active')`, group, ns); err != nil {
++					t.Fatal(err)
++				}
++			}
++			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++			defer cancel()
++			barrier, err := db.Conn(ctx)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer barrier.Close()
++			if _, err = barrier.ExecContext(ctx, "SELECT pg_advisory_lock(hashtext($1))", principalKey); err != nil {
++				t.Fatal(err)
++			}
++			const workers = 12
++			results := make(chan error, workers)
++			for i := 0; i < workers; i++ {
++				group := groupA
++				if mode == "different-groups" && i%2 == 1 {
++					group = groupB
++				}
++				go func() {
++					_, err := authorizer.resolveScope(ctx, db, "tenant-a", transportEnvelope{PrincipalType: "human", PrincipalKey: principalKey, GroupKeys: []string{group}})
++					results <- err
++				}()
++			}
++			func() {
++				defer barrier.ExecContext(ctx, "SELECT pg_advisory_unlock(hashtext($1))", principalKey)
++				waitAuthorizationLocks(t, db, workers)
++				if mode == "revoked-before-first-use" || mode == "disabled" {
++					status := "active"
++					if mode == "disabled" {
++						status = "disabled"
++					}
++					if _, err := barrier.ExecContext(ctx, `INSERT INTO memory_principals(principal_id,principal_key,principal_type,status) VALUES('jit-fixture',$1,'human',$2)`, principalKey, status); err != nil {
++						t.Fatal(err)
++					}
++					if mode == "revoked-before-first-use" {
++						if _, err := barrier.ExecContext(ctx, `INSERT INTO memory_namespace_memberships(namespace_id,principal_id,role,status,source_type,revoked_at) VALUES($1,'jit-fixture','member','revoked','operator',NOW())`, testutil.TestNamespaceID); err != nil {
++							t.Fatal(err)
++						}
++					}
++				}
++			}()
++			success := 0
++			for i := 0; i < workers; i++ {
++				err := <-results
++				if err == nil {
++					success++
++					continue
++				}
++				var denied *namespaceAuthError
++				if !errors.As(err, &denied) || (denied.status != http.StatusForbidden && denied.status != http.StatusConflict) {
++					t.Fatalf("unexpected authorization error: %v", err)
++				}
++			}
++			expected := workers
++			if mode == "different-groups" {
++				expected = workers / 2
++			}
++			if mode == "revoked-before-first-use" || mode == "disabled" {
++				expected = 0
++			}
++			if success != expected {
++				t.Fatalf("success=%d want %d", success, expected)
++			}
++			var principals, active int
++			if err := db.QueryRow("SELECT count(*) FROM memory_principals WHERE principal_key=$1", principalKey).Scan(&principals); err != nil {
++				t.Fatal(err)
++			}
++			if err := db.QueryRow(`SELECT count(*) FROM memory_namespace_memberships m JOIN memory_principals p USING(principal_id) WHERE p.principal_key=$1 AND m.status='active'`, principalKey).Scan(&active); err != nil {
++				t.Fatal(err)
++			}
++			wantActive := 1
++			if expected == 0 {
++				wantActive = 0
++			}
++			if principals != 1 || active != wantActive {
++				t.Fatalf("principals=%d active=%d", principals, active)
++			}
++			if mode == "revoked-before-first-use" {
++				var status string
++				if err := db.QueryRow("SELECT status FROM memory_namespace_memberships WHERE principal_id='jit-fixture'").Scan(&status); err != nil || status != "revoked" {
++					t.Fatalf("tombstone %s %v", status, err)
++				}
++			}
++		})
++	}
++}
++
++func TestHumanJITFailureRollsBackPrincipal(t *testing.T) {
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
++	}
++	db := testutil.OpenIsolatedPostgres(t, dsn)
++	authorizer, _ := testNamespaceAuthorizer(t)
++	key, group := bytesToHex(25), bytesToHex(26)
++	if _, err := db.Exec(`INSERT INTO memory_cognito_group_bindings(group_key,namespace_id,default_role,jit_enabled,status) VALUES($1,$2,'member',true,'active')`, group, testutil.TestNamespaceID); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.Exec(`CREATE FUNCTION reject_jit_fixture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'fixture membership failure'; END $$; CREATE TRIGGER reject_jit_fixture BEFORE INSERT ON memory_namespace_memberships FOR EACH ROW EXECUTE FUNCTION reject_jit_fixture()`); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := authorizer.resolveScope(context.Background(), db, "tenant-a", transportEnvelope{PrincipalType: "human", PrincipalKey: key, GroupKeys: []string{group}}); err == nil {
++		t.Fatal("expected membership failure")
++	}
++	var count int
++	if err := db.QueryRow("SELECT count(*) FROM memory_principals WHERE principal_key=$1", key).Scan(&count); err != nil || count != 0 {
++		t.Fatal(fmt.Sprintf("partial principal: %d %v", count, err))
++	}
++}
++
++func TestHumanJITRechecksAmbiguityAfterNamespaceLockWait(t *testing.T) {
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
++	}
++	db := testutil.OpenIsolatedPostgres(t, dsn)
++	authorizer, _ := testNamespaceAuthorizer(t)
++	groupA, groupB, key := bytesToHex(31), bytesToHex(32), bytesToHex(33)
++	if _, err := db.Exec(`INSERT INTO memory_cognito_group_bindings(group_key,namespace_id,default_role,jit_enabled,status) VALUES($1,$2,'member',true,'active'),($3,$4,'member',true,'disabled')`, groupA, testutil.TestNamespaceID, groupB, testutil.TestOtherNamespaceID); err != nil {
++		t.Fatal(err)
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++	defer cancel()
++	operator, err := db.BeginTx(ctx, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer operator.Rollback()
++	if _, err := operator.ExecContext(ctx, "SELECT 1 FROM memory_namespaces WHERE namespace_id=$1 FOR NO KEY UPDATE", testutil.TestNamespaceID); err != nil {
++		t.Fatal(err)
++	}
++	result := make(chan error, 1)
++	go func() {
++		_, err := authorizer.resolveScope(ctx, db, "tenant-a", transportEnvelope{PrincipalType: "human", PrincipalKey: key, GroupKeys: []string{groupA, groupB}})
++		result <- err
++	}()
++	waited := false
++	deadline := time.Now().Add(3 * time.Second)
++	for time.Now().Before(deadline) {
++		if err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND wait_event_type='Lock')").Scan(&waited); err != nil {
++			t.Fatal(err)
++		}
++		if waited {
++			break
++		}
++		time.Sleep(5 * time.Millisecond)
++	}
++	if !waited {
++		t.Fatal("authorization never waited on namespace")
++	}
++	if _, err := operator.ExecContext(ctx, "UPDATE memory_cognito_group_bindings SET status='active' WHERE group_key=$1", groupB); err != nil {
++		t.Fatal(err)
++	}
++	if err := operator.Commit(); err != nil {
++		t.Fatal(err)
++	}
++	var denied *namespaceAuthError
++	if err := <-result; !errors.As(err, &denied) || denied.status != http.StatusConflict {
++		t.Fatalf("ambiguity must conflict, got %v", err)
++	}
++	var count int
++	if err := db.QueryRow("SELECT count(*) FROM memory_principals WHERE principal_key=$1", key).Scan(&count); err != nil || count != 0 {
++		t.Fatalf("ambiguous JIT side effects: %d %v", count, err)
++	}
++}
+diff --git a/server/internal/middleware/namespace_m2m_concurrency_test.go b/server/internal/middleware/namespace_m2m_concurrency_test.go
+new file mode 100644
+index 0000000..0d8d95d
+--- /dev/null
++++ b/server/internal/middleware/namespace_m2m_concurrency_test.go
+@@ -0,0 +1,151 @@
++package middleware
++
++import (
++	"context"
++	"database/sql"
++	"fmt"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/domain"
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++func m2mOperatorRequest(mode string) map[string]any {
++	ns := func(slug string) map[string]any {
++		return map[string]any{"slug": slug, "display_name": slug, "cognito_group": "mem9-" + slug, "default_role": "member", "jit_enabled": true, "status": "active"}
++	}
++	namespaces := []any{ns("test-team"), ns("other-team")}
++	binding := map[string]any{"client_key": bytesToHex(72), "principal_key": bytesToHex(71), "namespace_slug": "test-team", "role": "member", "status": "active"}
++	bindings := []any{binding}
++	request := map[string]any{"command": "reconcile"}
++	switch mode {
++	case "remap":
++		binding["namespace_slug"] = "other-team"
++		namespaces = []any{ns("other-team")}
++	case "replacement":
++		binding["principal_key"] = bytesToHex(73)
++	case "prune":
++		bindings = []any{}
++		request["authoritativeM2MNamespaceSlugs"] = []string{"test-team"}
++	}
++	request["desired"] = map[string]any{"namespaces": namespaces, "m2m_bindings": bindings}
++	return request
++}
++
++func waitAnyNamespaceLock(t *testing.T, db *sql.DB, excludedTag string) {
++	t.Helper()
++	deadline := time.Now().Add(3 * time.Second)
++	for time.Now().Before(deadline) {
++		var waiting bool
++		if err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND ($1='' OR application_name<>$1) AND wait_event_type='Lock')", excludedTag).Scan(&waiting); err != nil {
++			t.Fatal(err)
++		}
++		if waiting {
++			return
++		}
++		time.Sleep(5 * time.Millisecond)
++	}
++	t.Fatal("authorization did not reach its deterministic lock barrier")
++}
++
++func TestM2MAuthorizationSerializesWithReconciliation(t *testing.T) {
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
++	}
++	for _, mode := range []string{"remap", "replacement", "prune"} {
++		for _, authFirst := range []bool{true, false} {
++			t.Run(fmt.Sprintf("%s/auth-first=%v", mode, authFirst), func(t *testing.T) {
++				db := testutil.OpenIsolatedPostgres(t, dsn)
++				authorizer, _ := testNamespaceAuthorizer(t)
++				initial, _ := testutil.NamespaceOperator(t, db, m2mOperatorRequest("initial"), "")
++				if err := <-initial; err != nil {
++					t.Fatal(err)
++				}
++				ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)
++				defer cancel()
++				identity := transportEnvelope{PrincipalType: "m2m", PrincipalKey: bytesToHex(71), ClientKey: bytesToHex(72)}
++				type authorization struct {
++					scope *domain.NamespaceScope
++					err   error
++				}
++				auth := make(chan authorization, 1)
++				startAuth := func() {
++					go func() {
++						scope, err := authorizer.resolveScope(ctx, db, "tenant-a", identity)
++						auth <- authorization{scope, err}
++					}()
++				}
++				barrier, err := db.Conn(ctx)
++				if err != nil {
++					t.Fatal(err)
++				}
++				defer barrier.Close()
++				const lock = "m2m-lifecycle-barrier"
++				if _, err := barrier.ExecContext(ctx, "SELECT pg_advisory_lock(hashtext($1))", lock); err != nil {
++					t.Fatal(err)
++				}
++				defer barrier.ExecContext(context.Background(), "SELECT pg_advisory_unlock(hashtext($1))", lock)
++				release := func() {
++					if _, err := barrier.ExecContext(ctx, "SELECT pg_advisory_unlock(hashtext($1))", lock); err != nil {
++						t.Fatal(err)
++					}
++				}
++				if authFirst {
++					// Pause the real authorizer after both parent locks, before it commits.
++					if _, err := db.Exec(`CREATE FUNCTION pause_auth_fixture() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN
++    IF current_setting('application_name') NOT LIKE 'namespace-operator-%' THEN PERFORM pg_advisory_xact_lock(hashtext('m2m-lifecycle-barrier')); END IF;
++    RETURN NEW; END $$;
++    CREATE TRIGGER pause_auth_fixture BEFORE UPDATE ON memory_principals FOR EACH ROW EXECUTE FUNCTION pause_auth_fixture()`); err != nil {
++						t.Fatal(err)
++					}
++					startAuth()
++					waitAnyNamespaceLock(t, db, "")
++					operator, tag := testutil.NamespaceOperator(t, db, m2mOperatorRequest(mode), "")
++					testutil.WaitForNamespaceOperator(t, db, tag)
++					release()
++					result := <-auth
++					if result.err != nil || result.scope.NamespaceID != testutil.TestNamespaceID {
++						t.Fatalf("accepted auth: %v %v", result.scope, result.err)
++					}
++					if err := <-operator; err != nil {
++						t.Fatal(err)
++					}
++				} else {
++					operator, tag := testutil.NamespaceOperator(t, db, m2mOperatorRequest(mode), lock)
++					testutil.WaitForNamespaceOperator(t, db, tag)
++					startAuth()
++					waitAnyNamespaceLock(t, db, tag)
++					release()
++					if err := <-operator; err != nil {
++						t.Fatal(err)
++					}
++					result := <-auth
++					if result.err == nil {
++						t.Fatalf("stale auth admitted: %+v", result.scope)
++					}
++				}
++				// A new request must see the final binding, never a partial membership.
++				if mode == "replacement" {
++					identity.PrincipalKey = bytesToHex(73)
++				}
++				scope, err := authorizer.resolveScope(ctx, db, "tenant-a", identity)
++				if mode == "prune" {
++					if err == nil {
++						t.Fatal("pruned client was admitted")
++					}
++				} else {
++					expected := testutil.TestNamespaceID
++					if mode == "remap" {
++						expected = testutil.TestOtherNamespaceID
++					}
++					if err != nil || scope.NamespaceID != expected {
++						t.Fatalf("final auth=%v err=%v", scope, err)
++					}
++				}
++			})
++		}
++	}
++}
+diff --git a/server/internal/repository/postgres/ingest_job.go b/server/internal/repository/postgres/ingest_job.go
+index f2e81cf..858a289 100644
+--- a/server/internal/repository/postgres/ingest_job.go
++++ b/server/internal/repository/postgres/ingest_job.go
+@@ -90,6 +90,23 @@ func (r *IngestJobRepo) Enqueue(ctx context.Context, input ingestqueue.EnqueueIn
+ 	}
+ 	defer tx.Rollback()
+ 
++	// Admission shares parent locks with other enqueues. Lifecycle writers take
++	// non-key update locks before cancelling jobs in the same transaction.
++	if (input.NamespaceID == "") != (input.PrincipalID == "") {
++		return nil, errors.New("ingest ownership must include namespace and principal")
++	}
++	if input.NamespaceID != "" {
++		var active int
++		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM memory_namespaces
++			WHERE namespace_id = $1 AND status = 'active' FOR SHARE`, input.NamespaceID).Scan(&active); err != nil {
++			return nil, fmt.Errorf("ingest namespace unavailable: %w", err)
++		}
++		if err := tx.QueryRowContext(ctx, `SELECT 1 FROM memory_principals
++			WHERE principal_id = $1 AND status = 'active' FOR SHARE`, input.PrincipalID).Scan(&active); err != nil {
++			return nil, fmt.Errorf("ingest principal unavailable: %w", err)
++		}
++	}
++
+ 	scope := ingestJobScope{
+ 		tenantID:    input.TenantID,
+ 		namespaceID: input.NamespaceID,
+@@ -157,6 +174,11 @@ func (r *IngestJobRepo) Enqueue(ctx context.Context, input ingestqueue.EnqueueIn
+ 		return nil, fmt.Errorf("enqueue ingest job: %w", err)
+ 	}
+ 	job.NewlyEnqueued = newlyEnqueued
++	if r.enqueueHook != nil {
++		if err := r.enqueueHook("before_commit"); err != nil {
++			return nil, err
++		}
++	}
+ 	commitErr := tx.Commit()
+ 	if commitErr == nil && r.enqueueHook != nil {
+ 		commitErr = r.enqueueHook("after_commit")
+@@ -475,17 +497,7 @@ func claimTerminalFinalization(
+ 	return job, err
+ }
+ 
+-func selectClaimableIngestJobScopes(
+-	ctx context.Context,
+-	tx *sql.Tx,
+-	tenantID string,
+-	cursor ingestJobClaimCursor,
+-) ([]ingestJobCandidate, error) {
+-	var afterCreatedAt any
+-	if cursor.afterSet {
+-		afterCreatedAt = cursor.afterCreated
+-	}
+-	rows, err := tx.QueryContext(ctx, `
++const claimableIngestJobScopesQuery = `
+ 		SELECT j.tenant_id, COALESCE(j.namespace_id, ''),
+ 			j.agent_id, j.app_id, j.session_id,
+ 			j.created_at, j.job_id
+@@ -519,7 +531,19 @@ func selectClaimableIngestJobScopes(
+ 			  )
+ 			  )
+ 		ORDER BY j.created_at, j.job_id
+-		LIMIT $6`,
++		LIMIT $6`
++
++func selectClaimableIngestJobScopes(
++	ctx context.Context,
++	tx *sql.Tx,
++	tenantID string,
++	cursor ingestJobClaimCursor,
++) ([]ingestJobCandidate, error) {
++	var afterCreatedAt any
++	if cursor.afterSet {
++		afterCreatedAt = cursor.afterCreated
++	}
++	rows, err := tx.QueryContext(ctx, claimableIngestJobScopesQuery,
+ 		tenantID,
+ 		afterCreatedAt,
+ 		cursor.afterJobID,
+diff --git a/server/internal/repository/postgres/ingest_plan.go b/server/internal/repository/postgres/ingest_plan.go
+index c7e3494..be7e378 100644
+--- a/server/internal/repository/postgres/ingest_plan.go
++++ b/server/internal/repository/postgres/ingest_plan.go
+@@ -360,6 +360,9 @@ func (r *IngestJobRepo) ApplyPlan(
+ 	if err := lockApplyingPlan(ctx, tx, lease, plan); err != nil {
+ 		return outcome, err
+ 	}
++	if err := r.callApplyHook("after_job_lock"); err != nil {
++		return outcome, err
++	}
+ 
+ 	for index, session := range plan.Sessions {
+ 		conflictTarget := `(app_id, session_id, content_hash)`
+diff --git a/server/internal/repository/postgres/namespace_claim_plan_test.go b/server/internal/repository/postgres/namespace_claim_plan_test.go
+new file mode 100644
+index 0000000..add99f4
+--- /dev/null
++++ b/server/internal/repository/postgres/namespace_claim_plan_test.go
+@@ -0,0 +1,120 @@
++package postgres
++
++import (
++	"context"
++	"encoding/json"
++	"sort"
++	"testing"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/ingestqueue"
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++type claimExplainNode struct {
++	Type     string             `json:"Node Type"`
++	Relation string             `json:"Relation Name"`
++	Index    string             `json:"Index Name"`
++	Alias    string             `json:"Alias"`
++	Rows     float64            `json:"Actual Rows"`
++	Removed  float64            `json:"Rows Removed by Filter"`
++	Loops    float64            `json:"Actual Loops"`
++	Plans    []claimExplainNode `json:"Plans"`
++}
++
++func TestNamespaceClaimQueryPlanBounds(t *testing.T) {
++	db := ingestTestDB(t)
++	// Equal ordering keys in two teams, four queued messages per FIFO scope,
++	// plus a much larger terminal history. Never disable sequential scans.
++	if _, err := db.Exec(`INSERT INTO ingest_jobs(job_id,tenant_id,namespace_id,principal_id,idempotency_key,
++  agent_id,app_id,session_id,state,created_at,available_at,completed_at)
++ SELECT 'claim-fixture-'||i,'claim-benchmark',CASE WHEN i%2=0 THEN $1 ELSE $2 END,$3,
++  md5(i::text)||md5(i::text),'agent','app',('session-'||(i/8)::text),
++  CASE WHEN i<=4096 THEN 'queued' ELSE 'succeeded' END,
++  TIMESTAMPTZ '2001-01-01Z'+i*INTERVAL '1 second',TIMESTAMPTZ '2001-01-01Z',
++  CASE WHEN i>4096 THEN TIMESTAMPTZ '2001-02-01Z' END
++ FROM generate_series(1,24096) i`, testutil.TestNamespaceID, testutil.TestOtherNamespaceID, testutil.TestPrincipalID); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.Exec("ANALYZE ingest_jobs"); err != nil {
++		t.Fatal(err)
++	}
++	ctx := context.Background()
++	tx, err := db.BeginTx(ctx, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer tx.Rollback()
++	repo := NewIngestJobRepo(db)
++	cursor, ok, err := repo.claimCursor(ctx, tx, "claim-benchmark")
++	if err != nil || !ok {
++		t.Fatalf("cursor %v %v", ok, err)
++	}
++	var raw []byte
++	if err := tx.QueryRowContext(ctx, "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON) "+claimableIngestJobScopesQuery, "claim-benchmark", nil, "", cursor.highCreatedAt, cursor.highJobID, maxClaimCandidateScopes).Scan(&raw); err != nil {
++		t.Fatal(err)
++	}
++	var explain []struct {
++		Plan      claimExplainNode
++		Execution float64 `json:"Execution Time"`
++	}
++	if err := json.Unmarshal(raw, &explain); err != nil {
++		t.Fatal(err)
++	}
++	cursorIndex := false
++	visited := float64(0)
++	var walk func(claimExplainNode)
++	walk = func(n claimExplainNode) {
++		if n.Relation == "ingest_jobs" && n.Type == "Seq Scan" {
++			t.Fatalf("queue sequential scan: %s", raw)
++		}
++		if n.Alias == "j" && n.Index == "idx_ingest_jobs_claim_cursor" {
++			cursorIndex = true
++			visited += (n.Rows + n.Removed) * n.Loops
++		}
++		for _, child := range n.Plans {
++			walk(child)
++		}
++	}
++	walk(explain[0].Plan)
++	if !cursorIndex || visited > 512 || explain[0].Plan.Rows > 32 {
++		t.Fatalf("cursor=%v visited=%.0f rows=%.0f plan=%s", cursorIndex, visited, explain[0].Plan.Rows, raw)
++	}
++	candidates, err := selectClaimableIngestJobScopes(ctx, tx, "claim-benchmark", cursor)
++	if err != nil || len(candidates) != 32 {
++		t.Fatalf("candidates=%d err=%v", len(candidates), err)
++	}
++	if err := tx.Commit(); err != nil {
++		t.Fatal(err)
++	}
++	// A locked queue head must be skipped without waiting for the row owner.
++	lock, err := db.BeginTx(ctx, nil)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer lock.Rollback()
++	if _, err := lock.Exec("SELECT 1 FROM ingest_jobs WHERE job_id='claim-fixture-1' FOR UPDATE"); err != nil {
++		t.Fatal(err)
++	}
++	samples := make([]time.Duration, 24)
++	for i := range samples {
++		started := time.Now()
++		job, err := repo.Claim(ctx, "claim-benchmark", "benchmark-worker", time.Minute, ingestqueue.MaxAttempts)
++		samples[i] = time.Since(started)
++		if err != nil || job == nil {
++			t.Fatalf("claim %d job=%v err=%v", i, job, err)
++		}
++		if job.ID == "claim-fixture-1" || job.NamespaceID == "" || job.PrincipalID == "" {
++			t.Fatal("claim ignored lock or lost ownership")
++		}
++		if samples[i] > 250*time.Millisecond {
++			t.Fatalf("claim/lock wait exceeded 250ms: %s", samples[i])
++		}
++	}
++	sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
++	p95 := samples[22]
++	if p95 > 100*time.Millisecond {
++		t.Fatalf("claim p95 %s exceeds 100ms", p95)
++	}
++	t.Logf("24,096 jobs, 2 namespaces, candidate rows=%.0f, returned=%.0f, explain=%.3fms, claim p95=%s", visited, explain[0].Plan.Rows, explain[0].Execution, p95)
++}
+diff --git a/server/internal/repository/postgres/namespace_lifecycle_integration_test.go b/server/internal/repository/postgres/namespace_lifecycle_integration_test.go
+new file mode 100644
+index 0000000..eef986f
+--- /dev/null
++++ b/server/internal/repository/postgres/namespace_lifecycle_integration_test.go
+@@ -0,0 +1,336 @@
++package postgres
++
++import (
++	"context"
++	"crypto/sha256"
++	"database/sql"
++	"encoding/hex"
++	"errors"
++	"fmt"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/ingestqueue"
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++func lifecycleDesired(disabled bool) map[string]any {
++	state := "active"
++	if disabled {
++		state = "disabled"
++	}
++	return map[string]any{"namespaces": []any{map[string]any{"slug": "test-team", "display_name": "Test Team", "cognito_group": "mem9-test-team", "default_role": "member", "jit_enabled": true, "status": state}}, "m2m_bindings": []any{}}
++}
++
++func lifecycleOperator(t *testing.T, db *sql.DB, disabled bool, beforeCommitLock string) (<-chan error, string) {
++	return testutil.NamespaceOperator(t, db, map[string]any{"command": "reconcile", "desired": lifecycleDesired(disabled)}, beforeCommitLock)
++}
++
++func waitLifecycleOperator(t *testing.T, db *sql.DB, tag string) {
++	testutil.WaitForNamespaceOperator(t, db, tag)
++}
++
++func TestEnqueueRejectsDisabledOwnership(t *testing.T) {
++	for _, kind := range []string{"namespace", "principal", "missing-principal", "missing-namespace"} {
++		t.Run(kind, func(t *testing.T) {
++			db := ingestTestDB(t)
++			repo := NewIngestJobRepo(db)
++			input := enqueueInput("tenant-a", "session-a", strings.Repeat("f", 64))
++			switch kind {
++			case "namespace":
++				_, _ = db.Exec("UPDATE memory_namespaces SET status='disabled' WHERE namespace_id=$1", input.NamespaceID)
++			case "principal":
++				_, _ = db.Exec("UPDATE memory_principals SET status='disabled' WHERE principal_id=$1", input.PrincipalID)
++			case "missing-principal":
++				input.PrincipalID = ""
++			case "missing-namespace":
++				input.NamespaceID = ""
++			}
++			if _, err := repo.Enqueue(context.Background(), input); err == nil {
++				t.Fatal("inactive/incomplete ownership admitted")
++			}
++			var count int
++			if err := db.QueryRow("SELECT count(*) FROM ingest_jobs WHERE job_id=$1", input.ID).Scan(&count); err != nil || count != 0 {
++				t.Fatalf("count %d err %v", count, err)
++			}
++		})
++	}
++}
++
++func TestNamespaceDisableLinearizesBeforeFirstApplyForeignKey(t *testing.T) {
++	for _, applyFirst := range []bool{true, false} {
++		t.Run(fmt.Sprint(applyFirst), func(t *testing.T) {
++			db := ingestTestDB(t)
++			repo := NewIngestJobRepo(db)
++			job, plan := prepareAtomicIntegrationPlan(t, repo, strings.Repeat("c", 64))
++			if applyFirst {
++				reached, release := make(chan struct{}), make(chan struct{})
++				repo.applyHook = func(point string) error {
++					if point == "after_job_lock" {
++						close(reached)
++						<-release
++					}
++					return nil
++				}
++				applied := make(chan error, 1)
++				go func() { _, err := repo.ApplyPlan(context.Background(), job.LeaseRef(), plan); applied <- err }()
++				select {
++				case <-reached:
++				case <-time.After(3 * time.Second):
++					close(release)
++					t.Fatal("apply did not reach pre-FK barrier")
++				}
++				pending, tag := lifecycleOperator(t, db, true, "")
++				func() { defer close(release); waitLifecycleOperator(t, db, tag) }()
++				if err := <-applied; err != nil {
++					t.Fatal(err)
++				}
++				if err := <-pending; err != nil {
++					t.Fatal(err)
++				}
++				assertAtomicMutationCounts(t, repo, job, 1, 2, ingestqueue.StateSucceeded)
++			} else {
++				conn, err := db.Conn(context.Background())
++				if err != nil {
++					t.Fatal(err)
++				}
++				defer conn.Close()
++				key := "cancel-before-commit"
++				if _, err = conn.ExecContext(context.Background(), "SELECT pg_advisory_lock(hashtext($1))", key); err != nil {
++					t.Fatal(err)
++				}
++				pending, tag := lifecycleOperator(t, db, true, key)
++				waitLifecycleOperator(t, db, tag)
++				applied := make(chan error, 1)
++				go func() { _, err := repo.ApplyPlan(context.Background(), job.LeaseRef(), plan); applied <- err }()
++				// The operator owns the job until its pending cancellation commits.
++				var waits int
++				deadline := time.Now().Add(3 * time.Second)
++				for time.Now().Before(deadline) {
++					_ = db.QueryRow("SELECT count(*) FROM pg_stat_activity WHERE datname=current_database() AND application_name<>$1 AND wait_event_type='Lock'", tag).Scan(&waits)
++					if waits > 0 {
++						break
++					}
++					time.Sleep(5 * time.Millisecond)
++				}
++				_, err = conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock(hashtext($1))", key)
++				if err != nil {
++					t.Fatal(err)
++				}
++				if waits == 0 {
++					t.Fatal("apply did not wait on uncommitted cancellation")
++				}
++				if err := <-pending; err != nil {
++					t.Fatal(err)
++				}
++				if err := <-applied; !errors.Is(err, ingestqueue.ErrLeaseLost) {
++					t.Fatalf("apply err=%v", err)
++				}
++				assertAtomicMutationCounts(t, repo, job, 0, 0, ingestqueue.StateDead)
++				if err := repo.Heartbeat(context.Background(), job.LeaseRef(), time.Minute); !errors.Is(err, ingestqueue.ErrLeaseLost) {
++					t.Fatalf("heartbeat: %v", err)
++				}
++				if err := repo.SavePlan(context.Background(), job.LeaseRef(), plan); !errors.Is(err, ingestqueue.ErrLeaseLost) {
++					t.Fatalf("save: %v", err)
++				}
++				if err := repo.ResumePlan(context.Background(), job.LeaseRef(), plan); !errors.Is(err, ingestqueue.ErrLeaseLost) {
++					t.Fatalf("start apply: %v", err)
++				}
++				active, _ := lifecycleOperator(t, db, false, "")
++				if err := <-active; err != nil {
++					t.Fatal(err)
++				}
++				input := enqueueInput(job.TenantID, job.SessionID, job.IdempotencyKey)
++				input.ID = "00000000-0000-4000-8000-000000000099"
++				replay := enqueueJob(t, repo, input)
++				if replay.ID != job.ID || replay.State != ingestqueue.StateDead {
++					t.Fatalf("cancelled replay resurrected: %s %s", replay.ID, replay.State)
++				}
++			}
++		})
++	}
++}
++
++func TestEnqueueDisableAdmissionRace(t *testing.T)  { testDisableAdmissionRace(t, false) }
++func TestEmergencyRevokeAdmissionRace(t *testing.T) { testDisableAdmissionRace(t, true) }
++func testDisableAdmissionRace(t *testing.T, emergency bool) {
++	for _, enqueueFirst := range []bool{true, false} {
++		t.Run(fmt.Sprint(enqueueFirst), func(t *testing.T) {
++			db := ingestTestDB(t)
++			if emergency {
++				digest := sha256.Sum256([]byte("mem9-principal-v2\x00https://identity.example.com/pool\x00human\x00fixture-human"))
++				if _, err := db.Exec("UPDATE memory_principals SET principal_type='human', principal_key=$1 WHERE principal_id=$2", hex.EncodeToString(digest[:]), testutil.TestPrincipalID); err != nil {
++					t.Fatal(err)
++				}
++			}
++			operator := func(t *testing.T, db *sql.DB, disabled bool, lock string) (<-chan error, string) {
++				if emergency {
++					return testutil.NamespaceOperator(t, db, map[string]any{"command": "revoke-user", "emergency": true, "desired": lifecycleDesired(false)}, lock)
++				}
++				return lifecycleOperator(t, db, disabled, lock)
++			}
++			repo := NewIngestJobRepo(db)
++			input := enqueueInput("tenant-a", "session-a", strings.Repeat("d", 64))
++			if enqueueFirst {
++				reached, release := make(chan struct{}), make(chan struct{})
++				repo.enqueueHook = func(point string) error {
++					if point == "before_commit" {
++						close(reached)
++						<-release
++					}
++					return nil
++				}
++				done := make(chan error, 1)
++				go func() { _, err := repo.Enqueue(context.Background(), input); done <- err }()
++				select {
++				case <-reached:
++				case <-time.After(3 * time.Second):
++					close(release)
++					t.Fatal("enqueue did not reach pre-commit barrier")
++				}
++				pending, tag := operator(t, db, true, "")
++				func() { defer close(release); waitLifecycleOperator(t, db, tag) }()
++				if err := <-done; err != nil {
++					t.Fatal(err)
++				}
++				if err := <-pending; err != nil {
++					t.Fatal(err)
++				}
++				job, err := repo.Get(context.Background(), input.TenantID, input.NamespaceID, input.ID)
++				if err != nil || job.State != ingestqueue.StateDead {
++					t.Fatalf("job=%v err=%v", job, err)
++				}
++			} else {
++				conn, err := db.Conn(context.Background())
++				if err != nil {
++					t.Fatal(err)
++				}
++				defer conn.Close()
++				_, err = conn.ExecContext(context.Background(), "SELECT pg_advisory_lock(hashtext('disable-first'))")
++				if err != nil {
++					t.Fatal(err)
++				}
++				pending, tag := operator(t, db, true, "disable-first")
++				waitLifecycleOperator(t, db, tag)
++				done := make(chan error, 1)
++				go func() { _, err := repo.Enqueue(context.Background(), input); done <- err }()
++				// Admission must remain pending while disabled status is uncommitted.
++				var waiting bool
++				deadline := time.Now().Add(3 * time.Second)
++				for time.Now().Before(deadline) {
++					_ = db.QueryRow("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE datname=current_database() AND application_name<>$1 AND wait_event_type='Lock')", tag).Scan(&waiting)
++					if waiting {
++						break
++					}
++					time.Sleep(5 * time.Millisecond)
++				}
++				_, _ = conn.ExecContext(context.Background(), "SELECT pg_advisory_unlock(hashtext('disable-first'))")
++				if err := <-pending; err != nil {
++					t.Fatal(err)
++				}
++				if err := <-done; err == nil {
++					t.Fatal("enqueue admitted after disable")
++				}
++				if !waiting {
++					t.Fatal("enqueue did not wait on disable")
++				}
++			}
++		})
++	}
++}
++
++func TestNormalMembershipRevokePreservesAcceptedActor(t *testing.T) {
++	db := ingestTestDB(t)
++	repo := NewIngestJobRepo(db)
++	job, plan := prepareAtomicIntegrationPlan(t, repo, strings.Repeat("e", 64))
++	if _, err := db.Exec("UPDATE memory_namespace_memberships SET status='revoked',revoked_at=NOW() WHERE principal_id=$1", testutil.TestPrincipalID); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := repo.ApplyPlan(context.Background(), job.LeaseRef(), plan); err != nil {
++		t.Fatal(err)
++	}
++	assertAtomicMutationCounts(t, repo, job, 1, 2, ingestqueue.StateSucceeded)
++	var count int
++	if err := db.QueryRow("SELECT count(*) FROM memories WHERE namespace_id=$1 AND created_by_principal_id=$2", job.NamespaceID, job.PrincipalID).Scan(&count); err != nil || count != 2 {
++		t.Fatalf("actor attribution count=%d err=%v", count, err)
++	}
++}
++
++func TestCancelledRuntimeReservationCanBeFinalized(t *testing.T) {
++	db := ingestTestDB(t)
++	repo := NewIngestJobRepo(db)
++	input := enqueueInput("finalization-tenant", "session-a", strings.Repeat("6", 64))
++	input.RuntimeOperationID = "fixture-operation"
++	input.RuntimeReservationExpiresAt = time.Now().Add(time.Hour)
++	job := enqueueJob(t, repo, input)
++	pending, _ := lifecycleOperator(t, db, true, "")
++	if err := <-pending; err != nil {
++		t.Fatal(err)
++	}
++	claimed, err := repo.Claim(context.Background(), job.TenantID, "finalizer", time.Minute, ingestqueue.MaxAttempts)
++	if err != nil || claimed == nil || claimed.ID != job.ID || claimed.State != ingestqueue.StateDead {
++		t.Fatalf("finalization claim=%v err=%v", claimed, err)
++	}
++	if err := repo.CompleteTerminalFinalization(context.Background(), claimed.LeaseRef()); err != nil {
++		t.Fatal(err)
++	}
++	var state string
++	if err := db.QueryRow("SELECT runtime_finalization_state FROM ingest_jobs WHERE job_id=$1", job.ID).Scan(&state); err != nil || state != "completed" {
++		t.Fatalf("finalization %s %v", state, err)
++	}
++}
++
++func TestPlanOwnershipOverridesRejectedWithoutMutation(t *testing.T) {
++	for _, field := range []string{"tenant", "namespace", "principal"} {
++		t.Run(field, func(t *testing.T) {
++			db := ingestTestDB(t)
++			repo := NewIngestJobRepo(db)
++			job, plan := prepareAtomicIntegrationPlan(t, repo, strings.Repeat("7", 64))
++			switch field {
++			case "tenant":
++				plan.TenantID = "foreign-tenant"
++			case "namespace":
++				plan.NamespaceID = testutil.TestOtherNamespaceID
++			case "principal":
++				plan.PrincipalID = testutil.TestOtherPrincipalID
++			}
++			plan, err := ingestqueue.FinalizePlan(plan)
++			if err != nil {
++				t.Fatal(err)
++			}
++			if err := repo.SavePlan(context.Background(), job.LeaseRef(), plan); !errors.Is(err, ingestqueue.ErrPlanInvalid) {
++				t.Fatalf("save mismatch: %v", err)
++			}
++			if _, err := repo.ApplyPlan(context.Background(), job.LeaseRef(), plan); !errors.Is(err, ingestqueue.ErrPlanInvalid) {
++				t.Fatalf("apply mismatch: %v", err)
++			}
++			assertAtomicMutationCounts(t, repo, job, 0, 0, ingestqueue.StateApplying)
++		})
++	}
++}
++
++func TestEnqueueLifecycleRollbackReleasesAdmissionLocks(t *testing.T) {
++	db := ingestTestDB(t)
++	repo := NewIngestJobRepo(db)
++	input := enqueueInput("rollback-tenant", "session-a", strings.Repeat("8", 64))
++	repo.enqueueHook = func(point string) error {
++		if point == "before_commit" {
++			return errors.New("injected enqueue rollback")
++		}
++		return nil
++	}
++	if _, err := repo.Enqueue(context.Background(), input); err == nil {
++		t.Fatal("enqueue survived injected rollback")
++	}
++	var count int
++	if err := db.QueryRow("SELECT count(*) FROM ingest_jobs WHERE job_id=$1", input.ID).Scan(&count); err != nil || count != 0 {
++		t.Fatalf("partial queue admission %d %v", count, err)
++	}
++	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
++	defer cancel()
++	job, err := NewIngestJobRepo(db).Enqueue(ctx, input)
++	if err != nil || !job.NewlyEnqueued {
++		t.Fatalf("rollback left locks or a replay row: %v %v", job, err)
++	}
++}
+diff --git a/server/internal/repository/postgres/namespace_schema_acceptance_test.go b/server/internal/repository/postgres/namespace_schema_acceptance_test.go
+new file mode 100644
+index 0000000..8986663
+--- /dev/null
++++ b/server/internal/repository/postgres/namespace_schema_acceptance_test.go
+@@ -0,0 +1,66 @@
++package postgres
++
++import (
++	"errors"
++	"fmt"
++	"testing"
++
++	"github.com/jackc/pgx/v5/pgconn"
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++func requireConstraint(t *testing.T, err error, code, name string) {
++	t.Helper()
++	var pgErr *pgconn.PgError
++	if !errors.As(err, &pgErr) || pgErr.Code != code || pgErr.ConstraintName != name {
++		t.Fatalf("expected %s/%s, got %v", code, name, err)
++	}
++}
++
++func TestNamespaceSessionAndPlanCompositeConstraints(t *testing.T) {
++	db := ingestTestDB(t)
++	nsA, nsB, p := testutil.TestNamespaceID, testutil.TestOtherNamespaceID, testutil.TestPrincipalID
++	session := `INSERT INTO sessions(id,namespace_id,principal_id,app_id,session_id,content_hash,role,content) VALUES($1,$2,$3,'app','shared-session',repeat('d',64),'user','synthetic')`
++	for i, ns := range []string{nsA, nsB} {
++		if _, err := db.Exec(session, fmt.Sprint("session-", i), ns, p); err != nil {
++			t.Fatal(err)
++		}
++	}
++	_, err := db.Exec(session, "session-duplicate", nsA, p)
++	requireConstraint(t, err, "23505", "uq_sessions_namespace_message")
++	if _, err := db.Exec(`UPDATE sessions SET content='only-a' WHERE namespace_id=$1 AND app_id='app' AND session_id='shared-session' AND content_hash=repeat('d',64)`, nsA); err != nil {
++		t.Fatal(err)
++	}
++	var content string
++	if err := db.QueryRow("SELECT content FROM sessions WHERE namespace_id=$1", nsB).Scan(&content); err != nil || content != "synthetic" {
++		t.Fatalf("B session changed %s %v", content, err)
++	}
++	for i, ns := range []string{nsA, nsB} {
++		if _, err := db.Exec(`INSERT INTO ingest_jobs(job_id,tenant_id,namespace_id,principal_id,idempotency_key) VALUES($1,'schema-tenant',$2,$3,repeat('9',64))`, fmt.Sprint("schema-job-", i), ns, p); err != nil {
++			t.Fatal(err)
++		}
++	}
++	_, err = db.Exec(`INSERT INTO ingest_jobs(job_id,tenant_id,namespace_id,principal_id,idempotency_key) VALUES('schema-job-duplicate','schema-tenant',$1,$2,repeat('9',64))`, nsA, p)
++	requireConstraint(t, err, "23505", "uq_ingest_jobs_namespace_idempotency")
++	plan := `INSERT INTO ingest_job_plans(tenant_id,namespace_id,principal_id,job_id,plan_revision,plan_hash,plan_payload,attempt_generation) VALUES($1,$2,$3,$4,$5,$6,'{}',1)`
++	hash := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
++	for _, bad := range []struct{ tenant, ns, job string }{{"schema-tenant", nsB, "schema-job-0"}, {"foreign-tenant", nsA, "schema-job-0"}, {"schema-tenant", nsA, "missing-job"}} {
++		_, err = db.Exec(plan, bad.tenant, bad.ns, p, bad.job, 1, hash)
++		requireConstraint(t, err, "23503", "fk_ingest_job_plans_job_namespace")
++	}
++	for i, ns := range []string{nsA, nsB} {
++		if _, err := db.Exec(plan, "schema-tenant", ns, p, fmt.Sprint("schema-job-", i), 1, hash); err != nil {
++			t.Fatal(err)
++		}
++	}
++	_, err = db.Exec(plan, "schema-tenant", nsA, p, "schema-job-0", 1, "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
++	requireConstraint(t, err, "23505", "ingest_job_plans_pkey")
++	_, err = db.Exec(plan, "schema-tenant", nsA, p, "schema-job-0", 2, hash)
++	requireConstraint(t, err, "23505", "uq_ingest_job_plans_namespace_hash")
++	for _, table := range []string{"sessions", "ingest_jobs", "ingest_job_plans"} {
++		var nullable string
++		if err := db.QueryRow("SELECT is_nullable FROM information_schema.columns WHERE table_schema='public' AND table_name=$1 AND column_name='namespace_id'", table).Scan(&nullable); err != nil || nullable != "NO" {
++			t.Fatalf("%s nullable=%s err=%v", table, nullable, err)
++		}
++	}
++}
+diff --git a/server/internal/service/durable_namespace_test.go b/server/internal/service/durable_namespace_test.go
+new file mode 100644
+index 0000000..798b9e7
+--- /dev/null
++++ b/server/internal/service/durable_namespace_test.go
+@@ -0,0 +1,128 @@
++package service
++
++import (
++	"context"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"github.com/qiffang/mnemos/server/internal/domain"
++	"github.com/qiffang/mnemos/server/internal/embed"
++	"github.com/qiffang/mnemos/server/internal/llm"
++	"github.com/qiffang/mnemos/server/internal/repository/postgres"
++	"github.com/qiffang/mnemos/server/internal/testutil"
++	"io"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"strings"
++	"sync/atomic"
++	"testing"
++
++	"github.com/qiffang/mnemos/server/internal/ingestqueue"
++)
++
++func TestDurableNamespacePayloadOverridesFailBeforeProcessing(t *testing.T) {
++	for _, field := range []string{"tenant_id", "namespace_id", "principal_id", "missing_namespace", "missing_principal"} {
++		t.Run(field, func(t *testing.T) {
++			job := durableTestJob(t, ModeRaw)
++			job.NamespaceID = "namespace-a"
++			job.PrincipalID = "principal-a"
++			var payload map[string]any
++			if err := json.Unmarshal(job.CanonicalPayload, &payload); err != nil {
++				t.Fatal(err)
++			}
++			payload["namespace_id"], payload["principal_id"] = job.NamespaceID, job.PrincipalID
++			switch field {
++			case "missing_namespace":
++				delete(payload, "namespace_id")
++			case "missing_principal":
++				delete(payload, "principal_id")
++			default:
++				payload[field] = "foreign-value"
++			}
++			job.CanonicalPayload, _ = json.Marshal(payload)
++			factoryCalls := 0
++			processor := NewDurableProcessor(nil, nil, nil, "", nil, nil).WithNamespaceIngestFactory(func(persisted *ingestqueue.Job) *IngestService {
++				factoryCalls++
++				if persisted.NamespaceID != job.NamespaceID || persisted.PrincipalID != job.PrincipalID {
++					t.Fatal("factory used payload identity")
++				}
++				// Empty service would panic if any model/repository processing were attempted.
++				return &IngestService{}
++			})
++			if _, err := processor.Plan(context.Background(), job, 1); !errors.Is(err, ingestqueue.ErrPlanInvalid) {
++				t.Fatalf("payload mismatch: %v", err)
++			}
++			if factoryCalls != 1 {
++				t.Fatalf("factory calls=%d", factoryCalls)
++			}
++		})
++	}
++}
++
++func TestDurableReconciliationExcludesCloserForeignVectors(t *testing.T) {
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
++	}
++	db := testutil.OpenIsolatedPostgres(t, dsn)
++	query := make([]float32, 1024)
++	query[0] = 1
++	scopeA := testutil.TestNamespaceScope()
++	scopeB := scopeA
++	scopeB.NamespaceID = testutil.TestOtherNamespaceID
++	scopeB.PrincipalID = testutil.TestOtherPrincipalID
++	for i, scope := range []domain.NamespaceScope{scopeA, scopeB} {
++		vector := append([]float32(nil), query...)
++		marker := "ALPHA_ONLY existing guidance"
++		if i == 0 {
++			vector[0], vector[1] = 0.8, 0.6
++		} else {
++			marker = "BETA_ONLY existing guidance"
++		}
++		repo := postgres.NewMemoryRepo(db, false, "", scope)
++		if err := repo.BulkCreate(context.Background(), []*domain.Memory{{ID: fmt.Sprintf("scope-memory-%d", i), Content: marker, Embedding: vector, MemoryType: domain.TypePinned, AgentID: "agent-a", AppID: "app-a", Version: 1}}); err != nil {
++			t.Fatal(err)
++		}
++	}
++	embedServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
++		_ = json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"embedding": query}}})
++	}))
++	defer embedServer.Close()
++	var reconciliations atomic.Int32
++	model := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		body, err := io.ReadAll(r.Body)
++		if err != nil {
++			t.Error(err)
++		}
++		content := `{"facts":[{"text":"Uses scoped guidance","tags":[]}],"message_tags":[[]]}`
++		if strings.Contains(string(body), "Existing memories:") {
++			reconciliations.Add(1)
++			if !strings.Contains(string(body), "ALPHA_ONLY") || strings.Contains(string(body), "BETA_ONLY") {
++				t.Error("reconciliation received wrong namespace candidates")
++			}
++			content = `{"memory":[{"id":"0","text":"ALPHA_ONLY existing guidance","event":"NOOP"}]}`
++		}
++		_ = json.NewEncoder(w).Encode(map[string]any{"choices": []any{map[string]any{"message": map[string]any{"content": content}}}})
++	}))
++	defer model.Close()
++	processor := NewDurableProcessor(nil, nil, nil, "", nil, nil).WithNamespaceIngestFactory(func(job *ingestqueue.Job) *IngestService {
++		repo := postgres.NewMemoryRepo(db, false, "", domain.NamespaceScope{NamespaceID: job.NamespaceID, PrincipalID: job.PrincipalID})
++		return NewIngestService(repo, llm.New(llm.Config{APIKey: "local", BaseURL: model.URL, Model: "fixture"}), embed.New(embed.Config{APIKey: "local", BaseURL: embedServer.URL, Model: "fixture", Dims: 1024}), "", ModeSmart)
++	})
++	job := durableTestJob(t, ModeSmart)
++	job.NamespaceID = scopeA.NamespaceID
++	job.PrincipalID = scopeA.PrincipalID
++	var payload map[string]any
++	_ = json.Unmarshal(job.CanonicalPayload, &payload)
++	payload["namespace_id"] = job.NamespaceID
++	payload["principal_id"] = job.PrincipalID
++	job.CanonicalPayload, _ = json.Marshal(payload)
++	plan, err := processor.Plan(context.Background(), job, 1)
++	if err != nil {
++		t.Fatal(err)
++	}
++	if reconciliations.Load() != 1 || len(plan.Actions) != 0 {
++		t.Fatalf("reconciliations=%d actions=%d", reconciliations.Load(), len(plan.Actions))
++	}
++}
+diff --git a/server/internal/testutil/namespace_operator.go b/server/internal/testutil/namespace_operator.go
+new file mode 100644
+index 0000000..682777a
+--- /dev/null
++++ b/server/internal/testutil/namespace_operator.go
+@@ -0,0 +1,88 @@
++package testutil
++
++import (
++	"context"
++	"database/sql"
++	"encoding/json"
++	"fmt"
++	"net/url"
++	"os"
++	"os/exec"
++	"path/filepath"
++	"testing"
++	"time"
++)
++
++// NamespaceOperator runs the real Node operator against a migrated test clone.
++// Configuration stays in an owner-only file; credentials are environment-only.
++func NamespaceOperator(t testing.TB, db *sql.DB, request map[string]any, beforeCommitLock string) (<-chan error, string) {
++	t.Helper()
++	root := os.Getenv("MEM9_NAMESPACE_OPERATOR_ROOT")
++	if root == "" {
++		t.Fatal("MEM9_NAMESPACE_OPERATOR_ROOT is required for operator acceptance")
++	}
++	var database string
++	if err := db.QueryRow("SELECT current_database()").Scan(&database); err != nil {
++		t.Fatal(err)
++	}
++	u, err := url.Parse(os.Getenv("MNEMO_TEST_POSTGRES_DSN"))
++	if err != nil {
++		t.Fatal(err)
++	}
++	u.Path = "/" + database
++	tag := "namespace-operator-" + database
++	q := u.Query()
++	q.Set("application_name", tag)
++	u.RawQuery = q.Encode()
++	data, err := json.Marshal(request)
++	if err != nil {
++		t.Fatal(err)
++	}
++	file := filepath.Join(t.TempDir(), "request.json")
++	if err := os.WriteFile(file, data, 0600); err != nil {
++		t.Fatal(err)
++	}
++	script := `import pg from './node_modules/pg/lib/index.js';
++import { readFile } from 'node:fs/promises';
++import { reconcileNamespaces } from './scripts/reconcile-memory-namespaces.mjs';
++import { manageAccess } from './scripts/manage-memory-access.mjs';
++const request=JSON.parse(await readFile(process.env.FIXTURE_CONFIG,'utf8'));
++const db=new pg.Client({connectionString:process.env.MNEMO_DSN});await db.connect();
++const query=db.query.bind(db);
++if(process.env.FIXTURE_COMMIT_LOCK) db.query=async(sql,args)=>{if(sql==='COMMIT') await query('SELECT pg_advisory_xact_lock(hashtext($1))',[process.env.FIXTURE_COMMIT_LOCK]);return query(sql,args)};
++const issuer='https://identity.example.com/pool';
++try {
++ if(request.command==='reconcile') await reconcileNamespaces({db,issuer,manageCognitoGroups:false,...request});
++ else await manageAccess({db,issuer,authMode:'oidc',externalIdentity:{issuer,sub:'fixture-human'},...request});
++} finally { await db.end(); }`
++	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
++	t.Cleanup(cancel)
++	cmd := exec.CommandContext(ctx, "node", "--input-type=module", "-e", script)
++	cmd.Dir = root
++	cmd.Env = []string{"PATH=" + os.Getenv("PATH"), "MNEMO_DSN=" + u.String(), "FIXTURE_CONFIG=" + file, "FIXTURE_COMMIT_LOCK=" + beforeCommitLock, "AWS_EC2_METADATA_DISABLED=true"}
++	done := make(chan error, 1)
++	go func() {
++		out, err := cmd.CombinedOutput()
++		if err != nil {
++			err = fmt.Errorf("operator: %w: %s", err, out)
++		}
++		done <- err
++	}()
++	return done, tag
++}
++
++func WaitForNamespaceOperator(t testing.TB, db *sql.DB, tag string) {
++	t.Helper()
++	deadline := time.Now().Add(5 * time.Second)
++	for time.Now().Before(deadline) {
++		var waiting bool
++		if err := db.QueryRow("SELECT EXISTS(SELECT 1 FROM pg_stat_activity WHERE application_name=$1 AND wait_event_type='Lock')", tag).Scan(&waiting); err != nil {
++			t.Fatal(err)
++		}
++		if waiting {
++			return
++		}
++		time.Sleep(5 * time.Millisecond)
++	}
++	t.Fatal("operator did not reach a database lock wait")
++}

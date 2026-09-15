@@ -287,4 +287,8 @@ assert_frozen_server_startup_rejected \
   true \
   "unsupported namespace migration phase"
 
+MEM9_NAMESPACE_TEST_DSN="$MNEMO_TEST_POSTGRES_DSN" \
+  "$ROOT/node_modules/.bin/vitest" run --root "$ROOT" \
+    "$ROOT/scripts/memory-namespace-lifecycle.test.mjs"
+export MEM9_NAMESPACE_OPERATOR_ROOT="$ROOT"
 go test -count=1 ./...

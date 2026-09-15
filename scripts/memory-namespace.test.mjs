@@ -253,6 +253,8 @@ if (request.method === "initialize") {
     id: 1,
     result: {
       tools: [
+        { name: "fixture___ingest_messages", inputSchema: {type:"object"} },
+        { name: "fixture___get_ingest_job_status", inputSchema: {type:"object"} },
         {
           name: "fixture___add_memory",
           inputSchema: {
@@ -285,7 +287,20 @@ if (request.method === "initialize") {
 } else {
   const tool = request.params.name;
   const input = request.params.arguments;
-  if (tool.endsWith("add_memory")) {
+  if (tool.endsWith("ingest_messages")) {
+    const job = auth === "beta" && process.env.MCP_FAKE_FAILURE !== "job-coalesce" ? "job-beta" : "job-alpha";
+    body = {jsonrpc:"2.0",id:1,result:{content:[{text:JSON.stringify({job_id:job,state:"queued"})}]}};
+  } else if (tool.endsWith("get_ingest_job_status")) {
+    const own = auth === "beta" ? "job-beta" : "job-alpha";
+    if (input.job_id !== own && process.env.MCP_FAKE_FAILURE !== "job-leak") {
+      body = {jsonrpc:"2.0",id:1,result:{isError:true,content:[{text:"Unknown ingest job"}]}};
+    } else {
+      body = {jsonrpc:"2.0",id:1,result:{content:[{text:JSON.stringify({
+        job_id: process.env.MCP_FAKE_FAILURE === "job-identity" ? "wrong-job" : input.job_id,
+        state: process.env.MCP_FAKE_FAILURE === "job-dead" ? "dead" : "succeeded"
+      })}]}};
+    }
+  } else if (tool.endsWith("add_memory")) {
     if (input.memory_type !== "pinned") {
       process.exit(3);
     }
@@ -529,25 +544,17 @@ describe("memory namespace operator config", () => {
         }
         if (text.includes("SELECT slug, display_name, status")) {
           return {
-            rows: state.namespaces.map(
-              ({ slug, display_name, status }) => ({
-                slug,
-                display_name,
-                status,
-              }),
-            ),
+            rows: state.namespaces.map(({ slug, display_name, status }) => ({
+              slug,
+              display_name,
+              status,
+            })),
           };
         }
         if (text.includes("binding.group_key")) {
           return {
             rows: state.namespaces.map(
-              ({
-                slug,
-                cognito_group,
-                default_role,
-                jit_enabled,
-                status,
-              }) => ({
+              ({ slug, cognito_group, default_role, jit_enabled, status }) => ({
                 group_key: deriveGroupKey(issuer, cognito_group),
                 namespace_slug: slug,
                 default_role,
@@ -577,8 +584,7 @@ describe("memory namespace operator config", () => {
                 status,
                 principal_status: status,
                 membership_role: role,
-                membership_status:
-                  status === "active" ? "active" : "revoked",
+                membership_status: status === "active" ? "active" : "revoked",
               }),
             ),
           };
@@ -607,10 +613,7 @@ describe("memory namespace operator config", () => {
     const staleLock = queries.find(({ text }) =>
       text.includes("NOT (binding.client_key = ANY"),
     );
-    expect(staleLock.values[0]).toEqual([
-      "namespace-alpha",
-      "namespace-beta",
-    ]);
+    expect(staleLock.values[0]).toEqual(["namespace-alpha", "namespace-beta"]);
     expect(staleLock.values[1].toSorted()).toEqual(
       [
         deriveClientKey(issuer, "default-client"),
@@ -625,8 +628,7 @@ describe("memory namespace operator config", () => {
     ]) {
       const query = queries.find(
         ({ text }) =>
-          text.includes(fragment) &&
-          text.includes("ANY($1::varchar[])"),
+          text.includes(fragment) && text.includes("ANY($1::varchar[])"),
       );
       expect(query.values[0]).toEqual(
         fragment.startsWith("DELETE")
@@ -636,9 +638,7 @@ describe("memory namespace operator config", () => {
     }
     expect(result.reconciliation.drift.total).toBe(0);
     expect(
-      new Set(
-        state.m2m_bindings.map(({ principal_key }) => principal_key),
-      ),
+      new Set(state.m2m_bindings.map(({ principal_key }) => principal_key)),
     ).toEqual(
       new Set([
         deriveM2MPrincipalKey(issuer, "default-client"),
@@ -661,6 +661,9 @@ describe("memory namespace operator config", () => {
     expect(result.stdout).toContain(
       "shared memory ID matched; cross-namespace keyword results absent",
     );
+    expect(result.stdout).toContain(
+      "independent jobs committed; same-team status visible; foreign status generic",
+    );
     expect(curlArgv).toContain('\\"search_mode\\":\\"keyword\\"');
     expect(curlArgv).toContain('\\"memory_type\\":\\"pinned\\"');
     expect(headers).toContain("Mcp-Session-Id: fixture-default");
@@ -674,13 +677,17 @@ describe("memory namespace operator config", () => {
     expect(curlArgv).not.toContain("fixture.beta.token");
   });
 
-  it.each(["cross-http", "cross-json"])(
-    "fails closed when a foreign-marker query returns %s",
-    async (failure) => {
-      const { result } = await runNamespaceE2EFixture(failure);
-      expect(result.status).not.toBe(0);
-    },
-  );
+  it.each([
+    "cross-http",
+    "cross-json",
+    "job-coalesce",
+    "job-leak",
+    "job-identity",
+    "job-dead",
+  ])("fails closed when a foreign-marker query returns %s", async (failure) => {
+    const { result } = await runNamespaceE2EFixture(failure);
+    expect(result.status).not.toBe(0);
+  });
 
   it("prints operator help without configuration, AWS, or database access", () => {
     const env = {
@@ -825,13 +832,10 @@ describe("memory namespace operator config", () => {
     );
 
     expect(result.status).toBe(1);
-    expect(result.stderr).toContain(
-      "belongs to application region eu-west-1",
-    );
+    expect(result.stderr).toContain("belongs to application region eu-west-1");
     expect(
       calls.some(
-        (args) =>
-          args.slice(0, 2).join(" ") === "cloudformation update-stack",
+        (args) => args.slice(0, 2).join(" ") === "cloudformation update-stack",
       ),
     ).toBe(false);
   });
@@ -847,8 +851,7 @@ describe("memory namespace operator config", () => {
     expect(result.stderr).toContain("belongs to stage dev");
     expect(
       calls.some(
-        (args) =>
-          args.slice(0, 2).join(" ") === "cloudformation update-stack",
+        (args) => args.slice(0, 2).join(" ") === "cloudformation update-stack",
       ),
     ).toBe(false);
   });
@@ -860,8 +863,7 @@ describe("memory namespace operator config", () => {
     expect(result.stderr).toContain("AccessDenied");
     expect(
       calls.some(
-        (args) =>
-          args.slice(0, 2).join(" ") === "cloudformation create-stack",
+        (args) => args.slice(0, 2).join(" ") === "cloudformation create-stack",
       ),
     ).toBe(false);
   });
@@ -872,8 +874,7 @@ describe("memory namespace operator config", () => {
     expect(result.status, result.stderr).toBe(0);
     expect(
       calls.filter(
-        (args) =>
-          args.slice(0, 2).join(" ") === "cloudformation create-stack",
+        (args) => args.slice(0, 2).join(" ") === "cloudformation create-stack",
       ),
     ).toHaveLength(1);
   });
@@ -895,10 +896,7 @@ describe("memory namespace operator config", () => {
 
   it("TC-GROUPNS-136: fixes and protects the retained stack identity", async () => {
     const script = await readFile(
-      resolve(
-        import.meta.dirname,
-        "deploy-memory-namespace-operator-role.sh",
-      ),
+      resolve(import.meta.dirname, "deploy-memory-namespace-operator-role.sh"),
       "utf8",
     );
     const deployRole = await readFile(
@@ -927,23 +925,45 @@ describe("memory namespace operator config", () => {
   });
 
   it("TC-GROUPNS-136: scopes operator trust to the owning account and application region", async () => {
-    const template = parse(await readFile(resolve(import.meta.dirname,
-      "../infra/cloudformation/memory-namespace-operator-role.yaml"), "utf8"), {
-      customTags: [
-        ...["!Ref", "!Sub", "!GetAtt"].map((tag) => ({ tag, resolve: (value) => value })),
-        ...["!If", "!Equals", "!Not"].map((tag) => ({ tag, collection: "seq", resolve: (value) => value })),
-      ],
-    });
-    const trust = template.Resources.MemoryNamespaceOperatorRole.Properties.AssumeRolePolicyDocument;
-    expect(trust.Statement).toEqual([{
-      Effect: "Allow",
-      Principal: { Service: "ecs-tasks.amazonaws.com" },
-      Action: "sts:AssumeRole",
-      Condition: {
-        StringEquals: { "aws:SourceAccount": "AWS::AccountId" },
-        ArnLike: { "aws:SourceArn": "arn:${AWS::Partition}:ecs:${ApplicationRegion}:${AWS::AccountId}:*" },
+    const template = parse(
+      await readFile(
+        resolve(
+          import.meta.dirname,
+          "../infra/cloudformation/memory-namespace-operator-role.yaml",
+        ),
+        "utf8",
+      ),
+      {
+        customTags: [
+          ...["!Ref", "!Sub", "!GetAtt"].map((tag) => ({
+            tag,
+            resolve: (value) => value,
+          })),
+          ...["!If", "!Equals", "!Not"].map((tag) => ({
+            tag,
+            collection: "seq",
+            resolve: (value) => value,
+          })),
+        ],
       },
-    }]);
+    );
+    const trust =
+      template.Resources.MemoryNamespaceOperatorRole.Properties
+        .AssumeRolePolicyDocument;
+    expect(trust.Statement).toEqual([
+      {
+        Effect: "Allow",
+        Principal: { Service: "ecs-tasks.amazonaws.com" },
+        Action: "sts:AssumeRole",
+        Condition: {
+          StringEquals: { "aws:SourceAccount": "AWS::AccountId" },
+          ArnLike: {
+            "aws:SourceArn":
+              "arn:${AWS::Partition}:ecs:${ApplicationRegion}:${AWS::AccountId}:*",
+          },
+        },
+      },
+    ]);
   });
 
   it("reattaches or stops the single stage operator task safely", async () => {
@@ -1019,7 +1039,7 @@ describe("memory namespace access state machines", () => {
   it("TC-GROUPNS-137: reports committed reconciliation verification failure without rollback", async () => {
     const queries = [];
     const db = {
-      async query(sql) {
+      async query(sql, args) {
         const text = String(sql);
         queries.push(text);
         if (text.includes("RETURNING namespace_id")) {
@@ -1083,7 +1103,7 @@ describe("memory namespace access state machines", () => {
       },
     };
     const db = {
-      async query(sql) {
+      async query(sql, args) {
         const text = String(sql);
         if (text.includes("RETURNING principal_id, status")) {
           return {
@@ -1099,7 +1119,7 @@ describe("memory namespace access state machines", () => {
         }
         if (
           text.includes("UPDATE ingest_jobs") &&
-          text.includes("principal_emergency_revoked")
+          args?.[1] === "principal_emergency_revoked"
         ) {
           jobsCancelled = true;
         }
@@ -1156,7 +1176,7 @@ describe("memory namespace access state machines", () => {
     let membershipStatus;
     let activeGrantAttempts = 0;
     const db = {
-      async query(sql) {
+      async query(sql, args) {
         const text = String(sql);
         if (text.includes("RETURNING principal_id, status")) {
           return {
@@ -1166,7 +1186,7 @@ describe("memory namespace access state machines", () => {
         }
         if (
           text.includes("FROM memory_namespaces") &&
-          text.includes("FOR UPDATE")
+          (text.includes("FOR UPDATE") || text.includes("FOR SHARE"))
         ) {
           return {
             rowCount: 1,
@@ -1287,7 +1307,7 @@ describe("memory namespace access state machines", () => {
         }
         if (
           text.includes("FROM memory_m2m_namespace_bindings") &&
-          text.includes("FOR UPDATE")
+          (text.includes("FOR UPDATE") || text.includes("FOR SHARE"))
         ) {
           return {
             rowCount: 1,
@@ -1355,7 +1375,7 @@ describe("memory namespace access state machines", () => {
       },
     };
     const db = {
-      async query(sql) {
+      async query(sql, args) {
         const text = String(sql);
         if (text.includes("RETURNING namespace_id")) {
           return { rowCount: 1, rows: [{ namespace_id: "namespace-a" }] };
@@ -1420,9 +1440,18 @@ describe("memory namespace access state machines", () => {
 });
 
 it("provisions a fresh external-provider operator role without querying a managed pool", async () => {
-  const {result,calls}=await runOperatorRoleFixture("missing",undefined,"prod","oidc");
-  expect(result.status,result.stderr).toBe(0);
-  expect(calls.some((call)=>call.slice(0,2).join(" ")==="ssm get-parameter")).toBe(false);
-  const create=calls.find((call)=>call.slice(0,2).join(" ")==="cloudformation create-stack");
+  const { result, calls } = await runOperatorRoleFixture(
+    "missing",
+    undefined,
+    "prod",
+    "oidc",
+  );
+  expect(result.status, result.stderr).toBe(0);
+  expect(
+    calls.some((call) => call.slice(0, 2).join(" ") === "ssm get-parameter"),
+  ).toBe(false);
+  const create = calls.find(
+    (call) => call.slice(0, 2).join(" ") === "cloudformation create-stack",
+  );
   expect(create).toContain("ParameterKey=CognitoUserPoolId,ParameterValue=");
 });

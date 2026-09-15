@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+import {
+  cancelPrincipalIngestJobs,
+  lockNamespaceLifecycle,
+} from "./lib/memory-ingest-cancellation.mjs";
 
 import { randomUUID } from "node:crypto";
 import process from "node:process";
@@ -185,6 +189,23 @@ export async function manageAccess({
     let targetNamespaceID;
     await db.query("BEGIN");
     try {
+      if (emergency) {
+        // Serialize overlapping namespace and principal cancellations.
+        await lockNamespaceLifecycle(db);
+      }
+      if (target) {
+        const namespace = await db.query(
+          `SELECT namespace_id
+           FROM memory_namespaces
+           WHERE slug = $1 AND status = 'active'
+           FOR SHARE`,
+          [target.slug],
+        );
+        if (namespace.rowCount !== 1) {
+          throw new Error("target namespace is unavailable");
+        }
+        targetNamespaceID = namespace.rows[0].namespace_id;
+      }
       await db.query(
         `UPDATE memory_namespace_memberships
          SET status = 'revoked', revoked_at = statement_timestamp()
@@ -198,17 +219,10 @@ export async function manageAccess({
            WHERE principal_id = $1`,
           [principalID],
         );
-        await db.query(
-          `UPDATE ingest_jobs
-           SET state = 'dead',
-               error_class = 'principal_emergency_revoked',
-               lease_owner = NULL,
-               lease_expires_at = NULL,
-               completed_at = statement_timestamp(),
-               updated_at = statement_timestamp()
-           WHERE principal_id = $1
-             AND state NOT IN ('succeeded', 'dead')`,
+        await cancelPrincipalIngestJobs(
+          db,
           [principalID],
+          "principal_emergency_revoked",
         );
       } else if (target) {
         await db.query(
@@ -234,17 +248,6 @@ export async function manageAccess({
         );
       }
       if (target) {
-        const namespace = await db.query(
-          `SELECT namespace_id
-           FROM memory_namespaces
-           WHERE slug = $1 AND status = 'active'
-           FOR UPDATE`,
-          [target.slug],
-        );
-        if (namespace.rowCount !== 1) {
-          throw new Error("target namespace is unavailable");
-        }
-        targetNamespaceID = namespace.rows[0].namespace_id;
         // A revoked target row is a fail-closed tombstone. If Cognito succeeds
         // but the final operator grant fails, runtime JIT sees this row and
         // refuses to reactivate it.
@@ -309,7 +312,7 @@ export async function manageAccess({
           `SELECT namespace_id
            FROM memory_namespaces
            WHERE slug = $1 AND status = 'active'
-           FOR UPDATE`,
+           FOR SHARE`,
           [target.slug],
         );
         if (namespace.rowCount !== 1) {

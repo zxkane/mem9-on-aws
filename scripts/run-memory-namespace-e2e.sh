@@ -143,7 +143,9 @@ resolve_tools() {
   SEARCH_TOOL=$(printf '%s' "$tools" | jq -r \
     '(.tools // [])[] | select(.name | endswith("search_memories")) | .name' |
     head -1)
-  if [[ -z "$ADD_TOOL" || -z "$SEARCH_TOOL" ]]; then
+  INGEST_TOOL=$(printf '%s' "$tools" | jq -r '(.tools // [])[] | select(.name | endswith("ingest_messages")) | .name' | head -1)
+  STATUS_TOOL=$(printf '%s' "$tools" | jq -r '(.tools // [])[] | select(.name | endswith("get_ingest_job_status")) | .name' | head -1)
+  if [[ -z "$ADD_TOOL" || -z "$SEARCH_TOOL" || -z "$INGEST_TOOL" || -z "$STATUS_TOOL" ]]; then
     echo "::error::namespace fixture client cannot discover memory tools"
     exit 1
   fi
@@ -317,3 +319,69 @@ if payload_contains_memory_id "$ALPHA_MEMORY_ID" || payload_has_memories; then
 fi
 
 echo "run-memory-namespace-e2e: OK — shared memory ID matched; cross-namespace keyword results absent"
+
+# Equal transcripts remain independent across teams and idempotent within A.
+durable_payload() {
+  assert_call_succeeded "$1"
+  printf '%s' "$MCP_RESP" | mcp_result | jq -ec '.content[0].text | fromjson | select(type == "object")'
+}
+INGEST_ARGS=$(jq -nc --arg marker "namespace-ingest-${STAGE}-${RUN_MARKER}" '{
+  session_id:$marker, agent_id:"namespace-e2e", mode:"smart",
+  messages:[{role:"user",content:("The synthetic project " + $marker + " uses blue as its established documentation accent color.")}]
+}')
+call_tool "$ALPHA_AUTH_CONFIG" alpha "$INGEST_TOOL" "$INGEST_ARGS"
+ALPHA_JOB=$(durable_payload "alpha ingest" | jq -er '.job_id | select(type == "string" and length > 0)')
+call_tool "$ALPHA_AUTH_CONFIG" alpha "$INGEST_TOOL" "$INGEST_ARGS"
+REPLAY_JOB=$(durable_payload "alpha replay" | jq -er '.job_id')
+call_tool "$BETA_AUTH_CONFIG" beta "$INGEST_TOOL" "$INGEST_ARGS"
+BETA_JOB=$(durable_payload "beta ingest" | jq -er '.job_id | select(type == "string" and length > 0)')
+if [[ "$ALPHA_JOB" != "$REPLAY_JOB" || "$ALPHA_JOB" == "$BETA_JOB" ]]; then
+  echo "::error::namespace ingest idempotency boundary failed"; exit 1
+fi
+call_tool "$DEFAULT_AUTH_CONFIG" default "$STATUS_TOOL" "$(jq -nc --arg id "$ALPHA_JOB" '{job_id:$id}')"
+if [[ $(durable_payload "shared-team job status" | jq -er '.job_id') != "$ALPHA_JOB" ]]; then
+  echo "::error::same-team client could not inspect accepted work"; exit 1
+fi
+
+unknown_job_error() {
+  local result
+  result=$(printf '%s' "$MCP_RESP" | mcp_result)
+  if ! printf '%s' "$result" | jq -e '.isError == true' >/dev/null; then
+    echo "::error::foreign or unknown job status was not rejected" >&2; return 1
+  fi
+  printf '%s' "$result" | jq -c '.content'
+}
+call_tool "$BETA_AUTH_CONFIG" beta "$STATUS_TOOL" "$(jq -nc --arg id "$ALPHA_JOB" '{job_id:$id}')"
+FOREIGN_ERROR=$(unknown_job_error)
+call_tool "$BETA_AUTH_CONFIG" beta "$STATUS_TOOL" '{"job_id":"00000000-0000-4000-8000-000000000000"}'
+UNKNOWN_ERROR=$(unknown_job_error)
+if [[ "$FOREIGN_ERROR" != "$UNKNOWN_ERROR" ]]; then
+  echo "::error::foreign job existence leaked through status"; exit 1
+fi
+
+INGEST_DEADLINE=$((SECONDS + 360))
+ALPHA_DONE=0
+BETA_DONE=0
+while [[ $SECONDS -lt $INGEST_DEADLINE ]]; do
+  for team in alpha beta; do
+    if [[ "$team" == alpha ]]; then auth="$ALPHA_AUTH_CONFIG"; job="$ALPHA_JOB"; else auth="$BETA_AUTH_CONFIG"; job="$BETA_JOB"; fi
+    call_tool "$auth" "$team" "$STATUS_TOOL" "$(jq -nc --arg id "$job" '{job_id:$id}')"
+    payload=$(durable_payload "${team} completion status")
+    if [[ $(printf '%s' "$payload" | jq -er '.job_id') != "$job" ]]; then
+      echo "::error::durable status changed job identity"; exit 1
+    fi
+    state=$(printf '%s' "$payload" | jq -er '.state')
+    case "$state" in
+      succeeded) if [[ "$team" == alpha ]]; then ALPHA_DONE=1; else BETA_DONE=1; fi ;;
+      dead) echo "::error::namespace ingest reached dead state"; exit 1 ;;
+      queued|retry_wait|processing|planning|applying) ;;
+      *) echo "::error::namespace ingest returned an unknown state"; exit 1 ;;
+    esac
+  done
+  if [[ "$ALPHA_DONE" == 1 && "$BETA_DONE" == 1 ]]; then break; fi
+  sleep 3
+done
+if [[ "$ALPHA_DONE" != 1 || "$BETA_DONE" != 1 ]]; then
+  echo "::error::namespace ingest did not finish within six minutes"; exit 1
+fi
+echo "run-memory-namespace-e2e: OK — independent jobs committed; same-team status visible; foreign status generic"

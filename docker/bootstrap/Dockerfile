@@ -28,6 +28,7 @@ COPY docker/bootstrap/migrations/ /bootstrap/migrations/
 COPY docker/bootstrap/entrypoint.sh /bootstrap/entrypoint.sh
 COPY docker/bootstrap/operator-entrypoint.mjs /bootstrap/operator/operator-entrypoint.mjs
 COPY scripts/lib/memory-namespace.mjs /bootstrap/operator/scripts/lib/memory-namespace.mjs
+COPY scripts/lib/memory-ingest-cancellation.mjs /bootstrap/operator/scripts/lib/memory-ingest-cancellation.mjs
 COPY scripts/manage-memory-access.mjs /bootstrap/operator/scripts/manage-memory-access.mjs
 COPY scripts/migrate-memory-namespaces.mjs /bootstrap/operator/scripts/migrate-memory-namespaces.mjs
 # The standalone operator resolves its enforcement SQL relative to scripts/,
