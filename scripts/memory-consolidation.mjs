@@ -162,6 +162,11 @@ Return JSON only:
 }]}
 
 Rules:
+- Each memory ID may belong to at most one action in the entire actions array.
+  This includes KEEP; never add KEEP for IDs used by another action.
+- Omit unchanged memories. Return {"actions":[]} when no changes are needed.
+- Copy supplied IDs verbatim. survivor_id and winner_id must belong to that
+  action's ids array.
 - MERGE only same-topic fragments and preserve all durable information.
 - CONTRADICTION names exactly two memories. Set winner_id only when their
   creation and update timestamps agree on a clear replacement timeline and
