@@ -1914,9 +1914,9 @@
       "namespace_evidence": "namespace_id = $1"
     },
     {
-      "id": "14fc116487437998ed7b",
+      "id": "dc7330c1e249e6da00a5",
       "owner": "scripts/memory-consolidation.mjs",
-      "line": 1858,
+      "line": 1863,
       "tables": [
         "memories"
       ],
@@ -1932,9 +1932,9 @@
       "namespace_evidence": "namespace_id = $1"
     },
     {
-      "id": "c10475441d66f5eae1c0",
+      "id": "e954d6e0c6cd93eec945",
       "owner": "scripts/memory-consolidation.mjs",
-      "line": 1889,
+      "line": 1894,
       "tables": [
         "memories"
       ],
@@ -1950,9 +1950,9 @@
       "namespace_evidence": "namespace_id = $7"
     },
     {
-      "id": "c9670f1853c422189409",
+      "id": "189e18ca9b572d645654",
       "owner": "scripts/memory-consolidation.mjs",
-      "line": 1917,
+      "line": 1922,
       "tables": [
         "memories"
       ],

@@ -1327,6 +1327,13 @@ cross these boundaries. Unknown thrown error names become the existing `Error`
 class before formatting. Classification remains sequential with unchanged
 review routing, retry behavior, and exit policy; these diagnostics add no metrics.
 
+The classification prompt states the existing action contract explicitly: an ID
+belongs to at most one action, including `KEEP`; unchanged memories may be
+omitted; IDs are copied from the input, and survivor/winner references stay within
+their action. Runtime conflict quarantine, unknown-ID rejection, and health
+thresholds remain authoritative. A prompt update requires synthetic model checks
+and a complete report-only run before reconsidering automatic writes.
+
 ### Interceptor token authentication
 
 The identity interceptor independently verifies JWT signatures before minting

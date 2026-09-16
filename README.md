@@ -1488,6 +1488,11 @@ error-class values; unknown values and private extra fields are dropped.
 Error messages, stacks, and model responses are never forwarded. These events
 add diagnostics without changing review routing, retries, or run success rules.
 
+The model instructions assign each supplied memory ID to at most one action,
+including `KEEP`, and permit unchanged memories to be omitted. Runtime validation
+still isolates every overlapping action and rejects unknown IDs; prompt guidance
+does not replace these checks.
+
 Console and task-log output contains bounded kinds and counters, without memory
 IDs, namespace/principal IDs, snippets, or model rationale. Content-bearing
 decisions, ID selections, and detailed operator reports belong only in mode-600

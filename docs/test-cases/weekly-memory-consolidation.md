@@ -3,6 +3,18 @@
 Unit tests use mocked database, REST, LLM, and AWS resource constructors.
 Preview E2E runs the deployed task in report-only mode.
 
+## Model action contract
+
+- Existing routing regressions must continue to quarantine all overlapping
+  actions, including a `KEEP` that overlaps a `MERGE`, and reject unknown IDs.
+- A live synthetic model probe uses only fictional, namespace-scoped memories
+  and the configured Bedrock route. Verify that returned IDs come from the input,
+  no ID belongs to multiple actions, and survivor/winner references belong to
+  their action. The probe performs no database or memory writes.
+- Synthetic samples are a smoke check, not proof of full-corpus quality. A
+  complete report-only run and the existing health assessment remain required
+  before automatic writes are reconsidered.
+
 ## Execution budget and progress
 
 Diagnostics regressions run in `scripts/consolidation-progress.test.mjs` and
