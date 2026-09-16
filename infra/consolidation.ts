@@ -3,7 +3,7 @@ import type { EcsOutputs } from "./ecs";
 import { resolveVpc } from "./vpc";
 import { accountId, applicationRegion, ecrImage } from "./ecr";
 import type { TenantIdentityOutputs } from "./tenant-identity";
-import type { SlackApprovalOutputs } from "./slack-approval";
+import type { MaintenanceIdentityOutputs } from "./namespace-identity";
 import { taskFailureAlarm } from "./task-failure-alarm";
 import {
   consolidationDigestKey,
@@ -27,6 +27,32 @@ const FAILURE_METRIC = "ConsolidationTaskFailures";
 
 export interface ConsolidationOutputs {
   taskDefinitionArn: Output<string>;
+}
+
+// Match the dispatcher's explicit, bounded target contract. Do not expose raw
+// values or JSON parser errors: this is private stage configuration.
+function maintenanceNamespaceIds(raw: string): string {
+  const invalid = () => new Error(
+    "MaintenanceNamespaceIds must be a JSON array of at most 32 unique " +
+      "lowercase namespace UUIDs, nonempty when scheduling is enabled",
+  );
+  let ids: unknown;
+  try {
+    ids = JSON.parse(raw);
+  } catch {
+    throw invalid();
+  }
+  if (
+    !Array.isArray(ids) ||
+    ids.length > 32 ||
+    (SCHEDULE_ENABLED && ids.length === 0) ||
+    ids.some((id) => typeof id !== "string" ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(id)) ||
+    new Set(ids).size !== ids.length
+  ) {
+    throw invalid();
+  }
+  return JSON.stringify(ids);
 }
 
 /**
@@ -143,10 +169,7 @@ export function consolidation(
   ecsOut: EcsOutputs,
   dbOut: DbOutputs,
   identity: TenantIdentityOutputs,
-  slackApprovalOut?: Pick<
-    SlackApprovalOutputs,
-    "botTokenParameterArn" | "channel"
-  >,
+  maintenanceIdentity: MaintenanceIdentityOutputs,
 ): ConsolidationOutputs {
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const tags = {
@@ -154,6 +177,14 @@ export function consolidation(
     Stage: $app.stage,
     ManagedBy: "sst",
   };
+  const namespaceIds = new sst.Secret("MaintenanceNamespaceIds", "[]");
+  const targetsParameter = new aws.ssm.Parameter("MaintenanceNamespaceTargets", {
+    name: `${prefix}/maintenance/targets`,
+    type: "SecureString",
+    // Secret Output propagation keeps namespace IDs redacted in previews/state.
+    value: namespaceIds.value.apply(maintenanceNamespaceIds),
+    tags,
+  });
   const image = ecrImage("mem9-on-aws/llm-proxy", IMAGE_TAG);
   const artifactBucketOwner = accountId();
   const artifactBucketName = decisionArtifactBucketName(artifactBucketOwner);
@@ -197,7 +228,7 @@ export function consolidation(
           {
             actions: ["s3:GetObject", "s3:PutObject"],
             resources: [
-              $interpolate`arn:aws:s3:::${artifactBucketName}/${consolidationDigestKey($app.stage)}`,
+              $interpolate`arn:aws:s3:::${artifactBucketName}/${consolidationDigestKey($app.stage, "*")}`,
             ],
           },
           {
@@ -232,6 +263,8 @@ export function consolidation(
     command: ["/app/scripts/memory-consolidation.mjs"],
     environment: {
       MEM9_STAGE: $app.stage,
+      MEM9_SERVICE_TRANSPORT_ISSUER: "maintenance:consolidation",
+      MEM9_SERVICE_TRANSPORT_SIGNING_REVISION: maintenanceIdentity.revision,
       MEM9_BASE_URL: $interpolate`http://${ecsOut.serviceDnsName}:8080`,
       MEM9_DB_HOST: dbOut.host,
       MEM9_DB_PORT: dbOut.port.apply(String),
@@ -250,9 +283,6 @@ export function consolidation(
             MEM9_DECISION_ARTIFACT_BUCKET_OWNER: artifactBucketOwner,
           }
         : {}),
-      ...(SCHEDULE_ENABLED && slackApprovalOut
-        ? { MEM9_SLACK_APPROVAL_CHANNEL: slackApprovalOut.channel }
-        : {}),
       ...(ecsOut.alertsTopicArn
         ? { MEM9_ALERTS_TOPIC_ARN: ecsOut.alertsTopicArn }
         : {}),
@@ -260,8 +290,10 @@ export function consolidation(
     ssm: {
       MEM9_DB_SECRET: dbOut.secretArn,
       MEM9_TENANT_ID: identity.tenantSecretArn,
-      ...(SCHEDULE_ENABLED && slackApprovalOut
-        ? { SLACK_BOT_TOKEN: slackApprovalOut.botTokenParameterArn }
+      MEM9_SERVICE_TRANSPORT_SIGNING_KEYS:
+        maintenanceIdentity.serviceParameterArns.consolidation,
+      ...(SCHEDULE_ENABLED
+        ? { MEM9_MAINTENANCE_TARGETS: targetsParameter.arn }
         : {}),
     },
     permissions: taskPermissions,
@@ -447,6 +479,7 @@ export function consolidation(
           containerOverrides: [
             {
               name: CONSOLIDATION_CONTAINER_NAME,
+              command: ["/app/scripts/dispatch-memory-consolidation.mjs"],
               environment: [
                 {
                   name: "MEM9_CONSOLIDATION_REPORT_ONLY",

@@ -3,17 +3,6 @@
   "exceptions": [
     {
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "statement_sha256": "48ed27824e4973e8b0b825e1c9390c3dddb7f43649374fb570aec73c3507da79",
-      "classification": "namespace_composed_or_compatibility",
-      "context": "OldestQueuedAge is a tenant-wide queue health metric and returns no memory content.",
-      "rationale": "The queue coordinator intentionally observes every namespace in the single self-hosted tenant; claimed jobs carry namespace_id and all planning and apply mutations revalidate that scope.",
-      "coverage": [
-        "upstream/server/internal/repository/postgres/ingest_job_integration_test.go",
-        "upstream/server/internal/repository/postgres/ingest_plan_integration_test.go"
-      ]
-    },
-    {
-      "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
       "statement_sha256": "a943eb67b946ec694d9e2b3d9ad40684bf1eae5b9498b098b487a822f512870a",
       "classification": "namespace_composed_or_compatibility",
       "context": "Terminal runtime finalization claims one tenant-owned job and returns its namespace.",

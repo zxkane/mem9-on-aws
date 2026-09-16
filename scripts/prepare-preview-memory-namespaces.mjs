@@ -15,6 +15,8 @@ import {
   freezeNamespaceWriters,
 } from "./migrate-memory-namespaces.mjs";
 import { reconcileNamespaces } from "./reconcile-memory-namespaces.mjs";
+import { initializeServiceMemberships } from "./manage-memory-services.mjs";
+import { lockNamespaceLifecycle } from "./lib/memory-ingest-cancellation.mjs";
 
 const PREVIEW_SERVICE_PRINCIPAL_ID =
   "70000000-0000-4000-8000-000000000201";
@@ -107,6 +109,16 @@ export async function preparePreviewMemoryNamespaces({
       `preview namespace reconciliation did not converge: ${reconciliation.drift.total} drift items`,
     );
   }
+  await db.query("BEGIN");
+  try {
+    await lockNamespaceLifecycle(db);
+    const namespaces = await db.query(
+      "SELECT namespace_id FROM memory_namespaces WHERE slug=ANY($1::varchar[]) AND status='active' ORDER BY namespace_id FOR NO KEY UPDATE",
+      [desired.namespaces.map(n => n.slug)],
+    );
+    await initializeServiceMemberships(db, namespaces.rows.map(n => n.namespace_id), ["consolidation", "cleanup", "analysis"]);
+    await db.query("COMMIT");
+  } catch (error) { await db.query("ROLLBACK"); throw error; }
   let phase = await migrationPhase(db);
   if (phase === "constraints_complete") {
     return { phase, reconciliation };

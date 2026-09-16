@@ -207,15 +207,15 @@ two-second SQL guard. Public evidence must not describe a personal deployment.
 | ID             | Scenario                                                                                                  | Expected                                                                                                                       | Surface                                                |
 | -------------- | --------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------ |
 | TC-GROUPNS-096 | Query inventory expands pinned upstream, applies patches, and scans compiled/source/operator SQL surfaces | Every scoped statement is in the version-controlled manifest; an added unclassified statement fails CI                         | Static/unit                                            |
-| TC-GROUPNS-097 | Cleanup/restore is requested in namespace v1                                                              | No deployed task exists; the retained direct CLI exits before SQL, REST, model, S3, SSM, or Slack calls                        | Infra/workflow static + CLI process                    |
-| TC-GROUPNS-098 | A cleanup request attempts to name a foreign ID                                                           | Cleanup is disabled in v1, so the CLI exits before row lookup, existence disclosure, or mutation                               | Infra/workflow static + CLI process                    |
-| TC-GROUPNS-099 | Consolidation is requested for any namespace                                                              | No task, schedule, model input, digest, or mutation path is synthesized, and the retained CLI exits before production adapters | Infra/workflow static + CLI process                    |
-| TC-GROUPNS-100 | Two consolidation launches are attempted                                                                  | No launchable task definition or schedule exists in the namespace v1 graph                                                     | Infra/workflow static                                  |
+| TC-GROUPNS-097 | Cleanup/restore omits its explicit namespace or service configuration                                      | Refuse before SQL, REST, model, S3, SSM, or Slack calls                                                                         | Unit + CLI process                                    |
+| TC-GROUPNS-098 | A cleanup or restore request names a B memory ID                                                          | Match unknown-ID behavior; do not read, model, disclose, or modify B data                                                       | Two-namespace PostgreSQL + service REST                |
+| TC-GROUPNS-099 | Consolidation processes A while related fragments exist in B                                              | List/model/merge/archive/stale/digest operations remain in A, including both sides of archive checks                           | Unit + two-namespace PostgreSQL + preview task         |
+| TC-GROUPNS-100 | Consolidation/cleanup run concurrently in A and B, with an A failure                                       | Same-namespace mutex excludes overlap; B mutex, failure history, digest, and completion are independent                        | Real PostgreSQL sessions + conditional digest store    |
 | TC-GROUPNS-101 | Scheduled cleanup scan or Slack approval is enabled without namespace contract                            | Startup/configuration fails closed                                                                                             | Infra unit                                             |
 | TC-GROUPNS-102 | A future namespace-aware Slack offer/claim/artifact/apply capability is enabled                           | Each tuple contains exactly one namespace and an approved destination before apply                                             | Capability-specific integration; not a v1 release gate |
-| TC-GROUPNS-103 | Upload worker is enabled without namespace task support                                                   | Startup/configuration fails closed                                                                                             | Infra unit                                             |
-| TC-GROUPNS-104 | Webhook or Space Chain path is enabled                                                                    | Startup/configuration fails closed until separately designed                                                                   | Infra unit                                             |
-| TC-GROUPNS-105 | Analysis/sampler/service REST path reads scoped tables                                                    | Explicit namespace binding is required                                                                                         | Static + integration                                   |
+| TC-GROUPNS-103 | Upload worker is enabled without namespace task support                                                   | Startup/configuration fails closed before credentials or schema SQL                                                            | Config + entrypoint unit + preview image startup       |
+| TC-GROUPNS-104 | Webhook or Space Chain path is enabled                                                                    | Startup/configuration fails closed until separately designed                                                                   | Config + entrypoint unit + preview image startup       |
+| TC-GROUPNS-105 | Analysis/sampler/service REST path reads scoped tables                                                    | Require an active service principal/membership and explicit namespace; REST identity is signed and bound to that namespace     | Unit + PostgreSQL + real service REST                   |
 
 ## Rollout, Rollback, And Operations
 
@@ -283,10 +283,10 @@ The feature cannot be enabled until:
 1. Every unit, infra, workflow, static, PostgreSQL integration, and benchmark AC
    above passes on its named pre-merge surface, excluding capability-specific
    TC-GROUPNS-102 and non-blocking TC-GROUPNS-107/114.
-   Disabled-path TC-GROUPNS-097..104 pass only when executable/static checks
-   prove those capabilities are absent or fail closed; a verification path in
-   the coverage map does not authorize the legacy implementations or claim an
-   AC result.
+   Supported maintenance TC-GROUPNS-097..100 requires execution against isolated
+   namespaces. Disabled-path TC-GROUPNS-101/103/104 requires startup/configuration
+   refusal, including preview attempts for the server capabilities. A path in
+   the coverage map does not substitute for execution evidence.
 2. Real Cognito/AgentCore PR-stage smoke tests pass for the rows explicitly
    marked `Gateway smoke`, including TC-GROUPNS-027 through 029, 036, 115, and 116.
 3. The automated PR-preview hard E2E passes with two synthetic namespaces in
@@ -365,4 +365,4 @@ against isolated migrated PostgreSQL databases, and runs all Go packages.
 The existing migration rehearsal remains the execution gate for additive DDL
 idempotence, legacy-shaped row preservation, phase guards, and enforcement.
 The coverage ownership map names verification surfaces; it does not replace
-execution evidence or enable still-disabled maintenance capabilities.
+execution evidence or enable the deferred cleanup-scan and Slack capabilities.

@@ -14,6 +14,7 @@ import {
   UpdateGroupCommand,
 } from "@aws-sdk/client-cognito-identity-provider";
 import pg from "pg";
+import { initializeServiceMemberships } from "./manage-memory-services.mjs";
 
 import {
   deriveGroupKey,
@@ -486,6 +487,9 @@ export async function reconcileNamespaces({
         );
       }
     }
+    await initializeServiceMemberships(db,
+      desired.namespaces.filter(n => n.status === "active").map(n => namespaceIDs.get(n.slug)),
+    );
     await db.query("COMMIT");
   } catch (error) {
     await db.query("ROLLBACK");

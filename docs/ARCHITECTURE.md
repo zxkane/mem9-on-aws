@@ -431,7 +431,8 @@ The image applies the downstream patches in this fixed order:
 `0014-recall-schema-budget-and-durable-facts`, and
 `0015-ingest-namespace-compatibility`, and
 `0016-namespace-vector-late-hydration`, and
-`0017-namespace-lifecycle-fencing`.
+`0017-namespace-lifecycle-fencing`,
+`0018-service-maintenance-namespaces`, and `0019-namespace-sampler`.
 
 Before namespace cutover, durable enqueue uses the additive schema's legacy
 tenant/idempotency index. Scoped jobs use the namespace/idempotency index and do
@@ -528,10 +529,11 @@ does not create a principal. The application admission group remains separate
 from every namespace group, so membership in the admission group cannot select
 a shared default namespace.
 
-Cleanup approval and consolidation are not synthesized by the namespace v1
-application graph. Their retained direct CLI entry points fail before creating
-production adapters, and
-upload processing, webhooks, and Space Chains remain unsupported. The production
+Cleanup and consolidation use shared report-only task definitions, separate
+service signing credentials, explicit namespace memberships, and namespace-bound
+SQL/REST adapters. Missing namespace/service configuration fails before creating
+production adapters. Cleanup approval, upload processing, webhooks, and Space
+Chains remain unsupported. The production
 cutover requires a manual snapshot, queue drain, service scale-to-zero, operator
 migration, group/binding reconciliation, user assignment, required-mode deploy,
 and two-namespace smoke. The operator commands do not stop ECS or mutate Gateway
@@ -626,12 +628,11 @@ do not require persistent task storage.
 
 ### Weekly memory consolidation
 
-Namespace v1 disables this complete resource graph. The implementation below is
-retained for redesign context, but no current SST stage creates the task,
-schedule, digest wiring, cleanup scan, or Slack approval path. Re-enablement
-requires a separate namespace-aware design and acceptance review. Direct
-cleanup, restore, and consolidation CLI entry points also fail before database,
-REST, model, S3, SSM, or Slack adapters are created.
+The application creates one shared report-only task for consolidation and one
+for cleanup/restore. Each invocation selects one namespace and uses a fixed
+service principal with an active membership there. Separate signing keyrings
+bind each service issuer to its principal. REST mutations and direct SQL retain
+namespace/principal/membership authorization locks through the write transaction.
 
 `infra/consolidation.ts` defines a separate arm64 Fargate task in the existing
 cluster. The task reads active memories and embeddings from Aurora, builds
@@ -643,7 +644,8 @@ characters are review-deferred before inference.
 
 The task definition always defaults to report-only. The tagged EventBridge
 Scheduler group, schedule, and execution role exist only when
-`MEM9_CONSOLIDATION_SCHEDULE_ENABLED=1`; previews remain `DISABLED`, while
+the namespace schedule opt-in is enabled with an explicit private target list;
+previews remain `DISABLED`, while
 production runs Sunday at 03:00 UTC. Production enablement is an operator
 decision after the one-shot cleanup and a report-only pass show actionable
 drift. `scripts/run-consolidation-task.sh` is the preview and operator harness:
@@ -661,44 +663,37 @@ requires the selected winner to be strictly newer by both `created_at` and
 pair review-only. Every DELETE and every contradiction without that corroborated
 timeline remains review-only.
 
-Review records with ids, bounded snippets, and rationale persist in the task's
-private CloudWatch Logs as the complete audit surface. Scheduled apply runs
-also classify each record deterministically as `OPERATOR_DECISION`,
-`DEFERRED_RETRY`, or `SYSTEM_HEALTH`. Report-only records do not participate in
-digest state or notification.
+Console and CloudWatch output contain bounded kinds and counts. Content-bearing
+operator reports are stored only in owner-only files scoped by stage and
+namespace. Report-only runs do not update digest state.
 
 The scheduled target alone sets `MEM9_CONSOLIDATION_SCHEDULED=1`. That run
 compares stable topic hashes with the prior content-free snapshot at
-`consolidation-digests/<stage>/current-v1.json` in the existing operator-owned
-audit bucket. Topic identity includes only schema version, kind, and sorted
+`consolidation-digests/<stage>/<namespace_id>/current-v1.json` in the existing
+operator-owned audit bucket. Topic identity includes stage, namespace, schema
+version, kind, and sorted
 unique memory ids; a separate payload hash includes current content hashes.
 This distinguishes `new`, `updated`, `continuing`, and `resolved` topics without
 storing memory ids, text, snippets, or rationale. The task reads and
-conditionally writes only that exact stage key with `ExpectedBucketOwner`,
+conditionally writes only that exact namespace key with `ExpectedBucketOwner`,
 `If-None-Match` on creation, and `If-Match` on updates. It has no S3 list or
 delete permission. The bucket keeps `decisions/` on its three-day lifecycle and
 `consolidation-digests/` for 70 days.
 
-When the existing Slack configuration is enabled, a scheduled run posts one
-private digest with totals, at most ten risk-ordered disposition/kind groups,
-and at most three bounded current samples per group. Unchanged-only runs are
-suppressed except for every fourth reminder; a newly observed
-`CLUSTER_TOO_LARGE` group is always selected. SNS is reserved for content-free
-system-health alarms at the documented run-level thresholds; manual apply runs
-evaluate current-run thresholds without loading digest state. A failed state
-read emits `ConsolidationDedupUnavailable`, avoids `new`/`resolved` claims and
-state overwrites, and sends degraded notifications when configured. Because S3
-returns `403` for both a missing key without `ListBucket` and some read failures,
-the task may attempt only an `If-None-Match: *` create after those notifications.
-That initializes a missing snapshot while an existing unreadable snapshot
-returns `412` and remains untouched. A readable but invalid snapshot is never
-overwritten automatically. The operator must pause the schedule and delete that
-exact stage key before the next run can initialize a replacement. Required
-notifications happen before the conditional state commit, and notification or
-state failures never roll back confirmed memory mutations.
+Slack digest delivery remains disabled until its namespace/destination contract
+is implemented. SNS health notifications contain counts only. Namespace digest
+reads and conditional writes isolate reminder and failure state; an invalid or
+foreign snapshot is never adopted. Failed state reads do not produce misleading
+new/resolved claims. Conditional creation can initialize a missing object but
+cannot overwrite an unreadable existing object. Confirmed memory mutations are
+not rolled back by later digest failures.
+
+The dispatcher starts a separate child process for each namespace in its private
+target list. It continues after an independent failure, reports overall failure
+if any target fails, and stops launching children on cancellation.
 
 Cleanup and consolidation apply modes share the PostgreSQL advisory key
-`mem9-cleanup:<stage>` for cross-host exclusion. Both retain optimistic
+`mem9-cleanup:<stage>:<namespace_id>` for cross-host exclusion. Both retain optimistic
 version/content guards; an archive predicates both timeline sides atomically.
 The cleanup tool also keeps its local lockfile as
 defense in depth; its production apply path therefore needs direct access to
@@ -1069,8 +1064,9 @@ to the GitHub Actions deploy role.
 - The OAuth facade custom domain is optional, production-only, and uses an
   existing Cloudflare zone with DNS-only records; previews use `execute-api`.
 - Schema bootstrap is a separate one-shot ECS task.
-- Weekly cross-memory consolidation, cleanup scan, and Slack approval are absent
-  in namespace v1; legacy enablement variables are not passed to SST.
+- Namespace-aware cleanup/consolidation require one explicit authorized namespace
+  per runner. Scheduling requires a private target list and a separate opt-in;
+  cleanup scan and Slack approval remain unavailable.
 - ECR scan-on-push is a guarded out-of-band registry singleton, separate from
   the retained repository stack.
 - Every application IAM role is synthesized with the fixed operator-owned

@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 // memory-cleanup.mjs — retroactive memory cleanup for the mem9 store (issue #102).
 //
-// Classifies every active memory with a Bedrock Mantle model against the same
+// Classifies active memories in one namespace with a Bedrock Mantle model against the same
 // D1–D4 durability rules smart-ingest uses (patch 0002), then applies KEEP /
-// DELETE / MERGE decisions through the public REST API. Dry-run is the default;
+// DELETE / MERGE decisions through signed service REST. Dry-run is the default;
 // `--apply` executes; `--ids` restricts apply to a reviewed subset.
 // Design: docs/designs/memory-cleanup.md. Tests: memory-cleanup.test.mjs.
 //
@@ -14,7 +14,8 @@
 // both callers share one reviewed contract.
 //
 // Usage:
-//   node scripts/memory-cleanup.mjs --stage prod [--base-url http://host:8080]
+//   node scripts/memory-cleanup.mjs --stage prod --namespace-id <uuid>
+//        [--base-url http://host:8080]
 //        [--tenant-secret-arn arn | MEM9_TENANT_ID env]
 //        [--apply] [--decisions file.json] [--ids approved.txt]
 //        [--cap 50] [--out dir] [--lock-file path] [--lock-ttl hours]
@@ -39,13 +40,13 @@
 // for a smaller, more reproducible offered set, never a larger one.
 //
 // The decision log and the restore log contain memory snippets — instance-private
-// data. Both are written OUTSIDE the repository (default ~/.mem9-cleanup/<stage>/)
+// data. Both are written OUTSIDE the repository (~/.mem9-cleanup/<stage>/<namespace-id>/)
 // and must never be committed to this public repository.
 // `snippetLogDir` enforces the part of that a check can reach: an `--out` inside
 // THIS script's tree is refused. Another checkout of the same repo is still the
 // operator's to avoid.
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { homedir, hostname } from "node:os";
 import { dirname, join, relative, resolve, sep } from "node:path";
 import process from "node:process";
@@ -65,8 +66,11 @@ import {
   RequestValidationError,
 } from "../docker/llm-proxy/server.mjs";
 import {
-  assertNamespaceV1LegacyMaintenanceDisabled,
-} from "./lib/memory-namespace.mjs";
+  requireNamespaceId,
+  requireMaintenanceConfig,
+  createScopedDatabase,
+  createServiceFetch,
+} from "./lib/maintenance-scope.mjs";
 
 const MEMORIES_PATH = "/v1alpha2/mem9s/memories";
 const LIST_PAGE_LIMIT = 200; // server max for GET /memories
@@ -192,8 +196,12 @@ const SNIPPET_LEN = 120;
 const INACTIVE_STATES = ["deleted", "archived"];
 const DEFAULT_LIST_LIMIT = 100;
 
-export function sharedCleanupMutexKey(stage) {
-  return `mem9-cleanup:${stage}`;
+export function sharedCleanupMutexKey(stage, namespaceId) {
+  const namespace = requireNamespaceId(namespaceId);
+  if (typeof stage !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9-]{0,63}$/.test(stage)) {
+    throw new Error("maintenance stage is required");
+  }
+  return `mem9-cleanup:${stage}:${namespace}`;
 }
 
 // D1–D4 durability rules, copied verbatim from
@@ -828,7 +836,7 @@ export function selectApprovalBatch(decisions, cap = DEFAULT_CAP) {
 }
 
 /** Build the REST client. Counts every non-GET request so dry-run can assert 0. */
-function restClient(baseUrl, tenantId, fetchImpl, counters) {
+function restClient(baseUrl, tenantId, fetchImpl, counters, findByIds) {
   const base = baseUrl.replace(/\/$/, "");
   async function call(method, path, body, { nullOn404 = false, nullOn412 = false, headers = {} } = {}) {
     if (method !== "GET") counters.writeCalls += 1;
@@ -857,6 +865,7 @@ function restClient(baseUrl, tenantId, fetchImpl, counters) {
   }
   const memoryPath = (id) => `${MEMORIES_PATH}/${encodeURIComponent(id)}`;
   return {
+    findByIds,
     listPage: (offset) =>
       call("GET", `${MEMORIES_PATH}?limit=${LIST_PAGE_LIMIT}&offset=${offset}`),
     // null on 404: upstream GetByID selects `WHERE state = 'active'` (probed at
@@ -1004,6 +1013,12 @@ function defaultPidAlive(pid) {
  * fresh run / crash-recovery / external write. Returns destructive calls used.
  */
 export async function applyMergeDecision(decision, client, deleteQueue, counters, log) {
+  // Inactive local fragments remain valid during crash recovery. A foreign or
+  // unknown fragment invalidates the whole merge before the survivor is written.
+  if (client.findByIds && !(await filterScopedDecisions([decision], client.findByIds)).length) {
+    counters.skippedLww += 1;
+    return 0;
+  }
   const survivor = await client.get(decision.id);
   if (!survivor) {
     // Survivor no longer active (deleted/archived out-of-band): the merge's
@@ -2321,7 +2336,7 @@ export async function postApprovalRequest({
   // line with `[memory-cleanup <iso>]`, which is exactly what forecloses a
   // CloudWatch `{ $.field = ... }` metric filter. `emit` writes one unprefixed
   // JSON object, which is what the two #154 filters read. Noop by default so a
-  // caller that has no metric surface prints nothing; `buildPostApproval` wires
+  // caller that has no metric surface prints nothing; a future enabled caller wires
   // the real emitter for the deployed scan.
   emit = () => {},
   approvalCap = DEFAULT_CAP,
@@ -2927,6 +2942,35 @@ export function snippetLogDir(outDir, stage) {
   return target;
 }
 
+function namespaceLogDir(outDir, stage, namespaceId) {
+  return join(snippetLogDir(outDir, stage), requireNamespaceId(namespaceId));
+}
+
+function validateRunScope(opts, deps) {
+  const namespaceId = requireNamespaceId(opts.namespaceId);
+  if ((deps.namespaceId !== undefined && deps.namespaceId !== namespaceId) ||
+      (deps.scope !== undefined && deps.scope.namespaceId !== namespaceId)) {
+    throw new Error("maintenance namespace mismatch");
+  }
+  return namespaceId;
+}
+
+function requireArtifactNamespace(document, namespaceId) {
+  if (requireNamespaceId(document.namespaceId) !== namespaceId) {
+    throw new Error("artifact namespace mismatch");
+  }
+}
+
+async function filterScopedDecisions(decisions, findByIds) {
+  if (typeof findByIds !== "function") throw new Error("namespace-scoped ID lookup is required");
+  const ids = [...new Set(decisions.flatMap(decisionIds))];
+  const known = new Set();
+  for (let offset = 0; offset < ids.length; offset += BATCH_DELETE_MAX) {
+    for (const row of await findByIds(ids.slice(offset, offset + BATCH_DELETE_MAX))) known.add(row.id);
+  }
+  return decisions.filter((decision) => decisionIds(decision).every((id) => known.has(id)));
+}
+
 /**
  * Obtain the decision list: replay the REVIEWED list the operator approved, replay
  * a prior dry-run file, or scan + classify and persist a new one outside the repo
@@ -2947,8 +2991,9 @@ async function loadDecisions(opts, deps, { client, fs, clock, log, outDir }) {
     // `runCleanup` entirely: exit non-zero with nothing applied, so the operator
     // re-runs the scan and clicks a fresh offer.
     const reviewed = await deps.loadReviewedDecisions();
+    requireArtifactNamespace(reviewed, opts.namespaceId);
     return {
-      decisions: reviewed.decisions,
+      decisions: await filterScopedDecisions(reviewed.decisions, deps.findByIds),
       // No `decisionPath`: nothing was written to disk. The artifact carries a
       // MERGE's `mergedContent`, which is real memory text, and the S3 object under
       // SSE-KMS is where #150 accepted that content living at rest — a second copy
@@ -2978,12 +3023,13 @@ async function loadDecisions(opts, deps, { client, fs, clock, log, outDir }) {
         `decision file is for stage ${JSON.stringify(loaded.stage)}, not ${JSON.stringify(opts.stage)}`,
       );
     }
+    requireArtifactNamespace(loaded, opts.namespaceId);
     if (!Array.isArray(loaded.decisions)) {
       throw new Error("decision file has no decisions array");
     }
     validateDecisions(loaded.decisions);
     return {
-      decisions: loaded.decisions,
+      decisions: await filterScopedDecisions(loaded.decisions, deps.findByIds),
       decisionPath: opts.decisionsFile,
       // The FILE's stamp, not now: this run generated nothing, and an offered
       // record claiming otherwise would date a list to the moment it was reposted.
@@ -2994,7 +3040,13 @@ async function loadDecisions(opts, deps, { client, fs, clock, log, outDir }) {
       failedBatches: 0,
     };
   }
-  const memories = await scanActiveMemories(client);
+  const scannedMemories = await scanActiveMemories(client);
+  // The signed REST scope is authoritative. The SQL lookup also fences injected
+  // adapters and ensures no foreign row reaches classification or a report.
+  const allowed = new Set((await filterScopedDecisions(
+    scannedMemories.map(({ id }) => ({ id, verdict: "KEEP" })), deps.findByIds,
+  )).map(({ id }) => id));
+  const memories = scannedMemories.filter(({ id }) => allowed.has(id));
   // Each pass is a full independent classification of the SAME scan, so the
   // passes differ only in model nondeterminism — which is exactly the variable
   // being measured. One scan, N classifications: re-scanning per pass would let a
@@ -3050,11 +3102,12 @@ async function loadDecisions(opts, deps, { client, fs, clock, log, outDir }) {
 
   const generatedAt = new Date(clock()).toISOString();
   fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
-  const decisionPath = join(outDir, `decisions-${generatedAt.replace(/[:.]/g, "-")}.json`);
+  fs.chmodSync?.(outDir, 0o700);
+  const decisionPath = join(outDir, `decisions-${generatedAt.replace(/[:.]/g, "-")}-${randomUUID()}.json`);
   fs.writeFileSync(
     decisionPath,
-    JSON.stringify({ stage: opts.stage, generatedAt, decisions }, null, 2),
-    { mode: 0o600 },
+    JSON.stringify({ stage: opts.stage, namespaceId: opts.namespaceId, generatedAt, decisions }, null, 2),
+    { flag: "wx", mode: 0o600 },
   );
   log(`decision list written to ${decisionPath}`);
   return {
@@ -3130,10 +3183,19 @@ function validateDecisions(decisions) {
   });
 }
 
-function readApprovedIds(fs, idsFile) {
+function readApprovedIds(fs, idsFile, opts) {
   if (!idsFile) return null;
-  const lines = fs.readFileSync(idsFile, "utf8").split("\n");
-  return new Set(lines.map((l) => l.trim()).filter(Boolean));
+  const raw = fs.readFileSync(idsFile, "utf8");
+  if (raw.trimStart().startsWith("{")) {
+    const document = JSON.parse(raw);
+    if (document.stage !== opts.stage) throw new Error("ids file stage mismatch");
+    requireArtifactNamespace(document, opts.namespaceId);
+    if (!Array.isArray(document.ids) || document.ids.some((id) => typeof id !== "string"))
+      throw new Error("ids file must contain an ids array");
+    return new Set(document.ids.map((id) => id.trim()).filter(Boolean));
+  }
+  if (raw.trimStart().startsWith("[")) throw new Error("ids file requires a namespace-bound object or one id per line");
+  return new Set(raw.split("\n").map((id) => id.trim()).filter(Boolean));
 }
 
 /**
@@ -3287,6 +3349,8 @@ async function applyDecisions({ decisions, client, cap, approved, counters, log 
  *           skippedLww, skippedByFilter}
  */
 export async function runCleanup(opts, deps) {
+  const namespaceId = validateRunScope(opts, deps);
+  if (typeof deps.findByIds !== "function") throw new Error("namespace-scoped ID lookup is required");
   const log = deps.log || console.error;
   const fs = deps.fs || (await import("node:fs"));
   const clock = deps.clock || Date.now;
@@ -3303,9 +3367,11 @@ export async function runCleanup(opts, deps) {
   // reasoning-model run at `--effort high` and then threw, discarding every
   // decision — the entire artifact of a dry run. Same rule the restore path
   // follows: an operator's path error fails before the expensive work, not after.
-  const outDir = snippetLogDir(deps.outDir, opts.stage);
+  const outDir = namespaceLogDir(deps.outDir, opts.stage, namespaceId);
+  const approved = opts.apply ? readApprovedIds(fs, opts.idsFile, opts) : null;
   // Shared tail of every return: the counters object is read at return time.
   const result = (fields) => ({
+    namespaceId,
     decisions: [],
     capUsed: 0,
     skippedByFilter: 0,
@@ -3321,7 +3387,7 @@ export async function runCleanup(opts, deps) {
     log(`discovery failed: ${err.message}`);
     return result({ exitCode: 2 });
   }
-  const client = restClient(baseUrl, opts.tenantId, deps.fetchImpl, counters);
+  const client = restClient(baseUrl, opts.tenantId, deps.fetchImpl, counters, deps.findByIds);
 
   const {
     decisions,
@@ -3401,7 +3467,7 @@ export async function runCleanup(opts, deps) {
     } else {
       // One line, and deliberately NOT a throw (#157). An absent poster is the
       // legitimate #102 operator-CLI configuration, so failing closed here would
-      // break the very path `buildPostApproval`'s undefined return exists to serve.
+      // break the ordinary operator CLI path.
       // What the line buys is a distinction the logs could not otherwise make: this
       // run had no Slack surface by design, versus this run should have offered and
       // did not. Synth refuses a prod scan with no channel, so the reachable causes
@@ -3417,10 +3483,10 @@ export async function runCleanup(opts, deps) {
 
   const lockFile =
     deps.lockFile ||
-    join(process.env.XDG_RUNTIME_DIR || join(homedir(), ".cache"), "mem9-cleanup", `${opts.stage}.lock`);
+    join(process.env.XDG_RUNTIME_DIR || join(homedir(), ".cache"), "mem9-cleanup", `${opts.stage}-${namespaceId}.lock`);
   const ttlMs = deps.lockTtlMs ?? (opts.lockTtlHours ? opts.lockTtlHours * HOUR_MS : DEFAULT_LOCK_TTL_MS);
   const sharedMutex = deps.acquireMutex
-    ? await deps.acquireMutex(opts.stage)
+    ? await deps.acquireMutex(opts.stage, namespaceId)
     : undefined;
   if (deps.acquireMutex && !sharedMutex) {
     log("another cleanup or consolidation apply holds the shared database mutex");
@@ -3434,7 +3500,6 @@ export async function runCleanup(opts, deps) {
 
   let applied;
   try {
-    const approved = readApprovedIds(fs, opts.idsFile);
     if (approved) {
       // Every id the decisions NAME, absorbed ids included: an approved absorbed id
       // is matched by its survivor's row and has none of its own, so a keyed-id set
@@ -3494,6 +3559,9 @@ export async function runCleanup(opts, deps) {
  * here: a Responses `status: "failed"` arrives as HTTP 200 with empty output,
  * and returning "" for it would parse as "no verdicts" and mark a whole batch
  * SKIP on what looks like an authoritative answer.
+ * `deps.beforeAttempt` is an optional async authorization hook for production
+ * callers. It must finish its transaction before resolving; no transaction spans
+ * bearer minting or provider I/O. Every fetch rechecks after awaited minting.
  */
 export function buildCompleteChat(opts, deps) {
   const model = opts.model || process.env.MEM9_LLM_MODEL || DEFAULT_CHAT_MODEL;
@@ -3537,7 +3605,11 @@ export function buildCompleteChat(opts, deps) {
     // Minting is a free local SigV4 presign (12h TTL); re-mint once on 401/403
     // so a long scan outliving the bearer self-heals (llm-proxy pattern).
     for (let attempt = 1; attempt <= 2; attempt += 1) {
-      if (!bearer) bearer = await deps.mintToken(route.region);
+      if (!bearer) {
+        await deps.beforeAttempt?.();
+        bearer = await deps.mintToken(route.region);
+      }
+      await deps.beforeAttempt?.();
       const res = await deps.fetchImpl(route.url, {
         method: "POST",
         headers: {
@@ -3620,114 +3692,64 @@ export function buildCompleteChat(opts, deps) {
  * before planning, and the gate is `superseded_by` as much as the state
  * (TC-MEMRESTORE-042, TC-MEMRESTORE-059).
  */
-export function inactiveMemoryAdapter(db) {
-  // Every column is load-bearing downstream: `version` is the fence value,
-  // `superseded_by` drives the archived refusal, `updated_at` is the only
-  // pre-restore age the decision log can record, and `content` is the snippet an
-  // operator reviews.
-  const READ_COLUMNS =
-    "id, content, state, version, updated_at, superseded_by";
-  return {
-    listInactive: async ({ state, since, limit } = {}) => {
-      const where = [];
-      // Built once and then COPIED per statement. Sharing one mutable array
-      // across the count and the page would make each query's parameter list
-      // depend on when the other happened to read it. `pg` uses the extended
-      // protocol, which rejects a surplus bind outright ("bind message supplies
-      // 2 parameters, but prepared statement \"\" requires 1"), so the aliasing
-      // would surface as a runtime error rather than as a wrong number.
-      const filters = [];
-      if (state) {
-        where.push(`state = $${filters.push(state)}`);
-      } else {
-        // Never a bare `SELECT ... FROM memories`: with no --state this must
-        // still exclude active rows, or "list what was deleted" would dump the
-        // entire corpus.
-        where.push("state <> 'active'");
-      }
-      // `updated_at` is the only timestamp that MOVES on deletion — there is no
-      // `memories.deleted_at` (only `tenants` has one). (`created_at` exists but
-      // records insertion.) So this filters when the row was last touched, which
-      // for a soft-deleted row is the deletion time only if nothing has touched
-      // it since. Surfaced in the output and in --help rather than left for the
-      // operator to infer.
-      if (since) where.push(`updated_at >= $${filters.push(since)}`);
-      const clause = `WHERE ${where.join(" AND ")}`;
+export function inactiveMemoryAdapter(db, scope) {
+  const namespaceId = requireNamespaceId(scope?.namespaceId);
+  return scopedInactiveMemoryAdapter(createScopedDatabase(db, scope), namespaceId);
+}
 
-      // Counted unbounded and separately from the page: reporting "10 of 10"
-      // for a capped listing would make a silent truncation read as complete.
-      const counted = await db.query(
-        `SELECT count(*)::bigint AS total FROM memories ${clause}`,
+function scopedInactiveMemoryAdapter(scoped, namespaceId) {
+  // A raw successor ID may point outside this namespace. Keep the force gate
+  // separately, without disclosing that foreign identifier in operator reports.
+  const columns = `memory.id, memory.content, memory.state, memory.version,
+    memory.updated_at, memory.superseded_by IS NOT NULL AS has_superseded_by,
+    CASE WHEN EXISTS (
+      SELECT 1 FROM memories AS winner
+      WHERE winner.namespace_id = $1 AND winner.id = memory.superseded_by
+    ) THEN memory.superseded_by ELSE NULL END AS superseded_by`;
+  return {
+    namespaceId,
+    listInactive: ({ state, since, limit } = {}) => scoped.read(async (tx) => {
+      const filters = [namespaceId];
+      const where = [];
+      if (state) where.push(`memory.state = $${filters.push(state)}`);
+      else where.push("memory.state <> 'active'");
+      if (since) where.push(`memory.updated_at >= $${filters.push(since)}`);
+      const clause = where.join(" AND ");
+      const counted = await tx.query(
+        `SELECT count(*)::bigint AS total FROM memories AS memory
+         WHERE memory.namespace_id = $1 AND ${clause}`,
         [...filters],
       );
-      const page = await db.query(
-        `SELECT ${READ_COLUMNS}
-           FROM memories ${clause}
-          ORDER BY updated_at DESC, id
-          LIMIT $${filters.length + 1}`,
+      const page = await tx.query(
+        `SELECT ${columns} FROM memories AS memory
+         WHERE memory.namespace_id = $1 AND ${clause}
+         ORDER BY memory.updated_at DESC, memory.id LIMIT $${filters.length + 1}`,
         [...filters, limit ?? DEFAULT_LIST_LIMIT],
       );
-      // The count is the truncation signal. Constructed example: a page of
-      // 1 row out of 2 matches is partial. A missing total must fail loudly;
-      // defaulting it to zero would disguise a failed count query as a valid
-      // listing.
       const total = Number(counted.rows[0]?.total);
-      if (!Number.isFinite(total)) {
-        throw new Error(
-          `inactive count query returned no usable total: ${JSON.stringify(counted.rows[0] ?? null)}`,
-        );
-      }
+      if (!Number.isFinite(total)) throw new Error("inactive count query returned no usable total");
       return { rows: page.rows, total };
-    },
-
-    // Deliberately NOT scoped to inactive rows: an already-active id must come
-    // back so restore can report it as an idempotent no-op rather than as
-    // "not found", which is what lets an operator finish a half-applied run.
-    findByIds: async (ids) => {
-      const result = await db.query(
-        `SELECT ${READ_COLUMNS} FROM memories WHERE id = ANY($1)`,
-        [ids],
+    }),
+    // Include local active and inactive rows so retries stay idempotent. Foreign
+    // IDs are absent even when the caller knows their state and version.
+    findByIds: (ids) => scoped.read(async (tx) => {
+      const result = await tx.query(
+        `SELECT ${columns} FROM memories AS memory
+         WHERE memory.namespace_id = $1 AND memory.id = ANY($2)`,
+        [namespaceId, ids],
       );
       return result.rows;
-    },
-
-    /**
-     * Flip one row back to active, fenced on the state AND version that were
-     * read. Returns false when the fence loses, so the caller reports a skip
-     * instead of claiming a restore that did not happen.
-     *
-     * Sets exactly one column, and each omission is load-bearing:
-     *  - `version` is preserved. It is the concurrency token #128's `If-Match`
-     *    compares against; restore changes no content, so bumping it would
-     *    invalidate a concurrent writer's fence for nothing.
-     *  - `superseded_by` is preserved. It is the audit link to the winner, and
-     *    this tool's own gate reads it (TC-MEMRESTORE-059); clearing it would
-     *    make a resurrected contradiction look like an ordinary independent
-     *    memory. #103 only ever writes the column — `listActiveMemories` does not
-     *    project it — so a restored loser re-enters clustering by embedding
-     *    similarity, not by this link.
-     *  - `embedding` is untouched. The row was never removed, so `vector(1024)`
-     *    still holds the original embedding — rewriting it would burn inference
-     *    cost and could shift the vector under a different model version.
-     *  - `updated_at` cannot be preserved: `trg_memories_updated` is BEFORE
-     *    UPDATE and unconditionally assigns NOW(). The pre-restore value goes in
-     *    the decision log so the real age survives somewhere an operator can
-     *    find it. Note what that does NOT fix: #103's timeline gate compares
-     *    `updated_at` on the rows themselves and nothing reads this log, so a
-     *    restored row still presents as the fresher side of a contradiction.
-     *    That is a known limitation, recorded rather than corrected.
-     */
-    restoreMemory: async ({ id, priorState, version }) => {
-      const result = await db.query(
-        `UPDATE memories
-            SET state = 'active'
-          WHERE id = $1
-            AND state = $2
-            AND version = $3`,
-        [id, priorState, version],
+    }),
+    restoreMemory: ({ id, priorState, version }) => scoped.write(async (tx, actor) => {
+      // Preserve content, embedding, version and the successor link. The schema
+      // trigger advances updated_at; record the authenticated restoring actor.
+      const result = await tx.query(
+        `UPDATE memories SET state = 'active', updated_by_principal_id = $5
+         WHERE namespace_id = $1 AND id = $2 AND state = $3 AND version = $4`,
+        [namespaceId, id, priorState, version, actor.principalId],
       );
       return result.rowCount === 1;
-    },
+    }),
   };
 }
 
@@ -3774,8 +3796,9 @@ function inactiveRecord(row) {
  * deleted, even while a weekly consolidation apply is running.
  */
 export async function runListInactive(opts, deps) {
+  const namespaceId = validateRunScope(opts, deps);
   const log = deps.log || console.error;
-  const adapter = deps.listInactive ? deps : inactiveMemoryAdapter(deps.db);
+  const adapter = deps.listInactive ? deps : inactiveMemoryAdapter(deps.db, deps.scope);
   const { rows, total } = await adapter.listInactive({
     state: opts.state,
     since: opts.since,
@@ -3795,14 +3818,14 @@ export async function runListInactive(opts, deps) {
     // connection to the wrong stage — the moment an operator most needs to know
     // which of the three happened.
     log(`no inactive memories matched${opts.state ? ` state=${opts.state}` : ""}${opts.since ? ` since=${opts.since}` : ""}`);
-    return { exitCode: 0, rows: [], total, writes: 0 };
+    return { namespaceId, exitCode: 0, rows: [], total, writes: 0 };
   }
   for (const record of records) log(JSON.stringify(record));
   log(
     `listed ${records.length} of ${total} inactive memories` +
       (opts.since ? "; --since filters updated_at (there is no deleted_at column)" : ""),
   );
-  return { exitCode: 0, rows: records, total, writes: 0 };
+  return { namespaceId, exitCode: 0, rows: records, total, writes: 0 };
 }
 
 /**
@@ -3830,6 +3853,7 @@ function readRestoreIds(fs, opts) {
         `ids file is for stage ${JSON.stringify(doc.stage)}, not ${JSON.stringify(opts.stage)}`,
       );
     }
+    requireArtifactNamespace(doc, opts.namespaceId);
     ids = Array.isArray(doc.ids) ? doc.ids : [];
   } else {
     ids = raw.split("\n");
@@ -3851,10 +3875,11 @@ function readRestoreIds(fs, opts) {
  *           refusedArchived, refusedUnknownState, fencedOut, capUsed, logPath?}
  */
 export async function runRestore(opts, deps) {
+  const namespaceId = validateRunScope(opts, deps);
   const log = deps.log || console.error;
   const fs = deps.fs || (await import("node:fs"));
   const clock = deps.clock || Date.now;
-  const adapter = deps.findByIds ? deps : inactiveMemoryAdapter(deps.db);
+  const adapter = deps.findByIds ? deps : inactiveMemoryAdapter(deps.db, deps.scope);
   const cap = opts.cap ?? DEFAULT_CAP;
   if (!Number.isFinite(cap) || cap <= 0) {
     throw new Error(`cap must be a positive finite number, got ${cap}`);
@@ -3865,7 +3890,7 @@ export async function runRestore(opts, deps) {
   // restore log" AFTER rows had already been restored, costing the operator the
   // record of a run that did happen. An operator error must fail before the
   // first write, not be reported as a lost log.
-  const outDir = snippetLogDir(deps.outDir, opts.stage);
+  const outDir = namespaceLogDir(deps.outDir, opts.stage, namespaceId);
 
   // Like the cap and the `--out` above, this throws — and all three do so before
   // any read: a bad cap, an `--out` in a checkout, and a stage-mismatched or
@@ -3928,7 +3953,7 @@ export async function runRestore(opts, deps) {
     // `superseded_by` deliberately), then a later #102 cleanup soft-deletes it
     // without clearing the column. That row is `deleted` and still names a live
     // winner, so a state-only gate waves it through.
-    const superseded = row.state === "archived" || row.superseded_by != null;
+    const superseded = row.state === "archived" || row.has_superseded_by === true || row.superseded_by != null;
     if (superseded) {
       const winner = row.superseded_by ?? "an unrecorded winner";
       if (!opts.force) {
@@ -3956,6 +3981,7 @@ export async function runRestore(opts, deps) {
   }
 
   const result = (fields) => ({
+    namespaceId,
     planned,
     restored: [],
     alreadyActive,
@@ -4002,12 +4028,12 @@ export async function runRestore(opts, deps) {
 
   const lockFile =
     deps.lockFile ||
-    join(process.env.XDG_RUNTIME_DIR || join(homedir(), ".cache"), "mem9-cleanup", `${opts.stage}.lock`);
+    join(process.env.XDG_RUNTIME_DIR || join(homedir(), ".cache"), "mem9-cleanup", `${opts.stage}-${namespaceId}.lock`);
   const ttlMs = deps.lockTtlMs ?? (opts.lockTtlHours ? opts.lockTtlHours * HOUR_MS : DEFAULT_LOCK_TTL_MS);
   // The same shared mutex cleanup and consolidation take. A restore racing
   // consolidation could re-activate the loser of a contradiction while #103 is
   // mid-resolution on that very pair.
-  const sharedMutex = deps.acquireMutex ? await deps.acquireMutex(opts.stage) : undefined;
+  const sharedMutex = deps.acquireMutex ? await deps.acquireMutex(opts.stage, namespaceId) : undefined;
   if (deps.acquireMutex && !sharedMutex) {
     log("another cleanup, consolidation, or restore apply holds the shared database mutex");
     return result({ exitCode: 3 });
@@ -4067,7 +4093,7 @@ export async function runRestore(opts, deps) {
         updatedAtBefore: isoOrNull(row.updated_at),
         version: priorVersion,
         supersededBy,
-        forced: priorState === "archived" || supersededBy !== null,
+        forced: priorState === "archived" || row.has_superseded_by === true || supersededBy !== null,
         snippet: (row.content ?? "").slice(0, SNIPPET_LEN),
         outcome: ok ? "restored" : "fenced-out",
       });
@@ -4150,13 +4176,14 @@ export async function runRestore(opts, deps) {
         `notFound=${notFound.length}; fencedOut=${fencedOut.length}`,
     );
     const generatedAt = new Date(clock()).toISOString();
-    const target = join(outDir, `restore-${generatedAt.replace(/[:.]/g, "-")}.json`);
+    const target = join(outDir, `restore-${generatedAt.replace(/[:.]/g, "-")}-${randomUUID()}.json`);
     try {
       fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
+      fs.chmodSync?.(outDir, 0o700);
       fs.writeFileSync(
         target,
-        JSON.stringify({ stage: opts.stage, generatedAt, forced: Boolean(opts.force), entries }, null, 2),
-        { mode: 0o600 },
+        JSON.stringify({ stage: opts.stage, namespaceId, generatedAt, forced: Boolean(opts.force), entries }, null, 2),
+        { flag: "wx", mode: 0o600 },
       );
     } catch (err) {
       log(
@@ -4192,6 +4219,7 @@ const MODES = ["cleanup", "list", "restore"];
 // the question — TC-MEMRESTORE-054 fails on a missing `mode`.
 export const ARG_SPECS = {
   "--stage": { key: "stage", mode: MODES },
+  "--namespace-id": { key: "namespaceId", mode: MODES },
   "--base-url": { key: "baseUrl", mode: ["cleanup"] },
   "--tenant-secret-arn": { key: "tenantSecretArn", mode: ["cleanup"] },
   "--decisions": { key: "decisionsFile", mode: ["cleanup"] },
@@ -4231,6 +4259,9 @@ export const USAGE = `memory-cleanup.mjs — audit, clean, and recover the mem9 
 
 Audit and clean (issue #102) — dry-run by default, --apply writes:
   --stage <name>              required for every mode
+  --namespace-id <uuid>       required, or MEM9_NAMESPACE_ID; exactly one namespace
+                              requires cleanup service membership and
+                              MEM9_SERVICE_TRANSPORT_SIGNING_KEYS
   --base-url <url>            skip service discovery
   --tenant-secret-arn <arn>   tenant key source (else MEM9_TENANT_ID)
   --apply                     execute the plan; without it nothing is written
@@ -4238,7 +4269,7 @@ Audit and clean (issue #102) — dry-run by default, --apply writes:
   --ids <file>                restrict --apply to the reviewed ids in <file>
   --cap <n>                   max mutations per run (default ${DEFAULT_CAP})
   --out <dir>                 decision/restore log directory (default
-                              ~/.mem9-cleanup/<stage>/; must be outside the
+                              ~/.mem9-cleanup/<stage>/<namespace-id>/; outside the
                               checkout — the log holds memory snippets)
   --lock-file <path>          stage lockfile path
   --lock-ttl <hours>          age after which a lock may be reclaimed
@@ -4396,6 +4427,7 @@ export function parseArgs(argv) {
   // cleanup-only because the retention rule is a property of the tool, and a
   // reader of `opts` should not have to know the mode to know what is protected.
   opts.protectedTopics ??= [...DEFAULT_PROTECTED_TOPICS];
+  opts.namespaceId = requireNamespaceId(opts.namespaceId ?? process.env.MEM9_NAMESPACE_ID);
   return opts;
 }
 
@@ -4522,21 +4554,6 @@ async function ssmClient(region, runtime) {
   return { ssm, release: () => ssm.destroy() };
 }
 
-/**
- * The client the decision artifact is written through (#150).
- *
- * Region-pinned to the APPLICATION region, like every other client here. The
- * artifact bucket is created by infra/slack-approval.ts in that region, and S3's
- * cross-region behavior is the reason to be explicit: a mismatched region does not
- * fail cleanly but answers `PermanentRedirect`, which reads as a bucket-name
- * problem.
- */
-async function s3Client(region, runtime) {
-  if (runtime.s3) return { s3: runtime.s3, release: () => {} };
-  const { S3Client } = await import("@aws-sdk/client-s3");
-  const s3 = new S3Client({ region });
-  return { s3, release: () => s3.destroy() };
-}
 
 async function readSecret(secretId, region, runtime) {
   const { GetSecretValueCommand } = await import(
@@ -4569,38 +4586,40 @@ async function readSecret(secretId, region, runtime) {
 // TypeError before the first AWS call rather than a missing-credentials error an
 // operator could act on. Defaulting at the boundary makes the CLI's two callers
 // agree without either having to remember (TC-MEMRESTORE-071).
-async function productionDatabaseMutex(stage, region, runtime = {}) {
+async function productionDatabaseMutex(stage, region, scope, runtime = {}, write = false) {
+  requireNamespaceId(scope?.namespaceId);
   const config = await resolveDatabaseConfig(stage, region, runtime);
   const Client = runtime.Client ?? (await import("pg")).Client;
-  const db = new Client({
-    ...config,
-    ssl: { rejectUnauthorized: true },
-    application_name: `mem9-cleanup-${stage}`,
-  });
-  await db.connect();
-
-  return {
-    // Exposed for the recovery modes (issue #124), which read and write rows the
-    // REST API cannot see at all — its GetByID and list both filter to
-    // `state = 'active'`.
-    db,
-    acquireMutex: async (lockStage) => {
-      const result = await db.query(
-        "SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS acquired",
-        [sharedCleanupMutexKey(lockStage)],
-      );
-      if (!result.rows[0]?.acquired) return null;
-      return {
-        release: async () => {
-          await db.query(
-            "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
-            [sharedCleanupMutexKey(lockStage)],
+  const db = new Client({ ...config, ssl: { rejectUnauthorized: true }, application_name: "mem9-cleanup" });
+  try {
+    await db.connect();
+    const scoped = createScopedDatabase(db, scope);
+    await scoped.authorize(write);
+    return {
+      db,
+      scoped,
+      acquireMutex: async () => {
+        // Authorization and lock acquisition share the transaction. The session
+        // lock then serializes maintenance while each mutation reauthorizes.
+        const acquired = await scoped.write(async (tx) => {
+          const result = await tx.query(
+            "SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS acquired",
+            [sharedCleanupMutexKey(stage, scope.namespaceId)],
           );
-        },
-      };
-    },
-    close: () => db.end(),
-  };
+          return Boolean(result.rows[0]?.acquired);
+        });
+        if (!acquired) return null;
+        return { release: () => db.query(
+          "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
+          [sharedCleanupMutexKey(stage, scope.namespaceId)],
+        ) };
+      },
+      close: () => db.end(),
+    };
+  } catch (error) {
+    await db.end().catch(() => {});
+    throw error;
+  }
 }
 
 /**
@@ -4617,393 +4636,126 @@ async function resolveRuntimeApplicationRegion() {
   return resolveApplicationRegion();
 }
 
-async function recoveryDeps(opts) {
-  const region = await resolveRuntimeApplicationRegion();
-  const database = await productionDatabaseMutex(opts.stage, region);
-  const adapter = inactiveMemoryAdapter(database.db);
+function ordinaryCleanupScope(opts) {
+  requireNamespaceId(opts.namespaceId ?? process.env.MEM9_NAMESPACE_ID);
+  const flags = ["MEM9_CLEANUP_SCAN_ENABLED", "MEM9_CLEANUP_SCHEDULED", "MEM9_SLACK_APPROVAL_ENABLED"];
+  const inputs = [MEM9_SLACK_CHANNEL_ENV, "MEM9_APPROVAL_HASH", MEM9_REVIEW_ARTIFACT_KEY_ENV, MEM9_REVIEW_ARTIFACT_HASH_ENV];
+  if (flags.some((key) => ![undefined, "", "0", "false"].includes(process.env[key])) ||
+      inputs.some((key) => Boolean(process.env[key]))) {
+    throw new Error("scheduled cleanup, Slack approval and approval artifacts are disabled");
+  }
+  return requireMaintenanceConfig(opts, process.env, "cleanup");
+}
+
+// Raw operator diagnostics never enter normal task logs. The full report stays
+// in an owner-only namespace directory; console events contain bounded kinds
+// and counters only, including failures after a partial apply.
+async function productionReporter(opts, scope, emit = console.error) {
+  const outDir = namespaceLogDir(opts.outDir, scope.stage, scope.namespaceId);
+  const fs = await import("node:fs");
+  const messages = [];
+  let result;
   return {
-    deps: {
-      ...adapter,
-      // A listing takes no lock, so an operator can look at what was deleted
-      // even while a weekly consolidation apply is running. Keyed on `restore`
-      // too, not `apply` alone: `--list-inactive --apply` is rejected by
-      // `parseArgs`, and this is the second line of that same defence.
-      acquireMutex: opts.apply && opts.restore ? database.acquireMutex : undefined,
-      outDir: opts.outDir,
-      lockFile: opts.lockFile,
-      log: (msg) => console.error(`[memory-cleanup ${new Date().toISOString()}] ${msg}`),
+    log: (message) => {
+      messages.push(String(message));
+      const kind = /^(dry-run:|apply done:|listed |no inactive memories)/.test(message) ? "summary" : "progress";
+      const counts = {};
+      if (kind === "summary") {
+        for (const match of String(message).matchAll(/\b(capUsed|writeCalls|skippedLww|skippedByFilter|restored|alreadyActive|notFound|fencedOut)=(\d+)/g)) {
+          const count = Number(match[2]);
+          if (Number.isSafeInteger(count)) counts[match[1]] = count;
+        }
+      }
+      emit(JSON.stringify({ event: "memory_cleanup", kind, ...counts }));
     },
-    close: () => database.close(),
+    recordResult: (value) => { result = value; },
+    recordError: (error) => { messages.push(String(error.stack ?? error)); },
+    close: () => {
+      if (!messages.length && result === undefined) return;
+      fs.mkdirSync(outDir, { recursive: true, mode: 0o700 });
+      fs.chmodSync(outDir, 0o700);
+      const generatedAt = new Date().toISOString();
+      fs.writeFileSync(join(outDir, `report-${randomUUID()}.json`), JSON.stringify({
+        stage: scope.stage, namespaceId: scope.namespaceId, generatedAt, result, messages,
+      }, null, 2), { flag: "wx", mode: 0o600 });
+    },
   };
 }
 
-/**
- * The `postApproval` dep, or `undefined` when this stage has no Slack surface.
- *
- * ABSENT rather than present-and-inert when the channel is unset, which is what
- * keeps #102's operator CLI working unchanged: a dep that existed
- * unconditionally would have every hand-run dry run try to write an approval
- * record the operator's identity may not be able to write, and would post a
- * clickable Approve button for a list they ran locally just to look at.
- *
- * The token is env-first for the same reason the database config is
- * (`resolveDatabaseConfig`): the apply task receives `SLACK_BOT_TOKEN` from ECS
- * `ssm:`, already decrypted, and its task role holds `ssm:GetParameters` under
- * `approvals/*` ONLY — so a read of `slack/bot-token` is an AccessDenied there.
- * The review run has no such restriction and reads the parameter itself.
- *
- * A configured channel with no reachable token THROWS. Skipping the post would be
- * the whole audit running, offering nothing, and exiting 0 — indistinguishable
- * from a healthy week to the only person who would notice.
- */
-async function buildPostApproval(opts, region, runtime) {
-  const channel = process.env[MEM9_SLACK_CHANNEL_ENV];
-  if (!channel) return undefined;
-
-  const ssmPrefix = process.env.MEM9_SSM_PREFIX || `/mem9-on-aws/${opts.stage}`;
-  const { ssm, release } = await ssmClient(region, runtime);
-  let botToken = process.env.SLACK_BOT_TOKEN;
-  try {
-    if (!botToken) {
-      const name = `${ssmPrefix}/slack/bot-token`;
-      const { GetParametersCommand } = await import("@aws-sdk/client-ssm");
-      // Plural, not `GetParameter`: the two are distinct IAM actions and the
-      // boundary's ceiling admits only this one (TC-SLACKAPP-047g).
-      const response = await ssm.send(
-        // The parameter is a SecureString; without decryption the value comes back
-        // as ciphertext and every post 401s with `invalid_auth`.
-        new GetParametersCommand({ Names: [name], WithDecryption: true }),
-      );
-      botToken = (response.Parameters ?? []).find((p) => p.Name === name)?.Value;
-      if (!botToken) {
-        throw new Error(
-          `${MEM9_SLACK_CHANNEL_ENV} is set but no bot token is available: ` +
-            `inject SLACK_BOT_TOKEN or seed ${name}`,
-        );
-      }
-    }
-  } catch (err) {
-    release();
-    throw err;
-  }
-
-  // Built only when the bucket is configured, and NOT fetched from SSM the way the
-  // bot token is. A bucket name is not a secret, and reading it from the parameter
-  // tree would put the artifact's location behind the same `approvals/*`-scoped
-  // grant the apply task is confined to — a second failure mode for no benefit.
-  const artifactBucket = process.env[MEM9_DECISION_BUCKET_ENV];
-  const artifactBucketOwner = artifactBucket
-    ? requireDecisionArtifactBucketOwner(
-        process.env[MEM9_DECISION_BUCKET_OWNER_ENV],
-      )
-    : undefined;
-  const { s3 } = artifactBucket
-    ? await s3Client(region, runtime)
-    : { s3: undefined };
-
-  // The clients outlive this call — they are the ones every offer writes through —
-  // and are deliberately NOT threaded into `close()`, unlike the database mutex.
-  // The asymmetry is the resource: an open Postgres connection holds a server-side
-  // session and an advisory lock the next run needs released, while an SSM or S3
-  // client holds local sockets that the entrypoint's `process.exit` reclaims.
-  // `release` is called only on the failure path above, where nothing gets to use
-  // it.
-  return async ({ decisions, generatedAt, issuedAt }) =>
-    postApprovalRequest({
-      ssm,
-      ssmPrefix,
-      stage: opts.stage,
-      decisions,
-      issuedAt,
-      generatedAt,
-      channel,
-      botToken,
-      s3,
-      artifactBucket,
-      artifactBucketOwner,
-      fetchImpl: runtime.fetchImpl ?? fetch,
-      log: (message) =>
-        console.error(`[memory-cleanup ${new Date().toISOString()}] ${message}`),
-      // `console.log` and nothing else on the line: the awslogs driver ships stdout
-      // and stderr to the same group, and the #154 metric filters need the whole
-      // event to BE the JSON object. Any prefix — including the timestamped one
-      // `log` adds — makes `{ $.event = ... }` stop matching, silently, with the
-      // alarms then reading no datapoints and sitting green forever.
-      emit: (event) => console.log(JSON.stringify(event)),
-      scheduled: process.env[MEM9_CLEANUP_SCHEDULED_ENV] === "1",
-      approvalCap: opts.cap,
-    });
+export async function recoveryDeps(opts, runtime = {}) {
+  const scope = ordinaryCleanupScope(opts);
+  const reporter = await productionReporter(opts, scope, runtime.emit);
+  const region = await resolveRuntimeApplicationRegion();
+  const database = await productionDatabaseMutex(scope.stage, region, scope, runtime, Boolean(opts.apply));
+  const adapter = scopedInactiveMemoryAdapter(database.scoped, scope.namespaceId);
+  return {
+    deps: {
+      ...adapter, scope,
+      acquireMutex: opts.apply && opts.restore ? database.acquireMutex : undefined,
+      outDir: opts.outDir, lockFile: opts.lockFile, log: reporter.log,
+    },
+    recordResult: reporter.recordResult,
+    recordError: reporter.recordError,
+    close: async () => { try { await database.close(); } finally { reporter.close(); } },
+  };
 }
 
-/**
- * The `reportOutcome` dep, or `undefined` when there is nothing to report to.
- *
- * Three independent absences, all of which must DEGRADE rather than fail, because
- * every one of them is discovered after the operator has already approved:
- *
- *  - No claim at all: a review run, which POSTS instead of updating. There is
- *    nothing to update against — the message does not exist yet.
- *  - A claim with no coordinates: a review run whose stamp write failed, or a
- *    pre-#123 record.
- *  - No bot token: the apply task takes it from ECS `ssm:`, already decrypted, and
- *    its role holds `ssm:GetParameters` under `approvals/*` ONLY — so unlike
- *    `buildPostApproval` this CANNOT read the parameter itself, and a missing
- *    token means no update rather than an AccessDenied.
- *
- * The asymmetry with `buildPostApproval`, which throws on a missing token, is the
- * point: there, failing loud costs an unposted list nobody has acted on yet; here,
- * it would cost deletions the operator already authorized.
- */
-function buildReportOutcome(opts, claim, runtime) {
-  const log = (message) =>
-    console.error(`[memory-cleanup ${new Date().toISOString()}] ${message}`);
-  if (!claim?.messageTs || !claim?.messageChannel) {
-    // Logged for the same reason the token branch below is: skipping the update
-    // leaves the review message showing its Approve button and the PRE-apply
-    // list, so the operator sees an un-actioned request for memories that are
-    // already deleted, and a re-click answers "already applied". The coordinates
-    // can legitimately be absent — `postApprovalRequest` only warns when the
-    // stamp fails — so this stays non-fatal, but it must not be invisible.
-    log(
-      `the approval claim carries no Slack message coordinates ` +
-        `(ts=${claim?.messageTs ?? "unset"}, channel=${claim?.messageChannel ?? "unset"}), ` +
-        `so the outcome cannot be posted back and the original message keeps its ` +
-        `button and pre-apply list; the apply is unaffected`,
-    );
-    return undefined;
-  }
-  const botToken = process.env.SLACK_BOT_TOKEN;
-  if (!botToken) {
-    log(
-      `the approval was claimed against a Slack message but SLACK_BOT_TOKEN is ` +
-        `not set, so the outcome cannot be posted back; the apply is unaffected`,
-    );
-    return undefined;
-  }
-  return async ({ result, appliedAt }) =>
-    updateApprovalMessage({
-      claim,
-      approved: claim.count,
-      stage: opts.stage,
-      result,
-      appliedAt,
-      botToken,
-      fetchImpl: runtime.fetchImpl ?? fetch,
-      log,
-    });
-}
 
 /**
- * Build the real deps for one run — for the operator CLI and for the
- * Slack-triggered apply task, which are the same code on different IAM (#123).
- *
- * `runtime` exists for the tests: every AWS client and `pg` itself is injectable,
- * which is what lets the container path be asserted without an account. Nothing in
- * production passes it.
- *
- * ORDER IS LOAD-BEARING. When `MEM9_APPROVAL_HASH` is set the ids are materialized
- * FIRST, before the database is opened and before the advisory lock is taken:
- * that read is the cheapest guard and the only one that can prove the ids are the
- * approved ids, and a tampered claim that failed later would hold the shared mutex
- * for the length of its own failure, blocking the weekly consolidation.
+ * Build ordinary operator cleanup with the same authorized namespace for SQL
+ * and signed service REST. Unsupported approval modes are refused before client
+ * construction. Injectable clients keep production wiring testable offline.
  */
 export async function createCleanupDeps(opts, runtime = {}) {
+  const scope = ordinaryCleanupScope(opts);
+  const reporter = await productionReporter(opts, scope, runtime.emit);
   const region = await resolveRuntimeApplicationRegion();
-
-  // The explicit flag WINS over the env var: a stale MEM9_TENANT_ID from a
-  // preview shell must not silently redirect an --apply aimed at another stage.
-  let tenantId;
-  if (opts.tenantSecretArn) {
-    tenantId = await readSecret(opts.tenantSecretArn, region, runtime);
-  } else {
-    tenantId = process.env.MEM9_TENANT_ID;
-  }
+  const tenantId = opts.tenantSecretArn
+    ? await readSecret(opts.tenantSecretArn, region, runtime)
+    : process.env.MEM9_TENANT_ID;
   if (!tenantId) throw new Error("tenant id required: set MEM9_TENANT_ID or --tenant-secret-arn");
-
-  // The approval hash is the ECS container override the callback Lambda sets, and
-  // it is the ONLY thing that reaches the task from the click.
-  const approvalHash = process.env.MEM9_APPROVAL_HASH;
-  const reviewArtifactKey = process.env[MEM9_REVIEW_ARTIFACT_KEY_ENV];
-  const reviewArtifactHash = process.env[MEM9_REVIEW_ARTIFACT_HASH_ENV];
-  if (Boolean(reviewArtifactKey) !== Boolean(reviewArtifactHash)) {
-    throw new Error(
-      `${MEM9_REVIEW_ARTIFACT_KEY_ENV} and ${MEM9_REVIEW_ARTIFACT_HASH_ENV} ` +
-        `must be set together`,
-    );
+  const database = await productionDatabaseMutex(scope.stage, region, scope, runtime, Boolean(opts.apply));
+  try {
+    const adapter = scopedInactiveMemoryAdapter(database.scoped, scope.namespaceId);
+    const getToken = runtime.getToken ?? (await import("@aws/bedrock-token-generator")).getToken;
+    const fromNodeProviderChain = runtime.fromNodeProviderChain ?? (await import("@aws-sdk/credential-providers")).fromNodeProviderChain;
+    const providerCompleteChat = buildCompleteChat({ ...opts, region }, {
+      fetchImpl: runtime.fetchImpl ?? fetch,
+      mintToken: (tokenRegion) => getToken({ credentials: fromNodeProviderChain(), region: tokenRegion }),
+      beforeAttempt: () => database.scoped.authorize(false),
+    });
+    const completeChat = async (...args) => {
+      // Recheck every batch, retry, and consensus pass before minting a token or
+      // sending already-scanned memory content to the provider.
+      await database.scoped.authorize(false);
+      return providerCompleteChat(...args);
+    };
+    async function discoverInstances(stage) {
+      const { ServiceDiscoveryClient, DiscoverInstancesCommand } = await import("@aws-sdk/client-servicediscovery");
+      const sd = new ServiceDiscoveryClient({ region });
+      try {
+        const res = await sd.send(new DiscoverInstancesCommand({ NamespaceName: `mem9-${stage}.local`, ServiceName: "mnemo", HealthStatus: "HEALTHY" }));
+        return (res.Instances || []).map((inst) => ({ ip: inst.Attributes?.AWS_INSTANCE_IPV4, port: Number(inst.Attributes?.AWS_INSTANCE_PORT || 8080) })).filter((inst) => inst.ip);
+      } finally { sd.destroy(); }
+    }
+    return {
+      tenantId,
+      deps: {
+        scope, namespaceId: scope.namespaceId,
+        fetchImpl: createServiceFetch(scope, runtime.fetchImpl ?? fetch),
+        findByIds: adapter.findByIds,
+        completeChat, discoverInstances,
+        log: reporter.log, outDir: opts.outDir, lockFile: opts.lockFile,
+        acquireMutex: opts.apply ? database.acquireMutex : undefined,
+      },
+      recordResult: reporter.recordResult,
+      recordError: reporter.recordError,
+      close: async () => { try { await database.close(); } finally { reporter.close(); } },
+    };
+  } catch (error) {
+    await database.close();
+    throw error;
   }
-  if (approvalHash && reviewArtifactKey) {
-    throw new Error(
-      `${MEM9_REVIEW_ARTIFACT_KEY_ENV} cannot be combined with MEM9_APPROVAL_HASH`,
-    );
-  }
-  if (
-    reviewArtifactHash &&
-    !/^sha256:[0-9a-f]{64}$/u.test(reviewArtifactHash)
-  ) {
-    throw new Error(
-      `${MEM9_REVIEW_ARTIFACT_HASH_ENV} must be a sha256 content hash`,
-    );
-  }
-  /** What the claim said, for the outcome update. Absent on a review run. */
-  let claim;
-  /**
-   * Fetch the reviewed list the click approved. Absent unless the claim named an
-   * artifact, which is what keeps a pre-#150 claim on the path it was written for.
-   */
-  let loadReviewedDecisions;
-  if (approvalHash) {
-    // A hash with nowhere to write is the loop's worst failure mode, not a
-    // degraded one: `readApprovedIds` returns null for an absent `--ids`, and null
-    // means "no filter" — so the run would delete every DELETE verdict it found
-    // rather than the ones the operator approved, and exit 0 reporting success.
-    if (!opts.idsFile) {
-      throw new Error(
-        "MEM9_APPROVAL_HASH is set but --ids is not; refusing to apply " +
-          "without the approved-id filter",
-      );
-    }
-    const ssmPrefix = process.env.MEM9_SSM_PREFIX || `/mem9-on-aws/${opts.stage}`;
-    const { ssm, release } = await ssmClient(region, runtime);
-    try {
-      claim = await materializeApprovedIds({
-        ssm,
-        stage: opts.stage,
-        ssmPrefix,
-        hash: approvalHash,
-        idsFile: opts.idsFile,
-        fs: await import("node:fs"),
-        log: (message) =>
-          console.error(`[memory-cleanup ${new Date().toISOString()}] ${message}`),
-      });
-      claim.hash = approvalHash;
-    } finally {
-      // Released here, unlike `buildPostApproval`'s client: this one has done its
-      // one read, and the outcome update goes over `fetch` rather than SSM.
-      release();
-    }
-    // Present exactly when the claim named an artifact, which is what makes the
-    // replay's reach a property of the RECORD rather than of this task's
-    // configuration (#150). A claim with coordinates gets a replay; a pre-#150 claim
-    // gets the #123 behaviour it was written for.
-    //
-    // The client is built from the REGION, while replay coordinates come from the
-    // reviewed claim rather than the task definition's current bucket setting. That
-    // setting can change between offer and apply. There is no "artifact named but
-    // unreachable" branch here: the client always exists, and an artifact this task
-    // genuinely cannot read fails inside `loadDecisionArtifact` as an AccessDenied
-    // refusal (TC-SLACKAPP-190), never as a fallback to re-classification.
-    if (claim.artifact) {
-      const expectedBucketOwner = requireDecisionArtifactBucketOwner(
-        process.env[MEM9_DECISION_BUCKET_OWNER_ENV],
-      );
-      const { s3 } = await s3Client(region, runtime);
-      // A THUNK, not the fetched list. `loadDecisions` calls it inside `runCleanup`,
-      // after `discoverBaseUrl` — so a stage whose mnemo service is unreachable
-      // fails on discovery rather than after an S3 GET, and the artifact is not
-      // fetched at all on a run that cannot proceed. It also keeps the memory text
-      // out of this scope: the bytes live only as long as the call.
-      loadReviewedDecisions = () =>
-        loadDecisionArtifact({
-          s3,
-          bucket: claim.artifact.bucket,
-          expectedBucketOwner,
-          key: claim.artifact.key,
-          hash: approvalHash,
-          stage: opts.stage,
-          log: (message) =>
-            console.error(`[memory-cleanup ${new Date().toISOString()}] ${message}`),
-        });
-    }
-  } else if (reviewArtifactKey) {
-    if (opts.apply) {
-      throw new Error(
-        `${MEM9_REVIEW_ARTIFACT_KEY_ENV} is review-only and cannot be combined ` +
-          `with --apply`,
-      );
-    }
-    const artifactBucket = process.env[MEM9_DECISION_BUCKET_ENV];
-    if (!artifactBucket) {
-      throw new Error(
-        `${MEM9_REVIEW_ARTIFACT_KEY_ENV} requires ${MEM9_DECISION_BUCKET_ENV}`,
-      );
-    }
-    const expectedKey = decisionArtifactKey(opts.stage, reviewArtifactHash);
-    if (reviewArtifactKey !== expectedKey) {
-      throw new Error(
-        `${MEM9_REVIEW_ARTIFACT_KEY_ENV} does not match the requested stage and hash`,
-      );
-    }
-    const expectedBucketOwner = requireDecisionArtifactBucketOwner(
-      process.env[MEM9_DECISION_BUCKET_OWNER_ENV],
-    );
-    const { s3 } = await s3Client(region, runtime);
-    loadReviewedDecisions = () =>
-      loadDecisionArtifact({
-        s3,
-        bucket: artifactBucket,
-        expectedBucketOwner,
-        key: reviewArtifactKey,
-        hash: reviewArtifactHash,
-        stage: opts.stage,
-        log: (message) =>
-          console.error(`[memory-cleanup ${new Date().toISOString()}] ${message}`),
-      });
-  }
-
-  const databaseMutex = opts.apply
-    ? await productionDatabaseMutex(opts.stage, region, runtime)
-    : undefined;
-
-  const postApproval = await buildPostApproval(opts, region, runtime);
-
-  const getToken =
-    runtime.getToken ?? (await import("@aws/bedrock-token-generator")).getToken;
-  const fromNodeProviderChain =
-    runtime.fromNodeProviderChain ??
-    (await import("@aws-sdk/credential-providers")).fromNodeProviderChain;
-  const completeChat = buildCompleteChat(
-    { ...opts, region },
-    {
-      fetchImpl: fetch,
-      mintToken: (tokenRegion) =>
-        getToken({ credentials: fromNodeProviderChain(), region: tokenRegion }),
-    },
-  );
-
-  async function discoverInstances(stage) {
-    const { ServiceDiscoveryClient, DiscoverInstancesCommand } = await import("@aws-sdk/client-servicediscovery");
-    const sd = new ServiceDiscoveryClient({ region });
-    const res = await sd.send(
-      new DiscoverInstancesCommand({
-        NamespaceName: `mem9-${stage}.local`,
-        ServiceName: "mnemo",
-        HealthStatus: "HEALTHY",
-      }),
-    );
-    return (res.Instances || []).map((inst) => ({
-      ip: inst.Attributes?.AWS_INSTANCE_IPV4,
-      port: Number(inst.Attributes?.AWS_INSTANCE_PORT || 8080),
-    })).filter((i) => i.ip);
-  }
-
-  return {
-    tenantId,
-    deps: {
-      fetchImpl: fetch,
-      completeChat,
-      discoverInstances,
-      log: (msg) => console.error(`[memory-cleanup ${new Date().toISOString()}] ${msg}`),
-      outDir: opts.outDir,
-      lockFile: opts.lockFile,
-      acquireMutex: databaseMutex?.acquireMutex,
-      postApproval,
-      loadReviewedDecisions,
-      reportOutcome: buildReportOutcome(opts, claim, runtime),
-    },
-    close: async () => {
-      await databaseMutex?.close();
-    },
-  };
 }
 
 const isMain =
@@ -5024,14 +4776,13 @@ if (isMain) {
       // so a partial listing reads as complete, nondeterministically. Setting
       // the code and letting the event loop drain is the only form that cannot.
       process.exitCode = 0;
-    } else {
-      assertNamespaceV1LegacyMaintenanceDisabled("memory-cleanup");
     }
     if (!opts.help && (opts.listInactive || opts.restore)) {
       production = await recoveryDeps(opts);
       const result = opts.restore
         ? await runRestore(opts, production.deps)
         : await runListInactive(opts, production.deps);
+      production.recordResult(result);
       process.exitCode = result.exitCode;
     } else if (!opts.help) {
       production = await createCleanupDeps(opts);
@@ -5039,14 +4790,19 @@ if (isMain) {
         { ...opts, tenantId: production.tenantId },
         production.deps,
       );
+      production.recordResult(result);
       process.exitCode = result.exitCode;
     }
   } catch (err) {
     // Full stack on a destructive tool: an operator reconstructing a
     // half-applied run needs more than one context-free message line.
-    console.error(`memory-cleanup: ${err.stack || err.message}`);
+    production?.recordError(err);
+    console.error(JSON.stringify({ event: "memory_cleanup", kind: "error", message: "maintenance failed; check namespace, service configuration, and the private operator report" }));
     process.exitCode = 1;
   } finally {
-    await production?.close();
+    try { await production?.close(); } catch {
+      console.error(JSON.stringify({ event: "memory_cleanup", kind: "report_or_close_failed" }));
+      process.exitCode = 1;
+    }
   }
 }

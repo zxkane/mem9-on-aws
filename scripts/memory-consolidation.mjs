@@ -13,9 +13,11 @@ import {
 } from "./memory-cleanup.mjs";
 import { resolveApplicationRegion } from "./lib/application-region.mjs";
 import {
-  assertNamespaceV1LegacyMaintenanceDisabled,
-  LEGACY_MAINTENANCE_DISABLED_CODE,
-} from "./lib/memory-namespace.mjs";
+  requireNamespaceId,
+  requireMaintenanceConfig,
+  createScopedDatabase,
+  createServiceFetch,
+} from "./lib/maintenance-scope.mjs";
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_CAP = 20;
@@ -32,6 +34,29 @@ const MAX_CLUSTER_CONTENT_CHARS = 200_000;
 const MEMORIES_PATH = "/v1alpha2/mem9s/memories";
 const REQUEST_TIMEOUT_MS = 30_000;
 const LLM_TIMEOUT_MS = 120_000;
+
+function safeErrorClass(error) {
+  return new Set([
+    "Error", "TypeError", "RangeError", "SyntaxError", "AbortError",
+    "TimeoutError", "InvalidActions", "ApplyMutationError", "PreconditionFailed",
+  ]).has(error?.name) ? error.name : "Error";
+}
+
+function requireScopedRows(rows, namespaceId) {
+  if (!Array.isArray(rows) || rows.some((row) => row?.namespace_id !== namespaceId)) {
+    throw new Error("consolidation rows do not match the required namespace");
+  }
+  return rows;
+}
+
+function rejectLegacySlack(env) {
+  if (
+    env.SLACK_BOT_TOKEN || env.MEM9_SLACK_APPROVAL_CHANNEL ||
+    (env.MEM9_SLACK_APPROVAL_ENABLED && env.MEM9_SLACK_APPROVAL_ENABLED !== "0")
+  ) {
+    throw new Error("Slack configuration is unsupported for namespace consolidation");
+  }
+}
 
 export const CONSOLIDATION_METRICS = [
   "ConsolidationScanned",
@@ -355,12 +380,14 @@ export function reviewDisposition(kind) {
   return REVIEW_KIND_POLICIES.get(kind)?.disposition ?? DISPOSITION_HEALTH;
 }
 
-export function buildReviewTopic(item, byId) {
+export function buildReviewTopic(item, byId, namespaceId) {
+  requireNamespaceId(namespaceId);
   const disposition = reviewDisposition(item?.kind);
   if (!disposition) return null;
   const ids = sortedUniqueIds(item.ids);
   const topicId = sha256(JSON.stringify([
     DIGEST_SCHEMA_VERSION,
+    namespaceId,
     item.kind,
     ids,
   ]));
@@ -380,10 +407,10 @@ export function buildReviewTopic(item, byId) {
   };
 }
 
-function buildCurrentTopics(review, byId) {
+function buildCurrentTopics(review, byId, namespaceId) {
   const topics = new Map();
   for (const item of review) {
-    const topic = buildReviewTopic(item, byId);
+    const topic = buildReviewTopic(item, byId, namespaceId);
     if (!topic) continue;
     const existing = topics.get(topic.topicId);
     if (!existing) {
@@ -637,6 +664,7 @@ function buildSlackDigestMessage({
 
 export function buildDigestOutcome({
   stage,
+  namespaceId,
   review,
   byId,
   previousState,
@@ -647,8 +675,12 @@ export function buildDigestOutcome({
   now,
   dedupAvailable = true,
 }) {
+  requireNamespaceId(namespaceId);
+  if (previousState && (previousState.stage !== stage || previousState.namespaceId !== namespaceId)) {
+    throw new Error("digest state does not match the consolidation namespace");
+  }
   const degraded = !dedupAvailable;
-  const currentTopics = buildCurrentTopics(review, byId);
+  const currentTopics = buildCurrentTopics(review, byId, namespaceId);
   const transitions = compareDigestTopics(currentTopics, previousState, {
     dedupAvailable,
   });
@@ -676,6 +708,7 @@ export function buildDigestOutcome({
   const nextState = {
     schemaVersion: DIGEST_SCHEMA_VERSION,
     stage,
+    namespaceId,
     generatedAt: new Date(now).toISOString(),
     unchangedRuns,
     kindCounts: health.kindCounts,
@@ -708,9 +741,11 @@ export function buildDigestOutcome({
 }
 
 export function serializeDigestState(state) {
+  requireNamespaceId(state.namespaceId);
   return JSON.stringify({
     schemaVersion: state.schemaVersion,
     stage: state.stage,
+    namespaceId: state.namespaceId,
     generatedAt: state.generatedAt,
     unchangedRuns: state.unchangedRuns,
     kindCounts: Object.fromEntries(
@@ -964,7 +999,7 @@ async function classifyClusters(clusters, completeChat, log, routingOptions) {
       actions = parseActions(await completeChat(CONSOLIDATION_PROMPT, input));
     } catch (error) {
       failed += 1;
-      log(`classification failed for cluster of ${cluster.length}: ${error.message}`);
+      log(`classification failed for cluster of ${cluster.length}: ${safeErrorClass(error)}`);
       const byId = new Map(cluster.map((memory) => [memory.id, memory]));
       review.push(
         reviewItem(
@@ -1126,13 +1161,13 @@ async function executeAutoAction(action, deps, metrics, clock) {
 }
 
 async function applyAutoActions(actions, context) {
-  const { byId, cap, clock, deps, metrics, stage } = context;
+  const { byId, cap, clock, deps, metrics } = context;
   const review = [];
   let mutations = 0;
   let failed = false;
   let mutex;
   try {
-    mutex = await deps.acquireMutex(stage);
+    mutex = await deps.acquireMutex();
   } catch (error) {
     failed = true;
     deps.log(`consolidation apply setup failed: ${error?.name || "Error"}`);
@@ -1232,6 +1267,10 @@ async function applyAutoActions(actions, context) {
 }
 
 export async function processScheduledDigest(input, deps) {
+  requireNamespaceId(input.namespaceId);
+  if (deps.namespaceId !== undefined && deps.namespaceId !== input.namespaceId) {
+    throw new Error("digest adapter does not match the consolidation namespace");
+  }
   let previousState;
   let etag;
   let dedupUnavailable = false;
@@ -1256,8 +1295,13 @@ export async function processScheduledDigest(input, deps) {
       if (loaded?.status === "missing") {
         // The first snapshot is created with If-None-Match below.
       } else if (loaded?.status === "ok" && loaded.state && loaded.etag) {
-        previousState = loaded.state;
-        etag = loaded.etag;
+        if (loaded.state.namespaceId !== input.namespaceId || loaded.state.stage !== input.stage) {
+          stateWriteAllowed = false;
+          markDedupUnavailable("Error");
+        } else {
+          previousState = loaded.state;
+          etag = loaded.etag;
+        }
       } else if (loaded?.status === "invalid") {
         stateWriteAllowed = false;
         markDedupUnavailable(loaded.errorClass);
@@ -1379,6 +1423,10 @@ function buildHealthAlarm({
  * Run one consolidation pass over injected adapters.
  */
 export async function runConsolidation(options, deps) {
+  const namespaceId = requireNamespaceId(options.namespaceId);
+  if (deps.namespaceId !== undefined && deps.namespaceId !== namespaceId) {
+    throw new Error("consolidation adapter does not match the required namespace");
+  }
   const stage = options.stage;
   const reportOnly = options.reportOnly ?? true;
   const scheduled = options.scheduled ?? false;
@@ -1388,6 +1436,9 @@ export async function runConsolidation(options, deps) {
   if (!Number.isInteger(cap) || cap <= 0 || cap > DEFAULT_CAP) {
     throw new Error(`cap must be an integer between 1 and ${DEFAULT_CAP}`);
   }
+  const memories = requireScopedRows(await deps.listActiveMemories(), namespaceId).filter(
+    isConsolidationCandidate,
+  );
   if (options.checkLlm) {
     const smokeActions = parseActions(
       await deps.completeChat(CONSOLIDATION_SMOKE_PROMPT, []),
@@ -1397,9 +1448,6 @@ export async function runConsolidation(options, deps) {
     }
   }
 
-  const memories = (await deps.listActiveMemories()).filter(
-    isConsolidationCandidate,
-  );
   const scanTime = clock();
   const clusters = clusterMemories(memories, {
     similarityThreshold:
@@ -1436,7 +1484,6 @@ export async function runConsolidation(options, deps) {
       clock,
       deps,
       metrics,
-      stage,
     });
     applyFailed = applied.failed;
     mutations = applied.mutations;
@@ -1444,7 +1491,7 @@ export async function runConsolidation(options, deps) {
   }
 
   for (const item of review) {
-    deps.log(`CONSOLIDATION_REVIEW ${JSON.stringify(item)}`);
+    deps.log(`CONSOLIDATION_REVIEW ${JSON.stringify({ kind: item.kind, count: item.ids.length })}`);
   }
   metrics.reviewItems = review.length;
   deps.log(
@@ -1461,7 +1508,7 @@ export async function runConsolidation(options, deps) {
     let digestById = byId;
     let dedupUnavailableError;
     try {
-      const currentMemories = (await deps.listActiveMemories()).filter(
+      const currentMemories = requireScopedRows(await deps.listActiveMemories(), namespaceId).filter(
         isConsolidationCandidate,
       );
       digestById = new Map(
@@ -1473,6 +1520,7 @@ export async function runConsolidation(options, deps) {
 
     const digestInput = {
       stage,
+      namespaceId,
       review,
       byId: digestById,
       metrics,
@@ -1593,6 +1641,7 @@ export async function runConsolidation(options, deps) {
   else deps.log(JSON.stringify(emf));
 
   return {
+    namespaceId,
     exitCode:
       applyFailed ||
       notificationFailed ||
@@ -1629,8 +1678,9 @@ function parseJsonObject(value) {
   }
 }
 
-function digestStateKey(stage) {
-  return `${DIGEST_STATE_PREFIX}/${stage}/${DIGEST_STATE_FILENAME}`;
+export function digestStateKey(stage, namespaceId) {
+  requireNamespaceId(namespaceId);
+  return `${DIGEST_STATE_PREFIX}/${stage}/${namespaceId}/${DIGEST_STATE_FILENAME}`;
 }
 
 function requireDigestBucketOwner(value) {
@@ -1646,7 +1696,7 @@ function exactKeys(value, allowed) {
   return Object.keys(value).every((key) => allowed.includes(key));
 }
 
-function normalizeDigestState(value, expectedStage) {
+function normalizeDigestState(value, expectedStage, expectedNamespaceId) {
   if (
     !value ||
     typeof value !== "object" ||
@@ -1654,6 +1704,7 @@ function normalizeDigestState(value, expectedStage) {
     !exactKeys(value, [
       "schemaVersion",
       "stage",
+      "namespaceId",
       "generatedAt",
       "unchangedRuns",
       "kindCounts",
@@ -1661,6 +1712,7 @@ function normalizeDigestState(value, expectedStage) {
     ]) ||
     value.schemaVersion !== DIGEST_SCHEMA_VERSION ||
     value.stage !== expectedStage ||
+    value.namespaceId !== expectedNamespaceId ||
     typeof value.generatedAt !== "string" ||
     !Number.isFinite(Date.parse(value.generatedAt)) ||
     !Number.isInteger(value.unchangedRuns) ||
@@ -1713,6 +1765,7 @@ function normalizeDigestState(value, expectedStage) {
   return {
     schemaVersion: DIGEST_SCHEMA_VERSION,
     stage: expectedStage,
+    namespaceId: expectedNamespaceId,
     generatedAt: value.generatedAt,
     unchangedRuns: value.unchangedRuns,
     kindCounts: Object.fromEntries(
@@ -1769,7 +1822,122 @@ function restAdapter(baseUrl, tenantId, fetchImpl = fetch) {
   };
 }
 
+// Kept separate from transport construction so PostgreSQL integration exercises
+// the same namespace predicates and audit writes as the deployed runner.
+export function createConsolidationDatabase(db, scope) {
+  const namespaceId = requireNamespaceId(scope.namespaceId);
+  const scoped = createScopedDatabase(db, scope);
+  const mutexKey = sharedCleanupMutexKey(scope.stage, namespaceId);
+  return {
+    namespaceId,
+    authorize: (write = false) => scoped.authorize(write),
+    listActiveMemories: () => scoped.read(async (tx, actor) => {
+      const result = await tx.query(
+        `SELECT id, namespace_id, content, tags, metadata, memory_type, state, version,
+                created_at, updated_at, embedding::text AS embedding
+           FROM memories
+          WHERE namespace_id = $1 AND state = 'active' AND embedding IS NOT NULL
+          ORDER BY id`,
+        [actor.namespaceId],
+      );
+      return requireScopedRows(result.rows, namespaceId).map((row) => ({
+        ...row,
+        tags: Array.isArray(row.tags) ? row.tags : [],
+        metadata: parseJsonObject(row.metadata),
+        embedding: parseVector(row.embedding),
+      }));
+    }),
+    acquireMutex: async () => {
+      await scoped.authorize(true);
+      const result = await db.query(
+        "SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS acquired",
+        [mutexKey],
+      );
+      if (!result.rows[0]?.acquired) return null;
+      return {
+        release: () => db.query(
+          "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
+          [mutexKey],
+        ),
+      };
+    },
+    archiveMemory: ({ id, supersededBy, version, content, winnerVersion, winnerContent }) =>
+      scoped.write(async (tx, actor) => {
+        const result = await tx.query(
+          `UPDATE memories AS loser
+              SET state = 'archived',
+                  superseded_by = $2,
+                  version = loser.version + 1,
+                  updated_at = NOW(),
+                  updated_by_principal_id = $8
+            WHERE loser.id = $1
+              AND loser.namespace_id = $7
+              AND loser.state = 'active'
+              AND loser.version = $3
+              AND loser.content = $4
+              AND EXISTS (
+                    SELECT 1
+                      FROM memories AS winner
+                     WHERE winner.id = $2
+                       AND winner.namespace_id = $7
+                       AND winner.state = 'active'
+                       AND winner.version = $5
+                       AND winner.content = $6
+                  )`,
+          [id, supersededBy, version, content, winnerVersion, winnerContent,
+            actor.namespaceId, actor.principalId],
+        );
+        return result.rowCount === 1;
+      }),
+    markMemoryStale: ({ id, tags, metadata, version, content }) =>
+      scoped.write(async (tx, actor) => {
+        const result = await tx.query(
+          `UPDATE memories
+              SET tags = $2,
+                  metadata = $3,
+                  version = version + 1,
+                  updated_by_principal_id = $7
+            WHERE id = $1
+              AND namespace_id = $6
+              AND state = 'active'
+              AND version = $4
+              AND content = $5`,
+          [id, JSON.stringify(tags), JSON.stringify(metadata), version, content,
+            actor.namespaceId, actor.principalId],
+        );
+        return result.rowCount === 1;
+      }),
+  };
+}
+
+// The shared MERGE helper also emits human-readable logs containing IDs. Only
+// allowlisted summaries cross the production stdout boundary.
+// Input is an internal prefixed log line; stage is supplied by trusted config.
+export function productionLogRecord(line, stage) {
+  const record = { event: "consolidation_progress", stage };
+  const match = /^CONSOLIDATION_(DIGEST|REVIEW|REVIEW_LIST) (.*)$/u.exec(line);
+  if (!match) return record;
+  let value;
+  try { value = JSON.parse(match[2]); } catch { return record; }
+  record.event = `consolidation_${match[1].toLowerCase()}`;
+  if (!value || typeof value !== "object") return record;
+  if (["dedup_unavailable", "slack_delivery_failed", "health_alarm_delivery_failed", "state_write_failed"].includes(value.event)) {
+    record.status = value.event;
+  }
+  if (REVIEW_KIND_POLICIES.has(value.kind)) record.kind = value.kind;
+  for (const key of ["count", "reviewItems"]) {
+    if (Number.isSafeInteger(value[key]) && value[key] >= 0) record[key] = value[key];
+  }
+  for (const key of ["reportOnly", "digestEnabled", "preconditionFailed"]) {
+    if (typeof value[key] === "boolean") record[key] = value[key];
+  }
+  if (value.errorClass) record.errorClass = safeErrorClass({ name: value.errorClass });
+  return record;
+}
+
 export async function createProductionDeps(options, runtime = {}) {
+  rejectLegacySlack(process.env);
+  const scope = Object.freeze(requireMaintenanceConfig(options, process.env, "consolidation"));
   const region =
     process.env.AWS_REGION ||
     (await resolveApplicationRegion());
@@ -1801,10 +1969,11 @@ export async function createProductionDeps(options, runtime = {}) {
   });
   await db.connect();
 
+  const database = createConsolidationDatabase(db, scope);
   const fetchImpl = runtime.fetch ?? fetch;
   const writeStdout =
     runtime.writeStdout ?? process.stdout.write.bind(process.stdout);
-  const rest = restAdapter(baseUrl, tenantId, fetchImpl);
+  const rest = restAdapter(baseUrl, tenantId, createServiceFetch(scope, fetchImpl));
   const getToken =
     runtime.getToken ??
     (await import("@aws/bedrock-token-generator")).getToken;
@@ -1821,11 +1990,11 @@ export async function createProductionDeps(options, runtime = {}) {
     { region, model: process.env.MEM9_LLM_MODEL, effort: process.env.MEM9_LLM_EFFORT },
     {
       fetchImpl,
+      beforeAttempt: () => database.authorize(),
       mintToken: (tokenRegion) =>
         getToken({ credentials: fromNodeProviderChain(), region: tokenRegion }),
     },
   );
-
   let sns;
   let s3;
   const publishHealthAlarm = async (alarm) => {
@@ -1886,11 +2055,12 @@ export async function createProductionDeps(options, runtime = {}) {
       owner: requireDigestBucketOwner(
         process.env.MEM9_DECISION_ARTIFACT_BUCKET_OWNER,
       ),
-      key: digestStateKey(options.stage),
+      key: digestStateKey(scope.stage, scope.namespaceId),
     };
   };
 
   const loadDigestState = async () => {
+    await database.authorize();
     const { bucket, owner, key } = digestBucketConfig();
     const { client, GetObjectCommand } = await digestS3();
     let response;
@@ -1928,7 +2098,7 @@ export async function createProductionDeps(options, runtime = {}) {
       return {
         status: "ok",
         etag: response.ETag,
-        state: normalizeDigestState(parsed, options.stage),
+        state: normalizeDigestState(parsed, scope.stage, scope.namespaceId),
       };
     } catch (error) {
       return {
@@ -1940,6 +2110,8 @@ export async function createProductionDeps(options, runtime = {}) {
   };
 
   const writeDigestState = async ({ state, etag }) => {
+    const validated = normalizeDigestState(state, scope.stage, scope.namespaceId);
+    await database.authorize(true);
     const { bucket, owner, key } = digestBucketConfig();
     const { client, PutObjectCommand } = await digestS3();
     await client.send(
@@ -1947,134 +2119,23 @@ export async function createProductionDeps(options, runtime = {}) {
         Bucket: bucket,
         Key: key,
         ExpectedBucketOwner: owner,
-        Body: serializeDigestState(state),
+        Body: serializeDigestState(validated),
         ContentType: "application/json",
         ...(etag ? { IfMatch: etag } : { IfNoneMatch: "*" }),
       }),
     );
   };
 
-  const postDigest = async (message) => {
-    const channel = process.env.MEM9_SLACK_APPROVAL_CHANNEL;
-    const botToken = process.env.SLACK_BOT_TOKEN;
-    if (!channel && !botToken) return;
-    if (!channel || !botToken) {
-      throw new Error("Slack digest configuration is incomplete");
-    }
-    const response = await fetchImpl(
-      "https://slack.com/api/chat.postMessage",
-      {
-        method: "POST",
-        headers: {
-          authorization: `Bearer ${botToken}`,
-          "content-type": "application/json; charset=utf-8",
-        },
-        body: JSON.stringify({ channel, ...message }),
-        signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
-      },
-    );
-    let payload;
-    try {
-      payload = await response.json();
-    } catch {
-      payload = null;
-    }
-    if (!response.ok || payload?.ok !== true) {
-      throw new Error(
-        `Slack chat.postMessage failed: HTTP ${response.status} ` +
-        `${payload?.error || "invalid_response"}`,
-      );
-    }
-  };
-
   return {
     deps: {
       ...rest,
-      listActiveMemories: async () => {
-        const result = await db.query(
-          `SELECT id, content, tags, metadata, memory_type, state, version,
-                  created_at, updated_at, embedding::text AS embedding
-             FROM memories
-            WHERE state = 'active' AND embedding IS NOT NULL
-            ORDER BY id`,
-        );
-        return result.rows.map((row) => ({
-          ...row,
-          tags: Array.isArray(row.tags) ? row.tags : [],
-          metadata: parseJsonObject(row.metadata),
-          embedding: parseVector(row.embedding),
-        }));
-      },
-      acquireMutex: async (stage) => {
-        const result = await db.query(
-          "SELECT pg_try_advisory_lock(hashtextextended($1, 0)) AS acquired",
-          [sharedCleanupMutexKey(stage)],
-        );
-        if (!result.rows[0]?.acquired) return null;
-        return {
-          release: async () => {
-            await db.query(
-              "SELECT pg_advisory_unlock(hashtextextended($1, 0))",
-              [sharedCleanupMutexKey(stage)],
-            );
-          },
-        };
-      },
-      archiveMemory: async ({
-        id,
-        supersededBy,
-        version,
-        content,
-        winnerVersion,
-        winnerContent,
-      }) => {
-        const result = await db.query(
-          `UPDATE memories AS loser
-              SET state = 'archived',
-                  superseded_by = $2,
-                  version = loser.version + 1,
-                  updated_at = NOW()
-            WHERE loser.id = $1
-              AND loser.state = 'active'
-              AND loser.version = $3
-              AND loser.content = $4
-              AND EXISTS (
-                    SELECT 1
-                      FROM memories AS winner
-                     WHERE winner.id = $2
-                       AND winner.state = 'active'
-                       AND winner.version = $5
-                       AND winner.content = $6
-                  )`,
-          [id, supersededBy, version, content, winnerVersion, winnerContent],
-        );
-        return result.rowCount === 1;
-      },
-      markMemoryStale: async ({ id, tags, metadata, version, content }) => {
-        // Deliberately does NOT touch `embedding` — see executeStale for why the
-        // REST PUT cannot be used here. `updated_at` is still rewritten by
-        // trg_memories_updated, which is why routeActions refuses to auto-archive
-        // a contradiction whose winner carries a stale marker.
-        const result = await db.query(
-          `UPDATE memories
-              SET tags = $2,
-                  metadata = $3,
-                  version = version + 1
-            WHERE id = $1
-              AND state = 'active'
-              AND version = $4
-              AND content = $5`,
-          [id, JSON.stringify(tags), JSON.stringify(metadata), version, content],
-        );
-        return result.rowCount === 1;
-      },
+      ...database,
       completeChat,
       loadDigestState,
       writeDigestState,
-      postDigest,
       publishHealthAlarm,
       emitMetrics: (record) => writeStdout(`${JSON.stringify(record)}\n`),
-      log: (line) => console.log(line),
+      log: (line) => writeStdout(`${JSON.stringify(productionLogRecord(line, scope.stage))}\n`),
     },
     close: async () => {
       await sns?.destroy();
@@ -2087,6 +2148,7 @@ export async function createProductionDeps(options, runtime = {}) {
 export function parseConsolidationArgs(argv) {
   const options = {
     stage: process.env.MEM9_STAGE,
+    namespaceId: process.env.MEM9_NAMESPACE_ID,
     reportOnly: process.env.MEM9_CONSOLIDATION_REPORT_ONLY !== "0",
     scheduled: process.env.MEM9_CONSOLIDATION_SCHEDULED === "1",
     checkLlm: false,
@@ -2102,12 +2164,18 @@ export function parseConsolidationArgs(argv) {
       options.reportOnly = false;
     } else if (arg === "--stage") {
       options.stage = argv[++index];
+    } else if (arg === "--namespace-id") {
+      if (argv.slice(0, index).includes("--namespace-id")) {
+        throw new Error("one namespace is required per consolidation run");
+      }
+      options.namespaceId = argv[++index];
     } else if (arg === "--cap") {
       options.cap = Number(argv[++index]);
     } else {
       throw new Error(`unknown argument ${arg}`);
     }
   }
+  options.namespaceId = requireNamespaceId(options.namespaceId);
   return options;
 }
 
@@ -2119,7 +2187,6 @@ if (isMain) {
   let production;
   try {
     const options = parseConsolidationArgs(process.argv.slice(2));
-    assertNamespaceV1LegacyMaintenanceDisabled("memory-consolidation");
     production = await createProductionDeps(options);
     const result = await runConsolidation(options, production.deps);
     process.exitCode = result.exitCode;
@@ -2127,15 +2194,16 @@ if (isMain) {
     console.error(
       JSON.stringify({
         event: "consolidation_failed",
-        errorClass: error?.name || "Error",
-        reason:
-          error?.code === LEGACY_MAINTENANCE_DISABLED_CODE
-            ? error.message
-            : undefined,
+        errorClass: safeErrorClass(error),
       }),
     );
     process.exitCode = 1;
   } finally {
-    await production?.close();
+    try {
+      await production?.close();
+    } catch (error) {
+      console.error(JSON.stringify({ event: "consolidation_close_failed", errorClass: safeErrorClass(error) }));
+      process.exitCode = 1;
+    }
   }
 }

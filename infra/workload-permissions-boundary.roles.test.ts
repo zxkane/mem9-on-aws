@@ -29,6 +29,16 @@ const accountId = "123456789012";
 const region = "ap-northeast-1";
 const repositoryRoot = resolve(import.meta.dirname, "..");
 const recordedResources: RecordedResource[] = [];
+const maintenanceNamespaceIds = [
+  "60000000-0000-4000-8000-000000000101",
+  "60000000-0000-4000-8000-000000000102",
+];
+const maintenanceRoleNames = [
+  "Mem9ConsolidationTaskRole",
+  "Mem9ConsolidationExecutionRole",
+  "Mem9CleanupTaskRole",
+  "Mem9CleanupExecutionRole",
+];
 const authorizerRoleLogicalName =
   "Mem9OauthFacadeApiAuthorizerMem9OauthFacadeAllowAllHandlerRole";
 const authorizerFunctionLogicalName =
@@ -124,10 +134,153 @@ function mockNewResource(args: MockResourceArgs): {
       Object.assign(state, { hex: "0123456789abcdef", result: "mock-id" });
       break;
     case "random:index/randomPassword:RandomPassword":
-      state.result = "mock-password";
+      state.result = args.name.padEnd(64, "x");
+      break;
+    case "aws:ssm/parameter:Parameter":
+      state.arn = `arn:aws:ssm:${region}:${accountId}:parameter${args.inputs.name}`;
       break;
   }
   return { id, state };
+}
+
+function oneResource(type: string, name: string): RecordedResource {
+  const matches = recordedResources.filter((resource) => resource.type === type && resource.name === name);
+  expect(matches, name).toHaveLength(1);
+  return matches[0];
+}
+
+function matchesArn(pattern: string, arn: string): boolean {
+  const escaped = pattern.split("*").map((part) => part.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  return new RegExp(`^${escaped.join(".*")}$`).test(arn);
+}
+
+async function verifyMaintenanceGraph(scheduleEnabled: boolean, namespaceRequired: boolean): Promise<void> {
+  const [{ isRpcSecret, unwrapRpcSecret }, { expectedBoundaryPolicyDocument }] = await Promise.all([
+    import(/* @vite-ignore */ moduleUrl(".sst/platform/node_modules/@pulumi/pulumi/runtime/rpc.js")),
+    import(/* @vite-ignore */ moduleUrl("scripts/lib/workload-permissions-boundary.mjs")),
+  ]);
+  // Reuse the checked-in boundary contract; this test does not add IAM grants.
+  const boundary = expectedBoundaryPolicyDocument({
+    partition: "aws", accountId, applicationRegion: region,
+    bedrockProjectArn: `arn:aws:bedrock-mantle:${region}:${accountId}:project/proj_mock`,
+  }).Statement as Array<Record<string, any>>;
+  const resourceScopes = boundary.find(({ Sid }) => Sid === "R")!.NotResource as string[];
+  const actionCeiling = boundary.find(({ NotAction }) => NotAction)!.NotAction as string[];
+  expect(actionCeiling).toEqual(expect.arrayContaining(["ssm:GetParameters", "kms:Decrypt"]));
+  const kmsParameterScope = boundary.find(({ Sid }) => Sid === "K")!
+    .Condition.StringNotLikeIfExists["kms:EncryptionContext:PARAMETER_ARN"] as string;
+  const executionRoleScopes = boundary.find(({ Sid }) => Sid === "S")!
+    .Condition.ArnNotLike["aws:PrincipalArn"] as string[];
+  expect(boundary.find(({ Sid }) => Sid === "V")!
+    .Condition.StringNotEqualsIfExists["kms:ViaService"]).toContain(`ssm.${region}.amazonaws.com`);
+
+  const parameterArn = (parameter: RecordedResource) =>
+    `arn:aws:ssm:${region}:${accountId}:parameter${parameter.inputs.name}`;
+  const assertSecureParameter = (name: string, path: string) => {
+    const parameter = oneResource("aws:ssm/parameter:Parameter", name);
+    expect(parameter.inputs).toMatchObject({ name: path, type: "SecureString" });
+    expect(isRpcSecret(parameter.inputs.value), `${name} remains secret at the Pulumi RPC boundary`).toBe(true);
+    const arn = parameterArn(parameter);
+    expect(resourceScopes.some((pattern) => matchesArn(pattern, arn)), `${name} SSM resource scope`).toBe(true);
+    expect(matchesArn(kmsParameterScope, arn), `${name} KMS parameter context`).toBe(true);
+    return parameter;
+  };
+  const keyParameters = Object.fromEntries(["consolidation", "cleanup", "analysis"].map((service) => [
+    service,
+    assertSecureParameter(
+      `Mem9Service${service[0].toUpperCase()}${service.slice(1)}SigningKeys`,
+      `/mem9-on-aws/prod/namespace/service-${service}-signing-keys`,
+    ),
+  ]));
+  // Distinct mock passwords preserve the real separation between service rings.
+  expect(new Set(Object.values(keyParameters).map((parameter) => unwrapRpcSecret(parameter.inputs.value))).size).toBe(3);
+  const bundle = assertSecureParameter("Mem9ServiceTransportSigningKeys", "/mem9-on-aws/prod/namespace/service-transport-signing-keys");
+
+  const containers = recordedResources.filter(({ type }) => type === "aws:ecs/taskDefinition:TaskDefinition")
+    .flatMap((definition) => (JSON.parse(unwrapRpcSecret(definition.inputs.containerDefinitions)) as Array<Record<string, any>>)
+      .map((container) => ({ definition, container })));
+  const taskContainer = (name: string) => {
+    const matches = containers.filter(({ container }) => container.name === name);
+    expect(matches, `${name} container`).toHaveLength(1);
+    return matches[0];
+  };
+  const serverKeys = taskContainer("mnemo-server").container.secrets.filter(
+    ({ name }: { name: string }) => name === "MNEMO_SERVICE_TRANSPORT_SIGNING_KEYS",
+  );
+  expect(serverKeys).toEqual(namespaceRequired ? [{
+    name: "MNEMO_SERVICE_TRANSPORT_SIGNING_KEYS", valueFrom: parameterArn(bundle),
+  }] : []);
+  const schedules = recordedResources.filter(({ type }) => type === "aws:scheduler/schedule:Schedule");
+  expect(schedules).toHaveLength(namespaceRequired && scheduleEnabled ? 1 : 0);
+  if (!namespaceRequired) {
+    expect(containers.filter(({ container }) =>
+      ["Mem9Consolidation", "Mem9Cleanup"].includes(container.name))).toEqual([]);
+    expect(recordedResources.filter(({ type, inputs }) =>
+      type === "aws:ssm/parameter:Parameter" &&
+      /^\/mem9-on-aws\/prod\/(?:maintenance|consolidation)\//.test(String(inputs.name)))).toEqual([]);
+    expect(recordedResources.filter(({ type }) => type === "aws:scheduler/scheduleGroup:ScheduleGroup")).toEqual([]);
+    return;
+  }
+
+  const targets = assertSecureParameter("MaintenanceNamespaceTargets", "/mem9-on-aws/prod/maintenance/targets");
+  expect(JSON.parse(unwrapRpcSecret(targets.inputs.value))).toEqual(scheduleEnabled ? maintenanceNamespaceIds : []);
+  const inlineStatements = (role: RecordedResource): Array<Record<string, any>> =>
+    (role.inputs.inlinePolicies as Array<{ policy: unknown }> ?? [])
+      .flatMap(({ policy }) => JSON.parse(unwrapRpcSecret(policy)).Statement);
+
+  for (const [service, name] of [["consolidation", "Mem9Consolidation"], ["cleanup", "Mem9Cleanup"]]) {
+    const { definition, container } = taskContainer(name);
+    const executionRole = oneResource("aws:iam/role:Role", `${name}ExecutionRole`);
+    const taskRole = oneResource("aws:iam/role:Role", `${name}TaskRole`);
+    expect(definition.inputs.executionRoleArn).toBe(mockArn(executionRole.type, executionRole.name));
+    expect(definition.inputs.taskRoleArn).toBe(mockArn(taskRole.type, taskRole.name));
+    expect(container.secrets).toEqual(expect.arrayContaining([{
+      name: "MEM9_SERVICE_TRANSPORT_SIGNING_KEYS", valueFrom: parameterArn(keyParameters[service]),
+    }]));
+    const injectedServices = container.secrets.filter(({ name: key }: { name: string }) => key.includes("TRANSPORT_SIGNING_KEYS"));
+    expect(injectedServices).toHaveLength(1);
+    expect(container.secrets.map(({ valueFrom }: { valueFrom: string }) => valueFrom)).not.toContain(parameterArn(bundle));
+    const environment = Object.fromEntries(container.environment.map(({ name: key, value }: { name: string; value: string }) => [key, value]));
+    expect(environment.MEM9_SERVICE_TRANSPORT_ISSUER).toBe(`maintenance:${service}`);
+    expect(environment.MEM9_NAMESPACE_ID).toBeUndefined();
+    expect(environment.MEM9_SERVICE_PRINCIPAL_KEY).toBeUndefined();
+    expect(JSON.stringify(container)).not.toMatch(/SLACK|APPROVAL/);
+    for (const id of maintenanceNamespaceIds) expect(JSON.stringify(container)).not.toContain(id);
+    expect(container.command).not.toContain("--apply");
+    if (service === "consolidation") expect(environment.MEM9_CONSOLIDATION_REPORT_ONLY).toBe("1");
+    const injectedTargets = container.secrets.filter(({ name: key }: { name: string }) => key === "MEM9_MAINTENANCE_TARGETS");
+    expect(injectedTargets).toEqual(service === "consolidation" && scheduleEnabled
+      ? [{ name: "MEM9_MAINTENANCE_TARGETS", valueFrom: parameterArn(targets) }] : []);
+
+    // SST's execution policy is broad; the existing boundary limits its
+    // effective resource/role scope. Container code never receives that role.
+    expect(inlineStatements(executionRole).some(({ actions, resources }) =>
+      actions.includes("ssm:GetParameters") && resources.some((pattern: string) => matchesArn(pattern, parameterArn(keyParameters[service]))))).toBe(true);
+    const physicalName = executionRole.inputs.name ?? `${executionRole.inputs.namePrefix ?? `mem9-on-aws-prod-${executionRole.name}-`}fixture`;
+    const executionArn = `arn:aws:iam::${accountId}:role/${physicalName}`;
+    expect(executionRoleScopes.some((pattern) => matchesArn(pattern, executionArn))).toBe(true);
+    const statements = inlineStatements(taskRole);
+    expect(statements.flatMap(({ actions }) => actions)).not.toContain("ssm:GetParameters");
+    expect(statements.flatMap(({ actions }) => actions)).not.toContain("secretsmanager:GetSecretValue");
+    const s3 = statements.filter(({ actions }) => actions.some((action: string) => action.startsWith("s3:")));
+    expect(s3.map(({ actions, resources }) => ({ actions, resources }))).toEqual(service === "consolidation" && scheduleEnabled ? [{
+      actions: ["s3:GetObject", "s3:PutObject"],
+      resources: [`arn:aws:s3:::mem9-audit-${accountId}/consolidation-digests/prod/*/current-v1.json`],
+    }] : []);
+  }
+
+  if (scheduleEnabled) {
+    const target = schedules[0].inputs.target as Record<string, any>;
+    const override = JSON.parse(unwrapRpcSecret(target.input)).containerOverrides[0];
+    expect(override).toMatchObject({
+      name: "Mem9Consolidation", command: ["/app/scripts/dispatch-memory-consolidation.mjs"],
+      environment: [
+        { name: "MEM9_CONSOLIDATION_REPORT_ONLY", value: "0" },
+        { name: "MEM9_CONSOLIDATION_SCHEDULED", value: "1" },
+      ],
+    });
+    for (const id of maintenanceNamespaceIds) expect(JSON.stringify(override)).not.toContain(id);
+  }
 }
 
 async function startSstRpcServer(): Promise<{
@@ -229,147 +382,129 @@ afterEach(() => {
     delete (globalThis as Record<string, unknown>)[name];
   }
   recordedResources.length = 0;
+  vi.unstubAllEnvs();
   vi.resetModules();
 });
 
 describe("workload role coverage from the real SST graph", () => {
   it.each([
-    {
-      label: "scheduler disabled",
-      scheduleEnabled: false,
-      slackApprovalEnabled: false,
-    },
-    {
-      label: "scheduler enabled",
-      scheduleEnabled: true,
-      slackApprovalEnabled: false,
-    },
-    {
-      label: "scheduler enabled, Slack approval enabled",
-      scheduleEnabled: true,
-      slackApprovalEnabled: true,
-    },
+    { label: "scheduler disabled, compatibility mode", scheduleEnabled: false, namespaceRequired: false, unsupportedFlag: undefined },
+    { label: "scheduler disabled, required namespaces", scheduleEnabled: false, namespaceRequired: true, unsupportedFlag: undefined },
+    { label: "scheduler enabled, required namespaces", scheduleEnabled: true, namespaceRequired: true, unsupportedFlag: undefined },
+    ...[
+      "MEM9_SLACK_APPROVAL_ENABLED",
+      "MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED",
+      "MEM9_CLEANUP_SCAN_ENABLED",
+    ].map((unsupportedFlag) => ({
+      label: `scheduler enabled, unsupported ${unsupportedFlag}`,
+      scheduleEnabled: true, namespaceRequired: true, unsupportedFlag,
+    })),
   ])(
-    "TC-FACADEAUTH-004/TC-CONSOL-026/TC-SLACKAPP-082: keeps the $label graph inside the workload boundary",
-    async ({ scheduleEnabled, slackApprovalEnabled }) => {
+    "TC-FACADEAUTH-004/TC-CONSOL-026/TC-SLACKAPP-082: verifies the $label graph and configuration guard",
+    async ({ scheduleEnabled, namespaceRequired, unsupportedFlag }) => {
       vi.resetModules();
       const rpcServer = await startSstRpcServer();
-      const previousSstServer = process.env.SST_SERVER;
-      const previousBoundaryFlag = process.env.WORKLOAD_BOUNDARY_PROD_ENABLED;
-      const previousMantleProject = process.env.MEM9_BEDROCK_PROJECT;
-      const previousSlackWebhook = process.env.SST_SECRET_SlackWebhookUrl;
-      const previousScheduleEnabled =
-        process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED;
-      const previousSlackApprovalEnabled =
-        process.env.MEM9_SLACK_APPROVAL_ENABLED;
-      const previousSlackApprovalChannel =
-        process.env.MEM9_SLACK_APPROVAL_CHANNEL;
-      const previousSlackBotToken = process.env.SST_SECRET_SlackBotToken;
-      const previousSlackSigningSecret =
-        process.env.SST_SECRET_SlackSigningSecret;
-      process.env.SST_SERVER = rpcServer.url;
-      process.env.WORKLOAD_BOUNDARY_PROD_ENABLED = "true";
-      process.env.MEM9_BEDROCK_PROJECT = "mock-project";
-      process.env.SST_SECRET_SlackWebhookUrl =
-        "https://hooks.example.com/services/mock";
-      if (scheduleEnabled) {
-        process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED = "1";
-      } else {
-        delete process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED;
-      }
-      if (slackApprovalEnabled) {
-        process.env.MEM9_SLACK_APPROVAL_ENABLED = "1";
-        process.env.MEM9_SLACK_APPROVAL_CHANNEL = "C0123456789";
-        process.env.SST_SECRET_SlackBotToken = "xoxb-mock-bot-token";
-        process.env.SST_SECRET_SlackSigningSecret = "mock-signing-secret";
-      } else {
-        delete process.env.MEM9_SLACK_APPROVAL_ENABLED;
-        delete process.env.MEM9_SLACK_APPROVAL_CHANNEL;
-        delete process.env.SST_SECRET_SlackBotToken;
-        delete process.env.SST_SECRET_SlackSigningSecret;
-      }
-      Object.assign(globalThis, {
-        $app: {
-          name: "mem9-on-aws",
-          protect: true,
-          providers: {},
-          removal: "retain",
-          stage: "prod",
-        },
-        $cli: {
-          command: "deploy",
-          paths: {
-            home: repositoryRoot,
-            platform: resolve(repositoryRoot, ".sst/platform"),
-            root: repositoryRoot,
-            work: resolve(repositoryRoot, ".sst"),
-          },
-          rpc: "",
-          state: { version: {} },
-        },
-        $dev: false,
-      });
-      const [pulumi, aws, command, random, sst, { $transform }] =
-        await Promise.all([
-          import(
-            /* @vite-ignore */ moduleUrl(
-              ".sst/platform/node_modules/@pulumi/pulumi/index.js",
-            )
-          ),
-          import(
-            /* @vite-ignore */ moduleUrl(
-              ".sst/platform/node_modules/@pulumi/aws/index.js",
-            )
-          ),
-          import(
-            /* @vite-ignore */ moduleUrl(
-              ".sst/platform/node_modules/@pulumi/command/index.js",
-            )
-          ),
-          import(
-            /* @vite-ignore */ moduleUrl(
-              ".sst/platform/node_modules/@pulumi/random/index.js",
-            )
-          ),
-          import(
-            /* @vite-ignore */ moduleUrl(
-              ".sst/platform/src/components/index.ts",
-            )
-          ),
-          import(
-            /* @vite-ignore */ moduleUrl(
-              ".sst/platform/src/components/component.ts",
-            )
-          ),
-        ]);
-      pulumi.runtime.setMocks(
-        {
-          call: mockCall,
-          newResource: mockNewResource,
-        },
-        "mem9-on-aws",
-        "prod",
-        false,
-      );
-      Object.assign(globalThis, {
-        $config: (value: unknown) => value,
-        $interpolate: pulumi.interpolate,
-        $jsonStringify: pulumi.jsonStringify,
-        $transform,
-        aws,
-        command,
-        random,
-        sst,
-      });
-
+      const environment: Record<string, string | undefined> = {
+        SST_SERVER: rpcServer.url,
+        WORKLOAD_BOUNDARY_PROD_ENABLED: "true",
+        MEM9_AUTH_MODE: "managed",
+        MEM9_BEDROCK_PROJECT: "proj_mock",
+        MEM9_BEDROCK_PROJECT_OPENAI: "",
+        MEM9_NAMESPACE_REQUIRED: namespaceRequired ? "1" : "0",
+        MEM9_CONSOLIDATION_SCHEDULE_ENABLED: scheduleEnabled ? "1" : "0",
+        SST_SECRET_MaintenanceNamespaceIds: JSON.stringify(scheduleEnabled ? maintenanceNamespaceIds : []),
+        SST_SECRET_SlackWebhookUrl: "https://hooks.example.com/services/mock",
+        MEM9_SLACK_APPROVAL_ENABLED: "0",
+        MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED: "0",
+        MEM9_CLEANUP_SCAN_ENABLED: "0",
+        MEM9_SLACK_APPROVAL_CHANNEL: undefined,
+        SST_SECRET_SlackBotToken: undefined,
+        SST_SECRET_SlackSigningSecret: undefined,
+        MEM9_DECISION_ARTIFACT_BUCKET: `mem9-audit-${accountId}`,
+      };
+      if (unsupportedFlag) environment[unsupportedFlag] = "1";
+      for (const [name, value] of Object.entries(environment)) vi.stubEnv(name, value);
       try {
+        Object.assign(globalThis, {
+          $app: {
+            name: "mem9-on-aws",
+            protect: true,
+            providers: {},
+            removal: "retain",
+            stage: "prod",
+          },
+          $cli: {
+            command: "deploy",
+            paths: {
+              home: repositoryRoot,
+              platform: resolve(repositoryRoot, ".sst/platform"),
+              root: repositoryRoot,
+              work: resolve(repositoryRoot, ".sst"),
+            },
+            rpc: "",
+            state: { version: {} },
+          },
+          $dev: false,
+        });
+        const [pulumi, aws, command, random, sst, { $transform }] =
+          await Promise.all([
+            import(
+              /* @vite-ignore */ moduleUrl(
+                ".sst/platform/node_modules/@pulumi/pulumi/index.js",
+              )
+            ),
+            import(
+              /* @vite-ignore */ moduleUrl(
+                ".sst/platform/node_modules/@pulumi/aws/index.js",
+              )
+            ),
+            import(
+              /* @vite-ignore */ moduleUrl(
+                ".sst/platform/node_modules/@pulumi/command/index.js",
+              )
+            ),
+            import(
+              /* @vite-ignore */ moduleUrl(
+                ".sst/platform/node_modules/@pulumi/random/index.js",
+              )
+            ),
+            import(
+              /* @vite-ignore */ moduleUrl(
+                ".sst/platform/src/components/index.ts",
+              )
+            ),
+            import(
+              /* @vite-ignore */ moduleUrl(
+                ".sst/platform/src/components/component.ts",
+              )
+            ),
+          ]);
+        pulumi.runtime.setMocks(
+          {
+            call: mockCall,
+            newResource: mockNewResource,
+          },
+          "mem9-on-aws",
+          "prod",
+          false,
+        );
+        Object.assign(globalThis, {
+          $config: (value: unknown) => value,
+          $interpolate: pulumi.interpolate,
+          $jsonStringify: pulumi.jsonStringify,
+          $transform,
+          aws,
+          command,
+          random,
+          sst,
+        });
+
         const expectedRoleNames = [
           ...EXPECTED_WORKLOAD_ROLE_NAMES,
+          ...(namespaceRequired ? maintenanceRoleNames : []),
           authorizerRoleLogicalName,
+          ...(namespaceRequired && scheduleEnabled ? ["Mem9ConsolidationSchedulerRole"] : []),
         ].sort();
-        // Namespace v1 keeps consolidation and Slack cleanup absent regardless
-        // of their legacy flags until their content-bearing state is scoped.
-        expectedRoleNames.sort();
         await pulumi.runtime.runInPulumiStack(async () => {
           const configModule = await import(
             /* @vite-ignore */ moduleUrl("sst.config.ts")
@@ -377,11 +512,23 @@ describe("workload role coverage from the real SST graph", () => {
           const config = configModule.default as {
             run(): Promise<Record<string, unknown>>;
           };
+          if (unsupportedFlag) {
+            // Catch inside the stack callback so rejected configuration cannot
+            // leave rejected Pulumi Outputs or background RPCs after the test.
+            await expect(config.run()).rejects.toThrow(
+              "namespace-aware cleanup scan and Slack approval are not supported",
+            );
+            return {};
+          }
           const outputs = await config.run();
           await waitForRecordedRoles(expectedRoleNames.length);
           return outputs;
         });
         await pulumi.runtime.waitForRPCs();
+        if (unsupportedFlag) {
+          expect(recordedResources.filter(({ type }) => !type.startsWith("pulumi:"))).toEqual([]);
+          return;
+        }
 
         const createdRoles = recordedResources.filter(
           ({ type }) => type === "aws:iam/role:Role",
@@ -395,6 +542,7 @@ describe("workload role coverage from the real SST graph", () => {
             ({ inputs }) => inputs.permissionsBoundary === expectedBoundary,
           ),
         ).toBe(true);
+        await verifyMaintenanceGraph(scheduleEnabled, namespaceRequired);
         for (const { inputs, name } of createdRoles) {
           const physicalName = inputs.name ?? inputs.namePrefix;
           if (physicalName === undefined) {
@@ -491,30 +639,7 @@ describe("workload role coverage from the real SST graph", () => {
           });
         }
       } finally {
-        if (previousSstServer === undefined) {
-          delete process.env.SST_SERVER;
-        } else {
-          process.env.SST_SERVER = previousSstServer;
-        }
-        for (const [name, value] of [
-          ["WORKLOAD_BOUNDARY_PROD_ENABLED", previousBoundaryFlag],
-          ["MEM9_BEDROCK_PROJECT", previousMantleProject],
-          ["SST_SECRET_SlackWebhookUrl", previousSlackWebhook],
-          [
-            "MEM9_CONSOLIDATION_SCHEDULE_ENABLED",
-            previousScheduleEnabled,
-          ],
-          ["MEM9_SLACK_APPROVAL_ENABLED", previousSlackApprovalEnabled],
-          ["MEM9_SLACK_APPROVAL_CHANNEL", previousSlackApprovalChannel],
-          ["SST_SECRET_SlackBotToken", previousSlackBotToken],
-          ["SST_SECRET_SlackSigningSecret", previousSlackSigningSecret],
-        ] as const) {
-          if (value === undefined) {
-            delete process.env[name];
-          } else {
-            process.env[name] = value;
-          }
-        }
+        vi.unstubAllEnvs();
         await rpcServer.close();
       }
     },

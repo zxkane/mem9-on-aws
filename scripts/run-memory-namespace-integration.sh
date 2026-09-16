@@ -12,10 +12,12 @@ PRINCIPAL_ID="70000000-0000-4000-8000-000000000101"
 OTHER_NAMESPACE_ID="60000000-0000-4000-8000-000000000102"
 OTHER_PRINCIPAL_ID="70000000-0000-4000-8000-000000000102"
 ACKNOWLEDGEMENT="I_ACKNOWLEDGE_EXISTING_MEMORY_IS_SHARED_TEAM_HISTORY"
+TMP_DIR=$(mktemp -d)
 
 cleanup() {
   docker rm -f "$CONTAINER" >/dev/null 2>&1 || true
   docker image rm "$OPERATOR_IMAGE" >/dev/null 2>&1 || true
+  rm -rf "$TMP_DIR"
 }
 trap cleanup EXIT
 
@@ -107,14 +109,19 @@ docker exec \
 # The same complete schema reruns on later starts and remains idempotent.
 psql_file /usr/local/share/mem9/schema.sql
 
-# Explicit synthetic bounds work against the initialized empty fixture.
-docker exec "$CONTAINER" \
+# An empty schema has no authorized analysis service. Namespace selection alone
+# must not permit even aggregate payload reads.
+if docker exec "$CONTAINER" \
   psql -qAt -v ON_ERROR_STOP=1 -U postgres -d "$DATABASE" \
   -v "namespace_id=$NAMESPACE_ID" \
   -v analysis_cutoff=2001-02-01T00:00:00Z \
   -v label_start=2001-01-01T00:00:00Z \
-  -f /bootstrap/analyze-ingest-prescreen.sql |
-  python3 -c 'import json,sys; rows=[json.loads(line) for line in sys.stdin if line.strip()]; assert any(row.get("section")=="complete" and row["data"]["consistent"] is True for row in rows)'
+  -f /bootstrap/analyze-ingest-prescreen.sql >"$TMP_DIR/analysis-denied.out" 2>"$TMP_DIR/analysis-denied.err"; then
+  echo "analysis unexpectedly ran without service membership" >&2
+  exit 1
+fi
+grep -q 'analysis namespace access denied' "$TMP_DIR/analysis-denied.err"
+[[ ! -s "$TMP_DIR/analysis-denied.out" ]] || { echo "denied analysis emitted results" >&2; exit 1; }
 
 psql_value "SELECT to_regclass('idx_memories_namespace_state') IS NULL" |
   grep -qx "t"
@@ -347,7 +354,7 @@ node "$ROOT/scripts/migrate-memory-namespaces.mjs" freeze |
 # TC-GROUPNS-062: exercise the real maintenance entry points while the
 # database is frozen. Clear ambient credentials and endpoints so a regressed
 # guard cannot reach operator-owned infrastructure during this destructive test.
-assert_legacy_maintenance_disabled() {
+assert_unscoped_maintenance_refused() {
   local script=$1
   local output
   local status
@@ -369,11 +376,11 @@ assert_legacy_maintenance_disabled() {
     exit 1
   }
   printf '%s' "$output" |
-    grep -q "legacy maintenance is disabled in memory namespace v1"
+    grep -Eq "namespace|consolidation_failed"
 }
 
-assert_legacy_maintenance_disabled memory-cleanup.mjs
-assert_legacy_maintenance_disabled memory-consolidation.mjs
+assert_unscoped_maintenance_refused memory-cleanup.mjs
+assert_unscoped_maintenance_refused memory-consolidation.mjs
 
 FROZEN_PLAN_BEFORE=$(psql_value "
   SELECT state || ':' || COALESCE(applied_at::text, '<null>')

@@ -69,6 +69,8 @@ export default $config({
     };
   },
   async run() {
+    const { assertSupportedMaintenanceConfiguration } = await import("./infra/maintenance-config");
+    assertSupportedMaintenanceConfiguration();
     const { resolveAuthConfig } = await import("./infra/auth-config");
     const authConfig = await resolveAuthConfig();
     // SST 4.17's Function component tests the Pulumi dev-mode Output as a
@@ -120,8 +122,9 @@ export default $config({
     // private Gateway proxy. ECS containers receive it from Secrets Manager.
     const { tenantIdentity } = await import("./infra/tenant-identity");
     const identityOut = tenantIdentity();
-    const { namespaceIdentity } = await import("./infra/namespace-identity");
+    const { namespaceIdentity, maintenanceServiceIdentity } = await import("./infra/namespace-identity");
     const namespaceIdentityOut = namespaceIdentity();
+    const maintenanceIdentityOut = maintenanceServiceIdentity();
 
     // ECS Fargate cluster + the mnemo-server service. Three containers:
     // mnemo-server, qwen3-embed (localhost /v1/embeddings, dims 1024), and
@@ -129,7 +132,7 @@ export default $config({
     // Takes db()'s Outputs DIRECTLY (a real Pulumi dependency) — NOT an SSM
     // read-back, which would fail on a fresh stage's first deploy.
     const { ecs } = await import("./infra/ecs");
-    const ecsOut = ecs(dbOut, identityOut, namespaceIdentityOut);
+    const ecsOut = ecs(dbOut, identityOut, namespaceIdentityOut, maintenanceIdentityOut);
 
     // MCP surface (§6/§6a): Cognito M2M → AgentCore Gateway → a VPC-attached proxy
     // Lambda that reaches mnemo-server privately over Cloud Map DNS. Threaded as
@@ -160,19 +163,13 @@ export default $config({
       authConfig,
     );
 
-    // Cleanup approval and consolidation remain disabled until their offer,
-    // artifact, lock, model-input, and apply contracts carry one namespace.
-    const namespaceMaintenanceEnabled = false;
-    if (namespaceMaintenanceEnabled) {
-      const { slackApproval } = await import("./infra/slack-approval");
-      const slackApprovalOut = slackApproval(
-        ecsOut,
-        dbOut,
-        identityOut,
-        facadeOut,
-      );
+    // One shared task per supported service; every invocation requires an
+    // authorized namespace. Scheduling additionally requires explicit targets.
+    if (process.env.MEM9_NAMESPACE_REQUIRED === "1") {
       const { consolidation } = await import("./infra/consolidation");
-      consolidation(ecsOut, dbOut, identityOut, slackApprovalOut);
+      consolidation(ecsOut, dbOut, identityOut, maintenanceIdentityOut);
+      const { standaloneCleanupTask } = await import("./infra/maintenance-cleanup");
+      standaloneCleanupTask(ecsOut, dbOut, identityOut, maintenanceIdentityOut);
     }
 
     return {};

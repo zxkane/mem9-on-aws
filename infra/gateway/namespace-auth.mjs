@@ -1,4 +1,5 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { validateServiceIdentity } from "./service-auth.mjs";
 
 export const INTERNAL_AUTH_FIELD = "__mem9_auth_v2";
 export const MAX_GROUPS = 32;
@@ -443,8 +444,10 @@ export function createTransportEnvelope({
     principal_type: identity.principal_type,
     client_key: identity.client_key,
     group_keys: identity.group_keys,
+    ...(identity.principal_type === "service" ? { namespace_id: identity.namespace_id } : {}),
   };
   validateGroupKeys(payload.group_keys);
+  if (payload.principal_type === "service") validateServiceIdentity(payload);
   const encoded = Buffer.from(canonicalJson(payload)).toString("base64url");
   return `${encoded}.${signPayload(payload, keys)}`;
 }
@@ -476,12 +479,14 @@ export function verifyTransportEnvelope({
     payload.path !== path ||
     !HEX_64.test(payload.body_hash) ||
     !HEX_64.test(payload.principal_key) ||
-    !PRINCIPAL_TYPES.has(payload.principal_type) ||
+    (!PRINCIPAL_TYPES.has(payload.principal_type) && payload.principal_type !== "service") ||
     !HEX_64.test(payload.client_key)
   ) {
     throw new Error("transport envelope is invalid");
   }
   validateGroupKeys(payload.group_keys);
+  if (payload.principal_type === "service") validateServiceIdentity(payload);
+  else if (Object.hasOwn(payload, "namespace_id")) throw new Error("only service transport can select a namespace");
   const currentTime = Math.floor(now ?? Date.now() / 1000);
   if (payload.expires_at < currentTime)
     throw new Error("transport envelope expired");

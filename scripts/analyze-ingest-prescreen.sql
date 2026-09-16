@@ -15,6 +15,9 @@
 --
 -- The operator supplies the analysis cutoff and the time from which zero_fact
 -- labels are authoritative. Older plans cannot be labeled from omission alone.
+-- The database connection authenticates the trusted operator/service. This
+-- script always authorizes the fixed analysis service, never a supplied
+-- principal ID. Grant that service a viewer membership before evaluation.
 
 \if :{?namespace_id}
 \else
@@ -155,8 +158,35 @@ ORDER BY
 LIMIT 1;
 COMMIT;
 
-BEGIN TRANSACTION READ ONLY;
+BEGIN TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY;
 SET LOCAL statement_timeout = '120s';
+
+-- Authorization and every payload read share one read-only snapshot. A
+-- concurrent revoke cannot make later feature queries read a different
+-- authorization/data snapshot; the next invocation observes the revocation.
+SELECT EXISTS (
+  SELECT 1
+  FROM memory_namespaces AS namespace
+  JOIN memory_namespace_memberships AS membership
+    ON membership.namespace_id = namespace.namespace_id
+  JOIN memory_principals AS principal
+    ON principal.principal_id = membership.principal_id
+  WHERE namespace.namespace_id = :'namespace_id'
+    AND namespace.status = 'active'
+    AND principal.principal_key = encode(sha256(
+      convert_to('mem9-service-principal-v1', 'UTF8') || decode('00', 'hex') ||
+      convert_to('analysis', 'UTF8')
+    ), 'hex')
+    AND principal.principal_type = 'service'
+    AND principal.status = 'active'
+    AND membership.status = 'active'
+    AND membership.source_type = 'service'
+    AND membership.role IN ('viewer', 'member', 'owner')
+) AS analysis_authorized \gset
+\if :analysis_authorized
+\else
+  DO $$ BEGIN RAISE EXCEPTION 'analysis namespace access denied'; END $$;
+\endif
 
 INSERT INTO ingest_prescreen_features
 WITH

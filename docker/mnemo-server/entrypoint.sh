@@ -23,6 +23,29 @@
 
 set -eu
 
+# Mirror the Go capability validation before credential handling or schema SQL.
+# The binary retains its own check for launches that bypass this entrypoint.
+validate_unsupported_capability() {
+  capability_name=$1
+  capability_value=$2
+  capability_value="${capability_value#"${capability_value%%[![:space:]]*}"}"
+  capability_value="${capability_value%"${capability_value##*[![:space:]]}"}"
+  case "$capability_value" in
+    ''|0|f|F|false|False|FALSE) ;;
+    1|t|T|true|True|TRUE)
+      echo "entrypoint: ${capability_name} is unsupported without a complete namespace contract" >&2
+      exit 1
+      ;;
+    *)
+      echo "entrypoint: ${capability_name} must be a boolean and remain disabled" >&2
+      exit 1
+      ;;
+  esac
+}
+validate_unsupported_capability MNEMO_UPLOAD_WORKER_ENABLED "${MNEMO_UPLOAD_WORKER_ENABLED:-}"
+validate_unsupported_capability MNEMO_WEBHOOKS_ENABLED "${MNEMO_WEBHOOKS_ENABLED:-}"
+validate_unsupported_capability MNEMO_SPACE_CHAINS_ENABLED "${MNEMO_SPACE_CHAINS_ENABLED:-}"
+
 MNEMO_DSN_ASSEMBLED=false
 if [ -z "${MNEMO_DSN:-}" ]; then
   : "${MEM9_DB_HOST:?MEM9_DB_HOST is required to assemble MNEMO_DSN}"

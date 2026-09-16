@@ -5,6 +5,7 @@
 set -euo pipefail
 
 STAGE="${STAGE:?STAGE is required (for example, prod or pr-103)}"
+MEM9_NAMESPACE_ID="${MEM9_NAMESPACE_ID:-}"
 CONSOLIDATION_TASK_WAIT_SECONDS="${CONSOLIDATION_TASK_WAIT_SECONDS-43200}"
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 REGION="${AWS_REGION:-$(node "$REPO_ROOT/scripts/resolve-application-region.mjs")}"
@@ -12,9 +13,14 @@ PREFIX="/mem9-on-aws/${STAGE}/consolidation"
 CONTAINER_NAME="Mem9Consolidation"
 
 if ! [[ "$STAGE" =~ ^[A-Za-z0-9-]+$ ]]; then
-  echo "::error::invalid consolidation stage: ${STAGE}" >&2
+  echo "::error::invalid consolidation stage" >&2
   exit 1
 fi
+if ! [[ "$MEM9_NAMESPACE_ID" =~ ^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$ ]]; then
+  echo "::error::MEM9_NAMESPACE_ID must be one lowercase namespace UUID" >&2
+  exit 1
+fi
+export MEM9_NAMESPACE_ID
 if ! [[ "$CONSOLIDATION_TASK_WAIT_SECONDS" =~ ^[1-9][0-9]*$ ]] ||
    (( CONSOLIDATION_TASK_WAIT_SECONDS < 60 ||
       CONSOLIDATION_TASK_WAIT_SECONDS > 43200 )); then
@@ -81,7 +87,8 @@ OVERRIDES=$(jq -cn --arg name "$CONTAINER_NAME" \
         "/app/scripts/memory-consolidation.mjs",
         "--report-only",
         "--check-llm"
-      ]
+      ],
+      environment: [{name: "MEM9_NAMESPACE_ID", value: $ENV.MEM9_NAMESPACE_ID}]
     }]
   }')
 START_TIME_MS=$(( $(date +%s) * 1000 ))
@@ -133,6 +140,10 @@ if ! EXIT_CODE=$(aws ecs describe-tasks \
   echo "::error::could not read the stopped consolidation task result" >&2
   exit 1
 fi
+if ! [[ "$EXIT_CODE" =~ ^(0|[1-9][0-9]{0,2})$ ]] || (( EXIT_CODE > 255 )); then
+  echo "::error::could not read a valid consolidation task exit code" >&2
+  exit 1
+fi
 echo "run-consolidation: task stopped (exitCode=${EXIT_CODE})"
 if [[ "$EXIT_CODE" != "0" ]]; then
   echo "::error::report-only consolidation exited ${EXIT_CODE}" >&2
@@ -157,32 +168,30 @@ if [[ -z "$LOG_PREFIX" ]]; then
 fi
 LOG_STREAM="${LOG_PREFIX}/${CONTAINER_NAME}/${TASK_ARN##*/}"
 
-# Query only the content-free list summary. Ordinary CONSOLIDATION_REVIEW lines
-# contain private memory snippets and must never be copied into CI output.
+# Query only the production formatter's structured list summary. Re-emit known
+# scalar fields rather than copying task output into CI logs.
 for attempt in 1 2 3 4 5 6; do
   MARKER=$(aws logs filter-log-events \
     --log-group-name "$LOG_GROUP" \
     --log-stream-names "$LOG_STREAM" \
-    --filter-pattern '"CONSOLIDATION_REVIEW_LIST"' \
+    --filter-pattern '{ $.event = "consolidation_review_list" }' \
     --start-time "$START_TIME_MS" \
     --region "$REGION" \
     --query 'events[].message' \
-    --output text 2>/dev/null || true)
-  # Never print a matched line raw. `filter-log-events` matches the token as a
-  # SUBSTRING, so an ordinary CONSOLIDATION_REVIEW record whose snippet or
-  # rationale happens to contain "CONSOLIDATION_REVIEW_LIST" also matches — and
-  # those records carry private memory content that must not reach CI output
-  # (this repo is planned to be open-sourced). Select the line that STARTS with
-  # the marker, then re-emit only the known content-free fields.
-  SUMMARY=$(printf '%s\n' "$MARKER" | jq -Rr --arg stage "$STAGE" '
-    select(startswith("CONSOLIDATION_REVIEW_LIST "))
-    | ltrimstr("CONSOLIDATION_REVIEW_LIST ")
-    | fromjson?
+    --output json 2>/dev/null || true)
+  # Verify the event again locally and discard namespace/content fields, even
+  # if a future runtime adds them to this record. Counts must remain numeric.
+  SUMMARY=$(printf '%s\n' "$MARKER" | jq -r --arg stage "$STAGE" '
+    .[]? | fromjson?
+    | select(type == "object")
     | select(
-        .stage == $stage
+        .event == "consolidation_review_list"
+        and .stage == $stage
         and .reportOnly == true
         and .digestEnabled == false
       )
+    | select(.reviewItems | type == "number")
+    | select(.reviewItems >= 0 and (.reviewItems | floor) == .reviewItems)
     | {stage, reportOnly, reviewItems, digestEnabled}
     | tostring' | head -1)
   if [[ -n "$SUMMARY" ]]; then

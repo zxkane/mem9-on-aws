@@ -1694,9 +1694,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "9e9b625faff685adff5f",
+      "id": "eb29d92d9a47ff7d85f5",
       "owner": "scripts/analyze-ingest-prescreen.sql",
-      "line": 159,
+      "line": 188,
       "tables": [
         "ingest_job_plans",
         "ingest_jobs"
@@ -1706,14 +1706,15 @@
       "classification": "namespace_bound",
       "rationale": "The statement carries an explicit namespace column, predicate, or key.",
       "coverage": [
+        "scripts/run-analysis-namespace-integration.sh",
         "scripts/memory-namespace-query-inventory.test.mjs"
       ],
       "namespace_evidence": "namespace_id = :'namespace_id'"
     },
     {
-      "id": "2702d1a5033deaa26a2b",
+      "id": "e8d5c651c7c3d0bc84ef",
       "owner": "scripts/analyze-ingest-prescreen.sql",
-      "line": 332,
+      "line": 362,
       "tables": [
         "ingest_job_plans"
       ],
@@ -1722,6 +1723,7 @@
       "classification": "namespace_bound",
       "rationale": "The statement carries an explicit namespace column, predicate, or key.",
       "coverage": [
+        "scripts/run-analysis-namespace-integration.sh",
         "scripts/memory-namespace-query-inventory.test.mjs"
       ],
       "namespace_evidence": "namespace_id = :'namespace_id'"
@@ -1840,130 +1842,130 @@
       "namespace_evidence": null
     },
     {
-      "id": "d44d3c090700f7ad42f6",
+      "id": "4dc1ba8638c57647e1bd",
       "owner": "scripts/memory-cleanup.mjs",
-      "line": 3660,
+      "line": 3719,
       "tables": [
         "memories"
       ],
-      "statement_sha256": "04c4a6182922eadc9ec09fcc9552cf3723d29d5c3744493ff8f0746a60954dd5",
-      "statement": "SELECT count(*)::bigint AS total FROM memories {{dynamic}}",
-      "classification": "disabled_capability",
-      "rationale": "This capability or provisioning path is excluded from the namespace-required AWS application until its full contract is namespace-bound.",
+      "statement_sha256": "587cd9732c9b8748254d0f86b2a56413ddcffd522e35c81ecab3588a098d06d1",
+      "statement": "SELECT count(*)::bigint AS total FROM memories AS memory WHERE memory.namespace_id = $1 AND {{dynamic}}",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
       "coverage": [
-        "sst.config.ts",
-        "infra/ecs.test.ts",
-        "infra/consolidation.test.ts"
+        "scripts/memory-cleanup-namespace.test.mjs",
+        "scripts/maintenance-postgres.test.mjs",
+        "scripts/memory-namespace-query-inventory.test.mjs"
       ],
-      "namespace_evidence": null
+      "namespace_evidence": "namespace_id = $1"
     },
     {
-      "id": "f054160018e55976a9e5",
+      "id": "f192e73ed3f4764b59b3",
       "owner": "scripts/memory-cleanup.mjs",
-      "line": 3664,
+      "line": 3724,
       "tables": [
         "memories"
       ],
-      "statement_sha256": "f6b8d735572be3c6b2c43ffb0fe6796bc7c97542fe27c5cae952f37061918759",
-      "statement": "SELECT {{dynamic}} FROM memories {{dynamic}} ORDER BY updated_at DESC, id LIMIT ${{dynamic}}",
-      "classification": "disabled_capability",
-      "rationale": "This capability or provisioning path is excluded from the namespace-required AWS application until its full contract is namespace-bound.",
+      "statement_sha256": "7d3e359849655aadc5f9d15c41842423fa07c36476b5675f3b9bd5e5dca8f413",
+      "statement": "SELECT memory.id, memory.content, memory.state, memory.version, memory.updated_at, memory.superseded_by IS NOT NULL AS has_superseded_by, CASE WHEN EXISTS ( SELECT 1 FROM memories AS winner WHERE winner.namespace_id = $1 AND winner.id = memory.superseded_by ) THEN memory.superseded_by ELSE NULL END AS superseded_by FROM memories AS memory WHERE memory.namespace_id = $1 AND {{dynamic}} ORDER BY memory.updated_at DESC, memory.id LIMIT ${{dynamic}}{{dynamic}}",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
       "coverage": [
-        "sst.config.ts",
-        "infra/ecs.test.ts",
-        "infra/consolidation.test.ts"
+        "scripts/memory-cleanup-namespace.test.mjs",
+        "scripts/maintenance-postgres.test.mjs",
+        "scripts/memory-namespace-query-inventory.test.mjs"
       ],
-      "namespace_evidence": null
+      "namespace_evidence": "namespace_id = $1"
     },
     {
-      "id": "6c6305925ff8e49e984c",
+      "id": "db2d0978f49a28503f41",
       "owner": "scripts/memory-cleanup.mjs",
-      "line": 3688,
+      "line": 3737,
       "tables": [
         "memories"
       ],
-      "statement_sha256": "fa6fc4cf4953dda94350c711393b903b3efc1e3fda3c6a7e2a3db55ffb415980",
-      "statement": "SELECT {{dynamic}} FROM memories WHERE id = ANY($1)",
-      "classification": "disabled_capability",
-      "rationale": "This capability or provisioning path is excluded from the namespace-required AWS application until its full contract is namespace-bound.",
+      "statement_sha256": "2f1415315c11e040b9fb8591e5165610c5556ae55ffb1c94dd93bdd251039d66",
+      "statement": "SELECT memory.id, memory.content, memory.state, memory.version, memory.updated_at, memory.superseded_by IS NOT NULL AS has_superseded_by, CASE WHEN EXISTS ( SELECT 1 FROM memories AS winner WHERE winner.namespace_id = $1 AND winner.id = memory.superseded_by ) THEN memory.superseded_by ELSE NULL END AS superseded_by FROM memories AS memory WHERE memory.namespace_id = $1 AND memory.id = ANY($2)",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
       "coverage": [
-        "sst.config.ts",
-        "infra/ecs.test.ts",
-        "infra/consolidation.test.ts"
+        "scripts/memory-cleanup-namespace.test.mjs",
+        "scripts/maintenance-postgres.test.mjs",
+        "scripts/memory-namespace-query-inventory.test.mjs"
       ],
-      "namespace_evidence": null
+      "namespace_evidence": "namespace_id = $1"
     },
     {
-      "id": "45a2b3e9fd3979a8160c",
+      "id": "5d187a99f96bff7ed379",
       "owner": "scripts/memory-cleanup.mjs",
-      "line": 3722,
+      "line": 3747,
       "tables": [
         "memories"
       ],
-      "statement_sha256": "6a281b6a2591cf57d2c8ee9a3c4319200e92276e14d38a0f9b307995853d4e4b",
-      "statement": "UPDATE memories SET state = 'active' WHERE id = $1 AND state = $2 AND version = $3",
-      "classification": "disabled_capability",
-      "rationale": "This capability or provisioning path is excluded from the namespace-required AWS application until its full contract is namespace-bound.",
+      "statement_sha256": "e0cd9c6b4cf5c542f55934b97ef657db80b73d1ffe3470983ffca230da886da6",
+      "statement": "UPDATE memories SET state = 'active', updated_by_principal_id = $5 WHERE namespace_id = $1 AND id = $2 AND state = $3 AND version = $4",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
       "coverage": [
-        "sst.config.ts",
-        "infra/ecs.test.ts",
-        "infra/consolidation.test.ts"
+        "scripts/memory-cleanup-namespace.test.mjs",
+        "scripts/maintenance-postgres.test.mjs",
+        "scripts/memory-namespace-query-inventory.test.mjs"
       ],
-      "namespace_evidence": null
+      "namespace_evidence": "namespace_id = $1"
     },
     {
-      "id": "9ca4fda8367c5c79fc7a",
+      "id": "c767053fd10f4cf37ec3",
       "owner": "scripts/memory-consolidation.mjs",
-      "line": 1995,
+      "line": 1836,
       "tables": [
         "memories"
       ],
-      "statement_sha256": "910f945921471516502dccbaad2edb79fb2f9e0d8b4f306bd657661a704d83b3",
-      "statement": "SELECT id, content, tags, metadata, memory_type, state, version, created_at, updated_at, embedding::text AS embedding FROM memories WHERE state = 'active' AND embedding IS NOT NULL ORDER BY id",
-      "classification": "disabled_capability",
-      "rationale": "This capability or provisioning path is excluded from the namespace-required AWS application until its full contract is namespace-bound.",
+      "statement_sha256": "044cc7141b9c74b2ab404367909f98f69d7b7d940283512ef85b42969ea79b61",
+      "statement": "SELECT id, namespace_id, content, tags, metadata, memory_type, state, version, created_at, updated_at, embedding::text AS embedding FROM memories WHERE namespace_id = $1 AND state = 'active' AND embedding IS NOT NULL ORDER BY id",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
       "coverage": [
-        "sst.config.ts",
-        "infra/ecs.test.ts",
-        "infra/consolidation.test.ts"
+        "scripts/consolidation-namespace.test.mjs",
+        "scripts/maintenance-postgres.test.mjs",
+        "scripts/memory-namespace-query-inventory.test.mjs"
       ],
-      "namespace_evidence": null
+      "namespace_evidence": "namespace_id = $1"
     },
     {
-      "id": "d014c34af222b158c875",
+      "id": "b71ec9d661b4f5af1c0a",
       "owner": "scripts/memory-consolidation.mjs",
-      "line": 2032,
+      "line": 1867,
       "tables": [
         "memories"
       ],
-      "statement_sha256": "f56a047cef6444733daf3a25177ac474e005b97b604a92b4bb54cfadc9d77924",
-      "statement": "UPDATE memories AS loser SET state = 'archived', superseded_by = $2, version = loser.version + 1, updated_at = NOW() WHERE loser.id = $1 AND loser.state = 'active' AND loser.version = $3 AND loser.content = $4 AND EXISTS ( SELECT 1 FROM memories AS winner WHERE winner.id = $2 AND winner.state = 'active' AND winner.version = $5 AND winner.content = $6 )",
-      "classification": "disabled_capability",
-      "rationale": "This capability or provisioning path is excluded from the namespace-required AWS application until its full contract is namespace-bound.",
+      "statement_sha256": "b13d1bca394cda951fc102cd79b3a8b8f93ed0fb3a42808f921317a112993d63",
+      "statement": "UPDATE memories AS loser SET state = 'archived', superseded_by = $2, version = loser.version + 1, updated_at = NOW(), updated_by_principal_id = $8 WHERE loser.id = $1 AND loser.namespace_id = $7 AND loser.state = 'active' AND loser.version = $3 AND loser.content = $4 AND EXISTS ( SELECT 1 FROM memories AS winner WHERE winner.id = $2 AND winner.namespace_id = $7 AND winner.state = 'active' AND winner.version = $5 AND winner.content = $6 )",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
       "coverage": [
-        "sst.config.ts",
-        "infra/ecs.test.ts",
-        "infra/consolidation.test.ts"
+        "scripts/consolidation-namespace.test.mjs",
+        "scripts/maintenance-postgres.test.mjs",
+        "scripts/memory-namespace-query-inventory.test.mjs"
       ],
-      "namespace_evidence": null
+      "namespace_evidence": "namespace_id = $7"
     },
     {
-      "id": "a6281c4be7ec23d24acb",
+      "id": "ff67c4ceae0418a2ced1",
       "owner": "scripts/memory-consolidation.mjs",
-      "line": 2059,
+      "line": 1895,
       "tables": [
         "memories"
       ],
-      "statement_sha256": "e867aff4bf7144b319796ad4c21057e99c9fd0c96b6f49295fcd3982a797c333",
-      "statement": "UPDATE memories SET tags = $2, metadata = $3, version = version + 1 WHERE id = $1 AND state = 'active' AND version = $4 AND content = $5",
-      "classification": "disabled_capability",
-      "rationale": "This capability or provisioning path is excluded from the namespace-required AWS application until its full contract is namespace-bound.",
+      "statement_sha256": "ed341834d3deda69f941808aa6c843455a3a98877d0b73eaa6a7e820e6b2343a",
+      "statement": "UPDATE memories SET tags = $2, metadata = $3, version = version + 1, updated_by_principal_id = $7 WHERE id = $1 AND namespace_id = $6 AND state = 'active' AND version = $4 AND content = $5",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
       "coverage": [
-        "sst.config.ts",
-        "infra/ecs.test.ts",
-        "infra/consolidation.test.ts"
+        "scripts/consolidation-namespace.test.mjs",
+        "scripts/maintenance-postgres.test.mjs",
+        "scripts/memory-namespace-query-inventory.test.mjs"
       ],
-      "namespace_evidence": null
+      "namespace_evidence": "namespace_id = $6"
     },
     {
       "id": "08cb95201084c902de4c",
@@ -2315,9 +2317,77 @@
       "namespace_evidence": null
     },
     {
-      "id": "6c73767d053269f87c74",
+      "id": "e60cf7616a68527fc761",
+      "owner": "scripts/run-maintenance-namespace-e2e.mjs",
+      "line": 170,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "2e8798c16ff6801e9fd3883dc95692f4a042a78aa7d25498e89a75b0f0e03ba4",
+      "statement": "DELETE FROM memories WHERE namespace_id=$1 AND agent_id=$2 AND id=ANY($3)",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/run-maintenance-namespace-e2e.test.mjs",
+        "scripts/run-maintenance-namespace-e2e.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "94c98b27e2f1ee95ee5f",
+      "owner": "scripts/run-maintenance-namespace-e2e.mjs",
+      "line": 171,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "47c053e4d4b460c4dd385a18b4598044d5b070fd70ecc85512b15bf5f623b0fe",
+      "statement": "SELECT count(*)::int AS remaining FROM memories WHERE namespace_id=$1 AND id=ANY($2)",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/run-maintenance-namespace-e2e.test.mjs",
+        "scripts/run-maintenance-namespace-e2e.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "cd3931de95ab41da7251",
+      "owner": "scripts/run-maintenance-namespace-e2e.mjs",
+      "line": 183,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "a379947b63de9bd3dce96ef9690e48b018e9939bb4b60f92d012a8d1585a73d7",
+      "statement": "SELECT to_jsonb(m) AS record FROM memories m WHERE namespace_id=$1 AND agent_id=$2 AND id=ANY($3) ORDER BY id",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/run-maintenance-namespace-e2e.test.mjs",
+        "scripts/run-maintenance-namespace-e2e.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "93aab7cd9e6ada67359b",
+      "owner": "scripts/run-maintenance-namespace-e2e.mjs",
+      "line": 283,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "a04c904b31e9b1b3ec96ff59176c307ba2d5f786eea80d2e314afe6b3898d57a",
+      "statement": "INSERT INTO memories (id,namespace_id,created_by_principal_id,updated_by_principal_id,agent_id,content,memory_type,state,version,embedding) VALUES($1,$2,$3,$3,$4,'Synthetic maintenance verification fixture','pinned','active',1, (ARRAY[1::real] || array_fill(0::real,ARRAY[1023]))::vector)",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/run-maintenance-namespace-e2e.test.mjs",
+        "scripts/run-maintenance-namespace-e2e.mjs"
+      ],
+      "namespace_evidence": "INSERT column namespace_id"
+    },
+    {
+      "id": "de9eaadef0f12cbce93b",
       "owner": "upstream/server/cmd/mnemo-server/main.go",
-      "line": 542,
+      "line": 551,
       "tables": [
         "ingest_job_plans",
         "ingest_jobs",
@@ -2736,26 +2806,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $2"
     },
     {
-      "id": "35d49826577bf904815f",
+      "id": "4121aa94bb57019bbaf6",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 254,
-      "tables": [
-        "ingest_jobs"
-      ],
-      "statement_sha256": "48ed27824e4973e8b0b825e1c9390c3dddb7f43649374fb570aec73c3507da79",
-      "statement": "SELECT EXTRACT(EPOCH FROM (statement_timestamp() - MIN(created_at))) FROM ingest_jobs WHERE tenant_id = $1 AND state IN ('queued', 'retry_wait')",
-      "classification": "namespace_composed_or_compatibility",
-      "rationale": "The queue coordinator intentionally observes every namespace in the single self-hosted tenant; claimed jobs carry namespace_id and all planning and apply mutations revalidate that scope.",
-      "coverage": [
-        "upstream/server/internal/repository/postgres/ingest_job_integration_test.go",
-        "upstream/server/internal/repository/postgres/ingest_plan_integration_test.go"
-      ],
-      "namespace_evidence": null
-    },
-    {
-      "id": "980a9f5a50c7dd19f2bb",
-      "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 338,
+      "line": 314,
       "tables": [
         "ingest_jobs"
       ],
@@ -2769,9 +2822,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $2"
     },
     {
-      "id": "a358fc84119017ee6029",
+      "id": "ecb8975f83f1bc64b2f4",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 384,
+      "line": 360,
       "tables": [
         "ingest_jobs"
       ],
@@ -2785,9 +2838,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $2"
     },
     {
-      "id": "b8509d0d37a38079761f",
+      "id": "02585a0e1ec45a607e58",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 422,
+      "line": 398,
       "tables": [
         "ingest_jobs"
       ],
@@ -2801,9 +2854,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $2"
     },
     {
-      "id": "0eb88b38d70baa39096e",
+      "id": "99f13ec1c3faa527e1af",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 466,
+      "line": 442,
       "tables": [
         "ingest_jobs"
       ],
@@ -2818,9 +2871,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "825ce8188cc10eda5edc",
+      "id": "881756bf3c1cb61f5795",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 500,
+      "line": 476,
       "tables": [
         "ingest_jobs"
       ],
@@ -2835,9 +2888,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "122dce6a2b2975b6b5f3",
+      "id": "a06987755bf17a6f3c51",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 590,
+      "line": 566,
       "tables": [
         "ingest_jobs"
       ],
@@ -2852,9 +2905,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "8717f411481d0ddb595d",
+      "id": "64b0e75fc6a73012a88c",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 682,
+      "line": 658,
       "tables": [
         "ingest_jobs"
       ],
@@ -2868,9 +2921,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $5"
     },
     {
-      "id": "99ef28683cedadebaa2b",
+      "id": "2e9ae9e153975d76cbf7",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 704,
+      "line": 680,
       "tables": [
         "ingest_jobs"
       ],
@@ -2884,9 +2937,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $5"
     },
     {
-      "id": "016bd089b996e94d7171",
+      "id": "d20b1d8558e6947c2823",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 740,
+      "line": 716,
       "tables": [
         "ingest_jobs"
       ],
@@ -2900,9 +2953,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $5"
     },
     {
-      "id": "5667f7d7d979a7833234",
+      "id": "5db40476aab0af77c9b7",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 783,
+      "line": 759,
       "tables": [
         "ingest_jobs"
       ],
@@ -2916,9 +2969,9 @@
       "namespace_evidence": "namespace_id IS NOT DISTINCT FROM $5"
     },
     {
-      "id": "363a82d948691f5af8b1",
+      "id": "c94a3db5fbb7d76f10c7",
       "owner": "upstream/server/internal/repository/postgres/ingest_job.go",
-      "line": 847,
+      "line": 823,
       "tables": [
         "ingest_jobs"
       ],
@@ -3174,9 +3227,9 @@
       "namespace_evidence": "namespace_id = $5"
     },
     {
-      "id": "290f614f0c9898001c02",
+      "id": "45b7c4d6b559f3c9d6a2",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 58,
+      "line": 61,
       "tables": [
         "memories"
       ],
@@ -3191,9 +3244,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "51802c3fccd579e886f5",
+      "id": "e02c9a40e4c97073914d",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 70,
+      "line": 75,
       "tables": [
         "memories"
       ],
@@ -3207,9 +3260,9 @@
       "namespace_evidence": "INSERT column namespace_id"
     },
     {
-      "id": "1c604efbf7424e2a1320",
+      "id": "88bbf07588597cbfae2f",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 91,
+      "line": 97,
       "tables": [
         "memories"
       ],
@@ -3223,9 +3276,9 @@
       "namespace_evidence": "namespace_id = $2"
     },
     {
-      "id": "fba0e1f6507af38f01ce",
+      "id": "2b526d576a5506efdd17",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 98,
+      "line": 104,
       "tables": [
         "memories"
       ],
@@ -3240,9 +3293,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "3cb4b851c846ee084dbc",
+      "id": "0c0a7a950933956a1c90",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 106,
+      "line": 112,
       "tables": [
         "memories"
       ],
@@ -3257,9 +3310,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "097386a82a083fb9734b",
+      "id": "20df4126ee1f702d2e3c",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 145,
+      "line": 153,
       "tables": [
         "memories"
       ],
@@ -3274,9 +3327,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "65627dcff5c39f2dae69",
+      "id": "9e9fb719ba41a33c1526",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 163,
+      "line": 171,
       "tables": [
         "memories"
       ],
@@ -3291,9 +3344,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "4e7b38432ae6b4c4b567",
+      "id": "3baf575d318791a7227f",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 199,
+      "line": 207,
       "tables": [
         "memories"
       ],
@@ -3308,9 +3361,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "d376121fac8758b54e0b",
+      "id": "701e3622802c3191fbe0",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 218,
+      "line": 229,
       "tables": [
         "memories"
       ],
@@ -3324,9 +3377,9 @@
       "namespace_evidence": "namespace_id = $4"
     },
     {
-      "id": "fd178fd02bf529d0a2be",
+      "id": "8fbaba51c4fa0e9a45fa",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 232,
+      "line": 245,
       "tables": [
         "memories"
       ],
@@ -3341,9 +3394,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "eba99c5482d322f1c908",
+      "id": "413c458070dfe97d2714",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 252,
+      "line": 266,
       "tables": [
         "memories"
       ],
@@ -3358,9 +3411,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "1ad2df97948004016fec",
+      "id": "29eb793565576614d0b5",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 276,
+      "line": 290,
       "tables": [
         "memories"
       ],
@@ -3374,9 +3427,9 @@
       "namespace_evidence": "INSERT column namespace_id"
     },
     {
-      "id": "ebf33752d21d0ad3c86e",
+      "id": "b7bd7efc0a1802d8c965",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 290,
+      "line": 304,
       "tables": [
         "memories"
       ],
@@ -3391,9 +3444,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "14a2ee884d7324c8dabc",
+      "id": "124b377c0e79014471a7",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 307,
+      "line": 322,
       "tables": [
         "memories"
       ],
@@ -3407,9 +3460,9 @@
       "namespace_evidence": "namespace_id = $4"
     },
     {
-      "id": "a98564989ab436e6b65f",
+      "id": "ed4a5861e5640745fe57",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 321,
+      "line": 338,
       "tables": [
         "memories"
       ],
@@ -3424,9 +3477,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "091dbc0203213b72f287",
+      "id": "756aa86836890c84e603",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 338,
+      "line": 356,
       "tables": [
         "memories"
       ],
@@ -3441,9 +3494,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "ea769c696308f5975840",
+      "id": "62388e8ada09109896ca",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 355,
+      "line": 373,
       "tables": [
         "memories"
       ],
@@ -3458,9 +3511,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "16877f56858ec45f12a3",
+      "id": "ed3e83ad573fd35ac0bd",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 406,
+      "line": 424,
       "tables": [
         "memories"
       ],
@@ -3475,9 +3528,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "d10076cdc4f7703419f6",
+      "id": "114a2170a7f4c83b4ee6",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 424,
+      "line": 442,
       "tables": [
         "memories"
       ],
@@ -3492,9 +3545,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "8c404b6abbbc09908125",
+      "id": "98cb88e0420ca9d69468",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 466,
+      "line": 484,
       "tables": [
         "memories"
       ],
@@ -3508,9 +3561,9 @@
       "namespace_evidence": "INSERT column namespace_id"
     },
     {
-      "id": "4f950683e33ed0595a09",
+      "id": "b1c99bea343b18bc93da",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 480,
+      "line": 498,
       "tables": [
         "memories"
       ],
@@ -3525,9 +3578,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "0cc6f15f1a893324bf80",
+      "id": "113f74fb21dd0227fe65",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 521,
+      "line": 539,
       "tables": [
         "memories"
       ],
@@ -3542,9 +3595,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "bf9be7c5d62d2db7e8bf",
+      "id": "7a87a9227ba22ec139ef",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 578,
+      "line": 596,
       "tables": [
         "memories"
       ],
@@ -3558,9 +3611,9 @@
       "namespace_evidence": "namespace_id = $1"
     },
     {
-      "id": "5fac11e5cd792d6a4e9d",
+      "id": "cf3bd040e509e1b3900c",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 637,
+      "line": 655,
       "tables": [
         "memories"
       ],
@@ -3576,9 +3629,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "a546a3c9e94a2c045707",
+      "id": "ff91f351a975eef677dc",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 695,
+      "line": 713,
       "tables": [
         "memories"
       ],
@@ -3593,9 +3646,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "f19faf155b3862599aa1",
+      "id": "c11dbef10f85fb10b479",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 723,
+      "line": 741,
       "tables": [
         "memories"
       ],
@@ -3610,9 +3663,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "9a2c362fec82a631aac9",
+      "id": "80297766b9b47e1cef1c",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 1049,
+      "line": 1067,
       "tables": [
         "memories"
       ],
@@ -3627,9 +3680,26 @@
       "namespace_evidence": null
     },
     {
-      "id": "bfa5e5980544ee6c665d",
+      "id": "e2e5d1ce285c5d27b9a3",
+      "owner": "upstream/server/internal/repository/postgres/namespace_sampler.go",
+      "line": 152,
+      "tables": [
+        "ingest_jobs"
+      ],
+      "statement_sha256": "1a24ec238992c6c3b7168a09b0cd01a4d281b48ab809aa0004eff5233bfd30da",
+      "statement": "SELECT EXTRACT(EPOCH FROM (statement_timestamp() - MIN(created_at))) FROM ingest_jobs WHERE tenant_id = $1 AND namespace_id = $2 AND state IN ('queued', 'retry_wait')",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "upstream/server/internal/repository/postgres/namespace_sampler_test.go",
+        "upstream/server/internal/ingestqueue/namespace_sampler_test.go"
+      ],
+      "namespace_evidence": "namespace_id = $2"
+    },
+    {
+      "id": "bcd5758a1951704d8e8d",
       "owner": "upstream/server/internal/repository/postgres/session_delete.go",
-      "line": 40,
+      "line": 42,
       "tables": [
         "sessions"
       ],
@@ -3644,9 +3714,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "199c40d34a4037f219fa",
+      "id": "473eb57dde5ac4cf093a",
       "owner": "upstream/server/internal/repository/postgres/session_delete.go",
-      "line": 65,
+      "line": 67,
       "tables": [
         "sessions"
       ],
@@ -3661,9 +3731,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "34c48a9ff513246f4aa1",
+      "id": "24118f76159043d0dfbe",
       "owner": "upstream/server/internal/repository/postgres/session_delete.go",
-      "line": 109,
+      "line": 111,
       "tables": [
         "sessions"
       ],

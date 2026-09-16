@@ -105,19 +105,37 @@
       "verification": [
         "scripts/memory-namespace-query-inventory.test.mjs",
         "scripts/verify-memory-namespace-query-inventory.mjs",
-        "scripts/memory-namespace-query-inventory.json"
+        "scripts/memory-namespace-query-inventory.json",
+        "scripts/run-analysis-namespace-integration.sh",
+        "scripts/memory-services.test.mjs",
+        "docker/mnemo-server/patches/0019-namespace-sampler.patch",
+        "scripts/run-ingest-queue-integration.sh"
       ]
     },
     {
       "id": "maintenance-paths",
-      "state": "disabled_v1",
-      "acceptance": ["097-101", "103-104"],
+      "state": "enabled_v1",
+      "acceptance": ["097-100"],
       "verification": [
-        "sst.config.ts",
-        ".github/workflows/infra-ci.yml",
-        "scripts/memory-cleanup.mjs",
-        "scripts/memory-consolidation.mjs",
-        "scripts/memory-namespace-query-inventory.json",
+        "scripts/maintenance-scope.test.mjs",
+        "scripts/maintenance-postgres.test.mjs",
+        "scripts/memory-cleanup-namespace.test.mjs",
+        "scripts/consolidation-namespace.test.mjs",
+        "scripts/dispatch-memory-consolidation.test.mjs",
+        "scripts/run-maintenance-namespace-e2e.mjs",
+        "scripts/run-maintenance-namespace-e2e.test.mjs",
+        "infra/consolidation.test.ts",
+        "infra/maintenance-cleanup.test.ts"
+      ]
+    },
+    {
+      "id": "unsupported-maintenance-capabilities",
+      "state": "disabled_v1",
+      "acceptance": ["101", "103-104"],
+      "verification": [
+        "infra/maintenance-config.test.ts",
+        "docker/mnemo-server/entrypoint.test.mjs",
+        "docker/mnemo-server/patches/0018-service-maintenance-namespaces.patch",
         "scripts/memory-namespace-release-gates.test.mjs"
       ]
     },

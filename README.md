@@ -63,7 +63,7 @@ citations.
 | ECS task           | **3 containers**: mnemo-server + qwen3-embed sidecar + llm-proxy sidecar                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | Schema bootstrap   | **startup atomic-ingest migration** before `mnemo-server`, plus a **one-shot ECS task** on deploy (pgvector + tenant runtime schema incl. `idx_app`/FTS/`vector(1024)` + seed 1 tenant)                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
 | Durable ingest     | Transcript `messages[]` requests enqueue durable Aurora jobs. Immutable, materialized plans apply raw sessions, tags, memory actions, and job success in one PostgreSQL transaction; authenticated REST and Gateway status lookups are tenant-scoped.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
-| Consolidation      | **Disabled in namespace v1.** The prior task implementation remains in the repository for redesign, but SST and CI do not synthesize or launch cleanup, consolidation, cleanup-scan, or Slack-approval resources until every content-bearing contract is namespace-bound.                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                  |
+| Maintenance        | **Service-scoped cleanup and consolidation.** Every invocation requires one namespace and an active service membership. Tasks default to report-only; scheduling is opt-in. Slack digests, approval, and cleanup scans remain disabled. |
 | Tenancy            | **single tenant** (one `X-API-Key`); writes carry **`X-Mnemo-Agent-Id`** to reserve per-agent scoping                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | Replicas           | **Single** (`desiredCount=1`) — single-writer, sidesteps mem9's local-disk import dir                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 
@@ -519,9 +519,9 @@ snapshot, or prevent Cognito administration on their own.
 
 8. Restore the service's desired count, reopen traffic, require fresh user
    tokens, and run same-group sharing plus cross-group denial smoke tests.
-   Cleanup approval, consolidation, upload processing, webhooks, and Space
-   Chains stay disabled until they receive a separately reviewed namespace
-   contract.
+   Grant maintenance services access separately before running scoped cleanup,
+   restore, or consolidation. Scheduling remains opt-in. Slack digests/approval,
+   cleanup scans, upload processing, webhooks, and Space Chains remain disabled.
 
 The caller of `scripts/run-memory-namespace-task.sh` needs constrained
 `ecs:RunTask`, `ecs:ListTasks`, `ecs:DescribeTasks`, and `ecs:StopTask`
@@ -656,12 +656,12 @@ claims cannot recreate access through JIT.
 
 ### Decision-artifact bucket bootstrap
 
-The Slack cleanup approval loop stores reviewed decision bytes under
-`decisions/<stage>/`, and scheduled consolidation stores content-free state
-under `consolidation-digests/<stage>/`, in one account-level S3 bucket. Every
-SST stage shares that bucket. It must therefore be provisioned before enabling
-Slack approval or scheduled consolidation; an SST stage never creates or
-deletes it.
+Scheduled consolidation stores private, memory-content-free state at
+`consolidation-digests/<stage>/<namespace-id>/current-v1.json` in the retained
+account-level decision-artifact bucket. Every SST stage shares the bucket;
+provision it before enabling scheduled consolidation. Application stages do
+not create or delete it. Existing `decisions/` artifacts belong to the disabled
+Slack approval capability and are not an enablement path for that feature.
 
 For the default `mem9-audit-<aws-account-id>` name:
 
@@ -717,14 +717,14 @@ owner stack. If a full update rolls back, rerun after fixing the cause;
 physical bucket, while `UPDATE_ROLLBACK_FAILED` first requires
 `continue-update-rollback`.
 
-The remaining decision-artifact and consolidation instructions describe the
-pre-namespace implementation and are not an enablement path for namespace v1.
-Do not set the old cleanup/consolidation variables until a separately reviewed
-namespace-aware design reintroduces those resources.
+Cleanup and consolidation use the service-scoped tasks documented below.
+Scheduling additionally requires the private namespace target list and the new
+repository variable `MEM9_NAMESPACE_CONSOLIDATION_SCHEDULE_ENABLED`; old
+repository enablement variables do not activate the CI deployment path.
 
 Existing buckets from before consolidation digests still have the old
 bucket-wide three-day lifecycle. Before setting
-`MEM9_CONSOLIDATION_SCHEDULE_ENABLED=1`, re-run
+`MEM9_NAMESPACE_CONSOLIDATION_SCHEDULE_ENABLED=1`, re-run
 `scripts/deploy-decision-artifact-bucket.sh` and require its two-rule lifecycle
 read-back to pass: `decisions/` expires after three days and
 `consolidation-digests/` after at least 70 days, with incomplete multipart
@@ -1017,8 +1017,14 @@ not accumulate as permanent custom-metric dimensions.
 
 Queue health and telemetry health are independent. Missing
 `OldestQueuedAgeMs` remains non-breaching because it is not evidence of a
-backlog. The sampler emits stage-only `SamplerHeartbeat=1` immediately and once
-per minute. The raw liveness alarm fills each current missing period with zero
+backlog. The sampler publishes an age only after every authorized namespace
+sample succeeds. Compatibility or incomplete migration suppresses the aggregate,
+because legacy NULL-namespace jobs could otherwise look like an empty queue;
+logs report the bounded `namespace_not_enforced` error. Failed or partial samples
+also suppress the aggregate. The sampler still emits stage-only
+`SamplerHeartbeat=1` immediately and once per minute, so a heartbeat alone does
+not prove that queue-age sampling succeeded. The raw liveness alarm fills each
+current missing period with zero
 and requires five of five one-minute periods below one. This prevents older
 healthy points in CloudWatch's wider sliding evaluation range from extending
 the five-minute bound, while one delayed latest sample after four healthy
@@ -1377,366 +1383,319 @@ After deploying a revision that introduces this workflow, re-run
 read-only `tag:GetResources`, `iam:ListRoles`, and scoped `iam:ListRoleTags`
 grants used for inventory discovery.
 
-## Memory cleanup (legacy redesign context)
+## Namespace-scoped memory maintenance
 
-`scripts/memory-cleanup.mjs` retroactively audits the memory store against the
-same D1–D4 durability rules smart-ingest enforces (issue #102; design:
-`docs/designs/memory-cleanup.md`). The mem9 REST API is VPC-internal and the
-CI runner pool lives outside that VPC, so there is no CI E2E for this tool —
-behavior is pinned by the unit suite (`scripts/memory-cleanup.test.mjs`), and
-the implementation remains for a future namespace-aware redesign.
+Cleanup, restore, consolidation, and analysis use fixed service identities and
+one explicit lowercase namespace UUID per invocation. A namespace ID alone is
+not authorization: the namespace, service principal, and service membership must
+all be active. Foreign memory IDs are treated as absent. There is no implicit
+all-namespace mode or service JIT enrollment.
 
-> Namespace v1 status: disabled. Every non-help CLI invocation exits before
-> creating SQL, REST, model, S3, SSM, or Slack production adapters. The commands
-> below document the pre-namespace behavior and are not an enablement or
-> operator path.
+The fixed capabilities are `cleanup`, `consolidation`, and `analysis`, with
+issuers `maintenance:cleanup`, `maintenance:consolidation`, and
+`maintenance:analysis`. Each has its own signing keyring, separate from the
+Gateway and other services. Tasks receive only their own service credential.
+Service REST envelopes bind the namespace, method, URI, and body; direct SQL
+authenticates through the trusted database connection and checks the fixed
+service membership in the same transaction as the operation.
 
-1. **Dry-run** (read-only; classifies every active memory):
+Service credentials approve only these canonical private REST paths:
+
+| Method | Path | Operation |
+| --- | --- | --- |
+| `GET` | `/v1alpha2/mem9s/memories` | List/search memories |
+| `GET` | `/v1alpha2/mem9s/memories/{memory-id}` | Read an existing memory |
+| `PUT` | `/v1alpha2/mem9s/memories/{memory-id}` | Update an existing memory |
+| `DELETE` | `/v1alpha2/mem9s/memories/{memory-id}` | Soft-delete a memory |
+| `POST` | `/v1alpha2/mem9s/memories/batch-delete` | Soft-delete selected memories |
+
+Membership roles still apply: a viewer cannot write. All other service routes
+and methods are denied, including `POST /v1alpha2/mem9s/memories` for creation
+or transcript ingestion, ingest-job endpoints, and session APIs. Memory routes
+cannot fall back to reading or mutating raw session records. This restriction
+does not change the human/M2M ingestion contract.
+
+### Grant a service access to one namespace
+
+Create an owner-only, gitignored `service-binding.local.json`:
+
+```json
+{"namespace_id":"<namespace-uuid>","service":"cleanup"}
+```
+
+Use the existing private operator task for `prod` or `dev`:
+
+```bash
+chmod 600 service-binding.local.json
+STAGE=prod scripts/run-memory-namespace-task.sh service-enable \
+  --config service-binding.local.json
+STAGE=prod scripts/run-memory-namespace-task.sh service-show \
+  --config service-binding.local.json
+```
+
+Use `service-disable` with the same file to revoke that membership. Set `service`
+to `consolidation` or `analysis` to administer those capabilities separately.
+Cleanup and consolidation receive member access; analysis receives viewer
+access. A disabled namespace or principal cannot be enabled through a membership
+grant. The configuration cannot choose a principal ID or another issuer.
+
+The internal queue sampler is not a public service-management choice and has no
+REST signing key. Startup and namespace reconciliation initialize only missing
+sampler viewer memberships; existing revocations and disabled principals remain
+intact.
+
+### Start with a report-only task
+
+After deploying the task definitions and granting the corresponding service:
+
+```bash
+STAGE=prod MEM9_NAMESPACE_ID="<namespace-uuid>" \
+  scripts/run-cleanup-task.sh
+STAGE=prod MEM9_NAMESPACE_ID="<namespace-uuid>" \
+  scripts/run-consolidation-task.sh
+```
+
+Both launchers run the deployed report-only command and verify a bounded summary
+from that exact task. They do not enable a schedule or apply mutations.
+Consolidation also checks the configured model route. Their default observation
+budget is twelve hours; use `CLEANUP_TASK_WAIT_SECONDS` or
+`CONSOLIDATION_TASK_WAIT_SECONDS` to shorten it. A timeout ends observation,
+leaving the task running; inspect it before launching another report.
+
+Console and task-log output contains bounded kinds and counters, without memory
+IDs, namespace/principal IDs, snippets, or model rationale. Content-bearing
+decisions, ID selections, and detailed operator reports belong only in mode-600
+private files, under mode-700 directories. Never attach them to issues or PRs.
+Cleanup writes its private files under
+`~/.mem9-cleanup/<stage>/<namespace-id>/`. Task-local files are ephemeral; use
+the direct operator CLI with a persistent private output directory when keeping
+decisions for review and later apply.
+
+### Maintenance preview acceptance
+
+Use `scripts/run-maintenance-namespace-e2e.mjs` from a clean checkout of the
+reviewed deployed commit against its own `pr-N` preview. Reuse the mode-600
+`deployment.local.json` from [human OAuth acceptance](#operator-run-human-oauth-acceptance),
+including its pinned resources and `preview-alpha`/`preview-beta` bindings.
+The operator host needs existing private database and REST access; the runner
+does not open network access or accept production targets. Cleanup and
+consolidation must already have their preview memberships and deployed credentials.
+
+```bash
+node scripts/run-maintenance-namespace-e2e.mjs \
+  --deployment-file deployment.local.json \
+  --fixtures-file maintenance-fixtures.local.json \
+  --evidence-file maintenance-acceptance.json
+```
+
+The nine scenarios cover own-memory GET/PUT, foreign HTTP absence, wrong service
+key, wrong issuer, wrong principal, namespace tampering, isolated membership
+revocation, unchanged foreign SQL records, and verified owned-fixture cleanup.
+This acceptance runner seeds synthetic memories through authorized SQL and
+tests mutations; the ECS cleanup/consolidation launchers above remain report-only.
+
+Cleanup removes only the journal's fixture IDs with its run marker in the pinned
+namespaces. It restores the temporarily revoked membership only when the current
+row still matches the journal-owned change, refusing concurrent external edits.
+The private fixture journal remains available after success or failure; detailed
+failures are saved beside it. Evidence contains only the commit, case names, and
+completion flags. All nine cases, `success`, and `cleanup_complete` are required
+for acceptance.
+
+For interrupted cleanup, retain the journal and use a new evidence path:
+
+```bash
+node scripts/run-maintenance-namespace-e2e.mjs \
+  --deployment-file deployment.local.json \
+  --fixtures-file maintenance-fixtures.local.json \
+  --evidence-file maintenance-cleanup.json --cleanup-only
+```
+
+Recovery rechecks the pinned target and journal ownership without requiring a
+healthy app deployment or service credentials. Cleanup-only evidence records
+recovery and never turns a failed acceptance run into success. Use new fixture
+and evidence paths for each acceptance run; recovery reuses the journal and
+writes a new evidence file.
+
+## Memory cleanup
+
+`scripts/memory-cleanup.mjs` audits active memories in one namespace against the
+D1–D4 durability rules used by smart ingest. It defaults to dry-run. Direct CLI
+use requires private network access, the deployed cleanup service keyring in
+`MEM9_SERVICE_TRANSPORT_SIGNING_KEYS`, stage/namespace configuration, and the
+database, tenant, and model access appropriate to the selected mode. Keep those
+values in an owner-only `maintenance.local.env` or inherited environment; never
+put credential values in arguments. The deployed task supplies its configuration
+by reference.
+
+1. **Audit and review** in the selected namespace:
 
    ```bash
-   node scripts/memory-cleanup.mjs --stage prod \
-     --model openai.gpt-5.6-terra --effort high \
-     --tenant-secret-arn "$(aws ssm get-parameter \
-       --name /mem9-on-aws/prod/tenant/secret-arn \
-       --query Parameter.Value --output text)"
+   node --env-file maintenance.local.env scripts/memory-cleanup.mjs \
+     --stage prod --namespace-id "<namespace-uuid>"
    ```
 
-   **Use a reasoning model for cleanup.** `--model` selects the classifier;
-   omitted, it falls back to `MEM9_LLM_MODEL` and then `zai.glm-5`. An
-   `openai.gpt-5.6-*` value routes to the Responses API in `--llm-region`
-   (default `us-west-2`) with a 24k output budget; anything else uses
-   chat-completions in the application region. Validate the chosen route and
-   output budget with synthetic classification fixtures. Truncated responses
-   must fail the batch; keep workload-specific model comparisons private.
+   Use `--model` and `--effort` to select the classifier. Keep the application
+   region and the independently configured Responses route region distinct.
+   Validate model changes with synthetic classification fixtures; truncated
+   responses fail their batch. Review the private decision file, including its
+   stage/namespace binding, protection decisions, and `UNCLASSIFIED` count.
+   Partial classifier failure can still exit zero; unclassified memories have
+   not passed the audit and must be retried before calling it complete.
 
-   The decision list is written to `~/.mem9-cleanup/prod/decisions-*.json`
-   (mode 0600, outside any checkout — it contains memory content and must
-   never be committed or attached to issues/PRs).
+2. **Select decisions** in a private file when applying only a subset. Prefer
+   the bound JSON form:
 
-2. **Review** the decision list. To approve a subset, put one decision id per
-   line in a text file.
+   ```json
+   {"stage":"prod","namespaceId":"<namespace-uuid>","ids":["<memory-id>"]}
+   ```
 
-3. **Apply during a low-ingest window** (the LWW re-read guard narrows but
-   does not close the TOCTOU race with live ingest — residual risk is
-   accepted because deletes are soft, `state='deleted'`):
+   Decision and JSON selection files for another stage or namespace are
+   rejected. Plain one-ID-per-line selections remain supported, but every read
+   and mutation still uses the invocation's authorized namespace.
+
+3. **Apply the reviewed decisions**:
 
    ```bash
-   node scripts/memory-cleanup.mjs --stage prod --apply \
-     --decisions ~/.mem9-cleanup/prod/decisions-<ts>.json \
-     [--ids approved.txt] [--cap 50] ...
+   node --env-file maintenance.local.env scripts/memory-cleanup.mjs \
+     --stage prod --namespace-id "<namespace-uuid>" --apply \
+     --decisions "<private-decision-file>" --ids approved.local.json --cap 50
    ```
 
-   Destructive actions (deleted ids + merge rewrites) are capped per run
-   (default 50, `--cap` override); the run aborts before any call that would
-   exceed the cap. Apply mode holds the same stage-scoped PostgreSQL advisory
-   mutex as scheduled consolidation, preventing cross-host mutation overlap.
-   A lockfile (`--lock-file`/`--lock-ttl` overrides) remains a local
-   defense-in-depth guard.
+   Apply re-reads records, checks content/version anchors, and uses soft
+   deletion. DELETE and merge writes share a per-run mutation cap, default 50.
+   The PostgreSQL apply mutex includes both stage and namespace and is shared
+   with restore and consolidation; different namespaces do not share that
+   mutex. A namespace-specific local lockfile is an additional safeguard.
 
-   Exit codes: `0` success, `1` unexpected error, `2` discovery failed,
-   `3` another run holds the lock, `4` cap exceeded (aborted), `5`
-   classification failed for every batch.
+Exit codes are `0` success, `1` unexpected failure, `2` discovery failure,
+`3` lock held, `4` mutation cap reached, and `5` every classification batch
+failed. A failure after partial application does not imply rollback of earlier
+completed mutations. Inspect the private report and scoped records before retry.
 
-   **Read the `UNCLASSIFIED=` count in the summary before trusting a run.**
-   Exit 5 fires only when _every_ batch fails, so a partial classifier outage
-   exits 0; the summary reports how many memories went unaudited and what share
-   of batches failed. Unclassified memories have not passed the audit; re-run
-   the failed classifications before treating it as complete.
-
-   **The audit and clean mode** requires VPC-internal network access to
-   `mnemo.mem9-<stage>.local:8080` (the script discovers the task IP via Cloud
-   Map `DiscoverInstances`; pass `--base-url` explicitly when tunneling) plus IAM
-   for `ssm:GetParameter` on `/mem9-on-aws/<stage>/tenant/secret-arn`,
-   `secretsmanager:GetSecretValue` on the tenant secret,
-   `servicediscovery:DiscoverInstances`, and
-   `bedrock-mantle:CreateInference`/`CallWithBearerToken`. A reasoning-model run
-   needs those Bedrock grants in the **responses region** as well (default
-   `us-west-2`), since the bearer is minted per region; cost attribution uses
-   `MEM9_BEDROCK_PROJECT_OPENAI` there and `MEM9_BEDROCK_PROJECT` in the
-   application region (Mantle projects are regional and never cross-applied).
-   `--apply` additionally needs the Aurora writer endpoint and the
-   `/mem9-on-aws/<stage>/db/*` grants below, because it takes the shared advisory
-   mutex on the database. The recovery modes below need none of the REST, tenant,
-   or Bedrock access — see their own requirements.
+Audit uses the private mem9 REST endpoint, Aurora, and the configured model
+route. The recovery modes below use Aurora directly and do not require REST,
+tenant-key discovery, or model calls. Both paths still require the configured
+cleanup identity and active membership. Preserve the application's database TLS
+verification and its specific region when using an operator host.
 
 ### Recovering a soft-deleted or archived memory
 
-Soft deletion is reversible by design, but nothing surfaced the reversal until
-issue #124. Two read-only-by-default modes on the same script do it. Both read
-and write the database directly, because the mem9 REST API filters every read to
-`state = 'active'` — GetByID 404s on an inactive row and the list endpoint never
-returns one, so the REST surface cannot see the rows being recovered. That makes
-their requirements narrower than the audit mode's, not wider — see
-**Requirements** below.
+Inactive rows are read directly from the database because normal REST reads
+return only active memories. Listing is read-only and does not acquire the
+apply mutex; restore is also dry-run unless `--apply` is supplied:
 
 ```bash
-# What is recoverable? Read-only, takes no lock, safe to run against prod
-# at any time — including while a weekly consolidation apply is running.
-node scripts/memory-cleanup.mjs --stage prod --list-inactive \
-  [--state deleted|archived] [--since 2026-07-01T00:00:00Z] [--limit 100]
+node --env-file maintenance.local.env scripts/memory-cleanup.mjs \
+  --stage prod --namespace-id "<namespace-uuid>" --list-inactive \
+  --state deleted --limit 100
 
-# Restore. Dry-run is the default; --apply writes.
-node scripts/memory-cleanup.mjs --stage prod --restore --ids recover.local.txt
-node scripts/memory-cleanup.mjs --stage prod --restore --ids recover.local.txt \
-  --apply [--cap 50] [--force]
+node --env-file maintenance.local.env scripts/memory-cleanup.mjs \
+  --stage prod --namespace-id "<namespace-uuid>" --restore --ids recover.local.json
+
+node --env-file maintenance.local.env scripts/memory-cleanup.mjs \
+  --stage prod --namespace-id "<namespace-uuid>" --restore --ids recover.local.json \
+  --apply --cap 50
 ```
 
-`deleted` and `archived` are **not** interchangeable. `deleted` came from a #102
-cleanup judgment. `archived` came from #103 contradiction resolution and carries
-`superseded_by`: restoring it returns the _loser_ of a contradiction while the
-winner is still active, so search can then return two directly contradictory
-memories — the defect #103 exists to remove. Restoring an `archived` row
-therefore requires `--force`, and both the refusal and the forced restore name
-the winning id. `superseded_by` is preserved either way, keeping the audit link
-and #103's handle on the pair.
+Use the same stage/namespace-bound JSON selection format shown above. Unknown
+and foreign IDs are absent. A stored successor outside the namespace is redacted;
+it cannot disclose a foreign winner's ID or bypass the contradiction safeguard.
 
-`--since` filters `updated_at`, the only timestamp that _moves on deletion_ —
-there is no `memories.deleted_at`, and `created_at` records insertion. For a
-soft-deleted row `updated_at` equals the deletion time only if nothing has
-touched the row since. Restore itself moves `updated_at` to
-`NOW()` (the `BEFORE UPDATE` trigger is unconditional), so the pre-restore value
-is recorded in `~/.mem9-cleanup/<stage>/restore-*.json` (mode 0600, outside any
-checkout — it contains memory snippets and must never be committed or attached to
-issues/PRs). `version` and the `vector(1024)` embedding are untouched: the row was
-never removed, so there is nothing to re-embed.
+`deleted` and `archived` have different meanings. Soft deletion reverses a
+cleanup decision; an archived row lost a contradiction to another memory.
+Restoring it can return both sides of that contradiction to search. An archived
+row, or a deleted row retaining a successor link, therefore requires an explicit
+`--force`. Review that decision in the private report. Restore preserves
+`superseded_by`, the memory version, and the stored embedding, so it does not
+re-embed or erase the contradiction's audit link.
 
-Exit codes match cleanup, plus `6`: the run finished but not everything the ids
-file asked for happened — an unknown id, a refused `archived` id, a row this tool
-does not know how to restore, or a row whose state or version moved between the
-read and the write. An already-`active` id is a reported no-op and exits 0, so
-finishing a partially-applied restore is safe. Exit `1` also covers the case
-where every write landed but the restore log could not be written: the rows moved
-and the record of which ones did not survive, so the ids on stderr are the only
-copy.
+`--since` filters `updated_at`, not insertion time; there is no dedicated
+deletion timestamp. Restore advances `updated_at` through the database trigger,
+records the authenticated restoring principal, and saves the prior timestamp in
+the private namespace-bound restore report. Each write fences namespace, ID,
+prior state, and version, skipping a record changed since review.
 
-**Requirements for the recovery modes:** network reachability of the **Aurora
-writer endpoint** (they never call the REST service, so no Cloud Map discovery
-and no `mnemo` reachability) plus IAM for `ssm:GetParameters` on
-`/mem9-on-aws/<stage>/db/{host,port,name,secret-arn}` and
-`secretsmanager:GetSecretValue` on the DB secret those parameters name. No tenant
-secret, no `servicediscovery:DiscoverInstances`, no Bedrock. The host must trust
-the current Amazon RDS CA; set `NODE_EXTRA_CA_CERTS` to the regional RDS bundle
-before starting Node when that CA is not already in the host trust store.
+Restore also uses exit `6` when some requested IDs were absent, refused, or
+fenced out. An already-active local record is an idempotent no-op. Failure to
+persist the restore report exits nonzero even if writes completed; IDs are not
+printed to console as a fallback. `--state`, `--since`, and `--limit` apply only
+to listing, while `--apply` is rejected for a listing.
 
-Flags are validated against the mode: `--state`/`--since`/`--limit` are rejected
-on a restore, and `--apply` is rejected on a listing, rather than silently
-ignored. An operator who believes a flag narrowed the run would otherwise act on
-that belief — and `--list-inactive --apply` would make a read-only listing take
-the shared advisory mutex and contend with the weekly consolidation.
+## Weekly memory consolidation
 
-## Weekly memory consolidation (legacy redesign context)
+Consolidation compares active memories within one namespace. The deployed task
+defaults to report-only. Apply can merge fragments, archive a strictly older
+contradiction loser, or mark an eligible fact stale, capped at 20 mutations per
+run. Archive checks both loser and winner in the same namespace; all mutations
+recheck service authorization and record the acting principal. Consolidation
+does not execute DELETE actions. Any approved deletion is reviewed and applied
+through cleanup using private namespace-bound files.
 
-`infra/consolidation.ts` defines an arm64 Fargate task that compares existing
-active memories with each other. The task always defaults to report-only.
-`scripts/run-consolidation-task.sh` starts that deployed task explicitly with
-`--report-only --check-llm`, performs a content-free live Mantle smoke, waits
-for exit zero, and reads only its content-free `CONSOLIDATION_REVIEW_LIST`
-summary from the exact CloudWatch log stream. The harness requires the marker
-to report `digestEnabled: false`. Its local observer budget defaults to twelve
-hours; set `CONSOLIDATION_TASK_WAIT_SECONDS` to an integer from 60 through
-43,200 to use a shorter bound. A timeout stops only the local observer and
-leaves the exact report-only ECS task running:
+Direct operator use of `scripts/memory-consolidation.mjs` accepts `--stage`,
+`--namespace-id`, `--report-only`, and explicit `--apply`, with the consolidation
+service's own environment and credentials. The report-only launcher above
+remains the first verification step. Normal console output is content-free;
+there is no Slack digest or approval delivery.
 
-```bash
-STAGE=prod bash scripts/run-consolidation-task.sh
+### Scheduling and digest state
+
+Scheduling is off by default. Grant consolidation access and run a report for
+each intended namespace first. Store the complete target list as the
+stage-scoped SST secret `MaintenanceNamespaceIds`: a JSON array of at most 32
+unique lowercase namespace UUIDs, nonempty when scheduling is enabled. This is
+an SST secret, not a GitHub Actions secret or repository variable.
+
+For file-based loading, put only the target-list entry in the owner-only,
+gitignored `maintenance-secrets.local.env`:
+
+```dotenv
+MaintenanceNamespaceIds='["<namespace-uuid>"]'
 ```
 
-> Namespace v1 status: disabled. SST and CI do not create or launch this task,
-> and direct `memory-consolidation.mjs` execution exits before creating
-> production adapters.
-
-Individual `CONSOLIDATION_REVIEW` records contain memory ids, snippets, and
-rationale. Review them only in the private task log group. Do not paste them
-into repository artifacts, issues, or PRs. Approved deletion ids go one per
-line in a local file and are applied through the cleanup tool:
-
 ```bash
-node scripts/memory-cleanup.mjs --stage prod --apply \
-  --ids approved.local.txt
+chmod 600 maintenance-secrets.local.env
+pnpm -C infra exec sst secret load --stage prod ../maintenance-secrets.local.env
 ```
 
-The cleanup tool reclassifies and LWW-checks those ids, uses soft deletion, and
-shares the consolidation advisory mutex. Consolidation itself never executes a
-DELETE. It may automatically merge fragments, archive a strictly older
-contradiction loser, or mark an eligible fact stale, with a hard cap of 20
-mutations per run.
-
-The weekly schedule group, schedule, and Scheduler execution role are absent by
-default. Before the first deployment that introduces Scheduler resources, re-run
-`scripts/deploy-github-role.sh` with IAM-admin credentials. Enable production by
-setting the repository variable `MEM9_CONSOLIDATION_SCHEDULE_ENABLED` to `1`
-only after the initial cleanup and a report-only run show actionable drift.
-Production then runs Sunday at 03:00 UTC; previews synthesize a disabled
-schedule for infrastructure coverage.
-
-Only that scheduled target enables digest state and notifications. It groups
-current review topics into operator-decision, deferred-retry, and system-health
-risk tiers, compares them with the previous weekly snapshot, and posts one
-private Slack digest when the existing Slack bot/channel configuration is
-enabled. The digest is bounded to ten groups and three samples per group;
-unchanged-only runs are suppressed except for every fourth reminder. It has no
-approval buttons.
-
-The content-free snapshot is stored in the existing audit bucket at
-`consolidation-digests/<stage>/current-v1.json` with an owner check and
-conditional writes. It contains hashes, kinds, counters, and timestamps only,
-never memory ids or content. The task can get and put only its exact stage key;
-it cannot list or delete objects. The bucket retains decision artifacts for
-three days and consolidation digest state for 70 days. SNS alerts are emitted
-only for run-level health thresholds or degraded deduplication, not merely
-because review records exist. Manual apply and preview report-only runs neither
-read nor write digest state and do not post the weekly digest; a manual apply
-can still publish a threshold-based content-free health alarm.
-
-Because the task deliberately lacks `s3:ListBucket`, S3 can return `403` for the
-missing snapshot on a newly enabled stage. The first scheduled run therefore
-sends a degraded digest and health alarm, conditionally creates the snapshot,
-and exits nonzero once. The following scheduled run reads that snapshot
-normally. Treat repeated degraded runs as an S3 or lifecycle failure, not as
-expected initialization.
-
-If CloudWatch reports a readable but invalid digest snapshot, the task leaves it
-untouched. Pause the schedule, confirm no consolidation task is running, and
-delete only `consolidation-digests/<stage>/current-v1.json` with the documented
-`aws s3api delete-object` recovery command, the expected bucket owner, and the
-application region. The next scheduled run conditionally initializes a fresh
-snapshot.
-
-## Slack approval for cleanup deletions
-
-> Namespace v1 status: disabled. SST and CI intentionally ignore the prior
-> cleanup/consolidation/Slack enablement variables, synthesize no related task,
-> schedule, or approval resources, and run no related E2E step. The contract
-> below is retained as redesign context only.
-
-The step above describes the pre-namespace manual path and is disabled in
-namespace v1. Slack approval
-(issue #123; test cases: `docs/test-cases/slack-approval-loop.md`) replaces the
-copying with a click: the review run posts the list to a private channel with
-Approve/Reject buttons, and Approve starts the same `--apply --ids` task.
-
-What a click can and cannot do is the whole design:
-
-- The button carries a **content hash**, never ids. A Slack action `value` is
-  capped at 2000 characters, and more importantly the ids applied come from the
-  `{prefix}/approvals/offered` record, not from the payload — the signature
-  proves the request came from the workspace, not that the ids in it are the ones
-  the classifier chose.
-- A click whose hash no longer matches the current record is refused. That is
-  what stops an approval of a list read last week from applying to a corpus that
-  has since changed.
-- Exactly one delivery wins. Slack redelivers after 3 seconds, so the claim is
-  written with `Overwrite: false` and the loser branches on the record's
-  `taskArn`. Both approval records are plain `String` parameters holding **ids
-  and a hash only, never memory content**; snippets go to Slack and CloudWatch
-  Logs.
-- `--cap` bounds both the offered batch and a single click's blast radius (50 by
-  default, passed explicitly by the task definition and scheduled/manual scan
-  commands). The full decision artifact is unchanged; the offer deterministically
-  packs complete DELETE/MERGE decisions in original order until their footprint
-  reaches the cap, never splits a MERGE, and may use a later smaller decision to
-  fill remaining capacity. Slack reports offered, total, and deferred counts.
-- Apply verifies the full artifact hash and then uses the immutable claim ids to
-  filter that artifact, so deferred decisions cannot be applied by the current
-  click. A later weekly scan reclassifies the remaining backlog.
-
-The whole feature is **absent** unless `MEM9_SLACK_APPROVAL_ENABLED=1` at deploy
-time: disabled means no task definition and no grants, because a task definition
-that exists is one `RunTask` can start. Enabling it needs a Slack app with
-`chat:write`, its Request URL pointed at `{facade-url}/slack/interactions`, and
-four values at deploy time — the flag and channel id as repository variables, the
-bot token and signing secret as repository secrets:
+Updating the value replaces the entire list. Preserve existing intended targets
+and redeploy the same stage. Before the first Scheduler deployment, complete
+the deploy-role and decision-bucket bootstrap prerequisites described above.
+Then opt in with the **new repository variable**:
 
 ```bash
-gh variable set MEM9_SLACK_APPROVAL_ENABLED --body 1
-gh variable set MEM9_SLACK_APPROVAL_CHANNEL --body "<private-channel-id>"
-gh secret set SLACK_BOT_TOKEN
-gh secret set SLACK_SIGNING_SECRET
-```
-
-Synthesis **fails** when the flag is set and either secret is unseeded. That is
-deliberate: GitHub exposes an unset secret as an empty string, so the failure it
-replaces is a Slack app that answers 401 to every click after a completely green
-deploy.
-
-Two infrastructure prerequisites are not part of an application deploy. The
-decision-artifact bucket must be bootstrapped as described above, and the
-workload permissions boundary must already admit the approval-record write
-(`ssm:PutParameter` scoped to `parameter/mem9-on-aws/*/approvals/*`) — until that
-rollout runs, the claim is denied at runtime and the click reports that the
-approval could not be recorded. If the bucket name is overridden, roll out the
-boundary with the same `MEM9_DECISION_ARTIFACT_BUCKET` value before deploying
-any stage. Use a **private** channel: anyone who can click can approve a deletion,
-and the message shows every offered id and snippet.
-
-The production rollout intentionally separates the approval/apply half from the
-unattended scan. First deploy with `MEM9_SLACK_APPROVAL_ENABLED=1` and leave
-`MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED` unset. Then run the deployed task once in
-manual dry-run mode:
-
-```bash
-CONFIRM_PROD_SCAN=prod STAGE=prod \
-  bash scripts/run-cleanup-scan-task.sh
-```
-
-The runner reads the deployed task and private-network inputs from SSM, verifies
-the task's Cloud Map URL belongs to the requested stage, inherits the deployed
-apply command's `--cap`, starts the same two-consensus-pass command the weekly
-schedule uses, waits for exit zero, and requires a fresh artifact-backed offer.
-It never passes `--apply`, `--ids`, or `MEM9_CLEANUP_SCHEDULED`; the hand-run
-cannot mutate memories and cannot satisfy the weekly liveness signal. Its output
-contains only the offered count. Review the private Slack message and click
-Approve there to exercise the real signature, claim, artifact replay, cap, LWW
-fence, soft-delete, and shared advisory-mutex path.
-
-If a completed scan wrote its artifact but failed before creating the offer, the
-same runner can replay that trusted artifact without scanning or classifying
-again. Supply both machine-local values; either one alone, a non-content hash, a
-cross-stage key, or any replay combined with `--apply` is refused:
-
-```bash
-MEM9_REVIEW_ARTIFACT_KEY="decisions/prod/sha256-<hash>.json" \
-MEM9_REVIEW_ARTIFACT_HASH="sha256:<hash>" \
-CONFIRM_PROD_SCAN=prod STAGE=prod \
-  bash scripts/run-cleanup-scan-task.sh
-```
-
-Recover those coordinates only from the private log of the completed trusted
-scan. Do not publish the key or hash.
-
-The runner's observation budget defaults to twelve hours to accommodate long
-two-pass scans. Select an observation budget appropriate to the workload.
-Set `CLEANUP_SCAN_WAIT_SECONDS` to an integer from 60 to 43200 to override
-that budget. This bounds only how long the local runner waits; EventBridge
-Scheduler invokes the ECS task directly, and an expired observer does not stop
-an in-flight task. If the runner times out, do not start a second scan: inspect
-the task started by `mem9-cleanup-operator-prod` and its offer before retrying.
-
-After that production drill succeeds, enable and deploy the weekly scan:
-
-```bash
-gh variable set MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED --body 1
+gh variable set MEM9_NAMESPACE_CONSOLIDATION_SCHEDULE_ENABLED --body 1
 gh workflow run "Infra CI" --ref main
 ```
 
-Production then scans Saturday at 03:00 UTC, one day before consolidation. The
-scan uses two independent classifier passes and offers only their destructive
-consensus. The first enablement is expected to raise the cleanup-scan liveness
-alarm once, because no scheduled datapoint exists yet; the first successful
-Saturday scan clears it.
+Infra CI maps this variable to the internal
+`MEM9_CONSOLIDATION_SCHEDULE_ENABLED` deployment environment value. Setting only
+the old repository variable does not activate the schedule. Production runs
+Sunday at 03:00 UTC; enabling this schedule enables scoped apply, not another
+report-only run. The dispatcher starts one isolated child per configured
+namespace and reports partial failure while continuing independent targets.
 
-The offer happens on the dry run and never on `--apply`: an apply that re-offered
-would overwrite the record its own claim was derived from, so a Slack redelivery
-mid-apply would be compared against a list the running task never saw. A failed
-offer exits **1** and keeps its decision file, which is what a manual
-`--apply --ids` reads.
+Scheduled apply maintains a private, memory-content-free snapshot at
+`consolidation-digests/<stage>/<namespace-id>/current-v1.json`. Its serialized
+stage/namespace binding, hashes, kinds, counts, and timestamps are checked on
+read, and updates use conditional writes. It contains no memory IDs or content.
+Manual/report-only runs do not update scheduled digest state. Health failures
+remain visible in bounded output; Slack delivery stays disabled.
 
-`scripts/run-slack-approval-e2e.sh` verifies a deployed stage by POSTing a
-correctly signed synthetic interaction (the handler distinguishes Slack from
-anyone else _only_ by the signature) and then reading the approval record back by
-name. It refuses to run anywhere but a `pr-N` stage: it overwrites
-`approvals/offered`, which on a shared stage would destroy a pending human
-approval, and the id it approves is a deletion. CI runs it on preview only.
+If a snapshot is invalid, the task preserves it. Pause scheduling, ensure no
+run for that namespace is active, and inspect the private object before an
+operator removes or restores that exact stage/namespace key. Never reset a
+different namespace's snapshot or use a stage-wide deletion. Set the new
+repository variable to `0` and redeploy to remove the schedule.
+
+## Slack approval and cleanup scans
+
+Slack digests, deletion approval, scheduled cleanup scans, and their replay
+artifacts are not enabled by this maintenance release. Their enablement flags
+or inputs fail configuration validation; they do not turn the ordinary cleanup
+task into an approval or scan task. Do not use the old Slack or scan rollout
+commands. Those capabilities require a separately reviewed namespace and
+destination contract; retained design/test files describe that deferred work.
 
 ## External OIDC authentication
 

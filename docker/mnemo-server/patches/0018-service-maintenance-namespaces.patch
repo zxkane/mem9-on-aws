@@ -1,0 +1,2095 @@
+diff --git a/server/cmd/mnemo-server/main.go b/server/cmd/mnemo-server/main.go
+index f41ac429fcd044b014f5a1506cc120c71493fd9f..9b8d30916f5ac4131090d378dfc404493bd5c263 100644
+--- a/server/cmd/mnemo-server/main.go
++++ b/server/cmd/mnemo-server/main.go
+@@ -66,6 +66,7 @@ func main() {
+ 		namespaceAuthorizer, err = middleware.NewNamespaceAuthorizer(
+ 			cfg.TransportIssuer,
+ 			cfg.TransportSigningKeys,
++			middleware.WithServiceSigningKeys(cfg.ServiceTransportSigningKeys),
+ 		)
+ 		if err != nil {
+ 			logger.Error("namespace authorization startup rejected", "err", err)
+@@ -389,8 +390,16 @@ func main() {
+ 		var durableWorkerCtx context.Context
+ 		durableWorkerCtx, durableWorkerCancel = context.WithCancel(context.Background())
+ 		defer durableWorkerCancel()
++		durableRepo := repository.NewIngestJobRepo(cfg.DBBackend, db)
++		samplerCtx, samplerCancel := context.WithTimeout(context.Background(), 30*time.Second)
++		err := durableRepo.InitializeSamplerMemberships(samplerCtx)
++		samplerCancel()
++		if err != nil {
++			logger.Error("durable ingest sampler startup rejected", "error_class", "namespace_initialization_failed")
++			os.Exit(1)
++		}
+ 		worker := ingestqueue.NewWorker(
+-			repository.NewIngestJobRepo(cfg.DBBackend, db),
++			durableRepo,
+ 			processor,
+ 			cfg.DurableIngestTenantID,
+ 			fmt.Sprintf("mnemo-%d", os.Getpid()),
+diff --git a/server/cmd/mnemo-server/namespace_capabilities_test.go b/server/cmd/mnemo-server/namespace_capabilities_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..2f076ada51b751f6b961e10cddf2651985f0dfd3
+--- /dev/null
++++ b/server/cmd/mnemo-server/namespace_capabilities_test.go
+@@ -0,0 +1,44 @@
++package main
++
++import (
++	"context"
++	"os/exec"
++	"path/filepath"
++	"strings"
++	"testing"
++	"time"
++)
++
++func TestUnsupportedCapabilitiesFailBeforeDatabase(t *testing.T) {
++	// Launch the actual application artifact, not the Go test executable.
++	executable := filepath.Join(t.TempDir(), "mnemo-server")
++	buildCtx, buildCancel := context.WithTimeout(context.Background(), time.Minute)
++	defer buildCancel()
++	build := exec.CommandContext(buildCtx, "go", "build", "-o", executable, ".")
++	if output, err := build.CombinedOutput(); err != nil {
++		t.Fatalf("build startup fixture: %v: %s", err, output)
++	}
++	for _, flag := range []string{"MNEMO_UPLOAD_WORKER_ENABLED", "MNEMO_WEBHOOKS_ENABLED", "MNEMO_SPACE_CHAINS_ENABLED"} {
++		t.Run(flag, func(t *testing.T) {
++			ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
++			defer cancel()
++			command := exec.CommandContext(ctx, executable)
++			command.Env = []string{
++				"MNEMO_DSN=invalid-database-dsn",
++				"MNEMO_DB_BACKEND=postgres", "MNEMO_NAMESPACE_REQUIRED=1", flag + "=1",
++			}
++			output, err := command.CombinedOutput()
++			if err == nil || command.ProcessState.ExitCode() != 1 {
++				t.Fatalf("startup did not exit 1: %v, %s", err, output)
++			}
++			if !strings.Contains(string(output), "failed to load config") || !strings.Contains(string(output), flag) {
++				t.Fatalf("startup missed the capability guard: %s", output)
++			}
++			for _, forbidden := range []string{"database connected", "failed to connect database", "dispatcher initialized", "upload worker"} {
++				if strings.Contains(string(output), forbidden) {
++					t.Fatalf("startup reached a database or worker: %s", output)
++				}
++			}
++		})
++	}
++}
+diff --git a/server/internal/config/config.go b/server/internal/config/config.go
+index 0e0a9561bd2ae47e320c91fe94b7c639ed8fe051..5e7ebc270cdaba7b9bf64c87155c7d9ee1e73104 100644
+--- a/server/internal/config/config.go
++++ b/server/internal/config/config.go
+@@ -34,17 +34,18 @@ type Config struct {
+ 	EmbedModel   string
+ 	EmbedDims    int
+ 
+-	LLMAPIKey                string
+-	LLMBaseURL               string
+-	LLMModel                 string
+-	LLMTemperature           float64
+-	IngestMode               string
+-	DurableIngestEnabled     bool
+-	DurableIngestTenantID    string
+-	DurableIngestMetricStage string
+-	NamespaceRequired        bool
+-	TransportIssuer          string
+-	TransportSigningKeys     string `json:"-"`
++	LLMAPIKey                   string
++	LLMBaseURL                  string
++	LLMModel                    string
++	LLMTemperature              float64
++	IngestMode                  string
++	DurableIngestEnabled        bool
++	DurableIngestTenantID       string
++	DurableIngestMetricStage    string
++	NamespaceRequired           bool
++	TransportIssuer             string
++	TransportSigningKeys        string `json:"-"`
++	ServiceTransportSigningKeys string `json:"-"`
+ 
+ 	// FactExtractionIncludeAssistant allows smart ingest to extract durable facts
+ 	// from assistant turns in addition to user turns. Disabled by default.
+@@ -150,6 +151,9 @@ type Config struct {
+ }
+ 
+ func Load() (*Config, error) {
++	if err := validateNamespaceCapabilities(); err != nil {
++		return nil, err
++	}
+ 	dsn := os.Getenv("MNEMO_DSN")
+ 	if dsn == "" {
+ 		return nil, fmt.Errorf("MNEMO_DSN is required")
+@@ -231,6 +235,7 @@ func Load() (*Config, error) {
+ 		NamespaceRequired:                envBool("MNEMO_NAMESPACE_REQUIRED", false),
+ 		TransportIssuer:                  strings.TrimSpace(os.Getenv("MNEMO_TRANSPORT_ISSUER")),
+ 		TransportSigningKeys:             strings.TrimSpace(os.Getenv("MNEMO_TRANSPORT_SIGNING_KEYS")),
++		ServiceTransportSigningKeys:      strings.TrimSpace(os.Getenv("MNEMO_SERVICE_TRANSPORT_SIGNING_KEYS")),
+ 		DisableSessionSave:               envBool("MNEMO_DISABLE_SESSION_SAVE", false),
+ 		TiDBZeroEnabled:                  envBool("MNEMO_TIDB_ZERO_ENABLED", true),
+ 		TiDBZeroAPIURL:                   envOr("MNEMO_TIDB_ZERO_API_URL", "https://zero.tidbapi.com/v1alpha1"),
+@@ -279,6 +284,9 @@ func Load() (*Config, error) {
+ 		UTMEnabled:                       envBool("MNEMO_UTM_ENABLED", false),
+ 		CORSAllowedOrigins:               parseCSV(envOr("MNEMO_CORS_ALLOWED_ORIGINS", defaultCORSAllowedOrigins(env))),
+ 	}
++	if cfg.ServiceTransportSigningKeys != "" && !cfg.NamespaceRequired {
++		return nil, fmt.Errorf("MNEMO_SERVICE_TRANSPORT_SIGNING_KEYS requires MNEMO_NAMESPACE_REQUIRED=1")
++	}
+ 	// Validate ingest mode.
+ 	switch cfg.IngestMode {
+ 	case "smart", "raw", "":
+diff --git a/server/internal/config/namespace_capabilities.go b/server/internal/config/namespace_capabilities.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..45c68195958279d101b60d6b5a379229efb46071
+--- /dev/null
++++ b/server/internal/config/namespace_capabilities.go
+@@ -0,0 +1,31 @@
++package config
++
++import (
++	"fmt"
++	"os"
++	"strconv"
++	"strings"
++)
++
++// These are refusal flags, not feature switches. A complete namespace contract
++// is required before any of these legacy capabilities can be enabled.
++func validateNamespaceCapabilities() error {
++	for _, name := range []string{
++		"MNEMO_UPLOAD_WORKER_ENABLED",
++		"MNEMO_WEBHOOKS_ENABLED",
++		"MNEMO_SPACE_CHAINS_ENABLED",
++	} {
++		value := strings.TrimSpace(os.Getenv(name))
++		if value == "" {
++			continue
++		}
++		enabled, err := strconv.ParseBool(value)
++		if err != nil {
++			return fmt.Errorf("%s must be a boolean and remain disabled", name)
++		}
++		if enabled {
++			return fmt.Errorf("%s is unsupported without a complete namespace contract", name)
++		}
++	}
++	return nil
++}
+diff --git a/server/internal/config/namespace_capabilities_test.go b/server/internal/config/namespace_capabilities_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..158f5bcd7b9766088f9580f65a62fca13ae39fe2
+--- /dev/null
++++ b/server/internal/config/namespace_capabilities_test.go
+@@ -0,0 +1,51 @@
++package config
++
++import (
++	"encoding/json"
++	"strings"
++	"testing"
++)
++
++func TestNamespaceUnsupportedCapabilityConfiguration(t *testing.T) {
++	for _, flag := range []string{"MNEMO_UPLOAD_WORKER_ENABLED", "MNEMO_WEBHOOKS_ENABLED", "MNEMO_SPACE_CHAINS_ENABLED"} {
++		for _, required := range []string{"0", "1"} {
++			for _, value := range []string{"1", "true", "yes", "invalid"} {
++				t.Run(flag+"/"+required+"/"+value, func(t *testing.T) {
++					t.Setenv("MNEMO_DSN", "not-a-database")
++					t.Setenv("MNEMO_NAMESPACE_REQUIRED", required)
++					t.Setenv(flag, value)
++					if _, err := Load(); err == nil || !strings.Contains(err.Error(), flag) {
++						t.Fatalf("unsupported configuration was accepted: %v", err)
++					}
++				})
++			}
++		}
++		for _, value := range []string{"", "0", "false"} {
++			t.Run(flag+"/disabled/"+value, func(t *testing.T) {
++				t.Setenv("MNEMO_DSN", "test-dsn")
++				t.Setenv(flag, value)
++				if _, err := Load(); err != nil {
++					t.Fatalf("disabled capability rejected: %v", err)
++				}
++			})
++		}
++	}
++}
++
++func TestNamespaceServiceKeysRequireEnforcementAndAreNotSerialized(t *testing.T) {
++	t.Setenv("MNEMO_DSN", "test-dsn")
++	t.Setenv("MNEMO_SERVICE_TRANSPORT_SIGNING_KEYS", `{"analysis":{"active":"a","a":"PRIVATE-KEY-MARKER","b":"OTHER-KEY-MARKER"}}`)
++	t.Setenv("MNEMO_NAMESPACE_REQUIRED", "0")
++	if _, err := Load(); err == nil || !strings.Contains(err.Error(), "MNEMO_NAMESPACE_REQUIRED") {
++		t.Fatalf("service keys accepted without enforcement: %v", err)
++	}
++	t.Setenv("MNEMO_NAMESPACE_REQUIRED", "1")
++	cfg, err := Load()
++	if err != nil {
++		t.Fatal(err)
++	}
++	encoded, err := json.Marshal(cfg)
++	if err != nil || strings.Contains(string(encoded), "PRIVATE-KEY-MARKER") {
++		t.Fatal("service keys leaked through configuration serialization")
++	}
++}
+diff --git a/server/internal/domain/errors.go b/server/internal/domain/errors.go
+index f3a5558dafb4300f6772ac5c05c1ae4aa7856d26..4b94f03eccf19251c5c5f7f4ee88e0afbd17d81c 100644
+--- a/server/internal/domain/errors.go
++++ b/server/internal/domain/errors.go
+@@ -14,6 +14,7 @@ var (
+ 	ErrFTSSearchTruncated      = errors.New("fts search truncated")
+ 	ErrNamespaceVectorCapacity = errors.New("namespace_vector_capacity")
+ 	ErrNamespaceVectorTimeout  = errors.New("namespace_vector_timeout")
++	ErrServiceMutationDenied   = errors.New("service mutation authorization denied")
+ 	// ErrPreconditionFailed reports that a caller-supplied precondition (an
+ 	// `If-Match` version) no longer holds, so the write was NOT applied.
+ 	// mem9-on-aws patch (issue #128): distinct from ErrConflict so a fenced
+diff --git a/server/internal/handler/durable_ingest_test.go b/server/internal/handler/durable_ingest_test.go
+index 882b20969a08f0162872f6a4f518ef33ef5e47a1..a38396ecb8b9bb414a9537f7cc7eb3383b9fdaa0 100644
+--- a/server/internal/handler/durable_ingest_test.go
++++ b/server/internal/handler/durable_ingest_test.go
+@@ -52,7 +52,7 @@ func durableRequest(t *testing.T, tenant string, db *sql.DB, body map[string]any
+ 			TenantID:      tenant,
+ 			NamespaceID:   testutil.TestNamespaceID,
+ 			PrincipalID:   testutil.TestPrincipalID,
+-			PrincipalType: "service",
++			PrincipalType: "human",
+ 			Role:          "owner",
+ 		},
+ 	}
+diff --git a/server/internal/handler/handler.go b/server/internal/handler/handler.go
+index 0ca4fa01813ae031a137c50d09651cc8ce70d78c..21978df7cf20434bf82260bcb58ef3dce29e3e88 100644
+--- a/server/internal/handler/handler.go
++++ b/server/internal/handler/handler.go
+@@ -383,6 +383,8 @@ func (s *Server) handleError(ctx context.Context, w http.ResponseWriter, err err
+ 		})
+ 	case errors.Is(err, domain.ErrNotFound):
+ 		return respondError(w, http.StatusNotFound, err.Error())
++	case errors.Is(err, domain.ErrServiceMutationDenied):
++		return respondError(w, http.StatusForbidden, "namespace membership denied")
+ 	case errors.Is(err, domain.ErrWriteConflict):
+ 		return respondError(w, http.StatusServiceUnavailable, err.Error())
+ 	// mem9-on-aws patch (issue #128): a failed `If-Match` precondition is 412, not
+diff --git a/server/internal/handler/memory.go b/server/internal/handler/memory.go
+index 3699f55cfcc3116de2b84669b7f5ede109884923..5806cc2853139d57f7eb27d64605fd81ea7ebc6e 100644
+--- a/server/internal/handler/memory.go
++++ b/server/internal/handler/memory.go
+@@ -48,13 +48,17 @@ func isSyncIngestTimeout(ctx context.Context, err error) bool {
+ }
+ 
+ func (s *Server) createMemory(w http.ResponseWriter, r *http.Request) {
++	auth := authInfo(r)
++	if auth != nil && auth.Namespace != nil && auth.Namespace.PrincipalType == "service" {
++		respondError(w, http.StatusForbidden, "service route denied")
++		return
++	}
+ 	var req createMemoryRequest
+ 	if err := decode(r, &req); err != nil {
+ 		s.handleError(r.Context(), w, err)
+ 		return
+ 	}
+ 
+-	auth := authInfo(r)
+ 	var chainAuth *domain.AuthInfo
+ 	var writeChainSource *domain.ChainSource
+ 	if auth.IsChain() {
+diff --git a/server/internal/handler/service_namespace_routes_test.go b/server/internal/handler/service_namespace_routes_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..7906d9ce4deb032e1748974ac32eeb80867549f1
+--- /dev/null
++++ b/server/internal/handler/service_namespace_routes_test.go
+@@ -0,0 +1,95 @@
++package handler
++
++import (
++	"bytes"
++	"context"
++	"crypto/hmac"
++	"crypto/sha256"
++	"database/sql"
++	"encoding/base64"
++	"encoding/hex"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/ingestqueue"
++	"github.com/qiffang/mnemos/server/internal/middleware"
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++func TestServiceTranscriptRevokedAfterAuthorizationCannotEnqueue(t *testing.T) {
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
++	}
++	for _, synchronous := range []bool{false, true} {
++		name := "async"
++		if synchronous {
++			name = "sync"
++		}
++		t.Run(name, func(t *testing.T) {
++			db := testutil.OpenIsolatedPostgres(t, dsn)
++			server := postgresSessionDeleteServer().WithNamespaceRequired(true).WithDurableIngest(true)
++			principal := sha256.Sum256([]byte("mem9-service-principal-v1\x00analysis"))
++			principalKey := hex.EncodeToString(principal[:])
++			if _, err := db.Exec("UPDATE memory_principals SET principal_key=$1 WHERE principal_id=$2", principalKey, testutil.TestPrincipalID); err != nil {
++				t.Fatal(err)
++			}
++			encodedKey := func(value byte) string { return base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{value}, 32)) }
++			gateway, _ := json.Marshal(map[string]string{"a": encodedKey(7), "b": encodedKey(8)})
++			services, _ := json.Marshal(map[string]map[string]string{"analysis": {"active": "a", "a": encodedKey(20), "b": encodedKey(21)}})
++			authorizer, err := middleware.NewNamespaceAuthorizer("gateway-target", string(gateway), middleware.WithServiceSigningKeys(string(services)))
++			if err != nil {
++				t.Fatal(err)
++			}
++			now := time.Now().Unix()
++			digest := sha256.Sum256(nil)
++			payload, _ := json.Marshal(map[string]any{
++				"v": 1, "kid": "a", "issuer": "maintenance:analysis", "issued_at": now, "expires_at": now + 30,
++				"method": "GET", "path": "/v1alpha2/mem9s/memories", "body_hash": hex.EncodeToString(digest[:]),
++				"principal_type": "service", "principal_key": principalKey, "client_key": principalKey,
++				"namespace_id": testutil.TestNamespaceID, "group_keys": []string{},
++			})
++			mac := hmac.New(sha256.New, bytes.Repeat([]byte{20}, 32))
++			_, _ = mac.Write(payload)
++			probe := httptest.NewRequest(http.MethodGet, "/v1alpha2/mem9s/memories", nil)
++			probe.Header.Set(middleware.TransportHeader, base64.RawURLEncoding.EncodeToString(payload)+"."+hex.EncodeToString(mac.Sum(nil)))
++			scope, err := authorizer.Authorize(context.Background(), db, "tenant-a", probe)
++			if err != nil {
++				t.Fatal(err)
++			}
++			request := durableRequest(t, "tenant-a", db, map[string]any{
++				"messages": []map[string]string{{"role": "user", "content": "service transcript must not enqueue"}},
++				"appId":    "fixture-app", "session_id": "fixture-session", "sync": synchronous,
++			})
++			// Retain the real authorization result, then commit revocation before
++			// dispatching POST directly. Even a stale/replayed handler scope cannot
++			// bypass the ingress route restriction to submit a durable job.
++			auth := middleware.AuthFromContext(request.Context())
++			auth.Namespace = scope
++			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
++			defer cancel()
++			if _, err := db.ExecContext(ctx, "UPDATE memory_namespace_memberships SET status='revoked' WHERE namespace_id=$1 AND principal_id=$2", auth.Namespace.NamespaceID, auth.Namespace.PrincipalID); err != nil {
++				t.Fatal(err)
++			}
++			factoryCalls := 0
++			original := server.ingestRepoFactory
++			server.ingestRepoFactory = func(backend string, connection *sql.DB) ingestqueue.Repository {
++				factoryCalls++
++				return original(backend, connection)
++			}
++			recorder := httptest.NewRecorder()
++			server.createMemory(recorder, request)
++			var jobs int
++			if err := db.QueryRow("SELECT count(*) FROM ingest_jobs").Scan(&jobs); err != nil {
++				t.Fatal(err)
++			}
++			if recorder.Code != 403 || jobs != 0 || factoryCalls != 0 {
++				t.Fatalf("service transcript reached ingest: status=%d jobs=%d factory=%d", recorder.Code, jobs, factoryCalls)
++			}
++		})
++	}
++}
+diff --git a/server/internal/middleware/auth.go b/server/internal/middleware/auth.go
+index da3484a8b569c20b2af53cfe7d84926d8b73834f..4e360ff706f57f74146ffbe2fe646a127d5893af 100644
+--- a/server/internal/middleware/auth.go
++++ b/server/internal/middleware/auth.go
+@@ -352,6 +352,10 @@ func ResolveApiKey(
+ 	return func(next http.Handler) http.Handler {
+ 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+ 			authStart := time.Now()
++			if state.namespaceAuth == nil && !legacyTransportMayBeIgnored(r) {
++				writeError(w, http.StatusForbidden, "memory namespace authorization unavailable")
++				return
++			}
+ 			apiKey := strings.TrimSpace(r.Header.Get(APIKeyHeader))
+ 			if apiKey == "" {
+ 				writeError(w, http.StatusBadRequest, "missing API key")
+diff --git a/server/internal/middleware/namespace_auth.go b/server/internal/middleware/namespace_auth.go
+index 0d5ebcdf8890db90aa1d0cb8749e726fd22b6b11..eb98c0d4d6a3be624fb860d8071e0637e00e12c2 100644
+--- a/server/internal/middleware/namespace_auth.go
++++ b/server/internal/middleware/namespace_auth.go
+@@ -58,18 +58,25 @@ type transportEnvelope struct {
+ 	PrincipalType string   `json:"principal_type"`
+ 	ClientKey     string   `json:"client_key"`
+ 	GroupKeys     []string `json:"group_keys"`
++	NamespaceID   string   `json:"namespace_id,omitempty"`
+ }
+ 
+ type NamespaceAuthorizer struct {
+-	issuer string
+-	keys   map[string][]byte
+-	now    func() time.Time
++	issuer      string
++	keys        map[string][]byte
++	serviceKeys map[string]map[string][]byte
++	now         func() time.Time
+ }
+ 
+-func NewNamespaceAuthorizer(issuer, rawKeys string) (*NamespaceAuthorizer, error) {
++type NamespaceAuthorizerOption func(*NamespaceAuthorizer) error
++
++func NewNamespaceAuthorizer(issuer, rawKeys string, options ...NamespaceAuthorizerOption) (*NamespaceAuthorizer, error) {
+ 	if strings.TrimSpace(issuer) == "" {
+ 		return nil, errors.New("MNEMO_TRANSPORT_ISSUER is required")
+ 	}
++	if strings.HasPrefix(issuer, "maintenance:") {
++		return nil, errors.New("MNEMO_TRANSPORT_ISSUER cannot use a maintenance issuer")
++	}
+ 	var encoded map[string]string
+ 	if err := json.Unmarshal([]byte(rawKeys), &encoded); err != nil {
+ 		return nil, fmt.Errorf("parse MNEMO_TRANSPORT_SIGNING_KEYS: %w", err)
+@@ -89,11 +96,17 @@ func NewNamespaceAuthorizer(issuer, rawKeys string) (*NamespaceAuthorizer, error
+ 	if len(keys["a"]) == 0 {
+ 		return nil, errors.New("transport signing key a is required")
+ 	}
+-	return &NamespaceAuthorizer{
++	authorizer := &NamespaceAuthorizer{
+ 		issuer: issuer,
+ 		keys:   keys,
+ 		now:    time.Now,
+-	}, nil
++	}
++	for _, option := range options {
++		if err := option(authorizer); err != nil {
++			return nil, err
++		}
++	}
++	return authorizer, nil
+ }
+ 
+ func (a *NamespaceAuthorizer) Authorize(
+@@ -137,7 +150,7 @@ func (a *NamespaceAuthorizer) verifyRequest(r *http.Request) (transportEnvelope,
+ 	if err := json.Unmarshal(payload, &identity); err != nil {
+ 		return identity, errors.New("transport envelope payload is malformed")
+ 	}
+-	key := a.keys[identity.KeyID]
++	key := a.transportSigningKey(identity)
+ 	if len(key) == 0 {
+ 		return identity, errors.New("transport envelope key is unknown")
+ 	}
+@@ -165,13 +178,11 @@ func (a *NamespaceAuthorizer) verifyRequest(r *http.Request) (transportEnvelope,
+ 	bodyDigest := sha256.Sum256(body)
+ 	now := a.now().Unix()
+ 	if identity.Version != 1 ||
+-		identity.Issuer != a.issuer ||
+ 		identity.Method != strings.ToUpper(r.Method) ||
+ 		identity.Path != r.URL.RequestURI() ||
+ 		identity.BodyHash != hex.EncodeToString(bodyDigest[:]) ||
+ 		!hex64Pattern.MatchString(identity.PrincipalKey) ||
+ 		!hex64Pattern.MatchString(identity.ClientKey) ||
+-		(identity.PrincipalType != "human" && identity.PrincipalType != "m2m") ||
+ 		identity.ExpiresAt < now ||
+ 		identity.IssuedAt > now+5 ||
+ 		identity.ExpiresAt-identity.IssuedAt != 30 {
+@@ -194,6 +205,9 @@ func (a *NamespaceAuthorizer) verifyRequest(r *http.Request) (transportEnvelope,
+ 	if identity.PrincipalType == "m2m" && len(identity.GroupKeys) != 0 {
+ 		return identity, errors.New("m2m transport cannot carry group keys")
+ 	}
++	if identity.PrincipalType == "service" && !approvedServiceMemoryRoute(r) {
++		return identity, errors.New("service route denied")
++	}
+ 	return identity, nil
+ }
+ 
+@@ -209,8 +223,12 @@ func (a *NamespaceAuthorizer) resolveScope(
+ 	}
+ 	defer tx.Rollback()
+ 
+-	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, identity.PrincipalKey); err != nil {
+-		return nil, &namespaceAuthError{status: http.StatusServiceUnavailable, msg: "namespace authorization unavailable", err: err}
++	// Only human/M2M reconciliation needs the principal-wide advisory lock.
++	// Service principals are fixed, preexisting identities shared across namespaces.
++	if identity.PrincipalType != "service" {
++		if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext($1))`, identity.PrincipalKey); err != nil {
++			return nil, &namespaceAuthError{status: http.StatusServiceUnavailable, msg: "namespace authorization unavailable", err: err}
++		}
+ 	}
+ 
+ 	var scope *domain.NamespaceScope
+@@ -219,6 +237,8 @@ func (a *NamespaceAuthorizer) resolveScope(
+ 		scope, err = resolveHumanScope(ctx, tx, tenantID, identity)
+ 	case "m2m":
+ 		scope, err = resolveM2MScope(ctx, tx, tenantID, identity)
++	case "service":
++		scope, err = resolveServiceScope(ctx, tx, tenantID, identity)
+ 	default:
+ 		err = errors.New("unsupported principal type")
+ 	}
+diff --git a/server/internal/middleware/namespace_service_auth.go b/server/internal/middleware/namespace_service_auth.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..67a41fd3196447b8d1c1549e21cbb3ecf8be5f34
+--- /dev/null
++++ b/server/internal/middleware/namespace_service_auth.go
+@@ -0,0 +1,209 @@
++package middleware
++
++import (
++	"context"
++	"crypto/sha256"
++	"database/sql"
++	"encoding/base64"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"io"
++	"net/http"
++	"strings"
++	"time"
++
++	"github.com/google/uuid"
++	"github.com/qiffang/mnemos/server/internal/domain"
++)
++
++// WithServiceSigningKeys adds independently keyed maintenance issuers. The server
++// receives the bundle; a service receives only its own ring. Both stable slots
++// verify during rotation; active selects the sender's slot, not the verifier's.
++func WithServiceSigningKeys(raw string) NamespaceAuthorizerOption {
++	return func(a *NamespaceAuthorizer) error {
++		if strings.TrimSpace(raw) == "" {
++			return nil
++		}
++		var encoded map[string]struct {
++			Active string `json:"active"`
++			A      string `json:"a"`
++			B      string `json:"b"`
++		}
++		decoder := json.NewDecoder(strings.NewReader(raw))
++		decoder.DisallowUnknownFields()
++		if err := decoder.Decode(&encoded); err != nil || encoded == nil {
++			return errors.New("MNEMO_SERVICE_TRANSPORT_SIGNING_KEYS must be a service keyring object")
++		}
++		if err := decoder.Decode(new(any)); err != io.EOF {
++			return errors.New("MNEMO_SERVICE_TRANSPORT_SIGNING_KEYS must contain one JSON object")
++		}
++		keys := make(map[string]map[string][]byte, len(encoded))
++		owners := make(map[[sha256.Size]byte]string)
++		for _, key := range a.keys {
++			owners[sha256.Sum256(key)] = "gateway"
++		}
++		for name, ring := range encoded {
++			switch name {
++			case "consolidation", "cleanup", "analysis":
++			default:
++				return errors.New("MNEMO_SERVICE_TRANSPORT_SIGNING_KEYS contains an unsupported service")
++			}
++			if ring.Active != "a" && ring.Active != "b" {
++				return fmt.Errorf("service %s active signing slot must be a or b", name)
++			}
++			keys[name] = make(map[string][]byte, 2)
++			for slot, value := range map[string]string{"a": ring.A, "b": ring.B} {
++				key, err := base64.RawURLEncoding.DecodeString(value)
++				if err != nil || len(key) < 32 {
++					return fmt.Errorf("service %s signing slot %s is invalid", name, slot)
++				}
++				fingerprint := sha256.Sum256(key)
++				if owner, exists := owners[fingerprint]; exists && owner != name {
++					return errors.New("transport signing keys must not be shared between issuers")
++				}
++				owners[fingerprint] = name
++				keys[name][slot] = key
++			}
++		}
++		a.serviceKeys = keys
++		return nil
++	}
++}
++
++func servicePrincipalKey(service string) string {
++	digest := sha256.Sum256([]byte("mem9-service-principal-v1\x00" + service))
++	return hex.EncodeToString(digest[:])
++}
++
++// Maintenance credentials do not grant transcript ingestion, job submission,
++// session APIs, or arbitrary future routes in the tenant-authenticated group.
++func approvedServiceMemoryRoute(r *http.Request) bool {
++	const memories = "/v1alpha2/mem9s/memories"
++	path := r.URL.Path
++	if r.URL.EscapedPath() != path {
++		return false
++	}
++	if r.Method == http.MethodPost {
++		return path == memories+"/batch-delete"
++	}
++	if r.Method != http.MethodGet && r.Method != http.MethodPut && r.Method != http.MethodDelete {
++		return false
++	}
++	if path == memories {
++		return r.Method == http.MethodGet
++	}
++	id, matched := strings.CutPrefix(path, memories+"/")
++	return matched && id != "" && id != "." && id != ".." && id != "batch-delete" && !strings.Contains(id, "/")
++}
++
++// Compatibility still authenticates legacy callers by the tenant key alone.
++// Parsing this header does not authenticate its claims. It only ensures service
++// or malformed envelopes cannot silently fall through to unscoped repositories
++// when no namespace verifier is installed.
++func legacyTransportMayBeIgnored(r *http.Request) bool {
++	headers := r.Header.Values(TransportHeader)
++	if len(headers) == 0 {
++		return true
++	}
++	if len(headers) != 1 {
++		return false
++	}
++	parts := strings.Split(strings.TrimSpace(headers[0]), ".")
++	if len(parts) != 2 {
++		return false
++	}
++	payload, err := base64.RawURLEncoding.DecodeString(parts[0])
++	if err != nil {
++		return false
++	}
++	mac, err := hex.DecodeString(parts[1])
++	if err != nil || len(mac) != sha256.Size {
++		return false
++	}
++	var identity transportEnvelope
++	decoder := json.NewDecoder(strings.NewReader(string(payload)))
++	decoder.DisallowUnknownFields()
++	if err := decoder.Decode(&identity); err != nil {
++		return false
++	}
++	if err := decoder.Decode(new(any)); err != io.EOF {
++		return false
++	}
++	now := time.Now().Unix()
++	if identity.Version != 1 || (identity.KeyID != "a" && identity.KeyID != "b") ||
++		identity.Issuer == "" || strings.HasPrefix(identity.Issuer, "maintenance:") ||
++		(identity.PrincipalType != "human" && identity.PrincipalType != "m2m") || identity.NamespaceID != "" ||
++		!hex64Pattern.MatchString(identity.PrincipalKey) || !hex64Pattern.MatchString(identity.ClientKey) ||
++		!hex64Pattern.MatchString(identity.BodyHash) || identity.Method != r.Method || identity.Path != r.URL.RequestURI() ||
++		identity.ExpiresAt < now || identity.IssuedAt > now+5 || identity.ExpiresAt-identity.IssuedAt != 30 ||
++		identity.GroupKeys == nil || len(identity.GroupKeys) > maxTransportGroups {
++		return false
++	}
++	for i, group := range identity.GroupKeys {
++		if !hex64Pattern.MatchString(group) || (i > 0 && identity.GroupKeys[i-1] >= group) {
++			return false
++		}
++	}
++	return identity.PrincipalType != "m2m" || len(identity.GroupKeys) == 0
++}
++
++func (a *NamespaceAuthorizer) transportSigningKey(identity transportEnvelope) []byte {
++	if identity.Issuer == a.issuer {
++		if identity.NamespaceID != "" || (identity.PrincipalType != "human" && identity.PrincipalType != "m2m") {
++			return nil
++		}
++		return a.keys[identity.KeyID]
++	}
++	service, maintenance := strings.CutPrefix(identity.Issuer, "maintenance:")
++	if !maintenance || a.serviceKeys[service] == nil {
++		return nil
++	}
++	principalKey := servicePrincipalKey(service)
++	namespaceID, err := uuid.Parse(identity.NamespaceID)
++	if err != nil || namespaceID == uuid.Nil || namespaceID.String() != identity.NamespaceID ||
++		identity.PrincipalType != "service" || identity.PrincipalKey != principalKey ||
++		identity.ClientKey != principalKey || identity.GroupKeys == nil || len(identity.GroupKeys) != 0 {
++		return nil
++	}
++	return a.serviceKeys[service][identity.KeyID]
++}
++
++func resolveServiceScope(ctx context.Context, tx *sql.Tx, tenantID string, identity transportEnvelope) (*domain.NamespaceScope, error) {
++	// Match the namespace -> principal -> membership lock order used by lifecycle
++	// operations. No principal or membership is created or reactivated here.
++	if err := lockActiveNamespace(ctx, tx, identity.NamespaceID); err != nil {
++		return nil, err
++	}
++	var principalID string
++	err := tx.QueryRowContext(ctx, `
++		SELECT principal_id FROM memory_principals
++		WHERE principal_key = $1 AND principal_type = 'service' AND status = 'active'
++		FOR SHARE`, identity.PrincipalKey).Scan(&principalID)
++	if errors.Is(err, sql.ErrNoRows) {
++		return nil, &namespaceAuthError{status: http.StatusForbidden, msg: "namespace membership required"}
++	}
++	if err != nil {
++		return nil, &namespaceAuthError{status: http.StatusServiceUnavailable, msg: "namespace authorization unavailable", err: err}
++	}
++	var role string
++	err = tx.QueryRowContext(ctx, `
++		SELECT role FROM memory_namespace_memberships
++		WHERE namespace_id = $1 AND principal_id = $2
++		  AND source_type = 'service' AND status = 'active'
++		FOR SHARE`, identity.NamespaceID, principalID).Scan(&role)
++	if errors.Is(err, sql.ErrNoRows) {
++		return nil, &namespaceAuthError{status: http.StatusForbidden, msg: "namespace membership required"}
++	}
++	if err != nil {
++		return nil, &namespaceAuthError{status: http.StatusServiceUnavailable, msg: "namespace authorization unavailable", err: err}
++	}
++	if role != "viewer" && role != "member" && role != "owner" {
++		return nil, &namespaceAuthError{status: http.StatusForbidden, msg: "memory namespace role denied"}
++	}
++	return &domain.NamespaceScope{
++		TenantID: tenantID, NamespaceID: identity.NamespaceID,
++		PrincipalID: principalID, PrincipalType: "service", Role: role,
++	}, nil
++}
+diff --git a/server/internal/middleware/namespace_service_auth_test.go b/server/internal/middleware/namespace_service_auth_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..a00602ad80f72c2b67741f3a6218fe4c430e4743
+--- /dev/null
++++ b/server/internal/middleware/namespace_service_auth_test.go
+@@ -0,0 +1,273 @@
++package middleware
++
++import (
++	"bytes"
++	"context"
++	"crypto/sha256"
++	"encoding/base64"
++	"encoding/hex"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/domain"
++	"github.com/qiffang/mnemos/server/internal/repository"
++)
++
++func serviceTestKeys() map[string]map[string]string {
++	result := make(map[string]map[string]string)
++	for i, name := range []string{"consolidation", "cleanup", "analysis"} {
++		result[name] = map[string]string{
++			"active": "a",
++			"a":      base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{byte(20 + 2*i)}, 32)),
++			"b":      base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{byte(21 + 2*i)}, 32)),
++		}
++	}
++	return result
++}
++
++func TestServiceTransportOnlyPermitsMaintenanceMemoryRoutes(t *testing.T) {
++	authorizer, _ := testNamespaceAuthorizer(t)
++	rings := serviceTestKeys()
++	raw, _ := json.Marshal(rings)
++	if err := WithServiceSigningKeys(string(raw))(authorizer); err != nil {
++		t.Fatal(err)
++	}
++	key, _ := base64.RawURLEncoding.DecodeString(rings["analysis"]["a"])
++	const base = "/v1alpha2/mem9s/memories"
++	for _, tc := range []struct {
++		method, path string
++		allowed      bool
++	}{
++		{"GET", base, true}, {"GET", base + "?limit=10", true},
++		{"GET", base + "/memory-id", true}, {"PUT", base + "/memory-id", true},
++		{"DELETE", base + "/memory-id", true}, {"POST", base + "/batch-delete", true},
++		{"POST", base, false}, {"POST", base + "?sync=true", false},
++		{"POST", base + "/messages", false}, {"PUT", base, false},
++		{"HEAD", base, false}, {"PATCH", base + "/memory-id", false},
++		{"DELETE", base, false}, {"PUT", base + "/batch-delete", false},
++		{"POST", "/v1alpha2/mem9s/session-messages", false},
++		{"PUT", "/v1alpha2/mem9s/session-messages/session-id", false},
++		{"DELETE", "/v1alpha2/mem9s/session-messages/session-id", false},
++		{"GET", "/v1alpha2/mem9s/ingest-jobs/job-id", false},
++		{"POST", base + "/batch-delete/extra", false},
++		{"PUT", base + "/memory-id/extra", false},
++		{"PUT", base + "/%2Fsession-id", false},
++		{"GET", "/v1alpha1/mem9s/tenant-a/memories", false},
++	} {
++		t.Run(tc.method+tc.path, func(t *testing.T) {
++			identity := serviceTestIdentity("analysis")
++			identity.Method, identity.Path = tc.method, tc.path
++			req := httptest.NewRequest(tc.method, tc.path, nil)
++			req.Header.Set(TransportHeader, signedTransport(t, key, identity))
++			_, err := authorizer.verifyRequest(req)
++			if (err == nil) != tc.allowed {
++				t.Fatalf("route allowed=%v, want %v: %v", err == nil, tc.allowed, err)
++			}
++		})
++	}
++}
++
++type compatibilityTenantProbe struct {
++	repository.TenantRepo
++	lookedUp bool
++}
++
++func (p *compatibilityTenantProbe) GetByID(context.Context, string) (*domain.Tenant, error) {
++	p.lookedUp = true
++	return nil, domain.ErrNotFound
++}
++
++func TestCompatibilityMiddlewareRejectsUnverifiableServiceBeforeRepository(t *testing.T) {
++	key := bytes.Repeat([]byte{20}, 32)
++	identity := serviceTestIdentity("analysis")
++	identity.IssuedAt = time.Now().Unix()
++	identity.ExpiresAt = identity.IssuedAt + 30
++	serviceToken := signedTransport(t, key, identity)
++	unknown := identity
++	unknown.PrincipalType = "unknown"
++	unknown.Issuer = "gateway-target"
++	unknown.NamespaceID = ""
++	masquerade := identity
++	masquerade.PrincipalType = "human"
++	masquerade.NamespaceID = ""
++	for _, tc := range []struct{ name, token string }{
++		{"service", serviceToken},
++		{"unknown type", signedTransport(t, key, unknown)},
++		{"maintenance issuer claiming human", signedTransport(t, key, masquerade)},
++		{"malformed", "malformed"}, {"empty header", " "},
++		{"malformed payload", "e30." + bytesToHex(1)},
++		{"invalid payload encoding", "%%%." + bytesToHex(1)},
++		{"invalid JSON", base64.RawURLEncoding.EncodeToString([]byte("{")) + "." + bytesToHex(1)},
++		{"invalid signature encoding", base64.RawURLEncoding.EncodeToString([]byte("{}")) + ".not-hex"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			probe := &compatibilityTenantProbe{}
++			called := false
++			router := ResolveApiKey(probe, nil, nil, nil)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
++			req := httptest.NewRequest(http.MethodGet, identity.Path, nil)
++			req.Header.Set(APIKeyHeader, "fixture-tenant")
++			req.Header.Set(TransportHeader, tc.token)
++			recorder := httptest.NewRecorder()
++			router.ServeHTTP(recorder, req)
++			if recorder.Code != 403 || probe.lookedUp || called {
++				t.Fatalf("compatibility request reached repository/content: status=%d lookup=%v handler=%v", recorder.Code, probe.lookedUp, called)
++			}
++		})
++	}
++	for _, kind := range []string{"bare", "human", "m2m"} {
++		t.Run("legacy-"+kind, func(t *testing.T) {
++			probe := &compatibilityTenantProbe{}
++			req := httptest.NewRequest(http.MethodGet, identity.Path, nil)
++			req.Header.Set(APIKeyHeader, "fixture-tenant")
++			if kind != "bare" {
++				legacy := identity
++				legacy.Issuer = "gateway-target"
++				legacy.PrincipalType = kind
++				legacy.NamespaceID = ""
++				req.Header.Set(TransportHeader, signedTransport(t, key, legacy))
++			}
++			ResolveApiKey(probe, nil, nil, nil)(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { t.Fatal("invalid tenant reached content") })).ServeHTTP(httptest.NewRecorder(), req)
++			if !probe.lookedUp {
++				t.Fatal("legacy compatibility tenant-key behavior changed")
++			}
++		})
++	}
++}
++
++func serviceTestIdentity(name string) transportEnvelope {
++	digest := sha256.Sum256(nil)
++	principal := sha256.Sum256([]byte("mem9-service-principal-v1\x00" + name))
++	return transportEnvelope{
++		Version: 1, KeyID: "a", Issuer: "maintenance:" + name,
++		IssuedAt: 1_787_875_200, ExpiresAt: 1_787_875_230,
++		Method: http.MethodGet, Path: "/v1alpha2/mem9s/memories?q=test",
++		BodyHash: hex.EncodeToString(digest[:]), PrincipalType: "service",
++		PrincipalKey: hex.EncodeToString(principal[:]), ClientKey: hex.EncodeToString(principal[:]),
++		GroupKeys: []string{}, NamespaceID: "60000000-0000-4000-8000-000000000001",
++	}
++}
++
++func TestServiceTransportIssuerKeysAndBoundIdentity(t *testing.T) {
++	authorizer, gatewayKey := testNamespaceAuthorizer(t)
++	rings := serviceTestKeys()
++	raw, _ := json.Marshal(rings)
++	if err := WithServiceSigningKeys(string(raw))(authorizer); err != nil {
++		t.Fatal(err)
++	}
++	for name, ring := range rings {
++		for _, slot := range []string{"a", "b"} {
++			t.Run(name+"/"+slot, func(t *testing.T) {
++				identity := serviceTestIdentity(name)
++				identity.KeyID = slot
++				key, _ := base64.RawURLEncoding.DecodeString(ring[slot])
++				req := httptest.NewRequest(identity.Method, identity.Path, nil)
++				req.Header.Set(TransportHeader, signedTransport(t, key, identity))
++				if _, err := authorizer.verifyRequest(req); err != nil {
++					t.Fatalf("valid service identity rejected: %v", err)
++				}
++			})
++		}
++	}
++	key, _ := base64.RawURLEncoding.DecodeString(rings["analysis"]["a"])
++	for _, tc := range []struct {
++		name   string
++		change func(*transportEnvelope)
++	}{
++		{"missing namespace", func(e *transportEnvelope) { e.NamespaceID = "" }},
++		{"invalid namespace", func(e *transportEnvelope) { e.NamespaceID = "not-a-uuid" }},
++		{"nil namespace", func(e *transportEnvelope) { e.NamespaceID = "00000000-0000-0000-0000-" + strings.Repeat("0", 12) }},
++		{"unknown issuer", func(e *transportEnvelope) { e.Issuer = "maintenance:unknown" }},
++		{"other capability", func(e *transportEnvelope) { *e = serviceTestIdentity("cleanup") }},
++		{"human identity", func(e *transportEnvelope) { e.PrincipalType = "human" }},
++		{"m2m identity", func(e *transportEnvelope) { e.PrincipalType = "m2m" }},
++		{"other principal", func(e *transportEnvelope) { e.PrincipalKey = bytesToHex(1) }},
++		{"other client", func(e *transportEnvelope) { e.ClientKey = bytesToHex(2) }},
++		{"groups", func(e *transportEnvelope) { e.GroupKeys = []string{bytesToHex(3)} }},
++		{"null groups", func(e *transportEnvelope) { e.GroupKeys = nil }},
++		{"unknown slot", func(e *transportEnvelope) { e.KeyID = "c" }},
++		{"expired", func(e *transportEnvelope) { e.IssuedAt -= 31; e.ExpiresAt -= 31 }},
++		{"future", func(e *transportEnvelope) { e.IssuedAt += 6; e.ExpiresAt += 6 }},
++		{"wrong lifetime", func(e *transportEnvelope) { e.ExpiresAt++ }},
++		{"wrong method", func(e *transportEnvelope) { e.Method = http.MethodPost }},
++		{"wrong path", func(e *transportEnvelope) { e.Path += "-changed" }},
++		{"wrong body", func(e *transportEnvelope) { e.BodyHash = bytesToHex(4) }},
++		{"gateway impersonation", func(e *transportEnvelope) { e.Issuer = "gateway-target"; e.PrincipalType = "human"; e.NamespaceID = "" }},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			identity := serviceTestIdentity("analysis")
++			req := httptest.NewRequest(identity.Method, identity.Path, nil)
++			tc.change(&identity)
++			req.Header.Set(TransportHeader, signedTransport(t, key, identity))
++			if _, err := authorizer.verifyRequest(req); err == nil {
++				t.Fatal("invalid service identity accepted")
++			}
++		})
++	}
++	for _, signer := range [][]byte{gatewayKey, bytes.Repeat([]byte{99}, 32)} {
++		identity := serviceTestIdentity("analysis")
++		req := httptest.NewRequest(identity.Method, identity.Path, nil)
++		req.Header.Set(TransportHeader, signedTransport(t, signer, identity))
++		if _, err := authorizer.verifyRequest(req); err == nil {
++			t.Fatal("service accepted a non-service signing key")
++		}
++	}
++	for _, principalType := range []string{"service", "human", "m2m"} {
++		identity := serviceTestIdentity("analysis")
++		identity.Issuer = "gateway-target"
++		identity.PrincipalType = principalType
++		if principalType == "service" {
++			identity.NamespaceID = ""
++		}
++		req := httptest.NewRequest(identity.Method, identity.Path, nil)
++		req.Header.Set(TransportHeader, signedTransport(t, gatewayKey, identity))
++		if _, err := authorizer.verifyRequest(req); err == nil {
++			t.Fatal("Gateway issuer accepted a service type or caller-selected namespace")
++		}
++	}
++	// An unchanged two-argument constructor remains Gateway-only.
++	gatewayOnly, _ := testNamespaceAuthorizer(t)
++	identity := serviceTestIdentity("analysis")
++	req := httptest.NewRequest(identity.Method, identity.Path, nil)
++	req.Header.Set(TransportHeader, signedTransport(t, key, identity))
++	if _, err := gatewayOnly.verifyRequest(req); err == nil {
++		t.Fatal("Gateway-only authorizer accepted service identity")
++	}
++}
++
++func TestServiceSigningKeysRejectInvalidConfiguration(t *testing.T) {
++	for _, tc := range []struct {
++		name   string
++		change func(map[string]map[string]string)
++	}{
++		{"unknown service", func(r map[string]map[string]string) { r["unknown"] = r["analysis"] }},
++		{"active slot", func(r map[string]map[string]string) { r["analysis"]["active"] = "c" }},
++		{"missing slot", func(r map[string]map[string]string) { delete(r["analysis"], "b") }},
++		{"short key", func(r map[string]map[string]string) { r["analysis"]["a"] = "AAAA" }},
++		{"invalid encoding", func(r map[string]map[string]string) { r["analysis"]["a"] = "%%%" }},
++		{"unknown field", func(r map[string]map[string]string) { r["analysis"]["other"] = "value" }},
++		{"cross-service reuse", func(r map[string]map[string]string) { r["analysis"]["a"] = r["cleanup"]["a"] }},
++		{"Gateway reuse", func(r map[string]map[string]string) {
++			r["analysis"]["a"] = base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{7}, 32))
++		}},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			a, _ := testNamespaceAuthorizer(t)
++			rings := serviceTestKeys()
++			tc.change(rings)
++			raw, _ := json.Marshal(rings)
++			if err := WithServiceSigningKeys(string(raw))(a); err == nil {
++				t.Fatal("invalid service key configuration accepted")
++			}
++		})
++	}
++	for _, raw := range []string{"null", "[]", "{", `{} {}`} {
++		a, _ := testNamespaceAuthorizer(t)
++		if err := WithServiceSigningKeys(raw)(a); err == nil {
++			t.Fatal("malformed service key configuration accepted")
++		}
++	}
++}
+diff --git a/server/internal/middleware/namespace_service_concurrency_test.go b/server/internal/middleware/namespace_service_concurrency_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..6765d0b137744b79bbcb89f89ef5dfb64c64b265
+--- /dev/null
++++ b/server/internal/middleware/namespace_service_concurrency_test.go
+@@ -0,0 +1,103 @@
++package middleware
++
++import (
++	"context"
++	"encoding/base64"
++	"encoding/json"
++	"net/http/httptest"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++func TestServiceAuthorizationDoesNotSerializeNamespaces(t *testing.T) {
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
++	}
++	for _, blocked := range []string{"namespace", "membership"} {
++		t.Run(blocked, func(t *testing.T) {
++			db := testutil.OpenIsolatedPostgres(t, dsn)
++			authorizer, _ := testNamespaceAuthorizer(t)
++			rings := serviceTestKeys()
++			raw, _ := json.Marshal(rings)
++			if err := WithServiceSigningKeys(string(raw))(authorizer); err != nil {
++				t.Fatal(err)
++			}
++			key, _ := base64.RawURLEncoding.DecodeString(rings["analysis"]["a"])
++			identity := serviceTestIdentity("analysis")
++			const principalID = "70000000-0000-4000-8000-000000000021"
++			if _, err := db.Exec(`INSERT INTO memory_principals(principal_id,principal_key,principal_type,status)
++				VALUES ($1,$2,'service','active')`, principalID, identity.PrincipalKey); err != nil {
++				t.Fatal(err)
++			}
++			if _, err := db.Exec(`INSERT INTO memory_namespace_memberships(namespace_id,principal_id,role,status,source_type)
++				VALUES ($1,$3,'viewer','active','service'),($2,$3,'viewer','active','service')`, testutil.TestNamespaceID, testutil.TestOtherNamespaceID, principalID); err != nil {
++				t.Fatal(err)
++			}
++			var before, after string
++			if err := db.QueryRow("SELECT row_to_json(memory_principals)::text FROM memory_principals WHERE principal_id=$1", principalID).Scan(&before); err != nil {
++				t.Fatal(err)
++			}
++			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
++			defer cancel()
++			barrier, err := db.BeginTx(ctx, nil)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer barrier.Rollback()
++			if blocked == "namespace" {
++				_, err = barrier.ExecContext(ctx, "SELECT 1 FROM memory_namespaces WHERE namespace_id=$1 FOR UPDATE", testutil.TestNamespaceID)
++			} else {
++				_, err = barrier.ExecContext(ctx, "SELECT 1 FROM memory_namespace_memberships WHERE namespace_id=$1 AND principal_id=$2 FOR UPDATE", testutil.TestNamespaceID, principalID)
++			}
++			if err != nil {
++				t.Fatal(err)
++			}
++			authenticate := func(ctx context.Context, namespace string) error {
++				requestIdentity := identity
++				requestIdentity.NamespaceID = namespace
++				req := httptest.NewRequest(requestIdentity.Method, requestIdentity.Path, nil)
++				req.Header.Set(TransportHeader, signedTransport(t, key, requestIdentity))
++				scope, err := authorizer.Authorize(ctx, db, "tenant-a", req)
++				if err == nil && scope.NamespaceID != namespace {
++					t.Error("wrong namespace authorized")
++				}
++				return err
++			}
++			done := make(chan error, 1)
++			go func() { done <- authenticate(ctx, testutil.TestNamespaceID) }()
++			waitAnyNamespaceLock(t, db, "")
++			otherCtx, otherCancel := context.WithTimeout(ctx, time.Second)
++			err = authenticate(otherCtx, testutil.TestOtherNamespaceID)
++			otherCancel()
++			if err != nil {
++				t.Fatalf("namespace B waited on namespace A: %v", err)
++			}
++			select {
++			case err := <-done:
++				t.Fatalf("namespace A escaped its lock barrier: %v", err)
++			default:
++			}
++			if err := barrier.Rollback(); err != nil {
++				t.Fatal(err)
++			}
++			select {
++			case err := <-done:
++				if err != nil {
++					t.Fatal(err)
++				}
++			case <-ctx.Done():
++				t.Fatal("namespace A authorization did not finish")
++			}
++			if err := db.QueryRow("SELECT row_to_json(memory_principals)::text FROM memory_principals WHERE principal_id=$1", principalID).Scan(&after); err != nil {
++				t.Fatal(err)
++			}
++			if before != after {
++				t.Fatal("service authorization wrote the shared principal")
++			}
++		})
++	}
++}
+diff --git a/server/internal/middleware/namespace_service_http_test.go b/server/internal/middleware/namespace_service_http_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..cee96c673a7dcfc7162bff3726f5660f293dcbef
+--- /dev/null
++++ b/server/internal/middleware/namespace_service_http_test.go
+@@ -0,0 +1,402 @@
++package middleware_test
++
++import (
++	"bytes"
++	"context"
++	"crypto/hmac"
++	"crypto/sha256"
++	"database/sql"
++	"encoding/base64"
++	"encoding/hex"
++	"encoding/json"
++	"io"
++	"log/slog"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"strings"
++	"sync"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/jackc/pgx/v5"
++	"github.com/qiffang/mnemos/server/internal/domain"
++	"github.com/qiffang/mnemos/server/internal/encrypt"
++	"github.com/qiffang/mnemos/server/internal/handler"
++	"github.com/qiffang/mnemos/server/internal/middleware"
++	"github.com/qiffang/mnemos/server/internal/repository/postgres"
++	"github.com/qiffang/mnemos/server/internal/service"
++	"github.com/qiffang/mnemos/server/internal/tenant"
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++type serviceAuthorizationPause struct {
++	entered chan struct{}
++	resume  chan struct{}
++}
++
++func waitServiceBlockedPID(t *testing.T, db *sql.DB, blocker int) int {
++	t.Helper()
++	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
++	defer cancel()
++	ticker := time.NewTicker(5 * time.Millisecond)
++	defer ticker.Stop()
++	for {
++		var pid int
++		if err := db.QueryRowContext(ctx, `SELECT COALESCE((SELECT pid FROM pg_stat_activity
++			WHERE datname=current_database() AND $1=ANY(pg_blocking_pids(pid)) LIMIT 1),0)`, blocker).Scan(&pid); err != nil {
++			t.Fatalf("read lock barrier: %v", err)
++		}
++		if pid != 0 {
++			return pid
++		}
++		select {
++		case <-ctx.Done():
++			t.Fatal("mutation did not reach the expected lock barrier")
++		case <-ticker.C:
++		}
++	}
++}
++
++// TC-GROUPNS-105: real HTTP -> API-key middleware -> service authorization ->
++// namespace-bound repository, with PostgreSQL membership and memory fixtures.
++func TestServiceRESTNamespaceAuthorizationPostgresHTTP(t *testing.T) {
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
++	}
++	db := testutil.OpenIsolatedPostgres(t, dsn)
++	connection, err := pgx.ParseConfig(dsn)
++	if err != nil {
++		t.Fatal(err)
++	}
++	var database string
++	if err := db.QueryRow("SELECT current_database()").Scan(&database); err != nil {
++		t.Fatal(err)
++	}
++	const tenantID = "90000000-0000-4000-8000-000000000018"
++	const principalID = "70000000-0000-4000-8000-000000000018"
++	principalKey := func(capability string) string {
++		digest := sha256.Sum256([]byte("mem9-service-principal-v1\x00" + capability))
++		return hex.EncodeToString(digest[:])
++	}
++	execSQL := func(query string, args ...any) {
++		t.Helper()
++		if _, err := db.Exec(query, args...); err != nil {
++			t.Fatal(err)
++		}
++	}
++	principal := principalKey("analysis")
++	execSQL(`INSERT INTO memory_principals (principal_id,principal_key,principal_type,status)
++		VALUES ($1,$2,'service','active')`, principalID, principal)
++	execSQL(`INSERT INTO memory_namespace_memberships (namespace_id,principal_id,role,status,source_type)
++		VALUES ($1,$2,'viewer','active','service')`, testutil.TestNamespaceID, principalID)
++	tenantRepo := postgres.NewTenantRepo(db)
++	if err := tenantRepo.Create(context.Background(), &domain.Tenant{
++		ID: tenantID, Name: "service-http-fixture", DBHost: connection.Host, DBPort: int(connection.Port),
++		DBUser: connection.User, DBPassword: connection.Password, DBName: database,
++		Provider: "self-hosted", Status: domain.TenantActive, SchemaVersion: 1,
++	}); err != nil {
++		t.Fatal(err)
++	}
++	const ownID = "91000000-0000-4000-8000-000000000018"
++	const foreignID = "91000000-0000-4000-8000-000000000019"
++	for _, row := range []struct{ id, namespace, content string }{
++		{ownID, testutil.TestNamespaceID, "namespace-a-fixture"},
++		{foreignID, testutil.TestOtherNamespaceID, "namespace-b-fixture"},
++	} {
++		scope := testutil.TestNamespaceScope()
++		scope.NamespaceID = row.namespace
++		if row.namespace == testutil.TestOtherNamespaceID {
++			scope.PrincipalID = testutil.TestOtherPrincipalID
++		}
++		repo := postgres.NewMemoryRepo(db, false, "", scope)
++		if err := repo.Create(context.Background(), &domain.Memory{
++			ID: row.id, Content: row.content, MemoryType: domain.TypePinned, State: domain.StateActive, Version: 1,
++		}); err != nil {
++			t.Fatal(err)
++		}
++	}
++	encodeKey := func(value byte) string {
++		return base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{value}, 32))
++	}
++	gatewayKeys, _ := json.Marshal(map[string]string{"a": encodeKey(7), "b": encodeKey(8)})
++	serviceKeys, _ := json.Marshal(map[string]map[string]string{
++		"analysis": {"active": "a", "a": encodeKey(20), "b": encodeKey(21)},
++		"cleanup":  {"active": "b", "a": encodeKey(22), "b": encodeKey(23)},
++	})
++	authorizer, err := middleware.NewNamespaceAuthorizer("gateway-target", string(gatewayKeys), middleware.WithServiceSigningKeys(string(serviceKeys)))
++	if err != nil {
++		t.Fatal(err)
++	}
++	pool := tenant.NewPool(tenant.PoolConfig{Backend: "postgres"})
++	t.Cleanup(pool.Close)
++	auth := middleware.ResolveApiKey(tenantRepo, pool, encrypt.NewPlainEncryptor(), nil, middleware.WithNamespaceAuthorizer(authorizer))
++	var pause atomic.Pointer[serviceAuthorizationPause]
++	authWithPause := func(next http.Handler) http.Handler {
++		return auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++			if barrier := pause.Swap(nil); barrier != nil {
++				close(barrier.entered)
++				select {
++				case <-barrier.resume:
++				case <-r.Context().Done():
++					return
++				}
++			}
++			next.ServeHTTP(w, r)
++		}))
++	}
++	pass := func(next http.Handler) http.Handler { return next }
++	server := handler.NewServer(nil, nil, "", nil, nil, "", false, service.ModeRaw, "postgres", slog.New(slog.NewTextHandler(io.Discard, nil))).WithNamespaceRequired(true).WithDurableIngest(true)
++	httpServer := httptest.NewServer(server.Router(pass, pass, authWithPause, pass))
++	httpServer.Client().Timeout = 15 * time.Second
++	t.Cleanup(httpServer.Close)
++	const listPath = "/v1alpha2/mem9s/memories"
++	request := func(method, path, body string, edit func(map[string]any), signingByte byte, tamper bool) (int, string) {
++		t.Helper()
++		digest := sha256.Sum256([]byte(body))
++		now := time.Now().Unix()
++		payload := map[string]any{
++			"v": 1, "kid": "a", "issuer": "maintenance:analysis", "issued_at": now, "expires_at": now + 30,
++			"method": method, "path": path, "body_hash": hex.EncodeToString(digest[:]),
++			"principal_type": "service", "principal_key": principal, "client_key": principal,
++			"group_keys": []string{}, "namespace_id": testutil.TestNamespaceID,
++		}
++		if edit != nil {
++			edit(payload)
++		}
++		raw, err := json.Marshal(payload)
++		if err != nil {
++			t.Fatal(err)
++		}
++		mac := hmac.New(sha256.New, bytes.Repeat([]byte{signingByte}, 32))
++		_, _ = mac.Write(raw)
++		if tamper {
++			payload["namespace_id"] = testutil.TestOtherNamespaceID
++			raw, _ = json.Marshal(payload)
++		}
++		req, err := http.NewRequest(method, httpServer.URL+path, strings.NewReader(body))
++		if err != nil {
++			t.Fatal(err)
++		}
++		req.Header.Set("X-API-Key", tenantID)
++		req.Header.Set("Content-Type", "application/json")
++		req.Header.Set(middleware.TransportHeader, base64.RawURLEncoding.EncodeToString(raw)+"."+hex.EncodeToString(mac.Sum(nil)))
++		response, err := httpServer.Client().Do(req)
++		if err != nil {
++			t.Fatal(err)
++		}
++		defer response.Body.Close()
++		output, err := io.ReadAll(response.Body)
++		if err != nil {
++			t.Fatal(err)
++		}
++		return response.StatusCode, string(output)
++	}
++	assertStatus := func(want int, method, path, body string, edit func(map[string]any), signingByte byte, tamper bool) string {
++		t.Helper()
++		status, output := request(method, path, body, edit, signingByte, tamper)
++		if status != want {
++			t.Fatalf("HTTP status %d, want %d: %s", status, want, output)
++		}
++		if strings.Contains(output, "namespace-b-fixture") || strings.Contains(output, principal) || strings.Contains(output, principalID) {
++			t.Fatal("HTTP output disclosed foreign content or service identity")
++		}
++		return output
++	}
++	output := assertStatus(200, http.MethodGet, listPath, "", nil, 20, false)
++	if !strings.Contains(output, "namespace-a-fixture") {
++		t.Fatalf("own namespace result missing: %s", output)
++	}
++	assertStatus(200, http.MethodGet, listPath+"/"+ownID, "", func(e map[string]any) { e["kid"] = "b" }, 21, false)
++	assertStatus(404, http.MethodGet, listPath+"/"+foreignID, "", nil, 20, false)
++	assertStatus(403, http.MethodPost, listPath, `{"content":"viewer write"}`, nil, 20, false)
++	for _, tc := range []struct {
++		name string
++		edit func(map[string]any)
++	}{
++		{"foreign namespace", func(e map[string]any) { e["namespace_id"] = testutil.TestOtherNamespaceID }},
++		{"missing namespace", func(e map[string]any) { delete(e, "namespace_id") }},
++		{"invalid namespace", func(e map[string]any) { e["namespace_id"] = "invalid" }},
++		{"wrong principal", func(e map[string]any) { e["principal_key"] = principalKey("cleanup") }},
++		{"wrong client", func(e map[string]any) { e["client_key"] = principalKey("cleanup") }},
++		{"human impersonation", func(e map[string]any) { e["principal_type"] = "human" }},
++		{"wrong issuer", func(e map[string]any) { e["issuer"] = "maintenance:cleanup" }},
++		{"expired", func(e map[string]any) {
++			e["issued_at"] = time.Now().Unix() - 60
++			e["expires_at"] = time.Now().Unix() - 30
++		}},
++	} {
++		t.Run(tc.name, func(t *testing.T) { assertStatus(403, http.MethodGet, listPath, "", tc.edit, 20, false) })
++	}
++	assertStatus(403, http.MethodGet, listPath, "", nil, 22, false)
++	assertStatus(403, http.MethodGet, listPath, "", nil, 20, true)
++	for _, tc := range []struct{ name, update, reset string }{
++		{"revoked membership", "UPDATE memory_namespace_memberships SET status='revoked' WHERE principal_id=$1", "UPDATE memory_namespace_memberships SET status='active' WHERE principal_id=$1"},
++		{"wrong membership source", "UPDATE memory_namespace_memberships SET source_type='operator' WHERE principal_id=$1", "UPDATE memory_namespace_memberships SET source_type='service' WHERE principal_id=$1"},
++		{"disabled principal", "UPDATE memory_principals SET status='disabled' WHERE principal_id=$1", "UPDATE memory_principals SET status='active' WHERE principal_id=$1"},
++		{"wrong principal type", "UPDATE memory_principals SET principal_type='human' WHERE principal_id=$1", "UPDATE memory_principals SET principal_type='service' WHERE principal_id=$1"},
++	} {
++		t.Run(tc.name, func(t *testing.T) {
++			execSQL(tc.update, principalID)
++			defer execSQL(tc.reset, principalID)
++			assertStatus(403, http.MethodGet, listPath, "", nil, 20, false)
++		})
++	}
++	execSQL("UPDATE memory_namespaces SET status='disabled' WHERE namespace_id=$1", testutil.TestNamespaceID)
++	assertStatus(403, http.MethodGet, listPath, "", nil, 20, false)
++	execSQL("UPDATE memory_namespaces SET status='active' WHERE namespace_id=$1", testutil.TestNamespaceID)
++	// A configured issuer does not create a principal or membership on first use.
++	assertStatus(403, http.MethodGet, listPath, "", func(e map[string]any) {
++		e["issuer"] = "maintenance:cleanup"
++		e["principal_key"] = principalKey("cleanup")
++		e["client_key"] = principalKey("cleanup")
++	}, 22, false)
++	var created int
++	if err := db.QueryRow("SELECT count(*) FROM memory_principals WHERE principal_key=$1", principalKey("cleanup")).Scan(&created); err != nil || created != 0 {
++		t.Fatal("service authorization created a principal")
++	}
++	// A member can write only its own namespace, and a later membership removal
++	// is observed despite the handler's existing service cache.
++	execSQL("UPDATE memory_namespace_memberships SET role='member' WHERE principal_id=$1", principalID)
++	for _, body := range []string{
++		`{"messages":[{"role":"user","content":"must not enqueue"}],"sync":false}`,
++		`{"messages":[{"role":"user","content":"must not ingest"}],"sync":true}`,
++	} {
++		assertStatus(403, http.MethodPost, listPath, body, nil, 20, false)
++	}
++	var jobs int
++	if err := db.QueryRow("SELECT count(*) FROM ingest_jobs").Scan(&jobs); err != nil || jobs != 0 {
++		t.Fatal("service memory POST reached the ingest queue")
++	}
++	// Pause after the real authorization transaction commits. Revocation must
++	// complete while the request is paused, and the later data write must reject.
++	for _, method := range []string{http.MethodPut, http.MethodDelete} {
++		t.Run("revocation-before-mutation/"+method, func(t *testing.T) {
++			var before, after string
++			if err := db.QueryRow("SELECT row_to_json(memories)::text FROM memories WHERE id=$1", ownID).Scan(&before); err != nil {
++				t.Fatal(err)
++			}
++			barrier := &serviceAuthorizationPause{entered: make(chan struct{}), resume: make(chan struct{})}
++			var released sync.Once
++			release := func() { released.Do(func() { close(barrier.resume) }) }
++			defer release()
++			pause.Store(barrier)
++			result := make(chan int, 1)
++			go func() {
++				status, _ := request(method, listPath+"/"+ownID, `{"tags":["must-not-commit"]}`, nil, 20, false)
++				result <- status
++			}()
++			select {
++			case <-barrier.entered:
++			case <-time.After(4 * time.Second):
++				t.Fatal("request did not finish authorization")
++			}
++			ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
++			defer cancel()
++			if _, err := db.ExecContext(ctx, "UPDATE memory_namespace_memberships SET status='revoked' WHERE principal_id=$1", principalID); err != nil {
++				t.Fatalf("authorization held locks across request work: %v", err)
++			}
++			defer execSQL("UPDATE memory_namespace_memberships SET status='active' WHERE principal_id=$1", principalID)
++			release()
++			select {
++			case status := <-result:
++				if status != 403 {
++					t.Fatalf("post-authorization revoked write returned %d", status)
++				}
++			case <-time.After(4 * time.Second):
++				t.Fatal("revoked write did not finish")
++			}
++			if err := db.QueryRow("SELECT row_to_json(memories)::text FROM memories WHERE id=$1", ownID).Scan(&after); err != nil {
++				t.Fatal(err)
++			}
++			if before != after {
++				t.Fatal("revoked service changed a memory row")
++			}
++		})
++	}
++	// A PostgreSQL trigger pauses the actual mutation after its authorization
++	// locks are acquired. Revocation must wait for that same transaction's commit.
++	execSQL(`CREATE FUNCTION service_memory_write_barrier() RETURNS trigger LANGUAGE plpgsql AS $$
++		BEGIN PERFORM pg_advisory_xact_lock(hashtext('service-memory-write-barrier')); RETURN NEW; END $$`)
++	execSQL(`CREATE TRIGGER service_memory_write_barrier BEFORE UPDATE ON memories
++		FOR EACH ROW EXECUTE FUNCTION service_memory_write_barrier()`)
++	defer execSQL("DROP TRIGGER service_memory_write_barrier ON memories")
++	for _, method := range []string{http.MethodPut, http.MethodDelete} {
++		t.Run("mutation-before-revocation/"+method, func(t *testing.T) {
++			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
++			defer cancel()
++			barrier, err := db.Conn(ctx)
++			if err != nil {
++				t.Fatal(err)
++			}
++			defer barrier.Close()
++			var blocker int
++			if err := barrier.QueryRowContext(ctx, "SELECT pg_backend_pid()").Scan(&blocker); err != nil {
++				t.Fatal(err)
++			}
++			if _, err := barrier.ExecContext(ctx, "SELECT pg_advisory_lock(hashtext('service-memory-write-barrier'))"); err != nil {
++				t.Fatal(err)
++			}
++			defer barrier.ExecContext(context.Background(), "SELECT pg_advisory_unlock(hashtext('service-memory-write-barrier'))")
++			result := make(chan int, 1)
++			go func() {
++				status, _ := request(method, listPath+"/"+ownID, `{"tags":["committed-before-revoke"]}`, nil, 20, false)
++				result <- status
++			}()
++			writer := waitServiceBlockedPID(t, db, blocker)
++			revoked := make(chan error, 1)
++			go func() {
++				_, err := db.ExecContext(ctx, "UPDATE memory_namespace_memberships SET status='revoked' WHERE principal_id=$1", principalID)
++				revoked <- err
++			}()
++			waitServiceBlockedPID(t, db, writer)
++			if _, err := barrier.ExecContext(ctx, "SELECT pg_advisory_unlock(hashtext('service-memory-write-barrier'))"); err != nil {
++				t.Fatal(err)
++			}
++			select {
++			case status := <-result:
++				want := http.StatusOK
++				if method == http.MethodDelete {
++					want = http.StatusNoContent
++				}
++				if status != want {
++					t.Fatalf("authorized write returned %d", status)
++				}
++			case <-ctx.Done():
++				t.Fatal("authorized write did not finish")
++			}
++			select {
++			case err := <-revoked:
++				if err != nil {
++					t.Fatal(err)
++				}
++			case <-ctx.Done():
++				t.Fatal("revocation did not finish after commit")
++			}
++			var state string
++			if err := db.QueryRow("SELECT state FROM memories WHERE id=$1", ownID).Scan(&state); err != nil {
++				t.Fatal(err)
++			}
++			if method == http.MethodDelete && state != "deleted" {
++				t.Fatal("winning delete was not committed")
++			}
++			if method == http.MethodPut {
++				var tags string
++				if err := db.QueryRow("SELECT tags::text FROM memories WHERE id=$1", ownID).Scan(&tags); err != nil || !strings.Contains(tags, "committed-before-revoke") {
++					t.Fatal("winning update was not committed")
++				}
++			}
++			execSQL("UPDATE memory_namespace_memberships SET status='active' WHERE principal_id=$1", principalID)
++			execSQL("UPDATE memories SET state='active' WHERE id=$1", ownID)
++		})
++	}
++	assertStatus(200, http.MethodPut, listPath+"/"+ownID, `{"tags":["service-fixture"]}`, nil, 20, false)
++	assertStatus(404, http.MethodDelete, listPath+"/"+foreignID, "", nil, 20, false)
++	execSQL("DELETE FROM memory_namespace_memberships WHERE principal_id=$1", principalID)
++	assertStatus(403, http.MethodGet, listPath, "", nil, 20, false)
++	if err := db.QueryRow("SELECT count(*) FROM memory_namespace_memberships WHERE principal_id=$1", principalID).Scan(&created); err != nil || created != 0 {
++		t.Fatal("service authorization recreated a membership")
++	}
++}
+diff --git a/server/internal/repository/postgres/memory.go b/server/internal/repository/postgres/memory.go
+index f087a1b27b2ff6f268a79107f15a48d562524186..d752efb8a200e0b207b6de57f121c436039f1fe8 100644
+--- a/server/internal/repository/postgres/memory.go
++++ b/server/internal/repository/postgres/memory.go
+@@ -25,6 +25,7 @@ type MemoryRepo struct {
+ 	clusterID          string
+ 	namespaceID        string
+ 	principalID        string
++	principalType      string
+ 	exactVectorMaxRows int
+ 	exactVectorTimeout time.Duration
+ }
+@@ -34,6 +35,7 @@ func NewMemoryRepo(db *sql.DB, ftsEnabled bool, clusterID string, scopes ...doma
+ 	if len(scopes) > 0 {
+ 		r.namespaceID = scopes[0].NamespaceID
+ 		r.principalID = scopes[0].PrincipalID
++		r.principalType = scopes[0].PrincipalType
+ 		r.exactVectorMaxRows, r.exactVectorTimeout = namespaceExactVectorConfig()
+ 	}
+ 	r.ftsAvailable.Store(ftsEnabled)
+@@ -54,20 +56,23 @@ func (r *MemoryRepo) Create(ctx context.Context, m *domain.Memory) error {
+ 		memoryType = string(domain.TypePinned)
+ 	}
+ 	if r.namespaceID == "" {
+-		_, err := r.db.ExecContext(ctx,
+-			`INSERT INTO memories (id, content, source, tags, metadata, embedding, memory_type, agent_id, session_id, app_id, state, version, updated_by, created_at, updated_at)
++		_, err := r.serviceMutation(ctx, func(executor memoryMutationExecutor) (sql.Result, error) {
++			return executor.ExecContext(ctx,
++				`INSERT INTO memories (id, content, source, tags, metadata, embedding, memory_type, agent_id, session_id, app_id, state, version, updated_by, created_at, updated_at)
+ 			 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active', $11, $12, NOW(), NOW())`,
+-			m.ID, m.Content, nullString(m.Source),
+-			tagsJSON, nullJSON(m.Metadata), vecToParam(m.Embedding), memoryType, nullString(m.AgentID), nullString(m.SessionID), m.AppID,
+-			m.Version, nullString(m.UpdatedBy),
+-		)
++				m.ID, m.Content, nullString(m.Source),
++				tagsJSON, nullJSON(m.Metadata), vecToParam(m.Embedding), memoryType, nullString(m.AgentID), nullString(m.SessionID), m.AppID,
++				m.Version, nullString(m.UpdatedBy),
++			)
++		})
+ 		if err != nil {
+ 			return fmt.Errorf("create memory: %w", err)
+ 		}
+ 		return nil
+ 	}
+-	_, err := r.db.ExecContext(ctx,
+-		`INSERT INTO memories (
++	_, err := r.serviceMutation(ctx, func(executor memoryMutationExecutor) (sql.Result, error) {
++		return executor.ExecContext(ctx,
++			`INSERT INTO memories (
+ 			id, content, source, tags, metadata, embedding, memory_type,
+ 			agent_id, session_id, app_id, state, version, updated_by,
+ 			namespace_id, created_by_principal_id, updated_by_principal_id,
+@@ -75,10 +80,11 @@ func (r *MemoryRepo) Create(ctx context.Context, m *domain.Memory) error {
+ 		 )
+ 		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'active',
+ 		         $11, $12, $13, $14, $14, NOW(), NOW())`,
+-		m.ID, m.Content, nullString(m.Source),
+-		tagsJSON, nullJSON(m.Metadata), vecToParam(m.Embedding), memoryType, nullString(m.AgentID), nullString(m.SessionID), m.AppID,
+-		m.Version, nullString(m.UpdatedBy), r.namespaceID, r.principalID,
+-	)
++			m.ID, m.Content, nullString(m.Source),
++			tagsJSON, nullJSON(m.Metadata), vecToParam(m.Embedding), memoryType, nullString(m.AgentID), nullString(m.SessionID), m.AppID,
++			m.Version, nullString(m.UpdatedBy), r.namespaceID, r.principalID,
++		)
++	})
+ 	if err != nil {
+ 		return fmt.Errorf("create memory: %w", err)
+ 	}
+@@ -123,7 +129,9 @@ func (r *MemoryRepo) UpdateOptimistic(ctx context.Context, m *domain.Memory, exp
+ 		args = append(args, expectedVersion)
+ 	}
+ 
+-	result, err := r.db.ExecContext(ctx, query, args...)
++	result, err := r.serviceMutation(ctx, func(executor memoryMutationExecutor) (sql.Result, error) {
++		return executor.ExecContext(ctx, query, args...)
++	})
+ 	if err != nil {
+ 		return fmt.Errorf("update memory: %w", err)
+ 	}
+@@ -135,7 +143,7 @@ func (r *MemoryRepo) UpdateOptimistic(ctx context.Context, m *domain.Memory, exp
+ }
+ 
+ func (r *MemoryRepo) SoftDelete(ctx context.Context, id, agentName string) (int64, error) {
+-	tx, err := r.db.BeginTx(ctx, nil)
++	tx, err := r.beginMemoryMutation(ctx)
+ 	if err != nil {
+ 		return 0, fmt.Errorf("soft delete begin tx: %w", err)
+ 	}
+@@ -203,7 +211,9 @@ func (r *MemoryRepo) BulkSoftDelete(ctx context.Context, ids []string, agentName
+ 		args = append(args, r.namespaceID)
+ 	}
+ 
+-	result, err := r.db.ExecContext(ctx, query, args...)
++	result, err := r.serviceMutation(ctx, func(executor memoryMutationExecutor) (sql.Result, error) {
++		return executor.ExecContext(ctx, query, args...)
++	})
+ 	if err != nil {
+ 		return 0, fmt.Errorf("bulk soft delete: %w", err)
+ 	}
+@@ -214,12 +224,14 @@ func (r *MemoryRepo) BulkSoftDelete(ctx context.Context, ids []string, agentName
+ 
+ func (r *MemoryRepo) ArchiveMemory(ctx context.Context, id, supersededBy string) error {
+ 	if r.namespaceID != "" {
+-		result, err := r.db.ExecContext(ctx,
+-			`UPDATE memories SET state = 'archived', superseded_by = $1,
++		result, err := r.serviceMutation(ctx, func(executor memoryMutationExecutor) (sql.Result, error) {
++			return executor.ExecContext(ctx,
++				`UPDATE memories SET state = 'archived', superseded_by = $1,
+ 			        updated_by_principal_id = $2, updated_at = NOW()
+ 			 WHERE id = $3 AND namespace_id = $4 AND state = 'active'`,
+-			supersededBy, r.principalID, id, r.namespaceID,
+-		)
++				supersededBy, r.principalID, id, r.namespaceID,
++			)
++		})
+ 		if err != nil {
+ 			return err
+ 		}
+@@ -228,11 +240,13 @@ func (r *MemoryRepo) ArchiveMemory(ctx context.Context, id, supersededBy string)
+ 		}
+ 		return nil
+ 	}
+-	result, err := r.db.ExecContext(ctx,
+-		`UPDATE memories SET state = 'archived', superseded_by = $1, updated_at = NOW()
++	result, err := r.serviceMutation(ctx, func(executor memoryMutationExecutor) (sql.Result, error) {
++		return executor.ExecContext(ctx,
++			`UPDATE memories SET state = 'archived', superseded_by = $1, updated_at = NOW()
+ 		 WHERE id = $2 AND state = 'active'`,
+-		supersededBy, id,
+-	)
++			supersededBy, id,
++		)
++	})
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -243,7 +257,7 @@ func (r *MemoryRepo) ArchiveMemory(ctx context.Context, id, supersededBy string)
+ }
+ 
+ func (r *MemoryRepo) ArchiveAndCreate(ctx context.Context, archiveID, supersededBy string, newMem *domain.Memory) error {
+-	tx, err := r.db.BeginTx(ctx, nil)
++	tx, err := r.beginMemoryMutation(ctx)
+ 	if err != nil {
+ 		return fmt.Errorf("begin tx: %w", err)
+ 	}
+@@ -303,12 +317,14 @@ func (r *MemoryRepo) ArchiveAndCreate(ctx context.Context, archiveID, superseded
+ 
+ func (r *MemoryRepo) SetState(ctx context.Context, id string, state domain.MemoryState) error {
+ 	if r.namespaceID != "" {
+-		result, err := r.db.ExecContext(ctx,
+-			`UPDATE memories SET state = $1, updated_by_principal_id = $2,
++		result, err := r.serviceMutation(ctx, func(executor memoryMutationExecutor) (sql.Result, error) {
++			return executor.ExecContext(ctx,
++				`UPDATE memories SET state = $1, updated_by_principal_id = $2,
+ 			        updated_at = NOW()
+ 			 WHERE id = $3 AND namespace_id = $4 AND state = 'active'`,
+-			string(state), r.principalID, id, r.namespaceID,
+-		)
++				string(state), r.principalID, id, r.namespaceID,
++			)
++		})
+ 		if err != nil {
+ 			return err
+ 		}
+@@ -317,10 +333,12 @@ func (r *MemoryRepo) SetState(ctx context.Context, id string, state domain.Memor
+ 		}
+ 		return nil
+ 	}
+-	result, err := r.db.ExecContext(ctx,
+-		`UPDATE memories SET state = $1, updated_at = NOW() WHERE id = $2 AND state = 'active'`,
+-		string(state), id,
+-	)
++	result, err := r.serviceMutation(ctx, func(executor memoryMutationExecutor) (sql.Result, error) {
++		return executor.ExecContext(ctx,
++			`UPDATE memories SET state = $1, updated_at = NOW() WHERE id = $2 AND state = 'active'`,
++			string(state), id,
++		)
++	})
+ 	if err != nil {
+ 		return err
+ 	}
+@@ -448,7 +466,7 @@ func (r *MemoryRepo) ListBootstrap(ctx context.Context, limit int) ([]domain.Mem
+ }
+ 
+ func (r *MemoryRepo) BulkCreate(ctx context.Context, memories []*domain.Memory) error {
+-	tx, err := r.db.BeginTx(ctx, nil)
++	tx, err := r.beginMemoryMutation(ctx)
+ 	if err != nil {
+ 		return fmt.Errorf("begin tx: %w", err)
+ 	}
+diff --git a/server/internal/repository/postgres/memory_service_mutation.go b/server/internal/repository/postgres/memory_service_mutation.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..57d486515e9f10d9d7e061484ed17def0fdcb6ae
+--- /dev/null
++++ b/server/internal/repository/postgres/memory_service_mutation.go
+@@ -0,0 +1,94 @@
++package postgres
++
++import (
++	"context"
++	"database/sql"
++	"errors"
++	"fmt"
++
++	"github.com/qiffang/mnemos/server/internal/domain"
++)
++
++type memoryMutationExecutor interface {
++	ExecContext(context.Context, string, ...any) (sql.Result, error)
++}
++
++// serviceMutation starts only at the repository write boundary, after embedding
++// or model work. Human/M2M and accepted durable-job writes retain their existing
++// behavior; the durable worker does not construct a REST service scope.
++func (r *MemoryRepo) serviceMutation(ctx context.Context, mutate func(memoryMutationExecutor) (sql.Result, error)) (sql.Result, error) {
++	if r.principalType != "service" {
++		return mutate(r.db)
++	}
++	tx, err := r.beginMemoryMutation(ctx)
++	if err != nil {
++		return nil, err
++	}
++	defer tx.Rollback()
++	result, err := mutate(tx)
++	if err != nil {
++		return nil, err
++	}
++	if err := tx.Commit(); err != nil {
++		return nil, err
++	}
++	return result, nil
++}
++
++// Existing multi-statement mutators use this entry point so the same locks
++// cover every statement and the final commit (including archive-and-create).
++func (r *MemoryRepo) beginMemoryMutation(ctx context.Context) (*sql.Tx, error) {
++	if r.principalType == "service" && (r.namespaceID == "" || r.principalID == "") {
++		return nil, domain.ErrServiceMutationDenied
++	}
++	tx, err := r.db.BeginTx(ctx, nil)
++	if err != nil {
++		return nil, err
++	}
++	if r.principalType == "service" {
++		if err := r.lockServiceMutationScope(ctx, tx); err != nil {
++			tx.Rollback()
++			return nil, err
++		}
++	}
++	return tx, nil
++}
++
++func serviceMutationScopeError(err error) error {
++	if errors.Is(err, sql.ErrNoRows) {
++		return domain.ErrServiceMutationDenied
++	}
++	return fmt.Errorf("service mutation authorization unavailable: %w", err)
++}
++
++func (r *MemoryRepo) lockServiceMutationScope(ctx context.Context, tx *sql.Tx) error {
++	for _, setting := range []string{
++		"SET LOCAL lock_timeout = '5s'",
++		"SET LOCAL statement_timeout = '30s'",
++		"SET LOCAL idle_in_transaction_session_timeout = '35s'",
++	} {
++		if _, err := tx.ExecContext(ctx, setting); err != nil {
++			return err
++		}
++	}
++	// Same global lock order as maintenance operators: namespace -> principal ->
++	// membership, then content rows. Revocation cannot commit until this write
++	// commits; a revocation that already committed is rechecked by these reads.
++	var allowed int
++	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM memory_namespaces
++		WHERE namespace_id=$1 AND status='active' FOR SHARE`, r.namespaceID).Scan(&allowed); err != nil {
++		return serviceMutationScopeError(err)
++	}
++	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM memory_principals
++		WHERE principal_id=$1 AND principal_type='service' AND status='active'
++		FOR SHARE`, r.principalID).Scan(&allowed); err != nil {
++		return serviceMutationScopeError(err)
++	}
++	if err := tx.QueryRowContext(ctx, `SELECT 1 FROM memory_namespace_memberships
++		WHERE namespace_id=$1 AND principal_id=$2 AND source_type='service'
++		  AND status='active' AND role IN ('member','owner')
++		FOR SHARE`, r.namespaceID, r.principalID).Scan(&allowed); err != nil {
++		return serviceMutationScopeError(err)
++	}
++	return nil
++}
+diff --git a/server/internal/repository/postgres/memory_service_mutation_test.go b/server/internal/repository/postgres/memory_service_mutation_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..24c746590adc8497c74d024355dff5e04386ca4a
+--- /dev/null
++++ b/server/internal/repository/postgres/memory_service_mutation_test.go
+@@ -0,0 +1,220 @@
++package postgres
++
++import (
++	"context"
++	"database/sql"
++	"errors"
++	"os"
++	"testing"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/domain"
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++func serviceMutationTestDB(t *testing.T) *sql.DB {
++	t.Helper()
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
++	}
++	return testutil.OpenIsolatedPostgres(t, dsn)
++}
++
++func serviceMutationSnapshot(t *testing.T, db *sql.DB) string {
++	t.Helper()
++	var snapshot string
++	if err := db.QueryRow(`SELECT COALESCE(jsonb_agg(to_jsonb(memory) ORDER BY id),'[]'::jsonb)::text FROM memories AS memory`).Scan(&snapshot); err != nil {
++		t.Fatal(err)
++	}
++	return snapshot
++}
++
++func serviceMutationMemory(id string) *domain.Memory {
++	return &domain.Memory{ID: id, Content: "service mutation fixture", MemoryType: domain.TypePinned, State: domain.StateActive, Version: 1}
++}
++
++func TestServiceMemoryMutationRejectsMissingScopeBeforeDatabase(t *testing.T) {
++	for _, scope := range []domain.NamespaceScope{
++		{PrincipalType: "service", PrincipalID: testutil.TestPrincipalID},
++		{PrincipalType: "service", NamespaceID: testutil.TestNamespaceID},
++	} {
++		repo := NewMemoryRepo(nil, false, "", scope)
++		if err := repo.Create(context.Background(), serviceMutationMemory("91000000-0000-4000-8000-000000000101")); !errors.Is(err, domain.ErrServiceMutationDenied) {
++			t.Fatalf("incomplete service scope reached database: %v", err)
++		}
++	}
++}
++
++func TestServiceMemoryMutatorsRevalidateScopeAtWrite(t *testing.T) {
++	const existingID = "91000000-0000-4000-8000-000000000101"
++	const createdID = "91000000-0000-4000-8000-000000000102"
++	ctx := context.Background()
++	for _, operation := range []struct {
++		name   string
++		mutate func(*MemoryRepo) error
++	}{
++		{"create", func(r *MemoryRepo) error { return r.Create(ctx, serviceMutationMemory(createdID)) }},
++		{"bulk-create", func(r *MemoryRepo) error {
++			return r.BulkCreate(ctx, []*domain.Memory{serviceMutationMemory(createdID)})
++		}},
++		{"update", func(r *MemoryRepo) error {
++			m := serviceMutationMemory(existingID)
++			m.Content = "changed"
++			return r.UpdateOptimistic(ctx, m, 1)
++		}},
++		{"delete", func(r *MemoryRepo) error { _, err := r.SoftDelete(ctx, existingID, ""); return err }},
++		{"batch-delete", func(r *MemoryRepo) error { _, err := r.BulkSoftDelete(ctx, []string{existingID}, ""); return err }},
++		{"archive", func(r *MemoryRepo) error { return r.ArchiveMemory(ctx, existingID, createdID) }},
++		{"archive-and-create", func(r *MemoryRepo) error {
++			return r.ArchiveAndCreate(ctx, existingID, createdID, serviceMutationMemory(createdID))
++		}},
++		{"set-state", func(r *MemoryRepo) error { return r.SetState(ctx, existingID, domain.StateArchived) }},
++	} {
++		t.Run(operation.name, func(t *testing.T) {
++			db := serviceMutationTestDB(t)
++			scope := testutil.TestNamespaceScope()
++			repo := NewMemoryRepo(db, false, "", scope)
++			if err := repo.Create(ctx, serviceMutationMemory(existingID)); err != nil {
++				t.Fatal(err)
++			}
++			before := serviceMutationSnapshot(t, db)
++			for _, guard := range []struct {
++				name, deny, restore string
++				id                  string
++			}{
++				{"revoked-membership", "UPDATE memory_namespace_memberships SET status='revoked' WHERE principal_id=$1", "UPDATE memory_namespace_memberships SET status='active' WHERE principal_id=$1", scope.PrincipalID},
++				{"viewer", "UPDATE memory_namespace_memberships SET role='viewer' WHERE principal_id=$1", "UPDATE memory_namespace_memberships SET role='owner' WHERE principal_id=$1", scope.PrincipalID},
++				{"wrong-source", "UPDATE memory_namespace_memberships SET source_type='operator' WHERE principal_id=$1", "UPDATE memory_namespace_memberships SET source_type='service' WHERE principal_id=$1", scope.PrincipalID},
++				{"disabled-principal", "UPDATE memory_principals SET status='disabled' WHERE principal_id=$1", "UPDATE memory_principals SET status='active' WHERE principal_id=$1", scope.PrincipalID},
++				{"wrong-principal-type", "UPDATE memory_principals SET principal_type='human' WHERE principal_id=$1", "UPDATE memory_principals SET principal_type='service' WHERE principal_id=$1", scope.PrincipalID},
++				{"disabled-namespace", "UPDATE memory_namespaces SET status='disabled' WHERE namespace_id=$1", "UPDATE memory_namespaces SET status='active' WHERE namespace_id=$1", scope.NamespaceID},
++			} {
++				t.Run(guard.name, func(t *testing.T) {
++					if _, err := db.Exec(guard.deny, guard.id); err != nil {
++						t.Fatal(err)
++					}
++					defer func() {
++						if _, err := db.Exec(guard.restore, guard.id); err != nil {
++							t.Error(err)
++						}
++					}()
++					if err := operation.mutate(repo); !errors.Is(err, domain.ErrServiceMutationDenied) {
++						t.Fatalf("revoked write returned %v", err)
++					}
++					if after := serviceMutationSnapshot(t, db); after != before {
++						t.Fatal("denied service mutation changed rows")
++					}
++				})
++			}
++			if err := operation.mutate(repo); err != nil {
++				t.Fatalf("active service write rejected: %v", err)
++			}
++		})
++	}
++}
++
++func TestServiceMemoryMutationRollbackAndLocalTimeouts(t *testing.T) {
++	db := serviceMutationTestDB(t)
++	ctx := context.Background()
++	scope := testutil.TestNamespaceScope()
++	repo := NewMemoryRepo(db, false, "", scope)
++	const id = "91000000-0000-4000-8000-000000000103"
++	if err := repo.Create(ctx, serviceMutationMemory(id)); err != nil {
++		t.Fatal(err)
++	}
++	before := serviceMutationSnapshot(t, db)
++	if err := repo.ArchiveAndCreate(ctx, id, id, serviceMutationMemory(id)); err == nil {
++		t.Fatal("duplicate replacement unexpectedly committed")
++	}
++	if serviceMutationSnapshot(t, db) != before {
++		t.Fatal("failed replacement left its archive committed")
++	}
++	if err := repo.BulkCreate(ctx, []*domain.Memory{serviceMutationMemory("91000000-0000-4000-8000-000000000104"), serviceMutationMemory(id)}); !errors.Is(err, domain.ErrDuplicateKey) {
++		t.Fatalf("duplicate bulk result: %v", err)
++	}
++	if serviceMutationSnapshot(t, db) != before {
++		t.Fatal("failed bulk insert partially committed")
++	}
++	deadline, cancel := context.WithTimeout(ctx, 2*time.Second)
++	defer cancel()
++	if _, err := db.ExecContext(deadline, "UPDATE memory_namespace_memberships SET role='member' WHERE principal_id=$1", scope.PrincipalID); err != nil {
++		t.Fatalf("failed transaction retained membership locks: %v", err)
++	}
++	tx, err := repo.beginMemoryMutation(ctx)
++	if err != nil {
++		t.Fatal(err)
++	}
++	defer tx.Rollback()
++	var lock, statement, idle string
++	if err := tx.QueryRow(`SELECT current_setting('lock_timeout'),current_setting('statement_timeout'),current_setting('idle_in_transaction_session_timeout')`).Scan(&lock, &statement, &idle); err != nil {
++		t.Fatal(err)
++	}
++	if lock != "5s" || statement != "30s" || idle != "35s" {
++		t.Fatalf("mutation timeouts: %s %s %s", lock, statement, idle)
++	}
++}
++
++func TestServiceMemoryFencePreservesOtherPrincipalTypes(t *testing.T) {
++	for _, principalType := range []string{"human", "m2m", ""} {
++		t.Run(principalType, func(t *testing.T) {
++			db := serviceMutationTestDB(t)
++			scope := testutil.TestNamespaceScope()
++			scope.PrincipalType = principalType
++			if _, err := db.Exec("UPDATE memory_namespace_memberships SET status='revoked' WHERE principal_id=$1", scope.PrincipalID); err != nil {
++				t.Fatal(err)
++			}
++			// A blank principal type is used by the accepted durable-job factory.
++			if err := NewMemoryRepo(db, false, "", scope).Create(context.Background(), serviceMutationMemory("91000000-0000-4000-8000-000000000105")); err != nil {
++				t.Fatalf("non-REST-service behavior changed: %v", err)
++			}
++		})
++	}
++}
++
++// Memory DELETE fallback and mixed batch deletion also mutate raw sessions.
++// Their second data transaction must not reuse an earlier authorization result.
++func TestServiceSessionDeleteRevalidatesScope(t *testing.T) {
++	for _, bulk := range []bool{false, true} {
++		name := "single"
++		if bulk {
++			name = "batch"
++		}
++		t.Run(name, func(t *testing.T) {
++			db := serviceMutationTestDB(t)
++			scope := testutil.TestNamespaceScope()
++			repo := NewSessionDeleteRepo(db, scope)
++			const id = "91000000-0000-4000-8000-000000000106"
++			testutil.InsertSessionRow(t, db, id, domain.StateActive, time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC))
++			beforeState, beforeTime := testutil.SessionRowState(t, db, id)
++			mutate := func() (int64, error) {
++				if bulk {
++					return repo.BulkSoftDelete(context.Background(), []string{id}, "")
++				}
++				return repo.SoftDelete(context.Background(), id, "")
++			}
++			for _, deny := range []string{
++				"UPDATE memory_namespace_memberships SET status='revoked' WHERE principal_id=$1",
++				"UPDATE memory_namespace_memberships SET role='viewer' WHERE principal_id=$1",
++				"UPDATE memory_namespace_memberships SET source_type='operator' WHERE principal_id=$1",
++			} {
++				if _, err := db.Exec(deny, scope.PrincipalID); err != nil {
++					t.Fatal(err)
++				}
++				if _, err := mutate(); !errors.Is(err, domain.ErrServiceMutationDenied) {
++					t.Fatalf("session mutation bypassed service fence: %v", err)
++				}
++				state, timestamp := testutil.SessionRowState(t, db, id)
++				if state != beforeState || !timestamp.Equal(beforeTime) {
++					t.Fatal("denied session deletion changed rows")
++				}
++				if _, err := db.Exec("UPDATE memory_namespace_memberships SET status='active',role='owner',source_type='service' WHERE principal_id=$1", scope.PrincipalID); err != nil {
++					t.Fatal(err)
++				}
++			}
++			if count, err := mutate(); err != nil || count != 1 {
++				t.Fatalf("active service session deletion: count=%d err=%v", count, err)
++			}
++		})
++	}
++}
+diff --git a/server/internal/repository/postgres/session_delete.go b/server/internal/repository/postgres/session_delete.go
+index 74a6b00de9a31adaec412d9ddc21a18778671cef..9cf7631dd2ea158768e5468c2272209e81093c85 100644
+--- a/server/internal/repository/postgres/session_delete.go
++++ b/server/internal/repository/postgres/session_delete.go
+@@ -15,13 +15,15 @@ import (
+ // SessionDeleteRepo supplies the PostgreSQL raw-session deletion methods.
+ // Other SessionRepo capabilities remain unsupported by the factory adapter.
+ type SessionDeleteRepo struct {
+-	db          *sql.DB
+-	namespaceID string
+-	principalID string
++	mutationScope *MemoryRepo
++	namespaceID   string
++	principalID   string
+ }
+ 
+ func NewSessionDeleteRepo(db *sql.DB, scopes ...domain.NamespaceScope) *SessionDeleteRepo {
+-	repo := &SessionDeleteRepo{db: db}
++	// Reuse the same service data-transaction fence for the session phase of
++	// memory DELETE fallback and mixed memory/session batch deletion.
++	repo := &SessionDeleteRepo{mutationScope: NewMemoryRepo(db, false, "", scopes...)}
+ 	if len(scopes) > 0 {
+ 		repo.namespaceID = scopes[0].NamespaceID
+ 		repo.principalID = scopes[0].PrincipalID
+@@ -30,7 +32,7 @@ func NewSessionDeleteRepo(db *sql.DB, scopes ...domain.NamespaceScope) *SessionD
+ }
+ 
+ func (r *SessionDeleteRepo) SoftDelete(ctx context.Context, id, _ string) (int64, error) {
+-	tx, err := r.db.BeginTx(ctx, nil)
++	tx, err := r.mutationScope.beginMemoryMutation(ctx)
+ 	if err != nil {
+ 		return 0, fmt.Errorf("session soft delete begin tx: %w", err)
+ 	}
+@@ -112,7 +114,9 @@ func (r *SessionDeleteRepo) BulkSoftDelete(
+ 		query += fmt.Sprintf(" AND namespace_id = $%d", len(args)+1)
+ 		args = append(args, r.namespaceID)
+ 	}
+-	result, err := r.db.ExecContext(ctx, query, args...)
++	result, err := r.mutationScope.serviceMutation(ctx, func(executor memoryMutationExecutor) (sql.Result, error) {
++		return executor.ExecContext(ctx, query, args...)
++	})
+ 	if err != nil {
+ 		if isUndefinedTableError(err) {
+ 			return 0, nil

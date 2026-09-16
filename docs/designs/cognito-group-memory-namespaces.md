@@ -907,6 +907,38 @@ cannot inherit an owner-wide exception.
 
 ## Maintenance State
 
+### Scoped maintenance implementation
+
+Maintenance services use separate signing credentials from the Gateway and from
+each other. The fixed issuers `maintenance:consolidation`, `maintenance:cleanup`,
+and `maintenance:analysis` each bind one deterministic service principal key.
+Each principal needs an explicit active `service` membership in the namespace
+being processed. A signed service envelope includes exactly one namespace and
+binds the HTTP method, URI, and body. Service credentials cannot sign human/M2M
+requests or impersonate a different service. There is no service JIT enrollment.
+
+Direct database adapters authenticate with the trusted task/operator database
+credentials, bind their fixed service identity, and authorize each operation
+against the namespace, principal, and membership in the same transaction as its
+SQL. Lock acquisition is ordered namespace, principal, membership; writes keep
+those locks until commit and set the updating principal. A disabled service or
+namespace cannot start another content-bearing operation. Operators with database
+administrator credentials remain trusted; these application guards do not claim
+to restrict arbitrary administrator SQL in the absence of RLS.
+
+One runner processes one namespace. A scheduler dispatcher can consume an
+explicit private list of namespace targets, starting an isolated child runner
+for each and continuing after an independent target failure. Empty or invalid
+target configuration cannot enable a scheduled apply. The shared task definition
+defaults to report-only; live apply and scheduling remain explicit choices.
+
+Cleanup, restoration, consolidation, model inputs, and local reports all retain
+the captured namespace. Database mutexes include stage and namespace, and digest
+objects and their serialized identity include both. Console/CloudWatch output
+contains bounded operation kinds and counts; content-bearing operator reports
+are written only to owner-only files. Slack approval and scheduled cleanup scans
+remain unavailable until their separate namespace/destination contract is built.
+
 ### Consolidation
 
 Current v1 state: absent from the SST application graph and CI deployment

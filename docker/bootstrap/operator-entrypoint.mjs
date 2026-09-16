@@ -176,6 +176,12 @@ export async function main() {
       await chmod(identityPath, 0o600);
     }
 
+    if (["service-enable", "service-disable", "service-show"].includes(OPERATION)) {
+      if (!configPath) throw new Error("service binding configuration is required");
+      await run(`${SCRIPT_ROOT}/manage-memory-services.mjs`,
+        [OPERATION.slice("service-".length), "--config", configPath], env);
+      return;
+    }
     if (OPERATION === "namespace-reconcile") {
       if (env.MEM9_AUTH_MODE !== "oidc")
         requireEnv("MEM9_COGNITO_USER_POOL_ID");

@@ -23,6 +23,8 @@
     "@aws-sdk/client-sns": "^3.1109.0",
     "@aws-sdk/credential-providers": "^3.1109.0",
     "@aws/bedrock-token-generator": "^1.1.0",
+    "@babel/parser": "7.29.8",
+    "@babel/traverse": "7.29.7",
     "@types/node": "^24.13.3",
     "@vitest/coverage-v8": "^4.1.10",
     "playwright": "1.63.0",

@@ -1,0 +1,717 @@
+diff --git a/server/internal/ingestqueue/types.go b/server/internal/ingestqueue/types.go
+index 5ff7ad6954ea4ac3269c17afe17ca2e6e47ac826..fb0c827f01b6458c4ad02954949272978595b0b1 100644
+--- a/server/internal/ingestqueue/types.go
++++ b/server/internal/ingestqueue/types.go
+@@ -51,6 +51,8 @@ const (
+ )
+ 
+ var (
++	ErrSamplerScopeDenied       = errors.New("sampler namespace access denied")
++	ErrSamplerNotEnforced       = errors.New("namespace sampling requires completed enforcement")
+ 	ErrLeaseLost                = errors.New("ingest job lease lost")
+ 	ErrProcessorUnavailable     = errors.New("durable ingest processor unavailable")
+ 	ErrCanonicalPayloadTooLarge = errors.New("canonical ingest payload too large")
+@@ -192,7 +194,9 @@ type Processor interface {
+ type Repository interface {
+ 	Enqueue(context.Context, EnqueueInput) (*Job, error)
+ 	Get(context.Context, string, string, string) (*Job, error)
+-	OldestQueuedAge(context.Context, string) (time.Duration, bool, error)
++	InitializeSamplerMemberships(context.Context) error
++	ListActiveNamespaces(context.Context) ([]string, error)
++	OldestQueuedAge(context.Context, string, string) (time.Duration, bool, error)
+ 	Claim(context.Context, string, string, time.Duration, int) (*Job, error)
+ 	StartPlanning(context.Context, LeaseRef) error
+ 	NextPlanRevision(context.Context, LeaseRef) (int, error)
+diff --git a/server/internal/ingestqueue/worker.go b/server/internal/ingestqueue/worker.go
+index 74f98896b333bc1fcb758b62c67f92d34161b724..a2a86873181fae4603c071bd756e2d53d0acf6d1 100644
+--- a/server/internal/ingestqueue/worker.go
++++ b/server/internal/ingestqueue/worker.go
+@@ -224,24 +224,46 @@ func (w *Worker) sampleOldestQueuedAge(ctx context.Context) {
+ 	w.config.Telemetry.SamplerHeartbeat()
+ 	sampleCtx, cancel := context.WithTimeout(ctx, queueAgeSampleTimeout)
+ 	defer cancel()
+-	age, present, err := w.repo.OldestQueuedAge(sampleCtx, w.tenantID)
++	age, err := w.namespaceQueueAge(sampleCtx)
+ 	if err != nil {
+ 		if ctx.Err() != nil {
+ 			return
+ 		}
++		errorClass := "database_error"
++		if errors.Is(err, ErrSamplerNotEnforced) {
++			errorClass = "namespace_not_enforced"
++		}
+ 		w.logger.Error(
+ 			"durable ingest queue age sample failed",
+ 			"operation", "queue_age",
+-			"error_class", "database_error",
++			"error_class", errorClass,
+ 		)
+ 		return
+ 	}
+-	if !present {
+-		age = 0
+-	}
+ 	w.config.Telemetry.QueueAge(age)
+ }
+ 
++// Namespace enumeration reads only control-plane metadata. Publish an aggregate
++// only after every authorized namespace sample succeeds: a partial maximum can
++// understate backlog just as a false zero can.
++func (w *Worker) namespaceQueueAge(ctx context.Context) (time.Duration, error) {
++	namespaces, err := w.repo.ListActiveNamespaces(ctx)
++	if err != nil {
++		return 0, err
++	}
++	var oldest time.Duration
++	for _, namespaceID := range namespaces {
++		age, present, err := w.repo.OldestQueuedAge(ctx, w.tenantID, namespaceID)
++		if err != nil {
++			return 0, err
++		}
++		if present && age > oldest {
++			oldest = age
++		}
++	}
++	return oldest, nil
++}
++
+ type attemptTelemetry struct {
+ 	startedAt        time.Time
+ 	queueWait        time.Duration
+diff --git a/server/internal/ingestqueue/worker_test.go b/server/internal/ingestqueue/worker_test.go
+index b8e1f4cf0720e4d6279a87a318d0c6e257930d05..91219ce3ceb038d65e3d52c2031b2c544f112c20 100644
+--- a/server/internal/ingestqueue/worker_test.go
++++ b/server/internal/ingestqueue/worker_test.go
+@@ -19,30 +19,39 @@ import (
+ 
+ type fakeRepo struct {
+ 	Repository
+-	claimCalls atomic.Int32
+-	claim      func(context.Context, string, string, time.Duration, int) (*Job, error)
+-	transition func(context.Context, LeaseRef) error
+-	nextPlan   func(context.Context, LeaseRef) (int, error)
+-	loadPlan   func(context.Context, LeaseRef) (*AtomicPlan, error)
+-	savePlan   func(context.Context, LeaseRef, AtomicPlan) error
+-	resumePlan func(context.Context, LeaseRef, AtomicPlan) error
+-	stalePlan  func(context.Context, LeaseRef, AtomicPlan) error
+-	applyPlan  func(context.Context, LeaseRef, AtomicPlan) (ApplyResult, error)
+-	fail       func(context.Context, LeaseRef, Failure) error
+-	heartbeat  func(context.Context, LeaseRef, time.Duration) error
+-	complete   func(context.Context, LeaseRef) error
+-	replace    func(context.Context, LeaseRef, RuntimeReservation) error
+-	oldestAge  func(context.Context, string) (time.Duration, bool, error)
++	claimCalls     atomic.Int32
++	claim          func(context.Context, string, string, time.Duration, int) (*Job, error)
++	transition     func(context.Context, LeaseRef) error
++	nextPlan       func(context.Context, LeaseRef) (int, error)
++	loadPlan       func(context.Context, LeaseRef) (*AtomicPlan, error)
++	savePlan       func(context.Context, LeaseRef, AtomicPlan) error
++	resumePlan     func(context.Context, LeaseRef, AtomicPlan) error
++	stalePlan      func(context.Context, LeaseRef, AtomicPlan) error
++	applyPlan      func(context.Context, LeaseRef, AtomicPlan) (ApplyResult, error)
++	fail           func(context.Context, LeaseRef, Failure) error
++	heartbeat      func(context.Context, LeaseRef, time.Duration) error
++	complete       func(context.Context, LeaseRef) error
++	replace        func(context.Context, LeaseRef, RuntimeReservation) error
++	oldestAge      func(context.Context, string, string) (time.Duration, bool, error)
++	listNamespaces func(context.Context) ([]string, error)
++}
++
++func (r *fakeRepo) ListActiveNamespaces(ctx context.Context) ([]string, error) {
++	if r.listNamespaces != nil {
++		return r.listNamespaces(ctx)
++	}
++	return []string{"namespace-a"}, nil
+ }
+ 
+ func (r *fakeRepo) OldestQueuedAge(
+ 	ctx context.Context,
+ 	tenantID string,
++	namespaceID string,
+ ) (time.Duration, bool, error) {
+ 	if r.oldestAge == nil {
+ 		return 0, false, nil
+ 	}
+-	return r.oldestAge(ctx, tenantID)
++	return r.oldestAge(ctx, tenantID, namespaceID)
+ }
+ 
+ func (r *fakeRepo) Claim(ctx context.Context, tenant, owner string, lease time.Duration, max int) (*Job, error) {
+@@ -1723,7 +1732,7 @@ func TestWorkerSamplesDatabaseClockQueueAge(t *testing.T) {
+ 	}
+ 	samples := 0
+ 	repo := &fakeRepo{
+-		oldestAge: func(_ context.Context, tenantID string) (time.Duration, bool, error) {
++		oldestAge: func(_ context.Context, tenantID, namespaceID string) (time.Duration, bool, error) {
+ 			if tenantID != "PRIVATE-TENANT-MARKER" {
+ 				t.Fatalf("queue age tenant = %q", tenantID)
+ 			}
+@@ -1766,7 +1775,7 @@ func TestWorkerQueueAgeSamplerCannotBlockClaims(t *testing.T) {
+ 	samplerStarted := make(chan time.Duration, 1)
+ 	claimCalled := make(chan struct{})
+ 	repo := &fakeRepo{
+-		oldestAge: func(sampleCtx context.Context, _ string) (time.Duration, bool, error) {
++		oldestAge: func(sampleCtx context.Context, _, _ string) (time.Duration, bool, error) {
+ 			deadline, ok := sampleCtx.Deadline()
+ 			if !ok {
+ 				samplerStarted <- 0
+diff --git a/server/internal/repository/postgres/ingest_job.go b/server/internal/repository/postgres/ingest_job.go
+index 858a289001844efddf6ba1cbf64bbdbaf7befd2f..0c93e1dfe7a6cd7fcb172508cd5e0d5261ebcfed 100644
+--- a/server/internal/repository/postgres/ingest_job.go
++++ b/server/internal/repository/postgres/ingest_job.go
+@@ -246,30 +246,6 @@ func (r *IngestJobRepo) Get(
+ 	return job, nil
+ }
+ 
+-func (r *IngestJobRepo) OldestQueuedAge(
+-	ctx context.Context,
+-	tenantID string,
+-) (time.Duration, bool, error) {
+-	var seconds sql.NullFloat64
+-	err := r.db.QueryRowContext(ctx, `
+-		SELECT EXTRACT(EPOCH FROM (statement_timestamp() - MIN(created_at)))
+-		FROM ingest_jobs
+-		WHERE tenant_id = $1 AND state IN ('queued', 'retry_wait')`,
+-		tenantID,
+-	).Scan(&seconds)
+-	if err != nil {
+-		return 0, false, fmt.Errorf("select oldest queued ingest age: %w", err)
+-	}
+-	if !seconds.Valid {
+-		return 0, false, nil
+-	}
+-	age := time.Duration(seconds.Float64 * float64(time.Second))
+-	if age < 0 {
+-		age = 0
+-	}
+-	return age, true, nil
+-}
+-
+ func (r *IngestJobRepo) Claim(
+ 	ctx context.Context,
+ 	tenantID string,
+diff --git a/server/internal/repository/postgres/ingest_job_integration_test.go b/server/internal/repository/postgres/ingest_job_integration_test.go
+index 0848454641b012b8878e078d9561c88384d92554..103e60df9f67617a46b0d21cf76711fc08a1050b 100644
+--- a/server/internal/repository/postgres/ingest_job_integration_test.go
++++ b/server/internal/repository/postgres/ingest_job_integration_test.go
+@@ -250,6 +250,7 @@ func TestIngestJobEnqueueUniqueRaceAndTenantIsolation(t *testing.T) {
+ 
+ func TestIngestJobOldestQueuedAgeUsesDatabaseClock(t *testing.T) {
+ 	db := ingestTestDB(t)
++	seedSamplerAccess(t, db)
+ 	repo := NewIngestJobRepo(db)
+ 	oldest := enqueueJob(t, repo, enqueueInput(
+ 		"tenant-a",
+@@ -273,7 +274,7 @@ func TestIngestJobOldestQueuedAgeUsesDatabaseClock(t *testing.T) {
+ 		t.Fatal(err)
+ 	}
+ 
+-	age, ok, err := repo.OldestQueuedAge(context.Background(), "tenant-a")
++	age, ok, err := repo.OldestQueuedAge(context.Background(), "tenant-a", testutil.TestNamespaceID)
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+diff --git a/server/internal/ingestqueue/namespace_sampler_test.go b/server/internal/ingestqueue/namespace_sampler_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..cd1e7f8abcdd367988b2c988d20961103a11db31
+--- /dev/null
++++ b/server/internal/ingestqueue/namespace_sampler_test.go
+@@ -0,0 +1,93 @@
++package ingestqueue
++
++import (
++	"bytes"
++	"context"
++	"errors"
++	"log/slog"
++	"strings"
++	"testing"
++	"time"
++)
++
++func TestNamespaceSamplerAggregateRequiresEverySample(t *testing.T) {
++	for _, scenario := range []string{"maximum", "empty", "partial", "enumeration", "compatibility", "all-empty"} {
++		t.Run(scenario, func(t *testing.T) {
++			var output, logs bytes.Buffer
++			calls := 0
++			repo := &fakeRepo{
++				listNamespaces: func(context.Context) ([]string, error) {
++					if scenario == "compatibility" {
++						return nil, ErrSamplerNotEnforced
++					}
++					if scenario == "enumeration" {
++						return nil, errors.New("private-enumeration-error")
++					}
++					if scenario == "empty" {
++						return nil, nil
++					}
++					return []string{"private-namespace-a", "private-namespace-b"}, nil
++				},
++				oldestAge: func(ctx context.Context, tenant, namespace string) (time.Duration, bool, error) {
++					calls++
++					if tenant != "private-tenant" {
++						t.Fatalf("wrong tenant: %s", tenant)
++					}
++					if _, ok := ctx.Deadline(); !ok {
++						t.Fatal("missing sample deadline")
++					}
++					if scenario == "all-empty" {
++						return 0, false, nil
++					}
++					if namespace == "private-namespace-a" {
++						return 3 * time.Minute, true, nil
++					}
++					if namespace != "private-namespace-b" {
++						t.Fatalf("wrong namespace: %s", namespace)
++					}
++					if scenario == "partial" {
++						return 0, false, errors.New("private-database-error")
++					}
++					return 11 * time.Minute, true, nil
++				},
++			}
++			cfg := DefaultWorkerConfig()
++			cfg.Telemetry = NewEMFTelemetry("prod", &output, nil)
++			worker := NewWorker(repo, fakeProcessor{}, "private-tenant", "worker-a", cfg, slog.New(slog.NewTextHandler(&logs, nil)))
++			worker.sampleOldestQueuedAge(context.Background())
++			records := telemetryRecords(t, output.String())
++			if len(records) == 0 || records[0]["SamplerHeartbeat"] != float64(1) {
++				t.Fatal("missing heartbeat")
++			}
++			failed := scenario == "partial" || scenario == "enumeration" || scenario == "compatibility"
++			if failed {
++				if len(records) != 1 {
++					t.Fatalf("partial sample emitted authoritative age: %s", output.String())
++				}
++				if logs.Len() == 0 {
++					t.Fatal("failure was not reported")
++				}
++				if scenario == "compatibility" && !strings.Contains(logs.String(), "namespace_not_enforced") {
++					t.Fatal("compatibility sampling failure lacks its bounded error class")
++				}
++			} else {
++				want := float64(0)
++				if scenario == "maximum" {
++					want = float64((11 * time.Minute).Milliseconds())
++				}
++				if len(records) != 2 || records[1]["OldestQueuedAgeMs"] != want {
++					t.Fatalf("bad aggregate: %s", output.String())
++				}
++				if !hasMetricDirective(records[1], []string{"stage"}, "OldestQueuedAgeMs") {
++					t.Fatal("age dimension is not stage-only")
++				}
++			}
++			if (scenario == "maximum" || scenario == "partial" || scenario == "all-empty") && calls != 2 {
++				t.Fatalf("only %d namespace samples", calls)
++			}
++			if strings.Contains(output.String()+logs.String(), "private-") {
++				t.Fatal("sampler exposed private identifiers or error text")
++			}
++		})
++	}
++}
+diff --git a/server/internal/repository/postgres/namespace_sampler.go b/server/internal/repository/postgres/namespace_sampler.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..0b3246644520881e307dcb3e786213fe3f21fe5e
+--- /dev/null
++++ b/server/internal/repository/postgres/namespace_sampler.go
+@@ -0,0 +1,176 @@
++package postgres
++
++import (
++	"context"
++	"crypto/sha256"
++	"database/sql"
++	"errors"
++	"fmt"
++	"time"
++
++	"github.com/google/uuid"
++
++	"github.com/qiffang/mnemos/server/internal/ingestqueue"
++)
++
++func samplerPrincipalKey() string {
++	return fmt.Sprintf("%x", sha256.Sum256([]byte("mem9-service-principal-v1\x00sampler")))
++}
++
++// InitializeSamplerMemberships is startup/bootstrap initialization, never JIT
++// during a sample. It shares the Node reconciler's lifecycle lock and preserves
++// every pre-existing principal status and membership, including tombstones.
++func (r *IngestJobRepo) InitializeSamplerMemberships(ctx context.Context) error {
++	tx, err := r.db.BeginTx(ctx, nil)
++	if err != nil {
++		return fmt.Errorf("begin sampler initialization: %w", err)
++	}
++	defer tx.Rollback()
++	if _, err := tx.ExecContext(ctx, `SELECT pg_advisory_xact_lock(hashtext('mem9-namespace-reconcile-v1'))`); err != nil {
++		return fmt.Errorf("lock sampler initialization: %w", err)
++	}
++	rows, err := tx.QueryContext(ctx, `SELECT namespace_id FROM memory_namespaces
++		WHERE status='active' ORDER BY namespace_id FOR NO KEY UPDATE`)
++	if err != nil {
++		return fmt.Errorf("lock sampler namespaces: %w", err)
++	}
++	var namespaceIDs []string
++	for rows.Next() {
++		var namespaceID string
++		if err := rows.Scan(&namespaceID); err != nil {
++			rows.Close()
++			return fmt.Errorf("read sampler namespace: %w", err)
++		}
++		namespaceIDs = append(namespaceIDs, namespaceID)
++	}
++	err = rows.Err()
++	rows.Close()
++	if err != nil {
++		return fmt.Errorf("read sampler namespaces: %w", err)
++	}
++	key := samplerPrincipalKey()
++	if _, err := tx.ExecContext(ctx, `INSERT INTO memory_principals (principal_id, principal_key, principal_type, status)
++		VALUES ($1, $2, 'service', 'active') ON CONFLICT (principal_key) DO NOTHING`, uuid.NewString(), key); err != nil {
++		return fmt.Errorf("initialize sampler principal: %w", err)
++	}
++	var principalID, principalType, status string
++	if err := tx.QueryRowContext(ctx, `SELECT principal_id, principal_type, status FROM memory_principals
++		WHERE principal_key=$1 FOR NO KEY UPDATE`, key).Scan(&principalID, &principalType, &status); err != nil {
++		return fmt.Errorf("read sampler principal: %w", err)
++	}
++	if principalType != "service" {
++		return ingestqueue.ErrSamplerScopeDenied
++	}
++	if status == "active" {
++		for _, namespaceID := range namespaceIDs {
++			if _, err := tx.ExecContext(ctx, `INSERT INTO memory_namespace_memberships
++				(namespace_id, principal_id, role, status, source_type)
++				VALUES ($1, $2, 'viewer', 'active', 'service')
++				ON CONFLICT (namespace_id, principal_id) DO NOTHING`, namespaceID, principalID); err != nil {
++				return fmt.Errorf("initialize sampler membership: %w", err)
++			}
++		}
++	}
++	if err := tx.Commit(); err != nil {
++		return fmt.Errorf("commit sampler initialization: %w", err)
++	}
++	return nil
++}
++
++// ListActiveNamespaces is metadata-only coordination. It deliberately does not
++// hide namespaces with missing/revoked sampler access: those must make the
++// aggregate fail instead of silently excluding their backlog.
++func (r *IngestJobRepo) ListActiveNamespaces(ctx context.Context) ([]string, error) {
++	// Before enforcement, legacy NULL-namespace jobs may exist outside every
++	// registered namespace. Suppress the whole aggregate rather than publish a
++	// false healthy zero or widen this sampler into a tenant-wide queue reader.
++	var phase string
++	if err := r.db.QueryRowContext(ctx, `SELECT phase FROM memory_namespace_migration_state
++		WHERE singleton_id`).Scan(&phase); err != nil {
++		return nil, fmt.Errorf("inspect sampler namespace enforcement: %w", err)
++	}
++	if phase != "constraints_complete" {
++		return nil, ingestqueue.ErrSamplerNotEnforced
++	}
++	rows, err := r.db.QueryContext(ctx, `
++		SELECT namespace_id FROM memory_namespaces
++		WHERE status = 'active' ORDER BY namespace_id`)
++	if err != nil {
++		return nil, fmt.Errorf("list sampler namespaces: %w", err)
++	}
++	defer rows.Close()
++	var namespaces []string
++	for rows.Next() {
++		var namespaceID string
++		if err := rows.Scan(&namespaceID); err != nil {
++			return nil, fmt.Errorf("read sampler namespace: %w", err)
++		}
++		namespaces = append(namespaces, namespaceID)
++	}
++	if err := rows.Err(); err != nil {
++		return nil, fmt.Errorf("list sampler namespaces: %w", err)
++	}
++	return namespaces, nil
++}
++
++// OldestQueuedAge never accepts a caller-selected principal or an implicit
++// tenant-wide scope. The in-process sampler authenticates with its trusted DB
++// connection and binds the fixed sampler service identity, without a REST key.
++func (r *IngestJobRepo) OldestQueuedAge(ctx context.Context, tenantID, namespaceID string) (time.Duration, bool, error) {
++	if tenantID == "" || namespaceID == "" {
++		return 0, false, ingestqueue.ErrSamplerScopeDenied
++	}
++	tx, err := r.db.BeginTx(ctx, nil)
++	if err != nil {
++		return 0, false, fmt.Errorf("begin sampler read: %w", err)
++	}
++	defer tx.Rollback()
++	// Hold authorization rows in the shared lifecycle lock order through the
++	// read. Revoke/disable must wait for an already-authorized sample to finish.
++	var found string
++	if err := tx.QueryRowContext(ctx, `
++		SELECT namespace_id FROM memory_namespaces
++		WHERE namespace_id = $1 AND status = 'active' FOR SHARE`, namespaceID).Scan(&found); err != nil {
++		return 0, false, samplerAuthorizationError(err)
++	}
++	principalKey := samplerPrincipalKey()
++	var principalID string
++	if err := tx.QueryRowContext(ctx, `
++		SELECT principal_id FROM memory_principals
++		WHERE principal_key = $1 AND principal_type = 'service'
++		  AND status = 'active' FOR SHARE`, principalKey).Scan(&principalID); err != nil {
++		return 0, false, samplerAuthorizationError(err)
++	}
++	if err := tx.QueryRowContext(ctx, `
++		SELECT role FROM memory_namespace_memberships
++		WHERE namespace_id = $1 AND principal_id = $2 AND status = 'active'
++		  AND source_type = 'service' AND role IN ('viewer', 'member', 'owner')
++		FOR SHARE`, namespaceID, principalID).Scan(&found); err != nil {
++		return 0, false, samplerAuthorizationError(err)
++	}
++	var seconds sql.NullFloat64
++	if err := tx.QueryRowContext(ctx, `
++		SELECT EXTRACT(EPOCH FROM (statement_timestamp() - MIN(created_at)))
++		FROM ingest_jobs
++		WHERE tenant_id = $1 AND namespace_id = $2 AND state IN ('queued', 'retry_wait')`, tenantID, namespaceID).Scan(&seconds); err != nil {
++		return 0, false, fmt.Errorf("select namespace queued age: %w", err)
++	}
++	if err := tx.Commit(); err != nil {
++		return 0, false, fmt.Errorf("commit sampler read: %w", err)
++	}
++	if !seconds.Valid {
++		return 0, false, nil
++	}
++	age := time.Duration(seconds.Float64 * float64(time.Second))
++	if age < 0 {
++		age = 0
++	}
++	return age, true, nil
++}
++
++func samplerAuthorizationError(err error) error {
++	if errors.Is(err, sql.ErrNoRows) {
++		return ingestqueue.ErrSamplerScopeDenied
++	}
++	return fmt.Errorf("authorize sampler read: %w", err)
++}
+diff --git a/server/internal/repository/postgres/namespace_sampler_test.go b/server/internal/repository/postgres/namespace_sampler_test.go
+new file mode 100644
+index 0000000000000000000000000000000000000000..34c2e51dfd48f76f2547c44d1a9ab2934bfc4a88
+--- /dev/null
++++ b/server/internal/repository/postgres/namespace_sampler_test.go
+@@ -0,0 +1,217 @@
++package postgres
++
++import (
++	"context"
++	"crypto/sha256"
++	"database/sql"
++	"errors"
++	"fmt"
++	"testing"
++	"time"
++
++	"github.com/qiffang/mnemos/server/internal/ingestqueue"
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++const samplerTestPrincipalID = "70000000-0000-4000-8000-000000000105"
++
++func seedSamplerAccess(t *testing.T, db *sql.DB) {
++	t.Helper()
++	key := fmt.Sprintf("%x", sha256.Sum256([]byte("mem9-service-principal-v1\x00sampler")))
++	if _, err := db.Exec(`INSERT INTO memory_principals (principal_id, principal_key, principal_type, status)
++		VALUES ($1, $2, 'service', 'active') ON CONFLICT DO NOTHING`, samplerTestPrincipalID, key); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.Exec(`INSERT INTO memory_namespace_memberships (namespace_id, principal_id, role, status, source_type)
++		SELECT namespace_id, $1, 'viewer', 'active', 'service' FROM memory_namespaces
++		ON CONFLICT DO NOTHING`, samplerTestPrincipalID); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func TestNamespaceSamplerRequiresScopeBeforeDatabase(t *testing.T) {
++	if _, _, err := NewIngestJobRepo(nil).OldestQueuedAge(context.Background(), "tenant-a", ""); !errors.Is(err, ingestqueue.ErrSamplerScopeDenied) {
++		t.Fatal("missing namespace was accepted")
++	}
++}
++
++func TestNamespaceSamplerCompatibilityBacklogFailsClosed(t *testing.T) {
++	for _, activeNamespaces := range []bool{false, true} {
++		t.Run(fmt.Sprintf("active_namespaces_%v", activeNamespaces), func(t *testing.T) {
++			db := ingestTestDB(t)
++			// Recreate additive nullability only in this isolated migrated clone.
++			// The supplied fully enforced template is never modified.
++			if _, err := db.Exec(`
++				ALTER TABLE ingest_jobs DROP CONSTRAINT ingest_jobs_pkey CASCADE;
++				ALTER TABLE ingest_jobs ALTER COLUMN namespace_id DROP NOT NULL,
++				  ALTER COLUMN principal_id DROP NOT NULL;
++				ALTER TABLE ingest_jobs ADD PRIMARY KEY (job_id);
++				UPDATE memory_namespace_migration_state SET phase='additive_ready',
++				  checkpoint=NULL, legacy_namespace_id=NULL, legacy_principal_id=NULL,
++				  legacy_namespace_slug=NULL, legacy_namespace_display_name=NULL,
++				  legacy_principal_key=NULL WHERE singleton_id;
++				INSERT INTO ingest_jobs (job_id, tenant_id, idempotency_key, canonical_payload, state, created_at)
++				VALUES ('80000000-0000-4000-8000-000000000105', 'sampler-compat-fixture',
++				  repeat('c',64), convert_to('{}','UTF8'), 'queued', statement_timestamp()-interval '31 minutes');
++			`); err != nil {
++				t.Fatal(err)
++			}
++			if !activeNamespaces {
++				if _, err := db.Exec(`UPDATE memory_namespaces SET status='disabled'`); err != nil {
++					t.Fatal(err)
++				}
++			}
++			var pending int
++			if err := db.QueryRow(`SELECT count(*) FROM ingest_jobs WHERE namespace_id IS NULL AND state='queued'`).Scan(&pending); err != nil {
++				t.Fatal(err)
++			}
++			if pending != 1 {
++				t.Fatal("compatibility fixture must contain a real unscoped queued job")
++			}
++			if _, err := NewIngestJobRepo(db).ListActiveNamespaces(context.Background()); !errors.Is(err, ingestqueue.ErrSamplerNotEnforced) {
++				t.Fatalf("legacy backlog yielded an authoritative namespace sample: %v", err)
++			}
++		})
++	}
++}
++
++func TestNamespaceSamplerInitializationPreservesRevocation(t *testing.T) {
++	db := ingestTestDB(t)
++	repo := NewIngestJobRepo(db)
++	ctx := context.Background()
++	key := fmt.Sprintf("%x", sha256.Sum256([]byte("mem9-service-principal-v1\x00sampler")))
++	// Mutate only the isolated clone. The shared migrated template is untouched.
++	if _, err := db.Exec(`DELETE FROM memory_namespace_memberships WHERE principal_id IN
++		(SELECT principal_id FROM memory_principals WHERE principal_key=$1)`, key); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.Exec(`DELETE FROM memory_principals WHERE principal_key=$1`, key); err != nil {
++		t.Fatal(err)
++	}
++	if err := repo.InitializeSamplerMemberships(ctx); err != nil {
++		t.Fatal(err)
++	}
++	var principalID, principalStatus string
++	if err := db.QueryRow(`SELECT principal_id,status FROM memory_principals WHERE principal_key=$1 AND principal_type='service'`, key).Scan(&principalID, &principalStatus); err != nil {
++		t.Fatal(err)
++	}
++	if principalStatus != "active" {
++		t.Fatal("new sampler principal is not active")
++	}
++	var count, expected int
++	if err := db.QueryRow(`SELECT count(*) FROM memory_namespaces WHERE status='active'`).Scan(&expected); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.QueryRow(`SELECT count(*) FROM memory_namespace_memberships WHERE principal_id=$1 AND status='active' AND role='viewer' AND source_type='service'`, principalID).Scan(&count); err != nil {
++		t.Fatal(err)
++	}
++	if count != expected {
++		t.Fatalf("initial sampler grants=%d want=%d", count, expected)
++	}
++	if _, err := db.Exec(`UPDATE memory_namespace_memberships SET status='revoked' WHERE principal_id=$1 AND namespace_id=$2`, principalID, testutil.TestNamespaceID); err != nil {
++		t.Fatal(err)
++	}
++	if err := repo.InitializeSamplerMemberships(ctx); err != nil {
++		t.Fatal(err)
++	}
++	var status string
++	if err := db.QueryRow(`SELECT status FROM memory_namespace_memberships WHERE principal_id=$1 AND namespace_id=$2`, principalID, testutil.TestNamespaceID).Scan(&status); err != nil {
++		t.Fatal(err)
++	}
++	if status != "revoked" {
++		t.Fatal("startup reactivated a revoked membership")
++	}
++	if _, err := db.Exec(`UPDATE memory_principals SET status='disabled' WHERE principal_id=$1`, principalID); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := db.Exec(`DELETE FROM memory_namespace_memberships WHERE principal_id=$1 AND namespace_id=$2`, principalID, testutil.TestOtherNamespaceID); err != nil {
++		t.Fatal(err)
++	}
++	if err := repo.InitializeSamplerMemberships(ctx); err != nil {
++		t.Fatal(err)
++	}
++	if err := db.QueryRow(`SELECT status FROM memory_principals WHERE principal_id=$1`, principalID).Scan(&status); err != nil {
++		t.Fatal(err)
++	}
++	if status != "disabled" {
++		t.Fatal("startup reactivated a disabled principal")
++	}
++	if err := db.QueryRow(`SELECT count(*) FROM memory_namespace_memberships WHERE principal_id=$1 AND namespace_id=$2`, principalID, testutil.TestOtherNamespaceID).Scan(&count); err != nil {
++		t.Fatal(err)
++	}
++	if count != 0 {
++		t.Fatal("startup granted membership to a disabled sampler")
++	}
++}
++
++func TestNamespaceSamplerForeignOlderJobAndAuthorization(t *testing.T) {
++	db := ingestTestDB(t)
++	repo := NewIngestJobRepo(db)
++	if _, _, err := repo.OldestQueuedAge(context.Background(), "tenant-a", testutil.TestNamespaceID); !errors.Is(err, ingestqueue.ErrSamplerScopeDenied) {
++		t.Fatalf("missing sampler identity was accepted: %v", err)
++	}
++	seedSamplerAccess(t, db)
++	input := enqueueInput("tenant-a", "session-a", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
++	a := enqueueJob(t, repo, input)
++	input.ID = "00000000-0000-4000-8000-000000000002"
++	input.NamespaceID = testutil.TestOtherNamespaceID
++	input.PrincipalID = testutil.TestOtherPrincipalID
++	input.IdempotencyKey = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
++	b := enqueueJob(t, repo, input)
++	for _, item := range []struct {
++		id      string
++		minutes int
++	}{{a.ID, 3}, {b.ID, 31}} {
++		if _, err := db.Exec(`UPDATE ingest_jobs SET created_at=statement_timestamp()-make_interval(mins => $2) WHERE job_id=$1`, item.id, item.minutes); err != nil {
++			t.Fatal(err)
++		}
++	}
++	for _, item := range []struct {
++		ns  string
++		age time.Duration
++	}{{testutil.TestNamespaceID, 3 * time.Minute}, {testutil.TestOtherNamespaceID, 31 * time.Minute}} {
++		age, present, err := repo.OldestQueuedAge(context.Background(), "tenant-a", item.ns)
++		if err != nil || !present || age < item.age || age > item.age+5*time.Second {
++			t.Fatalf("namespace age=%v present=%v error=%v", age, present, err)
++		}
++	}
++	if age, present, err := repo.OldestQueuedAge(context.Background(), "other-tenant", testutil.TestNamespaceID); err != nil || present || age != 0 {
++		t.Fatalf("foreign tenant age=%v present=%v err=%v", age, present, err)
++	}
++	for _, change := range []struct {
++		sql  string
++		undo string
++	}{
++		{`UPDATE memory_principals SET status='disabled' WHERE principal_id=$1`, `UPDATE memory_principals SET status='active' WHERE principal_id=$1`},
++		{`UPDATE memory_namespace_memberships SET status='revoked' WHERE principal_id=$1`, `UPDATE memory_namespace_memberships SET status='active' WHERE principal_id=$1`},
++		{`UPDATE memory_namespace_memberships SET source_type='operator' WHERE principal_id=$1`, `UPDATE memory_namespace_memberships SET source_type='service' WHERE principal_id=$1`},
++	} {
++		if _, err := db.Exec(change.sql, samplerTestPrincipalID); err != nil {
++			t.Fatal(err)
++		}
++		if _, _, err := repo.OldestQueuedAge(context.Background(), "tenant-a", testutil.TestNamespaceID); !errors.Is(err, ingestqueue.ErrSamplerScopeDenied) {
++			t.Fatal("unauthorized sampler read succeeded")
++		}
++		if _, err := db.Exec(change.undo, samplerTestPrincipalID); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if _, err := db.Exec(`UPDATE memory_namespaces SET status='disabled' WHERE namespace_id=$1`, testutil.TestNamespaceID); err != nil {
++		t.Fatal(err)
++	}
++	if _, _, err := repo.OldestQueuedAge(context.Background(), "tenant-a", testutil.TestNamespaceID); !errors.Is(err, ingestqueue.ErrSamplerScopeDenied) {
++		t.Fatal("disabled namespace read succeeded")
++	}
++	namespaces, err := repo.ListActiveNamespaces(context.Background())
++	if err != nil {
++		t.Fatal(err)
++	}
++	for _, ns := range namespaces {
++		if ns == testutil.TestNamespaceID {
++			t.Fatal("enumerated disabled namespace")
++		}
++	}
++	if len(namespaces) == 0 {
++		t.Fatal("active namespace metadata missing")
++	}
++}

@@ -289,6 +289,8 @@ jobs:
 
       - name: PostgreSQL namespace migration rehearsal
         run: bash scripts/run-memory-namespace-integration.sh
+      - name: Namespace analysis service isolation
+        run: bash scripts/run-analysis-namespace-integration.sh
 
   # ───────────────────────────────────────────────────────────────────────────
   # deploy-preview — PR opened/synchronized/reopened → stage `pr-N`.
@@ -1361,6 +1363,8 @@ jobs:
         # (`mem9-<sha7>`); infra/ecs.ts reads MEM9_IMAGE_TAG.
         env:
           MEM9_IMAGE_TAG: ${{ needs.build-and-push-image.outputs.image_tag }}
+          # New opt-in: the legacy tenant-wide flag cannot activate scheduling.
+          MEM9_CONSOLIDATION_SCHEDULE_ENABLED: ${{ vars.MEM9_NAMESPACE_CONSOLIDATION_SCHEDULE_ENABLED || '0' }}
           # Preserve an existing production OAuth hostname. New repositories may
           # leave this unset and use the account/Region/stage-derived default.
           # Preview deploys intentionally do not receive this prod-wide value.
