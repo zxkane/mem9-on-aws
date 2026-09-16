@@ -17,7 +17,8 @@
   "dependencies": {
     "@aws-sdk/client-bedrock-agentcore-control": "^3.1109.0",
     "@aws-sdk/client-ecs": "^3.1109.0",
-    "@aws-sdk/client-ssm": "^3.1109.0"
+    "@aws-sdk/client-ssm": "^3.1109.0",
+    "aws-jwt-verify": "5.2.1"
   },
   "devDependencies": {
     "@pulumi/pulumi": "3.256.0",

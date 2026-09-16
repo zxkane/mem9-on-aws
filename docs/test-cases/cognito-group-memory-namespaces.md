@@ -43,6 +43,8 @@ fabricated or changed payloads, unsigned/symmetric algorithm confusion, wrong
 issuer/audience, missing/expired claims, bounded JWKS retrieval and rotation,
 token-supplied key URLs, and generic failure without token/identity disclosure.
 Direct Lambda application rejection is recorded separately from IAM denial.
+Deployment packaging is checked with only the infrastructure package's runtime
+dependencies; a missing verifier must fail even when root dependencies are installed.
 
 | ID             | Scenario                                                                                                       | Expected                                                                        | Surface              |
 | -------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | -------------------- |
