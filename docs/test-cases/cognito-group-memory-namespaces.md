@@ -217,6 +217,12 @@ two-second SQL guard. Public evidence must not describe a personal deployment.
 | TC-GROUPNS-104 | Webhook or Space Chain path is enabled                                                                    | Startup/configuration fails closed until separately designed                                                                   | Config + entrypoint unit + preview image startup       |
 | TC-GROUPNS-105 | Analysis/sampler/service REST path reads scoped tables                                                    | Require an active service principal/membership and explicit namespace; REST identity is signed and bound to that namespace     | Unit + PostgreSQL + real service REST                   |
 
+The service operator entrypoint is also exercised with the real Node evaluator:
+valid owner-only bindings must finish import-only validation before reaching AWS,
+while malformed JSON, namespace IDs, services, or extra fields stop before AWS.
+Importing the validator must not invoke the service manager's CLI entrypoint.
+Import/validation failures must not echo private configuration fragments.
+
 ## Rollout, Rollback, And Operations
 
 | ID             | Scenario                                                                                                 | Expected                                                                                            | Surface                                      |
