@@ -146,7 +146,7 @@ export function validateDeploymentManifest(value) {
   );
   requireCase(
     typeof value.proxyLogGroup === "string" &&
-      /^[A-Za-z0-9./_#-]{1,512}$/.test(value.proxyLogGroup) &&
+      new RegExp("^[A-Za-z0-9./_#-]{1,512}$").test(value.proxyLogGroup) &&
       !value.proxyLogGroup.startsWith("aws/"),
     "pinned_proxy_log_group_required",
   );

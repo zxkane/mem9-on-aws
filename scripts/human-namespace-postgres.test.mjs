@@ -1,4 +1,8 @@
 import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import pg from "pg";
 import {
@@ -142,7 +146,7 @@ async function withFixture(work) {
       report: (label) => reports.push(label),
     });
     await fixture.prepare();
-    await work({ fixture, cognito, reports, connect });
+    await work({ fixture, cognito, reports, connect, dsn: source.href });
   } finally {
     if (fixture) await fixture.cleanup();
     await admin.query(`DROP DATABASE IF EXISTS "${name}" WITH (FORCE)`);
@@ -173,6 +177,53 @@ async function seedJit(fixture, alias, index = 0) {
 describe.skipIf(!process.env.MEM9_NAMESPACE_TEST_DSN)(
   "human acceptance with real PostgreSQL",
   () => {
+    it("runs the external operator CLIs through reconciliation, moves, and revocation", async () =>
+      withFixture(async ({ fixture, dsn }) => {
+        const directory = await mkdtemp(join(tmpdir(), "mem9-operator-cli-"));
+        const config = join(directory, "config.local.json");
+        const identity = join(directory, "identity.local.json");
+        const subject = `cli-${randomUUID()}`;
+        try {
+          await writeFile(config, JSON.stringify(fixture.desired), { mode: 0o600 });
+          await writeFile(identity, JSON.stringify({ issuer: fixture.issuer, sub: subject }), { mode: 0o600 });
+          const run = (script, args) => {
+            const result = spawnSync(process.execPath, [resolve(import.meta.dirname, script), ...args], {
+              encoding: "utf8",
+              timeout: 10000,
+              env: {
+                PATH: process.env.PATH,
+                MEM9_AUTH_MODE: "oidc",
+                MEM9_COGNITO_ISSUER: fixture.issuer,
+                MEM9_NAMESPACE_CONFIG: config,
+                MNEMO_DSN: dsn,
+                ...(process.env.MEM9_NAMESPACE_CHILD_COVERAGE
+                  ? { NODE_V8_COVERAGE: process.env.MEM9_NAMESPACE_CHILD_COVERAGE }
+                  : {}),
+              },
+            });
+            expect(result.stderr).toBe("");
+            expect(result.status).toBe(0);
+            expect(result.stdout).not.toContain(subject);
+            for (const namespace of fixture.desired.namespaces)
+              expect(result.stdout).not.toContain(namespace.cognito_group);
+            return JSON.parse(result.stdout);
+          };
+          const reconcile = () => run("reconcile-memory-namespaces.mjs", ["reconcile"]);
+          expect(reconcile()).toEqual(reconcile());
+          const access = (command, ...args) => run("manage-memory-access.mjs", [command, "--identity-file", identity, ...args]);
+          const [a, b] = fixture.desired.namespaces.map((n) => n.slug);
+          expect(access("show-user").principal_status).toBe("absent");
+          expect(access("assign-user", "--namespace", a).status).toBe("assigned");
+          expect(access("move-user", "--namespace", b).status).toBe("assigned");
+          expect(access("show-user").active_memberships).toBe(1);
+          expect(access("revoke-user").status).toBe("revoked");
+          expect(access("assign-user", "--namespace", a).status).toBe("assigned");
+          expect(access("revoke-user", "--emergency").status).toBe("emergency_revoked");
+          expect(access("show-user")).toMatchObject({ principal_status: "disabled", active_memberships: 0 });
+        } finally {
+          await rm(directory, { recursive: true, force: true });
+        }
+      }), 30000);
     it(
       "revokes never-used managed identities before stale group claims can JIT",
       async () =>

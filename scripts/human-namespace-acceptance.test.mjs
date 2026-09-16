@@ -2,6 +2,8 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+import { Readable } from "node:stream";
+import { readUsername } from "./lib/memory-namespace.mjs";
 import {
   HUMAN_CASES,
   HumanNamespaceFixture,
@@ -56,6 +58,21 @@ export const manifestFixture = () => ({
 });
 
 describe("operator human namespace acceptance guards", () => {
+  it("reads managed identities from private files or stdin and rejects unsafe input", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "mem9-managed-identity-"));
+    const file = join(directory, "username.local.txt");
+    try {
+      await writeFile(file, " fixture-user\n", { mode: 0o600 });
+      expect(await readUsername({ file })).toBe("fixture-user");
+      expect(await readUsername({ stdin: Readable.from([Buffer.from(" fixture-user\n")]) })).toBe("fixture-user");
+      await chmod(file, 0o644);
+      await expect(readUsername({ file })).rejects.toThrow("owner-only");
+      for (const input of ["", "first\nsecond", "x".repeat(129), "bad\0value"])
+        await expect(readUsername({ stdin: Readable.from([Buffer.from(input)]) })).rejects.toThrow("username input is invalid");
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
   it("accepts only the complete fixed case vocabulary in captured normal output", () => {
     const clean =
       HUMAN_CASES.map((label) => `PASS ${label}`).join("\n") +

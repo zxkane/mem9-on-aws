@@ -329,6 +329,8 @@ The real preview driver extends the existing cases with these checks:
 - TC-GROUPNS-094/122/128: normal revoke preserves accepted work; emergency
   revoke disables the principal and cancels live scoped jobs. Existing real
   PostgreSQL apply/admission races remain mandatory alongside the preview.
+  The apply race invokes the actual emergency access operator in both commit
+  orders, observes lock contention, and verifies content counts and job state.
 - TC-GROUPNS-121: concurrent access commands reach an observed PostgreSQL
   advisory-lock wait and finish with one matching group and membership.
 
