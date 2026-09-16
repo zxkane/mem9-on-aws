@@ -1759,12 +1759,23 @@ legacy secret. The public MCP registration remains secretless in either mode.
 Discovery is checked before resource registration, including an exact issuer
 match and HTTPS endpoints. Gateway validates the signature, issuer, client or
 audience, expiry and resource scopes. The identity interceptor independently
-classifies the registered human/machine client, checks the configured human
+verifies the token signature using the configured issuer and trusted JWKS URI,
+then classifies the registered human/machine client, checks the configured human
 group on every MCP method, and retains the signed namespace context. Missing
 groups do not confer machine access. A non-Cognito JWT without `token_use`
 requires a distinct configured API audience; an explicit ID token is rejected.
 The provider's own token lifetime bounds stale group claims. Group validation
 protects direct Gateway calls as well as calls through the facade.
+
+The interceptor accepts only the explicit asymmetric algorithm set and requires
+a finite, unexpired `exp`. The JWT `scope` claim must be a space-separated string;
+array-valued scopes are rejected. JWKS requests have a 2.5-second deadline, a 64 KiB
+response ceiling, and no redirects or bearer headers. Keys are cached for up to
+five minutes, with bounded refresh for unknown key IDs. Token-supplied key URLs
+are ignored. Invalid tokens cannot cause the interceptor to mint signed identity
+contexts, including through a direct Lambda invocation. This application check
+does not establish IAM-exclusive invocation; managed deployment/workload-role
+isolation remains a separate control.
 
 Register exactly `<facade-origin>/oauth/callback` at the external provider,
 with the existing facade HTTPS origin. The application's region and provider's

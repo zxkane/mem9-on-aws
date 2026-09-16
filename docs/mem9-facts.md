@@ -350,11 +350,18 @@ still keep writers stopped through namespace cutover.
   Isolation is a required `namespace_id` data-plane key, not a per-user
   database, schema, server, or embedding service.
 - Gateway identity is split across two Lambdas. A non-VPC interceptor validates
+  JWT signatures independently against configured issuer/JWKS metadata, then checks
   the deployed human/M2M client registry, access-token shape, OAuth scope, and
   bounded Cognito groups, then signs derived lookup keys. The VPC target verifies
   that request-bound context and creates a different signed transport envelope
   for mnemo-server. Neither caller-supplied namespace IDs nor bare derived
   headers are trusted.
+- Interceptor verification uses a pinned asymmetric algorithm allowlist and
+  requires token expiry. JWKS retrieval is HTTPS-only, has a 2.5-second deadline
+  and 64 KiB ceiling, never follows token key URLs, and refreshes its cache at
+  least every five minutes of use. Unknown-key refreshes are rate-limited.
+  Failures return a generic denial before an internal context can be minted.
+  Signature verification does not replace separate IAM invocation confinement.
 - For humans, Cognito group claims establish eligibility only. Aurora
   `memory_namespace_memberships` remains the active role/revocation source. A
   request must match exactly one configured group binding; unrelated groups are

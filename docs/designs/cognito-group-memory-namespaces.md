@@ -1317,3 +1317,21 @@ heartbeat remains available while a child is busy computing. It reports liveness
 and time since progress, not proof of useful work. Neither these records nor
 metrics contain namespace/principal IDs, memory content, model replies, or keys.
 Classification progress is rate-limited; metrics keep their existing contract.
+
+### Interceptor token authentication
+
+The identity interceptor independently verifies JWT signatures before minting
+internal contexts. Gateway authorizer validation remains useful admission
+control, but is not the interceptor's only proof of token authenticity.
+Verification pins the configured issuer and trusted JWKS URI supplied by the
+managed Cognito configuration or validated external-provider discovery. It never
+uses token-supplied key URLs. Only the explicit asymmetric algorithm allowlist
+is accepted, with signature/JWK agreement, a required finite expiry, and existing
+token-use, client, audience, scope, group, and identity checks.
+
+JWKS retrieval is HTTPS-only, bounded in time and response size, does not follow
+redirects, and uses a cache with bounded refresh on an unknown key. Failures are
+closed and generic; no JWT, identity, key material, or full context is logged.
+This protects against fabricated identities presented by an invoke-only caller.
+It does not claim universal IAM exclusion of other same-account principals;
+managed-role invocation restrictions remain part of the separate IAM boundary.

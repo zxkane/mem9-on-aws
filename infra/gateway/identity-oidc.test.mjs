@@ -1,6 +1,30 @@
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
+import { generateKeyPairSync, sign } from "node:crypto";
+
+const signingPair = generateKeyPairSync("rsa", { modulusLength: 2048 });
+const JWKS_URI = "https://keys.example.com/external-jwks";
+
 beforeEach(() => {
   vi.resetModules();
+  vi.stubEnv("MEM9_IDENTITY_JWKS_URI", JWKS_URI);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (uri) => {
+      expect(uri).toBe(JWKS_URI);
+      return new Response(
+        JSON.stringify({
+          keys: [
+            {
+              ...signingPair.publicKey.export({ format: "jwk" }),
+              kid: "external-signing",
+              alg: "RS256",
+              use: "sig",
+            },
+          ],
+        }),
+      );
+    }),
+  );
   vi.stubEnv(
     "MEM9_CLIENT_REGISTRY",
     JSON.stringify({
@@ -20,7 +44,10 @@ beforeEach(() => {
     JSON.stringify({ current: "k".repeat(64) }),
   );
 });
-afterEach(() => vi.unstubAllEnvs());
+afterEach(() => {
+  vi.unstubAllEnvs();
+  vi.unstubAllGlobals();
+});
 function event(method, claims = {}) {
   const payload = {
     iss: "https://issuer.example.com",
@@ -29,11 +56,13 @@ function event(method, claims = {}) {
     token_use: "access",
     groups: ["team-a"],
     scope: "mem9-mcp/read",
+    exp: Math.floor(Date.now() / 1000) + 900,
     ...claims,
   };
-  const token = `eyJhbGciOiJSUzI1NiJ9.${Buffer.from(
-    JSON.stringify(payload),
-  ).toString("base64url")}.signature`;
+  const encode = (value) =>
+    Buffer.from(JSON.stringify(value)).toString("base64url");
+  const body = `${encode({ alg: "RS256", kid: "external-signing" })}.${encode(payload)}`;
+  const token = `${body}.${sign("RSA-SHA256", Buffer.from(body), signingPair.privateKey).toString("base64url")}`;
   return {
     interceptorInputVersion: "1.0",
     mcp: {
@@ -135,5 +164,46 @@ describe("external group admission covers every MCP request", () => {
         registry,
       ),
     ).toThrow(/audience/);
+  });
+  it("verifies generic OIDC signatures and audience through the handler", async () => {
+    vi.stubEnv(
+      "MEM9_CLIENT_REGISTRY",
+      JSON.stringify({
+        human: ["human"],
+        m2m: [],
+        issuer: "https://issuer.example.com",
+        clientIdClaim: "cid",
+        groupClaim: "groups",
+        requiredGroup: "team-a",
+        audience: "https://api.example.com",
+      }),
+    );
+    const { handler } = await import("./identity-interceptor.mjs");
+    const claims = {
+      token_use: undefined,
+      client_id: undefined,
+      cid: "human",
+      aud: "https://api.example.com",
+    };
+    expect(
+      (await handler(event("tools/call", claims))).mcp
+        .transformedGatewayRequest,
+    ).toBeDefined();
+    for (const overrides of [
+      { aud: "wrong" },
+      { aud: undefined },
+      { cid: "unknown" },
+    ]) {
+      expect(
+        (await handler(event("tools/call", { ...claims, ...overrides }))).mcp
+          .transformedGatewayResponse.statusCode,
+      ).toBe(403);
+    }
+  });
+  it("rejects array-valued scopes in a signed token", async () => {
+    const { handler } = await import("./identity-interceptor.mjs");
+    const output = await handler(event("tools/call", { scope: ["mem9-mcp/read"] }));
+    expect(output.mcp.transformedGatewayResponse.statusCode).toBe(403);
+    expect(output.mcp).not.toHaveProperty("transformedGatewayRequest");
   });
 });

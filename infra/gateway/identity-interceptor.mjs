@@ -6,6 +6,7 @@ import {
   parseSigningKeys,
 } from "./namespace-auth.mjs";
 import { interceptScopes } from "./scope-interceptor.mjs";
+import { createAccessTokenVerifier } from "./access-token-verifier.mjs";
 
 const TOOL_DELIMITER = "___";
 const RESERVED_ARGUMENTS = new Set([
@@ -22,6 +23,7 @@ const RESERVED_ARGUMENTS = new Set([
 
 let registry;
 let signingKeys;
+let verifyAccessToken;
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -30,7 +32,12 @@ function isRecord(value) {
 function config() {
   registry ??= parseClientRegistry(process.env.MEM9_CLIENT_REGISTRY);
   signingKeys ??= parseSigningKeys(process.env.MEM9_IDENTITY_SIGNING_KEYS);
-  return { registry, signingKeys };
+  verifyAccessToken ??= createAccessTokenVerifier({
+    issuer: registry.issuer,
+    audience: registry.audience,
+    jwksUri: process.env.MEM9_IDENTITY_JWKS_URI,
+  });
+  return { registry, signingKeys, verifyAccessToken };
 }
 
 function authorizationToken(headers) {
@@ -110,12 +117,16 @@ function attachIdentity(body, identity, keys) {
 export const handler = async (event) => {
   try {
     // Authenticate every method, including initialize/tools/list and responses.
-    // Gateway has already verified the JWT signature before invoking us.
-    const { registry: clientRegistry, signingKeys: keys } = config();
-    const identity = classifyAccessToken(
-      authorizationToken(event?.mcp?.gatewayRequest?.headers),
-      clientRegistry,
-    );
+    // Verify independently: an IAM invocation is not proof that Gateway
+    // authenticated the event's bearer token.
+    const {
+      registry: clientRegistry,
+      signingKeys: keys,
+      verifyAccessToken: verify,
+    } = config();
+    const token = authorizationToken(event?.mcp?.gatewayRequest?.headers);
+    await verify(token);
+    const identity = classifyAccessToken(token, clientRegistry);
     const scoped = interceptScopes(event);
     if (
       event?.mcp?.gatewayResponse != null ||

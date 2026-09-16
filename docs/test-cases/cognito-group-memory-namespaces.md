@@ -37,6 +37,13 @@ not substitute for the human `cognito:groups` Gateway smokes named below.
 
 ## Cognito Token And Client Classification
 
+The identity interceptor additionally verifies real asymmetric signatures before
+creating any internal context. Signature tests cover valid human/M2M controls,
+fabricated or changed payloads, unsigned/symmetric algorithm confusion, wrong
+issuer/audience, missing/expired claims, bounded JWKS retrieval and rotation,
+token-supplied key URLs, and generic failure without token/identity disclosure.
+Direct Lambda application rejection is recorded separately from IAM denial.
+
 | ID             | Scenario                                                                                                       | Expected                                                                        | Surface              |
 | -------------- | -------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- | -------------------- |
 | TC-GROUPNS-011 | Reader-client access token contains valid `iss`, `sub`, `client_id`, `token_use`, scopes, and `cognito:groups` | Token is classified as human by the client registry                             | Unit + Gateway smoke |
