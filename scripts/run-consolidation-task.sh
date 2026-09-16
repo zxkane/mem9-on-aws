@@ -84,7 +84,8 @@ OVERRIDES=$(jq -cn --arg name "$CONTAINER_NAME" \
     containerOverrides: [{
       name: $name,
       command: [
-        "/app/scripts/memory-consolidation.mjs",
+        "/app/scripts/dispatch-memory-consolidation.mjs",
+        "--single",
         "--report-only",
         "--check-llm"
       ],

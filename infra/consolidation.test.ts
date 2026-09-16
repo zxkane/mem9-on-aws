@@ -302,6 +302,7 @@ beforeEach(() => {
   resources = [];
   maintenanceTargets = undefined;
   delete process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED;
+  delete process.env.MEM9_CONSOLIDATION_TIMEOUT_SECONDS;
   delete process.env.MEM9_IMAGE_TAG;
   process.env.MEM9_BEDROCK_PROJECT = "proj_test";
   // A reasoning model routes to another region, so the task needs THAT region's
@@ -314,6 +315,7 @@ afterEach(() => {
     delete (globalThis as Record<string, unknown>)[key];
   }
   delete process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED;
+  delete process.env.MEM9_CONSOLIDATION_TIMEOUT_SECONDS;
   delete process.env.MEM9_IMAGE_TAG;
   delete process.env.MEM9_BEDROCK_PROJECT;
   delete process.env.MEM9_BEDROCK_PROJECT_OPENAI;
@@ -321,6 +323,13 @@ afterEach(() => {
 });
 
 describe("consolidation task and schedule", () => {
+  it("passes a validated execution budget to the shared report/scheduled task", async () => {
+    installGlobals("prod");
+    process.env.MEM9_CONSOLIDATION_TIMEOUT_SECONDS="10800";
+    await loadAndRun();
+    const task=materialize(one("Task").args) as Record<string, any>;
+    expect(task.environment.MEM9_CONSOLIDATION_TIMEOUT_SECONDS).toBe("10800");
+  });
   it("injects only the consolidation service credential and a fixed issuer", async () => {
     installGlobals("prod");
     process.env.MEM9_SERVICE_TRANSPORT_ISSUER = "untrusted-issuer";
@@ -440,7 +449,8 @@ describe("consolidation task and schedule", () => {
       ".dkr.ecr.ap-northeast-1.amazonaws.com/mem9-on-aws/llm-proxy:latest",
     );
     expect(args.entrypoint).toEqual(["node"]);
-    expect(args.command).toEqual(["/app/scripts/memory-consolidation.mjs"]);
+    expect(args.command).toEqual(["/app/scripts/dispatch-memory-consolidation.mjs", "--single", "--report-only"]);
+    expect(args.environment.MEM9_CONSOLIDATION_TIMEOUT_SECONDS).toBe("7200");
     expect(args.environment.MEM9_CONSOLIDATION_REPORT_ONLY).toBe("1");
     expect(args.environment.MEM9_CONSOLIDATION_SCHEDULED).toBeUndefined();
     expect(args.environment.MEM9_SLACK_APPROVAL_CHANNEL).toBeUndefined();

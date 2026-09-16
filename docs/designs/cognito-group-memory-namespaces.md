@@ -1295,3 +1295,25 @@ handling is proven for pooled connections.
 
 Acceptance criteria are defined in
 [`../test-cases/cognito-group-memory-namespaces.md`](../test-cases/cognito-group-memory-namespaces.md).
+
+### Maintenance execution and observation budgets
+
+Each consolidation child has a fixed elapsed execution budget configured by
+`MEM9_CONSOLIDATION_TIMEOUT_SECONDS`: 7,200 seconds by default, with an explicit
+60..21,600 second range. A missing value selects the default; malformed values
+fail before child launch. Progress cannot renew the deadline. Timeout or operator
+cancellation sends TERM, escalates to KILL after five seconds, and waits for the
+child and pipes to close before another namespace can start.
+
+Both an explicit single-namespace report and a scheduled namespace list use
+the same dispatcher. Single mode requires `MEM9_NAMESPACE_ID` and never expands
+the private target list. Reports remain non-mutating. The existing observer's
+12-hour default is retained; its timeout means observation ended, not that the
+ECS task failed or stopped. An incomplete observation cannot authorize scheduling.
+
+Consolidation emits allowlisted phase, count, and elapsed-time records for setup,
+reading, model smoke, clustering, classification, apply, and digest work. A parent
+heartbeat remains available while a child is busy computing. It reports liveness
+and time since progress, not proof of useful work. Neither these records nor
+metrics contain namespace/principal IDs, memory content, model replies, or keys.
+Classification progress is rate-limited; metrics keep their existing contract.

@@ -649,11 +649,22 @@ previews remain `DISABLED`, while
 production runs Sunday at 03:00 UTC. Production enablement is an operator
 decision after the one-shot cleanup and a report-only pass show actionable
 drift. `scripts/run-consolidation-task.sh` is the preview and operator harness:
-it overrides the container command with `--report-only --check-llm`, performs a
+it invokes the dispatcher with `--single --report-only --check-llm`, performs a
 content-free live Mantle smoke, waits up to the bounded
 `CONSOLIDATION_TASK_WAIT_SECONDS` observer budget (12 hours by default) for exit
 zero, and queries only the exact task stream's content-free review-list marker.
 The observer timeout does not stop the report-only ECS task.
+
+The same dispatcher watches manual reports and scheduled namespace children.
+Each child has a fixed `MEM9_CONSOLIDATION_TIMEOUT_SECONDS` execution budget
+(default 7,200 seconds; range 60..21,600). Single mode forces report-only behavior
+and clears scheduled semantics, even if the task environment contains apply
+settings or a target list. A one-minute parent heartbeat stays available during
+CPU-bound child work. Phase records expose only bounded names, counts, and
+durations. Progress does not renew the deadline. Expiration sends TERM, escalates
+to KILL after five seconds, and waits for close; remaining namespaces then run
+independently. Heartbeats cannot substitute for successful exit and report-marker
+verification. Sequential dispatch duration is the sum of child runtimes.
 
 Automatic execution is capped at 20 mutations. It can merge fragments through
 the cleanup MERGE contract, archive only the strictly older side of a

@@ -1462,6 +1462,25 @@ budget is twelve hours; use `CLEANUP_TASK_WAIT_SECONDS` or
 `CONSOLIDATION_TASK_WAIT_SECONDS` to shorten it. A timeout ends observation,
 leaving the task running; inspect it before launching another report.
 
+Consolidation reports and scheduled runs share a parent-process watchdog.
+`MEM9_CONSOLIDATION_TIMEOUT_SECONDS` sets each namespace's execution budget:
+7,200 seconds (two hours) by default, with a validated 60..21,600 second range.
+Set the repository variable of that name and redeploy to change the task's
+configuration. The report launcher uses `dispatcher --single --report-only
+--check-llm`; single mode ignores scheduled targets and clears inherited apply
+and scheduled flags. The observer budget and execution budget are independent:
+choose enough observation time for task startup, execution, and log delivery.
+
+Task logs include `consolidation_phase` records with allowlisted phase names,
+counts, total elapsed time, and phase elapsed time. Classification updates are
+rate-limited. A separate `maintenance_heartbeat` appears every minute while a
+child runs, including during CPU-bound work; `sinceProgressMs` shows time since
+the last phase update. Heartbeats do not prove useful progress, renew execution
+deadlines, or count as report success. `maintenance_timeout` triggers TERM and
+then KILL after five seconds if necessary. The dispatcher waits for the child
+and its pipes to close before advancing. A sequential namespace list may take
+the sum of its per-namespace budgets; this is not an overlap-prevention guarantee.
+
 Console and task-log output contains bounded kinds and counters, without memory
 IDs, namespace/principal IDs, snippets, or model rationale. Content-bearing
 decisions, ID selections, and detailed operator reports belong only in mode-600

@@ -12,6 +12,7 @@ import {
   sharedCleanupMutexKey,
 } from "./memory-cleanup.mjs";
 import { resolveApplicationRegion } from "./lib/application-region.mjs";
+import { createConsolidationProgress, safeProgressRecord } from "./lib/maintenance-runtime.mjs";
 import {
   requireNamespaceId,
   requireMaintenanceConfig,
@@ -960,11 +961,14 @@ export function buildEmfRecord(stage, metrics, now = Date.now()) {
   };
 }
 
-async function classifyClusters(clusters, completeChat, log, routingOptions) {
+async function classifyClusters(clusters, completeChat, log, routingOptions, progress = () => {}) {
   const auto = [];
   const review = [];
   let attempted = 0;
   let failed = 0;
+  let completed = 0;
+  let skipped = 0;
+  const advance = () => progress({clusters:clusters.length,completed:++completed,failed,skipped});
   for (const cluster of clusters) {
     const contentChars = cluster.reduce(
       (total, memory) => total + String(memory.content ?? "").length,
@@ -983,6 +987,8 @@ async function classifyClusters(clusters, completeChat, log, routingOptions) {
           "cluster exceeds the safe model-request bound",
         ),
       );
+      skipped++;
+      advance();
       continue;
     }
     const input = cluster.map((memory) => ({
@@ -1009,11 +1015,13 @@ async function classifyClusters(clusters, completeChat, log, routingOptions) {
           "cluster classification failed",
         ),
       );
+      advance();
       continue;
     }
     const routed = routeActions(cluster, actions, routingOptions);
     auto.push(...routed.auto);
     review.push(...routed.review);
+    advance();
   }
   return { auto, review, attempted, failed };
 }
@@ -1436,31 +1444,36 @@ export async function runConsolidation(options, deps) {
   if (!Number.isInteger(cap) || cap <= 0 || cap > DEFAULT_CAP) {
     throw new Error(`cap must be an integer between 1 and ${DEFAULT_CAP}`);
   }
-  const memories = requireScopedRows(await deps.listActiveMemories(), namespaceId).filter(
-    isConsolidationCandidate,
-  );
+  const progress = deps.progress ?? createConsolidationProgress(stage,
+    record => deps.log(`CONSOLIDATION_PHASE ${JSON.stringify(record)}`), deps.progressClock);
+  const memories = await progress.run("reading", async update => {
+    const rows = requireScopedRows(await deps.listActiveMemories(), namespaceId).filter(isConsolidationCandidate);
+    update({memories:rows.length});
+    return rows;
+  });
   if (options.checkLlm) {
-    const smokeActions = parseActions(
-      await deps.completeChat(CONSOLIDATION_SMOKE_PROMPT, []),
-    );
-    if (smokeActions.length !== 0) {
-      throw new InvalidActions("LLM smoke returned unexpected actions");
-    }
+    await progress.run("model_smoke", async () => {
+      const smokeActions = parseActions(await deps.completeChat(CONSOLIDATION_SMOKE_PROMPT, []));
+      if (smokeActions.length !== 0) throw new InvalidActions("LLM smoke returned unexpected actions");
+    });
   }
 
   const scanTime = clock();
-  const clusters = clusterMemories(memories, {
-    similarityThreshold:
-      options.similarityThreshold ?? DEFAULT_SIMILARITY_THRESHOLD,
-    now: scanTime,
-    staleAfterMs: options.staleAfterMs,
-  });
-  const routed = await classifyClusters(
+  const clusters = await progress.run("clustering", update => {
+    const result = clusterMemories(memories, {
+      similarityThreshold: options.similarityThreshold ?? DEFAULT_SIMILARITY_THRESHOLD,
+      now: scanTime, staleAfterMs: options.staleAfterMs,
+    });
+    update({clusters:result.length});
+    return result;
+  }, {memories:memories.length});
+  const routed = await progress.run("classifying", update => classifyClusters(
     clusters,
     deps.completeChat,
     deps.log,
     { now: scanTime, staleAfterMs: options.staleAfterMs },
-  );
+    update,
+  ), {clusters:clusters.length,completed:0,failed:0,skipped:0});
   let review = [...routed.review];
   const metrics = {
     scanned: memories.length,
@@ -1478,12 +1491,16 @@ export async function runConsolidation(options, deps) {
   if (reportOnly) {
     review.push(...routed.auto.map((action) => reportOnlyReview(action, byId)));
   } else if (routed.auto.length > 0) {
-    const applied = await applyAutoActions(routed.auto, {
-      byId,
-      cap,
-      clock,
-      deps,
-      metrics,
+    const applied = await progress.run("applying", async update => {
+      const result = await applyAutoActions(routed.auto, {
+        byId,
+        cap,
+        clock,
+        deps,
+        metrics,
+      });
+      update({mutations:result.mutations,failed:result.failed?1:0});
+      return result;
     });
     applyFailed = applied.failed;
     mutations = applied.mutations;
@@ -1536,7 +1553,7 @@ export async function runConsolidation(options, deps) {
         : {}),
     };
     try {
-      const digest = await processScheduledDigest(digestInput, deps);
+      const digest = await progress.run("digest", () => processScheduledDigest(digestInput, deps));
       metrics.dedupUnavailable = digest.dedupUnavailable ? 1 : 0;
       digestFailed = digest.failed;
     } catch (error) {
@@ -1636,9 +1653,11 @@ export async function runConsolidation(options, deps) {
       }
     }
   }
-  const emf = buildEmfRecord(stage, metrics, clock());
-  if (deps.emitMetrics) deps.emitMetrics(emf);
-  else deps.log(JSON.stringify(emf));
+  await progress.run("finalizing", () => {
+    const emf = buildEmfRecord(stage, metrics, clock());
+    if (deps.emitMetrics) deps.emitMetrics(emf);
+    else deps.log(JSON.stringify(emf));
+  }, {mutations});
 
   return {
     namespaceId,
@@ -1915,6 +1934,10 @@ export function createConsolidationDatabase(db, scope) {
 // Input is an internal prefixed log line; stage is supplied by trusted config.
 export function productionLogRecord(line, stage) {
   const record = { event: "consolidation_progress", stage };
+  if (line.startsWith("CONSOLIDATION_PHASE ")) {
+    try { return safeProgressRecord(JSON.parse(line.slice("CONSOLIDATION_PHASE ".length)), stage) ?? record; }
+    catch { return record; }
+  }
   const match = /^CONSOLIDATION_(DIGEST|REVIEW|REVIEW_LIST) (.*)$/u.exec(line);
   if (!match) return record;
   let value;
@@ -2183,27 +2206,34 @@ const isMain =
   process.argv[1] &&
   resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url));
 
-if (isMain) {
+export async function runConsolidationCli(argv = process.argv.slice(2), runtime = {}) {
   let production;
+  let exitCode = 1;
+  const emit = runtime.emit ?? (record => console.log(JSON.stringify(record)));
+  const emitFailure = (event, error) => {
+    const write = runtime.emit ?? (record => console.error(JSON.stringify(record)));
+    try { write({event,errorClass:safeErrorClass(error)}); }
+    catch { /* Never expose the original error when the output sink fails. */ }
+  };
   try {
-    const options = parseConsolidationArgs(process.argv.slice(2));
-    production = await createProductionDeps(options);
-    const result = await runConsolidation(options, production.deps);
-    process.exitCode = result.exitCode;
+    const options = parseConsolidationArgs(argv);
+    const progress = createConsolidationProgress(options.stage, emit);
+    await progress.run("initializing", async () => {
+      production = await (runtime.createDeps ?? createProductionDeps)(options);
+    });
+    const result = await runConsolidation(options, {...production.deps,progress});
+    exitCode = result.exitCode;
   } catch (error) {
-    console.error(
-      JSON.stringify({
-        event: "consolidation_failed",
-        errorClass: safeErrorClass(error),
-      }),
-    );
-    process.exitCode = 1;
+    emitFailure("consolidation_failed", error);
   } finally {
     try {
       await production?.close();
     } catch (error) {
-      console.error(JSON.stringify({ event: "consolidation_close_failed", errorClass: safeErrorClass(error) }));
-      process.exitCode = 1;
+      emitFailure("consolidation_close_failed", error);
+      exitCode = 1;
     }
   }
+  return exitCode;
 }
+
+if (isMain) process.exitCode = await runConsolidationCli();

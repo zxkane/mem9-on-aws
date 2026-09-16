@@ -288,7 +288,7 @@ assert_frozen_server_startup_rejected \
   "unsupported namespace migration phase"
 
 MEM9_NAMESPACE_TEST_DSN="$MNEMO_TEST_POSTGRES_DSN" \
-  "$ROOT/node_modules/.bin/vitest" run --root "$ROOT" \
+  "$ROOT/node_modules/.bin/vitest" run --no-file-parallelism --root "$ROOT" \
     "$ROOT/scripts/memory-namespace-lifecycle.test.mjs" \
     "$ROOT/scripts/human-namespace-postgres.test.mjs" \
     "$ROOT/scripts/maintenance-postgres.test.mjs" \

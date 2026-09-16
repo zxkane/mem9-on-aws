@@ -276,7 +276,8 @@ describe("report-only consolidation ECS runner", () => {
             // preserves the repo layout (/app/scripts/...) because
             // memory-cleanup.mjs imports ../docker/llm-proxy/server.mjs; a
             // flattened /app/ path breaks that import at startup.
-            "/app/scripts/memory-consolidation.mjs",
+            "/app/scripts/dispatch-memory-consolidation.mjs",
+            "--single",
             "--report-only",
             "--check-llm",
           ],
@@ -471,12 +472,14 @@ describe("entrypoint path agreement (TC-CONSOL-045)", () => {
     // they drifted: the Dockerfile fix moved the script to /app/scripts/ and
     // updated the task `command`, but run-consolidation-task.sh kept the old
     // /app/ path. Nothing caught it because each was asserted in isolation.
-    const EXPECTED = "/app/scripts/memory-consolidation.mjs";
+    const EXPECTED = "/app/scripts/dispatch-memory-consolidation.mjs";
     expect(runner).toContain(EXPECTED);
     expect(infra).toContain(EXPECTED);
     // And the image must actually place the file there — a flattened COPY breaks
     // memory-cleanup.mjs's `../docker/llm-proxy/server.mjs` import at startup.
     expect(dockerfile).toContain("/app/scripts/memory-consolidation.mjs");
+    expect(dockerfile).toContain("/app/scripts/dispatch-memory-consolidation.mjs");
+    expect(dockerfile).toContain("/app/scripts/lib/maintenance-runtime.mjs");
     expect(dockerfile).toContain("/app/docker/llm-proxy/server.mjs");
     // Neither may still reference the flattened path.
     for (const [label, content] of [["runner", runner], ["infra", infra]]) {

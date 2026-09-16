@@ -53,6 +53,7 @@ COPY scripts/dispatch-memory-consolidation.mjs /app/scripts/dispatch-memory-cons
 COPY scripts/lib/application-region.mjs /app/scripts/lib/application-region.mjs
 COPY scripts/lib/memory-namespace.mjs /app/scripts/lib/memory-namespace.mjs
 COPY scripts/lib/maintenance-scope.mjs /app/scripts/lib/maintenance-scope.mjs
+COPY scripts/lib/maintenance-runtime.mjs /app/scripts/lib/maintenance-runtime.mjs
 COPY infra/gateway/namespace-auth.mjs /app/infra/gateway/namespace-auth.mjs
 COPY infra/gateway/service-auth.mjs /app/infra/gateway/service-auth.mjs
 

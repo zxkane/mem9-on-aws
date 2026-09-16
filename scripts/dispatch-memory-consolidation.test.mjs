@@ -1,7 +1,8 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
+import { spawn } from "node:child_process";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { parseMaintenanceTargets, dispatchConsolidation, safeChildRecord, runChild } from "./dispatch-memory-consolidation.mjs";
+import { parseMaintenanceTargets, parseDispatchConfiguration, dispatchConsolidation, safeChildRecord, runChild } from "./dispatch-memory-consolidation.mjs";
 import { buildEmfRecord } from "./memory-consolidation.mjs";
 const a = "60000000-0000-4000-8000-000000000001", b = "60000000-0000-4000-8000-000000000002";
 describe("explicit maintenance dispatch", () => {
@@ -67,6 +68,49 @@ describe("owned consolidation child lifecycle", () => {
     vi.clearAllTimers();
     vi.useRealTimers();
     vi.restoreAllMocks();
+  });
+
+  it("TC-CONSOL-085: permits a 79-minute child without renewing the deadline", async () => {
+    const {child,pending,emit}=childRun();
+    await vi.advanceTimersByTimeAsync(79*60*1000);
+    expect(child.kill).not.toHaveBeenCalled();
+    expect(emit.mock.calls.some(([r])=>r.event==="maintenance_heartbeat")).toBe(true);
+    child.close(0);
+    await expect(pending).resolves.toBe(0);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("TC-CONSOL-086/087: live phase updates do not extend a configured deadline", async () => {
+    const {child,pending,emit}=childRun(new FakeChild(),{environment:{...environment,MEM9_CONSOLIDATION_TIMEOUT_SECONDS:"120"},clock:()=>Date.now()});
+    await vi.advanceTimersByTimeAsync(59000);
+    child.stdout.write(JSON.stringify({event:"consolidation_phase",stage:"prod",phase:"clustering",state:"start",elapsedMs:59000,phaseElapsedMs:0,content:"PRIVATE"})+"\n");
+    await vi.advanceTimersByTimeAsync(1000);
+    expect(emit.mock.calls.at(-1)[0]).toMatchObject({event:"maintenance_heartbeat",phase:"clustering",elapsedMs:60000,sinceProgressMs:1000,budgetMs:120000});
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(emit.mock.calls.some(([r])=>r.event==="maintenance_timeout")).toBe(true);
+    expect(JSON.stringify(emit.mock.calls)).not.toContain("PRIVATE");
+    child.close(null,"SIGTERM");
+    await expect(pending).resolves.toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("still waits for close when publishing a timeout event throws", async () => {
+    const child=new FakeChild();
+    const {pending}=childRun(child,{environment:{...environment,MEM9_CONSOLIDATION_TIMEOUT_SECONDS:"60"},emit:()=>{throw new Error("sink unavailable");}});
+    const settled=vi.fn();pending.then(settled);
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    expect(settled).not.toHaveBeenCalled();
+    child.close(null,"SIGTERM");
+    await expect(pending).resolves.toBe(1);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it.each(["", "59", "21601", "SECRET"])("invalid runtime budget refuses child launch (%#)", async raw => {
+    const spawnChild=vi.fn();
+    await expect(runChild(a,{environment:{...environment,MEM9_CONSOLIDATION_TIMEOUT_SECONDS:raw},spawnChild})).rejects.toThrow("invalid consolidation execution budget");
+    expect(spawnChild).not.toHaveBeenCalled();
   });
 
   it("spawns one namespace without forwarding the private target list", async () => {
@@ -185,7 +229,7 @@ describe("owned consolidation child lifecycle", () => {
     const { child, pending } = childRun();
     const settled = vi.fn();
     pending.then(settled);
-    await vi.advanceTimersByTimeAsync(30 * 60 * 1000 - 1);
+    await vi.advanceTimersByTimeAsync(2 * 60 * 60 * 1000 - 1);
     expect(child.kill).not.toHaveBeenCalled();
     await vi.advanceTimersByTimeAsync(1);
     expect(child.kill.mock.calls).toEqual([["SIGTERM"]]);
@@ -287,4 +331,49 @@ describe("owned consolidation child lifecycle", () => {
     await expect(pending).resolves.toBe(1);
     expect(emit).not.toHaveBeenCalled();
   });
+});
+
+describe("single report dispatch", () => {
+  it("requires an explicit namespace and ignores even malformed scheduled targets", () => {
+    expect(parseDispatchConfiguration(["--single","--check-llm"],{...environment,MEM9_NAMESPACE_ID:a,MEM9_MAINTENANCE_TARGETS:"not-json"}))
+      .toEqual({targets:[a],reportOnly:true,checkLlm:true});
+    expect(()=>parseDispatchConfiguration(["--single"],environment)).toThrow();
+  });
+  it.each([["--apply"],["--single","--apply"],["--single","--single"],["--single","--check-llm","--check-llm"],["--check-llm"]])("rejects unsupported/duplicate flags (%#)", argv => {
+    expect(()=>parseDispatchConfiguration(argv,{...environment,MEM9_NAMESPACE_ID:a})).toThrow("invalid maintenance dispatch arguments");
+  });
+  it("forces report-only and clears inherited scheduled/apply semantics", async () => {
+    const {child,pending,spawnChild}=childRun(new FakeChild(),{reportOnly:true,checkLlm:true});
+    expect(spawnChild.mock.calls[0][1].slice(1)).toEqual(["--report-only","--check-llm"]);
+    expect(spawnChild.mock.calls[0][2].env).toMatchObject({MEM9_NAMESPACE_ID:a,MEM9_CONSOLIDATION_REPORT_ONLY:"1",MEM9_CONSOLIDATION_SCHEDULED:"0"});
+    expect(spawnChild.mock.calls[0][2].env).not.toHaveProperty("MEM9_MAINTENANCE_TARGETS");
+    child.close(0);await expect(pending).resolves.toBe(0);
+  });
+});
+
+it("the parent heartbeat and cancellation work while a real child blocks its event loop", async () => {
+  vi.useFakeTimers();
+  let child, ready;
+  const started=new Promise(resolve=>{ready=resolve;});
+  const emit=vi.fn(), controller=new AbortController();
+  const phase={event:"consolidation_phase",stage:"prod",phase:"clustering",state:"start",elapsedMs:0,phaseElapsedMs:0};
+  const spawnChild=()=>{
+    child=spawn(process.execPath,["-e",`process.stdout.write(${JSON.stringify(JSON.stringify(phase)+"\n")}); const end=Date.now()+10000; while(Date.now()<end){}`],{stdio:["ignore","pipe","pipe"]});
+    child.stdout.once("data",ready);
+    return child;
+  };
+  const pending=runChild(a,{environment,spawnChild,emit,signal:controller.signal});
+  try {
+    await started;
+    await vi.advanceTimersByTimeAsync(60000);
+    expect(emit.mock.calls.some(([r])=>r.event==="maintenance_heartbeat"&&r.phase==="clustering")).toBe(true);
+    expect(child.exitCode).toBeNull();
+    controller.abort();
+    await expect(pending).resolves.toBe(1);
+    expect(child.signalCode).toBe("SIGTERM");
+    expect(vi.getTimerCount()).toBe(0);
+  } finally {
+    child?.kill("SIGKILL");
+    vi.clearAllTimers();vi.useRealTimers();
+  }
 });

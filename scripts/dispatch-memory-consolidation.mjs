@@ -5,11 +5,13 @@ import { resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { requireNamespaceId } from "./lib/maintenance-scope.mjs";
 import { buildEmfRecord, CONSOLIDATION_METRICS } from "./memory-consolidation.mjs";
+import { consolidationTimeoutSeconds, CONSOLIDATION_HEARTBEAT_MS, safeProgressRecord } from "./lib/maintenance-runtime.mjs";
 
 export function safeChildRecord(line, stage) {
   let record;
   try { record = JSON.parse(line); } catch { return undefined; }
   if (!record || record.stage !== stage) return undefined;
+  if (record.event === "consolidation_phase") return safeProgressRecord(record, stage);
   if (record._aws) {
     if (!CONSOLIDATION_METRICS.every(name => Number.isSafeInteger(record[name]) && record[name] >= 0)) return undefined;
     return buildEmfRecord(stage, {
@@ -32,6 +34,15 @@ export function parseMaintenanceTargets(raw) {
     throw new Error("explicit unique maintenance targets are required");
   return value.map(requireNamespaceId);
 }
+export function parseDispatchConfiguration(argv, environment = process.env) {
+  const flags = new Set(argv);
+  if (flags.size !== argv.length || argv.some(arg => !["--single", "--report-only", "--check-llm"].includes(arg)) ||
+      (!flags.has("--single") && flags.size)) throw new Error("invalid maintenance dispatch arguments");
+  consolidationTimeoutSeconds(environment);
+  return flags.has("--single")
+    ? {targets:[requireNamespaceId(environment.MEM9_NAMESPACE_ID)],reportOnly:true,checkLlm:flags.has("--check-llm")}
+    : {targets:parseMaintenanceTargets(environment.MEM9_MAINTENANCE_TARGETS),reportOnly:false,checkLlm:false};
+}
 export async function dispatchConsolidation(raw, run, { signal } = {}) {
   const targets = parseMaintenanceTargets(raw);
   const result = { attempted: targets.length, succeeded: 0, failed: 0 };
@@ -44,7 +55,6 @@ export async function dispatchConsolidation(raw, run, { signal } = {}) {
   return result;
 }
 
-const CHILD_TIMEOUT_MS = 30 * 60 * 1000;
 const CHILD_KILL_GRACE_MS = 5000;
 const CHILD_OUTPUT_LIMIT_BYTES = 1024 * 1024;
 
@@ -54,15 +64,30 @@ export async function runChild(namespaceId, {
   signal,
   spawnChild = spawn,
   emit = record => console.log(JSON.stringify(record)),
+  reportOnly = false,
+  checkLlm = false,
+  clock = () => performance.now(),
 } = {}) {
   requireNamespaceId(namespaceId);
+  const budgetMs = consolidationTimeoutSeconds(environment) * 1000;
+  const stage = environment.MEM9_STAGE;
+  if (typeof stage !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9-]{0,63}$/.test(stage) ||
+      typeof reportOnly !== "boolean" || typeof checkLlm !== "boolean" || (checkLlm && !reportOnly))
+    throw new Error("invalid maintenance dispatch configuration");
   signal?.throwIfAborted();
   const childEnvironment = { ...environment, MEM9_NAMESPACE_ID: namespaceId };
   delete childEnvironment.MEM9_MAINTENANCE_TARGETS;
+  if (reportOnly) {
+    childEnvironment.MEM9_CONSOLIDATION_REPORT_ONLY = "1";
+    childEnvironment.MEM9_CONSOLIDATION_SCHEDULED = "0";
+  }
+  const started = clock();
   let child;
   try {
     child = spawnChild(process.execPath, [
       fileURLToPath(new URL("memory-consolidation.mjs", import.meta.url)),
+      ...(reportOnly ? ["--report-only"] : []),
+      ...(checkLlm ? ["--check-llm"] : []),
     ], { env: childEnvironment, stdio: ["ignore", "pipe", "pipe"] });
   } catch {
     // A synchronous spawn failure has no child or close event to join.
@@ -76,6 +101,10 @@ export async function runChild(namespaceId, {
     let bytes = 0;
     let timeoutTimer;
     let killTimer;
+    let heartbeatTimer;
+    let lastProgress = started;
+    let phase = "initializing";
+    const elapsed = since => Math.max(0, Math.floor(clock() - since));
     const releaseStreams = [];
 
     const kill = signalName => {
@@ -87,6 +116,7 @@ export async function runChild(namespaceId, {
       if (stopping) return;
       stopping = true;
       clearTimeout(timeoutTimer);
+      clearInterval(heartbeatTimer);
       // Install before TERM: even an immediate close must clear this timer.
       killTimer = setTimeout(() => {
         if (!closed) kill("SIGKILL");
@@ -101,6 +131,7 @@ export async function runChild(namespaceId, {
       closed = true;
       clearTimeout(timeoutTimer);
       clearTimeout(killTimer);
+      clearInterval(heartbeatTimer);
       signal?.removeEventListener("abort", onAbort);
       child.off("error", onError);
       for (const release of releaseStreams) release();
@@ -129,6 +160,10 @@ export async function runChild(namespaceId, {
         for (const line of lines.filter(Boolean)) {
           const record = safeChildRecord(line, environment.MEM9_STAGE);
           if (!record) { failed = true; continue; }
+          if (record.event === "consolidation_phase") {
+            phase = record.phase;
+            lastProgress = clock();
+          }
           try { emit(record); } catch { terminate(); return; }
           if (closed || stopping) return;
         }
@@ -150,8 +185,18 @@ export async function runChild(namespaceId, {
         stream.off("error", onError);
       });
     }
-    timeoutTimer = setTimeout(terminate, CHILD_TIMEOUT_MS);
+    timeoutTimer = setTimeout(() => {
+      try { emit({event:"maintenance_timeout",stage,elapsedMs:elapsed(started),budgetMs}); }
+      catch { /* Output failure still requires termination and close. */ }
+      finally { terminate(); }
+    }, Math.max(0, budgetMs - elapsed(started)));
     timeoutTimer.unref();
+    heartbeatTimer = setInterval(() => {
+      if (closed || stopping) return;
+      try { emit({event:"maintenance_heartbeat",stage,phase,elapsedMs:elapsed(started),sinceProgressMs:elapsed(lastProgress),budgetMs}); }
+      catch { terminate(); }
+    }, CONSOLIDATION_HEARTBEAT_MS);
+    heartbeatTimer.unref();
     signal?.addEventListener("abort", onAbort, { once: true });
     // Covers cancellation between the initial check and listener registration.
     if (signal?.aborted) onAbort();
@@ -159,15 +204,17 @@ export async function runChild(namespaceId, {
 }
 
 async function main() {
-  const { MEM9_MAINTENANCE_TARGETS: targets, ...environment } = process.env;
+  const configuration = parseDispatchConfiguration(process.argv.slice(2));
+  const { MEM9_MAINTENANCE_TARGETS: _targets, ...environment } = process.env;
   const controller = new AbortController();
   const stop = () => controller.abort();
   process.on("SIGINT", stop);
   process.on("SIGTERM", stop);
   let result;
   try {
-    result = await dispatchConsolidation(targets, namespaceId => runChild(namespaceId, {
+    result = await dispatchConsolidation(JSON.stringify(configuration.targets), namespaceId => runChild(namespaceId, {
       environment, signal: controller.signal,
+      reportOnly: configuration.reportOnly, checkLlm: configuration.checkLlm,
     }), { signal: controller.signal });
   } finally {
     process.off("SIGINT", stop);
