@@ -10,6 +10,7 @@ import {
   decisionArtifactBucketName,
 } from "./decision-artifact";
 import { disableTaskContainerPseudoTerminal } from "./ecs-task-definition";
+import { consolidationTimeoutSeconds } from "../scripts/lib/maintenance-runtime.mjs";
 
 const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 const BEDROCK_PROJECT = process.env.MEM9_BEDROCK_PROJECT;
@@ -260,7 +261,7 @@ export function consolidation(
     memory: "1 GB",
     image,
     entrypoint: ["node"],
-    command: ["/app/scripts/memory-consolidation.mjs"],
+    command: ["/app/scripts/dispatch-memory-consolidation.mjs", "--single", "--report-only"],
     environment: {
       MEM9_STAGE: $app.stage,
       MEM9_SERVICE_TRANSPORT_ISSUER: "maintenance:consolidation",
@@ -277,6 +278,7 @@ export function consolidation(
       MEM9_BEDROCK_PROJECT_OPENAI: BEDROCK_PROJECT_OPENAI,
       MEM9_LLM_RESPONSES_REGION: RESPONSES_REGION,
       MEM9_CONSOLIDATION_REPORT_ONLY: "1",
+      MEM9_CONSOLIDATION_TIMEOUT_SECONDS: String(consolidationTimeoutSeconds()),
       ...(SCHEDULE_ENABLED
         ? {
             MEM9_DECISION_ARTIFACT_BUCKET: artifactBucketName,

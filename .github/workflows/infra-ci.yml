@@ -129,6 +129,7 @@ env:
   MEM9_TRANSPORT_SIGNING_ACTIVE_SLOT: ${{ vars.MEM9_TRANSPORT_SIGNING_ACTIVE_SLOT }}
   MEM9_TRANSPORT_SIGNING_SLOT_A_REVISION: ${{ vars.MEM9_TRANSPORT_SIGNING_SLOT_A_REVISION }}
   MEM9_TRANSPORT_SIGNING_SLOT_B_REVISION: ${{ vars.MEM9_TRANSPORT_SIGNING_SLOT_B_REVISION }}
+  MEM9_CONSOLIDATION_TIMEOUT_SECONDS: ${{ vars.MEM9_CONSOLIDATION_TIMEOUT_SECONDS || '7200' }}
   # The out-of-band ECR repo namespace (infra/cloudformation/ecr-repositories.yaml).
   # build-and-push-image builds four images under it: <ns>/mnemo-server,
   # <ns>/qwen3-embed, <ns>/bootstrap, <ns>/llm-proxy. Deploy stages reference

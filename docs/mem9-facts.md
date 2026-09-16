@@ -407,6 +407,13 @@ still keep writers stopped through namespace cutover.
 
 ### Scoped maintenance and service capabilities (patches 0018 and 0019)
 
+- Consolidation reports and scheduled children use the same process watchdog.
+  Single mode always reports without applying or writing digest state. Each
+  namespace has a configurable fixed execution budget (two hours by default,
+  60 seconds to six hours), distinct from the operator's twelve-hour observation
+  default. Allowlisted phase/count/time records and a parent heartbeat expose
+  activity without identifiers or content; progress does not extend the budget.
+
 - Patch `0018-service-maintenance-namespaces` adds separately signed service
   transport for the fixed `maintenance:cleanup`, `maintenance:consolidation`,
   and `maintenance:analysis` capabilities. Their principal keys are derived

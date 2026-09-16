@@ -3,6 +3,17 @@
 Unit tests use mocked database, REST, LLM, and AWS resource constructors.
 Preview E2E runs the deployed task in report-only mode.
 
+## Execution budget and progress
+
+| ID | Scenario | Expected result |
+| --- | --- | --- |
+| TC-CONSOL-085 | A child takes longer than 30 minutes and completes within the default two-hour budget | It exits normally; progress never resets its fixed deadline |
+| TC-CONSOL-086 | An execution budget is malformed, outside 60..21,600 seconds, or explicitly empty | Refuse before spawn; a valid override gets its exact deadline and TERM/KILL/close handling |
+| TC-CONSOL-087 | A child is computing or awaiting a model | Parent heartbeat continues with bounded elapsed/since-progress fields; no namespace, credentials, or content is emitted |
+| TC-CONSOL-088 | A phase completes, a classification advances, or work throws | Phase/count/duration events remain allowlisted, rate-limited, and truthful; errors do not create success events |
+| TC-CONSOL-089 | A single-namespace report is launched while scheduled targets are configured | Only its explicit namespace runs through the shared watchdog, with report-only/model-smoke flags preserved |
+| TC-CONSOL-090 | A model or SQL operation spans a phase boundary | Progress adds no authorization grant, transaction lifetime, mutation, digest write, or metric dimension |
+
 ## Consolidation Logic
 
 | ID | Scenario | Expected result |
