@@ -1,7 +1,97 @@
 import { describe, expect, it, vi } from "vitest";
 import { runConsolidation, runConsolidationCli, productionLogRecord } from "./memory-consolidation.mjs";
+import { safeChildRecord } from "./dispatch-memory-consolidation.mjs";
 const namespaceId="60000000-0000-4000-8000-000000000101";
 const record = id => ({id,namespace_id:namespaceId,content:"PRIVATE-CONTENT",embedding:[1,0],memory_type:"insight",state:"active",version:1,created_at:"2026-09-01T00:00:00Z",updated_at:"2026-09-01T00:00:00Z",tags:[]});
+
+describe("bounded maintenance diagnostics", () => {
+  it.each(["TimeoutError", "InvalidActions", "PRIVATE-ERROR"])(
+    "TC-CONSOL-091: preserves classification failure diagnostics (%s) without changing policy",
+    async name => {
+      const childLogs = [], parentLogs = [], writes = vi.fn();
+      const completeChat = vi.fn(async () => {
+        if (name === "InvalidActions") return "PRIVATE-MODEL-RESPONSE";
+        throw Object.assign(new Error("PRIVATE-MESSAGE"), { name });
+      });
+      const result = await runConsolidation({ stage: "test", namespaceId, reportOnly: true }, {
+        listActiveMemories: async () => [record("PRIVATE-ID-A"), record("PRIVATE-ID-B")],
+        completeChat,
+        log: line => {
+          const child = productionLogRecord(line, "test");
+          childLogs.push(child);
+          parentLogs.push(safeChildRecord(JSON.stringify(child), "test"));
+        },
+        emitMetrics: vi.fn(), archiveMemory: writes, putMemory: writes, writeDigestState: writes,
+      });
+      const failure = {
+        event: "consolidation_classification_failed", stage: "test", count: 2,
+        errorClass: name === "PRIVATE-ERROR" ? "Error" : name,
+      };
+      for (const logs of [childLogs, parentLogs]) {
+        expect(logs.filter(r => r?.event === failure.event)).toEqual([failure]);
+        expect(logs).toContainEqual({ event: "consolidation_review", stage: "test", kind: "CLASSIFICATION_FAILED", count: 2 });
+        expect(logs).toContainEqual(expect.objectContaining({ event: "consolidation_phase", phase: "classifying", state: "complete", completed: 1, failed: 1 }));
+        expect(JSON.stringify(logs)).not.toMatch(/PRIVATE|60000000/);
+      }
+      expect(result).toMatchObject({ exitCode: 1, mutations: 0 });
+      expect(completeChat).toHaveBeenCalledOnce();
+      expect(writes).not.toHaveBeenCalled();
+    },
+  );
+
+  it("TC-CONSOL-091: continues to the next cluster after a logged failure", async () => {
+    const logs = [], writes = vi.fn();
+    const memories = [record("a"), record("b"), { ...record("c"), embedding: [0, 1] }, { ...record("d"), embedding: [0, 1] }];
+    const completeChat = vi.fn()
+      .mockRejectedValueOnce(new TypeError("PRIVATE-MESSAGE"))
+      .mockResolvedValueOnce('{"actions":[]}');
+    const result = await runConsolidation({ stage: "test", namespaceId, reportOnly: true }, {
+      listActiveMemories: async () => memories,
+      completeChat,
+      log: line => logs.push(safeChildRecord(JSON.stringify(productionLogRecord(line, "test")), "test")),
+      emitMetrics: vi.fn(), archiveMemory: writes, putMemory: writes, writeDigestState: writes,
+    });
+    expect(completeChat.mock.calls.map(([, input]) => input.map(memory => memory.id))).toEqual([["a", "b"], ["c", "d"]]);
+    expect(result).toMatchObject({ exitCode: 0, mutations: 0, review: [{ kind: "CLASSIFICATION_FAILED", ids: ["a", "b"] }] });
+    expect(logs.filter(r => r?.event === "consolidation_classification_failed")).toEqual([
+      { event: "consolidation_classification_failed", stage: "test", count: 2, errorClass: "TypeError" },
+    ]);
+    expect(logs).toContainEqual(expect.objectContaining({ event: "consolidation_phase", phase: "classifying", state: "complete", completed: 2, failed: 1 }));
+    expect(JSON.stringify(logs)).not.toContain("PRIVATE");
+    expect(writes).not.toHaveBeenCalled();
+  });
+
+  const enums = [
+    ["REVIEW", "kind", "kind", ["APPLY_FAILED", "UNFENCEABLE_MERGE", "CLASSIFICATION_FAILED", "UNKNOWN_ID", "CONFLICTING_ACTION", "INVALID_MERGE", "INVALID_STALE", "INELIGIBLE_STALE", "DELETE", "CONTRADICTION", "LOCK_HELD", "CLUSTER_TOO_LARGE", "TAG_LIMIT_REACHED", "CAP_DEFERRED"]],
+    ["DIGEST", "event", "status", ["dedup_unavailable", "slack_delivery_failed", "health_alarm_delivery_failed", "state_write_failed"]],
+    ["CLASSIFICATION_FAILED", "errorClass", "errorClass", ["Error", "TypeError", "RangeError", "SyntaxError", "AbortError", "TimeoutError", "InvalidActions", "ApplyMutationError", "PreconditionFailed"]],
+  ];
+  it.each(enums)("TC-CONSOL-092: preserves known %s enums through both formatters", (prefix, inputKey, outputKey, values) => {
+    for (const value of values) {
+      const expected = { event: `consolidation_${prefix.toLowerCase()}`, stage: "test", [outputKey]: value };
+      const child = productionLogRecord(`CONSOLIDATION_${prefix} ${JSON.stringify({ [inputKey]: value, content: "PRIVATE", namespace_id: namespaceId })}`, "test");
+      expect(child).toEqual(expected);
+      expect(safeChildRecord(JSON.stringify(child), "test")).toEqual(expected);
+      expect(safeChildRecord(JSON.stringify({ ...expected, message: "PRIVATE", namespace_id: namespaceId }), "test")).toEqual(expected);
+    }
+  });
+
+  it.each(["PRIVATE", null, {}, [], true, 1].map(value => [value]))("TC-CONSOL-093: drops unknown or mistyped enums (%j)", value => {
+    for (const [prefix, inputKey, outputKey] of enums) {
+      const expected = { event: `consolidation_${prefix.toLowerCase()}`, stage: "test" };
+      expect(productionLogRecord(`CONSOLIDATION_${prefix} ${JSON.stringify({ [inputKey]: value, message: "PRIVATE", stack: "PRIVATE", ids: ["PRIVATE"], reply: "PRIVATE" })}`, "test")).toEqual(expected);
+      expect(safeChildRecord(JSON.stringify({ ...expected, [outputKey]: value, message: "PRIVATE", stack: "PRIVATE", ids: ["PRIVATE"] }), "test")).toEqual(expected);
+    }
+  });
+
+  it.each([0, Number.MAX_SAFE_INTEGER, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, "2", null, {}, []].map(value => [value]))("TC-CONSOL-093: bounds numeric fields (%j)", count => {
+    const value = { count, reviewItems: count, reportOnly: true, digestEnabled: false, preconditionFailed: "PRIVATE", content: "PRIVATE" };
+    const expected = { event: "consolidation_review_list", stage: "test", reportOnly: true, digestEnabled: false };
+    if (Number.isSafeInteger(count) && count >= 0) Object.assign(expected, { count, reviewItems: count });
+    expect(productionLogRecord(`CONSOLIDATION_REVIEW_LIST ${JSON.stringify(value)}`, "test")).toEqual(expected);
+    expect(safeChildRecord(JSON.stringify({ ...value, event: expected.event, stage: "test" }), "test")).toEqual(expected);
+  });
+});
 
 describe("consolidation phase visibility", () => {
   it("closes initialized dependencies if publishing their completion fails", async () => {

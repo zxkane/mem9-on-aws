@@ -4,7 +4,7 @@ import { fileURLToPath } from "node:url";
 import { resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import { requireNamespaceId } from "./lib/maintenance-scope.mjs";
-import { buildEmfRecord, CONSOLIDATION_METRICS } from "./memory-consolidation.mjs";
+import { buildEmfRecord, CONSOLIDATION_METRICS, DIGEST_LOG_STATUSES, REVIEW_KIND_POLICIES, safeErrorClass } from "./memory-consolidation.mjs";
 import { consolidationTimeoutSeconds, CONSOLIDATION_HEARTBEAT_MS, safeProgressRecord } from "./lib/maintenance-runtime.mjs";
 
 export function safeChildRecord(line, stage) {
@@ -21,8 +21,11 @@ export function safeChildRecord(line, stage) {
       dedupUnavailable: record.ConsolidationDedupUnavailable,
     });
   }
-  if (!["consolidation_progress", "consolidation_review", "consolidation_review_list", "consolidation_digest"].includes(record.event)) return undefined;
+  if (!["consolidation_progress", "consolidation_review", "consolidation_review_list", "consolidation_digest", "consolidation_classification_failed"].includes(record.event)) return undefined;
   const clean = { event: record.event, stage };
+  if (REVIEW_KIND_POLICIES.has(record.kind)) clean.kind = record.kind;
+  if (DIGEST_LOG_STATUSES.includes(record.status)) clean.status = record.status;
+  if (safeErrorClass({ name: record.errorClass }) === record.errorClass) clean.errorClass = record.errorClass;
   for (const key of ["count", "reviewItems"]) if (Number.isSafeInteger(record[key]) && record[key] >= 0) clean[key] = record[key];
   for (const key of ["reportOnly", "digestEnabled", "preconditionFailed"]) if (typeof record[key] === "boolean") clean[key] = record[key];
   return clean;

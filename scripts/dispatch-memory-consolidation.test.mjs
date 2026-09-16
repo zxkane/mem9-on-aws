@@ -70,6 +70,22 @@ describe("owned consolidation child lifecycle", () => {
     vi.restoreAllMocks();
   });
 
+  it.each(["stdout", "stderr"])("TC-CONSOL-092: forwards bounded diagnostics from child %s", async stream => {
+    const { child, pending, emit } = childRun();
+    const records = [
+      { event: "consolidation_classification_failed", stage: "prod", count: 2, errorClass: "TimeoutError" },
+      { event: "consolidation_review", stage: "prod", kind: "CLASSIFICATION_FAILED", count: 2 },
+      { event: "consolidation_digest", stage: "prod", status: "state_write_failed", errorClass: "PreconditionFailed", preconditionFailed: true },
+    ];
+    const output = records.map(record => JSON.stringify({ ...record, namespace_id: a, content: "PRIVATE", stack: "PRIVATE" })).join("\n") + "\n";
+    child[stream].write(output.slice(0, 31));
+    child[stream].write(output.slice(31));
+    child.close(5);
+    await expect(pending).resolves.toBe(5);
+    expect(emit.mock.calls.map(([record]) => record)).toEqual(records);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it("TC-CONSOL-085: permits a 79-minute child without renewing the deadline", async () => {
     const {child,pending,emit}=childRun();
     await vi.advanceTimersByTimeAsync(79*60*1000);

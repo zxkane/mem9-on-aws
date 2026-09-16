@@ -36,7 +36,7 @@ const MEMORIES_PATH = "/v1alpha2/mem9s/memories";
 const REQUEST_TIMEOUT_MS = 30_000;
 const LLM_TIMEOUT_MS = 120_000;
 
-function safeErrorClass(error) {
+export function safeErrorClass(error) {
   return new Set([
     "Error", "TypeError", "RangeError", "SyntaxError", "AbortError",
     "TimeoutError", "InvalidActions", "ApplyMutationError", "PreconditionFailed",
@@ -79,7 +79,7 @@ const DISPOSITION_OPERATOR = "OPERATOR_DECISION";
 const DISPOSITION_DEFERRED = "DEFERRED_RETRY";
 const DISPOSITION_HEALTH = "SYSTEM_HEALTH";
 
-const REVIEW_KIND_POLICIES = new Map([
+export const REVIEW_KIND_POLICIES = new Map([
   ["APPLY_FAILED", {
     disposition: DISPOSITION_HEALTH,
     priority: 0,
@@ -1005,7 +1005,10 @@ async function classifyClusters(clusters, completeChat, log, routingOptions, pro
       actions = parseActions(await completeChat(CONSOLIDATION_PROMPT, input));
     } catch (error) {
       failed += 1;
-      log(`classification failed for cluster of ${cluster.length}: ${safeErrorClass(error)}`);
+      log(`CONSOLIDATION_CLASSIFICATION_FAILED ${JSON.stringify({
+        count: cluster.length,
+        errorClass: safeErrorClass(error),
+      })}`);
       const byId = new Map(cluster.map((memory) => [memory.id, memory]));
       review.push(
         reviewItem(
@@ -1929,6 +1932,10 @@ export function createConsolidationDatabase(db, scope) {
   };
 }
 
+export const DIGEST_LOG_STATUSES = Object.freeze([
+  "dedup_unavailable", "slack_delivery_failed", "health_alarm_delivery_failed", "state_write_failed",
+]);
+
 // The shared MERGE helper also emits human-readable logs containing IDs. Only
 // allowlisted summaries cross the production stdout boundary.
 // Input is an internal prefixed log line; stage is supplied by trusted config.
@@ -1938,13 +1945,13 @@ export function productionLogRecord(line, stage) {
     try { return safeProgressRecord(JSON.parse(line.slice("CONSOLIDATION_PHASE ".length)), stage) ?? record; }
     catch { return record; }
   }
-  const match = /^CONSOLIDATION_(DIGEST|REVIEW|REVIEW_LIST) (.*)$/u.exec(line);
+  const match = /^CONSOLIDATION_(DIGEST|REVIEW|REVIEW_LIST|CLASSIFICATION_FAILED) (.*)$/u.exec(line);
   if (!match) return record;
   let value;
   try { value = JSON.parse(match[2]); } catch { return record; }
   record.event = `consolidation_${match[1].toLowerCase()}`;
   if (!value || typeof value !== "object") return record;
-  if (["dedup_unavailable", "slack_delivery_failed", "health_alarm_delivery_failed", "state_write_failed"].includes(value.event)) {
+  if (DIGEST_LOG_STATUSES.includes(value.event)) {
     record.status = value.event;
   }
   if (REVIEW_KIND_POLICIES.has(value.kind)) record.kind = value.kind;
@@ -1954,7 +1961,7 @@ export function productionLogRecord(line, stage) {
   for (const key of ["reportOnly", "digestEnabled", "preconditionFailed"]) {
     if (typeof value[key] === "boolean") record[key] = value[key];
   }
-  if (value.errorClass) record.errorClass = safeErrorClass({ name: value.errorClass });
+  if (safeErrorClass({ name: value.errorClass }) === value.errorClass) record.errorClass = value.errorClass;
   return record;
 }
 
