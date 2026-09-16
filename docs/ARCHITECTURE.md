@@ -269,7 +269,8 @@ Cognito-authenticated MCP request
 
 `infra/gateway.ts` grants the gateway service role
 `lambda:InvokeFunction` on exactly the identity interceptor and proxy target.
-The interceptor classifies the validated Cognito client as human or M2M,
+The interceptor independently verifies JWT signatures against the configured
+issuer and trusted JWKS URI before classifying the client as human or M2M,
 requires an access token, derives privacy-preserving principal/client/group
 lookup keys, enforces OAuth tool scopes, and signs a request-bound internal
 context. It has no VPC, database credential, tenant key, or server network path.

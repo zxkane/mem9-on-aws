@@ -157,6 +157,7 @@ async function loadGateway() {
 function fakeCognito(): CognitoOutputs {
   return {
     issuer: out("https://cognito-idp.ap-northeast-1.amazonaws.com/pool-1"),
+    jwksUri: out("https://cognito-idp.ap-northeast-1.amazonaws.com/pool-1/.well-known/jwks.json"),
     allowedClientIds: [out("client-1")],
   } as unknown as CognitoOutputs;
 }
@@ -271,6 +272,9 @@ describe("gateway stack", () => {
     expect(targetFn).toBeDefined();
     expect(interceptorFn?.runtime).toBe("nodejs24.x");
     expect(interceptorFn?.vpc).toBeUndefined();
+    expect(unwrap((interceptorFn?.environment as Record<string, unknown>).MEM9_IDENTITY_JWKS_URI)).toBe(
+      unwrap(fakeCognito().jwksUri),
+    );
     expect(
       (interceptorFn?.environment as Record<string, unknown>).MEM9_API_KEY,
     ).toBeUndefined();
@@ -431,6 +435,7 @@ describe("external OIDC gateway admission", () => {
       MEM9_AUTH_REQUIRED_GROUP: "team-a",
       MEM9_AUTH_GROUP_CLAIM: "groups",
     });
+    auth.oidc!.jwksUri = "https://keys.example.com/external-jwks";
     const gateway = await loadGateway();
     gateway(
       fakeCognito(),
@@ -462,5 +467,6 @@ describe("external OIDC gateway admission", () => {
       requiredGroup: "team-a",
       issuer: "https://issuer.example.com/pool",
     });
+    expect(unwrap(env.MEM9_IDENTITY_JWKS_URI)).toBe("https://keys.example.com/external-jwks");
   });
 });

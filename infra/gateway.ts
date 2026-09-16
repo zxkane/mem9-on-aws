@@ -221,6 +221,7 @@ export function gateway(
       MEM9_TOOL_SCOPES: JSON.stringify(MCP_TOOL_SCOPES),
       MEM9_CLIENT_REGISTRY: clientRegistry,
       MEM9_IDENTITY_SIGNING_KEYS: identitySigningKeys,
+      MEM9_IDENTITY_JWKS_URI: external?.jwksUri ?? cognitoOut!.jwksUri,
     },
   });
 
