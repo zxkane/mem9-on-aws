@@ -611,7 +611,7 @@ describe("workflow integration", () => {
     );
   });
 
-  it("TC-GROUPNS-099/101: keeps consolidation absent from namespace deployments", () => {
+  it("TC-GROUPNS-099/101: requires separate namespace schedule opt-in", () => {
     const source = readFileSync(workflowPath, "utf8");
     const workflow = parse(source);
     const previewSteps = workflow.jobs["deploy-preview"].steps;
@@ -625,9 +625,7 @@ describe("workflow integration", () => {
     expect(previewDeploy.env).not.toHaveProperty(
       "MEM9_CONSOLIDATION_SCHEDULE_ENABLED",
     );
-    expect(prodDeploy.env).not.toHaveProperty(
-      "MEM9_CONSOLIDATION_SCHEDULE_ENABLED",
-    );
+    expect(prodDeploy.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED).toContain("vars.MEM9_NAMESPACE_CONSOLIDATION_SCHEDULE_ENABLED");
     expect(
       previewSteps.some(({ run }) =>
         String(run).includes("run-consolidation-task.sh"),

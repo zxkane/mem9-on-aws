@@ -6,12 +6,10 @@ import {
 } from "node:fs";
 import { relative, resolve } from "node:path";
 
-import {
-  computeLineStarts,
-  createScanner,
-  LanguageVariant,
-  SyntaxKind,
-} from "typescript/unstable/ast";
+import { parse } from "@babel/parser";
+import traverseModule from "@babel/traverse";
+
+const traverse = traverseModule.default ?? traverseModule;
 
 export const SCOPED_TABLES = [
   "ingest_job_plans",
@@ -31,13 +29,7 @@ const TABLE_PATTERN = new RegExp(
   "gi",
 );
 const DYNAMIC_RELATION_PATTERN =
-  /\b(?:FROM|JOIN|INTO|UPDATE|TABLE|REFERENCES|ON)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:ONLY\s+)?\{\{dynamic\}\}/i;
-const SCOPED_TABLE_SOURCE_PATTERN = new RegExp(
-  String.raw`\b(?:${SCOPED_TABLES.join("|")})\b`,
-  "i",
-);
-const DYNAMIC_RELATION_SOURCE_PATTERN =
-  /\b(?:FROM|JOIN|INTO|UPDATE|TABLE|REFERENCES|ON)\s*(?:\$\{|["'`]\s*\+)/i;
+  /\b(?:FROM|JOIN|INTO|UPDATE|TABLE|REFERENCES|ON)\s+(?:IF\s+(?:NOT\s+)?EXISTS\s+)?(?:ONLY\s+)?[^\s(),;]*\{\{dynamic\}\}/i;
 
 function normalizeSql(text) {
   return text
@@ -65,207 +57,144 @@ function isScopedSql(text) {
   );
 }
 
-function extractJavaScript({ owner, source }) {
-  const scanner = createScanner(true, LanguageVariant.Standard, source);
-  const lineStarts = computeLineStarts(source);
-  const candidates = [];
-  const candidateKeys = new Set();
+const DYNAMIC_SQL = "{{dynamic}}";
+const MAX_STATIC_SQL_LENGTH = 1_048_576;
+const MAX_STATIC_SQL_DEPTH = 64;
+const TRANSPARENT_EXPRESSIONS = new Set([
+  "ParenthesizedExpression", "TSAsExpression", "TSTypeAssertion",
+  "TSNonNullExpression", "TSSatisfiesExpression",
+]);
 
-  const lineAt = (position) => {
-    let low = 0;
-    let high = lineStarts.length;
-    while (low + 1 < high) {
-      const middle = Math.floor((low + high) / 2);
-      if (lineStarts[middle] <= position) low = middle;
-      else high = middle;
+function isStringExpression(path) {
+  return path.isStringLiteral() || path.isTemplateLiteral() ||
+    path.isBinaryExpression({ operator: "+" }) || path.isTaggedTemplateExpression() ||
+    TRANSPARENT_EXPRESSIONS.has(path.node.type);
+}
+
+function extractJavaScript({ owner, source }) {
+  let ast;
+  try {
+    ast = parse(source, {
+      sourceType: "unambiguous",
+      allowAwaitOutsideFunction: true,
+      plugins: [
+        ...(/\.(?:[cm]?ts|tsx)$/.test(owner) ? [["typescript", { dts: /\.d\.[cm]?ts$/.test(owner) }]] : []),
+        ...(/\.[jt]sx$/.test(owner) ? ["jsx"] : []),
+      ],
+    });
+  } catch (error) {
+    throw new Error(`${owner}:${error.loc?.line ?? "?"}: cannot parse inventory source (${error.reasonCode ?? "syntax error"})`);
+  }
+  const candidates = new Map();
+  const cache = new WeakMap();
+  const resolving = new Set();
+  const unknown = () => ({ text: DYNAMIC_SQL, unsupported: false });
+  const combine = (parts, unsupported = false) => {
+    const text = parts.map(part => part.text).join("");
+    if (text.length > MAX_STATIC_SQL_LENGTH) {
+      throw new Error(`${owner}: static SQL expansion exceeds size limit`);
     }
-    return low + 1;
+    return { text, unsupported: unsupported || parts.some(part => part.unsupported) };
   };
-  const add = (text, start) => {
-    if (isScopedSql(text)) {
+  const template = (path, raw, depth) => {
+    const expressions = path.get("expressions");
+    const parts = [];
+    path.node.quasis.forEach((quasi, index) => {
+      const text = raw ? quasi.value.raw : quasi.value.cooked;
+      parts.push(text == null ? unknown() : { text, unsupported: false });
+      if (index < expressions.length) parts.push(expand(expressions[index], depth + 1));
+    });
+    return combine(parts);
+  };
+  // Interpret only immutable lexical string syntax. Never call Babel's
+  // evaluator or execute source calls, imports, getters, or arbitrary tags.
+  const expand = (path, depth = 0) => {
+    if (depth > MAX_STATIC_SQL_DEPTH) {
+      throw new Error(`${owner}: static SQL expansion exceeds depth limit`);
+    }
+    if (cache.has(path.node)) return cache.get(path.node);
+    if (resolving.has(path.node)) return unknown();
+    resolving.add(path.node);
+    let result;
+    if (path.isStringLiteral()) {
+      result = { text: path.node.value, unsupported: false };
+    } else if (path.isTemplateLiteral()) {
+      result = template(path, false, depth);
+    } else if (path.isBinaryExpression({ operator: "+" })) {
+      result = combine([expand(path.get("left"), depth + 1), expand(path.get("right"), depth + 1)]);
+    } else if (path.isIdentifier()) {
+      const binding = path.scope.getBinding(path.node.name);
+      result = binding?.kind === "const" && binding.constant &&
+        binding.path.isVariableDeclarator() && binding.path.get("id").isIdentifier() &&
+        binding.path.node.init
+        ? expand(binding.path.get("init"), depth + 1)
+        : unknown();
+    } else if (path.isTaggedTemplateExpression()) {
+      const tag = path.get("tag");
+      const raw = tag.isMemberExpression({ computed: false }) &&
+        tag.get("object").isIdentifier({ name: "String" }) &&
+        !tag.scope.getBinding("String") && tag.get("property").isIdentifier({ name: "raw" });
+      // Unknown tags are never executed. Retain their raw source for an
+      // unclassified candidate even when a cooked escape would be invalid.
+      result = combine([template(path.get("quasi"), true, depth)], !raw);
+    } else if (TRANSPARENT_EXPRESSIONS.has(path.node.type)) {
+      result = expand(path.get("expression"), depth + 1);
+    } else {
+      result = unknown();
+    }
+    resolving.delete(path.node);
+    cache.set(path.node, result);
+    return result;
+  };
+
+  // A const SQL prefix used only to build larger, inspectable queries is not
+  // another statement. Keep definitions with direct/unknown uses so this
+  // reduction never hides a query whose enclosing expression is opaque.
+  const onlyComposedUses = (binding, seen = new Set()) => {
+    if (!binding || binding.kind !== "const" || !binding.constant ||
+      !binding.referencePaths.length || seen.has(binding)) return false;
+    const next = new Set(seen).add(binding);
+    return binding.referencePaths.every(reference => {
+      let enclosing = reference;
+      while (enclosing.parentPath && isStringExpression(enclosing.parentPath))
+        enclosing = enclosing.parentPath;
+      if (enclosing !== reference) {
+        const value = expand(enclosing);
+        return !value.unsupported && isScopedSql(normalizeSql(value.text));
+      }
+      const parent = reference.parentPath;
+      return parent.isVariableDeclarator() && parent.get("id").isIdentifier() &&
+        parent.node.init === reference.node &&
+        onlyComposedUses(parent.scope.getBinding(parent.node.id.name), next);
+    });
+  };
+
+  traverse(ast, {
+    enter(path) {
+      if (!isStringExpression(path)) return;
+      // A concatenation/template is one candidate. Its literal children are
+      // incomplete projections/predicates, not additional SQL statements.
+      if (path.parentPath && isStringExpression(path.parentPath)) return;
+      const resolved = expand(path);
+      const text = normalizeSql(resolved.text);
+      if (!isScopedSql(text)) return;
+      const declaration = path.parentPath;
+      if (declaration?.isVariableDeclarator() && declaration.get("id").isIdentifier() &&
+        onlyComposedUses(declaration.scope.getBinding(declaration.node.id.name))) return;
       const tables = tablesIn(text);
       const candidate = {
         owner,
-        line: lineAt(start),
-        text: normalizeSql(text),
-        tables:
-          tables.length > 0
-            ? tables
-            : ["<dynamic-relation>"],
+        line: path.node.loc.start.line,
+        text,
+        tables: tables.length ? tables : ["<dynamic-relation>"],
       };
       const key = `${candidate.line}\n${candidate.text}`;
-      if (!candidateKeys.has(key)) {
-        candidateKeys.add(key);
-        candidates.push(candidate);
-      }
-    }
-  };
-
-  const readTemplate = (templateScanner, start, head) => {
-    let text = head;
-    let braceDepth = 0;
-    for (;;) {
-      const token = templateScanner.scan();
-      if (token === SyntaxKind.EndOfFile) {
-        return { start, text };
-      }
-      if (token === SyntaxKind.TemplateHead) {
-        readTemplate(
-          templateScanner,
-          templateScanner.getTokenStart(),
-          templateScanner.getTokenValue(),
-        );
-        continue;
-      }
-      if (token === SyntaxKind.OpenBraceToken) {
-        braceDepth += 1;
-        continue;
-      }
-      if (token !== SyntaxKind.CloseBraceToken) {
-        continue;
-      }
-      if (braceDepth > 0) {
-        braceDepth -= 1;
-        continue;
-      }
-
-      text += "{{dynamic}}";
-      const continuation = templateScanner.reScanTemplateToken(false);
-      if (
-        continuation !== SyntaxKind.TemplateMiddle &&
-        continuation !== SyntaxKind.TemplateTail
-      ) {
-        return { start, text };
-      }
-      text += templateScanner.getTokenValue();
-      if (continuation === SyntaxKind.TemplateTail) {
-        return { start, text };
-      }
-    }
-  };
-
-  for (;;) {
-    const token = scanner.scan();
-    if (token === SyntaxKind.EndOfFile) break;
-    if (
-      token === SyntaxKind.StringLiteral ||
-      token === SyntaxKind.NoSubstitutionTemplateLiteral
-    ) {
-      add(scanner.getTokenValue(), scanner.getTokenStart());
-    } else if (token === SyntaxKind.TemplateHead) {
-      const template = readTemplate(
-        scanner,
-        scanner.getTokenStart(),
-        scanner.getTokenValue(),
-      );
-      add(template.text, template.start);
-    }
-  }
-
-  const concatScanner = createScanner(
-    true,
-    LanguageVariant.Standard,
-    source,
-  );
-  const tokens = [];
-  for (;;) {
-    const kind = concatScanner.scan();
-    if (kind === SyntaxKind.TemplateHead) {
-      const template = readTemplate(
-        concatScanner,
-        concatScanner.getTokenStart(),
-        concatScanner.getTokenValue(),
-      );
-      tokens.push({
-        kind: SyntaxKind.NoSubstitutionTemplateLiteral,
-        start: template.start,
-        value: template.text,
-      });
-      continue;
-    }
-    tokens.push({
-      kind,
-      start: concatScanner.getTokenStart(),
-      value:
-        kind === SyntaxKind.StringLiteral ||
-        kind === SyntaxKind.NoSubstitutionTemplateLiteral
-          ? concatScanner.getTokenValue()
-          : null,
-    });
-    if (kind === SyntaxKind.EndOfFile) break;
-  }
-
-  const openingTokens = new Set([
-    SyntaxKind.OpenParenToken,
-    SyntaxKind.OpenBracketToken,
-    SyntaxKind.OpenBraceToken,
-  ]);
-  const closingTokens = new Set([
-    SyntaxKind.CloseParenToken,
-    SyntaxKind.CloseBracketToken,
-    SyntaxKind.CloseBraceToken,
-  ]);
-  const boundaryTokens = new Set([
-    SyntaxKind.CommaToken,
-    SyntaxKind.SemicolonToken,
-    SyntaxKind.EndOfFile,
-  ]);
-  const stringTokens = new Set([
-    SyntaxKind.StringLiteral,
-    SyntaxKind.NoSubstitutionTemplateLiteral,
-  ]);
-
-  for (let startIndex = 0; startIndex < tokens.length; startIndex += 1) {
-    const startToken = tokens[startIndex];
-    if (
-      !stringTokens.has(startToken.kind) ||
-      !SQL_PREFIX.test(startToken.value)
-    ) {
-      continue;
-    }
-
-    let text = startToken.value;
-    let index = startIndex + 1;
-    let concatenated = false;
-    while (tokens[index]?.kind === SyntaxKind.PlusToken) {
-      concatenated = true;
-      index += 1;
-      const operandStart = index;
-      let depth = 0;
-      while (index < tokens.length) {
-        const kind = tokens[index].kind;
-        if (openingTokens.has(kind)) {
-          depth += 1;
-          index += 1;
-          continue;
-        }
-        if (closingTokens.has(kind)) {
-          if (depth === 0) break;
-          depth -= 1;
-          index += 1;
-          continue;
-        }
-        if (
-          depth === 0 &&
-          (kind === SyntaxKind.PlusToken || boundaryTokens.has(kind))
-        ) {
-          break;
-        }
-        index += 1;
-      }
-
-      const operand = tokens.slice(operandStart, index);
-      text +=
-        operand.length === 1 && stringTokens.has(operand[0].kind)
-          ? operand[0].value
-          : "{{dynamic}}";
-    }
-    if (concatenated) {
-      add(text, startToken.start);
-    }
-  }
-
-  return candidates;
+      if (resolved.unsupported) candidate.unsupported_expression = true;
+      const previous = candidates.get(key);
+      if (!previous || resolved.unsupported) candidates.set(key, candidate);
+    },
+  });
+  return [...candidates.values()];
 }
 
 function splitSql(source) {
@@ -322,6 +251,25 @@ function splitSql(source) {
         index += dollarTag.length - 1;
         state = "plain";
       }
+      continue;
+    }
+
+    if (char === "\\") {
+      const command = source.slice(index).match(/^\\([A-Za-z_]+)/)?.[1];
+      const execute = ["g", "gset", "gx", "watch"].includes(command);
+      const control = ["set", "unset", "pset", "if", "elif", "else", "endif",
+        "echo", "warn", "q", "quit", "i", "ir", "include", "include_relative",
+        "encoding", "conninfo", "timing"].includes(command);
+      if (!execute && !control) {
+        throw new Error("unsupported SQL-producing psql command in query inventory");
+      }
+      // psql controls are not SQL. Blank them while preserving offsets and
+      // line numbers; g/gset terminate the current SQL buffer without ';'.
+      if (execute) push(index);
+      const newline = source.indexOf("\n", index);
+      const end = newline < 0 ? source.length : newline;
+      source = source.slice(0, index) + " ".repeat(end - index) + source.slice(end);
+      index = end - 1;
       continue;
     }
 
@@ -413,9 +361,37 @@ export function statementHash(text) {
   return hash(normalizeSql(text));
 }
 
+const SCOPED_COVERAGE = new Map([
+  ["scripts/memory-cleanup.mjs", [
+    "scripts/memory-cleanup-namespace.test.mjs",
+    "scripts/maintenance-postgres.test.mjs",
+    "scripts/memory-namespace-query-inventory.test.mjs",
+  ]],
+  ["scripts/memory-consolidation.mjs", [
+    "scripts/consolidation-namespace.test.mjs",
+    "scripts/maintenance-postgres.test.mjs",
+    "scripts/memory-namespace-query-inventory.test.mjs",
+  ]],
+  ["scripts/analyze-ingest-prescreen.sql", [
+    "scripts/run-analysis-namespace-integration.sh",
+    "scripts/memory-namespace-query-inventory.test.mjs",
+  ]],
+  ["scripts/run-maintenance-namespace-e2e.mjs", [
+    "scripts/run-maintenance-namespace-e2e.test.mjs",
+    "scripts/run-maintenance-namespace-e2e.mjs",
+  ]],
+  ["upstream/server/internal/repository/postgres/namespace_sampler.go", [
+    "upstream/server/internal/repository/postgres/namespace_sampler_test.go",
+    "upstream/server/internal/ingestqueue/namespace_sampler_test.go",
+  ]],
+]);
+
 export function classifyStatement(statement, trustedExceptions = []) {
   const { owner, text } = statement;
   const evidence = namespaceEvidence(text);
+  if (statement.unsupported_expression) {
+    return classification("unclassified", "An unsupported string expression cannot prove the resulting SQL.", []);
+  }
 
   if (
     owner === "docker/bootstrap/schema.sql" ||
@@ -455,9 +431,6 @@ export function classifyStatement(statement, trustedExceptions = []) {
     owner === "upstream/server/internal/service/upload.go" ||
     owner === "upstream/server/internal/service/tenant.go" ||
     owner === "upstream/server/internal/tenant/schema.go" ||
-    owner === "scripts/memory-cleanup.mjs" ||
-    owner === "scripts/memory-consolidation.mjs" ||
-    owner.startsWith("infra/consolidation") ||
     owner.startsWith("infra/slack-approval")
   ) {
     return classification(
@@ -504,9 +477,7 @@ export function classifyStatement(statement, trustedExceptions = []) {
     return classification(
       "namespace_bound",
       "The statement carries an explicit namespace column, predicate, or key.",
-      owner === "scripts/analyze-ingest-prescreen.sql"
-        ? ["scripts/memory-namespace-query-inventory.test.mjs"]
-        : ["docker/mnemo-server/patches/0010-group-memory-namespaces.patch"],
+      SCOPED_COVERAGE.get(owner) ?? ["docker/mnemo-server/patches/0010-group-memory-namespaces.patch"],
       evidence,
     );
   }
@@ -623,18 +594,12 @@ export function extractRepositoryStatements(repoRoot) {
     for (const path of walkFiles(
       codeRoot,
       (candidate) =>
-        /\.(?:mjs|ts)$/.test(candidate) &&
-        !/\.test\.(?:mjs|ts)$/.test(candidate) &&
+        /\.(?:[cm]?js|[cm]?ts|jsx|tsx)$/.test(candidate) &&
+        !/\.test\.(?:[cm]?js|[cm]?ts|jsx|tsx)$/.test(candidate) &&
         !candidate.endsWith("memory-namespace-query-inventory.mjs") &&
         !candidate.endsWith("verify-memory-namespace-query-inventory.mjs"),
     )) {
       const source = readFileSync(path, "utf8");
-      if (
-        !SCOPED_TABLE_SOURCE_PATTERN.test(source) &&
-        !DYNAMIC_RELATION_SOURCE_PATTERN.test(source)
-      ) {
-        continue;
-      }
       candidates.push(
         ...extractSqlStatements({
           kind: "javascript",

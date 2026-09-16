@@ -81,14 +81,14 @@ describe("memory namespace coverage ownership map", () => {
     ).toEqual(["107", "114"]);
   });
 
-  it("TC-GROUPNS-097..104: proves disabled-v1 maintenance invariants", () => {
+  it("TC-GROUPNS-097..104: requires scope and keeps unsupported capabilities absent", () => {
     const sst = readFileSync(resolve(root, "sst.config.ts"), "utf8");
     const workflow = readFileSync(
       resolve(root, ".github/workflows/infra-ci.yml"),
       "utf8",
     );
     expect(sst).toMatch(
-      /const namespaceMaintenanceEnabled = false;/,
+      /assertSupportedMaintenanceConfiguration\(\);/,
     );
     const parsedWorkflow = parse(workflow);
     const deploymentSteps = [
@@ -97,7 +97,7 @@ describe("memory namespace coverage ownership map", () => {
     ];
     for (const forbidden of [
       "MEM9_CLEANUP_SCAN_ENABLED",
-      "MEM9_CONSOLIDATION_SCHEDULE_ENABLED",
+      "MEM9_CLEANUP_SCAN_SCHEDULE_ENABLED",
       "MEM9_SLACK_APPROVAL_ENABLED",
     ]) {
       expect(
@@ -107,7 +107,6 @@ describe("memory namespace coverage ownership map", () => {
       ).toBe(false);
     }
     for (const forbidden of [
-      "run-consolidation-task.sh",
       "run-slack-approval-e2e.sh",
     ]) {
       expect(
@@ -137,9 +136,8 @@ describe("memory namespace coverage ownership map", () => {
       );
       expect(result.error, script).toBeUndefined();
       expect(result.status, script).toBe(1);
-      expect(result.stderr, script).toContain(
-        "legacy maintenance is disabled in memory namespace v1",
-      );
+      expect(result.stdout, script).toBe("");
+      expect(result.stderr, script).toMatch(/namespace|consolidation_failed/);
     }
   });
 

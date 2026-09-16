@@ -33,10 +33,15 @@ operations:
   revoke-user --config <owner-only-json> --username-file <owner-only-file>
               [--emergency]
   show-user --config <owner-only-json> --username-file <owner-only-file>
+  service-enable --config <owner-only-json>
+  service-disable --config <owner-only-json>
+  service-show --config <owner-only-json>
 
 External identity provider: replace --username-file with --identity-file.
 The owner-only JSON must contain the deployed issuer and exact provider sub.
 Groups remain managed at the external identity provider.
+Service JSON contains exactly namespace_id and service; service is cleanup,
+consolidation, or analysis. Service access is independent of user groups.
 EOF
 }
 if [[ "${1:-}" == "--help" || "${1:-}" == "-h" ]]; then
@@ -56,7 +61,7 @@ case "$STAGE" in
 esac
 REGION="${AWS_REGION:-$(node "$ROOT/scripts/resolve-application-region.mjs")}"
 case "$OPERATION" in
-  reconcile|assign-user|move-user|revoke-user|show-user|assert-phase|preflight|freeze|backfill|enforce) ;;
+  reconcile|assign-user|move-user|revoke-user|show-user|service-enable|service-disable|service-show|assert-phase|preflight|freeze|backfill|enforce) ;;
   *) echo "unsupported namespace operation" >&2; exit 2 ;;
 esac
 
@@ -123,7 +128,7 @@ done
 need_config=false
 need_input=false
 case "$OPERATION" in
-  reconcile)
+  reconcile|service-enable|service-disable|service-show)
     need_config=true
     ;;
   assign-user|move-user|revoke-user|show-user)
@@ -149,6 +154,12 @@ if [[ "$need_config" == "true" ]]; then
     echo "namespace config must have mode 600" >&2
     exit 2
   }
+  if [[ "$OPERATION" == service-* ]]; then
+    node --input-type=module -e '
+      const {readServiceBinding}=await import(process.argv[1]);
+      await readServiceBinding(process.argv[2]);
+    ' "$ROOT/scripts/manage-memory-services.mjs" "$CONFIG_FILE" || exit 2
+  fi
 fi
 if [[ "$OPERATION" == "assign-user" || "$OPERATION" == "move-user" ]]; then
   [[ -n "$NAMESPACE_SLUG" ]] || {

@@ -3,22 +3,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
 import type { DbOutputs } from "./db";
 import type { EcsOutputs } from "./ecs";
-import type { SlackApprovalOutputs } from "./slack-approval";
+import type { MaintenanceIdentityOutputs } from "./namespace-identity";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import { cloudwatchStubs } from "./task-failure-alarm.test-fixtures";
 
 interface Output<T> {
   value: T;
+  secret: boolean;
   apply(fn: (value: T) => unknown): unknown;
 }
 
-const out = <T>(value: T): Output<T> => ({
+const out = <T>(value: T, secret = false): Output<T> => ({
   value,
+  secret,
   apply(fn) {
     const result = fn(value);
     return result && typeof result === "object" && "apply" in result
       ? result
-      : out(result);
+      : out(result, secret);
   },
 });
 
@@ -48,6 +50,30 @@ interface Resource {
 }
 
 let resources: Resource[];
+let maintenanceTargets: string | undefined;
+const NAMESPACE_A = "60000000-0000-4000-8000-000000000101";
+const NAMESPACE_B = "60000000-0000-4000-8000-000000000102";
+
+function enableSchedule() {
+  process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED = "1";
+  maintenanceTargets = JSON.stringify([NAMESPACE_A, NAMESPACE_B]);
+}
+
+function fakeMaintenanceIdentity(): MaintenanceIdentityOutputs {
+  const parameter = (suffix: string) => out(
+    `arn:aws:ssm:ap-northeast-1:123456789012:parameter/mem9-on-aws/prod/namespace/${suffix}`,
+  );
+  return {
+    bundle: out("sensitive-full-service-bundle", true),
+    bundleParameterArn: parameter("service-transport-signing-keys"),
+    revision: out("maintenance-revision"),
+    serviceParameterArns: {
+      consolidation: parameter("service-consolidation-signing-keys"),
+      cleanup: parameter("service-cleanup-signing-keys"),
+      analysis: parameter("service-analysis-signing-keys"),
+    },
+  } as unknown as MaintenanceIdentityOutputs;
+}
 
 function record(kind: string, logicalName: string, args: Record<string, unknown>) {
   resources.push({ kind, logicalName, args });
@@ -202,13 +228,22 @@ function installGlobals(stage: string) {
     }),
     ssm: {
       Parameter: class {
+        arn: Output<string>;
         constructor(logicalName: string, args: Record<string, unknown>) {
+          this.arn = out(`arn:aws:ssm:ap-northeast-1:123456789012:parameter${materialize(args.name)}`);
           record("Parameter", logicalName, args);
         }
       },
     },
   };
   (globalThis as Record<string, unknown>).sst = {
+    Secret: class {
+      value: Output<string>;
+      constructor(name: string, placeholder: string) {
+        record("Secret", name, { placeholder });
+        this.value = out(maintenanceTargets ?? placeholder, true);
+      }
+    },
     aws: {
       Task: class {
         taskDefinition = out(
@@ -252,30 +287,20 @@ function installGlobals(stage: string) {
   };
 }
 
-async function loadAndRun(stage = "prod", withSlack = false) {
+async function loadAndRun(stage = "prod") {
   vi.resetModules();
   const consolidationModule = await import("./consolidation");
-  const slackOut = withSlack
-    ? {
-        botTokenParameterArn: out(
-          "arn:aws:ssm:ap-northeast-1:123456789012:parameter/mem9-on-aws/prod/slack/bot-token",
-        ),
-        channel: "C0123456789",
-      } as unknown as Pick<
-        SlackApprovalOutputs,
-        "botTokenParameterArn" | "channel"
-      >
-    : undefined;
   consolidationModule.consolidation(fakeEcs(
     stage === "prod"
       ? "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts"
       : undefined,
-  ), fakeDb(), fakeIdentity(), slackOut);
+  ), fakeDb(), fakeIdentity(), fakeMaintenanceIdentity());
   return consolidationModule;
 }
 
 beforeEach(() => {
   resources = [];
+  maintenanceTargets = undefined;
   delete process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED;
   delete process.env.MEM9_IMAGE_TAG;
   process.env.MEM9_BEDROCK_PROJECT = "proj_test";
@@ -296,6 +321,114 @@ afterEach(() => {
 });
 
 describe("consolidation task and schedule", () => {
+  it("injects only the consolidation service credential and a fixed issuer", async () => {
+    installGlobals("prod");
+    process.env.MEM9_SERVICE_TRANSPORT_ISSUER = "untrusted-issuer";
+    process.env.MEM9_SERVICE_PRINCIPAL_KEY = "untrusted-principal";
+    try {
+      await loadAndRun();
+      const task = materialize(one("Task").args) as Record<string, any>;
+      expect(task.environment).toMatchObject({
+        MEM9_SERVICE_TRANSPORT_ISSUER: "maintenance:consolidation",
+        MEM9_SERVICE_TRANSPORT_SIGNING_REVISION: "maintenance-revision",
+        MEM9_CONSOLIDATION_REPORT_ONLY: "1",
+      });
+      expect(task.environment.MEM9_NAMESPACE_ID).toBeUndefined();
+      expect(task.environment.MEM9_SERVICE_PRINCIPAL_KEY).toBeUndefined();
+      expect(task.ssm.MEM9_SERVICE_TRANSPORT_SIGNING_KEYS).toBe(
+        materialize(fakeMaintenanceIdentity().serviceParameterArns.consolidation),
+      );
+      expect(JSON.stringify(task)).not.toMatch(
+        /sensitive-full-service-bundle|service-transport-signing-keys|service-cleanup-signing-keys|service-analysis-signing-keys|untrusted-/,
+      );
+    } finally {
+      delete process.env.MEM9_SERVICE_TRANSPORT_ISSUER;
+      delete process.env.MEM9_SERVICE_PRINCIPAL_KEY;
+    }
+  });
+
+  it("stores the empty default as a secret SecureString without a schedule", async () => {
+    installGlobals("prod");
+    await loadAndRun();
+    expect(one("Secret", "MaintenanceNamespaceIds").args.placeholder).toBe("[]");
+    const parameter = one("Parameter", "MaintenanceNamespaceTargets");
+    expect(materialize(parameter.args)).toMatchObject({
+      name: "/mem9-on-aws/prod/maintenance/targets",
+      type: "SecureString",
+      value: "[]",
+      tags: { Stage: "prod" },
+    });
+    expect((parameter.args.value as Output<string>).secret).toBe(true);
+    const task = materialize(one("Task").args) as Record<string, any>;
+    expect(task.environment.MEM9_MAINTENANCE_TARGETS).toBeUndefined();
+    expect(task.ssm.MEM9_MAINTENANCE_TARGETS).toBeUndefined();
+    expect(resources.filter(({ kind }) => kind === "Schedule")).toHaveLength(0);
+  });
+
+  it("keeps multiple targets private while using one task, schedule, and stage metric group", async () => {
+    enableSchedule();
+    installGlobals("prod");
+    await loadAndRun();
+    const parameter = one("Parameter", "MaintenanceNamespaceTargets");
+    expect(JSON.parse(String(materialize(parameter.args.value)))).toEqual([NAMESPACE_A, NAMESPACE_B]);
+    expect((parameter.args.value as Output<string>).secret).toBe(true);
+    one("Task");
+    one("Schedule");
+    one("ScheduleGroup");
+    const publicConfiguration = JSON.stringify(materialize(resources.filter(
+      ({ logicalName }) => logicalName !== "MaintenanceNamespaceTargets",
+    )));
+    expect(publicConfiguration).not.toContain(NAMESPACE_A);
+    expect(publicConfiguration).not.toContain(NAMESPACE_B);
+    expect(materialize(one("MetricAlarm", "ConsolidationScheduleTargetErrorAlarm").args)).toMatchObject({
+      dimensions: { ScheduleGroup: "mem9-on-aws-prod-consolidation-fixture" },
+    });
+  });
+
+  it.each([
+    undefined, "[]", "", "private malformed target", "null", "{}",
+    JSON.stringify([NAMESPACE_A, NAMESPACE_A]),
+    JSON.stringify([NAMESPACE_A, "private-invalid-namespace"]),
+    JSON.stringify([NAMESPACE_A, 12]),
+    JSON.stringify(Array.from({ length: 33 }, (_, index) =>
+      `60000000-0000-4000-8000-${String(index).padStart(12, "0")}`)),
+  ])("rejects invalid scheduled target configuration without disclosing it (case %#)", async (raw) => {
+    process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED = "1";
+    maintenanceTargets = raw;
+    installGlobals("prod");
+    await expect(loadAndRun()).rejects.toThrow(/^MaintenanceNamespaceIds must be/);
+    expect(resources.filter(({ kind }) => kind === "Schedule")).toHaveLength(0);
+  });
+
+  it("rejects malformed private targets even when scheduling is disabled", async () => {
+    maintenanceTargets = JSON.stringify(["private-invalid-namespace"]);
+    installGlobals("prod");
+    await expect(loadAndRun()).rejects.toThrow(/^MaintenanceNamespaceIds must be/);
+  });
+
+  it("scopes digest keys to each namespace inside the configured exact bucket", async () => {
+    enableSchedule();
+    installGlobals("prod");
+    process.env.MEM9_DECISION_ARTIFACT_BUCKET = "bucket";
+    try {
+      await loadAndRun();
+      const { consolidationDigestKey } = await import("./decision-artifact");
+      expect(consolidationDigestKey("prod", NAMESPACE_A)).toBe(
+        `consolidation-digests/prod/${NAMESPACE_A}/current-v1.json`,
+      );
+      expect(consolidationDigestKey("prod", NAMESPACE_B)).not.toBe(consolidationDigestKey("prod", NAMESPACE_A));
+      const task = materialize(one("Task").args) as Record<string, any>;
+      const s3 = task.permissions.filter((permission: { actions: string[] }) =>
+        permission.actions.some(action => action.startsWith("s3:")));
+      expect(s3).toEqual([{
+        actions: ["s3:GetObject", "s3:PutObject"],
+        resources: ["arn:aws:s3:::bucket/consolidation-digests/prod/*/current-v1.json"],
+      }]);
+    } finally {
+      delete process.env.MEM9_DECISION_ARTIFACT_BUCKET;
+    }
+  });
+
   it("TC-CONSOL-020/023/028/079: always defines a report task but omits the ungated schedule", async () => {
     installGlobals("prod");
     await loadAndRun();
@@ -352,6 +485,8 @@ describe("consolidation task and schedule", () => {
         "arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:mem9-on-aws-prod-Mem9DbSecret-x",
       MEM9_TENANT_ID:
         "arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:mem9-on-aws-prod-tenant-api-key-x",
+      MEM9_SERVICE_TRANSPORT_SIGNING_KEYS:
+        "arn:aws:ssm:ap-northeast-1:123456789012:parameter/mem9-on-aws/prod/namespace/service-consolidation-signing-keys",
     });
     expect(resources.filter((resource) => resource.kind === "Schedule")).toEqual([]);
     expect(
@@ -400,6 +535,7 @@ describe("consolidation task and schedule", () => {
       "/mem9-on-aws/prod/consolidation/subnet-ids",
       "/mem9-on-aws/prod/consolidation/task-def-arn",
       "/mem9-on-aws/prod/consolidation/task-sg-id",
+      "/mem9-on-aws/prod/maintenance/targets",
     ]);
 
     // The VALUE matters as much as the name. `subnet-ids` feeds RunTask's
@@ -443,7 +579,7 @@ describe("consolidation task and schedule", () => {
   });
 
   it("TC-CONSOL-021/022/027/037: creates a disabled preview and enabled weekly prod schedule", async () => {
-    process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED = "1";
+    enableSchedule();
     installGlobals("pr-103");
     const consolidationModule = await loadAndRun("pr-103");
     const scheduleGroup = materialize(one("ScheduleGroup").args) as Record<
@@ -471,6 +607,7 @@ describe("consolidation task and schedule", () => {
       containerOverrides: [
         {
           name: consolidationModule.CONSOLIDATION_CONTAINER_NAME,
+          command: ["/app/scripts/dispatch-memory-consolidation.mjs"],
           environment: [
             {
               name: "MEM9_CONSOLIDATION_REPORT_ONLY",
@@ -507,7 +644,7 @@ describe("consolidation task and schedule", () => {
   });
 
   it("TC-CONSOL-024/025: scopes task and scheduler permissions", async () => {
-    process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED = "1";
+    enableSchedule();
     installGlobals("prod");
     await loadAndRun();
 
@@ -539,7 +676,7 @@ describe("consolidation task and schedule", () => {
     expect(task.permissions).toContainEqual({
       actions: ["s3:GetObject", "s3:PutObject"],
       resources: [
-        "arn:aws:s3:::mem9-audit-123456789012/consolidation-digests/prod/current-v1.json",
+        "arn:aws:s3:::mem9-audit-123456789012/consolidation-digests/prod/*/current-v1.json",
       ],
     });
     expect(JSON.stringify(task.permissions)).not.toMatch(
@@ -784,10 +921,10 @@ describe("consolidation IAM templates", () => {
     });
   });
 
-  it("TC-CONSOL-067/068: activates digest state only from Scheduler and conditionally reuses Slack wiring", async () => {
-    process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED = "1";
+  it("TC-CONSOL-067/068: activates namespace digest state only from Scheduler without Slack wiring", async () => {
+    enableSchedule();
     installGlobals("prod");
-    const module = await loadAndRun("prod", true);
+    const module = await loadAndRun("prod");
 
     const task = materialize(one("Task", "Mem9Consolidation").args) as Record<
       string,
@@ -795,20 +932,20 @@ describe("consolidation IAM templates", () => {
     >;
     expect(task.environment).toMatchObject({
       MEM9_CONSOLIDATION_REPORT_ONLY: "1",
-      MEM9_SLACK_APPROVAL_CHANNEL: "C0123456789",
       MEM9_DECISION_ARTIFACT_BUCKET: "mem9-audit-123456789012",
       MEM9_DECISION_ARTIFACT_BUCKET_OWNER: "123456789012",
     });
     expect(task.environment.MEM9_CONSOLIDATION_SCHEDULED).toBeUndefined();
-    expect(materialize(task.ssm)).toMatchObject({
-      SLACK_BOT_TOKEN:
-        "arn:aws:ssm:ap-northeast-1:123456789012:parameter/mem9-on-aws/prod/slack/bot-token",
-    });
+    expect(task.ssm.MEM9_MAINTENANCE_TARGETS).toBe(
+      "arn:aws:ssm:ap-northeast-1:123456789012:parameter/mem9-on-aws/prod/maintenance/targets",
+    );
+    expect(JSON.stringify([task.environment, task.ssm, task.permissions])).not.toMatch(/slack/i);
 
     const schedule = materialize(one("Schedule").args) as Record<string, any>;
     expect(JSON.parse(schedule.target.input)).toEqual({
       containerOverrides: [{
         name: module.CONSOLIDATION_CONTAINER_NAME,
+        command: ["/app/scripts/dispatch-memory-consolidation.mjs"],
         environment: [
           { name: "MEM9_CONSOLIDATION_REPORT_ONLY", value: "0" },
           { name: "MEM9_CONSOLIDATION_SCHEDULED", value: "1" },
@@ -816,19 +953,9 @@ describe("consolidation IAM templates", () => {
       }],
     });
 
-    const config = readFileSync(
-      new URL("../sst.config.ts", import.meta.url),
-      "utf8",
-    );
-    const slackIndex = config.indexOf(
-      "const slackApprovalOut = slackApproval(",
-    );
-    expect(slackIndex).toBeGreaterThan(0);
-    expect(
-      config.indexOf(
-        "consolidation(ecsOut, dbOut, identityOut, slackApprovalOut)",
-      ),
-    ).toBeGreaterThan(slackIndex);
+    expect(JSON.stringify(schedule)).not.toContain(NAMESPACE_A);
+    expect(JSON.stringify(schedule)).not.toContain(NAMESPACE_B);
+
   });
 
   it("TC-CONSOL-070: splits decision and digest lifecycle retention", () => {
@@ -906,7 +1033,9 @@ describe("consolidation docs and metrics", () => {
       /re-run\s+`scripts\/deploy-decision-artifact-bucket\.sh`/u,
     );
     expect(readme).toMatch(/two-rule lifecycle\s+read-back/u);
-    expect(readme).toContain("first scheduled run");
+    expect(readme).toMatch(
+      /Before the first Scheduler deployment, complete\s+the deploy-role and decision-bucket bootstrap prerequisites/u,
+    );
     expect(design).toMatch(
       /re-run\s+`scripts\/deploy-decision-artifact-bucket\.sh`/u,
     );

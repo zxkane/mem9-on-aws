@@ -110,6 +110,20 @@ afterEach(() => {
 });
 
 describe("namespace signing identity", () => {
+  it("creates independent service keyrings and a server-only bundle", async () => {
+    const { maintenanceServiceIdentity } = await import("./namespace-identity");
+    const outputs = maintenanceServiceIdentity();
+    const bundle = JSON.parse(materialize<string>(outputs.bundle));
+    expect(Object.keys(bundle).sort()).toEqual(["analysis", "cleanup", "consolidation"]);
+    expect(new Set(Object.values(bundle).flatMap((ring: any) => [ring.a, ring.b])).size).toBe(6);
+    expect(parameters).toHaveLength(4);
+    for (const service of ["analysis", "cleanup", "consolidation"]) {
+      const value = parameters.find(p => String(p.name).endsWith(`/service-${service}-signing-keys`));
+      expect(value?.type).toBe("SecureString");
+      expect(JSON.parse(materialize<string>(value?.value))).toEqual(bundle[service]);
+    }
+    expect(materialize(outputs.revision)).toBe(createHash("sha256").update(materialize<string>(outputs.bundle)).digest("hex"));
+  });
   it("creates a stable identity secret and transport SecureString", async () => {
     const { namespaceIdentity } = await import("./namespace-identity");
     const outputs = namespaceIdentity();

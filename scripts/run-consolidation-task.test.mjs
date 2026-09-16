@@ -10,9 +10,11 @@ import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
+import { productionLogRecord } from "./memory-consolidation.mjs";
 
 const script = resolve("scripts/run-consolidation-task.sh");
 const temporaryPaths = [];
+const NAMESPACE_ID = "60000000-0000-4000-8000-000000000101";
 
 afterEach(() => {
   for (const path of temporaryPaths.splice(0)) {
@@ -21,6 +23,8 @@ afterEach(() => {
 });
 
 function runFixture({
+  namespaceId = NAMESPACE_ID,
+  markerLines,
   exitCode = "0",
   marker = true,
   digestEnabled = false,
@@ -138,9 +142,11 @@ if (command === "ssm get-parameters") {
     },
   }));
 } else if (command === "logs filter-log-events") {
-  if (process.env.MOCK_MARKER === "true") {
-    console.log('CONSOLIDATION_REVIEW_LIST {"stage":"pr-103","reportOnly":true,"reviewItems":0,"digestEnabled":' + process.env.MOCK_DIGEST_ENABLED + '}');
-  }
+  if (process.env.MOCK_MARKER_LINES !== undefined) {
+    console.log(JSON.stringify(process.env.MOCK_MARKER_LINES.split("\\n")));
+  } else if (process.env.MOCK_MARKER === "true") {
+    console.log(JSON.stringify([process.env.MOCK_DEFAULT_MARKER]));
+  } else console.log("[]");
 } else {
   console.error("unexpected aws command:", command, args.join(" "));
   process.exit(2);
@@ -155,7 +161,12 @@ if (command === "ssm get-parameters") {
     AWS_CALLS: calls,
     BASH_ENV: bashEnv,
     MOCK_EXIT_CODE: exitCode,
-    MOCK_DIGEST_ENABLED: String(digestEnabled),
+    MOCK_DEFAULT_MARKER: JSON.stringify(productionLogRecord(
+      `CONSOLIDATION_REVIEW_LIST ${JSON.stringify({
+        stage: "pr-103", reportOnly: true, reviewItems: 0, digestEnabled,
+      })}`,
+      "pr-103",
+    )),
     MOCK_CLOCK: clock,
     MOCK_FAIL_COMMAND: failCommand ?? "",
     MOCK_FAILURE_STDERR: failureStderr,
@@ -166,6 +177,10 @@ if (command === "ssm get-parameters") {
     PATH: `${bin}${delimiter}${process.env.PATH}`,
     STAGE: "pr-103",
   };
+  delete env.MEM9_NAMESPACE_ID;
+  delete env.MOCK_MARKER_LINES;
+  if (namespaceId !== null) env.MEM9_NAMESPACE_ID = namespaceId;
+  if (markerLines !== undefined) env.MOCK_MARKER_LINES = markerLines;
   delete env.CONSOLIDATION_TASK_WAIT_SECONDS;
   if (waitSeconds !== undefined) {
     env.CONSOLIDATION_TASK_WAIT_SECONDS = String(waitSeconds);
@@ -196,6 +211,42 @@ function expectOutputOmits(result, forbiddenValues) {
 }
 
 describe("report-only consolidation ECS runner", () => {
+  it.each([null, "", "private-invalid-namespace", `${NAMESPACE_ID},${NAMESPACE_ID}`, "../prod", "60000000-0000-4000-8000-00000000010A"])(
+    "requires one canonical namespace UUID before any AWS call (case %#)",
+    (namespaceId) => {
+      const { result, callRecords } = runFixture({ namespaceId });
+      expect(result.status).toBe(1);
+      expect(callRecords).toEqual([]);
+      expect(result.stderr).toContain("MEM9_NAMESPACE_ID must be one lowercase namespace UUID");
+      if (namespaceId) expectOutputOmits(result, [namespaceId]);
+    },
+  );
+
+  it("prints only typed summary counts, never namespace IDs or memory contents", () => {
+    const summary = {
+      event: "consolidation_review_list",
+      stage: "pr-103", reportOnly: true, digestEnabled: false,
+      namespaceId: NAMESPACE_ID, content: "private-memory-marker",
+    };
+    const { result } = runFixture({
+      markerLines: [
+        '{"event":"consolidation_review","content":"consolidation_review_list private-memory-marker"}',
+        JSON.stringify({ ...summary, reviewItems: NAMESPACE_ID }),
+        JSON.stringify({ ...summary, reviewItems: ["private-memory-marker"] }),
+        JSON.stringify({ ...summary, reviewItems: 2 }),
+      ].join("\n"),
+    });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toContain('"reviewItems":2');
+    expectOutputOmits(result, [NAMESPACE_ID, "private-memory-marker"]);
+  });
+
+  it("redacts malformed task exit status", () => {
+    const { result } = runFixture({ exitCode: `private-memory-marker ${NAMESPACE_ID}` });
+    expect(result.status).toBe(1);
+    expectOutputOmits(result, [NAMESPACE_ID, "private-memory-marker"]);
+  });
+
   it("TC-CONSOL-040/041: forces report-only and reads only the exact task marker", () => {
     const { callRecords, result } = runFixture();
     expect(result.status, result.stderr).toBe(0);
@@ -206,6 +257,7 @@ describe("report-only consolidation ECS runner", () => {
       "arn:aws",
       "123456789012",
       "Essential container in task exited",
+      NAMESPACE_ID,
     ]);
 
     const runCalls = callRecords.filter(
@@ -228,6 +280,7 @@ describe("report-only consolidation ECS runner", () => {
             "--report-only",
             "--check-llm",
           ],
+          environment: [{ name: "MEM9_NAMESPACE_ID", value: NAMESPACE_ID }],
         },
       ],
     });
@@ -258,7 +311,7 @@ describe("report-only consolidation ECS runner", () => {
     );
     expect(logCall).toContain("/sst/consolidation-preview");
     expect(logCall).toContain("sst/Mem9Consolidation/task-123");
-    expect(logCall).toContain('"CONSOLIDATION_REVIEW_LIST"');
+    expect(logCall).toContain('{ $.event = "consolidation_review_list" }');
     expect(logCall.join(" ")).not.toContain("CONSOLIDATION_REVIEW ");
   });
 

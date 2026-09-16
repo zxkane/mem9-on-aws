@@ -148,6 +148,7 @@ export function ecs(
   dbOut: DbOutputs,
   identity: TenantIdentityOutputs,
   namespaceIdentity: NamespaceIdentityOutputs,
+  maintenanceIdentity?: import("./namespace-identity").MaintenanceIdentityOutputs,
 ): EcsOutputs {
   if ($app.stage === "prod" && !BEDROCK_PROJECT) {
     throw new Error("MEM9_BEDROCK_PROJECT is required for production observability");
@@ -400,6 +401,9 @@ export function ecs(
           // guarantees the rolling service deployment consumes the new keyring.
           MNEMO_TRANSPORT_SIGNING_REVISION:
             namespaceIdentity.transportSigningRevision,
+          ...(maintenanceIdentity && NAMESPACE_REQUIRED === "1" ? {
+            MNEMO_SERVICE_TRANSPORT_SIGNING_REVISION: maintenanceIdentity.revision,
+          } : {}),
           // Bound prompt construction before the provider-boundary byte check.
           MNEMO_MAX_EXTRACTION_CONVERSATION_RUNES: String(MAX_EXTRACTION_CONVERSATION_RUNES),
         },
@@ -412,6 +416,9 @@ export function ecs(
           MEM9_TENANT_ID: identity.tenantSecretArn,
           MNEMO_TRANSPORT_SIGNING_KEYS:
             namespaceIdentity.transportSigningParameterArn,
+          ...(maintenanceIdentity && NAMESPACE_REQUIRED === "1" ? {
+            MNEMO_SERVICE_TRANSPORT_SIGNING_KEYS: maintenanceIdentity.bundleParameterArn,
+          } : {}),
         },
         // Process liveness only: /healthz confirms the HTTP server is responding,
         // but intentionally does not probe Aurora, qwen3, the LLM proxy, or an

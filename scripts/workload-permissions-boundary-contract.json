@@ -13,7 +13,7 @@
     {
       "id": "infra-ci.yml",
       "path": ".github/workflows/infra-ci.yml",
-      "reviewedBlob": "356520148039d3e0cc11502dfa0ea5683e207439"
+      "reviewedBlob": "580c1c538ad1e8646895448d083c06acd1273ba9"
     },
     {
       "id": "reconcile-previews.yml",

@@ -39,6 +39,6 @@ export function decisionArtifactKey(stage: string, hash: string): string {
   return `${decisionArtifactKeyPrefix(stage)}${hash.replace(/:/gu, "-")}.json`;
 }
 
-export function consolidationDigestKey(stage: string): string {
-  return `consolidation-digests/${stage}/current-v1.json`;
+export function consolidationDigestKey(stage: string, namespaceId: string): string {
+  return `consolidation-digests/${stage}/${namespaceId}/current-v1.json`;
 }

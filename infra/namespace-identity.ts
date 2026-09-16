@@ -13,6 +13,51 @@ export interface NamespaceIdentityOutputs {
   transportSigningRevision: Output<string>;
 }
 
+export interface MaintenanceIdentityOutputs {
+  bundle: Output<string>;
+  bundleParameterArn: Output<string>;
+  revision: Output<string>;
+  serviceParameterArns: Record<string, Output<string>>;
+}
+
+export function maintenanceServiceIdentity(): MaintenanceIdentityOutputs {
+  const rotation = transportSigningKeyConfig({
+    MEM9_TRANSPORT_SIGNING_ACTIVE_SLOT: process.env.MEM9_SERVICE_SIGNING_ACTIVE_SLOT,
+    MEM9_TRANSPORT_SIGNING_SLOT_A_REVISION: process.env.MEM9_SERVICE_SIGNING_SLOT_A_REVISION,
+    MEM9_TRANSPORT_SIGNING_SLOT_B_REVISION: process.env.MEM9_SERVICE_SIGNING_SLOT_B_REVISION,
+  });
+  const tags = { Project: "mem9-on-aws", Stage: $app.stage, ManagedBy: "sst" };
+  const rings: Record<string, Output<string>> = {};
+  const serviceParameterArns: Record<string, Output<string>> = {};
+  for (const service of ["consolidation", "cleanup", "analysis"]) {
+    const title = service[0].toUpperCase() + service.slice(1);
+    const a = new random.RandomPassword(`Mem9Service${title}SigningKeyA`, {
+      length: 64, special: false, keepers: { revision: rotation.slotARevision },
+    });
+    const b = new random.RandomPassword(`Mem9Service${title}SigningKeyB`, {
+      length: 64, special: false, keepers: { revision: rotation.slotBRevision },
+    });
+    rings[service] = a.result.apply((left: string) => b.result.apply((right: string) =>
+      JSON.stringify({ active: rotation.activeSlot, a: left, b: right })));
+    const parameter = new aws.ssm.Parameter(`Mem9Service${title}SigningKeys`, {
+      name: `/mem9-on-aws/${$app.stage}/namespace/service-${service}-signing-keys`,
+      type: "SecureString", value: rings[service], tags,
+    });
+    serviceParameterArns[service] = parameter.arn;
+  }
+  const bundle = rings.consolidation.apply(consolidation => rings.cleanup.apply(cleanup =>
+    rings.analysis.apply(analysis => JSON.stringify({
+      consolidation: JSON.parse(consolidation), cleanup: JSON.parse(cleanup), analysis: JSON.parse(analysis),
+    }))));
+  const parameter = new aws.ssm.Parameter("Mem9ServiceTransportSigningKeys", {
+    name: `/mem9-on-aws/${$app.stage}/namespace/service-transport-signing-keys`,
+    type: "SecureString", value: bundle, tags,
+  });
+  return { bundle, bundleParameterArn: parameter.arn,
+    revision: bundle.apply(value => createHash("sha256").update(value).digest("hex")),
+    serviceParameterArns };
+}
+
 export interface TransportSigningKeyConfig {
   activeSlot: "a" | "b";
   slotARevision: string;

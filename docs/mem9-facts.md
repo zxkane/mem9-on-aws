@@ -122,8 +122,10 @@ namespace predicates still fence every update.
 The real PostgreSQL HTTP test checks stored vectors, semantic recall after each
 metadata update, 412 for a stale version, 404 for a foreign namespace, and content
 updates with/without an embedder. This prevents new vector loss; it does not
-repair vectors previously cleared. Existing cleanup/consolidation SQL adapters
-remain disabled by namespace v1 and are not switched to REST by this upgrade.
+repair vectors previously cleared. Cleanup/consolidation now use authorized,
+namespace-bound SQL for state transitions and inactive records. REST mutations
+use separately signed service identities and recheck membership inside the
+actual mutation transaction.
 
 ### tidb backend (NOT viable on Aurora)
 
@@ -264,7 +266,9 @@ still keep writers stopped through namespace cutover.
   `0014-recall-schema-budget-and-durable-facts`, and
   `0015-ingest-namespace-compatibility`, and
   `0016-namespace-vector-late-hydration`, and
-  `0017-namespace-lifecycle-fencing`. The Docker build applies the complete stack to
+  `0017-namespace-lifecycle-fencing`,
+  `0018-service-maintenance-namespaces`, and
+  `0019-namespace-sampler`. The Docker build applies the complete stack to
   the pinned upstream commit in lexical order.
 - Upstream asynchronous `messages[]` ingest returns 202 before starting an
   untracked goroutine. Downstream patch
@@ -397,8 +401,76 @@ still keep writers stopped through namespace cutover.
   `constraints_complete`.
 - The migration command does not drain or scale ECS. Production cutover must
   stop write-capable traffic and scale mnemo-server to zero before `freeze`.
-  Cleanup approval, consolidation, upload processing, webhooks, and Space Chains
-  remain disabled until each path has a complete namespace contract.
+  Cleanup approval, upload processing, webhooks, and Space Chains remain disabled.
+  Scoped cleanup/consolidation require explicit service membership and one
+  namespace; scheduling additionally requires an explicit private target list.
+
+### Scoped maintenance and service capabilities (patches 0018 and 0019)
+
+- Patch `0018-service-maintenance-namespaces` adds separately signed service
+  transport for the fixed `maintenance:cleanup`, `maintenance:consolidation`,
+  and `maintenance:analysis` capabilities. Their principal keys are derived
+  from `sha256("mem9-service-principal-v1\0" + service)`. Credentials are
+  separate from Gateway credentials and from one another. An envelope binds one
+  explicit namespace, method, URI, and body; it cannot select a human/M2M
+  principal or another service. There is no service JIT enrollment.
+- The namespace, service principal, and service membership must be active.
+  REST mutations recheck authorization inside the mutation transaction.
+  Direct database adapters authenticate through trusted operator/task database
+  credentials and authorize their fixed service in the same transaction as
+  the query. Cleanup/consolidation writes use member access; analysis is a
+  viewer. Namespace selection does not itself grant access.
+- `scripts/manage-memory-services.mjs` manages only cleanup, consolidation,
+  and analysis. The existing private namespace task exposes `service-enable`,
+  `service-disable`, and `service-show` for an owner-only JSON file containing
+  exactly `namespace_id` and `service`. Operators cannot choose a principal
+  ID. Membership enablement does not revive a disabled principal or namespace.
+- Cleanup lists and restores only the selected namespace. Its successor
+  projection binds both the memory and winner aliases and redacts a foreign
+  successor ID. Archive/restore contradiction safeguards remain: an archived
+  row or retained successor link requires explicit force, and restore preserves
+  the link, version, and embedding. Consolidation fences both loser and winner
+  aliases, and its archive/stale transitions record the authenticated actor.
+- Decision and report artifacts carry stage/namespace identity and belong in
+  owner-only files. JSON ID selections are checked against that binding; plain
+  ID lists remain limited to the invocation's authorized namespace. Apply
+  mutexes and digest keys include both stage and
+  namespace. Scheduled digest state uses
+  `consolidation-digests/<stage>/<namespace-id>/current-v1.json`; console events
+  contain bounded kinds and counters, without memory IDs or snippets. Slack
+  digest delivery, approval, and cleanup scans remain disabled, as do upload
+  processing, webhooks, and Space Chains without their own namespace contract.
+- The shared cleanup/consolidation tasks default to report-only. Scheduling
+  needs a nonempty private target list in the stage-scoped SST secret
+  `MaintenanceNamespaceIds` and an explicit production opt-in through repository
+  variable `MEM9_NAMESPACE_CONSOLIDATION_SCHEDULE_ENABLED`. Infra CI maps that
+  variable to its internal consolidation schedule environment setting; the
+  old repository flag alone does not activate it. The dispatcher runs one
+  namespace per child and reports independent failures without sharing scope.
+- Patch `0019-namespace-sampler` binds every queue-age read to an explicit
+  namespace and the fixed internal sampler principal, derived from
+  `sha256("mem9-service-principal-v1\0sampler")`. It requires an active service
+  membership and has no REST signing capability. Startup initializes missing
+  sampler viewer grants only after phase validation; Node reconciliation does
+  the same for new namespaces. Both use `ON CONFLICT DO NOTHING` and preserve
+  revoked memberships and disabled principals.
+- The sampler coordinator enumerates active namespace metadata and publishes
+  only the maximum of a complete successful sample set, with stage as its sole
+  metric dimension. Any partial failure suppresses the aggregate. Until the
+  database phase is `constraints_complete`, it fails sampling with bounded
+  `namespace_not_enforced` output rather than publishing a false healthy zero
+  over a legacy NULL-namespace queue. Heartbeat continues independently; no
+  tenant-wide age query or compatibility authorization bypass is introduced.
+- Prescreen analysis uses the fixed analysis service key and checks its active
+  namespace membership before any payload query. Authorization and evaluation
+  share a repeatable-read, read-only snapshot. A supplied principal ID cannot
+  substitute for that service; all output remains bounded and content-free.
+- The reviewed SQL inventory includes full statically resolved JavaScript
+  projections and each scoped alias. Its AST extractor never evaluates source
+  code, and unresolved relations fail closed. Cleanup/consolidation have no
+  owner-wide disabled-capability exemption. PostgreSQL fixtures exercise
+  foreign winner/restore IDs, disabled services, and populated A/B analysis;
+  sampler fixtures also cover legacy NULL-namespace backlog before cutover.
 
 ### `If-Match` is a FENCE, not a warning (downstream patch 0009, issue #128)
 

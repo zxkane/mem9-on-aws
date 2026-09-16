@@ -3,20 +3,20 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   CONSOLIDATION_METRICS,
   DIGEST_SCHEMA_VERSION,
-  buildDigestOutcome,
+  buildDigestOutcome as buildDigestOutcomeScoped,
   buildEmfRecord,
-  buildReviewTopic,
+  buildReviewTopic as buildReviewTopicScoped,
   clusterMemories,
   compareDigestTopics,
   createProductionDeps,
   evaluateDigestHealth,
   parseActions,
   parseConsolidationArgs,
-  processScheduledDigest,
+  processScheduledDigest as processScheduledDigestScoped,
   reviewDisposition,
   routeActions,
-  runConsolidation,
-  serializeDigestState,
+  runConsolidation as runConsolidationScoped,
+  serializeDigestState as serializeDigestStateScoped,
 } from "./memory-consolidation.mjs";
 import largeDigestFixture from "./fixtures/consolidation-digest-large-v1.json" with {
   type: "json",
@@ -24,10 +24,37 @@ import largeDigestFixture from "./fixtures/consolidation-digest-large-v1.json" w
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 const NOW = Date.parse("2026-08-01T00:00:00Z");
+const NAMESPACE_ID = "60000000-0000-4000-8000-000000000101";
+const PRINCIPAL_ID = "70000000-0000-4000-8000-000000000101";
+
+// Existing behavior fixtures use one explicit namespace. Namespace-boundary
+// tests call the public entrypoints directly in consolidation-namespace.test.mjs.
+const runConsolidation = (options, deps) =>
+  runConsolidationScoped({ namespaceId: NAMESPACE_ID, ...options }, deps);
+const buildReviewTopic = (item, byId) =>
+  buildReviewTopicScoped(item, byId, NAMESPACE_ID);
+const buildDigestOutcome = (input) =>
+  buildDigestOutcomeScoped({ namespaceId: NAMESPACE_ID, ...input });
+const processScheduledDigest = (input, deps) =>
+  processScheduledDigestScoped({ namespaceId: NAMESPACE_ID, ...input }, deps);
+const serializeDigestState = (state) =>
+  serializeDigestStateScoped({ namespaceId: NAMESPACE_ID, ...state });
+
+function authorizationRows(sql) {
+  if (sql.includes("FROM memory_namespace_migration_state"))
+    return { rowCount: 1, rows: [{ phase: "constraints_complete" }] };
+  if (sql.includes("FROM memory_namespaces"))
+    return { rowCount: 1, rows: [{ namespace_id: NAMESPACE_ID }] };
+  if (sql.includes("FROM memory_principals"))
+    return { rowCount: 1, rows: [{ principal_id: PRINCIPAL_ID }] };
+  if (sql.includes("FROM memory_namespace_memberships"))
+    return { rowCount: 1, rows: [{ role: "owner" }] };
+}
 
 function memory(id, content, embedding, overrides = {}) {
   return {
     id,
+    namespace_id: NAMESPACE_ID,
     content,
     embedding,
     version: 1,
@@ -1204,6 +1231,9 @@ describe("production adapters and CLI", () => {
     "MEM9_LLM_MODEL",
     "MEM9_SLACK_APPROVAL_CHANNEL",
     "MEM9_STAGE",
+    "MEM9_NAMESPACE_ID",
+    "MEM9_SERVICE_TRANSPORT_SIGNING_KEYS",
+    "MEM9_SLACK_APPROVAL_ENABLED",
     "MEM9_TENANT_ID",
     "SLACK_BOT_TOKEN",
   ];
@@ -1219,14 +1249,16 @@ describe("production adapters and CLI", () => {
         password: "fixture-password",
       }),
       MEM9_TENANT_ID: "tenant-fixture",
+      MEM9_NAMESPACE_ID: NAMESPACE_ID,
+      MEM9_SERVICE_TRANSPORT_SIGNING_KEYS: JSON.stringify({ current: Buffer.alloc(32, 7).toString("base64url") }),
       ...overrides,
     });
   };
 
   class NoopClient {
     async connect() {}
-    async query() {
-      return { rows: [] };
+    async query(sql) {
+      return authorizationRows(sql) ?? { rows: [] };
     }
     async end() {}
   }
@@ -1282,10 +1314,13 @@ describe("production adapters and CLI", () => {
       }
       async query(sql, parameters) {
         dbCalls.push(["query", sql, parameters]);
-        if (sql.includes("SELECT id, content")) {
+        const authorization = authorizationRows(sql);
+        if (authorization) return authorization;
+        if (sql.includes("SELECT id, namespace_id, content")) {
           return {
             rows: [{
               id: "memory-1",
+              namespace_id: NAMESPACE_ID,
               content: "private content",
               tags: null,
               metadata: '{"source":"fixture"}',
@@ -1355,7 +1390,10 @@ describe("production adapters and CLI", () => {
     );
     expect(archiveQuery[1]).toContain("version = loser.version + 1");
     expect(archiveQuery[1]).toContain("EXISTS");
-    expect(archiveQuery[2]).toEqual(["a", "b", 1, "old", 2, "new"]);
+    expect(archiveQuery[2]).toEqual(["a", "b", 1, "old", 2, "new", NAMESPACE_ID, PRINCIPAL_ID]);
+    expect(archiveQuery[1]).toContain("loser.namespace_id = $7");
+    expect(archiveQuery[1]).toContain("winner.namespace_id = $7");
+    expect(archiveQuery[1]).toContain("updated_by_principal_id = $8");
     expect(
       await production.deps.completeChat("system", [{ id: "a" }]),
     ).toBe('{"actions":[]}');
@@ -1396,64 +1434,12 @@ describe("production adapters and CLI", () => {
     expect(dbCalls.at(-1)).toEqual(["end"]);
   });
 
-  it("TC-CONSOL-077: exercises the production Slack digest transport", async () => {
-    delete process.env.MEM9_SLACK_APPROVAL_CHANNEL;
-    delete process.env.SLACK_BOT_TOKEN;
+  it("TC-CONSOL-077: exposes no production Slack posting adapter", async () => {
     setProductionEnvironment();
-    const fetch = vi.fn(async () => ({
-      ok: true,
-      status: 200,
-      json: async () => ({ ok: true, ts: "123.456" }),
-    }));
-    const production = await createProductionDeps(
-      { stage: "prod" },
-      {
-        Client: NoopClient,
-        fetch,
-        fromNodeProviderChain: () => "credentials",
-        getToken: vi.fn(async () => "fixture-bearer"),
-      },
-    );
-    const message = {
-      text: "Weekly memory consolidation digest",
-      blocks: [{ type: "section", text: { type: "mrkdwn", text: "Digest" } }],
-    };
-
-    await expect(production.deps.postDigest(message)).resolves.toBeUndefined();
+    const fetch = vi.fn();
+    const production = await createProductionDeps({ stage: "prod" }, { Client: NoopClient, fetch });
+    expect(production.deps.postDigest).toBeUndefined();
     expect(fetch).not.toHaveBeenCalled();
-
-    process.env.MEM9_SLACK_APPROVAL_CHANNEL = "C0123456789";
-    await expect(production.deps.postDigest(message)).rejects.toThrow(
-      "Slack digest configuration is incomplete",
-    );
-    expect(fetch).not.toHaveBeenCalled();
-
-    process.env.SLACK_BOT_TOKEN = "fixture-slack-token";
-    await expect(production.deps.postDigest(message)).resolves.toBeUndefined();
-    expect(fetch).toHaveBeenCalledOnce();
-    expect(fetch.mock.calls[0][0]).toBe(
-      "https://slack.com/api/chat.postMessage",
-    );
-    expect(fetch.mock.calls[0][1]).toMatchObject({
-      method: "POST",
-      headers: {
-        authorization: "Bearer fixture-slack-token",
-        "content-type": "application/json; charset=utf-8",
-      },
-    });
-    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({
-      channel: "C0123456789",
-      ...message,
-    });
-
-    fetch.mockResolvedValueOnce({
-      ok: true,
-      status: 200,
-      json: async () => ({ ok: false, error: "channel_not_found" }),
-    });
-    await expect(production.deps.postDigest(message)).rejects.toThrow(
-      "Slack chat.postMessage failed: HTTP 200 channel_not_found",
-    );
     await production.close();
   });
 
@@ -1482,7 +1468,7 @@ describe("production adapters and CLI", () => {
     await expect(
       production.deps.putMemory("memory/1", { content: "merged" }, 2),
     ).resolves.toBeNull();
-    expect(fetch.mock.calls[0][1].headers["If-Match"]).toBe("2");
+    expect(fetch.mock.calls[0][1].headers.get("If-Match")).toBe("2");
 
     // The fence only exists for a versioned write. An unversioned write has no
     // precondition to lose, so a 412 there is an unexplained server answer and
@@ -1516,6 +1502,7 @@ describe("production adapters and CLI", () => {
     };
     const storedState = {
       schemaVersion: DIGEST_SCHEMA_VERSION,
+      namespaceId: NAMESPACE_ID,
       stage: "prod",
       generatedAt: "2026-08-16T03:00:00.000Z",
       unchangedRuns: 2,
@@ -1596,6 +1583,7 @@ describe("production adapters and CLI", () => {
     });
     const state = {
       schemaVersion: DIGEST_SCHEMA_VERSION,
+      namespaceId: NAMESPACE_ID,
       stage: "prod",
       generatedAt: "2026-08-23T03:00:00.000Z",
       unchangedRuns: 0,
@@ -1605,7 +1593,7 @@ describe("production adapters and CLI", () => {
     await production.deps.writeDigestState({ state });
     expect(sent.at(-1)).toMatchObject({
       Bucket: "example-mem9-artifacts",
-      Key: "consolidation-digests/prod/current-v1.json",
+      Key: `consolidation-digests/prod/${NAMESPACE_ID}/current-v1.json`,
       ExpectedBucketOwner: "123456789012",
       IfNoneMatch: "*",
     });
@@ -1685,6 +1673,8 @@ describe("production adapters and CLI", () => {
   });
 
   it("rejects incomplete production configuration before connecting", async () => {
+    setProductionEnvironment();
+    delete process.env.MEM9_TENANT_ID;
     await expect(
       createProductionDeps(
         { stage: "prod" },
@@ -1695,10 +1685,12 @@ describe("production adapters and CLI", () => {
 
   it("parses explicit report/apply arguments and rejects unknown options", () => {
     process.env.MEM9_STAGE = "prod";
+    process.env.MEM9_NAMESPACE_ID = NAMESPACE_ID;
     expect(
       parseConsolidationArgs(["--report-only", "--check-llm", "--cap", "7"]),
     ).toEqual({
       stage: "prod",
+      namespaceId: NAMESPACE_ID,
       reportOnly: true,
       scheduled: false,
       checkLlm: true,
@@ -2027,6 +2019,7 @@ describe("risk-tiered consolidation digests", () => {
     );
     const previousState = {
       schemaVersion: DIGEST_SCHEMA_VERSION,
+      namespaceId: NAMESPACE_ID,
       stage: "prod",
       generatedAt: "2026-07-26T00:00:00.000Z",
       unchangedRuns: 0,
@@ -2549,6 +2542,7 @@ describe("risk-tiered consolidation digests", () => {
     expect(JSON.parse(serialized)).toEqual(outcome.nextState);
     expect(JSON.parse(serializeDigestState({
       schemaVersion: DIGEST_SCHEMA_VERSION,
+      namespaceId: NAMESPACE_ID,
       stage: "prod",
       generatedAt: new Date(NOW).toISOString(),
       unchangedRuns: 0,

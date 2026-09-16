@@ -369,6 +369,7 @@ process.stdout.write(status);
       [resolve(import.meta.dirname, "run-memory-namespace-e2e.sh")],
       {
         encoding: "utf8",
+        timeout: 30000,
         env: {
           ...process.env,
           PATH: `${bin}${delimiter}${process.env.PATH}`,
@@ -486,8 +487,8 @@ describe("memory namespace operator config", () => {
       },
     });
     const namespaceIDs = new Map([
-      ["preview-alpha", "namespace-alpha"],
-      ["preview-beta", "namespace-beta"],
+      ["preview-alpha", "60000000-0000-4000-8000-000000000001"],
+      ["preview-beta", "60000000-0000-4000-8000-000000000002"],
     ]);
     const principalIDs = new Map(
       state.m2m_bindings.map(({ principal_key }, index) => [
@@ -508,6 +509,12 @@ describe("memory namespace operator config", () => {
     const db = {
       async query(sql, values = []) {
         const text = String(sql);
+        if (text.includes("SELECT principal_id,principal_type,status FROM memory_principals")) {
+          return { rowCount: 1, rows: [{ principal_id: "70000000-0000-4000-8000-000000000099", principal_type: "service", status: "active" }] };
+        }
+        if (text.includes("SELECT namespace_id FROM memory_namespaces WHERE slug=ANY")) {
+          return { rowCount: 2, rows: [{namespace_id:"60000000-0000-4000-8000-000000000001"},{namespace_id:"60000000-0000-4000-8000-000000000002"}] };
+        }
         queries.push({ text, values });
         if (text.includes("INSERT INTO memory_namespaces")) {
           return {
@@ -613,7 +620,7 @@ describe("memory namespace operator config", () => {
     const staleLock = queries.find(({ text }) =>
       text.includes("NOT (binding.client_key = ANY"),
     );
-    expect(staleLock.values[0]).toEqual(["namespace-alpha", "namespace-beta"]);
+    expect(staleLock.values[0]).toEqual(["60000000-0000-4000-8000-000000000001", "60000000-0000-4000-8000-000000000002"]);
     expect(staleLock.values[1].toSorted()).toEqual(
       [
         deriveClientKey(issuer, "default-client"),
@@ -1041,11 +1048,17 @@ describe("memory namespace access state machines", () => {
     const db = {
       async query(sql, args) {
         const text = String(sql);
+        if (text.includes("SELECT principal_id,principal_type,status FROM memory_principals")) {
+          return { rowCount: 1, rows: [{ principal_id: "70000000-0000-4000-8000-000000000099", principal_type: "service", status: "active" }] };
+        }
+        if (text.includes("SELECT namespace_id FROM memory_namespaces WHERE slug=ANY")) {
+          return { rowCount: 2, rows: [{namespace_id:"60000000-0000-4000-8000-000000000001"},{namespace_id:"60000000-0000-4000-8000-000000000002"}] };
+        }
         queries.push(text);
         if (text.includes("RETURNING namespace_id")) {
           return {
             rowCount: 1,
-            rows: [{ namespace_id: "namespace-a" }],
+            rows: [{ namespace_id: "60000000-0000-4000-8000-000000000001" }],
           };
         }
         if (text.includes("SELECT slug, display_name, status")) {
@@ -1105,6 +1118,12 @@ describe("memory namespace access state machines", () => {
     const db = {
       async query(sql, args) {
         const text = String(sql);
+        if (text.includes("SELECT principal_id,principal_type,status FROM memory_principals")) {
+          return { rowCount: 1, rows: [{ principal_id: "70000000-0000-4000-8000-000000000099", principal_type: "service", status: "active" }] };
+        }
+        if (text.includes("SELECT namespace_id FROM memory_namespaces WHERE slug=ANY")) {
+          return { rowCount: 2, rows: [{namespace_id:"60000000-0000-4000-8000-000000000001"},{namespace_id:"60000000-0000-4000-8000-000000000002"}] };
+        }
         if (text.includes("RETURNING principal_id, status")) {
           return {
             rowCount: 1,
@@ -1178,6 +1197,12 @@ describe("memory namespace access state machines", () => {
     const db = {
       async query(sql, args) {
         const text = String(sql);
+        if (text.includes("SELECT principal_id,principal_type,status FROM memory_principals")) {
+          return { rowCount: 1, rows: [{ principal_id: "70000000-0000-4000-8000-000000000099", principal_type: "service", status: "active" }] };
+        }
+        if (text.includes("SELECT namespace_id FROM memory_namespaces WHERE slug=ANY")) {
+          return { rowCount: 2, rows: [{namespace_id:"60000000-0000-4000-8000-000000000001"},{namespace_id:"60000000-0000-4000-8000-000000000002"}] };
+        }
         if (text.includes("RETURNING principal_id, status")) {
           return {
             rowCount: 1,
@@ -1190,7 +1215,7 @@ describe("memory namespace access state machines", () => {
         ) {
           return {
             rowCount: 1,
-            rows: [{ namespace_id: "namespace-a" }],
+            rows: [{ namespace_id: "60000000-0000-4000-8000-000000000001" }],
           };
         }
         if (
@@ -1252,6 +1277,12 @@ describe("memory namespace access state machines", () => {
     const db = {
       async query(sql, values = []) {
         const text = String(sql);
+        if (text.includes("SELECT principal_id,principal_type,status FROM memory_principals")) {
+          return { rowCount: 1, rows: [{ principal_id: "70000000-0000-4000-8000-000000000099", principal_type: "service", status: "active" }] };
+        }
+        if (text.includes("SELECT namespace_id FROM memory_namespaces WHERE slug=ANY")) {
+          return { rowCount: 2, rows: [{namespace_id:"60000000-0000-4000-8000-000000000001"},{namespace_id:"60000000-0000-4000-8000-000000000002"}] };
+        }
         queries.push({ text, values });
         if (text.includes("SELECT slug, display_name, status")) {
           return {
@@ -1296,7 +1327,7 @@ describe("memory namespace access state machines", () => {
         if (text.includes("RETURNING namespace_id")) {
           return {
             rowCount: 1,
-            rows: [{ namespace_id: "namespace-a" }],
+            rows: [{ namespace_id: "60000000-0000-4000-8000-000000000001" }],
           };
         }
         if (text.includes("RETURNING principal_id")) {
@@ -1346,7 +1377,7 @@ describe("memory namespace access state machines", () => {
         ({ text, values }) =>
           text.includes("AND namespace_id <> $2") &&
           values[0] === "principal-new" &&
-          values[1] === "namespace-a",
+          values[1] === "60000000-0000-4000-8000-000000000001",
       ),
     ).toBe(true);
     expect(result.drift.total).toBe(0);
@@ -1377,8 +1408,14 @@ describe("memory namespace access state machines", () => {
     const db = {
       async query(sql, args) {
         const text = String(sql);
+        if (text.includes("SELECT principal_id,principal_type,status FROM memory_principals")) {
+          return { rowCount: 1, rows: [{ principal_id: "70000000-0000-4000-8000-000000000099", principal_type: "service", status: "active" }] };
+        }
+        if (text.includes("SELECT namespace_id FROM memory_namespaces WHERE slug=ANY")) {
+          return { rowCount: 2, rows: [{namespace_id:"60000000-0000-4000-8000-000000000001"},{namespace_id:"60000000-0000-4000-8000-000000000002"}] };
+        }
         if (text.includes("RETURNING namespace_id")) {
-          return { rowCount: 1, rows: [{ namespace_id: "namespace-a" }] };
+          return { rowCount: 1, rows: [{ namespace_id: "60000000-0000-4000-8000-000000000001" }] };
         }
         if (text.includes("SELECT slug, display_name, status")) {
           return {

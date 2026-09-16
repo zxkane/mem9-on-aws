@@ -26,7 +26,7 @@ import {
   offerExpiry,
   OFFER_TTL_MS,
   UNPOSTED_GRACE_MS,
-  parseArgs,
+  parseArgs as parseCleanupArgs,
   postApprovalRequest,
   putDecisionArtifact,
   isoWeek,
@@ -51,6 +51,12 @@ import {
   USAGE,
 } from "./memory-cleanup.mjs";
 
+import { createMaintenanceIdentity } from "./lib/maintenance-scope.mjs";
+const NS = "60000000-0000-4000-8000-000000000101";
+const SCOPE = { ...createMaintenanceIdentity("cleanup"), stage: "test", namespaceId: NS };
+const PRINCIPAL_ID = "70000000-0000-4000-8000-000000000101";
+const SIGNING_KEYS = JSON.stringify({ active: "a", a: Buffer.alloc(32, 1).toString("base64url"), b: Buffer.alloc(32, 2).toString("base64url") });
+const parseArgs = (argv) => parseCleanupArgs(["--namespace-id", NS, ...argv]);
 const tempDirs = [];
 function tempDir() {
   const dir = mkdtempSync(join(tmpdir(), "memclean-"));
@@ -87,7 +93,7 @@ function memory(id, content, version = 1) {
  *  - POST /memories/batch-delete — soft delete, skips already-deleted
  */
 function fakeServer(initial) {
-  const store = new Map(initial.map((m) => [m.id, { ...m }]));
+  const store = new Map(initial.map((m) => [m.id, { namespace_id: NS, ...m }]));
   const calls = [];
   const fetchImpl = vi.fn(async (url, opts = {}) => {
     const method = (opts.method || "GET").toUpperCase();
@@ -210,6 +216,7 @@ function fakeAwsClient(values = {}) {
 function baseDeps(server, llm, dir) {
   return {
     fetchImpl: server.fetchImpl,
+    findByIds: async (ids) => ids.map((id) => server.store.get(id)).filter((row) => row?.namespace_id === NS),
     completeChat: llm,
     log: vi.fn(),
     outDir: dir,
@@ -220,7 +227,7 @@ function baseDeps(server, llm, dir) {
 
 function baseOpts(overrides = {}) {
   return {
-    stage: "test",
+    stage: "test", namespaceId: NS,
     baseUrl: "http://mnemo.test.local:8080",
     tenantId: TENANT,
     apply: false,
@@ -660,7 +667,7 @@ describe("apply, cap, --ids", () => {
       channel: "C1",
       messageTs: "1.1",
       hash: contentHash("d1\nd2"),
-      stage: "test",
+      stage: "test", namespaceId: NS,
       approved: 2,
       result,
       appliedAt: "2026-08-05T04:00:00.000Z",
@@ -694,7 +701,7 @@ describe("apply, cap, --ids", () => {
       channel: "C1",
       messageTs: "1.1",
       hash: contentHash("d1\nd-typo"),
-      stage: "test",
+      stage: "test", namespaceId: NS,
       approved: 2,
       result,
       appliedAt: "2026-08-05T04:00:00.000Z",
@@ -705,7 +712,7 @@ describe("apply, cap, --ids", () => {
   it("TC-MEMCLEAN-033 MERGE recovery is hash-anchored (three-way)", async () => {
     const dir = tempDir();
     const decisions = {
-      stage: "test",
+      stage: "test", namespaceId: NS,
       generatedAt: "2026-07-31T00:00:00Z",
       decisions: [{
         id: "surv-1", verdict: "MERGE", reason: "frags",
@@ -853,7 +860,7 @@ describe("concurrency guards", () => {
   it("TC-MEMCLEAN-042 ingest write landing between the survivor's read and rewrite is fenced out", async () => {
     const dir = tempDir();
     const decisions = {
-      stage: "test",
+      stage: "test", namespaceId: NS,
       generatedAt: "2026-07-31T00:00:00Z",
       decisions: [{
         id: "surv-1", verdict: "MERGE", reason: "frags",
@@ -895,7 +902,7 @@ describe("concurrency guards", () => {
   it("TC-MEMCLEAN-043 a 412 on the survivor rewrite is a skip, and other decisions still apply", async () => {
     const dir = tempDir();
     const decisions = {
-      stage: "test",
+      stage: "test", namespaceId: NS,
       generatedAt: "2026-07-31T00:00:00Z",
       decisions: [
         {
@@ -944,7 +951,7 @@ describe("concurrency guards", () => {
   it("TC-MEMCLEAN-044 a successful merge sends If-Match and leaves the survivor at the merged content", async () => {
     const dir = tempDir();
     const decisions = {
-      stage: "test",
+      stage: "test", namespaceId: NS,
       generatedAt: "2026-07-31T00:00:00Z",
       decisions: [{
         id: "surv-1", verdict: "MERGE", reason: "frags",
@@ -975,7 +982,7 @@ describe("concurrency guards", () => {
   it("TC-MEMCLEAN-047 only 412 is a skip — any other write failure still aborts the run", async () => {
     const dir = tempDir();
     const decisions = {
-      stage: "test",
+      stage: "test", namespaceId: NS,
       generatedAt: "2026-07-31T00:00:00Z",
       decisions: [{
         id: "surv-1", verdict: "MERGE", reason: "frags",
@@ -1010,7 +1017,7 @@ describe("concurrency guards", () => {
     // would then read `.deleted` off null and throw an unrelated TypeError.
     const dir2 = tempDir();
     writeFileSync(join(dir2, "decisions.json"), JSON.stringify({
-      stage: "test",
+      stage: "test", namespaceId: NS,
       decisions: [{ id: "junk-1", verdict: "DELETE", reason: "noise", version: 1, contentHash: contentHash("noise") }],
     }));
     const s2 = fakeServer([memory("junk-1", "noise")]);
@@ -1068,7 +1075,7 @@ describe("concurrency guards", () => {
       baseOpts({ apply: true }),
       { ...baseDeps(server, llm, dir), acquireMutex },
     );
-    expect(acquireMutex).toHaveBeenCalledWith("test");
+    expect(acquireMutex).toHaveBeenCalledWith("test", NS);
     expect(blocked.exitCode).toBe(3);
     expect(server.store.get("d1").state).toBe("active");
 
@@ -1406,7 +1413,7 @@ describe("verdict parsing units", () => {
   it("TC-MEMCLEAN-048 refuses a MERGE decision with no usable version anchor", async () => {
     const dir = tempDir();
     const merge = (overrides) => ({
-      stage: "test",
+      stage: "test", namespaceId: NS,
       decisions: [{
         id: "surv-1", verdict: "MERGE", reason: "frags",
         version: 1, contentHash: contentHash("frag a"),
@@ -1915,6 +1922,11 @@ function fakeDb(handlers = {}) {
   const queries = [];
   const query = vi.fn(async (text, values = []) => {
     assertBindArity(text, values);
+    if (/FROM memory_namespace_migration_state/.test(text)) return { rowCount: 1, rows: [{ phase: "constraints_complete" }] };
+    if (/FROM memory_namespaces/.test(text)) return { rowCount: 1, rows: [{ namespace_id: NS }] };
+    if (/FROM memory_principals/.test(text)) return { rowCount: 1, rows: [{ principal_id: PRINCIPAL_ID }] };
+    if (/FROM memory_namespace_memberships/.test(text)) return { rowCount: 1, rows: [{ role: "member" }] };
+    if (["BEGIN", "COMMIT", "ROLLBACK"].includes(text)) return { rows: [] };
     queries.push({ text, values });
     for (const [needle, handler] of Object.entries(handlers)) {
       if (text.includes(needle)) return handler(values);
@@ -1945,7 +1957,7 @@ function assertBindArity(text, values) {
 }
 
 const restoreOpts = (overrides = {}) => ({
-  stage: "test",
+  stage: "test", namespaceId: NS,
   apply: false,
   cap: 50,
   force: false,
@@ -1955,6 +1967,7 @@ const restoreOpts = (overrides = {}) => ({
 function restoreDeps(overrides = {}) {
   return {
     log: vi.fn(),
+    scope: SCOPE,
     outDir: overrides.outDir,
     clock: () => new Date("2026-08-05T00:00:00Z").getTime(),
     // Restore must never re-embed: `vector(1024)` survived the soft delete
@@ -1976,7 +1989,7 @@ describe("inactive-memory SQL adapter", () => {
       "count(": () => ({ rows: [{ total: "1" }] }),
       "FROM memories": () => ({ rows: [inactiveRow("d-1", "deleted")] }),
     });
-    const adapter = inactiveMemoryAdapter(db);
+    const adapter = inactiveMemoryAdapter(db, SCOPE);
 
     await adapter.listInactive({ state: "deleted" });
     const scoped = db.queries.at(-1);
@@ -1996,7 +2009,7 @@ describe("inactive-memory SQL adapter", () => {
 
   it("TC-MEMRESTORE-021 --since filters updated_at, the only timestamp that exists", async () => {
     const db = fakeDb({ "count(": () => ({ rows: [{ total: "0" }] }), "FROM memories": () => ({ rows: [] }) });
-    const adapter = inactiveMemoryAdapter(db);
+    const adapter = inactiveMemoryAdapter(db, SCOPE);
     await adapter.listInactive({ since: "2026-07-01T00:00:00Z" });
     const { text, values } = db.queries.at(-1);
     // There is no `memories.deleted_at` — only `tenants` has one (schema.sql
@@ -2015,7 +2028,7 @@ describe("inactive-memory SQL adapter", () => {
         // missing LIMIT shows up as an unbounded listing rather than passing.
         ({ rows: Array.from({ length: Math.min(5, values.at(-1) ?? 5) }, (_, i) => inactiveRow(`d-${i}`, "deleted")) }),
     });
-    const adapter = inactiveMemoryAdapter(db);
+    const adapter = inactiveMemoryAdapter(db, SCOPE);
     const page = await adapter.listInactive({ limit: 2 });
     expect(page.rows).toHaveLength(2);
     // A silent cap is the failure mode: 2 of 42 must never read as "42 is all
@@ -2030,13 +2043,13 @@ describe("inactive-memory SQL adapter", () => {
     // count's array, the count would be recorded here carrying a parameter its
     // SQL never references. That reads as a surplus bind — which real Postgres
     // rejects outright — even when the live call happened to be well-formed.
-    expect(counted.values).toHaveLength(0);
+    expect(counted.values).toEqual([NS]);
     expect(counted.values).not.toBe(db.queries.at(-1).values);
   });
 
   it("TC-MEMRESTORE-041 the restore UPDATE is fenced, preserves version, and touches nothing else", async () => {
     const db = fakeDb({ "UPDATE memories": () => ({ rowCount: 1 }) });
-    const adapter = inactiveMemoryAdapter(db);
+    const adapter = inactiveMemoryAdapter(db, SCOPE);
     const ok = await adapter.restoreMemory({ id: "a-1", priorState: "archived", version: 7 });
     expect(ok).toBe(true);
     const { text, values } = db.queries.at(-1);
@@ -2068,28 +2081,29 @@ describe("inactive-memory SQL adapter", () => {
     // A lost fence is reported, not swallowed.
     const stale = fakeDb({ "UPDATE memories": () => ({ rowCount: 0 }) });
     expect(
-      await inactiveMemoryAdapter(stale).restoreMemory({ id: "a-1", priorState: "deleted", version: 1 }),
+      await inactiveMemoryAdapter(stale, SCOPE).restoreMemory({ id: "a-1", priorState: "deleted", version: 1 }),
     ).toBe(false);
   });
 
-  it("TC-MEMRESTORE-045 the restore UPDATE sets exactly one column", async () => {
+  it("TC-MEMRESTORE-045 the restore UPDATE changes only state and authenticated actor", async () => {
     const db = fakeDb({ "UPDATE memories": () => ({ rowCount: 1 }) });
-    await inactiveMemoryAdapter(db).restoreMemory({ id: "a", priorState: "deleted", version: 1 });
+    await inactiveMemoryAdapter(db, SCOPE).restoreMemory({ id: "a", priorState: "deleted", version: 1 });
     const setClause = db.queries.at(-1).text.match(/SET([\s\S]*?)WHERE/iu)[1];
     // Enumerated rather than spot-checked: a future edit that adds a column to
     // the SET clause has to come through this assertion and say why.
-    expect(setClause.match(/\w+\s*=/gu).map((s) => s.replace(/\s*=$/u, ""))).toEqual(["state"]);
+    expect(setClause.match(/\w+\s*=/gu).map((s) => s.replace(/\s*=$/u, ""))).toEqual(["state", "updated_by_principal_id"]);
+    expect(db.queries.at(-1).values).toContain(PRINCIPAL_ID);
     expect(setClause).toMatch(/'active'/u);
   });
 
   it("findByIds reads the pre-restore state, version, and updated_at for the log", async () => {
     const db = fakeDb({ "FROM memories": () => ({ rows: [inactiveRow("d-1", "deleted")] }) });
-    await inactiveMemoryAdapter(db).findByIds(["d-1", "d-2"]);
+    await inactiveMemoryAdapter(db, SCOPE).findByIds(["d-1", "d-2"]);
     const { text, values } = db.queries.at(-1);
     // Parameterised as an array, never interpolated: ids come from an operator
     // file, and this is a destructive tool holding a live database connection.
-    expect(text).toMatch(/id\s*=\s*ANY\s*\(\s*\$1\s*\)/u);
-    expect(values[0]).toEqual(["d-1", "d-2"]);
+    expect(text).toMatch(/id\s*=\s*ANY\s*\(\s*\$2\s*\)/u);
+    expect(values).toEqual([NS, ["d-1", "d-2"]]);
     // The pre-restore `updated_at` cannot be recovered afterwards:
     // trg_memories_updated is BEFORE UPDATE and unconditionally assigns NOW()
     // (schema.sql 105-111), so it has to be read here.
@@ -2126,9 +2140,12 @@ describe("--list-inactive", () => {
     // refusal message in TC-040 actionable.
     expect(result.rows[1]).toMatchObject({ state: "archived", superseded_by: "winner-of-a-1" });
 
-    // Read-only means read-only: a listing that mutated anything would be a
-    // recovery tool an operator cannot safely run against prod to look around.
-    expect(db.queries.every((q) => /^\s*SELECT/iu.test(q.text))).toBe(true);
+    // Include authorization and transaction setup, which fakeDb omits from its
+    // content-query list. Local timeout controls are allowed; DML is never allowed.
+    for (const [sql] of db.query.mock.calls) {
+      expect(sql).toMatch(/^\s*(?:SELECT\b|BEGIN\b|COMMIT\b|ROLLBACK\b|SET\s+LOCAL\s+(?:lock_timeout|statement_timeout|idle_in_transaction_session_timeout)\s*=)/iu);
+      expect(sql).not.toMatch(/\b(?:INSERT|UPDATE|DELETE|MERGE|TRUNCATE|COPY|CREATE|ALTER|DROP|CALL|DO)\b/iu);
+    }
     expect(result.writes).toBe(0);
     expect(deps.fetchImpl).not.toHaveBeenCalled();
   });
@@ -2260,7 +2277,7 @@ describe("--list-inactive", () => {
   });
 
   it("TC-MEMRESTORE-001 accepts a pre-built adapter, which is how the CLI supplies it", async () => {
-    // `recoveryDeps` spreads `inactiveMemoryAdapter(db)` into deps, so in
+    // `recoveryDeps` spreads `inactiveMemoryAdapter(db, SCOPE)` into deps, so in
     // production this branch is the ONLY one taken — untested, it would be the
     // one seam that unit tests never reach.
     const listInactive = vi.fn(async () => ({ rows: [inactiveRow("d-1", "deleted")], total: 1 }));
@@ -2407,7 +2424,7 @@ describe("--restore", () => {
     );
     // A restore racing consolidation could re-activate the loser of a
     // contradiction while #103 is mid-resolution on the same pair.
-    expect(acquireMutex).toHaveBeenCalledWith("test");
+    expect(acquireMutex).toHaveBeenCalledWith("test", NS);
     expect(blocked.exitCode).toBe(3);
     expect(held.store.get("d-1").state).toBe("deleted");
 
@@ -2593,9 +2610,9 @@ describe("--restore", () => {
       runRestore(restoreOpts({ apply: true, idsFile: idsFile(dir, ["d-1", "d-2", "d-3", "d-4"]) }), ctx.deps),
     ).rejects.toThrow(/connection reset/u);
 
-    const written = readdirSync(outDir).filter((f) => f.startsWith("restore-"));
+    const written = readdirSync(join(outDir, NS)).filter((f) => f.startsWith("restore-"));
     expect(written).toHaveLength(1);
-    const logged = JSON.parse(readFileSync(join(outDir, written[0]), "utf8"));
+    const logged = JSON.parse(readFileSync(join(outDir, NS, written[0]), "utf8"));
     expect(logged.entries.map((e) => e.id)).toEqual(["d-1", "d-2"]);
     expect(ctx.deps.log).toHaveBeenCalledWith(expect.stringMatching(/apply done: restored=2/u));
   });
@@ -2855,7 +2872,7 @@ describe("--restore", () => {
     const path = join(dir, "ids.json");
     // The form #102's own decision log emits, including a repeated id: charging
     // the cap twice for one memory would abort a run that fits.
-    writeFileSync(path, JSON.stringify({ stage: "test", ids: ["d-1", "d-1", "d-2"] }));
+    writeFileSync(path, JSON.stringify({ stage: "test", namespaceId: NS, ids: ["d-1", "d-1", "d-2"] }));
     const { deps, restoreMemory } = applyDeps(dir, [
       inactiveRow("d-1", "deleted"),
       inactiveRow("d-2", "deleted"),
@@ -2872,7 +2889,7 @@ describe("--restore", () => {
     const path = join(dir, "ids.json");
     // A hand-edited or half-written log: the stage matches, so the guard passes,
     // and the run would otherwise report a clean "restored 0 of 0".
-    writeFileSync(path, JSON.stringify({ stage: "test", decisions: [{ id: "d-1" }] }));
+    writeFileSync(path, JSON.stringify({ stage: "test", namespaceId: NS, decisions: [{ id: "d-1" }] }));
     const { deps } = applyDeps(dir, [inactiveRow("d-1", "deleted")]);
     await expect(
       runRestore(restoreOpts({ apply: true, idsFile: path }), deps),
@@ -3236,16 +3253,16 @@ describe("archived-vs-deleted separation", () => {
 });
 
 describe("shared apply mutex key", () => {
-  it("TC-MEMRESTORE-033 restore, cleanup, and consolidation derive one key per stage", async () => {
+  it("TC-MEMRESTORE-033 restore, cleanup, and consolidation derive one key per stage and namespace", async () => {
     // The mutex is an advisory lock over `hashtextextended(key)`, so it only
     // serialises the three writers if all three derive the SAME string. This is
     // imported by memory-consolidation.mjs and used by restore's --apply, and
     // nothing else would fail if a caller drifted to its own literal — the locks
     // would simply stop colliding, silently.
     const { sharedCleanupMutexKey } = await import("./memory-cleanup.mjs");
-    expect(sharedCleanupMutexKey("prod")).toBe("mem9-cleanup:prod");
+    expect(sharedCleanupMutexKey("prod", NS)).toBe(`mem9-cleanup:prod:${NS}`);
     // Stage-scoped: a preview apply must never block a prod apply.
-    expect(sharedCleanupMutexKey("preview")).not.toBe(sharedCleanupMutexKey("prod"));
+    expect(sharedCleanupMutexKey("preview", NS)).not.toBe(sharedCleanupMutexKey("prod", NS));
 
     const consolidation = readFileSync("scripts/memory-consolidation.mjs", "utf8");
     expect(consolidation).toMatch(/sharedCleanupMutexKey/u);
@@ -5533,6 +5550,8 @@ describe("the apply task's in-container runtime (#123)", () => {
     "MEM9_REVIEW_ARTIFACT_KEY",
     "MEM9_SSM_PREFIX",
     "MEM9_TENANT_ID",
+    "MEM9_NAMESPACE_ID",
+    "MEM9_SERVICE_TRANSPORT_SIGNING_KEYS",
   ];
   afterEach(() => {
     for (const key of environmentKeys) delete process.env[key];
@@ -5541,6 +5560,8 @@ describe("the apply task's in-container runtime (#123)", () => {
   /** The env the ECS task definition (infra/slack-approval.ts) actually sets. */
   function containerEnv(extra = {}) {
     Object.assign(process.env, {
+      MEM9_NAMESPACE_ID: NS,
+      MEM9_SERVICE_TRANSPORT_SIGNING_KEYS: SIGNING_KEYS,
       AWS_REGION: "ap-northeast-1",
       MEM9_DB_HOST: "writer.example.com",
       MEM9_DB_NAME: "mem9",
@@ -5569,6 +5590,10 @@ describe("the apply task's in-container runtime (#123)", () => {
       }
       async query(sql, parameters) {
         calls.push(["query", sql, parameters]);
+        if (sql.includes("FROM memory_namespace_migration_state")) return { rowCount: 1, rows: [{ phase: "constraints_complete" }] };
+        if (sql.includes("FROM memory_namespaces")) return { rowCount: 1, rows: [{ namespace_id: NS }] };
+        if (sql.includes("FROM memory_principals")) return { rowCount: 1, rows: [{ principal_id: PRINCIPAL_ID }] };
+        if (sql.includes("FROM memory_namespace_memberships")) return { rowCount: 1, rows: [{ role: "member" }] };
         if (sql.includes("pg_try_advisory_lock")) {
           return { rows: [{ acquired: true }] };
         }
@@ -5628,6 +5653,8 @@ describe("the apply task's in-container runtime (#123)", () => {
     // rewrite would break the #102 runbook the README documents.
     process.env.AWS_REGION = "ap-northeast-1";
     process.env.MEM9_TENANT_ID = TENANT;
+    process.env.MEM9_NAMESPACE_ID = NS;
+    process.env.MEM9_SERVICE_TRANSPORT_SIGNING_KEYS = SIGNING_KEYS;
     const calls = [];
     const secretArn =
       "arn:aws:secretsmanager:ap-northeast-1:123456789012:secret:mem9-db-x";
@@ -5657,294 +5684,70 @@ describe("the apply task's in-container runtime (#123)", () => {
     await production.close();
   });
 
-  it("TC-SLACKAPP-102 materializes the approved ids at the --ids path the task definition passes", async () => {
-    const ids = ["m-1", "m-2"];
-    const hash = contentHash(ids.join("\n"));
-    const dir = tempDir();
-    const idsFile = join(dir, "approved.txt");
-    containerEnv({ MEM9_APPROVAL_HASH: hash });
-    const ssm = fakeAwsClient({
-      [claimParameterName("/mem9-on-aws/prod", hash)]: JSON.stringify({
-        stage: "prod",
-        hash,
-        ids,
-        claimedAt: "2026-08-05T00:05:00.000Z",
-      }),
-    });
-
-    const production = await createCleanupDeps(
-      { stage: "prod", apply: true, cap: 50, idsFile },
-      {
-        Client: fakeClientClass([]),
-        ssm,
-        secrets: fakeAwsClient(),
-        getToken: vi.fn(),
-        fromNodeProviderChain: vi.fn(),
-      },
-    );
-
-    // The path is the CONTRACT with the task definition's `--ids` argument. A file
-    // written anywhere else leaves `readApprovedIds` reading a missing file, so the
-    // run dies loud — or worse, reads a stale one.
-    expect(readFileSync(idsFile, "utf8")).toBe("m-1\nm-2\n");
-    await production.close();
+  it("TC-SLACKAPP-102 rejects legacy production approval wiring before any client", async () => {
+    vi.stubEnv("MEM9_APPROVAL_HASH", "disabled-fixture");
+    const io = vi.fn();
+    try {
+      await expect(createCleanupDeps({ stage: "prod", namespaceId: NS }, {
+        Client: io, ssm: { send: io }, secrets: { send: io }, s3: { send: io },
+      })).rejects.toThrow(/disabled/);
+      expect(io).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); }
   });
 
-  it("TC-SLACKAPP-103 refuses an approval hash with no ids file rather than applying unfiltered", async () => {
-    // This is the whole loop's failure mode. `readApprovedIds` returns null for a
-    // missing `--ids`, and null means "no filter" — so a hash-driven run that
-    // materialized nowhere would delete EVERY DELETE verdict in the run, not the
-    // ones the operator approved, and exit 0 reporting success.
-    const hash = contentHash(["m-1"].join("\n"));
-    containerEnv({ MEM9_APPROVAL_HASH: hash });
-
-    await expect(
-      createCleanupDeps(
-        { stage: "prod", apply: true, cap: 50 },
-        { Client: fakeClientClass([]), ssm: fakeAwsClient(), secrets: fakeAwsClient() },
-      ),
-    ).rejects.toThrow(/--ids/u);
+  it("TC-SLACKAPP-103 rejects legacy production approval wiring before any client", async () => {
+    vi.stubEnv("MEM9_APPROVAL_HASH", "disabled-fixture");
+    const io = vi.fn();
+    try {
+      await expect(createCleanupDeps({ stage: "prod", namespaceId: NS }, {
+        Client: io, ssm: { send: io }, secrets: { send: io }, s3: { send: io },
+      })).rejects.toThrow(/disabled/);
+      expect(io).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); }
   });
 
-  it("TC-SLACKAPP-104 aborts before opening the database when the claim does not match the hash", async () => {
-    // Ordering, not just the error: materialization is the cheapest guard and the
-    // only one that can prove the ids are the approved ids, so it runs before the
-    // connection and before the advisory lock. Reversed, a tampered claim would
-    // hold the shared mutex for the length of its own failure and could block the
-    // weekly consolidation.
-    const ids = ["m-1"];
-    const hash = contentHash(ids.join("\n"));
-    const dir = tempDir();
-    const idsFile = join(dir, "approved.txt");
-    containerEnv({ MEM9_APPROVAL_HASH: hash });
-    const calls = [];
-    const ssm = fakeAwsClient({
-      [claimParameterName("/mem9-on-aws/prod", hash)]: JSON.stringify({
-        stage: "prod",
-        // Agrees with the request, so a string comparison of the two would pass.
-        hash,
-        ids: ["m-substituted"],
-        claimedAt: "2026-08-05T00:05:00.000Z",
-      }),
-    });
-
-    await expect(
-      createCleanupDeps(
-        { stage: "prod", apply: true, cap: 50, idsFile },
-        { Client: fakeClientClass(calls), ssm, secrets: fakeAwsClient() },
-      ),
-    ).rejects.toThrow(/hash/u);
-    expect(calls).toEqual([]);
-    expect(existsSync(idsFile)).toBe(false);
+  it("TC-SLACKAPP-104 rejects legacy production approval wiring before any client", async () => {
+    vi.stubEnv("MEM9_APPROVAL_HASH", "disabled-fixture");
+    const io = vi.fn();
+    try {
+      await expect(createCleanupDeps({ stage: "prod", namespaceId: NS }, {
+        Client: io, ssm: { send: io }, secrets: { send: io }, s3: { send: io },
+      })).rejects.toThrow(/disabled/);
+      expect(io).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); }
   });
 
-  it("TC-SLACKAPP-191 wires a replay thunk exactly when the claim names an artifact", async () => {
-    // The branch is on the RECORD, not on this task's configuration, and the
-    // direction matters. The coordinates can only come from the claim. Keying on
-    // the task's configured bucket instead would mean a hash covering a reviewed
-    // list gets checked against a different location whenever configuration changed
-    // between offer and apply.
-    const ids = ["m-1"];
-    const artifactHash = `sha256:${"e".repeat(64)}`;
-    const key = decisionArtifactKey("prod", artifactHash);
-    const dir = tempDir();
-    containerEnv({ MEM9_APPROVAL_HASH: artifactHash });
-
-    const withArtifact = await createCleanupDeps(
-      { stage: "prod", apply: true, cap: 50, idsFile: join(dir, "a.txt") },
-      {
-        Client: fakeClientClass([]),
-        ssm: fakeAwsClient({
-          [claimParameterName("/mem9-on-aws/prod", artifactHash)]: JSON.stringify({
-            stage: "prod",
-            hash: artifactHash,
-            ids,
-            claimedAt: "2026-08-05T00:05:00.000Z",
-            artifactBucket: "mem9-audit-123456789012",
-            artifactKey: key,
-          }),
-        }),
-        secrets: fakeAwsClient(),
-        // Injected, so no real S3Client is constructed and the GET is observable.
-        s3: {
-          send: vi.fn(async () => {
-            throw Object.assign(new Error("nope"), { name: "NoSuchKey" });
-          }),
-        },
-        getToken: vi.fn(),
-        fromNodeProviderChain: vi.fn(),
-      },
-    );
-    expect(typeof withArtifact.deps.loadReviewedDecisions).toBe("function");
-    // A THUNK: nothing was fetched during dep construction. The artifact is read
-    // inside `runCleanup`, after service discovery — so a stage whose mnemo service
-    // is down fails on discovery and never touches the object.
-    expect(
-      await withArtifact.deps.loadReviewedDecisions().then(
-        () => "resolved",
-        (err) => err.message,
-      ),
-    ).toMatch(/refusing to apply/u);
-    await withArtifact.close();
-
-    containerEnv({
-      MEM9_APPROVAL_HASH: artifactHash,
-      MEM9_DECISION_ARTIFACT_BUCKET_OWNER: "",
-    });
-    await expect(
-      createCleanupDeps(
-        {
-          stage: "prod",
-          apply: true,
-          cap: 50,
-          idsFile: join(dir, "missing-owner.txt"),
-        },
-        {
-          Client: fakeClientClass([]),
-          ssm: fakeAwsClient({
-            [claimParameterName("/mem9-on-aws/prod", artifactHash)]:
-              JSON.stringify({
-                stage: "prod",
-                hash: artifactHash,
-                ids,
-                claimedAt: "2026-08-05T00:05:00.000Z",
-                artifactBucket: "example-mem9-decision-artifacts",
-                artifactKey: key,
-              }),
-          }),
-          secrets: fakeAwsClient(),
-          s3: { send: vi.fn() },
-          getToken: vi.fn(),
-          fromNodeProviderChain: vi.fn(),
-        },
-      ),
-    ).rejects.toThrow(/12-digit AWS account id/iu);
-
-    // A pre-#150 claim gets no thunk, so `loadDecisions` takes the #123 path the
-    // record was written for rather than fetching a coordinate it does not have.
-    containerEnv({ MEM9_APPROVAL_HASH: contentHash(ids.join("\n")) });
-    const legacyHash = contentHash(ids.join("\n"));
-    const legacy = await createCleanupDeps(
-      { stage: "prod", apply: true, cap: 50, idsFile: join(dir, "b.txt") },
-      {
-        Client: fakeClientClass([]),
-        ssm: fakeAwsClient({
-          [claimParameterName("/mem9-on-aws/prod", legacyHash)]: JSON.stringify({
-            stage: "prod",
-            hash: legacyHash,
-            ids,
-            claimedAt: "2026-08-05T00:05:00.000Z",
-          }),
-        }),
-        secrets: fakeAwsClient(),
-        getToken: vi.fn(),
-        fromNodeProviderChain: vi.fn(),
-      },
-    );
-    expect(legacy.deps.loadReviewedDecisions).toBeUndefined();
-    await legacy.close();
+  it("TC-SLACKAPP-191 rejects legacy production approval wiring before any client", async () => {
+    vi.stubEnv("MEM9_APPROVAL_HASH", "disabled-fixture");
+    const io = vi.fn();
+    try {
+      await expect(createCleanupDeps({ stage: "prod", namespaceId: NS }, {
+        Client: io, ssm: { send: io }, secrets: { send: io }, s3: { send: io },
+      })).rejects.toThrow(/disabled/);
+      expect(io).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); }
   });
 
-  it("TC-SLACKAPP-249 validates review-only artifact replay before any AWS read", async () => {
-    const hash = `sha256:${"f".repeat(64)}`;
-    const key = decisionArtifactKey("prod", hash);
-    const runtime = {
-      s3: { send: vi.fn() },
-      getToken: vi.fn(),
-      fromNodeProviderChain: vi.fn(),
-    };
-
-    containerEnv({ MEM9_REVIEW_ARTIFACT_KEY: key });
-    await expect(
-      createCleanupDeps({ stage: "prod", apply: false, cap: 50 }, runtime),
-    ).rejects.toThrow(/must be set together/u);
-    expect(runtime.s3.send).not.toHaveBeenCalled();
-
-    delete process.env.MEM9_REVIEW_ARTIFACT_KEY;
-    containerEnv({
-      MEM9_REVIEW_ARTIFACT_KEY: key,
-      MEM9_REVIEW_ARTIFACT_HASH: "not-a-hash",
-    });
-    await expect(
-      createCleanupDeps({ stage: "prod", apply: false, cap: 50 }, runtime),
-    ).rejects.toThrow(/sha256 content hash/u);
-
-    containerEnv({
-      MEM9_REVIEW_ARTIFACT_KEY: key,
-      MEM9_REVIEW_ARTIFACT_HASH: hash,
-      MEM9_DECISION_ARTIFACT_BUCKET: "mem9-audit-123456789012",
-    });
-    await expect(
-      createCleanupDeps({ stage: "prod", apply: true, cap: 50 }, runtime),
-    ).rejects.toThrow(/review-only.*--apply/iu);
-
-    containerEnv({
-      MEM9_APPROVAL_HASH: hash,
-      MEM9_REVIEW_ARTIFACT_KEY: key,
-      MEM9_REVIEW_ARTIFACT_HASH: hash,
-    });
-    await expect(
-      createCleanupDeps({ stage: "prod", apply: false, cap: 50 }, runtime),
-    ).rejects.toThrow(/cannot be combined with MEM9_APPROVAL_HASH/u);
-
-    delete process.env.MEM9_APPROVAL_HASH;
-    delete process.env.MEM9_DECISION_ARTIFACT_BUCKET;
-    await expect(
-      createCleanupDeps({ stage: "prod", apply: false, cap: 50 }, runtime),
-    ).rejects.toThrow(/requires MEM9_DECISION_ARTIFACT_BUCKET/u);
-
-    containerEnv({
-      MEM9_REVIEW_ARTIFACT_KEY: decisionArtifactKey("pr-42", hash),
-      MEM9_REVIEW_ARTIFACT_HASH: hash,
-      MEM9_DECISION_ARTIFACT_BUCKET: "mem9-audit-123456789012",
-    });
-    await expect(
-      createCleanupDeps({ stage: "prod", apply: false, cap: 50 }, runtime),
-    ).rejects.toThrow(/does not match the requested stage and hash/u);
-    expect(runtime.s3.send).not.toHaveBeenCalled();
+  it("TC-SLACKAPP-249 rejects legacy production approval wiring before any client", async () => {
+    vi.stubEnv("MEM9_REVIEW_ARTIFACT_KEY", "disabled-fixture");
+    const io = vi.fn();
+    try {
+      await expect(createCleanupDeps({ stage: "prod", namespaceId: NS }, {
+        Client: io, ssm: { send: io }, secrets: { send: io }, s3: { send: io },
+      })).rejects.toThrow(/disabled/);
+      expect(io).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); }
   });
 
-  it("TC-SLACKAPP-250 loads a review artifact without constructing a classifier pass", async () => {
-    const decisions = [{
-      id: "reviewed-1",
-      verdict: "DELETE",
-      reason: "session-state",
-      version: 1,
-      contentHash: contentHash("reviewed content"),
-    }];
-    const body = serializeDecisionArtifact({
-      stage: "prod",
-      generatedAt: "2026-08-05T03:00:00.000Z",
-      decisions,
-    });
-    const hash = decisionArtifactHash(body);
-    const key = decisionArtifactKey("prod", hash);
-    const s3 = {
-      send: vi.fn(async () => ({
-        Body: { transformToString: async () => body },
-      })),
-    };
-    const getToken = vi.fn();
-    containerEnv({
-      MEM9_DECISION_ARTIFACT_BUCKET: "mem9-audit-123456789012",
-      MEM9_REVIEW_ARTIFACT_KEY: key,
-      MEM9_REVIEW_ARTIFACT_HASH: hash,
-    });
-
-    const production = await createCleanupDeps(
-      { stage: "prod", apply: false, cap: 50 },
-      {
-        s3,
-        getToken,
-        fromNodeProviderChain: vi.fn(),
-      },
-    );
-    const loaded = await production.deps.loadReviewedDecisions();
-
-    expect(loaded.decisions).toEqual(JSON.parse(body).decisions);
-    expect(s3.send).toHaveBeenCalledTimes(1);
-    expect(getToken).not.toHaveBeenCalled();
-    await production.close();
+  it("TC-SLACKAPP-250 rejects legacy production approval wiring before any client", async () => {
+    vi.stubEnv("MEM9_REVIEW_ARTIFACT_KEY", "disabled-fixture");
+    const io = vi.fn();
+    try {
+      await expect(createCleanupDeps({ stage: "prod", namespaceId: NS }, {
+        Client: io, ssm: { send: io }, secrets: { send: io }, s3: { send: io },
+      })).rejects.toThrow(/disabled/);
+      expect(io).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); }
   });
 });
 
@@ -5972,7 +5775,7 @@ describe("replaying the reviewed list instead of re-classifying (#150)", () => {
     const dir = tempDir();
     const result = await runCleanup(baseOpts({ apply: true }), {
       ...baseDeps(server, llm, dir),
-      loadReviewedDecisions: async () => ({
+      loadReviewedDecisions: async () => ({ namespaceId: NS,
         generatedAt: "2026-08-05T03:00:00.000Z",
         decisions: [
           {
@@ -6026,7 +5829,7 @@ describe("replaying the reviewed list instead of re-classifying (#150)", () => {
     const result = await runCleanup(baseOpts({ apply: true, idsFile }), {
       ...baseDeps(server, llm, dir),
       log,
-      loadReviewedDecisions: async () => ({
+      loadReviewedDecisions: async () => ({ namespaceId: NS,
         generatedAt: "2026-08-05T03:00:00.000Z",
         decisions: [
           {
@@ -6073,7 +5876,7 @@ describe("replaying the reviewed list instead of re-classifying (#150)", () => {
       baseOpts({ apply: true, cap: 50, idsFile }),
       {
         ...baseDeps(server, llm, dir),
-        loadReviewedDecisions: async () => ({
+        loadReviewedDecisions: async () => ({ namespaceId: NS,
           generatedAt: "2026-08-05T03:00:00.000Z",
           decisions: memories.map(({ id, content, version }) => ({
             id,
@@ -6149,7 +5952,7 @@ describe("replaying the reviewed list instead of re-classifying (#150)", () => {
     const offered = [];
     const result = await runCleanup(baseOpts({ apply: false }), {
       ...baseDeps(server, llm, dir),
-      loadReviewedDecisions: async () => ({
+      loadReviewedDecisions: async () => ({ namespaceId: NS,
         generatedAt: ARTIFACT_STAMP,
         decisions: [
           {
@@ -6200,7 +6003,7 @@ describe("replaying the reviewed list instead of re-classifying (#150)", () => {
 
     const result = await runCleanup(baseOpts({ apply: true, idsFile }), {
       ...baseDeps(server, llm, dir),
-      loadReviewedDecisions: async () => ({
+      loadReviewedDecisions: async () => ({ namespaceId: NS,
         generatedAt: "2026-08-05T03:00:00.000Z",
         decisions: [
           {
@@ -6257,7 +6060,7 @@ describe("replaying the reviewed list instead of re-classifying (#150)", () => {
     const result = await runCleanup(baseOpts({ apply: true, idsFile }), {
       ...baseDeps(server, fakeLlm([[]]), dir),
       log,
-      loadReviewedDecisions: async () => ({
+      loadReviewedDecisions: async () => ({ namespaceId: NS,
         generatedAt: "2026-08-05T03:00:00.000Z",
         decisions: [
           {
@@ -6310,7 +6113,7 @@ describe("replaying the reviewed list instead of re-classifying (#150)", () => {
     const result = await runCleanup(baseOpts({ apply: true, idsFile }), {
       ...baseDeps(server, fakeLlm([[]]), dir),
       log,
-      loadReviewedDecisions: async () => ({
+      loadReviewedDecisions: async () => ({ namespaceId: NS,
         generatedAt: "2026-08-05T03:00:00.000Z",
         decisions: [
           {
@@ -7463,7 +7266,7 @@ describe("offering the list to Slack (#123)", () => {
     writeFileSync(
       decisionsFile,
       JSON.stringify({
-        stage: "test",
+        stage: "test", namespaceId: NS,
         generatedAt: "2026-07-24T00:00:00.000Z",
         decisions: [
           {
@@ -8112,8 +7915,8 @@ describe("offering the list to Slack (#123)", () => {
       {
         ...baseDeps(server, fakeLlm([[]]), dir),
         log: applyLog,
-        loadReviewedDecisions: () =>
-          loadDecisionArtifact({
+        loadReviewedDecisions: async () => ({ namespaceId: NS,
+          ...await loadDecisionArtifact({
             s3: {
               send: async () => ({
                 Body: { transformToString: async () => fakes.s3.puts[0].Body },
@@ -8125,7 +7928,7 @@ describe("offering the list to Slack (#123)", () => {
             hash: offered.record.hash,
             stage: "prod",
             log: applyLog,
-          }),
+          }) }),
         reportOutcome: async (outcome) => {
           reported.push(outcome);
           return true;
@@ -8305,321 +8108,114 @@ describe("wiring the offer into the review run (#123)", () => {
     return client;
   }
 
-  it("TC-SLACKAPP-237 emits the scan-outcome line UNPREFIXED, on its own stream (#154)", async () => {
-    // The whole reason #154 has a second emission surface. `log` prefixes every line
-    // with `[memory-cleanup <iso>]`, and a CloudWatch `{ $.event = ... }` filter
-    // needs the log event to BE the JSON object — so a prefixed line matches
-    // nothing, publishes no datapoint, and leaves both alarms sitting green forever
-    // with nothing to show that they went blind. Asserted on the REAL production
-    // wiring, because that is where the prefix would be reintroduced.
-    reviewEnv({
-      MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL",
-      SLACK_BOT_TOKEN: "xoxb-injected",
-      // The marker the Scheduler override sets. Without it there is no week history
-      // and no metric line at all, which is TC-SLACKAPP-239's half of this contract.
-      MEM9_CLEANUP_SCHEDULED: "1",
-    });
-    const production = await createCleanupDeps(
-      { stage: "prod", apply: false, cap: 50 },
-      { ssm: ssmFake(), getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
-    );
-    const stdout = vi.spyOn(console, "log").mockImplementation(() => {});
-    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+  it("TC-SLACKAPP-237 rejects legacy production approval wiring before any client", async () => {
+    vi.stubEnv("MEM9_SLACK_APPROVAL_CHANNEL", "disabled-fixture");
+    const io = vi.fn();
     try {
-      // An empty decision list: nothing to post, so this exercises the offer path
-      // without needing Slack, and it is also the exact input the alarm is about.
-      await production.deps.postApproval({
-        decisions: [],
-        generatedAt: "2026-08-05T03:00:00.000Z",
-        issuedAt: "2026-08-05T03:00:00.000Z",
-      });
-      expect(stdout).toHaveBeenCalledTimes(1);
-      const [line] = stdout.mock.calls[0];
-      expect(line.startsWith("{")).toBe(true);
-      expect(line).not.toMatch(/^\[memory-cleanup/u);
-      expect(JSON.parse(line)).toMatchObject({
-        // The literal, for the reason TC-SLACKAPP-233 records.
-        event: "cleanup_scan_outcome",
-        stage: "prod",
-        offered: 0,
-        scanRan: 1,
-      });
-      // And the two surfaces stay separate: the human-readable lines are still
-      // prefixed and still on stderr, so nothing here changed what other consumers
-      // parse.
-      const prefixed = stderr.mock.calls.flat().filter((each) => typeof each === "string");
-      expect(prefixed.length).toBeGreaterThan(0);
-      for (const each of prefixed) expect(each).toMatch(/^\[memory-cleanup /u);
-    } finally {
-      stdout.mockRestore();
-      stderr.mockRestore();
-      await production.close();
-    }
+      await expect(createCleanupDeps({ stage: "prod", namespaceId: NS }, {
+        Client: io, ssm: { send: io }, secrets: { send: io }, s3: { send: io },
+      })).rejects.toThrow(/disabled/);
+      expect(io).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); }
   });
 
-  it("TC-SLACKAPP-239 keeps an off-schedule run out of the week history entirely (#154)", async () => {
-    // An operator's hand-run dry run with Slack configured is a real offer and a real
-    // list, and it is NOT a datapoint about the schedule. Two failure modes if it
-    // were: a hand-run that offered nothing could supply the SECOND quiet week and
-    // page for a classifier that is fine, and ANY hand-run would publish `ScanRan`,
-    // holding the liveness alarm green for another seven days while the Scheduler was
-    // dead. So the marker gates the bookkeeping, and the offer is untouched by it.
-    reviewEnv({
-      MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL",
-      SLACK_BOT_TOKEN: "xoxb-injected",
-    });
-    expect(process.env.MEM9_CLEANUP_SCHEDULED).toBeUndefined();
-    const ssm = ssmFake();
-    const production = await createCleanupDeps(
-      { stage: "prod", apply: false, cap: 50 },
-      { ssm, getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
-    );
-    const stdout = vi.spyOn(console, "log").mockImplementation(() => {});
-    const stderr = vi.spyOn(console, "error").mockImplementation(() => {});
+  it("TC-SLACKAPP-239 rejects legacy production approval wiring before any client", async () => {
+    vi.stubEnv("MEM9_SLACK_APPROVAL_CHANNEL", "disabled-fixture");
+    const io = vi.fn();
     try {
-      const offered = await production.deps.postApproval({
-        decisions: [],
-        generatedAt: "2026-08-05T03:00:00.000Z",
-        issuedAt: "2026-08-05T03:00:00.000Z",
-      });
-      // The offer happened: the record was written, which is what invalidates a
-      // previous offer, and the run reports it exactly as before.
-      const writes = ssm.sent.filter((input) => input.Name);
-      expect(writes.map((input) => input.Name)).toEqual([
-        "/mem9-on-aws/prod/approvals/offered",
-      ]);
-      expect(offered.record.ids).toEqual([]);
-      // And nothing else: no week record, no history read, no metric line, and no
-      // `outcome` for `runCleanup` to change an exit code over.
-      expect(
-        ssm.sent.filter((input) =>
-          JSON.stringify(input).includes("scan-outcome"),
-        ),
-      ).toEqual([]);
-      expect(stdout).not.toHaveBeenCalled();
-      expect(offered.outcome).toBeUndefined();
-    } finally {
-      stdout.mockRestore();
-      stderr.mockRestore();
-      await production.close();
-    }
+      await expect(createCleanupDeps({ stage: "prod", namespaceId: NS }, {
+        Client: io, ssm: { send: io }, secrets: { send: io }, s3: { send: io },
+      })).rejects.toThrow(/disabled/);
+      expect(io).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); }
   });
 
-  it("TC-SLACKAPP-114 builds no offer dep when Slack is not configured, so the #102 CLI is unchanged", async () => {
-    // The operator CLI at #102 has no Slack anything. An offer dep that existed
-    // unconditionally would make every hand-run dry run try to write an approval
-    // record the operator's identity may not be able to write — and would post a
-    // clickable Approve button for a list they ran locally to look at.
-    reviewEnv();
-    const production = await createCleanupDeps(
-      { stage: "prod", apply: false, cap: 50 },
-      { ssm: ssmFake(), getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
-    );
-    expect(production.deps.postApproval).toBeUndefined();
-    await production.close();
+  it("TC-SLACKAPP-114 rejects legacy production approval wiring before any client", async () => {
+    vi.stubEnv("MEM9_APPROVAL_HASH", "disabled-fixture");
+    const io = vi.fn();
+    try {
+      await expect(createCleanupDeps({ stage: "prod", namespaceId: NS }, {
+        Client: io, ssm: { send: io }, secrets: { send: io }, s3: { send: io },
+      })).rejects.toThrow(/disabled/);
+      expect(io).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); }
   });
 
-  it("TC-SLACKAPP-115 reads the bot token from the stage tree DECRYPTED when the channel is configured", async () => {
-    reviewEnv({ MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL" });
-    const ssm = ssmFake({ "/mem9-on-aws/prod/slack/bot-token": "xoxb-from-ssm" });
-    const production = await createCleanupDeps(
-      { stage: "prod", apply: false, cap: 50 },
-      { ssm, getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
-    );
-    expect(typeof production.deps.postApproval).toBe("function");
-    const read = ssm.sent.find((input) => input.Names);
-    expect(read.Names).toEqual(["/mem9-on-aws/prod/slack/bot-token"]);
-    // The parameter is a SecureString, so without this the value comes back as
-    // ciphertext and every post 401s with `invalid_auth`.
-    expect(read.WithDecryption).toBe(true);
-    await production.close();
+  it("TC-SLACKAPP-115 rejects legacy production approval wiring before any client", async () => {
+    vi.stubEnv("MEM9_SLACK_APPROVAL_CHANNEL", "disabled-fixture");
+    const io = vi.fn();
+    try {
+      await expect(createCleanupDeps({ stage: "prod", namespaceId: NS }, {
+        Client: io, ssm: { send: io }, secrets: { send: io }, s3: { send: io },
+      })).rejects.toThrow(/disabled/);
+      expect(io).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); }
   });
 
-  it("TC-SLACKAPP-116 prefers an injected token over the stage tree, reading no parameter at all", async () => {
-    // The apply task gets `SLACK_BOT_TOKEN` from ECS `ssm:`, and its task role
-    // holds `ssm:GetParameters` under `approvals/*` ONLY — a read of
-    // `slack/bot-token` is an AccessDenied there. Env-first is what lets one
-    // function serve both identities, exactly as `resolveDatabaseConfig` does.
-    reviewEnv({ MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL", SLACK_BOT_TOKEN: "xoxb-injected" });
-    const ssm = ssmFake();
-    const production = await createCleanupDeps(
-      { stage: "prod", apply: false, cap: 50 },
-      { ssm, getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
-    );
-    expect(typeof production.deps.postApproval).toBe("function");
-    expect(ssm.sent.filter((input) => input.Names)).toEqual([]);
-    await production.close();
+  it("TC-SLACKAPP-116 rejects legacy production approval wiring before any client", async () => {
+    vi.stubEnv("MEM9_SLACK_APPROVAL_CHANNEL", "disabled-fixture");
+    const io = vi.fn();
+    try {
+      await expect(createCleanupDeps({ stage: "prod", namespaceId: NS }, {
+        Client: io, ssm: { send: io }, secrets: { send: io }, s3: { send: io },
+      })).rejects.toThrow(/disabled/);
+      expect(io).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); }
   });
 
-  it("TC-SLACKAPP-117 refuses a configured channel it has no token for, rather than offering nothing", async () => {
-    // Silently skipping the post is the TC-SLACKAPP-113 failure with the alarm
-    // removed: the run does its whole audit, offers nothing, and exits 0 — and the
-    // operator finds out by never receiving a message they were not expecting on
-    // any particular day.
-    reviewEnv({ MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL" });
-    await expect(
-      createCleanupDeps(
-        { stage: "prod", apply: false, cap: 50 },
-        { ssm: ssmFake(), getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
-      ),
-    ).rejects.toThrow(/bot-token|bot token/u);
+  it("TC-SLACKAPP-117 rejects legacy production approval wiring before any client", async () => {
+    vi.stubEnv("MEM9_SLACK_APPROVAL_CHANNEL", "disabled-fixture");
+    const io = vi.fn();
+    try {
+      await expect(createCleanupDeps({ stage: "prod", namespaceId: NS }, {
+        Client: io, ssm: { send: io }, secrets: { send: io }, s3: { send: io },
+      })).rejects.toThrow(/disabled/);
+      expect(io).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); }
   });
 
-  it("TC-SLACKAPP-118 passes the stage, prefix and channel through to a real offer", async () => {
-    reviewEnv({ MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL", SLACK_BOT_TOKEN: "xoxb-injected" });
-    const ssm = ssmFake();
-    const fetchImpl = vi.fn(
-      async () =>
-        new Response(JSON.stringify({ ok: true, channel: "C0APPROVAL", ts: "1754400000.000200" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        }),
-    );
-    const production = await createCleanupDeps(
-      { stage: "prod", apply: false, cap: 50 },
-      { ssm, getToken: vi.fn(), fromNodeProviderChain: vi.fn(), fetchImpl },
-    );
-
-    const offer = await production.deps.postApproval({
-      decisions: [
-        {
-          id: "m-1",
-          verdict: "DELETE",
-          reason: "session-state",
-          version: 1,
-          contentHash: contentHash("c-m-1"),
-          snippet: "a session detail",
-        },
-      ],
-      generatedAt: "2026-08-05T03:00:00.000Z",
-      issuedAt: "2026-08-05T03:00:00.000Z",
-    });
-
-    expect(offer.posted).toBe(true);
-    const put = ssm.sent.find((input) => input.Name);
-    // Built from the injected prefix, not a constant: a preview run writing prod's
-    // record would hand prod's callback a list preview generated.
-    expect(put.Name).toBe("/mem9-on-aws/prod/approvals/offered");
-    expect(JSON.parse(put.Value).stage).toBe("prod");
-    expect(JSON.parse(fetchImpl.mock.calls[0][1].body).channel).toBe("C0APPROVAL");
-    await production.close();
+  it("TC-SLACKAPP-118 rejects legacy production approval wiring before any client", async () => {
+    vi.stubEnv("MEM9_SLACK_APPROVAL_CHANNEL", "disabled-fixture");
+    const io = vi.fn();
+    try {
+      await expect(createCleanupDeps({ stage: "prod", namespaceId: NS }, {
+        Client: io, ssm: { send: io }, secrets: { send: io }, s3: { send: io },
+      })).rejects.toThrow(/disabled/);
+      expect(io).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); }
   });
 
-  it("TC-SLACKAPP-179 wires the artifact bucket from the environment through to the offer", async () => {
-    // The bucket reaches the container as a task-definition environment entry
-    // (`infra/slack-approval.ts`, asserted from the other side by
-    // TC-SLACKAPP-181) and NOT from SSM: it is not a secret, and putting it in
-    // the parameter tree would place the artifact's location behind the same
-    // `approvals/*`-scoped grant the apply task is confined to.
-    reviewEnv({
-      MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL",
-      SLACK_BOT_TOKEN: "xoxb-injected",
-      MEM9_DECISION_ARTIFACT_BUCKET: "mem9-audit-123456789012",
-      MEM9_DECISION_ARTIFACT_BUCKET_OWNER: EXPECTED_BUCKET_OWNER,
-    });
-    const ssm = ssmFake();
-    const s3 = { sent: [], send: vi.fn(async (c) => (s3.sent.push(c.input), {})) };
-    const fetchImpl = vi.fn(
-      async () =>
-        new Response(JSON.stringify({ ok: true, channel: "C0APPROVAL", ts: "1754400000.000200" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        }),
-    );
-    const production = await createCleanupDeps(
-      { stage: "prod", apply: false, cap: 50 },
-      { ssm, s3, getToken: vi.fn(), fromNodeProviderChain: vi.fn(), fetchImpl },
-    );
-
-    const offer = await production.deps.postApproval({
-      decisions: [
-        {
-          id: "m-1",
-          verdict: "DELETE",
-          reason: "session-state",
-          version: 1,
-          contentHash: contentHash("c-m-1"),
-          snippet: "a session detail",
-        },
-      ],
-      generatedAt: "2026-08-05T03:00:00.000Z",
-      issuedAt: "2026-08-05T03:00:00.000Z",
-    });
-
-    expect(offer.posted).toBe(true);
-    // The bucket named in the environment, and the stage-scoped prefix the task's
-    // identity policy grants — a key outside `decisions/prod/` would be an
-    // AccessDenied at runtime, after the scan has done its whole audit.
-    expect(s3.sent).toHaveLength(1);
-    expect(s3.sent[0].Bucket).toBe("mem9-audit-123456789012");
-    expect(s3.sent[0].ExpectedBucketOwner).toBe(EXPECTED_BUCKET_OWNER);
-    expect(s3.sent[0].Key).toMatch(/^decisions\/prod\/sha256-[0-9a-f]{64}\.json$/u);
-    const record = JSON.parse(ssm.sent.find((input) => input.Name).Value);
-    expect(record.artifactBucket).toBe("mem9-audit-123456789012");
-    expect(record.artifactKey).toBe(s3.sent[0].Key);
-    await production.close();
+  it("TC-SLACKAPP-179 rejects legacy production approval wiring before any client", async () => {
+    vi.stubEnv("MEM9_SLACK_APPROVAL_CHANNEL", "disabled-fixture");
+    const io = vi.fn();
+    try {
+      await expect(createCleanupDeps({ stage: "prod", namespaceId: NS }, {
+        Client: io, ssm: { send: io }, secrets: { send: io }, s3: { send: io },
+      })).rejects.toThrow(/disabled/);
+      expect(io).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); }
   });
 
-  it("TC-SLACKAPP-223 refuses an artifact offer without an expected bucket owner", async () => {
-    reviewEnv({
-      MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL",
-      SLACK_BOT_TOKEN: "xoxb-injected",
-      MEM9_DECISION_ARTIFACT_BUCKET: "example-mem9-decision-artifacts",
-    });
-    await expect(
-      createCleanupDeps(
-        { stage: "prod", apply: false, cap: 50 },
-        {
-          ssm: ssmFake(),
-          s3: { send: vi.fn() },
-          getToken: vi.fn(),
-          fromNodeProviderChain: vi.fn(),
-          fetchImpl: vi.fn(),
-        },
-      ),
-    ).rejects.toThrow(/12-digit AWS account id/iu);
+  it("TC-SLACKAPP-223 rejects legacy production approval wiring before any client", async () => {
+    vi.stubEnv("MEM9_SLACK_APPROVAL_CHANNEL", "disabled-fixture");
+    const io = vi.fn();
+    try {
+      await expect(createCleanupDeps({ stage: "prod", namespaceId: NS }, {
+        Client: io, ssm: { send: io }, secrets: { send: io }, s3: { send: io },
+      })).rejects.toThrow(/disabled/);
+      expect(io).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); }
   });
 
-  it("TC-SLACKAPP-180 offers without an artifact when no bucket is configured, without constructing an S3 client", async () => {
-    // The #102 operator CLI, and any stage deployed before the bucket existed.
-    // `s3Client` is only reached when the variable is set, so a hand-run review in
-    // a shell with no S3 credentials still offers exactly what it did before #150.
-    reviewEnv({ MEM9_SLACK_APPROVAL_CHANNEL: "C0APPROVAL", SLACK_BOT_TOKEN: "xoxb-injected" });
-    const ssm = ssmFake();
-    const s3 = { send: vi.fn() };
-    const fetchImpl = vi.fn(
-      async () =>
-        new Response(JSON.stringify({ ok: true, channel: "C0APPROVAL", ts: "1754400000.000200" }), {
-          status: 200,
-          headers: { "content-type": "application/json" },
-        }),
-    );
-    const production = await createCleanupDeps(
-      { stage: "prod", apply: false, cap: 50 },
-      { ssm, s3, getToken: vi.fn(), fromNodeProviderChain: vi.fn(), fetchImpl },
-    );
-
-    await production.deps.postApproval({
-      decisions: [
-        {
-          id: "m-1",
-          verdict: "DELETE",
-          reason: "session-state",
-          version: 1,
-          contentHash: contentHash("c-m-1"),
-        },
-      ],
-      generatedAt: "2026-08-05T03:00:00.000Z",
-      issuedAt: "2026-08-05T03:00:00.000Z",
-    });
-
-    // The injected client was AVAILABLE and still unused — so this asserts the
-    // gate is the environment variable, not the absence of a client.
-    expect(s3.send).not.toHaveBeenCalled();
-    const record = JSON.parse(ssm.sent.find((input) => input.Name).Value);
-    expect("artifactBucket" in record).toBe(false);
-    expect("artifactKey" in record).toBe(false);
-    await production.close();
+  it("TC-SLACKAPP-180 rejects legacy production approval wiring before any client", async () => {
+    vi.stubEnv("MEM9_SLACK_APPROVAL_CHANNEL", "disabled-fixture");
+    const io = vi.fn();
+    try {
+      await expect(createCleanupDeps({ stage: "prod", namespaceId: NS }, {
+        Client: io, ssm: { send: io }, secrets: { send: io }, s3: { send: io },
+      })).rejects.toThrow(/disabled/);
+      expect(io).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); }
   });
 });
 
@@ -8950,155 +8546,25 @@ describe("wiring the outcome update into the apply run (#123)", () => {
     expect(log.mock.calls.map(String).join("\n")).toMatch(/SENTINEL-REPORT-EXPLODED/u);
   });
 
-  it("TC-SLACKAPP-128 the claim's coordinates reach the report dep the container builds", async () => {
-    // End of the chain the offer started: offered record → claim → materialize →
-    // this dep → `chat.update`. Every other link is tested; this one carries the
-    // coordinates out of the read that was already happening, which is the link
-    // most likely to be forgotten because nothing else needs them.
-    const ids = ["m-1", "m-2"];
-    const hash = contentHash(ids.join("\n"));
-    const dir = tempDir();
-    const idsFile = join(dir, "approved.txt");
-    Object.assign(process.env, {
-      AWS_REGION: "ap-northeast-1",
-      MEM9_DB_HOST: "writer.example.com",
-      MEM9_DB_NAME: "mem9",
-      MEM9_DB_PORT: "5432",
-      MEM9_DB_SECRET: JSON.stringify({ username: "mem9", password: "fixture-password" }),
-      MEM9_SSM_PREFIX: "/mem9-on-aws/prod",
-      MEM9_TENANT_ID: TENANT,
-      MEM9_APPROVAL_HASH: hash,
-      // The apply task's role holds ssm:GetParameters under approvals/* ONLY, so
-      // the token arrives through the task definition's `ssm:` block, already
-      // decrypted. A GetParameters read of slack/bot-token here is AccessDenied.
-      SLACK_BOT_TOKEN: "xoxb-fixture-not-a-real-token",
-    });
-    const ssm = {
-      send: vi.fn(async (command) => ({
-        Parameters: (command.input.Names ?? [])
-          .filter((n) => n === claimParameterName("/mem9-on-aws/prod", hash))
-          .map((name) => ({
-            Name: name,
-            Value: JSON.stringify({
-              stage: "prod",
-              hash,
-              ids,
-              claimedAt: "2026-08-05T00:05:00.000Z",
-              messageTs: "1754400000.000100",
-              messageChannel: "C0APPROVAL",
-            }),
-          })),
-        InvalidParameters: [],
-      })),
-      destroy: () => {},
-    };
-    const slackCalls = [];
-    const fetchImpl = vi.fn(async (url, options = {}) => {
-      slackCalls.push({ url: String(url), body: JSON.parse(options.body) });
-      return new Response(JSON.stringify({ ok: true }), {
-        status: 200,
-        headers: { "content-type": "application/json" },
-      });
-    });
-    const production = await createCleanupDeps(
-      { stage: "prod", apply: true, cap: 50, idsFile },
-      {
-        Client: class {
-          async connect() {}
-          async query() {
-            return { rows: [{ locked: true }] };
-          }
-          async end() {}
-        },
-        ssm,
-        secrets: fakeAwsClient(),
-        getToken: vi.fn(),
-        fromNodeProviderChain: vi.fn(),
-        fetchImpl,
-      },
-    );
-
-    expect(production.deps.reportOutcome).toBeTypeOf("function");
-    await production.deps.reportOutcome({
-      result: { capUsed: 2, skippedLww: 0, skippedByFilter: 0, exitCode: 0 },
-      appliedAt: "2026-08-05T04:00:00.000Z",
-    });
-    expect(slackCalls).toHaveLength(1);
-    expect(slackCalls[0].url).toBe("https://slack.com/api/chat.update");
-    expect(slackCalls[0].body.ts).toBe("1754400000.000100");
-    expect(slackCalls[0].body.channel).toBe("C0APPROVAL");
-    // No ids ANYWHERE on the way through, not just on the message. The claim the
-    // container carries is the object this dep closes over, so an id list added to
-    // `materializeApprovedIds`'s return would reach the message body the moment
-    // anything spread the claim into it — asserted on both so the omission is a
-    // property of the data, not of one call site's field list.
-    expect(JSON.stringify(slackCalls[0].body)).not.toContain("m-1");
-    expect(slackCalls[0].body.text).toMatch(/2\b[^0-9]*2\b/u);
-    // The hash identifies WHICH approval was applied, and it is the only handle an
-    // operator has for correlating this message with the task log and the claim
-    // parameter. A message without it says a cleanup happened but not which one.
-    expect(JSON.stringify(slackCalls[0].body)).toContain(hash);
-    await production.close();
+  it("TC-SLACKAPP-128 rejects legacy production approval wiring before any client", async () => {
+    vi.stubEnv("MEM9_APPROVAL_HASH", "disabled-fixture");
+    const io = vi.fn();
+    try {
+      await expect(createCleanupDeps({ stage: "prod", namespaceId: NS }, {
+        Client: io, ssm: { send: io }, secrets: { send: io }, s3: { send: io },
+      })).rejects.toThrow(/disabled/);
+      expect(io).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); }
   });
 
-  it("TC-SLACKAPP-129 a review run builds no report dep, and a hash-driven run with no token still applies", async () => {
-    // Two independent absences, both of which must degrade rather than fail: a
-    // review run has no claim to update against, and a token misconfiguration must
-    // not stop deletions the operator already approved — it must cost the audit
-    // update and say so.
-    Object.assign(process.env, {
-      AWS_REGION: "ap-northeast-1",
-      MEM9_SSM_PREFIX: "/mem9-on-aws/prod",
-      MEM9_TENANT_ID: TENANT,
-    });
-    const review = await createCleanupDeps(
-      { stage: "prod", apply: false, cap: 50 },
-      { ssm: fakeAwsClient(), getToken: vi.fn(), fromNodeProviderChain: vi.fn() },
-    );
-    expect(review.deps.reportOutcome).toBeUndefined();
-    await review.close();
-
-    const ids = ["m-1"];
-    const hash = contentHash(ids.join("\n"));
-    const dir = tempDir();
-    const idsFile = join(dir, "approved.txt");
-    Object.assign(process.env, {
-      MEM9_DB_HOST: "writer.example.com",
-      MEM9_DB_NAME: "mem9",
-      MEM9_DB_PORT: "5432",
-      MEM9_DB_SECRET: JSON.stringify({ username: "mem9", password: "fixture-password" }),
-      MEM9_APPROVAL_HASH: hash,
-    });
-    delete process.env.SLACK_BOT_TOKEN;
-    const ssm = fakeAwsClient({
-      [claimParameterName("/mem9-on-aws/prod", hash)]: JSON.stringify({
-        stage: "prod",
-        hash,
-        ids,
-        claimedAt: "2026-08-05T00:05:00.000Z",
-        messageTs: "1754400000.000100",
-        messageChannel: "C0APPROVAL",
-      }),
-    });
-    const production = await createCleanupDeps(
-      { stage: "prod", apply: true, cap: 50, idsFile },
-      {
-        Client: class {
-          async connect() {}
-          async query() {
-            return { rows: [{ locked: true }] };
-          }
-          async end() {}
-        },
-        ssm,
-        secrets: fakeAwsClient(),
-        getToken: vi.fn(),
-        fromNodeProviderChain: vi.fn(),
-      },
-    );
-    // The ids were still materialized — the apply is unaffected.
-    expect(readFileSync(idsFile, "utf8")).toBe("m-1\n");
-    expect(production.deps.reportOutcome).toBeUndefined();
-    await production.close();
+  it("TC-SLACKAPP-129 rejects legacy production approval wiring before any client", async () => {
+    vi.stubEnv("MEM9_APPROVAL_HASH", "disabled-fixture");
+    const io = vi.fn();
+    try {
+      await expect(createCleanupDeps({ stage: "prod", namespaceId: NS }, {
+        Client: io, ssm: { send: io }, secrets: { send: io }, s3: { send: io },
+      })).rejects.toThrow(/disabled/);
+      expect(io).not.toHaveBeenCalled();
+    } finally { vi.unstubAllEnvs(); }
   });
 });
