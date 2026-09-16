@@ -1842,9 +1842,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "b514112ab4165a85d957",
+      "id": "4dc1ba8638c57647e1bd",
       "owner": "scripts/memory-cleanup.mjs",
-      "line": 3712,
+      "line": 3719,
       "tables": [
         "memories"
       ],
@@ -1860,9 +1860,9 @@
       "namespace_evidence": "namespace_id = $1"
     },
     {
-      "id": "0623ecb676fd78a068e6",
+      "id": "f192e73ed3f4764b59b3",
       "owner": "scripts/memory-cleanup.mjs",
-      "line": 3717,
+      "line": 3724,
       "tables": [
         "memories"
       ],
@@ -1878,9 +1878,9 @@
       "namespace_evidence": "namespace_id = $1"
     },
     {
-      "id": "3ace5ce47e2c0a19f2ac",
+      "id": "db2d0978f49a28503f41",
       "owner": "scripts/memory-cleanup.mjs",
-      "line": 3730,
+      "line": 3737,
       "tables": [
         "memories"
       ],
@@ -1896,9 +1896,9 @@
       "namespace_evidence": "namespace_id = $1"
     },
     {
-      "id": "b3342a5d525016d48e1b",
+      "id": "5d187a99f96bff7ed379",
       "owner": "scripts/memory-cleanup.mjs",
-      "line": 3740,
+      "line": 3747,
       "tables": [
         "memories"
       ],
@@ -2317,9 +2317,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "706aa64a617ae8be1adb",
+      "id": "e60cf7616a68527fc761",
       "owner": "scripts/run-maintenance-namespace-e2e.mjs",
-      "line": 162,
+      "line": 170,
       "tables": [
         "memories"
       ],
@@ -2334,9 +2334,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "264d3e421ef0e6a706ea",
+      "id": "94c98b27e2f1ee95ee5f",
       "owner": "scripts/run-maintenance-namespace-e2e.mjs",
-      "line": 163,
+      "line": 171,
       "tables": [
         "memories"
       ],
@@ -2351,9 +2351,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "4d1a33fefa57a8944054",
+      "id": "cd3931de95ab41da7251",
       "owner": "scripts/run-maintenance-namespace-e2e.mjs",
-      "line": 175,
+      "line": 183,
       "tables": [
         "memories"
       ],
@@ -2368,9 +2368,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "637d0c8583d50a3df50d",
+      "id": "93aab7cd9e6ada67359b",
       "owner": "scripts/run-maintenance-namespace-e2e.mjs",
-      "line": 238,
+      "line": 283,
       "tables": [
         "memories"
       ],

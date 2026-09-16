@@ -23,6 +23,14 @@ export const MAINTENANCE_CASES = Object.freeze([
 const SERVICES = ["consolidation", "cleanup"];
 const ALIASES = ["alpha", "beta"];
 const API = "/v1alpha2/mem9s/memories/";
+const DENIAL_MESSAGES = {
+  404: new Set(["not found"]),
+  403: new Set([
+    "memory namespace authorization failed", "memory namespace authorization unavailable",
+    "namespace membership required", "namespace membership denied",
+    "memory namespace role denied", "memory principal denied", "service route denied",
+  ]),
+};
 const check = (condition, code) => { if (!condition) throw new HumanAcceptanceError(code); };
 const markerFor = (runId) => `maintenance-e2e-${runId}`;
 const changeKey = (runId) => createHash("sha256").update(markerFor(runId)).digest("hex");
@@ -198,18 +206,37 @@ async function boundedHttpBody(response) {
   } finally { reader.releaseLock(); }
 }
 
+function assertGenericDenial(status, body) {
+  check(Buffer.byteLength(body) <= 512, "maintenance_denial_body_not_generic");
+  let value;
+  try { value = JSON.parse(body); } catch { check(false, "maintenance_denial_body_not_generic"); }
+  // Both the handler and middleware encode {error: string}. Accept only their
+  // fixed denial messages: no reflected IDs, fixture content, or service identity.
+  check(value && !Array.isArray(value) && Object.keys(value).length === 1 &&
+    typeof value.error === "string" && DENIAL_MESSAGES[status]?.has(value.error), "maintenance_denial_body_not_generic");
+}
+
 export async function runMaintenanceScenarios({ manifest, target, endpoint, journal, persist, report, fetchImpl = fetch, signal }) {
   const scopes = Object.fromEntries(SERVICES.map((service) => [service, Object.fromEntries(ALIASES.map((alias) => [alias,
     requireMaintenanceConfig({ stage: manifest.stage, namespaceId: journal.namespaces[alias] }, { MEM9_SERVICE_TRANSPORT_SIGNING_KEYS: endpoint.keyrings[service] }, service),
   ]))]));
+  const actors = new Map();
+  let writeSequence = 0;
   const request = async (scope, id, method, expected, intercept) => {
     signal?.throwIfAborted();
+    const before = expected === 200
+      ? (await snapshot(db, journal)).find((row) => row.id === id && row.namespace_id === scope.namespaceId)
+      : undefined;
+    if (expected === 200) check(before && Number.isSafeInteger(before.version) && before.version > 0, "maintenance_owned_row_missing");
+    const tags = expected === 200 && method === "PUT"
+      ? [journal.agentMarker, `write-${++writeSequence}`] : ["maintenance-e2e"];
     const transport = createServiceFetch(scope, async (url, options) => fetchImpl(url, intercept ? intercept(options) : options));
     const headers = new Headers({ "content-type": "application/json" });
     headers.set("X-API-Key", endpoint.tenantId);
+    if (before && method === "PUT") headers.set("If-Match", String(before.version));
     const response = await transport(`${endpoint.baseUrl}${API}${encodeURIComponent(id)}`, {
       method, headers,
-      ...(method === "PUT" ? { body: JSON.stringify({ tags: ["maintenance-e2e"] }) } : {}),
+      ...(method === "PUT" ? { body: JSON.stringify({ tags }) } : {}),
       signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(15000)]) : AbortSignal.timeout(15000),
     });
     const body = await boundedHttpBody(response);
@@ -220,7 +247,20 @@ export async function runMaintenanceScenarios({ manifest, target, endpoint, jour
     }
     if (expected === 200) {
       const value = JSON.parse(body);
-      check(value.id === id, "maintenance_response_identity_mismatch");
+      check(value.id === id && value.agent_id === journal.agentMarker, "maintenance_response_identity_mismatch");
+      if (method === "PUT") {
+        check(value.version === before.version + 1 && isDeepStrictEqual(value.tags, tags), "maintenance_put_response_mismatch");
+        const stored = (await snapshot(db, journal)).find((row) => row.id === id && row.namespace_id === scope.namespaceId);
+        // The Go DTO omits the authenticated actor ID; verify that audit field
+        // directly in PostgreSQL together with the returned mutation's contents.
+        check(stored && stored.version === value.version && isDeepStrictEqual(stored.tags, tags) &&
+          stored.updated_by_principal_id === actors.get(`${scope.service}/${scope.namespaceId}`) &&
+          stored.content === before.content && isDeepStrictEqual(stored.embedding, before.embedding), "maintenance_put_not_persisted");
+      } else {
+        check(value.version === before.version && isDeepStrictEqual(value.tags ?? [], before.tags ?? []) && value.content === before.content, "maintenance_get_not_persisted");
+      }
+    } else {
+      assertGenericDenial(expected, body);
     }
   };
   const tamper = (scope, changes, resign) => (options) => {
@@ -233,6 +273,11 @@ export async function runMaintenanceScenarios({ manifest, target, endpoint, jour
   };
   const db = await target.connect();
   try {
+    for (const service of SERVICES) for (const alias of ALIASES) {
+      const scope = scopes[service][alias];
+      const actor = await createScopedDatabase(db, scope).authorize(true);
+      actors.set(`${service}/${scope.namespaceId}`, actor.principalId);
+    }
     for (const alias of ALIASES) {
       await createScopedDatabase(db, scopes.consolidation[alias]).write(async (tx, actor) => {
         for (const id of journal.ids[alias]) await tx.query(`INSERT INTO memories

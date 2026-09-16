@@ -1399,6 +1399,22 @@ Service REST envelopes bind the namespace, method, URI, and body; direct SQL
 authenticates through the trusted database connection and checks the fixed
 service membership in the same transaction as the operation.
 
+Service credentials approve only these canonical private REST paths:
+
+| Method | Path | Operation |
+| --- | --- | --- |
+| `GET` | `/v1alpha2/mem9s/memories` | List/search memories |
+| `GET` | `/v1alpha2/mem9s/memories/{memory-id}` | Read an existing memory |
+| `PUT` | `/v1alpha2/mem9s/memories/{memory-id}` | Update an existing memory |
+| `DELETE` | `/v1alpha2/mem9s/memories/{memory-id}` | Soft-delete a memory |
+| `POST` | `/v1alpha2/mem9s/memories/batch-delete` | Soft-delete selected memories |
+
+Membership roles still apply: a viewer cannot write. All other service routes
+and methods are denied, including `POST /v1alpha2/mem9s/memories` for creation
+or transcript ingestion, ingest-job endpoints, and session APIs. Memory routes
+cannot fall back to reading or mutating raw session records. This restriction
+does not change the human/M2M ingestion contract.
+
 ### Grant a service access to one namespace
 
 Create an owner-only, gitignored `service-binding.local.json`:
@@ -1454,6 +1470,52 @@ Cleanup writes its private files under
 `~/.mem9-cleanup/<stage>/<namespace-id>/`. Task-local files are ephemeral; use
 the direct operator CLI with a persistent private output directory when keeping
 decisions for review and later apply.
+
+### Maintenance preview acceptance
+
+Use `scripts/run-maintenance-namespace-e2e.mjs` from a clean checkout of the
+reviewed deployed commit against its own `pr-N` preview. Reuse the mode-600
+`deployment.local.json` from [human OAuth acceptance](#operator-run-human-oauth-acceptance),
+including its pinned resources and `preview-alpha`/`preview-beta` bindings.
+The operator host needs existing private database and REST access; the runner
+does not open network access or accept production targets. Cleanup and
+consolidation must already have their preview memberships and deployed credentials.
+
+```bash
+node scripts/run-maintenance-namespace-e2e.mjs \
+  --deployment-file deployment.local.json \
+  --fixtures-file maintenance-fixtures.local.json \
+  --evidence-file maintenance-acceptance.json
+```
+
+The nine scenarios cover own-memory GET/PUT, foreign HTTP absence, wrong service
+key, wrong issuer, wrong principal, namespace tampering, isolated membership
+revocation, unchanged foreign SQL records, and verified owned-fixture cleanup.
+This acceptance runner seeds synthetic memories through authorized SQL and
+tests mutations; the ECS cleanup/consolidation launchers above remain report-only.
+
+Cleanup removes only the journal's fixture IDs with its run marker in the pinned
+namespaces. It restores the temporarily revoked membership only when the current
+row still matches the journal-owned change, refusing concurrent external edits.
+The private fixture journal remains available after success or failure; detailed
+failures are saved beside it. Evidence contains only the commit, case names, and
+completion flags. All nine cases, `success`, and `cleanup_complete` are required
+for acceptance.
+
+For interrupted cleanup, retain the journal and use a new evidence path:
+
+```bash
+node scripts/run-maintenance-namespace-e2e.mjs \
+  --deployment-file deployment.local.json \
+  --fixtures-file maintenance-fixtures.local.json \
+  --evidence-file maintenance-cleanup.json --cleanup-only
+```
+
+Recovery rechecks the pinned target and journal ownership without requiring a
+healthy app deployment or service credentials. Cleanup-only evidence records
+recovery and never turns a failed acceptance run into success. Use new fixture
+and evidence paths for each acceptance run; recovery reuses the journal and
+writes a new evidence file.
 
 ## Memory cleanup
 

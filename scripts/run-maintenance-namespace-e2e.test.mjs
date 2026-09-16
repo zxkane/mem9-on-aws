@@ -138,7 +138,21 @@ async function fixture(options = {}) {
     requests.push({ url, init });
     if (options.oversizeResponse) return new Response("private-body".repeat(65536));
     const headers = new Headers(init.headers), path = new URL(url).pathname, id = decodeURIComponent(path.split("/").at(-1));
-    const response = (status, body = {}) => new Response(JSON.stringify(body), { status });
+    const response = (status, body = status === 404 ? { error: "not found" } : status === 403 ? { error: "memory namespace authorization failed" } : {}) => {
+      if ((status === 403 || status === 404) && options.denialFault && (!options.denialStatus || options.denialStatus === status)) {
+        const faults = {
+          fixture: { error: "Synthetic maintenance verification fixture" },
+          foreign_id: { error: id }, namespace: { error: NS.alpha },
+          service: { error: "maintenance:consolidation" },
+          principal: { error: createMaintenanceIdentity("consolidation").principalKey },
+          extra_fields: { error: "not found", memory: { id, content: "private content" } },
+          empty: {}, object: { error: { message: "not found" } }, oversize: { error: "x".repeat(1024) },
+        };
+        body = faults[options.denialFault];
+      }
+      return new Response(JSON.stringify(body), { status });
+    };
+    const publicMemory = (row) => Object.fromEntries(Object.entries(row).filter(([key]) => !["embedding", "namespace_id", "created_by_principal_id", "updated_by_principal_id"].includes(key)));
     let identity, service;
     try {
       const envelope = headers.get("X-Mem9-Transport"), payload = JSON.parse(Buffer.from(envelope.split(".")[0], "base64url"));
@@ -149,16 +163,27 @@ async function fixture(options = {}) {
     const membership = memberships.get(membershipKey(identity.namespace_id, PRINCIPALS[service]));
     if (membership?.status !== "active") {
       if (options.externalMembershipChange) membership.role = "viewer";
-      return response(403);
+      return response(403, { error: "namespace membership required" });
     }
     const row = rows.get(id);
     if (!row || row.namespace_id !== identity.namespace_id) return response(options.foreignStatus ?? 404);
     if (init.method === "PUT") {
       const body = JSON.parse(init.body); expect(Object.keys(body)).toEqual(["tags"]);
-      row.tags = body.tags; row.version++;
+      const prior = structuredClone(row);
+      const updated = { ...prior, tags: body.tags, version: prior.version + 1, updated_by_principal_id: PRINCIPALS[service] };
+      if (options.putFault === "no_op") return response(200, publicMemory(prior));
+      if (options.putFault === "response_only") return response(200, publicMemory(updated));
+      Object.assign(row, updated);
       if (options.changeMarker) row.agent_id = "changed-by-other-writer";
+      const returned = structuredClone(row);
+      if (options.putFault === "returned_tags") returned.tags = ["ignored"];
+      if (options.putFault === "returned_version") returned.version = prior.version;
+      if (options.putFault === "stored_tags") row.tags = ["ignored"];
+      if (options.putFault === "stored_version") row.version = prior.version;
+      if (options.putFault === "stored_actor") row.updated_by_principal_id = PRINCIPALS[service === "cleanup" ? "consolidation" : "cleanup"];
+      return response(200, publicMemory(returned));
     }
-    return response(200, row);
+    return response(200, publicMemory(row));
   });
   const runtime = {
     checkCheckout: vi.fn(async (commit) => { expect(commit).toBe(manifest.commit); if (options.dirty) throw new Error("maintenance_clean_exact_checkout_required"); }),
@@ -209,6 +234,31 @@ describe("operator-only maintenance preview gate", () => {
       expect(alias).toBeDefined();
       expect(values[sql.startsWith("SELECT count") ? 1 : 2]).toEqual(journal.ids[alias]);
     }
+    safeOutput(f);
+  });
+  it.each(["no_op", "response_only", "returned_tags", "returned_version", "stored_tags", "stored_version", "stored_actor"])("requires returned and persisted mutation proof: %s", async (putFault) => {
+    const f = await fixture({ putFault });
+    await expect(main(f.args, f.runtime)).rejects.toThrow(/incomplete/);
+    const evidence = JSON.parse(await readFile(f.files.evidence, "utf8"));
+    expect(evidence).toMatchObject({ success: false, cleanup_complete: true });
+    expect(evidence.cases).not.toContain("maintenance_own_get_put");
+    expect([...f.rows.keys()]).toEqual(["unowned"]); safeOutput(f);
+  });
+  it.each(["fixture", "foreign_id", "namespace", "service", "principal", "extra_fields", "empty", "object", "oversize"])("rejects non-generic denial bodies: %s", async (denialFault) => {
+    const f = await fixture({ denialFault });
+    await expect(main(f.args, f.runtime)).rejects.toThrow(/incomplete/);
+    const evidence = JSON.parse(await readFile(f.files.evidence, "utf8"));
+    expect(evidence).toMatchObject({ success: false, cleanup_complete: true });
+    expect(evidence.cases).not.toContain("maintenance_foreign_http_absent");
+    expect([...f.rows.keys()]).toEqual(["unowned"]); safeOutput(f);
+  });
+  it("checks 403 bodies after valid generic foreign-ID 404 responses", async () => {
+    const f = await fixture({ denialFault: "service", denialStatus: 403 });
+    await expect(main(f.args, f.runtime)).rejects.toThrow(/incomplete/);
+    const evidence = JSON.parse(await readFile(f.files.evidence, "utf8"));
+    expect(evidence).toMatchObject({ success: false, cleanup_complete: true });
+    expect(evidence.cases).toContain("maintenance_foreign_http_absent");
+    expect(evidence.cases).not.toContain("maintenance_wrong_service_key_denied");
     safeOutput(f);
   });
   it.each(["production", "publicManifest", "dirty"])("rejects %s before target/AWS work", async (key) => {

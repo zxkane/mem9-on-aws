@@ -3559,6 +3559,9 @@ export async function runCleanup(opts, deps) {
  * here: a Responses `status: "failed"` arrives as HTTP 200 with empty output,
  * and returning "" for it would parse as "no verdicts" and mark a whole batch
  * SKIP on what looks like an authoritative answer.
+ * `deps.beforeAttempt` is an optional async authorization hook for production
+ * callers. It must finish its transaction before resolving; no transaction spans
+ * bearer minting or provider I/O. Every fetch rechecks after awaited minting.
  */
 export function buildCompleteChat(opts, deps) {
   const model = opts.model || process.env.MEM9_LLM_MODEL || DEFAULT_CHAT_MODEL;
@@ -3602,7 +3605,11 @@ export function buildCompleteChat(opts, deps) {
     // Minting is a free local SigV4 presign (12h TTL); re-mint once on 401/403
     // so a long scan outliving the bearer self-heals (llm-proxy pattern).
     for (let attempt = 1; attempt <= 2; attempt += 1) {
-      if (!bearer) bearer = await deps.mintToken(route.region);
+      if (!bearer) {
+        await deps.beforeAttempt?.();
+        bearer = await deps.mintToken(route.region);
+      }
+      await deps.beforeAttempt?.();
       const res = await deps.fetchImpl(route.url, {
         method: "POST",
         headers: {
@@ -4715,6 +4722,7 @@ export async function createCleanupDeps(opts, runtime = {}) {
     const providerCompleteChat = buildCompleteChat({ ...opts, region }, {
       fetchImpl: runtime.fetchImpl ?? fetch,
       mintToken: (tokenRegion) => getToken({ credentials: fromNodeProviderChain(), region: tokenRegion }),
+      beforeAttempt: () => database.scoped.authorize(false),
     });
     const completeChat = async (...args) => {
       // Recheck every batch, retry, and consensus pass before minting a token or

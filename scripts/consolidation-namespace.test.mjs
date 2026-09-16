@@ -24,7 +24,7 @@ function scope(namespaceId = NAMESPACE_A) {
 }
 
 function fakeDatabase(namespaceId = NAMESPACE_A) {
-  const state = { phase: "constraints_complete", allowed: true, role: "owner", rows: [memory(namespaceId)] };
+  const state = { phase: "constraints_complete", allowed: true, membershipActive: true, role: "owner", rows: [memory(namespaceId)] };
   const query = vi.fn(async (sql) => {
     if (sql.includes("FROM memory_namespace_migration_state"))
       return { rowCount: state.phase ? 1 : 0, rows: state.phase ? [{ phase: state.phase }] : [] };
@@ -33,7 +33,7 @@ function fakeDatabase(namespaceId = NAMESPACE_A) {
     if (sql.includes("FROM memory_principals"))
       return { rowCount: 1, rows: [{ principal_id: PRINCIPAL_ID }] };
     if (sql.includes("FROM memory_namespace_memberships"))
-      return { rowCount: 1, rows: [{ role: state.role }] };
+      return { rowCount: state.membershipActive ? 1 : 0, rows: state.membershipActive ? [{ role: state.role }] : [] };
     if (sql.includes("FROM memories") && !sql.includes("UPDATE"))
       return { rowCount: state.rows.length, rows: state.rows };
     if (sql.includes("pg_try_advisory_lock"))
@@ -228,6 +228,36 @@ describe("TC-GROUPNS-099: one namespace per consolidation run", () => {
       expect(lines).not.toMatch(/private-id|private content|60000000/);
       expect(lines).toContain('"kind":"DELETE"');
       expect(lines).toContain('"status":"state_write_failed"');
+    } finally { await production.close(); }
+  });
+
+  it.each([401, 403])("rechecks membership after provider HTTP %i before resending memory content", async (status) => {
+    productionEnvironment();
+    vi.stubEnv("MEM9_LLM_MODEL", "zai.glm-5");
+    const fixture = fakeDatabase();
+    let queriesAtProviderFailure;
+    const fetch = vi.fn(async () => {
+      if (fetch.mock.calls.length === 1) {
+        queriesAtProviderFailure = fixture.query.mock.calls.length;
+        fixture.state.membershipActive = false;
+        return { ok: false, status, json: async () => ({}) };
+      }
+      return { ok: true, status: 200, json: async () => ({
+        choices: [{ message: { content: '{"actions":[]}' } }],
+      }) };
+    });
+    const production = await createProductionDeps({ stage: "prod" }, {
+      Client: fixture.Client, fetch,
+      getToken: vi.fn(async () => "fixture-bearer"), fromNodeProviderChain: () => ({}),
+    });
+    try {
+      await expect(production.deps.completeChat("synthetic classifier", [memory()]))
+        .rejects.toThrow(/membership denied/);
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(fetch.mock.calls[0][1].body).toContain("synthetic configuration");
+      expect(fixture.query.mock.calls.slice(queriesAtProviderFailure)
+        .some(([sql]) => sql.includes("FROM memory_namespace_memberships"))).toBe(true);
+      expect(fixture.query.mock.calls.at(-1)[0]).toBe("ROLLBACK");
     } finally { await production.close(); }
   });
 

@@ -1684,6 +1684,29 @@ describe("LLM route", () => {
     expect(calls).toHaveLength(1);
   });
 
+  it.each(["zai.glm-5", "openai.gpt-5.6-terra"])("reauthorizes every provider retry for %s", async (model) => {
+    for (const status of [401, 403]) {
+      let revoked = false;
+      const fetchImpl = vi.fn(async () => { revoked = true; return { status, ok: false }; });
+      const beforeAttempt = vi.fn(async () => { if (revoked) throw new Error("membership revoked"); });
+      const mintToken = vi.fn(async () => "fixture-token");
+      const chat = build({ model }, { fetchImpl, mintToken, beforeAttempt });
+      await expect(chat("system", [{ id: "own", content: "own fact" }])).rejects.toThrow(/revoked/);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(mintToken).toHaveBeenCalledTimes(1);
+    }
+  });
+
+  it("reauthorizes after awaited bearer minting, immediately before provider fetch", async () => {
+    let revoked = false;
+    const beforeAttempt = vi.fn(async () => { if (revoked) throw new Error("membership revoked"); });
+    const mintToken = vi.fn(async () => { await Promise.resolve(); revoked = true; return "fixture-token"; });
+    const fetchImpl = vi.fn();
+    const chat = build({ model: "zai.glm-5" }, { fetchImpl, mintToken, beforeAttempt });
+    await expect(chat("system", [])).rejects.toThrow(/revoked/);
+    expect(fetchImpl).not.toHaveBeenCalled();
+  });
+
   it("TC-MEMCLEAN-076: --model/--effort/--llm-region parse; --effort is bounded", () => {
     expect(
       parseArgs([

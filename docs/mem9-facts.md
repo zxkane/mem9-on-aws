@@ -414,6 +414,14 @@ still keep writers stopped through namespace cutover.
   separate from Gateway credentials and from one another. An envelope binds one
   explicit namespace, method, URI, and body; it cannot select a human/M2M
   principal or another service. There is no service JIT enrollment.
+- The approved service REST subset is exactly `GET /v1alpha2/mem9s/memories`,
+  `GET`, `PUT`, or `DELETE /v1alpha2/mem9s/memories/{memory-id}`, and
+  `POST /v1alpha2/mem9s/memories/batch-delete`, subject to the active membership's
+  role. Collection POST for memory creation or transcript ingestion is denied,
+  including its synchronous variant. Session APIs, ingest-job routes, legacy
+  API paths, and raw-session fallback through memory IDs are also denied.
+  Maintenance credentials cannot submit work through the ingestion/session
+  paths; human/M2M ingestion remains a separate authorization contract.
 - The namespace, service principal, and service membership must be active.
   REST mutations recheck authorization inside the mutation transaction.
   Direct database adapters authenticate through trusted operator/task database
@@ -471,6 +479,13 @@ still keep writers stopped through namespace cutover.
   owner-wide disabled-capability exemption. PostgreSQL fixtures exercise
   foreign winner/restore IDs, disabled services, and populated A/B analysis;
   sampler fixtures also cover legacy NULL-namespace backlog before cutover.
+- The operator-only maintenance preview runner reuses the human deployment
+  manifest and runs nine named cases over owned synthetic memories: own GET/PUT,
+  foreign HTTP absence, wrong key/issuer/principal, namespace tampering,
+  isolated membership revocation, foreign SQL invariance, and owned cleanup.
+  Its private journal pins fixture ownership and the exact membership change;
+  cleanup-only recovery cannot claim acceptance. These mutation tests are
+  separate from the report-only ECS cleanup/consolidation launchers.
 
 ### `If-Match` is a FENCE, not a warning (downstream patch 0009, issue #128)
 

@@ -203,6 +203,52 @@ async function postgresFixture(work) {
 }
 
 describe.skipIf(!process.env.MEM9_NAMESPACE_TEST_DSN)("TC-GROUPNS-097/098 with two PostgreSQL namespaces", () => {
+  it.each(["provider_401", "during_refresh_mint"])("blocks a provider retry after PostgreSQL revocation: %s", async (when) => postgresFixture(async (db) => {
+    for (const [key, value] of Object.entries({
+      AWS_REGION: "ap-northeast-1", MEM9_NAMESPACE_ID: NS,
+      MEM9_SERVICE_TRANSPORT_SIGNING_KEYS: SIGNING_KEYS, MEM9_TENANT_ID: "fixture-tenant",
+      MEM9_DB_HOST: "fixture.invalid", MEM9_DB_NAME: "fixture", MEM9_BEDROCK_PROJECT: "fixture-project",
+      MEM9_DB_SECRET: JSON.stringify({ username: "fixture", password: "fixture" }),
+    })) vi.stubEnv(key, value);
+    const { pid, schema } = (await db.query("SELECT pg_backend_pid() AS pid, current_schema() AS schema")).rows[0];
+    const inspector = new pg.Client({ connectionString: process.env.MEM9_NAMESPACE_TEST_DSN });
+    await inspector.connect();
+    let production;
+    try {
+      await inspector.query("SELECT set_config('search_path', $1, false)", [schema]);
+      await inspector.query("SET lock_timeout='1s'");
+      await inspector.query("SET statement_timeout='3s'");
+      const idle = async () => {
+        const activity = (await inspector.query("SELECT state, xact_start FROM pg_stat_activity WHERE pid=$1", [pid])).rows[0];
+        expect(activity).toMatchObject({ state: "idle", xact_start: null });
+      };
+      const revoke = () => inspector.query("UPDATE memory_namespace_memberships SET status='revoked' WHERE namespace_id=$1 AND principal_id=$2", [NS, PRINCIPAL]);
+      class Client {
+        async connect() {}
+        query(...args) { return db.query(...args); }
+        async end() {} // postgresFixture owns this borrowed connection.
+      }
+      let mints = 0;
+      const getToken = vi.fn(async () => {
+        await idle(); mints++;
+        if (when === "during_refresh_mint" && mints === 2) await revoke();
+        return `fixture-token-${mints}`;
+      });
+      const fetchImpl = vi.fn(async () => {
+        await idle();
+        if (when === "provider_401") await revoke();
+        return new Response("{}", { status: 401 });
+      });
+      production = await createCleanupDeps({ stage: "test", namespaceId: NS, model: "zai.glm-5", outDir: directory() }, {
+        Client, getToken, fetchImpl, fromNodeProviderChain: vi.fn(), emit: vi.fn(),
+      });
+      await expect(production.deps.completeChat("system", [{ id: "a-active", content: "same fact" }])).rejects.toThrow(/denied/);
+      expect(fetchImpl).toHaveBeenCalledTimes(1);
+      expect(getToken).toHaveBeenCalledTimes(when === "provider_401" ? 1 : 2);
+      await idle();
+    } finally { await production?.close(); await inspector.end(); }
+  }));
+
   it("scopes counts, pages, all-state lookups and direct restore mutations", async () => postgresFixture(async (db) => {
     const adapter = inactiveMemoryAdapter(db, SCOPE);
     const page = await adapter.listInactive({ limit: 1 });

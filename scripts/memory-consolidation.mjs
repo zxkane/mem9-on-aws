@@ -1986,19 +1986,15 @@ export async function createProductionDeps(options, runtime = {}) {
   // a 24k output budget. Truncation matters more here than in cleanup — a MERGE's
   // `merged_content` IS the whole merged fact, so a reply cut mid-sentence would
   // PUT a fragment over a durable memory inside the auto-execute tier.
-  const modelChat = buildCompleteChat(
+  const completeChat = buildCompleteChat(
     { region, model: process.env.MEM9_LLM_MODEL, effort: process.env.MEM9_LLM_EFFORT },
     {
       fetchImpl,
+      beforeAttempt: () => database.authorize(),
       mintToken: (tokenRegion) =>
         getToken({ credentials: fromNodeProviderChain(), region: tokenRegion }),
     },
   );
-  const completeChat = async (...args) => {
-    await database.authorize();
-    return modelChat(...args);
-  };
-
   let sns;
   let s3;
   const publishHealthAlarm = async (alarm) => {
