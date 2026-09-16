@@ -391,6 +391,84 @@ process.stdout.write(status);
   }
 }
 
+describe("service binding validation subprocess", () => {
+  const namespaceId = "60000000-0000-4000-8000-000000000101";
+
+  async function runValidation(operation, contents) {
+    const directory = await mkdtemp(join(tmpdir(), "mem9-service-validation-"));
+    const bin = join(directory, "bin");
+    const config = join(directory, "service binding.local.json");
+    const callsPath = join(directory, "aws-calls.jsonl");
+    try {
+      await mkdir(bin);
+      await writeFile(config, contents, { mode: 0o600 });
+      await writeFile(callsPath, "", { mode: 0o600 });
+      // Only AWS is replaced. The shell executes the real Node evaluator and
+      // imports the real service manager, including its CLI entrypoint guard.
+      await writeFile(join(bin, "aws"), `#!/usr/bin/env node
+import { appendFileSync, readFileSync } from "node:fs";
+const args = process.argv.slice(2);
+const index = args.indexOf("--cli-input-json");
+const request = index >= 0
+  ? JSON.parse(readFileSync(args[index + 1].slice("file://".length), "utf8"))
+  : null;
+appendFileSync(process.env.AWS_CALL_LOG, JSON.stringify({ command: args.slice(0, 2), request }) + "\\n");
+process.exit(73); // Stop at the first AWS boundary; never launch a task.
+`, { mode: 0o755 });
+      const result = spawnSync("bash", [
+        resolve(import.meta.dirname, "run-memory-namespace-task.sh"),
+        operation, "--config", config,
+      ], {
+        encoding: "utf8",
+        timeout: 10_000,
+        env: {
+          HOME: process.env.HOME,
+          PATH: `${bin}${delimiter}${process.env.PATH}`,
+          STAGE: "dev",
+          AWS_REGION: "ap-northeast-1",
+          AWS_CALL_LOG: callsPath,
+        },
+      });
+      const calls = (await readFile(callsPath, "utf8")).split("\n").filter(Boolean).map(JSON.parse);
+      return { result, calls };
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }
+
+  it.each([
+    ["service-enable", "cleanup"],
+    ["service-disable", "consolidation"],
+    ["service-show", "analysis"],
+  ])("valid %s config reaches AWS after pure validation", async (operation, service) => {
+    const contents = JSON.stringify({ namespace_id: namespaceId, service });
+    const { result, calls } = await runValidation(operation, contents);
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(73);
+    expect(result.stderr).not.toContain("memory service operation failed");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toMatchObject({
+      command: ["ssm", "put-parameter"],
+      request: { Type: "SecureString", Value: contents },
+    });
+  });
+
+  it.each([
+    ["malformed private JSON", "PRIVATE_CANARY invalid JSON"],
+    ["invalid namespace", JSON.stringify({ namespace_id: "not-a-uuid", service: "cleanup" })],
+    ["unsupported service", JSON.stringify({ namespace_id: namespaceId, service: "unknown" })],
+    ["unexpected field", JSON.stringify({ namespace_id: namespaceId, service: "cleanup", principal_key: "unexpected" })],
+  ])("rejects %s before the AWS boundary", async (_label, contents) => {
+    const { result, calls } = await runValidation("service-enable", contents);
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(2);
+    expect(calls).toEqual([]);
+    expect(result.stdout).toBe("");
+    expect(result.stdout + result.stderr).not.toContain("PRIVATE");
+    expect(result.stderr).toBe("service binding validation failed\n");
+  });
+});
+
 describe("memory namespace operator config", () => {
   it("TC-GROUPNS-021/023/024: derives domain-separated exact keys", () => {
     expect(deriveHumanPrincipalKey("issuer-a", "subject")).not.toBe(

@@ -155,10 +155,17 @@ if [[ "$need_config" == "true" ]]; then
     exit 2
   }
   if [[ "$OPERATION" == service-* ]]; then
+    # Keep argv[1] distinct from the imported module's CLI entrypoint path.
     node --input-type=module -e '
-      const {readServiceBinding}=await import(process.argv[1]);
-      await readServiceBinding(process.argv[2]);
-    ' "$ROOT/scripts/manage-memory-services.mjs" "$CONFIG_FILE" || exit 2
+      try {
+        const {pathToFileURL}=await import("node:url");
+        const {readServiceBinding}=await import(pathToFileURL(process.argv[2]).href);
+        await readServiceBinding(process.argv[3]);
+      } catch {
+        console.error("service binding validation failed");
+        process.exitCode=1;
+      }
+    ' validate-service-binding "$ROOT/scripts/manage-memory-services.mjs" "$CONFIG_FILE" || exit 2
   fi
 fi
 if [[ "$OPERATION" == "assign-user" || "$OPERATION" == "move-user" ]]; then
