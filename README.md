@@ -1481,6 +1481,13 @@ then KILL after five seconds if necessary. The dispatcher waits for the child
 and its pipes to close before advancing. A sequential namespace list may take
 the sum of its per-namespace budgets; this is not an overlap-prevention guarantee.
 
+Each failed cluster classification emits `consolidation_classification_failed`
+with a bounded `errorClass` and `count` (memories in that cluster). Both child
+and dispatcher logs preserve only known review `kind`, digest `status`, and
+error-class values; unknown values and private extra fields are dropped.
+Error messages, stacks, and model responses are never forwarded. These events
+add diagnostics without changing review routing, retries, or run success rules.
+
 Console and task-log output contains bounded kinds and counters, without memory
 IDs, namespace/principal IDs, snippets, or model rationale. Content-bearing
 decisions, ID selections, and detailed operator reports belong only in mode-600

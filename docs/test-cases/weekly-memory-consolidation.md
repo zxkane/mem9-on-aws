@@ -5,6 +5,17 @@ Preview E2E runs the deployed task in report-only mode.
 
 ## Execution budget and progress
 
+Diagnostics regressions run in `scripts/consolidation-progress.test.mjs` and
+`scripts/dispatch-memory-consolidation.test.mjs`:
+
+- TC-CONSOL-091: a classification request or response-parse failure emits one
+  structured failure with a bounded error class and cluster count through both
+  log formatters; review routing, exit status, and mutation behavior stay intact.
+- TC-CONSOL-092: known review kinds, digest statuses, and error classes survive
+  child and parent formatting, including child stdout/stderr forwarding.
+- TC-CONSOL-093: unknown enums, invalid scalar types, and private extra fields
+  are dropped at both boundaries; counts remain nonnegative safe integers.
+
 | ID | Scenario | Expected result |
 | --- | --- | --- |
 | TC-CONSOL-085 | A child takes longer than 30 minutes and completes within the default two-hour budget | It exits normally; progress never resets its fixed deadline |

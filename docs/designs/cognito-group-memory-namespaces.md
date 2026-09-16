@@ -1318,6 +1318,15 @@ and time since progress, not proof of useful work. Neither these records nor
 metrics contain namespace/principal IDs, memory content, model replies, or keys.
 Classification progress is rate-limited; metrics keep their existing contract.
 
+Classification catches emit one bounded `consolidation_classification_failed`
+record per failed cluster with its memory count and safe error class. The child
+formatter and dispatcher share the existing review-kind and error-class
+allowlists and the four digest failure statuses. Both reconstruct records and
+drop unknown enum values and private fields; raw errors and model output never
+cross these boundaries. Unknown thrown error names become the existing `Error`
+class before formatting. Classification remains sequential with unchanged
+review routing, retry behavior, and exit policy; these diagnostics add no metrics.
+
 ### Interceptor token authentication
 
 The identity interceptor independently verifies JWT signatures before minting
