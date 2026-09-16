@@ -293,14 +293,18 @@ export function validateHumanAccessToken(
       claims.client_id.length > 0,
     "human access token claims required",
   );
-  requireCase(
-    Number.isInteger(claims.iat) &&
-      Number.isInteger(claims.exp) &&
-      claims.exp - claims.iat === 900 &&
-      claims.exp > now + 15 &&
-      claims.iat <= now + 5,
-    "human token must have a live 15-minute lifetime",
-  );
+  const integerTimes = Number.isInteger(claims.iat) && Number.isInteger(claims.exp);
+  if (!(integerTimes && claims.exp - claims.iat === 900 &&
+    claims.exp > now + 15 && claims.iat <= now + 5)) {
+    const error = new HumanAcceptanceError("human token must have a live 15-minute lifetime");
+    error.tokenTiming = {
+      integer_times: integerTimes,
+      lifetime_seconds: integerTimes ? claims.exp - claims.iat : null,
+      remaining_seconds: integerTimes ? claims.exp - now : null,
+      issued_offset_seconds: integerTimes ? claims.iat - now : null,
+    };
+    throw error;
+  }
   const scopes = new Set(String(claims.scope ?? "").split(/\s+/));
   requireCase(
     scopes.has("mem9-mcp/read") && scopes.has("mem9-mcp/write"),

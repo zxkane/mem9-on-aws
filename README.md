@@ -642,7 +642,9 @@ node scripts/run-human-namespace-e2e.mjs \
 ```
 
 Private failure details stay beside the fixture file in a `*.failure.local.json`
-record. Evidence paths must be new: cleanup cannot overwrite failed acceptance
+record. A token-time failure records only integer checks and relative timing
+differences from the validation clock, without tokens or identity claims.
+Evidence paths must be new: cleanup cannot overwrite failed acceptance
 evidence and produces a distinct `kind: cleanup` record. Publish only acceptance
 evidence after both `success` and `cleanup_complete` are true. Ordinary revoke leaves tombstones for managed and
 external identities even before their first memory request, so stale group

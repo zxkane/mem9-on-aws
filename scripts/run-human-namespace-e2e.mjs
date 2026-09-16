@@ -200,6 +200,7 @@ export async function main(args = process.argv.slice(2)) {
       name: problem?.name,
       message: problem?.message,
       stack: problem?.stack,
+      token_timing: problem?.tokenTiming,
       interrupted,
     });
     throw new HumanAcceptanceError(

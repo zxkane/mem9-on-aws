@@ -245,4 +245,23 @@ describe("operator human namespace acceptance guards", () => {
         validateHumanAccessToken(token({ ...claims, ...change }), now),
       ).toThrow();
   });
+  it("records only timing deltas from the same clock used by a failed guard", () => {
+    const now = 1_700_000_000;
+    for (const [iat, exp, expected] of [
+      [now, now + 899, [true, 899, 899, 0]],
+      [now - 900, now, [true, 900, 0, -900]],
+      [now + 6, now + 906, [true, 900, 906, 6]],
+      ["private-invalid-time", now + 900, [false, null, null, null]],
+    ]) {
+      const claims = { token_use: "access", sub: "private-subject-marker", client_id: "private-client-marker", scope: "mem9-mcp/read mem9-mcp/write", iat, exp };
+      const token = `header.${Buffer.from(JSON.stringify(claims)).toString("base64url")}.signature`;
+      let failure;
+      try { validateHumanAccessToken(token, now); } catch (error) { failure = error; }
+      expect(failure?.message).toBe("human token must have a live 15-minute lifetime");
+      expect(failure.tokenTiming).toEqual(Object.fromEntries(
+        ["integer_times", "lifetime_seconds", "remaining_seconds", "issued_offset_seconds"].map((name, i) => [name, expected[i]]),
+      ));
+      expect(JSON.stringify(failure)).not.toMatch(/private-subject|private-client|private-invalid|header\./);
+    }
+  });
 });
