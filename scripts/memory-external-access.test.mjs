@@ -217,6 +217,9 @@ describe("external namespace access", () => {
               MEM9_AUTH_MODE: "oidc",
               MEM9_COGNITO_ISSUER: issuer,
               MNEMO_DSN: "postgres://127.0.0.1:1/absent",
+              ...(process.env.MEM9_NAMESPACE_CHILD_COVERAGE
+                ? { NODE_V8_COVERAGE: process.env.MEM9_NAMESPACE_CHILD_COVERAGE }
+                : {}),
             },
           },
         );
@@ -331,15 +334,23 @@ describe.skipIf(!process.env.MEM9_NAMESPACE_TEST_DSN)(
   "external access in PostgreSQL",
   () => {
     it("TC-GROUPNS-139/140/141/142: serializes moves and preserves revocation", async () => {
+      const source = new URL(process.env.MEM9_NAMESPACE_TEST_DSN);
+      const template = decodeURIComponent(source.pathname.slice(1));
+      source.pathname = "/postgres";
+      const admin = new pg.Client({ connectionString: source.href });
+      await admin.connect();
+      const database = `external_${crypto.randomUUID().replaceAll("-", "")}`;
+      source.pathname = `/${database}`;
       const db = new pg.Client({
-        connectionString: process.env.MEM9_NAMESPACE_TEST_DSN,
+        connectionString: source.href,
       });
       const contender = new pg.Client({
-        connectionString: process.env.MEM9_NAMESPACE_TEST_DSN,
+        connectionString: source.href,
       });
-      await db.connect();
-      await contender.connect();
       try {
+        await admin.query(`CREATE DATABASE "${database}" TEMPLATE "${template.replaceAll('"', '""')}"`);
+        await db.connect();
+        await contender.connect();
         for (const namespace of desired.namespaces) {
           await db.query(
             `INSERT INTO memory_namespaces(namespace_id, slug, display_name, status)
@@ -439,8 +450,12 @@ describe.skipIf(!process.env.MEM9_NAMESPACE_TEST_DSN)(
           revoked_memberships: namespaceCount,
         });
       } finally {
-        await contender.end();
-        await db.end();
+        await Promise.allSettled([contender.end(), db.end()]);
+        try {
+          await admin.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`);
+        } finally {
+          await admin.end();
+        }
       }
     });
   },

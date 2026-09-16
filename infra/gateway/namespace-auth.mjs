@@ -273,7 +273,7 @@ function sanitizedInvocation(invocation) {
   return { tool: invocation.tool, arguments: args };
 }
 
-function requestHash(invocation) {
+export function requestHash(invocation) {
   return createHash("sha256")
     .update(canonicalJson(sanitizedInvocation(invocation)))
     .digest("hex");

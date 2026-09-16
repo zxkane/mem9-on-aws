@@ -547,8 +547,112 @@ upstream source and its exact trusted-exception policy. It also checks
 every `TC-GROUPNS-001..137` criterion has exactly one owning capability and a
 named verification surface. The map is not an AC execution result. The deployed
 PR namespace check is implemented by
-`scripts/run-memory-namespace-e2e.sh`; human Cognito-group token cases remain
-separate Gateway-smoke gates.
+`scripts/run-memory-namespace-e2e.sh`.
+
+#### Operator-run human OAuth acceptance
+
+`scripts/run-human-namespace-e2e.mjs` exercises real human authorization-code +
+PKCE login through the deployed facade and Cognito, followed by Gateway memory
+requests and the existing access-management functions. Run a reviewed, clean
+candidate checkout against its own `pr-N` preview from a trusted operator host
+with private database access. This does not add user-administration permissions
+to CI or application workloads. Automated human release gating remains follow-up
+work alongside preview/production deployment-role separation.
+
+Create a mode-600 `deployment.local.json` containing operator-verified targets.
+Names and tags are consistency checks; independently pin the actual preview
+pool, database resource ID, secret reference, account, deployed commit, and proxy
+log group from its Lambda `LoggingConfig.LogGroup` (which SST may customize).
+Never publish this file or derive authorization from PR-controlled tags alone.
+For GitHub pull-request builds, `commit` is the deployed synthetic merge commit
+(`refs/pull/<number>/merge`), not just the source branch head. Run the clean
+checkout of that same commit; its `pr-<sha7>` image tag is checked before mutation.
+
+```json
+{
+  "version": 1,
+  "stage": "pr-<number>",
+  "commit": "<full-reviewed-commit-sha>",
+  "accountId": "<aws-account-id>",
+  "region": "<application-region>",
+  "userPoolId": "<preview-user-pool-id>",
+  "facadeUrl": "https://facade.example.com",
+  "gatewayUrl": "https://gateway.example.com/mcp",
+  "proxyFunctionArn": "arn:aws:lambda:<application-region>:<aws-account-id>:function:<preview-proxy-function-name>",
+  "proxyLogGroup": "<exact-preview-proxy-log-group>",
+  "database": {
+    "host": "database.example.com",
+    "port": 5432,
+    "name": "<database-name>",
+    "clusterId": "<preview-cluster-identifier>",
+    "resourceId": "<immutable-cluster-resource-id>",
+    "secretArn": "arn:aws:secretsmanager:<application-region>:<aws-account-id>:secret:<preview-db-secret-name>",
+    "caFile": "/absolute/path/to/rds-ca.pem"
+  },
+  "namespaces": [
+    {"slug":"preview-alpha","display_name":"PR isolation fixture preview-alpha","cognito_group":"memory-preview-alpha","default_role":"member","jit_enabled":true,"status":"active"},
+    {"slug":"preview-beta","display_name":"PR isolation fixture preview-beta","cognito_group":"memory-preview-beta","default_role":"member","jit_enabled":true,"status":"active"}
+  ]
+}
+```
+
+The operator needs metadata/secret reads for those targets and user/group
+administration on that preview pool. Use the application's configured region.
+Preflight verifies that the exact reader client has a 15-minute access-token
+setting with explicit units, and browser registration must return that client.
+Issued tokens may be one second shorter (899 seconds); lifetimes above 900 or
+below 899 seconds, expired tokens, and excessive future issuance are rejected.
+Database TLS verification is mandatory; supply the RDS CA bundle. An existing
+authorized tunnel can use `MEM9_HUMAN_E2E_TUNNEL_PORT` with loopback while retaining
+the pinned database hostname for TLS. The runner does not change network access.
+
+```bash
+npm ci
+npx playwright install --with-deps chromium
+node scripts/run-human-namespace-e2e.mjs \
+  --deployment-file deployment.local.json \
+  --fixtures-file human-fixtures.local.json \
+  --evidence-file human-acceptance.json > human-output.local.log 2>&1
+node scripts/run-human-namespace-e2e.mjs \
+  --verify-output-file human-output.local.log
+```
+
+The fixture file is created exclusively with mode 600 and contains generated
+credentials, captured subjects, and an immutable target fingerprint. Updates use
+atomic replacement. Invitations are suppressed. No browser trace
+or screenshot is saved. Evidence contains only the commit, named cases, and
+completion flags. The matrix covers sharing/denial, first-login JIT, stale-token
+revocation before first use, role checks, group drift, move failures/retries,
+A-to-B-to-A, concurrent commands, and accepted-work revoke semantics. The output
+verifier accepts only the complete fixed case vocabulary; unexpected SDK output,
+identities, or lookup keys fail it.
+
+Gateway masks Lambda errors. Each negative case therefore requires a matching
+PR-only proxy diagnostic containing its invocation hash and exact backend
+403/409 status; an arbitrary tool error, 429, or backend outage fails the test.
+These diagnostics contain no arguments or identity values and are disabled in
+production. The operator reads only the explicitly pinned proxy log group;
+preflight rejects a configured log destination that differs from the manifest.
+
+Successful cleanup disables fixture principals before deleting owned users and
+removes the credential file. If cleanup is incomplete, retain that file and use
+the recovery command; its target checks do not require a healthy app deployment:
+
+```bash
+node scripts/run-human-namespace-e2e.mjs \
+  --deployment-file deployment.local.json \
+  --fixtures-file human-fixtures.local.json \
+  --evidence-file human-cleanup.json --cleanup-only
+```
+
+Private failure details stay beside the fixture file in a `*.failure.local.json`
+record. A token-time failure records only integer checks and relative timing
+differences from the validation clock, without tokens or identity claims.
+Evidence paths must be new: cleanup cannot overwrite failed acceptance
+evidence and produces a distinct `kind: cleanup` record. Publish only acceptance
+evidence after both `success` and `cleanup_complete` are true. Ordinary revoke leaves tombstones for managed and
+external identities even before their first memory request, so stale group
+claims cannot recreate access through JIT.
 
 ### Decision-artifact bucket bootstrap
 

@@ -778,10 +778,10 @@ index 0000000..add99f4
 +}
 diff --git a/server/internal/repository/postgres/namespace_lifecycle_integration_test.go b/server/internal/repository/postgres/namespace_lifecycle_integration_test.go
 new file mode 100644
-index 0000000..eef986f
+index 0000000..f9032bb
 --- /dev/null
 +++ b/server/internal/repository/postgres/namespace_lifecycle_integration_test.go
-@@ -0,0 +1,336 @@
+@@ -0,0 +1,364 @@
 +package postgres
 +
 +import (
@@ -843,9 +843,30 @@ index 0000000..eef986f
 +}
 +
 +func TestNamespaceDisableLinearizesBeforeFirstApplyForeignKey(t *testing.T) {
++	testLifecycleAtomicApplyRace(t, false)
++}
++
++// TC-GROUPNS-122/128: run the actual emergency access operator in both orders.
++func TestEmergencyOperatorLinearizesAgainstAtomicApply(t *testing.T) {
++	testLifecycleAtomicApplyRace(t, true)
++}
++
++func testLifecycleAtomicApplyRace(t *testing.T, emergency bool) {
 +	for _, applyFirst := range []bool{true, false} {
 +		t.Run(fmt.Sprint(applyFirst), func(t *testing.T) {
 +			db := ingestTestDB(t)
++			if emergency {
++				digest := sha256.Sum256([]byte("mem9-principal-v2\x00https://identity.example.com/pool\x00human\x00fixture-human"))
++				if _, err := db.Exec("UPDATE memory_principals SET principal_type='human', principal_key=$1 WHERE principal_id=$2", hex.EncodeToString(digest[:]), testutil.TestPrincipalID); err != nil {
++					t.Fatal(err)
++				}
++			}
++			operator := func(lock string) (<-chan error, string) {
++				if emergency {
++					return testutil.NamespaceOperator(t, db, map[string]any{"command": "revoke-user", "emergency": true, "desired": lifecycleDesired(false)}, lock)
++				}
++				return lifecycleOperator(t, db, true, lock)
++			}
 +			repo := NewIngestJobRepo(db)
 +			job, plan := prepareAtomicIntegrationPlan(t, repo, strings.Repeat("c", 64))
 +			if applyFirst {
@@ -865,7 +886,7 @@ index 0000000..eef986f
 +					close(release)
 +					t.Fatal("apply did not reach pre-FK barrier")
 +				}
-+				pending, tag := lifecycleOperator(t, db, true, "")
++				pending, tag := operator("")
 +				func() { defer close(release); waitLifecycleOperator(t, db, tag) }()
 +				if err := <-applied; err != nil {
 +					t.Fatal(err)
@@ -884,7 +905,7 @@ index 0000000..eef986f
 +				if _, err = conn.ExecContext(context.Background(), "SELECT pg_advisory_lock(hashtext($1))", key); err != nil {
 +					t.Fatal(err)
 +				}
-+				pending, tag := lifecycleOperator(t, db, true, key)
++				pending, tag := operator(key)
 +				waitLifecycleOperator(t, db, tag)
 +				applied := make(chan error, 1)
 +				go func() { _, err := repo.ApplyPlan(context.Background(), job.LeaseRef(), plan); applied <- err }()
@@ -920,6 +941,13 @@ index 0000000..eef986f
 +				}
 +				if err := repo.ResumePlan(context.Background(), job.LeaseRef(), plan); !errors.Is(err, ingestqueue.ErrLeaseLost) {
 +					t.Fatalf("start apply: %v", err)
++				}
++				if emergency {
++					var status string
++					if err := db.QueryRow("SELECT status FROM memory_principals WHERE principal_id=$1", job.PrincipalID).Scan(&status); err != nil || status != "disabled" {
++						t.Fatalf("emergency principal status=%s err=%v", status, err)
++					}
++					return
 +				}
 +				active, _ := lifecycleOperator(t, db, false, "")
 +				if err := <-active; err != nil {

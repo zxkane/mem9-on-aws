@@ -1727,6 +1727,86 @@
       "namespace_evidence": "namespace_id = :'namespace_id'"
     },
     {
+      "id": "578354d4def0ed486a8b",
+      "owner": "scripts/lib/human-namespace-acceptance.mjs",
+      "line": 773,
+      "tables": [
+        "ingest_jobs"
+      ],
+      "statement_sha256": "60d8d48f519f35f915a9b5b62f1ec1cc3432799bbc73b3aae798bef30c598e9f",
+      "statement": "SELECT tenant_id,app_id FROM ingest_jobs WHERE job_id=$1 AND namespace_id=$2 AND principal_id=$3",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "namespace_id=$2"
+    },
+    {
+      "id": "a8f6264254c75b8ccde1",
+      "owner": "scripts/lib/human-namespace-acceptance.mjs",
+      "line": 802,
+      "tables": [
+        "ingest_jobs"
+      ],
+      "statement_sha256": "a4c1b1ce7301bc5c57087d7beb634082dc63a0e487ec960466f9f65fb5b3a473",
+      "statement": "INSERT INTO ingest_jobs(job_id,tenant_id,namespace_id,principal_id, idempotency_key,canonical_payload,agent_id,app_id,session_id,state,attempt_count, lease_owner,lease_expires_at,created_at) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,'processing',1,$10, statement_timestamp()+interval '10 minutes',statement_timestamp()-interval '1 minute')",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "INSERT column namespace_id"
+    },
+    {
+      "id": "eb42ef88930bd62a72b3",
+      "owner": "scripts/lib/human-namespace-acceptance.mjs",
+      "line": 835,
+      "tables": [
+        "ingest_jobs"
+      ],
+      "statement_sha256": "5998dd160459ce7f41cfac477cdb5d6a1440c7ca32cabb494a52adbbef674f6f",
+      "statement": "DELETE FROM ingest_jobs WHERE job_id=$1 AND namespace_id=$2 AND principal_id=$3",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "namespace_id=$2"
+    },
+    {
+      "id": "9262784403d9d92241fd",
+      "owner": "scripts/lib/human-namespace-acceptance.mjs",
+      "line": 846,
+      "tables": [
+        "ingest_jobs"
+      ],
+      "statement_sha256": "741377f974b588d8b6d90729178895833f85866e6f056aa2ce34737daa3e4da4",
+      "statement": "SELECT state FROM ingest_jobs WHERE job_id=$1 AND namespace_id=$2 AND principal_id=$3",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "namespace_id=$2"
+    },
+    {
+      "id": "7362235b8cb9e7b6da42",
+      "owner": "scripts/lib/human-namespace-acceptance.mjs",
+      "line": 887,
+      "tables": [
+        "ingest_jobs"
+      ],
+      "statement_sha256": "d68e800b02caca412352619dfc656bdc0c47ce2668a53b15617d2152c779a12b",
+      "statement": "DELETE FROM ingest_jobs WHERE job_id=$1 AND namespace_id=$2 AND principal_id=$3 AND agent_id=$4",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "namespace_id=$2"
+    },
+    {
       "id": "28f817d36d253848074d",
       "owner": "scripts/lib/memory-ingest-cancellation.mjs",
       "line": 12,

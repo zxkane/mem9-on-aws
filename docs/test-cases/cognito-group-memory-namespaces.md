@@ -308,6 +308,43 @@ The feature cannot be enabled until:
 
 ## Namespace lifecycle verification surfaces
 
+### Human/provider acceptance follow-up
+
+The real preview driver extends the existing cases with these checks:
+
+- TC-GROUPNS-001/002/004/008/009: browser-issued human tokens exercise shared
+  and foreign namespaces, unrelated groups, caller-context replacement, and
+  a viewer's read/write role intersection.
+- TC-GROUPNS-003/005/037/038/040/118: zero/multiple groups fail before JIT;
+  concurrent first use creates one principal and one active membership.
+- TC-GROUPNS-020/110: the exact reader client is configured for 15 minutes with
+  explicit units. Its issued tokens have a 900-second lifetime or the observed
+  one-second shorter lifetime. Lifetimes outside 899–900 seconds, expired
+  tokens, and issuance more than five seconds in the future are rejected.
+- TC-GROUPNS-051/052: real provider/database reconciliation converges twice
+  and reports an omitted binding without deleting it.
+- TC-GROUPNS-054..056/120: a failed final grant denies both stale and fresh
+  tokens until retry; A-to-B-to-A restores only the intended membership, while
+  old team data stays in place. Fault injection covers database revoke commit,
+  group removal/addition/verification, final grant, and commit acknowledgement.
+- TC-GROUPNS-058: marker-identity and lookup-key scans check normal operator
+  output and the fixture task's logs; browser traces/screenshots are disabled.
+- TC-GROUPNS-094/122/128: normal revoke preserves accepted work; emergency
+  revoke disables the principal and cancels live scoped jobs. Existing real
+  PostgreSQL apply/admission races remain mandatory alongside the preview.
+  The apply race invokes the actual emergency access operator in both commit
+  orders, observes lock contention, and verifies content counts and job state.
+- TC-GROUPNS-121: concurrent access commands reach an observed PostgreSQL
+  advisory-lock wait and finish with one matching group and membership.
+
+The operator manifest and consistency checks reject production or a mismatched
+target before provisioning users or opening a database connection. The proxy's
+configured log destination must match the operator-pinned log group, including
+custom SST groups; a mismatch fails before secret retrieval. Cleanup must
+remove only owned synthetic users, close independent SQL sessions and browser
+contexts, and report incomplete cleanup as an incomplete run. These cases do not
+grant automatic user administration to an untrusted PR workflow.
+
 Patch `0017-namespace-lifecycle-fencing.patch` adds the following executable
 acceptance tests. `scripts/run-ingest-queue-integration.sh` applies the complete
 patch stack to a fresh pinned upstream checkout, runs the real Node operators

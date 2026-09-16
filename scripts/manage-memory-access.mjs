@@ -232,7 +232,7 @@ export async function manageAccess({
           [principalID],
         );
       }
-      if (external && command === "revoke-user") {
+      if (command === "revoke-user") {
         // Provider tokens can predate first use. Tombstones also block JIT for
         // an existing namespace in which this human never had a membership.
         await db.query(
