@@ -47,6 +47,7 @@ function fixture() {
     "ssm/get-parameters": {
       Parameters: Object.entries({
         "cognito/user-pool-id": manifest.userPoolId,
+        "cognito/reader/client-id": "fixtureclient",
         "facade/url": manifest.facadeUrl,
         "gateway/url": manifest.gatewayUrl,
         "gateway/proxy-function-arn": manifest.proxyFunctionArn,
@@ -58,6 +59,9 @@ function fixture() {
       arn: manifest.proxyFunctionArn,
       group: "/aws/lambda/mem9-on-aws-pr-42-Mem9ProxyFn-fixture",
       stage: "pr-42",
+    },
+    "cognito-idp/describe-user-pool-client": {
+      pool: manifest.userPoolId, id: "fixtureclient", validity: 15, units: "minutes",
     },
     "ecs/describe-services": {
       services: [
@@ -209,13 +213,17 @@ describe("trusted preview target pinning", () => {
       ),
     ).toBe(true);
   });
-  it.each(["account", "pool", "commit", "database", "secret", "runtime"])(
+  it.each(["account", "pool", "commit", "database", "secret", "runtime", "token-validity", "token-units", "reader-client", "reader-pool"])(
     "rejects %s mismatch before secret retrieval or DB connection",
     async (kind) => {
       const f = fixture();
       if (kind === "account")
         f.responses["sts/get-caller-identity"].Account = "other-account";
       if (kind === "pool") f.pool.Id = ["ap-northeast-1", "other"].join("_");
+      if (kind === "token-validity") f.responses["cognito-idp/describe-user-pool-client"].validity = 60;
+      if (kind === "token-units") delete f.responses["cognito-idp/describe-user-pool-client"].units;
+      if (kind === "reader-client") f.responses["cognito-idp/describe-user-pool-client"].id = "anotherclient";
+      if (kind === "reader-pool") f.responses["cognito-idp/describe-user-pool-client"].pool = "anotherpool";
       if (kind === "commit")
         f.responses[
           "ecs/describe-task-definition"

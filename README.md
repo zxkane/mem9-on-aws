@@ -598,6 +598,10 @@ checkout of that same commit; its `pr-<sha7>` image tag is checked before mutati
 
 The operator needs metadata/secret reads for those targets and user/group
 administration on that preview pool. Use the application's configured region.
+Preflight verifies that the exact reader client has a 15-minute access-token
+setting with explicit units, and browser registration must return that client.
+Issued tokens may be one second shorter (899 seconds); lifetimes above 900 or
+below 899 seconds, expired tokens, and excessive future issuance are rejected.
 Database TLS verification is mandatory; supply the RDS CA bundle. An existing
 authorized tunnel can use `MEM9_HUMAN_E2E_TUNNEL_PORT` with loopback while retaining
 the pinned database hostname for TLS. The runner does not change network access.

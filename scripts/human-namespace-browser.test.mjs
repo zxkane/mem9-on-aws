@@ -13,6 +13,24 @@ const token = () => {
   return `head.${Buffer.from(JSON.stringify({ iat: now, exp: now + 900, token_use: "access", sub: "fixture", client_id: "fixture-client", scope: "mem9-mcp/read mem9-mcp/write" })).toString("base64url")}.sig`;
 };
 describe("human OAuth/MCP client guards", () => {
+  it("rejects registration for a different client before opening a login context", async () => {
+    const browser = { newContext: vi.fn() };
+    let callback;
+    const client = new HumanOAuthBrowser({
+      browser,
+      facadeUrl: "https://facade.example.com",
+      providerOrigin: "https://login.example.com",
+      issuer: "fixture-issuer",
+      expectedClientId: "expected-client",
+      fetchImpl: async (_url, options) => {
+        callback = JSON.parse(options.body).redirect_uris[0];
+        return { status: 201, json: async () => ({ client_id: "different-client" }) };
+      },
+    });
+    await expect(client.login({ username: "fixture-user", password: "fixture-password", subject: "fixture" })).rejects.toThrow("oauth_registration_client_mismatch");
+    expect(browser.newContext).not.toHaveBeenCalled();
+    await expect(fetch(callback)).rejects.toThrow();
+  });
   it.each([false, true])(
     "receives loopback redirects and closes the listener (context-close failure=%s)",
     async (closeFails) => {
@@ -114,6 +132,7 @@ describe("human OAuth/MCP client guards", () => {
         facadeUrl: "https://facade.example.com",
         providerOrigin: "https://login.example.com",
         issuer: "fixture-issuer",
+        expectedClientId: "fixture-client",
         fetchImpl,
       });
       const login = client.login({

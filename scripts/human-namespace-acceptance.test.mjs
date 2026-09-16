@@ -221,7 +221,7 @@ describe("operator human namespace acceptance guards", () => {
     expect(() => validateFixturePlan({ ...a, unexpected: true })).toThrow();
   });
 
-  it("requires real human access-token shape and exact 15-minute lifetime", () => {
+  it("allows only a nominal 15-minute lifetime or the observed one-second shorter lifetime", () => {
     const now = Math.floor(Date.now() / 1000);
     const claims = {
       token_use: "access",
@@ -234,10 +234,13 @@ describe("operator human namespace acceptance guards", () => {
     const token = (body) =>
       `header.${Buffer.from(JSON.stringify(body)).toString("base64url")}.signature`;
     expect(validateHumanAccessToken(token(claims), now).sub).toBe("subject");
+    expect(validateHumanAccessToken(token({ ...claims, exp: now + 899 }), now).sub).toBe("subject");
     for (const change of [
       { token_use: "id" },
       { scope: "openid" },
       { exp: now + 3600 },
+      { exp: now + 898 },
+      { exp: now + 901 },
       { exp: now - 1 },
       { sub: "" },
     ])
@@ -248,7 +251,7 @@ describe("operator human namespace acceptance guards", () => {
   it("records only timing deltas from the same clock used by a failed guard", () => {
     const now = 1_700_000_000;
     for (const [iat, exp, expected] of [
-      [now, now + 899, [true, 899, 899, 0]],
+      [now, now + 898, [true, 898, 898, 0]],
       [now - 900, now, [true, 900, 0, -900]],
       [now + 6, now + 906, [true, 900, 906, 6]],
       ["private-invalid-time", now + 900, [false, null, null, null]],

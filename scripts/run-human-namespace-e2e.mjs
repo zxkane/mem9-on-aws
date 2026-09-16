@@ -146,6 +146,7 @@ export async function main(args = process.argv.slice(2)) {
         facadeUrl: manifest.facadeUrl,
         providerOrigin: target.providerOrigin,
         issuer: target.issuer,
+        expectedClientId: target.readerClientId,
         signal: controller.signal,
       });
       await runHumanNamespaceScenarios({

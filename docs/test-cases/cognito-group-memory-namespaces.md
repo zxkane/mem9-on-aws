@@ -317,7 +317,10 @@ The real preview driver extends the existing cases with these checks:
   a viewer's read/write role intersection.
 - TC-GROUPNS-003/005/037/038/040/118: zero/multiple groups fail before JIT;
   concurrent first use creates one principal and one active membership.
-- TC-GROUPNS-020/110: actual access tokens have a 900-second lifetime.
+- TC-GROUPNS-020/110: the exact reader client is configured for 15 minutes with
+  explicit units. Its issued tokens have a 900-second lifetime or the observed
+  one-second shorter lifetime. Lifetimes outside 899–900 seconds, expired
+  tokens, and issuance more than five seconds in the future are rejected.
 - TC-GROUPNS-051/052: real provider/database reconciliation converges twice
   and reports an omitted binding without deleting it.
 - TC-GROUPNS-054..056/120: a failed final grant denies both stale and fresh

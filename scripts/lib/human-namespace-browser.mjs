@@ -163,6 +163,7 @@ export class HumanOAuthBrowser {
     facadeUrl,
     providerOrigin,
     issuer,
+    expectedClientId,
     fetchImpl = fetch,
     signal,
   }) {
@@ -170,6 +171,7 @@ export class HumanOAuthBrowser {
     this.facade = facadeUrl.replace(/\/$/, "");
     this.providerOrigin = providerOrigin;
     this.issuer = issuer;
+    this.expectedClientId = expectedClientId;
     this.fetch = fetchImpl;
     this.signal = signal;
   }
@@ -229,6 +231,7 @@ export class HumanOAuthBrowser {
         typeof clientId === "string" && clientId.length > 0,
         "oauth_registration_client_missing",
       );
+      check(clientId === this.expectedClientId, "oauth_registration_client_mismatch");
       const authorize = new URL(`${this.facade}/oauth/authorize`);
       for (const [name, value] of Object.entries({
         response_type: "code",

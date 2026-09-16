@@ -1727,9 +1727,9 @@
       "namespace_evidence": "namespace_id = :'namespace_id'"
     },
     {
-      "id": "69eede89d9fc60f0b688",
+      "id": "578354d4def0ed486a8b",
       "owner": "scripts/lib/human-namespace-acceptance.mjs",
-      "line": 767,
+      "line": 773,
       "tables": [
         "ingest_jobs"
       ],
@@ -1743,9 +1743,9 @@
       "namespace_evidence": "namespace_id=$2"
     },
     {
-      "id": "6998b328608fa53428fb",
+      "id": "a8f6264254c75b8ccde1",
       "owner": "scripts/lib/human-namespace-acceptance.mjs",
-      "line": 796,
+      "line": 802,
       "tables": [
         "ingest_jobs"
       ],
@@ -1759,9 +1759,9 @@
       "namespace_evidence": "INSERT column namespace_id"
     },
     {
-      "id": "a2805bd1031a38330498",
+      "id": "eb42ef88930bd62a72b3",
       "owner": "scripts/lib/human-namespace-acceptance.mjs",
-      "line": 829,
+      "line": 835,
       "tables": [
         "ingest_jobs"
       ],
@@ -1775,9 +1775,9 @@
       "namespace_evidence": "namespace_id=$2"
     },
     {
-      "id": "87bda7261dfdc42034ed",
+      "id": "9262784403d9d92241fd",
       "owner": "scripts/lib/human-namespace-acceptance.mjs",
-      "line": 840,
+      "line": 846,
       "tables": [
         "ingest_jobs"
       ],
@@ -1791,9 +1791,9 @@
       "namespace_evidence": "namespace_id=$2"
     },
     {
-      "id": "7fd1b7a51a8ad363b88f",
+      "id": "7362235b8cb9e7b6da42",
       "owner": "scripts/lib/human-namespace-acceptance.mjs",
-      "line": 881,
+      "line": 887,
       "tables": [
         "ingest_jobs"
       ],

@@ -46,7 +46,7 @@ export async function verifyHumanPreviewTarget(
 ) {
   validateDeploymentManifest(manifest);
   const prefix = `/mem9-on-aws/${manifest.stage}`;
-  let auditLogGroup;
+  let auditLogGroup, readerClientId;
   const identity = await aws("sts", "get-caller-identity");
   check(identity.Account === manifest.accountId, "operator_account_mismatch");
   const { UserPool: pool } = await cognito.send(
@@ -78,6 +78,7 @@ export async function verifyHumanPreviewTarget(
       "get-parameters",
       "--names",
       `${prefix}/cognito/user-pool-id`,
+      `${prefix}/cognito/reader/client-id`,
       `${prefix}/facade/url`,
       `${prefix}/gateway/url`,
       `${prefix}/ecs/cluster-name`,
@@ -95,6 +96,22 @@ export async function verifyHumanPreviewTarget(
         values[`${prefix}/gateway/proxy-function-arn`] ===
           manifest.proxyFunctionArn,
       "deployment_endpoint_mismatch",
+    );
+    readerClientId = values[`${prefix}/cognito/reader/client-id`];
+    check(
+      typeof readerClientId === "string" && /^[A-Za-z0-9_+]{1,128}$/.test(readerClientId),
+      "preview_reader_client_missing",
+    );
+    const reader = await aws(
+      "cognito-idp", "describe-user-pool-client",
+      "--user-pool-id", manifest.userPoolId,
+      "--client-id", readerClientId,
+      "--query", "{pool:UserPoolClient.UserPoolId,id:UserPoolClient.ClientId,validity:UserPoolClient.AccessTokenValidity,units:UserPoolClient.TokenValidityUnits.AccessToken}",
+    );
+    check(
+      reader.pool === manifest.userPoolId && reader.id === readerClientId &&
+        reader.validity === 15 && reader.units === "minutes",
+      "preview_token_validity_configuration_mismatch",
     );
     const service = (
       await aws(
@@ -324,6 +341,7 @@ export async function verifyHumanPreviewTarget(
       cognito,
       connect,
       issuer,
+      readerClientId,
       targetFingerprint,
       readDenialStatus,
       providerOrigin: `https://${pool.Domain}.auth.${manifest.region}.amazoncognito.com`,

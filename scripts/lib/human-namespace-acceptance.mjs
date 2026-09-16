@@ -293,10 +293,16 @@ export function validateHumanAccessToken(
       claims.client_id.length > 0,
     "human access token claims required",
   );
-  const integerTimes = Number.isInteger(claims.iat) && Number.isInteger(claims.exp);
-  if (!(integerTimes && claims.exp - claims.iat === 900 &&
+  const integerTimes =
+    Number.isInteger(claims.iat) && Number.isInteger(claims.exp);
+  // The pinned reader configuration is checked as exactly 15 minutes.
+  // Permit the observed one-second shorter token, never a longer lifetime.
+  if (!(integerTimes &&
+    claims.exp - claims.iat >= 899 && claims.exp - claims.iat <= 900 &&
     claims.exp > now + 15 && claims.iat <= now + 5)) {
-    const error = new HumanAcceptanceError("human token must have a live 15-minute lifetime");
+    const error = new HumanAcceptanceError(
+      "human token must have a live 15-minute lifetime",
+    );
     error.tokenTiming = {
       integer_times: integerTimes,
       lifetime_seconds: integerTimes ? claims.exp - claims.iat : null,
