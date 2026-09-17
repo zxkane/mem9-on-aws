@@ -35,13 +35,15 @@
     {
       "id": "gateway-context-and-transport",
       "state": "enabled_v1",
+      "execution": "operator_run",
       "acceptance": ["027-036"],
       "verification": [
         "infra/gateway/identity-interceptor.test.mjs",
         "infra/gateway/namespace-auth.test.mjs",
         "infra/gateway/proxy-handler.test.mjs",
         "infra/gateway.test.ts",
-        "scripts/run-mcp-e2e.sh"
+        "scripts/run-mcp-e2e.sh",
+        "scripts/run-gateway-contract-e2e.mjs"
       ]
     },
     {

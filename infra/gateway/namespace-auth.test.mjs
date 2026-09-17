@@ -4,6 +4,8 @@ import { describe, expect, it } from "vitest";
 
 import {
   INTERNAL_AUTH_FIELD,
+  acceptanceCorrelation,
+  acceptanceToolCorrelation,
   canonicalJson,
   classifyAccessToken,
   createInternalContext,
@@ -188,6 +190,56 @@ describe("canonical signed contexts", () => {
     ).toBe('{"nested":{"a":["x",null],"b":true},"z":1}');
     expect(() => canonicalJson({ value: Number.NaN })).toThrow(
       /finite number/u,
+    );
+  });
+
+  it("derives an opaque acceptance correlation from the request hash", () => {
+    const keys = parseSigningKeys(JSON.stringify(SIGNING_KEYS));
+    expect(
+      acceptanceCorrelation({
+        requestHash: "a".repeat(64),
+        kid: "current",
+        keys,
+      }),
+    ).toBe(
+      acceptanceCorrelation({
+        requestHash: "a".repeat(64),
+        kid: "current",
+        keys,
+      }),
+    );
+    expect(
+      acceptanceCorrelation({
+        requestHash: "a".repeat(64),
+        kid: "current",
+        keys,
+      }),
+    ).not.toBe(
+      acceptanceCorrelation({
+        requestHash: "b".repeat(64),
+        kid: "current",
+        keys,
+      }),
+    );
+    expect(() =>
+      acceptanceCorrelation({
+        requestHash: "a".repeat(64),
+        kid: "unknown",
+        keys,
+      }),
+    ).toThrow(/key/u);
+    expect(
+      acceptanceToolCorrelation({
+        tool: "search_memories",
+        kid: "current",
+        keys,
+      }),
+    ).not.toBe(
+      acceptanceToolCorrelation({
+        tool: "get_ingest_job_status",
+        kid: "current",
+        keys,
+      }),
     );
   });
 

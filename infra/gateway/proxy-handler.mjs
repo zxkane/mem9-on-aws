@@ -30,12 +30,19 @@
 
 import { PROXY_TIMEOUT_MS, LAMBDA_RESPONSE_RESERVE_MS } from "./request-limits.mjs";
 import {
+  acceptanceCorrelation,
+  acceptanceToolCorrelation,
   INTERNAL_AUTH_FIELD,
   createTransportEnvelope,
   parseSigningKeys,
   requestHash,
   verifyInternalContext,
 } from "./namespace-auth.mjs";
+import {
+  acceptanceFromInternalContext,
+  recordAcceptanceCorrelation,
+  validateAcceptanceStage,
+} from "./acceptance-diagnostics.mjs";
 
 const BASE_URL = requireEnv("MEM9_SERVER_BASE_URL").replace(/\/+$/, "");
 const API_KEY = requireEnv("MEM9_API_KEY");
@@ -46,10 +53,9 @@ const TRANSPORT_SIGNING_KEYS = parseSigningKeys(
   requireEnv("MEM9_TRANSPORT_SIGNING_KEYS"),
 );
 const TRANSPORT_ISSUER = requireEnv("MEM9_TRANSPORT_ISSUER");
-const ACCEPTANCE_STAGE = process.env.MEM9_ACCEPTANCE_STAGE || "";
-if (ACCEPTANCE_STAGE && !/^pr-[1-9][0-9]*$/.test(ACCEPTANCE_STAGE)) {
-  throw new Error("acceptance diagnostics require a PR stage");
-}
+const ACCEPTANCE_STAGE = validateAcceptanceStage(
+  process.env.MEM9_ACCEPTANCE_STAGE || "",
+);
 const TOOL_DELIM = "___";
 const MEMORIES_PATH = "/v1alpha2/mem9s/memories";
 const INGEST_JOBS_PATH = "/v1alpha2/mem9s/ingest-jobs";
@@ -285,6 +291,24 @@ export const handler = async (event, context) => {
     invocation: { tool, arguments: input },
     keys: IDENTITY_SIGNING_KEYS,
   });
+  const acceptance = acceptanceFromInternalContext(identity);
+  if (acceptance) {
+    recordAcceptanceCorrelation({
+      stage: ACCEPTANCE_STAGE,
+      component: "target",
+      acceptance,
+      correlation: acceptanceCorrelation({
+        requestHash: identity.request_hash,
+        kid: identity.kid,
+        keys: IDENTITY_SIGNING_KEYS,
+      }),
+      toolCorrelation: acceptanceToolCorrelation({
+        tool,
+        kid: identity.kid,
+        keys: IDENTITY_SIGNING_KEYS,
+      }),
+    });
+  }
   try {
     return await withinProxyBudget(context, (budget) => {
       switch (tool) {

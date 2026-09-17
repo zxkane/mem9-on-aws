@@ -1,4 +1,6 @@
 import {
+  acceptanceCorrelation,
+  acceptanceToolCorrelation,
   INTERNAL_AUTH_FIELD,
   classifyAccessToken,
   createInternalContext,
@@ -7,10 +9,17 @@ import {
 } from "./namespace-auth.mjs";
 import { interceptScopes } from "./scope-interceptor.mjs";
 import { createAccessTokenVerifier } from "./access-token-verifier.mjs";
+import {
+  INTERNAL_ACCEPTANCE_FIELD,
+  parseAcceptanceRequest,
+  recordAcceptanceCorrelation,
+  validateAcceptanceStage,
+} from "./acceptance-diagnostics.mjs";
 
 const TOOL_DELIMITER = "___";
 const RESERVED_ARGUMENTS = new Set([
   INTERNAL_AUTH_FIELD,
+  INTERNAL_ACCEPTANCE_FIELD,
   "api_key",
   "client_key",
   "namespace",
@@ -24,6 +33,9 @@ const RESERVED_ARGUMENTS = new Set([
 let registry;
 let signingKeys;
 let verifyAccessToken;
+const ACCEPTANCE_STAGE = validateAcceptanceStage(
+  process.env.MEM9_ACCEPTANCE_STAGE || "",
+);
 
 function isRecord(value) {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -92,21 +104,43 @@ function attachIdentity(body, identity, keys) {
     const supplied = isRecord(request.params?.arguments)
       ? request.params.arguments
       : {};
+    const acceptance =
+      ACCEPTANCE_STAGE &&
+      parseAcceptanceRequest(supplied[INTERNAL_ACCEPTANCE_FIELD]);
     const args = Object.fromEntries(
       Object.entries(supplied).filter(([key]) => !RESERVED_ARGUMENTS.has(key)),
     );
     const invocation = { tool, arguments: args };
+    const context = createInternalContext({
+      invocation,
+      identity,
+      keys,
+      acceptance,
+    });
+    if (acceptance) {
+      recordAcceptanceCorrelation({
+        stage: ACCEPTANCE_STAGE,
+        component: "interceptor",
+        acceptance,
+        correlation: acceptanceCorrelation({
+          requestHash: context.request_hash,
+          kid: context.kid,
+          keys,
+        }),
+        toolCorrelation: acceptanceToolCorrelation({
+          tool,
+          kid: context.kid,
+          keys,
+        }),
+      });
+    }
     return {
       ...request,
       params: {
         ...request.params,
         arguments: {
           ...args,
-          [INTERNAL_AUTH_FIELD]: createInternalContext({
-            invocation,
-            identity,
-            keys,
-          }),
+          [INTERNAL_AUTH_FIELD]: context,
         },
       },
     };

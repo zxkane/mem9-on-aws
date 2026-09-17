@@ -6,6 +6,8 @@ export const MAX_GROUPS = 32;
 export const CONTEXT_TTL_SECONDS = 30;
 
 const HEX_64 = /^[0-9a-f]{64}$/u;
+const HEX_24 = /^[0-9a-f]{24}$/u;
+const ACCEPTANCE_CASE_PATTERN = /^[a-z][a-z0-9_]{0,31}$/u;
 const CLIENT_ID_PATTERN = /^[\x21-\x7e]{1,256}$/u;
 const ISSUER_PATTERN = /^https:\/\/[^\s]{1,1024}$/u;
 const PRINCIPAL_TYPES = new Set(["human", "m2m"]);
@@ -334,6 +336,30 @@ function signPayload(payload, keys) {
   return createHmac("sha256", key).update(canonicalJson(payload)).digest("hex");
 }
 
+export function acceptanceCorrelation({ requestHash, kid, keys }) {
+  if (typeof requestHash !== "string" || !HEX_64.test(requestHash)) {
+    throw new Error("acceptance request hash is invalid");
+  }
+  const key = keys.keys.get(kid);
+  if (!key) throw new Error("acceptance signing key is unknown");
+  return createHmac("sha256", key)
+    .update("mem9-acceptance-correlation-v1\0")
+    .update(requestHash)
+    .digest("hex");
+}
+
+export function acceptanceToolCorrelation({ tool, kid, keys }) {
+  if (typeof tool !== "string" || !/^[a-z][a-z0-9_]{0,127}$/u.test(tool)) {
+    throw new Error("acceptance tool is invalid");
+  }
+  const key = keys.keys.get(kid);
+  if (!key) throw new Error("acceptance signing key is unknown");
+  return createHmac("sha256", key)
+    .update("mem9-acceptance-tool-v1\0")
+    .update(tool)
+    .digest("hex");
+}
+
 function verifyMac(payload, mac, keys) {
   if (typeof mac !== "string" || !HEX_64.test(mac)) {
     throw new Error("signature is malformed");
@@ -361,7 +387,13 @@ function validateGroupKeys(groupKeys) {
   }
 }
 
-export function createInternalContext({ invocation, identity, keys, now }) {
+export function createInternalContext({
+  invocation,
+  identity,
+  keys,
+  now,
+  acceptance,
+}) {
   const issuedAt = Math.floor(now ?? Date.now() / 1000);
   const payload = {
     v: 2,
@@ -380,7 +412,20 @@ export function createInternalContext({ invocation, identity, keys, now }) {
     group_keys: identity.groups
       .map((group) => deriveGroupKey(identity.issuer, group))
       .sort(),
+    ...(acceptance
+      ? {
+          acceptance_run_id: acceptance.runId,
+          acceptance_case: acceptance.caseId,
+        }
+      : {}),
   };
+  if (
+    acceptance &&
+    (!HEX_24.test(payload.acceptance_run_id) ||
+      !ACCEPTANCE_CASE_PATTERN.test(payload.acceptance_case))
+  ) {
+    throw new Error("acceptance metadata is invalid");
+  }
   validateGroupKeys(payload.group_keys);
   return Object.freeze({ ...payload, mac: signPayload(payload, keys) });
 }
@@ -402,6 +447,16 @@ export function verifyInternalContext({ context, invocation, keys, now }) {
     throw new Error("internal context is invalid");
   }
   validateGroupKeys(payload.group_keys);
+  const hasAcceptanceRun = Object.hasOwn(payload, "acceptance_run_id");
+  const hasAcceptanceCase = Object.hasOwn(payload, "acceptance_case");
+  if (
+    hasAcceptanceRun !== hasAcceptanceCase ||
+    (hasAcceptanceRun &&
+      (!HEX_24.test(payload.acceptance_run_id) ||
+        !ACCEPTANCE_CASE_PATTERN.test(payload.acceptance_case)))
+  ) {
+    throw new Error("internal context acceptance metadata is invalid");
+  }
   const currentTime = Math.floor(now ?? Date.now() / 1000);
   if (payload.expires_at < currentTime)
     throw new Error("internal context expired");

@@ -81,6 +81,16 @@ describe("memory namespace coverage ownership map", () => {
     ).toEqual(["107", "114"]);
   });
 
+  it("labels the live Gateway/IAM contract as operator-run evidence", () => {
+    const capability = inventory.capabilities.find(
+      ({ id }) => id === "gateway-context-and-transport",
+    );
+    expect(capability.execution).toBe("operator_run");
+    expect(capability.verification).toContain(
+      "scripts/run-gateway-contract-e2e.mjs",
+    );
+  });
+
   it("TC-GROUPNS-097..104: requires scope and keeps unsupported capabilities absent", () => {
     const sst = readFileSync(resolve(root, "sst.config.ts"), "utf8");
     const workflow = readFileSync(
