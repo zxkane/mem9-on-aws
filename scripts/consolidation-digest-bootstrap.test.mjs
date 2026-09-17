@@ -85,7 +85,7 @@ async function fixture({ existing, putError, getError, afterPut } = {}) {
 afterEach(() => vi.unstubAllEnvs());
 
 describe("scheduled digest bootstrap", () => {
-  it("TC-CONSOL-085: creates a valid empty baseline before model work, then updates with the read ETag", async () => {
+  it("TC-CONSOL-094: creates a valid empty baseline before model work, then updates with the read ETag", async () => {
     const f = await fixture();
     try {
       const result = await runConsolidation({ ...options, checkLlm: true }, f.deps);
@@ -104,7 +104,7 @@ describe("scheduled digest bootstrap", () => {
     } finally { await f.close(); }
   });
 
-  it("TC-CONSOL-086: does not replace existing state before the model, including a concurrent winner", async () => {
+  it("TC-CONSOL-095: does not replace existing state before the model, including a concurrent winner", async () => {
     const initial = JSON.stringify({ ...emptyState(), unchangedRuns: 3, kindCounts: { CLASSIFICATION_FAILED: 1 } });
     const f = await fixture({ existing: initial });
     f.deps.completeChat.mockImplementation(async () => {
@@ -121,7 +121,7 @@ describe("scheduled digest bootstrap", () => {
     } finally { await f.close(); }
   });
 
-  it("TC-CONSOL-086: concurrent initializers converge without replacing the winner", async () => {
+  it("TC-CONSOL-095: concurrent initializers converge without replacing the winner", async () => {
     const f = await fixture();
     try {
       await Promise.all([0, 1].map(() => initializeScheduledDigest({ ...options, now: NOW }, f.deps)));
@@ -133,7 +133,7 @@ describe("scheduled digest bootstrap", () => {
     } finally { await f.close(); }
   });
 
-  it("TC-CONSOL-086: final CAS uses freshly reloaded state, not the bootstrap ETag", async () => {
+  it("TC-CONSOL-095: final CAS uses freshly reloaded state, not the bootstrap ETag", async () => {
     const f = await fixture();
     f.deps.completeChat.mockImplementation(async () => {
       f.state.body = JSON.stringify({ ...emptyState(), unchangedRuns: 2 });
@@ -147,7 +147,7 @@ describe("scheduled digest bootstrap", () => {
     } finally { await f.close(); }
   });
 
-  it("TC-CONSOL-085: validates bootstrap before an actual memory apply", async () => {
+  it("TC-CONSOL-094: validates bootstrap before an actual memory apply", async () => {
     const f = await fixture();
     const row = { id: "synthetic-stale", namespace_id: NS, content: "synthetic old setting", embedding: [1, 0],
       memory_type: "insight", state: "active", version: 1, tags: [], metadata: {},
@@ -168,7 +168,7 @@ describe("scheduled digest bootstrap", () => {
     } finally { await f.close(); }
   });
 
-  it.each([undefined, "", 17])("TC-CONSOL-087: refuses invalid ETag %j before any model work", async etag => {
+  it.each([undefined, "", 17])("TC-CONSOL-096: refuses invalid ETag %j before any model work", async etag => {
     const f = await fixture();
     f.deps.loadDigestState = async () => ({ status: "ok", state: emptyState(), etag });
     try {
@@ -186,7 +186,7 @@ describe("scheduled digest bootstrap", () => {
     ["name-without-status", { putError: Object.assign(new Error("precondition"), { name: "PreconditionFailed" }) }],
     ["get403", { getError: error("AccessDenied", 403) }],
     ["disappeared", { getError: error("NoSuchKey", 404) }],
-  ])("TC-CONSOL-087: %s aborts before model and memory reads", async (_name, config) => {
+  ])("TC-CONSOL-096: %s aborts before model and memory reads", async (_name, config) => {
     const f = await fixture(config);
     try {
       await expect(runConsolidation({ ...options, checkLlm: true }, f.deps)).rejects.toThrow();
@@ -201,7 +201,7 @@ describe("scheduled digest bootstrap", () => {
     ["namespace", JSON.stringify({ ...emptyState(), namespaceId: OTHER })],
     ["stage", JSON.stringify({ ...emptyState(), stage: "pr-example" })],
     ["schema", JSON.stringify({ ...emptyState(), schemaVersion: 999 })],
-  ])("TC-CONSOL-087: preserves invalid existing %s and blocks model/apply", async (_name, existing) => {
+  ])("TC-CONSOL-096: preserves invalid existing %s and blocks model/apply", async (_name, existing) => {
     const f = await fixture({ existing });
     try {
       await expect(runConsolidation({ ...options, checkLlm: true }, f.deps)).rejects.toThrow();
@@ -212,7 +212,7 @@ describe("scheduled digest bootstrap", () => {
     } finally { await f.close(); }
   });
 
-  it.each(["revoked", "viewer", "invalid-scope"])("TC-CONSOL-088: %s sends no S3 request", async mode => {
+  it.each(["revoked", "viewer", "invalid-scope"])("TC-CONSOL-097: %s sends no S3 request", async mode => {
     const f = await fixture();
     if (mode === "revoked") f.state.active = false;
     if (mode === "viewer") f.state.role = "viewer";
@@ -223,7 +223,7 @@ describe("scheduled digest bootstrap", () => {
     } finally { await f.close(); }
   });
 
-  it("TC-CONSOL-088: reauthorizes after initialization and refuses a revoked namespace before reading/model", async () => {
+  it("TC-CONSOL-097: reauthorizes after initialization and refuses a revoked namespace before reading/model", async () => {
     const f = await fixture({ afterPut: state => { state.active = false; } });
     try {
       await expect(runConsolidation({ ...options, checkLlm: true }, f.deps)).rejects.toThrow(/namespace denied/);
@@ -236,7 +236,7 @@ describe("scheduled digest bootstrap", () => {
   it.each([
     { reportOnly: true, scheduled: true }, { reportOnly: true, scheduled: false },
     { reportOnly: false, scheduled: false },
-  ])("TC-CONSOL-089: no digest requests for %j", async flags => {
+  ])("TC-CONSOL-098: no digest requests for %j", async flags => {
     const f = await fixture();
     try {
       expect((await runConsolidation({ ...options, ...flags }, f.deps)).exitCode).toBe(0);
@@ -245,7 +245,7 @@ describe("scheduled digest bootstrap", () => {
     } finally { await f.close(); }
   });
 
-  it("TC-CONSOL-089: empty baseline has the same initial health/reminder/transitions as missing", () => {
+  it("TC-CONSOL-098: empty baseline has the same initial health/reminder/transitions as missing", () => {
     for (const review of [[], [{ kind: "CLASSIFICATION_FAILED", ids: [], rationale: "synthetic" }]]) {
       const input = { stage: "prod", namespaceId: NS, review, byId: new Map(), now: NOW,
         metrics: { scanned: 0 }, mutations: 0, attemptedClusters: 10, classificationFailures: review.length };

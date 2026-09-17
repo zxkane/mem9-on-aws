@@ -1722,6 +1722,14 @@ fencing. Initialization does not lock the whole run or roll back later failures.
 Manual/report-only runs do not update scheduled digest state. Health failures
 remain visible in bounded output; Slack delivery stays disabled.
 
+After namespace cutover, numeric `pr-N` previews receive digest GetObject and
+PutObject access only under their own stage prefix, plus the matching
+S3-mediated KMS permission. This permits an explicitly invoked synthetic
+bootstrap probe without ListBucket, production-role reuse, or a schedule.
+Task defaults remain report-only; normal preview reports do not initialize
+metadata. The probe must use an owned preview namespace, preserve a private
+journal of its exact object key, and remove only its fixture after verification.
+
 If a snapshot is invalid, the task preserves it. Pause scheduling, ensure no
 run for that namespace is active, and inspect the private object before an
 operator removes or restores that exact stage/namespace key. Never reset a
