@@ -167,6 +167,16 @@ Public benchmark evidence must use a documented synthetic corpus, retain the
 configured two-second deadline, and verify top-K 10 and 50. Keep measurements
 from real operator data in private records.
 
+`docker/mnemo-server/patches/0020-namespace-performance-gates.patch` runs the
+production repository against 20,000 synthetic 1024-dimensional rows in each
+of two namespaces. It fetches top-K 10 and 50, compares IDs with the previous
+all-record exact materialization, and requires production p95 to remain within
+120 percent of that baseline. `scripts/run-memory-namespace-benchmark.sh` then
+runs the actual M2M resolution transaction from the stage bootstrap task inside
+the application VPC, requiring p95 below 20 ms. TC-GROUPNS-113 remains a
+separate attributed-connection observation rather than inferring Lambda pool
+absence from whole-database connection equality.
+
 ## Durable Ingest
 
 Lifecycle completion for #193/#194/#200 uses synthetic PostgreSQL fixtures:
@@ -278,6 +288,12 @@ Import/validation failures must not echo private configuration fragments.
 tasks from the owning account and application region, independently of the
 region hosting the CloudFormation ownership stack. Runtime operator-task
 execution verifies that the scoped trust still delivers credentials.
+
+`scripts/namespace-rollback-ref.txt` pins the latest approved namespace-aware
+main commit preceding the current delivery. The PostgreSQL integration rebuilds
+that source against its own pinned upstream, requires `/healthz` in
+namespace-required mode on a single-namespace enforced database, and requires
+the same binary's namespace-unaware mode to fail before serving traffic.
 
 ## External provider access administration
 

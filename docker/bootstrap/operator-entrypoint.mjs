@@ -230,6 +230,14 @@ export async function main() {
       );
       return;
     }
+    if (OPERATION === "benchmark") {
+      await run(
+        `${SCRIPT_ROOT}/benchmark-memory-namespaces.mjs`,
+        [],
+        env,
+      );
+      return;
+    }
     if (["preflight", "freeze", "enforce"].includes(OPERATION)) {
       await run(
         `${SCRIPT_ROOT}/migrate-memory-namespaces.mjs`,

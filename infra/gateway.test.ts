@@ -300,6 +300,9 @@ describe("gateway stack", () => {
       "deadbeefTENANTID",
     );
     expect(
+      Object.keys(env).filter((name) => name.startsWith("MEM9_DB_")),
+    ).toEqual([]);
+    expect(
       JSON.parse(
         String(
           (interceptorFn?.environment as Record<string, unknown>)
