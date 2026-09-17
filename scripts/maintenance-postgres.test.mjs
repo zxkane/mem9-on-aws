@@ -240,8 +240,8 @@ describe.skipIf(!process.env.MEM9_NAMESPACE_TEST_DSN)("maintenance with real Pos
       } finally { await independent.release(); }
     }), 30_000);
 
-  it.each(["read", "write"])(
-    "TC-GROUPNS-100: concurrent runs isolate a real digest %s failure and retain confirmed mutations",
+  it.each(["startup-read", "read", "write"])(
+    "TC-GROUPNS-100: concurrent runs isolate a real digest %s failure at its execution stage",
     async (failure) => withFixture(async ({ db, namespaces: ns, manage, seed, connect, scope, row }) => {
       await manage("enable", ns.a);
       await manage("enable", ns.b);
@@ -276,10 +276,15 @@ describe.skipIf(!process.env.MEM9_NAMESPACE_TEST_DSN)("maintenance with real Pos
           { type: "CONTRADICTION", ids: [loser.id, winner.id], winner_id: winner.id, rationale: "synthetic replacement" },
           { type: "DELETE", ids: [review.id], rationale: "synthetic review" },
         ] }));
+        let digestReads = 0;
         const adapters = {
           ...runnerDeps(database, completeChat),
           loadDigestState: () => digestDatabase.read(async (tx, actor) => {
-            if (actor.namespaceId === ns.a && failure === "read") await tx.query("SELECT 1 / 0");
+            // Bootstrap succeeds; this case exercises a later read failure
+            // after a confirmed memory mutation, which cannot be rolled back.
+            digestReads++;
+            if (actor.namespaceId === ns.a && (failure === "startup-read" || (digestReads > 1 && failure === "read")))
+              await tx.query("SELECT 1 / 0");
             const result = await tx.query(
               "SELECT state,version FROM maintenance_fixture_digests WHERE namespace_id=$1 AND object_key=$2",
               [actor.namespaceId, key],
@@ -289,10 +294,10 @@ describe.skipIf(!process.env.MEM9_NAMESPACE_TEST_DSN)("maintenance with real Pos
           writeDigestState: ({ state, etag }) => digestDatabase.write(async (tx, actor) => {
             expect(state.namespaceId).toBe(actor.namespaceId);
             if (etag === undefined) {
-              // The degraded read path may only conditionally create. An
-              // existing row rejects this without replacing its prior state.
-              await tx.query("INSERT INTO maintenance_fixture_digests(namespace_id,object_key,state) VALUES($1,$2,$3)",
+              // Model S3's atomic If-None-Match, including its 412 response.
+              const created = await tx.query("INSERT INTO maintenance_fixture_digests(namespace_id,object_key,state) VALUES($1,$2,$3) ON CONFLICT DO NOTHING RETURNING namespace_id",
                 [actor.namespaceId, key, JSON.stringify(state)]);
+              if (!created.rowCount) throw Object.assign(new Error("precondition failed"), { $metadata: { httpStatusCode: 412 } });
             } else {
               const changed = await tx.query(
                 "UPDATE maintenance_fixture_digests SET state=$3,version=version+1 WHERE namespace_id=$1 AND object_key=$2 AND version=$4",
@@ -304,14 +309,23 @@ describe.skipIf(!process.env.MEM9_NAMESPACE_TEST_DSN)("maintenance with real Pos
         };
         fixtures.push({ namespaceId, key, initial, loser, winner, review, adapters });
       }
-      const [a, b] = await Promise.all(fixtures.map(({ namespaceId, adapters }) => runConsolidation({
+      const [a, b] = await Promise.allSettled(fixtures.map(({ namespaceId, adapters }) => runConsolidation({
         stage: "pr-maintenance", namespaceId, reportOnly: false, scheduled: true,
       }, adapters)));
-      expect(a.exitCode).toBe(1);
-      expect(b.exitCode).toBe(0);
-      expect(a.metrics.dedupUnavailable).toBe(failure === "read" ? 1 : 0);
-      expect(b.metrics.dedupUnavailable).toBe(0);
-      expect([a.mutations, b.mutations]).toEqual([1, 1]);
+      expect(b.status).toBe("fulfilled");
+      expect(b.value.exitCode).toBe(0);
+      expect(b.value.metrics.dedupUnavailable).toBe(0);
+      expect(b.value.mutations).toBe(1);
+      if (failure === "startup-read") {
+        expect(a.status).toBe("rejected");
+        expect(a.reason.code).toBe("22012");
+        expect(fixtures[0].adapters.completeChat).not.toHaveBeenCalled();
+      } else {
+        expect(a.status).toBe("fulfilled");
+        expect(a.value.exitCode).toBe(1);
+        expect(a.value.metrics.dedupUnavailable).toBe(failure === "read" ? 1 : 0);
+        expect(a.value.mutations).toBe(1);
+      }
       const states = (await db.query("SELECT namespace_id,object_key,state,version FROM maintenance_fixture_digests")).rows;
       const savedA = states.find(({ namespace_id }) => namespace_id === ns.a);
       const savedB = states.find(({ namespace_id }) => namespace_id === ns.b);
@@ -325,7 +339,10 @@ describe.skipIf(!process.env.MEM9_NAMESPACE_TEST_DSN)("maintenance with real Pos
         new Map([[fixtures[1].review.id, fixtures[1].review]]), ns.b);
       expect(savedB.state.topics).toEqual([expect.objectContaining({ topicId: expectedTopic.topicId, payloadHash: expectedTopic.payloadHash })]);
       for (const fixture of fixtures) {
-        expect(await row(fixture.loser.id)).toMatchObject({ state: "archived", superseded_by: fixture.winner.id });
+        if (failure === "startup-read" && fixture.namespaceId === ns.a)
+          expect(await row(fixture.loser.id)).toEqual(fixture.loser);
+        else
+          expect(await row(fixture.loser.id)).toMatchObject({ state: "archived", superseded_by: fixture.winner.id });
         expect(await row(fixture.review.id)).toEqual(fixture.review);
         const retry = createConsolidationDatabase(await connect(), scope(fixture.namespaceId));
         const mutex = await retry.acquireMutex();

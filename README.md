@@ -1710,6 +1710,15 @@ Scheduled apply maintains a private, memory-content-free snapshot at
 `consolidation-digests/<stage>/<namespace-id>/current-v1.json`. Its serialized
 stage/namespace binding, hashes, kinds, counts, and timestamps are checked on
 read, and updates use conditional writes. It contains no memory IDs or content.
+Before any model call or memory apply, a scheduled run authorizes namespace
+writes and attempts to create an empty versioned baseline with `If-None-Match:
+*`. Only HTTP 412 is accepted as an existing snapshot; the task then reads and
+validates the snapshot normally. This initializes new or expired state without
+bucket listing permission. The baseline has no topics or kind counts and an
+unchanged-run count of zero; it records no completed consolidation run.
+Read, write, authorization, and validation failures abort startup. Existing
+snapshots are never replaced by initialization, and final updates retain ETag
+fencing. Initialization does not lock the whole run or roll back later failures.
 Manual/report-only runs do not update scheduled digest state. Health failures
 remain visible in bounded output; Slack delivery stays disabled.
 
