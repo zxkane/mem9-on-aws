@@ -75,15 +75,15 @@ dependencies; a missing verifier must fail even when root dependencies are insta
 | ID             | Scenario                                                                             | Expected                                                                                                           | Surface              |
 | -------------- | ------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------ | -------------------- |
 | TC-GROUPNS-027 | Caller supplies `__mem9_auth_v2`                                                     | Interceptor removes and overwrites it                                                                              | Real Gateway smoke   |
-| TC-GROUPNS-028 | Interceptor injects context into a declared reserved tool property                   | Context reaches the target unchanged through real Gateway schema processing                                        | Real Gateway smoke   |
+| TC-GROUPNS-028 | Interceptor injects context into the internal reserved property absent from the public tool schema | Context reaches the target unchanged through real Gateway schema processing                            | Real Gateway smoke   |
 | TC-GROUPNS-029 | Context MAC is valid and bound to the request/tool/time                              | Target accepts it for the bound invocation                                                                         | Unit + Gateway smoke |
 | TC-GROUPNS-030 | Principal, client, group, tool, request hash, time, or version changes after signing | Target rejects the context                                                                                         | Unit                 |
 | TC-GROUPNS-031 | Context is older than 30 seconds                                                     | Target rejects it                                                                                                  | Unit                 |
 | TC-GROUPNS-032 | Context uses unknown `kid`                                                           | Target rejects it                                                                                                  | Unit                 |
 | TC-GROUPNS-033 | Context group keys are duplicated, unsorted, malformed, or more than 32              | Target rejects it                                                                                                  | Unit                 |
 | TC-GROUPNS-034 | Target constructs mnemo request                                                      | Bearer and reserved argument are absent; fixed tenant and identity are carried only in a signed transport envelope | Unit                 |
-| TC-GROUPNS-035 | Interceptor and target IAM/resource settings are inspected                           | Interceptor has no VPC/DB/tenant-key access and target is invokable only by the exact Gateway role                 | Infra unit           |
-| TC-GROUPNS-036 | Public or unrelated IAM principal attempts target invocation                         | Invocation is denied                                                                                               | PR-preview IAM smoke |
+| TC-GROUPNS-035 | Interceptor and target IAM/resource settings are inspected                           | Interceptor has no VPC/DB/tenant-key access; the project grants invoke only to the exact Gateway role and installs no target resource policy | Infra unit           |
+| TC-GROUPNS-036 | An existing unrelated role whose identity policy permits `lambda:InvokeFunction` only on another resource range attempts target invocation | An absent control function in the allowed range returns `ResourceNotFoundException`; the live target returns `AccessDeniedException` before function execution | PR-preview IAM smoke |
 
 ## Control Plane And Membership
 
@@ -251,7 +251,7 @@ Import/validation failures must not echo private configuration fragments.
 | ID             | Scenario                                                                                                 | Expected                                                                                                                                                          | Surface                     |
 | -------------- | -------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------- |
 | TC-GROUPNS-115 | Human token has 17-31 unrelated groups plus one recognized group                                         | Context remains within the common 32-key limit and the recognized namespace resolves                                                                              | Unit + Gateway smoke        |
-| TC-GROUPNS-116 | Interceptor and target canonicalize a nested invocation delivered through real Gateway                   | Both derive the same request hash; reordered keys, caller context, or changed values fail verification                                                            | Real Gateway smoke          |
+| TC-GROUPNS-116 | Interceptor and target canonicalize nested Unicode/array invocations delivered through real Gateway     | Both emit the same keyed opaque correlation; reordered keys preserve it, changed values and same-arguments/different-tool calls change it, caller ownership fields never reach it, and duplicate/non-finite raw JSON is rejected | Real Gateway smoke          |
 | TC-GROUPNS-117 | Caller reaches mnemo with a bare tenant key, forged identity headers, or invalid target/service envelope | Namespace-aware endpoints reject before content SQL                                                                                                               | Integration                 |
 | TC-GROUPNS-118 | Human already has an active membership in B and a new group-A token triggers JIT                         | No A membership is created; request fails as an internal consistency error                                                                                        | PostgreSQL integration      |
 | TC-GROUPNS-119 | M2M reconciliation runs                                                                                  | One M2M principal, one binding referencing that principal, and one matching membership are created atomically                                                     | PostgreSQL integration      |
@@ -303,7 +303,17 @@ The feature cannot be enabled until:
    refusal, including preview attempts for the server capabilities. A path in
    the coverage map does not substitute for execution evidence.
 2. Real Cognito/AgentCore PR-stage smoke tests pass for the rows explicitly
-   marked `Gateway smoke`, including TC-GROUPNS-027 through 029, 036, 115, and 116.
+   marked `Gateway smoke`, including TC-GROUPNS-027 through 029, 036, 115, and
+   116. `scripts/run-gateway-contract-e2e.mjs` is the contract/IAM runner. It
+   requires an existing unrelated scoped-invoke role through
+   `MEM9_IAM_PROBE_ROLE_ARN` and a non-existent or inert control function ARN
+   matching that role's existing resource range through
+   `MEM9_IAM_PROBE_CONTROL_FUNCTION_ARN`; it never creates or expands IAM. The
+   operator identity needs read access to the stage's Cognito/Gateway SSM
+   parameters and their SSM-mediated KMS decrypt, Lambda configuration and
+   policy reads, CloudWatch Logs filtering, and `sts:AssumeRole`. The probe role
+   trust must admit that operator and its identity policy must allow the absent
+   control ARN while excluding the target.
 3. The automated PR-preview hard E2E passes with two synthetic namespaces in
    one Aurora database, and the separately named human-group and fault-injection
    suites also pass.

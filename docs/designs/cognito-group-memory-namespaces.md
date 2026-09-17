@@ -426,6 +426,51 @@ The signing key is a stage-scoped secret. Rotation supports a current signing
 key and one previous verification key. Neither key is committed, logged, or
 passed to mnemo-server.
 
+The implemented AgentCore event contract is:
+
+- the request interceptor reads the parsed JSON-RPC invocation from
+  `mcp.gatewayRequest.body.params.name` and `.arguments`;
+- the Lambda target receives the tool-schema properties as a flat event and
+  reads the effective tool name from
+  `context.clientContext.Custom.bedrockAgentCoreToolName`;
+- `__mem9_auth_v2` is intentionally absent from every public tool input schema.
+  The interceptor adds it to `transformedGatewayRequest` after caller ownership
+  fields are removed, and the target removes it before forwarding arguments.
+  A public declaration would present trusted transport state as caller-writable
+  application input and is not required by the deployed Lambda-target path.
+
+For PR stages only, both Lambdas receive `MEM9_ACCEPTANCE_STAGE`. The operator
+runner supplies a reserved `__mem9_acceptance_v1` object containing a random
+96-bit run id and a bounded case label. The interceptor removes that object
+before canonicalization and carries the validated metadata inside the signed
+internal context. Ordinary preview calls and malformed acceptance objects emit
+nothing.
+
+For a valid synthetic call, each Lambda derives an HMAC-SHA-256 correlation from
+the canonical request hash with the existing identity-signing key and emits only
+that opaque value, the random run id, the bounded case label, and a fixed
+component label. The raw request hash is never logged. The operator-run
+`scripts/run-gateway-contract-e2e.mjs` correlates those records for reordered
+keys, nested arrays, Unicode, caller-context injection, changed values, and
+same-arguments/different-tool calls. It separately sends duplicate-key and
+non-finite raw JSON and requires an HTTP client error or JSON-RPC parse/invalid
+request error. Production leaves the setting empty and emits no correlation
+records.
+
+The same runner verifies authority with two real calls after assuming an
+existing unrelated role. Calling a deliberately absent control function inside
+that role's existing Lambda resource range must return
+`ResourceNotFoundException`, proving authorization passed without executing a
+function. Calling the preview target must return `AccessDeniedException` for
+`lambda:InvokeFunction`. The runner also requires the target Lambda to have no
+resource-based policy. Application rejection, `FunctionError`, policy
+simulation, and a role created by the runner do not satisfy the gate. This
+proves the project has not installed a broad function grant and that the
+selected unrelated invoke-capable role is denied. It does not claim that an
+account administrator can be prevented from granting itself same-account
+invocation; independent JWT/context verification continues to protect direct
+invocation at the application boundary.
+
 Before production enablement, a real Gateway smoke test must prove all of the
 following:
 
@@ -434,12 +479,12 @@ following:
 - caller-supplied context is overwritten rather than merged;
 - interceptor and target reconstruct the same canonical invocation after the
   real Gateway transforms the request;
-- the target invocation source is the exact Gateway service role.
+- the project grants target invocation to the exact Gateway service role and
+  the target has no resource-based policy.
 
-If unknown arguments are stripped or rejected, each tool schema must declare the
-reserved property while marking it as internal in descriptions. Caller injection
-remains safe because the interceptor overwrites it and the target verifies the
-MAC.
+The live contract gate, rather than a public schema declaration, proves the
+reserved property survives the Gateway transform. Caller injection remains safe
+because the interceptor overwrites it and the target verifies the MAC.
 
 After verification, the target creates a second HMAC-SHA-256 transport envelope
 for mnemo-server. It uses a different secret and binds issuer, method, path,

@@ -222,6 +222,7 @@ export function gateway(
       MEM9_CLIENT_REGISTRY: clientRegistry,
       MEM9_IDENTITY_SIGNING_KEYS: identitySigningKeys,
       MEM9_IDENTITY_JWKS_URI: external?.jwksUri ?? cognitoOut!.jwksUri,
+      MEM9_ACCEPTANCE_STAGE: /^pr-[1-9][0-9]*$/.test(stage) ? stage : "",
     },
   });
 
@@ -411,6 +412,12 @@ export function gateway(
     name: `${prefix}/gateway/proxy-function-arn`,
     type: "String",
     value: proxyFn.arn,
+    tags,
+  });
+  new awsAny.ssm.Parameter("SsmGatewayIdentityFunctionArn", {
+    name: `${prefix}/gateway/identity-function-arn`,
+    type: "String",
+    value: identityFn.arn,
     tags,
   });
 

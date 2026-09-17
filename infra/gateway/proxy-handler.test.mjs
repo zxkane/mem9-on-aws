@@ -9,6 +9,8 @@
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import {
+  acceptanceCorrelation,
+  acceptanceToolCorrelation,
   INTERNAL_AUTH_FIELD,
   createInternalContext,
   parseSigningKeys,
@@ -319,7 +321,7 @@ describe("proxy-handler routing (regression)", () => {
 });
 
 describe("proxy-handler get_ingest_job_status", () => {
-  it("records only hash and backend status for an opted-in PR acceptance request", async()=>{
+  it("records only keyed correlation and backend status for an opted-in PR acceptance request", async()=>{
     const previous=process.env.MEM9_ACCEPTANCE_STAGE;
     process.env.MEM9_ACCEPTANCE_STAGE="pr-42";
     vi.resetModules();
@@ -328,9 +330,35 @@ describe("proxy-handler get_ingest_job_status", () => {
     try{
       const {handler:previewHandler}=await import("./proxy-handler.mjs");
       const invocation={tool:"search_memories",arguments:{q:"private-query-marker"}};
-      const context=createInternalContext({invocation,identity:{issuer:"https://cognito-idp.example.invalid/pool",principalType:"human",subject:"private-subject-marker",clientId:"reader-client",groups:["team-a"]},keys:identityKeys});
+      const context=createInternalContext({invocation,identity:{issuer:"https://cognito-idp.example.invalid/pool",principalType:"human",subject:"private-subject-marker",clientId:"reader-client",groups:["team-a"]},keys:identityKeys,acceptance:{runId:"0123456789abcdef01234567",caseId:"baseline"}});
       await expect(previewHandler({...invocation.arguments,[INTERNAL_AUTH_FIELD]:context},ctx("search_memories"))).rejects.toThrow("returned 403");
-      expect(log.mock.calls).toEqual([[JSON.stringify({event:"namespace_acceptance_http_error",request_hash:requestHash(invocation),status:403})]]);
+      expect(log.mock.calls).toEqual([
+        [
+          JSON.stringify({
+            event: "namespace_acceptance_correlation",
+            component: "target",
+            run_id: "0123456789abcdef01234567",
+            case: "baseline",
+            correlation: acceptanceCorrelation({
+              requestHash: requestHash(invocation),
+              kid: context.kid,
+              keys: identityKeys,
+            }),
+            tool_correlation: acceptanceToolCorrelation({
+              tool: invocation.tool,
+              kid: context.kid,
+              keys: identityKeys,
+            }),
+          }),
+        ],
+        [
+          JSON.stringify({
+            event: "namespace_acceptance_http_error",
+            request_hash: requestHash(invocation),
+            status: 403,
+          }),
+        ],
+      ]);
       expect(JSON.stringify(log.mock.calls)).not.toMatch(/private-query-marker|private-subject-marker|reader-client/);
     } finally {
       if(previous===undefined)delete process.env.MEM9_ACCEPTANCE_STAGE;else process.env.MEM9_ACCEPTANCE_STAGE=previous;

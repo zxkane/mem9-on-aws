@@ -287,6 +287,10 @@ describe("gateway stack", () => {
     const env = targetFn?.environment as Record<string, any>;
     expect(env.MEM9_ACCEPTANCE_STAGE).toBe("");
     expect(
+      (interceptorFn?.environment as Record<string, unknown>)
+        .MEM9_ACCEPTANCE_STAGE,
+    ).toBe("");
+    expect(
       String((env.MEM9_SERVER_BASE_URL as { value?: string }).value),
     ).toContain("mnemo.mem9-prod.local");
     expect(
@@ -316,6 +320,36 @@ describe("gateway stack", () => {
       }>
     )[0];
     expect(interceptor.interceptor.lambda.arn).toBe("arn:SstFunction");
+  });
+
+  it("publishes both acceptance Lambda ARNs for a PR stage", async () => {
+    installGlobals("pr-42");
+    const gateway = await loadGateway();
+    gateway(
+      fakeCognito(),
+      fakeEcs(),
+      fakeIdentity(),
+      out("reader-client-id-test") as unknown as Output<string>,
+      fakeNamespaceIdentity(),
+    );
+
+    const functions = all("SstFunction");
+    expect(
+      functions.find((fn) =>
+        String(fn.handler).includes("identity-interceptor.handler"),
+      )?.environment,
+    ).toMatchObject({ MEM9_ACCEPTANCE_STAGE: "pr-42" });
+    expect(
+      functions.find((fn) =>
+        String(fn.handler).includes("proxy-handler.handler"),
+      )?.environment,
+    ).toMatchObject({ MEM9_ACCEPTANCE_STAGE: "pr-42" });
+    expect(params.map(({ name }) => name)).toContain(
+      "/mem9-on-aws/pr-42/gateway/identity-function-arn",
+    );
+    expect(params.map(({ name }) => name)).toContain(
+      "/mem9-on-aws/pr-42/gateway/proxy-function-arn",
+    );
   });
 
   it("gateway service role grants ONLY lambda:InvokeFunction (no workload-identity/secret/ENI)", async () => {
