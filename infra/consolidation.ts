@@ -172,6 +172,10 @@ export function consolidation(
   identity: TenantIdentityOutputs,
   maintenanceIdentity: MaintenanceIdentityOutputs,
 ): ConsolidationOutputs {
+  // Namespace-enforced previews can verify the real digest adapter without
+  // enabling a schedule. Keep their storage grants inside that preview prefix.
+  const digestStorageEnabled = SCHEDULE_ENABLED ||
+    (/^pr-[1-9][0-9]*$/.test($app.stage) && process.env.MEM9_NAMESPACE_REQUIRED === "1");
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const tags = {
     Project: "mem9-on-aws",
@@ -224,7 +228,7 @@ export function consolidation(
           },
         ]
       : []),
-    ...(SCHEDULE_ENABLED
+    ...(digestStorageEnabled
       ? [
           {
             actions: ["s3:GetObject", "s3:PutObject"],
@@ -279,7 +283,7 @@ export function consolidation(
       MEM9_LLM_RESPONSES_REGION: RESPONSES_REGION,
       MEM9_CONSOLIDATION_REPORT_ONLY: "1",
       MEM9_CONSOLIDATION_TIMEOUT_SECONDS: String(consolidationTimeoutSeconds()),
-      ...(SCHEDULE_ENABLED
+      ...(digestStorageEnabled
         ? {
             MEM9_DECISION_ARTIFACT_BUCKET: artifactBucketName,
             MEM9_DECISION_ARTIFACT_BUCKET_OWNER: artifactBucketOwner,

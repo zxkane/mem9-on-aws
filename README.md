@@ -1710,8 +1710,25 @@ Scheduled apply maintains a private, memory-content-free snapshot at
 `consolidation-digests/<stage>/<namespace-id>/current-v1.json`. Its serialized
 stage/namespace binding, hashes, kinds, counts, and timestamps are checked on
 read, and updates use conditional writes. It contains no memory IDs or content.
+Before any model call or memory apply, a scheduled run authorizes namespace
+writes and attempts to create an empty versioned baseline with `If-None-Match:
+*`. Only HTTP 412 is accepted as an existing snapshot; the task then reads and
+validates the snapshot normally. This initializes new or expired state without
+bucket listing permission. The baseline has no topics or kind counts and an
+unchanged-run count of zero; it records no completed consolidation run.
+Read, write, authorization, and validation failures abort startup. Existing
+snapshots are never replaced by initialization, and final updates retain ETag
+fencing. Initialization does not lock the whole run or roll back later failures.
 Manual/report-only runs do not update scheduled digest state. Health failures
 remain visible in bounded output; Slack delivery stays disabled.
+
+After namespace cutover, numeric `pr-N` previews receive digest GetObject and
+PutObject access only under their own stage prefix, plus the matching
+S3-mediated KMS permission. This permits an explicitly invoked synthetic
+bootstrap probe without ListBucket, production-role reuse, or a schedule.
+Task defaults remain report-only; normal preview reports do not initialize
+metadata. The probe must use an owned preview namespace, preserve a private
+journal of its exact object key, and remove only its fixture after verification.
 
 If a snapshot is invalid, the task preserves it. Pause scheduling, ensure no
 run for that namespace is active, and inspect the private object before an

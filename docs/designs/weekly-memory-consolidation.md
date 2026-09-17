@@ -215,13 +215,23 @@ It never contains topic ids, memory ids, content hashes, snippets, or rationale.
 
 ### Failure ordering
 
+Before reading memories or calling the model, scheduled apply attempts to create
+an empty schema-versioned digest for its explicit namespace, using the existing
+namespace-authorized writer and `If-None-Match: *`. Only HTTP 412 means an object
+already exists. The next GetObject must return a valid stage/namespace-bound
+snapshot and ETag; any permission, transport, missing-state, or validation error
+aborts before apply. This uses existing GetObject/PutObject permissions, without
+ListBucket or interpreting a 403 as missing state. Empty topics/counts and
+`unchangedRuns: 0` retain first-run semantics and do not mark a run complete.
+Manual and report-only invocations do not initialize state.
+
 Confirmed memory mutations happen before digest delivery and are never rolled
 back. Required Slack and SNS notifications are attempted before snapshot
 commit. The snapshot is committed only when every required notification
 succeeds, preferring a duplicate notification on the next run over recording an
 undelivered digest as complete.
 
-If the state read is unavailable or invalid, the run emits a content-free
+If a later state read is unavailable or invalid, the run emits a content-free
 `dedup_unavailable` log/metric, does not claim `new` or `resolved`, does not
 overwrite known state, and sends a degraded Slack digest plus health alarm when
 those transports are configured. S3 returns `403` for a missing key when the

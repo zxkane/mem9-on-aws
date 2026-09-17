@@ -1452,6 +1452,9 @@ export async function runConsolidation(options, deps) {
   if (!Number.isInteger(cap) || cap <= 0 || cap > DEFAULT_CAP) {
     throw new Error(`cap must be an integer between 1 and ${DEFAULT_CAP}`);
   }
+  if (scheduled && !reportOnly) {
+    await initializeScheduledDigest({ stage, namespaceId, now: clock() }, deps);
+  }
   const progress = deps.progress ?? createConsolidationProgress(stage,
     record => deps.log(`CONSOLIDATION_PHASE ${JSON.stringify(record)}`), deps.progressClock);
   const memories = await progress.run("reading", async update => {
@@ -2178,6 +2181,33 @@ export async function createProductionDeps(options, runtime = {}) {
       await db.end();
     },
   };
+}
+
+// Create only absent metadata: S3 returns 403 for a missing GetObject key when
+// the role has no ListBucket permission. Never interpret that 403 as absence.
+export async function initializeScheduledDigest({ stage, namespaceId, now }, deps) {
+  requireNamespaceId(namespaceId);
+  if (deps.namespaceId !== undefined && deps.namespaceId !== namespaceId) {
+    throw new Error("digest adapter does not match the consolidation namespace");
+  }
+  try {
+    await deps.writeDigestState({ state: {
+      schemaVersion: DIGEST_SCHEMA_VERSION,
+      stage,
+      namespaceId,
+      generatedAt: new Date(now).toISOString(),
+      unchangedRuns: 0,
+      kindCounts: {},
+      topics: [],
+    } });
+  } catch (error) {
+    if (error?.$metadata?.httpStatusCode !== 412) throw error;
+  }
+  const loaded = await deps.loadDigestState();
+  if (loaded?.status !== "ok" || typeof loaded.etag !== "string" || !loaded.etag) {
+    throw new Error("scheduled digest initialization requires valid readable state");
+  }
+  normalizeDigestState(loaded.state, stage, namespaceId);
 }
 
 export function parseConsolidationArgs(argv) {

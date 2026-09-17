@@ -72,6 +72,8 @@ function fakeDeps(memories, responses) {
   const store = new Map(memories.map((item) => [item.id, structuredClone(item)]));
   const logs = [];
   const writes = [];
+  let digestState;
+  let digestVersion = 0;
   const completeChat = vi.fn(async () => responses.shift() ?? '{"actions":[]}');
   const mutexRelease = vi.fn(async () => {});
   return {
@@ -144,9 +146,16 @@ function fakeDeps(memories, responses) {
         item.superseded_by = supersededBy;
         return true;
       }),
-      loadDigestState: vi.fn(async () => ({ status: "missing" })),
+      loadDigestState: vi.fn(async () => digestState
+        ? { status: "ok", state: structuredClone(digestState), etag: String(digestVersion) }
+        : { status: "missing" }),
       writeDigestState: vi.fn(async (input) => {
+        if ((!input.etag && digestState) || (input.etag && input.etag !== String(digestVersion))) {
+          throw Object.assign(new Error("precondition failed"), { $metadata: { httpStatusCode: 412 } });
+        }
         writes.push({ type: "state", input: structuredClone(input) });
+        digestState = structuredClone(input.state);
+        digestVersion++;
       }),
       postDigest: vi.fn(async (message) => {
         writes.push({ type: "slack", message: structuredClone(message) });
@@ -1808,7 +1817,9 @@ describe("content-free telemetry", () => {
         alarm: expect.objectContaining({ degraded: true }),
       }),
     );
-    expect(fake.writes.some(({ type }) => type === "state")).toBe(false);
+    const stateWrites = fake.writes.filter(({ type }) => type === "state");
+    expect(stateWrites).toHaveLength(1);
+    expect(stateWrites[0].input.state).toMatchObject({ topics: [], kindCounts: {}, unchangedRuns: 0 });
   });
 });
 
@@ -1926,7 +1937,7 @@ describe("risk-tiered consolidation digests", () => {
         .map((item) => [item.id, item]),
     );
     const expected = buildReviewTopic(failedReview, currentById);
-    const stateWrite = fake.writes.find(({ type }) => type === "state");
+    const stateWrite = fake.writes.findLast(({ type }) => type === "state");
     expect(stateWrite.input.state.topics).toContainEqual(
       expect.objectContaining({ payloadHash: expected.payloadHash }),
     );

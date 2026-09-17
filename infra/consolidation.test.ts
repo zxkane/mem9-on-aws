@@ -311,6 +311,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllEnvs();
   for (const key of ["$app", "$interpolate", "$jsonStringify", "aws", "sst"]) {
     delete (globalThis as Record<string, unknown>)[key];
   }
@@ -436,6 +437,41 @@ describe("consolidation task and schedule", () => {
     } finally {
       delete process.env.MEM9_DECISION_ARTIFACT_BUCKET;
     }
+  });
+
+  it.each([
+    ["pr-238", "1", true], ["pr-238", "0", false],
+    ["pr-238", undefined, false], ["prod", "1", false],
+    ["dev", "1", false], ["pr-238-extra", "1", false],
+  ])("permits preview digest storage only after cutover (%s, %s)", async (stage, required, allowed) => {
+    if (required === undefined) vi.stubEnv("MEM9_NAMESPACE_REQUIRED", undefined);
+    else vi.stubEnv("MEM9_NAMESPACE_REQUIRED", required);
+    installGlobals(stage);
+    await loadAndRun(stage);
+    const task = materialize(one("Task").args) as Record<string, any>;
+    const s3 = task.permissions.filter((permission: { actions: string[] }) =>
+      permission.actions.some(action => action.startsWith("s3:")));
+    expect(s3).toEqual(allowed ? [{
+      actions: ["s3:GetObject", "s3:PutObject"],
+      resources: [`arn:aws:s3:::mem9-audit-123456789012/consolidation-digests/${stage}/*/current-v1.json`],
+    }] : []);
+    const kms = task.permissions.filter((permission: { actions: string[] }) =>
+      permission.actions.includes("kms:GenerateDataKey"));
+    expect(kms).toHaveLength(allowed ? 1 : 0);
+    if (allowed) {
+      expect(kms[0]).toEqual({ actions: ["kms:Decrypt", "kms:GenerateDataKey"], resources: ["*"], conditions: [
+        { test: "StringEquals", variable: "kms:ViaService", values: ["s3.ap-northeast-1.amazonaws.com"] },
+        { test: "StringEquals", variable: "kms:EncryptionContext:aws:s3:arn", values: ["arn:aws:s3:::mem9-audit-123456789012"] },
+      ] });
+      expect(task.environment.MEM9_DECISION_ARTIFACT_BUCKET).toBe("mem9-audit-123456789012");
+      expect(task.environment.MEM9_DECISION_ARTIFACT_BUCKET_OWNER).toBe("123456789012");
+    } else {
+      expect(task.environment.MEM9_DECISION_ARTIFACT_BUCKET).toBeUndefined();
+    }
+    expect(task.environment.MEM9_CONSOLIDATION_REPORT_ONLY).toBe("1");
+    expect(task.environment.MEM9_CONSOLIDATION_SCHEDULED).toBeUndefined();
+    expect(resources.filter(({ kind }) => kind === "Schedule")).toHaveLength(0);
+    expect(resources.filter(({ kind }) => kind === "Role")).toHaveLength(0);
   });
 
   it("TC-CONSOL-020/023/028/079: always defines a report task but omits the ungated schedule", async () => {
