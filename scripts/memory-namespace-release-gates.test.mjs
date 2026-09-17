@@ -16,6 +16,7 @@ const acceptedStates = new Set([
   "disabled_v1",
   "future_capability",
   "postdeploy_nonblocking",
+  "operator_pending",
 ]);
 
 function expandAcceptance(items) {
@@ -79,6 +80,11 @@ describe("memory namespace coverage ownership map", () => {
         expandAcceptance(acceptance),
       ).toSorted(),
     ).toEqual(["107", "114"]);
+    expect(
+      byState.operator_pending.flatMap(({ acceptance }) =>
+        expandAcceptance(acceptance),
+      ),
+    ).toEqual(["113"]);
   });
 
   it("labels the live Gateway/IAM contract as operator-run evidence", () => {

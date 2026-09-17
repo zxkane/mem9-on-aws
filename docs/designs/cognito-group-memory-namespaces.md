@@ -896,6 +896,18 @@ no supported path still uses it; otherwise a plan-regression test proves that
 namespace search cannot select it. A future per-namespace ANN strategy requires
 a separate reviewed design.
 
+The executable release benchmark uses 20,000 synthetic rows per namespace,
+1024-dimensional vectors, and top-K 10 and 50. It compares the production
+narrow-distance/top-K hydration query with the previous exact query that
+materialized complete records, alternates query order across 20 samples, and
+requires production p95 to remain within 120 percent of that baseline under the
+same two-second statement deadline. The PR preview then runs 100 real M2M
+namespace-resolution transactions from the bootstrap task inside the
+application VPC. That gate requires p95 below 20 ms. TC-GROUPNS-113 remains a
+separate live observation: infra synthesis proves the proxy Lambda has no
+database configuration, while attributed Aurora connection evidence must not be
+inferred from whole-database connection equality.
+
 ## Durable Ingest
 
 - Canonical request bytes and idempotency keys include namespace identity.
@@ -1189,6 +1201,12 @@ the bootstrap and second switch deployment.
 Before a second namespace contains data, the compatible application can be
 rolled back only to a release that still understands namespace columns and
 membership.
+
+`scripts/namespace-rollback-ref.txt` pins that approved public main commit. CI
+rebuilds its downstream patch stack against the upstream source pinned by that
+commit. The resulting distinct binary must become healthy against the enforced
+single-namespace fixture in namespace-required mode, while the same binary must
+reject namespace-unaware compatibility mode before serving traffic.
 
 After multiple namespaces are active, code that ignores namespace is never a
 valid rollback target. Recovery options are:

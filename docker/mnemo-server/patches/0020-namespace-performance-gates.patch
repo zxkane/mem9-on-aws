@@ -1,0 +1,291 @@
+diff --git a/server/internal/repository/postgres/namespace_performance_test.go b/server/internal/repository/postgres/namespace_performance_test.go
+new file mode 100644
+index 0000000..d6c7c8c
+--- /dev/null
++++ b/server/internal/repository/postgres/namespace_performance_test.go
+@@ -0,0 +1,285 @@
++package postgres
++
++import (
++	"context"
++	"database/sql"
++	"fmt"
++	"os"
++	"sort"
++	"strings"
++	"testing"
++	"time"
++
++	"github.com/pgvector/pgvector-go"
++	"github.com/qiffang/mnemos/server/internal/domain"
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++const namespaceBenchmarkRows = 20000
++
++func seedNamespaceVectorBenchmark(t *testing.T, db *sql.DB) {
++	t.Helper()
++	for _, fixture := range []struct {
++		prefix, namespaceID, principalID string
++	}{
++		{"97000000-0000-4000-8000-", testutil.TestNamespaceID, testutil.TestPrincipalID},
++		{"98000000-0000-4000-8000-", testutil.TestOtherNamespaceID, testutil.TestOtherPrincipalID},
++	} {
++		if _, err := db.Exec(`
++			INSERT INTO memories (
++				id, content, embedding, memory_type, app_id, state, version,
++				namespace_id, created_by_principal_id, updated_by_principal_id
++			)
++			SELECT
++				$1 || lpad(i::text, 12, '0'),
++				repeat('synthetic namespace benchmark content ', 120),
++				(
++					ARRAY[
++						1::real,
++						(i::real / $4::real)
++					] || array_fill(0::real, ARRAY[1022])
++				)::vector,
++				'pinned',
++				'namespace-benchmark',
++				'active',
++				1,
++				$2,
++				$3,
++				$3
++			FROM generate_series(1, $4) AS i`,
++			fixture.prefix,
++			fixture.namespaceID,
++			fixture.principalID,
++			namespaceBenchmarkRows,
++		); err != nil {
++			t.Fatal(err)
++		}
++	}
++	if _, err := db.Exec("ANALYZE memories"); err != nil {
++		t.Fatal(err)
++	}
++}
++
++func baselineNamespaceVectorSearch(
++	ctx context.Context,
++	db *sql.DB,
++	scope domain.NamespaceScope,
++	queryVector []float32,
++	filter domain.MemoryFilter,
++	limit int,
++) ([]domain.Memory, error) {
++	repo := NewMemoryRepo(db, false, "", scope)
++	conditions, args := repo.BuildFilterConds(filter)
++	conditions = append(conditions, "embedding IS NOT NULL")
++	vectorParameter := len(args) + 1
++	limitParameter := vectorParameter + 1
++	query := fmt.Sprintf(`
++		WITH namespace_memories AS MATERIALIZED (
++			SELECT %s
++			FROM memories
++			WHERE %s
++		)
++		SELECT %s, embedding <=> $%d AS distance
++		FROM namespace_memories
++		ORDER BY embedding <=> $%d
++		LIMIT $%d`,
++		allColumns,
++		strings.Join(conditions, " AND "),
++		allColumns,
++		vectorParameter,
++		vectorParameter,
++		limitParameter,
++	)
++	args = append(args, pgvector.NewVector(queryVector), limit)
++	tx, err := db.BeginTx(ctx, &sql.TxOptions{
++		Isolation: sql.LevelRepeatableRead,
++		ReadOnly:  true,
++	})
++	if err != nil {
++		return nil, err
++	}
++	defer tx.Rollback()
++	if _, err := tx.ExecContext(
++		ctx,
++		`SELECT set_config('statement_timeout', '2000', true)`,
++	); err != nil {
++		return nil, err
++	}
++	var rowsInNamespace int
++	if err := tx.QueryRowContext(ctx, `
++		SELECT COUNT(*)
++		FROM memories
++		WHERE namespace_id = $1
++		  AND state = 'active'
++		  AND embedding IS NOT NULL`,
++		scope.NamespaceID,
++	).Scan(&rowsInNamespace); err != nil {
++		return nil, err
++	}
++	if rowsInNamespace > namespaceBenchmarkRows {
++		return nil, fmt.Errorf(
++			"baseline namespace row count exceeds %d",
++			namespaceBenchmarkRows,
++		)
++	}
++	rows, err := tx.QueryContext(ctx, query, args...)
++	if err != nil {
++		return nil, err
++	}
++	defer rows.Close()
++	var memories []domain.Memory
++	for rows.Next() {
++		memory, err := scanMemoryRowsWithDistance(rows)
++		if err != nil {
++			return nil, err
++		}
++		memories = append(memories, *memory)
++	}
++	if err := rows.Err(); err != nil {
++		return nil, err
++	}
++	if err := tx.Commit(); err != nil {
++		return nil, err
++	}
++	return memories, nil
++}
++
++func benchmarkP95(samples []time.Duration) time.Duration {
++	ordered := append([]time.Duration(nil), samples...)
++	sort.Slice(ordered, func(i, j int) bool { return ordered[i] < ordered[j] })
++	return ordered[(len(ordered)*95+99)/100-1]
++}
++
++func assertSameBenchmarkRows(
++	t *testing.T,
++	expected, actual []domain.Memory,
++	limit int,
++) {
++	t.Helper()
++	if len(expected) != limit || len(actual) != limit {
++		t.Fatalf(
++			"benchmark result lengths baseline=%d production=%d want=%d",
++			len(expected),
++			len(actual),
++			limit,
++		)
++	}
++	for index := range expected {
++		if actual[index].ID != expected[index].ID {
++			t.Fatalf("benchmark rank %d differs", index)
++		}
++		if !strings.HasPrefix(actual[index].ID, "97000000-") {
++			t.Fatalf("benchmark returned a foreign namespace row")
++		}
++	}
++}
++
++func TestNamespaceVectorConfiguredCeilingBenchmark(t *testing.T) {
++	if os.Getenv("MEM9_NAMESPACE_PERFORMANCE_TEST") != "1" {
++		t.Skip("MEM9_NAMESPACE_PERFORMANCE_TEST is not enabled")
++	}
++	db := ingestTestDB(t)
++	seedNamespaceVectorBenchmark(t, db)
++	ctx := context.Background()
++	scope := testutil.TestNamespaceScope()
++	repo := NewMemoryRepo(db, false, "", scope)
++	repo.exactVectorMaxRows = namespaceBenchmarkRows
++	repo.exactVectorTimeout = 2 * time.Second
++	queryVector := make([]float32, 1024)
++	queryVector[0] = 1
++	app := "namespace-benchmark"
++	filter := domain.MemoryFilter{AppID: &app, MinScore: -1}
++
++	for _, limit := range []int{10, 50} {
++		for index := 0; index < 3; index++ {
++			baseline, err := baselineNamespaceVectorSearch(
++				ctx,
++				db,
++				scope,
++				queryVector,
++				filter,
++				limit,
++			)
++			if err != nil {
++				t.Fatal(err)
++			}
++			production, err := repo.VectorSearch(
++				ctx,
++				queryVector,
++				filter,
++				limit,
++			)
++			if err != nil {
++				t.Fatal(err)
++			}
++			assertSameBenchmarkRows(t, baseline, production, limit)
++		}
++
++		const sampleCount = 20
++		baselineSamples := make([]time.Duration, 0, sampleCount)
++		productionSamples := make([]time.Duration, 0, sampleCount)
++		for index := 0; index < sampleCount; index++ {
++			runBaseline := func() []domain.Memory {
++				started := time.Now()
++				rows, err := baselineNamespaceVectorSearch(
++					ctx,
++					db,
++					scope,
++					queryVector,
++					filter,
++					limit,
++				)
++				if err != nil {
++					t.Fatal(err)
++				}
++				baselineSamples = append(
++					baselineSamples,
++					time.Since(started),
++				)
++				return rows
++			}
++			runProduction := func() []domain.Memory {
++				started := time.Now()
++				rows, err := repo.VectorSearch(
++					ctx,
++					queryVector,
++					filter,
++					limit,
++				)
++				if err != nil {
++					t.Fatal(err)
++				}
++				productionSamples = append(
++					productionSamples,
++					time.Since(started),
++				)
++				return rows
++			}
++			var baseline, production []domain.Memory
++			if index%2 == 0 {
++				baseline, production = runBaseline(), runProduction()
++			} else {
++				production, baseline = runProduction(), runBaseline()
++			}
++			assertSameBenchmarkRows(t, baseline, production, limit)
++		}
++		baselineP95 := benchmarkP95(baselineSamples)
++		productionP95 := benchmarkP95(productionSamples)
++		if productionP95 > baselineP95*120/100 {
++			t.Fatalf(
++				"top-k %d production p95 %s exceeds 120%% of baseline %s",
++				limit,
++				productionP95,
++				baselineP95,
++			)
++		}
++		t.Logf(
++			"namespace exact vector benchmark rows_per_namespace=%d dimensions=1024 top_k=%d samples=%d baseline_p95=%s production_p95=%s",
++			namespaceBenchmarkRows,
++			limit,
++			sampleCount,
++			baselineP95,
++			productionP95,
++		)
++	}
++}

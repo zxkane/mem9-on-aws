@@ -40,12 +40,19 @@ beforeEach(() => {
 });
 afterEach(() => vi.unstubAllEnvs());
 describe("namespace operator with an external identity provider", () => {
-  it.each(["assert-phase", "preflight", "freeze", "enforce"])(
+  it.each(["assert-phase", "preflight", "freeze", "enforce", "benchmark"])(
     "runs database-only %s without a Cognito pool",
     async (operation) => {
       vi.stubEnv("MEM9_BOOTSTRAP_OPERATION", operation);
       await main();
-      expect(spawned.mock.calls[0][1][1]).toBe(operation);
+      if (operation === "benchmark") {
+        expect(spawned.mock.calls[0][1][0]).toContain(
+          "benchmark-memory-namespaces.mjs",
+        );
+        expect(spawned.mock.calls[0][1]).toHaveLength(1);
+      } else {
+        expect(spawned.mock.calls[0][1][1]).toBe(operation);
+      }
       expect(spawned.mock.calls[0][2].env.MEM9_COGNITO_USER_POOL_ID).toBe("");
     },
   );

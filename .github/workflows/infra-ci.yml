@@ -281,6 +281,7 @@ jobs:
           shellcheck scripts/run-ingest-queue-integration.sh
           shellcheck scripts/run-memory-namespace-integration.sh
           shellcheck scripts/run-memory-namespace-e2e.sh
+          shellcheck scripts/run-memory-namespace-benchmark.sh
           shellcheck scripts/run-memory-namespace-task.sh
           shellcheck scripts/lib/memory-namespace-operator.sh
           shellcheck scripts/deploy-memory-namespace-operator-role.sh
@@ -567,6 +568,15 @@ jobs:
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: bash scripts/run-memory-namespace-e2e.sh
+
+      - name: Namespace performance E2E (preview, hard)
+        # The stage-scoped bootstrap task runs inside the application VPC and
+        # benchmarks the real M2M namespace-resolution transaction.
+        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        shell: bash
+        env:
+          STAGE: ${{ steps.deploy.outputs.stage }}
+        run: bash scripts/run-memory-namespace-benchmark.sh
 
       - name: OAuth façade smoke (preview)
         if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''

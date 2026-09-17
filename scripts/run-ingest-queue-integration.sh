@@ -228,6 +228,12 @@ docker exec "$CONTAINER" \
   psql -q -v ON_ERROR_STOP=1 -U postgres -d postgres \
   -c "CREATE DATABASE mem9_namespace_frozen TEMPLATE mem9_namespace_test"
 docker exec "$CONTAINER" \
+  psql -q -v ON_ERROR_STOP=1 -U postgres -d postgres \
+  -c "CREATE DATABASE mem9_namespace_benchmark TEMPLATE mem9_namespace_test"
+docker exec "$CONTAINER" \
+  psql -q -v ON_ERROR_STOP=1 -U postgres -d postgres \
+  -c "CREATE DATABASE mem9_namespace_rollback TEMPLATE mem9_namespace_test"
+docker exec "$CONTAINER" \
   psql -q -v ON_ERROR_STOP=1 -U postgres -d mem9_namespace_frozen \
   -c "UPDATE memory_namespace_migration_state
       SET phase = 'frozen',
@@ -238,6 +244,8 @@ docker exec "$CONTAINER" \
           legacy_principal_key = NULL
       WHERE singleton_id"
 FROZEN_DSN="postgres://postgres:test@127.0.0.1:${PORT}/mem9_namespace_frozen?sslmode=disable"
+BENCHMARK_DSN="postgres://postgres:test@127.0.0.1:${PORT}/mem9_namespace_benchmark?sslmode=disable"
+ROLLBACK_DSN="postgres://postgres:test@127.0.0.1:${PORT}/mem9_namespace_rollback?sslmode=disable"
 
 git -C "$TMP_DIR" init -q upstream
 git -C "$TMP_DIR/upstream" remote add origin https://github.com/mem9-ai/mem9.git
@@ -253,6 +261,115 @@ node "$ROOT/scripts/verify-memory-namespace-query-inventory.mjs" \
 
 cd "$TMP_DIR/upstream/server"
 go build -o "$TMP_DIR/mnemo-server" ./cmd/mnemo-server
+
+ROLLBACK_REF=$(tr -d '[:space:]' <"$ROOT/scripts/namespace-rollback-ref.txt")
+[[ "$ROLLBACK_REF" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "namespace rollback ref is invalid" >&2
+  exit 1
+}
+if ! git -C "$ROOT" cat-file -e "${ROLLBACK_REF}^{commit}" 2>/dev/null; then
+  git -C "$ROOT" fetch -q --depth 1 \
+    https://github.com/zxkane/mem9-on-aws.git "$ROLLBACK_REF"
+fi
+ROLLBACK_FILES="$TMP_DIR/rollback-files"
+mkdir -p "$ROLLBACK_FILES"
+git -C "$ROOT" archive "$ROLLBACK_REF" \
+  docker/mnemo-server/Dockerfile \
+  docker/mnemo-server/patches |
+  tar -x -C "$ROLLBACK_FILES"
+ROLLBACK_MEM9_REF=$(
+  sed -n 's/^ARG MEM9_REF=//p' \
+    "$ROLLBACK_FILES/docker/mnemo-server/Dockerfile"
+)
+[[ "$ROLLBACK_MEM9_REF" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "rollback upstream ref is invalid" >&2
+  exit 1
+}
+git -C "$TMP_DIR" init -q rollback-upstream
+git -C "$TMP_DIR/rollback-upstream" remote add origin \
+  https://github.com/mem9-ai/mem9.git
+git -C "$TMP_DIR/rollback-upstream" fetch -q --depth 1 \
+  origin "$ROLLBACK_MEM9_REF"
+git -C "$TMP_DIR/rollback-upstream" checkout -q FETCH_HEAD
+git -C "$TMP_DIR/rollback-upstream" apply \
+  "$ROLLBACK_FILES"/docker/mnemo-server/patches/*.patch
+(
+  cd "$TMP_DIR/rollback-upstream/server"
+  go build -o "$TMP_DIR/mnemo-server-rollback" ./cmd/mnemo-server
+)
+
+ROLLBACK_PORT=$(
+  node -e '
+    const {createServer}=require("node:net");
+    const server=createServer();
+    server.listen(0,"127.0.0.1",()=>{
+      process.stdout.write(String(server.address().port));
+      server.close();
+    });
+  '
+)
+ROLLBACK_LOG="$TMP_DIR/rollback-server.log"
+env -i \
+  PATH="$PATH" \
+  MNEMO_DSN="$ROLLBACK_DSN" \
+  MNEMO_DB_BACKEND=postgres \
+  MNEMO_NAMESPACE_REQUIRED=1 \
+  MNEMO_DURABLE_INGEST_ENABLED=1 \
+  MEM9_TENANT_ID=rollback-integration-tenant \
+  MNEMO_TRANSPORT_ISSUER=integration-gateway \
+  MNEMO_TRANSPORT_SIGNING_KEYS='{"a":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","b":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}' \
+  MNEMO_PORT="$ROLLBACK_PORT" \
+  MEM9_STAGE=ci \
+  "$TMP_DIR/mnemo-server-rollback" >"$ROLLBACK_LOG" 2>&1 &
+ROLLBACK_PID=$!
+ROLLBACK_HEALTHY=false
+for _ in $(seq 1 50); do
+  if node -e '
+    const response = await fetch(process.argv[1], {
+      signal: AbortSignal.timeout(500),
+    });
+    if (!response.ok) process.exit(1);
+  ' "http://127.0.0.1:${ROLLBACK_PORT}/healthz" 2>/dev/null; then
+    ROLLBACK_HEALTHY=true
+    break
+  fi
+  if ! kill -0 "$ROLLBACK_PID" 2>/dev/null; then
+    break
+  fi
+  sleep 0.2
+done
+if [[ "$ROLLBACK_HEALTHY" != "true" ]]; then
+  echo "rollback namespace-aware server did not become healthy" >&2
+  cat "$ROLLBACK_LOG" >&2
+  kill "$ROLLBACK_PID" 2>/dev/null || true
+  wait "$ROLLBACK_PID" 2>/dev/null || true
+  exit 1
+fi
+kill -TERM "$ROLLBACK_PID"
+wait "$ROLLBACK_PID"
+
+set +e
+ROLLBACK_UNAWARE_OUTPUT=$(
+  timeout 10s env -i \
+    PATH="$PATH" \
+    MNEMO_DSN="$ROLLBACK_DSN" \
+    MNEMO_DB_BACKEND=postgres \
+    MNEMO_NAMESPACE_REQUIRED=0 \
+    MNEMO_DURABLE_INGEST_ENABLED=1 \
+    MEM9_TENANT_ID=rollback-integration-tenant \
+    MNEMO_TRANSPORT_ISSUER=integration-gateway \
+    MNEMO_TRANSPORT_SIGNING_KEYS='{"a":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA","b":"AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"}' \
+    MEM9_STAGE=ci \
+    "$TMP_DIR/mnemo-server-rollback" 2>&1
+)
+ROLLBACK_UNAWARE_STATUS=$?
+set -e
+[[ "$ROLLBACK_UNAWARE_STATUS" -eq 1 ]] || {
+  echo "namespace-unaware rollback mode did not fail startup" >&2
+  exit 1
+}
+printf '%s' "$ROLLBACK_UNAWARE_OUTPUT" |
+  grep -q "namespace compatibility mode cannot start in phase"
 
 assert_frozen_server_startup_rejected() {
   local namespace_required=$1
@@ -294,4 +411,9 @@ MEM9_NAMESPACE_TEST_DSN="$MNEMO_TEST_POSTGRES_DSN" \
     "$ROOT/scripts/maintenance-postgres.test.mjs" \
     "$ROOT/scripts/memory-cleanup-namespace.test.mjs"
 export MEM9_NAMESPACE_OPERATOR_ROOT="$ROOT"
+MEM9_NAMESPACE_PERFORMANCE_TEST=1 \
+MNEMO_TEST_POSTGRES_DSN="$BENCHMARK_DSN" \
+  go test -count=1 -v \
+  -run '^TestNamespaceVectorConfiguredCeilingBenchmark$' \
+  ./internal/repository/postgres
 go test -count=1 ./...
