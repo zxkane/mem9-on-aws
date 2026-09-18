@@ -13,6 +13,10 @@ Parameters:
     Default: mem9-on-aws
     Description: SST app name; used as the ECR repository namespace prefix so the
       repo URI reads .../mem9-on-aws/mnemo-server.
+  PreviewProjectName:
+    Type: String
+    Default: mem9-on-aws/preview
+    Description: Dedicated repository namespace writable by pull-request CI.
 
 Resources:
   # ───────────────────────────────────────────────────────────────────────────
@@ -194,6 +198,70 @@ Resources:
           Value: !Ref ProjectName
         - Key: ManagedBy
           Value: cloudformation
+
+  PreviewMnemoServerRepo:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Sub ${PreviewProjectName}/mnemo-server
+      ImageTagMutability: MUTABLE
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,"description":"Expire preview images after 7 days.","selection":{"tagStatus":"tagged","tagPrefixList":["pr-"],"countType":"sinceImagePushed","countUnit":"days","countNumber":7},"action":{"type":"expire"}},{"rulePriority":2,"description":"Expire untagged preview layers after 3 days.","selection":{"tagStatus":"untagged","countType":"sinceImagePushed","countUnit":"days","countNumber":3},"action":{"type":"expire"}}]}
+      Tags:
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: DeploymentScope, Value: preview }
+        - { Key: ManagedBy, Value: cloudformation }
+
+  PreviewQwen3EmbedRepo:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Sub ${PreviewProjectName}/qwen3-embed
+      ImageTagMutability: MUTABLE
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,"description":"Expire preview images after 7 days.","selection":{"tagStatus":"tagged","tagPrefixList":["pr-"],"countType":"sinceImagePushed","countUnit":"days","countNumber":7},"action":{"type":"expire"}},{"rulePriority":2,"description":"Expire untagged preview layers after 3 days.","selection":{"tagStatus":"untagged","countType":"sinceImagePushed","countUnit":"days","countNumber":3},"action":{"type":"expire"}}]}
+      Tags:
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: DeploymentScope, Value: preview }
+        - { Key: ManagedBy, Value: cloudformation }
+
+  PreviewBootstrapRepo:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Sub ${PreviewProjectName}/bootstrap
+      ImageTagMutability: MUTABLE
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,"description":"Expire preview images after 7 days.","selection":{"tagStatus":"tagged","tagPrefixList":["pr-"],"countType":"sinceImagePushed","countUnit":"days","countNumber":7},"action":{"type":"expire"}},{"rulePriority":2,"description":"Expire untagged preview layers after 3 days.","selection":{"tagStatus":"untagged","countType":"sinceImagePushed","countUnit":"days","countNumber":3},"action":{"type":"expire"}}]}
+      Tags:
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: DeploymentScope, Value: preview }
+        - { Key: ManagedBy, Value: cloudformation }
+
+  PreviewLlmProxyRepo:
+    Type: AWS::ECR::Repository
+    DeletionPolicy: RetainExceptOnCreate
+    UpdateReplacePolicy: Retain
+    Properties:
+      RepositoryName: !Sub ${PreviewProjectName}/llm-proxy
+      ImageTagMutability: MUTABLE
+      EncryptionConfiguration: { EncryptionType: AES256 }
+      LifecyclePolicy:
+        LifecyclePolicyText: |
+          {"rules":[{"rulePriority":1,"description":"Expire preview images after 7 days.","selection":{"tagStatus":"tagged","tagPrefixList":["pr-"],"countType":"sinceImagePushed","countUnit":"days","countNumber":7},"action":{"type":"expire"}},{"rulePriority":2,"description":"Expire untagged preview layers after 3 days.","selection":{"tagStatus":"untagged","countType":"sinceImagePushed","countUnit":"days","countNumber":3},"action":{"type":"expire"}}]}
+      Tags:
+        - { Key: Project, Value: !Ref ProjectName }
+        - { Key: DeploymentScope, Value: preview }
+        - { Key: ManagedBy, Value: cloudformation }
 
 Outputs:
   MnemoServerRepoUri:

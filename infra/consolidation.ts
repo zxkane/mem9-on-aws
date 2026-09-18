@@ -1,7 +1,7 @@
 import type { DbOutputs } from "./db";
 import type { EcsOutputs } from "./ecs";
 import { resolveVpc } from "./vpc";
-import { accountId, applicationRegion, ecrImage } from "./ecr";
+import { accountId, applicationRegion, workloadImage } from "./ecr";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import type { MaintenanceIdentityOutputs } from "./namespace-identity";
 import { taskFailureAlarm } from "./task-failure-alarm";
@@ -190,7 +190,7 @@ export function consolidation(
     value: namespaceIds.value.apply(maintenanceNamespaceIds),
     tags,
   });
-  const image = ecrImage("mem9-on-aws/llm-proxy", IMAGE_TAG);
+  const image = workloadImage("llm-proxy", IMAGE_TAG);
   const artifactBucketOwner = accountId();
   const artifactBucketName = decisionArtifactBucketName(artifactBucketOwner);
   const region = aws.getRegionOutput().name;

@@ -576,7 +576,7 @@ describe("CloudFormation declarations", () => {
     });
   });
 
-  it("TC-ECR-SCAN-011: leaves all four retained repositories in their existing stack", async () => {
+  it("TC-ECR-SCAN-011: retains four production and four preview repositories", async () => {
     const source = await readFile(
       join(repoRoot, "infra", "cloudformation", "ecr-repositories.yaml"),
       "utf8",
@@ -585,12 +585,17 @@ describe("CloudFormation declarations", () => {
     const repositoryNames = Object.values(template.Resources)
       .filter((resource) => resource.Type === "AWS::ECR::Repository")
       .map((resource) =>
-        resource.Properties.RepositoryName.replace("${ProjectName}", "mem9-on-aws"),
+        resource.Properties.RepositoryName
+          .replace("${ProjectName}", "mem9-on-aws")
+          .replace("${PreviewProjectName}", "mem9-on-aws/preview"),
       )
       .sort();
     const repositoryCount = (source.match(/Type: AWS::ECR::Repository$/gm) ?? []).length;
-    expect(repositoryCount).toBe(4);
-    expect(repositoryNames).toEqual(projectRepositories("mem9-on-aws").sort());
+    expect(repositoryCount).toBe(8);
+    expect(repositoryNames).toEqual([
+      ...projectRepositories("mem9-on-aws"),
+      ...projectRepositories("mem9-on-aws/preview"),
+    ].sort());
     expect(source).not.toContain("AWS::ECR::RegistryScanningConfiguration");
   });
 

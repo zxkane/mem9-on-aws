@@ -2,7 +2,7 @@ import type { DbOutputs } from "./db";
 import type { EcsOutputs } from "./ecs";
 import type { MaintenanceIdentityOutputs } from "./namespace-identity";
 import type { TenantIdentityOutputs } from "./tenant-identity";
-import { accountId, applicationRegion, ecrImage } from "./ecr";
+import { accountId, applicationRegion, workloadImage } from "./ecr";
 import { resolveVpc } from "./vpc";
 import { taskContainerLogGroupName } from "./consolidation";
 import { disableTaskContainerPseudoTerminal } from "./ecs-task-definition";
@@ -60,7 +60,7 @@ export function standaloneCleanupTask(
     architecture: "arm64",
     cpu: "0.5 vCPU",
     memory: "1 GB",
-    image: ecrImage("mem9-on-aws/llm-proxy", process.env.MEM9_IMAGE_TAG || "latest"),
+    image: workloadImage("llm-proxy", process.env.MEM9_IMAGE_TAG || "latest"),
     entrypoint: ["node"],
     // The CLI requires --stage and uses --base-url to bypass discovery. It
     // defaults to a dry run; apply requires an explicit operator override.

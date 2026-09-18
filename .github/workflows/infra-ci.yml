@@ -79,6 +79,7 @@ on:
       # the per-PR SST deploy. Re-include templates whose regression tests run
       # in this workflow.
       - "!infra/cloudformation/**"
+      - "infra/cloudformation/ecr-repositories.yaml"
       - "infra/cloudformation/github-actions-role.yaml"
       - "infra/cloudformation/ecr-registry-scanning.yaml"
       - "infra/cloudformation/workload-permissions-boundary.yaml"
@@ -98,6 +99,7 @@ on:
       - "tsconfig.json"
       - "vitest.config.ts"
       - "!infra/cloudformation/**"
+      - "infra/cloudformation/ecr-repositories.yaml"
       - "infra/cloudformation/github-actions-role.yaml"
       - "infra/cloudformation/ecr-registry-scanning.yaml"
       - "infra/cloudformation/workload-permissions-boundary.yaml"
@@ -474,6 +476,7 @@ jobs:
         # AWS_PREVIEW_ROLE_ARN), fall back to `latest` — infra/ecs.ts's own default.
         env:
           MEM9_IMAGE_TAG: ${{ needs.build-and-push-image.outputs.image_tag || 'latest' }}
+          MEM9_ECR_NAMESPACE: ${{ needs.build-and-push-image.outputs.image_tag != '' && 'mem9-on-aws/preview' || 'mem9-on-aws' }}
           # Bedrock Project id for the llm-proxy sidecar's OpenAI-Project cost
           # header (infra/ecs.ts BEDROCK_PROJECT). Repo variable set out-of-band by
           # scripts/deploy-bedrock-mantle-project.sh; empty → the proxy omits the
@@ -577,6 +580,7 @@ jobs:
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
           MEM9_IMAGE_TAG: ${{ needs.build-and-push-image.outputs.image_tag || 'latest' }}
+          MEM9_ECR_NAMESPACE: ${{ needs.build-and-push-image.outputs.image_tag != '' && 'mem9-on-aws/preview' || 'mem9-on-aws' }}
           MEM9_BEDROCK_PROJECT: ${{ vars.MEM9_BEDROCK_PROJECT }}
           MEM9_BEDROCK_PROJECT_OPENAI: ${{ vars.MEM9_BEDROCK_PROJECT_OPENAI }}
           MEM9_LLM_MODEL: ${{ vars.MEM9_LLM_MODEL }}
@@ -1053,6 +1057,7 @@ jobs:
     env:
       AWS_REGION: ${{ needs.application-region.outputs.region }}
       ROLE_NAME: ${{ github.event_name == 'pull_request' && 'github-actions-mem9-on-aws-preview' || 'github-actions-mem9-on-aws-prod' }}
+      ECR_NS: ${{ github.event_name == 'pull_request' && 'mem9-on-aws/preview' || 'mem9-on-aws' }}
     outputs:
       # The per-commit tag, or empty when skipped, so
       # downstream jobs can fall back to `latest`.
@@ -1471,6 +1476,7 @@ jobs:
         # (`mem9-<sha7>`); infra/ecs.ts reads MEM9_IMAGE_TAG.
         env:
           MEM9_IMAGE_TAG: ${{ steps.deploy-image.outputs.image_tag }}
+          MEM9_ECR_NAMESPACE: mem9-on-aws
           # New opt-in: the legacy tenant-wide flag cannot activate scheduling.
           MEM9_CONSOLIDATION_SCHEDULE_ENABLED: ${{ vars.MEM9_NAMESPACE_CONSOLIDATION_SCHEDULE_ENABLED || '0' }}
           # Preserve an existing production OAuth hostname. New repositories may

@@ -17,6 +17,10 @@ const deployScript = readFileSync(
   resolve(root, "scripts/deploy-github-role.sh"),
   "utf8",
 );
+const ecrSource = readFileSync(
+  resolve(root, "infra/cloudformation/ecr-repositories.yaml"),
+  "utf8",
+);
 const workflow = parse(
   readFileSync(resolve(root, ".github/workflows/infra-ci.yml"), "utf8"),
 );
@@ -156,6 +160,11 @@ describe("split GitHub OIDC deployment roles", () => {
     expect(roleSource).toContain("parameter/${ProjectName}/pr-*");
     expect(roleSource).toContain("secret:${ProjectName}-prod-*");
     expect(roleSource).toContain("secret:${ProjectName}-pr-*");
+    expect(roleSource).toContain("Sid: DenyProductionImageWrites");
+    expect(roleSource).toContain("Sid: DenyPreviewImageWrites");
+    expect(roleSource).toContain(
+      "repository/${ProjectName}/preview/mnemo-server",
+    );
     const previewPolicy = role("GitHubPreviewActionsRole").Policies[0]
       .PolicyDocument;
     const productionPolicy = role("GitHubProductionActionsRole").Policies[0]
@@ -220,6 +229,28 @@ describe("split GitHub OIDC deployment roles", () => {
         ["arn:", "aws:s3:::fixture/app/mem9-on-aws/prod.json"].join(""),
       ),
     ).toBe(true);
+    const previewImageDeny = previewPolicy.Statement.find(
+      ({ Sid }) => Sid === "DenyProductionImageWrites",
+    );
+    const productionImageDeny = productionPolicy.Statement.find(
+      ({ Sid }) => Sid === "DenyPreviewImageWrites",
+    );
+    expect(previewImageDeny.Action.toSorted()).toEqual([
+      "ecr:CompleteLayerUpload",
+      "ecr:InitiateLayerUpload",
+      "ecr:PutImage",
+      "ecr:UploadLayerPart",
+    ]);
+    expect(previewImageDeny.Resource).toHaveLength(4);
+    expect(previewImageDeny.Resource.every(
+      (resource) => !resource.includes("/preview/"),
+    )).toBe(true);
+    expect(productionImageDeny.Action.toSorted()).toEqual(
+      previewImageDeny.Action.toSorted(),
+    );
+    expect(productionImageDeny.Resource).toContain(
+      "repository/${ProjectName}/preview/*",
+    );
     expect(
       explicitlyDenies(
         previewPolicy,
@@ -350,7 +381,20 @@ describe("split GitHub OIDC deployment roles", () => {
       "${{ secrets.AWS_PROD_ROLE_ARN }}",
     );
     expect(workflow.jobs["build-and-push-image"].environment).toContain("prod");
+    expect(workflow.jobs["build-and-push-image"].env.ECR_NS).toContain(
+      "mem9-on-aws/preview",
+    );
     expect(workflow.jobs["deploy-prod"].environment).toBe("prod");
+    const previewDeploy = workflow.jobs["deploy-preview"].steps.find(
+      ({ name }) => name === "Deploy PR stage",
+    );
+    expect(previewDeploy.env.MEM9_ECR_NAMESPACE).toContain(
+      "mem9-on-aws/preview",
+    );
+    const prodDeploy = workflow.jobs["deploy-prod"].steps.find(
+      ({ name }) => name === "Deploy prod stage",
+    );
+    expect(prodDeploy.env.MEM9_ECR_NAMESPACE).toBe("mem9-on-aws");
     for (const jobName of [
       "build-and-push-image",
       "deploy-preview",
@@ -371,6 +415,31 @@ describe("split GitHub OIDC deployment roles", () => {
     expect(workflow.jobs["report-prod-failure"].if).toContain(
       "needs.changes.result != 'success'",
     );
+  });
+
+  it("TC-DEPLOYROLE-015/016: owns isolated preview repositories safely", () => {
+    for (const name of [
+      "mnemo-server",
+      "qwen3-embed",
+      "bootstrap",
+      "llm-proxy",
+    ]) {
+      expect(ecrSource).toContain(
+        `RepositoryName: !Sub \${PreviewProjectName}/${name}`,
+      );
+    }
+    expect(
+      (ecrSource.match(/DeletionPolicy: RetainExceptOnCreate/g) ?? []).length,
+    ).toBe(4);
+  });
+
+  it("re-includes the ECR owner template after the CloudFormation exclusion", () => {
+    for (const trigger of ["pull_request", "push"]) {
+      const paths = workflow.on[trigger].paths;
+      expect(
+        paths.indexOf("infra/cloudformation/ecr-repositories.yaml"),
+      ).toBeGreaterThan(paths.indexOf("!infra/cloudformation/**"));
+    }
   });
 
 

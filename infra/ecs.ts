@@ -50,7 +50,7 @@
 
 import { resolveVpc } from "./vpc";
 import type { DbOutputs } from "./db";
-import { ecrImage, accountId, applicationRegion } from "./ecr";
+import { workloadImage, accountId, applicationRegion } from "./ecr";
 import { observability } from "./observability";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import type { NamespaceIdentityOutputs } from "./namespace-identity";
@@ -184,9 +184,9 @@ export function ecs(
 
   // Image URIs (out-of-band ECR, referenced read-only). All three share IMAGE_TAG
   // so a single CI run pins the whole task consistently.
-  const mnemoImage = ecrImage("mem9-on-aws/mnemo-server", IMAGE_TAG);
-  const embedImage = ecrImage("mem9-on-aws/qwen3-embed", IMAGE_TAG);
-  const llmProxyImage = ecrImage("mem9-on-aws/llm-proxy", IMAGE_TAG);
+  const mnemoImage = workloadImage("mnemo-server", IMAGE_TAG);
+  const embedImage = workloadImage("qwen3-embed", IMAGE_TAG);
+  const llmProxyImage = workloadImage("llm-proxy", IMAGE_TAG);
 
   // ECS cluster in the existing default VPC. `loadBalancerSubnets` is required by
   // the type even though we create no ALB (the MCP surface uses a Lambda-proxy +

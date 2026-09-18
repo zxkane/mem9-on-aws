@@ -16,3 +16,5 @@
 | TC-DEPLOYROLE-012 | Additive owner-stack rollout | New roles exist while legacy role remains usable |
 | TC-DEPLOYROLE-013 | Legacy retirement | Old role trust is disabled and its repository secret removed only after both paths pass |
 | TC-DEPLOYROLE-014 | Rollback is invoked | Legacy role can be conditionally restored without widening fork trust |
+| TC-DEPLOYROLE-015 | Preview workload images are built | All four `pr-*` tags are written only below `mem9-on-aws/preview/*` and the preview task definitions reference that namespace |
+| TC-DEPLOYROLE-016 | Production image publication is attempted against preview repositories | Production role receives an explicit deny |

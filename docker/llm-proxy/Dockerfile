@@ -1,4 +1,5 @@
 # llm-proxy sidecar — OpenAI /v1/chat/completions proxy → Amazon Bedrock Mantle.
+# PR builds publish the complete image set to a dedicated preview repository namespace.
 #
 # ARCHITECTURE.md §7 (LLM smart-ingest): mem9 reads MNEMO_LLM_API_KEY once at
 # startup (immutable) and its client sends only Authorization + Content-Type. This

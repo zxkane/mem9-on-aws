@@ -1073,6 +1073,10 @@ Resources:
               - !Sub arn:${AWS::Partition}:ecr:${ApplicationRegion}:${AWS::AccountId}:repository/${ProjectName}/qwen3-embed
               - !Sub arn:${AWS::Partition}:ecr:${ApplicationRegion}:${AWS::AccountId}:repository/${ProjectName}/bootstrap
               - !Sub arn:${AWS::Partition}:ecr:${ApplicationRegion}:${AWS::AccountId}:repository/${ProjectName}/llm-proxy
+              - !Sub arn:${AWS::Partition}:ecr:${ApplicationRegion}:${AWS::AccountId}:repository/${ProjectName}/preview/mnemo-server
+              - !Sub arn:${AWS::Partition}:ecr:${ApplicationRegion}:${AWS::AccountId}:repository/${ProjectName}/preview/qwen3-embed
+              - !Sub arn:${AWS::Partition}:ecr:${ApplicationRegion}:${AWS::AccountId}:repository/${ProjectName}/preview/bootstrap
+              - !Sub arn:${AWS::Partition}:ecr:${ApplicationRegion}:${AWS::AccountId}:repository/${ProjectName}/preview/llm-proxy
   # ───────────────────────────────────────────────────────────────────────────
   # Policy 7 — MCP proxy Lambda (infra/gateway.ts): the VPC-attached proxy Lambda
   # (nodejs24.x) the AgentCore Gateway invokes to reach mnemo-server privately over
@@ -1586,6 +1590,18 @@ Resources:
                   - ssm:PutParameter
                   - ssm:RemoveTagsFromResource
                 Resource: !Sub arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:parameter/sst/bootstrap
+              - Sid: DenyProductionImageWrites
+                Effect: Deny
+                Action:
+                  - ecr:CompleteLayerUpload
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ecr:${ApplicationRegion}:${AWS::AccountId}:repository/${ProjectName}/mnemo-server
+                  - !Sub arn:${AWS::Partition}:ecr:${ApplicationRegion}:${AWS::AccountId}:repository/${ProjectName}/qwen3-embed
+                  - !Sub arn:${AWS::Partition}:ecr:${ApplicationRegion}:${AWS::AccountId}:repository/${ProjectName}/bootstrap
+                  - !Sub arn:${AWS::Partition}:ecr:${ApplicationRegion}:${AWS::AccountId}:repository/${ProjectName}/llm-proxy
               - !If
                 - HasProductionHostedZone
                 - Sid: DenyProductionHostedZones
@@ -1706,6 +1722,14 @@ Resources:
                       - !Sub app/${ProjectName}/pr-*.json
                       - !Sub app/${ProjectName}/.lock/pr-*.json
                       - !Sub lock/${ProjectName}/pr-*.json
+              - Sid: DenyPreviewImageWrites
+                Effect: Deny
+                Action:
+                  - ecr:CompleteLayerUpload
+                  - ecr:InitiateLayerUpload
+                  - ecr:PutImage
+                  - ecr:UploadLayerPart
+                Resource: !Sub arn:${AWS::Partition}:ecr:${ApplicationRegion}:${AWS::AccountId}:repository/${ProjectName}/preview/*
               - Sid: DenyPreviewSecretDecrypt
                 Effect: Deny
                 Action: kms:Decrypt

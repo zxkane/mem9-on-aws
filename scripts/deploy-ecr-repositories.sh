@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# deploy-ecr-repositories.sh — Create or update the four OUT-OF-BAND ECR
-# repositories for the mem9-on-aws workload images.
+# deploy-ecr-repositories.sh — Create or update the production and preview
+# OUT-OF-BAND ECR repositories for the mem9-on-aws workload images.
 #
 # Scope: **ECR repositories only**. The SST/Pulumi app does not manage these
 # repositories; it references them read-only. Owning them out-of-band means
@@ -126,6 +126,6 @@ echo "Repository URIs:"
 printf '%s\n' "$REPO_URIS"
 echo
 echo "Next steps:"
-echo "  1. CI builds four arm64 images and pushes each to its matching repository."
+echo "  1. CI pushes production and preview images to isolated repository paths."
 echo "  2. infra/ecr.ts composes the same URIs from account+region+namespace and"
 echo "     references \${uri}:\${tag} read-only."
