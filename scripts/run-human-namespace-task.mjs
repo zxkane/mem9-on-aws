@@ -101,14 +101,33 @@ export async function main() {
   };
   await writeFile(deployment, JSON.stringify(manifest), { mode: 0o600 });
   await chmod(deployment, 0o600);
-  await runAcceptance([
-    "--deployment-file",
-    deployment,
-    "--fixtures-file",
-    fixtures,
-    "--evidence-file",
-    evidence,
-  ]);
+  try {
+    await runAcceptance([
+      "--deployment-file",
+      deployment,
+      "--fixtures-file",
+      fixtures,
+      "--evidence-file",
+      evidence,
+    ]);
+  } catch (error) {
+    let publicCode = "operator_failure";
+    try {
+      const failure = JSON.parse(
+        await readFile(`${fixtures}.failure.local.json`, "utf8"),
+      );
+      const candidate =
+        failure.name === "HumanAcceptanceError"
+          ? failure.message
+          : failure.name;
+      if (/^[A-Za-z][A-Za-z0-9_]{0,63}$/u.test(candidate))
+        publicCode = candidate;
+    } catch {
+      // The task log remains intentionally content-free.
+    }
+    error.publicCode = publicCode;
+    throw error;
+  }
   const result = JSON.parse(await readFile(evidence, "utf8"));
   if (result.success !== true || result.cleanup_complete !== true)
     throw new Error("human acceptance evidence is incomplete");
@@ -118,8 +137,10 @@ if (
   process.argv[1] &&
   new URL(`file://${process.argv[1]}`).href === import.meta.url
 ) {
-  main().catch(() => {
-    process.stderr.write("human namespace preview acceptance failed\n");
+  main().catch((error) => {
+    process.stderr.write(
+      `human namespace preview acceptance failed (${error.publicCode ?? "operator_failure"})\n`,
+    );
     process.exitCode = 1;
   });
 }
