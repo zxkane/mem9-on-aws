@@ -88,4 +88,4 @@ for _ in $(seq 1 12); do
   grep -qx 'human namespace acceptance: complete' "$OUTPUT" && break
   sleep 5
 done
-node scripts/run-human-namespace-e2e.mjs --verify-output-file "$OUTPUT"
+node scripts/verify-human-namespace-output.mjs "$OUTPUT"
