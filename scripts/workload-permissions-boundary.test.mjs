@@ -1489,12 +1489,53 @@ async function runRolloutGateMock({
     `#!/usr/bin/env bash
 set -euo pipefail
 printf 'aws %s\\n' "$*" >> "$MOCK_CALLS"
-if [[ "\${1:-} \${2:-}" == "sts get-caller-identity" ]]; then
-  printf '{"Account":"%s","Arn":"arn:%s:sts::%s:assumed-role/operator/session"}\\n' \
-    "$MOCK_CALLER_ACCOUNT" "$MOCK_CALLER_PARTITION" "$MOCK_CALLER_ACCOUNT"
-else
-  exit 2
-fi
+case "\${1:-} \${2:-}" in
+  "sts get-caller-identity")
+    printf '{"Account":"%s","Arn":"arn:%s:sts::%s:assumed-role/operator/session"}\\n' \
+      "$MOCK_CALLER_ACCOUNT" "$MOCK_CALLER_PARTITION" "$MOCK_CALLER_ACCOUNT"
+    ;;
+  "cloudformation describe-stacks")
+    if [[ "$*" == *"ApplicationRegion"* ]]; then
+      printf '%s\\n' "$MOCK_CONFIGURED_APPLICATION_REGION"
+    elif [[ "$*" == *"LegacyRoleEnabled"* ]]; then
+      printf 'true\\n'
+    elif [[ "$*" == *"OutputKey"* ]]; then
+      printf 'arn:aws:iam::<aws-account-id>:role/fixture\\n'
+    else
+      printf '{}\\n'
+    fi
+    ;;
+  "cloudformation update-stack"|"cloudformation wait"|"s3 cp")
+    printf '{}\\n'
+    ;;
+  "s3api list-buckets")
+    printf 'fixture-template-bucket\\n'
+    ;;
+  "s3api get-bucket-location")
+    printf 'us-west-1\\n'
+    ;;
+  "iam list-open-id-connect-providers")
+    printf 'None\\n'
+    ;;
+  "ec2 describe-vpcs")
+    printf 'vpc-aaaaaaaaaaaaaaaaa\\n'
+    ;;
+  "ec2 describe-subnets")
+    printf 'subnet-bbbbbbbbbbbbbbbbb\\tsubnet-ccccccccccccccccc\\n'
+    ;;
+  "servicediscovery list-namespaces")
+    printf '["ns-fixture"]\\n'
+    ;;
+  "servicediscovery get-namespace")
+    printf 'ZFIXTURE123\\n'
+    ;;
+  "route53 get-hosted-zone")
+    printf '["vpc-aaaaaaaaaaaaaaaaa"]\\n'
+    ;;
+  *)
+    exit 2
+    ;;
+esac
 `,
   );
   await writeFile(
@@ -8988,7 +9029,10 @@ describe("boundary and deploy-role templates", () => {
 
     const deployRoleTemplate = parseCloudFormation(deployRoleTemplatePath);
     const deployRole = Object.values(deployRoleTemplate.Resources).find(
-      ({ Type }) => Type === "AWS::IAM::Role",
+      ({ Type, Properties }) =>
+        Type === "AWS::IAM::Role" &&
+        resolveTemplateValue(Properties.RoleName) ===
+          contract.identifiers.deployRoleName,
     );
     expect(resolveTemplateValue(deployRole.Properties.RoleName)).toBe(
       contract.identifiers.deployRoleName,
@@ -9358,7 +9402,9 @@ describe("boundary and deploy-role templates", () => {
         }
 
         const awsGate = job.steps.find(
-          (step) => step.name === "Gate on AWS_ROLE_ARN",
+          (step) =>
+            step.name?.startsWith("Gate on ") &&
+            step.env?.BOUNDARY_ENFORCED,
         );
         expect(
           awsGate,

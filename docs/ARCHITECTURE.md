@@ -973,9 +973,12 @@ window requires no concurrent workflow or repository-settings changes in that
 interval. This public repository's fork-triggered `pull_request` runs receive
 neither repository secrets nor write permissions, so they cannot request the
 OIDC token and the checked-in AWS steps also skip without
-`secrets.AWS_ROLE_ARN`. ARN secrecy is not an authorization boundary: the
-deploy role still trusts the repository's `pull_request` subject for
-same-repository previews. Before any workflow gives untrusted pull-request code
+`secrets.AWS_PREVIEW_ROLE_ARN`. ARN secrecy is not an authorization boundary.
+The preview role trusts only the dedicated preview-ci and preview-maintenance
+Environment subjects, with explicit production-stage denies. The
+production role trusts only the protected production Environment subject; every
+credential-bearing production job is bound to that environment. Before any workflow gives
+untrusted pull-request code
 `id-token: write`, including a `pull_request_target` path, the workflow's
 emitted subject must be identified and every matching deploy-role trust entry
 removed out of band until permanent enforcement is verified.

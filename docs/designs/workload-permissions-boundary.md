@@ -161,10 +161,9 @@ attachment lifecycle; it does not expose those EC2 actions to function code or
 another workload service.
 
 This common policy is a project-wide action/resource ceiling, not a stage
-isolation boundary. Pull-request and production jobs currently assume the same
-deploy role, which can write identity policies on any bounded project role.
-Separating preview and production trust requires distinct OIDC deploy roles and
-is not claimed by this design.
+isolation boundary. Pull-request and production jobs use distinct OIDC deploy
+roles with opposite-stage explicit denies. Both roles retain this common
+boundary-enforced policy surface for creating project workloads.
 
 The repository variables and workflow gates are mechanical maintenance
 interlocks, not an authorization boundary against someone who can modify the
@@ -178,15 +177,17 @@ reduced to read-only. The `id-token` permission supports only `write` or `none`,
 and
 [GitHub requires `id-token: write`](https://docs.github.com/en/actions/reference/security/oidc#workflow-permissions-for-the-requesting-the-oidc-token)
 to request an OIDC token. A public-fork run therefore cannot mint the token
-needed by `AssumeRoleWithWebIdentity`. The role ARN enters the checked-in
-workflow only as `secrets.AWS_ROLE_ARN`, so the fork-triggerable AWS jobs also
-skip their official AWS path when that secret is absent. That gate is an
+needed by `AssumeRoleWithWebIdentity`. The preview role ARN enters the checked-in
+workflow only as `secrets.AWS_PREVIEW_ROLE_ARN`, so fork-triggerable AWS jobs
+also skip their official AWS path when that secret is absent. That gate is an
 operational interlock. A role ARN is an identifier, not an authorization
 boundary; IAM authorizes the token against the role's audience and subject
 conditions.
 
-The deploy role's `pull_request` subject remains in its OIDC trust for
-same-repository preview runs. This argument does not rely on whether `vars.*`
+The preview role trusts only the `preview-ci` and `preview-maintenance`
+Environment subjects and carries production-stage denies. A separate production
+role trusts only the protected `prod` Environment subject, and every
+credential-bearing production job is bound to that environment. This argument does not rely on whether `vars.*`
 reaches fork-triggered workflows. Writers who can modify same-repository
 workflow code are trusted, and no concurrent workflow or repository-settings
 changes are allowed during rollout. Before any workflow can give untrusted

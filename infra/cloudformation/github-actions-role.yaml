@@ -53,9 +53,20 @@ Parameters:
   ApplicationPrivateSubnetArns:
     Type: CommaDelimitedList
     Description: ARNs of the private subnets used by the proxy Lambda.
+  ProductionHostedZoneArn:
+    Type: String
+    Default: ""
+    Description: Exact production Cloud Map private hosted-zone ARN denied to preview CI.
+  LegacyRoleEnabled:
+    Type: String
+    Default: "true"
+    AllowedValues: ["true", "false"]
+    Description: Keep the legacy shared deploy role during the guarded rollout.
 
 Conditions:
   CreateOIDCProvider: !Equals [!Ref OIDCProviderArn, ""]
+  KeepLegacyRole: !Equals [!Ref LegacyRoleEnabled, "true"]
+  HasProductionHostedZone: !Not [!Equals [!Ref ProductionHostedZoneArn, ""]]
 
 Resources:
   # ───────────────────────────────────────────────────────────────────────────
@@ -376,6 +387,8 @@ Resources:
               - iam:GetRole
             Resource:
               - !Sub arn:aws:iam::${AWS::AccountId}:role/github-actions-${GitHubRepo}
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/github-actions-${GitHubRepo}-preview
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/github-actions-${GitHubRepo}-prod
 
   # ───────────────────────────────────────────────────────────────────────────
   # Policy 3 — Scaffold resource grants: SSM (state + the meta stack's params),
@@ -1459,8 +1472,262 @@ Resources:
               - !Sub arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:function:${ProjectName}-*
 
   # ───────────────────────────────────────────────────────────────────────────
-  # IAM Role — assumed by GitHub Actions via OIDC.
+  # IAM roles — split preview and production identities. The legacy role remains
+  # conditional for the guarded live rollout and rollback.
   # ───────────────────────────────────────────────────────────────────────────
+  GitHubPreviewActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub github-actions-${GitHubRepo}-preview
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated:
+                !If [CreateOIDCProvider, !Ref GithubOidc, !Ref OIDCProviderArn]
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub:
+                  - !Sub repo:${GitHubOrg}/${GitHubRepo}:environment:preview-ci
+                  - !Sub repo:${GitHubOrg}/${GitHubRepo}:environment:preview-maintenance
+      ManagedPolicyArns:
+        - !Ref DenyPolicy
+        - !Ref CorePolicy
+        - !Ref ScaffoldPolicy
+        - !Ref DatabasePolicy
+        - !Ref ComputePolicy
+        - !Ref ImageBuildPolicy
+        - !Ref LambdaProxyPolicy
+        - !Ref GatewayMcpPolicy
+        - !Ref OAuth2FacadePolicy
+        - !Ref AlertDeliveryPolicy
+      Policies:
+        - PolicyName: preview-stage-isolation
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DenyTaggedProductionResources
+                Effect: Deny
+                Action: "*"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:ResourceTag/Stage: prod
+              - Sid: DenyProductionRequestTags
+                Effect: Deny
+                Action: "*"
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:RequestTag/Stage: prod
+              - Sid: DenyNamedProductionResources
+                Effect: Deny
+                Action: "*"
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:parameter/${ProjectName}/prod/*
+                  - !Sub arn:${AWS::Partition}:secretsmanager:*:${AWS::AccountId}:secret:${ProjectName}-prod-*
+                  - !Sub arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:function:${ProjectName}-prod-*
+                  - !Sub arn:${AWS::Partition}:ecs:*:${AWS::AccountId}:cluster/${ProjectName}-prod-*
+                  - !Sub arn:${AWS::Partition}:ecs:*:${AWS::AccountId}:service/${ProjectName}-prod-*/*
+                  - !Sub arn:${AWS::Partition}:ecs:*:${AWS::AccountId}:task-definition/${ProjectName}-prod-*
+                  - !Sub arn:${AWS::Partition}:rds:*:${AWS::AccountId}:cluster:${ProjectName}-prod-*
+                  - !Sub arn:${AWS::Partition}:rds:*:${AWS::AccountId}:db:${ProjectName}-prod-*
+                  - !Sub arn:${AWS::Partition}:rds:*:${AWS::AccountId}:subgrp:${ProjectName}-prod-*
+                  - !Sub arn:${AWS::Partition}:rds:*:${AWS::AccountId}:cluster-pg:${ProjectName}-prod-*
+                  - !Sub arn:${AWS::Partition}:rds:*:${AWS::AccountId}:pg:${ProjectName}-prod-*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-prod-*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aw*-prod-*
+                  - !Sub arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/sst/*${ProjectName}-prod-*
+                  - !Sub arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/sst/*${ProjectName}-prod-*/*
+              - Sid: DenyProductionState
+                Effect: Deny
+                Action: s3:*
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::*/app/${ProjectName}/prod.json
+                  - !Sub arn:${AWS::Partition}:s3:::*/app/${ProjectName}/.lock/prod.json
+                  - !Sub arn:${AWS::Partition}:s3:::*/lock/${ProjectName}/prod.json
+              - Sid: DenyProductionStateList
+                Effect: Deny
+                Action: s3:ListBucket
+                Resource: !Sub arn:${AWS::Partition}:s3:::sst-state-*
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - !Sub app/${ProjectName}/prod.json
+                      - !Sub app/${ProjectName}/.lock/prod.json
+                      - !Sub lock/${ProjectName}/prod.json
+              - Sid: DenySharedStateBucketMutation
+                Effect: Deny
+                Action:
+                  - s3:DeleteBucket
+                  - s3:DeleteBucketPolicy
+                  - s3:PutBucketAcl
+                  - s3:PutBucketCORS
+                  - s3:PutBucketNotification
+                  - s3:PutBucketOwnershipControls
+                  - s3:PutBucketPolicy
+                  - s3:PutBucketPublicAccessBlock
+                  - s3:PutBucketTagging
+                  - s3:PutBucketVersioning
+                  - s3:PutEncryptionConfiguration
+                  - s3:PutLifecycleConfiguration
+                  - s3:PutReplicationConfiguration
+                Resource: !Sub arn:${AWS::Partition}:s3:::sst-state-*
+              - Sid: DenySharedSstBootstrapMutation
+                Effect: Deny
+                Action:
+                  - ssm:AddTagsToResource
+                  - ssm:DeleteParameter
+                  - ssm:DeleteParameters
+                  - ssm:PutParameter
+                  - ssm:RemoveTagsFromResource
+                Resource: !Sub arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:parameter/sst/bootstrap
+              - !If
+                - HasProductionHostedZone
+                - Sid: DenyProductionHostedZones
+                  Effect: Deny
+                  Action:
+                    - route53:AssociateVPCWithHostedZone
+                    - route53:ChangeResourceRecordSets
+                    - route53:ChangeTagsForResource
+                    - route53:DeleteHostedZone
+                    - route53:DisassociateVPCFromHostedZone
+                    - route53:GetHostedZone
+                    - route53:ListResourceRecordSets
+                    - route53:ListTagsForResource
+                  Resource: !Ref ProductionHostedZoneArn
+                - !Ref AWS::NoValue
+              - Sid: DenyProductionSecretDecrypt
+                Effect: Deny
+                Action: kms:Decrypt
+                Resource: "*"
+                Condition:
+                  ArnLike:
+                    kms:EncryptionContext:SecretARN: !Sub arn:${AWS::Partition}:secretsmanager:*:${AWS::AccountId}:secret:${ProjectName}-prod-*
+              - Sid: DenyProductionParameterDecrypt
+                Effect: Deny
+                Action: kms:Decrypt
+                Resource: "*"
+                Condition:
+                  ArnLike:
+                    kms:EncryptionContext:PARAMETER_ARN: !Sub arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:parameter/${ProjectName}/prod/*
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: DeploymentScope
+          Value: preview
+        - Key: ManagedBy
+          Value: cloudformation
+
+  GitHubProductionActionsRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub github-actions-${GitHubRepo}-prod
+      MaxSessionDuration: 3600
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Federated:
+                !If [CreateOIDCProvider, !Ref GithubOidc, !Ref OIDCProviderArn]
+            Action: sts:AssumeRoleWithWebIdentity
+            Condition:
+              StringEquals:
+                token.actions.githubusercontent.com:aud: sts.amazonaws.com
+                token.actions.githubusercontent.com:sub: !Sub repo:${GitHubOrg}/${GitHubRepo}:environment:prod
+      ManagedPolicyArns:
+        - !Ref DenyPolicy
+        - !Ref CorePolicy
+        - !Ref ScaffoldPolicy
+        - !Ref DatabasePolicy
+        - !Ref ComputePolicy
+        - !Ref ImageBuildPolicy
+        - !Ref LambdaProxyPolicy
+        - !Ref GatewayMcpPolicy
+        - !Ref OAuth2FacadePolicy
+        - !Ref AlertDeliveryPolicy
+      Policies:
+        - PolicyName: production-stage-isolation
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: DenyTaggedPreviewResources
+                Effect: Deny
+                Action: "*"
+                Resource: "*"
+                Condition:
+                  StringLike:
+                    aws:ResourceTag/Stage: pr-*
+              - Sid: DenyPreviewRequestTags
+                Effect: Deny
+                Action: "*"
+                Resource: "*"
+                Condition:
+                  StringLike:
+                    aws:RequestTag/Stage: pr-*
+              - Sid: DenyNamedPreviewResources
+                Effect: Deny
+                Action: "*"
+                Resource:
+                  - !Sub arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:parameter/${ProjectName}/pr-*/*
+                  - !Sub arn:${AWS::Partition}:secretsmanager:*:${AWS::AccountId}:secret:${ProjectName}-pr-*
+                  - !Sub arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:function:${ProjectName}-pr-*
+                  - !Sub arn:${AWS::Partition}:ecs:*:${AWS::AccountId}:cluster/${ProjectName}-pr-*
+                  - !Sub arn:${AWS::Partition}:ecs:*:${AWS::AccountId}:service/${ProjectName}-pr-*/*
+                  - !Sub arn:${AWS::Partition}:ecs:*:${AWS::AccountId}:task-definition/${ProjectName}-pr-*
+                  - !Sub arn:${AWS::Partition}:rds:*:${AWS::AccountId}:cluster:${ProjectName}-pr-*
+                  - !Sub arn:${AWS::Partition}:rds:*:${AWS::AccountId}:db:${ProjectName}-pr-*
+                  - !Sub arn:${AWS::Partition}:rds:*:${AWS::AccountId}:subgrp:${ProjectName}-pr-*
+                  - !Sub arn:${AWS::Partition}:rds:*:${AWS::AccountId}:cluster-pg:${ProjectName}-pr-*
+                  - !Sub arn:${AWS::Partition}:rds:*:${AWS::AccountId}:pg:${ProjectName}-pr-*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-pr-*
+                  - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aw*-pr-*
+                  - !Sub arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/sst/*${ProjectName}-pr-*
+                  - !Sub arn:${AWS::Partition}:logs:*:${AWS::AccountId}:log-group:/sst/*${ProjectName}-pr-*/*
+              - Sid: DenyPreviewState
+                Effect: Deny
+                Action: s3:*
+                Resource:
+                  - !Sub arn:${AWS::Partition}:s3:::*/app/${ProjectName}/pr-*.json
+                  - !Sub arn:${AWS::Partition}:s3:::*/app/${ProjectName}/.lock/pr-*.json
+                  - !Sub arn:${AWS::Partition}:s3:::*/lock/${ProjectName}/pr-*.json
+              - Sid: DenyPreviewStateList
+                Effect: Deny
+                Action: s3:ListBucket
+                Resource: !Sub arn:${AWS::Partition}:s3:::sst-state-*
+                Condition:
+                  StringLike:
+                    s3:prefix:
+                      - !Sub app/${ProjectName}/pr-*.json
+                      - !Sub app/${ProjectName}/.lock/pr-*.json
+                      - !Sub lock/${ProjectName}/pr-*.json
+              - Sid: DenyPreviewSecretDecrypt
+                Effect: Deny
+                Action: kms:Decrypt
+                Resource: "*"
+                Condition:
+                  ArnLike:
+                    kms:EncryptionContext:SecretARN: !Sub arn:${AWS::Partition}:secretsmanager:*:${AWS::AccountId}:secret:${ProjectName}-pr-*
+              - Sid: DenyPreviewParameterDecrypt
+                Effect: Deny
+                Action: kms:Decrypt
+                Resource: "*"
+                Condition:
+                  ArnLike:
+                    kms:EncryptionContext:PARAMETER_ARN: !Sub arn:${AWS::Partition}:ssm:*:${AWS::AccountId}:parameter/${ProjectName}/pr-*/*
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: DeploymentScope
+          Value: production
+        - Key: ManagedBy
+          Value: cloudformation
+
   GitHubActionsRole:
     Type: AWS::IAM::Role
     Properties:
@@ -1487,10 +1754,12 @@ Resources:
                 #     job 403s at AssumeRoleWithWebIdentity before it can deploy.
                 #   - ref:refs/heads/main — any non-environment push job on main.
                 #   - pull_request — typecheck / preview / cleanup on PRs.
-                token.actions.githubusercontent.com:sub:
-                  - !Sub repo:${GitHubOrg}/${GitHubRepo}:environment:prod
-                  - !Sub repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main
-                  - !Sub repo:${GitHubOrg}/${GitHubRepo}:pull_request
+                token.actions.githubusercontent.com:sub: !If
+                  - KeepLegacyRole
+                  - - !Sub repo:${GitHubOrg}/${GitHubRepo}:environment:prod
+                    - !Sub repo:${GitHubOrg}/${GitHubRepo}:ref:refs/heads/main
+                    - !Sub repo:${GitHubOrg}/${GitHubRepo}:pull_request
+                  - - !Sub repo:${GitHubOrg}/${GitHubRepo}:environment:legacy-role-disabled
       ManagedPolicyArns:
         - !Ref DenyPolicy
         - !Ref CorePolicy
@@ -1509,11 +1778,25 @@ Resources:
           Value: cloudformation
 
 Outputs:
-  RoleArn:
+  PreviewRoleArn:
+    Description: GitHub Actions role for pull-request previews and preview maintenance.
+    Value: !GetAtt GitHubPreviewActionsRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-PreviewRoleArn
+  ProductionRoleArn:
+    Description: GitHub Actions role for approved main-branch production mutations.
+    Value: !GetAtt GitHubProductionActionsRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-ProductionRoleArn
+  LegacyRoleArn:
     Description: >
-      Set this value as the GitHub repository secret AWS_ROLE_ARN. Run
-      `gh secret set AWS_ROLE_ARN --repo zxkane/mem9-on-aws --body "<role-arn>"`
-      after the stack deploys (deploy-github-role.sh prints it).
+      Legacy shared role retained for boundary-tool compatibility. Its OIDC
+      trust is disabled when LegacyRoleEnabled is false.
+    Value: !GetAtt GitHubActionsRole.Arn
+    Export:
+      Name: !Sub ${AWS::StackName}-LegacyRoleArn
+  RoleArn:
+    Description: Backward-compatible alias for the conditional legacy role.
     Value: !GetAtt GitHubActionsRole.Arn
     Export:
       Name: !Sub ${AWS::StackName}-RoleArn

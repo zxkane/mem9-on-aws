@@ -988,9 +988,12 @@ atomic transaction. This public repository also accepts fork pull requests.
 GitHub withholds repository secrets and reduces write permissions on
 fork-triggered `pull_request` runs; because `id-token` supports only `write` or
 `none`, those runs cannot request an OIDC token. The missing
-`secrets.AWS_ROLE_ARN` also makes the checked-in AWS steps skip, but the role ARN
-is an identifier, not an authorization boundary. The deploy role still trusts
-the repository's `pull_request` subject for same-repository preview runs.
+`secrets.AWS_PREVIEW_ROLE_ARN` also makes the checked-in preview AWS steps skip,
+but the role ARN is an identifier, not an authorization boundary. The preview
+role trusts only the `preview-ci` and `preview-maintenance` Environment subjects
+and carries production-stage denies.
+The production role trusts only the `prod` Environment subject, so every
+credential-bearing production job is directly bound to its protection rules.
 Before any workflow can give untrusted pull-request code `id-token: write` (for
 example through `pull_request_target`), identify the subject that workflow
 emits and remove every matching subject from the deploy-role trust out of band.

@@ -2,7 +2,7 @@ name: Reconcile preview stages
 
 # Optional GitHub repository variable:
 #   DEPLOYMENT_MAINTENANCE_PAUSED - set to true during guarded IAM maintenance.
-#   Both report and apply stop before assuming the shared deploy role.
+#   Both report and apply stop before assuming the preview deploy role.
 #   WORKLOAD_BOUNDARY_PROD_ENABLED - both jobs stay disabled until the guarded
 #   workload-role migration sets this variable to true.
 #
@@ -47,6 +47,7 @@ jobs:
     needs: [application-region]
     if: vars.WORKLOAD_BOUNDARY_PROD_ENABLED == 'true'
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    environment: preview-maintenance
     timeout-minutes: 10
     permissions:
       id-token: write
@@ -75,7 +76,7 @@ jobs:
       - name: Configure AWS credentials (read-only reconciliation)
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           mask-aws-account-id: true
 
@@ -101,6 +102,7 @@ jobs:
     needs: [application-region, report]
     if: github.event_name == 'workflow_dispatch' && inputs.mode == 'apply' && vars.WORKLOAD_BOUNDARY_PROD_ENABLED == 'true'
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    environment: preview-maintenance
     timeout-minutes: 45
     permissions:
       id-token: write
@@ -138,7 +140,7 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           mask-aws-account-id: true
 
