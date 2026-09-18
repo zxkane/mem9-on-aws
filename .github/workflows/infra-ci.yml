@@ -282,6 +282,7 @@ jobs:
           shellcheck scripts/run-memory-namespace-integration.sh
           shellcheck scripts/run-memory-namespace-e2e.sh
           shellcheck scripts/run-memory-namespace-benchmark.sh
+          shellcheck scripts/run-memory-namespace-connection-e2e.sh
           shellcheck scripts/run-memory-namespace-task.sh
           shellcheck scripts/lib/memory-namespace-operator.sh
           shellcheck scripts/deploy-memory-namespace-operator-role.sh
@@ -559,7 +560,7 @@ jobs:
           E2E_SOFT: "1"
         run: bash scripts/run-mcp-e2e.sh
 
-      - name: Shared-database namespace isolation E2E (preview, hard)
+      - name: Namespace connection attribution E2E (preview, hard)
         # Two temporary M2M clients write into different namespaces in this
         # stage's one Aurora database. Each must recall its own marker and must
         # not observe the other marker. The script rejects non-pr-N stages.
@@ -567,7 +568,7 @@ jobs:
         shell: bash
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
-        run: bash scripts/run-memory-namespace-e2e.sh
+        run: bash scripts/run-memory-namespace-connection-e2e.sh
 
       - name: Namespace performance E2E (preview, hard)
         # The stage-scoped bootstrap task runs inside the application VPC and

@@ -86,4 +86,22 @@ describe("namespace capability guards at the container entrypoint", () => {
     expect(result.status).toBe(42);
     expect(readFileSync(trace, "utf8")).toBe("psql\n");
   });
+
+  it("TC-GROUPNS-113: labels the control-plane PostgreSQL pool", () => {
+    writeFileSync(
+      join(directory, "jq"),
+      '#!/bin/sh\nexec /usr/bin/jq "$@"\n',
+      { mode: 0o700 },
+    );
+    const result = run({
+      MEM9_DB_HOST: "db.example.com",
+      MEM9_DB_PORT: "5432",
+      MEM9_DB_NAME: "fixture",
+      MEM9_DB_SECRET: '{"username":"fixture","password":"fixture"}',
+    });
+    expect(result.status).toBe(42);
+    expect(result.stdout).toContain(
+      "application_name=mem9-server-control",
+    );
+  });
 });

@@ -130,8 +130,8 @@ export interface EcsOutputs {
   // `mnemo.mem9-<stage>.local`. The MCP proxy Lambda (infra/gateway.ts) resolves
   // this to reach the task privately over HTTP:8080 — no ALB/Lattice/cert.
   serviceDnsName: Output<string>;
-  // The task security group (from db()). The proxy Lambda attaches to this SG so a
-  // self-referential :8080 ingress rule (added below) lets it reach mnemo-server.
+  // The ECS/bootstrap security group (from db()). Gateway owns a distinct Lambda
+  // SG and a narrow ingress rule to this group on :8080.
   taskSecurityGroupId: Output<string>;
   // Production-only SNS topic backed by the existing Slack alert router.
   alertsTopicArn?: Output<string>;
@@ -252,20 +252,6 @@ export function ecs(
     },
     { dependsOn: [discoveryService] },
   );
-
-  // Let the proxy Lambda (which attaches to the task SG) reach mnemo-server on :8080.
-  // A self-referential ingress rule on the EXISTING task SG (from db.ts) — the Lambda
-  // shares that SG, so intra-SG traffic to 8080 is allowed. Standalone rule (not a
-  // mutation of db.ts's inline SG) so this stack owns it.
-  new awsAny.ec2.SecurityGroupRule("Mem9TaskFromProxyLambda", {
-    type: "ingress",
-    securityGroupId: taskSgId,
-    sourceSecurityGroupId: taskSgId,
-    protocol: "tcp",
-    fromPort: MNEMO_PORT,
-    toPort: MNEMO_PORT,
-    description: "mnemo-server HTTP from the MCP proxy Lambda (shares the task SG)",
-  });
 
   // Fargate service: arm64, single task (scaling unset → desiredCount 1). THREE
   // containers (§7): mnemo-server + qwen3-embed + llm-proxy. Registered in Cloud

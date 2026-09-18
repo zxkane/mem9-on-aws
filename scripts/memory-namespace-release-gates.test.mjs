@@ -80,11 +80,7 @@ describe("memory namespace coverage ownership map", () => {
         expandAcceptance(acceptance),
       ).toSorted(),
     ).toEqual(["107", "114"]);
-    expect(
-      byState.operator_pending.flatMap(({ acceptance }) =>
-        expandAcceptance(acceptance),
-      ),
-    ).toEqual(["113"]);
+    expect(byState.operator_pending ?? []).toEqual([]);
   });
 
   it("labels the live Gateway/IAM contract as operator-run evidence", () => {

@@ -238,6 +238,21 @@ resolve_tools "$ALPHA_AUTH_CONFIG" alpha
 initialize "$DEFAULT_AUTH_CONFIG" default
 initialize "$BETA_AUTH_CONFIG" beta
 
+if [[ "${MEM9_NAMESPACE_CONNECTION_PROBE_ONLY:-0}" == "1" ]]; then
+  for team in default alpha beta; do
+    case "$team" in
+      default) auth="$DEFAULT_AUTH_CONFIG" ;;
+      alpha) auth="$ALPHA_AUTH_CONFIG" ;;
+      beta) auth="$BETA_AUTH_CONFIG" ;;
+    esac
+    call_tool "$auth" "$team" "$SEARCH_TOOL" \
+      '{"q":"connection-pool-probe-no-match","limit":1,"search_mode":"keyword"}'
+    parse_search_payload "${team} connection-pool probe"
+  done
+  echo "run-memory-namespace-e2e: connection-pool probe completed for three clients"
+  exit 0
+fi
+
 RUN_MARKER="${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-0}"
 ALPHA_MARKER="namespace-alpha-${STAGE}-${RUN_MARKER}"
 BETA_MARKER="namespace-beta-${STAGE}-${RUN_MARKER}"

@@ -1,0 +1,11 @@
+--- a/server/internal/domain/types.go
++++ b/server/internal/domain/types.go
+@@ -235,7 +235,7 @@
+ 		if t.DBTLS {
+ 			sslmode = "require"
+ 		}
+-		return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
++		return fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s&application_name=mem9-server-tenant",
+ 			t.DBUser, t.DBPassword, t.DBHost, t.DBPort, t.DBName, sslmode)
+ 	default:
+ 		// MySQL/TiDB format

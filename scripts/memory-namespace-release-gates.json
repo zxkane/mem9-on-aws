@@ -164,10 +164,15 @@
     },
     {
       "id": "lambda-connection-observation",
-      "state": "operator_pending",
+      "state": "enabled_v1",
       "acceptance": ["113"],
       "verification": [
-        "docs/designs/cognito-group-memory-namespaces.md"
+        "infra/gateway.test.ts",
+        "docker/mnemo-server/entrypoint.test.mjs",
+        "docker/mnemo-server/patches/0021-namespace-connection-attribution.patch",
+        "scripts/observe-memory-namespace-connections.mjs",
+        "scripts/validate-memory-namespace-network.mjs",
+        "scripts/run-memory-namespace-connection-e2e.sh"
       ]
     },
     {

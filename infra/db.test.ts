@@ -98,7 +98,7 @@ describe("db stack", () => {
   it("creates a task SG and a db SG allowing 5432 from the task SG only", async () => {
     installGlobals("prod");
     const db = await loadDb();
-    db();
+    const outputs = db();
 
     expect(sgs).toHaveLength(2);
     const taskSg = sgs.find((s) => s.logicalName === "Mem9TaskSg");
@@ -118,6 +118,7 @@ describe("db stack", () => {
     // 5432 comes from the task SG, NOT an open CIDR.
     expect(ingress[0].securityGroups).toBeDefined();
     expect(ingress[0].cidrBlocks).toBeUndefined();
+    expect(outputs.taskSecurityGroupId).toBeDefined();
   });
 
   it("provisions Aurora postgres with NO proxy + scaling + vpc wiring", async () => {
@@ -228,6 +229,7 @@ describe("db stack", () => {
 
     const names = params.map((p) => p.name).sort();
     expect(names).toEqual([
+      "/mem9-on-aws/prod/db/db-sg-id",
       "/mem9-on-aws/prod/db/host",
       "/mem9-on-aws/prod/db/name",
       "/mem9-on-aws/prod/db/port",

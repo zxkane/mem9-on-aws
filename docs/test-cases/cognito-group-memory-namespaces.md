@@ -173,9 +173,12 @@ of two namespaces. It fetches top-K 10 and 50, compares IDs with the previous
 all-record exact materialization, and requires production p95 to remain within
 120 percent of that baseline. `scripts/run-memory-namespace-benchmark.sh` then
 runs the actual M2M resolution transaction from the stage bootstrap task inside
-the application VPC, requiring p95 below 20 ms. TC-GROUPNS-113 remains a
-separate attributed-connection observation rather than inferring Lambda pool
-absence from whole-database connection equality.
+the application VPC, requiring p95 below 20 ms. TC-GROUPNS-113 gives the proxy
+Lambda a distinct SG denied by Aurora's ECS-only ingress, labels the control and
+tenant PostgreSQL pools, and compares stable content-free `pg_stat_activity`
+counters before and after sequential default/alpha/beta Gateway searches.
+Unknown applications, missing attributed pools, any connection growth,
+or either pool exceeding the fixed five-connection idle bound fails the preview.
 
 ## Durable Ingest
 
@@ -253,7 +256,7 @@ Import/validation failures must not echo private configuration fragments.
 | TC-GROUPNS-110 | Cognito group is changed directly without database revoke                                                | Reader-client configuration bounds token lifetime to 15 minutes and drift report flags the mismatch | Infra unit + PR-preview integration          |
 | TC-GROUPNS-111 | Ten users and five namespaces are configured                                                             | No per-user/namespace DB, schema, cluster, ECS service, or embedder is created                      | Infra unit                                   |
 | TC-GROUPNS-112 | Namespace resolution load test runs                                                                      | p95 is below 20 ms in the application VPC                                                           | PR-preview benchmark                         |
-| TC-GROUPNS-113 | Gateway traffic is compared before/after                                                                 | No Lambda-originated Aurora pool or per-user connection growth appears                              | PR-preview observation                       |
+| TC-GROUPNS-113 | Gateway traffic is compared before/after                                                                 | The proxy SG cannot reach Aurora; attributed control/tenant pools remain within fixed idle bounds    | PR-preview hard gate                         |
 | TC-GROUPNS-114 | Snapshot/PITR restore is tested in isolation                                                             | Namespace, membership, memory, session, job, and plan constraints remain consistent                 | Post-deploy operator follow-up; non-blocking |
 
 ## Team-Review Hardening

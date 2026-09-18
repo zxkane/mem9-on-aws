@@ -9,7 +9,7 @@
  *     valueFrom` and connect DIRECTLY to the Aurora cluster writer endpoint.
  *     Never committed / human-handled.
  *   - Two security groups: a `db` SG (allows 5432 from the `task` SG only) and a
- *     `task` SG (attached to the ECS mnemo-server task).
+ *     `task` SG attached to ECS/bootstrap, not the Gateway proxy Lambda.
  *
  * NO RDS PROXY: mem9 and bootstrap connect directly to the Aurora cluster
  * writer endpoint. Operator-specific deployment diagnostics remain private.
@@ -51,9 +51,9 @@ export function db(): DbOutputs {
     ManagedBy: "sst",
   };
 
-  // SG shared by the ECS service, bootstrap task, and Gateway proxy Lambda. The
-  // DB SG scopes 5432 ingress to exactly this SG; the ECS and Lambda stacks attach
-  // it to their workloads. Egress is open for Aurora and AWS service endpoints.
+  // SG shared by the ECS service and bootstrap task. The DB SG scopes 5432
+  // ingress to exactly this SG. Gateway uses a separate SG with no Aurora path.
+  // Egress is open for Aurora and AWS service endpoints.
   const taskSg = new aws.ec2.SecurityGroup("Mem9TaskSg", {
     vpcId,
     description: "mem9 ECS task SG (mnemo-server); source for Aurora 5432 ingress",
@@ -173,6 +173,12 @@ export function db(): DbOutputs {
     name: `${prefix}/db/task-sg-id`,
     type: "String",
     value: taskSg.id,
+    tags,
+  });
+  new aws.ssm.Parameter("DbSgId", {
+    name: `${prefix}/db/db-sg-id`,
+    type: "String",
+    value: dbSg.id,
     tags,
   });
 

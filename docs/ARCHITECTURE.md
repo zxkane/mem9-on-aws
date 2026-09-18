@@ -220,6 +220,11 @@ endpoint. The bootstrap task writes the working database user and password into
 the single tenant row because upstream mem9 opens memory repositories from those
 per-tenant fields on each request.
 
+The control-plane and tenant pools use the fixed PostgreSQL application names
+`mem9-server-control` and `mem9-server-tenant`. Preview acceptance samples only
+their aggregate connection counts; no user or namespace value is added to a
+database session label.
+
 Native IAM database authentication is not part of the current implementation.
 AWS states that an Aurora IAM database authentication token is valid for 15
 minutes:
@@ -300,8 +305,10 @@ and `get_ingest_job_status`, requires `write` for `add_memory` and
 tools and missing or malformed scope claims fail closed.
 
 `infra/ecs.ts` creates an AWS Cloud Map private DNS namespace and service. The
-proxy Lambda and ECS task share the task security group, whose self-referencing
-port 8080 rule permits the private hop. The private backend path has no ALB,
+proxy Lambda has a dedicated security group. A single ingress rule permits that
+group to reach the ECS/bootstrap group on port 8080, while Aurora port 5432
+accepts only the ECS/bootstrap group. The Lambda therefore has no database
+network path. The private backend path has no ALB,
 certificate, VPC Lattice target, public Route 53 zone, or public mnemo-server
 endpoint.
 

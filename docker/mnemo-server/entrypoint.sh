@@ -13,7 +13,8 @@
 #   MEM9_DB_NAME    - "mem9"                          (plain env)
 #   MEM9_DB_SECRET  - JSON {"username":..,"password":..}  (ECS secret, whole value)
 #
-#   → MNEMO_DSN=postgres://<user>:<url-encoded-pw>@<host>:<port>/<db>?sslmode=require
+#   → MNEMO_DSN=postgres://<user>:<url-encoded-pw>@<host>:<port>/<db>
+#       ?sslmode=require&application_name=mem9-server-control
 #
 # If MNEMO_DSN is ALREADY set (for example, a local run), it
 # is respected as-is and this assembly is skipped.
@@ -69,12 +70,12 @@ if [ -z "${MNEMO_DSN:-}" ]; then
 
   # sslmode=require protects the direct Aurora connection; mem9 uses the pgx
   # stdlib driver, which honors the DSN query parameter.
-  export MNEMO_DSN="postgres://${DB_USER_URI}:${DB_PASS_URI}@${MEM9_DB_HOST}:${MEM9_DB_PORT}/${MEM9_DB_NAME}?sslmode=require"
+  export MNEMO_DSN="postgres://${DB_USER_URI}:${DB_PASS_URI}@${MEM9_DB_HOST}:${MEM9_DB_PORT}/${MEM9_DB_NAME}?sslmode=require&application_name=mem9-server-control"
   MNEMO_DSN_ASSEMBLED=true
 
   # Log the DSN with the password redacted (host/port/db/user are safe to show
   # and help diagnose connectivity; the secret value never appears in logs).
-  echo "entrypoint: assembled MNEMO_DSN=postgres://${DB_USER_URI}:***@${MEM9_DB_HOST}:${MEM9_DB_PORT}/${MEM9_DB_NAME}?sslmode=require"
+  echo "entrypoint: assembled MNEMO_DSN=postgres://${DB_USER_URI}:***@${MEM9_DB_HOST}:${MEM9_DB_PORT}/${MEM9_DB_NAME}?sslmode=require&application_name=mem9-server-control"
 fi
 
 # Apply the complete repeatable base schema before the process can become
