@@ -141,6 +141,7 @@ afterEach(() => {
   for (const g of ["$app", "aws", "sst", "$interpolate"])
     delete (globalThis as Record<string, unknown>)[g];
   delete process.env.MEM9_IMAGE_TAG;
+  delete process.env.MEM9_ECR_NAMESPACE;
   vi.resetModules();
 });
 

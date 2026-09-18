@@ -319,6 +319,7 @@ afterEach(() => {
   for (const g of ["$app", "aws", "sst", "command", "$interpolate", "$jsonStringify"])
     delete (globalThis as Record<string, unknown>)[g];
   delete process.env.MEM9_IMAGE_TAG;
+  delete process.env.MEM9_ECR_NAMESPACE;
   delete process.env.MEM9_BEDROCK_PROJECT;
   delete process.env.MEM9_BEDROCK_PROJECT_OPENAI;
   delete process.env.MEM9_DURABLE_INGEST_ENABLED;
@@ -575,6 +576,26 @@ describe("ecs stack", () => {
     for (const c of Object.values(containersByName())) {
       expect(imgStr(c)).toMatch(/:mem9-abc1234$/);
     }
+
+    for (const g of ["$app", "aws", "sst", "$interpolate"])
+      delete (globalThis as Record<string, unknown>)[g];
+    services = [];
+    process.env.MEM9_ECR_NAMESPACE = "mem9-on-aws/preview";
+    installGlobals("pr-42");
+    ecs = await loadEcs();
+    ecs(fakeDbOut());
+    for (const c of Object.values(containersByName())) {
+      expect(imgStr(c)).toContain("/mem9-on-aws/preview/");
+    }
+
+    for (const g of ["$app", "aws", "sst", "$interpolate"])
+      delete (globalThis as Record<string, unknown>)[g];
+    services = [];
+    installGlobals("prod");
+    ecs = await loadEcs();
+    expect(() => ecs(fakeDbOut())).toThrow(
+      "production workload images must use mem9-on-aws",
+    );
   });
 
   it("mnemo-server container: DB config + embed wiring as env, DB secret via ssm (never a literal)", async () => {

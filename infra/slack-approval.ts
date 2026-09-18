@@ -36,7 +36,7 @@ import type { EcsOutputs } from "./ecs";
 import type { OauthFacadeOutputs } from "./oauth-facade";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import { taskFailureAlarm } from "./task-failure-alarm";
-import { accountId, applicationRegion, ecrImage } from "./ecr";
+import { accountId, applicationRegion, workloadImage } from "./ecr";
 import {
   DECISION_ARTIFACT_BUCKET_ENV,
   DECISION_ARTIFACT_BUCKET_OWNER_ENV,
@@ -363,7 +363,7 @@ export function slackApproval(
     architecture: "arm64",
     cpu: "0.5 vCPU",
     memory: "1 GB",
-    image: ecrImage("mem9-on-aws/llm-proxy", IMAGE_TAG),
+    image: workloadImage("llm-proxy", IMAGE_TAG),
     // `node` is the ENTRYPOINT because ECS can override `command` but NOT
     // `entryPoint`; the handler's environment-only override depends on that.
     entrypoint: ["node"],

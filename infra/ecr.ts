@@ -37,3 +37,17 @@ export function accountId(): Output<string> {
 export function ecrImage(namespace: string, tag: string): Output<string> {
   return $interpolate`${accountId()}.dkr.ecr.${applicationRegion()}.amazonaws.com/${namespace}:${tag}`;
 }
+
+export function workloadImage(name: string, tag: string): Output<string> {
+  const namespace = process.env.MEM9_ECR_NAMESPACE || "mem9-on-aws";
+  if ($app.stage === "prod" && namespace !== "mem9-on-aws") {
+    throw new Error("production workload images must use mem9-on-aws");
+  }
+  if (
+    /^pr-[1-9][0-9]*$/u.test($app.stage) &&
+    !["mem9-on-aws", "mem9-on-aws/preview"].includes(namespace)
+  ) {
+    throw new Error("preview workload image namespace is invalid");
+  }
+  return ecrImage(`${namespace}/${name}`, tag);
+}

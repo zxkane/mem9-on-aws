@@ -20,7 +20,7 @@
  */
 
 import type { DbOutputs } from "./db";
-import { ecrImage } from "./ecr";
+import { workloadImage } from "./ecr";
 import { resolveVpc } from "./vpc";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import type { CognitoOutputs } from "./cognito";
@@ -64,7 +64,7 @@ export function bootstrap(
         }
       : undefined;
 
-  const image = ecrImage("mem9-on-aws/bootstrap", IMAGE_TAG);
+  const image = workloadImage("bootstrap", IMAGE_TAG);
 
   // The one-shot task. arm64, sized small (psql + jq are light — the DDL is
   // trivial). Injects the DB pieces + the DB secret (JSON {username,password}) +

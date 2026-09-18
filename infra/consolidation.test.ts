@@ -304,6 +304,7 @@ beforeEach(() => {
   delete process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED;
   delete process.env.MEM9_CONSOLIDATION_TIMEOUT_SECONDS;
   delete process.env.MEM9_IMAGE_TAG;
+  delete process.env.MEM9_ECR_NAMESPACE;
   process.env.MEM9_BEDROCK_PROJECT = "proj_test";
   // A reasoning model routes to another region, so the task needs THAT region's
   // project id and a grant for it.
@@ -318,6 +319,7 @@ afterEach(() => {
   delete process.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED;
   delete process.env.MEM9_CONSOLIDATION_TIMEOUT_SECONDS;
   delete process.env.MEM9_IMAGE_TAG;
+  delete process.env.MEM9_ECR_NAMESPACE;
   delete process.env.MEM9_BEDROCK_PROJECT;
   delete process.env.MEM9_BEDROCK_PROJECT_OPENAI;
   vi.resetModules();
