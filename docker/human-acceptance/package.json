@@ -1,0 +1,13 @@
+{
+  "name": "mem9-human-acceptance",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "dependencies": {
+    "@aws-sdk/client-cognito-identity-provider": "3.1120.0",
+    "pg": "8.23.0",
+    "playwright": "1.63.0"
+  }
+}

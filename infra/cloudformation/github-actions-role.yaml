@@ -389,6 +389,7 @@ Resources:
               - !Sub arn:aws:iam::${AWS::AccountId}:role/github-actions-${GitHubRepo}
               - !Sub arn:aws:iam::${AWS::AccountId}:role/github-actions-${GitHubRepo}-preview
               - !Sub arn:aws:iam::${AWS::AccountId}:role/github-actions-${GitHubRepo}-prod
+              - !Sub arn:aws:iam::${AWS::AccountId}:role/${ProjectName}-preview-human-acceptance
 
   # ───────────────────────────────────────────────────────────────────────────
   # Policy 3 — Scaffold resource grants: SSM (state + the meta stack's params),
@@ -1479,6 +1480,84 @@ Resources:
   # IAM roles — split preview and production identities. The legacy role remains
   # conditional for the guarded live rollout and rollback.
   # ───────────────────────────────────────────────────────────────────────────
+  PreviewHumanAcceptanceRole:
+    Type: AWS::IAM::Role
+    DeletionPolicy: Retain
+    UpdateReplacePolicy: Retain
+    Properties:
+      RoleName: !Sub ${ProjectName}-preview-human-acceptance
+      Description: Preview-only human OAuth namespace acceptance task
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+            Condition:
+              StringEquals:
+                aws:SourceAccount: !Ref AWS::AccountId
+              ArnLike:
+                aws:SourceArn: !Sub arn:${AWS::Partition}:ecs:${ApplicationRegion}:${AWS::AccountId}:*
+      Policies:
+        - PolicyName: preview-human-acceptance
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Sid: PreviewCognitoUsers
+                Effect: Allow
+                Action:
+                  - cognito-idp:AdminAddUserToGroup
+                  - cognito-idp:AdminCreateUser
+                  - cognito-idp:AdminDeleteUser
+                  - cognito-idp:AdminGetUser
+                  - cognito-idp:AdminListGroupsForUser
+                  - cognito-idp:AdminRemoveUserFromGroup
+                  - cognito-idp:AdminSetUserPassword
+                  - cognito-idp:CreateGroup
+                  - cognito-idp:DeleteGroup
+                  - cognito-idp:DescribeUserPool
+                  - cognito-idp:DescribeUserPoolClient
+                  - cognito-idp:GetGroup
+                Resource: !Sub arn:${AWS::Partition}:cognito-idp:${ApplicationRegion}:${AWS::AccountId}:userpool/*
+                Condition:
+                  StringLike:
+                    aws:ResourceTag/Stage: pr-*
+                  StringEquals:
+                    aws:ResourceTag/Project: !Ref ProjectName
+              - Sid: PreviewParameters
+                Effect: Allow
+                Action: ssm:GetParameters
+                Resource: !Sub arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/${ProjectName}/pr-*/*
+              - Sid: PreviewSecrets
+                Effect: Allow
+                Action:
+                  - secretsmanager:DescribeSecret
+                  - secretsmanager:GetSecretValue
+                Resource: !Sub arn:${AWS::Partition}:secretsmanager:${ApplicationRegion}:${AWS::AccountId}:secret:${ProjectName}-pr-*
+              - Sid: PreviewFunctionsAndLogs
+                Effect: Allow
+                Action: lambda:GetFunctionConfiguration
+                Resource: !Sub arn:${AWS::Partition}:lambda:${ApplicationRegion}:${AWS::AccountId}:function:${ProjectName}-pr-*
+              - Sid: PreviewProxyLogs
+                Effect: Allow
+                Action: logs:FilterLogEvents
+                Resource: !Sub arn:${AWS::Partition}:logs:${ApplicationRegion}:${AWS::AccountId}:log-group:/aws/lambda/${ProjectName}-pr-*:*
+              - Sid: PreviewMetadata
+                Effect: Allow
+                Action:
+                  - ecs:DescribeServices
+                  - ecs:DescribeTaskDefinition
+                  - rds:DescribeDBClusters
+                Resource: "*"
+      Tags:
+        - Key: Project
+          Value: !Ref ProjectName
+        - Key: DeploymentScope
+          Value: preview
+        - Key: ManagedBy
+          Value: cloudformation
+
   GitHubPreviewActionsRole:
     Type: AWS::IAM::Role
     Properties:

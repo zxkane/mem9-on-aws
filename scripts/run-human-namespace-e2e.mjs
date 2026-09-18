@@ -64,15 +64,23 @@ export async function main(args = process.argv.slice(2)) {
   const manifest = await readDeploymentManifest(options["deployment-file"]);
   const git = promisify(execFile),
     repoRoot = fileURLToPath(new URL("..", import.meta.url));
-  const { stdout: head } = await git("git", ["rev-parse", "HEAD"], {
-    cwd: repoRoot,
-  });
-  if (!options.cleanup && head.trim() !== manifest.commit)
-    throw new HumanAcceptanceError("operator_commit_mismatch");
-  try {
-    await git("git", ["diff", "--quiet", "HEAD", "--"], { cwd: repoRoot });
-  } catch {
-    throw new HumanAcceptanceError("operator_checkout_has_changes");
+  if (process.env.MEM9_HUMAN_E2E_TASK === "1") {
+    if (
+      !options.cleanup &&
+      process.env.MEM9_DEPLOY_COMMIT !== manifest.commit
+    )
+      throw new HumanAcceptanceError("task_commit_mismatch");
+  } else {
+    const { stdout: head } = await git("git", ["rev-parse", "HEAD"], {
+      cwd: repoRoot,
+    });
+    if (!options.cleanup && head.trim() !== manifest.commit)
+      throw new HumanAcceptanceError("operator_commit_mismatch");
+    try {
+      await git("git", ["diff", "--quiet", "HEAD", "--"], { cwd: repoRoot });
+    } catch {
+      throw new HumanAcceptanceError("operator_checkout_has_changes");
+    }
   }
   const target = await verifyHumanPreviewTarget(manifest, {
     cleanupOnly: options.cleanup,
@@ -140,7 +148,12 @@ export async function main(args = process.argv.slice(2)) {
       await fixture.prepare();
       if (interrupted) throw new HumanAcceptanceError("operator_interrupted");
       const { chromium } = await import("playwright");
-      browser = await chromium.launch({ headless: true });
+      browser = await chromium.launch({
+        headless: true,
+        ...(process.env.MEM9_HUMAN_BROWSER_EXECUTABLE
+          ? { executablePath: process.env.MEM9_HUMAN_BROWSER_EXECUTABLE }
+          : {}),
+      });
       const oauth = new HumanOAuthBrowser({
         browser,
         facadeUrl: manifest.facadeUrl,

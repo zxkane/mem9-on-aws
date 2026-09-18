@@ -11,7 +11,7 @@ describe("container security rebuild contract", () => {
     .filter((step) => step.uses?.startsWith("docker/build-push-action@"));
 
   it("refreshes base images and runtime packages for every published image", () => {
-    expect(builds).toHaveLength(4);
+    expect(builds).toHaveLength(5);
     for (const build of builds) {
       expect(build.with.pull, build.name).toBe(true);
       expect(build.with["no-cache-filters"].split(/[\s,]+/), build.name).toContain("runtime");
@@ -35,5 +35,16 @@ describe("container security rebuild contract", () => {
     expect(source).toContain("AS model");
     expect(source).toContain("COPY --from=model /app/node_modules ./node_modules");
     expect(build.with["no-cache-filters"]).toBe("runtime");
+  });
+
+  it("updates Chrome Stable before each ephemeral human acceptance run", () => {
+    const dockerfile = read("docker/human-acceptance/Dockerfile");
+    const entrypoint = read("docker/human-acceptance/entrypoint.sh");
+    expect(dockerfile).toContain("google-chrome-stable");
+    expect(dockerfile).toContain("arch=arm64");
+    expect(entrypoint).toContain(
+      "apt-get install -y -qq --only-upgrade google-chrome-stable",
+    );
+    expect(entrypoint).toContain("exec gosu node");
   });
 });

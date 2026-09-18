@@ -555,9 +555,16 @@ PR namespace check is implemented by
 PKCE login through the deployed facade and Cognito, followed by Gateway memory
 requests and the existing access-management functions. Run a reviewed, clean
 candidate checkout against its own `pr-N` preview from a trusted operator host
-with private database access. This does not add user-administration permissions
-to CI or application workloads. Automated human release gating remains follow-up
-work alongside preview/production deployment-role separation.
+with private database access.
+
+The standard PR-preview workflow also runs this matrix automatically in an
+ephemeral, preview-only Fargate task after namespace enforcement and the OAuth
+facade smoke pass. Its task role can administer users only in that preview user
+pool and can read only the stage resources required for target verification.
+The GitHub-hosted runner never receives database credentials or private-network
+access. Chrome Stable is upgraded before the one-shot browser starts; the task
+then removes every owned fixture and exits. The operator command below remains
+available for diagnosis and explicit cleanup recovery.
 
 Create a mode-600 `deployment.local.json` containing operator-verified targets.
 Names and tags are consistency checks; independently pin the actual preview

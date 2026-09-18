@@ -318,6 +318,7 @@ jobs:
           shellcheck scripts/run-memory-namespace-e2e.sh
           shellcheck scripts/run-memory-namespace-benchmark.sh
           shellcheck scripts/run-memory-namespace-connection-e2e.sh
+          shellcheck scripts/run-human-namespace-preview-e2e.sh
           shellcheck scripts/run-memory-namespace-task.sh
           shellcheck scripts/lib/memory-namespace-operator.sh
           shellcheck scripts/deploy-memory-namespace-operator-role.sh
@@ -342,7 +343,7 @@ jobs:
     environment: preview-ci
     # Depends on the image build so the preview pulls this PR's freshly-built
     # workload images.
-    needs: [changes, application-region, typecheck, build-and-push-image]
+    needs: [changes, application-region, typecheck, build-and-push-image, build-human-acceptance-image]
     if: >-
       always()
       && github.event_name == 'pull_request'
@@ -352,6 +353,7 @@ jobs:
       && needs.application-region.result == 'success'
       && needs.typecheck.result == 'success'
       && (needs.build-and-push-image.result == 'success' || needs.build-and-push-image.result == 'skipped')
+      && (needs.build-human-acceptance-image.result == 'success' || needs.build-human-acceptance-image.result == 'skipped')
     # Full-stack fresh preview: Aurora (~13m) + the 3-container ECS task (the
     # ~1.2 GB qwen3 image pull + 180s health-check startPeriod, plus the tiny
     # llm-proxy sidecar) + the bootstrap DB-retry + run-task. No RDS Proxy
@@ -361,7 +363,7 @@ jobs:
     # short for a fresh preview. A deploy job failure or timeout starts a
     # separate dependent cleanup job; explicit whole-workflow cancellation is
     # operator-controlled and does not guarantee downstream teardown.
-    timeout-minutes: 60
+    timeout-minutes: 90
     outputs:
       stage: ${{ steps.deploy.outputs.stage }}
     permissions:
@@ -490,6 +492,8 @@ jobs:
           # The image applies the repeatable atomic-ingest migration before the
           # server starts, so one enabled rollout is safe.
           MEM9_DURABLE_INGEST_ENABLED: "1"
+          MEM9_DEPLOY_COMMIT: ${{ github.sha }}
+          MEM9_HUMAN_ACCEPTANCE_IMAGE_TAG: ${{ needs.build-human-acceptance-image.outputs.image_tag }}
           # Fresh previews start compatibly. The deploy script overrides this
           # to 1 when the stage already exists, after first rerunning that
           # stage's bootstrap task so a cancelled cutover resumes before deploy.
@@ -585,6 +589,8 @@ jobs:
           MEM9_BEDROCK_PROJECT_OPENAI: ${{ vars.MEM9_BEDROCK_PROJECT_OPENAI }}
           MEM9_LLM_MODEL: ${{ vars.MEM9_LLM_MODEL }}
           MEM9_DURABLE_INGEST_ENABLED: "1"
+          MEM9_DEPLOY_COMMIT: ${{ github.sha }}
+          MEM9_HUMAN_ACCEPTANCE_IMAGE_TAG: ${{ needs.build-human-acceptance-image.outputs.image_tag }}
           # The preview bootstrap created two synthetic namespaces, reconciled
           # their Cognito groups/M2M bindings, and completed the empty-database
           # migration. The second deploy proves the real namespace-required
@@ -639,6 +645,13 @@ jobs:
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: bash scripts/run-oauth-facade-smoke.sh
+
+      - name: Human namespace OAuth E2E (preview, hard)
+        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        env:
+          STAGE: ${{ steps.deploy.outputs.stage }}
+          EXPECTED_HUMAN_IMAGE_TAG: ${{ needs.build-human-acceptance-image.outputs.image_tag }}
+        run: bash scripts/run-human-namespace-preview-e2e.sh
 
       - name: Comment deploy status
         if: always() && steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
@@ -1136,9 +1149,6 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         # Expand the tested event-to-tag output for each image. This keeps the
         # release/preview decision in one pure function.
-        env:
-          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
-          IMAGE_TAGS: ${{ steps.tag.outputs.image_tags }}
         run: |
           emit() { # $1 = image name (repo leaf), $2 = output key
             {
@@ -1153,6 +1163,9 @@ jobs:
           emit qwen3-embed  embed_tags
           emit bootstrap    bootstrap_tags
           emit llm-proxy    llm_proxy_tags
+        env:
+          REGISTRY: ${{ steps.ecr-login.outputs.registry }}
+          IMAGE_TAGS: ${{ steps.tag.outputs.image_tags }}
 
       - name: Set up QEMU
         # Enables linux/arm64 emulation on x86 runners (ubuntu-latest). A no-op
@@ -1228,6 +1241,95 @@ jobs:
           tags: ${{ steps.tags.outputs.llm_proxy_tags }}
           cache-from: type=gha,scope=llm-proxy
           cache-to: type=gha,mode=max,scope=llm-proxy
+
+  build-human-acceptance-image:
+    name: Build human namespace acceptance image
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    environment: preview-ci
+    needs: [changes, application-region, typecheck]
+    if: >-
+      always()
+      && github.event_name == 'pull_request'
+      && github.event.action != 'closed'
+      && github.event.pull_request.base.ref == 'main'
+      && needs.changes.outputs.aws_mutation_required == 'true'
+      && needs.application-region.result == 'success'
+      && needs.typecheck.result == 'success'
+    timeout-minutes: 20
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      AWS_REGION: ${{ needs.application-region.outputs.region }}
+      ECR_NS: mem9-on-aws/preview
+    outputs:
+      image_tag: ${{ steps.tag.outputs.human_image_tag }}
+    steps:
+      - name: Deployment maintenance gate
+        env:
+          PAUSED: ${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}
+        run: |
+          if [ "$PAUSED" = "true" ]; then
+            echo "::error::AWS deployments are paused for guarded IAM maintenance"
+            exit 1
+          fi
+      - name: Gate on AWS_PREVIEW_ROLE_ARN
+        id: gate
+        env:
+          BOUNDARY_ENFORCED: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
+          HAS_AWS: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+        run: |
+          if [ "$BOUNDARY_ENFORCED" != "true" ]; then
+            echo "::notice::Workload boundary unavailable — skipping human acceptance image"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif [ -z "$HAS_AWS" ]; then
+            echo "::notice::Preview AWS role unavailable — skipping human acceptance image"
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+      - uses: actions/checkout@v7
+        if: steps.gate.outputs.skip != 'true'
+      - uses: actions/setup-node@v7
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          node-version: 24
+      - name: Resolve human image tag
+        id: tag
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          EVENT_NAME: pull_request
+        run: node scripts/image-tags.mjs
+      - name: Configure AWS credentials (OIDC)
+        if: steps.gate.outputs.skip != 'true'
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        if: steps.gate.outputs.skip != 'true'
+        uses: aws-actions/amazon-ecr-login@v2
+      - uses: docker/setup-qemu-action@v4
+        if: steps.gate.outputs.skip != 'true'
+        with:
+          platforms: arm64
+      - uses: docker/setup-buildx-action@v4
+        if: steps.gate.outputs.skip != 'true'
+      - name: Build & push human acceptance (arm64)
+        if: steps.gate.outputs.skip != 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: docker/human-acceptance/Dockerfile
+          pull: true
+          no-cache-filters: runtime
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_NS }}/bootstrap:${{ steps.tag.outputs.human_image_tag }}
+          cache-from: type=gha,scope=human-acceptance
+          cache-to: type=gha,mode=max,scope=human-acceptance
 
   # ───────────────────────────────────────────────────────────────────────────
   # deploy-prod — push to main → stage `prod`. Every credential-bearing

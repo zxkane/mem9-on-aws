@@ -354,6 +354,13 @@ The feature cannot be enabled until:
 
 ### Human/provider acceptance follow-up
 
+The complete human/provider matrix is a hard PR-preview gate. It runs in an
+ephemeral Fargate task on the preview task security group, uses only the
+preview user pool and database, upgrades Chrome Stable before launch, removes
+every owned synthetic user/group, and emits only the fixed case vocabulary.
+The GitHub-hosted runner never receives database credentials or private-network
+access.
+
 The real preview driver extends the existing cases with these checks:
 
 - TC-GROUPNS-001/002/004/008/009: browser-issued human tokens exercise shared

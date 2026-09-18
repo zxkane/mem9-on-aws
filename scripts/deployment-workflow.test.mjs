@@ -231,6 +231,7 @@ describe("workflow integration", () => {
     expect(credentialJobs.sort()).toEqual(
       [
         "infra-ci.yml:build-and-push-image",
+        "infra-ci.yml:build-human-acceptance-image",
         "infra-ci.yml:cleanup-failed-preview",
         "infra-ci.yml:cleanup-preview",
         "infra-ci.yml:deploy-preview",
@@ -259,7 +260,7 @@ describe("workflow integration", () => {
   it("boots a fresh preview compatibly, then enforces namespaces before isolation E2E", () => {
     const workflow = parse(readFileSync(workflowPath, "utf8"));
     expect(workflow.concurrency["cancel-in-progress"]).toBe(false);
-    expect(workflow.jobs["deploy-preview"]["timeout-minutes"]).toBe(60);
+    expect(workflow.jobs["deploy-preview"]["timeout-minutes"]).toBe(90);
     const failedCleanup = workflow.jobs["cleanup-failed-preview"];
     const innerCleanupBudgetMinutes = 16 + 23 + 16;
     expect(failedCleanup["timeout-minutes"]).toBeGreaterThanOrEqual(
@@ -393,6 +394,38 @@ describe("workflow integration", () => {
       ]),
     );
     expect(actions.some((action) => action.includes("Admin"))).toBe(false);
+  });
+
+  it("runs the real human namespace matrix inside the preview VPC", () => {
+    const workflow = parse(readFileSync(workflowPath, "utf8"));
+    const job = workflow.jobs["deploy-preview"];
+    const steps = job.steps;
+    const oauthIndex = steps.findIndex(
+      ({ name }) => name === "OAuth façade smoke (preview)",
+    );
+    const humanIndex = steps.findIndex(
+      ({ name }) => name === "Human namespace OAuth E2E (preview, hard)",
+    );
+    const human = steps[humanIndex];
+
+    expect(job["timeout-minutes"]).toBeGreaterThanOrEqual(90);
+    expect(humanIndex).toBeGreaterThan(oauthIndex);
+    expect(human.if).toContain("steps.deploy.outputs.stage != ''");
+    expect(human.env.STAGE).toBe("${{ steps.deploy.outputs.stage }}");
+    expect(human.run).toBe(
+      "bash scripts/run-human-namespace-preview-e2e.sh",
+    );
+
+    for (const name of [
+      "Deploy PR stage",
+      "Deploy PR namespace enforcement",
+    ]) {
+      const deploy = steps.find((step) => step.name === name);
+      expect(deploy.env.MEM9_DEPLOY_COMMIT).toBe("${{ github.sha }}");
+      expect(deploy.env.MEM9_HUMAN_ACCEPTANCE_IMAGE_TAG).toBe(
+        "${{ needs.build-human-acceptance-image.outputs.image_tag }}",
+      );
+    }
   });
   it("TC-SLACKAPP-218: gates and lints the decision-artifact bucket template", () => {
     const workflow = parse(readFileSync(workflowPath, "utf8"));
