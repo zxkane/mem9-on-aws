@@ -84,6 +84,7 @@ for _ in $(seq 1 12); do
     --log-stream-name-prefix "$STREAM" --region "$REGION" \
     --query 'events[].message' --output text 2>/dev/null \
     | tr '\t' '\n' \
+    | tr -d '\r' \
     | grep -E '^(PASS |human namespace acceptance: complete$)' >"$OUTPUT" || true
   grep -qx 'human namespace acceptance: complete' "$OUTPUT" && break
   sleep 5

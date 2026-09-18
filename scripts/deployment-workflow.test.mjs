@@ -415,6 +415,12 @@ describe("workflow integration", () => {
     expect(human.run).toBe(
       "bash scripts/run-human-namespace-preview-e2e.sh",
     );
+    expect(
+      readFileSync(
+        resolve(here, "run-human-namespace-preview-e2e.sh"),
+        "utf8",
+      ),
+    ).toContain("tr -d '\\r'");
 
     for (const name of [
       "Deploy PR stage",
