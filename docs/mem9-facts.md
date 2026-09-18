@@ -268,8 +268,14 @@ still keep writers stopped through namespace cutover.
   `0016-namespace-vector-late-hydration`, and
   `0017-namespace-lifecycle-fencing`,
   `0018-service-maintenance-namespaces`, and
-  `0019-namespace-sampler`. The Docker build applies the complete stack to
+  `0019-namespace-sampler`, `0020-namespace-performance-gates`, and
+  `0021-namespace-connection-attribution`. The Docker build applies the complete stack to
   the pinned upstream commit in lexical order.
+- Patch `0021` adds the fixed low-cardinality
+  `application_name=mem9-server-tenant` parameter to PostgreSQL per-tenant
+  DSNs. The container entrypoint independently labels the control-plane pool
+  `mem9-server-control`. These labels are for bounded connection attribution;
+  they contain no user, namespace, memory, or request identifier.
 - Upstream asynchronous `messages[]` ingest returns 202 before starting an
   untracked goroutine. Downstream patch
   `docker/mnemo-server/patches/0004-durable-ingest-queue.patch` adds a
@@ -697,7 +703,7 @@ records and workload measurements remain private.
   constraint (see "DB connection mechanism"): mem9 reads one static `MNEMO_DSN`
   and can't compose it from parts, and the DB password is a runtime secret
   (Secrets Manager → ECS `secrets: valueFrom`), so the entrypoint assembles
-  `MNEMO_DSN=postgres://<user>:<url-encoded-pw>@<host>:<port>/<db>?sslmode=require`
+  `MNEMO_DSN=postgres://<user>:<url-encoded-pw>@<host>:<port>/<db>?sslmode=require&application_name=mem9-server-control`
   at container start from the injected `MEM9_DB_HOST/PORT/NAME` env + the
   `MEM9_DB_SECRET` JSON (`{username,password}`), URL-encoding the password (RDS
   RandomPassword can contain `@ / : ? #`) via `jq @uri`. It respects a pre-set

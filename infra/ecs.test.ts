@@ -132,8 +132,7 @@ function installGlobals(stage: string) {
     ec2: {
       getVpcOutput: () => ({ id: out("vpc-test") }),
       getSubnetsOutput: () => ({ ids: out(["subnet-a", "subnet-b", "subnet-c"]) }),
-      // Self-ingress :8080 rule so the proxy Lambda (shares the task SG) reaches
-      // mnemo-server (§6a).
+      // Gateway owns the dedicated proxy SG and :8080 ingress rule.
       SecurityGroupRule: class {
         constructor(_logicalName: string, args: Record<string, unknown>) {
           created.push({ kind: "SecurityGroupRule", args });
@@ -423,7 +422,7 @@ describe("ecs stack", () => {
     expect(args.loadBalancer).toBeUndefined();
   });
 
-  it("propagates cost tags, registers Cloud Map, and opens :8080 to the shared task SG", async () => {
+  it("propagates cost tags and registers Cloud Map without sharing the DB-authorized SG", async () => {
     installGlobals("prod");
     const ecs = await loadEcs();
     const outs = ecs(fakeDbOut());
@@ -458,13 +457,8 @@ describe("ecs stack", () => {
     expect(svcArgs.healthCheckGracePeriodSeconds).toBeUndefined();
     // The service depends on the discovery settle (fixes cold-deploy ServiceNotFound).
     expect(svcOpts.dependsOn?.length).toBeGreaterThanOrEqual(1);
-    // A self-referential :8080 ingress rule on the task SG lets the Lambda (which
-    // shares that SG) reach mnemo-server.
-    const rule = createdOf("SecurityGroupRule");
-    expect(rule.type).toBe("ingress");
-    expect(rule.fromPort).toBe(8080);
-    expect(rule.securityGroupId).toBeDefined();
-    expect(rule.sourceSecurityGroupId).toBeDefined();
+    // Gateway owns a distinct proxy SG and the narrowly scoped :8080 rule.
+    expect(created.filter((resource) => resource.kind === "SecurityGroupRule")).toHaveLength(0);
     // Exports the stable Cloud Map DNS name + task SG for gateway.ts.
     expect(String((outs.serviceDnsName as { value?: string }).value ?? outs.serviceDnsName)).toBe(
       "mnemo.mem9-prod.local",

@@ -34,6 +34,7 @@ COPY scripts/manage-memory-services.mjs /bootstrap/operator/scripts/manage-memor
 COPY infra/gateway/service-auth.mjs /bootstrap/operator/infra/gateway/service-auth.mjs
 COPY scripts/migrate-memory-namespaces.mjs /bootstrap/operator/scripts/migrate-memory-namespaces.mjs
 COPY scripts/benchmark-memory-namespaces.mjs /bootstrap/operator/scripts/benchmark-memory-namespaces.mjs
+COPY scripts/observe-memory-namespace-connections.mjs /bootstrap/operator/scripts/observe-memory-namespace-connections.mjs
 # The standalone operator resolves its enforcement SQL relative to scripts/,
 # just as it does in a checkout. Preserve that layout alongside bootstrap's SQL.
 COPY docker/bootstrap/migrations/003_enforce_memory_namespaces.sql /bootstrap/operator/docker/bootstrap/migrations/003_enforce_memory_namespaces.sql

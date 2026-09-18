@@ -194,7 +194,7 @@ export function gateway(
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const stage = $app.stage;
   const tags = { Project: "mem9-on-aws", Stage: stage, ManagedBy: "sst" };
-  const { privateSubnetIds } = resolveVpc();
+  const { vpcId, privateSubnetIds } = resolveVpc();
   // The GatewayTarget provision script (below) needs the region for its SDK client.
   const region = awsAny.getRegionOutput().name;
 
@@ -227,10 +227,39 @@ export function gateway(
   });
 
   // --- Proxy target Lambda (VPC-attached, nodejs24.x) ---
+  // Keep the proxy off the ECS/bootstrap SG. Aurora accepts 5432 only from that
+  // ECS SG, so this distinct SG makes a Lambda-originated database pool
+  // impossible at the network layer while retaining the private HTTP path.
+  const proxySg = new awsAny.ec2.SecurityGroup("Mem9GatewayProxySg", {
+    vpcId,
+    description: "Gateway proxy Lambda; HTTP to mnemo-server, no Aurora ingress",
+    egress: [
+      {
+        protocol: "-1",
+        fromPort: 0,
+        toPort: 0,
+        cidrBlocks: ["0.0.0.0/0"],
+      },
+    ],
+    tags,
+  });
+  const proxyIngress = new awsAny.ec2.SecurityGroupRule("Mem9TaskFromProxyLambda", {
+    type: "ingress",
+    securityGroupId: ecsOut.taskSecurityGroupId,
+    sourceSecurityGroupId: proxySg.id,
+    protocol: "tcp",
+    fromPort: MNEMO_PORT,
+    toPort: MNEMO_PORT,
+    description: "mnemo-server HTTP from the dedicated Gateway proxy SG",
+  });
+  const proxySecurityGroups = proxySg.id.apply((proxySgId: string) =>
+    proxyIngress.id.apply(() => [proxySgId]),
+  );
+
   // An `sst.aws.Function` (not a raw aws.lambda.Function): SST zips the handler,
   // creates the exec role with the VPC-ENI + logs perms, and forces nodejs24.x via
-  // the sst.config $transform. Attaches to the task SG (shares it with mnemo-server)
-  // so the self-ingress :8080 rule in ecs.ts lets it reach the server. Env carries
+  // the sst.config $transform. Its dedicated SG reaches the ECS SG only on :8080.
+  // Env carries
   // the Cloud Map URL + the X-API-Key (tenant id). The handler path is app-root-
   // relative (SST resolves handlers from the sst.config.ts dir). The local
   // provision command below separately resolves the checkout root at runtime.
@@ -240,7 +269,7 @@ export function gateway(
     timeout: "30 seconds",
     vpc: {
       privateSubnets: privateSubnetIds,
-      securityGroups: [ecsOut.taskSecurityGroupId],
+      securityGroups: proxySecurityGroups,
     },
     environment: {
       MEM9_SERVER_BASE_URL: $interpolate`http://${ecsOut.serviceDnsName}:${MNEMO_PORT}`,
@@ -412,6 +441,18 @@ export function gateway(
     name: `${prefix}/gateway/proxy-function-arn`,
     type: "String",
     value: proxyFn.arn,
+    tags,
+  });
+  new awsAny.ssm.Parameter("SsmGatewayProxyFunctionName", {
+    name: `${prefix}/gateway/proxy-function-name`,
+    type: "String",
+    value: proxyFn.name,
+    tags,
+  });
+  new awsAny.ssm.Parameter("SsmGatewayProxySgId", {
+    name: `${prefix}/gateway/proxy-sg-id`,
+    type: "String",
+    value: proxySg.id,
     tags,
   });
   new awsAny.ssm.Parameter("SsmGatewayIdentityFunctionArn", {

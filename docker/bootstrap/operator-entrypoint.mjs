@@ -57,6 +57,7 @@ function databaseDsn() {
   url.port = requireEnv("MEM9_DB_PORT");
   url.pathname = `/${encodeURIComponent(requireEnv("MEM9_DB_NAME"))}`;
   url.searchParams.set("sslmode", "require");
+  url.searchParams.set("application_name", "mem9-namespace-operator");
   return url.toString();
 }
 
@@ -233,6 +234,14 @@ export async function main() {
     if (OPERATION === "benchmark") {
       await run(
         `${SCRIPT_ROOT}/benchmark-memory-namespaces.mjs`,
+        [],
+        env,
+      );
+      return;
+    }
+    if (OPERATION === "connection-snapshot") {
+      await run(
+        `${SCRIPT_ROOT}/observe-memory-namespace-connections.mjs`,
         [],
         env,
       );

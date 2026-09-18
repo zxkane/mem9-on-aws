@@ -903,10 +903,16 @@ materialized complete records, alternates query order across 20 samples, and
 requires production p95 to remain within 120 percent of that baseline under the
 same two-second statement deadline. The PR preview then runs 100 real M2M
 namespace-resolution transactions from the bootstrap task inside the
-application VPC. That gate requires p95 below 20 ms. TC-GROUPNS-113 remains a
-separate live observation: infra synthesis proves the proxy Lambda has no
-database configuration, while attributed Aurora connection evidence must not be
-inferred from whole-database connection equality.
+application VPC. That gate requires p95 below 20 ms. TC-GROUPNS-113 uses a
+separate proxy Lambda security group that cannot satisfy Aurora's ECS-only 5432
+ingress rule. Fixed PostgreSQL `application_name` values distinguish the
+control and tenant pools. After the default client has warmed the service, the
+preview gate takes an idle `pg_stat_activity` baseline, sends sequential keyword
+searches through the default, alpha, and beta Gateway clients, and takes another
+stable snapshot. It rejects unknown applications, requires both attributed pools
+to be present, requires zero idle-connection growth across the sequential
+principal probes, and keeps the absolute five-connection mem9 idle bound. It does not infer
+attribution from whole-database connection counts or publish client addresses.
 
 ## Durable Ingest
 

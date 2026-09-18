@@ -95,6 +95,8 @@ function installGlobals(stage: string) {
       getSubnetsOutput: () => ({
         ids: out(["subnet-a", "subnet-b", "subnet-c"]),
       }),
+      SecurityGroup: makeCtor("SecurityGroup"),
+      SecurityGroupRule: makeCtor("SecurityGroupRule"),
     },
     iam: { Role: makeCtor("Role"), RolePolicy: makeCtor("RolePolicy") },
     bedrock: {
@@ -283,6 +285,23 @@ describe("gateway stack", () => {
     const vpc = targetFn?.vpc as Record<string, unknown>;
     expect(vpc.privateSubnets).toBeDefined();
     expect(vpc.securityGroups).toBeDefined();
+    expect(unwrap(vpc.securityGroups)).toEqual(["SecurityGroup-id"]);
+    const proxySg = only("SecurityGroup");
+    expect(proxySg.description).toContain("Gateway proxy");
+    const proxyRule = only("SecurityGroupRule");
+    expect(proxyRule.type).toBe("ingress");
+    expect(proxyRule.fromPort).toBe(8080);
+    expect(unwrap(proxyRule.securityGroupId)).toBe("sg-task");
+    expect(unwrap(proxyRule.sourceSecurityGroupId)).not.toBe("sg-task");
+    expect(
+      created.findIndex(({ kind }) => kind === "SecurityGroupRule"),
+    ).toBeLessThan(
+      created.findIndex(
+        ({ kind, args }) =>
+          kind === "SstFunction" &&
+          String(args.handler).includes("proxy-handler.handler"),
+      ),
+    );
     // Env (flat on sst.aws.Function): the Cloud Map base URL + the tenant key.
     const env = targetFn?.environment as Record<string, any>;
     expect(env.MEM9_ACCEPTANCE_STAGE).toBe("");
@@ -352,6 +371,12 @@ describe("gateway stack", () => {
     );
     expect(params.map(({ name }) => name)).toContain(
       "/mem9-on-aws/pr-42/gateway/proxy-function-arn",
+    );
+    expect(params.map(({ name }) => name)).toContain(
+      "/mem9-on-aws/pr-42/gateway/proxy-function-name",
+    );
+    expect(params.map(({ name }) => name)).toContain(
+      "/mem9-on-aws/pr-42/gateway/proxy-sg-id",
     );
   });
 

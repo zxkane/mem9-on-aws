@@ -331,7 +331,7 @@ describe("workflow integration", () => {
     );
     const isolationIndex = steps.findIndex(
       ({ name }) =>
-        name === "Shared-database namespace isolation E2E (preview, hard)",
+        name === "Namespace connection attribution E2E (preview, hard)",
     );
     const performanceIndex = steps.findIndex(
       ({ name }) => name === "Namespace performance E2E (preview, hard)",
@@ -341,7 +341,7 @@ describe("workflow integration", () => {
     expect(isolationIndex).toBeGreaterThan(enforcementIndex);
     expect(performanceIndex).toBeGreaterThan(isolationIndex);
     expect(steps[isolationIndex].run).toBe(
-      "bash scripts/run-memory-namespace-e2e.sh",
+      "bash scripts/run-memory-namespace-connection-e2e.sh",
     );
     expect(steps[performanceIndex].run).toBe(
       "bash scripts/run-memory-namespace-benchmark.sh",

@@ -11,6 +11,15 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 REGION="${AWS_REGION:-$(node "$ROOT/scripts/resolve-application-region.mjs")}"
 SAMPLES="${MEM9_NAMESPACE_BENCHMARK_SAMPLES:-100}"
 WARMUPS="${MEM9_NAMESPACE_BENCHMARK_WARMUPS:-20}"
+OPERATION="${MEM9_PREVIEW_OBSERVATION_OPERATION:-benchmark}"
+EVENT="${MEM9_PREVIEW_OBSERVATION_EVENT:-namespace_resolution_benchmark}"
+case "$OPERATION:$EVENT" in
+  benchmark:namespace_resolution_benchmark|connection-snapshot:namespace_connection_snapshot) ;;
+  *)
+    echo "::error::unsupported preview observation operation"
+    exit 2
+    ;;
+esac
 [[ "$SAMPLES" =~ ^[0-9]+$ && "$WARMUPS" =~ ^[0-9]+$ ]] || {
   echo "::error::benchmark sample counts must be integers"
   exit 2
@@ -95,12 +104,13 @@ NETWORK=$(jq -cn --argjson subnets "$SUBNETS" --arg sg "$TASK_SG" '
   }}')
 OVERRIDES=$(jq -cn \
   --arg container "$CONTAINER" \
+  --arg operation "$OPERATION" \
   --arg samples "$SAMPLES" \
   --arg warmups "$WARMUPS" '
   {containerOverrides:[{
     name:$container,
     environment:[
-      {name:"MEM9_BOOTSTRAP_OPERATION",value:"benchmark"},
+      {name:"MEM9_BOOTSTRAP_OPERATION",value:$operation},
       {name:"MEM9_NAMESPACE_BENCHMARK_SAMPLES",value:$samples},
       {name:"MEM9_NAMESPACE_BENCHMARK_WARMUPS",value:$warmups}
     ]
@@ -156,14 +166,23 @@ if [[ "$EXIT_CODE" != "0" ]]; then
   echo "::error::namespace benchmark task failed with exit ${EXIT_CODE}"
   exit 1
 fi
-RESULT=$(printf '%s' "$EVENTS" | jq -cer '
+RESULT=$(printf '%s' "$EVENTS" | jq -cer --arg event "$EVENT" '
   [.events[].message | fromjson?
-   | select(.event == "namespace_resolution_benchmark")]
+   | select(.event == $event)]
   | last
-  | select(
-      .version == 1
-      and .samples >= 20
-      and .p95_ms < .threshold_ms
-      and .threshold_ms == 20
-    )')
+  | select(.version == 1)
+  | if $event == "namespace_resolution_benchmark" then
+      select(
+        .samples >= 20
+        and .p95_ms < .threshold_ms
+        and .threshold_ms == 20
+      )
+    else
+      select(
+        (.control_connections | type) == "number"
+        and (.tenant_connections | type) == "number"
+        and (.active_connections | type) == "number"
+        and (.unknown_connections | type) == "number"
+      )
+    end')
 printf '%s\n' "$RESULT"
