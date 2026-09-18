@@ -1519,6 +1519,8 @@ Resources:
                   - cognito-idp:DescribeUserPool
                   - cognito-idp:DescribeUserPoolClient
                   - cognito-idp:GetGroup
+                  - cognito-idp:ListGroups
+                  - cognito-idp:UpdateGroup
                 Resource: !Sub arn:${AWS::Partition}:cognito-idp:${ApplicationRegion}:${AWS::AccountId}:userpool/*
                 Condition:
                   StringLike:
