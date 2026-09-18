@@ -129,6 +129,10 @@ describe("TC-GROUPNS-113 connection attribution", () => {
       resolve("scripts/run-memory-namespace-connection-e2e.sh"),
       "utf8",
     );
+    const observer = await readFile(
+      resolve("scripts/observe-memory-namespace-connections.mjs"),
+      "utf8",
+    );
     expect(dockerfile).toContain("observe-memory-namespace-connections.mjs");
     expect(workflow).toContain("Namespace connection attribution E2E");
     expect(workflow).toContain(
@@ -139,6 +143,8 @@ describe("TC-GROUPNS-113 connection attribution", () => {
     expect(runner).toContain("proxy-sg-id");
     expect(runner).toContain("db-sg-id");
     expect(runner).toContain("validate-memory-namespace-network.mjs");
+    expect(observer).not.toMatch(/^import pg from "pg";$/mu);
+    expect(observer).toContain('await import("pg")');
   });
 
   it("pins tenant-pool application attribution in the downstream patch", async () => {

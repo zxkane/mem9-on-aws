@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 
 import process from "node:process";
-import pg from "pg";
 
 const APPLICATIONS = Object.freeze({
   control: "mem9-server-control",
@@ -86,6 +85,7 @@ async function main() {
   }
   const dsn = process.env.MNEMO_DSN;
   if (!dsn) throw new Error("MNEMO_DSN is required");
+  const { default: pg } = await import("pg");
   const observerDsn = new URL(dsn);
   observerDsn.searchParams.set("application_name", APPLICATIONS.observer);
   const db = new pg.Client({
