@@ -94,11 +94,14 @@ async function main() {
   });
   await db.connect();
   try {
-    let result;
-    for (let attempt = 0; attempt < 20; attempt += 1) {
-      result = await observeConnections(db);
-      if (result.active_connections === 0) break;
+    let result = await observeConnections(db);
+    for (
+      let attempt = 1;
+      result.active_connections !== 0 && attempt < 20;
+      attempt += 1
+    ) {
       await new Promise((resolve) => setTimeout(resolve, 250));
+      result = await observeConnections(db);
     }
     if (result.active_connections !== 0) {
       throw new Error("database connections did not reach an idle snapshot");
