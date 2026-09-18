@@ -43,6 +43,15 @@ switch (command) {
   case "ec2 describe-subnets":
     respond(`subnet-${"b".repeat(17)}\tsubnet-${"c".repeat(17)}`);
     break;
+  case "servicediscovery list-namespaces":
+    respond('["ns-fixture"]');
+    break;
+  case "servicediscovery get-namespace":
+    respond("ZFIXTURE123");
+    break;
+  case "route53 get-hosted-zone":
+    respond(`["vpc-${"a".repeat(17)}"]`);
+    break;
   case "sts get-caller-identity":
     respond(
       optionValue("--query") === "Account"
@@ -55,6 +64,9 @@ switch (command) {
     const query = optionValue("--query");
     if (query?.includes("ApplicationRegion")) {
       respond(process.env.MOCK_APPLICATION_REGION ?? "eu-west-1");
+    }
+    if (query?.includes("LegacyRoleEnabled")) {
+      respond(process.env.MOCK_LEGACY_ROLE_ENABLED ?? "true");
     }
     if (query) {
       respond("arn:aws:iam::<aws-account-id>:role/github-actions-mem9-on-aws");

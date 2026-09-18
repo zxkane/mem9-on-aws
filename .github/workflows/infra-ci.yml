@@ -6,13 +6,10 @@
 #   3. cleanup-preview  — PR closed/merged → remove stage `pr-N`
 #   4. deploy-prod      — push to main → deploy stage `prod`
 #
-# Required GitHub repo secret:
-#   AWS_ROLE_ARN — IAM role ARN from
-#                  `infra/cloudformation/github-actions-role.yaml` (bootstrapped
-#                  out-of-band via `scripts/deploy-github-role.sh`).
-#                  deploy-prod HARD-FAILS without it (a silent skip would let a
-#                  push to main "succeed" without deploying). Preview/cleanup
-#                  skip gracefully when it's unset.
+# Required GitHub repo secrets:
+#   AWS_PREVIEW_ROLE_ARN — pull-request preview and cleanup role.
+#   AWS_PROD_ROLE_ARN — approved main-branch image/deployment role.
+#   Both are bootstrapped out-of-band by scripts/deploy-github-role.sh.
 #
 # Optional GitHub repo secret:
 #   MEM9_FACADE_CUSTOM_DOMAIN — production OAuth façade hostname, for example
@@ -124,7 +121,6 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  ROLE_NAME: github-actions-mem9-on-aws
   MEM9_DECISION_ARTIFACT_BUCKET: ${{ vars.MEM9_DECISION_ARTIFACT_BUCKET }}
   MEM9_TRANSPORT_SIGNING_ACTIVE_SLOT: ${{ vars.MEM9_TRANSPORT_SIGNING_ACTIVE_SLOT }}
   MEM9_TRANSPORT_SIGNING_SLOT_A_REVISION: ${{ vars.MEM9_TRANSPORT_SIGNING_SLOT_A_REVISION }}
@@ -187,6 +183,43 @@ jobs:
           if [[ "$region_changed" == "true" && "$EVENT_ACTION" != "closed" ]]; then
             echo "::error::Application region changes cannot deploy PR previews. Remove old-region previews and use the dedicated live migration process."
             exit 1
+          fi
+
+  changes:
+    name: Classify deployment changes
+    runs-on: ubuntu-latest
+    if: github.event_name != 'pull_request' || github.event.action != 'closed'
+    permissions:
+      contents: read
+    outputs:
+      workload_changed: ${{ steps.classify.outputs.workload_changed }}
+      app_infra_changed: ${{ steps.classify.outputs.app_infra_changed }}
+      aws_mutation_required: ${{ steps.classify.outputs.aws_mutation_required }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+      - name: Classify changed paths
+        id: classify
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          HEAD_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            node scripts/classify-infra-changes.mjs --force-production
+          elif [[ "$EVENT_NAME" == "pull_request" ]]; then
+            node scripts/classify-infra-changes.mjs \
+              --base "$BASE_SHA" \
+              --head "$HEAD_SHA" \
+              --merge-base
+          else
+            node scripts/classify-infra-changes.mjs \
+              --base "$BASE_SHA" \
+              --head "$HEAD_SHA"
           fi
 
   # ───────────────────────────────────────────────────────────────────────────
@@ -286,6 +319,8 @@ jobs:
           shellcheck scripts/run-memory-namespace-task.sh
           shellcheck scripts/lib/memory-namespace-operator.sh
           shellcheck scripts/deploy-memory-namespace-operator-role.sh
+          shellcheck scripts/deploy-github-role.sh
+          shellcheck scripts/verify-deploy-role-isolation.sh
 
       - name: PostgreSQL durable ingest integration tests
         run: bash scripts/run-ingest-queue-integration.sh
@@ -297,15 +332,24 @@ jobs:
 
   # ───────────────────────────────────────────────────────────────────────────
   # deploy-preview — PR opened/synchronized/reopened → stage `pr-N`.
-  # Skipped gracefully if AWS_ROLE_ARN is unset.
+  # Skipped gracefully if AWS_PREVIEW_ROLE_ARN is unset.
   # ───────────────────────────────────────────────────────────────────────────
   deploy-preview:
     name: Deploy PR Preview
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    environment: preview-ci
     # Depends on the image build so the preview pulls this PR's freshly-built
     # workload images.
-    needs: [application-region, typecheck, build-and-push-image]
-    if: github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.base.ref == 'main'
+    needs: [changes, application-region, typecheck, build-and-push-image]
+    if: >-
+      always()
+      && github.event_name == 'pull_request'
+      && github.event.action != 'closed'
+      && github.event.pull_request.base.ref == 'main'
+      && needs.changes.outputs.aws_mutation_required == 'true'
+      && needs.application-region.result == 'success'
+      && needs.typecheck.result == 'success'
+      && (needs.build-and-push-image.result == 'success' || needs.build-and-push-image.result == 'skipped')
     # Full-stack fresh preview: Aurora (~13m) + the 3-container ECS task (the
     # ~1.2 GB qwen3 image pull + 180s health-check startPeriod, plus the tiny
     # llm-proxy sidecar) + the bootstrap DB-retry + run-task. No RDS Proxy
@@ -324,6 +368,7 @@ jobs:
       pull-requests: write
     env:
       AWS_REGION: ${{ needs.application-region.outputs.region }}
+      ROLE_NAME: github-actions-mem9-on-aws-preview
       MEM9_LLM_RESPONSES_REGION: ${{ vars.MEM9_LLM_RESPONSES_REGION }}
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
@@ -336,17 +381,17 @@ jobs:
             exit 1
           fi
 
-      - name: Gate on AWS_ROLE_ARN
+      - name: Gate on AWS_PREVIEW_ROLE_ARN
         id: gate
         env:
           BOUNDARY_ENFORCED: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
-          HAS_AWS: ${{ secrets.AWS_ROLE_ARN }}
+          HAS_AWS: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
         run: |
           if [ "$BOUNDARY_ENFORCED" != "true" ]; then
             echo "::notice::Guarded workload-boundary migration is incomplete — skipping preview deploy"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           elif [ -z "$HAS_AWS" ]; then
-            echo "::notice::AWS_ROLE_ARN not configured — skipping preview deploy"
+            echo "::notice::AWS_PREVIEW_ROLE_ARN not configured — skipping preview deploy"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -377,7 +422,7 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           mask-aws-account-id: true
 
@@ -389,7 +434,7 @@ jobs:
         run: |
           set -euo pipefail
           if ! aws sts get-caller-identity >/dev/null 2>&1; then
-            echo "::error::OIDC role assumed but STS is unusable — check AWS_ROLE_ARN / trust policy"
+            echo "::error::OIDC role assumed but STS is unusable — check AWS_PREVIEW_ROLE_ARN / trust policy"
             exit 1
           fi
           if ! aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
@@ -402,6 +447,12 @@ jobs:
             exit 1
           fi
           echo "Preflight OK: OIDC deploy role assumed"
+
+      - name: Verify preview role isolation
+        if: steps.gate.outputs.skip != 'true'
+        env:
+          MEM9_PROD_HOSTED_ZONE_ID: ${{ secrets.MEM9_PROD_HOSTED_ZONE_ID }}
+        run: bash scripts/verify-deploy-role-isolation.sh preview
 
       - name: Remove conflicting Pulumi installation
         if: steps.gate.outputs.skip != 'true'
@@ -420,7 +471,7 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         shell: bash
         # Deploy the workload images this PR just built. If the build was skipped (no
-        # AWS_ROLE_ARN), fall back to `latest` — infra/ecs.ts's own default.
+        # AWS_PREVIEW_ROLE_ARN), fall back to `latest` — infra/ecs.ts's own default.
         env:
           MEM9_IMAGE_TAG: ${{ needs.build-and-push-image.outputs.image_tag || 'latest' }}
           # Bedrock Project id for the llm-proxy sidecar's OpenAI-Project cost
@@ -645,6 +696,7 @@ jobs:
   cleanup-failed-preview:
     name: Cleanup Failed PR Preview
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    environment: preview-ci
     needs: [application-region, deploy-preview]
     if: >-
       always() &&
@@ -673,17 +725,17 @@ jobs:
             exit 1
           fi
 
-      - name: Gate on AWS_ROLE_ARN
+      - name: Gate on AWS_PREVIEW_ROLE_ARN
         id: gate
         env:
           BOUNDARY_ENFORCED: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
-          HAS_AWS: ${{ secrets.AWS_ROLE_ARN }}
+          HAS_AWS: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
         run: |
           if [ "$BOUNDARY_ENFORCED" != "true" ]; then
             echo "::notice::Guarded workload-boundary migration is incomplete — skipping failed preview cleanup"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           elif [ -z "$HAS_AWS" ]; then
-            echo "::notice::AWS_ROLE_ARN not configured — skipping failed preview cleanup"
+            echo "::notice::AWS_PREVIEW_ROLE_ARN not configured — skipping failed preview cleanup"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -719,7 +771,7 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           mask-aws-account-id: true
 
@@ -769,6 +821,7 @@ jobs:
   cleanup-preview:
     name: Cleanup PR Preview
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    environment: preview-ci
     needs: [application-region]
     if: github.event_name == 'pull_request' && github.event.action == 'closed' && github.event.pull_request.base.ref == 'main'
     # Budget: 15m first remove + up to 20m ENI detach wait + 15m retry, plus
@@ -793,17 +846,17 @@ jobs:
             exit 1
           fi
 
-      - name: Gate on AWS_ROLE_ARN
+      - name: Gate on AWS_PREVIEW_ROLE_ARN
         id: gate
         env:
           BOUNDARY_ENFORCED: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
-          HAS_AWS: ${{ secrets.AWS_ROLE_ARN }}
+          HAS_AWS: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
         run: |
           if [ "$BOUNDARY_ENFORCED" != "true" ]; then
             echo "::notice::Guarded workload-boundary migration is incomplete — skipping preview cleanup"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           elif [ -z "$HAS_AWS" ]; then
-            echo "::notice::AWS_ROLE_ARN not configured — skipping cleanup"
+            echo "::notice::AWS_PREVIEW_ROLE_ARN not configured — skipping cleanup"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -813,7 +866,7 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           mask-aws-account-id: true
 
@@ -973,13 +1026,24 @@ jobs:
   # `pr-<sha7>`. Runs on all three events so previews exercise the real images
   # and prod pins the exact commit. Exposes the per-commit tag as an output that
   # deploy-preview and deploy-prod consume. Hard-fails on release events without
-  # AWS_ROLE_ARN; on PR it skips gracefully (matching deploy-preview's gate).
+  # the scope-specific role; on PR it skips gracefully when the preview role is
+  # absent, while production hard-fails without its role.
   # ───────────────────────────────────────────────────────────────────────────
   build-and-push-image:
     name: Build & push workload images
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
-    needs: [application-region, typecheck]
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch' || (github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.base.ref == 'main')
+    environment: ${{ github.event_name == 'pull_request' && 'preview-ci' || 'prod' }}
+    needs: [changes, application-region, typecheck]
+    if: >-
+      always()
+      && needs.changes.outputs.workload_changed == 'true'
+      && needs.application-region.result == 'success'
+      && needs.typecheck.result == 'success'
+      && (
+        github.event_name == 'push'
+        || github.event_name == 'workflow_dispatch'
+        || (github.event_name == 'pull_request' && github.event.action != 'closed' && github.event.pull_request.base.ref == 'main')
+      )
     # arm64 build: native on the self-hosted arm64 pool, QEMU-emulated on
     # ubuntu-latest (slower). Give the go build + emulation headroom.
     timeout-minutes: 30
@@ -988,8 +1052,9 @@ jobs:
       contents: read
     env:
       AWS_REGION: ${{ needs.application-region.outputs.region }}
+      ROLE_NAME: ${{ github.event_name == 'pull_request' && 'github-actions-mem9-on-aws-preview' || 'github-actions-mem9-on-aws-prod' }}
     outputs:
-      # The per-commit tag, or empty when skipped (PR with no AWS_ROLE_ARN) so
+      # The per-commit tag, or empty when skipped, so
       # downstream jobs can fall back to `latest`.
       image_tag: ${{ steps.tag.outputs.image_tag }}
     steps:
@@ -1002,11 +1067,11 @@ jobs:
             exit 1
           fi
 
-      - name: Gate on AWS_ROLE_ARN
+      - name: Gate on scope-specific AWS role
         id: gate
         env:
           BOUNDARY_ENFORCED: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
-          HAS_AWS: ${{ secrets.AWS_ROLE_ARN }}
+          HAS_AWS: ${{ github.event_name == 'pull_request' && secrets.AWS_PREVIEW_ROLE_ARN || secrets.AWS_PROD_ROLE_ARN }}
           EVENT_NAME: ${{ github.event_name }}
         run: |
           if [ "$BOUNDARY_ENFORCED" != "true" ]; then
@@ -1018,10 +1083,10 @@ jobs:
             echo "skip=true" >> "$GITHUB_OUTPUT"
           elif [ -z "$HAS_AWS" ]; then
             if [ "$EVENT_NAME" != "pull_request" ]; then
-              echo "::error::AWS_ROLE_ARN not configured — cannot build/push workload images for prod. Bootstrap the role (scripts/deploy-github-role.sh) and set the secret."
+              echo "::error::AWS_PROD_ROLE_ARN not configured — cannot build/push workload images for prod."
               exit 1
             fi
-            echo "::notice::AWS_ROLE_ARN not configured — skipping image builds (preview will fall back to :latest)"
+            echo "::notice::AWS_PREVIEW_ROLE_ARN not configured — skipping preview image builds"
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
             echo "skip=false" >> "$GITHUB_OUTPUT"
@@ -1052,7 +1117,7 @@ jobs:
         if: steps.gate.outputs.skip != 'true'
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ github.event_name == 'pull_request' && secrets.AWS_PREVIEW_ROLE_ARN || secrets.AWS_PROD_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           mask-aws-account-id: true
 
@@ -1160,15 +1225,23 @@ jobs:
           cache-to: type=gha,mode=max,scope=llm-proxy
 
   # ───────────────────────────────────────────────────────────────────────────
-  # deploy-prod — push to main → stage `prod`. HARD-FAILS without AWS_ROLE_ARN.
-  # Runs AFTER the image is built+pushed and pins prod to that exact `mem9-<sha7>`.
+  # deploy-prod — push to main → stage `prod`. Every credential-bearing
+  # production job is directly gated by the protected `prod` Environment.
+  # Workload changes pin the newly-built tag; application-IaC-only changes reuse
+  # the currently deployed tag.
   # ───────────────────────────────────────────────────────────────────────────
   deploy-prod:
     name: Deploy prod
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
-    needs: [application-region, typecheck, build-and-push-image]
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
     environment: prod
+    needs: [changes, application-region, typecheck, build-and-push-image]
+    if: >-
+      always()
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && needs.changes.outputs.aws_mutation_required == 'true'
+      && needs.application-region.result == 'success'
+      && needs.typecheck.result == 'success'
+      && (needs.build-and-push-image.result == 'success' || needs.build-and-push-image.result == 'skipped')
     # Full-stack prod: Aurora + the 3-container ECS task (qwen3 image pull + 180s
     # health startPeriod) + the bootstrap run-task. No RDS Proxy (dropped — see
     # infra/db.ts). The configured custom reconciliation budget
@@ -1180,6 +1253,7 @@ jobs:
       contents: read
     env:
       AWS_REGION: ${{ needs.application-region.outputs.region }}
+      ROLE_NAME: github-actions-mem9-on-aws-prod
       MEM9_LLM_RESPONSES_REGION: ${{ vars.MEM9_LLM_RESPONSES_REGION }}
       # Authentication is an operator choice. Preview jobs receive none of these
       # settings and continue to create isolated Cognito pools and test clients.
@@ -1210,12 +1284,12 @@ jobs:
             exit 1
           fi
 
-      - name: Gate on AWS_ROLE_ARN (hard-fail)
+      - name: Gate on AWS_PROD_ROLE_ARN (hard-fail)
         env:
-          HAS_AWS: ${{ secrets.AWS_ROLE_ARN }}
+          HAS_AWS: ${{ secrets.AWS_PROD_ROLE_ARN }}
         run: |
           if [ -z "$HAS_AWS" ]; then
-            echo "::error::AWS_ROLE_ARN not configured — cannot deploy prod. A silent skip would let this push 'succeed' without deploying. Bootstrap the role (scripts/deploy-github-role.sh) and set the secret."
+            echo "::error::AWS_PROD_ROLE_ARN not configured — cannot deploy prod."
             exit 1
           fi
 
@@ -1237,7 +1311,7 @@ jobs:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v6
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          role-to-assume: ${{ secrets.AWS_PROD_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           mask-aws-account-id: true
 
@@ -1248,7 +1322,7 @@ jobs:
         run: |
           set -euo pipefail
           if ! aws sts get-caller-identity >/dev/null 2>&1; then
-            echo "::error::OIDC role assumed but STS is unusable — check AWS_ROLE_ARN / trust policy"
+            echo "::error::OIDC role assumed but STS is unusable — check AWS_PROD_ROLE_ARN / trust policy"
             exit 1
           fi
           if ! aws iam get-role --role-name "$ROLE_NAME" >/dev/null 2>&1; then
@@ -1261,6 +1335,28 @@ jobs:
             exit 1
           fi
           echo "Preflight OK: OIDC deploy role assumed"
+
+      - name: Verify production role isolation
+        run: bash scripts/verify-deploy-role-isolation.sh production
+
+      - name: Resolve deployed image tag
+        id: deploy-image
+        env:
+          BUILT_IMAGE_TAG: ${{ needs.build-and-push-image.outputs.image_tag }}
+        run: |
+          image_tag="$BUILT_IMAGE_TAG"
+          if [[ -z "$image_tag" ]]; then
+            image_tag=$(aws ssm get-parameter \
+              --name /mem9-on-aws/prod/ecs/image-tag \
+              --region "$AWS_REGION" \
+              --query Parameter.Value \
+              --output text)
+          fi
+          if ! [[ "$image_tag" =~ ^mem9-[0-9a-f]{7}$ ]]; then
+            echo "::error::Production image tag is unavailable or malformed"
+            exit 1
+          fi
+          echo "image_tag=$image_tag" >> "$GITHUB_OUTPUT"
 
       - name: Remove conflicting Pulumi installation
         run: |
@@ -1374,7 +1470,7 @@ jobs:
         # Pin prod to the shared tag built for all workload images in this commit
         # (`mem9-<sha7>`); infra/ecs.ts reads MEM9_IMAGE_TAG.
         env:
-          MEM9_IMAGE_TAG: ${{ needs.build-and-push-image.outputs.image_tag }}
+          MEM9_IMAGE_TAG: ${{ steps.deploy-image.outputs.image_tag }}
           # New opt-in: the legacy tenant-wide flag cannot activate scheduling.
           MEM9_CONSOLIDATION_SCHEDULE_ENABLED: ${{ vars.MEM9_NAMESPACE_CONSOLIDATION_SCHEDULE_ENABLED || '0' }}
           # Preserve an existing production OAuth hostname. New repositories may
@@ -1456,11 +1552,17 @@ jobs:
   report-prod-failure:
     name: Report prod deploy failure
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
-    needs: [deploy-prod]
+    needs: [changes, deploy-prod]
     if: >-
       always() &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
-      needs.deploy-prod.result != 'success'
+      (
+        needs.changes.result != 'success'
+        || (
+          needs.changes.outputs.aws_mutation_required == 'true'
+          && needs.deploy-prod.result != 'success'
+        )
+      )
     timeout-minutes: 5
     permissions:
       contents: read

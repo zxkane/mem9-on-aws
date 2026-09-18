@@ -16,9 +16,10 @@
 #   scripts/deploy-github-role.sh            # auto create/update (reads .env)
 #   scripts/deploy-github-role.sh --create   # force create-stack
 #   scripts/deploy-github-role.sh --update   # force update-stack
+#   scripts/deploy-github-role.sh --retire-legacy
 #
-# After success, copy the RoleArn output to the GitHub repository secret:
-#   gh secret set AWS_ROLE_ARN --repo <owner>/mem9-on-aws --body "<role-arn>"
+# After the additive rollout, configure PreviewRoleArn and ProductionRoleArn as
+# the repository secrets AWS_PREVIEW_ROLE_ARN and AWS_PROD_ROLE_ARN.
 
 set -euo pipefail
 
@@ -28,6 +29,7 @@ set -euo pipefail
 _repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 if [[ "${WORKLOAD_BOUNDARY_SKIP_DOTENV:-false}" != "true" && -f "$_repo_root/.env" ]]; then
   set -a
+  # shellcheck source=/dev/null
   . "$_repo_root/.env"
   set +a
 fi
@@ -45,10 +47,13 @@ readonly STACK_REGION="us-west-2"
 APPLICATION_REGION="$(node "$_repo_root/scripts/resolve-application-region.mjs")"
 
 MODE=""
+LEGACY_ROLE_REQUEST=""
 for arg in "$@"; do
   case "$arg" in
     --create) MODE="create" ;;
     --update) MODE="update" ;;
+    --retire-legacy) LEGACY_ROLE_REQUEST=false ;;
+    --enable-legacy) LEGACY_ROLE_REQUEST=true ;;
     -h|--help)
       sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
       exit 0
@@ -64,6 +69,23 @@ if [[ ! -f "$TEMPLATE_FILE" ]]; then
   echo "Error: template not found at $TEMPLATE_FILE (run from repo root)" >&2
   exit 2
 fi
+
+read_existing_legacy_role_enabled() {
+  local value
+  value=$(aws cloudformation describe-stacks \
+    --stack-name "$STACK_NAME" \
+    --region "$STACK_REGION" \
+    --query "Stacks[0].Parameters[?ParameterKey=='LegacyRoleEnabled'].ParameterValue | [0]" \
+    --output text)
+  case "$value" in
+    true|false) printf '%s' "$value" ;;
+    None|"") printf 'true' ;;
+    *)
+      echo "Error: existing LegacyRoleEnabled value is invalid." >&2
+      return 1
+      ;;
+  esac
+}
 
 read_existing_application_region() {
   aws cloudformation describe-stacks \
@@ -105,6 +127,14 @@ elif [[ "$MODE" == "update" ]]; then
     exit 1
   fi
   require_matching_existing_region "$EXISTING_APPLICATION_REGION"
+fi
+
+if [[ -n "$LEGACY_ROLE_REQUEST" ]]; then
+  LEGACY_ROLE_ENABLED="$LEGACY_ROLE_REQUEST"
+elif [[ "$MODE" == "update" ]]; then
+  LEGACY_ROLE_ENABLED="$(read_existing_legacy_role_enabled)"
+else
+  LEGACY_ROLE_ENABLED=true
 fi
 
 echo "Stack:    $STACK_NAME"
@@ -218,13 +248,53 @@ for subnet_id in "${PRIVATE_SUBNET_IDS[@]}"; do
   APPLICATION_SUBNET_ARNS+="arn:${PARTITION}:ec2:${APPLICATION_REGION}:${ACCOUNT_ID}:subnet/${subnet_id}"
 done
 
+PROD_NAMESPACE_IDS=$(aws servicediscovery list-namespaces \
+  --region "$APPLICATION_REGION" \
+  --query "Namespaces[?Name=='mem9-prod.local'].Id" \
+  --output json)
+PROD_NAMESPACE_COUNT=$(jq 'length' <<<"$PROD_NAMESPACE_IDS")
+case "$PROD_NAMESPACE_COUNT" in
+  0)
+    PRODUCTION_HOSTED_ZONE_ARN=""
+    ;;
+  1)
+    PROD_NAMESPACE_ID=$(jq -r '.[0]' <<<"$PROD_NAMESPACE_IDS")
+    PROD_HOSTED_ZONE_ID=$(aws servicediscovery get-namespace \
+      --id "$PROD_NAMESPACE_ID" \
+      --region "$APPLICATION_REGION" \
+      --query "Namespace.Properties.DnsProperties.HostedZoneId" \
+      --output text)
+    if [[ ! "$PROD_HOSTED_ZONE_ID" =~ ^Z[A-Z0-9]+$ ]]; then
+      echo "Error: production Cloud Map hosted zone is unavailable." >&2
+      exit 1
+    fi
+    HOSTED_ZONE_VPCS=$(aws route53 get-hosted-zone \
+      --id "$PROD_HOSTED_ZONE_ID" \
+      --query "VPCs[].VPCId" \
+      --output json)
+    if ! jq -e --arg vpc "$APPLICATION_VPC_ID" \
+      'length > 0 and all(.[]; . == $vpc)' <<<"$HOSTED_ZONE_VPCS" >/dev/null; then
+      echo "Error: production hosted zone is not bound only to the application VPC." >&2
+      exit 1
+    fi
+    PRODUCTION_HOSTED_ZONE_ARN="arn:${PARTITION}:route53:::hostedzone/${PROD_HOSTED_ZONE_ID}"
+    ;;
+  *)
+    echo "Error: multiple production Cloud Map namespaces were discovered." >&2
+    exit 1
+    ;;
+esac
+
 PARAMS_JSON=$(printf \
-  '[{"ParameterKey":"OIDCProviderArn","ParameterValue":"%s"},{"ParameterKey":"ApplicationRegion","ParameterValue":"%s"},{"ParameterKey":"ApplicationVpcArn","ParameterValue":"%s"},{"ParameterKey":"ApplicationPrivateSubnetArns","ParameterValue":"%s"}]' \
+  '[{"ParameterKey":"OIDCProviderArn","ParameterValue":"%s"},{"ParameterKey":"ApplicationRegion","ParameterValue":"%s"},{"ParameterKey":"ApplicationVpcArn","ParameterValue":"%s"},{"ParameterKey":"ApplicationPrivateSubnetArns","ParameterValue":"%s"},{"ParameterKey":"ProductionHostedZoneArn","ParameterValue":"%s"},{"ParameterKey":"LegacyRoleEnabled","ParameterValue":"%s"}]' \
   "$OIDC_PROVIDER_ARN" \
   "$APPLICATION_REGION" \
   "$APPLICATION_VPC_ARN" \
-  "$APPLICATION_SUBNET_ARNS")
+  "$APPLICATION_SUBNET_ARNS" \
+  "$PRODUCTION_HOSTED_ZONE_ARN" \
+  "$LEGACY_ROLE_ENABLED")
 echo "ENI scope: $APPLICATION_REGION, one VPC, ${#PRIVATE_SUBNET_IDS[@]} private subnet(s)"
+echo "Legacy role enabled: $LEGACY_ROLE_ENABLED"
 
 case "$MODE" in
   create)
@@ -269,18 +339,33 @@ case "$MODE" in
     ;;
 esac
 
-ROLE_ARN=$(aws cloudformation describe-stacks \
+PREVIEW_ROLE_ARN=$(aws cloudformation describe-stacks \
   --stack-name "$STACK_NAME" \
   --region "$STACK_REGION" \
-  --query "Stacks[0].Outputs[?OutputKey=='RoleArn'].OutputValue" \
+  --query "Stacks[0].Outputs[?OutputKey=='PreviewRoleArn'].OutputValue" \
+  --output text)
+PROD_ROLE_ARN=$(aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" \
+  --region "$STACK_REGION" \
+  --query "Stacks[0].Outputs[?OutputKey=='ProductionRoleArn'].OutputValue" \
+  --output text)
+LEGACY_ROLE_ARN=$(aws cloudformation describe-stacks \
+  --stack-name "$STACK_NAME" \
+  --region "$STACK_REGION" \
+  --query "Stacks[0].Outputs[?OutputKey=='LegacyRoleArn'].OutputValue" \
   --output text)
 
 echo
-echo "RoleArn:  $ROLE_ARN"
+echo "PreviewRoleArn:    $PREVIEW_ROLE_ARN"
+echo "ProductionRoleArn: $PROD_ROLE_ARN"
+if [[ "$LEGACY_ROLE_ENABLED" == "true" ]]; then
+  echo "LegacyRoleArn:     $LEGACY_ROLE_ARN"
+else
+  echo "LegacyRoleArn:     (trust disabled)"
+fi
 echo
 echo "Next steps:"
-echo "  1. Set the GitHub secret:"
-echo "       gh secret set AWS_ROLE_ARN --repo zxkane/mem9-on-aws --body \"$ROLE_ARN\""
-echo "  2. (Optional) configure a self-hosted runner pool via RUNNER_LABEL:"
-echo "       gh variable set RUNNER_LABEL --repo zxkane/mem9-on-aws \\"
-echo "         --body '[\"self-hosted\", \"linux\", \"arm64\"]'"
+echo "  1. Set the role secrets without printing their values:"
+echo "       gh secret set AWS_PREVIEW_ROLE_ARN --repo zxkane/mem9-on-aws"
+echo "       gh secret set AWS_PROD_ROLE_ARN --repo zxkane/mem9-on-aws"
+echo "  2. After both paths pass, rerun with --retire-legacy and delete AWS_ROLE_ARN."

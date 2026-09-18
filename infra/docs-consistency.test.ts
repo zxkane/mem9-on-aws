@@ -299,15 +299,16 @@ describe("runtime documentation", () => {
     }
 
     expect(text.infraCi).toContain(
-      "HAS_AWS: ${{ secrets.AWS_ROLE_ARN }}",
+      "HAS_AWS: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}",
     );
     expect(text.infraCi).toMatch(
       /deploy-preview:[\s\S]{0,1600}permissions:[\s\S]{0,200}id-token: write/,
     );
     expect(text.githubActionsRole).toContain(
-      "- !Sub repo:${GitHubOrg}/${GitHubRepo}:pull_request",
+      "- !Sub repo:${GitHubOrg}/${GitHubRepo}:environment:preview-ci",
     );
-    expect(text.boundaryDesign).toContain("secrets.AWS_ROLE_ARN");
+    expect(text.boundaryDesign).toContain("secrets.AWS_PREVIEW_ROLE_ARN");
+    expect(text.boundaryDesign).toMatch(/separate\s+production role/i);
     expect(text.boundaryDesign).toMatch(
       /fork-triggered.{0,120}do not receive repository secrets/is,
     );
@@ -327,7 +328,7 @@ describe("runtime documentation", () => {
       "the `pull_request` subject must be removed from that role",
     );
     expect(text.boundaryDesign).toMatch(
-      /pull_request.{0,120}subject remains/is,
+      /preview-ci.{0,120}preview-maintenance/is,
     );
     expect(text.boundaryDesign).toMatch(
       /does not rely on whether.{0,80}vars\.\*/is,

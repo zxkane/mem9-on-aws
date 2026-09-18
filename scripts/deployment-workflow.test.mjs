@@ -67,7 +67,10 @@ function runFixture(name) {
   return { result, callRecords };
 }
 
-function runDeployRoleFixture(args = [], { existingApplicationRegion } = {}) {
+function runDeployRoleFixture(
+  args = [],
+  { existingApplicationRegion, existingLegacyRoleEnabled = "true" } = {},
+) {
   const dir = mkdtempSync(join(tmpdir(), "mem9-deploy-role-"));
   tempDirs.push(dir);
   const isolatedRoot = join(dir, "repo");
@@ -120,6 +123,7 @@ function runDeployRoleFixture(args = [], { existingApplicationRegion } = {}) {
       PROJECT_REGION: "us-east-1",
       MEM9_TEMPLATE_BUCKET: "fixture-template-bucket",
       MOCK_APPLICATION_REGION: existingApplicationRegion ?? "eu-west-1",
+      MOCK_LEGACY_ROLE_ENABLED: existingLegacyRoleEnabled,
     },
   });
   const callRecords = readFileSync(calls, "utf8")
@@ -809,6 +813,7 @@ describe("Lambda VPC IAM", () => {
       "ApplicationRegion",
       "ApplicationVpcArn",
       "ApplicationPrivateSubnetArns",
+      "ProductionHostedZoneArn",
     ]) {
       expect(script).toContain(`"ParameterKey":"${parameter}"`);
     }
@@ -859,8 +864,11 @@ describe("deploy-role stack region", () => {
       cloudFormationCalls.map(({ args }) => args.slice(0, 2).join(" ")),
     ).toEqual([
       "cloudformation describe-stacks",
+      "cloudformation describe-stacks",
       "cloudformation update-stack",
       "cloudformation wait",
+      "cloudformation describe-stacks",
+      "cloudformation describe-stacks",
       "cloudformation describe-stacks",
     ]);
     expect(
@@ -920,6 +928,38 @@ describe("deploy-role stack region", () => {
           args.slice(0, 2).join(" ") !== "cloudformation describe-stacks",
       ),
     ).toEqual([]);
+  });
+
+  it("preserves retired legacy trust unless rollback is explicit", () => {
+    const preserved = runDeployRoleFixture([], {
+      existingLegacyRoleEnabled: "false",
+    });
+    expect(preserved.result.status, preserved.result.stderr).toBe(0);
+    const preservedUpdate = preserved.callRecords.find(
+      ({ args }) => args.slice(0, 2).join(" ") ===
+        "cloudformation update-stack",
+    );
+    expect(
+      JSON.parse(optionValue(preservedUpdate.args, "--parameters")),
+    ).toContainEqual({
+      ParameterKey: "LegacyRoleEnabled",
+      ParameterValue: "false",
+    });
+
+    const restored = runDeployRoleFixture(["--enable-legacy"], {
+      existingLegacyRoleEnabled: "false",
+    });
+    expect(restored.result.status, restored.result.stderr).toBe(0);
+    const restoredUpdate = restored.callRecords.find(
+      ({ args }) => args.slice(0, 2).join(" ") ===
+        "cloudformation update-stack",
+    );
+    expect(
+      JSON.parse(optionValue(restoredUpdate.args, "--parameters")),
+    ).toContainEqual({
+      ParameterKey: "LegacyRoleEnabled",
+      ParameterValue: "true",
+    });
   });
 });
 
