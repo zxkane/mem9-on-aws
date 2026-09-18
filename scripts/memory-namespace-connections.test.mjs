@@ -95,6 +95,10 @@ describe("TC-GROUPNS-113 connection attribution", () => {
       { control_connections: 4, tenant_connections: 4, active_connections: 0, unknown_connections: 0 },
     )).not.toThrow();
     expect(() => compareConnectionSnapshots(
+      { control_connections: 2, tenant_connections: 2, active_connections: 0, unknown_connections: 0 },
+      { control_connections: 1, tenant_connections: 1, active_connections: 0, unknown_connections: 0 },
+    )).not.toThrow();
+    expect(() => compareConnectionSnapshots(
       { control_connections: 1, tenant_connections: 1, active_connections: 0, unknown_connections: 0 },
       { control_connections: 3, tenant_connections: 1, active_connections: 0, unknown_connections: 0 },
     )).toThrow(/control pool/u);

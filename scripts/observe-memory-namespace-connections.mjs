@@ -59,15 +59,15 @@ export function compareConnectionSnapshots(before, after) {
   }
   if (
     after.control_connections > MAX_IDLE_CONNECTIONS_PER_POOL ||
-    after.control_connections !== before.control_connections
+    after.control_connections > before.control_connections
   ) {
-    throw new Error("control pool changed after sequential principal probes");
+    throw new Error("control pool grew after sequential principal probes");
   }
   if (
     after.tenant_connections > MAX_IDLE_CONNECTIONS_PER_POOL ||
-    after.tenant_connections !== before.tenant_connections
+    after.tenant_connections > before.tenant_connections
   ) {
-    throw new Error("tenant pool changed after sequential namespace probes");
+    throw new Error("tenant pool grew after sequential namespace probes");
   }
   return {
     version: 1,
