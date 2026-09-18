@@ -308,7 +308,7 @@ describe("runtime documentation", () => {
       "- !Sub repo:${GitHubOrg}/${GitHubRepo}:environment:preview-ci",
     );
     expect(text.boundaryDesign).toContain("secrets.AWS_PREVIEW_ROLE_ARN");
-    expect(text.boundaryDesign).toMatch(/separate\s+production role/i);
+    expect(text.boundaryDesign).toMatch(/separate\s+production\s+role/i);
     expect(text.boundaryDesign).toMatch(
       /fork-triggered.{0,120}do not receive repository secrets/is,
     );
