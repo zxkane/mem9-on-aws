@@ -23,6 +23,15 @@ export function selectImageTags(eventName, sha) {
   throw new Error(`unsupported GitHub event: ${eventName || "<empty>"}`);
 }
 
+export function selectHumanImageTags(eventName, sha) {
+  if (eventName !== "pull_request") {
+    throw new Error("human acceptance images are built only for pull requests");
+  }
+  const selection = selectImageTags(eventName, sha);
+  const releaseTag = `pr-human-${selection.releaseTag.slice(3)}`;
+  return { releaseTag, tags: [releaseTag, "human-latest"] };
+}
+
 function writeGithubOutputs(path, selection) {
   appendFileSync(
     path,
@@ -39,10 +48,27 @@ function writeGithubOutputs(path, selection) {
 function main() {
   const output = process.env.GITHUB_OUTPUT;
   if (!output) throw new Error("GITHUB_OUTPUT is required");
-  writeGithubOutputs(
-    output,
-    selectImageTags(process.env.EVENT_NAME, process.env.GITHUB_SHA),
+  const selection = selectImageTags(
+    process.env.EVENT_NAME,
+    process.env.GITHUB_SHA,
   );
+  writeGithubOutputs(output, selection);
+  if (process.env.EVENT_NAME === "pull_request") {
+    const human = selectHumanImageTags(
+      process.env.EVENT_NAME,
+      process.env.GITHUB_SHA,
+    );
+    appendFileSync(
+      output,
+      [
+        `human_image_tag=${human.releaseTag}`,
+        "human_image_tags<<EOF",
+        ...human.tags,
+        "EOF",
+        "",
+      ].join("\n"),
+    );
+  }
 }
 
 const isMain =

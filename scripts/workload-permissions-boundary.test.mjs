@@ -9338,7 +9338,7 @@ describe("boundary and deploy-role templates", () => {
       ),
     ).toHaveLength(2);
     expect(workflow.match(/name: Deployment maintenance gate/gu)).toHaveLength(
-      5,
+      6,
     );
     expect(
       reconciliationWorkflow.match(/name: Deployment maintenance gate/gu),

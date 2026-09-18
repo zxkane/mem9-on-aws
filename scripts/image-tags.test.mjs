@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
 
-import { selectImageTags } from "./image-tags.mjs";
+import { selectHumanImageTags, selectImageTags } from "./image-tags.mjs";
 
 const SHA = "abcdef0123456789abcdef0123456789abcdef01";
 const tempDirs = [];
@@ -14,6 +14,14 @@ afterEach(() => {
 });
 
 describe("selectImageTags", () => {
+  it("uses isolated preview tags for the browser acceptance image", () => {
+    expect(selectHumanImageTags("pull_request", SHA)).toEqual({
+      releaseTag: "pr-human-abcdef0",
+      tags: ["pr-human-abcdef0", "human-latest"],
+    });
+    expect(() => selectHumanImageTags("push", SHA)).toThrow(/pull requests/u);
+  });
+
   it.each([
     ["push", { releaseTag: "mem9-abcdef0", tags: ["mem9-abcdef0", "latest"] }],
     [

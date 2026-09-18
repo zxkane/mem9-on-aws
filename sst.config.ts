@@ -162,6 +162,8 @@ export default $config({
       namespaceIdentityOut,
       authConfig,
     );
+    const { humanAcceptance } = await import("./infra/human-acceptance");
+    humanAcceptance(ecsOut.cluster, dbOut, cognitoOut);
 
     // One shared task per supported service; every invocation requires an
     // authorized namespace. Scheduling additionally requires explicit targets.

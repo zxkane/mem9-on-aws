@@ -302,7 +302,7 @@ describe("runtime documentation", () => {
       "HAS_AWS: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}",
     );
     expect(text.infraCi).toMatch(
-      /deploy-preview:[\s\S]{0,1600}permissions:[\s\S]{0,200}id-token: write/,
+      /deploy-preview:[\s\S]{0,2400}permissions:[\s\S]{0,200}id-token: write/,
     );
     expect(text.githubActionsRole).toContain(
       "- !Sub repo:${GitHubOrg}/${GitHubRepo}:environment:preview-ci",
