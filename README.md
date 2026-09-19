@@ -549,6 +549,13 @@ named verification surface. The map is not an AC execution result. The deployed
 PR namespace check is implemented by
 `scripts/run-memory-namespace-e2e.sh`.
 
+Namespace exact-vector searches emit content-free capacity telemetry. The
+production dashboard shows the maximum observed row count plus pre-ceiling,
+capacity-refusal, and timeout counters from
+`mem9-on-aws/NamespaceVector`. The warning begins at 80 percent of the
+configured row ceiling; metric dimensions never contain namespace, principal,
+memory, or request identifiers.
+
 #### Operator-run human OAuth acceptance
 
 `scripts/run-human-namespace-e2e.mjs` exercises real human authorization-code +

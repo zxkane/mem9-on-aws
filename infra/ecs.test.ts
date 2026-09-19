@@ -833,8 +833,8 @@ describe("ecs stack", () => {
     const filters = created.filter((c) => c.kind === "LogMetricFilter");
     const alarms = created.filter((c) => c.kind === "MetricAlarm");
     const compositeAlarms = created.filter((c) => c.kind === "CompositeAlarm");
-    expect(filters.length).toBe(3); // recall_zero_hit, recall_total, ingest_llm_auth_failure
-    expect(alarms.length).toBe(11);
+    expect(filters.length).toBe(7); // recall, ingest auth, and namespace-vector metrics
+    expect(alarms.length).toBe(14);
     expect(compositeAlarms).toHaveLength(1);
     expect(created.filter((c) => c.kind === "Dashboard")).toHaveLength(1);
     // Queue health remains evidence-based; only sampler liveness treats loss
@@ -843,7 +843,7 @@ describe("ecs stack", () => {
     expect(missingPolicies.filter((policy) => policy === "breaching")).toHaveLength(1);
     expect(
       missingPolicies.filter((policy) => policy === "notBreaching"),
-    ).toHaveLength(10);
+    ).toHaveLength(13);
     // Metric filter patterns reference the correct log line msg values.
     const patterns = filters.map((f) => (f.args as { pattern: string }).pattern);
     expect(patterns.some((p) => p.includes("confidence recall search") && p.includes("returned = 0"))).toBe(true);
