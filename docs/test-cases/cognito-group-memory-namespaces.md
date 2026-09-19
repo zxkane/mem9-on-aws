@@ -163,6 +163,11 @@ is exercised by `VectorSearch` and `EXPLAIN ANALYZE`: results must match a
 namespace-local brute-force baseline, foreign and filtered rows stay out, the
 distance tuples remain narrow, and an available HNSW index never selects
 candidates. Capacity and statement-timeout failures remain fail closed.
+The repository logs only bounded `result`, `rows`, `max_rows`, and
+`warning_percent` fields. Production metric filters extract the row gauge and
+warning/capacity/timeout counters without namespace, principal, memory, or
+request dimensions. The pre-ceiling warning starts at 80 percent and never
+changes the hard capacity response.
 Public benchmark evidence must use a documented synthetic corpus, retain the
 configured two-second deadline, and verify top-K 10 and 50. Keep measurements
 from real operator data in private records.

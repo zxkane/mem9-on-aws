@@ -2385,9 +2385,9 @@
       "namespace_evidence": "INSERT column namespace_id"
     },
     {
-      "id": "de9eaadef0f12cbce93b",
+      "id": "beb8054cbbb6fcc41b38",
       "owner": "upstream/server/cmd/mnemo-server/main.go",
-      "line": 551,
+      "line": 555,
       "tables": [
         "ingest_job_plans",
         "ingest_jobs",
@@ -3227,9 +3227,9 @@
       "namespace_evidence": "namespace_id = $5"
     },
     {
-      "id": "45b7c4d6b559f3c9d6a2",
+      "id": "daed0442fdccf6bb4c0f",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 61,
+      "line": 63,
       "tables": [
         "memories"
       ],
@@ -3244,9 +3244,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "e02c9a40e4c97073914d",
+      "id": "d4486eb18df50338bc07",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 75,
+      "line": 77,
       "tables": [
         "memories"
       ],
@@ -3260,9 +3260,9 @@
       "namespace_evidence": "INSERT column namespace_id"
     },
     {
-      "id": "88bbf07588597cbfae2f",
+      "id": "c026c643bb77878ffbe6",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 97,
+      "line": 99,
       "tables": [
         "memories"
       ],
@@ -3276,9 +3276,9 @@
       "namespace_evidence": "namespace_id = $2"
     },
     {
-      "id": "2b526d576a5506efdd17",
+      "id": "f64736a18e29d9a5109c",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 104,
+      "line": 106,
       "tables": [
         "memories"
       ],
@@ -3293,9 +3293,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "0c0a7a950933956a1c90",
+      "id": "ba0ee29ac97b021957cc",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 112,
+      "line": 114,
       "tables": [
         "memories"
       ],
@@ -3310,9 +3310,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "20df4126ee1f702d2e3c",
+      "id": "04f70f048efeb5c7bdbe",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 153,
+      "line": 155,
       "tables": [
         "memories"
       ],
@@ -3327,9 +3327,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "9e9fb719ba41a33c1526",
+      "id": "da435b37e50c276d6b6b",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 171,
+      "line": 173,
       "tables": [
         "memories"
       ],
@@ -3344,9 +3344,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "3baf575d318791a7227f",
+      "id": "5170ac88e913e95014c0",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 207,
+      "line": 209,
       "tables": [
         "memories"
       ],
@@ -3361,9 +3361,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "701e3622802c3191fbe0",
+      "id": "cdce37fbe2b3254e0a58",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 229,
+      "line": 231,
       "tables": [
         "memories"
       ],
@@ -3377,9 +3377,9 @@
       "namespace_evidence": "namespace_id = $4"
     },
     {
-      "id": "8fbaba51c4fa0e9a45fa",
+      "id": "92ba60e50e7694547bc5",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 245,
+      "line": 247,
       "tables": [
         "memories"
       ],
@@ -3394,9 +3394,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "413c458070dfe97d2714",
+      "id": "a478d10c88bbf0a9320a",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 266,
+      "line": 268,
       "tables": [
         "memories"
       ],
@@ -3411,9 +3411,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "29eb793565576614d0b5",
+      "id": "048cfaff6bd0fd74a493",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 290,
+      "line": 292,
       "tables": [
         "memories"
       ],
@@ -3427,9 +3427,9 @@
       "namespace_evidence": "INSERT column namespace_id"
     },
     {
-      "id": "b7bd7efc0a1802d8c965",
+      "id": "4119ab5d405f013ee471",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 304,
+      "line": 306,
       "tables": [
         "memories"
       ],
@@ -3444,9 +3444,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "124b377c0e79014471a7",
+      "id": "c12d6af4f08029b6314e",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 322,
+      "line": 324,
       "tables": [
         "memories"
       ],
@@ -3460,9 +3460,9 @@
       "namespace_evidence": "namespace_id = $4"
     },
     {
-      "id": "ed4a5861e5640745fe57",
+      "id": "c1da9abf7d142d3ec11e",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 338,
+      "line": 340,
       "tables": [
         "memories"
       ],
@@ -3477,9 +3477,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "756aa86836890c84e603",
+      "id": "0b2ac5855fcc59365b37",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 356,
+      "line": 358,
       "tables": [
         "memories"
       ],
@@ -3494,9 +3494,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "62388e8ada09109896ca",
+      "id": "c37d1556836bac8d7d91",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 373,
+      "line": 375,
       "tables": [
         "memories"
       ],
@@ -3511,9 +3511,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "ed3e83ad573fd35ac0bd",
+      "id": "839ce7c0eb8ee2d5b5b2",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 424,
+      "line": 426,
       "tables": [
         "memories"
       ],
@@ -3528,9 +3528,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "114a2170a7f4c83b4ee6",
+      "id": "a6fe82a1944aadcb5fe9",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 442,
+      "line": 444,
       "tables": [
         "memories"
       ],
@@ -3545,9 +3545,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "98cb88e0420ca9d69468",
+      "id": "9f70fcf958047da16872",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 484,
+      "line": 486,
       "tables": [
         "memories"
       ],
@@ -3561,9 +3561,9 @@
       "namespace_evidence": "INSERT column namespace_id"
     },
     {
-      "id": "b1c99bea343b18bc93da",
+      "id": "07ebd04ee7349a5a15b3",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 498,
+      "line": 500,
       "tables": [
         "memories"
       ],
@@ -3578,9 +3578,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "113f74fb21dd0227fe65",
+      "id": "476dd306b2ce4ffc5edd",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 539,
+      "line": 541,
       "tables": [
         "memories"
       ],
@@ -3595,9 +3595,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "7a87a9227ba22ec139ef",
+      "id": "2a1c33bf5eebb86375c7",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 596,
+      "line": 598,
       "tables": [
         "memories"
       ],
@@ -3611,9 +3611,9 @@
       "namespace_evidence": "namespace_id = $1"
     },
     {
-      "id": "cf3bd040e509e1b3900c",
+      "id": "e7e3302e6e9aef232cc9",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 655,
+      "line": 677,
       "tables": [
         "memories"
       ],
@@ -3629,9 +3629,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "ff91f351a975eef677dc",
+      "id": "4eb56c3717ca7bd16c2d",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 713,
+      "line": 743,
       "tables": [
         "memories"
       ],
@@ -3646,9 +3646,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "c11dbef10f85fb10b479",
+      "id": "abbcad28c0e4119d791e",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 741,
+      "line": 771,
       "tables": [
         "memories"
       ],
@@ -3663,9 +3663,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "80297766b9b47e1cef1c",
+      "id": "57091f528bf4a4a2ddcf",
       "owner": "upstream/server/internal/repository/postgres/memory.go",
-      "line": 1067,
+      "line": 1097,
       "tables": [
         "memories"
       ],

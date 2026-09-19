@@ -66,6 +66,7 @@ export function observability(
 
   const namespace = "mem9-on-aws";
   const durableNamespace = "mem9-on-aws/DurableIngest";
+  const namespaceVectorNamespace = "mem9-on-aws/NamespaceVector";
   const failureQueueRetentionSeconds = 14 * 24 * 60 * 60;
   const region = applicationRegion();
 
@@ -112,6 +113,46 @@ export function observability(
       },
     },
   );
+
+  new aws.cloudwatch.LogMetricFilter("NamespaceVectorRowsFilter", {
+    logGroupName,
+    pattern: '{ $.msg = "namespace vector search" && $.rows = * }',
+    metricTransformation: {
+      name: "NamespaceVectorRows",
+      namespace: namespaceVectorNamespace,
+      value: "$.rows",
+    },
+  });
+
+  new aws.cloudwatch.LogMetricFilter("NamespaceVectorWarningFilter", {
+    logGroupName,
+    pattern: '{ $.msg = "namespace vector capacity warning" }',
+    metricTransformation: {
+      name: "NamespaceVectorCapacityWarning",
+      namespace: namespaceVectorNamespace,
+      value: "1",
+    },
+  });
+
+  new aws.cloudwatch.LogMetricFilter("NamespaceVectorCapacityFilter", {
+    logGroupName,
+    pattern: '{ $.msg = "namespace vector search" && $.result = "capacity" }',
+    metricTransformation: {
+      name: "NamespaceVectorCapacityExceeded",
+      namespace: namespaceVectorNamespace,
+      value: "1",
+    },
+  });
+
+  new aws.cloudwatch.LogMetricFilter("NamespaceVectorTimeoutFilter", {
+    logGroupName,
+    pattern: '{ $.msg = "namespace vector search" && $.result = "timeout" }',
+    metricTransformation: {
+      name: "NamespaceVectorTimeout",
+      namespace: namespaceVectorNamespace,
+      value: "1",
+    },
+  });
 
   // ─── Alarm topic + independently observable delivery failures ───────────
 
@@ -412,6 +453,48 @@ export function observability(
             ],
           },
         },
+        {
+          type: "text",
+          x: 0,
+          y: 26,
+          width: 24,
+          height: 1,
+          properties: { markdown: "# Namespace vector search" },
+        },
+        {
+          type: "metric",
+          x: 0,
+          y: 27,
+          width: 24,
+          height: 6,
+          properties: {
+            title: "Namespace vector capacity",
+            region,
+            period: 300,
+            metrics: [
+              [
+                namespaceVectorNamespace,
+                "NamespaceVectorRows",
+                { stat: "Maximum" },
+              ],
+              [
+                namespaceVectorNamespace,
+                "NamespaceVectorCapacityWarning",
+                { stat: "Sum" },
+              ],
+              [
+                namespaceVectorNamespace,
+                "NamespaceVectorCapacityExceeded",
+                { stat: "Sum" },
+              ],
+              [
+                namespaceVectorNamespace,
+                "NamespaceVectorTimeout",
+                { stat: "Sum" },
+              ],
+            ],
+          },
+        },
       ],
     }),
   });
@@ -465,6 +548,51 @@ export function observability(
       "for reason=auth_remint or credential-rotation events.",
     namespace,
     metricName: "ingest_llm_auth_failure",
+    statistic: "Sum",
+    period: 900,
+    evaluationPeriods: 1,
+    threshold: 3,
+    comparisonOperator: "GreaterThanOrEqualToThreshold",
+    treatMissingData: "notBreaching",
+    alarmActions,
+    okActions,
+  });
+
+  new aws.cloudwatch.MetricAlarm("NamespaceVectorCapacityWarningAlarm", {
+    alarmDescription:
+      "Namespace exact-vector rows reached at least 80% of the configured ceiling.",
+    namespace: namespaceVectorNamespace,
+    metricName: "NamespaceVectorCapacityWarning",
+    statistic: "Sum",
+    period: 900,
+    evaluationPeriods: 1,
+    threshold: 1,
+    comparisonOperator: "GreaterThanOrEqualToThreshold",
+    treatMissingData: "notBreaching",
+    alarmActions,
+    okActions,
+  });
+
+  new aws.cloudwatch.MetricAlarm("NamespaceVectorCapacityExceededAlarm", {
+    alarmDescription:
+      "At least one namespace exact-vector search exceeded its configured row ceiling.",
+    namespace: namespaceVectorNamespace,
+    metricName: "NamespaceVectorCapacityExceeded",
+    statistic: "Sum",
+    period: 900,
+    evaluationPeriods: 1,
+    threshold: 1,
+    comparisonOperator: "GreaterThanOrEqualToThreshold",
+    treatMissingData: "notBreaching",
+    alarmActions,
+    okActions,
+  });
+
+  new aws.cloudwatch.MetricAlarm("NamespaceVectorTimeoutAlarm", {
+    alarmDescription:
+      "At least three namespace exact-vector SQL statements timed out in 15 minutes.",
+    namespace: namespaceVectorNamespace,
+    metricName: "NamespaceVectorTimeout",
     statistic: "Sum",
     period: 900,
     evaluationPeriods: 1,

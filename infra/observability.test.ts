@@ -235,11 +235,11 @@ describe("observability alert delivery", () => {
     const topic = one("Topic");
     expect(topic.args).toEqual({ name: "mem9-on-aws-prod-alerts" });
     const alarms = resources.filter((resource) => resource.kind === "MetricAlarm");
-    expect(alarms).toHaveLength(11);
+    expect(alarms).toHaveLength(14);
     const actionBearingMetricAlarms = alarms.filter(
       (alarm) => alarm.args.alarmActions !== undefined,
     );
-    expect(actionBearingMetricAlarms).toHaveLength(9);
+    expect(actionBearingMetricAlarms).toHaveLength(12);
     for (const alarm of actionBearingMetricAlarms) {
       expect(materialize(alarm.args.alarmActions)).toEqual([
         "arn:aws:sns:ap-northeast-1:123456789012:mem9-on-aws-prod-alerts",
@@ -687,7 +687,7 @@ describe("observability alert delivery", () => {
           resource.kind === "MetricAlarm" ||
           resource.kind === "CompositeAlarm",
       ),
-    ).toHaveLength(12);
+    ).toHaveLength(15);
   });
 
   it("TC-ALERT-015/TC-INGEST-METRIC-016/018/019/024..027: pins alarm semantics", () => {
@@ -1131,9 +1131,117 @@ describe("observability alert delivery", () => {
   it("TC-INGEST-METRIC-020: removes the obsolete ingest_dropped metric", () => {
     observability(prodInputs);
     const filters = resources.filter((resource) => resource.kind === "LogMetricFilter");
-    expect(filters).toHaveLength(3);
+    expect(filters).toHaveLength(7);
     expect(JSON.stringify(filters.map((filter) => filter.args))).not.toContain(
       "ingest_dropped",
     );
+  });
+
+  it("TC-GROUPNS-081/082: extracts bounded namespace-vector metrics and alarms", () => {
+    observability(prodInputs);
+    const vectorNamespace = "mem9-on-aws/NamespaceVector";
+    const filters = resources
+      .filter((resource) => resource.kind === "LogMetricFilter")
+      .filter(
+        (resource) =>
+          (resource.args.metricTransformation as { namespace?: string })
+            .namespace === vectorNamespace,
+      );
+    expect(filters.map((filter) => filter.logicalName).sort()).toEqual([
+      "NamespaceVectorCapacityFilter",
+      "NamespaceVectorRowsFilter",
+      "NamespaceVectorTimeoutFilter",
+      "NamespaceVectorWarningFilter",
+    ]);
+    expect(filters.map((filter) => filter.args)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          pattern: '{ $.msg = "namespace vector search" && $.rows = * }',
+          metricTransformation: expect.objectContaining({
+            name: "NamespaceVectorRows",
+            value: "$.rows",
+          }),
+        }),
+        expect.objectContaining({
+          pattern: '{ $.msg = "namespace vector capacity warning" }',
+          metricTransformation: expect.objectContaining({
+            name: "NamespaceVectorCapacityWarning",
+            value: "1",
+          }),
+        }),
+      ]),
+    );
+
+    for (const [logicalName, metricName, threshold] of [
+      [
+        "NamespaceVectorCapacityWarningAlarm",
+        "NamespaceVectorCapacityWarning",
+        1,
+      ],
+      [
+        "NamespaceVectorCapacityExceededAlarm",
+        "NamespaceVectorCapacityExceeded",
+        1,
+      ],
+      ["NamespaceVectorTimeoutAlarm", "NamespaceVectorTimeout", 3],
+    ] as const) {
+      expect(named("MetricAlarm", logicalName).args).toMatchObject({
+        namespace: vectorNamespace,
+        metricName,
+        statistic: "Sum",
+        period: 900,
+        evaluationPeriods: 1,
+        threshold,
+        comparisonOperator: "GreaterThanOrEqualToThreshold",
+        treatMissingData: "notBreaching",
+      });
+    }
+
+    const body = JSON.parse(
+      materialize(one("Dashboard").args.dashboardBody) as string,
+    );
+    const widget = body.widgets.find(
+      (candidate: { properties?: { title?: string } }) =>
+        candidate.properties?.title === "Namespace vector capacity",
+    );
+    expect(JSON.stringify(widget)).toContain(vectorNamespace);
+    expect(JSON.stringify(widget)).toContain("NamespaceVectorRows");
+    expect(JSON.stringify(widget)).toContain(
+      "NamespaceVectorCapacityWarning",
+    );
+    expect(JSON.stringify(widget)).toContain(
+      "NamespaceVectorCapacityExceeded",
+    );
+    expect(JSON.stringify(widget)).toContain("NamespaceVectorTimeout");
+
+    const patch = readFileSync(
+      new URL(
+        "../docker/mnemo-server/patches/0022-namespace-vector-observability.patch",
+        import.meta.url,
+      ),
+      "utf8",
+    );
+    for (const contract of [
+      '"namespace vector search"',
+      '"namespace vector capacity warning"',
+      '"result", "capacity"',
+      '"result", "timeout"',
+      '"rows", rowsInNamespace',
+      '"max_rows", maxRows',
+      '"warning_percent", namespaceVectorWarningPercent',
+      "installDefaultServerLogger",
+      "slog.SetDefault(logger)",
+      "slog.NewJSONHandler(output",
+    ]) {
+      expect(patch).toContain(contract);
+    }
+    for (const forbidden of [
+      '"namespace_id"',
+      '"principal_id"',
+      '"memory_id"',
+      '"request_id"',
+    ]) {
+      expect(patch).not.toContain(forbidden);
+    }
   });
 });

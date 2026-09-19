@@ -890,8 +890,12 @@ performance.
 
 The production threshold is selected from a representative two-namespace
 benchmark whose corpus size, vector dimensions, top-K, concurrency, hardware,
-and approved p95 baseline are recorded. A capacity alarm fires before a
-namespace reaches the ceiling. The migration drops the tenant-wide HNSW index if
+and approved p95 baseline are recorded. At 80 percent of the configured ceiling,
+the runtime emits a content-free warning. Production metric filters publish
+`NamespaceVectorRows`, `NamespaceVectorCapacityWarning`,
+`NamespaceVectorCapacityExceeded`, and `NamespaceVectorTimeout` in
+`mem9-on-aws/NamespaceVector`; none has an identifier dimension. The warning,
+capacity, and timeout counters have separate alarms. The migration drops the tenant-wide HNSW index if
 no supported path still uses it; otherwise a plan-regression test proves that
 namespace search cannot select it. A future per-namespace ANN strategy requires
 a separate reviewed design.
