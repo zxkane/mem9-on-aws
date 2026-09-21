@@ -35,6 +35,7 @@ const MAX_CLUSTER_CONTENT_CHARS = 200_000;
 const MEMORIES_PATH = "/v1alpha2/mem9s/memories";
 const REQUEST_TIMEOUT_MS = 30_000;
 const LLM_TIMEOUT_MS = 120_000;
+const STAGE_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9-]{0,63}$/;
 
 export function safeErrorClass(error) {
   return new Set([
@@ -364,6 +365,12 @@ function sortedUniqueIds(ids) {
       ),
     ),
   ].sort();
+}
+
+function reviewMemoryIds(review) {
+  return sortedUniqueIds(
+    review.flatMap((item) => Array.isArray(item?.ids) ? item.ids : []),
+  );
 }
 
 function boundedSamples(...collections) {
@@ -1448,7 +1455,9 @@ export async function runConsolidation(options, deps) {
   const scheduled = options.scheduled ?? false;
   const cap = options.cap ?? DEFAULT_CAP;
   const clock = deps.clock ?? Date.now;
-  if (!stage) throw new Error("stage is required");
+  if (typeof stage !== "string" || !STAGE_PATTERN.test(stage)) {
+    throw new Error("stage is required");
+  }
   if (!Number.isInteger(cap) || cap <= 0 || cap > DEFAULT_CAP) {
     throw new Error(`cap must be an integer between 1 and ${DEFAULT_CAP}`);
   }
@@ -1536,8 +1545,8 @@ export async function runConsolidation(options, deps) {
     let digestById = byId;
     let dedupUnavailableError;
     try {
-      const currentMemories = requireScopedRows(await deps.listActiveMemories(), namespaceId).filter(
-        isConsolidationCandidate,
+      const currentMemories = await deps.listActiveDigestMemories(
+        reviewMemoryIds(review),
       );
       digestById = new Map(
         currentMemories.map((memory) => [memory.id, memory]),
@@ -1875,6 +1884,25 @@ export function createConsolidationDatabase(db, scope) {
         tags: Array.isArray(row.tags) ? row.tags : [],
         metadata: parseJsonObject(row.metadata),
         embedding: parseVector(row.embedding),
+      }));
+    }),
+    listActiveDigestMemories: (ids) => scoped.read(async (tx, actor) => {
+      const targetIds = sortedUniqueIds(ids);
+      if (targetIds.length === 0) return [];
+      const result = await tx.query(
+        `SELECT id, namespace_id, content
+           FROM memories
+          WHERE namespace_id = $1
+            AND state = 'active'
+            AND embedding IS NOT NULL
+            AND memory_type <> 'session'
+            AND id = ANY($2)
+          ORDER BY id`,
+        [actor.namespaceId, targetIds],
+      );
+      return requireScopedRows(result.rows, namespaceId).map(({ id, content }) => ({
+        id,
+        content,
       }));
     }),
     acquireMutex: async () => {
@@ -2251,14 +2279,24 @@ const isMain =
 export async function runConsolidationCli(argv = process.argv.slice(2), runtime = {}) {
   let production;
   let exitCode = 1;
+  let stage;
   const emit = runtime.emit ?? (record => console.log(JSON.stringify(record)));
   const emitFailure = (event, error) => {
     const write = runtime.emit ?? (record => console.error(JSON.stringify(record)));
-    try { write({event,errorClass:safeErrorClass(error)}); }
+    try {
+      write({
+        event,
+        ...(stage ? { stage } : {}),
+        errorClass: safeErrorClass(error),
+      });
+    }
     catch { /* Never expose the original error when the output sink fails. */ }
   };
   try {
     const options = parseConsolidationArgs(argv);
+    stage = typeof options.stage === "string" && STAGE_PATTERN.test(options.stage)
+      ? options.stage
+      : undefined;
     const progress = createConsolidationProgress(options.stage, emit);
     await progress.run("initializing", async () => {
       production = await (runtime.createDeps ?? createProductionDeps)(options);

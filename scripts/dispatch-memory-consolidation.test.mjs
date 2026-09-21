@@ -82,8 +82,41 @@ describe("owned consolidation child lifecycle", () => {
     child[stream].write(output.slice(31));
     child.close(5);
     await expect(pending).resolves.toBe(5);
-    expect(emit.mock.calls.map(([record]) => record)).toEqual(records);
+    expect(emit.mock.calls.map(([record]) => record)).toEqual([
+      ...records,
+      {
+        event: "maintenance_child_terminal",
+        stage: "prod",
+        lastSeenPhase: "initializing",
+        terminationDisposition: "nonzero_exit",
+      },
+    ]);
     expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("TC-CONSOL-102: forwards a bounded child terminal failure and records a signal exit", async () => {
+    const { child, pending, emit } = childRun();
+    child.stderr.write(JSON.stringify({
+      event: "consolidation_failed",
+      stage: "prod",
+      errorClass: "Error",
+      message: "PRIVATE",
+      stack: "PRIVATE",
+      namespace_id: a,
+    }) + "\n");
+    child.close(null, "SIGKILL");
+
+    await expect(pending).resolves.toBe(1);
+    expect(emit.mock.calls.map(([record]) => record)).toEqual([
+      { event: "consolidation_failed", stage: "prod", errorClass: "Error" },
+      {
+        event: "maintenance_child_terminal",
+        stage: "prod",
+        lastSeenPhase: "initializing",
+        terminationDisposition: "signal_or_abrupt_exit",
+      },
+    ]);
+    expect(JSON.stringify(emit.mock.calls)).not.toMatch(/PRIVATE|60000000/);
   });
 
   it("TC-CONSOL-085: permits a 79-minute child without renewing the deadline", async () => {
@@ -158,6 +191,12 @@ describe("owned consolidation child lifecycle", () => {
     expect(emit).not.toHaveBeenCalled();
     child.close(0);
     await expect(pending).resolves.toBe(1);
+    expect(emit).toHaveBeenCalledWith({
+      event: "maintenance_child_terminal",
+      stage: "prod",
+      lastSeenPhase: "initializing",
+      terminationDisposition: "protocol_rejected",
+    });
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -174,7 +213,12 @@ describe("owned consolidation child lifecycle", () => {
     expect(settled).not.toHaveBeenCalled();
     child.close(null);
     expect(await outcome).toEqual({ value: 1 });
-    expect(emit).not.toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledWith({
+      event: "maintenance_child_terminal",
+      stage: "prod",
+      lastSeenPhase: "initializing",
+      terminationDisposition: "protocol_rejected",
+    });
     expect(vi.getTimerCount()).toBe(0);
   });
 
@@ -345,7 +389,12 @@ describe("owned consolidation child lifecycle", () => {
     child.stdout.write(line);
     child.close(0);
     await expect(pending).resolves.toBe(1);
-    expect(emit).not.toHaveBeenCalled();
+    expect(emit).toHaveBeenCalledWith({
+      event: "maintenance_child_terminal",
+      stage: "prod",
+      lastSeenPhase: "initializing",
+      terminationDisposition: "protocol_rejected",
+    });
   });
 });
 

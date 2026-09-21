@@ -12,6 +12,13 @@ export function safeChildRecord(line, stage) {
   try { record = JSON.parse(line); } catch { return undefined; }
   if (!record || record.stage !== stage) return undefined;
   if (record.event === "consolidation_phase") return safeProgressRecord(record, stage);
+  if (["consolidation_failed", "consolidation_close_failed"].includes(record.event)) {
+    return {
+      event: record.event,
+      stage,
+      errorClass: safeErrorClass({ name: record.errorClass }),
+    };
+  }
   if (record._aws) {
     if (!CONSOLIDATION_METRICS.every(name => Number.isSafeInteger(record[name]) && record[name] >= 0)) return undefined;
     return buildEmfRecord(stage, {
@@ -107,6 +114,7 @@ export async function runChild(namespaceId, {
     let heartbeatTimer;
     let lastProgress = started;
     let phase = "initializing";
+    let reportedFailure = false;
     const elapsed = since => Math.max(0, Math.floor(clock() - since));
     const releaseStreams = [];
 
@@ -129,7 +137,7 @@ export async function runChild(namespaceId, {
     };
     const onError = () => terminate();
     const onAbort = () => terminate();
-    const onClose = code => {
+    const onClose = (code, signalName) => {
       if (closed) return;
       closed = true;
       clearTimeout(timeoutTimer);
@@ -138,6 +146,26 @@ export async function runChild(namespaceId, {
       signal?.removeEventListener("abort", onAbort);
       child.off("error", onError);
       for (const release of releaseStreams) release();
+      const succeeded = !failed && code === 0 && !signalName;
+      if (!succeeded) {
+        const terminationDisposition = signalName
+            ? "signal_or_abrupt_exit"
+          : reportedFailure
+            ? "reported_failure"
+            : Number.isInteger(code) && code !== 0
+              ? "nonzero_exit"
+              : "protocol_rejected";
+        try {
+          emit({
+            event: "maintenance_child_terminal",
+            stage,
+            lastSeenPhase: phase,
+            terminationDisposition,
+          });
+        } catch {
+          // The child has already stopped; a logging failure cannot change it.
+        }
+      }
       resolveChild(!failed && Number.isInteger(code) ? code : 1);
     };
     child.on("error", onError);
@@ -163,6 +191,9 @@ export async function runChild(namespaceId, {
         for (const line of lines.filter(Boolean)) {
           const record = safeChildRecord(line, environment.MEM9_STAGE);
           if (!record) { failed = true; continue; }
+          if (["consolidation_failed", "consolidation_close_failed"].includes(record.event)) {
+            reportedFailure = true;
+          }
           if (record.event === "consolidation_phase") {
             phase = record.phase;
             lastProgress = clock();

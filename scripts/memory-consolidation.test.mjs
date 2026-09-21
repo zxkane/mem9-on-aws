@@ -16,6 +16,7 @@ import {
   reviewDisposition,
   routeActions,
   runConsolidation as runConsolidationScoped,
+  runConsolidationCli,
   serializeDigestState as serializeDigestStateScoped,
 } from "./memory-consolidation.mjs";
 import largeDigestFixture from "./fixtures/consolidation-digest-large-v1.json" with {
@@ -85,6 +86,11 @@ function fakeDeps(memories, responses) {
     deps: {
       listActiveMemories: vi.fn(async () =>
         [...store.values()].map((item) => structuredClone(item)),
+      ),
+      listActiveDigestMemories: vi.fn(async (ids) =>
+        [...store.values()]
+          .filter((item) => ids.includes(item.id) && item.state === "active")
+          .map(({ id, content }) => ({ id, content })),
       ),
       completeChat,
       acquireMutex: vi.fn(async () => ({ release: mutexRelease })),
@@ -1221,6 +1227,28 @@ describe("execution safety", () => {
     );
     expect(result.exitCode).toBe(0);
   });
+
+  it("TC-CONSOL-101: scheduled digest reloads only deduplicated review IDs without embeddings", async () => {
+    const fake = fakeDeps(
+      [
+        memory("a", "reviewed", [1, 0], {
+          updated_at: "2025-01-01T00:00:00Z",
+        }),
+        memory("unrelated", "unrelated", [0, 1]),
+      ],
+      ['{"actions":[{"type":"DELETE","ids":["a"],"rationale":"review"}]}'],
+    );
+    await runConsolidation(
+      { stage: "prod", reportOnly: false, scheduled: true, cap: 20 },
+      fake.deps,
+    );
+
+    expect(fake.deps.listActiveMemories).toHaveBeenCalledTimes(1);
+    expect(fake.deps.listActiveDigestMemories).toHaveBeenCalledWith(["a"]);
+    expect(fake.deps.listActiveDigestMemories).not.toHaveReturnedWith(
+      expect.arrayContaining([expect.objectContaining({ embedding: expect.anything() })]),
+    );
+  });
 });
 
 describe("production adapters and CLI", () => {
@@ -1379,6 +1407,17 @@ describe("production adapters and CLI", () => {
       metadata: { source: "fixture" },
       embedding: [1, 0.5],
     });
+    expect(
+      await production.deps.listActiveDigestMemories(["memory-1"]),
+    ).toEqual([{ id: "memory-1", content: "private content" }]);
+    const digestQuery = dbCalls.findLast(
+      ([kind, sql]) =>
+        kind === "query" &&
+        sql.includes("AND id = ANY($2)") &&
+        sql.includes("SELECT id, namespace_id, content"),
+    );
+    expect(digestQuery[1]).not.toContain("embedding::text");
+    expect(digestQuery[1]).toContain("memory_type <> 'session'");
     expect(await production.deps.getMemory("missing")).toBeNull();
     await production.deps.putMemory("memory/1", { tags: ["stale"] }, 2);
     expect(await production.deps.deleteMemories(["a", "b"])).toBe(2);
@@ -1441,6 +1480,39 @@ describe("production adapters and CLI", () => {
     await production.close();
     expect(sent.at(-1)).toBe("destroyed");
     expect(dbCalls.at(-1)).toEqual(["end"]);
+  });
+
+  it("TC-CONSOL-102: CLI terminal failures include the trusted stage and bounded class", async () => {
+    const emitted = [];
+    const result = await runConsolidationCli(
+      ["--stage", "prod", "--namespace-id", NAMESPACE_ID],
+      {
+        createDeps: async () => {
+          throw Object.assign(new Error("PRIVATE"), { name: "TypeError" });
+        },
+        emit: (record) => emitted.push(record),
+      },
+    );
+
+    expect(result).toBe(1);
+    expect(emitted).toContainEqual({
+      event: "consolidation_failed",
+      stage: "prod",
+      errorClass: "TypeError",
+    });
+    expect(JSON.stringify(emitted)).not.toContain("PRIVATE");
+  });
+
+  it("TC-CONSOL-102: CLI failure refuses an untrusted stage value", async () => {
+    const emitted = [];
+    const result = await runConsolidationCli(
+      ["--stage", "invalid stage / PRIVATE", "--namespace-id", NAMESPACE_ID],
+      { emit: (record) => emitted.push(record) },
+    );
+
+    expect(result).toBe(1);
+    expect(emitted).toEqual([{ event: "consolidation_failed", errorClass: "Error" }]);
+    expect(JSON.stringify(emitted)).not.toContain("PRIVATE");
   });
 
   it("TC-CONSOL-077: exposes no production Slack posting adapter", async () => {
@@ -1780,11 +1852,9 @@ describe("content-free telemetry", () => {
         }],
       })],
     );
-    const listActiveMemories =
-      fake.deps.listActiveMemories.getMockImplementation();
-    fake.deps.listActiveMemories
-      .mockImplementationOnce(listActiveMemories)
-      .mockRejectedValueOnce(new Error("post-mutation refresh failed"));
+    fake.deps.listActiveDigestMemories.mockRejectedValueOnce(
+      new Error("post-mutation refresh failed"),
+    );
     fake.deps.emitMetrics = vi.fn();
 
     const result = await runConsolidation(
