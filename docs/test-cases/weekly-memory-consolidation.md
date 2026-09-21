@@ -27,6 +27,15 @@ Diagnostics regressions run in `scripts/consolidation-progress.test.mjs` and
   child and parent formatting, including child stdout/stderr forwarding.
 - TC-CONSOL-093: unknown enums, invalid scalar types, and private extra fields
   are dropped at both boundaries; counts remain nonnegative safe integers.
+- TC-CONSOL-101: after a scheduled apply, digest refresh queries only the
+  deduplicated review IDs with a namespace-scoped `id/content` projection. It
+  must not reparse the corpus embeddings; rows no longer active remain missing,
+  while a query failure degrades the digest rather than becoming a missing row.
+- TC-CONSOL-102: a child-reported failure and a child process that exits by
+  signal both produce a content-free parent terminal outcome. It contains only
+  fixed event, phase, disposition, exit-code/signal-presence, and error-class
+  fields; it never contains error text, memory IDs, content, credentials, or
+  stack data.
 
 | ID | Scenario | Expected result |
 | --- | --- | --- |

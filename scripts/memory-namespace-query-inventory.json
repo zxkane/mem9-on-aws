@@ -1914,9 +1914,9 @@
       "namespace_evidence": "namespace_id = $1"
     },
     {
-      "id": "d9e7214008c39ccdf93b",
+      "id": "537f96d2d45859c5efc0",
       "owner": "scripts/memory-consolidation.mjs",
-      "line": 1866,
+      "line": 1875,
       "tables": [
         "memories"
       ],
@@ -1932,9 +1932,27 @@
       "namespace_evidence": "namespace_id = $1"
     },
     {
-      "id": "e04f723269cf2ae7b675",
+      "id": "655d3da65c10a27bec91",
       "owner": "scripts/memory-consolidation.mjs",
-      "line": 1897,
+      "line": 1893,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "2994b09de5de2cbe8dd5abbb7ca8c8e8a36fc07d7c6a787b109717f876a3a42f",
+      "statement": "SELECT id, namespace_id, content FROM memories WHERE namespace_id = $1 AND state = 'active' AND embedding IS NOT NULL AND memory_type <> 'session' AND id = ANY($2) ORDER BY id",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/consolidation-namespace.test.mjs",
+        "scripts/maintenance-postgres.test.mjs",
+        "scripts/memory-namespace-query-inventory.test.mjs"
+      ],
+      "namespace_evidence": "namespace_id = $1"
+    },
+    {
+      "id": "8c00926ab342c8bea30f",
+      "owner": "scripts/memory-consolidation.mjs",
+      "line": 1925,
       "tables": [
         "memories"
       ],
@@ -1950,9 +1968,9 @@
       "namespace_evidence": "namespace_id = $7"
     },
     {
-      "id": "e2cda195cd5162cbf52e",
+      "id": "f0a8f0560f95f421b0ad",
       "owner": "scripts/memory-consolidation.mjs",
-      "line": 1925,
+      "line": 1953,
       "tables": [
         "memories"
       ],
