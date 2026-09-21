@@ -11,8 +11,12 @@ export function serviceIdentity(service) {
   });
 }
 export function requireServiceNamespace(value) {
-  if (typeof value !== "string" || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(value))
-    throw new Error("one explicit namespace UUID is required");
+  // Existing namespace keys are opaque VARCHAR(36) values. New control-plane
+  // rows use UUIDs, but a pre-enforcement legacy key can have non-UUID hyphen
+  // placement. Authorization still requires an exact active DB namespace and
+  // service membership before any content operation.
+  if (typeof value !== "string" || !/^(?=.*-)[0-9a-f-]{36}$/.test(value))
+    throw new Error("one explicit namespace UUID or legacy identifier is required");
   return value;
 }
 export function validateServiceIdentity(identity) {
