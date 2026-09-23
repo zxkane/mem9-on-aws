@@ -379,7 +379,7 @@ export function ecs(
           // it only after freeze/backfill/enforce reaches constraints_complete
           // and the Cognito/Aurora namespace bindings are reconciled.
           MNEMO_NAMESPACE_REQUIRED: NAMESPACE_REQUIRED,
-          MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS: "20000",
+          MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS: "25000",
           MNEMO_NAMESPACE_EXACT_VECTOR_TIMEOUT: "2s",
           MNEMO_TRANSPORT_ISSUER: "gateway-target",
           // Non-secret keyring digest. SSM values are injected only when a task

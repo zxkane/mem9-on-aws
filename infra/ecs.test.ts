@@ -675,7 +675,7 @@ describe("ecs stack", () => {
     const ecs = await loadEcs();
     ecs(fakeDbOut());
     const env = containersByName()["mnemo-server"].environment as Record<string, unknown>;
-    expect(env.MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS).toBe("20000");
+    expect(env.MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS).toBe("25000");
     expect(env.MNEMO_NAMESPACE_EXACT_VECTOR_TIMEOUT).toBe("2s");
   });
 
