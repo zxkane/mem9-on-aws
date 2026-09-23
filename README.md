@@ -313,6 +313,33 @@ The AgentCore Gateway exposes four tools over MCP (Cognito-authenticated):
   separate regional Mantle Project, such as the OpenAI Responses fallback.
 - Agent contributors: see [`AGENTS.md`](AGENTS.md) for repo conventions and hard rules.
 
+### Automatic production deployment from main
+
+The production image-build and deploy jobs use the GitHub prod Environment for
+their main-only deployment policy, environment secrets, and OIDC role subject.
+A Required reviewers rule on that Environment pauses both jobs even after a
+successful main-branch test run. The intended gate is a pull request into main:
+main requires the always-running Runbook & Public-Content Scan check, and Infra
+CI runs its typecheck and tests before assuming production AWS credentials.
+Production jobs remain serialized and run their deployment smoke tests.
+
+After this change is merged, a repository administrator must reconcile the
+out-of-band GitHub settings once:
+
+    node scripts/configure-prod-auto-deploy.mjs --check
+    node scripts/configure-prod-auto-deploy.mjs --apply
+
+The apply command first creates main branch protection requiring a pull request
+and the scan check, with zero required PR approvals, no force pushes or deletes,
+and admin enforcement. It refuses to overwrite different existing protection.
+Only after verifying that protection does it remove the prod Environment's
+reviewer and wait rules. It requires the Environment's only allowed deployment
+branch to remain main and preserves the Environment itself and its secrets.
+The check command is read-only; it exits unsuccessfully while either gate is
+missing. Merging this PR alone does not change GitHub settings. If a run already
+waiting for approval stays queued after reconciliation, rerun Infra CI from
+main and inspect the new run's deploy result.
+
 ### Team memory namespaces and production cutover
 
 One Aurora database is shared by all teams. A managed Cognito group routes a
