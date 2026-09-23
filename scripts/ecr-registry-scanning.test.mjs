@@ -1236,7 +1236,7 @@ describe("CI validation", () => {
       "Type check (root)",
       "Unit tests (root)",
     ];
-    const setupPython = workflow.indexOf("uses: actions/setup-python@v7");
+    const setupPython = workflow.search(/uses: actions\/setup-python@[0-9a-f]{40} # v7/u);
     const templateValidation = workflow.indexOf(
       "name: Validate ECR registry scanning template",
     );
