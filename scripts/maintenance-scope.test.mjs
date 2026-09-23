@@ -3,12 +3,18 @@ import { createMaintenanceIdentity, requireNamespaceId, requireMaintenanceConfig
 import { verifyTransportEnvelope, parseSigningKeys } from "../infra/gateway/namespace-auth.mjs";
 
 const namespaceId = "60000000-0000-4000-8000-000000000001";
+const legacyNamespaceId = "abcdefabc-def-4000-8000-abcdefabcdef";
 const principalId = "70000000-0000-4000-8000-000000000001";
 const keys = { active: "a", a: "A".repeat(43), b: "B".repeat(43) };
 const config = () => requireMaintenanceConfig({ stage: "pr-42", namespaceId }, { MEM9_SERVICE_TRANSPORT_SIGNING_KEYS: JSON.stringify(keys) }, "consolidation");
 describe("maintenance scope boundaries", () => {
   it.each([undefined, "", "all", "*", "../other", [namespaceId], namespaceId + ",other"])("rejects missing or ambiguous namespace", value => {
     expect(() => requireNamespaceId(value)).toThrow();
+  });
+  it("accepts a bounded legacy namespace key while rejecting arbitrary input", () => {
+    expect(requireNamespaceId(legacyNamespaceId)).toBe(legacyNamespaceId);
+    expect(() => requireNamespaceId("a".repeat(36))).toThrow();
+    expect(() => requireNamespaceId("abcdefabc-def-4000-8000-abcdefabcdef/")).toThrow();
   });
   it("binds identity to the service and refuses mismatched configuration", () => {
     expect(createMaintenanceIdentity("cleanup").principalKey).not.toBe(createMaintenanceIdentity("consolidation").principalKey);
