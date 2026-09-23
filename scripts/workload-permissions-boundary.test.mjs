@@ -9310,7 +9310,7 @@ describe("boundary and deploy-role templates", () => {
     expect(workflow).toContain(
       "shellcheck scripts/rollout-workload-permissions-boundary.sh",
     );
-    expect(workflow).toContain("uses: pulumi/actions@v7");
+    expect(workflow).toMatch(/uses: pulumi\/actions@[0-9a-f]{40} # v7/u);
     expect(workflow).toContain("pulumi-version: 3.256.0");
     expect(workflow).not.toContain("sst install --config");
     expect(workflow).not.toContain("Cache SST/Pulumi runtime");
@@ -9475,7 +9475,7 @@ describe("boundary and deploy-role templates", () => {
       "Operator-owned workload boundary is missing or drifted",
     );
     const previewCheckouts = workflow.jobs["deploy-preview"].steps.filter(
-      ({ uses }) => uses === "actions/checkout@v7",
+      ({ uses }) => /^actions\/checkout@[0-9a-f]{40}$/u.test(uses || ""),
     );
     expect(previewCheckouts).toHaveLength(1);
     expect(previewCheckouts[0].with?.["fetch-depth"]).toBe(0);

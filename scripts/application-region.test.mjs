@@ -332,7 +332,7 @@ describe("application region consumers", () => {
       "needs.application-region.outputs.cleanup_region",
     );
     const checkout = cleanup.steps.find(
-      ({ uses }) => uses === "actions/checkout@v7",
+      ({ uses }) => /^actions\/checkout@[0-9a-f]{40}$/u.test(uses || ""),
     );
     expect(checkout.with.ref).toContain("github.event.pull_request.base.sha");
   });
