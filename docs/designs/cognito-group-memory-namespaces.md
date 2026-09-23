@@ -900,7 +900,7 @@ no supported path still uses it; otherwise a plan-regression test proves that
 namespace search cannot select it. A future per-namespace ANN strategy requires
 a separate reviewed design.
 
-The executable release benchmark uses 20,000 synthetic rows per namespace,
+The executable capacity benchmark uses 25,000 synthetic rows per namespace,
 1024-dimensional vectors, and top-K 10 and 50. It compares the production
 narrow-distance/top-K hydration query with the previous exact query that
 materialized complete records, alternates query order across 20 samples, and

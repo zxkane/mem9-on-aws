@@ -173,7 +173,7 @@ configured two-second deadline, and verify top-K 10 and 50. Keep measurements
 from real operator data in private records.
 
 `docker/mnemo-server/patches/0020-namespace-performance-gates.patch` runs the
-production repository against 20,000 synthetic 1024-dimensional rows in each
+production repository against 25,000 synthetic 1024-dimensional rows in each
 of two namespaces. It fetches top-K 10 and 50, compares IDs with the previous
 all-record exact materialization, and requires production p95 to remain within
 120 percent of that baseline. `scripts/run-memory-namespace-benchmark.sh` then

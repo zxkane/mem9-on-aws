@@ -21,7 +21,7 @@ index 0000000..d6c7c8c
 +	"github.com/qiffang/mnemos/server/internal/testutil"
 +)
 +
-+const namespaceBenchmarkRows = 20000
++const namespaceBenchmarkRows = 25000
 +
 +func seedNamespaceVectorBenchmark(t *testing.T, db *sql.DB) {
 +	t.Helper()

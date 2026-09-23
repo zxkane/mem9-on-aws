@@ -511,7 +511,7 @@ selects top-K from those scalar rows, then hydrates the selected records with
 the same namespace and filter predicates. Ordinary B-tree scans remain
 available for hydration. The materialization boundaries prevent tenant-wide
 HNSW candidate selection; enforcement also removes that index. ECS pins a
-20,000-active-vector ceiling per namespace and a two-second statement timeout.
+25,000-active-vector ceiling per namespace and a two-second statement timeout.
 Content-free structured events expose the observed row count, an 80-percent
 pre-ceiling warning, hard capacity refusals, and SQL timeouts. Production log
 metric filters publish these in `mem9-on-aws/NamespaceVector` without
