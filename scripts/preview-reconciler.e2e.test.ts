@@ -514,7 +514,7 @@ describe("preview reconciler CLI with mocked GitHub/AWS commands", () => {
       .toBe(false);
   });
 
-  it("TC-PREVIEW-RECON-095 refuses an SST-locked automatic stage without unlocking", async () => {
+  it("TC-PREVIEW-RECON-095 skips an all-locked inventory without unlocking", async () => {
     const commands = mockCommands({ lockedStage: "pr-7" });
     const logged: string[] = [];
     const previous = process.env.PREVIEW_AUTO_CLEANUP_ENABLED;
@@ -523,15 +523,17 @@ describe("preview reconciler CLI with mocked GitHub/AWS commands", () => {
       logged.push(String(message));
     });
     try {
-      await expect(runCli([
+      await runCli([
         "auto", "--repository", REPOSITORY,
         "--event", "schedule", "--mode", "auto",
-      ], commands.runner)).rejects.toThrow("All automatic preview candidates have SST locks");
+      ], commands.runner);
     } finally {
       if (previous === undefined) delete process.env.PREVIEW_AUTO_CLEANUP_ENABLED;
       else process.env.PREVIEW_AUTO_CLEANUP_ENABLED = previous;
     }
     expect(logged).toContain("::warning::Preview stage pr-7 has an SST lock; skipping");
+    expect(logged).toContain("::warning::All automatic preview candidates have SST locks; no stage removed");
+    expect(logged).toContain("Automatic preview cleanup selected none");
     expect(commands.calls.filter(({ file }) => file === "pnpm")).toEqual([]);
     expect(commands.calls.filter(({ file, args }) => file === "aws" && args[1] === "head-object"))
       .toHaveLength(2);

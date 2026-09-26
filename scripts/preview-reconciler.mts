@@ -2191,8 +2191,10 @@ export async function runCli(
         (stage) => hasPreviewStateLock(stage, stateBucket, accountId, commandRunner),
         (stage) => console.log(`::warning::Preview stage ${stage} has an SST lock; skipping`),
       );
-      if (!selected) throw new Error("All automatic preview candidates have SST locks");
-      plan = deepFreeze({ ...plan, stages: [selected] });
+      if (!selected) {
+        console.log("::warning::All automatic preview candidates have SST locks; no stage removed");
+      }
+      plan = deepFreeze({ ...plan, stages: selected ? [selected] : [] });
     }
     console.log(`Automatic preview cleanup selected ${selectAutomaticCandidate(plan)?.stage ?? "none"}`);
   } else {

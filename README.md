@@ -1424,7 +1424,7 @@ period has elapsed, and whose deployment is inactive. It rotates across eligible
 PRs on successive days so a failed removal does not permanently block the rest.
 An SST-locked stage is skipped using read-only lock checks; the same run may
 attempt the next unlocked closed-PR stage, but never more than one removal.
-If every candidate is locked, the run fails without deleting anything. The
+If every candidate is locked, the run warns and exits without deleting anything. The
 workflow never auto-unlocks SST state; those locks require operator review.
 Unset or `false` keeps scheduled runs report-only. The manual input still
 defaults to `dry-run`; `auto` runs the same bounded policy, while `apply`
