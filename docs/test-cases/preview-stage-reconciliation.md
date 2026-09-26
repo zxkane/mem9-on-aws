@@ -99,6 +99,27 @@ guard below must turn a listed test red.
 | TC-PREVIEW-RECON-067 | Valid preview state lacks LastModified or a preview-tagged resource lacks its ARN | Inventory fails closed instead of silently dropping a preview stage |
 | TC-PREVIEW-RECON-068 | Preview-named SST IAM role has no Stage tag | Inventory fails closed with a missing-tag error |
 | TC-PREVIEW-RECON-069 | Report has no preview stages | It still states the IAM-only role-name coverage limit, so an empty inventory does not imply full coverage |
+| TC-PREVIEW-RECON-070 | Scheduled run with auto-cleanup switch unset or false | Report succeeds; mutation job is skipped |
+| TC-PREVIEW-RECON-071 | Scheduled run with switch true, or explicit manual `auto` | Runs bounded automatic cleanup from a fresh observation; manual `dry-run` remains report-only and manual `apply` retains its existing behavior |
+| TC-PREVIEW-RECON-072 | Automatic candidate has a closed PR, canonical `pr-N` stage, elapsed 24-hour grace, no active workflow, and SST state or sweepable network | It may be selected; absent/open PRs, noncanonical stages, active runs, and operator-review inventory are excluded |
+| TC-PREVIEW-RECON-073 | Several eligible stages, including one that repeatedly fails | Exactly one is selected per run; UTC-day rotation gives other stages a turn without relying on the failed stage's removal |
+| TC-PREVIEW-RECON-074 | A selected PR reopens, disappears from the PR API, or is reclosed inside the grace period during any recheck | Automatic cleanup cancels before mutation; a failed GitHub observation aborts rather than treating the PR as absent |
+| TC-PREVIEW-RECON-075 | A current preview deployment becomes active or an uncorrelated PR run appears | Automatic cleanup makes no removal or network-delete call |
+| TC-PREVIEW-RECON-076 | A stored report artifact names a different stage or is stale | Automatic cleanup builds its own fresh plan and never accepts an artifact path |
+| TC-PREVIEW-RECON-077 | SST removal or network sweep returns success but stage ownership remains | Automatic cleanup fails the job after a fresh read; it does not report a successful removal |
+| TC-PREVIEW-RECON-078 | Automatic cleanup has no eligible closed PR | It exits successfully with zero mutations |
+| TC-PREVIEW-RECON-079 | Invalid trigger, disabled auto switch, `pr-0`, `pr-01`, or an unsafe stage string | CLI or stage guard refuses mutation |
+| TC-PREVIEW-RECON-080 | Credential-bearing workflow performs scheduled automatic cleanup | The same preview role, main-only Environment, maintenance gate, serial concurrency and pinned actions remain in force; only manual apply has issue-write permission |
+| TC-PREVIEW-RECON-081 | Automatic recheck finds state-missing non-sweepable resources | It does not overwrite the shared operator issue; manual apply retains issue ownership |
+| TC-PREVIEW-RECON-082 | Manual apply successfully removes a stage | It retains its existing behavior without the automatic post-removal ownership check |
+| TC-PREVIEW-RECON-083 | Tagging API returns live and deleted preview security groups and interfaces | Exact EC2 describes retain only live, currently tagged resources before planning or post-removal verification |
+| TC-PREVIEW-RECON-084 | EC2 liveness describe is denied or the response/ARN is malformed | Inventory fails closed rather than treating an uncertain resource as absent |
+| TC-PREVIEW-RECON-085 | `auto` CLI runs against mocked live GitHub/AWS observations with one closed PR | It builds a new plan, removes exactly that stage, rechecks ownership, and never writes a GitHub issue or consumes an artifact |
+| TC-PREVIEW-RECON-086 | Post-removal SST state, Tagging API, or IAM role list has an invalid response shape | Automatic cleanup fails rather than certifying the stage as gone |
+| TC-PREVIEW-RECON-087 | Active-run page or IAM role tag page is malformed | Automatic cleanup fails before any SST removal |
+| TC-PREVIEW-RECON-088 | AWS CLI no-paginate state listing has an empty first page and a preview key on the second page | The preview stage is discovered using the continuation token |
+| TC-PREVIEW-RECON-089 | S3 state page lacks Contents despite nonzero KeyCount, has a wrong count, or repeats its token | Listing fails closed; no stage is silently dropped or removed |
+| TC-PREVIEW-RECON-090 | SST bootstrap parameter is missing in the configured application region while tagged resources exist | Inventory fails before any automatic network sweep or SST removal |
 
 | ID | Scenario | Expected |
 |---|---|---|

@@ -9342,7 +9342,7 @@ describe("boundary and deploy-role templates", () => {
     );
     expect(
       reconciliationWorkflow.match(/name: Deployment maintenance gate/gu),
-    ).toHaveLength(2);
+    ).toHaveLength(3);
     for (const [name, source] of [
       ["infra-ci.yml", workflow],
       ["reconcile-previews.yml", reconciliationWorkflow],
