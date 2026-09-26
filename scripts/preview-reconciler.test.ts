@@ -3,6 +3,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
+import YAML from "yaml";
 
 import { DEFAULT_TIMEOUT_MS } from "./await-eni-detach.mts";
 import {
@@ -18,6 +19,7 @@ import {
   renderPlanReport,
   resourceTypeFromArn,
   runCli,
+  selectAutomaticCandidate,
   sstRemoveCommand,
   stateObjectHasLiveDeployment,
   sweepOrphanedNetwork,
@@ -56,6 +58,7 @@ function adapters(observations: Observation[]): ApplyAdapters {
   return {
     collectObservation: vi.fn(async () => observations[Math.min(index++, observations.length - 1)]),
     removeStage: vi.fn(async () => undefined),
+    observeStageOwnership: vi.fn(async () => ({ statePresent: false, resources: [] })),
     sweepOrphanedNetwork: vi.fn(async () => ({
       swept: true as const,
       networkInterfaces: 1,
@@ -1209,19 +1212,38 @@ describe("workflow control flow", () => {
     "reconcile-previews.yml",
   );
 
-  it("TC-PREVIEW-RECON-021 structurally excludes scheduled runs from apply", () => {
+  it("TC-PREVIEW-RECON-070/071/080 gates scheduled mutation separately from manual apply", () => {
     const source = fs.readFileSync(workflowPath, "utf8");
-    const reportJob = source.split("\n  apply:")[0].split("\n  report:")[1];
-    const applyJob = source.split("\n  apply:")[1];
+    const workflow = YAML.parse(source);
+    const { report, apply, auto } = workflow.jobs;
 
-    expect(source).toMatch(/schedule:/);
-    expect(applyJob).toMatch(
-      /if:\s*github\.event_name == 'workflow_dispatch' && inputs\.mode == 'apply'/,
+    expect(workflow.on.schedule).toEqual([{ cron: "17 3 * * *" }]);
+    expect(workflow.permissions).toEqual({});
+    expect(workflow.concurrency["cancel-in-progress"]).toBe(false);
+    expect(workflow.jobs["application-region"].permissions).toEqual({ contents: "read" });
+    expect(report.permissions.issues).toBeUndefined();
+    expect(apply.permissions.issues).toBe("write");
+    expect(auto.permissions.issues).toBeUndefined();
+    expect(apply.if).toBe(
+      "github.event_name == 'workflow_dispatch' && inputs.mode == 'apply' && vars.WORKLOAD_BOUNDARY_PROD_ENABLED == 'true'",
     );
-    expect(reportJob).toMatch(/permissions:[\s\S]*?issues:\s*read/);
-    expect(reportJob).not.toMatch(/issues:\s*write/);
-    expect(reportJob).not.toMatch(/preview-reconciler\.mts apply/);
-    expect(applyJob).toMatch(/permissions:[\s\S]*?issues:\s*write/);
+    expect(auto.if.replace(/\s+/g, " ").trim()).toBe(
+      "vars.WORKLOAD_BOUNDARY_PROD_ENABLED == 'true' && vars.PREVIEW_AUTO_CLEANUP_ENABLED == 'true' && ( github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.mode == 'auto') )",
+    );
+    expect(auto["timeout-minutes"]).toBe(75);
+    expect(auto.steps.find((step: { name?: string }) => step.name === "Automatic cleanup of one closed PR")["timeout-minutes"])
+      .toBe(65);
+    expect(auto.steps.some((step: { uses?: string }) => step.uses?.includes("download-artifact")))
+      .toBe(false);
+    expect(report.steps.find((step: { name?: string }) => step.name === "Preserve advisory plan for explicit manual apply").if)
+      .toBe("github.event_name == 'workflow_dispatch' && inputs.mode == 'apply'");
+    for (const job of Object.values(workflow.jobs) as Array<{ steps: Array<{ uses?: string; with?: Record<string, unknown> }> }>) {
+      for (const step of job.steps.filter((item) => item.uses?.startsWith("actions/checkout@"))) {
+        expect(step.with?.["persist-credentials"]).toBe(false);
+      }
+    }
+    expect(source.match(/^\s*-?\s*uses:\s*[^\s]+/gm)?.every((line) => /@[0-9a-f]{40}\b/.test(line)))
+      .toBe(true);
   });
 
   it("TC-PREVIEW-RECON-022/023 defaults manual dispatch to dry-run", () => {
@@ -1229,7 +1251,7 @@ describe("workflow control flow", () => {
 
     expect(source).toMatch(/workflow_dispatch:/);
     expect(source).toMatch(/mode:[\s\S]*?default:\s*dry-run/);
-    expect(source).toMatch(/options:\s*\n\s+- dry-run\s*\n\s+- apply/);
+    expect(source).toMatch(/options:\s*\n\s+- dry-run\s*\n\s+- auto\s*\n\s+- apply/);
   });
 
   // #146 narrowed this invariant rather than dropping it. The reconciler now owns
@@ -1523,6 +1545,80 @@ describe("tagged resource liveness", () => {
       unknown,
     ]);
   });
+
+  it("TC-PREVIEW-RECON-083 rechecks historical security groups and interfaces directly", async () => {
+    const resource = (kind: "security-group" | "network-interface", id: string) => ({
+      arn: `arn:aws:ec2:ap-northeast-1:123456789012:${kind}/${id}`,
+      managedBy: "sst",
+      project: "mem9-on-aws",
+      resourceType: `ec2:${kind}`,
+      stage: "pr-12",
+    });
+    const liveGroup = resource("security-group", "sg-0123456789abcdef0");
+    const deletedGroup = resource("security-group", "sg-0123456789abcdef1");
+    const liveInterface = resource("network-interface", "eni-0123456789abcdef0");
+    const deletedInterface = resource("network-interface", "eni-0123456789abcdef1");
+    const tags = [
+      { Key: "Project", Value: "mem9-on-aws" },
+      { Key: "ManagedBy", Value: "sst" },
+      { Key: "Stage", Value: "pr-12" },
+    ];
+    const runner: CommandRunner = vi.fn(async (_file, args, _label, allowedFailure) => {
+      const id = args[3];
+      if (args[1] === "describe-security-groups") {
+        expect(allowedFailure?.test("An error occurred (InvalidGroup.NotFound)")).toBe(true);
+        return id === "sg-0123456789abcdef1"
+          ? null
+          : { stdout: JSON.stringify({ SecurityGroups: [{
+              GroupId: id,
+              Tags: tags,
+            }] }), stderr: "" };
+      }
+      if (args[1] === "describe-network-interfaces") {
+        expect(allowedFailure?.test("An error occurred (InvalidNetworkInterfaceID.NotFound)")).toBe(true);
+        return id === "eni-0123456789abcdef1"
+          ? null
+          : { stdout: JSON.stringify({ NetworkInterfaces: [{ NetworkInterfaceId: id, Tags: tags }] }), stderr: "" };
+      }
+      throw new Error(`Unexpected command: ${args.join(" ")}`);
+    });
+
+    const live = await filterLiveTaggedResources(
+      [liveGroup, deletedGroup, liveInterface, deletedInterface], runner,
+    );
+    expect(live).toEqual([liveGroup, liveInterface]);
+    expect(runner).toHaveBeenCalledTimes(4);
+  });
+
+  it("TC-PREVIEW-RECON-084 fails closed on denied or malformed EC2 liveness reads", async () => {
+    const resource: import("./preview-reconciler.mts").ResourceObservation = {
+      arn: "arn:aws:ec2:ap-northeast-1:123456789012:security-group/sg-0123456789abcdef0",
+      managedBy: "sst", project: "mem9-on-aws", resourceType: "ec2:security-group", stage: "pr-12",
+    };
+    const denied: CommandRunner = vi.fn(async () => { throw new Error("UnauthorizedOperation"); });
+    await expect(filterLiveTaggedResources([resource], denied)).rejects.toThrow("UnauthorizedOperation");
+    await expect(filterLiveTaggedResources([
+      { ...resource, arn: "arn:aws:ec2:ap-northeast-1:123456789012:security-group/invalid" },
+    ], denied)).rejects.toThrow("Invalid tagged EC2 resource ARN");
+    const malformed: CommandRunner = vi.fn(async () => ({
+      stdout: JSON.stringify({ SecurityGroups: [] }), stderr: "",
+    }));
+    await expect(filterLiveTaggedResources([resource], malformed))
+      .rejects.toThrow("Invalid EC2 liveness observation");
+    const retagged: CommandRunner = vi.fn(async () => ({
+      stdout: JSON.stringify({ SecurityGroups: [{
+        GroupId: "sg-0123456789abcdef0",
+        Tags: [
+          { Key: "Project", Value: "mem9-on-aws" },
+          { Key: "ManagedBy", Value: "sst" },
+          { Key: "Stage", Value: "prod" },
+        ],
+      }] }),
+      stderr: "",
+    }));
+    await expect(filterLiveTaggedResources([resource], retagged))
+      .rejects.toThrow("EC2 liveness ownership mismatch");
+  });
 });
 
 describe("preview-only AWS observation", () => {
@@ -1582,7 +1678,8 @@ describe("preview-only AWS observation", () => {
       }
       if (file === "aws" && args[0] === "s3api" && args[1] === "list-objects-v2") {
         expect(args).toContain("app/mem9-on-aws/pr-");
-        return json({ Contents: [
+        expect(args).toContain("--no-paginate");
+        const contents = [
           { Key: "app/mem9-on-aws/prod.json", LastModified: OLD },
           ...(options.previews ? [
             { Key: "app/mem9-on-aws/pr-1.json", LastModified: OLD },
@@ -1594,7 +1691,8 @@ describe("preview-only AWS observation", () => {
               ? [{ Key: "app/mem9-on-aws/pr-16.json" }]
               : []),
           ] : []),
-        ] });
+        ];
+        return json({ Contents: contents, KeyCount: contents.length, IsTruncated: false });
       }
       if (file === "aws" && args[0] === "s3" && args[1] === "cp") {
         if (args[2]?.includes("prod.json")) throw new Error("AccessDenied: prod state");
@@ -1729,5 +1827,232 @@ describe("preview-only AWS observation", () => {
   it("TC-PREVIEW-RECON-068 fails closed on preview-named SST roles missing their Stage tag", async () => {
     const { runner } = inventoryRunner({ previews: true, roleStage: null });
     await expect(buildPlan(runner)).rejects.toThrow("IAM preview role Stage tag is missing");
+  });
+
+  it("TC-PREVIEW-RECON-076/078/079 builds auto inventory fresh with no plan artifact", async () => {
+    const { runner, calls } = inventoryRunner();
+    const previous = process.env.PREVIEW_AUTO_CLEANUP_ENABLED;
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    const args = [
+      "auto", "--repository", "zxkane/mem9-on-aws",
+      "--event", "schedule", "--mode", "auto",
+    ];
+    try {
+      delete process.env.PREVIEW_AUTO_CLEANUP_ENABLED;
+      await expect(runCli(args, runner)).rejects.toThrow("Automatic preview cleanup is disabled");
+      expect(calls).toEqual([]);
+
+      process.env.PREVIEW_AUTO_CLEANUP_ENABLED = "TRUE";
+      await expect(runCli(args, runner)).rejects.toThrow("Automatic preview cleanup is disabled");
+
+      process.env.PREVIEW_AUTO_CLEANUP_ENABLED = "true";
+      await runCli(args, runner);
+      await runCli([
+        "auto", "--repository", "zxkane/mem9-on-aws",
+        "--event", "workflow_dispatch", "--mode", "auto",
+      ], runner);
+      expect(log).toHaveBeenCalledWith("Automatic preview cleanup selected none");
+      expect(calls.some(({ file }) => file === "pnpm")).toBe(false);
+      await expect(runCli([...args, "--plan", "/tmp/untrusted-plan.json"], runner))
+        .rejects.toThrow("Invalid automatic cleanup trigger");
+      await expect(runCli([
+        "auto", "--repository", "zxkane/mem9-on-aws",
+        "--event", "schedule", "--mode", "apply",
+      ], runner)).rejects.toThrow("Invalid automatic cleanup trigger");
+    } finally {
+      log.mockRestore();
+      if (previous === undefined) delete process.env.PREVIEW_AUTO_CLEANUP_ENABLED;
+      else process.env.PREVIEW_AUTO_CLEANUP_ENABLED = previous;
+    }
+  });
+});
+
+describe("automatic closed-PR cleanup", () => {
+  const AUTO = { eventName: "schedule", mode: "auto" } as const;
+
+  function closedPreview(numbers: readonly number[]): Observation {
+    return observation({
+      pullRequests: numbers.map((number) => ({ number, state: "closed" as const, closedAt: OLD })),
+      workflowRuns: numbers.map((prNumber) => ({ prNumber, status: "completed" as const, completedAt: OLD })),
+      stateObjects: numbers.map((number) => ({ stage: `pr-${number}`, lastModified: OLD })),
+      resources: [],
+    });
+  }
+
+  it("TC-PREVIEW-RECON-072/073 selects only one confirmed closed PR and rotates numerically", () => {
+    const source = closedPreview([10, 2, 3]);
+    const stages = ["pr-2", "pr-3", "pr-10"];
+    const day = Math.floor(Date.parse(NOW) / 86_400_000);
+    const first = selectAutomaticCandidate(buildReconciliationPlan(source));
+    const next = selectAutomaticCandidate(buildReconciliationPlan({
+      ...source,
+      observedAt: new Date(Date.parse(NOW) + 86_400_000).toISOString(),
+    }));
+
+    expect(first?.stage).toBe(stages[day % stages.length]);
+    expect(next?.stage).toBe(stages[(day + 1) % stages.length]);
+  });
+
+  it("TC-PREVIEW-RECON-072/078 excludes absent, open, recent, and operator-review stages", () => {
+    const plan = buildReconciliationPlan(observation({
+      pullRequests: [
+        { number: 12, state: "closed", closedAt: OLD },
+        { number: 14, state: "closed", closedAt: OLD },
+        { number: 15, state: "open", closedAt: null },
+        { number: 16, state: "closed", closedAt: RECENT },
+      ],
+      workflowRuns: [12, 13, 14, 15, 16].map((prNumber) => ({
+        prNumber, status: "completed" as const, completedAt: OLD,
+      })),
+      stateObjects: [12, 13, 15, 16].map((number) => ({ stage: `pr-${number}`, lastModified: OLD })),
+      resources: [{ stage: "pr-14", resourceType: "rds:cluster", project: "mem9-on-aws", managedBy: "sst" }],
+    }));
+
+    expect(selectAutomaticCandidate(plan)?.stage).toBe("pr-12");
+    expect(selectAutomaticCandidate(buildReconciliationPlan(observation({
+      pullRequests: [], workflowRuns: [],
+    })))).toBeNull();
+  });
+
+  it("TC-PREVIEW-RECON-072 rejects a stage whose number disagrees with its PR number", () => {
+    const plan = buildReconciliationPlan(observation());
+    const forged = {
+      ...plan,
+      stages: [{ ...plan.stages[0], prNumber: 13 }],
+    };
+    expect(selectAutomaticCandidate(forged)).toBeNull();
+  });
+
+  it("TC-PREVIEW-RECON-073 applies at most one stage from a multi-candidate plan", async () => {
+    const source = closedPreview([12, 13, 14]);
+    const plan = buildReconciliationPlan(source);
+    const runtime = adapters([source, source]);
+    const selected = selectAutomaticCandidate(plan)!;
+
+    const result = await applyReconciliationPlan(plan, runtime, AUTO);
+
+    expect(result.removed).toEqual([selected.stage]);
+    expect(runtime.removeStage).toHaveBeenCalledTimes(1);
+    expect(runtime.observeStageOwnership).toHaveBeenCalledWith(selected.stage);
+  });
+
+  it("TC-PREVIEW-RECON-078 never mutates when only absent-PR candidates exist", async () => {
+    const source = observation({ pullRequests: [], workflowRuns: [] });
+    const runtime = adapters([source]);
+
+    const result = await applyReconciliationPlan(buildReconciliationPlan(source), runtime, AUTO);
+
+    expect(result.removed).toEqual([]);
+    expect(runtime.collectObservation).not.toHaveBeenCalled();
+    expect(runtime.removeStage).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    { name: "reopened", change: { pullRequests: [{ number: 12, state: "open" as const, closedAt: null }] } },
+    { name: "absent", change: { pullRequests: [] } },
+    { name: "reclosed inside grace", change: { pullRequests: [{ number: 12, state: "closed" as const, closedAt: RECENT }] } },
+    { name: "deployment active", change: { workflowRuns: [{ prNumber: 12, status: "in_progress" as const, completedAt: null }] } },
+    { name: "uncorrelated run active", change: { workflowRuns: [{ prNumber: null, status: "in_progress" as const, completedAt: null }] } },
+  ])("TC-PREVIEW-RECON-074/075 cancels when the selected PR is $name", async ({ change }) => {
+    const initial = buildReconciliationPlan(observation());
+    const fresh = observation(change);
+    const runtime = adapters([fresh, fresh]);
+
+    const result = await applyReconciliationPlan(initial, runtime, AUTO);
+
+    expect(result.removed).toEqual([]);
+    expect(result.swept).toEqual([]);
+    expect(runtime.removeStage).not.toHaveBeenCalled();
+    expect(runtime.sweepOrphanedNetwork).not.toHaveBeenCalled();
+  });
+
+  it("TC-PREVIEW-RECON-074 fails closed when a fresh GitHub observation fails", async () => {
+    const runtime = adapters([observation()]);
+    vi.mocked(runtime.collectObservation).mockRejectedValue(new Error("GitHub observation failed"));
+
+    await expect(applyReconciliationPlan(buildReconciliationPlan(observation()), runtime, AUTO))
+      .rejects.toThrow("GitHub observation failed");
+    expect(runtime.removeStage).not.toHaveBeenCalled();
+  });
+
+  it("TC-PREVIEW-RECON-077 fails when an apparently successful removal leaves ownership", async () => {
+    const runtime = adapters([observation(), observation()]);
+    vi.mocked(runtime.observeStageOwnership).mockResolvedValue({
+      statePresent: true, resources: [],
+    });
+
+    await expect(applyReconciliationPlan(buildReconciliationPlan(observation()), runtime, AUTO))
+      .rejects.toThrow("Automatic preview cleanup left stage ownership");
+    expect(runtime.removeStage).toHaveBeenCalledTimes(1);
+  });
+
+  it("TC-PREVIEW-RECON-077 fails when a successful network sweep leaves ownership", async () => {
+    const source = observation({ stateObjects: [], resources: networkOnlyResources() });
+    const runtime = adapters([source, source]);
+    vi.mocked(runtime.observeStageOwnership).mockResolvedValue({
+      statePresent: false,
+      resources: [{ resourceType: "ec2:security-group", count: 1 }],
+    });
+
+    await expect(applyReconciliationPlan(buildReconciliationPlan(source), runtime, AUTO))
+      .rejects.toThrow("Automatic preview cleanup left stage ownership");
+    expect(runtime.sweepOrphanedNetwork).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not rewrite the shared operator issue in automatic mode", async () => {
+    const fresh = observation({
+      stateObjects: [],
+      resources: [{ stage: "pr-12", resourceType: "rds:cluster", project: "mem9-on-aws", managedBy: "sst" }],
+    });
+    const runtime = adapters([fresh]);
+
+    const result = await applyReconciliationPlan(buildReconciliationPlan(observation()), runtime, AUTO);
+
+    expect(result.removed).toEqual([]);
+    expect(result.operatorIssue).toBe("none");
+    expect(runtime.findOpenOperatorIssue).not.toHaveBeenCalled();
+    expect(runtime.createOperatorIssue).not.toHaveBeenCalled();
+    expect(runtime.updateOperatorIssue).not.toHaveBeenCalled();
+  });
+
+  it("manual apply still removes candidates without the automatic post-check", async () => {
+    const runtime = adapters([observation(), observation()]);
+    const result = await applyReconciliationPlan(buildReconciliationPlan(observation()), runtime, {
+      eventName: "workflow_dispatch", mode: "apply",
+    });
+
+    expect(result.removed).toEqual(["pr-12"]);
+    expect(runtime.observeStageOwnership).not.toHaveBeenCalled();
+  });
+
+  it("TC-PREVIEW-RECON-074 cancels when a PR reopens immediately before SST removal", async () => {
+    const reopened = observation({
+      pullRequests: [{ number: 12, state: "open", closedAt: null }],
+    });
+    const runtime = adapters([observation(), reopened]);
+    const result = await applyReconciliationPlan(buildReconciliationPlan(observation()), runtime, AUTO);
+
+    expect(result.removed).toEqual([]);
+    expect(runtime.removeStage).not.toHaveBeenCalled();
+  });
+
+  it("TC-PREVIEW-RECON-074 cancels a network sweep if the PR reopens at the last recheck", async () => {
+    const networkOnly = observation({ stateObjects: [], resources: networkOnlyResources() });
+    const reopened = observation({
+      stateObjects: [],
+      resources: networkOnlyResources(),
+      pullRequests: [{ number: 12, state: "open", closedAt: null }],
+    });
+    const runtime = adapters([networkOnly, reopened]);
+    const result = await applyReconciliationPlan(buildReconciliationPlan(networkOnly), runtime, AUTO);
+
+    expect(result.swept).toEqual([]);
+    expect(runtime.sweepOrphanedNetwork).not.toHaveBeenCalled();
+  });
+
+  it("TC-PREVIEW-RECON-079 rejects noncanonical and protected stage names", () => {
+    for (const stage of ["prod", "pr-0", "pr-01", "PR-1", "pr-1a", "pr-1 ", "pr-1/../prod"]) {
+      expect(() => sstRemoveCommand(stage)).toThrow("Refusing unsafe stage removal");
+    }
   });
 });

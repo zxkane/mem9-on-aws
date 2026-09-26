@@ -1416,16 +1416,28 @@ and [`restore-db-cluster-to-point-in-time`](https://docs.aws.amazon.com/cli/late
 
 ## Preview reconciliation
 
-The `Reconcile preview stages` workflow runs daily in report-only mode. Manual
-dispatch also defaults to `dry-run`; selecting `apply` explicitly rechecks every
-candidate before invoking `sst remove` for a strict `pr-N` stage with SST state.
-Tagged resources without SST state are never deleted. They are summarized by
-stage and resource type in one deduplicated operator issue.
+The `Reconcile preview stages` workflow runs daily at 03:17 UTC as a fallback
+for PR-close cleanup. Set the GitHub repository variable
+`PREVIEW_AUTO_CLEANUP_ENABLED=true` to let each scheduled run automatically
+attempt **one** preview stage whose PR is confirmed closed, whose 24-hour grace
+period has elapsed, and whose deployment is inactive. It rotates across eligible
+PRs on successive days so a failed removal does not permanently block the rest.
+Unset or `false` keeps scheduled runs report-only. The manual input still
+defaults to `dry-run`; `auto` runs the same bounded policy, while `apply`
+retains the explicit all-candidate path. Automatic cleanup builds a fresh plan
+and rechecks PR state and stage ownership before and after mutation; a failed
+read or removal fails the run.
 
-After deploying a revision that introduces this workflow, re-run
-`scripts/deploy-github-role.sh` once so the out-of-band CI role receives the
-read-only `tag:GetResources`, `iam:ListRoles`, and scoped `iam:ListRoleTags`
-grants used for inventory discovery.
+Only exact `pr-N` stages are eligible. SST state-present stages use `sst remove`;
+state-missing stages whose entire owned inventory is an orphaned security group
+and its network interfaces may be swept after live tag checks. Other
+state-missing resources are reported for operator review and are not deleted.
+The manual `apply` path may still review candidates whose PR record is absent;
+automatic cleanup requires an explicitly closed PR.
+
+The workflow uses the existing preview OIDC role for inventory and teardown;
+changing the automatic-cleanup switch requires no role-stack update. Keep the
+main-only `preview-maintenance` Environment protection in place.
 
 ## Namespace-scoped memory maintenance
 

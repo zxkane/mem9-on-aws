@@ -2,9 +2,11 @@ name: Reconcile preview stages
 
 # Optional GitHub repository variable:
 #   DEPLOYMENT_MAINTENANCE_PAUSED - set to true during guarded IAM maintenance.
-#   Both report and apply stop before assuming the preview deploy role.
-#   WORKLOAD_BOUNDARY_PROD_ENABLED - both jobs stay disabled until the guarded
+#   Report, manual apply, and auto stop before assuming the preview deploy role.
+#   WORKLOAD_BOUNDARY_PROD_ENABLED - AWS jobs stay disabled until the guarded
 #   workload-role migration sets this variable to true.
+#   PREVIEW_AUTO_CLEANUP_ENABLED - exactly true enables bounded cleanup of one
+#   confirmed closed-PR stage per scheduled run (and manual auto run).
 #
 # Workload-boundary maintenance gate revision: 1
 
@@ -18,8 +20,11 @@ on:
         type: choice
         options:
           - dry-run
+          - auto
           - apply
         default: dry-run
+
+permissions: {}
 
 concurrency:
   group: preview-stage-reconciliation
@@ -34,8 +39,10 @@ jobs:
     outputs:
       region: ${{ steps.resolve.outputs.region }}
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-node@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24
       - name: Resolve SST AWS provider region
@@ -54,7 +61,6 @@ jobs:
       contents: read
       actions: read
       pull-requests: read
-      issues: read
     env:
       AWS_REGION: ${{ needs.application-region.outputs.region }}
     steps:
@@ -67,14 +73,16 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24
 
       - name: Configure AWS credentials (read-only reconciliation)
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
         with:
           role-to-assume: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
@@ -89,9 +97,9 @@ jobs:
           --event "$GITHUB_EVENT_NAME"
           --plan "$RUNNER_TEMP/preview-reconciliation-plan.json"
 
-      - name: Preserve advisory plan for explicit apply
+      - name: Preserve advisory plan for explicit manual apply
         if: github.event_name == 'workflow_dispatch' && inputs.mode == 'apply'
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: preview-reconciliation-plan
           path: ${{ runner.temp }}/preview-reconciliation-plan.json
@@ -122,13 +130,15 @@ jobs:
             exit 1
           fi
 
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
 
-      - uses: pnpm/action-setup@v6
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
           package_json_file: infra/package.json
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24
           cache: pnpm
@@ -138,14 +148,14 @@ jobs:
         run: pnpm -C infra install --frozen-lockfile
 
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v6
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
         with:
           role-to-assume: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           mask-aws-account-id: true
 
       - name: Download advisory plan
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           name: preview-reconciliation-plan
           path: ${{ runner.temp }}
@@ -159,3 +169,67 @@ jobs:
           --event "$GITHUB_EVENT_NAME"
           --mode apply
           --plan "$RUNNER_TEMP/preview-reconciliation-plan.json"
+
+  auto:
+    name: Automatically clean one closed PR preview
+    needs: [application-region, report]
+    if: >-
+      vars.WORKLOAD_BOUNDARY_PROD_ENABLED == 'true' &&
+      vars.PREVIEW_AUTO_CLEANUP_ENABLED == 'true' && (
+        github.event_name == 'schedule' ||
+        (github.event_name == 'workflow_dispatch' && inputs.mode == 'auto')
+      )
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    environment: preview-maintenance
+    timeout-minutes: 75
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+      pull-requests: read
+    env:
+      AWS_REGION: ${{ needs.application-region.outputs.region }}
+    steps:
+      - name: Deployment maintenance gate
+        env:
+          PAUSED: ${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}
+        run: |
+          if [ "$PAUSED" = "true" ]; then
+            echo "::error::AWS deployments are paused for guarded IAM maintenance"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+        with:
+          package_json_file: infra/package.json
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: infra/pnpm-lock.yaml
+
+      - name: Install SST dependencies
+        run: pnpm -C infra install --frozen-lockfile
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        with:
+          role-to-assume: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
+
+      - name: Automatic cleanup of one closed PR
+        timeout-minutes: 65
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PREVIEW_AUTO_CLEANUP_ENABLED: ${{ vars.PREVIEW_AUTO_CLEANUP_ENABLED }}
+        run: >-
+          node scripts/preview-reconciler.mts auto
+          --repository "$GITHUB_REPOSITORY"
+          --event "$GITHUB_EVENT_NAME"
+          --mode auto

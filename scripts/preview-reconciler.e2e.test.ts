@@ -27,6 +27,8 @@ const ENI_ID = "eni-0123456789abcdef0";
 type MockOptions = Readonly<{
   statePresent?: boolean;
   uncorrelatedActive?: boolean;
+  malformedAfterRemoval?: "state" | "tagging" | "iam";
+  s3TwoPages?: boolean;
   /**
    * When true the stage's only tagged resources are the sweepable SG + ENI, i.e.
    * the shape a cleanup job cancelled mid-`sst remove` leaves behind (#146).
@@ -37,9 +39,12 @@ type MockOptions = Readonly<{
 function mockCommands({
   statePresent = true,
   uncorrelatedActive = false,
+  malformedAfterRemoval,
+  s3TwoPages = false,
   networkOnly = false,
 }: MockOptions = {}): MockCommands {
   const calls: Array<{ file: string; args: readonly string[] }> = [];
+  let removed = false;
   const runner: CommandRunner = vi.fn(
     async (file: string, args: readonly string[]) => {
       calls.push({ file, args: [...args] });
@@ -66,6 +71,11 @@ function mockCommands({
               NetworkInterfaceId: ENI_ID,
               Status: "available",
               RequesterManaged: false,
+              Tags: [
+                { Key: "Project", Value: "mem9-on-aws" },
+                { Key: "ManagedBy", Value: "sst" },
+                { Key: "Stage", Value: "pr-7" },
+              ],
             },
           ],
         });
@@ -137,15 +147,17 @@ function mockCommands({
         return json({ Parameter: { Value: JSON.stringify({ state: "state-bucket" }) } });
       }
       if (file === "aws" && args[0] === "s3api") {
+        if (removed) {
+          return json(malformedAfterRemoval === "state" ? {} : { KeyCount: 0, IsTruncated: false });
+        }
+        if (s3TwoPages && !args.includes("--continuation-token")) {
+          return json({ KeyCount: 0, IsTruncated: true, NextContinuationToken: "second-page" });
+        }
+        if (!statePresent) return json({ KeyCount: 0, IsTruncated: false });
         return json({
-          Contents: statePresent
-            ? [
-                {
-                  Key: "app/mem9-on-aws/pr-7.json",
-                  LastModified: OLD,
-                },
-              ]
-            : [],
+          Contents: [{ Key: "app/mem9-on-aws/pr-7.json", LastModified: OLD }],
+          KeyCount: 1,
+          IsTruncated: false,
         });
       }
       if (file === "aws" && args[0] === "s3" && args[1] === "cp") {
@@ -158,13 +170,14 @@ function mockCommands({
         });
       }
       if (file === "aws" && args[0] === "resourcegroupstaggingapi") {
+        if (removed && malformedAfterRemoval === "tagging") return json({});
         const stageTags = [
           { Key: "Project", Value: "mem9-on-aws" },
           { Key: "ManagedBy", Value: "sst" },
           { Key: "Stage", Value: "pr-7" },
         ];
         return json({
-          ResourceTagMappingList: networkOnly
+          ResourceTagMappingList: removed ? [] : networkOnly
             ? [
                 {
                   ResourceARN: `arn:aws:ec2:ap-northeast-1:123456789012:security-group/${SG_ID}`,
@@ -192,8 +205,9 @@ function mockCommands({
         });
       }
       if (file === "aws" && args[0] === "iam" && args[1] === "list-roles") {
+        if (removed && malformedAfterRemoval === "iam") return json({});
         return json({
-          Roles: networkOnly
+          Roles: removed || networkOnly
             ? [{ RoleName: "github-actions-mem9-on-aws" }]
             : [
                 { RoleName: "github-actions-mem9-on-aws" },
@@ -210,7 +224,10 @@ function mockCommands({
           ],
         });
       }
-      if (file === "pnpm") return { stdout: "", stderr: "" };
+      if (file === "pnpm") {
+        removed = true;
+        return { stdout: "", stderr: "" };
+      }
       throw new Error(`Unexpected mock command: ${file} ${args.join(" ")}`);
     },
   );
@@ -235,6 +252,42 @@ afterEach(() => {
 });
 
 describe("preview reconciler CLI with mocked GitHub/AWS commands", () => {
+  it("TC-PREVIEW-RECON-088 reads a preview state on the second S3 API page", async () => {
+    await withPlan(async (planPath) => {
+      const commands = mockCommands({ s3TwoPages: true });
+      vi.spyOn(console, "log").mockImplementation(() => undefined);
+      await runCli([
+        "plan", "--repository", REPOSITORY,
+        "--event", "schedule", "--plan", planPath,
+      ], commands.runner);
+      const plan = JSON.parse(await fs.readFile(planPath, "utf8"));
+      expect(plan.stages.map((stage: { stage: string }) => stage.stage)).toContain("pr-7");
+      const lists = commands.calls.filter(({ file, args }) => file === "aws" && args[1] === "list-objects-v2");
+      expect(lists).toHaveLength(2);
+      expect(lists[0].args).toContain("--no-paginate");
+      expect(lists[1].args).toContain("second-page");
+    });
+  });
+
+  it.each([
+    { name: "missing Contents", page: { KeyCount: 1, IsTruncated: false }, error: "Invalid SST state listing" },
+    { name: "wrong KeyCount", page: { KeyCount: 1, Contents: [], IsTruncated: false }, error: "Invalid SST state page count" },
+    { name: "repeated token", page: { KeyCount: 0, IsTruncated: true, NextContinuationToken: "same" }, error: "Invalid SST state continuation token" },
+  ])("TC-PREVIEW-RECON-089 rejects S3 pagination with $name", async ({ page, error }) => {
+    await withPlan(async (planPath) => {
+      const commands = mockCommands();
+      const runner: CommandRunner = (file, args, label, allowedFailure) =>
+        file === "aws" && args[1] === "list-objects-v2"
+          ? Promise.resolve(json(page))
+          : commands.runner(file, args, label, allowedFailure);
+      await expect(runCli([
+        "plan", "--repository", REPOSITORY,
+        "--event", "schedule", "--plan", planPath,
+      ], runner)).rejects.toThrow(error);
+      expect(commands.calls.some(({ file }) => file === "pnpm")).toBe(false);
+    });
+  });
+
   it.each(["schedule", "workflow_dispatch"] as const)(
     "TC-PREVIEW-RECON-024 %s report makes no mutating call",
     async (eventName) => {
@@ -404,6 +457,108 @@ describe("preview reconciler CLI with mocked GitHub/AWS commands", () => {
         ),
       ).toBe(true);
     });
+  });
+
+  it("TC-PREVIEW-RECON-085 auto CLI uses a fresh plan and confirms SST removal", async () => {
+    const commands = mockCommands();
+    const logged: string[] = [];
+    const previous = process.env.PREVIEW_AUTO_CLEANUP_ENABLED;
+    process.env.PREVIEW_AUTO_CLEANUP_ENABLED = "true";
+    vi.spyOn(console, "log").mockImplementation((message: unknown) => {
+      logged.push(String(message));
+    });
+    try {
+      await runCli([
+        "auto", "--repository", REPOSITORY,
+        "--event", "schedule", "--mode", "auto",
+      ], commands.runner);
+    } finally {
+      if (previous === undefined) delete process.env.PREVIEW_AUTO_CLEANUP_ENABLED;
+      else process.env.PREVIEW_AUTO_CLEANUP_ENABLED = previous;
+    }
+
+    const removals = commands.calls.filter(({ file }) => file === "pnpm");
+    expect(removals).toHaveLength(1);
+    expect(removals[0].args).toEqual(["-C", "infra", "exec", "sst", "remove", "--stage", "pr-7"]);
+    expect(logged).toContain("Automatic preview cleanup selected pr-7");
+    expect(logged).toContain("Removed preview stage pr-7");
+    expect(commands.calls.filter(({ file, args }) => file === "aws" && args[1] === "list-objects-v2"))
+      .toHaveLength(4);
+    expect(commands.calls.some(({ file, args }) => file === "gh" && args.includes("POST")))
+      .toBe(false);
+  });
+
+  it.each([
+    { source: "state", message: "Invalid SST state page metadata" },
+    { source: "tagging", message: "Invalid AWS tagged-resource list" },
+    { source: "iam", message: "Invalid IAM role list" },
+  ] as const)("TC-PREVIEW-RECON-086 rejects a malformed $source post-removal inventory", async ({ source, message }) => {
+    const commands = mockCommands({ malformedAfterRemoval: source });
+    const previous = process.env.PREVIEW_AUTO_CLEANUP_ENABLED;
+    process.env.PREVIEW_AUTO_CLEANUP_ENABLED = "true";
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      await expect(runCli([
+        "auto", "--repository", REPOSITORY,
+        "--event", "schedule", "--mode", "auto",
+      ], commands.runner)).rejects.toThrow(message);
+    } finally {
+      if (previous === undefined) delete process.env.PREVIEW_AUTO_CLEANUP_ENABLED;
+      else process.env.PREVIEW_AUTO_CLEANUP_ENABLED = previous;
+    }
+    expect(commands.calls.filter(({ file }) => file === "pnpm")).toHaveLength(1);
+  });
+
+  it("TC-PREVIEW-RECON-087 rejects malformed workflow and IAM tag pages before removal", async () => {
+    const commands = mockCommands();
+    const previous = process.env.PREVIEW_AUTO_CLEANUP_ENABLED;
+    process.env.PREVIEW_AUTO_CLEANUP_ENABLED = "true";
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      for (const malformed of ["workflow", "iam-tags"] as const) {
+        const runner: CommandRunner = async (file, args, label, allowedFailure) => {
+          if (malformed === "workflow" && file === "gh" &&
+              args.includes(`repos/${REPOSITORY}/actions/workflows/infra-ci.yml/runs`)) {
+            return json([{}]);
+          }
+          if (malformed === "iam-tags" && file === "aws" && args[1] === "list-role-tags") {
+            return json({});
+          }
+          return commands.runner(file, args, label, allowedFailure);
+        };
+        await expect(runCli([
+          "auto", "--repository", REPOSITORY,
+          "--event", "schedule", "--mode", "auto",
+        ], runner)).rejects.toThrow(
+          malformed === "workflow" ? "Invalid GitHub workflow-run page" : "Invalid IAM role tag list",
+        );
+      }
+    } finally {
+      if (previous === undefined) delete process.env.PREVIEW_AUTO_CLEANUP_ENABLED;
+      else process.env.PREVIEW_AUTO_CLEANUP_ENABLED = previous;
+    }
+    expect(commands.calls.some(({ file }) => file === "pnpm")).toBe(false);
+  });
+
+  it("TC-PREVIEW-RECON-090 refuses cleanup when SST bootstrap cannot be read", async () => {
+    const commands = mockCommands({ statePresent: false, networkOnly: true });
+    const previous = process.env.PREVIEW_AUTO_CLEANUP_ENABLED;
+    process.env.PREVIEW_AUTO_CLEANUP_ENABLED = "true";
+    const runner: CommandRunner = (file, args, label, allowedFailure) =>
+      file === "aws" && args[0] === "ssm" && args[1] === "get-parameter"
+        ? Promise.resolve(null)
+        : commands.runner(file, args, label, allowedFailure);
+    try {
+      await expect(runCli([
+        "auto", "--repository", REPOSITORY,
+        "--event", "schedule", "--mode", "auto",
+      ], runner)).rejects.toThrow("SST bootstrap parameter is missing");
+    } finally {
+      if (previous === undefined) delete process.env.PREVIEW_AUTO_CLEANUP_ENABLED;
+      else process.env.PREVIEW_AUTO_CLEANUP_ENABLED = previous;
+    }
+    expect(commands.calls.some(({ file, args }) => file === "aws" && args[1]?.startsWith("delete-")))
+      .toBe(false);
   });
 
   // #146. The end-to-end shape of the leak: state gone, only the SG + its detached

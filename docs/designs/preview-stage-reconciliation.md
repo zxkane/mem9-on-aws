@@ -7,15 +7,21 @@ Status: Approved (autonomous mode)
 ## Operator Surface
 
 The reconciler is an operational GitHub Actions workflow, not an application UI.
-Its only controls are a recurring schedule and a manual choice:
+It is a fallback for the immediate `cleanup-preview` job on PR close. Its controls
+are the daily schedule, a separate auto-cleanup repository variable, and a
+manual choice:
 
 ```text
 schedule --------------------------> report job (read-only permissions)
+                                  \-> one closed-PR cleanup when enabled
 
 workflow_dispatch(mode=dry-run) ---> report job (read-only permissions)
 
+workflow_dispatch(mode=auto) ------> report job
+                                  \-> one closed-PR cleanup when enabled
+
 workflow_dispatch(mode=apply) ------> report job
-                                  \-> apply job (write issue permission)
+                                   \-> manual apply job (write issue permission)
                                       |
                                       +-- fresh safety observations
                                       +-- sst remove for state-present stages
@@ -23,9 +29,14 @@ workflow_dispatch(mode=apply) ------> report job
                                       `-- operator issue for state-missing stages
 ```
 
-The manual input defaults to `dry-run`. The apply job has a job-level condition
-requiring both `workflow_dispatch` and `mode == apply`; scheduled runs therefore
-cannot enter the mutation branch or receive its issue-write permission.
+The manual input defaults to `dry-run`. The apply job runs for an explicit manual
+`apply`, or for scheduled/manual `auto` only when the repository variable
+`PREVIEW_AUTO_CLEANUP_ENABLED` is exactly `true`. Unset is off. Only the manual
+apply job has issue-write permission; all AWS jobs use the main-only `preview-maintenance`
+Environment and the existing preview OIDC role. The maintenance and workload
+boundary gates still apply. Automatic cleanup does not consume the report
+artifact: it builds its own fresh plan after assuming the role. Manual `apply`
+still downloads the report artifact and revalidates it before mutation.
 
 ## Component Architecture
 
@@ -58,7 +69,12 @@ reaches the planner, reports, plan artifacts, errors, or operator issues.
 
 1. Read all pull requests and matching `Infra CI` workflow runs.
 2. Read `/sst/bootstrap`, then list only the `app/mem9-on-aws/pr-` prefix in the
-   configured SST state bucket. Check that the entire key names an exact
+   configured SST state bucket. Use explicit S3 API pages rather than AWS CLI's
+   merged paginator output: require `KeyCount` and `IsTruncated`, accept missing
+   `Contents` only with `KeyCount=0`, and follow bounded continuation tokens.
+   A missing bootstrap parameter is an unknown state location and aborts the
+   observation; it never means the stage has no SST state.
+   Check that the entire key names an exact
    `pr-[0-9]+.json` stage before downloading its content.
 3. Read resources tagged `Project=mem9-on-aws` and `ManagedBy=sst`, but retain
    only exact preview-stage tags before probing resource liveness. IAM roles use
@@ -66,19 +82,35 @@ reaches the planner, reports, plan artifacts, errors, or operator issues.
    not return them. Only role names with an exact `pr-N` segment under the three
    app-name prefixes authorized by the current IAM policy are queried for tags;
    an SST role's Stage tag must agree with the stage in its name.
+   Because the Tagging API also returns previously tagged resources, security
+   groups and network interfaces are described by exact EC2 ID and checked for
+   current ownership tags before they count as live. A NotFound response drops
+   the historical entry; access failures remain fatal.
 4. Group preview observations by stage. The accepted mutation format is exactly
    `pr-[0-9]+`; protected and malformed names never become candidates.
 5. For each observed preview stage, calculate the grace anchor as the latest of:
    pull-request close time, matching completed preview workflow time, and SST
    state-object modification time.
 6. A candidate requires a closed or absent pull request, no active matching
-   workflow, a known grace anchor, and at least 24 elapsed hours.
+   workflow, a known grace anchor, and at least 24 elapsed hours. Automatic
+   cleanup narrows this further to an explicitly observed closed PR and a
+   canonical `pr-[1-9][0-9]*` stage; absent PRs stay manual-only.
 7. Persist a redacted advisory plan artifact and print a redacted report.
 8. In manual apply mode, refresh all observations to classify every advisory
    candidate, write any state-missing operator inventory, then refresh the same
    stage again immediately before `sst remove`. Any reopened pull request,
    active/new workflow, changed state timestamp, missing state, or renewed grace
    period cancels removal.
+   In automatic mode, sort confirmed closed cleanup candidates numerically by
+   PR number and select exactly one by the UTC day index modulo candidate count.
+   The next day's rotation prevents one failing stage from starving the rest.
+   Recheck the confirmed closed PR at every observation, including immediately
+   before SST removal or network sweep. A disappeared PR, new active workflow,
+   API failure, or renewed grace period cancels the action. After an apparently
+   successful action, re-read stage ownership and fail the job if state or
+   resources remain. Automatic failure is visible as a failed workflow run.
+   Automatic cleanup never creates or rewrites the shared state-missing operator
+   issue; that issue remains owned by explicit manual `apply`.
 9. A state-missing candidate whose ENTIRE owned inventory is orphaned network
    scaffolding is classified `sweep-orphaned-network` and finished automatically
    (#146). Every other state-missing candidate is never sent to an AWS delete API:
@@ -107,6 +139,11 @@ reaches the planner, reports, plan artifacts, errors, or operator issues.
   updates the existing open issue instead of creating duplicates.
 - Collection failures fail closed. The reconciler never interprets an AWS or
   GitHub read error as an empty result.
+- Each automatic run attempts at most one eligible stage within a 65-minute
+  cleanup step and a 75-minute job; if there is none, it succeeds without a
+  mutation. A run that times out or fails leaves the stage for later rechecks.
+  Manual `apply` keeps its existing all-candidate behavior. Scheduled report
+  still runs when automatic cleanup is disabled.
 - Filtering precedes preview-specific AWS reads in both scheduled reports and
   manual apply rechecks. A production-only account produces an empty preview
   report; a denied read, missing state timestamp or resource ARN, or mismatched

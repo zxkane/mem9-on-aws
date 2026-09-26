@@ -11,7 +11,7 @@ const APPLICATION_REGION_RESOLVER = path.join(
   "scripts",
   "resolve-application-region.mjs",
 );
-const PREVIEW_STAGE = /^pr-([0-9]+)$/;
+const PREVIEW_STAGE = /^pr-([1-9][0-9]*)$/;
 const SAFE_RESOURCE_TYPE = /^[a-z0-9][a-z0-9-]*(?::[a-z0-9][a-z0-9._-]*)?$/;
 const GRACE_PERIOD_MS = 24 * 60 * 60 * 1_000;
 const PLAN_SCHEMA_VERSION = 1;
@@ -150,10 +150,9 @@ export type ReconciliationPlan = Readonly<{
   stages: readonly StagePlan[];
 }>;
 
-export type Trigger = Readonly<{
-  eventName: "workflow_dispatch";
-  mode: "apply";
-}>;
+export type Trigger =
+  | Readonly<{ eventName: "workflow_dispatch"; mode: "apply" }>
+  | Readonly<{ eventName: "schedule" | "workflow_dispatch"; mode: "auto" }>;
 
 export type OperatorIssueDraft = Readonly<{
   title: string;
@@ -163,6 +162,7 @@ export type OperatorIssueDraft = Readonly<{
 export type ApplyAdapters = ObservationAdapter &
   Readonly<{
     removeStage: (stage: string) => Promise<void>;
+    observeStageOwnership: (stage: string) => Promise<StageOwnershipObservation>;
     /**
      * Delete the orphaned network scaffolding of a state-missing stage. Returns
      * the counts it deleted, or a refusal reason when a live AWS re-check
@@ -496,6 +496,34 @@ export function buildReconciliationPlan(observation: Observation): Reconciliatio
   });
 }
 
+function confirmedClosedPreview(stage: StagePlan): boolean {
+  return (
+    stage.prNumber !== null &&
+    stage.prNumber > 0 &&
+    stage.stage === `pr-${stage.prNumber}` &&
+    stage.reasons.includes("pr-closed") &&
+    !stage.reasons.includes("pr-absent")
+  );
+}
+
+/** One closed-PR cleanup per run; rotating the start avoids a failing oldest stage
+ * blocking every other orphan on subsequent days. The plan is built in this job. */
+export function selectAutomaticCandidate(plan: ReconciliationPlan): StagePlan | null {
+  const observedAtMs = timestampMs(plan.observedAt, "automatic observation");
+  const candidates = plan.stages
+    .filter((stage) =>
+      stage.decision === "candidate" &&
+      confirmedClosedPreview(stage) &&
+      (stage.action === "remove-with-sst" || stage.action === "sweep-orphaned-network") &&
+      stage.eligibleAt !== null &&
+      observedAtMs >= timestampMs(stage.eligibleAt, "automatic eligibility"),
+    )
+    .sort((left, right) => left.prNumber! - right.prNumber!);
+  if (candidates.length === 0) return null;
+  const utcDay = Math.floor(observedAtMs / 86_400_000);
+  return candidates[utcDay % candidates.length];
+}
+
 function assertSafeOutput(output: string): void {
   if (/\barn:/i.test(output) || /https?:\/\//i.test(output) || /\b[0-9]{12}\b/.test(output)) {
     throw new Error("Refusing to emit an unredacted reconciliation report");
@@ -582,9 +610,12 @@ export async function upsertOperatorIssue(
 }
 
 function assertApplyTrigger(trigger: Trigger): void {
-  if (trigger.eventName !== "workflow_dispatch" || trigger.mode !== "apply") {
-    throw new Error("Apply requires an explicit manual apply trigger");
-  }
+  if (trigger.eventName === "workflow_dispatch" && trigger.mode === "apply") return;
+  if (
+    (trigger.eventName === "schedule" || trigger.eventName === "workflow_dispatch") &&
+    trigger.mode === "auto"
+  ) return;
+  throw new Error("Invalid reconciliation apply trigger");
 }
 
 /**
@@ -646,6 +677,7 @@ export async function applyReconciliationPlan(
   trigger: Trigger,
 ): Promise<ApplyResult> {
   assertApplyTrigger(trigger);
+  const automatic = trigger.mode === "auto";
   const removed: string[] = [];
   const swept: string[] = [];
   const cancelled: Array<{ stage: string; reason: string }> = [];
@@ -653,9 +685,19 @@ export async function applyReconciliationPlan(
   const removable: StagePlan[] = [];
   const sweepable: StagePlan[] = [];
 
-  for (const advisory of plan.stages.filter(
-    (stage) => stage.decision === "candidate",
-  )) {
+  const scheduledCandidate = automatic ? selectAutomaticCandidate(plan) : null;
+  const advisories = automatic
+    ? (scheduledCandidate ? [scheduledCandidate] : [])
+    : plan.stages.filter((stage) => stage.decision === "candidate");
+  const assertAutomaticRemovalComplete = async (stage: string): Promise<void> => {
+    if (!automatic) return;
+    const ownership = await adapters.observeStageOwnership(stage);
+    if (ownership.statePresent || ownership.resources.length > 0) {
+      throw new Error("Automatic preview cleanup left stage ownership");
+    }
+  };
+
+  for (const advisory of advisories) {
     if (previewNumber(advisory.stage) === null) {
       cancelled.push({ stage: displayStage(advisory.stage), reason: "stage-protected" });
       continue;
@@ -665,6 +707,10 @@ export async function applyReconciliationPlan(
     const fresh = freshPlan.stages.find((stage) => stage.stage === advisory.stage);
     if (!fresh) {
       cancelled.push({ stage: advisory.stage, reason: "no-longer-candidate" });
+      continue;
+    }
+    if (automatic && !confirmedClosedPreview(fresh)) {
+      cancelled.push({ stage: advisory.stage, reason: "pr-not-closed" });
       continue;
     }
 
@@ -707,7 +753,7 @@ export async function applyReconciliationPlan(
     if (draft) operatorIssue = await upsertOperatorIssue(draft, adapters);
     inventoryDirty = false;
   };
-  if (inventoryDirty) {
+  if (inventoryDirty && !automatic) {
     await persistStateMissingInventory();
   }
 
@@ -719,6 +765,10 @@ export async function applyReconciliationPlan(
     );
     if (!immediate) {
       cancelled.push({ stage: stage.stage, reason: "no-longer-candidate" });
+      continue;
+    }
+    if (automatic && !confirmedClosedPreview(immediate)) {
+      cancelled.push({ stage: stage.stage, reason: "pr-not-closed" });
       continue;
     }
 
@@ -744,6 +794,7 @@ export async function applyReconciliationPlan(
     }
     try {
       await adapters.removeStage(stage.stage);
+      await assertAutomaticRemovalComplete(stage.stage);
     } catch (error) {
       removalFailure = { error };
       break;
@@ -762,6 +813,10 @@ export async function applyReconciliationPlan(
     const immediate = immediatePlan.stages.find(
       (candidate) => candidate.stage === stage.stage,
     );
+    if (automatic && immediate && !confirmedClosedPreview(immediate)) {
+      cancelled.push({ stage: stage.stage, reason: "pr-not-closed" });
+      continue;
+    }
     // The re-check must re-derive the sweep verdict, never inherit the fresh plan's
     // `action` on its own: a stage the reconstruction declines has not been
     // confirmed state-missing, and sweeping it on the strength of its action alone
@@ -797,10 +852,11 @@ export async function applyReconciliationPlan(
       inventoryDirty = true;
       continue;
     }
+    await assertAutomaticRemovalComplete(confirmed.stage);
     swept.push(confirmed.stage);
   }
 
-  if (inventoryDirty) {
+  if (inventoryDirty && !automatic) {
     await persistStateMissingInventory();
   }
   if (removalFailure) throw removalFailure.error;
@@ -904,8 +960,13 @@ function stringOrNull(value: unknown): string | null {
   return typeof value === "string" && value.length > 0 ? value : null;
 }
 
+function requiredArray(value: unknown, label: string): unknown[] {
+  if (!Array.isArray(value)) throw new Error(`Invalid ${label}`);
+  return value;
+}
+
 function githubPages(value: unknown): unknown[] {
-  return Array.isArray(value) ? value : [];
+  return requiredArray(value, "GitHub pagination response");
 }
 
 function validateRepository(repository: string): void {
@@ -945,7 +1006,7 @@ async function collectPullRequests(
   const byHeadBranch = new Map<string, number>();
   const ambiguousHeadBranches = new Set<string>();
   const observations = pages.flatMap((page) =>
-    (Array.isArray(page) ? page : []).map((item): PullRequestObservation => {
+    requiredArray(page, "GitHub pull-request page").map((item): PullRequestObservation => {
       const pullRequest = asRecord(item);
       const number = Number(pullRequest.number);
       if (!Number.isSafeInteger(number)) throw new Error("Invalid pull-request number");
@@ -1001,7 +1062,7 @@ async function collectWorkflowRuns(
   const pages = githubPages(parseJson(result!.stdout, "GitHub workflow runs"));
   const runs = pages.flatMap((page) => {
     const workflowRuns = asRecord(page).workflow_runs;
-    return Array.isArray(workflowRuns) ? workflowRuns : [];
+    return requiredArray(workflowRuns, "GitHub workflow-run page");
   });
 
   const observations: WorkflowRunObservation[] = [];
@@ -1082,9 +1143,8 @@ async function collectStateObjects(
     "aws",
     ["ssm", "get-parameter", "--name", "/sst/bootstrap", "--output", "json"],
     "SST bootstrap observation",
-    /ParameterNotFound/,
   );
-  if (bootstrap === null) return [];
+  if (bootstrap === null) throw new Error("SST bootstrap parameter is missing");
 
   const parameter = asRecord(
     asRecord(parseJson(bootstrap.stdout, "SST bootstrap")).Parameter,
@@ -1097,27 +1157,49 @@ async function collectStateObjects(
   if (stateBucket === null) throw new Error("SST state bucket is missing");
   const statePrefix = "app/mem9-on-aws/";
 
-  const listing = await commandRunner(
-    "aws",
-    [
-      "s3api",
-      "list-objects-v2",
-      "--bucket",
-      stateBucket,
-      "--prefix",
-      `${statePrefix}pr-`,
-      "--output",
-      "json",
-    ],
-    "SST state observation",
-  );
-  const contents = asRecord(parseJson(listing!.stdout, "SST state objects")).Contents;
-  if (!Array.isArray(contents)) return [];
+  // AWS CLI auto-pagination strips KeyCount from its merged output. Read API
+  // pages explicitly so an empty response is distinguishable from malformed
+  // JSON, and so a stage on a later page cannot be silently missed.
+  const contents: unknown[] = [];
+  const seenTokens = new Set<string>();
+  let continuationToken: string | null = null;
+  let listingComplete = false;
+  for (let page = 0; page < 100; page++) {
+    const args = [
+      "s3api", "list-objects-v2", "--bucket", stateBucket,
+      "--prefix", `${statePrefix}pr-`, "--no-paginate", "--output", "json",
+    ];
+    if (continuationToken) args.push("--continuation-token", continuationToken);
+    const listing = await commandRunner("aws", args, "SST state observation");
+    const value = asRecord(parseJson(listing!.stdout, "SST state objects"));
+    if (
+      !Number.isSafeInteger(value.KeyCount) || Number(value.KeyCount) < 0 ||
+      typeof value.IsTruncated !== "boolean"
+    ) throw new Error("Invalid SST state page metadata");
+    const pageContents = value.Contents === undefined && value.KeyCount === 0
+      ? []
+      : requiredArray(value.Contents, "SST state listing");
+    if (pageContents.length !== value.KeyCount) {
+      throw new Error("Invalid SST state page count");
+    }
+    contents.push(...pageContents);
+    if (!value.IsTruncated) {
+      listingComplete = true;
+      break;
+    }
+    continuationToken = stringOrNull(value.NextContinuationToken);
+    if (!continuationToken || seenTokens.has(continuationToken)) {
+      throw new Error("Invalid SST state continuation token");
+    }
+    seenTokens.add(continuationToken);
+  }
+  if (!listingComplete) throw new Error("SST state listing exceeded page limit");
 
   const observations: StateObjectObservation[] = [];
   for (const item of contents) {
     const object = asRecord(item);
     const key = stringOrNull(object.Key);
+    if (!key) throw new Error("Invalid SST state object key");
     const lastModified = stringOrNull(object.LastModified);
     const stage = key?.startsWith(statePrefix) && key.endsWith(".json")
       ? key.slice(statePrefix.length, -".json".length)
@@ -1200,20 +1282,20 @@ async function collectResources(
     ],
     "AWS tagged-resource observation",
   );
-  const mappings = asRecord(
+  const mappings = requiredArray(asRecord(
     parseJson(result!.stdout, "AWS tagged resources"),
-  ).ResourceTagMappingList;
-  if (!Array.isArray(mappings)) return [];
+  ).ResourceTagMappingList, "AWS tagged-resource list");
 
   return mappings.flatMap((item): ResourceObservation[] => {
     const mapping = asRecord(item);
     const arn = stringOrNull(mapping.ResourceARN);
     const tags = new Map(
-      (Array.isArray(mapping.Tags) ? mapping.Tags : []).flatMap((item): [string, string][] => {
+      requiredArray(mapping.Tags, "AWS resource tags").map((item): [string, string] => {
         const tag = asRecord(item);
         const key = stringOrNull(tag.Key);
-        const value = stringOrNull(tag.Value);
-        return key && value ? [[key, value]] : [];
+        const value = tag.Value;
+        if (!key || typeof value !== "string") throw new Error("Invalid AWS resource tag");
+        return [key, value];
       }),
     );
     const stage = tags.get("Stage");
@@ -1241,12 +1323,15 @@ async function collectIamRoles(
     ["iam", "list-roles", "--output", "json"],
     "IAM role inventory",
   );
-  const roles = asRecord(parseJson(result!.stdout, "IAM roles")).Roles;
-  if (!Array.isArray(roles)) return [];
+  const roles = requiredArray(
+    asRecord(parseJson(result!.stdout, "IAM roles")).Roles,
+    "IAM role list",
+  );
 
   const observations: ResourceObservation[] = [];
   for (const item of roles) {
     const roleName = stringOrNull(asRecord(item).RoleName);
+    if (!roleName) throw new Error("Invalid IAM role name");
     const roleStage = roleName?.match(
       /^(?:mem9-on-aws|mem9-on-aw|mem9-on-a)-(pr-[0-9]+)(?:-|$)/,
     )?.[1];
@@ -1258,11 +1343,12 @@ async function collectIamRoles(
     );
     const rawTags = asRecord(parseJson(tagResult!.stdout, "IAM role tags")).Tags;
     const tags = new Map(
-      (Array.isArray(rawTags) ? rawTags : []).flatMap((item): [string, string][] => {
+      requiredArray(rawTags, "IAM role tag list").map((item): [string, string] => {
         const tag = asRecord(item);
         const key = stringOrNull(tag.Key);
-        const value = stringOrNull(tag.Value);
-        return key && value ? [[key, value]] : [];
+        const value = tag.Value;
+        if (!key || typeof value !== "string") throw new Error("Invalid IAM role tag");
+        return [key, value];
       }),
     );
     const stage = tags.get("Stage");
@@ -1309,6 +1395,8 @@ export async function filterLiveTaggedResources(
   const liveArns = new Set<string>();
   const historicalTypes = new Set([
     "cognito-idp:user-pool",
+    "ec2:security-group",
+    "ec2:network-interface",
     "ecs:cluster",
     "ecs:service",
     "ecs:task",
@@ -1322,6 +1410,57 @@ export async function filterLiveTaggedResources(
     byType.set(resource.resourceType, group);
   }
 
+  // GetResources can retain previously tagged EC2 resources after deletion.
+  // Describe each exact ID and recheck its current tags before counting it as
+  // live ownership. Only NotFound is an expected absence; other failures abort.
+  for (const config of [
+    {
+      resourceType: "ec2:security-group",
+      arnPattern: /:security-group\/(sg-[0-9a-f]+)$/,
+      operation: "describe-security-groups",
+      idFlag: "--group-ids",
+      responseKey: "SecurityGroups",
+      idKey: "GroupId",
+      notFound: /\(InvalidGroup\.NotFound\)/,
+    },
+    {
+      resourceType: "ec2:network-interface",
+      arnPattern: /:network-interface\/(eni-[0-9a-f]+)$/,
+      operation: "describe-network-interfaces",
+      idFlag: "--network-interface-ids",
+      responseKey: "NetworkInterfaces",
+      idKey: "NetworkInterfaceId",
+      notFound: /\(InvalidNetworkInterfaceID\.NotFound\)/,
+    },
+  ] as const) {
+    for (const resource of byType.get(config.resourceType) ?? []) {
+      const id = resource.arn?.match(config.arnPattern)?.[1];
+      if (!id) throw new Error("Invalid tagged EC2 resource ARN");
+      const result = await commandRunner(
+        "aws",
+        ["ec2", config.operation, config.idFlag, id, "--output", "json"],
+        "EC2 resource liveness observation",
+        config.notFound,
+      );
+      if (result === null) continue;
+      const records = asRecord(
+        parseJson(result.stdout, "EC2 resource liveness"),
+      )[config.responseKey];
+      if (!Array.isArray(records) || records.length !== 1 ||
+          stringOrNull(asRecord(records[0])[config.idKey]) !== id ||
+          !Array.isArray(asRecord(records[0]).Tags)) {
+        throw new Error("Invalid EC2 liveness observation");
+      }
+      const tags = asRecord(records[0]).Tags;
+      if (
+        tagValue(tags, "Project") !== resource.project ||
+        tagValue(tags, "ManagedBy") !== resource.managedBy ||
+        tagValue(tags, "Stage") !== resource.stage
+      ) throw new Error("EC2 liveness ownership mismatch");
+      liveArns.add(resource.arn!);
+    }
+  }
+
   for (const batch of chunks(byType.get("ecs:cluster") ?? [], 100)) {
     const result = await commandRunner(
       "aws",
@@ -1329,7 +1468,7 @@ export async function filterLiveTaggedResources(
       "ECS cluster liveness observation",
     );
     const clusters = asRecord(parseJson(result!.stdout, "ECS clusters")).clusters;
-    for (const item of Array.isArray(clusters) ? clusters : []) {
+    for (const item of requiredArray(clusters, "ECS cluster list")) {
       const cluster = asRecord(item);
       const arn = stringOrNull(cluster.clusterArn);
       const status = stringOrNull(cluster.status);
@@ -1348,7 +1487,7 @@ export async function filterLiveTaggedResources(
       parseJson(result!.stdout, "ECS active task definitions"),
     ).taskDefinitionArns;
     const activeArns = new Set(
-      (Array.isArray(active) ? active : []).flatMap((item) => {
+      requiredArray(active, "ECS active task definitions").flatMap((item) => {
         const arn = stringOrNull(item);
         return arn ? [arn] : [];
       }),
@@ -1364,7 +1503,7 @@ export async function filterLiveTaggedResources(
     const grouped = new Map<string, ResourceObservation[]>();
     for (const resource of byType.get(`ecs:${kind}`) ?? []) {
       const cluster = ecsClusterFromResourceArn(resource.arn!, kind);
-      if (!cluster) continue;
+      if (!cluster) throw new Error("Invalid tagged ECS resource ARN");
       const group = grouped.get(cluster) ?? [];
       group.push(resource);
       grouped.set(cluster, group);
@@ -1385,11 +1524,11 @@ export async function filterLiveTaggedResources(
           ...batch.map(({ arn }) => arn!),
         ],
         "ECS service liveness observation",
-        /ClusterNotFoundException|InvalidParameterException/,
+        /ClusterNotFoundException/,
       );
       if (result === null) continue;
       const items = asRecord(parseJson(result.stdout, "ECS services")).services;
-      for (const item of Array.isArray(items) ? items : []) {
+      for (const item of requiredArray(items, "ECS service list")) {
         const service = asRecord(item);
         const arn = stringOrNull(service.serviceArn);
         const status = stringOrNull(service.status);
@@ -1411,11 +1550,11 @@ export async function filterLiveTaggedResources(
           ...batch.map(({ arn }) => arn!),
         ],
         "ECS task liveness observation",
-        /ClusterNotFoundException|InvalidParameterException/,
+        /ClusterNotFoundException/,
       );
       if (result === null) continue;
       const items = asRecord(parseJson(result.stdout, "ECS tasks")).tasks;
-      for (const item of Array.isArray(items) ? items : []) {
+      for (const item of requiredArray(items, "ECS task list")) {
         const task = asRecord(item);
         const arn = stringOrNull(task.taskArn);
         const status = stringOrNull(task.lastStatus);
@@ -1433,7 +1572,7 @@ export async function filterLiveTaggedResources(
     );
     const listed = asRecord(parseJson(result!.stdout, "Cognito user pools")).UserPools;
     const activeIds = new Set(
-      (Array.isArray(listed) ? listed : []).flatMap((item) => {
+      requiredArray(listed, "Cognito user-pool list").flatMap((item) => {
         const id = stringOrNull(asRecord(item).Id);
         return id ? [id] : [];
       }),
@@ -1739,6 +1878,7 @@ function createApplyAdapters(
   return {
     ...observationAdapter,
     sweepOrphanedNetwork: (stage) => sweepOrphanedNetwork(stage, commandRunner),
+    observeStageOwnership: (stage) => observeStageOwnership(stage, commandRunner),
     async removeStage(stage) {
       const [file, ...args] = sstRemoveCommand(stage);
       await commandRunner(
@@ -1862,12 +2002,17 @@ type CliOptions =
       repository: string;
       trigger: Trigger;
       planPath: string;
+    }>
+  | Readonly<{
+      command: "auto";
+      repository: string;
+      trigger: Readonly<{ eventName: "schedule" | "workflow_dispatch"; mode: "auto" }>;
     }>;
 
 function parseCli(argv: readonly string[]): CliOptions {
   const [command, ...rest] = argv;
-  if (command !== "plan" && command !== "apply") {
-    throw new Error("Expected plan or apply command");
+  if (command !== "plan" && command !== "apply" && command !== "auto") {
+    throw new Error("Expected plan, apply, or auto command");
   }
   const flags = new Map<string, string>();
   for (let index = 0; index < rest.length; index += 2) {
@@ -1882,10 +2027,18 @@ function parseCli(argv: readonly string[]): CliOptions {
   const mode = flags.get("mode");
   const repository = flags.get("repository") ?? "";
   const planPath = flags.get("plan") ?? "";
-  if (planPath.length === 0) {
-    throw new Error("Invalid reconciliation trigger");
-  }
   validateRepository(repository);
+  if (command === "auto") {
+    if (
+      (eventName !== "schedule" && eventName !== "workflow_dispatch") ||
+      mode !== "auto" ||
+      flags.has("plan")
+    ) {
+      throw new Error("Invalid automatic cleanup trigger");
+    }
+    return { command, repository, trigger: { eventName, mode } };
+  }
+  if (planPath.length === 0) throw new Error("Invalid reconciliation trigger");
   if (command === "plan") {
     if (
       (eventName !== "schedule" && eventName !== "workflow_dispatch") ||
@@ -1928,9 +2081,20 @@ export async function runCli(
   }
 
   assertApplyTrigger(options.trigger);
-  const plan = validateStoredPlan(
-    parseJson(await fs.readFile(options.planPath, "utf8"), "stored plan"),
-  );
+  let plan: ReconciliationPlan;
+  if (options.command === "auto") {
+    if (process.env.PREVIEW_AUTO_CLEANUP_ENABLED !== "true") {
+      throw new Error("Automatic preview cleanup is disabled");
+    }
+    plan = buildReconciliationPlan(
+      await createObservationAdapter(options.repository, commandRunner).collectObservation(),
+    );
+    console.log(`Automatic preview cleanup selected ${selectAutomaticCandidate(plan)?.stage ?? "none"}`);
+  } else {
+    plan = validateStoredPlan(
+      parseJson(await fs.readFile(options.planPath, "utf8"), "stored plan"),
+    );
+  }
   const result = await applyReconciliationPlan(
     plan,
     createApplyAdapters(options.repository, commandRunner),
