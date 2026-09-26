@@ -29,6 +29,9 @@ type MockOptions = Readonly<{
   uncorrelatedActive?: boolean;
   malformedAfterRemoval?: "state" | "tagging" | "iam";
   s3TwoPages?: boolean;
+  lockedStage?: string;
+  additionalStage?: number;
+  accountId?: string;
   /**
    * When true the stage's only tagged resources are the sweepable SG + ENI, i.e.
    * the shape a cleanup job cancelled mid-`sst remove` leaves behind (#146).
@@ -41,10 +44,13 @@ function mockCommands({
   uncorrelatedActive = false,
   malformedAfterRemoval,
   s3TwoPages = false,
+  lockedStage,
+  additionalStage,
+  accountId = "123456789012",
   networkOnly = false,
 }: MockOptions = {}): MockCommands {
   const calls: Array<{ file: string; args: readonly string[] }> = [];
-  let removed = false;
+  let removedStage: string | null = null;
   const runner: CommandRunner = vi.fn(
     async (file: string, args: readonly string[]) => {
       calls.push({ file, args: [...args] });
@@ -80,6 +86,14 @@ function mockCommands({
           ],
         });
       }
+      if (file === "aws" && args[0] === "sts" && args[1] === "get-caller-identity") {
+        return { stdout: `${accountId}\n`, stderr: "" };
+      }
+      if (file === "aws" && args[0] === "s3api" && args[1] === "head-object") {
+        return lockedStage && args.includes(`app/mem9-on-aws/.lock/${lockedStage}.json`)
+          ? json({ LastModified: OLD })
+          : null;
+      }
       if (
         file === "aws" &&
         (args[1] === "delete-network-interface" || args[1] === "delete-security-group")
@@ -96,6 +110,12 @@ function mockCommands({
               closed_at: OLD,
               head: { sha: "preview-sha-7", ref: "preview-branch-7" },
             },
+            ...(additionalStage ? [{
+              number: additionalStage,
+              state: "closed",
+              closed_at: OLD,
+              head: { sha: `preview-sha-${additionalStage}`, ref: `preview-branch-${additionalStage}` },
+            }] : []),
           ],
         ]);
       }
@@ -147,16 +167,19 @@ function mockCommands({
         return json({ Parameter: { Value: JSON.stringify({ state: "state-bucket" }) } });
       }
       if (file === "aws" && args[0] === "s3api") {
-        if (removed) {
-          return json(malformedAfterRemoval === "state" ? {} : { KeyCount: 0, IsTruncated: false });
+        if (removedStage && malformedAfterRemoval === "state") {
+          return json({});
         }
         if (s3TwoPages && !args.includes("--continuation-token")) {
           return json({ KeyCount: 0, IsTruncated: true, NextContinuationToken: "second-page" });
         }
         if (!statePresent) return json({ KeyCount: 0, IsTruncated: false });
+        const remaining = [7, ...(additionalStage ? [additionalStage] : [])]
+          .filter((number) => `pr-${number}` !== removedStage);
+        if (remaining.length === 0) return json({ KeyCount: 0, IsTruncated: false });
         return json({
-          Contents: [{ Key: "app/mem9-on-aws/pr-7.json", LastModified: OLD }],
-          KeyCount: 1,
+          Contents: remaining.map((number) => ({ Key: `app/mem9-on-aws/pr-${number}.json`, LastModified: OLD })),
+          KeyCount: remaining.length,
           IsTruncated: false,
         });
       }
@@ -170,14 +193,14 @@ function mockCommands({
         });
       }
       if (file === "aws" && args[0] === "resourcegroupstaggingapi") {
-        if (removed && malformedAfterRemoval === "tagging") return json({});
+        if (removedStage && malformedAfterRemoval === "tagging") return json({});
         const stageTags = [
           { Key: "Project", Value: "mem9-on-aws" },
           { Key: "ManagedBy", Value: "sst" },
           { Key: "Stage", Value: "pr-7" },
         ];
         return json({
-          ResourceTagMappingList: removed ? [] : networkOnly
+          ResourceTagMappingList: removedStage === "pr-7" ? [] : networkOnly
             ? [
                 {
                   ResourceARN: `arn:aws:ec2:ap-northeast-1:123456789012:security-group/${SG_ID}`,
@@ -205,9 +228,9 @@ function mockCommands({
         });
       }
       if (file === "aws" && args[0] === "iam" && args[1] === "list-roles") {
-        if (removed && malformedAfterRemoval === "iam") return json({});
+        if (removedStage && malformedAfterRemoval === "iam") return json({});
         return json({
-          Roles: removed || networkOnly
+          Roles: removedStage === "pr-7" || networkOnly
             ? [{ RoleName: "github-actions-mem9-on-aws" }]
             : [
                 { RoleName: "github-actions-mem9-on-aws" },
@@ -225,7 +248,7 @@ function mockCommands({
         });
       }
       if (file === "pnpm") {
-        removed = true;
+        removedStage = args[args.indexOf("--stage") + 1] ?? null;
         return { stdout: "", stderr: "" };
       }
       throw new Error(`Unexpected mock command: ${file} ${args.join(" ")}`);
@@ -321,7 +344,7 @@ describe("preview reconciler CLI with mocked GitHub/AWS commands", () => {
     },
   );
 
-  it("TC-PREVIEW-RECON-025 apply invokes SST only after CLI revalidation", async () => {
+  it("TC-PREVIEW-RECON-025/097 manual apply invokes SST without automatic lock reads", async () => {
     await withPlan(async (planPath) => {
       const commands = mockCommands();
       vi.spyOn(console, "log").mockImplementation(() => undefined);
@@ -358,6 +381,9 @@ describe("preview reconciler CLI with mocked GitHub/AWS commands", () => {
       ).toEqual([
         ["-C", "infra", "exec", "sst", "remove", "--stage", "pr-7"],
       ]);
+      expect(commands.calls.some(({ file, args }) =>
+        file === "aws" && (args[0] === "sts" || args[1] === "head-object"),
+      )).toBe(false);
       expect(
         commands.calls.filter(
           ({ file, args }) =>
@@ -486,6 +512,80 @@ describe("preview reconciler CLI with mocked GitHub/AWS commands", () => {
       .toHaveLength(4);
     expect(commands.calls.some(({ file, args }) => file === "gh" && args.includes("POST")))
       .toBe(false);
+  });
+
+  it("TC-PREVIEW-RECON-095 refuses an SST-locked automatic stage without unlocking", async () => {
+    const commands = mockCommands({ lockedStage: "pr-7" });
+    const logged: string[] = [];
+    const previous = process.env.PREVIEW_AUTO_CLEANUP_ENABLED;
+    process.env.PREVIEW_AUTO_CLEANUP_ENABLED = "true";
+    vi.spyOn(console, "log").mockImplementation((message: unknown) => {
+      logged.push(String(message));
+    });
+    try {
+      await expect(runCli([
+        "auto", "--repository", REPOSITORY,
+        "--event", "schedule", "--mode", "auto",
+      ], commands.runner)).rejects.toThrow("All automatic preview candidates have SST locks");
+    } finally {
+      if (previous === undefined) delete process.env.PREVIEW_AUTO_CLEANUP_ENABLED;
+      else process.env.PREVIEW_AUTO_CLEANUP_ENABLED = previous;
+    }
+    expect(logged).toContain("::warning::Preview stage pr-7 has an SST lock; skipping");
+    expect(commands.calls.filter(({ file }) => file === "pnpm")).toEqual([]);
+    expect(commands.calls.filter(({ file, args }) => file === "aws" && args[1] === "head-object"))
+      .toHaveLength(2);
+  });
+
+  it("TC-PREVIEW-RECON-094 rejects an invalid bucket-owner identity before lock checks", async () => {
+    const commands = mockCommands({ accountId: "invalid" });
+    const previous = process.env.PREVIEW_AUTO_CLEANUP_ENABLED;
+    process.env.PREVIEW_AUTO_CLEANUP_ENABLED = "true";
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      await expect(runCli([
+        "auto", "--repository", REPOSITORY,
+        "--event", "schedule", "--mode", "auto",
+      ], commands.runner)).rejects.toThrow("Invalid AWS account observation");
+    } finally {
+      if (previous === undefined) delete process.env.PREVIEW_AUTO_CLEANUP_ENABLED;
+      else process.env.PREVIEW_AUTO_CLEANUP_ENABLED = previous;
+    }
+    expect(commands.calls.some(({ file }) => file === "pnpm")).toBe(false);
+    expect(commands.calls.some(({ file, args }) => file === "aws" && args[1] === "head-object"))
+      .toBe(false);
+  });
+
+  it("TC-PREVIEW-RECON-092 skips a locked stage and removes only the next unlocked stage", async () => {
+    const pinnedTime = Date.parse("2026-07-24T12:00:00Z");
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(pinnedTime);
+    const first = Math.floor(pinnedTime / 86_400_000) % 2 === 0 ? "pr-7" : "pr-8";
+    const expected = first === "pr-7" ? "pr-8" : "pr-7";
+    const commands = mockCommands({ additionalStage: 8, lockedStage: first });
+    const logged: string[] = [];
+    const previous = process.env.PREVIEW_AUTO_CLEANUP_ENABLED;
+    process.env.PREVIEW_AUTO_CLEANUP_ENABLED = "true";
+    vi.spyOn(console, "log").mockImplementation((message: unknown) => {
+      logged.push(String(message));
+    });
+    try {
+      await runCli([
+        "auto", "--repository", REPOSITORY,
+        "--event", "schedule", "--mode", "auto",
+      ], commands.runner);
+    } finally {
+      vi.useRealTimers();
+      if (previous === undefined) delete process.env.PREVIEW_AUTO_CLEANUP_ENABLED;
+      else process.env.PREVIEW_AUTO_CLEANUP_ENABLED = previous;
+    }
+    expect(logged).toContain(`::warning::Preview stage ${first} has an SST lock; skipping`);
+    expect(logged).toContain(`Automatic preview cleanup selected ${expected}`);
+    const removals = commands.calls.filter(({ file }) => file === "pnpm");
+    expect(removals).toHaveLength(1);
+    expect(removals[0].args).toEqual(["-C", "infra", "exec", "sst", "remove", "--stage", expected]);
+    expect(commands.calls.filter(({ file, args }) => file === "aws" && args[1] === "head-object"))
+      .toHaveLength(4);
   });
 
   it.each([

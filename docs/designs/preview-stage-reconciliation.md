@@ -102,8 +102,15 @@ reaches the planner, reports, plan artifacts, errors, or operator issues.
    active/new workflow, changed state timestamp, missing state, or renewed grace
    period cancels removal.
    In automatic mode, sort confirmed closed cleanup candidates numerically by
-   PR number and select exactly one by the UTC day index modulo candidate count.
-   The next day's rotation prevents one failing stage from starving the rest.
+   PR number and start at the UTC day index modulo candidate count. Before any
+   mutation, HEAD both known SST lock keys for each candidate using the current
+   AWS account as `ExpectedBucketOwner`. Only an exact 404 means no lock; a
+   present lock emits a content-free warning and the next candidate is checked.
+   All-locked inventories fail without mutation. The reconciler never performs
+   an automatic SST unlock: an old lock's age does not prove its holder is dead,
+   and an unconditional unlock could erase a newly replaced live lock. At most
+   one unlocked stage reaches the mutation path; the next day's rotation still
+   prevents a failing stage from starving the rest.
    Recheck the confirmed closed PR at every observation, including immediately
    before SST removal or network sweep. A disappeared PR, new active workflow,
    API failure, or renewed grace period cancels the action. After an apparently
@@ -145,6 +152,10 @@ reaches the planner, reports, plan artifacts, errors, or operator issues.
   mutation. A run that times out or fails leaves the stage for later rechecks.
   Manual `apply` keeps its existing all-candidate behavior. Scheduled report
   still runs when automatic cleanup is disabled.
+- SST remove failures are reduced to fixed categories (state lock,
+  authorization, resource busy, timeout, or unclassified) in public logs;
+  raw SST output remains private. A locked stage requires separate operator
+  investigation and is not force-unlocked by unattended cleanup.
 - Filtering precedes preview-specific AWS reads in both scheduled reports and
   manual apply rechecks. A production-only account produces an empty preview
   report; a denied read, missing state timestamp or resource ARN, or mismatched
