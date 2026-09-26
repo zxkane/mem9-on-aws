@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
 import { describe, expect, it, vi } from "vitest";
 
@@ -12,9 +13,11 @@ import {
   buildReconciliationPlan,
   filterLiveTaggedResources,
   isSweepableInventory,
+  observeStageOwnership,
   prepareOperatorIssue,
   renderPlanReport,
   resourceTypeFromArn,
+  runCli,
   sstRemoveCommand,
   stateObjectHasLiveDeployment,
   sweepOrphanedNetwork,
@@ -255,6 +258,7 @@ describe("buildReconciliationPlan", () => {
       "dev",
       "pr-x",
       "pr-1-extra",
+      "pr-12\n",
       "https://private.example.com/123456789012",
     ];
     const plan = buildReconciliationPlan(
@@ -1518,5 +1522,212 @@ describe("tagged resource liveness", () => {
       resource("arn:task-definition:active", "ecs:task-definition"),
       unknown,
     ]);
+  });
+});
+
+describe("preview-only AWS observation", () => {
+  const account = "123456789012";
+  const prodCluster = `arn:aws:ecs:ap-northeast-1:${account}:cluster/mem9-on-aws-prod-cluster`;
+  const previewCluster = `arn:aws:ecs:ap-northeast-1:${account}:cluster/mem9-on-aws-pr-12-cluster`;
+  const tagMapping = (arn: string, stage: string) => ({
+    ResourceARN: arn,
+    Tags: [
+      { Key: "Project", Value: "mem9-on-aws" },
+      { Key: "ManagedBy", Value: "sst" },
+      { Key: "Stage", Value: stage },
+    ],
+  });
+
+  it("does not probe production liveness even when given a production resource directly", async () => {
+    const runner: CommandRunner = vi.fn(async () => {
+      throw new Error("AccessDenied: prod ECS");
+    });
+    const live = await filterLiveTaggedResources([{
+      arn: prodCluster,
+      stage: "prod",
+      resourceType: "ecs:cluster",
+      project: "mem9-on-aws",
+      managedBy: "sst",
+    }], runner);
+    expect(live).toEqual([]);
+    expect(runner).not.toHaveBeenCalled();
+  });
+
+  function inventoryRunner(options: {
+    previews?: boolean;
+    failPreview?: "state" | "role" | "ecs";
+    roleStage?: string | null;
+    missingPreviewTimestamp?: boolean;
+    missingPreviewArn?: boolean;
+  } = {}) {
+    const calls: Array<{ file: string; args: readonly string[] }> = [];
+    const previewRoles = [
+      "mem9-on-aws-pr-13-task-role",
+      "mem9-on-aw-pr-13-short-role",
+      "mem9-on-a-pr-13-shortest-role",
+    ];
+    const runner: CommandRunner = vi.fn(async (file: string, args: readonly string[]) => {
+      calls.push({ file, args });
+      const json = (value: unknown) => ({ stdout: JSON.stringify(value), stderr: "" });
+      if (file === "gh" && args.some((arg) => arg.endsWith("/pulls"))) {
+        return json([options.previews
+          ? [{ number: 12, state: "closed", closed_at: OLD, head: {} }]
+          : []]);
+      }
+      if (file === "gh" && args.some((arg) => arg.endsWith("/runs"))) {
+        return json([{ workflow_runs: [] }]);
+      }
+      if (file === "aws" && args[0] === "ssm" && args[1] === "get-parameter") {
+        return json({ Parameter: { Value: JSON.stringify({ state: "fixture-state" }) } });
+      }
+      if (file === "aws" && args[0] === "s3api" && args[1] === "list-objects-v2") {
+        expect(args).toContain("app/mem9-on-aws/pr-");
+        return json({ Contents: [
+          { Key: "app/mem9-on-aws/prod.json", LastModified: OLD },
+          ...(options.previews ? [
+            { Key: "app/mem9-on-aws/pr-1.json", LastModified: OLD },
+            { Key: "app/mem9-on-aws/pr-12.json", LastModified: OLD },
+            { Key: "app/mem9-on-aws/pr-15.json", LastModified: OLD },
+            { Key: "app/mem9-on-aws/pr-12-extra.json", LastModified: OLD },
+            { Key: "app/mem9-on-aws/pr-12.json\n", LastModified: OLD },
+            ...(options.missingPreviewTimestamp
+              ? [{ Key: "app/mem9-on-aws/pr-16.json" }]
+              : []),
+          ] : []),
+        ] });
+      }
+      if (file === "aws" && args[0] === "s3" && args[1] === "cp") {
+        if (args[2]?.includes("prod.json")) throw new Error("AccessDenied: prod state");
+        if (options.failPreview === "state") throw new Error("AccessDenied: preview state");
+        return json({ checkpoint: { latest: { resources: [{}] } } });
+      }
+      if (file === "aws" && args[0] === "resourcegroupstaggingapi") {
+        return json({ ResourceTagMappingList: [
+          tagMapping(prodCluster, "prod"),
+          ...(options.previews ? [
+            tagMapping(previewCluster, "pr-12"),
+            tagMapping(`arn:aws:rds:ap-northeast-1:${account}:cluster:mem9-on-aws-pr-14-db`, "pr-14"),
+            ...(options.missingPreviewArn
+              ? [{ Tags: tagMapping(previewCluster, "pr-17").Tags }]
+              : []),
+          ] : []),
+        ] });
+      }
+      if (file === "aws" && args[0] === "iam" && args[1] === "list-roles") {
+        return json({ Roles: [
+          { RoleName: "mem9-on-aws-prod-task-role" },
+          { RoleName: "mem9-on-aw-prod-short-role" },
+          { RoleName: "mem9-on-aws-preview-human-acceptance" },
+          ...(options.previews ? [
+            ...previewRoles.map((RoleName) => ({ RoleName })),
+            { RoleName: "mem9-on-aws-pr-13extra-role" },
+          ] : []),
+        ] });
+      }
+      if (file === "aws" && args[0] === "iam" && args[1] === "list-role-tags") {
+        const roleName = args[3] ?? "";
+        if (roleName.includes("-prod-")) throw new Error("AccessDenied: prod role");
+        if (options.failPreview === "role") throw new Error("AccessDenied: preview role");
+        return json({ Tags: [
+          { Key: "Project", Value: "mem9-on-aws" },
+          { Key: "ManagedBy", Value: "sst" },
+          ...(options.roleStage === null
+            ? []
+            : [{ Key: "Stage", Value: options.roleStage ?? "pr-13" }]),
+        ] });
+      }
+      if (file === "aws" && args[0] === "ecs" && args[1] === "describe-clusters") {
+        if (args.includes(prodCluster)) throw new Error("AccessDenied: prod ECS");
+        if (options.failPreview === "ecs") throw new Error("AccessDenied: preview ecs");
+        return json({ clusters: [{ clusterArn: previewCluster, status: "ACTIVE" }] });
+      }
+      throw new Error(`Unexpected command: ${file} ${args.join(" ")}`);
+    });
+    return { runner, calls };
+  }
+
+  async function buildPlan(runner: CommandRunner) {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "mem9-reconcile-"));
+    const planPath = path.join(directory, "plan.json");
+    const log = vi.spyOn(console, "log").mockImplementation(() => undefined);
+    try {
+      await runCli([
+        "plan", "--repository", "zxkane/mem9-on-aws", "--event", "schedule",
+        "--plan", planPath,
+      ], runner);
+      return JSON.parse(fs.readFileSync(planPath, "utf8")) as { stages: Array<{ stage: string }> };
+    } finally {
+      log.mockRestore();
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
+  }
+
+  it("TC-PREVIEW-RECON-061 reports an empty preview inventory without reading prod resources", async () => {
+    const { runner, calls } = inventoryRunner();
+    const plan = await buildPlan(runner);
+    expect(plan.stages).toEqual([]);
+    expect(calls.some(({ args }) => args[0] === "s3" && args[1] === "cp")).toBe(false);
+    expect(calls.some(({ args }) => args[0] === "iam" && args[1] === "list-role-tags")).toBe(false);
+    expect(calls.some(({ args }) => args[0] === "ecs")).toBe(false);
+  });
+
+  it("TC-PREVIEW-RECON-069 discloses the IAM-only detection limit in empty reports", () => {
+    const report = renderPlanReport(buildReconciliationPlan(observation({
+      pullRequests: [], workflowRuns: [], stateObjects: [], resources: [],
+    })));
+    expect(report).toContain("IAM-only orphan detection covers role names under mem9-on-aws-");
+    expect(report).toContain("shorter SST names require other stage evidence");
+  });
+
+  it("TC-PREVIEW-RECON-062/065 finds preview orphans without prod or malformed-name probes", async () => {
+    const { runner, calls } = inventoryRunner({ previews: true });
+    const plan = await buildPlan(runner);
+    expect(plan.stages.map(({ stage }) => stage)).toEqual(["pr-1", "pr-12", "pr-13", "pr-14", "pr-15"]);
+    expect(calls.filter(({ args }) => args[0] === "s3" && args[1] === "cp")).toHaveLength(3);
+    expect(calls.filter(({ args }) => args[0] === "iam" && args[1] === "list-role-tags"))
+      .toHaveLength(3);
+    expect(calls.filter(({ args }) => args[0] === "ecs" && args[1] === "describe-clusters"))
+      .toEqual([{ file: "aws", args: ["ecs", "describe-clusters", "--clusters", previewCluster] }]);
+  });
+
+  it.each(["state", "role", "ecs"] as const)(
+    "TC-PREVIEW-RECON-063 fails closed when the preview %s read fails",
+    async (failPreview) => {
+      const { runner } = inventoryRunner({ previews: true, failPreview });
+      await expect(buildPlan(runner)).rejects.toThrow(`AccessDenied: preview ${failPreview}`);
+    },
+  );
+
+  it("TC-PREVIEW-RECON-064 fails closed when a preview-named SST role carries another Stage tag", async () => {
+    const { runner } = inventoryRunner({ previews: true, roleStage: "prod" });
+    await expect(buildPlan(runner)).rejects.toThrow("IAM preview role stage mismatch");
+  });
+
+  it("TC-PREVIEW-RECON-066 uses preview-only collectors during immediate ownership rechecks", async () => {
+    const { runner, calls } = inventoryRunner({ previews: true });
+    const owned = await observeStageOwnership("pr-12", runner);
+    expect(owned.statePresent).toBe(true);
+    expect(owned.resources.some((resource) => resource.resourceType === "ecs:cluster")).toBe(true);
+    expect(calls.some(({ args }) => args[0] === "s3" && args[1] === "cp" && args[2]?.includes("prod.json")))
+      .toBe(false);
+    expect(calls.some(({ args }) => args[0] === "iam" && args[1] === "list-role-tags" && args[3]?.includes("-prod-")))
+      .toBe(false);
+    expect(calls.some(({ args }) => args[0] === "ecs" && args.includes(prodCluster)))
+      .toBe(false);
+  });
+
+  it("TC-PREVIEW-RECON-067 fails closed on preview state objects missing LastModified", async () => {
+    const { runner } = inventoryRunner({ previews: true, missingPreviewTimestamp: true });
+    await expect(buildPlan(runner)).rejects.toThrow("Preview SST state timestamp is missing");
+  });
+
+  it("TC-PREVIEW-RECON-067 fails closed on preview-tagged resources missing their ARN", async () => {
+    const { runner } = inventoryRunner({ previews: true, missingPreviewArn: true });
+    await expect(buildPlan(runner)).rejects.toThrow("Preview tagged-resource ARN is missing");
+  });
+
+  it("TC-PREVIEW-RECON-068 fails closed on preview-named SST roles missing their Stage tag", async () => {
+    const { runner } = inventoryRunner({ previews: true, roleStage: null });
+    await expect(buildPlan(runner)).rejects.toThrow("IAM preview role Stage tag is missing");
   });
 });
