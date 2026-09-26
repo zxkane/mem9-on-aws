@@ -271,9 +271,13 @@ function displayStage(stage: string): string {
  * free of ARNs, account ids, and resource values; anything else is reduced to a
  * constant rather than risking an unvetted string in a report or operator issue.
  */
-function errorReason(error: unknown): string {
+export function errorReason(error: unknown): string {
   const message = error instanceof Error ? error.message : "";
-  return SAFE_ERROR_REASON.test(message) ? message : "unknown-error";
+  return SAFE_ERROR_REASON.test(message) &&
+    !/(?<![0-9])[0-9]{12}(?![0-9])/u.test(message) &&
+    !/\barn:/iu.test(message)
+    ? message
+    : "unknown-error";
 }
 
 const SAFE_ERROR_REASON = /^[A-Za-z0-9 ._:-]{1,120}$/u;
@@ -2114,8 +2118,8 @@ export async function runCli(
 
 const invokedPath = process.argv[1] ? path.resolve(process.argv[1]) : "";
 if (invokedPath === fileURLToPath(import.meta.url)) {
-  runCli(process.argv.slice(2)).catch(() => {
-    console.error("preview-reconciler: failed closed");
+  runCli(process.argv.slice(2)).catch((error: unknown) => {
+    console.error(`preview-reconciler: failed closed: ${errorReason(error)}`);
     process.exitCode = 1;
   });
 }

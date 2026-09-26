@@ -120,6 +120,7 @@ guard below must turn a listed test red.
 | TC-PREVIEW-RECON-088 | AWS CLI no-paginate state listing has an empty first page and a preview key on the second page | The preview stage is discovered using the continuation token |
 | TC-PREVIEW-RECON-089 | S3 state page lacks Contents despite nonzero KeyCount, has a wrong count, or repeats its token | Listing fails closed; no stage is silently dropped or removed |
 | TC-PREVIEW-RECON-090 | SST bootstrap parameter is missing in the configured application region while tagged resources exist | Inventory fails before any automatic network sweep or SST removal |
+| TC-PREVIEW-RECON-091 | A cleanup command fails with a safe operation label or an unsafe error containing an ARN/account ID | Public CLI output names only the safe operation label or `unknown-error`, never raw stderr or identifiers |
 
 | ID | Scenario | Expected |
 |---|---|---|

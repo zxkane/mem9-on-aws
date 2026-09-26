@@ -12,6 +12,7 @@ import {
   applyReconciliationPlan,
   awsCommandEnvironment,
   buildReconciliationPlan,
+  errorReason,
   filterLiveTaggedResources,
   isSweepableInventory,
   observeStageOwnership,
@@ -2054,5 +2055,26 @@ describe("automatic closed-PR cleanup", () => {
     for (const stage of ["prod", "pr-0", "pr-01", "PR-1", "pr-1a", "pr-1 ", "pr-1/../prod"]) {
       expect(() => sstRemoveCommand(stage)).toThrow("Refusing unsafe stage removal");
     }
+  });
+});
+
+describe("redacted failure diagnostics", () => {
+  it("TC-PREVIEW-RECON-091 keeps operation labels without exposing identifiers", () => {
+    expect(errorReason(new Error("SST removal for pr-144 failed")))
+      .toBe("SST removal for pr-144 failed");
+    expect(errorReason(new Error("Automatic preview cleanup left stage ownership")))
+      .toBe("Automatic preview cleanup left stage ownership");
+    for (const message of [
+      "arn:aws",
+      "AccessDenied for 123456789012",
+      "role_123456789012",
+      "abc123456789012",
+      "https://private.example.com/error",
+      "untrusted\noutput",
+    ]) {
+      expect(errorReason(new Error(message))).toBe("unknown-error");
+    }
+    const source = fs.readFileSync(path.resolve(import.meta.dirname, "preview-reconciler.mts"), "utf8");
+    expect(source).toContain("failed closed: ${errorReason(error)}");
   });
 });
