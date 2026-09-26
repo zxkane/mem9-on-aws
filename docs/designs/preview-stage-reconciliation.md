@@ -106,7 +106,9 @@ reaches the planner, reports, plan artifacts, errors, or operator issues.
    mutation, HEAD both known SST lock keys for each candidate using the current
    AWS account as `ExpectedBucketOwner`. Only an exact 404 means no lock; a
    present lock emits a content-free warning and the next candidate is checked.
-   All-locked inventories fail without mutation. The reconciler never performs
+   All-locked inventories warn and exit successfully without mutation, so a
+   future unlocked stage can be picked up by the next scheduled run. The
+   reconciler never performs
    an automatic SST unlock: an old lock's age does not prove its holder is dead,
    and an unconditional unlock could erase a newly replaced live lock. At most
    one unlocked stage reaches the mutation path; the next day's rotation still
