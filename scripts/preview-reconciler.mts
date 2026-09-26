@@ -248,7 +248,7 @@ function latestTimestamp(values: readonly (string | null)[]): string | null {
 
 function previewNumber(stage: string): number | null {
   const match = PREVIEW_STAGE.exec(stage);
-  if (!match) return null;
+  if (!match || match[0] !== stage) return null;
   const number = Number(match[1]);
   return Number.isSafeInteger(number) ? number : null;
 }
@@ -521,6 +521,8 @@ export function renderPlanReport(plan: ReconciliationPlan): string {
     "| Stage | Decision | Action | SST state | Grace anchor |",
     "|---|---|---|---|---|",
     ...(stageRows.length > 0 ? stageRows : ["| none | retain | none | missing | none |"]),
+    "",
+    "IAM-only orphan detection covers role names under mem9-on-aws-, mem9-on-aw-, and mem9-on-a-; shorter SST names require other stage evidence.",
     "",
     "Resource inventory",
     "",
@@ -1093,6 +1095,7 @@ async function collectStateObjects(
     asRecord(parseJson(bootstrapValue, "SST bootstrap value")).state,
   );
   if (stateBucket === null) throw new Error("SST state bucket is missing");
+  const statePrefix = "app/mem9-on-aws/";
 
   const listing = await commandRunner(
     "aws",
@@ -1102,7 +1105,7 @@ async function collectStateObjects(
       "--bucket",
       stateBucket,
       "--prefix",
-      "app/mem9-on-aws/",
+      `${statePrefix}pr-`,
       "--output",
       "json",
     ],
@@ -1116,8 +1119,11 @@ async function collectStateObjects(
     const object = asRecord(item);
     const key = stringOrNull(object.Key);
     const lastModified = stringOrNull(object.LastModified);
-    const match = key?.match(/^app\/mem9-on-aws\/(.+)\.json$/);
-    if (!match || !key || lastModified === null) continue;
+    const stage = key?.startsWith(statePrefix) && key.endsWith(".json")
+      ? key.slice(statePrefix.length, -".json".length)
+      : null;
+    if (!stage || previewNumber(stage) === null) continue;
+    if (lastModified === null) throw new Error("Preview SST state timestamp is missing");
     const state = await commandRunner(
       "aws",
       [
@@ -1130,7 +1136,7 @@ async function collectStateObjects(
       "SST state content observation",
     );
     if (stateObjectHasLiveDeployment(state!.stdout)) {
-      observations.push({ stage: match[1], lastModified });
+      observations.push({ stage, lastModified });
     }
   }
   return observations;
@@ -1211,7 +1217,8 @@ async function collectResources(
       }),
     );
     const stage = tags.get("Stage");
-    if (!arn || !stage) return [];
+    if (!stage || previewNumber(stage) === null) return [];
+    if (!arn) throw new Error("Preview tagged-resource ARN is missing");
     const resourceType = resourceTypeFromArn(arn);
     if (resourceType === "iam:role") return [];
     return [
@@ -1240,14 +1247,10 @@ async function collectIamRoles(
   const observations: ResourceObservation[] = [];
   for (const item of roles) {
     const roleName = stringOrNull(asRecord(item).RoleName);
-    if (
-      !roleName ||
-      !["mem9-on-aws-", "mem9-on-aw-", "mem9-on-a-"].some((prefix) =>
-        roleName.startsWith(prefix),
-      )
-    ) {
-      continue;
-    }
+    const roleStage = roleName?.match(
+      /^(?:mem9-on-aws|mem9-on-aw|mem9-on-a)-(pr-[0-9]+)(?:-|$)/,
+    )?.[1];
+    if (!roleName || !roleStage || previewNumber(roleStage) === null) continue;
     const tagResult = await commandRunner(
       "aws",
       ["iam", "list-role-tags", "--role-name", roleName, "--output", "json"],
@@ -1263,13 +1266,11 @@ async function collectIamRoles(
       }),
     );
     const stage = tags.get("Stage");
-    if (
-      stage &&
-      tags.get("Project") === "mem9-on-aws" &&
-      tags.get("ManagedBy") === "sst"
-    ) {
+    if (tags.get("Project") === "mem9-on-aws" && tags.get("ManagedBy") === "sst") {
+      if (stage === undefined) throw new Error("IAM preview role Stage tag is missing");
+      if (stage !== roleStage) throw new Error("IAM preview role stage mismatch");
       observations.push({
-        stage,
+        stage: roleStage,
         resourceType: "iam:role",
         project: "mem9-on-aws",
         managedBy: "sst",
@@ -1304,6 +1305,7 @@ export async function filterLiveTaggedResources(
   resources: readonly ResourceObservation[],
   commandRunner: CommandRunner = runCommand,
 ): Promise<ResourceObservation[]> {
+  const previewResources = resources.filter((resource) => previewNumber(resource.stage) !== null);
   const liveArns = new Set<string>();
   const historicalTypes = new Set([
     "cognito-idp:user-pool",
@@ -1313,7 +1315,7 @@ export async function filterLiveTaggedResources(
     "ecs:task-definition",
   ]);
   const byType = new Map<string, ResourceObservation[]>();
-  for (const resource of resources) {
+  for (const resource of previewResources) {
     if (!historicalTypes.has(resource.resourceType) || !resource.arn) continue;
     const group = byType.get(resource.resourceType) ?? [];
     group.push(resource);
@@ -1442,7 +1444,7 @@ export async function filterLiveTaggedResources(
     }
   }
 
-  return resources.filter(
+  return previewResources.filter(
     (resource) =>
       !historicalTypes.has(resource.resourceType) ||
       !resource.arn ||

@@ -90,6 +90,15 @@ guard below must turn a listed test red.
 | TC-PREVIEW-RECON-058 | A security group no pass can delete | Refuses `security-group-dependency-violation` — no infinite loop, no throw |
 | TC-PREVIEW-RECON-059 | The sweep refuses (e.g. an ENI stuck `in-use` because `sst remove` deleted the execution role) | Stage is recorded `operator-review` and appears in the operator issue, so a permanently-stuck stage cannot leak invisibly |
 | TC-PREVIEW-RECON-060 | `InvalidNetworkInterfaceID.NotFound` vs. `UnauthorizedOperation` on the same delete | NotFound counts as success; any other failure refuses and the security group is NOT deleted while its interface survives |
+| TC-PREVIEW-RECON-061 | Only production state, IAM roles, and tagged ECS exist | Scheduled report succeeds with no preview stages and makes no production GetObject, ListRoleTags, or ECS liveness call |
+| TC-PREVIEW-RECON-062 | Mixed production and preview inventory includes valid state keys, tagged resources, and all three SST role-name prefixes | Only exact `pr-N` objects and roles are read; state-only, tag-only, and IAM-only preview stages remain discoverable |
+| TC-PREVIEW-RECON-063 | Preview S3, IAM tag, or ECS liveness read returns AccessDenied | Report fails closed instead of treating that preview stage as absent |
+| TC-PREVIEW-RECON-064 | Preview-named SST IAM role has a conflicting Stage tag | Inventory fails closed rather than assigning the role to another stage |
+| TC-PREVIEW-RECON-065 | S3 key or IAM role name contains a malformed or prefix-colliding `pr-N` token | It is not downloaded or queried; `pr-1` does not match `pr-12` |
+| TC-PREVIEW-RECON-066 | Immediate ownership recheck runs with mixed production and preview inventory | It uses the same preview-only collectors and performs no production state, role-tag, or ECS read |
+| TC-PREVIEW-RECON-067 | Valid preview state lacks LastModified or a preview-tagged resource lacks its ARN | Inventory fails closed instead of silently dropping a preview stage |
+| TC-PREVIEW-RECON-068 | Preview-named SST IAM role has no Stage tag | Inventory fails closed with a missing-tag error |
+| TC-PREVIEW-RECON-069 | Report has no preview stages | It still states the IAM-only role-name coverage limit, so an empty inventory does not imply full coverage |
 
 | ID | Scenario | Expected |
 |---|---|---|

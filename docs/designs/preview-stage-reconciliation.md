@@ -57,12 +57,16 @@ reaches the planner, reports, plan artifacts, errors, or operator issues.
 ## Data Flow
 
 1. Read all pull requests and matching `Infra CI` workflow runs.
-2. Read `/sst/bootstrap`, then list `app/mem9-on-aws/*.json` state objects from
-   the configured SST state bucket.
-3. Read resources tagged `Project=mem9-on-aws` and `ManagedBy=sst`. IAM roles
-   use `ListRoles` plus `ListRoleTags` because the Resource Groups Tagging API
-   does not return them.
-4. Group observations only by stage. The accepted mutation format is exactly
+2. Read `/sst/bootstrap`, then list only the `app/mem9-on-aws/pr-` prefix in the
+   configured SST state bucket. Check that the entire key names an exact
+   `pr-[0-9]+.json` stage before downloading its content.
+3. Read resources tagged `Project=mem9-on-aws` and `ManagedBy=sst`, but retain
+   only exact preview-stage tags before probing resource liveness. IAM roles use
+   `ListRoles` plus `ListRoleTags` because the Resource Groups Tagging API does
+   not return them. Only role names with an exact `pr-N` segment under the three
+   app-name prefixes authorized by the current IAM policy are queried for tags;
+   an SST role's Stage tag must agree with the stage in its name.
+4. Group preview observations by stage. The accepted mutation format is exactly
    `pr-[0-9]+`; protected and malformed names never become candidates.
 5. For each observed preview stage, calculate the grace anchor as the latest of:
    pull-request close time, matching completed preview workflow time, and SST
@@ -103,6 +107,17 @@ reaches the planner, reports, plan artifacts, errors, or operator issues.
   updates the existing open issue instead of creating duplicates.
 - Collection failures fail closed. The reconciler never interprets an AWS or
   GitHub read error as an empty result.
+- Filtering precedes preview-specific AWS reads in both scheduled reports and
+  manual apply rechecks. A production-only account produces an empty preview
+  report; a denied read, missing state timestamp or resource ARN, or mismatched
+  SST role Stage tag for a valid preview stage still fails the run. The preview
+  role's production-resource denies remain in force. Non-preview stages are
+  omitted by the live adapter, while the pure planner still protects them if
+  supplied directly. SST role names that omit the authorized app-name prefixes
+  are not discoverable by IAM-only inventory; a state object or tagged non-IAM
+  resource can still reveal that stage. This is an existing permission boundary,
+  not widened by the reconciler. Every report states this limitation, including
+  an otherwise empty preview inventory.
 - The deploy role gains only read inventory actions: `tag:GetResources`,
   `iam:ListRoles`, and role-scoped `iam:ListRoleTags`. Existing SSM and S3 read
   permissions cover SST state.
