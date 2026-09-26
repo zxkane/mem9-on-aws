@@ -1426,7 +1426,8 @@ Unset or `false` keeps scheduled runs report-only. The manual input still
 defaults to `dry-run`; `auto` runs the same bounded policy, while `apply`
 retains the explicit all-candidate path. Automatic cleanup builds a fresh plan
 and rechecks PR state and stage ownership before and after mutation; a failed
-read or removal fails the run.
+read or removal fails the run. The CLI logs only a redacted operation label,
+never raw AWS stderr.
 
 Only exact `pr-N` stages are eligible. SST state-present stages use `sst remove`;
 state-missing stages whose entire owned inventory is an orphaned security group

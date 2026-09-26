@@ -138,7 +138,8 @@ reaches the planner, reports, plan artifacts, errors, or operator issues.
 - The operator issue uses a stable title and hidden marker. Exact matching
   updates the existing open issue instead of creating duplicates.
 - Collection failures fail closed. The reconciler never interprets an AWS or
-  GitHub read error as an empty result.
+  GitHub read error as an empty result. The CLI emits only a bounded, redacted
+  operation label for failures; raw AWS/GitHub stderr stays out of public logs.
 - Each automatic run attempts at most one eligible stage within a 65-minute
   cleanup step and a 75-minute job; if there is none, it succeeds without a
   mutation. A run that times out or fails leaves the stage for later rechecks.
