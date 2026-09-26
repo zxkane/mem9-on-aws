@@ -510,9 +510,9 @@ function confirmedClosedPreview(stage: StagePlan): boolean {
   );
 }
 
-/** One closed-PR cleanup per run; rotating the start avoids a failing oldest stage
- * blocking every other orphan on subsequent days. The plan is built in this job. */
-export function selectAutomaticCandidate(plan: ReconciliationPlan): StagePlan | null {
+/** Rotate the starting point by UTC day; examining locks is read-only and does
+ * not consume the one allowed mutation attempt for this run. */
+function automaticCandidates(plan: ReconciliationPlan): readonly StagePlan[] {
   const observedAtMs = timestampMs(plan.observedAt, "automatic observation");
   const candidates = plan.stages
     .filter((stage) =>
@@ -523,9 +523,29 @@ export function selectAutomaticCandidate(plan: ReconciliationPlan): StagePlan | 
       observedAtMs >= timestampMs(stage.eligibleAt, "automatic eligibility"),
     )
     .sort((left, right) => left.prNumber! - right.prNumber!);
-  if (candidates.length === 0) return null;
+  if (candidates.length === 0) return [];
   const utcDay = Math.floor(observedAtMs / 86_400_000);
-  return candidates[utcDay % candidates.length];
+  const offset = utcDay % candidates.length;
+  return [...candidates.slice(offset), ...candidates.slice(0, offset)];
+}
+
+export function selectAutomaticCandidate(plan: ReconciliationPlan): StagePlan | null {
+  return automaticCandidates(plan)[0] ?? null;
+}
+
+export async function selectUnlockedAutomaticCandidate(
+  plan: ReconciliationPlan,
+  hasLock: (stage: string) => Promise<boolean>,
+  onLocked: (stage: string) => void = () => undefined,
+): Promise<StagePlan | null> {
+  for (const candidate of automaticCandidates(plan)) {
+    if (await hasLock(candidate.stage)) {
+      onLocked(candidate.stage);
+      continue;
+    }
+    return candidate;
+  }
+  return null;
 }
 
 function assertSafeOutput(output: string): void {
@@ -922,6 +942,22 @@ export async function awsCommandEnvironment(
   };
 }
 
+/** SST output is private; only these fixed failure classes may reach CI logs. */
+export function classifySstRemoveFailure(output: string):
+  "state-lock" | "authorization-denied" | "resource-busy" | "timeout" | "unclassified" {
+  if (/AccessDenied|UnauthorizedOperation|not authorized|explicit deny|Forbidden/iu.test(output)) {
+    return "authorization-denied";
+  }
+  if (/Concurrent update detected|state (?:is )?locked|failed to (?:acquire|obtain) (?:the )?lock|lock (?:already |is )?held/iu.test(output)) {
+    return "state-lock";
+  }
+  if (/DependencyViolation|resource (?:is )?in use|cannot delete.*in use/iu.test(output)) {
+    return "resource-busy";
+  }
+  if (/timed out|timeout|deadline exceeded/iu.test(output)) return "timeout";
+  return "unclassified";
+}
+
 export async function runCommand(
   file: string,
   args: readonly string[],
@@ -942,6 +978,13 @@ export async function runCommand(
         ? String(error.stderr)
         : "";
     if (allowedFailure?.test(stderr)) return null;
+    if (file === "pnpm" && label.startsWith("SST removal for pr-")) {
+      const stdout =
+        typeof error === "object" && error !== null && "stdout" in error
+          ? String(error.stdout)
+          : "";
+      throw new Error(`${label} failed: ${classifySstRemoveFailure(`${stderr}\n${stdout}`)}`);
+    }
     throw new Error(`${label} failed`);
   }
 }
@@ -1140,9 +1183,7 @@ async function collectWorkflowRuns(
   return observations;
 }
 
-async function collectStateObjects(
-  commandRunner: CommandRunner,
-): Promise<StateObjectObservation[]> {
+async function sstStateBucket(commandRunner: CommandRunner): Promise<string> {
   const bootstrap = await commandRunner(
     "aws",
     ["ssm", "get-parameter", "--name", "/sst/bootstrap", "--output", "json"],
@@ -1159,6 +1200,55 @@ async function collectStateObjects(
     asRecord(parseJson(bootstrapValue, "SST bootstrap value")).state,
   );
   if (stateBucket === null) throw new Error("SST state bucket is missing");
+  return stateBucket;
+}
+
+async function currentAwsAccountId(commandRunner: CommandRunner): Promise<string> {
+  const result = await commandRunner(
+    "aws",
+    ["sts", "get-caller-identity", "--query", "Account", "--output", "text"],
+    "AWS account observation",
+  );
+  const accountId = result?.stdout.trim() ?? "";
+  if (!/^[0-9]{12}$/u.test(accountId)) throw new Error("Invalid AWS account observation");
+  return accountId;
+}
+
+/** Inspect known SST lock layouts without clearing a lock that a live process
+ * could own. A later lock race is handled by SST's own lock acquisition. */
+export async function hasPreviewStateLock(
+  stage: string,
+  stateBucket: string,
+  expectedBucketOwner: string,
+  commandRunner: CommandRunner = runCommand,
+): Promise<boolean> {
+  if (previewNumber(stage) === null) throw new Error("Refusing unsafe lock observation");
+  if (!/^[0-9]{12}$/u.test(expectedBucketOwner)) {
+    throw new Error("Invalid SST state bucket owner");
+  }
+  let locked = false;
+  for (const key of [
+    `app/mem9-on-aws/.lock/${stage}.json`,
+    `lock/mem9-on-aws/${stage}.json`,
+  ]) {
+    const result = await commandRunner(
+      "aws",
+      [
+        "s3api", "head-object", "--bucket", stateBucket, "--key", key,
+        "--expected-bucket-owner", expectedBucketOwner, "--output", "json",
+      ],
+      "SST preview lock observation",
+      /\(404\) when calling the HeadObject operation/u,
+    );
+    if (result !== null) locked = true;
+  }
+  return locked;
+}
+
+async function collectStateObjects(
+  commandRunner: CommandRunner,
+): Promise<StateObjectObservation[]> {
+  const stateBucket = await sstStateBucket(commandRunner);
   const statePrefix = "app/mem9-on-aws/";
 
   // AWS CLI auto-pagination strips KeyCount from its merged output. Read API
@@ -2093,6 +2183,17 @@ export async function runCli(
     plan = buildReconciliationPlan(
       await createObservationAdapter(options.repository, commandRunner).collectObservation(),
     );
+    if (selectAutomaticCandidate(plan)) {
+      const stateBucket = await sstStateBucket(commandRunner);
+      const accountId = await currentAwsAccountId(commandRunner);
+      const selected = await selectUnlockedAutomaticCandidate(
+        plan,
+        (stage) => hasPreviewStateLock(stage, stateBucket, accountId, commandRunner),
+        (stage) => console.log(`::warning::Preview stage ${stage} has an SST lock; skipping`),
+      );
+      if (!selected) throw new Error("All automatic preview candidates have SST locks");
+      plan = deepFreeze({ ...plan, stages: [selected] });
+    }
     console.log(`Automatic preview cleanup selected ${selectAutomaticCandidate(plan)?.stage ?? "none"}`);
   } else {
     plan = validateStoredPlan(

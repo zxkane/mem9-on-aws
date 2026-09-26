@@ -121,6 +121,12 @@ guard below must turn a listed test red.
 | TC-PREVIEW-RECON-089 | S3 state page lacks Contents despite nonzero KeyCount, has a wrong count, or repeats its token | Listing fails closed; no stage is silently dropped or removed |
 | TC-PREVIEW-RECON-090 | SST bootstrap parameter is missing in the configured application region while tagged resources exist | Inventory fails before any automatic network sweep or SST removal |
 | TC-PREVIEW-RECON-091 | A cleanup command fails with a safe operation label or an unsafe error containing an ARN/account ID | Public CLI output names only the safe operation label or `unknown-error`, never raw stderr or identifiers |
+| TC-PREVIEW-RECON-092 | Rotated automatic candidate has a currently present SST lock | It is skipped without unlock or resource deletion; the next unlocked confirmed-closed candidate may be selected, with at most one mutation attempt |
+| TC-PREVIEW-RECON-093 | The S3 lock is absent at both known keys | Exact `HeadObject` 404 responses allow an otherwise eligible candidate; bucket owner and stage are checked |
+| TC-PREVIEW-RECON-094 | A lock HEAD returns 403/other error, account identity is malformed, or the candidate stage is unsafe | Automatic cleanup fails before SST removal; uncertainty is never interpreted as an absent lock |
+| TC-PREVIEW-RECON-095 | All eligible candidates have SST locks | Automatic cleanup reports the locked candidates and exits failed with no mutation or unlock |
+| TC-PREVIEW-RECON-096 | SST removal reports a lock, authorization, dependency, timeout, or unknown error | The CLI emits only a fixed failure category, never raw SST stdout/stderr; no second unlock is attempted |
+| TC-PREVIEW-RECON-097 | Manual apply runs for a state-present preview | It retains existing behavior and never performs the automatic lock-inspection preflight |
 
 | ID | Scenario | Expected |
 |---|---|---|

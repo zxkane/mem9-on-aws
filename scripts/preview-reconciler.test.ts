@@ -12,15 +12,19 @@ import {
   applyReconciliationPlan,
   awsCommandEnvironment,
   buildReconciliationPlan,
+  classifySstRemoveFailure,
   errorReason,
   filterLiveTaggedResources,
+  hasPreviewStateLock,
   isSweepableInventory,
   observeStageOwnership,
   prepareOperatorIssue,
   renderPlanReport,
   resourceTypeFromArn,
   runCli,
+  runCommand,
   selectAutomaticCandidate,
+  selectUnlockedAutomaticCandidate,
   sstRemoveCommand,
   stateObjectHasLiveDeployment,
   sweepOrphanedNetwork,
@@ -1892,6 +1896,109 @@ describe("automatic closed-PR cleanup", () => {
 
     expect(first?.stage).toBe(stages[day % stages.length]);
     expect(next?.stage).toBe(stages[(day + 1) % stages.length]);
+  });
+
+  it("TC-PREVIEW-RECON-092 skips a locked first candidate and selects one unlocked stage", async () => {
+    const plan = buildReconciliationPlan(closedPreview([12, 13, 14]));
+    const first = selectAutomaticCandidate(plan)!;
+    const inspect = vi.fn(async (stage: string) => stage === first.stage);
+
+    const selected = await selectUnlockedAutomaticCandidate(plan, inspect);
+
+    expect(selected?.stage).not.toBe(first.stage);
+    expect(inspect).toHaveBeenCalledTimes(2);
+    expect(inspect).toHaveBeenNthCalledWith(1, first.stage);
+  });
+
+  it("TC-PREVIEW-RECON-095 refuses an all-locked inventory without selecting a stage", async () => {
+    const plan = buildReconciliationPlan(closedPreview([12, 13]));
+    const inspect = vi.fn(async () => true);
+
+    expect(await selectUnlockedAutomaticCandidate(plan, inspect)).toBeNull();
+    expect(inspect).toHaveBeenCalledTimes(2);
+    const noCandidates = buildReconciliationPlan(observation({ pullRequests: [], workflowRuns: [] }));
+    const untouched = vi.fn(async () => false);
+    expect(await selectUnlockedAutomaticCandidate(noCandidates, untouched)).toBeNull();
+    expect(untouched).not.toHaveBeenCalled();
+  });
+
+  it("TC-PREVIEW-RECON-093/094 inspects both exact lock keys without treating 403 as absence", async () => {
+    const calls: string[] = [];
+    const runner: CommandRunner = vi.fn(async (_file, args, _label, allowedFailure) => {
+      const key = args[args.indexOf("--key") + 1];
+      calls.push(key);
+      expect(args).toContain("--expected-bucket-owner");
+      expect(args).toContain("123456789012");
+      expect(allowedFailure?.test("An error occurred (404) when calling the HeadObject operation"))
+        .toBe(true);
+      return null;
+    });
+    expect(await hasPreviewStateLock("pr-12", "fixture-state", "123456789012", runner))
+      .toBe(false);
+    expect(calls).toEqual([
+      "app/mem9-on-aws/.lock/pr-12.json",
+      "lock/mem9-on-aws/pr-12.json",
+    ]);
+    const locked: CommandRunner = vi.fn(async (_file, args) =>
+      args.includes("app/mem9-on-aws/.lock/pr-12.json")
+        ? { stdout: JSON.stringify({ LastModified: OLD }), stderr: "" }
+        : null,
+    );
+    expect(await hasPreviewStateLock("pr-12", "fixture-state", "123456789012", locked))
+      .toBe(true);
+    expect(locked).toHaveBeenCalledTimes(2);
+    const lockedAtLegacyKey: CommandRunner = vi.fn(async (_file, args) =>
+      args.includes("lock/mem9-on-aws/pr-12.json")
+        ? { stdout: JSON.stringify({ LastModified: OLD }), stderr: "" }
+        : null,
+    );
+    expect(await hasPreviewStateLock("pr-12", "fixture-state", "123456789012", lockedAtLegacyKey))
+      .toBe(true);
+    expect(lockedAtLegacyKey).toHaveBeenCalledTimes(2);
+    await expect(hasPreviewStateLock("prod", "fixture-state", "123456789012", runner))
+      .rejects.toThrow("Refusing unsafe lock observation");
+    await expect(hasPreviewStateLock("pr-12", "fixture-state", "invalid", runner))
+      .rejects.toThrow("Invalid SST state bucket owner");
+    expect(calls).toHaveLength(2);
+
+    const forbidden: CommandRunner = vi.fn(async () => { throw new Error("AccessDenied"); });
+    await expect(hasPreviewStateLock("pr-12", "fixture-state", "123456789012", forbidden))
+      .rejects.toThrow("AccessDenied");
+  });
+
+  it("TC-PREVIEW-RECON-096 classifies SST failures without exposing raw resource data", () => {
+    expect(classifySstRemoveFailure("INFO locking app=mem9-on-aws\nConcurrent update detected"))
+      .toBe("state-lock");
+    expect(classifySstRemoveFailure("INFO locking app=mem9-on-aws\nAccessDenied on private resource"))
+      .toBe("authorization-denied");
+    expect(classifySstRemoveFailure("DependencyViolation: resource is in use"))
+      .toBe("resource-busy");
+    expect(classifySstRemoveFailure("context deadline exceeded"))
+      .toBe("timeout");
+    expect(classifySstRemoveFailure("unexpected provider failure 123456789012"))
+      .toBe("unclassified");
+  });
+
+  it("TC-PREVIEW-RECON-096 wraps an SST subprocess failure with only its fixed class", async () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "mem9-sst-error-"));
+    const previousPath = process.env.PATH;
+    try {
+      fs.writeFileSync(
+        path.join(directory, "pnpm"),
+        "#!/bin/sh\nprintf '%s\\n' 'Concurrent update detected' >&2\nexit 9\n",
+        { mode: 0o755 },
+      );
+      process.env.PATH = `${directory}${path.delimiter}${previousPath}`;
+      await expect(runCommand(
+        "pnpm", ["-C", "infra", "exec", "sst", "remove", "--stage", "pr-12"],
+        "SST removal for pr-12",
+      )).rejects.toThrow("SST removal for pr-12 failed: state-lock");
+      expect(errorReason(new Error("SST removal for pr-12 failed: state-lock")))
+        .toBe("SST removal for pr-12 failed: state-lock");
+    } finally {
+      process.env.PATH = previousPath;
+      fs.rmSync(directory, { recursive: true, force: true });
+    }
   });
 
   it("TC-PREVIEW-RECON-072/078 excludes absent, open, recent, and operator-review stages", () => {
