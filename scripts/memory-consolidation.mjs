@@ -41,7 +41,25 @@ export function safeErrorClass(error) {
   return new Set([
     "Error", "TypeError", "RangeError", "SyntaxError", "AbortError",
     "TimeoutError", "InvalidActions", "ApplyMutationError", "PreconditionFailed",
+    "ConnectionTimeout", "HttpUnauthorized", "HttpForbidden", "HttpError",
   ]).has(error?.name) ? error.name : "Error";
+}
+
+export const APPLY_OPERATIONS = Object.freeze(["MERGE", "ARCHIVE", "STALE", "mutex_acquire", "mutex_release"]);
+
+function applyErrorClass(error) {
+  // MERGE wraps transport failures with confirmed-write accounting. Inspect
+  // only fixed cause fields, with a bound even for cyclic exception objects.
+  let current = error;
+  for (let depth = 0; current && depth < 4; depth++, current = current.cause) {
+    if (current.code === "UND_ERR_CONNECT_TIMEOUT") return "ConnectionTimeout";
+    if (["TimeoutError", "HttpUnauthorized", "HttpForbidden", "HttpError"].includes(current.name)) return current.name;
+  }
+  return safeErrorClass(error);
+}
+
+function logApplyFailure(deps, operation, error) {
+  deps.log(`CONSOLIDATION_APPLY_FAILED ${JSON.stringify({ operation, errorClass: applyErrorClass(error) })}`);
 }
 
 function requireScopedRows(rows, namespaceId) {
@@ -1193,7 +1211,7 @@ async function applyAutoActions(actions, context) {
     mutex = await deps.acquireMutex();
   } catch (error) {
     failed = true;
-    deps.log(`consolidation apply setup failed: ${error?.name || "Error"}`);
+    logApplyFailure(deps, "mutex_acquire", error);
     review.push(
       reviewItem(
         "APPLY_FAILED",
@@ -1247,11 +1265,7 @@ async function applyAutoActions(actions, context) {
           ? error.confirmedMutations
           : 0;
         mutations += confirmedMutations;
-        deps.log(
-          `consolidation ${action.type} apply failed: ${
-            error?.name || "Error"
-          }`,
-        );
+        logApplyFailure(deps, action.type, error);
         review.push(
           reviewItem(
             "APPLY_FAILED",
@@ -1275,7 +1289,7 @@ async function applyAutoActions(actions, context) {
       await mutex.release();
     } catch (error) {
       failed = true;
-      deps.log(`consolidation mutex release failed: ${error?.name || "Error"}`);
+      logApplyFailure(deps, "mutex_release", error);
       review.push(
         reviewItem(
           "APPLY_FAILED",
@@ -1461,6 +1475,9 @@ export async function runConsolidation(options, deps) {
   if (!Number.isInteger(cap) || cap <= 0 || cap > DEFAULT_CAP) {
     throw new Error(`cap must be an integer between 1 and ${DEFAULT_CAP}`);
   }
+  // SQL-only reporting cannot prove that the signed REST mutation path is
+  // reachable. Production performs a read before digest writes or inference.
+  await deps.checkRest?.();
   if (scheduled && !reportOnly) {
     await initializeScheduledDigest({ stage, namespaceId, now: clock() }, deps);
   }
@@ -1842,11 +1859,17 @@ function restAdapter(baseUrl, tenantId, fetchImpl = fetch) {
     // write, not a transport failure: return null so the caller skips this
     // action instead of aborting the run mid-apply.
     if (version && response.status === 412) return null;
-    if (!response.ok) throw new Error(`${method} ${path} -> HTTP ${response.status}`);
+    if (!response.ok) {
+      const error = new Error(`memory REST request failed: HTTP ${response.status}`);
+      error.name = response.status === 401 ? "HttpUnauthorized"
+        : response.status === 403 ? "HttpForbidden" : "HttpError";
+      throw error;
+    }
     return response.json();
   };
   const pathFor = (id) => `${MEMORIES_PATH}/${encodeURIComponent(id)}`;
   return {
+    checkRest: () => call("GET", pathFor("00000000-0000-4000-8000-000000000000")),
     getMemory: (id) => call("GET", pathFor(id)),
     putMemory: (id, patch, version) =>
       call("PUT", pathFor(id), patch, version),
@@ -1981,12 +2004,13 @@ export function productionLogRecord(line, stage) {
     try { return safeProgressRecord(JSON.parse(line.slice("CONSOLIDATION_PHASE ".length)), stage) ?? record; }
     catch { return record; }
   }
-  const match = /^CONSOLIDATION_(DIGEST|REVIEW|REVIEW_LIST|CLASSIFICATION_FAILED) (.*)$/u.exec(line);
+  const match = /^CONSOLIDATION_(DIGEST|REVIEW|REVIEW_LIST|CLASSIFICATION_FAILED|APPLY_FAILED) (.*)$/u.exec(line);
   if (!match) return record;
   let value;
   try { value = JSON.parse(match[2]); } catch { return record; }
   record.event = `consolidation_${match[1].toLowerCase()}`;
   if (!value || typeof value !== "object") return record;
+  if (APPLY_OPERATIONS.includes(value.operation)) record.operation = value.operation;
   if (DIGEST_LOG_STATUSES.includes(value.event)) {
     record.status = value.event;
   }

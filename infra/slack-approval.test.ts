@@ -878,10 +878,8 @@ describe("slack approval infrastructure", () => {
         taskDefinitionArn: [
           "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-cleanup:1",
         ],
-        // `anything-but: 0` and NOT a >0 comparison: the predicted first-deploy
-        // failure is a task that dies in the ECS agent's secret-fetch phase, which
-        // reports NO exitCode at all. A numeric filter would miss exactly that.
-        containers: { exitCode: [{ "anything-but": 0 }] },
+        // Startup failures have no exitCode; they require an explicit match.
+        containers: { exitCode: [{ "anything-but": 0 }, { exists: false }] },
       },
     });
 
@@ -899,20 +897,15 @@ describe("slack approval infrastructure", () => {
         ],
       });
 
-    // stoppedReason is carried into the metric-filter document because it is the
-    // only place a startup failure names itself (ResourceInitializationError).
+    // TC-CONSOL-104: Logs consumes the envelope and stores the fixed JSON message.
     const target = materialize(
       one("EventTarget", "CleanupApplyFailureLogTarget").args,
     ) as Record<string, any>;
-    expect(target.inputTransformer.inputPaths).toMatchObject({
-      exitCode: "$.detail.containers[0].exitCode",
-      stoppedReason: "$.detail.stoppedReason",
-    });
-    expect(JSON.parse(target.inputTransformer.inputTemplate)).toMatchObject({
-      event: "cleanup_apply_task_failed",
-      stage: "prod",
-      stoppedReason: "<stoppedReason>",
-    });
+    expect(target.inputTransformer.inputPaths).toEqual({ timestamp: "$.time" });
+    const wire = JSON.parse(target.inputTransformer.inputTemplate);
+    expect(Object.keys(wire).sort()).toEqual(["message", "timestamp"]);
+    expect(wire.timestamp).toBe("<timestamp>");
+    expect(JSON.parse(wire.message)).toEqual({ event: "cleanup_apply_task_failed", stage: "prod" });
 
     const logPolicy = JSON.parse(
       String(

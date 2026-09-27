@@ -29,6 +29,7 @@ interface AuroraRecord {
 }
 
 let sgs: SgRecord[];
+let rules: Array<{ logicalName: string; args: Record<string, unknown> }>;
 let params: ParamRecord[];
 let auroras: AuroraRecord[];
 const dbSource = readFileSync(resolve(dirname(fileURLToPath(import.meta.url)), "db.ts"), "utf8");
@@ -37,6 +38,11 @@ function installGlobals(stage: string) {
   (globalThis as Record<string, unknown>).$app = { name: "mem9-on-aws", stage };
   (globalThis as Record<string, unknown>).aws = {
     ec2: {
+      SecurityGroupRule: class {
+        constructor(logicalName: string, args: Record<string, unknown>) {
+          rules.push({ logicalName, args });
+        }
+      },
       getVpcOutput: () => ({ id: out("vpc-test") }),
       getSubnetsOutput: () => ({ ids: out(["subnet-a", "subnet-b", "subnet-c"]) }),
       SecurityGroup: class {
@@ -79,6 +85,7 @@ function installGlobals(stage: string) {
 
 beforeEach(() => {
   sgs = [];
+  rules = [];
   params = [];
   auroras = [];
 });
@@ -95,6 +102,20 @@ async function loadDb() {
 }
 
 describe("db stack", () => {
+  it("TC-CONSOL-103: permits only the stage task group to reach the memory API", async () => {
+    installGlobals("prod");
+    (await loadDb())();
+    expect(rules).toHaveLength(1);
+    const { args } = rules[0];
+    expect(args).toMatchObject({
+      type: "ingress", protocol: "tcp", fromPort: 8080, toPort: 8080,
+      securityGroupId: { value: "sg-Mem9TaskSg" },
+      sourceSecurityGroupId: { value: "sg-Mem9TaskSg" },
+    });
+    expect(args.cidrBlocks).toBeUndefined();
+    expect(args.ipv6CidrBlocks).toBeUndefined();
+    expect(sgs.find(s => s.logicalName === "Mem9TaskSg")?.args.ingress).toBeUndefined();
+  });
   it("creates a task SG and a db SG allowing 5432 from the task SG only", async () => {
     installGlobals("prod");
     const db = await loadDb();

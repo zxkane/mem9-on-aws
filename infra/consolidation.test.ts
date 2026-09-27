@@ -818,10 +818,17 @@ describe("consolidation task and schedule", () => {
           "arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-consolidation:1",
         ],
         containers: {
-          exitCode: [{ "anything-but": 0 }],
+          exitCode: [{ "anything-but": 0 }, { exists: false }],
         },
       },
     });
+
+    const target = materialize(one("EventTarget", "ConsolidationTaskFailureLogTarget").args) as Record<string, any>;
+    expect(target.inputTransformer.inputPaths).toEqual({ timestamp: "$.time" });
+    const wire = JSON.parse(target.inputTransformer.inputTemplate);
+    expect(Object.keys(wire).sort()).toEqual(["message", "timestamp"]);
+    expect(wire.timestamp).toBe("<timestamp>");
+    expect(JSON.parse(wire.message)).toEqual({ event: "consolidation_task_failed", stage: "prod" });
 
     expect(materialize(one("MetricAlarm", "ConsolidationTaskFailureAlarm").args))
       .toMatchObject({

@@ -68,6 +68,19 @@ export function db(): DbOutputs {
     tags: { ...tags, Name: `mem9-on-aws-${$app.stage}-task` },
   });
 
+  // Maintenance tasks share this stage's group with the server. SQL reads use
+  // Aurora, but a merge must also reach the signed REST API to re-embed content.
+  // Keep ingress standalone, like the separate Lambda-to-server rule.
+  new aws.ec2.SecurityGroupRule("Mem9TaskToServerIngress", {
+    type: "ingress",
+    securityGroupId: taskSg.id,
+    sourceSecurityGroupId: taskSg.id,
+    protocol: "tcp",
+    fromPort: 8080,
+    toPort: 8080,
+    description: "Namespace-authorized maintenance to the memory API",
+  });
+
   // SG for the Aurora cluster: allow 5432 ONLY from the task SG.
   const dbSg = new aws.ec2.SecurityGroup("Mem9DbSg", {
     vpcId,

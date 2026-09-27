@@ -3,6 +3,28 @@
 Unit tests use mocked database, REST, LLM, and AWS resource constructors.
 Preview E2E runs the deployed task in report-only mode.
 
+## Maintenance connectivity and failure delivery
+
+- TC-CONSOL-103: the stage task security group permits only TCP 8080 from
+  itself through a standalone rule. No CIDR or sidecar port is added; the
+  separate proxy and Aurora rules retain their existing sources.
+- TC-CONSOL-104: both task failure targets supply the CloudWatch Logs
+  timestamp/message envelope. The message is valid JSON containing only the
+  fixed event and stage, even if the source has no exit code or an unsafe
+  stopped reason. Nonzero and absent exit codes match; zero and other task
+  revisions do not. Verify the pattern with AWS TestEventPattern and delivery
+  with a synthetic failed task after production deployment, while the weekly
+  schedule remains paused. Alert resources are production-only.
+- TC-CONSOL-105: apply failures preserve bounded operation and error class
+  through both log boundaries, including nested connection timeouts. Arbitrary
+  errors, URLs, identifiers, content and stack traces never survive formatting.
+  Partial-write accounting, abort behavior and nonzero exit remain intact.
+- TC-CONSOL-106: production report and apply runs check the signed REST read
+  path before digest writes or corpus classification. An absent synthetic ID
+  is healthy; transport and authorization failures abort without memory writes.
+  Verify a health-only ECS probe fails before the network fix and succeeds
+  afterward, then verify scoped synthetic writes and optimistic fences.
+
 ## Model action contract
 
 - Existing routing regressions must continue to quarantine all overlapping

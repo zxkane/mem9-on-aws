@@ -641,6 +641,14 @@ do not require persistent task storage.
 
 ### Weekly memory consolidation
 
+The stage task security group admits TCP 8080 from itself for maintenance REST
+requests. This permits communication between the separate maintenance and server
+tasks; sharing a security group alone does not permit inbound traffic. Ports
+8081/8082 remain closed between tasks, and signed service identity and namespace
+membership are still required by the memory API. Every production consolidation
+invocation checks a signed read of a synthetic absent ID before digest writes,
+corpus loading or inference, including report-only runs.
+
 The application creates one shared report-only task for consolidation and one
 for cleanup/restore. Each invocation selects one namespace and uses a fixed
 service principal with an active membership there. Separate signing keyrings
@@ -739,9 +747,14 @@ The production adapter emits that record through a dedicated
 exactly one root JSON object followed by one LF, with no CR or other data before
 or after the object; ordinary `console.log` is not used for this record.
 
-In production, an exact-task ECS STOPPED event with a non-zero container exit code produces
+In production, an exact-task ECS STOPPED event with a non-zero or absent container exit code produces
 `ConsolidationTaskFailures` in the same namespace and stage dimension. Its
-alarm targets the existing SNS-to-Slack delivery path. Its log resource policy
+alarm targets the existing SNS-to-Slack delivery path. The EventBridge target
+uses the required timestamp/message envelope; Logs stores only fixed event/stage
+JSON. Raw stopped reasons remain in ECS metadata. Apply diagnostics separately
+preserve bounded operation/error classes through the child and dispatcher logs,
+including nested connection timeouts, without logging memory or error text.
+Its log resource policy
 grants only the documented EventBridge delivery principals access to the
 dedicated failure log group. The Scheduler role can run only the exact task
 definition and pass only its task/execution roles to

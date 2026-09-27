@@ -9,6 +9,7 @@ import {
   clusterMemories,
   compareDigestTopics,
   createProductionDeps,
+  productionLogRecord,
   evaluateDigestHealth,
   parseActions,
   parseConsolidationArgs,
@@ -19,6 +20,7 @@ import {
   runConsolidationCli,
   serializeDigestState as serializeDigestStateScoped,
 } from "./memory-consolidation.mjs";
+import { safeChildRecord } from "./dispatch-memory-consolidation.mjs";
 import largeDigestFixture from "./fixtures/consolidation-digest-large-v1.json" with {
   type: "json",
 };
@@ -174,6 +176,44 @@ function fakeDeps(memories, responses) {
     },
   };
 }
+
+describe("maintenance failure regressions", () => {
+  it("TC-CONSOL-105: nested connection failure survives both boundaries without private data", async () => {
+    const fake = fakeDeps([
+      memory("survivor", "fragment one", [1, 0]),
+      memory("absorbed", "fragment two", [1, 0]),
+    ], [JSON.stringify({ actions: [{ type: "MERGE", ids: ["survivor", "absorbed"],
+      survivor_id: "survivor", merged_content: "combined fragments", rationale: "same topic" }] })]);
+    fake.deps.getMemory.mockRejectedValueOnce(new TypeError("PRIVATE URL and memory", {
+      cause: Object.assign(new Error("PRIVATE stack"), { code: "UND_ERR_CONNECT_TIMEOUT" }),
+    }));
+    const result = await runConsolidation({ stage: "prod", reportOnly: false }, fake.deps);
+    expect(result).toMatchObject({ exitCode: 1, mutations: 0 });
+    const diagnostics = fake.logs.map(line => productionLogRecord(line, "prod"))
+      .filter(record => record.event === "consolidation_apply_failed");
+    expect(diagnostics).toEqual([{ event: "consolidation_apply_failed", stage: "prod",
+      operation: "MERGE", errorClass: "ConnectionTimeout" }]);
+    expect(safeChildRecord(JSON.stringify({ ...diagnostics[0], content: "PRIVATE", stack: "PRIVATE" }), "prod"))
+      .toEqual(diagnostics[0]);
+    expect(fake.writes.filter(write => write.type !== "health")).toEqual([]);
+    expect(fake.mutexRelease).toHaveBeenCalledOnce();
+    const unknown = productionLogRecord('CONSOLIDATION_APPLY_FAILED {"operation":"PRIVATE","errorClass":"PRIVATE","content":"PRIVATE"}', "prod");
+    expect(unknown).toEqual({ event: "consolidation_apply_failed", stage: "prod" });
+    expect(safeChildRecord(JSON.stringify({ ...unknown, operation: "PRIVATE", errorClass: "PRIVATE" }), "prod"))
+      .toEqual(unknown);
+  });
+
+  it.each([true, false])("TC-CONSOL-106: REST failure stops reportOnly=%s before digest/corpus/model work", async reportOnly => {
+    const fake = fakeDeps([], []);
+    fake.deps.checkRest = vi.fn(async () => { throw new Error("REST unreachable"); });
+    await expect(runConsolidation({ stage: "prod", reportOnly, scheduled: true }, fake.deps))
+      .rejects.toThrow("REST unreachable");
+    expect(fake.deps.listActiveMemories).not.toHaveBeenCalled();
+    expect(fake.completeChat).not.toHaveBeenCalled();
+    expect(fake.deps.writeDigestState).not.toHaveBeenCalled();
+    expect(fake.writes).toEqual([]);
+  });
+});
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -1418,6 +1458,11 @@ describe("production adapters and CLI", () => {
     );
     expect(digestQuery[1]).not.toContain("embedding::text");
     expect(digestQuery[1]).toContain("memory_type <> 'session'");
+    await production.deps.checkRest();
+    const probe = fetch.mock.calls.at(-1);
+    expect(probe[0]).toMatch(/\/memories\/00000000-0000-4000-8000-000000000000$/);
+    expect(probe[1].method).toBe("GET");
+    expect(probe[1].headers.get("X-Mem9-Transport")).toBeTruthy();
     expect(await production.deps.getMemory("missing")).toBeNull();
     await production.deps.putMemory("memory/1", { tags: ["stale"] }, 2);
     expect(await production.deps.deleteMemories(["a", "b"])).toBe(2);

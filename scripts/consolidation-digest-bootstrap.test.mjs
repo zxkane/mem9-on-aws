@@ -71,6 +71,7 @@ async function fixture({ existing, putError, getError, afterPut } = {}) {
   }
   const production = await createProductionDeps(options, {
     Client, S3Client, GetObjectCommand, PutObjectCommand,
+    fetch: vi.fn(async () => ({ ok: false, status: 404 })),
     getToken: vi.fn(), fromNodeProviderChain: () => ({}),
   });
   const deps = {
