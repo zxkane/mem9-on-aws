@@ -13,7 +13,8 @@ Preview E2E runs the deployed task in report-only mode.
   fixed event and stage, even if the source has no exit code or an unsafe
   stopped reason. Nonzero and absent exit codes match; zero and other task
   revisions do not. Verify the pattern with AWS TestEventPattern and delivery
-  with a synthetic failed preview task.
+  with a synthetic failed task after production deployment, while the weekly
+  schedule remains paused. Alert resources are production-only.
 - TC-CONSOL-105: apply failures preserve bounded operation and error class
   through both log boundaries, including nested connection timeouts. Arbitrary
   errors, URLs, identifiers, content and stack traces never survive formatting.
