@@ -187,7 +187,7 @@ declare namespace aws {
     function getSubnetsOutput(args: GetSubnetsOutputArgs): GetSubnetsResult;
 
     // Security group + rule shapes used by infra/db.ts.
-    interface SecurityGroupRule {
+    interface SecurityGroupInlineRule {
       protocol: Input<string>;
       fromPort: Input<number>;
       toPort: Input<number>;
@@ -198,14 +198,26 @@ declare namespace aws {
     interface SecurityGroupArgs {
       vpcId: Input<string>;
       description?: Input<string>;
-      ingress?: SecurityGroupRule[];
-      egress?: SecurityGroupRule[];
+      ingress?: SecurityGroupInlineRule[];
+      egress?: SecurityGroupInlineRule[];
       tags?: Record<string, Input<string>>;
     }
     class SecurityGroup {
       constructor(name: string, args: SecurityGroupArgs);
       readonly id: Output<string>;
       readonly arn: Output<string>;
+    }
+    class SecurityGroupRule {
+      constructor(name: string, args: {
+        type: Input<"ingress" | "egress">;
+        securityGroupId: Input<string>;
+        sourceSecurityGroupId: Input<string>;
+        protocol: Input<string>;
+        fromPort: Input<number>;
+        toPort: Input<number>;
+        description?: Input<string>;
+      });
+      readonly id: Output<string>;
     }
   }
 

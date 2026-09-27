@@ -13,18 +13,14 @@ import { boundedNamePrefix } from "./consolidation";
 // over the task's OWN logs because the most likely first-deploy failure produces no
 // application log whatsoever: a task killed in the ECS agent's secret-fetch phase
 // never runs its entrypoint. That is also why the exit-code filter is
-// `anything-but: 0` and not a `> 0` comparison — such a task reports NO exitCode,
-// which is exactly what a numeric filter drops.
+// a nonzero exit OR an explicit missing-field matcher: startup failures report
+// no exitCode, which anything-but alone does not match.
 //
 // The rule is pinned to the task definition REVISION, never to the cluster: the
 // cluster is shared with the server and the other task, so a cluster-wide rule
 // would alarm one feature's topic on every unrelated task failure.
 //
-// Extracted because the two copies had already drifted — the cleanup copy carries
-// `stoppedReason` (see `includeStoppedReason`) and the consolidation copy does not
-// — and a third copy of ~110 lines of resource wiring is how the next one drifts
-// further. The logical names stay caller-supplied so that extracting this changed
-// no deployed resource's URN.
+// The logical names stay caller-supplied to preserve resource ownership.
 
 export interface TaskFailureAlarmArgs {
   /**
@@ -52,17 +48,6 @@ export interface TaskFailureAlarmArgs {
   taskDefinitionArn: Input<string>;
   alertsTopicArn: Input<string>;
   tags: Record<string, Input<string>>;
-  /**
-   * Carry `stoppedReason` into the log event. It is the ONLY field where a
-   * startup failure names itself (`ResourceInitializationError` on the secret
-   * fetch), so it is on for the cleanup task, whose execution role sits outside
-   * the boundary's secret-decrypt exception list.
-   *
-   * Off for consolidation only because turning it on would change that stack's
-   * deployed `inputTransformer` — a diff unrelated to whatever change is being
-   * shipped. Worth doing on its own.
-   */
-  includeStoppedReason?: boolean;
 }
 
 const FAILURE_NAMESPACE = "mem9-on-aws";
@@ -90,7 +75,7 @@ export function taskFailureAlarm(args: TaskFailureAlarmArgs): void {
       detail: {
         lastStatus: ["STOPPED"],
         taskDefinitionArn: [args.taskDefinitionArn],
-        containers: { exitCode: [{ "anything-but": 0 }] },
+        containers: { exitCode: [{ "anything-but": 0 }, { exists: false }] },
       },
     }),
     tags: args.tags,
@@ -122,19 +107,13 @@ export function taskFailureAlarm(args: TaskFailureAlarmArgs): void {
       arn: logGroup.arn,
       rule: rule.name,
       inputTransformer: {
-        inputPaths: {
-          exitCode: "$.detail.containers[0].exitCode",
-          ...(args.includeStoppedReason
-            ? { stoppedReason: "$.detail.stoppedReason" }
-            : {}),
-        },
+        inputPaths: { timestamp: "$.time" },
+        // Logs consumes this envelope and stores message as the log event.
+        // A constant JSON string cannot be broken by an absent exitCode or
+        // unescaped stoppedReason. Detailed reasons remain in ECS metadata.
         inputTemplate: JSON.stringify({
-          event: args.eventName,
-          stage: $app.stage,
-          exitCode: "<exitCode>",
-          ...(args.includeStoppedReason
-            ? { stoppedReason: "<stoppedReason>" }
-            : {}),
+          timestamp: "<timestamp>",
+          message: JSON.stringify({ event: args.eventName, stage: $app.stage }),
         }),
       },
     },

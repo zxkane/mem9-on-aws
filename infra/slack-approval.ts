@@ -565,7 +565,7 @@ export function slackApproval(
   // task's own logs BECAUSE the most likely first-deploy failure produces no
   // application log at all: a task that dies in the ECS agent's secret-fetch phase
   // (see the BOUNDARY NOTE at the top of this file) never runs its entrypoint.
-  // `anything-but: 0` also covers a NULL exitCode, which is exactly that case.
+  // An explicit absent-exitCode matcher covers that startup failure as well.
   if (ecsOut.alertsTopicArn) {
     taskFailureAlarm({
       stem: "CleanupApplyFailure",
@@ -582,10 +582,6 @@ export function slackApproval(
       taskDefinitionArn: task.taskDefinition,
       alertsTopicArn: ecsOut.alertsTopicArn,
       tags,
-      // On here and off for consolidation: the predicted first-deploy failure for
-      // THIS task is a death in the secret-fetch phase (see the BOUNDARY NOTE at
-      // the top of this file), and `stoppedReason` is the only field that names it.
-      includeStoppedReason: true,
     });
   }
 
