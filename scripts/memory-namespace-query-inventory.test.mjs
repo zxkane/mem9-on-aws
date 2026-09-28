@@ -26,6 +26,15 @@ const javascript = (source, owner = "scripts/example.mjs") =>
   extractSqlStatements({ kind: "javascript", owner, source });
 
 describe("memory namespace query inventory", () => {
+  it("STORE-007: stored maintenance routines cannot inherit a schema-operator exemption", () => {
+    const owner = "docker/bootstrap/migrations/004_consolidation_storage.sql";
+    const text = "CREATE FUNCTION example() RETURNS void AS $$ SELECT id FROM memories WHERE namespace_id=p_namespace $$ LANGUAGE SQL";
+    expect(classifyStatement({owner,text}).classification).toBe("unclassified");
+    const exception = {owner,statement_sha256:statementHash(text),classification:"namespace_composed_or_compatibility",
+      rationale:"Reviewed fixture",coverage:["scripts/consolidation-storage.postgres.test.mjs"],namespace_evidence:"namespace_id=p_namespace"};
+    expect(classifyStatement({owner,text},[exception]).classification).toBe("namespace_composed_or_compatibility");
+    expect(classifyStatement({owner,text:text.replace(" WHERE namespace_id=p_namespace","")},[exception]).classification).toBe("unclassified");
+  });
   it("TC-GROUPNS-096: parses a regex character class before SQL without hanging", () => {
     const source = String.raw`const valid = /[A-Za-z0-9./_#-]{1,512}/;
       db.query(\`SELECT id FROM memories WHERE namespace_id=$1\`);`.replaceAll("\\`", "`");

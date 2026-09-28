@@ -176,3 +176,7 @@ CREATE TRIGGER trg_upload_tasks_updated BEFORE UPDATE ON upload_tasks
 
 -- 6) Additive team-memory namespace control and data-plane columns.
 \ir migrations/002_memory_namespaces.sql
+
+-- 7) Dormant continuous-consolidation planning storage. This neither enables
+-- capture for a namespace nor grants any existing task a new database role.
+\ir migrations/004_consolidation_storage.sql

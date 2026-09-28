@@ -89,6 +89,25 @@ of achieved throughput or production acceptance.
 | TC-CONSOL-V2-047 | Planner misses planted safe candidates or resets blocked ages | Coverage/drain targets fail against ground truth; no success by denominator shrinkage or relabeling |
 | TC-CONSOL-V2-048 | An action exceeds an empty-window limit | Durable policy-blocked state exposes the missed target; other affordable work continues |
 
+## Continuous consolidation storage foundation
+
+The first implementation increment covers the durable planning foundation below.
+The full v2 acceptance gates above remain pending until their complete scenarios
+are implemented and exercised, including atomic apply and calibrated throughput.
+
+| ID | Scenario | Required result / evidence |
+| --- | --- | --- |
+| TC-CONSOL-STORE-001 | Fresh and populated database; migration repeated with existing work | No memory/vector changes, state resets, or duplicate triggers; existing writes remain functional |
+| TC-CONSOL-STORE-002 | Insert, version-only update, state update, hard delete, transaction rollback, namespace move | Committed changes captured without content or memory FK; rollback is invisible; both namespaces dirtied on move |
+| TC-CONSOL-STORE-003 | Earlier event sequence commits after a later event is consumed | Late commit remains consumable; no high-water cursor loses it |
+| TC-CONSOL-STORE-004 | New change arrives during a work lease; worker crashes or responds late | Desired generation survives acknowledgement; lease takeover increments token; stale completion rejected |
+| TC-CONSOL-STORE-005 | Competing consumers/claimants and namespace membership revocation | No duplicated claim or lost event; unauthorized namespace returns no data; revocation serializes with authorized work |
+| TC-CONSOL-STORE-006 | Planner inserts KEEP/review/MERGE classification then retries or alters payload | Exact retry reuses stored result; conflicting fingerprint is rejected; payload and member mapping immutable |
+| TC-CONSOL-STORE-007 | Separate planner/executor connections attempt memory DML, raw reads, policy changes, or caller spoofing | Denied by database privileges and authenticated-login binding, including SET ROLE/application_name spoofing |
+| TC-CONSOL-STORE-008 | Planner proposes authoritative fields, foreign/missing/changed members, DELETE, or malformed data | Storage validates a bounded exact member set, rejects authority fields, and creates no executable action |
+| TC-CONSOL-STORE-009 | New model/policy context or due-time expiry | Replanning preserves unresolved age; unchanged valid KEEP reused; expired or different-context results cannot be reused |
+| TC-CONSOL-STORE-010 | Baseline contains 17,236 synthetic active memories | All anchors become pending without memory changes; multiple 100-row planning batches proceed; record baseline/capture timing without claiming the full drain SLO |
+
 ## Model action contract
 
 - Existing routing regressions must continue to quarantine all overlapping

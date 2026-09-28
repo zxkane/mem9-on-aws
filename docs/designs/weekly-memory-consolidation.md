@@ -1,7 +1,7 @@
 # Design: continuous memory consolidation
 
 Date: 2026-09-28
-Status: Draft for review; not deployed
+Status: Design reviewed; implementation in progress; v2 not deployed
 Baseline: `082bec7`; current behavior remains documented in
 [ARCHITECTURE.md](../ARCHITECTURE.md) and [mem9-facts.md](../mem9-facts.md).
 
@@ -55,6 +55,12 @@ account-global IAM ownership in its existing region and the independently
 configured Responses route in its own region. No memory or embedding is sent to
 an external provider. No additional public API, Lambda Function URL, vector
 service, or cross-account authorization is introduced.
+
+Before changing scheduled delivery, re-run
+`scripts/deploy-decision-artifact-bucket.sh` when its existing bootstrap/lifecycle
+contract needs updating, and verify the retained bucket and deploy-role
+prerequisites documented in the README. The application continues to reference
+the operator-owned audit bucket rather than taking ownership of it.
 
 ```mermaid
 flowchart LR
@@ -190,6 +196,8 @@ and DELETE for memory rows, including direct SQL maintenance and operator paths.
 Notification insertion commits or rolls back with the memory transaction. It
 must not call a network service. Namespace migration and backfill explicitly
 invalidate coverage and schedule reconciliation work.
+Outbox memory references are historical IDs without a foreign key to `memories`,
+so capturing a hard delete cannot prevent that delete from committing.
 
 Do not use `updated_at > last_run` as the only detector: existing stale marking
 can advance version without changing that timestamp. Do not advance a single
@@ -371,9 +379,10 @@ and optimistic predicates.
 Execution revalidation refreshes a scheduling/authorization record, never the immutable proposal. When only the revalidation interval expired, reuse the classification only after its exact inputs, policy and temporal validity still match. Changed inputs or an expired time-dependent verdict require new planning. This avoids forcing a 72-hour drain to redo unchanged model work every 24 hours.
 
 Keep the order consistent in all paths: authorization rows; try-only namespace
-mutex where required; stage budget; namespace budget; action; member rows sorted
-by ID. Claiming work must not lock an action and then wait for a budget that a
-committer locks in the opposite order. A nonblocking busy mutex requeues with
+mutex where required; stage admission then stage budget; namespace admission
+then namespace budget; action; member rows sorted by ID. Claiming work must not
+lock an action and then wait for a budget that a committer locks in the opposite
+order. A nonblocking busy mutex requeues with
 backoff. No embedding or model request runs while those locks are held.
 
 An expired worker cannot finalize after a newer claimant has advanced the lease
@@ -628,8 +637,8 @@ Implementation is complete only when evidence proves:
    24–72 hour target under its real policy limits, without repeated full model
    classification. Judge discovery/completion against planted ground-truth safe
    candidates and reference retrieval, not only what the new planner emits.
-   Policy-blocked, overflow and
-   invalidated work stay visible; shrinking the denominator or resetting ages
+   Policy-blocked, overflow and invalidated work stay visible; shrinking the
+   denominator or resetting ages
    cannot manufacture success.
 2. Killing tasks after planning, preparation, commit, or response loss leaves no
    partial merge, duplicate mutation, missing dirty generation or extra budget.
@@ -665,6 +674,31 @@ Implementation is complete only when evidence proves:
 
 ## Delivery slices and review disposition
 
+The first implementation increment supplies the planning-storage part of slice 1
+in `docker/bootstrap/migrations/004_consolidation_storage.sql`. Its private
+`mem9_maintenance` schema holds an opt-in change outbox, dirty work generations,
+immutable classifications/member snapshots, publication receipts and expiry
+work. Namespace-scoped operations bind authenticated database login OIDs to a
+fixed planner or executor capability and recheck active service membership.
+The planner identity is `consolidation-planner`, with viewer membership; the
+executor retains `consolidation` and needs member access. No login credentials
+or memberships are created by this migration.
+
+Capture defaults off. The owner-only `configure_namespace` function establishes
+the baseline and changes the context hash under a short memory-table lock so an
+in-flight write cannot fall between baseline enumeration and capture enablement.
+The context hash must cover model, prompt, routing, policy and embedding versions.
+Planning operations serialize their short metadata transactions per namespace;
+model requests happen outside them. Three expired attempts leave visible blocked
+work; an operator must investigate and explicitly reset its attempts to retry.
+Changed context and due-time expiry preserve the age of unresolved work.
+
+`scripts/run-consolidation-storage-integration.sh` exercises these contracts
+against disposable PostgreSQL with real separate login sessions. CI runs it
+before deployment. This increment does not implement executable action admission,
+budget accounting, atomic memory apply, worker schedules, or the credential
+cutover. The complete slice-1 gate and the 24–72 hour drain gate remain pending.
+
 | Slice | Deliverable | Required gate |
 | --- | --- | --- |
 | 1 | Maintenance schema, immutable proposals, change capture, restricted DB roles and queue/accounting operations | Real PostgreSQL migration, capture, lease, budget and privilege tests; no production memory changes |
@@ -684,8 +718,10 @@ prevent large components from draining.
 The user confirmed the 24–72 hour goal for clearing the existing automatically
 eligible backlog on 2026-09-28, excluding cases that require human judgment.
 This confirms the business target; it does not establish that the target has
-been achieved or authorize implementation or production activation. Initial
-budgets, concurrency, and cost/quality thresholds remain proposed calibration
+been achieved or authorize production activation. The subsequent user instruction
+authorizes implementation after the implementation-readiness review passes.
+Codex, GLM-5 and Opus 4.8 each returned PASS on that review, with no P0/P1 blocker.
+Initial budgets, concurrency, and cost/quality thresholds remain proposed calibration
 parameters requiring shadow-run and load-test evidence. Engineering review and
 target confirmation do not approve these uncalibrated values; implementation
 must supply the measurements and release evidence above before changing live
