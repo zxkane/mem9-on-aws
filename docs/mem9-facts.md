@@ -459,6 +459,13 @@ still keep writers stopped through namespace cutover.
   row or retained successor link requires explicit force, and restore preserves
   the link, version, and embedding. Consolidation fences both loser and winner
   aliases, and its archive/stale transitions record the authenticated actor.
+- The current MERGE path is not one atomic operation. The survivor PUT has a
+  server-side version predicate, but absorbed fragments are re-read and later
+  sent to an unversioned batch-delete endpoint. A concurrent edit in that gap
+  is not excluded by the cleanup/consolidation advisory mutex, which does not
+  cover ordinary ingest. Increased automatic throughput requires the proposed
+  server-side all-member fence and atomic apply/receipt transaction; client-side
+  pre-reading alone does not establish that guarantee.
 - Decision and report artifacts carry stage/namespace identity and belong in
   owner-only files. JSON ID selections are checked against that binding; plain
   ID lists remain limited to the invocation's authorized namespace. Apply

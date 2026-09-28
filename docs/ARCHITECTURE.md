@@ -1125,6 +1125,12 @@ to the GitHub Actions deploy role.
 
 ## Planned changes
 
+A draft [continuous-consolidation redesign](designs/weekly-memory-consolidation.md)
+replaces the weekly mutation cap with durable candidates, incremental planning,
+atomic application and persisted risk budgets. It is a proposal, not deployed
+behavior; the current runtime and 20-mutation limit above remain authoritative
+until its implementation and release gates pass.
+
 The open reliability program covers future work in these areas:
 
 - Release image tag selection and read-only ECS actual-state reconciliation.
