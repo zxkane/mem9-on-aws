@@ -29,9 +29,11 @@ pays for classification again, including candidates left by the previous cap.
 
 The redesign must deliver all of the following:
 
-- Consume an existing, valid automatic-action backlog in 24–72 hours under the
-  calibrated service budget. This is a provisional acceptance target, not a
-  promise about the unvalidated 2,089 historical records.
+- Consume the existing automatically eligible backlog within the user-confirmed
+  24–72 hour target under the calibrated service budget. Cases that require human
+  judgment are excluded. The target was confirmed on 2026-09-28; eligibility and
+  measured drain time still need validation, including for the 2,089 historical
+  records.
 - Discover newly changed memories without reclassifying the unchanged corpus.
 - Continue applying durable candidates across task restarts and schedule ticks.
 - Bound the blast radius of each atomic action and transaction, and enforce
@@ -432,8 +434,9 @@ The 5,276 historical ID references suggest the order of magnitude of work, but
 are not an executable row budget: actions can overlap, be invalid, require fewer
 writes, or become stale. The new planner computes valid worst-case and actual
 costs. The acceptance report must show the resulting drain ETA and whether the
-24–72 hour target fits the calibrated daily/rate/model limits. If not, explicitly
-revise policy or capacity; do not hide the miss as a successful empty run.
+user-confirmed 24–72 hour target fits the calibrated daily/rate/model limits.
+If not, explicitly revise policy or capacity; do not hide the miss as a
+successful empty run.
 
 Persist stage/namespace counters and reservations using database time. Restart,
 manual invocation, duplicate schedule delivery, worker count and a new run ID
@@ -621,10 +624,11 @@ Detailed planned cases are in
 Implementation is complete only when evidence proves:
 
 1. A synthetic workload shaped like the observed 17k corpus and 2k deferred-action
-   backlog drains all eligible work within the selected 24–72 hour target under
-   its real policy limits, without repeated full model classification. Judge
-   discovery/completion against planted ground-truth safe candidates and reference
-   retrieval, not only what the new planner emits. Policy-blocked, overflow and
+   backlog drains all automatically eligible work within the user-confirmed
+   24–72 hour target under its real policy limits, without repeated full model
+   classification. Judge discovery/completion against planted ground-truth safe
+   candidates and reference retrieval, not only what the new planner emits.
+   Policy-blocked, overflow and
    invalidated work stay visible; shrinking the denominator or resetting ages
    cannot manufacture success.
 2. Killing tasks after planning, preparation, commit, or response loss leaves no
@@ -677,10 +681,15 @@ instead of introducing speculative whole-batch reservations. The anti-churn
 rule uses strict net reduction rather than a daily per-survivor cap that would
 prevent large components from draining.
 
-This is engineering design review, not production acceptance or approval of
-uncalibrated policy values. The 24–72 hour target and initial budget envelope
-remain proposed product/rollout parameters; implementation must supply the
-measurements and release evidence above before changing live behavior.
+The user confirmed the 24–72 hour goal for clearing the existing automatically
+eligible backlog on 2026-09-28, excluding cases that require human judgment.
+This confirms the business target; it does not establish that the target has
+been achieved or authorize implementation or production activation. Initial
+budgets, concurrency, and cost/quality thresholds remain proposed calibration
+parameters requiring shadow-run and load-test evidence. Engineering review and
+target confirmation do not approve these uncalibrated values; implementation
+must supply the measurements and release evidence above before changing live
+behavior.
 
 ## Source checks
 

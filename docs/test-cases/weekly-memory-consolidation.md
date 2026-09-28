@@ -33,9 +33,14 @@ These `TC-CONSOL-V2-*` cases specify the draft in
 implementation requirements, not claims that tests or production behavior already
 exist. Existing legacy cases remain the current implementation contract.
 
+The user confirmed the 24–72 hour target for the existing automatically eligible
+backlog on 2026-09-28; cases requiring human judgment are excluded. Budgets and
+concurrency still require calibration, and target confirmation is not evidence
+of achieved throughput or production acceptance.
+
 | ID | Scenario | Required result / evidence |
 | --- | --- | --- |
-| TC-CONSOL-V2-001 | A production-shaped 17k corpus produces roughly 2k automatic candidates | Real preview load replay drains all eligible work inside the selected 24–72 hour target under calibrated budgets; report actual action/row costs and model calls |
+| TC-CONSOL-V2-001 | A production-shaped 17k corpus produces roughly 2k automatic candidates | Real preview load replay drains all automatically eligible work inside the user-confirmed 24–72 hour target under calibrated budgets; report actual action/row costs and model calls |
 | TC-CONSOL-V2-002 | A batch reaches 100 changed rows with more ready work | Worker starts another eligible batch in the same invocation; no weekly wait and no budget reset |
 | TC-CONSOL-V2-003 | Restart after persisting only part of a classification pass | Previously committed classifications/actions survive and are not sent to the model again |
 | TC-CONSOL-V2-004 | Repeated unchanged audit, including KEEP outcomes | Zero repeated model calls while exact inputs, policy and temporal validity remain valid |
