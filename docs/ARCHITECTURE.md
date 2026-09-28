@@ -1125,6 +1125,18 @@ to the GitHub Actions deploy role.
 
 ## Planned changes
 
+A reviewed [continuous-consolidation redesign](designs/weekly-memory-consolidation.md)
+replaces the weekly mutation cap with durable candidates, incremental planning,
+atomic application and persisted risk budgets. Implementation has begun with
+the additive `004_consolidation_storage.sql` planning foundation: transactional
+change capture, durable work generations, immutable classifications and restricted
+database operations. Capture defaults off, no existing task receives a new
+database credential, and no executable action or budget is enabled by this
+migration. The current runtime and 20-mutation limit above remain authoritative
+until the remaining implementation and release gates pass. The isolated
+`scripts/run-consolidation-storage-integration.sh` rehearsal verifies migration,
+late commits, leases, caching and real login privilege isolation before deployment.
+
 The open reliability program covers future work in these areas:
 
 - Release image tag selection and read-only ECS actual-state reconciliation.

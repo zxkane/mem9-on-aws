@@ -393,6 +393,18 @@ export function classifyStatement(statement, trustedExceptions = []) {
     return classification("unclassified", "An unsupported string expression cannot prove the resulting SQL.", []);
   }
 
+  // These definitions execute at runtime through SECURITY DEFINER. Their
+  // location in a migration is not an operator-only authorization boundary.
+  // Review the complete routine hash, predicates, grants and real DB tests.
+  if (owner === "docker/bootstrap/migrations/004_consolidation_storage.sql" &&
+    /^CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\b/i.test(text)) {
+    const reviewed = trustedExceptions.find(exception =>
+      exception.owner === owner && exception.statement_sha256 === statementHash(text));
+    return reviewed
+      ? classification(reviewed.classification, reviewed.rationale, reviewed.coverage, reviewed.namespace_evidence)
+      : classification("unclassified", "Stored maintenance routines require exact runtime authorization review.", []);
+  }
+
   if (
     owner === "docker/bootstrap/schema.sql" ||
     owner.startsWith("docker/bootstrap/migrations/")

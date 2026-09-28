@@ -276,6 +276,42 @@
         "scripts/memory-namespace-lifecycle.test.mjs",
         "upstream/server/internal/repository/postgres/namespace_lifecycle_integration_test.go"
       ]
+    },
+    {
+      "owner": "docker/bootstrap/migrations/004_consolidation_storage.sql",
+      "statement_sha256": "605c7a4af979e9b043269992f6468609d57731400021c0ba27f4dab8e095f673",
+      "classification": "namespace_composed_or_compatibility",
+      "rationale": "Owner-only opt-in holds the planning mutex and drains foreground writers before seeding only the selected active namespace. Workers have no EXECUTE grant.",
+      "namespace_evidence": "public.memories m is bound by m.namespace_id=p_namespace; complete function and grants reviewed",
+      "coverage": [
+        "scripts/consolidation-storage.postgres.test.mjs",
+        "scripts/run-consolidation-storage-integration.sh",
+        "scripts/memory-namespace-query-inventory.test.mjs"
+      ]
+    },
+    {
+      "owner": "docker/bootstrap/migrations/004_consolidation_storage.sql",
+      "statement_sha256": "cc41fc9f0392a743570af965811fe1c14244e2a9139f7efe58fdbd8b0eb2cf0b",
+      "classification": "namespace_composed_or_compatibility",
+      "rationale": "Restricted SECURITY DEFINER routine binds authenticated login OID and group capability to fixed active service membership; every memory alias is constrained to p_namespace and exact requested IDs.",
+      "namespace_evidence": "public.memories m is bound by m.namespace_id=p_namespace; complete function and grants reviewed",
+      "coverage": [
+        "scripts/consolidation-storage.postgres.test.mjs",
+        "scripts/run-consolidation-storage-integration.sh",
+        "scripts/memory-namespace-query-inventory.test.mjs"
+      ]
+    },
+    {
+      "owner": "docker/bootstrap/migrations/004_consolidation_storage.sql",
+      "statement_sha256": "98958219017307ed54deef20f5e211023e1e5b105bc8e94819a108702bdb8e8e",
+      "classification": "namespace_composed_or_compatibility",
+      "rationale": "Restricted SECURITY DEFINER routine binds authenticated login OID and group capability to fixed active service membership; every memory alias is constrained to p_namespace and exact requested IDs.",
+      "namespace_evidence": "public.memories m is bound by m.namespace_id=p_namespace; complete function and grants reviewed",
+      "coverage": [
+        "scripts/consolidation-storage.postgres.test.mjs",
+        "scripts/run-consolidation-storage-integration.sh",
+        "scripts/memory-namespace-query-inventory.test.mjs"
+      ]
     }
   ]
 }

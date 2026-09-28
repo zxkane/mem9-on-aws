@@ -25,6 +25,89 @@ Preview E2E runs the deployed task in report-only mode.
   Verify a health-only ECS probe fails before the network fix and succeeds
   afterward, then verify scoped synthetic writes and optimistic fences.
 
+
+## Proposed continuous consolidation acceptance
+
+These `TC-CONSOL-V2-*` cases specify the draft in
+[the consolidation design](../designs/weekly-memory-consolidation.md). They are
+implementation requirements, not claims that tests or production behavior already
+exist. Existing legacy cases remain the current implementation contract.
+
+The user confirmed the 24–72 hour target for the existing automatically eligible
+backlog on 2026-09-28; cases requiring human judgment are excluded. Budgets and
+concurrency still require calibration, and target confirmation is not evidence
+of achieved throughput or production acceptance.
+
+| ID | Scenario | Required result / evidence |
+| --- | --- | --- |
+| TC-CONSOL-V2-001 | A production-shaped 17k corpus produces roughly 2k automatic candidates | Real preview load replay drains all automatically eligible work inside the user-confirmed 24–72 hour target under calibrated budgets; report actual action/row costs and model calls |
+| TC-CONSOL-V2-002 | A batch reaches 100 changed rows with more ready work | Worker starts another eligible batch in the same invocation; no weekly wait and no budget reset |
+| TC-CONSOL-V2-003 | Restart after persisting only part of a classification pass | Previously committed classifications/actions survive and are not sent to the model again |
+| TC-CONSOL-V2-004 | Repeated unchanged audit, including KEEP outcomes | Zero repeated model calls while exact inputs, policy and temporal validity remain valid |
+| TC-CONSOL-V2-005 | New related memory arrives after an old KEEP result | Dirty-neighbor work invalidates the relevant window; the old KEEP never certifies the full namespace |
+| TC-CONSOL-V2-006 | Staleness threshold passes without a row write | Due-time sweep reopens work independently of updated_at and outbox writes |
+| TC-CONSOL-V2-007 | One transaction allocates an earlier outbox sequence but commits late | Its change is still consumed; a high-water cursor cannot skip it |
+| TC-CONSOL-V2-008 | Generation G+1 arrives while G is being planned | Acknowledging G preserves G+1; repeat execution consumes the newest generation |
+| TC-CONSOL-V2-009 | Direct SQL update, delete, state change, migration or backfill | Transactional capture or explicit reconciliation covers every path, including version-only changes |
+| TC-CONSOL-V2-010 | A component exceeds the old cluster bound | Bounded paginated neighborhoods retain overflow and coverage; no permanent silent omission or false whole-component guarantee |
+| TC-CONSOL-V2-011 | Two neighborhoods/actions overlap | Deterministic deduplication plus final all-member fences prevent conflicting double application |
+| TC-CONSOL-V2-012 | Model output supplies foreign IDs, invalid graphs, confidence or budget overrides | Deterministic validation rejects authority fields and foreign scope; no memory mutation |
+| TC-CONSOL-V2-013 | Survivor or any donor is edited during embedding | Entire atomic merge aborts; no survivor-only rewrite or lost donor edit; run with real PostgreSQL and concurrent ingest |
+| TC-CONSOL-V2-014 | Membership/namespace/service is revoked or paused before commit | Transactional authorization blocks every memory write and receipt/budget completion |
+| TC-CONSOL-V2-015 | Worker dies before commit | Transaction rolls back memories, receipt and spent budget together; reservation is recoverable |
+| TC-CONSOL-V2-016 | Commit succeeds but HTTP response is lost | Retry reads the same receipt; no second embedding, mutation or budget charge |
+| TC-CONSOL-V2-017 | Lease expires, another worker claims, old worker returns | Old generation cannot finalize or spend a released reservation |
+| TC-CONSOL-V2-018 | Competing claims, commits and expiry recovery | Consistent lock order avoids deadlock; short transactions and real race tests prove accounting correctness |
+| TC-CONSOL-V2-019 | Legacy cleanup holds the namespace mutex | New backend returns/requeues busy without holding a caller-side mutex or deadlocking itself |
+| TC-CONSOL-V2-020 | Several workers, namespaces or duplicate Scheduler deliveries | Stage and namespace budgets remain exact; no multiplication per task or run ID |
+| TC-CONSOL-V2-021 | Worst-case reservation exceeds actual changes because survivor is already complete | Settle actual row transitions and release the difference; merge count is not assumed to equal rewritten/deleted counts |
+| TC-CONSOL-V2-022 | Budget window ends during preparation | Expired reservation cannot commit; reacquire under the next window and preserve idempotency |
+| TC-CONSOL-V2-023 | Budget decreases or pause is committed while work is queued/preparing | No later uncommitted action bypasses the new policy; committed receipts remain counted |
+| TC-CONSOL-V2-024 | One hot candidate repeatedly conflicts or one risk class dominates | Bounded retry and weighted fairness allow other candidates/namespaces to progress |
+| TC-CONSOL-V2-025 | Model throttling, invalid response, timeout or verification failure | Bounded attempts; persisted retry/review reason; no mutation and no inference-budget reset |
+| TC-CONSOL-V2-026 | Automatic DELETE or ambiguous contradiction is proposed | Remains manual review regardless of backlog age or larger execution budget |
+| TC-CONSOL-V2-027 | Equal content has different material context, protection or provenance | Exact dedup does not erase those distinctions; incompatible actions are reviewed |
+| TC-CONSOL-V2-028 | Semantic merge drops a qualifier, fact, timeline distinction or provenance | Preservation gate rejects it; evaluation and adversarial fixtures are required before budget promotion |
+| TC-CONSOL-V2-029 | Merge requires new content embedding; metadata-only change does not | Atomic receipt agrees with committed content/vector/version; local embedding only; no opening 8081/8082 |
+| TC-CONSOL-V2-030 | Undo after a later human or ingest edit | Conditional recovery refuses changed post-images; no blind restore; original receipt remains immutable |
+| TC-CONSOL-V2-031 | Before-image exceeds bound or terminal payload reaches retention | No truncated recovery guarantee; oversize is review-only; expired IDs remain non-replayable without retaining unnecessary content |
+| TC-CONSOL-V2-032 | Ready work waits behind budgets or a worker is idle | Distinct durable outcomes and age metrics; an increasing backlog cannot appear as healthy completed cleanup |
+| TC-CONSOL-V2-033 | EMF or digest delivery fails after commit | DB receipt/budget is authoritative; notification retries never replay mutations |
+| TC-CONSOL-V2-034 | Planner or executor attempts a disallowed database/API/inference operation | New restricted roles deny it; no shared owner credential is accepted as evidence of role isolation |
+| TC-CONSOL-V2-035 | An old maintenance task image runs after v2 activation | Backend mode guard and removal of legacy owner-secret access block both legacy REST and direct SQL bypasses |
+| TC-CONSOL-V2-036 | Roll back code or stop workers mid-run | New commits pause safely; no simultaneous legacy/v2 apply; plans/receipts survive and fences remain effective |
+| TC-CONSOL-V2-037 | Maintenance runs alongside representative foreground recall/write traffic | Paired preview benchmark meets reviewed absolute deadlines and p95 regression allowance; overload pauses/reduces background work |
+| TC-CONSOL-V2-038 | Logs, metrics, reports and public PR artifacts are collected | Only bounded counters/enums in ordinary output; content/IDs/credentials remain in authorized private storage |
+| TC-CONSOL-V2-039 | Claim/audit/query table is added or changed | Reviewed SQL inventory includes every namespace predicate and bounded privileged operation; full PostgreSQL namespace rehearsal passes |
+| TC-CONSOL-V2-040 | A budget-delayed unchanged plan needs periodic revalidation | Fresh policy/input/temporal checks can reuse its valid classification; changed/time-expired inputs require new planning and cannot inherit authority |
+| TC-CONSOL-V2-041 | A model alternates paraphrases or an operator undoes/rejects a merge | Novel-donor/net-reduction and rewrite-generation fences stop churn; suppression blocks reapplication; undo advances versions |
+| TC-CONSOL-V2-042 | Lock waits cross lease expiry or UTC midnight | Advancing-clock final authorization uses post-wait time; stale transaction-start clocks cannot authorize a write |
+| TC-CONSOL-V2-043 | Response is lost during reservation or embedding, before a receipt | One active per-action preparation/reservation; duplicates report in-progress; generation-fenced recovery is bounded |
+| TC-CONSOL-V2-044 | Old task caches owner credentials or retains SQL sessions through rollout | Pre-activation credential/session retirement blocks reconnect and existing-session writes; mode epoch serializes commits |
+| TC-CONSOL-V2-045 | Tasks contend for model calls/tokens or apply-rate capacity | Durable admission includes all reservations and unknown outcomes; missing bounds block activation |
+| TC-CONSOL-V2-046 | A merge arrives after another class borrowed capacity | Protected credits and next-window age priority give bounded service; spent loans are never fictitiously refunded |
+| TC-CONSOL-V2-047 | Planner misses planted safe candidates or resets blocked ages | Coverage/drain targets fail against ground truth; no success by denominator shrinkage or relabeling |
+| TC-CONSOL-V2-048 | An action exceeds an empty-window limit | Durable policy-blocked state exposes the missed target; other affordable work continues |
+
+## Continuous consolidation storage foundation
+
+The first implementation increment covers the durable planning foundation below.
+The full v2 acceptance gates above remain pending until their complete scenarios
+are implemented and exercised, including atomic apply and calibrated throughput.
+
+| ID | Scenario | Required result / evidence |
+| --- | --- | --- |
+| TC-CONSOL-STORE-001 | Fresh and populated database; migration repeated with existing work | No memory/vector changes, state resets, or duplicate triggers; existing writes remain functional |
+| TC-CONSOL-STORE-002 | Insert, version-only update, state update, hard delete, transaction rollback, namespace move | Committed changes captured without content or memory FK; rollback is invisible; both namespaces dirtied on move |
+| TC-CONSOL-STORE-003 | Earlier event sequence commits after a later event is consumed | Late commit remains consumable; no high-water cursor loses it |
+| TC-CONSOL-STORE-004 | New change arrives during a work lease; worker crashes or responds late | Desired generation survives acknowledgement; lease takeover increments token; stale completion rejected |
+| TC-CONSOL-STORE-005 | Competing consumers/claimants and namespace membership revocation | No duplicated claim or lost event; unauthorized namespace returns no data; revocation serializes with authorized work |
+| TC-CONSOL-STORE-006 | Planner inserts KEEP/review/MERGE classification then retries or alters payload | Exact retry reuses stored result; conflicting fingerprint is rejected; payload and member mapping immutable |
+| TC-CONSOL-STORE-007 | Separate planner/executor connections attempt memory DML, raw reads, policy changes, or caller spoofing | Denied by database privileges and authenticated-login binding, including SET ROLE/application_name spoofing |
+| TC-CONSOL-STORE-008 | Planner proposes authoritative fields, foreign/missing/changed members, DELETE, or malformed data | Storage validates a bounded exact member set, rejects authority fields, and creates no executable action |
+| TC-CONSOL-STORE-009 | New model/policy context or due-time expiry | Replanning preserves unresolved age; unchanged valid KEEP reused; expired or different-context results cannot be reused |
+| TC-CONSOL-STORE-010 | Baseline contains 17,236 synthetic active memories | All anchors become pending without memory changes; multiple 100-row planning batches proceed; record baseline/capture timing without claiming the full drain SLO |
+
 ## Model action contract
 
 - Existing routing regressions must continue to quarantine all overlapping
