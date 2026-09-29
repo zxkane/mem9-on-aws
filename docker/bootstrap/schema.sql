@@ -183,3 +183,4 @@ CREATE TRIGGER trg_upload_tasks_updated BEFORE UPDATE ON upload_tasks
 
 -- 8) Atomic execution and accounting remain disabled until explicit rollout.
 \ir migrations/005_consolidation_execution.sql
+\ir migrations/006_consolidation_planner.sql

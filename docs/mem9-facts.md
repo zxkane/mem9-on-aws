@@ -481,6 +481,14 @@ still keep writers stopped through namespace cutover.
   through actual inference completion, even after an HTTP disconnect. No worker
   task, schedule, credential cutover or production allowance is activated by
   installing these changes.
+- Migration `006_consolidation_planner.sql` packages opt-in incremental planning:
+  exact/vector phases, durable cursors, cache reuse, atomic queue publication,
+  fingerprint audits and reverse-dependency outbox consumption. The planner CLI
+  requires its own restricted database credential and a separate owner-enabled
+  policy. Model admission reserves certified bounds persistently across workers;
+  uncertain calls retain both charge and capacity, and overages pause admission.
+  No model contract is certified or activated by installation. Scheduling,
+  credential cutover and measured production drain/foreground gates remain pending.
 - Decision and report artifacts carry stage/namespace identity and belong in
   owner-only files. JSON ID selections are checked against that binding; plain
   ID lists remain limited to the invocation's authorized namespace. Apply

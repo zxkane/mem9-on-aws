@@ -377,6 +377,30 @@
         "scripts/run-consolidation-execution-integration.sh",
         "upstream/server/internal/handler/consolidation_test.go"
       ]
+    },
+    {
+      "owner": "docker/bootstrap/migrations/006_consolidation_planner.sql",
+      "statement_sha256": "7b6d600876f0b3bfb2a1ea155ca17170132b5323bb1401b7dbf9059ffec8928f",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Private incremental planner routine claim_neighborhood; complete routine and grants reviewed.",
+      "rationale": "The planner guard binds session_user login capability and active namespace viewer membership before any lookup. All memory aliases are restricted to p_namespace; vector retrieval materializes only that namespace, hydration is bounded, and only owner policy can enable this path.",
+      "namespace_evidence": "Explicit namespace predicates, private per-lease snapshots and namespace-bound cursors/cache keys.",
+      "coverage": [
+        "scripts/consolidation-planner.postgres.test.mjs",
+        "scripts/run-consolidation-planner-integration.sh"
+      ]
+    },
+    {
+      "owner": "docker/bootstrap/migrations/006_consolidation_planner.sql",
+      "statement_sha256": "b17a30b541b86a6a785d0bec8dfba2900fa1e51657101e3c41d25c8d61767419",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Private incremental planner routine audit_planner; complete routine and grants reviewed.",
+      "rationale": "The planner guard binds session_user login capability and active namespace viewer membership before any lookup. All memory aliases are restricted to p_namespace; vector retrieval materializes only that namespace, hydration is bounded, and only owner policy can enable this path.",
+      "namespace_evidence": "Explicit namespace predicates, private per-lease snapshots and namespace-bound cursors/cache keys.",
+      "coverage": [
+        "scripts/consolidation-planner.postgres.test.mjs",
+        "scripts/run-consolidation-planner-integration.sh"
+      ]
     }
   ]
 }

@@ -3,6 +3,38 @@
 Unit tests use mocked database, REST, LLM, and AWS resource constructors.
 Preview E2E runs the deployed task in report-only mode.
 
+## Incremental planner and model admission
+
+The planner increment keeps production activation closed. These cases cover
+the next executable delivery, independently of later scheduling and calibration.
+
+| Case | Scenario | Required result |
+| --- | --- | --- |
+| PLAN-001 | Install/replay migrations with existing namespaces and worker grants | No opt-in, policy, login, schedule or memory change; later scoped grants survive replay |
+| PLAN-002 | Foreign namespace, unbound login, disabled capture or revoked viewer | Discovery, cache, admission and publication reject before reading protected inputs |
+| PLAN-003 | More than one page of eligible neighbors, worker restart between pages | At most ten hydrated members; persisted cursor resumes with no lost overflow or reset of oldest age |
+| PLAN-004 | Anchor/member changes during inference or continuation | Stale generation cannot publish; new work survives and restarts discovery |
+| PLAN-005 | Late outbox commit and more reverse dependents than one page | Exact events remain until all dependent anchors are dirtied; no sequence watermark skips work |
+| PLAN-006 | Repeat exact neighborhood with valid KEEP, REVIEW or MERGE | Reuse protected classification with zero provider calls and unchanged authoritative validation |
+| PLAN-007 | Crash or response loss at publication/action handoff | Publication, action and cursor commit together or all roll back; receipt recovery never repeats the model |
+| PLAN-008 | Missing/null-vector anchor, equal content with conflicting context, protected or oversized inputs | Deterministic safe handling; incompatible/oversized actions remain review or blocked, with no truncation |
+| PLAN-009 | Concurrent workers, duplicate requests and fresh processes | Stage/namespace request and token reservations plus global slots remain within persisted policy |
+| PLAN-010 | Timeout, crash, missing/excess usage, expired attempt and late settlement | Conservative maximum charge exactly once; unknown/contract breaker cannot be reset by restart or midnight |
+| PLAN-011 | Policy lowering, pause, context change or membership revocation | No new provider dispatch under stale authority; used counters and outstanding reservations are retained |
+| PLAN-012 | Truncated/invalid model JSON, subset IDs, override fields and unbounded result | Strict whole-neighborhood verdict only; no arbitrary replacement content or authority |
+| PLAN-013 | Budget wait, failed model, fixed task deadline | Waits preserve age without burning attempts; actual failures are bounded; no new work after deadline |
+| PLAN-014 | Malformed credentials, DB failure and private provider errors | CLI emits only bounded content-free counts/error classes, never secrets or memory payloads |
+| PLAN-015 | Repeated paginated fingerprint audit and hard-deleted rows | Unchanged coverage causes no model work; changed/new/missing rows become durable work |
+| PLAN-016 | Synthetic 17k corpus with planted pairs and a large component | Compare discovered work with ground truth, bounded hydration and restart coverage; do not claim calibrated production drain time |
+
+Code-review regressions additionally cover same-policy embedding-context refresh;
+reopening an oversized page after a real edit; large deterministic duplicates;
+byte-bounded model paging without skipped neighbors; typed token bounds;
+definitive dispatch rejection versus ambiguous connection loss; and unspent
+reservation cancellation after revocation or expiry without releasing a
+dispatched/unknown attempt. The production timing contract reserves 110 seconds
+for the provider, 15 seconds for finishing, and 11 seconds for DB dispatch.
+
 ## Maintenance connectivity and failure delivery
 
 - TC-CONSOL-103: the stage task security group permits only TCP 8080 from
