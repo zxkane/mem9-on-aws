@@ -674,6 +674,50 @@ Implementation is complete only when evidence proves:
 
 ## Delivery slices and review disposition
 
+The planner delivery adds `006_consolidation_planner.sql`, a bounded planner CLI,
+and the single-attempt model adapter. Its implementation-readiness review passed
+with Codex, GLM-5 and Opus 5.5 after three rounds. Required corrections are encoded
+in the tests: generation-fenced exact/vector continuation, independent exact-pair
+discovery, a 125-second provider/finish margin plus 11 seconds for database
+dispatch, uncertain attempts
+retaining slots, and honest late-overage accounting. A real change during a page
+discards its cursor; a successful continuation preserves oldest unresolved age.
+The exact phase always advances to vector discovery even without an executable
+outcome. The existing capture trigger appends independent change rows and never
+locks queue/work, preserving the reviewed foreground/planner lock order.
+
+This delivery implements planner/model admission within slice 3; schedule
+provisioning, execution fair shares, retained-payload cleanup and live calibration
+remain separate work. Its whole-neighborhood semantic verdict is conservative:
+dense mixed neighborhoods may become review, and are not counted as automatically
+eligible/completed work. The 17,236-row synthetic fixture checks actual planted
+exact-pair proposals and bounded hydration, not calibrated production drain time.
+No production policy values, model-bound certificates or credentials are installed.
+The model certificate is operator evidence for the exact request and full token
+contract; unsupported/missing certification blocks inference. Database accounting
+is a protocol for the reviewed worker, not an IAM spending boundary, and owner
+resolution must reconcile against the configured Bedrock Project.
+
+Code review additionally required byte-bounded model neighborhoods without
+applying the provider cap to deterministic KEEP/exact MERGE; an oversized model
+pair becomes explicit review and keeps subsequent neighbors discoverable.
+Same-policy reconfiguration must refresh a changed embedding-context hash, and
+actual changed inputs may reopen this planner's blocked pages without resetting
+their oldest age. Time-based retries alone cannot reopen them. A definitively
+rejected dispatch or expired reservation still lacking a dispatch marker is
+provably unspent and refunded; ambiguous/dispatched outcomes retain conservative
+accounting and uncertainty capacity. Cancellation remains available to the
+originating login after namespace revocation and cannot refund a dispatched call.
+
+The final implementation review passed Codex, GLM-5 and Opus 5.5 after the
+boundary/race regressions were added. Ranked distances are retained and checked
+under memory-row locks. Historical reverse dependencies include observed
+lookahead and size-dropped neighbors before publication; consumed, pending and
+later change events all invalidate their anchor's continuation. The legacy
+consume API delegates to this path for configured planner namespaces. Policies
+are retained and paused through their enabled flag; deleting policy rows is not
+a supported operational path. Dependency retention remains an activation gate.
+
 The execution increment adds a private signed-consolidation apply/status route,
 immutable executable actions, preparation ownership, receipts, conditional undo,
 and persisted stage/namespace risk windows and apply-rate buckets. The executor

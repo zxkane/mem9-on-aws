@@ -1146,8 +1146,27 @@ login/session retirement. The executor requires `MEM9_EXECUTOR_DB_SECRET`
 and does not fall back to the legacy owner-secret environment variable.
 Atomicity, idempotency, UTC budget windows, rate limits and conditional undo are
 rehearsed by `scripts/run-consolidation-execution-integration.sh` and the real
-PostgreSQL HTTP tests. Continuous planning/scheduling, full retention cleanup,
-fair-share/model admission and production rollout acceptance remain pending.
+PostgreSQL HTTP tests.
+
+Migration `006_consolidation_planner.sql` and `scripts/consolidation-planner.mjs`
+add a dormant incremental planner. Exact candidates are independent of vector
+distance; every exact pass continues to vector discovery, including review-only
+outcomes. Generation-bound phase/cursors, immutable input snapshots, cached
+classifications and atomic publication/action receipts survive restarts. A real
+change discards stale continuation and preserves unresolved age. Capture remains
+an append-only outbox trigger; it never takes planner queue/work locks.
+
+Separate persisted stage/namespace model windows reserve complete certified input
+and output bounds before each single network attempt. Unknown outcomes retain
+their slot and conservative charge; actual overages are recorded and pause
+admission. Only owner reconciliation can release uncertainty or reset a breaker.
+Accounting remains possible after membership revocation through the originating
+login's content-free attempt capability. The planner requires its own restricted
+`MEM9_PLANNER_DB_SECRET`, with no owner-secret fallback. Installation creates no
+login, enabled planner/model policy, schedule or production allowance. The real
+PostgreSQL planner rehearsal runs before deployment. Schedule provisioning,
+execution fair shares, full retention cleanup and live rollout acceptance remain
+pending; the user-confirmed drain target still requires calibration.
 
 The open reliability program covers future work in these areas:
 

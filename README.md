@@ -1507,6 +1507,37 @@ intact.
 
 ### Start with a report-only task
 
+The continuous-maintenance planner is packaged separately as
+`scripts/consolidation-planner.mjs`. Migration `006_consolidation_planner.sql`
+provides resumable exact/vector discovery, classification reuse, atomic queue
+handoff and persisted model admission. Installing it enables no planner,
+credentials, budget or schedule. The current weekly task remains the active path.
+
+The planner requires `MEM9_PLANNER_DB_SECRET`, one explicit `MEM9_NAMESPACE_ID`
+and `MEM9_STAGE`, and an owner-enabled namespace policy. Its login must be bound
+to the planner role and active `consolidation-planner` viewer membership. There
+is no owner-secret fallback or mutation signing key. It uses TLS and a fixed
+50-minute deadline. Logs expose counts only; queued actions are not completed
+memory changes. Protected/incompatible exact groups still proceed to a separate
+vector-discovery phase, with unresolved review and overflow remaining visible.
+
+Model mode additionally requires owner-configured stage/namespace limits and a
+reviewed certificate for the **exact** selected model, regional Project, request
+shape, reasoning setting and token contract. No model/route is certified or
+automatically enabled by this release. The certificate must establish the maximum
+accepted input context and a hard output cap including reasoning; the worker
+reserves those complete bounds, checks raw usage, and makes one request per
+admission. It refuses model/route configuration mismatches. Unknown requests retain
+their charged maximum and a concurrency slot until owner reconciliation; reported
+overages are recorded and pause admission. Policy changes and restarts cannot
+reset counters. This is a deterministic worker protocol, not an IAM spend boundary;
+calibration and uncertainty resolution must reconcile Bedrock Project usage.
+
+Continuous schedule provisioning, execution fair shares, retained-payload cleanup,
+credential cutover and production load/quality calibration remain release gates.
+The synthetic 17k-row rehearsal checks planted duplicate discovery and bounded
+hydration; it does not prove the 24–72 hour production drain target.
+
 After deploying the task definitions and granting the corresponding service:
 
 ```bash

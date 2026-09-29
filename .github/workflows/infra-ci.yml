@@ -317,6 +317,7 @@ jobs:
           shellcheck scripts/run-memory-namespace-integration.sh
           shellcheck scripts/run-consolidation-storage-integration.sh
           shellcheck scripts/run-consolidation-execution-integration.sh
+          shellcheck scripts/run-consolidation-planner-integration.sh
           shellcheck scripts/run-memory-namespace-e2e.sh
           shellcheck scripts/run-memory-namespace-benchmark.sh
           shellcheck scripts/run-memory-namespace-connection-e2e.sh
@@ -336,6 +337,8 @@ jobs:
         run: bash scripts/run-consolidation-storage-integration.sh
       - name: PostgreSQL consolidation execution and budgets
         run: bash scripts/run-consolidation-execution-integration.sh
+      - name: PostgreSQL incremental planner and model admission
+        run: bash scripts/run-consolidation-planner-integration.sh
       - name: Namespace analysis service isolation
         run: bash scripts/run-analysis-namespace-integration.sh
 
