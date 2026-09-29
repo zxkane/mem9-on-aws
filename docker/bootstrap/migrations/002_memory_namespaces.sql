@@ -391,7 +391,7 @@ BEGIN
 
     SELECT phase
     INTO observed_phase
-    FROM memory_namespace_migration_state
+    FROM public.memory_namespace_migration_state
     WHERE singleton_id;
 
     IF observed_phase IN ('frozen', 'backfilling') THEN

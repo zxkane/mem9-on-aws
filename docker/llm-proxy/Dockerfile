@@ -51,6 +51,7 @@ COPY docker/llm-proxy/server.mjs /app/docker/llm-proxy/server.mjs
 COPY scripts/memory-cleanup.mjs /app/scripts/memory-cleanup.mjs
 COPY scripts/memory-consolidation.mjs /app/scripts/memory-consolidation.mjs
 COPY scripts/dispatch-memory-consolidation.mjs /app/scripts/dispatch-memory-consolidation.mjs
+COPY scripts/consolidation-executor.mjs /app/scripts/consolidation-executor.mjs
 COPY scripts/lib/application-region.mjs /app/scripts/lib/application-region.mjs
 COPY scripts/lib/memory-namespace.mjs /app/scripts/lib/memory-namespace.mjs
 COPY scripts/lib/maintenance-scope.mjs /app/scripts/lib/maintenance-scope.mjs
@@ -72,6 +73,9 @@ RUN node --input-type=module \
 RUN node --input-type=module \
       -e "await import('/app/scripts/dispatch-memory-consolidation.mjs')" \
     && echo "maintenance dispatcher imports OK"
+RUN node --input-type=module \
+      -e "await import('/app/scripts/consolidation-executor.mjs')" \
+    && echo "consolidation executor imports OK"
 
 # Listens on LLM_PROXY_PORT (default 8082); mem9 reaches it at
 # http://localhost:8082/v1. Not published outside the task — localhost only.

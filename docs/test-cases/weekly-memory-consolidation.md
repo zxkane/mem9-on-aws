@@ -108,6 +108,33 @@ are implemented and exercised, including atomic apply and calibrated throughput.
 | TC-CONSOL-STORE-009 | New model/policy context or due-time expiry | Replanning preserves unresolved age; unchanged valid KEEP reused; expired or different-context results cannot be reused |
 | TC-CONSOL-STORE-010 | Baseline contains 17,236 synthetic active memories | All anchors become pending without memory changes; multiple 100-row planning batches proceed; record baseline/capture timing without claiming the full drain SLO |
 
+## Atomic execution and persisted budgets
+
+These execution cases complement the storage foundation. Deployment does not
+enable execution: policy configuration, restricted login binding and the later
+credential-cutover/quality gates remain explicit prerequisites.
+
+| ID | Scenario | Required result / evidence |
+| --- | --- | --- |
+| TC-CONSOL-EXEC-001 | Additive migration repeats while legacy behavior is enabled | Execution stays disabled, no memory changes, no policy/counter/receipt reset |
+| TC-CONSOL-EXEC-002 | Authenticated planner queues an immutable MERGE classification | Costs and lossless output are derived by storage; unsupported/protected/context-conflicting inputs become durable review |
+| TC-CONSOL-EXEC-003 | Several executor logins claim work with shared stage/namespace budgets | Reservation is atomic, one current lease per action; task restarts cannot multiply limits |
+| TC-CONSOL-EXEC-004 | Backend commits a prepared merge | Survivor, donor states, embedding, receipt, snapshots and budget settlement commit together |
+| TC-CONSOL-EXEC-005 | Any participant changes after planning or during embedding | Whole operation invalidates without partial memory changes; reservation is released |
+| TC-CONSOL-EXEC-006 | Commit succeeds but response is lost | Same action returns its receipt, without embedding again or charging twice |
+| TC-CONSOL-EXEC-007 | Old worker finishes after lease takeover or preparation recovery | Generation/nonce checks reject the stale completion and prevent double reservations |
+| TC-CONSOL-EXEC-008 | Locks cross lease expiry or UTC midnight | Advancing database time sampled after locks rejects old authorization windows |
+| TC-CONSOL-EXEC-009 | Policy is paused/lowered or service membership revoked during preparation | Final transaction rechecks policy epochs and authorization; no later stale commit |
+| TC-CONSOL-EXEC-010 | An action cannot fit a configured empty window | Durable policy-blocked reason remains visible; affordable work can proceed |
+| TC-CONSOL-EXEC-011 | Prepared actions contend for apply-rate capacity | Persisted stage/namespace buckets bound commits; retry reuses preparation without a new embedding |
+| TC-CONSOL-EXEC-012 | Operator requests undo, with or without a later user edit | Exact post-image fences; versions advance, original receipt remains, replay is suppressed |
+| TC-CONSOL-EXEC-013 | Caller injects plan/budget/vector fields or uses human/analysis/cleanup transport | Private apply/status routes reject it; request carries only the action and lease generation |
+| TC-CONSOL-EXEC-014 | HTTP request disconnects while maintenance embedding is running | Sidecar holds admission until actual inference completes; concurrent maintenance is refused |
+| TC-CONSOL-EXEC-015 | ARCHIVE or STALE is eligible | Archive fences both timeline participants; stale marking preserves content/vector and settles actual rows |
+| TC-CONSOL-EXEC-016 | Planner/executor attempts direct action, budget, receipt or undo manipulation | Database privileges deny it; backend/operator capabilities are separately bound to authenticated logins |
+| TC-CONSOL-EXEC-017 | Real PostgreSQL HTTP tests and existing namespace/ingest/rollback suites run | New route works through signed service authorization without changing legacy/public API behavior |
+| TC-CONSOL-EXEC-018 | CLI configuration, credential JSON or database connection fails | Actual subprocess stdout/stderr contain only the bounded error record; generated credential markers never appear |
+
 ## Model action contract
 
 - Existing routing regressions must continue to quarantine all overlapping

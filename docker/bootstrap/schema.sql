@@ -180,3 +180,6 @@ CREATE TRIGGER trg_upload_tasks_updated BEFORE UPDATE ON upload_tasks
 -- 7) Dormant continuous-consolidation planning storage. This neither enables
 -- capture for a namespace nor grants any existing task a new database role.
 \ir migrations/004_consolidation_storage.sql
+
+-- 8) Atomic execution and accounting remain disabled until explicit rollout.
+\ir migrations/005_consolidation_execution.sql

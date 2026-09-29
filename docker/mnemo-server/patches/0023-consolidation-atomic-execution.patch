@@ -1,0 +1,883 @@
+diff --git a/server/cmd/mnemo-server/main.go b/server/cmd/mnemo-server/main.go
+index 114269e..4d1c70a 100644
+--- a/server/cmd/mnemo-server/main.go
++++ b/server/cmd/mnemo-server/main.go
+@@ -350,6 +350,7 @@ func main() {
+ 		WithNamespaceRequired(cfg.NamespaceRequired).
+ 		WithDurableIngest(cfg.DurableIngestEnabled).
+ 		WithDurableIngestTelemetry(durableTelemetry)
++	srv.WithConsolidationExecution(cfg.ConsolidationExecutionEnabled)
+ 	router := srv.Router(tenantMW, rateMW, apiKeyMW, middleware.CORS(cfg.CORSAllowedOrigins))
+ 
+ 	var durableWorkerCancel context.CancelFunc
+diff --git a/server/internal/config/config.go b/server/internal/config/config.go
+index 5e7ebc2..0184dac 100644
+--- a/server/internal/config/config.go
++++ b/server/internal/config/config.go
+@@ -34,18 +34,19 @@ type Config struct {
+ 	EmbedModel   string
+ 	EmbedDims    int
+ 
+-	LLMAPIKey                   string
+-	LLMBaseURL                  string
+-	LLMModel                    string
+-	LLMTemperature              float64
+-	IngestMode                  string
+-	DurableIngestEnabled        bool
+-	DurableIngestTenantID       string
+-	DurableIngestMetricStage    string
+-	NamespaceRequired           bool
+-	TransportIssuer             string
+-	TransportSigningKeys        string `json:"-"`
+-	ServiceTransportSigningKeys string `json:"-"`
++	LLMAPIKey                     string
++	LLMBaseURL                    string
++	LLMModel                      string
++	LLMTemperature                float64
++	IngestMode                    string
++	DurableIngestEnabled          bool
++	DurableIngestTenantID         string
++	DurableIngestMetricStage      string
++	NamespaceRequired             bool
++	ConsolidationExecutionEnabled bool
++	TransportIssuer               string
++	TransportSigningKeys          string `json:"-"`
++	ServiceTransportSigningKeys   string `json:"-"`
+ 
+ 	// FactExtractionIncludeAssistant allows smart ingest to extract durable facts
+ 	// from assistant turns in addition to user turns. Disabled by default.
+@@ -233,6 +234,7 @@ func Load() (*Config, error) {
+ 		DurableIngestTenantID:            strings.TrimSpace(os.Getenv("MEM9_TENANT_ID")),
+ 		DurableIngestMetricStage:         strings.TrimSpace(os.Getenv("MNEMO_DURABLE_INGEST_METRIC_STAGE")),
+ 		NamespaceRequired:                envBool("MNEMO_NAMESPACE_REQUIRED", false),
++		ConsolidationExecutionEnabled:    envBool("MNEMO_CONSOLIDATION_EXECUTION_ENABLED", false),
+ 		TransportIssuer:                  strings.TrimSpace(os.Getenv("MNEMO_TRANSPORT_ISSUER")),
+ 		TransportSigningKeys:             strings.TrimSpace(os.Getenv("MNEMO_TRANSPORT_SIGNING_KEYS")),
+ 		ServiceTransportSigningKeys:      strings.TrimSpace(os.Getenv("MNEMO_SERVICE_TRANSPORT_SIGNING_KEYS")),
+@@ -287,6 +289,9 @@ func Load() (*Config, error) {
+ 	if cfg.ServiceTransportSigningKeys != "" && !cfg.NamespaceRequired {
+ 		return nil, fmt.Errorf("MNEMO_SERVICE_TRANSPORT_SIGNING_KEYS requires MNEMO_NAMESPACE_REQUIRED=1")
+ 	}
++	if cfg.ConsolidationExecutionEnabled && (!cfg.NamespaceRequired || cfg.DBBackend != "postgres") {
++		return nil, fmt.Errorf("consolidation execution requires PostgreSQL namespace enforcement")
++	}
+ 	// Validate ingest mode.
+ 	switch cfg.IngestMode {
+ 	case "smart", "raw", "":
+diff --git a/server/internal/domain/types.go b/server/internal/domain/types.go
+index 73bf79d..a397226 100644
+--- a/server/internal/domain/types.go
++++ b/server/internal/domain/types.go
+@@ -88,6 +88,8 @@ type AuthInfo struct {
+ }
+ 
+ type NamespaceScope struct {
++	// Service is derived only from the authenticated maintenance issuer.
++	Service       string `json:"-"`
+ 	TenantID      string
+ 	NamespaceID   string
+ 	PrincipalID   string
+diff --git a/server/internal/embed/embedder.go b/server/internal/embed/embedder.go
+index 531bd93..88fc373 100644
+--- a/server/internal/embed/embedder.go
++++ b/server/internal/embed/embedder.go
+@@ -7,6 +7,7 @@ import (
+ 	"fmt"
+ 	"io"
+ 	"net/http"
++	"net/url"
+ 	"time"
+ )
+ 
+@@ -88,6 +89,20 @@ type embeddingResponse struct {
+ 
+ // Embed generates a vector embedding for the given text.
+ func (e *Embedder) Embed(ctx context.Context, text string) ([]float32, error) {
++	return e.embed(ctx, text, false)
++}
++
++// EmbedMaintenance is restricted to the local sidecar with explicit admission
++// acknowledgement. Redirects must never carry memory content off the host.
++func (e *Embedder) EmbedMaintenance(ctx context.Context, text string) ([]float32, error) {
++	u, err := url.Parse(e.baseURL)
++	if err != nil || u.Scheme != "http" || u.User != nil || (u.Hostname() != "localhost" && u.Hostname() != "127.0.0.1" && u.Hostname() != "::1") || e.dims != 1024 || len(text) > 16384 {
++		return nil, fmt.Errorf("invalid maintenance embedding configuration or input")
++	}
++	return e.embed(ctx, text, true)
++}
++
++func (e *Embedder) embed(ctx context.Context, text string, maintenance bool) ([]float32, error) {
+ 	reqBody := embeddingRequest{
+ 		Model:          e.model,
+ 		Input:          text,
+@@ -105,11 +120,21 @@ func (e *Embedder) Embed(ctx context.Context, text string) ([]float32, error) {
+ 	req.Header.Set("Content-Type", "application/json")
+ 	req.Header.Set("Authorization", "Bearer "+e.apiKey)
+ 
+-	resp, err := e.client.Do(req)
++	client := e.client
++	if maintenance {
++		req.Header.Set("X-Mem9-Maintenance", "1")
++		local := *e.client
++		local.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
++		client = &local
++	}
++	resp, err := client.Do(req)
+ 	if err != nil {
+ 		return nil, fmt.Errorf("embedding API call: %w", err)
+ 	}
+ 	defer resp.Body.Close()
++	if maintenance && resp.Header.Get("X-Mem9-Maintenance") != "1" {
++		return nil, fmt.Errorf("maintenance embedding admission unavailable")
++	}
+ 
+ 	if resp.StatusCode != http.StatusOK {
+ 		respBody, _ := io.ReadAll(resp.Body)
+diff --git a/server/internal/embed/maintenance_test.go b/server/internal/embed/maintenance_test.go
+new file mode 100644
+index 0000000..36176bc
+--- /dev/null
++++ b/server/internal/embed/maintenance_test.go
+@@ -0,0 +1,55 @@
++package embed
++
++import (
++	"context"
++	"encoding/json"
++	"net/http"
++	"net/http/httptest"
++	"strings"
++	"sync/atomic"
++	"testing"
++)
++
++func TestMaintenanceEmbeddingBoundary(t *testing.T) {
++	var calls atomic.Int32
++	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		calls.Add(1)
++		if r.Header.Get("X-Mem9-Maintenance") != "1" {
++			t.Error("missing maintenance attribution")
++		}
++		w.Header().Set("X-Mem9-Maintenance", "1")
++		vector := make([]float32, 1024)
++		vector[0] = 1
++		json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"embedding": vector}}})
++	}))
++	defer target.Close()
++	e := New(Config{BaseURL: target.URL, Model: "fixture", Dims: 1024})
++	if vector, err := e.EmbedMaintenance(context.Background(), "synthetic fact"); err != nil || len(vector) != 1024 {
++		t.Fatalf("maintenance embedding: %v", err)
++	}
++	if _, err := e.EmbedMaintenance(context.Background(), strings.Repeat("x", 16385)); err == nil {
++		t.Fatal("unbounded input accepted")
++	}
++	external := New(Config{BaseURL: "https://example.com/v1", Model: "fixture", Dims: 1024})
++	if _, err := external.EmbedMaintenance(context.Background(), "private"); err == nil {
++		t.Fatal("external endpoint accepted")
++	}
++	redirect := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		http.Redirect(w, r, target.URL, http.StatusTemporaryRedirect)
++	}))
++	defer redirect.Close()
++	before := calls.Load()
++	e = New(Config{BaseURL: redirect.URL, Model: "fixture", Dims: 1024})
++	if _, err := e.EmbedMaintenance(context.Background(), "private"); err == nil {
++		t.Fatal("redirect accepted")
++	}
++	if calls.Load() != before {
++		t.Fatal("maintenance request followed redirect")
++	}
++	unaware := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.Write([]byte("{\"data\":[{\"embedding\":[1]}]}")) }))
++	defer unaware.Close()
++	e = New(Config{BaseURL: unaware.URL, Model: "fixture", Dims: 1024})
++	if _, err := e.EmbedMaintenance(context.Background(), "private"); err == nil {
++		t.Fatal("sidecar without maintenance admission accepted")
++	}
++}
+diff --git a/server/internal/handler/consolidation.go b/server/internal/handler/consolidation.go
+new file mode 100644
+index 0000000..de14426
+--- /dev/null
++++ b/server/internal/handler/consolidation.go
+@@ -0,0 +1,238 @@
++package handler
++
++import (
++	"context"
++	"database/sql"
++	"encoding/json"
++	"errors"
++	"io"
++	"math"
++	"net/http"
++	"regexp"
++	"strings"
++	"time"
++
++	"github.com/go-chi/chi/v5"
++	"github.com/jackc/pgx/v5/pgconn"
++	"github.com/pgvector/pgvector-go"
++	"github.com/qiffang/mnemos/server/internal/domain"
++)
++
++var consolidationID = regexp.MustCompile("^[0-9a-f]{64}$")
++
++// The early check avoids unbudgeted embedding/read work through old routes.
++// Repository writes also hold the mode lock until commit to close the race.
++func (s *Server) consolidationLegacyGuard(next http.Handler) http.Handler {
++	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		auth := authInfo(r)
++		if auth == nil || auth.Namespace == nil || auth.Namespace.PrincipalType != "service" ||
++			strings.HasPrefix(r.URL.Path, "/v1alpha2/mem9s/maintenance/consolidation-actions/") ||
++			(auth.Namespace.Service != "consolidation" && (r.Method == http.MethodGet || r.Method == http.MethodHead)) {
++			next.ServeHTTP(w, r)
++			return
++		}
++		if auth.TenantDB == nil {
++			respondError(w, http.StatusForbidden, "service route denied")
++			return
++		}
++		var control sql.NullString
++		if err := auth.TenantDB.QueryRowContext(r.Context(), "SELECT to_regclass('mem9_maintenance.execution_control')::text").Scan(&control); err != nil {
++			s.consolidationFailure(w, err)
++			return
++		}
++		if control.Valid {
++			var allowed bool
++			if err := auth.TenantDB.QueryRowContext(r.Context(), "SELECT mem9_maintenance.legacy_write_allowed()").Scan(&allowed); err != nil {
++				s.consolidationFailure(w, err)
++				return
++			}
++			if !allowed {
++				respondError(w, http.StatusForbidden, "legacy maintenance route disabled")
++				return
++			}
++		}
++		next.ServeHTTP(w, r)
++	})
++}
++
++func (s *Server) WithConsolidationExecution(enabled bool) *Server {
++	s.consolidationExecution = enabled
++	return s
++}
++
++func (s *Server) consolidationAuth(w http.ResponseWriter, r *http.Request) (*domain.AuthInfo, string) {
++	auth := authInfo(r)
++	if !s.namespaceRequired || s.dbBackend != "postgres" || auth == nil || auth.TenantDB == nil ||
++		auth.Namespace == nil || auth.IsChain() || auth.Namespace.PrincipalType != "service" ||
++		auth.Namespace.Service != "consolidation" || auth.Namespace.TenantID != auth.TenantID ||
++		auth.Namespace.PrincipalID == "" || (auth.Namespace.Role != "member" && auth.Namespace.Role != "owner") {
++		respondError(w, http.StatusForbidden, "consolidation service required")
++		return nil, ""
++	}
++	id := chi.URLParam(r, "actionID")
++	if !consolidationID.MatchString(id) || r.URL.RawQuery != "" {
++		respondError(w, http.StatusBadRequest, "invalid consolidation action")
++		return nil, ""
++	}
++	return auth, id
++}
++
++func consolidationGeneration(w http.ResponseWriter, r *http.Request) (int64, error) {
++	d := json.NewDecoder(http.MaxBytesReader(w, r.Body, 256))
++	token, err := d.Token()
++	if err != nil || token != json.Delim('{') {
++		return 0, errors.New("object required")
++	}
++	token, err = d.Token()
++	if err != nil || token != "lease_generation" {
++		return 0, errors.New("lease required")
++	}
++	var generation int64
++	if err = d.Decode(&generation); err != nil || generation < 1 {
++		return 0, errors.New("invalid lease")
++	}
++	token, err = d.Token()
++	if err != nil || token != json.Delim('}') {
++		return 0, errors.New("unknown or duplicate field")
++	}
++	if err = d.Decode(new(any)); err != io.EOF {
++		return 0, errors.New("trailing data")
++	}
++	return generation, nil
++}
++
++func (s *Server) consolidationFailure(w http.ResponseWriter, err error) {
++	code := http.StatusServiceUnavailable
++	var databaseError *pgconn.PgError
++	if errors.As(err, &databaseError) {
++		switch databaseError.Code {
++		case "42501":
++			code = http.StatusForbidden
++		case "P0002":
++			code = http.StatusNotFound
++		case "55000":
++			code = http.StatusConflict
++		case "22023":
++			code = http.StatusBadRequest
++		}
++	}
++	// SQL errors and embedding error bodies can contain private material.
++	respondError(w, code, "consolidation operation unavailable")
++}
++
++func (s *Server) consolidationActionStatus(w http.ResponseWriter, r *http.Request) {
++	auth, id := s.consolidationAuth(w, r)
++	if auth == nil {
++		return
++	}
++	ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
++	defer cancel()
++	var result json.RawMessage
++	err := auth.TenantDB.QueryRowContext(ctx, "SELECT mem9_maintenance.action_status($1,$2)", auth.Namespace.NamespaceID, id).Scan(&result)
++	if err != nil {
++		s.consolidationFailure(w, err)
++		return
++	}
++	respond(w, http.StatusOK, result)
++}
++
++func (s *Server) applyConsolidationAction(w http.ResponseWriter, r *http.Request) {
++	auth, id := s.consolidationAuth(w, r)
++	if auth == nil {
++		return
++	}
++	if !s.consolidationExecution {
++		respondError(w, http.StatusServiceUnavailable, "consolidation execution disabled")
++		return
++	}
++	generation, err := consolidationGeneration(w, r)
++	if err != nil {
++		respondError(w, http.StatusBadRequest, "body must contain one positive lease_generation")
++		return
++	}
++	// A disconnect is an ambiguous outcome. Finish the bounded operation so the
++	// client can recover from the durable receipt instead of replaying a new plan.
++	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 50*time.Second)
++	defer cancel()
++	namespace := auth.Namespace.NamespaceID
++	var raw json.RawMessage
++	err = auth.TenantDB.QueryRowContext(ctx, "SELECT mem9_maintenance.prepare_action($1,$2,$3)", namespace, id, generation).Scan(&raw)
++	if err != nil {
++		s.consolidationFailure(w, err)
++		return
++	}
++	var preparation struct {
++		Status  string `json:"status"`
++		Content string `json:"content"`
++		Hash    string `json:"content_hash"`
++		Token   string `json:"owner_token"`
++		Model   string `json:"embedding_model"`
++	}
++	if err = json.Unmarshal(raw, &preparation); err != nil {
++		s.consolidationFailure(w, err)
++		return
++	}
++	if preparation.Status == "applied" || preparation.Status == "noop" {
++		respond(w, http.StatusOK, raw)
++		return
++	}
++	if preparation.Status == "in_progress" {
++		respond(w, http.StatusAccepted, map[string]string{"status": "in_progress"})
++		return
++	}
++	if preparation.Status == "invalidated" {
++		respond(w, http.StatusConflict, map[string]string{"status": "invalidated"})
++		return
++	}
++	if preparation.Status == "embed" {
++		abandon := func() {
++			cleanup, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Second)
++			defer cancel()
++			_, _ = auth.TenantDB.ExecContext(cleanup, "SELECT mem9_maintenance.abandon_preparation($1,$2,$3,$4)", namespace, id, generation, preparation.Token)
++		}
++		if s.embedder == nil || s.embedder.Model() != preparation.Model {
++			abandon()
++			respondError(w, http.StatusServiceUnavailable, "maintenance embedding unavailable")
++			return
++		}
++		vector, embedError := s.embedder.EmbedMaintenance(ctx, preparation.Content)
++		norm := float64(0)
++		for _, v := range vector {
++			norm += float64(v) * float64(v)
++		}
++		if embedError != nil || len(vector) != 1024 || norm < 0.99 || norm > 1.01 || math.IsNaN(norm) || math.IsInf(norm, 0) {
++			abandon()
++			respondError(w, http.StatusServiceUnavailable, "maintenance embedding unavailable")
++			return
++		}
++		_, err = auth.TenantDB.ExecContext(ctx, "SELECT mem9_maintenance.finish_preparation($1,$2,$3,$4,$5,$6::vector)",
++			namespace, id, generation, preparation.Token, preparation.Hash, pgvector.NewVector(vector))
++		if err != nil {
++			s.consolidationFailure(w, err)
++			return
++		}
++	} else if preparation.Status != "ready" {
++		respondError(w, http.StatusServiceUnavailable, "consolidation state unavailable")
++		return
++	}
++	err = auth.TenantDB.QueryRowContext(ctx, "SELECT mem9_maintenance.apply_action($1,$2,$3)", namespace, id, generation).Scan(&raw)
++	if err != nil {
++		s.consolidationFailure(w, err)
++		return
++	}
++	var result struct {
++		Status string `json:"status"`
++	}
++	if err = json.Unmarshal(raw, &result); err != nil {
++		s.consolidationFailure(w, err)
++		return
++	}
++	status := http.StatusOK
++	if result.Status == "rate_wait" || result.Status == "mutex_busy" {
++		status = http.StatusAccepted
++	}
++	if result.Status == "invalidated" {
++		status = http.StatusConflict
++	}
++	respond(w, status, raw)
++}
+diff --git a/server/internal/handler/consolidation_test.go b/server/internal/handler/consolidation_test.go
+new file mode 100644
+index 0000000..56735d6
+--- /dev/null
++++ b/server/internal/handler/consolidation_test.go
+@@ -0,0 +1,280 @@
++package handler
++
++import (
++	"bytes"
++	"context"
++	"crypto/hmac"
++	"crypto/sha256"
++	"database/sql"
++	"encoding/base64"
++	"encoding/hex"
++	"encoding/json"
++	"errors"
++	"fmt"
++	"net/http"
++	"net/http/httptest"
++	"os"
++	"strings"
++	"sync/atomic"
++	"testing"
++	"time"
++
++	"github.com/google/uuid"
++	"github.com/jackc/pgx/v5"
++	"github.com/jackc/pgx/v5/stdlib"
++	"github.com/qiffang/mnemos/server/internal/domain"
++	"github.com/qiffang/mnemos/server/internal/embed"
++	"github.com/qiffang/mnemos/server/internal/middleware"
++	"github.com/qiffang/mnemos/server/internal/repository/postgres"
++	"github.com/qiffang/mnemos/server/internal/testutil"
++)
++
++func TestConsolidationBodyIsStrict(t *testing.T) {
++	for _, body := range []string{"null", "{}", "[]", `{"lease_generation":0}`, `{"lease_generation":"1"}`, `{"lease_generation":1,"lease_generation":2}`, `{"lease_generation":1,"budget":2000}`, `{"lease_generation":1} {}`} {
++		req := httptest.NewRequest("POST", "/", strings.NewReader(body))
++		if _, err := consolidationGeneration(httptest.NewRecorder(), req); err == nil {
++			t.Errorf("accepted malformed body %s", body)
++		}
++	}
++	req := httptest.NewRequest("POST", "/", strings.NewReader(`{"lease_generation":12}`))
++	if n, err := consolidationGeneration(httptest.NewRecorder(), req); err != nil || n != 12 {
++		t.Fatal("valid generation rejected")
++	}
++}
++
++func TestConsolidationPrivateHTTPPostgres(t *testing.T) {
++	dsn := os.Getenv("MNEMO_TEST_POSTGRES_DSN")
++	if dsn == "" {
++		t.Skip("MNEMO_TEST_POSTGRES_DSN is not set")
++	}
++	db := testutil.OpenIsolatedPostgres(t, dsn)
++	ctx := context.Background()
++	exec := func(query string, args ...any) {
++		t.Helper()
++		if _, err := db.ExecContext(ctx, query, args...); err != nil {
++			t.Fatalf("fixture SQL: %v", err)
++		}
++	}
++	key := func(s string) string {
++		return fmt.Sprintf("%x", sha256.Sum256([]byte("mem9-service-principal-v1\x00"+s)))
++	}
++	namespace := testutil.TestNamespaceID
++	exec("UPDATE memory_principals SET principal_key=$1,principal_type='service' WHERE principal_id=$2", key("consolidation"), testutil.TestPrincipalID)
++	exec("UPDATE memory_namespace_memberships SET source_type='service',role='member',status='active' WHERE principal_id=$1", testutil.TestPrincipalID)
++	exec("INSERT INTO memory_namespace_memberships(namespace_id,principal_id,role,source_type) VALUES($1,$2,'member','service') ON CONFLICT DO NOTHING", testutil.TestOtherNamespaceID, testutil.TestPrincipalID)
++	plannerID := uuid.NewString()
++	exec("INSERT INTO memory_principals(principal_id,principal_key,principal_type) VALUES($1,$2,'service')", plannerID, key("consolidation-planner"))
++	exec("INSERT INTO memory_namespace_memberships(namespace_id,principal_id,role,source_type) VALUES($1,$2,'viewer','service')", namespace, plannerID)
++	exec("SELECT mem9_maintenance.configure_namespace($1,$2,true)", namespace, strings.Repeat("a", 64))
++	policy := `{"limits":{"total":10,"rewrite":10,"delete":10,"archive":10,"mark":10},"bps":{"total":10000,"rewrite":10000,"delete":10000,"archive":10000,"mark":10000},"rate":100,"burst":100}`
++	exec("SELECT mem9_maintenance.set_budget_policy('stage',$1)", policy)
++	exec("SELECT mem9_maintenance.set_budget_policy($1,$2)", namespace, policy)
++	retired := "retired_" + strings.ReplaceAll(uuid.NewString(), "-", "")
++	exec("CREATE ROLE " + pgx.Identifier{retired}.Sanitize() + " NOLOGIN")
++	t.Cleanup(func() { db.Exec("DROP ROLE " + pgx.Identifier{retired}.Sanitize()) })
++	connect := func(capability string) *sql.DB {
++		t.Helper()
++		role := "http_" + capability + "_" + strings.ReplaceAll(uuid.NewString(), "-", "")
++		password := uuid.NewString()
++		var statement string
++		if err := db.QueryRow("SELECT format('CREATE ROLE %I LOGIN PASSWORD %L',$1::text,$2::text)", role, password).Scan(&statement); err != nil {
++			t.Fatal(err)
++		}
++		exec(statement)
++		exec("GRANT mem9_maintenance_" + capability + " TO " + pgx.Identifier{role}.Sanitize())
++		exec("INSERT INTO mem9_maintenance.database_callers(role_oid,capability) VALUES($1::regrole::oid,$2)", role, capability)
++		cfg, err := pgx.ParseConfig(dsn)
++		if err != nil {
++			t.Fatal(err)
++		}
++		if err = db.QueryRow("SELECT current_database()").Scan(&cfg.Database); err != nil {
++			t.Fatal(err)
++		}
++		cfg.User = role
++		cfg.Password = password
++		connection := stdlib.OpenDB(*cfg)
++		if err = connection.Ping(); err != nil {
++			t.Fatal(err)
++		}
++		t.Cleanup(func() { connection.Close(); db.Exec("DROP ROLE " + pgx.Identifier{role}.Sanitize()) })
++		return connection
++	}
++	planner, executor, backend := connect("planner"), connect("executor"), connect("backend")
++	// The currently shipped server uses the migration-owning credential; the
++	// future dedicated server login inherits the explicit backend grant.
++	var legacyAllowed bool
++	if err := backend.QueryRow("SELECT mem9_maintenance.legacy_write_allowed()").Scan(&legacyAllowed); err != nil || !legacyAllowed {
++		t.Fatalf("backend fence grant: %v", err)
++	}
++	legacyScope := testutil.TestNamespaceScope()
++	legacyRepo := postgres.NewMemoryRepo(db, false, "", legacyScope)
++	legacyID := uuid.NewString()
++	if err := legacyRepo.Create(ctx, &domain.Memory{ID: legacyID, Content: "disabled mode compatibility", MemoryType: domain.TypeInsight, State: domain.StateActive, Version: 1}); err != nil {
++		t.Fatal(err)
++	}
++	if _, err := legacyRepo.SoftDelete(ctx, legacyID, "fixture"); err != nil {
++		t.Fatalf("disabled mode broke existing service writes: %v", err)
++	}
++	exec("SELECT mem9_maintenance.set_execution_mode('pr-http',true,ARRAY[$1::regrole::oid],'qwen3-embedding-0.6b')", retired)
++	humanID := uuid.NewString()
++	exec("INSERT INTO memory_principals(principal_id,principal_key,principal_type) VALUES($1,$2,'human')", humanID, key("human-fixture"))
++	exec("INSERT INTO memory_namespace_memberships(namespace_id,principal_id,role,source_type) VALUES($1,$2,'member','operator')", namespace, humanID)
++	humanRepo := postgres.NewMemoryRepo(db, false, "", domain.NamespaceScope{NamespaceID: namespace, PrincipalID: humanID, PrincipalType: "human", Role: "member"})
++	if err := humanRepo.Create(ctx, &domain.Memory{ID: uuid.NewString(), Content: "ordinary human write remains available", MemoryType: domain.TypeInsight, State: domain.StateActive, Version: 1}); err != nil {
++		t.Fatalf("execution mode blocked a human write: %v", err)
++	}
++	query := func(connection *sql.DB, query string, args ...any) json.RawMessage {
++		t.Helper()
++		var raw json.RawMessage
++		if err := connection.QueryRowContext(ctx, query, args...).Scan(&raw); err != nil {
++			t.Fatalf("fixture query: %v", err)
++		}
++		return raw
++	}
++	makeAction := func() (string, int64, []string) {
++		t.Helper()
++		ids := []string{uuid.NewString(), uuid.NewString()}
++		for i, id := range ids {
++			exec("INSERT INTO memories(id,namespace_id,content,tags,metadata,memory_type,state,version,embedding,created_by_principal_id,updated_by_principal_id) VALUES($1,$2,$3,'[]','{}','insight','active',1,(ARRAY[1::real]||array_fill(0::real,ARRAY[1023]))::vector,$4,$4)", id, namespace, fmt.Sprintf("Synthetic durable fact %d.", i), testutil.TestPrincipalID)
++		}
++		if _, err := planner.Exec("SELECT mem9_maintenance.consume_changes($1,1000)", namespace); err != nil {
++			t.Fatal(err)
++		}
++		var anchor string
++		var generation int64
++		if err := planner.QueryRow("SELECT memory_id,lease_generation FROM mem9_maintenance.claim_work($1,100,120) WHERE memory_id=ANY($2) LIMIT 1", namespace, ids).Scan(&anchor, &generation); err != nil {
++			t.Fatal(err)
++		}
++		var members json.RawMessage
++		if err := planner.QueryRow("SELECT jsonb_agg(jsonb_build_object('id',memory_id,'version',version,'fingerprint',fingerprint)) FROM mem9_maintenance.read_memories($1,$2)", namespace, ids).Scan(&members); err != nil {
++			t.Fatal(err)
++		}
++		payload, _ := json.Marshal(map[string]any{"context_hash": strings.Repeat("a", 64), "members": members, "result": "MERGE", "details": map[string]any{}, "valid_until": time.Now().UTC().Add(time.Hour)})
++		var classID string
++		if err := planner.QueryRow("SELECT mem9_maintenance.publish_classification($1,$2,$3,$4)", namespace, anchor, generation, string(payload)).Scan(&classID); err != nil {
++			t.Fatal(err)
++		}
++		queued := query(planner, "SELECT mem9_maintenance.queue_classification($1,$2)", namespace, classID)
++		var action struct {
++			ID string `json:"action_id"`
++		}
++		if err := json.Unmarshal(queued, &action); err != nil || action.ID == "" {
++			t.Fatal("action was not queued")
++		}
++		claimed := query(executor, "SELECT mem9_maintenance.claim_action($1,120)", namespace)
++		var lease struct {
++			Generation int64 `json:"lease_generation"`
++		}
++		if err := json.Unmarshal(claimed, &lease); err != nil || lease.Generation == 0 {
++			t.Fatal("action was not claimed")
++		}
++		return action.ID, lease.Generation, ids
++	}
++	var embeddingCalls atomic.Int32
++	embeddingEndpoint := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++		embeddingCalls.Add(1)
++		if r.Header.Get("X-Mem9-Maintenance") != "1" {
++			t.Error("missing sidecar admission header")
++		}
++		w.Header().Set("X-Mem9-Maintenance", "1")
++		vector := make([]float32, 1024)
++		vector[1] = 1
++		json.NewEncoder(w).Encode(map[string]any{"data": []any{map[string]any{"embedding": vector}}})
++	}))
++	defer embeddingEndpoint.Close()
++	server := postgresSessionDeleteServer().WithNamespaceRequired(true).WithConsolidationExecution(true)
++	server.embedder = embed.New(embed.Config{BaseURL: embeddingEndpoint.URL, Model: "qwen3-embedding-0.6b", Dims: 1024})
++	encodeKey := func(b byte) string { return base64.RawURLEncoding.EncodeToString(bytes.Repeat([]byte{b}, 32)) }
++	gateway, _ := json.Marshal(map[string]string{"a": encodeKey(1), "b": encodeKey(2)})
++	rings := map[string]map[string]string{}
++	for i, service := range []string{"consolidation", "cleanup", "analysis"} {
++		rings[service] = map[string]string{"active": "a", "a": encodeKey(byte(10 + i*2)), "b": encodeKey(byte(11 + i*2))}
++	}
++	serialized, _ := json.Marshal(rings)
++	authorizer, err := middleware.NewNamespaceAuthorizer("fixture-gateway", string(gateway), middleware.WithServiceSigningKeys(string(serialized)))
++	if err != nil {
++		t.Fatal(err)
++	}
++	authMiddleware := func(next http.Handler) http.Handler {
++		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
++			scope, err := authorizer.Authorize(r.Context(), db, "tenant-a", r)
++			if err != nil {
++				http.Error(w, "forbidden", 403)
++				return
++			}
++			auth := &domain.AuthInfo{TenantID: "tenant-a", TenantDB: backend, Namespace: scope}
++			next.ServeHTTP(w, r.WithContext(middleware.WithAuthContext(r.Context(), auth)))
++		})
++	}
++	identity := func(next http.Handler) http.Handler { return next }
++	router := server.Router(identity, identity, authMiddleware, identity)
++	send := func(service, method, path, body, ns string) *httptest.ResponseRecorder {
++		t.Helper()
++		request := httptest.NewRequest(method, path, strings.NewReader(body))
++		if service != "" {
++			now := time.Now().Unix()
++			hash := sha256.Sum256([]byte(body))
++			envelope, _ := json.Marshal(map[string]any{"v": 1, "kid": "a", "issuer": "maintenance:" + service, "issued_at": now, "expires_at": now + 30, "method": method, "path": path, "body_hash": hex.EncodeToString(hash[:]), "principal_type": "service", "principal_key": key(service), "client_key": key(service), "namespace_id": ns, "group_keys": []string{}})
++			secret, _ := base64.RawURLEncoding.DecodeString(rings[service]["a"])
++			mac := hmac.New(sha256.New, secret)
++			mac.Write(envelope)
++			request.Header.Set(middleware.TransportHeader, base64.RawURLEncoding.EncodeToString(envelope)+"."+hex.EncodeToString(mac.Sum(nil)))
++		}
++		response := httptest.NewRecorder()
++		router.ServeHTTP(response, request)
++		return response
++	}
++	action, generation, ids := makeAction()
++	for _, method := range []string{"GET", "POST"} {
++		path := "/v1alpha2/mem9s/memories"
++		if method == "POST" {
++			path += "/batch-delete"
++		}
++		if response := send("consolidation", method, path, "", namespace); response.Code != 403 {
++			t.Fatalf("legacy HTTP route bypass: %d", response.Code)
++		}
++	}
++	if _, err := legacyRepo.SoftDelete(ctx, ids[0], "fixture"); !errors.Is(err, domain.ErrServiceMutationDenied) {
++		t.Fatalf("legacy service delete did not return the mode fence: %v", err)
++	}
++	path := "/v1alpha2/mem9s/maintenance/consolidation-actions/" + action
++	body := fmt.Sprintf(`{"lease_generation":%d}`, generation)
++	for _, service := range []string{"", "analysis", "cleanup"} {
++		if response := send(service, "POST", path+"/apply", body, namespace); response.Code != 403 {
++			t.Fatalf("non-consolidation caller got %d", response.Code)
++		}
++	}
++	if response := send("consolidation", "POST", path+"/apply", `{"lease_generation":1,"content":"injected"}`, namespace); response.Code != 400 {
++		t.Fatalf("unknown field got %d", response.Code)
++	}
++	if response := send("consolidation", "GET", path, "", testutil.TestOtherNamespaceID); response.Code != 404 {
++		t.Fatalf("foreign action got %d", response.Code)
++	}
++	server.WithConsolidationExecution(false)
++	if response := send("consolidation", "POST", path+"/apply", body, namespace); response.Code != 503 {
++		t.Fatalf("disabled execution got %d", response.Code)
++	}
++	server.WithConsolidationExecution(true)
++	response := send("consolidation", "POST", path+"/apply", body, namespace)
++	if response.Code != 200 {
++		t.Fatalf("apply got %d: %s", response.Code, response.Body.String())
++	}
++	first := response.Body.String()
++	if strings.Contains(first, "Synthetic") || strings.Contains(first, "embedding") || strings.Contains(first, "before_images") {
++		t.Fatal("private payload in receipt")
++	}
++	if response = send("consolidation", "POST", path+"/apply", body, namespace); response.Code != 200 || response.Body.String() != first {
++		t.Fatal("receipt replay differed")
++	}
++	if embeddingCalls.Load() != 1 {
++		t.Fatal("duplicate apply embedded again")
++	}
++	var active, deleted int
++	if err := db.QueryRow("SELECT count(*) FILTER(WHERE state='active'),count(*) FILTER(WHERE state='deleted') FROM memories WHERE namespace_id=$1 AND id=ANY($2)", namespace, ids).Scan(&active, &deleted); err != nil || active != 1 || deleted != 1 {
++		t.Fatalf("atomic outcome %d/%d: %v", active, deleted, err)
++	}
++	server.WithConsolidationExecution(false)
++	if response := send("consolidation", "GET", path, "", namespace); response.Code != 200 {
++		t.Fatal("paused execution hid existing receipt")
++	}
++}
+diff --git a/server/internal/handler/handler.go b/server/internal/handler/handler.go
+index 21978df..662b167 100644
+--- a/server/internal/handler/handler.go
++++ b/server/internal/handler/handler.go
+@@ -32,32 +32,33 @@ import (
+ 
+ // Server holds the HTTP handlers and their dependencies.
+ type Server struct {
+-	tenant                *service.TenantService
+-	chains                *service.SpaceChainService
+-	uploadTasks           repository.UploadTaskRepo
+-	uploadDir             string
+-	embedder              *embed.Embedder
+-	llmClient             *llm.Client
+-	autoModel             string
+-	ftsEnabled            bool
+-	ingestMode            service.IngestMode
+-	dbBackend             string
+-	logger                *slog.Logger
+-	metering              metering.Writer
+-	runtimeUsage          runtimeusage.Manager
+-	webhooks              *webhook.Service
+-	activity              *service.ActivityTracker
+-	startedAt             time.Time
+-	svcCache              sync.Map
+-	chainRecallStopScore  float64
+-	disableSessionSave    bool
+-	includeAssistantFacts bool
+-	recallRequestTimeout  time.Duration
+-	recallResponseReserve time.Duration
+-	durableIngestEnabled  bool
+-	ingestRepoFactory     func(string, *sql.DB) ingestqueue.Repository
+-	durableTelemetry      ingestqueue.Telemetry
+-	namespaceRequired     bool
++	tenant                 *service.TenantService
++	chains                 *service.SpaceChainService
++	uploadTasks            repository.UploadTaskRepo
++	uploadDir              string
++	embedder               *embed.Embedder
++	llmClient              *llm.Client
++	autoModel              string
++	ftsEnabled             bool
++	ingestMode             service.IngestMode
++	dbBackend              string
++	logger                 *slog.Logger
++	metering               metering.Writer
++	runtimeUsage           runtimeusage.Manager
++	webhooks               *webhook.Service
++	activity               *service.ActivityTracker
++	startedAt              time.Time
++	svcCache               sync.Map
++	chainRecallStopScore   float64
++	disableSessionSave     bool
++	includeAssistantFacts  bool
++	recallRequestTimeout   time.Duration
++	recallResponseReserve  time.Duration
++	durableIngestEnabled   bool
++	ingestRepoFactory      func(string, *sql.DB) ingestqueue.Repository
++	durableTelemetry       ingestqueue.Telemetry
++	namespaceRequired      bool
++	consolidationExecution bool
+ }
+ 
+ // NewServer creates a new HTTP handler server.
+@@ -304,6 +305,7 @@ func (s *Server) Router(
+ 
+ 	r.Route("/v1alpha2/mem9s", func(r chi.Router) {
+ 		r.Use(apiKeyMW)
++		r.Use(s.consolidationLegacyGuard)
+ 
+ 		r.Post("/memories", s.createMemory)
+ 		r.Get("/memories", s.listMemories)
+@@ -311,6 +313,10 @@ func (s *Server) Router(
+ 		r.Put("/memories/{id}", s.updateMemory)
+ 		r.Delete("/memories/{id}", s.deleteMemory)
+ 		r.Post("/memories/batch-delete", s.batchDeleteMemories)
++		if s.namespaceRequired {
++			r.Post("/maintenance/consolidation-actions/{actionID}/apply", s.applyConsolidationAction)
++			r.Get("/maintenance/consolidation-actions/{actionID}", s.consolidationActionStatus)
++		}
+ 		if !s.namespaceRequired {
+ 			r.Get("/webhooks", s.listTenantWebhooks)
+ 			r.Post("/webhooks", s.createTenantWebhook)
+diff --git a/server/internal/middleware/namespace_auth.go b/server/internal/middleware/namespace_auth.go
+index eb98c0d..823275d 100644
+--- a/server/internal/middleware/namespace_auth.go
++++ b/server/internal/middleware/namespace_auth.go
+@@ -205,7 +205,7 @@ func (a *NamespaceAuthorizer) verifyRequest(r *http.Request) (transportEnvelope,
+ 	if identity.PrincipalType == "m2m" && len(identity.GroupKeys) != 0 {
+ 		return identity, errors.New("m2m transport cannot carry group keys")
+ 	}
+-	if identity.PrincipalType == "service" && !approvedServiceMemoryRoute(r) {
++	if identity.PrincipalType == "service" && !approvedServiceMemoryRoute(r) && !(identity.Issuer == "maintenance:consolidation" && approvedConsolidationRoute(r)) {
+ 		return identity, errors.New("service route denied")
+ 	}
+ 	return identity, nil
+diff --git a/server/internal/middleware/namespace_service_auth.go b/server/internal/middleware/namespace_service_auth.go
+index 67a41fd..935ffd7 100644
+--- a/server/internal/middleware/namespace_service_auth.go
++++ b/server/internal/middleware/namespace_service_auth.go
+@@ -98,6 +98,22 @@ func approvedServiceMemoryRoute(r *http.Request) bool {
+ 	return matched && id != "" && id != "." && id != ".." && id != "batch-delete" && !strings.Contains(id, "/")
+ }
+ 
++func approvedConsolidationRoute(r *http.Request) bool {
++	const prefix = "/v1alpha2/mem9s/maintenance/consolidation-actions/"
++	if r.URL.EscapedPath() != r.URL.Path || r.URL.RawQuery != "" {
++		return false
++	}
++	id, ok := strings.CutPrefix(r.URL.Path, prefix)
++	if !ok {
++		return false
++	}
++	if r.Method == http.MethodPost {
++		id, ok = strings.CutSuffix(id, "/apply")
++		return ok && hex64Pattern.MatchString(id)
++	}
++	return r.Method == http.MethodGet && hex64Pattern.MatchString(id)
++}
++
+ // Compatibility still authenticates legacy callers by the tenant key alone.
+ // Parsing this header does not authenticate its claims. It only ensures service
+ // or malformed envelopes cannot silently fall through to unscoped repositories
+@@ -203,6 +219,7 @@ func resolveServiceScope(ctx context.Context, tx *sql.Tx, tenantID string, ident
+ 		return nil, &namespaceAuthError{status: http.StatusForbidden, msg: "memory namespace role denied"}
+ 	}
+ 	return &domain.NamespaceScope{
++		Service:  strings.TrimPrefix(identity.Issuer, "maintenance:"),
+ 		TenantID: tenantID, NamespaceID: identity.NamespaceID,
+ 		PrincipalID: principalID, PrincipalType: "service", Role: role,
+ 	}, nil
+diff --git a/server/internal/repository/postgres/memory_service_mutation.go b/server/internal/repository/postgres/memory_service_mutation.go
+index 57d4865..1db42b0 100644
+--- a/server/internal/repository/postgres/memory_service_mutation.go
++++ b/server/internal/repository/postgres/memory_service_mutation.go
+@@ -90,5 +90,21 @@ func (r *MemoryRepo) lockServiceMutationScope(ctx context.Context, tx *sql.Tx) e
+ 		FOR SHARE`, r.namespaceID, r.principalID).Scan(&allowed); err != nil {
+ 		return serviceMutationScopeError(err)
+ 	}
++	// Keep this read lock through the memory commit. Mode activation waits for
++	// legacy writes; once enabled, service PUT/DELETE/batch-delete cannot bypass
++	// the atomic apply route or its budget. Human/M2M writes do not enter here.
++	var control sql.NullString
++	if err := tx.QueryRowContext(ctx, "SELECT to_regclass('mem9_maintenance.execution_control')::text").Scan(&control); err != nil {
++		return serviceMutationScopeError(err)
++	}
++	if control.Valid {
++		var legacyAllowed bool
++		if err := tx.QueryRowContext(ctx, "SELECT mem9_maintenance.legacy_write_allowed()").Scan(&legacyAllowed); err != nil {
++			return serviceMutationScopeError(err)
++		}
++		if !legacyAllowed {
++			return domain.ErrServiceMutationDenied
++		}
++	}
+ 	return nil
+ }
