@@ -12,6 +12,10 @@ import {resolveApplicationRegion} from './lib/application-region.mjs';
 
 const fail=message=>{throw Error(message);};
 const emit=(phase,values={})=>process.stdout.write(JSON.stringify({event:'consolidation_scheduler_acceptance',phase,...values})+'\n');
+export function taskDefinitionMatches(arn,manifest,containerName){
+  const prefix=`arn:aws:ecs:${manifest.region}:${manifest.account}:task-definition/${manifest.clusterName}-${containerName}:`;
+  return typeof arn==='string'&&arn.startsWith(prefix)&&/^[1-9][0-9]*$/.test(arn.slice(prefix.length));
+}
 export function validateManifest(value,stage,generation,region){
   if(!isConsolidationPreview(stage)||value?.stage!==stage||value.generation!==generation)fail('GenerationDeployMismatch');
   const cluster=value.clusterArn?.match(/^arn:aws:ecs:([a-z0-9-]+):([0-9]{12}):cluster\/(.+)$/);
@@ -89,7 +93,7 @@ export async function runSchedulerAcceptance({clients,stage,generation,region,no
   const bootstrapKeys=['task-def-arn','subnet-ids','task-sg-id'].map(key=>prefix+'/bootstrap/'+key);
   const bootstrap=await parameters(bootstrapKeys);
   const bootArn=bootstrap.get(bootstrapKeys[0]);
-  if(!bootArn?.startsWith(`arn:aws:ecs:${region}:${manifest.account}:task-definition/mem9-on-aws-${stage}-Mem9Bootstrap`))fail('InvalidBootstrapMetadata');
+  if(!taskDefinitionMatches(bootArn,manifest,'Mem9Bootstrap'))fail('InvalidBootstrapMetadata');
   const bootDef=(await send(ecs,new DescribeTaskDefinitionCommand({taskDefinition:bootArn}))).taskDefinition;
   const boot=bootDef?.containerDefinitions?.find(c=>c.name==='Mem9Bootstrap');
   const bootEnv=Object.fromEntries((boot?.environment??[]).map(e=>[e.name,e.value]));

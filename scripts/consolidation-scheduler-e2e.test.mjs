@@ -1,5 +1,5 @@
 import {describe,it,expect} from 'vitest';
-import {validateManifest,scheduleJournal,validateJournal,ownsTask,oneShotInput,runSchedulerAcceptance} from './consolidation-scheduler-e2e.mjs';
+import {validateManifest,scheduleJournal,validateJournal,ownsTask,oneShotInput,runSchedulerAcceptance,taskDefinitionMatches} from './consolidation-scheduler-e2e.mjs';
 
 const stage='pr-7',generation='a'.repeat(64),region='ap-northeast-1',account='123456789012';
 const clusterName=`mem9-on-aws-${stage}-Cluster-example`;
@@ -16,6 +16,13 @@ const template={State:'DISABLED',GroupName:manifest.groupName,Target:{Arn:manife
   Input:JSON.stringify({containerOverrides:[{name:worker.containerName,environment:[{name:'MEM9_WORKER_GENERATION',value:generation}]}]}),
   EcsParameters:{TaskDefinitionArn:worker.taskDefinitionArn,LaunchType:'FARGATE',PropagateTags:'TASK_DEFINITION'}}};
 describe('real Scheduler acceptance ownership and cleanup',()=>{
+  it('accepts the actual SST cluster-prefixed bootstrap family and rejects other families',()=>{
+    const arn=`arn:aws:ecs:${region}:${account}:task-definition/${clusterName}-Mem9Bootstrap:7`;
+    expect(taskDefinitionMatches(arn,manifest,'Mem9Bootstrap')).toBe(true);
+    for(const other of [arn.replace('-Mem9Bootstrap:','-Mem9BootstrapOther:'),arn.replace(clusterName,'mem9-on-aws-pr-8-Cluster-example'),
+      arn.replace(':7',':0'),arn.replace(`${clusterName}-Mem9Bootstrap`,`mem9-on-aws-${stage}-Mem9Bootstrap`)])
+      expect(taskDefinitionMatches(other,manifest,'Mem9Bootstrap')).toBe(false);
+  });
   it('rejects stale deployment, wrong account and wrong stage',()=>{
     expect(()=>validateManifest(raw,stage,'b'.repeat(64),region)).toThrow('GenerationDeployMismatch');
     expect(()=>validateManifest({...raw,roleArn:raw.roleArn.replace(account,'<other-account-id>')},stage,generation,region)).toThrow();
@@ -57,7 +64,7 @@ describe('real Scheduler acceptance ownership and cleanup',()=>{
   });
   it.each(['schedule-response-loss','setup-response-loss','stop-failure'])('journals and continues cleanup after %s',async scenario=>{
     let now=Date.now(),taskSequence=0;const calls=[],store=new Map(),tasks=new Map();
-    const bootArn=`arn:aws:ecs:${region}:${account}:task-definition/mem9-on-aws-${stage}-Mem9Bootstrap:7`;
+    const bootArn=`arn:aws:ecs:${region}:${account}:task-definition/${clusterName}-Mem9Bootstrap:7`;
     store.set(`/mem9-on-aws/${stage}/consolidation-preview/manifest`,JSON.stringify(raw));
     for(const [k,v] of Object.entries({'task-def-arn':bootArn,'subnet-ids':'subnet-test','task-sg-id':'sg-test'}))store.set(`/mem9-on-aws/${stage}/bootstrap/${k}`,v);
     const client={send:async command=>{
