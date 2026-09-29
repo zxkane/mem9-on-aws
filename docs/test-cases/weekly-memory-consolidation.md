@@ -133,6 +133,7 @@ credential-cutover/quality gates remain explicit prerequisites.
 | TC-CONSOL-EXEC-015 | ARCHIVE or STALE is eligible | Archive fences both timeline participants; stale marking preserves content/vector and settles actual rows |
 | TC-CONSOL-EXEC-016 | Planner/executor attempts direct action, budget, receipt or undo manipulation | Database privileges deny it; backend/operator capabilities are separately bound to authenticated logins |
 | TC-CONSOL-EXEC-017 | Real PostgreSQL HTTP tests and existing namespace/ingest/rollback suites run | New route works through signed service authorization without changing legacy/public API behavior |
+| TC-CONSOL-EXEC-018 | CLI configuration, credential JSON or database connection fails | Actual subprocess stdout/stderr contain only the bounded error record; generated credential markers never appear |
 
 ## Model action contract
 
