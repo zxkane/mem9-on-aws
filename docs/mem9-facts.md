@@ -459,13 +459,28 @@ still keep writers stopped through namespace cutover.
   row or retained successor link requires explicit force, and restore preserves
   the link, version, and embedding. Consolidation fences both loser and winner
   aliases, and its archive/stale transitions record the authenticated actor.
-- The current MERGE path is not one atomic operation. The survivor PUT has a
+- The legacy MERGE path is not one atomic operation. The survivor PUT has a
   server-side version predicate, but absorbed fragments are re-read and later
   sent to an unversioned batch-delete endpoint. A concurrent edit in that gap
   is not excluded by the cleanup/consolidation advisory mutex, which does not
   cover ordinary ingest. Increased automatic throughput requires the proposed
   server-side all-member fence and atomic apply/receipt transaction; client-side
   pre-reading alone does not establish that guarantee.
+- Patch `0023-consolidation-atomic-execution` and migration
+  `005_consolidation_execution.sql` provide the new private execution path,
+  disabled by default. It accepts only a stored action ID and lease generation,
+  uses lossless source-derived output, and commits memory changes, embedding,
+  receipt and budget settlement together. The backend uses the existing signed
+  consolidation identity; planner/executor database logins cannot perform direct
+  memory DML. The current schema-owning server credential can call the legacy
+  fence; future server logins require the explicit backend-role grant.
+- In enabled execution mode, the new server denies legacy consolidation routes
+  early and fences service writes again in their transaction. Human/M2M writes
+  keep their existing path. A rollback after activation must retain this fence.
+  The local embedding path acknowledges maintenance admission and holds it
+  through actual inference completion, even after an HTTP disconnect. No worker
+  task, schedule, credential cutover or production allowance is activated by
+  installing these changes.
 - Decision and report artifacts carry stage/namespace identity and belong in
   owner-only files. JSON ID selections are checked against that binding; plain
   ID lists remain limited to the invocation's authorized namespace. Apply

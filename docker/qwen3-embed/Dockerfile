@@ -46,6 +46,7 @@ RUN apt-get update \
 COPY --from=model /app/node_modules ./node_modules
 COPY docker/healthcheck.mjs ./healthcheck.mjs
 COPY docker/qwen3-embed/server.mjs ./
+COPY docker/qwen3-embed/maintenance-admission.mjs ./
 
 # Listens on QWEN3_EMBED_PORT (default 8081); mem9 reaches it at
 # http://localhost:8081/v1. Not published outside the task — localhost only.

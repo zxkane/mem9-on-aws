@@ -21,6 +21,9 @@
 //     bootstrap creates + mem9's MNEMO_EMBED_DIMS=1024). We assert it.
 
 import { createServer } from "node:http";
+import { createMaintenanceAdmission } from "./maintenance-admission.mjs";
+
+const maintenanceAdmission = createMaintenanceAdmission();
 
 const PORT = Number(process.env.QWEN3_EMBED_PORT || 8081);
 const MODEL_REPO =
@@ -139,15 +142,32 @@ const server = createServer(async (req, res) => {
           "`input` must be a string or an array of strings (token-id arrays are not supported)",
         );
       }
-      const extractor = await getExtractor();
-      // Single-text loop — NOT a native batch (padding pathology, see header).
-      const data = [];
-      let totalChars = 0;
-      for (let i = 0; i < inputs.length; i++) {
-        const embedding = await embedOne(extractor, inputs[i]);
-        data.push({ object: "embedding", index: i, embedding });
-        totalChars += inputs[i].length;
+      const maintenance = req.headers["x-mem9-maintenance"];
+      if (maintenance !== undefined && (maintenance !== "1" || inputs.length !== 1 || Buffer.byteLength(inputs[0]) > 16384)) {
+        return sendError(res, 400, "invalid maintenance embedding request");
       }
+      const compute = async () => {
+        const extractor = await getExtractor();
+        // Single-text loop avoids padding unrelated texts to the longest input.
+        const data = [];
+        let totalChars = 0;
+        for (let i = 0; i < inputs.length; i++) {
+          const embedding = await embedOne(extractor, inputs[i]);
+          data.push({ object: "embedding", index: i, embedding });
+          totalChars += inputs[i].length;
+        }
+        return { data, totalChars };
+      };
+      let computed;
+      if (maintenance === "1") {
+        const admitted = await maintenanceAdmission.run(compute);
+        if (!admitted.accepted) return sendError(res, 429, "maintenance embedding busy");
+        res.setHeader("X-Mem9-Maintenance", "1");
+        computed = admitted.value;
+      } else {
+        computed = await compute();
+      }
+      const { data, totalChars } = computed;
       // usage.*_tokens are not meaningful here (no token accounting); report a
       // char-based proxy so the OpenAI shape is complete. mem9 ignores it.
       const approxTokens = Math.ceil(totalChars / 4);
@@ -162,7 +182,7 @@ const server = createServer(async (req, res) => {
     return sendError(res, 404, `no route for ${req.method} ${url.pathname}`, "not_found");
   } catch (err) {
     // Never leak a stack; log server-side, return a generic 500.
-    console.error("embed request error:", err?.message || err);
+    console.error("embed request error:", "EmbeddingError");
     return sendError(res, 500, "internal error computing embedding", "server_error");
   }
 });

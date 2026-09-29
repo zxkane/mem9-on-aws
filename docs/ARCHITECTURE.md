@@ -1137,6 +1137,18 @@ until the remaining implementation and release gates pass. The isolated
 `scripts/run-consolidation-storage-integration.sh` rehearsal verifies migration,
 late commits, leases, caching and real login privilege isolation before deployment.
 
+The execution increment adds migration `005_consolidation_execution.sql`, the
+private backend route in patch `0023-consolidation-atomic-execution`, and a
+bounded `scripts/consolidation-executor.mjs` consumer. The server flag
+`MNEMO_CONSOLIDATION_EXECUTION_ENABLED` defaults off; database activation also
+requires configured budgets, restricted worker bindings and declared legacy
+login/session retirement. The executor requires `MEM9_EXECUTOR_DB_SECRET`
+and does not fall back to the legacy owner-secret environment variable.
+Atomicity, idempotency, UTC budget windows, rate limits and conditional undo are
+rehearsed by `scripts/run-consolidation-execution-integration.sh` and the real
+PostgreSQL HTTP tests. Continuous planning/scheduling, full retention cleanup,
+fair-share/model admission and production rollout acceptance remain pending.
+
 The open reliability program covers future work in these areas:
 
 - Release image tag selection and read-only ECS actual-state reconciliation.

@@ -26,8 +26,8 @@ const javascript = (source, owner = "scripts/example.mjs") =>
   extractSqlStatements({ kind: "javascript", owner, source });
 
 describe("memory namespace query inventory", () => {
-  it("STORE-007: stored maintenance routines cannot inherit a schema-operator exemption", () => {
-    const owner = "docker/bootstrap/migrations/004_consolidation_storage.sql";
+  it.each(["004_consolidation_storage.sql", "005_consolidation_execution.sql"])("STORE-007: stored routine %s cannot inherit a schema-operator exemption", name => {
+    const owner = "docker/bootstrap/migrations/" + name;
     const text = "CREATE FUNCTION example() RETURNS void AS $$ SELECT id FROM memories WHERE namespace_id=p_namespace $$ LANGUAGE SQL";
     expect(classifyStatement({owner,text}).classification).toBe("unclassified");
     const exception = {owner,statement_sha256:statementHash(text),classification:"namespace_composed_or_compatibility",

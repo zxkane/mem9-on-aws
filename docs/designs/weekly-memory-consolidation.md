@@ -674,6 +674,46 @@ Implementation is complete only when evidence proves:
 
 ## Delivery slices and review disposition
 
+The execution increment adds a private signed-consolidation apply/status route,
+immutable executable actions, preparation ownership, receipts, conditional undo,
+and persisted stage/namespace risk windows and apply-rate buckets. The executor
+can drain successive 100-row batches; a process summary counts only confirmed
+receipts and explicitly reports unresolved actions. The database remains the
+accounting authority after a lost response or caller shutdown.
+
+The first executable MERGE derives lossless output from stored source texts and
+provenance. Protected records, incompatible material context and oversized
+output are review-only. Rewritten content is limited to 16 KiB for the local
+embedding path. Broader semantic rewriting still needs the independent quality
+gates. Rate and budget policies have no automatic production defaults. A
+control-row lock deliberately serializes the short accounting transactions
+across the stage; inference runs outside those transactions. Sidecar admission
+limits maintenance inference to one per server.
+
+Current production uses the schema-owning server credential, which already has
+permission to run the legacy-write fence. A future server login must inherit
+`mem9_maintenance_backend` in addition to its normal application grants. The
+private function grant is explicit; no PUBLIC grant is added. Tests cover
+disabled-mode service writes, enabled-mode denial and unaffected human writes.
+Base migration replay preserves the later backend/operator authorization and
+execution grants. New execution remains disabled until declared legacy logins
+are retired, their sessions are gone, worker bindings and budgets exist, and
+the remaining operational cutover evidence is accepted. The database check
+does not replace a complete deployment/credential inventory.
+
+Remaining activation gates include the continuous planner and schedules,
+model-budget and fair-share admission, complete payload-retention cleanup,
+production credential cutover, quality/load calibration and the 24–72 hour
+drain proof. A rollback after activation must retain this increment's
+transactional legacy-route fence; older unguarded images are not an acceptable
+v2 rollback. The current rollback rehearsal keeps v2 disabled.
+
+The execution increment passed follow-up independent review by GLM-5 and
+Opus 4.8 after privilege/compatibility, migration-replay and recovery tests were
+supplied. A native reviewer did not complete because its service rejected the
+request; it is not counted as a passing review. Retention cleanup, operational
+cutover and activation-scale measurements remain release gates.
+
 The first implementation increment supplies the planning-storage part of slice 1
 in `docker/bootstrap/migrations/004_consolidation_storage.sql`. Its private
 `mem9_maintenance` schema holds an opt-in change outbox, dirty work generations,

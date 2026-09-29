@@ -148,30 +148,32 @@ CREATE TRIGGER trg_memories_maintenance_capture AFTER INSERT OR UPDATE OR DELETE
 -- login-OID binding must both match. Namespace revocation waits for these locks.
 CREATE OR REPLACE FUNCTION mem9_maintenance.authorize(p_namespace TEXT,p_capability TEXT DEFAULT NULL)
 RETURNS TEXT LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp AS $$
-DECLARE capability TEXT; actor TEXT; service TEXT; actor_key TEXT; member_role TEXT;
+DECLARE capability TEXT; actor TEXT; service TEXT; actor_key TEXT; member_role TEXT; source_kind TEXT;
 BEGIN
-  SELECT c.capability INTO capability FROM mem9_maintenance.database_callers c
-    JOIN pg_roles r ON r.oid=c.role_oid WHERE r.rolname=session_user;
+  SELECT c.capability INTO capability FROM mem9_maintenance.database_callers c JOIN pg_roles r ON r.oid=c.role_oid WHERE r.rolname=session_user;
   IF capability IS NULL OR (p_capability IS NOT NULL AND capability<>p_capability) OR
     NOT pg_has_role(session_user,('mem9_maintenance_'||capability)::name,'USAGE') THEN
-    RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='maintenance caller denied';
-  END IF;
-  IF NOT EXISTS (SELECT FROM public.memory_namespace_migration_state WHERE singleton_id AND phase='constraints_complete') THEN
-    RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='maintenance requires namespace enforcement';
-  END IF;
-  PERFORM n.namespace_id FROM public.memory_namespaces n
-    WHERE n.namespace_id=p_namespace AND n.status='active' FOR SHARE;
+    RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='maintenance caller denied'; END IF;
+  IF NOT EXISTS(SELECT FROM public.memory_namespace_migration_state WHERE singleton_id AND phase='constraints_complete') THEN
+    RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='maintenance requires namespace enforcement'; END IF;
+  PERFORM namespace_id FROM public.memory_namespaces WHERE namespace_id=p_namespace AND status='active' FOR SHARE;
   IF NOT FOUND THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='maintenance namespace denied'; END IF;
-  service := CASE capability WHEN 'planner' THEN 'consolidation-planner' ELSE 'consolidation' END;
-  actor_key := encode(sha256(convert_to('mem9-service-principal-v1','UTF8')||decode('00','hex')||convert_to(service,'UTF8')),'hex');
-  SELECT p.principal_id INTO actor FROM public.memory_principals p
-    WHERE p.principal_key=actor_key AND p.principal_type='service' AND p.status='active' FOR SHARE;
-  IF NOT FOUND THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='maintenance service denied'; END IF;
-  SELECT m.role INTO member_role FROM public.memory_namespace_memberships m
-    WHERE m.namespace_id=p_namespace AND m.principal_id=actor AND m.status='active' AND m.source_type='service' FOR SHARE;
-  IF member_role IS NULL OR (capability='executor' AND member_role NOT IN ('member','owner')) THEN
-    RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='maintenance membership denied';
+  IF capability='operator' THEN
+    SELECT o.principal_id INTO actor FROM mem9_maintenance.operator_principals o JOIN pg_roles r ON r.oid=o.role_oid WHERE r.rolname=session_user;
+    PERFORM principal_id FROM public.memory_principals WHERE principal_id=actor AND status='active' FOR SHARE;
+    IF NOT FOUND THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='maintenance operator denied'; END IF;
+  ELSE
+    service:=CASE capability WHEN 'planner' THEN 'consolidation-planner' ELSE 'consolidation' END;
+    actor_key:=encode(sha256(convert_to('mem9-service-principal-v1','UTF8')||decode('00','hex')||convert_to(service,'UTF8')),'hex');
+    SELECT principal_id INTO actor FROM public.memory_principals WHERE principal_key=actor_key AND principal_type='service' AND status='active' FOR SHARE;
+    IF NOT FOUND THEN RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='maintenance service denied'; END IF;
   END IF;
+  SELECT role,source_type INTO member_role,source_kind FROM public.memory_namespace_memberships
+    WHERE namespace_id=p_namespace AND principal_id=actor AND status='active' FOR SHARE;
+  IF member_role IS NULL OR (capability='operator' AND member_role<>'owner') OR
+    (capability<>'operator' AND source_kind<>'service') OR
+    (capability IN ('executor','backend') AND member_role NOT IN ('member','owner')) THEN
+    RAISE EXCEPTION USING ERRCODE='42501',MESSAGE='maintenance membership denied'; END IF;
   RETURN capability;
 END $$;
 
@@ -441,7 +443,18 @@ END $$;
 -- Even a mapped login cannot bypass these operations through direct DML.
 REVOKE ALL ON ALL TABLES IN SCHEMA mem9_maintenance FROM PUBLIC,mem9_maintenance_planner,mem9_maintenance_executor;
 REVOKE ALL ON ALL SEQUENCES IN SCHEMA mem9_maintenance FROM PUBLIC,mem9_maintenance_planner,mem9_maintenance_executor;
-REVOKE ALL ON ALL FUNCTIONS IN SCHEMA mem9_maintenance FROM PUBLIC,mem9_maintenance_planner,mem9_maintenance_executor;
+REVOKE ALL ON ALL FUNCTIONS IN SCHEMA mem9_maintenance FROM PUBLIC;
+-- Replaying the base migration must not revoke a later execution migration's
+-- grants or temporarily downgrade its backend/operator authorization.
+REVOKE ALL ON FUNCTION mem9_maintenance.immutable(),mem9_maintenance.capture_change(),
+  mem9_maintenance.authorize(TEXT,TEXT),mem9_maintenance.lock_queue(TEXT),
+  mem9_maintenance.dirty(TEXT,TEXT,TIMESTAMPTZ,TEXT),
+  mem9_maintenance.configure_namespace(TEXT,TEXT,BOOLEAN),
+  mem9_maintenance.consume_changes(TEXT,INTEGER),mem9_maintenance.claim_work(TEXT,INTEGER,INTEGER),
+  mem9_maintenance.read_memories(TEXT,TEXT[]),mem9_maintenance.input_fingerprint(TEXT,JSONB,TEXT),
+  mem9_maintenance.publish_classification(TEXT,TEXT,BIGINT,JSONB),
+  mem9_maintenance.find_classification(TEXT,TEXT[]),mem9_maintenance.sweep_due(TEXT,INTEGER),
+  mem9_maintenance.queue_status(TEXT) FROM mem9_maintenance_planner,mem9_maintenance_executor;
 GRANT USAGE ON SCHEMA mem9_maintenance TO mem9_maintenance_planner,mem9_maintenance_executor;
 GRANT EXECUTE ON FUNCTION mem9_maintenance.consume_changes(TEXT,INTEGER),
   mem9_maintenance.claim_work(TEXT,INTEGER,INTEGER),mem9_maintenance.read_memories(TEXT,TEXT[]),

@@ -312,6 +312,71 @@
         "scripts/run-consolidation-storage-integration.sh",
         "scripts/memory-namespace-query-inventory.test.mjs"
       ]
+    },
+    {
+      "owner": "docker/bootstrap/migrations/005_consolidation_execution.sql",
+      "statement_sha256": "f0e6902d8287cdaf17a3b8feeb115d22246286d55645d490b068cc47c998cb7b",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Private execution routine queue_classification; complete function, callers and grants reviewed.",
+      "rationale": "Memory aliases are bound to the authorized p_namespace and the immutable participant set. Public execution is revoked; entry points bind real login capabilities and active namespace membership. Internal routines are invoked only behind the same transaction guard.",
+      "namespace_evidence": "Explicit namespace predicates, namespace-bound action/classification keys and all-member fences.",
+      "coverage": [
+        "scripts/consolidation-execution.postgres.test.mjs",
+        "scripts/run-consolidation-execution-integration.sh",
+        "upstream/server/internal/handler/consolidation_test.go"
+      ]
+    },
+    {
+      "owner": "docker/bootstrap/migrations/005_consolidation_execution.sql",
+      "statement_sha256": "639c46b873ec22c15f4042e7b908bf1c379e48435c68454a4ff72cb572b9e54e",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Private execution routine open_windows; complete function, callers and grants reviewed.",
+      "rationale": "Memory aliases are bound to the authorized p_namespace and the immutable participant set. Public execution is revoked; entry points bind real login capabilities and active namespace membership. Internal routines are invoked only behind the same transaction guard.",
+      "namespace_evidence": "Explicit namespace predicates, namespace-bound action/classification keys and all-member fences.",
+      "coverage": [
+        "scripts/consolidation-execution.postgres.test.mjs",
+        "scripts/run-consolidation-execution-integration.sh",
+        "upstream/server/internal/handler/consolidation_test.go"
+      ]
+    },
+    {
+      "owner": "docker/bootstrap/migrations/005_consolidation_execution.sql",
+      "statement_sha256": "31b37bb37eae2caf83af6a04d6ef10bafc86061187dcaa2bac2bef548e14dd5e",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Private execution routine action_inputs_valid; complete function, callers and grants reviewed.",
+      "rationale": "Memory aliases are bound to the authorized p_namespace and the immutable participant set. Public execution is revoked; entry points bind real login capabilities and active namespace membership. Internal routines are invoked only behind the same transaction guard.",
+      "namespace_evidence": "Explicit namespace predicates, namespace-bound action/classification keys and all-member fences.",
+      "coverage": [
+        "scripts/consolidation-execution.postgres.test.mjs",
+        "scripts/run-consolidation-execution-integration.sh",
+        "upstream/server/internal/handler/consolidation_test.go"
+      ]
+    },
+    {
+      "owner": "docker/bootstrap/migrations/005_consolidation_execution.sql",
+      "statement_sha256": "7758e526b9a327dd4cdbda597ca6a4987d452f458c6767b6e1339b8223520cbd",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Private execution routine apply_action; complete function, callers and grants reviewed.",
+      "rationale": "Memory aliases are bound to the authorized p_namespace and the immutable participant set. Public execution is revoked; entry points bind real login capabilities and active namespace membership. Internal routines are invoked only behind the same transaction guard.",
+      "namespace_evidence": "Explicit namespace predicates, namespace-bound action/classification keys and all-member fences.",
+      "coverage": [
+        "scripts/consolidation-execution.postgres.test.mjs",
+        "scripts/run-consolidation-execution-integration.sh",
+        "upstream/server/internal/handler/consolidation_test.go"
+      ]
+    },
+    {
+      "owner": "docker/bootstrap/migrations/005_consolidation_execution.sql",
+      "statement_sha256": "2877af60818529c6e1df23b2f0a3cbafb61853a964d66f3879f073bfbb6e8b54",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "Private execution routine undo_action; complete function, callers and grants reviewed.",
+      "rationale": "Memory aliases are bound to the authorized p_namespace and the immutable participant set. Public execution is revoked; entry points bind real login capabilities and active namespace membership. Internal routines are invoked only behind the same transaction guard.",
+      "namespace_evidence": "Explicit namespace predicates, namespace-bound action/classification keys and all-member fences.",
+      "coverage": [
+        "scripts/consolidation-execution.postgres.test.mjs",
+        "scripts/run-consolidation-execution-integration.sh",
+        "upstream/server/internal/handler/consolidation_test.go"
+      ]
     }
   ]
 }
