@@ -89,7 +89,6 @@ export async function runSchedulerAcceptance({clients,stage,generation,region,no
   };
   const manifestName=prefix+'/consolidation-preview/manifest';
   const manifest=validateManifest(JSON.parse((await parameters([manifestName])).get(manifestName)),stage,generation,region);
-  const started=now();
   const bootstrapKeys=['task-def-arn','subnet-ids','task-sg-id'].map(key=>prefix+'/bootstrap/'+key);
   const bootstrap=await parameters(bootstrapKeys);
   const bootArn=bootstrap.get(bootstrapKeys[0]);
@@ -286,6 +285,7 @@ export async function runSchedulerAcceptance({clients,stage,generation,region,no
   let activated=false;
   try{
     activated=true;
+    const logCoverage=await captureDatabaseLogCoverage({send,rds,manifest,host:bootEnv.MEM9_DB_HOST});
     await quiesceOperators();
     await operator('pause');
     await cleanup();
@@ -304,7 +304,7 @@ export async function runSchedulerAcceptance({clients,stage,generation,region,no
     await operator('pause');activated=false;
     await cleanup();
     await sleep(30000);
-    await scanDatabaseLogs({send,rds,manifest,host:bootEnv.MEM9_DB_HOST,since:started});
+    await scanDatabaseLogs({send,rds,manifest,host:bootEnv.MEM9_DB_HOST,coverage:logCoverage,progress});
     for(const worker of manifest.workers){const schedule=await send(scheduler,new GetScheduleCommand({Name:worker.scheduleName,GroupName:manifest.groupName}));if(schedule.State!=='DISABLED')fail('RecurringScheduleEnabled');}
     progress('passed',{synthetic:true,changedRows:150,batchBoundaryCrossings:crossings});
     return {synthetic:true,changedRows:150,batchBoundaryCrossings:crossings};
@@ -321,7 +321,7 @@ export async function runSchedulerAcceptance({clients,stage,generation,region,no
   }
 }
 
-async function scanDatabaseLogs({send,rds,manifest,host,since}){
+async function databaseLogInventory({send,rds,manifest,host}){
   let Marker;let cluster;
   for(let page=0;page<100;page++){
     const r=await send(rds,new DescribeDBClustersCommand({Marker}));
@@ -331,30 +331,65 @@ async function scanDatabaseLogs({send,rds,manifest,host,since}){
   if(!cluster?.DBClusterIdentifier?.startsWith(`mem9-on-aws-${manifest.stage}-`))fail('DatabaseLogOwnerMismatch');
   const tags=(await send(rds,new ListTagsForResourceCommand({ResourceName:cluster.DBClusterArn}))).TagList??[];
   if(!tags.some(t=>t.Key==='Stage'&&t.Value===manifest.stage)||!tags.some(t=>t.Key==='Project'&&t.Value==='mem9-on-aws'))fail('DatabaseLogOwnerMismatch');
-  let files=0,bytes=0;
+  const inventory=[];
   for(const member of cluster.DBClusterMembers??[]){
     const instance=(await send(rds,new DescribeDBInstancesCommand({DBInstanceIdentifier:member.DBInstanceIdentifier}))).DBInstances?.[0];
     if(!instance?.DBInstanceIdentifier?.startsWith(`mem9-on-aws-${manifest.stage}-`)||instance.DBClusterIdentifier!==cluster.DBClusterIdentifier)fail('DatabaseLogOwnerMismatch');
-    let Marker;
+    let Marker;const files=[];
     for(let page=0;page<100;page++){
-      const r=await send(rds,new DescribeDBLogFilesCommand({DBInstanceIdentifier:instance.DBInstanceIdentifier,FileLastWritten:since,Marker}));
+      // LastWritten is not an interval-coverage filter: an active log can stay
+      // unchanged throughout a quiet, successful acceptance run.
+      const r=await send(rds,new DescribeDBLogFilesCommand({DBInstanceIdentifier:instance.DBInstanceIdentifier,Marker}));
       for(const file of r.DescribeDBLogFiles??[]){
         if(!file.LogFileName?.startsWith('error/postgresql'))continue;
-        let cursor='0',tail='';
-        for(let part=0;part<1000;part++){
-          const data=await send(rds,new DownloadDBLogFilePortionCommand({DBInstanceIdentifier:instance.DBInstanceIdentifier,LogFileName:file.LogFileName,Marker:cursor,NumberOfLines:1000}));
-          const raw=data.LogFileData??'';bytes+=Buffer.byteLength(raw);if(bytes>50*1024*1024)fail('DatabaseLogCoverageIncomplete');
-          assertStructuralDatabaseLog(tail+raw);tail=raw.slice(-4096);
-          if(!data.AdditionalDataPending)break;
-          if(!data.Marker||data.Marker===cursor||part===999)fail('DatabaseLogCoverageIncomplete');cursor=data.Marker;
-        }
-        files++;
+        if(!Number.isSafeInteger(file.Size)||file.Size<0||!Number.isSafeInteger(file.LastWritten))fail('InvalidDatabaseLogMetadata');
+        files.push(file);
       }
-      if(!r.Marker)break;Marker=r.Marker;if(page===99)fail('DatabaseLogCoverageIncomplete');
+      if(!r.Marker)break;
+      if(r.Marker===Marker||page===99)fail('DatabaseLogCoverageIncomplete');Marker=r.Marker;
+    }
+    if(!files.length||new Set(files.map(f=>f.LogFileName)).size!==files.length)fail('DatabaseLogCoverageIncomplete');
+    inventory.push({instance:instance.DBInstanceIdentifier,files});
+  }
+  if(!inventory.length)fail('DatabaseLogCoverageIncomplete');
+  return inventory;
+}
+
+export async function captureDatabaseLogCoverage(options){
+  const inventory=await databaseLogInventory(options);
+  return inventory.map(({instance,files})=>{
+    const anchor=[...files].sort((a,b)=>b.LastWritten-a.LastWritten||b.LogFileName.localeCompare(a.LogFileName))[0];
+    return {instance,anchor:anchor.LogFileName,minimumBytes:anchor.Size};
+  });
+}
+
+export async function scanDatabaseLogs({coverage,progress=emit,...options}){
+  const {send,rds}=options;
+  const inventory=await databaseLogInventory(options);
+  if(!Array.isArray(coverage)||coverage.length!==inventory.length)fail('DatabaseLogCoverageChanged');
+  let files=0,bytes=0;
+  for(const entry of inventory){
+    const expected=coverage.find(c=>c.instance===entry.instance);
+    const anchor=entry.files.find(f=>f.LogFileName===expected?.anchor);
+    if(!anchor||anchor.Size<expected.minimumBytes)fail('DatabaseLogAnchorMissing');
+    // Read all retained PostgreSQL files, including the pre-run anchor and any
+    // rotations. No raw pages or credential values leave this scanner.
+    for(const file of entry.files){
+      let cursor='0',tail='',fileBytes=0;
+      for(let part=0;part<1000;part++){
+        const data=await send(rds,new DownloadDBLogFilePortionCommand({DBInstanceIdentifier:entry.instance,LogFileName:file.LogFileName,Marker:cursor,NumberOfLines:1000}));
+        const raw=data.LogFileData??'';const length=Buffer.byteLength(raw);
+        bytes+=length;fileBytes+=length;if(bytes>50*1024*1024)fail('DatabaseLogCoverageIncomplete');
+        assertStructuralDatabaseLog(tail+raw);tail=raw.slice(-4096);
+        if(!data.AdditionalDataPending)break;
+        if(!data.Marker||data.Marker===cursor||part===999)fail('DatabaseLogCoverageIncomplete');cursor=data.Marker;
+      }
+      if(fileBytes<file.Size)fail('DatabaseLogReadIncomplete');
+      files++;
     }
   }
-  if(!files)fail('DatabaseLogCoverageIncomplete');
-  emit('StructuralDbLogCheckPassed',{files,bytes});
+  progress('StructuralDbLogCheckPassed',{files,bytes});
+  return {files,bytes};
 }
 
 async function main(){

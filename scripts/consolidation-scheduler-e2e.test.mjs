@@ -75,9 +75,13 @@ describe('real Scheduler acceptance ownership and cleanup',()=>{
       if(kind==='GetParametersByPathCommand')return {Parameters:[...store].filter(([key])=>key.startsWith(input.Path)).map(([Name,Value])=>({Name,Value}))};
       if(kind==='DescribeTaskDefinitionCommand'){
         const w=manifest.workers.find(w=>w.taskDefinitionArn===input.taskDefinition),name=w?.containerName??'Mem9Bootstrap';
-        return {taskDefinition:{containerDefinitions:[{name,environment:[{name:w?'MEM9_WORKER_GENERATION':'MEM9_PREVIEW_GENERATION',value:generation}],
+        return {taskDefinition:{containerDefinitions:[{name,environment:[{name:w?'MEM9_WORKER_GENERATION':'MEM9_PREVIEW_GENERATION',value:generation},{name:'MEM9_DB_HOST',value:'writer.example.com'}],
           logConfiguration:{options:{'awslogs-group':'/sst/synthetic','awslogs-stream-prefix':'ecs'}}}]}};
       }
+      if(kind==='DescribeDBClustersCommand')return {DBClusters:[{Endpoint:'writer.example.com',DBClusterIdentifier:'mem9-on-aws-pr-7-db',DBClusterArn:'synthetic-db-arn',DBClusterMembers:[{DBInstanceIdentifier:'mem9-on-aws-pr-7-instance'}]}]};
+      if(kind==='ListTagsForResourceCommand')return {TagList:[{Key:'Project',Value:'mem9-on-aws'},{Key:'Stage',Value:stage}]};
+      if(kind==='DescribeDBInstancesCommand')return {DBInstances:[{DBInstanceIdentifier:'mem9-on-aws-pr-7-instance',DBClusterIdentifier:'mem9-on-aws-pr-7-db'}]};
+      if(kind==='DescribeDBLogFilesCommand')return {DescribeDBLogFiles:[{LogFileName:'error/postgresql.log.2026-09-29-1805',Size:10,LastWritten:now-60000}]};
       if(kind==='RunTaskCommand'){
         const taskArn=`arn:aws:ecs:${region}:${account}:task/${clusterName}/task-${++taskSequence}`;
         const setup=input.overrides.containerOverrides[0].environment[0].value==='consolidation-preview-setup';

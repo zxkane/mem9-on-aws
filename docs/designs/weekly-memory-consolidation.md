@@ -92,6 +92,12 @@ bounded Aurora log pages in memory for credential-bearing structures. It never
 retrieves passwords/salts/verifiers onto the runner, persists raw log pages or
 prints them. The two log-read actions are scoped to preview database instances
 in the existing IAM owner stack. Incomplete log coverage fails acceptance.
+Before the first operator call, the harness records the newest PostgreSQL log
+file and its size for each owned database instance. The final scan requires that
+anchor to remain present and untruncated, scans all retained PostgreSQL files
+including rotations, and checks downloaded byte coverage. An active log that
+was last written before acceptance remains valid: a successful quiet interval
+must not be mistaken for missing coverage by a `FileLastWritten` filter.
 The local PostgreSQL rehearsal uses a deterministic embedding substitute; only
 the deployed acceptance verifies Qwen and Scheduler. Neither proves real-memory
 semantic quality or production backlog throughput.
