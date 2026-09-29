@@ -691,6 +691,16 @@ describe("ecs stack", () => {
     ).toBe("0");
   });
 
+  it.each([
+    ["prod","0","false"],["prod","1","false"],
+    ["pr-7","0","false"],["pr-7","1","true"],
+  ])("enables private consolidation only after preview namespace cutover (%s/%s)", async (stage,required,enabled) => {
+    process.env.MEM9_NAMESPACE_REQUIRED=required;
+    installGlobals(stage);
+    const ecs=await loadEcs();ecs(fakeDbOut());
+    expect((containersByName()["mnemo-server"].environment as Record<string,unknown>).MNEMO_CONSOLIDATION_EXECUTION_ENABLED).toBe(enabled);
+  });
+
   it("wires the mnemo-server terminal override into SST task synthesis", async () => {
     installGlobals("prod");
     const ecs = await loadEcs();

@@ -421,6 +421,9 @@ describe("workload role coverage from the real SST graph", () => {
         SST_SECRET_SlackBotToken: undefined,
         SST_SECRET_SlackSigningSecret: undefined,
         MEM9_DECISION_ARTIFACT_BUCKET: `mem9-audit-${accountId}`,
+        MEM9_DEPLOY_COMMIT: "a".repeat(40),
+        GITHUB_RUN_ID: "7",
+        GITHUB_RUN_ATTEMPT: "1",
       };
       if (unsupportedFlag) environment[unsupportedFlag] = "1";
       for (const [name, value] of Object.entries(environment)) vi.stubEnv(name, value);
@@ -504,6 +507,8 @@ describe("workload role coverage from the real SST graph", () => {
           ...(namespaceRequired ? maintenanceRoleNames : []),
           authorizerRoleLogicalName,
           ...(namespaceRequired && scheduleEnabled ? ["Mem9ConsolidationSchedulerRole"] : []),
+          ...(!namespaceRequired ? ["Mem9ConsolidationPlannerTaskRole", "Mem9ConsolidationPlannerExecutionRole",
+            "Mem9ConsolidationExecutorTaskRole", "Mem9ConsolidationExecutorExecutionRole"] : []),
         ].sort();
         await pulumi.runtime.runInPulumiStack(async () => {
           const configModule = await import(
@@ -521,6 +526,21 @@ describe("workload role coverage from the real SST graph", () => {
             return {};
           }
           const outputs = await config.run();
+          if (!namespaceRequired) {
+            // Exercise the actual SST/Pulumi worker transforms, including the
+            // execution policy replacement, alongside the unchanged prod graph.
+            await pulumi.runtime.waitForRPCs();
+            $app.stage = "pr-7";
+            const {consolidationPreviewConfig,continuousConsolidationTasks} = await import("./consolidation-runtime");
+            const previewCluster = new sst.aws.Cluster("PreviewWorkerCluster", {forceUpgrade: "v2", vpc: {
+              id: "vpc-mock", securityGroups: ["sg-mock"], containerSubnets: ["subnet-mock-a"], loadBalancerSubnets: ["subnet-mock-a"],
+            }});
+            continuousConsolidationTasks({cluster: previewCluster, serviceDnsName: pulumi.output("backend.internal")} as any,
+              {host: pulumi.output("db.mock.internal"), port: pulumi.output(5432)} as any, consolidationPreviewConfig()!,
+              {revision: pulumi.output("synthetic"), serviceParameterArns: {consolidation: pulumi.output(`arn:aws:ssm:${region}:${accountId}:parameter/mem9-on-aws/pr-7/namespace/service-consolidation-signing-keys`)}} as any);
+            await pulumi.runtime.waitForRPCs();
+            $app.stage = "prod";
+          }
           await waitForRecordedRoles(expectedRoleNames.length);
           return outputs;
         });
@@ -543,6 +563,19 @@ describe("workload role coverage from the real SST graph", () => {
           ),
         ).toBe(true);
         await verifyMaintenanceGraph(scheduleEnabled, namespaceRequired);
+        if (!namespaceRequired) {
+          for (const kind of ["Planner", "Executor"]) {
+            const role=oneResource("aws:iam/role:Role",`Mem9Consolidation${kind}ExecutionRole`);
+            const policies=role.inputs.inlinePolicies as Array<{policy:string}>;
+            const statements=JSON.parse(policies[0].policy).Statement;
+            expect(statements[0].Action).toEqual(["ssm:GetParameters"]);
+            expect(statements[0].Resource.every((arn:string)=>arn.includes("/mem9-on-aws/pr-7/"))).toBe(true);
+            expect(JSON.stringify(statements)).not.toContain("secretsmanager:GetSecretValue");
+            expect(role.inputs.managedPolicyArns).toEqual(["arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"]);
+            const trust=JSON.parse(String(role.inputs.assumeRolePolicy));
+            expect(trust.Statement[0].Condition.StringEquals["aws:SourceAccount"]).toBe(accountId);
+          }
+        }
         for (const { inputs, name } of createdRoles) {
           const physicalName = inputs.name ?? inputs.namePrefix;
           if (physicalName === undefined) {

@@ -450,6 +450,11 @@ BEGIN
   PERFORM mem9_maintenance.execution_guard(p_namespace,'executor');
   IF p_seconds IS NULL OR p_seconds NOT BETWEEN 1 AND 300 OR p_max_rows IS NULL OR p_max_rows NOT BETWEEN 1 AND 100 THEN RAISE EXCEPTION USING ERRCODE='22023',MESSAGE='invalid execution lease or batch'; END IF;
   PERFORM mem9_maintenance.reap_reservations();
+  IF to_regclass('mem9_maintenance.dispatcher_settings') IS NOT NULL THEN
+    IF EXISTS(SELECT FROM mem9_maintenance.dispatcher_settings WHERE singleton AND enabled AND p_namespace=ANY(targets)) AND
+      EXISTS(SELECT FROM mem9_maintenance.action_state WHERE namespace_id=p_namespace AND reservation IS NOT NULL AND lease_until>mem9_maintenance.execution_time()) THEN
+      RETURN jsonb_build_object('status','lease_busy'); END IF;
+  END IF;
   d:=mem9_maintenance.open_windows(p_namespace);
   SELECT * INTO c FROM mem9_maintenance.execution_control WHERE singleton;
   FOR a IN SELECT proposal.*,s.attempts FROM mem9_maintenance.action_state s JOIN mem9_maintenance.actions proposal USING(namespace_id,action_id)

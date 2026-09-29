@@ -25,6 +25,7 @@ import { resolveVpc } from "./vpc";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import type { CognitoOutputs } from "./cognito";
 import type { AuthConfig } from "./auth-config";
+import type { ConsolidationPreviewConfig } from "./consolidation-runtime";
 
 const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 
@@ -45,6 +46,7 @@ export function bootstrap(
   identity: TenantIdentityOutputs,
   cognito: CognitoOutputs | undefined,
   auth?: AuthConfig,
+  consolidationPreview?: ConsolidationPreviewConfig,
 ): BootstrapOutputs {
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const tags = { Project: "mem9-on-aws", Stage: $app.stage, ManagedBy: "sst" };
@@ -91,12 +93,20 @@ export function bootstrap(
       MEM9_COGNITO_USER_POOL_ID: auth?.oidc ? "" : cognito!.userPoolId,
       AWS_REGION: region,
       ...(previewNamespaceFixtures ?? {}),
+      ...(consolidationPreview ? {MEM9_PREVIEW_GENERATION: consolidationPreview.generation} : {}),
     },
     // Secret injection (== ECS secrets valueFrom): the DB creds JSON + the tenant
     // id, both resolved from Secrets Manager at task start, never literals.
     ssm: {
       MEM9_DB_SECRET: dbOut.secretArn,
       MEM9_TENANT_ID: identity.tenantSecretArn,
+      ...(consolidationPreview ? {
+        MEM9_CONSOLIDATION_PREVIEW_CONFIG: consolidationPreview.arns.config,
+        MEM9_PREVIEW_PLANNER_CREDENTIAL: consolidationPreview.arns.planner,
+        MEM9_PREVIEW_EXECUTOR_CREDENTIAL: consolidationPreview.arns.executor,
+        MEM9_PREVIEW_BACKEND_CREDENTIAL: consolidationPreview.arns.backend,
+        MEM9_PREVIEW_SEED_CREDENTIAL: consolidationPreview.arns.seed,
+      } : {}),
     },
     logging: { retention: "1 month" },
     transform: {

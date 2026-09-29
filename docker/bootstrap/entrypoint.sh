@@ -26,6 +26,10 @@ set -eu
 # commands. The Node entrypoint constructs MNEMO_DSN without printing it, reads
 # short-lived SecureString inputs, and invokes only a fixed operation allowlist.
 if [ -n "${MEM9_BOOTSTRAP_OPERATION:-}" ]; then
+  case "$MEM9_BOOTSTRAP_OPERATION" in
+    consolidation-preview-setup|consolidation-preview-pause|consolidation-preview-verify-planned|consolidation-preview-verify-executed|consolidation-preview-verify-repeated)
+      exec node /bootstrap/operator/scripts/consolidation-preview-fixture.mjs ;;
+  esac
   exec node /bootstrap/operator/operator-entrypoint.mjs
 fi
 

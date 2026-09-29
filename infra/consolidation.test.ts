@@ -211,7 +211,9 @@ function installGlobals(stage: string) {
         }
       },
       Schedule: class {
+        name: Output<string>;
         constructor(logicalName: string, args: Record<string, unknown>) {
+          this.name = out(String(materialize(args.namePrefix)) + "fixture");
           record("Schedule", logicalName, args);
         }
       },
@@ -326,6 +328,34 @@ afterEach(() => {
 });
 
 describe("consolidation task and schedule", () => {
+  it("SCHED-001/002: creates two disabled preview targets with exact worker permissions", async () => {
+    installGlobals("pr-7");
+    const generation="a".repeat(64);
+    const workers=(["planner","executor"] as const).map(kind=>{
+      const containerName=`Mem9Consolidation${kind==="planner"?"Planner":"Executor"}`;
+      const task:any=new sst.aws.Task(containerName,{cluster:fakeEcs().cluster});
+      task.taskDefinition=out(`arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-on-aws-pr-7-${containerName}:1`);
+      task.nodes.taskRole.arn=out(`task-${kind}`);task.nodes.executionRole.arn=out(`execution-${kind}`);
+      task.nodes.taskDefinition=out({containerDefinitions:out(JSON.stringify([{name:containerName,logConfiguration:{options:{"awslogs-group":`/sst/${kind}`}}}]))});
+      return {kind,containerName,generation,task};
+    });
+    const {consolidation}=await import("./consolidation");
+    consolidation(fakeEcs(),fakeDb(),fakeIdentity(),fakeMaintenanceIdentity(),workers);
+    const schedules=resources.filter(r=>r.kind==="Schedule").map(r=>materialize(r.args) as any);
+    expect(schedules).toHaveLength(2);
+    expect(schedules.map(s=>s.scheduleExpression)).toEqual(["rate(1 hour)","rate(15 minutes)"]);
+    for(const schedule of schedules){
+      expect(schedule.state).toBe("DISABLED");expect(schedule.target.ecsParameters.propagateTags).toBeUndefined();
+      expect(JSON.parse(schedule.target.input).containerOverrides[0].environment).toEqual([{name:"MEM9_WORKER_GENERATION",value:generation}]);
+    }
+    expect(one("ScheduleGroup").logicalName).toBe("WeeklyMemoryConsolidationGroup");
+    expect(one("Role").logicalName).toBe("Mem9ConsolidationSchedulerRole");
+    const policy=JSON.parse(String(materialize(one("RolePolicy").args.policy)));
+    expect(policy.Statement[0].Resource).toEqual(workers.map(w=>materialize(w.task.taskDefinition)));
+    expect(policy.Statement[1].Resource).toEqual(["task-planner","execution-planner","task-executor","execution-executor"]);
+    const manifest=JSON.parse(String(materialize(one("Parameter","ConsolidationAcceptanceManifest").args.value)));
+    expect(manifest.generation).toBe(generation);expect(manifest.workers.map((w:any)=>w.scheduleName)).toEqual(schedules.map(s=>s.namePrefix+"fixture"));
+  });
   it("passes a validated execution budget to the shared report/scheduled task", async () => {
     installGlobals("prod");
     process.env.MEM9_CONSOLIDATION_TIMEOUT_SECONDS="10800";

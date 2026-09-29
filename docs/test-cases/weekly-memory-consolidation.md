@@ -3,7 +3,31 @@
 Unit tests use mocked database, REST, LLM, and AWS resource constructors.
 Preview E2E runs the deployed task in report-only mode.
 
-## Incremental planner and model admission
+## Continuous scheduling and preview rehearsal
+
+These acceptance cases cover the next delivery. Production activation and
+real-corpus semantic/drain calibration remain separate gates.
+
+| Case | Scenario | Required result |
+| --- | --- | --- |
+| SCHED-001 | Synthesize production and numeric PR stages | Production creates no new continuous workers/credentials or enabled schedules; PR planner/executor schedules default DISABLED |
+| SCHED-002 | Inspect Scheduler trust and invocation grants | Exact schedule-group/current-account trust; RunTask names exact scheduled revisions and PassRole names only their task/execution roles |
+| SCHED-003 | Inspect worker roles and secret injection | Planner cannot read owner/executor/signing credentials; executor has no inference grant; replace SST's default wildcard secret-read inline policy with exact stage references |
+| SCHED-004 | Acquire the same kind's dispatcher lease from concurrent real login sessions | One winner, bounded busy outcome for the other; session_user binding rejects wrong-kind and backend callers |
+| SCHED-005 | Heartbeat, expiry, takeover and stale release | Fixed maximum job deadline cannot be extended; generations fence renew/release; old action/work receipts remain authoritative |
+| SCHED-006 | Multiple namespaces, restart and one unauthorized target | Persistent rotation continues across tasks, authorized targets progress and no foreign memory access succeeds |
+| SCHED-007 | Child exits, missing marker, deadline, signal and excessive output | Bounded parent/child termination and redacted counters; zero exit without an expected marker does not count as success |
+| SCHED-008 | Replay preview fixture setup or detect mismatched ownership/credentials | Preserve recorded policies/counters/receipts; never drop a database, reset counters or rotate a live cached tenant implicitly |
+| SCHED-009 | Preview seed login retirement and runtime DB privileges | Retired login cannot reconnect; workers cannot directly mutate memories or read the normal tenant; backend uses its dedicated fixture credential |
+| SCHED-010 | Trigger one-time schedules derived from disabled recurring definitions | Real Scheduler deliveries create correlated current-revision tasks; no direct RunTask substitute or prior-run logs satisfy the gate |
+| SCHED-011 | Observe planner handoff and executor batching | Baseline has zero new actions/receipts; scheduled planner queues new/cache-derived actions; a correlated executor reports more than one 100-row loop batch and more than 100 actual changed rows |
+| SCHED-012 | Duplicate wake and deliberately exhausted namespace budget | Receipts/mutations occur once; subsequent tasks preserve used counters and expose budget_wait while other namespaces complete |
+| SCHED-013 | Protected records, incompatible context and unclassified semantic conflicts | Protected/context-conflict cases remain unchanged/reviewed; model-disabled semantic conflicts remain explicitly deferred, never claimed as classified |
+| SCHED-014 | Pre-verified synthetic semantic classification | Planner cache handoff precedes a new action; real backend/local Qwen computes the changed-content embedding and preserves facts/provenance |
+| SCHED-015 | Finish or fail the rehearsal | Pause synthetic authoritative modes, remove temporary schedules, observe owned tasks quiescent, and confirm recurring schedules remain DISABLED; late delivery cannot mutate after pause |
+| SCHED-016 | Inspect PostgreSQL credential handling and logs | Passwords are injected, role setup uses SCRAM verifiers and guarded parameter handling, unsafe statement/audit logging fails before credentials are submitted |
+
+## Incremental planner and model admission cases
 
 The planner increment keeps production activation closed. These cases cover
 the next executable delivery, independently of later scheduling and calibration.
@@ -292,6 +316,12 @@ Diagnostics regressions run in `scripts/consolidation-progress.test.mjs` and
 | TC-CONSOL-079 | Inspect the synthesized consolidation task definition | The exact `Mem9Consolidation` container has `pseudoTerminal: false`, leaves `interactive` unset, and preserves its `awslogs` configuration while the task transform also preserves and adds tags |
 
 ## Preview E2E
+
+The continuous-scheduling gate additionally requires cross-stage task ARN
+denials for untagged tasks, exact revision/generation/nonce correlation, a
+pre-create SSM journal and cleanup after a lost CreateSchedule response. Local
+fixture tests use real SCRAM logins, reject an incorrect password and reject the
+retired seed login. Synthetic runs preserve existing stage-budget counters.
 
 | ID | Scenario | Expected result |
 |---|---|---|

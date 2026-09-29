@@ -14,6 +14,88 @@ absorbed-delete leg still has a read/write race.
 
 ## Problem and intended outcome
 
+### Continuous scheduling preview increment
+
+The scheduling design passed review by Codex, GLM-5 and Opus 5.5 before
+implementation. Its acceptance scope is synthetic preview data. Production
+activation, credential cutover, model certification, class fair shares,
+retention and the 24–72 hour historical-backlog target remain separate gates.
+
+Numeric `pr-N` stages provision separate planner and executor ECS tasks and
+disabled hourly/15-minute Scheduler targets. Both workers receive only their
+own database credential and target list; only the executor receives the
+synthetic tenant key and consolidation signing key. Neither has inference
+permissions in this rehearsal. Execution-role policies replace SST's wildcard
+secret reader with exact SSM references and constrained KMS decryption, keeping
+the ECR/log execution baseline. Production creates none of these credentials,
+workers, schedules or synthetic databases.
+
+Migration `007_consolidation_scheduling.sql` adds owner-configured dispatcher
+settings, caller-OID capabilities and one renewable lease per worker kind.
+Leases expire after 90 seconds and cannot outlive the fixed job deadline.
+Persisted namespace rotation survives process restarts. The deployed acceptance
+generation is pinned in task definitions and schedule input, and checked during
+acquisition, renewal and target selection. Action/work leases and immutable
+receipts still own data correctness. Scheduled executors cannot reserve a
+second action concurrently in the same namespace.
+
+The bootstrap's fixed preview operations create a journal-owned synthetic tenant
+database on preview Aurora. Stable generated SSM credentials use SCRAM role
+verifiers; sensitive SQL is parameterized and effective logging settings are
+checked before credential setup. Setup does not disable server auditing. The
+seed login actually inserts fixtures, then loses its grants and is retired
+`NOLOGIN` with no remaining session before execution is enabled. The bootstrap
+administrator remains a trusted administrator. The backend can acquire the
+metadata locks required by namespace authorization but a trigger rejects its
+metadata writes; it has no direct memory-write or policy-administration grant.
+
+Each deployed commit/run/attempt selects fresh namespace IDs. An existing
+generation is never reseeded or credited with a new batching proof. A partial
+attempt requires a new deployment generation. Old journal-owned namespaces are
+disabled before a new generation is enabled. Stage accounting is never reset:
+the synthetic database has a 20,000-row daily ceiling, with explicit rejection
+when there is insufficient headroom for another 150-row acceptance pass.
+
+Acceptance uses actual one-time Scheduler deliveries at least 120 seconds in
+the future, zero retries and a 60-second event age. Before creation, the harness
+writes and reads back a metadata-only SSM journal. It correlates the exact task
+revision, generation and invocation nonce, recovers prior journals, pauses
+synthetic modes and removes temporary schedules on exit. The recurring targets
+remain disabled. The runtime boundary denies task tagging, so Scheduler targets
+omit tag propagation. Cross-stage task-ARN denies protect untagged tasks; optional
+CI tagging is inventory-only and never grants cleanup ownership.
+
+Setup task launches also have a prewritten operator journal and an explicit ECS
+idempotency token. Recovery correlates and quiesces those tasks before the final
+database pause. An absolute setup deadline is enforced by both the process
+watchdog and the activation transaction, so a delayed unknown launch cannot
+reactivate execution after recovery. Cleanup attempts seed retirement, operator
+recovery, database pause and schedule removal independently, retains unresolved
+journals and reports incomplete cleanup. Seed retirement runs on setup failure
+and on recovery of an interrupted setup, including grant revocation and session
+termination.
+
+Fixtures contain 60 exact pairs plus one preclassified semantic pair in A,
+10 exact pairs in B, and eight pairs with an eight-row budget in C. Orthogonal
+synthetic vectors isolate unrelated neighborhoods. Setup creates only the known
+semantic classification, never its action or execution receipt. The scheduled
+planner must reuse that classification and queue the action; the private backend
+must obtain a new embedding from local Qwen for changed content. One correlated
+executor child must report more than 100 changed rows across at least two
+batches. Expected changes are A=122, B=20 and C=8. A second executor wake must
+change nothing and leave C's four pending actions budget-blocked. Protected,
+pinned and incompatible-context fixtures remain unchanged; uncertified semantic
+contradictions are explicitly deferred, not claimed as classified.
+
+`scripts/consolidation-scheduler-e2e.mjs` is a hard preview CI gate. It also scans
+bounded Aurora log pages in memory for credential-bearing structures. It never
+retrieves passwords/salts/verifiers onto the runner, persists raw log pages or
+prints them. The two log-read actions are scoped to preview database instances
+in the existing IAM owner stack. Incomplete log coverage fails acceptance.
+The local PostgreSQL rehearsal uses a deterministic embedding substitute; only
+the deployed acceptance verifies Qwen and Scheduler. Neither proves real-memory
+semantic quality or production backlog throughput.
+
 A production pass examined 17,236 memories and 1,978 clusters. It committed ten
 merge actions using the entire 20-row mutation budget: seven surviving records
 were rewritten and thirteen fragments were soft-deleted. The 2,130 review or

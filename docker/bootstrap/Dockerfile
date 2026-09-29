@@ -39,6 +39,9 @@ COPY scripts/observe-memory-namespace-connections.mjs /bootstrap/operator/script
 # just as it does in a checkout. Preserve that layout alongside bootstrap's SQL.
 COPY docker/bootstrap/migrations/003_enforce_memory_namespaces.sql /bootstrap/operator/docker/bootstrap/migrations/003_enforce_memory_namespaces.sql
 COPY scripts/prepare-preview-memory-namespaces.mjs /bootstrap/operator/scripts/prepare-preview-memory-namespaces.mjs
+COPY scripts/consolidation-preview-fixture.mjs /bootstrap/operator/scripts/consolidation-preview-fixture.mjs
+COPY scripts/lib/consolidation-preview-config.mjs /bootstrap/operator/scripts/lib/consolidation-preview-config.mjs
+COPY scripts/lib/consolidation-preview-secrets.mjs /bootstrap/operator/scripts/lib/consolidation-preview-secrets.mjs
 COPY scripts/reconcile-memory-namespaces.mjs /bootstrap/operator/scripts/reconcile-memory-namespaces.mjs
 COPY package.json package-lock.json /bootstrap/operator/
 RUN cd /bootstrap/operator && npm ci --omit=dev

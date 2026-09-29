@@ -125,6 +125,8 @@ export default $config({
     const { namespaceIdentity, maintenanceServiceIdentity } = await import("./infra/namespace-identity");
     const namespaceIdentityOut = namespaceIdentity();
     const maintenanceIdentityOut = maintenanceServiceIdentity();
+    const { consolidationPreviewConfig, continuousConsolidationTasks } = await import("./infra/consolidation-runtime");
+    const consolidationPreview = consolidationPreviewConfig();
 
     // ECS Fargate cluster + the mnemo-server service. Three containers:
     // mnemo-server, qwen3-embed (localhost /v1/embeddings, dims 1024), and
@@ -146,7 +148,7 @@ export default $config({
     // migration, and access-management commands inside the VPC. CI invokes the
     // default bootstrap mode after deploy; operator commands are explicit.
     const { bootstrap } = await import("./infra/bootstrap");
-    bootstrap(ecsOut.cluster, dbOut, identityOut, cognitoOut, authConfig);
+    bootstrap(ecsOut.cluster, dbOut, identityOut, cognitoOut, authConfig, consolidationPreview);
     // OAuth2 browser-login façade (§6): ApiGatewayV2 + reader client + façade
     // Lambda. Built BEFORE gateway() because it produces the reader client id the
     // gateway must trust. The façade reads gateway/url from SSM at RUNTIME, so it
@@ -169,7 +171,8 @@ export default $config({
     // authorized namespace. Scheduling additionally requires explicit targets.
     if (process.env.MEM9_NAMESPACE_REQUIRED === "1") {
       const { consolidation } = await import("./infra/consolidation");
-      consolidation(ecsOut, dbOut, identityOut, maintenanceIdentityOut);
+      const workers = consolidationPreview ? continuousConsolidationTasks(ecsOut, dbOut, consolidationPreview, maintenanceIdentityOut) : [];
+      consolidation(ecsOut, dbOut, identityOut, maintenanceIdentityOut, workers);
       const { standaloneCleanupTask } = await import("./infra/maintenance-cleanup");
       standaloneCleanupTask(ecsOut, dbOut, identityOut, maintenanceIdentityOut);
     }

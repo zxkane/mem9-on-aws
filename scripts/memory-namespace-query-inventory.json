@@ -1546,9 +1546,9 @@
       "namespace_evidence": "Explicit namespace predicates, namespace-bound action/classification keys and all-member fences."
     },
     {
-      "id": "030ab5d7427c6c2ef7c1",
+      "id": "8204c495452302ad0c23",
       "owner": "docker/bootstrap/migrations/005_consolidation_execution.sql",
-      "line": 497,
+      "line": 502,
       "tables": [
         "memories"
       ],
@@ -1564,9 +1564,9 @@
       "namespace_evidence": "Explicit namespace predicates, namespace-bound action/classification keys and all-member fences."
     },
     {
-      "id": "57e90a1206a41264dae0",
+      "id": "861efc653d4b439e79af",
       "owner": "docker/bootstrap/migrations/005_consolidation_execution.sql",
-      "line": 598,
+      "line": 603,
       "tables": [
         "memories"
       ],
@@ -1582,9 +1582,9 @@
       "namespace_evidence": "Explicit namespace predicates, namespace-bound action/classification keys and all-member fences."
     },
     {
-      "id": "8a5eeacb608cd78c1f40",
+      "id": "34d764710a68b2b8b116",
       "owner": "docker/bootstrap/migrations/005_consolidation_execution.sql",
-      "line": 659,
+      "line": 664,
       "tables": [
         "memories"
       ],
@@ -1956,6 +1956,78 @@
         "scripts/memory-namespace-query-inventory.test.mjs"
       ],
       "namespace_evidence": "namespace_id = :'namespace_id'"
+    },
+    {
+      "id": "421d2421f0754d1aee97",
+      "owner": "scripts/consolidation-preview-fixture.mjs",
+      "line": 142,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "8d0148ae3555b958bacbd410719036f68f451f3012a7d720568ffd08388b6d01",
+      "statement": "WITH members AS ( SELECT jsonb_agg(jsonb_build_object('id',m.id,'version',m.version, 'fingerprint',encode(sha256(convert_to(to_jsonb(m)::text,'UTF8')),'hex')) ORDER BY m.id) AS items FROM public.memories m WHERE namespace_id=$1 AND id=ANY($2)), payload AS ( SELECT jsonb_build_object('context_hash',s.context_hash,'members',members.items,'result','MERGE', 'valid_until',clock_timestamp()+interval '23 hours','details',jsonb_build_object('synthetic',true)) AS value FROM mem9_maintenance.namespace_state s,members WHERE namespace_id=$1) INSERT INTO mem9_maintenance.classifications(namespace_id,classification_id,input_hash,context_hash,result,payload,valid_until) SELECT $1,encode(sha256(convert_to(value::text,'UTF8')),'hex'), mem9_maintenance.input_fingerprint(value->>'context_hash',value->'members',$3), value->>'context_hash','MERGE',value,(value->>'valid_until')::timestamptz FROM payload RETURNING classification_id AS result",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/consolidation-preview.postgres.test.mjs",
+        "scripts/run-consolidation-scheduling-integration.sh",
+        "scripts/consolidation-scheduler-e2e.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "6a9a90f13eb31016af80",
+      "owner": "scripts/consolidation-preview-fixture.mjs",
+      "line": 236,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "e67b582e605b530074b281c21d2f8e60acb8cd4ba06be0d971d9fc83025a8cf7",
+      "statement": "INSERT INTO memories(id,namespace_id,content,tags,metadata,embedding,memory_type,version,source,app_id,agent_id,created_by_principal_id,updated_by_principal_id) VALUES($1,$2,$3,'[]',$4,$5::vector,$6,1,'synthetic',$7,'synthetic',$8,$8)",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/consolidation-preview.postgres.test.mjs",
+        "scripts/run-consolidation-scheduling-integration.sh",
+        "scripts/consolidation-scheduler-e2e.mjs"
+      ],
+      "namespace_evidence": "INSERT column namespace_id"
+    },
+    {
+      "id": "d9c6d96ada0ff6264993",
+      "owner": "scripts/consolidation-preview-fixture.mjs",
+      "line": 275,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "0558aa1b69580af9d62cc3934fb66602e69f133a20a0b7db011f5e5b9fd89e10",
+      "statement": "SELECT state='active' AND version=1 AND content=$3 AND embedding=$4::vector AS result FROM memories WHERE namespace_id=$1 AND id=$2",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/consolidation-preview.postgres.test.mjs",
+        "scripts/run-consolidation-scheduling-integration.sh",
+        "scripts/consolidation-scheduler-e2e.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "80fe68db469eeb73e76f",
+      "owner": "scripts/consolidation-preview-fixture.mjs",
+      "line": 289,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "3c188cff3db592aa3776e46fa791a99b3b15a2a53e6615e0754a7794a387bdf8",
+      "statement": "SELECT content,embedding::text,metadata FROM memories WHERE namespace_id=$1 AND id=ANY($2) AND state='active'",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/consolidation-preview.postgres.test.mjs",
+        "scripts/run-consolidation-scheduling-integration.sh",
+        "scripts/consolidation-scheduler-e2e.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
     },
     {
       "id": "7317e3a65a2fcb77ed87",

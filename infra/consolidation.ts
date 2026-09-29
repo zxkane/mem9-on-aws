@@ -4,6 +4,7 @@ import { resolveVpc } from "./vpc";
 import { accountId, applicationRegion, workloadImage } from "./ecr";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import type { MaintenanceIdentityOutputs } from "./namespace-identity";
+import type { ConsolidationWorker } from "./consolidation-runtime";
 import { taskFailureAlarm } from "./task-failure-alarm";
 import {
   consolidationDigestKey,
@@ -171,6 +172,7 @@ export function consolidation(
   dbOut: DbOutputs,
   identity: TenantIdentityOutputs,
   maintenanceIdentity: MaintenanceIdentityOutputs,
+  workers: ConsolidationWorker[] = [],
 ): ConsolidationOutputs {
   // Namespace-enforced previews can verify the real digest adapter without
   // enabling a schedule. Keep their storage grants inside that preview prefix.
@@ -385,7 +387,8 @@ export function consolidation(
     });
   }
 
-  if (SCHEDULE_ENABLED) {
+  if (SCHEDULE_ENABLED || workers.length > 0) {
+    const scheduledTasks = [...(SCHEDULE_ENABLED ? [task] : []), ...workers.map(worker => worker.task)];
     const accountId = aws.getCallerIdentityOutput().accountId;
     // EventBridge Scheduler caps a schedule-group name_prefix at 38 chars — the
     // TIGHTEST limit among this stack's names (IAM roles and ECS names allow 64),
@@ -447,15 +450,13 @@ export function consolidation(
           {
             Effect: "Allow",
             Action: "ecs:RunTask",
-            Resource: task.taskDefinition,
+            Resource: workers.length ? scheduledTasks.map(scheduled => scheduled.taskDefinition) : task.taskDefinition,
+            ...(workers.length ? {Condition: { ArnEquals: { "ecs:cluster": ecsOut.cluster.nodes.cluster.arn } }} : {}),
           },
           {
             Effect: "Allow",
             Action: "iam:PassRole",
-            Resource: [
-              task.nodes.taskRole.arn,
-              task.nodes.executionRole.arn,
-            ],
+            Resource: scheduledTasks.flatMap(scheduled => [scheduled.nodes.taskRole.arn, scheduled.nodes.executionRole.arn]),
             Condition: {
               StringEquals: {
                 "iam:PassedToService": "ecs-tasks.amazonaws.com",
@@ -466,7 +467,7 @@ export function consolidation(
       }),
     });
 
-    new aws.scheduler.Schedule("WeeklyMemoryConsolidation", {
+    if (SCHEDULE_ENABLED) new aws.scheduler.Schedule("WeeklyMemoryConsolidation", {
       // Same 38-char Scheduler name_prefix cap as the schedule group (the group
       // rejected 44). `...-weekly-consolidation-` is already 40 for pr-113, so
       // reuse the bounded prefix rather than find out in another deploy.
@@ -518,6 +519,36 @@ export function consolidation(
           },
         },
       },
+    });
+
+    const scheduledWorkers = workers.map(worker => {
+      const schedule = new aws.scheduler.Schedule(`ContinuousConsolidation${worker.kind}`, {
+        namePrefix: `mem9-on-aws-${$app.stage}-${worker.kind}-`,
+        description: `Dormant continuous consolidation ${worker.kind}; synthetic preview acceptance only.`,
+        groupName: scheduleGroup.name,
+        scheduleExpression: worker.kind === "planner" ? "rate(1 hour)" : "rate(15 minutes)",
+        scheduleExpressionTimezone: "UTC", state: "DISABLED", flexibleTimeWindow: { mode: "OFF" },
+        target: {
+          arn: ecsOut.cluster.nodes.cluster.arn, roleArn: schedulerRole.arn,
+          input: $jsonStringify({containerOverrides: [{name: worker.containerName,
+            environment: [{name: "MEM9_WORKER_GENERATION", value: worker.generation}]}]}),
+          retryPolicy: {maximumEventAgeInSeconds: 60, maximumRetryAttempts: 0},
+          // The workload boundary denies tagging. Ownership uses the exact
+          // task revision + invocation nonce, never propagated tags.
+          ecsParameters: {launchType: "FARGATE", taskCount: 1, taskDefinitionArn: worker.task.taskDefinition,
+            networkConfiguration: {assignPublicIp: worker.task.assignPublicIp,
+              securityGroups: worker.task.securityGroups, subnets: worker.task.subnets}},
+        },
+      });
+      return {kind: worker.kind, containerName: worker.containerName, scheduleName: schedule.name,
+        taskDefinitionArn: worker.task.taskDefinition,
+        logGroupName: taskContainerLogGroupName(worker.task, worker.containerName, worker.kind)};
+    });
+    if (workers.length > 0) new aws.ssm.Parameter("ConsolidationAcceptanceManifest", {
+      name: `${prefix}/consolidation-preview/manifest`, type: "String", tags,
+      value: $jsonStringify({version: 1, stage: $app.stage, generation: workers[0].generation,
+        groupName: scheduleGroup.name, roleArn: schedulerRole.arn,
+        clusterArn: ecsOut.cluster.nodes.cluster.arn, workers: scheduledWorkers}),
     });
 
     // Gated on the alerts topic, which only prod has: preview stages create no
