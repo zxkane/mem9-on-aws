@@ -207,12 +207,18 @@ describe.skipIf(!DSN)('atomic consolidation with real PostgreSQL',()=>{
   await expect(f.backend.query('SELECT mem9_maintenance.undo_action($1,$2)',[f.ns,'f'.repeat(64)])).rejects.toMatchObject({code:'42501'});
  }));
  it('EXEC-008 midnight after a member-lock wait rejects the old window and reclaims exactly once',()=>fixture(async f=>{
-  const ids=[await f.seed('A'),await f.seed('B')];await f.enable();await f.queue(await f.classify(ids));
-  const late=new Date();late.setUTCHours(23,59,59,0);
+  const ids=[await f.seed('A'),await f.seed('B')];await f.enable();const queued=await f.queue(await f.classify(ids));
+  expect(queued.status).toBe('queued');
+  // Use the most recent midnight: jumping to tonight can expire a freshly
+  // published 23-hour classification when this test runs before 01:00 UTC.
+  const late=new Date();late.setUTCHours(0,0,-1,0);
   await f.db.query('CREATE TABLE mem9_maintenance.fixture_clock(value timestamptz NOT NULL)');
   await f.db.query('INSERT INTO mem9_maintenance.fixture_clock VALUES($1)',[late]);
   await f.db.query("CREATE OR REPLACE FUNCTION mem9_maintenance.execution_time() RETURNS timestamptz LANGUAGE SQL VOLATILE SET search_path=pg_catalog,pg_temp AS $$ SELECT value FROM mem9_maintenance.fixture_clock $$");
-  const old=await f.claim();await f.ready(old);
+  // Align only this fixture's mutable due time with its simulated clock.
+  await f.db.query('UPDATE mem9_maintenance.action_state SET next_at=$1 WHERE namespace_id=$2 AND action_id=$3',[late,f.ns,queued.action_id]);
+  const old=await f.claim();expect(old.status).toBe('leased');
+  expect(['ready','embed']).toContain((await f.ready(old)).status);
   const blocker=await f.connect();await blocker.query('BEGIN');await blocker.query('SELECT id FROM memories WHERE id=$1 FOR UPDATE',[ids[0]]);
   const pid=await f.scalar(f.backend,'SELECT pg_backend_pid()');
   const attempt=f.apply(old).then(value=>({value}),error=>({error}));
