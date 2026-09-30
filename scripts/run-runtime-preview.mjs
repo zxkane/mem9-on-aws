@@ -16,7 +16,7 @@ const environment=container=>Object.fromEntries((container?.environment??[]).map
 export function validateRuntimeMetadata(meta,stage,region){
   if(!runtimeStage(stage)||!new RegExp(`^mem9-on-aws-${stage}-[A-Za-z0-9-]+$`).test(meta.cluster??''))fail('InvalidRuntimeMetadata');
   const arn=meta.taskDefinition?.match(/^arn:aws:ecs:([a-z0-9-]+):([0-9]{12}):task-definition\/(.+):([1-9][0-9]*)$/);
-  if(!arn||arn[1]!==region||arn[3]!==meta.cluster+'-Mem9Bootstrap'||!meta.service?.startsWith(`mem9-on-aws-${stage}-`)||
+  if(!arn||arn[1]!==region||arn[3]!==meta.cluster+'-Mem9Bootstrap'||meta.service!=='Mem9Server'||
     !/^sg-[a-f0-9]+$/.test(meta.securityGroup??'')||!Array.isArray(meta.subnets)||!meta.subnets.length||meta.subnets.length>16||
     meta.subnets.some(s=>!/^subnet-[a-f0-9]+$/.test(s)))fail('InvalidRuntimeMetadata');
   return {...meta,stage,region,account:arn[2],family:arn[3],clusterArn:`arn:aws:ecs:${region}:${arn[2]}:cluster/${meta.cluster}`};
@@ -201,7 +201,7 @@ export async function runRuntimePreview({clients,stage,region,operation,now=Date
 }
 
 async function main(){
-  const region=process.env.AWS_REGION||resolveApplicationRegion(),stage=process.env.STAGE;
+  const region=process.env.AWS_REGION||await resolveApplicationRegion(),stage=process.env.STAGE;
   const clients={ssm:new SSMClient({region,maxAttempts:3}),ecs:new ECSClient({region,maxAttempts:3}),logs:new CloudWatchLogsClient({region,maxAttempts:3}),iam:new IAMClient({region,maxAttempts:3})};
   try{await runRuntimePreview({clients,region,stage,operation:process.argv[2]});}
   finally{for(const client of Object.values(clients))client.destroy();}

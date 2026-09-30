@@ -554,6 +554,7 @@ describe("workload role coverage from the real SST graph", () => {
         await pulumi.runtime.waitForRPCs();
         if (preview) {
           const service = oneResource('aws:ecs/service:Service', 'Mem9ServerService');
+          expect(service.inputs.name).toBe('Mem9Server');
           expect(service.inputs.desiredCount).toBe(runtimeReady ? 1 : 0);
           const scaling = oneResource('aws:appautoscaling/target:Target', 'Mem9ServerAutoScalingTarget');
           expect(scaling.inputs.minCapacity).toBe(runtimeReady ? 1 : 0);

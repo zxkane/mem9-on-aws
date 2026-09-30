@@ -1,6 +1,10 @@
 import {describe,it,expect} from 'vitest';
 import {runRuntimePreview,validateRuntimeMetadata,validateRuntimeJournal} from './run-runtime-preview.mjs';
 import {runtimeServerContract} from './lib/runtime-live-verification.mjs';
+import {createServer} from 'node:http';
+import {execFile} from 'node:child_process';
+import {promisify} from 'node:util';
+import {fileURLToPath} from 'node:url';
 
 const stage='pr-7',region='ap-northeast-1',account='123456789012';
 const cluster='mem9-on-aws-pr-7-Mem9Cluster-abc',clusterArn=`arn:aws:ecs:${region}:${account}:cluster/${cluster}`;
@@ -8,7 +12,7 @@ const family=cluster+'-Mem9Bootstrap',taskDefinition=`arn:aws:ecs:${region}:${ac
 const prefix='/mem9-on-aws/pr-7';
 const serverTaskDefinition=`arn:aws:ecs:${region}:${account}:task-definition/${cluster}-Mem9Server:9`;
 const tenantSecret=`arn:aws:secretsmanager:${region}:${account}:secret:mem9-on-aws-pr-7-tenant-api-key-abc`;
-const shape={cluster,taskDefinition,securityGroup:'sg-abc',subnets:['subnet-abc'],service:'mem9-on-aws-pr-7-Mem9Server-abc'};
+const shape={cluster,taskDefinition,securityGroup:'sg-abc',subnets:['subnet-abc'],service:'Mem9Server'};
 function harness(){
   let time=1000000,sequence=0;const calls=[],journals=new Map(),tasks=[];
   const state={desiredCount:0,runningCount:0,pendingCount:0,loseRunResponse:false,wrongRevision:false};
@@ -67,9 +71,33 @@ function harness(){
     now:()=>time,sleep:async ms=>{time+=ms;},progress:()=>{}})};
 }
 describe('preview runtime deployment orchestration',()=>{
+  it('RUNTIME-008: the actual CLI resolves the project region when AWS_REGION is absent',async()=>{
+    const requests=[];
+    const server=createServer((req,res)=>{
+      let body='';req.on('data',chunk=>{body+=chunk;});req.on('end',()=>{
+        const target=req.headers['x-amz-target']?.split('.').at(-1);requests.push(target);
+        const input=JSON.parse(body);
+        const response=target==='GetParameters'?{Parameters:input.Names.map(Name=>({Name,Value:{
+          'bootstrap/cluster-name':cluster,'bootstrap/task-def-arn':taskDefinition,'bootstrap/task-sg-id':shape.securityGroup,
+          'bootstrap/subnet-ids':shape.subnets.join(','),'ecs/service-name':shape.service,'ecs/task-definition':serverTaskDefinition}[Name.slice(prefix.length+1)]}))}:
+          {Parameters:[]};
+        res.writeHead(200,{'content-type':'application/x-amz-json-1.1'});res.end(JSON.stringify(response));
+      });
+    });
+    await new Promise(resolve=>server.listen(0,'127.0.0.1',resolve));
+    try{
+      const endpoint=`http://127.0.0.1:${server.address().port}`;
+      const {stdout}=await promisify(execFile)(process.execPath,[fileURLToPath(new URL('./run-runtime-preview.mjs',import.meta.url)),'cancel'],{
+        timeout:20000,env:{PATH:process.env.PATH,STAGE:stage,AWS_ACCESS_KEY_ID:'synthetic-test-access',AWS_SECRET_ACCESS_KEY:'synthetic-test-secret',
+          AWS_EC2_METADATA_DISABLED:'true',AWS_ENDPOINT_URL:endpoint}});
+      expect(JSON.parse(stdout)).toEqual({event:'runtime_preview',phase:'cancelled'});
+      expect(requests).toEqual(['GetParameters','GetParametersByPath']);
+    }finally{await new Promise(resolve=>server.close(resolve));}
+  });
   it('RUNTIME-001/009: rejects other stages, foreign families and malformed journals before mutation',async()=>{
     for(const invalid of ['prod','dev','pr-0'])expect(()=>validateRuntimeMetadata(shape,invalid,region)).toThrow();
     expect(()=>validateRuntimeMetadata({...shape,taskDefinition:taskDefinition.replace('pr-7','pr-8')},stage,region)).toThrow();
+    expect(()=>validateRuntimeMetadata({...shape,service:'OtherService'},stage,region)).toThrow();
     const meta=validateRuntimeMetadata(shape,stage,region);
     expect(()=>validateRuntimeJournal({version:1,stage,nonce:'a'.repeat(32),createdAt:0,deadline:900000,operation:'bootstrap',taskDefinition},meta,prefix+'/runtime/invocations/wrong',1000000)).toThrow();
     const f=harness();f.state.desiredCount=1;
