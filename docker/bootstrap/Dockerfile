@@ -50,6 +50,8 @@ COPY scripts/lib/production-runtime-config.mjs /bootstrap/operator/scripts/lib/p
 COPY scripts/lib/production-runtime-state.mjs /bootstrap/operator/scripts/lib/production-runtime-state.mjs
 COPY scripts/lib/production-runtime-credentials.mjs /bootstrap/operator/scripts/lib/production-runtime-credentials.mjs
 COPY scripts/lib/production-runtime-ownership.mjs /bootstrap/operator/scripts/lib/production-runtime-ownership.mjs
+COPY scripts/lib/production-runtime-rehearsal.mjs /bootstrap/operator/scripts/lib/production-runtime-rehearsal.mjs
+COPY scripts/lib/runtime-extension-catalog.mjs /bootstrap/operator/scripts/lib/runtime-extension-catalog.mjs
 COPY scripts/lib/runtime-admin-probe-config.mjs /bootstrap/operator/scripts/lib/runtime-admin-probe-config.mjs
 COPY scripts/seed-tenant.mjs /bootstrap/operator/scripts/seed-tenant.mjs
 COPY scripts/lib/runtime-credentials.mjs /bootstrap/operator/scripts/lib/runtime-credentials.mjs

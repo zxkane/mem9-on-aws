@@ -37,6 +37,11 @@ function fixture({loseReply=false}={}){
 }
 
 describe('production invocation recovery',()=>{
+  it('cannot use a catalog-only target for a mutating operation',async()=>{
+    const f=fixture();await expect(invokeProductionTask(f.clients,{...meta,mode:'catalog'},
+      {operation:'prepare',nonce:'a'.repeat(32),epoch:1},{now:f.now,sleep:f.sleep})).rejects.toThrow('CatalogOnlyTarget');
+    expect(f.calls).toEqual([]);
+  });
   it('preserves the pre-launch journal after an accepted request loses its response',async()=>{
     const f=fixture({loseReply:true});
     await expect(invokeProductionTask(f.clients,meta,{operation:'status',nonce:'a'.repeat(32),epoch:1},{now:f.now,sleep:f.sleep})).rejects.toThrow('SyntheticLostReply');

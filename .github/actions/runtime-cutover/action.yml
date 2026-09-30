@@ -45,6 +45,17 @@ runs:
     - name: Converge infrastructure and verify retirement
       shell: bash
       run: node scripts/run-production-runtime.mjs finalize
+    - name: Refresh preview rehearsal credentials
+      if: inputs.cleanup-preview == 'true'
+      uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+      with:
+        role-to-assume: ${{ inputs.role-arn }}
+        aws-region: ${{ inputs.region }}
+        mask-aws-account-id: true
+    - name: Verify preview extension upgrade and administrator backup recovery
+      if: inputs.cleanup-preview == 'true'
+      shell: bash
+      run: timeout --signal=TERM --kill-after=30s 2700 node scripts/run-production-runtime.mjs rehearse
     - name: Refresh recovery credentials
       if: failure() || cancelled()
       uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6

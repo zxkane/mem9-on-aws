@@ -16,13 +16,13 @@ export async function inspectProductionDatabase(clients,meta,{now=Date.now}={}){
   const latest=new Date(db?.LatestRestorableTime).getTime(),earliest=new Date(db?.EarliestRestorableTime).getTime();
   if(clusters.length!==1||!db.DBClusterIdentifier?.startsWith(`mem9-on-aws-${meta.stage}-`)||
     db.DBClusterArn!==`arn:aws:rds:${meta.region}:${meta.account}:cluster:${db.DBClusterIdentifier}`||
-    db.DatabaseName!==meta.database||db.Status!=='available'||db.Engine!=='aurora-postgresql'||!db.StorageEncrypted||
+    db.DatabaseName!==meta.database||db.Status!=='available'||db.Engine!=='aurora-postgresql'||!/^\d+\.\d+$/.test(db.EngineVersion??'')||!db.StorageEncrypted||
     !db.DbClusterResourceId||!db.MasterUsername||db.MasterUserSecret||Object.keys(db.PendingModifiedValues??{}).length||
     !Number.isInteger(db.BackupRetentionPeriod)||db.BackupRetentionPeriod<(meta.stage==='prod'?14:1)||
     !Number.isFinite(earliest)||!Number.isFinite(latest)||earliest>latest||latest>now()+30000||now()-latest>15*60000)fail('ProductionDatabasePreflightFailed');
   const secret=await send(clients.secrets,new DescribeSecretCommand({SecretId:meta.originalOwnerSecret}));
   if(secret.ARN!==meta.originalOwnerSecret||secret.RotationEnabled||secret.DeletedDate)fail('UnexpectedOwnerCredentialRotation');
-  return {databaseClusterId:db.DBClusterIdentifier,databaseResourceId:db.DbClusterResourceId,masterUsername:db.MasterUsername};
+  return {databaseClusterId:db.DBClusterIdentifier,databaseResourceId:db.DbClusterResourceId,masterUsername:db.MasterUsername,engineVersion:db.EngineVersion};
 }
 
 export async function ensureProductionSnapshot(clients,plan,{create=false,now=Date.now,sleep=delay,deadline=Date.now()+20*60000}={}){

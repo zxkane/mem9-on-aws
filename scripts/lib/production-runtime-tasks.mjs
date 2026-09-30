@@ -5,11 +5,32 @@ import {DescribeTaskDefinitionCommand,RunTaskCommand,DescribeTasksCommand,ListTa
 import {FilterLogEventsCommand} from '@aws-sdk/client-cloudwatch-logs';
 import {GetCallerIdentityCommand} from '@aws-sdk/client-sts';
 import {rolloutStage,validateRolloutIdentity} from './production-runtime-config.mjs';
+import {validateExtensionCatalog} from './runtime-extension-catalog.mjs';
 
 const fail=code=>{throw Error(code);};
 const send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
 const environment=container=>Object.fromEntries((container?.environment??[]).map(e=>[e.name,e.value]));
 const same=(a,b)=>JSON.stringify(Object.entries(a).sort())===JSON.stringify(Object.entries(b).sort());
+
+export async function loadLegacyCatalogTarget(clients,{stage,region}){
+  if(!rolloutStage(stage))fail('InvalidRolloutStage');
+  const prefix=`/mem9-on-aws/${stage}/`,keys=['bootstrap/cluster-name','bootstrap/task-def-arn','bootstrap/subnet-ids','bootstrap/task-sg-id','db/host','db/port','db/name','db/secret-arn'];
+  const result=await send(clients.ssm,new GetParametersCommand({Names:keys.map(k=>prefix+k),WithDecryption:false}));
+  if(result.InvalidParameters?.length||result.Parameters?.length!==keys.length)fail('CatalogTargetMissing');
+  const values=new Map(result.Parameters.map(p=>[p.Name.slice(prefix.length),p.Value]));
+  const account=(await send(clients.sts,new GetCallerIdentityCommand({}))).Account;
+  const cluster=values.get('bootstrap/cluster-name'),host=values.get('db/host'),database=values.get('db/name');
+  const task=values.get('bootstrap/task-def-arn'),secret=values.get('db/secret-arn'),port=Number(values.get('db/port'));
+  if(!cluster?.startsWith(`mem9-on-aws-${stage}-`)||!/^[A-Za-z0-9-]+$/.test(cluster)||
+    !task?.startsWith(`arn:aws:ecs:${region}:${account}:task-definition/${cluster}-Mem9Bootstrap:`)||!/[1-9][0-9]*$/.test(task)||
+    !host?.startsWith(`mem9-on-aws-${stage}-`)||!host.endsWith(`.${region}.rds.amazonaws.com`)||
+    !secret?.startsWith(`arn:aws:secretsmanager:${region}:${account}:secret:mem9-on-aws-${stage}-`)||
+    !/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(database??'')||!Number.isInteger(port)||port<1||port>65535)fail('CatalogTargetMismatch');
+  const subnets=values.get('bootstrap/subnet-ids').split(','),securityGroup=values.get('bootstrap/task-sg-id');
+  if(!subnets.length||subnets.length>16||subnets.some(s=>!/^subnet-[a-f0-9]+$/.test(s))||!/^sg-[a-f0-9]+$/.test(securityGroup))fail('CatalogNetworkMismatch');
+  return {mode:'catalog',stage,region,account,cluster,clusterArn:`arn:aws:ecs:${region}:${account}:cluster/${cluster}`,
+    bootstrapTaskDefinition:task,host,port,database,originalOwnerSecret:secret,subnets,securityGroup};
+}
 
 export async function loadProductionManifest(clients,{stage,region}){
   if(!rolloutStage(stage))fail('InvalidRolloutStage');
@@ -66,7 +87,9 @@ async function observeInvocation(clients,meta,journal,{sleep=delay,now=Date.now}
 
 export async function invokeProductionTask(clients,meta,{operation,nonce,epoch,target,verification_hash,task_definition},
   {now=Date.now,sleep=delay,progress=()=>{},deadlineMs=Infinity}={}){
-  const main=meta.mode==='active';
+  const catalog=meta.mode==='catalog';
+  if(catalog&&operation!=='extension-catalog')fail('CatalogOnlyTarget');
+  const main=meta.mode==='active'||catalog;
   const taskDefinition=main?meta.bootstrapTaskDefinition:meta.transitionTaskDefinition;
   const containerName=main?'Mem9Bootstrap':meta.transitionContainer;
   const definition=(await send(clients.ecs,new DescribeTaskDefinitionCommand({taskDefinition}))).taskDefinition;
@@ -74,11 +97,14 @@ export async function invokeProductionTask(clients,meta,{operation,nonce,epoch,t
   const expected=main?{MEM9_DB_SECRET:meta.administratorCredential,MEM9_RUNTIME_DB_SECRET:meta.runtimeCredential,MEM9_TENANT_ID:meta.tenantSecret}:
     {MEM9_DB_SECRET:meta.originalOwnerSecret,MEM9_SCHEMA_ADMIN_CREDENTIAL:meta.administratorCredential,MEM9_RUNTIME_DB_SECRET:meta.runtimeCredential,
       MEM9_TRANSITION_CREDENTIAL:meta.transitionCredential,MEM9_TENANT_ID:meta.tenantSecret};
+  const legacySecretsValid=catalog&&container?.secrets?.find(s=>s.name==='MEM9_DB_SECRET')?.valueFrom===meta.originalOwnerSecret&&
+    container.secrets.every(s=>s.valueFrom.startsWith(`arn:aws:ssm:${meta.region}:${meta.account}:parameter/mem9-on-aws/${meta.stage}/`)||
+      s.valueFrom.startsWith(`arn:aws:secretsmanager:${meta.region}:${meta.account}:secret:mem9-on-aws-${meta.stage}-`));
   if(definition?.taskDefinitionArn!==taskDefinition||definition.containerDefinitions?.length!==1||container.environmentFiles?.length||
-    container.secrets?.length!==Object.keys(expected).length||env.MEM9_STAGE!==meta.stage||env.MEM9_DB_HOST!==meta.host||
+    (!catalog&&container.secrets?.length!==Object.keys(expected).length)||env.MEM9_STAGE!==meta.stage||env.MEM9_DB_HOST!==meta.host||
     env.MEM9_DB_NAME!==meta.database||env.MEM9_DB_PORT!==String(meta.port)||definition.networkMode!=='awsvpc'||
-    definition.runtimePlatform?.cpuArchitecture!=='ARM64'||!same(Object.fromEntries((container?.secrets??[]).map(s=>[s.name,s.valueFrom])),expected)||
-    (main&&definition.executionRoleArn!==meta.bootstrapExecutionRole)||
+    definition.runtimePlatform?.cpuArchitecture!=='ARM64'||(catalog?!legacySecretsValid:!same(Object.fromEntries((container?.secrets??[]).map(s=>[s.name,s.valueFrom])),expected))||
+    (main&&!catalog&&definition.executionRoleArn!==meta.bootstrapExecutionRole)||
     (!main&&(container.entryPoint?.join()!=='node'||container.command?.join()!=='/bootstrap/operator/scripts/production-runtime-operator.mjs')))
     fail('ProductionTaskDefinitionMismatch');
   const createdAt=now(),request={operation,nonce,epoch,deadline:Math.min(createdAt+900000,deadlineMs),
@@ -96,6 +122,8 @@ export async function invokeProductionTask(clients,meta,{operation,nonce,epoch,t
   journal.taskArn=launched.tasks[0].taskArn;
   await send(clients.ssm,new PutParameterCommand({Name:path,Type:'SecureString',Value:JSON.stringify(journal),Overwrite:true}));
   const stopped=await observeInvocation(clients,meta,journal,{sleep,now});
+  if(stopped.stopCode==='TaskFailedToStart'&&/^ResourceInitializationError/i.test(stopped.stoppedReason??'')&&
+    /secret|ssm|parameter/i.test(stopped.stoppedReason))fail('ProductionSecretInjectionFailed');
   const opts=container.logConfiguration?.options;
   if(!opts?.['awslogs-group']||!opts['awslogs-stream-prefix'])fail('ProductionLogConfigurationMissing');
   let terminal;
@@ -115,6 +143,12 @@ export async function invokeProductionTask(clients,meta,{operation,nonce,epoch,t
   }
   if(stopped.containers?.find(c=>c.name===containerName)?.exitCode!==0||terminal?.outcome!=='complete'||terminal.nonce!==nonce||terminal.operation!==operation)
     fail(terminal?.sqlState==='42501'?'ProductionDatabasePermissionDenied':'ProductionOperationFailed');
+  if(operation==='extension-catalog'){
+    if(terminal.target?.stage!==meta.stage||terminal.target.host!==meta.host||terminal.target.database!==meta.database)fail('ExtensionCatalogTargetMismatch');
+    validateExtensionCatalog(terminal.catalog);
+    await send(clients.ssm,new DeleteParameterCommand({Name:path}));
+    return terminal.catalog;
+  }
   const state=terminal.state;
   if(operation==='inspect-preparation'&&state===null){
     await send(clients.ssm,new DeleteParameterCommand({Name:path}));return null;

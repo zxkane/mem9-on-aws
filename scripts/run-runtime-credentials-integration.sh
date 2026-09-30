@@ -22,4 +22,4 @@ PORT=$(docker port "$CONTAINER" 5432/tcp | head -n 1 | awk -F: '{print $NF}')
 export MEM9_RUNTIME_TEST_DSN="postgres://postgres@127.0.0.1:${PORT}/runtime_credentials_test"
 export MEM9_RUNTIME_TEST_CONTAINER="$CONTAINER"
 cd "$ROOT"
-npm exec -- vitest run --no-file-parallelism scripts/runtime-credentials.postgres.test.mjs scripts/production-runtime-state.postgres.test.mjs scripts/production-runtime-credentials.postgres.test.mjs scripts/production-runtime-operator.postgres.test.mjs
+npm exec -- vitest run --no-file-parallelism scripts/runtime-credentials.postgres.test.mjs scripts/production-runtime-state.postgres.test.mjs scripts/production-runtime-credentials.postgres.test.mjs scripts/production-runtime-operator.postgres.test.mjs scripts/production-runtime-rehearsal.postgres.test.mjs

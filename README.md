@@ -1594,6 +1594,25 @@ stage's independently authorized operator session. The operator's `status` and
 `resume` commands inspect durable state and explicitly resume a restored
 migration; an expired migration remains restoration-only.
 
+The disposable cutover also verifies current extension maintenance and
+administrator-backup recovery. After actual master retirement, the new schema
+administrator must positively complete the same-version extension permission
+check and use CREATE/DROP, vector indexing and distance queries in a marked
+scratch database. When the engine exposes no reachable upgrade target, evidence
+is labelled `no_upgrade_available`; it never claims a version change. Production
+admission and ordinary post-cutover deployments compare the live engine and
+extension/owner/available-target tuple with this evidence.
+
+Backup-loss rehearsal writes durable recovery intent before deleting the preview
+primary parameter. Recovery uses only the exact protected backup, waits SSM's
+30-second recreation interval, creates without overwriting a racing value, then
+requires a fresh administrator login. It keeps time for restoration and never
+performs this deletion in production. An isolated preview namespace with three
+pinned synthetic records verifies that text, metadata, tags and embeddings survive
+the cutover. The resulting content-free evidence still marks cancellation
+recovery incomplete until the independent forced-cancellation exercise passes;
+it cannot by itself authorize production activation.
+
 After deploying the task definitions and granting the corresponding service:
 
 ```bash

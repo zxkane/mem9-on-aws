@@ -2321,6 +2321,38 @@
       "namespace_evidence": null
     },
     {
+      "id": "884852baf0b8e9899a39",
+      "owner": "scripts/lib/production-runtime-rehearsal.mjs",
+      "line": 24,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "2edecdd9c48e63b85c98fd0fa6b973f464964252ab3e2626c876ddb456a4ad82",
+      "statement": "SELECT id,encode(sha256(convert_to((to_jsonb(m)-'created_at'-'updated_at'|| jsonb_build_object('created_epoch',extract(epoch FROM created_at),'updated_epoch',extract(epoch FROM updated_at)))::text,'UTF8')),'hex') AS digest FROM public.memories m WHERE namespace_id=$1 ORDER BY id",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "aa5f16d31476e73a7be6",
+      "owner": "scripts/lib/production-runtime-rehearsal.mjs",
+      "line": 38,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "8445f3141875ffc475219724664afb664706f6562411a77333afcd2e9ca76caa",
+      "statement": "INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,source,tags,metadata,embedding,memory_type) VALUES($1,$2,$3,$3,$4,'runtime-preservation',$5::jsonb,$6::jsonb,$7::vector,'pinned')",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "INSERT column namespace_id"
+    },
+    {
       "id": "4dc1ba8638c57647e1bd",
       "owner": "scripts/memory-cleanup.mjs",
       "line": 3719,

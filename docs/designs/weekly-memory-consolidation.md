@@ -1391,3 +1391,25 @@ writer endpoint and cluster resource ID, requires current PITR and a completed
 encrypted recovery snapshot, and rejects automatic owner-secret rotation.
 Preview teardown removes its matching snapshot and out-of-band routing state;
 production recovery snapshots are retained.
+
+Extension evidence is structured current-version maintenance evidence. The
+verified Aurora 17.4/vector 0.8.0 installation is owned by `rdsadmin` and exposes
+no distinct reachable upgrade target. The fresh recorded schema administrator
+must positively complete the fixed same-version extension UPDATE after actual
+master retirement (`node-pg` command `ALTER`); every SQL error is a failure even
+if rollback leaves owner/version unchanged. It must separately CREATE/DROP the
+extension and exercise a vector index and distance queries in a marked scratch
+database on that engine, with the same observed extension owner class. Runtime
+receives no new DDL privilege.
+
+`extensionMaintenance` records the exact engine/server/installed extension,
+owner, installable versions and reachable-target catalog, positive command and
+vector-operation results, and `upgradeStatus`. `no_upgrade_available` requires
+zero distinct reachable targets on the live production cluster. `performed`
+requires an actual source/target version difference with an atomic receipt;
+same-version success never receives that label. Before downtime, activation,
+and subsequent ordinary deployments, the live tuple must match the attested
+tuple. Drift requires a fresh real target-version upgrade and restore rehearsal.
+This adjustment passed the same three-model panel after checking PostgreSQL
+ownership-check ordering and the actual Aurora command result. It changes no
+production engine/extension version and preserves all other rollout gates.

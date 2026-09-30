@@ -205,6 +205,23 @@ and effective settings; that catalog predicate alone is not the authority gate.
 This check changed no role, credential or memory data. Restricted bound-DML
 callers retain the existing read-only validation and receive no extra SET grant.
 
+### Extension maintenance evidence (verified 2026-09-30)
+
+The same-account Aurora PostgreSQL 17.4 preview exposes only pgvector 0.8.0
+as installable, with no distinct reachable update target from that installed
+version. Its extension owner is the AWS-managed `rdsadmin`, not the original
+master. A transaction probe accepted a same-version `ALTER EXTENSION` and was
+rolled back; node-pg reports its normalized command as `ALTER`.
+
+PostgreSQL 17 checks extension ownership before its already-installed notice.
+Therefore successful completion of that fixed statement can test the permission
+path, but an unchanged catalog after an error cannot. This is current-version
+maintenance evidence, not a version-upgrade certification. The accepted rollout
+requires the fresh schema administrator to pass after real-master retirement,
+adds isolated CREATE/DROP and vector-index/distance checks, and binds production
+admission to the live engine/extension/owner/available-target tuple. A new tuple
+requires new target-version upgrade and restore evidence before release.
+
 ## Embedding (MaaS)
 
 - OpenAI-compatible only. `server/internal/embed/embedder.go` POSTs to
