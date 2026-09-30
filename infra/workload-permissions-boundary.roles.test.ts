@@ -606,6 +606,12 @@ describe("workload role coverage from the real SST graph", () => {
         ).toBe(true);
         await verifyMaintenanceGraph(scheduleEnabled, namespaceRequired, productionMode);
         if(productionMode){
+          const {unwrapRpcSecret}=await import(/* @vite-ignore */ moduleUrl('.sst/platform/node_modules/@pulumi/pulumi/runtime/rpc.js'));
+          const policyJson=(value:unknown)=>{
+            const raw=unwrapRpcSecret(value);
+            const policy=typeof raw==='string'?JSON.parse(raw):raw;
+            return {...policy,Statement:policy.Statement.map(({Sid,...statement}:Record<string,unknown>)=>statement)};
+          };
           const service=oneResource('aws:ecs/service:Service','Mem9ServerService');
           expect(service.inputs.desiredCount).toBe(productionMode==='paused'?0:1);
           const task=oneResource('aws:ecs/taskDefinition:TaskDefinition','Mem9ServerTask');
@@ -623,13 +629,20 @@ describe("workload role coverage from the real SST graph", () => {
           expect(containers).toHaveLength(3);
           expect(containers.every((c:any)=>/@sha256:[a-f0-9]{64}$/.test(c.image))).toBe(true);
           expect(containers.find((c:any)=>c.name==='mnemo-server').secrets).toContainEqual({name:'MEM9_DB_SECRET',valueFrom:runtimeArn});
-          for(const name of ['Mem9ServerExecutionRole','Mem9ServerTaskRole','Mem9BootstrapExecutionRole','Mem9ConsolidationExecutionRole','Mem9CleanupExecutionRole']){
+          for(const name of ['Mem9ServerExecutionRole','Mem9ServerTaskRole','Mem9BootstrapExecutionRole','Mem9BootstrapTaskRole','Mem9ConsolidationExecutionRole','Mem9ConsolidationTaskRole','Mem9CleanupExecutionRole','Mem9CleanupTaskRole']){
             const role=oneResource('aws:iam/role:Role',name);
+            expect(policyJson(role.inputs.assumeRolePolicy),`${name} inherited ECS trust`).toEqual({
+              Version:'2012-10-17',Statement:[{Effect:'Allow',Action:'sts:AssumeRole',Principal:{Service:'ecs-tasks.amazonaws.com'}}],
+            });
             const policy=(role.inputs.inlinePolicies as Array<{name:string;policy:string}>).find(p=>p.name==='ProductionCredentialFence');
             expect(policy,`${name} replacement credential fence`).toBeDefined();
-            const statements=JSON.parse(policy!.policy).Statement;
+            const statements=policyJson(policy!.policy).Statement;
             expect(statements.every((s:any)=>s.Effect==='Deny')).toBe(true);
             if(productionMode!=='prepare')expect(statements[0]).toMatchObject({Resource:'*',Action:expect.arrayContaining(['ssm:GetParameters','secretsmanager:GetSecretValue','kms:Decrypt'])});
+          }
+          for(const name of ['RuntimeMem9ServerExecutionRole','SchemaMem9BootstrapExecutionRole','TransitionMem9BootstrapTaskRole','TransitionMem9BootstrapExecutionRole']){
+            const trust=policyJson(oneResource('aws:iam/role:Role',name).inputs.assumeRolePolicy);
+            expect(trust.Statement[0].Condition).toEqual({StringEquals:{'aws:SourceAccount':accountId},ArnLike:{'aws:SourceArn':`arn:aws:ecs:${region}:${accountId}:*`}});
           }
         }
         if (!namespaceRequired) {

@@ -54,7 +54,8 @@ export function productionRuntimeEnabled(){return (process.env.MEM9_PRODUCTION_R
 /** Old execution/task identities never gain the replacement administrative keys. */
 export function protectLegacyRuntimeCredentials(args:Record<string,unknown>,allowPreviewRuntime=false){
   if(!productionRuntimeEnabled())return;
-  args.assumeRolePolicy=$jsonStringify(runtimeTaskTrust());
+  // Existing service trust is audited before preparation. Preserve it here:
+  // fencing credentials does not require permission to rewrite role trust.
   const retired=process.env.MEM9_PRODUCTION_RUNTIME_MODE!=="prepare";
   const prefix=$interpolate`arn:aws:ssm:${applicationRegion()}:${accountId()}:parameter/mem9-on-aws/${$app.stage}/runtime/`;
   const suffixes=['schema-administrator-credential','schema-administrator-backup','transition-credential',

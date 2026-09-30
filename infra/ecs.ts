@@ -507,8 +507,6 @@ export function ecs(
       },
       ...(runtime||productionRuntimeEnabled() ? {executionRole: (args: Record<string, any>) => {
         if(runtime?.executionRoleArn){
-          args.assumeRolePolicy=$jsonStringify({Version:"2012-10-17",Statement:[{Effect:"Allow",Action:"sts:AssumeRole",Principal:{Service:"ecs-tasks.amazonaws.com"},
-            Condition:{StringEquals:{"aws:SourceAccount":accountId()},ArnLike:{"aws:SourceArn":$interpolate`arn:aws:ecs:${region}:${accountId()}:*`}}}]});
           args.inlinePolicies=[{name:"ProductionCredentialFence",policy:JSON.stringify({Version:"2012-10-17",Statement:[{
             Effect:"Deny",Action:["ssm:GetParameter","ssm:GetParameters","ssm:GetParametersByPath","secretsmanager:GetSecretValue","kms:Decrypt"],Resource:"*"}]})}];
           return;

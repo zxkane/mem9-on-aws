@@ -55,7 +55,7 @@ export async function verifyRuntimeRoles({iam,definition,meta,contract}){
     if(role?.Arn!==arn||role.PermissionsBoundary?.PermissionsBoundaryArn!==`arn:aws:iam::${meta.account}:policy/mem9-on-aws-workload-boundary`)fail('RuntimeRoleBoundaryMismatch');
     const trust=decoded(role.AssumeRolePolicyDocument);
     if(!same(trust,{Version:'2012-10-17',Statement:[{Effect:'Allow',Action:'sts:AssumeRole',Principal:{Service:'ecs-tasks.amazonaws.com'},
-      ...(meta.productionRuntime?{Condition:{StringEquals:{'aws:SourceAccount':meta.account},ArnLike:{'aws:SourceArn':`arn:aws:ecs:${meta.region}:${meta.account}:*`}}}:{})}]}))fail('RuntimeRoleTrustMismatch');
+      ...(meta.productionRuntime&&kind==='execution'?{Condition:{StringEquals:{'aws:SourceAccount':meta.account},ArnLike:{'aws:SourceArn':`arn:aws:ecs:${meta.region}:${meta.account}:*`}}}:{})}]}))fail('RuntimeRoleTrustMismatch');
     const policies=[],attached=[];
     for(const [Command,key,destination] of [[ListRolePoliciesCommand,'PolicyNames',policies],[ListAttachedRolePoliciesCommand,'AttachedPolicies',attached]]){
       let Marker;

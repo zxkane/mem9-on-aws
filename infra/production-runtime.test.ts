@@ -61,4 +61,18 @@ describe("production runtime preparation",()=>{
     expect(unwrap(after.inlinePolicies)[0].name).toBe(policy.name);
     expect(JSON.parse(unwrap(after.inlinePolicies)[0].policy).Statement[0]).toMatchObject({Effect:"Deny",Resource:"*"});
   });
+  it("preserves existing ECS trust while fencing legacy credentials",async()=>{
+    setup("prod");
+    const {protectLegacyRuntimeCredentials}=await import("./production-runtime");
+    const trust=out(JSON.stringify({Version:"2012-10-17",Statement:[{
+      Effect:"Allow",Action:"sts:AssumeRole",Principal:{Service:"ecs-tasks.amazonaws.com"},
+    }]}));
+    for(const mode of ["prepare","paused","ready","active"]){
+      vi.stubEnv("MEM9_PRODUCTION_RUNTIME_MODE",mode);
+      const args:any={assumeRolePolicy:trust,inlinePolicies:[]};
+      protectLegacyRuntimeCredentials(args);
+      expect(args.assumeRolePolicy).toBe(trust);
+      expect(unwrap(args.inlinePolicies)).toHaveLength(1);
+    }
+  });
 });
