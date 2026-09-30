@@ -127,6 +127,8 @@ export default $config({
     const maintenanceIdentityOut = maintenanceServiceIdentity();
     const { consolidationPreviewConfig, continuousConsolidationTasks } = await import("./infra/consolidation-runtime");
     const consolidationPreview = consolidationPreviewConfig();
+    const { runtimeCredentials } = await import("./infra/runtime-credentials");
+    const runtime = runtimeCredentials();
 
     // ECS Fargate cluster + the mnemo-server service. Three containers:
     // mnemo-server, qwen3-embed (localhost /v1/embeddings, dims 1024), and
@@ -134,7 +136,7 @@ export default $config({
     // Takes db()'s Outputs DIRECTLY (a real Pulumi dependency) — NOT an SSM
     // read-back, which would fail on a fresh stage's first deploy.
     const { ecs } = await import("./infra/ecs");
-    const ecsOut = ecs(dbOut, identityOut, namespaceIdentityOut, maintenanceIdentityOut);
+    const ecsOut = ecs(dbOut, identityOut, namespaceIdentityOut, maintenanceIdentityOut, runtime);
 
     // MCP surface (§6/§6a): Cognito M2M → AgentCore Gateway → a VPC-attached proxy
     // Lambda that reaches mnemo-server privately over Cloud Map DNS. Threaded as
@@ -148,7 +150,7 @@ export default $config({
     // migration, and access-management commands inside the VPC. CI invokes the
     // default bootstrap mode after deploy; operator commands are explicit.
     const { bootstrap } = await import("./infra/bootstrap");
-    bootstrap(ecsOut.cluster, dbOut, identityOut, cognitoOut, authConfig, consolidationPreview);
+    bootstrap(ecsOut.cluster, dbOut, identityOut, cognitoOut, authConfig, consolidationPreview, runtime);
     // OAuth2 browser-login façade (§6): ApiGatewayV2 + reader client + façade
     // Lambda. Built BEFORE gateway() because it produces the reader client id the
     // gateway must trust. The façade reads gateway/url from SSM at RUNTIME, so it

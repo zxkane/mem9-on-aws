@@ -225,6 +225,7 @@ async function readIndexDefinitions(db, spec) {
        index_class.relname AS index_name,
        index_state.indisvalid,
        index_state.indisready,
+       index_state.indislive,
        index_state.indisunique,
        table_class.relname AS table_name,
        ARRAY(
@@ -276,6 +277,7 @@ function indexDefinitionMatches(spec, actual) {
   if (
     actual.indisvalid !== true ||
     actual.indisready !== true ||
+    actual.indislive === false ||
     actual.indisunique !== spec.unique ||
     actual.table_name !== spec.table ||
     JSON.stringify(actual.key_expressions) !== JSON.stringify(spec.keys) ||
@@ -318,7 +320,7 @@ export async function ensureNamespaceIndexes(db) {
     try {
       for (const spec of NAMESPACE_INDEXES) {
         let actual = await readIndexDefinition(db, spec);
-        if (actual && (!actual.indisvalid || !actual.indisready)) {
+        if (actual && (!actual.indisvalid || !actual.indisready || actual.indislive === false)) {
           if (actual.index_name !== spec.name) {
             throw new Error(
               `attached namespace index ${actual.index_name} is invalid`,
@@ -351,6 +353,14 @@ export async function ensureNamespaceIndexes(db) {
     }
     return { index_count: NAMESPACE_INDEXES.length };
   });
+}
+
+export async function verifyNamespaceIndexes(db) {
+  for (const spec of NAMESPACE_INDEXES) {
+    const actual = await readIndexDefinition(db, spec);
+    if (!actual || actual.indislive !== true) throw new Error('RuntimeIndexNotReady');
+    assertIndexDefinition(spec, actual);
+  }
 }
 
 async function updateBatches(db, statement, values, batchSize) {

@@ -14,6 +14,63 @@ absorbed-delete leg still has a read/write race.
 
 ## Problem and intended outcome
 
+### Preview schema-owner/runtime credential separation
+
+Codex, GLM-5 and Opus 5.5 approved this increment before implementation. It
+prepares numeric PR previews for eventual production credential cutover while
+leaving production credentials, retirement gates and consolidation budgets
+unchanged. It does not process the historical production backlog.
+
+The preview application uses a stable SSM runtime login for the control and
+normal tenant connections. Bootstrap alone receives the owner secret. Exact
+table/column grants permit normal memory/session/ingest operations and required
+namespace identity transactions. Backend membership uses `INHERIT TRUE`,
+`SET FALSE`, `ADMIN FALSE`; existing caller-OID and membership guards remain.
+The login has no DDL, ownership, temporary-object, grant-option, tenant-credential
+write or direct maintenance-table permissions. Startup checks effective grants,
+including inherited/PUBLIC and column ACLs. New tenant pools reject privileged
+logins independently.
+
+An owner-only binding fixes each visible tenant's ID, host, port, database,
+username/OID, TLS and password fingerprint. A restrictive tenant SELECT policy
+enforces the binding even beside an older permissive policy. Unapproved tenant
+upserts/deletes invalidate readiness. The synthetic consolidation tenant uses
+its separate stable backend login; its binding and registry row commit together
+under the same owner bootstrap lock. No memory-write trigger is added.
+
+`runtime-contract.sql` is a separate, hashed asset, excluded from normal schema
+migrations. Both images use the same digest script. One dedicated owner
+`pg.Client` acquires a nonblocking lock before invalidation and never reconnects.
+Stamping requires that session still own the lock, the deadline remain valid,
+all tenants be approved, and actual namespace constraints, required index
+definitions and grants pass. The marker binds stage, runtime OID, packaged SQL
+and live index definitions. A real kill-during-index-build rehearsal verifies
+that readiness stays false and retry repairs only known invalid indexes.
+
+CI first deploys runtime-only service wiring at zero tasks with scaling suspended,
+then drains service tasks and all bootstrap revisions, including pending tasks.
+It does not launch cached bootstrap before deployment. After successful owner
+initialization, a second deployment always enables namespace enforcement,
+`MNEMO_SCHEMA_MODE=verify` and one service task. Verify mode skips shell and Go
+DDL, rejects unsupported runtime usage and requires the configured active tenant.
+ECS invocations have prewritten SSM journals, explicit idempotency tokens and
+absolute in-container deadlines. Cancellation recovers accepted-but-unobserved
+launches without creating a second task. Unresolved records are retained.
+
+Live verification inspects every active server task and its effective task
+definition before and after the database probe. It requires the expected runtime
+secret references, verify mode, one stable revision and no injected overrides.
+It reads current IAM trust, boundary, inline policies and managed attachments,
+requiring the exact reviewed runtime policies. The only permitted managed
+attachment is the AWS-owned ECS execution baseline for image pulls and logs;
+customer-managed or additional AWS-managed attachments fail verification.
+
+Required gates include real PostgreSQL privilege/startup/recovery tests, the
+actual rendered SST graph in both stages, and hard deployed runtime/MCP/ingest,
+namespace, human OAuth and Scheduler/Qwen acceptance. Synthetic preview evidence
+does not retire a production credential, certify model quality or calibrate the
+24–72 hour backlog target. Those remain later release gates.
+
 ### Continuous scheduling preview increment
 
 The scheduling design passed review by Codex, GLM-5 and Opus 5.5 before

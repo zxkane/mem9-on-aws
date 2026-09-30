@@ -19,6 +19,7 @@
  * stable identity in infra/tenant-identity.ts, so re-runs reuse the same key.
  */
 
+import type { RuntimeCredentials } from "./runtime-credentials";
 import type { DbOutputs } from "./db";
 import { workloadImage } from "./ecr";
 import { resolveVpc } from "./vpc";
@@ -47,6 +48,7 @@ export function bootstrap(
   cognito: CognitoOutputs | undefined,
   auth?: AuthConfig,
   consolidationPreview?: ConsolidationPreviewConfig,
+  runtime?: RuntimeCredentials,
 ): BootstrapOutputs {
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const tags = { Project: "mem9-on-aws", Stage: $app.stage, ManagedBy: "sst" };
@@ -82,6 +84,7 @@ export function bootstrap(
       // task definition before deciding whether it can safely resume namespace
       // cutover in required mode or must first deploy this compatible revision.
       MEM9_NAMESPACE_BOOTSTRAP_VERSION: "1",
+      ...(runtime ? {MEM9_RUNTIME_BOOTSTRAP_VERSION: "1"} : {}),
       MEM9_DB_HOST: dbOut.host,
       MEM9_DB_PORT: dbOut.port.apply((p) => String(p)),
       MEM9_DB_NAME: dbOut.database,
@@ -99,6 +102,7 @@ export function bootstrap(
     // id, both resolved from Secrets Manager at task start, never literals.
     ssm: {
       MEM9_DB_SECRET: dbOut.secretArn,
+      ...(runtime ? {MEM9_RUNTIME_DB_SECRET: runtime.parameterArn} : {}),
       MEM9_TENANT_ID: identity.tenantSecretArn,
       ...(consolidationPreview ? {
         MEM9_CONSOLIDATION_PREVIEW_CONFIG: consolidationPreview.arns.config,

@@ -197,7 +197,7 @@ function extractJavaScript({ owner, source }) {
   return [...candidates.values()];
 }
 
-function splitSql(source) {
+function splitSql(source, includeFunctions = false) {
   const statements = [];
   let start = 0;
   let startLine = 1;
@@ -207,7 +207,7 @@ function splitSql(source) {
 
   const push = (end) => {
     const text = normalizeSql(source.slice(start, end));
-    if (isScopedSql(text)) {
+    if (isScopedSql(text) || (includeFunctions && /^CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\b/i.test(text))) {
       statements.push({ line: startLine, text });
     }
     start = end + 1;
@@ -304,7 +304,7 @@ export function extractSqlStatements({ kind, owner, source }) {
     return extractJavaScript({ owner, source });
   }
   if (kind === "sql") {
-    return splitSql(source).map((statement) => ({
+    return splitSql(source, owner === "docker/bootstrap/runtime-contract.sql").map((statement) => ({
       owner,
       ...statement,
       tables: tablesIn(statement.text),
@@ -401,7 +401,7 @@ export function classifyStatement(statement, trustedExceptions = []) {
   // These definitions execute at runtime through SECURITY DEFINER. Their
   // location in a migration is not an operator-only authorization boundary.
   // Review the complete routine hash, predicates, grants and real DB tests.
-  if (["docker/bootstrap/migrations/004_consolidation_storage.sql", "docker/bootstrap/migrations/005_consolidation_execution.sql", "docker/bootstrap/migrations/006_consolidation_planner.sql", "docker/bootstrap/migrations/007_consolidation_scheduling.sql"].includes(owner) &&
+  if (["docker/bootstrap/runtime-contract.sql", "docker/bootstrap/migrations/004_consolidation_storage.sql", "docker/bootstrap/migrations/005_consolidation_execution.sql", "docker/bootstrap/migrations/006_consolidation_planner.sql", "docker/bootstrap/migrations/007_consolidation_scheduling.sql"].includes(owner) &&
     /^CREATE\s+(?:OR\s+REPLACE\s+)?FUNCTION\b/i.test(text)) {
     const reviewed = trustedExceptions.find(exception =>
       exception.owner === owner && exception.statement_sha256 === statementHash(text));
@@ -586,6 +586,7 @@ export function extractRepositoryStatements(repoRoot) {
   const candidates = [];
   const sqlFiles = [
     resolve(repoRoot, "docker/bootstrap/schema.sql"),
+    resolve(repoRoot, "docker/bootstrap/runtime-contract.sql"),
     ...walkFiles(
       resolve(repoRoot, "docker/bootstrap/migrations"),
       (path) => path.endsWith(".sql"),

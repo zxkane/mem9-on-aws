@@ -639,6 +639,11 @@ checkout of that same commit; its `pr-<sha7>` image tag is checked before mutati
 
 The operator needs metadata/secret reads for those targets and user/group
 administration on that preview pool. Use the application's configured region.
+`database.secretArn` pins the owner credential used to prepare and remove test
+fixtures. The application must independently use the stage's SSM runtime
+credential in verify mode; an owner-backed application fails preflight before
+fixture credentials are read. Preflight failures emit bounded error codes, and
+the workflow surfaces those codes even when the task exits unsuccessfully.
 Preflight verifies that the exact reader client has a 15-minute access-token
 setting with explicit units, and browser registration must return that client.
 Issued tokens may be one second shorter (899 seconds); lifetimes above 900 or
@@ -1533,8 +1538,16 @@ overages are recorded and pause admission. Policy changes and restarts cannot
 reset counters. This is a deterministic worker protocol, not an IAM spend boundary;
 calibration and uncertainty resolution must reconcile Bedrock Project usage.
 
-Continuous schedule provisioning, execution fair shares, retained-payload cleanup,
-credential cutover and production load/quality calibration remain release gates.
+Numeric PR previews now provision disabled continuous schedules and separate
+schema-owner/runtime database credentials. Preview CI stops the service, drains
+old bootstrap tasks, initializes the schema and exact grants, then starts the
+application with its non-owner login. Runtime verification, MCP write/search,
+namespace/OAuth and synthetic Scheduler/Qwen acceptance are hard gates. A stale
+owner tenant binding or privilege/schema drift prevents runtime startup. The
+production schema path does not install this preview-only contract.
+
+Production activation, execution fair shares, retained-payload cleanup,
+credential retirement and production load/quality calibration remain release gates.
 The synthetic 17k-row rehearsal checks planted duplicate discovery and bounded
 hydration; it does not prove the 24–72 hour production drain target.
 

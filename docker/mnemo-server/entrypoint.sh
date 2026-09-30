@@ -47,6 +47,19 @@ validate_unsupported_capability MNEMO_UPLOAD_WORKER_ENABLED "${MNEMO_UPLOAD_WORK
 validate_unsupported_capability MNEMO_WEBHOOKS_ENABLED "${MNEMO_WEBHOOKS_ENABLED:-}"
 validate_unsupported_capability MNEMO_SPACE_CHAINS_ENABLED "${MNEMO_SPACE_CHAINS_ENABLED:-}"
 
+MNEMO_SCHEMA_MODE="${MNEMO_SCHEMA_MODE:-apply}"
+case "$MNEMO_SCHEMA_MODE" in
+  apply) ;;
+  verify)
+    if [ -n "${MNEMO_DSN:-}" ] || [ "${MNEMO_NAMESPACE_REQUIRED:-0}" != "1" ]; then
+      echo 'entrypoint: verify mode requires injected runtime credentials and namespace enforcement' >&2
+      exit 1
+    fi
+    ;;
+  *) echo 'entrypoint: unsupported schema mode' >&2; exit 1 ;;
+esac
+export MNEMO_SCHEMA_MODE
+
 MNEMO_DSN_ASSEMBLED=false
 if [ -z "${MNEMO_DSN:-}" ]; then
   : "${MEM9_DB_HOST:?MEM9_DB_HOST is required to assemble MNEMO_DSN}"
@@ -87,6 +100,27 @@ fi
 # libpq variables so its password stays out of process arguments. A
 # caller-supplied local MNEMO_DSN uses --dbname directly.
 run_migration() {
+  if [ "$MNEMO_SCHEMA_MODE" = verify ]; then
+    : "${MEM9_STAGE:?runtime stage required}"
+    case "$MEM9_STAGE" in *[!a-zA-Z0-9-]*|'') return 3 ;; esac
+    schema_root=/usr/local/share/mem9
+    schema_digest=$(sh "$schema_root/schema-digest.sh" "$schema_root") || return 3
+    packaged_digest=$(cat "$schema_root/schema.sha256") || return 3
+    if [ "$schema_digest" != "$packaged_digest" ]; then
+      echo 'entrypoint: runtime schema asset mismatch' >&2; return 3
+    fi
+    if verified=$(PGHOST="$MEM9_DB_HOST" PGPORT="$MEM9_DB_PORT" PGDATABASE="$MEM9_DB_NAME" PGUSER="$DB_USER" \
+      PGPASSWORD="$DB_PASS" PGSSLMODE=require psql -X -tA --no-password -v ON_ERROR_STOP=1 \
+      --set=stage="$MEM9_STAGE" --set=schema_digest="$schema_digest" <<'SQL'
+SELECT mem9_runtime.ready_for(:'stage', :'schema_digest');
+SQL
+    ); then
+      [ "$verified" = t ] || { echo 'entrypoint: runtime schema is not ready' >&2; return 3; }
+      return 0
+    else
+      return $?
+    fi
+  fi
   if [ "$MNEMO_DSN_ASSEMBLED" = true ]; then
     PGHOST="$MEM9_DB_HOST" \
       PGPORT="$MEM9_DB_PORT" \

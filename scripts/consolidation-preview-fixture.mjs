@@ -7,6 +7,7 @@ import pg from 'pg';
 import {ensureNamespaceIndexes} from './migrate-memory-namespaces.mjs';
 import {isConsolidationPreview,previewConfiguration,previewUuid} from './lib/consolidation-preview-config.mjs';
 import {checkCredentialLogging,installCredentialGuard,setPreviewCredential} from './lib/consolidation-preview-secrets.mjs';
+import {withRuntimeBootstrapLock,bindRuntimeTenant} from './runtime-bootstrap.mjs';
 
 const kinds=['planner','executor','backend','seed'];
 const hash=text=>createHash('sha256').update(text).digest('hex');
@@ -239,14 +240,25 @@ export async function previewFixture({connect,controlDatabase,config,credentials
       try{await seed?.end();}finally{await retireSeed(control,db,config);}
     }
     const classification=await seedClassification(db,config);
-    // Parameterized tenant credential DML; values never enter DDL or runner logs.
-    await control.query(`INSERT INTO tenants(id,name,db_host,db_port,db_user,db_password,db_name,db_tls,provider,status,schema_version)
+    // The allowlist and tenant row become visible together under the same lock
+    // as normal bootstrap. Values never enter DDL or runner logs.
+    await withRuntimeBootstrapLock(control,config.stage,async owns=>{
+      await control.query('BEGIN');
+      try{
+        if(await scalar(control,"SELECT to_regclass('mem9_runtime.tenant_bindings') IS NOT NULL AS result")){
+          await bindRuntimeTenant(control,{tenant:config.tenantId,kind:'consolidation-preview',host:control.connectionParameters.host,
+            port:control.connectionParameters.port,database:config.database,credentials:credentials.backend});
+        }
+        await control.query(`INSERT INTO tenants(id,name,db_host,db_port,db_user,db_password,db_name,db_tls,provider,status,schema_version)
       VALUES($1,$2,$3,$4,$5,$6,$7,true,'self-hosted','active',1)
       ON CONFLICT(id) DO NOTHING`,[config.tenantId,'synthetic-consolidation-'+config.stage,control.connectionParameters.host,control.connectionParameters.port,
       credentials.backend.username,credentials.backend.password,config.database]);
     const tenant=await scalar(control,'SELECT db_user=$2 AND db_password=$3 AND db_name=$4 AS result FROM tenants WHERE id=$1',
       [config.tenantId,credentials.backend.username,credentials.backend.password,config.database]);
-    if(!tenant)throw Error('PreviewTenantCredentialMismatch');
+        if(!tenant)throw Error('PreviewTenantCredentialMismatch');
+        await owns();await control.query('COMMIT');
+      }catch(error){await control.query('ROLLBACK');throw error;}
+    });
     await privilegeChecks(connect,config,credentials);
     await activate(db,config,credentials,classification,activationDeadline);
     if(await scalar(db,'SELECT EXISTS(SELECT FROM mem9_maintenance.actions WHERE namespace_id=ANY($1)) OR EXISTS(SELECT FROM mem9_maintenance.receipts WHERE namespace_id=ANY($1)) AS result',[config.namespaces]))throw Error('PreviewNotFresh');

@@ -621,6 +621,7 @@ declare namespace sst {
     }
     interface ServiceArgs {
       cluster: Cluster;
+      scaling?: {min?: number; max?: number; cpuUtilization?: number | false; memoryUtilization?: number | false};
       architecture?: Input<"x86_64" | "arm64">;
       cpu?: Input<string>;
       memory?: Input<string>;
@@ -634,6 +635,8 @@ declare namespace sst {
       // IAM statements attached to the task role (SST's `permissions`).
       permissions?: Input<FargatePermission>[];
       transform?: {
+        executionRole?: (args: Record<string, any>) => void;
+        autoScalingTarget?: (args: Record<string, any>) => void;
         taskDefinition?: (
           args: Record<string, unknown>,
           opts: Record<string, unknown>,

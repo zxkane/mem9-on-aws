@@ -157,9 +157,11 @@ export async function verifyHumanPreviewTarget(
     );
     check(
       environment.MNEMO_NAMESPACE_REQUIRED === "1" &&
+        environment.MNEMO_SCHEMA_MODE === "verify" &&
         environment.MEM9_DB_HOST === manifest.database.host &&
         environment.MEM9_DB_NAME === manifest.database.name &&
-        secrets.MEM9_DB_SECRET === manifest.database.secretArn,
+        secrets.MEM9_DB_SECRET ===
+          `arn:aws:ssm:${manifest.region}:${manifest.accountId}:parameter${prefix}/runtime/database-credential`,
       "database_runtime_binding_mismatch",
     );
     const proxy = await aws(
@@ -211,6 +213,8 @@ export async function verifyHumanPreviewTarget(
       tags.Project === "mem9-on-aws",
     "database_secret_consistency_mismatch",
   );
+  // Fixture preparation is an owner operation. Its pinned owner secret is
+  // independent of the application's verified runtime-only credential above.
   // Read credential values only after every pinned resource has matched.
   const value = await aws(
     "secretsmanager",
