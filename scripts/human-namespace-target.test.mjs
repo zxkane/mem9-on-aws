@@ -82,13 +82,14 @@ function fixture() {
             image: `repository/${name}:pr-aaaaaaa`,
             environment: [
               { name: "MNEMO_NAMESPACE_REQUIRED", value: "1" },
+              { name: "MNEMO_SCHEMA_MODE", value: "verify" },
               { name: "MEM9_DB_HOST", value: manifest.database.host },
               { name: "MEM9_DB_NAME", value: manifest.database.name },
             ],
             secrets: [
               {
                 name: "MEM9_DB_SECRET",
-                valueFrom: manifest.database.secretArn,
+                valueFrom: `arn:aws:ssm:${manifest.region}:${manifest.accountId}:parameter${prefix}/runtime/database-credential`,
               },
             ],
           }),
@@ -136,6 +137,21 @@ function fixture() {
   return { manifest, pool, responses, aws, cognito, db, connectFactory };
 }
 describe("trusted preview target pinning", () => {
+  it("keeps owner fixture access separate from the required application runtime reference", async () => {
+    const f = fixture();
+    await verifyHumanPreviewTarget(f.manifest, f);
+    const reads = f.aws.mock.calls.filter(([service, op]) => service === 'secretsmanager' && op === 'get-secret-value');
+    expect(reads).toHaveLength(1);
+    expect(reads[0]).toContain(f.manifest.database.secretArn);
+    expect(f.connectFactory).toHaveBeenCalled();
+  });
+  it("rejects an owner-backed application before reading fixture credentials", async () => {
+    const f = fixture();
+    f.responses['ecs/describe-task-definition'].taskDefinition.containerDefinitions[0].secrets[0].valueFrom = f.manifest.database.secretArn;
+    await expect(verifyHumanPreviewTarget(f.manifest, f)).rejects.toThrow('database_runtime_binding_mismatch');
+    expect(f.connectFactory).not.toHaveBeenCalled();
+    expect(f.aws.mock.calls.some(([service, op]) => service === 'secretsmanager' && op === 'get-secret-value')).toBe(false);
+  });
   it("reads denial proof from an explicitly pinned custom Lambda log group", async () => {
     const f = fixture(),
       hash = "a".repeat(64);

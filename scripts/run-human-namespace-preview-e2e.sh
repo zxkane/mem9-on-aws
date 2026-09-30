@@ -69,10 +69,6 @@ done
 }
 EXIT=$(aws ecs describe-tasks --cluster "$CLUSTER" --tasks "$TASK" \
   --region "$REGION" --query 'tasks[0].containers[0].exitCode' --output text)
-[[ "$EXIT" == "0" ]] || {
-  echo "::error::Human namespace acceptance task failed"
-  exit 1
-}
 LOG_GROUP=$(jq -r '.taskDefinition.containerDefinitions[0].logConfiguration.options["awslogs-group"] // empty' <<<"$TASK_DEF_JSON")
 LOG_PREFIX=$(jq -r '.taskDefinition.containerDefinitions[0].logConfiguration.options["awslogs-stream-prefix"] // empty' <<<"$TASK_DEF_JSON")
 TASK_ID=${TASK##*/}
@@ -85,8 +81,14 @@ for _ in $(seq 1 12); do
     --query 'events[].message' --output text 2>/dev/null \
     | tr '\t' '\n' \
     | tr -d '\r' \
-    | grep -E '^(PASS |human namespace acceptance: complete$)' >"$OUTPUT" || true
+    | grep -E '^(PASS |human namespace acceptance: complete$|human namespace preview acceptance failed \([A-Za-z][A-Za-z0-9_]{0,63}\)$)' >"$OUTPUT" || true
   grep -qx 'human namespace acceptance: complete' "$OUTPUT" && break
+  grep -qE '^human namespace preview acceptance failed \([A-Za-z][A-Za-z0-9_]{0,63}\)$' "$OUTPUT" && break
   sleep 5
 done
+[[ "$EXIT" == "0" ]] || {
+  grep -E '^human namespace preview acceptance failed \([A-Za-z][A-Za-z0-9_]{0,63}\)$' "$OUTPUT" >&2 || true
+  echo "::error::Human namespace acceptance task failed"
+  exit 1
+}
 node scripts/verify-human-namespace-output.mjs "$OUTPUT"

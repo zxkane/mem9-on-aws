@@ -639,6 +639,11 @@ checkout of that same commit; its `pr-<sha7>` image tag is checked before mutati
 
 The operator needs metadata/secret reads for those targets and user/group
 administration on that preview pool. Use the application's configured region.
+`database.secretArn` pins the owner credential used to prepare and remove test
+fixtures. The application must independently use the stage's SSM runtime
+credential in verify mode; an owner-backed application fails preflight before
+fixture credentials are read. Preflight failures emit bounded error codes, and
+the workflow surfaces those codes even when the task exits unsuccessfully.
 Preflight verifies that the exact reader client has a 15-minute access-token
 setting with explicit units, and browser registration must return that client.
 Issued tokens may be one second shorter (899 seconds); lifetimes above 900 or

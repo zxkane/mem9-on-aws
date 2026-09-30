@@ -25,6 +25,7 @@ Production credential retirement and consolidation activation remain separate.
 | RUNTIME-011 | Register the synthetic consolidation tenant | Exact owner-approved binding and row commit together; stale credentials are invisible; prior Scheduler/Qwen acceptance remains valid |
 | RUNTIME-012 | Run all preview checks | Hard MCP search/ingest, namespace isolation/performance, OAuth/human and consolidation checks pass |
 | RUNTIME-013 | Inspect running server task definitions and current IAM policies | Exact runtime secret references, verify mode, stable revision and reviewed task/execution grants are required; owner references, mixed revisions, extra grants and environment overrides fail acceptance |
+| RUNTIME-014 | Run human OAuth target preflight with separated credentials | The application requires its exact runtime SSM reference and verify mode; the independently pinned owner secret is retained for fixtures. Owner-backed application references fail before credential reads, with bounded failure diagnostics |
 
 ## Continuous scheduling cases
 

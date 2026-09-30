@@ -5,8 +5,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { main as runAcceptance } from "./run-human-namespace-e2e.mjs";
+import { HumanAcceptanceError } from "./lib/human-namespace-acceptance.mjs";
 
 const exec = promisify(execFile);
+export function humanTaskFailureCode(error, failure) {
+  const candidate = failure
+    ? failure.name === "HumanAcceptanceError" ? failure.message : failure.name
+    : error instanceof HumanAcceptanceError ? error.message : "operator_failure";
+  return /^[A-Za-z][A-Za-z0-9_]{0,63}$/u.test(candidate ?? "")
+    ? candidate : "operator_failure";
+}
 const required = (name) => {
   const value = process.env[name];
   if (!value) throw new Error(`missing ${name}`);
@@ -111,17 +119,12 @@ export async function main() {
       evidence,
     ]);
   } catch (error) {
-    let publicCode = "operator_failure";
+    let publicCode = humanTaskFailureCode(error);
     try {
       const failure = JSON.parse(
         await readFile(`${fixtures}.failure.local.json`, "utf8"),
       );
-      const candidate =
-        failure.name === "HumanAcceptanceError"
-          ? failure.message
-          : failure.name;
-      if (/^[A-Za-z][A-Za-z0-9_]{0,63}$/u.test(candidate))
-        publicCode = candidate;
+      publicCode = humanTaskFailureCode(error, failure);
     } catch {
       // The task log remains intentionally content-free.
     }
@@ -139,7 +142,7 @@ if (
 ) {
   main().catch((error) => {
     process.stderr.write(
-      `human namespace preview acceptance failed (${error.publicCode ?? "operator_failure"})\n`,
+      `human namespace preview acceptance failed (${error.publicCode ?? humanTaskFailureCode(error)})\n`,
     );
     process.exitCode = 1;
   });
