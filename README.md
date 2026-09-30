@@ -1568,6 +1568,32 @@ credential retirement and production load/quality calibration remain release gat
 The synthetic 17k-row rehearsal checks planted duplicate discovery and bounded
 hydration; it does not prove the 24–72 hour production drain target.
 
+The production runtime migration is opt-in and uses a database-owned two-hour
+maintenance deadline. Before stopping service it prepares an encrypted recovery
+snapshot, inventories historical writers, isolates new credentials and registers
+a runtime fallback with every container image pinned by digest. It installs and
+verifies runtime access before fencing the old password, transfers inventoried
+application objects transactionally, and restores MCP/OAuth access before
+committing the real owner's retirement. Production batching remains disabled
+throughout this migration.
+
+The `Infra CI` manual inputs `runtime_cutover=true` and `runtime_stage=pr-N`
+select the disposable rehearsal; `runtime_stage=prod` selects production only
+from a verified main deployment. Production requires the reviewed Aurora
+retirement, extension, recovery and preservation evidence before dispatch. An
+operator-owned `runtime/rehearsal-acceptance` record must bind all five checks
+to the current source tree and schema/operator/coordinator digests plus a successful preview run; missing or
+stale evidence blocks production changes. Recovery remains available. An
+independent `Runtime cutover recovery` workflow handles failed or cancelled
+cutovers using the exact initiating revision and protected stage environment.
+It must be installed on the default branch and its cancellation rehearsal must
+pass before production migration. Recovery is bound to the initiating run and
+cannot restart the two-hour clock or revive the old service credential. It can
+also be invoked through `scripts/run-production-runtime.mjs recover` with the
+stage's independently authorized operator session. The operator's `status` and
+`resume` commands inspect durable state and explicitly resume a restored
+migration; an expired migration remains restoration-only.
+
 After deploying the task definitions and granting the corresponding service:
 
 ```bash

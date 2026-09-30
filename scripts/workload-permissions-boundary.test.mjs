@@ -1559,11 +1559,13 @@ case "\${1:-} \${2:-}" in
       [[ "$MOCK_GATE_REVISION" == "true" ]] &&
         printf '%s\\n' '${reviewedWorkflowBlobs.get("infra-ci.yml")}' ||
         printf '%s\\n' '0000000000000000000000000000000000000000'
+    elif [[ "$*" == *"runtime-recovery.yml"* ]]; then
+      printf '%s\\n' '${reviewedWorkflowBlobs.get("runtime-recovery.yml")}'
     else
       printf '%s\\n' '${reviewedWorkflowBlobs.get("reconcile-previews.yml")}'
     fi
     ;;
-  "api repos/zxkane/mem9-on-aws/actions/workflows/infra-ci.yml"|"api repos/zxkane/mem9-on-aws/actions/workflows/reconcile-previews.yml")
+  "api repos/zxkane/mem9-on-aws/actions/workflows/infra-ci.yml"|"api repos/zxkane/mem9-on-aws/actions/workflows/reconcile-previews.yml"|"api repos/zxkane/mem9-on-aws/actions/workflows/runtime-recovery.yml")
     workflow="\${2##*/}"
     if [[ -f "$MOCK_DISABLED_DIR/$workflow" ]]; then
       printf '%s\\n' 'disabled_manually'
@@ -1649,6 +1651,8 @@ case "\${1:-} \${2:-}" in
       hash-object)
         if [[ "\${2:-}" == *"infra-ci.yml" ]]; then
           printf '%s\\n' '${reviewedWorkflowBlobs.get("infra-ci.yml")}'
+        elif [[ "\${2:-}" == *"runtime-recovery.yml" ]]; then
+          printf '%s\\n' '${reviewedWorkflowBlobs.get("runtime-recovery.yml")}'
         else
           printf '%s\\n' '${reviewedWorkflowBlobs.get("reconcile-previews.yml")}'
         fi
@@ -6499,6 +6503,7 @@ describe("GitHub maintenance state transitions", () => {
     workflowStates = {
       "infra-ci.yml": "disabled_manually",
       "reconcile-previews.yml": "disabled_manually",
+      "runtime-recovery.yml": "disabled_manually",
     },
   } = {}) {
     const calls = [];
@@ -6594,10 +6599,7 @@ describe("GitHub maintenance state transitions", () => {
       "true",
     );
     expect(harness.variables.get("DEPLOYMENT_MAINTENANCE_PAUSED")).toBe("true");
-    expect([...harness.states.values()]).toEqual([
-      "disabled_manually",
-      "disabled_manually",
-    ]);
+    expect([...harness.states.values()]).toEqual(DEPLOYMENT_WORKFLOWS.map(() => "disabled_manually"));
     expect(
       harness.calls.some(
         (args) => args[0] === "workflow" && args[1] === "enable",
@@ -6719,7 +6721,7 @@ describe("GitHub maintenance state transitions", () => {
     expect(harness.variables.get("DEPLOYMENT_MAINTENANCE_PAUSED")).toBe(
       "false",
     );
-    expect([...harness.states.values()]).toEqual(["active", "active"]);
+    expect([...harness.states.values()]).toEqual(DEPLOYMENT_WORKFLOWS.map(() => "active"));
     const unpause = harness.calls.findIndex(
       (args) =>
         args[0] === "variable" &&
@@ -6742,10 +6744,7 @@ describe("GitHub maintenance state transitions", () => {
       /workflow enable/u,
     );
     expect(harness.variables.get("DEPLOYMENT_MAINTENANCE_PAUSED")).toBe("true");
-    expect([...harness.states.values()]).toEqual([
-      "disabled_manually",
-      "disabled_manually",
-    ]);
+    expect([...harness.states.values()]).toEqual(DEPLOYMENT_WORKFLOWS.map(() => "disabled_manually"));
     const pauseWrites = harness.calls.filter(
       (args) =>
         args[0] === "variable" &&
@@ -6779,10 +6778,7 @@ describe("GitHub maintenance state transitions", () => {
     expect(failure.deploymentPauseRestored).toBe(true);
     expect(failure.deploymentWorkflowsRestored).toBe(true);
     expect(harness.variables.get("DEPLOYMENT_MAINTENANCE_PAUSED")).toBe("true");
-    expect([...harness.states.values()]).toEqual([
-      "disabled_manually",
-      "disabled_manually",
-    ]);
+    expect([...harness.states.values()]).toEqual(DEPLOYMENT_WORKFLOWS.map(() => "disabled_manually"));
     const recoveryOptions = observedCommandOptions.filter(
       ({ signal: commandSignal }) => commandSignal !== abortController.signal,
     );
@@ -6847,10 +6843,7 @@ describe("GitHub maintenance state transitions", () => {
     expect(failure.deploymentPauseRestored).toBe(true);
     expect(failure.deploymentWorkflowsRestored).toBe(true);
     expect(harness.variables.get("DEPLOYMENT_MAINTENANCE_PAUSED")).toBe("true");
-    expect([...harness.states.values()]).toEqual([
-      "disabled_manually",
-      "disabled_manually",
-    ]);
+    expect([...harness.states.values()]).toEqual(DEPLOYMENT_WORKFLOWS.map(() => "disabled_manually"));
   });
 
   it("marks a stale maintenance-pause restoration read-back unsafe", async () => {
@@ -6868,10 +6861,7 @@ describe("GitHub maintenance state transitions", () => {
     }
     expect(failure).toBeInstanceOf(AggregateError);
     expect(failure.deploymentPauseRestored).toBe(false);
-    expect([...harness.states.values()]).toEqual([
-      "disabled_manually",
-      "disabled_manually",
-    ]);
+    expect([...harness.states.values()]).toEqual(DEPLOYMENT_WORKFLOWS.map(() => "disabled_manually"));
   });
 
   it("marks a failed maintenance-pause restoration without claiming success", async () => {
@@ -6908,10 +6898,7 @@ describe("GitHub maintenance state transitions", () => {
     expect(failure.deploymentPauseRestored).toBe(true);
     expect(failure.deploymentWorkflowsRestored).toBe(false);
     expect(harness.variables.get("DEPLOYMENT_MAINTENANCE_PAUSED")).toBe("true");
-    expect([...harness.states.values()]).toEqual([
-      "active",
-      "disabled_manually",
-    ]);
+    expect([...harness.states.values()]).toEqual(["active", ...DEPLOYMENT_WORKFLOWS.slice(1).map(() => "disabled_manually")]);
     failure.quarantineRemoved = true;
     const output = redactedRolloutFailure(failure);
     expect(output).toContain("workflow rollback failed");
@@ -6924,13 +6911,14 @@ describe("GitHub maintenance state transitions", () => {
       workflowStates: {
         "infra-ci.yml": "active",
         "reconcile-previews.yml": "active",
+        "runtime-recovery.yml": "active",
       },
     });
     harness.variables.set("WORKLOAD_BOUNDARY_PROD_ENABLED", "true");
     harness.variables.set("DEPLOYMENT_MAINTENANCE_PAUSED", "false");
     await harness.controller.activateProductionBoundary();
     await harness.controller.resumeDeployments();
-    expect([...harness.states.values()]).toEqual(["active", "active"]);
+    expect([...harness.states.values()]).toEqual(DEPLOYMENT_WORKFLOWS.map(() => "active"));
     expect(
       harness.calls.some(
         (args) => args[0] === "workflow" && args[1] === "enable",
@@ -6939,7 +6927,8 @@ describe("GitHub maintenance state transitions", () => {
   });
 });
 
-describe("operator entry point", () => {
+// Three deployment workflows each require pause/read-back/drain shell probes.
+describe("operator entry point", { timeout: 10000 }, () => {
   it("wires resolved identity and injected adapters through executeBoundaryRollout", async () => {
     const calls = [];
     const adapter = { name: "injected-adapter" };
@@ -9510,6 +9499,11 @@ describe("boundary and deploy-role templates", () => {
       {
         id: "reconcile-previews.yml",
         path: ".github/workflows/reconcile-previews.yml",
+        reviewedBlob: expect.stringMatching(/^[0-9a-f]{40}$/u),
+      },
+      {
+        id: "runtime-recovery.yml",
+        path: ".github/workflows/runtime-recovery.yml",
         reviewedBlob: expect.stringMatching(/^[0-9a-f]{40}$/u),
       },
     ]);

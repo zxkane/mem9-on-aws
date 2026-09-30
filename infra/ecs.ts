@@ -56,6 +56,7 @@ import { observability } from "./observability";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import type { NamespaceIdentityOutputs } from "./namespace-identity";
 import { disableMnemoServerPseudoTerminal } from "./ecs-task-definition";
+import {productionRuntimeEnabled,protectLegacyRuntimeCredentials} from "./production-runtime";
 import { RECALL_TIMEOUT_MS, RECALL_RESPONSE_RESERVE_MS } from "./gateway/request-limits.mjs";
 
 // The primary Mantle route follows the active SST AWS provider. The optional
@@ -121,6 +122,14 @@ const BEDROCK_PROJECT_OPENAI = process.env.MEM9_BEDROCK_PROJECT_OPENAI || "";
 // agrees, so the task grant and boundary Project cannot silently diverge.
 const RESPONSES_REGION = process.env.MEM9_LLM_RESPONSES_REGION || "us-west-2";
 
+export interface RuntimeTaskDefinitionView {
+  arn:Output<string>;
+  containerDefinitions:Output<string>;
+  taskRoleArn:Output<string|undefined>;
+  cpu:Output<string|undefined>;
+  memory:Output<string|undefined>;
+}
+
 export interface EcsOutputs {
   ssmPrefix: string;
   cluster: sst.aws.Cluster; // shared with bootstrap() so the one-shot task reuses it
@@ -136,6 +145,7 @@ export interface EcsOutputs {
   taskSecurityGroupId: Output<string>;
   // Production-only SNS topic backed by the existing Slack alert router.
   alertsTopicArn?: Output<string>;
+  serverTaskDefinition?: Output<RuntimeTaskDefinitionView>;
 }
 
 /**
@@ -488,8 +498,22 @@ export function ecs(
       },
     ],
     transform: {
-      taskDefinition: disableMnemoServerPseudoTerminal,
-      ...(runtime ? {executionRole: (args: Record<string, any>) => {
+      taskDefinition: (args) => {
+        disableMnemoServerPseudoTerminal(args);
+        if(runtime?.executionRoleArn){
+          args.executionRoleArn=runtime.executionRoleArn;
+          args.family=$interpolate`${cluster.nodes.cluster.name}-Mem9RuntimeServer`;
+        }
+      },
+      ...(runtime||productionRuntimeEnabled() ? {executionRole: (args: Record<string, any>) => {
+        if(runtime?.executionRoleArn){
+          args.assumeRolePolicy=$jsonStringify({Version:"2012-10-17",Statement:[{Effect:"Allow",Action:"sts:AssumeRole",Principal:{Service:"ecs-tasks.amazonaws.com"},
+            Condition:{StringEquals:{"aws:SourceAccount":accountId()},ArnLike:{"aws:SourceArn":$interpolate`arn:aws:ecs:${region}:${accountId()}:*`}}}]});
+          args.inlinePolicies=[{name:"ProductionCredentialFence",policy:JSON.stringify({Version:"2012-10-17",Statement:[{
+            Effect:"Deny",Action:["ssm:GetParameter","ssm:GetParameters","ssm:GetParametersByPath","secretsmanager:GetSecretValue","kms:Decrypt"],Resource:"*"}]})}];
+          return;
+        }
+        if(!runtime){protectLegacyRuntimeCredentials(args,true);return;}
         const parameters = [runtime.parameterArn, namespaceIdentity.transportSigningParameterArn,
           ...(maintenanceIdentity && NAMESPACE_REQUIRED === "1" ? [maintenanceIdentity.bundleParameterArn] : [])];
         // Preserve SST's ECR/log managed baseline; replace its wildcard reader.
@@ -501,15 +525,25 @@ export function ecs(
           {Effect: "Allow", Action: ["kms:Decrypt"], Resource: "*", Condition: {StringEquals: {
             "kms:ViaService": $interpolate`secretsmanager.${region}.amazonaws.com`, "kms:EncryptionContext:SecretARN": identity.tenantSecretArn}}},
         ]})}];
+        protectLegacyRuntimeCredentials(args,true);
       }, autoScalingTarget: (args: Record<string, any>) => {
+        if(!runtime){
+          if(productionRuntimeEnabled()){
+            args.minCapacity=0;args.maxCapacity=1;
+            args.suspendedState={dynamicScalingInSuspended:true,dynamicScalingOutSuspended:true,scheduledScalingSuspended:true};
+          }
+          return;
+        }
         // Scaling registration must not restore tasks during stage one.
         args.minCapacity = runtime.ready ? 1 : 0;
         args.maxCapacity = 1;
         args.suspendedState = {dynamicScalingInSuspended: true, dynamicScalingOutSuspended: true, scheduledScalingSuspended: true};
       }} : {}),
+      ...(productionRuntimeEnabled()?{taskRole:(args:Record<string,unknown>)=>protectLegacyRuntimeCredentials(args)}:{}),
       service: (args: Record<string, any>, opts: Record<string, any>) => {
         args.tags = { ...(args.tags ?? {}), ...tags };
         if (runtime) args.desiredCount = runtime.ready ? 1 : 0;
+        if(runtime?.executionRoleArn)args.deploymentCircuitBreaker={enable:true,rollback:process.env.MEM9_PRODUCTION_RUNTIME_MODE==="active"};
         // Fargate compute is billed to tasks, not just to this tagged Service.
         // Propagate Project/Stage to every new task so Cost Explorer can
         // attribute vCPU and memory charges. Managed tags add the ECS
@@ -631,5 +665,6 @@ export function ecs(
     serviceDnsName,
     taskSecurityGroupId: taskSgId,
     alertsTopicArn: observabilityOut.alertsTopicArn,
+    serverTaskDefinition:service.nodes.taskDefinition as Output<RuntimeTaskDefinitionView>,
   };
 }

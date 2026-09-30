@@ -5,11 +5,13 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 
 describe('preview runtime credential contract',()=>{
-  it('derives one stable bounded role and rejects non-preview input',()=>{
+  it('derives stable bounded production/preview roles and rejects unsupported input',()=>{
     expect(runtimeRoleName('pr-7')).toMatch(/^mem9_runtime_[a-f0-9]{12}$/);
     expect(runtimeRoleName('pr-7')).toBe(runtimeRoleName('pr-7'));
     expect(runtimeRoleName('pr-7')).not.toBe(runtimeRoleName('pr-8'));
-    for(const stage of ['prod','dev','pr-0','pr-7;sql'])expect(()=>runtimeRoleName(stage)).toThrow();
+    expect(runtimeRoleName('prod')).toMatch(/^mem9_runtime_[a-f0-9]{12}$/);
+    expect(runtimeRoleName('prod')).not.toBe(runtimeRoleName('pr-7'));
+    for(const stage of ['dev','pr-0','pr-7;sql'])expect(()=>runtimeRoleName(stage)).toThrow();
   });
   it('does not accept an owner credential or malformed secret as a runtime identity',()=>{
     const username=runtimeRoleName('pr-7');

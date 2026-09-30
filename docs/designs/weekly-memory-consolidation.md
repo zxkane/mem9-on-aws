@@ -1347,3 +1347,47 @@ call/transaction. Reuse it unchanged. The existing real PostgreSQL test
 a receipt constraint failure after the memory update; verify that it and the
 commit/retry/idempotency cases still pass. Do not create a second mutation or
 receipt-writing path in the production launcher.
+
+Implementation refinement for deployment-session lifetime: the existing GitHub
+OIDC roles retain their one-hour maximum sessions. Reuse the pinned credential
+setup action immediately before apply, finalization and recovery instead of
+expanding IAM session duration or building another OIDC transport. Apply admits
+at most 45 minutes of work and clips task deadlines to that cutoff. The database
+still records the original two-hour maintenance deadline and recovery epoch.
+
+All credentials, independent execution roles and the fallback task definition
+are prepared before stopping service. Before creating replacement secrets,
+inventory historical writers, fence their access to the new references, and
+reject any additional unreviewed workload reader. The prepared deployment also
+suspends scaling. After draining the old service/tasks, the operator installs
+the full credential deny on old identities, prepares runtime, fences the old
+password, drains old sessions and transfers ownership. Restoration uses a
+direct ECS update to the already registered fallback with all three container
+images pinned by digest. No SST deployment is needed during this interruption.
+Once runtime health and retirement pass, fresh deployment credentials reconcile
+SST to the active configuration and verify the permanent fences. Recovery
+likewise uses the registered fallback and the durable database state; an
+interruption before maintenance begins does not switch the serving credential.
+Normal deployments reject incomplete or missing post-cutover state before apply.
+
+Cancellation recovery also runs independently of the cancelled workflow. A
+default-branch `workflow_run` receiver accepts only a failed/cancelled explicit
+cutover job from this repository, requires main for production, checks out the
+initiating revision, and uses the literal protected stage environment. It shares
+the cutover concurrency group and obtains a fresh one-hour credential session.
+The persisted plan binds its current initiating run; a stale failure event cannot
+recover a later operation. Both ordinary failure handling and independent
+recovery are bounded to 45 minutes. The receiving workflow must already be on
+the default branch and a disposable cancellation-after-drain rehearsal must
+pass before production. Administrative removal of the workflow/credentials is
+outside the trusted-operator availability assumption and cannot be hidden by a
+false recovery guarantee.
+
+The preparatory plan stores the complete task-definition count and sorted digest
+alongside exact role, family and cluster sets, keeping routing parameters below
+the standard size limit. Pre-maintenance revalidation rejects added writer
+identities. Database preflight independently matches Aurora's actual master,
+writer endpoint and cluster resource ID, requires current PITR and a completed
+encrypted recovery snapshot, and rejects automatic owner-secret rotation.
+Preview teardown removes its matching snapshot and out-of-band routing state;
+production recovery snapshots are retained.

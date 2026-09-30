@@ -438,7 +438,11 @@ describe("oauthFacade factory", () => {
     expect(ssmPerm).toBeDefined();
     expect(ssmPerm?.actions).toEqual(["ssm:GetParameters"]);
     const resources = (unwrap(ssmPerm!.resources) as string[]).map(String);
-    expect(resources.some((r) => r.includes("/mem9-on-aws/prod/*"))).toBe(true);
+    expect(resources).toEqual([
+      'gateway/url','cognito/reader/client-id','cognito/reader/client-secret','oauth/allowed-callback-urls','slack/signing-secret',
+      'cleanup/cluster-name','cleanup/task-def-arn','cleanup/task-sg-id','cleanup/subnet-ids','approvals/*',
+    ].map(path=>'arn:aws:ssm:ap-northeast-1:123456789012:parameter/mem9-on-aws/prod/'+path));
+    expect(resources.some(r=>r.endsWith('/prod/*')||r.includes('/runtime/')||r.includes('/db/'))).toBe(false);
 
     const decrypt = perms.find((p) => p.actions.includes("kms:Decrypt"));
     expect(decrypt?.resources).toEqual(["*"]);
@@ -451,10 +455,7 @@ describe("oauthFacade factory", () => {
       {
         test: "ArnLike",
         variable: "kms:EncryptionContext:PARAMETER_ARN",
-        values: [
-          "arn:aws:ssm:ap-northeast-1:123456789012:" +
-            "parameter/mem9-on-aws/prod/*",
-        ],
+        values: resources,
       },
     ]);
   });

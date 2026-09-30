@@ -45,6 +45,11 @@ COPY scripts/prepare-preview-memory-namespaces.mjs /bootstrap/operator/scripts/p
 COPY scripts/consolidation-preview-fixture.mjs /bootstrap/operator/scripts/consolidation-preview-fixture.mjs
 COPY scripts/runtime-bootstrap.mjs /bootstrap/operator/scripts/runtime-bootstrap.mjs
 COPY scripts/runtime-admin-probe.mjs /bootstrap/operator/scripts/runtime-admin-probe.mjs
+COPY scripts/production-runtime-operator.mjs /bootstrap/operator/scripts/production-runtime-operator.mjs
+COPY scripts/lib/production-runtime-config.mjs /bootstrap/operator/scripts/lib/production-runtime-config.mjs
+COPY scripts/lib/production-runtime-state.mjs /bootstrap/operator/scripts/lib/production-runtime-state.mjs
+COPY scripts/lib/production-runtime-credentials.mjs /bootstrap/operator/scripts/lib/production-runtime-credentials.mjs
+COPY scripts/lib/production-runtime-ownership.mjs /bootstrap/operator/scripts/lib/production-runtime-ownership.mjs
 COPY scripts/lib/runtime-admin-probe-config.mjs /bootstrap/operator/scripts/lib/runtime-admin-probe-config.mjs
 COPY scripts/seed-tenant.mjs /bootstrap/operator/scripts/seed-tenant.mjs
 COPY scripts/lib/runtime-credentials.mjs /bootstrap/operator/scripts/lib/runtime-credentials.mjs

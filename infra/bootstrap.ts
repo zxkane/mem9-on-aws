@@ -27,6 +27,8 @@ import type { TenantIdentityOutputs } from "./tenant-identity";
 import type { CognitoOutputs } from "./cognito";
 import type { AuthConfig } from "./auth-config";
 import type { ConsolidationPreviewConfig } from "./consolidation-runtime";
+import type {ProductionRuntimeResources} from "./production-runtime";
+import {runtimeTaskTrust,protectLegacyRuntimeCredentials} from "./production-runtime";
 
 const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 
@@ -49,6 +51,7 @@ export function bootstrap(
   auth?: AuthConfig,
   consolidationPreview?: ConsolidationPreviewConfig,
   runtime?: RuntimeCredentials,
+  production?: ProductionRuntimeResources,
 ): BootstrapOutputs {
   const prefix = `/mem9-on-aws/${$app.stage}`;
   const tags = { Project: "mem9-on-aws", Stage: $app.stage, ManagedBy: "sst" };
@@ -85,6 +88,7 @@ export function bootstrap(
       // cutover in required mode or must first deploy this compatible revision.
       MEM9_NAMESPACE_BOOTSTRAP_VERSION: "1",
       ...(runtime ? {MEM9_RUNTIME_BOOTSTRAP_VERSION: "1"} : {}),
+      ...(production?.active ? {MEM9_BOOTSTRAP_OPERATION:"runtime-verify"} : {}),
       MEM9_DB_HOST: dbOut.host,
       MEM9_DB_PORT: dbOut.port.apply((p) => String(p)),
       MEM9_DB_NAME: dbOut.database,
@@ -95,17 +99,17 @@ export function bootstrap(
       // legacy pool here alongside the new issuer to an operator command.
       MEM9_COGNITO_USER_POOL_ID: auth?.oidc ? "" : cognito!.userPoolId,
       AWS_REGION: region,
-      ...(previewNamespaceFixtures ?? {}),
-      ...(consolidationPreview ? {MEM9_PREVIEW_GENERATION: consolidationPreview.generation} : {}),
+      ...(!production?.active ? previewNamespaceFixtures ?? {} : {}),
+      ...(consolidationPreview&&!production?.active ? {MEM9_PREVIEW_GENERATION: consolidationPreview.generation} : {}),
     },
     // Secret injection (== ECS secrets valueFrom): the DB creds JSON + the tenant
     // id, both resolved from Secrets Manager at task start, never literals.
     ssm: {
-      MEM9_DB_SECRET: dbOut.secretArn,
+      MEM9_DB_SECRET: production?.active ? production.administratorArn : dbOut.secretArn,
       ...(runtime ? {MEM9_RUNTIME_DB_SECRET: runtime.parameterArn} : {}),
-      ...(runtime?.probeParameterArn ? {MEM9_PROBE_ADMIN_CREDENTIAL: runtime.probeParameterArn} : {}),
+      ...(runtime?.probeParameterArn&&!production?.active ? {MEM9_PROBE_ADMIN_CREDENTIAL: runtime.probeParameterArn} : {}),
       MEM9_TENANT_ID: identity.tenantSecretArn,
-      ...(consolidationPreview ? {
+      ...(consolidationPreview&&!production?.active ? {
         MEM9_CONSOLIDATION_PREVIEW_CONFIG: consolidationPreview.arns.config,
         MEM9_PREVIEW_PLANNER_CREDENTIAL: consolidationPreview.arns.planner,
         MEM9_PREVIEW_EXECUTOR_CREDENTIAL: consolidationPreview.arns.executor,
@@ -117,7 +121,15 @@ export function bootstrap(
     transform: {
       taskDefinition: (args) => {
         args.tags = { ...(args.tags ?? {}), ...tags };
+        if(production?.active)args.executionRoleArn=production.bootstrapExecutionRoleArn;
       },
+      ...(production?{executionRole:(args:Record<string,unknown>)=>{
+        if(!production.active){protectLegacyRuntimeCredentials(args,true);return;}
+        args.assumeRolePolicy=$jsonStringify(runtimeTaskTrust());
+        args.inlinePolicies=[{name:"ProductionCredentialFence",policy:JSON.stringify({Version:"2012-10-17",Statement:[{
+          Effect:"Deny",Action:["ssm:GetParameter","ssm:GetParameters","ssm:GetParametersByPath","secretsmanager:GetSecretValue","kms:Decrypt"],Resource:"*"}]})}];
+      }}:{}),
+      ...(production?{taskRole:(args:Record<string,unknown>)=>protectLegacyRuntimeCredentials(args,true)}:{}),
     },
   });
 

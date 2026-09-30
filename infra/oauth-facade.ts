@@ -338,8 +338,14 @@ export function oauthFacade(
   // --- Façade Function (public, NOT VPC-attached) ---
   // arm64 nodejs24.x. Env carries the SSM prefix (the handler reads the reader
   // client id/secret from SSM at runtime) + the Cognito endpoint URLs + the
-  // resource scope + the live HMAC key. Least-privilege: SSM read scoped to this
-  // stage's parameter path only.
+  // resource scope + the live HMAC key. An entire-stage reader would also gain
+  // access to future database credentials. Enumerate only the handler's inputs.
+  const facadeParameters = [
+    `${prefix}/gateway/url`, `${credentialPrefix}/client-id`, `${credentialPrefix}/client-secret`,
+    `${prefix}/oauth/allowed-callback-urls`, `${prefix}/slack/signing-secret`,
+    ...['cluster-name','task-def-arn','task-sg-id','subnet-ids'].map(key=>`${prefix}/cleanup/${key}`),
+    `${prefix}/approvals/*`,
+  ].map(path=>$interpolate`arn:aws:ssm:${region}:${accountId}:parameter${path}`);
   const facadeFn = new sst.aws.Function("Mem9OauthFacadeFn", {
     handler: "infra/src/oauth-facade/handler.handler",
     runtime: "nodejs24.x",
@@ -379,9 +385,7 @@ export function oauthFacade(
     permissions: [
       {
         actions: ["ssm:GetParameters"],
-        resources: [
-          $interpolate`arn:aws:ssm:${region}:${accountId}:parameter${prefix}/*`,
-        ],
+        resources: facadeParameters,
       },
       {
         actions: ["kms:Decrypt"],
@@ -395,9 +399,7 @@ export function oauthFacade(
           {
             test: "ArnLike",
             variable: "kms:EncryptionContext:PARAMETER_ARN",
-            values: [
-              $interpolate`arn:aws:ssm:${region}:${accountId}:parameter${prefix}/*`,
-            ],
+            values: facadeParameters,
           },
         ],
       },

@@ -128,7 +128,10 @@ export default $config({
     const { consolidationPreviewConfig, continuousConsolidationTasks } = await import("./infra/consolidation-runtime");
     const consolidationPreview = consolidationPreviewConfig();
     const { runtimeCredentials } = await import("./infra/runtime-credentials");
-    const runtime = runtimeCredentials();
+    const previewRuntime = runtimeCredentials();
+    const {productionRuntimeResources,productionRuntimeTasks} = await import("./infra/production-runtime");
+    const productionRuntime = productionRuntimeResources(previewRuntime,identityOut,namespaceIdentityOut,maintenanceIdentityOut);
+    const runtime = productionRuntime?.active ? productionRuntime.runtime : previewRuntime;
 
     // ECS Fargate cluster + the mnemo-server service. Three containers:
     // mnemo-server, qwen3-embed (localhost /v1/embeddings, dims 1024), and
@@ -150,7 +153,8 @@ export default $config({
     // migration, and access-management commands inside the VPC. CI invokes the
     // default bootstrap mode after deploy; operator commands are explicit.
     const { bootstrap } = await import("./infra/bootstrap");
-    bootstrap(ecsOut.cluster, dbOut, identityOut, cognitoOut, authConfig, consolidationPreview, runtime);
+    bootstrap(ecsOut.cluster, dbOut, identityOut, cognitoOut, authConfig, consolidationPreview, runtime,productionRuntime);
+    if(productionRuntime)productionRuntimeTasks(ecsOut,dbOut,identityOut,productionRuntime);
     // OAuth2 browser-login façade (§6): ApiGatewayV2 + reader client + façade
     // Lambda. Built BEFORE gateway() because it produces the reader client id the
     // gateway must trust. The façade reads gateway/url from SSM at RUNTIME, so it

@@ -1,0 +1,109 @@
+name: Runtime cutover recovery
+
+on:
+  workflow_run:
+    workflows: [Infra CI]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  source:
+    if: github.event.workflow_run.conclusion != 'success' && github.event.workflow_run.head_repository.full_name == github.repository
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    permissions:
+      actions: read
+    outputs:
+      stage: ${{ steps.source.outputs.stage }}
+      sha: ${{ steps.source.outputs.sha }}
+      run-id: ${{ steps.source.outputs.run-id }}
+    steps:
+      - id: source
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9
+        with:
+          script: |
+            const run = context.payload.workflow_run;
+            if (run.event !== 'workflow_dispatch' || run.path !== '.github/workflows/infra-ci.yml') return;
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {
+              ...context.repo, run_id: run.id, per_page: 100,
+            });
+            const failed = jobs.filter(job => ['failure', 'cancelled', 'timed_out'].includes(job.conclusion));
+            const prod = failed.some(job => job.name === 'Production runtime credential cutover');
+            const preview = failed.map(job => /^Preview runtime credential rehearsal \((pr-[1-9][0-9]*)\)$/.exec(job.name)).filter(Boolean);
+            if (prod && run.head_branch !== 'main') throw Error('UntrustedProductionRecoverySource');
+            if ((prod ? 1 : 0) + preview.length !== 1 || !/^[a-f0-9]{40}$/.test(run.head_sha)) return;
+            core.setOutput('stage', prod ? 'prod' : preview[0][1]);
+            core.setOutput('sha', run.head_sha);
+            core.setOutput('run-id', String(run.id));
+
+  production:
+    needs: source
+    if: needs.source.outputs.stage == 'prod'
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    environment: prod
+    concurrency:
+      group: infra-deploy-prod
+      cancel-in-progress: false
+      queue: max
+    timeout-minutes: 55
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      STAGE: prod
+      MEM9_AUTH_MODE: ${{ secrets.MEM9_AUTH_MODE || 'managed' }}
+      MEM9_RUNTIME_RECOVERY_RUN_ID: ${{ needs.source.outputs.run-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+      - run: npm ci
+      - id: region
+        run: echo "region=$(node scripts/resolve-application-region.mjs)" >> "$GITHUB_OUTPUT"
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        with:
+          role-to-assume: ${{ secrets.AWS_PROD_ROLE_ARN }}
+          aws-region: ${{ steps.region.outputs.region }}
+          mask-aws-account-id: true
+      - name: Restore the interrupted production migration
+        run: timeout --signal=TERM --kill-after=30s 2700 node scripts/run-production-runtime.mjs recover
+
+  preview:
+    needs: source
+    if: startsWith(needs.source.outputs.stage, 'pr-')
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    environment: preview-ci
+    concurrency:
+      group: infra-ci-${{ needs.source.outputs.stage }}
+      cancel-in-progress: false
+      queue: max
+    timeout-minutes: 55
+    permissions:
+      id-token: write
+      contents: read
+    env:
+      STAGE: ${{ needs.source.outputs.stage }}
+      MEM9_RUNTIME_RECOVERY_RUN_ID: ${{ needs.source.outputs.run-id }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ needs.source.outputs.sha }}
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+      - run: npm ci
+      - id: region
+        run: echo "region=$(node scripts/resolve-application-region.mjs)" >> "$GITHUB_OUTPUT"
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        with:
+          role-to-assume: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          aws-region: ${{ steps.region.outputs.region }}
+          mask-aws-account-id: true
+      - name: Restore the interrupted preview migration
+        run: timeout --signal=TERM --kill-after=30s 2700 node scripts/run-production-runtime.mjs recover

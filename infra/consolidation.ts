@@ -12,6 +12,7 @@ import {
 } from "./decision-artifact";
 import { disableTaskContainerPseudoTerminal } from "./ecs-task-definition";
 import { consolidationTimeoutSeconds } from "../scripts/lib/maintenance-runtime.mjs";
+import {protectLegacyRuntimeCredentials,productionRuntimeEnabled} from "./production-runtime";
 
 const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 const BEDROCK_PROJECT = process.env.MEM9_BEDROCK_PROJECT;
@@ -307,6 +308,8 @@ export function consolidation(
     permissions: taskPermissions,
     logging: { retention: "1 month" },
     transform: {
+      executionRole: args=>protectLegacyRuntimeCredentials(args),
+      taskRole: args=>protectLegacyRuntimeCredentials(args),
       taskDefinition: (args) => {
         disableTaskContainerPseudoTerminal(
           args,
@@ -447,6 +450,7 @@ export function consolidation(
       policy: $jsonStringify({
         Version: "2012-10-17",
         Statement: [
+          ...(productionRuntimeEnabled()?[{Effect:"Deny",Action:"ecs:RunTask",Resource:task.taskDefinition.apply(arn=>arn.replace(/:[0-9]+$/,":*"))}]:[]),
           {
             Effect: "Allow",
             Action: "ecs:RunTask",
@@ -477,7 +481,7 @@ export function consolidation(
       groupName: scheduleGroup.name,
       scheduleExpression: "cron(0 3 ? * SUN *)",
       scheduleExpressionTimezone: "UTC",
-      state: $app.stage === "prod" ? "ENABLED" : "DISABLED",
+      state: $app.stage === "prod"&&!productionRuntimeEnabled() ? "ENABLED" : "DISABLED",
       flexibleTimeWindow: { mode: "OFF" },
       target: {
         arn: ecsOut.cluster.nodes.cluster.arn,

@@ -2,7 +2,7 @@ import {readFile} from 'node:fs/promises';
 import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import pg from 'pg';
-import {runtimeSchemaDigest,parseRuntimeConfig,runtimeRoleName,runtimeLockKey,RUNTIME_LOCK_CLASS,applyBootstrapSchema} from './lib/runtime-credentials.mjs';
+import {runtimeSchemaDigest,parseRuntimeConfig,runtimeRoleName,runtimeLockKey,RUNTIME_LOCK_CLASS,applyBootstrapSchema,runtimePreviewStage} from './lib/runtime-credentials.mjs';
 import {scramVerifier,secureCredentialDdlLogging} from './lib/consolidation-preview-secrets.mjs';
 import {seedTenant} from './seed-tenant.mjs';
 import {preparePreviewMemoryNamespaces,previewNamespaceDesiredState} from './prepare-preview-memory-namespaces.mjs';
@@ -36,7 +36,8 @@ async function invalidate(db){
     await db.query('UPDATE mem9_runtime.readiness SET ready=false,updated_at=clock_timestamp() WHERE singleton');
 }
 
-async function prepareRole(db,config){
+export async function prepareRuntimeRole(db,config){
+  if(config.credentials?.username!==runtimeRoleName(config.stage))throw Error('InvalidRuntimeConfiguration');
   await secureCredentialDdlLogging(db);
   const marker='mem9-runtime-v1/'+config.stage+'/'+config.database;
   const verifier=scramVerifier(config.credentials.password,config.credentials.salt);
@@ -114,7 +115,7 @@ export async function bootstrapRuntime({db,config,schemaRoot,prepareNamespaces,c
       await db.query(await readFile(join(schemaRoot,'runtime-contract.sql'),'utf8'));
       await onPhase('schema');
       const digest=await runtimeSchemaDigest(schemaRoot);
-      await prepareRole(db,config);await grantRuntime(db,config);
+      await prepareRuntimeRole(db,config);await grantRuntime(db,config);
       await onPhase('grants');
       await db.query('INSERT INTO mem9_runtime.readiness(singleton,stage,role_oid,schema_digest,ready) VALUES(true,$1,$2::regrole::oid,$3,false) ON CONFLICT(singleton) DO UPDATE SET stage=EXCLUDED.stage,role_oid=EXCLUDED.role_oid,schema_digest=EXCLUDED.schema_digest,ready=false',[config.stage,config.credentials.username,digest]);
       await prepareNamespaces(db);await onPhase('namespaces');
@@ -150,13 +151,14 @@ export async function bootstrapRuntime({db,config,schemaRoot,prepareNamespaces,c
 let currentPhase='configuration';
 async function main(){
   const env=process.env,config=parseRuntimeConfig(env),owner=JSON.parse(env.MEM9_DB_SECRET||'null');
+  const verify=env.MEM9_BOOTSTRAP_OPERATION==='runtime-verify';
+  if(!runtimePreviewStage(config.stage)&&!verify)throw Error('ProductionRuntimeOperatorRequired');
   const deadline=Number(env.MEM9_RUNTIME_BOOTSTRAP_DEADLINE);
   if(!Number.isSafeInteger(deadline)||deadline<=Date.now()||deadline>Date.now()+900000)throw Error('RuntimeBootstrapExpired');
   const watchdog=setTimeout(()=>process.exit(1),deadline-Date.now());watchdog.unref();
   const client=credentials=>new pg.Client({host:config.host,port:config.port,database:config.database,user:credentials.username,password:credentials.password,
     ssl:{rejectUnauthorized:true},connectionTimeoutMillis:10000,query_timeout:30000,keepAlive:true,keepAliveInitialDelayMillis:1000,
     application_name:'mem9-runtime-bootstrap'});
-  const verify=env.MEM9_BOOTSTRAP_OPERATION==='runtime-verify';
   const db=client(verify?config.credentials:owner);db.on('error',()=>{});
   try{
     currentPhase='connection';

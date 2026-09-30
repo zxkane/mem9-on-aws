@@ -1,0 +1,69 @@
+name: Guarded runtime credential cutover
+description: Prepare, apply, finalize and recover the reviewed stage runtime migration.
+inputs:
+  role-arn:
+    required: true
+    description: Existing stage-scoped deployment role
+  region:
+    required: true
+    description: Application region
+  cleanup-preview:
+    default: "false"
+    description: Remove the disposable rehearsal stage after completion
+runs:
+  using: composite
+  steps:
+    - name: Refresh preparation credentials
+      uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+      with:
+        role-to-assume: ${{ inputs.role-arn }}
+        aws-region: ${{ inputs.region }}
+        mask-aws-account-id: true
+    - name: Verify deployed operator image
+      env:
+        GH_TOKEN: ${{ github.token }}
+      shell: bash
+      run: node scripts/run-production-runtime.mjs image
+    - name: Prepare credentials and pinned fallback
+      shell: bash
+      run: timeout --signal=TERM --kill-after=30s 2700 node scripts/run-production-runtime.mjs prepare
+    - name: Refresh cutover credentials
+      uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+      with:
+        role-to-assume: ${{ inputs.role-arn }}
+        aws-region: ${{ inputs.region }}
+        mask-aws-account-id: true
+    - name: Apply bounded credential cutover
+      shell: bash
+      run: timeout --signal=TERM --kill-after=30s 2700 node scripts/run-production-runtime.mjs apply
+    - name: Refresh finalization credentials
+      uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+      with:
+        role-to-assume: ${{ inputs.role-arn }}
+        aws-region: ${{ inputs.region }}
+        mask-aws-account-id: true
+    - name: Converge infrastructure and verify retirement
+      shell: bash
+      run: node scripts/run-production-runtime.mjs finalize
+    - name: Refresh recovery credentials
+      if: failure() || cancelled()
+      uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+      with:
+        role-to-assume: ${{ inputs.role-arn }}
+        aws-region: ${{ inputs.region }}
+        mask-aws-account-id: true
+    - name: Restore service after a failed cutover
+      if: failure() || cancelled()
+      shell: bash
+      run: timeout --signal=TERM --kill-after=30s 2700 node scripts/run-production-runtime.mjs recover
+    - name: Refresh preview cleanup credentials
+      if: always() && inputs.cleanup-preview == 'true'
+      uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+      with:
+        role-to-assume: ${{ inputs.role-arn }}
+        aws-region: ${{ inputs.region }}
+        mask-aws-account-id: true
+    - name: Remove disposable rehearsal
+      if: always() && inputs.cleanup-preview == 'true'
+      shell: bash
+      run: node scripts/run-production-runtime.mjs cleanup-preview
