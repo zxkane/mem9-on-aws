@@ -16,9 +16,9 @@ export async function runConsolidationExecutor(deps,{runtimeMs=600000,now=()=>pe
   while(now()<deadline){
     if(batchRows===100){batchRows=0;report.batches++;}
     const claim=await deps.claim(100-batchRows);
-    if(claim.status==='scan_more'){await sleep(Math.min(10,Math.max(0,deadline-now())));continue;}
+    if(['scan_more','window_changed'].includes(claim.status)){await sleep(Math.min(10,Math.max(0,deadline-now())));continue;}
     if(claim.status!=='leased'){
-      if(!['idle','budget_wait','policy_blocked'].includes(claim.status))throw Error('invalid claim result');
+      if(!['idle','budget_wait','policy_blocked','lease_busy'].includes(claim.status))throw Error('invalid claim result');
       if(claim.status==='idle'&&batchRows>0){batchRows=0;report.batches++;continue;}
       report.stopReason=claim.status;break;
     }
@@ -66,11 +66,13 @@ async function main(){
   };
   await db.connect();
   try{
+    const slice=process.env.MEM9_CONSOLIDATION_SLICE_SECONDS;
+    if(slice!==undefined&&(!/^[1-9][0-9]*$/.test(slice)||Number(slice)>600))throw Error('invalid executor slice');
     const result=await runConsolidationExecutor({
       claim:async remaining=>(await db.query('SELECT mem9_maintenance.claim_action($1,120,$2) AS result',[scope.namespaceId,remaining])).rows[0].result,
       apply:(claim,timeout)=>request(claim.action_id,{lease_generation:claim.lease_generation},timeout),
       status:id=>request(id,null,10000),
-    });
+    },{runtimeMs:slice===undefined?600000:Number(slice)*1000});
     process.stdout.write(JSON.stringify({event:'consolidation_executor',stage:scope.stage,...result})+'\n');
   }finally{await db.end();}
 }

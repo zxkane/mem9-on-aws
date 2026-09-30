@@ -318,6 +318,7 @@ jobs:
           shellcheck scripts/run-consolidation-storage-integration.sh
           shellcheck scripts/run-consolidation-execution-integration.sh
           shellcheck scripts/run-consolidation-planner-integration.sh
+          shellcheck scripts/run-consolidation-scheduling-integration.sh
           shellcheck scripts/run-memory-namespace-e2e.sh
           shellcheck scripts/run-memory-namespace-benchmark.sh
           shellcheck scripts/run-memory-namespace-connection-e2e.sh
@@ -339,6 +340,8 @@ jobs:
         run: bash scripts/run-consolidation-execution-integration.sh
       - name: PostgreSQL incremental planner and model admission
         run: bash scripts/run-consolidation-planner-integration.sh
+      - name: Consolidation scheduling and synthetic fixture integration
+        run: bash scripts/run-consolidation-scheduling-integration.sh
       - name: Namespace analysis service isolation
         run: bash scripts/run-analysis-namespace-integration.sh
 
@@ -430,6 +433,10 @@ jobs:
       - name: Install infra dependencies
         if: steps.gate.outputs.skip != 'true'
         run: pnpm -C infra install --frozen-lockfile
+
+      - name: Install preview acceptance dependencies
+        if: steps.gate.outputs.skip != 'true'
+        run: npm ci
 
       - name: Configure AWS credentials (OIDC)
         if: steps.gate.outputs.skip != 'true'
@@ -613,6 +620,13 @@ jobs:
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: node scripts/reconcile-ecs-deployment.mjs --stage "$STAGE"
+
+      - name: Continuous consolidation Scheduler E2E (preview, hard)
+        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        env:
+          STAGE: ${{ steps.deploy.outputs.stage }}
+          MEM9_DEPLOY_COMMIT: ${{ github.sha }}
+        run: node scripts/consolidation-scheduler-e2e.mjs
 
       - name: MCP write-search E2E (preview, soft)
         # The first live write->search round-trip (section 6/6a): Cognito M2M JWT

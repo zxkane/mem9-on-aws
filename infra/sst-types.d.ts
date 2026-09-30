@@ -668,7 +668,11 @@ declare namespace sst {
       ssm?: Input<Record<string, Input<string>>>;
       permissions?: Input<FargatePermission>[];
       logging?: ServiceLogging;
-      transform?: { taskDefinition?: (args: Record<string, unknown>) => void };
+      transform?: {
+        taskDefinition?: (args: Record<string, unknown>) => void;
+        taskRole?: (args: Record<string, unknown>) => void;
+        executionRole?: (args: Record<string, unknown>) => void;
+      };
     }
     class Task {
       constructor(name: string, args: TaskArgs);

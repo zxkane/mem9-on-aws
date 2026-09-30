@@ -1168,6 +1168,19 @@ PostgreSQL planner rehearsal runs before deployment. Schedule provisioning,
 execution fair shares, full retention cleanup and live rollout acceptance remain
 pending; the user-confirmed drain target still requires calibration.
 
+The scheduling increment adds migration `007_consolidation_scheduling.sql`,
+separate planner/executor tasks and disabled recurring Scheduler targets for
+numeric preview stages only. A protected generation, expiring dispatcher leases
+and persisted namespace rotation coordinate bounded worker slices. Production
+receives no new worker credentials, enabled policies or schedules.
+The hard preview acceptance creates an isolated synthetic tenant database and
+uses actual one-time Scheduler deliveries, local Qwen embeddings and execution
+receipts to prove multi-batch processing and persistent budgets. It pauses
+synthetic modes and removes temporary schedules afterward. Synthetic acceptance
+does not certify real-memory quality or the production backlog drain target.
+See the existing [design](designs/weekly-memory-consolidation.md) for credential,
+logging, generation and failure-recovery contracts.
+
 The open reliability program covers future work in these areas:
 
 - Release image tag selection and read-only ECS actual-state reconciliation.

@@ -1595,6 +1595,12 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
+              - Sid: PreviewConsolidationDatabaseLogRead
+                Effect: Allow
+                Action:
+                  - rds:DescribeDBLogFiles
+                  - rds:DownloadDBLogFilePortion
+                Resource: !Sub arn:${AWS::Partition}:rds:${ApplicationRegion}:${AWS::AccountId}:db:${ProjectName}-pr-*
               - Sid: DenyTaggedProductionResources
                 Effect: Deny
                 Action: "*"
@@ -1617,6 +1623,7 @@ Resources:
                   - !Sub arn:${AWS::Partition}:secretsmanager:*:${AWS::AccountId}:secret:${ProjectName}-prod-*
                   - !Sub arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:function:${ProjectName}-prod-*
                   - !Sub arn:${AWS::Partition}:ecs:*:${AWS::AccountId}:cluster/${ProjectName}-prod-*
+                  - !Sub arn:${AWS::Partition}:ecs:*:${AWS::AccountId}:task/${ProjectName}-prod-*/*
                   - !Sub arn:${AWS::Partition}:ecs:*:${AWS::AccountId}:service/${ProjectName}-prod-*/*
                   - !Sub arn:${AWS::Partition}:ecs:*:${AWS::AccountId}:task-definition/${ProjectName}-prod-*
                   - !Sub arn:${AWS::Partition}:rds:*:${AWS::AccountId}:cluster:${ProjectName}-prod-*
@@ -1775,6 +1782,7 @@ Resources:
                   - !Sub arn:${AWS::Partition}:secretsmanager:*:${AWS::AccountId}:secret:${ProjectName}-pr-*
                   - !Sub arn:${AWS::Partition}:lambda:*:${AWS::AccountId}:function:${ProjectName}-pr-*
                   - !Sub arn:${AWS::Partition}:ecs:*:${AWS::AccountId}:cluster/${ProjectName}-pr-*
+                  - !Sub arn:${AWS::Partition}:ecs:*:${AWS::AccountId}:task/${ProjectName}-pr-*/*
                   - !Sub arn:${AWS::Partition}:ecs:*:${AWS::AccountId}:service/${ProjectName}-pr-*/*
                   - !Sub arn:${AWS::Partition}:ecs:*:${AWS::AccountId}:task-definition/${ProjectName}-pr-*
                   - !Sub arn:${AWS::Partition}:rds:*:${AWS::AccountId}:cluster:${ProjectName}-pr-*

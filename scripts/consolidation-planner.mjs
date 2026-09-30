@@ -147,7 +147,10 @@ async function main() {
       return getToken({ credentials: await fromNodeProviderChain()(), region, expiresInSeconds: 3600 });
     };
     deps.infer = createPlannerModelClient({ mintToken, dispatch: deps.dispatch, env: process.env });
-    const runtimeMs = Math.floor(PLANNER_RUNTIME_MS - (performance.now() - started) - FINISH_MARGIN_MS);
+    const slice = process.env.MEM9_CONSOLIDATION_SLICE_SECONDS;
+    if (slice !== undefined && (!/^[1-9][0-9]*$/.test(slice) || Number(slice) > 3000)) throw Error('invalid planner slice');
+    const runtimeMs = Math.floor(Math.min(PLANNER_RUNTIME_MS - (performance.now() - started) - FINISH_MARGIN_MS,
+      slice === undefined ? PLANNER_RUNTIME_MS : Number(slice) * 1000));
     const report = await runConsolidationPlanner(deps, { runtimeMs });
     process.stdout.write(JSON.stringify({ event: 'consolidation_planner', stage, ...report }) + '\n');
     if (['contract_violation', 'pending_publication'].includes(report.stopReason)) process.exitCode = 1;

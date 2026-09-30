@@ -379,6 +379,7 @@ export function ecs(
           // it only after freeze/backfill/enforce reaches constraints_complete
           // and the Cognito/Aurora namespace bindings are reconciled.
           MNEMO_NAMESPACE_REQUIRED: NAMESPACE_REQUIRED,
+          MNEMO_CONSOLIDATION_EXECUTION_ENABLED: /^pr-[1-9][0-9]*$/.test($app.stage) && NAMESPACE_REQUIRED === "1" ? "true" : "false",
           MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS: "25000",
           MNEMO_NAMESPACE_EXACT_VECTOR_TIMEOUT: "2s",
           MNEMO_TRANSPORT_ISSUER: "gateway-target",
