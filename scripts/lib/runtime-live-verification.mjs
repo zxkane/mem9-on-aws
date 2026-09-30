@@ -16,7 +16,7 @@ function canonical(value,key=''){
 const same=(a,b)=>JSON.stringify(canonical(a))===JSON.stringify(canonical(b));
 
 export function runtimeServerContract(definition,meta,tenantSecret){
-  if(definition.taskDefinitionArn!==meta.serverTaskDefinition||definition.family!==meta.cluster+'-Mem9Server')fail('RuntimeServerRevisionMismatch');
+  if(definition.taskDefinitionArn!==meta.serverTaskDefinition||definition.family!==meta.cluster+(meta.productionRuntime?'-Mem9RuntimeServer':'-Mem9Server'))fail('RuntimeServerRevisionMismatch');
   const server=definition.containerDefinitions?.find(c=>c.name==='mnemo-server'),env=environment(server);
   const base=`arn:aws:ssm:${meta.region}:${meta.account}:parameter/mem9-on-aws/${meta.stage}`;
   const secrets={MEM9_DB_SECRET:base+'/runtime/database-credential',MEM9_TENANT_ID:tenantSecret,
@@ -30,7 +30,7 @@ export function runtimeServerContract(definition,meta,tenantSecret){
     {Effect:'Allow',Action:['ssm:GetParameters'],Resource:parameters},
     {Effect:'Allow',Action:['secretsmanager:GetSecretValue'],Resource:[tenantSecret]},
     {Effect:'Allow',Action:['kms:Decrypt'],Resource:'*',Condition:{StringEquals:{'kms:ViaService':`ssm.${meta.region}.amazonaws.com`,'kms:EncryptionContext:PARAMETER_ARN':parameters}}},
-    {Effect:'Allow',Action:['kms:Decrypt'],Resource:'*',Condition:{StringEquals:{'kms:ViaService':`secretsmanager.${meta.region}.amazonaws.com`,'kms:EncryptionContext:SecretARN':tenantSecret}}},
+    {Effect:'Allow',Action:['kms:Decrypt'],Resource:'*',Condition:{StringEquals:{'kms:ViaService':`secretsmanager.${meta.region}.amazonaws.com`,'kms:EncryptionContext:SecretARN':meta.productionRuntime?[tenantSecret]:tenantSecret}}},
   ]};
   const proxy=environment(definition.containerDefinitions.find(c=>c.name==='llm-proxy'));
   const project=(region,id)=>`arn:aws:bedrock-mantle:${region}:${meta.account}:project/${id}`;
@@ -40,20 +40,22 @@ export function runtimeServerContract(definition,meta,tenantSecret){
     {Effect:'Allow',Action:['bedrock-mantle:CallWithBearerToken','bedrock-mantle:GetProject','bedrock-mantle:ListProjects','bedrock-mantle:ListTagsForResource'],Resource:['*']},
     {Effect:'Allow',Action:['ssmmessages:CreateControlChannel','ssmmessages:CreateDataChannel','ssmmessages:OpenControlChannel','ssmmessages:OpenDataChannel'],Resource:['*']},
   ]};
-  return {execution,task};
+  const fence={Version:'2012-10-17',Statement:[{Effect:'Deny',Action:['ssm:GetParameter','ssm:GetParameters','ssm:GetParameterHistory','ssm:GetParametersByPath','secretsmanager:GetSecretValue','kms:Decrypt'],Resource:'*'}]};
+  return {execution,task,...(meta.productionRuntime?{fence}:{})};
 }
 
 export async function verifyRuntimeRoles({iam,definition,meta,contract}){
   const send=command=>iam.send(command,{abortSignal:AbortSignal.timeout(30000)});
   for(const kind of ['task','execution']){
     const arn=definition[kind+'RoleArn'];
-    const prefix=`arn:aws:iam::${meta.account}:role/mem9-on-aws-${meta.stage}-Mem9Server${kind==='task'?'Task':'Execution'}Role-`;
+    const prefix=`arn:aws:iam::${meta.account}:role/mem9-on-aws-${meta.stage}-${meta.productionRuntime&&kind==='execution'?'Runtime':''}Mem9Server${kind==='task'?'Task':'Execution'}Role-`;
     if(!arn?.startsWith(prefix)||!/^[a-zA-Z0-9-]+$/.test(arn.slice(prefix.length)))fail('RuntimeRoleScopeMismatch');
     const RoleName=arn.split('/').at(-1);
     const role=(await send(new GetRoleCommand({RoleName}))).Role;
     if(role?.Arn!==arn||role.PermissionsBoundary?.PermissionsBoundaryArn!==`arn:aws:iam::${meta.account}:policy/mem9-on-aws-workload-boundary`)fail('RuntimeRoleBoundaryMismatch');
     const trust=decoded(role.AssumeRolePolicyDocument);
-    if(!same(trust,{Version:'2012-10-17',Statement:[{Effect:'Allow',Action:'sts:AssumeRole',Principal:{Service:'ecs-tasks.amazonaws.com'}}]}))fail('RuntimeRoleTrustMismatch');
+    if(!same(trust,{Version:'2012-10-17',Statement:[{Effect:'Allow',Action:'sts:AssumeRole',Principal:{Service:'ecs-tasks.amazonaws.com'},
+      ...(meta.productionRuntime?{Condition:{StringEquals:{'aws:SourceAccount':meta.account},ArnLike:{'aws:SourceArn':`arn:aws:ecs:${meta.region}:${meta.account}:*`}}}:{})}]}))fail('RuntimeRoleTrustMismatch');
     const policies=[],attached=[];
     for(const [Command,key,destination] of [[ListRolePoliciesCommand,'PolicyNames',policies],[ListAttachedRolePoliciesCommand,'AttachedPolicies',attached]]){
       let Marker;
@@ -64,7 +66,8 @@ export async function verifyRuntimeRoles({iam,definition,meta,contract}){
       }
     }
     const name=kind==='task'?'inline':'RuntimeSecrets';
-    if(policies.length!==1||policies[0]!==name)fail('RuntimeRolePolicyMismatch');
+    const expected=meta.productionRuntime&&kind==='task'?[name,'ProductionCredentialFence']:[name];
+    if(!same(policies,expected))fail('RuntimeRolePolicyMismatch');
     // The one permitted AWS-owned baseline (documented v1) grants only ECR
     // pulls/log writes; customers cannot edit it. No customer-managed policy
     // attachment or other AWS-managed policy is accepted.
@@ -72,5 +75,9 @@ export async function verifyRuntimeRoles({iam,definition,meta,contract}){
     if(!same(attached.map(p=>p.PolicyArn),allowed))fail('RuntimeRoleAttachmentMismatch');
     const actual=decoded((await send(new GetRolePolicyCommand({RoleName,PolicyName:name}))).PolicyDocument);
     if(!same(actual,contract[kind]))fail('RuntimeRolePolicyMismatch');
+    if(expected.length===2){
+      const fence=decoded((await send(new GetRolePolicyCommand({RoleName,PolicyName:'ProductionCredentialFence'}))).PolicyDocument);
+      if(!same(fence,contract.fence))fail('RuntimeRolePolicyMismatch');
+    }
   }
 }

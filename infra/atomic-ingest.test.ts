@@ -63,7 +63,7 @@ describe("atomic durable ingest wiring", () => {
       "utf8",
     );
     expect(ecs).toContain("process.env.MEM9_DURABLE_INGEST_ENABLED");
-    expect(workflow.match(/MEM9_DURABLE_INGEST_ENABLED: "1"/g)).toHaveLength(3);
+    expect(workflow.match(/MEM9_DURABLE_INGEST_ENABLED: "1"/g)).toHaveLength(5);
     expect(workflow).not.toContain('MEM9_DURABLE_INGEST_ENABLED: "0"');
     expect(workflow).not.toContain("Enable durable ingest after bootstrap");
     expect(dockerfile).toContain("postgresql-client");

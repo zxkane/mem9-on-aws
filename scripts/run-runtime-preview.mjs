@@ -6,7 +6,7 @@ import {ECSClient,DescribeTaskDefinitionCommand,DescribeServicesCommand,ListTask
 import {CloudWatchLogsClient,FilterLogEventsCommand} from '@aws-sdk/client-cloudwatch-logs';
 import {IAMClient} from '@aws-sdk/client-iam';
 import {runtimeServerContract,verifyRuntimeRoles} from './lib/runtime-live-verification.mjs';
-import {runtimeStage} from './lib/runtime-credentials.mjs';
+import {runtimePreviewStage as runtimeStage} from './lib/runtime-credentials.mjs';
 import {resolveApplicationRegion} from './lib/application-region.mjs';
 
 const fail=message=>{throw Error(message);};

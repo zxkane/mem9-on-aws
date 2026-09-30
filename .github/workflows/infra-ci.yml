@@ -57,6 +57,14 @@ on:
   # OAuth façade's HMAC state-signing key before the deploy.
   workflow_dispatch:
     inputs:
+      runtime_cutover:
+        description: "Run the guarded runtime credential cutover against an already verified deployment"
+        type: boolean
+        default: false
+      runtime_stage:
+        description: "prod, or the numeric pr-N stage owned by this exact branch revision"
+        type: string
+        default: prod
       seed_oauth_hmac:
         description: "Generate + set OauthStateHmacKey before deploying (enables the OAuth browser-login flow)"
         type: boolean
@@ -69,6 +77,8 @@ on:
       - "docker/**"
       - "sst.config.ts"
       - ".github/workflows/infra-ci.yml"
+      - ".github/workflows/runtime-recovery.yml"
+      - ".github/actions/runtime-cutover/**"
       - "scripts/**"
       - "package.json"
       - "package-lock.json"
@@ -93,6 +103,8 @@ on:
       - "docker/**"
       - "sst.config.ts"
       - ".github/workflows/infra-ci.yml"
+      - ".github/workflows/runtime-recovery.yml"
+      - ".github/actions/runtime-cutover/**"
       - "scripts/**"
       - "package.json"
       - "package-lock.json"
@@ -116,11 +128,14 @@ on:
 concurrency:
   group: >-
     ${{
-      (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      inputs.runtime_cutover
+        && (inputs.runtime_stage == 'prod' && 'infra-deploy-prod' || format('infra-ci-{0}', inputs.runtime_stage))
+        || (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
         && 'infra-deploy-prod'
         || format('infra-ci-pr-{0}', github.event.pull_request.number || 'unknown')
     }}
   cancel-in-progress: false
+  queue: max
 
 env:
   MEM9_DECISION_ARTIFACT_BUCKET: ${{ vars.MEM9_DECISION_ARTIFACT_BUCKET }}
@@ -1088,6 +1103,7 @@ jobs:
     needs: [changes, application-region, typecheck]
     if: >-
       always()
+      && !inputs.runtime_cutover
       && needs.changes.outputs.workload_changed == 'true'
       && needs.application-region.result == 'success'
       && needs.typecheck.result == 'success'
@@ -1379,6 +1395,7 @@ jobs:
     needs: [changes, application-region, typecheck, build-and-push-image]
     if: >-
       always()
+      && !inputs.runtime_cutover
       && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
       && needs.changes.outputs.aws_mutation_required == 'true'
       && needs.application-region.result == 'success'
@@ -1607,6 +1624,14 @@ jobs:
           echo "::add-mask::$ACCOUNT_ID"
           printf 'CLOUDFLARE_DEFAULT_ACCOUNT_ID=%s\n' "$ACCOUNT_ID" >> "$GITHUB_ENV"
 
+      - name: Install production runtime operator dependencies
+        run: npm ci
+
+      - name: Resolve production runtime deployment mode
+        env:
+          STAGE: prod
+        run: node scripts/run-production-runtime.mjs configure
+
       - name: Deploy prod stage
         shell: bash
         # Pin prod to the shared tag built for all workload images in this commit
@@ -1698,6 +1723,7 @@ jobs:
     needs: [changes, deploy-prod]
     if: >-
       always() &&
+      !inputs.runtime_cutover &&
       (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       (
         needs.changes.result != 'success'
@@ -1745,3 +1771,176 @@ jobs:
               ].join('\n'),
               labels: ['bug', 'infrastructure'],
             });
+
+  runtime-cutover-prod:
+    name: Production runtime credential cutover
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    environment: prod
+    needs:
+      - application-region
+      - typecheck
+    if: github.event_name == 'workflow_dispatch' && inputs.runtime_cutover && inputs.runtime_stage == 'prod'
+    timeout-minutes: 180
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+      pull-requests: read
+    env:
+      AWS_REGION: ${{ needs.application-region.outputs.region }}
+      ROLE_NAME: github-actions-mem9-on-aws-prod
+      MEM9_LLM_RESPONSES_REGION: ${{ vars.MEM9_LLM_RESPONSES_REGION }}
+      MEM9_AUTH_MODE: ${{ secrets.MEM9_AUTH_MODE || 'managed' }}
+      MEM9_OIDC_ISSUER: ${{ secrets.MEM9_OIDC_ISSUER }}
+      MEM9_OIDC_CLIENT_ID: ${{ secrets.MEM9_OIDC_CLIENT_ID }}
+      SST_SECRET_OidcClientSecret: ${{ secrets.MEM9_OIDC_CLIENT_SECRET }}
+      MEM9_OIDC_TOKEN_AUTH_METHOD: ${{ secrets.MEM9_OIDC_TOKEN_AUTH_METHOD }}
+      MEM9_OIDC_M2M_CLIENT_ID: ${{ secrets.MEM9_OIDC_M2M_CLIENT_ID }}
+      SST_SECRET_OidcM2mClientSecret: ${{ secrets.MEM9_OIDC_M2M_CLIENT_SECRET }}
+      MEM9_OIDC_AUDIENCE: ${{ secrets.MEM9_OIDC_AUDIENCE }}
+      MEM9_OIDC_CLIENT_ID_CLAIM: ${{ secrets.MEM9_OIDC_CLIENT_ID_CLAIM }}
+      MEM9_AUTH_REQUIRED_GROUP: ${{ secrets.MEM9_AUTH_REQUIRED_GROUP }}
+      MEM9_AUTH_GROUP_CLAIM: ${{ secrets.MEM9_AUTH_GROUP_CLAIM }}
+      MEM9_RETAIN_MANAGED_AUTH: ${{ secrets.MEM9_RETAIN_MANAGED_AUTH }}
+      MEM9_CONSOLIDATION_SCHEDULE_ENABLED: ${{ vars.MEM9_NAMESPACE_CONSOLIDATION_SCHEDULE_ENABLED || '0' }}
+      MEM9_COGNITO_DOMAIN_PREFIX: ${{ vars.MEM9_COGNITO_DOMAIN_PREFIX }}
+      MEM9_BEDROCK_PROJECT: ${{ vars.MEM9_BEDROCK_PROJECT }}
+      MEM9_BEDROCK_PROJECT_OPENAI: ${{ vars.MEM9_BEDROCK_PROJECT_OPENAI }}
+      MEM9_LLM_MODEL: ${{ vars.MEM9_LLM_MODEL }}
+      WORKLOAD_BOUNDARY_PROD_ENABLED: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
+      MEM9_DURABLE_INGEST_ENABLED: "1"
+      MEM9_NAMESPACE_REQUIRED: "1"
+      MEM9_FACADE_CUSTOM_DOMAIN: ${{ secrets.MEM9_FACADE_CUSTOM_DOMAIN }}
+      CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+      CLOUDFLARE_ZONE_ID: ${{ secrets.CLOUDFLARE_ZONE_ID }}
+      SST_SECRET_SlackWebhookUrl: ${{ secrets.SLACK_WEBHOOK_URL }}
+      MEM9_RUNTIME_READY: "1"
+      STAGE: ${{ inputs.runtime_stage }}
+    steps:
+      - name: Validate maintenance target
+        shell: bash
+        env:
+          PAUSED: ${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}
+          BOUNDARY: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
+        run: |-
+          set -euo pipefail
+          if [[ "$PAUSED" == true || "$BOUNDARY" != true ]]; then echo 'Runtime maintenance gate is closed'; exit 1; fi
+          if [[ "$STAGE" == prod ]]; then
+            [[ "$GITHUB_REF" == refs/heads/main ]] || { echo 'Production cutover requires main'; exit 1; }
+          else
+            [[ "$STAGE" =~ ^pr-[1-9][0-9]*$ ]] || { echo 'Invalid preview stage'; exit 1; }
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
+        with:
+          package_json_file: infra/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+      - name: Install operator dependencies
+        run: |-
+          npm ci
+          pnpm -C infra install --frozen-lockfile
+      - name: Require the verified deployment revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |-
+          node --input-type=module <<'JS'
+          import {execFileSync} from 'node:child_process';
+          const stage=process.env.STAGE,sha=process.env.GITHUB_SHA;
+          if(stage!=='prod'){
+            const pr=JSON.parse(execFileSync('gh',['pr','view',stage.slice(3),'--json','headRefOid,isCrossRepository,state'],{encoding:'utf8'}));
+            if(pr.isCrossRepository||pr.state!=='OPEN'||pr.headRefOid!==sha)throw Error('PreviewRevisionMismatch');
+          }
+          const runs=JSON.parse(execFileSync('gh',['run','list','--workflow','Infra CI','--commit',sha,'--limit','20','--json','databaseId,status,conclusion'],{encoding:'utf8'}));
+          let verified=false;
+          for(const run of runs.filter(r=>r.status==='completed'&&r.conclusion==='success')){
+            const info=JSON.parse(execFileSync('gh',['run','view',String(run.databaseId),'--json','jobs'],{encoding:'utf8'}));
+            if(info.jobs.some(j=>j.name===(stage==='prod'?'Deploy prod':'Deploy PR Preview')&&j.conclusion==='success')){verified=true;break;}
+          }
+          if(!verified)throw Error('VerifiedDeploymentRequired');
+          JS
+      - name: Run guarded runtime cutover
+        uses: ./.github/actions/runtime-cutover
+        with:
+          role-arn: ${{ secrets.AWS_PROD_ROLE_ARN }}
+          region: ${{ needs.application-region.outputs.region }}
+          cleanup-preview: "false"
+  runtime-cutover-preview:
+    name: Preview runtime credential rehearsal (${{ inputs.runtime_stage }})
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    environment: preview-ci
+    needs:
+      - application-region
+      - typecheck
+    if: github.event_name == 'workflow_dispatch' && inputs.runtime_cutover && inputs.runtime_stage != 'prod'
+    timeout-minutes: 180
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+      pull-requests: read
+    env:
+      MEM9_NAMESPACE_REQUIRED: "1"
+      MEM9_RUNTIME_READY: "1"
+      MEM9_DURABLE_INGEST_ENABLED: "1"
+      WORKLOAD_BOUNDARY_PROD_ENABLED: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
+      MEM9_CONSOLIDATION_SCHEDULE_ENABLED: ${{ vars.MEM9_NAMESPACE_CONSOLIDATION_SCHEDULE_ENABLED || '0' }}
+      MEM9_BEDROCK_PROJECT: ${{ vars.MEM9_BEDROCK_PROJECT }}
+      MEM9_BEDROCK_PROJECT_OPENAI: ${{ vars.MEM9_BEDROCK_PROJECT_OPENAI }}
+      MEM9_LLM_RESPONSES_REGION: ${{ vars.MEM9_LLM_RESPONSES_REGION }}
+      MEM9_LLM_MODEL: ${{ vars.MEM9_LLM_MODEL }}
+      STAGE: ${{ inputs.runtime_stage }}
+      AWS_REGION: ${{ needs.application-region.outputs.region }}
+    steps:
+      - name: Validate maintenance target
+        shell: bash
+        env:
+          PAUSED: ${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}
+          BOUNDARY: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
+        run: |-
+          set -euo pipefail
+          if [[ "$PAUSED" == true || "$BOUNDARY" != true ]]; then echo 'Runtime maintenance gate is closed'; exit 1; fi
+          if [[ "$STAGE" == prod ]]; then
+            [[ "$GITHUB_REF" == refs/heads/main ]] || { echo 'Production cutover requires main'; exit 1; }
+          else
+            [[ "$STAGE" =~ ^pr-[1-9][0-9]*$ ]] || { echo 'Invalid preview stage'; exit 1; }
+          fi
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
+        with:
+          package_json_file: infra/package.json
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: 24
+      - name: Install operator dependencies
+        run: |-
+          npm ci
+          pnpm -C infra install --frozen-lockfile
+      - name: Require the verified deployment revision
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |-
+          node --input-type=module <<'JS'
+          import {execFileSync} from 'node:child_process';
+          const stage=process.env.STAGE,sha=process.env.GITHUB_SHA;
+          if(stage!=='prod'){
+            const pr=JSON.parse(execFileSync('gh',['pr','view',stage.slice(3),'--json','headRefOid,isCrossRepository,state'],{encoding:'utf8'}));
+            if(pr.isCrossRepository||pr.state!=='OPEN'||pr.headRefOid!==sha)throw Error('PreviewRevisionMismatch');
+          }
+          const runs=JSON.parse(execFileSync('gh',['run','list','--workflow','Infra CI','--commit',sha,'--limit','20','--json','databaseId,status,conclusion'],{encoding:'utf8'}));
+          let verified=false;
+          for(const run of runs.filter(r=>r.status==='completed'&&r.conclusion==='success')){
+            const info=JSON.parse(execFileSync('gh',['run','view',String(run.databaseId),'--json','jobs'],{encoding:'utf8'}));
+            if(info.jobs.some(j=>j.name===(stage==='prod'?'Deploy prod':'Deploy PR Preview')&&j.conclusion==='success')){verified=true;break;}
+          }
+          if(!verified)throw Error('VerifiedDeploymentRequired');
+          JS
+      - name: Run guarded runtime cutover
+        uses: ./.github/actions/runtime-cutover
+        with:
+          role-arn: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          region: ${{ needs.application-region.outputs.region }}
+          cleanup-preview: "true"

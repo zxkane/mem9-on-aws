@@ -239,6 +239,8 @@ describe("workflow integration", () => {
         "reconcile-previews.yml:apply",
         "reconcile-previews.yml:auto",
         "reconcile-previews.yml:report",
+        "runtime-recovery.yml:preview",
+        "runtime-recovery.yml:production",
       ].sort(),
     );
   });
@@ -650,7 +652,7 @@ describe("workflow integration", () => {
       expect(reconcile).toBeGreaterThanOrEqual(0);
       expect(bootstrap).toBeGreaterThan(reconcile);
     }
-    expect(workflow.match(/MEM9_DURABLE_INGEST_ENABLED: "1"/g)).toHaveLength(3);
+    expect(workflow.match(/MEM9_DURABLE_INGEST_ENABLED: "1"/g)).toHaveLength(5);
     expect(workflow).not.toContain('MEM9_DURABLE_INGEST_ENABLED: "0"');
     expect(workflow).not.toContain("Enable durable ingest after bootstrap");
     expect(workflow.match(/pnpm -C infra exec sst deploy/g)).toHaveLength(3);
@@ -1054,7 +1056,10 @@ it("external OIDC secrets are wired only to production, with credentials passed 
   expect(env.SST_SECRET_OidcM2mClientSecret).toContain("secrets.MEM9_OIDC_M2M_CLIENT_SECRET");
   expect(env.MEM9_RETAIN_MANAGED_AUTH).toContain("secrets.MEM9_RETAIN_MANAGED_AUTH");
   for (const [name, job] of Object.entries(workflow.jobs)) {
-    if (name === "deploy-prod") continue;
+    if (["deploy-prod","runtime-cutover-prod"].includes(name)) {
+      expect(job.environment).toBe("prod");
+      continue;
+    }
     expect(JSON.stringify(job)).not.toMatch(/secrets\.MEM9_(OIDC|AUTH|RETAIN_MANAGED_AUTH)/u);
   }
 });

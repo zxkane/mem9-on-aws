@@ -82,6 +82,12 @@ declare namespace aws {
       constructor(name: string, args: Record<string, unknown>, opts?: unknown);
     }
   }
+  namespace ecs {
+    class TaskDefinition {
+      constructor(name:string,args:Record<string,unknown>,opts?:unknown);
+      readonly arn:Output<string>;
+    }
+  }
 
   // Cognito user pool + M2M/OAuth client (infra/cognito.ts + infra/oauth-facade.ts).
   namespace cognito {

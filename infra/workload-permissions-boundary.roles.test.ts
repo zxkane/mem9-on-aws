@@ -154,7 +154,7 @@ function matchesArn(pattern: string, arn: string): boolean {
   return new RegExp(`^${escaped.join(".*")}$`).test(arn);
 }
 
-async function verifyMaintenanceGraph(scheduleEnabled: boolean, namespaceRequired: boolean): Promise<void> {
+async function verifyMaintenanceGraph(scheduleEnabled: boolean, namespaceRequired: boolean, productionMode?: string): Promise<void> {
   const [{ isRpcSecret, unwrapRpcSecret }, { expectedBoundaryPolicyDocument }] = await Promise.all([
     import(/* @vite-ignore */ moduleUrl(".sst/platform/node_modules/@pulumi/pulumi/runtime/rpc.js")),
     import(/* @vite-ignore */ moduleUrl("scripts/lib/workload-permissions-boundary.mjs")),
@@ -200,7 +200,7 @@ async function verifyMaintenanceGraph(scheduleEnabled: boolean, namespaceRequire
     .flatMap((definition) => (JSON.parse(unwrapRpcSecret(definition.inputs.containerDefinitions)) as Array<Record<string, any>>)
       .map((container) => ({ definition, container })));
   const taskContainer = (name: string) => {
-    const matches = containers.filter(({ container }) => container.name === name);
+    const matches = containers.filter(({ container, definition }) => container.name === name && definition.name !== 'ProductionRuntimeFallback');
     expect(matches, `${name} container`).toHaveLength(1);
     return matches[0];
   };
@@ -226,7 +226,8 @@ async function verifyMaintenanceGraph(scheduleEnabled: boolean, namespaceRequire
   expect(JSON.parse(unwrapRpcSecret(targets.inputs.value))).toEqual(scheduleEnabled ? maintenanceNamespaceIds : []);
   const inlineStatements = (role: RecordedResource): Array<Record<string, any>> =>
     (role.inputs.inlinePolicies as Array<{ policy: unknown }> ?? [])
-      .flatMap(({ policy }) => JSON.parse(unwrapRpcSecret(policy)).Statement);
+      .flatMap(({ policy }) => JSON.parse(unwrapRpcSecret(policy)).Statement)
+      .filter((statement) => (statement.Effect ?? statement.effect ?? 'Allow') === 'Allow');
 
   for (const [service, name] of [["consolidation", "Mem9Consolidation"], ["cleanup", "Mem9Cleanup"]]) {
     const { definition, container } = taskContainer(name);
@@ -270,6 +271,7 @@ async function verifyMaintenanceGraph(scheduleEnabled: boolean, namespaceRequire
   }
 
   if (scheduleEnabled) {
+    expect(schedules[0].inputs.state).toBe(productionMode ? 'DISABLED' : 'ENABLED');
     const target = schedules[0].inputs.target as Record<string, any>;
     const override = JSON.parse(unwrapRpcSecret(target.input)).containerOverrides[0];
     expect(override).toMatchObject({
@@ -390,6 +392,7 @@ describe("workload role coverage from the real SST graph", () => {
   it.each([
     { label: "preview runtime preparation", scheduleEnabled: false, namespaceRequired: false, unsupportedFlag: undefined, runtimeReady: false },
     { label: "preview runtime ready", scheduleEnabled: false, namespaceRequired: true, unsupportedFlag: undefined, runtimeReady: true },
+    ...["prepare","paused","ready","active"].map(productionMode=>({label:`production runtime ${productionMode}`,scheduleEnabled:true,namespaceRequired:true,unsupportedFlag:undefined,productionMode})),
     { label: "scheduler disabled, compatibility mode", scheduleEnabled: false, namespaceRequired: false, unsupportedFlag: undefined },
     { label: "scheduler disabled, required namespaces", scheduleEnabled: false, namespaceRequired: true, unsupportedFlag: undefined },
     { label: "scheduler enabled, required namespaces", scheduleEnabled: true, namespaceRequired: true, unsupportedFlag: undefined },
@@ -406,6 +409,7 @@ describe("workload role coverage from the real SST graph", () => {
     async (testCase) => {
       const {scheduleEnabled, namespaceRequired, unsupportedFlag} = testCase;
       const runtimeReady = 'runtimeReady' in testCase ? testCase.runtimeReady : undefined;
+      const productionMode = 'productionMode' in testCase ? testCase.productionMode : undefined;
       const preview = runtimeReady !== undefined;
       const stage = preview ? 'pr-7' : 'prod';
       vi.resetModules();
@@ -415,6 +419,8 @@ describe("workload role coverage from the real SST graph", () => {
         WORKLOAD_BOUNDARY_PROD_ENABLED: "true",
         MEM9_AUTH_MODE: "managed",
         MEM9_RUNTIME_READY: runtimeReady ? "1" : "0",
+        MEM9_PRODUCTION_RUNTIME_MODE: productionMode??"off",
+        MEM9_RUNTIME_FALLBACK_IMAGES: productionMode?JSON.stringify(Object.fromEntries(["mnemo-server","qwen3-embed","llm-proxy"].map(name=>[name,`${accountId}.dkr.ecr.${region}.amazonaws.com/mem9-on-aws/${name}@sha256:${"a".repeat(64)}`]))):undefined,
         MEM9_BEDROCK_PROJECT: "proj_mock",
         MEM9_BEDROCK_PROJECT_OPENAI: "",
         MEM9_NAMESPACE_REQUIRED: namespaceRequired ? "1" : "0",
@@ -514,6 +520,7 @@ describe("workload role coverage from the real SST graph", () => {
           ...(namespaceRequired ? maintenanceRoleNames : []),
           authorizerRoleLogicalName,
           ...(namespaceRequired && scheduleEnabled ? ["Mem9ConsolidationSchedulerRole"] : []),
+          ...(productionMode?["RuntimeMem9ServerExecutionRole","SchemaMem9BootstrapExecutionRole","TransitionMem9BootstrapTaskRole","TransitionMem9BootstrapExecutionRole"]:[]),
           ...(!namespaceRequired ? ["Mem9ConsolidationPlannerTaskRole", "Mem9ConsolidationPlannerExecutionRole",
             "Mem9ConsolidationExecutorTaskRole", "Mem9ConsolidationExecutorExecutionRole"] : []),
         ].sort();
@@ -587,7 +594,7 @@ describe("workload role coverage from the real SST graph", () => {
         const createdRoles = recordedResources.filter(
           ({ type }) => type === "aws:iam/role:Role",
         );
-        expect(recordedResources.some(r=>r.name==='RuntimeDatabaseCredential')).toBe(false);
+        expect(recordedResources.some(r=>r.name==='RuntimeDatabaseCredential')).toBe(Boolean(productionMode));
         expect(createdRoles.map(({ name }) => name).sort()).toEqual(
           expectedRoleNames,
         );
@@ -597,7 +604,34 @@ describe("workload role coverage from the real SST graph", () => {
             ({ inputs }) => inputs.permissionsBoundary === expectedBoundary,
           ),
         ).toBe(true);
-        await verifyMaintenanceGraph(scheduleEnabled, namespaceRequired);
+        await verifyMaintenanceGraph(scheduleEnabled, namespaceRequired, productionMode);
+        if(productionMode){
+          const service=oneResource('aws:ecs/service:Service','Mem9ServerService');
+          expect(service.inputs.desiredCount).toBe(productionMode==='paused'?0:1);
+          const task=oneResource('aws:ecs/taskDefinition:TaskDefinition','Mem9ServerTask');
+          const server=JSON.parse(String(task.inputs.containerDefinitions)).find((c:any)=>c.name==='mnemo-server');
+          const runtimeArn=`arn:aws:ssm:${region}:${accountId}:parameter/mem9-on-aws/prod/runtime/database-credential`;
+          const credential=server.secrets.find((s:any)=>s.name==='MEM9_DB_SECRET').valueFrom;
+          if(productionMode==='prepare')expect(credential).not.toBe(runtimeArn);
+          else{
+            expect(credential).toBe(runtimeArn);
+            expect(task.inputs.executionRoleArn).toBe(mockArn('aws:iam/role:Role','RuntimeMem9ServerExecutionRole'));
+            expect(server.environment).toContainEqual({name:'MNEMO_SCHEMA_MODE',value:'verify'});
+          }
+          const fallback=oneResource('aws:ecs/taskDefinition:TaskDefinition','ProductionRuntimeFallback');
+          const containers=JSON.parse(String(fallback.inputs.containerDefinitions));
+          expect(containers).toHaveLength(3);
+          expect(containers.every((c:any)=>/@sha256:[a-f0-9]{64}$/.test(c.image))).toBe(true);
+          expect(containers.find((c:any)=>c.name==='mnemo-server').secrets).toContainEqual({name:'MEM9_DB_SECRET',valueFrom:runtimeArn});
+          for(const name of ['Mem9ServerExecutionRole','Mem9ServerTaskRole','Mem9BootstrapExecutionRole','Mem9ConsolidationExecutionRole','Mem9CleanupExecutionRole']){
+            const role=oneResource('aws:iam/role:Role',name);
+            const policy=(role.inputs.inlinePolicies as Array<{name:string;policy:string}>).find(p=>p.name==='ProductionCredentialFence');
+            expect(policy,`${name} replacement credential fence`).toBeDefined();
+            const statements=JSON.parse(policy!.policy).Statement;
+            expect(statements.every((s:any)=>s.Effect==='Deny')).toBe(true);
+            if(productionMode!=='prepare')expect(statements[0]).toMatchObject({Resource:'*',Action:expect.arrayContaining(['ssm:GetParameters','secretsmanager:GetSecretValue','kms:Decrypt'])});
+          }
+        }
         if (!namespaceRequired) {
           for (const kind of ["Planner", "Executor"]) {
             const role=oneResource("aws:iam/role:Role",`Mem9Consolidation${kind}ExecutionRole`);

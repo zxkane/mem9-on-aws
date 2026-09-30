@@ -6,7 +6,8 @@ import {readFile} from 'node:fs/promises';
 import {dirname,resolve} from 'node:path';
 
 export const RUNTIME_LOCK_CLASS=197568;
-export const runtimeStage=stage=>/^pr-[1-9][0-9]*$/.test(stage||'');
+export const runtimePreviewStage=stage=>/^pr-[1-9][0-9]*$/.test(stage||'');
+export const runtimeStage=stage=>stage==='prod'||runtimePreviewStage(stage);
 export function runtimeRoleName(stage){
   if(!runtimeStage(stage))throw Error('InvalidRuntimeStage');
   return 'mem9_runtime_'+createHash('sha256').update(stage).digest('hex').slice(0,12);

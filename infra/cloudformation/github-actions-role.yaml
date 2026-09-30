@@ -591,6 +591,7 @@ Resources:
               - rds:ModifyDBCluster
               - rds:DeleteDBCluster
               - rds:DescribeDBClusters
+              - rds:DescribeDBClusterSnapshots
               - rds:CreateDBInstance
               - rds:ModifyDBInstance
               - rds:DeleteDBInstance
@@ -618,6 +619,16 @@ Resources:
               - rds:AddTagsToResource
               - rds:RemoveTagsFromResource
             Resource: "*"
+          - Sid: RuntimeRecoverySnapshot
+            Effect: Allow
+            Action: rds:CreateDBClusterSnapshot
+            Resource:
+              - !Sub arn:${AWS::Partition}:rds:${ApplicationRegion}:${AWS::AccountId}:cluster:${ProjectName}-*
+              - !Sub arn:${AWS::Partition}:rds:${ApplicationRegion}:${AWS::AccountId}:cluster-snapshot:${ProjectName}-*-runtime-*
+          - Sid: PreviewRecoverySnapshotCleanup
+            Effect: Allow
+            Action: rds:DeleteDBClusterSnapshot
+            Resource: !Sub arn:${AWS::Partition}:rds:${ApplicationRegion}:${AWS::AccountId}:cluster-snapshot:${ProjectName}-pr-*-runtime-*
           - Sid: RDSServiceLinkedRoles
             # RDS provisions service-linked roles on first use in an account.
             # Scope CreateServiceLinkedRole to the two RDS service namespaces
@@ -755,6 +766,8 @@ Resources:
               - ecs:CreateCluster
               - ecs:DeleteCluster
               - ecs:DescribeClusters
+              # Credential cutover must drain historical stage clusters too.
+              - ecs:ListClusters
               - ecs:UpdateCluster
               - ecs:PutClusterCapacityProviders
               - ecs:CreateService
@@ -1627,6 +1640,7 @@ Resources:
                   - !Sub arn:${AWS::Partition}:ecs:*:${AWS::AccountId}:service/${ProjectName}-prod-*/*
                   - !Sub arn:${AWS::Partition}:ecs:*:${AWS::AccountId}:task-definition/${ProjectName}-prod-*
                   - !Sub arn:${AWS::Partition}:rds:*:${AWS::AccountId}:cluster:${ProjectName}-prod-*
+                  - !Sub arn:${AWS::Partition}:rds:*:${AWS::AccountId}:cluster-snapshot:${ProjectName}-prod-*
                   - !Sub arn:${AWS::Partition}:rds:*:${AWS::AccountId}:db:${ProjectName}-prod-*
                   - !Sub arn:${AWS::Partition}:rds:*:${AWS::AccountId}:subgrp:${ProjectName}-prod-*
                   - !Sub arn:${AWS::Partition}:rds:*:${AWS::AccountId}:cluster-pg:${ProjectName}-prod-*

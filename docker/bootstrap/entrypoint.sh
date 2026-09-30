@@ -27,6 +27,8 @@ set -eu
 # short-lived SecureString inputs, and invokes only a fixed operation allowlist.
 if [ -n "${MEM9_BOOTSTRAP_OPERATION:-}" ]; then
   case "$MEM9_BOOTSTRAP_OPERATION" in
+    production-runtime)
+      exec node /bootstrap/operator/scripts/production-runtime-operator.mjs ;;
     runtime-admin-probe|runtime-admin-probe-cleanup)
       exec node /bootstrap/operator/scripts/runtime-admin-probe.mjs ;;
     runtime-bootstrap|runtime-verify)

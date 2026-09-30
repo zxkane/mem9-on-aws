@@ -1,15 +1,16 @@
-import {runtimeRoleName, runtimeStage} from "../scripts/lib/runtime-credentials.mjs";
+import {runtimeRoleName, runtimePreviewStage} from "../scripts/lib/runtime-credentials.mjs";
 import {probeRoleName} from "../scripts/lib/runtime-admin-probe-config.mjs";
 
 export interface RuntimeCredentials {
   parameterArn: Output<string>;
   ready: boolean;
   probeParameterArn?: Output<string>;
+  executionRoleArn?: Output<string>;
 }
 
 /** Stable across preview generations. Only bootstrap receives the owner secret. */
 export function runtimeCredentials(): RuntimeCredentials | undefined {
-  if (!runtimeStage($app.stage)) return;
+  if (!runtimePreviewStage($app.stage)) return;
   const ready = process.env.MEM9_RUNTIME_READY ?? "0";
   if (!["0", "1"].includes(ready)) throw Error("InvalidRuntimeReady");
   if (ready === "1" && process.env.MEM9_NAMESPACE_REQUIRED !== "1") {

@@ -52,6 +52,9 @@ export function classifyChangedPaths(paths) {
   const workloadChanged = normalized.some(
     (path) =>
       path.startsWith("docker/") ||
+      path.startsWith(".github/actions/runtime-cutover/") ||
+      path === "scripts/run-production-runtime.mjs" ||
+      path.startsWith("scripts/lib/production-runtime-") ||
       [...WORKLOAD_COPY_INPUTS].some((input) => matchesCopyInput(path, input)),
   );
   const applicationInfrastructureChanged = normalized.some((path) => {
