@@ -236,6 +236,7 @@ describe("workflow integration", () => {
         "infra-ci.yml:cleanup-preview",
         "infra-ci.yml:deploy-preview",
         "infra-ci.yml:deploy-prod",
+        "infra-ci.yml:runtime-cutover-preview",
         "reconcile-previews.yml:apply",
         "reconcile-previews.yml:auto",
         "reconcile-previews.yml:report",

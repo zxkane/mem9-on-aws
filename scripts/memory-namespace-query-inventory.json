@@ -2321,9 +2321,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "884852baf0b8e9899a39",
+      "id": "a7ed6ed6cf6e5f2790df",
       "owner": "scripts/lib/production-runtime-rehearsal.mjs",
-      "line": 24,
+      "line": 25,
       "tables": [
         "memories"
       ],
@@ -2337,9 +2337,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "aa5f16d31476e73a7be6",
+      "id": "544dcc36cdfd414fffaf",
       "owner": "scripts/lib/production-runtime-rehearsal.mjs",
-      "line": 38,
+      "line": 39,
       "tables": [
         "memories"
       ],

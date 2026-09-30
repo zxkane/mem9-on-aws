@@ -85,8 +85,10 @@ async function observeInvocation(clients,meta,journal,{sleep=delay,now=Date.now}
   return stopped;
 }
 
-export async function invokeProductionTask(clients,meta,{operation,nonce,epoch,target,verification_hash,task_definition},
+export async function invokeProductionTask(clients,meta,{operation,nonce,epoch,target,verification_hash,task_definition,expected_hash,checkpoint_sequence},
   {now=Date.now,sleep=delay,progress=()=>{},deadlineMs=Infinity}={}){
+  if(expected_hash!==undefined&&(operation!=='resume'||typeof expected_hash!=='string'||!/^[a-f0-9]{64}$/.test(expected_hash)))fail('InvalidProductionInvocation');
+  if(checkpoint_sequence!==undefined&&(operation!=='rehearsal-preservation'||!Number.isSafeInteger(checkpoint_sequence)||checkpoint_sequence<1||checkpoint_sequence>1000))fail('InvalidProductionInvocation');
   const catalog=meta.mode==='catalog';
   if(catalog&&operation!=='extension-catalog')fail('CatalogOnlyTarget');
   const main=meta.mode==='active'||catalog;
@@ -108,7 +110,8 @@ export async function invokeProductionTask(clients,meta,{operation,nonce,epoch,t
     (!main&&(container.entryPoint?.join()!=='node'||container.command?.join()!=='/bootstrap/operator/scripts/production-runtime-operator.mjs')))
     fail('ProductionTaskDefinitionMismatch');
   const createdAt=now(),request={operation,nonce,epoch,deadline:Math.min(createdAt+900000,deadlineMs),
-    ...(target?{target}:{}),...(verification_hash?{verification_hash}:{}),...(task_definition?{task_definition}:{})};
+    ...(target?{target}:{}),...(verification_hash?{verification_hash}:{}),...(task_definition?{task_definition}:{}),
+    ...(expected_hash!==undefined?{expected_hash}:{}),...(checkpoint_sequence!==undefined?{checkpoint_sequence}:{})};
   if(!/^[a-f0-9]{32}$/.test(nonce??'')||!Number.isSafeInteger(epoch)||epoch<1||request.deadline<=createdAt+30000)fail('InvalidProductionInvocation');
   const invocation=randomUUID().replaceAll('-',''),path=`/mem9-on-aws/${meta.stage}/runtime/production-invocations/${invocation}`;
   const journal={version:1,stage:meta.stage,invocation,createdAt,taskDefinition,container:containerName,request,

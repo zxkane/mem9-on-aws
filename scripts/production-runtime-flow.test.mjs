@@ -31,6 +31,17 @@ describe('bounded production cutover sequencing',()=>{
     const f=fixture('transferred');await applyProductionCutover(f.actions,{now:()=>1001});
     expect(f.events).not.toContain('fence');expect(f.events).not.toContain('transfer');
   });
+  it('pauses only after the real password fence and its mirror, before transfer',async()=>{
+    const f=fixture('runtime_prepared');
+    f.actions.beforeFence=async state=>{expect(state.phase).toBe('runtime_prepared');f.events.push('admit-drill');};
+    f.actions.afterFence=async state=>{
+      expect(state.phase).toBe('password_fenced');expect(f.events.slice(-2)).toEqual(['fence','mirror']);
+      f.events.push('await-cancellation');throw Error('SyntheticCheckpointPause');
+    };
+    await expect(applyProductionCutover(f.actions,{now:()=>1001})).rejects.toThrow('SyntheticCheckpointPause');
+    expect(f.events.indexOf('admit-drill')).toBeLessThan(f.events.indexOf('fence'));
+    expect(f.events).not.toContain('transfer');expect(f.events).not.toContain('verify-fence');
+  });
   it('preserves time for credential refresh and recovery instead of beginning another step at minute45',async()=>{
     const f=fixture('password_fenced');
     await expect(applyProductionCutover(f.actions,{now:()=>2701000})).rejects.toThrow('ProductionRecoveryRequired');

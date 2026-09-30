@@ -1383,6 +1383,59 @@ pass before production. Administrative removal of the workflow/credentials is
 outside the trusted-operator availability assumption and cannot be hidden by a
 false recovery guarantee.
 
+The cancellation acceptance uses an explicit preview-only drill. A completed
+arming step binds the plan nonce, initiating run and attempt, checkout/tree and
+schema/operator/coordinator digests to the existing synthetic preservation
+baseline. After the real `password_fenced` transition and routing mirror commit,
+the coordinator records the actual phase-event hash, epoch and original deadline,
+marks the durable checkpoint `awaiting_cancellation`, then waits outside a
+database transaction for at most ten minutes. Admission before fencing must
+reserve the pause, receiver recovery and remaining migration work inside the
+existing deadlines. Neither the original two-hour database deadline nor the
+stricter apply admission cutoff is extended by a retry or resume. An external
+operator observes that checkpoint and cancels the actual GitHub run. Only an
+armed cancellation suppresses source-job recovery and cleanup; an ordinary
+failure or checkpoint timeout retains the existing recovery behavior.
+Arming and guarded recovery/cleanup are outer workflow steps, so the exact source
+attempt's jobs API proves successful arming and skipped recovery/cleanup. Recovery
+and cleanup credential refreshes live inside those guarded wrappers; no duplicate
+path remains inside the cutover action and no log-format inference is required.
+
+The existing default-branch receiver checks out the initiating revision and
+performs the normal recovery. The checked-out coordinator obtains the source
+attempt from the actual `workflow_run` payload, separately records the receiver
+run/attempt and workflow revision, and rejects stale attempts. A receipt requires
+real recovery/restored ledger transitions, a higher epoch, the same committed
+phase and unchanged maintenance deadline, fresh runtime MCP/OAuth success, and
+matching preservation hashes. Preservation is checked through a preview-only
+read-only transition-operator operation with exact legacy role OID, phase-selected
+credential, rollout lock and consistent snapshot; no workload gains access to
+the isolated fixture. Connections close before resume.
+The restored ledger transaction commits first; its hash-linked history is read
+back before publishing the SSM receipt. Resume verifies that exact committed
+event and current state again. An interrupted receipt publication causes a
+closed admission gate; it cannot create a restoration proof. Authentication
+precedes the read-only snapshot, with the pre-maintenance baseline compared to
+a separate post-recovery snapshot.
+Proof publication is deliberately not a resumable recovery subsystem: failed or
+ambiguous publication leaves the runtime restored and this test indeterminate.
+A receiver no-op cannot salvage acceptance. Inspect and clean up that fixture,
+then use a fresh drill for a new proof. Checkpoint advancement invalidates drill
+evidence but does not prevent ordinary recovery of the actual current phase.
+Webhook handling validates only the consumed typed identity projection, tolerates
+unrelated additive fields, and never interprets payload text as code. Resume
+compares the expected restored event hash and epoch inside the same database
+lock/transaction that advances the recovery status.
+
+A resume drill verifies the source attempt was cancelled with its local recovery
+and cleanup skipped, verifies the distinct receiver attempt succeeded, and binds
+its receipt to the current unchanged source tree and database history. It then
+continues the same migration and original deadline to full retirement and the
+administrator rehearsal. Only that combined evidence can set cancellation
+recovery true. Neither a receiver no-op nor an after-completion administrator
+loss test substitutes for takeover during maintenance. Failed receipt validation
+retains the preview for inspection; cleanup follows successful evidence capture.
+
 The preparatory plan stores the complete task-definition count and sorted digest
 alongside exact role, family and cluster sets, keeping routing parameters below
 the standard size limit. Pre-maintenance revalidation rejects added writer

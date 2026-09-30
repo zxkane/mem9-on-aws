@@ -65,6 +65,11 @@ on:
         description: "prod, or the numeric pr-N stage owned by this exact branch revision"
         type: string
         default: prod
+      runtime_cancellation_mode:
+        description: Preview-only cancellation drill or resume; normal preserves ordinary cutover
+        type: choice
+        options: [normal, cancel, resume]
+        default: normal
       seed_oauth_hmac:
         description: "Generate + set OauthStateHmacKey before deploying (enables the OAuth browser-login flow)"
         type: boolean
@@ -1822,8 +1827,10 @@ jobs:
         env:
           PAUSED: ${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}
           BOUNDARY: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
+          CANCELLATION_MODE: ${{ inputs.runtime_cancellation_mode }}
         run: |-
           set -euo pipefail
+          if [[ "$CANCELLATION_MODE" != normal ]]; then echo 'Cancellation drill is preview-only'; exit 1; fi
           if [[ "$PAUSED" == true || "$BOUNDARY" != true ]]; then echo 'Runtime maintenance gate is closed'; exit 1; fi
           if [[ "$STAGE" == prod ]]; then
             [[ "$GITHUB_REF" == refs/heads/main ]] || { echo 'Production cutover requires main'; exit 1; }
@@ -1867,6 +1874,12 @@ jobs:
           role-arn: ${{ secrets.AWS_PROD_ROLE_ARN }}
           region: ${{ needs.application-region.outputs.region }}
           cleanup-preview: "false"
+      - name: Restore interrupted production runtime
+        if: failure() || cancelled()
+        uses: ./.github/actions/runtime-recovery
+        with:
+          role-arn: ${{ secrets.AWS_PROD_ROLE_ARN }}
+          region: ${{ needs.application-region.outputs.region }}
   runtime-cutover-preview:
     name: Preview runtime credential rehearsal (${{ inputs.runtime_stage }})
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
@@ -1894,14 +1907,20 @@ jobs:
       STAGE: ${{ inputs.runtime_stage }}
       AWS_REGION: ${{ needs.application-region.outputs.region }}
     steps:
-      - name: Validate maintenance target
+      - name: Deployment maintenance gate
         shell: bash
         env:
           PAUSED: ${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}
           BOUNDARY: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
+          CANCELLATION_MODE: ${{ inputs.runtime_cancellation_mode }}
         run: |-
           set -euo pipefail
-          if [[ "$PAUSED" == true || "$BOUNDARY" != true ]]; then echo 'Runtime maintenance gate is closed'; exit 1; fi
+          case "$CANCELLATION_MODE" in normal|cancel|resume) ;; *) exit 1 ;; esac
+          if [ "$PAUSED" = "true" ]; then
+            echo '::error::AWS deployments are paused for guarded IAM maintenance'
+            exit 1
+          fi
+          if [[ "$BOUNDARY" != true ]]; then echo 'Runtime maintenance gate is closed'; exit 1; fi
           if [[ "$STAGE" == prod ]]; then
             [[ "$GITHUB_REF" == refs/heads/main ]] || { echo 'Production cutover requires main'; exit 1; }
           else
@@ -1938,9 +1957,50 @@ jobs:
           }
           if(!verified)throw Error('VerifiedDeploymentRequired');
           JS
-      - name: Run guarded runtime cutover
+      - name: Prepare guarded runtime cutover
+        if: inputs.runtime_cancellation_mode != 'resume'
         uses: ./.github/actions/runtime-cutover
         with:
           role-arn: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
           region: ${{ needs.application-region.outputs.region }}
+          phase: prepare
+      - name: Arm preview cancellation rehearsal
+        id: cancel_arm
+        if: inputs.runtime_cancellation_mode == 'cancel'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/run-production-runtime.mjs arm-cancellation
+      - name: Refresh preview resume credentials
+        if: inputs.runtime_cancellation_mode == 'resume'
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        with:
+          role-to-assume: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          aws-region: ${{ needs.application-region.outputs.region }}
+          mask-aws-account-id: true
+      - name: Resume verified cancellation rehearsal
+        if: inputs.runtime_cancellation_mode == 'resume'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/run-production-runtime.mjs resume
+      - name: Finish guarded runtime cutover
+        uses: ./.github/actions/runtime-cutover
+        env:
+          MEM9_RUNTIME_CANCELLATION_DRILL: ${{ inputs.runtime_cancellation_mode == 'cancel' && '1' || '0' }}
+          GH_TOKEN: ${{ github.token }}
+        with:
+          role-arn: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          region: ${{ needs.application-region.outputs.region }}
+          phase: finish
           cleanup-preview: "true"
+      - name: Restore interrupted preview runtime
+        if: (failure() || cancelled()) && !(cancelled() && steps.cancel_arm.outputs.armed == 'true')
+        uses: ./.github/actions/runtime-recovery
+        with:
+          role-arn: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          region: ${{ needs.application-region.outputs.region }}
+      - name: Remove disposable rehearsal
+        if: always() && !(cancelled() && steps.cancel_arm.outputs.armed == 'true') && (inputs.runtime_cancellation_mode != 'resume' || success())
+        uses: ./.github/actions/runtime-cleanup
+        with:
+          role-arn: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
+          region: ${{ needs.application-region.outputs.region }}

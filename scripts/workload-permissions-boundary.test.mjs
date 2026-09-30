@@ -9327,7 +9327,7 @@ describe("boundary and deploy-role templates", () => {
       ),
     ).toHaveLength(2);
     expect(workflow.match(/name: Deployment maintenance gate/gu)).toHaveLength(
-      6,
+      7,
     );
     expect(
       reconciliationWorkflow.match(/name: Deployment maintenance gate/gu),
@@ -9387,6 +9387,15 @@ describe("boundary and deploy-role templates", () => {
           expect(gate.run).toContain(
             "Guarded workload-boundary migration is incomplete — refusing prod deployment",
           );
+          continue;
+        }
+        if (jobName === "runtime-cutover-preview") {
+          expect(gate.env?.BOUNDARY).toBe("${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}");
+          expect(gate.run).toContain('if [[ "$BOUNDARY" != true ]]; then');
+          expect(gate.run).toContain("Runtime maintenance gate is closed'; exit 1");
+          expect(job.environment).toBe('preview-ci');
+          expect(job.if).toContain("github.event_name == 'workflow_dispatch'");
+          expect(job.steps[credentialIndex].if).toBe("inputs.runtime_cancellation_mode == 'resume'");
           continue;
         }
 

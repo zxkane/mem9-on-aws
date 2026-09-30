@@ -156,12 +156,14 @@ export async function commitRolloutPhase(db,{claim,from,to,owns,work=async()=>{}
   }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error;}
 }
 
-export async function changeRolloutRecovery(db,{claim,status,owns,evidence={}}){
+export async function changeRolloutRecovery(db,{claim,status,owns,evidence={},expectedHash}){
   if(!['recovering','restored','running'].includes(status))throw Error('InvalidRecoveryStatus');
+  if(expectedHash!==undefined&&(status!=='running'||typeof expectedHash!=='string'||!/^[a-f0-9]{64}$/.test(expectedHash)))throw Error('InvalidRecoveryEvidence');
   await owns();await db.query('BEGIN');
   try{
     let state=await readRolloutState(db,{lock:true});
     assertRolloutClaim(state,claim,{recovery:true,now:await timestamp(db)});
+    if(expectedHash!==undefined&&state.last_hash!==expectedHash)throw Error('RecoveryEvidenceChanged');
     const beforeWindow=state.phase==='prepared'&&state.started_ms===null&&state.deadline_ms===null;
     if(state.phase==='complete'||(status==='restored'&&state.status!=='recovering')||
       (status==='running'&&(state.status!=='restored'||(!beforeWindow&&(state.deadline_ms===null||await timestamp(db)>=state.deadline_ms)))))throw Error('RolloutRecoveryDenied');

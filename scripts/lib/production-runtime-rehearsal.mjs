@@ -1,6 +1,7 @@
 import {schemaAdministratorRole} from './production-runtime-config.mjs';
 import {createHash} from 'node:crypto';
 import {readExtensionCatalog,extensionCatalogDigest,extensionVersion} from './runtime-extension-catalog.mjs';
+import {cancellationHash} from './production-runtime-cancellation.mjs';
 
 const scalar=async(db,sql,args=[])=>(await db.query(sql,args)).rows[0]?.result;
 const identifier=value=>'"'+value.replaceAll('"','""')+'"';
@@ -46,6 +47,26 @@ export async function verifyPreservation(db,row){
   const baseline=row.preservation;
   if(!baseline?.namespace||baseline.rows?.length!==3||
     extensionCatalogDigest(await preservationRows(db,baseline.namespace))!==extensionCatalogDigest(baseline.rows))throw Error('ProbeMemoryPreservationFailed');
+}
+
+export async function readCancellationPreservation(db,state,{checkpoint,checkpointSequence}={}){
+  administratorProbeIdentity(state);
+  if(!['prepared','password_fenced'].includes(state.phase)||!['running','recovering','restored'].includes(state.status)||
+    (checkpointSequence!==undefined&&(!Number.isSafeInteger(checkpointSequence)||checkpointSequence<1||checkpointSequence>1000)))throw Error('PreservationReaderMismatch');
+  await db.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+  try{
+    await checkpoint();
+    const identity=(await db.query('SELECT current_database() AS database,session_user::regrole::oid AS role_oid')).rows[0];
+    if(identity.database!==state.identity.database||Number(identity.role_oid)!==state.identity.legacyRoleOid)throw Error('PreservationReaderMismatch');
+    const row=await readProbe(db,state);await verifyPreservation(db,row);
+    const history=checkpointSequence===undefined?[]:(await db.query(`SELECT sequence,payload,event_hash FROM mem9_runtime.production_rollout_events
+      WHERE operation_nonce=$1 AND sequence >= $2 AND (payload->>'kind'='recovery' OR sequence=$2) ORDER BY sequence LIMIT 129`,
+      [state.operation_nonce,checkpointSequence])).rows;
+    if(history.length>128)throw Error('CancellationHistoryTooLarge');
+    const result={count:row.preservation.rows.length,hash:cancellationHash(row.preservation.rows),history:history.map(event=>({
+      sequence:Number(event.sequence),epoch:event.payload.epoch,phase:event.payload.phase,status:event.payload.status,hash:event.event_hash,kind:event.payload.kind}))};
+    await checkpoint();await db.query('COMMIT');return result;
+  }catch(error){await db.query('ROLLBACK').catch(()=>{});throw error;}
 }
 
 export async function prepareAdministratorProbe(db,{state,checkpoint}){

@@ -30,8 +30,16 @@ describe('independent cutover cancellation recovery',()=>{
       expect(job.env.MEM9_RUNTIME_RECOVERY_RUN_ID).toBe('${{ needs.source.outputs.run-id }}');
       expect(job.steps.at(-1).run).toContain('2700 node scripts/run-production-runtime.mjs recover');
     }
-    const repair=cutover.runs.steps.filter(s=>/recovery credentials|failed cutover/.test(s.name??''));
-    expect(repair).toHaveLength(2);expect(repair.every(s=>s.if==='failure() || cancelled()')).toBe(true);
+    expect(cutover.runs.steps.some(s=>/\bmjs (recover|cleanup-preview)\b/.test(s.run??''))).toBe(false);
+    const preview=ci.jobs['runtime-cutover-preview'];
+    expect(preview.steps.find(s=>s.name==='Arm preview cancellation rehearsal')?.id).toBe('cancel_arm');
+    for(const name of ['Restore interrupted preview runtime','Remove disposable rehearsal']){
+      const step=preview.steps.find(s=>s.name===name);
+      expect(step?.uses).toMatch(/^\.\/\.github\/actions\/runtime-(recovery|cleanup)$/);
+      expect(step?.if).toContain("!(cancelled() && steps.cancel_arm.outputs.armed == 'true')");
+    }
+    expect(preview.steps.find(s=>s.name==='Remove disposable rehearsal').if).toContain("inputs.runtime_cancellation_mode != 'resume' || success()");
+    expect(ci.jobs['runtime-cutover-prod'].steps.find(s=>s.name==='Restore interrupted production runtime').if).toBe('failure() || cancelled()');
   });
   it('accepts a cancelled production cutover but rejects a different branch or ordinary deployment failure',async()=>{
     const jobs=[{name:ci.jobs['runtime-cutover-prod'].name,conclusion:'cancelled'}];

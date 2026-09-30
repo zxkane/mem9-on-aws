@@ -21,6 +21,7 @@ import {runtimeServerContract,verifyRuntimeRoles} from './lib/runtime-live-verif
 import {inspectProductionDatabase,ensureProductionSnapshot,removePreviewSnapshot} from './lib/production-runtime-backup.mjs';
 import {restoreMissingAdministrator,armAdministratorLoss,deletePreviewAdministrator,validateAdministratorLossIntent,administratorLossDeadlines} from './lib/production-runtime-administrator.mjs';
 import {assertExtensionMaintenance} from './lib/runtime-extension-catalog.mjs';
+import {cancellationRehearsal} from './lib/production-runtime-cancellation-runner.mjs';
 
 const runProcess=promisify(execFile),send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
 const emit=value=>process.stdout.write(JSON.stringify({event:'production_runtime_rollout',...value})+'\n');
@@ -28,10 +29,12 @@ const digest=value=>createHash('sha256').update(JSON.stringify(value)).digest('h
 
 export async function productionCoordinatorDigest(){
   const paths=['scripts/run-production-runtime.mjs','scripts/lib/production-runtime-aws.mjs','scripts/lib/production-runtime-backup.mjs',
+    'scripts/lib/production-runtime-cancellation.mjs','scripts/lib/production-runtime-cancellation-runner.mjs',
     'scripts/lib/production-runtime-flow.mjs','scripts/lib/production-runtime-tasks.mjs','scripts/lib/production-runtime-administrator.mjs','scripts/lib/runtime-extension-catalog.mjs','scripts/lib/runtime-live-verification.mjs',
     'infra/production-runtime.ts','infra/ecs.ts','infra/bootstrap.ts','infra/consolidation.ts','infra/maintenance-cleanup.ts',
     'sst.config.ts','infra/cloudformation/github-actions-role.yaml','.github/workflows/infra-ci.yml',
-    '.github/workflows/runtime-recovery.yml','.github/actions/runtime-cutover/action.yml','package-lock.json','infra/pnpm-lock.yaml'];
+    '.github/workflows/runtime-recovery.yml','.github/actions/runtime-cutover/action.yml','.github/actions/runtime-recovery/action.yml',
+    '.github/actions/runtime-cleanup/action.yml','package-lock.json','infra/pnpm-lock.yaml'];
   const hash=createHash('sha256');
   for(const path of paths.sort()){hash.update(path+'\0');hash.update(await readFile(new URL('../'+path,import.meta.url)));}
   return hash.digest('hex');
@@ -69,8 +72,10 @@ async function readOptional(clients,name){
 }
 
 export async function runProductionRuntime({clients,stage,region,command,env=process.env,execute=runProcess}){
-  if(!rolloutStage(stage)||!['configure','image','prepare','apply','finalize','recover','resume','status','cleanup-preview','rehearse','catalog'].includes(command))throw Error('InvalidProductionCommand');
+  if(!rolloutStage(stage)||!['configure','image','prepare','apply','finalize','recover','resume','status','cleanup-preview','rehearse','catalog','arm-cancellation'].includes(command))throw Error('InvalidProductionCommand');
   if(command==='rehearse'&&stage==='prod')throw Error('PreviewAdministratorRehearsalOnly');
+  if(!['0','1'].includes(env.MEM9_RUNTIME_CANCELLATION_DRILL??'0')||
+    (stage==='prod'&&(command==='arm-cancellation'||env.MEM9_RUNTIME_CANCELLATION_DRILL==='1')))throw Error('PreviewCancellationOnly');
   const commandDeadline=Date.now()+45*60000;
   const account=(await send(clients.sts,new GetCallerIdentityCommand({}))).Account;
   const prefix=`/mem9-on-aws/${stage}/runtime`,planPath=prefix+'/production-plan',statePath=prefix+'/production-state';
@@ -80,6 +85,14 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
     if(!/^[1-9][0-9]*$/.test(env.MEM9_RUNTIME_RECOVERY_RUN_ID))throw Error('InvalidRecoverySource');
     if(!plan&&await readOptional(clients,statePath))throw Error('ProductionPlanMissing');
     if(!plan||plan.sourceRunId!==env.MEM9_RUNTIME_RECOVERY_RUN_ID){emit({phase:'unrelated-recovery-skipped'});return;}
+    if(plan.sourceRunAttempt!==undefined){
+      if(env.GITHUB_EVENT_NAME!=='workflow_run'||!env.GITHUB_EVENT_PATH)throw Error('InvalidRecoverySource');
+      const event=JSON.parse(await readFile(env.GITHUB_EVENT_PATH,'utf8')),source=event?.workflow_run;
+      if(event.repository?.full_name!==env.GITHUB_REPOSITORY||source?.head_repository?.full_name!==env.GITHUB_REPOSITORY||
+        !Number.isSafeInteger(source.id)||!Number.isSafeInteger(source.run_attempt)||source.run_attempt<1||
+        !/^[a-f0-9]{40}$/.test(source.head_sha??'')||source.event!=='workflow_dispatch'||source.path!=='.github/workflows/infra-ci.yml')throw Error('InvalidRecoverySource');
+      if(String(source.id)!==plan.sourceRunId||source.run_attempt!==plan.sourceRunAttempt||source.head_sha!==plan.sourceSha){emit({phase:'unrelated-recovery-skipped'});return;}
+    }
   }
   const liveCatalog=async()=>{
     const manifest=await readOptional(clients,prefix+'/production-manifest');
@@ -115,6 +128,16 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
     if(Buffer.byteLength(serialized)>4096)throw Error('RuntimeRoutingTooLarge');
     return send(clients.ssm,new PutParameterCommand({Name:name,Type:'SecureString',Value:serialized,Overwrite:true}));
   };
+  const sourceMetadata=()=>{
+    const sourceRunAttempt=Number(env.GITHUB_RUN_ATTEMPT??'1');
+    if(!/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID??'')||!Number.isSafeInteger(sourceRunAttempt)||sourceRunAttempt<1||
+      !/^[a-f0-9]{40}$/.test(env.GITHUB_SHA??''))throw Error('ProductionWorkflowRunRequired');
+    return {sourceRunId:env.GITHUB_RUN_ID,sourceRunAttempt,sourceSha:env.GITHUB_SHA};
+  };
+  const claimSource=async()=>{
+    if(!plan)throw Error('ProductionPlanMissing');
+    plan={...plan,...sourceMetadata()};await put(planPath,plan);
+  };
   if(command==='image'){
     const r=await send(clients.ssm,new GetParametersCommand({Names:[`/mem9-on-aws/${stage}/ecs/image`],WithDecryption:false}));
     const image=r.Parameters?.[0]?.Value;
@@ -139,7 +162,8 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
       timeout:2400000,maxBuffer:8*1024*1024});
     if(plan?.databaseClusterId)await removePreviewSnapshot(clients,plan);
     await acknowledgeProductionCancellation(clients,pending);
-    if(plan)for(const name of [prefix+'/administrator-recovery-intent',statePath,planPath]){
+    if(plan)for(const name of [prefix+'/administrator-recovery-intent',statePath,planPath,
+      ...['intent','checkpoint','receipt','accepted'].map(key=>prefix+'/cancellation-'+key)]){
       try{await send(clients.ssm,new DeleteParameterCommand({Name:name}));}
       catch(error){if(error.name!=='ParameterNotFound')throw error;}
     }
@@ -185,6 +209,19 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
     await verifyRuntimeRoles({iam:clients.iam,definition,meta:current,contract});
     return {verification_hash:digest({nonce:state.operation_nonce,taskDefinition:service.taskDefinition,checkedAt:Date.now(),checks:['mcp','oauth']}),task_definition:service.taskDefinition};
   };
+  const cancellation=cancellationRehearsal({env,stage,getPlan:()=>plan,readState:read,invoke,execute,claimSource,progress:emit,
+    readRecord:key=>readOptional(clients,prefix+'/'+key),
+    writeRecord:async(key,value)=>{
+      const serialized=JSON.stringify(value);if(Buffer.byteLength(serialized)>4096)throw Error('CancellationEvidenceTooLarge');
+      await send(clients.ssm,new PutParameterCommand({Name:prefix+'/'+key,Type:'SecureString',Value:serialized,Overwrite:false}));
+    },
+    release:async()=>{
+      const sha=(await execute('git',['rev-parse','HEAD'],{cwd:process.cwd(),timeout:10000,maxBuffer:1024})).stdout.trim();
+      if(!/^[a-f0-9]{40}$/.test(sha))throw Error('ProductionSourceTreeInvalid');
+      return {sourceSha:sha,sourceTree:await productionSourceTree(),operatorDigest:await productionOperatorDigest(),
+        schemaDigest:await runtimeSchemaDigest('docker/bootstrap'),coordinatorDigest:await productionCoordinatorDigest()};
+    }});
+  if(command==='arm-cancellation')return cancellation.arm();
   if(command==='configure'){
     const marker=await readOptional(clients,statePath);
     let mode='off',fallbackImages;
@@ -211,11 +248,11 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
     emit({phase:'configured',mode});return;
   }
   if(command==='prepare'){
-    if(!/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID??''))throw Error('ProductionWorkflowRunRequired');
+    const workflowSource=sourceMetadata();
     if(plan){
       // The retry owns recovery even when its earlier attempt never produced
       // a manifest or ledger. Claim it before any task or deployment can run.
-      plan={...plan,sourceRunId:env.GITHUB_RUN_ID};await put(planPath,plan);
+      plan={...plan,...workflowSource};await put(planPath,plan);
       // A retry must inspect the durable phase before an SST prepare deployment
       // could put the original credential back into the service definition.
       const manifest=await readOptional(clients,prefix+'/production-manifest');
@@ -236,7 +273,7 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
       await auditAdditionalCredentialReaders(clients,source,inventory);
       const {definition,...metadata}=source;
       const database=await inspectProductionDatabase(clients,source);
-      plan={version:1,nonce:randomUUID().replaceAll('-',''),sourceRunId:env.GITHUB_RUN_ID,...metadata,...database,inventory:compactWriterInventory(inventory),createdAt:Date.now()};
+      plan={version:1,nonce:randomUUID().replaceAll('-',''),...workflowSource,...metadata,...database,inventory:compactWriterInventory(inventory),createdAt:Date.now()};
       await put(planPath,plan);
     }
     await ensureProductionSnapshot(clients,plan,{create:true,deadline:Math.min(commandDeadline,Date.now()+20*60000)});
@@ -306,19 +343,24 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
     await send(clients.ssm,new DeleteParameterCommand({Name:prefix+'/administrator-recovery-intent'}));
     if(fresh.preservationVerified!==true)throw Error('ForegroundPreservationProofMissing');
     if(restored.proofs?.retired_credentials!==true)throw Error('RetirementProofMissing');
-    const evidence={version:1,stage,runId:env.GITHUB_RUN_ID,commit:env.GITHUB_SHA,sourceTree:await productionSourceTree(),
+    const cancellationProof=await cancellation.evidence(restored);
+    const evidence={version:1,stage,runId:env.GITHUB_RUN_ID,runAttempt:Number(env.GITHUB_RUN_ATTEMPT??'1'),commit:env.GITHUB_SHA,sourceTree:await productionSourceTree(),
       schemaDigest:restored.identity.schemaDigest,operatorDigest:restored.identity.operatorDigest,coordinatorDigest:await productionCoordinatorDigest(),
       engineVersion:fresh.catalog.postgresVersion,extensionMaintenance:fresh,
-      checks:{retirement:true,administratorRecovery:true,foregroundPreservation:true,cancellationRecovery:false}};
+      checks:{retirement:true,administratorRecovery:true,foregroundPreservation:true,cancellationRecovery:Boolean(cancellationProof)},
+      ...(cancellationProof?{cancellation:cancellationProof}:{})};
     emit({phase:'administrator-rehearsal-complete',evidence});
     return restored;
   }
   if(command==='resume'){
-    const state=await invoke('resume',await read());await mirror(state);
-    if(env.GITHUB_RUN_ID){plan={...plan,sourceRunId:env.GITHUB_RUN_ID};await put(planPath,plan);}
+    let state;
+    if(await readOptional(clients,prefix+'/cancellation-intent'))state=await cancellation.resume();
+    else{if(env.GITHUB_RUN_ID)await claimSource();state=await invoke('resume',await read());}
+    await mirror(state);
     return state;
   }
   const actions={read,invoke,mirror,
+    beforeFence:cancellation.beforeFence,afterFence:cancellation.afterFence,afterRestoration:cancellation.afterRestoration,
     freezeLegacy:async(state,deadline)=>{
       const drained=await stopLegacyWriters(clients,meta,plan.inventory,{deadline:Math.min(deadline,Date.now()+600000)});
       await fenceLegacyRoles(clients,meta,plan.inventory,{retired:true});

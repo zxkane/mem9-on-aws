@@ -1,7 +1,7 @@
 import {randomUUID,randomBytes} from 'node:crypto';
 import pg from 'pg';
 import {describe,it,expect} from 'vitest';
-import {prepareAdministratorProbe,verifyAdministratorProbe,administratorProbeIdentity,verifyPreservation} from './lib/production-runtime-rehearsal.mjs';
+import {prepareAdministratorProbe,verifyAdministratorProbe,administratorProbeIdentity,verifyPreservation,readCancellationPreservation} from './lib/production-runtime-rehearsal.mjs';
 import {schemaAdministratorRole} from './lib/production-runtime-config.mjs';
 import {applyBootstrapSchema} from './lib/runtime-credentials.mjs';
 import {fileURLToPath} from 'node:url';
@@ -23,7 +23,7 @@ describe.skipIf(!dsn)('administrator extension rehearsal on isolated PostgreSQL'
       const client=new pg.Client({host:url.hostname,port:Number(url.port),database:dbName,user:credential.username,password:credential.password});
       client.on('error',()=>{});try{await client.connect();return client;}catch(error){await client.end().catch(()=>{});throw error;}
     };
-    const state={operation_nonce:nonce,phase:'prepared',status:'running',identity:{stage}};
+    const state={operation_nonce:nonce,phase:'prepared',status:'running',identity:{stage,database}};
     const probe=administratorProbeIdentity(state),checkpoint=async()=>{};
     try{
       // Only fixture setup uses a native superuser to create an extension owned
@@ -39,6 +39,12 @@ describe.skipIf(!dsn)('administrator extension rehearsal on isolated PostgreSQL'
       await prepareAdministratorProbe(owner,{state,connect,original,checkpoint});
       const baseline=(await owner.query('SELECT preservation FROM mem9_runtime.administrator_rehearsal WHERE operation_nonce=$1',[nonce])).rows[0];
       await verifyPreservation(owner,baseline);
+      const preserved=await readCancellationPreservation(owner,state,{checkpoint:async()=>{
+        expect((await owner.query('SHOW transaction_read_only')).rows[0].transaction_read_only).toBe('on');
+      }});
+      expect(preserved).toMatchObject({count:3,hash:expect.stringMatching(/^[a-f0-9]{64}$/)});
+      expect(JSON.stringify(preserved)).not.toContain('Synthetic runtime preservation');
+      await expect(readCancellationPreservation(owner,{...state,identity:{...state.identity,legacyRoleOid:state.identity.administratorRoleOid}},{checkpoint})).rejects.toThrow('PreservationReaderMismatch');
       for(const statement of ["UPDATE public.memories SET content='Synthetic corruption' WHERE id=$1 AND namespace_id=$2",
         'DELETE FROM public.memories WHERE id=$1 AND namespace_id=$2']){
         await owner.query('BEGIN');
