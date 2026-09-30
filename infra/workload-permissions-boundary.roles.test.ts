@@ -392,6 +392,7 @@ describe("workload role coverage from the real SST graph", () => {
   it.each([
     { label: "preview runtime preparation", scheduleEnabled: false, namespaceRequired: false, unsupportedFlag: undefined, runtimeReady: false },
     { label: "preview runtime ready", scheduleEnabled: false, namespaceRequired: true, unsupportedFlag: undefined, runtimeReady: true },
+    { label: "preview cutover preparation", scheduleEnabled: true, namespaceRequired: true, unsupportedFlag: undefined, runtimeReady: true, productionMode: 'prepare' },
     ...["prepare","paused","ready","active"].map(productionMode=>({label:`production runtime ${productionMode}`,scheduleEnabled:true,namespaceRequired:true,unsupportedFlag:undefined,productionMode})),
     { label: "scheduler disabled, compatibility mode", scheduleEnabled: false, namespaceRequired: false, unsupportedFlag: undefined },
     { label: "scheduler disabled, required namespaces", scheduleEnabled: false, namespaceRequired: true, unsupportedFlag: undefined },
@@ -584,6 +585,11 @@ describe("workload role coverage from the real SST graph", () => {
           const boot = JSON.parse(String(bootstrap.inputs.containerDefinitions))[0];
           expect(boot.secrets.find((s:any) => s.name === 'MEM9_RUNTIME_DB_SECRET').valueFrom).toBe(runtimeArn);
           expect(boot.secrets.find((s:any) => s.name === 'MEM9_DB_SECRET').valueFrom).not.toBe(runtimeArn);
+          if(productionMode)for(const name of ['RuntimeMem9ServerExecutionRole','SchemaMem9BootstrapExecutionRole']){
+            const role=oneResource('aws:iam/role:Role',name);
+            expect(role.inputs.name).toBe(`mem9-on-aws-${stage}-${name}-role`);
+            expect(role.inputs.permissionsBoundary).toBe(`arn:aws:iam::${accountId}:policy/${WORKLOAD_BOUNDARY_POLICY_NAME}`);
+          }
           return;
         }
         if (unsupportedFlag) {
@@ -641,6 +647,9 @@ describe("workload role coverage from the real SST graph", () => {
             if(productionMode!=='prepare')expect(statements[0]).toMatchObject({Resource:'*',Action:expect.arrayContaining(['ssm:GetParameters','secretsmanager:GetSecretValue','kms:Decrypt'])});
           }
           for(const name of ['RuntimeMem9ServerExecutionRole','SchemaMem9BootstrapExecutionRole','TransitionMem9BootstrapTaskRole','TransitionMem9BootstrapExecutionRole']){
+            if(name.startsWith('Runtime')||name.startsWith('Schema')){
+              expect(oneResource('aws:iam/role:Role',name).inputs.name).toBe(`mem9-on-aws-${stage}-${name}-role`);
+            }
             const trust=policyJson(oneResource('aws:iam/role:Role',name).inputs.assumeRolePolicy);
             expect(trust.Statement[0].Condition).toEqual({StringEquals:{'aws:SourceAccount':accountId},ArnLike:{'aws:SourceArn':`arn:aws:ecs:${region}:${accountId}:*`}});
           }
@@ -661,17 +670,9 @@ describe("workload role coverage from the real SST graph", () => {
         for (const { inputs, name } of createdRoles) {
           const physicalName = inputs.name ?? inputs.namePrefix;
           if (physicalName === undefined) {
-            // SST auto-names the role as `<app>-<stage>-<logicalName>-<suffix>`.
-            // That is the path MOST project roles take (Mem9ServerTaskRole,
-            // Mem9BootstrapExecutionRole, …), and it is required for names whose
-            // explicit prefix would exceed Pulumi's 38-char name_prefix cap. The
-            // boundary patterns are `mem9-on-a*-*<LogicalName>-*`, so the logical
-            // name is what must match.
-            // `expectedRoleNames` is already asserted above to equal the full
-            // set of created logical names, so membership here proves the role is
-            // a reviewed workload role whose auto-generated physical name will
-            // carry the `mem9-on-aws-<stage>-<logicalName>-` shape the boundary
-            // patterns match.
+            // These remaining roles come from SST components. Raw provider
+            // roles must supply a name; their default lacks project/stage scope.
+            expect(['RuntimeMem9ServerExecutionRole','SchemaMem9BootstrapExecutionRole']).not.toContain(name);
             expect(
               expectedRoleNames.includes(name),
               `${name} auto-named role must be a known workload role`,

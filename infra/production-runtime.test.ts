@@ -35,6 +35,24 @@ describe("production runtime preparation",()=>{
     expect(()=>productionRuntimeResources(undefined,f.identity as any,f.namespace as any,f.maintenance as any)).toThrow("RuntimeFallbackDigestRequired");
     expect(f.resources).toEqual([]);
   });
+  it.each(['prod','pr-7'])("gives raw IAM roles project and stage names within the existing boundary: %s",async stage=>{
+    const f=setup(stage);vi.stubEnv('MEM9_PRODUCTION_RUNTIME_MODE','prepare');vi.stubEnv('MEM9_NAMESPACE_REQUIRED','1');
+    vi.stubEnv('MEM9_RUNTIME_FALLBACK_IMAGES',JSON.stringify(images));
+    const {productionRuntimeResources}=await import('./production-runtime');
+    productionRuntimeResources(undefined,f.identity as any,f.namespace as any,f.maintenance as any);
+    const roles=f.resources.filter(resource=>resource.type==='role');expect(roles).toHaveLength(2);
+    for(const role of roles){
+      expect(role.args.name).toBe(`mem9-on-aws-${stage}-${role.name}-role`);
+      expect(role.args.name.length).toBeLessThanOrEqual(64);expect(role.args.namePrefix).toBeUndefined();
+    }
+  });
+  it('rejects overlong stage-scoped role names before creating credentials',async()=>{
+    const f=setup('pr-'+'9'.repeat(40));vi.stubEnv('MEM9_PRODUCTION_RUNTIME_MODE','prepare');vi.stubEnv('MEM9_NAMESPACE_REQUIRED','1');
+    vi.stubEnv('MEM9_RUNTIME_FALLBACK_IMAGES',JSON.stringify(images));
+    const {productionRuntimeResources}=await import('./production-runtime');
+    expect(()=>productionRuntimeResources(undefined,f.identity as any,f.namespace as any,f.maintenance as any)).toThrow('RuntimeRoleNameTooLong');
+    expect(f.resources).toEqual([]);
+  });
   it("separates administrator, runtime and transition references and never injects the backup into a role",async()=>{
     const f=setup("prod");vi.stubEnv("MEM9_PRODUCTION_RUNTIME_MODE","prepare");vi.stubEnv("MEM9_NAMESPACE_REQUIRED","1");
     vi.stubEnv("MEM9_RUNTIME_FALLBACK_IMAGES",JSON.stringify(images));
