@@ -78,6 +78,45 @@ export function oneShotInput(template,manifest,worker,journal){
         {name:'MEM9_WORKER_GENERATION',value:journal.generation},{name:'MEM9_WORKER_INVOCATION',value:journal.nonce}]}]})}};
 }
 
+export async function discoverSchedulerTasks(ecs,clusterArn,accept,{sleep=delay,now=Date.now,deadlineMs=now()+120000}={}){
+  const request=command=>{
+    const remaining=deadlineMs-now();if(remaining<=0)fail('TaskDiscoveryIncomplete');
+    return ecs.send(command,{abortSignal:AbortSignal.timeout(Math.min(30000,remaining))});
+  };
+  for(let attempt=0;attempt<4;attempt++){
+    const arns=new Set();
+    for(const desiredStatus of ['RUNNING','STOPPED']){
+      let nextToken;
+      for(let page=0;page<30;page++){
+        const result=await request(new ListTasksCommand({cluster:clusterArn,desiredStatus,nextToken,maxResults:100}));
+        for(const arn of result.taskArns??[])arns.add(arn);
+        if(!result.nextToken)break;
+        if(result.nextToken===nextToken||page===29)fail('TaskDiscoveryIncomplete');nextToken=result.nextToken;
+      }
+    }
+    const owned=[],all=[...arns];let missing=false;
+    for(let index=0;index<all.length;index+=100){
+      const batch=all.slice(index,index+100),expected=new Set(batch),seen=new Set();
+      const result=await request(new DescribeTasksCommand({cluster:clusterArn,tasks:batch}));
+      for(const failure of result.failures??[]){
+        if(failure.reason!=='MISSING'||!expected.has(failure.arn)||seen.has(failure.arn))fail('TaskDiscoveryIncomplete');
+        seen.add(failure.arn);missing=true;
+      }
+      for(const task of result.tasks??[]){
+        if(!task?.taskArn||!expected.has(task.taskArn)||seen.has(task.taskArn)||task.clusterArn!==clusterArn)fail('TaskDiscoveryIncomplete');
+        seen.add(task.taskArn);if(accept(task))owned.push(task);
+      }
+      if(seen.size!==expected.size)fail('TaskDiscoveryIncomplete');
+    }
+    if(!missing)return owned;
+    // Never turn an unaccounted task into a successful partial inventory.
+    // Refresh both views so expired stopped entries can disappear naturally.
+    if(attempt===3)fail('TaskDiscoveryIncomplete');
+    await sleep(Math.min([1000,3000,10000][attempt],Math.max(1,deadlineMs-now())));
+  }
+  fail('TaskDiscoveryIncomplete');
+}
+
 export async function runSchedulerAcceptance({clients,stage,generation,region,now=Date.now,sleep=delay,progress=emit}){
   const {ssm,ecs,scheduler,logs,rds}=clients;
   const send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
@@ -169,24 +208,8 @@ export async function runSchedulerAcceptance({clients,stage,generation,region,no
     }
     fail('AcceptanceJournalLimit');
   };
-  const discover=async journal=>{
-    const arns=new Set();
-    for(const desiredStatus of ['RUNNING','STOPPED']){
-      let nextToken;
-      for(let page=0;page<30;page++){
-        const r=await send(ecs,new ListTasksCommand({cluster:manifest.clusterArn,desiredStatus,nextToken,maxResults:100}));
-        for(const arn of r.taskArns??[])arns.add(arn);
-        if(!r.nextToken)break;nextToken=r.nextToken;if(page===29)fail('TaskDiscoveryIncomplete');
-      }
-    }
-    const owned=[];const list=[...arns];
-    for(let i=0;i<list.length;i+=100){
-      const r=await send(ecs,new DescribeTasksCommand({cluster:manifest.clusterArn,tasks:list.slice(i,i+100)}));
-      if(r.failures?.length)fail('TaskDiscoveryIncomplete');
-      for(const task of r.tasks??[])if(journal.operator?ownsOperatorTask(task,manifest,journal):ownsTask(task,manifest,journal))owned.push(task);
-    }
-    return owned;
-  };
+  const discover=journal=>discoverSchedulerTasks(ecs,manifest.clusterArn,
+    task=>journal.operator?ownsOperatorTask(task,manifest,journal):ownsTask(task,manifest,journal),{sleep,now});
   const quiesceOperators=async()=>{
     let NextToken;const saved=[];const errors=[];
     for(let page=0;page<100;page++){

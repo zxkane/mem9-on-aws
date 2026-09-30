@@ -1,5 +1,5 @@
 import {describe,it,expect} from 'vitest';
-import {validateManifest,scheduleJournal,validateJournal,ownsTask,oneShotInput,runSchedulerAcceptance,taskDefinitionMatches} from './consolidation-scheduler-e2e.mjs';
+import {validateManifest,scheduleJournal,validateJournal,ownsTask,oneShotInput,runSchedulerAcceptance,taskDefinitionMatches,discoverSchedulerTasks} from './consolidation-scheduler-e2e.mjs';
 
 const stage='pr-7',generation='a'.repeat(64),region='ap-northeast-1',account='123456789012';
 const clusterName=`mem9-on-aws-${stage}-Cluster-example`;
@@ -16,6 +16,32 @@ const template={State:'DISABLED',GroupName:manifest.groupName,Target:{Arn:manife
   Input:JSON.stringify({containerOverrides:[{name:worker.containerName,environment:[{name:'MEM9_WORKER_GENERATION',value:generation}]}]}),
   EcsParameters:{TaskDefinitionArn:worker.taskDefinitionArn,LaunchType:'FARGATE',PropagateTags:'TASK_DEFINITION'}}};
 describe('real Scheduler acceptance ownership and cleanup',()=>{
+  it('re-reads task inventory when a listed task briefly has no description',async()=>{
+    const arn=manifest.clusterArn.replace(':cluster/',':task/')+'/fresh',waits=[];let attempt=0;
+    const ecs={send:async command=>{
+      if(command.constructor.name==='ListTasksCommand')return {taskArns:command.input.desiredStatus==='RUNNING'?[arn]:[]};
+      attempt++;return attempt===1?{failures:[{arn,reason:'MISSING'}]}:{tasks:[{taskArn:arn,clusterArn:manifest.clusterArn}]};
+    }};
+    expect(await discoverSchedulerTasks(ecs,manifest.clusterArn,()=>true,{sleep:async ms=>waits.push(ms)})).toHaveLength(1);
+    expect(attempt).toBe(2);expect(waits).toEqual([1000]);
+  });
+  it('accepts a fresh complete inventory after an expired stopped entry disappears',async()=>{
+    const arn=manifest.clusterArn.replace(':cluster/',':task/')+'/expired';let lists=0;
+    const ecs={send:async command=>command.constructor.name==='ListTasksCommand'
+      ?{taskArns:++lists<=2&&command.input.desiredStatus==='STOPPED'?[arn]:[]}
+      :{failures:[{arn,reason:'MISSING'}]}};
+    expect(await discoverSchedulerTasks(ecs,manifest.clusterArn,()=>true,{sleep:async()=>{}})).toEqual([]);
+    expect(lists).toBe(4);
+  });
+  it.each(['MISSING','ACCESS_DENIED','unaccounted'])('keeps unresolved or unauthorized %s descriptions fail-closed',async reason=>{
+    const arn=manifest.clusterArn.replace(':cluster/',':task/')+'/test';let reads=0;
+    const ecs={send:async command=>{
+      if(command.constructor.name==='ListTasksCommand')return {taskArns:command.input.desiredStatus==='RUNNING'?[arn]:[]};
+      reads++;return reason==='unaccounted'?{tasks:[]}:{failures:[{arn,reason}]};
+    }};
+    await expect(discoverSchedulerTasks(ecs,manifest.clusterArn,()=>true,{sleep:async()=>{}})).rejects.toThrow('TaskDiscoveryIncomplete');
+    expect(reads).toBe(reason==='MISSING'?4:1);
+  });
   it('accepts the actual SST cluster-prefixed bootstrap family and rejects other families',()=>{
     const arn=`arn:aws:ecs:${region}:${account}:task-definition/${clusterName}-Mem9Bootstrap:7`;
     expect(taskDefinitionMatches(arn,manifest,'Mem9Bootstrap')).toBe(true);
