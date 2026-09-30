@@ -622,6 +622,14 @@ jobs:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: node scripts/run-runtime-preview.mjs verify
 
+      - name: Aurora administrator authority (preview, hard)
+        # Role/extension permission checks run inside ROLLBACK and the temporary
+        # administrator is removed. Actual production retirement is a later gate.
+        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        env:
+          STAGE: ${{ steps.deploy.outputs.stage }}
+        run: node scripts/run-runtime-preview.mjs admin-probe
+
       - name: Continuous consolidation Scheduler E2E (preview, hard)
         if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
         env:

@@ -1546,6 +1546,23 @@ namespace/OAuth and synthetic Scheduler/Qwen acceptance are hard gates. A stale
 owner tenant binding or privilege/schema drift prevents runtime startup. The
 production schema path does not install this preview-only contract.
 
+Preview CI also probes a fresh Aurora administrator's ability to change the
+actual master login attributes and pass ownership checks for installed extensions. The attempted
+DDL is rolled back, the original credential is checked again, and the temporary
+administrator is removed. This authority check uses an independent SSM
+SecureString and rejects production; it is a prerequisite for implementing the
+reviewed production cutover, not evidence that retirement, extension upgrades or
+batching occurred. The probe login expires, graceful interruption attempts
+cleanup, and cancellation retains its journal until a separate cleanup task
+verifies that the temporary administrator was removed.
+
+Dynamic credential DDL first requires `stderr` logging and applies/verifies
+session-level `log_error_verbosity=terse` and `log_min_error_statement=panic`.
+This prevents cancellation or backend termination from exposing the verifier
+through an uncaught PL/pgSQL error context. Other log destinations or denied
+session settings fail before credential changes; ordinary restricted callers
+keep their existing read-only logging validation.
+
 Production activation, execution fair shares, retained-payload cleanup,
 credential retirement and production load/quality calibration remain release gates.
 The synthetic 17k-row rehearsal checks planted duplicate discovery and bounded

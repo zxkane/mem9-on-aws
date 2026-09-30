@@ -969,3 +969,381 @@ The linked service behavior is not authorization to provision new resources:
 - [Scheduler delivery semantics](https://aws.amazon.com/blogs/compute/introducing-amazon-eventbridge-scheduler/)
 - [Scheduler schedule-group trust scope](https://docs.aws.amazon.com/scheduler/latest/UserGuide/cross-service-confused-deputy-prevention.html)
 - [Fargate CPU/memory combinations](https://docs.aws.amazon.com/AmazonECS/latest/developerguide/fargate-tasks-services.html)
+
+
+## Production cutover with a bounded maintenance window
+
+Status: implementation approved by Codex, GLM-5 and Kiro Opus 4.8 after six
+review rounds. Production activation still requires the evidence below. The
+operator permits a brief interruption of reads and writes, with a maximum
+maintenance window of two hours. All image builds, resource preparation, role
+policy review and rehearsal happen before this window. Automatically eligible
+historical work retains the 24–72 hour drain target; maintenance duration and
+backlog drain duration are separate clocks.
+
+### Administration and credential ownership
+
+Production gets three independent credential classes: schema administration,
+application runtime, and planner/executor. The existing database owner is the
+actual legacy login to retire. Its name and OID come from the current deployed
+server/bootstrap secret reference, the tenant registry, and live PostgreSQL
+catalogs; a newly created dummy role cannot satisfy retirement.
+
+The runtime uses a new stable SecureString reference distinct from the legacy
+master, transition and administrator references. Never retarget/overwrite the
+legacy secret with a runtime credential. Create a distinct runtime service
+execution role; historic service/bootstrap/maintenance roles must be denied all
+replacement runtime, transition and administrator credentials. Do not add
+runtime access to an execution role retained by historic service revisions.
+
+A new stage-scoped SSM SecureString holds a schema administrator credential.
+It is exposed only to a new bootstrap task execution role, never added to the
+execution role shared by historic bootstrap revisions. The existing bootstrap,
+server and maintenance execution roles lose wildcard credential readers and
+receive exact current references. Live IAM verification includes historic task
+families, every inline/attached policy, trust, permissions boundary, secret/KMS
+conditions and role override rejection. Historic revisions cannot retrieve the
+new administrator credential. Workload roles cannot write these parameters.
+
+Preflight requires the original owner to be the actual Aurora master with
+rds_superuser administrative authority; a merely schema-owning unprivileged
+login is not accepted as the migration creator. The new database administrator
+uses the Aurora-supported CREATEDB, CREATEROLE,
+LOGIN and rds_superuser administrative contract. This is an explicit trusted
+administrative principal outside the automation guarantee. Its password is
+passed as an ECS secret; SQL receives only a bound SCRAM verifier through the
+existing redacted credential guard. Verify logging settings before any secret
+operation. The original master secret value/reference remains unchanged as a retirement
+identity anchor; it becomes deliberately stale during the database password
+fence below. SST must not reset the database password or recreate the database.
+The reviewed current Aurora uses a stable RandomPassword and has no automatic
+rotation; preflight checks the live secret rotation configuration and the
+rendered plan instead of inventing a rotation controller.
+
+Do not use cluster-wide REASSIGN OWNED, rename the master, or create a role
+membership cycle. Transfer only an inventoried set of application objects in
+the exact stage database: the database itself, application schemas, tables,
+sequences, views and application functions/types. Exclude system catalogs,
+extension-owned objects, other databases and tablespaces. The inventory is
+bound to OIDs and owners, rejects unknown application schemas/object kinds,
+and is checked before and after a transaction. Indexes/constraints and row
+types follow their owning relation. The administrator must replay the complete
+schema and its grants successfully with a new real connection before retirement.
+The old-owner transaction transfers application schemas, non-extension
+standalone types, relations and routines, then the exact application database;
+all changes and the transferred-inventory receipt commit together or roll back
+together. Objects retain their ACLs. Inventory default ACLs explicitly; this
+project deliberately uses exact post-migration grants, not default grants to
+runtime, so no broad future-table/function privileges may be introduced.
+Extensions remain owned by their existing roles and are never dropped. Rehearse
+new-administrator extension maintenance authority on the deployed engine;
+unsupported extension administration blocks this approach before production.
+The transfer executes on the original owner connection, after it creates the
+new administrator and runs `GRANT new_admin TO old_owner WITH
+INHERIT TRUE, SET TRUE`. The original owner therefore owns each source object
+and can SET ROLE to the target owner. Never grant old_owner to new_admin: that
+would create a cycle with PostgreSQL creator membership. The same connection
+grants the new administrator ADMIN authority on the inventoried application
+group roles and existing runtime role, without granting administrative
+membership to runtime or workers. Do not grant ADMIN back to the creator: PostgreSQL already records the creator
+ADMIN membership, and rejects that self-grant. Final retirement executes on a
+fresh new-administrator connection with proven Aurora role-administration
+authority, never relying on ordinary CREATEROLE to alter its own NOLOGIN flag.
+The same-account rehearsal must retire the actual preview master this way;
+failure blocks the approach before production.
+Inspect all transitive memberships and reject any untrusted login capable of
+assuming either administrative role. Local PostgreSQL tests do not substitute
+for a same-account Aurora rehearsal of these operations.
+
+### Durable state and deployment behavior
+
+Use a protected stage control record with version, cluster/database identity,
+original owner OID, new administrator/runtime OIDs, image/schema digests,
+operation nonce, phase, phase timestamps and a fixed maintenance deadline.
+The DB state machine is `prepared -> maintenance -> runtime_prepared -> password_fenced -> transferred
+-> runtime_ready -> retired -> complete`; phase and version use row-lock/CAS transitions. Only the
+administrative workflow writes it; retries preserve identity and the
+original deadline. The database computes the two-hour deadline with its own
+clock when `prepared -> maintenance` commits, before stopping service. No
+caller-supplied timestamp or restart grants another two hours. The database record is the authority for whether retirement committed;
+an SSM record routes deployments but cannot independently prove retirement.
+
+Recovery is an explicit `recovering -> restored` branch with a monotonically
+increasing fencing epoch. Each administrative invocation binds its nonce and
+epoch, obtains the stage advisory lock on one dedicated connection, and checks
+the DB phase/epoch before every mutating phase or DDL segment. No automatic
+database reconnection is allowed inside an invocation. Recovery stops the
+original ECS task, cancels/terminates its exact recorded database backend,
+obtains that same advisory lock, then commits `recovering` with a higher epoch
+before repair DDL. A retry/reconnected old invocation fails before mutation.
+Transactional phases also hold the state-row lock; schema scripts with their
+own transactions stay under the session advisory lock and repeat the epoch
+check between segments. A new explicit resume invocation after restoration
+must obtain a new epoch and retain the original maintenance deadline; it cannot
+restart the two-hour allowance. Test the old invocation reconnecting after
+recovery and prove it cannot execute DDL or advance any phase.
+Operational recovery status is separate from the last committed migration
+phase. Retain an append-only, hash-linked phase/receipt history in the database;
+entering recovery cannot overwrite whether runtime preparation, password
+fencing, transfer or retirement committed. Resume requires the matching durable
+receipts plus catalog validation, never catalog inference without provenance.
+
+Preparation deploys new credentials and the distinct administrative task while
+keeping the original service configuration. Existing Infra CI remains the
+production deployment mechanism and retains its serialized production group.
+An explicit production-maintenance dispatch enters the transition. Normal
+push/manual deployments resolve the protected state before synthesis: legacy
+continues its existing path, completed migration uses runtime credentials, and
+an incomplete transition fails before deployment unless resuming that operation.
+Missing, malformed or contradictory state after migration fails closed; it must
+not silently choose legacy. A durable marker retained independently of ephemeral
+invocation journals prevents a missing journal from reopening the old path.
+Commit each database transition first, then mirror its content-free routing
+receipt to SSM with operation/version/cluster/database/digest identity. A missing
+or stale mirror is repaired only by the explicit resume command after reading
+the DB through the administrator task. Never infer database success from SSM.
+Tenant credential and allowlist updates are both PostgreSQL rows in one
+transaction; no claim of atomicity across SSM and PostgreSQL is made.
+Normal deploys re-read the matched receipt immediately before apply within the
+existing non-cancelling `infra-deploy-prod` concurrency group. The protected
+maintenance interlock blocks other trusted deploy writers for the window.
+No separate trigger-disabling mechanism replaces that existing serialization.
+
+After migration, normal deployments use schema verification without readiness
+invalidation. If the new image's schema digest differs, the normal deploy fails
+before changing the serving revision and requires the maintenance migration
+path. The administrator remains available for namespace operations and future
+schema upgrades. Preview behavior remains explicitly stage-scoped, and preview
+synthetic tenants/budgets are not imported into production.
+
+### Ordered cutover and restoration
+
+1. Preflight while service remains available: verify exact account/region,
+   stage/tenant/namespace mappings, real old writer inventory, current service
+   health, available PITR retention, a completed recovery snapshot, original
+   task definition/desired count, image digests, IAM and the rendered resource
+   graph. Exercise the new administrative login and its recovery authority.
+   Refuse unexpected additional tenant databases rather than rewriting their
+   credentials. No memory content leaves owned AWS.
+2. Disable the actual legacy schedules, block RunTask for the exact inventoried
+   historic writer task families, and establish the deployment interlock.
+   Before ownership work, revoke old-master secret and KMS access from every
+   historic execution/task role (including the service after it has drained),
+   and prevent untrusted task-definition/role overrides and service updates.
+   Only the distinct transition bootstrap role may read the old master during
+   this operation; remove that read after retirement. The new schema-admin
+   credential is never granted to a historic execution role. Read back actual
+   policies and negative IAM simulation; use inert ECS containers with the
+   historic execution roles to prove old/new secret injection denial without
+   accidentally running a legacy bootstrap if the expected denial fails.
+   Poll actual inert-task secret denials and IAM read-back until stable, then
+   repeat the complete task drain; a successful IAM update is not proof that
+   credentials already injected into a task disappeared. Inventory ACTIVE and
+   INACTIVE task definitions and nonterminal tasks for the stage, their exact
+   execution/task roles and credential references, plus all project workload
+   roles whose policies can read either privileged credential. Cross-check
+   live service and Scheduler targets. Unknown readers/families and incomplete
+   pagination block the operation. Persist the complete inventory digest and
+   revalidate it before transfer; CloudTrail history may supplement but never
+   replace live inventory or act as the sole completeness claim. Observe every
+   RUNNING/PENDING/stopping task in the inventoried writer families, including
+   old bootstrap, cleanup and consolidation revisions. The ordinary ingest
+   service is stopped only when preparation has passed and the durable
+   maintenance clock has started. Quiesce in-flight API writes and preserve
+   accepted durable ingest jobs; do not acknowledge requests that were not
+   durably accepted. V2 execution/capture/planning remain disabled.
+3. After draining the old service/tasks, first use the original owner connection
+   to commit the complete runtime bootstrap: exact role/grants, tenant tuple,
+   binding allowlist and schema readiness. Verify runtime login, visibility,
+   ACLs and direct synthetic read/write, then commit `runtime_prepared`.
+   This happens before killing the old password and outside the ownership
+   transfer transaction. If preparation fails, the trusted transition task
+   still has original-owner authority to repair/retry this bootstrap; service
+   restoration still uses runtime, never an owner-backed application.
+   Runtime grants, tenant binding and readiness survive a rolled-back ownership
+   transfer. Only after `runtime_prepared`, rotate the old login password in
+   PostgreSQL to a separate stage-scoped transition-only SecureString credential.
+   The original managed secret stays stale and cannot authenticate. This
+   explicitly fences cached old passwords, independent of IAM propagation.
+   The old-owner connection performs the bound SCRAM password change and
+   commits the password-fenced phase; ambiguous outcomes are reconciled using
+   the transition credential/new administrator, never by guessing the old state.
+   Use the new administrator to terminate every old-owner session except the
+   exact transfer backend (PID plus backend_start), observe their disappearance,
+   and prove an old-password connection fails. No legacy workload receives the
+   transition credential. Transfer the application ownership inventory and
+   reverify the already-committed runtime contract and tenant tuple. Preserve
+   all namespace bindings, memory
+   rows and ingest jobs. Production must not call the preview namespace seeder.
+4. Restore the service with the new runtime-only credential, verification mode,
+   unchanged namespace enforcement and v2 disabled. Prove MCP write/search,
+   OAuth and accepted ingest recovery against real credentials. The pinned fallback application image must also have passed runtime-only
+   verification against this exact schema/ACL contract in rehearsal. Keep at
+   least 45 minutes of the two-hour window for restoration. At minute 60 the
+   orchestrator unconditionally stops migration progress if runtime health is
+   unproven and executes the rehearsed restoration with the new credential. An operator remains present through this window;
+   cancelling CI does not count as restoring service.
+   Persist the exact fallback task-definition ARN, image digest and new runtime
+   credential reference in the DB control record. Disable ECS automatic
+   circuit-breaker rollback during first restoration, so it cannot choose a
+   completed pre-cutover revision. Failure explicitly selects the pinned
+   runtime-compatible fallback. Ordinary rollback may resume only once a
+   runtime-only revision is the completed baseline. Test both a failed first
+   restoration and a later failed ordinary deployment.
+5. Only after runtime health and new administrator replay have passed, commit
+   NOLOGIN and PASSWORD NULL for the actual old owner from the new admin,
+   revoke the temporary usable membership in new_admin, record the old OID as
+   retired, and close the old
+   administrative connection and terminate/verify zero sessions authenticated
+   with that OID. Verify old-password reconnect denial and every old task's
+   inability to retrieve the replacement administrative secret. The new runtime
+   stays online during retirement. Commit the completed deployment marker only
+   after these checks. Revoke transition-task access to the old and transition
+   credentials; normal admin bootstrap receives only the new administrator
+   credential. Batching remains disabled until its separate release gate.
+6. After the writer fence begins, restoration always uses the pinned, rehearsed
+   runtime-compatible application image and the new runtime credential, with
+   v2 and legacy schedules disabled. The administrator repairs/replays the
+   runtime bootstrap; the restricted runtime login never performs repairs.
+   Ownership transfer is one transaction, so its rollback is automatic; later
+   schema/grant/readiness phases are resumable and must be fault-injected.
+   After retirement recovery additionally retains NOLOGIN. It never restores
+   the old tenant credential, an old owner-backed service, or old automation.
+   No production outage starts until that restoration path is rehearsed,
+   including failures during each bootstrap phase. Do not restore a snapshot
+   over accepted writes.
+   A snapshot/PITR restore is a separate incident procedure, not an automatic
+   way to meet the window. The deadline is an admission/recovery budget, not a
+   promise that an AWS outage can be repaired within two hours.
+
+### Production worker activation and first historical batch
+
+Provision separate restricted planner/executor logins, real namespace caller
+bindings and stable SSM references. Reuse the reviewed private network,
+namespace-signed backend route, durable dispatcher/generation and disabled
+Scheduler targets. The server runtime is the backend caller; no second owner
+credential enters a worker. Deployment alone does not enable execution,
+capture, planner policies, model policies or recurring delivery.
+
+The owner-only launch command accepts one versioned policy manifest bound to
+the current stage, database, namespace list, retirement evidence, image/schema
+version and policy digest. It installs persisted stage AND namespace risk
+budgets, enables capture and configures a fresh incremental plan from current
+rows. Reuse `mem9_maintenance.configure_namespace` from migration 004: its
+namespace mutex and SHARE ROW EXCLUSIVE memory-table lock drain earlier
+writers, seed dirty work and enable capture in the same transaction. This is
+the existing race-free baseline; a second watermark protocol is unnecessary.
+Retain its concurrent-writer and late-commit integration tests. It cannot
+import old digest counts as executable actions. A canary uses
+one executor, one embedding slot, rate 0.05 actions/second, burst one, a maximum
+of 20 changed rows with per-class ceilings and no ARCHIVE/STALE allowance.
+The first policy permits only existing deterministic exact/lossless proposals;
+model inference stays disabled until its certification and preservation gates
+pass. Report that limited scope explicitly instead of claiming that all
+semantic backlog has been processed.
+
+Run a bounded real-memory canary only after preview failure/undo/load tests
+pass, then inspect source/receipt preservation and counts inside owned AWS.
+Canary verification compares receipt source/post-image hashes and exact lossless
+output/provenance, plus protected-record invariants. Namespace/size/protection
+edge cases are planted in the complete synthetic rehearsal fixture; do not
+require nonexistent production candidates or manufacture real data to satisfy
+a coverage quota. Canary completion is based on verified committed receipts,
+not ECS success. Repeated
+wakes must produce zero duplicate changes. Protected and disputed records
+remain review-only. Undo evidence uses a synthetic namespace in rehearsal;
+real production undo requires the post-image fence and a concrete reason.
+
+Promotion uses measured eligible work and observed throughput to derive a
+persisted daily allowance capable of draining eligible work in 24–72 hours,
+with stage/namespace quotas, one worker per kind and a foreground p95 regression
+limit of 10%. A canary-sized quota is never silently the steady-state policy.
+If exact candidates are sparse, report semantic/model readiness separately;
+13 candidate groups observed in preflight are neither the complete backlog
+nor a promised deletion count. No unchecked semantic policy is enabled merely
+to satisfy a throughput target. Stop claims/commits on retirement, authority,
+load, budget or invariant failures; retain receipts and unresolved work.
+
+### Required evidence
+
+Add regression cases to the existing consolidation test document for: ownership
+inventory/transaction rollback; fresh administrator connection and repeated
+bootstrap; role-cycle/privilege rejection; literal old-password/session denial;
+legacy task secret denial including execution-role overrides; timeout and retry
+without deadline extension; normal deployment before/after migration; missing
+state and digest mismatch; preservation of tenant IDs, namespaces, memories
+and accepted ingest jobs; restore before retirement and recovery after it;
+production policy/target validation; durable first batch and duplicate wake;
+zero runtime DDL and unchanged preview behavior. Run same-account Aurora and
+ECS rehearsal with synthetic data before touching production credentials.
+
+
+Review clarification: the rehearsal uses the complete production schema and
+observed object/role kinds with synthetic memory rows and a matching Aurora
+engine/version. It must include actual master-login retirement on a disposable
+preview cluster, not merely retirement of a synthetic seed login. Production
+memory content is not copied into a preview or sent to review models. Compare
+content-free production catalog fingerprints with the rehearsal inventory and
+block production if a class/dependency is untested. A terminated legacy session
+that remains visible is a hard stop, never permission to proceed with v2.
+
+
+Every database operation has a short lock timeout and a statement timeout
+bounded by the fixed maintenance cutoff. Record the active backend PID and
+backend_start with the operation/phase. At the minute-60 restoration cutoff,
+a separate administrator connection cancels/terminates only that matching
+backend, observes rollback/current committed phase, and runs restoration. An
+abandoned worker cannot continue DDL after the watchdog switches to recovery.
+Tests hold a real conflicting lock, interrupt a schema phase and drop a client
+response, then prove cancellation, phase reconciliation and recovery within
+the reserved window. Default ACLs are queried from pg_default_acl and compared
+with the reviewed expected set. For this rollout require zero application-scope
+default-ACL entries; unexpected defaults block before mutation. Do not silently
+copy grantor-specific defaults to the new administrator. A newly created
+synthetic object in rehearsal verifies the intended default ACL followed by the
+existing exact explicit grants; broad runtime defaults remain forbidden.
+Extension-administration proof on every observed installed extension, matching
+production role/object topology and actual master retirement are blocking
+preflight evidence, obtained on the disposable Aurora preview before generating
+production replacement credentials. No invented ALTER EXTENSION syntax is used.
+
+NOLOGIN remains mandatory because the already-reviewed execution guard checks
+rolcanlogin=false for actual retired OIDs. Password rotation alone is the
+transition fence, never a replacement for final NOLOGIN. If Aurora rehearsal
+cannot execute the required retirement, do not weaken the execution guard or
+activate production: revisit this design. Ownership transfer is necessary here
+for the new administrator to replay owner-only application DDL/SECURITY DEFINER
+functions without depending on the retired login's membership. Retiring a login
+does not by itself transfer object-owner authority to an rds_superuser member.
+The bounded transfer is a bootstrap authority requirement, not cosmetic cleanup.
+
+The current source object owner already has rds_superuser authority. Moving the
+same reviewed SECURITY DEFINER bodies to the new rds_superuser administrator
+does not introduce a new privilege tier. Preserve their exact EXECUTE grants
+and fixed search_path and verify function owner/body/grants after transfer.
+A separate non-administrative owner group is optional future hardening; it is
+not required to correct an assumed unprivileged legacy owner that this deployment
+does not have.
+
+Retirement is an automation fence, not a claim to constrain a trusted AWS/DB
+administrator. On the disposable preview, exercise an RDS master-password reset
+and record whether NOLOGIN persists; if a trusted management operation revives
+the master, the existing execution guard must refuse every subsequent v2 commit.
+Restore NOLOGIN and zero sessions before acceptance. Normal deployment verifies
+retirement and cannot reset the master password. Recover a missing administrator
+parameter from the protected encrypted deployment-state/credential backup using
+the same value, and prove that recovery in preview. This retains old-owner
+NOLOGIN and does not require enabling it as break-glass. If that backup is also
+unavailable, stop automation for a separately authorized incident procedure;
+never automatically reset/re-enable the retired master. Neither management-plane
+interference nor total loss of all administrative backups is hidden by a false
+two-hour recovery promise.
+
+Historical mutation/budget/receipt atomicity is already implemented by
+`mem9_maintenance.apply_action` in migration 005: mutation, budget consumption,
+before/post images and receipt insertion execute within one PostgreSQL function
+call/transaction. Reuse it unchanged. The existing real PostgreSQL test
+`EXEC-004 receipt insertion failure rolls back memory and accounting` injects
+a receipt constraint failure after the memory update; verify that it and the
+commit/retry/idempotency cases still pass. Do not create a second mutation or
+receipt-writing path in the production launcher.

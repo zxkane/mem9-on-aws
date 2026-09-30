@@ -3,7 +3,7 @@ import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import pg from 'pg';
 import {runtimeSchemaDigest,parseRuntimeConfig,runtimeRoleName,runtimeLockKey,RUNTIME_LOCK_CLASS,applyBootstrapSchema} from './lib/runtime-credentials.mjs';
-import {scramVerifier,checkCredentialLogging} from './lib/consolidation-preview-secrets.mjs';
+import {scramVerifier,secureCredentialDdlLogging} from './lib/consolidation-preview-secrets.mjs';
 import {seedTenant} from './seed-tenant.mjs';
 import {preparePreviewMemoryNamespaces,previewNamespaceDesiredState} from './prepare-preview-memory-namespaces.mjs';
 import {verifyNamespaceIndexes,enforceNamespaces} from './migrate-memory-namespaces.mjs';
@@ -37,7 +37,7 @@ async function invalidate(db){
 }
 
 async function prepareRole(db,config){
-  await checkCredentialLogging(db);
+  await secureCredentialDdlLogging(db);
   const marker='mem9-runtime-v1/'+config.stage+'/'+config.database;
   const verifier=scramVerifier(config.credentials.password,config.credentials.salt);
   await db.query(`CREATE OR REPLACE FUNCTION pg_temp.mem9_runtime_credential(p_role TEXT,p_verifier TEXT,p_marker TEXT)

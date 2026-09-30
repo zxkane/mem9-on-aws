@@ -187,6 +187,24 @@ tuples and a restrictive RLS guard; an old owner-credential upsert makes readine
 false and the tenant invisible. This is preview isolation, not production
 credential retirement or authorization to enable consolidation on real memories.
 
+### Credential DDL error logging (verified 2026-09-30)
+
+Dynamic `ALTER ROLE ... PASSWORD` uses a verifier literal inside PL/pgSQL.
+`EXCEPTION WHEN OTHERS` does not catch statement cancellation, and backend
+termination bypasses that handler. Isolated PostgreSQL tests reproduced the
+synthetic verifier in the default server error context for both cases.
+Credential DDL therefore requires the tested `stderr` destination and verifies
+session `log_error_verbosity=terse` plus `log_min_error_statement=panic`, together
+with the existing statement/parameter/audit logging checks. CSV/JSON destinations
+are rejected because their structured context is not removed by `terse`.
+
+A read-only connection to Aurora PostgreSQL 17.4 verified that the administrative
+login could set and read back these two session parameters even though
+`has_parameter_privilege(..., 'SET')` returned false. Verify the actual operation
+and effective settings; that catalog predicate alone is not the authority gate.
+This check changed no role, credential or memory data. Restricted bound-DML
+callers retain the existing read-only validation and receive no extra SET grant.
+
 ## Embedding (MaaS)
 
 - OpenAI-compatible only. `server/internal/embed/embedder.go` POSTs to

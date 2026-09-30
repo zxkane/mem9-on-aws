@@ -1,4 +1,5 @@
-import {randomUUID,createHash} from 'node:crypto';
+import {randomUUID,createHash,randomBytes} from 'node:crypto';
+import {spawnSync} from 'node:child_process';
 import {readFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import pg from 'pg';
@@ -7,11 +8,98 @@ import {bootstrapRuntime,withRuntimeBootstrapLock,verifyRuntime} from './runtime
 import {runtimeRoleName,runtimeSchemaDigest,applyBootstrapSchema} from './lib/runtime-credentials.mjs';
 import {ensureNamespaceIndexes} from './migrate-memory-namespaces.mjs';
 import {seedTenant} from './seed-tenant.mjs';
+import {probeRuntimeAdministrator,probeRoleName} from './runtime-admin-probe.mjs';
+import {secureCredentialDdlLogging,scramVerifier} from './lib/consolidation-preview-secrets.mjs';
 
 const DSN=process.env.MEM9_RUNTIME_TEST_DSN;
 const schemaRoot=fileURLToPath(new URL('../docker/bootstrap/',import.meta.url));
 const scalar=async(db,sql,args=[])=>(await db.query(sql,args)).rows[0]?.result;
 describe.skipIf(!DSN)('runtime credentials with real PostgreSQL',()=>{
+  it('rejects ordinary CREATEROLE as proof of Aurora retirement and cleans the real probe role',async()=>{
+    const u=new URL(DSN);if(u.hostname!=='127.0.0.1'||u.pathname!=='/runtime_credentials_test')throw Error('IsolatedRuntimeFixtureRequired');
+    const suffix=randomUUID().replaceAll('-',''),database='probe_'+suffix,legacy='legacy_'+suffix;
+    const stage='pr-'+String(Math.floor(Math.random()*100000000)+1),password=randomBytes(24).toString('hex');
+    const connect=async(credentials,dbName=database)=>{
+      const c=new pg.Client({host:u.hostname,port:Number(u.port),database:dbName,user:credentials.username,password:credentials.password});
+      c.on('error',()=>{});await c.connect();return c;
+    };
+    const root=await connect({username:u.username},'postgres');let owner;
+    try{
+      // This is intentionally an ordinary non-superuser group. Local PG must
+      // report denial, not impersonate RDS's proprietary administration powers.
+      await root.query('CREATE ROLE rds_superuser NOLOGIN');
+      await root.query(`CREATE ROLE "${legacy}" LOGIN CREATEDB CREATEROLE PASSWORD '${password}'`);
+      await root.query(`GRANT rds_superuser TO "${legacy}" WITH ADMIN OPTION`);
+      await root.query(`GRANT SET ON PARAMETER log_error_verbosity,log_min_error_statement TO "${legacy}"`);
+      await root.query(`CREATE DATABASE "${database}" OWNER "${legacy}"`);
+      const config={stage,database,ownerCredentials:{username:legacy,password},
+        probeCredential:{username:probeRoleName(stage),password:randomBytes(24).toString('hex'),salt:randomBytes(16).toString('hex')}};
+      owner=await connect(config.ownerCredentials);
+      await expect(probeRuntimeAdministrator({owner,connect,config})).rejects.toMatchObject({message:'MasterRetirementDenied',code:'42501'});
+      expect(await scalar(root,'SELECT NOT EXISTS(SELECT FROM pg_roles WHERE rolname=$1) AS result',[probeRoleName(stage)])).toBe(true);
+      expect(await scalar(root,'SELECT rolcanlogin AS result FROM pg_roles WHERE rolname=$1',[legacy])).toBe(true);
+      const unchanged=await connect(config.ownerCredentials);await unchanged.end();
+    }finally{
+      await owner?.end();
+      await root.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`);
+      await root.query(`DROP ROLE IF EXISTS "${probeRoleName(stage)}"`);
+      await root.query(`REVOKE SET ON PARAMETER log_error_verbosity,log_min_error_statement FROM "${legacy}"`);
+      await root.query(`DROP ROLE IF EXISTS "${legacy}"`);
+      await root.query('DROP ROLE IF EXISTS rds_superuser');await root.end();
+    }
+  });
+  it.each(['cancel','terminate'])('protects synthetic credential DDL in server logs after %s',async mode=>{
+    const u=new URL(DSN),container=process.env.MEM9_RUNTIME_TEST_CONTAINER;
+    if(u.hostname!=='127.0.0.1'||u.pathname!=='/runtime_credentials_test'||!/^mem9-runtime-test-[0-9]+-[0-9]+$/.test(container??''))throw Error('IsolatedRuntimeFixtureRequired');
+    const connect=async()=>{const db=new pg.Client({connectionString:DSN});db.on('error',()=>{});await db.connect();return db;};
+    const readLogs=()=>{
+      const r=spawnSync('docker',['logs',container],{encoding:'utf8',maxBuffer:4*1024*1024});
+      if(r.status!==0)throw Error('FixtureLogReadFailed');return r.stdout+r.stderr;
+    };
+    const control=await connect(),blocker=await connect(),role='logging_'+randomUUID().replaceAll('-','');
+    try{
+      await control.query('CREATE ROLE "'+role+'" NOLOGIN');
+      for(const hardened of [false,true]){
+        const db=await connect();
+        const verifier=scramVerifier(randomBytes(24).toString('hex'),'SyntheticLoggingSalt');
+        try{
+          await db.query(`CREATE FUNCTION pg_temp.secret_log_probe(p_verifier TEXT) RETURNS BOOLEAN LANGUAGE plpgsql AS $$
+            BEGIN EXECUTE format('ALTER ROLE %I PASSWORD %L','${role}',p_verifier); RETURN TRUE;
+            EXCEPTION WHEN OTHERS THEN RETURN FALSE; END $$`);
+          if(hardened)await secureCredentialDdlLogging(db);
+          else await db.query("SET log_error_verbosity='default'; SET log_min_error_statement='error'");
+          const pid=await scalar(db,'SELECT pg_backend_pid() AS result'),before=readLogs().length;
+          await blocker.query('BEGIN');await blocker.query('LOCK TABLE pg_authid IN SHARE MODE');
+          if(mode==='cancel')await db.query("SET statement_timeout='150ms'");
+          const result=db.query('SELECT pg_temp.secret_log_probe($1)',[verifier]).catch(error=>error);
+          if(mode==='terminate'){
+            let waiting=false;
+            for(let i=0;i<100;i++){
+              waiting=await scalar(control,"SELECT wait_event_type='Lock' AS result FROM pg_stat_activity WHERE pid=$1",[pid]);
+              if(waiting)break;await new Promise(resolve=>setTimeout(resolve,10));
+            }
+            expect(waiting).toBe(true);await control.query('SELECT pg_terminate_backend($1)',[pid]);
+          }
+          expect((await result).code).toBe(mode==='cancel'?'57014':'57P01');
+          await blocker.query('ROLLBACK');
+          // The error response alone does not prove log ingestion is complete.
+          // Wait for its PID/severity and a later server-side log barrier.
+          const barrier='mem9_fixture_log_barrier_'+randomUUID().replaceAll('-','');
+          await control.query(`DO $$ BEGIN RAISE LOG '${barrier}'; END $$`);
+          const severity=new RegExp('\\['+pid+'\\]\\s+'+(mode==='cancel'?'ERROR':'FATAL')+':');
+          let observed='';
+          for(let i=0;i<100;i++){
+            observed=readLogs().slice(before);
+            if(observed.includes(barrier)&&severity.test(observed))break;
+            await new Promise(resolve=>setTimeout(resolve,20));
+          }
+          expect(observed.includes(barrier)&&severity.test(observed)).toBe(true);
+          // Assert only a boolean, so a regression never prints the verifier.
+          expect(observed.includes(verifier)).toBe(!hardened);
+        }finally{await blocker.query('ROLLBACK');await db.end().catch(()=>{});}
+      }
+    }finally{await blocker.end();await control.query('DROP ROLE "'+role+'"');await control.end();}
+  });
   async function fixture(work){
     const u=new URL(DSN);if(u.hostname!=='127.0.0.1'||u.pathname!=='/runtime_credentials_test')throw Error('IsolatedRuntimeFixtureRequired');
     const name='runtime_'+randomUUID().replaceAll('-','');

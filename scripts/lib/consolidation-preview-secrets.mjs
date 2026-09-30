@@ -23,11 +23,26 @@ export async function checkCredentialLogging(db){
   ]])).rows);
 }
 
+// Dynamic credential DDL contains a verifier literal inside PL/pgSQL. OTHERS
+// does not catch query_canceled, and backend termination bypasses the handler.
+// Suppress server error CONTEXT/STATEMENT before constructing that DDL, then
+// verify the effective session settings. Callers without SET authority fail
+// before credentials are changed; ordinary bound-DML callers keep the read-only
+// logging check above and do not receive extra database privileges.
+export async function secureCredentialDdlLogging(db){
+  await db.query("SET log_error_verbosity='terse'; SET log_min_error_statement='panic'");
+  await checkCredentialLogging(db);
+  // CSV/JSON writers retain structured context independently of terse text
+  // formatting. This path is supported only with the tested stderr destination.
+  const r=await db.query("SELECT current_setting('log_error_verbosity')='terse' AND current_setting('log_min_error_statement')='panic' AND current_setting('log_destination')='stderr' AS safe");
+  if(r.rows[0]?.safe!==true)throw Error('UnsafeCredentialLogging');
+}
+
 // A guarded server function receives a SCRAM verifier as a bound value. Its
 // exception handler returns a boolean, suppressing dynamic-DDL error context.
 // No plaintext password ever appears in role DDL or process arguments.
 export async function installCredentialGuard(db){
-  await checkCredentialLogging(db);
+  await secureCredentialDdlLogging(db);
   await db.query(`CREATE OR REPLACE FUNCTION pg_temp.mem9_preview_role(p_role TEXT,p_verifier TEXT,p_login BOOLEAN)
     RETURNS BOOLEAN LANGUAGE plpgsql SET search_path=pg_catalog,pg_temp AS $$
     BEGIN

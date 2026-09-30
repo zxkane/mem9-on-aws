@@ -44,6 +44,8 @@ COPY docker/bootstrap/migrations/003_enforce_memory_namespaces.sql /bootstrap/op
 COPY scripts/prepare-preview-memory-namespaces.mjs /bootstrap/operator/scripts/prepare-preview-memory-namespaces.mjs
 COPY scripts/consolidation-preview-fixture.mjs /bootstrap/operator/scripts/consolidation-preview-fixture.mjs
 COPY scripts/runtime-bootstrap.mjs /bootstrap/operator/scripts/runtime-bootstrap.mjs
+COPY scripts/runtime-admin-probe.mjs /bootstrap/operator/scripts/runtime-admin-probe.mjs
+COPY scripts/lib/runtime-admin-probe-config.mjs /bootstrap/operator/scripts/lib/runtime-admin-probe-config.mjs
 COPY scripts/seed-tenant.mjs /bootstrap/operator/scripts/seed-tenant.mjs
 COPY scripts/lib/runtime-credentials.mjs /bootstrap/operator/scripts/lib/runtime-credentials.mjs
 COPY scripts/lib/consolidation-preview-config.mjs /bootstrap/operator/scripts/lib/consolidation-preview-config.mjs
@@ -54,4 +56,5 @@ RUN cd /bootstrap/operator && npm ci --omit=dev
 RUN chmod +x /bootstrap/entrypoint.sh
 
 # One-shot: applies schema + seeds the tenant, then exits 0. Not a server.
+USER node
 ENTRYPOINT ["/bootstrap/entrypoint.sh"]

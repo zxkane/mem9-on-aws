@@ -20,5 +20,6 @@ docker cp "$TASK_TMP/pg_hba.conf" "$CONTAINER:/var/lib/postgresql/data/pg_hba.co
 docker exec "$CONTAINER" psql -q -U postgres -c 'SELECT pg_reload_conf()' >/dev/null
 PORT=$(docker port "$CONTAINER" 5432/tcp | head -n 1 | awk -F: '{print $NF}')
 export MEM9_RUNTIME_TEST_DSN="postgres://postgres@127.0.0.1:${PORT}/runtime_credentials_test"
+export MEM9_RUNTIME_TEST_CONTAINER="$CONTAINER"
 cd "$ROOT"
 npm exec -- vitest run scripts/runtime-credentials.postgres.test.mjs
