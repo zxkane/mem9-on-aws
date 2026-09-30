@@ -40,6 +40,25 @@ export async function productionSourceTree(){
   const tree=result.stdout.trim();if(!/^[a-f0-9]{40}$/.test(tree))throw Error('ProductionSourceTreeInvalid');return tree;
 }
 
+export async function verifyRuntimeImage(image,{account,region,stage,revision,sourceTree,readCommit}){
+  const match=image?.match(new RegExp(`^${account}\\.dkr\\.ecr\\.${region}\\.amazonaws\\.com/(mem9-on-aws(?:/preview)?)/mnemo-server:((?:mem9|pr)-[a-f0-9]{7})$`));
+  if(!match||!rolloutStage(stage)||!/^[a-f0-9]{40}$/.test(revision??'')||
+    (stage==='prod'&&(match[1]!=='mem9-on-aws'||!match[2].startsWith('mem9-'))))throw Error('RuntimeImageRevisionMismatch');
+  const short=match[2].split('-').at(-1);let commit=revision;
+  if(!revision.startsWith(short)){
+    if(stage==='prod'||!/^pr-[1-9][0-9]*$/.test(stage??''))throw Error('RuntimeImageRevisionMismatch');
+    // Pull-request CI builds GitHub's merge commit. Accept that image only when
+    // its full tree matches this checkout and this exact head is a parent.
+    const merged=await readCommit(short);
+    if(!/^[a-f0-9]{40}$/.test(merged?.sha??'')||!merged.sha.startsWith(short)||merged.parents?.length!==2||
+      !merged.parents.every(parent=>/^[a-f0-9]{40}$/.test(parent?.sha??''))||
+      !merged.parents.some(parent=>parent.sha===revision)||!/^[a-f0-9]{40}$/.test(sourceTree??'')||
+      merged.commit?.tree?.sha!==sourceTree)throw Error('RuntimeImageRevisionMismatch');
+    commit=merged.sha;
+  }
+  return {namespace:match[1],tag:match[2],commit};
+}
+
 async function readOptional(clients,name){
   const r=await send(clients.ssm,new GetParametersCommand({Names:[name],WithDecryption:true}));
   if(r.InvalidParameters?.includes(name))return null;
@@ -77,9 +96,13 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
   if(command==='image'){
     const r=await send(clients.ssm,new GetParametersCommand({Names:[`/mem9-on-aws/${stage}/ecs/image`],WithDecryption:false}));
     const image=r.Parameters?.[0]?.Value;
-    const match=image?.match(new RegExp(`^${account}\\.dkr\\.ecr\\.${region}\\.amazonaws\\.com/(mem9-on-aws[^/]*)/mnemo-server:((?:mem9|pr)-[a-f0-9]{7})$`));
-    if(!match||!env.GITHUB_SHA?.startsWith(match[2].split('-').at(-1)))throw Error('RuntimeImageRevisionMismatch');
-    if(env.GITHUB_ENV)await appendFile(env.GITHUB_ENV,`MEM9_IMAGE_TAG=${match[2]}\nMEM9_ECR_NAMESPACE=${match[1]}\nMEM9_DEPLOY_COMMIT=${env.GITHUB_SHA}\n`);
+    const verified=await verifyRuntimeImage(image,{account,region,stage,revision:env.GITHUB_SHA,sourceTree:await productionSourceTree(),
+      readCommit:async short=>{
+        if(env.GITHUB_REPOSITORY!=='zxkane/mem9-on-aws')throw Error('RuntimeImageRepositoryMismatch');
+        const result=await execute('gh',['api',`repos/${env.GITHUB_REPOSITORY}/commits/${short}`,'--jq','{sha,parents,commit:{tree:.commit.tree}}'],{cwd:process.cwd(),env,timeout:30000,maxBuffer:16384});
+        return JSON.parse(result.stdout);
+      }});
+    if(env.GITHUB_ENV)await appendFile(env.GITHUB_ENV,`MEM9_IMAGE_TAG=${verified.tag}\nMEM9_ECR_NAMESPACE=${verified.namespace}\nMEM9_DEPLOY_COMMIT=${verified.commit}\n`);
     emit({phase:'image-verified'});return;
   }
   if(command==='cleanup-preview'){

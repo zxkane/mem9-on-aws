@@ -20,6 +20,8 @@ runs:
         aws-region: ${{ inputs.region }}
         mask-aws-account-id: true
     - name: Verify deployed operator image
+      env:
+        GH_TOKEN: ${{ github.token }}
       shell: bash
       run: node scripts/run-production-runtime.mjs image
     - name: Prepare credentials and pinned fallback

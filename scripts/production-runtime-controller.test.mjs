@@ -1,7 +1,27 @@
 import {describe,it,expect} from 'vitest';
-import {runProductionRuntime} from './run-production-runtime.mjs';
+import {runProductionRuntime,verifyRuntimeImage} from './run-production-runtime.mjs';
 
 const stage='pr-7',region='ap-northeast-1',account='123456789012';
+describe('preview cutover image provenance',()=>{
+  const revision='a'.repeat(40),merge='b'.repeat(40),sourceTree='c'.repeat(40);
+  const image=(namespace,tag)=>`${account}.dkr.ecr.${region}.amazonaws.com/${namespace}/mnemo-server:${tag}`;
+  const options={account,region,stage,revision,sourceTree,readCommit:async()=>({sha:merge,parents:[{sha:revision},{sha:'d'.repeat(40)}],commit:{tree:{sha:sourceTree}}})};
+  it('accepts the actual preview repository and an identical GitHub merge tree',async()=>{
+    expect(await verifyRuntimeImage(image('mem9-on-aws/preview','pr-bbbbbbb'),options)).toEqual({namespace:'mem9-on-aws/preview',tag:'pr-bbbbbbb',commit:merge});
+  });
+  it('rejects a different merged tree or a merge unrelated to the selected head',async()=>{
+    for(const merged of [
+      {sha:merge,parents:[{sha:revision},{sha:'d'.repeat(40)}],commit:{tree:{sha:'e'.repeat(40)}}},
+      {sha:merge,parents:[{sha:'d'.repeat(40)},{sha:'e'.repeat(40)}],commit:{tree:{sha:sourceTree}}},
+    ])await expect(verifyRuntimeImage(image('mem9-on-aws/preview','pr-bbbbbbb'),{...options,readCommit:async()=>merged})).rejects.toThrow('RuntimeImageRevisionMismatch');
+  });
+  it('keeps production and unrelated repositories out of the preview exception',async()=>{
+    await expect(verifyRuntimeImage(image('mem9-on-aws-other','pr-aaaaaaa'),options)).rejects.toThrow('RuntimeImageRevisionMismatch');
+    await expect(verifyRuntimeImage(image('mem9-on-aws/preview','pr-aaaaaaa'),{...options,stage:'prod'})).rejects.toThrow('RuntimeImageRevisionMismatch');
+    await expect(verifyRuntimeImage(image('mem9-on-aws','mem9-bbbbbbb'),{...options,stage:'prod'})).rejects.toThrow('RuntimeImageRevisionMismatch');
+    expect(await verifyRuntimeImage(image('mem9-on-aws','mem9-aaaaaaa'),{...options,stage:'prod'})).toMatchObject({commit:revision});
+  });
+});
 function fixture({plan,manifest}={}){
   const processes=[],calls=[],writes=[];
   const send=async command=>{
