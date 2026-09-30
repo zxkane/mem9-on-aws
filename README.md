@@ -1556,6 +1556,13 @@ batching occurred. The probe login expires, graceful interruption attempts
 cleanup, and cancellation retains its journal until a separate cleanup task
 verifies that the temporary administrator was removed.
 
+Dynamic credential DDL first requires `stderr` logging and applies/verifies
+session-level `log_error_verbosity=terse` and `log_min_error_statement=panic`.
+This prevents cancellation or backend termination from exposing the verifier
+through an uncaught PL/pgSQL error context. Other log destinations or denied
+session settings fail before credential changes; ordinary restricted callers
+keep their existing read-only logging validation.
+
 Production activation, execution fair shares, retained-payload cleanup,
 credential retirement and production load/quality calibration remain release gates.
 The synthetic 17k-row rehearsal checks planted duplicate discovery and bounded

@@ -15,6 +15,7 @@ function fixture(failAt){
       {name:'log_parameter_max_length_on_error',setting:'0'},
     ]};
     if(sql.includes('pg_extension'))return {rows:[{extname:'vector',extversion:'0.8.0'}]};
+    if(sql.includes(' AS safe'))return {rows:[{safe:true}]};
     return {rows:[{result:true}]};
   })};
   const admin={query:vi.fn(async(sql,args)=>{

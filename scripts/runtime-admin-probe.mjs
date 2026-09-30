@@ -3,7 +3,7 @@ import {pathToFileURL} from 'node:url';
 import {createHash} from 'node:crypto';
 import {setTimeout as delay} from 'node:timers/promises';
 import {probeRoleName,validateProbeCredential} from './lib/runtime-admin-probe-config.mjs';
-import {checkCredentialLogging,scramVerifier} from './lib/consolidation-preview-secrets.mjs';
+import {secureCredentialDdlLogging,scramVerifier} from './lib/consolidation-preview-secrets.mjs';
 
 export {probeRoleName};
 const identifier=value=>'"'+value.replaceAll('"','""')+'"';
@@ -12,7 +12,7 @@ const scalar=async(db,sql,args=[])=>(await db.query(sql,args)).rows[0]?.result;
 const boundedError=(message,error)=>Object.assign(new Error(message),{code:/^[0-9A-Z]{5}$/.test(error?.code??'')?error.code:undefined});
 const publicErrors=new Set(['PreviewAdminProbeOnly','InvalidProbeCredential','AdminProbeBusy','AuroraOwnerRequired',
   'ProbeCredentialFailed','MasterRetirementDenied','ExtensionAdministrationDenied','OwnerAuthenticationChanged',
-  'AdminProbeCleanupFailed','PreviewDatabaseRequired','AdminProbeExpired','AdminProbeInterrupted','ProbeRoleOwnershipMismatch']);
+  'AdminProbeCleanupFailed','PreviewDatabaseRequired','AdminProbeExpired','AdminProbeInterrupted','ProbeRoleOwnershipMismatch','UnsafeCredentialLogging']);
 
 export async function cleanupProbeAdministrator(owner,config){
   const role=probeRoleName(config.stage),marker='mem9-admin-probe-v1/'+config.stage+'/'+config.database;
@@ -48,7 +48,7 @@ export async function probeRuntimeAdministrator({owner,connect,config,signal}){
       AND EXISTS(SELECT FROM pg_roles a WHERE a.rolname='rds_superuser' AND pg_has_role(r.oid,a.oid,'USAGE'))) AS authorized
       FROM pg_roles r WHERE r.rolname=session_user`)).rows[0];
     if(!context?.authorized||context.database_name!==config.database||context.owner_name!==config.ownerCredentials.username)throw Error('AuroraOwnerRequired');
-    await checkCredentialLogging(owner);
+    await secureCredentialDdlLogging(owner);
     checkpoint();
     await owner.query(`CREATE OR REPLACE FUNCTION pg_temp.mem9_admin_probe_role(p_role TEXT,p_verifier TEXT,p_marker TEXT,p_deadline TIMESTAMPTZ)
       RETURNS BOOLEAN LANGUAGE plpgsql SET search_path=pg_catalog,pg_temp AS $$
