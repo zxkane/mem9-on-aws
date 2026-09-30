@@ -1,4 +1,4 @@
-import {randomUUID,createHash} from 'node:crypto';
+import {randomUUID,createHash,randomBytes} from 'node:crypto';
 import {readFile} from 'node:fs/promises';
 import {fileURLToPath} from 'node:url';
 import pg from 'pg';
@@ -7,11 +7,43 @@ import {bootstrapRuntime,withRuntimeBootstrapLock,verifyRuntime} from './runtime
 import {runtimeRoleName,runtimeSchemaDigest,applyBootstrapSchema} from './lib/runtime-credentials.mjs';
 import {ensureNamespaceIndexes} from './migrate-memory-namespaces.mjs';
 import {seedTenant} from './seed-tenant.mjs';
+import {probeRuntimeAdministrator,probeRoleName} from './runtime-admin-probe.mjs';
 
 const DSN=process.env.MEM9_RUNTIME_TEST_DSN;
 const schemaRoot=fileURLToPath(new URL('../docker/bootstrap/',import.meta.url));
 const scalar=async(db,sql,args=[])=>(await db.query(sql,args)).rows[0]?.result;
 describe.skipIf(!DSN)('runtime credentials with real PostgreSQL',()=>{
+  it('rejects ordinary CREATEROLE as proof of Aurora retirement and cleans the real probe role',async()=>{
+    const u=new URL(DSN);if(u.hostname!=='127.0.0.1'||u.pathname!=='/runtime_credentials_test')throw Error('IsolatedRuntimeFixtureRequired');
+    const suffix=randomUUID().replaceAll('-',''),database='probe_'+suffix,legacy='legacy_'+suffix;
+    const stage='pr-'+String(Math.floor(Math.random()*100000000)+1),password=randomBytes(24).toString('hex');
+    const connect=async(credentials,dbName=database)=>{
+      const c=new pg.Client({host:u.hostname,port:Number(u.port),database:dbName,user:credentials.username,password:credentials.password});
+      c.on('error',()=>{});await c.connect();return c;
+    };
+    const root=await connect({username:u.username},'postgres');let owner;
+    try{
+      // This is intentionally an ordinary non-superuser group. Local PG must
+      // report denial, not impersonate RDS's proprietary administration powers.
+      await root.query('CREATE ROLE rds_superuser NOLOGIN');
+      await root.query(`CREATE ROLE "${legacy}" LOGIN CREATEDB CREATEROLE PASSWORD '${password}'`);
+      await root.query(`GRANT rds_superuser TO "${legacy}" WITH ADMIN OPTION`);
+      await root.query(`CREATE DATABASE "${database}" OWNER "${legacy}"`);
+      const config={stage,database,ownerCredentials:{username:legacy,password},
+        probeCredential:{username:probeRoleName(stage),password:randomBytes(24).toString('hex'),salt:randomBytes(16).toString('hex')}};
+      owner=await connect(config.ownerCredentials);
+      await expect(probeRuntimeAdministrator({owner,connect,config})).rejects.toMatchObject({message:'MasterRetirementDenied',code:'42501'});
+      expect(await scalar(root,'SELECT NOT EXISTS(SELECT FROM pg_roles WHERE rolname=$1) AS result',[probeRoleName(stage)])).toBe(true);
+      expect(await scalar(root,'SELECT rolcanlogin AS result FROM pg_roles WHERE rolname=$1',[legacy])).toBe(true);
+      const unchanged=await connect(config.ownerCredentials);await unchanged.end();
+    }finally{
+      await owner?.end();
+      await root.query(`DROP DATABASE IF EXISTS "${database}" WITH (FORCE)`);
+      await root.query(`DROP ROLE IF EXISTS "${probeRoleName(stage)}"`);
+      await root.query(`DROP ROLE IF EXISTS "${legacy}"`);
+      await root.query('DROP ROLE IF EXISTS rds_superuser');await root.end();
+    }
+  });
   async function fixture(work){
     const u=new URL(DSN);if(u.hostname!=='127.0.0.1'||u.pathname!=='/runtime_credentials_test')throw Error('IsolatedRuntimeFixtureRequired');
     const name='runtime_'+randomUUID().replaceAll('-','');

@@ -368,3 +368,30 @@ retired seed login. Synthetic runs preserve existing stage-budget counters.
 | TC-CONSOL-098 | Manual or report-only invocation, including inherited scheduled marker | No initialization or scheduled digest writes; empty baseline produces the same first-run health, transitions, and reminder outcome as missing state |
 | TC-CONSOL-099 | Namespace-enforced numeric PR preview, with scheduling disabled | Only that preview's digest prefix receives GetObject/PutObject and matching S3/KMS access; production, arbitrary stages, and pre-cutover previews gain nothing; no ListBucket or schedule |
 | TC-CONSOL-100 | Explicit synthetic probe under the deployed preview task role | ListObjectsV2 is denied; actual initialization plus strict Get succeeds, a second initialization preserves state/ETag, and revoked membership blocks initialization; journal and clean up only owned preview fixtures; no model/memory apply or production-role reuse |
+
+
+## Production credential cutover and historical activation
+
+The following cases are required for the proposed production maintenance path;
+they are pending until executable tests and same-account rehearsal pass.
+
+| ID | Scenario | Expected evidence |
+| --- | --- | --- |
+| TC-CONS-PROD-001 | Prepare resources while production still uses the owner credential | Exact new parameter/task references; serving configuration and memory rows unchanged; new workers disabled |
+| TC-CONS-PROD-002 | Inventory and transfer application ownership | Exact database/OID inventory; unknown schema/type rejected; extension and other-database ownership untouched; transactional rollback on mismatch |
+| TC-CONS-PROD-003 | New administrator bootstraps through fresh connections | Schema replay, grants and namespace operations pass on local PostgreSQL and actual Aurora; no circular memberships or runtime admin privileges |
+| TC-CONS-PROD-004 | Install runtime while service is drained | Tenant ID, namespace mappings, memories and ingest jobs preserved; exact runtime tuple bound; readiness stamped only after schema/ACL/index verification |
+| TC-CONS-PROD-005 | Restore online runtime before retirement | MCP write/search, OAuth and durable ingest recovery pass; failed health check cannot retire old owner |
+| TC-CONS-PROD-006 | Retire the real legacy database identity | Actual old OID NOLOGIN, old sessions terminated, literal old-password reconnect fails; dummy retired role rejected |
+| TC-CONS-PROD-007 | Historic ECS revisions try administrator access | Exact IAM read-back and negative tests deny new admin secret to old bootstrap/server/maintenance task or execution roles, including override variants |
+| TC-CONS-PROD-008 | Repeated/ambiguous cutover invocation and deadline | Durable operation nonce/phase prevents duplicate transfer or two-hour extension; premature/expired transition rejected; cancellation preserves recovery state |
+| TC-CONS-PROD-009 | Failure before versus after retirement | Before/after: rehearsed runtime image and restricted credential restored with v2 and old schedules off. After retirement NOLOGIN remains; no automatic data restore |
+| TC-CONS-PROD-010 | Subsequent ordinary production deployment | Correct credential references and verify-only bootstrap; changed digest/incomplete or contradictory state fails before serving revision changes |
+| TC-CONS-PROD-011 | Policy and target manifest validation | Exact stage/database/namespace/version binding; both persisted budgets required; model/capture/dispatcher remain off until explicit activation |
+| TC-CONS-PROD-012 | First bounded historical batch | Durable receipt count and source/post-image preservation; protected/disputed cases stay review-only; duplicate wakes produce zero repeat mutations |
+| TC-CONS-PROD-013 | Canary promotion and load | Steady-state daily budget derived from measured eligible work; unchanged denominators and uncertainty accounting; foreground p95 within 10% allowance |
+| TC-CONS-PROD-014 | Preview regression and log redaction | Existing synthetic preview acceptance remains green; no production data copied to reviewers/preview; no passwords, verifiers or memory contents in output |
+| TC-CONS-PROD-015 | Abort after password fence before ownership transfer | Runtime role/grants/tenant/readiness were committed first; pinned runtime image restores read/write/search without runtime DDL |
+| TC-CONS-PROD-016 | ECS first-restoration and subsequent rollout failure | No automatic pre-cutover task resurrection; pinned fallback ARN/digest/new runtime reference enforced; all historic roles denied replacement credentials |
+| TC-CONS-PROD-017 | Old migration reconnects after watchdog recovery | Recovery epoch advances under the shared lock; old nonce/epoch cannot mutate DDL or phase; retry cannot extend original deadline |
+| TC-CONS-PROD-018 | Management-plane password reset and admin-parameter recovery | Preview records master NOLOGIN behavior; live-role execution guard denies v2 if revived; restore missing admin parameter from protected backup while keeping old login disabled |

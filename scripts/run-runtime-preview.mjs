@@ -24,7 +24,7 @@ export function validateRuntimeMetadata(meta,stage,region){
 
 export function validateRuntimeJournal(journal,meta,path,now=Date.now()){
   if(journal?.version!==1||journal.stage!==meta.stage||!/^[a-f0-9]{32}$/.test(journal.nonce??'')||
-    !['bootstrap','verify'].includes(journal.operation)||!Number.isSafeInteger(journal.deadline)||!Number.isSafeInteger(journal.createdAt)||
+    !['bootstrap','verify','admin-probe','admin-probe-cleanup'].includes(journal.operation)||!Number.isSafeInteger(journal.deadline)||!Number.isSafeInteger(journal.createdAt)||
     journal.createdAt>now+30000||journal.deadline!==journal.createdAt+900000||
     path!==`/mem9-on-aws/${meta.stage}/runtime/invocations/${journal.nonce}`||
     !journal.taskDefinition?.startsWith(`arn:aws:ecs:${meta.region}:${meta.account}:task-definition/${meta.family}:`)||
@@ -41,7 +41,7 @@ export function ownsRuntimeTask(task,meta,journal){
 }
 
 export async function runRuntimePreview({clients,stage,region,operation,now=Date.now,sleep=delay,progress=emit}){
-  if(!runtimeStage(stage)||!['drain','bootstrap','verify','cancel'].includes(operation))fail('InvalidRuntimeOperation');
+  if(!runtimeStage(stage)||!['drain','bootstrap','verify','admin-probe','admin-probe-cleanup','cancel'].includes(operation))fail('InvalidRuntimeOperation');
   const {ssm,ecs,logs}=clients;
   const send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
   const prefix=`/mem9-on-aws/${stage}`;
@@ -102,10 +102,16 @@ export async function runRuntimePreview({clients,stage,region,operation,now=Date
         await sleep(5000);
       }
       if(!complete)fail('RuntimeCancellationIncomplete');
-      await send(ssm,new DeleteParameterCommand({Name:path}));
     }
+    // A stopped probe may have been killed after creating its DB administrator.
+    // Keep every original journal until a separate, journaled cleanup task
+    // confirms role removal. Cleanup failures retain both generations for retry.
+    if(pending.some(({journal})=>journal.operation.startsWith('admin-probe')))
+      await runRuntimePreview({clients,stage,region,operation:'admin-probe-cleanup',now,sleep,progress});
+    for(const {path} of pending)await send(ssm,new DeleteParameterCommand({Name:path}));
   };
   if(operation==='cancel'){await cancel();progress('cancelled');return;}
+  if(operation==='admin-probe')await cancel();
   if(operation==='drain'){
     await cancel();
     const deadline=now()+600000;let empty=0;
@@ -128,6 +134,8 @@ export async function runRuntimePreview({clients,stage,region,operation,now=Date
   const container=def?.containerDefinitions?.find(c=>c.name==='Mem9Bootstrap'),env=environment(container);
   if(def?.family!==meta.family||env.MEM9_RUNTIME_BOOTSTRAP_VERSION!=='1'||env.MEM9_STAGE!==stage||
     container?.secrets?.find(s=>s.name==='MEM9_RUNTIME_DB_SECRET')?.valueFrom!==`arn:aws:ssm:${region}:${meta.account}:parameter${prefix}/runtime/database-credential`)fail('RuntimeBootstrapRevisionMismatch');
+  if(operation.startsWith('admin-probe')&&container?.secrets?.find(s=>s.name==='MEM9_PROBE_ADMIN_CREDENTIAL')?.valueFrom!==
+    `arn:aws:ssm:${region}:${meta.account}:parameter${prefix}/runtime/admin-probe-credential`)fail('AdminProbeCredentialMismatch');
   if(operation==='bootstrap'){
     const r=await send(ecs,new DescribeServicesCommand({cluster:meta.clusterArn,services:[meta.service]}));
     if(r.failures?.length||r.services?.length!==1||r.services[0].desiredCount!==0||r.services[0].runningCount||r.services[0].pendingCount)fail('RuntimeServiceNotStopped');
@@ -171,7 +179,8 @@ export async function runRuntimePreview({clients,stage,region,operation,now=Date
     if(!stopped)fail('RuntimeInvocationDeadline');
     const cfg=container.logConfiguration?.options;
     if(!cfg?.['awslogs-group']||!cfg['awslogs-stream-prefix'])fail('RuntimeLogConfigurationMissing');
-    const event=operation==='verify'?'runtime_verify':'runtime_bootstrap';
+    const event=operation==='verify'?'runtime_verify':operation==='admin-probe'?'runtime_admin_probe':
+      operation==='admin-probe-cleanup'?'runtime_admin_probe_cleanup':'runtime_bootstrap';
     let terminal=[];
     for(let attempt=0;attempt<12&&!terminal.length;attempt++){
       let nextToken;const observed=new Set();
@@ -192,10 +201,14 @@ export async function runRuntimePreview({clients,stage,region,operation,now=Date
       const error=terminal.find(v=>v.event==='runtime_bootstrap_failed')?.errorClass;
       fail(/^[A-Z][A-Za-z]{1,70}$/.test(error??'')?error:'RuntimeInvocationFailed');
     }
+    if(operation==='admin-probe-cleanup'&&terminal[0].roleRemoved!==true)fail('AdminProbeCleanupUnproven');
     if(operation==='verify')await verifyLiveServer();
     await send(ssm,new DeleteParameterCommand({Name:path}));progress(operation+'-ready');
   }catch(error){
-    try{await cancel();}catch{progress('cancellation-pending');}
+    // Cleanup cannot recursively request another cleanup on failure. Its
+    // journal remains for the next explicit cancellation/recovery attempt.
+    if(operation!=='admin-probe-cleanup')try{await cancel();}catch{progress('cancellation-pending');}
+    else progress('cancellation-pending');
     throw error;
   }
 }

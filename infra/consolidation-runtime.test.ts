@@ -24,6 +24,21 @@ describe("continuous consolidation preview resources",()=>{
     setup(stage);const {consolidationPreviewConfig}=await import("./consolidation-runtime");
     expect(consolidationPreviewConfig()).toBeUndefined();expect(resources).toEqual([]);
   });
+  it.each(["prod","dev","pr-invalid"])("creates no runtime administrator probe credential in %s",async stage=>{
+    setup(stage);const {runtimeCredentials}=await import("./runtime-credentials");
+    expect(runtimeCredentials()).toBeUndefined();expect(resources).toEqual([]);
+  });
+  it("keeps the preview authority-probe credential independent from application runtime",async()=>{
+    setup("pr-7");const {runtimeCredentials}=await import("./runtime-credentials");
+    const config=runtimeCredentials()!;
+    expect(value(config.probeParameterArn)).not.toBe(value(config.parameterArn));
+    const probe=resources.find(r=>r.kind==="parameter"&&r.name==="RuntimeAdminProbeCredential")!;
+    expect(probe.args.name).toBe("/mem9-on-aws/pr-7/runtime/admin-probe-credential");
+    expect(probe.args.type).toBe("SecureString");
+    const parsed=JSON.parse(value(probe.args.value));
+    expect(parsed.username).toMatch(/^mem9_probe_[a-f0-9]{12}$/);
+    expect(parsed.password).not.toContain("RuntimeDatabasePassword");
+  });
   it("pins preview generation and keeps credentials in SecureString outputs",async()=>{
     setup("pr-7");const {consolidationPreviewConfig}=await import("./consolidation-runtime");const config=consolidationPreviewConfig()!;
     expect(config.generation).toMatch(/^[a-f0-9]{64}$/);

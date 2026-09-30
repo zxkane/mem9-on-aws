@@ -103,6 +103,7 @@ export function bootstrap(
     ssm: {
       MEM9_DB_SECRET: dbOut.secretArn,
       ...(runtime ? {MEM9_RUNTIME_DB_SECRET: runtime.parameterArn} : {}),
+      ...(runtime?.probeParameterArn ? {MEM9_PROBE_ADMIN_CREDENTIAL: runtime.probeParameterArn} : {}),
       MEM9_TENANT_ID: identity.tenantSecretArn,
       ...(consolidationPreview ? {
         MEM9_CONSOLIDATION_PREVIEW_CONFIG: consolidationPreview.arns.config,

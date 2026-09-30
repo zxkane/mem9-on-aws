@@ -47,7 +47,9 @@ function harness(){
       case 'StopTaskCommand':tasks.find(t=>t.taskArn===input.task).lastStatus='STOPPED';return {};
       case 'DescribeTaskDefinitionCommand':if(input.taskDefinition===serverTaskDefinition)return {taskDefinition:serverDefinition};return {taskDefinition:{family,containerDefinitions:[{name:'Mem9Bootstrap',environment:[
         {name:'MEM9_STAGE',value:stage},{name:'MEM9_RUNTIME_BOOTSTRAP_VERSION',value:state.wrongRevision?'0':'1'}],
-        secrets:[{name:'MEM9_RUNTIME_DB_SECRET',valueFrom:`arn:aws:ssm:${region}:${account}:parameter${prefix}/runtime/database-credential`},{name:'MEM9_TENANT_ID',valueFrom:tenantSecret}],
+        secrets:[{name:'MEM9_RUNTIME_DB_SECRET',valueFrom:`arn:aws:ssm:${region}:${account}:parameter${prefix}/runtime/database-credential`},
+          {name:'MEM9_PROBE_ADMIN_CREDENTIAL',valueFrom:`arn:aws:ssm:${region}:${account}:parameter${prefix}/runtime/${state.wrongProbeReference?'wrong':'admin-probe-credential'}`},
+          {name:'MEM9_TENANT_ID',valueFrom:tenantSecret}],
         logConfiguration:{options:{'awslogs-group':'/sst/synthetic','awslogs-stream-prefix':'bootstrap'}}}]}};
       case 'RunTaskCommand':{
         const task={taskArn:`arn:aws:ecs:${region}:${account}:task/${cluster}/task-${++sequence}`,clusterArn,taskDefinitionArn:taskDefinition,
@@ -57,7 +59,10 @@ function harness(){
       case 'FilterLogEventsCommand':{
         const run=calls.findLast(c=>c.name==='RunTaskCommand');
         const operation=run.input.overrides.containerOverrides[0].environment.find(e=>e.name==='MEM9_BOOTSTRAP_OPERATION').value;
-        return {events:[{message:JSON.stringify({event:operation==='runtime-verify'?'runtime_verify':'runtime_bootstrap',outcome:'ready'})}]};
+        if(operation==='runtime-admin-probe-cleanup'&&state.failCleanup)return {events:[{message:JSON.stringify({event:'runtime_bootstrap_failed',errorClass:'AdminProbeCleanupFailed'})}]};
+        return {events:[{message:JSON.stringify({event:operation==='runtime-verify'?'runtime_verify':operation==='runtime-admin-probe'?'runtime_admin_probe':
+          operation==='runtime-admin-probe-cleanup'?'runtime_admin_probe_cleanup':'runtime_bootstrap',outcome:'ready',
+          ...(operation==='runtime-admin-probe-cleanup'?{roleRemoved:true}:{})})}]};
       }
       case 'GetRoleCommand':return {Role:{Arn:`arn:aws:iam::${account}:role/${input.RoleName}`,PermissionsBoundary:{PermissionsBoundaryArn:`arn:aws:iam::${account}:policy/mem9-on-aws-workload-boundary`},
         AssumeRolePolicyDocument:encodeURIComponent(JSON.stringify({Version:'2012-10-17',Statement:[{Effect:'Allow',Action:'sts:AssumeRole',Principal:{Service:'ecs-tasks.amazonaws.com'}}]}))}};
@@ -113,7 +118,7 @@ describe('preview runtime deployment orchestration',()=>{
     expect(f.tasks.every(t=>t.lastStatus==='STOPPED')).toBe(true);
     expect(f.calls.filter(c=>c.name==='ListTasksCommand').some(c=>c.input.desiredStatus==='PENDING')).toBe(false);
   });
-  it.each(['bootstrap','verify'])('RUNTIME-009/010: journals %s before exactly one idempotent launch and removes it after success',async operation=>{
+  it.each(['bootstrap','verify','admin-probe','admin-probe-cleanup'])('RUNTIME-009/010: journals %s before exactly one idempotent launch and removes it after success',async operation=>{
     const f=harness();if(operation==='verify')f.ready();await f.run(operation);
     const launch=f.calls.find(c=>c.name==='RunTaskCommand');
     expect(f.calls.filter(c=>c.name==='RunTaskCommand')).toHaveLength(1);
@@ -141,6 +146,22 @@ describe('preview runtime deployment orchestration',()=>{
     const f=harness();f.state.wrongRevision=true;
     await expect(f.run('bootstrap')).rejects.toThrow('RuntimeBootstrapRevisionMismatch');
     expect(f.calls.some(c=>c.name==='RunTaskCommand')).toBe(false);
+  });
+  it('refuses an administrator probe with a foreign credential reference before launch',async()=>{
+    const f=harness();f.state.wrongProbeReference=true;
+    await expect(f.run('admin-probe')).rejects.toThrow('AdminProbeCredentialMismatch');
+    expect(f.calls.some(c=>c.name==='RunTaskCommand')).toBe(false);
+  });
+  it.each([false,true])('retains interrupted probe tracking until role cleanup is proven (failure=%s)',async failCleanup=>{
+    const f=harness(),nonce='a'.repeat(32),path=prefix+'/runtime/invocations/'+nonce,start=f.now();
+    f.state.failCleanup=failCleanup;
+    f.journals.set(path,JSON.stringify({version:1,stage,nonce,createdAt:start,deadline:start+900000,operation:'admin-probe',taskDefinition}));
+    if(failCleanup){
+      await expect(f.run('cancel')).rejects.toThrow('AdminProbeCleanupFailed');
+      expect(f.journals.has(path)).toBe(true);expect(f.journals.size).toBe(2);
+    }else{await f.run('cancel');expect(f.journals.size).toBe(0);}
+    const launch=f.calls.find(c=>c.name==='RunTaskCommand');
+    expect(launch.input.overrides.containerOverrides[0].environment).toContainEqual({name:'MEM9_BOOTSTRAP_OPERATION',value:'runtime-admin-probe-cleanup'});
   });
   it.each(['owner-reference','old-revision','extra-execution-policy','extra-task-policy','injected-environment'])('RUNTIME-010: rejects live server drift: %s',async scenario=>{
     const f=harness();f.ready();
