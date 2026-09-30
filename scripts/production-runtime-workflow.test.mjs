@@ -19,6 +19,7 @@ describe('independent cutover cancellation recovery',()=>{
     expect(recovery.on.workflow_run).toEqual({workflows:['Infra CI'],types:['completed']});
     expect(recovery.jobs.source.if).toContain('head_repository.full_name == github.repository');
     expect(recovery.jobs.source.permissions['id-token']).toBeUndefined();
+    for(const job of Object.values(recovery.jobs))expect(job['runs-on']).toBe("${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}");
     expect(recovery.jobs.production.environment).toBe('prod');
     expect(recovery.jobs.preview.environment).toBe('preview-ci');
     expect(recovery.jobs.production.concurrency).toEqual({group:'infra-deploy-prod','cancel-in-progress':false,queue:'max'});
