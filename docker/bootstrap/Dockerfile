@@ -25,6 +25,9 @@ ENV NODE_EXTRA_CA_CERTS=/bootstrap/global-bundle.pem
 
 COPY docker/bootstrap/schema.sql /bootstrap/schema.sql
 COPY docker/bootstrap/migrations/ /bootstrap/migrations/
+COPY docker/bootstrap/runtime-contract.sql docker/bootstrap/schema-digest.sh /bootstrap/
+COPY docker/bootstrap/schema-digest.sh /bootstrap/operator/docker/bootstrap/schema-digest.sh
+RUN sh /bootstrap/schema-digest.sh /bootstrap > /bootstrap/schema.sha256
 COPY docker/bootstrap/entrypoint.sh /bootstrap/entrypoint.sh
 COPY docker/bootstrap/operator-entrypoint.mjs /bootstrap/operator/operator-entrypoint.mjs
 COPY scripts/lib/memory-namespace.mjs /bootstrap/operator/scripts/lib/memory-namespace.mjs
@@ -40,6 +43,9 @@ COPY scripts/observe-memory-namespace-connections.mjs /bootstrap/operator/script
 COPY docker/bootstrap/migrations/003_enforce_memory_namespaces.sql /bootstrap/operator/docker/bootstrap/migrations/003_enforce_memory_namespaces.sql
 COPY scripts/prepare-preview-memory-namespaces.mjs /bootstrap/operator/scripts/prepare-preview-memory-namespaces.mjs
 COPY scripts/consolidation-preview-fixture.mjs /bootstrap/operator/scripts/consolidation-preview-fixture.mjs
+COPY scripts/runtime-bootstrap.mjs /bootstrap/operator/scripts/runtime-bootstrap.mjs
+COPY scripts/seed-tenant.mjs /bootstrap/operator/scripts/seed-tenant.mjs
+COPY scripts/lib/runtime-credentials.mjs /bootstrap/operator/scripts/lib/runtime-credentials.mjs
 COPY scripts/lib/consolidation-preview-config.mjs /bootstrap/operator/scripts/lib/consolidation-preview-config.mjs
 COPY scripts/lib/consolidation-preview-secrets.mjs /bootstrap/operator/scripts/lib/consolidation-preview-secrets.mjs
 COPY scripts/reconcile-memory-namespaces.mjs /bootstrap/operator/scripts/reconcile-memory-namespaces.mjs

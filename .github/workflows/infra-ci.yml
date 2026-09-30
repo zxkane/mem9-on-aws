@@ -315,6 +315,8 @@ jobs:
           shellcheck scripts/run-slack-approval-e2e.sh
           shellcheck scripts/run-ingest-queue-integration.sh
           shellcheck scripts/run-memory-namespace-integration.sh
+          shellcheck scripts/run-runtime-credentials-integration.sh
+          shellcheck docker/bootstrap/schema-digest.sh docker/bootstrap/entrypoint.sh docker/mnemo-server/entrypoint.sh
           shellcheck scripts/run-consolidation-storage-integration.sh
           shellcheck scripts/run-consolidation-execution-integration.sh
           shellcheck scripts/run-consolidation-planner-integration.sh
@@ -334,6 +336,8 @@ jobs:
 
       - name: PostgreSQL namespace migration rehearsal
         run: bash scripts/run-memory-namespace-integration.sh
+      - name: PostgreSQL runtime credential isolation
+        run: bash scripts/run-runtime-credentials-integration.sh
       - name: PostgreSQL continuous consolidation storage
         run: bash scripts/run-consolidation-storage-integration.sh
       - name: PostgreSQL consolidation execution and budgets
@@ -510,9 +514,8 @@ jobs:
           MEM9_DURABLE_INGEST_ENABLED: "1"
           MEM9_DEPLOY_COMMIT: ${{ github.sha }}
           MEM9_HUMAN_ACCEPTANCE_IMAGE_TAG: ${{ needs.build-human-acceptance-image.outputs.image_tag }}
-          # Fresh previews start compatibly. The deploy script overrides this
-          # to 1 when the stage already exists, after first rerunning that
-          # stage's bootstrap task so a cancelled cutover resumes before deploy.
+          # Stage one registers the new runtime-only task at desiredCount=0.
+          MEM9_RUNTIME_READY: "0"
           MEM9_NAMESPACE_REQUIRED: "0"
         run: |
           # PR_NUMBER comes from GitHub's pull_request payload (integer);
@@ -525,14 +528,8 @@ jobs:
           echo "stage=$STAGE" >> "$GITHUB_OUTPUT"
           echo "Deploying to stage: $STAGE"
 
-          # A previous namespace-aware run may have been cancelled after its
-          # bootstrap advanced the database beyond additive_ready. Compatibility
-          # mode cannot start against that database. A preview created by an
-          # older revision can also have this SSM parameter while lacking all
-          # namespace migrations. Inspect the task-definition marker to
-          # distinguish those states: namespace-aware stages resume bootstrap
-          # and deploy directly in required mode; legacy and brand-new stages
-          # use the two-step 0 -> bootstrap -> 1 path below.
+          # Detect namespace-aware metadata without launching its cached task.
+          # The new owner bootstrap runs only after this deployment and drain.
           PARAMETER_ERROR=$(mktemp)
           trap 'rm -f "$PARAMETER_ERROR"' EXIT
           set +e
@@ -550,8 +547,7 @@ jobs:
               --query "taskDefinition.containerDefinitions[0].environment[?name=='MEM9_NAMESPACE_BOOTSTRAP_VERSION'].value | [0]" \
               --output text)
             if [ "$BOOTSTRAP_VERSION" = "1" ]; then
-              echo "Namespace-aware preview detected; resuming its bootstrap"
-              STAGE="$STAGE" bash scripts/run-bootstrap-task.sh
+              echo "Namespace-aware preview detected"
               export MEM9_NAMESPACE_REQUIRED="1"
             else
               echo "Legacy preview detected; deploying namespace compatibility first"
@@ -577,25 +573,23 @@ jobs:
             exit "$EXIT"
           fi
 
-      - name: Reconcile preview ECS deployment
+      - name: Drain preview service and previous bootstrap tasks
         if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
-        run: node scripts/reconcile-ecs-deployment.mjs --stage "$STAGE"
+        run: node scripts/run-runtime-preview.mjs drain
 
       - name: Run schema-bootstrap task (preview)
-        # Same one-shot bootstrap as prod (§8), idempotent. Runs against this PR's
-        # pr-N stage so the preview actually has the memories schema + a tenant —
-        # otherwise mnemo-server would boot but list/search would fail. STAGE comes
-        # from the deploy step's output (validated pr-N).
+        # Dedicated owner connection initializes schema, grants, exact tenant
+        # bindings and readiness while the application service is stopped.
         if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
         shell: bash
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
-        run: bash scripts/run-bootstrap-task.sh
+        run: node scripts/run-runtime-preview.mjs bootstrap
 
       - name: Deploy PR namespace enforcement
-        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '' && steps.deploy.outputs.initial_namespace_required == '0'
+        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
         shell: bash
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
@@ -612,14 +606,21 @@ jobs:
           # migration. The second deploy proves the real namespace-required
           # server can start before any isolation E2E traffic is sent.
           MEM9_NAMESPACE_REQUIRED: "1"
+          MEM9_RUNTIME_READY: "1"
         run: |
           pnpm -C infra exec sst deploy --stage "$STAGE" --print-logs
 
       - name: Reconcile namespace-enforced preview ECS deployment
-        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '' && steps.deploy.outputs.initial_namespace_required == '0'
+        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
         run: node scripts/reconcile-ecs-deployment.mjs --stage "$STAGE"
+
+      - name: Verify preview runtime credentials (hard)
+        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        env:
+          STAGE: ${{ steps.deploy.outputs.stage }}
+        run: node scripts/run-runtime-preview.mjs verify
 
       - name: Continuous consolidation Scheduler E2E (preview, hard)
         if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
@@ -628,20 +629,17 @@ jobs:
           MEM9_DEPLOY_COMMIT: ${{ github.sha }}
         run: node scripts/consolidation-scheduler-e2e.mjs
 
-      - name: MCP write-search E2E (preview, soft)
+      - name: MCP write-search E2E (preview, hard)
         # The first live write->search round-trip (section 6/6a): Cognito M2M JWT
         # -> AgentCore Gateway -> VPC-attached proxy Lambda -> Cloud Map private
-        # DNS -> mnemo-server -> Aurora -> qwen3 -> search. SOFT on preview
-        # (E2E_SOFT=1): mem9 ingest is async, and a fresh task registration or
-        # Lambda cold start can delay the first call, so a search-timeout logs a
-        # ::warning:: instead of failing the PR. Prod runs the same check HARD.
+        # DNS -> mnemo-server -> Aurora -> qwen3 -> search. Runtime credential
+        # isolation must preserve this real write/search path before promotion.
         # STAGE comes from the deploy step's validated pr-N output (env, not
         # inlined into run:).
         if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
         shell: bash
         env:
           STAGE: ${{ steps.deploy.outputs.stage }}
-          E2E_SOFT: "1"
         run: bash scripts/run-mcp-e2e.sh
 
       - name: Namespace connection attribution E2E (preview, hard)
@@ -675,6 +673,12 @@ jobs:
           STAGE: ${{ steps.deploy.outputs.stage }}
           EXPECTED_HUMAN_IMAGE_TAG: ${{ needs.build-human-acceptance-image.outputs.image_tag }}
         run: bash scripts/run-human-namespace-preview-e2e.sh
+
+      - name: Cancel outstanding runtime bootstrap invocations
+        if: always() && (failure() || cancelled()) && steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''
+        env:
+          STAGE: ${{ steps.deploy.outputs.stage }}
+        run: node scripts/run-runtime-preview.mjs cancel
 
       - name: Comment deploy status
         if: always() && steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != ''

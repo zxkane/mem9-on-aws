@@ -401,6 +401,138 @@
         "scripts/consolidation-planner.postgres.test.mjs",
         "scripts/run-consolidation-planner-integration.sh"
       ]
+    },
+    {
+      "owner": "docker/bootstrap/runtime-contract.sql",
+      "statement_sha256": "554970c95030a977ffb988daf1e1b0625f909a7bc66e9c3ace0294b6a261ab64",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "unprivileged",
+      "rationale": "Content-free catalog/readiness or tenant-credential binding guard. Security-definer routines use fixed search_path; only ready_for and tenant_visible are runtime callable. Exact login OID, tenant tuple, RLS and live ACL/schema/index checks fail closed; no memory payload is returned.",
+      "coverage": [
+        "scripts/runtime-credentials.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "docker/mnemo-server/patches/0024-runtime-schema-credentials.patch"
+      ]
+    },
+    {
+      "owner": "docker/bootstrap/runtime-contract.sql",
+      "statement_sha256": "66c7deb433b2eefb47e30d218edc9ab215febe3c82da4ce15a0b04e7ee3218cd",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "binding_matches",
+      "rationale": "Content-free catalog/readiness or tenant-credential binding guard. Security-definer routines use fixed search_path; only ready_for and tenant_visible are runtime callable. Exact login OID, tenant tuple, RLS and live ACL/schema/index checks fail closed; no memory payload is returned.",
+      "coverage": [
+        "scripts/runtime-credentials.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "docker/mnemo-server/patches/0024-runtime-schema-credentials.patch"
+      ]
+    },
+    {
+      "owner": "docker/bootstrap/runtime-contract.sql",
+      "statement_sha256": "a9fd7e48404d0a5a8f0694a35b878c912b9719ac87af0dab9e682cc5c3d2c393",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "tenant_visible",
+      "rationale": "Content-free catalog/readiness or tenant-credential binding guard. Security-definer routines use fixed search_path; only ready_for and tenant_visible are runtime callable. Exact login OID, tenant tuple, RLS and live ACL/schema/index checks fail closed; no memory payload is returned.",
+      "coverage": [
+        "scripts/runtime-credentials.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "docker/mnemo-server/patches/0024-runtime-schema-credentials.patch"
+      ]
+    },
+    {
+      "owner": "docker/bootstrap/runtime-contract.sql",
+      "statement_sha256": "a49f379cffb6f075b8f049b531e8d9ed80d31a3af5c900472053e25dadc3dd57",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "invalidate_tenant_change",
+      "rationale": "Content-free catalog/readiness or tenant-credential binding guard. Security-definer routines use fixed search_path; only ready_for and tenant_visible are runtime callable. Exact login OID, tenant tuple, RLS and live ACL/schema/index checks fail closed; no memory payload is returned.",
+      "coverage": [
+        "scripts/runtime-credentials.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "docker/mnemo-server/patches/0024-runtime-schema-credentials.patch"
+      ]
+    },
+    {
+      "owner": "docker/bootstrap/runtime-contract.sql",
+      "statement_sha256": "8f49186f95b221eae8a713865153f315e661582837e72bc3582cb8e1a9973346",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "table_permission",
+      "rationale": "Content-free catalog/readiness or tenant-credential binding guard. Security-definer routines use fixed search_path; only ready_for and tenant_visible are runtime callable. Exact login OID, tenant tuple, RLS and live ACL/schema/index checks fail closed; no memory payload is returned.",
+      "coverage": [
+        "scripts/runtime-credentials.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "docker/mnemo-server/patches/0024-runtime-schema-credentials.patch"
+      ]
+    },
+    {
+      "owner": "docker/bootstrap/runtime-contract.sql",
+      "statement_sha256": "01b9939e690e4bcf5731cc335a8a2ae4f618e52cab12bf32aeac3078d60f3b4f",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "column_permission",
+      "rationale": "Content-free catalog/readiness or tenant-credential binding guard. Security-definer routines use fixed search_path; only ready_for and tenant_visible are runtime callable. Exact login OID, tenant tuple, RLS and live ACL/schema/index checks fail closed; no memory payload is returned.",
+      "coverage": [
+        "scripts/runtime-credentials.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "docker/mnemo-server/patches/0024-runtime-schema-credentials.patch"
+      ]
+    },
+    {
+      "owner": "docker/bootstrap/runtime-contract.sql",
+      "statement_sha256": "1fc73011c9ddc861954e4def3795c1fba77df5ca89d96b5b37b81ffa2cc865ac",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "acl_valid",
+      "rationale": "Content-free catalog/readiness or tenant-credential binding guard. Security-definer routines use fixed search_path; only ready_for and tenant_visible are runtime callable. Exact login OID, tenant tuple, RLS and live ACL/schema/index checks fail closed; no memory payload is returned.",
+      "coverage": [
+        "scripts/runtime-credentials.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "docker/mnemo-server/patches/0024-runtime-schema-credentials.patch"
+      ]
+    },
+    {
+      "owner": "docker/bootstrap/runtime-contract.sql",
+      "statement_sha256": "02a3b84d080f5f1de1bf86f19dbf75febb42537e3d3adcf62e61b6afe99891fe",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "schema_valid",
+      "rationale": "Content-free catalog/readiness or tenant-credential binding guard. Security-definer routines use fixed search_path; only ready_for and tenant_visible are runtime callable. Exact login OID, tenant tuple, RLS and live ACL/schema/index checks fail closed; no memory payload is returned.",
+      "coverage": [
+        "scripts/runtime-credentials.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "docker/mnemo-server/patches/0024-runtime-schema-credentials.patch"
+      ]
+    },
+    {
+      "owner": "docker/bootstrap/runtime-contract.sql",
+      "statement_sha256": "3bf76dfb1baa3869c85772eb8b02f6892bb9088b1a7acdb4b5ecb43afc54d598",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "index_digest",
+      "rationale": "Content-free catalog/readiness or tenant-credential binding guard. Security-definer routines use fixed search_path; only ready_for and tenant_visible are runtime callable. Exact login OID, tenant tuple, RLS and live ACL/schema/index checks fail closed; no memory payload is returned.",
+      "coverage": [
+        "scripts/runtime-credentials.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "docker/mnemo-server/patches/0024-runtime-schema-credentials.patch"
+      ]
+    },
+    {
+      "owner": "docker/bootstrap/runtime-contract.sql",
+      "statement_sha256": "6aded8de03180cf58ad4351b72b4f343c8d8702c930a7888d22aff5786bf059a",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "ready_for",
+      "rationale": "Content-free catalog/readiness or tenant-credential binding guard. Security-definer routines use fixed search_path; only ready_for and tenant_visible are runtime callable. Exact login OID, tenant tuple, RLS and live ACL/schema/index checks fail closed; no memory payload is returned.",
+      "coverage": [
+        "scripts/runtime-credentials.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "docker/mnemo-server/patches/0024-runtime-schema-credentials.patch"
+      ]
+    },
+    {
+      "owner": "docker/bootstrap/runtime-contract.sql",
+      "statement_sha256": "4d3ebb66655b8793d00df918d0ad887e092ecb35974e4b006c4118aeed29defc",
+      "classification": "namespace_composed_or_compatibility",
+      "context": "grant_runtime",
+      "rationale": "Owner-only grant installer; PUBLIC/runtime cannot execute it. Canonical grants allow ordinary application DML and deny administrative and maintenance-table paths.",
+      "coverage": [
+        "scripts/runtime-credentials.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "docker/mnemo-server/patches/0024-runtime-schema-credentials.patch"
+      ]
     }
   ]
 }

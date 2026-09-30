@@ -81,6 +81,8 @@ RUN apk upgrade --no-cache \
 COPY --from=builder /out/mnemo-server /usr/local/bin/mnemo-server
 COPY docker/bootstrap/schema.sql /usr/local/share/mem9/schema.sql
 COPY docker/bootstrap/migrations/ /usr/local/share/mem9/migrations/
+COPY docker/bootstrap/runtime-contract.sql docker/bootstrap/schema-digest.sh /usr/local/share/mem9/
+RUN sh /usr/local/share/mem9/schema-digest.sh /usr/local/share/mem9 > /usr/local/share/mem9/schema.sha256
 # entrypoint assembles MNEMO_DSN from the ECS-injected DB env + secret, then
 # execs the server (mem9 reads a single static MNEMO_DSN and can't compose it
 # from parts — see docs/mem9-facts.md "DB connection mechanism").

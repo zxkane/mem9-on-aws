@@ -5,6 +5,29 @@ Preview E2E runs the deployed task in report-only mode.
 
 ## Continuous scheduling and preview rehearsal
 
+## Runtime credential preparation
+
+This increment exercises schema/runtime separation in numeric preview stages.
+Production credential retirement and consolidation activation remain separate.
+
+| Case | Scenario | Required result |
+| --- | --- | --- |
+| RUNTIME-001 | Apply production schema twice on fresh/existing databases | No runtime contract schema, role, tenant RLS or PUBLIC ACL changes |
+| RUNTIME-002 | Start a preview without valid readiness | Missing digest, wrong login OID, incomplete namespace constraints or invalid indexes reject startup |
+| RUNTIME-003 | Bootstrap and restart a normal preview | Server uses a non-owner login; only bootstrap can run DDL; normal MCP/ingest/JIT paths work |
+| RUNTIME-004 | Exercise runtime privileges | DDL, role management, tenant credential writes, maintenance policy/table writes, owner-role assumption and grant options are denied |
+| RUNTIME-005 | Write an owner credential into a tenant row | RLS hides it, readiness is invalidated, and a new privileged tenant pool is rejected |
+| RUNTIME-006 | Repeat or race bootstrap | Stable credentials; one dedicated session owns a nonblocking lock; busy attempts cannot invalidate or stamp |
+| RUNTIME-007 | Kill bootstrap during concurrent index creation | No readiness; retry repairs only known invalid indexes and verifies their complete definitions |
+| RUNTIME-008 | Lose bootstrap launch response or cancel runner | Recorded task identity/deadline allows recovery; old service/bootstrap revisions are drained before initialization |
+| RUNTIME-009 | Compare actual SST resource graphs | Production uses its existing path; preview starts with zero tasks, then resumes with runtime-only secret references |
+| RUNTIME-010 | Inspect child arguments and logs | No plaintext password, verifier, API key or private row contents are emitted |
+| RUNTIME-011 | Register the synthetic consolidation tenant | Exact owner-approved binding and row commit together; stale credentials are invisible; prior Scheduler/Qwen acceptance remains valid |
+| RUNTIME-012 | Run all preview checks | Hard MCP search/ingest, namespace isolation/performance, OAuth/human and consolidation checks pass |
+| RUNTIME-013 | Inspect running server task definitions and current IAM policies | Exact runtime secret references, verify mode, stable revision and reviewed task/execution grants are required; owner references, mixed revisions, extra grants and environment overrides fail acceptance |
+
+## Continuous scheduling cases
+
 These acceptance cases cover the next delivery. Production activation and
 real-corpus semantic/drain calibration remain separate gates.
 

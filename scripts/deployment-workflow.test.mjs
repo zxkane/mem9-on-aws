@@ -312,7 +312,7 @@ describe("workflow integration", () => {
     expect(previewDeploy?.run).toContain(
       "Legacy preview detected; deploying namespace compatibility first",
     );
-    expect(previewDeploy?.run).toContain(
+    expect(previewDeploy?.run).not.toContain(
       'STAGE="$STAGE" bash scripts/run-bootstrap-task.sh',
     );
     expect(previewDeploy?.run).toContain(
@@ -321,14 +321,17 @@ describe("workflow integration", () => {
     expect(previewDeploy?.run).toContain(
       "initial_namespace_required=$MEM9_NAMESPACE_REQUIRED",
     );
-    expect(previewEnforcement?.if).toContain(
+    expect(previewEnforcement?.if).not.toContain(
       "steps.deploy.outputs.initial_namespace_required == '0'",
     );
+    expect(previewDeploy.env.MEM9_RUNTIME_READY).toBe("0");
+    expect(previewEnforcement.env.MEM9_RUNTIME_READY).toBe("1");
     expect(prodDeploy?.env?.MEM9_NAMESPACE_REQUIRED).toBe(
       "${{ vars.MEM9_NAMESPACE_REQUIRED }}",
     );
 
     const steps = workflow.jobs["deploy-preview"].steps;
+    const drainIndex = steps.findIndex(({name}) => name === "Drain preview service and previous bootstrap tasks");
     const bootstrapIndex = steps.findIndex(
       ({ name }) => name === "Run schema-bootstrap task (preview)",
     );
@@ -343,6 +346,12 @@ describe("workflow integration", () => {
       ({ name }) => name === "Namespace performance E2E (preview, hard)",
     );
     expect(bootstrapIndex).toBeGreaterThanOrEqual(0);
+    expect(drainIndex).toBeGreaterThan(steps.indexOf(previewDeploy));
+    expect(bootstrapIndex).toBeGreaterThan(drainIndex);
+    expect(steps[drainIndex].run).toBe("node scripts/run-runtime-preview.mjs drain");
+    expect(steps[bootstrapIndex].run).toBe("node scripts/run-runtime-preview.mjs bootstrap");
+    const mcp = steps.find(({name}) => name === "MCP write-search E2E (preview, hard)");
+    expect(mcp.env.E2E_SOFT).toBeUndefined();
     expect(enforcementIndex).toBeGreaterThan(bootstrapIndex);
     expect(isolationIndex).toBeGreaterThan(enforcementIndex);
     expect(performanceIndex).toBeGreaterThan(isolationIndex);
@@ -635,7 +644,7 @@ describe("workflow integration", () => {
     for (const stage of ["preview", "prod"]) {
       const bootstrap = workflow.indexOf(`name: Run schema-bootstrap task (${stage})`);
       const reconcile = workflow.indexOf(
-        `name: Reconcile ${stage === "preview" ? "preview ECS deployment" : "prod ECS deployment"}`,
+        stage === "preview" ? "name: Drain preview service and previous bootstrap tasks" : "name: Reconcile prod ECS deployment",
       );
       expect(bootstrap).toBeGreaterThanOrEqual(0);
       expect(reconcile).toBeGreaterThanOrEqual(0);
@@ -718,7 +727,7 @@ describe("workflow integration", () => {
     const workflow = readFileSync(workflowPath, "utf8");
 
     expect(workflow).toContain("node scripts/image-tags.mjs");
-    expect(workflow.match(/node scripts\/reconcile-ecs-deployment\.mjs/g)).toHaveLength(3);
+    expect(workflow.match(/node scripts\/reconcile-ecs-deployment\.mjs/g)).toHaveLength(2);
   });
 
   it("TC-ECS-COST-005: propagates bootstrap task tags at task creation", () => {

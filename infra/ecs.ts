@@ -48,6 +48,7 @@
  * from them at container start.
  */
 
+import type { RuntimeCredentials } from "./runtime-credentials";
 import { resolveVpc } from "./vpc";
 import type { DbOutputs } from "./db";
 import { workloadImage, accountId, applicationRegion } from "./ecr";
@@ -149,6 +150,7 @@ export function ecs(
   identity: TenantIdentityOutputs,
   namespaceIdentity: NamespaceIdentityOutputs,
   maintenanceIdentity?: import("./namespace-identity").MaintenanceIdentityOutputs,
+  runtime?: RuntimeCredentials,
 ): EcsOutputs {
   if ($app.stage === "prod" && !BEDROCK_PROJECT) {
     throw new Error("MEM9_BEDROCK_PROJECT is required for production observability");
@@ -179,7 +181,7 @@ export function ecs(
   const dbHost = dbOut.host;
   const dbPort = dbOut.port.apply((p) => String(p));
   const dbName = dbOut.database;
-  const dbSecretArn = dbOut.secretArn;
+  const dbSecretArn = runtime?.parameterArn ?? dbOut.secretArn;
   const taskSgId = dbOut.taskSecurityGroupId;
 
   // Image URIs (out-of-band ECR, referenced read-only). All three share IMAGE_TAG
@@ -271,6 +273,7 @@ export function ecs(
     architecture: "arm64", // runtimePlatform cpuArchitecture=ARM64; images are linux/arm64
     cpu: "2 vCPU",
     memory: "6 GB",
+    ...(runtime ? {scaling: {min: runtime.ready ? 1 : 0, max: 1, cpuUtilization: false, memoryUtilization: false}} : {}),
     // Task-role IAM for the llm-proxy sidecar's Bedrock Mantle calls (§7). SST
     // attaches `permissions` to the TASK role (not the execution role), which is
     // the identity the container's default credential chain resolves — exactly
@@ -378,7 +381,8 @@ export function ecs(
           // while production is still on additive_ready; the operator enables
           // it only after freeze/backfill/enforce reaches constraints_complete
           // and the Cognito/Aurora namespace bindings are reconciled.
-          MNEMO_NAMESPACE_REQUIRED: NAMESPACE_REQUIRED,
+          MNEMO_NAMESPACE_REQUIRED: runtime ? "1" : NAMESPACE_REQUIRED,
+          ...(runtime ? {MNEMO_SCHEMA_MODE: "verify", MEM9_STAGE: $app.stage} : {}),
           MNEMO_CONSOLIDATION_EXECUTION_ENABLED: /^pr-[1-9][0-9]*$/.test($app.stage) && NAMESPACE_REQUIRED === "1" ? "true" : "false",
           MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS: "25000",
           MNEMO_NAMESPACE_EXACT_VECTOR_TIMEOUT: "2s",
@@ -485,8 +489,27 @@ export function ecs(
     ],
     transform: {
       taskDefinition: disableMnemoServerPseudoTerminal,
+      ...(runtime ? {executionRole: (args: Record<string, any>) => {
+        const parameters = [runtime.parameterArn, namespaceIdentity.transportSigningParameterArn,
+          ...(maintenanceIdentity && NAMESPACE_REQUIRED === "1" ? [maintenanceIdentity.bundleParameterArn] : [])];
+        // Preserve SST's ECR/log managed baseline; replace its wildcard reader.
+        args.inlinePolicies = [{name: "RuntimeSecrets", policy: $jsonStringify({Version: "2012-10-17", Statement: [
+          {Effect: "Allow", Action: ["ssm:GetParameters"], Resource: parameters},
+          {Effect: "Allow", Action: ["secretsmanager:GetSecretValue"], Resource: [identity.tenantSecretArn]},
+          {Effect: "Allow", Action: ["kms:Decrypt"], Resource: "*", Condition: {StringEquals: {
+            "kms:ViaService": $interpolate`ssm.${region}.amazonaws.com`, "kms:EncryptionContext:PARAMETER_ARN": parameters}}},
+          {Effect: "Allow", Action: ["kms:Decrypt"], Resource: "*", Condition: {StringEquals: {
+            "kms:ViaService": $interpolate`secretsmanager.${region}.amazonaws.com`, "kms:EncryptionContext:SecretARN": identity.tenantSecretArn}}},
+        ]})}];
+      }, autoScalingTarget: (args: Record<string, any>) => {
+        // Scaling registration must not restore tasks during stage one.
+        args.minCapacity = runtime.ready ? 1 : 0;
+        args.maxCapacity = 1;
+        args.suspendedState = {dynamicScalingInSuspended: true, dynamicScalingOutSuspended: true, scheduledScalingSuspended: true};
+      }} : {}),
       service: (args: Record<string, any>, opts: Record<string, any>) => {
         args.tags = { ...(args.tags ?? {}), ...tags };
+        if (runtime) args.desiredCount = runtime.ready ? 1 : 0;
         // Fargate compute is billed to tasks, not just to this tagged Service.
         // Propagate Project/Stage to every new task so Cost Explorer can
         // attribute vCPU and memory charges. Managed tags add the ECS

@@ -388,6 +388,8 @@ afterEach(() => {
 
 describe("workload role coverage from the real SST graph", () => {
   it.each([
+    { label: "preview runtime preparation", scheduleEnabled: false, namespaceRequired: false, unsupportedFlag: undefined, runtimeReady: false },
+    { label: "preview runtime ready", scheduleEnabled: false, namespaceRequired: true, unsupportedFlag: undefined, runtimeReady: true },
     { label: "scheduler disabled, compatibility mode", scheduleEnabled: false, namespaceRequired: false, unsupportedFlag: undefined },
     { label: "scheduler disabled, required namespaces", scheduleEnabled: false, namespaceRequired: true, unsupportedFlag: undefined },
     { label: "scheduler enabled, required namespaces", scheduleEnabled: true, namespaceRequired: true, unsupportedFlag: undefined },
@@ -401,13 +403,18 @@ describe("workload role coverage from the real SST graph", () => {
     })),
   ])(
     "TC-FACADEAUTH-004/TC-CONSOL-026/TC-SLACKAPP-082: verifies the $label graph and configuration guard",
-    async ({ scheduleEnabled, namespaceRequired, unsupportedFlag }) => {
+    async (testCase) => {
+      const {scheduleEnabled, namespaceRequired, unsupportedFlag} = testCase;
+      const runtimeReady = 'runtimeReady' in testCase ? testCase.runtimeReady : undefined;
+      const preview = runtimeReady !== undefined;
+      const stage = preview ? 'pr-7' : 'prod';
       vi.resetModules();
       const rpcServer = await startSstRpcServer();
       const environment: Record<string, string | undefined> = {
         SST_SERVER: rpcServer.url,
         WORKLOAD_BOUNDARY_PROD_ENABLED: "true",
         MEM9_AUTH_MODE: "managed",
+        MEM9_RUNTIME_READY: runtimeReady ? "1" : "0",
         MEM9_BEDROCK_PROJECT: "proj_mock",
         MEM9_BEDROCK_PROJECT_OPENAI: "",
         MEM9_NAMESPACE_REQUIRED: namespaceRequired ? "1" : "0",
@@ -434,7 +441,7 @@ describe("workload role coverage from the real SST graph", () => {
             protect: true,
             providers: {},
             removal: "retain",
-            stage: "prod",
+            stage,
           },
           $cli: {
             command: "deploy",
@@ -488,7 +495,7 @@ describe("workload role coverage from the real SST graph", () => {
             newResource: mockNewResource,
           },
           "mem9-on-aws",
-          "prod",
+          stage,
           false,
         );
         Object.assign(globalThis, {
@@ -526,7 +533,7 @@ describe("workload role coverage from the real SST graph", () => {
             return {};
           }
           const outputs = await config.run();
-          if (!namespaceRequired) {
+          if (!namespaceRequired && !preview) {
             // Exercise the actual SST/Pulumi worker transforms, including the
             // execution policy replacement, alongside the unchanged prod graph.
             await pulumi.runtime.waitForRPCs();
@@ -541,10 +548,36 @@ describe("workload role coverage from the real SST graph", () => {
             await pulumi.runtime.waitForRPCs();
             $app.stage = "prod";
           }
-          await waitForRecordedRoles(expectedRoleNames.length);
+          if (!preview) await waitForRecordedRoles(expectedRoleNames.length);
           return outputs;
         });
         await pulumi.runtime.waitForRPCs();
+        if (preview) {
+          const service = oneResource('aws:ecs/service:Service', 'Mem9ServerService');
+          expect(service.inputs.desiredCount).toBe(runtimeReady ? 1 : 0);
+          const scaling = oneResource('aws:appautoscaling/target:Target', 'Mem9ServerAutoScalingTarget');
+          expect(scaling.inputs.minCapacity).toBe(runtimeReady ? 1 : 0);
+          expect(scaling.inputs.suspendedState).toEqual({dynamicScalingInSuspended: true, dynamicScalingOutSuspended: true, scheduledScalingSuspended: true});
+          const runtimeParameter = oneResource('aws:ssm/parameter:Parameter', 'RuntimeDatabaseCredential');
+          expect(runtimeParameter.inputs.type).toBe('SecureString');
+          const task = oneResource('aws:ecs/taskDefinition:TaskDefinition', 'Mem9ServerTask');
+          const server = JSON.parse(String(task.inputs.containerDefinitions)).find((c:any) => c.name === 'mnemo-server');
+          const runtimeArn = `arn:aws:ssm:${region}:${accountId}:parameter/mem9-on-aws/pr-7/runtime/database-credential`;
+          expect(server.secrets.find((s:any) => s.name === 'MEM9_DB_SECRET').valueFrom).toBe(runtimeArn);
+          expect(server.environment).toEqual(expect.arrayContaining([{name:'MNEMO_SCHEMA_MODE',value:'verify'},{name:'MNEMO_NAMESPACE_REQUIRED',value:'1'}]));
+          const role = oneResource('aws:iam/role:Role', 'Mem9ServerExecutionRole');
+          const policies = role.inputs.inlinePolicies as Array<{policy:string}>;
+          const statements = JSON.parse(policies[0].policy).Statement;
+          expect(statements.find((s:any) => s.Action.includes('ssm:GetParameters')).Resource).toContain(runtimeArn);
+          expect(statements.find((s:any) => s.Action.includes('secretsmanager:GetSecretValue')).Resource).toHaveLength(1);
+          expect(JSON.stringify(statements)).not.toContain('Mem9DbSecret');
+          expect(role.inputs.managedPolicyArns).toEqual(['arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy']);
+          const bootstrap = oneResource('aws:ecs/taskDefinition:TaskDefinition', 'Mem9BootstrapTask');
+          const boot = JSON.parse(String(bootstrap.inputs.containerDefinitions))[0];
+          expect(boot.secrets.find((s:any) => s.name === 'MEM9_RUNTIME_DB_SECRET').valueFrom).toBe(runtimeArn);
+          expect(boot.secrets.find((s:any) => s.name === 'MEM9_DB_SECRET').valueFrom).not.toBe(runtimeArn);
+          return;
+        }
         if (unsupportedFlag) {
           expect(recordedResources.filter(({ type }) => !type.startsWith("pulumi:"))).toEqual([]);
           return;
@@ -553,6 +586,7 @@ describe("workload role coverage from the real SST graph", () => {
         const createdRoles = recordedResources.filter(
           ({ type }) => type === "aws:iam/role:Role",
         );
+        expect(recordedResources.some(r=>r.name==='RuntimeDatabaseCredential')).toBe(false);
         expect(createdRoles.map(({ name }) => name).sort()).toEqual(
           expectedRoleNames,
         );

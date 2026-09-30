@@ -228,6 +228,7 @@ describe("memory namespace query inventory", () => {
     try {
       for (const name of ["scripts/nested", "infra", "docker/bootstrap/migrations", "scripts/node_modules", "scripts/dist", "scripts/coverage", "scripts/.sst", "scripts/.git"]) mkdirSync(join(directory, name), {recursive:true});
       writeFileSync(join(directory,"docker/bootstrap/schema.sql"), "CREATE TABLE memories(id text);");
+      writeFileSync(join(directory,"docker/bootstrap/runtime-contract.sql"), "-- No runtime contract in this extraction fixture.\n");
       writeFileSync(join(directory,"docker/bootstrap/migrations/001.sql"), "ALTER TABLE memories ADD COLUMN namespace_id text;");
       writeFileSync(join(directory,"scripts/analyze-ingest-prescreen.sql"), "SELECT id FROM sessions WHERE namespace_id=:'namespace_id';");
       writeFileSync(join(directory,"scripts/nested/query.js"), 'const table="mem"+"ories"; const query="SELECT id FROM "+table+" WHERE namespace_id=$1";');

@@ -164,13 +164,28 @@ Verified from `server/internal/middleware/auth.go` + `service/tenant.go` +
   the RDS `RandomPassword` can contain such chars — a risk to watch, not ours to
   fix without a mem9 patch).
 - **Consequence for bootstrap:** the seeded `tenants` row MUST carry the REAL
-  `db_user`+`db_password` (the Aurora credentials from `MEM9_DB_SECRET`), NOT a
+  `db_user`+`db_password` (the intended Aurora login), NOT a
   placeholder — else every add/search fails auth at query time even though the
-  server boots and passes `idx_app` validation. The bootstrap entrypoint seeds
-  them via psql `--set` variables (password never in argv/SQL text). `db_tls=TRUE`
+  server boots and passes `idx_app` validation. `scripts/seed-tenant.mjs` now
+  supplies these values as bound Node/pg parameters. The former psql `--set`
+  invocation did put the password in process arguments; it must not be reused.
+  Passwords and the tenant API key are absent from bootstrap output. `db_tls=TRUE`
   → mem9 builds `sslmode=require`. This puts the DB password in a `tenants` table
   column (mem9's plain-mode design; the operator's own DB). `MNEMO_ENCRYPT_TYPE=kms`
   could encrypt it at rest later.
+
+Numeric PR previews use a stable, non-owner runtime login for both the control
+connection and the normal tenant pool. Only owner bootstrap receives the owner
+secret. `0024-runtime-schema-credentials.patch` adds `MNEMO_SCHEMA_MODE=verify`,
+checks stage/schema/index/ACL readiness and the configured tenant before workers
+start, and checks every newly opened tenant pool for privileged credentials.
+Verify mode skips startup migrations and webhook DDL and rejects unsupported
+runtime-usage configuration. The separate `runtime-contract.sql` is deliberately
+outside the normal migration chain: production remains on `apply` with its
+existing credentials. Preview tenant SELECT uses exact owner-approved connection
+tuples and a restrictive RLS guard; an old owner-credential upsert makes readiness
+false and the tenant invisible. This is preview isolation, not production
+credential retirement or authorization to enable consolidation on real memories.
 
 ## Embedding (MaaS)
 

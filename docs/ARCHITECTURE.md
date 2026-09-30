@@ -411,6 +411,40 @@ handler remains responsible for the actual `/mcp` bearer-token check.
 
 ### Schema bootstrap and data
 
+Numeric PR previews separate schema ownership from application access. Stable
+SSM SecureString runtime credentials are injected into `mnemo-server`; owner
+credentials remain confined to the bootstrap task. The runtime login has exact
+application table/column DML grants and backend function access with inherited
+membership, no `SET ROLE` or membership administration. It cannot change schema,
+tenant credentials, maintenance tables or policy. Owner-managed tenant bindings
+and restrictive RLS prevent a stale owner credential in the tenant registry from
+restoring owner access. Each new tenant pool also rejects a privileged login.
+
+Preview deployment first renders the service at zero tasks with all scaling
+paths suspended. It drains old service tasks and every old bootstrap revision,
+including pending tasks, before launching the new owner bootstrap. One dedicated
+database session holds a nonblocking advisory lock throughout initialization;
+readiness is invalidated first and stamped last. Bootstrap verifies live grants,
+namespace constraints and index definitions and records the packaged SQL digest,
+runtime OID and live index digest. Required-index removal or privilege drift
+rejects startup. Known invalid namespace indexes can be repaired after an
+interrupted concurrent build. Synthetic consolidation tenant bindings are
+committed atomically with their registry rows under the same bootstrap lock.
+
+The second deployment always enables namespace-required/verify mode and one
+runtime task. Bootstrap invocations have explicit ECS client tokens and durable
+SSM records with absolute deadlines; cancellation and the next deployment recover
+unknown launches. Hard preview gates exercise runtime verification, MCP write and
+search, namespace attribution, human OAuth and Scheduler/Qwen. Production does
+not install this runtime contract or provision its credentials. Its schema apply
+path remains intact; tenant seeding now uses bound Node/pg parameters without
+placing a password in argv or printing the tenant key.
+
+Runtime acceptance also reads the live service tasks, secret references, schema
+mode and IAM trust/boundary/policy attachments before and after its database probe.
+Owner-secret references, unexpected overrides, mixed revisions or additional
+credential permissions fail this gate even if the database itself is ready.
+
 `infra/bootstrap.ts` defines a separate one-shot arm64 ECS task. CI invokes it
 after deployment with `scripts/run-bootstrap-task.sh`. It:
 
