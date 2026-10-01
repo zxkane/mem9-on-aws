@@ -78,7 +78,8 @@ export async function productionCoordinatorDigest(){
     'scripts/run-production-consolidation.mjs','scripts/run-production-canary.mjs','scripts/consolidation-worker.mjs','scripts/consolidation-canary-replay.mjs',
     'scripts/lib/production-canary-verification.mjs','scripts/lib/production-canary-report.mjs','scripts/lib/production-canary-performance.mjs',
     'scripts/lib/production-canary-delivery.mjs','scripts/lib/production-canary-flow.mjs','scripts/lib/production-scheduling.mjs',
-    'scripts/lib/mcp-canary-sampler.mjs','scripts/lib/canary-benchmark.mjs','scripts/lib/production-artifacts.mjs','infra/ecr.ts');
+    'scripts/lib/mcp-canary-sampler.mjs','scripts/lib/canary-benchmark.mjs','scripts/lib/production-artifacts.mjs','infra/ecr.ts',
+    'scripts/resolve-cloudflare-account.mjs');
   const hash=createHash('sha256');
   for(const path of paths.sort()){hash.update(path+'\0');hash.update(await readFile(new URL('../'+path,import.meta.url)));}
   return hash.digest('hex');

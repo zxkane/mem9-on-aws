@@ -826,6 +826,18 @@ records and workload measurements remain private.
 - RDS Proxy is absent from the current architecture. mem9 and bootstrap connect
   directly to the Aurora cluster writer endpoint.
 
+### SST Cloudflare account initialization (verified 2026-10-01)
+
+SST v4.17.1 initializes every configured provider even with `home: "aws"`.
+Its Cloudflare provider reads `CLOUDFLARE_DEFAULT_ACCOUNT_ID`; when absent, it
+lists accounts and chooses the first returned account. Provider arguments do
+not provide an `accountId` override. Both production workflow paths therefore
+resolve the owner of the configured zone before invoking SST, using the shared
+`scripts/resolve-cloudflare-account.mjs`. This needs no broader token scope.
+Sources: [SST provider initialization](https://github.com/sst/sst/blob/v4.17.1/pkg/project/project.go),
+[Cloudflare provider](https://github.com/sst/sst/blob/v4.17.1/pkg/project/provider/cloudflare.go),
+and [Cloudflare zone details](https://developers.cloudflare.com/api/resources/zones/methods/get/).
+
 ### AgentCore Gateway private egress to VPC — Lambda-proxy (the VPC-Lattice path was abandoned)
 
 **Current implementation:** a **Lambda target**. AgentCore invokes a VPC-attached
