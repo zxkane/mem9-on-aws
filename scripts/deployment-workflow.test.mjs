@@ -134,49 +134,6 @@ function runDeployRoleFixture(
   return { result, callRecords };
 }
 
-function runCloudflareResolver({
-  customDomain = "memory.example.com",
-  curlExit = 0,
-  zoneResponse = "",
-} = {}) {
-  const workflow = parse(readFileSync(workflowPath, "utf8"));
-  const resolver = workflow.jobs["deploy-prod"].steps.find(
-    ({ name }) => name === "Resolve Cloudflare account ID",
-  );
-  const dir = mkdtempSync(join(tmpdir(), "mem9-cloudflare-account-"));
-  tempDirs.push(dir);
-  const bin = join(dir, "bin");
-  const githubEnv = join(dir, "github-env");
-  mkdirSync(bin);
-  writeFileSync(
-    join(bin, "curl"),
-    [
-      "#!/usr/bin/env bash",
-      'if [[ "${MOCK_CURL_EXIT:-0}" != "0" ]]; then exit "$MOCK_CURL_EXIT"; fi',
-      "printf '%s' \"$MOCK_ZONE_RESPONSE\"",
-      "",
-    ].join("\n"),
-    { mode: 0o755 },
-  );
-  writeFileSync(githubEnv, "");
-
-  const result = spawnSync("bash", ["-c", resolver.run], {
-    encoding: "utf8",
-    env: {
-      ...process.env,
-      PATH: `${bin}${delimiter}${process.env.PATH}`,
-      GITHUB_ENV: githubEnv,
-      MEM9_FACADE_CUSTOM_DOMAIN: customDomain,
-      CLOUDFLARE_API_TOKEN: customDomain ? "fixture-token" : "",
-      CLOUDFLARE_ZONE_ID: customDomain ? "a".repeat(32) : "",
-      MOCK_CURL_EXIT: String(curlExit),
-      MOCK_ZONE_RESPONSE: zoneResponse,
-    },
-  });
-
-  return { result, githubEnv: readFileSync(githubEnv, "utf8") };
-}
-
 function optionValue(args, option) {
   const index = args.indexOf(option);
   return index >= 0 ? args[index + 1] : undefined;
@@ -538,17 +495,7 @@ describe("workflow integration", () => {
     expect(resolver.env.CLOUDFLARE_ZONE_ID).toBe(
       "${{ secrets.CLOUDFLARE_ZONE_ID }}",
     );
-    expect(resolver.run).toContain(
-      "https://api.cloudflare.com/client/v4/zones/${CLOUDFLARE_ZONE_ID}",
-    );
-    expect(resolver.run).toContain("curl --fail");
-    expect(resolver.run).toContain('data.get("success") is True');
-    expect(resolver.run).toContain('re.fullmatch(r"[0-9a-f]{32}", value)');
-    expect(resolver.run).toContain("::add-mask::$ACCOUNT_ID");
-    expect(resolver.run).toContain(
-      "CLOUDFLARE_DEFAULT_ACCOUNT_ID=%s\\n",
-    );
-    expect(resolver.run).toContain('>> "$GITHUB_ENV"');
+    expect(resolver.run).toBe("node scripts/resolve-cloudflare-account.mjs");
     expect(prod.env.MEM9_FACADE_CUSTOM_DOMAIN).toBe(
       "${{ secrets.MEM9_FACADE_CUSTOM_DOMAIN }}",
     );
@@ -571,36 +518,40 @@ describe("workflow integration", () => {
     ).toBe(false);
   });
 
-  it("TC-CF-ACCOUNT-003/004: exports only a valid account and skips an unset domain", () => {
-    const accountId = "b".repeat(32);
-    const success = runCloudflareResolver({
-      zoneResponse: JSON.stringify({
-        success: true,
-        result: { account: { id: accountId } },
-      }),
-    });
-    expect(success.result.status).toBe(0);
-    expect(success.result.stdout).toContain(`::add-mask::${accountId}`);
-    expect(success.githubEnv).toBe(
-      `CLOUDFLARE_DEFAULT_ACCOUNT_ID=${accountId}\n`,
+  it("TC-CF-ACCOUNT-005: resolves the Cloudflare account before guarded production cutover", () => {
+    const workflow = parse(readFileSync(workflowPath, "utf8"));
+    const steps = workflow.jobs["runtime-cutover-prod"].steps;
+    const resolverIndex = steps.findIndex(
+      ({ name }) => name === "Resolve Cloudflare account ID",
     );
-
-    const noDomain = runCloudflareResolver({ customDomain: "" });
-    expect(noDomain.result.status).toBe(0);
-    expect(noDomain.result.stdout).toContain(
-      "skipping Cloudflare account resolution",
+    const cutoverIndex = steps.findIndex(
+      ({ name }) => name === "Run guarded runtime cutover",
     );
-    expect(noDomain.githubEnv).toBe("");
+    expect(resolverIndex).toBeGreaterThanOrEqual(0);
+    expect(resolverIndex).toBeLessThan(cutoverIndex);
+  });
 
-    for (const failure of [
-      runCloudflareResolver({ curlExit: 22 }),
-      runCloudflareResolver({ zoneResponse: "not-json" }),
-      runCloudflareResolver({
-        zoneResponse: JSON.stringify({ success: true, result: {} }),
-      }),
-    ]) {
-      expect(failure.result.status).not.toBe(0);
-      expect(failure.githubEnv).toBe("");
+  it("TC-CF-ACCOUNT-002/005: resolves once after Node setup, before dependencies or SST, only in production jobs", () => {
+    const workflow = parse(readFileSync(workflowPath, "utf8"));
+    const cloudflareSecrets = /secrets\.(?:MEM9_FACADE_CUSTOM_DOMAIN|CLOUDFLARE_[A-Z_]+)/u;
+    expect(JSON.stringify(workflow.env)).not.toMatch(cloudflareSecrets);
+    for (const [name, job] of Object.entries(workflow.jobs)) {
+      const steps = job.steps ?? [];
+      const resolvers = steps.filter((step) => step.name === "Resolve Cloudflare account ID");
+      if (!["deploy-prod", "runtime-cutover-prod"].includes(name)) {
+        expect(resolvers).toHaveLength(0);
+        expect(JSON.stringify(job)).not.toMatch(cloudflareSecrets);
+        continue;
+      }
+      expect(job.environment).toBe("prod");
+      expect(resolvers).toHaveLength(1);
+      expect(resolvers[0].run).toBe("node scripts/resolve-cloudflare-account.mjs");
+      expect(resolvers[0]["continue-on-error"]).toBeUndefined();
+      expect(resolvers[0].if).toBeUndefined();
+      const index = steps.indexOf(resolvers[0]);
+      expect(steps[index - 1].uses).toMatch(/^actions\/setup-node@/u);
+      expect(steps[index + 1].name).toMatch(/^Install (infra|operator) dependencies$/u);
+      expect(steps.slice(0, index).some((step) => /\bsst\s/.test(step.run ?? ""))).toBe(false);
     }
   });
 

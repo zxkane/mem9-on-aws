@@ -861,6 +861,17 @@ resources. One hostname maps to the production stage; use no production
 hostname for PR previews. Keep Cloudflare proxying disabled for these managed
 records.
 
+Normal production deployment and guarded runtime cutover both run
+`scripts/resolve-cloudflare-account.mjs` before dependency installation or SST.
+It reads the existing token from the environment, queries the configured zone,
+checks the returned zone and account IDs, masks the account, and exports
+`CLOUDFLARE_DEFAULT_ACCOUNT_ID` through `GITHUB_ENV`. No custom domain means no
+request. Transient failures allow four attempts of at most 15 seconds each,
+with 1/2/4-second backoff; permanent denial or invalid responses stop the job.
+Diagnostics contain only controlled reason, HTTP status, numeric API codes and
+validation flags. Preview deployments and rehearsals receive no Cloudflare
+configuration. A changed resolver requires fresh runtime rehearsal evidence.
+
 No certificate-renewal issue is required. ACM automatically renews a
 DNS-validated certificate while it remains attached to API Gateway and every
 ACM validation CNAME remains publicly resolvable. Do not manually remove that
