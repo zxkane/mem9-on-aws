@@ -1659,6 +1659,9 @@ reserved budget. Rate and burst count actions, while risk budgets count rows.
 Every pause invalidates prior dispatch admissions, and quiescence stops all
 revisions of the approved worker families. Activation uses a fresh nonce bound
 to the verified release. Worker and operator images are pinned to ECR digests.
+The bootstrap image build imports both production operator entrypoints as its
+non-root user with networking disabled, so missing transitive dependencies fail
+before deployment.
 The controller checks the main revision, sets persistent scheduling admission,
 and enables only the two existing verified schedule targets. It verifies their
 exact worker revisions and the unchanged running backend tasks and image digests.

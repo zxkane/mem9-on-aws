@@ -71,4 +71,9 @@ RUN chmod +x /bootstrap/entrypoint.sh
 
 # One-shot: applies schema + seeds the tenant, then exits 0. Not a server.
 USER node
+# Resolve the production entrypoints with the final filesystem and permissions.
+# Importing a module must not execute its CLI or contact AWS/the database.
+RUN --network=none node --input-type=module -e "\
+      await import('/bootstrap/operator/scripts/production-runtime-operator.mjs'); \
+      await import('/bootstrap/operator/scripts/production-consolidation-operator.mjs');"
 ENTRYPOINT ["/bootstrap/entrypoint.sh"]
