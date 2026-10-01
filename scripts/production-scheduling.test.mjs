@@ -1,6 +1,6 @@
 import {describe,it,expect} from 'vitest';
 import {activateProductionScheduling,verifyProductionScheduling,disableProductionScheduling,enableProductionScheduling,captureProductionBackend} from './lib/production-scheduling.mjs';
-import {productionArtifactAdmission,bindProductionBackend} from './lib/production-artifacts.mjs';
+import {productionArtifactAdmission,bindProductionBackend,validateProductionBackendBinding} from './lib/production-artifacts.mjs';
 
 const revision='a'.repeat(40),admission='b'.repeat(64),account='123456789012',region='ap-northeast-1';
 function deployment(){
@@ -28,13 +28,25 @@ function deployment(){
     if(command.constructor.name==='DescribeTaskDefinitionCommand')return {taskDefinition:{containerDefinitions:[server]}};
     if(command.constructor.name==='ListTasksCommand')return {taskArns:[clusterArn.replace(':cluster/',':task/')+'/'+'a'.repeat(32)]};
     if(command.constructor.name==='DescribeTasksCommand')return {tasks:[{taskArn:clusterArn.replace(':cluster/',':task/')+'/'+'a'.repeat(32),
-      taskDefinitionArn:`arn:aws:ecs:${region}:${account}:task-definition/${cluster}-Mem9Server:1`,clusterArn,lastStatus:'RUNNING',
+      taskDefinitionArn:`arn:aws:ecs:${region}:${account}:task-definition/${cluster}-Mem9RuntimeServer:1`,clusterArn,lastStatus:'RUNNING',
       containers:['mnemo-server','qwen3-embed','llm-proxy'].map(name=>({name,imageDigest:'sha256:'+'e'.repeat(64)}))}]};
     throw Error('UnexpectedCommand');
   };
   return {targets,calls,server,clients:{ecs:{send},scheduler:{send}}};
 }
 describe('production scheduling admission and deployment',()=>{
+  it('TC-CONS-WORKER-014 accepts the deployed runtime family and rejects legacy or foreign families',()=>{
+    const f=deployment(),target=f.targets[0];
+    const binding={taskArn:target.clusterArn.replace(':cluster/',':task/')+'/'+'a'.repeat(32),
+      taskDefinitionArn:`arn:aws:ecs:${region}:${account}:task-definition/${target.cluster}-Mem9RuntimeServer:2`,
+      containers:['mnemo-server','qwen3-embed','llm-proxy'].map(name=>({name,imageDigest:'sha256:'+'e'.repeat(64)}))};
+    expect(validateProductionBackendBinding(binding,target.clusterArn).taskDefinitionArn).toBe(binding.taskDefinitionArn);
+    for(const taskDefinitionArn of [binding.taskDefinitionArn.replace('Mem9RuntimeServer','Mem9Server'),
+      binding.taskDefinitionArn.replace('Mem9RuntimeServer','Mem9RuntimeServerExtra'),
+      binding.taskDefinitionArn.replace(target.cluster,target.cluster+'-foreign'),binding.taskDefinitionArn.replace(':2',':0')]){
+      expect(()=>validateProductionBackendBinding({...binding,taskDefinitionArn},target.clusterArn)).toThrow('InvalidProductionBackendBinding');
+    }
+  });
   it('requires HTTP capability but disabled recurrence during the canary',async()=>{
     const f=deployment();expect((await verifyProductionScheduling(f.clients,f.targets,{enabled:false})).enabled).toBe(false);
     f.server.environment[0].value='false';await expect(verifyProductionScheduling(f.clients,f.targets,{enabled:false})).rejects.toThrow();

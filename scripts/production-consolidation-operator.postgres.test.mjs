@@ -79,7 +79,7 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
           authorityVerified:true,alterCommandAccepted:true,createCommandAccepted:true,dropCommandAccepted:true,vectorOperationsVerified:true,
           upgradeStatus:'no_upgrade_available',sourceVersion:catalog.installedVersion,targetVersion:catalog.installedVersion}}};
       const backendBinding={taskArn:identity.clusterArn.replace(':cluster/',':task/')+'/'+'a'.repeat(32),
-        taskDefinitionArn:identity.fallbackTaskDefinition.replace('Mem9RuntimeServer','Mem9Server'),
+        taskDefinitionArn:identity.fallbackTaskDefinition,
         containers:['mnemo-server','qwen3-embed','llm-proxy'].map(name=>({name,imageDigest:'sha256:'+'e'.repeat(64)}))};
       const request=operation=>({operation,invocation:nonce,deadline:Date.now()+60000,...(operation==='baseline'?{backendBinding}: {})});
       await work({root,admin,config,request,connect,namespace,principal,nonce,executor,legacy});

@@ -6,7 +6,7 @@ import {schemaAdministratorRole} from './lib/production-runtime-config.mjs';
 import {runtimeRoleName} from './lib/runtime-credentials.mjs';
 import {secureCredentialDdlLogging,scramVerifier} from './lib/consolidation-preview-secrets.mjs';
 import {readExtensionCatalog,assertExtensionMaintenance} from './lib/runtime-extension-catalog.mjs';
-import {requireNamespaceId} from './lib/maintenance-scope.mjs';
+import {requireServiceNamespace as requireNamespaceId} from '../infra/gateway/service-auth.mjs';
 import {verifyCanaryReceiptChains,verifyProtectedCanaryBaseline,canaryEvidenceHash} from './lib/production-canary-verification.mjs';
 import {decodeCanaryReport,verifyCanaryReport,decodeBenchmarkRefs,readCanaryReportFragments,canaryReportDigest} from './lib/production-canary-report.mjs';
 import {canaryBenchmarkHashes} from './lib/canary-benchmark.mjs';
