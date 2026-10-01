@@ -1899,7 +1899,9 @@ jobs:
       MEM9_RUNTIME_READY: "1"
       MEM9_DURABLE_INGEST_ENABLED: "1"
       WORKLOAD_BOUNDARY_PROD_ENABLED: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
-      MEM9_CONSOLIDATION_SCHEDULE_ENABLED: ${{ vars.MEM9_NAMESPACE_CONSOLIDATION_SCHEDULE_ENABLED || '0' }}
+      # Match normal preview CI; the production weekly-task opt-in is not a
+      # preview target configuration. Continuous preview workers are separate.
+      MEM9_CONSOLIDATION_SCHEDULE_ENABLED: "0"
       MEM9_BEDROCK_PROJECT: ${{ vars.MEM9_BEDROCK_PROJECT }}
       MEM9_BEDROCK_PROJECT_OPENAI: ${{ vars.MEM9_BEDROCK_PROJECT_OPENAI }}
       MEM9_LLM_RESPONSES_REGION: ${{ vars.MEM9_LLM_RESPONSES_REGION }}

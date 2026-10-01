@@ -1615,8 +1615,9 @@ it cannot by itself authorize production activation.
 
 Production continuous workers are provisioned only after the runtime migration
 is active. Cutover deployments preserve the stage's validated maintenance target
-list from SSM, including manual previews whose original CI supplied an ephemeral
-SST override. Conflicting overrides stop deployment. Disposable preview teardown
+list from SSM. Preview rehearsals keep legacy weekly scheduling disabled, matching
+normal preview CI, independently of the production opt-in. Conflicting overrides
+stop deployment. Disposable preview teardown
 does not require an enabled schedule or a surviving target parameter.
 
 Production continuous workers keep the legacy weekly schedule disabled once migration

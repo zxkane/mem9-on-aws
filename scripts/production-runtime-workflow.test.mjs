@@ -1,6 +1,7 @@
 import {readFileSync} from 'node:fs';
 import {describe,it,expect} from 'vitest';
 import {parse} from 'yaml';
+import {cutoverDeploymentEnvironment} from './run-production-runtime.mjs';
 
 const recovery=parse(readFileSync(new URL('../.github/workflows/runtime-recovery.yml',import.meta.url),'utf8'));
 const cutover=parse(readFileSync(new URL('../.github/actions/runtime-cutover/action.yml',import.meta.url),'utf8'));
@@ -15,6 +16,15 @@ async function classify({branch='main',event='workflow_dispatch',jobs,path='.git
   return outputs;
 }
 describe('independent cutover cancellation recovery',()=>{
+  it('keeps preview rehearsal scheduling aligned with normal preview instead of the production opt-in',async()=>{
+    const preview=ci.jobs['runtime-cutover-preview'];
+    expect(preview.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED).toBe('0');
+    expect(ci.jobs['deploy-preview'].env?.MEM9_CONSOLIDATION_SCHEDULE_ENABLED??'0').toBe('0');
+    expect(ci.jobs['runtime-cutover-prod'].env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED).toContain('vars.MEM9_NAMESPACE_CONSOLIDATION_SCHEDULE_ENABLED');
+    const clients={ssm:{send:async command=>({Parameters:[{Name:command.input.Names[0],Value:'[]'}]})}};
+    const env=await cutoverDeploymentEnvironment(clients,'pr-7',preview.env);
+    expect(env.SST_SECRET_MaintenanceNamespaceIds).toBe('[]');
+  });
   it('runs independently after source completion with literal protected environments and shared serialization',()=>{
     expect(recovery.on.workflow_run).toEqual({workflows:['Infra CI'],types:['completed']});
     expect(recovery.jobs.source.if).toContain('head_repository.full_name == github.repository');
