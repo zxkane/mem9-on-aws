@@ -1,0 +1,93 @@
+import {execFileSync,execFile,spawn} from 'node:child_process';
+import {promisify} from 'node:util';
+import {mkdtemp,writeFile,rename,chmod} from 'node:fs/promises';
+import {join} from 'node:path';
+import {tmpdir} from 'node:os';
+import {pathToFileURL} from 'node:url';
+import {SSMClient} from '@aws-sdk/client-ssm';
+import {ECSClient} from '@aws-sdk/client-ecs';
+import {IAMClient} from '@aws-sdk/client-iam';
+import {STSClient} from '@aws-sdk/client-sts';
+import {SchedulerClient} from '@aws-sdk/client-scheduler';
+import {CloudWatchLogsClient} from '@aws-sdk/client-cloudwatch-logs';
+import {resolveApplicationRegion} from './lib/application-region.mjs';
+import {runProductionConsolidationTask} from './run-production-consolidation.mjs';
+import {loadProductionCanaryWorker,runProductionCanaryWake,recoverProductionCanaryDeliveries,quiesceProductionWorkers} from './lib/production-canary-delivery.mjs';
+import {loadMcpCanaryConfiguration,createMcpCanaryClient,sampleMcpCanaryCohort} from './lib/mcp-canary-sampler.mjs';
+import {runProductionCanaryFlow} from './lib/production-canary-flow.mjs';
+import {activateProductionScheduling,verifyProductionScheduling,disableProductionScheduling,enableProductionScheduling,captureProductionBackend} from './lib/production-scheduling.mjs';
+import {canaryEvidenceHash} from './lib/production-canary-verification.mjs';
+import {bindProductionBackend} from './lib/production-artifacts.mjs';
+
+const execute=promisify(execFile),repository='zxkane/mem9-on-aws';
+const gh=async args=>(await execute('gh',args,{timeout:30000,maxBuffer:2*1024*1024})).stdout.trim();
+async function setSchedulingSecret(name,value){
+  if(!['ProductionConsolidationAdmission','ProductionConsolidationEnabled'].includes(name)||
+    !(name.endsWith('Enabled')?/^[01]$/:/^[a-f0-9]{64}$/).test(value))throw Error('InvalidSchedulingSecret');
+  await new Promise((resolve,reject)=>{
+    const child=spawn('pnpm',['-C','infra','exec','sst','secret','set',name,'--stage','prod'],{stdio:['pipe','ignore','ignore']});
+    const timer=setTimeout(()=>{child.kill('SIGTERM');reject(Error('SchedulingSecretTimeout'));},600000);timer.unref();
+    child.on('error',()=>{clearTimeout(timer);reject(Error('SchedulingSecretFailed'));});
+    child.on('close',code=>{clearTimeout(timer);code===0?resolve():reject(Error('SchedulingSecretFailed'));});
+    child.stdin.on('error',()=>{});child.stdin.end(value);
+  });
+}
+
+export async function runProductionCanary({clients,region,dailyRows=6000,basisPoints=5000,planningWaves=8,persist}){
+  const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8',timeout:10000}).trim();
+  const targets=[];
+  for(const kind of ['planner','executor'])targets.push(await loadProductionCanaryWorker(clients,{region,kind,revision}));
+  let mcp;
+  const admin=(operation,options={})=>runProductionConsolidationTask(clients,{region,operation,...options});
+  const reload=async()=>{
+    const current=[];for(const kind of ['planner','executor'])current.push(await loadProductionCanaryWorker(clients,{region,kind,revision}));
+    return current;
+  };
+  let backend;
+  const verifyScheduling=async options=>{
+    if(options.enabled&&!options.backendBinding&&!backend)throw Error('ProductionBackendBindingMissing');
+    const current=await reload();
+    if(current.some(target=>targets.find(original=>original.kind===target.kind)?.taskDefinitionArn!==target.taskDefinitionArn))throw Error('ProductionWorkerArtifactChanged');
+    const verified=await verifyProductionScheduling(clients,current,options),observed=await captureProductionBackend(clients,current[0]);
+    if(backend&&options.backendBinding)bindProductionBackend(backend,options.backendBinding,current[0].clusterArn);
+    backend=bindProductionBackend(options.backendBinding??backend,observed,current[0].clusterArn,!options.enabled);
+    return {...verified,backendHash:canaryEvidenceHash(backend),backendBinding:backend};
+  };
+  return runProductionCanaryFlow({
+    admin,persist,
+    verifyScheduling,
+    disableScheduling:async()=>{await setSchedulingSecret('ProductionConsolidationEnabled','0');await disableProductionScheduling(clients,await reload());},
+    activateScheduling:({admission,activationSeed})=>activateProductionScheduling({
+      currentMain:()=>gh(['api',`repos/${repository}/commits/main`,'--jq','.sha']),setSecret:setSchedulingSecret,
+      enable:options=>enableProductionScheduling(clients,targets,options),
+      verify:verifyScheduling,
+    },{revision,admission,activationSeed}),
+    recoverDeliveries:()=>recoverProductionCanaryDeliveries(clients,targets),
+    quiesce:()=>quiesceProductionWorkers(clients,targets),
+    wake:(kind,wave,actions,onRunning,admission)=>runProductionCanaryWake(clients,targets.find(target=>target.kind===kind),{wave,actions,onRunning,admission}),
+    sample:async(validationId,phase,onWrite)=>{
+      mcp??=await createMcpCanaryClient(await loadMcpCanaryConfiguration(clients.ssm,'prod'));
+      return sampleMcpCanaryCohort(mcp,{validationId,phase,onWrite});
+    },
+  },{dailyRows,basisPoints,planningWaves});
+}
+
+async function main(){
+  if(process.env.STAGE!=='prod')throw Error('ProductionCanaryStageRequired');
+  const region=process.env.AWS_REGION||await resolveApplicationRegion();
+  const directory=await mkdtemp(join(tmpdir(),'mem9-production-canary-'));await chmod(directory,0o700);
+  const file=join(directory,'run.local.json');
+  const persist=async state=>{await writeFile(file+'.tmp',JSON.stringify(state),{mode:0o600});await rename(file+'.tmp',file);};
+  const clients={ssm:new SSMClient({region}),ecs:new ECSClient({region}),iam:new IAMClient({region}),sts:new STSClient({region}),
+    scheduler:new SchedulerClient({region}),logs:new CloudWatchLogsClient({region})};
+  process.stdout.write(JSON.stringify({event:'production_canary',phase:'started',journal:file})+'\n');
+  try{
+    const result=await runProductionCanary({clients,region,persist,dailyRows:Number(process.env.MEM9_PRODUCTION_DAILY_ROWS||6000),
+      basisPoints:Number(process.env.MEM9_PRODUCTION_BUDGET_BPS||5000),planningWaves:Number(process.env.MEM9_CANARY_PLANNING_WAVES||8)});
+    const {admission,activationSeed,...status}=result.status??{};
+    process.stdout.write(JSON.stringify({event:'production_canary',...result,status,journal:file})+'\n');
+  }finally{Object.values(clients).forEach(client=>client.destroy());}
+}
+if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)main().catch(()=>{
+  process.stdout.write(JSON.stringify({event:'production_canary',phase:'failed',errorClass:'ProductionCanaryFailed'})+'\n');process.exitCode=1;
+});

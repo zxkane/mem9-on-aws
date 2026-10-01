@@ -354,7 +354,7 @@
     },
     {
       "owner": "docker/bootstrap/migrations/005_consolidation_execution.sql",
-      "statement_sha256": "7758e526b9a327dd4cdbda597ca6a4987d452f458c6767b6e1339b8223520cbd",
+      "statement_sha256": "c9c647a6a8e15e05d067bc1abf2ec69b90bbaaef9973ec234f5ebbed3501510f",
       "classification": "namespace_composed_or_compatibility",
       "context": "Private execution routine apply_action; complete function, callers and grants reviewed.",
       "rationale": "Memory aliases are bound to the authorized p_namespace and the immutable participant set. Public execution is revoked; entry points bind real login capabilities and active namespace membership. Internal routines are invoked only behind the same transaction guard.",

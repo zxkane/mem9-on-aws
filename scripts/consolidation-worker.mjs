@@ -13,6 +13,8 @@ function seconds(value,fallback,max){
 }
 export function parseWorkerConfig(env=process.env){
   const kind=env.MEM9_WORKER_KIND,stage=env.MEM9_STAGE,generation=env.MEM9_WORKER_GENERATION;
+  const admission=stage==='prod'?env.MEM9_WORKER_ADMISSION:generation;
+  if(stage==='prod'&&!/^(?:[a-f0-9]{32}|[a-f0-9]{64})$/.test(admission??''))throw Error('production worker admission required');
   if(!Object.hasOwn(maxima,kind||'')||!stage||!/^[a-zA-Z0-9][a-zA-Z0-9-]{0,63}$/.test(stage)||
     !generation||!/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(generation))throw Error('invalid worker identity');
   let targets,credentials;
@@ -24,7 +26,7 @@ export function parseWorkerConfig(env=process.env){
     !/^[a-zA-Z_][a-zA-Z0-9_]{0,62}$/.test(credentials.username)||!env.MEM9_DB_HOST||!env.MEM9_DB_NAME)throw Error('worker credential required');
   const runtime=seconds(env.MEM9_WORKER_MAX_SECONDS,maxima[kind],maxima[kind]);
   const slice=seconds(env.MEM9_WORKER_SLICE_SECONDS,Math.min(180,runtime),runtime);
-  return {kind,stage,generation,targets,credentials,runtimeMs:runtime*1000,sliceMs:slice*1000,
+  return {kind,stage,generation,admission,targets,credentials,runtimeMs:runtime*1000,sliceMs:slice*1000,
     targetHash:createHash('sha256').update(targets.join('\n')).digest('hex')};
 }
 
@@ -128,6 +130,8 @@ export function runWorkerSlice(namespace,{kind,stage,environment=process.env,bud
 }
 
 async function main(){
+  const startedMs=Date.now(),invocation=process.env.MEM9_WORKER_INVOCATION;
+  if(invocation!==undefined&&!/^[a-f0-9]{32}$/.test(invocation))throw Error('invalid worker invocation');
   const config=parseWorkerConfig();
   const {default:pg}=await import('pg');
   const db=new pg.Client({host:process.env.MEM9_DB_HOST,port:Number(process.env.MEM9_DB_PORT||5432),database:process.env.MEM9_DB_NAME,
@@ -140,13 +144,13 @@ async function main(){
   try{
     await db.connect();
     const report=await runWorker({
-      acquire:()=>query('SELECT mem9_maintenance.acquire_dispatcher($1,$2,$3,$4) AS result',[config.kind,config.stage,config.targetHash,config.generation]),
+      acquire:()=>query('SELECT mem9_maintenance.acquire_dispatcher($1,$2,$3,$4) AS result',[config.kind,config.stage,config.targetHash,config.admission]),
       renew:l=>query('SELECT mem9_maintenance.renew_dispatcher($1,$2,$3) AS result',owned(l)),
       release:l=>query('SELECT mem9_maintenance.release_dispatcher($1,$2,$3) AS result',owned(l)),
       next:l=>query('SELECT mem9_maintenance.next_dispatcher_target($1,$2,$3) AS result',owned(l)),
       runSlice:(namespace,options)=>runWorkerSlice(namespace,{...options,kind:config.kind,stage:config.stage}),
     },config,{signal:abort.signal});
-    process.stdout.write(JSON.stringify(report)+'\n');
+    process.stdout.write(JSON.stringify({...report,startedMs,finishedMs:Date.now(),...(invocation?{invocation}:{})})+'\n');
     if(['lease_lost','partial_failure','interrupted'].includes(report.outcome))process.exitCode=1;
   }finally{await db.end();clearTimeout(hard);process.off('SIGTERM',stop);process.off('SIGINT',stop);}
 }

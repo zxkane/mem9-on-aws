@@ -16,6 +16,8 @@ function fixture(){
 
 describe('continuous consolidation dispatcher',()=>{
   it('requires explicit bounded targets and a kind-specific credential',()=>{
+    expect(()=>parseWorkerConfig({...env,MEM9_STAGE:'prod'})).toThrow();
+    expect(parseWorkerConfig({...env,MEM9_STAGE:'prod',MEM9_WORKER_ADMISSION:'a'.repeat(32)}).admission).toBe('a'.repeat(32));
     expect(parseWorkerConfig(env)).toMatchObject({kind:'planner',targets,stage:'pr-worker'});
     for(const patch of [{MEM9_WORKER_KIND:'owner'},{MEM9_WORKER_TARGETS:'[]'},
       {MEM9_WORKER_TARGETS:JSON.stringify([targets[0],targets[0]])},{MEM9_WORKER_TARGETS:'["not-a-namespace"]'},

@@ -132,6 +132,8 @@ export default $config({
     const {productionRuntimeResources,productionRuntimeTasks} = await import("./infra/production-runtime");
     const productionRuntime = productionRuntimeResources(previewRuntime,identityOut,namespaceIdentityOut,maintenanceIdentityOut);
     const runtime = productionRuntime?.active ? productionRuntime.runtime : previewRuntime;
+    const {productionConsolidationConfig,productionConsolidationOperators} = await import('./infra/production-consolidation');
+    const productionConsolidation = productionConsolidationConfig(productionRuntime,identityOut,dbOut);
 
     // ECS Fargate cluster + the mnemo-server service. Three containers:
     // mnemo-server, qwen3-embed (localhost /v1/embeddings, dims 1024), and
@@ -139,7 +141,8 @@ export default $config({
     // Takes db()'s Outputs DIRECTLY (a real Pulumi dependency) — NOT an SSM
     // read-back, which would fail on a fresh stage's first deploy.
     const { ecs } = await import("./infra/ecs");
-    const ecsOut = ecs(dbOut, identityOut, namespaceIdentityOut, maintenanceIdentityOut, runtime);
+    const ecsOut = ecs(dbOut, identityOut, namespaceIdentityOut, maintenanceIdentityOut, runtime,
+      productionConsolidation?String(productionConsolidation.executionEnabled):undefined);
 
     // MCP surface (§6/§6a): Cognito M2M → AgentCore Gateway → a VPC-attached proxy
     // Lambda that reaches mnemo-server privately over Cloud Map DNS. Threaded as
@@ -155,6 +158,7 @@ export default $config({
     const { bootstrap } = await import("./infra/bootstrap");
     bootstrap(ecsOut.cluster, dbOut, identityOut, cognitoOut, authConfig, consolidationPreview, runtime,productionRuntime);
     if(productionRuntime)productionRuntimeTasks(ecsOut,dbOut,identityOut,productionRuntime);
+    if(productionConsolidation&&productionRuntime)productionConsolidationOperators(ecsOut,dbOut,productionRuntime,productionConsolidation);
     // OAuth2 browser-login façade (§6): ApiGatewayV2 + reader client + façade
     // Lambda. Built BEFORE gateway() because it produces the reader client id the
     // gateway must trust. The façade reads gateway/url from SSM at RUNTIME, so it
@@ -177,7 +181,8 @@ export default $config({
     // authorized namespace. Scheduling additionally requires explicit targets.
     if (process.env.MEM9_NAMESPACE_REQUIRED === "1") {
       const { consolidation } = await import("./infra/consolidation");
-      const workers = consolidationPreview ? continuousConsolidationTasks(ecsOut, dbOut, consolidationPreview, maintenanceIdentityOut) : [];
+      const workerConfig=productionConsolidation??consolidationPreview;
+      const workers = workerConfig ? continuousConsolidationTasks(ecsOut, dbOut, workerConfig, maintenanceIdentityOut) : [];
       consolidation(ecsOut, dbOut, identityOut, maintenanceIdentityOut, workers);
       const { standaloneCleanupTask } = await import("./infra/maintenance-cleanup");
       standaloneCleanupTask(ecsOut, dbOut, identityOut, maintenanceIdentityOut);

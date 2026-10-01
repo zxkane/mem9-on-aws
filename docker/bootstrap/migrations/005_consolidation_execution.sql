@@ -405,7 +405,8 @@ BEGIN
   FOREACH scope_name IN ARRAY ARRAY['stage',p_namespace] LOOP
     SELECT * INTO w FROM mem9_maintenance.budget_windows WHERE scope=scope_name AND day=p_day;
     SELECT p.policy INTO policy FROM mem9_maintenance.budget_policies p WHERE p.scope=scope_name;
-    IF p_empty AND (p_cost->>'total')::bigint>(policy->>'burst')::numeric THEN RETURN FALSE; END IF;
+    -- Burst is measured in actions, not changed rows. Row capacity belongs to
+    -- the independent per-class risk limits checked below.
     FOREACH k IN ARRAY ARRAY['total','rewrite','delete','archive','mark'] LOOP
       lim:=least((w.limits->>k)::bigint,(policy->'limits'->>k)::bigint);
       IF scope_name<>'stage' THEN lim:=least(lim,ceil(w.active_count*(policy->'bps'->>k)::numeric/10000)::bigint); END IF;
@@ -629,7 +630,9 @@ BEGIN
   IF NOT mem9_maintenance.action_inputs_valid(p_namespace,p_id) THEN
     PERFORM mem9_maintenance.release_action(p_namespace,p_id,'invalidated','context_changed'); RETURN jsonb_build_object('status','invalidated'); END IF;
   IF NOT mem9_maintenance.execution_valid(p_namespace,p_id,p_generation) THEN RAISE EXCEPTION USING ERRCODE='55000',MESSAGE='execution authorization expired'; END IF;
-  IF NOT mem9_maintenance.take_apply_rate(p_namespace,(a.cost->>'total')::int) THEN RETURN jsonb_build_object('status','rate_wait'); END IF;
+  -- Rate and burst count atomic actions; risk reservations/settlement below
+  -- still charge every changed row. A burst of one must admit a multi-row merge.
+  IF NOT mem9_maintenance.take_apply_rate(p_namespace,1) THEN RETURN jsonb_build_object('status','rate_wait'); END IF;
   SELECT principal_id INTO actor FROM public.memory_principals WHERE principal_key=
     encode(sha256(convert_to('mem9-service-principal-v1','UTF8')||decode('00','hex')||convert_to('consolidation','UTF8')),'hex');
   target:=a.output->>'target';

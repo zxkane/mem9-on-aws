@@ -51,6 +51,9 @@ declare function $jsonStringify(value: unknown): Output<string>;
 
 // ── The `aws` provider surface the scaffold touches ─────────────────────────
 declare namespace aws {
+  namespace ecr {
+    function getImageOutput(args:{repositoryName:Input<string>;imageTag:Input<string>;registryId:Input<string>;region:Input<string>}):{imageDigest:Output<string>};
+  }
   // Caller identity — infra/ecs.ts uses accountId to compose the ECR image URI
   // (never a hardcoded account id in committed code).
   interface GetCallerIdentityResult {

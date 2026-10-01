@@ -46,6 +46,12 @@ COPY scripts/consolidation-preview-fixture.mjs /bootstrap/operator/scripts/conso
 COPY scripts/runtime-bootstrap.mjs /bootstrap/operator/scripts/runtime-bootstrap.mjs
 COPY scripts/runtime-admin-probe.mjs /bootstrap/operator/scripts/runtime-admin-probe.mjs
 COPY scripts/production-runtime-operator.mjs /bootstrap/operator/scripts/production-runtime-operator.mjs
+COPY scripts/production-consolidation-operator.mjs /bootstrap/operator/scripts/production-consolidation-operator.mjs
+COPY scripts/lib/production-canary-verification.mjs /bootstrap/operator/scripts/lib/production-canary-verification.mjs
+COPY scripts/lib/production-canary-performance.mjs /bootstrap/operator/scripts/lib/production-canary-performance.mjs
+COPY scripts/lib/production-canary-report.mjs /bootstrap/operator/scripts/lib/production-canary-report.mjs
+COPY scripts/lib/canary-benchmark.mjs /bootstrap/operator/scripts/lib/canary-benchmark.mjs
+COPY scripts/lib/production-artifacts.mjs /bootstrap/operator/scripts/lib/production-artifacts.mjs
 COPY scripts/lib/production-runtime-config.mjs /bootstrap/operator/scripts/lib/production-runtime-config.mjs
 COPY scripts/lib/production-runtime-state.mjs /bootstrap/operator/scripts/lib/production-runtime-state.mjs
 COPY scripts/lib/production-runtime-credentials.mjs /bootstrap/operator/scripts/lib/production-runtime-credentials.mjs

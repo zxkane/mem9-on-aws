@@ -10,9 +10,26 @@ vi.mock('./lib/production-runtime-backup.mjs',async importOriginal=>({...await i
   inspectProductionDatabase:async()=>({databaseClusterId:'synthetic',databaseResourceId:'synthetic-id',masterUsername:'original',engineVersion:'17.4'}),
   ensureProductionSnapshot:async()=>{throw Error('SyntheticStopAfterPlan');},
 }));
-import {runProductionRuntime} from './run-production-runtime.mjs';
+import {runProductionRuntime,cutoverDeploymentEnvironment} from './run-production-runtime.mjs';
 
 describe('fresh runtime preparation plan',()=>{
+  it('preserves the deployed namespace targets when a manual rehearsal has no SST secret override',async()=>{
+    const target='60000000-0000-4000-8000-000000000001',path='/mem9-on-aws/pr-7/maintenance/targets',calls=[];
+    const clients={ssm:{send:async command=>{calls.push(command.input);return {Parameters:[{Name:path,Value:JSON.stringify([target])}]};}}};
+    const env={MEM9_CONSOLIDATION_SCHEDULE_ENABLED:'1',UNRELATED:'unchanged'};
+    expect(await cutoverDeploymentEnvironment(clients,'pr-7',env)).toEqual({...env,SST_SECRET_MaintenanceNamespaceIds:JSON.stringify([target])});
+    expect(calls).toEqual([{Names:[path],WithDecryption:true}]);
+    await expect(cutoverDeploymentEnvironment(clients,'pr-7',{...env,SST_SECRET_MaintenanceNamespaceIds:'[]'})).rejects.toThrow('CutoverMaintenanceTargetsConflict');
+  });
+  it.each(['null','["foreign"]','[]','["60000000-0000-4000-8000-000000000001","60000000-0000-4000-8000-000000000001"]'])('rejects invalid or empty enabled namespace targets: %s',async value=>{
+    const clients={ssm:{send:async command=>({Parameters:[{Name:command.input.Names[0],Value:value}]})}};
+    await expect(cutoverDeploymentEnvironment(clients,'prod',{MEM9_CONSOLIDATION_SCHEDULE_ENABLED:'1'})).rejects.toThrow();
+  });
+  it('allows missing targets only for a disabled schedule without an explicit override',async()=>{
+    const clients={ssm:{send:async command=>({InvalidParameters:command.input.Names})}};
+    await expect(cutoverDeploymentEnvironment(clients,'prod',{MEM9_CONSOLIDATION_SCHEDULE_ENABLED:'1'})).rejects.toThrow('CutoverMaintenanceTargetsMissing');
+    expect((await cutoverDeploymentEnvironment(clients,'prod',{})).SST_SECRET_MaintenanceNamespaceIds).toBe('[]');
+  });
   it('persists workflow attempt provenance and compact source metadata without the task descriptor',async()=>{
     const writes=[];
     const send=async command=>{

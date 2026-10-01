@@ -22,10 +22,49 @@ import {inspectProductionDatabase,ensureProductionSnapshot,removePreviewSnapshot
 import {restoreMissingAdministrator,armAdministratorLoss,deletePreviewAdministrator,validateAdministratorLossIntent,administratorLossDeadlines} from './lib/production-runtime-administrator.mjs';
 import {assertExtensionMaintenance} from './lib/runtime-extension-catalog.mjs';
 import {cancellationRehearsal} from './lib/production-runtime-cancellation-runner.mjs';
+import {requireNamespaceId} from './lib/maintenance-scope.mjs';
 
 const runProcess=promisify(execFile),send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
 const emit=value=>process.stdout.write(JSON.stringify({event:'production_runtime_rollout',...value})+'\n');
 const digest=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
+
+export function safeProductionCommandFailure(error){
+  const output=String(error?.stdout??'')+'\n'+String(error?.stderr??'');
+  const signals=['AccessDenied','ValidationException','AlreadyExists','TypeError','ReferenceError','Concurrent update detected','ERR_CHILD_PROCESS_STDIO_MAXBUFFER']
+    .filter(signal=>output.includes(signal)||error?.code===signal);
+  const reasons=output.match(/\breasons=([a-z_,]+)/)?.[1]?.split(',')??[];
+  const allowed=new Set(['desired_state_unavailable','ecs_state_unavailable','service_lookup','multiple_deployments','stabilization_timeout',
+    'no_running_tasks','task_lookup','task_not_running','mixed_task_definitions','task_definition_mismatch','missing_container','mixed_image_tags','image_tag_mismatch','command_failed']);
+  return {exitCode:Number.isInteger(error?.code)?error.code:null,signals,reasons:reasons.filter(reason=>allowed.has(reason))};
+}
+
+async function executeProductionCommand(file,args,options){
+  try{return await runProcess(file,args,options);}
+  catch(error){emit({phase:'command-failed',...safeProductionCommandFailure(error)});throw error;}
+}
+
+export async function cutoverDeploymentEnvironment(clients,stage,env){
+  if(!rolloutStage(stage)||!['0','1'].includes(env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED??'0'))throw Error('InvalidCutoverMaintenanceConfiguration');
+  const name=`/mem9-on-aws/${stage}/maintenance/targets`;
+  const result=await send(clients.ssm,new GetParametersCommand({Names:[name],WithDecryption:true}));
+  const missing=result.InvalidParameters?.includes(name);
+  let targets=[];
+  if(missing){
+    if(env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED==='1'||env.SST_SECRET_MaintenanceNamespaceIds!==undefined)throw Error('CutoverMaintenanceTargetsMissing');
+  }else{
+    if(result.Parameters?.length!==1||result.Parameters[0].Name!==name)throw Error('InvalidCutoverMaintenanceTargets');
+    try{targets=JSON.parse(result.Parameters[0].Value);
+      if(!Array.isArray(targets)||targets.length>32||new Set(targets).size!==targets.length)throw Error();
+      targets=targets.map(requireNamespaceId);
+    }catch{throw Error('InvalidCutoverMaintenanceTargets');}
+    if(env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED==='1'&&!targets.length)throw Error('CutoverMaintenanceTargetsMissing');
+  }
+  if(env.SST_SECRET_MaintenanceNamespaceIds!==undefined){
+    let expected;try{expected=JSON.parse(env.SST_SECRET_MaintenanceNamespaceIds);}catch{throw Error('CutoverMaintenanceTargetsConflict');}
+    if(JSON.stringify(expected)!==JSON.stringify(targets))throw Error('CutoverMaintenanceTargetsConflict');
+  }
+  return {...env,SST_SECRET_MaintenanceNamespaceIds:JSON.stringify(targets)};
+}
 
 export async function productionCoordinatorDigest(){
   const paths=['scripts/run-production-runtime.mjs','scripts/lib/production-runtime-aws.mjs','scripts/lib/production-runtime-backup.mjs',
@@ -35,6 +74,11 @@ export async function productionCoordinatorDigest(){
     'sst.config.ts','infra/cloudformation/github-actions-role.yaml','.github/workflows/infra-ci.yml',
     '.github/workflows/runtime-recovery.yml','.github/actions/runtime-cutover/action.yml','.github/actions/runtime-recovery/action.yml',
     '.github/actions/runtime-cleanup/action.yml','package-lock.json','infra/pnpm-lock.yaml'];
+  paths.push('infra/production-consolidation.ts','infra/consolidation-runtime.ts','scripts/production-consolidation-operator.mjs',
+    'scripts/run-production-consolidation.mjs','scripts/run-production-canary.mjs','scripts/consolidation-worker.mjs','scripts/consolidation-canary-replay.mjs',
+    'scripts/lib/production-canary-verification.mjs','scripts/lib/production-canary-report.mjs','scripts/lib/production-canary-performance.mjs',
+    'scripts/lib/production-canary-delivery.mjs','scripts/lib/production-canary-flow.mjs','scripts/lib/production-scheduling.mjs',
+    'scripts/lib/mcp-canary-sampler.mjs','scripts/lib/canary-benchmark.mjs','scripts/lib/production-artifacts.mjs','infra/ecr.ts');
   const hash=createHash('sha256');
   for(const path of paths.sort()){hash.update(path+'\0');hash.update(await readFile(new URL('../'+path,import.meta.url)));}
   return hash.digest('hex');
@@ -71,7 +115,7 @@ async function readOptional(clients,name){
   try{return JSON.parse(r.Parameters[0].Value);}catch{throw Error('RuntimeRoutingInvalid');}
 }
 
-export async function runProductionRuntime({clients,stage,region,command,env=process.env,execute=runProcess}){
+export async function runProductionRuntime({clients,stage,region,command,env=process.env,execute=executeProductionCommand}){
   if(!rolloutStage(stage)||!['configure','image','prepare','apply','finalize','recover','resume','status','cleanup-preview','rehearse','catalog','arm-cancellation'].includes(command))throw Error('InvalidProductionCommand');
   if(command==='rehearse'&&stage==='prod')throw Error('PreviewAdministratorRehearsalOnly');
   if(!['0','1'].includes(env.MEM9_RUNTIME_CANCELLATION_DRILL??'0')||
@@ -158,7 +202,8 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
     if(!['off','prepare','paused','ready','active'].includes(mode))throw Error('InvalidProductionManifest');
     const pending=plan?.clusterArn?await cancelProductionInvocations(clients,plan):[];
     await execute('pnpm',['-C','infra','exec','sst','remove','--stage',stage,'--print-logs'],{cwd:process.cwd(),
-      env:{...env,MEM9_NAMESPACE_REQUIRED:'1',MEM9_PRODUCTION_RUNTIME_MODE:mode,...(plan?{MEM9_RUNTIME_FALLBACK_IMAGES:JSON.stringify(plan.fallbackImages)}:{})},
+      env:{...env,MEM9_NAMESPACE_REQUIRED:'1',MEM9_CONSOLIDATION_SCHEDULE_ENABLED:'0',SST_SECRET_MaintenanceNamespaceIds:'[]',
+        MEM9_PRODUCTION_RUNTIME_MODE:mode,...(plan?{MEM9_RUNTIME_FALLBACK_IMAGES:JSON.stringify(plan.fallbackImages)}:{})},
       timeout:2400000,maxBuffer:8*1024*1024});
     if(plan?.databaseClusterId)await removePreviewSnapshot(clients,plan);
     await acknowledgeProductionCancellation(clients,pending);
@@ -172,11 +217,15 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
   const deploy=async mode=>{
     if(!plan)throw Error('ProductionPlanMissing');
     emit({phase:'deploy-'+mode});
+    const deploymentEnv=await cutoverDeploymentEnvironment(clients,stage,env);
     await execute('pnpm',['-C','infra','exec','sst','deploy','--stage',stage,'--print-logs'],{
-      cwd:process.cwd(),env:{...env,MEM9_PRODUCTION_RUNTIME_MODE:mode,MEM9_RUNTIME_FALLBACK_IMAGES:JSON.stringify(plan.fallbackImages)},
+      cwd:process.cwd(),env:{...deploymentEnv,MEM9_PRODUCTION_RUNTIME_MODE:mode,MEM9_RUNTIME_FALLBACK_IMAGES:JSON.stringify(plan.fallbackImages)},
       timeout:1200000,maxBuffer:8*1024*1024});
+    emit({phase:'resources-deployed',mode});
     meta=await loadProductionManifest(clients,{stage,region});
+    emit({phase:'manifest-verified',mode});
     await execute(process.execPath,['scripts/reconcile-ecs-deployment.mjs','--stage',stage],{cwd:process.cwd(),env:{...env,AWS_REGION:region},timeout:1800000,maxBuffer:2*1024*1024});
+    emit({phase:'service-reconciled',mode});
   };
   const invoke=async(operation,state,extra={},limits={})=>{
     meta=await loadProductionManifest(clients,{stage,region});
