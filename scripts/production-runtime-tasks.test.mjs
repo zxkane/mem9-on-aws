@@ -37,6 +37,11 @@ function fixture({loseReply=false}={}){
 }
 
 describe('production invocation recovery',()=>{
+  it('cannot use a catalog-only target for a mutating operation',async()=>{
+    const f=fixture();await expect(invokeProductionTask(f.clients,{...meta,mode:'catalog'},
+      {operation:'prepare',nonce:'a'.repeat(32),epoch:1},{now:f.now,sleep:f.sleep})).rejects.toThrow('CatalogOnlyTarget');
+    expect(f.calls).toEqual([]);
+  });
   it('preserves the pre-launch journal after an accepted request loses its response',async()=>{
     const f=fixture({loseReply:true});
     await expect(invokeProductionTask(f.clients,meta,{operation:'status',nonce:'a'.repeat(32),epoch:1},{now:f.now,sleep:f.sleep})).rejects.toThrow('SyntheticLostReply');
@@ -44,6 +49,19 @@ describe('production invocation recovery',()=>{
     const stopped=await cancelProductionInvocations(f.clients,meta,{now:f.now,sleep:f.sleep});
     expect(stopped).toHaveLength(1);expect(f.tasks[0].lastStatus).toBe('STOPPED');
     expect(f.journals.size).toBe(1); // DB recovery must acknowledge it separately.
+  });
+  it.each([{operation:'resume',expected_hash:'c'.repeat(64)},{operation:'rehearsal-preservation',checkpoint_sequence:8}])('forwards the complete cancellation protocol through the real task adapter: %o',async fields=>{
+    const f=fixture({loseReply:true});
+    await expect(invokeProductionTask(f.clients,meta,{...fields,nonce:'a'.repeat(32),epoch:3},{now:f.now,sleep:f.sleep})).rejects.toThrow('SyntheticLostReply');
+    const value=f.tasks[0].overrides.containerOverrides[0].environment.find(entry=>entry.name==='MEM9_PRODUCTION_RUNTIME_REQUEST').value;
+    expect(JSON.parse(value)).toMatchObject(fields);
+    expect(JSON.parse([...f.journals.values()][0]).request).toMatchObject(fields);
+  });
+  it.each([{operation:'status',expected_hash:'c'.repeat(64)},{operation:'resume',expected_hash:'bad'},
+    {operation:'rehearsal-preservation',checkpoint_sequence:0},{operation:'status',checkpoint_sequence:8}])('rejects invalid cancellation protocol before launch: %o',async fields=>{
+    const f=fixture({loseReply:true});
+    await expect(invokeProductionTask(f.clients,meta,{...fields,nonce:'a'.repeat(32),epoch:3},{now:f.now,sleep:f.sleep})).rejects.toThrow('InvalidProductionInvocation');
+    expect(f.calls.some(call=>call.name==='RunTaskCommand')).toBe(false);
   });
   it('rejects command, environment and role override drift',()=>{
     const request={operation:'status',nonce:'a'.repeat(32),epoch:1,deadline:Date.now()+60000};

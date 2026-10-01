@@ -70,6 +70,9 @@ function mockCall(args: MockCallArgs): Record<string, unknown> {
       };
     case "aws:index/getRegion:getRegion":
       return { description: "mock region", name: region, region };
+    case "aws:ecr/getImage:getImage":
+      return {...args.inputs,id:'synthetic-image',imageDigest:'sha256:'+'a'.repeat(64),imageTags:[args.inputs.imageTag],
+        imageUri:`${accountId}.dkr.ecr.${region}.amazonaws.com/${args.inputs.repositoryName}@sha256:${'a'.repeat(64)}`};
     case "aws:ec2/getVpc:getVpc":
       return {
         ...args.inputs,
@@ -211,7 +214,9 @@ async function verifyMaintenanceGraph(scheduleEnabled: boolean, namespaceRequire
     name: "MNEMO_SERVICE_TRANSPORT_SIGNING_KEYS", valueFrom: parameterArn(bundle),
   }] : []);
   const schedules = recordedResources.filter(({ type }) => type === "aws:scheduler/schedule:Schedule");
-  expect(schedules).toHaveLength(namespaceRequired && scheduleEnabled ? 1 : 0);
+  const legacySchedules=schedules.filter(schedule=>schedule.name==='WeeklyMemoryConsolidation');
+  expect(legacySchedules).toHaveLength(namespaceRequired && scheduleEnabled ? 1 : 0);
+  expect(schedules.length-legacySchedules.length).toBe(productionMode==='active'?2:0);
   if (!namespaceRequired) {
     expect(containers.filter(({ container }) =>
       ["Mem9Consolidation", "Mem9Cleanup"].includes(container.name))).toEqual([]);
@@ -271,8 +276,8 @@ async function verifyMaintenanceGraph(scheduleEnabled: boolean, namespaceRequire
   }
 
   if (scheduleEnabled) {
-    expect(schedules[0].inputs.state).toBe(productionMode ? 'DISABLED' : 'ENABLED');
-    const target = schedules[0].inputs.target as Record<string, any>;
+    expect(legacySchedules[0].inputs.state).toBe(productionMode ? 'DISABLED' : 'ENABLED');
+    const target = legacySchedules[0].inputs.target as Record<string, any>;
     const override = JSON.parse(unwrapRpcSecret(target.input)).containerOverrides[0];
     expect(override).toMatchObject({
       name: "Mem9Consolidation", command: ["/app/scripts/dispatch-memory-consolidation.mjs"],
@@ -392,6 +397,7 @@ describe("workload role coverage from the real SST graph", () => {
   it.each([
     { label: "preview runtime preparation", scheduleEnabled: false, namespaceRequired: false, unsupportedFlag: undefined, runtimeReady: false },
     { label: "preview runtime ready", scheduleEnabled: false, namespaceRequired: true, unsupportedFlag: undefined, runtimeReady: true },
+    { label: "preview cutover preparation", scheduleEnabled: true, namespaceRequired: true, unsupportedFlag: undefined, runtimeReady: true, productionMode: 'prepare' },
     ...["prepare","paused","ready","active"].map(productionMode=>({label:`production runtime ${productionMode}`,scheduleEnabled:true,namespaceRequired:true,unsupportedFlag:undefined,productionMode})),
     { label: "scheduler disabled, compatibility mode", scheduleEnabled: false, namespaceRequired: false, unsupportedFlag: undefined },
     { label: "scheduler disabled, required namespaces", scheduleEnabled: false, namespaceRequired: true, unsupportedFlag: undefined },
@@ -435,6 +441,7 @@ describe("workload role coverage from the real SST graph", () => {
         SST_SECRET_SlackSigningSecret: undefined,
         MEM9_DECISION_ARTIFACT_BUCKET: `mem9-audit-${accountId}`,
         MEM9_DEPLOY_COMMIT: "a".repeat(40),
+        MEM9_IMAGE_TAG:'mem9-aaaaaaa',
         GITHUB_RUN_ID: "7",
         GITHUB_RUN_ATTEMPT: "1",
       };
@@ -521,6 +528,9 @@ describe("workload role coverage from the real SST graph", () => {
           authorizerRoleLogicalName,
           ...(namespaceRequired && scheduleEnabled ? ["Mem9ConsolidationSchedulerRole"] : []),
           ...(productionMode?["RuntimeMem9ServerExecutionRole","SchemaMem9BootstrapExecutionRole","TransitionMem9BootstrapTaskRole","TransitionMem9BootstrapExecutionRole"]:[]),
+          ...(productionMode==='active'?["Mem9ConsolidationPlannerTaskRole","Mem9ConsolidationPlannerExecutionRole","Mem9ConsolidationExecutorTaskRole","Mem9ConsolidationExecutorExecutionRole",
+            "ProdMem9BootstrapTaskRole","ProdMem9BootstrapExecutionRole","ControlMem9BootstrapTaskRole","ControlMem9BootstrapExecutionRole",
+            "PromoteMem9BootstrapTaskRole","PromoteMem9BootstrapExecutionRole"]:[]),
           ...(!namespaceRequired ? ["Mem9ConsolidationPlannerTaskRole", "Mem9ConsolidationPlannerExecutionRole",
             "Mem9ConsolidationExecutorTaskRole", "Mem9ConsolidationExecutorExecutionRole"] : []),
         ].sort();
@@ -584,6 +594,11 @@ describe("workload role coverage from the real SST graph", () => {
           const boot = JSON.parse(String(bootstrap.inputs.containerDefinitions))[0];
           expect(boot.secrets.find((s:any) => s.name === 'MEM9_RUNTIME_DB_SECRET').valueFrom).toBe(runtimeArn);
           expect(boot.secrets.find((s:any) => s.name === 'MEM9_DB_SECRET').valueFrom).not.toBe(runtimeArn);
+          if(productionMode)for(const name of ['RuntimeMem9ServerExecutionRole','SchemaMem9BootstrapExecutionRole']){
+            const role=oneResource('aws:iam/role:Role',name);
+            expect(role.inputs.name).toBe(`mem9-on-aws-${stage}-${name}-role`);
+            expect(role.inputs.permissionsBoundary).toBe(`arn:aws:iam::${accountId}:policy/${WORKLOAD_BOUNDARY_POLICY_NAME}`);
+          }
           return;
         }
         if (unsupportedFlag) {
@@ -606,10 +621,16 @@ describe("workload role coverage from the real SST graph", () => {
         ).toBe(true);
         await verifyMaintenanceGraph(scheduleEnabled, namespaceRequired, productionMode);
         if(productionMode){
+          const {unwrapRpcSecret}=await import(/* @vite-ignore */ moduleUrl('.sst/platform/node_modules/@pulumi/pulumi/runtime/rpc.js'));
+          const policyJson=(value:unknown)=>{
+            const raw=unwrapRpcSecret(value);
+            const policy=typeof raw==='string'?JSON.parse(raw):raw;
+            return {...policy,Statement:policy.Statement.map(({Sid,...statement}:Record<string,unknown>)=>statement)};
+          };
           const service=oneResource('aws:ecs/service:Service','Mem9ServerService');
           expect(service.inputs.desiredCount).toBe(productionMode==='paused'?0:1);
           const task=oneResource('aws:ecs/taskDefinition:TaskDefinition','Mem9ServerTask');
-          const server=JSON.parse(String(task.inputs.containerDefinitions)).find((c:any)=>c.name==='mnemo-server');
+          const server=JSON.parse(unwrapRpcSecret(task.inputs.containerDefinitions)).find((c:any)=>c.name==='mnemo-server');
           const runtimeArn=`arn:aws:ssm:${region}:${accountId}:parameter/mem9-on-aws/prod/runtime/database-credential`;
           const credential=server.secrets.find((s:any)=>s.name==='MEM9_DB_SECRET').valueFrom;
           if(productionMode==='prepare')expect(credential).not.toBe(runtimeArn);
@@ -619,17 +640,27 @@ describe("workload role coverage from the real SST graph", () => {
             expect(server.environment).toContainEqual({name:'MNEMO_SCHEMA_MODE',value:'verify'});
           }
           const fallback=oneResource('aws:ecs/taskDefinition:TaskDefinition','ProductionRuntimeFallback');
-          const containers=JSON.parse(String(fallback.inputs.containerDefinitions));
+          const containers=JSON.parse(unwrapRpcSecret(fallback.inputs.containerDefinitions));
           expect(containers).toHaveLength(3);
           expect(containers.every((c:any)=>/@sha256:[a-f0-9]{64}$/.test(c.image))).toBe(true);
           expect(containers.find((c:any)=>c.name==='mnemo-server').secrets).toContainEqual({name:'MEM9_DB_SECRET',valueFrom:runtimeArn});
-          for(const name of ['Mem9ServerExecutionRole','Mem9ServerTaskRole','Mem9BootstrapExecutionRole','Mem9ConsolidationExecutionRole','Mem9CleanupExecutionRole']){
+          for(const name of ['Mem9ServerExecutionRole','Mem9ServerTaskRole','Mem9BootstrapExecutionRole','Mem9BootstrapTaskRole','Mem9ConsolidationExecutionRole','Mem9ConsolidationTaskRole','Mem9CleanupExecutionRole','Mem9CleanupTaskRole']){
             const role=oneResource('aws:iam/role:Role',name);
+            expect(policyJson(role.inputs.assumeRolePolicy),`${name} inherited ECS trust`).toEqual({
+              Version:'2012-10-17',Statement:[{Effect:'Allow',Action:'sts:AssumeRole',Principal:{Service:'ecs-tasks.amazonaws.com'}}],
+            });
             const policy=(role.inputs.inlinePolicies as Array<{name:string;policy:string}>).find(p=>p.name==='ProductionCredentialFence');
             expect(policy,`${name} replacement credential fence`).toBeDefined();
-            const statements=JSON.parse(policy!.policy).Statement;
+            const statements=policyJson(policy!.policy).Statement;
             expect(statements.every((s:any)=>s.Effect==='Deny')).toBe(true);
             if(productionMode!=='prepare')expect(statements[0]).toMatchObject({Resource:'*',Action:expect.arrayContaining(['ssm:GetParameters','secretsmanager:GetSecretValue','kms:Decrypt'])});
+          }
+          for(const name of ['RuntimeMem9ServerExecutionRole','SchemaMem9BootstrapExecutionRole','TransitionMem9BootstrapTaskRole','TransitionMem9BootstrapExecutionRole']){
+            if(name.startsWith('Runtime')||name.startsWith('Schema')){
+              expect(oneResource('aws:iam/role:Role',name).inputs.name).toBe(`mem9-on-aws-${stage}-${name}-role`);
+            }
+            const trust=policyJson(oneResource('aws:iam/role:Role',name).inputs.assumeRolePolicy);
+            expect(trust.Statement[0].Condition).toEqual({StringEquals:{'aws:SourceAccount':accountId},ArnLike:{'aws:SourceArn':`arn:aws:ecs:${region}:${accountId}:*`}});
           }
         }
         if (!namespaceRequired) {
@@ -648,17 +679,9 @@ describe("workload role coverage from the real SST graph", () => {
         for (const { inputs, name } of createdRoles) {
           const physicalName = inputs.name ?? inputs.namePrefix;
           if (physicalName === undefined) {
-            // SST auto-names the role as `<app>-<stage>-<logicalName>-<suffix>`.
-            // That is the path MOST project roles take (Mem9ServerTaskRole,
-            // Mem9BootstrapExecutionRole, …), and it is required for names whose
-            // explicit prefix would exceed Pulumi's 38-char name_prefix cap. The
-            // boundary patterns are `mem9-on-a*-*<LogicalName>-*`, so the logical
-            // name is what must match.
-            // `expectedRoleNames` is already asserted above to equal the full
-            // set of created logical names, so membership here proves the role is
-            // a reviewed workload role whose auto-generated physical name will
-            // carry the `mem9-on-aws-<stage>-<logicalName>-` shape the boundary
-            // patterns match.
+            // These remaining roles come from SST components. Raw provider
+            // roles must supply a name; their default lacks project/stage scope.
+            expect(['RuntimeMem9ServerExecutionRole','SchemaMem9BootstrapExecutionRole']).not.toContain(name);
             expect(
               expectedRoleNames.includes(name),
               `${name} auto-named role must be a known workload role`,

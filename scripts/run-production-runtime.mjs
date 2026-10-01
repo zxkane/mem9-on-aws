@@ -15,21 +15,70 @@ import {runtimeSchemaDigest} from './lib/runtime-credentials.mjs';
 import {productionOperatorDigest} from './production-runtime-operator.mjs';
 import {rolloutStage} from './lib/production-runtime-config.mjs';
 import {captureProductionService,inventoryLegacyRoles,compactWriterInventory,fenceLegacyRoles,stopLegacyWriters,restorePinnedRuntime,auditAdditionalCredentialReaders} from './lib/production-runtime-aws.mjs';
-import {loadProductionManifest,invokeProductionTask,cancelProductionInvocations,acknowledgeProductionCancellation} from './lib/production-runtime-tasks.mjs';
+import {loadProductionManifest,loadLegacyCatalogTarget,invokeProductionTask,cancelProductionInvocations,acknowledgeProductionCancellation} from './lib/production-runtime-tasks.mjs';
 import {applyProductionCutover,finalizeProductionCutover,recoverProductionCutover} from './lib/production-runtime-flow.mjs';
 import {runtimeServerContract,verifyRuntimeRoles} from './lib/runtime-live-verification.mjs';
 import {inspectProductionDatabase,ensureProductionSnapshot,removePreviewSnapshot} from './lib/production-runtime-backup.mjs';
+import {restoreMissingAdministrator,armAdministratorLoss,deletePreviewAdministrator,validateAdministratorLossIntent,administratorLossDeadlines} from './lib/production-runtime-administrator.mjs';
+import {assertExtensionMaintenance} from './lib/runtime-extension-catalog.mjs';
+import {cancellationRehearsal} from './lib/production-runtime-cancellation-runner.mjs';
+import {requireNamespaceId} from './lib/maintenance-scope.mjs';
 
 const runProcess=promisify(execFile),send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
 const emit=value=>process.stdout.write(JSON.stringify({event:'production_runtime_rollout',...value})+'\n');
 const digest=value=>createHash('sha256').update(JSON.stringify(value)).digest('hex');
 
+export function safeProductionCommandFailure(error){
+  const output=String(error?.stdout??'')+'\n'+String(error?.stderr??'');
+  const signals=['AccessDenied','ValidationException','AlreadyExists','TypeError','ReferenceError','Concurrent update detected','ERR_CHILD_PROCESS_STDIO_MAXBUFFER']
+    .filter(signal=>output.includes(signal)||error?.code===signal);
+  const reasons=output.match(/\breasons=([a-z_,]+)/)?.[1]?.split(',')??[];
+  const allowed=new Set(['desired_state_unavailable','ecs_state_unavailable','service_lookup','multiple_deployments','stabilization_timeout',
+    'no_running_tasks','task_lookup','task_not_running','mixed_task_definitions','task_definition_mismatch','missing_container','mixed_image_tags','image_tag_mismatch','command_failed']);
+  return {exitCode:Number.isInteger(error?.code)?error.code:null,signals,reasons:reasons.filter(reason=>allowed.has(reason))};
+}
+
+async function executeProductionCommand(file,args,options){
+  try{return await runProcess(file,args,options);}
+  catch(error){emit({phase:'command-failed',...safeProductionCommandFailure(error)});throw error;}
+}
+
+export async function cutoverDeploymentEnvironment(clients,stage,env){
+  if(!rolloutStage(stage)||!['0','1'].includes(env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED??'0'))throw Error('InvalidCutoverMaintenanceConfiguration');
+  const name=`/mem9-on-aws/${stage}/maintenance/targets`;
+  const result=await send(clients.ssm,new GetParametersCommand({Names:[name],WithDecryption:true}));
+  const missing=result.InvalidParameters?.includes(name);
+  let targets=[];
+  if(missing){
+    if(env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED==='1'||env.SST_SECRET_MaintenanceNamespaceIds!==undefined)throw Error('CutoverMaintenanceTargetsMissing');
+  }else{
+    if(result.Parameters?.length!==1||result.Parameters[0].Name!==name)throw Error('InvalidCutoverMaintenanceTargets');
+    try{targets=JSON.parse(result.Parameters[0].Value);
+      if(!Array.isArray(targets)||targets.length>32||new Set(targets).size!==targets.length)throw Error();
+      targets=targets.map(requireNamespaceId);
+    }catch{throw Error('InvalidCutoverMaintenanceTargets');}
+    if(env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED==='1'&&!targets.length)throw Error('CutoverMaintenanceTargetsMissing');
+  }
+  if(env.SST_SECRET_MaintenanceNamespaceIds!==undefined){
+    let expected;try{expected=JSON.parse(env.SST_SECRET_MaintenanceNamespaceIds);}catch{throw Error('CutoverMaintenanceTargetsConflict');}
+    if(JSON.stringify(expected)!==JSON.stringify(targets))throw Error('CutoverMaintenanceTargetsConflict');
+  }
+  return {...env,SST_SECRET_MaintenanceNamespaceIds:JSON.stringify(targets)};
+}
+
 export async function productionCoordinatorDigest(){
   const paths=['scripts/run-production-runtime.mjs','scripts/lib/production-runtime-aws.mjs','scripts/lib/production-runtime-backup.mjs',
-    'scripts/lib/production-runtime-flow.mjs','scripts/lib/production-runtime-tasks.mjs','scripts/lib/runtime-live-verification.mjs',
+    'scripts/lib/production-runtime-cancellation.mjs','scripts/lib/production-runtime-cancellation-runner.mjs',
+    'scripts/lib/production-runtime-flow.mjs','scripts/lib/production-runtime-tasks.mjs','scripts/lib/production-runtime-administrator.mjs','scripts/lib/runtime-extension-catalog.mjs','scripts/lib/runtime-live-verification.mjs',
     'infra/production-runtime.ts','infra/ecs.ts','infra/bootstrap.ts','infra/consolidation.ts','infra/maintenance-cleanup.ts',
     'sst.config.ts','infra/cloudformation/github-actions-role.yaml','.github/workflows/infra-ci.yml',
-    '.github/workflows/runtime-recovery.yml','.github/actions/runtime-cutover/action.yml','package-lock.json','infra/pnpm-lock.yaml'];
+    '.github/workflows/runtime-recovery.yml','.github/actions/runtime-cutover/action.yml','.github/actions/runtime-recovery/action.yml',
+    '.github/actions/runtime-cleanup/action.yml','package-lock.json','infra/pnpm-lock.yaml'];
+  paths.push('infra/production-consolidation.ts','infra/consolidation-runtime.ts','scripts/production-consolidation-operator.mjs',
+    'scripts/run-production-consolidation.mjs','scripts/run-production-canary.mjs','scripts/consolidation-worker.mjs','scripts/consolidation-canary-replay.mjs',
+    'scripts/lib/production-canary-verification.mjs','scripts/lib/production-canary-report.mjs','scripts/lib/production-canary-performance.mjs',
+    'scripts/lib/production-canary-delivery.mjs','scripts/lib/production-canary-flow.mjs','scripts/lib/production-scheduling.mjs',
+    'scripts/lib/mcp-canary-sampler.mjs','scripts/lib/canary-benchmark.mjs','scripts/lib/production-artifacts.mjs','infra/ecr.ts');
   const hash=createHash('sha256');
   for(const path of paths.sort()){hash.update(path+'\0');hash.update(await readFile(new URL('../'+path,import.meta.url)));}
   return hash.digest('hex');
@@ -66,8 +115,11 @@ async function readOptional(clients,name){
   try{return JSON.parse(r.Parameters[0].Value);}catch{throw Error('RuntimeRoutingInvalid');}
 }
 
-export async function runProductionRuntime({clients,stage,region,command,env=process.env,execute=runProcess}){
-  if(!rolloutStage(stage)||!['configure','image','prepare','apply','finalize','recover','resume','status','cleanup-preview'].includes(command))throw Error('InvalidProductionCommand');
+export async function runProductionRuntime({clients,stage,region,command,env=process.env,execute=executeProductionCommand}){
+  if(!rolloutStage(stage)||!['configure','image','prepare','apply','finalize','recover','resume','status','cleanup-preview','rehearse','catalog','arm-cancellation'].includes(command))throw Error('InvalidProductionCommand');
+  if(command==='rehearse'&&stage==='prod')throw Error('PreviewAdministratorRehearsalOnly');
+  if(!['0','1'].includes(env.MEM9_RUNTIME_CANCELLATION_DRILL??'0')||
+    (stage==='prod'&&(command==='arm-cancellation'||env.MEM9_RUNTIME_CANCELLATION_DRILL==='1')))throw Error('PreviewCancellationOnly');
   const commandDeadline=Date.now()+45*60000;
   const account=(await send(clients.sts,new GetCallerIdentityCommand({}))).Account;
   const prefix=`/mem9-on-aws/${stage}/runtime`,planPath=prefix+'/production-plan',statePath=prefix+'/production-state';
@@ -77,21 +129,58 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
     if(!/^[1-9][0-9]*$/.test(env.MEM9_RUNTIME_RECOVERY_RUN_ID))throw Error('InvalidRecoverySource');
     if(!plan&&await readOptional(clients,statePath))throw Error('ProductionPlanMissing');
     if(!plan||plan.sourceRunId!==env.MEM9_RUNTIME_RECOVERY_RUN_ID){emit({phase:'unrelated-recovery-skipped'});return;}
+    if(plan.sourceRunAttempt!==undefined){
+      if(env.GITHUB_EVENT_NAME!=='workflow_run'||!env.GITHUB_EVENT_PATH)throw Error('InvalidRecoverySource');
+      const event=JSON.parse(await readFile(env.GITHUB_EVENT_PATH,'utf8')),source=event?.workflow_run;
+      if(event.repository?.full_name!==env.GITHUB_REPOSITORY||source?.head_repository?.full_name!==env.GITHUB_REPOSITORY||
+        !Number.isSafeInteger(source.id)||!Number.isSafeInteger(source.run_attempt)||source.run_attempt<1||
+        !/^[a-f0-9]{40}$/.test(source.head_sha??'')||source.event!=='workflow_dispatch'||source.path!=='.github/workflows/infra-ci.yml')throw Error('InvalidRecoverySource');
+      if(String(source.id)!==plan.sourceRunId||source.run_attempt!==plan.sourceRunAttempt||source.head_sha!==plan.sourceSha){emit({phase:'unrelated-recovery-skipped'});return;}
+    }
+  }
+  const liveCatalog=async()=>{
+    const manifest=await readOptional(clients,prefix+'/production-manifest');
+    const marker=await readOptional(clients,statePath);
+    // Before a ledger exists, the normal bootstrap still carries the original
+    // owner. Later, the manifest selects the transition/admin-only task.
+    const target=manifest&&marker?await loadProductionManifest(clients,{stage,region}):await loadLegacyCatalogTarget(clients,{stage,region});
+    const database=await inspectProductionDatabase(clients,target);
+    const catalog=await invokeProductionTask(clients,target,{operation:'extension-catalog',nonce:plan?.nonce??randomUUID().replaceAll('-',''),epoch:1},
+      {deadlineMs:Math.min(commandDeadline,Date.now()+10*60000)});
+    if(database.engineVersion!==catalog.postgresVersion)throw Error('DatabaseExtensionVersionMismatch');
+    return {engineVersion:database.engineVersion,catalog};
+  };
+  const verifyLiveMaintenance=async acceptance=>{
+    const current=await liveCatalog();assertExtensionMaintenance(acceptance,current.catalog,current.engineVersion);return current;
+  };
+  if(command==='catalog'){
+    const current=await liveCatalog();emit({phase:'extension-catalog',...current});return current;
   }
   if(stage==='prod'&&['prepare','apply','resume','finalize'].includes(command)){
     const acceptance=await readOptional(clients,prefix+'/rehearsal-acceptance');
-    const checks=['retirement','extensionUpgrade','administratorRecovery','cancellationRecovery','foregroundPreservation'];
+    const checks=['retirement','administratorRecovery','cancellationRecovery','foregroundPreservation'];
     if(acceptance?.version!==1||!/^pr-[1-9][0-9]*$/.test(acceptance.stage??'')||
       !/^[1-9][0-9]*$/.test(acceptance.runId??'')||!/^[a-f0-9]{40}$/.test(acceptance.commit??'')||
       acceptance.operatorDigest!==await productionOperatorDigest()||acceptance.schemaDigest!==await runtimeSchemaDigest('docker/bootstrap')||
       acceptance.coordinatorDigest!==await productionCoordinatorDigest()||
       acceptance.sourceTree!==await productionSourceTree()||
-      !acceptance.checks||checks.some(key=>acceptance.checks[key]!==true))throw Error('ProductionRehearsalRequired');
+      !acceptance.checks||checks.some(key=>acceptance.checks[key]!==true)||!acceptance.extensionMaintenance)throw Error('ProductionRehearsalRequired');
+    await verifyLiveMaintenance(acceptance);
   }
   const put=async(name,value)=>{
     const serialized=JSON.stringify(value);
     if(Buffer.byteLength(serialized)>4096)throw Error('RuntimeRoutingTooLarge');
     return send(clients.ssm,new PutParameterCommand({Name:name,Type:'SecureString',Value:serialized,Overwrite:true}));
+  };
+  const sourceMetadata=()=>{
+    const sourceRunAttempt=Number(env.GITHUB_RUN_ATTEMPT??'1');
+    if(!/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID??'')||!Number.isSafeInteger(sourceRunAttempt)||sourceRunAttempt<1||
+      !/^[a-f0-9]{40}$/.test(env.GITHUB_SHA??''))throw Error('ProductionWorkflowRunRequired');
+    return {sourceRunId:env.GITHUB_RUN_ID,sourceRunAttempt,sourceSha:env.GITHUB_SHA};
+  };
+  const claimSource=async()=>{
+    if(!plan)throw Error('ProductionPlanMissing');
+    plan={...plan,...sourceMetadata()};await put(planPath,plan);
   };
   if(command==='image'){
     const r=await send(clients.ssm,new GetParametersCommand({Names:[`/mem9-on-aws/${stage}/ecs/image`],WithDecryption:false}));
@@ -113,11 +202,13 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
     if(!['off','prepare','paused','ready','active'].includes(mode))throw Error('InvalidProductionManifest');
     const pending=plan?.clusterArn?await cancelProductionInvocations(clients,plan):[];
     await execute('pnpm',['-C','infra','exec','sst','remove','--stage',stage,'--print-logs'],{cwd:process.cwd(),
-      env:{...env,MEM9_NAMESPACE_REQUIRED:'1',MEM9_PRODUCTION_RUNTIME_MODE:mode,...(plan?{MEM9_RUNTIME_FALLBACK_IMAGES:JSON.stringify(plan.fallbackImages)}:{})},
+      env:{...env,MEM9_NAMESPACE_REQUIRED:'1',MEM9_CONSOLIDATION_SCHEDULE_ENABLED:'0',SST_SECRET_MaintenanceNamespaceIds:'[]',
+        MEM9_PRODUCTION_RUNTIME_MODE:mode,...(plan?{MEM9_RUNTIME_FALLBACK_IMAGES:JSON.stringify(plan.fallbackImages)}:{})},
       timeout:2400000,maxBuffer:8*1024*1024});
     if(plan?.databaseClusterId)await removePreviewSnapshot(clients,plan);
     await acknowledgeProductionCancellation(clients,pending);
-    if(plan)for(const name of [statePath,planPath]){
+    if(plan)for(const name of [prefix+'/administrator-recovery-intent',statePath,planPath,
+      ...['intent','checkpoint','receipt','accepted'].map(key=>prefix+'/cancellation-'+key)]){
       try{await send(clients.ssm,new DeleteParameterCommand({Name:name}));}
       catch(error){if(error.name!=='ParameterNotFound')throw error;}
     }
@@ -126,11 +217,15 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
   const deploy=async mode=>{
     if(!plan)throw Error('ProductionPlanMissing');
     emit({phase:'deploy-'+mode});
+    const deploymentEnv=await cutoverDeploymentEnvironment(clients,stage,env);
     await execute('pnpm',['-C','infra','exec','sst','deploy','--stage',stage,'--print-logs'],{
-      cwd:process.cwd(),env:{...env,MEM9_PRODUCTION_RUNTIME_MODE:mode,MEM9_RUNTIME_FALLBACK_IMAGES:JSON.stringify(plan.fallbackImages)},
+      cwd:process.cwd(),env:{...deploymentEnv,MEM9_PRODUCTION_RUNTIME_MODE:mode,MEM9_RUNTIME_FALLBACK_IMAGES:JSON.stringify(plan.fallbackImages)},
       timeout:1200000,maxBuffer:8*1024*1024});
+    emit({phase:'resources-deployed',mode});
     meta=await loadProductionManifest(clients,{stage,region});
+    emit({phase:'manifest-verified',mode});
     await execute(process.execPath,['scripts/reconcile-ecs-deployment.mjs','--stage',stage],{cwd:process.cwd(),env:{...env,AWS_REGION:region},timeout:1800000,maxBuffer:2*1024*1024});
+    emit({phase:'service-reconciled',mode});
   };
   const invoke=async(operation,state,extra={},limits={})=>{
     meta=await loadProductionManifest(clients,{stage,region});
@@ -163,6 +258,19 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
     await verifyRuntimeRoles({iam:clients.iam,definition,meta:current,contract});
     return {verification_hash:digest({nonce:state.operation_nonce,taskDefinition:service.taskDefinition,checkedAt:Date.now(),checks:['mcp','oauth']}),task_definition:service.taskDefinition};
   };
+  const cancellation=cancellationRehearsal({env,stage,getPlan:()=>plan,readState:read,invoke,execute,claimSource,progress:emit,
+    readRecord:key=>readOptional(clients,prefix+'/'+key),
+    writeRecord:async(key,value)=>{
+      const serialized=JSON.stringify(value);if(Buffer.byteLength(serialized)>4096)throw Error('CancellationEvidenceTooLarge');
+      await send(clients.ssm,new PutParameterCommand({Name:prefix+'/'+key,Type:'SecureString',Value:serialized,Overwrite:false}));
+    },
+    release:async()=>{
+      const sha=(await execute('git',['rev-parse','HEAD'],{cwd:process.cwd(),timeout:10000,maxBuffer:1024})).stdout.trim();
+      if(!/^[a-f0-9]{40}$/.test(sha))throw Error('ProductionSourceTreeInvalid');
+      return {sourceSha:sha,sourceTree:await productionSourceTree(),operatorDigest:await productionOperatorDigest(),
+        schemaDigest:await runtimeSchemaDigest('docker/bootstrap'),coordinatorDigest:await productionCoordinatorDigest()};
+    }});
+  if(command==='arm-cancellation')return cancellation.arm();
   if(command==='configure'){
     const marker=await readOptional(clients,statePath);
     let mode='off',fallbackImages;
@@ -170,6 +278,7 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
       if(!plan||!marker||marker.phase!=='complete'||marker.status!=='running')throw Error('ProductionMaintenanceIncomplete');
       const state=await read();
       if(state.phase!=='complete'||state.last_hash!==marker.last_hash||state.identity.schemaDigest!==await runtimeSchemaDigest('docker/bootstrap'))throw Error('ProductionDeploymentStateMismatch');
+      if(stage==='prod')await verifyLiveMaintenance(await readOptional(clients,prefix+'/rehearsal-acceptance'));
       mode='active';fallbackImages=plan.fallbackImages;
     }else{
       const names=[`/mem9-on-aws/${stage}/ecs/task-definition`,`/mem9-on-aws/${stage}/db/secret-arn`];
@@ -188,11 +297,11 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
     emit({phase:'configured',mode});return;
   }
   if(command==='prepare'){
-    if(!/^[1-9][0-9]*$/.test(env.GITHUB_RUN_ID??''))throw Error('ProductionWorkflowRunRequired');
+    const workflowSource=sourceMetadata();
     if(plan){
       // The retry owns recovery even when its earlier attempt never produced
       // a manifest or ledger. Claim it before any task or deployment can run.
-      plan={...plan,sourceRunId:env.GITHUB_RUN_ID};await put(planPath,plan);
+      plan={...plan,...workflowSource};await put(planPath,plan);
       // A retry must inspect the durable phase before an SST prepare deployment
       // could put the original credential back into the service definition.
       const manifest=await readOptional(clients,prefix+'/production-manifest');
@@ -201,7 +310,9 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
         try{state=await read();}catch{state=await invoke('inspect-preparation',null);}
         if(state){
           if(state.status!=='running')throw Error('ExplicitRecoveryRequired');
-          await mirror(state);emit({phase:'already-prepared'});return state;
+          await mirror(state);
+          if(stage!=='prod'&&state.phase==='prepared')await invoke('rehearsal-prepare',state);
+          emit({phase:'already-prepared'});return state;
         }
       }
     }
@@ -211,7 +322,7 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
       await auditAdditionalCredentialReaders(clients,source,inventory);
       const {definition,...metadata}=source;
       const database=await inspectProductionDatabase(clients,source);
-      plan={version:1,nonce:randomUUID().replaceAll('-',''),sourceRunId:env.GITHUB_RUN_ID,...metadata,...database,inventory:compactWriterInventory(inventory),createdAt:Date.now()};
+      plan={version:1,nonce:randomUUID().replaceAll('-',''),...workflowSource,...metadata,...database,inventory:compactWriterInventory(inventory),createdAt:Date.now()};
       await put(planPath,plan);
     }
     await ensureProductionSnapshot(clients,plan,{create:true,deadline:Math.min(commandDeadline,Date.now()+20*60000)});
@@ -220,7 +331,9 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
     const state=await invoke('prepare',null,{target:{clusterArn:meta.clusterArn,writerEndpoint:meta.host,
       fallbackTaskDefinition:meta.fallbackTaskDefinition,fallbackImageDigest:meta.fallbackImage.split('@')[1],runtimeCredentialArn:meta.runtimeCredential,
       masterUsername:plan.masterUsername}});
-    await mirror(state);emit({phase:'prepared'});return state;
+    await mirror(state);
+    if(stage!=='prod')await invoke('rehearsal-prepare',state);
+    emit({phase:'prepared'});return state;
   }
   if(command==='recover'){
     const manifest=await readOptional(clients,prefix+'/production-manifest');
@@ -234,8 +347,13 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
     }
     meta=await loadProductionManifest(clients,{stage,region});
     const repairDeadline=commandDeadline-20*60000;
+    const lossIntent=await readOptional(clients,prefix+'/administrator-recovery-intent');
+    if(lossIntent)validateAdministratorLossIntent(meta,plan,lossIntent);
+    await restoreMissingAdministrator(clients,meta,{deadlineMs:repairDeadline});
     const pending=await cancelProductionInvocations(clients,meta,{deadlineMs:repairDeadline});
-    try{const state=await read({deadline:repairDeadline});if(state.phase==='complete'||state.status==='restored'){emit({phase:state.phase,status:state.status});return state;}}
+    try{const state=await read({deadline:repairDeadline});if(state.phase==='complete'||state.status==='restored'){
+      await acknowledgeProductionCancellation(clients,pending);emit({phase:state.phase,status:state.status});return state;
+    }}
     catch(error){
       const state=await invoke('inspect-preparation',null);
       if(state)throw error;
@@ -251,12 +369,47 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
   if(command==='status'){
     const state=await read();emit({phase:state.phase,status:state.status,epoch:state.epoch,deadline:state.deadline_ms});return state;
   }
+  if(command==='rehearse'){
+    const state=await read();
+    if(state.phase!=='complete'||state.status!=='running')throw Error('CompletedPreviewCutoverRequired');
+    const upgraded=await invoke('rehearsal-verify',state);
+    const proof=upgraded.administrator_rehearsal;
+    assertExtensionMaintenance({engineVersion:proof?.catalog?.postgresVersion,extensionMaintenance:proof},proof?.catalog,proof?.catalog?.postgresVersion);
+    const {lossDeadline,restoreDeadline}=administratorLossDeadlines(commandDeadline);
+    const intent=await armAdministratorLoss(clients,meta,plan);
+    try{
+      administratorLossDeadlines(commandDeadline);
+      await deletePreviewAdministrator(clients,meta,plan,intent);
+      let rejected=false;
+      try{await invoke('status',state,{}, {deadline:lossDeadline});}catch(error){if(error.message!=='ProductionSecretInjectionFailed')throw error;rejected=true;}
+      if(!rejected)throw Error('MissingAdministratorCredentialStillInjected');
+    }finally{await restoreMissingAdministrator(clients,meta,{deadlineMs:restoreDeadline});}
+    const restored=await invoke('rehearsal-verify',state);
+    const fresh=restored.administrator_rehearsal;
+    assertExtensionMaintenance({engineVersion:fresh?.catalog?.postgresVersion,extensionMaintenance:fresh},fresh?.catalog,fresh?.catalog?.postgresVersion);
+    const pending=await cancelProductionInvocations(clients,meta,{deadlineMs:commandDeadline});
+    await acknowledgeProductionCancellation(clients,pending);
+    await send(clients.ssm,new DeleteParameterCommand({Name:prefix+'/administrator-recovery-intent'}));
+    if(fresh.preservationVerified!==true)throw Error('ForegroundPreservationProofMissing');
+    if(restored.proofs?.retired_credentials!==true)throw Error('RetirementProofMissing');
+    const cancellationProof=await cancellation.evidence(restored);
+    const evidence={version:1,stage,runId:env.GITHUB_RUN_ID,runAttempt:Number(env.GITHUB_RUN_ATTEMPT??'1'),commit:env.GITHUB_SHA,sourceTree:await productionSourceTree(),
+      schemaDigest:restored.identity.schemaDigest,operatorDigest:restored.identity.operatorDigest,coordinatorDigest:await productionCoordinatorDigest(),
+      engineVersion:fresh.catalog.postgresVersion,extensionMaintenance:fresh,
+      checks:{retirement:true,administratorRecovery:true,foregroundPreservation:true,cancellationRecovery:Boolean(cancellationProof)},
+      ...(cancellationProof?{cancellation:cancellationProof}:{})};
+    emit({phase:'administrator-rehearsal-complete',evidence});
+    return restored;
+  }
   if(command==='resume'){
-    const state=await invoke('resume',await read());await mirror(state);
-    if(env.GITHUB_RUN_ID){plan={...plan,sourceRunId:env.GITHUB_RUN_ID};await put(planPath,plan);}
+    let state;
+    if(await readOptional(clients,prefix+'/cancellation-intent'))state=await cancellation.resume();
+    else{if(env.GITHUB_RUN_ID)await claimSource();state=await invoke('resume',await read());}
+    await mirror(state);
     return state;
   }
   const actions={read,invoke,mirror,
+    beforeFence:cancellation.beforeFence,afterFence:cancellation.afterFence,afterRestoration:cancellation.afterRestoration,
     freezeLegacy:async(state,deadline)=>{
       const drained=await stopLegacyWriters(clients,meta,plan.inventory,{deadline:Math.min(deadline,Date.now()+600000)});
       await fenceLegacyRoles(clients,meta,plan.inventory,{retired:true});

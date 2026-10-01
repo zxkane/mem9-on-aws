@@ -6,9 +6,9 @@ function fixture(){
   const meta={account,region,stage,host:'mem9-on-aws-prod-fixture.cluster-example.ap-northeast-1.'+['rds','amazonaws','com'].join('.'),database:'mem9',
     originalOwnerSecret:`arn:aws:secretsmanager:${region}:${account}:secret:mem9-on-aws-prod-owner`};
   const database={DBClusterIdentifier:'mem9-on-aws-prod-fixture',DBClusterArn:`arn:aws:rds:${region}:${account}:cluster:mem9-on-aws-prod-fixture`,
-    DbClusterResourceId:'cluster-synthetic',DatabaseName:'mem9',Status:'available',Engine:'aurora-postgresql',StorageEncrypted:true,
+    DbClusterResourceId:'cluster-synthetic',DatabaseName:'mem9',Status:'available',Engine:'aurora-postgresql',EngineVersion:'17.4',StorageEncrypted:true,
     MasterUsername:'legacy',Endpoint:meta.host,BackupRetentionPeriod:14,LatestRestorableTime:new Date(time),EarliestRestorableTime:new Date(time-60000)};
-  const plan={...meta,nonce:'a'.repeat(32),createdAt:time-60000,databaseClusterId:database.DBClusterIdentifier,databaseResourceId:database.DbClusterResourceId,masterUsername:'legacy'};
+  const plan={...meta,nonce:'a'.repeat(32),createdAt:time-60000,databaseClusterId:database.DBClusterIdentifier,databaseResourceId:database.DbClusterResourceId,masterUsername:'legacy',engineVersion:'17.4'};
   const name=`mem9-on-aws-prod-runtime-${plan.nonce.slice(0,20)}`;
   let snapshot={DBClusterIdentifier:database.DBClusterIdentifier,DbClusterResourceId:database.DbClusterResourceId,
     DBClusterSnapshotArn:`arn:aws:rds:${region}:${account}:cluster-snapshot:${name}`,Engine:database.Engine,
@@ -30,7 +30,7 @@ function fixture(){
 describe('pre-maintenance database and recovery snapshot gates',()=>{
   it('binds the actual Aurora master and cluster and reads no secret value',async()=>{
     const f=fixture();expect(await inspectProductionDatabase(f.clients,f.meta,{now:f.now})).toEqual({
-      databaseClusterId:f.database.DBClusterIdentifier,databaseResourceId:f.database.DbClusterResourceId,masterUsername:'legacy'});
+      databaseClusterId:f.database.DBClusterIdentifier,databaseResourceId:f.database.DbClusterResourceId,masterUsername:'legacy',engineVersion:'17.4'});
     expect(f.calls.map(c=>c.type)).toEqual(['DescribeDBClustersCommand','DescribeSecretCommand']);
     expect(await ensureProductionSnapshot(f.clients,f.plan,{now:f.now})).toMatchObject({createdAt:f.now()});
     expect(f.calls.some(c=>c.type==='CreateDBClusterSnapshotCommand')).toBe(false);

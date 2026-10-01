@@ -71,7 +71,12 @@ describe.skipIf(!dsn)('production operator on real PostgreSQL',()=>{
       await expect(invoke('runtime')).rejects.toThrow('LegacySessionsRemain');
       await injected.end();injected=undefined;
       expect((await invoke('status')).phase).toBe('maintenance');
-      await invoke('recover');await invoke('repair');await invoke('restored');await invoke('resume');
+      await invoke('recover');await invoke('repair');await invoke('restored');
+      const restoredHash=state.last_hash,restoredEpoch=state.epoch;
+      await expect(invoke('resume',{expected_hash:'f'.repeat(64)})).rejects.toThrow('RecoveryEvidenceChanged');
+      expect(await invoke('status')).toMatchObject({last_hash:restoredHash,epoch:restoredEpoch,status:'restored'});
+      await invoke('resume',{expected_hash:restoredHash});
+      expect(state.epoch).toBe(restoredEpoch+1);
       expect((await invoke('runtime')).phase).toBe('runtime_prepared');
       await invoke('fence');await invoke('verify-fence');await invoke('drain-legacy');
       expect((await invoke('transfer')).phase).toBe('transferred');

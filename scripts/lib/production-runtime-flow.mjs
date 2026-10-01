@@ -16,7 +16,8 @@ export async function applyProductionCutover(actions,{now=Date.now}={}){
     await invoke('runtime');
   }
   if(state.phase==='runtime_prepared'){
-    admit();await invoke('fence');
+    admit();await actions.beforeFence?.(state);await invoke('fence');
+    await actions.afterFence?.(state);
   }
   if(state.phase==='password_fenced'){
     admit();await invoke('verify-fence');await actions.verifyLegacySessions(state);await invoke('transfer');
@@ -55,6 +56,7 @@ export async function recoverProductionCutover(actions,{now=Date.now,deadline=no
   const admit=until=>{if(now()>=until)throw Error('RecoveryPhaseDeadline');};
   admit(repairDeadline);
   let state=await actions.read({deadline:repairDeadline});
+  const interrupted={...state};
   if(state.phase==='complete')return state;
   const pending=await actions.stopInvocations(state,repairDeadline);
   await actions.cancelBackend(state,repairDeadline);
@@ -72,6 +74,8 @@ export async function recoverProductionCutover(actions,{now=Date.now,deadline=no
   state=await actions.invoke('repair',state,{}, {deadline:repairDeadline});await actions.mirror(state);
   admit(restoreDeadline);
   await actions.restoreRuntime(state,restoreDeadline);
-  await actions.verifyForeground(state,deadline);
-  state=await actions.invoke('restored',state,{}, {deadline});await actions.mirror(state);return state;
+  const verification=await actions.verifyForeground(state,deadline);
+  state=await actions.invoke('restored',state,{}, {deadline});await actions.mirror(state);
+  await actions.afterRestoration?.(interrupted,state,verification);
+  return state;
 }

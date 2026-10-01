@@ -53,6 +53,9 @@ export function classifyChangedPaths(paths) {
     (path) =>
       path.startsWith("docker/") ||
       path.startsWith(".github/actions/runtime-cutover/") ||
+      // Cutover binds its coordinator tree to the deployed operator release.
+      path === "infra/production-runtime.ts" ||
+      path === "scripts/consolidation-scheduler-e2e.mjs" ||
       path === "scripts/run-production-runtime.mjs" ||
       path.startsWith("scripts/lib/production-runtime-") ||
       [...WORKLOAD_COPY_INPUTS].some((input) => matchesCopyInput(path, input)),

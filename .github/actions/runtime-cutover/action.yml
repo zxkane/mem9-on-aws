@@ -1,5 +1,5 @@
 name: Guarded runtime credential cutover
-description: Prepare, apply, finalize and recover the reviewed stage runtime migration.
+description: Prepare, apply and verify the reviewed stage runtime migration; the caller owns recovery and cleanup.
 inputs:
   role-arn:
     required: true
@@ -9,10 +9,18 @@ inputs:
     description: Application region
   cleanup-preview:
     default: "false"
-    description: Remove the disposable rehearsal stage after completion
+    description: Verify the disposable preview administrator after completion
+  phase:
+    default: all
+    description: all, prepare, or finish
 runs:
   using: composite
   steps:
+    - name: Validate cutover phase
+      shell: bash
+      env:
+        PHASE: ${{ inputs.phase }}
+      run: 'case "$PHASE" in all|prepare|finish) ;; *) exit 1 ;; esac'
     - name: Refresh preparation credentials
       uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
       with:
@@ -25,45 +33,39 @@ runs:
       shell: bash
       run: node scripts/run-production-runtime.mjs image
     - name: Prepare credentials and pinned fallback
+      if: inputs.phase != 'finish'
       shell: bash
       run: timeout --signal=TERM --kill-after=30s 2700 node scripts/run-production-runtime.mjs prepare
     - name: Refresh cutover credentials
+      if: inputs.phase != 'prepare'
       uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
       with:
         role-to-assume: ${{ inputs.role-arn }}
         aws-region: ${{ inputs.region }}
         mask-aws-account-id: true
     - name: Apply bounded credential cutover
+      if: inputs.phase != 'prepare'
       shell: bash
       run: timeout --signal=TERM --kill-after=30s 2700 node scripts/run-production-runtime.mjs apply
     - name: Refresh finalization credentials
+      if: inputs.phase != 'prepare'
       uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
       with:
         role-to-assume: ${{ inputs.role-arn }}
         aws-region: ${{ inputs.region }}
         mask-aws-account-id: true
     - name: Converge infrastructure and verify retirement
+      if: inputs.phase != 'prepare'
       shell: bash
       run: node scripts/run-production-runtime.mjs finalize
-    - name: Refresh recovery credentials
-      if: failure() || cancelled()
+    - name: Refresh preview rehearsal credentials
+      if: inputs.cleanup-preview == 'true' && inputs.phase != 'prepare'
       uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
       with:
         role-to-assume: ${{ inputs.role-arn }}
         aws-region: ${{ inputs.region }}
         mask-aws-account-id: true
-    - name: Restore service after a failed cutover
-      if: failure() || cancelled()
+    - name: Verify preview extension upgrade and administrator backup recovery
+      if: inputs.cleanup-preview == 'true' && inputs.phase != 'prepare'
       shell: bash
-      run: timeout --signal=TERM --kill-after=30s 2700 node scripts/run-production-runtime.mjs recover
-    - name: Refresh preview cleanup credentials
-      if: always() && inputs.cleanup-preview == 'true'
-      uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
-      with:
-        role-to-assume: ${{ inputs.role-arn }}
-        aws-region: ${{ inputs.region }}
-        mask-aws-account-id: true
-    - name: Remove disposable rehearsal
-      if: always() && inputs.cleanup-preview == 'true'
-      shell: bash
-      run: node scripts/run-production-runtime.mjs cleanup-preview
+      run: timeout --signal=TERM --kill-after=30s 2700 node scripts/run-production-runtime.mjs rehearse

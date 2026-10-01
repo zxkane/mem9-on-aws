@@ -59,7 +59,9 @@ export async function revokeTransferMembership(db,{stage,legacyRoleOid}){
   const role=schemaAdministratorRole(stage);
   const source=(await db.query('SELECT session_user AS name,session_user::regrole::oid AS oid')).rows[0];
   if(Number(source?.oid)!==legacyRoleOid)throw Error('LegacySessionMismatch');
-  await db.query(`REVOKE ${identifier(role)} FROM ${identifier(source.name)} GRANTED BY ${identifier(source.name)}`);
+  // Aurora records rds_superuser-issued memberships under rdsadmin. Let the
+  // server select the effective grantor; keep RESTRICT and verify no usable edge.
+  await db.query(`REVOKE ${identifier(role)} FROM ${identifier(source.name)}`);
   if(await scalar(db,"SELECT pg_has_role($1::oid,$2::regrole::oid,'USAGE') OR pg_has_role($1::oid,$2::regrole::oid,'SET') AS result",[legacyRoleOid,role]))throw Error('TransferMembershipRemains');
 }
 

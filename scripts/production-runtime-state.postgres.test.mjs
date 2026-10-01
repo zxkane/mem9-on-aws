@@ -89,6 +89,17 @@ describe.skipIf(!dsn)('production rollout ledger on isolated PostgreSQL',()=>{
     state=await commitRolloutPhase(f.db,{claim:{...f.claim,epoch:4},from:'prepared',to:'maintenance',owns:f.owns});
     expect(state.deadline_ms-state.started_ms).toBe(7200000);
   }));
+  it('checks the exact restored event under the transaction lock before resume',()=>fixture(async f=>{
+    await f.initialize();
+    let state=await changeRolloutRecovery(f.db,{claim:f.claim,status:'recovering',owns:f.owns});
+    state=await changeRolloutRecovery(f.db,{claim:{...f.claim,epoch:state.epoch},status:'restored',owns:f.owns});
+    const restored=state,claim={...f.claim,epoch:state.epoch};
+    await expect(changeRolloutRecovery(f.db,{claim,status:'running',owns:f.owns,expectedHash:'f'.repeat(64)})).rejects.toThrow('RecoveryEvidenceChanged');
+    expect(await readRolloutState(f.db)).toMatchObject({last_hash:restored.last_hash,epoch:restored.epoch,status:'restored'});
+    const resumed=await changeRolloutRecovery(f.db,{claim,status:'running',owns:f.owns,expectedHash:restored.last_hash});
+    expect(resumed).toMatchObject({epoch:restored.epoch+1,status:'running',deadline_ms:restored.deadline_ms});
+    await expect(changeRolloutRecovery(f.db,{claim,status:'running',owns:f.owns,expectedHash:restored.last_hash})).rejects.toThrow('StaleRolloutClaim');
+  }));
   it('fails on missing history instead of inferring progress from catalog state',()=>fixture(async f=>{
     await f.initialize();
     await expect(f.db.query('DELETE FROM mem9_runtime.production_rollout_events')).rejects.toMatchObject({code:'55000'});

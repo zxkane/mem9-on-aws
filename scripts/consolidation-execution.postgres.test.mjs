@@ -123,11 +123,15 @@ describe.skipIf(!DSN)('atomic consolidation with real PostgreSQL',()=>{
   expect(await Promise.all(ids.map(f.row))).toEqual(before);for(const b of await f.budget())expect([b.used.total,b.reserved.total]).toEqual([0,0]);
  }));
  it('EXEC-004 receipt insertion failure rolls back memory and accounting',()=>fixture(async f=>{
-  const ids=[await f.seed('Fact A'),await f.seed('Fact B')];await f.enable();await f.queue(await f.classify(ids));const a=await f.claim();await f.ready(a);
+  const ids=[await f.seed('Fact A'),await f.seed('Fact B')];await f.enable();
+  const p={...policy(),rate:0.05,burst:1};for(const scope of ['stage',f.ns])await f.db.query('SELECT mem9_maintenance.set_budget_policy($1,$2)',[scope,p]);
+  await f.queue(await f.classify(ids));const a=await f.claim();await f.ready(a);
   const before=await Promise.all(ids.map(f.row));
+  const rateBefore=await f.rows(f.db,'SELECT * FROM mem9_maintenance.apply_admission ORDER BY scope');
   await f.db.query('ALTER TABLE mem9_maintenance.receipts ADD CONSTRAINT fixture_reject CHECK(false) NOT VALID');
   await expect(f.apply(a)).rejects.toMatchObject({code:'23514'});expect(await Promise.all(ids.map(f.row))).toEqual(before);
   for(const b of await f.budget())expect([b.used.total,b.reserved.total]).toEqual([0,2]);
+  expect(await f.rows(f.db,'SELECT * FROM mem9_maintenance.apply_admission ORDER BY scope')).toEqual(rateBefore);
   await f.db.query('ALTER TABLE mem9_maintenance.receipts DROP CONSTRAINT fixture_reject');expect((await f.apply(a)).status).toBe('applied');
  }));
  it('EXEC-003 shared budget reservations prevent double spending',()=>fixture(async f=>{
@@ -235,12 +239,26 @@ describe.skipIf(!DSN)('atomic consolidation with real PostgreSQL',()=>{
   const windows=await f.rows(f.db,"SELECT used,reserved FROM mem9_maintenance.budget_windows WHERE scope='stage' ORDER BY day");
   expect(windows.map(w=>[w.used.total,w.reserved.total])).toEqual([[0,0],[2,0]]);
  }));
- it('EXEC-010 a too-small rate burst is policy-blocked and reopens after policy correction',()=>fixture(async f=>{
-  const ids=[await f.seed('A'),await f.seed('B')];await f.enable();const p=policy();p.burst=1;
-  await f.db.query("SELECT mem9_maintenance.set_budget_policy('stage',$1)",[p]);
-  await f.queue(await f.classify(ids));expect((await f.claim()).status).toBe('policy_blocked');
-  await f.db.query("SELECT mem9_maintenance.set_budget_policy('stage',$1)",[policy()]);
-  expect((await f.claim()).status).toBe('leased');
+ it('EXEC-010/011 one-action burst admits a two-row merge and refills after twenty seconds',()=>fixture(async f=>{
+  const ids=await Promise.all(['A','B','C','D'].map(s=>f.seed(s)));await f.enable();
+  const p={...policy(),rate:0.05,burst:1};for(const scope of ['stage',f.ns])await f.db.query('SELECT mem9_maintenance.set_budget_policy($1,$2)',[scope,p]);
+  await f.queue(await f.classify(ids.slice(0,2)));await f.queue(await f.classify(ids.slice(2)));
+  const start=new Date(Date.now()+100);
+  await f.db.query('CREATE TABLE mem9_maintenance.fixture_clock(value timestamptz NOT NULL)');
+  await f.db.query('INSERT INTO mem9_maintenance.fixture_clock VALUES($1)',[start]);
+  await f.db.query("CREATE OR REPLACE FUNCTION mem9_maintenance.execution_time() RETURNS timestamptz LANGUAGE SQL VOLATILE SET search_path=pg_catalog,pg_temp AS $$ SELECT value FROM mem9_maintenance.fixture_clock $$");
+  const first=await f.claim();expect(first.status).toBe('leased');await f.ready(first);expect((await f.apply(first)).changed_rows).toBe(2);
+  const rateAfter=await f.rows(f.db,'SELECT * FROM mem9_maintenance.apply_admission ORDER BY scope');
+  const budgetAfter=await f.budget();
+  expect(Number(await f.scalar(f.db,"SELECT tokens FROM mem9_maintenance.apply_admission WHERE scope='stage'"))).toBe(0);
+  expect((await f.apply(first)).changed_rows).toBe(2);
+  expect(await f.rows(f.db,'SELECT * FROM mem9_maintenance.apply_admission ORDER BY scope')).toEqual(rateAfter);expect(await f.budget()).toEqual(budgetAfter);
+  const second=await f.claim();await f.ready(second);
+  await f.db.query('UPDATE mem9_maintenance.fixture_clock SET value=$1',[new Date(start.getTime()+19999)]);
+  expect(await f.apply(second)).toEqual({status:'rate_wait'});
+  await f.db.query('UPDATE mem9_maintenance.fixture_clock SET value=$1',[new Date(start.getTime()+20000)]);
+  expect((await f.apply(second)).changed_rows).toBe(2);
+  expect(Number(await f.scalar(f.db,"SELECT used->>'total' FROM mem9_maintenance.budget_windows WHERE scope='stage'"))).toBe(4);
  }));
  it('EXEC-003 window denominator does not grow when new memories arrive',()=>fixture(async f=>{
   const original=[await f.seed('A'),await f.seed('B')];await f.enable();await f.queue(await f.classify(original));const a=await f.claim();await f.ready(a);await f.apply(a);

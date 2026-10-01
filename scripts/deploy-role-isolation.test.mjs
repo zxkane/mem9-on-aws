@@ -287,6 +287,10 @@ describe("split GitHub OIDC deployment roles", () => {
     ).toBe(true);
   });
 
+  it('rebuilds release images when runtime cutover infrastructure or acceptance changes',()=>{
+    expect(classifyChangedPaths(['infra/production-runtime.ts'])).toEqual({workloadChanged:true,applicationInfrastructureChanged:true,awsMutationRequired:true});
+    expect(classifyChangedPaths(['scripts/consolidation-scheduler-e2e.mjs'])).toMatchObject({workloadChanged:true,awsMutationRequired:true});
+  });
   it("TC-DEPLOYROLE-005/006/007: classifies mutation paths", () => {
     expect(
       classifyChangedPaths([

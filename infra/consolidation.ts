@@ -528,14 +528,15 @@ export function consolidation(
     const scheduledWorkers = workers.map(worker => {
       const schedule = new aws.scheduler.Schedule(`ContinuousConsolidation${worker.kind}`, {
         namePrefix: `mem9-on-aws-${$app.stage}-${worker.kind}-`,
-        description: `Dormant continuous consolidation ${worker.kind}; synthetic preview acceptance only.`,
+        description: worker.production?`Continuous production consolidation ${worker.kind}; database admission also required.`:`Dormant continuous consolidation ${worker.kind}; synthetic preview acceptance only.`,
         groupName: scheduleGroup.name,
-        scheduleExpression: worker.kind === "planner" ? "rate(1 hour)" : "rate(15 minutes)",
-        scheduleExpressionTimezone: "UTC", state: "DISABLED", flexibleTimeWindow: { mode: "OFF" },
+        scheduleExpression: worker.production?(worker.kind==='planner'?'rate(15 minutes)':'rate(5 minutes)'):worker.kind === "planner" ? "rate(1 hour)" : "rate(15 minutes)",
+        scheduleExpressionTimezone: "UTC", state: worker.production?worker.enabled!.apply(enabled=>enabled?'ENABLED':'DISABLED'):"DISABLED", flexibleTimeWindow: { mode: "OFF" },
         target: {
           arn: ecsOut.cluster.nodes.cluster.arn, roleArn: schedulerRole.arn,
           input: $jsonStringify({containerOverrides: [{name: worker.containerName,
-            environment: [{name: "MEM9_WORKER_GENERATION", value: worker.generation}]}]}),
+            environment: [{name: "MEM9_WORKER_GENERATION", value: worker.generation},
+              ...(worker.production?[{name:'MEM9_WORKER_ADMISSION',value:worker.admission!}]:[])]}]}),
           retryPolicy: {maximumEventAgeInSeconds: 60, maximumRetryAttempts: 0},
           // The workload boundary denies tagging. Ownership uses the exact
           // task revision + invocation nonce, never propagated tags.
@@ -545,11 +546,12 @@ export function consolidation(
         },
       });
       return {kind: worker.kind, containerName: worker.containerName, scheduleName: schedule.name,
+        ...(worker.production?{image:worker.image,sourceTag:worker.sourceTag}:{}),
         taskDefinitionArn: worker.task.taskDefinition,
         logGroupName: taskContainerLogGroupName(worker.task, worker.containerName, worker.kind)};
     });
     if (workers.length > 0) new aws.ssm.Parameter("ConsolidationAcceptanceManifest", {
-      name: `${prefix}/consolidation-preview/manifest`, type: "String", tags,
+      name: `${prefix}/${workers[0].production?'consolidation-runtime':'consolidation-preview'}/manifest`, type: workers[0].production?'SecureString':"String", tags,
       value: $jsonStringify({version: 1, stage: $app.stage, generation: workers[0].generation,
         groupName: scheduleGroup.name, roleArn: schedulerRole.arn,
         clusterArn: ecsOut.cluster.nodes.cluster.arn, workers: scheduledWorkers}),

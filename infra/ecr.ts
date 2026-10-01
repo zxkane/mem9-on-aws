@@ -51,3 +51,13 @@ export function workloadImage(name: string, tag: string): Output<string> {
   }
   return ecrImage(`${namespace}/${name}`, tag);
 }
+
+export function pinnedProductionImage(name:'bootstrap'|'llm-proxy',tag:string):Output<string>{
+  if($app.stage!=='prod'||!/^mem9-[a-f0-9]{7}$/.test(tag)||(process.env.MEM9_ECR_NAMESPACE&&process.env.MEM9_ECR_NAMESPACE!=='mem9-on-aws'))throw Error('ProductionImageRevisionRequired');
+  const repositoryName='mem9-on-aws/'+name;
+  const image=aws.ecr.getImageOutput({repositoryName,imageTag:tag,registryId:accountId(),region:applicationRegion()});
+  return image.imageDigest.apply(digest=>{
+    if(!/^sha256:[a-f0-9]{64}$/.test(digest))throw Error('ProductionImageDigestRequired');
+    return $interpolate`${accountId()}.dkr.ecr.${applicationRegion()}.amazonaws.com/${repositoryName}@${digest}`;
+  });
+}

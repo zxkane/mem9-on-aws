@@ -1594,6 +1594,82 @@ stage's independently authorized operator session. The operator's `status` and
 `resume` commands inspect durable state and explicitly resume a restored
 migration; an expired migration remains restoration-only.
 
+The disposable cutover also verifies current extension maintenance and
+administrator-backup recovery. After actual master retirement, the new schema
+administrator must positively complete the same-version extension permission
+check and use CREATE/DROP, vector indexing and distance queries in a marked
+scratch database. When the engine exposes no reachable upgrade target, evidence
+is labelled `no_upgrade_available`; it never claims a version change. Production
+admission and ordinary post-cutover deployments compare the live engine and
+extension/owner/available-target tuple with this evidence.
+
+Backup-loss rehearsal writes durable recovery intent before deleting the preview
+primary parameter. Recovery uses only the exact protected backup, waits SSM's
+30-second recreation interval, creates without overwriting a racing value, then
+requires a fresh administrator login. It keeps time for restoration and never
+performs this deletion in production. An isolated preview namespace with three
+pinned synthetic records verifies that text, metadata, tags and embeddings survive
+the cutover. The resulting content-free evidence still marks cancellation
+recovery incomplete until the independent forced-cancellation exercise passes;
+it cannot by itself authorize production activation.
+
+Production continuous workers are provisioned only after the runtime migration
+is active. Cutover deployments preserve the stage's validated maintenance target
+list from SSM. Preview rehearsals keep legacy weekly scheduling disabled, matching
+normal preview CI, independently of the production opt-in. Conflicting overrides
+stop deployment. Disposable preview teardown
+does not require an enabled schedule or a surviving target parameter.
+
+Production continuous workers keep the legacy weekly schedule disabled once migration
+is active. Planner and executor credentials remain separate, and the persistent
+`ProductionConsolidationEnabled` SST secret defaults to `0`. The isolated runtime
+exposes the execution route for the canary while recurring targets stay disabled;
+database execution and dispatch require their independent admission controls.
+
+The initial production canary uses `scripts/run-production-canary.mjs` with
+`STAGE=prod` and the application's AWS region. It prepares restricted worker
+bindings, plans with execution disabled, pauses workers and captures protected
+row hashes before measuring foreground traffic. Measurements use the existing
+Cognito M2M client, 100 semantic reads and 100 temporary pinned writes per cohort,
+fixed concurrency/cadence, and complete MCP response validation. Temporary rows
+are recorded in a mode-600 local journal. Cleanup also reconciles the validation
+marker and deterministic content hashes, covering lost responses and duplicate
+deliveries. Changed rows remain untouched and block promotion. No owned benchmark
+rows may remain when promotion commits.
+
+The canary permits at most 20 changed rows across retries and UTC boundaries.
+After pausing execution it checks committed before/post images, provenance,
+protected rows and persistent counters. Two actual Scheduler deliveries must
+return identical cached receipts without changing the memory, receipt, budget or
+rate snapshots. Promotion requires matching release/generation/role evidence and
+unrounded foreground p95 within 10% of the baseline. It atomically installs the
+reviewed daily allowance and resumes dispatch without resetting spent or
+reserved budget. Rate and burst count actions, while risk budgets count rows.
+Every pause invalidates prior dispatch admissions, and quiescence stops all
+revisions of the approved worker families. Activation uses a fresh nonce bound
+to the verified release. Worker and operator images are pinned to ECR digests.
+The controller checks the main revision, sets persistent scheduling admission,
+and enables only the two existing verified schedule targets. It verifies their
+exact worker revisions and the unchanged running backend tasks and image digests.
+The first database baseline stores that backend binding permanently for the
+validation; a restarted controller checks the stored original and rejects missing
+or changed evidence instead of adopting the current backend.
+Activation rebuilds no images. A future release/digest change derives a different
+worker admission and cannot reuse the previous activation silently.
+Failures pause SQL execution and disable recurring delivery.
+
+Full-precision timing reports use four bounded SSM fragments injected only into
+the promotion task. The request binds their assembled SHA-256 and validates the
+receipt and release evidence again. Emergency control tasks need only the
+administrator credential and remain usable when report fragments are missing.
+
+The operator's `pause` and `status` paths remain available independently of
+worker credentials or stale maintenance evidence. Failed canary measurements or
+ambiguous task outcomes retain their journals and keep promotion closed. The
+initial planner configuration is exact-only (`model: null`); semantic automation
+requires its separate model-bound quality certificate and model budget. Neither
+synthetic acceptance nor the active-memory count is an eligible-backlog estimate.
+
 After deploying the task definitions and granting the corresponding service:
 
 ```bash

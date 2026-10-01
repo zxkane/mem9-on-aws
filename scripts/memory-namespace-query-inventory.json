@@ -1546,9 +1546,9 @@
       "namespace_evidence": "Explicit namespace predicates, namespace-bound action/classification keys and all-member fences."
     },
     {
-      "id": "8204c495452302ad0c23",
+      "id": "ccfe46a74abbe516c620",
       "owner": "docker/bootstrap/migrations/005_consolidation_execution.sql",
-      "line": 502,
+      "line": 503,
       "tables": [
         "memories"
       ],
@@ -1564,14 +1564,14 @@
       "namespace_evidence": "Explicit namespace predicates, namespace-bound action/classification keys and all-member fences."
     },
     {
-      "id": "861efc653d4b439e79af",
+      "id": "f3245a68dec294654f17",
       "owner": "docker/bootstrap/migrations/005_consolidation_execution.sql",
-      "line": 603,
+      "line": 604,
       "tables": [
         "memories"
       ],
-      "statement_sha256": "7758e526b9a327dd4cdbda597ca6a4987d452f458c6767b6e1339b8223520cbd",
-      "statement": "CREATE OR REPLACE FUNCTION mem9_maintenance.apply_action(p_namespace TEXT,p_id TEXT,p_generation BIGINT) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp SET timezone='UTC' AS $$ DECLARE a mem9_maintenance.actions; s mem9_maintenance.action_state; prep mem9_maintenance.preparations; c mem9_maintenance.execution_control; saved JSONB; actual JSONB:='{\"total\":0,\"rewrite\":0,\"delete\":0,\"archive\":0,\"mark\":0}'; before_rows JSONB:='[]'; after_rows JSONB:='[]'; current_row JSONB; actor TEXT; result JSONB; scope_name TEXT; changed INTEGER; target TEXT; BEGIN PERFORM mem9_maintenance.authorize(p_namespace,'backend'); SELECT r.result INTO result FROM mem9_maintenance.receipts r WHERE namespace_id=p_namespace AND action_id=p_id; IF FOUND THEN RETURN result; END IF; PERFORM mem9_maintenance.execution_guard(p_namespace,'backend'); SELECT * INTO c FROM mem9_maintenance.execution_control WHERE singleton; IF NOT pg_try_advisory_xact_lock(hashtextextended('mem9-cleanup:'||c.stage||':'||p_namespace,0)) THEN RETURN jsonb_build_object('status','mutex_busy'); END IF; PERFORM mem9_maintenance.open_windows(p_namespace); SELECT * INTO s FROM mem9_maintenance.action_state WHERE namespace_id=p_namespace AND action_id=p_id FOR UPDATE; IF NOT FOUND OR NOT mem9_maintenance.execution_valid(p_namespace,p_id,p_generation) THEN RAISE EXCEPTION USING ERRCODE='55000',MESSAGE='execution lease invalid'; END IF; SELECT * INTO a FROM mem9_maintenance.actions WHERE namespace_id=p_namespace AND action_id=p_id; SELECT * INTO prep FROM mem9_maintenance.preparations WHERE namespace_id=p_namespace AND action_id=p_id AND generation=p_generation; IF NOT FOUND OR prep.status<>'ready' OR prep.embedding_model<>c.embedding_model THEN RAISE EXCEPTION USING ERRCODE='55000',MESSAGE='preparation not ready'; END IF; FOR saved IN SELECT value FROM jsonb_array_elements(a.members) ORDER BY value->>'id' LOOP SELECT to_jsonb(m) INTO current_row FROM public.memories m WHERE m.namespace_id=p_namespace AND m.id=saved->>'id' FOR UPDATE; IF NOT FOUND OR current_row IS DISTINCT FROM saved THEN PERFORM mem9_maintenance.release_action(p_namespace,p_id,'invalidated','member_changed'); RETURN jsonb_build_object('status','invalidated'); END IF; before_rows:=before_rows||jsonb_build_array(current_row); END LOOP; IF NOT mem9_maintenance.action_inputs_valid(p_namespace,p_id) THEN PERFORM mem9_maintenance.release_action(p_namespace,p_id,'invalidated','context_changed'); RETURN jsonb_build_object('status','invalidated'); END IF; IF NOT mem9_maintenance.execution_valid(p_namespace,p_id,p_generation) THEN RAISE EXCEPTION USING ERRCODE='55000',MESSAGE='execution authorization expired'; END IF; IF NOT mem9_maintenance.take_apply_rate(p_namespace,(a.cost->>'total')::int) THEN RETURN jsonb_build_object('status','rate_wait'); END IF; SELECT principal_id INTO actor FROM public.memory_principals WHERE principal_key= encode(sha256(convert_to('mem9-service-principal-v1','UTF8')||decode('00','hex')||convert_to('consolidation','UTF8')),'hex'); target:=a.output->>'target'; IF a.kind='MERGE' THEN UPDATE public.memories SET content=a.output->>'content',tags=a.output->'tags',metadata=a.output->'metadata', embedding=CASE WHEN (a.cost->>'rewrite')::int>0 THEN prep.embedding ELSE embedding END, version=version+1,updated_by_principal_id=actor WHERE namespace_id=p_namespace AND id=target; UPDATE public.memories SET state='deleted',superseded_by=target,version=version+1,updated_by_principal_id=actor WHERE namespace_id=p_namespace AND id IN(SELECT value->>'id' FROM jsonb_array_elements(a.members)) AND id<>target; actual:=a.cost; ELSIF a.kind='ARCHIVE' THEN UPDATE public.memories SET state='archived',superseded_by=target,version=version+1,updated_by_principal_id=actor WHERE namespace_id=p_namespace AND id IN(SELECT value->>'id' FROM jsonb_array_elements(a.members)) AND id<>target; actual:=a.cost; ELSE UPDATE public.memories SET tags=CASE WHEN coalesce(nullif(tags,'null'),'[]')?'stale' THEN tags ELSE coalesce(nullif(tags,'null'),'[]')||'\"stale\"'::jsonb END, metadata=jsonb_set(coalesce(nullif(metadata,'null'),'{}'),'{consolidation}',coalesce(nullif(metadata->'consolidation','null'),'{}')||'{\"stale\":true}',TRUE), version=version+1,updated_by_principal_id=actor WHERE namespace_id=p_namespace AND id=target AND (NOT coalesce(tags,'[]')?'stale' OR metadata->'consolidation'->>'stale' IS DISTINCT FROM 'true'); GET DIAGNOSTICS changed=ROW_COUNT; IF changed=1 THEN actual:=a.cost; END IF; END IF; SELECT jsonb_agg(to_jsonb(m) ORDER BY m.id) INTO after_rows FROM public.memories m WHERE m.namespace_id=p_namespace AND m.id IN(SELECT value->>'id' FROM jsonb_array_elements(a.members)); FOREACH scope_name IN ARRAY ARRAY['stage',p_namespace] LOOP UPDATE mem9_maintenance.budget_windows SET used=mem9_maintenance.cost_add(used,actual),reserved=mem9_maintenance.cost_add(reserved,s.reservation,-1) WHERE scope=scope_name AND day=s.budget_day; END LOOP; result:=jsonb_build_object('action_id',p_id,'status',CASE WHEN (actual->>'total')::int=0 THEN 'noop' ELSE 'applied' END,'changed_rows',actual->'total','cost',actual); INSERT INTO mem9_maintenance.receipts(namespace_id,action_id,result,before_images,post_images) VALUES(p_namespace,p_id,result,before_rows,after_rows); UPDATE mem9_maintenance.action_state SET status=result->>'status',reason='',reservation=NULL,lease_until=NULL WHERE namespace_id=p_namespace AND action_id=p_id; RETURN result; END $$",
+      "statement_sha256": "c9c647a6a8e15e05d067bc1abf2ec69b90bbaaef9973ec234f5ebbed3501510f",
+      "statement": "CREATE OR REPLACE FUNCTION mem9_maintenance.apply_action(p_namespace TEXT,p_id TEXT,p_generation BIGINT) RETURNS JSONB LANGUAGE plpgsql SECURITY DEFINER SET search_path=pg_catalog,pg_temp SET timezone='UTC' AS $$ DECLARE a mem9_maintenance.actions; s mem9_maintenance.action_state; prep mem9_maintenance.preparations; c mem9_maintenance.execution_control; saved JSONB; actual JSONB:='{\"total\":0,\"rewrite\":0,\"delete\":0,\"archive\":0,\"mark\":0}'; before_rows JSONB:='[]'; after_rows JSONB:='[]'; current_row JSONB; actor TEXT; result JSONB; scope_name TEXT; changed INTEGER; target TEXT; BEGIN PERFORM mem9_maintenance.authorize(p_namespace,'backend'); SELECT r.result INTO result FROM mem9_maintenance.receipts r WHERE namespace_id=p_namespace AND action_id=p_id; IF FOUND THEN RETURN result; END IF; PERFORM mem9_maintenance.execution_guard(p_namespace,'backend'); SELECT * INTO c FROM mem9_maintenance.execution_control WHERE singleton; IF NOT pg_try_advisory_xact_lock(hashtextextended('mem9-cleanup:'||c.stage||':'||p_namespace,0)) THEN RETURN jsonb_build_object('status','mutex_busy'); END IF; PERFORM mem9_maintenance.open_windows(p_namespace); SELECT * INTO s FROM mem9_maintenance.action_state WHERE namespace_id=p_namespace AND action_id=p_id FOR UPDATE; IF NOT FOUND OR NOT mem9_maintenance.execution_valid(p_namespace,p_id,p_generation) THEN RAISE EXCEPTION USING ERRCODE='55000',MESSAGE='execution lease invalid'; END IF; SELECT * INTO a FROM mem9_maintenance.actions WHERE namespace_id=p_namespace AND action_id=p_id; SELECT * INTO prep FROM mem9_maintenance.preparations WHERE namespace_id=p_namespace AND action_id=p_id AND generation=p_generation; IF NOT FOUND OR prep.status<>'ready' OR prep.embedding_model<>c.embedding_model THEN RAISE EXCEPTION USING ERRCODE='55000',MESSAGE='preparation not ready'; END IF; FOR saved IN SELECT value FROM jsonb_array_elements(a.members) ORDER BY value->>'id' LOOP SELECT to_jsonb(m) INTO current_row FROM public.memories m WHERE m.namespace_id=p_namespace AND m.id=saved->>'id' FOR UPDATE; IF NOT FOUND OR current_row IS DISTINCT FROM saved THEN PERFORM mem9_maintenance.release_action(p_namespace,p_id,'invalidated','member_changed'); RETURN jsonb_build_object('status','invalidated'); END IF; before_rows:=before_rows||jsonb_build_array(current_row); END LOOP; IF NOT mem9_maintenance.action_inputs_valid(p_namespace,p_id) THEN PERFORM mem9_maintenance.release_action(p_namespace,p_id,'invalidated','context_changed'); RETURN jsonb_build_object('status','invalidated'); END IF; IF NOT mem9_maintenance.execution_valid(p_namespace,p_id,p_generation) THEN RAISE EXCEPTION USING ERRCODE='55000',MESSAGE='execution authorization expired'; END IF; IF NOT mem9_maintenance.take_apply_rate(p_namespace,1) THEN RETURN jsonb_build_object('status','rate_wait'); END IF; SELECT principal_id INTO actor FROM public.memory_principals WHERE principal_key= encode(sha256(convert_to('mem9-service-principal-v1','UTF8')||decode('00','hex')||convert_to('consolidation','UTF8')),'hex'); target:=a.output->>'target'; IF a.kind='MERGE' THEN UPDATE public.memories SET content=a.output->>'content',tags=a.output->'tags',metadata=a.output->'metadata', embedding=CASE WHEN (a.cost->>'rewrite')::int>0 THEN prep.embedding ELSE embedding END, version=version+1,updated_by_principal_id=actor WHERE namespace_id=p_namespace AND id=target; UPDATE public.memories SET state='deleted',superseded_by=target,version=version+1,updated_by_principal_id=actor WHERE namespace_id=p_namespace AND id IN(SELECT value->>'id' FROM jsonb_array_elements(a.members)) AND id<>target; actual:=a.cost; ELSIF a.kind='ARCHIVE' THEN UPDATE public.memories SET state='archived',superseded_by=target,version=version+1,updated_by_principal_id=actor WHERE namespace_id=p_namespace AND id IN(SELECT value->>'id' FROM jsonb_array_elements(a.members)) AND id<>target; actual:=a.cost; ELSE UPDATE public.memories SET tags=CASE WHEN coalesce(nullif(tags,'null'),'[]')?'stale' THEN tags ELSE coalesce(nullif(tags,'null'),'[]')||'\"stale\"'::jsonb END, metadata=jsonb_set(coalesce(nullif(metadata,'null'),'{}'),'{consolidation}',coalesce(nullif(metadata->'consolidation','null'),'{}')||'{\"stale\":true}',TRUE), version=version+1,updated_by_principal_id=actor WHERE namespace_id=p_namespace AND id=target AND (NOT coalesce(tags,'[]')?'stale' OR metadata->'consolidation'->>'stale' IS DISTINCT FROM 'true'); GET DIAGNOSTICS changed=ROW_COUNT; IF changed=1 THEN actual:=a.cost; END IF; END IF; SELECT jsonb_agg(to_jsonb(m) ORDER BY m.id) INTO after_rows FROM public.memories m WHERE m.namespace_id=p_namespace AND m.id IN(SELECT value->>'id' FROM jsonb_array_elements(a.members)); FOREACH scope_name IN ARRAY ARRAY['stage',p_namespace] LOOP UPDATE mem9_maintenance.budget_windows SET used=mem9_maintenance.cost_add(used,actual),reserved=mem9_maintenance.cost_add(reserved,s.reservation,-1) WHERE scope=scope_name AND day=s.budget_day; END LOOP; result:=jsonb_build_object('action_id',p_id,'status',CASE WHEN (actual->>'total')::int=0 THEN 'noop' ELSE 'applied' END,'changed_rows',actual->'total','cost',actual); INSERT INTO mem9_maintenance.receipts(namespace_id,action_id,result,before_images,post_images) VALUES(p_namespace,p_id,result,before_rows,after_rows); UPDATE mem9_maintenance.action_state SET status=result->>'status',reason='',reservation=NULL,lease_until=NULL WHERE namespace_id=p_namespace AND action_id=p_id; RETURN result; END $$",
       "classification": "namespace_composed_or_compatibility",
       "rationale": "Memory aliases are bound to the authorized p_namespace and the immutable participant set. Public execution is revoked; entry points bind real login capabilities and active namespace membership. Internal routines are invoked only behind the same transaction guard.",
       "coverage": [
@@ -1582,9 +1582,9 @@
       "namespace_evidence": "Explicit namespace predicates, namespace-bound action/classification keys and all-member fences."
     },
     {
-      "id": "34d764710a68b2b8b116",
+      "id": "47003f9eeafb2182b1b1",
       "owner": "docker/bootstrap/migrations/005_consolidation_execution.sql",
-      "line": 664,
+      "line": 667,
       "tables": [
         "memories"
       ],
@@ -2321,6 +2321,38 @@
       "namespace_evidence": null
     },
     {
+      "id": "a7ed6ed6cf6e5f2790df",
+      "owner": "scripts/lib/production-runtime-rehearsal.mjs",
+      "line": 25,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "2edecdd9c48e63b85c98fd0fa6b973f464964252ab3e2626c876ddb456a4ad82",
+      "statement": "SELECT id,encode(sha256(convert_to((to_jsonb(m)-'created_at'-'updated_at'|| jsonb_build_object('created_epoch',extract(epoch FROM created_at),'updated_epoch',extract(epoch FROM updated_at)))::text,'UTF8')),'hex') AS digest FROM public.memories m WHERE namespace_id=$1 ORDER BY id",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "544dcc36cdfd414fffaf",
+      "owner": "scripts/lib/production-runtime-rehearsal.mjs",
+      "line": 39,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "8445f3141875ffc475219724664afb664706f6562411a77333afcd2e9ca76caa",
+      "statement": "INSERT INTO public.memories(id,namespace_id,created_by_principal_id,updated_by_principal_id,content,source,tags,metadata,embedding,memory_type) VALUES($1,$2,$3,$3,$4,'runtime-preservation',$5::jsonb,$6::jsonb,$7::vector,'pinned')",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "INSERT column namespace_id"
+    },
+    {
       "id": "4dc1ba8638c57647e1bd",
       "owner": "scripts/memory-cleanup.mjs",
       "line": 3719,
@@ -2812,6 +2844,118 @@
         "scripts/run-memory-namespace-integration.sh"
       ],
       "namespace_evidence": null
+    },
+    {
+      "id": "b38634a4318c2548a6c1",
+      "owner": "scripts/production-consolidation-operator.mjs",
+      "line": 135,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "99e604ffaa82564d72fed5d21ab09c6e1edbd7ba2d4ac190e5ddd1b1b2b7ea2d",
+      "statement": "SELECT m.id,m.namespace_id, encode(sha256(convert_to((to_jsonb(m)-'created_at'-'updated_at'||jsonb_build_object( 'created_epoch',extract(epoch FROM m.created_at),'updated_epoch',extract(epoch FROM m.updated_at)))::text,'UTF8')),'hex') AS digest FROM public.memories m WHERE m.namespace_id=$1 AND (m.memory_type IS DISTINCT FROM 'insight' OR coalesce(m.metadata->>'protected','false')<>'false' OR coalesce(m.tags,'[]') ?| ARRAY['protected','pinned']) ORDER BY m.id LIMIT 100001 FOR SHARE",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "995e5938a84b477caa7b",
+      "owner": "scripts/production-consolidation-operator.mjs",
+      "line": 141,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "5c67ef9d95f0def34f60855df5750f8bf43fd5b90b46d7cd16ff7b3c3edb75f9",
+      "statement": "SELECT m.id,m.namespace_id, encode(sha256(convert_to((to_jsonb(m)-'created_at'-'updated_at'||jsonb_build_object( 'created_epoch',extract(epoch FROM m.created_at),'updated_epoch',extract(epoch FROM m.updated_at)))::text,'UTF8')),'hex') AS digest FROM public.memories m WHERE m.namespace_id=$1 AND m.id=ANY($2) ORDER BY m.id LIMIT 100001 FOR SHARE",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "9dd9297e7be4574eb71c",
+      "owner": "scripts/production-consolidation-operator.mjs",
+      "line": 192,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "6abcecaff33633073c8150743f103cbfd68ca60d72f5fe953ef13136f52d308d",
+      "statement": "SELECT to_jsonb(m) AS value FROM public.memories m WHERE namespace_id=$1 AND id=ANY($2) FOR SHARE",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "c92b18ebd86df6d97b13",
+      "owner": "scripts/production-consolidation-operator.mjs",
+      "line": 224,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "528b57ee3c6a9245bfdece3272b5b51b0fad11a814835dd147a33f8efd968180",
+      "statement": "SELECT EXISTS(SELECT FROM public.memories WHERE namespace_id=$1 AND agent_id=$2) AS result",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "6951b6a0cc74dc0d20f6",
+      "owner": "scripts/production-consolidation-operator.mjs",
+      "line": 247,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "ac519fbf581d7915f730f9966f20170674484fcc9876340f353babb2c0aed703",
+      "statement": "SELECT id,namespace_id,version,agent_id,content,memory_type,state FROM public.memories WHERE namespace_id=$1 AND agent_id=$2 ORDER BY id LIMIT 10001 FOR UPDATE",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "0fb19b749015840fd48a",
+      "owner": "scripts/production-consolidation-operator.mjs",
+      "line": 259,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "8cd5f55ecf9e71f4a78669e5651f9bb8edc1e3b9f33665b254f87bda9cf08f27",
+      "statement": "DELETE FROM public.memories WHERE namespace_id=$1 AND id=$2 AND version=$3",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "bc6340c9e508f18bec51",
+      "owner": "scripts/production-consolidation-operator.mjs",
+      "line": 263,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "528b57ee3c6a9245bfdece3272b5b51b0fad11a814835dd147a33f8efd968180",
+      "statement": "SELECT EXISTS(SELECT FROM public.memories WHERE namespace_id=$1 AND agent_id=$2) AS result",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+      ],
+      "namespace_evidence": "namespace_id=$1"
     },
     {
       "id": "e60cf7616a68527fc761",

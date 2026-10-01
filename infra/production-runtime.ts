@@ -54,7 +54,8 @@ export function productionRuntimeEnabled(){return (process.env.MEM9_PRODUCTION_R
 /** Old execution/task identities never gain the replacement administrative keys. */
 export function protectLegacyRuntimeCredentials(args:Record<string,unknown>,allowPreviewRuntime=false){
   if(!productionRuntimeEnabled())return;
-  args.assumeRolePolicy=$jsonStringify(runtimeTaskTrust());
+  // Existing service trust is audited before preparation. Preserve it here:
+  // fencing credentials does not require permission to rewrite role trust.
   const retired=process.env.MEM9_PRODUCTION_RUNTIME_MODE!=="prepare";
   const prefix=$interpolate`arn:aws:ssm:${applicationRegion()}:${accountId()}:parameter/mem9-on-aws/${$app.stage}/runtime/`;
   const suffixes=['schema-administrator-credential','schema-administrator-backup','transition-credential',
@@ -85,6 +86,10 @@ export function productionRuntimeResources(existing:RuntimeCredentials|undefined
   if(stage!=="prod"&&!runtimePreviewStage(stage))throw Error("InvalidProductionRuntimeStage");
   if(process.env.MEM9_NAMESPACE_REQUIRED!=="1")throw Error("ProductionRuntimeRequiresNamespaces");
   productionFallbackImages();
+  const executionName=`mem9-on-aws-${stage}-RuntimeMem9ServerExecutionRole-role`;
+  const bootstrapName=`mem9-on-aws-${stage}-SchemaMem9BootstrapExecutionRole-role`;
+  // Raw provider resources do not receive SST component name prefixes.
+  if([executionName,bootstrapName].some(name=>name.length>64))throw Error('RuntimeRoleNameTooLong');
   const mode=selected as "prepare"|"paused"|"ready"|"active",prefix=`/mem9-on-aws/${stage}/runtime`;
   const tags={Project:"mem9-on-aws",Stage:stage,ManagedBy:"sst"};
   const parameter=(name:string,path:string,value:Input<string>)=>new aws.ssm.Parameter(name,{name:prefix+"/"+path,type:"SecureString",value,tags});
@@ -106,12 +111,14 @@ export function productionRuntimeResources(existing:RuntimeCredentials|undefined
   const transitionSalt=new random.RandomPassword("TransitionDatabaseSalt",{length:32,special:false});
   const transition=parameter("TransitionDatabaseCredential","transition-credential",$jsonStringify({password:transitionPassword.result,salt:transitionSalt.result}));
   const execution=new aws.iam.Role("RuntimeMem9ServerExecutionRole",{
+    name:executionName,
     assumeRolePolicy:$jsonStringify(runtimeTaskTrust()),
     managedPolicyArns:["arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"],
     inlinePolicies:[{name:"RuntimeSecrets",policy:$jsonStringify(runtimeExecutionPolicy(
       [runtime.parameterArn,namespace.transportSigningParameterArn,maintenance.bundleParameterArn],[identity.tenantSecretArn]))}],tags,
   });
   const bootstrapExecution=new aws.iam.Role("SchemaMem9BootstrapExecutionRole",{
+    name:bootstrapName,
     assumeRolePolicy:$jsonStringify(runtimeTaskTrust()),
     managedPolicyArns:["arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"],
     inlinePolicies:[{name:"SchemaSecrets",policy:$jsonStringify(runtimeExecutionPolicy(

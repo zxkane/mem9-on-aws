@@ -9,8 +9,10 @@ import {schemaAdministratorRole,rolloutPhases,assertRolloutClaim,validateRollout
 import {withRolloutLock,initializeRollout,readRolloutState,commitRolloutPhase,changeRolloutRecovery,recordRolloutOperation} from './lib/production-runtime-state.mjs';
 import {prepareSchemaAdministrator,rotateLegacyCredential,revokeTransferMembership,retireLegacyCredential} from './lib/production-runtime-credentials.mjs';
 import {inspectApplicationOwnership,transferApplicationOwnership} from './lib/production-runtime-ownership.mjs';
+import {prepareAdministratorProbe,verifyAdministratorProbe,administratorProbeIdentity,readCancellationPreservation} from './lib/production-runtime-rehearsal.mjs';
+import {readExtensionCatalog} from './lib/runtime-extension-catalog.mjs';
 
-const operations=new Set(['prepare','inspect-preparation','status','begin','assert-quiescent','runtime','fence','verify-fence','drain-legacy','transfer','revoke','verify-admin','runtime-ready','retire','complete','cancel-backend','recover','repair','restored','resume']);
+const operations=new Set(['prepare','inspect-preparation','status','begin','assert-quiescent','runtime','fence','verify-fence','drain-legacy','transfer','revoke','verify-admin','runtime-ready','retire','complete','cancel-backend','recover','repair','restored','resume','rehearsal-prepare','rehearsal-verify','rehearsal-preservation','extension-catalog']);
 const identifier=value=>'"'+value.replaceAll('"','""')+'"';
 const scalar=async(db,sql,args=[])=>(await db.query(sql,args)).rows[0]?.result;
 
@@ -20,7 +22,9 @@ export function parseProductionRequest(raw){
   if(!request||typeof request!=='object'||Array.isArray(request)||!operations.has(request.operation)||
     !/^[a-f0-9]{32}$/.test(request.nonce??'')||!Number.isSafeInteger(request.epoch)||request.epoch<1||
     !Number.isSafeInteger(request.deadline)||request.deadline<=Date.now()||request.deadline>Date.now()+900000||
-    Object.keys(request).some(k=>!['operation','nonce','epoch','deadline','target','verification_hash','task_definition'].includes(k)))throw Error('InvalidProductionRequest');
+    Object.keys(request).some(k=>!['operation','nonce','epoch','deadline','target','verification_hash','task_definition','expected_hash','checkpoint_sequence'].includes(k)))throw Error('InvalidProductionRequest');
+  if(request.expected_hash!==undefined&&(request.operation!=='resume'||typeof request.expected_hash!=='string'||!/^[a-f0-9]{64}$/.test(request.expected_hash)))throw Error('InvalidProductionRequest');
+  if(request.checkpoint_sequence!==undefined&&(request.operation!=='rehearsal-preservation'||!Number.isSafeInteger(request.checkpoint_sequence)||request.checkpoint_sequence<1||request.checkpoint_sequence>1000))throw Error('InvalidProductionRequest');
   if(request.operation==='prepare'){
     const fields=['clusterArn','fallbackTaskDefinition','fallbackImageDigest','runtimeCredentialArn','writerEndpoint','masterUsername'];
     if(!request.target||Object.keys(request.target).sort().join()!==fields.sort().join()||fields.some(k=>typeof request.target[k]!=='string'))throw Error('InvalidProductionTarget');
@@ -31,7 +35,7 @@ export function parseProductionRequest(raw){
 export async function productionOperatorDigest(root=import.meta.dirname){
   const paths=['production-runtime-operator.mjs','runtime-bootstrap.mjs','seed-tenant.mjs','migrate-memory-namespaces.mjs',
     'lib/production-runtime-config.mjs','lib/production-runtime-state.mjs','lib/production-runtime-credentials.mjs',
-    'lib/production-runtime-ownership.mjs','lib/runtime-credentials.mjs','lib/consolidation-preview-secrets.mjs'];
+    'lib/production-runtime-ownership.mjs','lib/production-runtime-rehearsal.mjs','lib/production-runtime-cancellation.mjs','lib/runtime-extension-catalog.mjs','lib/runtime-credentials.mjs','lib/consolidation-preview-secrets.mjs'];
   const hash=createHash('sha256');
   for(const path of paths.sort()){hash.update(path+'\0');hash.update(await readFile(join(root,path)));}
   return hash.digest('hex');
@@ -103,6 +107,41 @@ export async function runProductionOperation({config,request,connect,schemaRoot,
   try{observed=expectState(await readConsistent(reader));}
   finally{await reader.end();}
   if(request.operation==='status')return observed;
+  if(request.operation==='rehearsal-preservation'){
+    administratorProbeIdentity(observed);
+    if(!['prepared','password_fenced'].includes(observed.phase)||!config.original)throw Error('PreservationReaderMismatch');
+    const credential=observed.phase==='password_fenced'?{...config.original,password:config.transition?.password}:config.original;
+    if(!credential.password)throw Error('TransitionCredentialRequired');
+    // Authentication failure never falls back to the retired original password.
+    const db=await connect(credential);
+    try{return await withRolloutLock(db,config.stage,async owns=>{
+      let current;
+      const checkpoint=async()=>{
+        abort();await owns();current=expectState(await readRolloutState(db));
+        assertRolloutClaim(current,claim,{recovery:true});
+        if(current.phase!==observed.phase||Date.now()>=request.deadline)throw Error('PreservationReaderMismatch');
+      };
+      const preservation=await readCancellationPreservation(db,observed,{checkpoint,checkpointSequence:request.checkpoint_sequence});
+      return {...current,rehearsal_preservation:{count:preservation.count,hash:preservation.hash},cancellation_history:preservation.history};
+    });}finally{await db.end();}
+  }
+  if(['rehearsal-prepare','rehearsal-verify'].includes(request.operation)){
+    administratorProbeIdentity(observed);
+    const preparing=request.operation==='rehearsal-prepare',phase=preparing?'prepared':'complete';
+    if(observed.phase!==phase||observed.status!=='running')throw Error('AdministratorRehearsalPhase');
+    const db=await connect(preparing?config.original:adminCredential);
+    try{return await withRolloutLock(db,config.stage,async owns=>{
+      const checkpoint=async()=>{
+        abort();await owns();const current=expectState(await readRolloutState(db));
+        assertRolloutClaim(current,claim,{recovery:true});
+        if(current.phase!==phase||current.status!=='running'||Date.now()>=request.deadline)throw Error('AdministratorRehearsalPhase');
+      };
+      await checkpoint();
+      const probe=preparing?await prepareAdministratorProbe(db,{state:observed,connect,original:config.original,checkpoint}):
+        await verifyAdministratorProbe(db,{state:observed,connect,administrator:adminCredential,checkpoint});
+      return {...expectState(await readRolloutState(db)),administrator_rehearsal:probe};
+    });}finally{await db.end();}
+  }
   assertRolloutClaim(observed,claim,{recovery:true});
   const index=rolloutPhases.indexOf(observed.phase);
   if(request.operation==='revoke'){
@@ -151,6 +190,8 @@ export async function runProductionOperation({config,request,connect,schemaRoot,
         if(request.operation==='runtime'&&await scalar(db,'SELECT EXISTS(SELECT FROM pg_stat_activity WHERE usesysid=$1::oid AND pid<>pg_backend_pid()) AS result',[state.identity.legacyRoleOid]))throw Error('LegacySessionsRemain');
       };
       await checkpoint();
+      if(request.operation==='resume')return changeRolloutRecovery(db,{claim,owns,status:'running',expectedHash:request.expected_hash,
+        evidence:{reason:'explicit_resume'}});
       await recordRolloutOperation(db,{claim,owns,recovery,reason:'phase_operation'});
       const phase=(from,to,work=async()=>{},evidence={})=>commitRolloutPhase(db,{claim,from,to,work,owns,evidence});
       if(request.operation==='begin')return phase('prepared','maintenance');
@@ -233,9 +274,9 @@ export async function runProductionOperation({config,request,connect,schemaRoot,
             await scalar(db,'SELECT EXISTS(SELECT FROM pg_stat_activity WHERE usesysid=$1::oid) AS result',[state.identity.legacyRoleOid]))throw Error('LegacyRetirementUnproven');
         },{verification_hash:request.verification_hash});
       }
-      if(['recover','restored','resume'].includes(request.operation))return changeRolloutRecovery(db,{claim,owns,
-        status:request.operation==='recover'?'recovering':request.operation==='restored'?'restored':'running',
-        evidence:{reason:request.operation==='recover'?'watchdog':request.operation==='restored'?'restored':'explicit_resume'}});
+      if(['recover','restored'].includes(request.operation))return changeRolloutRecovery(db,{claim,owns,
+        status:request.operation==='recover'?'recovering':'restored',
+        evidence:{reason:request.operation==='recover'?'watchdog':'restored'}});
       throw Error('UnsupportedProductionOperation');
     });
   }finally{await db.end();}
@@ -244,6 +285,23 @@ export async function runProductionOperation({config,request,connect,schemaRoot,
 async function main(){
   const env=process.env,request=parseProductionRequest(env.MEM9_PRODUCTION_RUNTIME_REQUEST);
   if(env.MEM9_RUNTIME_OPERATOR_RETIRED==='1')throw Error('TransitionTaskRetired');
+  if(request.operation==='extension-catalog'){
+    const stage=env.MEM9_STAGE,host=env.MEM9_DB_HOST,database=env.MEM9_DB_NAME,region=env.AWS_REGION;
+    if(!(stage==='prod'||/^pr-[1-9][0-9]*$/.test(stage??''))||!region||!host?.startsWith(`mem9-on-aws-${stage}-`)||
+      !host.endsWith(`.${region}.rds.amazonaws.com`)||!/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(database??''))throw Error('ExtensionCatalogTargetMismatch');
+    const credential=JSON.parse(env.MEM9_SCHEMA_ADMIN_CREDENTIAL??env.MEM9_DB_SECRET);
+    if(env.MEM9_SCHEMA_ADMIN_CREDENTIAL&&credential.username!==schemaAdministratorRole(stage))throw Error('ExtensionCatalogCredentialMismatch');
+    const db=new pg.Client({host,port:Number(env.MEM9_DB_PORT),database,user:credential.username,password:credential.password,
+      ssl:{rejectUnauthorized:true},connectionTimeoutMillis:10000,statement_timeout:30000,query_timeout:35000,application_name:'mem9-extension-catalog'});
+    db.on('error',()=>{});
+    const timer=setTimeout(()=>process.exit(1),Math.max(1,request.deadline-Date.now()));timer.unref();
+    try{
+      await db.connect();await db.query('BEGIN ISOLATION LEVEL REPEATABLE READ READ ONLY');
+      const catalog=await readExtensionCatalog(db);await db.query('ROLLBACK');
+      process.stdout.write(JSON.stringify({event:'production_runtime',operation:request.operation,nonce:request.nonce,outcome:'complete',target:{stage,host,database},catalog})+'\n');
+    }finally{clearTimeout(timer);await db.end().catch(()=>{});}
+    return;
+  }
   const runtime=parseRuntimeConfig(env),administrator=JSON.parse(env.MEM9_SCHEMA_ADMIN_CREDENTIAL??env.MEM9_DB_SECRET);
   if(!runtime.host.startsWith('mem9-on-aws-'+runtime.stage+'-'))throw Error('ProductionTargetMismatch');
   const config={stage:runtime.stage,database:runtime.database,runtime,administrator,
@@ -253,8 +311,8 @@ async function main(){
   process.once('SIGTERM',abort);process.once('SIGINT',abort);
   const stop=setTimeout(abort,Math.max(0,request.deadline-Date.now()-30000));stop.unref();
   const watchdog=setTimeout(()=>process.exit(1),request.deadline-Date.now());watchdog.unref();
-  const connect=async credential=>{
-    const db=new pg.Client({host:runtime.host,port:runtime.port,database:runtime.database,user:credential.username,password:credential.password,
+  const connect=async(credential,database=runtime.database)=>{
+    const db=new pg.Client({host:runtime.host,port:runtime.port,database,user:credential.username,password:credential.password,
       ssl:{rejectUnauthorized:true},connectionTimeoutMillis:10000,statement_timeout:30000,query_timeout:35000,application_name:'mem9-production-runtime'});
     db.on('error',()=>{});try{await db.connect();return db;}catch(error){await db.end().catch(()=>{});throw error;}
   };

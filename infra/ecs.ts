@@ -161,7 +161,9 @@ export function ecs(
   namespaceIdentity: NamespaceIdentityOutputs,
   maintenanceIdentity?: import("./namespace-identity").MaintenanceIdentityOutputs,
   runtime?: RuntimeCredentials,
+  productionExecution?: Input<string>,
 ): EcsOutputs {
+  if(productionExecution!==undefined&&($app.stage!=='prod'||!runtime?.executionRoleArn))throw Error('ProductionExecutionRequiresRuntimeIdentity');
   if ($app.stage === "prod" && !BEDROCK_PROJECT) {
     throw new Error("MEM9_BEDROCK_PROJECT is required for production observability");
   }
@@ -393,7 +395,7 @@ export function ecs(
           // and the Cognito/Aurora namespace bindings are reconciled.
           MNEMO_NAMESPACE_REQUIRED: runtime ? "1" : NAMESPACE_REQUIRED,
           ...(runtime ? {MNEMO_SCHEMA_MODE: "verify", MEM9_STAGE: $app.stage} : {}),
-          MNEMO_CONSOLIDATION_EXECUTION_ENABLED: /^pr-[1-9][0-9]*$/.test($app.stage) && NAMESPACE_REQUIRED === "1" ? "true" : "false",
+          MNEMO_CONSOLIDATION_EXECUTION_ENABLED: /^pr-[1-9][0-9]*$/.test($app.stage) && NAMESPACE_REQUIRED === "1" ? "true" : productionExecution??"false",
           MNEMO_NAMESPACE_EXACT_VECTOR_MAX_ROWS: "25000",
           MNEMO_NAMESPACE_EXACT_VECTOR_TIMEOUT: "2s",
           MNEMO_TRANSPORT_ISSUER: "gateway-target",
@@ -507,8 +509,6 @@ export function ecs(
       },
       ...(runtime||productionRuntimeEnabled() ? {executionRole: (args: Record<string, any>) => {
         if(runtime?.executionRoleArn){
-          args.assumeRolePolicy=$jsonStringify({Version:"2012-10-17",Statement:[{Effect:"Allow",Action:"sts:AssumeRole",Principal:{Service:"ecs-tasks.amazonaws.com"},
-            Condition:{StringEquals:{"aws:SourceAccount":accountId()},ArnLike:{"aws:SourceArn":$interpolate`arn:aws:ecs:${region}:${accountId()}:*`}}}]});
           args.inlinePolicies=[{name:"ProductionCredentialFence",policy:JSON.stringify({Version:"2012-10-17",Statement:[{
             Effect:"Deny",Action:["ssm:GetParameter","ssm:GetParameters","ssm:GetParametersByPath","secretsmanager:GetSecretValue","kms:Decrypt"],Resource:"*"}]})}];
           return;

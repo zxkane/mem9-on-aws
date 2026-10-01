@@ -28,7 +28,7 @@ import type { CognitoOutputs } from "./cognito";
 import type { AuthConfig } from "./auth-config";
 import type { ConsolidationPreviewConfig } from "./consolidation-runtime";
 import type {ProductionRuntimeResources} from "./production-runtime";
-import {runtimeTaskTrust,protectLegacyRuntimeCredentials} from "./production-runtime";
+import {protectLegacyRuntimeCredentials} from "./production-runtime";
 
 const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 
@@ -125,7 +125,6 @@ export function bootstrap(
       },
       ...(production?{executionRole:(args:Record<string,unknown>)=>{
         if(!production.active){protectLegacyRuntimeCredentials(args,true);return;}
-        args.assumeRolePolicy=$jsonStringify(runtimeTaskTrust());
         args.inlinePolicies=[{name:"ProductionCredentialFence",policy:JSON.stringify({Version:"2012-10-17",Statement:[{
           Effect:"Deny",Action:["ssm:GetParameter","ssm:GetParameters","ssm:GetParametersByPath","secretsmanager:GetSecretValue","kms:Decrypt"],Resource:"*"}]})}];
       }}:{}),
