@@ -205,6 +205,20 @@ and effective settings; that catalog predicate alone is not the authority gate.
 This check changed no role, credential or memory data. Restricted bound-DML
 callers retain the existing read-only validation and receive no extra SET grant.
 
+### Aurora role-grant attribution (verified 2026-10-01)
+
+Aurora PostgreSQL 17.4 recorded a transfer membership issued through the original
+`rds_superuser` login with `rdsadmin` as its grantor. Restricting `REVOKE` to
+`GRANTED BY` the original login left that membership usable. A same-caller
+transactional probe verified that plain `REVOKE`, with default `RESTRICT`, removed
+both effective `SET` and `USAGE`; rollback restored the exact membership row and
+options. Keep the source-role identity check and both effective-privilege checks.
+Do not impersonate the managed grantor or use cascading revocation.
+
+Ownership transfer and its phase receipt commit before this membership cleanup.
+A failed task after that commit can leave the SSM mirror behind the database.
+Recovery must read the durable database phase and preserve a committed transfer.
+
 ### Extension maintenance evidence (verified 2026-09-30)
 
 The same-account Aurora PostgreSQL 17.4 preview exposes only pgvector 0.8.0
