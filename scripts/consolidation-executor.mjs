@@ -26,9 +26,10 @@ export async function runConsolidationExecutor(deps,{runtimeMs=600000,now=()=>pe
       !integer(claim.reserved_rows)||claim.reserved_rows<1||claim.reserved_rows>100-batchRows)throw Error('invalid execution lease');
     report.claimed++;
     let result,finished=false;
-    for(let attempt=0;attempt<3&&now()<deadline;attempt++){
+    for(let attempt=0;attempt<3&&now()<deadline;){
+      let uncertain=false;
       try{result=await deps.apply(claim,Math.min(65000,Math.max(1,deadline-now())));}
-      catch{result=await deps.status(claim.action_id);}
+      catch{uncertain=true;result=await deps.status(claim.action_id);}
       if(terminal.has(result.status)){
         if(!integer(result.changed_rows)||result.changed_rows>claim.reserved_rows||
           (result.status==='noop'&&result.changed_rows!==0))throw Error('invalid execution receipt');
@@ -37,6 +38,9 @@ export async function runConsolidationExecutor(deps,{runtimeMs=600000,now=()=>pe
       }
       if(['invalidated','review','queued','policy_blocked'].includes(result.status)){report.deferred++;finished=true;break;}
       if(!waits.has(result.status))throw Error('invalid execution result');
+      // Explicit rate admission can take longer than three seconds. Keep the
+      // same lease and deadline; uncertain responses retain the retry ceiling.
+      if(result.status!=='rate_wait'||uncertain)attempt++;
       await sleep(Math.min(1000,Math.max(0,deadline-now())));
     }
     if(!finished){report.deferred++;report.stopReason='pending_action';break;}
