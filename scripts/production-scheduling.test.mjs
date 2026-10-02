@@ -1,6 +1,7 @@
 import {describe,it,expect} from 'vitest';
 import {activateProductionScheduling,verifyProductionScheduling,disableProductionScheduling,enableProductionScheduling,captureProductionBackend} from './lib/production-scheduling.mjs';
 import {productionArtifactAdmission,bindProductionBackend,validateProductionBackendBinding} from './lib/production-artifacts.mjs';
+import {productionRecurringEnvironment} from './lib/production-scheduler-context.mjs';
 
 const revision='a'.repeat(40),admission='b'.repeat(64),account='123456789012',region='ap-northeast-1';
 function deployment(){
@@ -58,7 +59,7 @@ describe('production scheduling admission and deployment',()=>{
     f.server.environment[0].value='false';await expect(verifyProductionScheduling(f.clients,f.targets,{enabled:false})).rejects.toThrow();
   });
   it('rejects old tokens, wrong backend revisions and altered scheduled commands',async()=>{
-    const f=deployment();f.targets.forEach(target=>target.template.State='ENABLED');
+    const f=deployment();f.targets.forEach(target=>{target.template.State='ENABLED';target.template.Target.Input=JSON.stringify({containerOverrides:[{name:target.containerName,environment:productionRecurringEnvironment(target.generation,admission)}]});});
     await expect(verifyProductionScheduling(f.clients,f.targets,{enabled:true,admission:'d'.repeat(64)})).rejects.toThrow();
     expect((await verifyProductionScheduling(f.clients,f.targets,{enabled:true,admission})).enabled).toBe(true);
     f.server.image+='stale';await expect(verifyProductionScheduling(f.clients,f.targets,{enabled:true,admission})).rejects.toThrow();

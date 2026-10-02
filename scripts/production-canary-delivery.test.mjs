@@ -1,5 +1,5 @@
 import {describe,it,expect} from 'vitest';
-import {productionCanarySchedule,ownsCanaryTask,quiesceProductionWorkers} from './lib/production-canary-delivery.mjs';
+import {productionCanarySchedule,ownsCanaryTask,quiesceProductionWorkers,runProductionCanaryWake} from './lib/production-canary-delivery.mjs';
 import {canaryEvidenceHash} from './lib/production-canary-verification.mjs';
 
 const namespace='60000000-0000-4000-8000-000000000001',id='a'.repeat(64);
@@ -20,6 +20,16 @@ function fixture(wave='repeat-a'){
   return {target,template,request,journal,task};
 }
 describe('bounded production Scheduler deliveries',()=>{
+  it('persists the exact launch identity before any AWS write and honors cancellation without retiming',async()=>{
+    const f=fixture(),calls=[],target={...f.target,kind:'executor',template:f.template},abort=new AbortController();
+    const clients={ssm:{send:async()=>calls.push('put')},scheduler:{send:async()=>calls.push('schedule')}};
+    await expect(runProductionCanaryWake(clients,target,{wave:'apply',admission:'a'.repeat(32),onIntent:async journal=>{
+      expect(journal.stage).toBe('prod');expect(journal.wave).toBe('apply');expect(journal.nonce).toMatch(/^[a-f0-9]{32}$/);expect(calls).toEqual([]);abort.abort();
+    }},{signal:abort.signal})).rejects.toThrow();expect(calls).toEqual([]);
+    let clock=100000;
+    await expect(runProductionCanaryWake(clients,target,{wave:'apply',admission:'a'.repeat(32),onIntent:async()=>{clock+=60001;}},{now:()=>clock})).rejects.toThrow('ProductionCanaryDeliveryFailed');
+    expect(calls).toEqual([]);
+  });
   it('stops older revisions of approved worker families and leaves unrelated tasks alone',async()=>{
     const f=fixture(),stopped=[];let now=Date.now();
     const target={...f.target,taskDefinitionArn:f.target.taskDefinitionArn.replace(/:1$/,':2')};

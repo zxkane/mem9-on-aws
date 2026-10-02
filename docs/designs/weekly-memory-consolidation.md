@@ -1856,3 +1856,37 @@ parent audit and material/authority/credential checks. Actual old-data/new-contr
 preview coverage, fresh production N150 cohorts and commits, both complete
 replays, benchmark cleanup, capacity calibration, promotion and genuine recurring
 deliveries remain required; an all-new preview cannot substitute for them.
+
+The retained combination rehearsal runs after a genuine disposable runtime
+finalization/rehearsal and before that stage is removed. Its optional manual
+input selects an earlier successful pull-request build for the same preview
+stage. A pre-AWS workflow check rejects production stages or malformed run IDs.
+The rehearsal verifies the historical build's exact preview ECR roots and ARM64
+children, keeps the current bootstrap/control image, and redeploys the stage with
+an explicitly synthetic preview-only descriptor. It then runs the ordinary
+bootstrap, synthetic 150-row Scheduler acceptance, MCP and OAuth checks and
+verifies actual service and worker image digests. Its distinct, source-bound
+`retained_data_preview` record is required by paused production witness
+publication. Synthetic descriptor hashes are never production parent or policy
+evidence. Preview teardown can inspect an expired descriptor, disables selection
+only for resource removal, and deletes the unchanged owned record before removing
+the runtime plan; concurrent changes reject cleanup.
+
+Continuation state persistence serializes immutable snapshots so asynchronous
+sampling and task-launch progress cannot overwrite each other's acknowledged
+journals. The controller checks the returned N150 baseline before admitting
+execution and the returned loaded cohort before freezing verification. Each
+canonical launch exposes its exact journal identity to durable persistence
+before any AWS write; cancellation or a missed original due time cannot retime
+that launch.
+
+Recurring activation receives the certified backend binding explicitly and
+verifies it before changing schedule admission. Recurring target payloads carry
+Scheduler context attributes. Acceptance correlates authenticated role identity,
+RunTask audit events, immutable task overrides and the task's exact log stream;
+user-agent text is not authentication. The retained worker's recurring reports
+do not carry the one-shot invocation field. Each kind must complete at least one
+successful slice, while classifications and changed rows may be zero. This
+proves the dispatcher and slice ran even when the queue is empty. A failure in
+only final operator-fence cleanup after verified recurring execution is reported
+as running with cleanup pending, preserving the already verified worker state.

@@ -25,6 +25,7 @@ import {cancellationRehearsal} from './lib/production-runtime-cancellation-runne
 import {requireNamespaceId} from './lib/maintenance-scope.mjs';
 import {loadDeploymentDataRelease} from './lib/production-data-release-loader.mjs';
 import {captureDataReleaseBuild} from './lib/production-data-evidence.mjs';
+import {inspectDataRelease} from './lib/production-data-release.mjs';
 
 const runProcess=promisify(execFile),send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
 const emit=value=>process.stdout.write(JSON.stringify({event:'production_runtime_rollout',...value})+'\n');
@@ -85,6 +86,13 @@ export async function productionCoordinatorDigest(){
     'scripts/lib/production-canary-fixture-evidence.mjs',
     'scripts/lib/production-data-release.mjs','scripts/lib/production-data-release-loader.mjs',
     'scripts/lib/production-data-build-inputs.mjs','scripts/lib/production-data-evidence.mjs',
+    'scripts/lib/production-data-authorization.mjs','scripts/lib/production-data-issuance.mjs',
+    'scripts/lib/production-scheduler-context.mjs',
+    'scripts/lib/production-canary-continuation-flow.mjs','scripts/lib/production-canary-continuation-proof.mjs',
+    'scripts/lib/production-recurring-verification.mjs','scripts/lib/production-recurring-observer.mjs',
+    'scripts/lib/production-canary-calibration.mjs',
+    'scripts/run-retained-data-preview.mjs',
+    'scripts/lib/retained-preview-evidence.mjs',
     'scripts/canary-fixture-runner.mjs','scripts/production-consolidation-operator.postgres.test.mjs',
     'scripts/canary-fixture-e2e.mjs','scripts/lib/canary-fixture-task.mjs',
     'docker/canary-fixture/runner.Dockerfile','docker/canary-fixture/database.Dockerfile','docker/canary-fixture/pg-hba.conf',
@@ -230,13 +238,32 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
     if(manifest&&!plan)throw Error('ProductionPlanMissing');
     const mode=manifest?.mode??(plan?'prepare':'off');
     if(!['off','prepare','paused','ready','active'].includes(mode))throw Error('InvalidProductionManifest');
+    const dataName=`/mem9-on-aws/${stage}/consolidation-runtime/data-release`;
+    const dataResult=await send(clients.ssm,new GetParametersCommand({Names:[dataName],WithDecryption:true}));
+    const dataParameter=dataResult.Parameters?.[0];
+    if(dataParameter){
+      if(dataResult.Parameters.length!==1||dataResult.InvalidParameters?.length||dataParameter.Name!==dataName||dataParameter.Type!=='SecureString'||
+        !Number.isSafeInteger(dataParameter.Version)||dataParameter.Version<1||!plan)throw Error('PreviewDataReleaseCleanupMismatch');
+      let data;try{data=JSON.parse(dataParameter.Value);}catch{throw Error('PreviewDataReleaseCleanupMismatch');}
+      inspectDataRelease(data,{stage,account,region,controlSourceTree:data.controlSourceTree,bindings:{runtimeNonce:plan.nonce}});
+    }else if(dataResult.InvalidParameters?.join()!==dataName)throw Error('PreviewDataReleaseCleanupMismatch');
     const pending=plan?.clusterArn?await cancelProductionInvocations(clients,plan):[];
     await execute('pnpm',['-C','infra','exec','sst','remove','--stage',stage,'--print-logs'],{cwd:process.cwd(),
       env:{...env,MEM9_NAMESPACE_REQUIRED:'1',MEM9_CONSOLIDATION_SCHEDULE_ENABLED:'0',SST_SECRET_MaintenanceNamespaceIds:'[]',
-        MEM9_PRODUCTION_RUNTIME_MODE:mode,...(plan?{MEM9_RUNTIME_FALLBACK_IMAGES:JSON.stringify(plan.fallbackImages)}:{})},
+        MEM9_PRODUCTION_RUNTIME_MODE:mode,MEM9_RETAINED_DATA_RELEASE:'none',MEM9_RETAINED_DATA_RELEASE_HASH:'none',
+        ...(plan?{MEM9_RUNTIME_FALLBACK_IMAGES:JSON.stringify(plan.fallbackImages)}:{})},
       timeout:2400000,maxBuffer:8*1024*1024});
     if(plan?.databaseClusterId)await removePreviewSnapshot(clients,plan);
     await acknowledgeProductionCancellation(clients,pending);
+    if(dataParameter){
+      const fresh=await send(clients.ssm,new GetParametersCommand({Names:[dataName],WithDecryption:true})),current=fresh.Parameters?.[0];
+      if(current){
+        if(fresh.Parameters.length!==1||fresh.InvalidParameters?.length||current.Name!==dataName||current.Version!==dataParameter.Version||current.Value!==dataParameter.Value)throw Error('PreviewDataReleaseCleanupMismatch');
+        await send(clients.ssm,new DeleteParameterCommand({Name:dataName}));
+      }else if(fresh.InvalidParameters?.join()!==dataName)throw Error('PreviewDataReleaseCleanupMismatch');
+      const gone=await send(clients.ssm,new GetParametersCommand({Names:[dataName],WithDecryption:true}));
+      if(gone.Parameters?.length||gone.InvalidParameters?.join()!==dataName)throw Error('PreviewDataReleaseCleanupIncomplete');
+    }
     if(plan)for(const name of [prefix+'/administrator-recovery-intent',statePath,planPath,
       ...['intent','checkpoint','receipt','accepted'].map(key=>prefix+'/cancellation-'+key)]){
       try{await send(clients.ssm,new DeleteParameterCommand({Name:name}));}

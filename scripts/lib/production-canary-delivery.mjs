@@ -157,7 +157,8 @@ export async function recoverProductionCanaryDeliveries(clients,targets,{now=Dat
   return {reconciled:pending.length};
 }
 
-export async function runProductionCanaryWake(clients,target,{wave,actions,admission,onRunning=async()=>{}},{now=Date.now,sleep=delay}={}){
+export async function runProductionCanaryWake(clients,target,{wave,actions,onIntent=async()=>{},admission,onRunning=async()=>{}},{now=Date.now,sleep=delay,signal}={}){
+  signal?.throwIfAborted();
   const nonce=randomUUID().replaceAll('-',''),when=now()+60000,deadline=when+(target.kind==='planner'?18:8)*60000;
   const request=productionCanarySchedule(target.template,target,{wave,nonce,when,actions,admission});
   const journal={version:1,stage:'prod',region:target.region,account:target.account,cluster:target.cluster,clusterArn:target.clusterArn,
@@ -165,10 +166,13 @@ export async function runProductionCanaryWake(clients,target,{wave,actions,admis
     taskDefinitionArn:target.taskDefinitionArn,containerName:target.containerName,taskRoleArn:target.taskRoleArn,executionRoleArn:target.executionRoleArn,
     overridesHash:canaryEvidenceHash(JSON.parse(request.Target.Input)),targetHash:canaryEvidenceHash(request.Target)};
   const journalPath='/mem9-on-aws/prod/consolidation-runtime/canary-deliveries/'+nonce;
+  await onIntent(structuredClone(journal));signal?.throwIfAborted();if(now()>=when)fail();
   await send(clients.ssm,new PutParameterCommand({Name:journalPath,Type:'SecureString',Value:JSON.stringify(journal),Overwrite:false}));
+  signal?.throwIfAborted();if(now()>=when)fail();
   await send(clients.scheduler,new CreateScheduleCommand(request));
   let terminal,started=false;
   while(now()<deadline){
+    signal?.throwIfAborted();
     const matches=await matchingTasks(clients,target,journal);if(matches.length>1)fail();
     if(matches.length){
       const task=matches[0];
@@ -183,6 +187,7 @@ export async function runProductionCanaryWake(clients,target,{wave,actions,admis
   const log=target.logOptions;if(!log?.['awslogs-group']||!log['awslogs-stream-prefix'])fail();
   const event=wave.startsWith('repeat')?'consolidation_canary_replay':'consolidation_worker';let record;
   for(let attempt=0;attempt<12&&!record;attempt++){
+    signal?.throwIfAborted();
     const records=[],seen=new Set();let nextToken;
     for(let page=0;page<30;page++){
       const response=await send(clients.logs,new FilterLogEventsCommand({logGroupName:log['awslogs-group'],

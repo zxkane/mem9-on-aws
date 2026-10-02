@@ -65,7 +65,8 @@ export async function captureDataReleaseBuild({data,repository=process.cwd(),con
     const child=await readEcr('batch-get-image',{repositoryName,imageDigest:image.arm64Digest});
     artifacts[component]=verifyDataReleaseArtifact(root,child,{account:data.account,repositoryName,...image});
   }
-  return {version:1,recipe:current.recipe,recipeHash,artifacts,buildInputsHash:hash({version:1,recipeHash,artifacts}),dataReleaseHash:selected.hash};
+  return {version:1,controlRevision,controlSourceTree:data.controlSourceTree,dataRevision:data.dataRevision,dataSourceTree:data.dataSourceTree,
+    recipe:current.recipe,recipeHash,artifacts,buildInputsHash:hash({version:1,recipeHash,artifacts}),dataReleaseHash:selected.hash};
 }
 
 export async function captureDataReleaseScans({data,readEcr=dataReleaseEcrReader(data),now=Date.now()}){
