@@ -41,6 +41,7 @@ function normalizedDefinition(value){
   if(copy.enableFaultInjection===false)delete copy.enableFaultInjection;
   if(copy.placementConstraints?.length===0)delete copy.placementConstraints;
   copy.containerDefinitions=copy.containerDefinitions.map(c=>{
+    if(Array.isArray(c.linuxParameters?.capabilities?.add)&&c.linuxParameters.capabilities.add.length===0)delete c.linuxParameters.capabilities.add;
     for(const key of ['environmentFiles','dependsOn','resourceRequirements','ulimits'])if(c[key]?.length===0)delete c[key];
     for(const key of ['privileged','interactive','pseudoTerminal'])if(c[key]===false)delete c[key];
     c.environment?.sort((a,b)=>a.name.localeCompare(b.name));return c;

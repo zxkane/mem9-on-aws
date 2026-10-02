@@ -23,6 +23,11 @@ it('creates a bounded preview fixture with no application AWS role, secrets or e
  expect(f.expected.containerDefinitions[0].dependsOn).toEqual([{containerName:'CanaryPostgres',condition:'HEALTHY'}]);
  expect(()=>verifyCanaryFixtureDefinition(f.definition,f.expected,f.meta)).not.toThrow();
   expect(()=>verifyCanaryFixtureTask(f.task,f.definition,f.expected,f.meta,f.images)).not.toThrow();
+  for(const container of f.definition.containerDefinitions)container.linuxParameters.capabilities.add=[];
+  expect(()=>verifyCanaryFixtureDefinition(f.definition,f.expected,f.meta)).not.toThrow();
+  f.definition.containerDefinitions[0].linuxParameters.capabilities.add=['SYS_PTRACE'];
+  expect(()=>verifyCanaryFixtureDefinition(f.definition,f.expected,f.meta)).toThrow();
+  f.definition.containerDefinitions[0].linuxParameters.capabilities.add=[];
   f.task.overrides.inferenceAcceleratorOverrides=[];
   f.task.overrides.containerOverrides.reverse();
   expect(()=>verifyCanaryFixtureTask(f.task,f.definition,f.expected,f.meta,f.images)).not.toThrow();
