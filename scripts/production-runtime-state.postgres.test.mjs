@@ -113,6 +113,20 @@ describe.skipIf(!dsn)('production rollout ledger on isolated PostgreSQL',()=>{
     try{await expect(withRolloutLock(peer,'prod',async()=>{})).rejects.toThrow('RolloutBusy');}
     finally{await peer.end();}
   }));
+  it('accepts only a hash-linked retired-phase credential proof for this rollout',()=>fixture(async f=>{
+    await f.initialize();
+    const move=(from,to)=>commitRolloutPhase(f.db,{claim:f.claim,from,to,owns:f.owns});
+    await move('prepared','maintenance');await move('maintenance','runtime_prepared');await move('runtime_prepared','password_fenced');
+    await recordRolloutOperation(f.db,{claim:f.claim,owns:f.owns,reason:'credential_fence',verification_hash:'d'.repeat(64)});
+    expect((await readRolloutState(f.db)).proofs.retired_credentials).toBe(false);
+    await move('password_fenced','transferred');await move('transferred','runtime_ready');await move('runtime_ready','retired');
+    const before=await readRolloutState(f.db);expect(before.proofs.retired_credentials).toBe(false);
+    await expect(recordRolloutOperation(f.db,{claim:{nonce:'f'.repeat(32),epoch:1},owns:f.owns,reason:'credential_fence',verification_hash:'e'.repeat(64)})).rejects.toThrow('StaleRolloutClaim');
+    await recordRolloutOperation(f.db,{claim:f.claim,owns:f.owns,reason:'credential_fence',verification_hash:'e'.repeat(64)});
+    const after=await readRolloutState(f.db);expect(after.proofs.retired_credentials).toBe(true);
+    expect(after).toMatchObject({operation_nonce:before.operation_nonce,epoch:before.epoch,started_ms:before.started_ms,deadline_ms:before.deadline_ms});
+    expect((await readRolloutState(f.db)).last_hash).toBe(after.last_hash);
+  }));
   it('transfers only application ownership in the outer transaction and preserves runtime grants',()=>fixture(async f=>{
     await f.db.query('GRANT SELECT ON public.memories TO "'+f.runtime+'"');
     const inventory=await inspectApplicationOwnership(f.db,{legacyRoleOid:f.identity.legacyRoleOid});

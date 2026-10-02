@@ -33,7 +33,8 @@ export async function applyProductionCutover(actions,{now=Date.now}={}){
     admit();await actions.verifyLegacySessions(state);
     await invoke('retire');
   }
-  if(state.phase==='retired'&&!state.proofs?.retired_credentials)await invoke('verify-fence');
+  // Finalization owns the retired-phase password probes. A newly committed
+  // retirement must not launch another task into the remaining apply window.
   // IaC convergence and final IAM verification run after a fresh CI credential
   // setup, while the restricted runtime already serves reads and writes.
   return state;
@@ -43,7 +44,7 @@ export async function finalizeProductionCutover(actions){
   let state=await actions.read();
   if(state.phase==='complete')return state;
   if(state.phase!=='retired'||state.status!=='running')throw Error('ProductionRetirementRequired');
-  if(!state.proofs?.retired_credentials){state=await actions.invoke('verify-fence',state);await actions.mirror(state);}
+  if(!state.proofs?.retired_credentials){state=await actions.invoke('verify-fence',state,{}, {deadline:state.deadline_ms});await actions.mirror(state);}
   await actions.convergeActive(state);
   const evidence=await actions.verifyRetirement(state);
   state=await actions.invoke('complete',state,evidence);await actions.mirror(state);return state;

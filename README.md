@@ -1588,6 +1588,11 @@ application objects transactionally, and restores MCP/OAuth access before
 committing the real owner's retirement. Production batching remains disabled
 throughout this migration.
 
+Credential-changing operations use the fixed 45-minute apply window. After
+retirement commits, finalization verifies rejection of both retired passwords
+before active convergence and completion, using the original maintenance
+deadline. A failed or under-budget verification cannot complete the migration.
+
 The `Infra CI` manual inputs `runtime_cutover=true` and `runtime_stage=pr-N`
 select the disposable rehearsal; `runtime_stage=prod` selects production only
 from a verified main deployment. Production requires the reviewed Aurora
