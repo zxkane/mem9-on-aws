@@ -62,5 +62,5 @@ export function prepareDataReleaseAuthorization({previous,observed,parent,contro
     runtimeNonce:observed.runtime.runtimeNonce,generation:observed.generation,targetsHash:hash([...parent.verification.targets].sort()),
     schemaDigest:observed.runtime.schemaDigest,operatorDigest:observed.runtime.operatorDigest,
     buildInputsHash:build.buildInputsHash,securityEvidenceHash:security.securityEvidenceHash,policyHash:hash(review),authorizationId,issuedMs,expiresMs};
-  return requireActiveDataRelease(data,{stage:'prod',account:data.account,region:data.region,controlSourceTree:control.sourceTree},{now});
+  return {...requireActiveDataRelease(data,{stage:'prod',account:data.account,region:data.region,controlSourceTree:control.sourceTree},{now}),review:structuredClone(review)};
 }

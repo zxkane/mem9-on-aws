@@ -1,15 +1,17 @@
 import {it,expect} from 'vitest';
 import {issueProductionDataRelease,PRODUCTION_DATA_RELEASE_PARAMETER as name} from './lib/production-data-issuance.mjs';
 import {inspectDataRelease} from './lib/production-data-release.mjs';
+import {canaryEvidenceHash as hash} from './lib/production-canary-verification.mjs';
 const now=1800000000000,h=c=>c.repeat(64);
 function fixture(){
   const data={version:1,stage:'prod',account:'123456789012',region:'ap-northeast-1',controlSourceTree:'a'.repeat(40),dataRevision:'b'.repeat(40),dataSourceTree:'c'.repeat(40),dataSourceTag:'mem9-bbbbbbb',
     images:Object.fromEntries(['llm-proxy','mnemo-server','qwen3-embed'].map((n,i)=>[n,{rootDigest:'sha256:'+h(String(i+1)),arm64Digest:'sha256:'+h(String(i+4))}])),
     runtimeNonce:'d'.repeat(32),authorizationId:'e'.repeat(32),issuedMs:now-1000,expiresMs:now+300000,
     ...Object.fromEntries(['parentProofHash','backendBindingHash','generation','targetsHash','schemaDigest','operatorDigest','buildInputsHash','securityEvidenceHash','policyHash'].map(n=>[n,h('a')]))};
+  const review={version:1,kind:'retained-data-policy-review',sourceEvidenceHash:h('a'),freshBuildSecurityHash:h('b')};data.policyHash=hash(review);
   const expected={account:data.account,region:data.region,controlRevision:'a'.repeat(40),controlSourceTree:data.controlSourceTree,
-    ...Object.fromEntries(['sourceEvidenceHash','materialHash','runtimeHash','buildInputsHash','securityEvidenceHash','policyHash','parentProofHash'].map(n=>[n,h('a')]))};
-  const authorization=inspectDataRelease(data,{stage:data.stage,account:data.account,region:data.region,controlSourceTree:data.controlSourceTree});
+    ...Object.fromEntries(['sourceEvidenceHash','materialHash','runtimeHash','buildInputsHash','securityEvidenceHash','parentProofHash'].map(n=>[n,h('a')])),policyHash:data.policyHash,freshBuildSecurityHash:review.freshBuildSecurityHash};
+  const authorization={...inspectDataRelease(data,{stage:data.stage,account:data.account,region:data.region,controlSourceTree:data.controlSourceTree}),review};
   let clock=now,parameter=null;const calls=[];
   const snapshot=()=>({...expected,executionEnabled:false,dispatcherEnabled:false,enabledSchedules:0,activeWorkers:0,activeAdministration:0,benchmarkRemaining:0,parameter});
   const deps={now:()=>clock,priorAttempt:async()=>null,inspect:async()=>snapshot(),archive:async()=>calls.push('archive'),acquireMutex:async()=>({owner:data.authorizationId}),
@@ -41,4 +43,12 @@ it('retains both fences after an unknown write, post-write expiry, or changed sn
 it('reports an issued authorization with pending mutex cleanup after gate restoration',async()=>{
   const f=fixture();f.deps.releaseMutex=async()=>{throw Error('MutexReleaseUnknown');};
   const result=await issueProductionDataRelease(f.deps,f);expect(result.phase).toBe('issued_cleanup_pending');expect(result.verified).toBe(true);expect(result.gateRestored).toBe(true);
+});
+it('rejects fresh-build scan drift before writing and retains fences if it drifts afterward',async()=>{
+  for(const after of [false,true]){
+    const f=fixture(),inspect=f.deps.inspect;let reads=0;
+    f.deps.inspect=async()=>{const value=await inspect();if(++reads>=(after?3:2))value.freshBuildSecurityHash=h('c');return value;};
+    const result=await issueProductionDataRelease(f.deps,f);expect(result.phase).toBe(after?'held':'rejected');
+    expect(f.calls.filter(v=>v==='put').length).toBe(after?1:0);if(after)expect(f.calls).not.toContain('gate-release');
+  }
 });

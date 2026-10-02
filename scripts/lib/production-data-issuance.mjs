@@ -2,7 +2,7 @@ import {requireActiveDataRelease} from './production-data-release.mjs';
 import {canaryEvidenceHash as hash} from './production-canary-verification.mjs';
 
 const fail=code=>{throw Error(code);};
-const fingerprints=['sourceEvidenceHash','materialHash','runtimeHash','buildInputsHash','securityEvidenceHash','policyHash','parentProofHash'];
+const fingerprints=['sourceEvidenceHash','materialHash','runtimeHash','buildInputsHash','securityEvidenceHash','freshBuildSecurityHash','policyHash','parentProofHash'];
 const safeError=e=>/^[A-Za-z0-9_.:-]{1,128}$/.test(e?.message??'')?e.message:'DataReleaseIssuanceFailed';
 export const PRODUCTION_DATA_RELEASE_PARAMETER='/mem9-on-aws/prod/consolidation-runtime/data-release';
 
@@ -28,6 +28,8 @@ export async function issueProductionDataRelease(deps,{authorization,expected}){
   const active=()=>{
     const checked=requireActiveDataRelease(data,{stage:'prod',account:expected?.account,region:expected?.region,controlSourceTree:expected?.controlSourceTree},{now:now()});
     if(checked.hash!==authorization.hash||!/^([a-f0-9]{40})$/.test(expected.controlRevision??''))fail('DataReleaseIssuanceIdentity');
+    if(hash(authorization.review)!==data.policyHash||authorization.review.freshBuildSecurityHash!==expected.freshBuildSecurityHash||
+      authorization.review.sourceEvidenceHash!==expected.sourceEvidenceHash)fail('DataReleaseIssuanceIdentity');
     for(const field of fingerprints){
       if(!/^[a-f0-9]{64}$/.test(expected[field]??''))fail('DataReleaseIssuanceIdentity');
       if(['buildInputsHash','securityEvidenceHash','policyHash','parentProofHash'].includes(field)&&expected[field]!==data[field])fail('DataReleaseIssuanceIdentity');
