@@ -1645,13 +1645,22 @@ database execution and dispatch require their independent admission controls.
 The initial production canary uses `scripts/run-production-canary.mjs` with
 `STAGE=prod` and the application's AWS region. It prepares restricted worker
 bindings, plans with execution disabled, pauses workers and captures protected
-row hashes before measuring foreground traffic. Measurements use the existing
-Cognito M2M client, 100 semantic reads and 100 temporary pinned writes per cohort,
+row hashes before measuring foreground traffic. The canary reads the deployed
+`auth/mode` and uses its existing managed or OIDC M2M client. It validates the
+active endpoint and scopes against the selected provider before reading client
+credentials, then confirms all selected parameter values and versions. Missing,
+mixed or changing configuration fails without falling back to retained Cognito
+or browser credentials. No operator authentication-mode default selects the
+canary client. Measurements use 100 semantic reads and 100 temporary pinned writes per cohort,
 fixed concurrency/cadence, and complete MCP response validation. Temporary rows
 are recorded in a mode-600 local journal. Cleanup also reconciles the validation
 marker and deterministic content hashes, covering lost responses and duplicate
 deliveries. Changed rows remain untouched and block promotion. No owned benchmark
 rows may remain when promotion commits.
+
+Changes to the host-side canary authentication loader also build matching release
+images and run preview acceptance before source-tree-bound rollout evidence is
+accepted.
 
 The canary permits at most 20 changed rows across retries and UTC boundaries.
 After pausing execution it checks committed before/post images, provenance,

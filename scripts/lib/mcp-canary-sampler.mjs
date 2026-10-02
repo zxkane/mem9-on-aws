@@ -11,14 +11,55 @@ const hash=value=>createHash('sha256').update(value).digest('hex');
 const secureUrl=value=>{let url;try{url=new URL(value);}catch{fail();}if(url.protocol!=='https:'||url.username||url.password||url.hash)fail();return url.href;};
 
 export async function loadMcpCanaryConfiguration(ssm,stage){
-  if(stage!=='prod'&&!/^pr-[1-9][0-9]*$/.test(stage??''))fail();
-  const prefix=`/mem9-on-aws/${stage}/`,keys=['cognito/token-endpoint','cognito/client-id','cognito/client-secret','cognito/scope','gateway/url'];
-  const result=await ssm.send(new GetParametersCommand({Names:keys.map(key=>prefix+key),WithDecryption:true}),{abortSignal:AbortSignal.timeout(30000)});
-  if(result.InvalidParameters?.length||result.Parameters?.length!==keys.length)fail();
-  const values=new Map(result.Parameters.map(parameter=>[parameter.Name,parameter.Value]));
-  if(values.size!==keys.length||keys.some(key=>!values.get(prefix+key)))fail();
-  return {tokenEndpoint:values.get(prefix+keys[0]),clientId:values.get(prefix+keys[1]),clientSecret:values.get(prefix+keys[2]),
-    scopes:values.get(prefix+keys[3]),gatewayUrl:values.get(prefix+keys[4])};
+  if(typeof stage!=='string'||stage!=='prod'&&!/^pr-[1-9][0-9]*$/.test(stage))fail();
+  const prefix=`/mem9-on-aws/${stage}/`;
+  const readRecords=async(names,decrypt=false)=>{
+    if(names.length<1||names.length>10||new Set(names).size!==names.length)fail();
+    let result;
+    try{result=await ssm.send(new GetParametersCommand({Names:names,WithDecryption:decrypt}),{abortSignal:AbortSignal.timeout(30000)});}
+    catch{fail();}
+    if(!Array.isArray(result?.Parameters)||result.Parameters.length!==names.length||
+      result.InvalidParameters!==undefined&&(!Array.isArray(result.InvalidParameters)||result.InvalidParameters.length))fail();
+    const records=new Map();
+    for(const parameter of result.Parameters){
+      if(!parameter||!names.includes(parameter.Name)||records.has(parameter.Name)||typeof parameter.Value!=='string'||
+        !parameter.Value.trim()||!Number.isSafeInteger(parameter.Version)||parameter.Version<1)fail();
+      records.set(parameter.Name,{value:parameter.Value,version:parameter.Version});
+    }
+    return records;
+  };
+  const modeKey=prefix+'auth/mode',endpointKey=prefix+'auth/token-endpoint',scopeKey=prefix+'auth/scope',gatewayKey=prefix+'gateway/url';
+  const selected=await readRecords([modeKey,endpointKey,scopeKey,gatewayKey]);
+  const mode=selected.get(modeKey).value;
+  if(mode!=='managed'&&mode!=='oidc')fail();
+  for(const key of [endpointKey,gatewayKey]){
+    const value=selected.get(key).value;if(value!==value.trim())fail();secureUrl(value);
+  }
+  const scopes=selected.get(scopeKey).value;
+  if(!scopes.split(' ').some(scope=>scope.endsWith('/read'))||!scopes.split(' ').some(scope=>scope.endsWith('/write')))fail();
+  let provider=prefix+'cognito',credentialPrefix=provider;
+  if(mode==='oidc'){
+    const key=prefix+'auth/provider-prefix',pointer=await readRecords([key]);
+    provider=pointer.get(key).value;
+    // The published fingerprint includes browser and M2M configuration; it is
+    // opaque here. Never reconstruct it from the issuer or read browser secrets.
+    if(!new RegExp(`^${prefix}auth/providers/[a-f0-9]{64}$`).test(provider))fail();
+    selected.set(key,pointer.get(key));credentialPrefix=provider+'/m2m';
+  }
+  const providerEndpoint=provider+'/token-endpoint',providerScope=provider+'/scope';
+  const metadata=await readRecords([providerEndpoint,providerScope]);
+  const endpoint=metadata.get(providerEndpoint).value;
+  if(endpoint!==endpoint.trim())fail();secureUrl(endpoint);
+  if(endpoint!==selected.get(endpointKey).value||metadata.get(providerScope).value!==scopes)fail();
+  for(const [name,record] of metadata)selected.set(name,record);
+  const clientKey=credentialPrefix+'/client-id',secretKey=credentialPrefix+'/client-secret';
+  for(const [name,record] of await readRecords([clientKey,secretKey],true))selected.set(name,record);
+  // Detect observed configuration changes before use. SSM batches are not
+  // transactional snapshots, so token failures still fail without fallback.
+  const confirmed=await readRecords([...selected.keys()],true);
+  for(const [name,record] of selected){const current=confirmed.get(name);if(current.version!==record.version||current.value!==record.value)fail();}
+  return {tokenEndpoint:confirmed.get(endpointKey).value,clientId:confirmed.get(clientKey).value,clientSecret:confirmed.get(secretKey).value,
+    scopes:confirmed.get(scopeKey).value,gatewayUrl:confirmed.get(gatewayKey).value};
 }
 
 async function responseText(response){
