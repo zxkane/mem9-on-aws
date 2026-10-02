@@ -1658,6 +1658,10 @@ marker and deterministic content hashes, covering lost responses and duplicate
 deliveries. Changed rows remain untouched and block promotion. No owned benchmark
 rows may remain when promotion commits.
 
+Changes to the host-side canary authentication loader also build matching release
+images and run preview acceptance before source-tree-bound rollout evidence is
+accepted.
+
 The canary permits at most 20 changed rows across retries and UTC boundaries.
 After pausing execution it checks committed before/post images, provenance,
 protected rows and persistent counters. Two actual Scheduler deliveries must

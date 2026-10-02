@@ -298,6 +298,13 @@ describe("split GitHub OIDC deployment roles", () => {
       awsMutationRequired: true,
     });
   });
+  it("builds a matching release and preview when canary authentication selection changes", () => {
+    expect(classifyChangedPaths(["scripts/lib/mcp-canary-sampler.mjs"])).toEqual({
+      workloadChanged: true,
+      applicationInfrastructureChanged: false,
+      awsMutationRequired: true,
+    });
+  });
   it("TC-DEPLOYROLE-005/006/007: classifies mutation paths", () => {
     expect(
       classifyChangedPaths([
