@@ -1244,6 +1244,16 @@ semantic backlog has been processed.
 
 Run a bounded real-memory canary only after preview failure/undo/load tests
 pass, then inspect source/receipt preservation and counts inside owned AWS.
+The foreground sampler selects the existing M2M client from deployed `auth/mode`,
+not an operator environment default. Both managed and OIDC provider metadata must
+match the active common token endpoint and scopes before credentials are read.
+OIDC selection follows only the published same-stage provider prefix and its M2M
+paths; retained Cognito and browser credentials are not fallback options. A final
+bounded read confirms all eight managed or nine OIDC parameter names, original
+values and versions. Incomplete, mixed or observed changing configuration fails
+with sanitized errors. This is a consistency check, not an atomic Parameter Store
+snapshot or a replacement for deployment serialization. The client configuration
+shape, token exchange, sampling workload and admission gates remain unchanged.
 Canary verification compares receipt source/post-image hashes and exact lossless
 output/provenance, plus protected-record invariants. Namespace/size/protection
 edge cases are planted in the complete synthetic rehearsal fixture; do not
