@@ -82,6 +82,25 @@ function mockAws(overrides = {}) {
 }
 
 describe("reconcileDeployment", () => {
+  it('reconciles retained roots and actual ARM64 digests without confusing the control tag',()=>{
+    const roots=Object.fromEntries(APP_CONTAINERS.map((name,i)=>[name,`sha256:${String(i+1).repeat(64)}`]));
+    const children=Object.fromEntries(APP_CONTAINERS.map((name,i)=>[name,`sha256:${String(i+4).repeat(64)}`]));
+    const selected={version:1,mode:'retained',controlTag:'mem9-aaaaaaa',dataTag:DESIRED_TAG,dataReleaseHash:'a'.repeat(64),
+      images:Object.fromEntries(APP_CONTAINERS.map(name=>[name,`${ACCOUNT}.dkr.ecr.${REGION}.amazonaws.com/mem9-on-aws/${name}@${roots[name]}`])),arm64Digests:children};
+    const response=baseResponses(),running=task();
+    running.attributes=[{name:'ecs.cpu-architecture',value:'arm64'}];
+    running.containers=APP_CONTAINERS.map(name=>({name,image:selected.images[name],imageDigest:children[name]}));
+    response['ssm get-parameters'].Parameters.push({Name:'/mem9-on-aws/prod/ecs/image-selection',Value:JSON.stringify(selected)});
+    response['ecs describe-tasks'].tasks=[running];
+    expect(reconcileDeployment({stage:'prod',runAws:mockAws(response).runAws}).ok).toBe(true);
+    running.containers[0].imageDigest='sha256:'+'f'.repeat(64);
+    expect(reconcileDeployment({stage:'prod',runAws:mockAws(response).runAws}).reasons).toContain('image_digest_mismatch');
+    running.containers[0].imageDigest=children['mnemo-server'];delete running.attributes;
+    expect(reconcileDeployment({stage:'prod',runAws:mockAws(response).runAws}).reasons).toContain('image_platform_mismatch');
+    selected.images['mnemo-server']=selected.images['mnemo-server'].replace(ACCOUNT,'0'.repeat(12));
+    response['ssm get-parameters'].Parameters.at(-1).Value=JSON.stringify(selected);
+    expect(reconcileDeployment({stage:'prod',runAws:mockAws(response).runAws}).reasons).toContain('desired_state_unavailable');
+  });
   it("accepts one stable PRIMARY deployment and exact task/container matches", () => {
     const { runAws, calls } = mockAws();
     const result = reconcileDeployment({ stage: "prod", runAws });
@@ -94,6 +113,14 @@ describe("reconcileDeployment", () => {
       "ecs list-tasks",
       "ecs describe-tasks",
     ]);
+  });
+  it('preserves ordinary tagged selection with exact declared image references',()=>{
+    const response=baseResponses(),selection={version:1,mode:'tag',controlTag:DESIRED_TAG,dataTag:DESIRED_TAG,
+      images:Object.fromEntries(APP_CONTAINERS.map(name=>[name,image(name)]))};
+    response['ssm get-parameters'].Parameters.push({Name:'/mem9-on-aws/prod/ecs/image-selection',Value:JSON.stringify(selection)});
+    expect(reconcileDeployment({stage:'prod',runAws:mockAws(response).runAws}).ok).toBe(true);
+    response['ecs describe-tasks'].tasks[0].containers[0].image=image('mnemo-server').replace('/mem9-on-aws/','/unrelated/');
+    expect(reconcileDeployment({stage:'prod',runAws:mockAws(response).runAws}).reasons).toContain('image_reference_mismatch');
   });
 
   it("waits for PRIMARY rollout completion", () => {

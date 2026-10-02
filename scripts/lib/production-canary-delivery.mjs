@@ -9,6 +9,8 @@ import {verifyProductionTaskRoles,validateProductionWorkerTarget} from '../run-p
 import {canaryEvidenceHash} from './production-canary-verification.mjs';
 import {requireNamespaceId} from './maintenance-scope.mjs';
 import {discoverSchedulerTasks} from '../consolidation-scheduler-e2e.mjs';
+import {loadWorkerDataRelease} from './production-data-release-loader.mjs';
+import {productionSourceTree} from '../run-production-runtime.mjs';
 
 const send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
 const fail=()=>{throw Error('ProductionCanaryDeliveryFailed');};
@@ -57,7 +59,7 @@ export function ownsCanaryTask(task,journal){
     canaryEvidenceHash({containerOverrides:overrides.containerOverrides})===journal.overridesHash;
 }
 
-export async function loadProductionCanaryWorker(clients,{region,kind,revision}){
+export async function loadProductionCanaryWorker(clients,{region,kind,revision,controlSourceTree}){
   if(!['planner','executor'].includes(kind)||!/^[a-f0-9]{40}$/.test(revision??''))fail();
   const account=(await send(clients.sts,new GetCallerIdentityCommand({}))).Account;
   const name='/mem9-on-aws/prod/consolidation-runtime/manifest',operatorName='/mem9-on-aws/prod/consolidation-runtime/operator-manifest';
@@ -65,6 +67,8 @@ export async function loadProductionCanaryWorker(clients,{region,kind,revision})
   if(result.InvalidParameters?.length||result.Parameters?.length!==2)fail();
   const parameters=new Map(result.Parameters.map(parameter=>[parameter.Name,JSON.parse(parameter.Value)]));
   const approved=validateProductionWorkerTarget(parameters.get(operatorName),{region,account});
+  const dataRelease=await loadWorkerDataRelease(clients,approved,{controlRevision:revision,
+    controlSourceTree:approved.version===2?(controlSourceTree??await productionSourceTree()):undefined});
   const manifest=parameters.get(name),prefix=`arn:aws:ecs:${region}:${account}:cluster/`;
   if(manifest.version!==1||manifest.stage!=='prod'||!/^[a-f0-9]{64}$/.test(manifest.generation??'')||
     !manifest.clusterArn?.startsWith(prefix+'mem9-on-aws-prod-')||!/^mem9-on-aws-prod-consolidation-[A-Za-z0-9-]+$/.test(manifest.groupName??'')||
@@ -73,7 +77,7 @@ export async function loadProductionCanaryWorker(clients,{region,kind,revision})
     manifest.clusterArn!==approved.clusterArn||manifest.generation!==approved.generation)fail();
   const worker=manifest.workers.find(worker=>worker.kind===kind),cluster=manifest.clusterArn.slice(prefix.length);
   const containerName=`Mem9Consolidation${kind==='planner'?'Planner':'Executor'}`;
-  if(worker?.containerName!==containerName||worker.sourceTag!==`mem9-${revision.slice(0,7)}`||worker.image!==approved.workerImage||
+  if(worker?.containerName!==containerName||worker.sourceTag!==approved.sourceTag||worker.image!==approved.workerImage||
     !worker.taskDefinitionArn?.startsWith(`arn:aws:ecs:${region}:${account}:task-definition/${cluster}-${containerName}:`)||
     !/^[1-9][0-9]*$/.test(worker.taskDefinitionArn.split(':').at(-1)))fail();
   const definition=(await send(clients.ecs,new DescribeTaskDefinitionCommand({taskDefinition:worker.taskDefinitionArn}))).taskDefinition;
@@ -89,7 +93,8 @@ export async function loadProductionCanaryWorker(clients,{region,kind,revision})
     values.MEM9_DB_HOST!==approved.host||values.MEM9_DB_NAME!==approved.database||values.MEM9_DB_PORT!==String(approved.port)||
     values.MEM9_BASE_URL!=='http://mnemo.mem9-prod.local:8080'||
     canaryEvidenceHash(actual)!==canaryEvidenceHash(secrets)||container.secrets.length!==Object.keys(secrets).length)fail();
-  const meta={...manifest,region,account,cluster,kind,revision,image:worker.image,sourceTag:worker.sourceTag,containerName,taskDefinitionArn:worker.taskDefinitionArn,subnets:approved.subnets,securityGroup:approved.securityGroup,
+  const meta={...manifest,region,account,cluster,kind,revision,controlSourceTag:approved.controlSourceTag??approved.sourceTag,dataRelease,
+    image:worker.image,sourceTag:worker.sourceTag,containerName,taskDefinitionArn:worker.taskDefinitionArn,subnets:approved.subnets,securityGroup:approved.securityGroup,
     taskRoleArn:definition.taskRoleArn,executionRoleArn:definition.executionRoleArn};
   await verifyProductionTaskRoles(clients,meta,definition,containerName,secrets,'WorkerParameters');
   const template=await send(clients.scheduler,new GetScheduleCommand({Name:worker.scheduleName,GroupName:manifest.groupName}));

@@ -15,6 +15,7 @@ import {verifyCanaryImageIndex,normalizeCanaryTask} from './production-canary-ma
 import {loadProductionManifest} from './production-runtime-tasks.mjs';
 import {runtimeServerContract,verifyRuntimeRoles} from './runtime-live-verification.mjs';
 import {validateProductionBackendBinding} from './production-artifacts.mjs';
+import {inspectDataRelease,requireActiveDataRelease} from './production-data-release.mjs';
 
 const execute=promisify(execFile),fail=()=>{throw Error('CanaryMaterialCaptureFailed');};
 const send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
@@ -121,7 +122,9 @@ export async function captureCanaryMaterial(clients,{account,region,release,batc
   if((await send(clients.sts,new GetCallerIdentityCommand({}))).Account!==account)fail();
   const aliases=await send(clients.iam,new ListAccountAliasesCommand({}));
   if(aliases.IsTruncated||aliases.AccountAliases?.length!==1||aliases.AccountAliases[0]!==expectedAccountAlias)fail();
-  const targets=[];for(const kind of ['planner','executor'])targets.push(await loadProductionCanaryWorker(clients,{region,kind,revision:release.revision}));
+  const targets=[];for(const kind of ['planner','executor'])targets.push(await loadProductionCanaryWorker(clients,{region,kind,revision:release.revision,controlSourceTree:release.sourceTree}));
+  const dataRelease=targets[0].dataRelease;
+  if(hash(targets[1].dataRelease??null)!==hash(dataRelease??null))fail();
   await verifyProductionScheduling(clients,targets,{enabled:false});
   const scheduler={roleArn:targets[0].roleArn,groupName:targets[0].groupName};
   if(targets.some(t=>t.roleArn!==scheduler.roleArn||t.groupName!==scheduler.groupName))fail();
@@ -159,7 +162,7 @@ export async function captureCanaryMaterial(clients,{account,region,release,batc
   for(const [component,reference,repository]of [
     ['worker',targets[0].image,'llm-proxy'],...definitions.backend.containerDefinitions.map(c=>[c.name,c.image,c.name]),
   ]){
-    const repositoryName='mem9-on-aws/'+repository,rootDigest=release.imageDigests?.[repository];
+    const repositoryName='mem9-on-aws/'+repository,rootDigest=dataRelease?.data.images[repository]?.rootDigest??release.imageDigests?.[repository];
     const image=verifyCanaryImageIndex(await batchGetImage({registryId:account,repositoryName,imageIds:[{imageDigest:rootDigest}]}),{account,repositoryName,rootDigest});
     catalog.set(reference,image);components[component]=image;
   }
@@ -176,7 +179,8 @@ export async function captureCanaryMaterial(clients,{account,region,release,batc
   const network={cluster:targets[0].clusterArn,backend:backendNetwork,workers:targets.map(t=>({kind:t.kind,subnets:[...t.subnets].sort(),securityGroup:t.securityGroup,assignPublicIp:'DISABLED'}))};
   if(hash(await captureProductionBackend(clients,targets[0]))!==hash(backend))fail();
   return {version:2,observedAt:new Date().toISOString(),account,region,revision:release.revision,sourceTree:release.sourceTree,coordinatorDigest:release.coordinatorDigest,
-    generation:targets[0].generation,sourceTag:'mem9-'+release.revision.slice(0,7),workerImage:targets[0].image,backendBinding:backend,
+    generation:targets[0].generation,sourceTag:targets[0].sourceTag,controlSourceTag:'mem9-'+release.revision.slice(0,7),workerImage:targets[0].image,backendBinding:backend,
+    ...(dataRelease?{dataRelease}:{}),
     runtime:{schemaDigest:runtime.schemaDigest,operatorDigest:runtime.operatorDigest,runtimeNonce:runtime.nonce},
     components,definitions,backendTask:task,authority:auth,credentials,network,scheduler,
     material:{planner:hash(normalized.planner),executor:hash(normalized.executor),backend:hash(normalized.backend),network:hash(network),
@@ -210,12 +214,36 @@ function materialHashes(snapshot){
   return material;
 }
 
-export function buildCanaryCompatibility(previous,current,parent){
+export function buildCanaryCompatibility(previous,current,parent,{now=Date.now()}={}){
+  return compareCanaryMaterial(previous,current,parent,{now,inspection:false});
+}
+
+// Structural comparison supports cleanup of an already-verified publication.
+// It never authorizes publication/admission or changes an authorization clock.
+export function inspectCanaryMaterialCompatibility(previous,current,parent){
+  return compareCanaryMaterial(previous,current,parent,{inspection:true});
+}
+
+function compareCanaryMaterial(previous,current,parent,{now,inspection}){
   if(previous?.version!==2||current?.version!==2||previous.account!==current.account||previous.region!==current.region||previous.generation!==current.generation||
     hash(previous.runtime)!==hash(current.runtime)||previous.workerImage!==parent.workerImage||previous.sourceTag!==parent.sourceTag||
     hash(previous.backendBinding)!==parent.backendBindingHash||previous.generation!==parent.generation)fail();
   const release=s=>({sourceTree:s.sourceTree,coordinatorDigest:s.coordinatorDigest,sourceTag:s.sourceTag,workerImage:s.workerImage,...s.runtime});
   if(hash(release(previous))!==parent.releaseHash)fail();
+  if(previous.dataRelease){
+    const selected=inspectDataRelease(previous.dataRelease.data,{stage:'prod',account:previous.account,region:previous.region,controlSourceTree:previous.sourceTree});
+    if(selected.hash!==previous.dataRelease.hash)fail();
+  }
+  if(current.dataRelease){
+    const selected=(inspection?inspectDataRelease:requireActiveDataRelease)(current.dataRelease.data,{stage:'prod',account:current.account,region:current.region,controlSourceTree:current.sourceTree,
+      bindings:{parentProofHash:hash(parent),backendBindingHash:parent.backendBindingHash,generation:parent.generation,targetsHash:hash([...parent.targets].sort()),
+        runtimeNonce:current.runtime.runtimeNonce,schemaDigest:current.runtime.schemaDigest,operatorDigest:current.runtime.operatorDigest}},{now});
+    if(selected.hash!==current.dataRelease.hash||selected.data.dataSourceTag!==current.sourceTag||selected.images['llm-proxy']!==current.workerImage||
+      selected.data.dataRevision!==(previous.dataRelease?.data.dataRevision??previous.revision)||
+      selected.data.dataSourceTree!==(previous.dataRelease?.data.dataSourceTree??previous.sourceTree))fail();
+    for(const name of ['mnemo-server','qwen3-embed','llm-proxy'])if(selected.data.images[name].rootDigest!==current.components[name].rootDigest||
+      selected.data.images[name].arm64Digest!==current.components[name].arm64Digest)fail();
+  }
   const images={},material={};
   const oldMaterial=materialHashes(previous),newMaterial=materialHashes(current);
   for(const name of ['worker','mnemo-server','qwen3-embed','llm-proxy']){
@@ -225,6 +253,6 @@ export function buildCanaryCompatibility(previous,current,parent){
   for(const name of ['planner','executor','backend','network','authority','credentials']){
     if(!oldMaterial[name]||oldMaterial[name]!==newMaterial[name])fail();material[name]={previous:oldMaterial[name],current:newMaterial[name]};
   }
-  return {version:1,parentProofHash:hash(parent),generation:parent.generation,targetsHash:hash([...parent.targets].sort()),
+  return {version:current.dataRelease?2:1,...(current.dataRelease?{dataReleaseHash:current.dataRelease.hash}:{}),parentProofHash:hash(parent),generation:parent.generation,targetsHash:hash([...parent.targets].sort()),
     previous:{release:release(previous),backendBindingHash:parent.backendBindingHash},current:{release:release(current),backendBinding:current.backendBinding},images,material};
 }

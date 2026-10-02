@@ -24,6 +24,15 @@ function fixture(){
   return {certificate,parent,config,state};
 }
 describe('canary continuation compatibility certificate',()=>{
+  it('binds the separately authorized retained selection without changing historical release fields',()=>{
+    const f=fixture();f.certificate.version=2;f.certificate.dataReleaseHash=hex(44);
+    f.config.dataRelease={hash:hex(44),expiresMs:1800000000000};f.config.acceptance.dataReleaseHash=hex(44);
+    f.config.acceptance.continuation.certificateHash=hash(f.certificate);
+    expect(validateCanaryCompatibility(f.certificate,f.parent,f.config,f.state).certificateHash).toBe(hash(f.certificate));
+    delete f.config.acceptance.dataReleaseHash;expect(()=>validateCanaryCompatibility(f.certificate,f.parent,f.config,f.state)).toThrow();
+    f.config.acceptance.dataReleaseHash=hex(44);f.config.dataRelease.hash=hex(45);
+    expect(()=>validateCanaryCompatibility(f.certificate,f.parent,f.config,f.state)).toThrow();
+  });
   it('allows non-authorizing structural inspection while mutation still requires the published witness',()=>{
     const f=fixture();delete f.config.acceptance.continuation;
     expect(inspectCanaryCompatibility(f.certificate,f.parent,f.config,f.state).certificateHash).toBe(hash(f.certificate));

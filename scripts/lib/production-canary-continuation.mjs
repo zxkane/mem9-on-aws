@@ -140,6 +140,7 @@ export async function beginCanaryContinuation(db,config,state,setup,request){
     if(parent.row.request_hash!==semanticHash||parent.row.validation_id!==setup.validation_id||
       parent.row.header.rootIdentity!==await canaryRootIdentity(db,state)||
       hash(parent.row.header.release)!==hash(canaryReleaseBinding(config,state))||
+      parent.row.header.certificate?.dataReleaseHash!==config.dataRelease?.hash||
       !canaryWitnessMatches(config.acceptance,parent.row.header.certificateHash,parent.row.header.parentProofHash))fail('CanaryAttemptConflict');
     return {attemptId:request.attemptId,parentProofHash:request.parentProofHash,repeated:true};
   }

@@ -67,6 +67,7 @@ function readDesiredState(stage, runAws) {
     service: `${prefix}/service-name`,
     taskDefinition: `${prefix}/task-definition`,
     imageTag: `${prefix}/image-tag`,
+    imageSelection: `${prefix}/image-selection`,
   };
   const response = runAws([
     "ssm",
@@ -83,17 +84,45 @@ function readDesiredState(stage, runAws) {
     ]),
   );
   if (
-    (response?.InvalidParameters ?? []).length > 0 ||
-    Object.values(names).some((name) => !values.has(name))
+    (response?.InvalidParameters ?? []).some(name=>name!==names.imageSelection) ||
+    Object.entries(names).some(([key,name]) => key!=='imageSelection'&&!values.has(name)) ||
+    values.size!==(response?.Parameters??[]).length ||
+    [...values.keys()].some(name=>!Object.values(names).includes(name))
   ) {
     throw new Error("desired state parameters are incomplete");
   }
+  const imageSelection=values.has(names.imageSelection)?parseImageSelection(values.get(names.imageSelection),{
+    stage,taskDefinition:values.get(names.taskDefinition),imageTag:values.get(names.imageTag)}):undefined;
   return {
     cluster: values.get(names.cluster),
     service: values.get(names.service),
     taskDefinition: values.get(names.taskDefinition),
     imageTag: values.get(names.imageTag),
+    imageSelection,
   };
+}
+
+function parseImageSelection(raw,{stage,taskDefinition,imageTag:tag}){
+  const value=JSON.parse(raw),exact=(v,keys)=>v&&typeof v==='object'&&!Array.isArray(v)&&Object.keys(v).sort().join()===[...keys].sort().join();
+  const retained=value?.mode==='retained',keys=['version','mode','controlTag','dataTag','images',...(retained?['dataReleaseHash','arm64Digests']:[])];
+  const match=String(taskDefinition).match(/^arn:aws:ecs:([a-z0-9-]+):([0-9]{12}):task-definition\/[A-Za-z0-9_-]+:[1-9][0-9]*$/);
+  if(!exact(value,keys)||value.version!==1||!['tag','retained'].includes(value.mode)||!match||
+    value.dataTag!==tag||safeTag(value.controlTag)==='<unavailable>'||!exact(value.images,APP_CONTAINERS))throw Error('invalid image selection');
+  const namespace=stage==='prod'?'mem9-on-aws':'mem9-on-aws/preview';
+  if(retained&&(!['prod'].includes(stage)&&!/^pr-[1-9][0-9]*$/.test(stage)||
+    !/^[a-f0-9]{64}$/.test(value.dataReleaseHash??'')||!exact(value.arm64Digests,APP_CONTAINERS)))throw Error('invalid retained selection');
+  for(const name of APP_CONTAINERS){
+    const prefix=`${match[2]}.dkr.ecr.${match[1]}.amazonaws.com/${namespace}/${name}`;
+    if(retained){
+      const ref=value.images[name],child=value.arm64Digests[name];
+      if(typeof ref!=='string'||!ref.startsWith(prefix+'@sha256:')||!/^sha256:[a-f0-9]{64}$/.test(ref.slice(prefix.length+1))||
+        !/^sha256:[a-f0-9]{64}$/.test(child??'')||ref===prefix+'@'+child)throw Error('invalid retained image');
+    }else{
+      const ref=value.images[name],registry=`${match[2]}.dkr.ecr.${match[1]}.amazonaws.com/`;
+      if(value.controlTag!==value.dataTag||typeof ref!=='string'||!ref.startsWith(registry)||!ref.endsWith('/'+name+':'+tag)||imageTag(ref)!==tag)throw Error('invalid tagged image');
+    }
+  }
+  return value;
 }
 
 function describeAllTasks(cluster, taskArns, runAws) {
@@ -299,21 +328,35 @@ export function reconcileDeployment({
   }
 
   const tags = [];
+  const retained=desired.imageSelection?.mode==='retained';
+  if(retained)result.imageMode='retained';
   for (const task of tasks) {
     const containers = new Map(
       (task.containers ?? []).map((container) => [container.name, container]),
     );
+    if(retained){
+      const architecture=(task.attributes??[]).filter(a=>a.name==='ecs.cpu-architecture');
+      if(architecture.length!==1||architecture[0].value!=='arm64')addReason(result,'image_platform_mismatch');
+      if(task.containers?.length!==APP_CONTAINERS.length||containers.size!==APP_CONTAINERS.length)addReason(result,'unexpected_container');
+    }
     for (const name of APP_CONTAINERS) {
       if (!containers.has(name)) {
         addReason(result, "missing_container");
         continue;
       }
-      tags.push(imageTag(containers.get(name).image));
+      const container=containers.get(name);
+      if(retained){
+        const expected=desired.imageSelection.images[name],root=expected.split('@')[1],child=desired.imageSelection.arm64Digests[name];
+        if(container.image!==expected||![root,child].includes(container.imageDigest))addReason(result,'image_digest_mismatch');
+      }else if(desired.imageSelection&&container.image!==desired.imageSelection.images[name]){
+        addReason(result,'image_reference_mismatch');
+      }
+      tags.push(imageTag(container.image));
     }
   }
   result.actualImageTags = [...new Set(tags)].sort();
-  if (result.actualImageTags.length > 1) addReason(result, "mixed_image_tags");
-  if (tags.some((tag) => tag !== desired.imageTag)) {
+  if (!retained&&result.actualImageTags.length > 1) addReason(result, "mixed_image_tags");
+  if (!retained&&tags.some((tag) => tag !== desired.imageTag)) {
     addReason(result, "image_tag_mismatch");
   }
 
@@ -327,6 +370,7 @@ export function formatReconciliationDiagnostic(result) {
     `status=${result.ok ? "match" : "mismatch"}`,
     `stage=${result.stage}`,
   ];
+  if(result.imageMode==='retained')fields.push('image_mode=retained');
   if (!result.ok) fields.push(`reasons=${result.reasons.join(",")}`);
   fields.push(
     `task_definition=${result.desiredTaskDefinition}`,

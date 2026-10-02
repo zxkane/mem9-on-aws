@@ -59,12 +59,15 @@ export function classifyChangedPaths(paths) {
       path === "infra/production-runtime.ts" ||
       path === "scripts/consolidation-scheduler-e2e.mjs" ||
       path === "scripts/run-production-runtime.mjs" ||
+      path === "scripts/run-production-canary.mjs" ||
       path === "scripts/run-bootstrap-task.sh" ||
       // Host-side canary selection also needs a matching preview release.
       path === "scripts/lib/mcp-canary-sampler.mjs" ||
       path === "scripts/canary-fixture-e2e.mjs" ||
       path === "scripts/lib/canary-fixture-task.mjs" ||
       path === "scripts/lib/production-canary-fixture-evidence.mjs" ||
+      path.startsWith("scripts/lib/production-canary-") ||
+      path.startsWith("scripts/lib/production-data-") ||
       path.startsWith("scripts/lib/production-runtime-") ||
       [...WORKLOAD_COPY_INPUTS].some((input) => matchesCopyInput(path, input)),
   );

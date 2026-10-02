@@ -452,14 +452,19 @@ declare namespace aws {
     }
     interface GetParameterOutputArgs {
       name: Input<string>;
+      region?: Input<string>;
+      withDecryption?: Input<boolean>;
     }
     interface GetParameterResult {
-      readonly value: Output<string>;
-      readonly arn: Output<string>;
+      readonly name: string;
+      readonly value: string;
+      readonly arn: string;
+      readonly type: string;
+      readonly version: number;
     }
     function getParameterOutput(
       args: GetParameterOutputArgs,
-    ): GetParameterResult;
+    ): Output<GetParameterResult>;
   }
 
   namespace scheduler {

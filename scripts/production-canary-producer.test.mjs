@@ -1,6 +1,6 @@
 import {describe,it,expect,vi,afterEach} from 'vitest';
 import {createHash} from 'node:crypto';
-import {buildCanaryCompatibility,captureCanaryMaterial,normalizeCanaryAuthority} from './lib/production-canary-producer.mjs';
+import {buildCanaryCompatibility,inspectCanaryMaterialCompatibility,captureCanaryMaterial,normalizeCanaryAuthority} from './lib/production-canary-producer.mjs';
 import {normalizeCanaryTask} from './lib/production-canary-material.mjs';
 import {validateCanaryCompatibility} from './lib/production-canary-compatibility.mjs';
 import {canaryEvidenceHash as hash} from './lib/production-canary-verification.mjs';
@@ -54,6 +54,22 @@ function fixture(){
   return {previous,current,parent};
 }
 describe('authenticated canary material producer',()=>{
+  it('recomputes retained authorization and binds its actual data roots and parent',()=>{
+    const f=fixture(),now=1800000000000,current=structuredClone(f.previous);
+    current.revision='c'.repeat(40);current.sourceTree='d'.repeat(40);current.coordinatorDigest=hex(55);
+    const data={version:1,stage:'prod',account,region,controlSourceTree:current.sourceTree,dataRevision:f.previous.revision,dataSourceTree:f.previous.sourceTree,dataSourceTag:f.previous.sourceTag,
+      images:Object.fromEntries(['llm-proxy','mnemo-server','qwen3-embed'].map(name=>[name,{rootDigest:current.components[name].rootDigest,arm64Digest:current.components[name].arm64Digest}])),
+      parentProofHash:hash(f.parent),backendBindingHash:f.parent.backendBindingHash,runtimeNonce:current.runtime.runtimeNonce,generation:current.generation,targetsHash:hash(f.parent.targets),
+      schemaDigest:current.runtime.schemaDigest,operatorDigest:current.runtime.operatorDigest,buildInputsHash:hex(21),securityEvidenceHash:hex(22),policyHash:hex(23),
+      authorizationId:'e'.repeat(32),issuedMs:now-1000,expiresMs:now+1000};
+    current.dataRelease={data,hash:hash(data)};
+    expect(buildCanaryCompatibility(f.previous,current,f.parent,{now})).toMatchObject({version:2,dataReleaseHash:hash(data)});
+    const altered=structuredClone(current);altered.dataRelease.data.securityEvidenceHash=hex(66);
+    expect(()=>buildCanaryCompatibility(f.previous,altered,f.parent,{now})).toThrow();
+    expect(()=>buildCanaryCompatibility(f.previous,current,f.parent,{now:data.expiresMs})).toThrow('DataReleaseAuthorizationExpired');
+    expect(inspectCanaryMaterialCompatibility(f.previous,current,f.parent)).toEqual(buildCanaryCompatibility(f.previous,current,f.parent,{now}));
+    expect(()=>inspectCanaryMaterialCompatibility(f.previous,altered,f.parent)).toThrow();
+  });
   it('captures complete Scheduler authority and credential fingerprints from mocked AWS reads',async()=>{
     const source=fixture().current;
     const imageManifest=JSON.stringify({schemaVersion:2,mediaType:'application/vnd.oci.image.index.v1+json',manifests:[
@@ -66,7 +82,7 @@ describe('authenticated canary material producer',()=>{
     const reference=`arn:aws:ssm:${region}:${account}:parameter/mem9-on-aws/prod/consolidation-runtime/executor-credential`,value='synthetic-credential-only';
     source.definitions.executor.containerDefinitions[0].secrets=[{name:'DB',valueFrom:reference}];
     const targets=['planner','executor'].map(kind=>({kind,...source.scheduler,clusterArn:task.clusterArn,taskDefinitionArn:source.definitions[kind].taskDefinitionArn,
-      image:source.definitions[kind].containerDefinitions[0].image,generation:source.generation,subnets:['subnet-abcd'],securityGroup:'sg-abcd',template:{Name:kind}}));
+      image:source.definitions[kind].containerDefinitions[0].image,sourceTag:source.sourceTag,generation:source.generation,subnets:['subnet-abcd'],securityGroup:'sg-abcd',template:{Name:kind}}));
     vi.spyOn(delivery,'loadProductionCanaryWorker').mockImplementation(async(_clients,{kind})=>targets.find(t=>t.kind===kind));
     vi.spyOn(scheduling,'verifyProductionScheduling').mockResolvedValue({enabled:false});
     vi.spyOn(scheduling,'captureProductionBackend').mockResolvedValue(source.backendBinding);

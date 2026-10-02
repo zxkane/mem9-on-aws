@@ -292,6 +292,10 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
 
   it('rejects wrong parent and incompatible witness before installing or changing continuation state',()=>fixture(async f=>{
     const frozen=await frozenPair(f),c=await continuationRequest(f,frozen);
+    const expired={...c.config,dataRelease:{hash:'4'.repeat(64),expiresMs:Date.now()-1000},
+      acceptance:{...c.config.acceptance,dataReleaseHash:'4'.repeat(64)}};
+    await expect(runProductionConsolidation(f.admin,expired,c.request('begin-continuation'),{connect:f.connect})).rejects.toThrow('DataReleaseAuthorizationExpired');
+    expect((await runProductionConsolidation(f.admin,expired,c.request('status'),{connect:f.connect})).enabled).toBe(false);
     const badParent={...c.request('begin-continuation'),parentProofHash:'f'.repeat(64)};
     await expect(runProductionConsolidation(f.admin,c.config,badParent,{connect:f.connect})).rejects.toThrow('CanaryContinuationParentMismatch');
     const incompatible=structuredClone(c.compatibility);incompatible.material.authority.current='2'.repeat(64);
@@ -299,6 +303,32 @@ describe.skipIf(!dsn)('production worker preparation on PostgreSQL',()=>{
     await expect(runProductionConsolidation(f.admin,config,{...c.request('begin-continuation'),compatibility:incompatible},{connect:f.connect})).rejects.toThrow('CanaryCompatibilityInvalid');
     expect(await scalar(f.admin,"SELECT to_regclass('mem9_maintenance.production_canary_validation_attempts') IS NULL AS result")).toBe(true);
     expect(await scalar(f.admin,'SELECT to_jsonb(s) AS result FROM mem9_maintenance.production_worker_setup s WHERE singleton')).toEqual(c.rootSnapshot);
+    // Cross the actual database expiry after enabling execution inside the
+    // transaction. Admission must roll back every write, including its budget.
+    const retainedCertificate={...c.compatibility,version:2,dataReleaseHash:'4'.repeat(64)};
+    const retained={...c.config,dataRelease:{hash:retainedCertificate.dataReleaseHash,expiresMs:Date.now()+60000},
+      acceptance:{...c.config.acceptance,dataReleaseHash:retainedCertificate.dataReleaseHash,
+        continuation:{...c.config.acceptance.continuation,certificateHash:canaryEvidenceHash(retainedCertificate)}}};
+    await runProductionConsolidation(f.admin,retained,{...c.request('begin-continuation'),compatibility:retainedCertificate},{connect:f.connect});
+    const snapshot=async()=>{
+      const result={};
+      for(const table of ['execution_control','dispatcher_settings','budget_policies','budget_windows','budget_policy_history','apply_admission','production_worker_setup','production_canary_validation_attempts','production_canary_validation_events','production_canary_validation_admissions'])
+        result[table]=(await f.admin.query('SELECT to_jsonb(t) AS value FROM mem9_maintenance.'+table+' t ORDER BY to_jsonb(t)::text')).rows;
+      return result;
+    };
+    const before=await snapshot();
+    retained.dataRelease.expiresMs=Number(await scalar(f.admin,'SELECT floor(extract(epoch from clock_timestamp())*1000)::bigint AS result'))+3000;
+    let crossed=false;
+    const delayed=Object.create(f.admin);
+    delayed.query=async(text,...args)=>{
+      const result=await f.admin.query(text,...args);
+      if(text.startsWith("SELECT mem9_maintenance.set_execution_mode('prod',true")){
+        crossed=true;await f.admin.query('SELECT pg_sleep(GREATEST(0,$1/1000.0-extract(epoch from clock_timestamp()))+0.05)',[retained.dataRelease.expiresMs]);
+      }
+      return result;
+    };
+    await expect(runProductionConsolidation(delayed,retained,c.request('canary'),{connect:f.connect})).rejects.toThrow('DataReleaseAuthorizationExpired');
+    expect(crossed).toBe(true);expect(await snapshot()).toEqual(before);
   }),60000);
 
   it('binds an actual atomic apply receipt to the admitted attempt without charging a replay',()=>fixture(async f=>{

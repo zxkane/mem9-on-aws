@@ -20,7 +20,7 @@ export interface ConsolidationWorker {
   enabled?:Output<boolean>;
   admission?:Output<string>;
   image?:Input<string>;
-  sourceTag?:string;
+  sourceTag?:Input<string>;
   task:sst.aws.Task;
 }
 export interface ConsolidationWorkerConfig {
@@ -31,7 +31,7 @@ export interface ConsolidationWorkerConfig {
   enabled?:Output<boolean>;
   admission?:Output<string>;
   image?:Input<string>;
-  sourceTag?:string;
+  sourceTag?:Input<string>;
 }
 export function consolidationPreviewConfig():ConsolidationPreviewConfig|undefined {
   if(!isConsolidationPreview($app.stage))return;

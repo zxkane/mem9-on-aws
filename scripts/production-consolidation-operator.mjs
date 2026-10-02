@@ -71,8 +71,16 @@ export function productionConsolidationConfig(env,request){
   if(!['pause','status'].includes(request.operation)&&(!/^mem9-[a-f0-9]{7}$/.test(env.MEM9_WORKER_SOURCE_TAG??'')||!/^\d{12}\.dkr\.ecr\.[a-z0-9-]+\.amazonaws\.com\/mem9-on-aws\/llm-proxy@sha256:[a-f0-9]{64}$/.test(env.MEM9_WORKER_IMAGE??'')))throw Error('ProductionWorkerArtifactRequired');
   if(request.operation==='prepare')for(const [kind,credential] of Object.entries({planner,executor}))if(credential?.username!==names[kind]||
     !/^[A-Za-z0-9]{32,128}$/.test(credential.password??'')||!/^[A-Za-z0-9]{16,128}$/.test(credential.salt??''))throw Error('InvalidProductionWorkerCredential');
+  let dataRelease;
+  if(env.MEM9_RETAINED_DATA_RELEASE_HASH&&env.MEM9_RETAINED_DATA_RELEASE_HASH!=='none'){
+    const expiresMs=Number(env.MEM9_RETAINED_DATA_RELEASE_EXPIRES_MS);
+    if(!/^[a-f0-9]{64}$/.test(env.MEM9_RETAINED_DATA_RELEASE_HASH)||!Number.isSafeInteger(expiresMs)||expiresMs<1||
+      !/^mem9-[a-f0-9]{7}$/.test(env.MEM9_CONTROL_SOURCE_TAG??''))throw Error('InvalidProductionDataRelease');
+    dataRelease={hash:env.MEM9_RETAINED_DATA_RELEASE_HASH,expiresMs};
+  }
   return {host:env.MEM9_DB_HOST,port:Number(env.MEM9_DB_PORT),database:env.MEM9_DB_NAME,generation:env.MEM9_WORKER_GENERATION,
     administrator,planner,executor,targets,acceptance:request.acceptance??{},workerImage:env.MEM9_WORKER_IMAGE,sourceTag:env.MEM9_WORKER_SOURCE_TAG,
+    ...(dataRelease?{dataRelease}:{}),
     ...(request.operation==='promote'?{canaryReport:readCanaryReportFragments(env,request.canaryReportHash)}:{})};
 }
 
@@ -143,7 +151,16 @@ async function servicePrincipal(db,service){
 
 export async function runProductionConsolidation(db,config,request,{connect}={}){
   return withRolloutLock(db,'prod',async owns=>{
-    const checkpoint=async()=>{await owns();if(!await scalar(db,'SELECT clock_timestamp()<to_timestamp($1/1000.0) AS result',[request.deadline]))throw Error('ProductionWorkerDeadline');return requireRetiredRuntime(db,config,{safeOnly:['pause','status'].includes(request.operation)});};
+    const checkpoint=async()=>{
+      await owns();if(!await scalar(db,'SELECT clock_timestamp()<to_timestamp($1/1000.0) AS result',[request.deadline]))throw Error('ProductionWorkerDeadline');
+      const state=await requireRetiredRuntime(db,config,{safeOnly:['pause','status'].includes(request.operation)});
+      if(config.dataRelease&&!['pause','status'].includes(request.operation)){
+        if(config.acceptance.dataReleaseHash!==config.dataRelease.hash)throw Error('ProductionDataReleaseEvidenceMismatch');
+        if(['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote'].includes(request.operation)&&
+          !await scalar(db,'SELECT clock_timestamp()<to_timestamp($1/1000.0) AS result',[config.dataRelease.expiresMs]))throw Error('DataReleaseAuthorizationExpired');
+      }
+      return state;
+    };
     const state=await checkpoint();
     if(request.operation==='promote'&&(typeof config.canaryReport!=='string'||canaryReportDigest(config.canaryReport)!==request.canaryReportHash))throw Error('VerifiedProductionCanaryRequired');
     const currentSetup=await scalar(db,"SELECT to_regclass('mem9_maintenance.production_worker_setup') IS NOT NULL AS result")?
@@ -163,6 +180,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
         const release=active.row.header.release;
         if(release.sourceTree!==config.acceptance.sourceTree||release.coordinatorDigest!==config.acceptance.coordinatorDigest||
           release.sourceTag!==config.sourceTag||release.workerImage!==config.workerImage||
+          active.row.header.certificate?.dataReleaseHash!==config.dataRelease?.hash||
           !canaryWitnessMatches(config.acceptance,active.row.header.certificateHash,active.row.header.parentProofHash))throw Error('CanaryAttemptReleaseMismatch');
       }
     }

@@ -35,6 +35,12 @@ function deployment(){
   return {targets,calls,server,clients:{ecs:{send},scheduler:{send}}};
 }
 describe('production scheduling admission and deployment',()=>{
+  it('checks retained data roots independently of the current control revision',async()=>{
+    const f=deployment(),selected=`${account}.dkr.ecr.${region}.amazonaws.com/mem9-on-aws/mnemo-server@sha256:${'e'.repeat(64)}`;
+    for(const target of f.targets)target.dataRelease={images:{'mnemo-server':selected}};
+    f.server.image=selected;expect((await verifyProductionScheduling(f.clients,f.targets,{enabled:false})).enabled).toBe(false);
+    f.server.image=selected.replace(/e{64}$/,'f'.repeat(64));await expect(verifyProductionScheduling(f.clients,f.targets,{enabled:false})).rejects.toThrow();
+  });
   it('TC-CONS-WORKER-014 accepts the deployed runtime family and rejects legacy or foreign families',()=>{
     const f=deployment(),target=f.targets[0];
     const binding={taskArn:target.clusterArn.replace(':cluster/',':task/')+'/'+'a'.repeat(32),

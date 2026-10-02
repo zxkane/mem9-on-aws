@@ -311,6 +311,11 @@ describe("split GitHub OIDC deployment roles", () => {
       expect(classifyChangedPaths([path])).toMatchObject({workloadChanged:true,awsMutationRequired:true});
     }
   });
+  it('rebuilds control release evidence when retained data validation or continuation changes',()=>{
+    for(const path of ['scripts/run-production-canary.mjs','scripts/lib/production-canary-continuation-proof.mjs',
+      'scripts/lib/production-data-release.mjs','scripts/lib/production-data-release-loader.mjs','scripts/lib/production-data-build-inputs.mjs','scripts/lib/production-data-evidence.mjs'])
+      expect(classifyChangedPaths([path])).toMatchObject({workloadChanged:true,awsMutationRequired:true});
+  });
   it("TC-DEPLOYROLE-005/006/007: classifies mutation paths", () => {
     expect(
       classifyChangedPaths([

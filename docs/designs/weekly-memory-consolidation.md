@@ -1795,3 +1795,64 @@ Continuation idempotency uses a caller-persisted attempt/request ID and a
 canonical semantic request hash covering the parent and new certified binding;
 transport retry nonce/deadline do not restart an attempt or its original clocks.
 A superseded attempt cannot advance the current pointer on replay.
+
+#### Retained data images with a new control release
+
+Rebuilding unchanged source does not guarantee an identical image: refreshed
+runtime layers and executable Node caches can change the ARM64 child. Never
+exclude those bytes to manufacture an equivalence result. A continuation may
+instead retain the actual previously verified worker and serving images while
+deploying the newly reviewed bootstrap/operator build. The ordinary release tag
+continues to identify control code; data tags, roots and ARM64 children are
+recorded independently. The existing seven-field canary release hash and all
+original parent proofs, bindings and spent lifetime allowance remain unchanged.
+
+The operator issues a strict stage/account/region-scoped descriptor at
+`consolidation-runtime/data-release` only after reviewing its source, artifact
+and security evidence. It binds the current control tree, original data revision
+and tree, three exact root/child pairs, parent proof, runtime nonce, generation,
+namespace targets, schema/operator identities, build-input evidence, security
+inventory and policy review. Authorization has a bounded explicit operation
+window, at most 24 hours. Changing only timestamps is not renewal evidence.
+A draft capture or valid JSON shape is not authorization.
+
+Declared build-input evidence covers the three Dockerfiles, every local COPY
+source including matching lockfiles and directory members, file modes, root and
+Dockerfile-specific ignore files, and the relevant pinned CI build/builder
+settings. Unsupported instructions, missing sources and linked inputs reject.
+Separate authenticated ECR reads verify exact index and ARM64 manifest bytes and
+record config/layer descriptors. These are selected-artifact identities, not a
+claim that every historical network fetch has source provenance or that future
+remote resolution is reproducible. Both declared recipes and resolved artifact
+records contribute to the build-input hash.
+
+`configure` reads the protected descriptor and existing selection metadata,
+checks the completed runtime identity, compares historical and control recipes,
+verifies selected ECR artifacts, and re-reads authorization before exporting its
+snapshot. Production checkout includes the historical revisions. The IaC
+selector independently reads the same protected parameter and rejects a forged
+environment snapshot or dirty tracked sources. Missing authorization after a
+retained deployment must not select fresh data images silently. Runtime image
+selection and release publication distinguish current control provenance from
+retained data provenance.
+
+Scan capture exhausts pages, checks counts and identity consistency, and retains
+all open findings. Existing deployment bytes are not implicit risk acceptance;
+new-build scans cannot replace scans of the selected retained bytes. The
+operator must assess current findings against the existing policy, preserve
+unfixed findings, and stop for required governance if there is new exposure,
+a newly introduced finding, or an available fix being withheld. Neither this
+path nor its tests introduce a zero-HIGH rule or an automatic waiver.
+
+Expiry blocks new deployment and admission, including a database-time check at
+the final admission transaction boundary. Expiry during verification rolls back
+budget policies, execution/dispatcher changes and attempt admission. Pause,
+status, inspection and cleanup remain available. Expiry does not automatically
+stop a verified recurring worker or add per-tick secret-store access.
+
+Predeployment authorization must be independently produced before the new
+postdeployment witness exists. Publication still performs the paused read-only
+parent audit and material/authority/credential checks. Actual old-data/new-control
+preview coverage, fresh production N150 cohorts and commits, both complete
+replays, benchmark cleanup, capacity calibration, promotion and genuine recurring
+deliveries remain required; an all-new preview cannot substitute for them.

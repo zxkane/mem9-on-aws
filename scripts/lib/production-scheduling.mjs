@@ -54,7 +54,8 @@ export async function verifyProductionScheduling(clients,targets,{enabled,admiss
   const definition=(await send(clients.ecs,new DescribeTaskDefinitionCommand({taskDefinition:service.taskDefinition}))).taskDefinition;
   const server=definition?.containerDefinitions?.find(container=>container.name==='mnemo-server');
   const target=targets[0];
-  if(!/^[a-f0-9]{40}$/.test(target.revision??'')||server?.image!==`${target.account}.dkr.ecr.${target.region}.amazonaws.com/mem9-on-aws/mnemo-server:mem9-${target.revision.slice(0,7)}`||
+  const expectedServer=target.dataRelease?.images['mnemo-server']??`${target.account}.dkr.ecr.${target.region}.amazonaws.com/mem9-on-aws/mnemo-server:mem9-${target.revision.slice(0,7)}`;
+  if(!/^[a-f0-9]{40}$/.test(target.revision??'')||server?.image!==expectedServer||
     server.environment?.find(item=>item.name==='MNEMO_CONSOLIDATION_EXECUTION_ENABLED')?.value!=='true')fail();
   return {enabled,taskDefinitions:targets.map(target=>target.taskDefinitionArn)};
 }

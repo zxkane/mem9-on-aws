@@ -23,6 +23,8 @@ import {restoreMissingAdministrator,armAdministratorLoss,deletePreviewAdministra
 import {assertExtensionMaintenance} from './lib/runtime-extension-catalog.mjs';
 import {cancellationRehearsal} from './lib/production-runtime-cancellation-runner.mjs';
 import {requireNamespaceId} from './lib/maintenance-scope.mjs';
+import {loadDeploymentDataRelease} from './lib/production-data-release-loader.mjs';
+import {captureDataReleaseBuild} from './lib/production-data-evidence.mjs';
 
 const runProcess=promisify(execFile),send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
 const emit=value=>process.stdout.write(JSON.stringify({event:'production_runtime_rollout',...value})+'\n');
@@ -81,6 +83,8 @@ export async function productionCoordinatorDigest(){
     'scripts/lib/production-canary-compatibility.mjs','scripts/lib/production-canary-paused-audit.mjs',
     'scripts/lib/production-canary-material.mjs','scripts/lib/production-canary-producer.mjs',
     'scripts/lib/production-canary-fixture-evidence.mjs',
+    'scripts/lib/production-data-release.mjs','scripts/lib/production-data-release-loader.mjs',
+    'scripts/lib/production-data-build-inputs.mjs','scripts/lib/production-data-evidence.mjs',
     'scripts/canary-fixture-runner.mjs','scripts/production-consolidation-operator.postgres.test.mjs',
     'scripts/canary-fixture-e2e.mjs','scripts/lib/canary-fixture-task.mjs',
     'docker/canary-fixture/runner.Dockerfile','docker/canary-fixture/database.Dockerfile','docker/canary-fixture/pg-hba.conf',
@@ -90,6 +94,18 @@ export async function productionCoordinatorDigest(){
   const hash=createHash('sha256');
   for(const path of paths.sort()){hash.update(path+'\0');hash.update(await readFile(new URL('../'+path,import.meta.url)));}
   return hash.digest('hex');
+}
+
+export async function retainedDeploymentEnvironment(clients,context,{captureBuild=captureDataReleaseBuild}={}){
+  const selected=await loadDeploymentDataRelease(clients,context);
+  if(!selected)return {MEM9_RETAINED_DATA_RELEASE:'none',MEM9_RETAINED_DATA_RELEASE_HASH:'none'};
+  const evidence=await captureBuild({data:selected.data,repository:context.repository,controlRevision:context.controlRevision});
+  if(evidence.buildInputsHash!==selected.data.buildInputsHash)throw Error('DataReleaseBuildEvidenceMismatch');
+  // Source/registry reads can take time. Do not export a revoked, replaced or
+  // expired authorization after those independent checks have completed.
+  const fresh=await loadDeploymentDataRelease(clients,{...context,now:Date.now()});
+  if(fresh?.hash!==selected.hash||fresh.parameterVersion!==selected.parameterVersion)throw Error('DataReleaseSelectionChanged');
+  return {MEM9_RETAINED_DATA_RELEASE:JSON.stringify(selected.data),MEM9_RETAINED_DATA_RELEASE_HASH:selected.hash};
 }
 
 export async function productionSourceTree(){
@@ -193,7 +209,13 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
   if(command==='image'){
     const r=await send(clients.ssm,new GetParametersCommand({Names:[`/mem9-on-aws/${stage}/ecs/image`],WithDecryption:false}));
     const image=r.Parameters?.[0]?.Value;
-    const verified=await verifyRuntimeImage(image,{account,region,stage,revision:env.GITHUB_SHA,sourceTree:await productionSourceTree(),
+    const sourceTree=await productionSourceTree();
+    const retained=await loadDeploymentDataRelease(clients,{stage,account,region,controlSourceTree:sourceTree,
+      runtime:await readOptional(clients,statePath),env});
+    if(retained&&(image!==retained.images['mnemo-server']||retained.currentSelection?.mode!=='retained'||
+      retained.currentSelection.dataReleaseHash!==retained.hash))throw Error('RuntimeImageRevisionMismatch');
+    const sourceImage=retained?`${account}.dkr.ecr.${region}.amazonaws.com/${stage==='prod'?'mem9-on-aws':'mem9-on-aws/preview'}/mnemo-server:${retained.currentSelection.controlTag}`:image;
+    const verified=await verifyRuntimeImage(sourceImage,{account,region,stage,revision:env.GITHUB_SHA,sourceTree,
       readCommit:async short=>{
         if(env.GITHUB_REPOSITORY!=='zxkane/mem9-on-aws')throw Error('RuntimeImageRepositoryMismatch');
         const result=await execute('gh',['api',`repos/${env.GITHUB_REPOSITORY}/commits/${short}`,'--jq','{sha,parents,commit:{tree:.commit.tree}}'],{cwd:process.cwd(),env,timeout:30000,maxBuffer:16384});
@@ -301,7 +323,11 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
         if(stage==='prod'&&(settings.MNEMO_SCHEMA_MODE==='verify'||server.secrets?.find(s=>s.name==='MEM9_DB_SECRET')?.valueFrom!==values.get(names[1])))throw Error('MissingProductionRoutingState');
       }
     }
-    if(env.GITHUB_ENV)await appendFile(env.GITHUB_ENV,`MEM9_PRODUCTION_RUNTIME_MODE=${mode}\n${fallbackImages?'MEM9_RUNTIME_FALLBACK_IMAGES='+JSON.stringify(fallbackImages)+'\n':''}`);
+    const controlRevision=(await execute('git',['rev-parse','HEAD'],{cwd:process.cwd(),timeout:10000,maxBuffer:1024})).stdout.trim();
+    const retainedEnv=await retainedDeploymentEnvironment(clients,{stage,account,region,controlSourceTree:await productionSourceTree(),
+      controlRevision,runtime:marker,env,repository:process.cwd()});
+    if(env.GITHUB_ENV)await appendFile(env.GITHUB_ENV,`MEM9_PRODUCTION_RUNTIME_MODE=${mode}\n${fallbackImages?'MEM9_RUNTIME_FALLBACK_IMAGES='+JSON.stringify(fallbackImages)+'\n':''}`+
+      Object.entries(retainedEnv).map(([key,value])=>key+'='+value+'\n').join(''));
     emit({phase:'configured',mode});return;
   }
   if(command==='prepare'){

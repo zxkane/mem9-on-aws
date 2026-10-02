@@ -20,13 +20,16 @@ export function canaryWitnessMatches(acceptance,certificateHash,parentProofHash)
 export function validateCanaryCompatibility(certificate,parent,config,state){
   const inspected=inspectCanaryCompatibility(certificate,parent,config,state);
   if(!canaryWitnessMatches(config.acceptance,hash(certificate),certificate.parentProofHash))fail();
+  if(certificate.version===2&&config.acceptance.dataReleaseHash!==certificate.dataReleaseHash)fail();
   return inspected;
 }
 
 // Structural inspection does not authorize an operator invocation. It is used
 // by the independent read-only publisher before a new witness exists.
 export function inspectCanaryCompatibility(certificate,parent,config,state){
-  if(!exact(certificate,['version','parentProofHash','generation','targetsHash','previous','current','images','material'])||certificate.version!==1||
+  const retained=certificate?.version===2;
+  if(!exact(certificate,['version','parentProofHash','generation','targetsHash','previous','current','images','material',...(retained?['dataReleaseHash']:[])])||![1,2].includes(certificate.version)||
+    (retained?(!hex(certificate.dataReleaseHash)||config.dataRelease?.hash!==certificate.dataReleaseHash):config.dataRelease!==undefined)||
     certificate.parentProofHash!==hash(parent)||certificate.generation!==parent.generation||certificate.generation!==config.generation||
     certificate.targetsHash!==hash([...config.targets].sort())||hash(parent.targets)!==hash(config.targets)||
     !exact(certificate.previous,['release','backendBindingHash'])||!exact(certificate.current,['release','backendBinding'])||
