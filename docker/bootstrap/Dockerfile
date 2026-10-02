@@ -47,6 +47,10 @@ COPY scripts/runtime-bootstrap.mjs /bootstrap/operator/scripts/runtime-bootstrap
 COPY scripts/runtime-admin-probe.mjs /bootstrap/operator/scripts/runtime-admin-probe.mjs
 COPY scripts/production-runtime-operator.mjs /bootstrap/operator/scripts/production-runtime-operator.mjs
 COPY scripts/production-consolidation-operator.mjs /bootstrap/operator/scripts/production-consolidation-operator.mjs
+COPY scripts/lib/production-canary-continuation.mjs /bootstrap/operator/scripts/lib/production-canary-continuation.mjs
+COPY scripts/lib/production-canary-compatibility.mjs /bootstrap/operator/scripts/lib/production-canary-compatibility.mjs
+COPY scripts/lib/production-canary-snapshot.mjs /bootstrap/operator/scripts/lib/production-canary-snapshot.mjs
+COPY scripts/lib/production-canary-paused-audit.mjs /bootstrap/operator/scripts/lib/production-canary-paused-audit.mjs
 COPY scripts/lib/production-canary-verification.mjs /bootstrap/operator/scripts/lib/production-canary-verification.mjs
 COPY scripts/lib/production-canary-performance.mjs /bootstrap/operator/scripts/lib/production-canary-performance.mjs
 COPY scripts/lib/production-canary-report.mjs /bootstrap/operator/scripts/lib/production-canary-report.mjs
@@ -75,5 +79,6 @@ USER node
 # Importing a module must not execute its CLI or contact AWS/the database.
 RUN --network=none node --input-type=module -e "\
       await import('/bootstrap/operator/scripts/production-runtime-operator.mjs'); \
-      await import('/bootstrap/operator/scripts/production-consolidation-operator.mjs');"
+      await import('/bootstrap/operator/scripts/production-consolidation-operator.mjs'); \
+      await import('/bootstrap/operator/scripts/lib/production-canary-paused-audit.mjs');"
 ENTRYPOINT ["/bootstrap/entrypoint.sh"]

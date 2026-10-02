@@ -7,7 +7,12 @@ import {runtimeRoleName} from './lib/runtime-credentials.mjs';
 import {secureCredentialDdlLogging,scramVerifier} from './lib/consolidation-preview-secrets.mjs';
 import {readExtensionCatalog,assertExtensionMaintenance} from './lib/runtime-extension-catalog.mjs';
 import {requireServiceNamespace as requireNamespaceId} from '../infra/gateway/service-auth.mjs';
-import {verifyCanaryReceiptChains,verifyProtectedCanaryBaseline,canaryEvidenceHash} from './lib/production-canary-verification.mjs';
+import {canaryEvidenceHash} from './lib/production-canary-verification.mjs';
+import {protectedRowHashes,captureCanarySnapshot} from './lib/production-canary-snapshot.mjs';
+import {canaryWitnessMatches} from './lib/production-canary-compatibility.mjs';
+import {currentCanaryAttempt,beginCanaryContinuation,bindAttemptProof,verifyCanaryMembership,appendCanaryAttemptEvent,
+  recordCanaryAdmission,canaryRootIdentity} from './lib/production-canary-continuation.mjs';
+import {assertCanaryAttemptCommitWindow} from './lib/production-canary-continuation.mjs';
 import {decodeCanaryReport,verifyCanaryReport,decodeBenchmarkRefs,readCanaryReportFragments,canaryReportDigest} from './lib/production-canary-report.mjs';
 import {canaryBenchmarkHashes} from './lib/canary-benchmark.mjs';
 import {productionArtifactAdmission,validateProductionBackendBinding} from './lib/production-artifacts.mjs';
@@ -23,10 +28,15 @@ export const canaryPolicy=()=>({limits:{total:20,rewrite:20,delete:20,archive:0,
 export function parseProductionConsolidationRequest(raw){
   if(typeof raw!=='string'||Buffer.byteLength(raw)>16384)throw Error('InvalidProductionWorkerRequest');
   let request;try{request=JSON.parse(raw);}catch{throw Error('InvalidProductionWorkerRequest');}
-  if(!request||!['prepare','plan','baseline','canary','verify-canary','promote','pause','status','cleanup-benchmark'].includes(request.operation)||
+  if(!request||!['prepare','plan','baseline','canary','verify-canary','inspect-canary','begin-continuation','resume-plan','promote','pause','status','cleanup-benchmark'].includes(request.operation)||
     !/^[a-f0-9]{32}$/.test(request.invocation??'')||
     !Number.isSafeInteger(request.deadline)||request.deadline<=Date.now()||request.deadline>Date.now()+15*60000||
-    Object.keys(request).some(k=>!['operation','deadline','dailyRows','basisPoints','acceptance','invocation','canaryReportHash','benchmarkRefs','backendBinding'].includes(k)))throw Error('InvalidProductionWorkerRequest');
+    Object.keys(request).some(k=>!['operation','deadline','dailyRows','basisPoints','acceptance','invocation','canaryReportHash','benchmarkRefs','backendBinding','attemptId','parentProofHash','compatibility'].includes(k)))throw Error('InvalidProductionWorkerRequest');
+  if(['begin-continuation','inspect-canary','resume-plan'].includes(request.operation)&&!/^[a-f0-9]{32}$/.test(request.attemptId??''))throw Error('CanaryAttemptRequired');
+  if(request.attemptId!==undefined&&(!['begin-continuation','inspect-canary','resume-plan','canary','verify-canary','promote'].includes(request.operation)||!/^[a-f0-9]{32}$/.test(request.attemptId)))throw Error('UnexpectedCanaryAttempt');
+  if(request.operation==='begin-continuation'){
+    if(!/^[a-f0-9]{64}$/.test(request.parentProofHash??'')||!request.compatibility||typeof request.compatibility!=='object'||Array.isArray(request.compatibility)||Buffer.byteLength(JSON.stringify(request.compatibility))>6000)throw Error('CanaryCompatibilityRequired');
+  }else if(request.parentProofHash!==undefined||request.compatibility!==undefined)throw Error('UnexpectedCanaryContinuation');
   if(request.operation==='promote'){
     if(!Number.isInteger(request.dailyRows)||request.dailyRows<20||request.dailyRows>50000||
       !Number.isInteger(request.basisPoints)||request.basisPoints<1||request.basisPoints>5000)throw Error('InvalidProductionWorkerBudget');
@@ -131,36 +141,34 @@ async function servicePrincipal(db,service){
   if(row?.principal_type!=='service'||row.status!=='active')throw Error('ProductionServicePrincipalMismatch');return row.principal_id;
 }
 
-async function protectedRowHashes(db,namespace,ids){
-  const query=ids===undefined?`SELECT m.id,m.namespace_id,
-    encode(sha256(convert_to((to_jsonb(m)-'created_at'-'updated_at'||jsonb_build_object(
-      'created_epoch',extract(epoch FROM m.created_at),'updated_epoch',extract(epoch FROM m.updated_at)))::text,'UTF8')),'hex') AS digest
-    FROM public.memories m WHERE m.namespace_id=$1 AND (m.memory_type IS DISTINCT FROM 'insight' OR
-      coalesce(m.metadata->>'protected','false')<>'false' OR coalesce(m.tags,'[]') ?| ARRAY['protected','pinned'])
-    ORDER BY m.id LIMIT 100001 FOR SHARE`:
-    `SELECT m.id,m.namespace_id,
-    encode(sha256(convert_to((to_jsonb(m)-'created_at'-'updated_at'||jsonb_build_object(
-      'created_epoch',extract(epoch FROM m.created_at),'updated_epoch',extract(epoch FROM m.updated_at)))::text,'UTF8')),'hex') AS digest
-    FROM public.memories m WHERE m.namespace_id=$1 AND m.id=ANY($2) ORDER BY m.id LIMIT 100001 FOR SHARE`;
-  const rows=(await db.query(query,ids===undefined?[namespace]:[namespace,ids])).rows;
-  if(rows.length>100000)throw Error('ProtectedBaselineTooLarge');return rows;
-}
-
 export async function runProductionConsolidation(db,config,request,{connect}={}){
   return withRolloutLock(db,'prod',async owns=>{
     const checkpoint=async()=>{await owns();if(!await scalar(db,'SELECT clock_timestamp()<to_timestamp($1/1000.0) AS result',[request.deadline]))throw Error('ProductionWorkerDeadline');return requireRetiredRuntime(db,config,{safeOnly:['pause','status'].includes(request.operation)});};
     const state=await checkpoint();
     if(request.operation==='promote'&&(typeof config.canaryReport!=='string'||canaryReportDigest(config.canaryReport)!==request.canaryReportHash))throw Error('VerifiedProductionCanaryRequired');
-    let currentSetup;
-    if(request.operation!=='prepare'){
-      const setup=await scalar(db,"SELECT to_regclass('mem9_maintenance.production_worker_setup') IS NOT NULL AS result")?
+    const currentSetup=await scalar(db,"SELECT to_regclass('mem9_maintenance.production_worker_setup') IS NOT NULL AS result")?
         (await db.query('SELECT * FROM mem9_maintenance.production_worker_setup WHERE singleton')).rows[0]:undefined;
-      currentSetup=setup;
+    if(request.operation==='prepare'&&currentSetup&&(currentSetup.validation_id!=null||currentSetup.protected_baseline!=null||
+      currentSetup.canary_started_at!=null||currentSetup.canary_used>0||currentSetup.receipt_verification!=null||currentSetup.promotion_verification!=null))throw Error('ProductionCanarySetupImmutable');
+    if(request.operation!=='prepare'){
+      const setup=currentSetup;
       config={...config,targets:(setup?.targets??[]).map(requireNamespaceId).sort()};
       if(!['status','pause'].includes(request.operation)&&!config.targets.length)throw Error('ProductionWorkersNotVerified');
     }
+    const active=currentSetup?await currentCanaryAttempt(db):null;
+    if(!['status','pause','cleanup-benchmark','prepare','begin-continuation'].includes(request.operation)){
+      if(active&&request.attemptId!==active.row.attempt_id||!active&&request.attemptId!==undefined)throw Error('CanaryAttemptIdentityMismatch');
+      if(active){
+        if(active.row.header.rootIdentity!==await canaryRootIdentity(db,state))throw Error('CanaryRootChanged');
+        const release=active.row.header.release;
+        if(release.sourceTree!==config.acceptance.sourceTree||release.coordinatorDigest!==config.acceptance.coordinatorDigest||
+          release.sourceTag!==config.sourceTag||release.workerImage!==config.workerImage||
+          !canaryWitnessMatches(config.acceptance,active.row.header.certificateHash,active.row.header.parentProofHash))throw Error('CanaryAttemptReleaseMismatch');
+      }
+    }
     if(request.operation==='status')return {phase:'status',setupPhase:currentSetup?.phase,validationId:currentSetup?.validation_id,canaryUsed:currentSetup?.canary_used,
-      backendBinding:currentSetup?.backend_binding,
+      backendBinding:active?.row.header.backendBinding??currentSetup?.backend_binding,
+      ...(active?{attempt:{id:active.row.attempt_id,ordinal:active.row.ordinal,phase:active.phase,frozen:active.frozen,parentProofHash:active.row.header.parentProofHash}}:{}),
       ...(currentSetup?.phase==='promote'?{admission:runningAdmission(currentSetup),activationSeed:currentSetup.promotion_verification?.activationSeed}:{}),
       enabled:await scalar(db,'SELECT enabled AS result FROM mem9_maintenance.execution_control WHERE singleton'),
       dispatcherEnabled:await scalar(db,'SELECT enabled AS result FROM mem9_maintenance.dispatcher_settings WHERE singleton'),
@@ -170,60 +178,45 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
     await db.query('BEGIN');
     try{
       await db.query("SET LOCAL TIME ZONE 'UTC'");
-      if(['verify-canary','promote'].includes(request.operation)){
+      if(request.operation==='begin-continuation'){
+        await db.query('SELECT singleton FROM mem9_maintenance.execution_control WHERE singleton FOR UPDATE');
+        const setup=(await db.query('SELECT * FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
+        for(const kind of ['planner','executor']){
+          if(Number(await scalar(db,'SELECT $1::regrole::oid AS result',[config[kind].username]))!==Number(setup?.[kind+'_oid']))throw Error('CanaryWorkerIdentityChanged');
+          await verifyWorkerPrivileges(db,config[kind].username,kind);
+        }
+        responseEvidence=await beginCanaryContinuation(db,config,state,setup,request);
+      }else if(['verify-canary','inspect-canary','promote'].includes(request.operation)){
         if(await scalar(db,'SELECT enabled AS result FROM mem9_maintenance.execution_control WHERE singleton FOR UPDATE')||
           await scalar(db,'SELECT enabled AS result FROM mem9_maintenance.dispatcher_settings WHERE singleton'))throw Error('PauseBeforeCanaryVerification');
         const setup=(await db.query('SELECT * FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
         if(setup?.phase!=='canary'||setup.generation!==config.generation||JSON.stringify(setup.targets)!==JSON.stringify(config.targets)||
           !setup.canary_started_at||setup.canary_used<1||setup.canary_used>20)throw Error('ProductionCanaryNotComplete');
-        const baseline=await scalar(db,"SELECT coalesce(jsonb_agg(jsonb_build_array(namespace_id,action_id) ORDER BY namespace_id,action_id),'[]') AS result FROM mem9_maintenance.receipts WHERE committed_at < $1",[setup.canary_started_at]);
-        if(JSON.stringify(baseline)!==JSON.stringify(setup.baseline_receipts))throw Error('CanaryReceiptBaselineChanged');
         for(const kind of ['planner','executor']){
           if(Number(await scalar(db,'SELECT $1::regrole::oid AS result',[config[kind].username]))!==Number(setup[kind+'_oid']))throw Error('CanaryWorkerIdentityChanged');
           await verifyWorkerPrivileges(db,config[kind].username,kind);
         }
-        if(await scalar(db,'SELECT EXISTS(SELECT FROM mem9_maintenance.receipts WHERE committed_at >= $1 AND NOT(namespace_id=ANY($2))) AS result',[setup.canary_started_at,config.targets]))throw Error('UnexpectedCanaryNamespace');
-        const rows=(await db.query(`SELECT to_jsonb(r) AS receipt,to_jsonb(a) AS action FROM mem9_maintenance.receipts r
-          JOIN mem9_maintenance.actions a USING(namespace_id,action_id) WHERE r.committed_at >= $1 AND r.namespace_id=ANY($2)
-          ORDER BY r.committed_at,r.namespace_id,r.action_id`,[setup.canary_started_at,config.targets])).rows;
-        const current=[];
-        for(const namespace of config.targets){
-          const ids=[...new Set(rows.filter(row=>row.receipt.namespace_id===namespace).flatMap(row=>row.receipt.post_images.map(image=>image.id)))];
-          if(ids.length)current.push(...(await db.query('SELECT to_jsonb(m) AS value FROM public.memories m WHERE namespace_id=$1 AND id=ANY($2) FOR SHARE',[namespace,ids])).rows.map(row=>row.value));
+        if(request.operation==='inspect-canary'&&!active)throw Error('CanaryAttemptRequired');
+        const snapshot=bindAttemptProof(await captureCanarySnapshot(db,config,state,setup,{backend:active?.row.header.backendBinding??setup.backend_binding}),active);
+        if(active)await verifyCanaryMembership(db,setup,active,snapshot.projection.receiptIds);
+        const {verification:proof,replayActions,backendBinding,receiptWindow}=snapshot;
+        if(active){
+          if(active.frozen&&canaryEvidenceHash(active.freeze.payload.data.verification)!==canaryEvidenceHash(proof))throw Error('CanaryConservationChanged');
+          if(request.operation==='promote'&&!active.frozen)throw Error('CanaryAttemptFreezeRequired');
+          if(request.operation==='verify-canary')await appendCanaryAttemptEvent(db,active.row.attempt_id,'frozen',{verification:proof,projection:snapshot.projection});
+        }else{
+          if(setup.receipt_verification&&setup.receipt_verification.conservationHash!==proof.conservationHash)throw Error('CanaryConservationChanged');
+          if(setup.receipt_verification){
+            if(canaryEvidenceHash(setup.receipt_verification)!==canaryEvidenceHash(proof))throw Error('CanaryReleaseContinuationRequired');
+          }else await db.query('UPDATE mem9_maintenance.production_worker_setup SET receipt_verification=$1 WHERE singleton',[proof]);
         }
-        const verified=verifyCanaryReceiptChains(rows,current);
-        if(verified.changedRows!==setup.canary_used)throw Error('CanaryCounterMismatch');
-        if(!Array.isArray(setup.protected_baseline))throw Error('ProtectedCanaryBaselineMissing');
-        const protectedCurrent=[];
-        for(const namespace of config.targets){
-          const ids=setup.protected_baseline.filter(row=>row.namespace_id===namespace).map(row=>row.id);
-          if(ids.length)protectedCurrent.push(...await protectedRowHashes(db,namespace,ids));
-        }
-        const protectedProof=verifyProtectedCanaryBaseline(setup.protected_baseline,protectedCurrent);
-        const backendBinding=validateProductionBackendBinding(setup.backend_binding,state.identity.clusterArn);
-        const allReceipts=await scalar(db,"SELECT coalesce(jsonb_agg(jsonb_build_array(namespace_id,action_id,result) ORDER BY namespace_id,action_id),'[]') AS result FROM mem9_maintenance.receipts");
-        const budgets=await scalar(db,"SELECT coalesce(jsonb_agg(to_jsonb(w) ORDER BY scope,day),'[]') AS result FROM mem9_maintenance.budget_windows w");
-        const admission=await scalar(db,"SELECT coalesce(jsonb_agg(to_jsonb(a) ORDER BY scope),'[]') AS result FROM mem9_maintenance.apply_admission a");
-        const policies=await scalar(db,"SELECT coalesce(jsonb_agg(to_jsonb(p) ORDER BY scope),'[]') AS result FROM mem9_maintenance.budget_policies p");
-        const conservation={receipts:canaryEvidenceHash(allReceipts),budgets:canaryEvidenceHash(budgets),admission:canaryEvidenceHash(admission),policies:canaryEvidenceHash(policies),
-          members:canaryEvidenceHash(current.sort((a,b)=>a.namespace_id.localeCompare(b.namespace_id)||a.id.localeCompare(b.id))),canaryUsed:setup.canary_used};
-        const replayActions=rows.map(row=>({namespace:row.receipt.namespace_id,id:row.receipt.action_id,result:row.receipt.result}));
-        const proof={generation:config.generation,validationId:setup.validation_id,targets:config.targets,workerImage:config.workerImage,sourceTag:config.sourceTag,
-          backendBindingHash:canaryEvidenceHash(backendBinding),...verified,...protectedProof,
-          plannerOid:Number(setup.planner_oid),executorOid:Number(setup.executor_oid),
-          releaseHash:canaryEvidenceHash({sourceTree:config.acceptance.sourceTree,coordinatorDigest:config.acceptance.coordinatorDigest,
-            schemaDigest:state.identity.schemaDigest,operatorDigest:state.identity.operatorDigest,runtimeNonce:state.operation_nonce,
-            workerImage:config.workerImage,sourceTag:config.sourceTag}),
-          protectedBaselineHash:canaryEvidenceHash(setup.protected_baseline.map(row=>[row.namespace_id,row.id,row.digest])),
-          replayResultHash:canaryEvidenceHash(replayActions.map(row=>[row.namespace,row.id,row.result])),conservationHash:canaryEvidenceHash(conservation)};
-        if(setup.receipt_verification&&setup.receipt_verification.conservationHash!==proof.conservationHash)throw Error('CanaryConservationChanged');
-        await db.query('UPDATE mem9_maintenance.production_worker_setup SET receipt_verification=$1 WHERE singleton',[proof]);
-        const committed=rows.map(row=>new Date(row.receipt.committed_at).getTime());
-        responseEvidence={verification:proof,replayActions,backendBinding,receiptWindow:{firstCommittedMs:Math.min(...committed),lastCommittedMs:Math.max(...committed),committedMs:committed}};
+        responseEvidence={verification:proof,replayActions,backendBinding,receiptWindow};
         if(request.operation==='promote'){
           for(const namespace of config.targets)if(await scalar(db,'SELECT EXISTS(SELECT FROM public.memories WHERE namespace_id=$1 AND agent_id=$2) AS result',
             [namespace,'mem9-canary-'+setup.validation_id]))throw Error('BenchmarkCleanupIncomplete');
-          const verifiedReport=verifyCanaryReport(decodeCanaryReport(config.canaryReport),proof,responseEvidence.receiptWindow);
+          const report=decodeCanaryReport(config.canaryReport);
+          const verifiedReport=verifyCanaryReport(report,proof,responseEvidence.receiptWindow);
+          if(active)await assertCanaryAttemptCommitWindow(db,active.row.attempt_id,report.loaded);
           const activationSeed=hash(config.generation+'/running/'+setup.validation_id+'/'+proof.releaseHash+'/'+request.invocation);
           const admission=productionArtifactAdmission(activationSeed,config.sourceTag,config.workerImage);
           const budget={limits:{total:request.dailyRows,rewrite:request.dailyRows,delete:request.dailyRows,archive:0,mark:0},
@@ -231,6 +224,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
           for(const scope of ['stage',...config.targets])await db.query('SELECT mem9_maintenance.set_budget_policy($1,$2)',[scope,budget]);
           await db.query("SELECT mem9_maintenance.set_execution_mode('prod',true,ARRAY[$1::oid],'qwen3-embedding-0.6b')",[state.identity.legacyRoleOid]);
           await db.query('SELECT mem9_maintenance.configure_dispatcher($1,$2,true,$3)',['prod',config.targets,admission]);
+          if(active)await appendCanaryAttemptEvent(db,active.row.attempt_id,'promoted',{verificationHash:canaryEvidenceHash(proof),reportHash:verifiedReport.reportHash,admissionHash:hash(admission)});
           await db.query("UPDATE mem9_maintenance.production_worker_setup SET phase='promote',promotion_verification=$1 WHERE singleton",[
             {...proof,...verifiedReport,budget,admission,activationSeed,activationNonce:request.invocation}]);
           responseEvidence={verification:proof,performance:verifiedReport.performance,dailyRows:request.dailyRows,admission,activationSeed};
@@ -322,7 +316,12 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
         for(const kind of ['planner','executor'])await verifyWorkerPrivileges(db,config[kind].username,kind);
         const enabled=await scalar(db,'SELECT enabled AS result FROM mem9_maintenance.execution_control WHERE singleton FOR UPDATE');
         const setup=(await db.query('SELECT * FROM mem9_maintenance.production_worker_setup WHERE singleton FOR UPDATE')).rows[0];
-        if(request.operation==='plan'){
+        if(request.operation==='resume-plan'){
+          if(!active||setup.phase!=='canary'||active.frozen||active.measured||enabled||await scalar(db,'SELECT enabled AS result FROM mem9_maintenance.dispatcher_settings WHERE singleton'))throw Error('CanaryPlanningContinuationDenied');
+          await db.query("SELECT mem9_maintenance.set_execution_mode('prod',false,ARRAY[$1::oid],'qwen3-embedding-0.6b')",[state.identity.legacyRoleOid]);
+          await recordCanaryAdmission(db,active.row.attempt_id,request.invocation,'planning');
+          await db.query('SELECT mem9_maintenance.configure_dispatcher($1,$2,true,$3)',['prod',config.targets,request.invocation]);
+        }else if(request.operation==='plan'){
           if(enabled||setup.phase!=='prepared'||setup.validation_id)throw Error('PlanBeforeCanaryBaseline');
           await db.query('SELECT mem9_maintenance.configure_dispatcher($1,$2,true,$3)',['prod',config.targets,request.invocation]);
         }else if(request.operation==='baseline'){
@@ -342,9 +341,13 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
         // Repeated canary invocations never replace the original baseline.
         }
         if(request.operation==='canary'){
+        if(active){
+          if(active.frozen||active.measured||enabled||await scalar(db,'SELECT enabled AS result FROM mem9_maintenance.dispatcher_settings WHERE singleton'))throw Error('CanaryAttemptAdmissionDenied');
+        }else if(setup.receipt_verification)throw Error('CanaryContinuationRequired');
         const budget=canaryPolicy();
         for(const scope of ['stage',...config.targets])await db.query('SELECT mem9_maintenance.set_budget_policy($1,$2)',[scope,budget]);
         await db.query("SELECT mem9_maintenance.set_execution_mode('prod',true,ARRAY[$1::oid],'qwen3-embedding-0.6b')",[state.identity.legacyRoleOid]);
+        if(active)await recordCanaryAdmission(db,active.row.attempt_id,request.invocation,'execution');
         await db.query('SELECT mem9_maintenance.configure_dispatcher($1,$2,true,$3)',['prod',config.targets,request.invocation]);
         await db.query(`UPDATE mem9_maintenance.production_worker_setup SET phase=$1,
           baseline_receipts=coalesce(baseline_receipts,(SELECT coalesce(jsonb_agg(jsonb_build_array(namespace_id,action_id) ORDER BY namespace_id,action_id),'[]') FROM mem9_maintenance.receipts)),
@@ -363,7 +366,7 @@ export async function runProductionConsolidation(db,config,request,{connect}={})
       await checkpoint();await db.query("UPDATE mem9_maintenance.production_worker_setup SET phase='prepared' WHERE singleton AND generation=$1",[config.generation]);
     }
     return {phase:request.operation,namespaces:config.targets.length,modelEnabled:false,...responseEvidence,
-      ...(['plan','canary'].includes(request.operation)?{admission:request.invocation}:{}),...(request.operation==='baseline'?{
+      ...(['plan','resume-plan','canary'].includes(request.operation)?{admission:request.invocation}:{}),...(request.operation==='baseline'?{
       validationId:await scalar(db,'SELECT validation_id AS result FROM mem9_maintenance.production_worker_setup WHERE singleton')}:{} )};
   });
 }

@@ -11,6 +11,8 @@ const DOCKERFILES = [
   "docker/llm-proxy/Dockerfile",
   "docker/mnemo-server/Dockerfile",
   "docker/qwen3-embed/Dockerfile",
+  "docker/canary-fixture/runner.Dockerfile",
+  "docker/canary-fixture/database.Dockerfile",
 ];
 
 export function discoverWorkloadCopyInputs() {
@@ -60,6 +62,9 @@ export function classifyChangedPaths(paths) {
       path === "scripts/run-bootstrap-task.sh" ||
       // Host-side canary selection also needs a matching preview release.
       path === "scripts/lib/mcp-canary-sampler.mjs" ||
+      path === "scripts/canary-fixture-e2e.mjs" ||
+      path === "scripts/lib/canary-fixture-task.mjs" ||
+      path === "scripts/lib/production-canary-fixture-evidence.mjs" ||
       path.startsWith("scripts/lib/production-runtime-") ||
       [...WORKLOAD_COPY_INPUTS].some((input) => matchesCopyInput(path, input)),
   );

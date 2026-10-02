@@ -77,6 +77,13 @@ export async function productionCoordinatorDigest(){
   paths.push('infra/production-consolidation.ts','infra/consolidation-runtime.ts','scripts/production-consolidation-operator.mjs',
     'scripts/run-production-consolidation.mjs','scripts/run-production-canary.mjs','scripts/consolidation-worker.mjs','scripts/consolidation-canary-replay.mjs',
     'scripts/lib/production-canary-verification.mjs','scripts/lib/production-canary-report.mjs','scripts/lib/production-canary-performance.mjs',
+    'scripts/lib/production-canary-continuation.mjs','scripts/lib/production-canary-snapshot.mjs',
+    'scripts/lib/production-canary-compatibility.mjs','scripts/lib/production-canary-paused-audit.mjs',
+    'scripts/lib/production-canary-material.mjs','scripts/lib/production-canary-producer.mjs',
+    'scripts/lib/production-canary-fixture-evidence.mjs',
+    'scripts/canary-fixture-runner.mjs','scripts/production-consolidation-operator.postgres.test.mjs',
+    'scripts/canary-fixture-e2e.mjs','scripts/lib/canary-fixture-task.mjs',
+    'docker/canary-fixture/runner.Dockerfile','docker/canary-fixture/database.Dockerfile','docker/canary-fixture/pg-hba.conf',
     'scripts/lib/production-canary-delivery.mjs','scripts/lib/production-canary-flow.mjs','scripts/lib/production-scheduling.mjs',
     'scripts/lib/mcp-canary-sampler.mjs','scripts/lib/canary-benchmark.mjs','scripts/lib/production-artifacts.mjs','infra/ecr.ts',
     'scripts/resolve-cloudflare-account.mjs');

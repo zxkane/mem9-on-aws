@@ -2321,6 +2321,96 @@
       "namespace_evidence": null
     },
     {
+      "id": "be255eb77b0b72520099",
+      "owner": "scripts/lib/production-canary-continuation.mjs",
+      "line": 150,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "20a3ebac51ea5235e0d0ecada4948c13d167511755485a2013b29c04ef7ce963",
+      "statement": "SELECT EXISTS(SELECT FROM public.memories WHERE namespace_id=$1 AND agent_id=$2) AS present",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/production-consolidation-operator.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "scripts/canary-fixture-e2e.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "337d8cc0d929e3173deb",
+      "owner": "scripts/lib/production-canary-paused-audit.mjs",
+      "line": 55,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "206af8a01543fced7a826e09388a73add4ab3550c211e4224335769abe636d04",
+      "statement": "SELECT count(*) AS result FROM public.memories WHERE namespace_id=$1 AND agent_id=$2",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/production-consolidation-operator.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "scripts/canary-fixture-e2e.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "752c16c0900e7fda94be",
+      "owner": "scripts/lib/production-canary-snapshot.mjs",
+      "line": 44,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "7026f2a261b00f327365586ee53131bcf69049a6ba33ab072ce7a360906eba12",
+      "statement": "SELECT m.id,m.namespace_id, encode(sha256(convert_to((to_jsonb(m)-'created_at'-'updated_at'||jsonb_build_object( 'created_epoch',extract(epoch FROM m.created_at),'updated_epoch',extract(epoch FROM m.updated_at)))::text,'UTF8')),'hex') AS digest FROM public.memories m WHERE m.namespace_id=$1 AND (m.memory_type IS DISTINCT FROM 'insight' OR coalesce(m.metadata->>'protected','false')<>'false' OR coalesce(m.tags,'[]') ?| ARRAY['protected','pinned']) ORDER BY m.id LIMIT 100001",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/production-consolidation-operator.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "scripts/canary-fixture-e2e.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "a92b50abbff28e3c219b",
+      "owner": "scripts/lib/production-canary-snapshot.mjs",
+      "line": 50,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "6275aeed34d94c2ad09ddf3db3ba7740e4ab98c9f2becbeda7c0cfa9caa7dede",
+      "statement": "SELECT m.id,m.namespace_id, encode(sha256(convert_to((to_jsonb(m)-'created_at'-'updated_at'||jsonb_build_object( 'created_epoch',extract(epoch FROM m.created_at),'updated_epoch',extract(epoch FROM m.updated_at)))::text,'UTF8')),'hex') AS digest FROM public.memories m WHERE m.namespace_id=$1 AND m.id=ANY($2) ORDER BY m.id LIMIT 100001",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/production-consolidation-operator.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "scripts/canary-fixture-e2e.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
+      "id": "a8da0ed6d8ddf07adfd2",
+      "owner": "scripts/lib/production-canary-snapshot.mjs",
+      "line": 76,
+      "tables": [
+        "memories"
+      ],
+      "statement_sha256": "8fe877ffff2bbe3a2d515f85427e73f80edb37fbd6d9689b347895e996c00b8f",
+      "statement": "SELECT to_jsonb(m) AS value FROM public.memories m WHERE namespace_id=$1 AND id=ANY($2){{dynamic}}",
+      "classification": "namespace_bound",
+      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
+      "coverage": [
+        "scripts/production-consolidation-operator.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "scripts/canary-fixture-e2e.mjs"
+      ],
+      "namespace_evidence": "namespace_id=$1"
+    },
+    {
       "id": "a7ed6ed6cf6e5f2790df",
       "owner": "scripts/lib/production-runtime-rehearsal.mjs",
       "line": 25,
@@ -2846,57 +2936,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "b38634a4318c2548a6c1",
+      "id": "2a5b77b1215714e09668",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 135,
-      "tables": [
-        "memories"
-      ],
-      "statement_sha256": "99e604ffaa82564d72fed5d21ab09c6e1edbd7ba2d4ac190e5ddd1b1b2b7ea2d",
-      "statement": "SELECT m.id,m.namespace_id, encode(sha256(convert_to((to_jsonb(m)-'created_at'-'updated_at'||jsonb_build_object( 'created_epoch',extract(epoch FROM m.created_at),'updated_epoch',extract(epoch FROM m.updated_at)))::text,'UTF8')),'hex') AS digest FROM public.memories m WHERE m.namespace_id=$1 AND (m.memory_type IS DISTINCT FROM 'insight' OR coalesce(m.metadata->>'protected','false')<>'false' OR coalesce(m.tags,'[]') ?| ARRAY['protected','pinned']) ORDER BY m.id LIMIT 100001 FOR SHARE",
-      "classification": "namespace_bound",
-      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
-      "coverage": [
-        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
-      ],
-      "namespace_evidence": "namespace_id=$1"
-    },
-    {
-      "id": "995e5938a84b477caa7b",
-      "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 141,
-      "tables": [
-        "memories"
-      ],
-      "statement_sha256": "5c67ef9d95f0def34f60855df5750f8bf43fd5b90b46d7cd16ff7b3c3edb75f9",
-      "statement": "SELECT m.id,m.namespace_id, encode(sha256(convert_to((to_jsonb(m)-'created_at'-'updated_at'||jsonb_build_object( 'created_epoch',extract(epoch FROM m.created_at),'updated_epoch',extract(epoch FROM m.updated_at)))::text,'UTF8')),'hex') AS digest FROM public.memories m WHERE m.namespace_id=$1 AND m.id=ANY($2) ORDER BY m.id LIMIT 100001 FOR SHARE",
-      "classification": "namespace_bound",
-      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
-      "coverage": [
-        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
-      ],
-      "namespace_evidence": "namespace_id=$1"
-    },
-    {
-      "id": "9dd9297e7be4574eb71c",
-      "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 192,
-      "tables": [
-        "memories"
-      ],
-      "statement_sha256": "6abcecaff33633073c8150743f103cbfd68ca60d72f5fe953ef13136f52d308d",
-      "statement": "SELECT to_jsonb(m) AS value FROM public.memories m WHERE namespace_id=$1 AND id=ANY($2) FOR SHARE",
-      "classification": "namespace_bound",
-      "rationale": "The statement carries an explicit namespace column, predicate, or key.",
-      "coverage": [
-        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
-      ],
-      "namespace_evidence": "namespace_id=$1"
-    },
-    {
-      "id": "c92b18ebd86df6d97b13",
-      "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 224,
+      "line": 215,
       "tables": [
         "memories"
       ],
@@ -2905,14 +2947,16 @@
       "classification": "namespace_bound",
       "rationale": "The statement carries an explicit namespace column, predicate, or key.",
       "coverage": [
-        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+        "scripts/production-consolidation-operator.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "scripts/canary-fixture-e2e.mjs"
       ],
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "6951b6a0cc74dc0d20f6",
+      "id": "2668a0495495ab6732b3",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 247,
+      "line": 241,
       "tables": [
         "memories"
       ],
@@ -2921,14 +2965,16 @@
       "classification": "namespace_bound",
       "rationale": "The statement carries an explicit namespace column, predicate, or key.",
       "coverage": [
-        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+        "scripts/production-consolidation-operator.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "scripts/canary-fixture-e2e.mjs"
       ],
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "0fb19b749015840fd48a",
+      "id": "16ae0790f06df67f4eaa",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 259,
+      "line": 253,
       "tables": [
         "memories"
       ],
@@ -2937,14 +2983,16 @@
       "classification": "namespace_bound",
       "rationale": "The statement carries an explicit namespace column, predicate, or key.",
       "coverage": [
-        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+        "scripts/production-consolidation-operator.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "scripts/canary-fixture-e2e.mjs"
       ],
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "bc6340c9e508f18bec51",
+      "id": "78670598036406e088a7",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 263,
+      "line": 257,
       "tables": [
         "memories"
       ],
@@ -2953,7 +3001,9 @@
       "classification": "namespace_bound",
       "rationale": "The statement carries an explicit namespace column, predicate, or key.",
       "coverage": [
-        "docker/mnemo-server/patches/0010-group-memory-namespaces.patch"
+        "scripts/production-consolidation-operator.postgres.test.mjs",
+        "scripts/run-runtime-credentials-integration.sh",
+        "scripts/canary-fixture-e2e.mjs"
       ],
       "namespace_evidence": "namespace_id=$1"
     },

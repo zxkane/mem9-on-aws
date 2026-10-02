@@ -2,6 +2,7 @@ import {describe,it,expect} from 'vitest';
 import {encodeCanaryReport,decodeCanaryReport,verifyCanaryReport,canaryReportFragments,canaryReportDigest,readCanaryReportFragments} from './lib/production-canary-report.mjs';
 import {productionConsolidationOverrides} from './run-production-consolidation.mjs';
 import {canaryEvidenceHash} from './lib/production-canary-verification.mjs';
+import {gzipSync,gunzipSync} from 'node:zlib';
 
 function fixture(){
   const epoch=Date.now()-1000000;
@@ -17,7 +18,57 @@ function fixture(){
       matched:5,resultHash:proof.replayResultHash,beforeHash:proof.conservationHash,afterHash:proof.conservationHash,startedMs:epoch+200000+i*10000,finishedMs:epoch+201000+i*10000,image:proof.workerImage,imageDigest}))};
   return {proof,receipts,report};
 }
+function largeTimingFixture(){
+  const f=fixture();let seed=42;
+  const random=()=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed/4294967296;};
+  const cohort=origin=>{
+    let at=origin;const samples=[];
+    for(let i=0;i<300;i++){
+      const latencyMs=500+random()*800,startedMs=at,finishedMs=at+Math.round(latencyMs)+(i%3)-1;
+      samples.push({kind:i%2?'write_ack':'read',index:Math.floor(i/2),ok:true,startedMs,finishedMs,latencyMs});at=finishedMs;
+    }
+    return {...f.report.baseline,samplesPerKind:150,samples};
+  };
+  f.report.baseline=cohort(Date.now()-1000000);
+  f.report.loaded=cohort(f.report.baseline.samples.at(-1).finishedMs+1000);
+  const first=f.report.loaded.samples[0].startedMs,last=f.report.loaded.samples.at(-1).finishedMs;
+  const committedMs=[60,100,140,180,220].map(i=>f.report.loaded.samples[i].startedMs);
+  f.receipts={firstCommittedMs:committedMs[0],lastCommittedMs:committedMs.at(-1),committedMs};f.report.receipts=f.receipts;
+  f.report.activity[0]={...f.report.activity[0],startedMs:first-1000,stoppedMs:last+1000};
+  f.report.replays=f.report.replays.map((r,i)=>({...r,startedMs:last+2000+i*10000,finishedMs:last+3000+i*10000}));
+  return f;
+}
 describe('bound production canary report',()=>{
+  it('preserves complete full-precision N150 cohorts within unchanged report and fragment limits',()=>{
+    const f=largeTimingFixture();
+    for(const c of [f.report.baseline,f.report.loaded])expect(c.samples.at(-1).finishedMs-c.samples[0].startedMs).toBeLessThan(300000);
+    const encoded=encodeCanaryReport(f.report);
+    expect(encoded.length).toBeLessThanOrEqual(12000);
+    const fragments=canaryReportFragments(encoded);
+    expect(fragments).toHaveLength(4);expect(fragments.every(p=>p.length<=3500)).toBe(true);
+    const env=Object.fromEntries(fragments.map((p,i)=>['MEM9_CANARY_REPORT_'+i,p]));
+    const decoded=decodeCanaryReport(readCanaryReportFragments(env,canaryReportDigest(encoded)));
+    expect(decoded).toEqual(f.report);
+    expect(verifyCanaryReport(decoded,f.proof,f.receipts).replayCount).toBe(2);
+  });
+  it('rejects invalid compact timing markers, gaps, residuals and integer overflow',()=>{
+    const f=largeTimingFixture(),encoded=encodeCanaryReport(f.report);
+    const packed=JSON.parse(gunzipSync(Buffer.from(encoded,'base64')).toString('utf8'));
+    expect(packed.baseline.encoding).toBe('delta-wall-v1');
+    expect(packed.baseline.timing.some(([,residual])=>residual<0)).toBe(true);
+    expect(packed.baseline.timing.some(([,residual])=>residual>0)).toBe(true);
+    for(const mutate of [
+      p=>{p.baseline.encoding='unknown';},
+      p=>{p.baseline.timing[0][0]=1;},
+      p=>{p.baseline.timing[1][0]=-1;},
+      p=>{p.baseline.timing[1][1]=99;},
+      p=>{p.baseline.origin=Number.MAX_SAFE_INTEGER;},
+    ]){
+      const changed=structuredClone(packed);mutate(changed);
+      const body=gzipSync(Buffer.from(JSON.stringify(changed)),{level:9}).toString('base64');
+      expect(()=>decodeCanaryReport(body)).toThrow('ProductionCanaryReportInvalid');
+    }
+  });
   it('keeps realistic unrounded timing entropy outside the complete ECS request envelope',()=>{
     const f=fixture();let seed=73419;
     const random=()=>{seed=(Math.imul(seed,1664525)+1013904223)>>>0;return seed/4294967296;};

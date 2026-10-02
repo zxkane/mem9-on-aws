@@ -11,7 +11,7 @@ describe("container security rebuild contract", () => {
     .filter((step) => step.uses?.startsWith("docker/build-push-action@"));
 
   it("refreshes base images and runtime packages for every published image", () => {
-    expect(builds).toHaveLength(5);
+    expect(builds).toHaveLength(7);
     for (const build of builds) {
       expect(build.with.pull, build.name).toBe(true);
       expect(build.with["no-cache-filters"].split(/[\s,]+/), build.name).toContain("runtime");
