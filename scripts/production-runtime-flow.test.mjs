@@ -1,5 +1,6 @@
 import {describe,it,expect} from 'vitest';
 import {applyProductionCutover,finalizeProductionCutover,recoverProductionCutover} from './lib/production-runtime-flow.mjs';
+import {assertRolloutClaim} from './lib/production-runtime-config.mjs';
 
 function fixture(initial='prepared'){
   let state={phase:initial,status:'running',epoch:1,started_ms:initial==='prepared'?null:1000,deadline_ms:initial==='prepared'?null:7201000};
@@ -19,6 +20,65 @@ function fixture(initial='prepared'){
   return {actions,events,getState:()=>state};
 }
 describe('bounded production cutover sequencing',()=>{
+  it('hands committed retirement to finalization without another apply-window probe',async()=>{
+    const f=fixture('runtime_ready'),invoke=f.actions.invoke;let now=2700999;
+    const original={epoch:f.getState().epoch,started_ms:f.getState().started_ms,deadline_ms:f.getState().deadline_ms};
+    f.actions.invoke=async op=>{
+      if(op==='verify-fence'&&f.getState().phase==='retired')throw Error('InsufficientApplyWindow');
+      const state=await invoke(op);if(op==='retire')now=2701500;return state;
+    };
+    const retired=await applyProductionCutover(f.actions,{now:()=>now});
+    expect(retired).toMatchObject({phase:'retired',status:'running',...original});
+    expect(retired.proofs?.retired_credentials).not.toBe(true);
+    expect(f.events).toContain('retire');expect(f.events).not.toContain('verify-fence');expect(f.events).not.toContain('convergeActive');
+  });
+  it('requires the post-retirement credential proof before active convergence',async()=>{
+    const f=fixture('retired'),original={epoch:f.getState().epoch,started_ms:f.getState().started_ms,deadline_ms:f.getState().deadline_ms};
+    const invoke=f.actions.invoke;f.actions.invoke=async(op,state,extra,limits)=>{
+      if(op==='verify-fence')expect(limits).toEqual({deadline:original.deadline_ms});
+      return invoke(op,state,extra,limits);
+    };
+    const result=await finalizeProductionCutover(f.actions);
+    expect(f.events.indexOf('verify-fence')).toBeLessThan(f.events.indexOf('convergeActive'));
+    expect(f.events.indexOf('convergeActive')).toBeLessThan(f.events.indexOf('verifyRetirement'));
+    expect(f.events.indexOf('verifyRetirement')).toBeLessThan(f.events.indexOf('complete'));
+    expect(result).toMatchObject({phase:'complete',...original});
+  });
+  it('does not activate or complete when post-retirement authentication proof fails',async()=>{
+    for(const failure of ['LegacyCredentialStillWorks','AuthenticationProbeIndeterminate','RuntimeInvocationDeadline']){
+      const f=fixture('retired');f.actions.invoke=async op=>{f.events.push(op);throw Error(failure);};
+      await expect(finalizeProductionCutover(f.actions)).rejects.toThrow(failure);
+      expect(f.events).toEqual(['verify-fence']);expect(f.getState().phase).toBe('retired');
+    }
+  });
+  it('reuses an already-verified retired proof without another apply or finalization probe',async()=>{
+    const f=fixture('retired');f.getState().proofs={retired_credentials:true};
+    await applyProductionCutover(f.actions,{now:()=>2701500});expect(f.events).toEqual([]);
+    await finalizeProductionCutover(f.actions);expect(f.events).not.toContain('verify-fence');
+    expect(f.events).toContain('verifyRetirement');expect(f.getState().phase).toBe('complete');
+  });
+  it('hands an already-retired state to finalization without fabricating missing proof',async()=>{
+    const f=fixture('retired');const state=await applyProductionCutover(f.actions,{now:()=>2701500});
+    expect(state.phase).toBe('retired');expect(state.proofs?.retired_credentials).not.toBe(true);expect(f.events).toEqual([]);
+  });
+  it('preserves the real original-window admission guard when finalization requests its proof',async()=>{
+    const f=fixture('retired');f.getState().operation_nonce='a'.repeat(32);
+    f.actions.invoke=async(op,state,_extra,limits)=>{
+      expect(op).toBe('verify-fence');expect(limits.deadline).toBe(state.deadline_ms);
+      assertRolloutClaim(state,{nonce:state.operation_nonce,epoch:state.epoch},{now:state.deadline_ms});
+      throw Error('ExpiredWindowAdmitted');
+    };
+    await expect(finalizeProductionCutover(f.actions)).rejects.toThrow('RolloutAdmissionClosed');
+    expect(f.events).toEqual([]);expect(f.getState().deadline_ms).toBe(7201000);
+  });
+  it('keeps the original retirement mutation cutoff and explicit recovery requirement',async()=>{
+    const f=fixture('runtime_ready');
+    await expect(applyProductionCutover(f.actions,{now:()=>2701000})).rejects.toThrow('ProductionRecoveryRequired');
+    expect(f.events).toEqual([]);expect(f.getState().phase).toBe('runtime_ready');
+    const restored=fixture('retired');restored.getState().status='restored';
+    await expect(finalizeProductionCutover(restored.actions)).rejects.toThrow('ProductionRetirementRequired');
+    expect(restored.events).toEqual([]);
+  });
   it('restores and verifies runtime before retiring the actual legacy credential',async()=>{
     const f=fixture();expect((await applyProductionCutover(f.actions,{now:()=>1001})).phase).toBe('retired');
     expect(f.events.indexOf('runtime')).toBeLessThan(f.events.indexOf('fence'));

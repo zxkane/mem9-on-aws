@@ -291,6 +291,13 @@ describe("split GitHub OIDC deployment roles", () => {
     expect(classifyChangedPaths(['infra/production-runtime.ts'])).toEqual({workloadChanged:true,applicationInfrastructureChanged:true,awsMutationRequired:true});
     expect(classifyChangedPaths(['scripts/consolidation-scheduler-e2e.mjs'])).toMatchObject({workloadChanged:true,awsMutationRequired:true});
   });
+  it("builds a matching release and preview when the ordinary bootstrap runner changes", () => {
+    expect(classifyChangedPaths(["scripts/run-bootstrap-task.sh"])).toEqual({
+      workloadChanged: true,
+      applicationInfrastructureChanged: false,
+      awsMutationRequired: true,
+    });
+  });
   it("TC-DEPLOYROLE-005/006/007: classifies mutation paths", () => {
     expect(
       classifyChangedPaths([

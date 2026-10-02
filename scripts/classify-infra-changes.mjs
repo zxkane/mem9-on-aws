@@ -57,6 +57,7 @@ export function classifyChangedPaths(paths) {
       path === "infra/production-runtime.ts" ||
       path === "scripts/consolidation-scheduler-e2e.mjs" ||
       path === "scripts/run-production-runtime.mjs" ||
+      path === "scripts/run-bootstrap-task.sh" ||
       path.startsWith("scripts/lib/production-runtime-") ||
       [...WORKLOAD_COPY_INPUTS].some((input) => matchesCopyInput(path, input)),
   );

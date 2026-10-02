@@ -1588,6 +1588,11 @@ application objects transactionally, and restores MCP/OAuth access before
 committing the real owner's retirement. Production batching remains disabled
 throughout this migration.
 
+Credential-changing operations use the fixed 45-minute apply window. After
+retirement commits, finalization verifies rejection of both retired passwords
+before active convergence and completion, using the original maintenance
+deadline. A failed or under-budget verification cannot complete the migration.
+
 The `Infra CI` manual inputs `runtime_cutover=true` and `runtime_stage=pr-N`
 select the disposable rehearsal; `runtime_stage=prod` selects production only
 from a verified main deployment. Production requires the reviewed Aurora
@@ -1662,6 +1667,10 @@ to the verified release. Worker and operator images are pinned to ECR digests.
 The bootstrap image build imports both production operator entrypoints as its
 non-root user with networking disabled, so missing transitive dependencies fail
 before deployment.
+After runtime credential cutover, ordinary deployments launch the declared
+`runtime-verify` bootstrap operation with a fresh invocation nonce and a
+14-minute deadline, below the verifier's 15-minute ceiling. This invocation
+window is independent of the completed cutover window.
 Canary backend bindings require the post-cutover `Mem9RuntimeServer` task family;
 legacy task families fail admission.
 The controller checks the main revision, sets persistent scheduling admission,

@@ -37,6 +37,19 @@ function fixture({loseReply=false}={}){
 }
 
 describe('production invocation recovery',()=>{
+  it.each([-1,0,29999,30000])('rejects a final verification window with only %i ms before journaling or launch',async remaining=>{
+    const f=fixture();
+    await expect(invokeProductionTask(f.clients,meta,{operation:'verify-fence',nonce:'a'.repeat(32),epoch:4},
+      {now:f.now,sleep:f.sleep,deadlineMs:f.now()+remaining})).rejects.toThrow('InvalidProductionInvocation');
+    expect(f.journals.size).toBe(0);expect(f.tasks).toHaveLength(0);
+    expect(f.calls.some(c=>['PutParameterCommand','RunTaskCommand'].includes(c.name))).toBe(false);
+  });
+  it('preserves the supplied finalization deadline rather than creating a later window',async()=>{
+    const f=fixture({loseReply:true}),deadline=f.now()+60000;
+    await expect(invokeProductionTask(f.clients,meta,{operation:'verify-fence',nonce:'a'.repeat(32),epoch:4},
+      {now:f.now,sleep:f.sleep,deadlineMs:deadline})).rejects.toThrow('SyntheticLostReply');
+    expect(JSON.parse([...f.journals.values()][0]).request.deadline).toBe(deadline);
+  });
   it('cannot use a catalog-only target for a mutating operation',async()=>{
     const f=fixture();await expect(invokeProductionTask(f.clients,{...meta,mode:'catalog'},
       {operation:'prepare',nonce:'a'.repeat(32),epoch:1},{now:f.now,sleep:f.sleep})).rejects.toThrow('CatalogOnlyTarget');

@@ -9,6 +9,7 @@ import { tmpdir } from "node:os";
 import { delimiter, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { afterEach, describe, expect, it } from "vitest";
+import { runtimeRoleName } from "./lib/runtime-credentials.mjs";
 
 const script = resolve("scripts/run-bootstrap-task.sh");
 const temporaryPaths = [];
@@ -19,7 +20,21 @@ afterEach(() => {
   }
 });
 
-function runFixture() {
+function runFixture({
+  runtimeVerify = false,
+  stage = "pr-42",
+  metadataStage = stage,
+  marker = "1",
+  containerCount = 1,
+  duplicate = false,
+  exitCode = runtimeVerify ? 0 : 1,
+  readable = true,
+  malformed = false,
+  wrongArn = false,
+  inherited = false,
+  operation = "",
+  launchFailure = false,
+} = {}) {
   const directory = mkdtempSync(join(tmpdir(), "mem9-bootstrap-runner-"));
   temporaryPaths.push(directory);
   const bin = join(directory, "bin");
@@ -37,6 +52,7 @@ const option = (name) => {
   return index === -1 ? undefined : args[index + 1];
 };
 const command = args.slice(0, 2).join(" ");
+const fixture=JSON.parse(process.env.BOOTSTRAP_TEST_CONFIG);
 if (command === "ssm get-parameter") {
   const values = {
     "cluster-name": "mem9-pr-42-cluster",
@@ -46,20 +62,31 @@ if (command === "ssm get-parameter") {
   };
   process.stdout.write(values[option("--name").split("/").at(-1)] + "\\n");
 } else if (command === "ecs describe-task-definition") {
+  if(!fixture.readable){process.stderr.write("fixture metadata unavailable");process.exit(3);}
+  if(fixture.malformed){process.stdout.write("not-json");process.exit(0);}
   console.log(JSON.stringify({
     taskDefinition: {
-      containerDefinitions: [{
-        name: "Mem9Bootstrap",
+      taskDefinitionArn:fixture.wrongArn?"wrong-definition":"arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-bootstrap:7",
+      containerDefinitions: Array.from({length:fixture.containerCount},(_,index)=>({
+        name: index===0?"Mem9Bootstrap":"OtherContainer",
+        environment: fixture.runtimeVerify?[
+          {name:"MEM9_BOOTSTRAP_OPERATION",value:"runtime-verify"},
+          {name:"MEM9_STAGE",value:fixture.metadataStage},
+          {name:"MEM9_RUNTIME_BOOTSTRAP_VERSION",value:fixture.marker},
+          ...(fixture.inherited?[{name:"MEM9_RUNTIME_BOOTSTRAP_DEADLINE",value:"1"},{name:"MEM9_RUNTIME_INVOCATION",value:"stale"}]:[]),
+          ...(fixture.duplicate?[{name:"MEM9_BOOTSTRAP_OPERATION",value:"runtime-bootstrap"}]:[])
+        ]:(fixture.operation?[{name:"MEM9_BOOTSTRAP_OPERATION",value:fixture.operation}]:[]),
         logConfiguration: {
           options: {
             "awslogs-group": "/sst/cluster/mem9-pr-42/bootstrap/Mem9Bootstrap",
             "awslogs-stream-prefix": "/service"
           }
         }
-      }]
+      }))
     }
   }));
 } else if (command === "ecs run-task") {
+  if(fixture.launchFailure){console.log(JSON.stringify({failures:[{reason:"fixture capacity failure"}],tasks:[]}));process.exit(0);}
   console.log(JSON.stringify({
     failures: [],
     tasks: [{
@@ -69,7 +96,7 @@ if (command === "ssm get-parameter") {
 } else if (command === "ecs describe-tasks") {
   const query = option("--query");
   if (query.includes("lastStatus")) process.stdout.write("STOPPED\\n");
-  else if (query.includes("exitCode")) process.stdout.write("1\\n");
+  else if (query.includes("exitCode")) process.stdout.write(String(fixture.exitCode)+"\\n");
   else if (query.includes("stoppedReason")) {
     process.stdout.write("Essential container in task exited\\n");
   } else {
@@ -94,14 +121,29 @@ if (command === "ssm get-parameter") {
     mode: 0o755,
   });
 
+  const before = Date.now();
   const result = spawnSync("bash", [script], {
     encoding: "utf8",
     env: {
       ...process.env,
       AWS_CALLS: calls,
       AWS_REGION: "ap-northeast-1",
+      BOOTSTRAP_TEST_CONFIG: JSON.stringify({
+        runtimeVerify,
+        metadataStage,
+        marker,
+        containerCount,
+        duplicate,
+        exitCode,
+        readable,
+        malformed,
+        wrongArn,
+        inherited,
+        operation,
+        launchFailure,
+      }),
       PATH: `${bin}${delimiter}${process.env.PATH}`,
-      STAGE: "pr-42",
+      STAGE: stage,
     },
   });
   const callRecords = readFileSync(calls, "utf8")
@@ -109,10 +151,177 @@ if (command === "ssm get-parameter") {
     .split("\n")
     .filter(Boolean)
     .map((line) => JSON.parse(line));
-  return { callRecords, result };
+  return { callRecords, result, before, after: Date.now() };
 }
 
 describe("schema bootstrap ECS runner", () => {
+  it("gives each declared runtime verification a fresh bounded context and matching idempotency token", () => {
+    const nonces = [];
+    for (const stage of ["prod", "prod", "pr-42"]) {
+      const { callRecords, result, before, after } = runFixture({
+        runtimeVerify: true,
+        stage,
+        inherited: true,
+      });
+      expect(result.status).toBe(0);
+      const runs = callRecords.filter(
+        (a) => a[0] === "ecs" && a[1] === "run-task",
+      );
+      expect(runs).toHaveLength(1);
+      const args = runs[0],
+        get = (name) => args[args.indexOf(name) + 1];
+      expect(args).toContain("--overrides");
+      expect(args).toContain("--client-token");
+      const overrides = JSON.parse(get("--overrides"));
+      expect(Object.keys(overrides)).toEqual(["containerOverrides"]);
+      expect(overrides.containerOverrides).toHaveLength(1);
+      const container = overrides.containerOverrides[0];
+      expect(Object.keys(container).sort()).toEqual(["environment", "name"]);
+      expect(container.name).toBe("Mem9Bootstrap");
+      expect(container.environment).toHaveLength(2);
+      const env = Object.fromEntries(
+        container.environment.map((x) => [x.name, x.value]),
+      );
+      expect(Object.keys(env).sort()).toEqual([
+        "MEM9_RUNTIME_BOOTSTRAP_DEADLINE",
+        "MEM9_RUNTIME_INVOCATION",
+      ]);
+      expect(env.MEM9_RUNTIME_INVOCATION).toMatch(/^[a-f0-9]{32}$/);
+      expect(get("--client-token")).toBe(env.MEM9_RUNTIME_INVOCATION);
+      const deadline = Number(env.MEM9_RUNTIME_BOOTSTRAP_DEADLINE);
+      expect(deadline).toBeGreaterThanOrEqual(before + 840000);
+      expect(deadline).toBeLessThanOrEqual(after + 840000);
+      expect(deadline).toBeLessThan(before + 900000);
+      expect(result.stdout).toContain("runtime verification passed");
+      expect(
+        callRecords.some((a) => a[0] === "ssm" && a[1] !== "get-parameter"),
+      ).toBe(false);
+      nonces.push(env.MEM9_RUNTIME_INVOCATION);
+    }
+    expect(new Set(nonces).size).toBe(3);
+  });
+
+  it("rejects inconsistent runtime-verification metadata before launching any task", () => {
+    for (const options of [
+      { metadataStage: "pr-7" },
+      { marker: "0" },
+      { containerCount: 2 },
+      { duplicate: true },
+      { stage: "arbitrary" },
+      { readable: false },
+      { malformed: true },
+      { wrongArn: true },
+    ]) {
+      const { callRecords, result } = runFixture({
+        runtimeVerify: true,
+        stage: "prod",
+        ...options,
+      });
+      expect(result.status).not.toBe(0);
+      expect(
+        callRecords.some((a) => a[0] === "ecs" && a[1] === "run-task"),
+      ).toBe(false);
+    }
+  });
+
+  it("leaves the legacy bootstrap launch context unchanged", () => {
+    for (const operation of [
+      "",
+      "namespace-status",
+      "runtime-bootstrap",
+      "runtime-admin-probe",
+    ]) {
+      const { callRecords } = runFixture({ operation });
+      const args = callRecords.find(
+        (a) => a[0] === "ecs" && a[1] === "run-task",
+      );
+      expect(args).not.toContain("--overrides");
+      expect(args).not.toContain("--client-token");
+    }
+  });
+
+  it("does not launch a second task when ECS rejects the verification launch", () => {
+    const { callRecords, result } = runFixture({
+      runtimeVerify: true,
+      stage: "prod",
+      launchFailure: true,
+    });
+    expect(result.status).toBe(1);
+    expect(
+      callRecords.filter((a) => a[0] === "ecs" && a[1] === "run-task"),
+    ).toHaveLength(1);
+    expect(
+      callRecords.some((a) => a[0] === "ecs" && a[1] === "describe-tasks"),
+    ).toBe(false);
+  });
+
+  it("satisfies the real verifier configuration guard while preserving invalid deadline rejection", () => {
+    const directory = mkdtempSync(join(tmpdir(), "mem9-runtime-deadline-"));
+    temporaryPaths.push(directory);
+    const blocker = join(directory, "block-network.cjs");
+    writeFileSync(
+      blocker,
+      `require(${JSON.stringify(resolve("node_modules/pg"))}).Client.prototype.connect=async function(){throw new Error("TestNetworkDisabled");};`,
+      { mode: 0o600 },
+    );
+    const { callRecords } = runFixture({ runtimeVerify: true, stage: "prod" });
+    const call = callRecords.find((a) => a[0] === "ecs" && a[1] === "run-task");
+    const override = JSON.parse(call[call.indexOf("--overrides") + 1]);
+    const context = Object.fromEntries(
+      override.containerOverrides[0].environment.map((x) => [x.name, x.value]),
+    );
+    const env = {
+      ...process.env,
+      MEM9_STAGE: "prod",
+      MEM9_BOOTSTRAP_OPERATION: "runtime-verify",
+      MEM9_DB_HOST: "127.0.0.1",
+      MEM9_DB_PORT: "1",
+      MEM9_DB_NAME: "fixture",
+      MEM9_TENANT_ID: "f".repeat(32),
+      MEM9_DB_SECRET: JSON.stringify({
+        username: "unused",
+        password: "unused",
+      }),
+      MEM9_RUNTIME_DB_SECRET: JSON.stringify({
+        username: runtimeRoleName("prod"),
+        password: "a".repeat(32),
+        salt: "b".repeat(16),
+      }),
+    };
+    delete env.MEM9_RUNTIME_BOOTSTRAP_DEADLINE;
+    const invoke = (values) => {
+      const r = spawnSync(
+        process.execPath,
+        ["--require", blocker, resolve("scripts/runtime-bootstrap.mjs")],
+        { encoding: "utf8", env: { ...env, ...values }, timeout: 5000 },
+      );
+      expect(r.error).toBeUndefined();
+      expect(r.status).toBe(1);
+      expect(r.stdout, r.stderr).not.toBe("");
+      return JSON.parse(r.stdout.trim());
+    };
+    expect(invoke(context)).toMatchObject({
+      event: "runtime_bootstrap_failed",
+      phase: "connection",
+      errorClass: "TestNetworkDisabled",
+    });
+    for (const value of [
+      undefined,
+      String(Date.now() - 1000),
+      String(Date.now() + 3600000),
+    ]) {
+      expect(
+        invoke(
+          value === undefined ? {} : { MEM9_RUNTIME_BOOTSTRAP_DEADLINE: value },
+        ),
+      ).toMatchObject({
+        event: "runtime_bootstrap_failed",
+        phase: "configuration",
+        errorClass: "RuntimeBootstrapExpired",
+      });
+    }
+  });
+
   it("prints the failed task's exact awslogs stream with existing deploy-role permissions", () => {
     const { callRecords, result } = runFixture();
     const output = result.stdout + result.stderr;
@@ -139,9 +348,11 @@ describe("schema bootstrap ECS runner", () => {
       callRecords.some(
         ([service, operation]) =>
           service === "logs" &&
-          ["describe-log-groups", "describe-log-streams", "get-log-events"].includes(
-            operation,
-          ),
+          [
+            "describe-log-groups",
+            "describe-log-streams",
+            "get-log-events",
+          ].includes(operation),
       ),
     ).toBe(false);
   });

@@ -16,6 +16,14 @@ async function classify({branch='main',event='workflow_dispatch',jobs,path='.git
   return outputs;
 }
 describe('independent cutover cancellation recovery',()=>{
+  it('rehearses the ordinary production bootstrap launcher after preview cutover completion',()=>{
+    const steps=cutover.runs.steps;
+    const at=steps.findIndex(s=>s.name==='Verify ordinary deployment bootstrap invocation');
+    expect(at).toBeGreaterThan(steps.findIndex(s=>s.name==='Converge infrastructure and verify retirement'));
+    expect(at).toBeLessThan(steps.findIndex(s=>s.name==='Verify preview extension upgrade and administrator backup recovery'));
+    expect(steps[at]).toMatchObject({if:"inputs.cleanup-preview == 'true' && inputs.phase != 'prepare'",shell:'bash',run:'bash scripts/run-bootstrap-task.sh'});
+    expect(steps[at]['continue-on-error']).not.toBe(true);
+  });
   it('keeps preview rehearsal scheduling aligned with normal preview instead of the production opt-in',async()=>{
     const preview=ci.jobs['runtime-cutover-preview'];
     expect(preview.env.MEM9_CONSOLIDATION_SCHEDULE_ENABLED).toBe('0');

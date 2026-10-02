@@ -40,10 +40,42 @@ fi
 # starting the task. The deploy role already has DescribeTaskDefinition and
 # FilterLogEvents; using these values avoids broad log-group discovery and does
 # not require DescribeLogStreams/GetLogEvents.
-TASK_DEF_JSON=$(aws ecs describe-task-definition \
+if ! TASK_DEF_JSON=$(aws ecs describe-task-definition \
   --task-definition "$TASK_DEF" \
   --region "$REGION" \
-  --output json 2>/dev/null || true)
+  --output json 2>/dev/null); then
+  echo "::error::could not read the deployed bootstrap task definition"
+  exit 1
+fi
+if ! printf '%s' "$TASK_DEF_JSON" | jq -e --arg arn "$TASK_DEF" '
+  .taskDefinition as $task |
+  $task.containerDefinitions as $containers |
+  ($containers[0].environment // []) as $environment |
+  $task.taskDefinitionArn == $arn and
+  ($containers | type) == "array" and ($containers | length) == 1 and
+  $containers[0].name == "Mem9Bootstrap" and
+  ($environment | type) == "array" and
+  all($environment[]; (.name | type) == "string" and (.value | type) == "string") and
+  ($environment | length) == ($environment | map(.name) | unique | length)
+' >/dev/null 2>&1; then
+  echo "::error::invalid or ambiguous bootstrap task definition"
+  exit 1
+fi
+RUNTIME_VERIFY=$(printf '%s' "$TASK_DEF_JSON" | jq -r '
+  any(.taskDefinition.containerDefinitions[0].environment[]?;
+    .name == "MEM9_BOOTSTRAP_OPERATION" and .value == "runtime-verify")
+')
+if [[ "$RUNTIME_VERIFY" == true ]]; then
+  if ! [[ "$STAGE" == prod || "$STAGE" =~ ^pr-[1-9][0-9]*$ ]] ||
+    ! printf '%s' "$TASK_DEF_JSON" | jq -e --arg stage "$STAGE" '
+      .taskDefinition.containerDefinitions[0].environment |
+      ([.[] | select(.name == "MEM9_STAGE") | .value] == [$stage]) and
+      ([.[] | select(.name == "MEM9_RUNTIME_BOOTSTRAP_VERSION") | .value] == ["1"])
+    ' >/dev/null 2>&1; then
+    echo "::error::runtime verification requires matching stage and runtime marker"
+    exit 1
+  fi
+fi
 LOG_CONTAINER_NAME=$(printf '%s' "$TASK_DEF_JSON" | jq -r \
   '.taskDefinition.containerDefinitions[0].name // empty' 2>/dev/null || true)
 LOG_GROUP=$(printf '%s' "$TASK_DEF_JSON" | jq -r \
@@ -64,6 +96,24 @@ SUBNETS_JSON=$(printf '%s' "$SUBNETS_CSV" | jq -Rc 'split(",")')
 NET_CONFIG="{\"awsvpcConfiguration\":{\"subnets\":${SUBNETS_JSON},\"securityGroups\":[\"${TASK_SG}\"],\"assignPublicIp\":\"DISABLED\"}}"
 
 echo "run-bootstrap: run-task on cluster ${CLUSTER} (task-def ${TASK_DEF##*/})"
+# Verification uses a fresh invocation window, independent of any completed
+# credential cutover. Keep one minute of headroom below the container's 15-minute
+# ceiling. The nonce correlates retries; it does not grant authorization.
+RUN_CONTEXT=()
+if [[ "$RUNTIME_VERIFY" == true ]]; then
+  read -r INVOCATION VERIFY_DEADLINE < <(node --input-type=module -e '
+    import {randomUUID} from "node:crypto";
+    console.log(randomUUID().replaceAll("-", ""), Date.now() + 840000);
+  ')
+  [[ "$INVOCATION" =~ ^[a-f0-9]{32}$ && "$VERIFY_DEADLINE" =~ ^[0-9]+$ ]] || exit 1
+  VERIFY_OVERRIDES=$(jq -cn --arg nonce "$INVOCATION" --arg deadline "$VERIFY_DEADLINE" '
+    {containerOverrides:[{name:"Mem9Bootstrap",environment:[
+      {name:"MEM9_RUNTIME_INVOCATION",value:$nonce},
+      {name:"MEM9_RUNTIME_BOOTSTRAP_DEADLINE",value:$deadline}
+    ]}]}
+  ')
+  RUN_CONTEXT=(--client-token "$INVOCATION" --overrides "$VERIFY_OVERRIDES")
+fi
 # Capture the FULL run-task response ONCE (tasks[] + failures[]) so a failure path
 # never re-invokes run-task (which would start a second task). Parse the task ARN
 # from the captured JSON.
@@ -75,6 +125,7 @@ RUN_OUT=$(aws ecs run-task \
   --propagate-tags TASK_DEFINITION \
   --enable-ecs-managed-tags \
   --network-configuration "$NET_CONFIG" \
+  "${RUN_CONTEXT[@]}" \
   --region "$REGION" \
   --output json)
 TASK_ARN=$(printf '%s' "$RUN_OUT" | jq -r '.tasks[0].taskArn // ""')
@@ -152,4 +203,8 @@ if [[ "$EXIT_CODE" != "0" ]]; then
   echo "::error::bootstrap task did not exit 0 (exitCode=${EXIT_CODE}, reason='${STOP_REASON}')."
   exit 1
 fi
-echo "run-bootstrap: OK — schema + tenant bootstrap applied for stage ${STAGE}"
+if [[ "$RUNTIME_VERIFY" == true ]]; then
+  echo "run-bootstrap: OK — runtime verification passed for stage ${STAGE}"
+else
+  echo "run-bootstrap: OK — schema + tenant bootstrap applied for stage ${STAGE}"
+fi
