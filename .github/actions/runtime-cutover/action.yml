@@ -58,6 +58,10 @@ runs:
       if: inputs.phase != 'prepare'
       shell: bash
       run: node scripts/run-production-runtime.mjs finalize
+    - name: Verify ordinary deployment bootstrap invocation
+      if: inputs.cleanup-preview == 'true' && inputs.phase != 'prepare'
+      shell: bash
+      run: bash scripts/run-bootstrap-task.sh
     - name: Refresh preview rehearsal credentials
       if: inputs.cleanup-preview == 'true' && inputs.phase != 'prepare'
       uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
