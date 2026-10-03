@@ -5,11 +5,13 @@ import {tmpdir} from 'node:os';
 import {join} from 'node:path';
 import {pathToFileURL} from 'node:url';
 import {randomUUID,createHash} from 'node:crypto';
-import {SSMClient,GetParametersCommand,PutParameterCommand} from '@aws-sdk/client-ssm';
+import {SSMClient,GetParametersCommand,GetParametersByPathCommand,PutParameterCommand} from '@aws-sdk/client-ssm';
 import {STSClient,GetCallerIdentityCommand} from '@aws-sdk/client-sts';
 import {ECSClient,DescribeTaskDefinitionCommand,DescribeServicesCommand,ListTasksCommand,DescribeTasksCommand} from '@aws-sdk/client-ecs';
+import {SchedulerClient,ListSchedulesCommand} from '@aws-sdk/client-scheduler';
 import {resolveApplicationRegion} from './lib/application-region.mjs';
-import {previewGeneration,previewConfiguration} from './lib/consolidation-preview-config.mjs';
+import {previewGeneration,previewConfiguration,previewAcceptanceContext} from './lib/consolidation-preview-config.mjs';
+import {validateManifest,discoverSchedulerTasks} from './consolidation-scheduler-e2e.mjs';
 import {captureDataReleaseBuild,verifyDataReleaseArtifact} from './lib/production-data-evidence.mjs';
 import {inspectDataRelease} from './lib/production-data-release.mjs';
 import {verifyCanaryFixtureImageIndex} from './lib/production-canary-material.mjs';
@@ -22,6 +24,42 @@ const send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeou
 const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
 const command=async(file,args,options={})=>(await execute(file,args,{encoding:'utf8',timeout:30000,maxBuffer:32*1024*1024,...options})).stdout;
 const gh=async path=>JSON.parse(await command('gh',['api',`repos/${repository}/`+path]));
+const stages=new Set(['quiet','configure','deploy','reconcile','bootstrap','scheduler','runtime-after','mcp','oauth']);
+export async function retainedPreviewStep(step,work,report=value=>process.stdout.write(JSON.stringify(value)+'\n')){
+  if(!stages.has(step))fail();
+  report({event:'retained_preview_step',step,phase:'started'});
+  try{const result=await work();report({event:'retained_preview_step',step,phase:'complete'});return result;}
+  catch{report({event:'retained_preview_step',step,phase:'failed'});throw Object.assign(Error('RetainedPreviewUnverified'),{step});}
+}
+
+export function postRuntimePreviewEnvironment(env,marker){
+  if(!/^pr-[1-9][0-9]*$/.test(env.STAGE??'')||marker?.stage!==env.STAGE||marker.phase!=='complete'||marker.status!=='running'||!/^[a-f0-9]{32}$/.test(marker.nonce??''))fail();
+  return {...env,MEM9_PRODUCTION_RUNTIME_MODE:'active',MEM9_PREVIEW_ACCEPTANCE_CONTEXT:'post-runtime',MEM9_PREVIEW_RUNTIME_NONCE:marker.nonce};
+}
+
+export async function assertRetainedPreviewQuiet({ssm,ecs,scheduler},{stage,region,account,clusterArn}){
+  const prefix='/mem9-on-aws/'+stage+'/',name=prefix+'consolidation-preview/manifest';
+  const response=await send(ssm,new GetParametersCommand({Names:[name],WithDecryption:false}));
+  if(response.InvalidParameters?.length||response.Parameters?.length!==1||response.Parameters[0].Name!==name)fail();
+  let value;try{value=JSON.parse(response.Parameters[0].Value);}catch{fail();}
+  const manifest=validateManifest(value,stage,value.generation,region);
+  if(manifest.account!==account||manifest.clusterArn!==clusterArn)fail();
+  for(const suffix of ['operators/','schedules/']){
+    const records=await send(ssm,new GetParametersByPathCommand({Path:prefix+'consolidation-preview/'+suffix,Recursive:true,WithDecryption:false,MaxResults:10}));
+    if(records.NextToken||!Array.isArray(records.Parameters)||records.Parameters.length)throw Error('RetainedPreviewNotQuiet');
+  }
+  const schedules=await send(scheduler,new ListSchedulesCommand({GroupName:manifest.groupName,MaxResults:100}));
+  const expected=manifest.workers.map(w=>w.scheduleName).sort();
+  if(schedules.NextToken||schedules.Schedules?.length!==2||JSON.stringify(schedules.Schedules.map(s=>s.Name).sort())!==JSON.stringify(expected)||
+    schedules.Schedules.some(s=>s.State!=='DISABLED'||s.GroupName!==manifest.groupName||
+      s.Arn!==`arn:aws:scheduler:${region}:${account}:schedule/${manifest.groupName}/${s.Name}`))throw Error('RetainedPreviewNotQuiet');
+  const families=new Set(manifest.workers.map(worker=>worker.taskDefinitionArn.replace(/:[0-9]+$/,'')));
+  const tasks=await discoverSchedulerTasks(ecs,clusterArn,task=>{
+    if(typeof task.taskDefinitionArn!=='string')throw Error('RetainedPreviewNotQuiet');
+    return families.has(task.taskDefinitionArn.replace(/:[0-9]+$/,''));
+  });
+  if(tasks.some(task=>task.lastStatus!=='STOPPED'))throw Error('RetainedPreviewNotQuiet');
+}
 
 export function retainedPreviewBuildDigests(log){
   const images={},tags=new Set();
@@ -60,7 +98,7 @@ export async function runRetainedDataPreview(env=process.env){
     const origin=(await command('git',['remote','get-url','origin'])).trim();if(!['https://github.com/'+repository,'https://github.com/'+repository+'.git'].includes(origin))fail();
     await command('git',['fetch','--no-tags','origin',commit.sha],{timeout:120000});
   }
-  const ssm=new SSMClient({region,maxAttempts:1}),sts=new STSClient({region}),ecs=new ECSClient({region});
+  const ssm=new SSMClient({region,maxAttempts:1}),sts=new STSClient({region}),ecs=new ECSClient({region}),scheduler=new SchedulerClient({region});
   const directory=await mkdtemp(join(tmpdir(),'mem9-retained-preview-'));
   try{
     const account=(await send(sts,new GetCallerIdentityCommand({}))).Account;if(!/^[0-9]{12}$/.test(account??''))fail();
@@ -69,6 +107,9 @@ export async function runRetainedDataPreview(env=process.env){
     if(marker.stage!==stage||marker.phase!=='complete'||marker.status!=='running')fail();
     const cluster=(await parameter(prefix+'ecs/cluster-name')).Value,clusterArn=`arn:aws:ecs:${region}:${account}:cluster/${cluster}`;
     if(!cluster.startsWith('mem9-on-aws-'+stage+'-'))fail();
+    const postEnv=postRuntimePreviewEnvironment(env,marker),context=previewAcceptanceContext(stage,postEnv);
+    const quiet=()=>assertRetainedPreviewQuiet({ssm,ecs,scheduler},{stage,region,account,clusterArn});
+    await retainedPreviewStep('quiet',quiet);
     const ecr=async(args)=>JSON.parse(await command('aws',['ecr',...args,'--region',region,'--registry-id',account,'--output','json']));
     const images={};
     for(const component of ['llm-proxy','mnemo-server','qwen3-embed']){
@@ -79,10 +120,10 @@ export async function runRetainedDataPreview(env=process.env){
       const arm64Digest=children[0].digest,child=await ecr(['batch-get-image','--repository-name',repositoryName,'--image-ids','imageDigest='+arm64Digest]);
       verifyDataReleaseArtifact(root,child,{account,repositoryName,rootDigest,arm64Digest});images[component]={rootDigest,arm64Digest};
     }
-    const generation=previewGeneration(stage,env),createdMs=Date.now();
+    const generation=previewGeneration(stage,postEnv),createdMs=Date.now();
     const synthetic=hash({kind:'synthetic-retained-preview',stage,marker,priorRun,controlRevision:revision,tree,images});
     const data={version:1,stage,account,region,controlSourceTree:tree,dataRevision:commit.sha,dataSourceTree:commit.commit.tree.sha,dataSourceTag:built.tag,images,
-      parentProofHash:synthetic,backendBindingHash:synthetic,runtimeNonce:marker.nonce,generation,targetsHash:hash(previewConfiguration(stage,generation,'shape-only').namespaces.sort()),
+      parentProofHash:synthetic,backendBindingHash:synthetic,runtimeNonce:marker.nonce,generation,targetsHash:hash(previewConfiguration(stage,generation,'shape-only',context).namespaces.sort()),
       schemaDigest:marker.schemaDigest,operatorDigest:marker.operatorDigest,buildInputsHash:'0'.repeat(64),securityEvidenceHash:synthetic,policyHash:synthetic,
       authorizationId:randomUUID().replaceAll('-',''),issuedMs:createdMs,expiresMs:createdMs+5400000};
     // The synthetic bindings apply only to this disposable stage. They are
@@ -91,18 +132,20 @@ export async function runRetainedDataPreview(env=process.env){
     data.buildInputsHash=evidence.buildInputsHash;const selected=inspectDataRelease(data,{stage,account,region,controlSourceTree:tree});
     const name=prefix+'consolidation-runtime/data-release',value=JSON.stringify(data);
     const absent=await send(ssm,new GetParametersCommand({Names:[name],WithDecryption:true}));if(absent.Parameters?.length||absent.InvalidParameters?.join()!==name)fail();
+    await retainedPreviewStep('quiet',quiet);
     let response;try{response=await send(ssm,new PutParameterCommand({Name:name,Type:'SecureString',Value:value,Overwrite:false}));}catch{}
     const recorded=await parameter(name);if(recorded.Type!=='SecureString'||recorded.Value!==value||recorded.Version!==1||response&&response.Version!==1)fail();
     const envFile=join(directory,'runtime.env');
-    await command(process.execPath,['scripts/run-production-runtime.mjs','configure'],{env:{...env,GITHUB_ENV:envFile},timeout:1200000});
+    await retainedPreviewStep('configure',()=>command(process.execPath,['scripts/run-production-runtime.mjs','configure'],{env:{...postEnv,GITHUB_ENV:envFile},timeout:1200000}));
     const runtimeEnv={};for(const line of (await readFile(envFile,'utf8')).split('\n').filter(Boolean)){
       const equal=line.indexOf('='),key=line.slice(0,equal);if(!['MEM9_PRODUCTION_RUNTIME_MODE','MEM9_RUNTIME_FALLBACK_IMAGES','MEM9_RETAINED_DATA_RELEASE','MEM9_RETAINED_DATA_RELEASE_HASH'].includes(key)||key in runtimeEnv)fail();runtimeEnv[key]=line.slice(equal+1);
     }
     if(runtimeEnv.MEM9_PRODUCTION_RUNTIME_MODE!=='active'||runtimeEnv.MEM9_RETAINED_DATA_RELEASE_HASH!==selected.hash)fail();
-    const deploymentEnv=await cutoverDeploymentEnvironment({ssm},stage,{...env,...runtimeEnv});
-    await command('pnpm',['-C','infra','exec','sst','deploy','--stage',stage,'--print-logs'],{env:deploymentEnv,timeout:1800000});
-    await command(process.execPath,['scripts/reconcile-ecs-deployment.mjs','--stage',stage],{env:deploymentEnv,timeout:1800000});
-    const bootstrapLog=await command('bash',['scripts/run-bootstrap-task.sh'],{env:deploymentEnv,timeout:1200000});
+    const deploymentEnv=await cutoverDeploymentEnvironment({ssm},stage,{...postEnv,...runtimeEnv});
+    await retainedPreviewStep('quiet',quiet);
+    await retainedPreviewStep('deploy',()=>command('pnpm',['-C','infra','exec','sst','deploy','--stage',stage,'--print-logs'],{env:deploymentEnv,timeout:1800000}));
+    await retainedPreviewStep('reconcile',()=>command(process.execPath,['scripts/reconcile-ecs-deployment.mjs','--stage',stage],{env:deploymentEnv,timeout:1800000}));
+    const bootstrapLog=await retainedPreviewStep('bootstrap',()=>command('bash',['scripts/run-bootstrap-task.sh'],{env:deploymentEnv,timeout:1200000}));
     const started=[...bootstrapLog.matchAll(/run-bootstrap: started ([a-f0-9]{32}), waiting/g)];if(started.length!==1)fail();
     const bootArn=(await parameter(prefix+'bootstrap/task-def-arn')).Value,bootDef=(await send(ecs,new DescribeTaskDefinitionCommand({taskDefinition:bootArn}))).taskDefinition;
     const boot=bootDef?.containerDefinitions?.[0],controlImage=`${account}.dkr.ecr.${region}.amazonaws.com/mem9-on-aws/preview/bootstrap:${env.MEM9_IMAGE_TAG}`;
@@ -113,7 +156,7 @@ export async function runRetainedDataPreview(env=process.env){
     if(bootTask?.taskDefinitionArn!==bootArn||bootTask.lastStatus!=='STOPPED'||bootTask.containers?.[0]?.exitCode!==0||
       ![bootstrap.rootDigest,bootstrap.arm64Digest].includes(bootTask.containers[0].imageDigest))fail();
     const workerStart=Date.now();
-    await command(process.execPath,['scripts/consolidation-scheduler-e2e.mjs'],{env:deploymentEnv,timeout:1800000});
+    await retainedPreviewStep('scheduler',()=>command(process.execPath,['scripts/consolidation-scheduler-e2e.mjs'],{env:deploymentEnv,timeout:1800000}));
     const workerManifest=JSON.parse((await parameter(prefix+'consolidation-preview/manifest')).Value);
     if(workerManifest.generation!==generation||workerManifest.workers?.length!==2||new Set(workerManifest.workers.map(w=>w.kind)).size!==2)fail();
     const workerEvidence={};
@@ -130,8 +173,9 @@ export async function runRetainedDataPreview(env=process.env){
         task.containers[0].image!==selected.images['llm-proxy']||![images['llm-proxy'].rootDigest,images['llm-proxy'].arm64Digest].includes(task.containers[0].imageDigest))fail();
       workerEvidence[worker.kind]=hash(matching.map(t=>({taskArn:t.taskArn,definition:t.taskDefinitionArn,image:t.containers[0].imageDigest})).sort((a,b)=>a.taskArn.localeCompare(b.taskArn)));
     }
-    await command('bash',['scripts/run-mcp-e2e.sh'],{env:deploymentEnv,timeout:600000});
-    await command('bash',['scripts/run-oauth-facade-smoke.sh'],{env:deploymentEnv,timeout:600000});
+    await retainedPreviewStep('runtime-after',()=>command('bash',['scripts/run-bootstrap-task.sh'],{env:deploymentEnv,timeout:1200000}));
+    await retainedPreviewStep('mcp',()=>command('bash',['scripts/run-mcp-e2e.sh'],{env:deploymentEnv,timeout:600000}));
+    await retainedPreviewStep('oauth',()=>command('bash',['scripts/run-oauth-facade-smoke.sh'],{env:deploymentEnv,timeout:600000}));
     const selection=JSON.parse((await parameter(prefix+'ecs/image-selection')).Value);
     if(selection.mode!=='retained'||selection.dataReleaseHash!==selected.hash||selection.controlTag!==env.MEM9_IMAGE_TAG||selection.dataTag!==built.tag)fail();
     const service=(await send(ecs,new DescribeServicesCommand({cluster:clusterArn,services:['Mem9Server']}))).services?.[0];
@@ -148,9 +192,9 @@ export async function runRetainedDataPreview(env=process.env){
       dataReleaseHash:selected.hash,buildInputsHash:evidence.buildInputsHash,images,bootstrap:{rootDigest:bootstrap.rootDigest,arm64Digest:bootstrap.arm64Digest},
       workers:workerEvidence,checks:{selectedData:true,currentControl:true,runtimeBootstrap:true,scheduler:true,workerData:true,mcp:true,oauth:true},completedMs:Date.now()};
     return result;
-  }finally{ssm.destroy();sts.destroy();ecs.destroy();await rm(directory,{recursive:true,force:true});}
+  }finally{ssm.destroy();sts.destroy();ecs.destroy();scheduler.destroy();await rm(directory,{recursive:true,force:true});}
 }
 
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)runRetainedDataPreview().then(evidence=>{
   process.stdout.write(JSON.stringify({event:'retained_data_preview',phase:'complete',evidence})+'\n');
-}).catch(()=>{process.stdout.write(JSON.stringify({event:'retained_data_preview',phase:'failed',errorClass:'RetainedPreviewUnverified'})+'\n');process.exitCode=1;});
+}).catch(error=>{process.stdout.write(JSON.stringify({event:'retained_data_preview',phase:'failed',errorClass:'RetainedPreviewUnverified',step:stages.has(error?.step)?error.step:'verification'})+'\n');process.exitCode=1;});

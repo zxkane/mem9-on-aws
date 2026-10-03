@@ -1890,3 +1890,34 @@ successful slice, while classifications and changed rows may be zero. This
 proves the dispatcher and slice ran even when the queue is empty. A failure in
 only final operator-fence cleanup after verified recurring execution is reported
 as running with cleanup pending, preserving the already verified worker state.
+
+### Post-runtime retained preview acceptance
+
+An active ordinary bootstrap remains a runtime verifier without synthetic
+fixture credentials. Post-runtime Scheduler acceptance uses a separate task
+only for a numeric preview in exact `active` mode with an explicit acceptance
+context bound to the completed runtime nonce. The deploy-authored route binds
+the current control image, task definition, roles, private network and exact
+credential references. Both the route and live definition are rechecked before
+launch; the task independently verifies the completed SQL ledger and the
+replacement administrator's session OID before fixture DDL.
+
+The context derives a fresh generation, database, four role names, tenant ID
+and tenant name. It never adopts the retired administrator's fixture or resets
+an old proof. The database's actual owner and context marker must match. Database
+creation runs in autocommit under a bounded fixture lock, outside the ordinary
+runtime bootstrap lock. Only the later new-binding/new-tenant transaction takes
+the existing runtime lock; pre-existing tenant and binding rows remain unchanged.
+
+The dedicated execution identity receives exactly the replacement administrator,
+fixture configuration and four fixture credentials, with scoped KMS access. It
+receives no original-owner, administrator-backup, transition or ordinary runtime
+credential. The ordinary bootstrap policy and production resource graph are
+unchanged. Historical task recovery uses the journal's original route identity;
+unknown work holds new admission. Partially created databases without a valid
+marker are not adopted or removed by a name-prefix sweep. Verified removal of
+the owned disposable preview cluster removes that residue.
+
+Acceptance still requires real Scheduler delivery, 150 changed synthetic rows,
+zero-change replay, pause, MCP/OAuth and complete disposal on the final source.
+This context does not alter production canary clocks, proofs or allowances.

@@ -78,6 +78,8 @@ export async function productionCoordinatorDigest(){
     '.github/workflows/runtime-recovery.yml','.github/actions/runtime-cutover/action.yml','.github/actions/runtime-recovery/action.yml',
     '.github/actions/runtime-cleanup/action.yml','package-lock.json','infra/pnpm-lock.yaml'];
   paths.push('infra/production-consolidation.ts','infra/consolidation-runtime.ts','scripts/production-consolidation-operator.mjs',
+    'infra/post-runtime-preview.ts','scripts/consolidation-preview-fixture.mjs','scripts/lib/consolidation-preview-config.mjs',
+    'scripts/lib/post-runtime-preview-authority.mjs','scripts/lib/post-runtime-preview-route.mjs','scripts/lib/post-runtime-preview-aws.mjs','scripts/consolidation-scheduler-e2e.mjs',
     'scripts/run-production-consolidation.mjs','scripts/run-production-canary.mjs','scripts/consolidation-worker.mjs','scripts/consolidation-canary-replay.mjs',
     'scripts/lib/production-canary-verification.mjs','scripts/lib/production-canary-report.mjs','scripts/lib/production-canary-performance.mjs',
     'scripts/lib/production-canary-continuation.mjs','scripts/lib/production-canary-snapshot.mjs',
@@ -251,6 +253,7 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
     await execute('pnpm',['-C','infra','exec','sst','remove','--stage',stage,'--print-logs'],{cwd:process.cwd(),
       env:{...env,MEM9_NAMESPACE_REQUIRED:'1',MEM9_CONSOLIDATION_SCHEDULE_ENABLED:'0',SST_SECRET_MaintenanceNamespaceIds:'[]',
         MEM9_PRODUCTION_RUNTIME_MODE:mode,MEM9_RETAINED_DATA_RELEASE:'none',MEM9_RETAINED_DATA_RELEASE_HASH:'none',
+        MEM9_PREVIEW_ACCEPTANCE_CONTEXT:undefined,MEM9_PREVIEW_RUNTIME_NONCE:undefined,
         ...(plan?{MEM9_RUNTIME_FALLBACK_IMAGES:JSON.stringify(plan.fallbackImages)}:{})},
       timeout:2400000,maxBuffer:8*1024*1024});
     if(plan?.databaseClusterId)await removePreviewSnapshot(clients,plan);

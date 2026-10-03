@@ -3,12 +3,16 @@ import type {EcsOutputs} from "./ecs";
 import type {MaintenanceIdentityOutputs} from "./namespace-identity";
 import {accountId,applicationRegion,workloadImage} from "./ecr";
 import {disableTaskContainerPseudoTerminal} from "./ecs-task-definition";
-import {isConsolidationPreview,previewGeneration,previewConfiguration} from "../scripts/lib/consolidation-preview-config.mjs";
+import {isConsolidationPreview,previewGeneration,previewConfiguration,previewAcceptanceContext} from "../scripts/lib/consolidation-preview-config.mjs";
+import {verifiedPostRuntimePreview} from './post-runtime-preview';
+import type {PostRuntimePreviewContext} from '../scripts/lib/consolidation-preview-config.mjs';
 
 type SecretKind="config"|"planner"|"executor"|"backend"|"seed"|"targets"|"tenant";
 export interface ConsolidationPreviewConfig {
   generation:string;
   database:string;
+  context?:PostRuntimePreviewContext;
+  verification?:Output<any>;
   values:Record<SecretKind,Output<string>>;
   arns:Record<SecretKind,Output<string>>;
 }
@@ -34,20 +38,24 @@ export interface ConsolidationWorkerConfig {
   sourceTag?:Input<string>;
 }
 export function consolidationPreviewConfig():ConsolidationPreviewConfig|undefined {
+  const context=previewAcceptanceContext($app.stage);
   if(!isConsolidationPreview($app.stage))return;
   const generation=previewGeneration($app.stage);
+  const verification=context?verifiedPostRuntimePreview($app.stage,context,generation):undefined;
+  const guarded=(value:Output<string>)=>verification?verification.apply(()=>value):value;
+  const keepers=context?{keepers:{generation}}:{};
   const tags={Project:"mem9-on-aws",Stage:$app.stage,ManagedBy:"sst"};
-  const tenant=new random.RandomPassword("ConsolidationPreviewTenant",{length:64,special:false});
-  const shape=previewConfiguration($app.stage,generation,"shape-only");
+  const tenant=new random.RandomPassword("ConsolidationPreviewTenant",{length:64,special:false,...keepers});
+  const shape=previewConfiguration($app.stage,generation,"shape-only",context);
   const values={} as Record<SecretKind,Output<string>>;
-  values.config=tenant.result.apply(secret=>JSON.stringify(previewConfiguration($app.stage,generation,secret)));
+  values.config=guarded(tenant.result.apply(secret=>JSON.stringify(previewConfiguration($app.stage,generation,secret,context))));
   values.tenant=values.config.apply(raw=>JSON.parse(raw).tenantId);
   values.targets=values.config.apply(raw=>JSON.stringify(JSON.parse(raw).namespaces));
   for(const kind of ["planner","executor","backend","seed"] as const){
     const title=kind[0].toUpperCase()+kind.slice(1);
-    const password=new random.RandomPassword(`ConsolidationPreview${title}Password`,{length:48,special:false});
-    const salt=new random.RandomPassword(`ConsolidationPreview${title}Salt`,{length:32,special:false});
-    values[kind]=$jsonStringify({username:shape.usernames[kind],password:password.result,salt:salt.result});
+    const password=new random.RandomPassword(`ConsolidationPreview${title}Password`,{length:48,special:false,...keepers});
+    const salt=new random.RandomPassword(`ConsolidationPreview${title}Salt`,{length:32,special:false,...keepers});
+    values[kind]=guarded($jsonStringify({username:shape.usernames[kind],password:password.result,salt:salt.result}));
   }
   const arns={} as Record<SecretKind,Output<string>>;
   for(const kind of Object.keys(values) as SecretKind[]){
@@ -57,7 +65,7 @@ export function consolidationPreviewConfig():ConsolidationPreviewConfig|undefine
     });
     arns[kind]=parameter.arn;
   }
-  return {generation,database:shape.database,values,arns};
+  return {generation,database:shape.database,context,verification,values,arns};
 }
 
 export function continuousConsolidationTasks(ecs:EcsOutputs,db:DbOutputs,config:ConsolidationWorkerConfig,identity:MaintenanceIdentityOutputs):ConsolidationWorker[]{

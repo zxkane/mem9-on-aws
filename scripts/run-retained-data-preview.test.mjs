@@ -1,5 +1,6 @@
 import {it,expect} from 'vitest';
-import {retainedPreviewBuildDigests,runRetainedDataPreview} from './run-retained-data-preview.mjs';
+import {retainedPreviewBuildDigests,runRetainedDataPreview,postRuntimePreviewEnvironment,assertRetainedPreviewQuiet,retainedPreviewStep} from './run-retained-data-preview.mjs';
+import {previewGeneration} from './lib/consolidation-preview-config.mjs';
 import {readFileSync} from 'node:fs';
 import {spawnSync} from 'node:child_process';
 import {parse} from 'yaml';
@@ -18,6 +19,40 @@ it('rejects missing, mixed and ambiguous data artifacts',()=>{
 it('cannot run against production or outside its actual workflow context',async()=>{
   await expect(runRetainedDataPreview({STAGE:'prod'})).rejects.toThrow('RetainedPreviewUnverified');
   await expect(runRetainedDataPreview({STAGE:'pr-7',GITHUB_EVENT_NAME:'pull_request'})).rejects.toThrow('RetainedPreviewUnverified');
+});
+it('derives the post-runtime generation only from a completed matching preview',()=>{
+  const env={STAGE:'pr-7',MEM9_DEPLOY_COMMIT:'a'.repeat(40),GITHUB_RUN_ID:'42',GITHUB_RUN_ATTEMPT:'1'};
+  const marker={stage:'pr-7',phase:'complete',status:'running',nonce:'b'.repeat(32)};
+  const next=postRuntimePreviewEnvironment(env,marker);
+  expect(next.MEM9_PREVIEW_RUNTIME_NONCE).toBe(marker.nonce);expect(next.MEM9_PRODUCTION_RUNTIME_MODE).toBe('active');
+  expect(previewGeneration('pr-7',next)).not.toBe(previewGeneration('pr-7',env));
+  expect(env.MEM9_PREVIEW_RUNTIME_NONCE).toBeUndefined();
+  for(const value of [{...marker,phase:'retired'},{...marker,stage:'prod'},{...marker,nonce:'invalid'}])expect(()=>postRuntimePreviewEnvironment(env,value)).toThrow();
+});
+it('requires empty old journals, disabled exact schedules and no running workers before changing context',async()=>{
+  const stage='pr-7',region='ap-northeast-1',account='123456789012',clusterArn=`arn:aws:ecs:${region}:${account}:cluster/mem9-on-aws-pr-7-example`;
+  const manifest={stage,generation:'a'.repeat(64),clusterArn,groupName:'mem9-on-aws-pr-7-consolidation-example',roleArn:`arn:aws:iam::${account}:role/mem9-on-aws-pr-7-Mem9ConsolidationSchedulerRole-role`,
+    workers:['planner','executor'].map(kind=>({kind,containerName:'Mem9Consolidation'+(kind==='planner'?'Planner':'Executor'),taskDefinitionArn:`arn:aws:ecs:${region}:${account}:task-definition/mem9-on-aws-pr-7-${kind}:1`,scheduleName:`mem9-on-aws-pr-7-${kind}-example`,logGroupName:'/sst/example'}))};
+  for(const unsafe of [null,'journal','schedule','task','stopping','stopped','missing']){
+    const calls=[],client={send:async command=>{
+      const name=command.constructor.name;calls.push(name);
+      if(name==='GetParametersCommand')return {Parameters:[{Name:command.input.Names[0],Value:JSON.stringify(manifest)}]};
+      if(name==='GetParametersByPathCommand')return {Parameters:unsafe==='journal'?[{Name:'owned-pending'}]:[]};
+      if(name==='ListSchedulesCommand')return {Schedules:manifest.workers.map(w=>({Name:w.scheduleName,GroupName:manifest.groupName,
+        Arn:`arn:aws:scheduler:${region}:${account}:schedule/${manifest.groupName}/${w.scheduleName}`,State:unsafe==='schedule'?'ENABLED':'DISABLED'}))};
+      if(name==='ListTasksCommand')return {taskArns:(unsafe==='task'&&command.input.desiredStatus==='RUNNING'||['stopping','stopped','missing'].includes(unsafe)&&command.input.desiredStatus==='STOPPED')?['known-task']:[]};
+      if(name==='DescribeTasksCommand')return unsafe==='missing'?{}:{tasks:[{taskArn:'known-task',clusterArn,taskDefinitionArn:manifest.workers[0].taskDefinitionArn,lastStatus:unsafe==='stopped'?'STOPPED':unsafe==='stopping'?'STOPPING':'RUNNING'}]};
+      throw Error('UnexpectedMutation');
+    }};
+    const operation=assertRetainedPreviewQuiet({ssm:client,ecs:client,scheduler:client},{stage,region,account,clusterArn});
+    if(unsafe&&unsafe!=='stopped')await expect(operation).rejects.toThrow();else await expect(operation).resolves.toBeUndefined();
+    expect(calls.every(c=>/^(Get|List|Describe)/.test(c))).toBe(true);
+  }
+});
+it('emits only fixed stage diagnostics without child errors or secret output',async()=>{
+  const events=[];
+  await expect(retainedPreviewStep('scheduler',async()=>{throw Object.assign(Error('PRIVATE_SECRET'),{stdout:'PRIVATE_SECRET',stderr:'PRIVATE_SECRET'});},e=>events.push(e))).rejects.toMatchObject({step:'scheduler'});
+  expect(JSON.stringify(events)).not.toContain('PRIVATE_SECRET');expect(events.at(-1)).toMatchObject({step:'scheduler',phase:'failed'});
 });
 it('gates the manual input before AWS work and runs the combination between finalization and cleanup',()=>{
   const workflow=parse(readFileSync('.github/workflows/infra-ci.yml','utf8'));

@@ -2136,9 +2136,9 @@
       "namespace_evidence": "namespace_id = :'namespace_id'"
     },
     {
-      "id": "2e44dbfb5ed9772aa358",
+      "id": "2a7f7c9a85b0e2e7fa11",
       "owner": "scripts/consolidation-preview-fixture.mjs",
-      "line": 143,
+      "line": 191,
       "tables": [
         "memories"
       ],
@@ -2154,9 +2154,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "7ae64fdd50e36bb04ca9",
+      "id": "62c823ee4a048f0c978b",
       "owner": "scripts/consolidation-preview-fixture.mjs",
-      "line": 237,
+      "line": 315,
       "tables": [
         "memories"
       ],
@@ -2172,9 +2172,9 @@
       "namespace_evidence": "INSERT column namespace_id"
     },
     {
-      "id": "470408f3b150fa28d712",
+      "id": "7c3cfcdd128d61d6d714",
       "owner": "scripts/consolidation-preview-fixture.mjs",
-      "line": 287,
+      "line": 370,
       "tables": [
         "memories"
       ],
@@ -2190,9 +2190,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "3c854e7ff215c1dbef44",
+      "id": "49ce7fac2fa64be17e1d",
       "owner": "scripts/consolidation-preview-fixture.mjs",
-      "line": 301,
+      "line": 384,
       "tables": [
         "memories"
       ],

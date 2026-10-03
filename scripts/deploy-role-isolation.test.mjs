@@ -102,6 +102,12 @@ function explicitlyDenies(policy, action, resource, context = {}) {
 }
 
 describe("split GitHub OIDC deployment roles", () => {
+  it('keeps preview schedule inventory read-only and application-region scoped',()=>{
+    const statements=role('GitHubPreviewActionsRole').Policies.flatMap(policy=>policy.PolicyDocument.Statement);
+    const inventory=statements.find(statement=>statement.Sid==='PreviewScheduleInventory');
+    expect(inventory).toMatchObject({Effect:'Allow',Action:'scheduler:ListSchedules',Resource:'*',Condition:{StringEquals:{'aws:RequestedRegion':'ApplicationRegion'}}});
+    expect(JSON.stringify(role('GitHubProductionActionsRole'))).not.toContain('PreviewScheduleInventory');
+  });
   it("TC-DEPLOYROLE-001/002/012/014: defines exact trusts and conditional legacy rollback", () => {
     expect(roleSource).toContain("GitHubPreviewActionsRole:");
     expect(roleSource).toContain("GitHubProductionActionsRole:");

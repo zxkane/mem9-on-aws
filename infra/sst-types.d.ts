@@ -51,6 +51,9 @@ declare function $jsonStringify(value: unknown): Output<string>;
 
 // ── The `aws` provider surface the scaffold touches ─────────────────────────
 declare namespace aws {
+  namespace kms {
+    function getKeyOutput(args:{keyId:Input<string>;region:Input<string>}):{arn:Output<string>};
+  }
   namespace ecr {
     function getImageOutput(args:{repositoryName:Input<string>;imageTag:Input<string>;registryId:Input<string>;region:Input<string>}):{imageDigest:Output<string>};
   }
