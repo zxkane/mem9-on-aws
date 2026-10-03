@@ -32,10 +32,32 @@ export function decodeBenchmarkRefs(encoded){
 const pack=cohort=>({version:cohort.version,workloadHash:cohort.workloadHash,samplesPerKind:cohort.samplesPerKind,
   warmupsPerKind:cohort.warmupsPerKind,concurrency:cohort.concurrency,cadenceMs:cohort.cadenceMs,
   origin:cohort.samples[0].startedMs,timing:cohort.samples.map(sample=>[sample.startedMs-cohort.samples[0].startedMs,sample.finishedMs-cohort.samples[0].startedMs,sample.latencyMs])});
+const packCompact=cohort=>{
+  const result=pack(cohort);let previous=cohort.samples[0].startedMs;
+  return {...result,encoding:'delta-wall-v1',timing:cohort.samples.map(sample=>{
+    // Keep latency exactly. The small integer residual reconstructs the wall
+    // duration; rounding here never replaces the measured latency value.
+    const item=[sample.startedMs-previous,sample.finishedMs-sample.startedMs-Math.round(sample.latencyMs),sample.latencyMs];
+    previous=sample.finishedMs;return item;
+  })};
+};
 const unpack=cohort=>{
   if(!cohort||!Number.isSafeInteger(cohort.origin)||!Array.isArray(cohort.timing)||cohort.timing.length>1000||
     cohort.timing.some(value=>!Array.isArray(value)||value.length!==3||!value.every(Number.isFinite)))fail();
-  const {origin,timing,...metadata}=cohort;
+  const {origin,timing,encoding,...metadata}=cohort;
+  if(encoding!==undefined){
+    if(encoding!=='delta-wall-v1'||!timing.length||timing[0][0]!==0||origin<=0)fail();
+    let previous=origin;
+    const samples=timing.map(([gap,residual,latencyMs],i)=>{
+      if(!Number.isSafeInteger(gap)||gap<0||!Number.isSafeInteger(residual)||Math.abs(residual)>2||latencyMs<=0||latencyMs>30000)fail();
+      const startedMs=previous+gap,finishedMs=startedMs+Math.round(latencyMs)+residual;
+      if(!Number.isSafeInteger(startedMs)||!Number.isSafeInteger(finishedMs)||finishedMs<startedMs||
+        Math.abs(finishedMs-startedMs-latencyMs)>2)fail();
+      previous=finishedMs;
+      return {kind:i%2?'write_ack':'read',index:Math.floor(i/2),ok:true,startedMs,finishedMs,latencyMs};
+    });
+    return {...metadata,samples};
+  }
   return {...metadata,samples:timing.map(([start,end,latencyMs],i)=>({kind:i%2?'write_ack':'read',index:Math.floor(i/2),ok:true,
     startedMs:origin+start,finishedMs:origin+end,latencyMs}))};
 };
@@ -46,7 +68,12 @@ export function encodeCanaryReport(report){
   verifyCanaryPerformance(report);
   const packed={version:report.version,verificationHash:report.verificationHash,baseline:pack(report.baseline),loaded:pack(report.loaded),
     activity:report.activity,replays:report.replays,receipts:report.receipts};
-  return gzipSync(Buffer.from(JSON.stringify(packed)),{level:9}).toString('base64');
+  const encode=value=>gzipSync(Buffer.from(JSON.stringify(value)),{level:9}).toString('base64');
+  const legacy=encode(packed);
+  if(legacy.length<=12000)return legacy;
+  const compact=encode({...packed,baseline:packCompact(report.baseline),loaded:packCompact(report.loaded)});
+  if(compact.length>12000)fail();
+  return compact;
 }
 
 export function decodeCanaryReport(encoded){

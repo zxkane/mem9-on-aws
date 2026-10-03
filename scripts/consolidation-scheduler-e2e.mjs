@@ -1,12 +1,18 @@
 import {randomUUID} from 'node:crypto';
 import {setTimeout as delay} from 'node:timers/promises';
 import {pathToFileURL} from 'node:url';
+import {execFileSync} from 'node:child_process';
 import {SSMClient,GetParametersCommand,GetParametersByPathCommand,PutParameterCommand,DeleteParameterCommand} from '@aws-sdk/client-ssm';
 import {ECSClient,DescribeTaskDefinitionCommand,RunTaskCommand,ListTasksCommand,DescribeTasksCommand,StopTaskCommand,TagResourceCommand} from '@aws-sdk/client-ecs';
 import {SchedulerClient,GetScheduleCommand,CreateScheduleCommand,DeleteScheduleCommand} from '@aws-sdk/client-scheduler';
 import {CloudWatchLogsClient,FilterLogEventsCommand} from '@aws-sdk/client-cloudwatch-logs';
 import {RDSClient,DescribeDBClustersCommand,DescribeDBInstancesCommand,ListTagsForResourceCommand,DescribeDBLogFilesCommand,DownloadDBLogFilePortionCommand} from '@aws-sdk/client-rds';
-import {previewGeneration,isConsolidationPreview} from './lib/consolidation-preview-config.mjs';
+import {IAMClient} from '@aws-sdk/client-iam';
+import {STSClient} from '@aws-sdk/client-sts';
+import {previewGeneration,isConsolidationPreview,previewAcceptanceContext} from './lib/consolidation-preview-config.mjs';
+import {loadPostRuntimeOperator,revalidatePostRuntimeOperator} from './lib/post-runtime-preview-aws.mjs';
+import {inspectPostRuntimeRoute,validatePostRuntimeDefinition} from './lib/post-runtime-preview-route.mjs';
+import {canaryEvidenceHash as evidenceHash} from './lib/production-canary-verification.mjs';
 import {assertStructuralDatabaseLog} from './lib/consolidation-preview-secrets.mjs';
 import {resolveApplicationRegion} from './lib/application-region.mjs';
 
@@ -58,9 +64,22 @@ export function ownsTask(task,manifest,journal){
 export function ownsOperatorTask(task,manifest,journal){
   const prefix=`arn:aws:ecs:${manifest.region}:${manifest.account}:task/${manifest.clusterName}/`;
   if(!task.taskArn?.startsWith(prefix)||task.clusterArn!==manifest.clusterArn||task.taskDefinitionArn!==journal.taskDefinitionArn)return false;
-  const env=Object.fromEntries((task.overrides?.containerOverrides?.find(c=>c.name==='Mem9Bootstrap')?.environment??[]).map(e=>[e.name,e.value]));
-  return env.MEM9_BOOTSTRAP_OPERATION==='consolidation-preview-setup'&&env.MEM9_PREVIEW_EXPECTED_GENERATION===journal.generation&&
+  const name=journal.route?.containerName??'Mem9Bootstrap';
+  const env=Object.fromEntries((task.overrides?.containerOverrides?.find(c=>c.name===name)?.environment??[]).map(e=>[e.name,e.value]));
+  return env.MEM9_BOOTSTRAP_OPERATION==='consolidation-preview-'+(journal.operation??'setup')&&env.MEM9_PREVIEW_EXPECTED_GENERATION===journal.generation&&
     env.MEM9_PREVIEW_OPERATOR_NONCE===journal.nonce&&env.MEM9_PREVIEW_OPERATOR_DEADLINE===String(journal.deadline);
+}
+export function verifyPostRuntimeTask(task,manifest,binding,journal){
+  const {route,image}=binding,override=task?.overrides?.containerOverrides;
+  if(!ownsOperatorTask(task,manifest,journal)||task.lastStatus!=='STOPPED'||task.containers?.length!==1||override?.length!==1||
+    override[0].name!==route.containerName||override[0].command?.length||override[0].environmentFiles?.length||
+    task.overrides.taskRoleArn&&task.overrides.taskRoleArn!==route.taskRoleArn||
+    task.overrides.executionRoleArn&&task.overrides.executionRoleArn!==route.executionRoleArn)fail('PostRuntimeTaskMismatch');
+  const c=task.containers[0],env=Object.fromEntries((override[0].environment??[]).map(e=>[e.name,e.value]));
+  const expected={MEM9_BOOTSTRAP_OPERATION:'consolidation-preview-'+journal.operation,MEM9_PREVIEW_EXPECTED_GENERATION:journal.generation,
+    MEM9_PREVIEW_OPERATOR_NONCE:journal.nonce,MEM9_PREVIEW_OPERATOR_DEADLINE:String(journal.deadline),MEM9_PREVIEW_BATCH_BOUNDARY_CROSSINGS:String(journal.batchBoundaryCrossings)};
+  if(c.name!==route.containerName||c.image!==route.image||![image.rootDigest,image.arm64Digest].includes(c.imageDigest)||c.exitCode!==0||
+    override[0].environment?.length!==5||Object.keys(env).length!==5||Object.keys(expected).some(k=>env[k]!==expected[k]))fail('PostRuntimeTaskMismatch');
 }
 export function oneShotInput(template,manifest,worker,journal){
   if(template.State!=='DISABLED'||template.GroupName!==manifest.groupName||template.Target?.RoleArn!==manifest.roleArn||
@@ -89,7 +108,8 @@ export async function discoverSchedulerTasks(ecs,clusterArn,accept,{sleep=delay,
       let nextToken;
       for(let page=0;page<30;page++){
         const result=await request(new ListTasksCommand({cluster:clusterArn,desiredStatus,nextToken,maxResults:100}));
-        for(const arn of result.taskArns??[])arns.add(arn);
+        if(!Array.isArray(result.taskArns))fail('TaskDiscoveryIncomplete');
+        for(const arn of result.taskArns)arns.add(arn);
         if(!result.nextToken)break;
         if(result.nextToken===nextToken||page===29)fail('TaskDiscoveryIncomplete');nextToken=result.nextToken;
       }
@@ -117,7 +137,7 @@ export async function discoverSchedulerTasks(ecs,clusterArn,accept,{sleep=delay,
   fail('TaskDiscoveryIncomplete');
 }
 
-export async function runSchedulerAcceptance({clients,stage,generation,region,now=Date.now,sleep=delay,progress=emit}){
+export async function runSchedulerAcceptance({clients,stage,generation,region,postRuntime,controlSourceTree,postRuntimeChecks,now=Date.now,sleep=delay,progress=emit}){
   const {ssm,ecs,scheduler,logs,rds}=clients;
   const send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
   const prefix=`/mem9-on-aws/${stage}`;
@@ -128,14 +148,28 @@ export async function runSchedulerAcceptance({clients,stage,generation,region,no
   };
   const manifestName=prefix+'/consolidation-preview/manifest';
   const manifest=validateManifest(JSON.parse((await parameters([manifestName])).get(manifestName)),stage,generation,region);
-  const bootstrapKeys=['task-def-arn','subnet-ids','task-sg-id'].map(key=>prefix+'/bootstrap/'+key);
-  const bootstrap=await parameters(bootstrapKeys);
-  const bootArn=bootstrap.get(bootstrapKeys[0]);
-  if(!taskDefinitionMatches(bootArn,manifest,'Mem9Bootstrap'))fail('InvalidBootstrapMetadata');
-  const bootDef=(await send(ecs,new DescribeTaskDefinitionCommand({taskDefinition:bootArn}))).taskDefinition;
-  const boot=bootDef?.containerDefinitions?.find(c=>c.name==='Mem9Bootstrap');
+  const postOptions={stage,generation,region,context:postRuntime,controlSourceTree};
+  const binding=postRuntime?await loadPostRuntimeOperator(clients,postOptions,postRuntimeChecks):undefined;
+  let bootArn,bootDef,bootName,operatorSubnets,operatorSecurityGroup;
+  if(binding){
+    const r=binding.route;bootArn=r.taskDefinitionArn;bootDef=binding.definition;bootName=r.containerName;operatorSubnets=r.subnets;operatorSecurityGroup=r.securityGroup;
+  }else{
+    const bootstrapKeys=['task-def-arn','subnet-ids','task-sg-id'].map(key=>prefix+'/bootstrap/'+key);
+    const bootstrap=await parameters(bootstrapKeys);bootArn=bootstrap.get(bootstrapKeys[0]);bootName='Mem9Bootstrap';
+    if(!taskDefinitionMatches(bootArn,manifest,bootName))fail('InvalidBootstrapMetadata');
+    bootDef=(await send(ecs,new DescribeTaskDefinitionCommand({taskDefinition:bootArn}))).taskDefinition;
+    operatorSubnets=bootstrap.get(bootstrapKeys[1]).split(',');operatorSecurityGroup=bootstrap.get(bootstrapKeys[2]);
+  }
+  const boot=bootDef?.containerDefinitions?.find(c=>c.name===bootName);
   const bootEnv=Object.fromEntries((boot?.environment??[]).map(e=>[e.name,e.value]));
   if(bootEnv.MEM9_PREVIEW_GENERATION!==generation)fail('GenerationDeployMismatch');
+  if(!binding){
+    const names=['production-plan','production-manifest','production-state'].map(name=>prefix+'/runtime/'+name);
+    const lifecycle=await send(ssm,new GetParametersCommand({Names:names,WithDecryption:false}));
+    if(lifecycle.Parameters?.length)fail('PostRuntimeContextRequired');
+    if(!Array.isArray(lifecycle.InvalidParameters)||lifecycle.InvalidParameters.length!==names.length||
+      new Set(lifecycle.InvalidParameters).size!==names.length||lifecycle.InvalidParameters.some(name=>!names.includes(name)))fail('AcceptanceMetadataMissing');
+  }
   const defs=new Map([[bootArn,bootDef]]);
   for(const worker of manifest.workers){
     const def=(await send(ecs,new DescribeTaskDefinitionCommand({taskDefinition:worker.taskDefinitionArn}))).taskDefinition;
@@ -169,34 +203,52 @@ export async function runSchedulerAcceptance({clients,stage,generation,region,no
     }
     fail('AcceptanceTaskDeadline');
   };
-  let operatorTask;
+  let operatorTask,operatorJournal;
   const operator=async(operation,crossings=0)=>{
     progress('operator-'+operation);
+    if(binding)await revalidatePostRuntimeOperator(clients,binding,postOptions,postRuntimeChecks);
     const nonce=randomUUID().replaceAll('-',''),deadline=now()+600000;
-    const journal={operator:true,stage,generation,nonce,deadline,taskDefinitionArn:bootArn};
+    const journal={operator:true,stage,generation,nonce,deadline,taskDefinitionArn:bootArn,
+      ...(binding?{version:2,operation,createdAt:now(),batchBoundaryCrossings:crossings,route:binding.route,routeHash:evidenceHash(binding.route)}:{})};
     const journalPath=prefix+'/consolidation-preview/operators/'+nonce;
-    if(operation==='setup'){
+    if(operation==='setup'||binding){
       await send(ssm,new PutParameterCommand({Name:journalPath,Type:'String',Value:JSON.stringify(journal),Overwrite:false}));
       const saved=JSON.parse((await parameters([journalPath])).get(journalPath));
       if(JSON.stringify(saved)!==JSON.stringify(journal))fail('OperatorJournalMismatch');
     }
+    if(binding)await revalidatePostRuntimeOperator(clients,binding,postOptions,postRuntimeChecks);
     const r=await send(ecs,new RunTaskCommand({cluster:manifest.clusterArn,taskDefinition:bootArn,launchType:'FARGATE',count:1,clientToken:nonce,
       propagateTags:'TASK_DEFINITION',enableECSManagedTags:true,
-      networkConfiguration:{awsvpcConfiguration:{subnets:bootstrap.get(bootstrapKeys[1]).split(','),securityGroups:[bootstrap.get(bootstrapKeys[2])],assignPublicIp:'DISABLED'}},
-      overrides:{containerOverrides:[{name:'Mem9Bootstrap',environment:[
+      networkConfiguration:{awsvpcConfiguration:{subnets:operatorSubnets,securityGroups:[operatorSecurityGroup],assignPublicIp:'DISABLED'}},
+      overrides:{containerOverrides:[{name:bootName,environment:[
         {name:'MEM9_BOOTSTRAP_OPERATION',value:'consolidation-preview-'+operation},
         {name:'MEM9_PREVIEW_EXPECTED_GENERATION',value:generation},
         {name:'MEM9_PREVIEW_OPERATOR_NONCE',value:nonce},
         {name:'MEM9_PREVIEW_OPERATOR_DEADLINE',value:String(deadline)},
         {name:'MEM9_PREVIEW_BATCH_BOUNDARY_CROSSINGS',value:String(crossings)}]}]}}));
     if(r.failures?.length||r.tasks?.length!==1)fail('OperatorLaunchFailed');
+    if(binding&&(!r.tasks[0].taskArn?.startsWith(manifest.clusterArn.replace(':cluster/',':task/')+'/')||
+      r.tasks[0].clusterArn!==manifest.clusterArn||r.tasks[0].taskDefinitionArn!==bootArn))fail('OperatorLaunchIdentityMismatch');
     operatorTask=r.tasks[0].taskArn;
+    operatorJournal=journal;
+    if(binding){
+      const prior=JSON.parse((await parameters([journalPath])).get(journalPath));if(evidenceHash(prior)!==evidenceHash(journal))fail('OperatorJournalMismatch');
+      journal.taskArn=operatorTask;
+      await send(ssm,new PutParameterCommand({Name:journalPath,Type:'String',Value:JSON.stringify(journal),Overwrite:true}));
+      if(evidenceHash(JSON.parse((await parameters([journalPath])).get(journalPath)))!==evidenceHash(journal))fail('OperatorJournalMismatch');
+    }
     const task=await waitTask(operatorTask,now()+600000);
-    const terminal=await records(task,'Mem9Bootstrap','consolidation_preview');
+    if(binding)verifyPostRuntimeTask(task,manifest,binding,journal);
+    const terminal=await records(task,bootName,'consolidation_preview');
     operatorTask=undefined;
     const bad=terminal.find(r=>r.event.endsWith('_failed'));
     if(bad)fail(/^[A-Za-z]{1,80}$/.test(bad.errorClass)?bad.errorClass:'OperatorFailed');
-    if(task.containers?.find(c=>c.name==='Mem9Bootstrap')?.exitCode!==0||terminal.length!==1)fail('OperatorFailed');
+    if(task.containers?.find(c=>c.name===bootName)?.exitCode!==0||terminal.length!==1)fail('OperatorFailed');
+    if(binding){
+      const proof=terminal[0].authority;
+      if(proof?.stage!==stage||proof.generation!==generation||proof.contextHash!==evidenceHash(postRuntime)||!Number.isSafeInteger(proof.administratorOid)||
+        !/^[a-f0-9]{64}$/.test(proof.runtimeStateHash??'')||!/^[a-f0-9]{64}$/.test(proof.runtimeRowsHash??''))fail('PostRuntimeOperatorEvidenceMissing');
+    }
     return terminal[0];
   };
   const journals=async()=>{
@@ -217,8 +269,14 @@ export async function runSchedulerAcceptance({clients,stage,generation,region,no
       for(const p of r.Parameters??[]){
         let j;try{j=JSON.parse(p.Value);}catch{fail('InvalidOperatorJournal');}
         if(j.operator!==true||j.stage!==stage||!/^[a-f0-9]{64}$/.test(j.generation||'')||!/^[a-f0-9]{32}$/.test(j.nonce||'')||
-          p.Name!==prefix+'/consolidation-preview/operators/'+j.nonce||!Number.isSafeInteger(j.deadline)||j.deadline>now()+600000||
-          j.taskDefinitionArn?.split(':').slice(0,-1).join(':')!==bootArn.split(':').slice(0,-1).join(':')||!/:\d+$/.test(j.taskDefinitionArn))fail('InvalidOperatorJournal');
+          p.Name!==prefix+'/consolidation-preview/operators/'+j.nonce||!Number.isSafeInteger(j.deadline)||j.deadline>now()+600000||!/:\d+$/.test(j.taskDefinitionArn))fail('InvalidOperatorJournal');
+        if(j.version===2){
+          const route=inspectPostRuntimeRoute(j.route,{stage,account:manifest.account,region});
+          if(evidenceHash(route)!==j.routeHash||route.generation!==j.generation||route.taskDefinitionArn!==j.taskDefinitionArn||
+            !['setup','pause','verify-planned','verify-executed','verify-repeated'].includes(j.operation)||!Number.isSafeInteger(j.createdAt)||j.createdAt<1||
+            j.createdAt>j.deadline||j.deadline-j.createdAt>600000||!Number.isSafeInteger(j.batchBoundaryCrossings)||j.batchBoundaryCrossings<0||j.batchBoundaryCrossings>10000)fail('InvalidOperatorJournal');
+          const def=(await send(ecs,new DescribeTaskDefinitionCommand({taskDefinition:j.taskDefinitionArn}))).taskDefinition;validatePostRuntimeDefinition(def,route);
+        }else if(j.version!==undefined||!taskDefinitionMatches(j.taskDefinitionArn,manifest,'Mem9Bootstrap'))fail('InvalidOperatorJournal');
         saved.push({path:p.Name,journal:j});
       }
       if(!r.NextToken)break;NextToken=r.NextToken;if(page===99)fail('OperatorJournalLimit');
@@ -230,6 +288,12 @@ export async function runSchedulerAcceptance({clients,stage,generation,region,no
       while(!complete){
         try{
           const tasks=await discover(journal);
+          if(journal.taskArn&&!tasks.some(task=>task.taskArn===journal.taskArn)){
+            if(!journal.taskArn.startsWith(manifest.clusterArn.replace(':cluster/',':task/')+'/'))fail('OperatorOwnershipChanged');
+            const known=await send(ecs,new DescribeTasksCommand({cluster:manifest.clusterArn,tasks:[journal.taskArn]}));
+            if(known.failures?.length||known.tasks?.length!==1||!ownsOperatorTask(known.tasks[0],manifest,journal))fail('OperatorOwnershipChanged');
+            tasks.push(known.tasks[0]);
+          }
           if(tasks.length){
             for(const task of tasks)if(task.lastStatus!=='STOPPED'){
               await send(ecs,new StopTaskCommand({cluster:manifest.clusterArn,task:task.taskArn,reason:'Synthetic setup recovery'}));
@@ -334,11 +398,16 @@ export async function runSchedulerAcceptance({clients,stage,generation,region,no
   }finally{
     const failures=[];
     if(operatorTask)try{
+      if(binding){
+        const known=await send(ecs,new DescribeTasksCommand({cluster:manifest.clusterArn,tasks:[operatorTask]}));
+        if(known.failures?.length||known.tasks?.length!==1||!ownsOperatorTask(known.tasks[0],manifest,operatorJournal))fail('OperatorOwnershipChanged');
+      }
       await send(ecs,new StopTaskCommand({cluster:manifest.clusterArn,task:operatorTask,reason:'Acceptance operator cleanup'}));
       await waitTask(operatorTask,now()+180000);
     }catch{failures.push('operator-stop');}
     try{await quiesceOperators();}catch{failures.push('operator-recovery');}
     try{if(activated)await operator('pause');}catch{failures.push('pause');}
+    if(binding)try{await quiesceOperators();}catch{failures.push('final-operator-recovery');}
     try{await cleanup();}catch{failures.push('schedules');}
     if(failures.length)fail('AcceptanceCleanupIncomplete');
   }
@@ -417,10 +486,12 @@ export async function scanDatabaseLogs({coverage,progress=emit,...options}){
 
 async function main(){
   const stage=process.env.STAGE;const generation=previewGeneration(stage);
+  const postRuntime=previewAcceptanceContext(stage),controlSourceTree=postRuntime?execFileSync('git',['rev-parse','HEAD^{tree}'],{encoding:'utf8'}).trim():undefined;
   const region=process.env.AWS_REGION||await resolveApplicationRegion();
   const cfg={region,maxAttempts:3};
-  const clients={ssm:new SSMClient(cfg),ecs:new ECSClient(cfg),scheduler:new SchedulerClient(cfg),logs:new CloudWatchLogsClient(cfg),rds:new RDSClient(cfg)};
-  try{await runSchedulerAcceptance({clients,stage,generation,region});}finally{for(const client of Object.values(clients))client.destroy();}
+  const clients={ssm:new SSMClient(cfg),ecs:new ECSClient(cfg),scheduler:new SchedulerClient(cfg),logs:new CloudWatchLogsClient(cfg),rds:new RDSClient(cfg),
+    ...(postRuntime?{iam:new IAMClient({...cfg,region:'us-east-1'}),sts:new STSClient(cfg)}:{})};
+  try{await runSchedulerAcceptance({clients,stage,generation,region,postRuntime,controlSourceTree});}finally{for(const client of Object.values(clients))client.destroy();}
 }
 if(process.argv[1]&&import.meta.url===pathToFileURL(process.argv[1]).href)main().catch(error=>{
   emit('failed',{errorClass:/^[A-Za-z]{1,80}$/.test(error.message)?error.message:'AcceptanceError'});process.exitCode=1;

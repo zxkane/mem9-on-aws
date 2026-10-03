@@ -157,6 +157,8 @@ export default $config({
     // default bootstrap mode after deploy; operator commands are explicit.
     const { bootstrap } = await import("./infra/bootstrap");
     bootstrap(ecsOut.cluster, dbOut, identityOut, cognitoOut, authConfig, consolidationPreview, runtime,productionRuntime);
+    const {postRuntimePreviewOperator}=await import('./infra/post-runtime-preview');
+    postRuntimePreviewOperator(ecsOut,dbOut,consolidationPreview,productionRuntime);
     if(productionRuntime)productionRuntimeTasks(ecsOut,dbOut,identityOut,productionRuntime);
     if(productionConsolidation&&productionRuntime)productionConsolidationOperators(ecsOut,dbOut,productionRuntime,productionConsolidation);
     // OAuth2 browser-login façade (§6): ApiGatewayV2 + reader client + façade

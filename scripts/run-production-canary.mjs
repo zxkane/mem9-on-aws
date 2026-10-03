@@ -18,6 +18,8 @@ import {runProductionCanaryFlow} from './lib/production-canary-flow.mjs';
 import {activateProductionScheduling,verifyProductionScheduling,disableProductionScheduling,enableProductionScheduling,captureProductionBackend} from './lib/production-scheduling.mjs';
 import {canaryEvidenceHash} from './lib/production-canary-verification.mjs';
 import {bindProductionBackend} from './lib/production-artifacts.mjs';
+import {runProductionContinuationFlow} from './lib/production-canary-continuation-flow.mjs';
+import {observeProductionRecurringDeliveries} from './lib/production-recurring-observer.mjs';
 
 const execute=promisify(execFile),repository='zxkane/mem9-on-aws';
 const gh=async args=>(await execute('gh',args,{timeout:30000,maxBuffer:2*1024*1024})).stdout.trim();
@@ -33,11 +35,15 @@ async function setSchedulingSecret(name,value){
   });
 }
 
-export async function runProductionCanary({clients,region,dailyRows=6000,basisPoints=5000,planningWaves=8,persist}){
+export async function runProductionCanary({clients,region,dailyRows=6000,basisPoints=5000,planningWaves=8,persist,continuation,controls}){
+  if(continuation&&(!controls||['guard','release','hold','calibrate','verifyQuiet'].some(key=>typeof controls[key]!=='function')))throw Error('ContinuationOperatorControlsRequired');
   const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8',timeout:10000}).trim();
   const targets=[];
   for(const kind of ['planner','executor'])targets.push(await loadProductionCanaryWorker(clients,{region,kind,revision}));
-  let mcp;
+  let mcp,activationStartedMs;
+  const cancellation=continuation?new AbortController():undefined;
+  const wakeClients=cancellation?Object.fromEntries(Object.entries(clients).map(([name,client])=>[name,{send:(command,options={})=>client.send(command,
+    {...options,abortSignal:AbortSignal.any([cancellation.signal,...(options.abortSignal?[options.abortSignal]:[])])})}])):clients;
   const admin=(operation,options={})=>runProductionConsolidationTask(clients,{region,operation,...options});
   const reload=async()=>{
     const current=[];for(const kind of ['planner','executor'])current.push(await loadProductionCanaryWorker(clients,{region,kind,revision}));
@@ -53,23 +59,52 @@ export async function runProductionCanary({clients,region,dailyRows=6000,basisPo
     backend=bindProductionBackend(options.backendBinding??backend,observed,current[0].clusterArn,!options.enabled);
     return {...verified,backendHash:canaryEvidenceHash(backend),backendBinding:backend};
   };
-  return runProductionCanaryFlow({
+  const dependencies={
     admin,persist,
     verifyScheduling,
     disableScheduling:async()=>{await setSchedulingSecret('ProductionConsolidationEnabled','0');await disableProductionScheduling(clients,await reload());},
-    activateScheduling:({admission,activationSeed})=>activateProductionScheduling({
-      currentMain:()=>gh(['api',`repos/${repository}/commits/main`,'--jq','.sha']),setSecret:setSchedulingSecret,
+    activateScheduling:async({admission,activationSeed,startedMs,backendBinding})=>{
+      activationStartedMs=startedMs??Date.now();
+      if(!Number.isSafeInteger(activationStartedMs)||activationStartedMs>Date.now())throw Error('InvalidActivationStart');
+      const expected=continuation?continuation.compatibility.current.backendBinding:(backendBinding??backend);
+      if(!expected||continuation&&!backendBinding)throw Error('ProductionBackendBindingMissing');
+      if(backendBinding)bindProductionBackend(expected,backendBinding,targets[0].clusterArn);
+      await verifyScheduling({enabled:false,backendBinding:expected});
+      return activateProductionScheduling({
+      currentMain:async()=>{if(continuation)await controls.guard('activation');return gh(['api',`repos/${repository}/commits/main`,'--jq','.sha']);},setSecret:setSchedulingSecret,
       enable:options=>enableProductionScheduling(clients,targets,options),
-      verify:verifyScheduling,
-    },{revision,admission,activationSeed}),
+      verify:options=>verifyScheduling({...options,backendBinding:expected}),
+      },{revision,admission,activationSeed});
+    },
     recoverDeliveries:()=>recoverProductionCanaryDeliveries(clients,targets),
     quiesce:()=>quiesceProductionWorkers(clients,targets),
-    wake:(kind,wave,actions,onRunning,admission)=>runProductionCanaryWake(clients,targets.find(target=>target.kind===kind),{wave,actions,onRunning,admission}),
-    sample:async(validationId,phase,onWrite)=>{
+    wake:(kind,wave,actions,onRunning,admission)=>runProductionCanaryWake(wakeClients,targets.find(target=>target.kind===kind),
+      typeof wave==='object'?wave:{wave,actions,onRunning,admission},{signal:cancellation?.signal}),
+    sample:async(validationId,phase,options)=>{
+      const sampling=typeof options==='function'?{onWrite:options}:options;
       mcp??=await createMcpCanaryClient(await loadMcpCanaryConfiguration(clients.ssm,'prod'));
-      return sampleMcpCanaryCohort(mcp,{validationId,phase,onWrite});
+      // Let the current foreground request settle, preserving a write receipt.
+      // Closure prevents the next request instead of creating new ambiguity by
+      // aborting a potentially committed HTTP write.
+      const client=Object.fromEntries(['read','write'].map(method=>[method,(...args)=>{
+        if(sampling.isClosing?.())throw Error('ContinuationClosing');return mcp[method](...args);
+      }]));
+      return sampleMcpCanaryCohort(client,{validationId,phase,samplesPerKind:sampling.samplesPerKind??100,onWrite:sampling.onWrite});
     },
-  },{dailyRows,basisPoints,planningWaves});
+  };
+  if(continuation){
+    const image=continuation.compatibility?.images?.worker;
+    const artifacts=Object.fromEntries(targets.map(target=>[target.kind,{rootDigest:image?.currentRoot,arm64Digest:image?.currentChild}]));
+    return runProductionContinuationFlow({...dependencies,guard:controls.guard,release:controls.release,hold:controls.hold,
+      calibrate:controls.calibrate,verifyQuiet:controls.verifyQuiet,abortWakes:()=>cancellation.abort(),
+      observeRecurring:running=>{
+        if(!Number.isSafeInteger(activationStartedMs))throw Error('ActivationStartMissing');
+        return observeProductionRecurringDeliveries(clients,targets,{admission:running.admission,artifacts,afterMs:activationStartedMs,
+          deadlineMs:activationStartedMs+2700000,guard:()=>controls.guard('recurring'),persist:controls.persistRecurring});
+      },
+    },continuation,{maxDiscoveryWaves:planningWaves});
+  }
+  return runProductionCanaryFlow(dependencies,{dailyRows,basisPoints,planningWaves});
 }
 
 async function main(){
@@ -78,7 +113,7 @@ async function main(){
   const directory=await mkdtemp(join(tmpdir(),'mem9-production-canary-'));await chmod(directory,0o700);
   const file=join(directory,'run.local.json');
   const persist=async state=>{await writeFile(file+'.tmp',JSON.stringify(state),{mode:0o600});await rename(file+'.tmp',file);};
-  const clients={ssm:new SSMClient({region}),ecs:new ECSClient({region}),iam:new IAMClient({region}),sts:new STSClient({region}),
+  const clients={ssm:new SSMClient({region}),ecs:new ECSClient({region}),iam:new IAMClient({region:'us-east-1'}),sts:new STSClient({region}),
     scheduler:new SchedulerClient({region}),logs:new CloudWatchLogsClient({region})};
   process.stdout.write(JSON.stringify({event:'production_canary',phase:'started',journal:file})+'\n');
   try{

@@ -2,6 +2,7 @@ import {describe,it,expect,vi,afterEach} from 'vitest';
 const out=(value:any):any=>({value,apply(fn:any){const next=fn(value);return next?.apply?next:out(next);}});
 const unwrap=(value:any):any=>value?.apply?unwrap(value.value):Array.isArray(value)?value.map(unwrap):value&&typeof value==='object'?Object.fromEntries(Object.entries(value).map(([k,v])=>[k,unwrap(v)])):value;
 vi.mock('./ecr',()=>({accountId:()=>out('123456789012'),applicationRegion:()=>out('ap-northeast-1'),
+  selectedDataSourceTag:vi.fn((tag:string)=>tag),selectedDataRelease:vi.fn(()=>undefined),
   pinnedProductionImage:(name:string)=>out('123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/mem9-on-aws/'+name+'@sha256:'+'a'.repeat(64))}));
 vi.mock('./vpc',()=>({resolveVpc:()=>({privateSubnetIds:out(['subnet-abcd'])})}));
 function setup(stage='prod',enabled='0',admission='unverified'){
@@ -52,6 +53,16 @@ describe('production continuous-consolidation configuration',()=>{
     const f=setup('prod','1','b'.repeat(64));const {productionConsolidationConfig}=await import('./production-consolidation');
     const cfg=productionConsolidationConfig({mode:'active'} as any,f.identity as any,f.db as any)!;
     expect(unwrap(cfg.enabled)).toBe(true);expect(unwrap(cfg.admission)).toMatch(/^[a-f0-9]{64}$/);expect(unwrap(cfg.admission)).not.toBe('b'.repeat(64));
+  });
+  it('keeps current control identity separate from a retained data admission',async()=>{
+    const f=setup('prod','1','b'.repeat(64)),ecr=await import('./ecr');
+    vi.mocked(ecr.selectedDataSourceTag).mockReturnValue(out('mem9-bbbbbbb'));
+    vi.mocked(ecr.selectedDataRelease).mockReturnValue(out({hash:'c'.repeat(64),data:{expiresMs:1800000600000}}));
+    const {productionConsolidationConfig}=await import('./production-consolidation');
+    const cfg=productionConsolidationConfig({mode:'active'} as any,f.identity as any,f.db as any)!;
+    expect(cfg.controlSourceTag).toBe('mem9-aaaaaaa');expect(unwrap(cfg.sourceTag)).toBe('mem9-bbbbbbb');
+    const {productionArtifactAdmission}=await import('../scripts/lib/production-artifacts.mjs');
+    expect(unwrap(cfg.admission)).toBe(productionArtifactAdmission('b'.repeat(64),'mem9-bbbbbbb',unwrap(cfg.image)));
   });
   it.each(['1','0'])('rejects an invalid persisted admission for enabled=%s',async enabled=>{
     const f=setup('prod',enabled,'invalid');const {productionConsolidationConfig}=await import('./production-consolidation');

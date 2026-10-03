@@ -1608,6 +1608,15 @@ Resources:
           PolicyDocument:
             Version: "2012-10-17"
             Statement:
+              - Sid: PreviewScheduleInventory
+                Effect: Allow
+                Action: scheduler:ListSchedules
+                # This list operation has no resource-level scope. The caller
+                # validates the exact preview group before requesting inventory.
+                Resource: "*"
+                Condition:
+                  StringEquals:
+                    aws:RequestedRegion: !Ref ApplicationRegion
               - Sid: PreviewConsolidationDatabaseLogRead
                 Effect: Allow
                 Action:

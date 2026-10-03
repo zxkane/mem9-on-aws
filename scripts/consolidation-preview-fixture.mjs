@@ -5,9 +5,10 @@ import {resolve,dirname} from 'node:path';
 import {isDeepStrictEqual} from 'node:util';
 import pg from 'pg';
 import {ensureNamespaceIndexes} from './migrate-memory-namespaces.mjs';
-import {isConsolidationPreview,previewConfiguration,previewUuid} from './lib/consolidation-preview-config.mjs';
+import {isConsolidationPreview,previewConfiguration,previewUuid,previewAcceptanceContext} from './lib/consolidation-preview-config.mjs';
 import {checkCredentialLogging,installCredentialGuard,setPreviewCredential} from './lib/consolidation-preview-secrets.mjs';
 import {withRuntimeBootstrapLock,bindRuntimeTenant} from './runtime-bootstrap.mjs';
+import {readPostRuntimeAuthority,assertPostRuntimeDatabase,postRuntimeDatabaseMarker,runtimeRowsFingerprint} from './lib/post-runtime-preview-authority.mjs';
 
 const kinds=['planner','executor','backend','seed'];
 const hash=text=>createHash('sha256').update(text).digest('hex');
@@ -19,8 +20,8 @@ const policy=total=>({limits:{total,rewrite:total,delete:total,archive:total,mar
 export function validatePreviewFixture(config,credentials,stage,generation){
   if(!isConsolidationPreview(stage)||config?.stage!==stage||config.generation!==generation||!/^[a-f0-9]{64}$/.test(generation||'')||
     !/^[a-f0-9]{32}$/.test(config.tenantId||''))throw Error('GenerationDeployMismatch');
-  const shape=previewConfiguration(stage,generation,'shape-only');
-  if(config.database!==shape.database||JSON.stringify(config.namespaces)!==JSON.stringify(shape.namespaces)||
+  const shape=previewConfiguration(stage,generation,'shape-only',config.context);
+  if(config.version!==shape.version||config.tenantName!==shape.tenantName||config.database!==shape.database||JSON.stringify(config.namespaces)!==JSON.stringify(shape.namespaces)||
     JSON.stringify(config.usernames)!==JSON.stringify(shape.usernames))throw Error('InvalidPreviewFixture');
   for(const kind of kinds)if(credentials[kind]?.username!==shape.usernames[kind])throw Error('InvalidPreviewCredential');
   return config;
@@ -54,16 +55,26 @@ async function applySchema(db,file){
   }
 }
 
-async function checkOwner(control,config,create){
-  const marker='mem9-consolidation-synthetic-v1/'+config.stage;
-  const existing=(await control.query("SELECT shobj_description(oid,'pg_database') AS marker FROM pg_database WHERE datname=$1",[config.database])).rows[0];
-  if(existing){if(existing.marker!==marker)throw Error('PreviewDatabaseOwnershipMismatch');return true;}
+async function fixtureDatabase(control,config){
+  return (await control.query("SELECT oid AS database_oid,datdba AS owner_oid,shobj_description(oid,'pg_database') AS marker FROM pg_database WHERE datname=$1",[config.database])).rows[0];
+}
+
+async function checkOwner(control,config,create,authority){
+  const marker=authority?postRuntimeDatabaseMarker(config):'mem9-consolidation-synthetic-v1/'+config.stage;
+  const existing=await fixtureDatabase(control,config);
+  if(existing){
+    if(authority)assertPostRuntimeDatabase(existing,authority,config);
+    else if(existing.marker!==marker)throw Error('PreviewDatabaseOwnershipMismatch');
+    return true;
+  }
   if(!create)return false;
   if(await scalar(control,'SELECT EXISTS(SELECT FROM pg_roles WHERE rolname=ANY($1)) AS result',[Object.values(config.usernames)]))throw Error('PreviewCredentialOwnershipMismatch');
   await control.query('CREATE DATABASE '+identifier(config.database));
+  if(authority&&Number((await fixtureDatabase(control,config))?.owner_oid)!==authority.administratorOid)throw Error('PreviewDatabaseOwnershipMismatch');
   // Stage has passed the strict pr-N validator; this contains no secret values.
   await control.query('COMMENT ON DATABASE '+identifier(config.database)+" IS '"+marker+"'");
   await control.query('REVOKE CONNECT ON DATABASE '+identifier(config.database)+' FROM PUBLIC');
+  if(authority)assertPostRuntimeDatabase(await fixtureDatabase(control,config),authority,config);
   return true;
 }
 
@@ -73,9 +84,46 @@ async function pause(db,config){
   await db.query("SELECT mem9_maintenance.set_execution_mode($1,false,'{}','qwen3-embedding-0.6b')",[config.stage]);
 }
 
-async function retireSeed(control,db,config){
+const postRoleMarker=(config,kind)=>postRuntimeDatabaseMarker(config)+'/'+kind;
+
+async function assertPostRole(control,db,config,kind){
+  if(!kinds.includes(kind)||!await scalar(db,"SELECT to_regclass('mem9_preview.role_ownership') IS NOT NULL AS result"))
+    throw Error('PreviewCredentialOwnershipMismatch');
+  const owned=(await db.query(`SELECT role_name,role_oid,marker_hash FROM mem9_preview.role_ownership
+    WHERE generation=$1 AND kind=$2`,[config.generation,kind])).rows[0];
+  if(!owned)throw Error('PreviewCredentialOwnershipMismatch');
+  const role=(await control.query(`SELECT oid,rolname,rolsuper,rolcreatedb,rolcreaterole,rolreplication,rolbypassrls,
+    shobj_description(oid,'pg_authid') AS marker FROM pg_roles WHERE rolname=$1`,[config.usernames[kind]])).rows[0];
+  const marker=postRoleMarker(config,kind);
+  if(!role||Number(owned.role_oid)!==Number(role.oid)||owned.role_name!==config.usernames[kind]||role.rolname!==owned.role_name||
+    role.marker!==marker||owned.marker_hash!==hash(marker)||
+    ['rolsuper','rolcreatedb','rolcreaterole','rolreplication','rolbypassrls'].some(key=>role[key]!==false))
+    throw Error('PreviewCredentialOwnershipMismatch');
+  return Number(role.oid);
+}
+
+async function createPostRole(control,db,config,kind,credential){
+  const marker=postRoleMarker(config,kind);let roleOid;
+  // Unlike the legacy setter, this transaction never adopts an existing name.
+  // No CONNECT/table/group privilege is granted until its OID receipt is saved.
+  await control.query('BEGIN');
+  try{
+    await control.query('CREATE ROLE '+identifier(credential.username)+' NOLOGIN NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS INHERIT');
+    await setPreviewCredential(control,credential,true);
+    await control.query('COMMENT ON ROLE '+identifier(credential.username)+" IS '"+marker+"'");
+    roleOid=Number(await scalar(control,'SELECT $1::regrole::oid AS result',[credential.username]));
+    if(!Number.isInteger(roleOid)||roleOid<1)throw Error('PreviewCredentialOwnershipMismatch');
+    await control.query('COMMIT');
+  }catch(error){await control.query('ROLLBACK').catch(()=>{});throw error;}
+  await db.query(`INSERT INTO mem9_preview.role_ownership(generation,kind,role_name,role_oid,marker_hash)
+    VALUES($1,$2,$3,$4::oid,$5)`,[config.generation,kind,credential.username,roleOid,hash(marker)]);
+  await assertPostRole(control,db,config,kind);
+}
+
+export async function retireSeed(control,db,config){
   const role=config.usernames.seed;
   if(!await scalar(control,'SELECT EXISTS(SELECT FROM pg_roles WHERE rolname=$1) AS result',[role]))return;
+  if(config.context)await assertPostRole(control,db,config,'seed');
   await control.query('ALTER ROLE '+identifier(role)+' NOLOGIN');
   for(const table of ['memories','memory_namespace_migration_state']){
     if(await scalar(db,'SELECT to_regclass($1) IS NOT NULL AS result',['public.'+table]))
@@ -162,18 +210,32 @@ export async function previewFixture({connect,controlDatabase,config,credentials
   validatePreviewFixture(config,credentials,config?.stage,config?.generation);
   if(!['setup','pause','verify-planned','verify-executed','verify-repeated'].includes(operation))throw Error('InvalidPreviewOperation');
   const control=await connect(controlDatabase);
-  let db;
+  let db,authority,databaseEvidence,ordinaryRows;
+  const authorityRequest={...config,controlDatabase};
+  const report=async value=>{
+    if(!authority)return value;
+    const current=await readPostRuntimeAuthority(control,authorityRequest);
+    if(current.runtimeStateHash!==authority.runtimeStateHash||await runtimeRowsFingerprint(control,config.tenantId)!==ordinaryRows)
+      throw Error('PreviewRuntimeRowsChanged');
+    return {...value,authority:{...authority,...databaseEvidence,runtimeRowsHash:ordinaryRows}};
+  };
   try{
-    await control.query("SELECT pg_advisory_lock(hashtext('mem9-consolidation-preview-setup'))");
-    if(!await checkOwner(control,config,operation==='setup'))return {outcome:'absent'};
+    if(config.context)authority=await readPostRuntimeAuthority(control,authorityRequest);
+    if(authority){
+      if(!await scalar(control,"SELECT pg_try_advisory_lock(hashtext('mem9-consolidation-preview-setup')) AS result"))throw Error('PreviewSetupBusy');
+      await checkCredentialLogging(control);
+      ordinaryRows=await runtimeRowsFingerprint(control,config.tenantId);
+    }else await control.query("SELECT pg_advisory_lock(hashtext('mem9-consolidation-preview-setup'))");
+    if(!await checkOwner(control,config,operation==='setup',authority))return await report({outcome:'absent'});
+    if(authority)databaseEvidence=assertPostRuntimeDatabase(await fixtureDatabase(control,config),authority,config);
     db=await connect(config.database);
     if(operation!=='setup'){
       if(!await scalar(db,"SELECT to_regclass('mem9_preview.runs') IS NOT NULL AS result"))throw Error('PreviewFixtureNotInitialized');
       if(operation==='pause'){
         try{await retireSeed(control,db,config);}finally{await pause(db,config);}
-        return {outcome:'paused'};
+        return await report({outcome:'paused'});
       }
-      return await verifyFixture(db,config,operation,batchBoundaryCrossings);
+      return await report(await verifyFixture(db,config,operation,batchBoundaryCrossings));
     }
     await checkCredentialLogging(control);await checkCredentialLogging(db);
     await applySchema(db,schemaFile);
@@ -182,14 +244,29 @@ export async function previewFixture({connect,controlDatabase,config,credentials
       CREATE TABLE IF NOT EXISTS mem9_preview.runs(generation TEXT PRIMARY KEY,namespaces TEXT[] NOT NULL,
         state TEXT NOT NULL CHECK(state IN ('seeding','seeded','batching_proven','failed_partial')),classification_id TEXT,receipt_snapshot JSONB,
         created_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp());`);
+    if(authority)await db.query(`CREATE TABLE IF NOT EXISTS mem9_preview.role_ownership(
+      generation TEXT NOT NULL,kind TEXT NOT NULL CHECK(kind IN ('planner','executor','backend','seed')),
+      role_name TEXT NOT NULL,role_oid OID NOT NULL,marker_hash TEXT NOT NULL,
+      PRIMARY KEY(generation,kind));
+      REVOKE ALL ON mem9_preview.role_ownership FROM PUBLIC;
+      DROP TRIGGER IF EXISTS preview_role_ownership_immutable ON mem9_preview.role_ownership;
+      CREATE TRIGGER preview_role_ownership_immutable BEFORE UPDATE OR DELETE ON mem9_preview.role_ownership
+        FOR EACH ROW EXECUTE FUNCTION mem9_maintenance.immutable();`);
     const run=await scalar(db,'SELECT to_jsonb(r) AS result FROM mem9_preview.runs r WHERE generation=$1',[config.generation]);
     if(run){
-      if(run.state==='batching_proven')return {outcome:'reused_proven'};
+      if(run.state==='batching_proven')return await report({outcome:'reused_proven'});
       if(run.state!=='seeded'||await scalar(db,'SELECT EXISTS(SELECT FROM mem9_maintenance.actions WHERE namespace_id=ANY($1)) AS result',[config.namespaces]))throw Error('PartialGenerationRequiresRedeploy');
       await retireSeed(control,db,config);
+      if(authority)for(const kind of kinds)await assertPostRole(control,db,config,kind);
       await privilegeChecks(connect,config,credentials);
       await activate(db,config,credentials,run.classification_id,activationDeadline);
-      return {outcome:'reused_seeded'};
+      return await report({outcome:'reused_seeded'});
+    }
+    if(authority){
+      if(await scalar(control,'SELECT EXISTS(SELECT FROM pg_roles WHERE rolname=ANY($1)) AS result',[Object.values(config.usernames)]))
+        throw Error('PreviewCredentialOwnershipMismatch');
+      if(await scalar(control,'SELECT EXISTS(SELECT FROM public.tenants WHERE id=$1 OR name=$2) AS result',[config.tenantId,config.tenantName]))
+        throw Error('PreviewTenantIdentityConflict');
     }
     await pause(db,config);
     // Fence only namespaces recorded by this fixture's own journal.
@@ -206,7 +283,8 @@ export async function previewFixture({connect,controlDatabase,config,credentials
     await db.query("INSERT INTO mem9_preview.runs(generation,namespaces,state) VALUES($1,$2,'seeding')",[config.generation,config.namespaces]);
     await installCredentialGuard(control);
     for(const kind of kinds){
-      await setPreviewCredential(control,credentials[kind],true);
+      if(authority)await createPostRole(control,db,config,kind,credentials[kind]);
+      else await setPreviewCredential(control,credentials[kind],true);
       await control.query('GRANT CONNECT ON DATABASE '+identifier(config.database)+' TO '+identifier(credentials[kind].username));
       if(kind!=='seed'){
         await control.query('GRANT mem9_maintenance_'+kind+' TO '+identifier(credentials[kind].username));
@@ -245,24 +323,29 @@ export async function previewFixture({connect,controlDatabase,config,credentials
     await withRuntimeBootstrapLock(control,config.stage,async owns=>{
       await control.query('BEGIN');
       try{
+        if(authority){
+          if(await runtimeRowsFingerprint(control,config.tenantId)!==ordinaryRows)throw Error('PreviewRuntimeRowsChanged');
+          if(await scalar(control,'SELECT EXISTS(SELECT FROM public.tenants WHERE id=$1 OR name=$2) AS result',[config.tenantId,config.tenantName]))throw Error('PreviewTenantIdentityConflict');
+        }
         if(await scalar(control,"SELECT to_regclass('mem9_runtime.tenant_bindings') IS NOT NULL AS result")){
           await bindRuntimeTenant(control,{tenant:config.tenantId,kind:'consolidation-preview',host:control.connectionParameters.host,
             port:control.connectionParameters.port,database:config.database,credentials:credentials.backend});
         }
         await control.query(`INSERT INTO tenants(id,name,db_host,db_port,db_user,db_password,db_name,db_tls,provider,status,schema_version)
       VALUES($1,$2,$3,$4,$5,$6,$7,true,'self-hosted','active',1)
-      ON CONFLICT(id) DO NOTHING`,[config.tenantId,'synthetic-consolidation-'+config.stage,control.connectionParameters.host,control.connectionParameters.port,
+      ON CONFLICT(id) DO NOTHING`,[config.tenantId,config.tenantName??'synthetic-consolidation-'+config.stage,control.connectionParameters.host,control.connectionParameters.port,
       credentials.backend.username,credentials.backend.password,config.database]);
     const tenant=await scalar(control,'SELECT db_user=$2 AND db_password=$3 AND db_name=$4 AS result FROM tenants WHERE id=$1',
       [config.tenantId,credentials.backend.username,credentials.backend.password,config.database]);
         if(!tenant)throw Error('PreviewTenantCredentialMismatch');
+        if(authority&&await runtimeRowsFingerprint(control,config.tenantId)!==ordinaryRows)throw Error('PreviewRuntimeRowsChanged');
         await owns();await control.query('COMMIT');
       }catch(error){await control.query('ROLLBACK');throw error;}
     });
     await privilegeChecks(connect,config,credentials);
     await activate(db,config,credentials,classification,activationDeadline);
     if(await scalar(db,'SELECT EXISTS(SELECT FROM mem9_maintenance.actions WHERE namespace_id=ANY($1)) OR EXISTS(SELECT FROM mem9_maintenance.receipts WHERE namespace_id=ANY($1)) AS result',[config.namespaces]))throw Error('PreviewNotFresh');
-    return {outcome:'seeded',synthetic:true,rows:syntheticMemories(config).length};
+    return await report({outcome:'seeded',synthetic:true,rows:syntheticMemories(config).length});
   }catch(error){
     if(db){
       await db.query('ROLLBACK').catch(()=>{});
@@ -317,6 +400,8 @@ async function main(){
   const credentials=Object.fromEntries(kinds.map(kind=>[kind,JSON.parse(env[`MEM9_PREVIEW_${kind.toUpperCase()}_CREDENTIAL`]||'null')]));
   validatePreviewFixture(config,credentials,env.MEM9_STAGE,env.MEM9_PREVIEW_GENERATION);
   if(env.MEM9_PREVIEW_EXPECTED_GENERATION!==config.generation)throw Error('GenerationDeployMismatch');
+  if(config.context&&(!/^[a-f0-9]{32}$/.test(env.MEM9_PREVIEW_OPERATOR_NONCE??'')||
+    !isDeepStrictEqual(previewAcceptanceContext(env.MEM9_STAGE,env),config.context)))throw Error('InvalidPreviewInvocation');
   const activationDeadline=Number(env.MEM9_PREVIEW_OPERATOR_DEADLINE);
   if(!Number.isSafeInteger(activationDeadline)||activationDeadline<=Date.now()||activationDeadline>Date.now()+600000)throw Error('PreviewOperatorExpired');
   const watchdog=setTimeout(()=>process.exit(1),activationDeadline-Date.now());watchdog.unref();

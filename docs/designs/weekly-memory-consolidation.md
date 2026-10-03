@@ -1476,3 +1476,448 @@ tuple. Drift requires a fresh real target-version upgrade and restore rehearsal.
 This adjustment passed the same three-model panel after checking PostgreSQL
 ownership-check ordering and the actual Aurora command result. It changes no
 production engine/extension version and preserves all other rollout gates.
+
+### Canary continuation after a frozen verification (proposed)
+
+A successful mutation batch can outlive neither a full foreground measurement
+nor its own verification freeze. The existing `receipt_verification` intentionally
+latches conservation: changing budget-policy epochs or adding another receipt
+makes subsequent verification fail. An operational wrapper must not clear that
+latch, reset counters, or reinterpret an incomplete cohort as passed. Continuation
+therefore needs an explicit canonical protocol, including its release transition.
+This section is proposed and requires design review before implementation.
+
+Keep the original `receipt_verification`, `validation_id`, protected baseline,
+pre-canary receipt set, original backend binding, `canary_started_at`, worker
+generation and cumulative `canary_used` intact. Add an owner-only, append-only attempt/event ledger and a
+current-attempt pointer. Attempts contain the complete parent proof and release
+bindings, expected parent hash, immutable request identity, transition evidence
+and their own verification freeze. Runtime and worker roles cannot modify this
+ledger. Repeated identical begin requests return their committed outcome;
+conflicting parent hashes, request bodies or active pointers reject. There is
+no generic reset, force, arbitrary SQL or old-proof replacement operation.
+
+`begin-continuation` runs only under the existing administrative lock and an
+execution-control row lock after execution and dispatch are disabled, all prior
+workers/invocations are quiescent and benchmark residue is zero. It recomputes
+the parent's complete receipt chains, original protected baseline and frozen
+conservation using the parent's recorded bindings, and compares the expected
+parent hash before creating an attempt. A mismatch makes no state change. The
+original 20-row lifetime cap remains authoritative across every attempt; starting
+another attempt never restores its spent allowance.
+
+The active attempt separates inspection from finalization. `inspect-canary`
+returns current receipt/protection evidence without installing a freeze.
+`resume-plan` requires a valid open continuation and enables only dispatcher
+planning while SQL execution stays disabled. Before load validation, pause and
+inspect again to prove discovery made no memory mutations. Canary admission is
+permitted only before the active attempt is frozen. `verify-canary` freezes the
+active attempt after its real writes and before cached replays; a later mismatch
+still rejects. For the legacy attempt, the original freeze keeps its existing
+behavior. Promotion verifies the active attempt and its report, while retaining
+all parent evidence and the original mutation counter.
+
+A normal release creates new task identities and tags. Production's worker
+generation is a retained random resource, not a hash of an image tag; it must
+remain unchanged. A paused continuation may accept a new backend binding only
+through a reviewed compatibility certificate. The operator must prove, from
+actual old and new release manifests, equal Linux/ARM64 child image digests for
+the worker and every serving container, plus equal execution configuration,
+network, roles, namespace targets, runtime/schema contracts and credential
+bindings. The normalizer may replace image references with their verified child
+digests and remove only enumerated AWS identity/registration fields; it must
+not ignore command, environment, secret reference, CPU/memory, volume, network
+or authority changes. A tag match or source-code similarity is insufficient.
+If byte/configuration equivalence cannot be proven, old capacity evidence is
+not reused. No unrelated worker/runtime code is changed in this increment.
+The changed administrative operator is separately bound to the new verified
+release and its synthetic continuation acceptance. Both old and new bindings
+are retained; the original setup binding is not overwritten. Status, inspection,
+verification and promotion use the active attempt binding when one exists. An
+updated task ARN is never described as an unchanged task.
+
+The release witness must be refreshed before the new canonical operations run.
+The existing pre-worker publisher's zero-receipt/no-setup mode remains strict.
+A separate reviewed paused-canary mode requires a complete new preview/rehearsal
+and production release, a bounded read-only database audit, disabled execution
+and dispatch, no active worker/admin/delivery, zero benchmark residue, and exact
+parent receipt/protection/counter verification. It also validates the release
+compatibility certificate. The publisher retains its owned S3 mutex, deployment
+gate, short audit lease, one bounded write, exact readback and independent lock
+release proof. It writes only the rehearsal-acceptance parameter, preserving the
+completed production runtime plan, state, credentials and recovery snapshots.
+A real marked preview fixture produces the continuation acceptance evidence;
+fixture data cannot be presented as real production mutation evidence.
+
+Fresh performance cohorts keep the existing minimum of 100 requests per class,
+P95 ceiling, complete real-activity coverage, workload identity, warmups,
+concurrency and deadlines. Predeclare a supported count before collecting either
+cohort. Use genuine still-pending planner work alongside the executor; never pad
+an interval with sleep or splice old and new samples. Launch the executor once,
+asynchronously, after the first measured write acknowledgment proves both class
+windows have begun. A durable launch intent precedes the canonical Scheduler
+journal and request. Every new commit must fall inside both measured windows;
+a timing miss keeps performance failed even though an authorized lossless
+commit remains valid historical work. Preserve all old failed measurements.
+
+Failure closes new launch admission immediately, starts canonical pause, cancels
+and reconciles owned schedules, stops/quiesces workers, joins all started work,
+then repeats the inventory/drain and fresh receipt reads. Acknowledged SQL pause
+serializes with `apply_action` on the execution-control row: prior commits may
+finish before that acknowledgment, but later applies reject while paused. No
+instantaneous ECS cancellation or dispatcher-token-at-commit guarantee is
+invented. Keep fences held on uncertain cleanup or ownership. All new benchmark
+records are reconciled and removed before release. An explicit recovery path
+uses the recorded owner and fresh authoritative evidence, never a timer-based
+forced unlock.
+
+Capacity evidence remains distinct from performance evidence. Reuse only the
+whole previously successful production apply batch, with all immutable receipts,
+commit times, actual task data and the verified compatibility linkage. Retain the
+existing first-burst exclusion, duty cycle and headroom; do not select faster
+receipts or turn an hours-long cross-attempt span into a rate. A fresh complete
+performance cohort and fresh eligible-backlog census are independently required.
+An allowance is a ceiling, not asserted demand; an empty backlog is not a reason
+to forbid incremental scheduling. No genuine new candidate or insufficient real
+planner work makes this validation attempt fail, not permission to create data.
+Only after active-attempt verification, two new full-set cached replays, complete
+cleanup and calibration may promotion and actual recurring-execution acceptance
+proceed.
+
+Required validation includes a real PostgreSQL frozen-parent reproduction,
+append-only/idempotent continuation transitions, unchanged lifetime budgets,
+planner-only execution disablement, rejected drift/reset attempts, actual image
+packaging, and a marked production-shaped preview lifecycle with synthetic data.
+Release verification must exercise both the old zero-receipt publisher mode and
+the new paused-canary mode, including rejection and recovery cases. The runtime
+operator/schema digests used by the completed credential cutover must not change.
+Administrative metadata DDL is packaged in the canonical operator, not added to
+the sealed bootstrap migration directory. New tables, indexes and helper
+functions remain in the maintenance schema; restrict PUBLIC/worker access in
+the same transaction and prove `ready_for` plus ordinary runtime verification
+still succeed. Explicitly package the new bootstrap-only helper and bind it in
+the release coordinator digest. Keep worker-copied verification code unchanged
+when old capacity reuse depends on equal actual worker image content.
+
+#### Canonical continuation interface details
+
+The root setup phase stays exactly `canary` from the first canary admission
+through all continued measurements. Only successful promotion changes it to
+`promote`. The existing receipt trigger increments root `canary_used` once per
+committed receipt in the same transaction as the memory writes; attempts never
+add another counter charge, subtract usage, or restore the allowance. Ten used
+rows leave ten available across all descendants, not ten per attempt.
+
+Administrative metadata uses these maintenance-schema objects:
+
+- `production_canary_validation_attempts`: immutable attempt header, root
+  validation ID, ordinal, parent ID/hash, canonical request hash/idempotency key,
+  complete parent proof, compatibility-certificate hash/body, attempt backend
+  and release binding, and creation time.
+- `production_canary_validation_events`: immutable ordered events with the
+  previous event hash, event type and payload. The states are `planning`,
+  `measuring`, `frozen`, `promoted` and `failed`; rejected requests append no
+  successful transition. A freeze event contains the exact verified receipt-ID
+  set, full proof and freeze time. The last event determines attempt state.
+- `production_canary_validation_current`: one owner-only current pointer,
+  advanced by compare-and-set against the expected parent. It never moves back.
+- `production_canary_validation_admissions`: owner-created execution-control
+  epochs associated with their attempt and canonical request. `resume-plan`
+  records planning admission with execution false; canary admission records an
+  execution epoch only in an unfrozen attempt, with root phase still `canary`.
+- `production_canary_validation_receipts`: immutable receipt membership keyed
+  by namespace/action ID, referencing the existing immutable receipt, its
+  digest, attempt and admission epoch. The legacy root membership is captured
+  from its verified frozen receipt set exactly once. New membership is recorded
+  by an owner-defined receipt trigger in the SAME apply transaction, using the
+  leased action's control epoch and active admission. A missing, stale,
+  cross-attempt or unbound admission rejects the insert and rolls back the
+  memory writes and counter update. Workers do not supply or edit membership.
+
+The action lease already records `control_epoch`, and `execution_valid` checks
+it against the current execution-control epoch immediately before apply. New
+metadata relies on that actual contract. It does not add an invented dispatcher
+token to a commit or change worker image code. Both the existing root counter
+trigger and new membership trigger retain atomic rollback behavior. Receipt
+replays return the existing receipt and do not create new membership or charge.
+
+Parent conservation has an immutable projection. At initial capture/begin,
+store the exact receipt-ID set and the policy/epoch, budget-window and admission
+snapshots that reproduce the parent's frozen hashes. Terminal member images
+are reconstructed from those immutable receipts' post-images; later descendant
+writes do not redefine the parent's historical population. The parent's
+protected baseline remains the original baseline, which is also checked against
+current rows before admission. Validate the ancestor hash chain and cumulative
+receipt membership; current verification uses the union of immutable ancestor
+and active-attempt receipt sets and verifies the complete source/post-image
+chain against current rows. Timestamp cutoffs alone never assign descendants,
+and unknown receipts cannot be silently omitted. A frozen attempt cannot admit
+another execution epoch; it requires another explicit child attempt.
+
+The compatibility certificate is a versioned canonical JSON object containing
+parent proof hash, old/new source tree and source tag, old/new worker and serving
+image roots and resolved ARM64 children, old/new backend identities, generation,
+namespace target hash, runtime/schema digests, role/credential binding hashes,
+normalizer version, normalized configuration hashes and an empty residual diff.
+The host producer computes it from authenticated AWS observations and archived
+parent evidence before publication; the owner operation validates its structure,
+current witness binding and expected parent. It is never inferred from tags.
+
+Normalize image references only by verified root-to-child mappings with exact
+registry/repository/digest checks and one Linux/ARM64 child. Task-definition
+`taskDefinitionArn`, `revision`, `registeredAt`, `registeredBy` and derived AWS
+registration metadata are separately recorded as identities. All other material
+fields must match: family, task/execution roles, CPU/memory, network mode,
+runtime platform, required compatibility, volumes, ephemeral storage, proxy/PID/
+IPC settings, placement constraints and complete container definitions after
+image substitution. Container names, commands, entrypoints, environment,
+secrets, mounts, dependencies, resource limits, logging, health checks and
+security settings are preserved; duplicate environment/secret names reject.
+Configured subnet/security-group sets and public-IP mode match exactly. Runtime
+ENI/task identity changes are recorded separately, never ignored as equivalent
+authority. An unknown semantic field or non-empty residual diff rejects reuse.
+
+Version 2 of the material capture includes the Scheduler role as well as all
+task and execution roles. Its trust must name the exact account and schedule
+group; its sole inline policy must deny the legacy task family, allow RunTask
+only for its own snapshot's two worker revisions in the exact cluster, and
+allow PassRole only for those workers' four roles to ECS. Additional policies,
+resources or schedules reject. After verifying that exact contract, only the
+two allowed RunTask revision references become family comparison markers.
+These markers never enter an IAM write. The original observations remain in
+the capture; all other authority fields, including the role ID and boundary,
+must match. Archived backend mappings must also match the captured task,
+definition and container digests, including when an image reference is tagged.
+
+`publish-runtime-rehearsal-acceptance` in explicit paused-canary mode is the
+witness-independent host producer. It uses a scoped read-only database audit
+and authenticated AWS/GitHub/archive reads, not any operator API requiring the
+new witness. Its single parameter write establishes the new witness. The
+versioned payload contains the genuine current-tree runtime rehearsal plus
+actual marked continuation-fixture evidence and the parent/certificate binding;
+new operator/host paths validate it before admitting new operations. Missing,
+stale, wrong-version, oversized or mismatched records reject. A lease heartbeat
+older than the existing ten-second limit, insufficient remaining lease, unknown
+write/readback or unproven release retains owned fences. The original publisher
+mode and its zero-setup/zero-receipt assertions remain unchanged.
+
+The packaged paused audit requires `REPEATABLE READ READ ONLY` and the direct
+schema-administrator session. Snapshot helpers omit row locks only for this
+read-only path; mutating operations retain their existing locks. Structural
+certificate inspection is separate from witness authorization, so the audit can
+run before publication while every mutating continuation still requires the
+published witness. The audit checks the original frozen root or the active
+frozen attempt, receipt membership, protected rows, spent counter, retired login,
+runtime ACLs, ownership, disabled controls and zero benchmark residue. It does
+not install continuation tables or return memory images.
+
+The compact continuation witness also requires a fixture hash, CI run ID and
+attempt. The publisher reads one completed `synthetic-canary-continuation`
+record from the authenticated preview job whose required fixture step passed.
+Its exact stage, source commit/tree, coordinator/schema/operator digests and
+workflow attempt must match, and all nine fixture checks must have passed:
+frozen parent, continuation, budget cap, receipt admission, parent preservation,
+read-only audit, commit window, ordinary post-promotion execution and cleanup.
+Both publication snapshots recheck the fixture's original 24-hour age limit;
+time spent preparing the publication cannot extend it. The fixture producer
+derives those checks from actual isolated database operations.
+
+The preview fixture is a separate stage-scoped ECS task. Its runner inherits the
+exact newly built bootstrap image and adds only the canonical PostgreSQL test
+file, its runner and test dependencies. Packaged SQL is mapped into the test's
+expected paths; another application source tree must not replace the inherited
+modules. A digest-pinned PostgreSQL sidecar listens only on loopback and receives
+no Aurora, tenant or production credentials. Both containers run as non-root.
+The runner requires all 17 named cases, zero skipped/failed cases and a successful
+test process, then removes the four shared fixture roles and proves zero fixture
+database/role residue before PostgreSQL exits. The host may emit the final
+marked preview evidence only after verifying the actual images, task completion
+and cleanup. Local container runs are not release evidence. This synthetic
+fixture does not certify Aurora retirement or capacity; the separate genuine
+Aurora runtime and foreground acceptance gates remain mandatory.
+
+The fixture task has no application IAM role or injected secrets; its existing
+preview execution role is used only by ECS for image pulls and logs. Launch has
+one immutable deadline and one RunTask attempt. Cleanup directly reconciles each
+known task ARN as well as fresh complete inventories; an empty list cannot
+erase an acknowledged task. Unknown launches retain the original deadline and
+are reconciled through its grace period. CI proves stopped containers and reads
+back task-definition deregistration. It does not claim immediate prevention of
+new launches or physical deletion from `INACTIVE` alone. A private stage-scoped
+SSM journal retains exact resource identities and request hashes until the
+operator separately verifies physical deletion and removes that journal.
+
+The executor launch predicate concerns FOREGROUND samples: a real planner is
+already running, and the canonical sampler calls `onWrite` with
+`phase === 'loaded'`, `warmup === false`, `index === 0`. Its serial measured read
+and write acknowledgment have therefore finished. Set/read the once flag and
+persist intent before asynchronously launching the executor; return promptly
+so sampling continues. It is not a planner write, an executor commit, or proof
+that the executor has already started. Later actual task and receipt timestamps
+must independently prove every sample lies wholly in one genuine planner OR
+executor interval and every new commit lies inside both foreground class
+windows. A timing miss remains failed.
+
+Final operational state is `running_verified` only after canonical promotion,
+complete cached-replay/cleanup/calibration gates, and actual recurring planner
+and executor deliveries with authenticated Scheduler provenance, matching
+bindings and successful reports. Store those observations in the durable
+operator audit. Existing worker admission/lease checks remain authoritative;
+no new worker SSM permissions or per-tick witness fetch is introduced. An empty
+backlog may produce a valid no-op cycle and is not an invented release blocker.
+
+Full-precision N150 timing data can exceed the existing report encoding limit.
+If needed, add an explicitly versioned lossless timing encoding that retains
+all samples and their exact timestamps and IEEE-754 latency values, and decodes
+legacy reports. Delta encoding may exploit redundant integer wall-clock values
+but must reconstruct them exactly; it does not round or discard latency data.
+The 12,000-character report, four bounded fragments, request-size limits and
+performance/sample gates remain unchanged. Boundary, malformed, overflow and
+full-precision round-trip tests are required.
+
+The receipt-membership trigger is scoped to root phase `canary`. After verified
+promotion changes root phase to `promote`, ordinary recurring receipts remain
+outside the frozen canary lineage and are governed by the steady-state budgets;
+they must not be rejected because the validation attempt is frozen. A real
+PostgreSQL test covers promotion, a subsequent ordinary apply, and its cached
+replay. Admission is forbidden once any freeze event exists in an attempt, even
+if a later failure event becomes its latest status. Lock order remains execution
+control, root setup, then continuation pointer/attempt/admission/membership.
+Action state may be `ready`; provenance uses its already-validated control epoch
+rather than assuming a literal `leased` status.
+
+A legacy frozen proof must not be rewritten merely because a newly deployed
+operator recomputes its non-conservation release fields. Before an explicit
+continuation, a verification call with changed release/binding context rejects
+without updating the original proof. Similarly, `prepare` cannot overwrite a
+setup that has captured a validation baseline, spent allowance or frozen proof.
+Continuation idempotency uses a caller-persisted attempt/request ID and a
+canonical semantic request hash covering the parent and new certified binding;
+transport retry nonce/deadline do not restart an attempt or its original clocks.
+A superseded attempt cannot advance the current pointer on replay.
+
+#### Retained data images with a new control release
+
+Rebuilding unchanged source does not guarantee an identical image: refreshed
+runtime layers and executable Node caches can change the ARM64 child. Never
+exclude those bytes to manufacture an equivalence result. A continuation may
+instead retain the actual previously verified worker and serving images while
+deploying the newly reviewed bootstrap/operator build. The ordinary release tag
+continues to identify control code; data tags, roots and ARM64 children are
+recorded independently. The existing seven-field canary release hash and all
+original parent proofs, bindings and spent lifetime allowance remain unchanged.
+
+The operator issues a strict stage/account/region-scoped descriptor at
+`consolidation-runtime/data-release` only after reviewing its source, artifact
+and security evidence. It binds the current control tree, original data revision
+and tree, three exact root/child pairs, parent proof, runtime nonce, generation,
+namespace targets, schema/operator identities, build-input evidence, security
+inventory and policy review. Authorization has a bounded explicit operation
+window, at most 24 hours. Changing only timestamps is not renewal evidence.
+A draft capture or valid JSON shape is not authorization.
+
+Declared build-input evidence covers the three Dockerfiles, every local COPY
+source including matching lockfiles and directory members, file modes, root and
+Dockerfile-specific ignore files, and the relevant pinned CI build/builder
+settings. Unsupported instructions, missing sources and linked inputs reject.
+Separate authenticated ECR reads verify exact index and ARM64 manifest bytes and
+record config/layer descriptors. These are selected-artifact identities, not a
+claim that every historical network fetch has source provenance or that future
+remote resolution is reproducible. Both declared recipes and resolved artifact
+records contribute to the build-input hash.
+
+`configure` reads the protected descriptor and existing selection metadata,
+checks the completed runtime identity, compares historical and control recipes,
+verifies selected ECR artifacts, and re-reads authorization before exporting its
+snapshot. Production checkout includes the historical revisions. The IaC
+selector independently reads the same protected parameter and rejects a forged
+environment snapshot or dirty tracked sources. Missing authorization after a
+retained deployment must not select fresh data images silently. Runtime image
+selection and release publication distinguish current control provenance from
+retained data provenance.
+
+Scan capture exhausts pages, checks counts and identity consistency, and retains
+all open findings. Existing deployment bytes are not implicit risk acceptance;
+new-build scans cannot replace scans of the selected retained bytes. The
+operator must assess current findings against the existing policy, preserve
+unfixed findings, and stop for required governance if there is new exposure,
+a newly introduced finding, or an available fix being withheld. Neither this
+path nor its tests introduce a zero-HIGH rule or an automatic waiver.
+
+Expiry blocks new deployment and admission, including a database-time check at
+the final admission transaction boundary. Expiry during verification rolls back
+budget policies, execution/dispatcher changes and attempt admission. Pause,
+status, inspection and cleanup remain available. Expiry does not automatically
+stop a verified recurring worker or add per-tick secret-store access.
+
+Predeployment authorization must be independently produced before the new
+postdeployment witness exists. Publication still performs the paused read-only
+parent audit and material/authority/credential checks. Actual old-data/new-control
+preview coverage, fresh production N150 cohorts and commits, both complete
+replays, benchmark cleanup, capacity calibration, promotion and genuine recurring
+deliveries remain required; an all-new preview cannot substitute for them.
+
+The retained combination rehearsal runs after a genuine disposable runtime
+finalization/rehearsal and before that stage is removed. Its optional manual
+input selects an earlier successful pull-request build for the same preview
+stage. A pre-AWS workflow check rejects production stages or malformed run IDs.
+The rehearsal verifies the historical build's exact preview ECR roots and ARM64
+children, keeps the current bootstrap/control image, and redeploys the stage with
+an explicitly synthetic preview-only descriptor. It then runs the ordinary
+bootstrap, synthetic 150-row Scheduler acceptance, MCP and OAuth checks and
+verifies actual service and worker image digests. Its distinct, source-bound
+`retained_data_preview` record is required by paused production witness
+publication. Synthetic descriptor hashes are never production parent or policy
+evidence. Preview teardown can inspect an expired descriptor, disables selection
+only for resource removal, and deletes the unchanged owned record before removing
+the runtime plan; concurrent changes reject cleanup.
+
+Continuation state persistence serializes immutable snapshots so asynchronous
+sampling and task-launch progress cannot overwrite each other's acknowledged
+journals. The controller checks the returned N150 baseline before admitting
+execution and the returned loaded cohort before freezing verification. Each
+canonical launch exposes its exact journal identity to durable persistence
+before any AWS write; cancellation or a missed original due time cannot retime
+that launch.
+
+Recurring activation receives the certified backend binding explicitly and
+verifies it before changing schedule admission. Recurring target payloads carry
+Scheduler context attributes. Acceptance correlates authenticated role identity,
+RunTask audit events, immutable task overrides and the task's exact log stream;
+user-agent text is not authentication. The retained worker's recurring reports
+do not carry the one-shot invocation field. Each kind must complete at least one
+successful slice, while classifications and changed rows may be zero. This
+proves the dispatcher and slice ran even when the queue is empty. A failure in
+only final operator-fence cleanup after verified recurring execution is reported
+as running with cleanup pending, preserving the already verified worker state.
+
+### Post-runtime retained preview acceptance
+
+An active ordinary bootstrap remains a runtime verifier without synthetic
+fixture credentials. Post-runtime Scheduler acceptance uses a separate task
+only for a numeric preview in exact `active` mode with an explicit acceptance
+context bound to the completed runtime nonce. The deploy-authored route binds
+the current control image, task definition, roles, private network and exact
+credential references. Both the route and live definition are rechecked before
+launch; the task independently verifies the completed SQL ledger and the
+replacement administrator's session OID before fixture DDL.
+
+The context derives a fresh generation, database, four role names, tenant ID
+and tenant name. It never adopts the retired administrator's fixture or resets
+an old proof. The database's actual owner and context marker must match. Database
+creation runs in autocommit under a bounded fixture lock, outside the ordinary
+runtime bootstrap lock. Only the later new-binding/new-tenant transaction takes
+the existing runtime lock; pre-existing tenant and binding rows remain unchanged.
+
+The dedicated execution identity receives exactly the replacement administrator,
+fixture configuration and four fixture credentials, with scoped KMS access. It
+receives no original-owner, administrator-backup, transition or ordinary runtime
+credential. The ordinary bootstrap policy and production resource graph are
+unchanged. Historical task recovery uses the journal's original route identity;
+unknown work holds new admission. Partially created databases without a valid
+marker are not adopted or removed by a name-prefix sweep. Verified removal of
+the owned disposable preview cluster removes that residue.
+
+Acceptance still requires real Scheduler delivery, 150 changed synthetic rows,
+zero-change replay, pause, MCP/OAuth and complete disposal on the final source.
+This context does not alter production canary clocks, proofs or allowances.

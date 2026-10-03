@@ -820,6 +820,7 @@ describe("ecs stack", () => {
     expect(names).toEqual([
       "/mem9-on-aws/prod/ecs/cluster-name",
       "/mem9-on-aws/prod/ecs/image",
+      "/mem9-on-aws/prod/ecs/image-selection",
       "/mem9-on-aws/prod/ecs/image-tag",
       "/mem9-on-aws/prod/ecs/service-dns-name",
       "/mem9-on-aws/prod/ecs/service-name",
@@ -833,6 +834,8 @@ describe("ecs stack", () => {
       ),
     ).toBe("arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-on-aws-prod-Mem9Server:42");
     expect(imageTag?.value).toBe("mem9-abcdef0");
+    const selection=params.find(p=>p.name.endsWith('/image-selection'));
+    expect(JSON.parse(String(materialize(selection?.value)))).toMatchObject({version:1,mode:'tag',controlTag:'mem9-abcdef0',dataTag:'mem9-abcdef0'});
   });
 
   // Observability (TC-OBS-001...003 and TC-INGEST-METRIC-015...027): prod only.

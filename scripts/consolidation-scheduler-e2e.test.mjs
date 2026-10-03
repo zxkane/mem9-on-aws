@@ -1,5 +1,5 @@
 import {describe,it,expect} from 'vitest';
-import {validateManifest,scheduleJournal,validateJournal,ownsTask,oneShotInput,runSchedulerAcceptance,taskDefinitionMatches,discoverSchedulerTasks} from './consolidation-scheduler-e2e.mjs';
+import {validateManifest,scheduleJournal,validateJournal,ownsTask,oneShotInput,runSchedulerAcceptance,taskDefinitionMatches,discoverSchedulerTasks,verifyPostRuntimeTask} from './consolidation-scheduler-e2e.mjs';
 
 const stage='pr-7',generation='a'.repeat(64),region='ap-northeast-1',account='123456789012';
 const clusterName=`mem9-on-aws-${stage}-Cluster-example`;
@@ -16,6 +16,18 @@ const template={State:'DISABLED',GroupName:manifest.groupName,Target:{Arn:manife
   Input:JSON.stringify({containerOverrides:[{name:worker.containerName,environment:[{name:'MEM9_WORKER_GENERATION',value:generation}]}]}),
   EcsParameters:{TaskDefinitionArn:worker.taskDefinitionArn,LaunchType:'FARGATE',PropagateTags:'TASK_DEFINITION'}}};
 describe('real Scheduler acceptance ownership and cleanup',()=>{
+  it('requires actual post-runtime task images and overrides, not requested values substituted as evidence',()=>{
+    const route={containerName:'Mem9PostFixture',taskDefinitionArn:`arn:aws:ecs:${region}:${account}:task-definition/${clusterName}-Mem9PostFixture:7`,image:`${account}.dkr.ecr.${region}.amazonaws.com/mem9-on-aws/preview/bootstrap@sha256:${'b'.repeat(64)}`,taskRoleArn:'task-role',executionRoleArn:'execution-role'};
+    const j={operator:true,stage,generation,nonce:'c'.repeat(32),deadline:Date.now()+60000,operation:'setup',batchBoundaryCrossings:0,taskDefinitionArn:route.taskDefinitionArn,route};
+    const task={taskArn:manifest.clusterArn.replace(':cluster/',':task/')+'/'+'d'.repeat(32),clusterArn:manifest.clusterArn,taskDefinitionArn:route.taskDefinitionArn,lastStatus:'STOPPED',
+      containers:[{name:route.containerName,image:route.image,imageDigest:'sha256:'+'e'.repeat(64),exitCode:0}],
+      overrides:{containerOverrides:[{name:route.containerName,environment:Object.entries({MEM9_BOOTSTRAP_OPERATION:'consolidation-preview-setup',MEM9_PREVIEW_EXPECTED_GENERATION:generation,MEM9_PREVIEW_OPERATOR_NONCE:j.nonce,MEM9_PREVIEW_OPERATOR_DEADLINE:String(j.deadline),MEM9_PREVIEW_BATCH_BOUNDARY_CROSSINGS:'0'}).map(([name,value])=>({name,value}))}]}};
+    const binding={route,image:{rootDigest:'sha256:'+'b'.repeat(64),arm64Digest:'sha256:'+'e'.repeat(64)}};
+    expect(()=>verifyPostRuntimeTask(task,manifest,binding,j)).not.toThrow();
+    for(const mutate of [t=>{delete t.overrides;},t=>{t.containers[0].imageDigest='sha256:'+'f'.repeat(64);},t=>{t.overrides.executionRoleArn='foreign';},t=>{t.overrides.containerOverrides[0].command=['foreign'];}]){
+      const bad=structuredClone(task);mutate(bad);expect(()=>verifyPostRuntimeTask(bad,manifest,binding,j)).toThrow('PostRuntimeTaskMismatch');
+    }
+  });
   it('re-reads task inventory when a listed task briefly has no description',async()=>{
     const arn=manifest.clusterArn.replace(':cluster/',':task/')+'/fresh',waits=[];let attempt=0;
     const ecs={send:async command=>{
@@ -88,6 +100,19 @@ describe('real Scheduler acceptance ownership and cleanup',()=>{
     await expect(runSchedulerAcceptance({clients:{ssm:client},stage,generation:'b'.repeat(64),region,progress:()=>{}})).rejects.toThrow('GenerationDeployMismatch');
     expect(calls).toEqual(['GetParametersCommand']);
   });
+  it('holds the legacy route once runtime preparation exists even if its fixture generation still matches',async()=>{
+    const bootArn=`arn:aws:ecs:${region}:${account}:task-definition/${clusterName}-Mem9Bootstrap:7`,calls=[];
+    const client={send:async command=>{
+      calls.push(command.constructor.name);
+      if(command.constructor.name==='DescribeTaskDefinitionCommand')return {taskDefinition:{containerDefinitions:[{name:'Mem9Bootstrap',environment:[{name:'MEM9_PREVIEW_GENERATION',value:generation}]}]}};
+      const names=command.input.Names;
+      if(names[0].endsWith('/manifest'))return {Parameters:[{Name:names[0],Value:JSON.stringify(raw)}]};
+      if(names[0].endsWith('/production-plan'))return {Parameters:[{Name:names[0],Value:'existing-lifecycle'}]};
+      return {Parameters:names.map((Name,i)=>({Name,Value:[bootArn,'subnet-test','sg-test'][i]}))};
+    }};
+    await expect(runSchedulerAcceptance({clients:{ssm:client,ecs:client},stage,generation,region,progress:()=>{}})).rejects.toThrow('PostRuntimeContextRequired');
+    expect(calls.every(name=>/^(Get|Describe)/.test(name))).toBe(true);
+  });
   it.each(['schedule-response-loss','setup-response-loss','stop-failure'])('journals and continues cleanup after %s',async scenario=>{
     let now=Date.now(),taskSequence=0;const calls=[],store=new Map(),tasks=new Map();
     const bootArn=`arn:aws:ecs:${region}:${account}:task-definition/${clusterName}-Mem9Bootstrap:7`;
@@ -95,7 +120,7 @@ describe('real Scheduler acceptance ownership and cleanup',()=>{
     for(const [k,v] of Object.entries({'task-def-arn':bootArn,'subnet-ids':'subnet-test','task-sg-id':'sg-test'}))store.set(`/mem9-on-aws/${stage}/bootstrap/${k}`,v);
     const client={send:async command=>{
       const kind=command.constructor.name,input=command.input;calls.push({kind,input});
-      if(kind==='GetParametersCommand')return {Parameters:input.Names.map(Name=>({Name,Value:store.get(Name)}))};
+      if(kind==='GetParametersCommand')return {Parameters:input.Names.filter(Name=>store.has(Name)).map(Name=>({Name,Value:store.get(Name)})),InvalidParameters:input.Names.filter(Name=>!store.has(Name))};
       if(kind==='PutParameterCommand'){store.set(input.Name,input.Value);return {};}
       if(kind==='DeleteParameterCommand'){store.delete(input.Name);return {};}
       if(kind==='GetParametersByPathCommand')return {Parameters:[...store].filter(([key])=>key.startsWith(input.Path)).map(([Name,Value])=>({Name,Value}))};

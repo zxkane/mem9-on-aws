@@ -12,6 +12,21 @@ describe('production worker administration request boundary',()=>{
     expect(parseProductionConsolidationRequest(JSON.stringify({...request('promote'),dailyRows:6000,basisPoints:3500,canaryReportHash:'a'.repeat(64)})).dailyRows).toBe(6000);
     expect(()=>parseProductionConsolidationRequest(JSON.stringify({...request('promote'),dailyRows:6000,basisPoints:3500}))).toThrow('VerifiedProductionCanaryRequired');
   });
+  it('requires explicit attempt identity and bounds the continuation-only fields',()=>{
+    const begin={...request('begin-continuation'),attemptId:'b'.repeat(32),parentProofHash:'c'.repeat(64),compatibility:{version:1}};
+    expect(parseProductionConsolidationRequest(JSON.stringify(begin)).attemptId).toBe(begin.attemptId);
+    for(const patch of [{attemptId:undefined},{parentProofHash:undefined},{compatibility:[]},{compatibility:{padding:'x'.repeat(6001)}},{force:true}]){
+      expect(()=>parseProductionConsolidationRequest(JSON.stringify({...begin,...patch}))).toThrow();
+    }
+    for(const operation of ['inspect-canary','resume-plan']){
+      expect(()=>parseProductionConsolidationRequest(JSON.stringify(request(operation)))).toThrow('CanaryAttemptRequired');
+      expect(parseProductionConsolidationRequest(JSON.stringify({...request(operation),attemptId:'b'.repeat(32)})).operation).toBe(operation);
+    }
+    for(const operation of ['pause','status','prepare','baseline','cleanup-benchmark']){
+      expect(()=>parseProductionConsolidationRequest(JSON.stringify({...request(operation),attemptId:'b'.repeat(32)}))).toThrow();
+      expect(()=>parseProductionConsolidationRequest(JSON.stringify({...request(operation),parentProofHash:'c'.repeat(64)}))).toThrow();
+    }
+  });
   it.each([{operation:'sql'},{invocation:'invalid'},{deadline:0},{password:'forbidden'},
     {operation:'promote',dailyRows:50001,basisPoints:10000},{dailyRows:20}])('rejects unsafe or unexpected input %o',patch=>{
     expect(()=>parseProductionConsolidationRequest(JSON.stringify({...request('pause'),...patch}))).toThrow();

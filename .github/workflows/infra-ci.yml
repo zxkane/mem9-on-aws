@@ -70,6 +70,10 @@ on:
         type: choice
         options: [normal, cancel, resume]
         default: normal
+      runtime_retained_data_run:
+        description: "Preview only: prior successful pull-request CI run supplying retained data images"
+        type: string
+        default: ""
       seed_oauth_hmac:
         description: "Generate + set OauthStateHmacKey before deploying (enables the OAuth browser-login flow)"
         type: boolean
@@ -176,6 +180,20 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: 24
+      - name: Validate retained preview request
+        if: github.event_name == 'workflow_dispatch'
+        shell: bash
+        env:
+          RETAINED_DATA_RUN_ID: ${{ inputs.runtime_retained_data_run }}
+          RUNTIME_CUTOVER: ${{ inputs.runtime_cutover && 'true' || 'false' }}
+          RUNTIME_STAGE: ${{ inputs.runtime_stage }}
+        run: |
+          if [[ -n "$RETAINED_DATA_RUN_ID" ]]; then
+            [[ "$RUNTIME_CUTOVER" == true && "$RUNTIME_STAGE" =~ ^pr-[1-9][0-9]*$ && "$RETAINED_DATA_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+              echo 'Retained-data rehearsal requires a numeric preview stage and a successful source run ID'
+              exit 1
+            }
+          fi
       - name: Resolve SST AWS provider region
         id: resolve
         env:
@@ -657,6 +675,17 @@ jobs:
           MEM9_DEPLOY_COMMIT: ${{ github.sha }}
         run: node scripts/consolidation-scheduler-e2e.mjs
 
+      - name: Canary continuation fixture (preview, hard)
+        if: steps.gate.outputs.skip != 'true' && steps.deploy.outputs.stage != '' && needs.build-and-push-image.result == 'success'
+        env:
+          STAGE: ${{ steps.deploy.outputs.stage }}
+          MEM9_FIXTURE_SOURCE_COMMIT: ${{ github.event.pull_request.head.sha }}
+          EXPECTED_IMAGE_TAG: ${{ needs.build-and-push-image.outputs.image_tag }}
+          EXPECTED_BOOTSTRAP_DIGEST: ${{ needs.build-and-push-image.outputs.bootstrap_digest }}
+          EXPECTED_FIXTURE_RUNNER_DIGEST: ${{ needs.build-and-push-image.outputs.fixture_runner_digest }}
+          EXPECTED_FIXTURE_DATABASE_DIGEST: ${{ needs.build-and-push-image.outputs.fixture_database_digest }}
+        run: node scripts/canary-fixture-e2e.mjs
+
       - name: MCP write-search E2E (preview, hard)
         # The first live write->search round-trip (section 6/6a): Cognito M2M JWT
         # -> AgentCore Gateway -> VPC-attached proxy Lambda -> Cloud Map private
@@ -1131,6 +1160,9 @@ jobs:
       # The per-commit tag, or empty when skipped, so
       # downstream jobs can fall back to `latest`.
       image_tag: ${{ steps.tag.outputs.image_tag }}
+      bootstrap_digest: ${{ steps.bootstrap.outputs.digest }}
+      fixture_runner_digest: ${{ steps.canary-runner.outputs.digest }}
+      fixture_database_digest: ${{ steps.canary-database.outputs.digest }}
     steps:
       - name: Deployment maintenance gate
         env:
@@ -1271,6 +1303,7 @@ jobs:
           cache-to: type=gha,mode=max,scope=qwen3-embed
 
       - name: Build & push bootstrap (arm64)
+        id: bootstrap
         if: steps.gate.outputs.skip != 'true'
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
         with:
@@ -1283,6 +1316,37 @@ jobs:
           tags: ${{ steps.tags.outputs.bootstrap_tags }}
           cache-from: type=gha,scope=bootstrap
           cache-to: type=gha,mode=max,scope=bootstrap
+
+      - name: Build & push canary fixture database (arm64)
+        id: canary-database
+        if: steps.gate.outputs.skip != 'true' && github.event_name == 'pull_request'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: docker/canary-fixture/database.Dockerfile
+          pull: true
+          no-cache-filters: runtime
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_NS }}/bootstrap:${{ steps.tag.outputs.image_tag }}-canary-db
+          cache-from: type=gha,scope=canary-fixture-database
+          cache-to: type=gha,mode=max,scope=canary-fixture-database
+
+      - name: Build & push canary fixture runner (arm64)
+        id: canary-runner
+        if: steps.gate.outputs.skip != 'true' && github.event_name == 'pull_request'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: docker/canary-fixture/runner.Dockerfile
+          pull: true
+          no-cache-filters: runtime
+          build-args: BOOTSTRAP_IMAGE=${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_NS }}/bootstrap@${{ steps.bootstrap.outputs.digest }}
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.ecr-login.outputs.registry }}/${{ env.ECR_NS }}/bootstrap:${{ steps.tag.outputs.image_tag }}-canary-runner
+          cache-from: type=gha,scope=canary-fixture-runner
+          cache-to: type=gha,mode=max,scope=canary-fixture-runner
 
       - name: Build & push llm-proxy (arm64)
         if: steps.gate.outputs.skip != 'true'
@@ -1458,6 +1522,10 @@ jobs:
           fi
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          # Retained data authorization compares the historical and control
+          # release recipes before deploying the independently built operator.
+          fetch-depth: 0
 
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
         with:
@@ -1917,6 +1985,8 @@ jobs:
             [[ "$STAGE" =~ ^pr-[1-9][0-9]*$ ]] || { echo 'Invalid preview stage'; exit 1; }
           fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0
       - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86
         with:
           package_json_file: infra/package.json
@@ -1982,6 +2052,12 @@ jobs:
           region: ${{ needs.application-region.outputs.region }}
           phase: finish
           cleanup-preview: "true"
+      - name: Retained data and current control acceptance (preview, hard)
+        if: success() && inputs.runtime_retained_data_run != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          MEM9_RETAINED_PREVIEW_DATA_RUN_ID: ${{ inputs.runtime_retained_data_run }}
+        run: node scripts/run-retained-data-preview.mjs
       - name: Restore interrupted preview runtime
         if: (failure() || cancelled()) && !(cancelled() && steps.cancel_arm.outputs.armed == 'true')
         uses: ./.github/actions/runtime-recovery

@@ -23,6 +23,9 @@ import {restoreMissingAdministrator,armAdministratorLoss,deletePreviewAdministra
 import {assertExtensionMaintenance} from './lib/runtime-extension-catalog.mjs';
 import {cancellationRehearsal} from './lib/production-runtime-cancellation-runner.mjs';
 import {requireNamespaceId} from './lib/maintenance-scope.mjs';
+import {loadDeploymentDataRelease} from './lib/production-data-release-loader.mjs';
+import {captureDataReleaseBuild} from './lib/production-data-evidence.mjs';
+import {inspectDataRelease} from './lib/production-data-release.mjs';
 
 const runProcess=promisify(execFile),send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
 const emit=value=>process.stdout.write(JSON.stringify({event:'production_runtime_rollout',...value})+'\n');
@@ -75,14 +78,44 @@ export async function productionCoordinatorDigest(){
     '.github/workflows/runtime-recovery.yml','.github/actions/runtime-cutover/action.yml','.github/actions/runtime-recovery/action.yml',
     '.github/actions/runtime-cleanup/action.yml','package-lock.json','infra/pnpm-lock.yaml'];
   paths.push('infra/production-consolidation.ts','infra/consolidation-runtime.ts','scripts/production-consolidation-operator.mjs',
+    'infra/post-runtime-preview.ts','scripts/consolidation-preview-fixture.mjs','scripts/lib/consolidation-preview-config.mjs',
+    'scripts/lib/post-runtime-preview-authority.mjs','scripts/lib/post-runtime-preview-route.mjs','scripts/lib/post-runtime-preview-aws.mjs','scripts/consolidation-scheduler-e2e.mjs',
     'scripts/run-production-consolidation.mjs','scripts/run-production-canary.mjs','scripts/consolidation-worker.mjs','scripts/consolidation-canary-replay.mjs',
     'scripts/lib/production-canary-verification.mjs','scripts/lib/production-canary-report.mjs','scripts/lib/production-canary-performance.mjs',
+    'scripts/lib/production-canary-continuation.mjs','scripts/lib/production-canary-snapshot.mjs',
+    'scripts/lib/production-canary-compatibility.mjs','scripts/lib/production-canary-paused-audit.mjs',
+    'scripts/lib/production-canary-material.mjs','scripts/lib/production-canary-producer.mjs',
+    'scripts/lib/production-canary-fixture-evidence.mjs',
+    'scripts/lib/production-data-release.mjs','scripts/lib/production-data-release-loader.mjs',
+    'scripts/lib/production-data-build-inputs.mjs','scripts/lib/production-data-evidence.mjs',
+    'scripts/lib/production-data-authorization.mjs','scripts/lib/production-data-issuance.mjs',
+    'scripts/lib/production-scheduler-context.mjs',
+    'scripts/lib/production-canary-continuation-flow.mjs','scripts/lib/production-canary-continuation-proof.mjs',
+    'scripts/lib/production-recurring-verification.mjs','scripts/lib/production-recurring-observer.mjs',
+    'scripts/lib/production-canary-calibration.mjs',
+    'scripts/run-retained-data-preview.mjs',
+    'scripts/lib/retained-preview-evidence.mjs',
+    'scripts/canary-fixture-runner.mjs','scripts/production-consolidation-operator.postgres.test.mjs',
+    'scripts/canary-fixture-e2e.mjs','scripts/lib/canary-fixture-task.mjs',
+    'docker/canary-fixture/runner.Dockerfile','docker/canary-fixture/database.Dockerfile','docker/canary-fixture/pg-hba.conf',
     'scripts/lib/production-canary-delivery.mjs','scripts/lib/production-canary-flow.mjs','scripts/lib/production-scheduling.mjs',
     'scripts/lib/mcp-canary-sampler.mjs','scripts/lib/canary-benchmark.mjs','scripts/lib/production-artifacts.mjs','infra/ecr.ts',
     'scripts/resolve-cloudflare-account.mjs');
   const hash=createHash('sha256');
   for(const path of paths.sort()){hash.update(path+'\0');hash.update(await readFile(new URL('../'+path,import.meta.url)));}
   return hash.digest('hex');
+}
+
+export async function retainedDeploymentEnvironment(clients,context,{captureBuild=captureDataReleaseBuild}={}){
+  const selected=await loadDeploymentDataRelease(clients,context);
+  if(!selected)return {MEM9_RETAINED_DATA_RELEASE:'none',MEM9_RETAINED_DATA_RELEASE_HASH:'none'};
+  const evidence=await captureBuild({data:selected.data,repository:context.repository,controlRevision:context.controlRevision});
+  if(evidence.buildInputsHash!==selected.data.buildInputsHash)throw Error('DataReleaseBuildEvidenceMismatch');
+  // Source/registry reads can take time. Do not export a revoked, replaced or
+  // expired authorization after those independent checks have completed.
+  const fresh=await loadDeploymentDataRelease(clients,{...context,now:Date.now()});
+  if(fresh?.hash!==selected.hash||fresh.parameterVersion!==selected.parameterVersion)throw Error('DataReleaseSelectionChanged');
+  return {MEM9_RETAINED_DATA_RELEASE:JSON.stringify(selected.data),MEM9_RETAINED_DATA_RELEASE_HASH:selected.hash};
 }
 
 export async function productionSourceTree(){
@@ -186,7 +219,13 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
   if(command==='image'){
     const r=await send(clients.ssm,new GetParametersCommand({Names:[`/mem9-on-aws/${stage}/ecs/image`],WithDecryption:false}));
     const image=r.Parameters?.[0]?.Value;
-    const verified=await verifyRuntimeImage(image,{account,region,stage,revision:env.GITHUB_SHA,sourceTree:await productionSourceTree(),
+    const sourceTree=await productionSourceTree();
+    const retained=await loadDeploymentDataRelease(clients,{stage,account,region,controlSourceTree:sourceTree,
+      runtime:await readOptional(clients,statePath),env});
+    if(retained&&(image!==retained.images['mnemo-server']||retained.currentSelection?.mode!=='retained'||
+      retained.currentSelection.dataReleaseHash!==retained.hash))throw Error('RuntimeImageRevisionMismatch');
+    const sourceImage=retained?`${account}.dkr.ecr.${region}.amazonaws.com/${stage==='prod'?'mem9-on-aws':'mem9-on-aws/preview'}/mnemo-server:${retained.currentSelection.controlTag}`:image;
+    const verified=await verifyRuntimeImage(sourceImage,{account,region,stage,revision:env.GITHUB_SHA,sourceTree,
       readCommit:async short=>{
         if(env.GITHUB_REPOSITORY!=='zxkane/mem9-on-aws')throw Error('RuntimeImageRepositoryMismatch');
         const result=await execute('gh',['api',`repos/${env.GITHUB_REPOSITORY}/commits/${short}`,'--jq','{sha,parents,commit:{tree:.commit.tree}}'],{cwd:process.cwd(),env,timeout:30000,maxBuffer:16384});
@@ -201,13 +240,33 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
     if(manifest&&!plan)throw Error('ProductionPlanMissing');
     const mode=manifest?.mode??(plan?'prepare':'off');
     if(!['off','prepare','paused','ready','active'].includes(mode))throw Error('InvalidProductionManifest');
+    const dataName=`/mem9-on-aws/${stage}/consolidation-runtime/data-release`;
+    const dataResult=await send(clients.ssm,new GetParametersCommand({Names:[dataName],WithDecryption:true}));
+    const dataParameter=dataResult.Parameters?.[0];
+    if(dataParameter){
+      if(dataResult.Parameters.length!==1||dataResult.InvalidParameters?.length||dataParameter.Name!==dataName||dataParameter.Type!=='SecureString'||
+        !Number.isSafeInteger(dataParameter.Version)||dataParameter.Version<1||!plan)throw Error('PreviewDataReleaseCleanupMismatch');
+      let data;try{data=JSON.parse(dataParameter.Value);}catch{throw Error('PreviewDataReleaseCleanupMismatch');}
+      inspectDataRelease(data,{stage,account,region,controlSourceTree:data.controlSourceTree,bindings:{runtimeNonce:plan.nonce}});
+    }else if(dataResult.InvalidParameters?.join()!==dataName)throw Error('PreviewDataReleaseCleanupMismatch');
     const pending=plan?.clusterArn?await cancelProductionInvocations(clients,plan):[];
     await execute('pnpm',['-C','infra','exec','sst','remove','--stage',stage,'--print-logs'],{cwd:process.cwd(),
       env:{...env,MEM9_NAMESPACE_REQUIRED:'1',MEM9_CONSOLIDATION_SCHEDULE_ENABLED:'0',SST_SECRET_MaintenanceNamespaceIds:'[]',
-        MEM9_PRODUCTION_RUNTIME_MODE:mode,...(plan?{MEM9_RUNTIME_FALLBACK_IMAGES:JSON.stringify(plan.fallbackImages)}:{})},
+        MEM9_PRODUCTION_RUNTIME_MODE:mode,MEM9_RETAINED_DATA_RELEASE:'none',MEM9_RETAINED_DATA_RELEASE_HASH:'none',
+        MEM9_PREVIEW_ACCEPTANCE_CONTEXT:undefined,MEM9_PREVIEW_RUNTIME_NONCE:undefined,
+        ...(plan?{MEM9_RUNTIME_FALLBACK_IMAGES:JSON.stringify(plan.fallbackImages)}:{})},
       timeout:2400000,maxBuffer:8*1024*1024});
     if(plan?.databaseClusterId)await removePreviewSnapshot(clients,plan);
     await acknowledgeProductionCancellation(clients,pending);
+    if(dataParameter){
+      const fresh=await send(clients.ssm,new GetParametersCommand({Names:[dataName],WithDecryption:true})),current=fresh.Parameters?.[0];
+      if(current){
+        if(fresh.Parameters.length!==1||fresh.InvalidParameters?.length||current.Name!==dataName||current.Version!==dataParameter.Version||current.Value!==dataParameter.Value)throw Error('PreviewDataReleaseCleanupMismatch');
+        await send(clients.ssm,new DeleteParameterCommand({Name:dataName}));
+      }else if(fresh.InvalidParameters?.join()!==dataName)throw Error('PreviewDataReleaseCleanupMismatch');
+      const gone=await send(clients.ssm,new GetParametersCommand({Names:[dataName],WithDecryption:true}));
+      if(gone.Parameters?.length||gone.InvalidParameters?.join()!==dataName)throw Error('PreviewDataReleaseCleanupIncomplete');
+    }
     if(plan)for(const name of [prefix+'/administrator-recovery-intent',statePath,planPath,
       ...['intent','checkpoint','receipt','accepted'].map(key=>prefix+'/cancellation-'+key)]){
       try{await send(clients.ssm,new DeleteParameterCommand({Name:name}));}
@@ -294,7 +353,11 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
         if(stage==='prod'&&(settings.MNEMO_SCHEMA_MODE==='verify'||server.secrets?.find(s=>s.name==='MEM9_DB_SECRET')?.valueFrom!==values.get(names[1])))throw Error('MissingProductionRoutingState');
       }
     }
-    if(env.GITHUB_ENV)await appendFile(env.GITHUB_ENV,`MEM9_PRODUCTION_RUNTIME_MODE=${mode}\n${fallbackImages?'MEM9_RUNTIME_FALLBACK_IMAGES='+JSON.stringify(fallbackImages)+'\n':''}`);
+    const controlRevision=(await execute('git',['rev-parse','HEAD'],{cwd:process.cwd(),timeout:10000,maxBuffer:1024})).stdout.trim();
+    const retainedEnv=await retainedDeploymentEnvironment(clients,{stage,account,region,controlSourceTree:await productionSourceTree(),
+      controlRevision,runtime:marker,env,repository:process.cwd()});
+    if(env.GITHUB_ENV)await appendFile(env.GITHUB_ENV,`MEM9_PRODUCTION_RUNTIME_MODE=${mode}\n${fallbackImages?'MEM9_RUNTIME_FALLBACK_IMAGES='+JSON.stringify(fallbackImages)+'\n':''}`+
+      Object.entries(retainedEnv).map(([key,value])=>key+'='+value+'\n').join(''));
     emit({phase:'configured',mode});return;
   }
   if(command==='prepare'){

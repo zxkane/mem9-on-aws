@@ -1,13 +1,15 @@
 import {describe,it,expect} from 'vitest';
 import {runProductionConsolidationTask,stopPreviousProductionAdministration} from './run-production-consolidation.mjs';
+import {productionSourceTree,productionCoordinatorDigest} from './run-production-runtime.mjs';
+import {execFileSync} from 'node:child_process';
 
 const account='123456789012',region='ap-northeast-1',cluster='mem9-on-aws-prod-Fixture',name='ControlMem9Bootstrap';
 const prefix=`arn:aws:ssm:${region}:${account}:parameter/mem9-on-aws/prod/`;
 const taskDefinition=`arn:aws:ecs:${region}:${account}:task-definition/${cluster}-${name}:1`;
-function fixture({drift=false,loseReply=false,wrongNonce=false,taskDrift}={}){
+function fixture({drift=false,loseReply=false,wrongNonce=false,taskDrift,acceptance,sourceTag='mem9-aaaaaaa'}={}){
   const calls=[],journals=new Map();let task,time=Date.now();
   const meta={version:1,stage:'prod',region,account,cluster,clusterArn:`arn:aws:ecs:${region}:${account}:cluster/${cluster}`,
-    sourceTag:'mem9-aaaaaaa',workerImage:`${account}.dkr.ecr.${region}.amazonaws.com/mem9-on-aws/llm-proxy@sha256:${'d'.repeat(64)}`,
+    sourceTag,workerImage:`${account}.dkr.ecr.${region}.amazonaws.com/mem9-on-aws/llm-proxy@sha256:${'d'.repeat(64)}`,
     host:'mem9-on-aws-prod-fixture.cluster-example.ap-northeast-1.'+['rds','amazonaws','com'].join('.'),port:5432,database:'mem9',generation:'a'.repeat(64),
     subnets:['subnet-abcd'],securityGroup:'sg-abcd',administratorCredential:prefix+'runtime/schema-administrator-credential',
     plannerCredential:prefix+'consolidation-runtime/planner-credential',executorCredential:prefix+'consolidation-runtime/executor-credential',targetsParameter:prefix+'maintenance/targets',
@@ -23,7 +25,7 @@ function fixture({drift=false,loseReply=false,wrongNonce=false,taskDrift}={}){
   const send=async command=>{
     const type=command.constructor.name,input=command.input;calls.push({type,input});
     if(type==='GetCallerIdentityCommand')return {Account:account};
-    if(type==='GetParametersCommand')return {Parameters:[{Value:JSON.stringify(meta)}]};
+    if(type==='GetParametersCommand')return {Parameters:[{Value:JSON.stringify(input.Names[0].includes('rehearsal-acceptance')?acceptance:meta)}]};
     if(type==='GetParametersByPathCommand')return {Parameters:[...journals].map(([Name,Value])=>({Name,Value}))};
     if(type==='DescribeTaskDefinitionCommand')return {taskDefinition:{taskDefinitionArn:taskDefinition,executionRoleArn:executionRole,taskRoleArn:taskRole,networkMode:'awsvpc',runtimePlatform:{cpuArchitecture:'ARM64'},
       containerDefinitions:[{name,image:meta.operators.control.image,entryPoint:['node'],command:['/bootstrap/operator/scripts/production-consolidation-operator.mjs'],
@@ -48,13 +50,26 @@ function fixture({drift=false,loseReply=false,wrongNonce=false,taskDrift}={}){
     if(type==='StopTaskCommand'){task.lastStatus='STOPPED';return {};}
     if(type==='FilterLogEventsCommand'){
       const request=JSON.parse(task.overrides.containerOverrides[0].environment.find(e=>e.name==='MEM9_PRODUCTION_CONSOLIDATION_REQUEST').value);
-      return {events:[{eventId:'result',message:JSON.stringify({event:'production_consolidation_operator',phase:'status',outcome:'complete',invocation:wrongNonce?'wrong':request.invocation})}]};
+      return {events:[{eventId:'result',message:JSON.stringify({event:'production_consolidation_operator',phase:request.operation,outcome:'complete',invocation:wrongNonce?'wrong':request.invocation})}]};
     }
     throw Error('UnexpectedCommand');
   };
   return {meta,clients:{ssm:{send},ecs:{send},logs:{send},sts:{send},iam:{send}},calls,journals,options:{now:()=>time,sleep:async ms=>{time+=ms;}}};
 }
 describe('production worker administrative task invocation',()=>{
+  it('serializes continuation fields into the bounded owned task request without silently dropping them',async()=>{
+    const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8'}).trim();
+    const acceptance={sourceTree:await productionSourceTree(),coordinatorDigest:await productionCoordinatorDigest()};
+    const f=fixture({acceptance,sourceTag:'mem9-'+revision.slice(0,7)});
+    const data={attemptId:'b'.repeat(32),parentProofHash:'c'.repeat(64),compatibility:{version:1}};
+    await runProductionConsolidationTask(f.clients,{region,operation:'begin-continuation',...data},f.options);
+    const launch=f.calls.find(c=>c.type==='RunTaskCommand');
+    const request=JSON.parse(launch.input.overrides.containerOverrides[0].environment.find(e=>e.name==='MEM9_PRODUCTION_CONSOLIDATION_REQUEST').value);
+    expect(request).toMatchObject({operation:'begin-continuation',...data});expect(f.journals.size).toBe(0);
+    const rejected=fixture();
+    await expect(runProductionConsolidationTask(rejected.clients,{region,operation:'status',...data},rejected.options)).rejects.toThrow();
+    expect(rejected.calls.some(c=>c.type==='RunTaskCommand')).toBe(false);
+  });
   it('validates the control credential and exact IAM policy, then matches the terminal nonce',async()=>{
     const f=fixture();expect((await runProductionConsolidationTask(f.clients,{region,operation:'status'},f.options)).outcome).toBe('complete');
     expect(f.journals.size).toBe(0);

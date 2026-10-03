@@ -3,6 +3,7 @@ import {GetScheduleCommand,UpdateScheduleCommand} from '@aws-sdk/client-schedule
 import {productionCanarySchedule} from './production-canary-delivery.mjs';
 import {canaryEvidenceHash} from './production-canary-verification.mjs';
 import {productionArtifactAdmission,validateProductionBackendBinding} from './production-artifacts.mjs';
+import {productionRecurringEnvironment,SCHEDULER_CONTEXT_ENVIRONMENT} from './production-scheduler-context.mjs';
 
 const fail=()=>{throw Error('ProductionSchedulingNotVerified');};
 const send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
@@ -25,7 +26,7 @@ export async function enableProductionScheduling(clients,targets,{admission,acti
     const current=await send(clients.scheduler,new GetScheduleCommand({Name:target.template.Name,GroupName:target.groupName}));
     if(canaryEvidenceHash(current.Target)!==canaryEvidenceHash(target.template.Target)||current.State!=='DISABLED')fail();
     productionCanarySchedule(current,target,{wave:'apply',nonce:'0'.repeat(32),admission:'0'.repeat(32),when:Date.now()+60000});
-    const input={containerOverrides:[{name:target.containerName,environment:[{name:'MEM9_WORKER_GENERATION',value:target.generation},{name:'MEM9_WORKER_ADMISSION',value:admission}]}]};
+    const input={containerOverrides:[{name:target.containerName,environment:productionRecurringEnvironment(target.generation,admission)}]};
     await send(clients.scheduler,new UpdateScheduleCommand({Name:current.Name,GroupName:current.GroupName,State:'ENABLED',
       ...Object.fromEntries(['Description','StartDate','EndDate','KmsKeyArn','ActionAfterCompletion'].filter(key=>current[key]!==undefined).map(key=>[key,current[key]])),
       ScheduleExpression:current.ScheduleExpression,ScheduleExpressionTimezone:current.ScheduleExpressionTimezone,
@@ -39,12 +40,15 @@ export async function verifyProductionScheduling(clients,targets,{enabled,admiss
     const current=await send(clients.scheduler,new GetScheduleCommand({Name:target.template.Name,GroupName:target.groupName}));
     productionCanarySchedule(current,target,{wave:'apply',nonce:'0'.repeat(32),admission:'0'.repeat(32),when:Date.now()+60000});
     const input=JSON.parse(current.Target.Input),override=input.containerOverrides[0];
+    const metadata=enabled||override.environment?.length===6;
+    const allowed=['MEM9_WORKER_GENERATION','MEM9_WORKER_ADMISSION',...(metadata?SCHEDULER_CONTEXT_ENVIRONMENT.map(e=>e.name):[])];
     if(current.State!==(enabled?'ENABLED':'DISABLED')||current.ScheduleExpression!==(target.kind==='planner'?'rate(15 minutes)':'rate(5 minutes)')||
       current.Target.RetryPolicy?.MaximumRetryAttempts!==0||current.Target.RetryPolicy?.MaximumEventAgeInSeconds!==60||
       current.FlexibleTimeWindow?.Mode!=='OFF'||Object.keys(input).join()!=='containerOverrides'||
       Object.keys(override).sort().join()!==['name','environment'].sort().join()||
-      override.environment.length!==2||new Set(override.environment.map(item=>item.name)).size!==2||
-      override.environment.some(item=>!['MEM9_WORKER_GENERATION','MEM9_WORKER_ADMISSION'].includes(item.name))||
+      override.environment.length!==allowed.length||new Set(override.environment.map(item=>item.name)).size!==allowed.length||
+      override.environment.some(item=>!allowed.includes(item.name))||
+      metadata&&SCHEDULER_CONTEXT_ENVIRONMENT.some(e=>override.environment.find(item=>item.name===e.name)?.value!==e.value)||
       (enabled&&override.environment.find(item=>item.name==='MEM9_WORKER_ADMISSION')?.value!==admission))fail();
   }
   const services=await send(clients.ecs,new DescribeServicesCommand({cluster:targets[0].clusterArn,services:['Mem9Server']}));
@@ -54,7 +58,8 @@ export async function verifyProductionScheduling(clients,targets,{enabled,admiss
   const definition=(await send(clients.ecs,new DescribeTaskDefinitionCommand({taskDefinition:service.taskDefinition}))).taskDefinition;
   const server=definition?.containerDefinitions?.find(container=>container.name==='mnemo-server');
   const target=targets[0];
-  if(!/^[a-f0-9]{40}$/.test(target.revision??'')||server?.image!==`${target.account}.dkr.ecr.${target.region}.amazonaws.com/mem9-on-aws/mnemo-server:mem9-${target.revision.slice(0,7)}`||
+  const expectedServer=target.dataRelease?.images['mnemo-server']??`${target.account}.dkr.ecr.${target.region}.amazonaws.com/mem9-on-aws/mnemo-server:mem9-${target.revision.slice(0,7)}`;
+  if(!/^[a-f0-9]{40}$/.test(target.revision??'')||server?.image!==expectedServer||
     server.environment?.find(item=>item.name==='MNEMO_CONSOLIDATION_EXECUTION_ENABLED')?.value!=='true')fail();
   return {enabled,taskDefinitions:targets.map(target=>target.taskDefinitionArn)};
 }

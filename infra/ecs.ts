@@ -51,7 +51,7 @@
 import type { RuntimeCredentials } from "./runtime-credentials";
 import { resolveVpc } from "./vpc";
 import type { DbOutputs } from "./db";
-import { workloadImage, accountId, applicationRegion } from "./ecr";
+import { workloadImage, accountId, applicationRegion, selectedDataSourceTag, selectedDataRelease } from "./ecr";
 import { observability } from "./observability";
 import type { TenantIdentityOutputs } from "./tenant-identity";
 import type { NamespaceIdentityOutputs } from "./namespace-identity";
@@ -201,6 +201,8 @@ export function ecs(
   const mnemoImage = workloadImage("mnemo-server", IMAGE_TAG);
   const embedImage = workloadImage("qwen3-embed", IMAGE_TAG);
   const llmProxyImage = workloadImage("llm-proxy", IMAGE_TAG);
+  const retainedData = selectedDataRelease();
+  const dataTag = selectedDataSourceTag(IMAGE_TAG);
 
   // ECS cluster in the existing default VPC. `loadBalancerSubnets` is required by
   // the type even though we create no ALB (the MCP surface uses a Lambda-proxy +
@@ -607,7 +609,7 @@ export function ecs(
   new aws.ssm.Parameter("EcsImageTag", {
     name: `${prefix}/ecs/image-tag`,
     type: "String",
-    value: IMAGE_TAG,
+    value: dataTag,
     tags,
   });
   // Record the deployed mnemo-server image URI (including tag) so it's auditable
@@ -618,6 +620,13 @@ export function ecs(
     type: "String",
     value: mnemoImage,
     tags,
+  });
+  new aws.ssm.Parameter("EcsImageSelection", {
+    name: `${prefix}/ecs/image-selection`, type: "String", tags,
+    value: $jsonStringify({version:1,mode:retainedData?'retained':'tag',controlTag:IMAGE_TAG,dataTag,
+      images:{'mnemo-server':mnemoImage,'qwen3-embed':embedImage,'llm-proxy':llmProxyImage},
+      ...(retainedData?{dataReleaseHash:retainedData.apply(value=>value.hash),
+        arm64Digests:retainedData.apply(value=>Object.fromEntries(Object.entries(value.data.images).map(([name,image])=>[name,image.arm64Digest])))}:{})}),
   });
   new aws.ssm.Parameter("EcsServiceDnsName", {
     name: `${prefix}/ecs/service-dns-name`,

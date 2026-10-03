@@ -13,6 +13,7 @@ import {
 import { disableTaskContainerPseudoTerminal } from "./ecs-task-definition";
 import { consolidationTimeoutSeconds } from "../scripts/lib/maintenance-runtime.mjs";
 import {protectLegacyRuntimeCredentials,productionRuntimeEnabled} from "./production-runtime";
+import {productionRecurringEnvironment} from '../scripts/lib/production-scheduler-context.mjs';
 
 const IMAGE_TAG = process.env.MEM9_IMAGE_TAG || "latest";
 const BEDROCK_PROJECT = process.env.MEM9_BEDROCK_PROJECT;
@@ -535,8 +536,9 @@ export function consolidation(
         target: {
           arn: ecsOut.cluster.nodes.cluster.arn, roleArn: schedulerRole.arn,
           input: $jsonStringify({containerOverrides: [{name: worker.containerName,
-            environment: [{name: "MEM9_WORKER_GENERATION", value: worker.generation},
-              ...(worker.production?[{name:'MEM9_WORKER_ADMISSION',value:worker.admission!}]:[])]}]}),
+            environment: worker.production?worker.enabled!.apply(enabled=>enabled?productionRecurringEnvironment(worker.generation,worker.admission!):
+              [{name:'MEM9_WORKER_GENERATION',value:worker.generation},{name:'MEM9_WORKER_ADMISSION',value:worker.admission!}]):
+              [{name:'MEM9_WORKER_GENERATION',value:worker.generation}]}]}),
           retryPolicy: {maximumEventAgeInSeconds: 60, maximumRetryAttempts: 0},
           // The workload boundary denies tagging. Ownership uses the exact
           // task revision + invocation nonce, never propagated tags.

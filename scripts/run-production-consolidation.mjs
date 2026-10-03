@@ -11,6 +11,7 @@ import {parseProductionConsolidationRequest} from './production-consolidation-op
 import {productionCoordinatorDigest,productionSourceTree} from './run-production-runtime.mjs';
 import {execFileSync} from 'node:child_process';
 import {canaryReportDigest,canaryReportFragments} from './lib/production-canary-report.mjs';
+import {loadWorkerDataRelease} from './lib/production-data-release-loader.mjs';
 
 const send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
 const fail=code=>{throw Error(code);};
@@ -111,7 +112,7 @@ export async function verifyProductionTaskRoles(clients,meta,definition,name,sec
 }
 
 export function validateProductionWorkerTarget(meta,{region,account}){
-  if(meta?.version!==1||meta.stage!=='prod'||meta.region!==region||meta.account!==account||
+  if(![1,2].includes(meta?.version)||meta.stage!=='prod'||meta.region!==region||meta.account!==account||
     !meta.cluster?.startsWith('mem9-on-aws-prod-')||!/^[A-Za-z0-9-]+$/.test(meta.cluster)||meta.clusterArn!==`arn:aws:ecs:${region}:${account}:cluster/${meta.cluster}`||
     !meta.host?.startsWith('mem9-on-aws-prod-')||!meta.host.endsWith(`.${region}.rds.amazonaws.com`)||
     !/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(meta.database??'')||!/^[a-f0-9]{64}$/.test(meta.generation??'')||
@@ -122,10 +123,14 @@ export function validateProductionWorkerTarget(meta,{region,account}){
   const arn=`arn:aws:ssm:${region}:${account}:parameter/mem9-on-aws/prod/`;
   for(const [key,path] of Object.entries({administratorCredential:'runtime/schema-administrator-credential',plannerCredential:'consolidation-runtime/planner-credential',
     executorCredential:'consolidation-runtime/executor-credential',targetsParameter:'maintenance/targets'}))if(meta[key]!==arn+path)fail('ProductionWorkerCredentialReferenceMismatch');
+  if(meta.version===2){
+    if(!/^mem9-[a-f0-9]{7}$/.test(meta.controlSourceTag??'')||!/^[a-f0-9]{64}$/.test(meta.dataReleaseHash??'')||
+      meta.dataReleaseParameter!=='/mem9-on-aws/prod/consolidation-runtime/data-release')fail('InvalidProductionDataReleaseManifest');
+  }else if(meta.dataReleaseHash!==undefined||meta.dataReleaseParameter!==undefined||meta.controlSourceTag!==undefined&&meta.controlSourceTag!==meta.sourceTag)fail('InvalidProductionDataReleaseManifest');
   return meta;
 }
 
-export async function runProductionConsolidationTask(clients,{region,operation,dailyRows,basisPoints,canaryReport,benchmarkRefs,backendBinding},{now=Date.now,sleep=delay}={}){
+export async function runProductionConsolidationTask(clients,{region,operation,dailyRows,basisPoints,canaryReport,benchmarkRefs,backendBinding,attemptId,parentProofHash,compatibility},{now=Date.now,sleep=delay}={}){
   const account=(await send(clients.sts,new GetCallerIdentityCommand({}))).Account;
   const prefix='/mem9-on-aws/prod/',manifestName=prefix+'consolidation-runtime/operator-manifest';
   const response=await send(clients.ssm,new GetParametersCommand({Names:[manifestName],WithDecryption:true}));
@@ -146,6 +151,8 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
     definition.networkMode!=='awsvpc'||definition.runtimePlatform?.cpuArchitecture!=='ARM64'||
     container.entryPoint?.join()!=='node'||container.command?.join()!=='/bootstrap/operator/scripts/production-consolidation-operator.mjs'||container.environmentFiles?.length||
     container.image!==target.image||env.MEM9_WORKER_IMAGE!==meta.workerImage||env.MEM9_WORKER_SOURCE_TAG!==meta.sourceTag||
+    (meta.controlSourceTag!==undefined&&env.MEM9_CONTROL_SOURCE_TAG!==meta.controlSourceTag)||
+    (meta.version===2&&env.MEM9_RETAINED_DATA_RELEASE_HASH!==meta.dataReleaseHash)||
     env.MEM9_STAGE!=='prod'||env.MEM9_DB_HOST!==meta.host||env.MEM9_DB_NAME!==meta.database||env.MEM9_WORKER_GENERATION!==meta.generation||
     env.MEM9_DB_PORT!==String(meta.port)||env.MEM9_PRODUCTION_WORKER_OPERATOR!==kind||Object.keys(actual).length!==Object.keys(secrets).length||
     Object.entries(secrets).some(([key,value])=>actual[key]!==value))fail('ProductionWorkerOperatorDefinitionMismatch');
@@ -158,11 +165,16 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
     try{acceptance=JSON.parse(proof.Parameters[0].Value);}catch{fail('ProductionWorkerRehearsalRequired');}
     if(acceptance.sourceTree!==await productionSourceTree()||acceptance.coordinatorDigest!==await productionCoordinatorDigest())fail('ProductionWorkerReleaseEvidenceMismatch');
     const revision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8',timeout:10000}).trim();
-    if(!/^[a-f0-9]{40}$/.test(revision)||meta.sourceTag!==`mem9-${revision.slice(0,7)}`)fail('ProductionWorkerImageRevisionMismatch');
+    if(!/^[a-f0-9]{40}$/.test(revision)||(meta.controlSourceTag??meta.sourceTag)!==`mem9-${revision.slice(0,7)}`)fail('ProductionWorkerImageRevisionMismatch');
+    const mode=['prepare','plan','baseline','begin-continuation','resume-plan','canary','promote'].includes(operation)?'admission':'inspection';
+    const data=await loadWorkerDataRelease(clients,meta,{controlRevision:revision,controlSourceTree:acceptance.sourceTree,mode,now:now()});
+    if(data&&(acceptance.dataReleaseHash!==data.hash||env.MEM9_RETAINED_DATA_RELEASE_EXPIRES_MS!==String(data.data.expiresMs)||
+      data.data.parentProofHash!==acceptance.continuation?.parentProofHash))fail('ProductionDataReleaseEvidenceMismatch');
   }
   const invocation=randomUUID().replaceAll('-','');
   const request={operation,invocation,deadline:now()+15*60000,...(operation==='promote'?{dailyRows,basisPoints,canaryReportHash:canaryReportDigest(canaryReport)}:{}),
-    ...(operation==='cleanup-benchmark'?{benchmarkRefs}:{}),...(operation==='baseline'?{backendBinding}:{}),...(acceptance?{acceptance}:{})};
+    ...(operation==='cleanup-benchmark'?{benchmarkRefs}:{}),...(operation==='baseline'?{backendBinding}:{}),...(acceptance?{acceptance}:{}),
+    ...(attemptId!==undefined?{attemptId}:{}),...(parentProofHash!==undefined?{parentProofHash}:{}),...(compatibility!==undefined?{compatibility}:{})};
   const encoded=JSON.stringify(request),overrides=productionConsolidationOverrides(name,request);
   if(operation==='promote')for(const [index,value] of canaryReportFragments(canaryReport).entries()){
     await send(clients.ssm,new PutParameterCommand({Name:prefix+`consolidation-runtime/canary-report-${index}`,Type:'SecureString',Value:value,Overwrite:true}));

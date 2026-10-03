@@ -2,7 +2,7 @@ const fail=()=>{throw Error('CanaryPerformanceNotVerified');};
 const time=value=>Number.isSafeInteger(value)&&value>0;
 const p95=values=>[...values].sort((a,b)=>a-b)[Math.ceil(values.length*0.95)-1];
 
-function cohort(value){
+export function verifyCanaryCohort(value){
   if(value?.version!==1||typeof value.workloadHash!=='string'||!/^[a-f0-9]{64}$/.test(value.workloadHash)||
     !Number.isInteger(value.samplesPerKind)||value.samplesPerKind<100||value.samplesPerKind>500||
     value.warmupsPerKind!==5||value.concurrency!==1||value.cadenceMs!==250||!Array.isArray(value.samples)||value.samples.length!==value.samplesPerKind*2)fail();
@@ -18,7 +18,7 @@ function cohort(value){
 }
 
 export function verifyCanaryPerformance({baseline,loaded,activity,receipts}){
-  cohort(baseline);cohort(loaded);
+  verifyCanaryCohort(baseline);verifyCanaryCohort(loaded);
   if(baseline.workloadHash!==loaded.workloadHash||baseline.samplesPerKind!==loaded.samplesPerKind||
     baseline.samples.at(-1).finishedMs>=loaded.samples[0].startedMs||
     loaded.samples[0].startedMs-baseline.samples.at(-1).finishedMs>3600000||

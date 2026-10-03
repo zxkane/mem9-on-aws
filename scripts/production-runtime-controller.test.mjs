@@ -47,6 +47,27 @@ function fixture({plan,manifest}={}){
   return {processes,calls,writes,clients:{ssm:{send},sts:{send}},execute:async(...args)=>{processes.push(args);return {};}};
 }
 describe('partial preparation cleanup',()=>{
+  it('removes an expired preview retention record only after its stage and unchanged-value checks',async()=>{
+    const plan={version:1,stage,region,account,nonce:'a'.repeat(32),fallbackImages:{synthetic:'image'}},name=`/mem9-on-aws/${stage}/consolidation-runtime/data-release`;
+    const data={version:1,stage,region,account,controlSourceTree:'b'.repeat(40),dataRevision:'c'.repeat(40),dataSourceTree:'d'.repeat(40),dataSourceTag:'pr-ccccccc',
+      images:Object.fromEntries(['llm-proxy','mnemo-server','qwen3-embed'].map(n=>[n,{rootDigest:'sha256:'+'1'.repeat(64),arm64Digest:'sha256:'+'2'.repeat(64)}])),
+      runtimeNonce:plan.nonce,authorizationId:'e'.repeat(32),issuedMs:1,expiresMs:2,
+      ...Object.fromEntries(['parentProofHash','backendBindingHash','generation','targetsHash','schemaDigest','operatorDigest','buildInputsHash','securityEvidenceHash','policyHash'].map(k=>[k,'a'.repeat(64)]))};
+    for(const changed of [false,true]){
+      const f=fixture({plan,manifest:{mode:'active'}}),send=f.clients.ssm.send,execute=f.execute;let present=true,version=1,removed=0;
+      f.clients.ssm.send=async command=>{
+        if(command.constructor.name==='GetParametersCommand'&&command.input.Names[0]===name)return present?{Parameters:[{Name:name,Type:'SecureString',Version:version,Value:JSON.stringify(data)}]}:{InvalidParameters:[name]};
+        if(command.constructor.name==='DeleteParameterCommand'&&command.input.Name===name){present=false;removed++;return {};}
+        return send(command);
+      };
+      f.execute=async(...args)=>{const r=await execute(...args);if(changed)version++;return r;};
+      const run=runProductionRuntime({...f,stage,region,command:'cleanup-preview',env:{MEM9_RETAINED_DATA_RELEASE:JSON.stringify(data)}});
+      if(changed){await expect(run).rejects.toThrow('PreviewDataReleaseCleanupMismatch');expect(removed).toBe(0);}
+      else{await run;expect(removed).toBe(1);}
+      expect(f.processes[0][2].env.MEM9_RETAINED_DATA_RELEASE).toBe('none');expect(f.processes[0][2].env.MEM9_RETAINED_DATA_RELEASE_HASH).toBe('none');
+      expect(f.processes[0][2].env.MEM9_PRODUCTION_RUNTIME_MODE).toBe('active');
+    }
+  });
   it.each(['prepare','apply','resume','finalize'])('blocks production %s without matching completed rehearsal evidence',async command=>{
     const f=fixture();await expect(runProductionRuntime({...f,stage:'prod',region,command,env:{}})).rejects.toThrow('ProductionRehearsalRequired');
     expect(f.calls.every(name=>['GetCallerIdentityCommand','GetParametersCommand'].includes(name))).toBe(true);

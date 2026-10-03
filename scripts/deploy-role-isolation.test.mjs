@@ -102,6 +102,12 @@ function explicitlyDenies(policy, action, resource, context = {}) {
 }
 
 describe("split GitHub OIDC deployment roles", () => {
+  it('keeps preview schedule inventory read-only and application-region scoped',()=>{
+    const statements=role('GitHubPreviewActionsRole').Policies.flatMap(policy=>policy.PolicyDocument.Statement);
+    const inventory=statements.find(statement=>statement.Sid==='PreviewScheduleInventory');
+    expect(inventory).toMatchObject({Effect:'Allow',Action:'scheduler:ListSchedules',Resource:'*',Condition:{StringEquals:{'aws:RequestedRegion':'ApplicationRegion'}}});
+    expect(JSON.stringify(role('GitHubProductionActionsRole'))).not.toContain('PreviewScheduleInventory');
+  });
   it("TC-DEPLOYROLE-001/002/012/014: defines exact trusts and conditional legacy rollback", () => {
     expect(roleSource).toContain("GitHubPreviewActionsRole:");
     expect(roleSource).toContain("GitHubProductionActionsRole:");
@@ -305,6 +311,17 @@ describe("split GitHub OIDC deployment roles", () => {
       awsMutationRequired: true,
     });
   });
+  it('rebuilds preview evidence when fixture host, contracts or packaged cases change',()=>{
+    for(const path of ['scripts/canary-fixture-e2e.mjs','scripts/lib/canary-fixture-task.mjs',
+      'scripts/lib/production-canary-fixture-evidence.mjs','scripts/canary-fixture-runner.mjs','scripts/production-consolidation-operator.postgres.test.mjs']){
+      expect(classifyChangedPaths([path])).toMatchObject({workloadChanged:true,awsMutationRequired:true});
+    }
+  });
+  it('rebuilds control release evidence when retained data validation or continuation changes',()=>{
+    for(const path of ['scripts/run-production-canary.mjs','scripts/lib/production-canary-continuation-proof.mjs',
+      'scripts/lib/production-data-release.mjs','scripts/lib/production-data-release-loader.mjs','scripts/lib/production-data-build-inputs.mjs','scripts/lib/production-data-evidence.mjs'])
+      expect(classifyChangedPaths([path])).toMatchObject({workloadChanged:true,awsMutationRequired:true});
+  });
   it("TC-DEPLOYROLE-005/006/007: classifies mutation paths", () => {
     expect(
       classifyChangedPaths([
@@ -348,6 +365,8 @@ describe("split GitHub OIDC deployment roles", () => {
       "docker/llm-proxy/Dockerfile",
       "docker/mnemo-server/Dockerfile",
       "docker/qwen3-embed/Dockerfile",
+      "docker/canary-fixture/runner.Dockerfile",
+      "docker/canary-fixture/database.Dockerfile",
     ]) {
       for (const line of readFileSync(resolve(root, dockerfile), "utf8").split("\n")) {
         const match = line.match(/^COPY (scripts\/\S+) \S+$/u);
