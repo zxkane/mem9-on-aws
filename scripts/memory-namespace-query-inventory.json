@@ -2321,9 +2321,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "be255eb77b0b72520099",
+      "id": "5b912b622fa59617fcce",
       "owner": "scripts/lib/production-canary-continuation.mjs",
-      "line": 150,
+      "line": 151,
       "tables": [
         "memories"
       ],
@@ -2936,9 +2936,9 @@
       "namespace_evidence": null
     },
     {
-      "id": "2a5b77b1215714e09668",
+      "id": "bfa7dc2d2b11e141d911",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 215,
+      "line": 233,
       "tables": [
         "memories"
       ],
@@ -2954,9 +2954,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "2668a0495495ab6732b3",
+      "id": "9441b32520b970791a6e",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 241,
+      "line": 259,
       "tables": [
         "memories"
       ],
@@ -2972,9 +2972,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "16ae0790f06df67f4eaa",
+      "id": "a0398bf67c3da53be9d9",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 253,
+      "line": 271,
       "tables": [
         "memories"
       ],
@@ -2990,9 +2990,9 @@
       "namespace_evidence": "namespace_id=$1"
     },
     {
-      "id": "78670598036406e088a7",
+      "id": "d439a9cec6e6aa60709a",
       "owner": "scripts/production-consolidation-operator.mjs",
-      "line": 257,
+      "line": 275,
       "tables": [
         "memories"
       ],
