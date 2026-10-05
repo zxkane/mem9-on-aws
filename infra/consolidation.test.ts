@@ -363,6 +363,22 @@ describe("consolidation task and schedule", () => {
     const task=materialize(one("Task").args) as Record<string, any>;
     expect(task.environment.MEM9_CONSOLIDATION_TIMEOUT_SECONDS).toBe("10800");
   });
+  it("pins a retained authorization version in the production worker manifest", async () => {
+    installGlobals("prod");
+    const dataRelease=out({hash:"c".repeat(64),parameterVersion:2});
+    const workers=(["planner","executor"] as const).map(kind=>{
+      const containerName=`Mem9Consolidation${kind==="planner"?"Planner":"Executor"}`;
+      const task:any=new sst.aws.Task(containerName,{cluster:fakeEcs().cluster});
+      task.taskDefinition=out(`arn:aws:ecs:ap-northeast-1:123456789012:task-definition/mem9-on-aws-prod-fixture-${containerName}:1`);
+      task.nodes.taskRole.arn=out(`task-${kind}`);task.nodes.executionRole.arn=out(`execution-${kind}`);
+      task.nodes.taskDefinition=out({containerDefinitions:out(JSON.stringify([{name:containerName,logConfiguration:{options:{"awslogs-group":`/sst/${kind}`}}}]))});
+      return {kind,containerName,generation:"a".repeat(64),task,production:true,enabled:out(false),admission:out("unverified"),dataRelease};
+    });
+    const {consolidation}=await import("./consolidation");
+    consolidation(fakeEcs(),fakeDb(),fakeIdentity(),fakeMaintenanceIdentity(),workers as any);
+    const manifest=JSON.parse(String(materialize(one("Parameter","ConsolidationAcceptanceManifest").args.value)));
+    expect(manifest.version).toBe(2);expect(manifest.dataReleaseParameterVersion).toBe(2);expect(manifest.dataReleaseHash).toBe("c".repeat(64));
+  });
   it("injects only the consolidation service credential and a fixed issuer", async () => {
     installGlobals("prod");
     process.env.MEM9_SERVICE_TRANSPORT_ISSUER = "untrusted-issuer";

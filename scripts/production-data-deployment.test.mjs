@@ -41,7 +41,7 @@ it('exports a snapshot only after build verification and an unchanged protected 
   vi.spyOn(Date,'now').mockReturnValue(now);const f=fixture();
   const captureBuild=vi.fn(async()=>({buildInputsHash:f.data.buildInputsHash}));
   const env=await retainedDeploymentEnvironment(f.clients,{...f.options,controlRevision:'a'.repeat(40)},{captureBuild});
-  expect(env.MEM9_RETAINED_DATA_RELEASE_HASH).toBe(f.selected.hash);expect(f.calls).toHaveLength(2);expect(captureBuild).toHaveBeenCalledOnce();
+  expect(env.MEM9_RETAINED_DATA_RELEASE_HASH).toBe(f.selected.hash);expect(env.MEM9_RETAINED_DATA_RELEASE_VERSION).toBe('2');expect(f.calls).toHaveLength(2);expect(captureBuild).toHaveBeenCalledOnce();
   await expect(retainedDeploymentEnvironment(f.clients,f.options,{captureBuild:async()=>({buildInputsHash:h('0')})})).rejects.toThrow('DataReleaseBuildEvidenceMismatch');
 });
 it('rejects authorization revocation or expiry during predeployment evidence capture',async()=>{

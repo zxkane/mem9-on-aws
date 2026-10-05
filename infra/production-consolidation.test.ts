@@ -57,7 +57,7 @@ describe('production continuous-consolidation configuration',()=>{
   it('keeps current control identity separate from a retained data admission',async()=>{
     const f=setup('prod','1','b'.repeat(64)),ecr=await import('./ecr');
     vi.mocked(ecr.selectedDataSourceTag).mockReturnValue(out('mem9-bbbbbbb'));
-    vi.mocked(ecr.selectedDataRelease).mockReturnValue(out({hash:'c'.repeat(64),data:{expiresMs:1800000600000}}));
+    vi.mocked(ecr.selectedDataRelease).mockReturnValue(out({hash:'c'.repeat(64),parameterVersion:2,data:{expiresMs:1800000600000}}));
     const {productionConsolidationConfig}=await import('./production-consolidation');
     const cfg=productionConsolidationConfig({mode:'active'} as any,f.identity as any,f.db as any)!;
     expect(cfg.controlSourceTag).toBe('mem9-aaaaaaa');expect(unwrap(cfg.sourceTag)).toBe('mem9-bbbbbbb');
@@ -87,5 +87,16 @@ describe('production continuous-consolidation configuration',()=>{
       expect(task.definition.tags).toMatchObject({Project:'mem9-on-aws',Stage:'prod'});
     }
     expect(()=>productionConsolidationOperators(ecs as any,f.db as any,{...runtime,mode:'prepare'} as any,cfg)).toThrow('ProductionWorkerOperatorRequiresRuntime');
+  });
+  it('emits the exact protected parameter version in every control task and the versioned manifest',async()=>{
+    const f=setup(),ecr=await import('./ecr');vi.mocked(ecr.selectedDataRelease).mockReturnValue(out({hash:'c'.repeat(64),parameterVersion:2,data:{expiresMs:1800000600000}}));
+    const {productionConsolidationConfig,productionConsolidationOperators}=await import('./production-consolidation');
+    const runtime={mode:'active',administratorArn:out('arn:aws:ssm:ap-northeast-1:123456789012:parameter/mem9-on-aws/prod/runtime/schema-administrator-credential')};
+    const config=productionConsolidationConfig(runtime as any,f.identity as any,f.db as any)!;
+    const ecs={clusterName:out('mem9-on-aws-prod-fixture'),cluster:{nodes:{cluster:{arn:out('arn:aws:ecs:ap-northeast-1:123456789012:cluster/mem9-on-aws-prod-fixture')}}}};
+    productionConsolidationOperators(ecs as any,f.db as any,runtime as any,config);
+    const manifest=JSON.parse(unwrap(f.resources.find(x=>x.name==='ProductionWorkerOperatorManifest').args.value));
+    expect(manifest.version).toBe(3);expect(manifest.dataReleaseParameterVersion).toBe(2);expect(manifest.dataReleaseHash).toBe('c'.repeat(64));
+    for(const task of f.resources.filter(x=>x.kind==='task'))expect(unwrap(task.args.environment.MEM9_RETAINED_DATA_RELEASE_VERSION)).toBe('2');
   });
 });

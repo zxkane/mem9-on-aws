@@ -68,13 +68,15 @@ export async function loadProductionCanaryWorker(clients,{region,kind,revision,c
   const parameters=new Map(result.Parameters.map(parameter=>[parameter.Name,JSON.parse(parameter.Value)]));
   const approved=validateProductionWorkerTarget(parameters.get(operatorName),{region,account});
   const dataRelease=await loadWorkerDataRelease(clients,approved,{controlRevision:revision,
-    controlSourceTree:approved.version===2?(controlSourceTree??await productionSourceTree()):undefined});
+    controlSourceTree:approved.version>=2?(controlSourceTree??await productionSourceTree()):undefined});
   const manifest=parameters.get(name),prefix=`arn:aws:ecs:${region}:${account}:cluster/`;
-  if(manifest.version!==1||manifest.stage!=='prod'||!/^[a-f0-9]{64}$/.test(manifest.generation??'')||
+  if(manifest.version!==(approved.version===3?2:1)||manifest.stage!=='prod'||!/^[a-f0-9]{64}$/.test(manifest.generation??'')||
     !manifest.clusterArn?.startsWith(prefix+'mem9-on-aws-prod-')||!/^mem9-on-aws-prod-consolidation-[A-Za-z0-9-]+$/.test(manifest.groupName??'')||
     manifest.roleArn!==`arn:aws:iam::${account}:role/mem9-on-aws-prod-Mem9ConsolidationSchedulerRole-role`||
     !Array.isArray(manifest.workers)||manifest.workers.length!==2||new Set(manifest.workers.map(worker=>worker.kind)).size!==2||
     manifest.clusterArn!==approved.clusterArn||manifest.generation!==approved.generation)fail();
+  if(approved.version===3&&(manifest.dataReleaseHash!==approved.dataReleaseHash||manifest.dataReleaseParameterVersion!==approved.dataReleaseParameterVersion)||
+    approved.version!==3&&(manifest.dataReleaseHash!==undefined||manifest.dataReleaseParameterVersion!==undefined))fail();
   const worker=manifest.workers.find(worker=>worker.kind===kind),cluster=manifest.clusterArn.slice(prefix.length);
   const containerName=`Mem9Consolidation${kind==='planner'?'Planner':'Executor'}`;
   if(worker?.containerName!==containerName||worker.sourceTag!==approved.sourceTag||worker.image!==approved.workerImage||

@@ -554,7 +554,10 @@ export function consolidation(
     });
     if (workers.length > 0) new aws.ssm.Parameter("ConsolidationAcceptanceManifest", {
       name: `${prefix}/${workers[0].production?'consolidation-runtime':'consolidation-preview'}/manifest`, type: workers[0].production?'SecureString':"String", tags,
-      value: $jsonStringify({version: 1, stage: $app.stage, generation: workers[0].generation,
+      value: $jsonStringify({version: workers[0].production&&workers[0].dataRelease?2:1, stage: $app.stage, generation: workers[0].generation,
+        ...(workers[0].production&&workers[0].dataRelease?{
+          dataReleaseHash:workers[0].dataRelease.apply(value=>value.hash),
+          dataReleaseParameterVersion:workers[0].dataRelease.apply(value=>value.parameterVersion)}:{}),
         groupName: scheduleGroup.name, roleArn: schedulerRole.arn,
         clusterArn: ecsOut.cluster.nodes.cluster.arn, workers: scheduledWorkers}),
     });

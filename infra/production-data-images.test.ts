@@ -17,8 +17,8 @@ function setup(retained=true){
     parentProofHash:'1'.repeat(64),backendBindingHash:'2'.repeat(64),runtimeNonce:'d'.repeat(32),generation:'3'.repeat(64),targetsHash:'4'.repeat(64),
     schemaDigest:'5'.repeat(64),operatorDigest:'6'.repeat(64),buildInputsHash:'7'.repeat(64),securityEvidenceHash:'8'.repeat(64),policyHash:'9'.repeat(64),
     authorizationId:'e'.repeat(32),issuedMs:now-1000,expiresMs:now+3600000};
-  if(retained){vi.stubEnv('MEM9_RETAINED_DATA_RELEASE',JSON.stringify(data));vi.stubEnv('MEM9_RETAINED_DATA_RELEASE_HASH',canaryEvidenceHash(data));}
-  else{vi.stubEnv('MEM9_RETAINED_DATA_RELEASE','none');vi.stubEnv('MEM9_RETAINED_DATA_RELEASE_HASH','none');}
+  if(retained){vi.stubEnv('MEM9_RETAINED_DATA_RELEASE',JSON.stringify(data));vi.stubEnv('MEM9_RETAINED_DATA_RELEASE_HASH',canaryEvidenceHash(data));vi.stubEnv('MEM9_RETAINED_DATA_RELEASE_VERSION','1');}
+  else{vi.stubEnv('MEM9_RETAINED_DATA_RELEASE','none');vi.stubEnv('MEM9_RETAINED_DATA_RELEASE_HASH','none');vi.stubEnv('MEM9_RETAINED_DATA_RELEASE_VERSION','0');}
   return {data,lookup};
 }
 afterEach(()=>{vi.restoreAllMocks();vi.unstubAllGlobals();vi.unstubAllEnvs();vi.resetModules();});
@@ -34,6 +34,10 @@ it('keeps ordinary image selection when no retention is configured',async()=>{
   setup(false);const ecr=await import('./ecr');
   expect(unwrap(ecr.workloadImage('mnemo-server','mem9-aaaaaaa'))).toBe('123456789012.dkr.ecr.ap-northeast-1.amazonaws.com/mem9-on-aws/mnemo-server:mem9-aaaaaaa');
   expect(ecr.selectedDataSourceTag('mem9-aaaaaaa')).toBe('mem9-aaaaaaa');
+});
+it.each(['0','2','missing'])('rejects a stale or absent expected parameter version: %s',async version=>{
+ setup();if(version==='missing')delete process.env.MEM9_RETAINED_DATA_RELEASE_VERSION;else vi.stubEnv('MEM9_RETAINED_DATA_RELEASE_VERSION',version);
+ const ecr=await import('./ecr');expect(()=>unwrap(ecr.selectedDataRelease())).toThrow();
 });
 it('rejects an internally consistent environment descriptor absent from protected storage',async()=>{
   const f=setup(),forged=structuredClone(f.data);forged.images['mnemo-server'].rootDigest='sha256:'+'f'.repeat(64);

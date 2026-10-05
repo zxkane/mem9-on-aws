@@ -32,7 +32,7 @@ export function accountId(): Output<string> {
   return accountIdOut;
 }
 
-type DataReleaseSelection=ReturnType<typeof requireActiveDataRelease>;
+type DataReleaseSelection=ReturnType<typeof requireActiveDataRelease>&{parameterVersion:number};
 let retainedSelection:Output<DataReleaseSelection>|undefined;
 let retainedInput:string|undefined;
 
@@ -40,13 +40,14 @@ let retainedInput:string|undefined;
 export function selectedDataRelease():Output<DataReleaseSelection>|undefined {
   const raw=process.env.MEM9_RETAINED_DATA_RELEASE;
   const expectedHash=process.env.MEM9_RETAINED_DATA_RELEASE_HASH;
+  const expectedVersion=process.env.MEM9_RETAINED_DATA_RELEASE_VERSION;
   if(!raw||raw==='none'){
-    if(expectedHash&&expectedHash!=='none'||retainedInput)throw Error('DataReleaseSelectionChanged');
+    if(expectedHash&&expectedHash!=='none'||expectedVersion&&expectedVersion!=='0'||retainedInput)throw Error('DataReleaseSelectionChanged');
     return;
   }
   if(($app.stage!=='prod'&&!/^pr-[1-9][0-9]*$/.test($app.stage))||process.env.MEM9_PRODUCTION_RUNTIME_MODE!=='active'||
-    !/^[a-f0-9]{64}$/.test(expectedHash??''))throw Error('VerifiedDataReleaseRequired');
-  const binding=$app.stage+'\0'+raw+'\0'+expectedHash;
+    !/^[a-f0-9]{64}$/.test(expectedHash??'')||!/^\d+$/.test(expectedVersion??'')||!Number.isSafeInteger(Number(expectedVersion))||Number(expectedVersion)<1)throw Error('VerifiedDataReleaseRequired');
+  const binding=$app.stage+'\0'+raw+'\0'+expectedHash+'\0'+expectedVersion;
   if(retainedInput&&retainedInput!==binding)throw Error('DataReleaseSelectionChanged');
   retainedInput=binding;
   if(!retainedSelection){
@@ -57,11 +58,11 @@ export function selectedDataRelease():Output<DataReleaseSelection>|undefined {
       const name=`/mem9-on-aws/${$app.stage}/consolidation-runtime/data-release`;
       return aws.ssm.getParameterOutput({name,region,withDecryption:true}).apply(parameter=>{
         if(parameter.name!==name||parameter.arn!==`arn:aws:ssm:${region}:${account}:parameter${name}`||
-          parameter.type!=='SecureString'||!Number.isSafeInteger(parameter.version)||parameter.version<1)throw Error('ProtectedDataReleaseRequired');
+          parameter.type!=='SecureString'||!Number.isSafeInteger(parameter.version)||parameter.version!==Number(expectedVersion))throw Error('ProtectedDataReleaseRequired');
         const context={stage:$app.stage,account,region,controlSourceTree};
         const selection=requireActiveDataRelease(parameter.value,context);
         if(selection.hash!==expectedHash||requireActiveDataRelease(raw,context).hash!==selection.hash)throw Error('DataReleaseSelectionChanged');
-        return selection;
+        return {...selection,parameterVersion:parameter.version};
       });
     }));
   }

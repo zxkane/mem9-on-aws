@@ -23,16 +23,17 @@ export async function loadDeploymentDataRelease(clients,{stage,account,region,co
   const current=parse(selectionName),operator=parse(operatorName),parameter=record.get(name);
   if(current!==undefined&&(!exact(current,['version','mode','controlTag','dataTag','images',...(current.mode==='retained'?['dataReleaseHash','arm64Digests']:[])])||
     current.version!==1||!['tag','retained'].includes(current.mode)))fail();
-  if(operator!==undefined&&(![1,2].includes(operator?.version)||operator.stage!==stage||operator.account!==account||operator.region!==region))fail();
+  if(operator!==undefined&&(![1,2,3].includes(operator?.version)||operator.stage!==stage||operator.account!==account||operator.region!==region))fail();
   const claimed=env.MEM9_RETAINED_DATA_RELEASE,claimedHash=env.MEM9_RETAINED_DATA_RELEASE_HASH;
   if(!parameter){
-    if(current?.mode==='retained'||operator?.version===2||claimed&&claimed!=='none'||claimedHash&&claimedHash!=='none')throw Error('ProductionDataReleaseMissing');
+    if(current?.mode==='retained'||operator?.version>=2||claimed&&claimed!=='none'||claimedHash&&claimedHash!=='none')throw Error('ProductionDataReleaseMissing');
     return;
   }
   if(parameter.Type!=='SecureString'||runtime?.phase!=='complete'||runtime.status!=='running'||runtime.stage!==stage)fail();
   const selected=requireActiveDataRelease(parameter.Value,{stage,account,region,controlSourceTree,
     bindings:{runtimeNonce:runtime.nonce,schemaDigest:runtime.schemaDigest,operatorDigest:runtime.operatorDigest}},{now});
   if(claimed!==undefined&&claimed!==JSON.stringify(selected.data)||claimedHash!==undefined&&claimedHash!==selected.hash)throw Error('ProductionDataReleaseOverrideConflict');
+  if(env.MEM9_RETAINED_DATA_RELEASE_VERSION!==undefined&&env.MEM9_RETAINED_DATA_RELEASE_VERSION!==String(parameter.Version))throw Error('ProductionDataReleaseVersionMismatch');
   // A descriptor for a new control release may legitimately supersede the old
   // selection hash. It must retain the exact already-selected data artifacts.
   if(current?.mode==='retained'){
@@ -52,11 +53,14 @@ export async function loadWorkerDataRelease(clients,meta,{controlRevision,contro
     return;
   }
   const name='/mem9-on-aws/prod/consolidation-runtime/data-release';
-  if(meta.version!==2||meta.stage!=='prod'||meta.dataReleaseParameter!==name||!/^[a-f0-9]{64}$/.test(meta.dataReleaseHash??'')||
+  if(![2,3].includes(meta.version)||meta.stage!=='prod'||meta.dataReleaseParameter!==name||!/^[a-f0-9]{64}$/.test(meta.dataReleaseHash??'')||
     !/^[a-f0-9]{40}$/.test(controlSourceTree??''))throw Error('ProductionDataReleaseInvalid');
+  if(meta.version===3&&(!Number.isSafeInteger(meta.dataReleaseParameterVersion)||meta.dataReleaseParameterVersion<1))throw Error('ProductionDataReleaseVersionRequired');
+  if(meta.version===2&&meta.dataReleaseParameterVersion!==undefined)throw Error('ProductionDataReleaseInvalid');
   const result=await clients.ssm.send(new GetParametersCommand({Names:[name],WithDecryption:true}),{abortSignal:AbortSignal.timeout(30000)});
   const p=result.Parameters?.[0];
   if(result.InvalidParameters?.length||result.Parameters?.length!==1||p.Name!==name||p.Type!=='SecureString'||!Number.isSafeInteger(p.Version)||p.Version<1)throw Error('ProductionDataReleaseMissing');
+  if(meta.version===3&&p.Version!==meta.dataReleaseParameterVersion||meta.version===2&&mode==='admission'&&p.Version!==1)throw Error('ProductionDataReleaseVersionMismatch');
   const expected={stage:'prod',account:meta.account,region:meta.region,controlSourceTree,bindings:{generation:meta.generation}};
   const selected=mode==='admission'?requireActiveDataRelease(p.Value,expected,{now}):inspectDataRelease(p.Value,expected);
   if(selected.hash!==meta.dataReleaseHash||selected.data.dataSourceTag!==meta.sourceTag||selected.images['llm-proxy']!==meta.workerImage)throw Error('ProductionDataReleaseMismatch');

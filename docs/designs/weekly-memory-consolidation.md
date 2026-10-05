@@ -1816,6 +1816,68 @@ inventory and policy review. Authorization has a bounded explicit operation
 window, at most 24 hours. Changing only timestamps is not renewal evidence.
 A draft capture or valid JSON shape is not authorization.
 
+Expired descriptors use a separate guarded supersession protocol. It preserves
+the inner descriptor schema and every retained-data/root binding, requires a new
+authorization ID and fresh source/build/security/policy evidence, and replaces
+only the exact expired protected parameter. The expected version increments by
+one. The operator never deletes the parameter, resets its version, edits an old
+approval timestamp, or resets canary history or spent allowance.
+
+The existing non-expiring operator mutex and deployment fence serialize every
+routine writer of that parameter. Before mutation, the evidence adapter must
+prove complete IAM/KMS writer coverage and revalidate the reviewed policy
+inventory against current state. An unknown writer or inconclusive policy
+evaluation rejects. After acquiring the fence, it repeats the full read-only
+root audit and source/security/worker/schedule checks. Snapshots must belong to
+that fence session and remain within five minutes of collection when used. After
+persisting a verification or abort receipt, collect another full live snapshot
+before the final fence assertion and release decision; checking only the age of
+the earlier snapshot does not detect intervening state changes.
+
+Before the single overwrite, the adapter conditionally archives the full
+predecessor, successor, version/hash link and complete predecessor lineage in
+owner-only immutable storage, verifies the stored bytes, and retains a durable
+local backup. The protected mutex commits to that transition. Archive history,
+not Parameter Store's bounded history, is authoritative for the chain. The
+protocol rejects incomplete or over-limit chains rather than truncating them;
+the current complete-chain limit is 1,000 entries. Previously reserved IDs are
+reconciliation-only even when their write never completed.
+
+Reconciliation cannot issue another authorization write. An exact successor at
+the expected version may be certified against fresh live evidence. An old or
+missing value alone does not prove a failed write and retains the intent and
+fences. A pre-write abort requires independently proven issuer termination,
+authenticated acquisition records and an unchanged predecessor. If an intent
+already exists, only a durable no-send receipt from the issuer can prove that it
+did not cross the Put boundary. The receipt binds the archive, intent and exact
+acquisition descriptors and is verified before cleanup. Its absence must not be
+replaced by an inference from an unchanged parameter.
+
+Persist a separate create-only acquisition intent before requesting any fence.
+Read back the exact acquisition record before requesting locks, the write intent
+before calling Put, and the verification receipt before releasing locks. A write
+acknowledgement alone cannot replace these authenticated durable reads.
+An archive-only interruption can be aborted only after proving issuer termination
+and authenticated absence of that intent. An attempted acquisition without a
+known outcome remains held. The adapter must read this journal from its durable,
+consistent authority, never infer absence from local files or a timed-out read.
+Acquisition descriptors remain available after their resources are released;
+recovery authenticates them alongside release receipts. Missing descriptors are
+not equivalent to already-released resources. Expired results remain historical
+and never become renewed admission authority.
+
+The inspector derives its lineage hash independently from authenticated immutable
+archive history. It must not copy the caller's proposed chain or expected hash.
+
+Deployment exports the protected parameter version together with its value and
+hash. The retained operator manifest uses outer revision 3 and the worker
+manifest outer revision 2; both bind `dataReleaseParameterVersion`. Control tasks
+receive the same value in `MEM9_RETAINED_DATA_RELEASE_VERSION`. New admission
+rejects missing, prior or later same-byte versions. Legacy retained manifests
+can inspect historical records during transition but cannot admit a superseded
+version. Workers stay disabled until normal deployment reconciles these bindings
+and fresh rollout verification succeeds.
+
 Declared build-input evidence covers the three Dockerfiles, every local COPY
 source including matching lockfiles and directory members, file modes, root and
 Dockerfile-specific ignore files, and the relevant pinned CI build/builder

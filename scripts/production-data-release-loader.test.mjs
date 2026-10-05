@@ -28,3 +28,20 @@ it('rejects swapped references, control identity, hash, generation and selected 
 it('preserves the legacy single-release path without reading another parameter',async()=>{
  const f=fixture();expect(await loadWorkerDataRelease(f.clients,{version:1,sourceTag:'mem9-aaaaaaa'},f.options)).toBeUndefined();expect(f.calls).toEqual([]);
 });
+it('loads a manifest-pinned successor version exactly',async()=>{
+ const f=fixture();f.meta.version=3;f.meta.dataReleaseParameterVersion=2;f.parameter.Version=2;
+ const selected=await loadWorkerDataRelease(f.clients,f.meta,{...f.options,mode:'admission'});expect(selected.parameterVersion).toBe(2);
+});
+it.each([1,3,undefined])('rejects observed version %s despite identical descriptor bytes',async version=>{
+ const f=fixture();f.meta.version=3;f.meta.dataReleaseParameterVersion=2;f.parameter.Version=version;
+ await expect(loadWorkerDataRelease(f.clients,f.meta,{...f.options,mode:'admission'})).rejects.toThrow();
+});
+it.each([undefined,0,'2',-1])('rejects invalid version binding %s in the new manifest',async version=>{
+ const f=fixture();f.meta.version=3;f.meta.dataReleaseParameterVersion=version;f.parameter.Version=2;
+ await expect(loadWorkerDataRelease(f.clients,f.meta,{...f.options,mode:'admission'})).rejects.toThrow();
+});
+it('a legacy retained manifest cannot admit a later same-byte parameter version',async()=>{
+ const f=fixture();f.parameter.Version=2;
+ await expect(loadWorkerDataRelease(f.clients,f.meta,{...f.options,mode:'admission'})).rejects.toThrow();
+ expect((await loadWorkerDataRelease(f.clients,f.meta,{...f.options,mode:'inspection'})).parameterVersion).toBe(2);
+});
