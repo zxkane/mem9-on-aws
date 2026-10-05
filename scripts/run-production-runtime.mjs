@@ -108,14 +108,14 @@ export async function productionCoordinatorDigest(){
 
 export async function retainedDeploymentEnvironment(clients,context,{captureBuild=captureDataReleaseBuild}={}){
   const selected=await loadDeploymentDataRelease(clients,context);
-  if(!selected)return {MEM9_RETAINED_DATA_RELEASE:'none',MEM9_RETAINED_DATA_RELEASE_HASH:'none'};
+  if(!selected)return {MEM9_RETAINED_DATA_RELEASE:'none',MEM9_RETAINED_DATA_RELEASE_HASH:'none',MEM9_RETAINED_DATA_RELEASE_VERSION:'0'};
   const evidence=await captureBuild({data:selected.data,repository:context.repository,controlRevision:context.controlRevision});
   if(evidence.buildInputsHash!==selected.data.buildInputsHash)throw Error('DataReleaseBuildEvidenceMismatch');
   // Source/registry reads can take time. Do not export a revoked, replaced or
   // expired authorization after those independent checks have completed.
   const fresh=await loadDeploymentDataRelease(clients,{...context,now:Date.now()});
   if(fresh?.hash!==selected.hash||fresh.parameterVersion!==selected.parameterVersion)throw Error('DataReleaseSelectionChanged');
-  return {MEM9_RETAINED_DATA_RELEASE:JSON.stringify(selected.data),MEM9_RETAINED_DATA_RELEASE_HASH:selected.hash};
+  return {MEM9_RETAINED_DATA_RELEASE:JSON.stringify(selected.data),MEM9_RETAINED_DATA_RELEASE_HASH:selected.hash,MEM9_RETAINED_DATA_RELEASE_VERSION:String(selected.parameterVersion)};
 }
 
 export async function productionSourceTree(){
@@ -252,7 +252,7 @@ export async function runProductionRuntime({clients,stage,region,command,env=pro
     const pending=plan?.clusterArn?await cancelProductionInvocations(clients,plan):[];
     await execute('pnpm',['-C','infra','exec','sst','remove','--stage',stage,'--print-logs'],{cwd:process.cwd(),
       env:{...env,MEM9_NAMESPACE_REQUIRED:'1',MEM9_CONSOLIDATION_SCHEDULE_ENABLED:'0',SST_SECRET_MaintenanceNamespaceIds:'[]',
-        MEM9_PRODUCTION_RUNTIME_MODE:mode,MEM9_RETAINED_DATA_RELEASE:'none',MEM9_RETAINED_DATA_RELEASE_HASH:'none',
+        MEM9_PRODUCTION_RUNTIME_MODE:mode,MEM9_RETAINED_DATA_RELEASE:'none',MEM9_RETAINED_DATA_RELEASE_HASH:'none',MEM9_RETAINED_DATA_RELEASE_VERSION:'0',
         MEM9_PREVIEW_ACCEPTANCE_CONTEXT:undefined,MEM9_PREVIEW_RUNTIME_NONCE:undefined,
         ...(plan?{MEM9_RUNTIME_FALLBACK_IMAGES:JSON.stringify(plan.fallbackImages)}:{})},
       timeout:2400000,maxBuffer:8*1024*1024});

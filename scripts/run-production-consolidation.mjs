@@ -112,7 +112,7 @@ export async function verifyProductionTaskRoles(clients,meta,definition,name,sec
 }
 
 export function validateProductionWorkerTarget(meta,{region,account}){
-  if(![1,2].includes(meta?.version)||meta.stage!=='prod'||meta.region!==region||meta.account!==account||
+  if(![1,2,3].includes(meta?.version)||meta.stage!=='prod'||meta.region!==region||meta.account!==account||
     !meta.cluster?.startsWith('mem9-on-aws-prod-')||!/^[A-Za-z0-9-]+$/.test(meta.cluster)||meta.clusterArn!==`arn:aws:ecs:${region}:${account}:cluster/${meta.cluster}`||
     !meta.host?.startsWith('mem9-on-aws-prod-')||!meta.host.endsWith(`.${region}.rds.amazonaws.com`)||
     !/^[A-Za-z_][A-Za-z0-9_]{0,62}$/.test(meta.database??'')||!/^[a-f0-9]{64}$/.test(meta.generation??'')||
@@ -123,10 +123,11 @@ export function validateProductionWorkerTarget(meta,{region,account}){
   const arn=`arn:aws:ssm:${region}:${account}:parameter/mem9-on-aws/prod/`;
   for(const [key,path] of Object.entries({administratorCredential:'runtime/schema-administrator-credential',plannerCredential:'consolidation-runtime/planner-credential',
     executorCredential:'consolidation-runtime/executor-credential',targetsParameter:'maintenance/targets'}))if(meta[key]!==arn+path)fail('ProductionWorkerCredentialReferenceMismatch');
-  if(meta.version===2){
+  if(meta.version>=2){
     if(!/^mem9-[a-f0-9]{7}$/.test(meta.controlSourceTag??'')||!/^[a-f0-9]{64}$/.test(meta.dataReleaseHash??'')||
       meta.dataReleaseParameter!=='/mem9-on-aws/prod/consolidation-runtime/data-release')fail('InvalidProductionDataReleaseManifest');
-  }else if(meta.dataReleaseHash!==undefined||meta.dataReleaseParameter!==undefined||meta.controlSourceTag!==undefined&&meta.controlSourceTag!==meta.sourceTag)fail('InvalidProductionDataReleaseManifest');
+    if(meta.version===3&&(!Number.isSafeInteger(meta.dataReleaseParameterVersion)||meta.dataReleaseParameterVersion<1)||meta.version===2&&meta.dataReleaseParameterVersion!==undefined)fail('InvalidProductionDataReleaseManifest');
+  }else if(meta.dataReleaseHash!==undefined||meta.dataReleaseParameter!==undefined||meta.dataReleaseParameterVersion!==undefined||meta.controlSourceTag!==undefined&&meta.controlSourceTag!==meta.sourceTag)fail('InvalidProductionDataReleaseManifest');
   return meta;
 }
 
@@ -152,7 +153,8 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
     container.entryPoint?.join()!=='node'||container.command?.join()!=='/bootstrap/operator/scripts/production-consolidation-operator.mjs'||container.environmentFiles?.length||
     container.image!==target.image||env.MEM9_WORKER_IMAGE!==meta.workerImage||env.MEM9_WORKER_SOURCE_TAG!==meta.sourceTag||
     (meta.controlSourceTag!==undefined&&env.MEM9_CONTROL_SOURCE_TAG!==meta.controlSourceTag)||
-    (meta.version===2&&env.MEM9_RETAINED_DATA_RELEASE_HASH!==meta.dataReleaseHash)||
+    (meta.version>=2&&env.MEM9_RETAINED_DATA_RELEASE_HASH!==meta.dataReleaseHash)||
+    (meta.version===3&&env.MEM9_RETAINED_DATA_RELEASE_VERSION!==String(meta.dataReleaseParameterVersion))||
     env.MEM9_STAGE!=='prod'||env.MEM9_DB_HOST!==meta.host||env.MEM9_DB_NAME!==meta.database||env.MEM9_WORKER_GENERATION!==meta.generation||
     env.MEM9_DB_PORT!==String(meta.port)||env.MEM9_PRODUCTION_WORKER_OPERATOR!==kind||Object.keys(actual).length!==Object.keys(secrets).length||
     Object.entries(secrets).some(([key,value])=>actual[key]!==value))fail('ProductionWorkerOperatorDefinitionMismatch');

@@ -1,5 +1,6 @@
 import {describe,it,expect} from 'vitest';
 import {loadProductionCanaryWorker} from './lib/production-canary-delivery.mjs';
+import {canaryEvidenceHash as hash} from './lib/production-canary-verification.mjs';
 
 function fixture(drift){
   const account='123456789012',region='ap-northeast-1',revision='a'.repeat(40),generation='b'.repeat(64),cluster='mem9-on-aws-prod-Fixture';
@@ -20,11 +21,11 @@ function fixture(drift){
   if(drift==='host')values.MEM9_DB_HOST='foreign.example.com';
   if(drift==='database')values.MEM9_DB_NAME='unrelated';
   if(drift==='port')values.MEM9_DB_PORT='5433';
-  const calls=[];
+  const calls=[],state={dataParameter:null};
   const send=async command=>{
     const name=command.constructor.name,input=command.input;calls.push(name);
     if(name==='GetCallerIdentityCommand')return {Account:account};
-    if(name==='GetParametersCommand')return {Parameters:input.Names.map(Name=>({Name,Value:JSON.stringify(Name.endsWith('/operator-manifest')?operator:manifest)}))};
+    if(name==='GetParametersCommand')return {Parameters:input.Names.map(Name=>Name.endsWith('/data-release')?state.dataParameter:{Name,Value:JSON.stringify(Name.endsWith('/operator-manifest')?operator:manifest)})};
     if(name==='DescribeTaskDefinitionCommand')return {taskDefinition:{taskDefinitionArn,taskRoleArn:role('task'),executionRoleArn:role('execution'),networkMode:'awsvpc',runtimePlatform:{cpuArchitecture:'ARM64'},
       containerDefinitions:[{name:containerName,image:operator.workerImage,
         entryPoint:['node'],command:['/app/scripts/consolidation-worker.mjs'],environment:Object.entries(values).map(([name,value])=>({name,value})),
@@ -42,7 +43,17 @@ function fixture(drift){
     if(name==='GetScheduleCommand')return {};
     throw Error('UnexpectedCommand');
   };
-  return {clients:{ssm:{send},sts:{send},ecs:{send},iam:{send},scheduler:{send}},options:{region,kind:'executor',revision},calls};
+  return {clients:{ssm:{send},sts:{send},ecs:{send},iam:{send},scheduler:{send}},options:{region,kind:'executor',revision},calls,operator,manifest,state};
+}
+function retainedFixture(){
+ const f=fixture(),o=f.operator,now=Date.now(),h='e'.repeat(64);
+ const data={version:1,stage:'prod',account:o.account,region:o.region,controlSourceTree:'a'.repeat(40),dataRevision:'a'.repeat(40),dataSourceTree:'b'.repeat(40),dataSourceTag:o.sourceTag,
+  images:Object.fromEntries(['llm-proxy','mnemo-server','qwen3-embed'].map(name=>[name,{rootDigest:'sha256:'+'d'.repeat(64),arm64Digest:'sha256:'+h}])),
+  runtimeNonce:'c'.repeat(32),authorizationId:'d'.repeat(32),issuedMs:now-1000,expiresMs:now+3600000,
+  ...Object.fromEntries(['parentProofHash','backendBindingHash','targetsHash','schemaDigest','operatorDigest','buildInputsHash','securityEvidenceHash','policyHash'].map(k=>[k,h])),generation:o.generation};
+ Object.assign(o,{version:3,controlSourceTag:o.sourceTag,dataReleaseHash:hash(data),dataReleaseParameter:'/mem9-on-aws/prod/consolidation-runtime/data-release',dataReleaseParameterVersion:2});
+ Object.assign(f.manifest,{version:2,dataReleaseHash:o.dataReleaseHash,dataReleaseParameterVersion:2});f.options.controlSourceTree=data.controlSourceTree;
+ f.state.dataParameter={Name:o.dataReleaseParameter,Type:'SecureString',Version:2,Value:JSON.stringify(data)};return f;
 }
 describe('production canary worker target loading',()=>{
   it('binds approved DB and private network to a verified task and both IAM roles',async()=>{
@@ -53,5 +64,14 @@ describe('production canary worker target loading',()=>{
   it.each(['host','database','port'])('rejects %s drift before schedule creation',async drift=>{
     const f=fixture(drift);await expect(loadProductionCanaryWorker(f.clients,f.options)).rejects.toThrow('ProductionCanaryDeliveryFailed');
     expect(f.calls).not.toContain('GetScheduleCommand');expect(f.calls).not.toContain('CreateScheduleCommand');
+  });
+  it('binds both retained manifests to the same exact protected version',async()=>{
+    const f=retainedFixture(),target=await loadProductionCanaryWorker(f.clients,f.options);expect(target.dataRelease.parameterVersion).toBe(2);
+  });
+  it.each([undefined,1,3])('rejects worker-manifest version binding %s before worker discovery',async version=>{
+    const f=retainedFixture();f.manifest.dataReleaseParameterVersion=version;await expect(loadProductionCanaryWorker(f.clients,f.options)).rejects.toThrow();expect(f.calls).not.toContain('DescribeTaskDefinitionCommand');
+  });
+  it('rejects a later same-byte protected parameter rewrite before worker discovery',async()=>{
+    const f=retainedFixture();f.state.dataParameter.Version=3;await expect(loadProductionCanaryWorker(f.clients,f.options)).rejects.toThrow('VersionMismatch');expect(f.calls).not.toContain('DescribeTaskDefinitionCommand');
   });
 });

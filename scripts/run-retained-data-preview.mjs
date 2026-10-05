@@ -138,9 +138,9 @@ export async function runRetainedDataPreview(env=process.env){
     const envFile=join(directory,'runtime.env');
     await retainedPreviewStep('configure',()=>command(process.execPath,['scripts/run-production-runtime.mjs','configure'],{env:{...postEnv,GITHUB_ENV:envFile},timeout:1200000}));
     const runtimeEnv={};for(const line of (await readFile(envFile,'utf8')).split('\n').filter(Boolean)){
-      const equal=line.indexOf('='),key=line.slice(0,equal);if(!['MEM9_PRODUCTION_RUNTIME_MODE','MEM9_RUNTIME_FALLBACK_IMAGES','MEM9_RETAINED_DATA_RELEASE','MEM9_RETAINED_DATA_RELEASE_HASH'].includes(key)||key in runtimeEnv)fail();runtimeEnv[key]=line.slice(equal+1);
+      const equal=line.indexOf('='),key=line.slice(0,equal);if(!['MEM9_PRODUCTION_RUNTIME_MODE','MEM9_RUNTIME_FALLBACK_IMAGES','MEM9_RETAINED_DATA_RELEASE','MEM9_RETAINED_DATA_RELEASE_HASH','MEM9_RETAINED_DATA_RELEASE_VERSION'].includes(key)||key in runtimeEnv)fail();runtimeEnv[key]=line.slice(equal+1);
     }
-    if(runtimeEnv.MEM9_PRODUCTION_RUNTIME_MODE!=='active'||runtimeEnv.MEM9_RETAINED_DATA_RELEASE_HASH!==selected.hash)fail();
+    if(runtimeEnv.MEM9_PRODUCTION_RUNTIME_MODE!=='active'||runtimeEnv.MEM9_RETAINED_DATA_RELEASE_HASH!==selected.hash||runtimeEnv.MEM9_RETAINED_DATA_RELEASE_VERSION!=='1')fail();
     const deploymentEnv=await cutoverDeploymentEnvironment({ssm},stage,{...postEnv,...runtimeEnv});
     await retainedPreviewStep('quiet',quiet);
     await retainedPreviewStep('deploy',()=>command('pnpm',['-C','infra','exec','sst','deploy','--stage',stage,'--print-logs'],{env:deploymentEnv,timeout:1800000}));

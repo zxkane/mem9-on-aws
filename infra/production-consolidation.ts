@@ -19,7 +19,7 @@ export interface ProductionConsolidationConfig extends ConsolidationWorkerConfig
   operatorImage:Output<string>;
   sourceTag:string|Output<string>;
   controlSourceTag:string;
-  dataRelease?:Output<VerifiedDataRelease>;
+  dataRelease?:Output<VerifiedDataRelease&{parameterVersion:number}>;
   usernames:{planner:string;executor:string};
 }
 
@@ -41,6 +41,7 @@ export function productionConsolidationOperators(ecs:EcsOutputs,db:DbOutputs,run
         MEM9_WORKER_GENERATION:config.generation,MEM9_PRODUCTION_WORKER_OPERATOR:kind,
         MEM9_WORKER_IMAGE:config.image,MEM9_WORKER_SOURCE_TAG:config.sourceTag,MEM9_CONTROL_SOURCE_TAG:config.controlSourceTag,
         MEM9_RETAINED_DATA_RELEASE_HASH:config.dataRelease?config.dataRelease.apply(value=>value.hash):'none',
+        MEM9_RETAINED_DATA_RELEASE_VERSION:config.dataRelease?config.dataRelease.apply(value=>String(value.parameterVersion)):'0',
         MEM9_RETAINED_DATA_RELEASE_EXPIRES_MS:config.dataRelease?config.dataRelease.apply(value=>String(value.data.expiresMs)):'0'},ssm:secrets,permissions:[],logging:{retention:'1 month'},
       transform:{taskRole:args=>{args.assumeRolePolicy=$jsonStringify(runtimeTaskTrust());},
         executionRole:args=>{args.assumeRolePolicy=$jsonStringify(runtimeTaskTrust());args.inlinePolicies=[{name:'ProductionWorkerOperator',policy:$jsonStringify(runtimeExecutionPolicy(Object.values(secrets),[]))}];},
@@ -49,10 +50,11 @@ export function productionConsolidationOperators(ecs:EcsOutputs,db:DbOutputs,run
     return [kind,{taskDefinition:task.taskDefinition,containerName:name,image:config.operatorImage}];
   }));
   new aws.ssm.Parameter('ProductionWorkerOperatorManifest',{name:'/mem9-on-aws/prod/consolidation-runtime/operator-manifest',type:'SecureString',tags,
-    value:$jsonStringify({version:config.dataRelease?2:1,stage:'prod',region:applicationRegion(),account:accountId(),cluster:ecs.clusterName,clusterArn:ecs.cluster.nodes.cluster.arn,
+    value:$jsonStringify({version:config.dataRelease?3:1,stage:'prod',region:applicationRegion(),account:accountId(),cluster:ecs.clusterName,clusterArn:ecs.cluster.nodes.cluster.arn,
       subnets:resolveVpc().privateSubnetIds,securityGroup:db.taskSecurityGroupId,generation:config.generation,sourceTag:config.sourceTag,workerImage:config.image,
       controlSourceTag:config.controlSourceTag,...(config.dataRelease?{
-        dataReleaseHash:config.dataRelease.apply(value=>value.hash),dataReleaseParameter:'/mem9-on-aws/prod/consolidation-runtime/data-release'}:{}),
+        dataReleaseHash:config.dataRelease.apply(value=>value.hash),dataReleaseParameter:'/mem9-on-aws/prod/consolidation-runtime/data-release',
+        dataReleaseParameterVersion:config.dataRelease.apply(value=>value.parameterVersion)}:{}),
       host:db.host,port:db.port,database:db.database,administratorCredential:runtime.administratorArn,
       plannerCredential:config.arns.planner,executorCredential:config.arns.executor,targetsParameter:config.arns.targets,operators:tasks})});
 }

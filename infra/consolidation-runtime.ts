@@ -6,6 +6,7 @@ import {disableTaskContainerPseudoTerminal} from "./ecs-task-definition";
 import {isConsolidationPreview,previewGeneration,previewConfiguration,previewAcceptanceContext} from "../scripts/lib/consolidation-preview-config.mjs";
 import {verifiedPostRuntimePreview} from './post-runtime-preview';
 import type {PostRuntimePreviewContext} from '../scripts/lib/consolidation-preview-config.mjs';
+import type {VerifiedDataRelease} from '../scripts/lib/production-data-release.mjs';
 
 type SecretKind="config"|"planner"|"executor"|"backend"|"seed"|"targets"|"tenant";
 export interface ConsolidationPreviewConfig {
@@ -25,6 +26,7 @@ export interface ConsolidationWorker {
   admission?:Output<string>;
   image?:Input<string>;
   sourceTag?:Input<string>;
+  dataRelease?:Output<VerifiedDataRelease&{parameterVersion:number}>;
   task:sst.aws.Task;
 }
 export interface ConsolidationWorkerConfig {
@@ -36,6 +38,7 @@ export interface ConsolidationWorkerConfig {
   admission?:Output<string>;
   image?:Input<string>;
   sourceTag?:Input<string>;
+  dataRelease?:Output<VerifiedDataRelease&{parameterVersion:number}>;
 }
 export function consolidationPreviewConfig():ConsolidationPreviewConfig|undefined {
   const context=previewAcceptanceContext($app.stage);
@@ -106,6 +109,6 @@ export function continuousConsolidationTasks(ecs:EcsOutputs,db:DbOutputs,config:
           ]})}];
         }},
     });
-    return {kind,containerName,generation:config.generation,production:config.production,enabled:config.enabled,admission:config.admission,image:config.image,sourceTag:config.sourceTag,task};
+    return {kind,containerName,generation:config.generation,production:config.production,enabled:config.enabled,admission:config.admission,image:config.image,sourceTag:config.sourceTag,dataRelease:config.dataRelease,task};
   });
 }
