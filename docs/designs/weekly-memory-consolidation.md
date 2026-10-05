@@ -1869,6 +1869,25 @@ and never become renewed admission authority.
 The inspector derives its lineage hash independently from authenticated immutable
 archive history. It must not copy the caller's proposed chain or expected hash.
 
+The owner stack protects `data-authorizations/` with five Deny-only statements:
+the existing TLS rule, required exact conditional creation, and explicit denial
+of copy sources, replication, deletion and ACL changes. Resource references must
+resolve to the same owned bucket. Readback rejects duplicate JSON members at all
+depths before constructing a Sid map, unknown fields or statements, duplicate
+values, unresolved resources and changed conditions. Scalar/single-array forms
+and ordering may normalize; permissions and scope may not.
+
+Lifecycle expiration, noncurrent expiration and archival transitions must not
+overlap this prefix. Intelligent-tiering archive access is checked from the
+complete paginated configuration inventory. These checks do not govern future
+configuration changes: admission separately inventories object/ACL/tag writers,
+bucket-policy, lifecycle, tiering, replication, versioning, encryption, ownership,
+public-access-block, access-point and KMS configuration mutators. Unknown or
+uncontrolled paths block use. Apply the archive policy through an independently
+reviewed UPDATE change set allowing only the intended in-place policy change,
+then perform read-only configuration verification and actual allow/deny probes.
+Provider validation errors must not be reported as IAM-denial evidence.
+
 Deployment exports the protected parameter version together with its value and
 hash. The retained operator manifest uses outer revision 3 and the worker
 manifest outer revision 2; both bind `dataReleaseParameterVersion`. Control tasks
