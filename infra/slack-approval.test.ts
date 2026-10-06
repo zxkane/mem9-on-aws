@@ -1891,11 +1891,11 @@ describe("slack approval infrastructure", () => {
       (resource: any) => resource.Type === "AWS::S3::BucketPolicy",
     ) as any;
     expect(policy).toBeDefined();
-    // Exactly one statement, and it must DENY. A bucket policy that granted
-    // anything would widen who can reach the artifact beyond the two identity
-    // policies that are supposed to be the only way in.
-    expect(policy.Properties.PolicyDocument.Statement).toHaveLength(1);
-    const [statement] = policy.Properties.PolicyDocument.Statement;
+    // All statements constrain access; none may add an identity grant.
+    const statements = policy.Properties.PolicyDocument.Statement;
+    expect(statements).toHaveLength(5);
+    expect(statements.every((entry: any) => entry.Effect === "Deny")).toBe(true);
+    const statement = statements.find((entry: any) => entry.Sid === "DenyInsecureTransport");
     expect(statement.Effect).toBe("Deny");
     expect(statement.Condition).toEqual({
       Bool: { "aws:SecureTransport": "false" },

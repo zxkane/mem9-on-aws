@@ -755,13 +755,26 @@ deployment left the bucket behind, the script automatically imports only that
 bucket with `decision-artifact-bucket-import.yaml`, waits for
 `stack-import-complete`, then applies the full template. This second update is
 required because CloudFormation import records properties but does not reconcile
-public-access block, encryption, lifecycle, tags, or create the TLS-only policy.
+public-access block, encryption, lifecycle, tags, or create the bucket policy.
 Every path finishes by reading those controls back and requiring CloudFormation
 drift status `IN_SYNC`. Re-running the script updates and verifies the existing
 owner stack. If a full update rolls back, rerun after fixing the cause;
 `UPDATE_ROLLBACK_COMPLETE` is recoverable after the script re-verifies the
 physical bucket, while `UPDATE_ROLLBACK_FAILED` first requires
 `continue-update-rollback`.
+
+Authorization history uses the private `data-authorizations/` prefix. Its policy
+requires conditional creation and denies copying, replication, deletion and ACL
+changes on those objects. Other prefixes keep their existing behavior. The
+owner-stack verifier checks the exact policy and rejects lifecycle or archival
+tiering rules that could remove or make this history unavailable.
+
+After an independently reviewed stack update, use
+`scripts/deploy-decision-artifact-bucket.sh --verify` to read the existing controls
+without creating, importing or updating the stack. This validates configuration;
+production use also requires verified writer/configuration-mutator governance and
+actual provider authorization probes. An archive-only policy rollout must use a
+reviewed UPDATE change set restricted to the intended in-place policy change.
 
 Cleanup and consolidation use the service-scoped tasks documented below.
 Scheduling additionally requires the private namespace target list and the new

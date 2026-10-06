@@ -15,12 +15,13 @@
 # Existing buckets are adopted automatically in two phases:
 #   1. IMPORT the bucket alone with decision-artifact-bucket-import.yaml.
 #   2. UPDATE to decision-artifact-bucket.yaml to reconcile hardening and create
-#      the TLS-only policy.
+#      the TLS and authorization-archive policy.
 #
 # Usage:
 #   scripts/deploy-decision-artifact-bucket.sh
 #   scripts/deploy-decision-artifact-bucket.sh --create
 #   scripts/deploy-decision-artifact-bucket.sh --update
+#   scripts/deploy-decision-artifact-bucket.sh --verify
 
 set -euo pipefail
 
@@ -40,8 +41,10 @@ mode=""
 
 for arg in "$@"; do
   case "$arg" in
-    --create) mode="create" ;;
-    --update) mode="update" ;;
+    --create|--update|--verify)
+      if [[ -n "$mode" ]]; then echo 'Choose exactly one operation mode.' >&2; exit 2; fi
+      mode="${arg#--}"
+      ;;
     -h|--help)
       sed -n '2,/^$/p' "$0" | sed 's/^# \?//'
       exit 0
@@ -231,6 +234,11 @@ else
   exit 1
 fi
 
+if [[ "$mode" == "verify" && "$stack_exists" != "true" ]]; then
+  echo 'Verification requires an existing owner stack.' >&2
+  exit 1
+fi
+
 if [[ "$stack_exists" == "true" ]]; then
   if ! stack_status="$(jq -er '
       .Stacks
@@ -240,6 +248,12 @@ if [[ "$stack_exists" == "true" ]]; then
     ' <<<"$describe_output")"; then
     echo "Decision-artifact stack status is malformed." >&2
     exit 1
+  fi
+  if [[ "$mode" == "verify" ]]; then
+    case "$stack_status" in
+      CREATE_COMPLETE|IMPORT_COMPLETE|UPDATE_COMPLETE|UPDATE_ROLLBACK_COMPLETE) ;;
+      *) echo 'Verification cannot resume or repair an incomplete owner stack.' >&2; exit 1 ;;
+    esac
   fi
   case "$stack_status" in
     REVIEW_IN_PROGRESS)
@@ -424,7 +438,7 @@ fi
 # An import records the live properties but does not reconcile them. The normal
 # update is therefore mandatory after adoption, even if the bucket looked close
 # to the desired declaration before import.
-if [[ "$stack_exists" == "true" ]]; then
+if [[ "$stack_exists" == "true" && "$mode" != "verify" ]]; then
   echo "Applying the complete decision-artifact template..."
   set +e
   update_output="$(aws cloudformation update-stack \
@@ -608,24 +622,20 @@ if ! policy="$(aws s3api get-bucket-policy "${s3_args[@]}")"; then
   echo "Reading decision-artifact bucket policy failed." >&2
   exit 1
 fi
-if ! jq -e --arg bucket_arn "arn:aws:s3:::$bucket_name" '
-    .Policy
-    | fromjson
-    | select(.Version == "2012-10-17")
-    | .Statement
-    | select(type == "array" and length == 1)
-    | .[0]
-    | .Sid == "DenyInsecureTransport"
-      and .Effect == "Deny"
-      and (.Principal == "*" or .Principal == {AWS: "*"})
-      and (.Action == "s3:*" or .Action == ["s3:*"])
-      and (
-        (if (.Resource | type) == "array" then .Resource else [.Resource] end)
-        | sort == ([$bucket_arn, ($bucket_arn + "/*")] | sort)
-      )
-      and .Condition.Bool["aws:SecureTransport"] == "false"
-  ' <<<"$policy" >/dev/null; then
+if ! node "$repo_root/scripts/verify-authorization-archive.mjs" policy \
+    --bucket "$bucket_name" <<<"$policy" >/dev/null; then
   echo "Decision-artifact bucket policy read-back mismatch." >&2
+  exit 1
+fi
+
+if ! tiering="$(node "$repo_root/scripts/verify-authorization-archive.mjs" collect-tiering \
+    --bucket "$bucket_name" --owner "$account_id" --region "$region")"; then
+  echo 'Reading authorization archive tiering configuration failed.' >&2
+  exit 1
+fi
+if ! printf '{"lifecycle":%s,"intelligentTiering":%s}\n' "$lifecycle" "$tiering" |
+    node "$repo_root/scripts/verify-authorization-archive.mjs" availability >/dev/null; then
+  echo 'Authorization archive availability verification failed.' >&2
   exit 1
 fi
 
