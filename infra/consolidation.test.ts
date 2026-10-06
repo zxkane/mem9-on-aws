@@ -978,7 +978,14 @@ describe("consolidation IAM templates", () => {
     );
     const statements = template.Resources.WorkloadPermissionsBoundary.Properties
       .PolicyDocument.Statement as Array<Record<string, any>>;
-    const ceiling = statements.find(({ NotAction }) => NotAction);
+    const oneBoundary = (purpose: string, predicate: (statement: Record<string, any>) => boolean) => {
+      const matches = statements.filter(predicate);
+      expect(matches, `unique boundary ${purpose}`).toHaveLength(1);
+      return matches[0];
+    };
+    const hasAction = (statement: Record<string, any>, action: string) =>
+      (Array.isArray(statement.Action) ? statement.Action : [statement.Action]).includes(action);
+    const ceiling = oneBoundary("action ceiling", s => s.Effect === "Deny" && s.NotAction !== undefined);
     expect(ceiling?.NotAction).toEqual(
       expect.arrayContaining([
         "ecs:RunTask",
@@ -989,15 +996,14 @@ describe("consolidation IAM templates", () => {
         "kms:GenerateDataKey",
       ]),
     );
-    const resourceDeny = statements.find(({ Sid }) => Sid === "R");
+    const resourceDeny = oneBoundary("resource ceiling", s => s.Effect === "Deny" && hasAction(s, "s3:GetObject") && s.NotResource !== undefined);
     expect(resourceDeny?.NotResource).toContainEqual({
       "Fn::Sub":
         "arn:${AWS::Partition}:s3:::${DecisionArtifactBucketName}/*",
     });
 
-    const secretRoleDeny = statements.find(
-      ({ Sid }) => Sid === "S",
-    );
+    const secretRoleDeny = oneBoundary("secret execution roles", s => s.Effect === "Deny" && hasAction(s, "kms:Decrypt") &&
+      s.Condition?.Null?.["kms:EncryptionContext:SecretARN"] === "false" && s.Condition?.ArnNotLike !== undefined);
     expect(
       secretRoleDeny?.Condition.ArnNotLike["aws:PrincipalArn"],
     ).toContainEqual({

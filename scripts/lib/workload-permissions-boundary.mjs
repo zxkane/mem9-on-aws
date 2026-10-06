@@ -1,4 +1,6 @@
 import { readFileSync } from "node:fs";
+import { AUTHORIZATION_ARCHIVE_PREFIX, parseStrictJson } from "./authorization-archive-policy.mjs";
+import { verifyAuthorizationMaintenanceIsolation } from "./authorization-maintenance-isolation.mjs";
 
 const rolloutContract = JSON.parse(
   readFileSync(
@@ -496,7 +498,6 @@ export function expectedBoundaryPolicyDocument(contract) {
     Version: "2012-10-17",
     Statement: [
       {
-        Sid: "I",
         Effect: "Allow",
         Action: "*",
         Resource: "*",
@@ -508,7 +509,6 @@ export function expectedBoundaryPolicyDocument(contract) {
         Resource: "*",
       },
       {
-        Sid: "R",
         Effect: "Deny",
         Action: [...PROJECT_RESOURCE_RUNTIME_ACTIONS],
         NotResource: projectResources,
@@ -526,13 +526,11 @@ export function expectedBoundaryPolicyDocument(contract) {
       // encryption context by `GenKey` below. That used to be an absence and is
       // now a statement, so the suite asserts `GenKey` directly.
       {
-        Sid: "P",
         Effect: "Deny",
         Action: "ssm:PutParameter",
         NotResource: ssmApprovalParameterArn,
       },
       {
-        Sid: "K",
         Effect: "Deny",
         Action: KMS_DECRYPT_ACTION,
         Resource: "*",
@@ -553,7 +551,6 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "V",
         Effect: "Deny",
         Action: KMS_DECRYPT_ACTION,
         Resource: "*",
@@ -571,7 +568,6 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "A",
         Effect: "Deny",
         Action: KMS_DECRYPT_ACTION,
         Resource: "*",
@@ -585,7 +581,6 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "B",
         Effect: "Deny",
         Action: KMS_DECRYPT_ACTION,
         Resource: "*",
@@ -599,7 +594,6 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "S",
         Effect: "Deny",
         Action: KMS_DECRYPT_ACTION,
         Resource: "*",
@@ -613,7 +607,6 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "L",
         Effect: "Deny",
         Action: KMS_DECRYPT_ACTION,
         Resource: "*",
@@ -627,7 +620,6 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "F",
         Effect: "Deny",
         Action: KMS_DECRYPT_ACTION,
         Resource: "*",
@@ -651,7 +643,6 @@ export function expectedBoundaryPolicyDocument(contract) {
       // present an artifact context is denied, and the SSM path presents
       // PARAMETER_ARN rather than aws:s3:arn.
       {
-        Sid: "GenKey",
         Effect: "Deny",
         Action: ARTIFACT_KMS_ACTION,
         Resource: "*",
@@ -662,7 +653,6 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "T",
         Effect: "Deny",
         Action: MANTLE_BEARER_ACTION,
         Resource: "*",
@@ -673,7 +663,6 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "EniRole",
         Effect: "Deny",
         Action: [...NETWORK_INTERFACE_DENY_ACTIONS],
         Resource: "*",
@@ -686,7 +675,6 @@ export function expectedBoundaryPolicyDocument(contract) {
         },
       },
       {
-        Sid: "N",
         Effect: "Deny",
         Action: [...NETWORK_INTERFACE_DENY_ACTIONS],
         Resource: "*",
@@ -695,6 +683,11 @@ export function expectedBoundaryPolicyDocument(contract) {
             "lambda:SourceFunctionArn": "false",
           },
         },
+      },
+      {
+        Effect: "Deny",
+        Action: "s3:PutObject",
+        Resource: `${decisionArtifactBucketArn}/${AUTHORIZATION_ARCHIVE_PREFIX}*`,
       },
     ],
   };
@@ -717,42 +710,91 @@ function sameStringSet(left, right) {
   );
 }
 
-function canonicalJson(value) {
-  if (Array.isArray(value)) {
-    return value
-      .map(canonicalJson)
-      .sort((left, right) =>
-        JSON.stringify(left).localeCompare(JSON.stringify(right)),
-      );
-  }
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.keys(value)
-        .sort()
-        .map((key) => [key, canonicalJson(value[key])]),
-    );
-  }
-  return value;
+function boundaryRecord(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value) ||
+      ![Object.prototype, null].includes(Object.getPrototypeOf(value))) return false;
+  const keys = Reflect.ownKeys(value), descriptors = Object.getOwnPropertyDescriptors(value);
+  return keys.every((key) => typeof key === "string" &&
+    descriptors[key].enumerable && Object.hasOwn(descriptors[key], "value"));
 }
 
-function sameBoundaryStatement(statement, expectedStatement) {
-  if (!statement || typeof statement !== "object") return false;
-  const expectedKeys = Object.keys(expectedStatement).sort();
-  if (!sameStringSet(Object.keys(statement), expectedKeys)) return false;
-  for (const key of ["Action", "NotAction", "Resource", "NotResource"]) {
-    if (
-      expectedStatement[key] !== undefined &&
-      !sameStringSet(statement[key], expectedStatement[key])
-    ) {
-      return false;
-    }
+function canonicalJson(value, depth = 0) {
+  if (depth > 32) throw new Error("boundary policy nesting is malformed");
+  if (value === null || typeof value === "string" || typeof value === "boolean") return value;
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (Array.isArray(value)) {
+    if (Object.keys(value).length !== value.length) throw new Error("boundary policy list is malformed");
+    const values = value.map((item) => canonicalJson(item, depth + 1));
+    const keys = values.map((item) => JSON.stringify(item));
+    if (new Set(keys).size !== keys.length) throw new Error("boundary policy list contains duplicates");
+    return values.sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
   }
-  if (statement.Effect !== expectedStatement.Effect) return false;
-  return (
-    expectedStatement.Condition === undefined ||
-    JSON.stringify(canonicalJson(statement.Condition)) ===
-      JSON.stringify(canonicalJson(expectedStatement.Condition))
-  );
+  if (!boundaryRecord(value)) throw new Error("boundary policy value is malformed");
+  return Object.fromEntries(Object.keys(value).sort()
+    .map((key) => [key, canonicalJson(value[key], depth + 1)]));
+}
+
+function boundaryStatementKey(statement) {
+  const fields = ["Sid", "Effect", "Action", "NotAction", "Resource", "NotResource", "Condition"];
+  if (!boundaryRecord(statement) || Object.keys(statement).some((key) => !fields.includes(key)) ||
+      !["Allow", "Deny"].includes(statement.Effect) ||
+      Object.hasOwn(statement, "Action") === Object.hasOwn(statement, "NotAction") ||
+      Object.hasOwn(statement, "Resource") === Object.hasOwn(statement, "NotResource")) {
+    throw new Error("boundary policy statement is malformed");
+  }
+  if (Object.hasOwn(statement, "Sid") && (typeof statement.Sid !== "string" || !statement.Sid)) {
+    throw new Error("boundary policy identifier is malformed");
+  }
+  if (Object.hasOwn(statement, "Condition") && !boundaryRecord(statement.Condition)) {
+    throw new Error("boundary policy condition is malformed");
+  }
+  const normalized = { ...statement };
+  for (const key of ["Action", "NotAction", "Resource", "NotResource"]) {
+    if (!Object.hasOwn(statement, key)) continue;
+    const values = sortedStrings(statement[key], "boundary policy value");
+    if (!values.length || values.some((value) => !value) || new Set(values).size !== values.length) {
+      throw new Error("boundary policy list is malformed or duplicated");
+    }
+    normalized[key] = values;
+  }
+  return JSON.stringify(canonicalJson(normalized));
+}
+
+function decodeBoundaryPolicyDocument(document) {
+  if (typeof document === "string") {
+    const raw = document.trimStart().startsWith("{") ? document : decodeURIComponent(document);
+    return parseStrictJson(raw);
+  }
+  return document;
+}
+
+function boundaryDocumentShape(document) {
+  return boundaryRecord(document) && document.Version === "2012-10-17" &&
+    sameStringSet(Object.keys(document), ["Version", "Statement"]);
+}
+
+function boundaryPolicyKeys(document) {
+  if (!boundaryDocumentShape(document)) throw new Error("boundary policy document is malformed");
+  const statements = list(document.Statement), keys = statements.map(boundaryStatementKey);
+  const sids = statements.filter((statement) => Object.hasOwn(statement, "Sid")).map((statement) => statement.Sid);
+  if (!keys.length || new Set(keys).size !== keys.length || new Set(sids).size !== sids.length) {
+    throw new Error("boundary policy statements are duplicated");
+  }
+  return keys;
+}
+
+/** Structural comparison only. Production callers use verifyBoundaryPolicyDocument
+ * below, which constructs the trusted expected policy from the checked contract.
+ * Reject duplicates on both sides before constructing the bijection; never
+ * deduplicate an authored collision into an apparently complete policy. */
+export function compareBoundaryPolicyDocuments(document, expectedDocument) {
+  try {
+    const actual = boundaryPolicyKeys(decodeBoundaryPolicyDocument(document));
+    const expected = boundaryPolicyKeys(decodeBoundaryPolicyDocument(expectedDocument));
+    return actual.length === expected.length && sameStringSet(actual, expected);
+  } catch {
+    return false;
+  }
 }
 
 const POLICY_DIAGNOSTIC_ITEM_LIMIT = 12;
@@ -802,52 +844,42 @@ function policyActions(statements) {
 
 export function boundaryPolicyDriftDiagnostic(document, contract) {
   try {
-    const actualDocument = decodePolicyDocument(document);
+    const actualDocument = decodeBoundaryPolicyDocument(document);
+    if (!boundaryRecord(actualDocument)) throw new Error("malformed boundary policy");
     const actual = list(actualDocument.Statement);
-    const expected = expectedBoundaryPolicyDocument(contract).Statement;
-    const documentShapeChanged =
-      actualDocument.Version !== "2012-10-17" ||
-      JSON.stringify(Object.keys(actualDocument).sort()) !==
-        JSON.stringify(["Statement", "Version"]);
-    const expectedSids = new Set(expected.map(({ Sid }) => Sid));
-    const actualSids = actual.map(({ Sid } = {}) => Sid);
-    const actualSidSet = new Set(
-      actualSids.filter((sid) => typeof sid === "string"),
-    );
-    const addedSids = actualSids.filter(
-      (sid) => typeof sid !== "string" || !expectedSids.has(sid),
-    );
-    const removedSids = [...expectedSids].filter(
-      (sid) => !actualSidSet.has(sid),
-    );
-    const changedSids = expected
-      .filter((expectedStatement) => {
-        const matches = actual.filter(
-          (statement) => statement?.Sid === expectedStatement.Sid,
-        );
-        return (
-          matches.length > 0 &&
-          (matches.length !== 1 ||
-            !sameBoundaryStatement(matches[0], expectedStatement))
-        );
-      })
-      .map(({ Sid }) => Sid);
-
+    const expectedDocument = expectedBoundaryPolicyDocument(contract);
+    const expected = expectedDocument.Statement, expectedKeys = boundaryPolicyKeys(expectedDocument);
+    const expectedSet = new Set(expectedKeys);
+    const actualKeys = actual.map((statement) => {
+      try { return boundaryStatementKey(statement); } catch { return null; }
+    });
+    const counts = new Map();
+    for (const key of actualKeys) if (key !== null) counts.set(key, (counts.get(key) ?? 0) + 1);
+    const label = (statement, index) => statement.Sid ?? `statement-${index + 1}`;
+    // Anonymous edits cannot be attributed by Sid. Report them as unmatched
+    // additions/removals using only trusted expected positions and redacted counts.
+    const added = actualKeys.filter((key) => key === null || !expectedSet.has(key))
+      .map((key, index) => key ?? `malformed-${index}`);
+    const removed = expected.filter((_statement, index) => !counts.has(expectedKeys[index]))
+      .map((statement) => label(statement, expected.indexOf(statement)));
+    const changed = expected.filter((statement, index) =>
+      statement.Sid !== undefined && actual.some((candidate, i) =>
+        boundaryRecord(candidate) && candidate.Sid === statement.Sid && actualKeys[i] !== expectedKeys[index]))
+      .map((statement) => statement.Sid);
+    const duplicateCount = [...counts.values()].reduce((sum, count) => sum + count - 1, 0);
     const expectedActions = new Set(policyActions(expected));
-    const actualActions = new Set(policyActions(actual));
-    const addedActions = [...actualActions].filter(
-      (action) => !expectedActions.has(action),
-    );
-    const removedActions = [...expectedActions].filter(
-      (action) => !actualActions.has(action),
-    );
+    const actualActions = new Set(policyActions(actual.filter(boundaryRecord)));
+    const addedActions = [...actualActions].filter((action) => !expectedActions.has(action));
+    const removedActions = [...expectedActions].filter((action) => !actualActions.has(action));
 
     return [
       "Policy delta (bounded; resources omitted):",
-      `  document shape changed: ${documentShapeChanged ? "yes" : "no"}`,
-      `  added statements: ${formatPolicyDiagnosticItems(addedSids, "sid")}`,
-      `  removed statements: ${formatPolicyDiagnosticItems(removedSids, "sid", { trusted: true })}`,
-      `  changed statements: ${formatPolicyDiagnosticItems(changedSids, "sid", { trusted: true })}`,
+      `  document shape changed: ${boundaryDocumentShape(actualDocument) ? "no" : "yes"}`,
+      `  added statements: ${formatPolicyDiagnosticItems(added, "sid")}`,
+      `  removed statements: ${formatPolicyDiagnosticItems(removed, "sid", { trusted: true })}`,
+      `  changed statements: ${formatPolicyDiagnosticItems(changed, "sid", { trusted: true })}`,
+      `  duplicate statements: ${duplicateCount}`,
+      `  malformed statements: ${actualKeys.filter((key) => key === null).length}`,
       `  added actions: ${formatPolicyDiagnosticItems(addedActions, "action")}`,
       `  removed actions: ${formatPolicyDiagnosticItems(removedActions, "action", { trusted: true })}`,
     ].join("\n");
@@ -857,54 +889,7 @@ export function boundaryPolicyDriftDiagnostic(document, contract) {
 }
 
 export function verifyBoundaryPolicyDocument(document, contract) {
-  const decoded = decodePolicyDocument(document);
-  if (
-    decoded.Version !== "2012-10-17" ||
-    Object.keys(decoded).some((key) => key !== "Version" && key !== "Statement")
-  ) {
-    return false;
-  }
-  const actual = list(decoded.Statement);
-  const expected = expectedBoundaryPolicyDocument(contract).Statement;
-  if (actual.length !== expected.length) return false;
-
-  // The loop below walks EXPECTED Sids and looks each one up in the deployed
-  // document, so its coverage of `actual` rests on the expected Sids being
-  // unique. With equal lengths plus uniqueness, expected -> actual is a bijection
-  // and every deployed statement gets compared; duplicate an expected Sid and
-  // that collapses.
-  //
-  // The reachable failure is narrower than it first looks, and the narrowing is
-  // worth recording because the obvious probes all come back clean. Two things
-  // have to hold at once. The duplicate must be VERBATIM: same-Sid statements
-  // that differ in content each fail the content comparison, so the function
-  // already returned false. And the DEPLOYED document must not carry the same
-  // duplicate, because two same-Sid statements there make `matches.length === 2`,
-  // which the check inside the loop already rejects. So an authored duplicate
-  // that reaches the live policy through this repo's own rollout is caught today
-  // — measured, not assumed.
-  //
-  // What is left is the case where the two diverge: the library holds a verbatim
-  // duplicate while the live policy holds a rogue statement under an unused Sid
-  // instead. Then both copies match the one deployed statement, both pass, the
-  // rogue one is compared against nothing, and the count still balances. Probed:
-  // that shape returns TRUE without the check below and FALSE with it, for a live
-  // document carrying `Allow` on `*`/`*`. Drift between the two is exactly the
-  // condition this function exists to detect, so it must not depend on their
-  // agreeing. #150 cut the Sids to about ten characters to reclaim bytes and
-  // appends statements next, which makes a pasted-but-unrenamed Sid the likely
-  // way the premise breaks.
-  const expectedSids = expected.map((statement) => statement.Sid);
-  if (new Set(expectedSids).size !== expectedSids.length) return false;
-
-  for (const expectedStatement of expected) {
-    const matches = actual.filter(
-      (statement) => statement?.Sid === expectedStatement.Sid,
-    );
-    if (matches.length !== 1) return false;
-    if (!sameBoundaryStatement(matches[0], expectedStatement)) return false;
-  }
-  return true;
+  return compareBoundaryPolicyDocuments(document, expectedBoundaryPolicyDocument(contract));
 }
 
 export function verifyQuarantinePolicy(document) {
@@ -1202,7 +1187,7 @@ function requireStatement(
 
 export function verifyPermanentEnforcementDocuments(
   documents,
-  { partition, accountId, boundaryArn },
+  { partition, accountId, boundaryArn, applicationRegion, decisionArtifactBucketName },
 ) {
   assertIdentity({ partition, accountId });
   const expectedBoundaryArn =
@@ -1327,6 +1312,7 @@ export function verifyPermanentEnforcementDocuments(
       `${stackPrefix}/github-actions-mem9-on-aws/*`,
       `${stackPrefix}/memory-namespace-operator-mem9-on-aws/*`,
       `${stackPrefix}/workload-permissions-boundary-mem9-on-aws/*`,
+      `${stackPrefix}/decision-artifact-bucket-mem9-on-aws/*`,
     ],
   });
   requireStatement(documents, {
@@ -1334,6 +1320,9 @@ export function verifyPermanentEnforcementDocuments(
     effect: "Deny",
     actions: STACK_MUTATION_ACTIONS,
     resources: [`${stackPrefix}/ecr-registry-scanning-mem9-on-aws/*`],
+  });
+  verifyAuthorizationMaintenanceIsolation(documents.map(decodePolicyDocument), {
+    partition, accountId, applicationRegion, decisionArtifactBucketName,
   });
   return true;
 }
@@ -1405,6 +1394,7 @@ export function validateProductionTaskDefinitionSecrets({
     accountId,
     applicationRegion,
   });
+  const parameterPrefix = `arn:${partition}:ssm:${applicationRegion}:${accountId}:parameter/mem9-on-aws/prod`;
   const seenArns = new Set();
   for (const taskDefinition of taskDefinitions) {
     const taskDefinitionArn = taskDefinition?.taskDefinitionArn;
@@ -1429,13 +1419,24 @@ export function validateProductionTaskDefinitionSecrets({
       ) {
         throw new Error("production task definition container is malformed");
       }
+      // These are metadata references declared by bootstrap/ecs, not a new
+      // credential selection mode. Credential retirement is verified separately.
+      const parameters = taskDefinitionArn === bootstrapTaskDefinitionArn && container.name === "Mem9Bootstrap"
+        ? {MEM9_DB_SECRET: `${parameterPrefix}/runtime/schema-administrator-credential`,
+          MEM9_RUNTIME_DB_SECRET: `${parameterPrefix}/runtime/database-credential`}
+        : serviceTaskDefinitionArns.includes(taskDefinitionArn) && container.name === "mnemo-server"
+          ? {MEM9_DB_SECRET: `${parameterPrefix}/runtime/database-credential`,
+            MNEMO_TRANSPORT_SIGNING_KEYS: `${parameterPrefix}/namespace/transport-signing-keys`,
+            MNEMO_SERVICE_TRANSPORT_SIGNING_KEYS: `${parameterPrefix}/namespace/service-transport-signing-keys`}
+          : {};
       for (const secret of container.secrets ?? []) {
         if (
           !secret ||
           typeof secret.name !== "string" ||
           secret.name.length === 0 ||
           typeof secret.valueFrom !== "string" ||
-          !secretArnPattern.test(secret.valueFrom) ||
+          !(secretArnPattern.test(secret.valueFrom) ||
+            Object.hasOwn(parameters, secret.name) && parameters[secret.name] === secret.valueFrom) ||
           secretNames.has(secret.name)
         ) {
           throw new Error(
@@ -1924,6 +1925,25 @@ export async function runBoundaryRollout(
     throw new Error("boundary region preflight configuration is invalid");
   }
   const boundedAdapter = createDeadlineAdapter(adapter, deadlineAt);
+  const coordinatedRoles = typeof adapter.resolveDeploymentRoles === "function";
+  let deployRoleNames = [deployRoleName];
+  const resolveDeploymentRoles = async () => {
+    const resolved = await boundedAdapter.resolveDeploymentRoles();
+    const expected = [DEPLOY_ROLE_NAME, `${DEPLOY_ROLE_NAME}-preview`, `${DEPLOY_ROLE_NAME}-prod`].sort();
+    if (!Array.isArray(resolved) || !sameList(resolved, expected)) {
+      throw new Error("deployment-role inventory is incomplete or changed");
+    }
+    return [...resolved];
+  };
+  const readDeploymentScope = async () => {
+    let expected;
+    for (const roleName of deployRoleNames) {
+      const scope = await discoverPassRoleScope(boundedAdapter, {roleName, partition, accountId});
+      if (expected && !sameList(expected, scope)) throw new Error("deployment-role PassRole scopes disagree");
+      expected = scope;
+    }
+    return expected;
+  };
   let quarantineAttempted = false;
   let quarantineRemoved = false;
   try {
@@ -1931,19 +1951,26 @@ export async function runBoundaryRollout(
     // or any other IAM mutation. The full runtime binding read still runs below,
     // immediately before boundary attachment.
     await boundedAdapter.verifyBoundaryRegion();
+    if (coordinatedRoles) {
+      if (typeof adapter.deleteQuarantines !== "function") {
+        throw new Error("deployment-role coordinated release is not configured");
+      }
+      deployRoleNames = await resolveDeploymentRoles();
+    }
     quarantineAttempted = true;
-    await boundedAdapter.putQuarantine({
-      roleName: deployRoleName,
-      policyName: QUARANTINE_POLICY_NAME,
-      policyDocument: quarantinePolicyDocument(),
-    });
+    for (const roleName of deployRoleNames) {
+      await boundedAdapter.putQuarantine({
+        roleName,
+        policyName: QUARANTINE_POLICY_NAME,
+        policyDocument: quarantinePolicyDocument(),
+      });
+    }
     if (!(await boundedAdapter.verifyQuarantine())) {
       throw new Error("deploy-role quarantine verification failed");
     }
     await boundedAdapter.deployBoundary();
 
-    const discovery = { roleName: deployRoleName, partition, accountId };
-    const scopeBefore = await discoverPassRoleScope(boundedAdapter, discovery);
+    const scopeBefore = await readDeploymentScope();
     const rolesBefore = await discoverAndRepairMatchingRoles(
       boundedAdapter,
       scopeBefore,
@@ -1973,10 +2000,7 @@ export async function runBoundaryRollout(
       await requireBoundary(boundedAdapter, roleName, boundaryArn);
     }
 
-    const scopeBeforeEnforcement = await discoverPassRoleScope(
-      boundedAdapter,
-      discovery,
-    );
+    const scopeBeforeEnforcement = await readDeploymentScope();
     const rolesBeforeEnforcement = await discoverMatchingRoles(
       boundedAdapter,
       scopeBeforeEnforcement,
@@ -1994,14 +2018,10 @@ export async function runBoundaryRollout(
     }
 
     const verifyFrozenState = async () => {
-      const policyDocuments = await loadRolePolicyDocuments(
-        boundedAdapter,
-        deployRoleName,
-      );
-      const scope = extractPassRoleScope(policyDocuments, {
-        partition,
-        accountId,
-      });
+      if (coordinatedRoles && !sameList(deployRoleNames, await resolveDeploymentRoles())) {
+        throw new Error("deployment-role inventory changed during rollout");
+      }
+      const scope = await readDeploymentScope();
       const roles = await discoverMatchingRoles(boundedAdapter, scope);
       if (!sameList(scopeBefore, scope) || !sameList(rolesBefore, roles)) {
         throw new Error("PassRole scope changed during permanent enforcement");
@@ -2019,6 +2039,7 @@ export async function runBoundaryRollout(
       if (
         !(await boundedAdapter.verifyPermanentEnforcement({
           boundaryArn,
+          ...(coordinatedRoles ? {roleNames: [...deployRoleNames]} : {}),
         }))
       ) {
         throw new Error(
@@ -2044,10 +2065,11 @@ export async function runBoundaryRollout(
 
     // Deletion owns a separate recovery budget so an interrupted or timed-out
     // response can reinstall and verify quarantine before the process exits.
-    await adapter.deleteQuarantine({
-      roleName: deployRoleName,
-      policyName: QUARANTINE_POLICY_NAME,
-    });
+    if (coordinatedRoles) {
+      await adapter.deleteQuarantines({roleNames: [...deployRoleNames], policyName: QUARANTINE_POLICY_NAME});
+    } else {
+      await adapter.deleteQuarantine({roleName: deployRoleName, policyName: QUARANTINE_POLICY_NAME});
+    }
     quarantineRemoved = true;
     await boundedAdapter.resumeDeployments();
     return { verifiedRoleCount: rolesAfter.length, status: "complete" };

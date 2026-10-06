@@ -1,6 +1,7 @@
 import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { validateDecisionArtifactBucketName } from "./authorization-maintenance-isolation.mjs";
 import {
   DENY_DANGEROUS_POLICY_NAME,
   DEPLOY_ROLE_NAME,
@@ -219,6 +220,7 @@ export async function resolveAwsIdentity(invokeAws = invokeAwsCli) {
 export function createAwsCliAdapter({
   identity,
   applicationRegion = process.env.WORKLOAD_BOUNDARY_APPLICATION_REGION,
+  decisionArtifactBucketName = process.env.MEM9_DECISION_ARTIFACT_BUCKET || `mem9-audit-${identity?.accountId}`,
   invokeAws = invokeAwsCli,
   deployBoundary = deployBoundaryStack,
   deployEnforcement = deployRoleEnforcement,
@@ -240,6 +242,7 @@ export function createAwsCliAdapter({
     throw new Error("application region is malformed");
   }
   const { accountId, partition } = identity;
+  validateDecisionArtifactBucketName(decisionArtifactBucketName);
   const [primaryRolePattern] = expectedRolePatterns(identity);
   const denyPolicyArn =
     `arn:${partition}:iam::${accountId}:policy/` +
@@ -274,12 +277,76 @@ export function createAwsCliAdapter({
       timeoutMs: awsTimeout(),
     });
 
+  const deploymentRoleNames = [DEPLOY_ROLE_NAME, `${DEPLOY_ROLE_NAME}-preview`, `${DEPLOY_ROLE_NAME}-prod`].sort();
+  let deploymentRoleSnapshot;
+  const deploymentError = () => {throw new Error("deployment-role owner identity is malformed or changed");};
+  const canonical = value => Array.isArray(value)
+    ? value.map(canonical).sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)))
+    : value && typeof value === "object"
+      ? Object.fromEntries(Object.keys(value).sort().map(key => [key, canonical(value[key])]))
+      : value;
+  const roleNamesForVerification = () => deploymentRoleSnapshot === undefined ? [DEPLOY_ROLE_NAME] : deploymentRoleNames;
+
+  async function resolveDeploymentRoles() {
+    const response = await invokeAwsCommand([
+      "cloudformation", "describe-stacks", "--stack-name", DEPLOY_ROLE_NAME,
+      "--region", OPERATOR_STACK_REGION,
+    ]);
+    if (response.NextToken || response.Stacks?.length !== 1) deploymentError();
+    const stack = response.Stacks[0];
+    const prefix = `arn:${partition}:cloudformation:${OPERATOR_STACK_REGION}:${accountId}:stack/${DEPLOY_ROLE_NAME}/`;
+    if (stack.StackName !== DEPLOY_ROLE_NAME || !stack.StackId?.startsWith(prefix) ||
+      !/^[A-Za-z0-9-]+$/.test(stack.StackId.slice(prefix.length)) ||
+      !["CREATE_COMPLETE", "UPDATE_COMPLETE"].includes(stack.StackStatus) || stack.ParentId || stack.RootId) deploymentError();
+    const fields = (rows, key, value) => {
+      if (!Array.isArray(rows)) deploymentError();
+      const result = new Map();
+      for (const row of rows) {
+        if (!row || typeof row[key] !== "string" || typeof row[value] !== "string" || result.has(row[key])) deploymentError();
+        result.set(row[key], row[value]);
+      }
+      return result;
+    };
+    const parameters = fields(stack.Parameters, "ParameterKey", "ParameterValue");
+    if (parameters.get("ApplicationRegion") !== applicationRegion ||
+      parameters.get("ProjectName") !== "mem9-on-aws" || parameters.get("GitHubRepo") !== "mem9-on-aws" ||
+      !["true", "false"].includes(parameters.get("LegacyRoleEnabled"))) deploymentError();
+    if (parameters.has("DecisionArtifactBucketName") && parameters.get("DecisionArtifactBucketName") !== decisionArtifactBucketName) deploymentError();
+    const outputs = fields(stack.Outputs, "OutputKey", "OutputValue");
+    for (const [key, name] of [["LegacyRoleArn", DEPLOY_ROLE_NAME], ["RoleArn", DEPLOY_ROLE_NAME],
+      ["PreviewRoleArn", `${DEPLOY_ROLE_NAME}-preview`], ["ProductionRoleArn", `${DEPLOY_ROLE_NAME}-prod`]]) {
+      if (outputs.get(key) !== `arn:${partition}:iam::${accountId}:role/${name}`) deploymentError();
+    }
+    const roles = [];
+    for (const name of deploymentRoleNames) {
+      const {Role: role} = await invokeAwsCommand(["iam", "get-role", "--role-name", name, "--region", "us-east-1"]);
+      if (!role || role.RoleName !== name || role.Arn !== `arn:${partition}:iam::${accountId}:role/${name}` ||
+        typeof role.RoleId !== "string" || !role.RoleId || role.RoleId.length > 128) deploymentError();
+      let trust = role.AssumeRolePolicyDocument;
+      if (typeof trust === "string") {
+        try {trust = JSON.parse(trust.trimStart().startsWith("{") ? trust : decodeURIComponent(trust));}
+        catch {deploymentError();}
+      }
+      if (!trust || typeof trust !== "object" || Array.isArray(trust)) deploymentError();
+      roles.push({name, arn: role.Arn, id: role.RoleId, trust,
+        boundary: role.PermissionsBoundary?.PermissionsBoundaryArn ?? null,
+        maximumSession: role.MaxSessionDuration ?? null, tags: role.Tags ?? []});
+    }
+    // This pins identity and stability, not approval of the trust policies.
+    // Their owner/purpose and effective-permission review remain independent.
+    const snapshot = JSON.stringify(canonical({stackId: stack.StackId,
+      legacyRoleEnabled: parameters.get("LegacyRoleEnabled"), roles}));
+    if (deploymentRoleSnapshot !== undefined && deploymentRoleSnapshot !== snapshot) deploymentError();
+    deploymentRoleSnapshot = snapshot;
+    return [...deploymentRoleNames];
+  }
+
   async function putQuarantine(
     invokeCommand,
     { roleName, policyName, policyDocument },
   ) {
     if (
-      roleName !== DEPLOY_ROLE_NAME ||
+      !deploymentRoleNames.includes(roleName) ||
       policyName !== QUARANTINE_POLICY_NAME ||
       !verifyQuarantinePolicy(policyDocument)
     ) {
@@ -297,7 +364,7 @@ export function createAwsCliAdapter({
     ]);
   }
 
-  function verifyQuarantine(invokeCommand, retrySleep = sleep) {
+  function verifyQuarantine(invokeCommand, retrySleep = sleep, roleName = DEPLOY_ROLE_NAME) {
     return retry(
       async () => {
         let response;
@@ -307,7 +374,7 @@ export function createAwsCliAdapter({
             "iam",
             "get-role-policy",
             "--role-name",
-            DEPLOY_ROLE_NAME,
+            roleName,
             "--policy-name",
             QUARANTINE_POLICY_NAME,
           ]);
@@ -356,7 +423,7 @@ export function createAwsCliAdapter({
             "iam",
             "get-role-policy",
             "--role-name",
-            DEPLOY_ROLE_NAME,
+            roleName,
             "--policy-name",
             QUARANTINE_POLICY_NAME,
           ]);
@@ -367,6 +434,11 @@ export function createAwsCliAdapter({
       },
       { attempts: consistencyAttempts, sleep: retrySleep },
     );
+  }
+
+  async function verifyQuarantines(invokeCommand, retrySleep = sleep, roleNames = roleNamesForVerification()) {
+    const results = await Promise.all(roleNames.map(roleName => verifyQuarantine(invokeCommand, retrySleep, roleName)));
+    return results.every(Boolean);
   }
 
   function createRecoveryContext() {
@@ -451,19 +523,72 @@ export function createAwsCliAdapter({
     return boundaryParameters;
   }
 
+  async function removeQuarantine({roleName, policyName}) {
+    if (!deploymentRoleNames.includes(roleName) || policyName !== QUARANTINE_POLICY_NAME) deploymentError();
+    let deletionError;
+    try {
+      await invokeAwsCommand([
+        "iam",
+        "delete-role-policy",
+        "--role-name",
+        roleName,
+        "--policy-name",
+        policyName,
+      ]);
+    } catch (error) {
+      deletionError = error;
+    }
+    let absenceError;
+    let absent = false;
+    if (!deletionError) {
+      try {
+        absent = await retry(
+          async () => {
+            try {
+              const names = await collectBoundedPages({
+                decodePage: (page) => ({
+                  items: page?.policyNames,
+                  nextToken: page?.marker,
+                }),
+                fetchPage: (marker) =>
+                  adapter.listInlinePolicies({ roleName, marker }),
+                label: "quarantine policy listing",
+              });
+              return !names.includes(policyName);
+            } catch (error) {
+              if (operationalContextExpired()) throw error;
+              return false;
+            }
+          },
+          { attempts: consistencyAttempts, sleep },
+        );
+      } catch (error) {
+        absenceError = error;
+      }
+    }
+    if (deletionError || absenceError || !absent) {
+      throw new AggregateError([deletionError, absenceError].filter(Boolean), "deploy-role quarantine removal was not observed");
+    }
+  }
+
   const adapter = {
+    resolveDeploymentRoles,
+
     async putQuarantine(request) {
       await putQuarantine(invokeAwsCommand, request);
     },
 
     async verifyQuarantine() {
-      return verifyQuarantine(invokeAwsCommand);
+      return verifyQuarantines(invokeAwsCommand);
     },
 
     async verifyBoundaryRegion() {
       const boundaryParameters = await readBoundaryStackParameters();
       if (boundaryParameters.get("ApplicationRegion") !== applicationRegion) {
         throw new Error("workload boundary application region is mismatched");
+      }
+      if (boundaryParameters.get("DecisionArtifactBucketName") !== decisionArtifactBucketName) {
+        throw new Error("workload boundary artifact bucket is mismatched");
       }
     },
 
@@ -875,7 +1000,10 @@ export function createAwsCliAdapter({
       await resumeDeployments();
     },
 
-    async verifyPermanentEnforcement({ boundaryArn }) {
+    async verifyPermanentEnforcement({ boundaryArn, roleNames = roleNamesForVerification() }) {
+      if (!Array.isArray(roleNames) || JSON.stringify(roleNames) !== JSON.stringify(roleNamesForVerification())) deploymentError();
+      const parameterArn = `arn:${partition}:ssm:${applicationRegion}:${accountId}:parameter/mem9-on-aws/prod/consolidation-runtime/data-release`;
+      const bucketArn = `arn:${partition}:s3:::${decisionArtifactBucketName}`;
       const probes = [
         {
           action: "iam:CreatePolicyVersion",
@@ -909,192 +1037,178 @@ export function createAwsCliAdapter({
           action: "iam:PassRole",
           resource: vpcProxyRoleArn,
         },
+        ...["ssm:PutParameter", "ssm:DeleteParameter", "ssm:LabelParameterVersion", "ssm:UnlabelParameterVersion"]
+          .map(action => ({action, resource: parameterArn})),
+        {action: "s3:PutObject", resource: `${bucketArn}/data-authorizations/propagation-probe`},
+        {action: "s3:PutBucketPolicy", resource: bucketArn},
+        {action: "s3:PutObject", resource: `arn:${partition}:s3:${applicationRegion}:${accountId}:accesspoint/propagation-probe/object/data-authorizations/probe`},
+        {action: "s3:CreateAccessPoint", resource: "*"},
+        {action: "cloudformation:UpdateStack", resource: `arn:${partition}:cloudformation:${applicationRegion}:${accountId}:stack/decision-artifact-bucket-mem9-on-aws/propagation-probe`},
       ];
-      const verifyLivePolicyDocuments = async () => {
-        const documents = await loadRolePolicyDocuments(
-          adapter,
-          DEPLOY_ROLE_NAME,
-        );
-        verifyPermanentEnforcementDocuments(documents, {
-          accountId,
-          boundaryArn,
-          partition,
-        });
-      };
-      const readDenyPolicyState = async ({ includeDocument = false } = {}) => {
-        const attachedPolicies = await collectBoundedPages({
-          decodePage: (page) => ({
-            items: page?.policies,
-            nextToken: page?.marker,
-          }),
-          fetchPage: (marker) =>
-            adapter.listAttachedPolicies({
-              marker,
-              roleName: DEPLOY_ROLE_NAME,
-            }),
-          label: "deploy-role attached policy listing",
-        });
-        const denyPolicies = attachedPolicies.filter(
-          (policy) => policy?.arn === denyPolicyArn,
-        );
-        if (denyPolicies.length !== 1) return undefined;
-        const metadata = await adapter.getManagedPolicy({
-          policyArn: denyPolicyArn,
-        });
-        if (
-          !metadata ||
-          typeof metadata.defaultVersionId !== "string" ||
-          !/^v[1-9][0-9]*$/u.test(metadata.defaultVersionId)
-        ) {
-          return undefined;
-        }
-        if (!includeDocument) {
-          return { defaultVersionId: metadata.defaultVersionId };
-        }
-        const version = await adapter.getManagedPolicyVersion({
-          policyArn: denyPolicyArn,
-          versionId: metadata.defaultVersionId,
-        });
-        if (!version?.document) return undefined;
-        return {
-          defaultVersionId: metadata.defaultVersionId,
-          document: version.document,
-        };
-      };
-      return retry(
-        async () => {
-          try {
-            await verifyLivePolicyDocuments();
-            const denyPolicyBefore = await readDenyPolicyState({
-              includeDocument: true,
-            });
-            if (!denyPolicyBefore) return false;
-            for (const { action, resource } of probes) {
-              const response = await invokeAwsCommand([
-                "iam",
-                "simulate-custom-policy",
-                "--policy-input-list",
-                serializePolicyInput(denyPolicyBefore.document),
-                "--action-names",
-                action,
-                "--resource-arns",
-                resource,
-                "--context-entries",
-                "ContextKeyName=iam:PassedToService," +
-                  "ContextKeyValues=ecs-tasks.amazonaws.com," +
-                  "ContextKeyType=string",
-              ]);
-              if (
-                (Object.hasOwn(response, "IsTruncated") &&
-                  typeof response.IsTruncated !== "boolean") ||
-                response.IsTruncated === true ||
-                Object.hasOwn(response, "Marker") ||
-                !Array.isArray(response.EvaluationResults) ||
-                response.EvaluationResults.length !== 1
-              ) {
-                return false;
-              }
-              const [result] = response.EvaluationResults;
-              if (
-                result.EvalActionName !== action ||
-                result.EvalResourceName !== resource ||
-                result.EvalDecision !== "explicitDeny" ||
-                !Array.isArray(result.MatchedStatements) ||
-                result.MatchedStatements.length === 0
-              ) {
-                return false;
-              }
-            }
-
-            const denyPolicyAfter = await readDenyPolicyState();
-            if (
-              denyPolicyAfter?.defaultVersionId !==
-              denyPolicyBefore.defaultVersionId
-            ) {
-              return false;
-            }
-            await verifyLivePolicyDocuments();
-            const finalDenyPolicy = await readDenyPolicyState();
-            return (
-              finalDenyPolicy?.defaultVersionId ===
-              denyPolicyBefore.defaultVersionId
-            );
-          } catch {
-            return false;
-          }
-        },
-        { attempts: consistencyAttempts, sleep },
-      );
-    },
-
-    async deleteQuarantine({ roleName, policyName }) {
-      let deletionError;
-      try {
-        await invokeAwsCommand([
-          "iam",
-          "delete-role-policy",
-          "--role-name",
-          roleName,
-          "--policy-name",
-          policyName,
-        ]);
-      } catch (error) {
-        deletionError = error;
-      }
-      let absenceError;
-      let absent = false;
-      if (!deletionError) {
-        try {
-          absent = await retry(
-            async () => {
-              try {
-                const names = await collectBoundedPages({
-                  decodePage: (page) => ({
-                    items: page?.policyNames,
-                    nextToken: page?.marker,
-                  }),
-                  fetchPage: (marker) =>
-                    adapter.listInlinePolicies({ roleName, marker }),
-                  label: "quarantine policy listing",
-                });
-                return !names.includes(policyName);
-              } catch (error) {
-                if (operationalContextExpired()) throw error;
-                return false;
-              }
-            },
-            { attempts: consistencyAttempts, sleep },
-          );
-        } catch (error) {
-          absenceError = error;
-        }
-      }
-      if (deletionError || absenceError || !absent) {
-        let recoveryError;
-        try {
-          const recovery = createRecoveryContext();
-          await putQuarantine(recovery.invokeCommand, {
+      const verifyRole = async (roleName) => {
+        const verifyLivePolicyDocuments = async () => {
+          const documents = await loadRolePolicyDocuments(
+            adapter,
             roleName,
-            policyName,
-            policyDocument: quarantinePolicyDocument(),
+          );
+          verifyPermanentEnforcementDocuments(documents, {
+            accountId,
+            boundaryArn,
+            partition,
+            applicationRegion,
+            decisionArtifactBucketName,
+          });
+        };
+        const readDenyPolicyState = async ({ includeDocument = false } = {}) => {
+          const attachedPolicies = await collectBoundedPages({
+            decodePage: (page) => ({
+              items: page?.policies,
+              nextToken: page?.marker,
+            }),
+            fetchPage: (marker) =>
+              adapter.listAttachedPolicies({
+                marker,
+                roleName,
+              }),
+            label: "deploy-role attached policy listing",
+          });
+          const denyPolicies = attachedPolicies.filter(
+            (policy) => policy?.arn === denyPolicyArn,
+          );
+          if (denyPolicies.length !== 1) return undefined;
+          const metadata = await adapter.getManagedPolicy({
+            policyArn: denyPolicyArn,
           });
           if (
-            !(await verifyQuarantine(recovery.invokeCommand, recovery.sleep))
+            !metadata ||
+            typeof metadata.defaultVersionId !== "string" ||
+            !/^v[1-9][0-9]*$/u.test(metadata.defaultVersionId)
           ) {
-            throw new Error(
-              "deploy-role quarantine recovery verification failed",
-            );
+            return undefined;
           }
-        } catch (error) {
-          recoveryError = error;
-        }
-        if (recoveryError) {
-          throw new AggregateError(
-            [deletionError, absenceError, recoveryError].filter(Boolean),
-            "deploy-role quarantine removal was ambiguous and recovery failed",
-          );
+          if (!includeDocument) {
+            return { defaultVersionId: metadata.defaultVersionId };
+          }
+          const version = await adapter.getManagedPolicyVersion({
+            policyArn: denyPolicyArn,
+            versionId: metadata.defaultVersionId,
+          });
+          if (!version?.document) return undefined;
+          return {
+            defaultVersionId: metadata.defaultVersionId,
+            document: version.document,
+          };
+        };
+        return retry(
+          async () => {
+            try {
+              await verifyLivePolicyDocuments();
+              const denyPolicyBefore = await readDenyPolicyState({
+                includeDocument: true,
+              });
+              if (!denyPolicyBefore) return false;
+              for (const { action, resource } of probes) {
+                const response = await invokeAwsCommand([
+                  "iam",
+                  "simulate-custom-policy",
+                  "--policy-input-list",
+                  serializePolicyInput(denyPolicyBefore.document),
+                  "--action-names",
+                  action,
+                  "--resource-arns",
+                  resource,
+                  "--context-entries",
+                  "ContextKeyName=iam:PassedToService," +
+                    "ContextKeyValues=ecs-tasks.amazonaws.com," +
+                    "ContextKeyType=string",
+                ]);
+                if (
+                  (Object.hasOwn(response, "IsTruncated") &&
+                    typeof response.IsTruncated !== "boolean") ||
+                  response.IsTruncated === true ||
+                  Object.hasOwn(response, "Marker") ||
+                  !Array.isArray(response.EvaluationResults) ||
+                  response.EvaluationResults.length !== 1
+                ) {
+                  return false;
+                }
+                const [result] = response.EvaluationResults;
+                if (
+                  result.EvalActionName !== action ||
+                  result.EvalResourceName !== resource ||
+                  result.EvalDecision !== "explicitDeny" ||
+                  !Array.isArray(result.MatchedStatements) ||
+                  result.MatchedStatements.length === 0
+                ) {
+                  return false;
+                }
+              }
+
+              const denyPolicyAfter = await readDenyPolicyState();
+              if (
+                denyPolicyAfter?.defaultVersionId !==
+                denyPolicyBefore.defaultVersionId
+              ) {
+                return false;
+              }
+              await verifyLivePolicyDocuments();
+              const finalDenyPolicy = await readDenyPolicyState();
+              return (
+                finalDenyPolicy?.defaultVersionId ===
+                denyPolicyBefore.defaultVersionId
+              );
+            } catch {
+              return false;
+            }
+          },
+          { attempts: consistencyAttempts, sleep },
+        );
+      };
+      for (const roleName of roleNames) if (!(await verifyRole(roleName))) return false;
+      return true;
+    },
+
+    async deleteQuarantine({roleName, policyName}) {
+      if (!deploymentRoleNames.includes(roleName) || policyName !== QUARANTINE_POLICY_NAME) deploymentError();
+      try {
+        await removeQuarantine({roleName, policyName});
+      } catch (releaseError) {
+        try {
+          const recovery = createRecoveryContext();
+          await putQuarantine(recovery.invokeCommand, {roleName, policyName, policyDocument: quarantinePolicyDocument()});
+          if (!(await verifyQuarantine(recovery.invokeCommand, recovery.sleep, roleName))) {
+            throw new Error("deploy-role quarantine recovery verification failed");
+          }
+        } catch (recoveryError) {
+          throw new AggregateError([...(releaseError instanceof AggregateError ? releaseError.errors : [releaseError]), recoveryError],
+            "deploy-role quarantine removal was ambiguous and recovery failed");
         }
         throw new Error("deploy-role quarantine removal was not observed");
+      }
+    },
+
+    async deleteQuarantines({roleNames, policyName}) {
+      if (deploymentRoleSnapshot === undefined || policyName !== QUARANTINE_POLICY_NAME ||
+        !Array.isArray(roleNames) || JSON.stringify(roleNames) !== JSON.stringify(deploymentRoleNames)) deploymentError();
+      await resolveDeploymentRoles();
+      try {
+        for (const roleName of roleNames) await removeQuarantine({roleName, policyName});
+      } catch (releaseError) {
+        try {
+          const recovery = createRecoveryContext();
+          // Independent roles are restored together so a failed peer does not
+          // consume the entire shared recovery window before others are tried.
+          const results = await Promise.allSettled(roleNames.map(roleName => putQuarantine(recovery.invokeCommand, {
+            roleName, policyName, policyDocument: quarantinePolicyDocument(),
+          })));
+          if (results.some(result => result.status === "rejected") ||
+            !(await verifyQuarantines(recovery.invokeCommand, recovery.sleep, roleNames))) {
+            throw new Error("deployment-role group quarantine recovery failed");
+          }
+        } catch (recoveryError) {
+          throw new AggregateError([releaseError, recoveryError], "deployment-role group quarantine recovery failed");
+        }
+        throw new Error("deployment-role quarantine release was uncertain; group restored");
       }
     },
   };

@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { readFile } from "node:fs/promises";
 import {
   boundaryPolicyDriftDiagnostic,
   verifyBoundaryPolicyDocument,
@@ -8,8 +7,12 @@ import {
 } from "./lib/workload-permissions-boundary.mjs";
 
 try {
-  const input = await readFile("/dev/stdin", "utf8");
-  const document = JSON.parse(input);
+  let input = "";
+  process.stdin.setEncoding("utf8");
+  for await (const chunk of process.stdin) {
+    input += chunk;
+    if (Buffer.byteLength(input) > 1024 * 1024) throw new Error("policy input exceeds limit");
+  }
   const quarantine = process.argv[2] === "--quarantine";
   const contract = {
     accountId: process.env.WORKLOAD_BOUNDARY_ACCOUNT_ID,
@@ -23,8 +26,8 @@ try {
     policyRevision: process.env.WORKLOAD_BOUNDARY_POLICY_REVISION,
   };
   const valid = quarantine
-    ? verifyQuarantinePolicy(document)
-    : verifyBoundaryPolicyDocument(document, contract);
+    ? verifyQuarantinePolicy(input)
+    : verifyBoundaryPolicyDocument(input, contract);
   if (!valid) {
     const label = quarantine
       ? "Deploy-role quarantine"
@@ -32,7 +35,7 @@ try {
     process.stderr.write(`${label} policy read-back mismatch.\n`);
     if (!quarantine) {
       process.stderr.write(
-        `${boundaryPolicyDriftDiagnostic(document, contract)}\n`,
+        `${boundaryPolicyDriftDiagnostic(input, contract)}\n`,
       );
     }
     process.exitCode = 1;

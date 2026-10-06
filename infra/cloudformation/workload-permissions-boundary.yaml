@@ -62,8 +62,7 @@ Resources:
           # an explicit boundary allow. The explicit Deny/NotAction below is the
           # action ceiling; this Allow only admits identity-policy permissions
           # that survive every explicit deny.
-          - Sid: I
-            Effect: Allow
+          - Effect: Allow
             Action: "*"
             Resource: "*"
           - Sid: !Sub C${PolicyRevision}
@@ -116,8 +115,7 @@ Resources:
               - kms:GenerateDataKey
               - bedrock-mantle:CallWithBearerToken
             Resource: "*"
-          - Sid: R
-            Effect: Deny
+          - Effect: Deny
             Action:
               - bedrock-mantle:CreateInference
               - bedrock-mantle:GetProject
@@ -178,15 +176,13 @@ Resources:
           # all, and #150's GenerateDataKey admission is confined to S3's own
           # encryption context by the `GenKey` deny below. Remove that deny and
           # this sentence stops being true — measured, not assumed.
-          - Sid: P
-            Effect: Deny
+          - Effect: Deny
             Action: ssm:PutParameter
             NotResource: !Sub arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/mem9-on-aws/*/approvals/*
           # Lambda cold starts, SSM SecureStrings, and the two ECS task-definition
           # secret families use different KMS encryption contexts. Missing and
           # foreign contexts remain denied.
-          - Sid: K
-            Effect: Deny
+          - Effect: Deny
             Action: kms:Decrypt
             Resource: "*"
             Condition:
@@ -208,8 +204,7 @@ Resources:
                 # deploy. Pinning both forms costs 6215 bytes, past the hard quota.
                 # Load-bearing — removed, the artifact read is explicitDeny.
                 "kms:EncryptionContext:aws:s3:arn": !Sub arn:${AWS::Partition}:s3:::${DecisionArtifactBucketName}
-          - Sid: V
-            Effect: Deny
+          - Effect: Deny
             Action: kms:Decrypt
             Resource: "*"
             Condition:
@@ -222,8 +217,7 @@ Resources:
                   - !Sub s3.${ApplicationRegion}.${AWS::URLSuffix}
               StringNotLikeIfExists:
                 "kms:EncryptionContext:aws:lambda:FunctionArn": !Sub arn:${AWS::Partition}:lambda:${ApplicationRegion}:${AWS::AccountId}:function:mem9-on-aws-*
-          - Sid: A
-            Effect: Deny
+          - Effect: Deny
             Action: kms:Decrypt
             Resource: "*"
             Condition:
@@ -231,8 +225,7 @@ Resources:
                 "kms:EncryptionContext:PARAMETER_ARN": "false"
               StringNotEqualsIfExists:
                 kms:ViaService: !Sub ssm.${ApplicationRegion}.${AWS::URLSuffix}
-          - Sid: B
-            Effect: Deny
+          - Effect: Deny
             Action: kms:Decrypt
             Resource: "*"
             Condition:
@@ -242,8 +235,7 @@ Resources:
                 kms:ViaService: !Sub secretsmanager.${ApplicationRegion}.${AWS::URLSuffix}
           # Secrets Manager's encryption context is fixed, but the boundary also
           # constrains which project role types may use that service-mediated path.
-          - Sid: S
-            Effect: Deny
+          - Effect: Deny
             Action: kms:Decrypt
             Resource: "*"
             Condition:
@@ -257,8 +249,7 @@ Resources:
                   - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9CleanupExecutionRole-*
           # Only the reviewed Lambda execution-role types may present the Lambda
           # cold-start context. Other workload roles cannot forge it.
-          - Sid: L
-            Effect: Deny
+          - Effect: Deny
             Action: kms:Decrypt
             Resource: "*"
             Condition:
@@ -274,8 +265,7 @@ Resources:
           # Encryption context is caller supplied. Block function code from
           # presenting a project Lambda context directly while preserving the
           # facade's SSM-mediated decrypt and Lambda's cold-start service path.
-          - Sid: F
-            Effect: Deny
+          - Effect: Deny
             Action: kms:Decrypt
             Resource: "*"
             Condition:
@@ -292,15 +282,13 @@ Resources:
           # restores it: ...IfExists with a negated operator FIRES on an ABSENT key,
           # so any caller that cannot present an artifact context is denied, and the
           # SSM path presents PARAMETER_ARN rather than aws:s3:arn.
-          - Sid: GenKey
-            Effect: Deny
+          - Effect: Deny
             Action: kms:GenerateDataKey
             Resource: "*"
             Condition:
               StringNotLikeIfExists:
                 "kms:EncryptionContext:aws:s3:arn": !Sub arn:${AWS::Partition}:s3:::${DecisionArtifactBucketName}
-          - Sid: T
-            Effect: Deny
+          - Effect: Deny
             Action: bedrock-mantle:CallWithBearerToken
             Resource: "*"
             Condition:
@@ -308,8 +296,7 @@ Resources:
                 bedrock-mantle:BearerTokenType: SHORT_TERM
           # Only the VPC proxy Lambda role may expose ENI permissions to the
           # Lambda service. A second deny blocks those APIs from function code.
-          - Sid: EniRole
-            Effect: Deny
+          - Effect: Deny
             Action:
               - ec2:*NetworkInterface*
               - ec2:AssignPrivateIpAddresses
@@ -319,8 +306,7 @@ Resources:
             Condition:
               ArnNotLike:
                 "aws:PrincipalArn": !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-a*-*Mem9ProxyFnRole-*
-          - Sid: N
-            Effect: Deny
+          - Effect: Deny
             Action:
               - ec2:*NetworkInterface*
               - ec2:AssignPrivateIpAddresses
@@ -330,6 +316,11 @@ Resources:
             Condition:
               "Null":
                 "lambda:SourceFunctionArn": "false"
+
+          # Maintenance-only archive writes cannot be delegated to workloads.
+          - Effect: Deny
+            Action: s3:PutObject
+            Resource: !Sub arn:${AWS::Partition}:s3:::${DecisionArtifactBucketName}/data-authorizations/*
 
 Outputs:
   PolicyArn:

@@ -167,14 +167,21 @@ async function verifyMaintenanceGraph(scheduleEnabled: boolean, namespaceRequire
     partition: "aws", accountId, applicationRegion: region,
     bedrockProjectArn: `arn:aws:bedrock-mantle:${region}:${accountId}:project/proj_mock`,
   }).Statement as Array<Record<string, any>>;
-  const resourceScopes = boundary.find(({ Sid }) => Sid === "R")!.NotResource as string[];
-  const actionCeiling = boundary.find(({ NotAction }) => NotAction)!.NotAction as string[];
+  const oneBoundary = (label: string, predicate: (statement: Record<string, any>) => boolean) => {
+    const matches = boundary.filter(predicate);
+    expect(matches, `unique boundary ${label}`).toHaveLength(1);
+    return matches[0];
+  };
+  const hasAction = (statement: Record<string, any>, action: string) =>
+    (Array.isArray(statement.Action) ? statement.Action : [statement.Action]).includes(action);
+  const resourceScopes = oneBoundary('resource ceiling', s => s.Effect === 'Deny' && hasAction(s, 's3:GetObject') && s.NotResource !== undefined).NotResource as string[];
+  const actionCeiling = oneBoundary('action ceiling', s => s.Effect === 'Deny' && s.NotAction !== undefined).NotAction as string[];
   expect(actionCeiling).toEqual(expect.arrayContaining(["ssm:GetParameters", "kms:Decrypt"]));
-  const kmsParameterScope = boundary.find(({ Sid }) => Sid === "K")!
+  const kmsParameterScope = oneBoundary('KMS contexts', s => hasAction(s, 'kms:Decrypt') && s.Condition?.StringNotLikeIfExists?.['kms:EncryptionContext:PARAMETER_ARN'] !== undefined)
     .Condition.StringNotLikeIfExists["kms:EncryptionContext:PARAMETER_ARN"] as string;
-  const executionRoleScopes = boundary.find(({ Sid }) => Sid === "S")!
+  const executionRoleScopes = oneBoundary('secret execution roles', s => hasAction(s, 'kms:Decrypt') && s.Condition?.Null?.['kms:EncryptionContext:SecretARN'] === 'false' && s.Condition?.ArnNotLike !== undefined)
     .Condition.ArnNotLike["aws:PrincipalArn"] as string[];
-  expect(boundary.find(({ Sid }) => Sid === "V")!
+  expect(oneBoundary('KMS services', s => hasAction(s, 'kms:Decrypt') && Array.isArray(s.Condition?.StringNotEqualsIfExists?.['kms:ViaService']))
     .Condition.StringNotEqualsIfExists["kms:ViaService"]).toContain(`ssm.${region}.amazonaws.com`);
 
   const parameterArn = (parameter: RecordedResource) =>
