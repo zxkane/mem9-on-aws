@@ -1921,3 +1921,116 @@ the owned disposable preview cluster removes that residue.
 Acceptance still requires real Scheduler delivery, 150 changed synthetic rows,
 zero-change replay, pause, MCP/OAuth and complete disposal on the final source.
 This context does not alter production canary clocks, proofs or allowances.
+
+### Deployment and workload exclusions for authorization maintenance
+
+This increment separates ordinary deployment from the maintenance authority that
+writes the protected production data-release parameter and immutable authorization
+archive. It does not enable execution, issue an authorization, or certify live
+governance. Implementation follows independent design review.
+
+The shared deployment deny policy covers production, preview and any retained
+legacy deployment role. It denies `ssm:PutParameter`, `ssm:DeleteParameter`,
+`ssm:DeleteParameters`, `ssm:AddTagsToResource` and `ssm:RemoveTagsFromResource`
+on the exact application-region production `consolidation-runtime/data-release`
+parameter. Existing production reads and preview production-access exclusions
+remain intact; preview descriptor creation and teardown use their own paths.
+Also deny `ssm:LabelParameterVersion` and `ssm:UnlabelParameterVersion` on that
+parameter. Current readers use its fixed unlabelled name and verify the observed
+version/hash; mutable label selectors remain unsupported.
+
+For the exact decision-artifact bucket ARN and its `data-authorizations/*`
+object ARN, add an unconditional **Deny** with
+`NotAction: ["s3:Get*", "s3:List*"]`. This grants no reads. It excludes object
+creation, deletion, ACL/tag/replication changes and bucket configuration changes
+from deployment, including changes that could remove the archive's protection.
+Other direct-bucket object prefixes, deployment state and publication locks retain
+their existing permissions. Ordinary deployment does not require access-point
+mutation. Extend this read-only exclusion to
+`arn:${AWS::Partition}:s3:*:*:accesspoint/*`, covering both regional and Multi-Region
+access points and their object paths. This deliberately excludes CI mutation
+through any access point, including one owned by another account, while granting
+no access to it. Separately deny the create/delete access-point, create/delete
+Multi-Region access-point, put/delete access-point policy, put Multi-Region policy
+and submit Multi-Region routes actions on `*`, including creation APIs that cannot
+be constrained by a pre-existing ARN. Preserve Get/List reads without granting
+them. Test direct, regional, Multi-Region and delegated-role paths separately.
+
+The workload boundary already denies object mutation actions other than
+`s3:PutObject`. Add an explicit `PutObject` deny on the exact archive prefix so
+deployment cannot bypass its exclusion by granting a bounded workload that write.
+Preserve object reads, decision/digest writes, SSM approval writes, and every
+existing KMS, network-interface, service-origin and PassRole restriction.
+The existing resource ceiling already rejects access-point object ARNs outside
+the exact bucket object glob; retain and test that independent denial.
+
+Add the decision-artifact owner stack to the existing protected CloudFormation
+stack set. Verify that deployment cannot modify its own governing roles/policies,
+the boundary or relevant operator helpers through direct IAM changes, another
+stack, role passing or assumption. Preserve supported workload provisioning and
+service-specific PassRole. Any reachable project-owned bypass receives a scoped
+exclusion and regression test; unrelated account administration is outside this
+source increment. Live maintenance-writer and trust governance remain separate.
+
+`DecisionArtifactBucketName` becomes an explicit deployment-role template input.
+`deploy-github-role.sh` resolves the existing `MEM9_DECISION_ARTIFACT_BUCKET`
+override or account-derived default using the same validation as the artifact
+owner and workload-boundary paths, including their existing 3–33-character
+project limit. Every entry point rejects longer names before AWS mutation; the
+general S3 bucket-name maximum does not expand this project's supported range.
+Existing owner-stack/boundary bindings must
+agree before any upload or update. Authenticated absence may support the existing
+fresh-bootstrap order; failed reads never count as absence. Retargeting an
+existing bucket is not a supported operation. IAM ownership remains in its
+existing region; artifact-owner observations use the application region.
+These binding checks use only metadata Get/List operations and never require a
+write probe or a boundary association that has not yet been provisioned.
+
+Runtime-role preflight also recognizes the exact SSM credential and signing-key
+references declared by the production bootstrap and `mnemo-server` containers.
+Match their secret names, container purpose, account, application region and prod
+paths; reject backup/transition credentials, mutable selectors and misplaced
+administrator references. Preserve existing Secrets Manager reference checks.
+This checks boundary compatibility and does not select credentials or certify
+database-role retirement.
+
+The boundary has little remaining space. A reproducible synthetic fixture with
+two maximum-length project IDs, the maximum revision length and a 33-character
+bucket serializes to 6,136 characters. Omitting its 14 non-revision `Sid` fields
+and adding the Sid-free archive `PutObject` deny produces 6,109 characters. Keep
+the `C${PolicyRevision}` marker. This is removal of optional identifiers only;
+do not shorten action/resource sets or change conditions to fit the quota.
+
+Replace the boundary verifier's Sid lookup with a bijection over canonical
+statements: exact statement count, unique expected and actual statements, and
+exactly one matching actual statement for each expected statement. Preserve the
+current permitted scalar/list and order normalization while retaining strict
+field, effect and condition comparison. Reject duplicates, extra/missing
+statements, duplicate Action/Resource entries, changed revision markers and
+ambiguous input. Normalization must not discard duplicate values. Prove that
+Sid removal does not make any expected statements identical across the complete
+fixture matrix. Include an adversarial expected fixture whose two statements
+differ only by Sid and therefore collide when Sids are removed; reject it rather
+than merging the statements. Update diagnostics and
+Sid-dependent boundary consumers together; deployment-policy Sid contracts stay
+unchanged. Measure the full supported fixture matrix and every affected rendered
+policy against its existing quota in CI and deployment preflight, using the full
+rendered template output rather than adding up isolated statement estimates.
+
+Implementation touches the deployment-role and boundary templates,
+`deploy-github-role.sh`, the existing boundary contract/verifier and its callers,
+and their isolation/bootstrap/boundary tests. Documented acceptance includes
+template/library parity, drift and duplicate rejection, bucket-binding failures
+before mutation, and positive/negative permission matrices for both deployment
+and bounded workloads. Configuration inspection is not a live permission proof.
+
+After offline verification and review, use the existing serialized ownership
+rollout with deployment quarantine and independent permanent-enforcement checks.
+Update the deployment exclusions and boundary as a coordinated contract change;
+do not release quarantine on a partially applied version. Read back actual default
+policy versions and bucket bindings, run scoped authorization probes and normal
+preview/deployment checks, then refresh target-scoped governance evidence. Preserve
+maintenance rollback/recovery ownership and original authorization history.
+The old Sid-based verifier will reject the compact representation. Coordinate
+the reviewed source/verifier and policy rollout under the same quarantine; do not
+restore ordinary deployments until their source and both policy contracts agree.

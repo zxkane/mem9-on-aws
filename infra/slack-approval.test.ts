@@ -449,6 +449,24 @@ function boundaryStatements(): Array<Record<string, any>> {
     .Statement as Array<Record<string, any>>;
 }
 
+type BoundaryPurpose = "actionCeiling" | "resources" | "approvals" | "kmsDecryptContext" | "kmsGenerateContext" | "kmsServices";
+
+/** Optional Sids are absent from the compact boundary. Match its semantic
+ * fields uniquely; deployment-policy Sid contracts remain separate. */
+function boundaryStatement(statements: Array<Record<string, any>>, purpose: BoundaryPurpose): Record<string, any> {
+  const selectors: Record<BoundaryPurpose, (statement: Record<string, any>) => boolean> = {
+    actionCeiling: s => s.NotAction !== undefined,
+    resources: s => list(s.Action).includes("s3:GetObject") && s.NotResource !== undefined,
+    approvals: s => list(s.Action).length === 1 && list(s.Action).includes("ssm:PutParameter") && s.NotResource !== undefined,
+    kmsDecryptContext: s => list(s.Action).includes("kms:Decrypt") && s.Condition?.StringNotLikeIfExists?.["kms:EncryptionContext:aws:s3:arn"] !== undefined,
+    kmsGenerateContext: s => list(s.Action).includes("kms:GenerateDataKey") && s.Condition?.StringNotLikeIfExists?.["kms:EncryptionContext:aws:s3:arn"] !== undefined,
+    kmsServices: s => list(s.Action).includes("kms:Decrypt") && Array.isArray(s.Condition?.StringNotEqualsIfExists?.["kms:ViaService"]),
+  };
+  const matches = statements.filter(s => s.Effect === "Deny" && selectors[purpose](s));
+  expect(matches, `unique boundary ${purpose}`).toHaveLength(1);
+  return matches[0];
+}
+
 /**
  * The OUT-OF-BAND artifact bucket template. The bucket is not part of this stack
  * (see TC-SLACKAPP-215 for why a fixed account-scoped name cannot be), so the
@@ -639,7 +657,7 @@ describe("slack approval infrastructure", () => {
     // fails in CI instead of surfacing as an opaque runtime AccessDenied on the
     // operator's first real Slack click.
     const boundary = boundaryStatements();
-    const ceiling = boundary.find(({ NotAction }) => NotAction);
+    const ceiling = boundaryStatement(boundary, "actionCeiling");
     expect(ceiling).toBeDefined();
     const admitted = list(ceiling!.NotAction);
     for (const action of actions) {
@@ -652,9 +670,7 @@ describe("slack approval infrastructure", () => {
     // The approval `P` statement is a NotResource deny, so the grant is only reachable if EVERY
     // resource it names is matched by the exception. One stray resource in the
     // same statement denies the whole call.
-    const approvalDeny = boundary.find(
-      ({ Sid }) => Sid === "P",
-    );
+    const approvalDeny = boundaryStatement(boundary, "approvals");
     expect(approvalDeny).toBeDefined();
     // `!Sub` resolves to an OBJECT, so these must be resolved before comparing —
     // stringifying them first yields "[object Object]", which matches nothing and
@@ -1553,7 +1569,7 @@ describe("slack approval infrastructure", () => {
     expect(actions).toContain("ssm:PutParameter");
 
     const boundary = boundaryStatements();
-    const ceiling = boundary.find(({ NotAction }) => NotAction);
+    const ceiling = boundaryStatement(boundary, "actionCeiling");
     expect(ceiling).toBeDefined();
     const admitted = list(ceiling!.NotAction);
     for (const action of actions) {
@@ -1566,9 +1582,7 @@ describe("slack approval infrastructure", () => {
     // `ParamWrite` is a NotResource deny: one stray resource in the same
     // statement denies the whole call, so EVERY resource the write names has to
     // be matched by the exception.
-    const approvalDeny = boundary.find(
-      ({ Sid }) => Sid === "P",
-    );
+    const approvalDeny = boundaryStatement(boundary, "approvals");
     expect(approvalDeny).toBeDefined();
     const exceptions = listRaw(approvalDeny!.NotResource).map(resolveSub);
     const putResources = permissions
@@ -1699,7 +1713,7 @@ describe("slack approval infrastructure", () => {
     // a drift here is an AccessDenied at artifact-write time, AFTER the approval
     // click has been spent, which is the one failure mode this loop must not have.
     const boundary = boundaryStatements();
-    const scoped = boundary.find(({ Sid }) => Sid === "R");
+    const scoped = boundaryStatement(boundary, "resources");
     expect(scoped).toBeDefined();
     expect(listRaw(scoped!.NotResource).map(resolveSub)).toContain(
       `arn:aws:s3:::${name}/*`,
@@ -1707,8 +1721,7 @@ describe("slack approval infrastructure", () => {
     // Both KMS context values too: the write needs GenerateDataKey under the
     // `GenKey` deny, and the read needs Decrypt under `KmsContext`. A bucket name
     // that matched only one of the three would break exactly one direction.
-    const contextArn = boundary
-      .filter(({ Sid }) => Sid === "K" || Sid === "GenKey")
+    const contextArn = [boundaryStatement(boundary, "kmsDecryptContext"), boundaryStatement(boundary, "kmsGenerateContext")]
       .map((statement) =>
         resolveSub(
           statement.Condition?.StringNotLikeIfExists?.[
@@ -1767,7 +1780,7 @@ describe("slack approval infrastructure", () => {
     const boundary = boundaryStatements();
     expect(
       JSON.stringify(
-        listRaw(boundary.find(({ Sid }) => Sid === "R")!.NotResource),
+        listRaw(boundaryStatement(boundary, "resources")!.NotResource),
       ),
     ).toContain("${DecisionArtifactBucketName}");
   });
@@ -1829,8 +1842,8 @@ describe("slack approval infrastructure", () => {
     expect(rule.BucketKeyEnabled).toBe(true);
     // Pin the coupling directly, so flipping the flag alone turns THIS test red
     // rather than only the other one.
-    const contextArn = boundaryStatements()
-      .filter(({ Sid }) => Sid === "K" || Sid === "GenKey")
+    const boundary = boundaryStatements();
+    const contextArn = [boundaryStatement(boundary, "kmsDecryptContext"), boundaryStatement(boundary, "kmsGenerateContext")]
       .map((statement) =>
         resolveSub(
           statement.Condition?.StringNotLikeIfExists?.[
@@ -2084,7 +2097,7 @@ describe("slack approval infrastructure", () => {
     const s3Statements = permissions.filter((statement) =>
       list(statement.actions).some((action) => action.startsWith("s3:")),
     );
-    const scoped = boundary.find(({ Sid }) => Sid === "R");
+    const scoped = boundaryStatement(boundary, "resources");
     expect(scoped).toBeDefined();
     const exceptions = listRaw(scoped!.NotResource).map(resolveSub);
     // `R` is a NotResource deny, so EVERY resource the grant names must be
@@ -2118,26 +2131,26 @@ describe("slack approval infrastructure", () => {
     // must satisfy both `K` (the Decrypt half) and `GenKey` (the write
     // half). All three read from the deployed template, so a boundary edit that
     // drops the s3 entry or re-adds a `/*` suffix turns this red.
-    const kmsVia = boundary.find(({ Sid }) => Sid === "V");
+    const kmsVia = boundaryStatement(boundary, "kmsServices");
     expect(
       listRaw(kmsVia!.Condition.StringNotEqualsIfExists["kms:ViaService"])
         .map((value) => resolveSub(value).replace("${AWS::URLSuffix}", "amazonaws.com")),
     ).toContain("s3.ap-northeast-1.amazonaws.com");
-    for (const sid of ["K", "GenKey"]) {
-      const statement = boundary.find((entry) => entry.Sid === sid);
+    for (const purpose of ["kmsDecryptContext", "kmsGenerateContext"] as const) {
+      const statement = boundaryStatement(boundary, purpose);
       const pattern = resolveSub(
         statement!.Condition.StringNotLikeIfExists["kms:EncryptionContext:aws:s3:arn"],
       );
       expect(
         globMatches(pattern, contextValues![0]),
-        `the artifact context is denied by ${sid}`,
+        `the artifact context is denied by ${purpose}`,
       ).toBe(true);
     }
 
     // And every action, S3 and KMS alike, has to be inside the action ceiling —
     // `s3:AbortMultipartUpload` notably is NOT, which is why the writer uses a
     // single PutObject rather than lib-storage's multipart Upload.
-    const ceiling = boundary.find(({ NotAction }) => NotAction);
+    const ceiling = boundaryStatement(boundary, "actionCeiling");
     const admitted = list(ceiling!.NotAction);
     for (const action of [...s3Statements, ...kms].flatMap((s) => list(s.actions))) {
       expect(

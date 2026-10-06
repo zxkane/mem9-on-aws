@@ -242,23 +242,45 @@ read_policy_revision() {
 verify_boundary_policy_at_base() {
   local boundary_policy="$1"
   local base_ref="${WORKLOAD_BOUNDARY_BASE_REF:-}"
-  local source_path target_path temp_dir verifier_exit
+  local source_path target_path temp_dir verifier_exit needs_dependencies=false
   local -a verifier_sources=(
     "scripts/verify-workload-permissions-boundary.mjs"
     "scripts/lib/workload-permissions-boundary.mjs"
     "scripts/workload-permissions-boundary-contract.json"
   )
   [[ "$base_ref" =~ ^[0-9a-f]{40}$ ]] || return 2
-  git cat-file -e "${base_ref}^{commit}" >/dev/null 2>&1 || return 2
+  GIT_NO_REPLACE_OBJECTS=1 git cat-file -e "${base_ref}^{commit}" >/dev/null 2>&1 || return 2
+  # Resolve helper bytes from the same reviewed base. Historical verifiers did
+  # not import these modules; never substitute current-worktree dependencies.
+  for source_path in \
+    "scripts/lib/authorization-archive-policy.mjs" \
+    "scripts/lib/authorization-maintenance-isolation.mjs"; do
+    if GIT_NO_REPLACE_OBJECTS=1 git cat-file -e "${base_ref}:${source_path}" 2>/dev/null; then
+      verifier_sources+=("$source_path")
+      needs_dependencies=true
+    fi
+  done
+  if [[ "$needs_dependencies" == true ]]; then
+    verifier_sources+=("package.json" "package-lock.json")
+  fi
   temp_dir="$(mktemp -d)" || return 2
   mkdir -p "$temp_dir/scripts/lib"
   for source_path in "${verifier_sources[@]}"; do
     target_path="$temp_dir/$source_path"
-    if ! git show "${base_ref}:${source_path}" >"$target_path" 2>/dev/null; then
+    if ! GIT_NO_REPLACE_OBJECTS=1 git show "${base_ref}:${source_path}" >"$target_path" 2>/dev/null; then
       rm -rf "$temp_dir"
       return 2
     fi
   done
+  # The strict parser imports yaml. Use the base's lockfile and integrity checks,
+  # not current-worktree node_modules; dependency lifecycle scripts never run.
+  if [[ "$needs_dependencies" == true ]] &&
+      ! timeout --signal=TERM --kill-after=5s 120s npm ci \
+        --prefix "$temp_dir" --ignore-scripts --no-audit --no-fund \
+        >"$temp_dir/dependencies.log" 2>&1; then
+    rm -rf "$temp_dir"
+    return 2
+  fi
   if WORKLOAD_BOUNDARY_ACCOUNT_ID="$account_id" \
       WORKLOAD_BOUNDARY_APPLICATION_REGION="$application_region" \
       WORKLOAD_BOUNDARY_BEDROCK_PROJECT_ARN="$bedrock_project_arn" \

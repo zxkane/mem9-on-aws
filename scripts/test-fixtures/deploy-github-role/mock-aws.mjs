@@ -18,9 +18,23 @@ function optionValue(option) {
 }
 
 function respond(value = "") {
-  if (value) process.stdout.write(`${value}\n`);
+  if (value) process.stdout.write(`${typeof value === "string" ? value : JSON.stringify(value)}\n`);
   process.exit(0);
 }
+
+const accountId = "123456789012";
+const roleStackName = "github-actions-mem9-on-aws";
+const artifactStackName = "decision-artifact-bucket-mem9-on-aws";
+const boundaryStackName = "workload-permissions-boundary-mem9-on-aws";
+const bucketName = `mem9-audit-${accountId}`;
+const applicationRegion = "eu-west-1";
+const stackId = (name, region) => `arn:aws:cloudformation:${region}:${accountId}:stack/${name}/fixture-id`;
+const stackMetadata = (name, region, parameters) => ({
+  StackName: name,
+  StackId: stackId(name, region),
+  StackStatus: "UPDATE_COMPLETE",
+  Parameters: Object.entries(parameters).map(([ParameterKey, ParameterValue]) => ({ ParameterKey, ParameterValue })),
+});
 
 const command = args.slice(0, 2).join(" ");
 
@@ -53,28 +67,56 @@ switch (command) {
     respond(`["vpc-${"a".repeat(17)}"]`);
     break;
   case "sts get-caller-identity":
-    respond(
-      optionValue("--query") === "Account"
-        ? "<aws-account-id>"
-        : "arn:aws:sts::<aws-account-id>:assumed-role/fixture/operator",
-    );
+    respond({ Account: accountId, Arn: `arn:aws:sts::${accountId}:assumed-role/fixture/operator`, UserId: "fixture:operator" });
     break;
   case "cloudformation describe-stacks": {
     const region = optionValue("--region");
     const query = optionValue("--query");
-    if (query?.includes("ApplicationRegion")) {
-      respond(process.env.MOCK_APPLICATION_REGION ?? "eu-west-1");
+    const name = optionValue("--stack-name");
+    if (name === roleStackName && region === "us-west-2") {
+      if (query?.includes("Outputs")) {
+        const suffix = query.includes("PreviewRoleArn") ? "-preview" : query.includes("ProductionRoleArn") ? "-prod" : "";
+        respond(`arn:aws:iam::${accountId}:role/${roleStackName}${suffix}`);
+      }
+      if (process.env.MOCK_ROLE_STACK_ABSENT === "true") {
+        process.stderr.write(`An error occurred (ValidationError) when calling the DescribeStacks operation: Stack with id ${name} does not exist\n`);
+        process.exit(254);
+      }
+      respond({ Stacks: [stackMetadata(name, region, {
+        ApplicationRegion: process.env.MOCK_APPLICATION_REGION ?? applicationRegion,
+        LegacyRoleEnabled: process.env.MOCK_LEGACY_ROLE_ENABLED ?? "true",
+        ProjectName: "mem9-on-aws",
+        GitHubRepo: "mem9-on-aws",
+      })] });
     }
-    if (query?.includes("LegacyRoleEnabled")) {
-      respond(process.env.MOCK_LEGACY_ROLE_ENABLED ?? "true");
+    if (name === artifactStackName && region === applicationRegion) {
+      respond({ Stacks: [stackMetadata(name, region, { DecisionArtifactBucketName: bucketName })] });
     }
-    if (query) {
-      respond("arn:aws:iam::<aws-account-id>:role/github-actions-mem9-on-aws");
+    if (name === boundaryStackName && region === "us-west-2") {
+      respond({ Stacks: [stackMetadata(name, region, {
+        ApplicationRegion: applicationRegion,
+        DecisionArtifactBucketName: bucketName,
+      })] });
     }
-    if (region === "us-west-2") respond("{}");
+    process.stderr.write("unexpected fixture stack identity or region\n");
     process.exit(255);
     break;
   }
+  case "cloudformation describe-stack-resource":
+    if (optionValue("--stack-name") !== stackId(artifactStackName, applicationRegion) ||
+        optionValue("--logical-resource-id") !== "DecisionArtifactBucket" ||
+        optionValue("--region") !== applicationRegion) {
+      process.stderr.write("unexpected fixture artifact resource identity\n");
+      process.exit(255);
+    }
+    respond({ StackResourceDetail: {
+      StackId: stackId(artifactStackName, applicationRegion),
+      LogicalResourceId: "DecisionArtifactBucket",
+      PhysicalResourceId: bucketName,
+      ResourceType: "AWS::S3::Bucket",
+      ResourceStatus: "CREATE_COMPLETE",
+    } });
+    break;
   case "cloudformation create-stack":
     respond();
     break;

@@ -11,6 +11,8 @@
 # Config: set AWS_PROFILE (and any overrides) in a gitignored .env at the repo
 # root — copy .env.example and fill in your own profile. Targets account
 # <aws-account-id>.
+# MEM9_DECISION_ARTIFACT_BUCKET selects the exact owner/boundary bucket;
+# unset defaults to mem9-audit-<caller-account-id>. Names must be 3-33 characters.
 #
 # Usage:
 #   scripts/deploy-github-role.sh            # auto create/update (reads .env)
@@ -50,8 +52,10 @@ MODE=""
 LEGACY_ROLE_REQUEST=""
 for arg in "$@"; do
   case "$arg" in
-    --create) MODE="create" ;;
-    --update) MODE="update" ;;
+    --create|--update)
+      if [[ -n "$MODE" ]]; then echo 'Choose exactly one operation mode.' >&2; exit 2; fi
+      MODE="${arg#--}"
+      ;;
     --retire-legacy) LEGACY_ROLE_REQUEST=false ;;
     --enable-legacy) LEGACY_ROLE_REQUEST=true ;;
     -h|--help)
@@ -70,109 +74,32 @@ if [[ ! -f "$TEMPLATE_FILE" ]]; then
   exit 2
 fi
 
+# Bind one bucket to the source application region and authenticated account.
+# Existing owner/boundary mismatch or unreadable metadata fails before upload.
+ISOLATION_HELPER="$_repo_root/scripts/lib/authorization-maintenance-isolation.mjs"
+BUCKET_OVERRIDE="${MEM9_DECISION_ARTIFACT_BUCKET:-}"
+BINDINGS_JSON="$(node "$ISOLATION_HELPER" inspect "$APPLICATION_REGION" "$STACK_NAME" "$BUCKET_OVERRIDE" "$MODE")"
+MODE="$(jq -r '.mode' <<<"$BINDINGS_JSON")"
+ACCOUNT_ID="$(jq -r '.accountId' <<<"$BINDINGS_JSON")"
+PARTITION="$(jq -r '.partition' <<<"$BINDINGS_JSON")"
+DECISION_ARTIFACT_BUCKET_NAME="$(jq -r '.decisionArtifactBucketName' <<<"$BINDINGS_JSON")"
 read_existing_legacy_role_enabled() {
-  local value
-  value=$(aws cloudformation describe-stacks \
-    --stack-name "$STACK_NAME" \
-    --region "$STACK_REGION" \
-    --query "Stacks[0].Parameters[?ParameterKey=='LegacyRoleEnabled'].ParameterValue | [0]" \
-    --output text)
-  case "$value" in
-    true|false) printf '%s' "$value" ;;
-    None|"") printf 'true' ;;
-    *)
-      echo "Error: existing LegacyRoleEnabled value is invalid." >&2
-      return 1
-      ;;
-  esac
+  jq -r '.legacyRoleEnabled' <<<"$BINDINGS_JSON"
 }
+LEGACY_ROLE_ENABLED="${LEGACY_ROLE_REQUEST:-$(read_existing_legacy_role_enabled)}"
 
-read_existing_application_region() {
-  aws cloudformation describe-stacks \
-    --stack-name "$STACK_NAME" \
-    --region "$STACK_REGION" \
-    --query "Stacks[0].Parameters[?ParameterKey=='ApplicationRegion'].ParameterValue | [0]" \
-    --output text
-}
-
-require_matching_existing_region() {
-  local existing_region="$1"
-  if [[ ! "$existing_region" =~ ^[a-z]{2}(-gov)?-[a-z0-9-]+-[0-9]+$ ]]; then
-    echo "Error: existing GitHub Actions role has no valid ApplicationRegion; no mutation was attempted." >&2
-    return 1
-  fi
-  if [[ "$existing_region" != "$APPLICATION_REGION" ]]; then
-    echo "Error: Existing GitHub Actions role belongs to application region ${existing_region}; no mutation was attempted." >&2
-    echo "Relocating a live deployment requires a dedicated dual-region migration after old-region previews are removed." >&2
+recheck_owner_bindings() {
+  local current
+  current="$(node "$ISOLATION_HELPER" inspect "$APPLICATION_REGION" "$STACK_NAME" "$DECISION_ARTIFACT_BUCKET_NAME" "$MODE")"
+  if [[ "$current" != "$BINDINGS_JSON" ]]; then
+    echo 'Error: deployment owner bindings changed before mutation.' >&2
     return 1
   fi
 }
-
-# Auto-detect create vs update before uploading a large template or touching any
-# other service. An existing owner cannot be retargeted in place.
-if [[ -z "$MODE" ]]; then
-  set +e
-  EXISTING_APPLICATION_REGION="$(read_existing_application_region 2>/dev/null)"
-  DESCRIBE_EXIT=$?
-  set -e
-  if [[ $DESCRIBE_EXIT -eq 0 ]]; then
-    require_matching_existing_region "$EXISTING_APPLICATION_REGION"
-    MODE="update"
-  else
-    MODE="create"
-  fi
-elif [[ "$MODE" == "update" ]]; then
-  if ! EXISTING_APPLICATION_REGION="$(read_existing_application_region)"; then
-    echo "Error: could not read the existing GitHub Actions role region; no mutation was attempted." >&2
-    exit 1
-  fi
-  require_matching_existing_region "$EXISTING_APPLICATION_REGION"
-fi
-
-if [[ -n "$LEGACY_ROLE_REQUEST" ]]; then
-  LEGACY_ROLE_ENABLED="$LEGACY_ROLE_REQUEST"
-elif [[ "$MODE" == "update" ]]; then
-  LEGACY_ROLE_ENABLED="$(read_existing_legacy_role_enabled)"
-else
-  LEGACY_ROLE_ENABLED=true
-fi
 
 echo "Stack:    $STACK_NAME"
 echo "Region:   $STACK_REGION"
 echo "Template: $TEMPLATE_FILE"
-
-# CloudFormation's inline --template-body cap is 51200 bytes. This role template
-# grew past that as resource-type policies accumulated (including former
-# ELB/ACM/VPC-Lattice resources plus current Route53/Cognito/AgentCore resources),
-# which made `update-stack --template-body` SILENTLY
-# fail validation → the role froze at a stale version and every downstream deploy
-# 403'd on "missing" grants that were in git but never applied. So above ~50KB we
-# upload the template to S3 and use --template-url (1 MB cap). The bucket is a
-# reused SST state bucket (MEM9_TEMPLATE_BUCKET overrides); the object is a
-# throwaway under tmp/.
-TEMPLATE_SIZE=$(wc -c < "$TEMPLATE_FILE" | tr -d ' ')
-if [[ "$TEMPLATE_SIZE" -gt 50000 ]]; then
-  TEMPLATE_BUCKET="${MEM9_TEMPLATE_BUCKET:-}"
-  if [[ -z "$TEMPLATE_BUCKET" ]]; then
-    TEMPLATE_BUCKET=$(aws s3api list-buckets \
-      --query "Buckets[?starts_with(Name, 'sst-state-')].Name | [0]" --output text 2>/dev/null)
-  fi
-  if [[ -z "$TEMPLATE_BUCKET" || "$TEMPLATE_BUCKET" == "None" ]]; then
-    echo "Error: template is ${TEMPLATE_SIZE}B (> 50KB inline cap) but no S3 bucket found for --template-url. Set MEM9_TEMPLATE_BUCKET." >&2
-    exit 1
-  fi
-  # Bucket region for the virtual-hosted URL (CFN reads it cross-region over https).
-  BUCKET_REGION=$(aws s3api get-bucket-location --bucket "$TEMPLATE_BUCKET" \
-    --query 'LocationConstraint' --output text 2>/dev/null)
-  [[ "$BUCKET_REGION" == "None" || -z "$BUCKET_REGION" ]] && BUCKET_REGION="us-east-1"
-  TEMPLATE_KEY="tmp/${STACK_NAME}.yaml"
-  aws s3 cp "$TEMPLATE_FILE" "s3://${TEMPLATE_BUCKET}/${TEMPLATE_KEY}" --region "$BUCKET_REGION" >/dev/null
-  TEMPLATE_URL="https://${TEMPLATE_BUCKET}.s3.${BUCKET_REGION}.amazonaws.com/${TEMPLATE_KEY}"
-  TEMPLATE_ARG=(--template-url "$TEMPLATE_URL")
-  echo "Template: ${TEMPLATE_SIZE}B > 50KB → uploaded to s3://${TEMPLATE_BUCKET}/${TEMPLATE_KEY} (--template-url)"
-else
-  TEMPLATE_ARG=(--template-body "file://$TEMPLATE_FILE")
-fi
 
 # Reuse the account's existing GitHub Actions OIDC provider if present (sister
 # projects created one already). Fail the discovery loud — silently falling
@@ -238,9 +165,6 @@ for subnet_id in "${PRIVATE_SUBNET_IDS[@]}"; do
   fi
 done
 
-ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-CALLER_ARN=$(aws sts get-caller-identity --query Arn --output text)
-PARTITION=$(cut -d: -f2 <<< "$CALLER_ARN")
 APPLICATION_VPC_ARN="arn:${PARTITION}:ec2:${APPLICATION_REGION}:${ACCOUNT_ID}:vpc/${APPLICATION_VPC_ID}"
 APPLICATION_SUBNET_ARNS=""
 for subnet_id in "${PRIVATE_SUBNET_IDS[@]}"; do
@@ -286,15 +210,62 @@ case "$PROD_NAMESPACE_COUNT" in
 esac
 
 PARAMS_JSON=$(printf \
-  '[{"ParameterKey":"OIDCProviderArn","ParameterValue":"%s"},{"ParameterKey":"ApplicationRegion","ParameterValue":"%s"},{"ParameterKey":"ApplicationVpcArn","ParameterValue":"%s"},{"ParameterKey":"ApplicationPrivateSubnetArns","ParameterValue":"%s"},{"ParameterKey":"ProductionHostedZoneArn","ParameterValue":"%s"},{"ParameterKey":"LegacyRoleEnabled","ParameterValue":"%s"}]' \
+  '[{"ParameterKey":"OIDCProviderArn","ParameterValue":"%s"},{"ParameterKey":"ApplicationRegion","ParameterValue":"%s"},{"ParameterKey":"ApplicationVpcArn","ParameterValue":"%s"},{"ParameterKey":"ApplicationPrivateSubnetArns","ParameterValue":"%s"},{"ParameterKey":"ProductionHostedZoneArn","ParameterValue":"%s"},{"ParameterKey":"LegacyRoleEnabled","ParameterValue":"%s"},{"ParameterKey":"DecisionArtifactBucketName","ParameterValue":"%s"}]' \
   "$OIDC_PROVIDER_ARN" \
   "$APPLICATION_REGION" \
   "$APPLICATION_VPC_ARN" \
   "$APPLICATION_SUBNET_ARNS" \
   "$PRODUCTION_HOSTED_ZONE_ARN" \
-  "$LEGACY_ROLE_ENABLED")
+  "$LEGACY_ROLE_ENABLED" \
+  "$DECISION_ARTIFACT_BUCKET_NAME")
 echo "ENI scope: $APPLICATION_REGION, one VPC, ${#PRIVATE_SUBNET_IDS[@]} private subnet(s)"
 echo "Legacy role enabled: $LEGACY_ROLE_ENABLED"
+
+# Check every full rendered managed policy with the actual deployment inputs.
+# A large subnet list or changed template cannot bypass the quota gate.
+jq --arg partition "$PARTITION" --arg account "$ACCOUNT_ID" \
+  --arg region "$STACK_REGION" --arg stack "$STACK_NAME" \
+  'map({key: .ParameterKey, value: .ParameterValue}) | from_entries |
+   . + {"AWS::Partition": $partition, "AWS::AccountId": $account,
+        "AWS::Region": $region, "AWS::StackName": $stack,
+        "AWS::URLSuffix": (if $partition == "aws-cn" then "amazonaws.com.cn" else "amazonaws.com" end)}' \
+  <<<"$PARAMS_JSON" | node "$ISOLATION_HELPER" template "$TEMPLATE_FILE" >/dev/null
+
+# CloudFormation's inline --template-body cap is 51200 bytes. This role template
+# grew past that as resource-type policies accumulated (including former
+# ELB/ACM/VPC-Lattice resources plus current Route53/Cognito/AgentCore resources),
+# which made `update-stack --template-body` SILENTLY
+# fail validation → the role froze at a stale version and every downstream deploy
+# 403'd on "missing" grants that were in git but never applied. So above ~50KB we
+# upload the template to S3 and use --template-url (1 MB cap). The bucket is a
+# reused SST state bucket (MEM9_TEMPLATE_BUCKET overrides); the object is a
+# throwaway under tmp/.
+TEMPLATE_SIZE=$(wc -c < "$TEMPLATE_FILE" | tr -d ' ')
+if [[ "$TEMPLATE_SIZE" -gt 50000 ]]; then
+  TEMPLATE_BUCKET="${MEM9_TEMPLATE_BUCKET:-}"
+  if [[ -z "$TEMPLATE_BUCKET" ]]; then
+    TEMPLATE_BUCKET=$(aws s3api list-buckets \
+      --query "Buckets[?starts_with(Name, 'sst-state-')].Name | [0]" --output text 2>/dev/null)
+  fi
+  if [[ -z "$TEMPLATE_BUCKET" || "$TEMPLATE_BUCKET" == "None" ]]; then
+    echo "Error: template is ${TEMPLATE_SIZE}B (> 50KB inline cap) but no S3 bucket found for --template-url. Set MEM9_TEMPLATE_BUCKET." >&2
+    exit 1
+  fi
+  # Bucket region for the virtual-hosted URL (CFN reads it cross-region over https).
+  BUCKET_REGION=$(aws s3api get-bucket-location --bucket "$TEMPLATE_BUCKET" \
+    --query 'LocationConstraint' --output text 2>/dev/null)
+  [[ "$BUCKET_REGION" == "None" || -z "$BUCKET_REGION" ]] && BUCKET_REGION="us-east-1"
+  TEMPLATE_KEY="tmp/${STACK_NAME}.yaml"
+  recheck_owner_bindings
+  aws s3 cp "$TEMPLATE_FILE" "s3://${TEMPLATE_BUCKET}/${TEMPLATE_KEY}" --region "$BUCKET_REGION" >/dev/null
+  TEMPLATE_URL="https://${TEMPLATE_BUCKET}.s3.${BUCKET_REGION}.amazonaws.com/${TEMPLATE_KEY}"
+  TEMPLATE_ARG=(--template-url "$TEMPLATE_URL")
+  echo "Template: ${TEMPLATE_SIZE}B > 50KB → uploaded to s3://${TEMPLATE_BUCKET}/${TEMPLATE_KEY} (--template-url)"
+else
+  TEMPLATE_ARG=(--template-body "file://$TEMPLATE_FILE")
+fi
+
+recheck_owner_bindings
 
 case "$MODE" in
   create)
@@ -361,7 +332,7 @@ echo "ProductionRoleArn: $PROD_ROLE_ARN"
 if [[ "$LEGACY_ROLE_ENABLED" == "true" ]]; then
   echo "LegacyRoleArn:     $LEGACY_ROLE_ARN"
 else
-  echo "LegacyRoleArn:     (trust disabled)"
+  echo "LegacyRoleArn:     $LEGACY_ROLE_ARN (trust disabled)"
 fi
 echo
 echo "Next steps:"

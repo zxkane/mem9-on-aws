@@ -47,6 +47,12 @@ Parameters:
     Type: String
     AllowedPattern: "^[a-z]{2}(-[a-z0-9]+)+-[0-9]+$"
     Description: AWS Region where the SST application and its Lambda VPC ENIs run.
+  DecisionArtifactBucketName:
+    Type: String
+    MinLength: 3
+    MaxLength: 33
+    AllowedPattern: "^(?!xn--|sthree-|amzn-s3-demo-)(?!.*(?:-s3alias|--ol-s3|--x-s3|--table-s3|-an)$)[a-z0-9][a-z0-9-]*[a-z0-9]$"
+    Description: Exact shared artifact bucket, matching its owner and workload boundary.
   ApplicationVpcArn:
     Type: String
     Description: ARN of the existing VPC used by the SST application.
@@ -95,6 +101,39 @@ Resources:
       PolicyDocument:
         Version: "2012-10-17"
         Statement:
+          - Sid: DenyProductionDataReleaseMutation
+            Effect: Deny
+            Action:
+              - ssm:PutParameter
+              - ssm:DeleteParameter
+              - ssm:DeleteParameters
+              - ssm:AddTagsToResource
+              - ssm:RemoveTagsFromResource
+              - ssm:LabelParameterVersion
+              - ssm:UnlabelParameterVersion
+            Resource: !Sub arn:${AWS::Partition}:ssm:${ApplicationRegion}:${AWS::AccountId}:parameter/${ProjectName}/prod/consolidation-runtime/data-release
+          - Sid: DenyAuthorizationArchiveMutation
+            # No read grant: exclude mutation of the bucket/archive and every
+            # access-point path, while preserving other direct-bucket prefixes.
+            Effect: Deny
+            NotAction: [s3:Get*, s3:List*]
+            Resource:
+              - !Sub arn:${AWS::Partition}:s3:::${DecisionArtifactBucketName}
+              - !Sub arn:${AWS::Partition}:s3:::${DecisionArtifactBucketName}/data-authorizations/*
+              - !Sub arn:${AWS::Partition}:s3:*:*:accesspoint/*
+          - Sid: DenyS3AccessPointMutation
+            # Creation/control APIs also require a resource-independent deny.
+            Effect: Deny
+            Action:
+              - s3:CreateAccessPoint
+              - s3:DeleteAccessPoint
+              - s3:CreateMultiRegionAccessPoint
+              - s3:DeleteMultiRegionAccessPoint
+              - s3:PutAccessPointPolicy
+              - s3:DeleteAccessPointPolicy
+              - s3:PutMultiRegionAccessPointPolicy
+              - s3:SubmitMultiRegionAccessPointRoutes
+            Resource: "*"
           - Sid: DenyIAMUserAndProvider
             Effect: Deny
             Action:
@@ -190,6 +229,7 @@ Resources:
               - !Sub arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/workload-permissions-boundary-${ProjectName}/*
               - !Sub arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/github-actions-${GitHubRepo}/*
               - !Sub arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/memory-namespace-operator-${ProjectName}/*
+              - !Sub arn:${AWS::Partition}:cloudformation:*:${AWS::AccountId}:stack/decision-artifact-bucket-${ProjectName}/*
           - Sid: DenyUnboundedProjectRoleCreation
             # Negated ARN conditions also match a missing request/resource key,
             # so CreateRole without a boundary and boundary replacement with any

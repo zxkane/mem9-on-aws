@@ -6,6 +6,7 @@ import {
   readFileSync,
   readdirSync,
   rmSync,
+  symlinkSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -28,6 +29,10 @@ const applicationRegionResolverPath = resolve(
 const applicationRegionLibraryPath = resolve(
   here,
   "lib/application-region.mjs",
+);
+const authorizationIsolationLibraryPath = resolve(
+  here,
+  "lib/authorization-maintenance-isolation.mjs",
 );
 const deployRoleFixturePath = resolve(
   here,
@@ -69,7 +74,11 @@ function runFixture(name) {
 
 function runDeployRoleFixture(
   args = [],
-  { existingApplicationRegion, existingLegacyRoleEnabled = "true" } = {},
+  {
+    existingApplicationRegion,
+    existingLegacyRoleEnabled = "true",
+    roleStackAbsent = false,
+  } = {},
 ) {
   const dir = mkdtempSync(join(tmpdir(), "mem9-deploy-role-"));
   tempDirs.push(dir);
@@ -93,6 +102,13 @@ function runDeployRoleFixture(
     applicationRegionLibraryPath,
     join(isolatedLibrary, "application-region.mjs"),
   );
+  copyFileSync(
+    authorizationIsolationLibraryPath,
+    join(isolatedLibrary, "authorization-maintenance-isolation.mjs"),
+  );
+  // Exercise the real template renderer with the installed YAML dependency.
+  symlinkSync(join(root, "node_modules"), join(isolatedRoot, "node_modules"), "dir");
+  writeFileSync(calls, "");
   writeFileSync(
     join(isolatedRoot, "sst.config.ts"),
     [
@@ -121,10 +137,16 @@ function runDeployRoleFixture(
       AWS_PROFILE: "fixture-operator",
       AWS_REGION: "us-east-2",
       PROJECT_REGION: "us-east-1",
+      WORKLOAD_BOUNDARY_SKIP_DOTENV: "true",
+      STACK_NAME: "github-actions-mem9-on-aws",
+      MEM9_DECISION_ARTIFACT_BUCKET: "",
+      MEM9_VPC_ID: "",
       MEM9_TEMPLATE_BUCKET: "fixture-template-bucket",
       MOCK_APPLICATION_REGION: existingApplicationRegion ?? "eu-west-1",
       MOCK_LEGACY_ROLE_ENABLED: existingLegacyRoleEnabled,
+      MOCK_ROLE_STACK_ABSENT: String(roleStackAbsent),
     },
+    timeout: 30_000,
   });
   const callRecords = readFileSync(calls, "utf8")
     .trim()
@@ -858,27 +880,22 @@ describe("deploy-role stack region", () => {
     const updateCall = cloudFormationCalls.find(
       ({ args }) => args[1] === "update-stack",
     );
+    expect(result.status, result.stderr).toBe(0);
     const parameters = JSON.parse(
       optionValue(updateCall.args, "--parameters"),
     );
 
-    expect(result.status, result.stderr).toBe(0);
-    expect(
-      cloudFormationCalls.map(({ args }) => args.slice(0, 2).join(" ")),
-    ).toEqual([
-      "cloudformation describe-stacks",
-      "cloudformation describe-stacks",
-      "cloudformation update-stack",
-      "cloudformation wait",
-      "cloudformation describe-stacks",
-      "cloudformation describe-stacks",
-      "cloudformation describe-stacks",
-    ]);
-    expect(
-      cloudFormationCalls.every(
-        ({ args }) => optionValue(args, "--region") === "us-west-2",
-      ),
-    ).toBe(true);
+    expect(cloudFormationCalls.filter(({ args }) => args[1] === "update-stack")).toHaveLength(1);
+    const uploadIndex = callRecords.findIndex(({ args }) => args[0] === "s3" && args[1] === "cp");
+    expect(uploadIndex).toBeGreaterThan(0);
+    for (const stack of ["github-actions-mem9-on-aws", "decision-artifact-bucket-mem9-on-aws", "workload-permissions-boundary-mem9-on-aws"]) {
+      expect(callRecords.slice(0, uploadIndex).some(({ args }) =>
+        args[1] === "describe-stacks" && optionValue(args, "--stack-name") === stack)).toBe(true);
+    }
+    for (const { args } of cloudFormationCalls) {
+      const artifactOwner = optionValue(args, "--stack-name").includes("decision-artifact-bucket-mem9-on-aws");
+      expect(optionValue(args, "--region")).toBe(artifactOwner ? "eu-west-1" : "us-west-2");
+    }
     expect(ec2Calls).not.toHaveLength(0);
     expect(
       ec2Calls.every(
@@ -889,26 +906,29 @@ describe("deploy-role stack region", () => {
       ParameterKey: "ApplicationRegion",
       ParameterValue: "eu-west-1",
     });
+    expect(parameters).toContainEqual({
+      ParameterKey: "DecisionArtifactBucketName",
+      ParameterValue: "mem9-audit-123456789012",
+    });
   });
 
   it.each([
     ["create", "--create", "cloudformation create-stack"],
     ["update", "--update", "cloudformation update-stack"],
   ])("pins forced %s operations to the owner region", (_, mode, operation) => {
-    const { result, callRecords } = runDeployRoleFixture([mode]);
+    const { result, callRecords } = runDeployRoleFixture([mode], {
+      roleStackAbsent: mode === "--create",
+    });
     const cloudFormationCalls = callRecords.filter(
       ({ args }) => args[0] === "cloudformation",
     );
 
     expect(result.status, result.stderr).toBe(0);
-    expect(
-      cloudFormationCalls.map(({ args }) => args.slice(0, 2).join(" ")),
-    ).toContain(operation);
-    expect(
-      cloudFormationCalls.every(
-        ({ args }) => optionValue(args, "--region") === "us-west-2",
-      ),
-    ).toBe(true);
+    const mutationCalls = cloudFormationCalls.filter(({ args }) =>
+      ["create-stack", "update-stack"].includes(args[1]));
+    expect(mutationCalls.map(({ args }) => args.slice(0, 2).join(" "))).toEqual([operation]);
+    expect(optionValue(mutationCalls[0].args, "--stack-name")).toBe("github-actions-mem9-on-aws");
+    expect(optionValue(mutationCalls[0].args, "--region")).toBe("us-west-2");
   });
 
   it("refuses to retarget the existing IAM owner during a live region move", () => {
@@ -917,7 +937,7 @@ describe("deploy-role stack region", () => {
     });
     expect(result.status).toBe(1);
     expect(result.stderr).toContain(
-      "Existing GitHub Actions role belongs to application region ap-northeast-1",
+      "Existing GitHub Actions role belongs to another application region",
     );
     expect(
       callRecords.some(
@@ -925,12 +945,10 @@ describe("deploy-role stack region", () => {
           "cloudformation update-stack",
       ),
     ).toBe(false);
-    expect(
-      callRecords.filter(
-        ({ args }) =>
-          args.slice(0, 2).join(" ") !== "cloudformation describe-stacks",
-      ),
-    ).toEqual([]);
+    expect(callRecords.map(({ args }) => args.slice(0, 2).join(" "))).toEqual([
+      "sts get-caller-identity",
+      "cloudformation describe-stacks",
+    ]);
   });
 
   it("preserves retired legacy trust unless rollback is explicit", () => {
