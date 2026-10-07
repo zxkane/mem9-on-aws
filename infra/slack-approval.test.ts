@@ -456,7 +456,7 @@ type BoundaryPurpose = "actionCeiling" | "resources" | "approvals" | "kmsDecrypt
 function boundaryStatement(statements: Array<Record<string, any>>, purpose: BoundaryPurpose): Record<string, any> {
   const selectors: Record<BoundaryPurpose, (statement: Record<string, any>) => boolean> = {
     actionCeiling: s => s.NotAction !== undefined,
-    resources: s => list(s.Action).includes("s3:GetObject") && s.NotResource !== undefined,
+    resources: s => list(s.Action).some(pattern => globMatches(pattern, "s3:GetObject")) && s.NotResource !== undefined,
     approvals: s => list(s.Action).length === 1 && list(s.Action).includes("ssm:PutParameter") && s.NotResource !== undefined,
     kmsDecryptContext: s => list(s.Action).includes("kms:Decrypt") && s.Condition?.StringNotLikeIfExists?.["kms:EncryptionContext:aws:s3:arn"] !== undefined,
     kmsGenerateContext: s => list(s.Action).includes("kms:GenerateDataKey") && s.Condition?.StringNotLikeIfExists?.["kms:EncryptionContext:aws:s3:arn"] !== undefined,

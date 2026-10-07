@@ -510,7 +510,14 @@ export function expectedBoundaryPolicyDocument(contract) {
       },
       {
         Effect: "Deny",
-        Action: [...PROJECT_RESOURCE_RUNTIME_ACTIONS],
+        // The unchanged, literal action ceiling makes these families equivalent
+        // on every admitted action. Extra matches remain denied by the ceiling.
+        Action: [
+          "bedrock-mantle:CreateInference", "bedrock-mantle:GetProject",
+          "bedrock-mantle:ListProjects", "bedrock-mantle:ListTagsForResource",
+          "ecr:Batch*", "ecr:GetDownloadUrlForLayer", "lambda:*", "logs:*",
+          "secretsmanager:*", "sns:*", "sqs:*", "ssm:*", "s3:*",
+        ],
         NotResource: projectResources,
       },
       // The statement above scopes the write to the PROJECT prefix — every
@@ -686,8 +693,12 @@ export function expectedBoundaryPolicyDocument(contract) {
       },
       {
         Effect: "Deny",
-        Action: "s3:PutObject",
-        Resource: `${decisionArtifactBucketArn}/${AUTHORIZATION_ARCHIVE_PREFIX}*`,
+        Action: ["s3:PutObject", "iam:PassRole"],
+        Resource: [
+          `${decisionArtifactBucketArn}/${AUTHORIZATION_ARCHIVE_PREFIX}*`,
+          `arn:${partition}:iam::${accountId}:role/mem9-on-aws-namespace-operator`,
+          `arn:${partition}:iam::${accountId}:role/mem9-on-aws-preview-human-acceptance`,
+        ],
       },
     ],
   };
@@ -1924,6 +1935,10 @@ export async function runBoundaryRollout(
   if (typeof adapter.verifyBoundaryRegion !== "function") {
     throw new Error("boundary region preflight configuration is invalid");
   }
+  if (typeof adapter.verifyRetainedOperators !== "function" ||
+      typeof adapter.verifyRetainedOperatorEnforcement !== "function") {
+    throw new Error("retained operator verification is not configured");
+  }
   const boundedAdapter = createDeadlineAdapter(adapter, deadlineAt);
   const coordinatedRoles = typeof adapter.resolveDeploymentRoles === "function";
   let deployRoleNames = [deployRoleName];
@@ -1946,11 +1961,17 @@ export async function runBoundaryRollout(
   };
   let quarantineAttempted = false;
   let quarantineRemoved = false;
+  const verifyRetainedOperators = async () => {
+    if (await boundedAdapter.verifyRetainedOperators() !== true) {
+      throw new Error("retained operator identity verification failed");
+    }
+  };
   try {
     // Catch a retained stack from another application region before quarantine
     // or any other IAM mutation. The full runtime binding read still runs below,
     // immediately before boundary attachment.
     await boundedAdapter.verifyBoundaryRegion();
+    await verifyRetainedOperators();
     if (coordinatedRoles) {
       if (typeof adapter.deleteQuarantines !== "function") {
         throw new Error("deployment-role coordinated release is not configured");
@@ -2018,6 +2039,7 @@ export async function runBoundaryRollout(
     }
 
     const verifyFrozenState = async () => {
+      await verifyRetainedOperators();
       if (coordinatedRoles && !sameList(deployRoleNames, await resolveDeploymentRoles())) {
         throw new Error("deployment-role inventory changed during rollout");
       }
@@ -2045,6 +2067,11 @@ export async function runBoundaryRollout(
         throw new Error(
           "permanent permissions-boundary enforcement is incomplete",
         );
+      }
+      if (!(await boundedAdapter.verifyRetainedOperatorEnforcement({
+        roleNames: [...deployRoleNames],
+      }))) {
+        throw new Error("retained operator permanent enforcement is incomplete");
       }
       return roles;
     };

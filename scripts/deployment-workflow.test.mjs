@@ -106,6 +106,11 @@ function runDeployRoleFixture(
     authorizationIsolationLibraryPath,
     join(isolatedLibrary, "authorization-maintenance-isolation.mjs"),
   );
+  for (const dependency of ["authorization-archive-policy.mjs", "retained-operator-protection.mjs"]) {
+    copyFileSync(join(here, "lib", dependency), join(isolatedLibrary, dependency));
+  }
+  copyFileSync(join(here, "workload-permissions-boundary-contract.json"),
+    join(isolatedScripts, "workload-permissions-boundary-contract.json"));
   // Exercise the real template renderer with the installed YAML dependency.
   symlinkSync(join(root, "node_modules"), join(isolatedRoot, "node_modules"), "dir");
   writeFileSync(calls, "");

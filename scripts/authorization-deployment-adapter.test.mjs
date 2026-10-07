@@ -3,6 +3,7 @@ import {readFileSync} from "node:fs";
 import {parse} from "yaml";
 import {createAwsCliAdapter} from "./lib/workload-permissions-boundary-aws.mjs";
 import {DEPLOY_ROLE_NAME, QUARANTINE_POLICY_NAME, quarantinePolicyDocument} from "./lib/workload-permissions-boundary.mjs";
+import {createRetainedOperatorFixture} from "./test-fixtures/retained-operator.mjs";
 
 const accountId = "123456789012", applicationRegion = "ap-northeast-1";
 const names = [DEPLOY_ROLE_NAME, `${DEPLOY_ROLE_NAME}-preview`, `${DEPLOY_ROLE_NAME}-prod`].sort();
@@ -29,20 +30,9 @@ function enforcementPolicies() {
 
 function fixture() {
   const calls = [], quarantined = new Set();
-  const stack = {StackName: DEPLOY_ROLE_NAME,
-    StackId: `arn:aws:cloudformation:us-west-2:${accountId}:stack/${DEPLOY_ROLE_NAME}/synthetic`,
-    StackStatus: "UPDATE_COMPLETE",
-    Parameters: [{ParameterKey: "ApplicationRegion", ParameterValue: applicationRegion},
-      {ParameterKey: "ProjectName", ParameterValue: "mem9-on-aws"},
-      {ParameterKey: "GitHubRepo", ParameterValue: "mem9-on-aws"},
-      {ParameterKey: "LegacyRoleEnabled", ParameterValue: "false"}],
-    Outputs: [{OutputKey: "LegacyRoleArn", OutputValue: arn(names[0])},
-      {OutputKey: "RoleArn", OutputValue: arn(names[0])},
-      {OutputKey: "PreviewRoleArn", OutputValue: arn(`${DEPLOY_ROLE_NAME}-preview`)},
-      {OutputKey: "ProductionRoleArn", OutputValue: arn(`${DEPLOY_ROLE_NAME}-prod`)}]};
-  const roles = new Map(names.map((name, index) => [name, {RoleName: name, Arn: arn(name),
-    RoleId: `AROASYNTHETIC${index}`, MaxSessionDuration: 3600, Tags: [],
-    AssumeRolePolicyDocument: {Version: "2012-10-17", Statement: []}}]));
+  const operators = createRetainedOperatorFixture();
+  const stack = operators.stacks[DEPLOY_ROLE_NAME];
+  const roles = new Map(Object.entries(operators.roles));
   let failDelete, failRestore, deletionStarted = false;
   let recoveryRead;
   let missingDenyFor;
@@ -50,6 +40,7 @@ function fixture() {
   const invokeAws = async args => {
     calls.push(args);
     const op = args.slice(0, 2).join(" "), name = arg(args, "--role-name");
+    if (args[0] === 'cloudformation') return operators.invokeAws(args);
     switch (op) {
       case "cloudformation describe-stacks":
         expect(arg(args, "--stack-name")).toBe(DEPLOY_ROLE_NAME);
@@ -95,7 +86,8 @@ describe("authenticated deployment-role adapter", () => {
   it("resolves every owner-stack role including the retained disabled legacy role", async () => {
     const f = fixture();
     await expect(f.adapter.resolveDeploymentRoles()).resolves.toEqual(names);
-    expect(f.calls.filter(c => c[0] === "iam").map(c => arg(c, "--role-name")).sort()).toEqual(names);
+    expect([...new Set(f.calls.filter(c => c[0] === "iam").map(c => arg(c, "--role-name")))].sort())
+      .toEqual([...names, 'mem9-on-aws-preview-human-acceptance'].sort());
   });
   for (const kind of ["missing-output", "foreign-output", "wrong-stack", "wrong-region", "duplicate-output"]) {
     it(`rejects ${kind} before any IAM mutation`, async () => {
@@ -103,16 +95,16 @@ describe("authenticated deployment-role adapter", () => {
       if (kind === "missing-output") f.stack.Outputs.pop();
       if (kind === "foreign-output") f.stack.Outputs[2].OutputValue = arn(names[1]).replace(accountId, "9".repeat(12));
       if (kind === "wrong-stack") f.stack.StackId += "/foreign";
-      if (kind === "wrong-region") f.stack.Parameters[0].ParameterValue = "us-west-2";
+      if (kind === "wrong-region") f.stack.Parameters.find(p => p.ParameterKey === 'ApplicationRegion').ParameterValue = "us-west-2";
       if (kind === "duplicate-output") f.stack.Outputs.push(f.stack.Outputs[0]);
-      await expect(f.adapter.resolveDeploymentRoles()).rejects.toThrow(/deployment.role/i);
+      await expect(f.adapter.resolveDeploymentRoles()).rejects.toThrow(/deployment.role|ownership|catalog/i);
       expect(f.calls.some(c => /put|delete/.test(c[1]))).toBe(false);
     });
   }
   it("detects deletion and recreation with the same role ARN", async () => {
     const f = fixture(); await f.adapter.resolveDeploymentRoles();
     f.roles.get(names[1]).RoleId += "REPLACED";
-    await expect(f.adapter.resolveDeploymentRoles()).rejects.toThrow(/deployment.role/i);
+    await expect(f.adapter.resolveDeploymentRoles()).rejects.toThrow(/deployment.role|ownership|catalog/i);
   });
   it("does not accept quarantine on only the legacy role", async () => {
     const f = fixture(); await f.adapter.resolveDeploymentRoles();

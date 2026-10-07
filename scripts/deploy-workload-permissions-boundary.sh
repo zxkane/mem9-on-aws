@@ -254,7 +254,8 @@ verify_boundary_policy_at_base() {
   # not import these modules; never substitute current-worktree dependencies.
   for source_path in \
     "scripts/lib/authorization-archive-policy.mjs" \
-    "scripts/lib/authorization-maintenance-isolation.mjs"; do
+    "scripts/lib/authorization-maintenance-isolation.mjs" \
+    "scripts/lib/retained-operator-protection.mjs"; do
     if GIT_NO_REPLACE_OBJECTS=1 git cat-file -e "${base_ref}:${source_path}" 2>/dev/null; then
       verifier_sources+=("$source_path")
       needs_dependencies=true

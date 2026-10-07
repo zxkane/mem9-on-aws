@@ -30,7 +30,9 @@ try {
           activateProduction: () => maintenance.activateProductionBoundary(),
           deadlineAt,
           invokeAws: (args, options) =>
-            invokeAwsCli(args, { ...options, signal: shutdown.signal }),
+            // Recovery supplies a fresh, bounded signal after ordinary work
+            // has been cancelled. Preserve it through the entrypoint.
+            invokeAwsCli(args, { ...options, signal: options?.signal ?? shutdown.signal }),
           reviewedCommit,
           resumeDeploymentWorkflows: () => maintenance.resumeDeployments(),
           signal: shutdown.signal,

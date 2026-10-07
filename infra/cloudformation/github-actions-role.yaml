@@ -331,10 +331,10 @@ Resources:
         Version: "2012-10-17"
         Statement:
           - Sid: CFN
-            # SST v4 deploys via Pulumi, but the CloudControl API + internal
-            # change-sets consume these. Narrowing this is a known cause of
-            # mid-stack `sst deploy` failures. This does NOT provision app
-            # resources — the direct grants below do that.
+            # Keep the historical grant set for compatibility. The permanent
+            # CI inline protections deny all admitted CloudFormation mutations;
+            # metadata reads and template validation remain available. SST uses
+            # direct service APIs; ownership-stack writes use the operator path.
             Effect: Allow
             Action:
               - cloudformation:CreateStack
@@ -1952,6 +1952,187 @@ Resources:
           Value: !Ref ProjectName
         - Key: ManagedBy
           Value: cloudformation
+
+  # Independently owned inline policies preserve the temporary quarantine.
+  LegacyRetainedOperatorProtection:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub github-actions-${GitHubRepo}-retained-operator-protection
+      Roles:
+        - !Ref GitHubActionsRole
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: DenyRetainedOperatorMutation
+            Effect: Deny
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:UpdateRole
+              - iam:UpdateRoleDescription
+              - iam:UpdateAssumeRolePolicy
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:PutRolePermissionsBoundary
+              - iam:DeleteRolePermissionsBoundary
+              - iam:TagRole
+              - iam:UntagRole
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-namespace-operator
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-preview-human-acceptance
+          - Sid: DenyNamespaceOperatorPassRole
+            Effect: Deny
+            Action: iam:PassRole
+            Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-namespace-operator
+          - Sid: DenyPreviewHumanAcceptancePassRole
+            Effect: Deny
+            Action: iam:PassRole
+            Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-preview-human-acceptance
+            Condition:
+              StringNotEquals:
+                iam:PassedToService: ecs-tasks.amazonaws.com
+          - Sid: DenyCloudFormationMutation
+            Effect: Deny
+            Action:
+              - cloudformation:CancelUpdateStack
+              - cloudformation:ContinueUpdateRollback
+              - cloudformation:CreateChangeSet
+              - cloudformation:CreateStack
+              - cloudformation:CreateStackRefactor
+              - cloudformation:DeleteChangeSet
+              - cloudformation:DeleteStack
+              - cloudformation:ExecuteChangeSet
+              - cloudformation:ExecuteStackRefactor
+              - cloudformation:RecordHandlerProgress
+              - cloudformation:RollbackStack
+              - cloudformation:SetStackPolicy
+              - cloudformation:SignalResource
+              - cloudformation:TagResource
+              - cloudformation:UntagResource
+              - cloudformation:UpdateStack
+              - cloudformation:UpdateTerminationProtection
+            Resource: "*"
+
+  PreviewRetainedOperatorProtection:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub github-actions-${GitHubRepo}-preview-retained-operator-protection
+      Roles:
+        - !Ref GitHubPreviewActionsRole
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: DenyRetainedOperatorMutation
+            Effect: Deny
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:UpdateRole
+              - iam:UpdateRoleDescription
+              - iam:UpdateAssumeRolePolicy
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:PutRolePermissionsBoundary
+              - iam:DeleteRolePermissionsBoundary
+              - iam:TagRole
+              - iam:UntagRole
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-namespace-operator
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-preview-human-acceptance
+          - Sid: DenyNamespaceOperatorPassRole
+            Effect: Deny
+            Action: iam:PassRole
+            Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-namespace-operator
+          - Sid: DenyPreviewHumanAcceptancePassRole
+            Effect: Deny
+            Action: iam:PassRole
+            Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-preview-human-acceptance
+            Condition:
+              StringNotEquals:
+                iam:PassedToService: ecs-tasks.amazonaws.com
+          - Sid: DenyCloudFormationMutation
+            Effect: Deny
+            Action:
+              - cloudformation:CancelUpdateStack
+              - cloudformation:ContinueUpdateRollback
+              - cloudformation:CreateChangeSet
+              - cloudformation:CreateStack
+              - cloudformation:CreateStackRefactor
+              - cloudformation:DeleteChangeSet
+              - cloudformation:DeleteStack
+              - cloudformation:ExecuteChangeSet
+              - cloudformation:ExecuteStackRefactor
+              - cloudformation:RecordHandlerProgress
+              - cloudformation:RollbackStack
+              - cloudformation:SetStackPolicy
+              - cloudformation:SignalResource
+              - cloudformation:TagResource
+              - cloudformation:UntagResource
+              - cloudformation:UpdateStack
+              - cloudformation:UpdateTerminationProtection
+            Resource: "*"
+
+  ProductionRetainedOperatorProtection:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: !Sub github-actions-${GitHubRepo}-prod-retained-operator-protection
+      Roles:
+        - !Ref GitHubProductionActionsRole
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Sid: DenyRetainedOperatorMutation
+            Effect: Deny
+            Action:
+              - iam:CreateRole
+              - iam:DeleteRole
+              - iam:UpdateRole
+              - iam:UpdateRoleDescription
+              - iam:UpdateAssumeRolePolicy
+              - iam:PutRolePolicy
+              - iam:DeleteRolePolicy
+              - iam:AttachRolePolicy
+              - iam:DetachRolePolicy
+              - iam:PutRolePermissionsBoundary
+              - iam:DeleteRolePermissionsBoundary
+              - iam:TagRole
+              - iam:UntagRole
+            Resource:
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-namespace-operator
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-preview-human-acceptance
+          - Sid: DenyNamespaceOperatorPassRole
+            Effect: Deny
+            Action: iam:PassRole
+            Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-namespace-operator
+          - Sid: DenyPreviewHumanAcceptancePassRole
+            Effect: Deny
+            Action: iam:PassRole
+            Resource: !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/${ProjectName}-preview-human-acceptance
+          - Sid: DenyCloudFormationMutation
+            Effect: Deny
+            Action:
+              - cloudformation:CancelUpdateStack
+              - cloudformation:ContinueUpdateRollback
+              - cloudformation:CreateChangeSet
+              - cloudformation:CreateStack
+              - cloudformation:CreateStackRefactor
+              - cloudformation:DeleteChangeSet
+              - cloudformation:DeleteStack
+              - cloudformation:ExecuteChangeSet
+              - cloudformation:ExecuteStackRefactor
+              - cloudformation:RecordHandlerProgress
+              - cloudformation:RollbackStack
+              - cloudformation:SetStackPolicy
+              - cloudformation:SignalResource
+              - cloudformation:TagResource
+              - cloudformation:UntagResource
+              - cloudformation:UpdateStack
+              - cloudformation:UpdateTerminationProtection
+            Resource: "*"
 
 Outputs:
   PreviewRoleArn:

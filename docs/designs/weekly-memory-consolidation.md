@@ -2034,3 +2034,131 @@ maintenance rollback/recovery ownership and original authorization history.
 The old Sid-based verifier will reject the compact representation. Coordinate
 the reviewed source/verifier and policy rollout under the same quarantine; do not
 restore ordinary deployments until their source and both policy contracts agree.
+
+### Retained operator roles during boundary maintenance
+
+The namespace operator and preview human-acceptance task roles are separately
+owned administrative identities. Their Cognito/ephemeral-input capabilities are
+not ordinary workload capabilities. Matching the broad project role-name prefix
+must not cause the runtime boundary to be attached to either role.
+
+Classification requires fresh evidence for both exact roles. Resolve the owning
+CloudFormation stack and logical resource (`MemoryNamespaceOperatorRole` or
+`PreviewHumanAcceptanceRole`), validate account, application-region parameters,
+resource type and physical role name, and read the matching IAM ARN and RoleId.
+Check the ECS trust document against the source-declared account/region
+conditions, require no attached managed policies, and compare the complete inline
+policy set with the owner template rendered from validated stack parameters.
+Both current owner templates declare no permissions boundary: require its exact
+absence and include that state in the frozen identity. Reject nested owner stacks
+or a configured CloudFormation service role until their authority has a separately
+reviewed contract. Verify the existing complete owner-stack mutation deny set,
+including change sets, refactors and direct updates; unresolved service-role
+indirection cannot be certified by a direct IAM denial alone.
+Validate the namespace operator's stage and optional managed-pool binding rather
+than inventing Cognito permissions for an external issuer. Names and tags alone
+never establish an exclusion.
+
+Freeze those verified identities and policy contents for the maintenance attempt.
+Recheck them before and after enforcement and before quarantine release. A
+missing, recreated, retargeted or modified operator fails closed; do not interpret
+a failed classification as permission to attach the runtime boundary. Ordinary
+workloads still require that boundary, and live application-role coverage cannot
+be reduced by an operator exclusion.
+The CI role catalog is the exact legacy, preview and production set from the
+owning stack, with the separate human-acceptance resource accounted for. An
+additional or missing declared CI role requires a catalog update and review;
+names or output selection alone must not silently omit it.
+
+Add CloudFormation-owned inline protections to the legacy, preview and production
+deployment roles. Deny creation/deletion, trust and policy changes, attachment or
+boundary changes, and tag mutation on both exact operator role ARNs. Retain the
+existing protected owner-stack controls. Deny passing the namespace operator from
+every CI identity. Permit the human-acceptance role's existing direct preview and
+legacy CI path only to `ecs-tasks.amazonaws.com`; deny other or absent service
+context, and deny passing that preview-only role from production CI.
+Use separate `AWS::IAM::Policy` resources with their own fixed policy names and
+role references, rather than changing each `AWS::IAM::Role.Policies` collection
+during quarantine. The source-owned protections and the temporary quarantine
+remain distinct policies; updates must not adopt, delete or replace quarantine.
+Verify each role's total inline size including both forms.
+
+The complete CI identity-policy set must preserve the separation between workload
+role mutation and deployment-role mutation. Current workload-prefix grants do not
+match any of the three deployment-role ARNs, so CI cannot remove its own inline
+protections. Check every admitted IAM mutation against the closed CI catalog,
+including wildcard and NotAction grants, and fail on a matching grant instead of
+assuming this remains true. Installed quarantine separately denies every action,
+including deletion of itself. Verify both cases; quarantine alone is not proof of
+the permanent separation after maintenance.
+
+Ordinary CI must also deny the complete existing CloudFormation mutation action
+set on `*`. This closes reuse of a service role attached to a different stack,
+which direct IAM role denials on the caller cannot constrain. Preserve stack
+metadata reads and template validation. The pinned SST provider bootstraps through
+S3, SSM and ECR directly, and this application's resources do not declare
+CloudFormation stack constructs; ownership-stack writes remain in the separate
+operator workflow. Verify that every CloudFormation mutation admitted by any CI
+identity policy is covered by the permanent deny, rejecting unsupported wildcard
+or newly added mutation grants. No other project's stacks or execution roles are
+modified by this control.
+
+Human acceptance retains preview-resource authority and the runner's numeric-PR,
+task-definition/image/commit target checks. This does not claim that a role's
+`PassedToService` condition alone controls ECS cluster placement. Both operator
+runners supply role overrides at RunTask, and PassRole applies to task roles and
+overrides; an existing registered task definition does not justify removing that
+check. Preserve the positive supported runner path and test the negative pass.
+
+CI denies do not constrain a separately assumed workload identity. Add a permanent
+boundary deny on `iam:PassRole` to both exact operator ARNs, so CI cannot author a
+bounded workload that launches an exempt operator role. Combine this with the
+existing archive `PutObject` deny using action/resource arrays: each action still
+applies only to its applicable resource type. This adds no runtime grant and
+preserves direct CI human acceptance.
+
+Keep the exact action ceiling unchanged. To fit the new deny, compact only the
+resource-deny action list: use the service families `lambda:*`, `logs:*`,
+`secretsmanager:*`, `sns:*`, `sqs:*`, `ssm:*`, `s3:*`, and `ecr:Batch*` where the
+current exact ceiling already denies all additional actions. Retain the separate
+Mantle and ECR authorization-token behavior. Prove that, for every action admitted
+by the exact ceiling, old and compact resource-deny matching are identical.
+Actions outside that ceiling remain explicitly denied. A synthetic maximum-field
+measurement including the two operator PassRole exclusions is 6,069 characters;
+the complete rendered matrix remains a required regression gate.
+The ceiling must remain a duplicate-free list of literal action names, with no
+wildcards. The finite intersection proof then covers future service actions too:
+an unlisted action remains outside the unchanged ceiling. The 6,109/6,136 figures
+in the earlier increment describe its previous fixtures, not this final policy.
+
+Operator protection must be independently verified for every CI role, including
+its source-owned inline policy, without counting quarantine as permanent
+enforcement. Simulations and structural comparisons must distinguish the allowed
+direct preview-human ECS path from denied namespace, production, wrong-service
+and delegated-workload paths. Measure each CI role's aggregate inline policies,
+including quarantine, against the 10,240-character quota; do not grow the already
+tight shared managed policy merely to add these protections.
+
+The guarded rollout validates operator candidates before excluding them from
+attachment, quarantines all deployment roles, preserves operator identities and
+permissions, applies the source-owned protections and runtime boundary, verifies
+both independently, then releases quarantine. The temporary operator session
+needs no new workload-boundary attachment or trust-repair grant for this change.
+This resolves role classification; it does not certify archive governance or
+authorize a historical-memory batch by itself.
+If a late identity/policy check fails after other roles were restricted, retain
+deployment quarantine and the installed restrictions. Do not roll the operator
+back by editing its role or remove verified restrictions to make the check pass;
+recovery repeats the complete ownership and policy checks before release.
+
+The CLI must preserve the adapter's explicitly supplied recovery signal. A process
+stop signal cancels ordinary work, while recovery has its own bounded grace
+period to restore quarantine after an uncertain partial release. Replacing that
+fresh signal with the already-aborted process signal would prevent recovery.
+Verify this through the real CLI entrypoint and coordinated release adapter;
+the process still exits with its original interruption status after recovery.
+
+Request 1,000 roles per IAM service page to reduce repeated operator metadata
+checks in large accounts. Keep every page's identity verification and all existing
+inventory bounds. IAM may return a shorter page, so only its completion flag and
+marker determine whether another request is required.

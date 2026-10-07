@@ -121,8 +121,13 @@ describe('deployment authorization maintenance exclusions', () => {
     for (const [logicalId, policy] of Object.entries(policies)) expect(JSON.stringify(policy).length, logicalId).toBeLessThanOrEqual(6144);
   });
 
-  it('preserves the entire prior template apart from the approved parameter and denies', () => {
+  it('preserves the prior template apart from approved isolation additions', () => {
     const { template } = render();
+    for (const [logical, role] of [['LegacyRetainedOperatorProtection','GitHubActionsRole'],
+      ['PreviewRetainedOperatorProtection','GitHubPreviewActionsRole'],['ProductionRetainedOperatorProtection','GitHubProductionActionsRole']]) {
+      expect(template.Resources[logical]).toMatchObject({Type:'AWS::IAM::Policy',Properties:{Roles:[{Ref:role}]}});
+      delete template.Resources[logical];
+    }
     delete template.Parameters.DecisionArtifactBucketName;
     const statements = template.Resources.DenyPolicy.Properties.PolicyDocument.Statement;
     template.Resources.DenyPolicy.Properties.PolicyDocument.Statement = statements.filter(s => !sids.includes(s.Sid));

@@ -7,6 +7,8 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it, vi } from "vitest";
 import { parse } from "yaml";
+import { createRetainedOperatorFixture } from "./test-fixtures/retained-operator.mjs";
+import { expectedRetainedOperatorProtectionPolicy, retainedOperatorProtectionPolicyName } from "./lib/retained-operator-protection.mjs";
 import {
   DENY_DANGEROUS_POLICY_NAME,
   DEPLOY_ROLE_NAME,
@@ -119,7 +121,7 @@ const hasAction = (statement, action) => policyList(statement.Action).includes(a
 const boundaryPurposes = {
   identity: s => s.Effect === "Allow" && hasAction(s, "*") && policyList(s.Resource).includes("*"),
   actionCeiling: s => s.Effect === "Deny" && s.NotAction !== undefined,
-  resources: s => s.Effect === "Deny" && hasAction(s, "s3:GetObject") && s.NotResource !== undefined,
+  resources: s => s.Effect === "Deny" && hasAction(s, "s3:*") && s.NotResource !== undefined,
   approvals: s => s.Effect === "Deny" && policyList(s.Action).length === 1 && hasAction(s, "ssm:PutParameter") && s.NotResource !== undefined,
   kmsContexts: s => hasAction(s, "kms:Decrypt") && s.Condition?.StringNotLikeIfExists?.["kms:EncryptionContext:PARAMETER_ARN"] !== undefined,
   kmsServices: s => hasAction(s, "kms:Decrypt") && Array.isArray(s.Condition?.StringNotEqualsIfExists?.["kms:ViaService"]),
@@ -792,9 +794,7 @@ async function runBoundaryDeployMock({
   });
   const baselineBoundaryPolicy = structuredClone(expectedBoundaryPolicy);
   const baselineBeforeMutation = JSON.stringify(baselineBoundaryPolicy);
-  for (const [purpose, field] of [["actionCeiling", "NotAction"], ["resources", "Action"]]) {
-    boundaryStatement(baselineBoundaryPolicy.Statement, purpose)[field].push("iam:DeleteRole");
-  }
+  boundaryStatement(baselineBoundaryPolicy.Statement, "actionCeiling").NotAction.push("iam:DeleteRole");
   expect(JSON.stringify(baselineBoundaryPolicy)).not.toBe(baselineBeforeMutation);
   await writeFile(
     expectedPath,
@@ -1290,7 +1290,7 @@ esac
       join(repositoryPath, "scripts/lib/workload-permissions-boundary.mjs"),
       mutatedLibrarySource,
     );
-    for (const dependency of ["authorization-archive-policy.mjs", "authorization-maintenance-isolation.mjs"]) {
+    for (const dependency of ["authorization-archive-policy.mjs", "authorization-maintenance-isolation.mjs", "retained-operator-protection.mjs"]) {
       await writeFile(join(repositoryPath, "scripts/lib", dependency), readFileSync(resolve(root, "scripts/lib", dependency), "utf8"));
     }
     // The real base owns its dependency manifest and lockfile as well as its
@@ -1338,7 +1338,7 @@ set -euo pipefail
 if [[ "\${1:-}" == "cat-file" ]]; then
   [[ "$MOCK_BASE_REF_AVAILABLE" == "true" ]] || exit 1
   case "\${3:-}" in
-    *:scripts/lib/authorization-archive-policy.mjs|*:scripts/lib/authorization-maintenance-isolation.mjs) exit 1 ;;
+    *:scripts/lib/authorization-archive-policy.mjs|*:scripts/lib/authorization-maintenance-isolation.mjs|*:scripts/lib/retained-operator-protection.mjs) exit 1 ;;
     *) exit 0 ;;
   esac
 fi
@@ -1931,6 +1931,8 @@ function makeAdapter(options = {}) {
   const adapter = {
     calls,
     state,
+    async verifyRetainedOperators() { return true; },
+    async verifyRetainedOperatorEnforcement() { return true; },
     async verifyBoundaryRegion() {
       calls.push("verify-boundary-region");
       if (options.failBoundaryRegionPreflight) {
@@ -3063,6 +3065,63 @@ describe("guarded rollout", () => {
       legacyLambdaTrustPolicy,
     ]),
   );
+
+  it("TC104/112: validates retained operators before mutation and on each final check", async () => {
+    const adapter = makeAdapter();
+    const verify = vi.fn(async () => {
+      if (verify.mock.calls.length === 1) {
+        expect(adapter.calls).toEqual(["verify-boundary-region"]);
+      }
+      return true;
+    });
+    adapter.verifyRetainedOperators = verify;
+    adapter.verifyRetainedOperatorEnforcement = vi.fn(async () => {
+      expect(adapter.state.quarantineInstalled).toBe(true);
+      expect(adapter.calls).toContain("deploy-enforcement");
+      return true;
+    });
+    await runBoundaryRollout(adapter, options);
+    expect(verify).toHaveBeenCalledTimes(3);
+    expect(adapter.verifyRetainedOperatorEnforcement).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["verifyRetainedOperators", "verifyRetainedOperatorEnforcement"])(
+    "TC104: missing %s rejects before any mutation", async method => {
+      const adapter = makeAdapter();
+      delete adapter[method];
+      await expect(runBoundaryRollout(adapter, options)).rejects.toThrow(/retained operator/u);
+      expect(adapter.calls).toEqual([]);
+    },
+  );
+
+  it.each([1, 2, 3])("TC105/112: retained identity drift at check %i holds the rollout", async failingCheck => {
+    const adapter = makeAdapter();
+    let checks = 0;
+    adapter.verifyRetainedOperators = async () => {
+      if (++checks === failingCheck) throw new Error("retained operator drift");
+      return true;
+    };
+    await expect(runBoundaryRollout(adapter, options)).rejects.toThrow("retained operator drift");
+    expect(adapter.calls).not.toContain("resume-deployments");
+    expect(adapter.calls.some(call => call.startsWith("unquarantine:"))).toBe(false);
+    expect(adapter.state.quarantineInstalled).toBe(failingCheck > 1);
+  });
+
+  it("TC111: retained operator protection failure holds quarantine after enforcement", async () => {
+    const adapter = makeAdapter();
+    adapter.verifyRetainedOperatorEnforcement = async () => false;
+    await expect(runBoundaryRollout(adapter, options)).rejects.toThrow(/retained operator/u);
+    expect(adapter.calls).toContain("deploy-enforcement");
+    expect(adapter.calls).not.toContain("resume-deployments");
+    expect(adapter.state.quarantineInstalled).toBe(true);
+  });
+
+  it("TC105: a false identity verification result fails before quarantine", async () => {
+    const adapter = makeAdapter();
+    adapter.verifyRetainedOperators = async () => false;
+    await expect(runBoundaryRollout(adapter, options)).rejects.toThrow(/retained operator/u);
+    expect(adapter.state.quarantineInstalled).toBe(false);
+  });
 
   it("preflights before quarantine and removes quarantine only after complete verification", async () => {
     const adapter = makeAdapter();
@@ -5285,6 +5344,8 @@ describe("stateful AWS CLI adapter", () => {
 
   it("runs the complete paginated migration and removes quarantine last", async () => {
     const calls = [];
+    const operators = createRetainedOperatorFixture();
+    const retainedNames = ["mem9-on-aws-namespace-operator", "mem9-on-aws-preview-human-acceptance"];
     const boundaries = new Map();
     const quarantines = new Map();
     const retainedPreviewRoleNames = [
@@ -5311,6 +5372,12 @@ describe("stateful AWS CLI adapter", () => {
       const roleName = argument(args, "--role-name");
       const policyArn = argument(args, "--policy-arn");
 
+      if ((args[0] === "cloudformation" && argument(args, "--stack-name") !== WORKLOAD_BOUNDARY_STACK_NAME) ||
+          (retainedNames.includes(roleName) && args[0] === "iam") ||
+          (command === "iam get-role" && deploymentRoleNames.includes(roleName))) {
+        return operators.invokeAws(args);
+      }
+
       switch (command) {
         case "sts get-caller-identity":
           return {
@@ -5329,10 +5396,23 @@ describe("stateful AWS CLI adapter", () => {
             argument(args, "--policy-name") === QUARANTINE_POLICY_NAME &&
             quarantines.has(roleName)
           ) {
-            return { PolicyDocument: quarantines.get(roleName) };
+            return { RoleName: roleName, PolicyName: QUARANTINE_POLICY_NAME, PolicyDocument: quarantines.get(roleName) };
+          }
+          if (state.enforced && argument(args, "--policy-name") === retainedOperatorProtectionPolicyName(roleName)) {
+            return { RoleName: roleName, PolicyName: retainedOperatorProtectionPolicyName(roleName),
+              PolicyDocument: expectedRetainedOperatorProtectionPolicy({ accountId, partition, roleName }) };
           }
           throw new Error("inline policy not found");
         case "iam simulate-custom-policy": {
+          const input = JSON.parse(argument(args, "--policy-input-list"));
+          if (input.Statement.some(s => s.Sid === "DenyRetainedOperatorMutation")) {
+            const action = argument(args, "--action-names"), resource = argument(args, "--resource-arns");
+            const service = optionValues(args, "--context-entries").some(v => v.includes("ContextKeyValues=ecs-tasks.amazonaws.com"));
+            const allowHuman = action === "iam:PassRole" && resource.endsWith("/mem9-on-aws-preview-human-acceptance") && service &&
+              input.Statement.find(s => s.Sid === "DenyPreviewHumanAcceptancePassRole").Condition !== undefined;
+            return { IsTruncated: false, EvaluationResults: [{ EvalActionName: action, EvalResourceName: resource,
+              EvalDecision: allowHuman ? "allowed" : "explicitDeny", MatchedStatements: [{ SourcePolicyId: "PolicyInputList.1" }] }] };
+          }
           const quarantineInput = optionValues(args, "--policy-input-list")
             .some(value => verifyQuarantinePolicy(JSON.parse(value)));
           const actions = optionValues(args, "--action-names");
@@ -5403,12 +5483,15 @@ describe("stateful AWS CLI adapter", () => {
         case "iam get-policy":
           return {
             Policy: {
+              Arn: policyArn,
               DefaultVersionId: state.enforced ? "v2" : "v1",
             },
           };
         case "iam get-policy-version":
           return {
             PolicyVersion: {
+              VersionId: state.enforced ? "v2" : "v1",
+              IsDefaultVersion: true,
               Document:
                 policyArn === denyPolicyArn && !state.enforced
                   ? { Version: "2012-10-17", Statement: [] }
@@ -5420,7 +5503,10 @@ describe("stateful AWS CLI adapter", () => {
             return { PolicyNames: [], IsTruncated: false };
           }
           return {
-            PolicyNames: quarantines.has(roleName) ? [QUARANTINE_POLICY_NAME] : [],
+            PolicyNames: [
+              ...(quarantines.has(roleName) ? [QUARANTINE_POLICY_NAME] : []),
+              ...(state.enforced ? [retainedOperatorProtectionPolicyName(roleName)] : []),
+            ],
             IsTruncated: true,
             Marker: "inline-2",
           };
@@ -5509,22 +5595,28 @@ describe("stateful AWS CLI adapter", () => {
             ? {
                 Roles: retainedPreviewRoleNames.map((name) => ({
                   Arn: role(name).arn,
-                  AssumeRolePolicyDocument: undefined,
+                  RoleId: `AROASYNTHETICPREVIEW${retainedPreviewRoleNames.indexOf(name)}`,
+                  Path: "/", CreateDate: "2026-01-01T00:00:00Z",
+                  AssumeRolePolicyDocument: operators.roles[retainedNames[0]].AssumeRolePolicyDocument,
                   RoleName: name,
                 })),
                 IsTruncated: false,
               }
             : {
                 Roles: [
+                  ...retainedNames.map(name => structuredClone(operators.roles[name])),
                   ...expectedProductionRoleNames.map((name) => ({
                     Arn: role(name).arn,
+                    RoleId: `AROASYNTHETICPRODUCTION${expectedProductionRoleNames.indexOf(name)}`,
+                    Path: "/", CreateDate: "2026-01-01T00:00:00Z",
                     AssumeRolePolicyDocument:
-                      role(name).assumeRolePolicyDocument,
+                      role(name).assumeRolePolicyDocument ?? operators.roles[retainedNames[0]].AssumeRolePolicyDocument,
                     RoleName: name,
                   })),
                   {
                     Arn: role("unrelated-role").arn,
-                    AssumeRolePolicyDocument: undefined,
+                    RoleId: "AROASYNTHETICUNRELATED", Path: "/", CreateDate: "2026-01-01T00:00:00Z",
+                    AssumeRolePolicyDocument: operators.roles[retainedNames[0]].AssumeRolePolicyDocument,
                     RoleName: "unrelated-role",
                   },
                 ],
@@ -5635,7 +5727,8 @@ describe("stateful AWS CLI adapter", () => {
     ).toBeLessThan(
       calls.findIndex(
         (args) =>
-          args.slice(0, 2).join(" ") === "iam list-attached-role-policies",
+          args.slice(0, 2).join(" ") === "iam list-attached-role-policies" &&
+          deploymentRoleNames.includes(argument(args, "--role-name")),
       ),
     );
     const boundaryDeploys = calls
@@ -8412,20 +8505,19 @@ describe("boundary and deploy-role templates", () => {
     );
     expect(byPurpose("resources").Action).toEqual(
       expect.arrayContaining([
-        "secretsmanager:GetSecretValue",
-        "sns:Publish",
-        "sqs:SendMessage",
-        "ssm:GetParameters",
+        "secretsmanager:*",
+        "sns:*",
+        "sqs:*",
         // Admitting a WRITE to the action ceiling is only safe if it is also
         // resource-scoped. A boundary never GRANTS: effective permissions are the
         // intersection of the boundary and the identity policy. So without this
         // entry the boundary simply stops constraining `ssm:PutParameter` by
         // resource, and any identity-policy grant — including an over-broad one
         // added later — would take effect account-wide (#123).
-        "ssm:PutParameter",
+        "ssm:*",
       ]),
     );
-    expect(byPurpose("resources").Action).not.toEqual(
+    expect(actionCeiling.NotAction).not.toEqual(
       expect.arrayContaining([
         "ssm:GetParameter",
         "ssm:GetParameterHistory",
@@ -8725,12 +8817,12 @@ describe("boundary and deploy-role templates", () => {
     "ssmmessages:OpenDataChannel",
   ];
 
-  const actionsScopedByNotResource = (document) =>
-    new Set(
-      document.Statement.filter(
-        (statement) => statement.Effect === "Deny" && statement.NotResource,
-      ).flatMap((statement) => statement.Action ?? []),
-    );
+  const actionsScopedByNotResource = (document) => {
+    const patterns = document.Statement.filter(statement => statement.Effect === "Deny" && statement.NotResource)
+      .flatMap(statement => policyList(statement.Action));
+    return new Set(boundaryStatement(document.Statement, "actionCeiling").NotAction.filter(action =>
+      patterns.some(pattern => new RegExp(`^${RegExp.escape(pattern).replaceAll("\\*", ".*").replaceAll("\\?", ".")}$`, "iu").test(action))));
+  };
 
   it("resource-scopes every non-read-only action admitted to the ceiling", () => {
     const document = expectedBoundaryPolicyDocument(boundaryContract);
@@ -8862,7 +8954,7 @@ describe("boundary and deploy-role templates", () => {
     // deny, and the artifact must be in its NotResource escape list.
     const resources = byPurpose("resources");
     expect(asList(resources.Action)).toEqual(
-      expect.arrayContaining(["s3:GetObject", "s3:PutObject"]),
+      expect.arrayContaining(["s3:*"]),
     );
     expect(asList(resources.NotResource)).toContain(artifact);
     // Both KMS entries, each proven load-bearing for the read path.
@@ -8912,7 +9004,7 @@ describe("boundary and deploy-role templates", () => {
   });
 
   // Measure both maximum-length project IDs and revision with the default
-  // bucket. Removing non-revision Sids and adding the archive deny leaves 75
+  // bucket. The compact resource deny and operator exclusions leave 115
   // characters here; the separate maximum-bucket fixture covers its larger ARN.
   const OPENAI_PROJECT_ARN =
     "arn:aws:bedrock-mantle:us-west-2:123456789012:project/proj_openai";
@@ -8922,7 +9014,7 @@ describe("boundary and deploy-role templates", () => {
   const MAX_OPENAI_PROJECT_ARN =
     "arn:aws:bedrock-mantle:us-west-2:123456789012:project/" +
     MAX_MANTLE_PROJECT_ID;
-  const BOUNDARY_SIZE_RESERVE = 75;
+  const BOUNDARY_SIZE_RESERVE = 115;
 
   it("matches the contract library in the OpenAI-configured shape", () => {
     const document = boundaryPolicyDocument(OPENAI_PROJECT_ARN);

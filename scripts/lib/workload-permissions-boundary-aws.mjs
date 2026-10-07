@@ -2,6 +2,8 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { validateDecisionArtifactBucketName } from "./authorization-maintenance-isolation.mjs";
+import { createRetainedOperatorInventory, RETAINED_OPERATOR_ROLE_NAMES } from "./retained-operator-inventory.mjs";
+import { verifyRetainedOperatorEnforcement } from "./retained-operator-enforcement.mjs";
 import {
   DENY_DANGEROUS_POLICY_NAME,
   DEPLOY_ROLE_NAME,
@@ -276,6 +278,9 @@ export function createAwsCliAdapter({
       signal,
       timeoutMs: awsTimeout(),
     });
+  const retainedOperators = createRetainedOperatorInventory({
+    invokeAws: invokeAwsCommand, identity, applicationRegion,
+  });
 
   const deploymentRoleNames = [DEPLOY_ROLE_NAME, `${DEPLOY_ROLE_NAME}-preview`, `${DEPLOY_ROLE_NAME}-prod`].sort();
   let deploymentRoleSnapshot;
@@ -288,6 +293,7 @@ export function createAwsCliAdapter({
   const roleNamesForVerification = () => deploymentRoleSnapshot === undefined ? [DEPLOY_ROLE_NAME] : deploymentRoleNames;
 
   async function resolveDeploymentRoles() {
+    await retainedOperators.verifyDeploymentRoleCatalog();
     const response = await invokeAwsCommand([
       "cloudformation", "describe-stacks", "--stack-name", DEPLOY_ROLE_NAME,
       "--region", OPERATOR_STACK_REGION,
@@ -297,7 +303,7 @@ export function createAwsCliAdapter({
     const prefix = `arn:${partition}:cloudformation:${OPERATOR_STACK_REGION}:${accountId}:stack/${DEPLOY_ROLE_NAME}/`;
     if (stack.StackName !== DEPLOY_ROLE_NAME || !stack.StackId?.startsWith(prefix) ||
       !/^[A-Za-z0-9-]+$/.test(stack.StackId.slice(prefix.length)) ||
-      !["CREATE_COMPLETE", "UPDATE_COMPLETE"].includes(stack.StackStatus) || stack.ParentId || stack.RootId) deploymentError();
+      !["CREATE_COMPLETE", "UPDATE_COMPLETE"].includes(stack.StackStatus) || stack.ParentId || stack.RootId || stack.RoleARN) deploymentError();
     const fields = (rows, key, value) => {
       if (!Array.isArray(rows)) deploymentError();
       const result = new Map();
@@ -573,6 +579,18 @@ export function createAwsCliAdapter({
 
   const adapter = {
     resolveDeploymentRoles,
+
+    async verifyRetainedOperators() {
+      await retainedOperators.verify();
+      return true;
+    },
+
+    async verifyRetainedOperatorEnforcement({ roleNames }) {
+      await retainedOperators.verify();
+      return verifyRetainedOperatorEnforcement({
+        invokeAws: invokeAwsCommand, identity, roleNames,
+      });
+    },
 
     async putQuarantine(request) {
       await putQuarantine(invokeAwsCommand, request);
@@ -928,11 +946,17 @@ export function createAwsCliAdapter({
         "iam",
         "list-roles",
         "--no-paginate",
+        // --max-items is a CLI paginator option. Set the service page size
+        // explicitly while retaining raw IsTruncated/Marker handling.
+        "--cli-input-json",
+        '{"MaxItems":1000}',
         ...markerArgs(marker),
       ]);
       const markerValue = pageMarker(response, "Roles");
+      await retainedOperators.verify();
+      const roles = retainedOperators.filterRoles(response.Roles);
       return {
-        roles: response.Roles.map((role) => ({
+        roles: roles.map((role) => ({
           arn: role.Arn,
           assumeRolePolicyDocument: role.AssumeRolePolicyDocument,
           name: role.RoleName,
@@ -942,6 +966,9 @@ export function createAwsCliAdapter({
     },
 
     async putRoleBoundary({ roleName, permissionsBoundary }) {
+      if (RETAINED_OPERATOR_ROLE_NAMES.includes(roleName)) {
+        throw new Error("retained operator cannot receive the workload boundary");
+      }
       await invokeAwsCommand([
         "iam",
         "put-role-permissions-boundary",
