@@ -3,6 +3,7 @@ import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
+import { stringify } from 'yaml';
 import { createRetainedOperatorFixture as fixture } from './test-fixtures/retained-operator.mjs';
 import { expectedRolePatterns, matchingRoleNames } from './lib/workload-permissions-boundary.mjs';
 const accountId = '123456789012';
@@ -35,6 +36,29 @@ describe('retained operator ownership inventory', () => {
     expect(await inventory.verify()).toEqual(retained);
     await expect(inventory.verifyDeploymentRoleCatalog()).resolves.toBeUndefined();
     expect(f.calls.some(a => a.includes('--next-token'))).toBe(true);
+  });
+
+  it.each([namespaceStack, deploymentStack])('accepts a flow-style YAML owner template from %s', async stack => {
+    const f = fixture(); const { inventory } = await create(f);
+    const raw = stringify(f.templates[stack], { collectionStyle: 'flow', lineWidth: 0 });
+    expect(raw.trimStart().startsWith('{')).toBe(true);
+    expect(() => JSON.parse(raw)).toThrow();
+    f.state.rawTemplate[stack] = raw;
+    expect(await inventory.verify()).toEqual(retained);
+    expect(await inventory.verify()).toEqual(retained);
+    await expect(inventory.verifyDeploymentRoleCatalog()).resolves.toBeUndefined();
+  });
+
+  it.each(['duplicate key', 'changed role'])('rejects an invalid flow-style YAML owner template: %s', async scenario => {
+    const f = fixture(); const { inventory } = await create(f);
+    if (scenario === 'changed role') f.templates[namespaceStack].Resources.MemoryNamespaceOperatorRole.Properties.RoleName = humanRole;
+    let raw = stringify(f.templates[namespaceStack], { collectionStyle: 'flow', lineWidth: 0 });
+    if (scenario === 'duplicate key') {
+      expect(raw).toContain('Resources:'); raw = raw.replace('Resources:', 'Resources: {}, Resources:');
+    }
+    f.state.rawTemplate[namespaceStack] = raw;
+    await expect(inventory.verify()).rejects.toThrow();
+    expect(() => inventory.filterRoles(Object.values(f.roles))).toThrow();
   });
 
   it.each(['owner account', 'owner region', 'owner status', 'nested owner', 'service role', 'stage', 'pool region', 'duplicate parameter',
