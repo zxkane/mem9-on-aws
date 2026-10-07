@@ -2,11 +2,12 @@ import {describe,it,expect} from 'vitest';
 import {runProductionConsolidationTask,stopPreviousProductionAdministration} from './run-production-consolidation.mjs';
 import {productionSourceTree,productionCoordinatorDigest} from './run-production-runtime.mjs';
 import {execFileSync} from 'node:child_process';
+import {installMaintenanceAdmission,requireMaintenanceAdmission,assertMaintenancePhase} from './lib/production-maintenance-admission.mjs';
 
 const account='123456789012',region='ap-northeast-1',cluster='mem9-on-aws-prod-Fixture',name='ControlMem9Bootstrap';
 const prefix=`arn:aws:ssm:${region}:${account}:parameter/mem9-on-aws/prod/`;
 const taskDefinition=`arn:aws:ecs:${region}:${account}:task-definition/${cluster}-${name}:1`;
-function fixture({drift=false,loseReply=false,wrongNonce=false,taskDrift,acceptance,sourceTag='mem9-aaaaaaa'}={}){
+function fixture({drift=false,loseReply=false,wrongNonce=false,taskDrift,acceptance,sourceTag='mem9-aaaaaaa',phase='ready',guard=true}={}){
   const calls=[],journals=new Map();let task,time=Date.now();
   const meta={version:1,stage:'prod',region,account,cluster,clusterArn:`arn:aws:ecs:${region}:${account}:cluster/${cluster}`,
     sourceTag,workerImage:`${account}.dkr.ecr.${region}.amazonaws.com/mem9-on-aws/llm-proxy@sha256:${'d'.repeat(64)}`,
@@ -54,7 +55,9 @@ function fixture({drift=false,loseReply=false,wrongNonce=false,taskDrift,accepta
     }
     throw Error('UnexpectedCommand');
   };
-  return {meta,clients:{ssm:{send},ecs:{send},logs:{send},sts:{send},iam:{send}},calls,journals,options:{now:()=>time,sleep:async ms=>{time+=ms;}}};
+  const clients={ssm:{send},ecs:{send},logs:{send},sts:{send},iam:{send}};
+  if(guard){const binding={owner:'a'.repeat(32),operationHash:'b'.repeat(64),fenceHash:'c'.repeat(64),sourceTree:'d'.repeat(40)};let mint;mint=installMaintenanceAdmission(clients,{binding,assertCurrent:()=>{},verify:async event=>{assertMaintenancePhase(phase,event.kind);expect(event.target.image).toBe(meta.operators.control.image);expect(event.target.taskDefinitionArn).toBe(taskDefinition);const at=Date.now();return mint(event,{...binding,phase,observedMs:at,expiresMs:at+300000});}});}
+  return {meta,clients,calls,journals,options:{now:()=>time,sleep:async ms=>{time+=ms;}}};
 }
 describe('production worker administrative task invocation',()=>{
   it('serializes continuation fields into the bounded owned task request without silently dropping them',async()=>{
@@ -96,4 +99,14 @@ describe('production worker administrative task invocation',()=>{
     expect(f.journals.size).toBe(0);
     expect(f.calls.some(c=>c.type==='ListTasksCommand')).toBe(true);
   });
+});
+it('before deployment a general status task is not the fixed legacy root-audit exception',async()=>{
+ const f=fixture({phase:'before-deployment'});await expect(runProductionConsolidationTask(f.clients,{region,operation:'status'},f.options)).rejects.toThrow('MaintenancePhaseDenied');expect(f.calls.some(c=>['PutParameterCommand','RunTaskCommand'].includes(c.type))).toBe(false);
+});
+it('before witness the host may explicitly verify its authenticated target with status',async()=>{
+ const f=fixture({phase:'before-witness'});expect((await runProductionConsolidationTask(f.clients,{region,operation:'status'},f.options)).phase).toBe('status');
+ expect(f.calls.filter(c=>c.type==='RunTaskCommand')).toHaveLength(1);
+});
+it('actual admin dispatch fails closed without a verified host registration',async()=>{
+ const f=fixture({guard:false});requireMaintenanceAdmission(f.clients);await expect(runProductionConsolidationTask(f.clients,{region,operation:'status'},f.options)).rejects.toThrow('MaintenanceAdmissionRequired');expect(f.journals.size).toBe(0);
 });

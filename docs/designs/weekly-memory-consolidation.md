@@ -1520,14 +1520,16 @@ all parent evidence and the original mutation counter.
 A normal release creates new task identities and tags. Production's worker
 generation is a retained random resource, not a hash of an image tag; it must
 remain unchanged. A paused continuation may accept a new backend binding only
-through a reviewed compatibility certificate. The operator must prove, from
+through a reviewed compatibility certificate. Versions 1 and 2 require, from
 actual old and new release manifests, equal Linux/ARM64 child image digests for
 the worker and every serving container, plus equal execution configuration,
 network, roles, namespace targets, runtime/schema contracts and credential
 bindings. The normalizer may replace image references with their verified child
 digests and remove only enumerated AWS identity/registration fields; it must
 not ignore command, environment, secret reference, CPU/memory, volume, network
-or authority changes. A tag match or source-code similarity is insufficient.
+or authority changes. Version 3 uses the separately verified transition contract
+below for its explicitly supported differences. A tag match or source-code
+similarity is insufficient.
 If byte/configuration equivalence cannot be proven, old capacity evidence is
 not reused. No unrelated worker/runtime code is changed in this increment.
 The changed administrative operator is separately bound to the new verified
@@ -1654,7 +1656,7 @@ chain against current rows. Timestamp cutoffs alone never assign descendants,
 and unknown receipts cannot be silently omitted. A frozen attempt cannot admit
 another execution epoch; it requires another explicit child attempt.
 
-The compatibility certificate is a versioned canonical JSON object containing
+Versions 1 and 2 of the compatibility certificate are canonical JSON objects containing
 parent proof hash, old/new source tree and source tag, old/new worker and serving
 image roots and resolved ARM64 children, old/new backend identities, generation,
 namespace target hash, runtime/schema digests, role/credential binding hashes,
@@ -1685,9 +1687,80 @@ allow PassRole only for those workers' four roles to ECS. Additional policies,
 resources or schedules reject. After verifying that exact contract, only the
 two allowed RunTask revision references become family comparison markers.
 These markers never enter an IAM write. The original observations remain in
-the capture; all other authority fields, including the role ID and boundary,
-must match. Archived backend mappings must also match the captured task,
+the capture; under these versions all other authority fields, including the
+role ID and boundary, must match. Archived backend mappings must also match the captured task,
 definition and container digests, including when an image reference is tagged.
+
+### Reviewed material transitions (V3)
+
+A version 3 certificate represents a specific approved material transition;
+versions 1 and 2 retain their original equality rules. Validate both raw
+snapshots and their recorded legacy hashes before any comparison projection.
+Keep those records unchanged. Backend observation handling is limited to the
+reviewed compatibility-list ordering and the specified Docker API capability
+metadata variant. Required compatibility, execution configuration, images,
+network, credential bindings and unknown semantic fields remain strict.
+
+An authority transition preserves the actual, potentially different before and
+after hashes. Its typed proof binds the complete role cohort, stable role IDs
+and ARNs, original snapshot anchors, and the approved bootstrap operation,
+terminal chain, source, templates and parameters. The current boundary must
+match the policy generated from that evidence. Only the explicitly approved
+Deny action expansion and added Deny are supported; unchanged statements,
+resource exceptions and conditions are verified exactly. An Allow change,
+weakened or removed Deny, expanded resource exception, or changed role identity,
+trust or other identity policy rejects. A generic assertion that a policy is
+more restrictive is insufficient.
+
+V3 material pairs identify the proof's original raw snapshot anchors. They do
+not relabel a later observation as those original bytes. Each fresh observation
+has its own raw hash and must match the proof's stable execution projection,
+complete current authority hash and explicit release/parameter selection.
+Allowed metadata ordering changes may change the raw observation hash while
+leaving the verified configuration identity unchanged.
+
+The protected witness binds the whole V3 certificate hash, including its
+transition-proof commitment. Full proof and raw observations remain in the
+existing immutable archive, addressed only by fixed account, region, runtime,
+owner and key rules. Every use authenticates the records, recomputes their
+hashes and verifies their semantics against current observations. Missing,
+unavailable or mismatched evidence rejects; no new signing service or arbitrary
+proof URL is introduced. The certificate remains bounded separately from its
+archived evidence.
+
+Each stage produces a fresh observation envelope under the existing operation
+and fence ownership. It binds the DB-root audit, complete cloud observation,
+parameter version/hash, actual deployed release, reviewed target release and
+all root, generation, namespace and budget identities. An immutable joint
+record commits to the operation, ownership, stable transition proof and fresh
+envelope hashes. Verify its authenticated readback and both ends before use.
+Root and cloud observations must belong to the same bounded collection, with
+the existing five-minute freshness and before/after ownership checks. This
+does not assert an atomic transaction spanning AWS and PostgreSQL.
+
+Before the new control image is deployed, the verified new host code performs
+transition validation and the existing single protected authorization write.
+The old control image may execute only the exact pinned read-only root-audit
+command. Its original V2 certificate proves the existing database root and
+pause state; it does not prove the new IAM state or authorize continuation.
+Maintenance admission defaults to denial at actual dispatch boundaries.
+Until the intended V3 image and its first protected paused witness are verified,
+old control-image writes, continuation, promotion and maintenance-worker
+dispatch remain forbidden. Normal foreground access and explicitly retained
+data images are independent of this maintenance restriction.
+
+The target control digest is verified from the trusted build for the reviewed
+source tree and recipe, then checked against the deployed image before the
+first V3 witness. Do not invent a production digest before that build exists.
+Keep the existing authorization parameter, merge/push deployment sequence,
+data-image recipes, schema, runtime-operator digest members and spent allowance.
+Update all V3 producers, consumers, calibration and transport validation
+together; legacy consumers reject the new version rather than downgrade it.
+Check complete payloads against the existing certificate, request and ECS
+override limits. New-head CI, preview and live verification remain mandatory
+before historical maintenance starts.
+
+### Witness publication
 
 `publish-runtime-rehearsal-acceptance` in explicit paused-canary mode is the
 witness-independent host producer. It uses a scoped read-only database audit

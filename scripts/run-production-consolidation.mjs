@@ -12,6 +12,7 @@ import {productionCoordinatorDigest,productionSourceTree} from './run-production
 import {execFileSync} from 'node:child_process';
 import {canaryReportDigest,canaryReportFragments} from './lib/production-canary-report.mjs';
 import {loadWorkerDataRelease} from './lib/production-data-release-loader.mjs';
+import {assertMaintenanceDispatch,sendMaintenanceCommand} from './lib/production-maintenance-admission.mjs';
 
 const send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
 const fail=code=>{throw Error(code);};
@@ -159,7 +160,6 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
     env.MEM9_DB_PORT!==String(meta.port)||env.MEM9_PRODUCTION_WORKER_OPERATOR!==kind||Object.keys(actual).length!==Object.keys(secrets).length||
     Object.entries(secrets).some(([key,value])=>actual[key]!==value))fail('ProductionWorkerOperatorDefinitionMismatch');
   await verifyProductionTaskRoles(clients,meta,definition,name,secrets);
-  if(operation!=='status')await stopPreviousProductionAdministration(clients,meta,{now,sleep});
   let acceptance;
   if(!['pause','status'].includes(operation)){
     const proof=await send(clients.ssm,new GetParametersCommand({Names:[prefix+'runtime/rehearsal-acceptance'],WithDecryption:true}));
@@ -173,23 +173,27 @@ export async function runProductionConsolidationTask(clients,{region,operation,d
     if(data&&(acceptance.dataReleaseHash!==data.hash||env.MEM9_RETAINED_DATA_RELEASE_EXPIRES_MS!==String(data.data.expiresMs)||
       data.data.parentProofHash!==acceptance.continuation?.parentProofHash))fail('ProductionDataReleaseEvidenceMismatch');
   }
+  const admission={kind:['status','inspect-canary'].includes(operation)?'target-verify':operation==='pause'?'owned-cleanup':'admin',operation,transitionRequired:compatibility?.version===3,target:{account,region,image:target.image,taskDefinitionArn:target.taskDefinition,taskRoleArn:definition.taskRoleArn,executionRoleArn:definition.executionRoleArn,
+    sourceTree:acceptance?.sourceTree??null,dataReleaseHash:meta.dataReleaseHash??null,dataReleaseParameterVersion:meta.dataReleaseParameterVersion??null}};
+  await assertMaintenanceDispatch(clients,{...admission,service:'ecs',api:'InspectTarget',input:{taskDefinition:target.taskDefinition}});
+  if(operation!=='status')await stopPreviousProductionAdministration(clients,meta,{now,sleep});
   const invocation=randomUUID().replaceAll('-','');
   const request={operation,invocation,deadline:now()+15*60000,...(operation==='promote'?{dailyRows,basisPoints,canaryReportHash:canaryReportDigest(canaryReport)}:{}),
     ...(operation==='cleanup-benchmark'?{benchmarkRefs}:{}),...(operation==='baseline'?{backendBinding}:{}),...(acceptance?{acceptance}:{}),
     ...(attemptId!==undefined?{attemptId}:{}),...(parentProofHash!==undefined?{parentProofHash}:{}),...(compatibility!==undefined?{compatibility}:{})};
   const encoded=JSON.stringify(request),overrides=productionConsolidationOverrides(name,request);
   if(operation==='promote')for(const [index,value] of canaryReportFragments(canaryReport).entries()){
-    await send(clients.ssm,new PutParameterCommand({Name:prefix+`consolidation-runtime/canary-report-${index}`,Type:'SecureString',Value:value,Overwrite:true}));
+    await sendMaintenanceCommand(clients,'ssm',new PutParameterCommand({Name:prefix+`consolidation-runtime/canary-report-${index}`,Type:'SecureString',Value:value,Overwrite:true}),admission);
   }
   const journalName=prefix+'consolidation-runtime/invocations/'+invocation;
   const journal={version:1,stage:'prod',cluster:meta.clusterArn,taskDefinition:target.taskDefinition,container:name,invocation,
     request:{operation,invocation,deadline:request.deadline},requestHash:requestHash(encoded),
     taskRoleArn:definition.taskRoleArn,executionRoleArn:definition.executionRoleArn};
   if(Buffer.byteLength(JSON.stringify(journal))>3500)fail('ProductionWorkerJournalTooLarge');
-  await send(clients.ssm,new PutParameterCommand({Name:journalName,Type:'SecureString',Value:JSON.stringify(journal),Overwrite:false}));
-  const run=await send(clients.ecs,new RunTaskCommand({cluster:meta.clusterArn,taskDefinition:target.taskDefinition,launchType:'FARGATE',count:1,clientToken:invocation,
+  await sendMaintenanceCommand(clients,'ssm',new PutParameterCommand({Name:journalName,Type:'SecureString',Value:JSON.stringify(journal),Overwrite:false}),admission);
+  const run=await sendMaintenanceCommand(clients,'ecs',new RunTaskCommand({cluster:meta.clusterArn,taskDefinition:target.taskDefinition,launchType:'FARGATE',count:1,clientToken:invocation,
     networkConfiguration:{awsvpcConfiguration:{subnets:meta.subnets,securityGroups:[meta.securityGroup],assignPublicIp:'DISABLED'}},
-    overrides}));
+    overrides}),admission);
   if(run.failures?.length||run.tasks?.length!==1)fail('ProductionWorkerOperatorLaunchFailed');
   const taskArn=run.tasks[0].taskArn;
   await send(clients.ssm,new PutParameterCommand({Name:journalName,Type:'SecureString',Value:JSON.stringify({...journal,taskArn}),Overwrite:true}));

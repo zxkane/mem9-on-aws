@@ -85,6 +85,8 @@ export async function productionCoordinatorDigest(){
     'scripts/lib/production-canary-continuation.mjs','scripts/lib/production-canary-snapshot.mjs',
     'scripts/lib/production-canary-compatibility.mjs','scripts/lib/production-canary-paused-audit.mjs',
     'scripts/lib/production-canary-material.mjs','scripts/lib/production-canary-producer.mjs',
+    'scripts/lib/production-canary-transition.mjs','scripts/lib/production-canary-material-transition.mjs',
+    'scripts/lib/production-canary-material-integrity.mjs','scripts/lib/production-maintenance-admission.mjs',
     'scripts/lib/production-canary-fixture-evidence.mjs',
     'scripts/lib/production-data-release.mjs','scripts/lib/production-data-release-loader.mjs',
     'scripts/lib/production-data-build-inputs.mjs','scripts/lib/production-data-evidence.mjs',

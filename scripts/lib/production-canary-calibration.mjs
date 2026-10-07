@@ -2,6 +2,7 @@ import {canaryEvidenceHash as hash} from './production-canary-verification.mjs';
 import {inspectContinuationReceiptSet,verifyContinuationReceiptSet,verifyContinuationCommitWindow} from './production-canary-continuation-proof.mjs';
 import {normalizeCanaryTask} from './production-canary-material.mjs';
 import {verifyCanaryReport} from './production-canary-report.mjs';
+import {inspectCanaryTransitionCertificate} from './production-canary-transition.mjs';
 
 const fail=()=>{throw Error('ProductionBudgetCalibrationIndeterminate');};
 const integer=(v,min=0)=>Number.isSafeInteger(v)&&v>=min;
@@ -10,6 +11,7 @@ const integer=(v,min=0)=>Number.isSafeInteger(v)&&v>=min;
  * data/material compatibility certificate. Performance and census stay fresh.
  */
 export function calibrateProductionContinuation(state,original,capacity,census,{attemptId,compatibility,controlRevision,dailyRows=1000,basisPoints=5000,now=Date.now()}){
+  const transition=compatibility?.version===3?inspectCanaryTransitionCertificate(compatibility):null;
   const old=inspectContinuationReceiptSet(original),current=state?.verified,context={attemptId,compatibility};
   verifyContinuationReceiptSet(original,current,context);
   if(state.phase!=='calibrating'||state.benchmarkRemaining!==0||state.report?.verificationHash!==hash(current.verification)||
@@ -21,7 +23,7 @@ export function calibrateProductionContinuation(state,original,capacity,census,{
   for(const kind of ['worker','mnemo-server','qwen3-embed','llm-proxy']){
     const image=compatibility.images?.[kind];if(!image||image.previousChild!==image.currentChild||!/^sha256:[a-f0-9]{64}$/.test(image.currentChild??''))fail();
   }
-  for(const kind of ['planner','executor','backend','network','authority','credentials']){
+  for(const kind of transition?['planner','executor','network','credentials']:['planner','executor','backend','network','authority','credentials']){
     const material=compatibility.material?.[kind];if(!material||material.previous!==material.current||!/^[a-f0-9]{64}$/.test(material.current??''))fail();
   }
   const d=capacity?.delivery,task=capacity?.task,definition=capacity?.definition;

@@ -49,6 +49,7 @@ COPY scripts/production-runtime-operator.mjs /bootstrap/operator/scripts/product
 COPY scripts/production-consolidation-operator.mjs /bootstrap/operator/scripts/production-consolidation-operator.mjs
 COPY scripts/lib/production-canary-continuation.mjs /bootstrap/operator/scripts/lib/production-canary-continuation.mjs
 COPY scripts/lib/production-canary-compatibility.mjs /bootstrap/operator/scripts/lib/production-canary-compatibility.mjs
+COPY scripts/lib/production-canary-transition.mjs /bootstrap/operator/scripts/lib/production-canary-transition.mjs
 COPY scripts/lib/production-canary-snapshot.mjs /bootstrap/operator/scripts/lib/production-canary-snapshot.mjs
 COPY scripts/lib/production-canary-paused-audit.mjs /bootstrap/operator/scripts/lib/production-canary-paused-audit.mjs
 COPY scripts/lib/production-canary-verification.mjs /bootstrap/operator/scripts/lib/production-canary-verification.mjs

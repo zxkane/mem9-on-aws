@@ -11,6 +11,7 @@ import {requireNamespaceId} from './maintenance-scope.mjs';
 import {discoverSchedulerTasks} from '../consolidation-scheduler-e2e.mjs';
 import {loadWorkerDataRelease} from './production-data-release-loader.mjs';
 import {productionSourceTree} from '../run-production-runtime.mjs';
+import {sendMaintenanceCommand,maintenanceWorkerTarget} from './production-maintenance-admission.mjs';
 
 const send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
 const fail=()=>{throw Error('ProductionCanaryDeliveryFailed');};
@@ -169,9 +170,10 @@ export async function runProductionCanaryWake(clients,target,{wave,actions,onInt
     overridesHash:canaryEvidenceHash(JSON.parse(request.Target.Input)),targetHash:canaryEvidenceHash(request.Target)};
   const journalPath='/mem9-on-aws/prod/consolidation-runtime/canary-deliveries/'+nonce;
   await onIntent(structuredClone(journal));signal?.throwIfAborted();if(now()>=when)fail();
-  await send(clients.ssm,new PutParameterCommand({Name:journalPath,Type:'SecureString',Value:JSON.stringify(journal),Overwrite:false}));
+  const dispatch={kind:'wake',operation:wave,target:maintenanceWorkerTarget(target)};
+  await sendMaintenanceCommand(clients,'ssm',new PutParameterCommand({Name:journalPath,Type:'SecureString',Value:JSON.stringify(journal),Overwrite:false}),dispatch,{...(signal?{abortSignal:signal}:{})});
   signal?.throwIfAborted();if(now()>=when)fail();
-  await send(clients.scheduler,new CreateScheduleCommand(request));
+  await sendMaintenanceCommand(clients,'scheduler',new CreateScheduleCommand(request),dispatch,{...(signal?{abortSignal:signal}:{})});
   let terminal,started=false;
   while(now()<deadline){
     signal?.throwIfAborted();

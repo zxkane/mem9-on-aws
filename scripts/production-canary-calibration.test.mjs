@@ -45,3 +45,14 @@ it('rejects changed execution configuration, incomplete capacity, stale census a
     const f=fixture();change(f);expect(()=>run(f)).toThrow();
   }
 });
+function transitionFixture(){
+ const f=fixture(),c=f.options.compatibility;c.version=3;c.dataReleaseHash=h('c');c.transition={version:1,kind:'bootstrap-boundary-tightening',proofHash:h('d'),backendProjectionHash:h('e')};
+ c.material.authority.current=h('f');c.material.backend.current=h('e');c.current.backendBinding={taskArn:`arn:aws:ecs:${region}:${account}:task/mem9-on-aws-prod-Test/`+'a'.repeat(32),taskDefinitionArn:`arn:aws:ecs:${region}:${account}:task-definition/mem9-on-aws-prod-Test-Backend:2`,containers:['llm-proxy','mnemo-server','qwen3-embed'].map(name=>({name,imageDigest:'sha256:'+h('a')}))};
+ f.state.verified.verification.backendBindingHash=hash(c.current.backendBinding);f.state.report.verificationHash=hash(f.state.verified.verification);return f;
+}
+it('V3 calibration preserves original receipts and capacity while retaining unequal authority hashes',()=>{
+ const f=transitionFixture(),before=structuredClone(f.original),value=run(f);expect(value.estimatedDailyCapacity).toBe(3456);expect(value.capacityReceipts).toBe(5);expect(f.original).toEqual(before);expect(f.options.compatibility.material.authority.previous).not.toBe(f.options.compatibility.material.authority.current);
+});
+it('V3 calibration rejects a malformed commitment or unrelated execution-material change',()=>{
+ for(const key of ['commitment','executor']){const f=transitionFixture();if(key==='commitment')f.options.compatibility.transition.proofHash='bad';else f.options.compatibility.material.executor.current=h('9');expect(()=>run(f)).toThrow();}
+});

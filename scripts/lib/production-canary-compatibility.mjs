@@ -1,5 +1,6 @@
 import {canaryEvidenceHash as hash} from './production-canary-verification.mjs';
 import {validateProductionBackendBinding} from './production-artifacts.mjs';
+import {inspectCanaryTransitionCertificate} from './production-canary-transition.mjs';
 
 const fail=()=>{throw Error('CanaryCompatibilityInvalid');};
 const hex=v=>typeof v==='string'&&/^[a-f0-9]{64}$/.test(v);
@@ -20,15 +21,15 @@ export function canaryWitnessMatches(acceptance,certificateHash,parentProofHash)
 export function validateCanaryCompatibility(certificate,parent,config,state){
   const inspected=inspectCanaryCompatibility(certificate,parent,config,state);
   if(!canaryWitnessMatches(config.acceptance,hash(certificate),certificate.parentProofHash))fail();
-  if(certificate.version===2&&config.acceptance.dataReleaseHash!==certificate.dataReleaseHash)fail();
+  if([2,3].includes(certificate.version)&&config.acceptance.dataReleaseHash!==certificate.dataReleaseHash)fail();
   return inspected;
 }
 
 // Structural inspection does not authorize an operator invocation. It is used
 // by the independent read-only publisher before a new witness exists.
 export function inspectCanaryCompatibility(certificate,parent,config,state){
-  const retained=certificate?.version===2;
-  if(!exact(certificate,['version','parentProofHash','generation','targetsHash','previous','current','images','material',...(retained?['dataReleaseHash']:[])])||![1,2].includes(certificate.version)||
+  const transition=certificate?.version===3?inspectCanaryTransitionCertificate(certificate):null,retained=[2,3].includes(certificate?.version);
+  if(!transition&&!exact(certificate,['version','parentProofHash','generation','targetsHash','previous','current','images','material',...(retained?['dataReleaseHash']:[])])||![1,2,3].includes(certificate?.version)||
     (retained?(!hex(certificate.dataReleaseHash)||config.dataRelease?.hash!==certificate.dataReleaseHash):config.dataRelease!==undefined)||
     certificate.parentProofHash!==hash(parent)||certificate.generation!==parent.generation||certificate.generation!==config.generation||
     certificate.targetsHash!==hash([...config.targets].sort())||hash(parent.targets)!==hash(config.targets)||
@@ -53,7 +54,7 @@ export function inspectCanaryCompatibility(certificate,parent,config,state){
   if(!previous.workerImage.endsWith('@'+certificate.images.worker.previousRoot)||!next.workerImage.endsWith('@'+certificate.images.worker.currentRoot))fail();
   const kinds=['planner','executor','backend','network','authority','credentials'];
   if(!exact(certificate.material,kinds))fail();
-  for(const material of Object.values(certificate.material))if(!exact(material,['previous','current'])||!hex(material.previous)||material.previous!==material.current)fail();
+  if(!transition)for(const material of Object.values(certificate.material))if(!exact(material,['previous','current'])||!hex(material.previous)||material.previous!==material.current)fail();
   const backendBinding=validateProductionBackendBinding(certificate.current.backendBinding,state.identity.clusterArn);
   for(const container of backendBinding.containers){
     const image=certificate.images[container.name];

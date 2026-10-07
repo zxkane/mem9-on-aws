@@ -1,6 +1,7 @@
 import {describe,it,expect} from 'vitest';
 import {productionCanarySchedule,ownsCanaryTask,quiesceProductionWorkers,runProductionCanaryWake} from './lib/production-canary-delivery.mjs';
 import {canaryEvidenceHash} from './lib/production-canary-verification.mjs';
+import {requireMaintenanceAdmission,installMaintenanceAdmission} from './lib/production-maintenance-admission.mjs';
 
 const namespace='60000000-0000-4000-8000-000000000001',id='a'.repeat(64);
 function fixture(wave='repeat-a'){
@@ -20,6 +21,16 @@ function fixture(wave='repeat-a'){
   return {target,template,request,journal,task};
 }
 describe('bounded production Scheduler deliveries',()=>{
+  it('required clients reject a cached legacy wake with no transition field before any SDK mutation',async()=>{
+    const f=fixture(),calls=[],clients=requireMaintenanceAdmission({ssm:{send:async()=>calls.push('put')},scheduler:{send:async()=>calls.push('create')}});
+    await expect(runProductionCanaryWake(clients,{...f.target,template:f.template},{wave:'apply',admission:'a'.repeat(32)})).rejects.toThrow('MaintenanceAdmissionRequired');expect(calls).toEqual([]);
+  });
+  it('revalidates immediately before CreateSchedule after the delivery journal await',async()=>{
+    const f=fixture(),calls=[],binding={owner:'a'.repeat(32),operationHash:'b'.repeat(64),fenceHash:'c'.repeat(64),sourceTree:'d'.repeat(40)};
+    let phase='ready',mint;const clients={ssmWrite:{send:async()=>{calls.push('put');phase='before-witness';}},schedulerWrite:{send:async()=>calls.push('create')}};
+    mint=installMaintenanceAdmission(clients,{binding,assertCurrent:()=>{},verify:async event=>mint(event,{...binding,phase,observedMs:Date.now(),expiresMs:Date.now()+200000})});
+    await expect(runProductionCanaryWake(clients,{...f.target,template:f.template},{wave:'apply',admission:'a'.repeat(32)})).rejects.toThrow('MaintenancePhaseDenied');expect(calls).toEqual(['put']);
+  });
   it('persists the exact launch identity before any AWS write and honors cancellation without retiming',async()=>{
     const f=fixture(),calls=[],target={...f.target,kind:'executor',template:f.template},abort=new AbortController();
     const clients={ssm:{send:async()=>calls.push('put')},scheduler:{send:async()=>calls.push('schedule')}};

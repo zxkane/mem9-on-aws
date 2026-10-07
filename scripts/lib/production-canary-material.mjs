@@ -63,3 +63,17 @@ export function normalizeCanaryTask(definition,{account,region,images}){
   // material difference remains visible to the exact comparison/hash.
   return normalized;
 }
+
+export const CANARY_BACKEND_ADDITIONAL_ATTRIBUTE='com.amazonaws.ecs.capability.docker-remote-api.1.21';
+export const CANARY_BACKEND_COMPATIBILITIES=Object.freeze(['EC2','FARGATE','MANAGED_INSTANCES']);
+/** Configured execution and response metadata are separate outputs. Callers
+ * must authenticate raw self-hashes first and verify the exact permitted
+ * attribute-set transition; this function does not itself approve a change. */
+export function projectConfiguredCanaryBackend(definition,context){
+ const normalized=normalizeCanaryTask(definition,context),list=definition.compatibilities,attributes=definition.requiresAttributes;
+ if(JSON.stringify(definition.requiresCompatibilities)!==JSON.stringify(['FARGATE'])||!Array.isArray(list)||list.length!==3||new Set(list).size!==3||
+   JSON.stringify([...list].sort())!==JSON.stringify(CANARY_BACKEND_COMPATIBILITIES)||!Array.isArray(attributes)||!attributes.length||attributes.length>100||
+   attributes.some(a=>!a||Object.keys(a).sort().join()!=='name'||typeof a.name!=='string'||!a.name||a.name.length>256)||new Set(attributes.map(a=>a.name)).size!==attributes.length)fail();
+ const {requiresAttributes:ignored,...configuration}=normalized;
+ return {configuration:{...configuration,compatibilities:[...list].sort()},metadata:{compatibilities:[...list].sort(),attributeNames:attributes.map(a=>a.name).sort()}};
+}

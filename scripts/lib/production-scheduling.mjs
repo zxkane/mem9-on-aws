@@ -4,6 +4,7 @@ import {productionCanarySchedule} from './production-canary-delivery.mjs';
 import {canaryEvidenceHash} from './production-canary-verification.mjs';
 import {productionArtifactAdmission,validateProductionBackendBinding} from './production-artifacts.mjs';
 import {productionRecurringEnvironment,SCHEDULER_CONTEXT_ENVIRONMENT} from './production-scheduler-context.mjs';
+import {sendMaintenanceCommand,dispatchMaintenanceAction,maintenanceWorkerTarget} from './production-maintenance-admission.mjs';
 
 const fail=()=>{throw Error('ProductionSchedulingNotVerified');};
 const send=(client,command)=>client.send(command,{abortSignal:AbortSignal.timeout(30000)});
@@ -27,10 +28,10 @@ export async function enableProductionScheduling(clients,targets,{admission,acti
     if(canaryEvidenceHash(current.Target)!==canaryEvidenceHash(target.template.Target)||current.State!=='DISABLED')fail();
     productionCanarySchedule(current,target,{wave:'apply',nonce:'0'.repeat(32),admission:'0'.repeat(32),when:Date.now()+60000});
     const input={containerOverrides:[{name:target.containerName,environment:productionRecurringEnvironment(target.generation,admission)}]};
-    await send(clients.scheduler,new UpdateScheduleCommand({Name:current.Name,GroupName:current.GroupName,State:'ENABLED',
+    await sendMaintenanceCommand(clients,'scheduler',new UpdateScheduleCommand({Name:current.Name,GroupName:current.GroupName,State:'ENABLED',
       ...Object.fromEntries(['Description','StartDate','EndDate','KmsKeyArn','ActionAfterCompletion'].filter(key=>current[key]!==undefined).map(key=>[key,current[key]])),
       ScheduleExpression:current.ScheduleExpression,ScheduleExpressionTimezone:current.ScheduleExpressionTimezone,
-      FlexibleTimeWindow:current.FlexibleTimeWindow,Target:{...current.Target,Input:JSON.stringify(input)}}));
+      FlexibleTimeWindow:current.FlexibleTimeWindow,Target:{...current.Target,Input:JSON.stringify(input)}}),{kind:'activate',operation:'enable-schedule',target:maintenanceWorkerTarget(target)});
   }
 }
 
@@ -79,8 +80,9 @@ export async function disableProductionScheduling(clients,targets){
 export async function activateProductionScheduling(deps,{revision,admission,activationSeed}){
   if(!/^[a-f0-9]{40}$/.test(revision??'')||!/^[a-f0-9]{64}$/.test(admission??'')||!/^[a-f0-9]{64}$/.test(activationSeed??''))fail();
   const sameRelease=async()=>{if(await deps.currentMain()!==revision)fail();};
-  await sameRelease();await deps.setSecret('ProductionConsolidationAdmission',activationSeed);
-  await sameRelease();await deps.setSecret('ProductionConsolidationEnabled','1');
+  const setting=(name,value)=>dispatchMaintenanceAction(deps.clients,{kind:'activate',operation:'set-setting',revision},{name,value},input=>deps.setSecret(input.name,input.value));
+  await sameRelease();await setting('ProductionConsolidationAdmission',activationSeed);
+  await sameRelease();await setting('ProductionConsolidationEnabled','1');
   await sameRelease();await deps.enable({admission,activationSeed,assertRelease:sameRelease});
   await sameRelease();const verified=await deps.verify({enabled:true,admission});return {revision,...verified};
 }
