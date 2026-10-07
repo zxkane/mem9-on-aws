@@ -2150,3 +2150,15 @@ If a late identity/policy check fails after other roles were restricted, retain
 deployment quarantine and the installed restrictions. Do not roll the operator
 back by editing its role or remove verified restrictions to make the check pass;
 recovery repeats the complete ownership and policy checks before release.
+
+The CLI must preserve the adapter's explicitly supplied recovery signal. A process
+stop signal cancels ordinary work, while recovery has its own bounded grace
+period to restore quarantine after an uncertain partial release. Replacing that
+fresh signal with the already-aborted process signal would prevent recovery.
+Verify this through the real CLI entrypoint and coordinated release adapter;
+the process still exits with its original interruption status after recovery.
+
+Request 1,000 roles per IAM service page to reduce repeated operator metadata
+checks in large accounts. Keep every page's identity verification and all existing
+inventory bounds. IAM may return a shorter page, so only its completion flag and
+marker determine whether another request is required.

@@ -18,7 +18,7 @@ function create(mutatePage = () => {}) {
       calls.push(args);
       if (args.slice(0, 2).join(' ') === 'iam list-roles') {
         const response = { Roles: [...Object.values(f.roles), workload].map(r => structuredClone(r)), IsTruncated: false };
-        mutatePage(response, f);
+        mutatePage(response, f, args);
         return response;
       }
       return f.invokeAws(args);
@@ -34,6 +34,29 @@ it('TC104: real adapter excludes only verified exact operators and keeps ordinar
   expect(page.roles.map(r => r.name)).toContain(workloadName);
   for (const name of retainedNames) expect(page.roles.map(r => r.name)).not.toContain(name);
   expect(page.roles.filter(r => r.name.startsWith('github-actions-'))).toHaveLength(3);
+});
+
+it('TC118: requests large service pages and still follows markers on short pages', async () => {
+  const { adapter, calls } = create((response, _fixture, args) => {
+    const next = args.includes('--marker');
+    response.Roles = next ? response.Roles.slice(3) : response.Roles.slice(0, 3);
+    response.IsTruncated = !next;
+    if (!next) response.Marker = 'next-page';
+  });
+  const first = await adapter.listRoles({});
+  expect(first.marker).toBe('next-page');
+  const second = await adapter.listRoles({ marker: first.marker });
+  expect(second.marker).toBeUndefined();
+  const requests = calls.filter(args => args[1] === 'list-roles');
+  expect(requests).toHaveLength(2);
+  for (const args of requests) {
+    expect(args).toContain('--no-paginate');
+    expect(JSON.parse(args[args.indexOf('--cli-input-json') + 1])).toEqual({ MaxItems: 1000 });
+    expect(args).not.toContain('--max-items');
+  }
+  expect(requests[1][requests[1].indexOf('--marker') + 1]).toBe('next-page');
+  expect([...first.roles, ...second.roles].map(role => role.name)).toContain(workloadName);
+  expect(calls.filter(args => args[1] === 'get-template')).toHaveLength(8);
 });
 
 it.each(['Arn', 'RoleId'])('TC105: filtering cannot hide a retained role with a changed %s', async field => {

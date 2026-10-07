@@ -946,6 +946,10 @@ export function createAwsCliAdapter({
         "iam",
         "list-roles",
         "--no-paginate",
+        // --max-items is a CLI paginator option. Set the service page size
+        // explicitly while retaining raw IsTruncated/Marker handling.
+        "--cli-input-json",
+        '{"MaxItems":1000}',
         ...markerArgs(marker),
       ]);
       const markerValue = pageMarker(response, "Roles");
