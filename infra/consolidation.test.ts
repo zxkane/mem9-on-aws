@@ -996,7 +996,8 @@ describe("consolidation IAM templates", () => {
         "kms:GenerateDataKey",
       ]),
     );
-    const resourceDeny = oneBoundary("resource ceiling", s => s.Effect === "Deny" && hasAction(s, "s3:GetObject") && s.NotResource !== undefined);
+    const resourceDeny = oneBoundary("resource ceiling", s => s.Effect === "Deny" &&
+      (hasAction(s, "s3:GetObject") || hasAction(s, "s3:*")) && s.NotResource !== undefined);
     expect(resourceDeny?.NotResource).toContainEqual({
       "Fn::Sub":
         "arn:${AWS::Partition}:s3:::${DecisionArtifactBucketName}/*",

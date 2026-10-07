@@ -162,21 +162,26 @@ export async function inspectAuthorizationDeploymentBindings({ run, applicationR
 // including conditions and subnet lists, before the template is uploaded.
 export async function verifyAuthorizationDeploymentTemplate(templateSource, parameterValues) {
   const { parseDocument } = await import('yaml');
+  const { verifyRetainedOperatorProtectionDocuments, verifyRetainedOperatorProtectionPolicy,
+    retainedOperatorProtectionPolicyName } = await import('./retained-operator-protection.mjs');
+  const {identifiers:{quarantinePolicyName}} = JSON.parse(await readFile(
+    new URL('../workload-permissions-boundary-contract.json', import.meta.url), 'utf8'));
   const document = parseDocument(templateSource, { uniqueKeys: true, customTags: [
     ...['Ref', 'Sub', 'GetAtt'].map(name => ({ tag: '!' + name, resolve: value => ({ [name]: value }) })),
     ...['If', 'Equals', 'Not'].map(name => ({ tag: '!' + name, collection: 'seq', resolve: value => ({ [name]: value.toJSON() }) })),
   ] });
   requireValue(document.errors.length === 0 && document.warnings.length === 0, 'invalid deployment template');
   const template = document.toJS();
+  const noValue = Symbol('AWS::NoValue');
   const values = Object.fromEntries(Object.entries(template.Parameters).map(([key, value]) => [key, value.Default]));
   Object.assign(values, parameterValues);
   for (const [key, parameter] of Object.entries(template.Parameters)) {
     if (parameter.Type === 'CommaDelimitedList' && typeof values[key] === 'string') values[key] = values[key].split(',');
   }
   const resolve = value => {
-    if (Array.isArray(value)) return value.map(resolve);
+    if (Array.isArray(value)) return value.map(resolve).filter(child => child !== noValue);
     if (!value || typeof value !== 'object') return value;
-    if ('Ref' in value) { requireValue(values[value.Ref] !== undefined, `unresolved ${value.Ref}`); return values[value.Ref]; }
+    if ('Ref' in value) { if (value.Ref === 'AWS::NoValue') return noValue; requireValue(values[value.Ref] !== undefined, `unresolved ${value.Ref}`); return values[value.Ref]; }
     if ('Sub' in value) return value.Sub.replace(/\$\{([^}]+)\}/gu, (_, key) => {
       requireValue(typeof values[key] === 'string', `unresolved ${key}`); return values[key];
     });
@@ -194,11 +199,58 @@ export async function verifyAuthorizationDeploymentTemplate(templateSource, para
   for (const [key, size] of Object.entries(sizes)) requireValue(size <= 6144, `${key} exceeds managed policy quota: ${size}`);
   const context = { partition: values['AWS::Partition'], accountId: values['AWS::AccountId'], applicationRegion: values.ApplicationRegion,
     decisionArtifactBucketName: values.DecisionArtifactBucketName, projectName: values.ProjectName, githubRepo: values.GitHubRepo };
+  const roles = new Map();
   for (const role of ['GitHubPreviewActionsRole', 'GitHubProductionActionsRole', 'GitHubActionsRole']) {
     const resource = template.Resources[role];
     requireValue(resource && !resource.Condition, `missing or conditional deploy role: ${role}`);
-    const attached = resource.Properties.ManagedPolicyArns.map(p => policies[p.Ref]).filter(Boolean);
+    const roleName = resolve(resource.Properties.RoleName);
+    const name = retainedOperatorProtectionPolicyName(roleName);
+    const attached = resource.Properties.ManagedPolicyArns.map(p => {
+      requireValue(p && typeof p.Ref === 'string' && policies[p.Ref], 'unresolved CI managed policy attachment');
+      return policies[p.Ref];
+    });
     verifyAuthorizationMaintenanceIsolation(attached, context);
+    roles.set(role, {roleName, name, attached, inline: new Map()});
+  }
+  const addInline = (role, name, policy, separate) => {
+    requireValue(typeof name === 'string' && /^[\w+=,.@-]{1,128}$/u.test(name), 'invalid CI inline policy name');
+    requireValue(name !== quarantinePolicyName, 'source policy must not adopt quarantine');
+    requireValue(!role.inline.has(name), 'duplicate CI inline policy name');
+    requireValue(name !== role.name || separate, 'permanent protection must use a separate inline policy resource');
+    requireValue(policy?.Version === '2012-10-17' && policy.Statement, 'invalid CI inline policy document');
+    role.inline.set(name, {document: policy, separate});
+  };
+  for (const [logical, role] of roles) {
+    const inline = template.Resources[logical].Properties.Policies ?? [];
+    requireValue(Array.isArray(inline), 'invalid CI inline policies');
+    for (const entry of inline) addInline(role, resolve(entry.PolicyName), resolve(entry.PolicyDocument), false);
+  }
+  for (const resource of Object.values(template.Resources).filter(r => r.Type === 'AWS::IAM::Policy')) {
+    const p = resource.Properties;
+    requireValue(!resource.Condition && p && Array.isArray(p.Roles) && p.Roles.length > 0 && !p.Users && !p.Groups,
+      'unsupported source-owned inline policy resource');
+    const seen = new Set();
+    for (const ref of p.Roles) {
+      requireValue(ref && Object.keys(ref).join() === 'Ref' && roles.has(ref.Ref) && !seen.has(ref.Ref),
+        'source-owned inline policy role binding changed');
+      seen.add(ref.Ref);
+      addInline(roles.get(ref.Ref), resolve(p.PolicyName), resolve(p.PolicyDocument), true);
+    }
+  }
+  // Reserve the separately owned quarantine in addition to every source inline
+  // document. The boundary suite pins this exact quarantine representation.
+  const quarantine = {Version:'2012-10-17',Statement:[{
+    Sid:'QuarantineAllDeployRoleActions',Effect:'Deny',Action:'*',Resource:'*',
+  }]};
+  for (const role of roles.values()) {
+    const total = JSON.stringify(quarantine).length + [...role.inline.values()]
+      .reduce((sum, entry) => sum + JSON.stringify(entry.document).length, 0);
+    requireValue(total <= 10240, `CI inline policy quota exceeded: ${role.roleName} (${total})`);
+    const protection = role.inline.get(role.name);
+    requireValue(protection?.separate === true, 'missing source-owned CI operator protection');
+    const protectionContext = {partition: context.partition, accountId: context.accountId, roleName: role.roleName};
+    verifyRetainedOperatorProtectionPolicy(protection.document, protectionContext);
+    verifyRetainedOperatorProtectionDocuments([...role.attached, ...[...role.inline.values()].map(entry => entry.document)], protectionContext);
   }
   return sizes;
 }

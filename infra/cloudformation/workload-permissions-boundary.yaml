@@ -115,26 +115,22 @@ Resources:
               - kms:GenerateDataKey
               - bedrock-mantle:CallWithBearerToken
             Resource: "*"
+          # Equivalent on the unchanged exact action ceiling; no new grants.
           - Effect: Deny
             Action:
               - bedrock-mantle:CreateInference
               - bedrock-mantle:GetProject
               - bedrock-mantle:ListProjects
               - bedrock-mantle:ListTagsForResource
-              - ecr:BatchCheckLayerAvailability
-              - ecr:BatchGetImage
+              - ecr:Batch*
               - ecr:GetDownloadUrlForLayer
-              - lambda:InvokeFunction
-              - logs:CreateLogGroup
-              - logs:CreateLogStream
-              - logs:PutLogEvents
-              - secretsmanager:GetSecretValue
-              - sqs:SendMessage
-              - sns:Publish
-              - ssm:GetParameters
-              - ssm:PutParameter
-              - s3:GetObject
-              - s3:PutObject
+              - lambda:*
+              - logs:*
+              - secretsmanager:*
+              - sns:*
+              - sqs:*
+              - ssm:*
+              - s3:*
             NotResource:
               - !Ref BedrockProjectArn
               # AWS::NoValue removes this entry entirely when unconfigured, so
@@ -319,8 +315,11 @@ Resources:
 
           # Maintenance-only archive writes cannot be delegated to workloads.
           - Effect: Deny
-            Action: s3:PutObject
-            Resource: !Sub arn:${AWS::Partition}:s3:::${DecisionArtifactBucketName}/data-authorizations/*
+            Action: [s3:PutObject, iam:PassRole]
+            Resource:
+              - !Sub arn:${AWS::Partition}:s3:::${DecisionArtifactBucketName}/data-authorizations/*
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-namespace-operator
+              - !Sub arn:${AWS::Partition}:iam::${AWS::AccountId}:role/mem9-on-aws-preview-human-acceptance
 
 Outputs:
   PolicyArn:

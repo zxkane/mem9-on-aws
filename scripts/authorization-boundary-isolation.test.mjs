@@ -14,8 +14,10 @@ const maximum = { ...base, decisionArtifactBucketName:'a'.repeat(33), policyRevi
   openAiBedrockProjectArn:`arn:aws:bedrock-mantle:us-west-2:${accountId}:project/proj_${'z'.repeat(20)}` };
 const list = value => Array.isArray(value) ? value : [value];
 const bucket = contract => contract.decisionArtifactBucketName ?? `mem9-audit-${contract.accountId}`;
-const archiveDeny = contract => ({Effect:'Deny',Action:'s3:PutObject',
-  Resource:`arn:${contract.partition}:s3:::${bucket(contract)}/data-authorizations/*`});
+const maintenanceDeny = contract => ({Effect:'Deny',Action:['s3:PutObject','iam:PassRole'],
+  Resource:[`arn:${contract.partition}:s3:::${bucket(contract)}/data-authorizations/*`,
+    `arn:${contract.partition}:iam::${contract.accountId}:role/mem9-on-aws-namespace-operator`,
+    `arn:${contract.partition}:iam::${contract.accountId}:role/mem9-on-aws-preview-human-acceptance`]});
 const build = contract => boundary.expectedBoundaryPolicyDocument(contract);
 const verify = (document, contract=base) => boundary.verifyBoundaryPolicyDocument(document, contract);
 const compare = (document, expected) => boundary.compareBoundaryPolicyDocuments(document, expected);
@@ -23,8 +25,22 @@ const canonical = value => Array.isArray(value) ? value.map(canonical) : value &
   Object.fromEntries(Object.keys(value).sort().map(key=>[key,canonical(value[key])])) : value;
 const fingerprint = value => createHash('sha256').update(JSON.stringify(canonical(value))).digest('hex');
 const withoutSids = document => document.Statement.map(({Sid,...statement})=>statement);
-const isArchiveDeny = (statement, contract=base) => fingerprint(statement)===fingerprint(archiveDeny(contract));
-const resourceCeiling = document => document.Statement.find(s=>s.Effect==='Deny' && list(s.Action).includes('s3:GetObject') && s.NotResource);
+const isMaintenanceDeny = (statement, contract=base) => fingerprint(statement)===fingerprint(maintenanceDeny(contract));
+const resourceCeiling = document => document.Statement.find(s=>s.Effect==='Deny' && list(s.Action).some(a=>a==='s3:GetObject'||a==='s3:*') && s.NotResource);
+const originalResourceActions = ['bedrock-mantle:CreateInference','bedrock-mantle:GetProject','bedrock-mantle:ListProjects','bedrock-mantle:ListTagsForResource',
+  'ecr:BatchCheckLayerAvailability','ecr:BatchGetImage','ecr:GetDownloadUrlForLayer','lambda:InvokeFunction','logs:CreateLogGroup','logs:CreateLogStream',
+  'logs:PutLogEvents','secretsmanager:GetSecretValue','sns:Publish','sqs:SendMessage','ssm:GetParameters','ssm:PutParameter','s3:GetObject','s3:PutObject'];
+const originalCeiling = [...originalResourceActions,'ecs:RunTask','ec2:AssignPrivateIpAddresses','ec2:CreateNetworkInterface','ec2:DeleteNetworkInterface',
+  'ec2:DescribeNetworkInterfaces','ec2:DescribeSubnets','ec2:UnassignPrivateIpAddresses','ecr:GetAuthorizationToken','iam:PassRole',
+  'ssmmessages:CreateControlChannel','ssmmessages:CreateDataChannel','ssmmessages:OpenControlChannel','ssmmessages:OpenDataChannel',
+  'kms:Decrypt','kms:GenerateDataKey','bedrock-mantle:CallWithBearerToken'];
+function previousBoundary(document, contract=base){
+  const previous=structuredClone(document);
+  previous.Statement=previous.Statement.filter(s=>!isMaintenanceDeny(s,contract));
+  resourceCeiling(previous).Action=[...originalResourceActions];
+  return previous;
+}
+
 
 it('the executable verifier rejects duplicate raw JSON instead of losing it during pre-parsing', () => {
   const invoke = input => spawnSync(process.execPath, [fileURLToPath(new URL('./verify-workload-permissions-boundary.mjs', import.meta.url))], {
@@ -90,14 +106,14 @@ describe('authorization archive workload boundary',()=>{
     expect(template.Parameters.DecisionArtifactBucketName.MaxLength).toBe(33);
     expect(document.Statement).toHaveLength(16);
     expect(document.Statement.filter(s=>Object.hasOwn(s,'Sid')).map(s=>s.Sid)).toEqual(['C'+contract.policyRevision]);
-    expect(document.Statement.filter(s=>isArchiveDeny(s,contract))).toHaveLength(1);
+    expect(document.Statement.filter(s=>isMaintenanceDeny(s,contract))).toHaveLength(1);
     expect(verify(document,contract)).toBe(true);
     expect(compare(document,expected)).toBe(true);
     expect(JSON.stringify(document).length).toBeLessThanOrEqual(6144);
   });
 
-  it('TC096: the complete maximum fixture is 6109 characters; longer bucket names reject',()=>{
-    expect(JSON.stringify(renderTemplate(maximum).document).length).toBe(6109);
+  it('TC096/110: the complete maximum fixture is 6069 characters; longer bucket names reject',()=>{
+    expect(JSON.stringify(renderTemplate(maximum).document).length).toBe(6069);
     for(const length of [34,63])expect(()=>build({...base,decisionArtifactBucketName:'a'.repeat(length)})).toThrow(/invalid decision-artifact bucket name/u);
   });
 
@@ -105,11 +121,11 @@ describe('authorization archive workload boundary',()=>{
     ['default',base,'107ce6149ee5e34bb9cc12912f32b1e34566bc4e59a1ace7ae0650576ceccbce'],
     ['maximum',maximum,'1ae6c364ada0618b9f3a6afaf38055b9d8c7d71c8f2d09f46a6a177358506535'],
   ])('TC099: %s preserves every pre-change semantic field',(_name,contract,pinnedHash)=>{
-    // Pinned before this change, excluding optional Sids only. The new deny is
-    // the sole permitted addition; no condition or action/resource shortening.
+    // Restore only the separately proven resource-action compaction and remove
+    // the two new maintenance exclusions; every older field remains pinned.
     const document=build(contract);
-    expect(document.Statement.filter(s=>isArchiveDeny(s,contract))).toHaveLength(1);
-    const previous={...document,Statement:document.Statement.filter(s=>!isArchiveDeny(s,contract))};
+    expect(document.Statement.filter(s=>isMaintenanceDeny(s,contract))).toHaveLength(1);
+    const previous=previousBoundary(document,contract);
     expect(fingerprint(withoutSids(previous))).toBe(pinnedHash);
   });
 
@@ -209,8 +225,8 @@ function permits(document,{action,resource,context={}}){
     (s.Resource?list(s.Resource).some(r=>matches(r,resource)):!list(s.NotResource).some(r=>matches(r,resource)))&&conditionMatches(s.Condition));
 }
 
-it('TC093/094/099: only archive Put changes across the synthetic request matrix',()=>{
-  const document=build(base),before={...document,Statement:document.Statement.filter(s=>!isArchiveDeny(s))};
+it('TC093/094/099/108: only archive Put and operator PassRole change across the synthetic request matrix',()=>{
+  const document=build(base),before=previousBoundary(document);
   expect(fingerprint(withoutSids(before))).toBe('107ce6149ee5e34bb9cc12912f32b1e34566bc4e59a1ace7ae0650576ceccbce');
   const arn=`arn:aws:s3:::${bucket(base)}`,parameter=`arn:aws:ssm:${base.applicationRegion}:${accountId}:parameter/mem9-on-aws/prod/`;
   const key=`arn:aws:kms:${base.applicationRegion}:${accountId}:key/synthetic`,fn=`arn:aws:lambda:${base.applicationRegion}:${accountId}:function:mem9-on-aws-prod-proxy`;
@@ -249,9 +265,25 @@ it('TC093/094/099: only archive Put changes across the synthetic request matrix'
     {action:'ec2:CreateNetworkInterface',resource:'*',context:{'aws:PrincipalArn':proxy},allowed:true},
     {action:'ec2:CreateNetworkInterface',resource:'*',context:{'aws:PrincipalArn':proxy,'lambda:SourceFunctionArn':fn},allowed:false},
     {action:'ec2:CreateNetworkInterface',resource:'*',context:{'aws:PrincipalArn':proxy.replace('Mem9ProxyFnRole','UnreviewedRole')},allowed:false});
+  for(const name of ['mem9-on-aws-namespace-operator','mem9-on-aws-preview-human-acceptance'])
+    cases.push({action:'iam:PassRole',resource:`arn:aws:iam::${accountId}:role/${name}`,context:{'iam:PassedToService':'ecs-tasks.amazonaws.com'},allowed:true,after:false});
   for(const request of cases){
     expect(permits(before,request),JSON.stringify(request)).toBe(request.allowed);
     expect(permits(document,request),JSON.stringify(request)).toBe(request.after??request.allowed);
   }
   expect(list(resourceCeiling(document).NotResource).some(r=>r.includes(':accesspoint/'))).toBe(false);
+});
+
+it('TC109: exact 34-action ceiling proves the resource-action compaction intersection',()=>{
+  for(const {contract} of fixtures){
+    const document=build(contract),ceiling=document.Statement.find(s=>s.NotAction).NotAction;
+    expect(ceiling).toEqual(originalCeiling);expect(ceiling).toHaveLength(34);
+    expect(new Set(ceiling).size).toBe(34);expect(ceiling.every(a=>!/[?*]/u.test(a))).toBe(true);
+    const compact=list(resourceCeiling(document).Action);
+    for(const action of ceiling)expect(compact.some(p=>matches(p,action)),action).toBe(originalResourceActions.some(p=>matches(p,action)));
+    for(const action of ['s3:FutureMutation','ecr:BatchFutureMutation','lambda:FutureMutation']){
+      expect(ceiling.includes(action)).toBe(false);
+      expect(permits(document,{action,resource:'*'})).toBe(false);
+    }
+  }
 });

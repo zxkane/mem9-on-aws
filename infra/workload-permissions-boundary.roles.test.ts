@@ -174,7 +174,8 @@ async function verifyMaintenanceGraph(scheduleEnabled: boolean, namespaceRequire
   };
   const hasAction = (statement: Record<string, any>, action: string) =>
     (Array.isArray(statement.Action) ? statement.Action : [statement.Action]).includes(action);
-  const resourceScopes = oneBoundary('resource ceiling', s => s.Effect === 'Deny' && hasAction(s, 's3:GetObject') && s.NotResource !== undefined).NotResource as string[];
+  const resourceScopes = oneBoundary('resource ceiling', s => s.Effect === 'Deny' &&
+    (hasAction(s, 's3:GetObject') || hasAction(s, 's3:*')) && s.NotResource !== undefined).NotResource as string[];
   const actionCeiling = oneBoundary('action ceiling', s => s.Effect === 'Deny' && s.NotAction !== undefined).NotAction as string[];
   expect(actionCeiling).toEqual(expect.arrayContaining(["ssm:GetParameters", "kms:Decrypt"]));
   const kmsParameterScope = oneBoundary('KMS contexts', s => hasAction(s, 'kms:Decrypt') && s.Condition?.StringNotLikeIfExists?.['kms:EncryptionContext:PARAMETER_ARN'] !== undefined)

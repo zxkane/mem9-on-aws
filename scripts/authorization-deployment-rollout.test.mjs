@@ -19,6 +19,8 @@ function fixture({incomplete, badScope, drift, failRelease, failEnforcement} = {
   let roleReads = 0, resumed = false;
   const adapter = {
     async verifyBoundaryRegion() {calls.push("region");},
+    async verifyRetainedOperators() { return true; },
+    async verifyRetainedOperatorEnforcement() { return true; },
     async resolveDeploymentRoles() {
       calls.push("deployment-roles");
       roleReads++;
