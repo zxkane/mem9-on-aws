@@ -8,9 +8,32 @@ const hex=(v,n=64)=>typeof v==='string'&&new RegExp('^[a-f0-9]{'+n+'}$').test(v)
 const fingerprints=['sourceEvidenceHash','materialHash','runtimeHash','buildInputsHash','securityEvidenceHash','freshBuildSecurityHash','policyHash','parentProofHash','rootHash','writerBoundaryHash','lineageHash'];
 const unchanged=['stage','account','region','dataRevision','dataSourceTree','dataSourceTag','images','runtimeNonce','generation','targetsHash','parentProofHash','backendBindingHash','schemaDigest','operatorDigest','buildInputsHash'];
 const normalized=v=>JSON.parse(JSON.stringify(v));
+const immutable=v=>{if(v&&typeof v==='object'){Object.values(v).forEach(immutable);Object.freeze(v);}return v;};
 const parameterHash=v=>hash(normalized(v));
 export const MAX_SUPERSESSION_LINEAGE=1000;
+export const SUPERSESSION_ADMISSION_MAX_AGE_MS=300000;
 export const SUPERSESSION_EVIDENCE_MAX_AGE_MS=300000;
+export const SUPERSESSION_OPERATION_MAX_MS=1800000;
+
+/** Derived only from existing immutable authorization/review fields. This is
+ * an issuance bound, not a timeout for owned task or credential cleanup. */
+export function supersessionOperationDeadline(times){
+ if(!exact(times,['issuedMs','reviewedMs','expiresMs'])||Object.values(times).some(v=>!Number.isSafeInteger(v)||v<1)||
+   times.expiresMs<=times.issuedMs||times.expiresMs<=times.reviewedMs)fail('DataReleaseSupersessionTimeInvalid');
+ const deadline=Math.min(times.issuedMs,times.reviewedMs)+SUPERSESSION_OPERATION_MAX_MS;
+ if(!Number.isSafeInteger(deadline))fail('DataReleaseSupersessionTimeInvalid');
+ return Math.min(deadline,times.expiresMs);
+}
+
+export function assertSupersessionOperationWindow(times,now,{initial=false,historical=false}={}){
+ const deadline=supersessionOperationDeadline(times);
+ if(typeof initial!=='boolean'||typeof historical!=='boolean'||initial&&historical||!Number.isSafeInteger(now)||now<1||
+   times.issuedMs>now||times.reviewedMs>now)fail('DataReleaseSupersessionTimeInvalid');
+ if(historical)return deadline;
+ if(initial&&(now-times.issuedMs>SUPERSESSION_ADMISSION_MAX_AGE_MS||now-times.reviewedMs>SUPERSESSION_ADMISSION_MAX_AGE_MS))fail('DataReleaseSupersessionEvidenceExpired');
+ if(now>=deadline)fail('DataReleaseSupersessionOperationExpired');
+ return deadline;
+}
 
 function inspectParameter(p,expected){
  if(!p||p.Name!==parameterName||p.Type!=='SecureString'||!Number.isSafeInteger(p.Version)||p.Version<1||
@@ -34,9 +57,10 @@ export function validateSupersessionLineage(lineage,predecessor,nextId){
  return hash(lineage);
 }
 
-function validate(input,now,{historical=false}={}){
+function validate(input,now,{initial=false,historical=false}={}){
  if(!exact(input,['authorization','expected','predecessor','lineage']))fail('DataReleaseSupersessionInputInvalid');
  const {authorization,expected,predecessor,lineage}=input,data=authorization?.data;
+ assertSupersessionOperationWindow({issuedMs:data?.issuedMs,reviewedMs:authorization?.review?.reviewedMs,expiresMs:data?.expiresMs},now,{initial,historical});
  if(!exact(expected,['account','region','controlRevision','controlSourceTree',...fingerprints])||!hex(expected.controlRevision,40)||fingerprints.some(k=>!hex(expected[k])))fail('DataReleaseSupersessionContextInvalid');
  const previous=inspectParameter(predecessor,expected),context={stage:'prod',account:expected.account,region:expected.region,controlSourceTree:expected.controlSourceTree};
  const next=historical?inspectDataRelease(data,context):requireActiveDataRelease(data,context,{now});
@@ -48,7 +72,6 @@ function validate(input,now,{historical=false}={}){
     review.controlSourceTree!==data.controlSourceTree||review.expiresMs!==data.expiresMs||!hex(review.policySourcesHash)||hash(review)!==data.policyHash)fail('DataReleasePolicyReviewInvalid');
  for(const field of ['sourceEvidenceHash','parentProofHash','buildInputsHash','securityEvidenceHash','freshBuildSecurityHash'])if(review[field]!==expected[field])fail('DataReleasePolicyReviewInvalid');
  for(const field of ['parentProofHash','buildInputsHash','securityEvidenceHash','policyHash'])if(data[field]!==expected[field])fail('DataReleaseSupersessionContextInvalid');
- if(!historical&&(now-data.issuedMs>SUPERSESSION_EVIDENCE_MAX_AGE_MS||!Number.isSafeInteger(review.reviewedMs)||review.reviewedMs>now||now-review.reviewedMs>SUPERSESSION_EVIDENCE_MAX_AGE_MS))fail('DataReleaseSupersessionEvidenceExpired');
  return {previous:previous.data,data};
 }
 
@@ -57,7 +80,7 @@ function verifySnapshot(snapshot,input,now,{successor=false,fenced=false}={}){
  if(!snapshot||Object.keys(expected).some(k=>snapshot[k]!==expected[k]))fail('DataReleaseSnapshotChanged');
  if(snapshot.rootVerified!==true||snapshot.writersSerialized!==true||snapshot.executionEnabled!==false||snapshot.dispatcherEnabled!==false||
    ['enabledSchedules','activeWorkers','activeAdministration','activeContinuations','benchmarkRemaining'].some(k=>snapshot[k]!==0))fail('DataReleaseSupersessionNotPaused');
- if(!Number.isSafeInteger(snapshot.observedMs)||snapshot.observedMs>now||now-snapshot.observedMs>SUPERSESSION_EVIDENCE_MAX_AGE_MS||fenced&&snapshot.fenceOwner!==owner)fail('DataReleaseSnapshotNotFresh');
+ if(!Number.isSafeInteger(now)||now<1||!Number.isSafeInteger(snapshot.observedMs)||snapshot.observedMs>now||now-snapshot.observedMs>SUPERSESSION_EVIDENCE_MAX_AGE_MS||fenced&&snapshot.fenceOwner!==owner)fail('DataReleaseSnapshotNotFresh');
  const p=snapshot.parameter;inspectParameter(p,expected);
  if(successor){if(p.Version!==predecessor.Version+1||p.Value!==JSON.stringify(authorization.data))fail('DataReleaseSupersessionReadbackUncertain');}
  else if(parameterHash(p)!==parameterHash(predecessor))fail('DataReleasePredecessorChanged');
@@ -92,48 +115,79 @@ async function verifyUnsentPredecessor(deps,envelope,intent){
  if(parameterHash(await deps.readback())!==parameterHash(envelope.predecessor)||hash(await deps.readIntent(envelope.operation.owner))!==hash(intent))fail('DataReleasePredecessorChanged');
 }
 
+/** Released receipts change how ownership is checked, not whether a remaining
+ * mutation needs current evidence. The adapter's guard is read-only and must
+ * authenticate released resources as well as the still-owned mutex. */
+async function finishRecoveryRelease(deps,envelope,input,fences,now,{successor}){
+ const {mutex,gate,mutexReleased,gateReleased}=fences,owner=envelope.operation.owner;
+ if(typeof deps.assertRemainingFenceOwnership!=='function')fail('DataReleaseRecoveryReleaseGuardRequired');
+ await deps.assertRemainingFenceOwnership(gate,mutex,envelope.operation);
+ const remaining=Boolean(mutex&&!mutexReleased||gate&&!gateReleased);
+ let snapshot;
+ if(remaining){
+  snapshot=await deps.inspect({owner,remainingFences:true});
+  await deps.assertRemainingFenceOwnership(gate,mutex,envelope.operation);
+  verifySnapshot(snapshot,input,now(),{successor,fenced:true});
+ }
+ // When both receipts are authenticated these helper calls only verify the
+ // released state. They must never reacquire or change released resources.
+ if(gate)await deps.restoreGate(gate,envelope.operation,mutex);
+ await deps.assertRecoveryOwner(envelope.operation);
+ await deps.assertRemainingFenceOwnership(gate,mutex,envelope.operation);
+ if(snapshot)verifySnapshot(snapshot,input,now(),{successor,fenced:true});
+ if(mutex)await deps.releaseMutex(mutex,envelope.operation);
+}
+
 /** One protected overwrite. The adapter owns the existing non-expiring mutex,
  * authenticated fresh evidence and durable create-only archive implementation.
  * No post-write observation can cause a retry or corrective write. */
 export async function supersedeProductionDataRelease(deps,input){
- const now=deps.now??Date.now;validate(input,now());const envelope=envelopeFor(input),owner=envelope.operation.owner;
+ const now=deps.now??Date.now;validate(input,now(),{initial:true});input=immutable(normalized(input));const envelope=immutable(envelopeFor(input)),owner=envelope.operation.owner;
  if(await deps.priorAttempt(owner)!==null||await deps.readArchive(owner)!==null)fail('DataReleaseReconciliationRequired');
- verifySnapshot(await deps.inspect(),input,now());await deps.archive(envelope);await verifyArchive(deps,envelope);
+ validate(input,now());verifySnapshot(await deps.inspect(),input,now());validate(input,now());await deps.archive(envelope);await verifyArchive(deps,envelope);
  const state={version:1,owner,authorizationHash:input.authorization.hash,predecessorVersion:input.predecessor.Version,phase:'inspecting',sent:false,verified:false};
- let mutex,gate;
+ let mutex,gate,advancePending=false;
  try{
   // Durable, authenticated absence of this record after issuer termination
   // distinguishes an archive-only crash from an uncertain fence acquisition.
-  await persistRecord(deps,'recordAcquisitionIntent','readAcquisitionIntent',acquisitionIntent(envelope),'DataReleaseAcquisitionIntentUnverified');
-  mutex=await deps.acquireMutex(envelope.operation);state.mutex=mutex;
-  gate=await deps.acquireGate(envelope.operation,mutex);state.gate=gate;
-  verifySnapshot(await deps.inspect({owner,fenced:true}),input,now(),{fenced:true});validate(input,now());
+  validate(input,now());advancePending=true;await persistRecord(deps,'recordAcquisitionIntent','readAcquisitionIntent',acquisitionIntent(envelope),'DataReleaseAcquisitionIntentUnverified');advancePending=false;
+  validate(input,now());advancePending=true;mutex=await deps.acquireMutex(envelope.operation);state.mutex=mutex;advancePending=false;
+  validate(input,now());advancePending=true;gate=await deps.acquireGate(envelope.operation,mutex);state.gate=gate;advancePending=false;
+  validate(input,now());const before=await deps.inspect({owner,fenced:true});verifySnapshot(before,input,now(),{fenced:true});validate(input,now());
   await verifyArchive(deps,envelope);await deps.assertFence(gate,mutex);
-  await persistRecord(deps,'recordIntent','readIntent',writeIntent(envelope),'DataReleaseWriteIntentUnverified');
+  validate(input,now());advancePending=true;await persistRecord(deps,'recordIntent','readIntent',writeIntent(envelope),'DataReleaseWriteIntentUnverified');advancePending=false;
   // Re-read the exact predecessor after all archive/inspection work. The
   // non-expiring owned mutex remains held across the single write and checks.
   if(parameterHash(await deps.readback())!==parameterHash(input.predecessor))fail('DataReleasePredecessorChanged');
-  await deps.assertFence(gate,mutex);validate(input,now());state.sent=true;state.phase='attempted';
+  await deps.assertFence(gate,mutex);verifySnapshot(before,input,now(),{fenced:true});validate(input,now());state.sent=true;state.phase='attempted';
   let response;try{response=await deps.putParameter({Name:parameterName,Type:'SecureString',Value:JSON.stringify(input.authorization.data),Overwrite:true});}catch{state.transportUncertain=true;}
   if(response!==undefined&&response.Version!==input.predecessor.Version+1)fail('DataReleaseWriteVersionConflict');
   const parameter=await deps.readback();
   // Exact readback is necessary but not sufficient: repeat the entire live
   // audit. This is evidence/release gating, never permission for another Put.
-  const after=await deps.inspect({owner,fenced:true});verifySnapshot(after,input,now(),{successor:true,fenced:true});
+  validate(input,now());const after=await deps.inspect({owner,fenced:true});verifySnapshot(after,input,now(),{successor:true,fenced:true});
   if(parameterHash(parameter)!==parameterHash(after.parameter))fail('DataReleaseSupersessionReadbackUncertain');
-  validate(input,now());await deps.assertFence(gate,mutex);state.verified=true;state.phase='issued';state.parameterVersion=parameter.Version;
+  validate(input,now());await deps.assertFence(gate,mutex);verifySnapshot(after,input,now(),{successor:true,fenced:true});validate(input,now());state.verified=true;state.phase='issued';state.parameterVersion=parameter.Version;
   await persistRecord(deps,'recordVerified','readVerified',{...state,archiveHash:hash(envelope)},'DataReleaseVerificationReceiptUnverified');
   // Persistence can consume time or lose ownership. Do not release based on
   // the freshness/authority that existed before the durable receipt write.
-  const releaseSnapshot=await deps.inspect({owner,fenced:true});
+  validate(input,now());const releaseSnapshot=await deps.inspect({owner,fenced:true});
   await deps.assertFence(gate,mutex);verifySnapshot(releaseSnapshot,input,now(),{successor:true,fenced:true});validate(input,now());
   await deps.restoreGate(gate,envelope.operation,mutex);state.gateRestored=true;
-  await deps.releaseMutex(mutex,envelope.operation);state.mutexReleased=true;state.phase='complete';
+  verifySnapshot(releaseSnapshot,input,now(),{successor:true,fenced:true});validate(input,now());await deps.releaseMutex(mutex,envelope.operation);state.mutexReleased=true;state.phase='complete';
  }catch(error){
   state.error=/^[A-Za-z0-9_.:-]{1,128}$/.test(error?.message??'')?error.message:'DataReleaseSupersessionFailed';
   if(!mutex&&error?.mutex){mutex=error.mutex;state.mutex=mutex;}
-  if(state.sent||error?.hold)state.phase=state.gateRestored?'issued_cleanup_pending':'held';
+  // A deadline guard may carry hold:true from an adapter. It does not erase
+  // this issuer's positive no-send knowledge, but it cannot excuse an unknown
+  // acquisition/intent or unconfirmed child cleanup. All abort proof below is
+  // still mandatory before any cleanup capability is used.
+  const caughtAt=now(),deadlineOnly=!advancePending&&error?.code!=='ECLEANUP'&&error?.cleanupComplete!==false&&
+   ['DataReleaseSupersessionOperationExpired','SupersessionAdmissionExpired'].includes(error?.message)&&Number.isSafeInteger(caughtAt)&&
+   caughtAt>=supersessionOperationDeadline({issuedMs:input.authorization.data.issuedMs,reviewedMs:input.authorization.review.reviewedMs,expiresMs:input.authorization.data.expiresMs});
+  if(state.sent||error?.hold&&!deadlineOnly)state.phase=state.gateRestored?'issued_cleanup_pending':'held';
   else try{
+   await verifyArchive(deps,envelope);
    const intent=await deps.readIntent(owner);
    if(intent&&hash(intent)!==hash(writeIntent(envelope)))fail('DataReleaseReconciliationIntentInvalid');
    // The running issuer knows it has not crossed the Put boundary. Preserve
@@ -155,6 +209,7 @@ export async function supersedeProductionDataRelease(deps,input){
  * always uncertain here; negative/terminal conclusions require independently
  * corroborated service/history evidence and are not inferred from stale reads. */
 export async function reconcileProductionDataSupersession(deps,envelope){
+ envelope=immutable(normalized(envelope));
  const input={authorization:envelope.authorization,expected:envelope.expected,predecessor:envelope.predecessor,lineage:envelope.lineage},now=deps.now??Date.now;
  validate(input,now(),{historical:true});if(hash(envelopeFor(input))!==hash(envelope))fail('DataReleaseArchiveUnverified');
  await verifyArchive(deps,envelope);await deps.assertRecoveryOwner(envelope.operation);
@@ -186,7 +241,7 @@ export async function reconcileProductionDataSupersession(deps,envelope){
    if(fences.gateReleased||fences.mutexReleased){
     if(!aborted||gate&&!fences.gateReleased||fences.gateReleased&&fences.gateReleased.owner!==state.owner||fences.mutexReleased&&fences.mutexReleased.owner!==state.owner)fail('DataReleaseAbortReceiptInvalid');
     await verifyUnsentPredecessor(deps,envelope,intent);
-    if(gate)await deps.restoreGate(gate,envelope.operation,mutex);await deps.releaseMutex(mutex,envelope.operation);
+    await finishRecoveryRelease(deps,envelope,input,fences,now,{successor:false});
     state.sent=false;state.phase='aborted';await deps.recordOutcome(state);return state;
    }
    await deps.assertFence(gate,mutex);const before=await deps.inspect({owner:state.owner,fenced:true});verifySnapshot(before,input,now(),{fenced:true});
@@ -204,9 +259,7 @@ export async function reconcileProductionDataSupersession(deps,envelope){
    if(!verified||!fences.gateReleased||fences.gateReleased.owner!==state.owner||fences.mutexReleased&&fences.mutexReleased.owner!==state.owner)fail('DataReleaseReleaseReceiptInvalid');
    const p=await deps.readback();inspectParameter(p,input.expected);
    if(p.Version!==input.predecessor.Version+1||p.Value!==JSON.stringify(input.authorization.data))fail('DataReleaseSupersessionReadbackUncertain');
-   // Existing fence helpers re-read and authenticate released receipts. They
-   // must not require an already-released gate to become active again.
-   await deps.restoreGate(gate,envelope.operation,mutex);await deps.releaseMutex(mutex,envelope.operation);
+   await finishRecoveryRelease(deps,envelope,input,fences,now,{successor:true});
    state.verified=true;state.parameterVersion=p.Version;state.expired=now()>=input.authorization.data.expiresMs;state.phase='complete';
    await deps.recordOutcome(state);return state;
   }

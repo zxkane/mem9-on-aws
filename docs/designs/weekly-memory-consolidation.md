@@ -1812,8 +1812,8 @@ The operator issues a strict stage/account/region-scoped descriptor at
 and security evidence. It binds the current control tree, original data revision
 and tree, three exact root/child pairs, parent proof, runtime nonce, generation,
 namespace targets, schema/operator identities, build-input evidence, security
-inventory and policy review. Authorization has a bounded explicit operation
-window, at most 24 hours. Changing only timestamps is not renewal evidence.
+inventory and policy review. The descriptor has an explicit lifetime of at most
+24 hours. Changing only timestamps is not renewal evidence.
 A draft capture or valid JSON shape is not authorization.
 
 Expired descriptors use a separate guarded supersession protocol. It preserves
@@ -1822,6 +1822,33 @@ authorization ID and fresh source/build/security/policy evidence, and replaces
 only the exact expired protected parameter. The expected version increments by
 one. The operator never deletes the parameter, resets its version, edits an old
 approval timestamp, or resets canary history or spent allowance.
+
+Supersession separates initial admission, snapshot freshness and operation
+lifetime. Before any dependent work, both `issuedMs` and `reviewedMs` must be
+integer timestamps, non-future and no more than five minutes old. The immutable
+normal-issuance deadline is
+`D = min(min(issuedMs, reviewedMs) + 30 minutes, expiresMs)`. Later validation
+requires `now < D` and retains all source, policy and retained-data bindings;
+it does not reapply the initial five-minute age limit to the whole operation.
+The deadline derives from the existing hashed envelope, without a new start-time
+or deadline field. Restarting or obtaining a new session cannot extend it.
+`supersessionOperationDeadline` and `assertSupersessionOperationWindow` expose
+the same pure `{issuedMs, reviewedMs, expiresMs}` timing contract to adapters.
+
+The public protocol retains four complete collections, in addition to the
+caller's initial collection used to prepare authorization. Each snapshot still
+has its own five-minute freshness limit; no collection is replaced by a cached
+result. Every normal advance checks D before acquiring fences, recording an
+advance intent, sending the single Put, recording verification, or releasing a
+fence. An expiry before Put prevents sending and uses the existing positively
+proven no-send cleanup. Expiry after Put holds normal progress. Diagnostic and
+cleanup records cannot mark normal issuance successful or change its value.
+
+The caller's 35-minute process/task cleanup lifecycle remains separate from D,
+with sufficient session lifetime and cleanup margin checked at startup. Do not
+clamp shared transport lifetime to D: stopping an owned read-only audit task
+must remain possible after normal issuance expires. Service calls retain their
+individual short timeouts and cleanup requires confirmed termination.
 
 The existing non-expiring operator mutex and deployment fence serialize every
 routine writer of that parameter. Before mutation, the evidence adapter must
@@ -1852,6 +1879,29 @@ already exists, only a durable no-send receipt from the issuer can prove that it
 did not cross the Put boundary. The receipt binds the archive, intent and exact
 acquisition descriptors and is verified before cleanup. Its absence must not be
 replaced by an inference from an unchanged parameter.
+
+Historical reconciliation validates the same integer and non-future timestamp
+structure even after D or descriptor expiry; only the initial age and normal
+operation deadline are exempt. It cannot send another Put, renew a descriptor,
+or turn historical completion into current production admission.
+
+Recovery distinguishes completed release from remaining resource changes. With
+authenticated release receipts for all acquired fences, helpers verify the
+released state without acquiring or changing those resources; append-only audit
+records remain permitted. Any remaining release instead requires a fresh full
+audit of all source, permission, root, pause and parameter fingerprints, followed
+by renewed recovery ownership and resource checks immediately before the
+conditional release. This applies to both verified-successor and proven-unsent
+abort cleanup. An already-restored deployment gate must not become active again.
+
+The adapter exposes read-only `assertRemainingFenceOwnership(gate, mutex, operation)`
+using authenticated acquisition and release records. Recovery-only
+`inspect({owner, remainingFences: true})` applies that guard before and after the full
+audit and returns the existing `fenceOwner` binding. Release callbacks retain
+snapshot-freshness and ownership checks at their service boundary after awaited
+preparation. A missing mutex is accepted only when authenticated release intent
+and exact absence prove the earlier removal; acknowledging its missing receipt
+does not issue another delete. Unknown absence or conflicting ownership holds.
 
 Persist a separate create-only acquisition intent before requesting any fence.
 Read back the exact acquisition record before requesting locks, the write intent
