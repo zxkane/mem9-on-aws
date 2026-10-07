@@ -96,17 +96,16 @@ function policy(value, kind) {
 function template(value) {
   if (typeof value === 'string') {
     requireValue(Buffer.byteLength(value) <= 1024 * 1024);
-    if (value.trimStart().startsWith('{')) value = json(value);
-    else {
-      try {
-        const document = parseDocument(value, { uniqueKeys: true, prettyErrors: false, customTags: [
-          ...['Ref', 'Sub', 'GetAtt'].map(name => ({ tag: '!' + name, resolve: v => ({ [name === 'Ref' ? name : 'Fn::' + name]: v }) })),
-          ...['If', 'Equals', 'Not'].map(name => ({ tag: '!' + name, collection: 'seq', resolve: v => ({ ['Fn::' + name]: v.toJSON() }) })),
-        ] });
-        requireValue(!document.errors.length && !document.warnings.length);
-        value = document.toJS({ maxAliasCount: 0 });
-      } catch { fail(); }
-    }
+    // JSON and YAML flow mappings can both start with "{". The YAML parser
+    // accepts both formats while retaining duplicate-key and intrinsic checks.
+    try {
+      const document = parseDocument(value, { uniqueKeys: true, prettyErrors: false, customTags: [
+        ...['Ref', 'Sub', 'GetAtt'].map(name => ({ tag: '!' + name, resolve: v => ({ [name === 'Ref' ? name : 'Fn::' + name]: v }) })),
+        ...['If', 'Equals', 'Not'].map(name => ({ tag: '!' + name, collection: 'seq', resolve: v => ({ ['Fn::' + name]: v.toJSON() }) })),
+      ] });
+      requireValue(!document.errors.length && !document.warnings.length);
+      value = document.toJS({ maxAliasCount: 0 });
+    } catch { fail(); }
   }
   fields(value, ['Resources'], ['AWSTemplateFormatVersion', 'Description', 'Parameters', 'Conditions', 'Outputs', 'Metadata', 'Mappings']);
   requireValue(object(value.Resources) && object(value.Parameters) && object(value.Outputs));
