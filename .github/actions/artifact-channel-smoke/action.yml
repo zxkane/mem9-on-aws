@@ -1,8 +1,8 @@
 name: Synthetic artifact channel smoke
-description: Checks real owner status and cross-job fixed-name artifact conflict; no production authority.
+description: Synthetic R7 winner channel using a private local choice surrogate; no S3 or production authority.
 inputs:
-  mode:
-    description: Fixed workflow role, first or duplicate.
+  contender:
+    description: Fixed parallel contender, a or b.
     required: true
   challenge:
     description: Synthetic random 64-hex dispatch binding.
@@ -10,14 +10,13 @@ inputs:
   github-token:
     description: Read-only job token for GitHub metadata.
     required: true
-  first-receipt:
-    description: First job metadata, only for verifying conflict preserves that artifact.
-    required: false
 outputs:
   diagnostic:
-    description: Same-job upload observation, including the first ID/digest, retained even when the probe fails.
+    description: Synthetic inbox commitments only.
   receipt:
     description: Synthetic channel observation; not an authorization or transferable capability.
+  marker:
+    description: AWS_SIMULATED_MARKER is 1 only for the selected original process; no AWS call occurs.
 runs:
   using: node24
   main: index.mjs

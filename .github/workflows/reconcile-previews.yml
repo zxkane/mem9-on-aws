@@ -1,13 +1,13 @@
-# Branch-only synthetic channel acceptance. Do not merge this replacement.
-# Uses an existing default-branch workflow path for workflow_dispatch --ref.
-# No schedule, production source authorization, cloud credentials or memory.
-name: Artifact channel smoke (synthetic only)
+# Branch-only R7 CHANNEL mechanics. Do not merge this replacement.
+# The conditional choice is an owner-private LOCAL journal, NOT S3 authority.
+# Artifact names are inbox labels, not locks. No AWS/OIDC/memory operations.
+name: Artifact winner channel (synthetic local choice only)
 
 on:
   workflow_dispatch:
     inputs:
       challenge:
-        description: Fresh synthetic 64-hex challenge; not an artifact nonce
+        description: Fresh synthetic 64-hex challenge
         type: string
         required: true
 
@@ -18,9 +18,8 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  first_claim:
-    name: First upload
-    # The project selector is preserved, but this exercise never uses the pool.
+  contender_a:
+    name: Contender A
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/artifact-channel-smoke' && vars.RUNNER_LABEL == ''
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     timeout-minutes: 8
@@ -37,20 +36,19 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: '24'
-      - name: Install only the pinned artifact client closure
+      - name: Install pinned artifact client closure
         working-directory: .github/actions/artifact-channel-smoke
         run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Verify owner announcement, then upload
+      - name: Upload own inbox and await owner winner
         id: channel
         uses: ./.github/actions/artifact-channel-smoke
         with:
-          mode: first
+          contender: a
           challenge: ${{ inputs.challenge }}
           github-token: ${{ github.token }}
 
-  duplicate_claim:
-    name: Duplicate upload
-    needs: first_claim
+  contender_b:
+    name: Contender B
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/artifact-channel-smoke' && vars.RUNNER_LABEL == ''
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     timeout-minutes: 8
@@ -58,6 +56,8 @@ jobs:
       contents: read
       actions: read
       statuses: read
+    outputs:
+      receipt: ${{ steps.channel.outputs.receipt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -65,13 +65,49 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: '24'
-      - name: Install only the pinned artifact client closure
+      - name: Install pinned artifact client closure
         working-directory: .github/actions/artifact-channel-smoke
         run: npm ci --ignore-scripts --no-audit --no-fund
-      - name: Verify announcement and require same-name upload conflict
+      - name: Upload own inbox and await owner winner
+        id: channel
         uses: ./.github/actions/artifact-channel-smoke
         with:
-          mode: duplicate
+          contender: b
           challenge: ${{ inputs.challenge }}
           github-token: ${{ github.token }}
-          first-receipt: ${{ needs.first_claim.outputs.receipt }}
+
+  verify_markers:
+    name: Verify synthetic winner only
+    needs: [contender_a, contender_b]
+    if: always() && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/artifact-channel-smoke' && vars.RUNNER_LABEL == ''
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    timeout-minutes: 3
+    permissions: {}
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24'
+      - name: Require exactly one simulated protected step
+        env:
+          CONTENDER_A: ${{ needs.contender_a.outputs.receipt }}
+          CONTENDER_B: ${{ needs.contender_b.outputs.receipt }}
+          RESULT_A: ${{ needs.contender_a.result }}
+          RESULT_B: ${{ needs.contender_b.result }}
+        run: |
+          node --input-type=module <<'NODE'
+          import assert from 'node:assert/strict';
+          assert.equal(process.env.RESULT_A, 'success');
+          assert.equal(process.env.RESULT_B, 'success');
+          const a=JSON.parse(process.env.CONTENDER_A), b=JSON.parse(process.env.CONTENDER_B);
+          for (const r of [a,b]) {
+            assert.equal(r.kind, 'synthetic-local-journal-channel-result');
+            assert([0,1].includes(r.AWS_SIMULATED_MARKER));
+            assert.match(r.winnerHash, /^[a-f0-9]{64}$/);
+          }
+          assert.equal(a.bindingHash,b.bindingHash);
+          assert.equal(a.winnerHash,b.winnerHash);
+          assert.notEqual(a.candidateHash,b.candidateHash);
+          assert.equal(a.AWS_SIMULATED_MARKER+b.AWS_SIMULATED_MARKER,1);
+          assert.equal((a.AWS_SIMULATED_MARKER?a:b).candidateHash,a.winnerHash);
+          console.log(JSON.stringify({kind:'synthetic-local-choice-channel-verified',bindingHash:a.bindingHash,winnerHash:a.winnerHash}));
+          NODE

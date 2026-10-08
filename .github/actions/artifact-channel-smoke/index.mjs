@@ -24,7 +24,7 @@ try{
   const raw=JSON.stringify(diagnostic);await appendFile(env.GITHUB_OUTPUT,'diagnostic='+raw+'\n');
   await new Promise((resolve,reject)=>process.stdout.write(raw+'\n',error=>error?reject(error):resolve()));
  };
- const result=await runChannel({config,mode:env.INPUT_MODE,firstReceipt:env['INPUT_FIRST-RECEIPT']?JSON.parse(env['INPUT_FIRST-RECEIPT']):undefined,env},{api:githubReader(env['INPUT_GITHUB-TOKEN']),checkout,artifactClient,recordDiagnostic});
- const raw=JSON.stringify(result);await appendFile(env.GITHUB_OUTPUT,'receipt='+raw+'\n');console.log(raw);
+ const result=await runChannel({config,contender:env.INPUT_CONTENDER,env},{api:githubReader(env['INPUT_GITHUB-TOKEN']),checkout,artifactClient,recordDiagnostic});
+ const raw=JSON.stringify(result);await appendFile(env.GITHUB_OUTPUT,'receipt='+raw+'\nmarker='+result.AWS_SIMULATED_MARKER+'\n');console.log(raw);
  clearTimeout(watchdog);
 }catch{console.error('::error::SyntheticChannelHeld');process.exit(1);}
