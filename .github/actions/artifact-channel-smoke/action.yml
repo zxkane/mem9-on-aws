@@ -1,0 +1,21 @@
+name: Synthetic artifact channel smoke
+description: Checks real owner status and cross-job fixed-name artifact conflict; no production authority.
+inputs:
+  mode:
+    description: Fixed workflow role, first or duplicate.
+    required: true
+  challenge:
+    description: Synthetic random 64-hex dispatch binding.
+    required: true
+  github-token:
+    description: Read-only job token for GitHub metadata.
+    required: true
+  first-receipt:
+    description: First job metadata, only for verifying conflict preserves that artifact.
+    required: false
+outputs:
+  receipt:
+    description: Synthetic channel observation; not an authorization or transferable capability.
+runs:
+  using: node24
+  main: index.mjs

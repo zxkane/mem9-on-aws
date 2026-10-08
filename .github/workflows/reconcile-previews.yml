@@ -1,235 +1,77 @@
-name: Reconcile preview stages
-
-# Optional GitHub repository variable:
-#   DEPLOYMENT_MAINTENANCE_PAUSED - set to true during guarded IAM maintenance.
-#   Report, manual apply, and auto stop before assuming the preview deploy role.
-#   WORKLOAD_BOUNDARY_PROD_ENABLED - AWS jobs stay disabled until the guarded
-#   workload-role migration sets this variable to true.
-#   PREVIEW_AUTO_CLEANUP_ENABLED - exactly true enables bounded cleanup of one
-#   confirmed closed-PR stage per scheduled run (and manual auto run).
-#
-# Workload-boundary maintenance gate revision: 1
+# Branch-only synthetic channel acceptance. Do not merge this replacement.
+# Uses an existing default-branch workflow path for workflow_dispatch --ref.
+# No schedule, production source authorization, cloud credentials or memory.
+name: Artifact channel smoke (synthetic only)
 
 on:
-  schedule:
-    - cron: "17 3 * * *"
   workflow_dispatch:
     inputs:
-      mode:
-        description: "Report only, or revalidate and remove eligible SST-managed stages"
-        type: choice
-        options:
-          - dry-run
-          - auto
-          - apply
-        default: dry-run
+      challenge:
+        description: Fresh synthetic 64-hex challenge; not an artifact nonce
+        type: string
+        required: true
 
 permissions: {}
 
 concurrency:
-  group: preview-stage-reconciliation
+  group: artifact-channel-smoke-${{ github.ref }}
   cancel-in-progress: false
 
 jobs:
-  application-region:
-    name: Resolve application region
+  first_claim:
+    name: First upload
+    # The project selector is preserved, but this exercise never uses the pool.
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/artifact-channel-smoke' && vars.RUNNER_LABEL == ''
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    timeout-minutes: 8
     permissions:
       contents: read
+      actions: read
+      statuses: read
     outputs:
-      region: ${{ steps.resolve.outputs.region }}
+      receipt: ${{ steps.channel.outputs.receipt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: 24
-      - name: Resolve SST AWS provider region
-        id: resolve
-        run: echo "region=$(node scripts/resolve-application-region.mjs)" >> "$GITHUB_OUTPUT"
+          node-version: '24'
+      - name: Install only the pinned artifact client closure
+        working-directory: .github/actions/artifact-channel-smoke
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Verify owner announcement, then upload
+        id: channel
+        uses: ./.github/actions/artifact-channel-smoke
+        with:
+          mode: first
+          challenge: ${{ inputs.challenge }}
+          github-token: ${{ github.token }}
 
-  report:
-    name: Report stale preview stages
-    needs: [application-region]
-    if: vars.WORKLOAD_BOUNDARY_PROD_ENABLED == 'true'
+  duplicate_claim:
+    name: Duplicate upload
+    needs: first_claim
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/artifact-channel-smoke' && vars.RUNNER_LABEL == ''
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
-    environment: preview-maintenance
-    timeout-minutes: 10
+    timeout-minutes: 8
     permissions:
-      id-token: write
       contents: read
       actions: read
-      pull-requests: read
-    env:
-      AWS_REGION: ${{ needs.application-region.outputs.region }}
+      statuses: read
     steps:
-      - name: Deployment maintenance gate
-        env:
-          PAUSED: ${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}
-        run: |
-          if [ "$PAUSED" = "true" ]; then
-            echo "::error::AWS deployments are paused for guarded IAM maintenance"
-            exit 1
-          fi
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
-
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: 24
-
-      - name: Configure AWS credentials (read-only reconciliation)
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+          node-version: '24'
+      - name: Install only the pinned artifact client closure
+        working-directory: .github/actions/artifact-channel-smoke
+        run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Verify announcement and require same-name upload conflict
+        uses: ./.github/actions/artifact-channel-smoke
         with:
-          role-to-assume: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Build redacted advisory plan
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: >-
-          node scripts/preview-reconciler.mts plan
-          --repository "$GITHUB_REPOSITORY"
-          --event "$GITHUB_EVENT_NAME"
-          --plan "$RUNNER_TEMP/preview-reconciliation-plan.json"
-
-      - name: Preserve advisory plan for explicit manual apply
-        if: github.event_name == 'workflow_dispatch' && inputs.mode == 'apply'
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: preview-reconciliation-plan
-          path: ${{ runner.temp }}/preview-reconciliation-plan.json
-          retention-days: 1
-
-  apply:
-    name: Revalidate and reconcile preview stages
-    needs: [application-region, report]
-    if: github.event_name == 'workflow_dispatch' && inputs.mode == 'apply' && vars.WORKLOAD_BOUNDARY_PROD_ENABLED == 'true'
-    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
-    environment: preview-maintenance
-    timeout-minutes: 45
-    permissions:
-      id-token: write
-      contents: read
-      actions: read
-      pull-requests: read
-      issues: write
-    env:
-      AWS_REGION: ${{ needs.application-region.outputs.region }}
-    steps:
-      - name: Deployment maintenance gate
-        env:
-          PAUSED: ${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}
-        run: |
-          if [ "$PAUSED" = "true" ]; then
-            echo "::error::AWS deployments are paused for guarded IAM maintenance"
-            exit 1
-          fi
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
-        with:
-          package_json_file: infra/package.json
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: infra/pnpm-lock.yaml
-
-      - name: Install SST dependencies
-        run: pnpm -C infra install --frozen-lockfile
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
-        with:
-          role-to-assume: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Download advisory plan
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
-        with:
-          name: preview-reconciliation-plan
-          path: ${{ runner.temp }}
-
-      - name: Apply after fresh safety checks
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: >-
-          node scripts/preview-reconciler.mts apply
-          --repository "$GITHUB_REPOSITORY"
-          --event "$GITHUB_EVENT_NAME"
-          --mode apply
-          --plan "$RUNNER_TEMP/preview-reconciliation-plan.json"
-
-  auto:
-    name: Automatically clean one closed PR preview
-    needs: [application-region, report]
-    if: >-
-      vars.WORKLOAD_BOUNDARY_PROD_ENABLED == 'true' &&
-      vars.PREVIEW_AUTO_CLEANUP_ENABLED == 'true' && (
-        github.event_name == 'schedule' ||
-        (github.event_name == 'workflow_dispatch' && inputs.mode == 'auto')
-      )
-    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
-    environment: preview-maintenance
-    timeout-minutes: 75
-    permissions:
-      id-token: write
-      contents: read
-      actions: read
-      pull-requests: read
-    env:
-      AWS_REGION: ${{ needs.application-region.outputs.region }}
-    steps:
-      - name: Deployment maintenance gate
-        env:
-          PAUSED: ${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}
-        run: |
-          if [ "$PAUSED" = "true" ]; then
-            echo "::error::AWS deployments are paused for guarded IAM maintenance"
-            exit 1
-          fi
-
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-
-      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
-        with:
-          package_json_file: infra/package.json
-
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
-        with:
-          node-version: 24
-          cache: pnpm
-          cache-dependency-path: infra/pnpm-lock.yaml
-
-      - name: Install SST dependencies
-        run: pnpm -C infra install --frozen-lockfile
-
-      - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
-        with:
-          role-to-assume: ${{ secrets.AWS_PREVIEW_ROLE_ARN }}
-          aws-region: ${{ env.AWS_REGION }}
-          mask-aws-account-id: true
-
-      - name: Automatic cleanup of one closed PR
-        timeout-minutes: 65
-        env:
-          GH_TOKEN: ${{ github.token }}
-          PREVIEW_AUTO_CLEANUP_ENABLED: ${{ vars.PREVIEW_AUTO_CLEANUP_ENABLED }}
-        run: >-
-          node scripts/preview-reconciler.mts auto
-          --repository "$GITHUB_REPOSITORY"
-          --event "$GITHUB_EVENT_NAME"
-          --mode auto
+          mode: duplicate
+          challenge: ${{ inputs.challenge }}
+          github-token: ${{ github.token }}
+          first-receipt: ${{ needs.first_claim.outputs.receipt }}
