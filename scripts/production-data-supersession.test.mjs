@@ -54,6 +54,13 @@ it('requires contiguous complete lineage and never reuses an earlier authorizati
  for(const chain of [[],[{...f.input.lineage[0],parameterVersion:2}],[{...f.input.lineage[0],authorizationHash:h('9')}],f.input.lineage.concat(f.input.lineage)])expect(()=>validateSupersessionLineage(chain,f.input.predecessor,f.data.authorizationId)).toThrow();
  expect(()=>validateSupersessionLineage(f.input.lineage,f.input.predecessor,f.old.authorizationId)).toThrow();
 });
+it('does not route an image-security change through legacy supersession',async()=>{
+ const f=fixture();f.data.version=2;f.input.authorization.hash=hash(f.data);
+ await expect(supersedeProductionDataRelease(f.deps,f.input)).rejects.toThrow('DataReleaseSupersessionInputInvalid');
+ expect(f.calls).not.toContain('put');
+ const g=fixture();g.old.version=2;g.input.predecessor.Value=JSON.stringify(g.old);g.input.lineage[0].authorizationHash=hash(g.old);
+ expect(()=>validateSupersessionLineage(g.input.lineage,g.input.predecessor,g.data.authorizationId)).toThrow('DataReleaseLineageInvalid');
+});
 for(const key of ['images','runtimeNonce','generation','parentProofHash','targetsHash','dataRevision','dataSourceTree','dataSourceTag','backendBindingHash','schemaDigest','operatorDigest','buildInputsHash'])it('rejects changed retained binding '+key+' before any mutation',async()=>{
  const f=fixture();f.data[key]=key==='images'?{}:key==='runtimeNonce'?id('1'):h('1');f.input.authorization.hash=hash(f.data);
  await expect(supersedeProductionDataRelease(f.deps,f.input)).rejects.toThrow();expect(f.calls).not.toContain('put');

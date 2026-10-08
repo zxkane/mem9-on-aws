@@ -3,6 +3,7 @@
 // JSON configuration cannot install one. Ordinary data-plane clients are not
 // wrapped or changed by this module.
 import {createHash} from 'node:crypto';
+import {getImageAuthorization,inheritImageAuthorization} from './production-image-admission.mjs';
 const guards=new WeakMap(),required=new WeakSet(),permits=new WeakMap();
 const fail=code=>{throw Error(code);};
 const freeze=value=>{if(value&&typeof value==='object'){Object.values(value).forEach(freeze);Object.freeze(value);}return value;};
@@ -34,17 +35,18 @@ export function installMaintenanceAdmission(clients,{binding,verify,assertCurren
   };
 }
 export function inheritMaintenanceAdmission(source,target){
+  inheritImageAuthorization(source,target);
   if(required.has(source))required.add(target);if(guards.has(source))guards.set(target,guards.get(source));return target;
 }
 export async function assertMaintenanceDispatch(clients,event){
   const entry=guards.get(clients);
-  if(!entry){if(required.has(clients)||event.transitionRequired)fail('MaintenanceAdmissionRequired');return null;}
+  if(!entry){if(required.has(clients)||getImageAuthorization(clients)||event.transitionRequired)fail('MaintenanceAdmissionRequired');return null;}
   if(!event||!Object.values(purposes).some(k=>k.has(event.kind))||typeof event.operation!=='string'||!event.operation)fail('MaintenanceDispatchInvalid');
   const permit=await entry.verify(freeze(structuredClone(event))),record=permits.get(permit);
   if(!record||record.entry!==entry||record.eventHash!==hash(event))fail('MaintenancePermitInvalid');return permit;
 }
 export function consumeMaintenancePermit(clients,permit,event){
-  if(permit===null){if(required.has(clients)||event.transitionRequired)fail('MaintenanceAdmissionRequired');return;}
+  if(permit===null){if(required.has(clients)||getImageAuthorization(clients)||event.transitionRequired)fail('MaintenanceAdmissionRequired');return;}
   const record=permits.get(permit),entry=guards.get(clients);
   if(!record||record.entry!==entry||record.used||record.eventHash!==hash(event))fail('MaintenancePermitInvalid');record.used=true;
   const c=record.checkpoint,at=entry.now();if(!Number.isSafeInteger(at)||at<c.observedMs||at>=c.expiresMs||at-c.observedMs>300000)fail('MaintenancePermitExpired');

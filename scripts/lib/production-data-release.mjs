@@ -1,4 +1,6 @@
 import {canaryEvidenceHash as hash} from './production-canary-verification.mjs';
+import {inspectImageTransitionDescriptorCommitment} from './production-image-transition.mjs';
+import {parseStrictJson} from './authorization-archive-policy.mjs';
 
 export const DATA_COMPONENTS=Object.freeze(['llm-proxy','mnemo-server','qwen3-embed']);
 export const DATA_RELEASE_MAX_AUTHORIZATION_MS=86400000;
@@ -19,7 +21,9 @@ export function inspectDataRelease(raw,expected){
     if(typeof raw==='string'){if(Buffer.byteLength(raw)>4096)fail();data=JSON.parse(raw);}
     else data=structuredClone(raw);
   }catch{fail();}
-  if(!exact(data,keys)||data.version!==1||!expected||
+  const imageTransition=data?.version===2;
+  if(imageTransition&&typeof raw==='string')try{data=parseStrictJson(raw);}catch{fail();}
+  if(!exact(data,imageTransition?[...keys,'transition']:keys)||![1,2].includes(data.version)||!expected||
     Object.keys(expected).some(k=>!['stage','account','region','controlSourceTree','bindings'].includes(k))||
     !['prod'].includes(data.stage)&&!/^pr-[1-9][0-9]*$/.test(data.stage??'')||
     data.stage!==expected.stage||!/^\d{12}$/.test(data.account??'')||data.account!==expected.account||
@@ -30,6 +34,10 @@ export function inspectDataRelease(raw,expected){
     !hex(data.runtimeNonce,32)||!hex(data.authorizationId,32)||hashes.some(k=>!hex(data[k],64))||
     !Number.isSafeInteger(data.issuedMs)||data.issuedMs<1||!Number.isSafeInteger(data.expiresMs)||data.expiresMs<=data.issuedMs||
     data.expiresMs-data.issuedMs>DATA_RELEASE_MAX_AUTHORIZATION_MS||!exact(data.images,DATA_COMPONENTS))fail();
+  // A compact commitment is not proof verification or deployment authority.
+  // The image-transition publisher and every admission caller must authenticate
+  // the full proof and bind the selected predecessor/target independently.
+  if(imageTransition)try{inspectImageTransitionDescriptorCommitment(data.transition);}catch{fail();}
   for(const image of Object.values(data.images))if(!exact(image,['rootDigest','arm64Digest'])||
     !digest(image.rootDigest)||!digest(image.arm64Digest)||image.rootDigest===image.arm64Digest)fail();
   if(expected.bindings!==undefined){

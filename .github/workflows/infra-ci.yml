@@ -1130,17 +1130,88 @@ jobs:
   # the scope-specific role; on PR it skips gracefully when the preview role is
   # absent, while production hard-fails without its role.
   # ───────────────────────────────────────────────────────────────────────────
+  verify-production-image-transition:
+    name: Verify production image source
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    environment: prod
+    needs: [changes, application-region, typecheck]
+    if: >-
+      !inputs.runtime_cutover
+      && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+      && (needs.changes.outputs.workload_changed == 'true' || needs.changes.outputs.aws_mutation_required == 'true')
+    timeout-minutes: 10
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+      pull-requests: read
+    env:
+      AWS_REGION: ${{ needs.application-region.outputs.region }}
+    outputs:
+      image_transition: ${{ steps.source.outputs.image_transition }}
+    steps:
+      - name: Deployment maintenance gate
+        env:
+          BOUNDARY_ENFORCED: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
+          PAUSED: ${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}
+          HAS_AWS: ${{ secrets.AWS_PROD_ROLE_ARN }}
+        run: |
+          if [ "$PAUSED" = "true" ]; then
+            echo "::error::AWS deployments are paused for guarded IAM maintenance"
+            exit 1
+          fi
+          if [ "$BOUNDARY_ENFORCED" != "true" ]; then
+            echo "::error::Guarded workload-boundary migration is incomplete — refusing prod deployment"
+            exit 1
+          fi
+          if [ -z "$HAS_AWS" ]; then
+            echo "::error::Production image verification requires the active isolated deployment role"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+
+      - name: Install production image verifier dependencies
+        run: npm ci
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        with:
+          role-to-assume: ${{ secrets.AWS_PROD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
+
+      - name: Verify protected image upgrade source
+        id: source
+        env:
+          STAGE: prod
+          MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PROD_ROLE_ARN }}
+          MEM9_DECISION_ARTIFACT_BUCKET: ${{ vars.MEM9_DECISION_ARTIFACT_BUCKET }}
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/verify-image-security-deployment.mjs
+
+      - name: Remove private image transition bundle
+        if: always() && env.MEM9_IMAGE_TRANSITION_BUNDLE_FILE != ''
+        run: node scripts/verify-image-security-deployment.mjs --cleanup
+
   build-and-push-image:
     name: Build & push workload images
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     environment: ${{ github.event_name == 'pull_request' && 'preview-ci' || 'prod' }}
-    needs: [changes, application-region, typecheck]
+    needs: [changes, application-region, typecheck, verify-production-image-transition]
     if: >-
       always()
       && !inputs.runtime_cutover
       && needs.changes.outputs.workload_changed == 'true'
       && needs.application-region.result == 'success'
       && needs.typecheck.result == 'success'
+      && (github.event_name == 'pull_request' || (needs.verify-production-image-transition.result == 'success' && needs.verify-production-image-transition.outputs.image_transition == 'false'))
       && (
         github.event_name == 'push'
         || github.event_name == 'workflow_dispatch'
@@ -1362,6 +1433,108 @@ jobs:
           cache-from: type=gha,scope=llm-proxy
           cache-to: type=gha,mode=max,scope=llm-proxy
 
+  build-image-transition-control:
+    name: Build image transition control
+    runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
+    environment: prod
+    needs: [application-region, verify-production-image-transition]
+    if: >-
+      needs.verify-production-image-transition.result == 'success'
+      && needs.verify-production-image-transition.outputs.image_transition == 'true'
+    timeout-minutes: 30
+    permissions:
+      id-token: write
+      contents: read
+      actions: read
+      pull-requests: read
+    env:
+      AWS_REGION: ${{ needs.application-region.outputs.region }}
+    outputs:
+      image_tag: ${{ steps.tag.outputs.image_tag }}
+      bootstrap_digest: ${{ steps.bootstrap.outputs.digest }}
+    steps:
+      - name: Deployment maintenance gate
+        env:
+          BOUNDARY_ENFORCED: ${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}
+          PAUSED: ${{ vars.DEPLOYMENT_MAINTENANCE_PAUSED }}
+          HAS_AWS: ${{ secrets.AWS_PROD_ROLE_ARN }}
+        run: |
+          if [ "$PAUSED" = "true" ]; then
+            echo "::error::AWS deployments are paused for guarded IAM maintenance"
+            exit 1
+          fi
+          if [ "$BOUNDARY_ENFORCED" != "true" ]; then
+            echo "::error::Guarded workload-boundary migration is incomplete — refusing prod deployment"
+            exit 1
+          fi
+          if [ -z "$HAS_AWS" ]; then
+            echo "::error::Production image verification requires the active isolated deployment role"
+            exit 1
+          fi
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: 24
+
+      - name: Install production image verifier dependencies
+        run: npm ci
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
+        with:
+          role-to-assume: ${{ secrets.AWS_PROD_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+          mask-aws-account-id: true
+
+      - name: Resolve image tag
+        id: tag
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+        run: node scripts/image-tags.mjs
+
+      - name: Log in to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@03f1aad4c6c7ffd436567f42f9384779290529bd # v2
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4
+        with:
+          platforms: arm64
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4
+
+      - name: Verify protected image upgrade source
+        id: source
+        env:
+          STAGE: prod
+          MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PROD_ROLE_ARN }}
+          MEM9_DECISION_ARTIFACT_BUCKET: ${{ vars.MEM9_DECISION_ARTIFACT_BUCKET }}
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/verify-image-security-deployment.mjs --build
+
+      - name: Build & push image transition bootstrap (arm64)
+        id: bootstrap
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7
+        with:
+          context: .
+          file: docker/bootstrap/Dockerfile
+          pull: true
+          no-cache-filters: runtime
+          platforms: linux/arm64
+          push: true
+          tags: ${{ steps.ecr-login.outputs.registry }}/mem9-on-aws/bootstrap:${{ steps.tag.outputs.image_tag }}
+          cache-from: type=gha,scope=bootstrap
+          cache-to: type=gha,mode=max,scope=bootstrap
+
+      - name: Remove private image transition bundle
+        if: always() && env.MEM9_IMAGE_TRANSITION_BUNDLE_FILE != ''
+        run: node scripts/verify-image-security-deployment.mjs --cleanup
+
   build-human-acceptance-image:
     name: Build human namespace acceptance image
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
@@ -1461,7 +1634,7 @@ jobs:
     name: Deploy prod
     runs-on: ${{ vars.RUNNER_LABEL && fromJSON(vars.RUNNER_LABEL) || 'ubuntu-latest' }}
     environment: prod
-    needs: [changes, application-region, typecheck, build-and-push-image]
+    needs: [changes, application-region, typecheck, build-and-push-image, verify-production-image-transition, build-image-transition-control]
     if: >-
       always()
       && !inputs.runtime_cutover
@@ -1469,7 +1642,11 @@ jobs:
       && needs.changes.outputs.aws_mutation_required == 'true'
       && needs.application-region.result == 'success'
       && needs.typecheck.result == 'success'
-      && (needs.build-and-push-image.result == 'success' || needs.build-and-push-image.result == 'skipped')
+      && needs.verify-production-image-transition.result == 'success'
+      && (
+        (needs.verify-production-image-transition.outputs.image_transition == 'true' && needs.build-image-transition-control.result == 'success' && needs.build-and-push-image.result == 'skipped')
+        || (needs.verify-production-image-transition.outputs.image_transition == 'false' && needs.build-image-transition-control.result == 'skipped' && (needs.build-and-push-image.result == 'success' || needs.build-and-push-image.result == 'skipped'))
+      )
     # Full-stack prod: Aurora + the 3-container ECS task (qwen3 image pull + 180s
     # health startPeriod) + the bootstrap run-task. No RDS Proxy (dropped — see
     # infra/db.ts). The configured custom reconciliation budget
@@ -1479,9 +1656,12 @@ jobs:
     permissions:
       id-token: write
       contents: read
+      actions: read
+      pull-requests: read
     env:
       AWS_REGION: ${{ needs.application-region.outputs.region }}
       ROLE_NAME: github-actions-mem9-on-aws-prod
+      MEM9_EXPECT_IMAGE_TRANSITION: ${{ needs.verify-production-image-transition.outputs.image_transition }}
       MEM9_LLM_RESPONSES_REGION: ${{ vars.MEM9_LLM_RESPONSES_REGION }}
       # Authentication is an operator choice. Preview jobs receive none of these
       # settings and continue to create isolated Cognito pools and test clients.
@@ -1548,12 +1728,23 @@ jobs:
       - name: Install infra dependencies
         run: pnpm -C infra install --frozen-lockfile
 
+      - name: Install production runtime operator dependencies
+        run: npm ci
+
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6
         with:
           role-to-assume: ${{ secrets.AWS_PROD_ROLE_ARN }}
           aws-region: ${{ env.AWS_REGION }}
           mask-aws-account-id: true
+
+      - name: Verify protected image upgrade source
+        env:
+          STAGE: prod
+          MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PROD_ROLE_ARN }}
+          MEM9_DECISION_ARTIFACT_BUCKET: ${{ vars.MEM9_DECISION_ARTIFACT_BUCKET }}
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/verify-image-security-deployment.mjs
 
       - name: Preflight — verify role is assumable
         env:
@@ -1582,9 +1773,22 @@ jobs:
       - name: Resolve deployed image tag
         id: deploy-image
         env:
+          IMAGE_TRANSITION: ${{ needs.verify-production-image-transition.outputs.image_transition }}
           BUILT_IMAGE_TAG: ${{ needs.build-and-push-image.outputs.image_tag }}
+          CONTROL_IMAGE_TAG: ${{ needs.build-image-transition-control.outputs.image_tag }}
+          CONTROL_IMAGE_DIGEST: ${{ needs.build-image-transition-control.outputs.bootstrap_digest }}
         run: |
           image_tag="$BUILT_IMAGE_TAG"
+          if [[ "$IMAGE_TRANSITION" == 'true' ]]; then
+            if ! [[ "$CONTROL_IMAGE_TAG" =~ ^mem9-[0-9a-f]{7}$ ]] || ! [[ "$CONTROL_IMAGE_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+              echo "::error::Verified control build output is missing"
+              exit 1
+            fi
+            image_tag="$CONTROL_IMAGE_TAG"
+          elif [[ "$IMAGE_TRANSITION" != 'false' ]]; then
+            echo "::error::Verified image transition selection is missing"
+            exit 1
+          fi
           if [[ -z "$image_tag" ]]; then
             image_tag=$(aws ssm get-parameter \
               --name /mem9-on-aws/prod/ecs/image-tag \
@@ -1683,13 +1887,26 @@ jobs:
           pnpm -C infra exec sst secret set OauthStateHmacKey "$KEY" --stage prod
           echo "::notice::OauthStateHmacKey seeded for prod (re-linked by the deploy below)"
 
-      - name: Install production runtime operator dependencies
-        run: npm ci
+      - name: Refresh image upgrade authorization before configure
+        env:
+          STAGE: prod
+          MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PROD_ROLE_ARN }}
+          MEM9_DECISION_ARTIFACT_BUCKET: ${{ vars.MEM9_DECISION_ARTIFACT_BUCKET }}
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/verify-image-security-deployment.mjs --deploy
 
       - name: Resolve production runtime deployment mode
         env:
           STAGE: prod
         run: node scripts/run-production-runtime.mjs configure
+
+      - name: Refresh image upgrade authorization before SST
+        env:
+          STAGE: prod
+          MEM9_DEPLOY_ROLE_ARN: ${{ secrets.AWS_PROD_ROLE_ARN }}
+          MEM9_DECISION_ARTIFACT_BUCKET: ${{ vars.MEM9_DECISION_ARTIFACT_BUCKET }}
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/verify-image-security-deployment.mjs --deploy
 
       - name: Deploy prod stage
         shell: bash
@@ -1697,6 +1914,7 @@ jobs:
         # (`mem9-<sha7>`); infra/ecs.ts reads MEM9_IMAGE_TAG.
         env:
           MEM9_IMAGE_TAG: ${{ steps.deploy-image.outputs.image_tag }}
+          MEM9_EXPECTED_BOOTSTRAP_DIGEST: ${{ needs.build-image-transition-control.outputs.bootstrap_digest }}
           MEM9_ECR_NAMESPACE: mem9-on-aws
           # New opt-in: the legacy tenant-wide flag cannot activate scheduling.
           MEM9_CONSOLIDATION_SCHEDULE_ENABLED: ${{ vars.MEM9_NAMESPACE_CONSOLIDATION_SCHEDULE_ENABLED || '0' }}
@@ -1775,6 +1993,10 @@ jobs:
         env:
           STAGE: prod
         run: bash scripts/run-oauth-facade-smoke.sh
+
+      - name: Remove private image transition bundle
+        if: always() && env.MEM9_IMAGE_TRANSITION_BUNDLE_FILE != ''
+        run: node scripts/verify-image-security-deployment.mjs --cleanup
 
   report-prod-failure:
     name: Report prod deploy failure

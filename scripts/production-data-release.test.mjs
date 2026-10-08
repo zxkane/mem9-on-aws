@@ -1,5 +1,6 @@
 import {it,expect} from 'vitest';
 import {inspectDataRelease,requireActiveDataRelease} from './lib/production-data-release.mjs';
+import {IMAGE_TRANSITION_LIMITS_HASH} from './lib/production-image-transition.mjs';
 const now=1800000000000,hex=n=>n.toString(16).padStart(64,'0');
 function fixture(){
  const data={version:1,stage:'prod',account:'123456789012',region:'ap-northeast-1',controlSourceTree:'a'.repeat(40),
@@ -36,4 +37,34 @@ it('never permits production data images through a preview context',()=>{
  const f=fixture();expect(()=>requireActiveDataRelease(f.data,{...f.expected,stage:'pr-7'},{now})).toThrow('DataReleaseInvalid');
  f.data.stage='pr-7';f.data.dataSourceTag='pr-bbbbbbb';
  expect(requireActiveDataRelease(f.data,{...f.expected,stage:'pr-7'},{now}).images['llm-proxy']).toContain('/mem9-on-aws/preview/llm-proxy@');
+});
+
+function imageRelease(){
+ const f=fixture();f.data.version=2;
+ f.data.transition={version:1,kind:'image-security-upgrade',proofHash:hex(30),predecessorHash:hex(31),limitsHash:IMAGE_TRANSITION_LIMITS_HASH};
+ return f;
+}
+it('inspects an explicitly typed image-security target without claiming it is serving',()=>{
+ const f=imageRelease(),result=requireActiveDataRelease(JSON.stringify(f.data),f.expected,{now});
+ expect(result.data.version).toBe(2);expect(result.data.transition).toEqual(f.data.transition);
+ expect(result.data.parentProofHash).toBe(f.data.parentProofHash);
+ expect(result.data.backendBindingHash).toBe(f.data.backendBindingHash);
+ expect(result.images['mnemo-server'].endsWith('@'+f.data.images['mnemo-server'].rootDigest)).toBe(true);
+});
+it('keeps legacy records strict and rejects unknown image-security commitments',()=>{
+ for(const mutate of [f=>{delete f.data.transition;},f=>{f.data.transition.kind='other';},
+  f=>{f.data.transition.version=2;},f=>{f.data.transition.proofHash='unknown';},
+  f=>{delete f.data.transition.predecessorHash;},f=>{f.data.transition.compatible=true;},
+  f=>{f.data.transition.limitsHash='';},f=>{f.data.version=3;}]){
+  const f=imageRelease();mutate(f);expect(()=>inspectDataRelease(f.data,f.expected)).toThrow();
+ }
+ const f=imageRelease();f.data.version=1;expect(()=>inspectDataRelease(f.data,f.expected)).toThrow();
+});
+it('does not renew image-security expiry during historical inspection',()=>{
+ const f=imageRelease();expect(()=>inspectDataRelease(f.data,f.expected)).not.toThrow();
+ expect(()=>requireActiveDataRelease(f.data,f.expected,{now:f.data.expiresMs})).toThrow('DataReleaseAuthorizationExpired');
+});
+it('rejects duplicate decoded JSON keys in the explicit image-security descriptor',()=>{
+ const f=imageRelease(),raw=JSON.stringify(f.data).replace('{','{"version":2,');
+ expect(()=>inspectDataRelease(raw,f.expected)).toThrow();
 });

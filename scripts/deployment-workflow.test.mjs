@@ -215,6 +215,8 @@ describe("workflow integration", () => {
     expect(credentialJobs.sort()).toEqual(
       [
         "infra-ci.yml:build-and-push-image",
+        "infra-ci.yml:verify-production-image-transition",
+        "infra-ci.yml:build-image-transition-control",
         "infra-ci.yml:build-human-acceptance-image",
         "infra-ci.yml:cleanup-failed-preview",
         "infra-ci.yml:cleanup-preview",

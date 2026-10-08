@@ -24,6 +24,7 @@ import {assertExtensionMaintenance} from './lib/runtime-extension-catalog.mjs';
 import {cancellationRehearsal} from './lib/production-runtime-cancellation-runner.mjs';
 import {requireNamespaceId} from './lib/maintenance-scope.mjs';
 import {loadDeploymentDataRelease} from './lib/production-data-release-loader.mjs';
+import {installImageDeploymentBundle} from './lib/production-image-deployment-bundle.mjs';
 import {captureDataReleaseBuild} from './lib/production-data-evidence.mjs';
 import {inspectDataRelease} from './lib/production-data-release.mjs';
 
@@ -91,6 +92,12 @@ export async function productionCoordinatorDigest(){
     'scripts/lib/production-data-release.mjs','scripts/lib/production-data-release-loader.mjs',
     'scripts/lib/production-data-build-inputs.mjs','scripts/lib/production-data-evidence.mjs',
     'scripts/lib/production-data-authorization.mjs','scripts/lib/production-data-issuance.mjs',
+    'scripts/lib/production-image-transition.mjs','scripts/lib/production-image-transition-proof.mjs',
+    'scripts/lib/production-image-graph.mjs','scripts/lib/production-image-filesystem.mjs','scripts/lib/production-image-copy.mjs',
+    'scripts/lib/production-image-admission.mjs','scripts/lib/production-image-supersession.mjs',
+    'scripts/lib/production-image-custody.mjs','scripts/lib/production-image-restoration.mjs','scripts/lib/production-image-archive.mjs',
+    'scripts/lib/production-image-deployment.mjs','scripts/lib/production-image-deployment-reader.mjs','scripts/lib/production-image-deployment-bundle.mjs',
+    'scripts/lib/production-current-capacity.mjs','scripts/verify-image-security-deployment.mjs',
     'scripts/lib/production-scheduler-context.mjs',
     'scripts/lib/production-canary-continuation-flow.mjs','scripts/lib/production-canary-continuation-proof.mjs',
     'scripts/lib/production-recurring-verification.mjs','scripts/lib/production-recurring-observer.mjs',
@@ -109,6 +116,7 @@ export async function productionCoordinatorDigest(){
 }
 
 export async function retainedDeploymentEnvironment(clients,context,{captureBuild=captureDataReleaseBuild}={}){
+  await installImageDeploymentBundle(clients,{env:context.env??process.env,expected:{stage:context.stage,account:context.account,region:context.region,controlSourceTree:context.controlSourceTree},controlRevision:context.controlRevision});
   const selected=await loadDeploymentDataRelease(clients,context);
   if(!selected)return {MEM9_RETAINED_DATA_RELEASE:'none',MEM9_RETAINED_DATA_RELEASE_HASH:'none',MEM9_RETAINED_DATA_RELEASE_VERSION:'0'};
   const evidence=await captureBuild({data:selected.data,repository:context.repository,controlRevision:context.controlRevision});

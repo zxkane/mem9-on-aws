@@ -3,6 +3,8 @@ import {inspectContinuationReceiptSet,verifyContinuationReceiptSet,verifyContinu
 import {normalizeCanaryTask} from './production-canary-material.mjs';
 import {verifyCanaryReport} from './production-canary-report.mjs';
 import {inspectCanaryTransitionCertificate} from './production-canary-transition.mjs';
+import {inspectImageTransitionCertificate} from './production-image-transition.mjs';
+import {verifyCurrentCanaryCapacity} from './production-current-capacity.mjs';
 
 const fail=()=>{throw Error('ProductionBudgetCalibrationIndeterminate');};
 const integer=(v,min=0)=>Number.isSafeInteger(v)&&v>=min;
@@ -10,7 +12,8 @@ const integer=(v,min=0)=>Number.isSafeInteger(v)&&v>=min;
 /** Reuse the whole original successful apply batch only through an exact
  * data/material compatibility certificate. Performance and census stay fresh.
  */
-export function calibrateProductionContinuation(state,original,capacity,census,{attemptId,compatibility,controlRevision,dailyRows=1000,basisPoints=5000,now=Date.now()}){
+export function calibrateProductionContinuation(state,original,capacity,census,{attemptId,compatibility,controlRevision,dataRevision,dailyRows=1000,basisPoints=5000,now=Date.now()}){
+  if(compatibility?.version===4)return calibrateCurrentImage(state,original,capacity,census,{attemptId,compatibility,controlRevision,dataRevision,dailyRows,basisPoints,now});
   const transition=compatibility?.version===3?inspectCanaryTransitionCertificate(compatibility):null;
   const old=inspectContinuationReceiptSet(original),current=state?.verified,context={attemptId,compatibility};
   verifyContinuationReceiptSet(original,current,context);
@@ -64,5 +67,43 @@ export function calibrateProductionContinuation(state,original,capacity,census,{
   return {version:1,scope:'exact-lossless-pairs',controlRevision,dataSourceTag:proof.sourceTag,verificationHash:hash(proof),generation:proof.generation,validationId:proof.validationId,targetsHash,
     capacityEvidenceHash:hash({original,capacity,compatibility}),censusHash:hash(census),capacityAgeMs:now-d.stoppedMs,capacityReceipts:old.actions.length,
     spanSeconds,steadyChangedRows,dutyCycle:0.8,headroom:0.5,estimatedDailyCapacity,dailyRows,basisPoints,remainingCostUpperBound,
+    estimatedDrainHours:remainingCostUpperBound/Math.min(dailyRows,estimatedDailyCapacity)*24,checkedAt:now};
+}
+
+/** An image-security upgrade cannot reuse historical throughput. Its complete
+ * single apply delta supplies the rate; the historical set remains immutable. */
+function calibrateCurrentImage(state,original,capacity,census,{attemptId,compatibility,controlRevision,dataRevision,dailyRows,basisPoints,now}){
+  inspectImageTransitionCertificate(compatibility);
+  const old=inspectContinuationReceiptSet(original),current=state?.verified,context={attemptId,compatibility};
+  const extension=verifyContinuationReceiptSet(original,current,context),{newActions,newTimes}=extension;
+  if(state.phase!=='calibrating'||state.benchmarkRemaining!==0||state.executorRequested!==true||
+    state.report?.verificationHash!==hash(current.verification)||state.report.baseline?.samplesPerKind!==150||state.report.loaded?.samplesPerKind!==150||
+    !/^[a-f0-9]{40}$/.test(controlRevision??'')||!/^[a-f0-9]{40}$/.test(dataRevision??'')||
+    !integer(dailyRows,21)||dailyRows>50000||!integer(basisPoints,1)||basisPoints>5000||
+    newActions.length<2||newActions.some(a=>a.result.changed_rows!==2))fail();
+  verifyCanaryReport(state.report,current.verification,current.receiptWindow,{now});
+  verifyContinuationCommitWindow(original,current,state.report.loaded,context);
+  const newChangedRows=newActions.reduce((sum,a)=>sum+a.result.changed_rows,0),remainingAllowance=20-old.proof.changedRows;
+  if(newChangedRows>remainingAllowance||current.verification.changedRows!==old.proof.changedRows+newChangedRows)fail();
+  if(!Array.isArray(state.deliveries))fail();
+  const applies=state.deliveries.filter(d=>d.kind==='executor'&&d.wave==='apply');if(applies.length!==1)fail();
+  if(!Array.isArray(state.launches))fail();const launches=state.launches.filter(d=>d.kind==='executor'&&d.wave==='apply');if(launches.length!==1)fail();
+  const {delivery:d,task}=verifyCurrentCanaryCapacity(capacity,{delivery:applies[0],launch:launches[0].journal,attemptId,dataRevision,compatibility,now});
+  if(d.record.changedRows!==newChangedRows||newTimes.some(t=>t<d.startedMs||t>d.stoppedMs||t<Date.parse(task.startedAt)||t>Date.parse(task.stoppedAt)))fail();
+  const activity=state.report.activity.filter(a=>a.kind==='executor');
+  if(activity.length!==1||['startedMs','stoppedMs','exitCode','image','imageDigest'].some(k=>activity[0][k]!==d[k]))fail();
+  const proof=current.verification,targetsHash=hash([...proof.targets].sort()),at=Date.parse(census?.at),bound=census?.exactCandidateUpperBound,setup=census?.workerSetup;
+  if(census?.event!=='backlog_census'||!Number.isSafeInteger(at)||at>now||now-at>300000||census.targetsHash!==targetsHash||census.targetNamespaces!==proof.targets.length||
+    census.controls?.enabled!==false||!integer(census.controls.retired_roles,1)||census.controls.execution_receipts!==proof.receipts||
+    setup?.generation!==proof.generation||setup.validationId!==proof.validationId||setup.targetsHash!==targetsHash||
+    !bound||!['groups','rows','surplus','largest_group'].every(k=>integer(bound[k]))||bound.rows!==bound.groups*2||bound.rows-bound.groups!==bound.surplus||bound.largest_group!==(bound.groups?2:0))fail();
+  const spanSeconds=(newTimes.at(-1)-newTimes[0])/1000,steadyChangedRows=newActions.slice(1).reduce((sum,a)=>sum+a.result.changed_rows,0);
+  const estimatedDailyCapacity=Math.floor(steadyChangedRows/spanSeconds*86400*0.8*0.5),remainingCostUpperBound=bound.surplus*2;
+  if(!(spanSeconds>0)||!integer(estimatedDailyCapacity,1)||dailyRows>estimatedDailyCapacity||remainingCostUpperBound>3*Math.min(dailyRows,estimatedDailyCapacity))fail();
+  return {version:2,scope:'exact-lossless-pairs',capacitySource:'current-apply',attemptId,controlRevision,dataRevision,dataSourceTag:proof.sourceTag,
+    dataReleaseHash:compatibility.dataReleaseHash,verificationHash:hash(proof),generation:proof.generation,validationId:proof.validationId,targetsHash,
+    capacityEvidenceHash:hash({original,current,capacity,compatibility,newActions,newTimes}),censusHash:hash(census),capacityAgeMs:now-d.stoppedMs,
+    capacityReceipts:newActions.length,existingSpent:old.proof.changedRows,remainingAllowance,newChangedRows,spanSeconds,steadyChangedRows,
+    dutyCycle:0.8,headroom:0.5,estimatedDailyCapacity,dailyRows,basisPoints,remainingCostUpperBound,
     estimatedDrainHours:remainingCostUpperBound/Math.min(dailyRows,estimatedDailyCapacity)*24,checkedAt:now};
 }

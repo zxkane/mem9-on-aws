@@ -561,3 +561,40 @@ they are pending until executable tests and same-account rehearsal pass.
 | TC-CONS-WORKER-137 | A V3 image is deployed without its verified paused witness | Keep maintenance disabled until current image/source/parameter bindings, complete live evidence and the whole certificate commitment pass |
 | TC-CONS-WORKER-138 | V3 crosses producer, consumer, calibration and transport boundaries | Preserve honest authority hashes and proof identity throughout; enforce all existing payload limits and reject legacy downgrade or truncated evidence |
 | TC-CONS-WORKER-139 | The control-only transition is released | Prove data Docker/COPY inputs, worker/replay, schema and frozen runtime-operator digest members unchanged; preserve all root and cumulative-budget state and complete new-head CI/preview/live validation |
+
+### Security image transitions
+
+These cases use synthetic images, findings, identities and receipt histories.
+They do not report a live deployment or authorize production execution.
+
+| ID | Scenario | Expected result |
+| --- | --- | --- |
+| TC-CONS-IMAGE-001 | A security update changes image children | Only the explicit image-transition type admits verified old/target differences; V1–V3 retain their prior rules |
+| TC-CONS-IMAGE-002 | Source and destination manifests differ | Reject altered bytes, digest, size, media type, subject, repository or tag; never rewrite provenance |
+| TC-CONS-IMAGE-003 | An OCI graph is incomplete or cyclic | Reject missing config/layers/attestations, unsupported edges and cycles before the first upload |
+| TC-CONS-IMAGE-004 | Resource limits are exceeded | Enforce the fixed limits commitment, reserve declared bytes before reads and reject excess nodes, edges, depth, concurrency, bytes or elapsed time |
+| TC-CONS-IMAGE-005 | A layer contains unsafe filesystem entries | Use bounded virtual overlay semantics; reject escaping paths, unresolved links, invalid whiteouts or unsupported entries without extracting to the host |
+| TC-CONS-IMAGE-006 | Earlier package metadata differs from the final filesystem | Validate the effective final package database and required package version against image, build and vendor evidence |
+| TC-CONS-IMAGE-007 | A scan comparison omits information | Recompute complete normalized arrays from all raw pages; preserve unknown fields, distinguish missing/null and reject omitted or duplicated findings |
+| TC-CONS-IMAGE-008 | JSON object key order changes | Keep raw response hashes distinct while the fixed canonical JSON hash remains stable; reject duplicate decoded keys |
+| TC-CONS-IMAGE-009 | Findings differ from the approved exact transition | Reject extra changes, incomplete/expired scans or missing current policy dispositions; no severity-only or generic reviewed flag |
+| TC-CONS-IMAGE-010 | A destination scan is pending or a request outcome is unknown | Observe within fixed deadlines; issue at most one eligible StartImageScan intent and never blindly resend |
+| TC-CONS-IMAGE-011 | Source, reviewed control and merged revisions differ | Authenticate each identity independently; require unchanged data inputs and exact reviewed/merged control-tree equality |
+| TC-CONS-IMAGE-012 | Deployment source differs from the protected target | Reject before the first deployment AWS mutation, including image publication; no fallback or extra parameter write |
+| TC-CONS-IMAGE-013 | A protected descriptor authorizes a target that is not serving | Keep target authorization separate from actual deployment; require current serving readbacks and the new protected witness before execution |
+| TC-CONS-IMAGE-014 | Old history or cumulative budget is replaced | Preserve original root, generation, validation ID, receipts and timestamps; validate current state against that history and charge new writes to the same cap |
+| TC-CONS-IMAGE-015 | Historical or replay results are supplied as new capacity | Reject old-image tasks, cached replays and cross-batch receipts as current-image capacity evidence |
+| TC-CONS-IMAGE-016 | Current capacity has too few real actions | Require at least two genuine exact-pair actions from the complete current-image apply batch, a positive time span and sufficient remaining allowance |
+| TC-CONS-IMAGE-017 | A capacity commit lies outside the loaded observation window | Require all measured commits inside the real executor interval and both N150 read/write-ack windows |
+| TC-CONS-IMAGE-018 | New current-image capacity is valid | Preserve first-burst exclusion, duty cycle, headroom, fresh census, replay and cleanup gates before bounded promotion |
+| TC-CONS-IMAGE-019 | A copy, publication or deployment is interrupted | Keep durable intents, authenticate partial results, hold unknown outcomes and preserve original history without blind retry |
+| TC-CONS-IMAGE-020 | A child or network operation remains active at cleanup | Stop new operations, drain owned work and retain credentials unless positive completion is proved |
+| TC-CONS-IMAGE-021 | A caller requests broader authority | Reject foreign accounts/repositories, arbitrary endpoints, new IAM grants, image deletion and global credential-store fallback |
+| TC-CONS-IMAGE-022 | Producer, loader, host and database consumer compose | Bind the same complete proof and compact certificate through all boundaries; reject missing proofs, downgrade and mixed module-instance permits |
+| TC-CONS-IMAGE-023 | Payload and immutable-code constraints are checked | Keep certificate/request/override size caps and prove protected schema, operator, worker/replay and data-build inputs unchanged |
+| TC-CONS-IMAGE-024 | Build/deploy job attempts its first AWS mutation | Require the production source-verifier job to succeed before image publication, preserving the existing data-build recipe; repeat verification in deployment before stale-lock recovery, secret changes or deployment |
+| TC-CONS-IMAGE-025 | A CI bundle is changed, missing or bound to an old parameter | Reject before image selection; wait for full asynchronous restoration against the current protected parameter and checked-out revision |
+| TC-CONS-IMAGE-026 | CI finishes, fails or is cancelled | Run unconditional cleanup of the hash-verified owned bundle; preserve unrelated files and reject a wrong path, owner, mode or digest |
+| TC-CONS-IMAGE-027 | The protected descriptor bytes are written at an unexpected version | Derive the only valid successor from its authenticated archive predecessor; reject an earlier or later version in deployment and restoration |
+| TC-CONS-IMAGE-028 | CI queues or preflights consume evidence validity | Recheck inside the control build and before configure/SST; reserve the operation timeout plus cancellation margin against the earliest enforced expiry without restamping evidence |
+| TC-CONS-IMAGE-029 | The V2 control build fails, is cancelled, or has missing outputs | Hold deployment without routing to the ordinary data build; consume the successful control job's actual tag/digest and pin every bootstrap workload to that digest |

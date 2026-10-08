@@ -9449,7 +9449,7 @@ describe("boundary and deploy-role templates", () => {
       ),
     ).toHaveLength(2);
     expect(workflow.match(/name: Deployment maintenance gate/gu)).toHaveLength(
-      7,
+      9,
     );
     expect(
       reconciliationWorkflow.match(/name: Deployment maintenance gate/gu),
@@ -9499,7 +9499,7 @@ describe("boundary and deploy-role templates", () => {
           );
           continue;
         }
-        if (jobName === "deploy-prod") {
+        if (["deploy-prod", "verify-production-image-transition", "build-image-transition-control"].includes(jobName)) {
           expect(gate.env?.BOUNDARY_ENFORCED).toBe(
             "${{ vars.WORKLOAD_BOUNDARY_PROD_ENABLED }}",
           );

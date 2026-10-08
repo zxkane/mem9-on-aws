@@ -18,6 +18,7 @@
 // ── Pulumi Output/Input ────────────────────────────────────────────────────
 declare namespace $util {
   interface Output<T> {
+    apply<U>(fn: (value: T) => Promise<U>): Output<U>;
     apply<U>(fn: (value: T) => U | Output<U>): Output<U>;
   }
   type Input<T> = T | Promise<T> | Output<T>;

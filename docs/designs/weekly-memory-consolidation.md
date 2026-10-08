@@ -1760,6 +1760,80 @@ Check complete payloads against the existing certificate, request and ECS
 override limits. New-head CI, preview and live verification remain mandatory
 before historical maintenance starts.
 
+### Security image transitions (descriptor V2, certificate V4)
+
+A security patch that changes selected image bytes uses an explicit
+`image-security-upgrade` transition. It does not relax the equality rules of
+earlier descriptors or certificates. The new descriptor commits to the full
+transition proof, predecessor parameter and fixed resource limits. The compact
+V4 certificate commits to that proof and its verified execution projection.
+Neither document claims that the authorized target is already serving.
+
+The target is the complete three-image cohort from one verified PR build.
+Native ECR operations copy the OCI indexes, manifests, configs, layers and
+attestations to the existing production repositories without changing any
+bytes or digests. Before the first upload, read and verify the entire graph,
+including subject relationships, and reject unsupported or incomplete edges.
+Reserve declared bytes before downloading and enforce the shared limits for
+nodes, edges, depth, bytes, decompression, concurrency and elapsed time. Image
+parsing has no credentials; archive entries are interpreted in a bounded virtual
+filesystem without executing images or extracting paths onto the host. The
+effective final package database must prove the required patched version.
+Temporary sessions narrow existing authority; this path adds no persistent IAM
+grant, registry-password fallback or cross-account transfer.
+
+Destination bytes are independently verified. Fresh complete scans cover the
+old and target artifacts, preserve every finding and unknown field, and bind
+exact per-component policy dispositions. Missing pages, unknown scan outcomes,
+unreviewed differences and a fixed package absent from the final filesystem
+hold publication. Unchanged unfixed findings remain visible and require their
+existing-policy disposition. The artifact-policy commitment is separate from
+the final owner review, which binds current evidence and authentic timestamps.
+
+The historical data build, reviewed control source and actual merged deployment
+are separate identities. Data build inputs remain unchanged; the protected
+descriptor commits to the reviewed control tree. Both production build and
+deployment jobs verify the actual main-push commit, merged PR, workflow and tree
+before their first AWS mutation, including ECR image publication. A verified
+V2 target selects a separate bootstrap-only control build; the original data
+build recipe stays unchanged. A missing or failed selector cannot fall back to
+the ordinary build. The control build rechecks inside its job after queue and
+approval waits, reserving its full timeout plus cancellation margin against the
+earliest existing review, scan and vendor deadline. Deployment consumes that
+job's actual tag and digest, and refreshes authenticated metadata immediately
+before configure and SST. The normal deployment selector independently rereads
+the protected parameter, requires exactly the archived predecessor version plus
+one, and checks the same tree and authorization. A new build or later
+observation cannot retroactively authorize an earlier write.
+
+Full evidence uses fixed keys below the existing immutable authorization
+archive. Initial issuance requires the live verification context; serializing
+and reloading a self-claimed proof cannot manufacture it. Subsequent readers
+restore evidence only against independently authenticated operation or protected
+descriptor commitments, then obtain fresh target manifest observations. Archive
+records alone have no authority and restored graph handles cannot upload.
+CI carries the verified bundle through a private owned file and rechecks the
+current parameter and checkout before use. Completion, failure and cancellation
+cleanup remove only that exact bundle, preserving unrelated runner files.
+
+The existing fenced supersession flow archives and verifies the complete
+operation before one protected parameter overwrite. It preserves the original
+database root, generation, validation ID, receipts, timestamps and cumulative
+canary cap. Unknown write or cleanup outcomes remain held for authenticated
+recovery; they never cause another Put or reset the allowance. Actual deployed
+image and parameter bindings, a fresh root observation and a new protected
+paused witness are required before maintenance can execute.
+
+Capacity must then be measured on the current image through the existing
+continuation flow. At least two genuine exact-pair actions must belong to one
+complete current-image apply batch, and their commits must fall inside the
+executor interval and both loaded N150 windows. Historical capacity, cached
+replays and receipts assembled from different batches cannot substitute. New
+writes consume the original remaining allowance. Insufficient candidates,
+capacity or budget hold promotion. The existing first-burst exclusion, duty
+cycle, headroom, fresh census, zero-write replays, cleanup and authenticated
+recurring-delivery checks still apply.
+
 ### Witness publication
 
 `publish-runtime-rehearsal-acceptance` in explicit paused-canary mode is the

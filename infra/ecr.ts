@@ -1,5 +1,6 @@
 import {execFileSync} from 'node:child_process';
 import {DATA_COMPONENTS,requireActiveDataRelease} from '../scripts/lib/production-data-release.mjs';
+import {readImageDeploymentBundle,restoreImageDeploymentBundle} from '../scripts/lib/production-image-deployment-bundle.mjs';
 
 /**
  * Shared helper for composing OUT-OF-BAND ECR image URIs.
@@ -54,14 +55,21 @@ export function selectedDataRelease():Output<DataReleaseSelection>|undefined {
     execFileSync('git',['diff','--quiet'],{timeout:10000});
     execFileSync('git',['diff','--cached','--quiet'],{timeout:10000});
     const controlSourceTree=execFileSync('git',['rev-parse','HEAD^{tree}'],{encoding:'utf8',timeout:10000}).trim();
+    const controlRevision=execFileSync('git',['rev-parse','HEAD'],{encoding:'utf8',timeout:10000}).trim();
     retainedSelection=accountId().apply(account=>applicationRegion().apply(region=>{
       const name=`/mem9-on-aws/${$app.stage}/consolidation-runtime/data-release`;
-      return aws.ssm.getParameterOutput({name,region,withDecryption:true}).apply(parameter=>{
+      return aws.ssm.getParameterOutput({name,region,withDecryption:true}).apply(async parameter=>{
         if(parameter.name!==name||parameter.arn!==`arn:aws:ssm:${region}:${account}:parameter${name}`||
           parameter.type!=='SecureString'||!Number.isSafeInteger(parameter.version)||parameter.version!==Number(expectedVersion))throw Error('ProtectedDataReleaseRequired');
         const context={stage:$app.stage,account,region,controlSourceTree};
         const selection=requireActiveDataRelease(parameter.value,context);
         if(selection.hash!==expectedHash||requireActiveDataRelease(raw,context).hash!==selection.hash)throw Error('DataReleaseSelectionChanged');
+        if(selection.data.version===2){
+          const file=process.env.MEM9_IMAGE_TRANSITION_BUNDLE_FILE,digest=process.env.MEM9_IMAGE_TRANSITION_BUNDLE_HASH;
+          if(!file||!digest)throw Error('VerifiedImageTransitionRequired');
+          const bundle=await readImageDeploymentBundle(file,digest);
+          await restoreImageDeploymentBundle(bundle,{parameter:{Name:name,Type:parameter.type,ARN:parameter.arn,Version:parameter.version,Value:parameter.value},expected:context,controlRevision});
+        }
         return {...selection,parameterVersion:parameter.version};
       });
     }));
@@ -96,6 +104,17 @@ export function workloadImage(name: string, tag: string): Output<string> {
   if(DATA_COMPONENTS.includes(name)){
     const retained=selectedDataRelease();if(retained)return retained.apply(selection=>selection.images[name]);
   }
+  if(name==='bootstrap'&&$app.stage==='prod'){
+    const retained=selectedDataRelease();
+    if(retained)return retained.apply(selection=>{
+      if(selection.data.version===2){
+        const digest=process.env.MEM9_EXPECTED_BOOTSTRAP_DIGEST;
+        if(!/^sha256:[a-f0-9]{64}$/.test(digest??''))throw Error('VerifiedControlBuildRequired');
+        return $interpolate`${accountId()}.dkr.ecr.${applicationRegion()}.amazonaws.com/${namespace}/bootstrap@${digest}`;
+      }
+      return ecrImage(`${namespace}/${name}`,tag);
+    });
+  }
   return ecrImage(`${namespace}/${name}`, tag);
 }
 
@@ -108,6 +127,7 @@ export function pinnedProductionImage(name:'bootstrap'|'llm-proxy',tag:string):O
   const image=aws.ecr.getImageOutput({repositoryName,imageTag:tag,registryId:accountId(),region:applicationRegion()});
   return image.imageDigest.apply(digest=>{
     if(!/^sha256:[a-f0-9]{64}$/.test(digest))throw Error('ProductionImageDigestRequired');
+    if(name==='bootstrap'&&process.env.MEM9_EXPECTED_BOOTSTRAP_DIGEST&&digest!==process.env.MEM9_EXPECTED_BOOTSTRAP_DIGEST)throw Error('VerifiedControlBuildMismatch');
     return $interpolate`${accountId()}.dkr.ecr.${applicationRegion()}.amazonaws.com/${repositoryName}@${digest}`;
   });
 }
