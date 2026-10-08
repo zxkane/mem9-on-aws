@@ -16,7 +16,7 @@ async function fixture(t){
  const binding=bindingFor(config,run,commit),status={id:1,creator:{id:42},url:`https://api.github.com/repos/${config.repository}/statuses/${revision}`,...statusFor(binding)};
  const artifact={id:500,name:artifactName(binding),size_in_bytes:300,digest:'sha256:'+'e'.repeat(64),expired:false,created_at:new Date(now).toISOString(),expires_at:new Date(now+86400000).toISOString(),workflow_run:{id:77,head_sha:revision,head_branch:BRANCH}};
  const env={GITHUB_ACTIONS:'true',GITHUB_EVENT_NAME:'workflow_dispatch',GITHUB_REF:'refs/heads/'+BRANCH,GITHUB_SERVER_URL:'https://github.com',GITHUB_API_URL:'https://api.github.com',RUNNER_ENVIRONMENT:'github-hosted',GITHUB_REPOSITORY:config.repository,GITHUB_RUN_ID:'77',GITHUB_RUN_ATTEMPT:'1',GITHUB_ACTOR_ID:'42',GITHUB_JOB:'first_claim',GITHUB_SHA:revision,GITHUB_WORKFLOW_SHA:revision,RUNNER_TEMP:root,ACTIONS_RUNTIME_TOKEN:'synthetic',ACTIONS_RESULTS_URL:'https://results-receiver.actions.githubusercontent.com'};
- const f={root,config,run,commit,binding,status,artifact,env,reads:[],uploads:[],statuses:[status],uploadError:null,metadataChanges:0};
+ const f={root,config,run,commit,binding,status,artifact,env,reads:[],uploads:[],diagnostics:[],statuses:[status],uploadError:null,sameJobError:Error(CONFLICT),sameJobResult:{id:501,size:301,digest:'f'.repeat(64)},metadataChanges:0};
  f.api=async path=>{
   f.reads.push(path);
   if(path.includes('/statuses?'))return structuredClone(f.statuses);
@@ -32,19 +32,21 @@ async function fixture(t){
   assert(f.reads.some(p=>p.includes('/statuses?')));const payload=JSON.parse(await readFile(files[0]));
   f.uploads.push({name,payload,directory,options});assert.deepEqual(Object.keys(payload).sort(),['nonce','scopeHash']);assert.match(payload.nonce,/^[a-f0-9]{64}$/);
   assert.deepEqual(options,{retentionDays:2,compressionLevel:0,skipArchive:false});if(f.uploadError)throw f.uploadError;
+  if(files[0].endsWith('/same-job-claim.json')){if(f.sameJobError)throw f.sameJobError;return f.sameJobResult;}
   return {id:500,size:300,digest:'e'.repeat(64)};
  }});
- f.options={api:f.api,checkout:f.checkout,artifactClient:f.artifactClient,now:()=>now,sleep:async ms=>{now+=ms;}};
+ f.options={api:f.api,checkout:f.checkout,artifactClient:f.artifactClient,recordDiagnostic:async d=>{f.diagnostics.push(structuredClone(d));},now:()=>now,sleep:async ms=>{now+=ms;}};
  f.advance=ms=>{now+=ms;};f.now=()=>now;f.execute=(mode='first',firstReceipt)=>runChannel({config,mode,firstReceipt,env:mode==='first'?env:{...env,GITHUB_JOB:'duplicate_claim'}},f.options);
  return f;
 }
 
-test('first own upload verifies actual-form REST metadata; second job performs its own same-name upload and requires conflict',async t=>{
+test('first job makes two own fresh-nonce uploads; same-job and cross-job probes independently require conflict',async t=>{
  const f=await fixture(t),first=await f.execute();assert.equal(first.kind,'synthetic-channel-first-upload');assert.equal(first.artifact.id,500);
  f.uploadError=Error(CONFLICT);const second=await f.execute('duplicate',first);assert.equal(second.kind,'synthetic-channel-duplicate-conflict');assert.equal(second.jobId,102);assert.deepEqual(second.artifact,first.artifact);
- assert.equal(f.uploads.length,2);assert.equal(f.uploads[0].name,f.uploads[1].name);assert.notEqual(f.uploads[0].payload.nonce,f.uploads[1].payload.nonce);assert.deepEqual(await readdir(f.root),[]);
+ assert.equal(f.uploads.length,3);assert.equal(new Set(f.uploads.map(x=>x.name)).size,1);assert.equal(new Set(f.uploads.map(x=>x.payload.nonce)).size,3);assert.deepEqual(await readdir(f.root),[]);
+ assert.deepEqual(f.diagnostics.map(d=>d.secondUpload.outcome),['pending','conflict-409']);assert.deepEqual(f.diagnostics[0].firstArtifact,first.artifact);
 });
-test('second-job unexpected success is failure, not artifact adoption',async t=>{const f=await fixture(t),first=await f.execute();await assert.rejects(f.execute('duplicate',first),/SyntheticDuplicateUnexpectedSuccess/);assert.equal(f.uploads.length,2);});
+test('second-job unexpected success is failure, not artifact adoption',async t=>{const f=await fixture(t),first=await f.execute();await assert.rejects(f.execute('duplicate',first),/SyntheticDuplicateUnexpectedSuccess/);assert.equal(f.uploads.length,3);});
 for(const message of ['timeout','connection reset','(409) Conflict','Failed to CreateArtifact: Received non-retryable error: Failed request: (403) Forbidden: an artifact with this name already exists','Failed to CreateArtifact: Received non-retryable error: Failed request: (409) Conflict: unrelated conflict'])test('unknown/conflicting failure does not count as duplicate acceptance: '+message,async t=>{
  const f=await fixture(t),first=await f.execute();f.uploadError=Error(message);await assert.rejects(f.execute('duplicate',first),/SyntheticUploadHeld/);
 });
@@ -56,7 +58,20 @@ test('identical owner announcements are allowed but full pagination is required'
  await assert.rejects(readAnnouncement(f.binding,async()=>Array.from({length:100},(_,i)=>({...f.status,id:++pages*100+i,context:'unrelated'})),()=>{}),/SyntheticStatusPaginationLimit/);
 });
 test('an announcement may arrive during finite polling without changing binding or upload name',async t=>{
- const f=await fixture(t);let polls=0;f.options.api=async path=>path.includes('/statuses?')&&++polls<3?[]:f.api(path);await f.execute();assert.equal(polls,3);assert.equal(f.uploads.length,1);assert.equal(f.now(),1791490010000);
+ const f=await fixture(t);let polls=0;f.options.api=async path=>path.includes('/statuses?')&&++polls<3?[]:f.api(path);await f.execute();assert.equal(polls,3);assert.equal(f.uploads.length,2);assert.equal(f.now(),1791490010000);
+});
+test('same-job unexpected success saves both observed IDs/digests, then fails and retains remote artifacts',async t=>{
+ const f=await fixture(t);f.sameJobError=null;f.sameJobResult={...f.sameJobResult,token:'must-not-log',signedUploadUrl:'must-not-log'};
+ await assert.rejects(f.execute(),/SyntheticSameJobUnexpectedSuccess/);assert.equal(f.uploads.length,2);assert.deepEqual(f.diagnostics.map(d=>d.secondUpload.outcome),['pending','unexpected-success']);
+ assert.equal(f.diagnostics[0].firstArtifact.id,500);assert.equal(f.diagnostics[0].firstArtifact.digest,'e'.repeat(64));assert.deepEqual(f.diagnostics[1].secondUpload,{outcome:'unexpected-success',id:501,digest:'f'.repeat(64),size:301});
+ assert(!JSON.stringify(f.diagnostics).includes('must-not-log'));assert.equal(f.uploads[0].name,f.uploads[1].name);assert.notEqual(f.uploads[0].payload.nonce,f.uploads[1].payload.nonce);assert.deepEqual(await readdir(f.root),[]);
+});
+for(const error of ['timeout must-not-log','connection reset must-not-log','Failed to CreateArtifact: Received non-retryable error: Failed request: (403) Forbidden: must-not-log'])test('same-job unknown is diagnostic failure: '+error.split(' ')[0],async t=>{
+ const f=await fixture(t);f.sameJobError=Error(error);await assert.rejects(f.execute(),/SyntheticSameJobUploadHeld/);assert.equal(f.uploads.length,2);
+ assert.deepEqual(f.diagnostics.map(d=>d.secondUpload.outcome),['pending','unknown']);assert.equal(f.diagnostics.at(-1).firstArtifact.id,500);assert(!JSON.stringify(f.diagnostics).includes('must-not-log'));assert.deepEqual(await readdir(f.root),[]);
+});
+test('same-job returned existing ID is failure, never adoption',async t=>{
+ const f=await fixture(t);f.sameJobError=null;f.sameJobResult={id:500,digest:'e'.repeat(64),size:300};await assert.rejects(f.execute(),/SyntheticSameJobUnexpectedSuccess/);assert.equal(f.diagnostics.at(-1).secondUpload.id,500);
 });
 for(const [name,mutate] of [['expired',a=>{a.expired=true;}],['short retention',a=>{a.expires_at=new Date(1791490000001).toISOString();}],['digest',a=>{a.digest='sha256:'+'f'.repeat(64);}],['run',a=>{a.workflow_run.id=78;}],['head',a=>{a.workflow_run.head_sha='f'.repeat(40);}],['name',a=>{a.name='other';}]])test('artifact '+name+' fails metadata acceptance',async t=>{const f=await fixture(t);mutate(f.artifact);await assert.rejects(f.execute(),/SyntheticArtifact/);});
 test('conflict must preserve the exact original artifact after the attempted second upload',async t=>{

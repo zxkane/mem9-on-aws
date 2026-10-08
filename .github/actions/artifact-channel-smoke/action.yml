@@ -14,6 +14,8 @@ inputs:
     description: First job metadata, only for verifying conflict preserves that artifact.
     required: false
 outputs:
+  diagnostic:
+    description: Same-job upload observation, including the first ID/digest, retained even when the probe fails.
   receipt:
     description: Synthetic channel observation; not an authorization or transferable capability.
 runs:

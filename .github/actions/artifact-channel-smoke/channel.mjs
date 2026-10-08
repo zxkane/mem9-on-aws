@@ -77,7 +77,7 @@ function environment(env,config,mode){
 
 /** Adapters are local test seams, not action inputs. The real entrypoint binds
  * API, checkout and artifact implementation to reviewed code in this process. */
-export async function runChannel({config,mode,firstReceipt,env},{api:rawApi,checkout,artifactClient,now=Date.now,sleep=ms=>new Promise(r=>setTimeout(r,ms))}){
+export async function runChannel({config,mode,firstReceipt,env},{api:rawApi,checkout,artifactClient,recordDiagnostic=async()=>{},now=Date.now,sleep=ms=>new Promise(r=>setTimeout(r,ms))}){
  config=inputs(config);need(['first','duplicate'].includes(mode),'SyntheticMode');const envHash=environment(env,config,mode),openedMs=now();let deadline=openedMs+LIMITS.durationMs,reads=0;
  const check=()=>{need(now()>=openedMs&&now()<deadline,'SyntheticDeadline');need(environment(env,config,mode)===envHash,'SyntheticEnvironmentChanged');};
  const bounded=async(fn,ms)=>{check();let timer;try{const result=await Promise.race([Promise.resolve().then(fn),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('SyntheticDeadline')),Math.max(1,Math.min(ms,deadline-now())));})]);check();return result;}finally{clearTimeout(timer);}};
@@ -102,18 +102,37 @@ export async function runChannel({config,mode,firstReceipt,env},{api:rawApi,chec
   const meta=await api(`repos/${binding.repository}/actions/artifacts/${firstReceipt.artifact.id}`);original=verifyArtifact(binding,meta,firstReceipt.artifact,now());need(hash(original)===hash(firstReceipt.artifact),'SyntheticFirstArtifactChanged');
  }
  const root=env.RUNNER_TEMP;need(typeof root==='string'&&resolve(root)===root&&await realpath(root)===root&&(await lstat(root)).isDirectory(),'SyntheticTemporaryRoot');
- const directory=await mkdtemp(join(root,'mem9-channel-')),file=join(directory,'claim.json');let result;
+ const directory=await mkdtemp(join(root,'mem9-channel-')),file=join(directory,'claim.json'),sameJobFile=join(directory,'same-job-claim.json');let result;
  try{
   const nonce=randomBytes(32).toString('hex'),scopeHash=hash({bindingHash:hash(binding),checkpoint:'synthetic/artifact-channel'}),fd=await open(file,'wx',0o600);
   try{await fd.writeFile(JSON.stringify({nonce,scopeHash}));await fd.sync();}finally{await fd.close();}
-  // Each job attempts its own upload exactly once. The second job must fail;
-  // a returned existing ID is not adoption or a successful duplicate test.
+  // The first job separately probes SAME-JOB uniqueness below. The existing
+  // second-job probe remains strict: a returned ID never counts as a conflict.
   const client=await bounded(artifactClient,LIMITS.requestMs);let uploaded;
   try{uploaded=await bounded(()=>client.uploadArtifact(artifactName(binding),[file],directory,{retentionDays:2,compressionLevel:0,skipArchive:false}),LIMITS.uploadMs);}
   catch(error){need(mode==='duplicate'&&isDuplicateConflict(error),'SyntheticUploadHeld');}
   if(mode==='first'){
    need(uploaded&&positive(uploaded.id),'SyntheticUploadIncomplete');const meta=await api(`repos/${binding.repository}/actions/artifacts/${uploaded.id}`),artifact=verifyArtifact(binding,meta,uploaded,now());
    need(artifact.createdMs>=Math.floor(openedMs/1000)*1000,'SyntheticArtifactPredatesProcess');result={version:1,kind:'synthetic-channel-first-upload',bindingHash:hash(binding),jobId,artifact};
+   const diagnostic={version:1,kind:'synthetic-channel-same-job-diagnostic',bindingHash:hash(binding),runId:binding.runId,runAttempt:binding.runAttempt,jobId,firstArtifact:artifact};
+   await recordDiagnostic({...diagnostic,secondUpload:{outcome:'pending'}});
+   const freshNonce=randomBytes(32).toString('hex');need(freshNonce!==nonce,'SyntheticFreshNonce');
+   const secondFd=await open(sameJobFile,'wx',0o600);try{await secondFd.writeFile(JSON.stringify({nonce:freshNonce,scopeHash}));await secondFd.sync();}finally{await secondFd.close();}
+   let second,conflict=false;
+   try{second=await bounded(()=>client.uploadArtifact(artifactName(binding),[sameJobFile],directory,{retentionDays:2,compressionLevel:0,skipArchive:false}),LIMITS.uploadMs);}
+   catch(error){
+    conflict=isDuplicateConflict(error);
+    if(!conflict){await recordDiagnostic({...diagnostic,secondUpload:{outcome:'unknown'}});throw Error('SyntheticSameJobUploadHeld');}
+   }
+   if(!conflict){
+    // Allowlist only actual SDK metadata. Never serialize an SDK error,
+    // credentials, signed URL, or an arbitrary returned object into diagnostics.
+    const observed={};if(positive(second?.id))observed.id=second.id;if(hex(second?.digest))observed.digest=second.digest;if(positive(second?.size))observed.size=second.size;
+    await recordDiagnostic({...diagnostic,secondUpload:{outcome:'unexpected-success',...observed}});
+    throw Error('SyntheticSameJobUnexpectedSuccess');
+   }
+   await recordDiagnostic({...diagnostic,secondUpload:{outcome:'conflict-409'}});
+   const confirmed=verifyArtifact(binding,await api(`repos/${binding.repository}/actions/artifacts/${artifact.id}`),artifact,now());need(hash(confirmed)===hash(artifact),'SyntheticSameJobArtifactChanged');
   }else{
    need(uploaded===undefined,'SyntheticDuplicateUnexpectedSuccess');const meta=await api(`repos/${binding.repository}/actions/artifacts/${original.id}`),artifact=verifyArtifact(binding,meta,original,now());need(hash(artifact)===hash(original),'SyntheticArtifactChangedAfterConflict');
    result={version:1,kind:'synthetic-channel-duplicate-conflict',bindingHash:hash(binding),jobId,artifact};
@@ -121,7 +140,7 @@ export async function runChannel({config,mode,firstReceipt,env},{api:rawApi,chec
   const listed=await api(`repos/${binding.repository}/actions/runs/${binding.runId}/artifacts?name=${encodeURIComponent(artifactName(binding))}&per_page=100&page=1`);
   need(listed?.total_count===1&&listed.artifacts?.length===1&&listed.artifacts[0].id===result.artifact.id,'SyntheticArtifactMultiplicity');
   bindingFor(config,await api(runPath),commit);await checkCheckout();check();
- }finally{try{await unlink(file);}catch(error){if(error.code!=='ENOENT')throw error;}await rmdir(directory);}
+ }finally{for(const owned of [file,sameJobFile])try{await unlink(owned);}catch(error){if(error.code!=='ENOENT')throw error;}await rmdir(directory);}
  return result;
 }
 
