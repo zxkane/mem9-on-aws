@@ -48,7 +48,7 @@ export function createImageBudget(options={}){
 }
 export function assertImageBudget(budget){need(budgets.has(budget),'ImageBudgetRequired');budget.check();return budget;}
 export function validateImageDescriptor(d,kind){
- need(record(d)&&Object.keys(d).every(k=>['mediaType','digest','size','annotations','platform','artifactType'].includes(k)),'ImageDescriptorFields');
+ need(record(d)&&Object.keys(d).every(k=>['mediaType','digest','size','annotations','platform','artifactType','data'].includes(k)),'ImageDescriptorFields');
  need(hexDigest(d.digest)&&integer(d.size)&&media.has(d.mediaType),'ImageDescriptorInvalid');
  if(kind==='manifest')need(manifests.has(d.mediaType)&&d.size<=L.maxManifestBytes,'ImageManifestLimit');
  if(kind==='blob')need(!manifests.has(d.mediaType)&&d.size<=L.maxBlobBytes,'ImageBlobLimit');
@@ -56,6 +56,13 @@ export function validateImageDescriptor(d,kind){
  if(d.mediaType===IMAGE_MEDIA.attestation)need(d.size<=L.maxAttestationPayloadBytes,'ImageAttestationLimit');
  if(d.annotations!==undefined)need(record(d.annotations)&&Object.entries(d.annotations).every(([k,v])=>typeof v==='string'&&Buffer.byteLength(k)<=L.maxPathBytes&&Buffer.byteLength(v)<=L.maxBufferPerStreamBytes),'ImageAnnotations');
  if(d.platform!==undefined)need(record(d.platform)&&typeof d.platform.os==='string'&&typeof d.platform.architecture==='string','ImagePlatform');
+ if(Object.hasOwn(d,'data')){
+  need(typeof d.data==='string'&&d.size<=L.maxBufferPerStreamBytes&&d.data.length<=Math.ceil(L.maxBufferPerStreamBytes/3)*4,'ImageEmbeddedDataLimit');
+  need(Buffer.byteLength(d.data,'base64')<=L.maxBufferPerStreamBytes,'ImageEmbeddedDataLimit');
+  const bytes=Buffer.from(d.data,'base64');
+  need(bytes.toString('base64')===d.data&&bytes.length===d.size&&imageDigest(bytes)===d.digest,'ImageEmbeddedDataInvalid');
+  // Embedded bytes do not replace the separately verified registry read.
+ }
  return d;
 }
 
