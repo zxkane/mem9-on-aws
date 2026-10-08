@@ -27,4 +27,7 @@ try{
  const result=await runChannel({config,contender:env.INPUT_CONTENDER,env},{api:githubReader(env['INPUT_GITHUB-TOKEN']),checkout,artifactClient,recordDiagnostic});
  const raw=JSON.stringify(result);await appendFile(env.GITHUB_OUTPUT,'receipt='+raw+'\nmarker='+result.AWS_SIMULATED_MARKER+'\n');console.log(raw);
  clearTimeout(watchdog);
-}catch{console.error('::error::SyntheticChannelHeld');process.exit(1);}
+}catch(error){
+ const code=typeof error?.message==='string'&&/^Synthetic[A-Za-z]{1,80}$/.test(error.message)?error.message:'SyntheticChannelHeld';
+ console.error('::error::'+code);process.exit(1);
+}
